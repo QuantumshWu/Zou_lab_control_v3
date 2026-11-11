@@ -961,7 +961,27 @@ struct Garbage { publications: Vec<Arc<Publication>>, deliveries: Vec<Arc<Delive
 
 /// One event, under the lock. `newest`: the newest of what is committed together,
 /// the one a Latest subscriber takes.
+/// A run as the journal names it: its owner and the start of its generation's id.
+fn journal_run(generation: &Generation) -> (String, String) {
+    (generation.owner.to_string(), generation.id.as_uuid().simple().to_string()[..8].to_owned())
+}
+
+/// One committed event, as the journal keeps it: each output's ordinal, and the events it is of.
 fn commit_locked(state: &mut State, generation: &Generation, bundle: &Bundle, newest: bool, garbage: &mut Garbage) -> Result<Arc<Delivery>> {
+    let committed = commit_checked(state, generation, bundle, newest, garbage);
+    if committed.is_ok() {
+        crate::journal::note_with("runtime", "commit", || {
+            let (owner, run) = journal_run(generation);
+            let outputs: serde_json::Map<String, Value> = bundle.inputs.iter().map(|input| (input.signal().to_string(), input.ordinal().into())).collect();
+            let parents: Vec<String> = bundle.parents.iter().map(|parent| match parent.key.ordinal {
+                Some(ordinal) => format!("{}#{ordinal}", parent.key.signal), None => parent.key.signal.to_string() }).collect();
+            serde_json::json!({"owner": owner, "run": run, "out": outputs, "of": parents})
+        });
+    }
+    committed
+}
+
+fn commit_checked(state: &mut State, generation: &Generation, bundle: &Bundle, newest: bool, garbage: &mut Garbage) -> Result<Arc<Delivery>> {
     if bundle.inputs.is_empty() { return Err(RuntimeError::EmptyBundle); }
     if !bundle.metadata.is_object() { return Err(RuntimeError::InvalidMetadata); }
     if state.closed { return Err(RuntimeError::Closed); }
@@ -1244,6 +1264,13 @@ impl Runtime {
                     subscriber.changed.notify_all();
                 }
             }
+            crate::journal::note_with("runtime", "begin", || {
+                let (owner, id) = journal_run(&token);
+                let mut signals: Vec<&str> = run.signals.keys().map(|name| &**name).collect();
+                signals.sort_unstable();
+                serde_json::json!({"owner": owner, "run": id, "signals": signals,
+                    "source": run.source.as_ref().map(|source| source.signal.to_string())})
+            });
             state.runs.insert(token.id,run);
             notify_changes(&state);
         }
@@ -1473,6 +1500,10 @@ impl Runtime {
         let State {runs,subscribers,..}=&mut *state;
         let run = runs.get_mut(&generation.id).ok_or(RuntimeError::UnknownGeneration)?;
         if !run.sealed {
+            crate::journal::note_with("runtime", "seal", || {
+                let (owner, id) = journal_run(generation);
+                serde_json::json!({"owner": owner, "run": id, "status": outcome.get("status")})
+            });
             run.sealed = true; run.outcome = Some(Arc::new(outcome));
             let ids = run.subscribers.clone();
             for ticket in ids.iter() {
@@ -1576,6 +1607,7 @@ fn signal_mut<'a>(state: &'a mut State, generation: GenerationId, signal: &str) 
 }
 fn remove_run(state: &mut State, id: GenerationId, garbage: &mut Vec<Arc<Delivery>>) -> Option<Run> {
     let run = state.runs.remove(&id)?;
+    crate::journal::note_with("runtime", "retire", || { let (owner, id) = journal_run(&run.token); serde_json::json!({"owner": owner, "run": id}) });
     state.owners.remove(&run.token.owner);
     for name in run.signals.keys() { state.signals.remove(name); }
     for ticket in run.subscribers.iter() {

@@ -424,6 +424,13 @@ an open device tells the core a fact of its own outside any request, its arrays 
 (`HostEvent::Notice`; an SLM Editor's draft, sent whenever it changes -- a solve ends
 long after the command that started it). SDK: `zlc_plugin.notifier()` inside a device
 command gives the instance's `Notifier`, callable from any thread while that device is open.
+And `journal {lines: [{us, src, ev, facts}]}`: what a plugin says for the application's flight
+journal (`zlc_core::journal`, the last hour of commands, runs, board commands, publications and
+drawn reads, exported by `export_diagnostics`) -- a camera frame arriving, a capture armed or
+ended, a scan segment fired. `us` is microseconds since the Unix epoch when this process observed
+the fact; the core files the line among its own in arrival order and adds the process id. Plain
+JSON, identities and times only, never data. SDK: `zlc_plugin.journal.note(source, event, **facts)`,
+which is silently not kept outside a plugin process and never fails its caller.
 
 Plugin -> core (only during a run, bound to its run id):
 

@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zlc_core::AnyBuffer;
@@ -725,7 +725,12 @@ impl PluginHost {
     /// Any instance operation (`fields`, `tune`, `values`, `query`, `configure`).
     pub fn call(&self, instance: &str, op: &str, params: Value, deadline: Duration) -> Result<Reply, CallError> {
         let _request = self.admit_local(instance, false)?;
-        self.inner.call(instance, op, params, deadline)
+        // What the core asks of a plugin instance: the operation and, for a device method, which.
+        let (began, method) = (Instant::now(), params.get("method").and_then(Value::as_str).map(str::to_owned));
+        let answer = self.inner.call(instance, op, params, deadline);
+        zlc_core::journal::note_with("plugins", "call", || json!({"instance": instance, "op": op, "method": method,
+            "ms": began.elapsed().as_secs_f64() * 1e3, "error": answer.as_ref().err().map(|error| error.message.clone())}));
+        answer
     }
 
     /// The bench at a Start (`snapshot`, §5): an open device's settings as plain JSON, null when it
@@ -1191,6 +1196,13 @@ impl Inner {
         let params = &message["p"];
         let text = |name: &str| params[name].as_str().unwrap_or("").to_owned();
         match message["op"].as_str().unwrap_or("") {
+            // What a plugin says for the journal (`zlc_plugin.journal`): its own facts, at the time it observed them.
+            "journal" => for line in params["lines"].as_array().into_iter().flatten() {
+                let (Some(us), Some(event)) = (line["us"].as_u64(), line["ev"].as_str()) else { continue };
+                let mut facts = line["facts"].clone();
+                if facts.is_object() { facts["pid"] = json!(process.pid()); }
+                zlc_core::journal::note_at(us, line["src"].as_str().unwrap_or("plugin"), event, facts);
+            },
             // Only an open device of this process speaks for itself.
             // A device lent to another core speaks to that core (zlc-fabric).
             "device.notice" => {
@@ -1634,8 +1646,13 @@ impl Inner {
         // The node's lends in its arguments pass to the device as the device's holds
         // (to a remote device, as the bytes of its blocks).
         let deadline = message["deadline_ms"].as_u64().map_or(CALL_DEADLINE, Duration::from_millis);
+        let began = Instant::now();
         let reply = serving.request(&self.registry, "spi", json!({"instance": device, "method": method,
-            "args": params["args"], "kwargs": params["kwargs"]}), lends, deadline)?;
+            "args": params["args"], "kwargs": params["kwargs"]}), lends, deadline);
+        // What a node's run asks of a device it claims (a draft query's read has no run).
+        zlc_core::journal::note_with("plugins", "device", || json!({"device": device, "method": method, "run": params["run"],
+            "ms": began.elapsed().as_secs_f64() * 1e3, "error": reply.as_ref().err().map(|error| error.message.clone())}));
+        let reply = reply?;
         let returned: Vec<String> = reply.lends.iter().map(|lend| lend.name().to_owned()).collect();
         for name in &returned { self.registry.hold_for(node.pid(), name)?; }
         Ok((reply.value, returned))

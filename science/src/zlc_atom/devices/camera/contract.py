@@ -51,15 +51,34 @@ def roi_request(
 CAPTURE_REST_SECONDS = 0.2
 
 
+def _say(event: str, camera: object, **facts: object) -> None:
+    """One line of the application's journal for this camera (``zlc_plugin.journal``)."""
+
+    from zlc_plugin.journal import note
+
+    note("camera", event, camera=type(camera).__name__, **facts)
+
+
 def rests_before_arm(arm):
-    """An ``arm`` that first lets the rest since this camera's last capture run out."""
+    """An ``arm`` that first lets the rest since this camera's last capture run out, and says
+    in the journal that the capture began (or why it did not)."""
 
     @wraps(arm)
     def rested(self, *args, **kwargs):
         ended = getattr(self, "_capture_ended_at", None)
-        if ended is not None:
-            time.sleep(max(0.0, ended + CAPTURE_REST_SECONDS - time.monotonic()))
-        return arm(self, *args, **kwargs)
+        rest = 0.0 if ended is None else max(0.0, ended + CAPTURE_REST_SECONDS - time.monotonic())
+        if rest:
+            time.sleep(rest)
+        groups = kwargs.get("source_group_sizes")
+        facts = dict(frames=args[0] if args else kwargs.get("frames"), cycle_size=groups[0] if groups else None,
+                     cycles=len(groups) if groups else None, rested_seconds=rest)
+        try:
+            armed = arm(self, *args, **kwargs)
+        except BaseException as error:
+            _say("arm_failed", self, error=f"{type(error).__name__}: {error}", **facts)
+            raise
+        _say("arm", self, **facts)
+        return armed
 
     return rested
 
@@ -71,10 +90,18 @@ def rest_starts_after(finish):
     def noted(self, *args, **kwargs):
         armed = self.capture_state()
         try:
-            return finish(self, *args, **kwargs)
+            terminal = finish(self, *args, **kwargs)
+        except BaseException as error:
+            if armed:
+                _say("finish_failed", self, error=f"{type(error).__name__}: {error}")
+            raise
         finally:
             if armed:
                 self._capture_ended_at = time.monotonic()
+        if armed:
+            # How many frames the camera itself produced in the capture that just ended.
+            _say("finish", self, produced=getattr(terminal, "produced_count", None))
+        return terminal
 
     return noted
 

@@ -3,6 +3,7 @@
 // Editor's preview pixels) and its one view.
 import { confirm } from "./fluent/index.js";
 import { Shell } from "./shell.js";
+import { startJournal } from "./journal.js";
 import { Transport } from "./transport.js";
 import { PanelBoard } from "./views/board.js";
 import { FIRST_REQUEST, WINDOWS, windowKey } from "./views/index.js";
@@ -10,6 +11,8 @@ import { FIRST_REQUEST, WINDOWS, windowKey } from "./views/index.js";
 const key = windowKey();
 const review = `review-${new URLSearchParams(location.search).get("node") ?? ""}`;
 const transport = new Transport(FIRST_REQUEST);
+// What the operator does in this window, for the application's flight journal.
+startJournal(command => transport.post(command), key);
 const board = new PanelBoard(transport, key === "figure-viewer" ? "figure-panels" : "panels");
 const shell = new Shell(transport, WINDOWS[key]!(board));
 board.changed = () => shell.status();

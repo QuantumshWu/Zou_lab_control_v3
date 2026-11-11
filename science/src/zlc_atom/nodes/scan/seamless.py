@@ -29,6 +29,7 @@ from pathlib import Path
 from time import monotonic
 
 from zlc_data.units import DEFAULT_UNITS, figure_padded
+from zlc_plugin import journal
 from zlc_plugin.tunable import snapshot as device_snapshot
 
 from zlc_atom.nodes._framework.pulse import STATUS_DONE, PulseBoard, check_cancelled, pulse_description
@@ -273,6 +274,7 @@ class SeamlessScanMeasurement:
             context.report_progress(f"Setting {bound.label} ({figure_padded(index + 1, points)}/{points})")
             unit = axis.unit or bound.unit
             actual = knobs.move(port, value, unit)
+            journal.note("scan", "device_set", port=port, asked=float(value), unit=unit, actual=actual, point=index)
             key, field = device_port_parts(port)
             previous = readbacks.get(key, {})
             # Keyed by the device's id; its Device Manager name beside it, for whoever shows it.
@@ -347,6 +349,10 @@ class SeamlessScanMeasurement:
                 receipt = board.run(self.pulse_path, api_values=self._api_values_for(outer_row),
                                     run_repeats=shots, scan_repeats=sweeps, scan_plan=scan_plan)
             command_id = int(receipt["command_id"])
+            # One segment's FIRE: which rows, and whether the acquisition was started for it.
+            journal.note("scan", "segment_fired", command_id=command_id, row_offset=row_offset, sweeps=sweeps,
+                         shots=readouts, outer_row=[float(value) for value in outer_row],
+                         first=not state.get("configured"))
             applied = dict(receipt["applied"])
             config = applied.get("config")
             if not state.get("configured"):
@@ -396,6 +402,8 @@ class SeamlessScanMeasurement:
                     report_seen = now
                 grace = _SOURCE_GRACE_SECONDS + 3.0 * float(report["elapsed_seconds"]) / readouts
                 if now - max(report_seen, last_delivery) >= grace:
+                    journal.note("scan", "segment_short", command_id=command_id, shots=readouts, delivered=delivered,
+                                 board_elapsed_seconds=float(report["elapsed_seconds"]))
                     raise RuntimeError(
                         f"the board played {readouts} shots and the source "
                         f"delivered {delivered}: a missed camera trigger "
@@ -405,6 +413,8 @@ class SeamlessScanMeasurement:
                 report = board.wait_report(command_id, context.cancel_requested)
                 if report["status"] != STATUS_DONE:
                     raise RuntimeError(f"the pulse failed: {report.get('fault') or report['status']}")
+            journal.note("scan", "segment_done", command_id=command_id, shots=readouts, delivered=delivered,
+                         board_elapsed_seconds=float(report["elapsed_seconds"]), status=report["status"])
             state["completed_segment"] = True
         except BaseException:
             board.stop()

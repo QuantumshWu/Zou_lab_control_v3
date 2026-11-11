@@ -11,6 +11,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use zlc_core::journal::{self, json, Value};
+
 use crate::codec::sequence_to_tree;
 use crate::compile::CompiledProgram;
 use crate::device::{AppliedState, BoardDescription, ConfigHolder, DoneReport, PulseStreamer, SafeReadback};
@@ -254,17 +256,31 @@ impl Board {
     /// reported, since nothing new reaches a board that is still playing.
     pub fn load(&self, program: Arc<CompiledProgram>, source: Option<Arc<Sequence>>, rows: Vec<Vec<u64>>) -> Result<()> {
         self.free()?;
-        match &self.link { Link::Virtual(board) => board.streamer.load(program, source, rows), Link::Remote(client) => client.load(program, source, rows) }
+        let (began, row_count) = (Instant::now(), rows.len());
+        let loaded = match &self.link { Link::Virtual(board) => board.streamer.load(program, source, rows), Link::Remote(client) => client.load(program, source, rows) };
+        self.say("load", json!({"rows": row_count, "ms": began.elapsed().as_secs_f64() * 1e3, "error": loaded.as_ref().err().map(|error| error.message.clone())}));
+        loaded
+    }
+
+    /// One line of the journal for this board: what was asked of it and what it answered.
+    fn say(&self, event: &str, mut facts: Value) {
+        facts["board"] = json!(self.name);
+        journal::note("board", event, facts);
     }
 
     /// FIRE what is loaded; the confirmed application and its command id.
     /// Refused while the last FIRE's report has not been taken.
     pub fn fire(&self, run_repeats: u64, scan_repeats: u64) -> Result<(AppliedState, u32)> {
         self.free()?;
-        let (applied, command_id) = match &self.link {
-            Link::Virtual(board) => (board.fire(run_repeats, scan_repeats)?, board.streamer.fire_command_id()),
-            Link::Remote(client) => (client.fire(run_repeats, scan_repeats)?, client.fire_command_id().unwrap_or(0)),
+        let began = Instant::now();
+        let fired = match &self.link {
+            Link::Virtual(board) => board.fire(run_repeats, scan_repeats).map(|applied| (applied, board.streamer.fire_command_id())),
+            Link::Remote(client) => client.fire(run_repeats, scan_repeats).map(|applied| (applied, client.fire_command_id().unwrap_or(0))),
         };
+        // Said once the board has answered: `ms` earlier is when the FIRE was sent.
+        self.say("fire", json!({"run_repeats": run_repeats, "scan_repeats": scan_repeats, "ms": began.elapsed().as_secs_f64() * 1e3,
+            "command_id": fired.as_ref().ok().map(|(_, id)| *id), "error": fired.as_ref().err().map(|error| error.message.clone())}));
+        let (applied, command_id) = fired?;
         *guard(&self.last) = Some((command_id, Fate::Pending));
         Ok((applied, command_id))
     }
@@ -290,6 +306,9 @@ impl Board {
     pub fn wait_done(&self, timeout: Option<Duration>, command_id: Option<u32>) -> Result<Option<DoneReport>> {
         let report = match &self.link { Link::Virtual(board) => board.wait_done(timeout, command_id), Link::Remote(client) => client.wait_done(timeout, command_id) }?;
         if let Some(report) = &report {
+            // `elapsed_seconds` after its FIRE is when the board itself was done; this line is when that was read.
+            self.say("report", json!({"command_id": report.command_id, "status": report.status, "elapsed_seconds": report.elapsed_seconds,
+                "cursor": report.cursor, "underflow": report.underflow, "observer_error": report.observer_error}));
             let mut last = guard(&self.last);
             if last.is_some_and(|(id, _)| id == report.command_id) { *last = Some((report.command_id, Fate::Reported)); }
         }
@@ -338,7 +357,9 @@ impl Board {
 
     /// SAFE now; an unreported FIRE will not report.
     pub fn safe(&self) -> Result<SafeReadback> {
+        let began = Instant::now();
         let readback = match &self.link { Link::Virtual(board) => board.safe(), Link::Remote(client) => client.safe() };
+        self.say("safe", json!({"ms": began.elapsed().as_secs_f64() * 1e3, "error": readback.as_ref().err().map(|error| error.message.clone())}));
         let mut last = guard(&self.last);
         if let Some((command_id, Fate::Pending)) = *last { *last = Some((command_id, Fate::Safed)); }
         readback

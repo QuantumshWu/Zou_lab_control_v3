@@ -8,6 +8,7 @@ from functools import lru_cache
 from time import monotonic
 
 import numpy as np
+from zlc_plugin import journal
 from zlc_plugin.capture import validate_batch, terminal_evidence
 
 from zlc_data import (
@@ -834,6 +835,13 @@ class CameraMeasurementNode:
             self._next_record_ordinal = int(accepted["next"])
             self._capture_group_ends = frozenset(accepted["group_ends"])
         for record in records:
+            # Every frame as this measurement took it: which, when the camera and the host each
+            # say it came, and whether it closes a cycle. The journal's one line per frame.
+            journal.note("camera", "frame", key=self.request.camera_key, ordinal=int(record.source_ordinal),
+                         cycle_end=record.source_ordinal in self._capture_group_ends,
+                         frame_stamp=record.frame_stamp, camera_stamp=record.camera_stamp,
+                         camera_seconds=record.timestamp_seconds, camera_microseconds=record.timestamp_microseconds,
+                         host_received_at_ns=record.host_received_at_ns)
             if self._record_received is not None:
                 self._record_received(record)
         if not self.reads_photoelectrons:

@@ -172,6 +172,10 @@ pub fn dispatch(op: &str, params: &Value, context: &dyn Context) -> Result<Value
             if !actual_devices.is_object() { return Err(invalid("actual_devices must be an object")); }
             let dropped = context.input_drain(quiet)?;
             if new_source { context.input_await_new_source()?; }
+            // `dropped`: source events that had arrived before this segment was armed and belong to no shot of it.
+            zlc_core::journal::note("scan", "segment_armed", json!({"row_offset": actual.0, "scan_repeat_base": actual.1, "sweeps": actual.2,
+                "shots": inner * shots * actual.2, "written_before": session.written, "dropped": dropped, "new_source": new_source,
+                "actual_devices": actual_devices}));
             session.segment = Some(Segment { row_offset: actual.0, scan_repeat_base: actual.1,
                 total: inner * shots * actual.2, written: 0, previous_ordinal: None, actual_devices });
             Ok(json!({"dropped": dropped}))
@@ -250,6 +254,10 @@ fn collect(params: &Value, session: &mut Session, context: &dyn Context) -> Resu
         segment.written += 1;
         session.written += 1;
         collected += 1;
+        if segment.written == segment.total {
+            zlc_core::journal::note("scan", "segment_filled", json!({"row_offset": segment.row_offset, "shots": segment.total,
+                "last_source_ordinal": source_ordinal, "written": session.written}));
+        }
         if Instant::now() >= deadline { break; }
     }
     let segment = session.segment.as_ref().unwrap();

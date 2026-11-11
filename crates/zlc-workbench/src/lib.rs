@@ -10,6 +10,7 @@ pub mod workspace;
 mod apparatus;
 mod bench;
 mod choices;
+pub mod diagnostics;
 mod layout;
 mod logic;
 
@@ -89,6 +90,29 @@ pub enum Event {
     RunSnapshot { run: String, ticket: u64, wait: bool },
     /// `outcome`: completed, stopped or failed.
     RunFinished { run: String, outcome: String, error: Option<Value>, generation: Option<String> },
+}
+
+impl Event {
+    /// The fact as the journal keeps it: which, of what, and its outcome; never a payload.
+    fn journal(&self) -> Value {
+        let failed = |result: &Result<Value, String>| result.as_ref().err().cloned();
+        match self {
+            Event::Lifecycle { revision, event, .. } => { let mut inner = event.journal(); inner["lifecycle_revision"] = json!(revision); inner }
+            Event::Opened { instance, .. } => json!({"fact": "opened", "instance": instance}),
+            Event::Failed { instance, error } => json!({"fact": "failed", "instance": instance, "error": error}),
+            Event::Closed { instance, error } => json!({"fact": "closed", "instance": instance, "error": error}),
+            Event::Answered { ticket, result } => json!({"fact": "answered", "ticket": ticket, "error": failed(result)}),
+            Event::Log { instance, line } => json!({"fact": "log", "instance": instance, "line": line}),
+            Event::RunStarted { run } => json!({"fact": "run_started", "run": run}),
+            Event::RunReady { run } => json!({"fact": "run_ready", "run": run}),
+            Event::RunProgress { run, message, current, total } => json!({"fact": "run_progress", "run": run, "message": message, "current": current, "total": total}),
+            Event::RunRequest { run, request } => json!({"fact": "run_request", "run": run, "kind": request.get("kind")}),
+            Event::RunArtifact { run, .. } => json!({"fact": "run_artifact", "run": run}),
+            Event::RunAcquire { run, ticket, node, completion } => json!({"fact": "run_acquire", "run": run, "ticket": ticket, "node": node, "completion": completion}),
+            Event::RunSnapshot { run, ticket, wait } => json!({"fact": "run_snapshot", "run": run, "ticket": ticket, "wait": wait}),
+            Event::RunFinished { run, outcome, error, generation } => json!({"fact": "run_finished", "run": run, "outcome": outcome, "error": error, "generation": generation}),
+        }
+    }
 }
 
 /// What a node run is started with.
@@ -243,7 +267,7 @@ pub const COMMANDS: &[&str] = &[
     "read_device", "tune_device", "accept_device_risk", "publish_device",
     "add_node", "rename_node", "edit_node", "check_node", "revert_node", "start_node", "stop_node", "remove_node", "answer_request",
     "order_panels", "rename_panel", "set_panel_interval", "set_panel_overlay", "publish_panel_outputs", "set_board",
-    "save_layout", "load_layout", "clear_board", "run_recipe",
+    "save_layout", "load_layout", "clear_board", "run_recipe", "export_diagnostics",
 ];
 
 /// Commands that leave the result to a later plugin event.
@@ -333,10 +357,14 @@ impl Workbench {
     /// [`Workbench::take_replies`] under `request`, now or when the plugin answers.
     pub fn apply(&mut self, name: &str, params: &Value, origin: &Origin, request: u64, host: &mut dyn Host) {
         if self.handles_command(name) {
-            if let Err(error) = self.run_device_command(name, params, request) { self.replies.push((request, Err(error))); }
+            if let Err(error) = self.run_device_command(name, params, request) {
+                zlc_core::journal::note("workbench", "refused", json!({"name": name, "request": request, "error": error}));
+                self.replies.push((request, Err(error)));
+            }
             return;
         }
         let result = self.dispatch(name, params, origin, request, host);
+        if let Err(error) = &result { zlc_core::journal::note("workbench", "refused", json!({"name": name, "request": request, "error": error})); }
         match result {
             Ok(None) if DEFERRED.contains(&name) => {}
             Ok(reply) => self.replies.push((request, Ok(reply.unwrap_or_else(|| json!({}))))),
@@ -434,6 +462,7 @@ impl Workbench {
                 let path = self.workspace.resolve(text(params, "path")?);
                 self.load_layout(&path, params["stop_running"].as_bool().unwrap_or(false), host).map(Some)
             }
+            "export_diagnostics" => self.export_diagnostics(host).map(Some),
             "clear_board" => self.clear_board(params["stop_running"].as_bool().unwrap_or(false), host).map(Some),
             "run_recipe" => self.run_recipe(text(params, "name")?, &params["parameters"], params["start"].as_bool().unwrap_or(true), &origin_text, host).map(Some),
             _ => Err(format!("{name} is not a workbench command")),
@@ -442,6 +471,7 @@ impl Workbench {
 
     /// One plugin fact, applied on the owner turn.
     pub fn on_event(&mut self, event: Event, host: &mut dyn Host) {
+        zlc_core::journal::note_with("workbench", "event", || event.journal());
         match event {
             Event::Opened { instance, working_point } => self.instance_opened(&instance, working_point, host),
             Event::Failed { instance, error } => self.instance_failed(&instance, error, host),

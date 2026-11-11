@@ -1128,6 +1128,10 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!("load_layout", LoadLayout, control, false,
         "Replace the board from a zlc.console-board file; refused while nodes run unless stop_running. Notes say what could not be kept."),
     command!("read_layout", PathRef, read, true, "What a layout file would load, without loading it."),
+    command!("export_diagnostics", Empty, control, false,
+        "Write the diagnostics archive (the last hour's journal of commands, runs, board commands, publications, camera frames and \
+         drawn reads, with the board's layout, apparatus, state and the pulse and Config files it names; no acquired data) into the \
+         workspace's diagnostics folder: {path, segments, files, bytes}."),
     command!("clear_board", ClearBoard, control, false, "Remove every logic node and panel; refused while nodes run unless stop_running."),
     command!("list_recipes", RecipeName, read, true, "Experiment recipes in the workspace, or one with its parameters and defaults."),
     command!("run_recipe", RunRecipe, control, false,
