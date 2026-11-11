@@ -423,6 +423,27 @@ impl Model {
         }
     }
 
+    /// The legs of the Raman pairs that a component's drive e ← b makes folded onto e (far.rs, # A fold onto an explicit
+    /// state): e's kept drives (`legs`) whose channel is another Floquet state than the drive's own (`apart`) -- a fact
+    /// of the model's clusters and frames, the same at every state, made once for the errors read at thousands
+    /// (`pairs_made`).
+    pub(crate) fn pair_legs(&self, component: Component, excited: usize, ground: usize) -> &[(usize, usize)] {
+        &self.pairs[((2 * component.frequency + component.counter as usize) * EXCITED + excited - GROUND) * GROUND + ground]
+    }
+
+    /// Every drive's pairs' legs (`pair_legs`), by component (a frequency's co-rotating one, then its counter-rotating
+    /// one), excited state and ground state.
+    pub(crate) fn pairs_made(&self) -> Vec<Vec<(usize, usize)>> {
+        let components = (0..self.light.frequencies.len()).flat_map(|frequency| [false, true].map(|counter| Component { frequency, counter }));
+        components
+            .flat_map(|component| {
+                let from = self.frequency(component);
+                (0..EXCITED * GROUND).map(move |at| (from.clone(), at / GROUND, at % GROUND))
+            })
+            .map(|(from, x, ground)| self.legs[x].iter().copied().filter(|&(d, a)| self.apart(ground, &from, a, &self.carriers[d].beat)).collect())
+            .collect()
+    }
+
     /// Per excited state (less GROUND) its kept drives: (carrier, ground state) of each explicit drive into it -- the
     /// legs of the Raman pairs a drive folded onto it makes (far.rs, # A fold onto an explicit state).
     pub(crate) fn legs_made(&self) -> Vec<Vec<(usize, usize)>> {
@@ -833,12 +854,9 @@ impl Model {
         let h = &at.energies;
         let v: [f64; 3] = at.sample.at.kappa.map(|k| k * self.hbar_over_mass);
         let mut moved = (h[0][excited] - self.energies[excited]) - (h[0][ground] - self.energies[ground]) + self.hbar_over_mass * (dot3(q, at.sample.at.kappa) + 0.5 * dot3(q, q));
-        let (from, nu) = (self.frequency(component), self.tones[component.frequency].nu[side]);
-        for &(d, a) in &self.legs[excited - GROUND] {
-            let other = &self.carriers[d];
-            if self.apart(ground, &from, a, &other.beat) {
-                moved += self.kept_coupling(d, excited, a, &at.amplitudes).norm_sqr() / (h[0][ground] + nu - h[0][a] - other.detuning);
-            }
+        let nu = self.tones[component.frequency].nu[side];
+        for &(d, a) in self.pair_legs(component, excited, ground) {
+            moved += self.kept_coupling(d, excited, a, &at.amplitudes).norm_sqr() / (h[0][ground] + nu - h[0][a] - self.carriers[d].detuning);
         }
         let rate: f64 = (0..3).map(|i| v[i] * (h[1 + i][excited] - h[1 + i][ground])).sum::<f64>() + self.hbar_over_mass * dot3(q, at.force);
         (moved, rate.abs())
@@ -914,8 +932,8 @@ impl Model {
     ///   order of its denominator, `drive_motion`).
     pub(crate) fn pair_error(&self, component: Component, excited: usize, ground: usize, response: Option<C64>, at: &Measured) -> UnitError {
         let side = component.counter as usize;
-        let (from, nu, h) = (self.frequency(component), self.tones[component.frequency].nu[side], &at.energies[0]);
-        let legs: Vec<(usize, usize)> = self.legs[excited - GROUND].iter().copied().filter(|&(d, a)| self.apart(ground, &from, a, &self.carriers[d].beat)).collect();
+        let (nu, h) = (self.tones[component.frequency].nu[side], &at.energies[0]);
+        let legs = self.pair_legs(component, excited, ground);
         let mut error = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
         if legs.is_empty() {
             return error;
@@ -932,7 +950,7 @@ impl Model {
             .sum()
         };
         if let Some(r) = response {
-            for &(d, a) in &legs {
+            for &(d, a) in legs {
                 let apart = (h[ground] + nu - h[a] - self.carriers[d].detuning).abs() - lift(ground) - lift(a);
                 let s = super::units::PAIR * 0.5 * gate((r * self.kept_coupling(d, excited, a, &at.amplitudes)).abs(), apart.max(0.0), 0.0).saturation;
                 error.parameter = error.parameter.max(s);
