@@ -9,6 +9,7 @@ import {
 import { boardKinds, type Control, type Panel, type State } from "../protocol.js";
 import { queueStatus, saveImage, type View, type ViewContext } from "../shell.js";
 import type { Board, LogicRow, NodeType, RunRow } from "../workbench.js";
+import { DiagnosticsPopup, type DiagnosticsState } from "./diagnostics.js";
 import type { PanelBoard } from "./board.js";
 import { LogicEditorView, LogicRowView, PublisherEditorView, projectRow, type EditorIntents, type NodeProjection } from "./logic.js";
 import { PanelEditView, type EditInfo } from "./panel_edit.js";
@@ -36,6 +37,7 @@ export class TaskConsoleView implements View {
   private onScreen = false;
   private pause: Button;
   private fileCommands: Button[];
+  private diagnostics: DiagnosticsPopup;
   private strip: StatusStrip;
   private tabs = new TabWidget();
   private monitor = element("div", "monitor-page");
@@ -73,8 +75,9 @@ export class TaskConsoleView implements View {
     this.fileCommands = [save, open, clear];
     // The last hour as the application's journal kept it, with the board and the files it names: one archive
     // to hand to whoever looks into a fault. Never held back by a running task: a fault is exported while it shows.
-    const diagnostics = command("Diagnostics…", () => this.send({ action: "export_diagnostics" }, "Exporting diagnostics…"),
-      { title: "Export the last hour's record of commands, runs, board commands, camera frames and drawn data, with the layout and the files it names, as one archive in the workspace's diagnostics folder" });
+    const diagnostics = command("Diagnostics…", () => this.diagnostics.toggle(),
+      { title: "The last hour's record of commands, runs, board commands, camera frames and drawn data, and the recent data kept beside it: export them as one archive, or set how much data is kept" });
+    this.diagnostics = new DiagnosticsPopup(diagnostics, (command, feedback) => this.send(command, feedback));
     header.append(identity, this.summary, this.kinds.root, this.add.root, this.selectors, this.pause.root, image.root, save.root, open.root, clear.root, diagnostics.root);
     this.strip = new StatusStrip({ action: ["Stop task", () => { const task = this.boardState()?.active_task; if (task) this.send({ action: "stop_node", node: task }, "Stopping the task…"); }] });
     this.strip.root.id = "status";
@@ -152,6 +155,7 @@ export class TaskConsoleView implements View {
     const rows = this.nodeRows();
     const takeover = board?.active_task ?? null;
     this.updateKinds(latest);
+    this.diagnostics.accept(latest.diagnostics as DiagnosticsState | undefined, state.request, Boolean(state.error));
     // Header: a board-wide command needs the workbench's board.
     const workbench = Boolean(board);
     for (const control of [this.pause, ...this.fileCommands]) control.disabled = !workbench;

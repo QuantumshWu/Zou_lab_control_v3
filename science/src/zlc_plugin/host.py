@@ -28,7 +28,7 @@ import numpy as np
 
 from . import capabilities, tunable
 from .blocks import Arena, Attachments
-from .declare import ADMIT, NODE_INSTANCE, QUERY_PARAMETERS, DeviceType, NodeKind, NodeType, Opened, field_json
+from .declare import ADMIT, NODE_INSTANCE, QUERY_OPTIONAL, QUERY_PARAMETERS, DeviceType, NodeKind, NodeType, Opened, field_json
 from .describe import describe, find
 from .wire import (PROTOCOL, Channel, Decoder, Encoder, PluginError, error_payload, plain, raise_remote)
 
@@ -192,7 +192,7 @@ class Process:
                     items.append(self._releases.get_nowait())
                 except queue.Empty:
                     break
-            released: dict[str, list[Any]] = {"blocks": [], "leases": []}
+            released: dict[str, list[Any]] = {"blocks": [], "leases": [], "retired": []}
             for kind, value in items:
                 released[kind].append(value)
             try:
@@ -324,7 +324,7 @@ class Process:
                 self.reply(identity, error=PluginError("invalid", f"protocol {major} is not {PROTOCOL[0]}"))
                 return "exit"
             self.session = str(params["session"])
-            self.arena = Arena(self.session)
+            self.arena = Arena(self.session, retired=lambda names: [self._releases.put(("retired", name)) for name in names])
             self.reply(identity, {"protocol": list(PROTOCOL), "pid": os.getpid(),
                                   "python": sys.version.split()[0], "sdk": "zlc_plugin 1"})
             return None
@@ -904,7 +904,8 @@ def _query(instance: Instance, params: dict[str, Any]) -> Any:
             facts["node"] = instance.name.removeprefix(NODE_INSTANCE)
             _QUERYING.instance = instance
             try:
-                return function(*(facts.get(parameter) for parameter in QUERY_PARAMETERS[name]))
+                named = {parameter: facts.get(parameter) for parameter in QUERY_OPTIONAL.get(name, ()) if _takes(function, parameter)}
+                return function(*(facts.get(parameter) for parameter in QUERY_PARAMETERS[name]), **named)
             finally:
                 _QUERYING.instance = None
     raise PluginError("unknown_op", f"{instance.name} answers no query {name!r}")
@@ -1058,6 +1059,19 @@ _HANDLERS: dict[str, Callable[[Instance, dict[str, Any]], Any]] = {
 }
 
 
+class DeviceFacts:
+    """A device a node may know but not call: its Device Manager name and what it states of itself."""
+
+    def __init__(self, info: dict[str, Any]) -> None:
+        self.instance = str(info.get("instance") or "")
+        self.role = str(info.get("role") or self.instance)
+        #: What the device states of itself, as plain JSON (a sequencer: its ``trigger_lanes``).
+        self.facts = dict(info.get("facts") or {})
+
+    def __repr__(self) -> str:
+        return f"<device {self.instance} (its facts only)>"
+
+
 class _DeviceProxy:
     """A claimed device of a run, reached through the core."""
 
@@ -1069,6 +1083,8 @@ class _DeviceProxy:
         self.role = str(info.get("role") or info.get("instance") or "")
         #: The unit the operator keeps for a field (field -> spelling): its scan port's and its record's.
         self.units = {str(field): str(unit) for field, unit in dict(info.get("units") or {}).items()}
+        #: What the device states of itself, as plain JSON; read without a call.
+        self.facts = dict(info.get("facts") or {})
 
     def _call(self, method: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         timeout = kwargs.get("timeout")
@@ -1233,6 +1249,10 @@ class Run:
     def proxies(instance: Instance, devices: dict[str, Any], *, run: str | None) -> dict[str, Any]:
         built = {}
         for argument, info in devices.items():
+            if info.get("native"):
+                # A device the core implements itself is no plugin's to call: what it states of itself.
+                built[argument] = DeviceFacts(info)
+                continue
             kind = _proxy_class(tuple(info.get("capabilities", ())), bool(info.get("tunable")), tuple(info.get("reads") or ()))
             built[argument] = kind(instance, run, argument, info)
         return built

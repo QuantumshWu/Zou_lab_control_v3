@@ -966,9 +966,65 @@ fn journal_run(generation: &Generation) -> (String, String) {
     (generation.owner.to_string(), generation.id.as_uuid().simple().to_string()[..8].to_owned())
 }
 
+/// What the Runtime has just published, kept for whoever looks into a fault afterwards: every event's data
+/// in the order it was committed, as much as a budget of memory holds and no older than the journal goes
+/// back. The oldest goes first, whichever signal it is of, so every signal is kept for the same length of
+/// time -- a small result as long as the frames it was made from, and no longer.
+#[derive(Default)]
+struct Recent {
+    budget: usize,
+    kept: VecDeque<(u64, Arc<Publication>)>,
+    /// The memory `kept` pins: each data block once, however many kept publications share it.
+    bytes: usize,
+    blocks: HashMap<usize, (usize, usize)>,
+}
+
+impl Recent {
+    fn block(publication: &Publication) -> Option<(usize, usize)> {
+        publication.data.as_ref().map(|data| (Arc::as_ptr(data) as usize, data.payload_bytes()))
+    }
+
+    fn keep(&mut self, us: u64, publication: &Arc<Publication>, garbage: &mut Vec<Arc<Publication>>) {
+        let Some((block, bytes)) = Self::block(publication) else { return };
+        let held = self.blocks.entry(block).or_insert((0, bytes));
+        if held.0 == 0 { self.bytes += bytes; }
+        held.0 += 1;
+        self.kept.push_back((us, publication.clone()));
+        self.shed(us, garbage);
+    }
+
+    /// Let go of what is over the budget or older than the journal keeps, oldest first.
+    fn shed(&mut self, now: u64, garbage: &mut Vec<Arc<Publication>>) {
+        let oldest = now.saturating_sub(crate::journal::KEPT.as_micros() as u64);
+        while self.kept.front().is_some_and(|(us, _)| self.bytes > self.budget || *us < oldest) {
+            let (_, publication) = self.kept.pop_front().expect("a front");
+            if let Some((block, bytes)) = Self::block(&publication) {
+                let gone = self.blocks.get_mut(&block).is_some_and(|held| { held.0 -= 1; held.0 == 0 });
+                if gone { self.blocks.remove(&block); self.bytes -= bytes; }
+            }
+            garbage.push(publication);
+        }
+    }
+}
+
+/// What [`Runtime::recent`] answers: the budget, the memory now pinned, and the kept publications, oldest
+/// first, each with when it was committed (microseconds since the Unix epoch).
+pub struct RecentData { pub budget: usize, pub bytes: usize, pub publications: Vec<(u64, Arc<Publication>)> }
+
+impl RecentData {
+    /// How far back the kept data goes from `now_us`, in seconds; None while nothing is kept.
+    pub fn span_seconds(&self, now_us: u64) -> Option<f64> {
+        self.publications.first().map(|(us, _)| now_us.saturating_sub(*us) as f64 / 1e6)
+    }
+}
+
 /// One committed event, as the journal keeps it: each output's ordinal, and the events it is of.
 fn commit_locked(state: &mut State, generation: &Generation, bundle: &Bundle, newest: bool, garbage: &mut Garbage) -> Result<Arc<Delivery>> {
     let committed = commit_checked(state, generation, bundle, newest, garbage);
+    if let (Ok(delivery), Some(recent)) = (&committed, state.recent.as_mut()) {
+        let now = crate::journal::now_us();
+        for publication in delivery.publications.iter() { recent.keep(now, publication, &mut garbage.publications); }
+    }
     if committed.is_ok() {
         crate::journal::note_with("runtime", "commit", || {
             let (owner, run) = journal_run(generation);
@@ -1140,6 +1196,8 @@ fn commit_checked(state: &mut State, generation: &Generation, bundle: &Bundle, n
 }
 
 struct State {
+    /// What is kept of recent publications (`Runtime::keep_recent`); None while nothing is asked to be.
+    recent: Option<Recent>,
     runs: HashMap<GenerationId, Run>, owners: HashMap<Arc<str>, GenerationId>,
     signals: HashMap<Arc<str>, GenerationId>, subscribers: HashMap<u64, Subscriber>, next_ticket: u64, closed: bool,
     watches: HashMap<u64, (SyncSender<()>, Arc<AtomicBool>)>,
@@ -1152,6 +1210,7 @@ impl Default for Runtime { fn default() -> Self { Self::new() } }
 impl Runtime {
     pub fn new() -> Self {
         Self { inner: Arc::new(Inner { state: Mutex::new(State {
+            recent: None,
             runs: HashMap::new(), owners: HashMap::new(), signals: HashMap::new(),
             subscribers: HashMap::new(), next_ticket: 1, closed: false, watches: HashMap::new(),
         }) }) }
@@ -1520,6 +1579,41 @@ impl Runtime {
         Ok(())
     }
 
+    /// Keep the data of what is published from now on, as much as `budget_bytes` holds (0: none, and what
+    /// was kept is let go). See [`Recent`].
+    pub fn keep_recent(&self, budget_bytes: usize) {
+        let mut garbage = Vec::new();
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            if budget_bytes == 0 {
+                if let Some(recent) = state.recent.take() { garbage.extend(recent.kept.into_iter().map(|(_, publication)| publication)); }
+            } else {
+                let recent = state.recent.get_or_insert_with(Recent::default);
+                recent.budget = budget_bytes;
+                recent.shed(crate::journal::now_us(), &mut garbage);
+            }
+        }
+        drop(garbage); // Large buffers are released outside the state lock.
+    }
+
+    /// What is kept now (`keep_recent`); the publications are shared, not copied.
+    pub fn recent(&self) -> RecentData {
+        let state = self.inner.state.lock().unwrap();
+        match &state.recent {
+            Some(recent) => RecentData { budget: recent.budget, bytes: recent.bytes, publications: recent.kept.iter().cloned().collect() },
+            None => RecentData { budget: 0, bytes: 0, publications: Vec::new() },
+        }
+    }
+
+    /// The memory `keep_recent` pins now and how far back it goes (seconds), without sharing a publication.
+    pub fn recent_held(&self) -> (usize, usize, Option<f64>) {
+        let state = self.inner.state.lock().unwrap();
+        match &state.recent {
+            Some(recent) => (recent.budget, recent.bytes, recent.kept.front().map(|(us, _)| crate::journal::now_us().saturating_sub(*us) as f64 / 1e6)),
+            None => (0, 0, None),
+        }
+    }
+
     pub fn retire(&self, generation: &Generation) -> Result<()> { self.remove(|_| Some(generation.id)) }
 
     /// Withdraw an owner's run, ended or not (v2 withdraw_owner): its signals leave.
@@ -1849,6 +1943,47 @@ mod tests {
         assert!(later.upgrade().is_none(),"an old prefix must not keep future event facts alive");
         assert!(late_parent.upgrade().is_none(),"an old prefix must not keep a future event's ancestors alive");
         assert_eq!(frozen.provenance(),expected);
+    }
+
+    #[test]
+    fn recent_publications_are_kept_within_a_budget_the_oldest_out_first_whatever_its_signal() {
+        let plane = Runtime::new();
+        let schema = schema();
+        let declare = |signal: &str| Declaration { signal: signal.into(), schema: schema.clone(), storage: Storage::Latest };
+        let generation = plane.begin("camera", vec![declare("image"), declare("judged")], json!({})).unwrap();
+        // Nothing is kept until it is asked for.
+        let first = plane.commit(&generation, &bundle(&schema, &["image", "judged"], 0)).unwrap();
+        let weak_first = Arc::downgrade(first.publications[0].data().unwrap());
+        drop(first);
+        plane.commit(&generation, &bundle(&schema, &["image", "judged"], 1)).unwrap();
+        assert!(weak_first.upgrade().is_none() && plane.recent().publications.is_empty());
+        // Room for everything: one event of each signal, and what it costs.
+        plane.keep_recent(usize::MAX);
+        plane.commit(&generation, &bundle(&schema, &["image", "judged"], 2)).unwrap();
+        let kept = plane.recent();
+        assert_eq!(kept.publications.len(), 2);
+        let each = kept.bytes / 2;
+        assert!(each > 0 && plane.recent_held().2.is_some());
+        drop(kept);
+        // Room for four blocks: the last two events of both signals, the same span of each.
+        plane.keep_recent(4 * each);
+        for ordinal in 3..8 { plane.commit(&generation, &bundle(&schema, &["image", "judged"], ordinal)).unwrap(); }
+        let kept = plane.recent();
+        let held: Vec<(String, u64)> = kept.publications.iter().map(|(_, publication)| (publication.key().signal.to_string(), publication.key().ordinal.unwrap())).collect();
+        assert_eq!(held.len(), 4);
+        for signal in ["image", "judged"] {
+            let ordinals: Vec<u64> = held.iter().filter(|(of, _)| of == signal).map(|(_, ordinal)| *ordinal).collect();
+            assert_eq!(ordinals, [6, 7], "{signal}: {held:?}");
+        }
+        assert_eq!(kept.bytes, 4 * each);
+        assert!(kept.publications.windows(2).all(|pair| pair[0].0 <= pair[1].0), "oldest first");
+        // Kept data outlives the Runtime's own latest; let go, it is gone.
+        let oldest = Arc::downgrade(kept.publications[0].1.data().unwrap());
+        drop(kept);
+        assert!(oldest.upgrade().is_some());
+        plane.keep_recent(0);
+        assert!(oldest.upgrade().is_none() && plane.recent().publications.is_empty());
+        assert_eq!(plane.recent_held(), (0, 0, None));
     }
 
     #[test]

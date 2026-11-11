@@ -12,6 +12,10 @@
 //! facts. A fact written elsewhere and brought here later (a plugin process's) keeps the time it was
 //! observed at in `us` and is ordered by `n` as it arrived.
 //!
+//! Two kinds of line are kept: what happened (a note), and what the application's state then was. State is
+//! said as its changes, and whole at the start of every segment (`at_segment_start`), so each segment
+//! file can be read without the one before it.
+//!
 //! Lines are written to segment files of [`SEGMENT`] each (`journal-<start us>.jsonl`), a second or
 //! so after they are said, so a crash or a freeze leaves the journal on disk. Segments older than
 //! [`KEPT`] are removed, and the oldest first when the folder passes [`FOLDER_LIMIT`]. Nothing is
@@ -71,6 +75,42 @@ pub fn note(source: &str, event: &str, facts: Value) { if is_open() { keep(now_u
 
 /// As [`note`], with facts that are only gathered while the journal is open.
 pub fn note_with(source: &str, event: &str, facts: impl FnOnce() -> Value) { if is_open() { keep(now_us(), source, event, facts()); } }
+
+/// As [`note`], with `fields` -- the text of a JSON object -- kept whole: a state's changes are what they
+/// are, and a change cut short could not be applied by whoever reads the journal.
+pub fn note_fields(source: &str, event: &str, fields: &str) {
+    if !is_open() { return; }
+    let Some(journal) = JOURNAL.get() else { return };
+    let line = whole_line(source, event, fields);
+    let mut waiting = journal.waiting.lock().unwrap_or_else(|error| error.into_inner());
+    if waiting.lines.len() > WAITING_LIMIT { waiting.dropped += 1; return; }
+    waiting.lines.extend_from_slice(&line);
+}
+
+/// One line with `fields` (a JSON object's text) after its stamp.
+fn whole_line(source: &str, event: &str, fields: &str) -> Vec<u8> {
+    let stamp = serde_json::json!({"us": now_us(), "n": ORDER.fetch_add(1, Ordering::Relaxed), "src": source, "ev": event}).to_string();
+    let inner = fields.trim().strip_prefix('{').and_then(|rest| rest.strip_suffix('}')).unwrap_or("").trim();
+    let mut line = stamp.into_bytes();
+    if !inner.is_empty() {
+        line.pop();
+        line.push(b',');
+        line.extend_from_slice(inner.as_bytes());
+        line.push(b'}');
+    }
+    line.push(b'\n');
+    line
+}
+
+/// What opens every segment: `opening` is called when one begins and says, through the function it is
+/// handed (source, event, the text of a JSON object), the lines that make the segment readable alone --
+/// the application's whole state. They are stamped as they are said and written before anything else.
+pub fn at_segment_start(opening: impl Fn(&mut dyn FnMut(&str, &str, &str)) + Send + Sync + 'static) {
+    *OPENING.lock().unwrap_or_else(|error| error.into_inner()) = Some(Box::new(opening));
+}
+
+type Opening = Box<dyn Fn(&mut dyn FnMut(&str, &str, &str)) + Send + Sync>;
+static OPENING: Mutex<Option<Opening>> = Mutex::new(None);
 
 /// A fact observed at `us` by another process, brought here now.
 pub fn note_at(us: u64, source: &str, event: &str, facts: Value) { if is_open() { keep(us, source, event, facts); } }
@@ -156,11 +196,16 @@ fn write_waiting(journal: &Journal, writer: &mut Option<Writer>) {
     };
     if dropped > 0 { keep(now_us(), "journal", "dropped", serde_json::json!({"notes": dropped})); }
     if lines.is_empty() { return; }
+    let mut opening = Vec::new();
     if writer.as_ref().is_none_or(|writer| now_us().saturating_sub(writer.start) >= SEGMENT.as_micros() as u64) {
         *writer = Writer::begin(&journal.folder).ok();
+        if let Some(say) = OPENING.lock().unwrap_or_else(|error| error.into_inner()).as_ref() {
+            say(&mut |source, event, fields| opening.extend_from_slice(&whole_line(source, event, fields)));
+        }
     }
     // A disk that refuses is not the application's fault to stop for: the lines are lost and said so.
-    let written = writer.as_mut().is_some_and(|writer| writer.file.write_all(&lines).and_then(|()| writer.file.flush()).is_ok());
+    let written = writer.as_mut().is_some_and(|writer| writer.file.write_all(&opening).and_then(|()| writer.file.write_all(&lines))
+        .and_then(|()| writer.file.flush()).is_ok());
     if !written { *writer = None; journal.waiting.lock().unwrap_or_else(|error| error.into_inner()).dropped += 1; }
 }
 
@@ -195,6 +240,18 @@ mod tests {
         assert_eq!((kept["rows"].as_array().unwrap().len(), kept["rows"][ARRAY_LIMIT].as_str()), (ARRAY_LIMIT + 1, Some("… (200 items)")));
         assert!(kept["inner"]["text"].as_str().unwrap().ends_with("(10000 bytes)"));
         assert_eq!(kept["n"], 3);
+    }
+
+    #[test]
+    fn whole_fields_follow_the_stamp_uncut() {
+        let long = "x".repeat(TEXT_LIMIT * 3);
+        let line = whole_line("app", "state", &serde_json::json!({"changes": [[["logic", 0, "name"], long]], "request": 7}).to_string());
+        let read: Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!((&read["src"], &read["ev"], &read["request"]), (&json!("app"), &json!("state"), &json!(7)));
+        assert_eq!(read["changes"][0][1].as_str().unwrap().len(), TEXT_LIMIT * 3, "a change is kept whole");
+        assert!(read["us"].is_u64() && read["n"].is_u64());
+        let bare: Value = serde_json::from_slice(&whole_line("app", "state", "{}")).unwrap();
+        assert_eq!(bare.as_object().unwrap().len(), 4, "no fields: the stamp alone");
     }
 
     #[test]

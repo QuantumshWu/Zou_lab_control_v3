@@ -6,6 +6,9 @@ mod diagnostics;
 mod dialog;
 mod figure_file;
 mod delta;
+mod recent_export;
+mod resources;
+mod state_journal;
 mod pixels;
 mod windows;
 mod science;
@@ -467,9 +470,9 @@ fn main() {
     // The application keeps its flight journal from its first moment; the installer has nothing to keep.
     if !installer {
         match zlc_core::journal::open(&zlc_core::checkout::local("journal")) {
-            Ok(()) => zlc_core::journal::note("app", "started", json!({"pid": std::process::id(),
+            Ok(()) => { state_journal::open(); resources::start(); zlc_core::journal::note("app", "started", json!({"pid": std::process::id(),
                 "release": std::fs::read_to_string(zlc_core::checkout::path("bin/release.json")).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                    .map(|release| json!({"version": release["version"], "commit": release["commit"]}))})),
+                    .map(|release| json!({"version": release["version"], "commit": release["commit"]}))})) }
             Err(error) => eprintln!("The flight journal is not kept: {error}"),
         }
     }
@@ -527,6 +530,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let proxy = event_loop.create_proxy();
     let worker_proxy = proxy.clone();
     let runtime = Runtime::new();
+    // The data of recent publications is kept for a diagnostics archive, within the budget this checkout was last given.
+    runtime.keep_recent((recent_export::saved_budget_mib() as usize) << 20);
     let scientific_runtime = runtime.clone();
     let derivation_proxy = proxy.clone();
     let prepared_proxy=proxy.clone();
@@ -714,16 +719,19 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             Event::UserEvent(AppEvent::Command { command, .. }) => command.get("id").cloned(),
             _ => None,
         };
-        // Opt-in timing (ZLC_V3_TRACE): one span per application event turn.
-        let _turn = trace::span("ui.turn", || json!({"event": match &event {
-            Event::UserEvent(AppEvent::Command { command, .. }) => command["action"].clone(),
-            Event::UserEvent(AppEvent::Completed(_)) => json!("completed"),
-            Event::UserEvent(AppEvent::Pulse(_)) => json!("pulse-event"),
-            Event::UserEvent(AppEvent::Plugin(_) | AppEvent::Workbench(_)) => json!("workbench-event"),
-            Event::UserEvent(AppEvent::RuntimeChanged) => json!("runtime"),
-            Event::UserEvent(_) => json!("other"),
-            _ => json!("window"),
-        }}));
+        // What this turn of the loop handles: the journal's count of the loop's use names its longest turn
+        // by it (resources.rs), and so does the opt-in timing (ZLC_V3_TRACE), one span per turn.
+        let handles: std::borrow::Cow<'static, str> = match &event {
+            Event::UserEvent(AppEvent::Command { command, .. }) => command["action"].as_str().unwrap_or("command").to_owned().into(),
+            Event::UserEvent(AppEvent::Completed(_)) => "completed".into(),
+            Event::UserEvent(AppEvent::Pulse(_)) => "pulse-event".into(),
+            Event::UserEvent(AppEvent::Plugin(_) | AppEvent::Workbench(_)) => "workbench-event".into(),
+            Event::UserEvent(AppEvent::RuntimeChanged) => "runtime".into(),
+            Event::UserEvent(_) => "other".into(),
+            _ => "window".into(),
+        };
+        let _turn = trace::span("ui.turn", || json!({"event": handles}));
+        let _busy = resources::turn(handles);
         let result = (|| -> Result<(), String> {
             match event {
                 Event::WindowEvent { window_id, event: WindowEvent::CloseRequested, .. } => {
@@ -807,7 +815,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // Every command a window or a client sends, but the ones sent at display cadence (a board's sync, a pointer's
                     // moves, a page's own mappings): those are read from what they led to.
-                    if !matches!(action.as_str(), "sync_panels"|"pointer"|"map_ready"|"frame_consumed"|"mappings_released"|"describe"|"ready") {
+                    let read = zlc_bus::catalog::find(&action).is_some_and(|spec| spec.read_only);
+                    if !read && !matches!(action.as_str(), "sync_panels"|"pointer"|"map_ready"|"frame_consumed"|"mappings_released"|"describe"|"ready") {
                         zlc_core::journal::note_with("app", "action", || json!({"action": action, "window": from.as_ref().map(|kind| format!("{kind:?}")), "command": command}));
                     }
                     if matches!(action.as_str(), "map_ready"|"frame_consumed"|"mappings_released") {
@@ -1100,6 +1109,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         };
                         if workbench.on_runtime(&mut host) { workbench_host::deliver(&mut workbench, &builtin, &mut host); }
                         tell_editor_claims(&mut pulse, &workbench);
+                        // What the sequencer states of itself (its trigger lanes, how often each rises in what it holds)
+                        // reaches the workbench when it changes, as any device's facts do.
+                        if let Some((instance, facts)) = pulse.device_facts() { let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Facts { instance, facts })); }
                         // A changed Overlay redraws the picture it is of, data or not.
                         if action == "set_panel_overlay" { pending.store(true, Ordering::Release); }
                         accepted["acquisition"] = builtin.acquisition();
@@ -1990,6 +2002,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
                     if !closing { windows.send(&accepted)?; }
                     tell_editor_claims(&mut pulse, &workbench);
+                        // What the sequencer states of itself (its trigger lanes, how often each rises in what it holds)
+                        // reaches the workbench when it changes, as any device's facts do.
+                        if let Some((instance, facts)) = pulse.device_facts() { let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Facts { instance, facts })); }
                 }
                 // v2 _route_exact_panel_selection: an Edit's region is its panel's.
                 Event::UserEvent(AppEvent::Selection(note)) => {
@@ -2094,6 +2109,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             windows.send(&accepted)?;
                         }
                         tell_editor_claims(&mut pulse, &workbench);
+                        // What the sequencer states of itself (its trigger lanes, how often each rises in what it holds)
+                        // reaches the workbench when it changes, as any device's facts do.
+                        if let Some((instance, facts)) = pulse.device_facts() { let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Facts { instance, facts })); }
                         pulse.editor.poll();
                         pulse.dispatch();
                     }

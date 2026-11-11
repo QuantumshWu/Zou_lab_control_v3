@@ -116,6 +116,30 @@ IMAGE_AREA_TO_ROI = SelectionMapping(
 )
 
 
+#: The draft field naming the sequencer lane that triggers the camera (a raw lane, ``ch11``).
+TRIGGER_CHANNEL = "trigger_channel"
+#: The build argument of the device that states the lanes and says what each plays.
+TRIGGER_SOURCE = "trigger_source"
+
+
+def trigger_lanes(devices: object) -> list[dict]:
+    """The lanes the draft's trigger source states: ``{lane, port, label, frames}`` each."""
+
+    source = (devices or {}).get(TRIGGER_SOURCE) if isinstance(devices, dict) else None
+    lanes = (getattr(source, "facts", None) or {}).get("trigger_lanes") or []
+    return [dict(lane) for lane in lanes]
+
+
+def trigger_frames(values: object, devices: object) -> int | None:
+    """How many frames one shot of the chosen lane makes; None while the board holds no pulse, or no lane is chosen."""
+
+    chosen = str((values or {}).get(TRIGGER_CHANNEL) or "").strip()
+    for lane in trigger_lanes(devices) if chosen else ():
+        if lane.get("lane") == chosen:
+            return None if lane.get("frames") is None else int(lane["frames"])
+    return None
+
+
 CAMERA_MEASUREMENT_SCHEMA = AuthoringSchema(
     (
         # Blank keeps the camera's current setting.
@@ -134,10 +158,23 @@ CAMERA_MEASUREMENT_SCHEMA = AuthoringSchema(
         AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1,
                        blank_label="camera's current"),
         AuthoringField("repeat", "int", "Repeat", 0, minimum=0),
-        AuthoringField("frames_per_cycle", "int", "Frames per cycle", 1, minimum=1),
+        AuthoringField("frames_per_cycle", "int", "Frames per cycle", 1, minimum=1,
+                       # A cycle's size is the trigger lane's to say once one is named.
+                       enabled_when=(TRIGGER_CHANNEL, (None, "")),
+                       description="Counted by hand only while no trigger channel is chosen."),
+        AuthoringField(
+            TRIGGER_CHANNEL, "str", "Trigger channel", None, required=False,
+            blank_label="count frames",
+            description=(
+                "The sequencer lane that triggers this camera. Chosen, each frame is the trigger it arrives at: a cycle "
+                "is the lane's triggers of one shot, a frame at no trigger's time is dropped, and a trigger with no "
+                "frame leaves its shot marked invalid. Blank counts frames, as the number above says."
+            ),
+        ),
         photoelectron_switch(),
     ),
 )
 
 
-__all__ = ["CAMERA_MEASUREMENT_SCHEMA", "IMAGE_AREA_TO_ROI", "ROI_FIELD_NAMES"]
+__all__ = ["CAMERA_MEASUREMENT_SCHEMA", "IMAGE_AREA_TO_ROI", "ROI_FIELD_NAMES", "TRIGGER_CHANNEL", "TRIGGER_SOURCE",
+           "trigger_frames", "trigger_lanes"]

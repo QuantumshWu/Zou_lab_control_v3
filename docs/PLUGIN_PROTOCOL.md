@@ -96,7 +96,8 @@ A type descriptor (JSON, the only form the core sees):
                          "file_filter": "Calibration artifacts (*.json)", "required": true, "frame_claims": true}],
     "outputs": [{"name": "frames", "contract": "zlc.camera.frames", "index_by_source": false}],
     "devices": [{"capability": "camera.adapter", "argument": "camera",
-                 "protected_fields": ["exposure", "roi_x"], "enabled_when": null}],
+                 "protected_fields": ["exposure", "roi_x"], "enabled_when": null,
+                 "reads_only": false, "optional": false}],
     "previews": [...], "reports_ready": true, "acquisition_input": "", "acquisition_completion": "ready",
     "artifact_outputs": [...], "selection_mappings": [...], "workspace_resources": [...],
     "replaces": {"post_selected_occupancy": {"post_selection": true}},  // types it took over: a saved row naming one loads as this type, these values over its own
@@ -413,7 +414,7 @@ record is the template with each column's `position`-th value at its path. A `wi
 runs and each member's ancestors held once. The native `read_archive` and `read_file` give
 both in their older structure; Python's `read_archive` gives them as stored.
 
-Plugin -> core events: `release {blocks, leases}`, `run.ready`, `run.progress`,
+Plugin -> core events: `release {blocks, leases, retired}`, `run.ready`, `run.progress`,
 `device.log {instance, line}` (one line of
 an open device's own log, v2's: each INFO record of the loggers under `zlc_pulse.remote`,
 `zlc_atom.devices` and the type's `log_channels`, as `[HH:MM:SS] message`, for the devices
@@ -744,6 +745,12 @@ it while any numpy view of it is alive; the SDK sends one release per lend when
 the view is garbage. If the producer dies, everything the core already mapped
 stays valid (the section lives while any view exists).
 
+**Giving memory back.** A producer reuses its released blocks, and keeps no more of a
+size than its work has needed: a block that went unused through a whole turn of its
+size's allocations, or a size not allocated for longer than it ever went before, is
+unmapped and named in `release`'s `retired`. The core forgets a retired name and
+unmaps its own view of it with its last reader; a borrowing plugin does the same.
+
 **Copies.** The SDK passes an array by reference when it is a view of an SDK
 block (`ctx.allocate(shape, dtype)`, or an array received from another plugin);
 any other numpy array is copied once into a fresh block when sent. A camera frame
@@ -846,6 +853,21 @@ the device's `open` reply lists (`reads`: of `tunable_values`, `settings_provena
 `convert_tunable_value`, `read_tunable_in_unit` the ones it implements -- a scan
 editor converts a knob's limits through the device's own law, an RF amplitude
 into its channel's load). Anything that changes the device is refused.
+
+A requirement with `reads_only` is read, never claimed: the run holds nothing of the
+device, beside whoever does hold it, and its `device` calls are answered only for the
+reads above (`this run only reads <device>; <method> is not a read` otherwise). With
+`optional` a draft may leave it unset or name a device that is not open; the build is
+then called without it.
+
+**Facts.** A device may state facts of itself that a draft needs before any run: plain
+JSON under `facts` in its working point, said again whenever they change (a sequencer:
+`trigger_lanes [{lane, port, label, frames}]`, the lanes it can trigger on and how
+many times each rises in a shot of the loaded pulse, null while none is loaded). A
+draft query's device carries them as `facts`. A device the core implements itself is
+not called by a plugin: a draft query is handed it as its facts alone
+(`{"instance", "role", "facts", "native": true}`, the SDK's `DeviceFacts`), and a build
+as its key.
 
 ## 8. Commands in the catalogue
 

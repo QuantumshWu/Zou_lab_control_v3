@@ -240,6 +240,8 @@ impl Windows {
     /// sections its view reads (delta.rs); a page with nothing new in it and
     /// no request of its own is not sent it.
     pub fn send(&self, state: &Value) -> Result<(), String> {
+        // The journal is told what the windows are: the changes, and the reply a message carries.
+        crate::state_journal::say(state);
         if let Some(share) = self.share.as_ref().filter(|_| state["type"] == "state") { share.publish_state(state); }
         for window in self.open.iter().filter(|window| window.ready) {
             window.pixels.send_state(state, |section| window.kind.reads(section), |request| request.as_u64().is_some_and(|request| window.owns_request(request)))?;

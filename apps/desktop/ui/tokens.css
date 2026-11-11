@@ -314,4 +314,7 @@
   --slm-preset-min-h: calc(max(260px, round(calc(360px * var(--fluent)), 1px)) * var(--qt));
   --slm-pupil-min-w: calc(round(calc(430px * var(--fluent)), 1px) * var(--qt));
   --slm-pupil-min-h: calc(max(260px, round(calc(270px * var(--fluent)), 1px)) * var(--qt));
+  /* The Task Console's Diagnostics popup: a paragraph, one field, a line and two commands. */
+  --diagnostics-min-w: calc(round(calc(430px * var(--fluent)), 1px) * var(--qt));
+  --diagnostics-min-h: calc(max(260px, round(calc(260px * var(--fluent)), 1px)) * var(--qt));
 }

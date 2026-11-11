@@ -33,6 +33,28 @@ export function describe(target) {
 export function isCommandKey(event) {
     return COMMAND_KEYS.has(event.key) || ((event.ctrlKey || event.metaKey || event.altKey) && event.key.length === 1);
 }
+/** The tasks that held this page's thread, as the browser itself reports them (its Long Tasks: 50 ms and
+ * over -- its definition, not one made here): how many since last asked, how long together, the longest. */
+export class HeldUp {
+    count = 0;
+    total = 0;
+    longest = 0;
+    add(tasks) {
+        for (const task of tasks) {
+            this.count++;
+            this.total += task.duration;
+            this.longest = Math.max(this.longest, task.duration);
+        }
+    }
+    /** What was added since last asked, and nothing while nothing was. */
+    take() {
+        if (!this.count)
+            return undefined;
+        const said = { count: this.count, total_ms: Math.round(this.total), longest_ms: Math.round(this.longest) };
+        this.count = this.total = this.longest = 0;
+        return said;
+    }
+}
 /** Keep this window's journal: `post` sends a batch to the core. Returns `note`, for a line of the page's own. */
 export function startJournal(post, page) {
     let waiting = [];
@@ -45,7 +67,14 @@ export function startJournal(post, page) {
         }
         waiting.push({ us: now(), ev, facts: { page, ...facts } });
     };
+    const held = new HeldUp();
+    if (typeof PerformanceObserver !== "undefined" && PerformanceObserver.supportedEntryTypes?.includes("longtask")) {
+        new PerformanceObserver(list => held.add(list.getEntries())).observe({ type: "longtask", buffered: true });
+    }
     const send = () => {
+        const tasks = held.take();
+        if (tasks)
+            waiting.push({ us: now(), ev: "long_tasks", facts: { page, ...tasks } });
         if (dropped) {
             waiting.push({ us: now(), ev: "dropped", facts: { page, lines: dropped } });
             dropped = 0;

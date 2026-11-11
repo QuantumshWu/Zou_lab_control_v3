@@ -104,6 +104,11 @@ pub struct DeviceRequirement {
     /// `None`: every tunable field of the device is frozen while claimed.
     pub protected_fields: Option<Vec<String>>,
     pub enabled_when: Option<(String, Vec<Value>)>,
+    /// The run only reads the device (the methods it lists as reads): it claims nothing of it, protects
+    /// none of its fields, and runs beside whoever does hold it.
+    pub reads_only: bool,
+    /// A draft may leave it unset, or name a device that is not open: the node is then built without it.
+    pub optional: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

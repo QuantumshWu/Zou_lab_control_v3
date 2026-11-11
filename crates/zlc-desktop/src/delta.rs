@@ -18,6 +18,9 @@ impl Sent {
     /// The page was (re)loaded: it holds nothing.
     pub fn reset(&mut self) { *self = Sent::default(); }
 
+    /// Every section as it was last told: the state a reader of the changes has arrived at.
+    pub fn sections(&self) -> &Map<String, Value> { &self.sections }
+
     /// The message for `state` on a page that reads the sections `reads`
     /// accepts, or `None` when it would tell the page nothing: no section it
     /// reads changed, the error is the one it already shows, and the request

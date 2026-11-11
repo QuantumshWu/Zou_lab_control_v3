@@ -75,7 +75,7 @@ fn start(h: &Harness, mode: &str, configure_first: bool) -> String {
 
 fn start_plan(h: &Harness, spec: Value, mode: &str, configure_first: bool, effective_inner: &str) -> String {
     h.host.start_run("native", RunRequest {
-        prepared: None, device_labels: Default::default(), device_units: Default::default(), devices: Default::default(), shared: Default::default(),
+        prepared: None, device_labels: Default::default(), device_units: Default::default(), devices: Default::default(), shared: Default::default(), reads: Default::default(),
         values: json!({"spec": spec.to_string(), "mode": mode, "configure_first": configure_first,
             "effective_inner": effective_inner}),
         origin: Origin::Operator, resources: json!({}), source_signal: Some(SOURCE.into()), run_directory: None,

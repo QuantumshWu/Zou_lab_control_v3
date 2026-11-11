@@ -249,7 +249,7 @@ class SourcePopup {
  * -- Duration, its total with the source badge, what it holds, its name --
  * then Expand, Edit and Ungroup on the port rows' lines; expanded, a Start
  * and an End card frame its members, read-only names, Collapse held down. */
-class ComponentCard {
+export class ComponentCard {
   readonly root = element("section", "card bordered pulse-card pulse-component");
   private title = element("div", "heading pulse-title");
   private totalText = element("span", "elided");

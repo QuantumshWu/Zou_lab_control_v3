@@ -65,9 +65,11 @@ class Capture(unittest.TestCase):
 
     def test_camera_monitor_validates_one_batch_and_uses_returned_group_boundaries(self):
         from zlc_atom.nodes.camera import measurement
-        records = [types.SimpleNamespace(source_ordinal=i) for i in range(5)]
+        # A frame as the journal names it: its ordinal and the stamps a camera may or may not give.
+        records = [types.SimpleNamespace(source_ordinal=i, frame_stamp=None, camera_stamp=None, timestamp_seconds=None,
+                                         timestamp_microseconds=None, host_received_at_ns=0) for i in range(5)]
         node = object.__new__(measurement.CameraMeasurementNode)
-        node._request = types.SimpleNamespace(frames_per_cycle=2, photoelectrons=False)
+        node._request = types.SimpleNamespace(frames_per_cycle=2, photoelectrons=False, camera_key="camera")
         node._actual_working_point = types.SimpleNamespace(electrons_per_count=None)
         node._record_received = None
         node._next_record_ordinal = 0

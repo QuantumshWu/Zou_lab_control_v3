@@ -507,6 +507,11 @@ class PylonCameraAdapter:
             camera="pylon camera",
         )
 
+    @property
+    def stamps_frames(self) -> bool:
+        # A machine-vision camera read this way says only when the host received a frame.
+        return False
+
     @_serialized
     def set_exposure_seconds(self, seconds: float | None) -> CameraWorkingPoint:
         """Integrate for this long on every trigger, leaving the geometry.

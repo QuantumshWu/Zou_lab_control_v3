@@ -118,6 +118,11 @@ class VirtualCamera:
             camera="virtual camera",
         )
 
+    @property
+    def stamps_frames(self) -> bool:
+        # The virtual sensor's frames carry the time its world exposed them.
+        return True
+
     def working_point(self) -> CameraWorkingPoint:
         with self._condition:
             exposure = self._exposure_seconds

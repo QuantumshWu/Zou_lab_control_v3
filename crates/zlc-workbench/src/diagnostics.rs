@@ -4,7 +4,8 @@
 //! in order), the board as it stands (its layout, the apparatus, the workbench's own state), the
 //! release that was running, the newest program logs, and the text files the board names -- a
 //! node's pulse, the Subpulses and the Config that pulse names in turn -- as they are now. It
-//! holds no acquired data: a calibration or a dataset the board names is named, not carried.
+//! names a calibration or a dataset the board uses without carrying it; the one data it does carry is
+//! what the application keeps of recent publications within its budget (`data/`), when asked to.
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -40,18 +41,41 @@ journal/journal-<start us>.jsonl
     workbench launch/event/refused     node runs: the configuration launched, each plugin fact, each refusal
     app action/drawn/report            commands a window sent, the reads each panel was drawn from,
                                        the console's line whenever it changed
+    app state_snapshot / state         the application's whole state at the start of each file, then every
+                                       change: `changes` is a list of [path, value] (set), [path] (delete a
+                                       key) and [path, items, start, removed] (splice an array); a line with
+                                       `request` is that command's reply (`result`, `error`). A read-only
+                                       command that succeeds is said by its reply alone
+    plugins device_repeated            the same device call made again `times` with nothing going wrong
+                                       (a capture polling its camera), said when something else follows
     board load/fire/report/safe        the pulse board; a report's `elapsed_seconds` after its fire is
                                        when the board itself was done
     scan segment_armed/segment_filled  a scan's segments; `dropped` is what arrived before one was armed
     plugins call/device                what the core asked of a plugin, and a run of a device
     camera arm/finish/frame            a camera's captures and each frame as its measurement read it
+    camera aligned_to/frame_dropped/   a measurement that follows a trigger channel: the play it aligned to, a
+      shot_incomplete/shot_abandoned   frame no trigger asked for, a shot one or more of whose frames never came
     ui click/key/popup/error           what the operator did in a window
+    ui long_tasks                      the tasks the browser reported as holding a page's thread (50 ms and
+                                       over, its definition) since the page's last batch: count, total, longest
+    system machine / resources         once at start the machine's processors and the sampling period; then per
+                                       period `processes` -- the application and its descendants (plugin and
+                                       page processes; `plugins process` says which pid a plugin is), each with
+                                       `cpu` (processors used since the last line: 1 is one whole processor) and
+                                       its working and private memory -- `machine` (its processors' busy share,
+                                       free memory) and `loop`: the event loop's turns in the period, their
+                                       time together and the longest with what it handled
 
 state.json      the workbench's state when this was exported (nodes, runs, devices, board)
 layout.json     the board as Save would write it
-apparatus.json  the apparatus file
+apparatus.json  the apparatus as it is loaded now, whichever file it was read from
 release.json    the release that was running
 logs/           the newest program logs
+data/           the data of recent publications, as far back as the application's budget for it holds --
+                every signal for the same length of time: one .npy per signal and run, its events stacked
+                in commit order; data/index.json names each file's signal, run, ordinals and commit times,
+                by which a `runtime commit` line of the journal finds its event. Absent when the archive
+                was exported without data, or none was kept
 files/          the JSON files the board names (a node's pulse, the Subpulses and Config it names),
                 as they were when this was exported; files.json says which path each one is
 ";
@@ -61,7 +85,7 @@ pub struct Exported { pub path: PathBuf, pub segments: usize, pub bytes: u64 }
 
 impl Workbench {
     /// Write the archive into the workspace's diagnostics folder and say where.
-    pub(crate) fn export_diagnostics(&mut self, host: &dyn Host) -> Result<Value, String> {
+    pub(crate) fn export_diagnostics(&mut self, with_data: bool, host: &dyn Host) -> Result<Value, String> {
         let stamp: String = workspace::utc_now().chars().filter(char::is_ascii_digit).take(14).collect();
         let folder = self.workspace.root.join(FOLDER);
         std::fs::create_dir_all(&folder).map_err(|error| format!("{}: {error}", folder.display()))?;
@@ -70,18 +94,22 @@ impl Workbench {
         let pretty = |value: &Value| serde_json::to_vec_pretty(value).unwrap_or_default();
         members.push(("state.json".into(), pretty(&Value::Object(self.state(host)))));
         members.push(("layout.json".into(), pretty(&self.layout_document(host))));
-        for (name, file) in [("apparatus.json", self.workspace.apparatus()), ("release.json", zlc_core::checkout::path("bin/release.json"))] {
-            if let Ok(bytes) = std::fs::read(&file) { members.push((name.into(), bytes)); }
-        }
+        // The apparatus as it is loaded and edited now, whichever file it came from.
+        members.push(("apparatus.json".into(), pretty(&self.apparatus.tree())));
+        if let Ok(bytes) = std::fs::read(zlc_core::checkout::path("bin/release.json")) { members.push(("release.json".into(), bytes)); }
         members.extend(newest_logs(&zlc_core::checkout::local("logs")));
         let named = named_files(&[&members[1].1, &members[2].1], &self.workspace.root);
         let files = named.len();
         members.push(("files.json".into(), pretty(&Value::Object(named.iter().map(|(member, path, _)| (member.clone(), json!(path))).collect()))));
         members.extend(named.into_iter().map(|(member, _, bytes)| (member, bytes)));
+        // The data of the publications the journal names, as far back as the application keeps it.
+        let data = if with_data { host.diagnostic_data() } else { Vec::new() };
+        let data_files = data.len();
+        members.extend(data);
         journal::note("workbench", "diagnostics_exported", json!({"path": path}));
         let exported = write(&path, &journal::segments(), &members).map_err(|error| format!("{}: {error}", path.display()))?;
         self.console_report = (format!("diagnostics exported to {}", exported.path.display()), "task");
-        Ok(json!({"path": exported.path, "segments": exported.segments, "files": files, "bytes": exported.bytes}))
+        Ok(json!({"path": exported.path, "segments": exported.segments, "files": files, "data_files": data_files, "bytes": exported.bytes}))
     }
 }
 

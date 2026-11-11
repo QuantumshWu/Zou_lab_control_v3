@@ -73,6 +73,8 @@ struct State {
     held: HashMap<(u32, String), usize>,
     free: HashMap<usize, Vec<String>>,
     gone: HashSet<u32>,
+    /// Blocks their owner has given back while something here still held them: forgotten at the last hold.
+    retired: HashSet<String>,
     next: u64,
 }
 
@@ -153,6 +155,22 @@ impl Registry {
         for name in names { self.unhold(name, Some(holder)); }
     }
 
+    /// Plugin `owner` has unmapped these blocks of its own for good (its arena gave them back to the
+    /// system): the core's mapping goes with them, at once or with the last hold.
+    pub fn retired(&self, owner: u32, names: &[String]) {
+        let mut state = self.lock();
+        for name in names {
+            match state.entries.get(name) {
+                Some(entry) if entry.owner == owner && entry.holds == 0 => { state.entries.remove(name); }
+                Some(entry) if entry.owner == owner => { state.retired.insert(name.clone()); }
+                _ => {}
+            }
+        }
+    }
+
+    /// The blocks the core holds mapped now.
+    pub fn mapped(&self) -> usize { self.lock().entries.len() }
+
     /// A plugin process ended: its holds go, and its own blocks are never reused.
     pub fn holder_gone(&self, holder: u32) {
         let names: Vec<(String, usize)> = {
@@ -187,7 +205,7 @@ impl Registry {
                 let size = entry.mapping.size;
                 state.free.entry(size).or_default().push(name.to_owned());
                 None
-            } else if state.gone.contains(&owner) {
+            } else if state.gone.contains(&owner) || state.retired.remove(name) {
                 state.entries.remove(name);
                 None
             } else {

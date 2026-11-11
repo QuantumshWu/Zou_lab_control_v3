@@ -26,6 +26,14 @@ export function button(text: string, action: () => void, className = ""): HTMLBu
 
 /** Set text only when it differs: a state arrives many times a second, and
  * rewriting unchanged text restarts selections and tooltips. */
+/** A node's content box as it is laid out: its box less its edges and its padding, to the fraction.
+ * Never clientWidth: that is whole px, and of a text field it is not the same box in every engine (the
+ * padding box by the standard, the content box where the field clips its overflow). */
+export function contentWidth(node: Element, style: CSSStyleDeclaration = getComputedStyle(node)): number {
+  const inset = [style.paddingLeft, style.paddingRight, style.borderLeftWidth, style.borderRightWidth].reduce((sum, side) => sum + (parseFloat(side) || 0), 0);
+  return node.getBoundingClientRect().width - inset;
+}
+
 export function setText(node: Element, text: string): void {
   if (node.textContent !== text) node.textContent = text;
 }

@@ -304,6 +304,13 @@ class CameraAdapter(Protocol):
     @property
     def photoelectron_conversion(self) -> tuple[float, float] | None: ...
 
+    #: Whether every frame carries the time this camera's own clock exposed it at
+    #: (``timestamp_seconds``/``timestamp_microseconds``).  Only such a camera's frames can be told
+    #: apart by when they came, so only it can be aligned to the lane that triggers it; like the
+    #: conversion, it is answered from the device's configuration, open or not.
+    @property
+    def stamps_frames(self) -> bool: ...
+
     # A camera has a state: how long it integrates, and which part of the
     # sensor it reads.  The two are set separately: one call that demanded
     # both is what let a task replace a tuned ROI with the full sensor because
