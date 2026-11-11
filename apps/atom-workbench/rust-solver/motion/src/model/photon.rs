@@ -105,9 +105,11 @@ pub(crate) struct Member {
     pub(crate) phase: Beat,
 }
 
-/// Which classes' gradients a state's photons are made with (`Model::photons_of`): every class's (a step's scattering);
-/// one class's, that class the only photon made (a jump's: the class drawn, `Model::emission_of`); or none's, every
-/// class's amplitudes alone (what the draw of a class reads: their rates).
+/// Which classes' gradients a state's photons are made with (`Model::photons_of`): every class's, with the explicit
+/// states' part of the second moment's rate (a step's scattering, the one reader of the second moment); one class's,
+/// that class the only photon made, for its mean (a jump's: the class drawn and the kick it carries,
+/// `Model::emission_of` -- the explicit states' part is not made); or none's, every class's amplitudes alone (what the
+/// draw of a class reads: their rates).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Gradients {
     All,
@@ -575,8 +577,9 @@ impl Model {
                 work += m.entries.len() as f64 * (2.0 + partner + if taken { 3.0 * (3.0 + 2.0 * partner) } else { 0.0 });
                 // The fourth order's vectors: each a matrix on a state more, and its weights.
                 work += (more * (m.entries.len() + 4 * rows)) as f64;
-                // An explicit state's part: its decay rate into the class over its population, `MemberPlan::decay`.
-                if !m.folded && with {
+                // An explicit state's part of the second moment's rate, where every class's is asked: its decay rate into
+                // the class over its population, `MemberPlan::decay`.
+                if !m.folded && gradients == Gradients::All {
                     if !levelled {
                         dressing.clear();
                         dressing.extend((0..self.carriers.len()).map(|d| self.dressed_coherently(d)));

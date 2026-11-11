@@ -272,7 +272,8 @@ pub struct Photon {
     /// ∇u_a of the folded part (`Photon::moments`): gradients[i][a], i the lab axis; empty where none were asked.
     pub gradients: [[Vec<C64>; 3]; 3],
     /// The explicit states' part of the second moment's rate, in the amplitudes' norm (1/µm² times ‖u‖²'s unit; eliminate.rs
-    /// `Model::explicit_moment`): their absorption's mean is the Ehrenfest force's. Zero where no gradients were asked.
+    /// `Model::explicit_moment`): their absorption's mean is the Ehrenfest force's. Zero where it is not made: without
+    /// gradients, and of a class made alone (photon.rs `Gradients`).
     pub explicit: [[f64; 3]; 3],
 }
 

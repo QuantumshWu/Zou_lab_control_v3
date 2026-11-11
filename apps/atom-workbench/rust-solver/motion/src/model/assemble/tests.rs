@@ -617,7 +617,8 @@ fn the_decay_s_mismatch_on_a_scene() {
 
 /// A state's photons made in parts (photon.rs `Gradients`) are the same photons: every class's amplitudes without any
 /// gradients (what a jump's draw reads) are the amplitudes of the photons made whole, and one class alone with its
-/// gradients (what a jump makes of the class it draws) is that class of them -- the same numbers, bit for bit, so a
+/// gradients (what a jump makes of the class it draws) is that class of them but for the explicit states' part of the
+/// second moment's rate, which a class alone does not make -- the same numbers, bit for bit, so a
 /// jump's photon (`Dynamics::emit`: the classes' rates to the draw, the drawn class's amplitudes and kick) is the whole
 /// photon's, whichever class is drawn. On every model of the tests, with the exact elimination, and on a scene's tables.
 #[test]
@@ -645,7 +646,7 @@ fn a_state_s_photons_in_parts_are_its_photons() {
                 assert!(alone.gradients.iter().flatten().all(|g| g.is_empty()), "{name}, cluster {cluster}, class {}: gradients where none are asked", photon.class);
                 assert!((alone.class, &alone.amplitudes) == (photon.class, &photon.amplitudes), "{name}, cluster {cluster}, class {}: the amplitudes alone", photon.class);
                 let one = model.photons_of(&plan, table, &at, &psi, Gradients::Of(photon.class)).0;
-                assert!(one.len() == 1 && one[0] == *photon, "{name}, cluster {cluster}, class {}: the class alone", photon.class);
+                assert!(one.len() == 1 && crate::model::Photon { explicit: photon.explicit, ..one[0].clone() } == *photon && one[0].explicit == [[0.0; 3]; 3], "{name}, cluster {cluster}, class {}: the class alone", photon.class);
                 let mut draw = |rates: &[f64]| {
                     assert!(rates.len() == bare.len() && rates.iter().zip(&bare).all(|(rate, photon)| *rate == photon.weight()), "{name}, cluster {cluster}: the classes' rates to a jump's draw");
                     Some(drawn)
