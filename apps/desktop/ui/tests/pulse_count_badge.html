@@ -22,7 +22,8 @@ try {
     const box = new ValueBox(() => 0, () => {}, 'pulse'); box.root.classList.add('pulse-count');
     const spin = new SpinBox(box.root, box.box.root, {step: () => 1, bounds: () => [1, null], commit: () => {}});
     card.append(box.root); document.body.append(card); box.show(field(source, scan, text)); spin.refresh();
-    await frame(); await frame();
+    // What a frame runs, called here: a headless page draws no frames, and whether one came was chance.
+    SpinBox.fit(); await frame(); SpinBox.fit();
     const badge = box.badge.getBoundingClientRect();
     const chip = box.root.querySelector('.step-chip');
     const input = box.box.root, style = getComputedStyle(input);

@@ -2,9 +2,10 @@
 <meta charset="utf-8">
 <title>Decimal spin grid regressions</title>
 <link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
 <pre id="result">pending</pre>
 <script type="module">
-import {gridStep,spinBox} from '../dist/fluent/spin.js';
+import {SpinBox,gridStep,spinBox} from '../dist/fluent/spin.js';
 import {Field,shifted} from '../dist/fluent/form.js';
 const assert=(ok,message)=>{if(!ok)throw Error(message)};
 const equal=(a,b,message)=>assert(Object.is(a,b),`${message}: ${a} != ${b}`);
@@ -47,6 +48,26 @@ try {
   input.dispatchEvent(new WheelEvent('wheel',{deltaY:-100,bubbles:true,cancelable:true}));
   equal(input.value,'180','stepped field text');equal(sent.at(-1),180,'field wire');
   equal(shifted(sent.at(-1),6),180000000,'SI prefix wire');
+ });
+ check('a number is answered alike whichever way its step chip stands: an edit that keeps its length keeps the chip',()=>{
+  // SpinBox.fit is what a frame runs; called here because a headless page draws no frames.
+  const host=document.createElement('div');host.style.width='160px';document.body.append(host);
+  const pen=document.createElement('canvas').getContext('2d');
+  for(const text of ['5','12','12.5','123.4','123.45','123.456','1234.567','12345.678','123456.789','1234567.8901']){
+   const root=document.createElement('div'),input=document.createElement('input');root.append(input);host.append(root);
+   const spin=new SpinBox(root,input,{decimal:true,step:()=>.1,bounds:()=>[null,null],commit:()=>{},setStep:()=>{}});
+   input.value=text;spin.refresh();SpinBox.fit();
+   const states=[];
+   for(let round=0;round<6;round++){
+    states.push(root.classList.contains('chip-yields')?'yields':'shown');
+    input.value=text.slice(0,-1)+String((round+1)%10);spin.refresh();SpinBox.fit();
+   }
+   assert(new Set(states).size===1,`${text}: its chip came and went as it was edited: ${states.join(' ')}`);
+   // Shown, the digits stand in the field's own room, before the chip.
+   const style=getComputedStyle(input);pen.font=`${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+   const room=input.getBoundingClientRect().width-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight)-2*parseFloat(style.borderLeftWidth);
+   if(states[0]==='shown')assert(pen.measureText(input.value).width<=room+.5,`${text}: the digits (${pen.measureText(input.value).width}) run past their room (${room})`);
+  }
  });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
 }catch(error){document.getElementById('result').textContent=JSON.stringify({passed:false,error:error.stack})}

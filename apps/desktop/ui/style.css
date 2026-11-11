@@ -445,7 +445,9 @@ body.carrying, body.carrying * { cursor: grabbing !important; }
 .pulse-card { flex: none; }
 .pulse-editor section.pulse-card { gap: var(--row-gap); }
 .pulse-row { display: flex; align-items: center; gap: var(--row-gap); height: var(--control); min-width: 0; }
-.pulse-row > .pulse-label { width: var(--pulse-label-w); }
+/* The label column's width, and never wider than its row: alone on a narrow card's line (a spacer's,
+ * an expanded Subpulse's Start and End) it is the line, not a box standing out of the card. */
+.pulse-row > .pulse-label { width: var(--pulse-label-w); max-width: 100%; }
 .pulse-row > input, .pulse-row > select, .pulse-row > .pulse-value { flex: 1; min-width: 0; }
 .pulse-title { flex: 0 1 auto; min-width: 0; height: 100%; font-weight: var(--heading-weight); padding-bottom: 0; }
 .pulse-ports { display: flex; flex-direction: column; gap: var(--pulse-row-gap); margin-top: calc(var(--section-gap) - var(--row-gap)); }
