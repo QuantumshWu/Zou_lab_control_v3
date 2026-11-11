@@ -1,7 +1,8 @@
 //! The atoms' reach (SPEC §1.8) and provable extrema over it.
 //!
 //! # The reach
-//! The sublevel set {(r, v) : V_prep(r; p) + v²/(2 ħ/m) ≤ V_min + E_r} of the prepared energy, E_r = ln(1/s) k_B T_r: at r the
+//! The sublevel set {(r, v) : V_prep(r; p) + v²/(2 ħ/m) ≤ V_min + E_r} of the prepared energy, E_r = L k_B T_r the level that
+//! holds all but the share s of a thermal ensemble in the trap (# The reach's level): at r the
 //! speeds |v| ≤ √(2 (ħ/m)(V_min + E_r − V_prep(r))), at most √(2 (ħ/m) E_r) (`Reach::speed`), the positions where that is real. Its level
 //! V_min + E_r is below the far value 0 where the trap holds the reach; there −V_prep ≥ −(V_min + E_r) > 0 on it, and the proven
 //! envelope −V_prep ≤ B max_l A_l(r) (model.rs `Envelope`) puts it inside the union of the ellipsoids u_l ≤ B/(−V_min − E_r) − 1
@@ -9,17 +10,25 @@
 //! M_l⁻¹ = (w₀²/2)(1 − nnᵀ) + z_R² nnᵀ, bound `Reach::cell`. A level at or above the far value -- or a plane wave in the trap
 //! light -- leaves the reach unbounded: the whole space, its bounds the global ones.
 //!
+//! # The reach's level
+//! The reach is the set that holds all but the share s of the ensemble: its level is the (1 − s) quantile of a thermal
+//! atom's energy above the trap's bottom. Each quadratic degree of freedom holds ½ k_B T x² with x a standard normal, so
+//! the energy of n of them over k_B T follows Γ(n/2) and the share above L is the regularized upper incomplete gamma
+//! function Q(n/2, L): the level is the L with Q(n/2, L) = s (`quantile`, by bisection to the format's resolution; Q
+//! falls monotonically). The degrees of freedom are counted on the trap itself: the three momenta, and each principal
+//! axis of the prepared trap's Hessian along which it holds the atom (a frequency above zero, model.rs `Trap`); an axis
+//! along which the trap is free adds a momentum's degree alone and no potential's. A trap that holds along its three
+//! axes has six, Q(3, L) = e^{−L}(1 + L + L²/2): L = 12.89 at s = 2.44e-4. (ln(1/s) = 8.32, the level where the
+//! Boltzmann factor is s, is the quantile of two degrees, one oscillator: Q(1, L) = e^{−L}. Six degrees leave 1.07 % of
+//! the atoms above it, with 3.4 % of the energy.)
+//!
 //! # What the reach leaves out
-//! E_r = ln(1/s) k_B T_r is the level where the Boltzmann factor is s: the share of a thermal ensemble above it is s for
-//! one quadratic degree of freedom pair alone (a one-dimensional oscillator, Q(1, L) = e^{−L}, L = ln(1/s)). A trapped atom
-//! has six: the share of a harmonic trap's atoms outside the joint-energy set is Q(3, L) = e^{−L}(1 + L + L²/2), 1.07 % at
-//! s = 2.44e-4 (L = 8.32), in a tweezer 35 k_B T deep 1.32 %, and they hold Q(4, L) = 3.4 % of the energy -- not s. The
-//! level stays where it is (the folds are judged and the step's first rung taken over it); what it leaves out is booked
-//! as it is, read off the ensemble the run draws and not off a formula for one trap's shape (`Model::left_out`): of
-//! the initial atoms of the most trajectories a solve runs, the share outside the set -- the count's far end at the
-//! confidence z (estimate.rs `wilson`; with none outside, z²/(N + z²), what was booked whatever the count) --, on what
-//! is shown; and their share of the kinetic energy, on T. A reach grown with the atoms' temperature leaves out less of
-//! the same initial atoms.
+//! The level's quantile is the harmonic trap's. What the real trap adds -- the tweezer's anharmonic flanks, the lowered
+//! isothermal's cut, the Wigner factors' widths -- is read off the ensemble the run draws, not off a formula for one
+//! trap's shape (`Model::left_out`): of the initial atoms of the most trajectories a solve runs, the share outside the
+//! set -- the count's far end at the confidence z (estimate.rs `wilson`; with none outside, z²/(N + z²), s itself) --,
+//! booked on what is shown; and their share of the kinetic energy, on T. A reach grown with the atoms' temperature
+//! leaves out less of the same initial atoms.
 //!
 //! # Provable extrema (`Model::bounds_over`)
 //! A quantity's bound over the reach is the largest of its upper bounds over cells covering the reach's box, a cell taken where
@@ -970,10 +979,32 @@ fn decided(threshold: f64) -> impl Fn(f64, f64) -> bool + Sync {
     move |upper, attained| upper < threshold || attained >= threshold
 }
 
+/// The L with Q(a, L) = share, 0 < share < 1: the level, in units of k_B T, that the share `share` of a thermal ensemble
+/// of 2a quadratic degrees of freedom lies above (module documentation, # The reach's level). Q falls monotonically
+/// from 1 at L = 0: the bracket's top is doubled from one until Q is below the share, then halved until its two ends are
+/// neighbours in the format.
+fn quantile(a: f64, share: f64) -> f64 {
+    let above = |level: f64| crate::special::upper(a, level) > share;
+    let (mut lo, mut hi) = (0.0, 1.0);
+    while above(hi) {
+        (lo, hi) = (hi, 2.0 * hi);
+    }
+    loop {
+        let middle = 0.5 * (lo + hi);
+        if !(lo < middle && middle < hi) {
+            return hi;
+        }
+        if above(middle) { lo = middle } else { hi = middle }
+    }
+}
+
 impl Model {
-    /// The reach of a trap at temperature T_r (µK) and unsampled share s (module documentation).
+    /// The reach of a trap at temperature T_r (µK) that leaves out the share s (module documentation, # The reach's
+    /// level): its level the (1 − s) quantile of the energy of the trap's quadratic degrees of freedom -- three momenta
+    /// and the principal axes along which the trap holds the atom.
     pub fn reach(&self, trap: &Trap, p: &[f64; GROUND], temperature_uk: f64, share: f64) -> Reach {
-        let energy = (1.0 / share).ln() * KT_PER_UK * temperature_uk;
+        let degrees = 3 + trap.frequencies.iter().filter(|omega| **omega > 0.0).count();
+        let energy = quantile(0.5 * degrees as f64, share) * KT_PER_UK * temperature_uk;
         let level = trap.minimum + energy;
         let envelope = self.envelope(p);
         let b = envelope.peak();
@@ -1213,6 +1244,31 @@ mod tests {
     /// gradient within its slope; every carrier's coherent coupling |Σ_l a_l X^f_l[e,s]|, its columns and its units' columns within
     /// their bounds; the far light's energies within their slack and their differences' gradients within `energy_slope_over` --
     /// and on a cell a thousand times smaller the couplings' bounds within that factor of the centre's values.
+    /// The reach's level is the quantile of its trap's degrees of freedom (module documentation, # The reach's level):
+    /// Q(n/2, L) = s to the format's resolution for two to six degrees; one oscillator's is ln(1/s), a trap's that holds
+    /// along three axes 12.89 at s = z²/(2¹⁴ + z²), where ln(1/s) = 8.32 left Q(3, 8.32) = 1.07 % above it; and a trap
+    /// free along an axis has five, its level between the two.
+    #[test]
+    fn the_reach_s_level_is_the_quantile_of_its_trap_s_degrees_of_freedom() {
+        let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
+        for degrees in 2..=6 {
+            let level = quantile(0.5 * degrees as f64, share);
+            let above = crate::special::upper(0.5 * degrees as f64, level);
+            assert!((above - share).abs() <= 1e-12 * share, "{degrees} degrees: Q({}, {level}) = {above} against s = {share}", 0.5 * degrees as f64);
+        }
+        assert!((quantile(1.0, share) - (1.0 / share).ln()).abs() <= 1e-12 * (1.0 / share).ln(), "one oscillator's level is ln(1/s)");
+        assert!((quantile(3.0, share) - 12.89).abs() < 0.005 && (crate::special::upper(3.0, (1.0 / share).ln()) - 0.01072).abs() < 1e-5, "six degrees: {}", quantile(3.0, share));
+        let model = at_the_atom("R2_RECOIL");
+        let p = { let mut p = [0.0; GROUND]; p[7] = 1.0; p };
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        assert!(trap.frequencies.iter().all(|omega| *omega > 0.0), "the tweezer holds along its three axes");
+        let kt = KT_PER_UK * 30.0;
+        let held = model.reach(&trap, &p, 30.0, share);
+        let free = model.reach(&Trap { frequencies: [trap.frequencies[0], trap.frequencies[1], 0.0], ..trap.clone() }, &p, 30.0, share);
+        assert!((held.energy - quantile(3.0, share) * kt).abs() <= 1e-12 * held.energy && (free.energy - quantile(2.5, share) * kt).abs() <= 1e-12 * free.energy, "the degrees are the trap's: {} and {}", held.energy / kt, free.energy / kt);
+        assert!((held.speed / (2.0 * model.hbar_over_mass * (1.0 / share).ln() * kt).sqrt() - 1.245).abs() < 0.001, "the reach's speed, 1.245 of the Boltzmann factor's level's");
+    }
+
     #[test]
     fn a_region_s_bounds_hold_over_its_cell_and_are_the_values_at_its_centre() {
         let model = lattice();

@@ -133,16 +133,18 @@ pub struct Envelope {
     pub weights: Vec<f64>,
 }
 
-/// The atoms' reach (SPEC §1.8): the sublevel set {(r, κ) : V_prep(r) + (ħ/m)κ²/2 − V_min ≤ ln(1/s) k_B T_r} of the prepared
-/// energy. Its extrema are provable bounds over its cells, made side by side (reach.rs, # A cell's sides); what it leaves
-/// out of the initial ensemble is counted on that ensemble (reach.rs `Model::left_out`).
+/// The atoms' reach (SPEC §1.8): the sublevel set {(r, κ) : V_prep(r) + (ħ/m)κ²/2 − V_min ≤ L k_B T_r} of the prepared
+/// energy, L the level a thermal ensemble's share s lies above (reach.rs, # The reach's level). Its extrema are provable
+/// bounds over its cells, made side by side (reach.rs, # A cell's sides); what it leaves out of the initial ensemble
+/// beyond that is counted on the ensemble (reach.rs `Model::left_out`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reach {
     /// T_r (µK): the temperature the atoms reach (never lowered; the solve's trials read it).
     pub temperature_uk: f64,
-    /// ln(1/s) k_B T_r (rad/µs), s the share the most trajectories of a solve leave unseen (SPEC §3): the energy above
-    /// V_min the reach holds, potential and kinetic together -- the level where the Boltzmann factor is s, not the level
-    /// that leaves the share s of the atoms out (reach.rs, # What the reach leaves out).
+    /// L k_B T_r (rad/µs): the energy above V_min the reach holds, potential and kinetic together -- the (1 − s) quantile
+    /// of a thermal atom's energy in the trap, s the share the most trajectories of a solve leave unseen (SPEC §3), over
+    /// the trap's quadratic degrees of freedom (reach.rs, # The reach's level: Q(3, L) = s, L = 12.89, where it holds
+    /// along three axes).
     pub energy: f64,
     /// V_min (rad/µs).
     pub minimum: f64,

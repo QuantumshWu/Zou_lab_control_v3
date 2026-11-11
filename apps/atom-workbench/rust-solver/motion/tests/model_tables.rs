@@ -133,7 +133,7 @@ fn a_table_follows_a_line_through_resonance_across_its_axis() {
 /// Light whose intensity is the same everywhere is no axis, on whatever cells its reach is cut (tabulate.rs, # Axes): the
 /// lin-perp-lin scene's lights of two counter-propagating plane waves of orthogonal polarizations, their dressings kept --
 /// each on its chart, as the solve's pilot keeps the cooling light's at four times the base intensity --, over a reach grown
-/// to 120 µK. Each chart's intensity is the same at every point, its weight nothing on the reach's first cell: the tables
+/// to 75 µK (its level, 12.89 k_B T, still below the trap's far value: a bounded reach). Each chart's intensity is the same at every point, its weight nothing on the reach's first cell: the tables
 /// are made, and no axis of theirs is an intensity but the tweezer's. (Bounded by the field's modulus along the two waves'
 /// phases, that weight's proof cut 8 million cells in 43 s and did not end.)
 #[test]
@@ -147,7 +147,7 @@ fn a_light_of_one_intensity_everywhere_is_no_axis() {
     let model = Model::new(&request, &light, &kept).unwrap();
     let p = alone(state);
     let trap = model.trap(&p, &model.prepared()).unwrap();
-    let reach = model.reach(&trap, &p, 120.0, unseen());
+    let reach = model.reach(&trap, &p, 75.0, unseen());
     let tables = model.tabulate(&reach, 1 << 16);
     let axes: Vec<Coordinate> = tables.tables.iter().flat_map(|t| t.layout.coordinates[..t.axes()].iter().copied()).collect();
     assert!(axes.iter().any(|c| matches!(c, Coordinate::Chart { index, .. } if *index > 0)), "a kept dressing's light is on its chart: {axes:?}");
