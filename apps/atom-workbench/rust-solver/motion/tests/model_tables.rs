@@ -96,7 +96,7 @@ fn a_table_follows_a_line_through_resonance_across_its_axis() {
     let cluster = model.cluster_of(state);
     let index = tables.tables.iter().position(|t| t.layout.cluster == cluster && t.layout.lights == model.running()).expect("a table for the running lights");
     let table = &tables.tables[index];
-    assert_eq!(table.axes(), 1, "{:?} {:?}", table.layout.coordinates, table.layout.weights);
+    assert_eq!(table.axes(), 1, "{:?}", table.layout.coordinates);
     assert!(matches!(table.layout.coordinates[0], Coordinate::Chart { index: 0, .. }), "the tweezer's intensity: {:?}", table.layout.coordinates[0]);
     // The light with a drive folded at the atom off: what the exact generator is compared with for that light's own size.
     let dark = Lights(model.running().0.iter().enumerate().map(|(f, l)| if kept.iter().any(|u| matches!(u, Unit::Bare { component, .. } if component.frequency == f)) { Lit::Off } else { *l }).collect());
@@ -191,7 +191,7 @@ fn a_table_is_the_elimination_to_its_interpolation_s_orders() {
     let cluster = model.cluster_of(7);
     let index = tables.tables.iter().position(|t| t.layout.cluster == cluster && t.layout.lights == model.running()).expect("a table for the running lights");
     let t = &tables.tables[index];
-    assert_eq!(t.axes(), 1, "{:?} {:?}", t.layout.coordinates, t.layout.weights);
+    assert_eq!(t.axes(), 1, "{:?}", t.layout.coordinates);
     assert!(matches!(t.layout.coordinates[0], Coordinate::Chart { index: 0, .. }), "the tweezer's intensity: {:?}", t.layout.coordinates[0]);
     let exact = Run::new(&model, p);
     let errors = |tables: &Tables| -> (f64, f64) {

@@ -1476,7 +1476,7 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
 }
 
 /// The jump of a trajectory at its state (SPEC §1.6): from `Stream::jump(seed, index, jumps + 1)` the next threshold, the
-/// class ∝ Σ_a‖u_a‖², the polarization across the direction by ‖Σ_a ε_a u_a‖², and the direction from the dipole pattern
+/// class ∝ Σ_a‖u_a‖² (`Photon::weight`), the polarization across the direction by ‖Σ_a ε_a u_a‖², and the direction from the dipole pattern
 /// tr G − n·Re(G)·n (at most tr G, as Re G ≥ 0) by exact rejection from the uniform sphere; then ψ ← f/‖f‖ on the landing
 /// cluster and κ += −k_φ n + s b, the emitted photon's recoil and the class's conditional mean of the absorbed momentum
 /// as far as one photon's goes (`Dynamics::kick`; module documentation, # The absorbed light's momentum) -- at most
@@ -1498,12 +1498,11 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
     let mut stream = Stream::jump(trajectory.seed, trajectory.index, j);
     let threshold = stream.open_uniform();
     let (mut class, mut polarization) = (stream.uniform(), stream.uniform());
-    let weight = |p: &Photon| -> f64 { p.amplitudes.iter().map(|u| norm_sqr(u)).sum() };
     let mut first = true;
     loop {
         let at = trajectory.point();
         let photons = model.photons(trajectory.cluster, &at, &trajectory.psi);
-        let total: f64 = photons.iter().map(weight).sum();
+        let total: f64 = photons.iter().map(Photon::weight).sum();
         if !(total > 0.0) {
             // A norm at its threshold with no photon to emit is refused; a bare state with none goes on as it is.
             if first {
@@ -1518,7 +1517,7 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
         trajectory.work += model.photon_work();
         let mut x = class * total;
         let mut pick = photons.len() - 1;
-        for (i, w) in photons.iter().map(weight).enumerate() {
+        for (i, w) in photons.iter().map(Photon::weight).enumerate() {
             if x < w {
                 pick = i;
                 break;

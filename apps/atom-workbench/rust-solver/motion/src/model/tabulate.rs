@@ -121,13 +121,12 @@ pub(crate) struct Polarization {
 }
 
 /// What one cluster's near table for one light set tabulates (module documentation): its coordinates, the axes first, their
-/// a-priori weights and their values at the focus, its carriers' units, and the cluster's plan under the lights (its near forms).
+/// values at the focus, its carriers' units, and the cluster's plan under the lights (its near forms).
 #[derive(Clone, Debug)]
 pub struct Layout {
     pub cluster: usize,
     pub lights: Lights,
     pub coordinates: Vec<Coordinate>,
-    pub weights: Vec<f64>,
     focus: Vec<f64>,
     polarizations: Vec<Vec<Polarization>>,
     plan: Arc<Plan>,
@@ -154,12 +153,10 @@ impl Layout {
     }
 }
 
-/// The near tables of a model (module documentation), the complex multiply-adds their nodes took, and k_BT_r of the reach they
-/// were made for (rad/µs).
+/// The near tables of a model (module documentation), and k_BT_r of the reach they were made for (rad/µs).
 #[derive(Clone, Debug)]
 pub struct Tables {
     pub tables: Vec<NearTable>,
-    pub work: f64,
     pub thermal: f64,
 }
 
@@ -175,7 +172,6 @@ pub(crate) fn shares() -> (f64, f64) {
 /// the populations, the larger of δ P_g and |ΔV|/k_BT_r on T); zero on the samples of other clusters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableRead {
-    pub table: usize,
     pub axes: Vec<Vec<UnitError>>,
     pub whole: Vec<UnitError>,
 }
@@ -275,10 +271,10 @@ impl Model {
         work
     }
 
-    /// The light at coordinate values x (module documentation, # A node): the far beams' amplitudes from each lit frequency's chart,
-    /// the near beams' from their units' intensities (a carrier with a coherent dressing: from its chart).
-    fn light_at(&self, lights: &Lights, coordinates: &[Coordinate], polarizations: &[Vec<Polarization>], x: &[f64]) -> (Vec<Amplitude>, Vec<Amplitude>) {
-        let mut far = vec![dark(); self.light.beams.len()];
+    /// The light at coordinate values x (module documentation, # A node): each lit frequency's beams' amplitudes from its chart,
+    /// a carrier's from its units' intensities (a carrier with a coherent dressing: from its chart).
+    fn light_at(&self, lights: &Lights, coordinates: &[Coordinate], polarizations: &[Vec<Polarization>], x: &[f64]) -> Vec<Amplitude> {
+        let mut near = vec![dark(); self.light.beams.len()];
         for (w, f) in self.light.frequencies.iter().enumerate() {
             if !lights.on(w) {
                 continue;
@@ -289,10 +285,9 @@ impl Model {
             let e = f.chart_field(&s);
             let components: Vec<C64> = f.basis.iter().map(|u| (0..3).map(|q| u[q].conj() * e[q]).sum()).collect();
             for (j, &l) in f.beams.iter().enumerate() {
-                far[l].value = components.iter().enumerate().map(|(k, &e)| f.dual(j, k) * e).sum();
+                near[l].value = components.iter().enumerate().map(|(k, &e)| f.dual(j, k) * e).sum();
             }
         }
-        let mut near = far.clone();
         for (d, cc) in self.carriers.iter().enumerate() {
             if !lights.on(cc.frequency) || polarizations[d].is_empty() {
                 continue;
@@ -306,20 +301,19 @@ impl Model {
                 }
             }
         }
-        (far, near)
+        near
     }
 
-    /// The near forms at coordinate values x into a node's reals (module documentation, # A node's reals), and the complex
-    /// multiply-adds that made them.
-    fn node(&self, layout: &Layout, x: &[f64], out: &mut [f64]) -> f64 {
+    /// The near forms at coordinate values x into a node's reals (module documentation, # A node's reals).
+    fn node(&self, layout: &Layout, x: &[f64], out: &mut [f64]) {
         let (lights, plan) = (&layout.lights, &layout.plan);
-        let (_, near) = self.light_at(lights, &layout.coordinates, &layout.polarizations, x);
+        let near = self.light_at(lights, &layout.coordinates, &layout.polarizations, x);
         let coherent = self.coherent_dressing();
         let h = self.far_hamiltonian(&near, lights, 0, &coherent);
         let r = self.eliminate(layout.cluster, &h, &near, lights, 0, &coherent);
         let energies = vec![(0..STATES).map(|s| h[0][(s, s)].re).collect::<Vec<f64>>()];
         let mut values = vec![C64::ZERO; plan.near.len()];
-        let work = self.forms(plan, &r, &energies, &mut values);
+        self.forms(plan, &r, &energies, &mut values);
         let (forms, point) = out.split_at_mut(2 * values.len());
         for (pair, z) in forms.chunks_mut(2).zip(&values) {
             pair.copy_from_slice(&[z.re, z.im]);
@@ -331,13 +325,6 @@ impl Model {
         let len = values.len();
         plan.decay(|at| if at < len { values[at] + plan.bare(at) } else { plan.constants[at - len] }, &mut vec![], generator);
         plan.lay_jumps(|at| values[at], jumps);
-        r.work + self.far_work(lights, 0, &coherent) + work
-    }
-
-    /// The complex multiply-adds of one node (the same at every node: the elimination's loops do not depend on the values).
-    fn node_work(&self, layout: &Layout) -> f64 {
-        let mut out = vec![0.0; layout.width()];
-        self.node(layout, &layout.focus, &mut out)
     }
 
     /// A near table's grid with axis f's spacing halved (crate::table `Axis::halved`), its nodes reused: the refinement's one step.
@@ -370,17 +357,14 @@ impl Model {
         let running = self.running();
         let mut untrapped = running.clone();
         untrapped.0[self.light.trap] = Lit::Off;
-        let mut out = Tables { tables: vec![], work: 0.0, thermal: crate::units::KT_PER_UK * reach.temperature_uk };
+        let mut out = Tables { tables: vec![], thermal: crate::units::KT_PER_UK * reach.temperature_uk };
         for cluster in 0..self.clusters.len() {
             for lights in [&running, &untrapped] {
                 if lights == &untrapped && !running.on(self.light.trap) {
                     continue;
                 }
                 if let Some(first) = self.first_table(cluster, lights, reach, most) {
-                    let nodes = Table::nodes(first.table.axes());
-                    let (table, more) = self.refined(first, reach, most);
-                    out.work += nodes as f64 * self.node_work(&table.layout) + more;
-                    out.tables.push(table);
+                    out.tables.push(self.refined(first, reach, most));
                 }
             }
         }
@@ -399,24 +383,20 @@ impl Model {
         ((at - moved).max(axis.lo), (at + moved).min(axis.hi))
     }
 
-    /// A table refined over the atoms' reach (module documentation, # Refinement), and the complex multiply-adds of its new
-    /// nodes.
-    fn refined(&self, mut table: NearTable, reach: &Reach, most: usize) -> (NearTable, f64) {
+    /// A table refined over the atoms' reach (module documentation, # Refinement).
+    fn refined(&self, mut table: NearTable, reach: &Reach, most: usize) -> NearTable {
         let d = table.axes();
         let ranges: Vec<(f64, f64)> = (0..d).map(|f| self.reach_range(&table.layout, f, reach)).collect();
         let (shown, temperature) = shares();
         let thermal = crate::units::KT_PER_UK * reach.temperature_uk;
-        let node = self.node_work(&table.layout);
-        let mut work = 0.0;
         let mut verified = vec![false; d];
         while let Some(f) = verified.iter().position(|v| !v) {
             let Some(finer) = self.halved(&table, f, most) else { break };
-            work += table.table.new_nodes(finer.axes()) as f64 * node;
             let (responses, potential) = self.halving_error(&table.layout, &table.table, &finer, f, &ranges, reach);
             verified[f] = 2.0 * responses <= shown.min(temperature) && potential <= temperature * thermal;
             table.table = finer;
         }
-        (table, work)
+        table
     }
 
     /// The error of a table against the one a halving of axis f finer, at the finer's new nodes over the reach's ranges (module
@@ -529,7 +509,6 @@ impl Model {
             cluster,
             lights: lights.clone(),
             coordinates: picked.iter().map(|&c| all[c]).collect(),
-            weights: picked.iter().map(|&c| weights[c]).collect(),
             focus: picked.iter().map(|&c| focus[c]).collect(),
             polarizations,
             plan,
@@ -552,7 +531,7 @@ impl Model {
             .collect();
         let coherent = self.coherent_dressing();
         let energies = |x: &[f64]| -> Vec<f64> {
-            let (_, near) = self.light_at(lights, coordinates, polarizations, x);
+            let near = self.light_at(lights, coordinates, polarizations, x);
             self.far_energies(&near, lights, 0, &coherent).0.swap_remove(0)
         };
         let at_focus = energies(focus);
@@ -712,8 +691,7 @@ impl Model {
         tables
             .tables
             .iter()
-            .enumerate()
-            .map(|(index, table)| {
+            .map(|table| {
                 let (d, plan) = (table.axes(), &table.layout.plan);
                 let (w, generator) = (table.table.width(), 2 * plan.near.len()..2 * plan.near.len() + plan.generator_start.len());
                 let mut axes = vec![vec![zero; samples.len()]; d];
@@ -737,7 +715,7 @@ impl Model {
                     let exact = self.middle_of(plan, sample.at.t, &amplitudes, Some(&self.near_exact(plan, &amplitudes, 1, &self.coherent_dressing())));
                     whole[k] = self.form_error(sample, &far, &self.action(sample, &exact), &ours, tables.thermal);
                 }
-                TableRead { table: index, axes, whole }
+                TableRead { axes, whole }
             })
             .collect()
     }
