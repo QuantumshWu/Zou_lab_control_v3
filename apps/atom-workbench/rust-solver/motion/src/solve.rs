@@ -809,10 +809,14 @@ fn attempt(
         // errors are their bounds, `Measured::means`) with the item's place for its unit and how it was booked, and the
         // unsampled share.
         let held: Vec<f64> = estimates.iter().map(|e| 1. - e.loss).collect();
-        let weighed = |u: usize, k: usize| -> f64 { if held[k] > 0. { means[k][u][0].max(means[k][u][1]) * held[k] } else { 0. } };
-        for (u, unit) in units.iter().enumerate() {
-            let action = if matches!(booking[u], Booked::Read(_)) { FOLD_MEASURED } else { FOLD_BOUNDED };
-            context.ledger.item(&model.label(unit), (1..outputs).map(|k| weighed(u, k)).fold(0., f64::max), action);
+        let mut largest = vec![0.0_f64; units.len()];
+        for k in (1..outputs).filter(|&k| held[k] > 0.) {
+            for (most, m) in largest.iter_mut().zip(&means[k]) {
+                *most = most.max(m[0].max(m[1]) * held[k]);
+            }
+        }
+        for ((unit, most), how) in units.iter().zip(largest).zip(&booking) {
+            context.ledger.item(&model.label(unit), most, if matches!(how, Booked::Read(_)) { FOLD_MEASURED } else { FOLD_BOUNDED });
         }
         context.ledger.item("可达范围之外的初始原子份额", unsampled[0], "按初始系综计数（Wilson 远端），计入布居的模型误差");
         context.ledger.item("可达范围之外的初始原子的动能份额", unsampled[1], "按初始系综计数，计入 T 的模型误差");
@@ -2026,8 +2030,9 @@ mod tests {
     /// Three units, the second booked at its bound 1e-5; two groups, output 1 read in both, output 2 in the first
     /// alone, output 3 in neither. A read unit's error is the mean over the states of the output, of the first group's
     /// with the second left out, and its bound (1, none) where no state is read; the bounded unit's is its bound
-    /// everywhere. The sums add what the reach leaves out; a read unit leaves a sum by subtraction, and where it was not
-    /// read the others' bounds stand on T (alone, what the reach leaves out), and its population's bound leaves as a read one.
+    /// everywhere. The sums add what the reach leaves out; a read unit leaves a sum by subtraction; where it was not
+    /// read, its population's bound leaves as a read error does, and on T the others' bounds stand -- alone, what the
+    /// reach leaves out.
     #[test]
     fn the_states_errors_are_the_outputs_means_and_sums() {
         let e = |population: f64, temperature: f64| UnitError { parameter: 0., population, temperature };
