@@ -972,25 +972,27 @@ fn attempt(
         // The tables' errors (SPEC §5.4): each table's whole error against the elimination itself, its mean over the
         // run's held states read at one state of every pilot trajectory (`one_each`, `over_the_run`) -- a state on another
         // cluster reads none of it. A table
-        // beyond the tables' shares has the axis of its largest read halved and is read again, until it is within them or
-        // its next grid would exceed the work's bound; what it reads then is booked on every output, and flagged where it
-        // still lies beyond.
+        // beyond the tables' shares has the axis of its largest read halved and is read again, until it is within them,
+        // or it has no axis to halve (its coordinates all held at the focus: model/tabulate.rs, # Axes), or its next
+        // grid would exceed the work's bound; what it reads then is booked on every output, and flagged where it still
+        // lies beyond -- with which of the two ended its refinement (`Stuck`).
         let read_at = one_each(&pilot);
         let (shown_share, temperature_share) = crate::model::tabulate::shares();
         drop(run);
-        let mut stuck = vec![false; tables.tables.len()];
+        let mut stuck: Vec<Option<Stuck>> = vec![None; tables.tables.len()];
         let booked = loop {
             let reads: Vec<Vec<crate::model::tabulate::TableRead>> = read_at.par_iter().map(|pick| model.table_reads(&tables, std::slice::from_ref(&pick.state.sample))).collect();
             let mean = |f: &dyn Fn(&crate::model::tabulate::TableRead) -> f64, t: usize| over_the_run(&read_at, reads.iter().map(|r| f(&r[t])), None);
             let whole: Vec<[f64; 2]> = (0..tables.tables.len()).map(|t| [mean(&|r| r.whole[0].population, t), mean(&|r| r.whole[0].temperature, t)]).collect();
-            let beyond = (0..whole.len()).find(|&t| !stuck[t] && (whole[t][0] > shown_share || whole[t][1] > temperature_share));
+            let beyond = (0..whole.len()).find(|&t| stuck[t].is_none() && (whole[t][0] > shown_share || whole[t][1] > temperature_share));
             let Some(t) = beyond else { break whole };
             let axes = tables.tables[t].axes();
             let weight = |f: usize| mean(&|r| r.axes[f][0].population / shown_share + r.axes[f][0].temperature / temperature_share, t);
             let worst = (0..axes).max_by(|&a, &b| weight(a).total_cmp(&weight(b)));
-            match worst.and_then(|f| model.halved(&tables.tables[t], f, most)) {
-                Some(finer) => tables.tables[t].table = finer,
-                None => stuck[t] = true,
+            match worst.map(|f| model.halved(&tables.tables[t], f, most)) {
+                Some(Some(finer)) => tables.tables[t].table = finer,
+                Some(None) => stuck[t] = Some(Stuck::Work),
+                None => stuck[t] = Some(Stuck::Axes),
             }
         };
         for (t, table) in tables.tables.iter().enumerate() {
@@ -1003,8 +1005,10 @@ fn attempt(
                 context.fixed.model[k] = [(context.fixed.model[k][0] + booked[t][0]).min(1.), context.fixed.model[k][1] + booked[t][1]];
             }
             context.ledger.item(&label, booked[t][0].max(booked[t][1]), TABLE_MEASURED);
-            if stuck[t] {
-                context.ledger.flag(format!("{label}的误差超出表的份额，而加密已到工作量的界：按实测记账"));
+            match stuck[t] {
+                Some(Stuck::Work) => context.ledger.flag(format!("{label}的误差超出表的份额，而再加密一档的网格就超过工作量的界（{most} 个节点）：按实测记账")),
+                Some(Stuck::Axes) => context.ledger.flag(format!("{label}的误差超出表的份额，而它没有可加密的轴（它依赖的坐标都取在焦点处的值上）：按实测记账")),
+                None => {}
             }
         }
         // The step's check (module documentation, # The step): the clear part of the pilot's difference into the
@@ -1048,6 +1052,14 @@ fn attempt(
         context.ledger.flag("准备势在所取阱底之外还有更深的地方：初始系综按该阱底的深度封顶".into());
     }
     Ok(Attempt::Done(assemble(&context, &e, &l, &c, parts.len() as u64 * GROUP)))
+}
+
+/// Why a table beyond the tables' shares is refined no further (`attempt`): the grid with its worst axis halved would
+/// hold more nodes than the work's bound allows; or the table has no axis -- nothing to halve.
+#[derive(Clone, Copy)]
+enum Stuck {
+    Work,
+    Axes,
 }
 
 /// The flag of a step whose error lies clearly beyond what it may take at the steps' cap (module documentation, # The
