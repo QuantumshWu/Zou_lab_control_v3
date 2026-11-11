@@ -2122,8 +2122,8 @@ impl crate::step::Middle for Middle<'_> {
             let span = term.first..term.first + term.len;
             axpy(of.1[term.flag] * phases[term.tone], real, imaginary, &mut re[span.clone()], &mut im[span]);
         }
-        for (place, z) in h.data.iter_mut().enumerate() {
-            *z = C64::new(re[place], im[place]);
+        for (z, (re, im)) in h.data.iter_mut().zip(re.iter().zip(im.iter())) {
+            *z = C64::new(*re, *im);
         }
         if path.turning {
             for x in 0..n {
@@ -2229,9 +2229,11 @@ impl Middle<'_> {
         weights.clear();
         weights.resize(2 * plan.padded, 0.0);
         let (re, im) = weights.split_at_mut(plan.padded);
-        for place in 0..n * n {
-            let w = rho[(place % n) * n + place / n] * turns[place / n] * turns[place % n].conj();
-            (re[place], im[place]) = (w.re, w.im);
+        for (x, (re, im)) in re[..n * n].chunks_exact_mut(n).zip(im[..n * n].chunks_exact_mut(n)).enumerate() {
+            for (y, (re, im)) in re.iter_mut().zip(im.iter_mut()).enumerate() {
+                let w = rho[y * n + x] * turns[x] * turns[y].conj();
+                (*re, *im) = (w.re, w.im);
+            }
         }
         sums.clear();
         sums.resize(if on.is_some() { 1 } else { plan.tones.len() }, [0.0; 3]);

@@ -651,6 +651,11 @@ pub fn eigen(a: &Mat) -> Option<Eigen> {
 }
 
 impl Eigen {
+    /// R column by column (its transpose row by row): a product's right factor as `combine` takes its weights.
+    pub fn columns(&self) -> &[C64] {
+        &self.columns[2]
+    }
+
     /// The eigendecomposition of a general complex matrix: Householder reduction to Hessenberg form; the single-shift
     /// implicit QR iteration to the complex Schur form T = Q†AQ, with Wilkinson shifts (an exceptional shift every tenth
     /// iteration) and deflation where a subdiagonal entry is within the precision of its two diagonal neighbours (LAPACK

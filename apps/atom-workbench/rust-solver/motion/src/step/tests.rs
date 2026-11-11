@@ -1443,6 +1443,48 @@ fn microseconds<const N: usize>(items: usize, mut passes: [&mut dyn FnMut() -> f
     least.map(|t| 1e6 * t / items as f64)
 }
 
+/// The densities' sums are made lane by lane with fused multiply-adds (`step::accumulate`). They are the plain sums
+/// Σ_k w_jk x_a x_b*/⟨x|x⟩ within the rounding of the operations between the two: a term's five in the lanes (the
+/// norm's reciprocal, the row's multiple by it, the fused product's two, the weight's fused one) and its five in the
+/// plain sum, and the K terms' additions each way: γ(2K + 10) of Σ_k |w_jk| |x_a| |x_b|/⟨x|x⟩, entry by entry, for one
+/// sum and for three, on 1 to 13 states. And a sum is Hermitian as `step::whole` gives it: its entries below the
+/// diagonal the conjugates of those above, exactly.
+#[test]
+fn the_densities_sums_are_the_plain_sums_within_their_rounding() {
+    use crate::linalg::LANES;
+    use crate::units::rounding;
+    let mut worst = 0.0_f64;
+    for n in [1_usize, 3, 4, 5, 13] {
+        for count in [1, 3] {
+            let states: Vec<Vec<C64>> = (0..7).map(|k| (0..n).map(|a| C64::cis(0.7 * a as f64 + 1.3 * k as f64) * (0.2 + 0.1 * ((a + 2 * k) % 5) as f64)).collect()).collect();
+            let weights: Vec<[f64; 3]> = (0..7).map(|k| [0.3 - 0.11 * k as f64, 0.05 * k as f64, -0.2 + 0.07 * k as f64]).collect();
+            let mut sums = vec![0.0; count * 2 * n * n.div_ceil(LANES) * LANES];
+            for (x, w) in states.iter().zip(&weights) {
+                super::accumulate(x, &w[..count], &mut sums);
+            }
+            let mut sum = vec![C64::ZERO; n * n];
+            for j in 0..count {
+                super::whole(&sums, j, n, &mut sum);
+                for a in 0..n {
+                    for b in 0..n {
+                        let (mut plain, mut scale) = (C64::ZERO, 0.0);
+                        for (x, w) in states.iter().zip(&weights) {
+                            let norm = x.iter().map(|z| z.norm_sqr()).sum::<f64>();
+                            plain += x[a] * x[b].conj() * (w[j] / norm);
+                            scale += w[j].abs() * x[a].abs() * x[b].abs() / norm;
+                        }
+                        let (apart, bound) = ((sum[a * n + b] - plain).abs(), rounding(2 * states.len() + 10) * scale);
+                        assert!(apart <= bound, "{n} states, sum {j} of {count}, entry ({a}, {b}): {apart:e} against {bound:e}");
+                        assert!(a == b || sum[b * n + a] == sum[a * n + b].conj(), "{n} states, sum {j} of {count}: ({a}, {b}) against its mirror");
+                        worst = worst.max(apart / bound);
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("the densities' sums: within {worst:.3} of their rounding's bound");
+}
+
 /// The harness's yardstick: 1024 complex multiply-adds (an 8 × 8 matrix on a vector, sixteen times). Timed in turn with a
 /// case's passes it tells the machine's pace while they ran -- another core or a lower clock under the machine's other
 /// work scales every pass alike, by a factor of two and more from one run to the next --, by which runs compare.
