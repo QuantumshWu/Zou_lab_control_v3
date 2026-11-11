@@ -19,10 +19,12 @@
 //!
 //! # The step (SPEC §2.2)
 //! One step τ for the run (adapt.rs). The ladder's rungs are the output interval over powers of two. A step is
-//! admissible where its nodes resolve what the scheme samples along an atom's path (`top_rung`): the reference flow,
+//! admissible where its nodes resolve what the scheme samples along an atom's path (`admissible`): the reference flow,
 //! ω τ < π at the prepared trap's largest frequency; and the generator, whose change along the path the propagation
 //! reads at nodes half a step apart, (|Ω| + |K| v) τ/2 < π for every residual beat Ω and wave vector K of the model's
-//! entries at the largest speed v of the reach the model is judged over. The top rung is the largest that is.
+//! entries at an atom's speed v. The ladder begins at the largest rung that is admissible for the run and whose double
+//! is for the companion (`first_rung`): the run's step at the largest speed of the reach the model is judged over; the
+//! companion's at the reach's rms speed.
 //!
 //! The step's convergence is checked on the pilot, as a refinement is checked by hand: the pilot's trajectories run at
 //! τ and, the same trajectory numbers -- the same initial atoms, the same jumps' draws by their number, the same
@@ -31,8 +33,8 @@
 //! for the loss, for each row as shown and for T on each lab axis, each carried to the outputs by the dynamics itself.
 //! The step's error is a smooth function of the time, and one question whatever the number of outputs.
 //!
-//! - The first rung is the rung below the top one: its companion at 2τ is then itself admissible -- a comparison of two
-//!   levels says something only where the coarser one still resolves what the scheme samples.
+//! - A comparison of two levels says something only where the coarser one still resolves what the scheme samples: the
+//!   first rung's double is admissible for the typical atom, and stable for every atom.
 //! - The screen (`screen`, `settle`), on the scout and on the pilot: the step is halved while some average lies clearly
 //!   beyond the step's share among the family's few looks (decide.rs `judge`); the level at τ becomes the companion and
 //!   only τ/2 is run anew. Down to the step at which a trajectory would take `MOST_STEPS` steps, where the step stands
@@ -317,24 +319,42 @@ impl Well for Prepared<'_> {
     }
 }
 
-/// The ladder's top rung (module documentation, # The step): the output interval over the least power of two at which
-/// the step's nodes resolve what the scheme samples along an atom's path.
+/// Whether a step is admissible for an atom of a speed (module documentation, # The step): its nodes resolve what the
+/// scheme samples along the atom's path.
 /// - The reference flow, at the prepared trap's largest frequency ω (rad/µs): ω τ < π -- there the two half flows of a
-///   step turn the motion by π and any kick between them grows.
+///   step turn the motion by π and any kick between them grows. The same for every atom.
 /// - The generator: the propagation reads its change along the path at three nodes, the step's middle and its two
 ///   ends (step.rs, # The kick), τ/2 apart, and takes it for the parabola through them. An entry that turns at the rate
 ///   ρ along the path -- its residual beat Ω in the cluster's frames and its residual wave vector K at the atom's
 ///   velocity, ρ = |Ω + K·v| ≤ |Ω| + |K| v (`sampled`: the model's own entries, per beat the largest |K|) -- advances by
-///   ρ τ/2 from node to node; at π the nodes read it as its alias, and two steps one of which is beyond that agree or
-///   differ for no reason of the step. So (|Ω| + |K| v) τ/2 < π for every entry, at the largest speed v of the reach
-///   the model is judged over (model.rs `Reach::speed`): one domain for the model's folds and for the step.
-fn top_rung(interval: f64, frequency: f64, sampled: &[[f64; 2]], speed: f64) -> f64 {
-    let turn = sampled.iter().map(|[beat, wave]| beat + wave * speed).fold(0., f64::max);
-    let mut tau = interval;
-    while frequency * tau >= PI || 0.5 * turn * tau >= PI {
+///   ρ τ/2 from node to node; at π the nodes read it as its alias. So (|Ω| + |K| v) τ/2 < π for every entry.
+fn admissible(tau: f64, frequency: f64, sampled: &[[f64; 2]], speed: f64) -> bool {
+    frequency * tau < PI && sampled.iter().all(|[beat, wave]| 0.5 * (beat + wave * speed) * tau < PI)
+}
+
+/// The ladder's first rung (module documentation, # The step): the largest rung -- the output interval over a power of
+/// two -- that is admissible for the run and whose double is admissible for the companion (`admissible`), at the speeds
+/// `fastest` and `typical` (µm/µs) of the reach the model is judged over.
+/// - The run's step is the result's: it is admissible for every atom the model is judged for, at the reach's largest
+///   speed (model.rs `Reach::speed`) -- one domain for the model's folds and for the step.
+/// - The companion at twice the step is a probe of the step, not a result: it must be stable, which the trap's
+///   resonance decides for every atom alike, and resolve the light for the typical atom, at the reach's rms speed
+///   (`typical_speed`) -- two steps one of which reads the light's alias at most atoms agree or differ for no reason of
+///   the step, while the few fastest atoms beyond its limit weigh in the difference by their share.
+/// Where the trap's resonance binds, the first rung is the rung below the largest stable one. Half the output interval
+/// at the most: the companion's step is a rung itself, and no step crosses an output.
+fn first_rung(interval: f64, frequency: f64, sampled: &[[f64; 2]], fastest: f64, typical: f64) -> f64 {
+    let mut tau = 0.5 * interval;
+    while !(admissible(tau, frequency, sampled, fastest) && admissible(2. * tau, frequency, sampled, typical)) {
         tau *= 0.5;
     }
     tau
+}
+
+/// The rms speed (µm/µs) of atoms at the temperature T (µK): √(3 (ħ/m) k_BT/ħ), the reach's typical atom at the
+/// reach's own temperature.
+fn typical_speed(hbar_over_mass: f64, temperature_uk: f64) -> f64 {
+    (3. * hbar_over_mass * KT_PER_UK * temperature_uk).sqrt()
 }
 
 /// The outputs each lab axis's T is averaged over between the pilot's levels (estimate.rs `between`), and the axes
@@ -605,15 +625,15 @@ fn attempt(
     // reference flow's, SPEC §2.1), so the quadrature costs no more than the pilot the solve has just run, in any trap;
     // where that budget ends it before its levels agree, their difference is T(0)'s booked error (`Fixed::start`).
     let (momentum, start) = exact(&ensemble.kinetic(0));
-    // The ladder's top rung over the reach the model is judged over, and the first rung below it: an attempt that begins
-    // at the step the one before stood at begins no higher than that (a reach that has grown lowers the top).
-    let top = top_rung(plan.times[1] - plan.times[0], trap.frequencies.iter().copied().fold(0., f64::max), &model.sampled(&model.running()), judged.speed);
+    // The ladder's first rung over the reach the model is judged over: an attempt that begins at the step the one
+    // before stood at begins no higher than its own first rung (a reach that has grown lowers it).
+    let first_rung = first_rung(plan.times[1] - plan.times[0], trap.frequencies.iter().copied().fold(0., f64::max), &model.sampled(&model.running()), judged.speed, typical_speed(hm, judged.temperature_uk));
     let mut context = Context {
         momentum,
         fixed: Fixed { model: vec![[0.; 2]; outputs], temperature: vec![[false; 3]; outputs], start },
         step: vec![Bound::share(); outputs],
         checked: None,
-        tau: step.map_or(halved(top, 1.), |step| step.min(halved(top, 1.))),
+        tau: step.map_or(first_rung, |step| step.min(first_rung)),
         plan,
         scales,
         initial: row,
@@ -1664,28 +1684,39 @@ mod tests {
         assert!(n % GROUP == 0 && unseen(n as f64) <= room && unseen((n - GROUP) as f64) > room, "{n}");
     }
 
-    /// The ladder's top rung: the output interval over the least power of two at which the step's nodes resolve what the
-    /// scheme samples.
-    /// - The reference flow alone (no light sampled): below the resonance ω τ = π -- of a 10 µs interval, 5 µs at a
-    ///   tweezer's 74.65 kHz (π/ω = 6.7 µs) and 0.3125 µs at a lattice's 910.7 kHz (0.55 µs); the interval itself in a
-    ///   slow trap.
-    /// - The light: a standing wave of the D2 line (|K| = 2k = 16.1 /µm) crossed at 0.218 µm/µs -- the reach's speed at
-    ///   30 µK, √(2 ln(1/s) k_BT/m) with the unsampled share s of 2¹⁴ trajectories -- turns at 3.51 rad/µs: τ < 2π/3.51 =
-    ///   1.79 µs, the rung 1.25 µs of a 10 µs interval where the trap alone would give 5 µs. A heavier, colder atom at
-    ///   0.0089 µm/µs leaves the trap's rung. A residual beat counts with the motion, |Ω| + |K| v: 2 rad/µs more take
-    ///   the rung to 0.625 µs. The largest entry decides, whichever its part: a beat of 12 rad/µs alone, 0.3125 µs.
+    /// The ladder's first rung: the largest rung admissible for the run at the reach's largest speed whose double is
+    /// admissible for the companion at the reach's rms speed.
+    /// - Where the trap's resonance binds it is the rung below the largest stable one: of a 10 µs interval, 2.5 µs at a
+    ///   tweezer's 74.65 kHz (π/ω = 6.7 µs: 5 µs is stable, its double is not) and 0.15625 µs at a lattice's 910.7 kHz
+    ///   (0.55 µs); half the interval in a slow trap (the companion is one step an interval).
+    /// - The light: a standing wave of the D2 line (|K| = 2k = 16.1 /µm) at the reach of 30 µK -- its largest speed
+    ///   0.2185 µm/µs, √(2 ln(1/s) k_BT/m) with the unsampled share s of 2¹⁴ trajectories, its rms speed 0.0928 µm/µs --
+    ///   lets the run's step be below 2π/(K v) = 1.79 µs and the companion's below 4.20 µs: the first rung is 1.25 µs,
+    ///   its companion 2.5 µs. With the largest residual wave vector √10 k of six beams' cooling, 1.13 µs and 2.66 µs:
+    ///   0.625 µs with its companion at 1.25 µs -- the rung below 1.25 µs only because 1.25 µs itself is beyond the
+    ///   run's limit, not by a second halving. At 141 µK (0.473 and 0.201 µm/µs) the standing wave gives 0.82 µs and
+    ///   1.94 µs: 0.625 µs. A heavier, colder atom at 0.0089 µm/µs leaves the trap's rung.
+    /// - A residual beat counts with the motion at both levels, |Ω| + |K| v.
     #[test]
-    fn the_top_rung_resolves_the_trap_and_the_light() {
+    fn the_first_rung_is_admissible_and_its_double_is_for_the_typical_atom() {
         let khz = |f: f64| std::f64::consts::TAU * f * 1e-3;
-        assert_eq!(top_rung(10., khz(74.65), &[], 0.218), 5.);
-        assert_eq!(top_rung(10., khz(910.7), &[[0., 16.1]], 0.218), 0.3125);
-        assert_eq!(top_rung(10., khz(1.), &[[0., 0.]], 0.218), 10.);
-        let speed = (2. * (MOST_TRAJECTORIES as f64 / (CONFIDENCE * CONFIDENCE) + 1.).ln() * KT_PER_UK * 30. * hbar_over_mass(1.4432e-25)).sqrt();
-        assert!((speed - 0.2185).abs() < 5e-4 && (TAU / (16.1 * speed) - 1.79).abs() < 5e-3, "{speed}");
-        assert_eq!(top_rung(10., khz(74.65), &[[0., 16.1]], speed), 1.25);
-        assert_eq!(top_rung(10., khz(74.65), &[[0., 16.1]], 0.0089), 5.);
-        assert_eq!(top_rung(10., khz(74.65), &[[0., 0.], [2., 16.1], [0.5, 8.]], speed), 0.625);
-        assert_eq!(top_rung(10., khz(74.65), &[[12., 0.], [0., 16.1]], speed), 0.3125);
+        let hm = hbar_over_mass(1.4432e-25);
+        let fastest = |t: f64| (2. * (MOST_TRAJECTORIES as f64 / (CONFIDENCE * CONFIDENCE) + 1.).ln() * KT_PER_UK * t * hm).sqrt();
+        let (fast, typical) = (fastest(30.), typical_speed(hm, 30.));
+        assert!((fast - 0.2185).abs() < 5e-4 && (typical - 0.0928).abs() < 5e-4, "{fast} {typical}");
+        assert_eq!(first_rung(10., khz(74.65), &[], fast, typical), 2.5);
+        assert_eq!(first_rung(10., khz(910.7), &[[0., 16.1]], fast, typical), 0.15625);
+        assert_eq!(first_rung(10., khz(1.), &[[0., 0.]], fast, typical), 5.);
+        assert!((TAU / (16.1 * fast) - 1.79).abs() < 5e-3 && (TAU / (16.1 * typical) - 4.20).abs() < 1e-2);
+        assert_eq!(first_rung(10., khz(74.65), &[[0., 16.1]], fast, typical), 1.25);
+        let k = 16.106 / 2. * 10f64.sqrt();
+        assert!((TAU / (k * fast) - 1.13).abs() < 5e-3 && (TAU / (k * typical) - 2.66).abs() < 1e-2);
+        assert_eq!(first_rung(10., khz(100.), &[[0., k]], fast, typical), 0.625);
+        assert_eq!(first_rung(20., khz(79.), &[[0., 16.1]], fastest(141.), typical_speed(hm, 141.)), 0.625);
+        assert_eq!(first_rung(16., khz(20.3), &[[0., 32.2]], fast, typical), 0.5);
+        assert_eq!(first_rung(10., khz(74.65), &[[0., 16.1]], 0.0089, 0.0038), 2.5);
+        assert_eq!(first_rung(10., khz(74.65), &[[0., 0.], [2., 16.1], [0.5, 8.]], fast, typical), 0.625);
+        assert!(admissible(1.25, khz(74.65), &[[0., 16.1]], fast) && !admissible(2.5, khz(74.65), &[[0., 16.1]], fast) && admissible(2.5, khz(74.65), &[[0., 16.1]], typical));
     }
 
     /// The screen's outcomes on the run's averages between two levels (unlimited groups: one look's interval is z of
