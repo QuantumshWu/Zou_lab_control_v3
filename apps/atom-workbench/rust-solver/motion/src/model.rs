@@ -141,10 +141,15 @@ pub struct Envelope {
 pub struct Reach {
     /// T_r (µK): the temperature the atoms reach (never lowered; the solve's trials read it).
     pub temperature_uk: f64,
+    /// The kinetic temperature (µK) along each principal axis of the trap of the ensemble the reach is made for,
+    /// s_i² T_r with the Wigner factor's s_i² = x_i coth x_i, x_i = ħω_i/2k_BT_r (reach.rs, # The reach's level): T_r
+    /// where ħω_i ≪ k_BT_r, the zero point's ħω_i/2k_B where it is cold. Their mean is the ensemble's rms speed's
+    /// temperature, their largest what no lab axis's T exceeds while the atoms are the ensemble's.
+    pub kinetic_uk: [f64; 3],
     /// L k_B T_r (rad/µs): the energy above V_min the reach holds, potential and kinetic together -- the (1 − s) quantile
-    /// of a thermal atom's energy in the trap, s the share the most trajectories of a solve leave unseen (SPEC §3), over
-    /// the trap's quadratic degrees of freedom (reach.rs, # The reach's level: Q(3, L) = s, L = 12.89, where it holds
-    /// along three axes).
+    /// of an atom's energy in the ensemble as drawn at T_r, s the share the most trajectories of a solve leave unseen
+    /// (SPEC §3; reach.rs, # The reach's level: classically Q(3, L) = s, L = 12.89, where the trap holds along three
+    /// axes).
     pub energy: f64,
     /// V_min (rad/µs).
     pub minimum: f64,

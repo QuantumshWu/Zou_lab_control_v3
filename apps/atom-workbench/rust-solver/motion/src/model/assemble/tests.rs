@@ -121,7 +121,7 @@ struct Written {
 /// - per pair of frequencies −½(V'†R̃ + R̃'†V) on the ground places whose beat the frames or a kept unit hold, V = Σ_k e_k U^f_k
 ///   a frequency's every folded coupling and R̃ = Σ_k (e_k T_k − ẽ_k T2_k) its response at the atom of the elimination at the
 ///   middle, in the levels its dressings make there (`Model::far_hamiltonian`; none where it is no carrier); the explicit states' van Vleck shift by the drives folded at the atom, each its own
-///   denominator against the other leg's folded coupling; the explicit drives Σ_k e_k U_k and their adjoints;
+///   denominator at the energy its cluster's ground states read the state at against the other leg's folded coupling; the explicit drives Σ_k e_k U_k and their adjoints;
 /// - the decay −(i/2) Σ_φ Σ_a J_{a,φ}†J_{a,φ}, a class's jump the sum of its members' -- a component's bare drives'
 ///   e_k J_{a,k} (e_k* counter-rotating), a carrier's C_a R̃ with its own bare drives' e_k J_{a,k}, an explicit state's
 ///   −C_a --, each at its relative beat;
@@ -225,14 +225,20 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
             for y in g..n {
                 let (e, f) = (c.states[x], c.states[y]);
                 let sum = (0..GROUND).fold(NONE, |sum, b| {
-                    let half = |state: usize| -> Jet {
-                        let mut gap: Vec<f64> = far.iter().map(|part| part[(state, state)].re - part[(b, b)].re).collect();
-                        gap[0] -= cc.detuning;
+                    // An explicit state is read by its cluster's ground states (far.rs, # A fold onto an explicit state): at
+                    // its frame θ and their mean energy in theirs, z = θ + ⟨E_a − θ_a⟩_a -- the two-photon distance from b.
+                    let half = |place: usize| -> Jet {
+                        let frame = |p: usize| model.omega(&c.frames[p]);
+                        let mut gap: Vec<f64> = far.iter().map(|part| (0..g).map(|a| part[(c.states[a], c.states[a])].re).sum::<f64>() / g as f64 - part[(b, b)].re).collect();
+                        gap[0] += frame(place) - (0..g).map(frame).sum::<f64>() / g as f64 - cc.detuning;
                         let reciprocal = jet::reciprocal(&gap);
                         std::array::from_fn(|part| real(0.5 * reciprocal[part]))
                     };
-                    let right = times(times(at_the_atom(e, b), conjugate(folded(w, f, b))), half(e));
-                    let left = times(times(folded(w, e, b), conjugate(at_the_atom(f, b))), half(f));
+                    // A half whose couplings are nothing is no term (a kept drive's own ground state is at no distance
+                    // from itself, and it is not folded).
+                    let term = |couplings: Jet, place: usize| if couplings == NONE { NONE } else { times(couplings, half(place)) };
+                    let right = term(times(at_the_atom(e, b), conjugate(folded(w, f, b))), x);
+                    let left = term(times(folded(w, e, b), conjugate(at_the_atom(f, b))), y);
                     plus(sum, plus(right, left))
                 });
                 add(x, y, scaled(sum, phase(&zero, x, y)));
