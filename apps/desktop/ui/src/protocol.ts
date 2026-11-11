@@ -1,6 +1,7 @@
 // The wire: commands the window sends on the bus and the accepted state it
 // is told.  Every UI action is one of these commands; the window keeps no
 // state of its own beyond drafts, focus and which page it shows.
+import type { LogicRow } from "./workbench.js";
 import type { FieldSpec } from "./fluent/index.js";
 export type { Value } from "./fluent/index.js";
 
@@ -10,7 +11,13 @@ export type Axis = Readonly<{ bounds: readonly [number, number, number, number];
 /** `bound`: where a live panel's Window (its binding's row) stands among the display rows. */
 export type Control = FieldSpec & { section: "binding" | "semantic" | "display" | "board"; bound?: boolean };
 export type Signal = { id: string; label: string; available: boolean; reason?: string };
-export type PlotKind = { id: string; label: string };
+/** A plot kind as the plotting owner states it: `board` its place among the kinds a board
+ * offers for a new panel (null: none adds it), `overlay` whether a panel of it is drawn with
+ * a chosen judgement, `default_window` the shots a new panel of it reads. */
+export type PlotKind = { id: string; label: string; board?: number | null; overlay?: boolean; default_window?: number };
+/** The kinds a board offers, in the order the plotting owner gives them (the live board's and the Figure Viewer's). */
+export const boardKinds = (kinds: readonly PlotKind[]): PlotKind[] =>
+  kinds.filter(kind => typeof kind.board === "number").sort((left, right) => left.board! - right.board!);
 export type Panel = {
   id: string;
   title: string;
@@ -47,7 +54,11 @@ export type State = {
   plot_kinds?: PlotKind[];
   acquisition?: { state: "idle" | "starting" | "running" | "stopping" | "stopped" | "error"; produced?: number; error?: string };
   /** The Figure Viewer's own document: the opened archive, its panels and the Data it offers. */
-  viewer?: { document: { path: string; title: string; info?: unknown; flow?: unknown }; panels: Panel[]; signals: Signal[]; plot_kinds?: PlotKind[]; error?: string | null };
+  viewer?: { document: { path: string; title: string }; panels: Panel[]; signals: Signal[]; plot_kinds?: PlotKind[]; error?: string | null;
+    /** Its processors' rows (the same as a Logic page's), and the types its chooser offers. */
+    logic?: LogicRow[]; processor_types?: { type_id: string; label: string; description: string }[] };
+  /** Its Figure's record (info pane tabs and Flow); sent only when it changes. */
+  record?: { info?: unknown; flow?: unknown };
   error?: string;
   busy?: boolean;
   message?: string;

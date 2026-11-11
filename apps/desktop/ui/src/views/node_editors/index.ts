@@ -95,10 +95,13 @@ export class NodeEditors {
 
   /** Each editor handed the row.  A state push that changes nothing an editor draws costs it
    * nothing: its model, the lock, the node's name and the fields it manages (an edit of another
-   * field leaves it as it is).  True when any editor drew anew. */
+   * field leaves it as it is).  A model still of an older draft draws nothing where the editor
+   * already stands: it would put back what the operator has just changed until the answer comes.
+   * True when any editor drew anew. */
   update(row: LogicRow, locked: string): boolean {
     let drew = false;
     for (const editor of this.drawn) {
+      if (row.editor_facts_pending && editor.key) continue;
       const fields = editor.facts.manages.map(name => [row.values[name], row.controls.find(control => control.name === name)]);
       const key = JSON.stringify([editor.facts, locked, row.node_id, row.type_id, row.name, fields, editor.view.contextKey?.(row)]);
       if (key === editor.key) continue;

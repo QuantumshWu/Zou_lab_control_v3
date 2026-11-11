@@ -60,6 +60,8 @@ export type TunableField = WorkbenchControl & {
   /** The row at rest: Ready, Protected, Stands outside its bounds. */
   status: string;
   severity: "idle" | "warning";
+  /** Read in the unit the apparatus keeps for it (the operator's pick, saved with the apparatus). */
+  unit_kept?: boolean;
 };
 
 export type DeviceRow = {
@@ -145,6 +147,8 @@ export type LogicRow = {
    * place of the fields it manages.  `editor_facts_error`: why it could not. */
   editor_facts?: EditorFacts | null;
   editor_facts_error?: string | null;
+  /** `editor_facts` answers an older draft; the current one's answer is on its way. */
+  editor_facts_pending?: boolean;
 };
 
 export type ArtifactValue = string | null | { path: string; frames?: string[] }[];

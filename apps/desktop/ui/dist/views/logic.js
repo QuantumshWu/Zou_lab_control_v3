@@ -1,8 +1,10 @@
 // The Task Console's Logic rows and Edit pages (v2 LogicRowView,
 // LogicEditorView).  Both draw one node's projection and send its intents;
 // admission, follow intent, restarts and claims are the workbench's.
-import { Field, Legend, Readout, StatusLine, assign, command, element, fieldKind, form, row as formRow, sectionTitle, setChecked, setState, setTitle, shareLabelColumn, switchButton, } from "../fluent/index.js";
+import { Field, Legend, Readout, StatusLine, assign, command, element, fieldKind, form, heldNote, row as formRow, sectionTitle, setChecked, setState, setTitle, shareLabelColumn, showHeld, switchButton, } from "../fluent/index.js";
 import { NodeEditors, editorModels } from "./node_editors/index.js";
+/** The held note's lines: the Task gate, then each reason several rows share. */
+const NEWLINE = "\n";
 /** Every word the Start slot can say, on the row and on its Edit page. */
 export const START_LABELS = ["Start", "Restart", "Starting…"];
 /** Each node state as the status word it is drawn with (v2 STATE_WORDS): a
@@ -113,6 +115,8 @@ export class LogicEditorView {
     title = new Readout("", true, true);
     kind = element("span", "note");
     statusLine = new StatusLine();
+    /** The console's Task gate, said once for the page (its rows are `held`). */
+    held = heldNote();
     body = element("div", "logic-editor-body");
     footer = element("div", "logic-editor-actions");
     form = form();
@@ -138,7 +142,7 @@ export class LogicEditorView {
         const titleRow = element("div", "logic-editor-title");
         this.title.root.classList.add("heading");
         titleRow.append(this.title.root, this.kind);
-        header.append(titleRow, this.statusLine.root);
+        header.append(titleRow, this.statusLine.root, this.held);
         this.statusLine.text.classList.add("wrap");
         this.editorError.hidden = true;
         this.body.append(this.form, this.editorError);
@@ -195,7 +199,7 @@ export class LogicEditorView {
         if (this.kind.textContent !== kind)
             this.kind.textContent = kind;
         this.statusLine.show(projection.status, STATE_WORDS[projection.state]);
-        const locked = takeover.active ? "A running task owns the console" : "";
+        const locked = takeover.active ? "A running task owns the console: editing is locked until it ends" : "";
         const specs = [];
         // THE NAME: what the node is called on its row, this page and its tab.
         specs.push({ key: "name", spec: { name: "name", label: "Name", kind: "text", value: row.name, required: false, allow_none: true,
@@ -204,14 +208,14 @@ export class LogicEditorView {
         const sourceLabel = row.source_label;
         if (sourceLabel) {
             specs.push({ key: "source", spec: { name: "source_signal", label: sourceLabel, kind: "choice", value: row.source_signal, required: true, allow_none: true,
-                    placeholder: "(not selected)", choices: row.source_choices, ...(row.source_tree ? { tree: row.source_tree } : {}), unavailable_reason: locked },
+                    placeholder: "(not selected)", choices: row.source_choices, ...(row.source_tree ? { tree: row.source_tree } : {}), held: locked },
                 commit: value => this.intents.editDraft(row.node_id, { source_signal: value }, sourceLabel) });
         }
         for (const [argument, choices] of Object.entries(row.device_choices)) {
             const label = row.device_labels[argument] ?? argument;
             // v2 _add_selector_row(_device_label(name)): a device row carries no ` *` (only Signal does).
             specs.push({ key: `device:${argument}`, spec: { name: `device-${argument}`, label, kind: "choice", value: row.device_keys[argument] ?? null,
-                    required: false, allow_none: true, placeholder: "(not selected)", choices, unavailable_reason: locked },
+                    required: false, allow_none: true, placeholder: "(not selected)", choices, held: locked },
                 commit: value => this.intents.editDraft(row.node_id, { device_keys: { [argument]: value } }, label) });
         }
         // The node's own editors (one model, or a stack of them) draw the fields
@@ -227,9 +231,24 @@ export class LogicEditorView {
         for (const control of row.controls) {
             if (managed.has(control.name))
                 continue;
-            specs.push({ key: `value:${control.name}`, group: control.group, spec: locked ? { ...control, unavailable_reason: control.unavailable_reason || locked } : control,
+            specs.push({ key: `value:${control.name}`, group: control.group, spec: { ...control, held: locked },
                 commit: value => this.intents.editDraft(row.node_id, { values: { [control.name]: value } }, control.label) });
         }
+        // A reason several rows share is said once above them (with the Task gate), and those
+        // rows are held; a reason of one row stays under it.
+        const byReason = new Map();
+        for (const item of specs) {
+            const reason = item.spec.unavailable_reason;
+            if (reason)
+                byReason.set(reason, [...(byReason.get(reason) ?? []), item.spec.label || item.spec.name]);
+        }
+        const shared = [...byReason].filter(([, rows]) => rows.length > 1);
+        for (const item of specs) {
+            const reason = item.spec.unavailable_reason;
+            if (reason && shared.some(([text]) => text === reason))
+                item.spec = { ...item.spec, unavailable_reason: "", held: item.spec.held || reason };
+        }
+        showHeld(this.held, [locked, ...shared.map(([reason, rows]) => `${reason}: ${rows.join(", ")}`)].filter(Boolean).join(NEWLINE));
         const alive = new Set(specs.map(item => item.key));
         for (const [key, field] of this.fields)
             if (!alive.has(key)) {
@@ -338,7 +357,7 @@ export class LogicEditorView {
                 return formRow(label, new Readout(claims || "No files chosen").root);
             }
             const control = { name: spec.name, label, kind: "path", value: typeof value === "string" ? value : "",
-                required: spec.required, filter: spec.file_filter, refreshable: true, unavailable_reason: locked };
+                required: spec.required, filter: spec.file_filter, refreshable: true, held: locked };
             let field = this.artifactFields.get(spec.name);
             if (!field) {
                 field = new Field(`${row.node_id}-artifact`, control, {
@@ -366,6 +385,7 @@ export class PublisherEditorView {
     body = element("div", "logic-editor-body");
     form = form();
     fields = new Map();
+    held = heldNote();
     constructor(id, publish) {
         this.id = id;
         this.publish = publish;
@@ -373,13 +393,14 @@ export class PublisherEditorView {
         const titleRow = element("div", "logic-editor-title");
         this.title.root.classList.add("heading");
         titleRow.append(this.title.root, element("span", "note", "(panel publisher)"));
-        header.append(titleRow);
+        header.append(titleRow, this.held);
         this.body.classList.add("publisher-body");
         this.body.append(this.form);
         this.root.append(header, this.body);
     }
     update(name, outputs, locked, request, failed = false) {
         this.title.text = `${name} outputs`;
+        showHeld(this.held, locked);
         const alive = new Set(outputs.map(output => output.name));
         for (const [key, field] of this.fields)
             if (!alive.has(key)) {
@@ -388,7 +409,7 @@ export class PublisherEditorView {
             }
         for (const output of outputs) {
             const spec = { name: output.name, label: output.label, kind: "boolean", value: output.published, required: false,
-                description: `publishes as ${output.signal}`, unavailable_reason: locked };
+                description: `publishes as ${output.signal}`, held: locked };
             let field = this.fields.get(output.name);
             if (!field) {
                 // One switch is one output (the board merges it, v2 update_panel_published_outputs).

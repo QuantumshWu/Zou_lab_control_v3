@@ -24,7 +24,7 @@ from typing import Any, BinaryIO, Callable
 
 import numpy as np
 
-PROTOCOL = (2, 0)
+PROTOCOL = (3, 0)
 MAX_FRAME = 16 << 20
 #: Arrays smaller than this are sent inside the frame instead of a block.
 INLINE_BYTES = 16 << 10
@@ -323,3 +323,7 @@ def plain(value: Any) -> Any:
 
 __all__ = ["Channel", "Decoder", "Encoder", "INLINE_BYTES", "KINDS", "MAX_FRAME", "PROTOCOL", "PluginError",
            "Refused", "error_payload", "plain", "raise_remote"]
+
+# Preserve existing exception names on the public plugin protocol.
+PluginError.__module__ = "zlc_plugin.wire"
+Refused.__module__ = "zlc_plugin.wire"

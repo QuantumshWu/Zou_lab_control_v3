@@ -161,7 +161,7 @@ impl Elem for f64 {
     fn view(buffer: &AnyBuffer) -> Option<&OwnedBuffer<Self>> { if let AnyBuffer::F64(b) = buffer { Some(b) } else { None } }
     fn scalar(self) -> Scalar { Scalar::Float(self) }
 }
-impl crate::numeric::Widen for F16 { #[inline(always)] fn widen(self) -> f64 { half_to_f64(self.to_bits()) } }
+
 impl Elem for F16 {
     const NP: DType = DType::F16;
     #[inline(always)] fn f64(self) -> f64 { half_to_f64(self.to_bits()) }

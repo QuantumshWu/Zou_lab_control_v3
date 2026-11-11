@@ -711,6 +711,7 @@ def _write_npz(
     *,
     arrays: Mapping[str, object],
     metadata: Mapping[str, object],
+    artifact_context: object,
 ) -> Path:
     """Atomically write one current, pickle-free feedback data checkpoint."""
 
@@ -731,7 +732,7 @@ def _write_npz(
         sort_keys=True,
     )
     payload["metadata"] = np.asarray(encoded)
-    return atomic_write_file(
+    return artifact_context.artifacts.write_file(
         selected,
         lambda stream: np.savez_compressed(stream, **payload),
     )
@@ -2533,6 +2534,7 @@ class SlmFeedbackTask:
             paths[name].mkdir(parents=True, exist_ok=True)
         site_path = _write_npz(
             paths["data"] / "sites.npz",
+            artifact_context=context,
             arrays={
                 "target_row": np.asarray(self._rows, dtype="<i8"),
                 "target_column": np.asarray(self._columns, dtype="<i8"),
@@ -2604,6 +2606,7 @@ class SlmFeedbackTask:
         )
         data_path = _write_npz(
             paths["measurements"] / f"measurement-{int(candidate):04d}.npz",
+            artifact_context=context,
             arrays=arrays,
             metadata=metadata,
         )
@@ -3178,7 +3181,7 @@ class SlmFeedbackTask:
                 "error": None if error is None else f"{type(error).__name__}: {error}",
                 "figures_error": None if figures_error is None else str(figures_error),
             }
-            json_path = write_readable_json(paths["root"] / "summary.json", plain_json(document))
+            json_path = context.artifacts.write_json(paths["root"] / "summary.json", plain_json(document), name="summary_json", role="summary")
             lines = [
                 f"SLM feedback: Ramsey frequency; status: {status}",
                 f"Acquisition: {self.acquisition_logic}; Fit: {self.source_signal}",
@@ -3193,9 +3196,7 @@ class SlmFeedbackTask:
             for key in ("error", "figures_error", "rollback"):
                 if document[key] is not None:
                     lines.append(f"{key}: {document[key]}")
-            text_path = atomic_write_text(paths["root"] / "summary.txt", "\n".join(lines) + "\n")
-            context.register_artifact("summary_json", json_path, role="summary")
-            context.register_artifact("summary_text", text_path, role="summary")
+            text_path = context.artifacts.write_text(paths["root"] / "summary.txt", "\n".join(lines) + "\n", name="summary_text", role="summary")
             return
         initial = None if not history else history[0]
         formal_history = [
@@ -3374,8 +3375,8 @@ class SlmFeedbackTask:
                 }
             ),
         }
-        json_path = write_readable_json(
-            paths["root"] / "summary.json", plain_json(document)
+        json_path = context.artifacts.write_json(
+            paths["root"] / "summary.json", plain_json(document), name="summary_json", role="summary"
         )
         final_slope = (
             document["plant_slope_history"][-1]
@@ -3436,11 +3437,9 @@ class SlmFeedbackTask:
                 "Figures not written: "
                 f"{type(figures_error).__name__}: {figures_error}"
             )
-        text_path = atomic_write_text(
-            paths["root"] / "summary.txt", "\n".join(lines) + "\n"
+        text_path = context.artifacts.write_text(
+            paths["root"] / "summary.txt", "\n".join(lines) + "\n", name="summary_text", role="summary"
         )
-        context.register_artifact("summary_json", json_path, role="summary")
-        context.register_artifact("summary_text", text_path, role="summary")
 
     def _finish_candidate(
         self,

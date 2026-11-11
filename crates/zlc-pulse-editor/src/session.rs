@@ -724,6 +724,8 @@ impl Editor {
             return;
         };
         let adopted = applied.authored_source.clone().unwrap_or_else(|| source.clone());
+        // The board's wire carries no bracket names: the copy is read under this draft's.
+        let adopted = match self.state.sequence.as_ref() { Some(current) => adopted.bracket_names_of(current), None => adopted };
         let playing_this = self.state.sequence.as_ref().is_some_and(|current| {
             **current == *adopted || self.execution_sequence().is_ok_and(|execution| execution == *adopted)
         });

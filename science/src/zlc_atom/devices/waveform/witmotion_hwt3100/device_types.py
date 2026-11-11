@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
-from zlc_atom.devices import discovered, underscored
-from zlc_atom.devices.waveform.wheeltec_n100.source import free_serial_ports
+from zlc_atom.devices import discovered, free_serial_ports, underscored
 from zlc_plugin import DeviceType
 
 from .modbus import LOGGED_ADDRESS, SUPPORTED_BAUDS

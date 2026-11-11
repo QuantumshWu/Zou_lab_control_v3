@@ -12,7 +12,7 @@ export type PortRow = { key: string; kind: "digital" | "dac" | "clock"; label: s
   width: number; lo: number; hi: number; visible: boolean };
 export type PeriodVM = { period_id: string; name: string; duration: FieldVM; unit: string; unit_choices: string[];
   digital: [string, boolean][]; analog: [string, string, FieldVM][]; kind: "period" | "spacer"; readonly: boolean };
-export type BracketVM = { bracket_id: string; start_period_id: string | null; end_period_id: string | null; count: number; ordinal: number;
+export type BracketVM = { bracket_id: string; name: string; start_period_id: string | null; end_period_id: string | null; count: number; ordinal: number;
   color: string; count_field: FieldVM; readonly: boolean };
 export type ComponentVM = { component_id: string; name: string; period_ids: string[]; total_text: string; summary_text: string;
   bracket_ids: string[]; source: "default" | "config"; config_path: string; config_active: boolean; error: string };
@@ -37,7 +37,7 @@ export type ConfigPage = { file_path: string; dirty: boolean; entries: [string, 
   parked: string[]; enabled: boolean; error: string; directory: string | null };
 export type SubpulsePage = { sources: { component_id: string; name: string; source: string; path: string; status: string; word: string }[];
   enabled: boolean; busy: boolean; error: string; document: Schedule | null; contexts: [string, string][]; context_id: string;
-  selected_id: string; path: string; dirty: boolean; bindings: [string, string, string][]; config_names: string[]; save_target: string };
+  selected_id: string; path: string; dirty: boolean; bindings: [string, string, string][]; config_names: string[] };
 export type TargetRecord = { key: string; kind: "digital" | "dac"; signal: string; endpoints: string[]; clock_key: string | null; clock_endpoint: string | null };
 export type TargetPage = { records: TargetRecord[]; editable: boolean; caption: string; reserved: string[]; feedback: string;
   feedback_word: "idle" | "running" | "task" | "warning" | "error"; width_rules: { digital: number[]; dac: number[] } | null };

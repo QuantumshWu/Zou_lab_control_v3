@@ -25,8 +25,13 @@ pub fn shape_text(schema: &zlc_core::schema::DatasetSchema) -> String {
 }
 
 pub fn signals(runtime: &Runtime) -> Vec<SignalInfo> {
-    // The Figure Viewer's data is not the apparatus's: no node reads it.
-    runtime.signals().into_iter().filter(|source| !crate::archive::viewer_owned(&source.signal)).map(|source| {
+    // The Figure Viewer's data is not the apparatus's: no node of the apparatus reads it.
+    offered_signals(runtime, &|signal| !crate::archive::viewer_owned(signal))
+}
+
+/// The Runtime's signals a document offers.
+pub fn offered_signals(runtime: &Runtime, offered: &dyn Fn(&str) -> bool) -> Vec<SignalInfo> {
+    runtime.signals().into_iter().filter(|source| offered(&source.signal)).map(|source| {
         SignalInfo { name: source.signal.to_string(), generation: source.generation.id().as_uuid().to_string(), owner: source.generation.owner().to_owned(),
                      published: source.published, sealed: source.sealed, shape: shape_text(&source.schema) }
     }).collect()
@@ -71,7 +76,15 @@ pub fn automatic_cell(kind: &str, mut target: Value) -> Value {
     target
 }
 
+/// What the plotting owner says of a plot kind (`Host::plot_kind`): the one table every part
+/// of the application reads.
+pub fn plot_kind(kind: &str) -> Option<zlc_workbench::PlotKindFacts> {
+    let handler = zlc_plot::configuration::handler(zlc_plot::kinds::PlotKind::parse(kind)?);
+    Some(zlc_workbench::PlotKindFacts { board: handler.board.is_some(), default_window: handler.kind.default_window() as u64, overlay: handler.overlay })
+}
+
 impl Host for DesktopHost<'_> {
+    fn plot_kind(&self, kind: &str) -> Option<zlc_workbench::PlotKindFacts> { plot_kind(kind) }
     fn signals(&self) -> Vec<SignalInfo> { signals(self.runtime) }
     fn panels(&self) -> Vec<PanelContent> { panel_contents(self.bindings, self.accepted, self.targets) }
     fn reserve_panel_ids(&mut self, count: usize) -> Vec<String> { self.bindings.reserve_ids(count).unwrap_or_default() }
@@ -90,23 +103,39 @@ impl Host for DesktopHost<'_> {
             self.targets.remove(&panel);
         }
     }
-    fn schemas(&self, signal: &str) -> Option<(Value, Value)> {
-        let source = self.runtime.signals().into_iter().find(|source| &*source.signal == signal)?;
-        let event = self.runtime.read_latest(&source.generation, signal).ok()
-            .and_then(|publication| publication.data().map(|block| zlc_plugin_host::wire::schema_tree(block.schema())));
-        Some((zlc_plugin_host::wire::schema_tree(&source.schema), event.unwrap_or(Value::Null)))
-    }
+    fn schemas(&self, signal: &str) -> Option<(Value, Value)> { schemas(self.runtime, signal) }
+    fn diagnostic_data(&self) -> Vec<(String, Vec<u8>)> { crate::recent_export::members(self.runtime) }
+    fn keep_recent_data(&mut self, mib: u64) { crate::recent_export::set_budget_mib(self.runtime, mib); }
+}
+
+/// A signal's dataset schema and its latest event's (`Host::schemas`).
+pub fn schemas(runtime: &Runtime, signal: &str) -> Option<(Value, Value)> {
+    let source = runtime.signals().into_iter().find(|source| &*source.signal == signal)?;
+    let event = runtime.read_latest(&source.generation, signal).ok()
+        .and_then(|publication| publication.data().map(|block| zlc_plugin_host::wire::schema_tree(block.schema())));
+    Some((zlc_plugin_host::wire::schema_tree(&source.schema), event.unwrap_or(Value::Null)))
 }
 
 /// A read-only view for decorating a state message.
 struct View { signals: Vec<SignalInfo>, panels: Vec<PanelContent> }
 
 impl Host for View {
+    fn plot_kind(&self, kind: &str) -> Option<zlc_workbench::PlotKindFacts> { plot_kind(kind) }
     fn signals(&self) -> Vec<SignalInfo> { self.signals.clone() }
     fn panels(&self) -> Vec<PanelContent> { self.panels.clone() }
     fn reserve_panel_ids(&mut self, _: usize) -> Vec<String> { Vec::new() }
     fn add_panel(&mut self, _: &str, _: &str, _: &str, _: u64, _: Value) -> Result<String, String> { Err("read-only view".into()) }
     fn close_panel(&mut self, _: &str) {}
+}
+
+/// The console's line and the apparatus's, said to the journal whenever either changes.
+fn journal_reports(state: &Value) {
+    if !zlc_core::journal::is_open() { return; }
+    static SAID: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let reports = json!({"console": state["board"]["report"], "apparatus": state["apparatus"]["report"]});
+    let text = reports.to_string();
+    let mut said = SAID.lock().unwrap_or_else(|error| error.into_inner());
+    if *said != text { zlc_core::journal::note("app", "report", reports); *said = text; }
 }
 
 /// Put the workbench sections into a state message, and publish the open
@@ -116,6 +145,9 @@ pub fn decorate(workbench: &Workbench, runtime: &Runtime, bindings: &Panels, tar
     let _span = crate::trace::span("workbench.decorate", || json!({}));
     let view = View { signals: signals(runtime), panels: panel_contents(bindings, state, targets) };
     workbench.decorate(state, &view);
+    // How much recent data is kept for a diagnostics archive, and how far back it goes.
+    state["diagnostics"] = crate::recent_export::state(runtime);
+    journal_reports(state);
     tools.publish(workbench.plugin_tools());
 }
 
@@ -155,6 +187,9 @@ pub struct Stand {
     scanning: Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// Each instance's opens and closes, in the order asked: the next turn to hand out, and the gate.
     lifecycles: BTreeMap<String, (u64, Arc<Gate>)>,
+    /// Where `run.fit` batches are solved: off the window's turn and the channel's thread.
+    fits: zlc_plugin_host::workers::Workers,
+    artifacts: Arc<crate::run_artifacts::Store>,
 }
 
 /// Workbench runs and plugin-host runs. A run's host id is known only when its start
@@ -234,13 +269,9 @@ fn refused(message: String) -> zlc_plugin_host::CallError { zlc_plugin_host::Cal
 /// when asked, written inside its run directory; `{archive, image}`.
 /// A path a run names, inside its run directory (relative ones are taken from it).
 fn run_path(directory: Option<&std::path::PathBuf>, path: &Value) -> Result<std::path::PathBuf, String> {
-    let directory = directory.ok_or("This run has no run directory")?;
-    let path = std::path::Path::new(path.as_str().ok_or("A path must be text")?);
-    let path = if path.is_absolute() { path.to_path_buf() } else { directory.join(path) };
-    if !path.starts_with(directory) || path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
-        return Err(format!("{} is outside the run directory", path.display()));
-    }
-    Ok(path)
+    let directory=directory.ok_or("This run has no run directory")?;
+    let path=std::path::Path::new(path.as_str().ok_or("An artifact needs a path")?);
+    crate::run_artifacts::confined(directory,path)
 }
 
 /// `run.animation`: the GIF of the run's frame images, written inside its run directory; `{path}`.
@@ -263,7 +294,7 @@ fn save_figure(params: &Value, lent: &Lent, directory: Option<std::path::PathBuf
     let path = run_path(directory.as_ref(), &params["path"])?;
     let source = |dataset: &Value| -> Result<Source, String> {
         let dataset = lent.dataset(dataset)?;
-        Ok(Source { repeat_counts: None, schema: dataset.block.schema().clone(), data: SourceData::Dense(dataset.block), block_id: dataset.block_id.into(),
+        Ok(Source { site_geometry: Default::default(), repeat_counts: None, schema: dataset.block.schema().clone(), data: SourceData::Dense(dataset.block), block_id: dataset.block_id.into(),
                     generation: dataset.generation.into(), revision: dataset.revision, window: None })
     };
     let array = |reference: &Value| -> Result<Option<OverlayArray>, String> {
@@ -294,7 +325,8 @@ impl Builtin {
                core: Arc<dyn Fn(crate::remote::RemoteCall) -> Result<(), String> + Send + Sync>) -> Self {
         Self(Rc::new(RefCell::new(Stand { runtime, host, missing: None, catalog_ready: false, reply, instances: BTreeMap::new(), runs: Arc::default(),
             unmapped: Vec::new(), directories: BTreeMap::new(), requests: BTreeMap::new(), core, events: Vec::new(), camera: None,
-            acquisition: json!({"state": "idle", "produced": 0}), native: None, native_instances: BTreeMap::new(), bench: None, scanning: Arc::default(), lifecycles: BTreeMap::new() })))
+            acquisition: json!({"state": "idle", "produced": 0}), native: None, native_instances: BTreeMap::new(), bench: None, scanning: Arc::default(), lifecycles: BTreeMap::new(),
+            fits: zlc_plugin_host::workers::Workers::new("zlc-plugin-fit"), artifacts: Arc::default() })))
     }
     /// Native device types (their descriptors) and the handler their instances' requests go to.
     pub fn set_native(&self, types: Vec<Value>, handler: Rc<dyn Fn(NativeRequest)>) { self.0.borrow_mut().native = Some((types, handler)); }
@@ -393,11 +425,12 @@ impl Builtin {
                 self.camera_fact(&ours, if outcome == "failed" { "error" } else { "stopped" }, error.as_ref());
                 let mut stand = self.0.borrow_mut();
                 stand.runs.lock().unwrap().mapped.remove(&run);
+                stand.artifacts.retire(&ours);
                 stand.directories.remove(&ours);
                 stand.requests.retain(|request, _| !request.starts_with(&format!("{ours}:")));
                 vec![Event::RunFinished { run: ours, outcome, error, generation }]
             }
-            HostEvent::Request { ticket, op, params, origin, lent, .. } => self.request(ours, ticket, &op, params, origin, lent),
+            HostEvent::Request { run: hosted, ticket, op, params, origin, lent, .. } => self.request(ours, hosted, ticket, &op, params, origin, lent),
             // A device's own facts are its window's (main.rs gives them to slm_host).
             HostEvent::CatalogChanged | HostEvent::Notice { .. } => Vec::new(),
             HostEvent::DeviceLog { instance, line } => vec![Event::Log { instance, line }],
@@ -410,7 +443,7 @@ impl Builtin {
         held.into_iter().flat_map(|event| self.host_event(event)).collect()
     }
 
-    fn respond(&self, ticket: u64, result: Result<Value, String>) {
+    pub(crate) fn respond(&self, ticket: u64, result: Result<Value, String>) {
         if let Some(host) = &self.0.borrow().host { host.respond(ticket, result.map_err(refused)); }
     }
 
@@ -439,7 +472,8 @@ impl Builtin {
     }
 
     /// What a run asks of the application (PLUGIN_PROTOCOL §5).
-    fn request(&self, run: String, ticket: u64, op: &str, params: Value, origin: Origin, lent: Lent) -> Vec<Event> {
+    /// `run` is the workbench's run, `hosted` the plugin host's own id of it.
+    fn request(&self, run: String, hosted: String, ticket: u64, op: &str, params: Value, origin: Origin, lent: Lent) -> Vec<Event> {
         match op {
             "run.figure" | "run.animation" => {
                 // Drawn off the window's turn; the run's thread waits for the paths.
@@ -453,27 +487,35 @@ impl Builtin {
                 if let Err(error) = spawned { self.respond(ticket, Err(error.to_string())); }
                 Vec::new()
             }
+            "run.fit" => {
+                let stand = self.0.borrow();
+                let Some(host) = stand.host.clone() else { return Vec::new() };
+                let stop = host.run_stop(params["instance"].as_str().unwrap_or(""), params["run"].as_str().unwrap_or(""));
+                stand.fits.run(move || host.respond(ticket, crate::run_fit::answer(&params, &lent, &stop)));
+                Vec::new()
+            }
             "run.operator_input" => {
                 let request = format!("{run}:{ticket}");
                 self.0.borrow_mut().requests.insert(request.clone(), ticket);
                 vec![Event::RunRequest { run, request: json!({"request": request, "kind": params["kind"], "title": params["title"],
                     "message": params["message"], "payload": params["payload"]}) }]
             }
-            "run.artifact" => {
-                // Registered only once it exists, complete, inside the run's directory.
-                let directory = self.0.borrow().directories.get(&run).cloned();
-                let registered = (|| -> Result<Value, String> {
-                    let directory = directory.ok_or("This run has no run directory")?;
-                    let path = std::path::Path::new(params["path"].as_str().ok_or("An artifact needs a path")?);
-                    let path = if path.is_absolute() { path.to_path_buf() } else { directory.join(path) };
-                    let relative = path.strip_prefix(&directory).map_err(|_| format!("{} is outside the run directory", path.display()))?;
-                    if matches!(relative.to_str(), Some("start.json" | "run.json")) { return Err("start.json and run.json are the run's own records".into()); }
-                    let size = std::fs::metadata(&path).map_err(|error| format!("{}: {error}", path.display()))?.len();
-                    Ok(json!({"name": params["name"], "path": relative.to_string_lossy().replace('\\', "/"), "role": params["role"],
-                              "contract_id": params["contract_id"], "size_bytes": size}))
-                })();
-                self.respond(ticket, registered.clone());
-                registered.map(|artifact| vec![Event::RunArtifact { run, artifact }]).unwrap_or_default()
+            "run.artifacts" | "run.artifact" => {
+                let stand=self.0.borrow();
+                let Some(host)=stand.host.clone() else{return Vec::new()};
+                let directory=stand.directories.get(&run).cloned();
+                let store=stand.artifacts.clone();let reply=stand.reply.clone();
+                let legacy=op=="run.artifact";
+                let mut params=params;
+                if legacy{params["action"]=json!("register");}
+                stand.fits.run(move||{
+                    let (answer,artifacts)=store.answer(&run,directory.as_deref(),&params,&lent);
+                    for artifact in artifacts{reply(Event::RunArtifact{run:run.clone(),artifact});}
+                    if legacy{
+                        host.respond(ticket,if answer.get("error").is_some(){Err(refused(answer["error"]["message"].as_str().unwrap_or("artifact registration failed").to_owned()))}else{Ok(answer["ok"].clone())});
+                    }else{host.respond(ticket,Ok(answer));}
+                });
+                Vec::new()
             }
             "run.acquire" => vec![Event::RunAcquire { run, ticket, node: params["node"].as_str().unwrap_or("").to_owned(),
                 completion: params["completion"].as_str().unwrap_or("ready").to_owned() }],
@@ -481,9 +523,12 @@ impl Builtin {
             "core" => {
                 // The same command a client would send, under the run's origin.
                 let (reply, answer) = std::sync::mpsc::channel();
-                // `_run` names the asking run, so a command can hold it to that run's claims.
+                // `_run` names the asking run, so a command can hold it to that run's claims;
+                // `_plugin_run` is the plugin host's id of it, what its native services know
+                // it by (a seamless scan's plan).
                 let mut arguments = params.get("params").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
                 arguments["_run"] = json!(run);
+                arguments["_plugin_run"] = json!(hosted);
                 let call = crate::remote::RemoteCall { origin, name: params["command"].as_str().unwrap_or("").to_owned(), params: arguments, reply };
                 let host = self.0.borrow().host.clone();
                 let sent = (self.0.borrow().core)(call);
@@ -556,7 +601,7 @@ fn plugin_families() -> Vec<String> {
 impl Plugins for Builtin {
     fn catalog(&mut self) -> TypeCatalog {
         let stand = self.0.borrow();
-        let (mut types, mut errors, mut templates) = (Vec::new(), Vec::new(), serde_json::Map::new());
+        let (mut types, mut errors, mut templates, mut configuration_schemas) = (Vec::new(), Vec::new(), serde_json::Map::new(), serde_json::Map::new());
         if let Some((native, _)) = &stand.native { types.extend(native.iter().cloned()); }
         if stand.bench.is_some() { types.push(zlc_fabric::remote_type()); }
         if let Some(host) = stand.host.as_ref().filter(|_| stand.catalog_ready) {
@@ -565,6 +610,7 @@ impl Plugins for Builtin {
                     types.extend(catalog.types.iter().map(descriptor));
                     errors.extend(catalog.errors.iter().map(|error| json!({"module": error.module, "error": error.error})));
                     templates = catalog.templates.clone();
+                    configuration_schemas = catalog.configuration_schemas.clone();
                 }
                 Err(error) => errors.push(json!({"module": "zlc_plugin describe", "error": error})),
             }
@@ -575,7 +621,8 @@ impl Plugins for Builtin {
             if families.is_empty() { errors.push(json!({"module": "zlc_atom", "error": reason})); }
             errors.extend(families.into_iter().map(|family| json!({"module": format!("zlc_atom.devices.{family}"), "error": reason})));
         }
-        TypeCatalog::from_describe(&json!({"protocol": [2, 0], "types": types, "errors": errors, "templates": templates})).unwrap_or_else(|error| {
+        TypeCatalog::from_describe(&json!({"protocol": zlc_plugin_host::PROTOCOL, "types": types, "errors": errors, "templates": templates,
+            "configuration_schemas": configuration_schemas})).unwrap_or_else(|error| {
             eprintln!("{}", json!({"type": "plugin-error", "error": error}));
             TypeCatalog::default()
         })
@@ -626,10 +673,13 @@ impl Plugins for Builtin {
     fn query(&mut self, instance: &str, ticket: u64, name: &str, args: &Value) {
         let mut params = args.clone();
         params["name"] = json!(name);
-        // A native device (the pulse board) is no plugin's to read: the query sees only plugin devices.
+        // A native device (the pulse board) is no plugin's to call: the query is handed what it states of
+        // itself (`facts`) and nothing to call it by.
         if let Some(devices) = params["devices"].as_object_mut() {
             let stand = self.0.borrow();
-            devices.retain(|_, info| !info["instance"].as_str().is_some_and(|id| stand.native_instances.contains_key(id)));
+            for info in devices.values_mut() {
+                if info["instance"].as_str().is_some_and(|id| stand.native_instances.contains_key(id)) { info["native"] = json!(true); }
+            }
         }
         let instance = instance.to_owned();
         let started = self.spawn("query", move |host| Event::Answered { ticket,
@@ -645,7 +695,7 @@ impl Plugins for Builtin {
         // The bench a Start records waits for no device long: one busy in another run's call misses
         // the bound without being taken for unresponsive.
         let started = self.spawn("call", move |host| Event::Answered { ticket,
-            result: if op == "snapshot" { host.snapshot(&instance, zlc_workbench::SNAPSHOT_WAIT) } else { host.call(&instance, &op, params, CALL).map(|reply| reply.value) }
+            result: if op == "snapshot" { host.snapshot(&instance, &params["units"], zlc_workbench::SNAPSHOT_WAIT) } else { host.call(&instance, &op, params, CALL).map(|reply| reply.value) }
                 .map_err(|error| error.to_string()) });
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error) }); }
     }
@@ -669,7 +719,7 @@ impl Plugins for Builtin {
         let (devices, native): (Vec<_>, Vec<_>) = { let stand = self.0.borrow(); run.devices.iter()
             .map(|(argument, instance)| (argument.clone(), instance.clone())).partition(|(_, instance)| !stand.native_instances.contains_key(instance)) };
         let keys = native.into_iter().map(|(argument, instance)| (format!("{argument}_key"), json!(instance)));
-        let request = RunRequest { prepared: run.prepared.clone(), values: Value::Object(run.values.clone()), devices: devices.into_iter().collect(), device_labels: run.device_labels.clone(), shared: run.shared.clone(), origin: origin(&run.origin),
+        let request = RunRequest { prepared: run.prepared.clone(), values: Value::Object(run.values.clone()), devices: devices.into_iter().collect(), device_labels: run.device_labels.clone(), device_units: run.device_units.clone(), shared: run.shared.clone(), reads: run.reads.clone(), origin: origin(&run.origin),
             // Build arguments beside the values: chosen artifacts and resolved workspace resources.
             resources: Value::Object(run.artifacts.iter().chain(&run.resources).map(|(key, value)| (key.clone(), value.clone())).chain(keys).collect()), source_signal: (!run.source_signal.is_empty()).then(|| run.source_signal.clone()),
             run_directory: run.directory.clone(), outputs: run.outputs.clone(), record_devices: run.record_devices };
@@ -845,3 +895,7 @@ pub fn stop_camera(workbench: &mut Workbench, builtin: &Builtin, origin: &Origin
     run(workbench, builtin, "stop_node", &json!({"node": node}), origin, 0, host);
     workbench.take_replies().into_iter().map(|(_, result)| result).last().unwrap_or(Ok(Value::Null)).map(|_| ())
 }
+
+#[cfg(test)]
+#[path = "workbench_host_fit_path.rs"]
+mod fit_path;

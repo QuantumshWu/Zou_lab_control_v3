@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 /// The plot kinds a live signal can be shown as.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum PlotKind { Image, Curve, Histogram, Rolling, FacetGrid }
+pub enum PlotKind { Image, Curve, Histogram, Rolling, FacetGrid, PointMap }
 
 /// Open a saved Figure archive in a Figure Viewer of its own (v2: one window per Figure).
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -538,6 +538,9 @@ pub struct ReadDevice {
     /// Read these fields in another spelling of their unit from now on (field -> unit,
     /// one of the field's `units`; "" = its own unit again).
     pub units: Option<BTreeMap<String, String>>,
+    /// The operator picked these units: the apparatus keeps them (saved with it), and the
+    /// device's recorded state and its scan axes use them too.
+    pub keep: Option<bool>,
 }
 
 /// Apply one Device Control field to an open device.
@@ -730,6 +733,8 @@ pub struct PulseRun {
     pub scan_repeats: Option<u64>,
     /// A table the board plays: these scan slots (no other slot streams), each row run_repeats times.
     pub scan: Option<PulseScanTable>,
+    /// A run-scoped native scan plan; mutually exclusive with an explicit scan table.
+    pub scan_plan: Option<PulseScanPlan>,
     /// A run's two-step play: `load` puts the document on the board without firing (no command_id);
     /// `fire` then fires what that load left there (repeats only). Default: both at once.
     pub stage: Option<String>,
@@ -743,6 +748,15 @@ pub struct PulseScanTable {
     pub fields: Vec<String>,
     /// One row per point, one value per field.
     pub rows: Vec<Vec<f64>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PulseScanPlan {
+    /// Opaque handle returned by this run's native scan prepare operation.
+    pub handle: String,
+    /// The host point whose linked pulse coordinates accompany this inner table.
+    pub outer_index: usize,
 }
 
 /// The Pulse ticks a scan plan schedules, compiled for the attached board.
@@ -764,6 +778,34 @@ pub struct PulseScanAxes {
     pub fields: Vec<String>,
     /// Per field, its values in the field's own unit.
     pub columns: Vec<Vec<f64>>,
+}
+
+/// How much recent data is kept for a diagnostics archive.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetDiagnostics {
+    /// The memory the data of recent publications is kept within, in MiB; 0 keeps none.
+    pub budget_mib: u64,
+}
+
+/// Write the diagnostics archive.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExportDiagnostics {
+    /// Carry the kept data of recent publications too (default true); false writes the records alone.
+    #[serde(default)]
+    pub data: Option<bool>,
+}
+
+/// What the board plays on one trigger lane.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PulseSchedule {
+    /// A raw digital lane of the board (ch11), or a port's key.
+    pub lane: String,
+    /// The revision the asker already has: answered {unchanged: true} while the board still plays that.
+    #[serde(default)]
+    pub known: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1060,6 +1102,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Installed device and logic-node types: what each is for, its settings/fields with choices and units, inputs, outputs, device needs; and plugins that failed to load."),
     command!("plot_catalog", PlotCatalog, read, true,
         "What panels can do before one exists: plot kinds, facet cell kinds, axis roles, reductions and fit models (formulas and parameters with details)."),
+    command!("fit_models", Empty, read, true,
+        "The models a series can be fitted with (run.fit): each one's id, label, and parameters with their names and unit relations."),
     command!("get_device_log", DeviceLog, read, true, "The newest log lines of a device instance's plugin."),
     command!("add_device", AddDevice, control, false, "Add a device to the apparatus draft; it opens at apply_devices."),
     command!("remove_device", DeviceRef, control, false, "Remove a device from the apparatus draft; the open instance closes at apply_devices."),
@@ -1112,6 +1156,14 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!("load_layout", LoadLayout, control, false,
         "Replace the board from a zlc.console-board file; refused while nodes run unless stop_running. Notes say what could not be kept."),
     command!("read_layout", PathRef, read, true, "What a layout file would load, without loading it."),
+    command!("set_diagnostics", SetDiagnostics, control, false,
+        "Set how much memory the data of recent publications is kept within for a diagnostics archive (MiB; 0 keeps none). Every \
+         signal is kept for the same length of time, the oldest going first; the state's diagnostics section says how far back it goes."),
+    command!("export_diagnostics", ExportDiagnostics, control, false,
+        "Write the diagnostics archive (the last hour's journal of commands, runs, board commands, publications, camera frames and \
+         drawn reads, with the board's layout, apparatus, state and the pulse and Config files it names; no acquired data) into the \
+         workspace's diagnostics folder: {path, segments, files, data_files, bytes}. data: false leaves out the kept data of recent \
+         publications (data/, one .npy per signal and run), which is carried otherwise."),
     command!("clear_board", ClearBoard, control, false, "Remove every logic node and panel; refused while nodes run unless stop_running."),
     command!("list_recipes", RecipeName, read, true, "Experiment recipes in the workspace, or one with its parameters and defaults."),
     command!("run_recipe", RunRecipe, control, false,
@@ -1127,6 +1179,11 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Wait for one FIRE's report, taken once: {done, status done|error|underflow, cursor, elapsed_seconds, command_id, fault}; \
          {done: false} while it plays. A FIRE that can no longer report (already reported, made safe, replaced) is refused, \
          and so is any client but the run while a run holds the board (taking the report is that run's)."),
+    command!("pulse_schedule", PulseSchedule, read, false,
+        "When one digital lane of the attached board rises in every shot it holds or plays, for whoever that lane triggers: {revision, \
+         state none|loaded|playing|stopped|done, command_id, run_repeats (shots per scan point; 0: the first point without end), scan_repeats \
+         (table sweeps; 0: without end), sent_us, answered_us (this computer's clock when the FIRE was sent and answered), lane, \
+         points: [{rising: [seconds after the point begins], duration: seconds}]}. Any client may read it, whoever holds the board."),
     command!("pulse_estimate", PulseEstimate, read, false,
         "The Pulse ticks a scan plan schedules, compiled for the attached board with its Config: per API point the board table's \
          ticks, its first row's and the output-delay bound; sums over the points; clock_hz."),

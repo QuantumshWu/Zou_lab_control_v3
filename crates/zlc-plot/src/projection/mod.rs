@@ -7,6 +7,7 @@
 pub mod nd;
 pub mod kernels;
 pub mod model;
+pub mod site_geometry;
 pub mod history;
 pub mod output;
 pub mod view;
@@ -14,6 +15,7 @@ pub mod reduce;
 pub mod strided;
 pub mod lattice;
 pub mod curve;
+mod point_map;
 pub mod rolling;
 pub mod histogram;
 pub mod scope;

@@ -4,6 +4,8 @@
 //! Needs ZLC_PLUGIN_PYTHON, ZLC_ATOM_FIXTURE (the fixture NPZ) and
 //! ZLC_ATOM_CALIBRATION (its calibration JSON); ZLC_ATOM_OUT, when set, receives
 //! every committed segment for comparison with v2 (runs/v2port/D_tools).
+mod support;
+
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -28,8 +30,9 @@ fn occupancy_and_frame_survival_follow_a_finite_site_frame_run() {
     let host = PluginHost::new(HostConfig { python: python.into(), python_path,
         packages: vec!["zlc_atom".into(), "zlc_atom_fixtures".into()], memory_limit_mib: Some(4096) },
         runtime.clone(), safe, move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
+        support::install(&host).unwrap();
     let request = |values: serde_json::Value, resources: serde_json::Value, source: Option<&str>, outputs: &[(&str, &str)]| {
-        RunRequest { prepared: None, device_labels: Default::default(), values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator, resources,
+        RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values, devices: Default::default(), shared: Default::default(), reads: Default::default(), origin: Origin::Operator, resources,
             source_signal: source.map(str::to_owned), run_directory: None,
             outputs: outputs.iter().map(|(output, signal)| (output.to_string(), signal.to_string())).collect(), record_devices: false }
     };

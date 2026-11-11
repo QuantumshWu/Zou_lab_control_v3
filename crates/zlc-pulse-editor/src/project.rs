@@ -372,7 +372,7 @@ pub fn bracket_records(sequence: &Sequence, context: Context) -> Vec<Value> {
             c.from_file() && sequence.components.iter().any(|resolved| resolved.component_id == c.component_id
                 && resolved.bracket_ids.contains(&b.bracket_id))
         });
-        json!({"bracket_id": b.bracket_id, "start_period_id": b.start_period_id, "end_period_id": b.end_period_id, "count": b.count,
+        json!({"bracket_id": b.bracket_id, "name": b.name, "start_period_id": b.start_period_id, "end_period_id": b.end_period_id, "count": b.count,
                "ordinal": index + 1, "color": palette.bracket_color(index), "count_field": field.to_json(), "readonly": readonly})
     }).collect()
 }

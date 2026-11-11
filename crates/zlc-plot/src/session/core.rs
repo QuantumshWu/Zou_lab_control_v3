@@ -153,6 +153,7 @@ pub struct PlotSession {
     pub(crate) scene: Scene,
     pub(crate) renderer: Box<dyn PanelRenderer>,
     pub(crate) click_history: ClickHistory,
+    pub(super) sites: super::point_map::SiteSelection,
     pub(crate) schemas: SchemaCache,
     pending: Option<Pending>,
     /// Effects held instead of drawn (`_configuration_effects`), drawn at
@@ -181,7 +182,7 @@ fn validated_ratio(value: f64) -> Result<f64> {
 
 fn layout_kind(kind: PlotKind) -> LayoutKind {
     match kind {
-        PlotKind::Curve => LayoutKind::Curve, PlotKind::Image => LayoutKind::Image, PlotKind::Histogram => LayoutKind::Histogram,
+        PlotKind::Curve => LayoutKind::Curve, PlotKind::Image | PlotKind::PointMap => LayoutKind::Image, PlotKind::Histogram => LayoutKind::Histogram,
         PlotKind::Rolling => LayoutKind::Rolling, PlotKind::FacetGrid => LayoutKind::FacetGrid, PlotKind::PulseTimeline => LayoutKind::PulseTimeline,
     }
 }
@@ -249,10 +250,10 @@ impl PlotSession {
                 fit: Some(services.fit.clone()), unit_registry: services.registry.clone(), configuration_updates: Some(updates), ..Default::default()
             })?;
         }
-        let renderer = services.renderers.create(panel, &candidate.spec, &plan, &services.defaults.style)?;
+        let renderer = services.renderers.create(panel, &scene.render_spec(), &plan, &services.defaults.style)?;
         scene.pending_configuration = Some(candidate.clone());
         let mut session = PlotSession { services, closed: false, for_export, device_pixel_ratio, scene, renderer,
-                                        click_history: ClickHistory::new(), schemas: SchemaCache::default(), pending: None, held: None };
+                                        click_history: ClickHistory::new(), sites: Default::default(), schemas: SchemaCache::default(), pending: None, held: None };
         session.present_prepared(prepared, Some(candidate), false)?;
         Ok(session)
     }
@@ -438,9 +439,13 @@ impl PlotSession {
     }
 
     fn restore_scene(&mut self, pending: Pending, compose: bool) {
-        let layout_changed = *self.renderer.plan() != pending.renderer_plan || *self.renderer.spec() != pending.snapshot.spec;
+        let layout_changed = *self.renderer.plan() != pending.renderer_plan || *self.renderer.spec() != pending.snapshot.render_spec();
+        if !layout_changed && (!self.scene.projection.shares_limit_history(&pending.snapshot.projection)
+            || self.scene.accepted_configuration.as_ref().is_some_and(|c| !c.same_source)) {
+            self.renderer.reset_limit_history();
+        }
         self.scene = pending.snapshot;
-        self.renderer.set_spec(self.scene.spec.clone());
+        self.renderer.set_spec(self.scene.render_spec());
         let result = if layout_changed {
             self.apply_layout_plan(pending.renderer_plan, compose, Some(pending.presentation))
         } else {
@@ -469,7 +474,7 @@ impl PlotSession {
             Some(PointerGesture::Pan(pan)) if pan.candidate.is_some() => pan.candidate,
             _ => self.scene.viewport,
         };
-        let image = self.semantic_kind() == PlotKind::Image;
+        let image = matches!(self.semantic_kind(), PlotKind::Image | PlotKind::PointMap);
         let view_limits = match viewport {
             None => None,
             Some((x, y)) => Some((x.map(|x| self.viewport_x_to_axes(x)).transpose()?.map(|x| (x.low, x.high)),
@@ -477,7 +482,7 @@ impl PlotSession {
         };
         let (thresholds, labels) = self.classifier_frame_labels()?;
         let accepted = self.scene.accepted_fit.clone();
-        let frame = RenderFrame {
+        let mut frame = RenderFrame {
             payload: self.scene.projection.payload().clone(), state: self.scene.display.state.clone(), effects,
             data_revision: self.data_revision(),
             fit_overlays: accepted.as_ref().map_or_else(|| Arc::from(Vec::new()), |fit| fit.overlays.clone()),
@@ -486,7 +491,40 @@ impl PlotSession {
             image_overlay: overlay_of(&self.scene.image_overlay), selectors: self.painted_selector_snapshot()?,
             facet_index: self.scene.focused_facet_index, facet_focus_index: self.scene.facet_focus_index, view_limits, presentation,
         };
-        self.renderer.present(&frame, compose)?;
+        let empty_ring = &self.services.defaults.style.artists.point_empty;
+        if let Payload::PointMap(map) = self.scene.projection.payload().as_ref() {
+            // Camera rings sit on illuminated pixels. Here the space around a site
+            // is the canvas background, so use normal figure ink for the numbers.
+            self.renderer.set_empty_point_style(&crate::style::PointRingToken {
+                color: self.services.defaults.style.palette.line_single, alpha: 1.0, ..empty_ring.clone()
+            });
+            let prior = frame.presentation.take().unwrap_or_else(|| self.renderer.series_presentation());
+            let target = self.scene.display.state.interaction.series_lock.as_ref()
+                .map(|target| (target, "locked"))
+                .or_else(|| prior.series_readout.as_ref().filter(|r| r.mode.as_ref() == "hover").map(|r| (&r.target,"hover")));
+            let index_and_readout = target.and_then(|(target, mode)| super::point_map::readout(map,target,mode));
+            let (index, readout) = index_and_readout.unzip();
+            let mut overlay = self.sites.overlay(map,index);
+            if frame.state.get("presentation").and_then(Value::as_str) != Some("height_bars") {
+                // The overlay draws the 2D faces. Keep the scalar plane for
+                // Image's colour limits and distribution, without painting its pixel edges.
+                if frame.state.get("show_image") == Some(&Value::Bool(true)) {
+                    Arc::make_mut(&mut frame.state).values.insert("show_image", Value::Bool(false));
+                } else {
+                    Arc::make_mut(&mut overlay).face_values = None;
+                }
+            }
+            frame.image_overlay = Some(overlay);
+            frame.payload = self.sites.image(self.scene.projection.payload(),map);
+            super::point_map::boolean_scale(&mut frame.state, map.boolean);
+            self.renderer.present(&frame, false)?;
+            self.renderer.show_resolved_series_readout(readout.as_ref());
+            if compose { self.renderer.draw()?; }
+        } else {
+            self.sites = Default::default();
+            self.renderer.set_empty_point_style(empty_ring);
+            self.renderer.present(&frame, compose)?;
+        }
         let interaction = self.renderer.series_interaction();
         self.scene.display.commit_interaction(&interaction);
         if compose { self.scene.presentation_epoch += 1; }
@@ -627,6 +665,7 @@ impl PlotSession {
         context.focused_facet_index = candidate.focused_facet_index.map(|i| i as usize);
         let mut projection = prepared.projection.with_context(Arc::new(context));
         if *projection.spec() != candidate.spec { projection = projection.with_spec(candidate.spec.clone()); }
+        let keep_limits = candidate.same_source && self.scene.projection.shares_limit_history(&projection);
         let (old_schema, new_schema) = (self.data().source().map(|s| s.schema.clone()), projection.data().source().map(|s| s.schema.clone()));
         let geometry_changed = !candidate.same_source || spec_changed
             || matches!((&old_schema, &new_schema), (Some(old), Some(new)) if !structure_equal(old, new));
@@ -686,11 +725,12 @@ impl PlotSession {
         self.scene.pending_configuration = Some(candidate.clone());
         let plan = self.resolve_plan()?;
         let relayout = spec_changed || plan != *self.renderer.plan() || previous_focus != self.scene.facet_focus_index;
-        self.renderer.set_spec(candidate.spec.clone());
+        self.renderer.set_spec(self.scene.render_spec());
         if relayout {
             self.scene.layout_revision += 1;
             self.apply_layout_plan(plan, true, Some(candidate.presentation.clone()))?;
         } else {
+            if !keep_limits { self.renderer.reset_limit_history(); }
             self.update_renderer(effects | RenderEffect::BASE_GEOMETRY, true, Some(candidate.presentation.clone()))?;
         }
         if clamped {
@@ -829,21 +869,32 @@ pub(crate) fn facet_cell_count(spec: &PlotSpec, payload: &Payload) -> Option<usi
 
 fn structure_equal(a: &Arc<DatasetSchema>, b: &Arc<DatasetSchema>) -> bool { Arc::ptr_eq(a, b) || a.structure_key() == b.structure_key() }
 
+/// The shape a Fit data box takes: the committed view's, else the whole image's.
+fn image_view_shape(scene: &Scene) -> Option<f64> {
+    let image = scene.projection.payload().image_data()?;
+    let range = |range: Option<crate::configuration::selectors::NumericRange>| range.map(|range| (range.low, range.high));
+    let (x, y) = scene.viewport.unwrap_or((None, None));
+    crate::render::geometry::image_view_shape(&image.x.display.to_f64(), &image.y.display.to_f64(), (range(x), range(y)))
+}
+
 /// `_surface_plan_for(spec, payload, state)`.
 pub(crate) fn surface_plan_for(scene: &Scene, services: &SessionServices, device_pixel_ratio: f64) -> Result<SurfacePlan> {
     let spec = &scene.spec;
     let state = &scene.display.state.values;
-    let semantic_image = spec.semantic().kind() == PlotKind::Image;
+    let semantic_image = matches!(spec.semantic().kind(), PlotKind::Image | PlotKind::PointMap);
     let topology = spec.is_facet_grid().then(|| FacetTopology {
         cell_count: facet_cell_count(spec, scene.projection.payload()).unwrap_or(0).max(1) as u32,
         cell_height_over_width: semantic_image.then_some(1.0),
     });
     let flag = |name: &str| matches!(state.get(name), Some(Value::Bool(true)));
+    let image_scene = semantic_image && state.get("presentation").is_some_and(|value| value.py_str() == "height_bars");
+    let fit_shape = if matches!(spec.kind(), PlotKind::Image | PlotKind::PointMap) && !image_scene && state.get("image_box") == Some(&Value::text("fit")) { image_view_shape(scene) } else { None };
     let options = SurfaceOptions {
         facet_topology: topology, device_pixel_ratio: Some(device_pixel_ratio), export_scale: None,
         rolling_side_distribution: (spec.kind() == PlotKind::Rolling).then(|| flag("side_distribution")),
-        image_height_over_width: (spec.kind() == PlotKind::Image).then_some(1.0),
-        image_scene: semantic_image && state.get("presentation").is_some_and(|value| value.py_str() == "height_bars"),
+        image_height_over_width: (matches!(spec.kind(), PlotKind::Image | PlotKind::PointMap)).then_some(fit_shape.unwrap_or(1.0)),
+        image_fit_box: fit_shape.is_some(),
+        image_scene,
         image_side_distribution: Some(!semantic_image || flag("side_distribution")),
     };
     resolve_surface(Some(scene.size), layout_kind(spec.kind()), &options, &services.defaults.layout, &services.defaults.style.fonts)

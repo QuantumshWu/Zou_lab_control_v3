@@ -149,6 +149,64 @@ impl PartialEq for Json {
     }
 }
 
+// ---------------------------------------------------------------- finding
+
+/// Where a string opening at `at` ends (past its closing quote).
+fn string_end(bytes: &[u8], mut at: usize) -> Option<usize> {
+    at += 1;
+    loop {
+        match bytes.get(at)? { b'"' => return Some(at + 1), b'\\' => at += 2, _ => at += 1 }
+    }
+}
+
+/// Where the value starting at `at` ends, by its brackets.
+fn value_end(bytes: &[u8], mut at: usize) -> Option<usize> {
+    match *bytes.get(at)? {
+        b'"' => string_end(bytes, at),
+        b'{' | b'[' => {
+            let mut depth = 0usize;
+            loop {
+                match *bytes.get(at)? {
+                    b'"' => { at = string_end(bytes, at)?; continue; }
+                    b'{' | b'[' => depth += 1,
+                    b'}' | b']' => { depth -= 1; if depth == 0 { return Some(at + 1); } }
+                    _ => {}
+                }
+                at += 1;
+            }
+        }
+        _ => {
+            while !matches!(bytes.get(at).copied(), None | Some(b',' | b'}' | b']')) && !whitespace(bytes[at]) { at += 1; }
+            Some(at)
+        }
+    }
+}
+
+/// The bytes of the value under `path`, nested object keys spelled plainly, found without
+/// building anything; `None` when a plain walk does not find one.
+pub fn object_path_span(text: &str, path: &[&str]) -> Option<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    let skip = |mut at: usize| { while bytes.get(at).copied().is_some_and(whitespace) { at += 1; } at };
+    let mut at = skip(0);
+    for key in path {
+        if *bytes.get(at)? != b'{' { return None; }
+        at = skip(at + 1);
+        loop {
+            if *bytes.get(at)? != b'"' { return None; }
+            let end = string_end(bytes, at)?;
+            let name = &bytes[at + 1..end - 1];
+            at = skip(end);
+            if *bytes.get(at)? != b':' { return None; }
+            at = skip(at + 1);
+            if name == key.as_bytes() { break; }
+            at = skip(value_end(bytes, at)?);
+            if *bytes.get(at)? != b',' { return None; }
+            at = skip(at + 1);
+        }
+    }
+    Some(at..value_end(bytes, at)?)
+}
+
 // ---------------------------------------------------------------- parsing
 
 /// The deepest container CPython's scanner opens before its recursion

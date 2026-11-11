@@ -1,7 +1,10 @@
 """Strict, pickle-free figure archives containing arrays and typed datasets.
 
 This module owns what a figure file means. The caller owns where the bytes
-land. Arrays stay NPZ members; explanatory metadata is one strict JSON tree.
+land. Arrays stay NPZ members; explanatory metadata is one strict JSON tree,
+and the lineage (a figure's whole causal history, never needed to draw it) is its
+own UTF-8 JSON member beside it. A file written before that member existed keeps
+its lineage inside the metadata and reads the same.
 """
 
 from __future__ import annotations
@@ -37,6 +40,8 @@ __all__ = [
 
 FIGURE_SCHEMA = "zlc.figure"
 _INFO_KEY = "info"
+_LINEAGE_MEMBER = "lineage.json"
+_LINEAGE_SCHEMA = "zlc.figure.lineage/1"
 _ROOT_KEYS = {"schema", "name", "members", "sections"}
 _APPARATUS_TABLE = "apparatus_table"
 _APPARATUS_SCHEMA = "zlc.figure.apparatus-table/1"
@@ -94,18 +99,23 @@ def _jsonable(value: Any, path: str = "metadata", memo: dict[int, Any] | None = 
 
 def _apparatus_records(sections: dict[str, Any]):
     """Only run/event records and the saved source own apparatus observations."""
-    def records(value):
-        if not isinstance(value, dict):
-            return
-        if "apparatus" in value:
-            yield value
-        acquisition = value.get("acquisition")
+    def run_table(acquisition):
         runs = acquisition.get("runs") if isinstance(acquisition, dict) else None
         if isinstance(runs, list):
             for run in runs:
                 record = run.get("record") if isinstance(run, dict) else None
                 if isinstance(record, dict) and "apparatus" in record:
                     yield record
+
+    def records(value):
+        if not isinstance(value, dict):
+            return
+        if "apparatus" in value:
+            yield value
+        yield from run_table(value.get("acquisition"))
+        window = value.get("window")
+        if isinstance(window, dict):
+            yield from run_table(window.get("acquisition"))
 
     lineage = sections.get("lineage")
     nodes = lineage.get("nodes") if isinstance(lineage, dict) else None
@@ -137,7 +147,7 @@ def _pack_apparatus(sections: dict[str, Any]) -> dict[str, Any] | None:
     return {"schema": _APPARATUS_SCHEMA, "records": records}
 
 
-def _unpack_apparatus(info: dict[str, Any]) -> None:
+def _unpack_apparatus(info: dict[str, Any], sections: dict[str, Any]) -> None:
     if _APPARATUS_TABLE not in info:
         return
     table = info.pop(_APPARATUS_TABLE)
@@ -150,7 +160,7 @@ def _unpack_apparatus(info: dict[str, Any]) -> None:
     if not isinstance(records, list) or not records:
         raise ValueError("figure apparatus table records must be a non-empty array")
     used = set()
-    for record in _apparatus_records(info["sections"]):
+    for record in _apparatus_records(sections):
         reference = record["apparatus"]
         if not isinstance(reference, dict) or set(reference) != {_APPARATUS_REF}:
             raise ValueError("figure apparatus reference must contain only $apparatus")
@@ -245,12 +255,14 @@ def _member_compression(array: np.ndarray) -> int:
 
 def _write_npz_members(
     stream: BinaryIO,
+    info: np.ndarray,
+    lineage: str | None,
     members: Mapping[str, np.ndarray],
 ) -> None:
     """Write one standard NPZ with compression chosen per array member."""
 
     with zipfile.ZipFile(stream, mode="w", allowZip64=True) as archive:
-        for key, array in members.items():
+        for key, array in {_INFO_KEY: info, **members}.items():
             member = zipfile.ZipInfo(f"{key}.npy")
             member.compress_type = _member_compression(array)
             # Per member: the archive-level default is not applied to a
@@ -258,6 +270,13 @@ def _write_npz_members(
             member.compress_level = _DEFLATE_LEVEL
             with archive.open(member, mode="w", force_zip64=True) as target:
                 write_array(target, array, allow_pickle=False)
+            if key == _INFO_KEY and lineage is not None:
+                encoded = lineage.encode("utf-8")
+                member = zipfile.ZipInfo(_LINEAGE_MEMBER)
+                member.compress_type = _member_compression(np.frombuffer(encoded, dtype=np.uint8))
+                member.compress_level = _DEFLATE_LEVEL
+                with archive.open(member, mode="w", force_zip64=True) as target:
+                    target.write(encoded)
 
 
 def write_figure_archive(
@@ -316,20 +335,32 @@ def write_figure_archive(
     members = {
         key: _member_descriptor(array) for key, array in sorted(stored.items())
     }
+    def encoded(document: dict[str, Any]) -> str:
+        return json.dumps(
+            document,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    # Each document shares its own repeated apparatus: reading one needs only itself.
+    lineage = None
+    if "lineage" in plain_sections:
+        lineage_sections = {"lineage": plain_sections.pop("lineage")}
+        lineage_document = {"schema": _LINEAGE_SCHEMA}
+        table = _pack_apparatus(lineage_sections)
+        if table is not None:
+            lineage_document[_APPARATUS_TABLE] = table
+        lineage_document["lineage"] = lineage_sections["lineage"]
+        lineage = encoded(lineage_document)
     apparatus = _pack_apparatus(plain_sections)
     document = {"schema": FIGURE_SCHEMA, "name": name, "members": members,
                 "sections": plain_sections}
     if apparatus is not None:
         document[_APPARATUS_TABLE] = apparatus
-    info = json.dumps(
-        document,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
 
-    _write_npz_members(stream, {_INFO_KEY: np.asarray(info), **stored})
+    _write_npz_members(stream, np.asarray(encoded(document)), lineage, stored)
 
 
 def _metadata_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -355,18 +386,38 @@ def _finite_float(value: str) -> float:
 def _parse_info(array: np.ndarray) -> dict[str, Any]:
     if array.shape != () or array.dtype.kind != "U":
         raise ValueError("figure info must be one scalar Unicode JSON document")
+    info = _parse_metadata(str(array.item()))
+    if not isinstance(info, dict):
+        raise ValueError("figure metadata root must be an object")
+    return info
+
+
+def _parse_metadata(text: str) -> Any:
     try:
-        info = json.loads(
-            str(array.item()),
+        return json.loads(
+            text,
             object_pairs_hook=_metadata_pairs,
             parse_constant=_reject_nonfinite,
             parse_float=_finite_float,
         )
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid figure metadata JSON: {exc}") from exc
-    if not isinstance(info, dict):
-        raise ValueError("figure metadata root must be an object")
-    return info
+
+
+def _parse_lineage(raw: bytes) -> Any:
+    """The lineage member's document, its shared apparatus restored."""
+
+    document = _parse_metadata(raw.decode("utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError("figure lineage document must be an object")
+    keys = {"schema", "lineage"}
+    exact_keys(document, keys | {_APPARATUS_TABLE} if _APPARATUS_TABLE in document else keys,
+               "figure lineage document")
+    if document["schema"] != _LINEAGE_SCHEMA:
+        raise ValueError(f"unsupported figure lineage format {document['schema']!r}")
+    sections = {"lineage": document["lineage"]}
+    _unpack_apparatus(document, sections)
+    return sections["lineage"]
 
 
 def _validate_current_info(info: dict[str, Any]) -> dict[str, Any]:
@@ -414,7 +465,7 @@ def _validate_current_info(info: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 f"figure member {key!r} shape must be nonnegative integers"
             )
-    _unpack_apparatus(info)
+    _unpack_apparatus(info, info["sections"])
     return info
 
 
@@ -470,8 +521,12 @@ def read_archive(path: object) -> tuple[
 
     with np.load(path, allow_pickle=False) as archive:
         zip_names = archive.zip.namelist()
+        lineage_members = zip_names.count(_LINEAGE_MEMBER)
+        zip_names = [name for name in zip_names if name != _LINEAGE_MEMBER]
         if any(not name.endswith(".npy") for name in zip_names):
             raise ValueError("figure NPZ may contain only NPY members")
+        if lineage_members > 1:
+            raise ValueError(f"figure contains duplicate NPZ members {[_LINEAGE_MEMBER]!r}")
         names = [name[:-4] for name in zip_names]
         duplicates = sorted({name for name in names if names.count(name) > 1})
         if duplicates:
@@ -485,6 +540,10 @@ def read_archive(path: object) -> tuple[
         info = _validate_current_info(
             _parse_info(np.asarray(archive[f"{_INFO_KEY}.npy"]))
         )
+        if lineage_members:
+            if "lineage" in info["sections"]:
+                raise ValueError("figure lineage is stored twice")
+            info["sections"]["lineage"] = _parse_lineage(archive[_LINEAGE_MEMBER])
         expected = {_INFO_KEY, *info["members"]}
         actual = set(names)
         if actual != expected:

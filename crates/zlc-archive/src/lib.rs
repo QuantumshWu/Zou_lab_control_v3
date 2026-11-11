@@ -16,6 +16,7 @@
 //! Every refusal is an [`ArchiveError`] carrying the Python exception class and
 //! message the scientific reader raises for the same file.
 
+pub mod array_wire;
 pub mod deflate;
 pub mod durable;
 pub mod error;
@@ -32,7 +33,7 @@ pub mod tree;
 pub mod zip;
 
 pub use error::{ArchiveError, ErrorKind, Result};
-pub use figure::{read_archive, write_figure_archive, write_figure_file, Entry, FigureArchive, Members};
+pub use figure::{open_archive, read_archive, write_figure_archive, write_figure_file, Entry, FigureArchive, Members, SavedLineage};
 pub use json::Json;
 pub use manifest::{ArchiveDataset, DatasetRef, ReadDataset};
 pub use npy::{NpyArray, NpyData, NpyType};

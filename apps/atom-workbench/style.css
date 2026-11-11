@@ -258,8 +258,7 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .monitor-tree { display: grid; gap: var(--row-gap); padding-bottom: var(--row-gap); }
 .monitor-f-row { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--row-gap); align-items: start; padding: var(--row-gap) 0 var(--row-gap) calc(var(--info-chevron-box) + var(--row-gap)); }
 .monitor-list { display: flex; flex-wrap: wrap; gap: var(--row-gap); }
-/* The shared check button is borderless in every state. Its selection
- * outline must not introduce a border that disappears on hover and reflows rows. */
+/* The shared check button is borderless; its selection outline is a shadow. */
 .monitor-option.check { display: flex; align-items: center; gap: var(--check-gap); background: var(--bg); border: 0; padding: var(--pad-v) var(--field-text-inset); border-radius: var(--radius); cursor: pointer; }
 .monitor-option.check:is(:hover, :active) { background: var(--accent-tint); }
 .monitor-option.check[aria-checked="true"] { background: var(--selected); box-shadow: inset 0 0 0 var(--edge) var(--selection-edge); }

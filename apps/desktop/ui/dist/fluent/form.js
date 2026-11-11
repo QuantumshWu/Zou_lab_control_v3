@@ -266,13 +266,18 @@ export class Field {
         }
         // A row with no unit picker says its unit in its label; a picker says it itself (_shown_label).
         const label = spec.unit && spec.unit !== "1" && !spec.units?.length ? `${spec.label} (${spec.unit})` : spec.label;
-        const words = this.marked && (spec.required ?? !spec.allow_none) ? `${label} *` : label;
+        // A row out of use asks for nothing.
+        const words = this.marked && spec.enabled !== false && (spec.required ?? !spec.allow_none) ? `${label} *` : label;
         // _fit_label: a label wider than the column the form gives it keeps its start and its end.
         setMiddle(this.label, words, "none");
         setTitle(this.label, spec.description || spec.label);
         const reason = this.reason();
-        setText(this.problem, spec.problem || "");
-        assign(this.problem, "hidden", !spec.problem);
+        // What the row must say: what is wrong with it, or why it alone cannot be edited (a
+        // whole page held says so once, above its rows).
+        const message = spec.problem || spec.unavailable_reason || "";
+        setText(this.problem, message);
+        assign(this.problem, "hidden", !message);
+        this.problem.classList.toggle("field-note", !spec.problem && Boolean(message));
         if (this.input instanceof Segmented) {
             setTitle(this.input.root, reason);
             this.input.disabled = Boolean(reason);
@@ -316,7 +321,7 @@ export class Field {
     }
     /** Why the row cannot be edited now (its tip then), or empty. */
     reason() {
-        return this.spec.unavailable_reason || (this.spec.enabled === false ? "Not used with the current settings" : "");
+        return this.spec.unavailable_reason || this.spec.held || (this.spec.enabled === false ? "Not used with the current settings" : "");
     }
     /** The box shows Scope (the owner's, or a pick on its way to it) over more than one coordinate. */
     cycleSelected() {
@@ -383,7 +388,7 @@ export class Field {
             setChecked(this.automatic, automatic);
             // While Auto holds the value its editor shows what Auto resolves to.
             if (!(this.input instanceof Segmented))
-                assign(this.input, "disabled", automatic || Boolean(this.spec.unavailable_reason));
+                assign(this.input, "disabled", automatic || Boolean(this.reason()));
         }
         const shown = automatic ? (this.spec.automatic_value ?? null) : value;
         if (this.tree) {
@@ -577,6 +582,17 @@ export function defaultUnit(own, candidates, integer = false) {
 /** A form: one label column (setting_label_width) and one control column;
  * rows a row gap apart, section titles a control high, sections a section gap. */
 export function form(className = "") { return element("div", `form ${className}`.trim()); }
+/** Why a whole page cannot be edited now, said once above its rows; its rows carry the
+ * same words as `held` (disabled, said in their tips only). Hidden while nothing holds it. */
+export function heldNote() {
+    const note = element("p", "form-note held-note");
+    note.hidden = true;
+    return note;
+}
+export function showHeld(note, text) {
+    setText(note, text);
+    assign(note, "hidden", !text);
+}
 /** FluentSectionLabel row: the semibold title, its commands at the row's end. */
 export function sectionTitle(text, ...trailing) {
     const heading = element("div", "section-title");

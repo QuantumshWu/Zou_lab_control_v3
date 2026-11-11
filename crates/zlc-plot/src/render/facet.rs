@@ -652,7 +652,7 @@ impl Renderer {
                     let s = item.summary;
                     if s.xlow.is_finite() {
                         xs.extend([s.xlow, s.xhigh]);
-                        ys.extend([s.pooled.0, s.pooled.1]);
+                        ys.extend([s.ylow, s.yhigh]);
                     }
                 }
             }

@@ -89,10 +89,10 @@ read-only MCP client too; every other one is `control`.
 |---|---|---|
 | `pulse_state` | read | The `pulse` section of the app state: document, every page's projection, connection, board snapshot, last message. |
 | `pulse_open`, `pulse_save`, `pulse_new`, `pulse_clear` | control | File and document lifecycle (explicit paths for remote clients). |
-| `pulse_edit` | control | One edit: `period_name`, `duration`, `digital`, `analog`, `delay`, `binding`, `config_binding`, `bracket`, `bracket_add`, `bracket_remove`, `period_add`, `spacer_add`, `period_remove`, `remove_items`, `reorder`, `run_repeats`, `visible_ports`, `fill_port`, `clear_port`, `document_name`, `port_label`. Same arguments as v2's `control_action`. |
+| `pulse_edit` | control | One edit: `period_name`, `duration`, `digital`, `analog`, `delay`, `binding`, `config_binding`, `bracket`, `bracket_add`, `bracket_name` (how its count reads, `name.repeats`; an edit that makes two fields read alike is refused), `bracket_remove`, `period_add`, `spacer_add`, `period_remove`, `remove_items`, `reorder`, `run_repeats`, `visible_ports`, `fill_port`, `clear_port`, `document_name`, `port_label`. Same arguments as v2's `control_action`. |
 | `pulse_scan` | control | Scan page, by `op`: `template`, `edit_source`, `load_program`, `run` (the Python program in a child process, 2 GB / 120 s cap, returning the table), `load_array` (.npy/.csv/.txt), `save_array`, `clear`, `repeats`. |
 | `pulse_config` | control | Value Config page, by `op`: `edit`, `new`, `load`, `refresh`, `unload`, `save`, `mode`, `binding`. |
-| `pulse_subpulse` | control | Subpulse page, by `op`: `select`, `source`, `open_source`, `new`, `open`, `save`, `save_as`, `export`, `insert`, `insert_file`, `group`, `ungroup`, `remove`, `rename`, `edit` (a `pulse_edit` on the selected Subpulse). |
+| `pulse_subpulse` | control | Subpulse page, by `op`: `select`, `source`, `open_source`, `new`, `open`, `save`, `save_as` (an independent file or a block of the Pulse, to its own file), `insert`, `insert_file`, `group`, `ungroup`, `remove`, `rename`, `edit` (a `pulse_edit` on the selected Subpulse). |
 | `pulse_target` | control | Target page: apply port records. |
 | `pulse_preview` | control | Preview page: `include_off`, `selectors`, `size`; `save` writes the drawn figure (PNG). The drawing is the native `pulse_timeline` panel `pulse-preview`. |
 | `pulse_page` | control | The page shown (Edit, Preview, Scan, Value Config, Subpulse Config, Target); Preview redraws on show. |

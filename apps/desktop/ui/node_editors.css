@@ -47,7 +47,7 @@
 .axis-unit { grid-column: 4; display: flex; align-items: center; min-width: 0; }
 .axis-unit > .unit-picker { width: 100%; }
 .unit-word { padding: 0 0 var(--cap-lift) var(--field-text-inset); white-space: nowrap; }
-.scan-axes > .segmented { grid-column: 5; }
+.scan-axes > .segmented { grid-column: 5; justify-self: start; }
 .scan-axes > .axis-link { grid-column: 6; }
 .scan-axes > button.glyph { grid-column: 7; }
 /* What a row's values are, and what is wrong with them, under the row from the axis's text. */
@@ -100,8 +100,32 @@
 .derive-error.muted { color: var(--muted-ink); }
 .derive-reduce { grid-column: 2 / 7; display: flex; flex-wrap: wrap; align-items: center; gap: var(--row-gap); min-width: 0; }
 .derive-over { width: auto; min-width: var(--derive-operand-w); }
+.derive-reduce > .segmented { flex-wrap: wrap; max-width: 100%; }
+/* A word and what it names wrap as one. */
+.derive-pair { display: flex; align-items: center; gap: var(--row-gap); min-width: 0; }
+.derive-pair > select { width: auto; min-width: var(--range-count-w); }
+.derive-pair > .spin { flex: none; width: var(--range-count-w); }
+/* The statistic's word and its remove stand on the strip's line, however its controls wrap. */
+.derive-stat-lead, .derive-reduce + .derive-remove { align-self: start; }
+.derive-stat-lead { min-height: var(--control); }
 .derive-adds { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: var(--row-gap); }
 .derive-preview { grid-column: 2 / -1; padding-left: var(--field-text-inset); margin-top: calc(-1 * var(--row-gap) / 2); }
+/* A pane too narrow for the column set: a card's lines stand one under another
+ * (a head line's Publish and remove beside its name), nothing overflows. */
+.derive-variables { container-type: inline-size; }
+@container (max-width: 660px) {
+  .derive-inputs-form { grid-template-columns: minmax(0, 1fr); }
+  .derive-inputs { grid-template-columns: max-content minmax(0, 1fr); }
+  .derive-inputs > .derive-input-axes { grid-column: 1 / -1; white-space: normal; }
+  .derive-lines { grid-template-columns: 1fr auto auto; grid-auto-flow: dense; }
+  .derive-lead, .derive-stat-lead { justify-content: flex-start; }
+  .derive-lines > .derive-operand, .derive-at, .derive-labels-cell, .derive-reduce, .derive-error, .derive-adds, .derive-preview { grid-column: 1 / -1; width: 0; min-width: 100%; }
+  .derive-labels-cell:not(:has(> :not([hidden]))), .derive-tail { display: none; }
+  .derive-lines > .derive-publish { grid-column: 2; }
+  .derive-lines > .derive-remove { grid-column: 3; }
+  .derive-pair { max-width: 100%; }
+  .derive-pair > select, .derive-pair > .derive-over { min-width: 0; }
+}
 
 /* ---------- FrameClaimsEditor / PostSelectionEditor -------------------- */
 .frame-claims > .selection-grid { align-self: flex-start; }
@@ -111,14 +135,46 @@
 .post-slot { display: flex; align-items: center; gap: calc(var(--row-gap) / 2); }
 .post-slot > select { flex: none; }
 
-/* Linked parameters use the parent's columns; the thin bracket indicates membership. */
-.scan-axes.has-links > .segmented { min-width: calc(230px * var(--fluent) * var(--qt)); }
-.linked-marker { grid-column: 1; justify-self: end; align-self: stretch; border-right: var(--edge) solid var(--divider); margin-top: calc(-1 * var(--row-gap)); width: var(--row-gap); }
-.linked-marker.last { border-bottom: var(--edge) solid var(--divider); border-radius: 0 0 var(--radius) 0; }
-.linked-port { grid-column: 2; min-width: 0; width: 100%; }
-.linked-values { grid-column: 3; display: flex; min-width: 0; }
-.linked-values > input { width: 100%; min-width: 0; }
+/* Linked parameters use the parent's columns.  A group -- the axis and the rows that follow
+ * it -- stands on a band of its colour (--link, set per group from --link-group-N) at the
+ * label column's end; the axis's "x" badge sits between the band and its knob, and each
+ * linked row reads "↳ knob = f(x) [formula] unit", what it plays on a line under it. */
+.scan-axes {
+  --link-band-w: calc(max(2px, round(calc(3px * var(--fluent)), 1px)) * var(--qt));
+  --link-badge: calc(max(14px, round(calc(18px * var(--fluent)), 1px)) * var(--qt));
+  /* From the band to the label column's end: the badge and a gap before it. */
+  --link-lead-w: calc(var(--link-badge) + var(--row-gap));
+}
+.axis-kind.link-master { display: flex; align-items: center; align-self: stretch; height: auto; padding-right: 0; position: relative; }
+.axis-kind.link-master::after, .linked-lead::after, .axis-notes.in-link::before {
+  content: ""; position: absolute; top: 0; bottom: 0; right: var(--link-lead-w); width: var(--link-band-w); background: var(--link);
+}
+.link-badge {
+  flex: none; margin-left: auto; width: var(--link-badge); height: var(--link-badge); border-radius: calc(var(--link-badge) / 2);
+  display: block; padding: 0; background: var(--link); color: var(--surface);
+}
+/* Its "x" is drawn on the disc's centre by the letter's own middle (linkBadge). */
+.link-badge > svg { display: block; width: 100%; height: 100%; }
+.link-badge > svg > text { fill: currentColor; font-family: inherit; font-size: 72px; font-weight: 600; }
+/* A linked row's band runs up through the gap above it and down beside its preview line. */
+.linked-lead { grid-column: 1; grid-row: span 2; align-self: stretch; position: relative; margin-top: calc(-1 * var(--row-gap)); }
+/* A note under the axis (its custom values) keeps the band unbroken. */
+.axis-notes.in-link { position: relative; }
+.axis-notes.in-link::before { top: calc(-1 * var(--row-gap)); right: auto; left: calc(-1 * (var(--row-gap) + var(--link-lead-w) + var(--link-band-w))); }
+.linked-param { grid-column: 2; display: flex; align-items: center; min-width: 0; }
+.linked-arrow { flex: none; width: var(--link-badge); text-align: center; color: var(--link); padding-bottom: var(--cap-lift); }
+.linked-param > .linked-port { flex: 1; min-width: 0; }
+/* A linked parameter's formula of x: the values column, it has no mode.  "f(x)" in the
+ * group's colour joins the box as its prefix. */
+.linked-values { grid-column: 3 / span 1; display: flex; align-items: center; min-width: 0; }
+.linked-eq { flex: none; padding: 0 var(--row-gap) var(--cap-lift) 0; }
+.link-chip {
+  flex: none; display: flex; align-items: center; height: var(--control); padding: 0 var(--field-text-inset) var(--cap-lift);
+  background: var(--link); color: var(--surface); border-radius: var(--radius) 0 0 var(--radius);
+}
+.linked-values > input { flex: 1; width: 100%; min-width: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .linked-unit { grid-column: 4; width: 100%; min-width: 0; }
-.linked-mode { grid-column: 5; }
 .scan-axes > button.linked-add { grid-column: 6; justify-self: center; }
 .scan-axes > button.linked-remove { grid-column: 7; }
+.linked-preview { grid-column: 3 / -1; padding-left: var(--field-text-inset); margin-top: calc(-1 * var(--row-gap) / 2); }
+.linked-preview.problem { color: var(--red-dark); }

@@ -8,7 +8,7 @@
 // operand may be, which axes and labels a pick offers, which statistics
 // fit, each line's problem and what the variable comes out as.  The cards
 // write back `variables`, the rows they were handed, edited.
-import { CheckCombo, ComboBox, Segmented, button, element, form, row as formRow, sectionTitle, setChecked, setText, switchButton, token, } from "../../fluent/index.js";
+import { CheckCombo, ComboBox, Segmented, button, element, form, row as formRow, sectionTitle, setChecked, setText, spinBox, switchButton, token, } from "../../fluent/index.js";
 /** A label set's values, each `[key, text]`: as listed, or its counted rows
  * spelled as the model names them (`spatial-y 0 · spatial-x 1`). */
 function labelValues(set) {
@@ -185,6 +185,13 @@ class CardView {
     statStrip = new Segmented(value => this.statisticChosen(String(value)));
     overWord = element("span", "derive-word", "over");
     over = new CheckCombo();
+    x = new ComboBox(value => this.edit(row => { row.over = value === null ? [] : [String(value)]; }), "x axis");
+    modelPair = element("div", "derive-pair");
+    model = new ComboBox(value => this.edit(row => { row.model = String(value ?? ""); }), "choose");
+    everyPair = element("div", "derive-pair");
+    /** Blank is 0, the whole axis. */
+    everyCount = spinBox({ step: () => 1, bounds: () => [0, null], special: { value: 0, text: "" }, label: "Every", commit: count => this.everyChosen(count) });
+    everyAxis = new ComboBox(value => this.edit(row => { row.by = String(value ?? ""); }), "axis");
     statRemove = button("×", () => this.closeStatistic(), "destructive glyph square derive-remove");
     statError = element("p", "field-error derive-error");
     statCells;
@@ -201,9 +208,28 @@ class CardView {
         this.index = index;
         this.statLead.append(element("span", "derive-word", "statistic"), element("span", "derive-eq hold", "="));
         const reduce = element("div", "derive-reduce");
-        reduce.append(this.statStrip.root, this.overWord, this.over.root);
+        const overPair = element("div", "derive-pair");
+        overPair.append(this.overWord, this.over.root, this.x.root);
+        this.modelPair.append(element("span", "derive-word", "model"), this.model.root);
+        this.everyPair.append(element("span", "derive-word", "every"), this.everyCount.root, this.everyAxis.root);
+        reduce.append(this.statStrip.root, overPair, this.modelPair, this.everyPair);
         this.over.root.classList.add("derive-over");
-        this.over.edited = values => this.edit(row => { row.over = values; });
+        // The axis a group runs along goes with it.
+        this.over.edited = values => this.edit(row => { row.over = values; if (row.by && !values.includes(row.by))
+            Object.assign(row, { by: "", every: 0 }); });
+        const count = this.everyCount;
+        count.input.title = "Coordinates in one group; blank reduces the whole axis";
+        count.input.addEventListener("change", () => {
+            const typed = count.text.trim() === "" ? 0 : Number(count.text);
+            if (Number.isInteger(typed) && typed >= 0)
+                this.everyChosen(typed);
+            else {
+                count.input.value = this.row.every ? String(this.row.every) : "";
+                count.refresh();
+            }
+        });
+        count.input.addEventListener("keydown", event => { if (event.key === "Enter")
+            count.input.blur(); });
         this.statRemove.title = "Remove this statistic";
         this.statCells = [this.statLead, reduce, this.statRemove, this.statError];
         this.root.append(this.grid);
@@ -253,8 +279,25 @@ class CardView {
             overItems.push({ value: choice.value, label: choice.label });
         }
         this.over.set(overItems, statistic.over);
-        this.overWord.hidden = this.over.root.hidden = !overItems.length;
+        this.over.root.hidden = statistic.fit || !overItems.length;
+        this.overWord.hidden = !statistic.fit && !overItems.length;
         this.over.disabled = locked;
+        this.x.root.hidden = !statistic.fit;
+        this.x.setChoices(statistic.fit_axes.map(axis => ({ value: axis, label: axis })));
+        this.x.value = statistic.over[0] ?? null;
+        this.x.disabled = locked;
+        this.modelPair.hidden = !statistic.fit;
+        this.model.setChoices(statistic.models.map(([value, label]) => ({ value, label })));
+        this.model.value = statistic.model || null;
+        this.model.disabled = locked;
+        this.everyPair.hidden = !statistic.every_axes.length;
+        this.everyAxis.setChoices(statistic.every_axes.map(axis => ({ value: axis, label: axis })));
+        this.everyAxis.value = statistic.by || null;
+        this.everyAxis.disabled = locked;
+        if (document.activeElement !== this.everyCount.input)
+            this.everyCount.input.value = statistic.every ? String(statistic.every) : "";
+        this.everyCount.input.disabled = locked;
+        this.everyCount.refresh();
         this.statRemove.disabled = locked;
         setText(this.statError, statistic.error);
         this.statError.hidden = !statistic.error;
@@ -325,20 +368,22 @@ class CardView {
         else
             this.editTerm(index, term => { term.labels = values; });
     }
-    /** The statistic; with nothing to reduce over yet, every Cell axis of the
-     * value -- or, with none, the list of its axes to pick. */
+    /** The statistic, and what the model says it writes with it. */
     statisticChosen(statistic) {
-        const defaults = this.card.statistic.default_over;
-        const open = !this.row.over.length && !defaults.length && this.card.statistic.over_choices.length > 0;
-        this.edit(row => { row.statistic = statistic; if (!row.over.length)
-            row.over = [...defaults]; });
-        if (open)
+        const chosen = this.card.statistic.chosen[statistic];
+        this.edit(row => { row.statistic = statistic; Object.assign(row, copy(chosen.row)); });
+        if (chosen.opens_over)
             requestAnimationFrame(() => this.over.open());
+    }
+    /** How many coordinates make a group; none is the whole axis again. */
+    everyChosen(count) {
+        this.edit(row => { row.every = count; if (!count)
+            row.by = ""; });
     }
     closeStatistic() {
         this.statisticOpen = false;
         if (this.row.statistic || this.row.over.length)
-            this.edit(row => { row.statistic = ""; row.over = []; });
+            this.edit(row => { Object.assign(row, { statistic: "", over: [], by: "", every: 0, model: "" }); });
         else
             this.redraw();
     }

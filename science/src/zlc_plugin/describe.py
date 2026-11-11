@@ -14,7 +14,7 @@ import pathlib
 import traceback
 from typing import Any, Iterator
 
-from .declare import DeviceType, NodeType
+from .declare import DeviceType, NodeType, field_json
 from .wire import PROTOCOL
 
 
@@ -55,8 +55,23 @@ def describe(packages: list[str]) -> dict[str, Any]:
     types: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     templates: dict[str, list[dict[str, str]]] = {}
+    configuration_schemas: dict[str, list[dict[str, Any]]] = {}
     seen: dict[str, str] = {}
     for package in packages:
+        # Scientific configuration is declared by its package, never copied
+        # into the application. Missing packages leave saved values intact.
+        try:
+            module_name = f"{package}.configuration"
+            spec = importlib.util.find_spec(module_name)
+            offered = {} if spec is None else getattr(importlib.import_module(module_name), "APPARATUS_SCHEMAS", {})
+            for name, schema in offered.items():
+                fields = [field_json(field) for field in schema.fields]
+                if name in configuration_schemas and configuration_schemas[name] != fields:
+                    raise ValueError(f"configuration schema {name!r} has conflicting plugin owners")
+                configuration_schemas[str(name)] = fields
+        except Exception as error:
+            errors.append({"module": f"{package}.configuration", "error": f"{type(error).__name__}: {error}",
+                           "traceback": "".join(traceback.format_exception(error))})
         for module_name in leaf_modules(package):
             try:
                 for item in types_of(module_name):
@@ -76,5 +91,6 @@ def describe(packages: list[str]) -> dict[str, Any]:
         except Exception as error:
             errors.append({"module": f"{package}.templates", "error": f"{type(error).__name__}: {error}",
                            "traceback": "".join(traceback.format_exception(error))})
-    return {"protocol": list(PROTOCOL), "types": types, "errors": errors, "templates": templates}
+    return {"protocol": list(PROTOCOL), "types": types, "errors": errors, "templates": templates,
+            "configuration_schemas": configuration_schemas}
 

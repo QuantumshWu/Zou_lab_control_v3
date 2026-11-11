@@ -5,6 +5,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak, atomic::{AtomicBool, Ordering}, mpsc:
 use std::time::{Duration, Instant};
 use serde_json::Value;
 use uuid::Uuid;
+use crate::acquisition::Builder;
 use crate::dataset::DataBlock;
 use crate::OwnedBuffer;
 use crate::schema::{Axis, CodeBase, CodeMapping, Coordinate, Coordinates, DatasetSchema, Domain, DomainRole};
@@ -42,7 +43,15 @@ impl Generation {
     pub fn owner(&self) -> &str { &self.owner }
 }
 
-pub struct RunRecord { pub generation: GenerationId, pub owner: Arc<str>, pub metadata: Value }
+pub struct RunRecord { pub generation: GenerationId, pub owner: Arc<str>, pub metadata: Value,
+    /// Set on a run that stands for a saved Figure (`begin_imported`).
+    pub imported: Option<Arc<dyn ImportedRun>> }
+/// The field of a provenance's run record that holds an imported run's saved history.
+pub const IMPORTED_LINEAGE: &str = "zlc.figure.imported-lineage";
+/// A saved Figure's history, kept behind one handle its datasets' runs share: readers of
+/// run metadata (a selection's context, a plugin's read) never carry it. Only capturing a
+/// provenance asks for it, as `{source, lineage}`.
+pub trait ImportedRun: Send + Sync { fn saved_history(&self) -> Value; }
 pub struct ParentRecord {
     pub key: PublicationKey,
     pub run: Arc<RunRecord>,
@@ -197,6 +206,30 @@ pub struct WindowRead {
 pub enum ReadKind {
     Event(Arc<Publication>), Canonical(Arc<Publication>), Window(Arc<WindowRead>),
 }
+impl ReadKind {
+    /// Visit the metadata roots actually represented by this read. For a finite
+    /// prefix these are newest first; a consumer that recognizes a previously
+    /// visited immutable prefix can stop by returning false.
+    pub fn visit_record_roots(&self, mut visit: impl FnMut(&Arc<str>, &Arc<RunRecord>, &Arc<EventRecord>) -> bool) {
+        match self {
+            Self::Window(window) => {
+                for entry in window.entries().iter().rev() {
+                    if !visit(&entry.key.signal, entry.run(), entry.event()) { break; }
+                }
+            }
+            Self::Event(publication) | Self::Canonical(publication) => {
+                if !visit(&publication.key.signal, publication.run(), publication.event()) { return; }
+                if matches!(self, Self::Canonical(_)) {
+                    let mut entry = publication.events.as_deref();
+                    while let Some(fact) = entry {
+                        if !Arc::ptr_eq(&fact.event, publication.event()) && !visit(&publication.key.signal, publication.run(), &fact.event) { break; }
+                        entry = fact.previous.as_deref();
+                    }
+                }
+            }
+        }
+    }
+}
 #[derive(Clone)]
 pub struct Read { kind: ReadKind, _lineage: Option<Arc<PayloadLineage>> }
 impl Read {
@@ -253,38 +286,42 @@ impl Read {
         }
     }
     /// The causal facts a saved Figure keeps: each publication with its run and
-    /// event records and parents; a window also lists every member's record.
+    /// event records and parents; a window also holds every member, each run and event once.
     pub fn provenance(&self) -> Value {
         fn record(key:&PublicationKey, run:&RunRecord, event:&EventRecord) -> Value {
+            let mut metadata = run.metadata.clone();
+            if let Some(imported) = &run.imported { metadata[IMPORTED_LINEAGE] = imported.saved_history(); }
             serde_json::json!({"publication":{"stream":run.owner.as_ref(),"generation":key.generation.as_uuid().to_string(),"signal":key.signal.as_ref(),
-                "revision":key.revision,"ordinal":key.ordinal},"run":run.metadata,"event":event.metadata,
+                "revision":key.revision,"ordinal":key.ordinal},"run":metadata,"event":event.metadata,
                 "parents":event.parents.iter().map(|parent|record(&parent.key,&parent.run,&parent.event)).collect::<Vec<_>>()})
         }
-        fn acquisition(entries: impl IntoIterator<Item=(PublicationKey, Arc<RunRecord>, Arc<EventRecord>, [usize;2], [usize;2])>) -> Value {
-            fn add_event(key: &PublicationKey, run: &RunRecord, event: &EventRecord,
-                         runs: &mut Vec<Value>, run_indices: &mut HashMap<GenerationId,usize>,
-                         events: &mut Vec<Value>, event_indices: &mut HashMap<PublicationKey,usize>) -> usize {
-                if let Some(index) = event_indices.get(key) { return *index; }
-                let run_index = *run_indices.entry(key.generation).or_insert_with(|| {
-                    let index = runs.len();
-                    runs.push(serde_json::json!({"stream":run.owner.as_ref(), "generation":key.generation.as_uuid().to_string(), "record":run.metadata}));
-                    index
-                });
-                let parents: Vec<_> = event.parents.iter().map(|parent|
-                    add_event(&parent.key,&parent.run,&parent.event,runs,run_indices,events,event_indices)).collect();
-                let index = events.len();
-                events.push(serde_json::json!({"run":run_index, "signal":key.signal.as_ref(), "revision":key.revision,
-                    "ordinal":key.ordinal, "record":event.metadata, "parents":parents}));
-                event_indices.insert(key.clone(),index);
+        /// Each run and each event once, parents before their children.
+        #[derive(Default)]
+        struct Events { table: Builder, runs: HashMap<GenerationId,usize>, known: HashMap<PublicationKey,usize> }
+        impl Events {
+            fn add(&mut self, key: &PublicationKey, run: &RunRecord, event: &EventRecord) -> usize {
+                if let Some(index) = self.known.get(key) { return *index; }
+                let run_index = match self.runs.get(&key.generation) {
+                    Some(index) => *index,
+                    None => {
+                        let index = self.table.run(&run.owner,&key.generation.as_uuid().to_string(),&run.metadata);
+                        self.runs.insert(key.generation,index);
+                        index
+                    }
+                };
+                let parents: Vec<_> = event.parents.iter().map(|parent| self.add(&parent.key,&parent.run,&parent.event)).collect();
+                let index = self.table.event(run_index,&key.signal,key.revision,key.ordinal,&event.metadata,&parents);
+                self.known.insert(key.clone(),index);
                 index
             }
-            let (mut runs, mut events, mut ranges) = (Vec::new(),Vec::new(),Vec::new());
-            let (mut run_indices, mut event_indices) = (HashMap::new(),HashMap::new());
+        }
+        fn acquisition(entries: impl IntoIterator<Item=(PublicationKey, Arc<RunRecord>, Arc<EventRecord>, [usize;2], [usize;2])>) -> Value {
+            let mut events = Events::default();
             for (key,run,event,origin,extent) in entries {
-                let index = add_event(&key,&run,&event,&mut runs,&mut run_indices,&mut events,&mut event_indices);
-                ranges.push(serde_json::json!({"event":index, "origin":origin, "extent":extent}));
+                let index = events.add(&key,&run,&event);
+                events.table.range(index,origin,extent);
             }
-            serde_json::json!({"runs":runs,"events":events,"ranges":ranges})
+            events.table.finish()
         }
         match &self.kind {
             ReadKind::Event(event) => record(&event.key,&event.run,&event.event),
@@ -304,8 +341,9 @@ impl Read {
             ReadKind::Window(window) => {
                 let latest = window.entries.last().expect("window has an anchor");
                 let mut value = record(&latest.key,&latest.run,&latest.event);
-                value["window"] = serde_json::json!({"width":window.width,"members":window.entries.iter()
-                    .map(|event|record(&event.key,&event.run,&event.event)).collect::<Vec<_>>()});
+                let mut events = Events::default();
+                let members: Vec<_> = window.entries.iter().map(|event|events.add(&event.key,&event.run,&event.event)).collect();
+                value["window"] = crate::acquisition::window(window.width,&members,events.table);
                 value
             }
         }
@@ -382,7 +420,7 @@ impl Signal {
         let capacity = self.capacity();
         let Some(latest) = &self.latest else { return false; };
         let count = self.history.len();
-        let start = latest.key.ordinal.map(|ordinal|ordinal.saturating_sub(capacity.saturating_sub(1) as u64));
+        let start = latest.key.ordinal.map(|ordinal| ordinal.saturating_sub(capacity.saturating_sub(1) as u64));
         while self.history.front().is_some_and(|p| capacity == 0 || p.key.ordinal < start) {
             garbage.push(self.history.pop_front().unwrap());
         }
@@ -620,7 +658,7 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
         // the signal across runs is one only while it runs (v2: only a processor stays a
         // route once ended).
         let route=run.source.as_ref().filter(|source|source.coherent && source.declared
-            && (source.generation.is_some() || !run.sealed));
+            && (source.generation.is_some() || !run.sealed) && owes_its_group(state,source));
         for (name,signal) in &run.signals {
             retained.insert(name.clone(),signal);
             if let Some(event)=&signal.latest {
@@ -667,8 +705,9 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
         // A panel's window of a member is anchored in what that window retains.
         let at_shot=|name:&Arc<str>,shot:&HashSet<EventIdentity>| latest.get(name).filter(|read:&&Read|read.shot_roots()==*shot).cloned().or_else(|| {
             let signal:&Signal=retained.get(name)?;
-            let kept=if windowed.contains(name) {Some(&signal.history)} else {signal.recent.as_ref()};
-            kept?.iter().rev().find(|event|causal_events(&event.key,&event.event,true)==*shot).map(|event|dataset_read(event.clone()))
+            let same_shot=|event:&&Arc<Publication>|causal_events(&event.key,&event.event,true)==*shot;
+            let kept=if windowed.contains(name) {signal.history.iter().rev().find(same_shot)} else {signal.recent.as_ref()?.iter().rev().find(same_shot)};
+            kept.map(|event|dataset_read(event.clone()))
         });
         let mut joined=HashMap::new();let mut coherent=shot.is_some();
         for name in shot.as_ref().map_or(&[][..],|_|&leaves[..]) {
@@ -696,17 +735,13 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
             coherent &= !previous.selected.iter().filter(|(name,_)|component.contains(*name)).any(|(_,read)|
                 read.shot_roots().iter().any(|shown|shot.iter().any(|root|root.0==shown.0 && root.1<shown.1)));
         }
-        // No newer complete shot: the group keeps the one it showed (v2 previous_front), of
-        // whichever runs. A member that never had a result has none to keep; one whose
-        // signal left the Runtime has left the group.
+        // No newer complete shot: each member keeps what it showed (v2 previous_front), of
+        // whichever runs and shots: they stood apart until a consumer came to owe this group.
+        // A member that never had a result has none to keep; one whose signal left the
+        // Runtime has left the group.
         if !coherent {
             joined=previous.selected.iter().filter(|(name,_)|component.contains(*name) && state.signals.contains_key(*name))
                 .map(|(name,read)|(name.clone(),read.clone())).collect();
-            let roots:HashSet<_>=required.iter().filter_map(|name|joined.get(name)).map(|read| {
-                let mut roots:Vec<_>=causal_events(&read.anchor().key,&read.anchor().event,true).into_iter().collect();
-                roots.sort_unstable_by_key(|(generation,revision)|(generation.as_uuid(),*revision));roots
-            }).collect();
-            if roots.len()!=1 {joined.clear();}
         }
         for name in component {selected.remove(&name);if let Some(read)=joined.remove(&name) {selected.insert(name,read);}}
     }
@@ -725,7 +760,25 @@ struct Run {
 /// (`generation`), or the signal across its runs. A guarded route is a derived
 /// owner's: it ends when that source run is replaced. A declared route is a member
 /// of its source's same-shot group until its owner releases it (`release_route`).
-struct DerivedSource { signal: Arc<str>, generation: Option<GenerationId>, coherent: bool, guarded: bool, declared: bool }
+struct DerivedSource {
+    signal: Arc<str>, generation: Option<GenerationId>, coherent: bool, guarded: bool, declared: bool,
+    /// The subscription that feeds it, when it is told (`bind_consumer`): what says it owes the newest shot.
+    consumer: Option<u64>,
+}
+
+/// Whether a consumer's group waits for it. A consumer with work for the newest source
+/// event alone is about to answer it: its group waits, and they are shown together.
+/// With nothing to do it owes no shot (it answered the last with nothing, as a group of
+/// repeats does until it closes); with more it is catching up. Then its source goes on
+/// showing its newest, and the consumer what it has answered. A consumer that takes only
+/// the newest is never behind. One whose feed is not known, or has gone, keeps its group
+/// as a declared member does.
+fn owes_its_group(state:&State,source:&DerivedSource) -> bool {
+    let Some(subscriber)=source.consumer.and_then(|ticket|state.subscribers.get(&ticket)) else {return true};
+    let queued=subscriber.queue.iter().filter(|delivery|matches!(delivery.kind,DeliveryKind::Data)).take(2).count();
+    let owed=usize::from(subscriber.in_hand)+subscriber.replay.len().saturating_add(queued);
+    if matches!(subscriber.policy,DeliveryPolicy::Latest) {owed>0} else {owed==1}
+}
 struct Subscriber {
     generation: Option<GenerationId>, follow_owner: Option<Arc<str>>,
     requests: Vec<ReadRequest>, policy: DeliveryPolicy,
@@ -736,6 +789,8 @@ struct Subscriber {
     /// A finite run's committed events, delivered before the queue; its store holds them.
     replay: VecDeque<Arc<Delivery>>,
     changed: Arc<Condvar>, interrupted: bool,
+    /// A data delivery taken by `next` and not finished: the next `next` says it is.
+    in_hand: bool,
 }
 impl Subscriber {
     /// The blocks an event pins itself: its own, or a Snapshot replacement's
@@ -900,7 +955,249 @@ fn release_demands(run: &mut Run, requests: &[ReadRequest], ticket: u64, garbage
         }
     }
 }
+/// What commits release, dropped outside the state lock.
+#[derive(Default)]
+struct Garbage { publications: Vec<Arc<Publication>>, deliveries: Vec<Arc<Delivery>>, heads: Vec<Arc<PayloadLineage>> }
+
+/// One event, under the lock. `newest`: the newest of what is committed together,
+/// the one a Latest subscriber takes.
+/// A run as the journal names it: its owner and the start of its generation's id.
+fn journal_run(generation: &Generation) -> (String, String) {
+    (generation.owner.to_string(), generation.id.as_uuid().simple().to_string()[..8].to_owned())
+}
+
+/// What the Runtime has just published, kept for whoever looks into a fault afterwards: every event's data
+/// in the order it was committed, as much as a budget of memory holds and no older than the journal goes
+/// back. The oldest goes first, whichever signal it is of, so every signal is kept for the same length of
+/// time -- a small result as long as the frames it was made from, and no longer.
+#[derive(Default)]
+struct Recent {
+    budget: usize,
+    kept: VecDeque<(u64, Arc<Publication>)>,
+    /// The memory `kept` pins: each data block once, however many kept publications share it.
+    bytes: usize,
+    blocks: HashMap<usize, (usize, usize)>,
+}
+
+impl Recent {
+    fn block(publication: &Publication) -> Option<(usize, usize)> {
+        publication.data.as_ref().map(|data| (Arc::as_ptr(data) as usize, data.payload_bytes()))
+    }
+
+    fn keep(&mut self, us: u64, publication: &Arc<Publication>, garbage: &mut Vec<Arc<Publication>>) {
+        let Some((block, bytes)) = Self::block(publication) else { return };
+        let held = self.blocks.entry(block).or_insert((0, bytes));
+        if held.0 == 0 { self.bytes += bytes; }
+        held.0 += 1;
+        self.kept.push_back((us, publication.clone()));
+        self.shed(us, garbage);
+    }
+
+    /// Let go of what is over the budget or older than the journal keeps, oldest first.
+    fn shed(&mut self, now: u64, garbage: &mut Vec<Arc<Publication>>) {
+        let oldest = now.saturating_sub(crate::journal::KEPT.as_micros() as u64);
+        while self.kept.front().is_some_and(|(us, _)| self.bytes > self.budget || *us < oldest) {
+            let (_, publication) = self.kept.pop_front().expect("a front");
+            if let Some((block, bytes)) = Self::block(&publication) {
+                let gone = self.blocks.get_mut(&block).is_some_and(|held| { held.0 -= 1; held.0 == 0 });
+                if gone { self.blocks.remove(&block); self.bytes -= bytes; }
+            }
+            garbage.push(publication);
+        }
+    }
+}
+
+/// What [`Runtime::recent`] answers: the budget, the memory now pinned, and the kept publications, oldest
+/// first, each with when it was committed (microseconds since the Unix epoch).
+pub struct RecentData { pub budget: usize, pub bytes: usize, pub publications: Vec<(u64, Arc<Publication>)> }
+
+impl RecentData {
+    /// How far back the kept data goes from `now_us`, in seconds; None while nothing is kept.
+    pub fn span_seconds(&self, now_us: u64) -> Option<f64> {
+        self.publications.first().map(|(us, _)| now_us.saturating_sub(*us) as f64 / 1e6)
+    }
+}
+
+/// One committed event, as the journal keeps it: each output's ordinal, and the events it is of.
+fn commit_locked(state: &mut State, generation: &Generation, bundle: &Bundle, newest: bool, garbage: &mut Garbage) -> Result<Arc<Delivery>> {
+    let committed = commit_checked(state, generation, bundle, newest, garbage);
+    if let (Ok(delivery), Some(recent)) = (&committed, state.recent.as_mut()) {
+        let now = crate::journal::now_us();
+        for publication in delivery.publications.iter() { recent.keep(now, publication, &mut garbage.publications); }
+    }
+    if committed.is_ok() {
+        crate::journal::note_with("runtime", "commit", || {
+            let (owner, run) = journal_run(generation);
+            let outputs: serde_json::Map<String, Value> = bundle.inputs.iter().map(|input| (input.signal().to_string(), input.ordinal().into())).collect();
+            let parents: Vec<String> = bundle.parents.iter().map(|parent| match parent.key.ordinal {
+                Some(ordinal) => format!("{}#{ordinal}", parent.key.signal), None => parent.key.signal.to_string() }).collect();
+            serde_json::json!({"owner": owner, "run": run, "out": outputs, "of": parents})
+        });
+    }
+    committed
+}
+
+fn commit_checked(state: &mut State, generation: &Generation, bundle: &Bundle, newest: bool, garbage: &mut Garbage) -> Result<Arc<Delivery>> {
+    if bundle.inputs.is_empty() { return Err(RuntimeError::EmptyBundle); }
+    if !bundle.metadata.is_object() { return Err(RuntimeError::InvalidMetadata); }
+    if state.closed { return Err(RuntimeError::Closed); }
+    let event = Arc::new(EventRecord { metadata: bundle.metadata.clone(),
+        parents: bundle.parents.iter().map(|p| ParentRecord {
+            key: p.key.clone(), run: p.run.clone(), event: p.event.clone(),
+        }).collect() });
+    if let Some(source)=state.runs.get(&generation.id).ok_or(RuntimeError::UnknownGeneration)?.source.as_ref().filter(|source|source.guarded) {
+        if state.signals.get(&source.signal)!=source.generation.as_ref() {return Err(RuntimeError::SourceSuperseded);}
+        if !bundle.parents.first().is_some_and(|parent|Some(parent.key.generation)==source.generation
+            && parent.key.signal==source.signal) {
+            return Err(RuntimeError::InvalidLayout("Derived bundle anchor does not belong to its declared source".into()));
+        }
+    }
+    let run = state.runs.get_mut(&generation.id).ok_or(RuntimeError::UnknownGeneration)?;
+    if run.sealed { return Err(RuntimeError::Sealed); }
+    let revision = run.revision.checked_add(1).ok_or(RuntimeError::CounterExhausted)?;
+    let mut names = HashSet::new();
+    let mut prepared = Vec::with_capacity(bundle.inputs.len());
+    // Every sibling is checked before any state or subscriber changes.
+    for input in &bundle.inputs {
+        let name=input.signal();
+        if !names.insert(name.clone()) { return Err(RuntimeError::DuplicateSignal(name.to_string())); }
+        let signal = run.signals.get(name).ok_or_else(|| RuntimeError::UnknownSignal(name.to_string()))?;
+        let (data, placement, snapshot) = match input {
+            Input::Event {data,origin,shot_time,ordinal,..} => {
+                if shot_time.is_some_and(|time| !time.is_finite()) {
+                    return Err(RuntimeError::InvalidLayout("A shot time must be finite".into()));
+                }
+                if signal.stamped.is_some_and(|stamped| stamped != shot_time.is_some()) {
+                    return Err(RuntimeError::InvalidLayout("A signal stamps every shot with its time or none".into()));
+                }
+                // A later shot is later in time; a revised one keeps its place.
+                if let (Some(time), Some(latest)) = (shot_time, signal.latest.as_ref()) {
+                    if latest.key.ordinal.is_some_and(|last| *ordinal > last) && latest.shot_time.is_some_and(|last| *time <= last) {
+                        return Err(RuntimeError::OutOfOrder(name.to_string()));
+                    }
+                }
+                match (&signal.store,origin) {
+                (None,None) => (Some(admit_block(data,&signal.schema).ok_or_else(|| RuntimeError::SchemaChanged(name.to_string()))?), None,None),
+                (Some(store),Some(origin)) => {
+                    let extent = [data.schema().domain(DomainRole::Repeat).size(),
+                        data.schema().domain(DomainRole::Point).size()];
+                    let placement = Placement::new(*origin,extent,data.clone()).map_err(RuntimeError::InvalidLayout)?;
+                    store.validate(std::slice::from_ref(&placement)).map_err(RuntimeError::InvalidLayout)?;
+                    (Some(data.clone()),Some(placement),None)
+                }
+                _ => return Err(RuntimeError::InvalidLayout("Only finite outputs require a Repeat/Point placement".into())),
+            }},
+            Input::FiniteSnapshot {..} => {
+                if signal.store.is_none() {return Err(RuntimeError::InvalidLayout("A prefix publication requires a finite dataset store".into()));}
+                (None,None,None)
+            }
+            Input::Dataset {snapshot,..} => {
+                if signal.store.is_some() || signal.history_capable {
+                    return Err(RuntimeError::InvalidLayout("Complete datasets require a Snapshot declaration".into()));
+                }
+                (None,None,Some(snapshot.with_schema(signal.schema.clone()).ok()
+                    .or_else(|| signal.schema.holds(snapshot.schema()).then(|| snapshot.clone()))
+                    .ok_or_else(|| RuntimeError::SchemaChanged(name.to_string()))?))
+            }
+        };
+        if input.ordinal().is_some_and(|ordinal|signal.last_ordinal.is_some_and(|last|last>ordinal)) {
+            return Err(RuntimeError::OutOfOrder(name.to_string()));
+        }
+        prepared.push((input,data,placement,snapshot));
+    }
+    let mut prepared_publications = Vec::with_capacity(prepared.len());
+    for (input,data,placement,snapshot) in prepared {
+        let signal = run.signals.get_mut(input.signal()).unwrap();
+        // The same lock still protects the prevalidated stores. No
+        // fallible sibling installation remains after preflight.
+        let canonical = snapshot.or_else(||signal.store.as_mut().map(|store|match placement {
+            Some(placement)=>store.commit(vec![placement]).expect("finite store preflight under Runtime lock"),
+            None=>store.snapshot(),
+        }));
+        if signal.store.is_some() && data.is_some() {
+            signal.events.push(Arc::new(FiniteEvent {previous:signal.events.last().cloned(),
+                revision,ordinal:input.ordinal(),event:event.clone()}));
+        }
+        let shot_time = match input { Input::Event {shot_time,..} => *shot_time, _ => None };
+        if matches!(input, Input::Event {..}) { signal.stamped = Some(shot_time.is_some()); }
+        prepared_publications.push(Publication {
+            key: PublicationKey { generation: generation.id, signal: input.signal().clone(), revision, ordinal: input.ordinal() },
+            data, run: run.record.clone(), event: event.clone(), canonical, shot_time,
+            events: signal.events.last().cloned(),
+            storage: if signal.store.is_some() { Storage::Finite }
+                else if signal.history_capable { Storage::Latest } else { Storage::Snapshot },
+            lineage:Weak::new(),
+        });
+    }
+    // A current head and an in-flight Read own this flattened payload
+    // closure. Publications retained in history carry only a Weak
+    // link, so forty ROI samples do not pin forty full camera frames.
+    let head=Arc::new_cyclic(|weak| {
+        let mut closure=HashMap::new();
+        if run.source.as_ref().is_some_and(|source|source.coherent) {
+            for parent in &bundle.parents {
+                if let Some(lineage)=parent.lineage.upgrade() {
+                    closure.extend(lineage.publications.iter().map(|(key,value)|(key.clone(),value.clone())));
+                }
+                closure.insert(parent.key.clone(),parent.clone());
+            }
+        }
+        for mut publication in prepared_publications {
+            publication.lineage=weak.clone();
+            closure.insert(publication.key.clone(),Arc::new(publication));
+        }
+        PayloadLineage {publications:closure}
+    });
+    let publications: Arc<[_]> = bundle.inputs.iter().map(|input|head.publications[&PublicationKey {
+        generation:generation.id,signal:input.signal().clone(),revision,ordinal:input.ordinal(),
+    }].clone()).collect();
+    for publication in publications.iter() {
+        let signal = run.signals.get_mut(&publication.key.signal).unwrap();
+        if let Some(ordinal)=publication.key.ordinal {signal.last_ordinal=Some(ordinal);}
+        if let Some(previous)=signal.head.replace(head.clone()) {garbage.heads.push(previous);}
+        if let Some(previous) = signal.latest.replace(publication.clone()) { garbage.publications.push(previous); }
+        signal.keep_recent(publication,&mut garbage.publications);
+        if signal.capacity() > 0 {
+            // Recomputing the same source ordinal revises that sample;
+            // it is not an invented extra camera shot.
+            if signal.history.back().is_some_and(|p| p.key.ordinal == publication.key.ordinal) {
+                garbage.publications.push(signal.history.pop_back().unwrap());
+            }
+            signal.history.push_back(publication.clone());
+        }
+        signal.trim(&mut garbage.publications);
+        signal.views.clear();
+    }
+    run.revision = revision;
+    let subscriber_ids = run.subscribers.clone();
+    let reads = publications.iter().cloned().map(|event|if event.data.is_some() {
+        Read::from_event(event).expect("actual event")
+    } else {Read::from_canonical(event)}).collect();
+    let committed = Arc::new(Delivery { kind:DeliveryKind::Data, generation: generation.id, revision: Some(revision), publications, reads });
+    let State { runs, subscribers, .. } = &mut *state;
+    let run = runs.get_mut(&generation.id).unwrap();
+    for ticket in subscriber_ids.iter() {
+        let Some(subscriber) = subscribers.get_mut(ticket).filter(|s| s.terminal.is_none()) else { continue; };
+        if !newest && matches!(subscriber.policy, DeliveryPolicy::Latest) { continue; }
+        let publications: Arc<[_]> = committed.publications.iter().filter(|p|
+            subscriber.requests.iter().any(|request| request.signal == p.key.signal
+                && (!matches!(request.mode,ReadMode::Event) || p.data.is_some()))).cloned().collect();
+        if publications.is_empty() { continue; }
+        let result = capture_reads(run,&subscriber.requests,&publications).and_then(|reads|
+            subscriber.enqueue(Arc::new(Delivery { kind:DeliveryKind::Data, generation: generation.id, revision: Some(revision), publications, reads }), &mut garbage.deliveries));
+        if let Err(error) = result {
+            subscriber.terminal = Some(error);
+            subscriber.clear_queue(&mut garbage.deliveries);
+            release_demands(run,&subscriber.requests,*ticket,&mut garbage.publications);
+            subscriber.changed.notify_all();
+        }
+    }
+    Ok(committed)
+}
+
 struct State {
+    /// What is kept of recent publications (`Runtime::keep_recent`); None while nothing is asked to be.
+    recent: Option<Recent>,
     runs: HashMap<GenerationId, Run>, owners: HashMap<Arc<str>, GenerationId>,
     signals: HashMap<Arc<str>, GenerationId>, subscribers: HashMap<u64, Subscriber>, next_ticket: u64, closed: bool,
     watches: HashMap<u64, (SyncSender<()>, Arc<AtomicBool>)>,
@@ -913,6 +1210,7 @@ impl Default for Runtime { fn default() -> Self { Self::new() } }
 impl Runtime {
     pub fn new() -> Self {
         Self { inner: Arc::new(Inner { state: Mutex::new(State {
+            recent: None,
             runs: HashMap::new(), owners: HashMap::new(), signals: HashMap::new(),
             subscribers: HashMap::new(), next_ticket: 1, closed: false, watches: HashMap::new(),
         }) }) }
@@ -929,7 +1227,12 @@ impl Runtime {
     }
 
     pub fn begin(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value) -> Result<Generation> {
-        self.begin_run(owner.into(),outputs,metadata,None)
+        self.begin_run(owner.into(),outputs,metadata,None,None)
+    }
+
+    /// A run that stands for a saved Figure: what it publishes descends from `imported`.
+    pub fn begin_imported(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value, imported: Arc<dyn ImportedRun>) -> Result<Generation> {
+        self.begin_run(owner.into(),outputs,metadata,None,Some(imported))
     }
 
     /// Declare an actual causal route, not a naming convention. Presentation
@@ -937,7 +1240,7 @@ impl Runtime {
     pub fn begin_derived(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value,
                          source:&PublicationKey, coherent:bool) -> Result<Generation> {
         self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source.signal.clone(),
-            generation:Some(source.generation),coherent,guarded:true,declared:true}))
+            generation:Some(source.generation),coherent,guarded:true,declared:true,consumer:None}),None)
     }
 
     /// A plugin run that consumes `source` and commits each result with the
@@ -950,11 +1253,21 @@ impl Runtime {
     /// member while it runs. It keeps committing a replaced run's remaining queue.
     pub fn begin_consuming(&self, owner: impl Into<Arc<str>>, outputs: Vec<Declaration>, metadata: Value,
                            source: Arc<str>, generation: Option<GenerationId>) -> Result<Generation> {
-        self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source,generation,coherent:true,guarded:false,declared:true}))
+        self.begin_run(owner.into(),outputs,metadata,Some(DerivedSource {signal:source,generation,coherent:true,guarded:false,declared:true,consumer:None}),None)
+    }
+
+    /// The subscription that feeds this consuming run, one delivery at a time: from now
+    /// on its group waits for it only for the shot it owes (`owes_its_group`).
+    pub fn bind_consumer(&self, generation: &Generation, consumer: SubscriptionTicket) -> Result<()> {
+        let mut state = self.inner.state.lock().unwrap();
+        let run = state.runs.get_mut(&generation.id).ok_or(RuntimeError::UnknownGeneration)?;
+        if let Some(source) = run.source.as_mut() { source.consumer = Some(consumer.0); }
+        notify_changes(&state);
+        Ok(())
     }
 
     fn begin_run(&self, owner:Arc<str>, outputs:Vec<Declaration>, metadata:Value,
-                 source:Option<DerivedSource>) -> Result<Generation> {
+                 source:Option<DerivedSource>, imported:Option<Arc<dyn ImportedRun>>) -> Result<Generation> {
         if owner.is_empty() || owner.trim() != owner.as_ref() || outputs.is_empty() {
             return Err(RuntimeError::InvalidDeclaration("An owner and at least one output are required".into()));
         }
@@ -1000,7 +1313,7 @@ impl Runtime {
             }).collect();
             state.owners.insert(owner.clone(), token.id);
             let mut run = Run { token: token.clone(), sealed: false, revision: 0, signals,
-                record: Arc::new(RunRecord { generation: token.id, owner:owner.clone(), metadata }), outcome: None, subscribers: Arc::from([]),source };
+                record: Arc::new(RunRecord { generation: token.id, owner:owner.clone(), metadata, imported }), outcome: None, subscribers: Arc::from([]),source };
             // Explicit followers and their retention are installed before the
             // producer can commit its first event, without a notification race.
             for (&ticket,subscriber) in state.subscribers.iter_mut().filter(|(_,subscriber)|
@@ -1010,6 +1323,13 @@ impl Runtime {
                     subscriber.changed.notify_all();
                 }
             }
+            crate::journal::note_with("runtime", "begin", || {
+                let (owner, id) = journal_run(&token);
+                let mut signals: Vec<&str> = run.signals.keys().map(|name| &**name).collect();
+                signals.sort_unstable();
+                serde_json::json!({"owner": owner, "run": id, "signals": signals,
+                    "source": run.source.as_ref().map(|source| source.signal.to_string())})
+            });
             state.runs.insert(token.id,run);
             notify_changes(&state);
         }
@@ -1018,169 +1338,37 @@ impl Runtime {
     }
 
     pub fn commit(&self, generation: &Generation, bundle: &Bundle) -> Result<Arc<Delivery>> {
-        if bundle.inputs.is_empty() { return Err(RuntimeError::EmptyBundle); }
-        if !bundle.metadata.is_object() { return Err(RuntimeError::InvalidMetadata); }
-        let event = Arc::new(EventRecord { metadata: bundle.metadata.clone(),
-            parents: bundle.parents.iter().map(|p| ParentRecord {
-                key: p.key.clone(), run: p.run.clone(), event: p.event.clone(),
-            }).collect() });
-        let mut garbage = Vec::new();
-        let mut deliveries = Vec::new();
-        let mut heads = Vec::new();
-        let committed;
+        let mut garbage = Garbage::default();
+        let result = {
+            let mut state = self.inner.state.lock().unwrap();
+            let committed = commit_locked(&mut state, generation, bundle, true, &mut garbage);
+            if committed.is_ok() { notify_changes(&state); }
+            committed
+        };
+        drop(garbage); // Large buffers are released outside the state lock.
+        result
+    }
+
+    /// Commit consecutive event bundles under one lock, each its own event in order
+    /// as `commit` would make it: every Exact and Follow subscriber takes each, a
+    /// Latest subscriber the newest, and the change watch one wake. Answers the last delivery.
+    pub fn commit_events(&self, generation: &Generation, bundles: &[Bundle]) -> Result<Arc<Delivery>> {
+        let count = bundles.len();
+        if count == 0 { return Err(RuntimeError::EmptyBundle); }
+        let mut garbage = Garbage::default();
+        let (mut last, mut failed) = (None, None);
         {
             let mut state = self.inner.state.lock().unwrap();
-            if state.closed { return Err(RuntimeError::Closed); }
-            if let Some(source)=state.runs.get(&generation.id).ok_or(RuntimeError::UnknownGeneration)?.source.as_ref().filter(|source|source.guarded) {
-                if state.signals.get(&source.signal)!=source.generation.as_ref() {return Err(RuntimeError::SourceSuperseded);}
-                if !bundle.parents.first().is_some_and(|parent|Some(parent.key.generation)==source.generation
-                    && parent.key.signal==source.signal) {
-                    return Err(RuntimeError::InvalidLayout("Derived bundle anchor does not belong to its declared source".into()));
+            for (index, bundle) in bundles.iter().enumerate() {
+                match commit_locked(&mut state, generation, bundle, index + 1 == count, &mut garbage) {
+                    Ok(delivery) => last = Some(delivery),
+                    Err(error) => { failed = Some(error); break; }
                 }
             }
-            let run = state.runs.get_mut(&generation.id).ok_or(RuntimeError::UnknownGeneration)?;
-            if run.sealed { return Err(RuntimeError::Sealed); }
-            let revision = run.revision.checked_add(1).ok_or(RuntimeError::CounterExhausted)?;
-            let mut names = HashSet::new();
-            let mut prepared = Vec::with_capacity(bundle.inputs.len());
-            // Every sibling is checked before any state or subscriber changes.
-            for input in &bundle.inputs {
-                let name=input.signal();
-                if !names.insert(name.clone()) { return Err(RuntimeError::DuplicateSignal(name.to_string())); }
-                let signal = run.signals.get(name).ok_or_else(|| RuntimeError::UnknownSignal(name.to_string()))?;
-                let (data, placement, snapshot) = match input {
-                    Input::Event {data,origin,shot_time,ordinal,..} => {
-                        if shot_time.is_some_and(|time| !time.is_finite()) {
-                            return Err(RuntimeError::InvalidLayout("A shot time must be finite".into()));
-                        }
-                        if signal.stamped.is_some_and(|stamped| stamped != shot_time.is_some()) {
-                            return Err(RuntimeError::InvalidLayout("A signal stamps every shot with its time or none".into()));
-                        }
-                        // A later shot is later in time; a revised one keeps its place.
-                        if let (Some(time), Some(latest)) = (shot_time, signal.latest.as_ref()) {
-                            if latest.key.ordinal.is_some_and(|last| *ordinal > last) && latest.shot_time.is_some_and(|last| *time <= last) {
-                                return Err(RuntimeError::OutOfOrder(name.to_string()));
-                            }
-                        }
-                        match (&signal.store,origin) {
-                        (None,None) => (Some(admit_block(data,&signal.schema).ok_or_else(|| RuntimeError::SchemaChanged(name.to_string()))?), None,None),
-                        (Some(store),Some(origin)) => {
-                            let extent = [data.schema().domain(DomainRole::Repeat).size(),
-                                data.schema().domain(DomainRole::Point).size()];
-                            let placement = Placement::new(*origin,extent,data.clone()).map_err(RuntimeError::InvalidLayout)?;
-                            store.validate(std::slice::from_ref(&placement)).map_err(RuntimeError::InvalidLayout)?;
-                            (Some(data.clone()),Some(placement),None)
-                        }
-                        _ => return Err(RuntimeError::InvalidLayout("Only finite outputs require a Repeat/Point placement".into())),
-                    }},
-                    Input::FiniteSnapshot {..} => {
-                        if signal.store.is_none() {return Err(RuntimeError::InvalidLayout("A prefix publication requires a finite dataset store".into()));}
-                        (None,None,None)
-                    }
-                    Input::Dataset {snapshot,..} => {
-                        if signal.store.is_some() || signal.history_capable {
-                            return Err(RuntimeError::InvalidLayout("Complete datasets require a Snapshot declaration".into()));
-                        }
-                        (None,None,Some(snapshot.with_schema(signal.schema.clone()).ok()
-                            .or_else(|| signal.schema.holds(snapshot.schema()).then(|| snapshot.clone()))
-                            .ok_or_else(|| RuntimeError::SchemaChanged(name.to_string()))?))
-                    }
-                };
-                if input.ordinal().is_some_and(|ordinal|signal.last_ordinal.is_some_and(|last|last>ordinal)) {
-                    return Err(RuntimeError::OutOfOrder(name.to_string()));
-                }
-                prepared.push((input,data,placement,snapshot));
-            }
-            let mut prepared_publications = Vec::with_capacity(prepared.len());
-            for (input,data,placement,snapshot) in prepared {
-                let signal = run.signals.get_mut(input.signal()).unwrap();
-                // The same lock still protects the prevalidated stores. No
-                // fallible sibling installation remains after preflight.
-                let canonical = snapshot.or_else(||signal.store.as_mut().map(|store|match placement {
-                    Some(placement)=>store.commit(vec![placement]).expect("finite store preflight under Runtime lock"),
-                    None=>store.snapshot(),
-                }));
-                if signal.store.is_some() && data.is_some() {
-                    signal.events.push(Arc::new(FiniteEvent {previous:signal.events.last().cloned(),
-                        revision,ordinal:input.ordinal(),event:event.clone()}));
-                }
-                let shot_time = match input { Input::Event {shot_time,..} => *shot_time, _ => None };
-                if matches!(input, Input::Event {..}) { signal.stamped = Some(shot_time.is_some()); }
-                prepared_publications.push(Publication {
-                    key: PublicationKey { generation: generation.id, signal: input.signal().clone(), revision, ordinal: input.ordinal() },
-                    data, run: run.record.clone(), event: event.clone(), canonical, shot_time,
-                    events: signal.events.last().cloned(),
-                    storage: if signal.store.is_some() { Storage::Finite }
-                        else if signal.history_capable { Storage::Latest } else { Storage::Snapshot },
-                    lineage:Weak::new(),
-                });
-            }
-            // A current head and an in-flight Read own this flattened payload
-            // closure. Publications retained in history carry only a Weak
-            // link, so forty ROI samples do not pin forty full camera frames.
-            let head=Arc::new_cyclic(|weak| {
-                let mut closure=HashMap::new();
-                if run.source.as_ref().is_some_and(|source|source.coherent) {
-                    for parent in &bundle.parents {
-                        if let Some(lineage)=parent.lineage.upgrade() {
-                            closure.extend(lineage.publications.iter().map(|(key,value)|(key.clone(),value.clone())));
-                        }
-                        closure.insert(parent.key.clone(),parent.clone());
-                    }
-                }
-                for mut publication in prepared_publications {
-                    publication.lineage=weak.clone();
-                    closure.insert(publication.key.clone(),Arc::new(publication));
-                }
-                PayloadLineage {publications:closure}
-            });
-            let publications: Arc<[_]> = bundle.inputs.iter().map(|input|head.publications[&PublicationKey {
-                generation:generation.id,signal:input.signal().clone(),revision,ordinal:input.ordinal(),
-            }].clone()).collect();
-            for publication in publications.iter() {
-                let signal = run.signals.get_mut(&publication.key.signal).unwrap();
-                if let Some(ordinal)=publication.key.ordinal {signal.last_ordinal=Some(ordinal);}
-                if let Some(previous)=signal.head.replace(head.clone()) {heads.push(previous);}
-                if let Some(previous) = signal.latest.replace(publication.clone()) { garbage.push(previous); }
-                signal.keep_recent(publication,&mut garbage);
-                if signal.capacity() > 0 {
-                    // Recomputing the same source ordinal revises that sample;
-                    // it is not an invented extra camera shot.
-                    if signal.history.back().is_some_and(|p| p.key.ordinal == publication.key.ordinal) {
-                        garbage.push(signal.history.pop_back().unwrap());
-                    }
-                    signal.history.push_back(publication.clone());
-                }
-                signal.trim(&mut garbage);
-                signal.views.clear();
-            }
-            run.revision = revision;
-            let subscriber_ids = run.subscribers.clone();
-            let reads = publications.iter().cloned().map(|event|if event.data.is_some() {
-                Read::from_event(event).expect("actual event")
-            } else {Read::from_canonical(event)}).collect();
-            committed = Arc::new(Delivery { kind:DeliveryKind::Data, generation: generation.id, revision: Some(revision), publications, reads });
-            let State { runs, subscribers, .. } = &mut *state;
-            let run = runs.get_mut(&generation.id).unwrap();
-            for ticket in subscriber_ids.iter() {
-                let Some(subscriber) = subscribers.get_mut(ticket).filter(|s| s.terminal.is_none()) else { continue; };
-                let publications: Arc<[_]> = committed.publications.iter().filter(|p|
-                    subscriber.requests.iter().any(|request| request.signal == p.key.signal
-                        && (!matches!(request.mode,ReadMode::Event) || p.data.is_some()))).cloned().collect();
-                if publications.is_empty() { continue; }
-                let result = capture_reads(run,&subscriber.requests,&publications).and_then(|reads|
-                    subscriber.enqueue(Arc::new(Delivery { kind:DeliveryKind::Data, generation: generation.id, revision: Some(revision), publications, reads }), &mut deliveries));
-                if let Err(error) = result {
-                    subscriber.terminal = Some(error);
-                    subscriber.clear_queue(&mut deliveries);
-                    release_demands(run,&subscriber.requests,*ticket,&mut garbage);
-                    subscriber.changed.notify_all();
-                }
-            }
-            notify_changes(&state);
+            if last.is_some() { notify_changes(&state); }
         }
-        drop((garbage, deliveries, heads));
-        Ok(committed)
+        drop(garbage);
+        match failed { Some(error) => Err(error), None => Ok(last.unwrap()) }
     }
 
     pub fn read_latest(&self, generation: &Generation, signal: &str) -> Result<Arc<Publication>> {
@@ -1229,8 +1417,16 @@ impl Runtime {
             let read=selected.get(name).ok_or(RuntimeError::NoData)?;
             match width {
                 None => Ok(read.clone()),
-                Some(width) if read.key().generation==generation.id =>
-                    window_read_at(signal_mut(&mut state,generation.id,name)?,*width,read.anchor()).map(Read::from_window),
+                Some(width) if read.key().generation==generation.id => {
+                    let signal=signal_mut(&mut state,generation.id,name)?;
+                    // A front standing behind the newest event keeps the window it was shown
+                    // in until it moves: the same picture, with nothing to build or draw.
+                    let behind=signal.latest.as_ref().is_some_and(|latest|latest.key!=*read.key());
+                    match front.windows.get(&(name.clone(),*width)).filter(|shown|behind && shown.key()==read.key()) {
+                        Some(shown) => Ok(shown.clone()),
+                        None => window_read_at(signal,*width,read.anchor()).map(Read::from_window),
+                    }
+                }
                 // Kept at a replaced run: the window it was shown in.
                 Some(width) => front.windows.get(&(name.clone(),*width)).filter(|shown|shown.key()==read.key()).cloned().ok_or(RuntimeError::NoData),
             }
@@ -1341,7 +1537,7 @@ impl Runtime {
             let generation = follow_owner.as_ref().and_then(|owner|state.owners.get(owner).copied()).or(generation);
             let mut subscriber = Subscriber { generation:None, follow_owner, requests: unique, policy,
                 queue: VecDeque::new(), bytes: 0, terminal:None, blocks:HashMap::new(),first:None,replay:VecDeque::new(),
-                changed: Arc::new(Condvar::new()), interrupted: false };
+                changed: Arc::new(Condvar::new()), interrupted: false, in_hand: false };
             if let Some(generation)=generation {
                 let run=state.runs.get_mut(&generation).ok_or(RuntimeError::UnknownGeneration)?;
                 subscriber.attach(run,ticket,start,&mut deliveries,&mut garbage)?;
@@ -1363,6 +1559,10 @@ impl Runtime {
         let State {runs,subscribers,..}=&mut *state;
         let run = runs.get_mut(&generation.id).ok_or(RuntimeError::UnknownGeneration)?;
         if !run.sealed {
+            crate::journal::note_with("runtime", "seal", || {
+                let (owner, id) = journal_run(generation);
+                serde_json::json!({"owner": owner, "run": id, "status": outcome.get("status")})
+            });
             run.sealed = true; run.outcome = Some(Arc::new(outcome));
             let ids = run.subscribers.clone();
             for ticket in ids.iter() {
@@ -1377,6 +1577,41 @@ impl Runtime {
         drop(state);
         drop((garbage,deliveries));
         Ok(())
+    }
+
+    /// Keep the data of what is published from now on, as much as `budget_bytes` holds (0: none, and what
+    /// was kept is let go). See [`Recent`].
+    pub fn keep_recent(&self, budget_bytes: usize) {
+        let mut garbage = Vec::new();
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            if budget_bytes == 0 {
+                if let Some(recent) = state.recent.take() { garbage.extend(recent.kept.into_iter().map(|(_, publication)| publication)); }
+            } else {
+                let recent = state.recent.get_or_insert_with(Recent::default);
+                recent.budget = budget_bytes;
+                recent.shed(crate::journal::now_us(), &mut garbage);
+            }
+        }
+        drop(garbage); // Large buffers are released outside the state lock.
+    }
+
+    /// What is kept now (`keep_recent`); the publications are shared, not copied.
+    pub fn recent(&self) -> RecentData {
+        let state = self.inner.state.lock().unwrap();
+        match &state.recent {
+            Some(recent) => RecentData { budget: recent.budget, bytes: recent.bytes, publications: recent.kept.iter().cloned().collect() },
+            None => RecentData { budget: 0, bytes: 0, publications: Vec::new() },
+        }
+    }
+
+    /// The memory `keep_recent` pins now and how far back it goes (seconds), without sharing a publication.
+    pub fn recent_held(&self) -> (usize, usize, Option<f64>) {
+        let state = self.inner.state.lock().unwrap();
+        match &state.recent {
+            Some(recent) => (recent.budget, recent.bytes, recent.kept.front().map(|(us, _)| crate::journal::now_us().saturating_sub(*us) as f64 / 1e6)),
+            None => (0, 0, None),
+        }
     }
 
     pub fn retire(&self, generation: &Generation) -> Result<()> { self.remove(|_| Some(generation.id)) }
@@ -1466,6 +1701,7 @@ fn signal_mut<'a>(state: &'a mut State, generation: GenerationId, signal: &str) 
 }
 fn remove_run(state: &mut State, id: GenerationId, garbage: &mut Vec<Arc<Delivery>>) -> Option<Run> {
     let run = state.runs.remove(&id)?;
+    crate::journal::note_with("runtime", "retire", || { let (owner, id) = journal_run(&run.token); serde_json::json!({"owner": owner, "run": id}) });
     state.owners.remove(&run.token.owner);
     for name in run.signals.keys() { state.signals.remove(name); }
     for ticket in run.subscribers.iter() {
@@ -1521,7 +1757,12 @@ impl Drop for HistoryLease {
 }
 
 pub struct Subscription { inner: Weak<Inner>, ticket: u64 }
+/// Which subscription feeds a consuming run (`Runtime::bind_consumer`).
+#[derive(Clone, Copy, Debug)]
+pub struct SubscriptionTicket(u64);
 impl Subscription {
+    pub fn ticket(&self) -> SubscriptionTicket { SubscriptionTicket(self.ticket) }
+
     /// Interrupt one wait for control work without consuming an exact delivery.
     pub fn wake(&self) -> Result<()> {
         let inner = self.inner.upgrade().ok_or(RuntimeError::Closed)?;
@@ -1538,13 +1779,21 @@ impl Subscription {
         let deadline = Instant::now().checked_add(timeout)
             .ok_or_else(|| RuntimeError::InvalidDeclaration("Timeout exceeds the monotonic clock range".into()))?;
         let mut state = inner.state.lock().unwrap();
-        let changed = state.subscribers.get(&self.ticket).ok_or(RuntimeError::Closed)?.changed.clone();
+        let subscriber = state.subscribers.get_mut(&self.ticket).ok_or(RuntimeError::Closed)?;
+        let changed = subscriber.changed.clone();
+        // Asking for the next says the last is finished; with nothing committed for it, a
+        // board learns here that the source need not wait.
+        if std::mem::take(&mut subscriber.in_hand) { notify_changes(&state); }
         loop {
             let subscriber = state.subscribers.get_mut(&self.ticket).ok_or(RuntimeError::Closed)?;
             if std::mem::take(&mut subscriber.interrupted) { return Ok(None); }
-            if let Some(delivery) = subscriber.replay.pop_front() { return Ok(Some(delivery)); }
-            if let Some(delivery) = subscriber.queue.pop_front() {
+            let taken = subscriber.replay.pop_front().or_else(|| {
+                let delivery = subscriber.queue.pop_front()?;
                 subscriber.account(&delivery, false);
+                Some(delivery)
+            });
+            if let Some(delivery) = taken {
+                subscriber.in_hand = matches!(delivery.kind, DeliveryKind::Data);
                 return Ok(Some(delivery));
             }
             if let Some(error) = &subscriber.terminal { return Err(error.clone()); }
@@ -1570,6 +1819,58 @@ mod tests {
         let cell = Domain::dense(vec![2, 3], vec![axis("y", 2), axis("x", 3)]).unwrap();
         DatasetSchema::new(singleton.clone(), singleton, cell,
             ValueSchema::new(DType::U16, Some("count".into()), None, ValidityContract::Value).unwrap()).unwrap()
+    }
+    /// A window's record holds its run once and reads as every member's tree.
+    #[test]
+    fn window_provenance_holds_each_run_once() {
+        let (plane, sample) = (Runtime::new(), schema());
+        let declare = |signal: &str| vec![Declaration {signal:signal.into(),schema:sample.clone(),storage:Storage::Latest}];
+        let camera = plane.begin("camera",declare("frames"),json!({"device_snapshots":{"camera":{"exposure_seconds":0.02}}})).unwrap();
+        let derived = plane.begin("derived",declare("value"),json!({"node":"derived"})).unwrap();
+        let history = plane.retain_history(&derived,"value",3).unwrap();
+        for ordinal in 0..5u64 {
+            let parent = plane.commit(&camera,&bundle(&sample,&["frames"],ordinal)).unwrap().publications[0].clone();
+            let mut output = bundle(&sample,&["value"],ordinal);
+            output.metadata = json!({"records":{"value":{"shot":ordinal}}});
+            output.parents = vec![parent];
+            plane.commit(&derived,&output).unwrap();
+        }
+        let window = plane.read_window(&derived,"value",3).unwrap();
+        let provenance = Read::from_window(window).provenance();
+        let stored = &provenance["window"];
+        assert_eq!(stored["acquisition"]["runs"].as_array().unwrap().len(),2);
+        assert_eq!(stored.to_string().matches("exposure_seconds").count(),1,"once, not per member");
+        let expanded = crate::acquisition::expand_window(stored).unwrap();
+        assert_eq!(expanded["width"],json!(3));
+        let members = expanded["members"].as_array().unwrap();
+        assert_eq!(members.len(),3);
+        for (member,shot) in members.iter().zip(2u64..) {
+            assert_eq!(member["publication"]["ordinal"],json!(shot));
+            assert_eq!(member["publication"]["stream"],"derived");
+            assert_eq!(member["event"]["records"]["value"]["shot"],json!(shot));
+            assert_eq!(member["run"]["node"],"derived");
+            assert_eq!(member["parents"][0]["publication"]["signal"],"frames");
+            assert_eq!(member["parents"][0]["run"]["device_snapshots"]["camera"]["exposure_seconds"],json!(0.02));
+        }
+        drop(history);
+    }
+    /// A run standing for a saved Figure answers its history in a provenance's run record, not in its metadata.
+    #[test]
+    fn an_imported_run_answers_its_saved_history_only_in_a_provenance() {
+        struct Saved(std::sync::atomic::AtomicUsize);
+        impl ImportedRun for Saved {
+            fn saved_history(&self) -> Value { self.0.fetch_add(1,Ordering::Relaxed); json!({"source":{},"lineage":{"root":null,"nodes":[],"device_settings":[]}}) }
+        }
+        let (plane, sample) = (Runtime::new(), schema());
+        let saved = Arc::new(Saved(Default::default()));
+        let figure = plane.begin_imported("figure",vec![Declaration {signal:"data".into(),schema:sample.clone(),storage:Storage::Latest}],json!({"operation":"figure-import"}),saved.clone()).unwrap();
+        let publication = plane.commit(&figure,&bundle(&sample,&["data"],0)).unwrap().publications[0].clone();
+        assert!(publication.run().metadata.get(IMPORTED_LINEAGE).is_none());
+        assert_eq!(saved.0.load(Ordering::Relaxed),0,"nothing asked for it while publishing");
+        let provenance = Read::from_event(publication).unwrap().provenance();
+        assert_eq!(provenance["run"][IMPORTED_LINEAGE]["lineage"]["root"],Value::Null);
+        assert_eq!(provenance["run"]["operation"],"figure-import");
+        assert_eq!(saved.0.load(Ordering::Relaxed),1);
     }
     fn block(schema: &Arc<DatasetSchema>, value: u16) -> Arc<DataBlock> {
         DataBlock::new(schema.clone(), OwnedBuffer::from_vec(vec![value; 6]).into(), Validity::Uniform(true), None).unwrap()
@@ -1615,7 +1916,7 @@ mod tests {
             }
         }
         let before = plane.read_views(&[(scan.clone(),"scan".into(),None)]).pop().unwrap().unwrap().provenance();
-        let acquired = &before["acquisition"];
+        let acquired = crate::acquisition::expand_acquisition(&before["acquisition"]).unwrap();
         assert_eq!(acquired["runs"].as_array().unwrap().len(),2);
         assert_eq!(acquired["events"].as_array().unwrap().len(),5,"the shared parent occurs once");
         for (point,range) in acquired["ranges"].as_array().unwrap().iter().enumerate() {
@@ -1642,6 +1943,47 @@ mod tests {
         assert!(later.upgrade().is_none(),"an old prefix must not keep future event facts alive");
         assert!(late_parent.upgrade().is_none(),"an old prefix must not keep a future event's ancestors alive");
         assert_eq!(frozen.provenance(),expected);
+    }
+
+    #[test]
+    fn recent_publications_are_kept_within_a_budget_the_oldest_out_first_whatever_its_signal() {
+        let plane = Runtime::new();
+        let schema = schema();
+        let declare = |signal: &str| Declaration { signal: signal.into(), schema: schema.clone(), storage: Storage::Latest };
+        let generation = plane.begin("camera", vec![declare("image"), declare("judged")], json!({})).unwrap();
+        // Nothing is kept until it is asked for.
+        let first = plane.commit(&generation, &bundle(&schema, &["image", "judged"], 0)).unwrap();
+        let weak_first = Arc::downgrade(first.publications[0].data().unwrap());
+        drop(first);
+        plane.commit(&generation, &bundle(&schema, &["image", "judged"], 1)).unwrap();
+        assert!(weak_first.upgrade().is_none() && plane.recent().publications.is_empty());
+        // Room for everything: one event of each signal, and what it costs.
+        plane.keep_recent(usize::MAX);
+        plane.commit(&generation, &bundle(&schema, &["image", "judged"], 2)).unwrap();
+        let kept = plane.recent();
+        assert_eq!(kept.publications.len(), 2);
+        let each = kept.bytes / 2;
+        assert!(each > 0 && plane.recent_held().2.is_some());
+        drop(kept);
+        // Room for four blocks: the last two events of both signals, the same span of each.
+        plane.keep_recent(4 * each);
+        for ordinal in 3..8 { plane.commit(&generation, &bundle(&schema, &["image", "judged"], ordinal)).unwrap(); }
+        let kept = plane.recent();
+        let held: Vec<(String, u64)> = kept.publications.iter().map(|(_, publication)| (publication.key().signal.to_string(), publication.key().ordinal.unwrap())).collect();
+        assert_eq!(held.len(), 4);
+        for signal in ["image", "judged"] {
+            let ordinals: Vec<u64> = held.iter().filter(|(of, _)| of == signal).map(|(_, ordinal)| *ordinal).collect();
+            assert_eq!(ordinals, [6, 7], "{signal}: {held:?}");
+        }
+        assert_eq!(kept.bytes, 4 * each);
+        assert!(kept.publications.windows(2).all(|pair| pair[0].0 <= pair[1].0), "oldest first");
+        // Kept data outlives the Runtime's own latest; let go, it is gone.
+        let oldest = Arc::downgrade(kept.publications[0].1.data().unwrap());
+        drop(kept);
+        assert!(oldest.upgrade().is_some());
+        plane.keep_recent(0);
+        assert!(oldest.upgrade().is_none() && plane.recent().publications.is_empty());
+        assert_eq!(plane.recent_held(), (0, 0, None));
     }
 
     #[test]

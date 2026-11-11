@@ -194,9 +194,10 @@ class DeviceType:
     #: takes ``excluded`` is handed the bound resources (``resources``) and touches none.
     discover: Callable[..., tuple[tuple[Mapping[str, Any], ...], tuple[str, ...]]] | None = None
     addable: bool = True
-    #: SPI methods answered on their own thread instead of the lane, for an
-    #: adapter that is thread-safe for them: a phase-movie submit or cancel
-    #: while play_phase_sequence holds the lane.
+    #: Adapter calls answered on their own thread instead of the lane, for an
+    #: adapter that is thread-safe for them: SPI methods (a phase-movie submit or
+    #: cancel while play_phase_sequence holds the lane), commands by name and
+    #: ``make_safe`` (a stage's Stop, and Stop all, while a move holds the lane).
     concurrent: tuple[str, ...] = ()
     #: The window a device's Control opens instead of the generic field form
     #: (v2 control_factory): ``"slm-editor"`` for an SLM; empty for the form.
@@ -294,8 +295,13 @@ class DatasetInput:
     delivery: str
     select_bundle: bool = False
     enabled_when: tuple[str, tuple[Any, ...]] | None = None
+    consumer: str = "plugin"
 
     def __post_init__(self) -> None:
+        if self.consumer not in ("plugin", "core"):
+            raise ValueError("dataset input consumer must be 'plugin' or 'core'")
+        if self.consumer == "core" and (self.delivery != "exact" or self.select_bundle):
+            raise ValueError("core dataset inputs require exact delivery without a bundle")
         if self.delivery not in ("exact", "latest"):
             raise ValueError("dataset input delivery must be 'exact' or 'latest'")
 
@@ -308,6 +314,12 @@ class DeviceRequirement:
     argument_name: str
     protected_fields: tuple[str, ...] | None = ()
     enabled_when: tuple[str, tuple[Any, ...]] | None = None
+    #: The run only reads the device: it claims nothing of it and may call only what the device lists
+    #: as reads, beside whoever holds it.  A device the core implements itself is then handed to draft
+    #: queries as what it states of itself (``facts``) and to the build as its key alone.
+    reads_only: bool = False
+    #: A draft may leave it unset or name a device that is not open; the build is then called without it.
+    optional: bool = False
 
 
 #: NodeType callables answered through ``query`` (PLUGIN_PROTOCOL.md §2), each
@@ -316,9 +328,10 @@ class DeviceRequirement:
 #: v2 callable takes them.
 QUERY_PARAMETERS: dict[str, tuple[str, ...]] = {
     "declare_outputs": ("values", "devices"),
-    "declare_previews": ("values", "devices"),
+    "declare_previews": ("values", "devices", "node"),
     "resolve_field_availability": ("devices",),
-    "resolve_field_choices": ("values", "resources"),
+    "resolve_field_choices": ("values", "resources", "devices"),
+    "resolve_field_units": ("values", "devices"),
     "resolve_device_claims": ("values",),
     "editor_facts": ("values", "resources", "devices", "source", "bundle", "artifacts"),
     "resolve_defaults": ("values", "resources"),
@@ -327,6 +340,9 @@ QUERY_PARAMETERS: dict[str, tuple[str, ...]] = {
     "estimate_run": ("values", "devices", "resources"),
     "describe_output_frames": ("values", "output_name", "source"),
 }
+#: Facts a query's callable is handed by name when it has a parameter of that name (the v2
+#: callables that never took them are called as before).
+QUERY_OPTIONAL: dict[str, tuple[str, ...]] = {"describe_output_frames": ("devices",)}
 NODE_QUERIES = tuple(QUERY_PARAMETERS)
 #: Every node answers it, from its schema, admit_resources and artifact codecs (host._admit).
 ADMIT = "admit"
@@ -336,7 +352,7 @@ NODE_INSTANCE = "node/"
 #: (``node.answers``): a node just added is drawn from them at once, its own process's
 #: answers replacing them when they land.
 FIRST_ANSWERS = ("declare_outputs", "declare_previews", "resolve_field_availability", "resolve_field_choices",
-                 "resolve_defaults", "resolve_device_claims", "editor_facts")
+                 "resolve_field_units", "resolve_defaults", "resolve_device_claims", "editor_facts")
 
 
 @dataclass(frozen=True)
@@ -366,8 +382,11 @@ class NodeType:
     selection_mappings: tuple[object, ...] = ()
     workspace_resources: tuple[object, ...] = ()
     resolve_field_availability: Callable[..., Any] | None = None
-    #: ``(values, resources) -> {field: [(value, label), ...]}``: the choices of
-    #: a field whose options come from the draft (a chosen pulse's periods).
+    #: ``(values, devices) -> {field: unit}``: the unit a field is typed in, when the draft decides it.
+    resolve_field_units: Callable[..., Any] | None = None
+    #: ``(values, resources, devices) -> {field: [(value, label), ...]}``: the choices
+    #: of a field whose options come from the draft (a chosen pulse's periods, a
+    #: bound source's channels).
     resolve_field_choices: Callable[..., Any] | None = None
     #: ``(values) -> {argument: {"instance": key, "fields": [...]}}``: devices a
     #: draft names (a scan's device axes) beside the declared requirements;
@@ -427,7 +446,7 @@ class NodeType:
         source or bundle. A query that cannot answer it is left to the node's own process."""
 
         facts = {"values": {item["name"]: item["default"] for item in parameters}, "devices": {}, "resources": {},
-                 "source": None, "bundle": [], "artifacts": {"inputs": {}, "resolved": {}}}
+                 "source": None, "bundle": [], "artifacts": {"inputs": {}, "resolved": {}}, "node": None}
         answers: dict[str, Any] = {}
         for name in FIRST_ANSWERS:
             function = getattr(self, name)
@@ -447,7 +466,7 @@ class NodeType:
         for item in self.input_specs:
             if isinstance(item, DatasetInput) or hasattr(item, "delivery"):
                 inputs.append({"name": item.name, "contract": item.contract_id,
-                               "delivery": item.delivery, "select_bundle": bool(getattr(item, "select_bundle", False)),
+                               "delivery": item.delivery, "consumer": getattr(item, "consumer", "plugin"), "select_bundle": bool(getattr(item, "select_bundle", False)),
                                "enabled_when": plain(getattr(item, "enabled_when", None))})
             else:
                 codec = getattr(item, "codec", None)
@@ -472,7 +491,8 @@ class NodeType:
                             for item in self.outputs],
                 "devices": [{"capability": item.capability_token, "argument": item.argument_name,
                              "protected_fields": None if item.protected_fields is None else list(item.protected_fields),
-                             "enabled_when": plain(item.enabled_when)} for item in self.device_requirements],
+                             "enabled_when": plain(item.enabled_when), "reads_only": bool(item.reads_only),
+                             "optional": bool(item.optional)} for item in self.device_requirements],
                 "previews": previews, "reports_ready": self.reports_ready,
                 "acquisition_input": self.acquisition_input, "acquisition_completion": self.acquisition_completion,
                 "artifact_outputs": [{"name": item.name, "contract": item.contract_id} for item in self.artifact_outputs],

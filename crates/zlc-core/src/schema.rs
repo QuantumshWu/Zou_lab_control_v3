@@ -17,14 +17,15 @@ pub enum Coordinate {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum CoordinateKey {
+pub enum CoordinateKey {
     Integer(i128),
     Real(u64),
     Text(Arc<str>),
 }
 
 impl Coordinate {
-    fn key(&self) -> Result<CoordinateKey, String> {
+    /// The exact identity used to validate and join axis coordinates.
+    pub fn key(&self) -> Result<CoordinateKey, String> {
         match self {
             Self::Integer(value) => Ok(CoordinateKey::Integer(*value)),
             Self::Real(value) if value.is_finite() => {

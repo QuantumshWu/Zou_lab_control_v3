@@ -11,6 +11,7 @@ pub mod fit_layer;
 pub mod gesture;
 pub mod overlay;
 pub mod preparation;
+mod point_map;
 pub mod projected;
 pub mod renderer;
 

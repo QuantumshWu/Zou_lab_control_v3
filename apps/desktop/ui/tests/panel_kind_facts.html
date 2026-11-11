@@ -1,0 +1,68 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Panel kind facts regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<div id="host"></div>
+<script type="module">
+// Run with tools/test_ui.ps1. Which panels have a Window and which an Overlay is the plotting owner's to
+// say: a Window where its controls hold the binding's row (`bound`), an Overlay where its kind takes one.
+// The interface keeps no list of kinds of its own.
+import {PanelBoard} from '../dist/views/board.js';
+import {boardKinds} from '../dist/protocol.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const results = [];
+const check = async (name, test) => { await test(); results.push(name); };
+const transport = {send: () => 1, post: () => {}, report: error => { throw error; }};
+const host = document.getElementById('host');
+host.style.cssText = 'flex:none;display:flex;flex-direction:column;height:600px;width:1600px';
+const board = new PanelBoard(transport);
+host.append(board.root);
+// The plotting owner's catalogue, in its own (not the board's) order.
+const KINDS = [
+  {id: 'curve', label: 'Curve', board: 1, overlay: false, default_window: 1},
+  {id: 'image', label: 'Image', board: 0, overlay: true, default_window: 1},
+  {id: 'point_map', label: 'Point Map', board: 5, overlay: false, default_window: 1},
+  {id: 'histogram', label: 'Histogram', board: 3, overlay: false, default_window: 1},
+  {id: 'rolling', label: 'Rolling', board: 2, overlay: false, default_window: 100},
+  {id: 'facet_grid', label: 'Facet grid', board: 4, overlay: true, default_window: 1},
+  {id: 'pulse_timeline', label: 'Pulse timeline', board: null, overlay: false, default_window: 1},
+];
+const bound = {name: 'window', section: 'display', bound: true};
+const labels = {section: 'display', name: 'show_point_labels', label: 'Point labels', kind: 'boolean', value: true};
+const panel = (id, kind, controls) => ({id, kind, display_size: {width: 300, height: 200}, binding: {signal: 's', window: 7}, controls});
+const entry = id => ({panel: id, title: '', interval_ms: 100, overlay_signal: '', overlay_choices: [], signal_tree: [], overlay_tree: [], outputs: []});
+const PANELS = [
+  panel('grid-histogram', 'facet_grid', [bound]),
+  panel('grid-image', 'facet_grid', [labels]),
+  panel('histogram', 'histogram', [bound]),
+  panel('image', 'image', [labels]),
+  panel('point-map', 'point_map', [labels]),
+];
+board.accept({type: 'state', plot_kinds: KINDS, signals: [],
+  board: {panels: PANELS.map(item => entry(item.id)), frozen: {}, paused: false, selectors: true}, panels: PANELS});
+const rows = id => { const view = board.views.get(id); view.setSettingsOpen(true); return [...view.fields.keys()]; };
+try {
+  await check('a grid of histogram cells has the Window its plot declares', () => {
+    assert(rows('grid-histogram').includes('binding:window'), `rows ${rows('grid-histogram')}`);
+    assert(board.views.get('grid-histogram').fields.get('binding:window').value === 7, 'the binding\'s own window');
+    assert(rows('histogram').includes('binding:window'), 'a histogram keeps its Window');
+  });
+  await check('a panel whose plot declares no Window has none', () => {
+    assert(!rows('grid-image').includes('binding:window'), 'a grid of image cells');
+    assert(!rows('image').includes('binding:window'), 'an image');
+  });
+  await check('an Overlay stands where the kind takes one', () => {
+    assert(rows('image').includes('board:overlay_signal') && rows('grid-image').includes('board:overlay_signal'), 'an image and a grid of images');
+    assert(!rows('point-map').includes('board:overlay_signal'), 'a point map draws its own geometry');
+    assert(!rows('grid-histogram').includes('board:overlay_signal'), 'a grid with no image cells has no rings to label');
+  });
+  await check('a board offers the kinds the plotting owner places, in its order', () => {
+    assert(boardKinds(KINDS).map(kind => kind.id).join() === 'image,curve,rolling,histogram,facet_grid,point_map', boardKinds(KINDS).map(kind => kind.id).join());
+  });
+  document.querySelector('#result').textContent = JSON.stringify({passed: true, count: results.length});
+} catch (error) {
+  document.querySelector('#result').textContent = JSON.stringify({passed: false, count: results.length, error: String(error.stack || error)});
+}
+</script>

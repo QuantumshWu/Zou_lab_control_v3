@@ -1,5 +1,5 @@
 //! Axis limits a frame shows (`rendering.py` `_curve_x_limits`, `_data_limits`,
-//! `_relim_retains`, `_autoscaled_limits`, `_select_display_limits`).
+//! `_autoscaled_limits`, `_select_display_limits`).
 
 use crate::kinds::RelimMode;
 
@@ -25,8 +25,18 @@ pub fn data_limits(values: &[f64]) -> Option<(f64, f64)> { finite_range(values) 
 /// `np.allclose(rtol=1e-12, atol=1e-15)` for scalars.
 pub fn scalar_close(left: f64, right: f64) -> bool { (left - right).abs() <= 1e-15 + 1e-12 * right.abs() }
 
-/// Whether an autoscaled axis may keep the limits it already shows.
-pub fn relim_retains(mode: RelimMode, rules_geometry: bool) -> bool { mode != RelimMode::Tight || rules_geometry }
+/// The data's span and a fraction of it each side; a single value, that fraction of itself.
+fn padded_limits((low, high): (f64, f64), padding_fraction: f64) -> (f64, f64) {
+    let span = high - low;
+    let data_span = if span != 0.0 { span } else if high.abs() != 0.0 { high.abs() } else { 1.0 };
+    let padding = padding_fraction * data_span;
+    (low - padding, high + padding)
+}
+
+/// Exactly the data's span. A single value has none, so it is padded: limits must increase.
+pub fn tight_limits(data_range: (f64, f64), padding_fraction: f64) -> (f64, f64) {
+    if data_range.0 != data_range.1 { data_range } else { padded_limits(data_range, padding_fraction) }
+}
 
 /// The limits one autoscaled axis takes for this data.
 pub fn autoscaled_limits(data_range: (f64, f64), current: Option<(f64, f64)>, padding_fraction: f64,
@@ -35,10 +45,7 @@ pub fn autoscaled_limits(data_range: (f64, f64), current: Option<(f64, f64)>, pa
     let target = if zero_based && low >= 0.0 {
         (0.0, if high != 0.0 { high * 1.2 } else { 1.0 })
     } else {
-        let span = high - low;
-        let data_span = if span != 0.0 { span } else if high.abs() != 0.0 { high.abs() } else { 1.0 };
-        let padding = padding_fraction * data_span;
-        (low - padding, high + padding)
+        padded_limits(data_range, padding_fraction)
     };
     let Some((current_low, current_high)) = current.filter(|_| retain) else { return target };
     let span = current_high - current_low;

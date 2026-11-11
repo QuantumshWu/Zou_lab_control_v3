@@ -15,6 +15,7 @@ use zlc_core::{AnyBuffer, OwnedBuffer};
 
 use super::nd::{Array, DType, Mask, Scalar, product};
 use super::ProjectionError;
+use super::site_geometry::{GeometryCache, SiteGeometries};
 use crate::kinds::{AxisDomain, AxisRef};
 
 pub const REPEAT: &str = "repeat";
@@ -466,6 +467,7 @@ pub struct Window { pub start: i128, pub latest: i128 }
 /// `OwnedSnapshot`: one dataset revision.
 #[derive(Clone)]
 pub struct Snapshot {
+    pub site_geometry: SiteGeometries,
     pub schema: Arc<Schema>,
     pub block: Block,
     pub window: Option<Window>,
@@ -476,6 +478,7 @@ pub struct Snapshot {
 
 /// What a native read is: the zlc-core boundary of the projection.
 pub struct Source {
+    pub site_geometry: SiteGeometries,
     pub schema: Arc<DatasetSchema>,
     pub repeat_counts: Option<Vec<usize>>,
     pub data: SourceData,
@@ -527,7 +530,7 @@ impl Source {
             None => SourceData::Dense(event_block(read).clone()),
             Some(placed) => SourceData::Segments(placed.into_iter().map(|(origin, block)| (origin, block.clone())).collect()),
         };
-        Ok(Source { schema: read.schema().clone(), repeat_counts: Some(read.repeat_counts()), data, block_id: block_id.into(), generation: key.generation.as_uuid().to_string().into(),
+        Ok(Source { site_geometry: SiteGeometries::from_read(read), schema: read.schema().clone(), repeat_counts: Some(read.repeat_counts()), data, block_id: block_id.into(), generation: key.generation.as_uuid().to_string().into(),
             revision: key.revision, window: window.map(|w| (w.start, w.latest)) })
     }
     /// A figure archive's dataset under its recorded identity, dense or
@@ -539,6 +542,7 @@ impl Source {
             zlc_core::restrict::Source::Placed { segments, .. } => SourceData::Segments(segments),
         };
         Source {
+            site_geometry: SiteGeometries::default(),
             schema: snapshot.schema().clone(), repeat_counts: Some(snapshot.repeat_counts().to_vec()), data,
             block_id: reference.block_id.as_str().into(), generation: reference.stream_generation.as_str().into(), revision: reference.revision,
             window: snapshot.window().map(|(start, latest)| (start, i128::from(latest))),
@@ -641,13 +645,13 @@ impl Snapshot {
                     Some(Window { start: i128::from(ordinal) + 1 - window.width as i128, latest: i128::from(ordinal) }))
             }
         };
-        Ok(Snapshot { schema, block, window, block_id: block_id.into(), generation: key.generation.as_uuid().to_string().into(), revision: key.revision })
+        Ok(Snapshot { site_geometry: SiteGeometries::from_read(read).cached(&cache.geometry), schema, block, window, block_id: block_id.into(), generation: key.generation.as_uuid().to_string().into(), revision: key.revision })
     }
 }
 
 /// Converted schemas, reused while the native schema owner is the same.
 #[derive(Default)]
-pub struct SchemaCache { entries: HashMap<usize, (Arc<DatasetSchema>, Arc<Schema>)> }
+pub struct SchemaCache { geometry: GeometryCache, entries: HashMap<usize, (Arc<DatasetSchema>, Arc<Schema>)> }
 
 impl SchemaCache {
     pub fn get(&mut self, schema: &Arc<DatasetSchema>) -> Result<Arc<Schema>, ProjectionError> {
@@ -732,6 +736,7 @@ impl Snapshot {
                 .map(|(origin, data)| Placed::new(*origin, Arc::new(segment_of(data, &cell)))).collect())),
         };
         Ok(Snapshot {
+            site_geometry: source.site_geometry.cached(&cache.geometry),
             schema, block, window: source.window.map(|(start, latest)| Window { start, latest }),
             block_id: source.block_id.clone(), generation: source.generation.clone(), revision: source.revision,
         })

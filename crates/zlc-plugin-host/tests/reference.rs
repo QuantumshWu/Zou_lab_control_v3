@@ -2,6 +2,8 @@
 //! camera_measurement, finite and monitor runs. Needs ZLC_PLUGIN_PYTHON; the
 //! camera_measurement port is line D's (claude/v3-atom): ZLC_PLUGIN_PATH names
 //! the science trees to import (os path list), else this checkout's science/src.
+mod support;
+
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -24,6 +26,7 @@ fn the_virtual_mot_camera_and_camera_measurement_run_through_the_host() {
     let sender = std::sync::Mutex::new(sender);
     let host = PluginHost::new(HostConfig { python: python.into(), python_path, packages: vec!["zlc_atom".into()], memory_limit_mib: Some(4096) },
         runtime.clone(), safe, move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
+        support::install(&host).unwrap();
     let catalog = host.catalog().unwrap();
     if catalog.find("camera_measurement").is_none() { eprintln!("this science tree has no camera_measurement: skipped"); return; }
     let opened = host.open("mot", "camera.virtual_mot", json!({"exposure_seconds": 0.02}), json!({"seed": 0})).unwrap();
@@ -31,8 +34,8 @@ fn the_virtual_mot_camera_and_camera_measurement_run_through_the_host() {
     let start = |values: serde_json::Value| {
         let token = host.call("camera_measurement1", "query", json!({"name":"prepare_run","values":values,"resources":{},
             "devices":{"camera":{"instance":"mot","role":"mot","type_id":"camera.virtual_mot","capabilities":["camera.adapter"],"tunable":true,"reads":opened["reads"]}}}), Duration::from_secs(30)).unwrap().value["prepared"].as_str().unwrap().to_owned();
-        host.start_run("camera_measurement1", RunRequest { prepared: Some(token), device_labels: Default::default(), values,
-        devices: [("camera".to_owned(), "mot".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
+        host.start_run("camera_measurement1", RunRequest { prepared: Some(token), device_labels: Default::default(), device_units: Default::default(), values,
+        devices: [("camera".to_owned(), "mot".to_owned())].into(), shared: Default::default(), reads: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None,
         outputs: [("frames".to_owned(), "@logic/camera_measurement1/frames".to_owned())].into(), record_devices: false }).unwrap() };
     let wait = |run: &str, stop_after: Option<u64>| loop {
@@ -90,8 +93,8 @@ fn the_virtual_mot_camera_and_camera_measurement_run_through_the_host() {
     let variables = json!([{"name": "doubled", "terms": [{"of": "frames"}, {"op": "*", "number": 2}]}]);
     let token = host.call("derive1", "query", json!({"name":"prepare_run","values":{"variables":variables},"resources":{},"devices":{},"source_signal":frames}),
         Duration::from_secs(30)).unwrap().value["prepared"].as_str().unwrap().to_owned();
-    let derive = host.start_run("derive1", RunRequest { prepared: Some(token), device_labels: Default::default(), values: json!({"variables": variables}), devices: Default::default(),
-        shared: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: Some(frames.to_owned()), run_directory: None,
+    let derive = host.start_run("derive1", RunRequest { prepared: Some(token), device_labels: Default::default(), device_units: Default::default(), values: json!({"variables": variables}), devices: Default::default(),
+        shared: Default::default(), reads: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: Some(frames.to_owned()), run_directory: None,
         outputs: [("doubled".to_owned(), "@logic/derive1/doubled".to_owned())].into(), record_devices: false }).unwrap();
     std::thread::sleep(Duration::from_secs(2));
     host.stop_run("camera_measurement1", &camera).unwrap();

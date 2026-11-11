@@ -137,6 +137,25 @@ fn fit_source_scatter_is_selectable_only_at_its_visible_dots() {
 }
 
 #[test]
+fn a_first_frame_fit_cannot_rescale_a_histogram_whose_data_span_zero_to_one() {
+    let (mut renderer, mut state) = make_renderer(PlotSpec::Histogram(HistogramPlot::default()), Kind::Histogram, 1.0);
+    Arc::make_mut(&mut state).values.insert("relim_mode", zlc_plot::configuration::Value::text("tight"));
+    let payload = Payload::Histogram(HistogramData {
+        revision: 1, generation: "fit".into(), edges: quantity(&[0., 1.], "count"), centers: quantity(&[0.5], "count"),
+        counts: Array::from_vec(vec![1i64], vec![1, 1]), group_keys: vec![vec![]],
+    });
+    let fit = FitOverlay { success: true, polylines: vec![zlc_plot::session::FitPolyline {
+        x: vec![0.,1.].into(), y: vec![0.,1.].into(), role: "primary", component_index: 0,
+    }], ..Default::default() };
+    renderer.present(&RenderFrame { payload: Arc::new(payload), state, effects: RenderEffect::BASE_GEOMETRY, data_revision: 1,
+        fit_overlays: vec![fit].into(), fit_model_id: None, classifier_overlays: vec![].into(), classifier_thresholds: vec![], classifier_labels: vec![],
+        image_overlay: None, selectors: SelectorSnapshot::new(&[], None).unwrap(), facet_index: None, facet_focus_index: None,
+        view_limits: None, presentation: None });
+    let axis = &renderer.fig.axes[renderer.primary_axes()];
+    assert_eq!((axis.xlim, axis.ylim), ((0.,1.), (0.,1.)));
+}
+
+#[test]
 fn histogram_bars_invert_both_axis_scales_before_selecting_a_bin() {
     for scale in ["linear", "log-x", "log-y", "function-x", "function-y"] {
         let spec = PlotSpec::Histogram(HistogramPlot { group: Some(AxisRef::point("probe.group").unwrap()), ..Default::default() });

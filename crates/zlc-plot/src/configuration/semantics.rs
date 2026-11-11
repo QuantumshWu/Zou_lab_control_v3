@@ -27,10 +27,10 @@ pub const COORDINATE_PREFIX: &str = "coordinate:";
 pub const FATE_REDUCE: &str = "reduce";
 pub const FATE_POOL: &str = "pool";
 const SCOPE_VALUE_TAG: &str = "scope-value";
-const ROLE_FATES: [Role; 4] = [Role::X, Role::Y, Role::Group, Role::Facet];
+const ROLE_FATES: [Role; 5] = Role::ALL;
 
 fn role_label(role: Role) -> &'static str {
-    match role { Role::X => "X axis", Role::Y => "Y axis", Role::Group => "Group", Role::Facet => "Facet" }
+    match role { Role::X => "X axis", Role::Y => "Y axis", Role::Group => "Group", Role::Facet => "Facet", Role::Site => "Site" }
 }
 
 /// One `(value, label)` choice.
@@ -188,7 +188,7 @@ fn scope_terms(spec: &PlotSpec) -> OrderedMap<AxisRef, Coordinate> { OrderedMap:
 /// Every axis this specification names, in any role.
 fn axes_used_by(spec: &PlotSpec) -> Vec<AxisRef> {
     let semantic = spec.semantic();
-    let mut used: Vec<AxisRef> = [semantic.x(), semantic.y(), semantic.group(), spec.facet()].into_iter().flatten().cloned().collect();
+    let mut used: Vec<AxisRef> = [semantic.x(), semantic.y(), semantic.group(), semantic.role(Role::Site), spec.facet()].into_iter().flatten().cloned().collect();
     used.extend(spec.scope().iter().map(|(axis, _)| axis.clone()));
     used
 }
@@ -196,7 +196,7 @@ fn axes_used_by(spec: &PlotSpec) -> Vec<AxisRef> {
 /// What this specification has already made of one axis.
 pub fn fate_of(spec: &PlotSpec, reference: &AxisRef) -> Value {
     let semantic = spec.semantic();
-    for role in [Role::X, Role::Y, Role::Group] {
+    for role in [Role::X, Role::Y, Role::Group, Role::Site] {
         if semantic.role(role) == Some(reference) { return Value::text(role.name()); }
     }
     if spec.facet() == Some(reference) { return Value::text("facet"); }
@@ -314,7 +314,7 @@ fn coordinate_spec(schema: &PlotSchema, spec: &PlotSpec, primary: &AxisRef, sele
     };
     let semantic = spec.semantic();
     let mut changes: Vec<(Role, Option<AxisRef>)> = Vec::new();
-    for role in [Role::X, Role::Y, Role::Group] {
+    for role in [Role::X, Role::Y, Role::Group, Role::Site] {
         if semantic.has_role(role) { changes.push((role, remap(semantic.role(role))?)); }
     }
     let reduced = match semantic.reduced() {
@@ -375,24 +375,67 @@ pub fn merge_labels(old_spec: &PlotSpec, new_spec: &PlotSpec, schema: Option<&Pl
 
 /// Carry existing semantic intent onto another schema of the chosen kind.
 pub fn rebased_spec(schema: &PlotSchema, kind: PlotKind, values: &ValueMap) -> Result<PlotSpec> {
+    rebase_authored(schema, kind, values).map(|(spec, _)| spec)
+}
+
+/// Rebuild on a new schema and return only the original choices the result honours.
+pub(crate) fn rebase_authored(schema: &PlotSchema, kind: PlotKind, values: &ValueMap) -> Result<(PlotSpec, ValueMap)> {
     let selected_kind = match values.get("kind") { Some(value) => kind_from_value(value)?, None => kind };
-    let cell_kind = values.get("cell_kind").map(kind_from_value).transpose()?;
+    let automatic = values.get("cell_kind").and_then(Value::as_str) == Some("") && selected_kind == PlotKind::FacetGrid;
+    let cell_kind = values.get("cell_kind").filter(|_| !automatic && selected_kind == PlotKind::FacetGrid).map(kind_from_value).transpose()?;
     let candidate = fitting_spec(Some(schema), Some(selected_kind), cell_kind)?
         .ok_or_else(|| PlotError::value(format!("{} has no unambiguous default for this schema", selected_kind.value())))?;
-    let vocabulary: ValueMap = ["kind", "cell_kind"].into_iter().filter_map(|name| values.get(name).map(|value| (name, value.clone()))).collect();
-    let candidate = if vocabulary.is_empty() { candidate } else { composed_spec(Some(schema), &candidate, &vocabulary)? };
-    let names: HashSet<String> = describe_semantics(Some(schema), &candidate, &DEFAULT_LAYOUT)?.fields.into_iter().map(|field| field.name).collect();
-    let rows = fate_row_axes(schema, &candidate, None, None)?;
-    let mut carried = ValueMap::new();
-    for (name, value) in values.iter().filter(|(name, _)| names.contains(*name)) {
-        if is_scope_fate(value) {
-            let admitted = rows.iter().find(|axis| fate_field_name(axis) == name)
-                .map(|axis| axis_admits_scope(schema, axis, value)).transpose()?.unwrap_or(false);
-            if !admitted { continue; }
+    // Pins are expressed in the chosen coordinate's units. First restore the
+    // alternatives still present, then validate each pin against that axis.
+    let fields = describe_semantics(Some(schema), &candidate, &DEFAULT_LAYOUT)?;
+    let mut coordinates = ValueMap::new();
+    let mut missing_coordinates = HashSet::new();
+    for (name, value) in values.iter().filter(|(name, _)| name.starts_with(COORDINATE_PREFIX)) {
+        if fields.field(name).is_some_and(|field| field.choice_values().any(|choice| choice == value)) {
+            coordinates.insert(name, value.clone());
+        } else {
+            missing_coordinates.insert(name.replacen(COORDINATE_PREFIX, FATE_PREFIX, 1));
         }
-        carried.insert(name, value.clone());
     }
-    composed_spec(Some(schema), &candidate, &carried)
+    let candidate = composed_spec(Some(schema), &candidate, &coordinates)?;
+    let fields = describe_semantics(Some(schema), &candidate, &DEFAULT_LAYOUT)?;
+    let mut roles = ValueMap::new();
+    let mut other = ValueMap::new();
+    for (name, value) in values.iter().filter(|(name, _)| *name == "reduction" || name.starts_with(FATE_PREFIX)) {
+        let Some(field) = fields.field(name) else { continue };
+        let offered = field.choice_values().any(|choice| choice == value);
+        let pinned = !missing_coordinates.contains(name) && field.cycle_choices.as_ref().is_some_and(|pins| pins.contains_value(value));
+        if offered || pinned {
+            if name.starts_with(FATE_PREFIX) && value.as_str().and_then(Role::parse).is_some() {
+                roles.insert(name, value.clone());
+            } else {
+                other.insert(name, value.clone());
+            }
+        }
+    }
+    // Compose role swaps atomically. A surviving old assignment can conflict
+    // with the new schema's only holder of a required role. Drop only that
+    // assignment, preserving unrelated group, facet and reduction choices.
+    let apply = |base: &PlotSpec, mut changes: ValueMap| -> Result<PlotSpec> {
+        loop {
+            match composed_spec(Some(schema), base, &changes) {
+                Err(error) if error.kind == ErrorKind::Vacancy => {
+                    let role = error.role.as_deref().and_then(Role::parse);
+                    let Some(axis) = role.and_then(|role| role_holder(base, role)) else { return Err(error) };
+                    let primary = coordinate_axis_ref(schema, &axis)?;
+                    if changes.remove(&fate_field_name(&primary)).is_none() { return Err(error); }
+                }
+                result => return result,
+            }
+        }
+    };
+    let candidate = apply(&candidate, roles)?;
+    let spec = apply(&candidate, other)?;
+    let fields = describe_semantics(Some(schema), &spec, &DEFAULT_LAYOUT)?;
+    let mut kept: ValueMap = values.iter().filter(|(name, value)| fields.field(name).is_some_and(|field| field.value == **value))
+        .map(|(name, value)| (name, value.clone())).collect();
+    if automatic { kept.insert("cell_kind", Value::text("")); }
+    Ok((spec, kept))
 }
 
 /// Compose the candidate one semantic edit produces.
@@ -440,7 +483,7 @@ pub fn composed_spec(schema: Option<&PlotSchema>, spec: &PlotSpec, values: &Valu
                 inherited.insert(fate_field_name(&coordinate_axis_ref(schema, reference)?), Choice::Raw(scope_fate(value)));
             }
             let cell_roles = field_names(&changed);
-            for role in [Role::X, Role::Y, Role::Group] {
+            for role in [Role::X, Role::Y, Role::Group, Role::Site] {
                 if let Some(reference) = role_holder(&candidate, role) {
                     if cell_roles.contains(&role.name()) {
                         inherited.set_default(fate_field_name(&coordinate_axis_ref(schema, &reference)?), Choice::Raw(Value::text(role.name())));
@@ -554,7 +597,9 @@ pub fn composed_spec(schema: Option<&PlotSchema>, spec: &PlotSpec, values: &Valu
         let mut role_targets: OrderedMap<Role, AxisRef> = OrderedMap::new();
         for (axis, value) in fate_values.iter() {
             if is_scope_fate(value) {
-                if !axis_admits_scope(schema, axis, value)? { continue; }
+                if !axis_admits_scope(schema, axis, value)? {
+                    return Err(PlotError::value(format!("scope {} is absent from axis {}", value.py_repr(), axis_repr(axis))));
+                }
                 scope.insert(axis.clone(), scope_coordinate_from_fate(value)?);
             } else if *value == Value::text(FATE_REDUCE) || *value == Value::text(FATE_POOL) {
                 if let Some(previous) = candidate.semantic().reduced() {
@@ -568,6 +613,9 @@ pub fn composed_spec(schema: Option<&PlotSchema>, spec: &PlotSpec, values: &Valu
                 }
                 if role_targets.get(&role).is_some_and(|previous| previous != axis) {
                     return Err(PlotError::value(format!("fate '{}' is assigned to more than one axis", role.name())));
+                }
+                if role == Role::Site && resolve_axis(schema, axis)?.axis.role() != super::data_contract::SITE {
+                    return Err(PlotError::value("Point Map needs an axis with the site role"));
                 }
                 role_targets.insert(role, axis.clone());
             } else {
@@ -608,7 +656,7 @@ pub fn composed_spec(schema: Option<&PlotSchema>, spec: &PlotSpec, values: &Valu
 
     let settled = |candidate: PlotSpec, scope: &OrderedMap<AxisRef, Coordinate>| -> Result<PlotSpec> {
         let semantic = candidate.semantic();
-        let role_axes: HashSet<AxisRef> = [semantic.x(), semantic.y(), semantic.group(), candidate.facet()].into_iter().flatten().cloned().collect();
+        let role_axes: HashSet<AxisRef> = [semantic.x(), semantic.y(), semantic.group(), semantic.role(Role::Site), candidate.facet()].into_iter().flatten().cloned().collect();
         let mut pinned = scope.clone();
         pinned.retain(|axis, _| !role_axes.contains(axis));
         let candidate = with_scope_if_changed(candidate, &pinned)?;
@@ -682,6 +730,11 @@ pub fn describe_semantics(schema: Option<&PlotSchema>, spec: &PlotSpec, layout: 
         return Ok(SemanticDescription { kind, kind_choices: vec![kind], fields: vec![field], axis_choices: Vec::new(), x: None, y: None,
             group: None, reduction: None, facet: None, facet_max_cells: layout.facet_max_cells(), fate_rows: Vec::new() });
     };
+    if let PlotSpec::PointMap(map) = spec {
+        if resolve_axis(schema, &map.site)?.axis.role() != super::data_contract::SITE {
+            return Err(PlotError::value("Point Map needs an axis with the site role"));
+        }
+    }
     if !admits(spec.kind(), Some(schema))? {
         return Err(PlotError::value(format!("plot specification {} is not admissible for schema", spec_type_name(spec))));
     }
@@ -716,7 +769,11 @@ pub fn describe_semantics(schema: Option<&PlotSchema>, spec: &PlotSpec, layout: 
         let current = fate_of(spec, &reference);
         let mut offered = vec![(Value::text(default), format!("({default_label})"))];
         if default == FATE_POOL && declares_reduced(spec) { offered.push((Value::text(FATE_REDUCE), "reduced".to_owned())); }
-        for role in &roles { offered.push((Value::text(role.name()), role_label(*role).to_owned())); }
+        for role in &roles {
+            if *role != Role::Site || resolved.axis.role() == super::data_contract::SITE {
+                offered.push((Value::text(role.name()), role_label(*role).to_owned()));
+            }
+        }
         let pins = CycleChoices::new(resolved.axis.clone());
         fields.push(SemanticField::new(name.clone(), label, current, offered, true, Some(pins))?);
         fate_rows.push((reference, name));
@@ -744,7 +801,7 @@ pub fn describe_semantics(schema: Option<&PlotSchema>, spec: &PlotSpec, layout: 
 
 pub(crate) fn spec_type_name(spec: &PlotSpec) -> &'static str {
     match spec {
-        PlotSpec::Curve(_) => "CurvePlot", PlotSpec::Image(_) => "ImagePlot", PlotSpec::Histogram(_) => "HistogramPlot",
+        PlotSpec::Curve(_) => "CurvePlot", PlotSpec::Image(_) => "ImagePlot", PlotSpec::PointMap(_) => "PointMapPlot", PlotSpec::Histogram(_) => "HistogramPlot",
         PlotSpec::Rolling(_) => "RollingPlot", PlotSpec::FacetGrid(_) => "FacetGridPlot", PlotSpec::PulseTimeline(_) => "PulseTimelinePlot",
     }
 }

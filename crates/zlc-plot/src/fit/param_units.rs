@@ -157,16 +157,8 @@ impl<'a> FitParameterUnits<'a> {
             }
             let Some(quantity) = (self.quantities)(UnitRelation::Axis0) else { return Ok(simple("", Crossing::Inverse)) };
             let inverted = |unit: &Unit| -> String {
-                match self.registry().inverse_for(unit) {
-                    Some(found) => found.symbol.clone(),
-                    None => {
-                        if unit.symbol == "1" {
-                            String::new()
-                        } else {
-                            format!("1/{}", unit.symbol)
-                        }
-                    }
-                }
+                let symbol = self.registry().inverse_symbol(unit);
+                if symbol == "1" { String::new() } else { symbol }
             };
             return Ok(FitParameterConversion {
                 parameter: name,

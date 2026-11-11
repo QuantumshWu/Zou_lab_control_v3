@@ -1,6 +1,6 @@
 import { command } from "./button.js";
 import { FlowGraph, type Graph } from "./flow_graph.js";
-import { element, labelColumnWidth, setText, token } from "./dom.js";
+import { contentWidth, element, labelColumnWidth, setText, token } from "./dom.js";
 import { wordsWidth } from "./ink.js";
 import { elideMiddle, fontOf, measurer } from "./elide.js";
 import { Menu } from "./menu.js";
@@ -243,7 +243,7 @@ export class PathEdit {
   private show(): void {
     if (document.activeElement === this.input) return;
     const style = getComputedStyle(this.input);
-    const room = this.input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    const room = this.input.clientWidth ? contentWidth(this.input, style) : 0;
     const text = room > 0 ? elideMiddle(this.full, room, measurer(fontOf(style))) : this.full;
     if (this.input.value !== text) this.input.value = text;
   }

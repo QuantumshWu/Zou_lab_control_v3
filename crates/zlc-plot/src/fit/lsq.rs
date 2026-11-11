@@ -300,7 +300,7 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
     engine.settle_population(&spec, result, nested.into_iter().next().flatten().as_ref(), opts, false)
 }
 
-/// `_covariance(jac, reduced)`: the rank-tested inverse information of the
+/// `_covariance(jac, reduced)`: the identified inverse information of the
 /// loss-scaled Jacobian at the solution.
 fn covariance_at(objective: &ResidualObjective, solved: &[f64], free: &[usize], reduced: f64) -> (Vec<f64>, bool) {
     let n = free.len();
@@ -313,8 +313,12 @@ fn covariance_at(objective: &ResidualObjective, solved: &[f64], free: &[usize], 
         return invalid;
     }
     let mut scaled = vec![0.0; points * n];
+    // The scatter the arithmetic itself leaves (finalize_one).
+    let mut rounding_rss = 0.0;
     for i in 0..points {
         let weight = objective.weights.map_or(1.0, |w| w[i]);
+        let rounding = EPSILON * predicted[i].abs() * weight;
+        rounding_rss += rounding * rounding;
         let Ok((raw, _sq, _c, _g, _inf, finite)) = point_terms(predicted[i], objective.values[i], objective.counted, weight, objective.weights.is_some(), objective.loss) else { return invalid };
         if !finite {
             return invalid;
@@ -336,29 +340,13 @@ fn covariance_at(objective: &ResidualObjective, solved: &[f64], free: &[usize], 
         return invalid;
     }
     let Ok(r) = super::linalg::qr_r(points, n, &scaled) else { return invalid };
-    let Ok((s, vt)) = super::linalg::svd_small(n, &r) else { return invalid };
-    let tolerance = EPSILON * points.max(n) as f64 * s[0];
-    if !s.iter().all(|v| v.is_finite()) || s[n - 1] <= tolerance {
-        return invalid;
-    }
-    let mut covariance = vec![0.0; n * n];
-    for a in 0..n {
-        for b in 0..n {
-            let mut value = 0.0;
-            for k in 0..n {
-                value += vt[k * n + a] * vt[k * n + b] / (s[k] * s[k]);
-            }
-            covariance[a * n + b] = value * reduced;
-        }
-    }
-    for a in 0..n {
-        for b in 0..a {
-            let v = (covariance[a * n + b] + covariance[b * n + a]) / 2.0;
-            covariance[a * n + b] = v;
-            covariance[b * n + a] = v;
-        }
-    }
-    if covariance.iter().any(|v| !v.is_finite()) || (0..n).any(|i| covariance[i * n + i] < 0.0) {
+    // Rank and identifiability on unit-norm columns (identify.rs): an
+    // undetermined parameter's row and column are NaN, the rest stand.
+    let Ok(Some(identified)) = super::identify::from_factor(n, &r, points.max(n)) else { return invalid };
+    let floor = if objective.counted { 0.0 } else { rounding_rss / (points - n) as f64 };
+    let covariance = identified.covariance(pmax(reduced, floor));
+    let defined = &identified.defined;
+    if (0..n).any(|a| defined[a] && (covariance[a * n + a] < 0.0 || (0..n).any(|b| defined[b] && !covariance[a * n + b].is_finite()))) {
         return invalid;
     }
     (covariance, true)

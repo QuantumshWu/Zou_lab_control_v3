@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Popup press regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. A press in an open list is in that list, whatever the list redraws
+// before the press is let go: a state update between the two never closes the list.
+import {TreeCombo} from '../dist/fluent/tree_combo.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const results = [];
+const check = async (name, test) => { await test(); results.push(name); };
+const TREE = [{heading: 'Camera', leaves: [{key: 'a', label: 'frames', text: 'Camera · frames'}]},
+  {heading: 'Occupancy', leaves: [{key: 'b', label: 'counts', text: 'Occupancy · counts'}, {key: 'c', label: 'occupied', text: 'Occupancy · occupied'}]}];
+const pointer = (type, target) => target.dispatchEvent(new PointerEvent(type, {bubbles: true, button: 0, clientX: 5, clientY: 5}));
+const rows = () => [...document.querySelectorAll('.tree-combo-list .tree-row')];
+const row = words => rows().find(node => node.textContent === words);
+const opened = () => document.querySelector('.tree-combo-list')?.matches(':popover-open') ?? false;
+const stand = () => {
+  const picked = [];
+  const combo = new TreeCombo(key => picked.push(key));
+  combo.setTree(TREE, 'a');
+  document.body.append(combo.root);
+  combo.root.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0}));
+  assert(opened(), 'a press of the box opens its tree');
+  return {combo, picked};
+};
+try {
+  await check('a state update keeps the open tree\'s rows', () => {
+    const {combo} = stand();
+    const before = rows();
+    combo.setTree(TREE, 'a');
+    combo.value = 'a';
+    assert(rows().every((node, index) => node === before[index]), 'the rows were redrawn');
+    combo.value = 'b';
+    assert(rows().every((node, index) => node === before[index]), 'a new pick redrew the rows');
+    combo.dispose(); combo.root.remove();
+  });
+  await check('a heading pressed while the tree redraws opens, and the tree stays open', () => {
+    const {combo, picked} = stand();
+    const heading = row('Occupancy');
+    pointer('pointerdown', heading);
+    // The owner's choices change under the press: every row is made again.
+    combo.setTree([...TREE, {heading: 'Scan', leaves: [{key: 'd', label: 'plan', text: 'Scan · plan'}]}], 'a');
+    assert(!heading.isConnected, 'the pressed row is still the one in the page: the case is not made');
+    pointer('pointerup', row('Occupancy'));
+    assert(opened(), 'the tree closed under a press on its own heading');
+    assert(row('counts') && row('occupied'), 'the heading did not open');
+    pointer('pointerdown', row('occupied'));
+    pointer('pointerup', row('occupied'));
+    assert(!opened() && picked.join() === 'c' && combo.value === 'c', `picked ${picked.join()}`);
+    combo.dispose(); combo.root.remove();
+  });
+  await check('a click elsewhere still closes it', () => {
+    const {combo, picked} = stand();
+    pointer('pointerdown', document.body);
+    pointer('pointerup', document.body);
+    assert(!opened() && !picked.length, 'the tree stayed open');
+    combo.dispose(); combo.root.remove();
+  });
+  document.querySelector('#result').textContent = JSON.stringify({passed: true, count: results.length});
+} catch (error) {
+  document.querySelector('#result').textContent = JSON.stringify({passed: false, count: results.length, error: String(error.stack || error)});
+}
+</script>

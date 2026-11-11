@@ -2,15 +2,21 @@
 //! logic rows and their runs, the board and its layout files
 //! (docs/WORKBENCH_COMMANDS.md). One owner turn applies every command and
 //! every plugin event; plugin work is asked of [`Plugins`] and completes as an
-//! [`Event`]. Scientific data never passes through here.
+//! [`Event`]. Scientific data never passes through that owner turn. Domain
+//! workers in [`scan`] and [`services`] use immutable core data directly.
 pub mod fields;
 pub mod types;
 pub mod workspace;
 mod apparatus;
 mod bench;
 mod choices;
+pub mod diagnostics;
 mod layout;
 mod logic;
+
+pub mod scan;
+
+pub mod services;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -73,6 +79,9 @@ pub enum Event {
     Opened { instance: String, working_point: Value },
     Failed { instance: String, error: String },
     Closed { instance: String, error: Option<String> },
+    /// What an open device states of itself changed (its trigger lanes, what it holds): the drafts
+    /// that name devices are asked again.
+    Facts { instance: String, facts: Value },
     Answered { ticket: u64, result: Result<Value, String> },
     Log { instance: String, line: String },
     RunStarted { run: String },
@@ -84,6 +93,30 @@ pub enum Event {
     RunSnapshot { run: String, ticket: u64, wait: bool },
     /// `outcome`: completed, stopped or failed.
     RunFinished { run: String, outcome: String, error: Option<Value>, generation: Option<String> },
+}
+
+impl Event {
+    /// The fact as the journal keeps it: which, of what, and its outcome; never a payload.
+    fn journal(&self) -> Value {
+        let failed = |result: &Result<Value, String>| result.as_ref().err().cloned();
+        match self {
+            Event::Lifecycle { revision, event, .. } => { let mut inner = event.journal(); inner["lifecycle_revision"] = json!(revision); inner }
+            Event::Opened { instance, .. } => json!({"fact": "opened", "instance": instance}),
+            Event::Failed { instance, error } => json!({"fact": "failed", "instance": instance, "error": error}),
+            Event::Closed { instance, error } => json!({"fact": "closed", "instance": instance, "error": error}),
+            Event::Facts { instance, facts } => json!({"fact": "device_facts", "instance": instance, "facts": facts}),
+            Event::Answered { ticket, result } => json!({"fact": "answered", "ticket": ticket, "error": failed(result)}),
+            Event::Log { instance, line } => json!({"fact": "log", "instance": instance, "line": line}),
+            Event::RunStarted { run } => json!({"fact": "run_started", "run": run}),
+            Event::RunReady { run } => json!({"fact": "run_ready", "run": run}),
+            Event::RunProgress { run, message, current, total } => json!({"fact": "run_progress", "run": run, "message": message, "current": current, "total": total}),
+            Event::RunRequest { run, request } => json!({"fact": "run_request", "run": run, "kind": request.get("kind")}),
+            Event::RunArtifact { run, .. } => json!({"fact": "run_artifact", "run": run}),
+            Event::RunAcquire { run, ticket, node, completion } => json!({"fact": "run_acquire", "run": run, "ticket": ticket, "node": node, "completion": completion}),
+            Event::RunSnapshot { run, ticket, wait } => json!({"fact": "run_snapshot", "run": run, "ticket": ticket, "wait": wait}),
+            Event::RunFinished { run, outcome, error, generation } => json!({"fact": "run_finished", "run": run, "outcome": outcome, "error": error, "generation": generation}),
+        }
+    }
 }
 
 /// What a node run is started with.
@@ -102,8 +135,13 @@ pub struct RunSpec {
     /// Requirement argument -> device instance id.
     pub devices: BTreeMap<String, String>,
     pub device_labels: BTreeMap<String, String>,
+    /// Device instance id -> the units its apparatus entry keeps (field -> spelling): its proxy reads,
+    /// records and scans those fields in them.
+    pub device_units: BTreeMap<String, BTreeMap<String, String>>,
     /// The arguments whose device the run shares (a scan's device axis: its fields protected, not the device).
     pub shared: std::collections::BTreeSet<String>,
+    /// The arguments whose device the run only reads: no claim is taken for them.
+    pub reads: std::collections::BTreeSet<String>,
     pub artifacts: Map<String, Value>,
     /// Workspace resources by build argument, resolved (a pulse: its description).
     pub resources: Map<String, Value>,
@@ -126,8 +164,16 @@ pub struct SignalInfo { pub name: String, pub generation: String, pub owner: Str
 /// `outputs`: what it can publish, (name, label): its region's catalogue and its fit's parameters.
 pub struct PanelContent { pub panel: String, pub signal: String, pub kind: String, pub window: u64, pub target: Value, pub outputs: Vec<(String, String)> }
 
+/// What the plotting owner says of one plot kind. The workbench keeps no table of kinds:
+/// `board`: a board may add a panel of it; `default_window`: how many recent shots a new
+/// panel of it reads; `overlay`: a panel of it is drawn with a judgement its operator chooses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlotKindFacts { pub board: bool, pub default_window: u64, pub overlay: bool }
+
 /// What the application provides: signals and the panels it shows.
 pub trait Host {
+    /// The plotting owner's facts of `kind`; None for a name it has no kind of.
+    fn plot_kind(&self, kind: &str) -> Option<PlotKindFacts>;
     fn signals(&self) -> Vec<SignalInfo>;
     fn panels(&self) -> Vec<PanelContent>;
     /// Panel ids the application will use for the next panels it adds.
@@ -138,6 +184,11 @@ pub trait Host {
     /// A signal's dataset schema as `zlc_data.codec` trees: its run's, and its latest
     /// event's (null before one); None while the Runtime has no such signal.
     fn schemas(&self, _signal: &str) -> Option<(Value, Value)> { None }
+    /// What the application adds to a diagnostics archive beside the journal and the board: the data it
+    /// keeps of recent publications, as archive members (name, bytes).
+    fn diagnostic_data(&self) -> Vec<(String, Vec<u8>)> { Vec::new() }
+    /// Keep recent data within `mib` MiB from now on (0: none).
+    fn keep_recent_data(&mut self, _mib: u64) {}
 }
 
 /// What an answered ticket was for.
@@ -211,6 +262,8 @@ pub struct Workbench {
     pub(crate) routed_selections: BTreeMap<String, Value>,
     /// Devices driven from outside the workbench, by whom (the Pulse Editor playing on the session's sequencer).
     pub(crate) device_users: DeviceUsers,
+    /// A processor follows its source across its runs (the apparatus's); a Figure Viewer's data has no next run.
+    pub(crate) follows_sources: bool,
 }
 
 /// v2 DeviceUseCoordinator's other owners: each device driven from outside the workbench, by
@@ -225,7 +278,7 @@ pub const COMMANDS: &[&str] = &[
     "read_device", "tune_device", "accept_device_risk", "publish_device",
     "add_node", "rename_node", "edit_node", "check_node", "revert_node", "start_node", "stop_node", "remove_node", "answer_request",
     "order_panels", "rename_panel", "set_panel_interval", "set_panel_overlay", "publish_panel_outputs", "set_board",
-    "save_layout", "load_layout", "clear_board", "run_recipe",
+    "save_layout", "load_layout", "clear_board", "run_recipe", "export_diagnostics", "set_diagnostics",
 ];
 
 /// Commands that leave the result to a later plugin event.
@@ -236,17 +289,9 @@ pub(crate) fn text<'a>(params: &'a Value, name: &str) -> Result<&'a str, String>
 }
 
 impl Workbench {
-    pub fn new(root: &Path, mut plugins: Box<dyn Plugins>) -> Result<Self, String> {
-        let workspace = Workspace::new(root)?;
-        let catalog = plugins.catalog();
-        let mut workbench = Self { plugins, catalog, apparatus: apparatus::Apparatus::empty(workspace.apparatus()), workspace,
-            devices: BTreeMap::new(), nodes: Vec::new(), runs: Vec::new(), run_sequences: BTreeMap::new(), board: layout::Board::default(), notes: Vec::new(),
-            report: (String::new(), "idle"), settling: None, settling_since: None,
-            // v2 set_deriving(False) when the console is built.
-            console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None,
-            tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), applied_simulation: None, scan: None,
-            resolution: None, found: Vec::new(), bundles: BTreeMap::new(),
-            selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default() };
+    pub fn new(root: &Path, plugins: Box<dyn Plugins>) -> Result<Self, String> {
+        let mut workbench = Self::document(root, plugins)?;
+        workbench.follows_sources = true;
         let path = workbench.workspace.apparatus();
         if path.is_file() {
             if let Err(error) = workbench.load_apparatus(&path) { workbench.notes.push(error); }
@@ -256,6 +301,20 @@ impl Workbench {
         }
         workbench.say_new_notes();
         Ok(workbench)
+    }
+
+    /// A workbench of logic nodes alone, no apparatus read: a Figure Viewer's, over the data it holds.
+    pub fn document(root: &Path, mut plugins: Box<dyn Plugins>) -> Result<Self, String> {
+        let workspace = Workspace::new(root)?;
+        let catalog = plugins.catalog();
+        Ok(Self { plugins, catalog, apparatus: apparatus::Apparatus::empty(workspace.apparatus()), workspace,
+            devices: BTreeMap::new(), nodes: Vec::new(), runs: Vec::new(), run_sequences: BTreeMap::new(), board: layout::Board::default(), notes: Vec::new(),
+            report: (String::new(), "idle"), settling: None, settling_since: None,
+            // v2 set_deriving(False) when the console is built.
+            console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None,
+            tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), applied_simulation: None, scan: None,
+            resolution: None, found: Vec::new(), bundles: BTreeMap::new(),
+            selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default(), follows_sources: false })
     }
 
     pub fn handles(name: &str) -> bool { COMMANDS.contains(&name) }
@@ -276,6 +335,7 @@ impl Workbench {
         self.say_new_notes();
     }
     pub fn workspace(&self) -> &Workspace { &self.workspace }
+    pub fn catalog(&self) -> &TypeCatalog { &self.catalog }
     /// The file dialog a window command without a path asks (v2 ask_open_path / ask_save_path):
     /// its caption, its v2 filter, whether it saves, where it starts -- a folder, or the file a
     /// save proposes -- and its kind's own folder ([`workspace::dialog_start`]). Devices@ starts at
@@ -308,10 +368,14 @@ impl Workbench {
     /// [`Workbench::take_replies`] under `request`, now or when the plugin answers.
     pub fn apply(&mut self, name: &str, params: &Value, origin: &Origin, request: u64, host: &mut dyn Host) {
         if self.handles_command(name) {
-            if let Err(error) = self.run_device_command(name, params, request) { self.replies.push((request, Err(error))); }
+            if let Err(error) = self.run_device_command(name, params, request) {
+                zlc_core::journal::note("workbench", "refused", json!({"name": name, "request": request, "error": error}));
+                self.replies.push((request, Err(error)));
+            }
             return;
         }
         let result = self.dispatch(name, params, origin, request, host);
+        if let Err(error) = &result { zlc_core::journal::note("workbench", "refused", json!({"name": name, "request": request, "error": error})); }
         match result {
             Ok(None) if DEFERRED.contains(&name) => {}
             Ok(reply) => self.replies.push((request, Ok(reply.unwrap_or_else(|| json!({}))))),
@@ -381,7 +445,7 @@ impl Workbench {
             "apply_devices" => self.apply_devices(host).map(Some),
             "close_device" => self.close_device(text(params, "device")?, host).map(Some),
             "shut_down_devices" => self.shut_down_devices(host).map(Some),
-            "read_device" => self.read_device(text(params, "device")?, params["units"].as_object(), Some(request)).map(|()| None),
+            "read_device" => self.read_device(text(params, "device")?, params["units"].as_object(), params["keep"] == true, Some(request)).map(|()| None),
             "tune_device" => self.tune_device(params, request).map(|()| None),
             "accept_device_risk" => self.accept_device_risk(text(params, "device")?, params["accepted"].as_bool().unwrap_or(false)).map(Some),
             "publish_device" => self.publish_device(text(params, "device")?, params["published"].as_bool().ok_or("published is required")?, request).map(|()| None),
@@ -409,6 +473,13 @@ impl Workbench {
                 let path = self.workspace.resolve(text(params, "path")?);
                 self.load_layout(&path, params["stop_running"].as_bool().unwrap_or(false), host).map(Some)
             }
+            "export_diagnostics" => self.export_diagnostics(params["data"].as_bool().unwrap_or(true), host).map(Some),
+            "set_diagnostics" => {
+                let mib = params["budget_mib"].as_u64().ok_or("budget_mib is required: the memory recent data is kept within, in MiB (0 keeps none)")?;
+                host.keep_recent_data(mib);
+                self.console_report = (if mib == 0 { "diagnostics keep no data".to_owned() } else { format!("diagnostics keep the most recent {mib} MiB of data") }, "task");
+                Ok(Some(json!({"budget_mib": mib})))
+            }
             "clear_board" => self.clear_board(params["stop_running"].as_bool().unwrap_or(false), host).map(Some),
             "run_recipe" => self.run_recipe(text(params, "name")?, &params["parameters"], params["start"].as_bool().unwrap_or(true), &origin_text, host).map(Some),
             _ => Err(format!("{name} is not a workbench command")),
@@ -417,10 +488,13 @@ impl Workbench {
 
     /// One plugin fact, applied on the owner turn.
     pub fn on_event(&mut self, event: Event, host: &mut dyn Host) {
+        // An answer that came is what the state then shows; one that failed is said here.
+        if !matches!(&event, Event::Answered { result: Ok(_), .. }) { zlc_core::journal::note_with("workbench", "event", || event.journal()); }
         match event {
             Event::Opened { instance, working_point } => self.instance_opened(&instance, working_point, host),
             Event::Failed { instance, error } => self.instance_failed(&instance, error, host),
             Event::Closed { instance, error } => self.instance_closed(&instance, error, host),
+            Event::Facts { instance, facts } => self.device_facts(&instance, facts),
             Event::Answered { ticket, result } => self.answered(ticket, result, host),
             Event::Lifecycle { current, revision, event } => {
                 if current.load(std::sync::atomic::Ordering::Acquire) == revision { self.on_event(*event, host); }
@@ -472,7 +546,7 @@ impl Workbench {
             Ticket::Tune { device, request } => {
                 let reply = result.clone().map(|readback| json!({"device": device, "readback": readback}));
                 self.replies.push((request, reply));
-                if result.is_ok() { let _ = self.read_device(&device, None, None); }
+                if result.is_ok() { let _ = self.read_device(&device, None, false, None); }
             }
         }
     }
@@ -496,6 +570,11 @@ impl Workbench {
     /// What a device is called (v2 session.device_labels): its role, else its instance id.
     pub fn device_label(&self, instance: &str) -> String {
         self.devices.get(instance).map(|live| live.entry.role.clone()).filter(|role| !role.is_empty()).unwrap_or_else(|| instance.to_owned())
+    }
+
+    /// The units an open device's apparatus entry keeps (field -> spelling): none for a field never picked.
+    pub fn device_units(&self, instance: &str) -> BTreeMap<String, String> {
+        self.devices.get(instance).map(|live| live.entry.units.clone()).unwrap_or_default()
     }
 
     /// The first logic node of a type (board order).
@@ -523,6 +602,28 @@ impl Workbench {
         sections.insert("board".into(), self.board_state(&host.panels(), &signals));
         sections.insert("runs".into(), Value::Array(self.runs.iter().rev().take(50).map(logic::Run::row).collect()));
         sections
+    }
+
+    /// The logic nodes' rows alone (what a Figure Viewer's page draws of them).
+    pub fn logic_rows(&self, host: &dyn Host) -> Value {
+        let signals = host.signals();
+        Value::Array(self.nodes.iter().map(|node| self.node_row(node, &signals)).collect())
+    }
+
+    /// The node types that can run on saved data, for a Figure Viewer's chooser.
+    pub fn pure_processors(&self) -> Value {
+        Value::Array(self.catalog.nodes().filter(|item| item.pure_processor() && item.addable.unwrap_or(true))
+            .map(|item| json!({"type_id": item.type_id, "label": item.label(), "description": item.description})).collect())
+    }
+
+    /// Whether a node of this id stands on this board.
+    pub fn has_node(&self, id: &str) -> bool { self.node(id).is_some() }
+
+    /// Everything goes at once: each node's run is told to stop, its plugin instance closes, its signals are withdrawn.
+    pub fn close_nodes(&mut self, host: &mut dyn Host) {
+        self.stop_all(host);
+        for node in std::mem::take(&mut self.nodes) { self.plugins.close(&zlc_core::control::node_instance(&node.id)); }
+        self.tickets.clear();
     }
 
     /// Put the sections into a state message, ordering `panels` as the board does.

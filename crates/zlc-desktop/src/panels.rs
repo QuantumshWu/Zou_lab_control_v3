@@ -105,6 +105,25 @@ pub struct Panels {
 
 impl Default for Panels { fn default() -> Self { Self::new() } }
 
+/// The reads the live board's panels are drawn from, said to the journal whenever any of them
+/// changes: which run and which event each picture and its overlay are of.
+pub fn journal_drawn(inputs: &[PanelInput]) {
+    if !zlc_core::journal::is_open() { return; }
+    static SAID: Mutex<String> = Mutex::new(String::new());
+    let key = |read: &Read| {
+        let key = read.key();
+        json!({"signal": &*key.signal, "run": key.generation.as_uuid().simple().to_string()[..8], "ordinal": key.ordinal, "revision": key.revision})
+    };
+    let drawn = Value::Array(inputs.iter().map(|input| json!({"panel": input.panel, "kind": input.kind, "window": input.window,
+        "source": input.read.as_ref().map(key), "overlay": input.overlay.as_ref().map(key), "reason": input.reason})).collect());
+    let text = drawn.to_string();
+    let mut said = SAID.lock().unwrap_or_else(|error| error.into_inner());
+    if *said != text {
+        zlc_core::journal::note("app", "drawn", json!({"panels": drawn}));
+        *said = text;
+    }
+}
+
 impl Panels {
     pub fn new() -> Self { Self::with_prefix("panel") }
     pub fn with_prefix(prefix: impl Into<String>) -> Self { Self { bindings: BTreeMap::new(), next_id: 1, prefix: prefix.into(), review_revision: 0, front: Mutex::default() } }
@@ -339,7 +358,7 @@ impl Panels {
                 requests.push((binding.generation.as_ref().unwrap().clone(), binding.signal.clone(), width));
                 // The Overlay is a member of the picture's group whatever its run's state: the
                 // Runtime keeps the last shot both have until its judgement of a newer one comes.
-                let judgement = overlays.get(panel).filter(|_| width.is_none())
+                let judgement = overlays.get(panel).filter(|_| width.is_none() && crate::workbench_host::plot_kind(kind).is_some_and(|facts| facts.overlay))
                     .and_then(|overlay| sources.iter().find(|source| *source.signal == **overlay));
                 if let Some(judgement) = judgement {
                     positions.push((inputs.len(), true));
@@ -395,7 +414,7 @@ impl Panels {
                     if let Some(frozen) = &binding.frozen {
                         let key = frozen.read.key();
                         let newest = sources.iter().find(|source| source.signal == binding.signal)
-                            .and_then(|source| runtime.read_views(&[(source.generation.clone(), source.signal.clone(), None)]).remove(0).ok());
+                            .and_then(|source| runtime.read_coherent_views(&[(source.generation.clone(), source.signal.clone(), None)], &mut Default::default()).remove(0).ok());
                         // v2 _snapshot_text: what the held picture is to Save, in v2's words.
                         let moved = self.bindings.get(&frozen.of).is_some_and(|live| live.signal != binding.signal);
                         let status = if moved { "Stale: this panel now shows another signal; refresh before saving" }

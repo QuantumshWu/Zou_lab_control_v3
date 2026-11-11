@@ -237,7 +237,7 @@ impl PlotSession {
     /// normalized continuous view; sample selection is a separate concern).
     pub(crate) fn committed_view(&self, selected: Option<Viewport>) -> Result<Option<Viewport>> {
         let Some(mut selected) = normalize_viewport(selected) else { return Ok(None) };
-        if self.semantic_kind() == PlotKind::Image && (selected.0.is_none() || selected.1.is_none()) {
+        if matches!(self.semantic_kind(), PlotKind::Image | PlotKind::PointMap) && (selected.0.is_none() || selected.1.is_none()) {
             let (x, y) = self.current_display_limits()?;
             selected = (selected.0.or(Some(x)), selected.1.or(Some(y)));
         }
@@ -253,13 +253,22 @@ impl PlotSession {
         let previous = (self.scene.viewport, self.scene.fit_context_generation);
         self.scene.viewport = selected;
         self.scene.fit_context_generation += 1;
-        let effects = RenderEffect::AXIS_TRANSFORM | RenderEffect::FIT_SELECTION | RenderEffect::OVERLAY;
-        if let Err(error) = self.render_current(effects) {
+        if let Err(error) = self.present_viewport() {
             (self.scene.viewport, self.scene.fit_context_generation) = previous;
-            if self.render_current(effects).is_err() { let _ = self.redraw_surface(); }
+            if self.present_viewport().is_err() { let _ = self.redraw_surface(); }
             return Err(error);
         }
         Ok(true)
+    }
+
+    /// Draw the committed viewport: a Fit data box takes its shape first.
+    fn present_viewport(&mut self) -> Result<()> {
+        let plan = self.resolve_plan()?;
+        if plan != *self.renderer.plan() {
+            self.scene.layout_revision += 1;
+            return self.apply_layout_plan(plan, true, None);
+        }
+        self.render_current(RenderEffect::AXIS_TRANSFORM | RenderEffect::FIT_SELECTION | RenderEffect::OVERLAY)
     }
 
     /// `_current_display_limits`: the primary axes' sorted limits.

@@ -1,0 +1,75 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Window journal regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<div id="stage"></div>
+<script type="module">
+// Run with tools/test_ui.ps1. A window says what the operator did in it -- a click and on what, a command
+// key, a popup opened, an error -- in batches, each line stamped; it names controls and never keeps what
+// was typed into one.
+import {HeldUp, describe, isCommandKey, startJournal} from '../dist/journal.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const results = [];
+const check = async (name, test) => { await test(); results.push(name); };
+const stage = document.getElementById('stage');
+stage.innerHTML = `
+  <section data-panel="panel-3"><div data-item="period:p7">
+    <button id="fire" title="Fire the pulse"><span>On Pulse</span></button>
+    <input name="duration" aria-label="Duration" value="12.5 secret">
+  </div></section>`;
+const sent = [];
+const before = Date.now() * 1000;
+const note = startJournal(command => sent.push(command), 'task-console');
+const lines = () => sent.flatMap(command => command.lines);
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+try {
+  await check('a control is named by its kind, its words and where it stands, never its value', () => {
+    const button = describe(stage.querySelector('#fire span'));
+    assert(button.tag === 'button' && button.id === 'fire' && button.words === 'Fire the pulse', JSON.stringify(button));
+    assert(button.item === 'period:p7' && button.panel === 'panel-3', JSON.stringify(button));
+    const field = describe(stage.querySelector('input'));
+    assert(field.words === 'Duration' && field.name === 'duration', JSON.stringify(field));
+    assert(!JSON.stringify(field).includes('secret'), 'a field\'s value was read');
+  });
+  await check('typing is not a command; a command key and a held modifier are', () => {
+    assert(!isCommandKey({key: 'a'}) && !isCommandKey({key: '7'}) && !isCommandKey({key: ' '}), 'a typed character');
+    assert(isCommandKey({key: 'Enter'}) && isCommandKey({key: 'Escape'}) && isCommandKey({key: 's', ctrlKey: true}), 'a command');
+  });
+  await check('what was done is sent in one batch, stamped and in order', async () => {
+    stage.querySelector('#fire').click();
+    const input = stage.querySelector('input');
+    input.dispatchEvent(new KeyboardEvent('keydown', {key: 'x', bubbles: true}));
+    input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', ctrlKey: true, bubbles: true}));
+    note('page', {shown: 'logic'});
+    assert(sent.length === 0, 'a line was sent alone');
+    await wait(1300);
+    assert(sent.length === 1 && sent[0].action === 'journal', `batches ${sent.length}`);
+    const said = lines().map(line => line.ev);
+    assert(said.join() === 'opened,click,key,page', said.join());
+    const [, click, key] = lines();
+    assert(click.facts.id === 'fire' && click.facts.page === 'task-console', JSON.stringify(click));
+    assert(key.facts.key === 'Ctrl+Enter' && key.facts.name === 'duration', JSON.stringify(key));
+    const after = Date.now() * 1000;
+    assert(lines().every((line, at, all) => line.us >= before - 2000 && line.us <= after + 2000 && (at === 0 || line.us >= all[at - 1].us)), 'the stamps');
+  });
+  await check('an error of the page is a line', async () => {
+    dispatchEvent(new ErrorEvent('error', {message: 'x is not defined', filename: 'board.js', lineno: 12, colno: 3}));
+    await wait(1300);
+    const error = lines().find(line => line.ev === 'error');
+    assert(error && error.facts.message === 'x is not defined' && error.facts.line === 12, JSON.stringify(error));
+  });
+  await check('the tasks the browser reports as long are counted until asked, then counted afresh', () => {
+    const held = new HeldUp();
+    assert(held.take() === undefined, 'nothing held is nothing said');
+    held.add([{duration: 61.4}, {duration: 250.2}]);
+    held.add([{duration: 88}]);
+    assert(JSON.stringify(held.take()) === JSON.stringify({count: 3, total_ms: 400, longest_ms: 250}), 'the count');
+    assert(held.take() === undefined, 'asked, the count starts again');
+  });
+  document.getElementById('result').textContent = JSON.stringify({passed: true, count: results.length});
+} catch (error) {
+  document.getElementById('result').textContent = JSON.stringify({passed: false, count: results.length, error: String(error.stack || error)});
+}
+</script>

@@ -80,7 +80,7 @@ export class Transport {
         const id = this.nextRequest++;
         if (this.shared) {
             // A pointer's own motion is no intent; anything else is said once, in the status line.
-            if (command.action !== "pointer" && command.action !== "frontend_error")
+            if (command.action !== "pointer" && command.action !== "frontend_error" && command.action !== "journal")
                 this.note(READ_ONLY, "warning");
             return id;
         }

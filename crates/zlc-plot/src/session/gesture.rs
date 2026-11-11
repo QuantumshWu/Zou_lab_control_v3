@@ -89,8 +89,12 @@ impl PlotSession {
         let interaction = self.services.interaction;
         let mut series_changed = false;
         let mut series = |session: &mut PlotSession, action: SeriesAction, axes: Option<&AxesId>| -> Result<bool> {
-            let changed = session.renderer.series_focus(action, axes, pixel.0, pixel.1, interaction.selector_handle_radius_px,
-                                                        interaction.double_click_radius_px)?;
+            let changed = if session.semantic_kind() == PlotKind::PointMap {
+                session.site_focus(action, axes, pixel, interaction.selector_handle_radius_px, interaction.double_click_radius_px)
+            } else {
+                session.renderer.series_focus(action, axes, pixel.0, pixel.1, interaction.selector_handle_radius_px,
+                                               interaction.double_click_radius_px)?
+            };
             series_changed |= changed;
             Ok(changed)
         };
@@ -223,7 +227,7 @@ impl PlotSession {
 
     /// `_color_selector_domain` and `_current_color_limit_value`, then the drag.
     fn begin_color_limit_pointer(&mut self, point_x: f64, axes: AxesId, transform: &AxisTransform) -> Result<()> {
-        if self.semantic_kind() != PlotKind::Image { return Ok(()); }
+        if !matches!(self.semantic_kind(), PlotKind::Image | PlotKind::PointMap) { return Ok(()); }
         let rail = self.renderer.axes("distribution");
         let first = rail.first().ok_or_else(|| PlotError::runtime("color selector requires a side distribution"))?;
         let geometry = self.renderer.geometry(first).ok_or_else(|| PlotError::runtime("color selector requires a side distribution"))?;
@@ -285,7 +289,7 @@ impl PlotSession {
         let base = self.scene.viewport.unwrap_or((None, None));
         let base_x = base.0.map(|x| self.viewport_x_to_axes(x)).transpose()?;
         let (x, y) = wheel_viewport(base_x, base.1, geometry.x_limits, geometry.y_limits, (&geometry.x_scale, &geometry.y_scale),
-                                    self.semantic_kind() == PlotKind::Image, factor, ticks, None)?;
+                                    matches!(self.semantic_kind(), PlotKind::Image | PlotKind::PointMap), factor, ticks, None)?;
         let request = (Some(self.viewport_x_from_axes(x)?), y);
         self.set_viewport(request.0, request.1)?;
         Ok(())
@@ -345,7 +349,7 @@ impl PlotSession {
     /// `_update_pan`: follow the pan; whether the view moved.
     fn follow_pan(&self, gesture: &mut PanGesture, pixel: (f64, f64)) -> Result<bool> {
         let canvas = self.renderer.canvas_size();
-        let image = self.semantic_kind() == PlotKind::Image;
+        let image = matches!(self.semantic_kind(), PlotKind::Image | PlotKind::PointMap);
         let committed = self.projected().viewport();
         update_pan(gesture, Some(pixel), canvas, image, self.scene.viewport.and_then(|view| view.1), committed,
                    |x| self.viewport_x_from_axes(x), |selected| self.committed_view(selected))

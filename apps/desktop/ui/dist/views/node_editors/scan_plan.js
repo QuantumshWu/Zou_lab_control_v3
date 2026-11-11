@@ -18,37 +18,12 @@
 // and an API override keep their digits, read in the new unit; an API box
 // still at the pulse's own number is that number re-read in it.
 import { Field, Segmented, SpinBox, TreeCombo, switchButton, setChecked, alignUnitPickers, button, choiceTree, defaultUnit, element, sectionTitle, setText, shifted, token, unitTree } from "../../fluent/index.js";
-const copyAxis = (entry) => ({ ...entry, values: [...entry.values], ...(entry.links ? { links: entry.links.map(link => ({ ...link, values: [...link.values] })) } : {}) });
+const copyAxis = (entry) => ({ ...entry, values: [...entry.values], ...(entry.range ? { range: { ...entry.range } } : {}), ...(entry.links ? { links: entry.links.map(link => ({ ...link, values: [...link.values] })) } : {}) });
 /** The word a manual axis carries in the label column: a hand moves it. */
 const BY_HAND = "By hand";
-/** numpy.linspace: the authored coordinates in the row's unit. */
-function linspace(start, stop, count) {
-    if (count <= 1)
-        return [start];
-    const step = (stop - start) / (count - 1);
-    return Array.from({ length: count }, (_, index) => index === count - 1 ? stop : index * step + start);
-}
-const ulp = (value) => value === 0 ? Number.MIN_VALUE : 2 ** (Math.floor(Math.log2(Math.abs(value))) - 52);
-/** Whether a list is the evenly spaced grid its ends describe, judged before
- * any display rounding (v2 _uniform_values: only the last-bit error two float
- * routes differ by). */
-function uniform(values) {
-    const first = values[0], last = values[values.length - 1];
-    if (first === undefined || last === undefined || values.length < 2)
-        return true;
-    const tolerance = 4 * ulp(Math.max(Math.abs(first), Math.abs(last)));
-    return linspace(first, last, values.length).every((value, index) => Math.abs(value - values[index]) <= tolerance);
-}
-/** The plan's axes as written; an unreadable plan has no rows (its problem is the model's to say). */
-function readPlan(text) {
-    try {
-        const tree = JSON.parse(String(text ?? ""));
-        return (tree.axes ?? []).map(axis => ({ port: String(axis.port ?? ""), values: (axis.values ?? []).map(Number), unit: String(axis.unit ?? ""),
-            mode: axis.mode === "values" ? "values" : "range", value_text: String(axis.value_text ?? ""), ...(axis.links || axis.link_enabled ? { link_enabled: axis.link_enabled === true, links: (axis.links ?? []).map(link => ({ ...link, values: [...link.values] })) } : {}) }));
-    }
-    catch {
-        return [];
-    }
+/** The UI authors a range; the native compiler alone expands its numbers. */
+function rangeBank(start, stop, count) {
+    return { values: [], range: { start, stop, count } };
 }
 /** `value` + `step` in decimal, each as its shortest spelling: 80 − 0.1 is 79.9, never 79.90000000000001. */
 function decimalSum(value, step) {
@@ -81,14 +56,14 @@ function firstSweep(port) {
     const { current, bounds: [low, high] } = inSpelling(port, unit);
     const inside = (value) => Math.min(high ?? Infinity, Math.max(low ?? -Infinity, value));
     if (current === null)
-        return { unit, values: [low ?? high ?? 0] };
+        return { unit, ...rangeBank(low ?? high ?? 0, low ?? high ?? 0, 1) };
     const step = port.integer ? 1 : 0.1;
     const from = inside(decimalSum(current, -step)), to = inside(decimalSum(current, step));
     if (!(from < to))
-        return { unit, values: [inside(current)] };
+        return { unit, ...rangeBank(inside(current), inside(current), 1) };
     if (!port.integer)
-        return { unit, values: linspace(from, to, 5) };
-    return { unit, values: Array.from({ length: Math.floor(to) - Math.ceil(from) + 1 }, (_, index) => Math.ceil(from) + index) };
+        return { unit, ...rangeBank(from, to, 5) };
+    return { unit, ...rangeBank(Math.ceil(from), Math.floor(to), Math.floor(to) - Math.ceil(from) + 1) };
 }
 /** A spin box for one end or the count of a Range bank. */
 function rangeSpin(label, step, bounds, commit, decimal = true) {
@@ -110,6 +85,15 @@ function rangeSpin(label, step, bounds, commit, decimal = true) {
     });
     return spin;
 }
+/** A played number as the operator would write it: no binary noise (0.30000000000000004 is 0.3). */
+const spoken = (value) => value === null ? "" : String(Number(value.toPrecision(12)));
+/** What plays, in two words: "first … last unit" (one point: its value) and "n points". */
+function endsText(ends, unit) {
+    const suffix = unit && unit !== "1" ? ` ${unit}` : "";
+    return ends.count === 1 ? [`${spoken(ends.first)}${suffix}`, "1 point"] : [`${spoken(ends.first)} … ${spoken(ends.last)}${suffix}`, `${ends.count} points`];
+}
+/** How many colours link groups take in turn (--link-group-0 … in tokens.css). */
+const LINK_COLOURS = 4;
 /** The Values list's tooltip: what it is. */
 const LIST_TIP = "Scan these values in the written order";
 class AxisRowView {
@@ -138,6 +122,8 @@ class AxisRowView {
     linkedSignature = "";
     linkedCells = [];
     linkedUpdates = [];
+    /** The master's "x": what its linked formulas call this axis, its tooltip what x plays. */
+    badge = linkBadge();
     /** A list nobody's ends describe, kept until a spin is edited. */
     customValues = null;
     constructor(owner, manual, entry) {
@@ -182,11 +168,21 @@ class AxisRowView {
         this.notes.append(this.custom);
     }
     get cells() {
-        const signature = JSON.stringify([this.entry.link_enabled, (this.entry.links ?? []).map(link => [link.port, link.unit, link.mode, this.owner.portTree(link.port), this.owner.ports.find(port => port.port === link.port)?.units])]);
+        const signature = JSON.stringify([this.entry.link_enabled, (this.entry.links ?? []).map(link => [link.port, link.unit, this.owner.portTree(link.port), this.owner.ports.find(port => port.port === link.port)?.units])]);
+        let cells;
         if (signature === this.linkedSignature && this.linkedCells.length) {
             this.linkedUpdates.forEach(update => update());
-            return [this.kind, this.axis, this.values, this.unit, this.mode.root, this.linkedCells[0], this.remove, this.notes, ...this.linkedCells.slice(1)];
+            cells = [this.kind, this.axis, this.values, this.unit, this.mode.root, this.linkedCells[0], this.remove, this.notes, ...this.linkedCells.slice(1)];
         }
+        else
+            cells = this.linkedRows(signature);
+        this.paintGroup(cells);
+        return cells;
+    }
+    /** The Link switch and, while it is on, one row per linked parameter, which reads as an
+     * equation: "↳ knob = f(x) [formula] unit", under it what that formula plays (or why it
+     * cannot be evaluated), from the native preview's facts. */
+    linkedRows(signature) {
         this.linkedSignature = signature;
         this.linkedUpdates = [];
         this.linkControls = [];
@@ -201,56 +197,30 @@ class AxisRowView {
         this.linkControls.push(toggle);
         if (this.entry.link_enabled)
             for (const [index, link] of (this.entry.links ?? []).entries()) {
-                const marker = element("span", "linked-marker");
+                // The group's band, beside this row and its preview line.
+                const lead = element("span", "linked-lead");
+                const param = element("div", "linked-param");
                 const picker = new TreeCombo(value => { link.port = value; const port = this.owner.ports.find(p => p.port === value); if (port)
                     link.unit = firstSweep(port).unit; this.owner.emitPlan(); });
                 picker.root.classList.add("linked-port");
                 picker.setTree(this.owner.portTree(link.port), link.port);
+                param.append(element("span", "linked-arrow", "↳"), picker.root);
+                // A linked parameter is not scanned: it follows this axis by a formula of x.
                 const holder = element("div", "linked-values");
-                if (link.mode === "range") {
-                    const bank = element("div", "range-bank");
-                    const start = rangeSpin("linked from", () => 1, () => [null, null], value => { link.values[0] = value; this.owner.emitPlan(); });
-                    const stop = rangeSpin("linked to", () => 1, () => [null, null], value => { link.values[link.values.length - 1] = value; this.owner.emitPlan(); });
-                    const update = () => {
-                        if (document.activeElement !== start.input)
-                            start.input.value = String(link.values[0] ?? 0);
-                        if (document.activeElement !== stop.input)
-                            stop.input.value = String(link.values.at(-1) ?? 1);
-                        start.refresh();
-                        stop.refresh();
-                    };
-                    update();
-                    this.linkedUpdates.push(update);
-                    bank.append(element("span", "bank-word", "from"), start.root, element("span", "bank-word", "to"), stop.root);
-                    holder.append(bank);
-                    this.linkControls.push(start.input, stop.input);
-                }
-                else {
-                    const input = element("input");
-                    input.type = "text";
-                    input.spellcheck = false;
-                    const update = () => { if (document.activeElement !== input)
-                        input.value = link.mode === "formula" ? link.formula : link.value_text; };
-                    update();
-                    this.linkedUpdates.push(update);
-                    input.setAttribute("aria-label", link.mode === "formula" ? "Linked formula" : "Linked values");
-                    input.placeholder = link.mode === "formula" ? "120 - x" : "1, 2, 3";
-                    input.title = link.mode === "formula" ? "x is this axis's number; write numeric constants directly" : LIST_TIP;
-                    input.addEventListener("change", () => { if (link.mode === "formula")
-                        link.formula = input.value;
-                    else
-                        link.value_text = input.value; this.owner.emitPlan(); });
-                    holder.append(input);
-                    this.linkControls.push(input);
-                }
+                const chip = element("span", "link-chip", "f(x)");
+                const input = element("input");
+                input.type = "text";
+                input.spellcheck = false;
+                input.setAttribute("aria-label", "Linked formula");
+                input.placeholder = "x + 6.37";
+                input.title = "x is this axis's number; write numeric constants directly";
+                input.addEventListener("change", () => { link.formula = input.value; link.mode = "formula"; this.owner.emitPlan(); });
+                holder.append(element("span", "linked-eq", "="), chip, input);
+                this.linkControls.push(input);
                 const unit = new TreeCombo(value => { link.unit = value; this.owner.emitPlan(); });
                 unit.root.classList.add("linked-unit");
                 const port = this.owner.ports.find(p => p.port === link.port);
                 unit.setTree(unitTree((port?.units.length ? port.units : [[link.unit, 0]]).map(([symbol]) => ({ value: symbol, label: symbol || "1", group: port?.families[symbol] })), link.unit), link.unit);
-                const mode = new Segmented(value => { link.mode = value; this.owner.emitPlan(); });
-                mode.root.classList.add("linked-mode");
-                mode.setChoices([["range", "Range"], ["values", "Values"], ["formula", "Formula"]]);
-                mode.setCurrent(link.mode);
                 const add = button("+", () => this.addLink(), "quiet glyph square linked-add");
                 add.title = "Add linked parameter";
                 add.setAttribute("aria-label", add.title);
@@ -258,18 +228,55 @@ class AxisRowView {
                     this.entry.link_enabled = false; this.owner.emitPlan(); }, "destructive glyph square linked-remove");
                 remove.title = "Remove linked parameter";
                 remove.setAttribute("aria-label", remove.title);
-                const nodes = [marker, picker.root, holder, unit.root, mode.root, add, remove];
-                nodes.forEach(node => node.classList.add("linked-row-cell"));
-                if (index === (this.entry.links?.length ?? 0) - 1)
-                    marker.classList.add("last");
-                this.linkControls.push(picker.root, unit.root, ...mode.root.querySelectorAll("button"), add, remove);
-                cells.push(...nodes);
+                const preview = element("p", "note linked-preview");
+                const update = () => {
+                    if (document.activeElement !== input)
+                        input.value = link.formula ?? "";
+                    chip.title = `x is ${this.axisLabel()}`;
+                    const fact = this.owner.axisFacts(this.entry.port)?.links?.[index];
+                    const known = fact?.port === link.port ? fact : undefined;
+                    const [span, count] = known ? endsText(known, link.unit) : ["", ""];
+                    setText(preview, known ? known.problem || `${span} (${count})` : "");
+                    preview.classList.toggle("problem", Boolean(known?.problem));
+                };
+                update();
+                this.linkedUpdates.push(update);
+                this.linkControls.push(picker.root, unit.root, add, remove);
+                cells.push(lead, param, holder, unit.root, add, remove, preview);
             }
         for (const control of this.linkControls)
             if ("disabled" in control)
                 control.disabled = this.linkLocked;
         this.linkedCells = [toggle, ...cells.slice(8)];
         return cells;
+    }
+    /** The knob as its picker names it (a manual axis: its name). */
+    axisLabel() {
+        const port = this.port();
+        if (port)
+            return port.port.startsWith(this.owner.families.device) ? port.leaf : port.label;
+        if (this.manual)
+            return this.entry.port.slice(this.owner.families.manual.length);
+        return this.owner.unofferedLeaf(this.entry.port) ?? this.entry.port;
+    }
+    /** A linked group in its colour (by its place among the plan's groups): a band down the
+     * left of the axis and its linked rows, the axis's "x" badge saying what x plays. */
+    paintGroup(cells) {
+        const group = this.entry.link_enabled && this.entry.links?.length ? this.owner.linkGroup(this) : -1;
+        this.kind.classList.toggle("link-master", group >= 0);
+        this.notes.classList.toggle("in-link", group >= 0);
+        if (group < 0) {
+            this.badge.remove();
+            for (const cell of cells)
+                cell.style.removeProperty("--link");
+            return;
+        }
+        for (const cell of cells)
+            cell.style.setProperty("--link", `var(--link-group-${group % LINK_COLOURS})`);
+        if (this.badge.parentElement !== this.kind)
+            this.kind.append(this.badge);
+        const played = this.owner.axisFacts(this.entry.port)?.played;
+        this.badge.title = `x = ${this.axisLabel()}${played ? ` (${endsText(played, this.entry.unit).join(", ")})` : ""}`;
     }
     addLink() {
         const port = this.owner.unusedPort();
@@ -313,21 +320,22 @@ class AxisRowView {
         if (this.name && document.activeElement !== this.name)
             this.name.value = entry.port.slice(this.owner.families.manual.length);
         const values = entry.values.length ? entry.values : [0];
-        this.customValues = uniform(entry.values) ? null : [...entry.values];
-        for (const [spin, value] of [[this.start, values[0]], [this.stop, values[values.length - 1]], [this.points, entry.values.length || 1]]) {
+        this.customValues = entry.range || entry.values.length < 2 || this.owner.axisFacts(entry.port)?.range_uniform ? null : [...entry.values];
+        for (const [spin, value] of [[this.start, entry.range?.start ?? values[0]], [this.stop, entry.range?.stop ?? values[values.length - 1]], [this.points, entry.range?.count ?? (entry.values.length || 1)]]) {
             if (document.activeElement !== spin.input) {
                 spin.input.value = String(value);
                 spin.input.classList.remove("invalid");
             }
             spin.refresh();
         }
-        if (entry.values.length) {
-            this.flag(this.start.input, [values[0]]);
-            this.flag(this.stop.input, [values[values.length - 1]]);
+        if (entry.values.length || entry.range) {
+            this.flag(this.start.input, [entry.range?.start ?? values[0]]);
+            this.flag(this.stop.input, [entry.range?.stop ?? values[values.length - 1]]);
         }
         if (document.activeElement !== this.list)
             this.list.value = entry.value_text;
-        this.flag(this.list, entry.value_text.trim() ? entry.value_text.split(",").map(item => Number(item.trim())).filter(Number.isFinite) : [], LIST_TIP);
+        const fact = this.owner.axisFacts(entry.port);
+        this.flag(this.list, fact?.value_text === entry.value_text ? fact.values_bounds ?? [] : [], LIST_TIP);
         // A unit with other spellings is a picker; one without is a word.
         const port = this.port();
         const offered = port?.units.some(([symbol]) => symbol === entry.unit) ? port.units : [];
@@ -392,10 +400,25 @@ class AxisRowView {
         if (![start, stop, count].every(Number.isFinite) || count < 1)
             return;
         this.customValues = null;
-        this.entry = { ...this.entry, values: linspace(start, stop, count) };
+        this.entry = { ...this.entry, ...rangeBank(start, stop, count) };
         this.showMode();
         this.owner.emitPlan();
     }
+}
+/** The group's "x": a lowercase x centred in its disc by its x-height, not by its line
+ * (a line centres the em box, which leaves a lowercase letter low). */
+function linkBadge() {
+    const badge = element("span", "link-badge");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 100 100");
+    svg.setAttribute("aria-hidden", "true");
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    for (const [name, value] of [["x", "50"], ["y", "50"], ["text-anchor", "middle"], ["dominant-baseline", "middle"]])
+        text.setAttribute(name, value);
+    text.textContent = "x";
+    svg.append(text);
+    badge.append(svg);
+    return badge;
 }
 export class ScanPlanEditor {
     edit;
@@ -404,8 +427,10 @@ export class ScanPlanEditor {
     add = button("Add axis", () => this.addRow(false));
     addManual = button("Add manual axis", () => this.addRow(true));
     axes = element("div", "scan-axes");
+    unread = element("p", "field-error");
     problem = element("p", "field-error");
     summary = element("p", "note wrap");
+    previewSignature = "";
     apiTitle = sectionTitle("API values");
     apiForm = element("div", "form api-values");
     parked = element("div", "api-parked");
@@ -435,7 +460,7 @@ export class ScanPlanEditor {
         // keeps for it (labelFloor), never setting it: the column, and every field
         // after it, stays put when a pulse that binds some is chosen.
         this.apiForm.dataset.labelRoom = "";
-        this.root.append(sectionTitle("Scan plan", this.add, this.addManual), this.axes, this.problem, this.summary, this.apiTitle, this.apiForm, this.parked, this.apiNote);
+        this.root.append(sectionTitle("Scan plan", this.add, this.addManual), this.axes, this.unread, this.problem, this.summary, this.apiTitle, this.apiForm, this.parked, this.apiNote);
         if (readOnly)
             for (const node of [this.add, this.addManual, this.apiTitle, this.apiForm, this.parked, this.apiNote])
                 node.hidden = true;
@@ -454,6 +479,7 @@ export class ScanPlanEditor {
         this.rows = [];
         this.axes.replaceChildren();
         this.planText = null;
+        this.previewSignature = "";
         this.shownUnits.clear();
         this.apiFields.clear();
         this.apiForm.replaceChildren();
@@ -492,9 +518,15 @@ export class ScanPlanEditor {
         this.ports = facts.ports;
         this.locked = locked;
         const text = String(row.values.plan ?? "");
-        if (text !== this.planText || portsChanged) {
+        // Native authoring facts are a pure function of this source. Comparing the
+        // token avoids serializing long explicit value banks on every status push.
+        const preview = facts.plan_source;
+        // Draft values can arrive before their asynchronous native preview. An
+        // old preview must not replace newer authoring or its focused widgets.
+        if (facts.plan_source === text && (text !== this.planText || portsChanged || preview !== this.previewSignature)) {
             this.planText = text;
-            this.reconcileRows(this.ordered(readPlan(text)));
+            this.previewSignature = preview;
+            this.reconcileRows(facts.rows.map(copyAxis));
         }
         for (const view of this.rows)
             this.remember(view);
@@ -502,6 +534,8 @@ export class ScanPlanEditor {
         this.addManual.disabled = Boolean(locked);
         for (const view of this.rows)
             view.locked = Boolean(locked);
+        setText(this.unread, facts.unread || "");
+        this.unread.hidden = !facts.unread;
         setText(this.problem, facts.problem);
         this.problem.hidden = !facts.problem;
         setText(this.summary, facts.problem ? "" : facts.summary);
@@ -519,11 +553,10 @@ export class ScanPlanEditor {
             entries.push({ key: current, group: lost.group, label: `${lost.leaf} (${current in this.facts.withheld ? "its bracket is empty" : current.startsWith(this.families.device) ? "unavailable" : "not in this pulse"})` });
         return choiceTree(entries, current, "ports");
     }
-    /** The host's axes (manual, device, API) stand outside the board's, in their order. */
-    ordered(axes) {
-        const host = (axis) => [axis.port, ...(axis.link_enabled ? (axis.links ?? []).map(link => link.port) : [])].some(port => this.facts.host_advanced.some(prefix => port.startsWith(prefix)));
-        return [...axes.filter(host), ...axes.filter(axis => !host(axis))];
-    }
+    axisFacts(port) { return this.facts?.axis_facts.find(axis => axis.port === port); }
+    unofferedLeaf(port) { return this.facts?.unoffered[port]?.leaf; }
+    /** A linked axis's place among the plan's linked axes: its group's colour. */
+    linkGroup(view) { return this.rows.filter(row => row.entry.link_enabled && row.entry.links?.length).indexOf(view); }
     /** The rows brought to the plan, kept wherever they can be: a row of the
      * right kind at its position is re-pointed, not rebuilt. */
     reconcileRows(axes) {
@@ -566,7 +599,7 @@ export class ScanPlanEditor {
             let ordinal = 1;
             while (taken.has(`manual ${ordinal}`))
                 ordinal++;
-            this.rows.push(new AxisRowView(this, true, { port: `${this.families.manual}manual ${ordinal}`, values: linspace(0, 1, 3), unit: "", mode: "range", value_text: "" }));
+            this.rows.push(new AxisRowView(this, true, { port: `${this.families.manual}manual ${ordinal}`, ...rangeBank(0, 1, 3), unit: "", mode: "range", value_text: "" }));
         }
         else {
             // The first knob the plan does not sweep yet (a port may stand on one axis only).
@@ -588,16 +621,15 @@ export class ScanPlanEditor {
         this.rows = this.rows.filter(item => item !== view);
         this.emitPlan();
     }
-    /** The plan the rows hold, host axes first, as the draft's `plan`. */
+    /** Author the current banks; the native preview returns canonical axis order. */
     emitPlan() {
         for (const view of this.rows)
             this.remember(view);
-        const order = this.ordered(this.rows.map(view => view.entry));
-        this.rows = order.map(entry => this.rows.find(view => view.entry === entry));
+        const order = this.rows.map(view => view.entry);
         this.placeRows(this.rows);
         this.axes.classList.toggle("has-manual", this.rows.some(view => view.manual));
         this.axes.classList.toggle("has-links", this.rows.some(view => view.entry.link_enabled));
-        this.planText = JSON.stringify({ axes: order.map(axis => ({ port: axis.port, unit: axis.unit, values: axis.values, mode: axis.mode, value_text: axis.value_text, ...(axis.links || axis.link_enabled ? { link_enabled: axis.link_enabled === true, links: axis.links ?? [] } : {}) })) });
+        this.planText = JSON.stringify({ axes: order.map(axis => ({ port: axis.port, unit: axis.unit, values: axis.values, ...(axis.range ? { range: axis.range } : {}), ...(axis.coordinate_of !== undefined ? { coordinate_of: axis.coordinate_of } : {}), mode: axis.mode, value_text: axis.value_text, ...(axis.links || axis.link_enabled ? { link_enabled: axis.link_enabled === true, links: axis.links ?? [] } : {}) })) });
         this.edit({ plan: this.planText }, "Scan plan");
     }
     // ---------------------------------------------------------- API values
@@ -626,7 +658,7 @@ export class ScanPlanEditor {
             const spec = { name: item.name, label: item.label, kind: item.kind, value: shown(item.value), required: false, allow_none: false,
                 unit: symbol, units: item.units.map(([value]) => ({ value, label: value, group: item.families[value] })),
                 minimum: shown(item.minimum), maximum: shown(item.maximum), description: item.description,
-                unavailable_reason: item.unavailable_reason || this.locked, inexact: true };
+                unavailable_reason: item.unavailable_reason, held: this.locked, inexact: true };
             let field = this.apiFields.get(item.name);
             if (!field) {
                 field = new Field(`${row.node_id}-api`, spec, {

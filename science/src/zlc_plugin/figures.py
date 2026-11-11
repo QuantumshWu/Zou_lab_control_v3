@@ -133,6 +133,21 @@ class ImagePlot(_Spec):
 
 
 @dataclass(frozen=True)
+class PointMapPlot(_Spec):
+    """Colour the calibrated locations of a SITE axis by their scalar values."""
+
+    site: AxisRef
+    reduction: Reduction = Reduction.MEAN
+    labels: PlotLabels = field(default_factory=PlotLabels)
+    scope: tuple[tuple[AxisRef, object], ...] = ()
+    coordinates: tuple[AxisRef, ...] = ()
+    kind = "point_map"
+
+    def tree(self) -> dict[str, Any]:
+        return {**self._common(), "site": self.site.tree(), "reduction": Reduction(self.reduction).value}
+
+
+@dataclass(frozen=True)
 class HistogramPlot(_Spec):
     reduction: Reduction = Reduction.MEAN
     reduced: tuple[AxisRef, ...] = ()
@@ -301,6 +316,7 @@ __all__ = [
     "ImagePlot",
     "ImagePointOverlay",
     "PlotLabels",
+    "PointMapPlot",
     "RECIPE_PARTS",
     "Reduction",
     "dataset_from_wire",

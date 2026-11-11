@@ -211,7 +211,7 @@ fn a_loaded_empty_panel_reserves_its_authored_size_before_start() {
         assert_eq!(row["size"],size);
         assert_eq!(row["target"]["size"],size, "saving before Start must keep the authored size");
         assert_eq!(row["display_size"],json!({"width":width,"height":height}));
-        assert_eq!(row["size_choices"].as_array().unwrap().len(),9);
+        assert_eq!(row["size_choices"].as_array().unwrap().len(),11);
         assert!(result.fronts.is_empty());
         document.finish_presentation(&panels,&BTreeSet::new());
     }

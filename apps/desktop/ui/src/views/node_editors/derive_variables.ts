@@ -9,14 +9,14 @@
 // fit, each line's problem and what the variable comes out as.  The cards
 // write back `variables`, the rows they were handed, edited.
 import {
-  CheckCombo, ComboBox, Segmented, button, element, form, row as formRow, sectionTitle, setChecked, setText, switchButton, token,
+  CheckCombo, ComboBox, Segmented, button, element, form, row as formRow, sectionTitle, setChecked, setText, spinBox, switchButton, token,
   type CheckItem,
 } from "../../fluent/index.js";
 import type { EditorFacts, LogicRow } from "../../workbench.js";
 import type { DraftEdit, NodeEditor } from "./index.js";
 
 type Term = { op: string; of: string; number: number | null; boolean: string; at: string; labels: string[] };
-type Variable = { name: string; publish: boolean; terms: Term[]; statistic: string; over: string[] };
+type Variable = { name: string; publish: boolean; terms: Term[]; statistic: string; over: string[]; by: string; every: number; model: string };
 type Choice = { value: string; label: string; group: string | null };
 /** A pick's values: listed, or `rows` of index axes the model only counts
  * (where each starts, its step, how many; rows last fastest), of which the
@@ -49,7 +49,14 @@ type Line = {
   operands: (Choice & { keeps_pick: boolean })[]; number: boolean; number_text: string; number_unit: string;
   picks: boolean; at: string; labels: string[]; axes: (Choice & { labels: string | null })[]; error: string; muted: boolean;
 };
-type Statistic = { current: string | null; choices: [string, boolean][]; over: string[]; over_choices: Choice[]; default_over: string[]; error: string; muted: boolean };
+/** The statistic line.  `chosen`: what picking each statistic writes, and
+ * whether its over list then asks at once.  `every_axes`: the axes a group
+ * may run along, none where groups are not offered.  `fit`: the over list is
+ * one x among `fit_axes`, beside a model. */
+type Statistic = { current: string | null; choices: [string, boolean][]; over: string[]; over_choices: Choice[];
+  chosen: Record<string, { row: Partial<Variable>; opens_over: boolean }>;
+  every_axes: string[]; by: string; every: number;
+  fit: boolean; fit_axes: string[]; model: string; models: [string, string][]; error: string; muted: boolean };
 type Card = { row: Variable; lines: Line[]; statistic: Statistic; preview: string; problem: string;
   add_terms: Record<string, { term: Term; pending_at: string | null }> };
 type Facts = EditorFacts & {
@@ -195,6 +202,13 @@ class CardView {
   private statStrip = new Segmented(value => this.statisticChosen(String(value)));
   private overWord = element("span", "derive-word", "over");
   private over = new CheckCombo();
+  private x = new ComboBox(value => this.edit(row => { row.over = value === null ? [] : [String(value)]; }), "x axis");
+  private modelPair = element("div", "derive-pair");
+  private model = new ComboBox(value => this.edit(row => { row.model = String(value ?? ""); }), "choose");
+  private everyPair = element("div", "derive-pair");
+  /** Blank is 0, the whole axis. */
+  private everyCount = spinBox({ step: () => 1, bounds: () => [0, null], special: { value: 0, text: "" }, label: "Every", commit: count => this.everyChosen(count) });
+  private everyAxis = new ComboBox(value => this.edit(row => { row.by = String(value ?? ""); }), "axis");
   private statRemove = button("×", () => this.closeStatistic(), "destructive glyph square derive-remove");
   private statError = element("p", "field-error derive-error");
   private statCells: HTMLElement[];
@@ -210,9 +224,22 @@ class CardView {
   constructor(private editor: DeriveVariablesEditor, public index: number) {
     this.statLead.append(element("span", "derive-word", "statistic"), element("span", "derive-eq hold", "="));
     const reduce = element("div", "derive-reduce");
-    reduce.append(this.statStrip.root, this.overWord, this.over.root);
+    const overPair = element("div", "derive-pair");
+    overPair.append(this.overWord, this.over.root, this.x.root);
+    this.modelPair.append(element("span", "derive-word", "model"), this.model.root);
+    this.everyPair.append(element("span", "derive-word", "every"), this.everyCount.root, this.everyAxis.root);
+    reduce.append(this.statStrip.root, overPair, this.modelPair, this.everyPair);
     this.over.root.classList.add("derive-over");
-    this.over.edited = values => this.edit(row => { row.over = values; });
+    // The axis a group runs along goes with it.
+    this.over.edited = values => this.edit(row => { row.over = values; if (row.by && !values.includes(row.by)) Object.assign(row, { by: "", every: 0 }); });
+    const count = this.everyCount;
+    count.input.title = "Coordinates in one group; blank reduces the whole axis";
+    count.input.addEventListener("change", () => {
+      const typed = count.text.trim() === "" ? 0 : Number(count.text);
+      if (Number.isInteger(typed) && typed >= 0) this.everyChosen(typed);
+      else { count.input.value = this.row.every ? String(this.row.every) : ""; count.refresh(); }
+    });
+    count.input.addEventListener("keydown", event => { if (event.key === "Enter") count.input.blur(); });
     this.statRemove.title = "Remove this statistic";
     this.statCells = [this.statLead, reduce, this.statRemove, this.statError];
     this.root.append(this.grid);
@@ -258,8 +285,24 @@ class CardView {
       overItems.push({ value: choice.value, label: choice.label });
     }
     this.over.set(overItems, statistic.over);
-    this.overWord.hidden = this.over.root.hidden = !overItems.length;
+    this.over.root.hidden = statistic.fit || !overItems.length;
+    this.overWord.hidden = !statistic.fit && !overItems.length;
     this.over.disabled = locked;
+    this.x.root.hidden = !statistic.fit;
+    this.x.setChoices(statistic.fit_axes.map(axis => ({ value: axis, label: axis })));
+    this.x.value = statistic.over[0] ?? null;
+    this.x.disabled = locked;
+    this.modelPair.hidden = !statistic.fit;
+    this.model.setChoices(statistic.models.map(([value, label]) => ({ value, label })));
+    this.model.value = statistic.model || null;
+    this.model.disabled = locked;
+    this.everyPair.hidden = !statistic.every_axes.length;
+    this.everyAxis.setChoices(statistic.every_axes.map(axis => ({ value: axis, label: axis })));
+    this.everyAxis.value = statistic.by || null;
+    this.everyAxis.disabled = locked;
+    if (document.activeElement !== this.everyCount.input) this.everyCount.input.value = statistic.every ? String(statistic.every) : "";
+    this.everyCount.input.disabled = locked;
+    this.everyCount.refresh();
     this.statRemove.disabled = locked;
     setText(this.statError, statistic.error);
     this.statError.hidden = !statistic.error;
@@ -322,18 +365,21 @@ class CardView {
     else this.editTerm(index, term => { term.labels = values; });
   }
 
-  /** The statistic; with nothing to reduce over yet, every Cell axis of the
-   * value -- or, with none, the list of its axes to pick. */
+  /** The statistic, and what the model says it writes with it. */
   private statisticChosen(statistic: string): void {
-    const defaults = this.card!.statistic.default_over;
-    const open = !this.row.over.length && !defaults.length && this.card!.statistic.over_choices.length > 0;
-    this.edit(row => { row.statistic = statistic; if (!row.over.length) row.over = [...defaults]; });
-    if (open) requestAnimationFrame(() => this.over.open());
+    const chosen = this.card!.statistic.chosen[statistic]!;
+    this.edit(row => { row.statistic = statistic; Object.assign(row, copy(chosen.row)); });
+    if (chosen.opens_over) requestAnimationFrame(() => this.over.open());
+  }
+
+  /** How many coordinates make a group; none is the whole axis again. */
+  private everyChosen(count: number): void {
+    this.edit(row => { row.every = count; if (!count) row.by = ""; });
   }
 
   private closeStatistic(): void {
     this.statisticOpen = false;
-    if (this.row.statistic || this.row.over.length) this.edit(row => { row.statistic = ""; row.over = []; });
+    if (this.row.statistic || this.row.over.length) this.edit(row => { Object.assign(row, { statistic: "", over: [], by: "", every: 0, model: "" }); });
     else this.redraw();
   }
 

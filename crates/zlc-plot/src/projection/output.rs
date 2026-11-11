@@ -108,6 +108,26 @@ pub struct ImageData {
 }
 
 #[derive(Clone, Debug)]
+pub struct PointMapData {
+    /// Ordinary Image input and its existing numbered site overlay.
+    pub image: ImageData,
+    pub overlay: Arc<crate::session::ImagePointOverlay>,
+    pub radius: f64,
+    pub revision: u64,
+    pub generation: Arc<str>,
+    pub site: AxisRef,
+    pub coordinates: Vec<Scalar>,
+    pub geometry: Arc<super::site_geometry::SiteGeometry>,
+    /// Geometry point for each projected value, joined by the SITE coordinate.
+    pub indices: Vec<usize>,
+    pub values: QuantityArray,
+    pub valid: Array,
+    /// Standard uncertainty, in canonical value units.
+    pub sigma: Option<Array>,
+    pub boolean: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct HistogramData {
     pub revision: u64,
     pub generation: Arc<str>,
@@ -167,19 +187,28 @@ pub struct FacetData {
 pub struct PulsePayload { pub data: Arc<crate::pulse::PulseTimelineData>, pub revision: u64 }
 
 #[derive(Clone, Debug)]
-pub enum Payload { Curve(CurveData), Image(ImageData), Histogram(HistogramData), Facet(FacetData), Pulse(PulsePayload) }
+pub enum Payload { Curve(CurveData), Image(ImageData), PointMap(PointMapData), Histogram(HistogramData), Facet(FacetData), Pulse(PulsePayload) }
 
 impl Payload {
+    /// The spatial plane shared by image artists, side distributions and height bars.
+    pub fn image_data(&self) -> Option<&ImageData> {
+        match self {
+            Payload::Image(image) => Some(image),
+            Payload::PointMap(data) => Some(&data.image),
+            _ => None,
+        }
+    }
+
     pub fn revision(&self) -> u64 {
         match self {
-            Payload::Curve(p) => p.revision, Payload::Image(p) => p.revision, Payload::Histogram(p) => p.revision, Payload::Facet(p) => p.revision,
+            Payload::Curve(p) => p.revision, Payload::Image(p) => p.revision, Payload::PointMap(p) => p.revision, Payload::Histogram(p) => p.revision, Payload::Facet(p) => p.revision,
             Payload::Pulse(p) => p.revision,
         }
     }
     /// The run the data came out of; an authored pulse timeline has none.
     pub fn generation(&self) -> Option<&Arc<str>> {
         match self {
-            Payload::Curve(p) => Some(&p.generation), Payload::Image(p) => Some(&p.generation), Payload::Histogram(p) => Some(&p.generation),
+            Payload::Curve(p) => Some(&p.generation), Payload::Image(p) => Some(&p.generation), Payload::PointMap(p) => Some(&p.generation), Payload::Histogram(p) => Some(&p.generation),
             Payload::Facet(p) => Some(&p.generation), Payload::Pulse(_) => None,
         }
     }
@@ -286,6 +315,10 @@ impl Payload {
         match self {
             Payload::Curve(p) => p.golden(arrays),
             Payload::Image(p) => p.golden(arrays),
+            Payload::PointMap(p) => json!({"type": "PointMapData", "revision": p.revision, "generation": p.generation.as_ref(),
+                "site": axis_ref_json(&p.site), "coordinates": p.coordinates.iter().map(scalar_json).collect::<Vec<_>>(),
+                "point_ids": p.indices.iter().map(|&i| &p.geometry.points[i].id).collect::<Vec<_>>(),
+                "values": p.values.golden(arrays), "valid": arrays.array(&p.valid), "sigma": arrays.optional(&p.sigma), "boolean": p.boolean}),
             Payload::Histogram(p) => p.golden(arrays),
             Payload::Facet(p) => json!({"type": "FacetData", "revision": p.revision, "generation": p.generation.as_ref(),
                 "cells": p.cells.iter().map(|cell| json!({"type": "FacetCell", "facet_index": cell.facet_index,

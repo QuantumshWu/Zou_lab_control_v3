@@ -49,6 +49,9 @@ pub struct Node {
     pub pending: Option<PendingStart>,
     pub preparing: Option<u64>,
     pub removing: bool,
+    /// The panel each declared preview opened (`signal|kind` -> panel): while it is open it is
+    /// that preview, whatever its kind or choices became since, and a later run opens no other.
+    pub preview_panels: BTreeMap<String, String>,
     pub instance: Instance,
     /// Plugin query answers, the newest of each: name -> (draft revision, answer). What the
     /// page draws and the issues it shows come from them, a newer draft's too until its own land.
@@ -72,7 +75,7 @@ impl Node {
     pub(crate) fn new(id: String, name: String, type_id: String, draft: Draft, auto_preview: bool, descriptor: Option<&TypeDescriptor>) -> Self {
         let answers = descriptor.map(|item| item.node().answers.iter().map(|(query, answer)| (query.clone(), (0, Ok(answer.clone())))).collect()).unwrap_or_default();
         Node { id, name, type_id, draft, auto_preview, revision: 1, running: None, frozen: None, run: None, error: None, follow: false, follow_attempted: None,
-               pending: None, preparing: None, removing: false, instance: Instance::Opening, answers, checked: BTreeSet::new(), resources: Map::new(), resource_issues: Vec::new(),
+               pending: None, preparing: None, removing: false, preview_panels: BTreeMap::new(), instance: Instance::Opening, answers, checked: BTreeSet::new(), resources: Map::new(), resource_issues: Vec::new(),
                start_after_check: None }
     }
 
@@ -202,7 +205,7 @@ pub fn signal_key(producer: &str, output: &str) -> String { format!("@logic/{pro
 
 /// The draft queries asked whenever a draft changes (PLUGIN_PROTOCOL §2);
 /// admission that needs data or files runs in the plugin at Start.
-const DRAFT_QUERIES: [&str; 9] = ["declare_outputs", "declare_previews", "resolve_field_availability", "resolve_field_choices", "resolve_defaults",
+const DRAFT_QUERIES: [&str; 10] = ["declare_outputs", "declare_previews", "resolve_field_availability", "resolve_field_choices", "resolve_field_units", "resolve_defaults",
                                   "resolve_device_claims", "editor_facts", ADMIT_SOURCE, ADMIT];
 /// What the draft cannot compute from what its source published (v2 admit_source): asked
 /// once every member of the source bundle has a schema; its answers are draft issues.
@@ -392,7 +395,7 @@ impl Workbench {
         for output in frames.into_iter().filter(|_| only.is_none()) {
             self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Query { node, name, .. } if node == id && name == &format!("{FRAMES_QUERY}:{output}")));
             let ticket = self.ticket(Ticket::Query { node: id.to_owned(), revision, name: format!("{FRAMES_QUERY}:{output}") });
-            self.plugins.query(&node_instance(id), ticket, FRAMES_QUERY, &json!({"values": args["values"], "output_name": output, "source": source}));
+            self.plugins.query(&node_instance(id), ticket, FRAMES_QUERY, &json!({"values": args["values"], "output_name": output, "source": source, "devices": args["devices"]}));
         }
     }
 
@@ -407,13 +410,14 @@ impl Workbench {
     /// The signals a node's source bundle holds, by member name: every output of the source's
     /// producer when its input takes the whole bundle (v2 `select_bundle`), else the selected one.
     fn bundle_signals(&self, node: &Node) -> Vec<(String, String)> {
-        let Some((producer, _)) = split_signal(&node.draft.source_signal) else { return Vec::new() };
+        if node.draft.source_signal.is_empty() { return Vec::new(); }
         let whole = self.catalog.get(&node.type_id).and_then(|item| item.node().inputs.first()).is_some_and(|input| input.select_bundle);
-        let signals: Vec<String> = match self.node(producer).filter(|_| whole) {
+        let signals: Vec<String> = match split_signal(&node.draft.source_signal).and_then(|(producer, _)| self.node(producer)).filter(|_| whole) {
             Some(producer) => self.node_outputs(producer).into_iter().map(|(signal, _)| signal).collect(),
             None => vec![node.draft.source_signal.clone()],
         };
-        signals.into_iter().filter_map(|signal| split_signal(&signal).map(|(_, name)| name.to_owned()).map(|name| (name, signal))).collect()
+        // A member is called what a delivery calls it: the signal's last segment, whoever makes it (a saved dataset's too).
+        signals.into_iter().map(|signal| (signal.rsplit('/').next().unwrap_or(&signal).to_owned(), signal)).collect()
     }
 
     /// The source bundles the nodes' queries read (an editor, an admission check), each member
@@ -463,10 +467,28 @@ impl Workbench {
     }
 
     /// The bench's devices changed: editors that offer them ask again.
-    pub(crate) fn refresh_editors(&mut self) {
-        let editors: Vec<String> = self.nodes.iter().filter(|node| self.catalog.get(&node.type_id)
-            .is_some_and(|item| item.node().queries.iter().any(|name| name == "editor_facts"))).map(|node| node.id.clone()).collect();
-        for id in editors { self.send_queries(&id); }
+    /// The bench changed (a device opened, failed, closed, or an Apply): every draft query
+    /// reads the devices' facts (`device_infos`: whether the device a node names is open, what
+    /// it reads and tunes; an editor also every tunable device of the bench). A node that names
+    /// one, and every node with an editor, asks again under a new revision, so an answer given
+    /// before the change -- a camera not yet open when a layout loaded -- cannot stand after it.
+    /// An open device says what it now states of itself (`Event::Facts`): kept with its working point, and
+    /// every draft that names devices is asked again when it differs from what was known.
+    pub(crate) fn device_facts(&mut self, instance: &str, facts: Value) {
+        let Some(live) = self.devices.get_mut(instance) else { return };
+        if !live.working_point.is_object() || live.working_point["facts"] == facts { return; }
+        live.working_point["facts"] = facts;
+        self.bench_changed();
+    }
+
+    pub(crate) fn bench_changed(&mut self) {
+        let asking: Vec<String> = self.nodes.iter().filter(|node| !node.draft.device_keys.values().all(String::is_empty)
+            || self.catalog.get(&node.type_id).is_some_and(|item| item.node().queries.iter().any(|name| name == "editor_facts")))
+            .map(|node| node.id.clone()).collect();
+        for id in asking {
+            if let Ok(node) = self.node_mut(&id) { node.revision += 1; node.recheck(); }
+            self.send_queries(&id);
+        }
     }
 
     /// The devices the draft itself names (`resolve_device_claims`: a scan's device
@@ -528,12 +550,14 @@ impl Workbench {
     /// Selected devices as the plugin's device proxies are described.
     fn device_infos(&self, keys: &BTreeMap<String, String>) -> Value {
         // `tunable`: the proxy reads and tunes its knobs (the SDK's tunable quartet);
-        // `reads`: the read-only methods the device implements (its own unit conversions).
+        // `reads`: the read-only methods the device implements (its own unit conversions);
+        // `units`: the spelling the operator keeps for a field (its scan port's unit, its recorded unit).
         Value::Object(keys.iter().filter_map(|(argument, key)| self.devices.get(key).map(|live| {
             let kind = self.live_type(live);
             (argument.clone(), json!({"instance": key, "role": self.device_role(key), "type_id": kind.map_or(live.entry.type_id.as_str(), |item| item.type_id.as_str()),
                 "capabilities": kind.map(|item| item.capabilities.clone()).unwrap_or_default(),
-                "tunable": live.working_point["tunable"] == true, "reads": live.working_point["reads"].clone()}))
+                "tunable": live.working_point["tunable"] == true, "reads": live.working_point["reads"].clone(), "units": live.entry.units,
+                "facts": live.working_point["facts"].clone()}))
         })).collect())
     }
 
@@ -839,6 +863,8 @@ impl Workbench {
         for requirement in Self::active_requirements(descriptor, &node.draft.values) {
             let options = self.device_options(&requirement.capability);
             let key = node.draft.device_keys.get(&requirement.argument).map(String::as_str).unwrap_or("");
+            // An optional device that is not there is not asked for: the node is built without it.
+            if requirement.optional && !options.iter().any(|(id, _)| id == key) { continue; }
             // Opening, or closed by an Apply that reopens it with new settings.
             let opening = self.devices.iter().find(|(id, live)| (live.state == crate::apparatus::LiveState::Opening || live.reopen.is_some())
                 && (key.is_empty() || key == id.as_str()) && self.catalog.get(&live.entry.type_id).is_some_and(|item| item.capabilities.contains(&requirement.capability)));
@@ -1025,7 +1051,7 @@ impl Workbench {
             if let Some((parent, reply, _)) = acquisition { self.plugins.acquired(&parent, reply, Err(error)); } return;
         }
         self.cancel_start(id, "superseded by another Start");
-        let processor = self.catalog.get(&self.node(id).unwrap().type_id).is_some_and(|descriptor| descriptor.node().node_kind == "processor");
+        let processor = self.follows_sources && self.catalog.get(&self.node(id).unwrap().type_id).is_some_and(|descriptor| descriptor.node().node_kind == "processor");
         if processor { self.plugins.follow(&node_instance(id), Some(&frozen.draft.source_signal)); }
         let node = self.node_mut(id).unwrap();
         node.error = None; node.running = Some(frozen.draft.clone()); node.frozen = Some(frozen);
@@ -1138,8 +1164,12 @@ impl Workbench {
                 ("folder", Value::String(path)) if !path.trim().is_empty() => json!(self.workspace.resolve(path.trim())),
                 (_, value) => value.clone(),
             })).collect();
-        let devices: BTreeMap<String, String> = claims.iter().map(|claim| (claim.argument.clone(), claim.device.clone())).collect();
+        let mut devices: BTreeMap<String, String> = claims.iter().map(|claim| (claim.argument.clone(), claim.device.clone())).collect();
         let shared: BTreeSet<String> = claims.iter().filter(|claim| !claim.exclusive).map(|claim| claim.argument.clone()).collect();
+        // A device the run only reads is its argument without a claim, while it is open.
+        let reads: BTreeSet<String> = Self::active_requirements(&descriptor, &frozen.values).into_iter().filter(|requirement| requirement.reads_only)
+            .filter_map(|requirement| draft.device_keys.get(&requirement.argument).filter(|key| self.device_open(key))
+                .map(|key| { devices.insert(requirement.argument.clone(), key.clone()); requirement.argument.clone() })).collect();
         let artifacts: Map<String, Value> = descriptor.node().artifact_inputs.iter().filter_map(|spec| draft.artifact_inputs.get(&spec.name)
             .map(|value| (spec.name.clone(), match value {
                 Value::String(path) => json!(self.workspace.resolve(path)),
@@ -1150,12 +1180,13 @@ impl Workbench {
         let outputs = frozen.outputs.clone();
         Ok(RunSpec { node_name: node.name.clone(), run: String::new(), node_id: id.to_owned(), instance: node_instance(id), type_id: node.type_id.clone(),
             values, source_signal: draft.source_signal.clone(), device_labels: devices.values().map(|key| (key.clone(), self.device_role(key).to_owned())).collect(),
-            devices, shared, artifacts, resources, directory: None, outputs, origin: origin.to_owned(), prepared: None, record_devices: self.takes_bench(&node.type_id) })
+            device_units: devices.values().map(|key| (key.clone(), self.device_units(key))).filter(|(_, units)| !units.is_empty()).collect(),
+            devices, shared, reads, artifacts, resources, directory: None, outputs, origin: origin.to_owned(), prepared: None, record_devices: self.takes_bench(&node.type_id) })
     }
 
     fn frozen_claims(&self, type_id: &str, frozen: &Frozen) -> Vec<Claim> {
         let Some(descriptor) = self.catalog.get(type_id) else { return Vec::new() };
-        let mut claims: Vec<Claim> = Self::active_requirements(descriptor, &frozen.values).into_iter().filter_map(|requirement| {
+        let mut claims: Vec<Claim> = Self::active_requirements(descriptor, &frozen.values).into_iter().filter(|requirement| !requirement.reads_only).filter_map(|requirement| {
             frozen.draft.device_keys.get(&requirement.argument).filter(|key| !key.is_empty())
                 .map(|key| Claim { argument: requirement.argument.clone(), device: key.clone(), protected: requirement.protected_fields.clone(), exclusive: true })
         }).collect();
@@ -1217,6 +1248,10 @@ impl Workbench {
         // v2 _activate_candidate: said when a run starts, however it was asked for (Start, a
         // follow restart, a task's acquisition).
         self.console_report = (format!("{} started", node.name), "task");
+        // The configuration this run plays, beside the id every later line names it by.
+        zlc_core::journal::note_with("workbench", "launch", || json!({"run": spec.run, "node": id, "type": spec.type_id, "origin": spec.origin,
+            "source_signal": spec.source_signal, "values": spec.values, "devices": spec.devices, "artifacts": spec.artifacts,
+            "acquisition_parent": pending.acquisition.as_ref().map(|(parent, _, completion)| json!([parent, completion]))}));
         self.plugins.start(&spec);
         Ok(())
     }
@@ -1331,7 +1366,7 @@ impl Workbench {
             }
         } else if self.device_opened(instance, working_point) {
             self.default_device_keys(instance);
-            self.refresh_editors();
+            self.bench_changed();
             self.launch_pending(host);
             // Starts that waited for this device go now.
             let waiting: Vec<String> = self.nodes.iter().filter(|node| node.start_after_check.is_some()).map(|node| node.id.clone()).collect();
@@ -1362,6 +1397,7 @@ impl Workbench {
     pub(crate) fn instance_failed(&mut self, instance: &str, error: String, host: &mut dyn Host) {
         let Some(id) = instance.strip_prefix(NODE_INSTANCE) else {
             if self.device_failed(instance, error) {
+                self.bench_changed();
                 self.cancel_device_starts(instance, "a required device failed");
                 for node in self.claiming_nodes(instance) { self.stop_run_of(&node, "its device failed"); }
                 self.close_released();
@@ -1382,7 +1418,7 @@ impl Workbench {
     pub(crate) fn instance_closed(&mut self, instance: &str, error: Option<String>, host: &mut dyn Host) {
         match instance.strip_prefix(NODE_INSTANCE) {
             Some(id) => if let (Ok(node), Some(error)) = (self.node_mut(id), error) { node.instance = Instance::Failed(error); },
-            None => if self.device_closed(instance, error) { self.refresh_editors(); self.launch_pending(host); },
+            None => if self.device_closed(instance, error) { self.bench_changed(); self.launch_pending(host); },
         }
     }
 
@@ -1482,12 +1518,14 @@ impl Workbench {
         self.stop_acquisitions(id, "its parent run ended");
         for panel in preview_panels { host.close_panel(&panel); self.board.remove(&panel); }
         let message = error.as_ref().map(|error| error["message"].as_str().map(str::to_owned).unwrap_or_else(|| error.to_string()));
+        // On saved data what completed stands as the configuration it came from: an edit reads "edited" until it runs again.
+        let stands = !self.follows_sources && outcome == "completed";
         if let Ok(node) = self.node_mut(&node_id) {
             if outcome == "failed" {
                 let message = message.unwrap_or_else(|| "the run failed".into());
                 node.error = Some(if node.follow { format!("failed; restarts with the source's next run: {message}") } else { message });
             }
-            if !node.follow && node.pending.is_none() { node.running = None; node.frozen = None; }
+            if !node.follow && node.pending.is_none() && !stands { node.running = None; node.frozen = None; }
             if node.removing { self.retire_node(&node_id); }
         }
         self.close_released();
@@ -1521,7 +1559,6 @@ impl Workbench {
     /// Declared previews get a panel once their signal first publishes in this run.
     pub(crate) fn open_previews(&mut self, host: &mut dyn Host) {
         let signals = host.signals();
-        let shown: BTreeSet<String> = host.panels().into_iter().map(|panel| panel.signal).collect();
         let mut wanted = Vec::new();
         for node in self.nodes.iter().filter(|node| node.auto_preview) {
             let Some(run) = node.run.as_deref().and_then(|id| self.run(id)) else { continue };
@@ -1532,16 +1569,32 @@ impl Workbench {
                 let Some(published) = self.source_published(&signals, &signal) else { continue };
                 if run.preview_baseline.get(&signal).cloned().flatten().as_deref() == Some(published.generation.as_str()) { continue; }
                 let task = descriptor.node().node_kind == "task";
-                wanted.push((run.id.clone(), signal.clone(), preview.plot_kind.clone(), preview.semantic.clone(), task, shown.contains(&signal)));
+                wanted.push((node.id.clone(), run.id.clone(), signal, preview.plot_kind.clone(), preview.semantic.clone(), task));
             }
         }
-        for (run, signal, kind, semantic, task, already) in wanted {
+        for (node, run, signal, kind, semantic, task) in wanted {
             if let Some(record) = self.run_mut(&run) { record.previewed.insert(signal.clone()); }
-            if already { continue; }
+            let kind = if kind.is_empty() { "image" } else { &kind };
+            let key = format!("{signal}|{kind}");
+            let panels = host.panels();
+            // The panel this preview opened before is it still, however the operator has
+            // changed it since (another channel, another kind).
+            let opened = self.node(&node).and_then(|node| node.preview_panels.get(&key));
+            if opened.is_some_and(|opened| panels.iter().any(|panel| panel.panel == *opened)) { continue; }
+            // Else a panel showing the declared view: a run can request a different view of
+            // the same signal, so match only the declared choices, and let a panel keep its
+            // other authored settings.
+            let shown = panels.iter().find(|panel| panel.signal == signal && panel.kind == kind
+                && semantic.as_object().is_none_or(|fields| fields.iter().all(|(key, value)| panel.target["semantic"].get(key) == Some(value))));
+            if let Some(shown) = shown.map(|panel| panel.panel.clone()) {
+                if let Ok(node) = self.node_mut(&node) { node.preview_panels.insert(key, shown); }
+                continue;
+            }
             let target = if semantic.is_object() { json!({"semantic": semantic}) } else { json!({}) };
-            match host.add_panel("", &signal, if kind.is_empty() { "image" } else { &kind }, 1, target) {
+            match host.add_panel("", &signal, kind, 1, target) {
                 Ok(panel) => {
                     self.board.add(&panel);
+                    if let Ok(node) = self.node_mut(&node) { node.preview_panels.insert(key, panel.clone()); }
                     if task { if let Some(record) = self.run_mut(&run) { record.preview_panels.push(panel); } }
                 }
                 Err(error) => self.notes.push(format!("preview {signal}: {error}")),
@@ -1671,6 +1724,11 @@ impl Workbench {
                     .map(str::to_owned).or_else(|| field.derived.then(|| field.description.clone().unwrap_or_default()));
                 if let Some(reason) = reason { control["unavailable_reason"] = json!(reason); }
             }
+            // A unit the draft decides (a trigger level is typed in its channel's).
+            let units = node.answers.get("resolve_field_units").and_then(|(_, answer)| answer.as_ref().ok()).and_then(Value::as_object);
+            for (name, unit) in units.into_iter().flatten() {
+                if let Some(control) = controls.iter_mut().find(|control| control["name"] == name.as_str()) { control["unit"] = unit.clone(); }
+            }
             // Options the draft decides (an SLM rearrangement's imaging periods are its pulse's
             // periods): the field is a choice of them; a held value not among them stays, unavailable.
             let offered = node.answers.get("resolve_field_choices").and_then(|(_, answer)| answer.as_ref().ok()).and_then(Value::as_object);
@@ -1740,6 +1798,8 @@ impl Workbench {
             "device_keys": node.draft.device_keys,
             "device_choices": device_choices,
             "editor_facts_error": editor_facts.and_then(|answer| answer.as_ref().err()),
+            // The newest answer is of an older draft, and its process has been asked for this one's.
+            "editor_facts_pending": node.instance == Instance::Open && node.answers.get(EDITOR_FACTS).is_some_and(|(revision, _)| *revision != node.revision),
             "artifact_inputs": node.draft.artifact_inputs,
             "artifact_specs": descriptor.map(|item| item.node().artifact_inputs.iter().map(|spec| json!({"name": spec.name, "label": spec.label,
                 "file_filter": spec.file_filter, "required": spec.required.unwrap_or(true), "frame_claims": spec.frame_claims})).collect::<Vec<_>>()).unwrap_or_default(),

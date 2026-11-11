@@ -8,25 +8,37 @@
 //! registers physical outputs for Stop all. The core holds no interpreter: an
 //! instance whose call hangs is a failed instance, a process that stops
 //! answering is failed instances, and each can be opened again.
+#[cfg(test)]
+extern crate self as zlc_plugin_host;
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_application;
+
 pub mod blocks;
 mod cache;
 pub mod descriptor;
 mod files;
 mod frame;
+mod lifecycle;
+mod native_input;
+mod outgoing;
 mod process;
+pub mod services;
 pub mod schema;
 pub mod wire;
+pub mod workers;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use zlc_core::AnyBuffer;
 use zlc_core::control::{Origin, SafeActions, public_instance};
-use zlc_core::runtime::{Bundle, Declaration, DeliveryKind, DeliveryPolicy, Generation, GenerationId, HistoryLease, Input, Read, ReadKind,
+use zlc_core::runtime::{Bundle, Declaration, DeliveryKind, DeliveryPolicy, Generation, GenerationId, HistoryLease, Input, Read, ReadKind, SubscriptionTicket,
     ReadMode, ReadRequest, RunRecord, Runtime, RuntimeError, Start, Storage, Subscription};
 use zlc_core::schema::{DatasetSchema, DomainRole};
 
@@ -34,7 +46,7 @@ pub use blocks::{Lend, Registry};
 pub use descriptor::{Catalog, CommandDescriptor, FileParam, TypeDescriptor};
 use process::{Incoming, Job, PluginProcess};
 
-pub const PROTOCOL: [u32; 2] = [2, 0];
+pub const PROTOCOL: [u32; 2] = [3, 0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind { Refused, Invalid, Failed, Timeout, Lost, Cancelled, StaleRun, UnknownOp, NotClaimed }
@@ -182,7 +194,7 @@ pub enum HostEvent {
     /// `generation`: the Runtime generation the run published under, if it began.
     RunFinished { instance: String, run: String, outcome: String, result: Value, error: Option<Value>, generation: Option<String> },
     /// A run asks the application: `run.operator_input`, `run.artifact`, `run.figure`, `run.animation`,
-    /// `run.acquire` or `core` (a catalogue command, under the run's origin). Answer with
+    /// `run.fit`, `run.acquire` or `core` (a catalogue command, under the run's origin). Answer with
     /// `respond(ticket, ..)`; `lent` holds the blocks the request's arrays are on.
     Request { instance: String, run: String, ticket: u64, op: String, params: Value, origin: Origin, lent: Lent },
     /// Plugin commands appeared or disappeared (MCP `tools/list_changed`).
@@ -236,7 +248,9 @@ impl Serving {
                 let blocks: Vec<String> = lends.iter().map(|lend| lend.name().to_owned()).collect();
                 for name in &blocks { registry.hold_for(process.pid(), name)?; }
                 drop(lends);
-                let incoming = process.request_with(op, params, blocks, deadline)?;
+                let unread = blocks.clone();
+                let incoming = process.request_with_cleanup(op, params, blocks, deadline,
+                    || registry.released_by(process.pid(), &unread))?;
                 Ok(Reply { value: incoming.message["ok"].clone(), lends: incoming.lends })
             }
             Serving::Remote(endpoint) => endpoint.request(op, params, lends, deadline),
@@ -281,8 +295,12 @@ pub struct RunRequest {
     /// Device instance per requirement argument.
     pub devices: BTreeMap<String, String>,
     pub device_labels: BTreeMap<String, String>,
+    /// Device instance -> the units its apparatus entry keeps (field -> spelling), told to its proxy.
+    pub device_units: BTreeMap<String, BTreeMap<String, String>>,
     /// The arguments whose device the run shares (a scan's device axis); it takes every other one exclusively.
     pub shared: std::collections::BTreeSet<String>,
+    /// The arguments whose device the run only reads: it takes no claim, and may call only what the device lists as reads.
+    pub reads: std::collections::BTreeSet<String>,
     pub origin: Origin,
     pub resources: Value,
     /// A processor's input: the signal its deliveries come from (§5).
@@ -300,14 +318,30 @@ struct RunState {
     id: String,
     origin: Origin,
     devices: BTreeMap<String, String>,
+    /// The arguments of `devices` it only reads.
+    reads: std::collections::BTreeSet<String>,
     signals: BTreeMap<String, String>,
     generation: Option<Generation>,
     /// The signal its commits derive from: one run of it (a processor's subscription),
     /// or the signal across its runs (a run following it), declared at run.begin.
     route: Option<(Arc<str>, Option<GenerationId>)>,
+    /// The subscription a processor's deliveries come by.
+    consumer: Option<SubscriptionTicket>,
     outputs: HashMap<String, OutputState>,
     histories: Vec<HistoryLease>,
     apparatus: Option<Value>,
+    stop: RunStop,
+    lifecycle: lifecycle::RunLifecycle,
+    /// An exact input consumed by a core service, never encoded for Python.
+    core_input: Option<Arc<Mutex<native_input::CoreInput>>>,
+    resources: services::Resources,
+}
+
+/// What work done for a run watches: set when the run is asked to stop, and when it is gone.
+struct RunStop(Arc<AtomicBool>);
+
+impl Drop for RunStop {
+    fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); }
 }
 
 struct Instance {
@@ -370,6 +404,9 @@ struct Source { feed: Feed, bundle: bool, input: String, generation: GenerationI
 enum Feed { Live(Subscription), Sealed(Vec<Read>) }
 
 struct Inner {
+    /// Per device, the method a run last called of it and how often it has been called again since with
+    /// nothing going wrong (and the slowest of those): what the journal says once instead of every time.
+    repeated: Mutex<HashMap<String, (String, u64, f64)>>,
     config: HostConfig,
     /// What every plugin process gets in its environment ([`plugin_environment`]).
     environment: Vec<(&'static str, std::ffi::OsString)>,
@@ -390,6 +427,11 @@ struct Inner {
     /// nothing uses go, are each one step, so instances opened together (Init opens them
     /// in parallel) share one process, and a closing one never ends a process another is joining.
     gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Where a node's device calls wait, beside the channels they arrived on.
+    device_calls: workers::Workers,
+    service_calls: workers::Workers,
+    services: Mutex<Option<services::Handler>>,
+    process_resources: Mutex<HashMap<u32, services::Resources>>,
 }
 
 /// The plugin host. Cheap to clone; clones share it.
@@ -423,8 +465,10 @@ impl PluginHost {
             let registry = Registry::new(session.clone(), Box::new(move |pid, names| {
                 if let Some(inner) = owner.upgrade() { inner.release_to(pid, names); }
             }));
-            Inner { environment: plugin_environment(&config.python), config, session, runtime, safe, registry, job, catalog: Mutex::new(None),
-                    state: Mutex::default(), processes: Mutex::default(), events: Box::new(events), gates: Mutex::default() }
+            Inner { repeated: Mutex::default(), environment: plugin_environment(&config.python), config, session, runtime, safe, registry, job, catalog: Mutex::new(None),
+                    state: Mutex::default(), processes: Mutex::default(), events: Box::new(events), gates: Mutex::default(),
+                    device_calls: workers::Workers::new("zlc-plugin-device-call"),
+                    service_calls: workers::Workers::new("zlc-plugin-service"), services: Mutex::default(), process_resources: Mutex::default() }
         });
         let watched = Arc::downgrade(&inner);
         std::thread::Builder::new().name("zlc-plugin-watch".into()).spawn(move || watch(watched)).map_err(|error| error.to_string())?;
@@ -596,7 +640,7 @@ impl PluginHost {
             // fabric has checked that this connection owns the instance.
             params["plain"] = json!(true);
             let Serving::Process(process) = serving else { return Err(CallError::new(ErrorKind::Refused, "a published snapshot must come from its owning process")); };
-            return process.snapshot(instance, deadline)
+            return process.snapshot(instance, &params["units"], deadline)
                 .map(|incoming| Reply::new(incoming.message["ok"].clone(), incoming.lends));
         }
         serving.request(&self.inner.registry, op, params, lends, deadline)
@@ -645,6 +689,8 @@ impl PluginHost {
             state.instances.get(instance).map(|entry| (entry.serving.clone(), entry.descriptor.clone()))
         };
         let Some((serving, descriptor)) = serving else {
+            // A node whose process was lost is closed all the same: what its finished runs published goes with it.
+            if instance.starts_with(zlc_core::control::NODE_INSTANCE) { let _ = inner.runtime.withdraw(public_instance(instance)); }
             // Init can fail after acquiring a handle but before admission. Its
             // SDK lane owns that cleanup even though no live host entry exists.
             let processes: Vec<_> = inner.processes.lock().unwrap().values()
@@ -686,14 +732,22 @@ impl PluginHost {
     /// Any instance operation (`fields`, `tune`, `values`, `query`, `configure`).
     pub fn call(&self, instance: &str, op: &str, params: Value, deadline: Duration) -> Result<Reply, CallError> {
         let _request = self.admit_local(instance, false)?;
-        self.inner.call(instance, op, params, deadline)
+        // What the core asks of a plugin instance: the operation and, for a device method, which.
+        let (began, method) = (Instant::now(), params.get("method").and_then(Value::as_str).map(str::to_owned));
+        let answer = self.inner.call(instance, op, params, deadline);
+        // A question a draft or the bench asks changes nothing: said only when it fails.
+        if answer.is_err() || !matches!(op, "query" | "snapshot" | "values" | "fields") {
+            zlc_core::journal::note_with("plugins", "call", || json!({"instance": instance, "op": op, "method": method,
+                "ms": began.elapsed().as_secs_f64() * 1e3, "error": answer.as_ref().err().map(|error| error.message.clone())}));
+        }
+        answer
     }
 
     /// The bench at a Start (`snapshot`, §5): an open device's settings as plain JSON, null when it
-    /// does not report them. A device busy in another run's call may miss `deadline`, which says
+    /// does not report them; a field `units` names is recorded in that unit (field -> spelling). A device busy in another run's call may miss `deadline`, which says
     /// nothing of its health (untracked: the late answer is dropped). A remote
     /// device uses its owner's identical snapshot operation over the fabric.
-    pub fn snapshot(&self, instance: &str, deadline: Duration) -> Result<Value, CallError> {
+    pub fn snapshot(&self, instance: &str, units: &Value, deadline: Duration) -> Result<Value, CallError> {
         let _request = self.admit_local(instance, false)?;
         let serving = {
             let state = self.inner.state.lock().unwrap();
@@ -702,9 +756,9 @@ impl PluginHost {
             if entry.published.is_some() { return Err(published_refusal(instance)); }
             entry.serving.clone()
         };
-        let params = json!({"instance": instance, "plain": true});
+        let params = json!({"instance": instance, "plain": true, "units": units});
         match serving {
-            Serving::Process(process) => process.snapshot(instance, deadline).map(|reply| reply.message["ok"].clone()),
+            Serving::Process(process) => process.snapshot(instance, units, deadline).map(|reply| reply.message["ok"].clone()),
             Serving::Remote(endpoint) => endpoint.request("snapshot", params, Vec::new(), deadline).map(|reply| reply.value),
         }
     }
@@ -770,6 +824,11 @@ impl PluginHost {
                 .and_then(|(_, parked)| parked.take());
             let entry = state.instances.get(instance).expect("checked");
             let input = entry.descriptor.active_input(&request.values);
+            let core_input = input.is_some_and(|input| input["consumer"] == "core");
+            if core_input && (input.is_some_and(|input| input["delivery"] != "exact" || input["select_bundle"] == true)
+                || entry.descriptor.node.as_ref().is_some_and(|node| node["node_kind"] == "processor")) {
+                return Err(CallError::new(ErrorKind::Invalid, "a core input requires one exact non-processor input"));
+            }
             let source = match &entry.descriptor.node {
                 Some(node) if node["node_kind"] == "processor" => Some(match parked {
                     Some(source) => source,
@@ -790,25 +849,34 @@ impl PluginHost {
             };
             let route = request.source_signal.as_deref().filter(|_| source.is_some() || following.is_some())
                 .map(|signal| (Arc::from(signal), source.as_ref().map(|source| source.generation)));
+            let consumer = source.as_ref().and_then(|source: &Source| match &source.feed { Feed::Live(subscription) => Some(subscription.ticket()), Feed::Sealed(_) => None });
             let mut devices = serde_json::Map::new();
             for (argument, device) in &request.devices {
                 let target = state.instances.get(device).filter(|target| target.descriptor.is_device())
                     .ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{device} is not an open device")))?;
-                let exclusive = !request.shared.contains(argument);
+                let exclusive = !request.shared.contains(argument) && !request.reads.contains(argument);
                 if let Some((owner, _)) = target.claims.iter().find(|(_, held)| exclusive && *held) {
                     return Err(CallError::new(ErrorKind::Refused, format!("{device} is claimed by run {owner}")));
                 }
-                if target.published.is_some() { return Err(published_refusal(device)); }
+                if target.published.is_some() && !request.reads.contains(argument) { return Err(published_refusal(device)); }
                 devices.insert(argument.clone(), json!({"instance": device, "role": request.device_labels.get(device).unwrap_or(device), "type_id": target.descriptor.type_id,
-                    "capabilities": target.descriptor.capabilities, "tunable": target.tunable, "reads": target.reads}));
+                    "capabilities": target.descriptor.capabilities, "tunable": target.tunable, "reads": target.reads,
+                    "units": request.device_units.get(device).cloned().unwrap_or_default()}));
             }
-            for (argument, device) in &request.devices {
+            for (argument, device) in request.devices.iter().filter(|(argument, _)| !request.reads.contains(*argument)) {
                 state.instances.get_mut(device).unwrap().claims.push((run.clone(), !request.shared.contains(argument)));
             }
+            let mut native_input = None;
+            let following = following.and_then(|(follower, received)| {
+                state.followers.push(follower);
+                if core_input {
+                    native_input = Some(Arc::new(Mutex::new(native_input::CoreInput::new(received))));
+                    None
+                } else { Some(received) }
+            });
             state.instances.get_mut(instance).unwrap().run = Some(RunState { id: run.clone(), origin: request.origin.clone(),
-                devices: request.devices.clone(), signals: request.outputs.clone(), generation: None, route, outputs: HashMap::new(),
-                histories: Vec::new(), apparatus: None });
-            let following = following.map(|(follower, received)| { state.followers.push(follower); received });
+                devices: request.devices.clone(), reads: request.reads.clone(), signals: request.outputs.clone(), generation: None, route, consumer, outputs: HashMap::new(),
+                histories: Vec::new(), apparatus: None, stop: RunStop(Arc::default()), lifecycle: lifecycle::RunLifecycle::default(), core_input: native_input, resources: Default::default() });
             (process, devices, source, following)
         };
         let started = process.request("run.start", json!({"instance": instance, "run": run, "values": request.values,
@@ -849,14 +917,25 @@ impl PluginHost {
     /// Ask a run to stop; it ends with `RunFinished`.
     pub fn stop_run(&self, instance: &str, run: &str) -> Result<(), CallError> {
         let process = {
-            let state = self.inner.state.lock().unwrap();
-            let entry = state.instances.get(instance).ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not open")))?;
-            if entry.run.as_ref().is_none_or(|current| current.id != run) {
+            let mut state = self.inner.state.lock().unwrap();
+            let entry = state.instances.get_mut(instance).ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not open")))?;
+            let Some(current) = entry.run.as_mut().filter(|current| current.id == run) else {
                 return Err(CallError::new(ErrorKind::StaleRun, format!("{run} is not {instance}'s current run")));
-            }
-            entry.serving.process().cloned().ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not a node of this core")))?
+            };
+            let process = entry.serving.process().cloned().ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not a node of this core")))?;
+            if !current.lifecycle.request_stop() { return Ok(()); }
+            current.stop.0.store(true, Ordering::Relaxed);
+            process
         };
         process.event("run.stop", json!({"instance": instance, "run": run}))
+    }
+
+    /// What work done for this run watches: set once it is asked to stop or is gone
+    /// (already set when it is not the instance's current run).
+    pub fn run_stop(&self, instance: &str, run: &str) -> Arc<AtomicBool> {
+        let state = self.inner.state.lock().unwrap();
+        let current = state.instances.get(instance).and_then(|entry| entry.run.as_ref()).filter(|current| current.id == run);
+        current.map_or_else(|| Arc::new(AtomicBool::new(true)), |current| current.stop.0.clone())
     }
 
     /// Open instances: (id, type, pid; 0 for one another core serves).
@@ -974,6 +1053,8 @@ impl Inner {
         let pid = hello.message["ok"]["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
             .ok_or("Plugin process handshake has no pid")?;
         process.set_pid(pid);
+        // Which process a plugin is: what the journal says of a process's use of the machine names it by pid.
+        zlc_core::journal::note("plugins", "process", json!({"key": key, "pid": pid}));
         self.processes.lock().unwrap().insert(pid, process.clone());
         Ok(process)
     }
@@ -1092,6 +1173,7 @@ impl Inner {
 
     fn process_exited(&self, process: &Arc<PluginProcess>, reason: String) {
         process.ended();
+        self.process_resources.lock().unwrap().remove(&process.pid());
         self.registry.holder_gone(process.pid());
         let retiring = process.retiring.load(Ordering::Acquire);
         let names: Vec<String> = process.instances.lock().unwrap().iter().cloned().collect();
@@ -1126,6 +1208,13 @@ impl Inner {
         let params = &message["p"];
         let text = |name: &str| params[name].as_str().unwrap_or("").to_owned();
         match message["op"].as_str().unwrap_or("") {
+            // What a plugin says for the journal (`zlc_plugin.journal`): its own facts, at the time it observed them.
+            "journal" => for line in params["lines"].as_array().into_iter().flatten() {
+                let (Some(us), Some(event)) = (line["us"].as_u64(), line["ev"].as_str()) else { continue };
+                let mut facts = line["facts"].clone();
+                if facts.is_object() { facts["pid"] = json!(process.pid()); }
+                zlc_core::journal::note_at(us, line["src"].as_str().unwrap_or("plugin"), event, facts);
+            },
             // Only an open device of this process speaks for itself.
             // A device lent to another core speaks to that core (zlc-fabric).
             "device.notice" => {
@@ -1141,6 +1230,9 @@ impl Inner {
             "release" => {
                 let names: Vec<String> = params["blocks"].as_array().into_iter().flatten().filter_map(|name| name.as_str().map(str::to_owned)).collect();
                 self.registry.released_by(process.pid(), &names);
+                // Blocks the plugin has given back to the system: the core lets its mapping of each go too.
+                let retired: Vec<String> = params["retired"].as_array().into_iter().flatten().filter_map(|name| name.as_str().map(str::to_owned)).collect();
+                self.registry.retired(process.pid(), &retired);
                 // The reads (and the blocks they free) are dropped after letting the lock go.
                 let released: Vec<_> = {
                     let mut state = self.state.lock().unwrap();
@@ -1158,10 +1250,18 @@ impl Inner {
                     current: params["current"].as_u64(), total: params["total"].as_u64() });
             },
             "run.finished" => {
-                let (instance, run, outcome) = (text("instance"), text("run"), text("outcome"));
-                let generation = self.end_run(&instance, &run, &outcome, &json!({"result": params["result"], "error": params["error"]}));
-                (self.events)(HostEvent::RunFinished { instance, run, outcome, result: params["result"].clone(),
-                    error: params.get("error").filter(|error| !error.is_null()).cloned(), generation });
+                // Older/custom protocol implementations cannot choose their own
+                // terminal result. Fail explicitly rather than leave a live run
+                // waiting forever or bypass the Stop/terminal arbitration.
+                let (instance, run) = (text("instance"), text("run"));
+                let owned = self.state.lock().unwrap().instances.get(&instance)
+                    .is_some_and(|entry| entry.serving.pid() == process.pid() && entry.run.as_ref().is_some_and(|current| current.id == run));
+                if owned {
+                    let error = json!({"kind":"invalid", "message":"run.finished is no longer authoritative; use run.begin_terminal and run.finish"});
+                    let generation = self.end_run(&instance, &run, "failed", &json!({"error": error}));
+                    (self.events)(HostEvent::RunFinished { instance, run, outcome:"failed".into(), result:Value::Null,
+                        error:Some(error), generation });
+                }
             }
             // Its log stays this core's too (the publishing machine's row narrates it).
             "device.log" => if process.instances.lock().unwrap().contains(&text("instance")) {
@@ -1180,20 +1280,30 @@ impl Inner {
     fn plugin_request(self: &Arc<Self>, process: &Arc<PluginProcess>, message: Value, lends: Vec<Arc<Lend>>) {
         let id = message["id"].clone();
         let op = message["op"].as_str().unwrap_or("").to_owned();
+        if op == "service" {
+            let (inner, process) = (self.clone(), process.clone());
+            self.service_calls.run(move || {
+                let answer = inner.service_request(&process, &message["p"], lends);
+                inner.answer(&process, &id, answer);
+            });
+            return;
+        }
         if op == "device" {
             // Waiting for another plugin must not stop this one's channel.
             let (inner, process) = (self.clone(), process.clone());
-            let _ = std::thread::Builder::new().name("zlc-plugin-device-call".into()).spawn(move || {
+            self.device_calls.run(move || {
                 let answer = inner.route_device(&process, &message, lends);
                 inner.answer(&process, &id, answer);
             });
             return;
         }
         let answer = match op.as_str() {
+            "run.begin_terminal" | "run.finish" => self.lifecycle_request(process.pid(), &op, &message["p"]).map(|value| (value, Vec::new())),
             "run.begin" => self.run_begin(&message["p"]).map(|value| (value, Vec::new())),
             "run.commit" => self.run_commit(&message["p"], &lends).map(|value| (value, Vec::new())),
+            "run.commit_events" => self.run_commit_events(&message["p"], &lends).map(|value| (value, Vec::new())),
             "runtime.read" => self.runtime_read(process, &message["p"]),
-            "run.operator_input" | "run.artifact" | "run.figure" | "run.animation" | "run.acquire" | "run.snapshot" | "core" => {
+            "run.operator_input" | "run.artifact" | "run.artifacts" | "run.figure" | "run.animation" | "run.fit" | "run.acquire" | "run.snapshot" | "core" => {
                 // The application answers these (respond); the run's thread waits.
                 let params = &message["p"];
                 let (instance, run) = (params["instance"].as_str().unwrap_or("").to_owned(), params["run"].as_str().unwrap_or("").to_owned());
@@ -1224,20 +1334,26 @@ impl Inner {
             Ok((value, blocks)) => json!({"t": "res", "id": id, "ok": value, "blocks": blocks}),
             Err(error) => json!({"t": "res", "id": id, "error": error.wire()}),
         };
-        if let Err(error) = process.send(&message) { eprintln!("Plugin {} answer: {error}", process.key); }
+        if let Err(error) = process.send(&message) {
+            let blocks: Vec<_> = message["blocks"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            self.registry.released_by(process.pid(), &blocks);
+            eprintln!("Plugin {} answer: {error}", process.key);
+        }
     }
 
     fn run_of<'a>(state: &'a mut State, params: &Value) -> Result<&'a mut RunState, CallError> {
         let instance = params["instance"].as_str().unwrap_or("");
         let run = params["run"].as_str().unwrap_or("");
+        Self::run_named(state, instance, run)
+    }
+
+    fn run_named<'a>(state: &'a mut State, instance: &str, run: &str) -> Result<&'a mut RunState, CallError> {
         state.instances.get_mut(instance).and_then(|entry| entry.run.as_mut()).filter(|current| current.id == run)
             .ok_or_else(|| CallError::new(ErrorKind::StaleRun, format!("{run} is not {instance}'s current run")))
     }
 
     fn run_begin(&self, params: &Value) -> Result<Value, CallError> {
-        let instance = params["instance"].as_str().unwrap_or("").to_owned();
         let mut declarations = Vec::new();
-        let mut outputs = HashMap::new();
         for output in params["outputs"].as_array().ok_or_else(|| CallError::new(ErrorKind::Invalid, "run.begin needs outputs"))? {
             let name = output["name"].as_str().ok_or_else(|| CallError::new(ErrorKind::Invalid, "an output needs a name"))?;
             let schema = wire::schema_from_tree(&output["schema"]).map_err(|error| CallError::new(ErrorKind::Invalid, format!("{name}: {error}")))?;
@@ -1247,6 +1363,14 @@ impl Inner {
             };
             declarations.push((name.to_owned(), schema, finite));
         }
+        self.begin_outputs(params, declarations)
+    }
+
+    /// One declaration path for plugin-created and core-created schemas. Native
+    /// services do not serialize a schema merely to decode it back in this process.
+    fn begin_outputs(&self, params: &Value, declarations: Vec<(String, Arc<DatasetSchema>, bool)>) -> Result<Value, CallError> {
+        let instance = params["instance"].as_str().unwrap_or("").to_owned();
+        let mut outputs = HashMap::new();
         let mut state = self.state.lock().unwrap();
         let display_name = state.instances.get(&instance).map(|entry| entry.display_name.clone()).unwrap_or_else(|| public_instance(&instance).to_owned());
         let run = Self::run_of(&mut state, params)?;
@@ -1271,6 +1395,7 @@ impl Inner {
             Some((source, of)) => self.runtime.begin_consuming(public_instance(&instance), declarations, record, source, of),
             None => self.runtime.begin(public_instance(&instance), declarations, record),
         }.map_err(|error| CallError::from(error.to_string()))?;
+        if let Some(consumer) = run.consumer { self.runtime.bind_consumer(&generation, consumer).map_err(|error| CallError::from(error.to_string()))?; }
         let id = generation.id().as_uuid().to_string();
         run.generation = Some(generation);
         let declared: Vec<String> = outputs.values().map(|output| output.signal.to_string()).collect();
@@ -1335,6 +1460,73 @@ impl Inner {
                           "revision": key.revision, "ordinal": key.ordinal}))
         }).collect();
         Ok(Value::Object(keys))
+    }
+
+    /// Consecutive events of a run in one message (PLUGIN_PROTOCOL.md §5): each the
+    /// event `run_commit` would make of it.
+    fn run_commit_events(&self, params: &Value, lends: &[Arc<Lend>]) -> Result<Value, CallError> {
+        let invalid = |message: String| CallError::new(ErrorKind::Invalid, message);
+        let column = |field: &str, expected: usize| -> Result<Option<AnyBuffer>, CallError> {
+            if params[field].is_null() { return Ok(None); }
+            let column = wire::array(&params[field], lends).map_err(|error| invalid(format!("{field}: {error}")))?;
+            if column.shape.first() != Some(&expected) { return Err(invalid(format!("{field} needs one row per event"))); }
+            Ok(Some(column.values))
+        };
+        let count = params["count"].as_u64().filter(|count| *count > 0).ok_or_else(|| invalid("run.commit_events needs a count".into()))? as usize;
+        let Some(AnyBuffer::U64(ordinals)) = column("ordinals", count)? else { return Err(invalid("run.commit_events needs u64 ordinals".into())); };
+        let times = match column("shot_times", count)? {
+            None => None, Some(AnyBuffer::F64(times)) => Some(times),
+            Some(_) => return Err(invalid("shot times are float64 seconds".into())),
+        };
+        let origins = match column("origins", count)? {
+            None => None, Some(AnyBuffer::U64(origins)) if origins.len() == 2 * count => Some(origins),
+            Some(_) => return Err(invalid("origins are (count, 2) u64".into())),
+        };
+        let records = match &params["records"] {
+            Value::Null => None,
+            Value::Array(records) if records.len() == count => Some(records),
+            _ => return Err(invalid("records needs one record per event".into())),
+        };
+        let entries = params["inputs"].as_array().filter(|entries| !entries.is_empty()).ok_or_else(|| invalid("run.commit_events needs inputs".into()))?;
+        let (generation, outputs) = {
+            let mut state = self.state.lock().unwrap();
+            let run = Self::run_of(&mut state, params)?;
+            let generation = run.generation.clone().ok_or_else(|| invalid("run.commit_events before run.begin".into()))?;
+            let mut outputs = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let name = entry["output"].as_str().unwrap_or("");
+                let output = run.outputs.get_mut(name).ok_or_else(|| invalid(format!("{name} was not declared at run.begin")))?;
+                if let Some(tree) = entry.get("schema").filter(|tree| !tree.is_null()) {
+                    output.chunk = Some(wire::schema_from_tree(tree).map_err(|error| invalid(format!("{name}: {error}")))?);
+                }
+                let schema = if output.finite {
+                    output.chunk.clone().ok_or_else(|| invalid(format!("{name}: a finite event needs its chunk schema")))?
+                } else { output.chunk.clone().unwrap_or_else(|| output.schema.clone()) };
+                let blocks = wire::decode_events(&entry["data"], &schema, count, lends).map_err(|error| invalid(format!("{name}: {error}")))?;
+                outputs.push((name.to_owned(), output.signal.clone(), blocks));
+            }
+            (generation, outputs)
+        };
+        let mut blocks: Vec<_> = outputs.iter().map(|(.., blocks)| blocks.iter()).collect();
+        let bundles: Vec<Bundle> = (0..count).map(|index| {
+            let mut metadata = serde_json::Map::new();
+            if let Some(records) = records {
+                metadata.insert("records".into(), Value::Object(outputs.iter().map(|(name, ..)| (name.clone(), records[index].clone())).collect()));
+            }
+            let time = times.as_ref().map(|times| times.as_slice()[index]);
+            if let Some(time) = time {
+                metadata.insert("shot_time_seconds".into(), Value::Object(outputs.iter().map(|(name, ..)| (name.clone(), json!(time))).collect()));
+            }
+            let inputs = outputs.iter().zip(&mut blocks).map(|((_, signal, _), blocks)| Input::Event {
+                signal: signal.clone(), ordinal: ordinals.as_slice()[index], data: blocks.next().expect("one block per event").clone(),
+                origin: origins.as_ref().map(|origins| [origins.as_slice()[2 * index] as usize, origins.as_slice()[2 * index + 1] as usize]),
+                shot_time: time,
+            }).collect();
+            Bundle { inputs, metadata: Value::Object(metadata), parents: Vec::new() }
+        }).collect();
+        self.runtime.commit_events(&generation, &bundles)
+            .map_err(|error| CallError::from(error.to_string()))?;
+        Ok(Value::Null)
     }
 
     fn runtime_read(&self, process: &Arc<PluginProcess>, params: &Value) -> Result<(Value, Vec<String>), CallError> {
@@ -1452,25 +1644,52 @@ impl Inner {
             // A draft query (no run) reads the devices its draft names, as v2's
             // declare_outputs read `source.outputs`: reads only, nothing claimed.
             let drafted = params["run"].is_null();
+            let mut reading = drafted;
             let device = if drafted {
                 params["device"].as_str().filter(|device| state.instances.get(*device).is_some_and(|entry| entry.descriptor.is_device()))
                     .ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("a draft query names no open device as {argument:?}")))?.to_owned()
             } else {
                 let run = Self::run_of(&mut state, params)?;
+                reading = run.reads.contains(argument);
                 run.devices.get(argument).cloned()
                     .ok_or_else(|| CallError::new(ErrorKind::NotClaimed, format!("this run has no device {argument:?}")))?
             };
             let entry = state.instances.get(&device).ok_or_else(|| CallError::lost(format!("{device} is no longer open")))?;
-            if drafted && !descriptor::method_reads(&method, &entry.reads) {
-                return Err(CallError::new(ErrorKind::Refused, format!("a draft query only reads {device}; {method} is not a read")));
+            if reading && !descriptor::method_reads(&method, &entry.reads) {
+                return Err(CallError::new(ErrorKind::Refused, if drafted { format!("a draft query only reads {device}; {method} is not a read") }
+                    else { format!("this run only reads {device}; {method} is not a read") }));
             }
             (device, entry.serving.clone())
         };
         // The node's lends in its arguments pass to the device as the device's holds
         // (to a remote device, as the bytes of its blocks).
         let deadline = message["deadline_ms"].as_u64().map_or(CALL_DEADLINE, Duration::from_millis);
+        let began = Instant::now();
         let reply = serving.request(&self.registry, "spi", json!({"instance": device, "method": method,
-            "args": params["args"], "kwargs": params["kwargs"]}), lends, deadline)?;
+            "args": params["args"], "kwargs": params["kwargs"]}), lends, deadline);
+        // What a node's run asks of a device it claims (a draft query's read has no run). The same call
+        // made again and again with nothing going wrong -- a capture polling its camera -- is one line when
+        // it begins and one, with how often and its slowest, when something else follows it.
+        let ms = began.elapsed().as_secs_f64() * 1e3;
+        let failed = reply.as_ref().err().map(|error| error.message.clone());
+        let said = {
+            let mut repeated = self.repeated.lock().unwrap_or_else(|error| error.into_inner());
+            match repeated.get_mut(&device) {
+                Some((again, times, slowest)) if failed.is_none() && *again == method => { *times += 1; *slowest = slowest.max(ms); None }
+                held => {
+                    let before = held.filter(|(_, times, _)| *times > 0).map(|(method, times, slowest)| (method.clone(), *times, *slowest));
+                    repeated.insert(device.clone(), (method.clone(), 0, 0.0));
+                    Some(before)
+                }
+            }
+        };
+        if let Some(before) = said {
+            if let Some((again, times, slowest)) = before {
+                zlc_core::journal::note("plugins", "device_repeated", json!({"device": device, "method": again, "times": times, "slowest_ms": slowest}));
+            }
+            zlc_core::journal::note("plugins", "device", json!({"device": device, "method": method, "run": params["run"], "ms": ms, "error": failed}));
+        }
+        let reply = reply?;
         let returned: Vec<String> = reply.lends.iter().map(|lend| lend.name().to_owned()).collect();
         for name in &returned { self.registry.hold_for(node.pid(), name)?; }
         Ok((reply.value, returned))
@@ -1490,7 +1709,8 @@ impl Inner {
         let members = signals.iter().filter(|item| item.generation.id() == anchor.generation.id()
             && (bundle || item.signal == anchor.signal));
         let name = input["name"].as_str().unwrap_or("source").to_owned();
-        if anchor.sealed && anchor.finite {
+        // Sealed, a finite run and a Snapshot (a saved Figure's dataset, one complete state) are one whole dataset.
+        if anchor.sealed && (anchor.finite || !anchor.history_capable) {
             let views: Vec<_> = members.filter(|item| item.published).map(|item| (item.generation.clone(), item.signal.clone(), None)).collect();
             let reads = self.runtime.read_views(&views).into_iter().collect::<Result<Vec<_>, _>>()
                 .map_err(|error| CallError::from(format!("{signal}: {error}")))?;
@@ -1740,6 +1960,7 @@ mod tests {
             python_path: vec![root.join("../../science/src"), root.join("tests/plugins")],
             packages: vec!["zlc_test_plugins".into()], memory_limit_mib: Some(3072),
         }, Runtime::new(), SafeActions::new(), |_| {}).unwrap();
+        crate::test_application::install(&host).unwrap();
         host.open("rf", "test.fabric", json!({}), json!({})).unwrap();
         let request = host.admit_local("rf", true).unwrap();
         host.lend_out("rf", Arc::new(|_, _, _| {})).unwrap();

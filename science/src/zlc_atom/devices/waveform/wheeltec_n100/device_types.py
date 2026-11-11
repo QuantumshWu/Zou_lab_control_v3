@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.devices import discovered, underscored
+from zlc_atom.devices import discovered, free_serial_ports, underscored
 from zlc_plugin import DeviceType
 
 from .source import (
@@ -13,7 +13,6 @@ from .source import (
     WheeltecN100Config,
     WheeltecN100WaveformSource,
     discover_n100,
-    free_serial_ports,
 )
 
 

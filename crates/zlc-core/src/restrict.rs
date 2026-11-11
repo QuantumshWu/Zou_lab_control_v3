@@ -477,7 +477,7 @@ fn coordinates_of(vector: Vector) -> Coordinates {
 fn invalid(error: String) -> RestrictError { RestrictError::value(error) }
 
 /// `_subset_axis(axis, indices)`.
-fn subset_axis(axis: &Arc<Axis>, indices: &Indices) -> Result<Arc<Axis>> {
+pub fn subset_axis(axis: &Arc<Axis>, indices: &Indices) -> Result<Arc<Axis>> {
     if indices.keeps_everything(axis.len()) { return Ok(axis.clone()); }
     let labels = axis.labels().map(|labels| indices.iter().map(|index| labels[index].clone()).collect::<Vec<_>>());
     let held = Held::of(axis);
@@ -504,7 +504,7 @@ fn unique_inverse(codes: &[u64]) -> (Vec<u64>, Vec<u64>) {
 }
 
 /// `_subset_mapped_domain(domain, indices)`.
-fn subset_mapped_domain(domain: &Arc<Domain>, indices: &Indices) -> Result<Arc<Domain>> {
+pub fn subset_mapped_domain(domain: &Arc<Domain>, indices: &Indices) -> Result<Arc<Domain>> {
     if indices.keeps_everything(domain.size()) { return Ok(domain.clone()); }
     let mut axes = Vec::with_capacity(domain.axes().len());
     let mut mappings = Vec::with_capacity(domain.axes().len());

@@ -7,6 +7,7 @@ pub mod blas;
 pub mod classifier;
 pub mod engine;
 pub mod evaluation;
+pub mod identify;
 pub mod linalg;
 pub mod lsq;
 pub mod models;

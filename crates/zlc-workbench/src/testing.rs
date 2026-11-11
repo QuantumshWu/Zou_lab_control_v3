@@ -72,6 +72,14 @@ pub struct FakeHost { pub signals: Vec<SignalInfo>, pub panels: Vec<PanelContent
                       pub schemas: std::collections::BTreeMap<String, (Value, Value)> }
 
 impl Host for FakeHost {
+    /// The application's table, as the plotting owner states it (`zlc_plot` HANDLERS).
+    fn plot_kind(&self, kind: &str) -> Option<crate::PlotKindFacts> {
+        let (board, default_window, overlay) = match kind {
+            "image" | "facet_grid" => (true, 1, true), "curve" | "histogram" | "point_map" => (true, 1, false),
+            "rolling" => (true, 100, false), "pulse_timeline" => (false, 1, false), _ => return None,
+        };
+        Some(crate::PlotKindFacts { board, default_window, overlay })
+    }
     fn signals(&self) -> Vec<SignalInfo> { self.signals.clone() }
     fn panels(&self) -> Vec<PanelContent> { self.panels.clone() }
     fn reserve_panel_ids(&mut self, count: usize) -> Vec<String> {
@@ -89,7 +97,12 @@ impl Host for FakeHost {
 /// A camera, a sequencer with a coil output, a camera measurement, an
 /// occupancy processor and a scan task that acquires through the measurement.
 pub fn catalog() -> Value {
-    json!({"protocol": [2, 0], "errors": [{"module": "zlc_atom.devices.camera.pylon.device_types", "error": "No module named pypylon"}], "types": [
+    json!({"protocol": [2, 0], "configuration_schemas": {"simulation": [
+        {"name":"image_shape_yx","type":"pair","label":"Image shape","default":[372,460]},
+        {"name":"grid_shape_yx","type":"pair","label":"Trap grid","default":[5,7]},
+        {"name":"seed","type":"int","label":"Seed","default":0,"minimum":0},
+        {"name":"world_profile","type":"str","label":"Profile","default":""}
+    ]}, "errors": [{"module": "zlc_atom.devices.camera.pylon.device_types", "error": "No module named pypylon"}], "types": [
         {"type_id": "camera.virtual_mot", "kind": "device", "family": "camera", "label": "Virtual MOT camera", "simulation": true,
          "capabilities": ["camera.adapter"], "parameters": [{"name": "exposure_seconds", "type": "float", "label": "Exposure", "default": 0.1, "minimum": 0.0}],
          "commands": [{"name": "editor_send", "summary": "Send the draft", "drives": true, "params": [], "input_schema": {"type": "object"}},
@@ -353,6 +366,73 @@ mod tests {
         assert!(refused.unwrap_err().starts_with("amplitude: Stop the active Logic"), "an unnamed field is claimed, not protected");
     }
 
+    /// The unit the operator picks for a field in Device Control is the apparatus's: kept on the
+    /// device's row (unsaved until Save), saved and read back, the device opened in it, its scan
+    /// ports and run proxy told it, and the bench a run records asks for it -- each entry under the
+    /// device's id with its Device Manager name beside it. A window's own default unit is not kept.
+    #[test]
+    fn a_picked_unit_is_kept_by_the_apparatus_and_everything_recorded_uses_it() {
+        let root = scratch("kept-units");
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().extend([
+            json!({"type_id": "rf.virtual", "kind": "device", "family": "rf", "label": "Virtual RF", "capabilities": ["rf.source"], "parameters": []}),
+            json!({"type_id": "device_scan", "kind": "node", "label": "Device scan", "parameters": [{"name": "plan", "type": "text", "label": "Plan", "default": ""}],
+                   "node": {"node_kind": "task", "outputs": [], "queries": ["resolve_device_claims", "editor_facts"]}})]);
+        std::fs::write(root.join("apparatus.json"), r#"{"format": "zlc.installation", "simulation": {},
+            "devices": [{"instance_id": "rf_1", "role": "Trap RF", "type_id": "rf.virtual", "parameters": {}}]}"#).unwrap();
+        let open = |catalog: &Value| {
+            let calls = Rc::new(RefCell::new(Calls::default()));
+            let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog: catalog.clone() })).unwrap();
+            let mut host = FakeHost::default();
+            apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+            event(&mut workbench, Event::Opened { instance: "rf_1".into(), working_point: json!({"state": "open", "tunable": true, "snapshot": true}) }, &mut host);
+            (workbench, calls, host)
+        };
+        let read = |calls: &Rc<RefCell<Calls>>, op: &str| calls.borrow().2.iter().rev().find(|(name, ..)| name == op).cloned().unwrap();
+        let (mut workbench, calls, mut host) = open(&catalog);
+        workbench.apply("read_device", &json!({"device": "rf_1", "units": {"ch1_frequency": "MHz"}}), &Origin::Operator, 2, &mut host);
+        assert_eq!(workbench.apparatus_state()["dirty"], false, "a window's default is this session's only");
+        workbench.apply("read_device", &json!({"device": "rf_1", "units": {"ch1_power": "mVpp"}, "keep": true}), &Origin::Operator, 3, &mut host);
+        assert_eq!(read(&calls, "fields").2, json!({"units": {"ch1_frequency": "MHz", "ch1_power": "mVpp"}}));
+        assert_eq!(workbench.apparatus_state()["dirty"], true, "kept on the row, saved with the apparatus");
+        assert_eq!(workbench.apparatus_state()["action"], "shut_down", "a kept unit changes nothing the device holds");
+        apply(&mut workbench, &mut host, "save_apparatus", json!({"path": "apparatus.json"})).unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(root.join("apparatus.json")).unwrap()).unwrap();
+        assert_eq!(saved["devices"][0]["units"], json!({"ch1_power": "mVpp"}));
+        assert_eq!((&saved["devices"][0]["instance_id"], &saved["devices"][0]["role"]), (&json!("rf_1"), &json!("Trap RF")), "the key stays the id");
+
+        // Read back: the device opens in the kept unit, and Device Control says it is kept.
+        let (mut workbench, calls, mut host) = open(&catalog);
+        assert_eq!(workbench.apparatus.draft[0].units, [("ch1_power".to_owned(), "mVpp".to_owned())].into());
+        workbench.apply("read_device", &json!({"device": "rf_1"}), &Origin::Operator, 2, &mut host);
+        let (_, ticket, params) = read(&calls, "fields");
+        assert_eq!(params, json!({"units": {"ch1_power": "mVpp"}}));
+        event(&mut workbench, Event::Answered { ticket, result: Ok(json!([
+            {"field": {"name": "ch1_power", "type": "float", "label": "CH1 Power", "default": null, "unit": "mVpp"}, "current": 40.0, "live_write": true, "dependency_group": ["ch1_power"]},
+            {"field": {"name": "ch1_frequency", "type": "float", "label": "CH1 Frequency", "default": null, "unit": "Hz"}, "current": 8.0e7, "live_write": true, "dependency_group": ["ch1_frequency"]}])) }, &mut host);
+        let fields = workbench.device_rows()[0]["fields"].clone();
+        assert_eq!((&fields[0]["unit_kept"], &fields[1]["unit_kept"]), (&json!(true), &json!(false)));
+        // The scan editor's proxy and a run's are told the kept units.
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "device_scan", "values": {"plan": "device:rf_1:ch1_power"}})).unwrap();
+        event(&mut workbench, Event::Opened { instance: node_instance("device_scan"), working_point: Value::Null }, &mut host);
+        let (_, ticket, args) = read(&calls, "editor_facts");
+        assert_eq!((&args["devices"]["tunable:rf_1"]["role"], &args["devices"]["tunable:rf_1"]["units"]), (&json!("Trap RF"), &json!({"ch1_power": "mVpp"})));
+        event(&mut workbench, Event::Answered { ticket, result: Ok(json!({"ports": [{"port": "device:rf_1:ch1_power"}]})) }, &mut host);
+        let (_, ticket, _) = read(&calls, "resolve_device_claims");
+        event(&mut workbench, Event::Answered { ticket, result: Ok(json!({"tunable:rf_1": {"instance": "rf_1", "fields": ["ch1_power"]}})) }, &mut host);
+        apply(&mut workbench, &mut host, "start_node", json!({"node": "device_scan"})).unwrap();
+        let spec = calls.borrow().1.last().cloned().unwrap();
+        assert_eq!((spec.device_labels["rf_1"].as_str(), &spec.device_units["rf_1"]), ("Trap RF", &[("ch1_power".to_owned(), "mVpp".to_owned())].into()));
+        // The bench the run records asks the device in the kept unit; its entry is named.
+        event(&mut workbench, Event::RunStarted { run: spec.run.clone() }, &mut host);
+        event(&mut workbench, Event::RunSnapshot { run: spec.run.clone(), ticket: 101, wait: false }, &mut host);
+        let (_, ticket, params) = read(&calls, "snapshot");
+        assert_eq!(params, json!({"units": {"ch1_power": "mVpp"}}));
+        event(&mut workbench, Event::Answered { ticket, result: Ok(json!({"values": {"ch1_power": 40.0}, "units": {"ch1_power": "mVpp"}})) }, &mut host);
+        let bench = calls.borrow().3.iter().rev().find(|(run, id, _)| *run == spec.run && *id == 101).cloned().unwrap().2.unwrap();
+        assert_eq!(bench["devices"]["rf_1"], json!({"type_id": "rf.virtual", "role": "Trap RF", "values": {"ch1_power": 40.0}, "units": {"ch1_power": "mVpp"}}));
+    }
+
     /// A node is drawn at once from its type's answers for its default draft (the catalogue's),
     /// before its plugin has started; an edit of one field leaves the others as the newest
     /// answers drew them while the plugin checks it (v2 answered at once): the field the plugin
@@ -532,6 +612,12 @@ mod tests {
                    (&json!("@logic/occupancy/occupied"), &json!([["@logic/occupancy/occupied", "Occupancy/occupied"]])));
         assert!(apply(&mut workbench, &mut host, "set_panel_overlay", json!({"panel": "panel-11", "signal": "@logic/camera_measurement/frames"}))
             .unwrap_err().contains("judges no sites"));
+        // Which kinds take an Overlay is the plotting owner's fact, read through the host: a curve takes none.
+        host.panels.push(PanelContent { panel: "panel-99".into(), signal: "@logic/camera_measurement/frames".into(), kind: "curve".into(),
+                                        window: 1, target: json!({}), outputs: Vec::new() });
+        assert!(apply(&mut workbench, &mut host, "set_panel_overlay", json!({"panel": "panel-99", "signal": "@logic/occupancy/occupied"}))
+            .unwrap_err().contains("takes no Overlay"));
+        host.panels.pop();
         apply(&mut workbench, &mut host, "set_panel_overlay", json!({"panel": "panel-11", "signal": null})).unwrap();
         assert!(workbench.panel_overlays().is_empty());
         apply(&mut workbench, &mut host, "set_panel_overlay", json!({"panel": "panel-11", "signal": "@logic/occupancy/occupied"})).unwrap();
@@ -900,6 +986,84 @@ mod tests {
 
     fn asked(calls: &Rc<RefCell<Calls>>, name: &str) -> u64 { calls.borrow().2.iter().rev().find(|(query, ..)| query == name).unwrap().1 }
 
+    /// A layout loads its nodes with their devices named before the devices open: what a node
+    /// asked then (its camera not yet open) is asked again once the camera opens, and again when
+    /// it fails, so a Start reads the bench as it is now, not as it was while loading.
+    #[test]
+    fn a_node_asks_again_when_its_device_opens_or_fails() {
+        let root = scratch("bench_changed");
+        std::fs::write(root.join("apparatus.json"), RIG).unwrap();
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "camera_check", "kind": "node", "label": "Camera check", "parameters": [],
+            "node": {"node_kind": "measurement", "outputs": [], "queries": ["resolve_device_claims"],
+                     "devices": [{"capability": "camera.adapter", "argument": "camera", "protected_fields": []}]}}));
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+        let node = apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_check", "device_keys": {"camera": "mot_camera"}})).unwrap()["node"]
+            .as_str().unwrap().to_owned();
+        event(&mut workbench, Event::Opened { instance: node_instance(&node), working_point: Value::Null }, &mut host);
+        let last = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().rev().find(|(query, ..)| query == "resolve_device_claims").cloned().unwrap();
+        let (_, before, args) = last(&calls);
+        assert_eq!(args["devices"]["camera"]["tunable"], false, "asked while the camera is still opening");
+        event(&mut workbench, Event::Answered { ticket: before, result: Ok(json!({})) }, &mut host);
+        event(&mut workbench, Event::Opened { instance: "mot_camera".into(), working_point: json!({"tunable": true}) }, &mut host);
+        let (_, opened, args) = last(&calls);
+        assert!(opened > before, "asked again once the camera opened");
+        assert_eq!(args["devices"]["camera"]["tunable"], true);
+        // The answer to the first question, late, is not taken for the second.
+        event(&mut workbench, Event::Answered { ticket: before, result: Err("the camera is not open".into()) }, &mut host);
+        assert!(workbench.state(&host)["logic"][0]["issues"].to_string().find("not open").is_none());
+        event(&mut workbench, Event::Failed { instance: "mot_camera".into(), error: "lost".into() }, &mut host);
+        assert!(last(&calls).1 > opened, "and again when it failed");
+    }
+
+    /// A device a node only reads (a camera watching the sequencer that triggers it) is its argument
+    /// without a claim: whoever holds the device keeps it, the node is told what the device states of
+    /// itself and again when that changes, and left unset it is simply not there.
+    #[test]
+    fn a_device_a_node_only_reads_is_never_claimed_and_tells_the_draft_its_facts() {
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "watcher", "kind": "node", "label": "Watcher", "parameters": [],
+            "node": {"node_kind": "measurement", "outputs": [{"name": "frames"}], "queries": ["resolve_field_choices"],
+                     "devices": [{"capability": "camera.adapter", "argument": "camera", "protected_fields": []},
+                                 {"capability": "sequencer.streamer", "argument": "trigger_source", "protected_fields": [], "reads_only": true, "optional": true}]}}));
+        let (_root, mut workbench, calls, mut host) = rig("reads-only", catalog);
+        let lanes = |frames: Value| json!({"trigger_lanes": [{"lane": "ch11", "port": "emCCD", "label": "emCCD", "frames": frames}]});
+        event(&mut workbench, Event::Opened { instance: "sequencer".into(), working_point: json!({"facts": lanes(Value::Null)}) }, &mut host);
+        let node = apply(&mut workbench, &mut host, "add_node", json!({"type_id": "watcher"})).unwrap()["node"].as_str().unwrap().to_owned();
+        event(&mut workbench, Event::Opened { instance: node_instance(&node), working_point: Value::Null }, &mut host);
+        assert_eq!(workbench.node(&node).unwrap().draft.device_keys["trigger_source"], "sequencer", "the first open one, as any requirement's");
+        let asked = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().rev().find(|(query, ..)| query == "resolve_field_choices").cloned().unwrap();
+        let (_, first, args) = asked(&calls);
+        assert_eq!(args["devices"]["trigger_source"]["facts"], lanes(Value::Null), "what the device states of itself reaches the draft");
+        // The board now holds a pulse that triggers the lane three times a shot: the draft is asked again.
+        event(&mut workbench, Event::Facts { instance: "sequencer".into(), facts: lanes(json!(3)) }, &mut host);
+        let (_, second, args) = asked(&calls);
+        assert!(second > first);
+        assert_eq!(args["devices"]["trigger_source"]["facts"]["trigger_lanes"][0]["frames"], 3);
+        event(&mut workbench, Event::Facts { instance: "sequencer".into(), facts: lanes(json!(3)) }, &mut host);
+        assert_eq!(asked(&calls).1, second, "the same facts said again ask nothing");
+        event(&mut workbench, Event::Answered { ticket: second, result: Ok(json!({})) }, &mut host);
+
+        apply(&mut workbench, &mut host, "start_node", json!({"node": node})).unwrap();
+        let prepared = calls.borrow().2.iter().rev().find(|(query, ..)| query == "prepare_run").cloned().unwrap();
+        event(&mut workbench, Event::Answered { ticket: prepared.1, result: Ok(json!({"prepared": "p1"})) }, &mut host);
+        let spec = calls.borrow().1.last().cloned().unwrap();
+        assert_eq!((spec.devices["camera"].as_str(), spec.devices["trigger_source"].as_str()), ("mot_camera", "sequencer"));
+        assert_eq!(spec.reads.iter().collect::<Vec<_>>(), ["trigger_source"], "read, and said so to the plugin host");
+        assert!(workbench.device_claimant("sequencer").is_none(), "whoever plays the board is not kept from it");
+        assert_eq!(workbench.device_claimant("mot_camera").as_deref(), Some("watcher"));
+        apply(&mut workbench, &mut host, "stop_node", json!({"node": node})).unwrap();
+        event(&mut workbench, Event::RunFinished { run: spec.run.clone(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
+
+        // Without the sequencer the node still starts: an optional device that is not there is not asked for.
+        event(&mut workbench, Event::Closed { instance: "sequencer".into(), error: None }, &mut host);
+        let issues = workbench.state(&host)["logic"][0]["issues"].to_string();
+        assert!(!issues.contains("sequencer") && !issues.contains("trigger_source"), "{issues}");
+    }
+
     /// v2 _active_differs: a failed device and changed simulation settings are an Apply, not a Shut down.
     #[test]
     fn a_failed_device_and_changed_simulation_are_applied() {
@@ -912,6 +1076,30 @@ mod tests {
         assert_eq!(workbench.apparatus_state()["action"], "shut_down");
         apply(&mut workbench, &mut host, "edit_simulation", json!({"values": {"seed": 5}})).unwrap();
         assert_eq!(workbench.apparatus_state()["action"], "apply");
+    }
+
+    #[test]
+    fn simulation_rules_come_from_the_plugin_and_missing_declarations_preserve_saved_values() {
+        let (_root, mut workbench, _calls, mut host) = rig("simulation-schema-owner", catalog());
+        let refusal=apply(&mut workbench,&mut host,"edit_simulation",json!({"values":{"seed":-1}})).unwrap_err();
+        assert!(refusal.contains("at least 0"),"{refusal}");
+        let mut declared=catalog();
+        declared["configuration_schemas"]["simulation"]=json!([
+            {"name":"plugin_setting","type":"int","label":"Plugin setting","default":12,"minimum":10}
+        ]);
+        let (_root, mut workbench, _calls, mut host)=rig("simulation-other-owner",declared);
+        apply(&mut workbench,&mut host,"edit_simulation",json!({"values":{"plugin_setting":15}})).unwrap();
+        assert_eq!(workbench.apparatus.simulation["plugin_setting"],15);
+        assert!(apply(&mut workbench,&mut host,"edit_simulation",json!({"values":{"seed":2}})).is_err());
+
+        let mut missing=catalog(); missing.as_object_mut().unwrap().remove("configuration_schemas");
+        let root=scratch("simulation-unavailable-owner");
+        std::fs::write(root.join("apparatus.json"),RIG.replace("\"simulation\": {}","\"simulation\": {\"seed\":7,\"unknown_owner_value\":\"keep\"}")).unwrap();
+        let mut workbench=Workbench::new(&root,Box::new(FakePlugins{calls:Rc::default(),catalog:missing})).unwrap();
+        let mut host=FakeHost::default();
+        assert_eq!(workbench.apparatus.simulation["seed"],7,"saved configuration survives unavailable plugin declarations");
+        assert_eq!(workbench.apparatus.simulation["unknown_owner_value"],"keep");
+        assert!(apply(&mut workbench,&mut host,"edit_simulation",json!({"values":{"seed":2}})).unwrap_err().contains("declares"));
     }
 
     /// v2 _path_unread: a file not read in full is never replaced by Save unless asked; the draft is not that file.
@@ -1250,6 +1438,25 @@ mod tests {
                    "gain: Protected by camera_measurement");
     }
 
+    /// A derived field (a stage's state) is a reading: Device Control shows it and never tunes it.
+    #[test]
+    fn a_derived_device_field_is_read_only() {
+        let (_root, mut workbench, calls, mut host) = rig("audit-derived", catalog());
+        workbench.apply("read_device", &json!({"device": "mot_camera"}), &Origin::Operator, 2, &mut host);
+        event(&mut workbench,Event::Answered { ticket: asked(&calls, "fields"), result: Ok(json!([
+            {"field": {"name": "state", "type": "str", "label": "State", "default": null, "derived": true}, "current": "READY from MOVING",
+             "live_write": false, "dependency_group": ["state"]},
+            {"field": {"name": "position", "type": "float", "label": "Position", "default": null, "minimum": 0.0, "maximum": 25.0, "unit": "mm"},
+             "current": 12.0, "live_write": true, "dependency_group": ["position"]}])) }, &mut host);
+        let row = workbench.device_rows().into_iter().find(|row| row["instance_id"] == "mot_camera").unwrap();
+        let fields = row["fields"].as_array().unwrap();
+        assert_eq!((&fields[0]["current_text"], &fields[0]["editable"], &fields[0]["reason"], &fields[0]["status"]),
+                   (&json!("READY from MOVING"), &json!(false), &json!("Read from the device"), &json!("Read only")));
+        assert_eq!((&fields[1]["editable"], &fields[1]["status"]), (&json!(true), &json!("Ready")));
+        assert_eq!(apply(&mut workbench, &mut host, "tune_device", json!({"device": "mot_camera", "field": "state", "value": "READY"})).unwrap_err(),
+                   "state: Read from the device");
+    }
+
     /// v2 InstallationConfig, v2 discover: two devices of one name do not open; a scan waits for a device change.
     #[test]
     fn a_draft_with_two_devices_of_one_name_does_not_open_and_a_scan_waits_for_init() {
@@ -1473,6 +1680,21 @@ mod tests {
         assert_eq!(wb.node_row(wb.node("seamless_scan").unwrap(),&[])["editor_facts"]["marker"],"fresh");
     }
     #[test]
+    fn a_row_says_while_its_editor_model_is_of_an_older_draft() {
+        let mut catalog=catalog();catalog["types"][4]["node"]["queries"]=json!(["editor_facts"]);
+        let (_root,mut wb,calls,mut host)=rig("editor-facts-pending",catalog);
+        add_open_node(&mut wb,&mut host,json!({"type_id":"seamless_scan"}));
+        let first=asked(&calls,"editor_facts");
+        event(&mut wb,Event::Answered{ticket:first,result:Ok(json!({"marker":"first"}))},&mut host);
+        let row=|wb:&Workbench|wb.node_row(wb.node("seamless_scan").unwrap(),&[]);
+        assert_eq!(row(&wb)["editor_facts_pending"],false);
+        apply(&mut wb,&mut host,"edit_node",json!({"node":"seamless_scan","values":{"acquisition_logic":"camera_measurement"}})).unwrap();
+        assert_eq!((&row(&wb)["editor_facts_pending"],&row(&wb)["editor_facts"]["marker"]),(&json!(true),&json!("first")));
+        let second=asked(&calls,"editor_facts");
+        event(&mut wb,Event::Answered{ticket:second,result:Ok(json!({"marker":"second"}))},&mut host);
+        assert_eq!((&row(&wb)["editor_facts_pending"],&row(&wb)["editor_facts"]["marker"]),(&json!(false),&json!("second")));
+    }
+    #[test]
     fn old_reply_cannot_touch_recreated_node() {
         let mut catalog=catalog();catalog["types"][4]["node"]["queries"]=json!(["editor_facts"]);
         let (_root,mut wb,calls,mut host)=rig("audit-recreate-reply",catalog);
@@ -1495,6 +1717,51 @@ mod tests {
         event(&mut wb,Event::RunFinished{run:"camera_measurement#1".into(),outcome:"completed".into(),error:None,generation:Some("g1".into())},&mut host);
         wb.open_previews(&mut host);
         assert_eq!(host.panels.len(),1);
+    }
+
+    #[test]
+    fn auto_preview_reuses_the_declared_view_of_a_signal() {
+        let signal = "@logic/camera_measurement/frames";
+        let required = json!({"fate:cell_data:time": "x", "fate:cell_data:channel": ["scope-value", 2]});
+        let mut types = catalog();
+        types["types"][2]["node"]["previews"] = json!([{"output": "frames", "plot_kind": "curve", "semantic": required}]);
+        let (_root, mut wb, _calls, mut host) = rig("preview-view", types);
+        add_open_node(&mut wb, &mut host, json!({"type_id": "camera_measurement"}));
+        host.add_panel("history", signal, "rolling", 100, json!({})).unwrap();
+        let other = json!({"semantic": {"fate:cell_data:time": "x", "fate:cell_data:channel": ["scope-value", 0]}});
+        host.add_panel("other-channel", signal, "curve", 1, other.clone()).unwrap();
+
+        let start = json!({"node": "camera_measurement"});
+        apply(&mut wb, &mut host, "start_node", start.clone()).unwrap();
+        host.signals.push(SignalInfo { name: signal.into(), owner: "camera_measurement".into(), generation: "g1".into(),
+                                       published: true, sealed: false, shape: "".into() });
+        wb.open_previews(&mut host);
+        assert_eq!(host.panels.len(), 3);
+        assert_eq!(host.panels[0].kind, "rolling");
+        assert_eq!(host.panels[1].target, other);
+        assert_eq!(host.panels[2].kind, "curve");
+        assert_eq!(host.panels[2].target["semantic"], required);
+
+        // A later run asks for the same preview after the user has changed an unrelated setting.
+        host.panels[2].target["semantic"]["reduction"] = json!("max");
+        event(&mut wb, Event::RunFinished { run: "camera_measurement#1".into(), outcome: "completed".into(), error: None,
+                                            generation: Some("g1".into()) }, &mut host);
+        apply(&mut wb, &mut host, "start_node", start).unwrap();
+        host.signals[0].generation = "g2".into();
+        wb.open_previews(&mut host);
+        assert_eq!(host.panels.len(), 3);
+        assert_eq!(host.panels[2].target["semantic"]["reduction"], "max");
+
+        // The operator turns the preview to another channel, then to a Rolling trend: it is
+        // still the panel this preview opened, and the next run opens no other.
+        host.panels[2].target["semantic"]["fate:cell_data:channel"] = json!(["scope-value", 1]);
+        host.panels[2].kind = "rolling".into();
+        event(&mut wb, Event::RunFinished { run: "camera_measurement#2".into(), outcome: "completed".into(), error: None,
+                                            generation: Some("g2".into()) }, &mut host);
+        apply(&mut wb, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
+        host.signals[0].generation = "g3".into();
+        wb.open_previews(&mut host);
+        assert_eq!(host.panels.len(), 3, "no second panel for the preview the operator changed");
     }
     #[test]
     fn a_failed_preparation_preserves_the_active_run() {
@@ -1561,8 +1828,8 @@ mod tests {
     #[test]
     fn only_the_latest_device_read_can_replace_its_fields() {
         let (_root,mut wb,calls,mut host)=rig("device-read-order",catalog());
-        wb.read_device("mot_camera",None,None).unwrap(); let old=asked(&calls,"fields");
-        wb.read_device("mot_camera",None,None).unwrap(); let fresh=asked(&calls,"fields");
+        wb.read_device("mot_camera",None,false,None).unwrap(); let old=asked(&calls,"fields");
+        wb.read_device("mot_camera",None,false,None).unwrap(); let fresh=asked(&calls,"fields");
         wb.on_event(Event::Answered{ticket:fresh,result:Ok(json!({"marker":"fresh"}))},&mut host);
         wb.on_event(Event::Answered{ticket:old,result:Ok(json!({"marker":"old"}))},&mut host);
         assert_eq!(wb.devices["mot_camera"].fields.as_ref().unwrap()["marker"],"fresh");

@@ -1,8 +1,6 @@
 //! Arrays and datasets on the wire (PLUGIN_PROTOCOL.md §6), core side.
-use std::any::Any;
 use std::sync::Arc;
 
-use base64::Engine;
 use serde_json::{Value, json};
 use zlc_core::dataset::{DataBlock, Validity};
 use zlc_core::schema::{DatasetSchema, DomainRole, ValidityContract};
@@ -13,33 +11,7 @@ use crate::blocks::{Lend, Registry};
 /// Arrays smaller than this are sent inline (as the SDK does).
 pub const INLINE_BYTES: usize = 16 << 10;
 
-pub fn dtype(text: &str) -> Result<DType, String> {
-    Ok(match text {
-        "|b1" => DType::Bool, "|u1" => DType::U8, "|i1" => DType::I8, "<u2" => DType::U16, "<i2" => DType::I16,
-        "<u4" => DType::U32, "<i4" => DType::I32, "<u8" => DType::U64, "<i8" => DType::I64, "<f2" => DType::F16,
-        "<f4" => DType::F32, "<f8" => DType::F64, "<c8" => DType::C64, "<c16" => DType::C128,
-        other => return Err(format!("Unsupported array dtype {other:?}")),
-    })
-}
-
-pub fn dtype_name(dtype: DType) -> &'static str {
-    match dtype {
-        DType::Bool => "|b1", DType::U8 => "|u1", DType::I8 => "|i1", DType::U16 => "<u2", DType::I16 => "<i2",
-        DType::U32 => "<u4", DType::I32 => "<i4", DType::U64 => "<u8", DType::I64 => "<i8", DType::F16 => "<f2",
-        DType::F32 => "<f4", DType::F64 => "<f8", DType::C64 => "<c8", DType::C128 => "<c16",
-    }
-}
-
-/// Inline bytes kept 16-byte aligned, so any dtype can borrow them.
-struct Inline(Vec<u128>, usize);
-
-unsafe impl ForeignBytes for Inline {
-    fn bytes(&self) -> &[u8] { unsafe { std::slice::from_raw_parts(self.0.as_ptr().cast(), self.1) } }
-    fn as_any(&self) -> &dyn Any { self }
-}
-
-/// One decoded array: its values (borrowed from a block when lent) and shape.
-pub struct Array { pub values: AnyBuffer, pub shape: Vec<usize> }
+pub use zlc_archive::array_wire::{Array, dtype, dtype_name};
 
 fn shape_of(spec: &Value) -> Result<Vec<usize>, String> {
     spec["shape"].as_array().ok_or("Array has no shape")?.iter()
@@ -54,21 +26,13 @@ pub fn array(reference: &Value, lends: &[Arc<Lend>]) -> Result<Array, String> {
             .ok_or_else(|| format!("Block {name} was not lent by this message"))?;
         let kind = dtype(spec["dtype"].as_str().ok_or("Array has no dtype")?)?;
         let shape = shape_of(spec)?;
-        let count = shape.iter().product::<usize>();
+        let count = shape.iter().try_fold(1usize, |count, dim| count.checked_mul(*dim).ok_or("Array shape overflows usize"))?;
         let offset = spec["offset"].as_u64().ok_or("Array has no offset")? as usize;
         let owner: Arc<dyn ForeignBytes> = lend.clone();
         return Ok(Array { values: AnyBuffer::from_foreign(kind, owner, offset, count)?, shape });
     }
-    if let Some(spec) = reference.get("$inline") {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(spec["b64"].as_str().ok_or("Inline array has no data")?)
-            .map_err(|error| format!("Inline array: {error}"))?;
-        let kind = dtype(spec["dtype"].as_str().ok_or("Array has no dtype")?)?;
-        let shape = shape_of(spec)?;
-        let count = shape.iter().product::<usize>();
-        let mut words = vec![0u128; bytes.len().div_ceil(16)];
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), words.as_mut_ptr().cast::<u8>(), bytes.len()) };
-        let owner: Arc<dyn ForeignBytes> = Arc::new(Inline(words, bytes.len()));
-        return Ok(Array { values: AnyBuffer::from_foreign(kind, owner, 0, count)?, shape });
+    if reference.get("$inline").is_some() {
+        return zlc_archive::array_wire::decode(reference);
     }
     Err(format!("Expected an array, got {reference}"))
 }
@@ -79,7 +43,7 @@ pub fn encode_array(values: &AnyBuffer, shape: &[usize], registry: &Arc<Registry
     let kind = dtype_name(values.dtype());
     let bytes = values.as_bytes();
     if bytes.len() < INLINE_BYTES {
-        return Ok(json!({"$inline": {"b64": base64::engine::general_purpose::STANDARD.encode(bytes), "dtype": kind, "shape": shape}}));
+        return zlc_archive::array_wire::encode(values, shape);
     }
     let borrowed = values.foreign().and_then(|(owner, offset)| owner.as_any().downcast_ref::<Lend>().map(|lend| (lend, offset)));
     let (name, size, offset) = match borrowed {
@@ -142,6 +106,46 @@ pub fn decode_block(data: &Value, schema: Arc<DatasetSchema>, lends: &[Arc<Lend>
         },
     };
     DataBlock::new(schema, values.values, validity, sigma)
+}
+
+/// One output's `count` consecutive events, each `schema`'s block: the planes hold
+/// them one after another (first axis the event), and each block borrows its part.
+pub fn decode_events(data: &Value, schema: &Arc<DatasetSchema>, count: usize, lends: &[Arc<Lend>]) -> Result<Vec<Arc<DataBlock>>, String> {
+    let planned = |shape: &[usize]| std::iter::once(count).chain(shape.iter().copied()).collect::<Vec<_>>();
+    let values = array(&data["values"], lends)?;
+    if values.shape != planned(schema.physical_shape()) {
+        return Err(format!("Events of shape {:?} do not match {count} of the declared {:?}", values.shape, schema.physical_shape()));
+    }
+    let (owner, offset) = values.values.foreign().ok_or("Event values must be borrowed")?;
+    let stride = values.values.as_bytes().len() / count.max(1);
+    let (kind, len) = (values.values.dtype(), schema.value_len());
+    let masks = match &data["validity"] {
+        Value::Bool(_) | Value::Null => None,
+        reference => {
+            let mask = array(reference, lends)?;
+            if !matches!(mask.values, AnyBuffer::Bool(_)) { return Err("A validity mask must be bool".into()); }
+            if mask.shape != planned(&mask_shape(schema)) {
+                return Err(format!("A validity mask of shape {:?} does not match {count} of {:?}", mask.shape, mask_shape(schema)));
+            }
+            Some(mask.values)
+        }
+    };
+    let uniform = data["validity"].as_bool().unwrap_or(true);
+    (0..count).map(|index| {
+        let part = AnyBuffer::from_foreign(kind, owner.clone(), offset + index * stride, len)?;
+        let validity = match &masks {
+            None => Validity::Uniform(uniform),
+            Some(mask) => {
+                let (owner, offset) = mask.foreign().ok_or("A validity mask must be borrowed")?;
+                let cells = schema.component_mask_len();
+                match AnyBuffer::from_foreign(DType::Bool, owner.clone(), offset + index * cells, cells)? {
+                    AnyBuffer::Bool(mask) => Validity::Mask(mask),
+                    _ => unreachable!("asked for bool"),
+                }
+            }
+        };
+        DataBlock::new(schema.clone(), part, validity, None)
+    }).collect()
 }
 
 /// One complete dataset with its identity (`zlc_plugin.figures.dataset_to_wire`).

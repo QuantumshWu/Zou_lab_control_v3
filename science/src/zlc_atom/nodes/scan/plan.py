@@ -24,19 +24,17 @@ port needs -- the plugin decodes no pulse.
 
 from __future__ import annotations
 
-import ast
-import operator
 import itertools
 import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from numbers import Real
 
-import numpy as np
 
 from zlc_data.units import DEFAULT_UNITS, VoltageIntoLoad, format_quantity
 from zlc_durable import strict_json_loads
+from zlc_plugin.services import call as native
 
 from zlc_atom.authoring import TunableField, read_tunable_in_unit
 from zlc_atom.nodes._framework.descriptor import (
@@ -274,28 +272,29 @@ def unscannable_api_ports(description: Mapping[str, object]) -> dict[str, str]:
             for field, reason in dict(pulse_description(description).get("unscannable") or {}).items()}
 
 
-def label_device_scan_ports(
-    ports: Sequence[ScanPort], device_labels: Mapping[str, str] | None,
-) -> tuple[ScanPort, ...]:
-    """Project accepted Role metadata without reading or renaming a device."""
+#: Between a device's name and its field's in a device port's label ("Trap RF · CH1 Power").
+DEVICE_LABEL_SEPARATOR = " · "
 
-    labels = device_labels or {}
-    result = []
-    for port in ports:
-        if port.port.startswith(DEVICE_PARAM_FAMILY):
-            key, field = device_port_parts(port.port)
-            label = f"{labels.get(key, key)}.{field}"
-            if label != port.label:
-                port = replace(port, label=label)
-        result.append(port)
-    return tuple(result)
+
+def device_port_label(device: str, field: str) -> str:
+    """What a device port is called wherever it is shown: the name Device
+    Manager gives the device, then its field's label.  Its axis identity
+    stays ``<key>.<field>`` (:func:`port_label`), so renaming a device never
+    renames an axis a selection or a saved panel names."""
+
+    return f"{device}{DEVICE_LABEL_SEPARATOR}{field}"
 
 
 def scan_ports_for_devices(
     tunables: Mapping | None, *, units: Mapping[str, str] | None = None,
-    device_labels: Mapping[str, str] | None = None,
+    unread: dict[str, str] | None = None,
 ) -> tuple[ScanPort, ...]:
     """Every port the bench's tunable devices offer, from their own words.
+
+    A device that cannot answer raises, unless ``unread`` is given: then it
+    offers nothing and that dict says why, by device key.  An editor gives it,
+    since one instrument failing a read says nothing about the other knobs; a
+    run does not, since it cannot move a knob it cannot read.
 
     ``tunables`` is already the tunable set -- ``tunable_devices`` chose it
     by ``is_tunable`` -- so each device is asked for its
@@ -305,24 +304,35 @@ def scan_ports_for_devices(
     coupled hardware transaction is atomic.  A field whose bounds leave no
     interval -- a knob pinned to one value by policy -- is a control, not
     an axis, and is passed over rather than failing the whole projection.
-    The port's unit is the field's own declared unit -- an RF frequency
-    axis publishes hertz -- and its label names the device and the knob;
-    it stands at the device's reading, in that unit.
+    A ``derived`` field is a reading (a stage's state), never an axis.
+    The port's unit is the one ``units`` names for it (the plan's axis
+    unit), else the one the operator keeps for the field (the device's
+    ``units``, picked in Device Control), else the field's own declared
+    unit -- an RF frequency axis publishes hertz; its label names the device
+    by its ``role`` and the knob by its label; it stands at the device's
+    reading, in that unit.
     """
 
     ports: list[ScanPort] = []
     for key in sorted(dict(tunables or {})):
         device = tunables[key]
-        for tunable in device.tunable_fields():
+        try:
+            fields = device.tunable_fields()
+        except Exception as error:  # noqa: BLE001 -- the instrument's or its link's, of any type
+            if unread is None:
+                raise
+            unread[key] = str(error)
+            continue
+        for tunable in fields:
             if not isinstance(tunable, TunableField):
                 raise TypeError("device tunable_fields must contain TunableField values")
             field = tunable.metadata
             port = f"{DEVICE_PARAM_FAMILY}{key}:{field.name}"
-            selected_unit = (units or {}).get(port)
-            if selected_unit:
+            selected_unit = (units or {}).get(port) or dict(getattr(device, "units", None) or {}).get(field.name)
+            if selected_unit and selected_unit != field.unit:
                 tunable = read_tunable_in_unit(device, field.name, selected_unit)
                 field = tunable.metadata
-            if field.minimum is None or field.maximum is None:
+            if field.derived or field.minimum is None or field.maximum is None:
                 continue
             if float(field.minimum) >= float(field.maximum):
                 continue
@@ -332,7 +342,7 @@ def scan_ports_for_devices(
             ports.append(
                 ScanPort(
                     port,
-                    port_label(port),
+                    device_port_label(getattr(device, "role", "") or key, field.label or field.name),
                     field.unit or "",
                     float(field.minimum),
                     float(field.maximum),
@@ -342,8 +352,7 @@ def scan_ports_for_devices(
                     display_unit=field.display_unit,
                 )
             )
-    return label_device_scan_ports(ports, device_labels if device_labels is not None else
-                                   {key: getattr(device, "role", "") or key for key, device in dict(tunables or {}).items()})
+    return tuple(ports)
 
 
 class DeviceKnob:
@@ -360,6 +369,7 @@ class DeviceKnob:
     def __init__(self, device: object) -> None:
         self._device = device
         self.role = getattr(device, "role", "")
+        self.units = dict(getattr(device, "units", None) or {})
         native = getattr(device, "tune_in_unit", None)
         if callable(native):
             self.tune_in_unit = native
@@ -386,7 +396,7 @@ class DeviceKnob:
             row["name"], row["type"], row["label"], row.get("default"), required=bool(row.get("required")),
             minimum=row.get("minimum"), maximum=row.get("maximum"), step=row.get("step"), unit=row.get("unit"),
             display_unit=row.get("display_unit"), choices=tuple(AuthoringChoice(choice["value"], choice["label"]) for choice in row.get("choices") or ()),
-            description=str(row.get("description") or ""))
+            description=str(row.get("description") or ""), derived=bool(row.get("derived")))
         limits = item.get("device_limits")
         return TunableField(metadata, item.get("current"), bool(item["live_write"]),
                             tuple(item["dependency_group"]), None if limits is None else tuple(limits))
@@ -441,16 +451,12 @@ class ScanPlan:
 
     def __post_init__(self) -> None:
         axes = tuple(self.axes)
-        if not axes:
-            raise ValueError("a scan plan needs at least one axis")
         if any(not isinstance(axis, ScanAxis) for axis in axes):
             raise TypeError("plan axes must be ScanAxis values")
-        names = tuple(axis.port for axis in axes)
-        if len(set(names)) != len(names):
-            raise ValueError("a port may appear on one axis only")
-        object.__setattr__(self, "axes", tuple(sorted(
-            axes, key=lambda axis: any(host_advanced_port(item.port) for item in axes if (item.coordinate_of or item.port) == (axis.coordinate_of or axis.port)), reverse=True,
-        )))
+        answer = native("scan.order", axes=[
+            {"port": axis.port, "values": list(axis.values), "unit": axis.unit, "coordinate_of": axis.coordinate_of}
+            for axis in axes])
+        object.__setattr__(self, "axes", tuple(axes[index] for index in answer["order"]))
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -479,67 +485,30 @@ class ScanPlan:
 
     @classmethod
     def from_tree(cls, tree: object) -> "ScanPlan":
-        """Compile every listed axis from its selected input bank."""
+        """Compile authored banks through the canonical native authority."""
 
-        rows = plan_input_rows(tree)
-        axes = []
-        for index, entry in enumerate(rows, 1):
-            try:
-                if entry["port"].startswith(MANUAL_PARAM_FAMILY):
-                    manual_axis_name(entry["port"])
-                values = (
-                    parse_scan_values(entry["value_text"])
-                    if entry["mode"] == "values" else entry["values"]
-                )
-                axes.append(ScanAxis(entry["port"], tuple(values), entry["unit"], entry.get("coordinate_of")))
-                if entry.get("link_enabled"):
-                    for linked in entry.get("links", ()):
-                        if linked["mode"] == "formula":
-                            played = formula_values(linked["formula"], values)
-                        elif linked["mode"] == "values":
-                            played = parse_scan_values(linked["value_text"])
-                        else:
-                            ends = linked["values"]
-                            if not ends:
-                                raise ValueError("linked Range needs endpoints")
-                            played = tuple(ends[0] + (ends[-1] - ends[0]) * i / max(1, len(values)-1) for i in range(len(values)))
-                        if len(played) != len(values):
-                            raise ValueError(f"linked parameter {linked['port']!r} needs {len(values)} values")
-                        if linked["port"].startswith(MANUAL_PARAM_FAMILY):
-                            raise ValueError("a linked parameter must be a scan slot, API or device parameter")
-                        axes.append(ScanAxis(linked["port"], tuple(played), linked["unit"], entry["port"]))
-            except (TypeError, ValueError) as error:
-                raise ValueError(f"scan axis {index} ({entry['port']!r}): {error}") from None
-        return cls(tuple(axes))
+        compiled = native("scan.compile", document=tree.to_tree() if isinstance(tree, cls) else tree, mode="compile")
+        result = object.__new__(cls)
+        object.__setattr__(result, "axes", tuple(
+            ScanAxis(axis["port"], tuple(axis["values"]), axis["unit"], axis.get("coordinate_of"))
+            for axis in compiled["axes"]))
+        return result
 
 
 def formula_values(source: str, values: Sequence[float]) -> tuple[float, ...]:
-    """Numeric arithmetic only: x is the parent number; units belong to the result."""
-    if len(source) > 2048:
-        raise ValueError("formula is too long")
-    try:
-        tree = ast.parse(source, mode="eval")
-    except SyntaxError as error:
-        raise ValueError("invalid formula") from error
-    operations = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv, ast.Pow: operator.pow}
-    if len(list(ast.walk(tree))) > 128:
-        raise ValueError("formula is too complex")
-    def read(node, x):
-        if isinstance(node, ast.Constant) and type(node.value) in (int, float): return float(node.value)
-        if isinstance(node, ast.Name) and node.id == "x": return float(x)
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-            return read(node.operand, x) * (-1 if isinstance(node.op, ast.USub) else 1)
-        if isinstance(node, ast.BinOp) and type(node.op) in operations:
-            a, b = read(node.left, x), read(node.right, x)
-            if isinstance(node.op, ast.Pow) and abs(b) > 64: raise ValueError("formula exponent exceeds 64")
-            return operations[type(node.op)](a, b)
-        raise ValueError("formula accepts numbers, x, parentheses and + - * / **")
-    try:
-        result = tuple(float(read(tree.body, x)) for x in values)
-        if not all(math.isfinite(x) for x in result): raise ValueError("formula must produce finite numbers")
-        return result
-    except (ArithmeticError, TypeError, OverflowError) as error:
-        raise ValueError(f"cannot evaluate formula: {error}") from error
+    """Evaluate the native scan grammar; there is no Python evaluator."""
+
+    return tuple(native("scan.formula", source=source, values=list(values))["values"])
+
+
+def scan_row_count(axes: Sequence[ScanAxis]) -> int:
+    """Count the factored groups without expanding their Cartesian product."""
+    lengths: dict[str, int] = {}
+    for axis in axes:
+        group = axis.coordinate_of or axis.port
+        if lengths.setdefault(group, len(axis.values)) != len(axis.values):
+            raise ValueError("linked parameters must have equal lengths")
+    return math.prod(lengths.values())
 
 
 def scan_rows(axes: Sequence[ScanAxis]) -> tuple[tuple[float, ...], ...]:
@@ -598,26 +567,12 @@ def bind_plan(
     """
 
     by_name = {port.port: port for port in ports}
-    bound = []
-    for axis in plan.axes:
-        port = by_name.get(axis.port)
-        if port is None and axis.port in (withheld or {}):
-            raise ValueError(f"{withheld[axis.port]}; remove axis {axis.port!r} or put a period inside the bracket")
-        if port is None:
-            offered = ", ".join(sorted(by_name)) or "nothing"
-            raise ValueError(
-                f"this pulse offers no scan port named {axis.port!r}; "
-                f"it offers {offered}"
-            )
-        for value in axis.values:
-            native = axis.native_value(port, value)
-            if native < port.lo or native > port.hi:
-                raise ValueError(
-                    f"axis {axis.port!r} plays {value!r} {axis.unit or port.unit}, outside the port's "
-                    f"range [{port.lo:g}, {port.hi:g}] {port.unit}"
-                )
-        bound.append(port)
-    return tuple(bound)
+    answer = native("scan.bind", axes=[
+        {"port": axis.port, "values": list(axis.values), "unit": axis.unit, "coordinate_of": axis.coordinate_of}
+        for axis in plan.axes], ports=[
+        {"port": port.port, "unit": port.unit, "lo": port.lo, "hi": port.hi}
+        for port in ports], withheld=dict(withheld or {}))
+    return tuple(by_name[name] for name in answer["ports"])
 
 
 #: A seamless plan may carry only host axes and play an ordinary fixed Pulse;
@@ -720,76 +675,22 @@ def api_overrides_to_authored(overrides: Mapping[str, float]) -> str:
 
 
 def plan_input_rows(payload: object) -> tuple[dict, ...]:
-    """Read the two independent input banks without compiling Values text."""
+    """Read authored banks without evaluating dormant text or disabled links."""
+
     if isinstance(payload, ScanPlan):
         payload = payload.to_tree()
-    elif isinstance(payload, str):
-        if not payload.strip():
-            raise ValueError("the scan plan is empty; add an axis")
-        payload = strict_json_loads(payload, "the scan plan")
-    if not isinstance(payload, Mapping) or set(payload) != {"axes"}:
-        raise ValueError("a scan plan document carries only its axes")
-    entries = payload["axes"]
-    if isinstance(entries, (str, bytes)) or not isinstance(entries, Sequence):
-        raise TypeError("scan plan axes must be a list")
-    rows = []
-    for index, entry in enumerate(entries, 1):
-        allowed = {"port", "values", "unit", "mode", "value_text", "formula", "links", "link_enabled", "coordinate_of"}
-        if not isinstance(entry, Mapping) or not {"port", "values"} <= set(entry) or set(entry) - allowed:
-            raise ValueError("scan axis fields must be port, values, and optional unit, mode, value_text")
-        row = {"port": entry["port"], "values": entry["values"], "unit": entry.get("unit", ""),
-               "mode": entry.get("mode", "range"), "value_text": entry.get("value_text", "")}
-        if "coordinate_of" in entry:
-            row["coordinate_of"] = entry["coordinate_of"]
-        if "links" in entry or "link_enabled" in entry:
-            if not isinstance(entry.get("link_enabled", False), bool):
-                raise TypeError("link_enabled must be boolean")
-            row["link_enabled"] = entry.get("link_enabled", False)
-            raw_links = entry.get("links", [])
-            if not isinstance(raw_links, list):
-                raise TypeError("linked parameters must be a list")
-            row["links"] = []
-            for linked in raw_links:
-                if not isinstance(linked, Mapping) or set(linked) - {"port", "values", "unit", "mode", "value_text", "formula"}:
-                    raise ValueError("invalid linked parameter fields")
-                mode = linked.get("mode", "formula")
-                if mode not in ("range", "values", "formula"):
-                    raise ValueError("linked mode must be range, values or formula")
-                clean = plan_input_rows({"axes": [{**{k:v for k,v in linked.items() if k != "formula"}, "mode": "range" if mode == "formula" else mode}]})[0]
-                clean["mode"] = mode
-                clean["formula"] = linked.get("formula", "x")
-                if not isinstance(clean["formula"], str):
-                    raise TypeError("formula must be text")
-                row["links"].append(clean)
-        if any(not isinstance(row[key], str) for key in ("port", "unit", "mode", "value_text")):
-            raise TypeError(f"scan axis {index}: port, unit, mode and value_text must be text")
-        if row["mode"] not in ("range", "values"):
-            raise ValueError(f"scan axis {index} ({row['port']!r}): mode must be range or values")
-        values = row["values"]
-        if (isinstance(values, (str, bytes)) or not isinstance(values, Sequence)
-                or any(isinstance(value, bool) or not isinstance(value, Real) for value in values)):
-            raise TypeError(f"scan axis {index} ({row['port']!r}): Range values must be a numeric list")
-        row["values"] = list(values)
-        rows.append(row)
-    return tuple(sorted(rows, key=lambda row: any(host_advanced_port(item["port"]) for item in (row, *(row.get("links", ()) if row.get("link_enabled") else ()))), reverse=True))
+    return tuple(native("scan.compile", document=payload, mode="normalize")["rows"])
 
 
 def parse_scan_values(text: str) -> tuple[float, ...]:
-    """Comma-separated finite numbers, retaining the authored order/repeats."""
-    if not isinstance(text, str):
-        raise TypeError("Values must be comma-separated text")
-    if not text.strip():
-        raise ValueError("Values is empty; enter comma-separated numbers")
-    values = []
-    for index, item in enumerate(text.split(","), 1):
-        try:
-            value = float(item.strip())
-        except ValueError:
-            raise ValueError(f"Values item {index} is not a number: {item!r}") from None
-        if not math.isfinite(value):
-            raise ValueError(f"Values item {index} must be finite")
-        values.append(value)
-    return tuple(values)
+    """Parse Values through the same native compiler used by Start and preview."""
+
+    return tuple(native("scan.values", text=text)["values"])
+
+
+def _range_values(row: Mapping[str, object]) -> tuple[float, ...]:
+    descriptor = row.get("range")
+    return tuple(native("scan.range", **descriptor)["values"] if descriptor is not None else row["values"])
 
 
 def plan_from_authored(payload: object) -> ScanPlan:
@@ -876,14 +777,16 @@ def _selected_plan(
 
     A Range row keeps its point COUNT and its direction, because that is
     what the plan's form offers (from, to, points): the same effort spent
-    over a smaller range, walked the way it was authored.  Its new ends are
-    held to the span the scan played: past it -- the half pixel beyond an
-    image's last column, a curve's margin -- the picture shows nothing
-    scanned, and a range drawn there would sweep past the knob's limits
-    when the scan ran up to them.  A Values row is an exact statement and
-    stays one: the listed values the region holds, in their order and
-    spelling.  A region holding nothing scanned on an axis it cuts is
-    refused by name.
+    over the drawn range, walked the way it was authored.  Each end is read
+    by itself.  A wall within half a step of the scan's outermost point --
+    the half pixel an image draws beyond its last column, a curve's margin
+    -- is that point's own cell: the row keeps the end it has.  A wall past
+    that, inside the data or beyond it, is the new end as drawn, so a
+    region reaching past what was scanned sweeps there next; the plan's own
+    check against the knob's limits says so when that is too far.  A Values
+    row is an exact statement and stays one: the listed values the region
+    holds, in their order and spelling.  A region holding none of an axis's
+    listed values is refused by name.
     """
 
     rows = plan_input_rows(draft.get("plan"))
@@ -899,24 +802,24 @@ def _selected_plan(
         named = True
         listed = row["mode"] == "values"
         items = [item.strip() for item in row["value_text"].split(",")] if listed else []
-        authored = parse_scan_values(row["value_text"]) if listed else tuple(row["values"])
+        authored = parse_scan_values(row["value_text"]) if listed else _range_values(row)
         if len(authored) < 2:
             continue
-        played = [float(value) for value in recorded["values"]]
-        first, last = min(played), max(played)
+        played = sorted({float(value) for value in recorded["values"]})
+        if len(played) < 2:
+            continue
+        first, last = played[0], played[-1]
         lower, upper = float(chosen.lower), float(chosen.upper)
-        if lower <= first and upper >= last:
+        # The outermost points' own cells: half a step either side of each.
+        keeps_low = abs(lower - first) <= (played[1] - first) / 2 if not listed else lower <= first
+        keeps_high = abs(upper - last) <= (last - played[-2]) / 2 if not listed else upper >= last
+        if keeps_low and keeps_high:
             continue
         source_unit = context.get("axis_units", {}).get(axis_id)
         if source_unit is None:
             raise ValueError(f"selected scan axis {axis_id!r} has no recorded unit")
-        if not listed:
-            lower, upper = max(lower, first), min(upper, last)
         if not lower < upper:
-            raise ValueError(
-                f"selected scan axis {axis_id!r}: the region lies outside the "
-                f"{first:g} to {last:g} {source_unit} the scan played"
-            )
+            raise ValueError(f"selected scan axis {axis_id!r}: the region has no width")
         low, high = _bounds_in_row_unit(axis_id, row, (lower, upper), source_unit)
         if listed:
             kept = [item for item, value in zip(items, authored, strict=True) if low <= value <= high]
@@ -926,8 +829,17 @@ def _selected_plan(
                 )
             row["value_text"] = ", ".join(kept)
         else:
-            values = [float(value) for value in np.linspace(low, high, len(authored))]
-            row["values"] = values if authored[0] <= authored[-1] else values[::-1]
+            # An end the region leaves in its outermost cell stays as the row has it.
+            low = min(authored[0], authored[-1]) if keeps_low else low
+            high = max(authored[0], authored[-1]) if keeps_high else high
+            if not low < high:
+                raise ValueError(f"selected scan axis {axis_id!r}: the region lies wholly past the end the row keeps")
+            start, stop = (low, high) if authored[0] <= authored[-1] else (high, low)
+            if "range" in row:
+                row["range"] = {"start": start, "stop": stop, "count": len(authored)}
+                row["values"] = []
+            else:
+                row["values"] = native("scan.range", start=start, stop=stop, count=len(authored))["values"]
         changed = True
     if not named:
         return None
@@ -963,6 +875,7 @@ SCAN_PLAN_SELECTIONS = (
 
 
 __all__ = [
+    "DEVICE_LABEL_SEPARATOR",
     "DEVICE_PARAM_FAMILY",
     "SCAN_PLAN_SELECTIONS",
     "PULSE_PARAM_FAMILY",
@@ -973,6 +886,7 @@ __all__ = [
     "ScanPort",
     "ambiguous_api_value",
     "bind_plan",
+    "device_port_label",
     "device_port_parts",
     "hardware_scan_ports_for",
     "plan_from_authored",

@@ -1,0 +1,67 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Diagnostics popup regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<div id="stage"></div>
+<script type="module">
+// Run with tools/test_ui.ps1. The Task Console's Diagnostics popup says how much recent data is kept and
+// how far back it goes, sets the budget, and exports the record with or without that data.
+import {command} from '../dist/fluent/index.js';
+import {DiagnosticsPopup, heldWords} from '../dist/views/diagnostics.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const results = [];
+const check = async (name, test) => { await test(); results.push(name); };
+const sent = [];
+let popup;
+const anchor = command('Diagnostics…', () => popup.toggle());
+document.getElementById('stage').append(anchor.root);
+popup = new DiagnosticsPopup(anchor, (cmd, feedback) => { sent.push({cmd, feedback}); return sent.length; });
+const shown = () => document.querySelector('.popup');
+const buttons = () => [...shown().querySelectorAll('.form-actions button')];
+try {
+  await check('the kept data is said in words: none, not yet, how far back, and whether the budget limits it', () => {
+    assert(heldWords({budget_mib: 0, held_minutes: null, full: false}).startsWith('No data is kept'), 'no budget');
+    assert(heldWords({budget_mib: 256, held_minutes: null, full: false}) === 'No data has been published yet.', 'nothing yet');
+    assert(heldWords({budget_mib: 256, held_minutes: 0, full: false}).includes('less than a minute'), 'under a minute');
+    assert(heldWords({budget_mib: 256, held_minutes: 1, full: false}).includes('last 1 minute of'), 'one minute');
+    const full = heldWords({budget_mib: 256, held_minutes: 23, full: true});
+    assert(full.includes('last 23 minutes') && full.includes('budget is full'), full);
+    assert(heldWords({budget_mib: 256, held_minutes: 23, full: false}).includes('not full yet'), 'not full');
+  });
+  await check('the popup opens on its command showing the budget and what is held', () => {
+    popup.accept({budget_mib: 256, held_minutes: 23, full: true});
+    anchor.root.click();
+    assert(shown() && shown().matches(':popover-open'), 'the popup did not open');
+    const input = shown().querySelector('input');
+    assert(input.value === '256', `budget shown as ${input.value}`);
+    assert(shown().textContent.includes('MiB'), 'the unit is not said');
+    assert(shown().textContent.includes('last 23 minutes'), 'what is held is not said');
+    assert(buttons().map(button => button.textContent.trim()).join('|') === 'Export record|Export with data', 'the commands');
+  });
+  await check('a typed budget is sent as the one setting, and the answered state settles the field', () => {
+    const input = shown().querySelector('input');
+    input.focus(); input.value = '512';
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
+    input.dispatchEvent(new Event('change', {bubbles: true}));
+    const last = sent.at(-1);
+    assert(last && last.cmd.action === 'set_diagnostics' && last.cmd.budget_mib === 512, JSON.stringify(sent));
+    assert(sent.filter(item => item.cmd.action === 'set_diagnostics').length === 1, 'sent more than once');
+    popup.accept({budget_mib: 512, held_minutes: 23, full: false}, sent.length);
+    assert(input.value === '512' && shown().textContent.includes('not full yet'), 'not settled');
+  });
+  await check('each export says whether it carries the data, and closes the popup', () => {
+    buttons()[0].click();
+    assert(JSON.stringify(sent.at(-1).cmd) === JSON.stringify({action: 'export_diagnostics', data: false}), JSON.stringify(sent.at(-1)));
+    assert(!shown().matches(':popover-open'), 'the popup stayed open');
+    anchor.root.click();
+    buttons()[1].click();
+    assert(JSON.stringify(sent.at(-1).cmd) === JSON.stringify({action: 'export_diagnostics', data: true}), JSON.stringify(sent.at(-1)));
+  });
+  document.getElementById('result').textContent = JSON.stringify({passed: true, count: results.length});
+} catch (error) {
+  document.getElementById('result').textContent = JSON.stringify({passed: false, count: results.length, error: String(error.stack || error)});
+}
+</script>

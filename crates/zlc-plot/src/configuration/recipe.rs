@@ -13,7 +13,7 @@ use super::selectors::{
     finite_value, normalize_viewport, thresholds_wire, CrosshairPoint, NumericRange, RectangleRange, SelectorKind,
     SelectorState, SelectorValue, ThresholdTarget, Viewport,
 };
-use super::spec::{CellPlot, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, PlotLabels, PlotSpec, RollingPlot, ScopeTerm};
+use super::spec::{CellPlot, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, PointMapPlot, PlotLabels, PlotSpec, RollingPlot, ScopeTerm};
 use super::state::{py_iter, Interaction, InteractionUpdate, Presentation, PresentationUpdate};
 use super::value::{Value, ValueMap};
 
@@ -104,6 +104,10 @@ pub fn encode_spec(spec: &PlotSpec) -> Result<ValueMap> {
             common.insert("facet", axis_document(grid.facet.as_ref()));
             common.insert("cell", Value::Map(encode_spec(&grid.cell.as_spec())?));
         }
+        PlotSpec::PointMap(s) => {
+            common.insert("site", axis_document(Some(&s.site)));
+            common.insert("reduction", Value::text(s.reduction.value()));
+        }
         PlotSpec::Curve(s) => {
             common.insert("reduction", Value::text(s.reduction.value()));
             common.insert("group", axis_document(s.group.as_ref()));
@@ -142,6 +146,12 @@ pub fn decode_spec(value: &Value) -> Result<PlotSpec> {
     let missing = Value::None;
     let get = |name: &str| map.get(name).unwrap_or(&missing);
     match kind {
+        PlotKind::PointMap => {
+            keys(value, &["kind", "labels", "scope", "coordinates", "site", "reduction"], "point map recipe")?;
+            let site = axis(get("site"), "site axis")?.ok_or_else(|| PlotError::value("Point Map requires a site axis"))?;
+            Ok(PlotSpec::PointMap(PointMapPlot { site, reduction: reduction_from_value(get("reduction"))?,
+                labels, scope, coordinates: coordinates()? }.validated()?))
+        }
         PlotKind::Histogram => {
             let mut fields = vec!["kind", "labels", "scope", "coordinates", "reduction", "reduced"];
             if map.contains_key("group") { fields.push("group"); }
@@ -307,7 +317,9 @@ pub struct RecipeParts<'a> {
 /// to the archive writer).
 pub fn encode_plot_recipe(spec: &PlotSpec, parameters: &ValueMap, size: &str, parts: &RecipeParts<'_>) -> Result<ValueMap> {
     let schema = parameter_schema_for(spec, &DEFAULT_STYLE);
-    let complete = schema.initial_values(Some(parameters))?;
+    let mut complete = schema.initial_values(Some(parameters))?;
+    // Absent means square: a figure that never chose a Fit data box saves as it always did.
+    if complete.get("image_box") == Some(&Value::text(super::display::IMAGE_BOX_SQUARE)) { complete.remove("image_box"); }
     let size = DEFAULT_LAYOUT.validate_preset(size).map_err(PlotError::value)?;
     let spec_document = encode_spec(spec)?;
     let default_interaction = Interaction::default();
@@ -347,8 +359,10 @@ pub fn decode_plot_recipe(value: &Value) -> Result<DecodedRecipe> {
     let selectors = decode_selectors(get("selectors"))?;
     let interaction = InteractionUpdate::from_value(get("interaction"))?;
     let presentation = PresentationUpdate::from_value(get("presentation"))?;
+    let mut parameters = parameters.clone();
+    super::parameters::clear_saved_auto_bounds(&mut parameters);
     Ok(DecodedRecipe {
-        spec, parameters: parameters.clone(), size, viewport, classifier_thresholds: thresholds.clone(), facet_focus,
+        spec, parameters, size, viewport, classifier_thresholds: thresholds.clone(), facet_focus,
         fit: fit.clone(), selectors, overlay: get("overlay").clone(), interaction, presentation,
     })
 }

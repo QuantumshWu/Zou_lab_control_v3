@@ -5,17 +5,18 @@ inside a fire; unplanned slots keep their Pulse field values. Without board
 axes, each host point plays the fixed Pulse with no table. Run repeats supplies
 shots_per_point without rewriting PulseBracket or adding artificial scan coordinates.
 
-The board is the core's (_framework.pulse): every fire is one ``pulse_run`` of
-the template with this point's API values and, when the plan has board axes,
-the table of their values; the board quantizes the table and answers the rows
-it plays, which are the scan's coordinates. The source signal arrives as this
-run's exact input (``context.next_input``), in played order.
+The board is the core's (_framework.pulse): every fire carries this point's
+API values and a native scan handle. The core builds and quantizes the table,
+retains its effective coordinates and full execution snapshot, and answers a
+compact receipt. The source signal arrives as this run's core-consumed exact
+input, in played order.
+Inner coordinates are the quantized values played; host coordinates keep
+their nominal settings, with hardware facts retained in the native snapshot.
 
 Acquisition preparation happens once at Scan Start. Device writes use their
 actual readback; manual changes are controlled by the operator. No implicit
 settling delay is added to either operation.
-Committed source publications are placed in scan/repeat order by the shared
-Dataset writer. Device knobs return to their original values and units on
+The native scan session places source publications in scan/repeat order. Device knobs return to their original values and units on
 completion, Stop or failure through the existing cleanup path.
 """
 
@@ -24,16 +25,16 @@ from __future__ import annotations
 import itertools
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 
 from zlc_data.units import DEFAULT_UNITS, figure_padded
+from zlc_plugin import journal
 from zlc_plugin.tunable import snapshot as device_snapshot
 
 from zlc_atom.nodes._framework.pulse import STATUS_DONE, PulseBoard, check_cancelled, pulse_description
 
-from .dataset import SCAN_OUTPUT, ScanDatasetWriter
+from .dataset import SCAN_OUTPUT
 from .devices import ScanDeviceKnobs
 from .plan import (
     API_PARAM_FAMILY,
@@ -50,7 +51,8 @@ from .plan import (
     port_label,
     resolve_api_overrides,
     split_outer_axes,
-    scan_rows,
+    scan_row_count,
+    host_advanced_port,
     unscannable_api_ports,
 )
 
@@ -103,7 +105,7 @@ def estimate_scan_time(
     ports = bind_plan(ScanPlan(pulse_axes), (*hardware_scan_ports_for(description), *api_scan_ports_for(description)),
                       withheld=unscannable_api_ports(description)) if pulse_axes else ()
     outer_axes, board_axes = split_outer_axes(plan)
-    outer_count = len(scan_rows(outer_axes))
+    outer_count = scan_row_count(outer_axes)
     estimate = _pulse_seconds(description, ports, outer_axes, board_axes, outer_count, repeats, shots_per_point, board_estimate)
     return {
         "points_per_sweep": plan.point_count,
@@ -242,31 +244,6 @@ class SeamlessScanMeasurement:
     def dataset_output_declarations(self):
         return (SCAN_OUTPUT,)
 
-    def _table(self, rows: Sequence[Sequence[float]], outer_row: Sequence[float] = ()) -> dict[str, object] | None:
-        """The board axes' table as ``pulse_run`` takes it: the planned slots
-        (plan order) and every row in each slot's own unit. Slots the plan
-        does not name play their authored value; no table at all without
-        board axes."""
-
-        carried = [(axis, port, value) for axis, port, value in zip(self.outer_axes, self.outer_ports, outer_row)
-                   if axis.port.startswith(PULSE_PARAM_FAMILY)]
-        if not self.board_axes and not carried:
-            return None
-        return {
-            "fields": [port.port[len(PULSE_PARAM_FAMILY):] for port in self.board_ports] + [port.port[len(PULSE_PARAM_FAMILY):] for _, port, _ in carried],
-            "rows": [[axis.native_value(port, value) for axis, port, value in zip(self.board_axes, self.board_ports, row)]
-                     + [axis.native_value(port, value) for axis, port, value in carried] for row in rows],
-        }
-
-    def _plan_ordered_rows(self, played: Sequence[Sequence[float]]) -> tuple[tuple[float, ...], ...]:
-        """The board's played rows (slot units) back in the plan's axis units."""
-
-        return tuple(
-            tuple(float(DEFAULT_UNITS.convert(value, port.unit, axis.unit or port.unit))
-                  for axis, port, value in zip(self.board_axes, self.board_ports, row))
-            for row in played
-        )
-
     def resolved_device_claims(self) -> dict[str, dict[str, object]]:
         """Fields this plan will tune: the core claims them for the run, so a
         Device Control tune of the same field is refused while the scan owns it."""
@@ -297,9 +274,12 @@ class SeamlessScanMeasurement:
             context.report_progress(f"Setting {bound.label} ({figure_padded(index + 1, points)}/{points})")
             unit = axis.unit or bound.unit
             actual = knobs.move(port, value, unit)
+            journal.note("scan", "device_set", port=port, asked=float(value), unit=unit, actual=actual, point=index)
             key, field = device_port_parts(port)
             previous = readbacks.get(key, {})
+            # Keyed by the device's id; its Device Manager name beside it, for whoever shows it.
             readbacks[key] = {
+                "role": getattr(self.tunables[key], "role", "") or key,
                 "values": {**previous.get("values", {}), field: actual},
                 "units": {**previous.get("units", {}), field: unit},
                 "provenance": dict(self.tunables[key].settings_provenance()),
@@ -324,7 +304,6 @@ class SeamlessScanMeasurement:
         board: PulseBoard,
         *,
         outer_row: Sequence[float],
-        table: Mapping[str, object] | None,
         state: dict[str, object],
         inner_count: int,
         sweeps: int,
@@ -346,39 +325,48 @@ class SeamlessScanMeasurement:
         shots = self.shots_per_point
         readouts = sweeps * inner_count * shots
         try:
-            table = self._table(state["inner_rows"], outer_row)
-            # Everything published so far belongs to the world before this point.
-            context.discard_inputs()
+            # Native Pulse resolves this handle directly; no inner rows cross Python.
+            native = state["native"]
+            scan_plan = native.pulse_segment(row_offset // inner_count)
+            native.arm(row_offset=row_offset, scan_repeat_base=scan_repeat_base, sweeps=sweeps,
+                       quiet_seconds=0.0 if state.get("completed_segment") else 0.05,
+                       actual_devices=state["readbacks"],
+                       new_source=not state.get("configured") and bool(self.acquisition_logic))
             check_cancelled(context)
-            if "writer" not in state:
-                # The first point is configured; restoration values stay in ScanDeviceKnobs.
-                state["tunables"] = {key: device_snapshot(device) for key, device in sorted(self.tunables.items())}
-                board.load(self.pulse_path, api_values=self._api_values_for(outer_row), scan=table)
+            if not state.get("configured"):
+                # The first point is configured; restoration values stay in ScanDeviceKnobs. Each
+                # device is recorded under its id, named, in the units its operator keeps.
+                state["tunables"] = {
+                    key: {**device_snapshot(device, getattr(device, "units", None)), "role": getattr(device, "role", "") or key}
+                    for key, device in sorted(self.tunables.items())}
+                board.load(self.pulse_path, api_values=self._api_values_for(outer_row), scan_plan=scan_plan)
                 if self.acquisition_logic:
                     context.report_progress("Preparing the acquisition")
                     context.acquire(self.acquisition_logic, completion="ready")
                 context.record_devices()
-                receipt = board.fire_loaded(self.pulse_path, run_repeats=shots, scan_repeats=sweeps)
+                receipt = board.fire_loaded(self.pulse_path, run_repeats=shots, scan_repeats=sweeps, scan_plan=scan_plan)
             else:
                 receipt = board.run(self.pulse_path, api_values=self._api_values_for(outer_row),
-                                    run_repeats=shots, scan_repeats=sweeps, scan=table)
+                                    run_repeats=shots, scan_repeats=sweeps, scan_plan=scan_plan)
             command_id = int(receipt["command_id"])
+            # One segment's FIRE: which rows, and whether the acquisition was started for it.
+            journal.note("scan", "segment_fired", command_id=command_id, row_offset=row_offset, sweeps=sweeps,
+                         shots=readouts, outer_row=[float(value) for value in outer_row],
+                         first=not state.get("configured"))
             applied = dict(receipt["applied"])
             config = applied.get("config")
-            if "writer" not in state:
+            if not state.get("configured"):
                 self._begin(context, state, receipt)
             elif config != state["config"]:
                 raise RuntimeError(
                     "the Config file changed during the scan; its later points "
                     "would play values its run record does not name"
                 )
-            writer: ScanDatasetWriter = state["writer"]
             context.report_progress(
                 f"Scanning point {figure_padded(progress_base + 1, progress_total)}/{progress_total}; shots",
                 current=progress_base * shots,
                 total=progress_total * shots,
             )
-            per_sweep = inner_count * shots
             # Readouts are assigned by arrival, so the board's own report is
             # the one witness that no more triggers are coming.  Once it is
             # in, a source that falls silent gets a bounded grace instead of
@@ -387,50 +375,47 @@ class SeamlessScanMeasurement:
             report = None
             report_seen = next_ask = 0.0
             last_delivery = monotonic()
-            for delivered in range(readouts):
-                sweep, rest = divmod(delivered, per_sweep)
-                row_index, shot = divmod(rest, shots)
-                while True:
-                    check_cancelled(context)
-                    value = context.next_input(_INPUT_SLICE_SECONDS)
-                    if value is not None:
-                        break
-                    now = monotonic()
+            delivered = 0
+            while delivered < readouts:
+                check_cancelled(context)
+                answer = native.collect(timeout_seconds=_INPUT_SLICE_SECONDS, max_events=1024)
+                delivered = int(answer["segment_written"])
+                if int(answer["collected"]):
+                    last_delivery = monotonic()
+                    context.report_progress(
+                        f"Scanning point {figure_padded(progress_base + (delivered - 1) // shots + 1, progress_total)}"
+                        f"/{progress_total}; shots",
+                        current=progress_base * shots + delivered,
+                        total=progress_total * shots,
+                    )
+                    continue
+                now = monotonic()
+                if report is None:
+                    if now < next_ask:
+                        continue
+                    next_ask = now + _BOARD_POLL_SECONDS
+                    report = board.wait_done(command_id, 0.0)
                     if report is None:
-                        if now < next_ask:
-                            continue
-                        next_ask = now + _BOARD_POLL_SECONDS
-                        report = board.wait_done(command_id, 0.0)
-                        if report is None:
-                            continue
-                        if report["status"] != STATUS_DONE:
-                            raise RuntimeError(f"the pulse failed: {report.get('fault') or report['status']}")
-                        report_seen = now
-                    grace = _SOURCE_GRACE_SECONDS + 3.0 * float(report["elapsed_seconds"]) / readouts
-                    if now - max(report_seen, last_delivery) >= grace:
-                        raise RuntimeError(
-                            f"the board played {readouts} shots and the source "
-                            f"delivered {delivered}: a missed camera trigger "
-                            "leaves every later frame without its shot"
-                        )
-                last_delivery = monotonic()
-                output = writer.write(value, row=row_offset + row_index,
-                                      scan_repeat=scan_repeat_base + sweep, run_repeat=shot)
-                if state["readbacks"]:
-                    event = dict(output.event_record or {})
-                    event["actual_devices"] = {**event.get("actual_devices", {}), **state["readbacks"]}
-                    output = replace(output, event_record=event)
-                context.commit_live({SCAN_OUTPUT.name: output}, source_publication=value)
-                context.report_progress(
-                    f"Scanning point {figure_padded(progress_base + delivered // shots + 1, progress_total)}"
-                    f"/{progress_total}; shots",
-                    current=progress_base * shots + delivered + 1,
-                    total=progress_total * shots,
-                )
+                        continue
+                    if report["status"] != STATUS_DONE:
+                        raise RuntimeError(f"the pulse failed: {report.get('fault') or report['status']}")
+                    report_seen = now
+                grace = _SOURCE_GRACE_SECONDS + 3.0 * float(report["elapsed_seconds"]) / readouts
+                if now - max(report_seen, last_delivery) >= grace:
+                    journal.note("scan", "segment_short", command_id=command_id, shots=readouts, delivered=delivered,
+                                 board_elapsed_seconds=float(report["elapsed_seconds"]))
+                    raise RuntimeError(
+                        f"the board played {readouts} shots and the source "
+                        f"delivered {delivered}: a missed camera trigger "
+                        "leaves every later frame without its shot"
+                    )
             if report is None:
                 report = board.wait_report(command_id, context.cancel_requested)
                 if report["status"] != STATUS_DONE:
                     raise RuntimeError(f"the pulse failed: {report.get('fault') or report['status']}")
+            journal.note("scan", "segment_done", command_id=command_id, shots=readouts, delivered=delivered,
+                         board_elapsed_seconds=float(report["elapsed_seconds"]), status=report["status"])
+            state["completed_segment"] = True
         except BaseException:
             board.stop()
             raise
@@ -438,46 +423,31 @@ class SeamlessScanMeasurement:
     def _begin(self, context: object, state: dict[str, object], receipt: Mapping[str, object]) -> None:
         """The first fire's facts: the played table, the dataset it fills and the run record."""
 
-        inner_rows = state["inner_rows"]
-        if self.board_axes:
-            table = receipt.get("scan")
-            if not isinstance(table, Mapping) or not isinstance(table.get("fields"), (list, tuple)) or not isinstance(table.get("rows"), (list, tuple)):
-                raise RuntimeError("Scan cannot start: the sequencer FIRE receipt is missing its loaded scan table (fields and quantized rows)")
-            fields = tuple(table["fields"])
-            required = tuple(port.port[len(PULSE_PARAM_FAMILY):] for port in self.board_ports)
-            if len(set(fields)) != len(fields) or any(field not in fields for field in required):
-                raise RuntimeError("Scan cannot start: the sequencer FIRE receipt names different scan fields than the plan")
-            if any(len(row) != len(fields) for row in table["rows"]):
-                raise RuntimeError("Scan cannot start: the sequencer FIRE receipt has inconsistent scan row widths")
-            played = tuple(tuple(float(row[fields.index(field)]) for field in required) for row in table["rows"])
-            if len(played) != len(inner_rows):
-                raise RuntimeError("Scan cannot start: the sequencer FIRE receipt has a different point count than the plan")
-            effective_inner = self._plan_ordered_rows(played)
-        else:
-            effective_inner = inner_rows
-        effective_rows = tuple(
-            tuple(outer_row) + tuple(inner_row)
-            for outer_row in state["outer_rows"]
-            for inner_row in effective_inner
-        )
-        axes = tuple(
-            [(port_label(axis.port), axis.unit or ("" if port is None else port.unit))
-             for axis, port in zip(self.outer_axes, self.outer_ports)]
-            + [(port_label(axis.port), axis.unit or port.unit) for axis, port in zip(self.board_axes, self.board_ports)]
-        )
-        axis_names = tuple(
-            port_label(axis.port) if port is None else port.label
-            for axis, port in zip((*self.outer_axes, *self.board_axes), (*self.outer_ports, *self.board_ports))
-        )
+        native = state["native"]
+        table = receipt.get("scan")
+        if (not isinstance(table, Mapping) or table.get("handle") != native.handle
+                or table.get("row_count") != native.inner_count):
+            raise RuntimeError("Scan cannot start: the sequencer FIRE receipt is missing its native scan identity or point count")
         applied = dict(receipt["applied"])
-        state.update(
-            writer=ScanDatasetWriter(effective_rows, axes, scan_repeats=self.repeats,
-                                     run_repeats=self.shots_per_point, axis_names=axis_names,
-                                     coordinate_of=[self.plan.axes.index(next(a for a in self.plan.axes if a.port == axis.coordinate_of)) if axis.coordinate_of else None for axis in self.plan.axes]),
-            config=applied.get("config"),
+        state["native"].configure(
+            record=self.run_record(sequencer=applied, tunables=state["tunables"]),
+            output=SCAN_OUTPUT.name,
         )
-        context.set_run_record(self.run_record(effective_rows=effective_rows, sequencer=applied,
-                                               tunables=state["tunables"]))
+        state.update(configured=True, config=applied.get("config"))
+
+    def _native_spec(self) -> dict[str, object]:
+        ports = {port.port: port for port in self.ports}
+        return {
+            "axes": [
+                {"port": axis.port, "identity": port_label(axis.port),
+                 "label": ports[axis.port].label if axis.port in ports else port_label(axis.port),
+                 "unit": axis.unit or (ports[axis.port].unit if axis.port in ports else ""),
+                 "values": list(axis.values), "coordinate_of": axis.coordinate_of,
+                 "host_advanced": host_advanced_port(axis.port)}
+                for axis in self.plan.axes
+            ],
+            "scan_repeats": self.repeats, "run_repeats": self.shots_per_point,
+        }
 
     def execute(self, context: object):
         """Play the whole plan and return the dataset it filled.
@@ -490,16 +460,15 @@ class SeamlessScanMeasurement:
         """
 
         board = PulseBoard(context)
-        inner_rows = scan_rows(self.board_axes)
-        # The board holds one row while Run repeats supplies its shots, then
-        # advances the row; the independent PulseBracket remains wholly inside
-        # each shot.
-        table = self._table(inner_rows)
-        outer_rows = scan_rows(self.outer_axes)
-        state: dict[str, object] = {"inner_rows": inner_rows, "outer_rows": outer_rows, "readbacks": {}}
-        inner_count = len(inner_rows)
-        segment = dict(table=table, state=state, inner_count=inner_count,
-                       progress_total=self.repeats * len(outer_rows) * inner_count)
+        native = context.scan(self._native_spec())
+        if native.ports != tuple(axis.port for axis in self.plan.axes):
+            raise RuntimeError("the native scan axis order differs from the bound plan")
+        # Both board table expansion and receipt retention stay native. The
+        # plugin pages only host points for device/API/operator decisions.
+        state: dict[str, object] = {"native": native, "readbacks": {}}
+        inner_count = native.inner_count
+        segment = dict(state=state, inner_count=inner_count,
+                       progress_total=self.repeats * native.point_count)
         knobs = ScanDeviceKnobs(self.tunables)
         # The board is released per fire, inside ``_play_table``; what the
         # whole plan owes the bench is the knobs back where they were,
@@ -514,9 +483,9 @@ class SeamlessScanMeasurement:
                 standing: tuple[float, ...] | None = None
                 done = 0
                 for sweep in range(self.repeats):
-                    for index, outer_row in enumerate(outer_rows):
+                    for index, outer_row in enumerate(native.iter_rows("outer")):
                         changed = tuple(
-                            (axis.port, outer_row[position], index, len(outer_rows))
+                            (axis.port, outer_row[position], index, native.outer_count)
                             for position, axis in enumerate(self.outer_axes)
                             if standing is None or standing[position] != outer_row[position]
                         )
@@ -552,26 +521,13 @@ class SeamlessScanMeasurement:
                 )
             raise
         knobs.restore()
-        return {"points": len(outer_rows) * inner_count, "shots": state["writer"].written}
+        return {"points": native.point_count, "shots": native.written}
 
-    def run_record(self, *, effective_rows: Sequence[Sequence[float]], sequencer: Mapping[str, object],
+    def run_record(self, *, sequencer: Mapping[str, object],
                    tunables: Mapping[str, Mapping[str, object]]) -> dict[str, object]:
-        """The plan as the board played it and the devices' facts."""
+        """Factored authored plan and device facts; native configure records effective axes."""
 
-        requested_rows = self.plan.rows()
-        played_rows = tuple(tuple(float(value) for value in row) for row in effective_rows)
-        if len(played_rows) != len(requested_rows):
-            raise ValueError("effective scan rows differ in length from the plan")
-        axes = []
-        for index, axis in enumerate(self.plan.axes):
-            mapping: dict[float, float] = {}
-            for requested, played in zip(requested_rows, played_rows, strict=True):
-                previous = mapping.setdefault(float(requested[index]), float(played[index]))
-                if previous != float(played[index]):
-                    raise ValueError("one authored scan value quantized two different ways")
-            axes.append({"port": axis.port, "values": [mapping[float(value)] for value in axis.values],
-                         "unit": axis.unit, **({"coordinate_of": axis.coordinate_of} if axis.coordinate_of else {})})
-
+        axes = self.plan.to_tree()["axes"]
         named_devices = {"sequencer": self.sequencer_key}
         for axis in self.outer_axes:
             if axis.port.startswith(DEVICE_PARAM_FAMILY):

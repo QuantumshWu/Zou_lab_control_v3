@@ -451,6 +451,7 @@ mod tests {
             python_path: vec![root.join("../../science/src"), root.join("../zlc-plugin-host/tests/plugins")],
             packages: vec!["zlc_test_plugins".into()], memory_limit_mib: Some(3072),
         }, Runtime::new(), SafeActions::new(), |_| {}).unwrap();
+        crate::test_application::install(&host).unwrap();
         host.open("rf", "test.fabric", json!({}), json!({})).unwrap();
         let publisher = Publisher::start(host.clone(), Bench::new(), "127.0.0.1", 0).unwrap();
         publisher.publish("rf", "RF").unwrap();

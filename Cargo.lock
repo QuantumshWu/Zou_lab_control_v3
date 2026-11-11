@@ -2975,6 +2975,8 @@ dependencies = [
 name = "zlc-core"
 version = "0.1.0"
 dependencies = [
+ "rayon",
+ "serde",
  "serde_json",
  "uuid",
 ]
@@ -3013,6 +3015,7 @@ dependencies = [
  "uuid",
  "zlc-core",
  "zlc-plugin-host",
+ "zlc-workbench",
 ]
 
 [[package]]
@@ -3075,6 +3078,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "zlc-archive",
  "zlc-core",
+ "zlc-workbench",
 ]
 
 [[package]]
@@ -3118,11 +3122,13 @@ version = "0.1.0"
 name = "zlc-workbench"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "caseless",
  "serde",
  "serde_json",
  "unicode-general-category",
  "unicode-normalization",
+ "uuid",
  "windows-sys 0.61.2",
  "zlc-archive",
  "zlc-core",

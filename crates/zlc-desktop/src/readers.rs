@@ -109,9 +109,12 @@ pub fn read_file(root: &Path, params: &Value) -> Result<ToolOutput, String> {
 }
 
 fn npz(file: &Path, shown: &str, size: u64, offset: usize, limit: usize, section: Option<&str>) -> Result<ToolOutput, String> {
-    let mut summary = match zlc_archive::read_archive(file) {
+    // The lineage is the file's whole causal history: read when it is what is asked for.
+    let read = if section.is_none_or(|name| name == "lineage") { zlc_archive::read_archive(file) } else { zlc_archive::open_archive(file) };
+    let mut summary = match read {
         Ok(archive) => {
-            let info = archive.info.to_serde();
+            let mut info = archive.info.to_serde();
+            if archive.lineage.is_present() { info["sections"]["lineage"] = Value::Null; }
             let names: Vec<String> = info["sections"].as_object().map(|sections| sections.keys().cloned().collect()).unwrap_or_default();
             let sections = match section {
                 Some(name) => json!({name: info["sections"].get(name).ok_or_else(|| format!("No section {name:?}; sections: {}", names.join(", ")))?}),
@@ -314,7 +317,7 @@ pub fn read_signal(runtime: &Runtime, params: &Value) -> Result<ToolOutput, Stri
 pub fn plot_catalog(params: &Value) -> Result<ToolOutput, String> {
     use zlc_plot::configuration::{semantics, spec, HANDLERS};
     let details = params["details"] == true;
-    let kinds: Vec<Value> = HANDLERS.iter().filter(|handler| handler.kind.value() != "pulse_timeline").map(|handler| json!({
+    let kinds: Vec<Value> = HANDLERS.iter().filter(|handler| handler.board.is_some()).map(|handler| json!({
         "kind": handler.kind.value(), "label": handler.display_name, "semantic_fields": handler.semantic_fields,
         "fit_target": handler.fit_target.map(|target| target.value()), "record_input": handler.record_input})).collect();
     let models: Vec<Value> = zlc_plot::fit::builtin_fit_models().iter().map(|model| {

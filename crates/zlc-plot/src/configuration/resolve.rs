@@ -26,7 +26,7 @@ use super::ordered::OrderedMap;
 use super::parameters::{ParameterSchema, RenderEffect, LIMIT_PAIRS};
 use super::recipe::{decode_plot_recipe, encode_plot_recipe, DecodedRecipe, RecipeParts, RECIPE_FIELDS};
 use super::selectors::{committed_selectors, normalize_classifier_threshold_targets, normalize_viewport, NumericRange, SelectorKind, SelectorState, SelectorValue, ThresholdTarget, Viewport};
-use super::semantics::{composed_spec, describe_semantics, rebased_spec, SemanticDescription};
+use super::semantics::{composed_spec, describe_semantics, rebase_authored, SemanticDescription};
 use super::spec::{paints_image_surface, LabelSlot, PlotLabels, PlotSpec};
 use super::state::{DisplayState, Interaction, InteractionUpdate, Presentation, PresentationUpdate};
 use super::value::{repr_str, Value, ValueMap};
@@ -213,9 +213,9 @@ impl ResolvedConfiguration {
         let mut recipe = encode_plot_recipe(&self.spec, &self.display_state.values, self.size, &parts)?;
         recipe.remove("spec");
         recipe.remove("overlay");
-        // Saving a resolved Auto axis as authored would pin it after reload.
-        let automatic = self.semantics.values().get("cell_kind").and_then(Value::as_str) == Some("");
-        let mut semantic = if automatic { self.authored_semantics.clone() } else { self.semantics.values() };
+        // The controls describe the resolved axes. A reusable target keeps the
+        // operator's choices, so a default can still follow the next source.
+        let mut semantic = self.authored_semantics.clone();
         semantic.insert("kind", Value::text(self.spec.kind().value()));
         let mut target = ValueMap::from_pairs([("semantic", Value::Map(semantic))]);
         target.update(&recipe);
@@ -439,8 +439,11 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
         document.update(&wire_without_semantic());
         decoded = Some(decode_plot_recipe(&Value::Map(document))?);
     }
-    let explicit_spec = spec.is_some() || decoded.is_some();
-    let mut seed = spec.or_else(|| decoded.as_ref().map(|decoded| decoded.spec.clone())).or_else(|| base.map(|base| base.spec.clone()));
+    let supplied = spec.or_else(|| decoded.as_ref().map(|decoded| decoded.spec.clone()));
+    // Capturing a live session restates its accepted spec. A separately
+    // supplied exact spec (e.g. an archive) owns its declared axes.
+    let new_spec = supplied.as_ref().is_some_and(|spec| base.is_none_or(|base| base.spec != *spec));
+    let mut seed = supplied.or_else(|| base.map(|base| base.spec.clone()));
     let mut semantic_values = match (&semantic_updates, &typed.semantic, wire.get("semantic")) {
         (Some(values), _, _) => values.clone(),
         (None, Some(values), _) => values.clone(),
@@ -448,9 +451,7 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
         (None, None, Some(Value::None) | None) => ValueMap::new(),
         (None, None, Some(other)) => return Err(PlotError::type_error(format!("'{}' object is not a mapping", other.type_name()))),
     };
-    let role_edit = semantic_values.keys().any(|name| name.starts_with("fate:") || name.starts_with("coordinate:"));
     let mut authored_semantics = base.map(|base| base.authored_semantics.clone()).unwrap_or_default();
-    authored_semantics.update(&semantic_values);
     // v2's panel cell kind "" ("automatic (from data)"): a grid whose cell the
     // data decides, again on every resolution, until a cell kind is named.
     // A resolution that names none keeps what its base was.
@@ -471,23 +472,32 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
         None => true,
         Some(base) => match (base.schema.as_deref(), schema_ref) {
             (None, None) => true,
-            (Some(previous), Some(following)) => schemas_continue(previous, following)?,
+            (Some(previous), Some(following)) => schemas_continue(previous, following)? && seed.scope().iter().all(|(reference, value)| {
+                // An indexed window keeps its shape as its shot times move.
+                // A pin continues only while its chosen coordinate is present.
+                let old = previous.domain(reference.domain).axis(&reference.axis_id);
+                following.domain(reference.domain).axis(&reference.axis_id).is_some_and(|axis|
+                    old.is_some_and(|old| Arc::ptr_eq(old, axis)) || super::data_contract::coordinate_position(axis, value).is_some())
+            }),
             _ => false,
         },
     };
-    if let (Some(base), false, Some(schema)) = (base, continuing, schema_ref) {
+    let needs_rebase = !new_spec && (!continuing || !same_source);
+    if let (Some(base), Some(schema)) = (base.filter(|_| needs_rebase), schema_ref) {
         // Rebase the previous intent first. A new explicit edit still passes
         // through strict composition on the new schema; never silently drop it.
-        let mut carried = if automatic_cell { base.authored_semantics.clone() }
-            else { describe_semantics(base.schema.as_deref(), &seed, &defaults.layout)?.values() };
-        if automatic_cell { carried.remove("cell_kind"); }
-        seed = rebased_spec(schema, seed.kind(), &carried)?;
-        let resolved = describe_semantics(Some(schema), &seed, &defaults.layout)?.values();
-        if semantic_updates.is_none() && typed.semantic.is_none() {
+        if semantic_updates.is_none() && typed.semantic.is_none() && semantic_values.contains_key("kind") {
+            // Older complete targets echo every formerly resolved row. Those
+            // rows describe the previous signal, including obsolete pin values.
             let previous = base.semantics.values();
-            semantic_values.retain(|name, value| !(previous.get(name) == Some(value) && !resolved.contains_key(name)));
+            semantic_values.retain(|name, value| previous.get(name) != Some(value));
         }
-        authored_semantics.retain(|name, _| name == "cell_kind" || resolved.contains_key(name));
+        let mut carried = base.authored_semantics.clone();
+        for name in ["kind", "cell_kind"] {
+            if let Some(value) = semantic_values.get(name) { carried.insert(name, value.clone()); }
+        }
+        if automatic_cell { carried.insert("cell_kind", Value::text("")); }
+        (seed, authored_semantics) = rebase_authored(schema, seed.kind(), &carried)?;
     }
     if automatic_cell && seed.is_facet_grid() {
         // The densest cell this data admits, reached as a cell-kind edit (its scope and roles carried).
@@ -500,12 +510,27 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
     }
     let selected_spec = composed_spec(schema_ref, &seed, &semantic_values)?;
     let mut semantics = describe_semantics(schema_ref, &selected_spec, &defaults.layout)?;
-    if role_edit || explicit_spec {
+    if new_spec {
         authored_semantics = semantics.values();
-        if automatic_cell { authored_semantics.insert("cell_kind", Value::text("")); }
+    } else {
+        let coordinate_changed = |name: &str| name.strip_prefix("fate:").is_some_and(|axis|
+            semantic_values.contains_key(&format!("coordinate:{axis}")));
+        // A pin follows its row position when the operator chooses an
+        // alternative coordinate. Record the coordinate in the new units.
+        let previous = authored_semantics.clone();
+        for (name, value) in previous.iter() {
+            if super::semantics::is_scope_fate(value) && coordinate_changed(name) {
+                if let Some(field) = semantics.field(name) { authored_semantics.insert(name, field.value.clone()); }
+            }
+        }
+        authored_semantics.retain(|name, value| semantics.field(name).is_some_and(|field| field.value == *value));
+        for (name, _) in semantic_values.iter() {
+            if let Some(field) = semantics.field(name) { authored_semantics.insert(name, field.value.clone()); }
+        }
     }
     if automatic_cell {
         if let Some(field) = semantics.fields.iter_mut().find(|field| field.name == "cell_kind") {
+            authored_semantics.insert("cell_kind", Value::text(""));
             field.value = Value::text("");
             field.choices.insert(0, (Value::text(""), "automatic (from data)".into()));
         }
@@ -572,7 +597,7 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
         if !unknown.is_empty() { return Err(unknown_names("unknown display parameter(s)", unknown)); }
         Ok(parameters.declared_subset(values))
     };
-    let previous = match base {
+    let mut previous = match base {
         Some(base) if parameters.same_names(&base.parameter_schema) && selected_spec == base.spec => base.display_state.clone(),
         _ => {
             let retained = match base { Some(base) => retained_parameters(&base.display_state.values, &parameters)?, None => ValueMap::new() };
@@ -583,6 +608,7 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
             }
         }
     };
+    if different_source { super::parameters::clear_saved_auto_bounds(&mut previous.values); }
     let mut values = declared(&changes.parameters.clone().unwrap_or_default())?;
     let mut authored = match parameter_updates.or_else(|| changes.parameter_updates.clone()) {
         None => values.iter().filter(|(name, value)| previous.values.get(name) != Some(value)).map(|(name, value)| (name, value.clone())).collect(),
@@ -625,7 +651,6 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
         }
         selectors = committed_selectors(&by_kind.values().copied().collect::<Vec<_>>())?;
     }
-    if let Some(update) = changes.viewport { viewport = normalize_viewport(update); }
     if let Some(update) = changes.facet_focus {
         facet_focus = update;
         if update.is_some() { focused = update; }
@@ -637,19 +662,20 @@ pub fn resolve_configuration(request: ResolveRequest<'_>) -> Result<Arc<Resolved
             if !is_grid { return Err(PlotError::type_error(format!("{name} requires a FacetGridPlot"))); }
         }
     }
-    if roles_match && viewport == base.unwrap().viewport {
-        viewport = rebase_viewport(base.unwrap(), &selected_spec, schema_ref, &candidate_values, viewport, registry_ref.unwrap_or(&DEFAULT_UNITS))?;
-    }
-    if let Some((x, y)) = viewport {
-        let mut ranges = [x, y];
-        for (mode, low, high) in LIMIT_PAIRS {
-            if parameters.contains(low) && [mode, low, high].iter().any(|name| authored.contains_key(name)) {
-                for (index, coordinate) in ["x", "y"].into_iter().enumerate() {
-                    if low == format!("{coordinate}_min") { ranges[index] = None; }
+    // Restoring a Figure applies its saved mode and its explicit viewport together.
+    // Only an inherited viewport is rebased or released by a new limit edit.
+    if let Some(update) = changes.viewport {
+        viewport = normalize_viewport(update);
+    } else if let Some(base) = base.filter(|_| roles_match && viewport.is_some()) {
+        viewport = rebase_viewport(base, &selected_spec, schema_ref, &candidate_values, viewport, registry_ref.unwrap_or(&DEFAULT_UNITS))?;
+        if let Some((mut x, mut y)) = viewport {
+            for (mode, low, high) in LIMIT_PAIRS {
+                if parameters.contains(low) && [mode, low, high].iter().any(|name| authored.contains_key(name)) {
+                    match low { "x_min" => x = None, "y_min" => y = None, _ => {} }
                 }
             }
+            viewport = normalize_viewport(Some((x, y)));
         }
-        viewport = normalize_viewport(Some((ranges[0], ranges[1])));
     }
     if let Some(update) = &changes.interaction { interaction = update.applied_to(&interaction); }
     if let Some(update) = &changes.presentation { presentation = update.applied_to(&presentation); }

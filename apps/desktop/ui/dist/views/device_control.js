@@ -8,8 +8,9 @@
 // shown or brought forward, a run letting the device go.  A number is read in
 // the unit that shows it between 1 and 1000, in the family its device shows it
 // in (defaultUnit), chosen once, at the window's first reading; a unit the
-// operator picks stays.
-import { Field, StatusStrip, alignUnitPickers, command, defaultUnit, element, readoutText, setChecked, setElided, setState, shifted, statusDot, switchButton, titleRow, } from "../fluent/index.js";
+// operator picks stays, and the apparatus keeps it (read_device keep): the
+// field opens in it next time, and is recorded and scanned in it.
+import { Field, StatusStrip, alignUnitPickers, command, defaultUnit, element, readoutText, setChecked, setElided, setState, shifted, statusDot, switchButton, titleRow, heldNote, showHeld, } from "../fluent/index.js";
 import { queueStatus } from "../shell.js";
 /** How long a live field waits after an edit before it tunes (v2: 75 ms). */
 const LIVE_DELAY_MS = 75;
@@ -24,8 +25,15 @@ export class DeviceControlView {
     root = element("section", "device-control");
     owner;
     refresh = command("Refresh", () => this.read());
+    /** The device's own commands (a stage's Home and Stop), one button each, and the names they stand for. */
+    actions = element("span", "device-actions");
+    actionNames = "";
     risk;
     reason = element("p", "note wrap");
+    /** A reason several rows share (a run protecting them), said once above the table; those
+     * rows are held, saying it only in their tips. A reason of one row stays under it. */
+    shared = heldNote();
+    sharedReasons = new Set();
     table = element("div", "control-table");
     rows = new Map();
     strip = new StatusStrip();
@@ -49,12 +57,12 @@ export class DeviceControlView {
         this.ctx = ctx;
         this.risk = switchButton(on => ctx.transport.send({ action: "accept_device_risk", device: id, accepted: on }, on ? "Accepting the risk…" : "Withdrawing the risk…"), "Accept risk");
         this.risk.classList.add("row-switch");
-        const title = titleRow("Owner: none", [this.refresh.root, this.risk]);
+        const title = titleRow("Owner: none", [this.actions, this.refresh.root, this.risk]);
         this.owner = title.querySelector(".heading");
         const headings = ["Field", "Current", "Desired", "Device limits", "Live", "Apply", "Status"]
             .map((words, index) => element("span", `column-heading${index === 1 ? " right" : index === 2 ? " field" : index === 4 || index === 5 ? " centre" : ""}`, words));
         this.table.append(...headings);
-        this.root.append(title, this.reason, this.table, this.strip.root);
+        this.root.append(title, this.reason, this.shared, this.table, this.strip.root);
     }
     /** Read the device's fields; asked again while a read is in flight, that read answers both. */
     read() {
@@ -80,7 +88,14 @@ export class DeviceControlView {
         this.reason.textContent = control?.reason ?? "Reading the device…";
         setChecked(this.risk, Boolean(device.risk_accepted));
         this.risk.disabled = !control?.risk_enabled;
+        this.showActions(device.state === "open" ? device.commands ?? [] : []);
         const fields = device.fields ?? [];
+        const byReason = new Map();
+        for (const field of fields)
+            if (!field.editable && field.reason)
+                byReason.set(field.reason, [...(byReason.get(field.reason) ?? []), field.label || field.name]);
+        this.sharedReasons = new Set([...byReason].filter(([, rows]) => rows.length > 1).map(([reason]) => reason));
+        showHeld(this.shared, [...byReason].filter(([reason]) => this.sharedReasons.has(reason)).map(([reason, rows]) => `${reason}: ${rows.join(", ")}`).join("\n"));
         const alive = new Set(fields.map(field => field.name));
         for (const [name, row] of this.rows)
             if (!alive.has(name)) {
@@ -115,6 +130,8 @@ export class DeviceControlView {
                 row.field.acceptEdit();
             }
             row.spec = spec;
+            if (spec.unit_kept)
+                row.picked = true;
             if (!spec.editable || device.state !== "open") {
                 this.cancelLive(row);
                 this.queued.delete(spec.name);
@@ -185,6 +202,26 @@ export class DeviceControlView {
             this.reread();
         this.held = held;
     }
+    /** One button per command the device declares (its catalogue names, `<id>__<command>`); never disabled while
+     * another is in flight, so a Stop reaches a stage whose move is still running.  Its answer is the page's note;
+     * the reading is then taken again, since a command moves what the rows show. */
+    showActions(names) {
+        const key = names.join("\n");
+        if (key === this.actionNames)
+            return;
+        this.actionNames = key;
+        this.actions.replaceChildren(...names.map(name => {
+            const word = name.slice(name.lastIndexOf("__") + 2).replace(/_/g, " ");
+            const label = word.charAt(0).toUpperCase() + word.slice(1);
+            return command(label, () => {
+                this.ctx.transport.request({ action: name }, `${label}…`).then(answer => {
+                    this.read();
+                    this.note = typeof answer === "string" && answer ? `${label}: ${answer}` : `${label} done`;
+                    this.status();
+                }, () => this.read());
+            }).root;
+        }));
+    }
     status() {
         // v2's words: ready (or that it has nothing to tune) once read, what the last Apply did.
         const fields = this.device?.fields;
@@ -193,7 +230,10 @@ export class DeviceControlView {
     }
     desiredSpec(row) {
         const spec = row.spec;
-        return { ...spec, value: row.draft !== undefined ? row.draft : spec.desired, unavailable_reason: row.unitRequest !== null ? "Reading the new unit" : spec.editable ? "" : spec.reason || "Read only", spin: true, inexact: true };
+        const reason = row.unitRequest !== null ? "Reading the new unit" : spec.editable ? "" : spec.reason || "Read only";
+        // A reason the page says once (above the table) holds the row; one of its own is said under it.
+        return { ...spec, value: row.draft !== undefined ? row.draft : spec.desired, ...(this.sharedReasons.has(reason) ? { held: reason } : { unavailable_reason: reason }),
+            spin: true, inexact: true };
     }
     makeRow(spec) {
         const row = {};
@@ -205,20 +245,20 @@ export class DeviceControlView {
         row.revision = 0;
         row.valid = true;
         row.unitRequest = null;
-        row.picked = false;
+        row.picked = Boolean(spec.unit_kept);
         row.applied = "";
         row.error = "";
         row.outside = false;
         row.field = new Field(`control-${this.id}`, { ...spec, value: spec.desired, spin: true, inexact: true }, {
             // Another spelling is the device's to read (an RF level depends on its
             // load): the row is re-read in it, reading, bounds and limits together
-            // (a draft keeps its digits: update).
+            // (a draft keeps its digits: update). The apparatus keeps the operator's pick.
             unit: unit => {
                 this.cancelLive(row);
                 this.queued.delete(row.spec.name);
                 row.revision++;
                 row.picked = true;
-                row.unitRequest = this.ctx.transport.send({ action: "read_device", device: this.id, units: { [row.spec.name]: unit } }, `Reading ${row.spec.label} in ${unit}…`);
+                row.unitRequest = this.ctx.transport.send({ action: "read_device", device: this.id, units: { [row.spec.name]: unit }, keep: true }, `Reading ${row.spec.label} in ${unit}…`);
                 queueMicrotask(() => { if (this.device)
                     this.update(this.device); });
                 return row.unitRequest;

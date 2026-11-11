@@ -234,7 +234,7 @@ fn prepare_value_unit_ranges(schema: &ParameterSchema, prepared: &mut ValueMap, 
     if selected == previous.values.get("value_display_unit").cloned().unwrap_or(Value::None) { return Ok(()); }
     let value_low = match spec.semantic().kind() {
         PlotKind::Curve | PlotKind::Rolling => "y_min",
-        PlotKind::Image => "color_min",
+        PlotKind::Image | PlotKind::PointMap => "color_min",
         PlotKind::Histogram => "x_min",
         _ => return Ok(()),
     };

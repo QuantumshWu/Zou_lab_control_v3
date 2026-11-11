@@ -107,6 +107,7 @@ pub fn selector_key_error(kind: SelectorKind) -> PlotError {
 fn spec_facts(spec: &PlotSpec) -> Result<SpecFacts> {
     Ok(match spec {
         PlotSpec::Curve(s) => SpecFacts::Curve { x: s.x.clone(), group: s.group.clone(), reduction: s.reduction },
+        PlotSpec::PointMap(s) => SpecFacts::PointMap { site: s.site.clone(), reduction: s.reduction },
         PlotSpec::Image(s) => SpecFacts::Image { x: s.x.clone(), y: s.y.clone(), reduction: s.reduction },
         PlotSpec::Histogram(s) => SpecFacts::Histogram { group: s.group.clone(), reduced: s.reduced.clone(), reduction: s.reduction },
         PlotSpec::Rolling(s) => SpecFacts::Rolling { x: s.x.clone(), group: s.group.clone(), reduction: s.reduction },
@@ -248,7 +249,12 @@ impl FitProjection {
         let mut owner = Projection::new();
         owner.registry = settings.registry.clone();
         if let Some(Input::Dataset(previous)) = inherit.map(|previous| &*previous.input) {
-            owner.histogram = previous.histogram.clone();
+            // Canonical bin edges may continue across a restart of the same
+            // camera, while a different Scope or statistic needs its own domain.
+            if previous.plan.same_samples(&plan) {
+                owner.histogram = previous.histogram.clone();
+                owner.histogram_mode = Some(crate::projection::plan::relim_mode(&previous.plan.display));
+            }
             owner.carry = previous.carry.lock().expect("carry lock").take();
             owner.pools = previous.view.lock().expect("view lock").pools.clone();
         }
@@ -326,6 +332,14 @@ impl FitProjection {
     pub fn data_generation(&self) -> Option<&Arc<str>> {
         match &*self.input { Input::Dataset(built) => Some(&built.source.generation), Input::Pulse { .. } => None }
     }
+    pub(super) fn shares_limit_history(&self, other: &Self) -> bool {
+        match (self.input.as_ref(), other.input.as_ref()) {
+            (Input::Dataset(a), Input::Dataset(b)) => a.source.generation == b.source.generation
+                && a.plan.same_samples(&b.plan) && a.plan.display.value_display_unit == b.plan.display.value_display_unit,
+            (Input::Pulse {..}, Input::Pulse {..}) => true,
+            _ => false,
+        }
+    }
     pub fn payload(&self) -> &Arc<Payload> { &self.payload }
     pub fn spec(&self) -> &PlotSpec { &self.spec }
     pub fn context(&self) -> &Arc<ProjectionContext> { &self.context }
@@ -371,6 +385,7 @@ impl FitProjection {
         match payload {
             Payload::Curve(curve) if !curve.series.is_empty() => Quantity::of(&curve.series[0].y),
             Payload::Image(image) => Quantity::of(&image.z),
+            Payload::PointMap(data) => Quantity::of(&data.values),
             Payload::Histogram(histogram) => Quantity::of(&histogram.edges),
             _ => {
                 let view = self.view();
@@ -393,6 +408,7 @@ impl FitProjection {
     }
 
     pub fn x_quantity(&self) -> Result<Quantity> {
+        if let Payload::PointMap(data) = &*self.payload { return Ok(Quantity::of(&data.image.x)); }
         if self.semantic().kind() == PlotKind::Rolling { return self.rolling_x_quantity(); }
         self.coordinate(&self.x_ref()?)
     }
@@ -400,12 +416,12 @@ impl FitProjection {
     /// `_x_selector_source`: what a selector's x is measured in.
     pub fn x_selector_quantity(&self) -> Result<Quantity> {
         if self.is_histogram_plot() { return Ok(self.value_quantity()); }
-        if self.semantic().kind() == PlotKind::Rolling { return self.rolling_x_quantity(); }
-        self.coordinate(&self.x_ref()?)
+        self.x_quantity()
     }
 
     /// `_y_ref_or_value`: an image's y axis, else the plotted value.
     pub fn y_quantity(&self) -> Result<Quantity> {
+        if let Payload::PointMap(data) = &*self.payload { return Ok(Quantity::of(&data.image.y)); }
         match self.semantic().y() { Some(y) => self.coordinate(y), None => Ok(self.value_quantity()) }
     }
 
@@ -465,7 +481,7 @@ impl FitProjection {
         let x = match x_range { None => None, Some(range) => canonical(range, &self.x_selector_quantity()?) };
         let y = match y_range {
             None => None,
-            Some(_) if fit && self.semantic().kind() != PlotKind::Image => None,
+            Some(_) if fit && !matches!(self.semantic().kind(), PlotKind::Image | PlotKind::PointMap) => None,
             Some(range) if self.is_histogram_plot() => Some(range),
             Some(range) => canonical(range, &self.y_quantity()?),
         };
@@ -695,7 +711,7 @@ impl FitProjection {
         for (index, spec) in result.model.parameters.iter().enumerate() {
             let (value, unit) = self.display_parameter(&units, spec, result.parameter_values[index], false, None)?;
             let fixed = result.fixed_parameter_names.contains(&spec.name);
-            let error = if result.covariance_valid && !fixed {
+            let error = if result.covariance_valid && !fixed && result.standard_errors[index].is_finite() {
                 Some(self.display_parameter(&units, spec, result.standard_errors[index], true, None)?.0.abs())
             } else { None };
             rows.push(FitParameterDisplay::new(&spec.name, spec.display_label.as_deref().unwrap_or(&spec.name), value, error, &unit).map_err(fit_error)?);

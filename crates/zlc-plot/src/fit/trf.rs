@@ -3,6 +3,7 @@
 //! `_finalize_one`), line for line.
 
 use rayon::prelude::*;
+use super::identify;
 use super::linalg::{self, LinAlgError};
 use super::models::{point_terms, rho, student_score, student_terms, COUNT_FLOOR};
 use super::num::{div, nextafter, pmax, pmin, KernelError, Zr, EPSILON};
@@ -1153,6 +1154,10 @@ pub fn finalize_one(
     // Student-t points: each point's score and its derivative, per unit of
     // its weighted Jacobian row (the sandwich covariance below).
     let (mut scores, mut slopes) = (Vec::new(), Vec::new());
+    // The scatter the arithmetic itself leaves: a fitted value is known to
+    // its rounding, so data the model reproduces exactly (a site that never
+    // changed) measure a scatter of that much, not of none.
+    let mut rounding_rss = 0.0;
     let mut finite = true;
     let mut scaled_jacobian = vec![0.0; selected_count * free_count];
     for point in 0..point_count {
@@ -1174,11 +1179,14 @@ pub fn finalize_one(
             // The Student-t point: its score and slope feed the sandwich.
             let (raw, squared, _cost, _gf, _if, point_finite) = student_terms(fitted[point], observations[point], weight, dof[point]);
             let (score, slope) = student_score(raw, dof[point]);
-            scores.push(score);
+            let rounding = student_score(EPSILON * fitted[point].abs() * weight, dof[point]).0;
+            scores.push(if score.abs() < rounding { rounding } else { score });
             slopes.push(slope);
             (raw, squared, point_finite, 1.0)
         };
         raw_rss += squared;
+        let rounding = EPSILON * fitted[point].abs() * weight;
+        rounding_rss += rounding * rounding;
         let residual_scale = if poisson {
             let expected = pmax(fitted[point], COUNT_FLOOR);
             let absolute = raw.abs();
@@ -1210,8 +1218,13 @@ pub fn finalize_one(
     }
     let mut covariance_valid = finite && selected > free_count && reduced.is_finite() && reduced >= 0.0;
     let mut free_covariance = vec![0.0; free_count * free_count];
+    // Rank and identifiability are read from the information equilibrated
+    // by its diagonal (identify.rs): the test does not depend on the units
+    // the parameters are written in, and a parameter the data do not
+    // determine loses its own error only (NaN), not every parameter's.
+    let mut defined = vec![true; free_count];
     if covariance_valid && !dof.is_empty() {
-        // The Student-t covariance: the M-estimator sandwich A^-1 B A^-1
+        // The Student-t covariance: the M-estimator sandwich A^+ B A^+
         // with A = sum psi'(t) j j^T and B = sum psi(t)^2 j j^T (j the
         // point's Jacobian row over its sigma), times n/(n - p). A point's
         // estimated sigma and its residual are not independent once one
@@ -1219,6 +1232,8 @@ pub fn finalize_one(
         // understates the spread; the sandwich reads it from the points.
         // With infinite dof (psi = t, psi' = 1) it is chi^2 (J^T W J)^-1 /
         // (n - p) in the large-sample limit, the Gaussian weighting's.
+        // A^+ is the pseudo-inverse on the identified subspace; a defined
+        // parameter's row of it is the exact weight of its functional.
         let f = free_count;
         let mut bread = vec![0.0; f * f];
         let mut meat = vec![0.0; f * f];
@@ -1232,50 +1247,40 @@ pub fn finalize_one(
                 }
             }
         }
-        let (values, vectors) = linalg::eigh_lower(f, &bread)?;
-        let largest = values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-        covariance_valid = values.iter().all(|v| v.is_finite() && *v > EPSILON * selected.max(f) as f64 * largest);
-        if covariance_valid {
-            let mut inverse = vec![0.0; f * f];
-            for a in 0..f {
-                for b in 0..f {
-                    inverse[a * f + b] = (0..f).map(|k| vectors[a * f + k] * vectors[b * f + k] / values[k]).sum();
-                }
-            }
-            let correction = selected as f64 / (selected as i64 - f as i64).max(1) as f64;
-            for a in 0..f {
-                for b in 0..f {
-                    let mut value = 0.0;
-                    for c in 0..f {
-                        for d in 0..f {
-                            value += inverse[a * f + c] * meat[c * f + d] * inverse[d * f + b];
+        match identify::from_information(f, &bread, selected.max(f))? {
+            Some(identified) => {
+                let inverse = identified.pseudo_inverse(1.0);
+                let correction = selected as f64 / (selected as i64 - f as i64).max(1) as f64;
+                for a in 0..f {
+                    for b in 0..f {
+                        let mut value = 0.0;
+                        for c in 0..f {
+                            for d in 0..f {
+                                value += inverse[a * f + c] * meat[c * f + d] * inverse[d * f + b];
+                            }
                         }
+                        free_covariance[a * f + b] = value * correction;
                     }
-                    free_covariance[a * f + b] = value * correction;
                 }
+                identified.mask(&mut free_covariance);
+                defined = identified.defined;
             }
+            None => covariance_valid = false,
         }
     } else if covariance_valid {
         let triangular = linalg::qr_r(selected, free_count, &scaled_jacobian)?;
-        let (singular_values, right) = linalg::svd_small(free_count, &triangular)?;
-        covariance_valid = singular_values.len() == free_count && singular_values[0].is_finite() && singular_values[free_count - 1].is_finite();
-        let tolerance = if covariance_valid { EPSILON * selected.max(free_count) as f64 * singular_values[0] } else { f64::INFINITY };
-        covariance_valid = covariance_valid && singular_values[free_count - 1] > tolerance;
-        if covariance_valid {
-            for row in 0..free_count {
-                for column in 0..free_count {
-                    let mut value = 0.0;
-                    for singular in 0..free_count {
-                        value += div(right[singular * free_count + row] * right[singular * free_count + column], singular_values[singular] * singular_values[singular])?;
-                    }
-                    free_covariance[row * free_count + column] = value * reduced;
-                }
+        match identify::from_factor(free_count, &triangular, selected.max(free_count))? {
+            Some(identified) => {
+                let floor = if poisson { 0.0 } else { rounding_rss / (selected as i64 - free_count as i64).max(1) as f64 };
+                free_covariance = identified.covariance(pmax(reduced, floor));
+                defined = identified.defined;
             }
+            None => covariance_valid = false,
         }
     }
     if covariance_valid {
-        for row in 0..free_count {
-            for column in 0..row {
+        for row in (0..free_count).filter(|&row| defined[row]) {
+            for column in (0..row).filter(|&column| defined[column]) {
                 let value = 0.5 * (free_covariance[row * free_count + column] + free_covariance[column * free_count + row]);
                 free_covariance[row * free_count + column] = value;
                 free_covariance[column * free_count + row] = value;

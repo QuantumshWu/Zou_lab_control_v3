@@ -11,6 +11,7 @@
 // editor draws is drawn by that editor (a seamless scan's plan as its axis rows, never its JSON); the
 // rest stand as plain rows (a camera's ROI). Nothing here writes the draft: every command is recorded.
 import {PanelEditView} from '../dist/views/panel_edit.js';
+import {scanFacts} from './scan_facts.js';
 const wait = (ms=100) => new Promise(resolve=>setTimeout(resolve,ms));
 const assert = (condition, message) => { if (!condition) throw Error(message); };
 const equal = (actual,expected,message) => assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
@@ -37,7 +38,7 @@ const AXES=[{port:'device:rf:frequency',unit:'MHz',values:[99.9,100,100.1],mode:
 const scanRow=(text,more={})=>({node_id:'scan',name:'Seamless scan',type_id:'seamless_scan',node_kind:'measurement',values:{plan:text,api_values:'',repeats:1},
   controls:[{name:'plan',label:'Plan',kind:'text',value:text,required:true},{name:'api_values',label:'API values',kind:'text',value:''},
     {name:'repeats',label:'Repeats',kind:'integer',value:1}],
-  selector_fields:['plan'],editor_facts:facts,...more});
+  selector_fields:['plan'],editor_facts:scanFacts(facts,JSON.parse(text).axes),...more});
 const roi=(x)=>['roi_x','roi_y','roi_width','roi_height'].map((name,index)=>({name,label:name.replace('_',' '),kind:'integer',value:[x,4,24,32][index],required:true}));
 const cameraRow=(x=3)=>({node_id:'cam',name:'Camera',type_id:'camera_measurement',node_kind:'measurement',values:{},controls:[...roi(x),{name:'exposure',label:'Exposure',kind:'number',value:1}],
   selector_fields:['roi_x','roi_y','roi_width','roi_height'],editor_facts:null});

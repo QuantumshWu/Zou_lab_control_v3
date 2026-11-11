@@ -120,10 +120,9 @@ fn camera_parameter(name: &'static str, normalizer: Normalizer, default: f64, la
         .normalized(normalizer).labelled(label).finished()
 }
 
-fn image_parameters(style: &PlotStyle) -> Vec<ParameterSpec> {
+fn color_parameters(style: &PlotStyle) -> Vec<ParameterSpec> {
     let policy = &style.render;
     vec![
-        flag("show_image", E::BASE_STYLE, true, "Image raster"),
         relim_parameter("relim_mode", IMAGE_COLOR_EFFECTS, "tight", "Color limits"),
         ParameterSpec::declare("colormap", ValueType::Text, IMAGE_COLOR_EFFECTS, Value::text(policy.image_default_colormap))
             .normalized(Normalizer::NonEmptyText).labelled("Colormap")
@@ -131,13 +130,37 @@ fn image_parameters(style: &PlotStyle) -> Vec<ParameterSpec> {
         limit_parameter("color_min", IMAGE_COLOR_EFFECTS, "Color minimum"),
         limit_parameter("color_max", IMAGE_COLOR_EFFECTS, "Color maximum"),
         flag("show_colorbar", E::CHROME, true, "Colorbar"),
+    ]
+}
+
+/// Spatial presentations share their color scale and height-bar camera.
+fn spatial_parameters(style: &PlotStyle, kind: PlotKind) -> Vec<ParameterSpec> {
+    let mut parameters = color_parameters(style);
+    let views = if kind == PlotKind::PointMap {
+        vec![(Value::text("heatmap"), "Points (2D)".to_owned()), (Value::text("height_bars"), "Height bars (3D)".to_owned())]
+    } else {
+        enum_choices(&["heatmap", "height_bars"])
+    };
+    parameters.extend([
         ParameterSpec::declare("presentation", ValueType::Text, IMAGE_COLOR_EFFECTS | E::BASE_GEOMETRY | E::LAYOUT, Value::text("heatmap"))
             .normalized(Normalizer::ImagePresentation).labelled("Presentation")
-            .with_choices(enum_choices(&["heatmap", "height_bars"])).segmented().finished(),
+            .with_choices(views).segmented().finished(),
         camera_parameter("camera_azimuth", Normalizer::FiniteNumber, HOME_CAMERA.0, "View azimuth"),
         camera_parameter("camera_elevation", Normalizer::CameraElevation, HOME_CAMERA.1, "View elevation"),
         camera_parameter("camera_zoom", Normalizer::CameraZoom, HOME_CAMERA.2, "View zoom"),
-    ]
+    ]);
+    parameters
+}
+
+/// The value of `image_box` a figure that never chose has.
+pub(crate) const IMAGE_BOX_SQUARE: &str = "square";
+
+/// Whether a single image's axes box stays square or hugs its data; a cell is
+/// square on screen either way. A grid's cells have no such choice.
+fn image_box_parameter() -> ParameterSpec {
+    ParameterSpec::declare("image_box", ValueType::Text, E::LAYOUT | E::AXIS_TRANSFORM, Value::text(IMAGE_BOX_SQUARE))
+        .normalized(Normalizer::NonEmptyText).labelled("Image box")
+        .with_choices(vec![(Value::text(IMAGE_BOX_SQUARE), "Square".to_owned()), (Value::text("fit"), "Fit data".to_owned())]).segmented().finished()
 }
 
 fn side_distribution_parameter() -> ParameterSpec { flag("side_distribution", E::LAYOUT, true, "Side distribution") }
@@ -174,9 +197,11 @@ fn build_parameter_schema(kind: PlotKind, semantic_kind: PlotKind, has_facet: bo
         entries.extend(histogram_parameters());
         entries.push(window_parameter(1, ROLLING_WINDOW_EFFECTS));
     }
-    if semantic_kind == PlotKind::Image {
-        entries.extend(image_parameters(style));
+    if matches!(semantic_kind, PlotKind::Image | PlotKind::PointMap) {
+        entries.push(flag("show_image", E::BASE_STYLE, true, "Image raster"));
+        entries.extend(spatial_parameters(style, semantic_kind));
         entries.push(side_distribution_parameter());
+        if kind != PlotKind::FacetGrid { entries.push(image_box_parameter()); }
     }
     if kind == PlotKind::Rolling {
         entries.push(bin_count_parameter(ROLLING_DISTRIBUTION_BIN_EFFECTS));
@@ -185,7 +210,7 @@ fn build_parameter_schema(kind: PlotKind, semantic_kind: PlotKind, has_facet: bo
         entries.push(ParameterSpec::declare("trailing", ValueType::Int, UNCERTAINTY_EFFECTS, Value::Int(1))
             .normalized(Normalizer::Integer).labelled("Trailing mean (shots)").bounded(1.0, 1_000_000.0, 1.0).finished());
     }
-    if semantic_kind == PlotKind::Image { entries.push(flag("show_point_labels", E::OVERLAY, true, "Point labels")); }
+    if matches!(semantic_kind, PlotKind::Image | PlotKind::PointMap) { entries.push(flag("show_point_labels", E::OVERLAY, true, "Point labels")); }
     if kind == PlotKind::PulseTimeline { entries.push(flag("show_scan_regions", E::BASE_STYLE | E::TEXT, true, "Scan regions")); }
     let has_limits = entries.iter().any(|entry| LIMIT_MODE_NAMES.contains(&entry.name));
     ParameterSchema::new(entries, if has_limits { TransitionRules::Limits } else { TransitionRules::Conflicts })

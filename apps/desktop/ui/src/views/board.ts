@@ -4,7 +4,7 @@
 // Viewer's opened Figure (each window's pixel mappings are its own). The
 // board only copies finished pixels and forwards pointer and setting
 // intents; every scientific decision is the host's.
-import { Field, armable, button, comboFace, element, fieldKind, hintWidest, setFragments, setState, shareLabelColumn, token, type Fragment, type Value } from "../fluent/index.js";
+import { Field, armable, button, comboFace, element, fieldKind, heldNote, hintWidest, showHeld, setFragments, setState, shareLabelColumn, token, type Fragment, type Value } from "../fluent/index.js";
 import type { Command, Control, Frame, MapInfo, Panel, PlotKind, Signal, State } from "../protocol.js";
 import type { SharedBuffer, Transport } from "../transport.js";
 import { BoardMetrics, GeomProxy, drop, firstFreeSlot, minBoardWidth, pack, slotUnder, type Place } from "./board_layout.js";
@@ -515,6 +515,8 @@ export class PanelView {
   readonly settings = element("section", "settings");
   readonly settingsStatus = element("p", "settings-status");
   readonly form = element("div", "form");
+  /** Why its source and semantics are held while a task runs, said once above the rows. */
+  private held = heldNote();
   readonly settingButton: HTMLButtonElement;
   readonly fields = new Map<string, Field>();
   private titles = new Map<SectionKey, HTMLElement>();
@@ -634,7 +636,7 @@ export class PanelView {
     const edit = button("Edit", () => { this.setSettingsOpen(false); this.board.onEdit?.(this.id); });
     edit.hidden = !this.board.onEdit || isEdit(this.id);
     actions.append(edit, element("span", "spacer"), remove);
-    this.form.append(...SECTIONS.map(([key]) => this.titles.get(key)!), actions);
+    this.form.append(this.held, ...SECTIONS.map(([key]) => this.titles.get(key)!), actions);
     body.append(this.settingsStatus, this.form);
     this.settings.append(header, body);
     this.settings.addEventListener("keydown", event => {
@@ -903,13 +905,12 @@ export class PanelView {
   }
 
   private updateSettings(panel: Panel, request?: number, failed = false): void {
-    // v2 _form_spec: no Plot kind row (a panel's kind is chosen when it is added), and a
-    // Window only where v2's kinds declare one (curve, histogram, rolling).
-    const windowed = ["curve", "histogram", "rolling"].includes(panel.kind);
-    const window: Control | null = panel.binding && windowed
+    // v2 _form_spec: no Plot kind row (a panel's kind is chosen when it is added). A Window
+    // stands where the plot's own spec declares one (its `bound` display row: a curve, a
+    // histogram, a rolling, and a grid of curve or histogram cells), and only there: which
+    // kinds have one is the plotting owner's to say, never a list kept here.
+    const window: Control | null = panel.binding && (panel.controls ?? []).some(control => control.bound)
       ? { section: "binding", name: "window", label: "Window", kind: "integer", value: panel.binding.window, minimum: 1, required: true } : null;
-    // The binding's Window stands where the plot's spec holds it (a `bound` display row), else last.
-    const held = (panel.controls ?? []).some(control => control.bound);
     const controls: Control[] = [
       ...(panel.binding ? [
         { section: "binding", name: "signal", label: "Signal", kind: "choice", value: panel.binding.signal,
@@ -925,7 +926,6 @@ export class PanelView {
         const kinds = (control.choices ?? []).filter(([value]) => value !== "").map(([value]) => [value, String(value)] as [Value, string]);
         return [{ ...control, choices: [["", "automatic (from data)"] as [Value, string], ...kinds] }];
       }),
-      ...(window && !held ? [window] : []),
     ];
     // The board's own rows of this panel (workbench board.panels): its name and refresh.
     const entry = this.board.boardPanel(this.subject);
@@ -935,7 +935,7 @@ export class PanelView {
     // v2's Overlay (paints_images): a panel whose surfaces are images -- an Image,
     // or a grid of image cells -- is drawn with the site rings of a judgement of
     // its measurement; its display rows then hold the rings' Point labels.
-    if (entry && (panel.controls ?? []).some(control => control.name === "show_point_labels")) {
+    if (entry && this.board.plotKinds.find(kind => kind.id === panel.kind)?.overlay && (panel.controls ?? []).some(control => control.name === "show_point_labels")) {
       // No overlay is the box's none row, "Off" in MUTED_INK, as v2's.
       controls.push({ section: "board", name: "overlay_signal", label: "Overlay", kind: "choice", value: entry.overlay_signal || null,
         allow_none: true, placeholder: "Off", tree: entry.overlay_tree });
@@ -949,8 +949,9 @@ export class PanelView {
     // source and semantics; display parameters stay editable (frozen).
     const frozen = this.board.frozen(this.subject);
     if (frozen) for (const [index, spec] of controls.entries()) {
-      if (spec.section === "binding" || spec.section === "semantic" || spec.name === "overlay_signal") controls[index] = { ...spec, unavailable_reason: spec.unavailable_reason || frozen };
+      if (spec.section === "binding" || spec.section === "semantic" || spec.name === "overlay_signal") controls[index] = { ...spec, held: frozen };
     }
+    showHeld(this.held, frozen);
     const rank = (spec: Control): number => { const at = PANEL_ORDER.indexOf(`${spec.section}:${spec.name}`); return at < 0 ? PANEL_ORDER.length : at; };
     const ordered = [...controls.filter(spec => this.sectionOf(spec) === "panel").sort((a, b) => rank(a) - rank(b)), ...controls.filter(spec => this.sectionOf(spec) !== "panel")];
     controls.splice(0, controls.length, ...ordered);

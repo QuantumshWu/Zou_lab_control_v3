@@ -28,6 +28,8 @@ from ._dcam_driver import DcamProperty, DcamSdkDriver, DcamValue
 from ..roi_grid import snap_roi_axis
 from ._owner_lane import CameraSdkOwnerLane
 from ..contract import (
+    rest_starts_after,
+    rests_before_arm,
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
     CameraWorkingPoint,
@@ -159,6 +161,11 @@ class DcamCameraAdapter:
             self._config.electrons_per_count,
             camera="qCMOS camera",
         )
+
+    @property
+    def stamps_frames(self) -> bool:
+        # DCAM stamps each frame with the camera's own clock, to the microsecond.
+        return True
 
     def _require_device(self) -> object:
         if self._device is None or not self._open:
@@ -497,6 +504,7 @@ class DcamCameraAdapter:
 
         return self._lane.call(apply)
 
+    @rests_before_arm
     def arm(
         self,
         frames: int | None,
@@ -792,6 +800,7 @@ class DcamCameraAdapter:
         )
         return self._terminal
 
+    @rest_starts_after
     def finish_record_capture(self) -> CameraCaptureTerminalRecord:
         self._finish_requested.set()
         return self._lane.call(self._finish_on_owner)

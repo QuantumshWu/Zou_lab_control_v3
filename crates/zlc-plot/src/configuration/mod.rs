@@ -81,6 +81,6 @@ pub use recipe::{decode_plot_recipe, encode_plot_recipe, DecodedRecipe, RecipePa
 pub use resolve::{resolve_configuration, scientific_context_signature, ConfigurationUpdates, Defaults, InteractionUpdates, OverlayHandle, PreparationKey, ResolveRequest, ResolvedConfiguration, ScientificContext, Signature};
 pub use selectors::{normalize_classifier_threshold_targets, normalize_viewport, CrosshairPoint, NumericRange, RectangleRange, SelectorKind, SelectorSnapshot, SelectorState, SelectorValue, ThresholdTarget, Viewport};
 pub use semantics::{composed_spec, describe_semantics, fate_field_name, rebased_spec, updated_spec, CycleChoices, SemanticDescription, SemanticField};
-pub use spec::{CellPlot, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, PlotLabels, PlotSpec, PulseTimelinePlot, Reduction, RelimMode, RollingPlot};
+pub use spec::{CellPlot, CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, PointMapPlot, PlotLabels, PlotSpec, PulseTimelinePlot, Reduction, RelimMode, RollingPlot};
 pub use state::{DisplayState, DisplayStateStore, Interaction, InteractionUpdate, Presentation, PresentationUpdate, SeriesReadout, SeriesTarget};
 pub use value::{Value, ValueMap};

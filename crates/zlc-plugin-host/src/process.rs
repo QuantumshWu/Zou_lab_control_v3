@@ -2,7 +2,7 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::os::windows::io::AsRawHandle;
-use std::process::{Child, ChildStdin};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJob
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
 use crate::blocks::Lend;
-use crate::{CallError, ErrorKind, frame};
+use crate::{CallError, ErrorKind, outgoing::Outgoing};
 
 /// A message read from a plugin, with the holds its `blocks` gave the core.
 pub(crate) struct Incoming { pub message: Value, pub lends: Vec<Arc<Lend>> }
@@ -24,7 +24,7 @@ pub(crate) struct PluginProcess {
     pid: AtomicU32,
     /// The process it is: the one plugin process (`plugins`) or an isolated type's (`type:<id>`).
     pub key: String,
-    writer: Mutex<Option<ChildStdin>>,
+    writer: Arc<Outgoing>,
     /// Each request's waiter, and whether its deadline watches the process.
     pending: Mutex<HashMap<u64, (mpsc::Sender<Incoming>, bool, Option<String>)>>,
     /// One read-only snapshot worker per device, including replies that became
@@ -53,7 +53,7 @@ impl PluginProcess {
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         let process = Arc::new(Self {
-            pid: AtomicU32::new(child.id()), key, writer: Mutex::new(Some(writer)), pending: Mutex::default(), snapshots: Mutex::default(), snapshot_done: Condvar::new(), next: AtomicU64::new(1),
+            pid: AtomicU32::new(child.id()), key, writer: Outgoing::new(writer), pending: Mutex::default(), snapshots: Mutex::default(), snapshot_done: Condvar::new(), next: AtomicU64::new(1),
             alive: AtomicBool::new(true), retiring: AtomicBool::new(false), child: Mutex::new(child),
             log: Mutex::default(), instances: Mutex::default(), users: AtomicUsize::new(0), overdue: Mutex::default(), missed_pings: AtomicU64::new(0),
         });
@@ -66,9 +66,7 @@ impl PluginProcess {
     pub fn set_pid(&self, pid: u32) { self.pid.store(pid, Ordering::Release); }
 
     pub fn send(&self, message: &Value) -> Result<(), CallError> {
-        let mut writer = self.writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let sink = writer.as_mut().ok_or_else(|| CallError::lost("the plugin process has ended"))?;
-        frame::write(sink, message).map_err(|error| CallError::lost(format!("cannot write to the plugin: {error}")))
+        self.writer.send(message)
     }
 
     pub fn event(&self, op: &str, params: Value) -> Result<(), CallError> {
@@ -81,19 +79,25 @@ impl PluginProcess {
 
     /// A request lending `blocks` (already held for this process by the caller).
     pub fn request_with(&self, op: &str, params: Value, blocks: Vec<String>, deadline: Duration) -> Result<Incoming, CallError> {
-        self.exchange(op, params, blocks, deadline, true)
+        self.exchange(op, params, blocks, deadline, true, &mut || {})
+    }
+
+    /// Release argument holds only when writer admission proves no frame began.
+    pub fn request_with_cleanup(&self, op: &str, params: Value, blocks: Vec<String>, deadline: Duration,
+        mut on_unsent: impl FnMut()) -> Result<Incoming, CallError> {
+        self.exchange(op, params, blocks, deadline, true, &mut on_unsent)
     }
 
     /// A request whose missed deadline says nothing about the process's health
     /// (a hardware scan waiting on a vendor call): its late answer is dropped.
     pub fn request_untracked(&self, op: &str, params: Value, deadline: Duration) -> Result<Incoming, CallError> {
-        self.exchange(op, params, Vec::new(), deadline, false)
+        self.exchange(op, params, Vec::new(), deadline, false, &mut || {})
     }
 
     /// Start metadata has one total budget, including pipe contention. A frame
     /// already being written must finish in the background to keep the shared
     /// channel valid, but this caller never waits past its deadline or ends the owner.
-    pub fn snapshot(self: &Arc<Self>, instance: &str, deadline: Duration) -> Result<Incoming, CallError> {
+    pub fn snapshot(self: &Arc<Self>, instance: &str, units: &Value, deadline: Duration) -> Result<Incoming, CallError> {
         let until = Instant::now() + deadline;
         if !self.alive.load(Ordering::Acquire) { return Err(CallError::lost("the plugin process has ended")); }
         {
@@ -107,29 +111,23 @@ impl PluginProcess {
             snapshots.insert(instance.to_owned());
         }
         let (reply, answer) = mpsc::channel();
-        let (process, name) = (self.clone(), instance.to_owned());
+        let (process, name, units) = (self.clone(), instance.to_owned(), units.clone());
         let spawned = std::thread::Builder::new().name("zlc-plugin-snapshot".into()).spawn(move || {
             let mut identity = None;
             let result = (|| {
-                let mut writer = loop {
-                    if Instant::now() >= until { return Err(CallError::new(ErrorKind::Timeout, "snapshot expired before it could be sent")); }
-                    if !process.alive.load(Ordering::Acquire) { return Err(CallError::lost("the plugin process has ended")); }
-                    match process.writer.try_lock() {
-                        Ok(writer) => break writer,
-                        Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
-                        Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(1)),
-                    }
-                };
                 if Instant::now() >= until { return Err(CallError::new(ErrorKind::Timeout, "snapshot expired before it could be sent")); }
-                let sink = writer.as_mut().ok_or_else(|| CallError::lost("the plugin process has ended"))?;
                 let id = process.next.fetch_add(1, Ordering::Relaxed);
                 identity = Some(id);
                 let (sender, received) = mpsc::channel();
                 process.pending.lock().unwrap().insert(id, (sender, false, Some(name.clone())));
-                frame::write(sink, &json!({"t":"req", "id":id, "op":"snapshot", "p":{"instance":name, "plain":true},
-                    "blocks":[], "deadline_ms":until.saturating_duration_since(Instant::now()).as_millis() as u64}))
-                    .map_err(|error| CallError::lost(format!("cannot write snapshot to the plugin: {error}")))?;
-                drop(writer);
+                let sent = process.writer.send_until(&json!({"t":"req", "id":id, "op":"snapshot", "p":{"instance":name, "plain":true, "units":units},
+                    "blocks":[], "deadline_ms":until.saturating_duration_since(Instant::now()).as_millis() as u64}), until);
+                if let Err(error) = sent {
+                    if !error.started { return Err(error.error); }
+                    // A partially written frame must finish without interleaving.
+                    // The bounded caller has left; retain this one per-device
+                    // snapshot until its real reply or process retirement.
+                }
                 // The read loop retires pending on the actual answer or process
                 // exit, even if the bounded caller has already gone away.
                 let incoming = received.recv().map_err(|_| CallError::lost("the plugin process ended during snapshot"))?;
@@ -155,21 +153,35 @@ impl PluginProcess {
     }
 
     /// A health ping: a late answer is counted by the watcher, not as an overdue request.
-    pub fn ping(&self) -> bool { self.exchange("ping", json!({}), Vec::new(), Duration::from_secs(1), false).is_ok() }
+    pub fn ping(&self) -> bool { self.exchange("ping", json!({}), Vec::new(), Duration::from_secs(1), false, &mut || {}).is_ok() }
 
-    fn exchange(&self, op: &str, params: Value, blocks: Vec<String>, deadline: Duration, track: bool) -> Result<Incoming, CallError> {
-        if !self.alive.load(Ordering::Acquire) { return Err(CallError::lost("the plugin process has ended")); }
+    fn exchange(&self, op: &str, params: Value, blocks: Vec<String>, deadline: Duration, track: bool, on_unsent: &mut dyn FnMut()) -> Result<Incoming, CallError> {
+        let until = Instant::now() + deadline;
+        if !self.alive.load(Ordering::Acquire) { on_unsent(); return Err(CallError::lost("the plugin process has ended")); }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let instance = params["instance"].as_str().map(str::to_owned);
         let (sender, answer) = mpsc::channel();
-        self.pending.lock().unwrap().insert(id, (sender, track, instance.clone()));
+        {
+            let mut pending = self.pending.lock().unwrap();
+            let emergency = matches!(op, "ping" | "exit" | "close" | "make_safe")
+                || (op == "command" && params["name"] == "stop")
+                || (op == "spi" && matches!(params["method"].as_str(), Some("stop" | "make_safe")));
+            let limit = if emergency { 320 } else { 256 };
+            if pending.len() >= limit { drop(pending); on_unsent(); return Err(CallError::new(ErrorKind::Refused, "the plugin has too many pending calls")); }
+            pending.insert(id, (sender, track, instance.clone()));
+        }
         let message = json!({"t": "req", "id": id, "op": op, "p": params, "blocks": blocks,
                              "deadline_ms": deadline.as_millis() as u64});
-        if let Err(error) = self.send(&message) {
-            self.pending.lock().unwrap().remove(&id);
-            return Err(error);
+        if let Err(failure) = self.writer.send_until(&message, until) {
+            let mut pending = self.pending.lock().unwrap();
+            if failure.started && track {
+                if pending.contains_key(&id) { self.overdue.lock().unwrap().insert(id, (Instant::now(), instance)); }
+            } else { pending.remove(&id); }
+            drop(pending);
+            if !failure.started { on_unsent(); }
+            return Err(failure.error);
         }
-        match answer.recv_timeout(deadline) {
+        match answer.recv_timeout(until.saturating_duration_since(Instant::now())) {
             Ok(incoming) => match incoming.message.get("error") {
                 Some(error) => Err(CallError::from_wire(error)),
                 None => Ok(incoming),
@@ -213,7 +225,7 @@ impl PluginProcess {
         self.alive.store(false, Ordering::Release);
         self.pending.lock().unwrap().clear();
         self.snapshot_done.notify_all();
-        self.writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+        self.writer.close();
     }
 
     /// End the interpreter (not only its launcher), then the launcher.
@@ -323,19 +335,68 @@ mod snapshot_tests {
             python_path: vec![root.join("../../science/src"), root.join("tests/plugins")],
             packages: vec!["zlc_test_plugins".into()], memory_limit_mib: Some(3072),
         }, Runtime::new(), SafeActions::new(), |_| {}).unwrap();
+        crate::test_application::install(&host).unwrap();
         host.open("echo", "test.echo", json!({}), json!({})).unwrap();
         let process = host.inner.state.lock().unwrap().instances["echo"].serving.process().unwrap().clone();
         Some((host, process))
     }
 
     #[test]
+    fn service_workers_release_failed_arrays_and_cannot_restore_exited_process_resources() {
+        let Some((host, process)) = host() else { return };
+        let names = Arc::new(Mutex::new(Vec::<String>::new()));
+        let exported = names.clone();
+        let (started, ready) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let resumed = Mutex::new(resumed);
+        *host.inner.services.lock().unwrap() = Some(Arc::new(move |_, params, context| {
+            if params["wait"] == true {
+                context.install_resource("fixture", Arc::new(7_u64))?;
+                started.send(()).unwrap();
+                resumed.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+                assert!(context.install_resource("late", Arc::new(8_u64)).is_err());
+            }
+            let values = zlc_core::OwnedBuffer::from_vec(vec![9_u8; crate::wire::INLINE_BYTES]);
+            let value = context.write_array(&values.into(), &[crate::wire::INLINE_BYTES])?;
+            exported.lock().unwrap().push(value["$array"]["block"].as_str().unwrap().to_owned());
+            if params["wait"] == true { Ok(value) } else { Err(CallError::new(ErrorKind::Failed, "fixture failure")) }
+        }));
+        let result = host.inner.service_request(&process, &json!({"operation":"fixture", "params":{}}), Vec::new());
+        assert_eq!(result.err().unwrap().kind, ErrorKind::Failed);
+        assert_eq!(host.registry().holds(&names.lock().unwrap()[0]), 0, "failed handlers retain no output holds");
+        let (inner, caller) = (host.inner.clone(), process.clone());
+        let pending = std::thread::spawn(move || inner.service_request(&caller,
+            &json!({"operation":"fixture", "params":{"wait":true}}), Vec::new()));
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        host.shutdown();
+        assert!(!process.alive.load(Ordering::Acquire));
+        resume.send(()).unwrap();
+        assert!(pending.join().unwrap().is_err());
+        assert!(!host.inner.process_resources.lock().unwrap().contains_key(&process.pid()));
+        for name in names.lock().unwrap().iter() { assert_eq!(host.registry().holds(name), 0, "late output {name} leaked"); }
+    }
+
+    #[test]
+    fn an_expired_unsent_request_releases_its_argument_holds() {
+        let Some((host, process)) = host() else { return };
+        let block=host.registry().export(b"owned argument").unwrap();
+        host.registry().hold_for(process.pid(),block.name()).unwrap();
+        assert_eq!(host.registry().holds(block.name()),2);
+        let result=process.request_with_cleanup("spi",json!({"instance":"echo","method":"frame"}),vec![block.name().to_owned()],Duration::ZERO,
+            || host.registry().released_by(process.pid(),&[block.name().to_owned()]));
+        assert_eq!(result.err().unwrap().kind,ErrorKind::Timeout);
+        assert_eq!(host.registry().holds(block.name()),1);
+        assert!(!process.requests_pending("echo"));host.shutdown();
+    }
+
+    #[test]
     fn local_snapshot_expires_before_a_busy_pipe_is_written_and_leaves_no_worker() {
         let Some((host, process)) = host() else { return };
         host.open("other", "test.echo", json!({}), json!({})).unwrap();
-        let held = process.writer.lock().unwrap();
+        let held = process.writer.pause();
         for name in ["echo", "other"] {
             let started = Instant::now();
-            assert_eq!(host.snapshot(name, Duration::from_millis(50)).unwrap_err().kind, ErrorKind::Timeout);
+            assert_eq!(host.snapshot(name, &json!({}), Duration::from_millis(50)).unwrap_err().kind, ErrorKind::Timeout);
             assert!(started.elapsed() < Duration::from_millis(500));
         }
         let until = Instant::now() + Duration::from_secs(1);
@@ -343,7 +404,7 @@ mod snapshot_tests {
         assert!(process.snapshots.lock().unwrap().is_empty(), "expired unsent metadata must not retain workers");
         assert!(!process.requests_pending("echo") && !process.requests_pending("other"), "nothing was sent after the deadlines");
         drop(held);
-        for name in ["echo", "other"] { assert_eq!(host.snapshot(name, Duration::from_secs(2)).unwrap()["values"]["amplitude"], 0.0); }
+        for name in ["echo", "other"] { assert_eq!(host.snapshot(name, &json!({}), Duration::from_secs(2)).unwrap()["values"]["amplitude"], 0.0); }
         host.shutdown();
     }
 
@@ -355,7 +416,7 @@ mod snapshot_tests {
         let until = Instant::now() + Duration::from_secs(2);
         while !process.requests_pending("echo") && Instant::now() < until { std::thread::sleep(Duration::from_millis(5)); }
         assert!(process.requests_pending("echo"));
-        for _ in 0..3 { assert_eq!(host.snapshot("echo", Duration::from_millis(50)).unwrap_err().kind, ErrorKind::Timeout); }
+        for _ in 0..3 { assert_eq!(host.snapshot("echo", &json!({}), Duration::from_millis(50)).unwrap_err().kind, ErrorKind::Timeout); }
         assert_eq!(process.snapshots.lock().unwrap().len(), 1);
         assert_eq!(process.pending.lock().unwrap().values().filter(|(_, tracked, name)| !tracked && name.as_deref() == Some("echo")).count(), 1);
         let started = Instant::now();
@@ -386,9 +447,9 @@ mod snapshot_tests {
         let reading = std::thread::spawn(move || crate::read_loop(inner, reader, stdout));
         let instance = "snapshot-instance-".repeat(65536);
         let started = Instant::now();
-        assert_eq!(process.snapshot(&instance, Duration::from_millis(200)).err().unwrap().kind, ErrorKind::Timeout);
+        assert_eq!(process.snapshot(&instance, &json!({}), Duration::from_millis(200)).err().unwrap().kind, ErrorKind::Timeout);
         assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(process.writer.try_lock().is_err(), "the frame write really owns the full pipe");
+        assert!(process.writer.writing(), "the frame write really owns the full pipe");
         assert!(!process.wait_exit(Duration::ZERO), "metadata timeout must leave its owner alive");
         assert_eq!(process.snapshots.lock().unwrap().len(), 1);
         let shutting = Instant::now();

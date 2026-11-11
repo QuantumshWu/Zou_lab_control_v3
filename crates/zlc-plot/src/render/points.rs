@@ -19,6 +19,7 @@ use crate::session::overlay::{ImagePointOverlay, PointStatus};
 /// The overlay's artists (`{key}:points*`) and the signature they were made for.
 #[derive(Clone, Debug, Default)]
 pub struct PointTables {
+    pub face_values: Option<Arc<[f64]>>,
     pub signature: Option<PointSignature>,
     pub axes: usize,
     pub rings: Option<ChildId>,
@@ -33,6 +34,7 @@ pub struct PointTables {
 /// `{key}:points-signature`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PointSignature {
+    fill_mapping: Option<(&'static str, (f64, f64))>,
     overlay: Option<(u64, usize)>,
     facet_value: Option<Scalar>,
     show_labels: bool,
@@ -40,25 +42,7 @@ pub struct PointSignature {
     view: Option<([u64; 4], [u64; 4], u64)>,
 }
 
-/// `_point_ring_radius(points, fraction=..., fallback=...)`: a fraction of the
-/// median nearest-neighbour distance.
-fn point_ring_radius(points: &[[f64; 2]], fraction: f64, fallback: f64) -> f64 {
-    if points.len() < 2 || !points.iter().all(|p| p[0].is_finite() && p[1].is_finite()) { return fallback; }
-    let mut nearest: Vec<f64> = points.iter().enumerate().map(|(i, a)| {
-        let mut best = f64::INFINITY;
-        for (j, b) in points.iter().enumerate() {
-            let (dx, dy) = (a[0] - b[0], a[1] - b[1]);
-            let squared = if i == j { f64::INFINITY } else { dx * dx + dy * dy };
-            if squared < best || best.is_nan() { best = squared; }
-        }
-        best.sqrt()
-    }).filter(|d| d.is_finite() && *d > 0.0).collect();
-    if nearest.is_empty() { return fallback; }
-    nearest.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = nearest.len();
-    let median = if n % 2 == 1 { nearest[n / 2] } else { (nearest[n / 2 - 1] + nearest[n / 2]) / 2.0 };
-    fraction * median
-}
+use crate::projection::site_geometry::point_ring_radius;
 
 /// `ImagePointOverlay.statuses_for(spec, facet_value)`: the site judgements of
 /// the one exact (repeat, point) cell the image's scope (and a grid cell's facet
@@ -102,6 +86,13 @@ fn statuses_for(overlay: &ImagePointOverlay, spec: &PlotSpec, facet_value: Optio
 }
 
 impl Renderer {
+    pub(super) fn point_facecolors(&self, cmap: &str, (low, high): (f64, f64)) -> Vec<[f64; 4]> {
+        self.image.points.face_values.as_deref().unwrap_or_default().iter().map(|&v| {
+            if v.is_finite() { super::mpl::image::colormap_rgba(cmap, ((v - low) / (high - low)).clamp(0.0, 1.0)) }
+            else { [0.0; 4] }
+        }).collect()
+    }
+
     /// `_update_image_point_overlay` of every painted image surface: an Image's
     /// one, or each cell of a grid of images with its own facet coordinate.
     pub(crate) fn update_image_point_overlay(&mut self, overlay: Option<&Arc<ImagePointOverlay>>, state: &DisplayState) {
@@ -127,12 +118,14 @@ impl Renderer {
     /// `_update_image_point_overlay(axes, payload, overlay, state, key, facet_value)`.
     fn update_surface_points(&mut self, axes: usize, data: &ImageData, overlay: Option<&Arc<ImagePointOverlay>>, state: &DisplayState, facet_value: Option<&Scalar>) {
         let show_labels = matches!(state.get("show_point_labels"), Some(Value::Bool(true)));
+        self.image.points.face_values = overlay.and_then(|o| o.face_values.clone());
         let view = overlay.filter(|o| o.paths_xy.is_some()).map(|_| {
             let a = &self.fig.axes[axes];
             let b = a.bbox_exact(self.fig.size_inches, self.fig.dpi);
             ([a.xlim.0, a.xlim.1, a.ylim.0, a.ylim.1].map(f64::to_bits), [b[0], b[1], b[2] - b[0], b[3] - b[1]].map(f64::to_bits), self.fig.dpi.to_bits())
         });
         let signature = PointSignature {
+            fill_mapping: self.image.points.face_values.as_ref().and(self.image.mapping),
             overlay: overlay.map(|o| (o.revision, Arc::as_ptr(o) as usize)), facet_value: facet_value.cloned(), show_labels,
             units: (data.x.display_unit.symbol.to_string(), data.y.display_unit.symbol.to_string()), view,
         };
@@ -192,6 +185,7 @@ impl Renderer {
                 if let Some(id) = self.image.points.joined { self.set_point_child_visible(id, false); }
                 let rings = EllipsesArtist {
                     visible: true, zorder: visual.point_zorder, offsets: points.clone(), widths: vec![2.0 * radii.0; count],
+                    facecolors: self.image.mapping.map_or_else(Vec::new, |(cmap, limits)| self.point_facecolors(cmap, limits)),
                     heights: vec![2.0 * radii.1; count], edgecolors: colours.clone(), linewidths: widths.clone(), dashed: dashed.clone(),
                 };
                 match self.image.points.rings {

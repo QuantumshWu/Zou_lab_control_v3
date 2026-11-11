@@ -13,6 +13,7 @@ from typing import Any
 
 CAPABILITIES: dict[str, str] = {
     "camera.adapter": "zlc_atom.devices.camera.contract:CameraAdapter",
+    "motion.axis": "zlc_atom.devices.motion.contract:MotionAxis",
     "rf.source": "zlc_atom.devices.rf.contract:RfSource",
     "slm.phase": "zlc_atom.devices.slm:SlmAdapter",
     "waveform.source": "zlc_atom.devices.waveform.contract:WaveformSource",
@@ -21,10 +22,11 @@ CAPABILITIES: dict[str, str] = {
 #: v2's tunable quartet: served for every device that implements all four.
 TUNABLE = ("tunable_fields", "tune", "tunable_values", "settings_provenance")
 #: The device methods that only read (PLUGIN_PROTOCOL §8): the knobs and their
-#: provenance, and a device's own unit conversions (an RF amplitude into its
-#: channel's load).  A draft query may call these on the devices its draft
-#: names; it may change nothing.
-READS = ("tunable_fields", "tunable_values", "settings_provenance", "convert_tunable_value", "read_tunable_in_unit")
+#: provenance, a device's own unit conversions (an RF amplitude into its
+#: channel's load), and how a waveform source samples.  A draft query may call
+#: these on the devices its draft names; it may change nothing.
+READS = ("tunable_fields", "tunable_values", "settings_provenance", "convert_tunable_value", "read_tunable_in_unit",
+         "working_point")
 
 
 def reads(adapter: object) -> tuple[str, ...]:

@@ -656,10 +656,11 @@ impl FitEngine {
         let loss = loss_code(&opts.loss).ok_or_else(|| FitError::value(format!("unsupported compiled fit loss: {}", super::num::str_repr(&opts.loss))))?;
         // Bucket after bucket, checked before each solve and after each
         // that succeeds (a failed bucket skips that check); a bucket's cells
-        // solve in parallel.
+        // solve in parallel, each checked before it starts: a batch of many
+        // cells is one bucket, and a Stop does not wait for all of it.
         for bucket in &buckets {
             check.check()?;
-            match solve_bucket(kernel, &prepared, bucket, &base_lower, &base_upper, counted, loss, parameter_count) {
+            match solve_bucket(kernel, &prepared, bucket, &base_lower, &base_upper, counted, loss, parameter_count, &check)? {
                 Ok(list) => {
                     check.check()?;
                     for (cell, outcome) in list {
@@ -799,7 +800,7 @@ fn form_buckets(prepared: &[Option<Prepared>], active: &[usize], counted: bool, 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn solve_bucket(kernel: Kernel, prepared: &[Option<Prepared>], bucket: &Bucket, base_lower: &[f64], base_upper: &[f64], counted: bool, loss: i64, parameter_count: usize) -> Result<Vec<(usize, CellOutcome)>, String> {
+fn solve_bucket(kernel: Kernel, prepared: &[Option<Prepared>], bucket: &Bucket, base_lower: &[f64], base_upper: &[f64], counted: bool, loss: i64, parameter_count: usize, check: &Check) -> Result<Result<Vec<(usize, CellOutcome)>, String>, FitError> {
     let use_weights = bucket.cells.iter().any(|&c| prepared[c].as_ref().expect("cell").weights.is_some());
     let max_nfev = match &bucket.layout {
         Layout::Shared => bucket.budget,
@@ -810,13 +811,14 @@ fn solve_bucket(kernel: Kernel, prepared: &[Option<Prepared>], bucket: &Bucket, 
         .par_iter()
         .enumerate()
         .map(|(local, &cell)| {
+            check.check()?;
             let item = prepared[cell].as_ref().expect("cell");
-            (cell, solve_one(kernel, item, &bucket.layout, local, base_lower, base_upper, counted, loss, use_weights, max_nfev))
+            Ok((cell, solve_one(kernel, item, &bucket.layout, local, base_lower, base_upper, counted, loss, use_weights, max_nfev)))
         })
-        .collect();
+        .collect::<Result<_, FitError>>()?;
     // A prepare- or finalize-time exception fails the whole bucket.
     if let Some((_, Err(message))) = solved.iter().find(|(_, s)| s.is_err()) {
-        return Err(message.clone());
+        return Ok(Err(message.clone()));
     }
     let mut outcomes = Vec::with_capacity(bucket.cells.len());
     for (cell, solved) in solved {
@@ -824,7 +826,7 @@ fn solve_bucket(kernel: Kernel, prepared: &[Option<Prepared>], bucket: &Bucket, 
         let solved = solved.expect("checked");
         outcomes.push((cell, finish_cell(item, solved, parameter_count)));
     }
-    Ok(outcomes)
+    Ok(Ok(outcomes))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -999,12 +1001,14 @@ fn finish_cell(item: &Prepared, mut solved: Solved, parameter_count: usize) -> C
         let n = parameter_count;
         let c = &solved.covariance;
         let e = &solved.errors;
-        let bad = c.iter().any(|v| !v.is_finite())
-            || e.iter().any(|v| !v.is_finite())
-            || (0..n).any(|i| (0..n).any(|j| !isclose(c[i * n + j], c[j * n + i], 1e-12, 1e-15)))
-            || (0..n).any(|i| c[i * n + i] < 0.0)
-            || e.iter().any(|&v| v < 0.0)
-            || (0..n).any(|i| !isclose(e[i] * e[i], c[i * n + i], 1e-10, 1e-15));
+        // An undetermined parameter's error is NaN (and its covariance row
+        // and column); the determined ones form the checked covariance.
+        let defined: Vec<bool> = e.iter().map(|v| v.is_finite()).collect();
+        let pairs = || (0..n).flat_map(|i| (0..n).map(move |j| (i, j))).filter(|&(i, j)| defined[i] && defined[j]);
+        let bad = e.iter().any(|v| v.is_infinite())
+            || (0..n).any(|i| defined[i] != c[i * n + i].is_finite())
+            || pairs().any(|(i, j)| !c[i * n + j].is_finite() || !isclose(c[i * n + j], c[j * n + i], 1e-12, 1e-15))
+            || (0..n).any(|i| defined[i] && (c[i * n + i] < 0.0 || e[i] < 0.0 || !isclose(e[i] * e[i], c[i * n + i], 1e-10, 1e-15)));
         if bad {
             final_error = Some("compiled fit returned invalid covariance");
         }

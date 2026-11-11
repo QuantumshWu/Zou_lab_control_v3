@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from functools import wraps
 from typing import Protocol, Sequence, runtime_checkable
 import time
 
@@ -41,6 +42,68 @@ def roi_request(
         integer(item, f"roi_xywh[{index}]", minimum=0 if index < 2 else 1)
         for index, item in enumerate(value)
     )
+
+
+#: How long a camera rests between the end of one capture and the start of the next. A capture
+#: that has only just stopped may still have an exposure or a readout on its way; started at
+#: once, the next capture could count it as its own first frame, and every cycle after it
+#: would be grouped one frame late with nothing to report.
+CAPTURE_REST_SECONDS = 0.2
+
+
+def _say(event: str, camera: object, **facts: object) -> None:
+    """One line of the application's journal for this camera (``zlc_plugin.journal``)."""
+
+    from zlc_plugin.journal import note
+
+    note("camera", event, camera=type(camera).__name__, **facts)
+
+
+def rests_before_arm(arm):
+    """An ``arm`` that first lets the rest since this camera's last capture run out, and says
+    in the journal that the capture began (or why it did not)."""
+
+    @wraps(arm)
+    def rested(self, *args, **kwargs):
+        ended = getattr(self, "_capture_ended_at", None)
+        rest = 0.0 if ended is None else max(0.0, ended + CAPTURE_REST_SECONDS - time.monotonic())
+        if rest:
+            time.sleep(rest)
+        groups = kwargs.get("source_group_sizes")
+        facts = dict(frames=args[0] if args else kwargs.get("frames"), cycle_size=groups[0] if groups else None,
+                     cycles=len(groups) if groups else None, rested_seconds=rest)
+        try:
+            armed = arm(self, *args, **kwargs)
+        except BaseException as error:
+            _say("arm_failed", self, error=f"{type(error).__name__}: {error}", **facts)
+            raise
+        _say("arm", self, **facts)
+        return armed
+
+    return rested
+
+
+def rest_starts_after(finish):
+    """A ``finish_record_capture`` that notes when a capture that was armed came to its end."""
+
+    @wraps(finish)
+    def noted(self, *args, **kwargs):
+        armed = self.capture_state()
+        try:
+            terminal = finish(self, *args, **kwargs)
+        except BaseException as error:
+            if armed:
+                _say("finish_failed", self, error=f"{type(error).__name__}: {error}")
+            raise
+        finally:
+            if armed:
+                self._capture_ended_at = time.monotonic()
+        if armed:
+            # How many frames the camera itself produced in the capture that just ended.
+            _say("finish", self, produced=getattr(terminal, "produced_count", None))
+        return terminal
+
+    return noted
 
 
 def arm_groups(
@@ -240,6 +303,13 @@ class CameraAdapter(Protocol):
     #: a form offer the unit before anything has been armed.
     @property
     def photoelectron_conversion(self) -> tuple[float, float] | None: ...
+
+    #: Whether every frame carries the time this camera's own clock exposed it at
+    #: (``timestamp_seconds``/``timestamp_microseconds``).  Only such a camera's frames can be told
+    #: apart by when they came, so only it can be aligned to the lane that triggers it; like the
+    #: conversion, it is answered from the device's configuration, open or not.
+    @property
+    def stamps_frames(self) -> bool: ...
 
     # A camera has a state: how long it integrates, and which part of the
     # sensor it reads.  The two are set separately: one call that demanded

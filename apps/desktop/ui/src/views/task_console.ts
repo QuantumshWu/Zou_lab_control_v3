@@ -6,9 +6,10 @@ import {
   ComboBox, Dialog, Field, StatusStrip, TabWidget, command, confirm, element, note, setChecked, setElided, setState, statusDot, switchButton,
   type StatusWord, type Value, type Command as Button,
 } from "../fluent/index.js";
-import type { Control, Panel, State } from "../protocol.js";
+import { boardKinds, type Control, type Panel, type State } from "../protocol.js";
 import { queueStatus, saveImage, type View, type ViewContext } from "../shell.js";
 import type { Board, LogicRow, NodeType, RunRow } from "../workbench.js";
+import { DiagnosticsPopup, type DiagnosticsState } from "./diagnostics.js";
 import type { PanelBoard } from "./board.js";
 import { LogicEditorView, LogicRowView, PublisherEditorView, projectRow, type EditorIntents, type NodeProjection } from "./logic.js";
 import { PanelEditView, type EditInfo } from "./panel_edit.js";
@@ -16,8 +17,6 @@ import { PanelEditView, type EditInfo } from "./panel_edit.js";
 const ADD_WORDS = { plot: "Add panel", logic: "Add node" } as const;
 /** A node type in the chooser: its layer, then its name (v2 "Processor: occupancy"). */
 const LAYER_WORDS: Record<string, string> = { measurement: "Measurement", processor: "Processor", task: "Task", panel_publisher: "Panel publisher" };
-/** TASK_CONSOLE_PANEL_KINDS: what the console's chooser offers, in v2's order. */
-const CONSOLE_PLOT_KINDS = ["image", "curve", "rolling", "histogram", "facet_grid"];
 const SEVERITY: Record<StatusWord, number> = { idle: 0, task: 0, running: 1, warning: 2, error: 3 };
 /** v2 _running_logic: a node still at work, started or waiting to start (a follower waiting for its source is not). */
 const working = (row: LogicRow): boolean => row.phase !== "idle" && row.phase !== "following";
@@ -38,6 +37,7 @@ export class TaskConsoleView implements View {
   private onScreen = false;
   private pause: Button;
   private fileCommands: Button[];
+  private diagnostics: DiagnosticsPopup;
   private strip: StatusStrip;
   private tabs = new TabWidget();
   private monitor = element("div", "monitor-page");
@@ -73,7 +73,12 @@ export class TaskConsoleView implements View {
     const open = command("Open…", () => void this.openLayout(), { title: "Open a saved layout and signal wiring" });
     const clear = command("Clear", () => void this.clearBoard(), { role: "destructive", title: "Remove every panel and logic node from the board" });
     this.fileCommands = [save, open, clear];
-    header.append(identity, this.summary, this.kinds.root, this.add.root, this.selectors, this.pause.root, image.root, save.root, open.root, clear.root);
+    // The last hour as the application's journal kept it, with the board and the files it names: one archive
+    // to hand to whoever looks into a fault. Never held back by a running task: a fault is exported while it shows.
+    const diagnostics = command("Diagnostics…", () => this.diagnostics.toggle(),
+      { title: "The last hour's record of commands, runs, board commands, camera frames and drawn data, and the recent data kept beside it: export them as one archive, or set how much data is kept" });
+    this.diagnostics = new DiagnosticsPopup(diagnostics, (command, feedback) => this.send(command, feedback));
+    header.append(identity, this.summary, this.kinds.root, this.add.root, this.selectors, this.pause.root, image.root, save.root, open.root, clear.root, diagnostics.root);
     this.strip = new StatusStrip({ action: ["Stop task", () => { const task = this.boardState()?.active_task; if (task) this.send({ action: "stop_node", node: task }, "Stopping the task…"); }] });
     this.strip.root.id = "status";
     this.strip.text.id = "status-text";
@@ -150,6 +155,7 @@ export class TaskConsoleView implements View {
     const rows = this.nodeRows();
     const takeover = board?.active_task ?? null;
     this.updateKinds(latest);
+    this.diagnostics.accept(latest.diagnostics as DiagnosticsState | undefined, state.request, Boolean(state.error));
     // Header: a board-wide command needs the workbench's board.
     const workbench = Boolean(board);
     for (const control of [this.pause, ...this.fileCommands]) control.disabled = !workbench;
@@ -239,8 +245,7 @@ export class TaskConsoleView implements View {
   private updateKinds(latest: State): void {
     // v2 TaskConsoleView: the console's five plot kinds by their own names, the first the
     // default; then each node type by its api name, measurements, processors, tasks.
-    const offered = new Set((latest.plot_kinds ?? []).map(kind => kind.id));
-    const plots = CONSOLE_PLOT_KINDS.filter(id => offered.has(id)).map(id => ({ value: `plot:${id}`, label: `Plot: ${id}` }));
+    const plots = boardKinds(latest.plot_kinds ?? []).map(({ id }) => ({ value: `plot:${id}`, label: `Plot: ${id}` }));
     const layer = (kind: string): number => ({ measurement: 0, processor: 1, task: 2 } as Record<string, number>)[kind] ?? 3;
     const nodes = [...((latest.node_types as NodeType[] | undefined) ?? [])]
       .sort((a, b) => layer(a.node_kind) - layer(b.node_kind) || a.type_id.localeCompare(b.type_id))

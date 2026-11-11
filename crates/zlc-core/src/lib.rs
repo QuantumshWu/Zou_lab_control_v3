@@ -1,18 +1,26 @@
 //! Immutable numerical storage. Shape, axes and publication identity belong to consumers.
 
+pub mod scan;
+
+pub mod capture;
+
 use std::mem::{align_of, offset_of, size_of};
 use std::sync::{Arc, Mutex, Weak};
 
 pub mod schema;
 pub mod dataset;
+pub mod acquisition;
 pub mod runtime;
 pub mod store;
 pub mod control;
 pub mod pyfmt;
 pub mod decimal;
 pub mod units;
+pub mod scientific;
+pub mod parameters;
 pub mod restrict;
 pub mod checkout;
+pub mod journal;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DType {
@@ -27,6 +35,24 @@ pub struct F16(u16);
 impl F16 {
     pub const fn from_bits(bits: u16) -> Self { Self(bits) }
     pub const fn to_bits(self) -> u16 { self.0 }
+    pub fn to_f64(self) -> f64 {
+        let sign=if self.0&0x8000==0{1.0}else{-1.0};let exponent=(self.0>>10)&31;let fraction=self.0&1023;
+        match exponent{0=>sign*f64::from(fraction)*2.0_f64.powi(-24),31=>if fraction==0{sign*f64::INFINITY}else{f64::NAN},
+            _=>sign*f64::from(1024+fraction)*2.0_f64.powi(i32::from(exponent)-25)}
+    }
+    /// Explicit round-to-nearest-even conversion, used by native array kernels.
+    pub fn from_f64(value:f64)->Self {
+        let sign=if value.is_sign_negative(){0x8000}else{0};let value=value.abs();
+        if value.is_nan(){return Self(sign|0x7e00);}if value.is_infinite(){return Self(sign|0x7c00);}
+        if value<2.0_f64.powi(-14){return Self(sign|((value*2.0_f64.powi(24)).round_ties_even() as u16));}
+        let bits=value.to_bits();let exponent=((bits>>52)&0x7ff) as i32-1023;
+        if exponent>15{return Self(sign|0x7c00);}
+        let significand=(1u64<<52)|(bits&((1u64<<52)-1));let q=significand>>42;let r=significand&((1u64<<42)-1);
+        let rounded=q+u64::from(r>(1u64<<41)||(r==(1u64<<41)&&q&1!=0));
+        let exponent=exponent+15+i32::from(rounded==2048);
+        if exponent>=31{return Self(sign|0x7c00);}
+        Self(sign|((exponent as u16)<<10)|((if rounded==2048{1024}else{rounded}) as u16&1023))
+    }
 }
 
 /// NumPy complex64 storage: native-endian real then imaginary binary32.

@@ -18,7 +18,7 @@ use super::height_bars::HeightBars;
 use super::image::ImageTables;
 use super::geometry;
 use super::labels::state_label;
-use super::limits::{autoscaled_limits, relim_retains, scalar_close, select_display_limits};
+use super::limits::{autoscaled_limits, scalar_close, select_display_limits, tight_limits};
 use super::mpl::axes::{AxesModel, Child, ChildId, TitleText};
 use super::mpl::figure::FigureModel;
 use super::mpl::rc::Rc;
@@ -427,8 +427,14 @@ impl Renderer {
         let home = self.home_limits.get(&axes).copied().unwrap_or((self.fig.axes[axes].xlim, self.fig.axes[axes].ylim));
         match requested {
             None => home,
-            Some((x, y)) => (x.unwrap_or(home.0), y.unwrap_or(home.1)),
+            Some((x, y)) => self.image_view_on_box(axes, (x.unwrap_or(home.0), y.unwrap_or(home.1))),
         }
+    }
+
+    /// A single image's cells are square on screen whatever view is asked of it.
+    fn image_view_on_box(&self, axes: usize, view: ((f64, f64), (f64, f64))) -> ((f64, f64), (f64, f64)) {
+        let (PlotSpec::Image(_), Some(aspect), Some(ratio)) = (&self.spec, self.fig.axes[axes].aspect, self.plan.image_height_over_width) else { return view };
+        geometry::image_view_on_box(view, (&self.axis_scale(axes, true), &self.axis_scale(axes, false)), aspect, ratio)
     }
 
     /// `axis_scale(axis, name)`: how the axis maps a value to its position.
@@ -456,6 +462,8 @@ impl Renderer {
     /// `_set_xlim`: only a real change moves the limits (and re-envelopes
     /// the dense lines of the axes).
     pub fn set_xlim(&mut self, axes: usize, limits: (f64, f64)) {
+        // Claim the resolved view even when it equals the axes' initial (0, 1).
+        self.fig.axes[axes].autoscale[0] = false;
         let current = self.fig.axes[axes].xlim;
         if !(scalar_close(current.0, limits.0) && scalar_close(current.1, limits.1)) {
             self.fig.axes[axes].set_xlim(limits.0, limits.1);
@@ -465,6 +473,7 @@ impl Renderer {
     }
 
     pub fn set_ylim(&mut self, axes: usize, limits: (f64, f64)) {
+        self.fig.axes[axes].autoscale[1] = false;
         let current = self.fig.axes[axes].ylim;
         if !(scalar_close(current.0, limits.0) && scalar_close(current.1, limits.1)) {
             self.fig.axes[axes].set_ylim(limits.0, limits.1);
@@ -667,6 +676,20 @@ impl Renderer {
     }
 
     // --------------------------------------------------------------- limits
+    /// These ranges retain live-frame history in the current source's display units.
+    pub(crate) fn reset_limit_history(&mut self) {
+        self.limits.clear();
+        self.home_limits.clear();
+        self.histogram.limits.clear();
+        self.rolling.count_ceiling = 0.0;
+        self.facet.image_signature = None;
+        for image in std::iter::once(&mut self.image).chain(self.facet.images.values_mut()) {
+            image.distribution_limits = None;
+            image.distribution_cache = None;
+            image.distribution.1 = 0.0;
+        }
+    }
+
     /// `_resolve_data_limits(key, data_range, state, quantity, cache_selected=...)`.
     pub(crate) fn resolve_data_limits(&mut self, key: &str, data_range: Option<(f64, f64)>, state: &DisplayState,
                                       quantity: &str, cache_selected: bool) -> (f64, f64) {
@@ -686,19 +709,28 @@ impl Renderer {
             None
         } else if let Some(range) = data_range {
             let policy = &self.style.render;
-            Some(autoscaled_limits(range, current, policy.image_color_padding_fraction, policy.image_color_deadband_fraction,
-                                   mode == RelimMode::Normal, relim_retains(mode, rules_geometry) && mode_asked == Some(asked)))
+            // An axis that rules geometry keeps its hysteresis even when tight: a scene must not jump every frame.
+            Some(if mode == RelimMode::Tight && !rules_geometry {
+                tight_limits(range, policy.image_color_padding_fraction)
+            } else {
+                autoscaled_limits(range, current, policy.image_color_padding_fraction, policy.image_color_deadband_fraction,
+                                  mode == RelimMode::Normal, mode_asked == Some(asked))
+            })
         } else {
             Some(current.unwrap_or((0.0, 1.0)))
         };
         let authored = (real_value(state.get(&format!("{quantity}_min"))), real_value(state.get(&format!("{quantity}_max"))));
         let selected = select_display_limits(mode, automatic, authored, allow_partial)
             .unwrap_or_else(|error| panic!("{error}"));
-        let cached = if cache_selected { Some(selected) } else { automatic };
-        if let Some(cached) = cached {
-            self.limits.entry(limits_key).or_insert(LimitMemo { limits: None, asked: None }).limits = Some(cached);
+        // Empty frames can display a fallback; only measured or explicitly
+        // fixed limits can establish a history for later frames.
+        if data_range.is_some() || mode == RelimMode::Fixed {
+            let cached = if cache_selected { Some(selected) } else { automatic };
+            if let Some(cached) = cached {
+                self.limits.entry(limits_key).or_insert(LimitMemo { limits: None, asked: None }).limits = Some(cached);
+            }
+            self.limits.entry(format!("{key}:relim_mode")).or_insert(LimitMemo { limits: None, asked: None }).asked = Some(asked);
         }
-        self.limits.entry(format!("{key}:relim_mode")).or_insert(LimitMemo { limits: None, asked: None }).asked = Some(asked);
         selected
     }
 

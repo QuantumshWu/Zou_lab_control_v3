@@ -8,7 +8,9 @@ publish.workspace = true
 zlc-core = { path = "../zlc-core" }
 zlc-archive = { path = "../zlc-archive" }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
 unicode-normalization = "0.1"
 caseless = "0.2"
 unicode-general-category = "1"

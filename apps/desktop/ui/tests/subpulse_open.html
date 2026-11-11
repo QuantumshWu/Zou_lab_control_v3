@@ -1,0 +1,68 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Expanded Subpulse regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. An expanded Subpulse's own periods and brackets wear what the closed
+// Subpulse does (its edge and its title's ink; green while Config supplies it), and no other item does.
+// Its Start and End cards hold their commands whole: the same inset left and right of each.
+import {ComponentCard} from '../dist/pulse/edit.js';
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const results = [];
+const card = (...classes) => {
+  const root = document.createElement('section'); root.className = ['card', 'bordered', 'pulse-card', ...classes].join(' ');
+  const title = document.createElement('div'); title.className = 'heading pulse-title'; title.textContent = 'x';
+  root.append(title); document.body.append(root);
+  const style = getComputedStyle(root);
+  return {edge: style.borderTopColor, ground: style.backgroundColor, ink: getComputedStyle(title).color};
+};
+const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+try {
+  const closed = card('pulse-component'), config = card('pulse-component', 'config');
+  const period = card('pulse-period'), post = card('pulse-post');
+  assert(!same(closed, config), 'the two sources look alike: the case is not made');
+  for (const kind of ['pulse-period', 'pulse-post']) {
+    const plain = kind === 'pulse-period' ? period : post;
+    const inside = card(kind, 'in-subpulse'), supplied = card(kind, 'in-subpulse', 'in-subpulse-config');
+    assert(inside.edge === closed.edge && inside.ink === closed.ink, `${kind} in an open Subpulse: ${JSON.stringify(inside)} / ${JSON.stringify(closed)}`);
+    assert(same(supplied, config), `${kind} in an open Config Subpulse: ${JSON.stringify(supplied)} / ${JSON.stringify(config)}`);
+    assert(plain.edge !== closed.edge || plain.ink !== closed.ink, `${kind} outside a Subpulse looks like one inside`);
+    results.push(kind);
+  }
+  const editor = document.createElement('div'); editor.className = 'pulse-editor';
+  const items = document.createElement('div'); items.className = 'pulse-items'; editor.append(items); document.body.append(editor);
+  const framing = (mode, name, total) => {
+    const made = new ComponentCard('c1', mode, () => 0, () => {});
+    items.append(made.root);
+    made.update({source: 'default', config_active: false, total_text: total, error: '', summary_text: '3 periods', name});
+    return made.root;
+  };
+  const insets = root => {
+    const box = root.getBoundingClientRect(), style = getComputedStyle(root);
+    const left = box.left + parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft);
+    const right = box.right - parseFloat(style.borderRightWidth) - parseFloat(style.paddingRight);
+    return [...root.querySelectorAll('.pulse-ports > button')].map(button => {
+      const at = button.getBoundingClientRect();
+      return {text: button.textContent, left: at.left - left, right: right - at.right, short: button.scrollWidth - button.clientWidth};
+    });
+  };
+  const spacer = document.createElement('section'); spacer.className = 'card bordered pulse-card pulse-period spacer'; items.append(spacer);
+  for (const mode of ['start', 'end']) {
+    const root = framing(mode, 'ramp', '12 ms');
+    const commands = insets(root);
+    assert(commands.length === 3 && commands.every(command => Math.abs(command.left) < 0.5 && Math.abs(command.right) < 0.5 && command.short <= 0),
+           `${mode}: a command stands out of its card: ${JSON.stringify(commands)}`);
+    assert(root.getBoundingClientRect().width >= spacer.getBoundingClientRect().width, `${mode}: narrower than a spacer`);
+    // A long total and a long name elide: they do not widen the card.
+    const long = framing(mode, 'a very long name for a subpulse that nobody could read whole', '1234567.890123 ms');
+    assert(Math.abs(long.getBoundingClientRect().width - root.getBoundingClientRect().width) < 0.5,
+           `${mode}: its words widened it: ${long.getBoundingClientRect().width} / ${root.getBoundingClientRect().width}`);
+    results.push(`${mode} commands`);
+  }
+  document.getElementById('result').textContent = JSON.stringify({passed: true, count: results.length});
+} catch (error) {
+  document.getElementById('result').textContent = JSON.stringify({passed: false, count: results.length, error: String(error.stack || error)});
+}
+</script>

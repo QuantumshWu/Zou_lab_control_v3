@@ -106,6 +106,8 @@ pub trait PanelRenderer: Send {
     fn spec(&self) -> &PlotSpec;
     /// `renderer.spec = spec`: takes effect with the next present or relayout.
     fn set_spec(&mut self, spec: PlotSpec);
+    /// Begin a different signal's automatic ranges, including sibling outputs of a run.
+    fn reset_limit_history(&mut self) {}
     /// Rebuild the figure for `plan` (`relayout`); nothing is composed.
     fn relayout(&mut self, plan: SurfacePlan, facet_index: Option<usize>, facet_focus_index: Option<usize>) -> Result<()>;
     /// Prepare every scene layer of `frame`; compose one canvas front when
@@ -165,6 +167,10 @@ pub trait PanelRenderer: Send {
     fn height_bars_pick(&self, x: f64, y: f64) -> Option<(f64, f64)>;
 
     /// The committed series lock (`{"series_lock": ...}`).
+    /// The empty-ring ink for the image's current backdrop.
+    fn set_empty_point_style(&mut self, _style: &crate::style::PointRingToken) {}
+    /// Present an already-resolved selection using the ordinary series inspector.
+    fn show_resolved_series_readout(&mut self, _readout: Option<&crate::configuration::SeriesReadout>) {}
     fn series_interaction(&self) -> Interaction;
     /// The presented series readout (`{"series_readout": ...}`).
     fn series_presentation(&self) -> Presentation;

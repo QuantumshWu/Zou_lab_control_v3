@@ -57,7 +57,7 @@ A failed device does not stop the others; the operator may keep rows that cannot
 Device Control: `read_device {device}` reads `devices[i].fields` (readback, limits, `editable` and the
 `reason` when not). `tune_device {device, field, value, unit?}` applies one field; its reply holds the
 readback. A field a running node protects is refused; an unprotected live-safe field of a held device needs
-the operator's `accept_device_risk`. `read_device {units: {field: "MHz"}}` reads a field in another unit.
+the operator's `accept_device_risk`. `read_device {units: {field: "MHz"}}` reads a field in another unit; with `keep: true` the apparatus keeps it as the operator's unit.
 Commands a device type declares appear as `<instance>__<command>` tools while it is open
 (an id outside letters, digits and `_` is spelled `<letters>-<hash>`; `get_state` devices list each row's tool names).
 `get_device_log {device}` is its plugin's log.
@@ -73,7 +73,10 @@ the pulse in the Pulse Editor first, then in one batch: `start_node {node}`, `wa
 Calibration and Seamless Scan run their own acquisition and Pulse: start them once, not the camera by hand.
 Processors (Occupancy, Frame Survival, Derive, ...) can start before their source publishes: they follow
 it (`phase: following`) and run on each new acquisition. `waveform_measurement` does the same for
-waveform devices; read the source's actual axes in `list_signals`.
+waveform devices; read the source's actual axes in `list_signals`. Its `trigger_slope` (`rising`/`falling`,
+default `off`) with `trigger_channel`, `trigger_level` and `trigger_samples` locks a slow free-running source in
+software: each crossing gives one record of that many samples with the crossing in its middle, on a record time
+axis that is zero there. With `repeat` N it keeps the records of N crossings; with 0 each record is the latest.
 
 ## pulse
 
@@ -142,12 +145,15 @@ before Start. Configure the result panel and its fit before Start: the first swe
 
 ## plot
 
-`add_panel {signal, kind}` (`image`, `curve`, `histogram`, `rolling`, `facet_grid`; a blank panel without
+`add_panel {signal, kind}` (`image`, `curve`, `histogram`, `rolling`, `facet_grid`, `point_map`; a blank panel without
 `signal`, bound later with `configure {binding: {signal}}`); its reply's `added_panels` names it. Its row in
 `get_state panels` has `controls`:
 section `semantic` (`kind`, `cell_kind`, `reduction`, and one `fate:<domain>:<axis>` per data axis),
 `display` (colormap, limits, bins, uncertainty, ...). `configure {panel, semantic: {...}, parameters: {...},
 size, binding: {window}}` sets them with exactly the values the controls list.
+
+`point_map` colours sites by the selected signal's value in their recorded calibration geometry.
+Use the panel's axis controls to select or reduce extra dimensions.
 
 Axis roles: `x` for the scanned coordinate, `facet` for independent cells such as sites, `group` for
 overlaid series, `reduce` (with `reduction: "mean"`) for repeated trials, a scope pin for one coordinate

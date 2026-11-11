@@ -740,6 +740,7 @@ fn overlay(suite: &Suite, reads: &mut Reads<'_>, doc: &Value) -> Option<Arc<Imag
     let status = doc["status"].as_str().map(|key| reads.get(key));
     let paths = (!doc["paths_xy"].is_null()).then(|| { let (values, shape) = floats(&doc["paths_xy"]); (values.into(), shape[1]) });
     Some(Arc::new(ImagePointOverlay {
+        face_values: None,
         revision: doc["revision"].as_u64().unwrap(), coordinates: floats(&doc["coordinates"]).0.into(), point_ids: strings(&doc["point_ids"]),
         labels: doc["labels"].as_array().map(|items| items.iter().map(|item| item.as_str().map(str::to_owned)).collect()),
         static_statuses: doc["static_statuses"].as_array().map(|items| items.iter().map(|item| match item.as_str().unwrap() {

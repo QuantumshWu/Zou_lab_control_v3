@@ -203,12 +203,18 @@ fn played_json(table: &ScanRows) -> Json {
 fn load_plan(board: &Board, sequence: &Sequence, api_values: &ApiValues, scan: Option<&ScanRows>) -> Result<RunPlan> {
     let description = board.description();
     let plan = plan_run(sequence, api_values, scan, &description.geometry)?;
+    load_prepared(board, &plan)?;
+    Ok(plan)
+}
+
+fn load_prepared(board: &Board, plan: &RunPlan) -> Result<()> {
+    let description = board.description();
     if plan.resolved.target.abi_fingerprint() != description.target.abi_fingerprint() {
         return value_error("pulse target ABI is incompatible with the connected board");
     }
     let program = Arc::new(compile_sequence(&plan.resolved, &description.geometry, description.clock_hz)?);
     board.load(program, Some(plan.resolved.clone()), plan.rows.clone())?;
-    Ok(plan)
+    Ok(())
 }
 
 /// What the board holds or plays as a receipt: the command id of a FIRE, the
@@ -226,6 +232,17 @@ fn receipt(board: &Board, applied: &AppliedState, command_id: Option<u32>, plan:
     receipt.extend([("applied", archive_snapshot(board, applied)?), ("timing", timing)]);
     if let Some(played) = plan.and_then(|plan| plan.played.as_ref()) { receipt.push(("scan", played_json(played))); }
     Ok(Json::object(receipt))
+}
+
+/// Apply an already validated native plan. The caller can check its effective
+/// scan geometry before any LOAD/FIRE, without compiling or quantizing twice.
+pub fn apply_run_plan(board: &Board, plan: &RunPlan, fire: Option<(u64,u64)>) -> Result<Json> {
+    load_prepared(board, plan)?;
+    match fire {
+        Some((runs,sweeps)) => { let (applied,id)=board.fire(runs,sweeps)?; receipt(board,&applied,Some(id),Some(plan)) },
+        None => { let applied=board.applied()?.ok_or_else(|| Error::new(Kind::Runtime,"the board reports no LOAD"))?;
+            receipt(board,&applied,None,Some(plan)) },
+    }
 }
 
 /// `pulse_run`: plan, ABI check, compile, load and fire one document; the

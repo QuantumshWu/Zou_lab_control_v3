@@ -128,7 +128,7 @@ pub const RANGE_OUTPUTS: [(&str, &str); 2] = [("roi_frame", "ROI frame"), ("roi_
 /// derive. A rolling trace's region names no upstream rows, so it derives nothing;
 /// a surface whose y names an axis takes areas, any other x ranges.
 pub fn selection_outputs(subject: &SelectionSubject) -> &'static [(&'static str, &'static str)] {
-    if subject.plot_kind == PlotKind::Rolling { &[] } else if subject.y.is_some() { &AREA_OUTPUTS } else { &RANGE_OUTPUTS }
+    if matches!(subject.plot_kind, PlotKind::Rolling | PlotKind::PointMap) { &[] } else if subject.y.is_some() { &AREA_OUTPUTS } else { &RANGE_OUTPUTS }
 }
 
 /// One region's cut, and what it derives: `region` the axis terms, `band` a value
@@ -147,7 +147,7 @@ impl RoiPlan {
     /// names no axis (a histogram's value) is a band on the measured value; a
     /// rolling trace's region derives nothing (`None`).
     pub fn for_region(schema: &Arc<DatasetSchema>, subject: &SelectionSubject, selector: &SelectorState) -> Result<Option<Self>> {
-        if subject.plot_kind == PlotKind::Rolling { return Ok(None); }
+        if matches!(subject.plot_kind, PlotKind::Rolling | PlotKind::PointMap) { return Ok(None); }
         let (x_bounds, y_bounds) = match &selector.value {
             SelectorValue::Area(area) => (area.x, subject.y.as_ref().map(|_| area.y)),
             SelectorValue::XRange(range) => (*range, None),

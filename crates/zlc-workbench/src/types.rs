@@ -104,6 +104,11 @@ pub struct DeviceRequirement {
     /// `None`: every tunable field of the device is frozen while claimed.
     pub protected_fields: Option<Vec<String>>,
     pub enabled_when: Option<(String, Vec<Value>)>,
+    /// The run only reads the device (the methods it lists as reads): it claims nothing of it, protects
+    /// none of its fields, and runs beside whoever does hold it.
+    pub reads_only: bool,
+    /// A draft may leave it unset, or name a device that is not open: the node is then built without it.
+    pub optional: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -139,6 +144,12 @@ impl TypeDescriptor {
     pub fn discoverable(&self) -> bool { self.is_device() && self.queries.iter().any(|query| query == "discover") }
     /// A device type that finds what a row leaves blank before it opens (Init's resolve phase).
     pub fn resolvable(&self) -> bool { self.is_device() && self.queries.iter().any(|query| query == "resolve") }
+    /// A processor that needs nothing but its dataset input, by its declaration: no device, no file,
+    /// no workspace resource, no acquisition it restarts. It can run on any dataset, a saved one too.
+    pub fn pure_processor(&self) -> bool {
+        self.node.as_ref().is_some_and(|node| node.node_kind == "processor" && !node.inputs.is_empty() && node.devices.is_empty()
+            && node.artifact_inputs.is_empty() && node.workspace_resources.is_empty() && node.acquisition_input.is_none())
+    }
     /// What views list: everything except the authoring schema.
     pub fn summary(&self) -> Value {
         let mut row = json!({"type_id": self.type_id, "kind": self.kind, "family": self.family, "label": self.label(),
@@ -157,6 +168,8 @@ pub struct TypeCatalog {
     pub errors: Vec<(String, String)>,
     /// Apparatus starting points (Device Manager New…): name -> (instance id, type id) rows.
     pub templates: Vec<(String, Vec<(String, String)>)>,
+    /// Package-owned apparatus domains (for example a simulation world).
+    pub configuration_schemas: std::collections::BTreeMap<String, Vec<Field>>,
 }
 
 impl TypeCatalog {
@@ -176,7 +189,11 @@ impl TypeCatalog {
         let templates = document["templates"].as_object().into_iter().flatten().map(|(name, rows)| (name.clone(),
             rows.as_array().into_iter().flatten().map(|row| (row["instance_id"].as_str().unwrap_or("").to_owned(), row["type_id"].as_str().unwrap_or("").to_owned())).collect()))
             .collect();
-        Ok(Self { types, errors, templates })
+        let configuration_schemas = match document.get("configuration_schemas") {
+            None => Default::default(),
+            Some(schemas) => serde_json::from_value(schemas.clone()).map_err(|e| format!("configuration schemas: {e}"))?,
+        };
+        Ok(Self { types, errors, templates, configuration_schemas })
     }
     pub fn get(&self, type_id: &str) -> Option<&TypeDescriptor> { self.types.iter().find(|item| item.type_id == type_id) }
     pub fn devices(&self) -> impl Iterator<Item = &TypeDescriptor> { self.types.iter().filter(|item| item.is_device()) }

@@ -156,5 +156,7 @@ pub fn parameter_controls_for_kind(kind: super::kinds::PlotKind, values: Option<
 pub fn plot_kinds() -> Json {
     Json::Array(super::handlers::HANDLERS.iter().map(|handler| json!({
         "id": handler.kind.value(), "label": handler.display_name, "record_input": handler.record_input,
+        // What every other owner reads instead of keeping a list of kinds of its own.
+        "board": handler.board, "overlay": handler.overlay, "default_window": handler.kind.default_window(),
     })).collect())
 }

@@ -120,14 +120,14 @@ impl Science {
             overlay_errors: BTreeMap::new(), pending: None, report, selected, held: BTreeMap::new() }
     }
 
-    fn open(&self, path: &str) -> Result<DecodedArchive,String> {
+    pub(crate) fn open(&self, path: &str) -> Result<DecodedArchive,String> {
         // Every entry point (Browse, typed path, refresh, CLI or remote open)
         // resolves a preview to its data before decoding or replacing a figure.
         let path = crate::figure_file::archive_path(std::path::Path::new(path))?;
         let path = path.to_str().ok_or("The figure path is not valid Unicode")?;
         let opened = read_document(path, self.services.fit.clone(), self.services.defaults.clone(), self.services.registry.clone())
             .map_err(|error| error_text(&error))?;
-        Ok(DecodedArchive { path: opened.path, info: opened.info, items: opened.items.into_iter().map(|item| ArchiveItem {
+        Ok(DecodedArchive { path: opened.path, info: opened.info, lineage: opened.lineage, items: opened.items.into_iter().map(|item| ArchiveItem {
             key: item.key, plane: item.plane, target: item.target, overlay: item.overlay, overlay_plane: item.overlay_plane }).collect() })
     }
 
@@ -189,7 +189,7 @@ impl Science {
         if let Some(archive)=&job.archive {
             command["action"]=json!("sync_panels");
             command["reset_document"]=json!(true);
-            command["initial_document"]=json!({"path":archive.path(),"info":archive.info()});
+            command["initial_document"]=json!({"path":archive.path()});
             let mut items = BTreeMap::new();
             for item in archive.items() {
                 let mut overlay=item.overlay.clone();
@@ -218,8 +218,13 @@ impl Science {
                 }
                 let mut read = held[&key].clone();
                 // A saved Figure keeps the layer it was saved with; a data copy's preview, the one its copy kept.
-                if job.document != 0 { if let Some(layer) = &input.layer { read.overlay = Some(Some(layer.clone())); } }
-                if job.document == 0 {
+                if !crate::workbench_host::plot_kind(&input.kind).is_some_and(|facts| facts.overlay) {
+                    // A kind that takes no chosen overlay: a site image owns the one resolved from this exact read.
+                    read.overlay = Some(None);
+                    self.overlay_errors.remove(&input.panel);
+                } else if job.document != 0 {
+                    if let Some(layer) = &input.layer { read.overlay = Some(Some(layer.clone())); }
+                } else {
                     // A live image carries its point layer (v2 ImageFrame(snapshot, overlay)).
                     // A point review draws its own candidates.
                     read.overlay = Some(match (&input.layer, self.overlays.layer(&input.panel, source, input.overlay.as_ref())) {

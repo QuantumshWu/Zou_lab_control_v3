@@ -3,14 +3,14 @@
 // and the Monitor / Logic / Edit pages.  The board, the rows and the pages
 // draw the workbench's state; every button is one §4 command.
 import { ComboBox, Dialog, Field, StatusStrip, TabWidget, command, confirm, element, note, setChecked, setElided, setState, statusDot, switchButton, } from "../fluent/index.js";
+import { boardKinds } from "../protocol.js";
 import { queueStatus, saveImage } from "../shell.js";
+import { DiagnosticsPopup } from "./diagnostics.js";
 import { LogicEditorView, LogicRowView, PublisherEditorView, projectRow } from "./logic.js";
 import { PanelEditView } from "./panel_edit.js";
 const ADD_WORDS = { plot: "Add panel", logic: "Add node" };
 /** A node type in the chooser: its layer, then its name (v2 "Processor: occupancy"). */
 const LAYER_WORDS = { measurement: "Measurement", processor: "Processor", task: "Task", panel_publisher: "Panel publisher" };
-/** TASK_CONSOLE_PANEL_KINDS: what the console's chooser offers, in v2's order. */
-const CONSOLE_PLOT_KINDS = ["image", "curve", "rolling", "histogram", "facet_grid"];
 const SEVERITY = { idle: 0, task: 0, running: 1, warning: 2, error: 3 };
 /** v2 _running_logic: a node still at work, started or waiting to start (a follower waiting for its source is not). */
 const working = (row) => row.phase !== "idle" && row.phase !== "following";
@@ -32,6 +32,7 @@ export class TaskConsoleView {
     onScreen = false;
     pause;
     fileCommands;
+    diagnostics;
     strip;
     tabs = new TabWidget();
     monitor = element("div", "monitor-page");
@@ -68,7 +69,11 @@ export class TaskConsoleView {
         const open = command("Open…", () => void this.openLayout(), { title: "Open a saved layout and signal wiring" });
         const clear = command("Clear", () => void this.clearBoard(), { role: "destructive", title: "Remove every panel and logic node from the board" });
         this.fileCommands = [save, open, clear];
-        header.append(identity, this.summary, this.kinds.root, this.add.root, this.selectors, this.pause.root, image.root, save.root, open.root, clear.root);
+        // The last hour as the application's journal kept it, with the board and the files it names: one archive
+        // to hand to whoever looks into a fault. Never held back by a running task: a fault is exported while it shows.
+        const diagnostics = command("Diagnostics…", () => this.diagnostics.toggle(), { title: "The last hour's record of commands, runs, board commands, camera frames and drawn data, and the recent data kept beside it: export them as one archive, or set how much data is kept" });
+        this.diagnostics = new DiagnosticsPopup(diagnostics, (command, feedback) => this.send(command, feedback));
+        header.append(identity, this.summary, this.kinds.root, this.add.root, this.selectors, this.pause.root, image.root, save.root, open.root, clear.root, diagnostics.root);
         this.strip = new StatusStrip({ action: ["Stop task", () => { const task = this.boardState()?.active_task; if (task)
                     this.send({ action: "stop_node", node: task }, "Stopping the task…"); }] });
         this.strip.root.id = "status";
@@ -148,6 +153,7 @@ export class TaskConsoleView {
         const rows = this.nodeRows();
         const takeover = board?.active_task ?? null;
         this.updateKinds(latest);
+        this.diagnostics.accept(latest.diagnostics, state.request, Boolean(state.error));
         // Header: a board-wide command needs the workbench's board.
         const workbench = Boolean(board);
         for (const control of [this.pause, ...this.fileCommands])
@@ -260,8 +266,7 @@ export class TaskConsoleView {
     updateKinds(latest) {
         // v2 TaskConsoleView: the console's five plot kinds by their own names, the first the
         // default; then each node type by its api name, measurements, processors, tasks.
-        const offered = new Set((latest.plot_kinds ?? []).map(kind => kind.id));
-        const plots = CONSOLE_PLOT_KINDS.filter(id => offered.has(id)).map(id => ({ value: `plot:${id}`, label: `Plot: ${id}` }));
+        const plots = boardKinds(latest.plot_kinds ?? []).map(({ id }) => ({ value: `plot:${id}`, label: `Plot: ${id}` }));
         const layer = (kind) => ({ measurement: 0, processor: 1, task: 2 }[kind] ?? 3);
         const nodes = [...(latest.node_types ?? [])]
             .sort((a, b) => layer(a.node_kind) - layer(b.node_kind) || a.type_id.localeCompare(b.type_id))

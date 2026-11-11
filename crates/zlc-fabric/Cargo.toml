@@ -9,3 +9,6 @@ zlc-core = { path = "../zlc-core" }
 zlc-plugin-host = { path = "../zlc-plugin-host" }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+zlc-workbench = { path = "../zlc-workbench" }

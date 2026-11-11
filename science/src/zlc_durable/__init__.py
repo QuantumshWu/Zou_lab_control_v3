@@ -1,6 +1,8 @@
 """Durable filesystem primitives: write atomically, land where you meant to.
 
-Every package that saves anything depends on this and on nothing else of ours.
+Saving packages use this facade and the independent native client; no plugin
+SDK or application import is required. Publication/durability rules are shared
+with the native archive owner, while scientific content encoders stay Python.
 It deliberately does NOT carry a canonical encoder or content digests -- an
 archive in this project is plain JSON and plain arrays, readable without
 importing any of our packages.
@@ -8,7 +10,7 @@ importing any of our packages.
 
 from __future__ import annotations
 
-from .readable import readable_json_bytes, strict_json_loads, write_readable_json
+from .readable import readable_json, readable_json_bytes, strict_json_loads, write_readable_json
 from .durability import (
     DirectoryDurabilityError,
     atomic_write_bytes,
@@ -26,6 +28,7 @@ __all__ = [
     "atomic_write_bytes",
     "atomic_write_file",
     "atomic_write_text",
+    "readable_json",
     "readable_json_bytes",
     "strict_json_loads",
     "write_readable_json",

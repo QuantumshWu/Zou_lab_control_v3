@@ -72,7 +72,7 @@ impl<R> Effect<R> {
 /// A rolling region names no upstream rows: None.
 pub fn selection_document(subject: &SelectionSubject, selector: &SelectorState) -> Option<Json> {
     use crate::kinds::PlotKind;
-    if subject.plot_kind == PlotKind::Rolling { return None; }
+    if matches!(subject.plot_kind, PlotKind::Rolling | PlotKind::PointMap) { return None; }
     let range = |axis: &Option<crate::kinds::AxisRef>, bounds: &crate::configuration::selectors::NumericRange, frame: &Option<Arc<str>>| json!({
         "axis": axis.as_ref().map_or("", |axis| axis.axis_id.as_str()), "lower": bounds.low.min(bounds.high), "upper": bounds.low.max(bounds.high),
         "coordinate_frame": frame.as_deref(), "domain": axis.as_ref().map_or("value", |axis| axis.domain.value()),

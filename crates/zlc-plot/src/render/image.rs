@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use super::colormaps;
 use super::core::{text_value, Kind, Renderer};
-use super::geometry::{centers_extent, image_cell_aspect, image_coordinate_scale, square_image_limits};
+use super::geometry::{centers_extent, image_cell_aspect, image_coordinate_scale, letterboxed_limits};
 use super::labels::{has_explicit_unit_suffix, quantity_label, state_label};
 use super::limits::{autoscaled_limits, scalar_close};
 use super::mpl::axes::{nonsingular_by, Child, ChildId, LineArtist};
@@ -379,16 +379,17 @@ impl Renderer {
             self.chrome_dirty.insert(axes);
         }
         let coordinate_aspect = coordinate_aspect.unwrap_or_else(|| panic!("image cell geometry has no finite coordinate aspect"));
-        let home = square_image_limits((extent[0], extent[1], extent[2], extent[3]), coordinate_aspect).unwrap_or_else(|e| panic!("{e}"));
+        let screen_scale = coordinate_aspect / self.plan.image_height_over_width.unwrap_or(1.0);
+        let home = letterboxed_limits((extent[0], extent[1], extent[2], extent[3]), screen_scale).unwrap_or_else(|e| panic!("{e}"));
         let home = ((scales.0.value(home.0), scales.0.value(home.1)), (scales.1.value(home.2), scales.1.value(home.3)));
         self.home_limits.insert(axes, home);
+        self.fig.axes[axes].aspect = Some(coordinate_aspect);
         let requested = if self.painted_surfaces().iter().any(|(_, a, _)| *a == axes) { self.requested_view } else { None };
         let (x_limits, y_limits) = self.resolved_view_limits(axes, requested);
         self.set_xlim(axes, x_limits);
         self.set_ylim(axes, y_limits);
         let model = &mut self.fig.axes[axes];
         model.anchor = policy.image_anchor;
-        model.aspect = Some(coordinate_aspect);
         // The drawable box follows the aspect: Matplotlib's `apply_aspect` resolves it now.
         let (l, b, w, h) = zlc_figure::transform::bounds(&model.position);
         let signature = [coordinate_aspect, x_limits.0, x_limits.1, y_limits.0, y_limits.1, l, b, w, h].map(f64::to_bits);
@@ -507,7 +508,7 @@ impl Renderer {
                 autoscaled_limits(range, current, policy.image_color_padding_fraction, policy.image_color_deadband_fraction, false, true)
             }
         };
-        self.image.distribution_limits = Some(selected);
+        if data_range.is_some() { self.image.distribution_limits = Some(selected); }
         let rail = (if color_limits.0 < selected.0 { color_limits.0 } else { selected.0 },
                     if color_limits.1 > selected.1 { color_limits.1 } else { selected.1 });
         (selected, rail)
@@ -800,6 +801,15 @@ impl Renderer {
             prepared.color_limits = (low, high);
         }
         if let Some(Child::Image(image)) = self.fig.axes[axes].child_mut(id) { image.clim = Some((low, high)); }
+        if !self.height_bars.active && self.image.points.face_values.is_some() {
+            if let (Some((cmap, _)), Some(rings)) = (self.image.mapping, self.image.points.rings) {
+                let faces = self.point_facecolors(cmap, (low, high));
+                if let Some(Child::Ellipses(artist)) = self.fig.axes[self.image.points.axes].child_mut(rings) {
+                    artist.facecolors = faces;
+                }
+                self.image.points.signature = None;
+            }
+        }
         Ok(())
     }
 }

@@ -1,4 +1,6 @@
 //! Real plugin processes (needs ZLC_PLUGIN_PYTHON = the science env's python.exe).
+mod support;
+
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -21,6 +23,7 @@ fn host() -> Option<(PluginHost, Runtime, SafeActions, mpsc::Receiver<HostEvent>
     let (sender, events) = mpsc::channel();
     let sender = std::sync::Mutex::new(sender);
     let host = PluginHost::new(config, runtime.clone(), safe.clone(), move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
+        support::install(&host).unwrap();
     Some((host, runtime, safe, events))
 }
 
@@ -83,8 +86,8 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
         "devices":{"echo":{"instance":"echo","type_id":"test.echo","capabilities":["test.echo"],"tunable":true,"reads":opened["reads"]}}});
     let prepared = host.call("counter","query",prepare(128),Duration::from_secs(20)).unwrap().value["prepared"].as_str().unwrap().to_owned();
     host.set_node_name("counter", "Imaging camera");
-    let run = host.start_run("counter", RunRequest { prepared: Some(prepared), device_labels: Default::default(), values: json!({"count": 3, "size": 128}),
-        devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
+    let run = host.start_run("counter", RunRequest { prepared: Some(prepared), device_labels: Default::default(), device_units: Default::default(), values: json!({"count": 3, "size": 128}),
+        devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), reads: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into(), record_devices: false }).unwrap();
     assert!(host.call("counter","query",prepare(13),Duration::from_secs(20)).err().unwrap().message.contains("unsupported test frame shape"));
     assert_eq!(host.spi("echo", "frame", json!([2, 1]), json!({}), Duration::from_secs(5)).err().unwrap().kind, ErrorKind::NotClaimed);
@@ -135,7 +138,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     // commits it with that event as parent and the same ordinal, then completes.
     host.open("doubler", "doubler", json!({}), json!({})).unwrap();
     let doubled_signal = "@logic/doubler/doubled";
-    let run = host.start_run("doubler", RunRequest { prepared: None, device_labels: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
+    let run = host.start_run("doubler", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(), reads: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: Some(frames_signal.to_owned()), run_directory: None,
         outputs: [("doubled".to_owned(), doubled_signal.to_owned())].into(), record_devices: false }).unwrap();
     let (outcome, result, error, ..) = finished(&run);
@@ -159,8 +162,8 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while host.registry().holds(&lent) > 1 && std::time::Instant::now() < deadline { std::thread::sleep(Duration::from_millis(20)); }
     assert_eq!(host.registry().holds(&lent), 1, "only Runtime holds the last frame");
-    let run = host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), values: json!({"count": 1, "size": 128}),
-        devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
+    let run = host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values: json!({"count": 1, "size": 128}),
+        devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), reads: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into(), record_devices: false }).unwrap();
     let (outcome, _, error, ..) = finished(&run);
     assert_eq!(outcome, "completed", "{error:?}");
@@ -169,11 +172,11 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     // A following processor reads its source's next generation from its first commit,
     // however late its own run starts: here, after that source has sealed.
     host.follow("doubler", Some(frames_signal));
-    let run = host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), values: json!({"count": 3, "size": 128}),
-        devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator, resources: json!({}),
+    let run = host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values: json!({"count": 3, "size": 128}),
+        devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), reads: Default::default(), origin: Origin::Operator, resources: json!({}),
         source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames_signal.to_owned())].into(), record_devices: false }).unwrap();
     assert_eq!(finished(&run).0, "completed");
-    let run = host.start_run("doubler", RunRequest { prepared: None, device_labels: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
+    let run = host.start_run("doubler", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(), reads: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: Some(frames_signal.to_owned()), run_directory: None,
         outputs: [("doubled".to_owned(), doubled_signal.to_owned())].into(), record_devices: false }).unwrap();
     let (outcome, result, error, ..) = finished(&run);
@@ -235,7 +238,7 @@ fn a_run_follows_only_an_exact_input_and_what_ends_early_leaves_with_its_signals
             _ => {}
         }
     };
-    let request = |values, source: Option<&str>, output: (&str, &str)| RunRequest { prepared: None, device_labels: Default::default(), values, devices: Default::default(), shared: Default::default(), origin: Origin::Operator,
+    let request = |values, source: Option<&str>, output: (&str, &str)| RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values, devices: Default::default(), shared: Default::default(), reads: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: source.map(str::to_owned), run_directory: None, outputs: [(output.0.to_owned(), output.1.to_owned())].into(), record_devices: false };
     let published = |signal: &str| {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -349,7 +352,7 @@ fn close_releases_a_handle_left_by_a_failed_init_before_host_admission() {
 #[test]
 fn a_start_records_the_bench_its_devices_report_and_a_busy_one_is_not_lost() {
     let Some((host, runtime, _safe, events)) = host() else { return };
-    let snapshot = |instance: &str, wait_ms: u64| host.snapshot(instance, Duration::from_millis(wait_ms));
+    let snapshot = |instance: &str, wait_ms: u64| host.snapshot(instance, &json!({}), Duration::from_millis(wait_ms));
     // A tunable device answers its quartet's reads; one with a snapshot of its own answers that;
     // any other does not report its settings. Its open answer says which.
     for (instance, type_id, reports) in [("echo", "test.echo", true), ("pattern", "test.pattern", true), ("plain", "test.plain", false)] {
@@ -374,8 +377,8 @@ fn a_start_records_the_bench_its_devices_report_and_a_busy_one_is_not_lost() {
     let frames = "@logic/counter/frames";
     let bench = json!({"taken_at": "2026-10-25T12:00:00.000+00:00", "devices": {"echo": {"type_id": "test.echo", "role": "echo", "values": {"amplitude": 0.0}}},
                        "sequencer": {}});
-    let start = |record_devices: bool| host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(),
-        values: json!({"count": 1, "size": 128}), devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), origin: Origin::Operator,
+    let start = |record_devices: bool| host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(),
+        values: json!({"count": 1, "size": 128}), devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(), reads: Default::default(), origin: Origin::Operator,
         resources: json!({}), source_signal: None, run_directory: None, outputs: [("frames".to_owned(), frames.to_owned())].into(), record_devices }).unwrap();
     let recorded = |run: String| {
         loop {
@@ -423,4 +426,93 @@ fn scans_and_resolves_are_handed_the_bound_resources() {
     assert_eq!(refused.to_string(), "RuntimeError: no free wire (tried none; passed over COM3, COM4, COM5: bound)");
     assert_eq!(host.resolve("test.echo", json!({}), &[], wait).unwrap_err().kind, ErrorKind::UnknownOp);
     host.shutdown();
+}
+
+#[test]
+fn a_run_asks_for_fits_on_lent_arrays_and_its_stop_ends_them() {
+    let Some((host, _runtime, _safe, events)) = host() else { return };
+    host.open("fitter", "fitter", json!({}), json!({})).unwrap();
+    let start = || host.start_run("fitter", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values: json!({}), devices: Default::default(), shared: Default::default(), reads: Default::default(),
+        origin: Origin::Operator, resources: json!({}), source_signal: None, run_directory: None, outputs: Default::default(), record_devices: false }).unwrap();
+    let cells = |count: usize| json!({"parameters": ["a", "b"], "values": vec![json!([1.0, 2.0]); count], "errors": vec![json!([0.5, null]); count],
+        "success": vec![true; count], "reduced_chi_square": vec![1.0; count], "messages": vec![""; count]});
+
+    let run = start();
+    let mut asked = 0;
+    let (outcome, result, error) = loop {
+        match events.recv_timeout(Duration::from_secs(60)).expect("run events") {
+            HostEvent::Request { run: id, ticket, op, params, lent, .. } if id == run => {
+                assert_eq!((op.as_str(), &params["model"]), ("run.fit", &json!("damped_sine")));
+                asked += 1;
+                let x = lent.array(&params["x"]).unwrap();
+                assert!(matches!(x.values, AnyBuffer::F64(_)));
+                if asked == 1 {
+                    assert!(params["y"].get("$array").is_some(), "the large arrays go by block");
+                    assert_eq!(x.shape, [60]);
+                    assert_eq!(lent.array(&params["y"]).unwrap().shape, [300, 60]);
+                    assert_eq!(lent.array(&params["sigma"]).unwrap().shape, [300, 60]);
+                    assert_eq!(lent.array(&params["warm"]).unwrap().shape, [300, 2]);
+                    host.respond(ticket, Ok(cells(300)));
+                } else {
+                    assert_eq!((lent.array(&params["y"]).unwrap().shape, &params["sigma"], &params["warm"]), (vec![2, 3], &json!(null), &json!(null)));
+                    host.respond(ticket, Ok(cells(2)));
+                }
+            }
+            HostEvent::RunFinished { run: id, outcome, result, error, .. } if id == run => break (outcome, result, error),
+            HostEvent::Failed { reason, .. } => panic!("plugin failed: {reason}"),
+            _ => {}
+        }
+    };
+    assert_eq!(outcome, "completed", "{error:?}");
+    assert_eq!(result, json!({"values": [300, 2], "errors": [300, 2], "nan_error": true, "success": [true, true], "chi": [300], "messages": ["", ""],
+                              "parameters": ["a", "b"], "short": [2, 2]}));
+    assert!(host.run_stop("fitter", &run).load(std::sync::atomic::Ordering::Relaxed), "a run that is gone is stopped");
+
+    // The run's Stop: the flag its batch watches is set, and the cancelled answer ends the run stopped.
+    let run = start();
+    let outcome = loop {
+        match events.recv_timeout(Duration::from_secs(60)).expect("run events") {
+            HostEvent::Request { run: id, ticket, .. } if id == run => {
+                let stop = host.run_stop("fitter", &run);
+                assert!(!stop.load(std::sync::atomic::Ordering::Relaxed));
+                host.stop_run("fitter", &run).unwrap();
+                assert!(stop.load(std::sync::atomic::Ordering::Relaxed));
+                host.respond(ticket, Err(zlc_plugin_host::CallError::new(ErrorKind::Cancelled, "the run was stopped")));
+            }
+            HostEvent::RunFinished { run: id, outcome, .. } if id == run => break outcome,
+            HostEvent::Failed { reason, .. } => panic!("plugin failed: {reason}"),
+            _ => {}
+        }
+    };
+    assert_eq!(outcome, "stopped");
+    host.shutdown();
+}
+
+/// A device a run only reads is handed to it without a claim: it may call what the device lists as
+/// reads and nothing else, and the device stays free for whoever holds or uses it.
+#[test]
+fn a_run_only_reads_a_device_it_does_not_claim() {
+    let Some((host, _runtime, _safe, events)) = host() else { return };
+    let opened = host.open("echo", "test.echo", json!({"gain": 2.0}), json!({})).unwrap();
+    host.open("counter", "counter", json!({}), json!({})).unwrap();
+    let prepared = host.call("counter", "query", json!({"name": "prepare_run", "values": {"count": 1, "size": 16}, "resources": {},
+        "devices": {"echo": {"instance": "echo", "type_id": "test.echo", "capabilities": ["test.echo"], "tunable": true, "reads": opened["reads"]}}}),
+        Duration::from_secs(20)).unwrap().value["prepared"].as_str().unwrap().to_owned();
+    let run = host.start_run("counter", RunRequest { prepared: Some(prepared), device_labels: Default::default(), device_units: Default::default(),
+        values: json!({"count": 1, "size": 16}), devices: [("echo".to_owned(), "echo".to_owned())].into(), shared: Default::default(),
+        reads: ["echo".to_owned()].into(), origin: Origin::Operator, resources: json!({}), source_signal: None, run_directory: None,
+        outputs: [("frames".to_owned(), "@logic/counter/frames".to_owned())].into(), record_devices: false }).unwrap();
+    // The counter moves a knob of its device first: not a read, so this run is refused it.
+    let (outcome, error) = loop {
+        match events.recv_timeout(Duration::from_secs(60)).expect("run events") {
+            HostEvent::RunFinished { run: id, outcome, error, .. } if id == run => break (outcome, error),
+            HostEvent::Failed { reason, .. } => panic!("plugin failed: {reason}"),
+            _ => {}
+        }
+    };
+    assert_eq!(outcome, "failed");
+    let said = error.map(|error| error.to_string()).unwrap_or_default();
+    assert!(said.contains("this run only reads echo"), "{said}");
+    // It never held the device: another run takes it exclusively at once, with no claim left to clear.
+    assert_eq!(host.spi("echo", "get:opened_with", json!([]), json!({}), Duration::from_secs(5)).unwrap().value, json!({"gain": 2.0}));
 }

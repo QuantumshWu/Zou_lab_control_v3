@@ -61,7 +61,14 @@ archive's datasets (`@figure/<k>/<dataset name>`) and its panels' outputs. `open
 opens the Figure in a new window; `open {path, window}` replaces that window's Figure
 (as its File field does); the live board, its camera and its runs go on. A command
 naming a `figure-<n>-<k>` panel, or `add_panel` of a viewer's signal, acts on that
-viewer; a panel cannot be bound to another document's signal. The host sends each
+viewer; a panel cannot be bound to another document's signal. A viewer also runs
+processors on its data: `add_node {type_id, source_signal}`, `edit_node`, `start_node`,
+`stop_node`, `remove_node` from its window (or naming a node `figure-<n>-<type>`) act on
+that viewer's own workbench, whose rows are its `logic` and whose offered types, the
+processors whose declaration needs no device, file or workspace resource, are its
+`processor_types`. Their outputs (`@logic/figure-<n>-<type>/<output>`) are that viewer's
+`signals`; closing the window, or opening another Figure in it, removes the nodes and
+their signals. The host sends each
 viewer to its window as a `state` message `{request, error, result, saved, viewer}`: a
 save's answer is the message's own `saved`, as on the Task Console's state.
 
@@ -141,6 +148,11 @@ row is read in by, once, at its window's first reading; `read_device
 {units}` re-reads the row in one: the reading is converted, a Desired draft not yet
 applied keeps its digits, read in the new unit, and is never tuned by the change) and
 `status`/`severity` (v2's words at rest: Ready, Protected, Stands outside its bounds).
+A field the device declares `derived` (a stage's controller state) is a reading: its row
+is never `editable` (reason "Read from the device", status "Read only") and `tune_device`
+refuses it. Device Control shows the open device's `commands` as buttons (a stage's Home,
+Stop, Enable, Disable, Reset, Status), each sending its catalogue entry; a button is never
+held back by an Apply in flight, its answer is the page's note, and the rows are read again.
 Once read, the row also has `control: {owners (node names), reason, risk_enabled}`.
 
 Bench fabric (PLUGIN_PROTOCOL §10): `published` (Remote on: handed to another
@@ -331,7 +343,7 @@ plugin event changes `state` again (use `wait`).
 | `apply_devices` | — | control | Init / Apply: opens what the draft adds or changes (in parallel, admitted in operator order), closes what it removes; runs that claim a closing device are stopped first. Partial failures stay per instance. One physical resource, one row: a row binding one an earlier row or another live device binds fails before it opens (`RuntimeError: serial:COM3 is already bound (to n100)`). A row of a resolvable type that leaves a resource blank (the board's UART, an IMU's port) is `opening` and `resolving`: it is resolved first (PLUGIN_PROTOCOL `resolve`), one row at a time in operator order and handed every bound resource but its own, while every other row opens at once (`busy`: `… · finding sequencer's UART port`). What it finds is written into its draft row -- the apparatus reads unsaved; Save keeps it -- and the row opens with it under the same checks; the line says it (`sequencer: board UART found on COM5 (…), written into the apparatus -- Save to keep it`). What it cannot find fails the row with what it tried and passed over. Shut down, Close or an Apply that takes the row out drop its resolve; a late answer opens and pins nothing, and the next row is asked once it is in. |
 | `close_device` | `device` | control | Close one live instance (its claiming runs are stopped first); the draft keeps it, so `apply_devices` reopens it. |
 | `shut_down_devices` | — | control | Shut down: stops every run, closes every instance. Never refused. |
-| `read_device` | `device`, `units?` | read | Device Control open/Refresh: reads `fields` (PLUGIN_PROTOCOL ops `fields`, `values`); `units` {field: spelling} reads those fields in the operator's unit from now on (the device converts: an RF level depends on its load). |
+| `read_device` | `device`, `units?`, `keep?` | read | Device Control open/Refresh: reads `fields` (PLUGIN_PROTOCOL ops `fields`, `values`); `units` {field: spelling} reads those fields in that unit from now on (the device converts: an RF level depends on its load); `keep`: the operator picked them, and the apparatus entry keeps them (`units`, saved with it): the device opens in them, its recorded state is converted into them and a scan offers its axes in them. |
 | `tune_device` | `device`, `field`, `value`, `unit?` | control | Device Control Apply of one field (`value` in `unit`, else the field's own); the reply holds the readback in that unit. Refused when protected by a claim, or claimed and not `live_write`, or claimed without the operator's risk acceptance. |
 | `accept_device_risk` | `device`, `accepted` | control | Device Control's Accept risk: allow tuning unprotected live-safe fields of a device a run claims (bound to that claim). |
 | `publish_device` | `device`, `published` | control | Remote on (v2's switch): hand an open device to the other bench computers, or take it back. Refused for a device a run holds and for a `remote.device` row (a relay loop). Shut down withdraws first. |
@@ -493,7 +505,7 @@ window), `fit`, `selector`+`crosshair`→`selectors`, `focused_cell`→`facet_fo
 
 ### 7.2 Apparatus `zlc.installation` (`<workspace>/apparatus.json`)
 `{"format": "zlc.installation", "simulation": {...}, "devices": [{"instance_id",
-"role", "type_id", "parameters"}]}`, exactly these keys; strict JSON; written only by
+"role", "type_id", "parameters", "units"?}]}`, exactly these keys (`units`: field -> the unit the operator picked in Device Control, written only when it holds one); strict JSON; written only by
 `save_apparatus`. An unknown `type_id` is kept and shown failed with the import
 reason; an unknown parameter is ignored with a note (v2 refused the whole file). Such a
 file is `unread`: the draft shows unsaved and Save does not write back fewer devices or

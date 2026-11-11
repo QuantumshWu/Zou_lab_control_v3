@@ -104,13 +104,17 @@ class PulseBoard:
         run_repeats: int = 1,
         scan_repeats: int = 1,
         scan: Mapping[str, Any] | None = None,
+        scan_plan: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         """Resolve, compile, load and fire ``document`` with these API values,
         each ``(number, unit)``; answers the receipt (module docstring):
         ``command_id``, the resolved ``api_values`` in their fields' own
         units, ``applied`` (the board's execution record for the archive)
         and ``timing`` (what the compiled program plays when).  ``scan`` is a
-        table for the board to play, ``{fields, rows}`` (module docstring)."""
+        table for the board to play, ``{fields, rows}`` (module docstring).
+        ``scan_plan`` instead names a native scan handle and outer point;
+        its receipt carries identity/counts and Config, while the native scan
+        session retains the table and full execution record."""
 
         params: dict[str, Any] = dict(
             document=str(document),
@@ -119,6 +123,10 @@ class PulseBoard:
         if scan is not None:
             params["scan"] = {"fields": [str(field) for field in scan["fields"]],
                               "rows": [[float(value) for value in row] for row in scan["rows"]]}
+        if scan_plan is not None:
+            if scan is not None:
+                raise ValueError("scan and scan_plan are mutually exclusive")
+            params["scan_plan"] = dict(scan_plan)
         return self._core("pulse_run", **params)
 
     def load(
@@ -127,10 +135,12 @@ class PulseBoard:
         *,
         api_values: Mapping[str, tuple[float, str]] | None = None,
         scan: Mapping[str, Any] | None = None,
+        scan_plan: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         """LOAD ``document`` without firing (v2 ``arm_sequencer``), so the FIRE
         later is the FIRE alone; the receipt is :meth:`run`'s without
-        ``command_id``, its ``applied`` and ``timing`` those of the LOAD."""
+        ``command_id``, its ``applied`` and ``timing`` those of the LOAD.
+        Native ``scan_plan`` calls return the same compact receipt as run()."""
 
         params: dict[str, Any] = dict(
             document=str(document), stage="load",
@@ -138,15 +148,21 @@ class PulseBoard:
         if scan is not None:
             params["scan"] = {"fields": [str(field) for field in scan["fields"]],
                               "rows": [[float(value) for value in row] for row in scan["rows"]]}
+        if scan_plan is not None:
+            if scan is not None:
+                raise ValueError("scan and scan_plan are mutually exclusive")
+            params["scan_plan"] = dict(scan_plan)
         return self._core("pulse_run", **params)
 
-    def fire_loaded(self, document: str | Path, *, run_repeats: int = 1, scan_repeats: int = 1) -> Mapping[str, Any]:
+    def fire_loaded(self, document: str | Path, *, run_repeats: int = 1, scan_repeats: int = 1,
+                    scan_plan: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
         """FIRE what :meth:`load` left on the board (refused if it no longer
         holds that program and table); the receipt keeps LOAD's named ``scan``
         and ``api_values`` and adds the FIRE's ``command_id``, ``applied`` and ``timing``."""
 
         return self._core("pulse_run", document=str(document), stage="fire",
-                          run_repeats=int(run_repeats), scan_repeats=int(scan_repeats))
+                          run_repeats=int(run_repeats), scan_repeats=int(scan_repeats),
+                          **({"scan_plan": dict(scan_plan)} if scan_plan is not None else {}))
 
     def wait_done(self, command_id: int, timeout_seconds: float) -> Mapping[str, Any] | None:
         """That FIRE's completion report, or None when it has not completed in time."""

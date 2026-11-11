@@ -1,5 +1,5 @@
 import { prompt } from "./dialog.js";
-import { assign, button, element, token } from "./dom.js";
+import { assign, button, contentWidth, element, token } from "./dom.js";
 import { glyphFace, setGlyph } from "./ink.js";
 /** The decimal places `value` is written with (1e-05: 5). */
 export function decimals(value) {
@@ -302,8 +302,10 @@ export class SpinBox {
             if (!input.clientWidth)
                 return null;
             const style = getComputedStyle(input);
-            // The digits' whole room: the chip yields to them, never the other way round.
-            const digits = input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) + spin.chipRoom;
+            // The digits' whole room: the chip yields to them, never the other way round. The field's content
+            // box as it stands, and the chip's room back while the padding holds it -- the same room whichever
+            // way the chip stands now, so the same number is answered alike.
+            const digits = contentWidth(input, style) + spin.chipRoom;
             const label = chip.firstElementChild.textContent ?? "";
             // The chip's text is its ink, rounded up to whole Qt px (_step_chip_metrics).
             const width = glyphFace("chip", label).ink / devicePixelRatio;

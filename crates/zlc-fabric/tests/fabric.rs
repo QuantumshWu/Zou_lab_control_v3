@@ -1,6 +1,9 @@
 //! Two cores in one process, each with its own plugin host and real plugin
 //! processes (needs ZLC_PLUGIN_PYTHON = the science env's python.exe): one
 //! publishes the test echo device, the other uses it through the fabric.
+#[path="../../zlc-plugin-host/tests/support/mod.rs"]
+mod support;
+
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +31,7 @@ fn core() -> Option<Core> {
     let (sender, events) = mpsc::channel();
     let sender = Mutex::new(sender);
     let host = PluginHost::new(config, runtime.clone(), safe.clone(), move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
+        support::install(&host).unwrap();
     Some(Core { host, runtime, safe, events })
 }
 
@@ -107,8 +111,8 @@ fn a_published_device_serves_another_core_through_its_blocks_claims_and_safe_act
     // A node of this core runs on it: frames out, a frame back in, published here without another copy.
     b.host.open("counter", "counter", json!({}), json!({})).unwrap();
     let signal = "@logic/counter/frames";
-    let run = b.host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), values: json!({"count": 3, "size": 128}), devices: [("echo".to_owned(), "remote_echo".to_owned())].into(),
-        shared: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: None, run_directory: None, outputs: [("frames".to_owned(), signal.to_owned())].into(), record_devices: false }).unwrap();
+    let run = b.host.start_run("counter", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), values: json!({"count": 3, "size": 128}), devices: [("echo".to_owned(), "remote_echo".to_owned())].into(),
+        shared: Default::default(), reads: Default::default(), origin: Origin::Operator, resources: json!({}), source_signal: None, run_directory: None, outputs: [("frames".to_owned(), signal.to_owned())].into(), record_devices: false }).unwrap();
     let (outcome, result, error) = loop {
         match b.events.recv_timeout(Duration::from_secs(60)).expect("run events") {
             HostEvent::Request { run: id, ticket, params, .. } if id == run => b.host.respond(ticket, Ok(json!({"pong": params["params"]["value"]}))),
@@ -166,12 +170,12 @@ fn remote_snapshots_equal_the_same_local_device_for_tunables_native_state_and_un
         let opened = a.host.open(name, kind, json!({}), json!({})).unwrap();
         assert_eq!(opened["snapshot"], reports);
         if kind == "test.pattern" { a.host.spi(name, "extended_snapshot", json!([]), json!({}), Duration::from_secs(2)).unwrap(); }
-        let local = a.host.snapshot(name, Duration::from_secs(2)).unwrap();
+        let local = a.host.snapshot(name, &json!({}), Duration::from_secs(2)).unwrap();
         publisher.publish(name, name).unwrap();
         let (link, attached) = Link::open("127.0.0.1", publisher.port(), name, bench("consumer"), b.host.registry().clone()).unwrap();
         assert_eq!(attached.snapshot, Some(reports));
         b.host.attach(name, attached.descriptor, Arc::new(link.clone()), attached.tunable, attached.snapshot.unwrap(), attached.reads).unwrap();
-        assert_eq!(b.host.snapshot(name, Duration::from_secs(2)).unwrap(), local, "{kind}: preserve the owner's entire answer");
+        assert_eq!(b.host.snapshot(name, &json!({}), Duration::from_secs(2)).unwrap(), local, "{kind}: preserve the owner's entire answer");
         // A second socket may list devices, but snapshot is still an owned
         // instance operation: it cannot bypass attach or borrow this owner's claim.
         let mut outsider = TcpStream::connect(("127.0.0.1", publisher.port())).unwrap();
@@ -182,14 +186,14 @@ fn remote_snapshots_equal_the_same_local_device_for_tunables_native_state_and_un
             if answer["id"] == 77 { assert_eq!(answer["error"]["kind"], "not_claimed"); break; }
         }
         outsider.shutdown(Shutdown::Both).unwrap();
-        assert_eq!(a.host.snapshot(name, Duration::from_secs(2)).unwrap_err().kind, ErrorKind::Refused, "the publishing UI still cannot bypass the owner");
+        assert_eq!(a.host.snapshot(name, &json!({}), Duration::from_secs(2)).unwrap_err().kind, ErrorKind::Refused, "the publishing UI still cannot bypass the owner");
         if kind == "test.pattern" {
             b.host.spi(name, "fail_snapshot_once", json!([]), json!({}), Duration::from_secs(2)).unwrap();
-            let error = b.host.snapshot(name, Duration::from_secs(2)).unwrap_err();
+            let error = b.host.snapshot(name, &json!({}), Duration::from_secs(2)).unwrap_err();
             assert_eq!(error.kind, ErrorKind::Failed);
             assert!(error.is("builtins:RuntimeError"));
             assert!(error.message.contains("snapshot readback unavailable"));
-            assert_eq!(b.host.snapshot(name, Duration::from_secs(2)).unwrap(), local, "a snapshot failure does not detach its device");
+            assert_eq!(b.host.snapshot(name, &json!({}), Duration::from_secs(2)).unwrap(), local, "a snapshot failure does not detach its device");
         }
         b.host.close(name).unwrap();
         publisher.withdraw(name).unwrap();
@@ -212,7 +216,7 @@ fn snapshot_timeout_is_bounded_and_does_not_fail_or_reclaim_the_remote_device() 
     while !a.host.requests_pending("echo") && Instant::now() < until { std::thread::sleep(Duration::from_millis(5)); }
     assert!(a.host.requests_pending("echo"));
     let started = Instant::now();
-    let error = b.host.snapshot("remote_echo", Duration::from_millis(150)).unwrap_err();
+    let error = b.host.snapshot("remote_echo", &json!({}), Duration::from_millis(150)).unwrap_err();
     assert_eq!(error.kind, ErrorKind::Timeout);
     assert!(started.elapsed() < Duration::from_secs(1), "no five-second reply grace for Start snapshots");
     // The metadata request remains queued beyond the normal five-second
@@ -221,7 +225,7 @@ fn snapshot_timeout_is_bounded_and_does_not_fail_or_reclaim_the_remote_device() 
     assert!(a.events.try_iter().all(|event| !matches!(event, HostEvent::Failed { .. })));
     assert!(b.events.try_iter().all(|event| !matches!(event, HostEvent::Failed { .. })));
     assert_eq!(publisher.offers()[0]["in_use_by"], consumer.client());
-    assert_eq!(b.host.snapshot("remote_echo", Duration::from_secs(2)).unwrap()["values"]["amplitude"], 0.0);
+    assert_eq!(b.host.snapshot("remote_echo", &json!({}), Duration::from_secs(2)).unwrap()["values"]["amplitude"], 0.0);
     assert_eq!(b.host.spi("remote_echo", "made_safe", json!([]), json!({}), Duration::from_secs(2)).unwrap().value, json!([]));
     assert!(link.tail(20).iter().all(|line| !line.contains("BROKE") && !line.contains("RELINKED")));
     b.host.close("remote_echo").unwrap();

@@ -11,6 +11,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use zlc_core::journal::{self, json, Value};
+
 use crate::codec::sequence_to_tree;
 use crate::compile::CompiledProgram;
 use crate::device::{AppliedState, BoardDescription, ConfigHolder, DoneReport, PulseStreamer, SafeReadback};
@@ -19,7 +21,7 @@ use crate::json::Json;
 use crate::manifest::target_from_config;
 use crate::model::Sequence;
 use crate::remote::RemotePulseStreamer;
-use crate::schedule::{run_duration_seconds, trigger_windows_by_channel};
+use crate::schedule::{run_duration_seconds, trigger_edge_ticks, trigger_windows_by_channel};
 use crate::transport::{Event, MemoryRegisterTransport, RegisterTransport};
 use crate::wire::{STATUS_DONE, STATUS_ERROR, STATUS_RUNNING, load_streamer_config, require_streamer_config};
 
@@ -211,8 +213,44 @@ pub enum Fate {
     Safed,
 }
 
+/// What the board is playing, as whoever aligns to its triggers needs it: which LOAD or FIRE
+/// (`revision` counts every change), and when that FIRE was sent and answered (this computer's
+/// clock, microseconds since the Unix epoch).
+#[derive(Clone, Copy, Debug)]
+struct Play { revision: u64, state: &'static str, command_id: Option<u32>, run_repeats: u64, scan_repeats: u64, sent_us: u64, answered_us: u64 }
+
+/// One scan point as a trigger lane plays it: when the lane rises after the point begins, and
+/// how long the point lasts (seconds, exact multiples of the board's tick).
+pub struct TriggerPoint { pub rising: Vec<f64>, pub duration: f64 }
+
+/// The rising edges of `lane` (a raw lane, `ch11`, or a port key) at every point of `rows`, in
+/// the order the table is played. An edge a lane delay carries past its point's end stays with
+/// the point that made it.
+pub fn trigger_points(program: &CompiledProgram, rows: &[Vec<u64>], lane: &str) -> Result<Vec<TriggerPoint>> {
+    let table = (!rows.is_empty()).then_some(rows);
+    let edges = trigger_edge_ticks(program, &[lane], table, 1, 1, None)?.remove(0).1;
+    let mut rising = edges.into_iter().step_by(2).peekable();
+    let single = [Vec::new()];
+    let played: &[Vec<u64>] = if rows.is_empty() { &single } else { rows };
+    let (mut points, mut start) = (Vec::with_capacity(played.len()), 0u128);
+    for (index, row) in played.iter().enumerate() {
+        let ticks = program.frame_ticks(row)?;
+        let (end, last) = (start + ticks, index + 1 == played.len());
+        let mut offsets = Vec::new();
+        while let Some(tick) = rising.next_if(|tick| last || *tick < end) { offsets.push((tick - start) as f64 / program.clock_hz); }
+        points.push(TriggerPoint { rising: offsets, duration: ticks as f64 / program.clock_hz });
+        start = end;
+    }
+    Ok(points)
+}
+
 /// One attached board, as the application holds it.
-pub struct Board { link: Link, description: BoardDescription, name: String, last: Mutex<Option<(u32, Fate)>> }
+pub struct Board { link: Link, description: BoardDescription, name: String, last: Mutex<Option<(u32, Fate)>>, play: Mutex<Play>,
+                   /// What the board confirmed it holds at its last LOAD or FIRE, and the schedules worked out from it
+                   /// (revision, lane, points): asked for at every frame's pace, they are neither fetched nor walked twice.
+                   held: Mutex<Option<AppliedState>>, schedules: Mutex<Vec<(u64, String, Json)>> }
+
+const NOTHING: Play = Play { revision: 0, state: "none", command_id: None, run_repeats: 0, scan_repeats: 0, sent_us: 0, answered_us: 0 };
 
 /// How long a remote server may take to answer a connect.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -221,7 +259,7 @@ impl Board {
     pub fn virtual_board(config_path: Option<&Path>) -> Result<Board> {
         let board = VirtualBoard::open(config_path)?;
         let description = board.streamer.describe()?;
-        Ok(Board { link: Link::Virtual(board), description, name: "virtual".into(), last: Mutex::new(None) })
+        Ok(Board { link: Link::Virtual(board), description, name: "virtual".into(), last: Mutex::new(None), play: Mutex::new(NOTHING), held: Mutex::default(), schedules: Mutex::default() })
     }
 
     /// A pulse server at `host:port` (v2's `pulse_server` or `zlc-pulse-server`).
@@ -229,7 +267,7 @@ impl Board {
         let client = RemotePulseStreamer::new(host, port, None, CONNECT_TIMEOUT)?;
         client.open()?;
         let description = match client.describe() { Ok(description) => description, Err(error) => { let _ = client.close(); return Err(error); } };
-        Ok(Board { link: Link::Remote(client), description, name: format!("remote {host}:{port}"), last: Mutex::new(None) })
+        Ok(Board { link: Link::Remote(client), description, name: format!("remote {host}:{port}"), last: Mutex::new(None), play: Mutex::new(NOTHING), held: Mutex::default(), schedules: Mutex::default() })
     }
 
     /// Take a remote board back after another client held it (the server SAFEs
@@ -254,17 +292,95 @@ impl Board {
     /// reported, since nothing new reaches a board that is still playing.
     pub fn load(&self, program: Arc<CompiledProgram>, source: Option<Arc<Sequence>>, rows: Vec<Vec<u64>>) -> Result<()> {
         self.free()?;
-        match &self.link { Link::Virtual(board) => board.streamer.load(program, source, rows), Link::Remote(client) => client.load(program, source, rows) }
+        let (began, row_count) = (Instant::now(), rows.len());
+        let loaded = match &self.link { Link::Virtual(board) => board.streamer.load(program, source, rows), Link::Remote(client) => client.load(program, source, rows) };
+        self.say("load", json!({"rows": row_count, "ms": began.elapsed().as_secs_f64() * 1e3, "error": loaded.as_ref().err().map(|error| error.message.clone())}));
+        // A LOAD makes the board safe first: whatever played has stopped, whether or not this one took.
+        *guard(&self.held) = if loaded.is_ok() { self.applied().ok().flatten() } else { None };
+        self.playing(if loaded.is_ok() { "loaded" } else { "stopped" }, None, (0, 0), journal::now_us());
+        loaded
+    }
+
+    /// The board now holds or plays something else: every reader of its schedule sees a new revision.
+    fn playing(&self, state: &'static str, command_id: Option<u32>, repeats: (u64, u64), sent_us: u64) {
+        let mut play = guard(&self.play);
+        *play = Play { revision: play.revision + 1, state, command_id, run_repeats: repeats.0, scan_repeats: repeats.1, sent_us, answered_us: journal::now_us() };
+    }
+
+    /// Counts every LOAD, FIRE, stop and report: what a reader of the schedule compares.
+    pub fn revision(&self) -> u64 { guard(&self.play).revision }
+
+    /// The digital lanes a camera can be triggered from: (raw lane, port key, label), in the target's order.
+    pub fn trigger_lanes(&self) -> Vec<(String, String, String)> {
+        self.description.target.ports.iter().filter(|port| port.kind == crate::model::PortKind::Digital && port.lanes.len() == 1)
+            .map(|port| (port.lanes[0].clone(), port.key.clone(), port.label.clone())).collect()
+    }
+
+    /// How often each trigger lane rises in one shot of what the board holds (its table's first
+    /// point); None while it holds nothing. With the revision that count is of.
+    pub fn trigger_counts(&self) -> Result<(u64, Option<Vec<usize>>)> {
+        let play = *guard(&self.play);
+        let Some(applied) = guard(&self.held).clone() else { return Ok((play.revision, None)) };
+        let lanes = self.trigger_lanes();
+        let names: Vec<&str> = lanes.iter().map(|(lane, ..)| lane.as_str()).collect();
+        let first: Vec<Vec<u64>> = applied.rows.first().cloned().into_iter().collect();
+        let edges = trigger_edge_ticks(&applied.program, &names, (!first.is_empty()).then_some(first.as_slice()), 1, 1, None)?;
+        Ok((play.revision, Some(edges.into_iter().map(|(_, ticks)| ticks.len().div_ceil(2)).collect())))
+    }
+
+    /// `pulse_schedule`: what the board holds or plays, for whoever is triggered by `lane`:
+    /// `{revision, state: none|loaded|playing|stopped|done, command_id, run_repeats, scan_repeats,
+    /// sent_us, answered_us, lane, points: [{rising: [s], duration: s}]}`. A shot is one play of one
+    /// point; each point is played `run_repeats` times before the next, the table `scan_repeats`
+    /// times (0: without end). `known`: the revision the asker already has, answered `unchanged`.
+    pub fn trigger_schedule(&self, lane: &str, known: Option<u64>) -> Result<Json> {
+        let play = *guard(&self.play);
+        let mut facts = vec![("revision", int(play.revision)), ("state", Json::str(play.state)),
+            ("command_id", play.command_id.map_or(Json::Null, int)), ("run_repeats", int(play.run_repeats)), ("scan_repeats", int(play.scan_repeats)),
+            ("sent_us", int(play.sent_us)), ("answered_us", int(play.answered_us)), ("lane", Json::str(lane))];
+        if known == Some(play.revision) { facts.push(("unchanged", Json::Bool(true))); return Ok(Json::object(facts)); }
+        let known = guard(&self.schedules).iter().find(|(revision, of, _)| *revision == play.revision && of == lane).map(|(.., points)| points.clone());
+        let points = match known {
+            Some(points) => points,
+            None => {
+                let points = match guard(&self.held).clone() {
+                    Some(applied) => trigger_points(&applied.program, &applied.rows, lane)?,
+                    None => Vec::new(),
+                };
+                let points = Json::Array(points.into_iter().map(|point| Json::object(vec![
+                    ("rising", Json::Array(point.rising.into_iter().map(Json::Float).collect())), ("duration", Json::Float(point.duration))])).collect());
+                let mut schedules = guard(&self.schedules);
+                schedules.retain(|(revision, ..)| *revision == play.revision);
+                schedules.push((play.revision, lane.to_owned(), points.clone()));
+                points
+            }
+        };
+        facts.push(("points", points));
+        Ok(Json::object(facts))
+    }
+
+    /// One line of the journal for this board: what was asked of it and what it answered.
+    fn say(&self, event: &str, mut facts: Value) {
+        facts["board"] = json!(self.name);
+        journal::note("board", event, facts);
     }
 
     /// FIRE what is loaded; the confirmed application and its command id.
     /// Refused while the last FIRE's report has not been taken.
     pub fn fire(&self, run_repeats: u64, scan_repeats: u64) -> Result<(AppliedState, u32)> {
         self.free()?;
-        let (applied, command_id) = match &self.link {
-            Link::Virtual(board) => (board.fire(run_repeats, scan_repeats)?, board.streamer.fire_command_id()),
-            Link::Remote(client) => (client.fire(run_repeats, scan_repeats)?, client.fire_command_id().unwrap_or(0)),
+        let began = Instant::now();
+        let fired = match &self.link {
+            Link::Virtual(board) => board.fire(run_repeats, scan_repeats).map(|applied| (applied, board.streamer.fire_command_id())),
+            Link::Remote(client) => client.fire(run_repeats, scan_repeats).map(|applied| (applied, client.fire_command_id().unwrap_or(0))),
         };
+        // Said once the board has answered: `ms` earlier is when the FIRE was sent.
+        self.say("fire", json!({"run_repeats": run_repeats, "scan_repeats": scan_repeats, "ms": began.elapsed().as_secs_f64() * 1e3,
+            "command_id": fired.as_ref().ok().map(|(_, id)| *id), "error": fired.as_ref().err().map(|error| error.message.clone())}));
+        let sent_us = journal::now_us().saturating_sub(began.elapsed().as_micros() as u64);
+        let (applied, command_id) = fired?;
+        *guard(&self.held) = Some(applied.clone());
+        self.playing("playing", Some(command_id), (run_repeats, scan_repeats), sent_us);
         *guard(&self.last) = Some((command_id, Fate::Pending));
         Ok((applied, command_id))
     }
@@ -290,8 +406,17 @@ impl Board {
     pub fn wait_done(&self, timeout: Option<Duration>, command_id: Option<u32>) -> Result<Option<DoneReport>> {
         let report = match &self.link { Link::Virtual(board) => board.wait_done(timeout, command_id), Link::Remote(client) => client.wait_done(timeout, command_id) }?;
         if let Some(report) = &report {
+            // `elapsed_seconds` after its FIRE is when the board itself was done; this line is when that was read.
+            self.say("report", json!({"command_id": report.command_id, "status": report.status, "elapsed_seconds": report.elapsed_seconds,
+                "cursor": report.cursor, "underflow": report.underflow, "observer_error": report.observer_error}));
             let mut last = guard(&self.last);
             if last.is_some_and(|(id, _)| id == report.command_id) { *last = Some((report.command_id, Fate::Reported)); }
+            drop(last);
+            // The FIRE that reported has played all it had: nothing more comes of this schedule.
+            let play = *guard(&self.play);
+            if play.state == "playing" && play.command_id == Some(report.command_id) {
+                self.playing("done", play.command_id, (play.run_repeats, play.scan_repeats), play.sent_us);
+            }
         }
         Ok(report)
     }
@@ -338,7 +463,11 @@ impl Board {
 
     /// SAFE now; an unreported FIRE will not report.
     pub fn safe(&self) -> Result<SafeReadback> {
+        let began = Instant::now();
         let readback = match &self.link { Link::Virtual(board) => board.safe(), Link::Remote(client) => client.safe() };
+        self.say("safe", json!({"ms": began.elapsed().as_secs_f64() * 1e3, "error": readback.as_ref().err().map(|error| error.message.clone())}));
+        let play = *guard(&self.play);
+        if matches!(play.state, "playing" | "loaded") { self.playing("stopped", play.command_id, (play.run_repeats, play.scan_repeats), play.sent_us); }
         let mut last = guard(&self.last);
         if let Some((command_id, Fate::Pending)) = *last { *last = Some((command_id, Fate::Safed)); }
         readback

@@ -16,24 +16,34 @@ fn finite_repeat_count(value: u64, field_name: &str) -> Result<u64> {
     Ok(value)
 }
 
-/// Finite execution rows in `scan -> row -> run` order.
-fn scan_points(program: &CompiledProgram, table: Option<&[Vec<u64>]>, run_repeats: u64, scan_repeats: u64) -> Result<Vec<Vec<u64>>> {
+/// A validated finite scan, retaining its table once instead of expanding repeats.
+struct ScanPoints<'a> { rows: &'a [Vec<u64>], run_repeats: u64, scan_repeats: u64 }
+
+impl<'a> ScanPoints<'a> {
+    /// Finite execution rows in `scan -> row -> run` order, borrowed as needed.
+    fn iter(&self) -> impl Iterator<Item = &'a [u64]> + '_ {
+        (0..self.scan_repeats).flat_map(move |_| self.rows.iter()
+            .flat_map(move |row| (0..self.run_repeats).map(move |_| row.as_slice())))
+    }
+}
+
+fn scan_points<'a>(program: &CompiledProgram, table: Option<&'a [Vec<u64>]>, run_repeats: u64, scan_repeats: u64) -> Result<ScanPoints<'a>> {
     let run_repeats = finite_repeat_count(run_repeats, "run_repeats")?;
     let scan_repeats = finite_repeat_count(scan_repeats, "scan_repeats")?;
-    let rows: Vec<Vec<u64>> = match table {
+    static FIXED_ROWS: [Vec<u64>; 1] = [Vec::new()];
+    let rows = match table {
         None => {
             if program.slot_count() > 0 { return value_error("a slotted program requires an explicit value table"); }
             if scan_repeats != 1 { return value_error("scan_repeats must be 1 when there is no scan table"); }
-            vec![Vec::new()]
+            &FIXED_ROWS[..]
         }
         Some(rows) => {
             if rows.iter().any(|row| row.len() != program.slot_count()) { return value_error("table width differs from the program slot count"); }
             if rows.is_empty() { return value_error("table must contain at least one row"); }
-            rows.to_vec()
+            rows
         }
     };
-    let sweep: Vec<Vec<u64>> = rows.iter().flat_map(|row| std::iter::repeat_n(row.clone(), run_repeats as usize)).collect();
-    Ok((0..scan_repeats).flat_map(|_| sweep.iter().cloned()).collect())
+    Ok(ScanPoints { rows, run_repeats, scan_repeats })
 }
 
 type Shapes = BTreeMap<Vec<u64>, (Vec<(usize, u128)>, u128)>;
@@ -64,7 +74,7 @@ fn channel_edges(program: &CompiledProgram, channels: &[&str], table: Option<&[V
         bits.push(bit);
     }
     let points = scan_points(program, table, run_repeats, scan_repeats)?;
-    let shapes = point_shapes(program, &points, bracket_bodies)?;
+    let shapes = point_shapes(program, points.rows, bracket_bodies)?;
     let mut streams = Vec::new();
     for bit in bits {
         let delay = u128::from(program.channel_delays[bit]);
@@ -72,7 +82,7 @@ fn channel_edges(program: &CompiledProgram, channels: &[&str], table: Option<&[V
         let mut ticks = Vec::new();
         let mut previous = false;
         let mut offset: u128 = 0;
-        for point in &points {
+        for point in points.iter() {
             let (visits, total) = &shapes[point];
             for &(row, tick) in visits {
                 let level = levels[row];
@@ -112,9 +122,9 @@ pub fn bus_action_ticks(program: &CompiledProgram, table: Option<&[Vec<u64>]>, r
     for action in &program.bus_actions { by_row.entry(action.row as usize).or_default().push(action.bus_index as usize); }
     let mut ticks = vec![Vec::new(); program.bus_names.len()];
     let points = scan_points(program, table, run_repeats, scan_repeats)?;
-    let shapes = point_shapes(program, &points, bracket_bodies)?;
+    let shapes = point_shapes(program, points.rows, bracket_bodies)?;
     let mut offset: u128 = 0;
-    for point in &points {
+    for point in points.iter() {
         let (visits, total) = &shapes[point];
         for &(row, tick) in visits {
             for &bus in by_row.get(&row).map(Vec::as_slice).unwrap_or(&[]) {
@@ -128,10 +138,14 @@ pub fn bus_action_ticks(program: &CompiledProgram, table: Option<&[Vec<u64>]>, r
 
 /// `run_duration_seconds`: the exact finite playback duration of one run.
 pub fn run_duration_seconds(program: &CompiledProgram, table: Option<&[Vec<u64>]>, run_repeats: u64, scan_repeats: u64) -> Result<f64> {
-    let mut total = BigUint::zero();
-    for point in scan_points(program, table, run_repeats, scan_repeats)? {
-        total = total.add(&BigUint::from_u128(program.frame_ticks(&point)?));
+    let points = scan_points(program, table, run_repeats, scan_repeats)?;
+    let mut sweep = BigUint::zero();
+    for point in points.rows {
+        sweep = sweep.add(&BigUint::from_u128(program.frame_ticks(point)?));
     }
+    // Keep the exact integer sum until the same final float conversion as an
+    // expanded run. A run's total may exceed u128 even when each Pulse fits.
+    let total = sweep.mul_small(points.run_repeats).mul_small(points.scan_repeats);
     Ok(big_to_f64(&total) / program.clock_hz)
 }
 
@@ -143,8 +157,10 @@ pub fn integer_table(rows: &[Vec<f64>]) -> Result<Vec<Vec<u64>>> {
 }
 
 /// Refuse an application whose delayed events overflow the frozen FIFOs
-/// (`PulseStreamer._validate_delay_capacity`). A queue entry stays live through
-/// the edge it is emitted on, so capacity counts a closed `delay` window.
+/// (`PulseStreamer._validate_delay_capacity`). A queue entry is popped in the
+/// cycle it plays, and a full queue takes a new event in that same cycle
+/// (zlc_period_streamer.v g_evtfifo / g_busseg), so capacity counts a half-open
+/// `delay` window: an event due at a new one's tick is no longer in flight.
 ///
 /// The walk is bounded: a delay window overlaps at most `delay / T + 2`
 /// consecutive Pulses no shorter than `T` ticks, and after `depth` identical
@@ -185,7 +201,9 @@ pub fn validate_delay_capacity(program: &CompiledProgram, rows: &[Vec<u64>], par
     if !ttl.is_empty() {
         let edges = trigger_edge_ticks(program, &asked, Some(&execution_rows), 1, 1, Some(&kept_bodies))?;
         for ((bit, delay), (_, events)) in ttl.iter().zip(&edges) {
-            check_delay_window(events, u128::from(*delay), params.evt_fifo_depth, &format!("channel {}", repr(&program.channels[*bit])))?;
+            let channel = &program.channels[*bit];
+            let named = physical_to_logical.get(channel.as_str()).map_or_else(|| format!("channel {}", repr(channel)), |port| format!("channel {} ({port})", repr(channel)));
+            check_delay_window(events, u128::from(*delay), params.evt_fifo_depth, program.clock_hz, &named, "toggles")?;
         }
     }
     if !bus_delays.is_empty() {
@@ -195,19 +213,35 @@ pub fn validate_delay_capacity(program: &CompiledProgram, rows: &[Vec<u64>], par
         for (bus, delay) in &bus_delays {
             let mut events = actions.get(*bus as usize).cloned().unwrap_or_default();
             if finite_completion { events.push(run_end); }
-            check_delay_window(&events, u128::from(*delay), params.bus_evt_fifo_depth, &format!("DAC bus {bus}"))?;
+            check_delay_window(&events, u128::from(*delay), params.bus_evt_fifo_depth, program.clock_hz, &format!("DAC bus {bus}"), "actions")?;
         }
     }
     Ok(())
 }
 
-fn check_delay_window(events: &[u128], delay: u128, capacity: u64, label: &str) -> Result<()> {
+/// A time in the unit that reads it between 1 and 1000, to six figures.
+fn readable_seconds(seconds: f64) -> String {
+    let (scale, unit) = [(1.0, "s"), (1e-3, "ms"), (1e-6, "µs"), (1e-9, "ns")].into_iter()
+        .find(|(scale, _)| seconds.abs() >= *scale).unwrap_or((1e-9, "ns"));
+    let value = seconds / scale;
+    let text = format!("{value:.6}");
+    format!("{} {unit}", text.trim_end_matches('0').trim_end_matches('.'))
+}
+
+/// The board holds a delayed event from its tick e until e + delay, and frees it in the
+/// cycle it plays: one due at a new event's own tick leaves room for it (the FIFO pops
+/// and pushes in one cycle). Too many: say how many, and the longest delay that fits.
+fn check_delay_window(events: &[u128], delay: u128, capacity: u64, clock_hz: f64, label: &str, what: &str) -> Result<()> {
     let mut first = 0;
     for (last, tick) in events.iter().enumerate() {
-        while first < last && events[first] + delay < *tick { first += 1; }
+        while first < last && events[first] + delay <= *tick { first += 1; }
         let required = last - first + 1;
         if required as u64 > capacity {
-            return value_error(format!("{label} needs {required} delayed events in flight but the connected geometry holds {capacity}"));
+            let room = capacity as usize;
+            let fits = events.windows(room + 1).map(|window| window[room] - window[0]).min().unwrap_or(0);
+            let time = |ticks: u128| readable_seconds(ticks as f64 / clock_hz);
+            return value_error(format!("{label} {what} {required} times within its delay of {}, and the board holds {capacity} in flight: a delay of at most {} fits, or it must {what_verb} less often", time(delay), time(fits),
+                what_verb = if what == "toggles" { "toggle" } else { "act" }));
         }
     }
     Ok(())

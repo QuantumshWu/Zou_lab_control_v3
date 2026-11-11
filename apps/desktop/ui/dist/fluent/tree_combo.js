@@ -119,8 +119,9 @@ export class TreeCombo {
         if (this.root.value !== (leaf ? key : ""))
             this.root.value = leaf ? key : "";
         this.root.classList.toggle("blank", !leaf);
+        // The open tree keeps its rows (a press on one is let go on the same one): only which is picked changes.
         if (this.open)
-            this.render();
+            this.paintPicked();
     }
     set disabled(disabled) { assign(this.root, "disabled", disabled); if (disabled)
         hidePopup(this.list); }
@@ -151,7 +152,7 @@ export class TreeCombo {
         this.up = undefined;
         this.render();
         // The picked row is the tree's selection (SELECTED) when it opens.
-        this.move(this.rows.findIndex(row => row.kind === "leaf" ? row.leaf.key === this.current : row.kind === "none" && this.current === ""));
+        this.move(this.rows.findIndex(row => this.picked(row)));
     }
     /** What a row is, to find it again among the rows a toggle reveals. */
     identity(row) {
@@ -190,7 +191,7 @@ export class TreeCombo {
             else {
                 node.setAttribute("role", "treeitem");
                 item.textContent = row.kind === "leaf" ? row.leaf.label : this.none;
-                node.setAttribute("aria-selected", String(row.kind === "leaf" ? row.leaf.key === this.current : this.current === ""));
+                node.setAttribute("aria-selected", String(this.picked(row)));
             }
             node.append(item);
             return node;
@@ -201,6 +202,11 @@ export class TreeCombo {
     /** Every row it reveals, below the box or above it, as far as the window goes on that side; the rest scrolls. */
     place() {
         this.up = placeDrop(this.list, this.root, this.up);
+    }
+    picked(row) { return row.kind === "leaf" ? row.leaf.key === this.current : row.kind === "none" && this.current === ""; }
+    paintPicked() {
+        this.rows.forEach((row, index) => { if (row.kind !== "heading")
+            this.list.children[index]?.setAttribute("aria-selected", String(this.picked(row))); });
     }
     paintCursor() {
         [...this.list.children].forEach((node, index) => node.classList.toggle("current", index === this.cursor));

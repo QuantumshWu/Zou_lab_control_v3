@@ -242,7 +242,7 @@ pub fn polyline_ir(ctx: &EmitContext<'_>, an: &AxesNodes, index: usize, line: &P
     Artist::Line(out)
 }
 
-/// The point overlay's rings: `EllipseCollection(units="xy", transOffset=transData, facecolors="none")`.
+/// Data-space ellipse faces and outlines share one antialiased circle path.
 #[derive(Clone, Debug)]
 pub struct EllipsesArtist {
     pub visible: bool,
@@ -251,6 +251,7 @@ pub struct EllipsesArtist {
     /// Full widths and heights (the collection keeps halves).
     pub widths: Vec<f64>,
     pub heights: Vec<f64>,
+    pub facecolors: Vec<[f64; 4]>,
     pub edgecolors: Vec<[f64; 4]>,
     pub linewidths: Vec<f64>,
     /// `"--"` where true, `"-"` elsewhere.
@@ -273,7 +274,7 @@ pub fn ellipses_ir(ctx: &EmitContext<'_>, nodes: &mut super::nodes::Nodes, an: &
         paths: vec![artist::path(vertices, Some(codes), false)],
         offsets: e.offsets.clone(),
         offset_transform: an.trans_data,
-        facecolors: Vec::new(),
+        facecolors: e.facecolors.clone(),
         edgecolors: e.edgecolors.clone(),
         linewidths: e.linewidths.clone(),
         linestyles: dashes,

@@ -69,9 +69,9 @@ pub fn effective_cap_width(pixel_x: &[f64], cap_width: f64) -> f64 {
     cap_width
 }
 
-/// The fused pass: xmin/xmax, low/high bounds, isolated, pooled value+SEM bounds.
+/// Extents of the valid data points in display units, and whether any point is isolated.
 #[derive(Clone, Copy, Debug)]
-pub struct Summary { pub xlow: f64, pub xhigh: f64, pub ylow: f64, pub yhigh: f64, pub isolated: bool, pub pooled: (f64, f64) }
+pub struct Summary { pub xlow: f64, pub xhigh: f64, pub ylow: f64, pub yhigh: f64, pub isolated: bool }
 
 /// `_PreparedSeries`.
 #[derive(Clone, Debug)]
@@ -91,10 +91,9 @@ fn py_min(a: f64, b: f64) -> f64 { if b < a { b } else { a } }
 fn py_max(a: f64, b: f64) -> f64 { if b > a { b } else { a } }
 
 /// `prepare_curve_summary`: validity, display bounds and singleton presence in one pass.
-fn summarize(x: &[f64], y: &[f64], source_valid: &[bool], band: Option<(&[f64], &[f64])>) -> (Vec<bool>, Summary) {
+fn summarize(x: &[f64], y: &[f64], source_valid: &[bool]) -> (Vec<bool>, Summary) {
     let mut valid = vec![false; x.len()];
     let (mut xmin, mut xmax, mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
-    let (mut pooled_min, mut pooled_max) = (f64::INFINITY, f64::NEG_INFINITY);
     let mut isolated = false;
     let mut previous = false;
     for point in 0..x.len() {
@@ -102,15 +101,10 @@ fn summarize(x: &[f64], y: &[f64], source_valid: &[bool], band: Option<(&[f64], 
         let usable = source_valid[point] && xv.is_finite() && yv.is_finite();
         valid[point] = usable;
         if usable {
-            let (mut low, mut high) = match band { Some((l, h)) => (l[point], h[point]), None => (yv, yv) };
-            if !low.is_finite() { low = yv; }
-            if !high.is_finite() { high = yv; }
             xmin = py_min(xmin, xv);
             xmax = py_max(xmax, xv);
-            ymin = py_min(ymin, low);
-            ymax = py_max(ymax, high);
-            pooled_min = py_min(py_min(py_min(pooled_min, yv), low), high);
-            pooled_max = py_max(py_max(py_max(pooled_max, yv), low), high);
+            ymin = py_min(ymin, yv);
+            ymax = py_max(ymax, yv);
             if !previous {
                 let following = point + 1 < x.len() && source_valid[point + 1] && x[point + 1].is_finite() && y[point + 1].is_finite();
                 if !following { isolated = true; }
@@ -118,7 +112,7 @@ fn summarize(x: &[f64], y: &[f64], source_valid: &[bool], band: Option<(&[f64], 
         }
         previous = usable;
     }
-    (valid, Summary { xlow: xmin, xhigh: xmax, ylow: ymin, yhigh: ymax, isolated, pooled: (pooled_min, pooled_max) })
+    (valid, Summary { xlow: xmin, xhigh: xmax, ylow: ymin, yhigh: ymax, isolated })
 }
 
 /// `_series_band`: display-unit y+/-sem bounds of one projected series.
@@ -145,7 +139,7 @@ pub fn prepare_curve_series(source: &[CurveSeries]) -> Vec<PreparedSeries> {
         let y = item.y.display.to_f64();
         let band = series_band(item);
         let source_valid: Vec<bool> = item.valid.to_f64().iter().map(|v| *v != 0.0).collect();
-        let (valid, summary) = summarize(&x, &y, &source_valid, band.as_ref().map(|(l, h)| (l.as_slice(), h.as_slice())));
+        let (valid, summary) = summarize(&x, &y, &source_valid);
         PreparedSeries {
             x: Arc::new(x), y: Arc::new(y), valid: Arc::new(valid), label: item.label.clone(),
             identity: series_identity(&item.group_key), group_key: item.group_key.clone(),
