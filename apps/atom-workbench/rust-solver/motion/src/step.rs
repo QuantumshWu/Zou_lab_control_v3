@@ -177,8 +177,8 @@
 //!   to the kick begins with the next step, half a step late on average. First order. The emission's direction has no
 //!   mean; a fold's absorbed mean kick has one where the light is one-sided: (γτ/2)(2ω_r/|Δ + iΓ/2|) of the light's
 //!   response. Through the friction every jump's kick stays undamped half a step longer: the energy is high by what
-//!   the jumps' kicks put in over half a step, E_r/3 a jump a step as a temperature (0.06 µK for Rb; 0.1 % of PGC3D's
-//!   13 µK at its 0.24 jumps a step). The Brownian part has had the same term since κ_m is predicted without the path's
+//!   the jumps' kicks put in over half a step, E_r/3 a jump a step as a temperature (0.06 µK for Rb; 0.13 % of PGC3D's
+//!   13 µK at its 0.28 jumps a step). The Brownian part has had the same term since κ_m is predicted without the path's
 //!   increment (# The absorbed light's momentum). The pilot's companion at twice the step reads all of these (solve.rs,
 //!   # The step).
 //!
