@@ -896,6 +896,12 @@ impl Picture {
         pairs
     }
 
+    /// Whether some pair's change is followed: the split's choice on this step, as the tests read it.
+    #[cfg(test)]
+    pub(crate) fn follows(&self) -> bool {
+        self.followed
+    }
+
     /// The largest row sum of |X| at the step's end: the size of the following there.
     #[cfg(test)]
     fn following(&self) -> f64 {

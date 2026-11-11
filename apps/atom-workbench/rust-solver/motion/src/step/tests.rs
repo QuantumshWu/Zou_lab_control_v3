@@ -616,13 +616,15 @@ fn a_step_integrates_its_internal_frequencies_whatever_the_detuning() {
 }
 
 /// The step's order in what the path changes (step.rs, # The kick; spectral.rs): the same atom from the bare ground
-/// state at 0.4 µm/µs (k·v = 3.2 rad/µs), over 0.0625 µs in one, two and four steps, with and without the decay, at
-/// detunings that turn 1, 10, 50 and 200 rad over that span (the light shift 3 rad over it at each). A mass the kick
+/// state at 0.4 µm/µs (k·v = 3.2 rad/µs), over 0.0625 µs in one, two, four and eight steps, with and without the decay,
+/// at detunings that turn 1, 10, 50 and 200 rad over that span (the light shift 3 rad over it at each). A mass the kick
 /// does not move: the steps' paths are the reference's, and a step is its propagation. The state against the path's
 /// sub-stepped reference, and the kick against the reference of the step's own decomposition (`decomposed`): what
-/// the propagation leaves of the path's change, without the splitting.
-/// - Where the step's nodes resolve the pair (it turns less than a radian between two of them: Δτ = 1 in two and in
-///   four steps) the state is hopped, and both fall as the fourth order, sixteen a halving: a hop's second Magnus term
+/// the propagation leaves of the path's change, without the splitting. Which of the two the pair is taken by is the
+/// propagation's own choice at each step (spectral.rs, # The split: the pair's turn between two nodes against the size
+/// of its change over a half step), read from the step's picture.
+/// - Where the step's nodes resolve the pair for what changes (Δτ = 1 in four and in eight steps; with the decay in
+///   two as well) the state is hopped, and both fall as the fourth order, sixteen a halving: a hop's second Magnus term
 ///   is of the fifth order in the step, and so is the three nodes' representation of the change (Simpson's rule's).
 /// - Where they do not (Δτ = 1 in one step, Δτ = 10 and more in any) the state follows the change, by the following
 ///   X = D/ω and its rate's corrections, to the second order. Its error is within the square of the following at the
@@ -643,36 +645,39 @@ fn a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the
             let model = Atom::new(hm, flat, beams.to_vec(), detuning, gamma);
             // The dressed state's dipole kick over the span (`step_errors`): the kick's scale.
             let size = beams.iter().map(|b| 0.5 * b.rabi).sum::<f64>().powi(2) * K * span / detuning.hypot(0.5 * gamma);
-            let errors: Vec<[f64; 2]> = [1, 2, 4]
+            // Each level's errors, and whether every step of it hopped the pair.
+            let (errors, hops): (Vec<[f64; 2]>, Vec<bool>) = [1, 2, 4, 8]
                 .into_iter()
                 .map(|steps: usize| {
                     let tau = span / steps as f64;
                     let subs = 2 * ((1000.0 * turns) as usize).max(10_000) / steps;
                     let start = held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]);
                     let (mut t, mut exact, mut kick) = (start.clone(), [C64::ONE, C64::ZERO], 0.0);
+                    let (mut scratch, mut hopped) = (step::Scratch::default(), true);
                     for i in 0..steps {
                         let (end, part) = decomposed(&beams, detuning, gamma, z0 + v * i as f64 * tau, v, exact, tau, subs);
                         (exact, kick) = (end, kick + part);
-                        t = step_of(&model, &t, tau, &mut step::Scratch::default()).unwrap().end;
+                        t = step_of(&model, &t, tau, &mut scratch).unwrap().end;
+                        hopped &= !scratch.picture.follows();
                     }
                     let state = (0..2).map(|a| (t.psi[a] - exact[a]).abs()).fold(0.0, f64::max);
-                    [state, (t.kappa[2] - start.kappa[2] - kick).abs() / kick.abs().max(size)]
+                    ([state, (t.kappa[2] - start.kappa[2] - kick).abs() / kick.abs().max(size)], hopped)
                 })
-                .collect();
-            let falls: Vec<[f64; 2]> = (0..2).map(|i| std::array::from_fn(|q| errors[i][q] / errors[i + 1][q])).collect();
+                .unzip();
+            let falls: Vec<[f64; 2]> = (0..3).map(|i| std::array::from_fn(|q| errors[i][q] / errors[i + 1][q])).collect();
             eprintln!(
-                "Γ {gamma:6.3}, Δτ {turns:5}: in 1, 2, 4 steps ψ {:.2e} {:.2e} {:.2e} (falls {:.1}, {:.1}), kick {:.2e} {:.2e} {:.2e} (falls {:.1}, {:.1})",
-                errors[0][0], errors[1][0], errors[2][0], falls[0][0], falls[1][0], errors[0][1], errors[1][1], errors[2][1], falls[0][1], falls[1][1]
+                "Γ {gamma:6.3}, Δτ {turns:5}: in 1, 2, 4, 8 steps (hopped {hops:?}) ψ {:.2e} {:.2e} {:.2e} {:.2e} (falls {:.1}, {:.1}, {:.1}), kick {:.2e} {:.2e} {:.2e} {:.2e} (falls {:.1}, {:.1}, {:.1})",
+                errors[0][0], errors[1][0], errors[2][0], errors[3][0], falls[0][0], falls[1][0], falls[2][0], errors[0][1], errors[1][1], errors[2][1], errors[3][1], falls[0][1], falls[1][1], falls[2][1]
             );
             // The pair's frequency at the light's largest coupling V, and the following's size at the end of a step
             // of the span's n-th part: k·v h V/ω.
             let coupling = beams.iter().map(|b| 0.5 * b.rabi).sum::<f64>();
             let omega = detuning.hypot(2.0 * coupling);
             let following = |steps: usize| K * v * 0.5 * span / steps as f64 * coupling / omega;
-            // Resolved by the step's nodes: less than a radian between two of them, at the pair's largest frequency.
-            let resolved = |steps: usize| omega * 0.5 * span / (steps as f64) < 1.0;
-            let hopped = (0..2).all(|i| !resolved(1 << i) || (0..2).all(|q| falls[i][q] > 12.0));
-            let followed = (0..3).all(|i| resolved(1 << i) || errors[i][0] < following(1 << i).powi(2));
+            // The fourth order between two levels that both hop the pair -- the slowest pair's last two levels at
+            // the least --, and the following's square at a level that follows it.
+            let hopped = (0..3).all(|i| !(hops[i] && hops[i + 1]) || (0..2).all(|q| falls[i][q] > 12.0)) && (turns != 1.0 || (hops[2] && hops[3]));
+            let followed = (0..4).all(|i| hops[i] || errors[i][0] < following(1 << i).powi(2));
             if !(hopped && followed) {
                 failures.push(format!("Γ {gamma}, Δτ {turns}: {errors:?}"));
             }
