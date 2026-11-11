@@ -621,8 +621,10 @@ fn attempt(
     let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
     let row: [f64; STATES] = std::array::from_fn(|s| request.initial_density[(s, s)].re);
     // What the reach the model was judged over leaves out of the initial ensemble (model/reach.rs `Model::left_out`): of
-    // the atoms and of their kinetic energy, counted on the initial atoms of the most trajectories a solve runs.
-    let unsampled = model.left_out(&judged, (0..MOST_TRAJECTORIES as u64).map(|index| { let start = ensemble.draw(SEED, index); (start.r, start.kappa) }));
+    // the atoms and of their kinetic energy, counted on the initial atoms of the most trajectories a solve runs (drawn on
+    // all the cores: 0.4 s of one).
+    let atoms: Vec<(V3, V3)> = (0..MOST_TRAJECTORIES).into_par_iter().map(|index| { let start = ensemble.draw(SEED, index); (start.r, start.kappa) }).collect();
+    let unsampled = model.left_out(&judged, atoms.into_iter());
     let depth = ensemble.depths()[chief];
     let mut ledger = Ledger::default();
     ledger.note = Some(format!("初始系综：各初态在自己的准备阱中的束缚原子（降低的等温分布乘每轴谐振子的 Wigner 因子，T = {} μK），参考态阱深 {:.1} k_BT", request.temperature_uk, depth));
