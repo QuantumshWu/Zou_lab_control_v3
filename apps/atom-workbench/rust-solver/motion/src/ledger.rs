@@ -100,27 +100,16 @@ impl Ledger {
         });
     }
     /// The items from the largest estimate down, the totals and the flags of the outputs at `times` (µs): the populations'
-    /// accounts at every output; T's per lab axis where it has one (SPEC §4), `held` where that axis is held to its
-    /// target. T's a-priori total is taken over every output and axis where T has an account, held to its target or not
-    /// -- what the approximations leave of the T that is shown --; an axis is flagged against the target only at the
-    /// outputs it is held to, each axis by its name.
-    pub fn close(&mut self, times: &[f64], population: &[Account], temperature: &[[Option<Account>; 3]], held: &[[bool; 3]]) {
+    /// accounts at every output and the total T's (the mean over the lab axes: what T's target is on, SPEC §4) where it
+    /// has one.
+    pub fn close(&mut self, times: &[f64], population: &[Account], temperature: &[Option<Account>]) {
         self.items.sort_by(|a, b| b.estimate.total_cmp(&a.estimate));
         let populations: Vec<Option<Account>> = population.iter().map(|&a| Some(a)).collect();
-        let axes: [Vec<Option<Account>>; 3] = std::array::from_fn(|a| temperature.iter().map(|t| t[a]).collect());
-        let held: [Vec<bool>; 3] = std::array::from_fn(|a| held.iter().map(|h| h[a]).collect());
-        let of_axes = Total { error: axes.iter().map(|accounts| largest(accounts, TEMPERATURE_TARGET).error).fold(0., f64::max), target: TEMPERATURE_TARGET };
-        self.totals = Totals { population: largest(&populations, POPULATION_TARGET), temperature: of_axes };
-        let everywhere = vec![true; times.len()];
-        for (accounts, target, flaggable, what) in [
-            (&populations[..], POPULATION_TARGET, &everywhere[..], "布居与损失"),
-            (&axes[0][..], TEMPERATURE_TARGET, &held[0][..], "温度 T_x "),
-            (&axes[1][..], TEMPERATURE_TARGET, &held[1][..], "温度 T_y "),
-            (&axes[2][..], TEMPERATURE_TARGET, &held[2][..], "温度 T_z "),
-        ] {
+        self.totals = Totals { population: largest(&populations, POPULATION_TARGET), temperature: largest(temperature, TEMPERATURE_TARGET) };
+        for (accounts, target, what) in [(&populations[..], POPULATION_TARGET, "布居与损失"), (temperature, TEMPERATURE_TARGET, "总温度")] {
             // Not within the target: beyond it, or no number.
             let beyond: Vec<usize> =
-                (0..times.len()).filter(|&k| flaggable[k] && accounts[k].is_some_and(|a| !(a.total() <= target))).collect();
+                (0..times.len()).filter(|&k| accounts[k].is_some_and(|a| !(a.total() <= target))).collect();
             if let Some(&worst) = beyond.iter().max_by(|&&i, &&j| accounts[i].unwrap().total().total_cmp(&accounts[j].unwrap().total())) {
                 let a = accounts[worst].unwrap();
                 self.flag(format!(
@@ -204,18 +193,16 @@ mod tests {
         assert_eq!(Account::default().total(), 0.);
     }
 
-    /// The totals take the a-priori part where it takes most of its target; the outputs beyond the target are flagged as one span,
-    /// with the largest and its parts; T is totalled wherever an axis has an account -- an output the axis is not held to
-    /// at, and all of them when it is held to none -- and flagged per axis, only where that axis is held to its target: an
-    /// axis beyond the target at an output it is not held to is not flagged, whatever the other axes are held to there;
-    /// nothing flagged within the targets, and no note.
+    /// The totals take the a-priori part where it takes most of its target; the outputs beyond the target are flagged as
+    /// one span, with the largest and its parts -- what is shown, and the total T where it has an account (an output
+    /// without one is neither totalled nor flagged); nothing flagged within the targets, and no note.
     #[test]
     fn the_ledger_totals_and_flags_the_outputs_beyond_their_targets() {
         let times: Vec<f64> = (0..6).map(|k| 250. * k as f64).collect();
         let within = vec![account(0.01, 0.0224, 0.03); 6];
-        let read = vec![[Some(account(0.01, 0.0447, 0.05)); 3]; 6];
+        let read = vec![Some(account(0.01, 0.0447, 0.05)); 6];
         let mut quiet = Ledger::default();
-        quiet.close(&times, &within, &read, &[[true; 3]; 6]);
+        quiet.close(&times, &within, &read);
         assert_eq!((quiet.flagged.as_ref(), quiet.note.as_ref()), (None, None));
         assert!((quiet.totals.population.error - within[0].a_priori()).abs() < 1e-16 && quiet.totals.population.target == POPULATION_TARGET);
 
@@ -223,28 +210,16 @@ mod tests {
         population[3] = account(0.01, 0.0224, 0.06);
         population[5] = account(0.01, 0.0224, 0.05);
         let mut temperature = read.clone();
-        temperature[2][0] = Some(account(0.0, 0.0447, 0.2));
-        temperature[4][1] = Some(account(0.06, 0.0447, 0.3));
-        temperature[5][2] = None;
-        let mut held = [[true; 3]; 6];
-        held[4][1] = false;
+        temperature[2] = Some(account(0.0, 0.0447, 0.2));
+        temperature[4] = Some(account(0.06, 0.0447, 0.02));
+        temperature[5] = None;
         let mut l = Ledger::default();
-        l.close(&times, &population, &temperature, &held);
+        l.close(&times, &population, &temperature);
         assert!((l.totals.population.error - population[3].a_priori()).abs() < 1e-16);
-        assert_eq!(l.totals.temperature.error, temperature[4][1].unwrap().a_priori(), "the output the axis is not held to at; the statistics take no part");
+        assert_eq!(l.totals.temperature.error, temperature[4].unwrap().a_priori(), "the statistics take no part");
         let flagged = l.flagged.unwrap();
         assert!(flagged.starts_with("750 μs 至 1.25 ms 之间 2 个时刻：布居与损失的估计误差超出目标，最大 6.5%（目标 5%；模型 1%、步长 2.2%、统计 6%）"), "{flagged}");
-        assert!(flagged.ends_with("；500 μs：温度 T_x 的估计误差超出目标，最大 20%（目标 10%；模型 0%、步长 4.5%、统计 20%）"), "{flagged}");
-
-        // The same axis held there: flagged, by its name, beside the other axis's.
-        held[4][1] = true;
-        let mut both = Ledger::default();
-        both.close(&times, &population, &temperature, &held);
-        assert!(both.flagged.unwrap().ends_with("；500 μs：温度 T_x 的估计误差超出目标，最大 20%（目标 10%；模型 0%、步长 4.5%、统计 20%）；1 ms：温度 T_y 的估计误差超出目标，最大 31%（目标 10%；模型 6%、步长 4.5%、统计 30%）"));
-
-        let mut none_held = Ledger::default();
-        none_held.close(&times, &within, &temperature, &[[false; 3]; 6]);
-        assert_eq!((none_held.totals.temperature, none_held.flagged), (l.totals.temperature, None));
+        assert!(flagged.ends_with("；500 μs：总温度的估计误差超出目标，最大 20%（目标 10%；模型 0%、步长 4.5%、统计 20%）"), "{flagged}");
     }
 
     /// An item below u·ε is none, the others have their places; the items come out largest first.
@@ -252,7 +227,7 @@ mod tests {
     fn items_are_the_approximations_that_count() {
         let mut l = Ledger::default();
         assert_eq!((l.item("small", 1e-3, ""), l.item("nothing", 1e-32, ""), l.item("step", 0.022, "")), (Some(0), None, Some(1)));
-        l.close(&[0., 1.], &[Account::default(); 2], &[[None; 3]; 2], &[[false; 3]; 2]);
+        l.close(&[0., 1.], &[Account::default(); 2], &[None; 2]);
         assert_eq!(l.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["step", "small"]);
     }
 

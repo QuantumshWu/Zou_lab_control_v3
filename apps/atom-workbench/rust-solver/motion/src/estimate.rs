@@ -331,10 +331,10 @@ impl Estimate {
     pub fn shown_statistics(&self) -> f64 {
         self.shown_interval().max(unseen(self.trajectories))
     }
-    /// The interval of T on the lab axis `axis` at the confidence z, relative to `scale` (µK); unbounded where T is not
-    /// read.
-    pub fn temperature_interval(&self, axis: usize, scale: f64) -> f64 {
-        self.motion.as_ref().map_or(f64::INFINITY, |m| m.temperature_errors[axis].interval() / scale)
+    /// The interval of the total T (the mean over the lab axes) at the confidence z, relative to it; unbounded where T
+    /// is not read.
+    pub fn temperature_interval(&self) -> f64 {
+        self.motion.as_ref().map_or(f64::INFINITY, |m| m.temperature_total_error.interval() / m.temperature_total)
     }
 }
 
@@ -461,20 +461,20 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
 }
 
 /// The step's error as two ensembles measure it, averaged over the outputs after t = 0 (module documentation, # The
-/// step's error): the loss's and each row's as shown (absolute), and T's per lab axis relative to T -- none on an axis no
-/// output reads.
+/// step's error): the loss's and each row's as shown (absolute), and the total T's (the mean over the three lab axes, the
+/// T the target is on) relative to it -- none where no output reads it at both levels.
 #[derive(Clone, Debug)]
 pub struct Between {
     pub loss: Read,
     pub shown: [Read; STATES],
-    pub temperature: [Option<Read>; 3],
+    pub temperature: Option<Read>,
 }
 
 /// The step's error of the level `fine`, from it and the level `coarse` at twice its step on the same trajectories,
 /// group by group in the same order (module documentation, # The step's error): each quantity's average over the
 /// outputs after t = 0 -- T's on a lab axis over the outputs of `over` (per output and axis) where both levels, and
 /// both without any one group, hold two atoms at least.
-pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scales, over: &[[bool; 3]]) -> Between {
+pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scales) -> Between {
     assert_eq!(fine.len(), coarse.len(), "the two levels hold the same groups");
     let outputs = fine.first().map_or(0, |g| g.borrow().sums.len());
     let (hm, groups) = (scales.hbar_over_mass, fine.len());
@@ -488,14 +488,15 @@ pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scale
         Read { value: mean(&|j| f(&j.full)), spread: if leave.is_empty() { Spread::UNREAD } else { spread(leave.iter().copied(), read) } }
     };
     let all: Vec<&Jackknife> = each.iter().collect();
-    let temperature = std::array::from_fn(|a| {
+    let temperature = {
         let read = |m: &[Moments]| m.iter().all(|x| x.temperature.is_some());
-        let at: Vec<&Jackknife> = each.iter().enumerate().filter(|(k, j)| over[k + 1][a] && read(&j.full) && j.leave.iter().all(|l| read(l))).map(|(_, j)| j).collect();
+        let at: Vec<&Jackknife> = each.iter().filter(|j| read(&j.full) && j.leave.iter().all(|l| read(l))).collect();
         (!at.is_empty()).then(|| {
-            let e = |m: &[Moments]| share * (m[1].temperature.map_or(f64::NAN, |t| t[a]) / m[0].temperature.map_or(f64::NAN, |t| t[a]) - 1.);
+            let total = |m: &Moments| m.temperature.map_or(f64::NAN, |t| t.iter().sum::<f64>());
+            let e = |m: &[Moments]| share * (total(&m[1]) / total(&m[0]) - 1.);
             averaged(&at, &e, at.iter().map(|j| j.holding).fold(f64::INFINITY, f64::min))
         })
-    });
+    };
     Between {
         loss: averaged(&all, &|m| share * (m[1].loss - m[0].loss), groups as f64),
         shown: std::array::from_fn(|s| averaged(&all, &|m| share * (m[1].shown[s] - m[0].shown[s]), groups as f64)),
@@ -539,7 +540,7 @@ mod tests {
                     fine.push(group(energies.iter().map(|&(e, _)| Some(atom(0, 0., e))).collect()));
                     coarse.push(group(energies.iter().map(|&(e, other)| Some(atom(0, 0., (1. + 3. * bias) * (rho * e + (1. - rho) * other)))).collect()));
                 }
-                let read = between(&twice(&fine), &twice(&coarse), &UNIT, &[[true; 3]; 2]).temperature[0].unwrap();
+                let read = between(&twice(&fine), &twice(&coarse), &UNIT).temperature.unwrap();
                 let m = summarize(&fine, &UNIT)[0].motion.unwrap();
                 sum += read.value;
                 squares += read.value * read.value;
@@ -557,10 +558,10 @@ mod tests {
             assert!((error / own / expected - 1.).abs() <= 3. * tolerance, "ρ = {rho}: the error over T's own, {}, against {expected}", error / own);
         }
         let shows = |count: usize| group((0..GROUP as usize).map(|i| Some(atom(usize::from(i >= count), 0., 1.))).collect());
-        let read = between(&twice(&[shows(6), shows(6)]), &twice(&[shows(3), shows(3)]), &UNIT, &[[true; 3]; 2]);
+        let read = between(&twice(&[shows(6), shows(6)]), &twice(&[shows(3), shows(3)]), &UNIT);
         assert!((read.shown[0].value + 0.125).abs() < 1e-15 && (read.shown[1].value - 0.125).abs() < 1e-15 && read.loss.value == 0. && read.shown[0].spread.error == 0.);
         // The average over the outputs: three outputs after t = 0 whose rows read (3 − 6)/8, (5 − 6)/8 and (4 − 6)/8 a
-        // third each -- their mean; T's on the outputs asked alone, none on an axis asked nowhere.
+        // third each -- their mean; the total T's over the same outputs.
         let series = |counts: [usize; 3]| -> Vec<Group> {
             (0..2)
                 .map(|_| {
@@ -573,14 +574,12 @@ mod tests {
                 })
                 .collect()
         };
-        let mut over = [[true, false, false]; 4];
-        over[2][0] = false;
-        let read = between(&series([6; 3]), &series([3, 5, 4]), &UNIT, &over);
+        let read = between(&series([6; 3]), &series([3, 5, 4]), &UNIT);
         assert!((read.shown[0].value + (3. + 1. + 2.) / 8. / 3. / 3.).abs() < 1e-15, "{:?}", read.shown[0]);
-        // T is 1 + count at each output on every atom: 7 at the finer level, 4, 6 and 5 at the coarser; x over the
-        // first and the third output.
-        let t = read.temperature[0].expect("x is read where it is asked");
-        assert!((t.value - ((4. / 7. - 1.) + (5. / 7. - 1.)) / 2. / 3.).abs() < 1e-15 && read.temperature[1].is_none(), "{t:?}");
+        // T is 1 + count at each output on every atom: 7 at the finer level, 4, 6 and 5 at the coarser, on every axis
+        // and so in the total.
+        let t = read.temperature.expect("T is read at both levels");
+        assert!((t.value - ((4. / 7. - 1.) + (6. / 7. - 1.) + (5. / 7. - 1.)) / 3. / 3.).abs() < 1e-15, "{t:?}");
     }
 
     /// Groups of one output as groups of two: t = 0 and the output itself.
