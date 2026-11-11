@@ -40,10 +40,34 @@
 //! Varah bound, eliminate.rs) and the same change of E_e − E_b by its static form at full intensity. An intensity's shift is linear in it, so its weight is that per unit intensity times the bound of
 //! its distance from its focus value over the reach (reach.rs `Model::bounds_over`): a plane wave's intensity, the same everywhere,
 //! weighs nothing; an angle or a phase weighs its whole range. A response is a pole in E_e − E_b, its relative change at most the
-//! weight: a coordinate whose weight is below the population target leaves the responses within it a priori. The axes are the
-//! heaviest coordinates above it, as many as keep one interpolation cheaper than the elimination it replaces and the first grid
-//! within the work bound -- none where no coordinate reaches the target: the forms at the focus alone --; the others are held at
-//! the focus, the table's whole error read at the atoms (`Model::table_reads`).
+//! weight.
+//!
+//! What a table leaves out is held to one criterion, the tables' shares (# Refinement), whether it lies between an axis' nodes
+//! or in a coordinate that is no axis: twice the responses' error within the shares, the potential's within T's of k_BT_r. A
+//! coordinate whose weight is within half the shares leaves the responses within them a priori, and is held at the focus.
+//!
+//! The weight is a bound: the line it is taken across may be far from resonance, or not meet the coordinate at all (a lone
+//! carrier's own unit: its dressing is in no denominator of its own response). So a heavier coordinate is asked whether the
+//! table needs it, by a look (`Model::look`): the table that holds it at the focus against the elimination with the coordinate
+//! moved, at the table's nodes over the reach, by the refinement's own two measures and shares. Twice:
+//! - before it is made an axis, the heaviest coordinate first: the table of the axes taken so far, each on its first grid,
+//!   against the coordinate at each of its own first nodes over the reach. Beyond the shares it is taken as an axis -- as
+//!   many as keep one interpolation cheaper than the elimination it replaces and the first grid within the work bound --,
+//!   within them it is held: a coordinate that moves nothing costs these few nodes and never multiplies the table's;
+//! - after the refinement: every coordinate so held, at the one value its first look read worst, against every node of the
+//!   refined table over the reach. Beyond the shares there it is an axis after all, and the table is made again with it.
+//! What the looks say, and what they do not. The first sees the others' first nodes alone: a response's change by a shift δ
+//! of its line is δ/|D|, largest where an axis carries the line through resonance, and between that axis' first nodes the
+//! coordinate's part is unseen. The last is at every node of the table kept -- where the refinement itself reads -- but at
+//! one value of the coordinate: for one that shifts the lines in proportion to its move (every intensity) the error
+//! |δ|/|D + δ| rises with |δ| as long as it is below one, so the value farthest over the reach, the first look's worst, is
+//! the worst at every node; of an angle or a phase the first look's order need not hold at the other nodes. Neither looks
+//! between the nodes, as the refinement does not. What the coordinates held leave is in the table's whole error, read at the
+//! atoms (`Model::table_reads`): that read is the measure, the looks decide the axes. None where no coordinate is needed:
+//! the forms at the focus alone. (With the cut at the population target, as it was, a coordinate could leave the responses
+//! off by 0.05 where an axis was refined to 0.004: a probe on resonance in a tweezer that moves its line by 0.04 half-widths
+//! over its whole intensity read 2.1e-2 at the edge of a reach of 120 µK and 8.2e-3 on average across it, beyond the share
+//! 7.8e-3, with no axis to halve; the test below.)
 //!
 //! # At a point
 //! The axes' coordinates and their gradients at the point (field.rs `Frequency::chart`; ∇I_u = 2 Re(f_u* ∇f_u)/N_u), the table's
@@ -102,6 +126,7 @@ use crate::field::{range, Amplitude, Chart};
 use crate::linalg::{Mat, C64};
 use crate::request::{GROUND, STATES};
 use crate::table::{Axis, Table};
+use rayon::prelude::*;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -177,6 +202,15 @@ pub(crate) fn shares() -> (f64, f64) {
 pub struct TableRead {
     pub axes: Vec<Vec<UnitError>>,
     pub whole: Vec<UnitError>,
+}
+
+/// A cluster's first table for a light set (`Model::first_table`): the table, its axes each on its first grid; their
+/// ranges over the atoms' reach; and the coordinates its first looks held at the focus, each with the value it was read
+/// worst at (module documentation, # Axes).
+struct First {
+    table: NearTable,
+    ranges: Vec<(f64, f64)>,
+    held: Vec<(Coordinate, f64)>,
 }
 
 /// The zero amplitude.
@@ -354,9 +388,11 @@ impl Model {
 
     /// The near tables for the atoms' reach (module documentation, # Axes, # Refinement), each grid of at most `most` nodes: per
     /// cluster the running lights' and, where the trap is lit and a carrier stays lit without it, those lights less the trap's --
-    /// each light set under which the cluster has near forms --, refined over the reach. A coordinate the axes' rules refuse
-    /// (`first_table`: the cost of an interpolation, the node bound, `table::MOST_AXES`) is held at its focus value like
-    /// the light ones, whatever its weight: the table's whole error at the atoms reads it (`table_reads`).
+    /// each light set under which the cluster has near forms --, refined over the reach; then the coordinates its first
+    /// table's looks held are looked at once more on the refined one (module documentation, # Axes), and the table is made
+    /// again with one that it needs after all. A coordinate the axes' rules refuse (`first_table`: the cost of an
+    /// interpolation, the node bound, `table::MOST_AXES`) is held at its focus value like the light ones, whatever its
+    /// weight: the table's whole error at the atoms reads it (`table_reads`).
     pub fn tabulate(&self, reach: &Reach, most: usize) -> Tables {
         let running = self.running();
         let mut untrapped = running.clone();
@@ -367,15 +403,23 @@ impl Model {
                 if lights == &untrapped && !running.on(self.light.trap) {
                     continue;
                 }
-                if let Some(first) = self.first_table(cluster, lights, reach, most) {
-                    out.tables.push(self.refined(first, reach, most));
+                let mut needed = vec![];
+                while let Some(First { table, ranges, held }) = self.first_table(cluster, lights, reach, most, &needed) {
+                    let table = self.refined(table, &ranges, reach, most);
+                    match held.iter().find(|(coordinate, worst)| self.look(&table, &ranges, *coordinate, &[*worst], reach).0 > 1.0) {
+                        Some((coordinate, _)) => needed.push(*coordinate),
+                        None => {
+                            out.tables.push(table);
+                            break;
+                        }
+                    }
                 }
             }
         }
         out
     }
 
-    /// The range of a table's axis over the atoms' reach (module documentation, # Refinement).
+    /// The range of a table's coordinate (an axis or one held) over the atoms' reach (module documentation, # Refinement).
     fn reach_range(&self, layout: &Layout, f: usize, reach: &Reach) -> (f64, f64) {
         let (coordinate, at) = (layout.coordinates[f], layout.focus[f]);
         let axis = first_axis(coordinate);
@@ -387,36 +431,97 @@ impl Model {
         ((at - moved).max(axis.lo), (at + moved).min(axis.hi))
     }
 
-    /// A table refined over the atoms' reach (module documentation, # Refinement).
-    fn refined(&self, mut table: NearTable, reach: &Reach, most: usize) -> NearTable {
-        let d = table.axes();
-        let ranges: Vec<(f64, f64)> = (0..d).map(|f| self.reach_range(&table.layout, f, reach)).collect();
+    /// A table's error by the two measures (`node_error`: the responses' relative error, the bound of the potential's) over
+    /// the tables' shares (module documentation, # Refinement), the larger of the two: twice the responses' over the smaller
+    /// of what is shown's and T's, the potential's over T's of k_BT_r. Within the shares: at most one.
+    fn over(&self, (responses, potential): (f64, f64), reach: &Reach) -> f64 {
         let (shown, temperature) = shares();
-        let thermal = crate::units::KT_PER_UK * reach.temperature_uk;
-        let mut verified = vec![false; d];
+        (2.0 * responses / shown.min(temperature)).max(potential / (temperature * crate::units::KT_PER_UK * reach.temperature_uk))
+    }
+
+    /// A table refined over the atoms' reach, its axes' ranges there given (module documentation, # Refinement).
+    fn refined(&self, mut table: NearTable, ranges: &[(f64, f64)], reach: &Reach, most: usize) -> NearTable {
+        let mut verified = vec![false; table.axes()];
         while let Some(f) = verified.iter().position(|v| !v) {
             let Some(finer) = self.halved(&table, f, most) else { break };
-            let (responses, potential) = self.halving_error(&table.layout, &table.table, &finer, f, &ranges, reach);
-            verified[f] = 2.0 * responses <= shown.min(temperature) && potential <= temperature * thermal;
+            verified[f] = self.over(self.halving_error(&table.layout, &table.table, &finer, f, ranges, reach), reach) <= 1.0;
             table.table = finer;
         }
         table
     }
 
-    /// The error of a table against the one a halving of axis f finer, at the finer's new nodes over the reach's ranges (module
-    /// documentation, # Refinement): the responses' relative error and the bound of the potential's error (rad/µs), each the
-    /// largest over the nodes; +∞ where one is no number.
-    fn halving_error(&self, layout: &Layout, coarse: &Table, fine: &Table, f: usize, ranges: &[(f64, f64)], reach: &Reach) -> (f64, f64) {
+    /// A look at a coordinate a table holds at its focus value (module documentation, # Axes): the table's nodes that the
+    /// reach's ranges of its axes meet (a node's own spacing about it), each against the elimination there with the
+    /// coordinate at each of `values`, by the refinement's two measures. The largest error over the tables' shares (`over`)
+    /// and the value it was read at (the focus value where every error is nothing).
+    fn look(&self, table: &NearTable, ranges: &[(f64, f64)], coordinate: Coordinate, values: &[f64], reach: &Reach) -> (f64, f64) {
+        let (layout, grid) = (&table.layout, &table.table);
+        let place = layout.coordinates.iter().position(|c| *c == coordinate).expect("a coordinate of the table's layout");
+        let shift = self.reach_shifts(reach);
+        let places = |node: usize| -> Vec<f64> { grid.node(node).0.iter().zip(grid.axes()).map(|(&i, a)| a.node(i)).collect() };
+        let met: Vec<usize> = (0..Table::nodes(grid.axes())).filter(|&node| places(node).iter().zip(grid.axes()).zip(ranges).all(|((s, a), range)| s - a.spacing() <= range.1 && s + a.spacing() >= range.0)).collect();
+        let looks: Vec<(usize, f64)> = met.iter().flat_map(|&node| values.iter().map(move |&value| (node, value))).collect();
+        looks
+            .par_iter()
+            .map(|&(node, value)| {
+                let mut x = layout.focus.clone();
+                let s = places(node);
+                x[..s.len()].copy_from_slice(&s);
+                x[place] = value;
+                let mut moved = vec![0.0; grid.width()];
+                self.node(layout, &x, &mut moved);
+                (self.over(self.node_error(layout, &shift, &moved, grid.node(node).1), reach), value)
+            })
+            .reduce(|| (0.0, layout.focus[place]), |worst, read| if read.0 > worst.0 { read } else { worst })
+    }
+
+    /// Per frequency the largest Doppler shift of its beams at the reach's speed (the weight of a T2's error beside its T's,
+    /// `node_error`).
+    fn reach_shifts(&self, reach: &Reach) -> Vec<f64> {
+        self.light.frequencies.iter().map(|f| f.beams.iter().map(|&l| self.doppler_shift(l, [0.0; 3]) + self.light.beams[l].wave_number * reach.speed).fold(0.0, f64::max)).collect()
+    }
+
+    /// A node's reals `other` against the elimination's `exact` (module documentation, # Refinement): the responses' relative
+    /// error, the largest over the lit carriers, and the bound of the potential's error (rad/µs), the largest over the ground
+    /// places; +∞ where one is no number. `shift`: `reach_shifts`.
+    fn node_error(&self, layout: &Layout, shift: &[f64], exact: &[f64], other: &[f64]) -> (f64, f64) {
         let plan = &layout.plan;
         let (start, count, pairs) = (plan.near.responding().start, plan.near.responses.len(), plan.near.pairs.len());
-        // Per frequency the largest Doppler shift of its beams at the reach's speed; a field component's peak.
-        let shift: Vec<f64> = self.light.frequencies.iter().map(|f| f.beams.iter().map(|&l| self.doppler_shift(l, [0.0; 3]) + self.light.beams[l].wave_number * reach.speed).fold(0.0, f64::max)).collect();
+        // A field component's peak.
         let peak = |frequency: usize, k: usize| self.light.frequencies[frequency].coefficients.iter().map(|c| c[k].abs()).sum::<f64>();
-        let ground = self.clusters[layout.cluster].ground;
         let complex = |row: &[f64], at: usize| C64::new(row[2 * at], row[2 * at + 1]);
-        let mut interpolated = vec![0.0; fine.width()];
-        let (mut responses, mut potential) = (0.0_f64, 0.0_f64);
         let read = |x: f64| if x.is_nan() { f64::INFINITY } else { x };
+        let error = |at: usize| (complex(other, at) - complex(exact, at)).norm_sqr();
+        let (mut responses, mut potential) = (0.0_f64, 0.0_f64);
+        for (c, cc) in self.carriers.iter().enumerate() {
+            let w = shift[cc.frequency];
+            let sum = |of: &dyn Fn(usize) -> f64| (0..count).filter(|&i| plan.near.responses[i][0] == c).map(of).sum::<f64>().sqrt();
+            let size = sum(&|i| complex(exact, start + i).norm_sqr());
+            if !(size == 0.0) {
+                responses = responses.max(read((sum(&|i| error(start + i)) + w * sum(&|i| error(start + count + i))) / size));
+            }
+        }
+        for x in 0..self.clusters[layout.cluster].ground {
+            let moved: f64 = plan
+                .near
+                .pairs
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p[0] == p[2] && p[4] == x)
+                .map(|(i, p)| peak(p[0], p[1]) * peak(p[2], p[3]) * (error(i).sqrt() + 2.0 * shift[p[0]] * error(pairs + i).sqrt()))
+                .sum();
+            potential = potential.max(read(moved));
+        }
+        (responses, potential)
+    }
+
+    /// The error of a table against the one a halving of axis f finer, at the finer's new nodes over the reach's ranges (module
+    /// documentation, # Refinement): the responses' relative error and the bound of the potential's error (`node_error`), each
+    /// the largest over the nodes.
+    fn halving_error(&self, layout: &Layout, coarse: &Table, fine: &Table, f: usize, ranges: &[(f64, f64)], reach: &Reach) -> (f64, f64) {
+        let shift = self.reach_shifts(reach);
+        let mut interpolated = vec![0.0; fine.width()];
+        let mut error = (0.0_f64, 0.0_f64);
         for node in 0..Table::nodes(fine.axes()) {
             let (at, exact) = fine.node(node);
             if at[f] % 2 == 0 {
@@ -433,33 +538,16 @@ impl Model {
                 continue;
             }
             coarse.eval(&s, &mut interpolated, None);
-            let error = |at: usize| (complex(&interpolated, at) - complex(exact, at)).norm_sqr();
-            for (c, cc) in self.carriers.iter().enumerate() {
-                let w = shift[cc.frequency];
-                let sum = |of: &dyn Fn(usize) -> f64| (0..count).filter(|&i| plan.near.responses[i][0] == c).map(of).sum::<f64>().sqrt();
-                let size = sum(&|i| complex(exact, start + i).norm_sqr());
-                if !(size == 0.0) {
-                    responses = responses.max(read((sum(&|i| error(start + i)) + w * sum(&|i| error(start + count + i))) / size));
-                }
-            }
-            for x in 0..ground {
-                let moved: f64 = plan
-                    .near
-                    .pairs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, p)| p[0] == p[2] && p[4] == x)
-                    .map(|(i, p)| peak(p[0], p[1]) * peak(p[2], p[3]) * (error(i).sqrt() + 2.0 * shift[p[0]] * error(pairs + i).sqrt()))
-                    .sum();
-                potential = potential.max(read(moved));
-            }
+            let (responses, potential) = self.node_error(layout, &shift, exact, &interpolated);
+            error = (error.0.max(responses), error.1.max(potential));
         }
-        (responses, potential)
+        error
     }
 
-    /// A cluster's first table for a light set (module documentation, # Axes); None where it has no near form under it, or where
-    /// its grid exceeds `most` nodes.
-    fn first_table(&self, cluster: usize, lights: &Lights, reach: &Reach, most: usize) -> Option<NearTable> {
+    /// A cluster's first table for a light set (module documentation, # Axes): its axes the coordinates its first looks
+    /// find it needs, and those `needed` (a last look's, taken unasked), each on its first grid; None where it has no near
+    /// form under it, or where its grid exceeds `most` nodes.
+    fn first_table(&self, cluster: usize, lights: &Lights, reach: &Reach, most: usize, needed: &[Coordinate]) -> Option<First> {
         let plan = self.plan(cluster, lights);
         if plan.near.len() == 0 {
             return None;
@@ -471,8 +559,11 @@ impl Model {
         let mut focus = vec![0.0; all.len()];
         self.coordinates_at(&all, &polarizations, &focus_amplitudes, &mut focus, &mut vec![[0.0; 3]; all.len()]);
         let mut weights = self.weights(cluster, lights, &all, &polarizations, &focus);
-        // An intensity's weight per unit intensity times the bound of its distance from the focus value over the reach.
-        let target = crate::units::POPULATION_TARGET;
+        // The weight a coordinate held at the focus may have: the responses' error the refinement leaves of an axis, half
+        // the tables' shares (module documentation, # Axes). An intensity's weight per unit intensity times the bound of its
+        // distance from the focus value over the reach.
+        let (shown, temperature) = shares();
+        let target = shown.min(temperature) / 2.0;
         let intensities: Vec<usize> = (0..all.len()).filter(|&c| weights[c] >= target && intensity(all[c])).collect();
         let moved = {
             let polarizations = &polarizations;
@@ -491,11 +582,27 @@ impl Model {
         }
         let mut order: Vec<usize> = (0..all.len()).collect();
         order.sort_by(|&a, &b| weights[b].total_cmp(&weights[a]));
-        // The axes: the heaviest coordinates at or above the population target, as many as keep an interpolation cheaper than the
-        // elimination and the first grid within the bound.
+        // The table of given axes, each on its first grid, the other coordinates at the focus.
         let width = 2 * plan.near.len();
         let exact = self.near_exact(&plan, &focus_amplitudes, 1, &coherent).work * crate::decide::COMPLEX;
-        let mut axes: Vec<usize> = vec![];
+        let made = |axes: &[usize]| -> Option<NearTable> {
+            let picked: Vec<usize> = axes.iter().copied().chain(order.iter().copied().filter(|c| !axes.contains(c))).collect();
+            let layout = Layout {
+                cluster,
+                lights: lights.clone(),
+                coordinates: picked.iter().map(|&c| all[c]).collect(),
+                focus: picked.iter().map(|&c| focus[c]).collect(),
+                polarizations: polarizations.clone(),
+                plan: plan.clone(),
+            };
+            let table = self.build(&layout, axes.iter().map(|&c| first_axis(all[c])).collect(), None, most)?;
+            Some(NearTable { layout, table })
+        };
+        // The axes: of the coordinates at or above that weight, the heaviest first, those the table so far needs by its look at
+        // the coordinate's first nodes over the reach -- as many as keep an interpolation cheaper than the elimination and the
+        // first grid within the bound.
+        let (mut axes, mut ranges, mut held) = (vec![], vec![], vec![]);
+        let mut table = made(&axes)?;
         for &c in &order {
             if weights[c] < target {
                 break;
@@ -505,20 +612,23 @@ impl Model {
             if d > crate::table::MOST_AXES || (4usize.pow(d as u32) * (1 + d) * width) as f64 >= exact || Table::nodes(&first) > most {
                 break;
             }
-            axes.push(c);
+            let place = table.layout.coordinates.iter().position(|x| *x == all[c]).expect("a coordinate of the table's layout");
+            let (range, axis) = (self.reach_range(&table.layout, place, reach), first[d - 1]);
+            let take = needed.contains(&all[c]) || {
+                let values: Vec<f64> = (0..axis.nodes).map(|i| axis.node(i)).filter(|v| v - axis.spacing() <= range.1 && v + axis.spacing() >= range.0).collect();
+                let (error, worst) = self.look(&table, &ranges, all[c], &values, reach);
+                if error <= 1.0 {
+                    held.push((all[c], worst));
+                }
+                error > 1.0
+            };
+            if take {
+                axes.push(c);
+                ranges.push(range);
+                table = made(&axes)?;
+            }
         }
-        let picked: Vec<usize> = axes.iter().copied().chain(order.iter().copied().filter(|c| !axes.contains(c))).collect();
-        let grid: Vec<Axis> = axes.iter().map(|&c| first_axis(all[c])).collect();
-        let layout = Layout {
-            cluster,
-            lights: lights.clone(),
-            coordinates: picked.iter().map(|&c| all[c]).collect(),
-            focus: picked.iter().map(|&c| focus[c]).collect(),
-            polarizations,
-            plan,
-        };
-        let table = self.build(&layout, grid, None, most)?;
-        Some(NearTable { layout, table })
+        Some(First { table, ranges, held })
     }
 
     /// The coordinates' a-priori weights for a cluster under a light set (module documentation, # Axes).
@@ -778,5 +888,126 @@ fn first_axis(c: Coordinate) -> Axis {
             Axis::first(lo, hi, periodic)
         }
         Coordinate::Unit { .. } => Axis::first(0.0, 1.0, false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::field::Light;
+    use crate::model::{Component, Point, Unit};
+    use crate::request::Request;
+
+    fn scene(name: &str) -> Request {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        Request::from_native(&line).unwrap()
+    }
+
+    /// The reach of a model's atoms in the trap of ground state `b` at a temperature, as the solve makes it.
+    fn reach_of(model: &Model, b: usize, temperature: f64) -> (crate::model::Trap, Reach) {
+        let p: [f64; GROUND] = std::array::from_fn(|s| if s == b { 1.0 } else { 0.0 });
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &p, temperature, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+        (trap, reach)
+    }
+
+    /// One criterion for what a table leaves out (module documentation, # Axes), on the two sides of it.
+    ///
+    /// A coordinate that is needed. R2_RECOIL's σ⁺ probe on |2,2⟩ → |3′,3′⟩, folded at the atom and on resonance at the
+    /// focus, in a tweezer whose shift of |3′,3′⟩ is the ground state's but for 0.04 half-widths of the line (an outside
+    /// form's entry): the tweezer's intensity weighs 0.0407 at most, between half the tables' shares (0.0039) and the
+    /// population target. Over a reach of 120 µK it is the table's axis, and the table's error as the ledger reads it
+    /// (`table_reads`) is within the shares from the trap's axis to the reach's edge. (Held at the focus, as the cut at
+    /// the population target had it, the read was 2.1e-2 at the edge and 8.2e-3 on average: beyond the share 7.8e-3 of a
+    /// table that had no axis to halve.)
+    ///
+    /// A coordinate that is not. R3_DOPPLER's cooling pair is one polarization unit, its intensity a standing wave's
+    /// from none to all over the reach, and its dressing at full intensity is 0.045 half-widths: by its weight a
+    /// coordinate to ask. The pair is the model's one carrier and its line the cycling one, so its dressing is in no
+    /// denominator of its own response: the first look, the unit at its seven first nodes on the tweezer's intensity's
+    /// first nodes, reads 6e-7 of the shares and holds it; the last, at every node of the refined table (193), 7e-7; and
+    /// the scene's table is the one of the tweezer's intensity alone. Named needed, the unit is an axis unasked.
+    #[test]
+    fn a_coordinate_is_an_axis_where_the_table_without_it_is_beyond_its_shares() {
+        let (b, e) = (7, 31);
+        let mut request = scene("R2_RECOIL");
+        let light = Light::new(&request);
+        let beam = request.beams.iter().position(|b| b.id == "probe").unwrap();
+        let probe = light.frequencies.iter().position(|f| f.beams.contains(&beam)).unwrap();
+        let kept = Model::new(&request, &light, &[]).unwrap().bare_units(Component { frequency: probe, counter: false });
+        // The line's detuning at the focus, what the tweezer's light moves it by there, and its width.
+        let line = |request: &Request| -> (f64, f64, f64) {
+            let model = Model::new(request, &light, &kept).unwrap();
+            let (coherent, amplitudes) = (model.coherent_dressing(), model.light.amplitudes([0.0; 3]));
+            let (lit, mut unlit) = (model.running(), model.running());
+            unlit.0[model.light.trap] = Lit::Off;
+            let of = |lights: &Lights| {
+                let h = &model.far_hamiltonian(&amplitudes, lights, 0, &coherent)[0];
+                h[(e, e)].re - h[(b, b)].re
+            };
+            (of(&lit) - model.carriers[model.carrier_of(probe).unwrap()].detuning, of(&lit) - of(&unlit), model.decay[(e - GROUND, e - GROUND)].re)
+        };
+        let (_, moved, gamma) = line(&request);
+        let tweezer = &light.frequencies[light.trap];
+        let field: f64 = (0..3).map(|q| tweezer.fields.iter().map(|f| f[q]).sum::<C64>().norm_sqr()).sum();
+        let wanted = 0.04 * 0.5 * gamma * moved.signum();
+        for q in 0..3 {
+            request.outside_forms[tweezer.form].matrices[q][(e, e)] += C64::real((wanted - moved) / field);
+        }
+        for _ in 0..3 {
+            let (detuning, _, _) = line(&request);
+            request.hamiltonian[(e, e)] -= C64::real(detuning);
+        }
+        let (detuning, moved, _) = line(&request);
+        assert!(detuning.abs() <= 1e-9 * gamma && (moved.abs() / (0.5 * gamma) - 0.04).abs() < 0.002, "on resonance at the focus, moved by 0.04 half-widths: {detuning}, {moved}");
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let (trap, reach) = reach_of(&model, b, 4.0 * request.temperature_uk);
+        let tables = model.tabulate(&reach, 1 << 16);
+        let cluster = model.cluster_of(b);
+        let index = tables.tables.iter().position(|t| t.layout.cluster == cluster && t.layout.lights == model.running()).unwrap();
+        let table = &tables.tables[index];
+        assert!(table.axes() == 1 && table.layout.coordinates[0] == (Coordinate::Chart { frequency: light.trap, index: 0 }), "the tweezer's intensity is the axis: {:?}", &table.layout.coordinates[..table.axes()]);
+        let (p, prepared) = (std::array::from_fn(|s| if s == b { 1.0 } else { 0.0 }), model.prepared());
+        let edge = (1..).map(|i| 0.01 * i as f64).find(|&rho| model.potential([trap.centre[0] + rho, trap.centre[1], trap.centre[2]], &p, &prepared) > reach.minimum + reach.energy).unwrap();
+        let samples: Vec<Sample> = (0..40).map(|i| Sample { cluster, at: Point { r: [trap.centre[0] + edge * (i as f64 + 0.5) / 40.0, trap.centre[1], trap.centre[2]], kappa: [0.0; 3], t: 0.0 }, psi: vec![C64::ONE] }).collect();
+        let reads = &model.table_reads(&tables, &samples)[index];
+        let largest = reads.whole.iter().map(|r| r.population.max(r.temperature)).fold(0.0, f64::max);
+        let (shown, temperature) = shares();
+        eprintln!("the probe in the nearly magic tweezer: {} nodes; over {edge:.2} µm the table's largest read {largest:.2e}", Table::nodes(table.table.axes()));
+        assert!(largest <= shown.min(temperature), "the table's read {largest:.3e} over the reach beyond its share {shown:.3e}");
+
+        // The cooling pair's own unit: an axis by its weight, one the table does not need.
+        let request = scene("R3_DOPPLER");
+        let light = Light::new(&request);
+        let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+        let mut kept: Vec<Unit> = vec![];
+        let (model, reach) = loop {
+            let model = Model::new(&request, &light, &kept).unwrap();
+            let (_, reach) = reach_of(&model, state, request.temperature_uk);
+            let units = model.units();
+            let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+            if failing.is_empty() {
+                break (model, reach);
+            }
+            kept.extend(failing);
+        };
+        let (cluster, lights, most) = (model.cluster_of(state), model.running(), 1 << 16);
+        let First { table: first, ranges, held } = model.first_table(cluster, &lights, &reach, most, &[]).unwrap();
+        assert!(first.axes() == 1 && matches!(first.layout.coordinates[0], Coordinate::Chart { index: 0, .. }), "the first table's axis is the tweezer's intensity: {:?}", &first.layout.coordinates[..first.axes()]);
+        assert!(held.len() == 1 && matches!(held[0].0, Coordinate::Unit { .. }), "the pair's unit is asked and held: {held:?}");
+        let (unit, worst) = held[0];
+        let (axis, grid) = (first_axis(unit), Table::nodes(first.table.axes()));
+        let values: Vec<f64> = (0..axis.nodes).map(|i| axis.node(i)).collect();
+        let early = model.look(&first, &ranges, unit, &values, &reach).0;
+        let refined = model.refined(first, &ranges, &reach, most);
+        let last = model.look(&refined, &ranges, unit, &[worst], &reach).0;
+        eprintln!("R3_DOPPLER: the pair's unit over the tweezer's {grid} first nodes reads {early:.1e} of the shares; at its worst value {worst} over the refined table's {} nodes, {last:.1e}", Table::nodes(refined.table.axes()));
+        assert!(early <= 1.0 && last <= 1.0, "the table does not need the unit: {early:e}, {last:e} of the shares");
+        let tables = model.tabulate(&reach, most);
+        let table = tables.tables.iter().find(|t| t.layout.cluster == cluster && t.layout.lights == lights).unwrap();
+        assert!(table.axes() == 1 && table.layout.coordinates[0] == refined.layout.coordinates[0] && table.table.axes()[0].nodes == refined.table.axes()[0].nodes, "the table kept is the tweezer's intensity's: {:?}", &table.layout.coordinates[..table.axes()]);
+        // A coordinate a last look finds needed is taken unasked.
+        assert_eq!(model.first_table(cluster, &lights, &reach, most, &[unit]).unwrap().table.axes(), 2, "the unit, needed, is the first table's second axis");
     }
 }
