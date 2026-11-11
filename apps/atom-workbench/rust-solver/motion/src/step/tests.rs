@@ -724,9 +724,9 @@ fn mean_force(model: &Atom, r: [f64; 3], v: [f64; 3], trajectories: u64, from: f
     for i in 0..trajectories {
         let mut t = Trajectory::new(model, 0, r, v.map(|x| x / model.hm), 11, i);
         let mut path = adapt::Path::new(t.seed, t.index, tau, 0);
-        adapt::advance(model, tau, &mut t, &mut step::Scratch::default(), &mut path, from, &mut |_| {}).unwrap();
+        adapt::advance(model, tau, &mut t, &mut step::Scratch::default(), &mut path, from, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
         let start = t.kappa;
-        adapt::advance(model, tau, &mut t, &mut step::Scratch::default(), &mut path, to, &mut |_| {}).unwrap();
+        adapt::advance(model, tau, &mut t, &mut step::Scratch::default(), &mut path, to, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
         forces.push(std::array::from_fn::<f64, 3, _>(|a| (t.kappa[a] - start[a]) / (to - from)));
     }
     let n = forces.len() as f64;
@@ -827,7 +827,7 @@ fn the_jumps_are_at_the_roots_of_the_norm() {
     let model = Atom::new(RB, flat, vec![], 0.0, gamma);
     let mut t = Trajectory::new(&model, 0, [0.0; 3], [0.0; 3], 3, 5);
     let end = 2000.0;
-    adapt::advance(&model, 10.0, &mut t, &mut step::Scratch::default(), &mut adapt::Path::new(3, 5, 10.0, 0), end, &mut |_| {}).unwrap();
+    adapt::advance(&model, 10.0, &mut t, &mut step::Scratch::default(), &mut adapt::Path::new(3, 5, 10.0, 0), end, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
     // The jumps the thresholds put before `end`, and the last one's time.
     let threshold = |j: u32| crate::random::Stream::jump(3, 5, j).open_uniform();
     let (mut last, mut j, mut waits) = (0.0, 0, Vec::new());
@@ -868,7 +868,7 @@ fn a_jump_is_made_where_its_own_step_reaches_the_threshold() {
     let start = Trajectory::new(&model, 0, [0.0, 0.0, 0.05], [0.0, 0.0, 8.0], 3, 5);
     let (mut t, mut steps) = (start.clone(), Vec::new());
     let mut path = adapt::Path::new(t.seed, t.index, tau, 0);
-    adapt::advance(&model, tau, &mut t, &mut step::Scratch::default(), &mut path, end, &mut |s| steps.push(s.tau)).unwrap();
+    adapt::advance(&model, tau, &mut t, &mut step::Scratch::default(), &mut path, end, &[], &mut |_, _| {}, &mut |s, _| steps.push(s.tau)).unwrap();
     let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
     let (mut twin, mut scratch, mut longest) = (start.clone(), step::Scratch::default(), 0.0_f64);
     for &length in &steps {
@@ -903,7 +903,7 @@ fn a_conservative_trap_keeps_its_energy() {
     let mut path = adapt::Path::new(t.seed, t.index, tau, 0);
     for k in 1..=outputs {
         let to = run * k as f64 / outputs as f64;
-        adapt::advance(&model, tau, &mut t, &mut step::Scratch::default(), &mut path, to, &mut |_| {}).unwrap();
+        adapt::advance(&model, tau, &mut t, &mut step::Scratch::default(), &mut path, to, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
         // Every advance lands on its output time exactly: an ulp short, the rest is an interval of the time's round-off.
         assert_eq!(t.time, to, "advanced to {} for the output at {to}", t.time);
         errors.push(model.energy(0, &t.point(), &t.psi) - e0);
@@ -1018,40 +1018,263 @@ fn the_stumpff_functions_are_their_series() {
 fn the_quadrature_integrates_a_bandwidth_to_round_off() {
     for (omega, decay, tau) in [(1.0, 0.0, 1e-3), (3.0, 0.0, 1.0), (40.0, 0.0, 0.7), (900.0, 0.0, 1.1), (60.0, 19.0, 0.3)] {
         let w = C64::new(omega, decay);
-        let sum: C64 = super::quadrature(0.0, tau, w.abs()).map(|(s, weight)| (C64::I * w * s).exp() * weight).sum();
+        let sum: C64 = super::quadrature(0.0, tau, w.abs(), super::FORMS).map(|(s, weight)| (C64::I * w * s).exp() * weight).sum();
         let exact = ((C64::I * w * tau).exp() - C64::ONE) / (C64::I * w);
         assert!((sum - exact).abs() <= 1e-14 * tau, "ω {omega}, γ {decay}, τ {tau}: {sum:?} against {exact:?} on {} nodes", super::nodes(tau, w.abs()));
     }
 }
 
-/// A step's path moments (`Segment::moments`): ∫κ dt and ∫κ² dt over sub-intervals of a long step through a Gaussian
-/// tweezer beyond its inflection (a hyperbolic axis in the middle's expansion) -- before the middle, across it, after it --
-/// against dense trapezoids of the path's κ (`Segment::at`).
+/// Errors as they are printed: each in three digits of its own size.
+fn sizes(errors: &[f64]) -> String {
+    errors.iter().map(|e| format!("{e:.3e}")).collect::<Vec<_>>().join(", ")
+}
+
+/// A step's path (`Segment`; step.rs, # The path between a step's ends) in a tilted quadratic trap with a stiff axis
+/// (ω τ = 1.26), a hyperbolic and a flat one, under a kick with every part: the force two unequal counter-propagating
+/// waves leave to the step, and their diffusion's part of a Brownian path, its increment and its first moment. The path
+/// begins at the step's start and ends at the step's end, to the rounding of the flow's sums. Its moments
+/// (`Segment::moments`) over cuts of the step -- before the middle, across it, after it, the whole -- are the dense
+/// trapezoids of its own κ and κ² (`Segment::at`) with, on κ², the diffusion's rate times the integral of what the
+/// step's two moments do not tell of the Brownian path (|τ|σ(1 − 3σ), τ²/15 over the step).
 #[test]
-fn a_segment_s_moments_are_its_path_s_integrals() {
-    let trap = Trap::Gaussian { depth: 6.0, waists: [1.0, 1.2, 3.0] };
-    let model = Atom::new(RB, trap, vec![], 0.0, 0.0);
-    let start = held(&model, [0.3, -0.2, 0.5], [40.0, 25.0, -60.0]);
-    let tau = 3.0;
-    let step = step::step(&model, &start, tau, &mut step::Scratch::default()).unwrap();
+fn a_step_s_path_goes_from_its_start_to_its_end_and_its_moments_are_its_integrals() {
+    let (c, s) = (0.6_f64, 0.8_f64);
+    let axes = [[c, s, 0.0], [-s * 0.6, c * 0.6, 0.8], [s * 0.8, -c * 0.8, 0.6]];
+    let curvature = [543.0, -100.0, 0.0];
+    let hessian: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|b| (0..3).map(|i| curvature[i] * axes[i][a] * axes[i][b]).sum()));
+    let (k, amplitude, epsilon) = (8.0, 0.5, 0.3);
+    let mut model = Atom::new(RB, Trap::Quadratic { hessian, gradient: [1.0, -2.0, 3.0] }, vec![], 0.0, 0.0);
+    model.folded = vec![(C64::real(0.5 * amplitude * (1.0 + epsilon)), [0.0, 0.6 * k, 0.8 * k]), (C64::real(0.5 * amplitude * (1.0 - epsilon)), [0.0, -0.6 * k, -0.8 * k])];
+    let start = held(&model, [0.3, -0.2, 0.1], [40.0, 25.0, -60.0]);
+    let tau = 2.0;
+    let mut stream = crate::random::Stream::brownian(43, 1, 0, 0);
+    let brownian = step::Brownian::over(tau, &[stream.normals(), stream.normals()]);
+    let step = step::Midway::new(&model, &start, tau).unwrap().step(&start, &brownian, None, &mut step::Scratch::default()).unwrap();
     let seg = &step.segment;
-    // κ on the step's path at the time t: the flow from the start before the middle, from the kicked middle after it.
-    let path = |t: f64| if t < 0.5 * tau { seg.flow.advance(seg.from, t).1 } else { seg.flow.advance(seg.kicked, t - 0.5 * tau).1 };
-    for (from, to) in [(0.2, 1.1), (1.0, 2.6), (1.9, 2.95), (0.0, 3.0)] {
+    let scatter: [f64; 3] = std::array::from_fn(|a| step.spread[a].iter().map(|l| l * l).sum());
+    assert!(scatter[1] > 0.0 && scatter[2] > 0.0 && seg.kicked.0 != seg.flow.advance(seg.from, 0.5 * tau).0, "the step's kick has a diffusion's increment and its first moment");
+    let (first, last) = (seg.at(start.time), seg.at(start.time + tau));
+    assert!(relative(&first.0, &start.r) < 1e-13 && relative(&first.1, &start.kappa) < 1e-13, "the path's start {first:?} against the step's {:?}", (start.r, start.kappa));
+    assert!(relative(&last.0, &step.end.r) < 1e-12 && relative(&last.1, &step.end.kappa) < 1e-12, "the path's end {last:?} against the step's {:?}", (step.end.r, step.end.kappa));
+    // The same step without the kick ends elsewhere: the path's end is the kicked step's.
+    let unkicked = seg.flow.advance(seg.from, tau);
+    assert!(relative(&unkicked.1, &step.end.kappa) > 1e-4, "the kick moves the end: {unkicked:?}");
+    for (from, to) in [(0.2, 0.9), (0.7, 1.6), (1.3, 1.95), (0.0, 2.0), (1.6, 0.7)] {
         let (one, two) = seg.moments(from, to);
         let n = 200_000;
         let h = (to - from) / n as f64;
         let (mut a, mut b) = ([0.0; 3], [0.0; 3]);
         for i in 0..=n {
             let w = if i == 0 || i == n { 0.5 * h } else { h };
-            let k = path(from + i as f64 * h);
+            let time = from + i as f64 * h;
+            let kappa = seg.at(time).1;
+            let sigma = time / tau * (1.0 - time / tau);
             for x in 0..3 {
-                a[x] += w * k[x];
-                b[x] += w * k[x] * k[x];
+                a[x] += w * kappa[x];
+                b[x] += w * (kappa[x] * kappa[x] + scatter[x] * tau * sigma * (1.0 - 3.0 * sigma));
             }
         }
         assert!(relative(&one, &a) < 1e-8 && relative(&two, &b) < 1e-8, "[{from}, {to}]: {one:?} vs {a:?}, {two:?} vs {b:?}");
     }
+    // The cuts' moments add up to the whole's.
+    let (lo, hi, whole) = (seg.moments(0.0, 0.5 * tau), seg.moments(0.5 * tau, tau), seg.moments(0.0, tau));
+    for x in 0..3 {
+        assert!((lo.0[x] + hi.0[x] - whole.0[x]).abs() <= 1e-12 * whole.0[x].abs() && (lo.1[x] + hi.1[x] - whole.1[x]).abs() <= 1e-12 * whole.1[x], "axis {x}: {lo:?} and {hi:?} against {whole:?}");
+    }
+}
+
+/// Two states in harmonic wells of their own atop a harmonic reference: V_s(r) = ½ Σ_a (λ_a + μ_{s,a}) r_a², no coupling,
+/// no decay. The populations p_s stay, the force is the wells' mean, so the motion is harmonic on each axis at
+/// Ω_a² = (ħ/m)(λ_a + Σ_s p_s μ_{s,a}), and the states' relative phase is −½ Σ_a (μ_{1,a} − μ_{0,a}) ∫r_a² dt: all in closed
+/// form. The scheme splits it: the reference's flow at λ, the kick −τ Σ_s p_s μ_s r_h at the middle, each state's phase
+/// at its well's value there.
+struct Wells {
+    hm: f64,
+    reference: [f64; 3],
+    own: [[f64; 3]; 2],
+    cluster: Cluster,
+}
+
+impl Wells {
+    fn new(hm: f64, reference: [f64; 3], own: [[f64; 3]; 2]) -> Wells {
+        let cluster = Cluster { states: vec![0, 1], ground: 2, frames: vec![Beat(vec![0]); 2], waves: vec![[0.0; 3]; 2], waves_exact: vec![Beat(vec![]); 2] };
+        Wells { hm, reference, own, cluster }
+    }
+    /// (r, κ) and the states' relative phase arg(ψ₁ψ₀*) at the time t from (r, κ) at t = 0 with the populations p.
+    fn exact(&self, r: [f64; 3], kappa: [f64; 3], p: [f64; 2], t: f64) -> ([f64; 3], [f64; 3], f64) {
+        let (mut r1, mut k1, mut phase) = ([0.0; 3], [0.0; 3], 0.0);
+        for a in 0..3 {
+            let omega = (self.hm * (self.reference[a] + p[0] * self.own[0][a] + p[1] * self.own[1][a])).sqrt();
+            let (x, y) = (r[a], self.hm * kappa[a] / omega);
+            let (cos, sin) = ((omega * t).cos(), (omega * t).sin());
+            (r1[a], k1[a]) = (x * cos + y * sin, kappa[a] * cos - omega / self.hm * x * sin);
+            // ∫₀ᵗ (x cos Ωs + y sin Ωs)² ds.
+            let square = 0.5 * (x * x + y * y) * t + (x * x - y * y) * (2.0 * omega * t).sin() / (4.0 * omega) + x * y * (1.0 - (2.0 * omega * t).cos()) / (2.0 * omega);
+            phase -= 0.5 * (self.own[1][a] - self.own[0][a]) * square;
+        }
+        (r1, k1, phase)
+    }
+}
+
+impl Dynamics for Wells {
+    type Middle<'a> = Parts;
+    fn hbar_over_mass(&self) -> f64 {
+        self.hm
+    }
+    fn reference(&self, r: [f64; 3]) -> Quadratic {
+        let gradient: [f64; 3] = std::array::from_fn(|a| self.reference[a] * r[a]);
+        Quadratic { value: 0.5 * dot3(gradient, r), gradient, hessian: std::array::from_fn(|a| std::array::from_fn(|b| if a == b { self.reference[a] } else { 0.0 })) }
+    }
+    fn cluster(&self, _: usize) -> &Cluster {
+        &self.cluster
+    }
+    fn cluster_of(&self, _: usize) -> usize {
+        0
+    }
+    fn middle(&self, _: usize, r: [f64; 3], _: f64) -> Parts {
+        let (mut m, mut g) = (Mat::zeros(2, 2), zeros(2));
+        for s in 0..2 {
+            let gradient: [f64; 3] = std::array::from_fn(|a| (self.reference[a] + self.own[s][a]) * r[a]);
+            m[(s, s)] = C64::real(0.5 * dot3(gradient, r));
+            for a in 0..3 {
+                g[a][(s, s)] = C64::real(gradient[a]);
+            }
+        }
+        Parts { waves: self.cluster.waves.clone(), parts: vec![Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g }] }
+    }
+    fn photons(&self, _: usize, _: &Point, _: &[C64]) -> Vec<Photon> {
+        unreachable!("the wells scatter nothing")
+    }
+    fn kick(&self, _: usize, _: &Point, _: &[C64], _: &Photon) -> [f64; 3] {
+        unreachable!("the wells scatter nothing")
+    }
+    fn scattering(&self, _: usize, _: &Point, _: &[C64], _: &[f64]) -> Scattering {
+        Scattering::NONE
+    }
+    fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
+        0.5 * self.hm * dot3(at.kappa, at.kappa) + self.reference(at.r).value
+    }
+    fn lost(&self, _: usize, _: &Point, _: &[C64]) -> bool {
+        false
+    }
+    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
+        let mut rows = [0.0; STATES];
+        for (row, z) in rows.iter_mut().zip(psi) {
+            *row = z.norm_sqr();
+        }
+        rows
+    }
+    fn assembly_work(&self) -> f64 {
+        0.0
+    }
+    fn photon_work(&self) -> f64 {
+        0.0
+    }
+}
+
+/// A trajectory read inside a step (step.rs, # The path between a step's ends; adapt.rs, # The reads) against the
+/// closed form of two states in their own harmonic wells (`Wells`): the wells' share of the force is a fifth to a half
+/// of the reference's, and the atom crosses a third of a radian of its orbit a step at the largest step.
+/// - One step from an exact start, read at three tenths of it: the momentum on the step's path errs by f′(h² − u²)/2,
+///   the second order -- its error falls fourfold a halving of τ --, where the splitting's own path, the kick at the
+///   middle, lacks 0.3 τ f there, the first order (twofold a halving); the position on the path is of the third order
+///   like the step's end, eightfold.
+/// - A read at the step's end is the step's end: position, momentum and internal state to rounding.
+/// - Over a run of some orbits, read at times that are no step's end at any of the steps (their place in the step a
+///   third and two thirds, by turns): position, momentum and the states' relative phase converge at the second order,
+///   fourfold a halving, as the same quantities do at a time every step ends at.
+#[test]
+fn a_read_inside_a_step_is_of_the_second_order_and_the_step_s_end_at_its_end() {
+    let model = Wells::new(RB, [300.0, 200.0, 60.0], [[150.0, 40.0, 30.0], [60.0, 100.0, 12.0]]);
+    let (r, kappa) = ([0.3, -0.2, 0.5], [40.0, 25.0, -60.0]);
+    let psi = [C64::real(0.6), C64::cis(0.3) * 0.8];
+    let p = [0.36, 0.64];
+    let start = || {
+        let mut t = Trajectory::new(&model, 0, r, kappa, 7, 0);
+        (t.psi, t.threshold) = (psi.into_iter().collect(), f64::MIN_POSITIVE);
+        t
+    };
+    let apart = |a: &[f64; 3], b: &[f64; 3]| (0..3).map(|x| (a[x] - b[x]).abs()).fold(0.0, f64::max);
+    let relative_phase = |psi: &[C64]| (psi[1] * psi[0].conj()).arg() - 0.3;
+    // The phases' distance on the circle.
+    let turned = |a: f64, b: f64| (a - b).sin().atan2((a - b).cos()).abs();
+    let order = |errors: &[f64]| -> Vec<f64> { errors.windows(2).map(|e| (e[0] / e[1]).log2()).collect() };
+
+    // One step, read at 0.3 τ and at its end.
+    let (mut inside, mut middle_kick, mut position, mut end) = (vec![], vec![], vec![], vec![]);
+    for tau in [0.4, 0.2, 0.1, 0.05] {
+        let mut scratch = step::Scratch::default();
+        let step = step::step(&model, &start(), tau, &mut scratch).unwrap();
+        let read = step.at(0.3 * tau, &mut scratch);
+        let (re, ke, _) = model.exact(r, kappa, p, 0.3 * tau);
+        inside.push(apart(&read.kappa, &ke));
+        position.push(apart(&read.r, &re));
+        middle_kick.push(apart(&step.segment.flow.advance(step.segment.from, 0.3 * tau).1, &ke));
+        let (_, ke, _) = model.exact(r, kappa, p, tau);
+        end.push(apart(&step.end.kappa, &ke));
+        // A read at the step's end is the step's end.
+        let last = step.at(step.end.time, &mut scratch);
+        let state = (0..2).map(|s| (last.psi[s] - step.end.psi[s]).abs()).fold(0.0, f64::max);
+        assert!(relative(&last.r, &step.end.r) < 1e-13 && relative(&last.kappa, &step.end.kappa) < 1e-13 && state < 1e-13 && last.time == step.end.time, "τ {tau}: the read at the end {last:?} against the end {:?}", step.end);
+    }
+    eprintln!("one step, κ at 0.3 τ: on the path {} (orders {:.2?}), with the kick at the middle {} ({:.2?}); r on the path {} ({:.2?}); κ at the end {} ({:.2?})", sizes(&inside), order(&inside), sizes(&middle_kick), order(&middle_kick), sizes(&position), order(&position), sizes(&end), order(&end));
+    assert!(order(&inside).iter().all(|o| (o - 2.0).abs() < 0.2), "the momentum read inside a step: orders {:?}", order(&inside));
+    assert!(order(&middle_kick).iter().all(|o| (o - 1.0).abs() < 0.2), "the momentum with the kick at the middle: orders {:?}", order(&middle_kick));
+    assert!(order(&position).iter().all(|o| (o - 3.0).abs() < 0.2) && order(&end).iter().all(|o| (o - 3.0).abs() < 0.2), "the position inside and the end's momentum: orders {:?}, {:?}", order(&position), order(&end));
+
+    // A run, read inside its steps and at a time all its steps end at.
+    let (coarsest, run) = (0.4, 48.0);
+    let reads = [(19.0 + 1.0 / 3.0) * coarsest, (67.0 + 1.0 / 3.0) * coarsest, (103.0 + 1.0 / 3.0) * coarsest, 110.0 * coarsest];
+    let mut errors: Vec<Vec<[f64; 3]>> = vec![vec![]; reads.len()];
+    for halvings in 0..4 {
+        let tau = coarsest / (1 << halvings) as f64;
+        let (mut t, mut path) = (start(), adapt::Path::new(7, 0, coarsest, halvings));
+        let mut states = vec![];
+        adapt::advance(&model, tau, &mut t, &mut step::Scratch::default(), &mut path, run, &reads, &mut |k, state| states.push((k, state.clone())), &mut |_, _| {}).unwrap();
+        assert!(states.iter().map(|(k, _)| *k).eq(0..reads.len()) && t.time == run && t.taken as f64 == run / tau, "τ {tau}: {} reads, {} steps to {}", states.len(), t.taken, t.time);
+        for (k, state) in &states {
+            assert_eq!(state.time, reads[*k]);
+            let (re, ke, phase) = model.exact(r, kappa, p, reads[*k]);
+            errors[*k].push([apart(&state.r, &re), apart(&state.kappa, &ke), turned(relative_phase(&state.psi), phase)]);
+        }
+    }
+    for (k, read) in errors.iter().enumerate() {
+        for (x, name) in ["r", "κ", "the phase"].into_iter().enumerate() {
+            let e: Vec<f64> = read.iter().map(|e| e[x]).collect();
+            eprintln!("t = {:.3} ({}): {name} errs by {}, orders {:.2?}", reads[k], if k + 1 < reads.len() { "inside a step" } else { "a step's end" }, sizes(&e), order(&e));
+            assert!(order(&e).iter().all(|o| (o - 2.0).abs() < 0.25), "t = {}: {name} converges at the orders {:?}", reads[k], order(&e));
+        }
+    }
+}
+
+/// The internal state read inside a step is the step's own propagation there: a two-level atom crossing a standing
+/// wave on a uniform path (a mass the kick does not move), with a Doppler frame that turns (K_e = k₀), read at tenths of
+/// one step against the sub-stepped lab reference to each time (`substepped`). The step leaves of the path's change
+/// what its three nodes do (`step_errors`); a read between the nodes errs as the step's end does -- by 1.3 times its
+/// error at the largest step here, by the same at the smaller, asked within twice -- and falls with the step as it does,
+/// more than a hundredfold over two halvings.
+#[test]
+fn the_state_read_inside_a_step_is_the_path_s() {
+    let (hm, detuning, v, z0) = (1e-9, -40.0, 0.25, 0.11);
+    let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
+    let beams = [Beam { k: [0.0, 0.0, K], rabi: 6.0, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi: 6.0, phase: 0.3 }];
+    let model = Atom::new(hm, flat, beams.to_vec(), detuning, GAMMA);
+    let (mut inside, mut ends) = (vec![], vec![]);
+    for tau in [0.2, 0.1, 0.05] {
+        let mut scratch = step::Scratch::default();
+        let step = step::step(&model, &held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]), tau, &mut scratch).unwrap();
+        let error = |share: f64, scratch: &mut step::Scratch| {
+            let (read, (exact, _)) = (step.at(share * tau, scratch), substepped(&beams, detuning, GAMMA, z0, v, [C64::ONE, C64::ZERO], share * tau, 40_000, None));
+            (0..2).map(|s| (read.psi[s] - exact[s]).abs()).fold(0.0, f64::max)
+        };
+        inside.push((1..10).map(|i| error(0.1 * i as f64, &mut scratch)).fold(0.0, f64::max));
+        ends.push(error(1.0, &mut scratch));
+    }
+    eprintln!("the state's error inside a step {}, at its end {}", sizes(&inside), sizes(&ends));
+    for ((within, end), tau) in inside.iter().zip(&ends).zip([0.2, 0.1, 0.05]) {
+        assert!(*within <= 2.0 * end, "τ {tau}: the state inside errs by {within:e}, at the end by {end:e}");
+    }
+    assert!(inside[0] / inside[2] > 100.0 && ends[0] / ends[2] > 100.0, "the errors fall with the step: inside {inside:?}, at the end {ends:?}");
 }
 
 /// With light the step is its own inverse up to its path momentum's prediction (step.rs, # The path's momentum: the two
@@ -1145,7 +1368,7 @@ fn conservative_trap(name: &str) {
         let mut e0 = run.energy(t.cluster, &t.point(), &t.psi);
         for (k, &time) in request.times_us.iter().enumerate().skip(1) {
             let before = t.jumps;
-            adapt::advance(&run, tau, &mut t, &mut step::Scratch::default(), &mut path, time, &mut |_| {}).unwrap();
+            adapt::advance(&run, tau, &mut t, &mut step::Scratch::default(), &mut path, time, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
             assert!(t.lost.is_none(), "{name}: atom {i} lost at {:?}", t.lost);
             let e = run.energy(t.cluster, &t.point(), &t.psi);
             if t.jumps == before {
@@ -1830,7 +2053,7 @@ fn a_travelling_wave_s_jumps_carry_its_photons_and_its_steps_nothing() {
         let start = [0.3, -0.2, 1.1];
         let mut t = Trajectory::new(&model, 0, [0.1, 0.2, 0.3], start, 17, index);
         let mut path = adapt::Path::new(t.seed, t.index, 1.0, 0);
-        adapt::advance(&model, 1.0, &mut t, &mut step::Scratch::default(), &mut path, end, &mut |_| {}).unwrap();
+        adapt::advance(&model, 1.0, &mut t, &mut step::Scratch::default(), &mut path, end, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
         assert!(t.jumps > 0 && t.taken > 0, "trajectory {index}: {} jumps over {} steps", t.jumps, t.taken);
         for a in 0..3 {
             let carried = t.jumps as f64 * k[a];
@@ -1859,7 +2082,7 @@ fn a_standing_wave_s_light_diffuses_the_momentum_at_its_closed_form() {
         let (mut scratch, mut path) = (step::Scratch::default(), adapt::Path::new(23, 5, 1.0, 0));
         let (mut sums, mut last) = ([0.0; 4], t.kappa);
         for i in 0..n {
-            adapt::advance(&model, 1.0, &mut t, &mut scratch, &mut path, (i + 1) as f64, &mut |_| {}).unwrap();
+            adapt::advance(&model, 1.0, &mut t, &mut scratch, &mut path, (i + 1) as f64, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
             let d = t.kappa[2] - last[2];
             assert_eq!((t.kappa[0], t.kappa[1]), (0.0, 0.0), "{name}: the momentum across the wave");
             for (p, sum) in sums.iter_mut().enumerate() {
@@ -2006,7 +2229,7 @@ fn a_diffusion_s_energy_input_does_not_know_the_trap() {
     for index in 0..runs {
         let mut t = Trajectory::new(&model, 0, [0.0, 0.0, node], [0.0; 3], 41, index);
         let mut path = adapt::Path::new(t.seed, t.index, tau, 0);
-        adapt::advance(&model, tau, &mut t, &mut step::Scratch::default(), &mut path, tau * steps as f64, &mut |_| {}).unwrap();
+        adapt::advance(&model, tau, &mut t, &mut step::Scratch::default(), &mut path, tau * steps as f64, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
         assert_eq!((t.jumps, t.taken), (0, steps), "trajectory {index}: a node scatters nothing, and every step is whole");
         assert!((k * (t.r[2] - node)).abs() < 1e-3, "trajectory {index} stays at the node: {}", t.r[2] - node);
         mean += energy(&t) / runs as f64;
