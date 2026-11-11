@@ -44,22 +44,6 @@ const fn square_root(a: f64) -> f64 {
     }
 }
 
-/// The tolerance of a jump's time, relative to the length of the step that ends in it (adapt.rs, # The jumps' times):
-/// the square of the step's share of the tighter target, (s·min ε)² = 5·10⁻⁴.
-///
-/// Derivation: a jump made δt from where its step's own propagation reaches the threshold is, to first order, the
-/// hazard's integral off by γδt for that waiting time -- a share γδt of a jump too many or too few -- and the jump's
-/// kick taken ωδt away in the orbit's phase. The step's error is checked between the pilot's two levels at the scheme's
-/// order (solve.rs, # The step), which a tolerance does not follow: it is a share of the step's length, of the first
-/// order in it. So it is admitted at the second order of what the step may take, its share s·ε of a target:
-/// δt ≤ (s·ε)² L of the step's length L makes the hazard's part at most (s·ε)² of that step's own hazard and the
-/// phase's at most (s·ε)² ω L, ε the tighter of the two targets. The power two is chosen, not derived: the argument
-/// holds for any power above one, and a smaller tolerance costs the search's steps alone.
-pub const JUMP_TIMING: f64 = {
-    let share = STEP_SHARE * if POPULATION_TARGET < TEMPERATURE_TARGET { POPULATION_TARGET } else { TEMPERATURE_TARGET };
-    share * share
-};
-
 // ---------------------------------------------------------------------------------------------------------------------
 // The contract's definitions and caps.
 
@@ -137,7 +121,6 @@ mod tests {
     #[test]
     fn the_derived_values_are_their_formulas() {
         assert!((STEP_SHARE - 0.2_f64.sqrt()).abs() <= f64::EPSILON * STEP_SHARE, "{STEP_SHARE}");
-        assert!((JUMP_TIMING - 0.2 * 0.05 * 0.05).abs() <= 4.0 * f64::EPSILON * JUMP_TIMING, "{JUMP_TIMING}");
         assert!((KT_PER_UK - 0.130_920_3).abs() <= 1e-7, "{KT_PER_UK}");
         assert!((hbar_over_mass(1.4432e-25) - 7.307_2e-4).abs() <= 1e-8);
         assert!((wave_number(384_230_484.468_5) - 8.052_8).abs() <= 1e-4);

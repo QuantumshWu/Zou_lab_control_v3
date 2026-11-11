@@ -32,25 +32,30 @@
 //! the state's norm (measured: within 10⁻⁷ over a step where the following is 0.04, 10⁻¹⁰ where it is 0.01; taken to
 //! the second order alone it drifted by a sixth of the following's square there) --, and through the three nodes.
 //!
-//! g = e^{−iΛ(u + h)} m: Ĥ₀'s phases and decays are factors, exact over any width, and i ṁ = D̃₂(u) m with
-//! D̃₂_ab = e^{iω_ab(u + h)} (D₂)_ab on the slow pairs. m is hopped from the step's start to its middle and to its end
-//! -- two hops a step, whatever Ĥ₀ --, each the first Magnus term, m ← e^{−iJ} m with J = ∫D̃₂ over the hop, the
-//! integral over the pair's turn exact: for a hop from u over w, with D₂ = uA + u²B,
-//!   J_ab = e^{iω_ab(u + h)} w [A_ab (u I₀ + w I₁) + B_ab (u² I₀ + 2uw I₁ + w² I₂)],  I_p = ∫₀¹ s^p e^{zs} ds,  z = iω_ab w,
+//! g = e^{−iΛ(u − u₀)} m, u₀ the time the state is launched at (the step's start, −h): Ĥ₀'s phases and decays are
+//! factors, exact over any width, and i ṁ = D̃₂(u) m with D̃₂_ab = e^{iω_ab(u − u₀)} (D₂)_ab on the slow pairs. m is
+//! hopped from its launch to the middle of what is left of the step and to the step's end -- from the step's start to
+//! its middle and to its end: two hops, whatever Ĥ₀ --, each the first Magnus term, m ← e^{−iJ} m with J = ∫D̃₂ over the
+//! hop, the integral over the pair's turn exact: for a hop from u over w, with D₂ = uA + u²B,
+//!   J_ab = e^{iω_ab(u − u₀)} w [A_ab (u I₀ + w I₁) + B_ab (u² I₀ + 2uw I₁ + w² I₂)],  I_p = ∫₀¹ s^p e^{zs} ds,  z = iω_ab w,
 //! the moments by their series Σ_j z^j/(j!(j + p + 1)) -- |z| < 1 for a slow pair over a half step: no cancellation,
 //! and summed until its terms are within the round-off of the state the exponent acts on or of the exponent's own
-//! first term (`series`, `Picture::exponent`). The one hop beyond the step's end (`Picture::extend`) is no wider than
-//! the step, 2|h|: |z| < 2 there, and the series still loses no more than e² of the round-off to cancellation.
+//! first term (`series`, `Picture::exponent`).
 //!
-//! Between the three nodes m is their quintic: its values there and its rates ṁ = −iD̃₂m (zero at the middle), the
-//! Hermite interpolant. m changes by the slow pairs alone, so its sixth derivative is of the size |ω|⁵ |D₂| with
-//! |ω| |h| < 1, and the quintic errs by no more than (4/27)/720 of h⁶ times it. So the state at any time u of the step
-//! is x(u) = R (1 + X(u)) e^{−iΛ(u + h)} m(u) -- n exponentials, the matrix R(1 + X(u)) from its three (R(1 + X₀), RX₁
-//! and RX₂, made once a step) and its product of n² (`Picture::at`), no hop --, and at the step's three nodes it is the
-//! hops' own.
+//! Between its three stops m is their quintic: its values there and its rates ṁ = −iD̃₂m (zero at the step's middle,
+//! where D₂ is), the Hermite interpolant. m changes by the slow pairs alone, so its sixth derivative is of the size
+//! |ω|⁵ |D₂| with |ω| |h| < 1, and the quintic errs by no more than (4/27)/720 of w⁶ times it, w the stops' spacing. So
+//! the state at any time u from the launch on is x(u) = R (1 + X(u)) e^{−iΛ(u − u₀)} m(u) -- n exponentials, the matrix
+//! R(1 + X(u)) from its three (R(1 + X₀), RX₁ and RX₂, made once a step) and its product of n² (`Picture::at`), no hop
+//! --, and at the three stops it is the hops' own.
+//!
+//! The propagation is linear in the state, and nothing of the picture but m knows the state: a state that changes at
+//! a time of the step -- a quantum jump's (step.rs, # Jumps) -- is launched again at that time on the same picture,
+//! m = (1 + X(u₀))⁻¹R⁻¹x there (one factorization of n³/3), its two hops over what is left of the step, each no wider
+//! than a half step, and the quintic of its own three stops (`Picture::launch`).
 //!
 //! Where nothing moves (D = 0: an atom at rest, a generator still along every path) X = 0 and m is constant: the state
-//! is e^{−i(c + Λ)(u + h)} on its start, exact at any detuning times step.
+//! is e^{−i(c + Λ)(u − u₀)} on its launch, exact at any detuning times step.
 //!
 //! What is left out, all of the change alone:
 //! - of the slow pairs, the hop's second Magnus term, −½∫∫[D̃₂(t₁), D̃₂(t₂)]: over a half step it is
@@ -130,8 +135,9 @@ fn unlay(from: &[f64], columns: usize, matrix: &mut [C64]) {
 }
 
 /// A generator along a step's path (module documentation): filled by the caller with Ĥ at the middle (`base`) and at
-/// the two ends (`ends`: at −h, at +h), then prepared (`prepare`) and launched from the step's start state (`launch`);
-/// kept by a trajectory from step to step, its memory made once.
+/// the two ends (`ends`: at −h, at +h), then prepared (`prepare`) and launched from a state at a time of the step
+/// (`launch`: the step's start state, and a jump's state at the jump); kept by a trajectory from step to step, its
+/// memory made once.
 pub struct Picture {
     n: usize,
     /// Ĥ₀ (n × n; rad/µs), the caller's: kept as it is given.
@@ -172,18 +178,20 @@ pub struct Picture {
     moving: bool,
     half: f64,
     /// The fast pairs (n²) and their 1/ω, their following X₀, X₁, X₂ (3n², each column by column), whether any pair
-    /// is followed at all, and 1 + X(−h) factored (LU with partial pivoting, n² and its pivots): the start state's
-    /// way into g.
+    /// is followed at all, and 1 + X factored at the launch's time (LU with partial pivoting, n² and its pivots): the
+    /// launched state's way into g.
     fast: Vec<bool>,
     inverses: Vec<C64>,
     follow: Vec<C64>,
     followed: bool,
     factors: Vec<C64>,
     pivots: Vec<usize>,
-    /// The path: m and ṁ at −h, 0 and h and at the far end of an extension beyond h (8n), that end, and the rounding
-    /// of the hops' exponentials relative to the state's norm.
+    /// The path: m and ṁ at its three stops (6n) -- the launch's time `origin`, `centre` = origin + `spacing` and the
+    /// step's end, centre + spacing --, and the rounding of the hops' exponentials relative to the state's norm.
     path: Vec<C64>,
-    far: f64,
+    origin: f64,
+    centre: f64,
+    spacing: f64,
     bound: f64,
     /// Without the decomposition: the frame's state at the last two stops (2n) and their times.
     stops: Vec<C64>,
@@ -237,7 +245,9 @@ impl Default for Picture {
             factors: Vec::new(),
             pivots: Vec::new(),
             path: Vec::new(),
-            far: 0.0,
+            origin: 0.0,
+            centre: 0.0,
+            spacing: 0.0,
             bound: 0.0,
             stops: Vec::new(),
             times: [0.0; 2],
@@ -264,11 +274,12 @@ fn series(x: f64, size: f64) -> usize {
 }
 
 /// The quintic through three nodes at s = −1, 0, 1 (the Hermite interpolant of values and rates): the weights of the
-/// values at −1, 0, 1 and of the rates d/ds at −1 and 1 (the middle's rate is none here).
-fn quintic(s: f64) -> ([f64; 3], [f64; 2]) {
+/// values and of the rates d/ds at −1, 0, 1 -- with ℓ_i the nodes' Lagrange polynomials, (1 − 2ℓ_i′(s_i)(s − s_i)) ℓ_i²
+/// and (s − s_i) ℓ_i².
+fn quintic(s: f64) -> ([f64; 3], [f64; 3]) {
     let (minus, middle, plus) = (0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0));
     let (m2, p2) = (minus * minus, plus * plus);
-    ([(1.0 + 3.0 * (s + 1.0)) * m2, middle * middle, (1.0 - 3.0 * (s - 1.0)) * p2], [(s + 1.0) * m2, (s - 1.0) * p2])
+    ([(1.0 + 3.0 * (s + 1.0)) * m2, middle * middle, (1.0 - 3.0 * (s - 1.0)) * p2], [(s + 1.0) * m2, s * middle * middle, (s - 1.0) * p2])
 }
 
 impl Picture {
@@ -291,7 +302,7 @@ impl Picture {
                 (&mut self.follow, 3 * size),
                 (&mut self.moments, 3 * size),
                 (&mut self.factors, size),
-                (&mut self.path, 8 * n),
+                (&mut self.path, 6 * n),
                 (&mut self.stops, 2 * n),
             ] {
                 v.resize(length, C64::ZERO);
@@ -390,7 +401,7 @@ impl Picture {
     /// - At the two ends the second order D X − X D_s. Its fast part F is followed in its turn (X's second order: the
     ///   same polynomial of F through the three nodes -- F is zero at the middle, as D is).
     /// - At the two ends D₂ whole, (1 + X) D₂ = D_s + D X − F by the factors of 1 + X there, and of it the slow pairs,
-    ///   through the three nodes (zero at the middle). The factors at −h are kept: the start state's way into g.
+    ///   through the three nodes (zero at the middle).
     fn follow(&mut self) {
         let (n, h) = (self.n, self.half);
         let size = n * n;
@@ -487,7 +498,7 @@ impl Picture {
             combine(true, x, n, d, out, n, 0);
             let whole = &mut ends[end * size..(end + 1) * size];
             unlay(out, n, whole);
-            let (f, pivots) = if end == 0 { (&mut self.factors[..], &mut self.pivots[..]) } else { (&mut factors[..], &mut spare[..n]) };
+            let (f, pivots) = (&mut factors[..], &mut spare[..n]);
             for (row, numbers) in f.chunks_exact_mut(n).enumerate() {
                 for (z, column) in numbers.iter_mut().zip(x.chunks_exact(n)) {
                     *z = column[row];
@@ -571,9 +582,9 @@ impl Picture {
         self.work += (4 * size) as f64;
     }
 
-    /// `matrix`'s slow pairs turned by e^{iω_ab s}: from a pair's own time to the path's, s = u + h from the step's
-    /// start. A slow pair's rates differ by less than 1/|h|, so the factor is bounded whatever the states' own decays
-    /// over s are: the turn by the two states' phases, the modulus by the rates' difference.
+    /// `matrix`'s slow pairs turned by e^{iω_ab s}: from a pair's own time to the path's, s = u − u₀ from the launch.
+    /// A slow pair's rates differ by less than 1/|h|, so the factor is bounded whatever the states' own decays over s
+    /// are: the turn by the two states' phases, the modulus by the rates' difference.
     fn turn(&mut self, s: f64) {
         if s == 0.0 {
             return;
@@ -597,7 +608,7 @@ impl Picture {
     fn hop(&mut self, m: &mut [C64], u: f64, w: f64) -> f64 {
         let n = self.n;
         self.exponent(u, w);
-        self.turn(u + self.half);
+        self.turn(u - self.origin);
         let plan = linalg::exp_apply(&mut self.matrix, C64::new(0.0, -1.0), m, &mut self.vectors);
         self.work += (plan.parts * plan.terms * n * n) as f64;
         plan.rounding(n)
@@ -609,7 +620,7 @@ impl Picture {
         for ((z, a), b) in self.matrix.data.iter_mut().zip(&self.ends[0].data).zip(&self.ends[1].data) {
             *z = *a * u + *b * (u * u);
         }
-        self.turn(u + self.half);
+        self.turn(u - self.origin);
         for (row, out) in self.matrix.data.chunks(n).zip(rate.iter_mut()) {
             let z: C64 = row.iter().zip(m).map(|(d, m)| *d * *m).sum();
             *out = C64::new(z.im, -z.re);
@@ -640,16 +651,16 @@ impl Picture {
         bound
     }
 
-    /// Launches the picture from the frame's state x at the step's start, the time −h. Through the decomposition:
-    /// m there, (1 + X(−h))⁻¹R⁻¹x, and where the generator moves m's two hops to the middle and to the end with its
-    /// rates at the nodes -- the state is then known at every time of the step (`at`). Without it: the first stop.
-    pub fn launch(&mut self, x: &[C64]) {
+    /// Launches the picture from the frame's state x at the time `from` of the step (from the middle; the step's
+    /// start −h, or a later time the state changes at). Through the decomposition: m there, (1 + X(from))⁻¹R⁻¹x, and
+    /// where the generator moves m's two hops -- to the middle of what is left of the step and to the step's end --
+    /// with its rates at the three stops: the state is then known at every time from the launch on (`at`). The middle
+    /// stop's rate is none where it is the step's middle (D₂ is zero there). Without the decomposition: the first stop.
+    pub fn launch(&mut self, from: f64, x: &[C64]) {
         let (n, h) = (self.n, self.half);
-        (self.far, self.bound) = (h, 0.0);
+        (self.origin, self.bound) = (from, 0.0);
         if !self.through {
-            self.stops[..n].copy_from_slice(x);
-            self.stops[n..].copy_from_slice(x);
-            self.times = [-h; 2];
+            self.again(x);
             return;
         }
         let mut path = std::mem::take(&mut self.path);
@@ -658,47 +669,60 @@ impl Picture {
         self.work += (n * n) as f64;
         if self.moving {
             if self.followed {
-                // g = (1 + X(−h))⁻¹ d by the factors.
+                // g = (1 + X(from))⁻¹ d: X at the time row by row, one more on its diagonal, factored.
+                let size = n * n;
+                let (zero, rest) = self.follow.split_at(size);
+                let (one, two) = rest.split_at(size);
+                for (row, numbers) in self.factors.chunks_exact_mut(n).enumerate() {
+                    for (column, z) in numbers.iter_mut().enumerate() {
+                        let t = column * n + row;
+                        *z = zero[t] + one[t] * from + two[t] * (from * from);
+                    }
+                    numbers[row] += C64::ONE;
+                }
+                linalg::factor(&mut self.factors, &mut self.pivots, n);
                 linalg::solve(&self.factors, &self.pivots, n, &mut path[..n], 1);
-                self.work += (n * n) as f64;
+                self.work += (n * size / 3 + 3 * size) as f64;
             }
+            let spacing = 0.5 * (h - from);
+            (self.centre, self.spacing) = (from + spacing, spacing);
+            let centre = self.centre;
             let (start, rest) = path.split_at_mut(n);
             let (rate, rest) = rest.split_at_mut(n);
-            self.rate(-h, start, rate);
-            let (middle, rest) = rest.split_at_mut(2 * n);
-            middle[..n].copy_from_slice(start);
-            self.bound += self.hop(&mut middle[..n], -h, h);
+            self.rate(from, start, rate);
+            let (middle, rest) = rest.split_at_mut(n);
+            middle.copy_from_slice(start);
+            self.bound += self.hop(middle, from, spacing);
+            let (rate, rest) = rest.split_at_mut(n);
+            if centre == 0.0 {
+                rate.fill(C64::ZERO);
+            } else {
+                self.rate(centre, middle, rate);
+            }
             let (end, rest) = rest.split_at_mut(n);
-            end.copy_from_slice(&middle[..n]);
-            self.bound += self.hop(end, 0.0, h);
+            end.copy_from_slice(middle);
+            self.bound += self.hop(end, centre, spacing);
             self.rate(h, end, &mut rest[..n]);
         }
         self.path = path;
     }
 
-    /// Follows the path beyond the step's end as far as the time `far` (from the middle), on the same generator
-    /// uA + u²B continued: one more hop of m and its rate there. Nothing where the state takes strides or nothing moves.
-    /// `far` − h is at most the step's length 2|h| (the caller's reach, adapt.rs, # The jumps' times): a slow pair turns
-    /// less than two radians over the hop (module documentation).
-    pub fn extend(&mut self, far: f64) {
-        let (n, h) = (self.n, self.half);
-        if self.through && self.moving && far != h {
-            let mut path = std::mem::take(&mut self.path);
-            let (before, beyond) = path.split_at_mut(6 * n);
-            let (m, rate) = beyond.split_at_mut(n);
-            m.copy_from_slice(&before[4 * n..5 * n]);
-            self.bound += self.hop(m, h, far - h);
-            self.rate(far, m, rate);
-            self.path = path;
-            self.far = far;
+    /// The path from its launch again, from the launch's state x: nothing through the decomposition (the state is
+    /// known at any time from the launch on), the first stop again without it -- the strides go from stop to stop,
+    /// ahead only.
+    pub fn again(&mut self, x: &[C64]) {
+        if !self.through {
+            let n = self.n;
+            self.stops[..n].copy_from_slice(x);
+            self.stops[n..].copy_from_slice(x);
+            self.times = [self.origin; 2];
         }
     }
 
-    /// The frame's state at the time u (from the middle) through the decomposition (module documentation):
-    /// x = R (1 + X(u)) e^{−iΛ(u + h)} m(u), m the nodes' quintic within the step and the cubic of the end's and the
-    /// far end's values and rates beyond it.
+    /// The frame's state at the time u (from the middle; from the launch on) through the decomposition (module
+    /// documentation): x = R (1 + X(u)) e^{−iΛ(u − u₀)} m(u), m its three stops' quintic.
     fn at(&mut self, u: f64, x: &mut [C64]) {
-        let (n, h) = (self.n, self.half);
+        let n = self.n;
         let size = n * n;
         assert!(self.through, "a state through the decomposition");
         let d = &mut self.coordinates[..];
@@ -706,24 +730,15 @@ impl Picture {
         let node = |k: usize| &path[k * n..(k + 1) * n];
         if !self.moving {
             d.copy_from_slice(node(0));
-        } else if self.far == h || (u - h) / h <= 0.0 {
-            let (values, rates) = quintic(u / h);
-            let (start, rate, middle, end, last) = (node(0), node(1), node(2), node(4), node(5));
-            for a in 0..n {
-                d[a] = start[a] * values[0] + middle[a] * values[1] + end[a] * values[2] + (rate[a] * rates[0] + last[a] * rates[1]) * h;
-            }
         } else {
-            // The cubic on [h, far]: values and rates at its two ends.
-            let w = self.far - h;
-            let t = (u - h) / w;
-            let (values, rates) = ([(1.0 + 2.0 * t) * (1.0 - t) * (1.0 - t), t * t * (3.0 - 2.0 * t)], [t * (1.0 - t) * (1.0 - t) * w, t * t * (t - 1.0) * w]);
-            let (end, last, far, there) = (node(4), node(5), node(6), node(7));
+            let (values, rates) = quintic((u - self.centre) / self.spacing);
+            let (start, first, middle, second, end, last) = (node(0), node(1), node(2), node(3), node(4), node(5));
             for a in 0..n {
-                d[a] = end[a] * values[0] + far[a] * values[1] + last[a] * rates[0] + there[a] * rates[1];
+                d[a] = start[a] * values[0] + middle[a] * values[1] + end[a] * values[2] + (first[a] * rates[0] + second[a] * rates[1] + last[a] * rates[2]) * self.spacing;
             }
         }
         for (z, l) in d.iter_mut().zip(&self.lambda) {
-            *z *= (C64::new(0.0, -(u + h)) * *l).exp();
+            *z *= (C64::new(0.0, -(u - self.origin)) * *l).exp();
         }
         // R(1 + X(u)) d: the matrix at the time from its three, R(1 + X₀) + u RX₁ + u² RX₂; R where nothing is followed.
         let matrix = if self.followed {
@@ -875,7 +890,7 @@ mod tests {
                 let mut picture = pictured(&base, &a, &b, half, moving);
                 assert_eq!(picture.through, decomposed, "{off} off the exceptional point");
                 let mut x = [C64::ZERO; 2];
-                picture.launch(&start);
+                picture.launch(-half, &start);
                 let w = 2.0 * half / stops as f64;
                 for k in 1..=stops {
                     picture.advance(if k == stops { half } else { -half + k as f64 * w }, &mut x);
@@ -912,13 +927,70 @@ mod tests {
             let mut picture = pictured(&base, &a, &b, half, moving);
             assert!(picture.through && picture.moving == moving);
             assert!(!moving || picture.fast.iter().enumerate().all(|(k, fast)| *fast || k / n == k % n), "a slow pair");
-            picture.launch(&start);
+            picture.launch(-half, &start);
             let error = errors(&mut picture, &base, &a, &b, half, &start, &[half, 0.37 * half, -0.6 * half], 400_000);
             eprintln!("slopes × {scale}: the state's error {error:e}, the following's size {:e}", picture.following());
             found.push((error, picture.following()));
         }
         assert!(found[0].0 < 1e-11, "{found:?}");
         assert!(found[1].0 < found[1].1 * found[1].1 && found[2].0 < 0.4 * found[1].0, "{found:?}");
+    }
+
+    /// A state launched inside the step goes on as the flow does (module documentation: the propagation is linear, and
+    /// the picture knows the state by m alone). The step's start state is launched and read at a time of the step and
+    /// at later ones; launched again at that time from the state read there, it is read at the later ones again: the
+    /// two launches differ by what the hops and their quintics leave, each within its own bound -- slow pairs hopped
+    /// (the fifth order of the step: 10⁻⁴ at the half 0.08, `a_slow_pair_s_hops_are_of_the_fourth_order`), fast pairs
+    /// followed (the square of the following, `a_fast_pair_s_state_follows_the_change`) --, whether the launch lies
+    /// before the step's middle or after it; and at its own time the launched state is the state given, to rounding.
+    #[test]
+    fn a_state_launched_inside_the_step_goes_on_as_the_flow_does() {
+        let entry = |seed: f64, i: usize, j: usize| C64::new((seed * (1.0 + i as f64) + 0.7 * j as f64).sin(), (seed * (2.0 + j as f64) - 0.3 * i as f64).cos());
+        let hermitian = |n: usize, seed: f64, size: f64| Mat::from_fn(n, n, |i, j| (entry(seed, i, j) + entry(seed, j, i).conj()) * (0.5 * size));
+        let slow = {
+            let mut base = hermitian(3, 1.3, 2.0);
+            for i in 0..3 {
+                base[(i, i)] += C64::new(0.0, -0.05 * i as f64);
+            }
+            (base, hermitian(3, 2.1, 4.0), hermitian(3, 0.4, 20.0), 0.08)
+        };
+        let fast = {
+            let mut base = hermitian(4, 1.3, 40.0);
+            for (i, shift) in [0.0, 5.0, -600.0, -620.0].into_iter().enumerate() {
+                base[(i, i)] += C64::new(shift, if i >= 2 { -19.0 } else { 0.0 });
+            }
+            (base, hermitian(4, 2.1, 2.0), hermitian(4, 0.4, 20.0), 0.05)
+        };
+        for (name, (base, a, b, half)) in [("slow pairs", slow), ("fast pairs", fast)] {
+            let n = base.rows;
+            let start: Vec<C64> = (0..n).map(|i| C64::cis(0.9 * i as f64) * 0.5).collect();
+            let mut picture = pictured(&base, &a, &b, half, true);
+            assert!(picture.through && picture.followed == (name == "fast pairs"));
+            let within = if picture.followed { picture.following().powi(2) } else { 1e-4 };
+            for from in [-0.55 * half, 0.0, 0.3 * half] {
+                let later = [from + 0.21 * (half - from), from + 0.5 * (half - from), from + 0.83 * (half - from), half];
+                picture.launch(-half, &start);
+                let mut state = vec![C64::ZERO; n];
+                picture.advance(from, &mut state);
+                let first: Vec<Vec<C64>> = later.iter().map(|&u| {
+                    let mut x = vec![C64::ZERO; n];
+                    picture.advance(u, &mut x);
+                    x
+                }).collect();
+                picture.launch(from, &state);
+                let mut x = vec![C64::ZERO; n];
+                picture.advance(from, &mut x);
+                let own = x.iter().zip(&state).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max);
+                assert!(own < 1e-13, "{name}, launched at {from}: the state there is {own:e} off the one given");
+                let mut worst = 0.0_f64;
+                for (&u, expected) in later.iter().zip(&first) {
+                    picture.advance(u, &mut x);
+                    worst = worst.max(x.iter().zip(expected).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max));
+                }
+                eprintln!("{name}, launched at {:.2} of the half step: the two launches differ by {worst:e} (within {within:e})", from / half);
+                assert!(worst < within, "{name}, launched at {from}: {worst:e} against {within:e}");
+            }
+        }
     }
 
     /// The picture's products go through the lanes' kernel (`linalg::combine`: sums by fused multiply-adds, Σ_k c_k x_k
@@ -971,7 +1043,7 @@ mod tests {
         let start: Vec<C64> = (0..n).map(|i| C64::cis(0.9 * i as f64) * 0.5).collect();
         let mut picture = pictured(&base, &a, &b, half, true);
         assert!(picture.through && picture.followed && picture.fast.iter().any(|fast| !fast));
-        picture.launch(&start);
+        picture.launch(-half, &start);
         let mut worst = 0.0_f64;
         for u in [-half, -0.6 * half, 0.0, 0.37 * half, half] {
             let mut x = vec![C64::ZERO; n];
@@ -1023,7 +1095,7 @@ mod tests {
         for half in [0.08, 0.04] {
             let mut picture = pictured(&base, &a, &b, half, true);
             assert!(picture.through && !picture.followed, "a fast pair at the half {half}");
-            picture.launch(&start);
+            picture.launch(-half, &start);
             let error = errors(&mut picture, &base, &a, &b, half, &start, &[half, 0.0, -0.41 * half, 0.73 * half], 100_000);
             eprintln!("half {half}: the state's error {error:e}");
             found.push(error);
