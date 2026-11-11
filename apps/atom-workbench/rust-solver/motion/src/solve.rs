@@ -18,7 +18,8 @@
 //! 5. The result (contract §2.2, `assemble`).
 //!
 //! # The step (SPEC §2.2)
-//! One step τ for the run (adapt.rs). The ladder's rungs are the output interval over powers of two. A step is
+//! One step τ for the run (adapt.rs). A step divides the output interval evenly, and so does its companion's at twice
+//! the step: the ladder's rungs are the output interval over the even numbers, and below a rung its halves. A step is
 //! admissible where its nodes resolve what the scheme samples along an atom's path (`admissible`): the reference flow,
 //! ω τ < π at the prepared trap's largest frequency; and the generator, whose change along the path the propagation
 //! reads at nodes half a step apart, (|Ω| + |K| v) τ/2 < π for every residual beat Ω and wave vector K of the model's
@@ -332,9 +333,10 @@ fn admissible(tau: f64, frequency: f64, sampled: &[[f64; 2]], speed: f64) -> boo
     frequency * tau < PI && sampled.iter().all(|[beat, wave]| 0.5 * (beat + wave * speed) * tau < PI)
 }
 
-/// The ladder's first rung (module documentation, # The step): the largest rung -- the output interval over a power of
-/// two -- that is admissible for the run and whose double is admissible for the companion (`admissible`), at the speeds
-/// `fastest` and `typical` (µm/µs) of the reach the model is judged over.
+/// The ladder's first rung (module documentation, # The step): the largest rung -- the output interval over an even
+/// number, its double a whole part of the interval too -- that is admissible for the run and whose double is admissible
+/// for the companion (`admissible`), at the speeds `fastest` and `typical` (µm/µs) of the reach the model is judged over.
+/// (Admissibility is a bound on the step from above: the least even number is found by counting up.)
 /// - The run's step is the result's: it is admissible for every atom the model is judged for, at the reach's largest
 ///   speed (model.rs `Reach::speed`) -- one domain for the model's folds and for the step.
 /// - The companion at twice the step is a probe of the step, not a result: it must be stable, which the trap's
@@ -344,11 +346,9 @@ fn admissible(tau: f64, frequency: f64, sampled: &[[f64; 2]], speed: f64) -> boo
 /// Where the trap's resonance binds, the first rung is the rung below the largest stable one. Half the output interval
 /// at the most: the companion's step is a rung itself, and no step crosses an output.
 fn first_rung(interval: f64, frequency: f64, sampled: &[[f64; 2]], fastest: f64, typical: f64) -> f64 {
-    let mut tau = 0.5 * interval;
-    while !(admissible(tau, frequency, sampled, fastest) && admissible(2. * tau, frequency, sampled, typical)) {
-        tau *= 0.5;
-    }
-    tau
+    let step = |pairs: u64| interval / (2 * pairs) as f64;
+    let pairs = (1..).find(|&m| admissible(step(m), frequency, sampled, fastest) && admissible(2. * step(m), frequency, sampled, typical)).expect("a step short enough is admissible");
+    step(pairs)
 }
 
 /// The rms speed (µm/µs) of atoms at the temperature T (µK): √(3 (ħ/m) k_BT/ħ), the reach's typical atom at the
@@ -634,7 +634,7 @@ fn attempt(
         step: vec![Bound::share(); outputs],
         checked: None,
         tau: step.map_or(first_rung, |step| step.min(first_rung)),
-        plan,
+        plan: Plan { cell: 2. * step.map_or(first_rung, |step| step.min(first_rung)), ..plan },
         scales,
         initial: row,
         ledger,
@@ -909,6 +909,10 @@ struct Plan {
     halves: Vec<V3>,
     listed: Vec<usize>,
     end: f64,
+    /// The cells of a trajectory's Brownian path (adapt.rs `Path`), µs: the companion's step at the attempt's first
+    /// rung, a whole part of the output interval. Every step of the attempt -- a rung's, its companion's -- is a cell
+    /// over a power of two, so every level reads the same path. The output interval until the first rung is known.
+    cell: f64,
 }
 impl Plan {
     /// The plan of the request's times with the trap's frequency per lab axis (rad/µs).
@@ -918,7 +922,7 @@ impl Plan {
         let count = times.len().min(DISTRIBUTION_TIMES);
         let mut listed: Vec<usize> = (0..count).map(|i| ((i * last) as f64 / (count - 1) as f64).round() as usize).collect();
         listed.dedup();
-        Plan { end: times[last] + halves[last].iter().fold(0., |a: f64, &b| a.max(b)), times: times.to_vec(), halves, listed }
+        Plan { end: times[last] + halves[last].iter().fold(0., |a: f64, &b| a.max(b)), times: times.to_vec(), halves, listed, cell: interval }
     }
 }
 
@@ -974,9 +978,9 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
     let widest = plan.halves.iter().flatten().fold(0., |a: f64, &b| a.max(b));
     let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
     let mut scratch = Scratch::default();
-    // The trajectory's Brownian path in cells of an output interval, its grid the multiples of τ (the ladder's rungs
-    // are the interval over powers of two): the same path at every rung.
-    let mut path = adapt::Path::new(SEED, index, interval, (interval / tau).log2().round() as u32);
+    // The trajectory's Brownian path in the plan's cells, its grid the multiples of τ (a cell over a power of two):
+    // the same path at every rung and at its companion.
+    let mut path = adapt::Path::new(SEED, index, plan.cell, (plan.cell / tau).log2().round() as u32);
     // Per output and lab axis: the window's time held, ∫κ dt and ∫κ² dt.
     let mut moments = vec![[[0.; 3]; 3]; outputs];
     let mut out = vec![Fate::Lost; outputs];
@@ -1684,19 +1688,13 @@ mod tests {
         assert!(n % GROUP == 0 && unseen(n as f64) <= room && unseen((n - GROUP) as f64) > room, "{n}");
     }
 
-    /// The ladder's first rung: the largest rung admissible for the run at the reach's largest speed whose double is
-    /// admissible for the companion at the reach's rms speed.
-    /// - Where the trap's resonance binds it is the rung below the largest stable one: of a 10 µs interval, 2.5 µs at a
-    ///   tweezer's 74.65 kHz (π/ω = 6.7 µs: 5 µs is stable, its double is not) and 0.15625 µs at a lattice's 910.7 kHz
-    ///   (0.55 µs); half the interval in a slow trap (the companion is one step an interval).
-    /// - The light: a standing wave of the D2 line (|K| = 2k = 16.1 /µm) at the reach of 30 µK -- its largest speed
-    ///   0.2185 µm/µs, √(2 ln(1/s) k_BT/m) with the unsampled share s of 2¹⁴ trajectories, its rms speed 0.0928 µm/µs --
-    ///   lets the run's step be below 2π/(K v) = 1.79 µs and the companion's below 4.20 µs: the first rung is 1.25 µs,
-    ///   its companion 2.5 µs. With the largest residual wave vector √10 k of six beams' cooling, 1.13 µs and 2.66 µs:
-    ///   0.625 µs with its companion at 1.25 µs -- the rung below 1.25 µs only because 1.25 µs itself is beyond the
-    ///   run's limit, not by a second halving. At 141 µK (0.473 and 0.201 µm/µs) the standing wave gives 0.82 µs and
-    ///   1.94 µs: 0.625 µs. A heavier, colder atom at 0.0089 µm/µs leaves the trap's rung.
-    /// - A residual beat counts with the motion at both levels, |Ω| + |K| v.
+    /// The first rung is the largest even part of the output interval that is admissible for the run and whose double is
+    /// for the companion (`first_rung`). Rb-87 at 30 µK: the reach's largest speed 0.2185 µm/µs, its rms speed 0.0928.
+    /// - No light, a 74.65 kHz trap, 10 µs between outputs: π/ω = 6.70 µs bounds the companion, 3.35 µs the run: the
+    ///   interval over 4, 2.5 µs. A 1 kHz trap bounds nothing: half the interval.
+    /// - A pattern of 2k = 16.1 µm⁻¹: the run below 2π/(K v_max) = 1.79 µs, the companion below 4.20 µs, so the run
+    ///   below 1.79 µs: the interval over 6, 1.667 µs. At √10 k the run below 1.13 µs: the interval over 10, 1 µs.
+    /// - In every case the rung is admissible with its double, and the next larger even part is not.
     #[test]
     fn the_first_rung_is_admissible_and_its_double_is_for_the_typical_atom() {
         let khz = |f: f64| std::f64::consts::TAU * f * 1e-3;
@@ -1705,17 +1703,26 @@ mod tests {
         let (fast, typical) = (fastest(30.), typical_speed(hm, 30.));
         assert!((fast - 0.2185).abs() < 5e-4 && (typical - 0.0928).abs() < 5e-4, "{fast} {typical}");
         assert_eq!(first_rung(10., khz(74.65), &[], fast, typical), 2.5);
-        assert_eq!(first_rung(10., khz(910.7), &[[0., 16.1]], fast, typical), 0.15625);
         assert_eq!(first_rung(10., khz(1.), &[[0., 0.]], fast, typical), 5.);
         assert!((TAU / (16.1 * fast) - 1.79).abs() < 5e-3 && (TAU / (16.1 * typical) - 4.20).abs() < 1e-2);
-        assert_eq!(first_rung(10., khz(74.65), &[[0., 16.1]], fast, typical), 1.25);
+        assert_eq!(first_rung(10., khz(74.65), &[[0., 16.1]], fast, typical), 10. / 6.);
         let k = 16.106 / 2. * 10f64.sqrt();
         assert!((TAU / (k * fast) - 1.13).abs() < 5e-3 && (TAU / (k * typical) - 2.66).abs() < 1e-2);
-        assert_eq!(first_rung(10., khz(100.), &[[0., k]], fast, typical), 0.625);
-        assert_eq!(first_rung(20., khz(79.), &[[0., 16.1]], fastest(141.), typical_speed(hm, 141.)), 0.625);
-        assert_eq!(first_rung(16., khz(20.3), &[[0., 32.2]], fast, typical), 0.5);
-        assert_eq!(first_rung(10., khz(74.65), &[[0., 16.1]], 0.0089, 0.0038), 2.5);
-        assert_eq!(first_rung(10., khz(74.65), &[[0., 0.], [2., 16.1], [0.5, 8.]], fast, typical), 0.625);
+        assert_eq!(first_rung(10., khz(100.), &[[0., k]], fast, typical), 1.);
+        let both = |tau: f64, w: f64, sampled: &[[f64; 2]], fast: f64, typical: f64| admissible(tau, w, sampled, fast) && admissible(2. * tau, w, sampled, typical);
+        for (interval, w, sampled, fast, typical) in [
+            (10., khz(910.7), vec![[0., 16.1]], fast, typical),
+            (20., khz(79.), vec![[0., 16.1]], fastest(141.), typical_speed(hm, 141.)),
+            (16., khz(20.3), vec![[0., 32.2]], fast, typical),
+            (10., khz(74.65), vec![[0., 16.1]], 0.0089, 0.0038),
+            (10., khz(74.65), vec![[0., 0.], [2., 16.1], [0.5, 8.]], fast, typical),
+            (100., khz(100.), vec![[0., k]], fast, typical),
+        ] {
+            let tau = first_rung(interval, w, &sampled, fast, typical);
+            let pairs = (interval / (2. * tau)).round();
+            assert!((interval / (2. * pairs) - tau).abs() <= 1e-12 * tau && both(tau, w, &sampled, fast, typical), "{interval} {tau}");
+            assert!(pairs == 1. || !both(interval / (2. * (pairs - 1.)), w, &sampled, fast, typical), "{interval} {tau}: a larger rung is admissible");
+        }
         assert!(admissible(1.25, khz(74.65), &[[0., 16.1]], fast) && !admissible(2.5, khz(74.65), &[[0., 16.1]], fast) && admissible(2.5, khz(74.65), &[[0., 16.1]], typical));
     }
 
