@@ -272,7 +272,8 @@ pub struct Photon {
     /// ∇u_a of the folded part (`Photon::moments`): gradients[i][a], i the lab axis; empty where none were asked.
     pub gradients: [[Vec<C64>; 3]; 3],
     /// The explicit states' part of the second moment's rate, in the amplitudes' norm (1/µm² times ‖u‖²'s unit; eliminate.rs
-    /// `Model::explicit_moment`): their absorption's mean is the Ehrenfest force's. Zero where no gradients were asked.
+    /// `Model::explicit_moment`): their absorption's mean is the Ehrenfest force's. Zero where it is not made: without
+    /// gradients, and of a class made alone (photon.rs `Gradients`).
     pub explicit: [[f64; 3]; 3],
 }
 
@@ -787,17 +788,12 @@ impl<'a> Run<'a> {
         let assembly = plans.iter().map(|(plan, table)| model.middle(plan, at.r, at.t, *table).work).fold(0.0, f64::max) * crate::decide::COMPLEX + photons;
         Run { model, tables, reference, prepared: model.prepared(), plans, assembly, photons }
     }
-    /// The photon classes of a cluster's state at a point with their amplitudes alone (photon.rs `Gradients::None`): what a
-    /// jump's draw of its class, direction and polarization reads.
+    /// The photon classes of a cluster's state at a point with their amplitudes alone (photon.rs `Gradients::None`): the
+    /// classes a jump draws among, by their rates (`Photon::weight`; a jump makes the rates and the drawn class's photon
+    /// alone, photon.rs `Model::emission_of`).
     pub fn photon_amplitudes(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
         let (plan, table) = &self.plans[cluster];
         self.model.photons_of(plan, *table, at, psi, photon::Gradients::None).0
-    }
-    /// The mean a jump of the drawn photon's class carries (`Photon::kick`), from the state it was drawn at: that class
-    /// alone made again, with its gradients (photon.rs `Model::kick_of`).
-    pub fn kick_at(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon) -> [f64; 3] {
-        let (plan, table) = &self.plans[cluster];
-        self.model.kick_of(plan, *table, at, psi, photon.class)
     }
     /// The scattering of a cluster's state at a point per unit time, an explicit state's decay at the populations
     /// `populations` of unit sum (None: the state's own; photon.rs `Model::scattering_of`).
@@ -850,11 +846,9 @@ impl crate::step::Dynamics for Run<'_> {
     fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Middle<'_> {
         Run::middle(self, cluster, r, t)
     }
-    fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
-        self.photon_amplitudes(cluster, at, psi)
-    }
-    fn kick(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon) -> [f64; 3] {
-        self.kick_at(cluster, at, psi, photon)
+    fn emit(&self, cluster: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<crate::step::Emitted> {
+        let (plan, table) = &self.plans[cluster];
+        self.model.emission_of(plan, *table, at, psi, draw)
     }
     fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> crate::step::Internal {
         Run::landed(self, cluster, at, f)
