@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Expanded Subpulse regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. An expanded Subpulse's own periods and brackets wear what the closed
+// Subpulse does (its edge and its title's ink; green while Config supplies it), and no other item does.
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const results = [];
+const card = (...classes) => {
+  const root = document.createElement('section'); root.className = ['card', 'bordered', 'pulse-card', ...classes].join(' ');
+  const title = document.createElement('div'); title.className = 'heading pulse-title'; title.textContent = 'x';
+  root.append(title); document.body.append(root);
+  const style = getComputedStyle(root);
+  return {edge: style.borderTopColor, ground: style.backgroundColor, ink: getComputedStyle(title).color};
+};
+const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+try {
+  const closed = card('pulse-component'), config = card('pulse-component', 'config');
+  const period = card('pulse-period'), post = card('pulse-post');
+  assert(!same(closed, config), 'the two sources look alike: the case is not made');
+  for (const kind of ['pulse-period', 'pulse-post']) {
+    const plain = kind === 'pulse-period' ? period : post;
+    const inside = card(kind, 'in-subpulse'), supplied = card(kind, 'in-subpulse', 'in-subpulse-config');
+    assert(inside.edge === closed.edge && inside.ink === closed.ink, `${kind} in an open Subpulse: ${JSON.stringify(inside)} / ${JSON.stringify(closed)}`);
+    assert(same(supplied, config), `${kind} in an open Config Subpulse: ${JSON.stringify(supplied)} / ${JSON.stringify(config)}`);
+    assert(plain.edge !== closed.edge || plain.ink !== closed.ink, `${kind} outside a Subpulse looks like one inside`);
+    results.push(kind);
+  }
+  document.getElementById('result').textContent = JSON.stringify({passed: true, count: results.length});
+} catch (error) {
+  document.getElementById('result').textContent = JSON.stringify({passed: false, count: results.length, error: String(error.stack || error)});
+}
+</script>

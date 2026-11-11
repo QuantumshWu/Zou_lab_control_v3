@@ -498,6 +498,11 @@ body.carrying, body.carrying * { cursor: grabbing !important; }
 .pulse-component .pulse-title { color: var(--derived-ink); }
 .pulse-component.config { background: var(--config-green-tint); border-color: var(--config-green) !important; }
 .pulse-component.config .pulse-title { color: var(--config-green-dark); }
+/* An expanded Subpulse's own items wear what the closed Subpulse does. */
+.pulse-period.in-subpulse, .pulse-post.in-subpulse { border-color: var(--selection-edge) !important; }
+.pulse-period.in-subpulse .pulse-title, .pulse-post.in-subpulse .pulse-title { color: var(--derived-ink); }
+.pulse-period.in-subpulse-config, .pulse-post.in-subpulse-config { background: var(--config-green-tint); border-color: var(--config-green) !important; }
+.pulse-period.in-subpulse-config .pulse-title, .pulse-post.in-subpulse-config .pulse-title { color: var(--config-green-dark); }
 /* _value_line: a read value at a field's text inset, its badge where a field seats one. */
 .pulse-value-line { flex: none; display: flex; align-items: center; gap: var(--edit-pad-h); height: var(--control); min-width: 0;
   padding: 0 calc(var(--edge) + var(--edit-pad-h)) var(--cap-lift) var(--field-text-inset); }

@@ -671,6 +671,21 @@ export class Strip {
         const components = new Map(schedule.components.map(component => [component.component_id, component]));
         const authored = schedule.periods.filter(period => period.kind !== "spacer");
         const ordinal = new Map(authored.map((period, at) => [period, at + 1]));
+        // An expanded Subpulse's own periods and brackets keep its edge and ink (green while Config
+        // supplies it), so an open Subpulse is seen at a glance and its extent with it.
+        const within = new Map();
+        for (const component of schedule.components) {
+            if (!this.opened.has(component.component_id))
+                continue;
+            for (const id of component.period_ids)
+                within.set(`period:${id}`, component);
+            for (const id of component.bracket_ids)
+                within.set(`bracket:${id}`, component);
+        }
+        const mark = (root, owner) => {
+            root.classList.toggle("in-subpulse", owner !== undefined);
+            root.classList.toggle("in-subpulse-config", owner?.config_active === true);
+        };
         const nodes = [];
         const alive = new Set(this.visual);
         const usedCards = new Set();
@@ -686,6 +701,7 @@ export class Strip {
                     this.periods.set(id, card);
                 }
                 card.update(period, ordinal.get(period) ?? 0, authored.length, schedule.ports, schedule.analog_mode_choices);
+                mark(card.root, within.get(`period:${id}`));
                 nodes.push(card.root);
             }
             else if (kind === "bracket") {
@@ -699,6 +715,7 @@ export class Strip {
                     this.posts.set(id, post);
                 }
                 post.update(bracket);
+                mark(post.root, within.get(`bracket:${bracketId}`));
                 nodes.push(post.root);
             }
             else {
