@@ -389,10 +389,9 @@ pub struct Trajectory {
     pub rate: f64,
     /// The work counted (`decide::Work`, real multiply-adds) of the integrator's own algorithms over the trajectory --
     /// the generator's decomposition, its following and hops, the states at the kick's nodes and their sums, with the
-    /// model's generators and forces at the step's nodes (`adapt` adds each step's, tried or taken) --, the middles it
-    /// asked the model for (each costed by `Dynamics::assembly_work`) and its jumps' photons (`Dynamics::photon_work`).
+    /// model's generators and forces at the step's nodes (`adapt` adds each step's, tried or taken) --, and its jumps'
+    /// photons (`Dynamics::photon_work`).
     pub work: f64,
-    pub assemblies: u64,
 }
 
 impl Trajectory {
@@ -418,7 +417,6 @@ impl Trajectory {
             index,
             rate: 0.0,
             work: 0.0,
-            assemblies: 0,
         }
     }
     /// The trajectory's point.

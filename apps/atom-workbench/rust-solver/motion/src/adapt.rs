@@ -189,20 +189,12 @@ impl Path {
     }
 }
 
-/// The trajectory's physical state from the end of a step taken, its counters kept (a step's end holds its start's:
-/// the steps tried on the way to it are counted on the trajectory).
+/// The trajectory's physical state from the end of a step taken, its counted work kept (a step's end holds its
+/// start's: the steps tried on the way to it are counted on the trajectory).
 fn adopt(trajectory: &mut Trajectory, end: &Trajectory) {
-    let (work, assemblies) = (trajectory.work, trajectory.assemblies);
+    let work = trajectory.work;
     *trajectory = end.clone();
-    (trajectory.work, trajectory.assemblies) = (work, assemblies);
-}
-
-/// The middle of a step of `length` from a state (`step::Midway`), counted: a middle of the model where the step's
-/// fixed point holds.
-fn midway<'a, D: Dynamics>(model: &'a D, trajectory: &mut Trajectory, from: &Trajectory, length: f64) -> Result<Midway<'a, D>, Refused> {
-    let through = Midway::new(model, from, length)?;
-    trajectory.assemblies += 1;
-    Ok(through)
+    trajectory.work = work;
 }
 
 /// Advances a held trajectory to the time `to` (the run's end) by steps of τ, with its jumps and its loss test (module
@@ -251,7 +243,7 @@ pub fn advance<D: Dynamics>(
             let reach = length.min(most - length);
             // The step's part of the Brownian path, and where the trajectory stands on it at the step's end.
             let (brownian, beyond) = path.reach(trajectory.time + length);
-            let tried = midway(model, trajectory, &from, length).and_then(|through| through.attempt(&from, &brownian, slack, reach, scratch));
+            let tried = Midway::new(model, &from, length).and_then(|through| through.attempt(&from, &brownian, slack, reach, scratch));
             let refusal = match tried {
                 Ok(Attempt::Whole(whole)) => {
                     trajectory.work += whole.work;
