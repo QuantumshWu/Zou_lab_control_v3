@@ -1401,12 +1401,15 @@ fn trajectory(model: &Run, ensemble: &Ensemble, tau: f64, plan: &Plan, keep: boo
     run(model, ensemble.draw(SEED, index), index, tau, plan, keep)
 }
 
-/// The groups of the numbers `groups`, the members `members` of each (all of them: 0..GROUP), their trajectories run on every core in
-/// their numbers' order -- each thread takes the next number, so the groups finish nearly in order and the first after
-/// about one trajectory's time --, each group's records added in
-/// its members' order on this thread (`Shape::fold`, nothing depends on the threads), the groups returned in their order;
-/// whenever the solve's next message is due (`Messages::due`), `progress` takes the groups finished so far in order and
-/// sends their result, or with no group finished the last result goes out again (module documentation, # Checkpoints).
+/// The groups of the numbers `groups`, the members `members` of each (all of them: 0..GROUP), their trajectories run on
+/// the solve's one pool of threads (rayon's: the pool its decisions' loops run on between the trajectories, every core
+/// unless the process is told otherwise; what a thread keeps for the model, model/assemble.rs `Held`, it keeps from one
+/// call to the next) in their numbers' order -- each thread takes the next number as it ends one, so a faster core takes
+/// more of them, the groups finish nearly in order and the first after about one trajectory's time --, each group's
+/// records added in its members' order on this thread (`Shape::fold`, nothing depends on the threads), the groups
+/// returned in their order; whenever the solve's next message is due (`Messages::due`), `progress` takes the groups
+/// finished so far in order and sends their result, or with no group finished the last result goes out again (module
+/// documentation, # Checkpoints).
 fn run_groups(groups: &[u64], members: std::ops::Range<u64>, shape: Shape, record: &(dyn Fn(u64) -> Record + Sync), messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
     let size = members.end - members.start;
     let count = groups.len();
@@ -1414,14 +1417,15 @@ fn run_groups(groups: &[u64], members: std::ops::Range<u64>, shape: Shape, recor
     // The k-th trajectory run: member k mod size of the k / size-th group.
     let number = move |k: u64| groups[(k / size) as usize] * GROUP + members.start + k % size;
     let next = AtomicU64::new(0);
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(stop as usize);
+    let threads = rayon::current_num_threads().min(stop as usize);
     let mut waiting: Vec<Vec<Option<Record>>> = (0..count).map(|_| (0..size).map(|_| None).collect()).collect();
     let mut parts: Vec<Option<Part>> = (0..count).map(|_| None).collect();
-    std::thread::scope(|scope| {
+    // This thread stays here for the records and the messages; the pool's threads run the trajectories.
+    rayon::in_place_scope(|scope| {
         let (sender, receiver) = mpsc::channel::<(u64, Record)>();
         for _ in 0..threads {
             let (sender, next) = (sender.clone(), &next);
-            scope.spawn(move || loop {
+            scope.spawn(move |_| loop {
                 let k = next.fetch_add(1, Ordering::Relaxed);
                 if k >= stop || sender.send((k, record(number(k)))).is_err() {
                     break;
