@@ -312,16 +312,15 @@ pub struct Scales {
     pub frequencies: [f64; 3],
 }
 
-/// The estimates at one output (module documentation): the loss, the rows as shown and the held atoms' populations, the
-/// held atoms' motion where at least two are held; each spread over the groups that read it, and the trajectories and
-/// held atoms behind them.
+/// The estimates at one output (module documentation): the loss, the held atoms' populations (a row as shown is its
+/// population times 1 − L) and the rows' spreads as shown, the held atoms' motion where at least two are held; each
+/// spread over the groups that read it, and the trajectories and held atoms behind them.
 #[derive(Clone, Debug)]
 pub struct Estimate {
     pub trajectories: f64,
     pub held: f64,
     pub loss: f64,
     pub loss_error: Spread,
-    pub shown: [f64; STATES],
     pub shown_errors: [Spread; STATES],
     pub populations: [f64; STATES],
     pub motion: Option<Motion>,
@@ -469,7 +468,6 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
                 held: n,
                 loss: full.loss,
                 loss_error: j.every(|m| m[0].loss),
-                shown: full.shown,
                 shown_errors: std::array::from_fn(|s| j.every(|m| m[0].shown[s])),
                 populations: if n > 0. { all.rows.map(|r| r / n) } else { [0.; STATES] },
                 motion,
@@ -629,7 +627,8 @@ mod tests {
                 let (fine, coarse) = (level(0.), level(3. * bias));
                 let read = between(&fine, &coarse, &UNIT).shown[0];
                 let (f, c) = (summarize(&fine, &UNIT), summarize(&coarse, &UNIT));
-                let mean = (1..=outputs).map(|k| (c[k].shown[0] - f[k].shown[0]) / 3.).sum::<f64>() / outputs as f64;
+                let shown = |e: &Estimate| e.populations[0] * (1. - e.loss);
+                let mean = (1..=outputs).map(|k| (shown(&c[k]) - shown(&f[k])) / 3.).sum::<f64>() / outputs as f64;
                 sum += read.value;
                 squares += read.value * read.value;
                 variances += read.spread.error * read.spread.error;
@@ -802,7 +801,7 @@ mod tests {
     fn a_mean_s_jackknife_is_its_standard_error() {
         let mut groups: Vec<Group> = [1, 1, 1, 1, 0].into_iter().map(|s| group(vec![Some(atom(s, 0., 1.))])).collect();
         let e = &summarize(&groups, &UNIT)[0];
-        assert!((e.shown[0] - 0.2).abs() < 1e-15 && (e.shown_errors[0].error - 0.2).abs() < 1e-15, "{:?}", e.shown_errors[0]);
+        assert!((e.populations[0] * (1. - e.loss) - 0.2).abs() < 1e-15 && (e.shown_errors[0].error - 0.2).abs() < 1e-15, "{:?}", e.shown_errors[0]);
         assert_eq!(e.shown_errors[0].interval(), student(CONFIDENCE, 4) * e.shown_errors[0].error);
         groups.push(group(vec![None]));
         let e = &summarize(&groups, &UNIT)[0];

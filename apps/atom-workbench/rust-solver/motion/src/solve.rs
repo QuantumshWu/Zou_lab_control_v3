@@ -2,16 +2,22 @@
 //!
 //! # The pipeline
 //! 1. The request's checks; the light; the initial components; the reach and the model with every unit whose existence
-//!    gate fails kept (model.rs, SPEC §1.5).
-//! 2. The scout: the first member of every pilot group, at the first rung and at twice its step (# The step), screened.
-//!    Where its atoms outgrow the reach, or a folded unit is to be kept at its states (`keep`), the attempt ends there
-//!    and the next begins with that model: a model is settled for the price of a few trajectories, not of a pilot.
-//!    The pilot: the run's first `pilot_size` trajectories (their own numbers, from `MOST_TRAJECTORIES`; the scout's are
-//!    its groups' first members and are not run again), at the run's two levels. It checks the step, reads the model's
-//!    units' errors at the states of the first held member of every group, the outputs and lab axes where T is held to
-//!    its target, and the reach's test. Its trajectories stay in the result: they are trajectories of the run's own
-//!    model and step.
-//! 3. The model's decisions (SPEC §5.2), from the pilot alone, the step's error taken at its share.
+//!    gate fails kept (model.rs, SPEC §1.5); the trap the result reports, the outputs' plan, the initial ensemble and
+//!    what the reach leaves out of it; T(0) by quadrature; the near light's tables over the reach (SPEC §2.3).
+//! 2. The scout: the first member of every pilot group, at the attempt's first step and at twice it (# The step),
+//!    screened. Where its atoms outgrow the reach, or a folded unit is to be kept at its states (`keep`), the attempt
+//!    ends there and the next begins with that model: a model is settled for the price of a few trajectories, not of a
+//!    pilot.
+//!    The pilot: the scout's groups whole, `pilot_size` trajectories at the run's two levels (the scout's are its
+//!    groups' first members and are not run again). Its groups have numbers of their own, from trajectory
+//!    `MOST_TRAJECTORIES` on: beyond every number a group of the product takes, which is its place in the run's list
+//!    (`product`). It checks the step -- on further pairs where the check cannot see (# The step) --, reads the
+//!    reach's test again, the model's units' errors at the states of the first held member of every group, and the
+//!    tables' errors there (SPEC §5.4). Its trajectories at the run's step stay in the result: they are trajectories
+//!    of the run's own model and step.
+//! 3. The model's decisions (SPEC §5.2; # The model), at the scout's states and again at the pilot's, the step's error
+//!    taken at its share: a unit to keep ends the attempt, and the next begins with its model at the step this one
+//!    stood at; a keep to undo ends it too (# The model).
 //! 4. The product: batches of whole groups at the settled step, one level, every trajectory run to the last output,
 //!    until every held quantity's total lies within its target (# Stopping) or the trajectories reach
 //!    `MOST_TRAJECTORIES`.
@@ -28,7 +34,8 @@
 //! reads at nodes half a step apart, (|Ω| + |K| v) τ/2 < π for every residual beat Ω and wave vector K of the model's
 //! entries at an atom's speed v. The ladder begins at the largest rung that is admissible for the run and whose double
 //! is for the companion (`first_rung`): the run's step at the largest speed of the reach the model is judged over; the
-//! companion's at the reach's rms speed.
+//! companion's at the reach's rms speed. An attempt after the first begins at the step the one before stood at, where
+//! that is the shorter.
 //!
 //! The step's convergence is checked on the pilot, as a refinement is checked by hand: the pilot's trajectories run at
 //! τ and, the same trajectory numbers -- the same initial atoms, the same jumps' draws by their number, the same
@@ -50,7 +57,8 @@
 //!     for the pilot to read. On the pilot the check takes the remedy of less predicted work (`blind`, `remedy`):
 //!     more pairs -- the product's next groups, at τ and 2τ; the check's resolution √(t·SE) falls as N^{−1/2}, the
 //!     companions cost half a trajectory a pair and the finer level is the product's own --, or the rung below, by
-//!     the order. Both works are continuous in the read, and equal where the choice turns.
+//!     the order. Both works are continuous in the read, and equal where the choice turns. At the steps' cap there
+//!     is no rung below: a check that cannot see lets the step stand there, with no flag.
 //! - A rung reached by a halving inherits the read of the rung above, lowered by the order (`lowered`: a mean square
 //!   goes as τ^{2p}), and is held by whichever of the two reads has the lesser far end (`held`). Its own read tests
 //!   what both e and the inheritance rest on, e ∝ τ^p between the levels: where it lies clearly above the inherited
@@ -92,6 +100,12 @@
 //! what it folds, so a keep that pays by its rate alone is not looked for -- where one exists the fold is at fault, not
 //! the choice.
 //!
+//! The price of a keep knows the kept model's work a step, not the step it needs: the pricing reads no step. So a keep
+//! made for its predicted saving is tried, and undone where its model's check is about to take a step at which it
+//! costs more than the model before it did, (1 − share)·τ_before/τ > 1 (`Attempt::Undo`; `attempt`): the fold's error
+//! stands again, measured and booked. A unit once kept for its saving is not priced again in the solve, undone or not
+//! (`barred`). The rates are read at the states `one_each` picks, the same for every model.
+//!
 //! A unit is read at the states only where its error can matter. A unit whose gate bounds its error over the reach
 //! (units.rs `Gate::error_bound`) is booked at that bound at every output, unread, as long as such bounds, the smallest
 //! first, add up to no more than the share the most trajectories a solve runs leave unseen (`booked`; estimate.rs
@@ -100,9 +114,10 @@
 //! state's errors are kept as read and their means per output made once for every decision that asks (`Measured`).
 //!
 //! # Stopping (SPEC §3)
-//! Every quantity held to a target -- what is shown at an output; T on a lab axis held there -- has the total
-//! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, from the units measured at the pilot's states, and c the
-//! step's clear part (its rms over the run), both fixed by the pilot; S the statistics' interval. The run stops where every one of them lies
+//! Every quantity held to a target -- at every output after t = 0 what is shown, and the total T -- has the total
+//! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, from the units measured at the pilot's states and the
+//! tables' errors there, and c the step's clear part (its rms over the run), both fixed by the pilot; S the
+//! statistics' interval. The run stops where every one of them lies
 //! within its target: the test the ledger flags an output by (`Look::met`). The stop reads the run's standard errors
 //! and nothing else of its estimates. A look that no number of trajectories brings within its target (A² + c² ≥ ε²:
 //! the model's decisions have kept what they could) is not chased: the ledger flags it.
@@ -128,20 +143,22 @@
 //! are tilted against the lab axes it is the root mean square of the principal frequencies the axis is made of,
 //! ω_a² = Σ_i (e_i·x_a)² ω_i², no less than their mean of the same weights (Jensen): with every mode at its own boundary,
 //! k_BT_i = C ħω_i, the axis's T_a = Σ_i (e_i·x_a)² T_i = C ħ Σ_i (e_i·x_a)² ω_i/k_B ≤ C ħω_a/k_B, so a tilted axis is
-//! held only where the modes it is made of are inside the regime in that weighted mean, never further out.
-//!
-//! Which axes are held at which outputs is the pilot's, fixed before the product; the product's own T does not move it.
+//! reported inside the regime only where the modes it is made of are inside it in that weighted mean, never further
+//! out.
 //!
 //! # Checkpoints
 //! The decisions take counts, never the wall clock, so a request gives the same result on any machine. The wall clock only
 //! times the messages (`Messages`): one clock for the whole solve, set at every message; whenever `CHECKPOINT` has passed
-//! since the last one, the stage that is running sends a complete result of the groups it has finished so far in their
-//! order (a prefix: whole groups chosen by their number alone). A result is passed on where it rests on two groups at
-//! least (the jackknife's least for a spread) and on no fewer trajectories than the attempt's last one -- a pilot's
-//! first groups at a finer step are no better than the result before them --; else the last result goes out again, so
-//! that the app hears from the solve whatever stage it is in.
+//! since the last one, the trajectories that are running (`run_groups`: the scout's, the pilot's, a batch's) send a
+//! complete result of the groups finished so far in their order (a prefix: whole groups chosen by their number alone).
+//! A result is passed on where it rests on two groups at least (the jackknife's least for a spread) and on no fewer
+//! trajectories than the attempt's last one -- a pilot's first groups at a finer step are no better than the result
+//! before them --; else the last result goes out again, and nothing where the solve has sent none yet. Between the
+//! product's batches each total is a message. What runs no trajectories sends nothing and looks at no clock: the
+//! model's construction and its gates, the tables and their refinement, the units' reads at the states, the pricing
+//! of keeps, T(0)'s quadrature.
 use crate::adapt;
-use crate::decide::{assured, halved, judge, pays, Judgement, Read};
+use crate::decide::{assured, judge, pays, Judgement, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
 use crate::estimate::{between, draws_for, half_window, occupation, spread, summarize, unseen, Between, Estimate, Fate, Group, Held, Scales, Spread};
 use crate::field::{Geometry, Light};
@@ -164,9 +181,12 @@ use crate::request::Request;
 /// The runs' seed, the key of every trajectory's streams (random.rs): any fixed value, fixed so that a request gives the
 /// same result every time.
 const SEED: u64 = 0;
-/// The output times the distributions are given at (contract §3.4: at most 21, t = 0 and the last among them).
+/// The output times the distributions are given at (contract §3.4: at most 21, t = 0 and the last among them): the
+/// contract's number, for the display alone -- no estimate reads a distribution.
 const DISTRIBUTION_TIMES: usize = 21;
-/// Half the time the app waits for a message before it kills the worker (contract §2.5: 120 s): the checkpoints' interval.
+/// Half the time the app waits for a message before it kills the worker (contract §2.5: 120 s): the checkpoints'
+/// interval. The other half is left to what runs between two messages and sends none (module documentation,
+/// # Checkpoints): a margin, not a bound derived from those stages' work. It times messages and decides no result.
 const CHECKPOINT: Duration = Duration::from_secs(60);
 /// What the engine did with a folded unit (the ledger's `action`, shown by the app): its booked error is read at the
 /// pilot's states (SPEC §5.2).
@@ -356,6 +376,9 @@ impl Well for Prepared<'_> {
 ///   ρ along the path -- its residual beat Ω in the cluster's frames and its residual wave vector K at the atom's
 ///   velocity, ρ = |Ω + K·v| ≤ |Ω| + |K| v (`sampled`: the model's own entries, per beat the largest |K|) -- advances by
 ///   ρ τ/2 from node to node; at π the nodes read it as its alias. So (|Ω| + |K| v) τ/2 < π for every entry.
+/// Both are edges -- where the scheme stops meaning anything --, not accuracies within a share: how well a step below
+/// them does is the check's to say (the pilot's two levels). The frequency is the prepared trap's alone: the curvature
+/// of the near light's own wells is no condition here.
 fn admissible(tau: f64, frequency: f64, sampled: &[[f64; 2]], speed: f64) -> bool {
     frequency * tau < PI && sampled.iter().all(|[beat, wave]| 0.5 * (beat + wave * speed) * tau < PI)
 }
@@ -372,7 +395,8 @@ fn admissible(tau: f64, frequency: f64, sampled: &[[f64; 2]], speed: f64) -> boo
 ///   the step, while the few fastest atoms beyond its limit weigh in the difference by their share.
 /// Where the trap's resonance binds, the first rung is the rung below the largest stable one. Half the run at the
 /// most: the companion's step is a rung itself, the run its one step then. Nothing of the outputs enters: they are read
-/// inside the steps (adapt.rs, # The reads).
+/// inside the steps (adapt.rs, # The reads). The count has no end of its own: `MOST_STEPS` holds the halvings below the
+/// first rung (`settle`), not the first rung, and at a speed or a frequency that is no number the count does not end.
 fn first_rung(run: f64, frequency: f64, sampled: &[[f64; 2]], fastest: f64, typical: f64) -> f64 {
     let step = |pairs: u64| run / (2 * pairs) as f64;
     let pairs = (1..).find(|&m| admissible(step(m), frequency, sampled, fastest) && admissible(2. * step(m), frequency, sampled, typical)).expect("a step short enough is admissible");
@@ -397,10 +421,10 @@ fn judged(read: &Between) -> Vec<(Read, f64)> {
 }
 
 /// The screen of a step on the reads between its two levels (module documentation, # The step; decide.rs `judge`):
-/// the family of its reads, each against the square of the step's share -- a mean square goes as the step to twice
-/// the scheme's order. The step is halved where the family is beyond.
+/// the family of its reads, each against the square of the step's share. The step is halved where the family is
+/// beyond.
 fn screen(read: &Between) -> Judgement {
-    judge(&judged(read), 2. * ORDER as f64)
+    judge(&judged(read))
 }
 
 /// A read as the scheme's order gives it at half the step (module documentation, # The step): a mean square goes as
@@ -413,7 +437,8 @@ fn lowered(read: &Between) -> Between {
 
 /// Whether a rung's own read refutes the read it inherits (module documentation, # The step): some look's mean square
 /// lies clearly above what the order allows it -- its near end above the inherited read's far end, both among the
-/// family's looks. The step's error does not fall at the scheme's order between these levels.
+/// family's looks. The step's error does not fall at the scheme's order between these levels. Two reads that do not
+/// hold the same looks -- the total T read at one rung and not at the other -- refute nothing, on any look.
 fn refuted(own: &Between, inherited: &Between) -> bool {
     let (own, inherited) = (judged(own), judged(inherited));
     let looks = own.len() as f64;
@@ -526,7 +551,9 @@ struct Checked {
 
 /// The pilot's reads between its two levels as the run takes them (module documentation, # The step): the clear part
 /// of each rms among the looks the screen judges -- √(M̂ − t·SE) at the family's interval, where positive --, and the
-/// check's resolution, one look's √(t·SE).
+/// check's resolution, one look's √(t·SE). The family's interval, because clear is one statement: the near end the
+/// screen compares with the share's square (`screen`) is the number booked, and on what is shown the booked part is
+/// the largest of the family's rows and loss, the largest of many noisy reads (decide.rs, # Many reads).
 fn checked(read: &Between) -> (Bound, [f64; 2]) {
     let looks = judged(read).len() as f64;
     let clear = |read: &Read| read.least(looks).max(0.).sqrt();
@@ -747,8 +774,8 @@ fn attempt(
     // The folded units: which are read at the states, which booked at their gates' bounds (`booked`).
     let booking = booked(&units.iter().zip(&gates).map(|(u, g)| g.error_bound(u)).collect::<Vec<_>>());
     let reading: Vec<Unit> = units.iter().zip(&booking).filter(|(_, b)| matches!(b, Booked::Read(_))).map(|(u, _)| u.clone()).collect();
-    // The trap every reported quantity describes (SPEC §1.3: trapFrequencyKHz, n̄, the validated regime, T's targeting and
-    // its windows): the trap light's potential with the other lights' phase-averaged shifts at the reference state
+    // The trap every reported quantity describes (SPEC §1.3: trapFrequencyKHz, n̄, the validated regime and T's
+    // windows): the trap light's potential with the other lights' phase-averaged shifts at the reference state
     // (`Model::reported`). Where it has no minimum the descent reaches -- the atoms are not held by the light they run in: a
     // mathematical object that does not exist, not a kind of scene -- the prepared trap's is reported, and flagged.
     let (report, unheld) = match model.trap(&reference, &model.reported()) {
@@ -801,8 +828,11 @@ fn attempt(
     };
 
     // The near light's tables (SPEC §2.3, §5.4; model/tabulate.rs): refined over the reach to the largest ensemble's
-    // resolution, no grid of more nodes than the middles the pilot's first rung asks of the model at its two levels -- a
-    // table dearer than the run it serves is not built, and what it then misses is read at the atoms below.
+    // resolution, no grid of more nodes than the middles the pilot takes at the attempt's first step and at its double,
+    // pilot_size·(end/τ + end/(2τ)) -- a node counted as a middle without a table. The bound is on each grid by
+    // itself, and against the pilot's middles, not the run's: it keeps a grid's nodes below the pilot's middles
+    // before a trajectory has run; it is not the work the table saves. What a grid held back misses is read at the
+    // atoms below.
     let most = (pilot_size() as f64 * (context.plan.end / context.tau + context.plan.end / (2. * context.tau))).ceil() as usize;
     let mut tables = model.tabulate(&judged, most);
     let run = Run::tabulated(&model, &tables, reference);
@@ -859,8 +889,8 @@ fn attempt(
         let measured = Measured { errors: &errors, output: &at, group: &from, booked: &booking };
         let means = measured.means(outputs, None);
         context.fixed.model = model_error(&sums(&means, unsampled), unsampled);
-        // The tables' errors (SPEC §5.4): each table's whole error against the elimination itself, read at one state of
-        // each pilot trajectory (`one_each`) and averaged over them -- a state on another cluster reads none of it. A table
+        // The tables' errors (SPEC §5.4): each table's whole error against the elimination itself, read at the states
+        // `one_each` picks of those read above and averaged over them -- a state on another cluster reads none of it. A table
         // beyond the tables' shares has the axis of its largest read halved and is read again, until it is within them or
         // its next grid would exceed the work's bound; what it reads then is booked on every output, and flagged where it
         // still lies beyond.
@@ -991,6 +1021,9 @@ enum Settled {
 /// - neither, on the pilot (all the members of a group in: the last word on the step; the scout screens only what is
 ///   clearly beyond): the check cannot see (`blind`) and takes the remedy of less predicted work (`remedy`) -- more
 ///   pairs, the product's next groups at both levels; or the rung below.
+/// A rung below at which a trajectory would take more than `MOST_STEPS` steps is not taken: the step stands, capped
+/// where the check was beyond or refuted, and as if it had seen where it could not see. Nor is one at which a priced
+/// keep's model costs more than the model before it (`dearer`): the attempt ends, and the keep is undone.
 #[allow(clippy::too_many_arguments)]
 fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, dearer: &dyn Fn(f64) -> bool, messages: &mut Messages) -> Settled {
     let more = level(run, ensemble, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
@@ -1004,7 +1037,7 @@ fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Le
         let read = between(&fine, &coarse, &context.scales);
         let failed = inherited.as_ref().is_some_and(|inherited| refuted(&read, inherited));
         let held = held(&read, inherited.as_ref().filter(|_| !failed));
-        let beyond = matches!(screen(&read), Judgement::Beyond(_));
+        let beyond = screen(&read) == Judgement::Beyond;
         if !(beyond || failed) {
             let Some(unseen) = blind(&read, &held).filter(|_| members.end == GROUP) else { return Settled::Standing };
             // The product's trajectories as the pairs' finer level predicts them, beside the step's share.
@@ -1021,7 +1054,7 @@ fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Le
                 continue;
             }
         }
-        let below = halved(context.tau, 1.);
+        let below = 0.5 * context.tau;
         if context.plan.end / below > MOST_STEPS as f64 {
             return if beyond || failed { Settled::Capped } else { Settled::Standing };
         } else if dearer(below) {
@@ -1043,7 +1076,9 @@ fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Le
 /// prediction rests on. What that bounds: the batches accumulate -- every trajectory of the product is in the result --,
 /// so the product ends on the first total that meets the targets. Each total is at most g times one that did not meet
 /// them, so the last total is at most g times the least that meets them, whatever was predicted: at g = 2 no more than
-/// half of the work is spent past the need, and a need N times the pilot's size is reached in log₂ N batches.
+/// half of the work is spent past the need, and a need N times the pilot's size is reached in log₂ N batches. The
+/// bound holds at any g > 1 and does not single out two -- a smaller factor spends less past the need and reads more
+/// often --: the factor is chosen, not derived.
 fn batch(need: f64, have: u64) -> u64 {
     let whole = ((need / GROUP as f64).ceil() as u64).saturating_mul(GROUP);
     whole.clamp(have + GROUP, 2 * have).min(MOST_TRAJECTORIES)
@@ -1084,7 +1119,10 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, parts: &mut Vec<Pa
 
 /// The pilot's size: the fewest whole groups whose unseen share fits the statistics' room in the population target beside
 /// the step's share alone, z²/(N + z²) ≤ √(1 − s²) ε (`room`; estimate.rs `unseen` and its inverse `draws_for`, units.rs
-/// `STEP_SHARE`) -- the smallest ensemble that can see a share as large as the target, 88 trajectories.
+/// `STEP_SHARE`). The pilot is the run's first trajectories, and no run ends on fewer: what is shown has statistics no
+/// less than the unseen share (estimate.rs `Estimate::shown_statistics`), so below this number its look is not met
+/// beside the step's share whatever the trajectories show and however exact the model. N ≥ z²(1/(√(1 − s²) ε) − 1) =
+/// 85.4 at z = 2, s² = 1/(1 + 2p) = 1/5, ε = 0.05: eleven groups of `GROUP` = 8, 88 trajectories.
 fn pilot_size() -> u64 {
     (draws_for(room(POPULATION_TARGET, 0., step_bound()[0])) / GROUP as f64).ceil() as u64 * GROUP
 }
@@ -1097,8 +1135,9 @@ struct Plan {
     listed: Vec<usize>,
     end: f64,
     /// The cells of a trajectory's Brownian path (adapt.rs `Path`), µs: the companion's step at the attempt's first
-    /// rung, a whole part of the run. Every step of the attempt -- a rung's, its companion's -- is a cell over a power
-    /// of two, so every level reads the same path. The run until the first rung is known.
+    /// step (its first rung, or the shorter step the attempt before stood at), a whole part of the run. Every step of
+    /// the attempt -- a rung's, its companion's -- is a cell over a power of two, so every level reads the same path.
+    /// The run until the first rung is known.
     cell: f64,
 }
 impl Plan {
@@ -1114,24 +1153,17 @@ impl Plan {
     }
 }
 
-/// Counts over trajectories: the steps taken, the integrator's counted work (decide.rs `Work`) and its generator
-/// assemblies, the time held (µs), and the trajectories the scheme could not advance (adapt.rs `advance`'s refusal) with
-/// the earliest time one stopped at.
+/// Counts over trajectories: the steps taken, and the trajectories the scheme could not advance (adapt.rs `advance`'s
+/// refusal) with the earliest time one stopped at.
 #[derive(Clone, Copy, Debug, Default)]
 struct Counts {
     steps: u64,
-    work: f64,
-    assemblies: u64,
-    held: f64,
     failed: u64,
     since: Option<f64>,
 }
 impl Counts {
     fn add(&mut self, o: &Counts) {
         self.steps += o.steps;
-        self.work += o.work;
-        self.assemblies += o.assemblies;
-        self.held += o.held;
         self.failed += o.failed;
         self.since = match (self.since, o.since) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -1236,7 +1268,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
             h.kappa2 = std::array::from_fn(|a| w[a][2] / w[a][0]);
         }
     }
-    let counts = Counts { steps, work: t.work, assemblies: t.assemblies, held: t.lost.unwrap_or(t.time).min(plan.end), failed: u64::from(failed), since: failed.then_some(t.time) };
+    let counts = Counts { steps, failed: u64::from(failed), since: failed.then_some(t.time) };
     Record { outputs: out, listed, samples, counts }
 }
 
@@ -1362,9 +1394,8 @@ fn run_groups(groups: &[u64], members: std::ops::Range<u64>, shape: Shape, recor
 }
 
 /// What the pilot fixes for the run (module documentation, # Stopping), per output: the model's error on the held atoms
-/// (populations absolute, T relative; T's unbounded where no pilot atom reads it), and per lab axis whether that axis's
-/// T is held to its target; and T(0)'s relative error, its quadrature's last two levels' difference (ensemble.rs
-/// `Ensemble::kinetic`).
+/// (populations absolute, T relative; T's unbounded where no pilot atom reads it); and T(0)'s relative error, its
+/// quadrature's last two levels' difference (ensemble.rs `Ensemble::kinetic`).
 #[derive(Clone)]
 struct Fixed {
     model: Vec<[f64; 2]>,
@@ -1384,8 +1415,8 @@ fn room(target: f64, model: f64, step: f64) -> f64 {
     (target * target - model * model - step * step).max(0.).sqrt()
 }
 
-/// One quantity held to its target at one output (module documentation, # Stopping): what is shown, or T on a lab axis
-/// held there. Its account (ledger.rs: the model's error A, the step's clear part c, the statistics S, as the ledger
+/// One quantity held to its target at one output (module documentation, # Stopping): what is shown, or the total T.
+/// Its account (ledger.rs: the model's error A, the step's clear part c, the statistics S, as the ledger
 /// books them) against its target ε; and what its need takes beside them: the statistics' jackknife interval and the
 /// trajectories it was read on, and on what is shown the unseen share, which the statistics are no less than.
 #[derive(Clone, Copy, Debug)]
@@ -1481,8 +1512,8 @@ impl Measured<'_> {
     /// Per output and unit the unit's error on the held atoms (on their populations, absolute; on T, relative). A unit
     /// read: the mean over the states of the pilot's groups but `left`; where they hold no atom nothing is measured, and
     /// the error is its bound there, 1 on a population and none on T (the run's atoms at such an output are at most the
-    /// share the pilot left unseen, and T is not held to its target without a pilot's T). A unit booked at its gate's
-    /// bound: that bound, at every output.
+    /// share the pilot left unseen, and T has no account without a pilot's T: its look fits no number of trajectories
+    /// and is not chased). A unit booked at its gate's bound: that bound, at every output.
     fn means(&self, outputs: usize, left: Option<usize>) -> Vec<Vec<[f64; 2]>> {
         let read = self.booked.iter().filter(|b| matches!(b, Booked::Read(_))).count();
         let (mut sum, mut count) = (vec![vec![[0.; 2]; read]; outputs], vec![0.; outputs]);
@@ -1547,8 +1578,11 @@ fn rate(run: &Run, assembly: f64, middle: &crate::model::Middle, state: &State) 
     (work + assemblies as f64 * assembly) / state.tau
 }
 
-/// One state of each pilot trajectory among `states` (their outputs in `output`): its outputs taken in turn by its
-/// number -- the trajectory is the pilot's independent unit.
+/// Of `states` (their outputs in `output`; `sampled`'s: at every output one a group, its first held member's), those
+/// at the output their trajectory's number picks, 1 + number mod (outputs − 1): one state of a group whose first
+/// member is held throughout, at that member's pick. The first members' numbers are `GROUP` apart, so the picks are
+/// `GROUP` outputs apart, around the outputs after t = 0: where those are more than the pilot's trajectories the picks
+/// lie in one stretch of the run that many outputs long, and where their number divides `GROUP`, on one output.
 fn one_each(states: &[State], output: &[usize], outputs: usize) -> Vec<usize> {
     (0..states.len()).filter(|&j| output[j] as u64 == 1 + states[j].index % (outputs as u64 - 1)).collect()
 }
@@ -1628,8 +1662,7 @@ impl<'a> Level<'a> {
 /// without one: its estimates, the units' errors, the rates). A share, not the work saved: both models' N are the one
 /// variance the pilot estimates over their rooms (N ∝ σ̂²), and σ̂²'s spread, common to both, scales the work saved
 /// without ever changing its sign; in the share it cancels, and what spreads is what the keep changes -- the rooms and
-/// the rates. The rates are read at one state of each pilot trajectory -- the trajectory is the pilot's independent
-/// unit, its outputs taken in turn by its number --, the same states for every model.
+/// the rates. The rates are read at the states `one_each` picks of the pilot's, the same states for every model.
 struct Pricing<'a> {
     request: &'a Request,
     light: &'a Light,
@@ -1997,7 +2030,7 @@ mod tests {
     /// standard error of 0.01 is clear among them, and one of 0.03 -- clear at one look -- is not.
     #[test]
     fn the_screen_halves_the_step_on_a_clear_mean_square_alone() {
-        let halved = |read: &Between| matches!(screen(read), Judgement::Beyond(_));
+        let halved = |read: &Between| screen(read) == Judgement::Beyond;
         let [sp, st] = step_bound();
         let (bp, bt) = (sp * sp, st * st);
         assert!(!halved(&at(Some(read(0.5 * bt, 0.1 * bt)))));
@@ -2115,7 +2148,7 @@ mod tests {
         let (step, _) = checked(&clear);
         let family = Spread { error: 0.04, groups: 11. }.interval_over(judged(&clear).len() as f64);
         assert!((step.temperature - (0.36 - family).sqrt()).abs() < 1e-15 && step.temperature > step_bound()[1], "{step:?}");
-        assert!(matches!(screen(&clear), Judgement::Beyond(_)));
+        assert!(screen(&clear) == Judgement::Beyond);
         let mut lossy = at(None);
         (lossy.loss, lossy.shown[2]) = (read(0.04, 0.0001), pilot(1e-4, 4e-4));
         let (step, resolution) = checked(&lossy);
@@ -2155,7 +2188,6 @@ mod tests {
             held: trajectories,
             loss: 0.,
             loss_error: exact,
-            shown: [0.; STATES],
             shown_errors: [exact; STATES],
             populations: [0.; STATES],
             motion: Some(crate::estimate::Motion {
@@ -2320,13 +2352,6 @@ mod tests {
         }
     }
 
-    /// The initial ensembles of the conservative reference traps (refs/scenes R1, the app's own requests: a lone tweezer, a
-    /// standing wave, crossed beams of one frequency, a σ⁺ tweezer) in the model's prepared wells under the model's proven
-    /// envelopes: 2¹² draws each read the exact moments (ħ/m)⟨κ_a²⟩ = Σ_b p_b η_b k_BT (S_b²)_aa per lab axis within their
-    /// intervals over the groups at the confidence z -- twelve looks, three axes of four traps -- and the quadrature's own
-    /// error as the solve books it for T(0), its last two levels' relative difference (`Fixed::start`), here on 2¹⁶
-    /// evaluations, fewer than a pilot's steps in these traps (88 trajectories of 800 steps or more). η lies in (0, 1]:
-    /// the lowered isothermal's kinetic temperature, below the Boltzmann one.
     /// What the reach leaves out of a tweezer's ensemble by quadrature (model/reach.rs `Model::left_out`, ensemble.rs
     /// `Ensemble::beyond`) is what a count over its drawn atoms finds -- drawn here alone, for the test. R4_TW2 (one
     /// component, 30 µK, its tweezer 35 k_BT deep), the reach at the request's temperature: of the initial atoms of the
@@ -2364,6 +2389,13 @@ mod tests {
         assert!((ratio - energy.value).abs() <= CONFIDENCE * spread + energy.difference, "the kinetic energy's share: {ratio:e} ± {spread:e} drawn against {:e} ± {:e}", energy.value, energy.difference);
     }
 
+    /// The initial ensembles of the conservative reference traps (refs/scenes R1, the app's own requests: a lone tweezer, a
+    /// standing wave, crossed beams of one frequency, a σ⁺ tweezer) in the model's prepared wells under the model's proven
+    /// envelopes: 2¹² draws each read the exact moments (ħ/m)⟨κ_a²⟩ = Σ_b p_b η_b k_BT (S_b²)_aa per lab axis within their
+    /// intervals over the groups at the confidence z -- twelve looks, three axes of four traps -- and the quadrature's own
+    /// error as the solve books it for T(0), its last two levels' relative difference (`Fixed::start`), here on 2¹⁶
+    /// evaluations, fewer than a pilot's steps in these traps (88 trajectories of 800 steps or more). η lies in (0, 1]:
+    /// the lowered isothermal's kinetic temperature, below the Boltzmann one.
     #[test]
     fn the_reference_traps_draw_their_exact_moments() {
         let names = ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED", "R1_SIGMA_P"];
