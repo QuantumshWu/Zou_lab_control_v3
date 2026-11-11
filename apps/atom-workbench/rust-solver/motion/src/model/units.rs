@@ -130,10 +130,14 @@ pub(crate) const EXISTS: f64 = 0.5;
 
 /// The fourth order's leading errors in a drive's share s (module documentation, # The fold's order; derivation:
 /// fourth.status.md), each the next order's: on the force 3/2 s², the next term of the one line's (1 − s + 3/2 s²); on
-/// the rates s², what the slow state's jumps and the photons its landings draw leave of the exact 1/(1 + s) -- on a
-/// cycling state −0.99 s² at three intensities (the test below), the coefficient one of the order.
+/// the rates 9/8 s², the most that the slow state's jumps with the landing's norm against the threshold (model.rs
+/// `Model::landed`) leave of the exact 1/(1 + s) at any detuning. Far from the line −s² (the jumps and their prompt
+/// photons, 1/(1 − p) a jump: −0.99 s² measured). On resonance the jumps with the exact mean interval (1 − p)/γ are
+/// right to this order (+0.00 s²), and the landing's norm 1 − p = 1 + 3s/2 held against the threshold waits
+/// ln(1 − p)/γ where that mean has −p/γ: the rate is high by p²/2 = (3/2)²/2 s² (two levels: +1.07 s² at s = 0.03,
+/// between the two at the detunings between, the test below).
 pub(crate) const ORDER_FORCE: f64 = 1.5;
-pub(crate) const ORDER_RATES: f64 = 1.0;
+pub(crate) const ORDER_RATES: f64 = 1.125;
 
 /// The leading error of a Raman pair's fold in its mixing m² (eliminate.rs `Model::pair_error`): the kept line reads
 /// the folded leg's self-energy |U|²/(d_R + λ) at λ = 0, and its response's next term makes its rate m² (3ε² − Γ²/4)/(ε² +
@@ -1312,8 +1316,8 @@ mod tests {
                         }
                     }
                     let prompt = 1.0 - crate::linalg::norm_sqr(&part) / size;
-                    let (slow, p) = fourth.landed(&plan, None, &at, &f);
-                    assert!((crate::linalg::norm_sqr(&slow) + p * size - size).abs() <= 1e-12 * size, "{scene}: the norm on average");
+                    let slow = fourth.landed(&plan, None, &at, &f);
+                    let p = 1.0 - crate::linalg::norm_sqr(&slow) / size;
                     worst = worst.max((p - prompt).abs());
                     s = s.max(2.0 * prompt);
                     // The slow state's direction: Π f against the exact part's ground amplitudes (to their common first
@@ -1480,8 +1484,8 @@ mod tests {
     /// A cycling state's photons per unit time, against the two-level atom's (module documentation, # The fold's order;
     /// `cycling`). With the drive's share s: the second-order fold's rate is too high by s; the fourth order's jumps
     /// alone are too low by s/2; with the landing -- every jump back into the bare state followed by one more photon
-    /// with the probability p, and so on: 1/(1 − p) photons a jump -- the rate is right to the next order: low by
-    /// `ORDER_RATES` s², to the order after that.
+    /// with the probability p, and so on: 1/(1 − p) photons a jump, these lines being far from resonance -- the rate is
+    /// right to the next order: low by s², to the order after that, within `ORDER_RATES` s².
     #[test]
     fn a_cycling_state_s_photon_rate_with_the_landing_is_the_two_level_atom_s() {
         for scene in ["R4_LIN_1", "R4_LIN_2", "R4_LIN_4"] {
@@ -1492,7 +1496,8 @@ mod tests {
                 model.photons_of(&plan, None, &at, &psi, crate::model::photon::Gradients::None).0.iter().map(|p| p.amplitudes.iter().map(|u| crate::linalg::norm_sqr(u)).sum::<f64>()).sum()
             };
             let plan = fourth.plan(fourth.membership[3], &fourth.running());
-            let prompt = fourth.landed(&plan, None, &at, &psi).1;
+            let prompt = 1.0 - crate::linalg::norm_sqr(&fourth.landed(&plan, None, &at, &psi));
+            assert!(prompt > 0.0, "{scene}: far from its line the landing's norm is below one: p = {prompt}");
             let errors = [rate(&second) / exact - 1.0, rate(&fourth) / exact - 1.0, rate(&fourth) / (1.0 - prompt) / exact - 1.0];
             // What the comparison cannot resolve: the second order's rate is the two-level atom's times (1 + s) but for
             // the line's width over its detuning, squared.
@@ -1501,7 +1506,77 @@ mod tests {
             eprintln!("{scene}: s = {s:.4}, p = {prompt:.4}: the photon rate against the two-level atom's -- second order {:+.3e} (s {:+.1e}), fourth {:+.3e}, fourth with the landing {:+.3e} ({rest:+.3} s²)", errors[0], errors[0] - s, errors[1], errors[2]);
             assert!(floor <= width, "{scene}: the second order's rate is too high by s: {} for s = {s}", errors[0]);
             assert!((errors[1] + 0.5 * s).abs() <= ORDER_RATES * s * s + floor, "{scene}: the fourth order's jumps alone too low by s/2: {} for s = {s}", errors[1]);
-            assert!((rest + ORDER_RATES).abs() <= s, "{scene}: with the landing the rate is low by `ORDER_RATES` s², to the order after: {} for s = {s}", errors[2]);
+            assert!((rest + 1.0).abs() <= s && rest.abs() <= ORDER_RATES, "{scene}: with the landing the rate is low by s², to the order after: {} for s = {s}", errors[2]);
+        }
+    }
+
+    /// The landing's norm against the threshold (model.rs `Model::landed`, step.rs `jump`) is the two-level atom's rate
+    /// to the fourth order on and off resonance, by one rule. Two exact levels (`three_levels` with no second light:
+    /// g –V→ e alone, the drive folded at the atom at the fourth order, the atom at κ = −k/2 where its Doppler shift is
+    /// nothing), Δ from 0 to 6 Γ on both sides, s = 2|V|²/(Δ² + Γ²/4) = 0.03, 0.06, 0.12. With the slow state's rate γ off
+    /// the generator and the landing's norm n = ‖Π g‖², the waiting time after a jump is P(T > t) = min(1, n e^{−γt}), its
+    /// mean (max(0, ln n) + min(1, n))/γ, against the exact steady rate Γ|V|²/(Δ² + Γ²/4 + 2|V|²):
+    /// - n = 1 − p with p = (s/2)(Δ² − 3Γ²/4)/(Δ² + Γ²/4) to its order: above one within 0.866 Γ of the line (1 + 3s/2 on
+    ///   resonance), below one beyond;
+    /// - the rate is the exact one within `ORDER_RATES` s² everywhere (+1.07 s² on resonance at s = 0.03, −0.99 s² at
+    ///   6 Γ); with the norm clamped at one it was 1.52 s high on resonance;
+    /// - `jump` itself on resonance: every jump emits one photon and no more, and a trajectory that lands back in g goes
+    ///   on with the norm n, above one.
+    #[test]
+    fn the_landing_s_norm_against_the_threshold_is_the_two_level_atom_s_rate_on_and_off_resonance() {
+        use crate::step::{self, Dynamics, Trajectory};
+        let (g, e) = (THREE[0], THREE[2]);
+        for s in [0.03, 0.06, 0.12] {
+            for delta in [0.0, 0.25, -0.25, 0.5, 0.8, 1.0, -1.0, 2.0, -6.0] {
+                let v = (0.5 * s * (delta * delta + 0.25_f64)).sqrt();
+                let (request, of, gamma) = three_levels(v, delta, 0.0, 0.0);
+                let light = Light::new(&request);
+                let component = Component { frequency: of[0], counter: false };
+                let model = Model::new(&request, &light, &[Unit::Bare { component, excited: e, ground: g }, Unit::Second { ground: g }]).unwrap();
+                let cluster = model.membership[g];
+                assert!(model.clusters[cluster].states == [g] && model.fourth[cluster].is_some(), "g alone, its fold at the fourth order");
+                let beam = &light.beams[light.frequencies[of[0]].beams[0]];
+                let k = beam.wave_vector();
+                let at = Point { r: [0.0; 3], kappa: k.map(|x| -0.5 * x), t: 0.0 };
+                let rate = {
+                    use crate::step::Middle as _;
+                    let middle = model.assemble(cluster, at.r, 0.0, &model.running());
+                    let mut h = Mat::zeros(1, 1);
+                    middle.generator(&middle.path(at.kappa, [0.0; 3]), 0.0, &mut h);
+                    -2.0 * h[(0, 0)].im
+                };
+                let plan = model.plan(cluster, &model.running());
+                let n = crate::linalg::norm_sqr(&model.landed(&plan, None, &at, &[C64::ONE]));
+                let p = 0.5 * s * (delta * delta - 0.75) / (delta * delta + 0.25);
+                assert!((1.0 - n - p).abs() <= 1.5 * s * s, "s = {s}, Δ = {delta} Γ: the landing's norm {n} against 1 − p, p = {p}");
+                assert!((n > 1.0) == (delta.abs() < 0.75_f64.sqrt()), "s = {s}, Δ = {delta} Γ: the norm {n} is above one within 0.866 Γ of the line");
+                let (vr, d) = (v * gamma, delta * gamma);
+                let exact = gamma * vr * vr / (d * d + 0.25 * gamma * gamma + 2.0 * vr * vr);
+                let mean = (n.ln().max(0.0) + n.min(1.0)) / rate;
+                let error = 1.0 / (mean * exact) - 1.0;
+                println!("s = {s}, Δ = {delta:+.2} Γ: n − 1 = {:+.3} s, the rate {:+.3} s² of the exact one (the norm clamped at one: {:+.3} s)", (n - 1.0) / s, error / (s * s), (rate / n.min(1.0) / exact - 1.0) / s);
+                assert!(error.abs() <= ORDER_RATES * s * s, "s = {s}, Δ = {delta} Γ: the rate {error:+.3e} of the exact one, s² = {:.3e}", s * s);
+                if delta == 0.0 {
+                    assert!(((rate / exact - 1.0) / s - 1.5).abs() < 0.1, "on resonance the clamped norm's rate is 1.5 s high");
+                    let mut reference = [0.0; GROUND];
+                    reference[g] = 1.0;
+                    let run = crate::model::Run::new(&model, reference);
+                    let mut back = 0;
+                    for index in 0..200 {
+                        let mut t = Trajectory::new(&run, g, at.r, at.kappa, 11, index);
+                        step::jump(&run, &mut t).unwrap();
+                        assert_eq!((t.work / run.photon_work()).round(), 1.0, "one photon a jump where the landing's norm is above one");
+                        let norm = crate::linalg::norm_sqr(&t.psi);
+                        if t.cluster == cluster {
+                            back += 1;
+                            assert!(norm > 1.0 && (norm - n).abs() <= 0.2 * (n - 1.0), "the trajectory goes on with the landing's norm: {norm} against {n}");
+                        } else {
+                            assert!((norm - 1.0).abs() <= 1e-12, "a second-order landing is the bare state: {norm}");
+                        }
+                    }
+                    assert!(back > 0, "some jumps land back in g");
+                }
+            }
         }
     }
 
@@ -1516,7 +1591,7 @@ mod tests {
             let mut reference = [0.0; GROUND];
             reference[3] = 1.0;
             let run = crate::model::Run::new(&fourth, reference);
-            let prompt = run.landed(fourth.membership[3], &at, &[C64::ONE, C64::ZERO, C64::ZERO]).1;
+            let prompt = 1.0 - crate::linalg::norm_sqr(&run.landed(fourth.membership[3], &at, &[C64::ONE, C64::ZERO, C64::ZERO]));
             let trials = 4000u64;
             let mut photons = 0.0;
             for index in 0..trials {
