@@ -1,0 +1,15 @@
+import sys, time, numpy as np, ref
+from common import *
+count, span, tau = int(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
+env = {'TABLES': sys.argv[5]} if len(sys.argv) > 5 else None
+print('v | exact F, engine F ± se (steps, jumps) | exact 2D = local + slow | engine 2D ± se = Brownian + Var(steps+jumps) [Var steps, Var jumps, 2Cov] | jumps/µs, F=1 share (engine; exact)')
+for v in [float(x) for x in sys.argv[1].split(',')]:
+    m, p = constant('closed', v)
+    o = p.moments()
+    # A whole number of the light's periods: the periodic part of the force then adds the same to every start phase.
+    whole = max(1, round(span * v / LAM)) * LAM / v
+    a, d = engine(f'const:{v}', WIDE, tau, count, 150.0, whole, whole, f'c{v}', env)
+    e = engine_rates(a, d)
+    f1 = p.population(np.array([n.startswith('ground-1') for n in m.names]))
+    print('%6.3f | %9.5f %9.5f ± %.5f (%9.5f %9.5f) | %7.3f = %6.3f + %7.3f | %7.3f ± %.3f = %6.3f + %7.3f [%7.3f %6.3f %6.3f] | %.4f %.4f; %.4f' % (
+        v, o['drift'], e['drift'], e['drift_se'], e['steps'], e['jumps'], o['rate'], o['local'], o['slow'], e['var'] + e['brownian'], e['var_se'], e['brownian'], e['var'], e['var_steps'], e['var_jumps'], e['cov'], e['jump_rate'], e['other'], f1), flush=True)

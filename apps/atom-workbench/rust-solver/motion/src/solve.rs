@@ -85,15 +85,14 @@
 //! brings the trajectories to the number the looks predict, at most to twice the number the prediction rests on
 //! (`batch`).
 //!
-//! # T is held per lab axis
-//! The semiclassical model is validated where k_BT ≥ `CLASSICAL` ħω and not below (SPEC §0, §8: its one known limit). The
-//! test is taken axis by axis: T_a is held to its target -- its step's difference screened against the step's share, its
-//! clear part booked, its look met or chased (`looks`), the total flagged where it exceeds the target (ledger.rs) -- at every
-//! output where the pilot's T_a may lie in the regime of its own axis; an axis below it is reported, not chased, and
-//! takes no other axis with it: a trap's tight axis that cools to a few ħω leaves the numerical error of the loose axes,
-//! where the model holds, as controlled as before. The result says per output and axis whether the run's own T_a lies
-//! in the regime (`Solution::classical`), whether the axis was held (`Solution::temperature_held`) and its total
-//! estimated error (`Solution::temperature_estimated_errors`).
+//! # T's target is on the total temperature
+//! The user's target on T, 10 % relative at the confidence z, is on the total temperature: the mean of the three lab
+//! axes' T (`Motion::temperature_total`), its statistics the jackknife of that mean. It is held at every output after
+//! t = 0 where it is read -- its step's difference screened against the step's share, its clear part booked, its look
+//! met or chased (`looks`), the total flagged where it exceeds the target (ledger.rs). Each axis's T is shown with its
+//! own statistics and held to nothing: an axis that carries little of the energy does not set the run's length.
+//! The validated regime k_BT_a ≥ `CLASSICAL` ħω_a is reported per output and axis (`Solution::classical`) and decides
+//! nothing in the solve.
 //!
 //! The axis's frequency is the reported trap's along the lab axis, ω_a² = (ħ/m) ∂²V/∂x_a² at its bottom (model.rs
 //! `Trap::lab`): T_a is the variance of κ along the lab axis over that frequency's period (# Outputs and windows), n̄_a
@@ -187,11 +186,10 @@ pub struct Solution {
     /// Per output and lab axis: in the validated regime, k_BT_a ≥ CLASSICAL ħω_a at the run's own T_a (reporting only; the
     /// contract's `classical` is every axis's, contract §2.2).
     pub classical: Vec<[bool; 3]>,
-    /// Per output and lab axis: whether the axis's T is held to its target (module documentation, # T is held per lab axis:
-    /// fixed by the pilot; an axis below its validated regime is not), and its total estimated error (relative, ledger.rs `Account`:
-    /// model, step and statistics, weighed by the held share), none where one of the three is not read.
-    pub temperature_held: Vec<[bool; 3]>,
-    pub temperature_estimated_errors: Vec<[Option<f64>; 3]>,
+    /// Per output: the total T's estimated error (relative, ledger.rs `Account`: model, step and statistics, weighed by
+    /// the held share), none where one of the three is not read. T's target is on the total T, the mean over the three
+    /// lab axes; each axis's T is shown with its statistics.
+    pub temperature_estimated_errors: Vec<Option<f64>>,
     pub trajectories: u64,
     /// The run's step τ (µs, adapt.rs).
     pub time_step_us: f64,
@@ -357,51 +355,43 @@ fn typical_speed(hbar_over_mass: f64, temperature_uk: f64) -> f64 {
     (3. * hbar_over_mass * KT_PER_UK * temperature_uk).sqrt()
 }
 
-/// The outputs each lab axis's T is averaged over between the pilot's levels (estimate.rs `between`), and the axes
-/// that are judged: an axis held to its target somewhere is averaged over the outputs it is held at, and judged; one
-/// held nowhere is averaged over every output, for its accounts alone.
-fn averaged_over(held: &[[bool; 3]]) -> (Vec<[bool; 3]>, [bool; 3]) {
-    let somewhere: [bool; 3] = std::array::from_fn(|a| held.iter().any(|h| h[a]));
-    (held.iter().map(|h| std::array::from_fn(|a| h[a] || !somewhere[a])).collect(), somewhere)
-}
-
 /// The reads a step is judged by (module documentation, # The step), each with the step's share of its target: the
-/// run's averages of the loss, of every row as shown, and of T on each lab axis that is held to its target somewhere
-/// (`held`). One family: what is clear of one of them is clear among them all.
-fn judged(read: &Between, held: [bool; 3]) -> Vec<(Read, f64)> {
+/// run's averages of the loss, of every row as shown, and of the total T. One family: what is clear of one of them is
+/// clear among them all.
+fn judged(read: &Between) -> Vec<(Read, f64)> {
     let [sp, st] = step_bound();
     let mut looks = vec![(read.loss, sp)];
     looks.extend(read.shown.iter().map(|x| (*x, sp)));
-    looks.extend((0..3).filter(|&a| held[a]).filter_map(|a| read.temperature[a].map(|t| (t, st))));
+    looks.extend(read.temperature.map(|t| (t, st)));
     looks
 }
 
 /// The screen of a step on the reads between its two levels (module documentation, # The step; decide.rs `judge`):
 /// the family of its reads, each against the step's share. The step is halved where the family is beyond.
-fn screen(read: &Between, held: [bool; 3]) -> Judgement {
-    judge(&judged(read, held), ORDER as f64)
+fn screen(read: &Between) -> Judgement {
+    judge(&judged(read), ORDER as f64)
 }
 
 /// The step's part of an output's accounts (module documentation, # The step): on what is shown -- the largest of the
-/// rows' and the loss's, a probability's error at most 1 -- and on T per lab axis (relative). The step's share until the
+/// rows' and the loss's, a probability's error at most 1 -- and on the total T (relative). The step's share until the
 /// pilot's two levels are read; then the clear part of their difference's average over the run (`checked`), the same
-/// at every output, unbounded on an axis's T that no output reads at both levels.
+/// at every output, unbounded on T where no output reads it at both levels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Bound {
     shown: f64,
-    temperature: [f64; 3],
+    temperature: f64,
 }
 impl Bound {
     /// The step's share of each target (`step_bound`).
     fn share() -> Bound {
         let [shown, temperature] = step_bound();
-        Bound { shown, temperature: [temperature; 3] }
+        Bound { shown, temperature }
     }
 }
 
 /// The step's check as the result tells it (module documentation, # The step): the companion's step (µs), the pairs
 /// compared, and the check's resolution -- the interval t·SE of the pairs' averages over the run, the largest on what is
-/// shown (absolute) and on T on the axes held to their target (relative; unbounded where a held axis's is not read).
+/// shown (absolute) and on the total T (relative; unbounded where it is not read).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Checked {
     companion: f64,
@@ -412,12 +402,12 @@ struct Checked {
 /// The pilot's reads between its two levels as the run takes them (module documentation, # The step): the clear part
 /// of each average among the looks the screen judges -- |e| − t·SE at the family's interval, where positive --, and the
 /// check's resolution, one look's t·SE.
-fn checked(read: &Between, held: [bool; 3]) -> (Bound, [f64; 2]) {
-    let looks = judged(read, held).len() as f64;
+fn checked(read: &Between) -> (Bound, [f64; 2]) {
+    let looks = judged(read).len() as f64;
     let clear = |read: &Read| read.clear(looks).max(0.);
-    let step = Bound { shown: read.shown.iter().map(clear).fold(clear(&read.loss), f64::max).min(1.), temperature: read.temperature.map(|t| t.map_or(f64::INFINITY, |t| clear(&t))) };
+    let step = Bound { shown: read.shown.iter().map(clear).fold(clear(&read.loss), f64::max).min(1.), temperature: read.temperature.map_or(f64::INFINITY, |t| clear(&t)) };
     let shown = read.shown.iter().map(|x| x.spread.interval()).fold(read.loss.spread.interval(), f64::max);
-    let temperature = (0..3).filter(|&a| held[a]).map(|a| read.temperature[a].map_or(f64::INFINITY, |t| t.spread.interval())).fold(0., f64::max);
+    let temperature = read.temperature.map_or(f64::INFINITY, |t| t.spread.interval());
     (step, [shown, temperature])
 }
 
@@ -456,27 +446,9 @@ fn outgrown(estimates: &[Estimate], reach: f64) -> Option<f64> {
 }
 
 /// Whether a lab axis's temperature (µK) lies in the validated regime of that axis's frequency (rad/µs), k_BT ≥
-/// `CLASSICAL` ħω (SPEC §0, §3): the one test, per axis, of what the result reports as classical and of where the axis's T
-/// is held to its target (module documentation, # T is held per lab axis).
+/// `CLASSICAL` ħω (SPEC §0, §3): what the result reports as classical, per axis; reporting only.
 fn classical(temperature: f64, frequency: f64) -> bool {
     KT_PER_UK * temperature >= CLASSICAL * frequency
-}
-
-/// The outputs and lab axes where T is held to its target (module documentation, # T is held per lab axis): where the T
-/// of `estimates` (the pilot's) on the axis has its error read and its upper bound T_a + t·SE lies in the validated
-/// regime of the axis's frequency (rad/µs); none at t = 0, the ensemble's exact moment.
-fn held_to(estimates: &[Estimate], frequencies: &V3) -> Vec<[bool; 3]> {
-    estimates
-        .iter()
-        .enumerate()
-        .map(|(k, e)| {
-            let Some(m) = e.motion.as_ref().filter(|_| k > 0) else { return [false; 3] };
-            std::array::from_fn(|a| {
-                let (t, error) = (m.temperature[a], &m.temperature_errors[a]);
-                error.read() && t > 0. && classical(t + error.interval(), frequencies[a])
-            })
-        })
-        .collect()
 }
 
 /// The states the model is read at and the folded units' errors there (SPEC §5.2): at every output the first member of
@@ -645,7 +617,7 @@ fn attempt(
     let first_rung = first_rung(plan.times[1] - plan.times[0], trap.frequencies.iter().copied().fold(0., f64::max), &model.sampled(&model.running()), judged.speed, typical_speed(hm, judged.temperature_uk));
     let mut context = Context {
         momentum,
-        fixed: Fixed { model: vec![[0.; 2]; outputs], temperature: vec![[false; 3]; outputs], start },
+        fixed: Fixed { model: vec![[0.; 2]; outputs], start },
         step: vec![Bound::share(); outputs],
         checked: None,
         tau: step.map_or(first_rung, |step| step.min(first_rung)),
@@ -673,7 +645,7 @@ fn attempt(
     // The scout (module documentation, # The pipeline): the first member of every pilot group at both levels, screened;
     // where its atoms outgrow the reach or a unit is to be kept at its states, the attempt ends here -- for the price of
     // the scout, not of a pilot. The pilot's read of the same things below stands for the result.
-    if settle(&run, &ensemble, &mut context, &mut levels, &numbers, 0..1, &report.lab, &dearer, messages) == Settled::Dearer {
+    if settle(&run, &ensemble, &mut context, &mut levels, &numbers, 0..1, &dearer, messages) == Settled::Dearer {
         return Ok(Attempt::Undo);
     }
     let scouted = {
@@ -686,14 +658,14 @@ fn attempt(
         let units = model.units();
         let read = sampled(&model, &units, &tables, &scout, None);
         let measured = Measured { errors: &read.errors, output: &read.at, group: &read.from };
-        let fixed = Fixed { model: model_error(&sums(&measured.means(outputs, None), unsampled), None, unsampled), temperature: held_to(&estimates, &report.lab), ..context.fixed.clone() };
+        let fixed = Fixed { model: model_error(&sums(&measured.means(outputs, None), unsampled), None, unsampled), ..context.fixed.clone() };
         if let Some((u, share)) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &read.samples, &scout, &estimates, &fixed, &context.scales, unsampled, scout.len() as f64, barred) {
             return Ok(Attempt::Keep(units[u].clone(), tau, share));
         }
         read
     };
     // The pilot: its groups' other members at both levels, screened.
-    match settle(&run, &ensemble, &mut context, &mut levels, &numbers, 1..GROUP, &report.lab, &dearer, messages) {
+    match settle(&run, &ensemble, &mut context, &mut levels, &numbers, 1..GROUP, &dearer, messages) {
         Settled::Dearer => return Ok(Attempt::Undo),
         Settled::Capped => context.ledger.flag(capped()),
         Settled::Standing => {}
@@ -755,11 +727,9 @@ fn attempt(
                 context.ledger.flag(format!("{label}的误差超出表的份额，而加密已到工作量的界：按实测记账"));
             }
         }
-        context.fixed.temperature = held_to(&estimates, &report.lab);
         // The step's check (module documentation, # The step): the clear part of the pilot's difference into the
         // accounts, its resolution into the result's words.
-        let (over, held) = averaged_over(&context.fixed.temperature);
-        let (step, resolution) = checked(&between(&pilot, &levels.coarse.iter().collect::<Vec<_>>(), &context.scales, &over), held);
+        let (step, resolution) = checked(&between(&pilot, &levels.coarse.iter().collect::<Vec<_>>(), &context.scales));
         (context.step, context.checked) = (vec![step; outputs], Some(Checked { companion: 2. * tau, pairs: pilot_size(), resolution }));
         // A unit to keep at the pilot's states (`keep`): its model then runs a pilot again.
         if let Some((u, share)) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &pilot, &estimates, &context.fixed, &context.scales, unsampled, pilot_size() as f64, barred) {
@@ -838,7 +808,7 @@ enum Settled {
 /// share among all the looks (`screen`), the step is halved -- the level at τ becomes the companion, and the members so
 /// far run anew at τ/2 alone. The finer level keeps its states (the model is read at them).
 #[allow(clippy::too_many_arguments)]
-fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, frequencies: &V3, dearer: &dyn Fn(f64) -> bool, messages: &mut Messages) -> Settled {
+fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, dearer: &dyn Fn(f64) -> bool, messages: &mut Messages) -> Settled {
     let more = level(run, ensemble, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
     absorb(&mut levels.fine, more);
     let more = level(run, ensemble, &context.plan, 2. * context.tau, numbers, members.clone(), false, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
@@ -846,8 +816,7 @@ fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Le
     loop {
         let beyond = {
             let (fine, coarse) = levels.paired();
-            let (over, held) = averaged_over(&held_to(&pooled(&fine, &context.scales).0, frequencies));
-            matches!(screen(&between(&fine, &coarse, &context.scales, &over), held), Judgement::Beyond(_))
+            matches!(screen(&between(&fine, &coarse, &context.scales)), Judgement::Beyond(_))
         };
         let below = halved(context.tau, 1.);
         if !beyond {
@@ -1199,7 +1168,6 @@ fn run_groups(groups: &[u64], members: std::ops::Range<u64>, shape: Shape, recor
 #[derive(Clone)]
 struct Fixed {
     model: Vec<[f64; 2]>,
-    temperature: Vec<[bool; 3]>,
     start: f64,
 }
 
@@ -1252,20 +1220,19 @@ impl Look {
 }
 
 /// The looks of a run (module documentation, # Stopping) by its estimates, the pilot's fixed errors and the step's
-/// part: at every output after t = 0 what is shown, and T on each lab axis held to its target there. A held axis
-/// whose T has no account -- one of its parts is unread -- is not met; where it is its statistics that are unread, its
-/// need is predicted from the normal theory of a variance over the N h atoms held, the relative interval z √(2/(N h)).
+/// part: at every output after t = 0 what is shown, and the total T (the mean over the three lab axes: what T's target
+/// is on). A T without an account -- one of its parts is unread -- is not met; where it is its statistics that are
+/// unread, its need is predicted from the normal theory of one axis's variance over the N h atoms held, the relative
+/// interval z √(2/(N h)) -- the total's is at most that (three axes' mean; equal where one axis holds all the energy).
 fn looks(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> Vec<Look> {
     let (population, temperature) = accounts(estimates, fixed, step);
     let mut looks = vec![];
     for (k, e) in estimates.iter().enumerate().skip(1) {
         let (h, n) = (1. - e.loss, e.trajectories);
         looks.push(Look { output: k, target: POPULATION_TARGET, account: population[k], interval: e.shown_interval(), trajectories: n, shown: true });
-        for a in (0..3).filter(|&a| fixed.temperature[k][a]) {
-            let account = temperature[k][a].unwrap_or(Account { model: h * fixed.model[k][1], step: h * step[k].temperature[a], statistics: f64::INFINITY });
-            let interval = if account.statistics.is_finite() { account.statistics } else { h * CONFIDENCE * (2. / (n * h)).sqrt() };
-            looks.push(Look { output: k, target: TEMPERATURE_TARGET, account, interval, trajectories: n, shown: false });
-        }
+        let account = temperature[k].unwrap_or(Account { model: h * fixed.model[k][1], step: h * step[k].temperature, statistics: f64::INFINITY });
+        let interval = if account.statistics.is_finite() { account.statistics } else { h * CONFIDENCE * (2. / (n * h)).sqrt() };
+        looks.push(Look { output: k, target: TEMPERATURE_TARGET, account, interval, trajectories: n, shown: false });
     }
     looks
 }
@@ -1277,14 +1244,13 @@ fn crowded(looks: &[Look]) -> Vec<usize> {
     outputs
 }
 
-/// Each output's accounts of what is shown and of T per lab axis (ledger.rs `Account`) by the run's estimates, the model's
+/// Each output's accounts of what is shown and of the total T (ledger.rs `Account`) by the run's estimates, the model's
 /// errors on the held atoms per output (`Fixed`) and the step's part, T's where read: the held share 1 − L weighs the
 /// model's error on the rows as shown, and T's whole accounts (module documentation, # Stopping); t = 0 is the
 /// request's state, without error, and the ensemble's moments, T's by quadrature: its accounts are the quadrature's
 /// error alone (`Fixed::start`), in the discretization's part (SPEC §4). The model's error on what is shown is at most
-/// 1, a probability's. An axis's T has an account where its statistics, the model's error and the axis's step error
-/// are all read.
-fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> (Vec<Account>, Vec<[Option<Account>; 3]>) {
+/// 1, a probability's. T has an account where its statistics, the model's error and its step error are all read.
+fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> (Vec<Account>, Vec<Option<Account>>) {
     estimates
         .iter()
         .zip(&fixed.model)
@@ -1292,15 +1258,12 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> (Vec<Accou
         .enumerate()
         .map(|(k, ((e, a), b))| {
             if k == 0 {
-                return (Account::default(), [Some(Account { step: fixed.start, ..Account::default() }); 3]);
+                return (Account::default(), Some(Account { step: fixed.start, ..Account::default() }));
             }
             let h = 1. - e.loss;
             let population = Account { model: (a[0] * h).min(1.), step: b.shown, statistics: e.shown_statistics() };
-            let temperature = std::array::from_fn(|x| {
-                let relative = e.motion.as_ref().map_or(f64::INFINITY, |m| e.temperature_interval(x, m.temperature[x]));
-                let bound = b.temperature[x];
-                (relative.is_finite() && a[1].is_finite() && bound.is_finite()).then_some(Account { model: h * a[1], step: h * bound, statistics: h * relative })
-            });
+            let (relative, bound) = (e.temperature_interval(), b.temperature);
+            let temperature = (relative.is_finite() && a[1].is_finite() && bound.is_finite()).then_some(Account { model: h * a[1], step: h * bound, statistics: h * relative });
             (population, temperature)
         })
         .unzip()
@@ -1583,18 +1546,17 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     let classical = |t: &V3| -> [bool; 3] { std::array::from_fn(|a| classical(t[a], w[a])) };
     let mut ledger = c.ledger.clone();
     let (population, temperature) = accounts(estimates, &c.fixed, &c.step);
-    let held = c.fixed.temperature.clone();
     // The step's item: the largest it is booked at over the accounts (weighed by the held share as the totals are). And
     // the check in the method's words: the two steps compared, the pairs, the resolution -- a check, in no total.
     let mut step = String::new();
     if let Some(check) = &c.checked {
-        let largest = (1..outputs).flat_map(|k| temperature[k].iter().flatten().map(|a| a.step).chain([population[k].step])).fold(0., f64::max);
+        let largest = (1..outputs).flat_map(|k| temperature[k].iter().map(|a| a.step).chain([population[k].step])).fold(0., f64::max);
         let share = (1 << ORDER) - 1;
         ledger.item(&format!("时间步长 τ = {} μs（全程不变）", c.tau), largest, &format!("试探的轨迹在 τ 与 2τ 下逐条配对比较：两者之差的 1/{share} 在全程上的平均中读清的部分"));
         let relative = if check.resolution[1].is_finite() { format!("±{}", percent(check.resolution[1])) } else { "读不出".into() };
         step = format!("（收敛检查：与 {} μs 在 {} 对同号轨迹上比较，全程平均的差别能分辨到布居 ±{}、温度 {relative}；这是检查，不是误差界，未计入总误差）", check.companion, check.pairs, percent(check.resolution[0]));
     }
-    ledger.close(times, &population, &temperature, &held);
+    ledger.close(times, &population, &temperature);
     // T and the motion at t = 0: exact.
     let start_t = c.momentum.map(|m| m / KT_PER_UK);
     let mut s = Solution {
@@ -1611,8 +1573,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         velocity: std::array::from_fn(|a| histograms(listed, &c.plan.listed, &|x| x.1[a] * hm)),
         position: std::array::from_fn(|a| histograms(listed, &c.plan.listed, &|x| x.0[a])),
         classical: Vec::with_capacity(outputs),
-        temperature_held: held,
-        temperature_estimated_errors: temperature.iter().map(|axes| axes.map(|a| a.map(|a| a.total()))).collect(),
+        temperature_estimated_errors: temperature.iter().map(|a| a.map(|a| a.total())).collect(),
         trajectories,
         time_step_us: c.tau,
         method: format!("{}；{trajectories} 条轨迹（每组 {GROUP} 条拉丁超立方），步长 {} μs{step}。", c.method, c.tau),
@@ -1674,7 +1635,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     }
     // T shown with its statistics where its model error or its step error is unread.
     let unbooked: Vec<usize> = (1..outputs)
-        .filter(|&k| estimates[k].motion.as_ref().is_some_and(|m| m.temperature_errors.iter().all(Spread::read)) && !(c.fixed.model[k][1].is_finite() && c.step[k].temperature.iter().all(|b| b.is_finite())))
+        .filter(|&k| estimates[k].motion.as_ref().is_some_and(|m| m.temperature_errors.iter().all(Spread::read)) && !(c.fixed.model[k][1].is_finite() && c.step[k].temperature.is_finite()))
         .collect();
     if !unbooked.is_empty() {
         s.approximations.flag(format!("{}：这些时刻被俘获的原子不足，模型或步长对温度的误差读不出", span(&unbooked, times)));
@@ -1756,60 +1717,55 @@ mod tests {
     /// The screen's outcomes on the run's averages between two levels (unlimited groups: one look's interval is z of
     /// the error). The step stands where every average fits its share, where a small one lies under a wide interval,
     /// and where one lies above its share but not clearly so among the looks; it is halved where an average is clear of
-    /// its share: T's on an axis held to its target somewhere (an axis held nowhere is not judged, whatever the others
-    /// are), the loss's and a row's as shown against the population's share. The family is the run's few averages: a
-    /// difference of 24 % on T with a standard error of 5 % on eleven groups -- one standing wave's Doppler cooling at
-    /// 2.5 µs against 5 µs -- is clear among them, where no single output's 6 SE was among seven thousand looks.
+    /// its share: the total T's, the loss's and a row's as shown against the population's share. The family is the
+    /// run's few averages: a difference of 24 % on T with a standard error of 5 % on eleven groups -- one standing
+    /// wave's Doppler cooling at 2.5 µs against 5 µs -- is clear among them, where no single output's 6 SE was among
+    /// seven thousand looks.
     #[test]
     fn the_screen_halves_the_step_on_a_clear_average_alone() {
         let read = |value: f64, error: f64| Read { value, spread: Spread { error, groups: f64::INFINITY } };
         let quiet = read(0., 0.);
-        let at = |t: Read| Between { loss: quiet, shown: [quiet; STATES], temperature: [Some(t), Some(quiet), None] };
-        let halved = |read: &Between, held: [bool; 3]| matches!(screen(read, held), Judgement::Beyond(_));
+        let at = |t: Read| Between { loss: quiet, shown: [quiet; STATES], temperature: Some(t) };
+        let halved = |read: &Between| matches!(screen(read), Judgement::Beyond(_));
         let [sp, st] = step_bound();
-        assert!(!halved(&at(read(0.5 * st, 0.1 * st)), [true; 3]));
-        assert!(!halved(&at(read(0.5 * st, st)), [true; 3]));
-        assert!(!halved(&at(read(2. * st, st)), [true; 3]));
-        assert!(halved(&at(read(4. * st, 0.01 * st)), [true; 3]));
-        assert!(!halved(&at(read(9. * st, 0.)), [false, true, true]) && halved(&at(read(9. * st, 0.)), [true, false, false]));
+        assert!(!halved(&at(read(0.5 * st, 0.1 * st))));
+        assert!(!halved(&at(read(0.5 * st, st))));
+        assert!(!halved(&at(read(2. * st, st))));
+        assert!(halved(&at(read(4. * st, 0.01 * st))));
+        assert!(!halved(&Between { temperature: None, ..at(quiet) }));
         let lost = Between { loss: read(2. * sp, 0.01 * sp), ..at(quiet) };
         let mut row = at(quiet);
         row.shown[3] = read(-2. * sp, 0.01 * sp);
-        assert!(halved(&lost, [false; 3]) && halved(&row, [false; 3]));
+        assert!(halved(&lost) && halved(&row));
         let pilot = |value: f64, error: f64| at(Read { value, spread: Spread { error, groups: 11. } });
-        assert_eq!(judged(&pilot(0.24, 0.05), [true; 3]).len(), 1 + STATES + 2);
-        assert!(halved(&pilot(0.65, 0.11), [true; 3]) && halved(&pilot(0.32, 0.05), [true; 3]) && !halved(&pilot(0.12, 0.04), [true; 3]));
+        assert_eq!(judged(&pilot(0.24, 0.05)).len(), 1 + STATES + 1);
+        assert!(halved(&pilot(0.65, 0.11)) && halved(&pilot(0.32, 0.05)) && !halved(&pilot(0.12, 0.04)));
     }
 
-    /// The step's check on the pilot's averages (`checked`): a difference of 12 % on T_x with a standard error of 4 % on
-    /// eleven groups leaves nothing clear among the looks (Student's t at ten degrees of freedom and Šidák's tail over
-    /// the family) and nothing enters the accounts; of 60 % the clear part does, the number the screen halves the step
-    /// for where it exceeds the step's share. The resolution is one look's t·SE: T's on the axes judged alone, what is
-    /// shown from the rows and the loss. An axis no output reads has no bound, and no resolution where it is judged.
-    /// The outputs an axis is averaged over: those it is held at; all of them for an axis held nowhere, which is not
-    /// judged.
+    /// The step's check on the pilot's averages (`checked`): a difference of 12 % on the total T with a standard error
+    /// of 4 % on eleven groups leaves nothing clear among the looks (Student's t at ten degrees of freedom and Šidák's
+    /// tail over the family) and nothing enters the accounts; of 60 % the clear part does, the number the screen halves
+    /// the step for where it exceeds the step's share. The resolution is one look's t·SE: T's, and what is shown from
+    /// the rows and the loss. A T no output reads at both levels has no bound and no resolution.
     #[test]
     fn the_step_s_check_books_what_is_clear_and_tells_its_resolution() {
         let quiet = Read { value: 0., spread: Spread { error: 0., groups: f64::INFINITY } };
         let pilot = |value: f64, error: f64| Read { value, spread: Spread { error, groups: 11. } };
-        let at = |x: Read| Between { loss: quiet, shown: [quiet; STATES], temperature: [Some(x), Some(pilot(0.3, 0.2)), Some(quiet)] };
-        let held = [true, false, true];
-        let (step, resolution) = checked(&at(pilot(0.12, 0.04)), held);
-        assert!(step.shown == 0. && step.temperature[0] == 0. && step.temperature[2] == 0., "{step:?}");
+        let at = |x: Read| Between { loss: quiet, shown: [quiet; STATES], temperature: Some(x) };
+        let (step, resolution) = checked(&at(pilot(0.12, 0.04)));
+        assert!(step.shown == 0. && step.temperature == 0., "{step:?}");
         let one = Spread { error: 0.04, groups: 11. }.interval();
         assert!(resolution == [0., one] && one > CONFIDENCE * 0.04, "{resolution:?}");
         let read = at(pilot(0.6, 0.04));
-        let (step, _) = checked(&read, held);
-        let family = Spread { error: 0.04, groups: 11. }.interval_over(judged(&read, held).len() as f64);
-        assert!((step.temperature[0] - (0.6 - family)).abs() < 1e-15 && step.temperature[0] > step_bound()[1], "{step:?}");
-        assert!(matches!(screen(&read, held), Judgement::Beyond(_)));
+        let (step, _) = checked(&read);
+        let family = Spread { error: 0.04, groups: 11. }.interval_over(judged(&read).len() as f64);
+        assert!((step.temperature - (0.6 - family)).abs() < 1e-15 && step.temperature > step_bound()[1], "{step:?}");
+        assert!(matches!(screen(&read), Judgement::Beyond(_)));
         let mut lossy = at(quiet);
-        (lossy.loss, lossy.shown[2], lossy.temperature[1]) = (Read { value: -0.2, spread: Spread { error: 0.01, groups: f64::INFINITY } }, pilot(0.01, 0.02), None);
-        let (step, resolution) = checked(&lossy, [false, true, false]);
-        assert!(step.shown > 0.15 && step.shown < 0.2 && step.temperature[1] == f64::INFINITY, "{step:?}");
+        (lossy.loss, lossy.shown[2], lossy.temperature) = (Read { value: -0.2, spread: Spread { error: 0.01, groups: f64::INFINITY } }, pilot(0.01, 0.02), None);
+        let (step, resolution) = checked(&lossy);
+        assert!(step.shown > 0.15 && step.shown < 0.2 && step.temperature == f64::INFINITY, "{step:?}");
         assert!((resolution[0] - Spread { error: 0.02, groups: 11. }.interval()).abs() < 1e-15 && resolution[1] == f64::INFINITY, "{resolution:?}");
-        let (over, judged) = averaged_over(&[[false; 3], [true, false, false], [false; 3]]);
-        assert_eq!((over, judged), (vec![[false, true, true], [true; 3], [false, true, true]], [true, false, false]));
     }
 
     /// A look on T at 800 trajectories: the model's error, the step's clear part, the statistics' interval (each
@@ -1835,9 +1791,9 @@ mod tests {
         assert_eq!((batch(1147.3, 800), batch(300., 800), batch(5000., 800), batch(f64::INFINITY, 800), batch(1e9, MOST_TRAJECTORIES - 8)), (1152, 808, 1600, 1600, MOST_TRAJECTORIES));
     }
 
-    /// An output's estimate with T = `temperature` (µK) and its standard errors per lab axis, read on unlimited groups (the
-    /// interval is z of the error), every atom held, nothing else to chase.
-    fn estimate(temperature: V3, errors: V3, trajectories: f64) -> Estimate {
+    /// An output's estimate with T = `temperature` (µK) per lab axis and the total T's standard error `error` (µK), read
+    /// on unlimited groups (the interval is z of the error), every atom held, nothing else to chase.
+    fn estimate(temperature: V3, error: f64, trajectories: f64) -> Estimate {
         let exact = Spread { error: 0., groups: f64::INFINITY };
         Estimate {
             trajectories,
@@ -1849,9 +1805,9 @@ mod tests {
             populations: [0.; STATES],
             motion: Some(crate::estimate::Motion {
                 temperature,
-                temperature_errors: errors.map(|error| Spread { error, groups: f64::INFINITY }),
+                temperature_errors: [exact; 3],
                 temperature_total: temperature.iter().sum::<f64>() / 3.,
-                temperature_total_error: exact,
+                temperature_total_error: Spread { error, groups: f64::INFINITY },
                 occupation: [0.; 3],
                 mean_velocity: [0.; 3],
             }),
@@ -1859,60 +1815,35 @@ mod tests {
         }
     }
 
-    /// T is held per lab axis (module documentation): in a trap of 100, 100 and 19 kHz the regime begins at
-    /// CLASSICAL ħω/k_B = 19.2, 19.2 and 3.65 µK. A pilot that reads 25, 6 and 10 µK (± 1 %) holds x and z at their own
-    /// T and leaves y; an axis whose T reads below its boundary within its interval is held (its upper bound is inside);
-    /// one whose error is unread is not; nothing is held at t = 0.
+    /// The looks and the accounts are of what is shown and of the total T. A pilot that reads 25, 6 and 10 µK on the
+    /// axes has the total 13.67 µK; with a model error of 3 % and a step's clear part of 2 % there is one look on what
+    /// is shown and one on T at every output after t = 0. An interval of 1 % on the total neither keeps the run from
+    /// stopping nor asks for a trajectory; one of 15 % does both, by (interval/room)², whatever the axes' own errors
+    /// are. A model error or a step part that fills the target crowds its output. T's account holds the three parts,
+    /// and the result's total is it.
     #[test]
-    fn an_axis_is_held_where_its_own_temperature_is_in_its_regime() {
-        let frequencies = [100., 100., 19.].map(|khz: f64| TAU * khz * 1e-3);
-        let boundary = frequencies.map(|w| CLASSICAL * w / KT_PER_UK);
-        assert!((boundary[0] - 19.2).abs() < 0.05 && (boundary[2] - 3.65).abs() < 0.05, "{boundary:?}");
-        let cold = estimate([25., 6., 10.], [0.25, 0.06, 0.1], 800.);
-        let held = held_to(&[cold.clone(), cold.clone()], &frequencies);
-        assert_eq!(held, [[false; 3], [true, false, true]]);
-        let edge = estimate([19., 19., 3.6], [0.2, 0.05, 0.1], 800.);
-        assert_eq!(held_to(&[edge.clone(), edge], &frequencies)[1], [true, false, true]);
-        let mut unread = cold.clone();
-        unread.motion.as_mut().unwrap().temperature_errors[2] = Spread::UNREAD;
-        assert_eq!(held_to(&[cold, unread], &frequencies)[1], [true, false, false]);
-    }
-
-    /// The looks and the accounts follow each axis's hold. With x and z held and y not (the pilot's 25, 6, 10 µK), a model
-    /// error of 3 % and a step's clear part of 2 %, 40 % and 1 % on the axes: there is one look on what is shown and one
-    /// on each held axis, each with its own step part and statistics; an interval of 30 % on y neither keeps the run
-    /// from stopping nor asks for a trajectory, where the same interval on x does both, by (interval/room)²; y's step
-    /// part, beyond any target, crowds no output where on a held axis it would. A model error that fills the target
-    /// crowds its output. Every axis has its account, its own step and statistics in it, and the result's per-axis
-    /// totals are those.
-    #[test]
-    fn the_looks_and_the_accounts_follow_each_axis() {
-        let fixed = |held: [bool; 3]| Fixed { model: vec![[0.; 2], [0., 0.03]], temperature: vec![[false; 3], held], start: 0. };
-        let none = Bound { shown: 0., temperature: [0.; 3] };
-        let step = [none, Bound { shown: 0., temperature: [0.02, 0.4, 0.01] }];
-        let held = [true, false, true];
-        let n = 800.;
-        let quiet = estimate([25., 6., 10.], [0.25, 0.9, 0.1], n);
+    fn the_looks_and_the_accounts_are_of_the_total_temperature() {
+        let fixed = Fixed { model: vec![[0.; 2], [0., 0.03]], start: 0. };
+        let none = Bound { shown: 0., temperature: 0. };
+        let step = [none, Bound { shown: 0., temperature: 0.02 }];
+        let (n, total) = (800., (25. + 6. + 10.) / 3.);
+        let quiet = estimate([25., 6., 10.], 0.005 * total, n);
         let run = [quiet.clone(), quiet];
-        let all = looks(&run, &fixed(held), &step);
-        assert_eq!(all.iter().map(|l| (l.output, l.shown, l.account.step)).collect::<Vec<_>>(), [(1, true, 0.), (1, false, 0.02), (1, false, 0.01)]);
+        let all = looks(&run, &fixed, &step);
+        assert_eq!(all.iter().map(|l| (l.output, l.shown, l.account.step)).collect::<Vec<_>>(), [(1, true, 0.), (1, false, 0.02)]);
         assert!(all.iter().all(|l| l.met() && l.need() < n) && crowded(&all).is_empty());
-        let noisy = estimate([25., 6., 10.], [3.75, 0.06, 0.1], n);
+        let noisy = estimate([25., 6., 10.], 0.075 * total, n);
         let run = [noisy.clone(), noisy];
-        let x = looks(&run, &fixed(held), &step)[1];
-        let need = n * (CONFIDENCE * 3.75 / 25. / room(TEMPERATURE_TARGET, 0.03, 0.02)).powi(2);
-        assert!(!x.met() && (x.need() - need).abs() < 1e-9 * need, "{} against {need}", x.need());
-        let every = looks(&run, &fixed([true; 3]), &step);
-        assert!(!every[2].fits() && crowded(&every) == [1]);
-        let mut full = fixed(held);
+        let t = looks(&run, &fixed, &step)[1];
+        let need = n * (CONFIDENCE * 0.075 / room(TEMPERATURE_TARGET, 0.03, 0.02)).powi(2);
+        assert!(!t.met() && (t.need() - need).abs() < 1e-9 * need, "{} against {need}", t.need());
+        let wide = [none, Bound { shown: 0., temperature: 0.4 }];
+        assert!(!looks(&run, &fixed, &wide)[1].fits() && crowded(&looks(&run, &fixed, &wide)) == [1]);
+        let mut full = Fixed { model: fixed.model.clone(), start: 0. };
         full.model[1][1] = 0.11;
         assert!(crowded(&looks(&run, &full, &step)) == [1]);
-        let (_, accounts) = accounts(&run, &fixed(held), &step);
-        let expected = [(0.02, CONFIDENCE * 3.75 / 25.), (0.4, CONFIDENCE * 0.06 / 6.), (0.01, CONFIDENCE * 0.1 / 10.)];
-        for (a, (step, statistics)) in expected.into_iter().enumerate() {
-            let account = accounts[1][a].unwrap();
-            assert!(account.model == 0.03 && account.step == step && (account.statistics - statistics).abs() < 1e-14, "{account:?}");
-        }
+        let account = accounts(&run, &fixed, &step).1[1].unwrap();
+        assert!(account.model == 0.03 && account.step == 0.02 && (account.statistics - CONFIDENCE * 0.075).abs() < 1e-14, "{account:?}");
     }
 
     /// The plan: the windows half a period (at most half an interval) cut at t = 0, the listed outputs evenly spread with
