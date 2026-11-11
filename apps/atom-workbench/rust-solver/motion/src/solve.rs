@@ -23,7 +23,12 @@
 //! largest below the reference flow's resonance, ω τ < π at the prepared trap's largest frequency (`top_rung`).
 //!
 //! The step's error is measured on what is shown, not read step by step. The run keeps two levels: its trajectories at
-//! τ, and the same trajectory numbers -- the same initial atoms, the same streams by their keys -- at 2τ (`Levels`).
+//! τ, and the same trajectory numbers -- the same initial atoms, the same jumps' draws by their number, the same
+//! Brownian path (adapt.rs) -- at 2τ (`Levels`). What the levels share cancels in their difference for as long as the
+//! pairs stay together: some 50 µs in six beams' cooling, where the jumps' times, which are the step's, and the
+//! light's structure on the wavelength's scale part them whatever the noise (with no diffusion at all as fast), and
+//! half a millisecond in one standing wave's Doppler cooling (SPEC §2.2). After that the two levels are independent
+//! ensembles, and the difference's error is theirs in quadrature.
 //! An output's step error is e(τ) = [Q(2τ) − Q(τ)]/(2^p − 1), its error the delete-one-group jackknife of the paired
 //! difference (estimate.rs `between`): one instrument for the loss, the rows as shown and T per lab axis, each carried
 //! to the output by the dynamics itself. Booked per output is the bound |e| + t·SE(e) (`Bound`). The part of it that
@@ -1050,6 +1055,9 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
     let widest = plan.halves.iter().flatten().fold(0., |a: f64, &b| a.max(b));
     let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
     let mut scratch = Scratch::default();
+    // The trajectory's Brownian path in cells of an output interval, its grid the multiples of τ (the ladder's rungs
+    // are the interval over powers of two): the same path at every rung.
+    let mut path = adapt::Path::new(SEED, index, interval, (interval / tau).log2().round() as u32);
     // Per output and lab axis: the window's time held, ∫κ dt and ∫κ² dt.
     let mut moments = vec![[[0.; 3]; 3]; outputs];
     let mut out = vec![Fate::Lost; outputs];
@@ -1098,7 +1106,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
             }
         };
         for k in 1..outputs {
-            failed = adapt::advance(model, tau, &mut t, &mut scratch, plan.times[k], &mut each).is_err();
+            failed = adapt::advance(model, tau, &mut t, &mut scratch, &mut path, plan.times[k], &mut each).is_err();
             if failed || t.lost.is_some() {
                 reached = k;
                 break;
@@ -1107,7 +1115,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
         }
         if reached == outputs {
             // Through the last output's window; a failure there leaves every output read.
-            failed = adapt::advance(model, tau, &mut t, &mut scratch, plan.end, &mut each).is_err();
+            failed = adapt::advance(model, tau, &mut t, &mut scratch, &mut path, plan.end, &mut each).is_err();
         }
     }
     // From the output it does not reach: failed, or lost.

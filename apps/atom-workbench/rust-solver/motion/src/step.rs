@@ -137,10 +137,10 @@
 //!   (`Brownian`) through a factor Λ of it, Λ Λᵀ = 2D (`factor`): in free flight κ += τ F_s + Λ ΔW and r −= (ħ/m) Λ ΔZ,
 //!   ΔW = ∫dW the path's increment over the step and ΔZ = ∫(s − τ/2)dW its first moment about the middle. With ΔZ the
 //!   kick at the middle moves the step's end as the force Λ dW/ds spread over the step moves it, (ħ/m)∫(τ − s)Λ dW: a
-//!   step and its two halves on the same path (`Brownian::halves`: ΔW = ΔW₁ + ΔW₂, ΔZ = ΔZ₁ + ΔZ₂ + (τ/4)(ΔW₂ − ΔW₁))
-//!   then end together but for the scheme's own error, which is what the step's doubling reads (adapt.rs). Without it
-//!   they would end (ħ/m)(τ/4)Λ(ΔW₂ − ΔW₁) apart, a difference of zero mean and of order τ^{3/2} that is no error of the
-//!   scheme.
+//!   step and its two halves on the same path (`Brownian::split` at the middle: ΔW = ΔW₁ + ΔW₂, ΔZ = ΔZ₁ + ΔZ₂ +
+//!   (τ/4)(ΔW₂ − ΔW₁)) then end together but for the scheme's own error, which is what the run's two levels differ by
+//!   (adapt.rs, # The Brownian path: the same trajectory at twice the step is on the same path). Without it they would
+//!   end (ħ/m)(τ/4)Λ(ΔW₂ − ΔW₁) apart, a difference of zero mean and of order τ^{3/2} that is no error of the scheme.
 //!   In the reference's flow (`spreading`): along a principal axis of the rate ω (ω² = (ħ/m)λ) a force spread over
 //!   the step ends as the kick ∫cos(ωu)Λ dW and the displacement −(ħ/m)∫(sin ωu/ω)Λ dW at the middle (u the time from
 //!   it), uncorrelated, of the variances (τ/2)(1 + c₁(x)) and (τ/2)(1 − c₁(x))/ω² an axis of Λ Λᵀ, x = ω²τ² and c₁ the
@@ -266,8 +266,7 @@ pub trait Middle {
 }
 
 /// A cluster's internal state: its amplitudes on the cluster's states -- at most the model's `STATES` --, held in place,
-/// so that whatever holds one (a trajectory, a step's end, the read's carried state, a jump's photon) copies without
-/// the heap. A slice of its amplitudes wherever one is asked; those beyond its length are zero.
+/// so that whatever holds one (a trajectory, a step's end, a jump's photon) copies without the heap. A slice of its amplitudes wherever one is asked; those beyond its length are zero.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Internal {
     len: usize,
@@ -331,7 +330,7 @@ pub struct Trajectory {
     pub threshold: f64,
     /// The jumps made: the next one draws from `Stream::jump(seed, index, jumps + 1)`.
     pub jumps: u32,
-    /// The steps taken: the next one's part of the Brownian path is drawn from `Stream::diffusion(seed, index, taken)`
+    /// The steps taken (their parts of the Brownian path are the path's own, adapt.rs `Path`)
     /// (adapt.rs).
     pub taken: u32,
     /// The time the atom was lost (SPEC §1.7: checked at every step's end and after every jump); None while held.
@@ -1103,8 +1102,7 @@ pub enum Attempt {
 /// A step's middle (module documentation, # The reference, # The kick): the reference's flow of a step of τ and the
 /// point (r_h, κ_h) its first half reaches from the step's start, the reference's gradient there, and the model's
 /// generator there at the step's middle time (`Dynamics::middle`) -- all of a step that its internal state does not
-/// enter. The trajectory's step goes through it; so does the other step a read takes from the same start, the carried
-/// state's (adapt.rs, # The read) -- one middle of the model for the two.
+/// enter. The trajectory's step goes through it.
 pub struct Midway<'a, D: Dynamics + 'a> {
     model: &'a D,
     tau: f64,
@@ -1236,32 +1234,48 @@ impl Brownian {
     /// A path that does not move.
     pub const STILL: Brownian = Brownian { increment: [0.0; 3], moment: [0.0; 3] };
 
-    /// The part over a step of the length τ of the path two vectors of standard normal deviates make: ΔW = √|τ| g₀ and
-    /// ΔZ = √(|τ|³/12) g₁. The same deviates at another length are the same path's shape at that length.
+    /// The part over a stretch of the length τ of the path two vectors of standard normal deviates make: ΔW = √|τ| g₀
+    /// and ΔZ = √(|τ|³/12) g₁.
     pub fn over(tau: f64, deviates: &[[f64; 3]; 2]) -> Brownian {
         let (t, cube) = (tau.abs().sqrt(), (tau.abs().powi(3) / 12.0).sqrt());
         Brownian { increment: deviates[0].map(|g| t * g), moment: deviates[1].map(|g| cube * g) }
     }
 
-    /// The path's parts over the two halves of a step of the length τ, given its part over the step: the Brownian
-    /// bridge between them, from two further vectors of deviates. With u = ΔW₂ − ΔW₁ (variance τ) and ζ_i the halves'
-    /// own first moments (variance (τ/2)³/12 each), ΔZ = ζ₁ + ζ₂ + (τ/4)u; given ΔZ, the normal law of its two parts is
-    /// (τ/4)u = ¾ΔZ + e and ζ₁ + ζ₂ = ¼ΔZ − e with e of variance τ³/64 (the parts' variances τ³/16 and τ³/48 over their
-    /// sum's τ³/12), and ζ₁ − ζ₂ is of variance τ³/48, independent of both. So ΔW₁ + ΔW₂ = ΔW and ΔZ₁ + ΔZ₂ +
-    /// (τ/4)(ΔW₂ − ΔW₁) = ΔZ exactly, and the halves' parts have the law of `over` at τ/2, independent of each other.
-    pub fn halves(&self, tau: f64, deviates: &[[f64; 3]; 2]) -> [Brownian; 2] {
-        let cube = tau.abs().powi(3).sqrt();
+    /// The path's parts over the two pieces of a stretch of the length h cut at s from its start, given its part over
+    /// the stretch: the Brownian bridge between them, from three further vectors of deviates. With r = h − s, B the
+    /// bridge's value at the cut (ΔW₁ = (s/h)ΔW + B, of variance s r/h) and ζ_i the pieces' own first moments about
+    /// their own middles (variances s³/12 and r³/12), ΔZ = ζ₁ + ζ₂ − (h/2)B: three independent normals whose variances
+    /// add up to h³/12. Given their sum, each is its variance's share of ΔZ and what a free draw y_i of its own
+    /// variance leaves, y_i − (v_i/V)Σy. So ΔW₁ + ΔW₂ = ΔW and the pieces join to ΔZ exactly (`joined`), and the
+    /// pieces' parts have the law of `over` at their lengths, independent of each other. At the middle: ΔZ = ΔZ₁ + ΔZ₂ +
+    /// (h/4)(ΔW₂ − ΔW₁).
+    pub fn split(&self, length: f64, cut: f64, deviates: &[[f64; 3]; 3]) -> [Brownian; 2] {
+        let (h, s) = (length.abs(), cut.abs());
+        let r = h - s;
+        let variances = [s.powi(3) / 12.0, r.powi(3) / 12.0, 0.25 * h * s * r];
+        let whole = h.powi(3) / 12.0;
         let mut out = [Brownian::STILL; 2];
         for a in 0..3 {
-            let (e, d) = (cube / 8.0 * deviates[0][a], cube / 48.0_f64.sqrt() * deviates[1][a]);
-            let u = 4.0 / tau.abs() * (0.75 * self.moment[a] + e);
-            let sum = 0.25 * self.moment[a] - e;
-            out[0].increment[a] = 0.5 * (self.increment[a] - u);
-            out[1].increment[a] = 0.5 * (self.increment[a] + u);
-            out[0].moment[a] = 0.5 * (sum + d);
-            out[1].moment[a] = 0.5 * (sum - d);
+            let free: [f64; 3] = std::array::from_fn(|i| variances[i].sqrt() * deviates[i][a]);
+            let rest = self.moment[a] - (free[0] + free[1] + free[2]);
+            let parts: [f64; 3] = std::array::from_fn(|i| free[i] + variances[i] / whole * rest);
+            out[0].increment[a] = s / h * self.increment[a] - 2.0 / h * parts[2];
+            out[1].increment[a] = self.increment[a] - out[0].increment[a];
+            out[0].moment[a] = parts[0];
+            out[1].moment[a] = parts[1];
         }
         out
+    }
+
+    /// The path's part over a stretch made of this part, over the length s, and the next one, over the length r:
+    /// ΔW = ΔW₁ + ΔW₂, and the first moment about the whole's middle from the pieces' about their own, ΔZ = ΔZ₁ + ΔZ₂ −
+    /// (r/2)ΔW₁ + (s/2)ΔW₂.
+    pub fn joined(&self, length: f64, next: &Brownian, further: f64) -> Brownian {
+        let (s, r) = (length.abs(), further.abs());
+        Brownian {
+            increment: std::array::from_fn(|a| self.increment[a] + next.increment[a]),
+            moment: std::array::from_fn(|a| self.moment[a] + next.moment[a] - 0.5 * r * self.increment[a] + 0.5 * s * next.increment[a]),
+        }
     }
 }
 
@@ -1342,14 +1356,7 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
 /// stream decides: below p the bare state emits a photon as any state does -- its class, polarization and direction
 /// drawn anew, its recoil and its bounded kick with them -- and lands again; else the trajectory goes on in the slow
 /// state the model gives, normalized.
-///
-/// `carried` is a second internal state of the trajectory's cluster taken through the same jump (adapt.rs, # The read):
-/// the picked class's operator into the picked polarization on it, renormalized as ψ is; of every further photon the
-/// landing draws, the same; and where the trajectory goes on in its slow state, the model's same map to the slow state
-/// on it. What is drawn -- the classes, the polarizations, whether one more photon -- is drawn of the trajectory's
-/// state alone; the jump is then one linear map of the internal state, the photons' operators and the slow state's
-/// projector, applied to both. One an operator annihilates is dropped (None).
-pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut Option<Internal>) -> Result<(), Refused> {
+pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), Refused> {
     let j = trajectory.jumps + 1;
     let mut stream = Stream::jump(trajectory.seed, trajectory.index, j);
     let threshold = stream.open_uniform();
@@ -1396,17 +1403,10 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut O
         let along = |e: [f64; 3]| -> Internal { (0..u[0].len()).map(|i| (0..3).map(|a| u[a][i] * e[a]).sum()).collect() };
         let (f1, f2) = (along(e1), along(e2));
         let (w1, w2) = (norm_sqr(&f1), norm_sqr(&f2));
-        let (epsilon, f, w) = if polarization * (w1 + w2) < w1 { (e1, f1, w1) } else { (e2, f2, w2) };
+        let (f, w) = if polarization * (w1 + w2) < w1 { (f1, w1) } else { (f2, w2) };
         let absorbed = model.kick(trajectory.cluster, &at, &trajectory.psi, photon);
         for a in 0..3 {
             trajectory.kappa[a] += -photon.wave_number * direction[a] + absorbed[a];
-        }
-        if let Some(other) = carried.take() {
-            *carried = model.photons(trajectory.cluster, &at, &other).iter().find(|p| p.class == photon.class).and_then(|p| {
-                let g: Internal = (0..p.amplitudes[0].len()).map(|i| (0..3).map(|a| p.amplitudes[a][i] * epsilon[a]).sum()).collect();
-                let size = norm_sqr(&g);
-                (size > 0.0).then(|| g.iter().map(|z| *z * (1.0 / size.sqrt())).collect())
-            });
         }
         let scale = 1.0 / w.sqrt();
         trajectory.psi = f.iter().map(|z| *z * scale).collect();
@@ -1419,15 +1419,9 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory, carried: &mut O
             break;
         }
         if stream.uniform() >= prompt {
-            let normalized = |state: &Internal| -> Option<Internal> {
-                let size = norm_sqr(state);
-                (size > 0.0).then(|| state.iter().map(|z| *z * (1.0 / size.sqrt())).collect())
-            };
-            if let Some(other) = carried.take() {
-                *carried = normalized(&model.landed(trajectory.cluster, &at, &other).0);
-            }
-            if let Some(state) = normalized(&slow) {
-                trajectory.psi = state;
+            let size = norm_sqr(&slow);
+            if size > 0.0 {
+                trajectory.psi = slow.iter().map(|z| *z * (1.0 / size.sqrt())).collect();
             }
             break;
         }
