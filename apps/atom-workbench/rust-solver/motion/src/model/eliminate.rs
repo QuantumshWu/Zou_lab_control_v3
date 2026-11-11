@@ -62,7 +62,7 @@ use super::assemble::{NearValues, Plan};
 use super::photon::Origin;
 use super::reach::{distance, Region, Weights};
 use super::units::{gate, Measured};
-use super::{Beat, Component, Level, Lights, Model, Point, Unit, UnitError};
+use super::{Beat, Component, Level, Lights, Model, Unit, UnitError};
 use crate::field::Amplitude;
 use crate::linalg::{dot3, Lu, Mat, C64};
 use crate::request::{GROUND, STATES};
@@ -171,13 +171,14 @@ impl Model {
     /// documentation, # The response): a pair the lights hold (model.rs `Lights::pair`), and of a carrier's frequency one
     /// whose interference its dressing keeps -- two beams of one polarization unit, or any two where its dressing is coherent.
     pub(crate) fn level_pairs(&self, lights: &Lights, coherent: &[bool]) -> Vec<Vec<bool>> {
-        (0..self.light.frequencies.len())
-            .map(|w| {
-                let n = self.light.frequencies[w].beams.len();
-                let carrier = self.carrier_of(w).filter(|&d| !coherent[d]).map(|d| &self.carriers[d]);
-                (0..n * n).map(|x| lights.pair(w, x / n, x % n) && carrier.is_none_or(|cc| cc.units[x / n] == cc.units[x % n])).collect()
-            })
-            .collect()
+        (0..self.light.frequencies.len()).map(|w| (0..self.light.frequencies[w].beams.len().pow(2)).map(|x| self.level_pair(lights, coherent, w, x)).collect()).collect()
+    }
+
+    /// Whether pair x of frequency w's beams (row-major) enters the levels (`level_pairs`).
+    fn level_pair(&self, lights: &Lights, coherent: &[bool], w: usize, x: usize) -> bool {
+        let n = self.light.frequencies[w].beams.len();
+        let carrier = self.carrier_of(w).filter(|&d| !coherent[d]).map(|d| &self.carriers[d]);
+        lights.pair(w, x / n, x % n) && carrier.is_none_or(|cc| cc.units[x / n] == cc.units[x % n])
     }
 
     /// The levels at the atom as the eliminations take them: H(r) on all the states, its jet to `order` -- the base and every
@@ -195,17 +196,21 @@ impl Model {
         h
     }
 
-    /// The same levels' energies, H(r)'s diagonal to `order` ([part][state]), and their complex multiply-adds: the base's and
-    /// each beam pair's coefficient times its form's diagonal, STATES per part.
-    pub(crate) fn far_energies(&self, amplitudes: &[Amplitude], lights: &Lights, order: usize, coherent: &[bool]) -> (Vec<Vec<f64>>, f64) {
+    /// The same levels' energies, H(r)'s diagonal to `order`, into `e` ([part][state]: its caller's vectors, kept from one
+    /// point to the next and written whole here), and their complex multiply-adds: the base's and each beam pair's
+    /// coefficient times its form's diagonal, STATES per part.
+    pub(crate) fn far_energies(&self, amplitudes: &[Amplitude], lights: &Lights, order: usize, coherent: &[bool], e: &mut Vec<Vec<f64>>) -> f64 {
         let np = jet::parts(order);
-        let mut e: Vec<Vec<f64>> = (0..np).map(|p| (0..STATES).map(|s| if p == 0 { self.base[(s, s)].re } else { 0.0 }).collect()).collect();
+        e.resize_with(np, Vec::new);
+        for (p, part) in e.iter_mut().enumerate() {
+            part.clear();
+            part.extend((0..STATES).map(|s| if p == 0 { self.base[(s, s)].re } else { 0.0 }));
+        }
         let mut work = 0.0;
-        let pairs = self.level_pairs(lights, coherent);
         for (w, (f, tone)) in self.light.frequencies.iter().zip(&self.tones).enumerate() {
             let n = f.beams.len();
-            for (x, _) in pairs[w].iter().enumerate().filter(|of| *of.1) {
-                let c = jet::of(&super::far::pair(&amplitudes[f.beams[x / n]], &amplitudes[f.beams[x % n]]), order);
+            for x in (0..n * n).filter(|&x| self.level_pair(lights, coherent, w, x)) {
+                let c = jet::whole(&super::far::pair(&amplitudes[f.beams[x / n]], &amplitudes[f.beams[x % n]]));
                 for (part, &z) in e.iter_mut().zip(&c) {
                     for (s, v) in part.iter_mut().enumerate() {
                         *v += (z * tone.pairs[x][(s, s)]).re;
@@ -214,7 +219,7 @@ impl Model {
                 work += (np * STATES) as f64;
             }
         }
-        (e, work)
+        work
     }
 
     /// The complex multiply-adds of `far_hamiltonian`: each of its beam pairs' form added to every part of the jet, STATES² each.
@@ -225,7 +230,13 @@ impl Model {
 
     /// Per carrier whether its dressing takes its coherent field (`Unit::Dressing` kept) rather than its units' T̄.
     pub(crate) fn coherent_dressing(&self) -> Vec<bool> {
-        self.carriers.iter().map(|c| self.kept.contains(&Unit::Dressing { carrier: Component { frequency: c.frequency, counter: false } })).collect()
+        (0..self.carriers.len()).map(|d| self.dressed_coherently(d)).collect()
+    }
+
+    /// Whether one carrier's dressing takes its coherent field (`coherent_dressing`, carrier by carrier: what a caller
+    /// that keeps its vector fills it from).
+    pub(crate) fn dressed_coherently(&self, carrier: usize) -> bool {
+        self.kept.contains(&Unit::Dressing { carrier: Component { frequency: self.carriers[carrier].frequency, counter: false } })
     }
 
     /// A carrier's beam groups whose interference its dressing keeps: its units (beams of parallel fields), all its beams where its
@@ -494,28 +505,34 @@ impl Model {
     /// field (module documentation, # First-order Doppler), from the near forms' responses.
     pub(crate) fn carrier_responses(&self, plan: &Plan, near: &NearValues, amplitudes: &[Amplitude], kappa: [f64; 3]) -> Vec<Option<Mat>> {
         let g = self.clusters[plan.cluster].ground;
-        let (start, count) = (plan.near.responding().start, plan.near.responses.len());
+        let start = plan.near.responding().start;
         let mut out: Vec<Option<Mat>> = self.carriers.iter().map(|cc| plan.lights.on(cc.frequency).then(|| Mat::zeros(EXCITED, g))).collect();
-        let fields: Vec<Vec<(C64, C64)>> = self
-            .carriers
-            .iter()
-            .map(|cc| {
-                let f = &self.light.frequencies[cc.frequency];
-                (0..cc.basis.len())
-                    .map(|k| {
-                        f.beams.iter().zip(&f.coefficients).fold((C64::ZERO, C64::ZERO), |(plain, weighted), (&l, c)| {
-                            let z = amplitudes[l].value * c[k];
-                            (plain + z, weighted + z * self.doppler_shift(l, kappa))
-                        })
-                    })
-                    .collect()
-            })
-            .collect();
-        for (i, &[c, k, e, y]) in plan.near.responses.iter().enumerate() {
-            let (plain, weighted) = fields[c][k];
-            out[c].as_mut().expect("a lit carrier's response")[(e, y)] += plain * near.data[start + i] - weighted * near.data[start + count + i];
-        }
+        self.responses_each(plan, |i| near.data[start + i], amplitudes, kappa, &mut vec![], |c, e, y, z| out[c].as_mut().expect("a lit carrier's response")[(e, y)] += z);
         out
+    }
+
+    /// The terms of the carriers' folded responses (`carrier_responses`), one a response of the plan's near forms, each to
+    /// `add` as it is made -- its carrier, its excited state (less GROUND), its ground place and its value
+    /// e_k T_k − e^w_k T2_k --, from the forms' responding section `near` (its entry i: the T's, then the T2's). `fields` is
+    /// its caller's vector, kept from one point to the next and written whole here before it is read: per carrier and
+    /// basis vector its field's component, plain and Doppler-weighted, as many a carrier as the widest basis holds.
+    pub(crate) fn responses_each(&self, plan: &Plan, near: impl Fn(usize) -> C64, amplitudes: &[Amplitude], kappa: [f64; 3], fields: &mut Vec<(C64, C64)>, mut add: impl FnMut(usize, usize, usize, C64)) {
+        let count = plan.near.responses.len();
+        let widest = self.carriers.iter().map(|cc| cc.basis.len()).max().unwrap_or(0);
+        fields.clear();
+        for cc in &self.carriers {
+            let f = &self.light.frequencies[cc.frequency];
+            fields.extend((0..widest).map(|k| {
+                f.beams.iter().zip(&f.coefficients).filter(|_| k < cc.basis.len()).fold((C64::ZERO, C64::ZERO), |(plain, weighted), (&l, c)| {
+                    let z = amplitudes[l].value * c[k];
+                    (plain + z, weighted + z * self.doppler_shift(l, kappa))
+                })
+            }));
+        }
+        for (i, &[c, k, e, y]) in plan.near.responses.iter().enumerate() {
+            let (plain, weighted) = fields[c * widest + k];
+            add(c, e, y, plain * near(i) - weighted * near(count + i));
+        }
     }
 
     /// The first-order Doppler term's relative size on each ground place y of a plan's cluster (its error's square root,
@@ -540,21 +557,6 @@ impl Model {
             }
         }
         first.iter().zip(&second).map(|(&t, &t2)| if t > 0.0 { t2 / t } else { 0.0 }).collect()
-    }
-
-    /// The channels of the drives folded at the atom on a cluster at a point (readout.rs): per lit carrier its response there
-    /// (`carrier_responses`), the forms from their table where one serves.
-    pub(crate) fn near_channels(&self, cluster: usize, at: &Point, amplitudes: &[Amplitude], lights: &Lights, tables: Option<&super::tabulate::Tables>) -> Vec<super::readout::Channels> {
-        let plan = self.plan(cluster, lights);
-        if plan.near.len() == 0 {
-            return vec![];
-        }
-        let near = self.near_values(&plan, amplitudes, &[(plan.near.responding(), 0)], tables.and_then(|t| t.of(cluster, lights)));
-        self.carrier_responses(&plan, &near, amplitudes, at.kappa)
-            .into_iter()
-            .zip(&self.carriers)
-            .filter_map(|(r, cc)| r.map(|response| super::readout::Channels { component: Component { frequency: cc.frequency, counter: false }, nu: cc.beat.clone(), response }))
-            .collect()
     }
 
     /// A carrier's dressing's error at a sample: every carrier's folded response there with its coherent field in the dressing, R'
@@ -1088,7 +1090,7 @@ pub(crate) fn term_unit(a: usize, b: usize, beat: &Beat) -> Unit {
 mod tests {
     use super::*;
     use crate::field::Light;
-    use crate::model::Sample;
+    use crate::model::{Point, Sample};
     use crate::request::Request;
 
     fn scene(name: &str) -> Request {
