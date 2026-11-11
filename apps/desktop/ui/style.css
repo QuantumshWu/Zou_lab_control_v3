@@ -474,8 +474,9 @@ body.carrying, body.carrying * { cursor: grabbing !important; }
  * painted or hit tested (500 periods cost what the cards on screen cost); it
  * keeps the size it was last drawn at, and every card has a set width. Only a
  * long strip (Strip.update): a card's overflow (a long port label) then no
- * longer widens the timeline's scroll range by a few pixels. */
-.pulse-items.long > .pulse-period, .pulse-items.long > .pulse-component { content-visibility: auto; contain-intrinsic-size: auto none; }
+ * longer widens the timeline's scroll range by a few pixels. A Subpulse's Start and
+ * End are as wide as their commands need, so they are always laid out (two a Subpulse). */
+.pulse-items.long > .pulse-period, .pulse-items.long > .pulse-component:not(.framing) { content-visibility: auto; contain-intrinsic-size: auto none; }
 /* A spacer: the page's grey, a dashed edge, a muted title. */
 .pulse-period.spacer { width: var(--pulse-spacer-w); background: var(--bg); border-style: dashed; }
 .pulse-period.spacer .pulse-title { color: var(--muted-ink); }
@@ -494,7 +495,11 @@ body.carrying, body.carrying * { cursor: grabbing !important; }
 .pulse-post-name { flex: 1; min-width: 0; width: 100%; }
 /* A Subpulse: white with the selection edge and a derived-ink title; green while Config supplies it. */
 .pulse-component { width: var(--pulse-period-w); border-color: var(--selection-edge) !important; }
-.pulse-component.framing { width: var(--pulse-spacer-w); }
+/* Expanded, its Start and End: a spacer's width, and never narrower than their commands (a command is
+ * never narrower than its words, fit_button_words) -- narrower, the commands stood out of the card's
+ * right inset. Only the commands say so: a long total or name elides. */
+.pulse-component.framing { width: var(--pulse-spacer-w); min-width: min-content; }
+.pulse-component.framing > :not(.pulse-ports) { contain: inline-size; }
 .pulse-component .pulse-title { color: var(--derived-ink); }
 .pulse-component.config { background: var(--config-green-tint); border-color: var(--config-green) !important; }
 .pulse-component.config .pulse-title { color: var(--config-green-dark); }
