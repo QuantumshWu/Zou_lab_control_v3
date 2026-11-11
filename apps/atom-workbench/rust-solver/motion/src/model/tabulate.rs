@@ -66,9 +66,12 @@
 //! # Refinement
 //! A response is a pole in its line's detuning, and an axis that moves the line across it within the atoms' reach is the generic
 //! case of near-resonant light in a trap; the first grid resolves nothing of it. A table is therefore refined before it is used,
-//! by its own measured error where an interpolant is worst, between its nodes. Halving an axis' spacing (crate::table
-//! `Axis::halved`) puts the new nodes at the middles of its intervals: there the table before the halving is compared with the
-//! elimination itself -- the new nodes' own values, so the check costs nothing beyond the finer table --, over every interval the
+//! by its own measured error between its nodes. Halving an axis' spacing (crate::table `Axis::halved`) puts the new nodes at
+//! the middles of its intervals: there the table before the halving is compared with the elimination itself -- the new nodes'
+//! own values, so the check costs nothing beyond the finer table. The middle is not where the interpolant is worst: its
+//! leading error (h³f‴/6) u(1 − u)(1 − 2u) vanishes there and is largest at u ≈ 0.21 and 0.79 (crate::table, # The
+//! interpolant), so the check reads the next order, h⁴f⁗, and is no bound of the table before the halving; what the table
+//! kept errs by is read at the atoms (`Model::table_reads`). The comparison is made over every interval the
 //! reach meets: an intensity's range over the reach is its focus value ± the proven bound of its distance from it, to the axis'
 //! first spacing (reach.rs `Model::extents_over`); an angle's or a phase's is its whole range.
 //! Two measures, per node the largest: the responses' relative error, max over the lit carriers of (‖ΔT‖ + w‖ΔT2‖)/‖T‖ (Frobenius
@@ -88,9 +91,9 @@
 //! T (a variance's, normal theory). An error within them is below what any run can read, so no run is limited by its tables.
 //!
 //! # Work
-//! A node costs its elimination (eliminate.rs `Responses::work`) and its forms; a point the table's interpolation of the reals
-//! asked, 4^D (1 + D) each on D axes (4^D for a value alone), its chain rule (3 D each) and the coordinates (each frequency's
-//! field and chart from its beams).
+//! A point costs the table's interpolation of the reals asked, 4^D (1 + D) each on D axes (4^D for a value alone), and the
+//! coordinates (each frequency's field and chart from its beams); the chain rule's 3 D a real is not counted. A node's own
+//! cost -- its elimination and its forms -- is counted nowhere: the tables are made once a model.
 
 use super::assemble::{sized, Middle, NearValues, Plan, Site};
 use super::reach::Region;
@@ -351,8 +354,9 @@ impl Model {
 
     /// The near tables for the atoms' reach (module documentation, # Axes, # Refinement), each grid of at most `most` nodes: per
     /// cluster the running lights' and, where the trap is lit and a carrier stays lit without it, those lights less the trap's --
-    /// each light set under which the cluster has near forms --, refined over the reach. A cluster whose first grid exceeds the
-    /// bound keeps the exact elimination.
+    /// each light set under which the cluster has near forms --, refined over the reach. A coordinate the axes' rules refuse
+    /// (`first_table`: the cost of an interpolation, the node bound, `table::MOST_AXES`) is held at its focus value like
+    /// the light ones, whatever its weight: the table's whole error at the atoms reads it (`table_reads`).
     pub fn tabulate(&self, reach: &Reach, most: usize) -> Tables {
         let running = self.running();
         let mut untrapped = running.clone();

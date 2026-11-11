@@ -9,9 +9,12 @@ use crate::field::Amplitude;
 use crate::linalg::{Lu, Mat, C64};
 
 /// The parts of a jet of an order (0, 1 or 2).
-pub(crate) fn parts(order: usize) -> usize {
+pub(crate) const fn parts(order: usize) -> usize {
     [1, 4, 10][order]
 }
+
+/// The parts of a whole jet, the second order's.
+pub(crate) const WHOLE: usize = parts(2);
 
 /// The complex multiply-adds of an n × n LU factorization (linalg.rs `Lu::new`): at column k, n − k − 1 multipliers and
 /// (n − k − 1)² updates, Σ = (n³ − n)/3.
@@ -40,7 +43,7 @@ pub(crate) fn second(i: usize, j: usize) -> usize {
 pub(crate) const PAIRS: [(usize, usize); 6] = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)];
 
 /// An amplitude's whole jet: its value, its gradient, its Hessian's six parts.
-pub(crate) fn whole(c: &Amplitude) -> [C64; 10] {
+pub(crate) fn whole(c: &Amplitude) -> [C64; WHOLE] {
     std::array::from_fn(|p| match p {
         0 => c.value,
         1..=3 => c.gradient[p - 1],
@@ -49,7 +52,7 @@ pub(crate) fn whole(c: &Amplitude) -> [C64; 10] {
 }
 
 /// The amplitude of a whole jet (`whole`'s inverse: the Hessian symmetric).
-pub(crate) fn amplitude(jet: &[C64; 10]) -> Amplitude {
+pub(crate) fn amplitude(jet: &[C64; WHOLE]) -> Amplitude {
     Amplitude { value: jet[0], gradient: std::array::from_fn(|i| jet[1 + i]), hessian: std::array::from_fn(|i| std::array::from_fn(|j| jet[second(i, j)])) }
 }
 

@@ -246,6 +246,8 @@ pub fn advance<D: Dynamics>(
                 break (from, None, true);
             }
             let slack = if bracket.1 - bracket.0 <= JUMP_TIMING * length { f64::INFINITY } else { JUMP_TIMING * length };
+            // Followed beyond its end for its length again at most (not derived: the search's bracket alone, and what
+            // bounds the one hop of `spectral::Picture::extend`), and not past the longest step.
             let reach = length.min(most - length);
             // The step's part of the Brownian path, and where the trajectory stands on it at the step's end.
             let (brownian, beyond) = path.reach(trajectory.time + length);

@@ -67,7 +67,10 @@
 //! A radian between nodes is where the two treatments meet: a pair slower than that is resolved by the nodes (its
 //! moments' series converge without cancellation, its quintic holds), a pair faster is followed more closely than a
 //! hop over a half step would take it (|X| ≤ |D| |h| there, the size of the hop's own exponent). A half step takes
-//! the pairs by its own nodes.
+//! the pairs by its own nodes. The radian is where the two sizes meet, not where the two errors do: a hopped pair
+//! leaves (|D| h)² |ω| h/60 (the second Magnus term), a followed one a part c of (|D| h)²/(|ω| h)² (c measured an
+//! order below one), equal at |ω| h = (60 c)^{1/3} -- about two for c = 0.1, and no number without c. The split is
+//! not derived.
 //!
 //! # What follows the generator's own frequencies, and what does not
 //! The propagation's own work -- the decomposition, the following, two hops -- is the same whatever Ĥ₀'s frequencies
@@ -503,6 +506,9 @@ impl Picture {
         for (j, (x, out)) in self.follow.chunks_exact(size).zip(self.nodes.chunks_exact_mut(matrix)).enumerate() {
             combine(j == 0, x, n, &self.right, out, n, 0);
         }
+        // Nine products of n³ (D X and X D_s at the two ends, D X again at the two ends, the three matrices of a state
+        // at a time), two factorizations of 1 + X (n³/3) each with its n columns solved (n³), and per entry D at the
+        // two ends (2 each), X at a time four times (2 each) and −D_s at the two ends (2 each): 16.
         self.work += (9 * n * size + 2 * (n * size / 3 + n * size) + 16 * size) as f64;
     }
 

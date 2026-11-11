@@ -610,7 +610,10 @@ impl Rule {
     }
 }
 
-/// The rules of 2 to 64 nodes.
+/// The rules of 2 to 64 nodes. The least is the smallest rule there is (`FORMS`, `MOMENTS` ask for no fewer). The
+/// largest is not derived: a rule's panel phase over its nodes, x_m/m, rises with m towards 8/e (Stirling on the
+/// error's factorials), so no rule is the last that pays; 64 is at three quarters of that limit (u^{1/128}). Every
+/// rule integrates to round-off: the largest sets the nodes of a stiff step's quadrature, its cost alone.
 fn rules() -> &'static [Rule] {
     static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
     RULES.get_or_init(|| (2..=64).map(Rule::new).collect())
