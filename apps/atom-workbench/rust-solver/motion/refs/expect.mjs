@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {levelShifts,laserMHz} from './lib/app.mjs';
-import {KT_PER_UK,RAD_PER_MHZ,beamMeasure,branchRate,coupling,decayRates,gaussHermite,gaussLegendre,hbarOverMass,hermitianEigen,index,integrate,inverse3,kineticRatio,preparedTrap,rayleigh,recoilRate,recoilUK,solve3,uKOfMHz,wignerTemperature} from './lib/phys.mjs';
+import {KT_PER_UK,RAD_PER_MHZ,beamMeasure,branchRate,coupling,decayRates,gaussHermite,gaussLegendre,hbarOverMass,hermitianEigen,index,integrate,inverse3,kineticRatio,preparedTrap,rayleigh,recoilRate,recoilUK,roundoff,runningTrap,solve3,uKOfMHz,wignerTemperature} from './lib/phys.mjs';
 import {ramanNumbers,standingPhase} from './lib/defs.mjs';
 
 const here=path.dirname(fileURLToPath(import.meta.url));
@@ -20,6 +20,10 @@ const all=line=>grid(line).map((_,i)=>i);
 const beamOf=(line,id)=>line.model.motion.beams.find(b=>b.id===id);
 /** The user's targets (SPEC §0): populations and loss 0.05 absolute, T 0.10 relative. */
 const POPULATION={absolute:0.05},TEMPERATURE={relative:0.10};
+/** A quantity the user sets no target for -- a trap frequency, a mean position or velocity, one axis's T (the solver
+ * holds each axis's T to nothing: its target is on the total, solve.rs "# T's target is on the total temperature") --:
+ * judged against this reference's own u and the result's statistics alone (check.mjs, rule 0). */
+const OWN=null;
 /** The emission pattern of a σ± dipole about the quantization axis: ⟨cos²θ⟩ = ∫(1 + c²)c² / ∫(1 + c²) = 2/5 (c = cos θ
  * over [−1, 1]); a π dipole's ∝ (1 − c²): 1/5. */
 const XI_SIGMA=2/5;
@@ -32,13 +36,24 @@ const expectation=(id,reference,title,line,fields)=>({id,reference,title,request
  * in the prepared trap (lib/phys.mjs preparedTrap: the solver's potential of the reference state, its depth and its
  * frequencies; classical kinetic temperature T_kin = T·I(5/2)/I(3/2), lib/phys.mjs kineticRatio; for a single Gaussian
  * beam of depth y₀ = U₀/k_BT exactly, by the beam's measure) times, per lab axis a of frequency ω_a, the thermal
- * oscillator's Wigner factor: T_a(0) = (T_kin/T)·T*_a, T*_a = (ħω_a/2k_B) coth(ħω_a/2k_BT). */
+ * oscillator's Wigner factor: T_a(0) = (T_kin/T)·T*_a, T*_a = (ħω_a/2k_B) coth(ħω_a/2k_BT). Their uncertainty u0: the
+ * frequency's (the logarithmic slope of T⋆ in ω is at most 1); the ratio's quadrature (its change at two thirds of the nodes) and its sums'
+ * rounding (lib/phys.mjs `roundoff` of the nodes' count); and, for a trap of several beams, the lowering's whole effect
+ * |1 − T_kin/T|, which the one beam's measure does not state for it. */
 function initialTemperatures(trap,T){
-  const ratio=kineticRatio(beamMeasure(trap.depth/(KT_PER_UK*T)));
-  return {ratio,T0:trap.omegas.map(w=>ratio*wignerTemperature(w,T))};
+  const y=trap.depth/(KT_PER_UK*T),nodes=24,ratio=kineticRatio(beamMeasure(y,nodes)),open=Math.abs(kineticRatio(beamMeasure(y,2*nodes/3))/ratio-1)+roundoff(4*nodes**3)+(trap.beams.length>1?Math.abs(1-ratio):0);
+  const T0=trap.omegas.map(w=>ratio*wignerTemperature(w,T));
+  return {ratio,T0,u0:T0.map((t,a)=>t*(trap.u[a]/trap.omegas[a]+open))};
 }
 /** ω (rad/µs) → trapFrequencyKHz. */
 const kHz=w=>w/(2*Math.PI)*1e3;
+/** A trap's frequencies along the lab axes (rad/µs) with their uncertainty, as series. */
+const trapSeries=(omegas,u)=>['x','y','z'].map((a,i)=>({quantity:'trapFrequency',axis:a,value:kHz(omegas[i]),u:kHz(u[i]),target:OWN}));
+/** T's series of a reference that gives every axis (per output Ts[j][a] with us[j][a]): the total (T_x + T_y + T_z)/3,
+ * the quantity the user's target is on -- its u the mean of the axes' (what they share adds fully) --, and each axis
+ * against its own u. */
+const temperatureSeries=(line,Ts,us)=>[{quantity:'T',total:true,regime:'any',indices:all(line),values:Ts.map(t=>(t[0]+t[1]+t[2])/3),u:us.map(u=>(u[0]+u[1]+u[2])/3),target:TEMPERATURE},
+  ...['x','y','z'].map((a,i)=>({quantity:'T',axis:a,regime:'any',indices:all(line),values:Ts.map(t=>t[i]),u:us.map(u=>u[i]),target:OWN}))];
 
 // ---------------------------------------------------------------------------------------------------------------------
 // R1: conservative motion.
@@ -61,17 +76,18 @@ const kHz=w=>w/(2*Math.PI)*1e3;
  * trap light makes between the ground states (ledger: 基态…的远光静态耦合) shift the level in fourth order too and are
  * in neither. (ii) The lowered isothermal is a function of the energy alone, so the flow keeps it (Jeans):
  * T_a(t) = T_a(0) for all t; the Wigner scaling (the ratio T* to T per axis) is exactly stationary in the harmonic part
- * and breaks it only through the anharmonic part, relatively ~k_BT/U, so u_a = T_a(0)·|T*_a/T − 1|·k_BT/U. (iii) No
+ * and breaks it only through the anharmonic part, relatively ~k_BT/U, so u_a = T_a(0)·|T*_a/T − 1|·k_BT/U after t = 0
+ * (at t = 0 the moment's own evaluation, `initialTemperatures`). (iii) No
  * atom is unbound (E < 0) and energy is conserved: L ≡ 0. (iv) The far light's scattering Γ_sc = Σ Γ_e|X_eg|²/δ²
  * (incoherent sum, an upper bound of the coherent one) bounds any population change by Γ_sc·t. */
 async function r1(id){
   const line=read(`scenes/${id}.json`),scene=read(`scenes/${id}.scene.json`),m=line.model.motion,T=m.temperatureUK,init=scene.dynamics.initialStateId,times=grid(line);
-  const trap=preparedTrap(line,init),U=trap.depth,omegas=trap.omegas,{ratio,T0}=initialTemperatures(trap,T);
+  const trap=preparedTrap(line,init),U=trap.depth,omegas=trap.omegas,{ratio,T0,u0}=initialTemperatures(trap,T);
   const chart=(await levelShifts(scene,trap.beams.map(b=>b.id)))[init];
   const series=[];
-  ['x','y','z'].forEach((a,i)=>series.push({quantity:'trapFrequency',axis:a,value:kHz(omegas[i]),u:kHz(trap.u[i]),target:{relative:0}}));
-  ['x','y','z'].forEach((a,i)=>{const T0a=T0[i],u=T0a*Math.abs(wignerTemperature(omegas[i],T)/T-1)*(KT_PER_UK*T/U);
-    series.push({quantity:'T',axis:a,regime:'any',indices:all(line),values:times.map(()=>T0a),u:times.map(()=>u),target:TEMPERATURE});});
+  series.push(...trapSeries(omegas,trap.u));
+  const uT=T0.map((T0a,i)=>T0a*Math.abs(wignerTemperature(omegas[i],T)/T-1)*(KT_PER_UK*T/U));
+  series.push(...temperatureSeries(line,times.map(()=>T0),times.map((_,j)=>j?uT.map((u,i)=>Math.hypot(u,u0[i])):u0)));
   series.push({quantity:'loss',indices:all(line),values:times.map(()=>0),u:times.map(()=>0),target:POPULATION});
   const gamma=decayRates(line),E=line.model.motion.hamiltonian.real.filter((_,q)=>q%33===0),g0=index(line,init);
   let scatter=0;
@@ -106,23 +122,28 @@ async function cycle(id,beams){
 /** The steady-state photon rate of a two-level atom: R = (Γ/2) s/(1 + s + (2δ/Γ)²), s = 2Ω²/Γ² (exact for the
  * optical Bloch equations' steady state). */
 const rate=(gamma,omega,delta)=>{const s=2*omega*omega/(gamma*gamma);return gamma/2*s/(1+s+(2*delta/gamma)**2);};
-/** The running trap (SPEC §1.3: the reported trap frequency is the running trap's) of a scene whose near beams drive
- * weakly (|X|²/(δ² + Γ²/4) ≪ 1, whatever their detuning): the trap light's potential plus the other lights'
- * phase-averaged smooth shift of the reference state g, U = Σ_{l,e} |X^l_eg|² δ_le/(δ_le² + Γ_e²/4) (the second-order
- * shift with the excited state's width -- the order of the solver's elimination --, beams of one frequency summed
- * without their fringes), each δ_le = δ_le,b + κ_e V at the potential energy V above the bottom
- * (κ_e = (shift_e − shift_g)/U₀, both ∝ |a|²): so ∂²V_run = ∂²V_prep (1 + dU/dV),
- * dU/dV = Σ κ_e |X|²(Γ_e²/4 − δ²)/(δ² + Γ_e²/4)². Returns that factor and the next order's size (the factor's
- * departure times the largest |X|²/(δ² + Γ²/4), as the reference's uncertainty). */
-async function runningFactor(line,scene,g,beams){
+/** The running trap's factor (lib/phys.mjs `runningTrap`: ∂²V_run = ∂²V_prep × factor) by the formula of one excited
+ * level at a time, on the level chart's all-order levels (independent of the request's second order): each beam's
+ * shift |X^l_eg|² δ_le/(δ_le² + Γ_e²/4) with δ_le = δ_le,b + κ_e V at the potential energy V above the bottom,
+ * κ_e = (shift_e − shift_g)/U₀, so factor = 1 + Σ κ_e |X|²(Γ_e²/4 − δ²)/(δ² + Γ_e²/4)². It is the running trap's where
+ * the light reaches one excited level of its m alone (the closed cycle of R2, R3, R10: the two agree to 10⁻⁷ of the
+ * frequency and better, the far fold's fourth order and the photon's recoil apart); where the trap light mixes the
+ * levels the light reaches (R4's lin⊥lin pairs on F′ = 1, 2, 3 of one m) neither the levels nor the couplings are linear
+ * in the trap's intensity, and this formula errs in the same order as it computes (3·10⁻⁵ of the frequency on
+ * R4_LIN_1). Listed in the conditions as the difference to `runningTrap`; no series reads it. */
+async function levelFactor(line,scene,g,beams){
   const states=line.model.states,gi=index(line,g),gamma=decayRates(line),sh=await levelShifts(scene,['tweezer']),U0=-sh[g].shiftMHz;
-  let slope=0,smax=0;
+  let slope=0;
   for(const id of beams){const nu=await laserMHz(scene,id);
     for(let e=8;e<32;e++){const x=coupling(line,id,e,gi),X2=x.re*x.re+x.im*x.im;if(!X2)continue;
       const delta=RAD_PER_MHZ*(nu-(sh[states[e]].absoluteMHz-sh[g].absoluteMHz)),kappa=(sh[states[e]].shiftMHz-sh[g].shiftMHz)/U0,G2=gamma[e]**2/4;
-      slope+=kappa*X2*(G2-delta*delta)/((delta*delta+G2)**2);smax=Math.max(smax,X2/(delta*delta+G2));}}
-  return {factor:1+slope,u:Math.abs(slope)*smax};
+      slope+=kappa*X2*(G2-delta*delta)/((delta*delta+G2)**2);}}
+  return 1+slope;
 }
+/** The conditions every reference with a running trap lists of it. */
+const trapConditions=async(line,scene,g,run)=>{const near=line.model.motion.beams.filter(b=>b.id!==line.model.motion.trapBeamId).map(b=>b.id);
+  return [{what:'running trap: ∂²V_run over ∂²V_prep, less 1',value:run.factor-1},{what:'excited population the other lights make in second order (the running trap\'s next order is 3 times it, of the line above)',value:run.population,limit:'≪ 1'},
+    {what:'the one-level formula on the level chart, its factor less the running trap\'s (zero but for the trap light\'s mixing of the excited levels the light reaches, the far fold\'s fourth order and the recoil)',value:(await levelFactor(line,scene,g,near))-run.factor}];};
 /** Mandel's Q of the two-level atom's photon count, Q = 2R ∫₀^∞ [g²(τ) − 1] dτ, g²(τ) = ρ_ee(τ | ground)/ρ_ee^ss (the
  * quantum regression theorem): with the Bloch equations ẋ = Mx + b, ∫(x(τ) − x_ss) dτ = −M⁻¹(x(0) − x_ss). The
  * variance of the number of absorbed photons is (1 + Q) times their mean, the absorption part of the momentum
@@ -159,8 +180,8 @@ function mandelQ(gamma,omega,delta){
  * with ⟨(∂_aδ)²⟩ = κ²mω_a²k_BT_a/ħ² the heating k_B dT_a/dt = κ²ω_a²·ee·k_BT_a/2: 10⁻⁵ of T here, at δ = −100Γ. */
 async function r2(){
   const id='R2_RECOIL',c=await cycle(id,['probe']),{line,gamma,U0,kappa}=c,p=c.beams.probe,m=line.model.motion,mass=m.massKg,T=m.temperatureUK;
-  const prep=preparedTrap(line,'ground-2-2'),omegas=prep.omegas,[radial,,axial]=omegas;
-  const {ratio,T0}=initialTemperatures(prep,T),Erec=recoilUK(p.k,mass),Q=mandelQ(gamma,p.omega,p.delta);
+  const prep=preparedTrap(line,'ground-2-2'),omegas=prep.omegas,[radial]=omegas;
+  const {ratio,T0,u0}=initialTemperatures(prep,T),Erec=recoilUK(p.k,mass),Q=mandelQ(gamma,p.omega,p.delta);
   const R=delta=>rate(gamma,p.omega,delta),h=1e-3*Math.abs(p.delta),R2=(R(p.delta+h)-2*R(p.delta)+R(p.delta-h))/(h*h);
   const meanR=Ts=>{const kT=Ts.map(t=>KT_PER_UK*t),V=kT.reduce((a,b)=>a+b,0)/2,varV=kT.reduce((a,b)=>a+b*b/2,0);return R(p.delta+kappa*V)+R2*kappa*kappa*varV/2;};
   const rates=[(1-XI_SIGMA)/2,(1-XI_SIGMA)/2,1+Q+XI_SIGMA],eps=[0.5,0.5,1];
@@ -169,7 +190,7 @@ async function r2(){
   const times=grid(line),Ts=[T0.slice()],Rs=[meanR(T0)];let state=T0.slice();
   for(let i=1;i<times.length;i++){const n=20,dt=(times[i]-times[i-1])/n;for(let j=0;j<n;j++){const k1=derivative(state),k2=derivative(state.map((x,a)=>x+dt/2*k1[a])),k3=derivative(state.map((x,a)=>x+dt/2*k2[a])),k4=derivative(state.map((x,a)=>x+dt*k3[a]));state=state.map((x,a)=>x+dt/6*(k1[a]+2*k2[a]+2*k3[a]+k4[a]));}Ts.push(state.slice());Rs.push(meanR(state));}
   // The radiation-pressure offset, the spring softened by the probe's light shift and by the cloud's anharmonicity.
-  const rbar=Rs.reduce((a,b)=>a+b,0)/Rs.length,r=hbarOverMass(mass),run=await runningFactor(line,c.scene,'ground-2-2',['probe']),dyn=axial*Math.sqrt(run.factor);
+  const rbar=Rs.reduce((a,b)=>a+b,0)/Rs.length,r=hbarOverMass(mass),run=runningTrap(line,'ground-2-2'),dyn=run.omegas[2];
   const z0=r*p.k*rbar/(dyn*dyn),kTbar=KT_PER_UK*Ts.reduce((a,s)=>a+(s[0]+s[1]+s[2])/3,0)/Ts.length/U0;
   // The oscillation's remainder in the average over the 20 evenly spaced distribution samples after t = 0 (contract §2.2:
   // at most 21 times with 0 and the end): at most max |mean cos ωt_i| over the anharmonic frequency window
@@ -178,19 +199,17 @@ async function r2(){
   for(let w=dyn*(1-5*kTbar);w<=dyn;w+=dyn*1e-5)rest=Math.max(rest,Math.abs(tS.reduce((s,t)=>s+Math.cos(w*t),0))/tS.length);
   const zbar=z0*(1+3.5*kTbar),zu=Math.hypot(z0*1.5*kTbar,z0*Math.abs(Rs.at(-1)-Rs[0])/(2*rbar),z0*rest);
   const series=[];
-  // The reported trap is the running one (SPEC §1.3): the prepared one (the model's own, lib/phys.mjs preparedTrap, with
-  // its uncertainty) softened by the probe's second-order shift at the local detuning (runningFactor: ω² × (1 − κΩ²/4δ²)
-  // for |δ| ≫ Γ). The dressed two-level shift (−δ + sgn δ·√(δ² + Ω²))/2 softens by (3/4)(Ω/δ)² of that less: the fold's
-  // fourth order, the solver's model error (its ledger: the probe's drive), not this reference's.
-  ['x','y','z'].forEach((a,i)=>series.push({quantity:'trapFrequency',axis:a,value:kHz(omegas[i]*Math.sqrt(run.factor)),u:Math.hypot(kHz(prep.u[i])*Math.sqrt(run.factor),kHz(omegas[i])*run.u/2),target:{relative:0}}));
+  // The reported trap is the running one (SPEC §1.3; lib/phys.mjs runningTrap): the prepared one softened by the
+  // probe's second-order shift at the local detuning (ω² × (1 − κΩ²/4δ²) for |δ| ≫ Γ). The dressed two-level shift
+  // (−δ + sgn δ·√(δ² + Ω²))/2 softens by (3/4)(Ω/δ)² of that less: the next order, in its u.
+  series.push(...trapSeries(run.omegas,run.u));
   // u(T): the cross-axis quartic terms (k_BT_other/U₀)·ΔT_a; the centre-of-mass energy ½mω²z₀² that dephasing turns
   // into heat (z, after t = 0); the Wigner scaling's non-stationarity (R1). Mandel's Q is in the rate.
   const push=0.5*mass*(dyn*1e6)**2*(z0*1e-6)**2/1.380649e-23*1e6;
-  ['x','y','z'].forEach((a,i)=>{
-    const u=Ts.map((s,j)=>{const other=Math.max(...s.filter((_,b)=>b!==i)),dT=s[i]-T0[i];return Math.hypot(KT_PER_UK*other/U0*dT,i===2&&j>0?push:0,T0[i]*Math.abs(wignerTemperature(omegas[i],T)/T-1)*KT_PER_UK*T/U0);});
-    series.push({quantity:'T',axis:a,regime:'any',indices:all(line),values:Ts.map(s=>s[i]),u,target:TEMPERATURE});});
-  // The offset's target: the force's, the T target 10 % (the heating that R2 judges is ∝ the same rate R).
-  series.push({quantity:'meanPositionAverage',axis:'z',value:zbar,u:zu,target:{absolute:TEMPERATURE.relative*zbar}});
+  series.push(...temperatureSeries(line,Ts,Ts.map((s,j)=>[0,1,2].map(i=>{const other=Math.max(...s.filter((_,b)=>b!==i)),dT=s[i]-T0[i];
+    return Math.hypot(u0[i],KT_PER_UK*other/U0*dT,i===2&&j>0?push:0,j?T0[i]*Math.abs(wignerTemperature(omegas[i],T)/T-1)*KT_PER_UK*T/U0:0);}))));
+  // The offset: no user's target is on a position (it is judged against zu and the distributions' own spread).
+  series.push({quantity:'meanPositionAverage',axis:'z',value:zbar,u:zu,target:OWN});
   series.push({quantity:'loss',indices:all(line),values:times.map(()=>0),u:times.map(()=>0),target:POPULATION});
   const ree=Rs.map(x=>x/gamma);
   series.push({quantity:'population',state:'ground-2-2',indices:all(line),values:ree.map((x,i)=>i?1-x:1),u:ree.map((x,i)=>i?0.1*x:0),target:POPULATION});
@@ -201,7 +220,8 @@ async function r2(){
     conditions:[{what:'|δ_b|/Γ',value:Math.abs(p.delta)/gamma,limit:'≫ 1'},{what:'s',value:s},{what:'κ·⟨V⟩/|δ_b| (cloud spread of the detuning)',value:kappa*KT_PER_UK*1.5*T/Math.abs(p.delta),limit:'≪ 1'},
       {what:'k_BT/U₀ at the end (quartic corrections)',value:KT_PER_UK*Math.max(...Ts.at(-1))/U0,limit:'≪ 1'},{what:'Mandel Q',value:Q},{what:'k_BT ≥ 4ħω_radial at t = 0',value:KT_PER_UK*T/radial,limit:'≥ 4'},
       {what:'state-force diffusion: its relative heating over the run, stiffest axis',value:Math.max(...stateForce(T0))*times.at(-1),limit:'≪ 1'},
-      {what:'one beam\'s Doppler damping time m/β (s), β = ħk²|dR/dδ|',value:1/(hbarOverMass(mass)*p.k**2*rbar*8*Math.abs(p.delta)/(gamma*gamma)/(1+s+(2*p.delta/gamma)**2))*1e-6,limit:'≫ the run'}],
+      {what:'one beam\'s Doppler damping time m/β (s), β = ħk²|dR/dδ|',value:1/(hbarOverMass(mass)*p.k**2*rbar*8*Math.abs(p.delta)/(gamma*gamma)/(1+s+(2*p.delta/gamma)**2))*1e-6,limit:'≫ the run'},
+      ...await trapConditions(line,c.scene,'ground-2-2',run)],
     series,info:{depthUK:uKOfMHz(U0/RAD_PER_MHZ),trapKHz:omegas.map(kHz),kineticRatio:ratio,T0,s,deltaOverGamma:p.delta/gamma,photonRatePerUs:rbar,recoilUK:Erec,mandelQ:Q,z0Um:z0,meanZUm:zbar,runningTrapFactor:run.factor,kappa}}));
 }
 
@@ -231,7 +251,7 @@ async function r2(){
 async function r3(){
   const id='R3_DOPPLER',c=await cycle(id,['cool-plus','cool-minus']),{line,gamma,U0,kappa}=c,b=c.beams['cool-plus'],m=line.model.motion,mass=m.massKg,T=m.temperatureUK;
   const prep=preparedTrap(line,'ground-2-2'),omegas=prep.omegas,axial=omegas[2],eps=[0.5,0.5,1];
-  const {ratio,T0}=initialTemperatures(prep,T),Erec=recoilUK(b.k,mass),wrec=hbarOverMass(mass)*b.k*b.k/2,s=2*b.omega**2/gamma**2;
+  const {ratio,T0,u0}=initialTemperatures(prep,T),Erec=recoilUK(b.k,mass),wrec=hbarOverMass(mass)*b.k*b.k/2,s=2*b.omega**2/gamma**2;
   const Q=mandelQ(gamma,Math.SQRT2*b.omega,b.delta),times=grid(line);
   const capacity=(t,a)=>1+1.5*eps[a]*KT_PER_UK*t/U0,energy=(t,a)=>t*(1+0.75*eps[a]*KT_PER_UK*t/U0),temperature=(E,a)=>{const c2=0.75*eps[a]*KT_PER_UK/U0;return c2>0?(-1+Math.sqrt(1+4*c2*E))/(2*c2):E;};
   // Gauss–Chebyshev nodes of sin²φ (arcsine law on [0, 1]), equal weights.
@@ -258,22 +278,23 @@ async function r3(){
   const Ts=sums.map((row,j)=>row.map(([s1,s2],a)=>{if(!j)return [T0[a],0];const mean=s1/N,se=Math.sqrt(Math.max(0,s2/N-mean*mean)/N);return [temperature(mean,a),se/capacity(temperature(mean,a),a)];}));
   const xb=2*b.delta/gamma,meanX=2*(b.delta+kappa*KT_PER_UK*1.5*Ts.at(-1).reduce((s2,q)=>s2+q[0],0)/3)/gamma;
   const doppler=X=>(1+XI_SIGMA)*(1+X*X)/(8*Math.abs(X))*gamma/KT_PER_UK;  // ħΓ(1+ξ)(1+x²)/(16|δ|/Γ) in µK with |δ|/Γ = |x|/2
-  // The reported trap (SPEC §1.3): the prepared one (the model's own, lib/phys.mjs preparedTrap, with its uncertainty)
-  // softened or stiffened by the cooling pair's phase-averaged shift.
-  const run=await runningFactor(line,c.scene,'ground-2-2',['cool-plus','cool-minus']);
-  const series=['x','y','z'].map((a,i)=>({quantity:'trapFrequency',axis:a,value:kHz(omegas[i]*Math.sqrt(run.factor)),u:Math.hypot(kHz(prep.u[i])*Math.sqrt(run.factor),kHz(omegas[i])*run.u/2),target:{relative:0}}));
-  ['x','y','z'].forEach((a,i)=>{
-    const u=Ts.map((row,j)=>{const other=Math.max(...row.filter((_,k)=>k!==i).map(q=>q[0])),dT=Math.abs(row[i][0]-T0[i]);
-      return Math.hypot(row[i][1],j?2*s/(1+meanX*meanX)*(i===2?row[i][0]:dT):0,KT_PER_UK*other/U0*dT,KT_PER_UK*row[i][0]/U0*dT/2);});
-    series.push({quantity:'T',axis:a,regime:'any',indices:all(line),values:Ts.map(row=>row[i][0]),u,target:TEMPERATURE});});
+  // The reported trap (SPEC §1.3; lib/phys.mjs runningTrap): the prepared one softened or stiffened by the cooling
+  // pair's phase-averaged shift.
+  const run=runningTrap(line,'ground-2-2'),series=trapSeries(run.omegas,run.u);
+  series.push(...temperatureSeries(line,Ts.map(row=>row.map(q=>q[0])),Ts.map((row,j)=>[0,1,2].map(i=>{const other=Math.max(...row.filter((_,k)=>k!==i).map(q=>q[0])),dT=Math.abs(row[i][0]-T0[i]);
+    return Math.hypot(u0[i],row[i][1],j?2*s/(1+meanX*meanX)*(i===2?row[i][0]:dT):0,KT_PER_UK*other/U0*dT,KT_PER_UK*row[i][0]/U0*dT/2);}))));
   series.push({quantity:'loss',indices:all(line),values:times.map(()=>0),u:times.map(()=>0),target:POPULATION});
-  series.push({quantity:'population',state:'ground-2-2',indices:all(line),values:times.map((_,i)=>i?1-gamma*s/(1+meanX*meanX)/gamma/2:1),u:times.map((_,i)=>i?s:0),target:POPULATION});
+  // The excited population of the pair, averaged over the wave: R/Γ = s/(1 + x²), at the end's mean detuning; u: its
+  // change over the run (from the bottom's detuning, where the cold cloud starts) and the saturation's next order.
+  const excited=X=>s/(1+X*X);
+  series.push({quantity:'population',state:'ground-2-2',indices:all(line),values:times.map((_,i)=>i?1-excited(meanX):1),u:times.map((_,i)=>i?Math.abs(excited(meanX)-excited(xb))+2*s*excited(meanX):0),target:POPULATION});
   write(id,expectation(id,'R3','R3 一维多普勒冷却（σ⁺σ⁺ 驻波，非魔术光镊：按局域失谐平均）',line,{
     derivation:'Low-saturation two-beam Doppler friction and diffusion at the local detuning δ_b + κV (the tweezer moves the cycling line with the potential energy; no magic wavelength exists in the model), with the trap force\'s fluctuation between the two states (2D_aa = 2κ²mω_a²V_a·ee, R10), averaged over each atom\'s fast trap motion: phase-averaged Itô equations for the per-axis energies, solved by Monte Carlo from the prepared ensemble; free-space limit k_BT = ħΓ(1+ξ)(1+x²)/(16|δ|/Γ).',
     conditions:[{what:'s per beam',value:s,limit:'≤ 0.02'},{what:'x = 2δ/Γ at the bottom',value:xb},{what:'x at the end\'s mean potential energy',value:meanX},{what:'κ = δ_LS(0)/U₀',value:kappa},
       {what:'k v_rms/Γ at the Doppler T',value:b.k*Math.sqrt(hbarOverMass(mass)*KT_PER_UK*doppler(meanX))/gamma,limit:'≪ 1'},{what:'depth over k_BT at the end',value:U0/(KT_PER_UK*Math.max(...Ts.at(-1).map(q=>q[0]))),limit:'≥ 20'},
       {what:'axial ω over the cooling rate β/m',value:axial/(8*wrec*s*Math.abs(xb)/((1+xb*xb)**2)),limit:'≫ 1'},{what:'Mandel Q',value:Q},
-      {what:'state-force diffusion: its relative heating of a stiff axis over the run, at the end\'s mean detuning',value:kappa*kappa*omegas[0]**2*4*s/(gamma*(1+meanX*meanX)**2)/2*times.at(-1),limit:'≪ 1'}],
+      {what:'state-force diffusion: its relative heating of a stiff axis over the run, at the end\'s mean detuning',value:kappa*kappa*omegas[0]**2*4*s/(gamma*(1+meanX*meanX)**2)/2*times.at(-1),limit:'≪ 1'},
+      ...await trapConditions(line,c.scene,'ground-2-2',run)],
     series,info:{depthUK:uKOfMHz(U0/RAD_PER_MHZ),trapKHz:omegas.map(kHz),kineticRatio:ratio,T0,s,kappa,freeDopplerUK:doppler(meanX),freeDopplerAtBottomUK:doppler(xb),runningTrapFactor:run.factor,monteCarlo:{N,dt,phaseNodes:n}}}));
 }
 
@@ -334,9 +355,11 @@ async function r5(){
 
 /** R6. The Λ |1,0⟩ ↔ |2,0⟩ in second order (lib/defs.mjs ramanNumbers): Ω_R = 2Σ_e X^A_{e1}X^B*_{e2}/Δ_e, the
  * two-photon detuning δ₂ (compensated to ~0 at v = 0), the scattering Γ̄ = mean over the two states of
- * Σ_{l,e} Γ_e|X^l_eg|²/δ². Co-propagating (Δk ≈ 0): P₂ = (Ω_R²/Ω_eff²) sin²(Ω_eff t/2), Ω_eff = √(Ω_R² + δ₂²); an atom
- * that scatters loses the coherence, so P₂ = e^{−Γ̄t}P₂^coh + (1 − e^{−Γ̄t})/2 with u = (1 − e^{−Γ̄t})/2.
- * Counter-propagating (Δk = k_A + k_B along z): the transition |1, p⟩ → |2, p + ħΔk⟩ has δ₂(t) = −Δk v_z(t) − ħΔk²/2m;
+ * Σ_{l,e} Γ_e|X^l_eg|²/δ². An atom that scatters loses the coherence, so P₂ = e^{−Γ̄t}P₂^coh + (1 − e^{−Γ̄t})/2 with
+ * u = (1 − e^{−Γ̄t})/2. With Δk = (k_A n_A − k_B n_B)·z -- 2k for counter-propagating beams, the two wave numbers'
+ * difference (10⁻⁴ rad/µm) for co-propagating ones, one formula for both: no value of Δk is told from another, and
+ * at Δk → 0 it is P₂ = (Ω_R²/Ω_eff²) sin²(Ω_eff t/2), Ω_eff = √(Ω_R² + δ₂²) --
+ * the transition |1, p⟩ → |2, p + ħΔk⟩ has δ₂(t) = −Δk v_z(t) − ħΔk²/2m;
  * along each orbit of the harmonic axial trap, v_z(t) = v₀ cos ωt − ωz₀ sin ωt, the two-level amplitudes are integrated
  * (RK4) and averaged over the prepared ensemble's (z₀, v₀) (Gaussian, velocity variance k_BT(0)/m and position variance k_BT* over mω²; Gauss–Hermite), and
  * the mean momentum ħΔk·P̄₂ moves the centre of mass: ⟨v_z⟩(t) = (ħΔk/m)∫₀^t cos ω(t − s) dP̄₂(s). */
@@ -348,28 +371,23 @@ async function r6(id){
   const A=beamOf(line,'ramanA'),B=beamOf(line,'ramanB'),dk=A.waveNumberPerUm*A.direction[2]-B.waveNumberPerUm*B.direction[2],r=hbarOverMass(mass),recoil=r*dk*dk/2;
   const prep=preparedTrap(line,'ground-1-0'),axial=prep.omegas[2],{T0}=initialTemperatures(prep,T);
   const sv=Math.sqrt(r*KT_PER_UK*T0[2]),sz=Math.sqrt(r*KT_PER_UK*wignerTemperature(axial,T))/axial;
-  const counter=Math.abs(dk)>1;
   // i ċ = Hc, H = ½[[−δ, Ω_R],[Ω_R, δ]] in the two-photon rotating frame (P₂ is even in δ), δ(t) given; P₂ on the grid.
   const evolve=(delta)=>{
     let a=[1,0,0,0];const P=[0];const f=(t,y)=>{const d=delta(t),h=omegaR/2,[r1,i1,r2,i2]=y;return [-d/2*i1+h*i2,d/2*r1-h*r2,h*i1+d/2*i2,-h*r1-d/2*r2];};
     for(let i=1;i<times.length;i++){const n=8,dt=(times[i]-times[i-1])/n;let t=times[i-1];for(let s=0;s<n;s++){const k1=f(t,a),k2=f(t+dt/2,a.map((x,j)=>x+dt/2*k1[j])),k3=f(t+dt/2,a.map((x,j)=>x+dt/2*k2[j])),k4=f(t+dt,a.map((x,j)=>x+dt*k3[j]));a=a.map((x,j)=>x+dt/6*(k1[j]+2*k2[j]+2*k3[j]+k4[j]));t+=dt;}P.push(a[2]**2+a[3]**2);}
     return P;};
-  let P2;
-  if(!counter){P2=evolve(()=>d2);}
-  else{const nodes=gaussHermite(24);P2=times.map(()=>0);
-    for(const [x,wx] of nodes)for(const [y,wy] of nodes){const z0=sz*x,v0=sv*y,P=evolve(t=>d2-dk*(v0*Math.cos(axial*t)-axial*z0*Math.sin(axial*t))-recoil);P.forEach((p,i)=>P2[i]+=wx*wy*p);}}
+  const nodes=gaussHermite(24),P2=times.map(()=>0);
+  for(const [x,wx] of nodes)for(const [y,wy] of nodes){const z0=sz*x,v0=sv*y,P=evolve(t=>d2-dk*(v0*Math.cos(axial*t)-axial*z0*Math.sin(axial*t))-recoil);P.forEach((p,i)=>P2[i]+=wx*wy*p);}
   const f=times.map(t=>1-Math.exp(-scatter*t));
   const p2=P2.map((p,i)=>(1-f[i])*p+f[i]/2),p1=P2.map((p,i)=>(1-f[i])*(1-p)+f[i]/2);
   const series=[{quantity:'population',state:'ground-2-0',indices:all(line),values:p2,u:f.map(x=>x/2),target:POPULATION},
     {quantity:'population',state:'ground-1-0',indices:all(line),values:p1,u:f.map(x=>x/2),target:POPULATION}];
-  if(counter){
-    const vel=times.map((t,i)=>{let s=0;for(let j=1;j<=i;j++)s+=Math.cos(axial*(t-(times[j]+times[j-1])/2))*(P2[j]*(1-f[j])-P2[j-1]*(1-f[j-1]));return r*dk*s;});
-    const unit=r*dk;
-    series.push({quantity:'meanVelocity',axis:'z',indices:all(line),values:vel,u:vel.map((_,i)=>Math.abs(unit)*f[i]),target:{absolute:Math.abs(unit)*POPULATION.absolute}});
-  }
+  // The centre of mass (m/s): no user's target is on a velocity (judged against u and the thermal spread's statistics).
+  const vel=times.map((t,i)=>{let s=0;for(let j=1;j<=i;j++)s+=Math.cos(axial*(t-(times[j]+times[j-1])/2))*(P2[j]*(1-f[j])-P2[j-1]*(1-f[j-1]));return r*dk*s;});
+  series.push({quantity:'meanVelocity',axis:'z',indices:all(line),values:vel,u:vel.map((_,i)=>Math.abs(r*dk)*f[i]),target:OWN});
   series.push({quantity:'loss',indices:all(line),values:times.map(()=>0),u:times.map(()=>0),target:POPULATION});
-  write(id,expectation(id,'R6',`R6 拉曼 Λ（${counter?'对向，Δk = 2k':'同向'}）`,line,{
-    derivation:counter?'Two-photon Rabi oscillation with the Doppler detuning −Δk·v(t) along harmonic axial orbits and the recoil shift ħΔk²/2m, averaged over the prepared ensemble; ⟨v_z⟩ = (ħΔk/m)∫cos ω(t−s) dP̄₂; scattering destroys the coherence (u).':'Two-photon Rabi oscillation P₂ = (Ω_R²/Ω_eff²)sin²(Ω_eff t/2) (second-order Λ, light shifts compensated); scattering destroys the coherence (u). The exact static evolution is R0_R6_RAMAN_CO.',
+  write(id,expectation(id,'R6',`R6 拉曼 Λ（Δk = ${(dk/A.waveNumberPerUm).toFixed(2)} k）`,line,{
+    derivation:'Two-photon Rabi oscillation with the Doppler detuning −Δk·v(t) along harmonic axial orbits and the recoil shift ħΔk²/2m, averaged over the prepared ensemble; ⟨v_z⟩ = (ħΔk/m)∫cos ω(t−s) dP̄₂; scattering destroys the coherence (u). One formula for every Δk: co-propagating beams are its Δk → 0, P₂ = (Ω_R²/Ω_eff²)sin²(Ω_eff t/2) (the exact static evolution of that one is R0_R6_RAMAN_CO).',
     conditions:[{what:'Ω_R/2π (MHz)',value:omegaR/(2*Math.PI)},{what:'residual two-photon detuning (MHz)',value:twoPhotonMHz},{what:'scattering per µs (mean of the two states)',value:scatter},
       {what:'Δk (rad/µm)',value:dk},{what:'axial ω·t at the end (orbit integration needed when not ≪ 1)',value:axial*times.at(-1)},{what:'Δk·v_rms/Ω_R',value:Math.abs(dk)*sv/omegaR}],
     series,info:{omegaR,twoPhotonMHz,scatter,recoilShift:recoil,axialKHz:kHz(axial),T0z:T0[2]}}));
@@ -619,7 +637,7 @@ async function r10(id){
   const c=await cycle(id,['wave-plus','wave-minus']),{line,scene,gamma,kappa}=c,m=line.model.motion,mass=m.massKg,T=m.temperatureUK,times=grid(line);
   const wave=standingPhase(line),k=wave.k,theta=wave.thetaDeg*Math.PI/180,omega1=wave.omega1,deltaB=c.beams['wave-plus'].delta;
   if(Math.abs(wave.imbalance)>1e-9||c.beams['wave-minus'].delta!==deltaB)throw new Error(`${id}: the two beams differ: not a standing wave`);
-  const tw=beamOf(line,m.trapBeamId),prep=preparedTrap(line,'ground-2-2'),omegas=prep.omegas,U0=prep.depth,{ratio,T0}=initialTemperatures(prep,T);
+  const tw=beamOf(line,m.trapBeamId),prep=preparedTrap(line,'ground-2-2'),omegas=prep.omegas,U0=prep.depth,{ratio,T0,u0}=initialTemperatures(prep,T);
   if(Math.abs(tw.direction[0])!==1)throw new Error(`${id}: the tweezer is not along x`);
   const r=hbarOverMass(mass),Erec=recoilUK(k,mass),R0=omega1*omega1/gamma,s0=2*omega1*omega1/(gamma*gamma),eps=[1,0.5,0.5],emission=[(1-XI_SIGMA)/2,(1-XI_SIGMA)/2,XI_SIGMA];
   // The nearest nodes' distances in phase, the cloud's density there, and how near a node a kick's energy exceeds E.
@@ -646,8 +664,8 @@ async function r10(id){
   const NODES=[6,6,12],first=averages(T0,NODES),finer=averages(T0,NODES.map(n=>n+2)),quadrature=Math.max(...first.heat.map((x,a)=>Math.abs(finer.heat[a]/x-1)));
   // ρ_ee″ at the centre (1/µm²: the parametric drive's strength), by a central difference over 10⁻³ rad of the wave.
   const curvature=(()=>{const h=1e-3/k,at=z=>correlations(gamma,omega1*Math.cos(k*z+theta),deltaB).ree;return (at(h)-2*at(0)+at(-h))/(h*h);})();
-  const run=await runningFactor(line,scene,'ground-2-2',['wave-plus','wave-minus']),step=times[1]-times[0];
-  const windows=omegas.map(w=>Math.min(2*Math.PI/(w*Math.sqrt(run.factor)),step));
+  const run=runningTrap(line,'ground-2-2'),step=times[1]-times[0];
+  const windows=run.omegas.map(w=>Math.min(2*Math.PI/w,step));
   /** The moments' equations from the prepared ensemble, the y–z exchange absent or complete, on a grid that resolves
    * the trap; per output T_a (A over its window), B_a, and the accumulated friction's and state force's parts of each
    * axis' energy, the photons, ∫2(kσ_z)⁴dt and the point model's ejections. */
@@ -675,28 +693,32 @@ async function r10(id){
     scatter+=re*re+im*im;if(g!==g0)raman+=re*re+im*im;}
   const far=2*recoilUK(tw.waveNumberPerUm,mass)*scatter;
   // The reported trap is the running one (R2's).
-  const series=['x','y','z'].map((a,i)=>({quantity:'trapFrequency',axis:a,value:kHz(omegas[i]*Math.sqrt(run.factor)),u:Math.hypot(kHz(prep.u[i])*Math.sqrt(run.factor),kHz(omegas[i])*run.u/2),target:{relative:0}}));
+  const series=trapSeries(run.omegas,run.u);
   // An axis' u at output j of a solution (the doc's list), and the series.
   const shape=[(1-XI_SIGMA)/4,(1-XI_SIGMA)/4,(1-XI_SIGMA)/2].map(x=>x*Math.abs(Math.cos(2*theta))*Erec*R0);
   const sigma2=y=>r*KT_PER_UK*y.B[2]/(omegas[2]*omegas[2]),parametric=(y,j)=>y.T[1]*(omegas[1]*kappa*Math.abs(curvature)*sigma2(y)*times[j])**2/32;
   const uncertainty=(sol,j,a)=>{const y=sol[j],dT=Math.abs(y.T[a]-T0[a]),other=Math.max(...[0,1,2].filter(b=>b!==a).map(b=>y.T[b])),v=Math.sqrt(r*KT_PER_UK*y.T[2]),ks2=k*k*sigma2(y);
     return j?Math.hypot(shape[a]*y.shape,KT_PER_UK*(1.5*eps[a]*y.T[a]+other)/U0*dT,s0*Math.abs(y.friction[a]),(2*k*v/gamma)**2*dT,far*times[j],raman*times[j]*dT,kappa*first.soft[a]*2*ks2*T0[a],
-      a===1?parametric(y,j):0,T0[a]*Math.abs(wignerTemperature(omegas[a],T)/T-1)*KT_PER_UK*T/U0,quadrature*dT):0;};
+      a===1?parametric(y,j):0,T0[a]*Math.abs(wignerTemperature(omegas[a],T)/T-1)*KT_PER_UK*T/U0,quadrature*dT,u0[a]):u0[a];};
   const radial=sol=>sol.map(y=>(y.T[1]+y.T[2])/2),ra=radial(apart),rm=radial(mixed),uRadial=ra.map((x,j)=>Math.hypot((uncertainty(apart,j,1)+uncertainty(apart,j,2))/2,(x-rm[j])/2));
-  series.push({quantity:'T',axis:'x',regime:'any',indices:all(line),values:apart.map((y,j)=>(y.T[0]+mixed[j].T[0])/2),u:apart.map((y,j)=>Math.hypot(uncertainty(apart,j,0),(y.T[0]-mixed[j].T[0])/2)),target:TEMPERATURE});
-  series.push({quantity:'T',axes:['y','z'],label:'radial mean',regime:'any',indices:all(line),values:ra.map((x,j)=>(x+rm[j])/2),u:uRadial,target:TEMPERATURE});
-  ['y','z'].forEach((a,n)=>series.push({quantity:'T',axis:a,regime:'any',reported:true,indices:all(line),values:apart.map(y=>y.T[1+n]),u:apart.map((y,j)=>Math.hypot(uncertainty(apart,j,1+n),y.T[1+n]-rm[j])),target:TEMPERATURE}));
-  series.push({quantity:'Tincrease',axes:['y','z'],label:'radial mean',reported:true,indices:all(line).slice(1),values:ra.slice(1).map((x,j)=>(x+rm[j+1])/2-ra[0]),u:uRadial.slice(1),target:TEMPERATURE});
+  // The total (T_x + T_y + T_z)/3 = (T_x + 2·radial mean)/3, the quantity the user's target is on; T_x and the radial
+  // mean each against its own u.
+  const Tx=apart.map((y,j)=>(y.T[0]+mixed[j].T[0])/2),uTx=apart.map((y,j)=>Math.hypot(uncertainty(apart,j,0),(y.T[0]-mixed[j].T[0])/2)),Tr=ra.map((x,j)=>(x+rm[j])/2);
+  series.push({quantity:'T',total:true,regime:'any',indices:all(line),values:Tx.map((x,j)=>(x+2*Tr[j])/3),u:uTx.map((u,j)=>(u+2*uRadial[j])/3),target:TEMPERATURE});
+  series.push({quantity:'T',axis:'x',regime:'any',indices:all(line),values:Tx,u:uTx,target:OWN});
+  series.push({quantity:'T',axes:['y','z'],label:'radial mean',regime:'any',indices:all(line),values:Tr,u:uRadial,target:OWN});
+  ['y','z'].forEach((a,n)=>series.push({quantity:'T',axis:a,regime:'any',reported:true,indices:all(line),values:apart.map(y=>y.T[1+n]),u:apart.map((y,j)=>Math.hypot(uncertainty(apart,j,1+n),y.T[1+n]-rm[j])),target:OWN}));
+  series.push({quantity:'Tincrease',axes:['y','z'],label:'radial mean',reported:true,indices:all(line).slice(1),values:ra.slice(1).map((x,j)=>(x+rm[j+1])/2-ra[0]),u:uRadial.slice(1),target:OWN});
   series.push({quantity:'loss',indices:all(line),values:times.map(()=>0),u:apart.map(y=>y.ejected),target:POPULATION});
   const ree=apart.map((y,j)=>j?averages(y.B,NODES).ree:0),uree=apart.map((y,j)=>j?ree[j]*(y.shape/times[j]+s0)+raman*times[j]:0);
   series.push({quantity:'population',state:'ground-2-2',indices:all(line),values:ree.map(x=>1-x),u:uree,target:POPULATION});
   series.push({quantity:'population',state:'D2-3-3',indices:all(line),values:ree,u:uree,target:POPULATION});
   const hw=omegas.map(w=>w/KT_PER_UK),share=E2=>2*reach(E2)*atNode(end.ksigma)/end.sin2,factor=read('scenes/manifest.json').scenes[id].held?.mass??1;
   write(id,expectation(id,'R10',`R10 驻波中的动量扩散（θ = ${wave.thetaDeg.toFixed(0)}°，s₀ = ${+s0.toPrecision(2)}${factor>1?`，质量 ×${factor}`:''}）`,line,{
-    derivation:'Two-level atom in a resonant standing wave Ω₁cos(kz+θ), held within kσ_z ≪ 1 of the phase θ by a tight tweezer. Momentum diffusion of the atom at rest = correlation integral of the force ħ∇δ P_e − (ħ∇Ω/2)σ_x (quantum regression on the Bloch equations, exact in the saturation) + emission recoil; at low saturation on resonance 2D_zz = ħ²k²R₀[ξcos²(kz+θ) + sin²(kz+θ)], R₀ = Ω₁²/Γ (Gordon–Ashkin: the dipole force’s fluctuations ħ²|∇Ω|²/Γ remain at the node), and the trap’s state-dependent force adds 4R(κ∇V)²/Γ² on every axis. Harmonic moment equations for ⟨p²⟩, ⟨r²⟩, ⟨rp⟩ per axis with the kicks 2D, the first-order friction and the excited atom’s share of the trap force, averaged over the Gaussian cloud at the local Ω(z) and δ = κV. Judged: T_x and the radial mean (T_y+T_z)/2 (the round tweezer exchanges energy between y and z).',
+    derivation:'Two-level atom in a resonant standing wave Ω₁cos(kz+θ), held within kσ_z ≪ 1 of the phase θ by a tight tweezer. Momentum diffusion of the atom at rest = correlation integral of the force ħ∇δ P_e − (ħ∇Ω/2)σ_x (quantum regression on the Bloch equations, exact in the saturation) + emission recoil; at low saturation on resonance 2D_zz = ħ²k²R₀[ξcos²(kz+θ) + sin²(kz+θ)], R₀ = Ω₁²/Γ (Gordon–Ashkin: the dipole force’s fluctuations ħ²|∇Ω|²/Γ remain at the node), and the trap’s state-dependent force adds 4R(κ∇V)²/Γ² on every axis. Harmonic moment equations for ⟨p²⟩, ⟨r²⟩, ⟨rp⟩ per axis with the kicks 2D, the first-order friction and the excited atom’s share of the trap force, averaged over the Gaussian cloud at the local Ω(z) and δ = κV. Judged: the total T at the user\'s target; T_x and the radial mean (T_y+T_z)/2 each against its own u (the round tweezer exchanges energy between y and z).',
     conditions:[{what:'s₀ = 2Ω₁²/Γ² at the antinode',value:s0},{what:'θ, the wave’s phase at the trap’s centre (deg)',value:wave.thetaDeg},
       {what:'kσ_z at t = 0',value:first.ksigma,limit:'≪ π/2'},{what:'kσ_z at the end (no exchange)',value:end.ksigma,limit:'≪ π/2'},
-      {what:'least k_BT_a/4ħω_a at t = 0 (the solver holds T to its target only where ≥ 1 on every axis)',value:Math.min(...T0.map((t,a)=>t/(4*hw[a])))},
+      {what:'least k_BT_a/ħω_a at t = 0 (the result reports its validated regime per output: `classical`)',value:Math.min(...T0.map((t,a)=>t/hw[a]))},
       {what:'⟨(2δ/Γ)²⟩ over the cloud at t = 0 (the tweezer’s line shift κV)',value:first.spread,limit:'≪ 1'},{what:'⟨(2δ/Γ)²⟩ at the end',value:end.spread,limit:'≪ 1'},
       {what:'ρ_ee over the cloud at t = 0',value:first.ree,limit:'≪ 1'},{what:'photons scattered per atom over the run',value:last.photons},
       {what:'heating of z per trap period over T_z at t = 0 (slow: ≪ 1)',value:first.heat[2]*2*Math.PI/omegas[2]/T0[2]},
@@ -706,7 +728,8 @@ async function r10(id){
       {what:'parametric drive of y: its part of T_y at the end over T_y',value:parametric(last,times.length-1)/last.T[1],limit:'≪ 1'},
       {what:'tweezer photons over the run',value:scatter*tEnd,limit:'≪ the wave’s'},{what:'atoms the tweezer’s Raman scattering takes out of the cycle over the run',value:raman*tEnd,limit:'≪ 1'},
       {what:'κ = δ_LS(0)/U₀',value:kappa},{what:'point model: share of the dipole heating in kicks above the depth (ejected)',value:share(U0)},
-      {what:'point model: share of the dipole heating in kicks above 10 k_BT_z',value:share(10*KT_PER_UK*last.T[2])}],
+      {what:'point model: share of the dipole heating in kicks above 10 k_BT_z',value:share(10*KT_PER_UK*last.T[2])},
+      ...await trapConditions(line,scene,'ground-2-2',run)],
     series,info:{depthUK:U0/KT_PER_UK,kappa,trapKHz:omegas.map(kHz),runningTrapFactor:run.factor,kineticRatio:ratio,T0,recoilUK:Erec,antinodeRatePerUs:R0,massFactor:factor,windowsUs:windows,
       zerothOrderRatesUKperUs:{z:Erec*R0*((1+XI_SIGMA)/2-(1-XI_SIGMA)/2*Math.cos(2*theta)*Math.exp(-2*first.ksigma**2)),xy:Erec*R0*(1-XI_SIGMA)/4*(1+Math.cos(2*theta)*Math.exp(-2*first.ksigma**2)),zIncoherent:Erec*R0*(1+XI_SIGMA)/2*(1+Math.cos(2*theta)*Math.exp(-2*first.ksigma**2))},
       ratesAtStartUKperUs:{heat:first.heat,stateForce:first.state,friction:first.phi.map((x,a)=>x*T0[a])},endNoExchange:last.T,endFullExchange:mixed.at(-1).T,quadratureChange:quadrature}}));
@@ -718,11 +741,12 @@ async function r10(id){
 /** R4, reported only (another engine's old numeric result is never a judge: check.mjs `reported`, kind
  * "characterization"). The 1D GMW quantum results (LONGREF_TW*.json, contract §3.5: reused, not recomputed) along the
  * radial axis z through the focus: T_z(t) and the F = 1 population at the scene's output times (every 10 µs, their
- * rows), compared where k_BT ≥ 4ħω (below it the semiclassical method is known to run 10–55 % cold). Their own
+ * rows), compared at the outputs the result calls classical (its validated regime: below it the semiclassical method
+ * is known to run 10–55 % cold). The files are kept beside the references (refs/data). Their own
  * uncertainty: the step (dt 0.2 vs 0.1 µs: ≤ 1.2 % in T, the companions) and grid; the 3D scene's other axes are
  * assumed separable (their coupling through the tweezer's light shift ~1 % at 30 µK). */
 async function r4(id){
-  const line=read(`scenes/${id}.json`),name=id.slice(3),ref=JSON.parse(fs.readFileSync(`${(await import('./scenes.mjs')).TW_REFERENCES}/LONGREF_${name}.json`,'utf8'));
+  const line=read(`scenes/${id}.json`),name=id.slice(3),ref=read(`data/LONGREF_${name}.json`);
   const times=grid(line),rows=new Map(ref.rows.map(r=>[Math.round(r.t_us),r])),hw=ref.physics.omega_r_over_2pi_kHz*1e-3*2*Math.PI/KT_PER_UK;
   // The reference's numerical error in T at each time: its companions (the step: dt 0.2 vs 0.1 µs, the Strang error of
   // dt 0.2 being 4/3 of that difference; the momentum grid), interpolated in t; without companions (TW1) the step bias
@@ -738,15 +762,13 @@ async function r4(id){
   const idx=all(line).filter(i=>rows.has(Math.round(times[i])));
   // The reported trap (SPEC §1.3): the prepared one of |2,2⟩ (the tweezer along x, π: the model's own, lib/phys.mjs
   // preparedTrap, with its uncertainty) with the lin⊥lin pairs' phase-averaged shift.
-  const scene=read(`scenes/${id}.scene.json`),prep=preparedTrap(line,'ground-2-2'),run=await runningFactor(line,scene,'ground-2-2',line.model.motion.beams.filter(b=>b.id!=='tweezer').map(b=>b.id));
-  const trap=prep.omegas.map(w=>w*Math.sqrt(run.factor));
-  const series=[...['x','y','z'].map((a2,i)=>({quantity:'trapFrequency',axis:a2,value:kHz(trap[i]),u:Math.hypot(kHz(prep.u[i])*Math.sqrt(run.factor),kHz(trap[i])*run.u/2),target:{relative:0}})),{quantity:'T',axis:'z',reported:true,regime:'classical',indices:idx,values:idx.map(i=>rows.get(Math.round(times[i])).T_uK),u:idx.map(i=>relT(times[i])*rows.get(Math.round(times[i])).T_uK),
-      judged:idx.map(i=>rows.get(Math.round(times[i])).T_uK>=4*hw),target:TEMPERATURE},
+  const scene=read(`scenes/${id}.scene.json`),run=runningTrap(line,'ground-2-2'),trap=run.omegas;
+  const series=[...trapSeries(run.omegas,run.u),{quantity:'T',axis:'z',reported:true,regime:'classical',indices:idx,values:idx.map(i=>rows.get(Math.round(times[i])).T_uK),u:idx.map(i=>relT(times[i])*rows.get(Math.round(times[i])).T_uK),target:OWN},
     {quantity:'group',label:'F=1',reported:true,states:line.model.states.filter(s=>s.startsWith('ground-1-')),indices:idx,values:idx.map(i=>rows.get(Math.round(times[i])).pF1),u:idx.map(()=>0.003),target:POPULATION},
     {quantity:'loss',reported:true,indices:idx,values:idx.map(i=>Math.max(0,rows.get(Math.round(times[i])).loss)),u:idx.map(()=>0.002),target:POPULATION}];
   write(id,expectation(id,'R4',`R4 西西弗斯 ${name}：1D GMW 量子结果（只报告）`,line,{kind:'characterization',
-    derivation:'Reported, never judged: the old 1D quantum (GMW) result of the same scene along the radial axis z, T_z and p(F=1), compared where k_BT ≥ 4ħω. R4 is judged by its scaling law (R4_LINEAR).',
-    conditions:[{what:'ħω_r/k_B (µK) of the reference',value:hw},{what:'reference numerical error in T at the end (relative)',value:relNum(times.at(-1))},{what:'separability κk_BT/|δ_eff| at t = 0',value:kap*KT_PER_UK*30/dEff},{what:'running trap factor (ω² over the tweezer’s)',value:run.factor}],
+    derivation:'Reported, never judged: the old 1D quantum (GMW) result of the same scene along the radial axis z, T_z and p(F=1), compared where the result calls its output classical. A 1D result is no reference of the 3D run\'s T_z in this tweezer: its two tight axes exchange energy (diffusion.status.md §9); R4D_TW2 compares like with like.',
+    conditions:[{what:'ħω_r/k_B (µK) of the reference',value:hw},{what:'reference numerical error in T at the end (relative)',value:relNum(times.at(-1))},{what:'separability κk_BT/|δ_eff| at t = 0',value:kap*KT_PER_UK*30/dEff},...await trapConditions(line,scene,'ground-2-2',run)],
     series,info:{reference:`LONGREF_${name}.json`,note:ref.note,wall_s:ref.wall_s,trapKHz:trap.map(kHz),referenceRadialKHz:ref.physics.omega_r_over_2pi_kHz}}));
 }
 
@@ -791,6 +813,18 @@ function lightWells(line,ids,detuning,points=200){
  * window, the outputs the steady state is read over (the run's last third); check.mjs forms D = Σ c_k T̄_k from the
  * three results. Each member is judged alone by its reported trap only.
  *
+ * What it tests, and what it does not. It tests that the steady T_z is an affine function of the intensity over
+ * I … 4I, rising with it: D = 0 within z√(SE_D² + u²), the reference's own allowance and the results' statistics, and
+ * T̄(4I) > T̄(I) beyond its standard error (without a rise the second difference vanishes for any physics: not judged;
+ * a fall contradicts c > 0: fails). D is no temperature: the user's 10 % of T is no allowance of it, and none is
+ * granted. It does not test the slope c, the offset or T itself: every T = a + bI with b > 0 passes. In particular it
+ * is blind to a deficit of T that keeps T affine in I -- and the point-particle model has one in these scenes: in 1D
+ * its T_z runs 18–27 % below the same model's quantum answer (motion3d_status/rewrite/diffusion.status.md §4.3, §5:
+ * the Ehrenfest mean force drops the traceless part of the first order; reported by the reference R4D_TW2, accepted
+ * by the owner, no part of the error budget). So R4 is no absolute test of the Sisyphus temperature, and none exists
+ * in this set: T ∝ I^α gives D/T(4I) = 1 − 3·2^{−α} + 2·4^{−α} (−0.12 at α = ½, +0.19 at α = 3/2), and check.mjs prints
+ * the exponents the allowance cannot tell from 1.
+ *
  * What the law needs, as numbers of the scenes (the conditions) or of the results (the requirements, which check.mjs
  * reads before it judges): the detuning from the cycle's line in the trap, (Γ/2δ)² ≪ 1; the largest excited
  * population of the atom in the lowest light-shift potential, p ≪ 1, at 4I; that potential's modulation U well above
@@ -799,33 +833,32 @@ function lightWells(line,ids,detuning,points=200){
  * (the regime in which T depends on U alone); the tweezer no more than a slow background of the molasses -- its
  * frequency against that oscillation, (ω_z/Ω_osc)², and its line shift over the cloud against the detuning,
  * κk_BT/ħ|δ| --; the cloud over many periods of the polarization (the pattern's first harmonic averages to
- * e^{−2k²σ_z²}, σ_z² = k_BT/mω_z²); k_BT ≥ 4ħω on every axis (the method's validated regime); and the steady state
- * reached (T̄ over the window's two halves equal within twice their standard errors). u, relative to T(4I):
- * p(4I) + (Γ/2δ)² + (ω_z/Ω_osc(I))² from the scenes, and what check.mjs adds from the results,
- * κk_BT(4I)/ħ|δ| + e^{−2k²σ_z²(I)}. The target is the user's 10 % of T(4I): a point 10 % off the line through the
- * other two. */
+ * e^{−2k²σ_z²}, σ_z² = k_BT/mω_z²); every output of the window one the result calls classical (its validated regime,
+ * which the solver reports and decides nothing by); and the steady state reached (T̄ over the window's two halves equal
+ * within twice their standard errors). u, relative to T(4I): p(4I) + (Γ/2δ)² + (ω_z/Ω_osc(I))² from the scenes, and
+ * what check.mjs adds from the results, κk_BT(4I)/ħ|δ| + e^{−2k²σ_z²(I)}. */
 async function r4linear(){
   const ids=['R4_LIN_1','R4_LIN_2','R4_LIN_4'],facts=[];
   for(const id of ids){
     const line=read(`scenes/${id}.json`),scene=read(`scenes/${id}.scene.json`),m=line.model.motion,states=line.model.states,gamma=decayRates(line)[index(line,'D2-3-3')],cool=m.beams.filter(b=>/^cool/.test(b.id)).map(b=>b.id);
     const sh=await levelShifts(scene,['tweezer']),nu=await laserMHz(scene,cool[0]),detuning=e=>RAD_PER_MHZ*(nu-(sh[states[e]].absoluteMHz-sh['ground-2-2'].absoluteMHz));
     const delta=detuning(index(line,'D2-3-3')),kappa=(sh['D2-3-3'].shiftMHz-sh['ground-2-2'].shiftMHz)/(-sh['ground-2-2'].shiftMHz),wells=lightWells(line,cool,detuning);
-    const prep=preparedTrap(line,'ground-2-2'),run=await runningFactor(line,scene,'ground-2-2',m.beams.filter(b=>b.id!=='tweezer').map(b=>b.id)),trap=prep.omegas.map(w=>w*Math.sqrt(run.factor));
+    const run=runningTrap(line,'ground-2-2'),trap=run.omegas;
     const {durationUs,samples}=line.options,recoil=recoilRate(wells.k,m.massKg),intensity=beamOf(line,cool[0]).intensityMWcm2;
     facts.push({id,delta,gamma,kappa,wells,trap,recoil,durationUs,samples,intensity,mass:m.massKg});
     write(id,expectation(id,'R4',`R4 西西弗斯标度律：每束 ${intensity} mW/cm²，阱内 δ = ${(delta/gamma).toFixed(1)}Γ`,line,{
-      derivation:'A member of R4_LINEAR (the scaling law at three intensities): alone it is judged by its reported trap only, the prepared one of |2,2⟩ with the lin⊥lin pairs’ phase-averaged shift.',
+      derivation:'A member of R4_LINEAR (the scaling law at three intensities): alone it is judged by its reported trap only, the prepared one of |2,2⟩ with the lin⊥lin pairs’ phase-averaged shift (lib/phys.mjs runningTrap: the trap light mixes the excited levels these pairs reach, so the resolvent is kept whole).',
       conditions:[{what:'δ from the cycle’s line in the trap / Γ',value:delta/gamma},{what:'largest excited population in the lowest light-shift potential',value:wells.saturation,limit:'≪ 1'},
         {what:'the lowest light-shift potential’s modulation over E_rec',value:wells.modulation/recoil,limit:'≫ 100'},{what:'Ω_osc τ_p: oscillations in the light’s wells between two pumpings',value:wells.oscillation/wells.pump,limit:'≫ 1'},
-        {what:'photons scattered over the run',value:wells.photons*durationUs},{what:'pumping times over the run',value:wells.pump*durationUs}],
-      series:['x','y','z'].map((a,i)=>({quantity:'trapFrequency',axis:a,value:kHz(trap[i]),u:Math.hypot(kHz(prep.u[i])*Math.sqrt(run.factor),kHz(trap[i])*run.u/2),target:{relative:0}})),
+        {what:'photons scattered over the run',value:wells.photons*durationUs},{what:'pumping times over the run',value:wells.pump*durationUs},...await trapConditions(line,scene,'ground-2-2',run)],
+      series:trapSeries(run.omegas,run.u),
       info:{trapKHz:trap.map(kHz),modulationUK:wells.modulation/KT_PER_UK,deepestShiftUK:wells.deepest/KT_PER_UK,oscillationKHz:kHz(wells.oscillation),photonRatePerUs:wells.photons,pumpRatePerUs:wells.pump}}));
   }
   const low=facts[0],high=facts.at(-1),fixed=high.wells.saturation+(low.gamma/(2*low.delta))**2+(low.trap[2]/low.wells.oscillation)**2;
-  write('R4_LINEAR',{id:'R4_LINEAR',reference:'R4',title:'R4 西西弗斯标度律：T(4I) − 3T(2I) + 2T(I) = 0（lin⊥lin 稳态 T_z 对光强线性）',kind:'relation',
+  write('R4_LINEAR',{id:'R4_LINEAR',reference:'R4',title:'R4 西西弗斯标度律：T(4I) − 3T(2I) + 2T(I) = 0（lin⊥lin 稳态 T_z 对光强线性；不检验斜率与 T 本身）',kind:'relation',
     members:facts.map(f=>({id:f.id,request:`scenes/${f.id}.json`,durationUs:f.durationUs,samples:f.samples,window:[Math.ceil(2*(f.samples-1)/3),f.samples-1]})),
-    quantity:'T',axis:'z',coefficients:[2,-3,1],scale:facts.length-1,value:0,u:{relative:fixed},target:TEMPERATURE,
-    derivation:'k_BT = c·ħΩ²/|δ| + O(E_rec) at |δ| ≫ Γ and low saturation: at one detuning T is linear in the intensity, so T(4I) − 3T(2I) + 2T(I) = 0 for the steady states of three scenes that differ in the intensity alone. Judged against 10 % of T(4I) once the requirements hold in all three results.',
+    quantity:'T',axis:'z',coefficients:[2,-3,1],scale:facts.length-1,value:0,u:{relative:fixed},target:OWN,
+    derivation:'k_BT = c·ħΩ²/|δ| + O(E_rec) at |δ| ≫ Γ and low saturation: at one detuning T is linear in the intensity, so T(4I) − 3T(2I) + 2T(I) = 0 for the steady states of three scenes that differ in the intensity alone. Tested: that the steady T_z rises with I and is an affine function of it, the second difference zero within z·√(SE² + u²) (no user\'s target: D is no temperature). Not tested: the slope c, the offset, T itself -- every T = a + bI with b > 0 passes, so does a deficit of T that keeps it affine in I.',
     conditions:[{what:'δ from the cycle’s line in the trap / Γ',value:low.delta/low.gamma},{what:'(Γ/2δ)²',value:(low.gamma/(2*low.delta))**2,limit:'≪ 1'},
       {what:'largest excited population in the lowest light-shift potential, at I, 2I, 4I',value:facts.map(f=>f.wells.saturation),limit:'≪ 1'},
       {what:'the lowest light-shift potential’s modulation over E_rec, at I, 2I, 4I',value:facts.map(f=>f.wells.modulation/f.recoil),limit:'≫ 100'},
@@ -834,9 +867,9 @@ async function r4linear(){
       {what:'pumping times over the run, at I, 2I, 4I',value:facts.map(f=>f.wells.pump*f.durationUs)},
       {what:'photons scattered over the run, at I, 2I, 4I',value:facts.map(f=>f.wells.photons*f.durationUs)},
       {what:'(ω_z/Ω_osc)² at I: the tweezer against the oscillation in the light’s wells',value:(low.trap[2]/low.wells.oscillation)**2,limit:'≪ 1'},
-      {what:'4ħω_z/k_B (µK): T̄ of every member must stay above it',value:4*low.trap[2]/KT_PER_UK},
+      {what:'ħω_z/k_B (µK)',value:low.trap[2]/KT_PER_UK},
       {what:'κ = δ_LS(0)/U₀ (the line’s shift over the cloud is κk_BT)',value:low.kappa},{what:'u from the scenes (relative to T(4I))',value:fixed}],
-    requirements:['classical: k_BT ≥ 4ħω on every axis over the window, in every member','steady: T̄ over the window’s two halves equal within twice their standard errors, in every member'],
+    requirements:['classical: every output of the window is one the result calls classical, in every member','steady: T̄ over the window’s two halves equal within twice their standard errors, in every member','a rise: T̄(4I) − T̄(I) beyond twice its standard error (a fall beyond it fails)'],
     info:{k:low.wells.k,kappa:low.kappa,deltaRadPerUs:low.delta,trapZ:low.trap[2],hbarOverMass:hbarOverMass(low.mass),modulationUK:facts.map(f=>f.wells.modulation/KT_PER_UK),intensities:facts.map(f=>f.intensity)}});
 }
 
@@ -845,7 +878,7 @@ async function r4linear(){
 
 /** R8 (characterization only, contract §6). The exact local momentum diffusion of R5051's atom held at its trap's centre
  * (the quantum regression theorem on the master equation with every D2 state explicit, the force operator −∇H, the
- * spontaneous photons' recoil: kick/runs/qrt_R5051_n.jsonl, d⟨κ_a²⟩/dt = 2D_a, D in 1/(µm² µs)), with the force
+ * spontaneous photons' recoil: refs/data/qrt_R5051_n.jsonl, d⟨κ_a²⟩/dt = 2D_a, D in 1/(µm² µs)), with the force
  * correlation cut off by e^{−γτ}: γ → 0 holds the slow intra-state fluctuations a point particle's Ehrenfest force
  * leaves out (SPEC §8), which a moving atom's motion cuts off at about its trap frequency. The held atom (mass ×100,
  * scenes.mjs R8_HELD) does not cut them off; its T grows by ΔT_a = (ħ/Mm)·2D_a t/k_B, here at γ = 1/µs (the
@@ -860,13 +893,13 @@ async function r4linear(){
  * roots against the root of the mean). */
 async function r8(){
   const id='R8_R5051',line=read(`scenes/${id}.json`),times=grid(line),m=line.model.motion,r=hbarOverMass(m.massKg),{R8_HELD}=await import('./scenes.mjs');
-  const qrt=fs.readFileSync('C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/kick/runs/qrt_R5051_n.jsonl','utf8').split('\n').filter(x=>x.trim()).map(x=>JSON.parse(x));
+  const qrt=fs.readFileSync(path.join(here,'data','qrt_R5051_n.jsonl'),'utf8').split('\n').filter(x=>x.trim()).map(x=>JSON.parse(x));
   const centre=qrt.slice(1).find(q=>q.offset.every(v=>v===0)),D=g=>centre.cutoffs.find(c=>c.gamma===g).D;
   // The site: ω_a along the lab axes, and ω_⊥², ω_∥² by least squares on ω_a² = ω_⊥² + (ω_∥² − ω_⊥²) n_a².
   const lab=qrt[0].trap.lab.map(w=>w/Math.sqrt(R8_HELD.mass)),tw=beamOf(line,m.trapBeamId),norm=Math.hypot(...tw.direction),n2=tw.direction.map(x=>(x/norm)**2);
   const my=lab.reduce((t,w)=>t+w*w,0)/3,slope=lab.reduce((t,w,a)=>t+(w*w-my)*(n2[a]-1/3),0)/n2.reduce((t,x)=>t+(x-1/3)**2,0),across=Math.sqrt(my-slope/3),along=Math.sqrt(my-slope/3+slope);
   const residual=Math.max(...lab.map((w,a)=>Math.abs(across**2+slope*n2[a]-w*w)/(w*w))),T=m.temperatureUK,spread=w=>Math.sqrt(r*KT_PER_UK*wignerTemperature(w,T))/w,probe=Math.max(...m.beams.filter(b=>b.id!==tw.id&&String(b.frequencyIndex)!==String(tw.frequencyIndex)).map(b=>b.waveNumberPerUm));
-  const series=['x','y','z'].map((a,i)=>({quantity:'Tincrease',axis:a,indices:all(line),values:times.map(t=>r*2*D(1)[i]*t/KT_PER_UK),u:times.map(t=>r*2*Math.abs(D(0.3)[i]-D(1)[i])*t/KT_PER_UK),target:TEMPERATURE}));
+  const series=['x','y','z'].map((a,i)=>({quantity:'Tincrease',axis:a,indices:all(line),values:times.map(t=>r*2*D(1)[i]*t/KT_PER_UK),u:times.map(t=>r*2*Math.abs(D(0.3)[i]-D(1)[i])*t/KT_PER_UK),target:OWN}));
   write(id,{...expectation(id,'R8','R8 静止原子的动量扩散（R5051，QRT；只作表征）',line,{
     derivation:'Held atom (mass ×100): Var κ_a grows as 2D_a t with the QRT diffusion of the exact master equation at the trap centre; D at the correlation cutoff γ = 1/µs, u to γ = 0.3/µs. The γ → 0 limit (slow intra-state fluctuations) is beyond the semiclassical point particle (SPEC §8).',
     conditions:[{what:'photon rate at the centre (1/µs)',value:centre.photonRate},{what:'excited population',value:centre.excited},
@@ -878,7 +911,7 @@ async function r8(){
       {what:'kσ: the probe’s wave number times the larger spread',value:probe*spread(across),limit:'≪ 1: held'},{what:'2k_tσ_∥: the standing wave’s phase over the spread along it',value:2*tw.waveNumberPerUm*spread(along),limit:'≪ 1: held'},
       {what:'initial T along x, y, z (µK): Σ_j (e_j·a)² T*_j',value:n2.map(c=>c*wignerTemperature(along,T)+(1-c)*wignerTemperature(across,T))},
       {what:'expected increase over the run along x, y, z (µK)',value:[0,1,2].map(i=>r*2*D(1)[i]*times.at(-1)/KT_PER_UK)}],
-    series,info:{source:'kick/runs/qrt_R5051_n.jsonl (NS scratchpad)',cutoffs:centre.cutoffs.map(c=>({gamma:c.gamma,D:c.D,Dforce:c.Dforce})),Drecoil:centre.Drecoil}}),kind:'characterization'});
+    series,info:{source:'refs/data/qrt_R5051_n.jsonl',cutoffs:centre.cutoffs.map(c=>({gamma:c.gamma,D:c.D,Dforce:c.Dforce})),Drecoil:centre.Drecoil}}),kind:'characterization'});
 }
 
 const RUN={R1_TWEEZER:()=>r1('R1_TWEEZER'),R1_RETRO:()=>r1('R1_RETRO'),R1_SIGMA_P:()=>r1('R1_SIGMA_P'),R1_SIGMA_M:()=>r1('R1_SIGMA_M'),R1_CROSSED:()=>r1('R1_CROSSED'),
