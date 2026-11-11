@@ -101,6 +101,28 @@ pub fn draws_for(share: f64) -> f64 {
     CONFIDENCE * CONFIDENCE * (1. / share - 1.)
 }
 
+/// The probability that `count` or more of `draws` independent draws meet an event of the probability `share`: the
+/// binomial's upper tail, 1 − Σ_{k < n} C(N, k) p^k (1 − p)^{N − k}, its terms one from the one before
+/// (× (N − k)/(k + 1) · p/(1 − p)) -- exact at any count, where a normal's or Wilson's interval is not at a count of
+/// one or two. A claim that a share is at most p is refuted by a count whose tail is below the test's (`tail_among`).
+pub fn at_least(count: f64, draws: f64, share: f64) -> f64 {
+    if share >= 1. {
+        return 1.;
+    }
+    let (mut term, mut below) = ((1. - share).powf(draws), 0.);
+    for k in 0..count as u64 {
+        below += term;
+        term *= (draws - k as f64) / (k + 1) as f64 * share / (1. - share);
+    }
+    (1. - below).clamp(0., 1.)
+}
+
+/// The two-sided tail at the confidence z of one look among `looks` (module documentation, # Many looks): Šidák's
+/// 1 − (1 − p)^{1/m}, p = P(|N| > z). A one-sided test takes half of it.
+pub fn tail_among(looks: f64) -> f64 {
+    -((-normal_tail(CONFIDENCE)).ln_1p() / looks).exp_m1()
+}
+
 /// The half width of T's window on a lab axis about an output at t (SPEC §1.7): half of one trap period of the axis,
 /// 2π/ω at its frequency ω > 0, the window no longer than an output interval, cut at t = 0 so that it stays centred there.
 pub fn half_window(frequency: f64, interval: f64, t: f64) -> f64 {
@@ -141,9 +163,8 @@ impl Spread {
         if self.error == 0. {
             return 0.;
         }
-        let tail = -((-normal_tail(CONFIDENCE)).ln_1p() / looks).exp_m1();
         let freedom = (self.groups < f64::INFINITY).then(|| (self.groups.floor() - 1.) as u64);
-        quantile(tail, freedom) * self.error
+        quantile(tail_among(looks), freedom) * self.error
     }
 }
 
@@ -751,6 +772,22 @@ mod tests {
         assert!(((1. - normal_tail(q)).powf(1000.) - (1. - p)).abs() < 1e-13 && (q - 4.08).abs() < 0.01, "{q}");
         assert!(Spread { error: 1., groups: 8. }.interval_over(1000.) > q, "Student's tail is the wider");
         assert_eq!(Spread { error: 0., groups: f64::INFINITY }.interval_over(1e6), 0.);
+    }
+
+    /// The binomial's upper tail (`at_least`): of 88 draws at the share 2.44e-4 one or more meet it with 1 − (1 − p)⁸⁸
+    /// = 2.12 %, two or more with 2.25e-4 (that less 88 p (1 − p)⁸⁷); none or more always; at a share of one half, 88 or more with
+    /// 2⁻⁸⁸, 45 or more with a half less half the middle term; a share of none is met by no draw, one of all by every.
+    /// And Šidák's tail of one look among m (`tail_among`): p at one, 1 − (1 − p)^{1/21} at twenty-one.
+    #[test]
+    fn a_count_s_tail_is_the_binomial_s() {
+        let p = unseen(16384.);
+        assert!((p - 2.44e-4).abs() < 1e-6 && (at_least(1., 88., p) - (1. - (1. - p).powi(88))).abs() < 1e-15 && (at_least(1., 88., p) - 0.0212).abs() < 1e-4);
+        assert!((at_least(2., 88., p) - (1. - (1. - p).powi(88) - 88. * p * (1. - p).powi(87))).abs() < 1e-15 && (at_least(2., 88., p) - 2.25e-4).abs() < 1e-6 && at_least(0., 88., p) == 1.);
+        let middle = (1..=44).fold(1., |c, k| c * (88 - 44 + k) as f64 / k as f64) * 0.5f64.powi(88);
+        assert!((at_least(88., 88., 0.5) - 0.5f64.powi(88)).abs() < 1e-15 && (at_least(45., 88., 0.5) - (0.5 - 0.5 * middle)).abs() < 1e-12);
+        assert_eq!((at_least(1., 88., 0.), at_least(88., 88., 1.)), (0., 1.));
+        let one = tail_among(1.);
+        assert!((one - 0.045_500_263_896).abs() < 1e-9 && (tail_among(21.) - (1. - (1. - one).powf(1. / 21.))).abs() < 1e-15);
     }
 
     /// Wilson's far end at a count of zero: z²/(N + z²), at z = 2 four in N + 4, and the N it is a given share at; a draw of
