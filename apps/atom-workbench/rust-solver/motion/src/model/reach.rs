@@ -442,8 +442,8 @@ impl TermForm {
     /// coupling (units.rs `rounding`: a quantity within γ_N of its operands' scale) -- a field's component that is zero comes
     /// as the last bits of its vector's, and so does every product with it: per pair of basis vectors two coefficients times
     /// an entry, itself the outside forms' nine terms and two folds' sums over the excited states, of the forms' largest
-    /// entry.
-    fn rounding_of(model: &Model, to: usize, from: usize, pairs: &[Mat]) -> f64 {
+    /// entry. The same for every entry of a form: made once with it (units.rs `Model::constants`).
+    pub(crate) fn rounding_of(model: &Model, to: usize, from: usize, pairs: &[Mat]) -> f64 {
         let terms = model.tones[to].basis[0].len() * model.tones[from].basis[0].len() * (2 * EXCITED + 11);
         rounding(terms) * pairs.iter().map(|m| m.max_abs()).fold(0.0, f64::max)
     }
@@ -453,13 +453,13 @@ impl TermForm {
         let between = |lj: usize, li: usize| norm3(model.wave_value(&model.pair_wave(lj, li)));
         // The states' own coupling with every light off is H0, diagonal, less the outside forms at the focus: theirs.
         let own = model.base[(a, b)];
-        if model.beats[beat].0.is_zero() && own.abs() > (0..model.tones.len()).map(|f| TermForm::rounding_of(model, f, f, &model.tones[f].pairs)).fold(0.0, f64::max) {
+        if model.beats[beat].0.is_zero() && own.abs() > (0..model.tones.len()).map(|f| model.constants(f, f).rounding).fold(0.0, f64::max) {
             out.base = own;
         }
         for &(to, from) in &model.beats[beat].1 {
             let (bt, bf) = (&model.light.frequencies[to].beams, &model.light.frequencies[from].beams);
             let constants = model.constants(to, from);
-            let least = TermForm::rounding_of(model, to, from, &constants.pairs);
+            let least = constants.rounding;
             for (x, m) in constants.pairs.iter().enumerate() {
                 let v = m[(a, b)];
                 if v.abs() > least {
