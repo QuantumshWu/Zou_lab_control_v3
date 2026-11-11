@@ -31,16 +31,6 @@
 //! shown, the groups holding an atom read the held atoms' quantities.
 //!
 //! # The step's error
-//! The trajectories that are read hold their step errors at every output (adapt.rs `Drift`). An output's step error
-//! (`stepped`): on each row as shown the mean of the trajectories' rows less their carried states', over all the
-//! trajectories, jackknifed like the estimate it belongs to; on T_a the local errors of the axis's energy carried to
-//! the output by the read trajectories' own regression (transport.rs) over k_B T_a -- T_a is the window mean of
-//! (ħ/m)κ_a², which of a bound axis is its energy --, jackknifed with the transport's replicates; where a step of some
-//! atom there went unread the reads are no numbers. Of the loss energy the mean and the spread
-//! over every read trajectory of its accumulated local errors -- a lost one's as they stood at its loss, where its
-//! loss was decided --, the window within which a loss decision may differ (solve.rs).
-//!
-//! # The step's error between two ensembles
 //! The scheme is of the order p (units.rs `ORDER`): an output's step error at the step τ is e(τ) = C τ^p + O(τ^{p+1}), so
 //! the same output at twice the step differs by Q(2τ) − Q(τ) = (2^p − 1) e(τ) to the leading order, and
 //! e(τ) = [Q(2τ) − Q(τ)]/(2^p − 1) (decide.rs `richardson` at the ratio ½, less the level's own share). `between` takes it
@@ -62,11 +52,8 @@
 //! # What no trajectory saw
 //! A share that n of N independent draws met is bounded at the confidence z by the far end of Wilson's score interval
 //! (`wilson`); at a count of zero, z²/(N + z²) (`unseen`): one function for every such share -- an output's statistics,
-//! whose jackknife reads nothing of a loss or a state no trajectory reached, the reach's unsampled share, and the
-//! trajectories within the step's error of the escape (solve.rs).
-use crate::adapt::Drift;
+//! whose jackknife reads nothing of a loss or a state no trajectory reached, and the reach's unsampled share.
 use crate::decide::{richardson, Read};
-use crate::transport::{transported, Mark};
 use crate::request::STATES;
 use crate::special::upper;
 use crate::units::{CONFIDENCE, KT_PER_UK, ORDER};
@@ -203,18 +190,18 @@ fn student_tail(q: f64, nu: u64) -> f64 {
     1. - a
 }
 
-/// An atom held at an output: its readout's populations (SPEC §1.7), per lab axis its means of κ and κ² over the
-/// output's window (1/µm, 1/µm²), and, where its trajectory is read, what it holds of its step errors (adapt.rs `Drift`).
+/// An atom held at an output: its readout's populations (SPEC §1.7) and per lab axis its means of κ and κ² over the
+/// output's window (1/µm, 1/µm²).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Held {
     pub rows: [f64; STATES],
     pub kappa: [f64; 3],
     pub kappa2: [f64; 3],
-    pub drift: Option<Drift>,
 }
 
-/// What became of a trajectory by an output: its atom is held; it was lost (SPEC §1.7); or the scheme could not advance
-/// its state (adapt.rs) -- no physical outcome: the trajectory is left out of the output's estimates and counted.
+/// One trajectory at one output, what became of it by then: its atom is held; it was lost (SPEC §1.7); or the scheme
+/// could not advance its state (adapt.rs) -- no physical outcome: the trajectory is left out of the output's estimates
+/// and counted.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Fate {
     Held(Held),
@@ -222,20 +209,8 @@ pub enum Fate {
     Failed,
 }
 
-/// One trajectory at one output: its fate; where its loss decision is judged against the step's error, whether its loss
-/// energy lay within that of the escape (solve.rs); and, of a read trajectory, the loss energy's accumulated error where
-/// that decision stood -- at the output while held, at its loss once lost.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Output {
-    pub fate: Fate,
-    pub near: Option<bool>,
-    pub energy: Option<f64>,
-}
-
-/// One output's sums over a group's trajectories: their number (the failed ones apart), the atoms held, and over the held atoms Σρ_s, Σ⟨κ⟩,
-/// Σ⟨κ⟩² (for the U-statistic, module documentation) and Σ⟨κ²⟩ per lab axis; the held atoms that are read, the sums of
-/// their rows' step errors and their unread steps (`Drift`); the trajectories judged against the step's error and those
-/// of them near the escape; the trajectories whose loss energy's error is read, its sum and its squares' (`Output`).
+/// One output's sums over a group's trajectories: their number (the failed ones apart), the atoms held, and over the held
+/// atoms Σρ_s, Σ⟨κ⟩, Σ⟨κ⟩² (for the U-statistic, module documentation) and Σ⟨κ²⟩ per lab axis.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sums {
     pub trajectories: f64,
@@ -245,44 +220,17 @@ pub struct Sums {
     pub kappa: [f64; 3],
     pub kappa_squared: [f64; 3],
     pub kappa2: [f64; 3],
-    pub read: f64,
-    pub shown: [f64; STATES],
-    pub unread: f64,
-    pub judged: f64,
-    pub near: f64,
-    pub energy: [f64; 3],
 }
 impl Sums {
-    pub const ZERO: Sums = Sums {
-        trajectories: 0.,
-        failed: 0.,
-        held: 0.,
-        rows: [0.; STATES],
-        kappa: [0.; 3],
-        kappa_squared: [0.; 3],
-        kappa2: [0.; 3],
-        read: 0.,
-        shown: [0.; STATES],
-        unread: 0.,
-        judged: 0.,
-        near: 0.,
-        energy: [0.; 3],
-    };
+    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3] };
     /// One trajectory at the output.
-    pub fn add(&mut self, output: &Output) {
-        if output.fate == Fate::Failed {
+    pub fn add(&mut self, fate: &Fate) {
+        if *fate == Fate::Failed {
             self.failed += 1.;
             return;
         }
         self.trajectories += 1.;
-        if let Some(near) = output.near {
-            self.judged += 1.;
-            self.near += f64::from(u8::from(near));
-        }
-        if let Some(e) = output.energy {
-            self.energy = [self.energy[0] + 1., self.energy[1] + e, self.energy[2] + e * e];
-        }
-        if let Fate::Held(h) = &output.fate {
+        if let Fate::Held(h) = fate {
             self.held += 1.;
             for (s, r) in self.rows.iter_mut().zip(&h.rows) {
                 *s += r;
@@ -292,17 +240,7 @@ impl Sums {
                 self.kappa_squared[a] += h.kappa[a] * h.kappa[a];
                 self.kappa2[a] += h.kappa2[a];
             }
-            if let Some(d) = &h.drift {
-                self.read += 1.;
-                self.add_read(&d.rows, d.unread, 1.);
-            }
         }
-    }
-    fn add_read(&mut self, rows: &[f64; STATES], unread: f64, sign: f64) {
-        for (s, r) in self.shown.iter_mut().zip(rows) {
-            *s += sign * r;
-        }
-        self.unread += sign * unread;
     }
     /// Another's sums added in with the sign (−1: left out).
     fn combine(&mut self, o: &Sums, sign: f64) {
@@ -317,46 +255,29 @@ impl Sums {
             self.kappa_squared[a] += sign * o.kappa_squared[a];
             self.kappa2[a] += sign * o.kappa2[a];
         }
-        self.read += sign * o.read;
-        self.judged += sign * o.judged;
-        self.near += sign * o.near;
-        for (s, x) in self.energy.iter_mut().zip(&o.energy) {
-            *s += sign * x;
-        }
-        self.add_read(&o.shown, o.unread, sign);
     }
 }
 
-/// One group's sums at every output (module documentation, # Errors), and of each of its read trajectories, in their
-/// order, the motion's mark at every output it is held at (# The step's error).
+/// One group's sums at every output (module documentation, # Errors).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Group {
     pub sums: Vec<Sums>,
-    pub marks: Vec<Vec<Option<Mark>>>,
 }
 impl Group {
     pub fn new(outputs: usize) -> Group {
-        Group { sums: vec![Sums::ZERO; outputs], marks: vec![] }
+        Group { sums: vec![Sums::ZERO; outputs] }
     }
     /// The group's further trajectories, after those it holds.
     pub fn absorb(&mut self, other: Group) {
         for (s, o) in self.sums.iter_mut().zip(&other.sums) {
             s.combine(o, 1.);
         }
-        self.marks.extend(other.marks);
     }
-    /// One trajectory's outputs, in order.
-    pub fn add(&mut self, outputs: &[Output]) {
+    /// One trajectory at every output, in order.
+    pub fn add(&mut self, outputs: &[Fate]) {
         assert_eq!(outputs.len(), self.sums.len(), "a trajectory has every output");
         for (s, o) in self.sums.iter_mut().zip(outputs) {
             s.add(o);
-        }
-        let mark = |o: &Output| match &o.fate {
-            Fate::Held(h) => h.drift.map(|d| d.mark),
-            _ => None,
-        };
-        if outputs.first().is_some_and(|o| mark(o).is_some()) {
-            self.marks.push(outputs.iter().map(mark).collect());
         }
     }
 }
@@ -382,10 +303,6 @@ pub struct Estimate {
     pub shown_errors: [Spread; STATES],
     pub populations: [f64; STATES],
     pub motion: Option<Motion>,
-    /// The trajectories judged against the step's error of the loss energy, and those of them within it of the escape
-    /// (`Sums::judged`, `Sums::near`).
-    pub judged: f64,
-    pub near: f64,
     /// The trajectories the scheme could not advance to the output (`Fate::Failed`): none of the above counts them.
     pub failed: f64,
 }
@@ -534,93 +451,14 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
                 shown_errors: std::array::from_fn(|s| j.every(|m| m[0].shown[s])),
                 populations: if n > 0. { all.rows.map(|r| r / n) } else { [0.; STATES] },
                 motion,
-                judged: all.judged,
-                near: all.near,
                 failed: all.failed,
             }
         })
         .collect()
 }
 
-/// The step's error at one output, read on the trajectories that are read (module documentation, # The step's error):
-/// T's relative error per lab axis where the transport reads it, each row's as shown, and, where some trajectory's is
-/// read, the loss energy's accumulated error -- its mean and its spread between trajectories (rad/µs).
-#[derive(Clone, Debug)]
-pub struct Stepped {
-    pub temperature: Option<[Read; 3]>,
-    pub shown: [Read; STATES],
-    pub energy: Option<[f64; 2]>,
-}
-
-impl Stepped {
-    /// The read of a rung whose errors are `factor` times this one's (the scheme's order between two rungs): every
-    /// error and its spread times it.
-    pub fn times(&self, factor: f64) -> Stepped {
-        let scaled = |r: &Read| Read { value: r.value * factor, spread: Spread { error: r.spread.error * factor, groups: r.spread.groups } };
-        Stepped { temperature: self.temperature.as_ref().map(|t| std::array::from_fn(|a| scaled(&t[a]))), shown: std::array::from_fn(|q| scaled(&self.shown[q])), energy: self.energy.map(|e| e.map(|x| x * factor)) }
-    }
-}
-
-/// The step's error at every output from the groups' sums and their read trajectories' marks: every group has as many
-/// read trajectories as the first (its first members, solve.rs), and a row's error as shown is its sum over the read
-/// trajectories' held atoms over all the read trajectories -- held or lost: the error of the share shown.
-pub fn stepped<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<Stepped> {
-    let outputs = groups.first().map_or(0, |g| g.borrow().sums.len());
-    let hm = scales.hbar_over_mass;
-    let series: Vec<&[Option<Mark>]> = groups.iter().flat_map(|g| g.borrow().marks.iter().map(Vec::as_slice)).collect();
-    let readers: Vec<f64> = groups.iter().map(|g| g.borrow().marks.len() as f64).collect();
-    let members = groups.first().map_or(0, |g| g.borrow().marks.len());
-    let every: f64 = readers.iter().sum();
-    (0..outputs)
-        .into_par_iter()
-        .map(|k| {
-            let mut all = Sums::ZERO;
-            for g in groups {
-                all.combine(&g.borrow().sums[k], 1.);
-            }
-            let rest: Vec<Sums> = groups
-                .iter()
-                .map(|g| {
-                    let mut r = all.clone();
-                    r.combine(&g.borrow().sums[k], -1.);
-                    r
-                })
-                .collect();
-            let reading = groups.iter().filter(|g| Borrow::<Group>::borrow(*g).sums[k].read > 0.).count() as f64;
-            // A read with an unread step behind it is no number (module documentation, # The step's error).
-            let complete = all.unread == 0.;
-            let unread = Read { value: f64::NAN, spread: Spread::UNREAD };
-            // T's relative error per axis: the transported error over k_B T_a, of all the trajectories and without each
-            // group.
-            let moved = if complete && members > 0 { transported(&series, members, k) } else { None };
-            let relative = |a: usize| match (&moved, temperature(&all, hm)) {
-                (Some(m), Some(t)) => Read {
-                    value: m.all[a] / (KT_PER_UK * t[a]),
-                    spread: spread(rest.iter().zip(&m.without).map(|(s, w)| temperature(s, hm).map_or(f64::NAN, |t| w[a] / (KT_PER_UK * t[a]))), reading),
-                },
-                _ => unread,
-            };
-            let read = |f: &dyn Fn(&Sums, f64) -> f64, groups: f64| Read {
-                value: if complete { f(&all, every) } else { f64::NAN },
-                spread: if complete && rest.len() >= 2 { spread(rest.iter().zip(&readers).map(|(s, r)| f(s, every - r)), groups) } else { Spread::UNREAD },
-            };
-            let [count, sum, squares] = all.energy;
-            let energy = (count > 0.).then(|| {
-                let mean = sum / count;
-                [mean, (squares / count - mean * mean).max(0.).sqrt()]
-            });
-            Stepped {
-                temperature: (all.read >= 2. && all.held >= 2.).then(|| std::array::from_fn(relative)),
-                shown: std::array::from_fn(|q| read(&|s: &Sums, readers: f64| s.shown[q] / readers, rest.len() as f64)),
-                energy,
-            }
-        })
-        .collect()
-}
-
-/// The step's error at one output as two ensembles measure it (module documentation, # The step's error between two
-/// ensembles): the loss's and each row's as shown (absolute), and T's per lab axis relative to T, where both levels
-/// hold two atoms at least.
+/// The step's error at one output as two ensembles measure it (module documentation, # The step's error): the loss's
+/// and each row's as shown (absolute), and T's per lab axis relative to T, where both levels hold two atoms at least.
 #[derive(Clone, Debug)]
 pub struct Between {
     pub loss: Read,
@@ -629,7 +467,7 @@ pub struct Between {
 }
 
 /// The step's error of the level `fine` at every output, from it and the level `coarse` at twice its step on the same
-/// trajectories, group by group in the same order (module documentation, # The step's error between two ensembles).
+/// trajectories, group by group in the same order (module documentation, # The step's error).
 pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scales) -> Vec<Between> {
     assert_eq!(fine.len(), coarse.len(), "the two levels hold the same groups");
     let outputs = fine.first().map_or(0, |g| g.borrow().sums.len());
@@ -706,52 +544,6 @@ mod tests {
         let shows = |count: usize| group((0..GROUP as usize).map(|i| Some(atom(usize::from(i >= count), 0., 1.))).collect());
         let read = &between(&[shows(6), shows(6)], &[shows(3), shows(3)], &UNIT)[0];
         assert!((read.shown[0].value + 0.125).abs() < 1e-15 && (read.shown[1].value - 0.125).abs() < 1e-15 && read.loss.value == 0. && read.shown[0].spread.error == 0.);
-    }
-
-    /// The step's error (`stepped`): three groups of eight read atoms over one output interval, each with ⟨κ²⟩ = 4 on
-    /// every axis (k_B T_a = 4 ħ/m) and the local errors 1, 2 and 3 % of k_B T_a made over the interval, its rows' error
-    /// 0.02 on one row, its loss energy's 0.5 and 1.5 in turn; each group's last atom is lost in the interval. T's read
-    /// is those shares with no spread (energies that do not differ carry their errors unchanged, transport.rs); the
-    /// row's as shown is 0.02 on the held atoms over all the trajectories (seven of eight held); the loss energy's mean
-    /// and spread are those of the seven that are read.
-    #[test]
-    fn the_step_s_error_is_the_reads_of_its_trajectories() {
-        let scales = Scales { hbar_over_mass: 1e-3, frequencies: [1.; 3] };
-        let kt = 4. * scales.hbar_over_mass;
-        let atom = |errors: f64, energy: f64, unread: f64| {
-            let mut drift = Drift::ZERO;
-            drift.mark.level = [7.; 3];
-            drift.mark.error = [0.01 * kt * errors, 0.02 * kt * errors, 0.03 * kt * errors];
-            drift.rows[2] = 0.02 * errors;
-            (drift.energy, drift.unread) = (energy * errors, unread);
-            let mut rows = [0.; STATES];
-            rows[2] = 1.;
-            Output { fate: Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [4.; 3], drift: Some(drift) }), near: None, energy: Some(energy * errors) }
-        };
-        let group = |unread: f64| {
-            let mut g = Group::new(2);
-            for i in 0..GROUP {
-                let energy = if i % 2 == 0 { 0.5 } else { 1.5 };
-                let last = if i + 1 < GROUP { atom(1., energy, if i == 0 { unread } else { 0. }) } else { Output { fate: Fate::Lost, near: None, energy: None } };
-                g.add(&[atom(0., energy, 0.), last]);
-            }
-            g
-        };
-        let groups: Vec<Group> = (0..3).map(|_| group(0.)).collect();
-        let read = &stepped(&groups, &scales)[1];
-        let t = read.temperature.as_ref().expect("the held atoms are read");
-        for (a, share) in [0.01, 0.02, 0.03].into_iter().enumerate() {
-            assert!((t[a].value - share).abs() < 1e-15 && t[a].spread.error < 1e-15, "{:?}", t[a]);
-        }
-        let held = (GROUP - 1) as f64 / GROUP as f64;
-        assert!((read.shown[2].value - 0.02 * held).abs() < 1e-15 && read.shown[0].value == 0., "{:?}", read.shown[2]);
-        let energy = read.energy.expect("the trajectories' loss energy errors are read");
-        let (mean, square) = ((4. * 0.5 + 3. * 1.5) / 7., (4. * 0.25 + 3. * 2.25) / 7.);
-        assert!((energy[0] - mean).abs() < 1e-15 && (energy[1] - (square - mean * mean).sqrt()).abs() < 1e-15, "{energy:?}");
-        // One unread step among them: the reads are no numbers (unreadable), whatever the others read.
-        let read = &stepped(&[groups[0].clone(), groups[1].clone(), group(1.)], &scales)[1];
-        assert!(read.shown[2].value.is_nan() && !read.shown[2].spread.read() && read.shown[2].bound(1.) == f64::INFINITY);
-        assert!(read.temperature.as_ref().is_some_and(|t| t.iter().all(|x| x.bound(1.) == f64::INFINITY)));
     }
 
     /// Student's t at ν degrees of freedom at the normal's two-sided tail beyond z.
@@ -837,12 +629,12 @@ mod tests {
     fn atom(state: usize, x: f64, y: f64) -> Held {
         let mut rows = [0.; STATES];
         rows[state] = 1.;
-        Held { rows, kappa: [x; 3], kappa2: [y; 3], drift: None }
+        Held { rows, kappa: [x; 3], kappa2: [y; 3] }
     }
     fn group(atoms: Vec<Option<Held>>) -> Group {
         let mut g = Group::new(1);
         for held in atoms {
-            g.add(&[Output { fate: held.map_or(Fate::Lost, Fate::Held), near: None, energy: None }]);
+            g.add(&[held.map_or(Fate::Lost, Fate::Held)]);
         }
         g
     }

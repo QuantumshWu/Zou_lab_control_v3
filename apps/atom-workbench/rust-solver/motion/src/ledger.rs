@@ -5,9 +5,10 @@
 //! E² = A² + b² + S² (`Account`):
 //! - A, the model's: each unit's error measured along the trajectories (SPEC §5.2), and the share of the thermal ensemble
 //!   that the model's reach leaves out -- the unseen share at the most trajectories a solve runs (SPEC §1.8);
-//! - b, the discretization's, the part a finer one takes away: the step's, the bound of its error read on the pilot
-//!   (SPEC §2.2), standing unless a falsifier refutes it (SPEC §5.3); and at t = 0, where T is the initial ensemble's exact
-//!   moment by quadrature, that quadrature's last two levels' difference (solve.rs `Fixed::start`);
+//! - b, the discretization's, the part a finer one takes away: the step's, the bound of its error as the run's two
+//!   levels measure it at the output (SPEC §2.2; the step's share until they are read); and at t = 0, where T is the
+//!   initial ensemble's exact moment by quadrature, that quadrature's last two levels' difference (solve.rs
+//!   `Fixed::start`);
 //! - S, the statistics': the jackknife's interval at the confidence z, on what is shown no less than what the run's own
 //!   trajectories leave unseen -- an event none of them showed has no spread to read (estimate.rs
 //!   `Estimate::shown_statistics`). The same function as A's share, another error: that one is the model's, at the most
