@@ -31,24 +31,28 @@
 //! number of times over the step (an explicit excited state twenty linewidths off its light turns 48 rad in 0.0625 µs,
 //! and rings at that for 2/Γ after every jump); D(s) is what the motion along the path and the lights' beats change,
 //! slow by the step's own choice. The two are integrated apart:
-//! - Ĥ₀ exactly, for the state and for every time integral of the step: in its eigenbasis its phases and decays are
-//!   factors over any width (the interaction picture, `spectral::Picture`), and the state is taken through the nodes of
-//!   a Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: to
-//!   round-off) -- the kick, the mean populations and the norm's root are read there. These nodes meet no model;
+//! - Ĥ₀ exactly: in its eigenbasis its phases and decays are factors over any width (the interaction picture,
+//!   `spectral::Picture`), so the state is known at any time of the step for n exponentials and two products of n²;
 //! - D through the step's three nodes alone, its middle and its two ends (two more generators of the model; none where
-//!   Ĥ is the same at every time, `Middle::still`: every pair of states holds one wave vector): D(s) = sA + s²B, and
-//!   between two quadrature nodes the first Magnus term of the interaction picture with its integral over Ĥ₀'s
-//!   oscillation exact (`spectral::Picture::hop`). The gradient's slow change is taken through the same three nodes
-//!   (`propagate`).
+//!   Ĥ is the same at every time, `Middle::still`: every pair of states holds one wave vector): D(s) = sA + s²B. A pair
+//!   of Ĥ₀'s states that turns a radian and more between two nodes follows the change (a polynomial in the time, to
+//!   the second order: the generator's own eigenvectors along the path); the slower pairs, with the change's own light
+//!   shift, are two hops of the interaction picture a step, the first Magnus term with its integral over the pair's
+//!   turn exact, and a quintic between the nodes (spectral.rs). The propagation's work is the same whatever Ĥ₀'s
+//!   frequencies times the step are. The gradient's slow change is taken through the same three nodes (`propagate`).
+//! The step's time integrals -- the kick, the mean populations -- are read on that state at the nodes of a
+//! Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: to
+//! round-off), and the norm's root between them. These nodes meet no model and no hop. Their number still follows the
+//! bandwidth: the kick is a quotient by the norm, whose sum of exponentials under the forms' has no closed form (below).
 //! What is left is of the slow change alone (spectral.rs), and neither part of it grows with the detuning times the
 //! step:
 //! - the three nodes are Simpson's rule's: of the fourth order, for the generator and for the gradient alike (their
 //!   cubic is odd about the middle and drops out of the step's integrals);
-//! - a hop leaves the second Magnus term. Where the hops resolve Ĥ₀ -- a folded cluster, whose own frequencies are its
-//!   light shifts -- that is of the fifth order in the step, and the propagation on its path is of the fourth order,
-//!   state and kick. Where they do not -- an explicit far-detuned state, whose hops follow the detuning -- it is the
-//!   light shift of the change itself, at most (k·v τ)²/24 of the light shift's turn over the step: O(τ³) a step like
-//!   the splitting's own error, and a fraction of it.
+//! - a hop leaves the second Magnus term, of the fifth order in the step: where every pair is slow -- a folded
+//!   cluster, whose own frequencies are its light shifts -- the propagation on its path is of the fourth order, state
+//!   and kick;
+//! - a followed pair -- an explicit far-detuned state -- leaves the third order of the following, within its square
+//!   (k·v h V/ω)² at the coupling V and the pair's frequency ω: it falls with the step and with the detuning.
 //! An atom at rest, or a generator still along the path, has D = 0: its state and its kick are exact.
 //!
 //! The step is of the second order all the same: its splitting's. The position is held at r_h through the kick, the
@@ -80,6 +84,19 @@
 //! of the size Γ/Δ times the excited share -- puts a part of the quotient at twice the forms' bandwidth, which the
 //! quadrature does not resolve: the kick errs by a part of that ringing, measured 2·10⁻⁷ of the dipole kick at twenty
 //! linewidths and Δτ = 50, 10⁻⁵ at Δτ = 200 (tests). Without a decay nothing does.)
+//!
+//! Why a quadrature and not a closed form. On the unnormalized state every form is a sum over the pairs of states of
+//! a slow factor times e^{−i(λ_b − λ_a*)s}, whose integral over the step is a closed form pair by pair (the moments
+//! ∫sᵖe^{zs}ds; spectral.rs). The kick is not that: it is the form over the norm ⟨x|x⟩(s), itself such a sum -- its
+//! pairs' weights the eigenvectors' overlaps, which a decay makes non-zero, e^{−Γs} for each decaying state and a
+//! ringing at the detuning wherever the state holds an explicit state's amplitude (after every jump; and at the
+//! following's third order on every step of a moving atom). One over that sum is no sum of exponentials: the
+//! quotient's integral has no closed form, and its series in the ringing costs n⁴ a term. Resolved on nodes it costs
+//! n² a node -- so the nodes stay, as many as the bandwidth asks, each now a state at a time and no hop. A closed form
+//! with the norm's ringing left out would err by that ringing times the fast pairs' share of the force -- by estimate
+//! 10⁻³ of the dipole kick on the step after a jump at twenty linewidths, where the quadrature leaves 10⁻⁵ --, and
+//! where the norm rings by tenths of itself (a light shift of a third of the detuning: the tests' Δτ = 10) no order
+//! of that series is enough.
 //!
 //! A generator's scalar part, tr/n -- the trap's light shift and the decay every state shares --, is a phase and a
 //! factor on the whole state: it goes with Ĥ₀'s eigenvalues, exactly, and the exponentials take it out
@@ -345,7 +362,7 @@ pub struct Trajectory {
     pub capped: Option<f64>,
     pub rate: f64,
     /// The work counted (`decide::Work`, real multiply-adds) of the integrator's own algorithms over the trajectory --
-    /// the generator's decomposition, its hops and their exponentials, the kick's sums, with the model's generators
+    /// the generator's decomposition, its following and hops, the states at the kick's nodes and their sums, with the model's generators
     /// and forces at the step's nodes, the doubling (`adapt` adds each step's) --, the middles it asked the model for
     /// (each costed by
     /// `Dynamics::assembly_work`) and its jumps' photons (`Dynamics::photon_work`).
@@ -565,7 +582,7 @@ fn rules() -> &'static [Rule] {
 }
 
 /// The rule and the panels over a width of an entire integrand of bandwidth ν to round-off: the fewest nodes, each panel
-/// of width w within its rule's phase, νw ≤ x_m. Its node count is the propagation's hops and the kick's sums
+/// of width w within its rule's phase, νw ≤ x_m. Its node count is the propagation's states and the kick's sums
 /// (`propagate`, `count::impulse`).
 fn plan(width: f64, bandwidth: f64) -> (&'static Rule, usize) {
     rules()
@@ -688,12 +705,15 @@ impl<'a, M: Middle> Along<'a, M> {
 /// more: sums[j] += w_j |x⟩⟨x|/⟨x|x⟩ (`mirror` makes them whole).
 fn accumulate(x: &[C64], weights: &[f64], sums: &mut [C64]) {
     let (n, scale) = (x.len(), 1.0 / norm_sqr(x));
+    let mut row = [C64::ZERO; STATES];
     for (a, left) in x.iter().enumerate() {
         let left = *left * scale;
-        for b in a..n {
-            let z = left * x[b].conj();
-            for (sum, w) in sums.chunks_mut(n * n).zip(weights) {
-                sum[a * n + b] += z * *w;
+        for (z, right) in row[a..n].iter_mut().zip(&x[a..]) {
+            *z = left * right.conj();
+        }
+        for (sum, w) in sums.chunks_mut(n * n).zip(weights) {
+            for (sum, z) in sum[a * n + a..(a + 1) * n].iter_mut().zip(&row[a..n]) {
+                *sum += *z * *w;
             }
         }
     }
@@ -736,7 +756,7 @@ fn shear<M: Middle>(along: &Along<M>, rho: &mut [C64], psi: &[C64], tau: f64) ->
 
 /// A trajectory's scratch memory for its steps, made with it and fitted to each step's cluster (`Scratch::fit`): the
 /// generator's picture along the step's path (`spectral::Picture`: the generator at the step's nodes, its decomposition,
-/// a hop's exponent), and one array carved (`Scratch::carve`) into the middle state's density and the nodes' weighted
+/// its following, the state's path), and one array carved (`Scratch::carve`) into the middle state's density and the nodes' weighted
 /// sums of theirs (`propagate`). Every use writes what it reads: nothing a step left in it is read by another.
 #[derive(Default)]
 pub struct Scratch {
@@ -806,7 +826,7 @@ mod count {
     use super::COMPLEX;
     /// The propagation: the model's generator at the step's nodes -- three, or the one of a path it is still along --
     /// and the picture's own count of its complex multiply-adds (`spectral::Picture::work`: the decomposition, the
-    /// slopes, the hops).
+    /// slopes, the following, the hops, the states at the nodes).
     pub fn propagation(model: [f64; 3], still: bool, picture: f64) -> f64 {
         COMPLEX * (if still { 1.0 } else { 3.0 } * model[0] + picture)
     }
@@ -842,10 +862,11 @@ fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64) {
 }
 
 /// The propagation of B over the step on the path through a middle at the momentum κ, the generator taken at it (module
-/// documentation, # The kick): the frame's state hopped from the step's start through the nodes of a quadrature that
+/// documentation, # The kick): the generator's picture launched from the step's start (`spectral::Picture::launch`:
+/// the state is then known at any time of the step), the frame's state read at the nodes of a quadrature that
 /// resolves the generator's own frequencies -- Gauss–Legendre over the step at the bandwidth of the forms on a state it
-/// propagates (`quadrature`) --, by way of the step's middle and to its end, each hop exact in those frequencies
-/// (`spectral::Picture::hop`); and the kick's part of the state by that quadrature.
+/// propagates (`quadrature`) --, at the step's middle and at its end (`spectral::Picture::advance`); and the kick's
+/// part of the state by that quadrature.
 ///
 /// The kick is exact in its decomposition about the middle state x_m held in the frame: its shear at r_h, each tone at
 /// its beat alone (`shear`), and −∫Re tr(Ĝ(u)(ρ(u) − ρ_m))du of the state's change along the path. Ĝ(u) changes along
@@ -857,25 +878,25 @@ fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64) {
 /// matrix, and the kick its one form with ∫ρ(u)du.
 ///
 /// Watched for a threshold (`Watch`), it says whether ‖ψ‖² reaches it at the step's end, and ends where it reaches it
-/// elsewhere (`Crossed`): the norm's root between the nodes that bracket it, by the hop from the earlier one (`root`) --
-/// within the step, or, where the step ends above the threshold, on further nodes of the same quadrature on the same
-/// path beyond its end, as far as the reach.
+/// elsewhere (`Crossed`): the norm's root between the nodes that bracket it, the state read at the root's times
+/// (`spectral::Picture::between`; `root`) -- within the step, or, where the step ends above the threshold, on further
+/// nodes of the same quadrature on the same path followed beyond its end (`spectral::Picture::extend`), as far as the
+/// reach.
 fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [f64; 3], hbar_over_mass: f64, tau: f64, watch: Option<Watch>) -> Result<Propagated, Crossed> {
     let along = Along::new(middle, kappa, kappa.map(|k| hbar_over_mass * k), tau);
     let (n, h, still, model) = (along.n, 0.5 * tau, middle.still(), middle.work());
     let Carved { picture, held, sums } = scratch.carve();
     pictured(&along, picture, tau);
     let (bandwidth, watch) = (picture.bandwidth, watch.filter(|_| tau > 0.0));
-    let (mut state, mut x) = ([C64::ZERO; STATES], [C64::ZERO; STATES]);
+    let mut x = [C64::ZERO; STATES];
     for (x, (z, phase)) in x.iter_mut().zip(psi.iter().zip(&along.half)) {
         *x = *z * *phase;
     }
-    picture.enter(&x[..n], &mut state[..n]);
-    // The norm at a time from the step's start, by the hop from the coordinates `from` at the time `at` from the middle.
-    let through = |picture: &mut Picture, from: &[C64; STATES], at: f64, time: f64| {
-        let (mut y, mut z) = (*from, [C64::ZERO; STATES]);
-        picture.hop(&mut y[..n], at, time - h - at);
-        picture.leave(&y[..n], &mut z[..n]);
+    picture.launch(&x[..n]);
+    // The norm at a time from the step's start, between the last two stops.
+    let between = |picture: &mut Picture, time: f64| {
+        let mut z = [C64::ZERO; STATES];
+        picture.between(time - h, &mut z[..n]);
         norm_sqr(&z[..n])
     };
     let (mut ends, mut weights, mut counted) = ([[C64::ZERO; STATES]; 2], [0.0; 3], 0);
@@ -902,13 +923,11 @@ fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [
             }
             (_, None) => break,
         };
-        let before = state;
-        let bound = picture.hop(&mut state[..n], at, u - at);
-        picture.leave(&state[..n], &mut x[..n]);
+        let bound = picture.advance(u, &mut x[..n]);
         let now = norm_sqr(&x[..n]);
         if let Some(watch) = watch.filter(|watch| !reached && now <= watch.theta) {
             let floor = 2.0 * (picture.rounding + bound) + rounding(n + 1);
-            let crossing = root(|time| through(picture, &before, at, time), (at + h, norm), (u + h, now), watch.theta, floor);
+            let crossing = root(|time| between(picture, time), (at + h, norm), (u + h, now), watch.theta, floor);
             if crossing < tau - watch.slack {
                 return Err(Crossed { at: crossing, work: count::propagation(model, still, picture.work) });
             }
@@ -932,16 +951,15 @@ fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [
         }
         (at, norm) = (u, now);
     }
-    // Above the threshold at its end: the same hops on the same path beyond it, as far as the reach.
+    // Above the threshold at its end: the same path followed beyond it, as far as the reach.
     if let Some(watch) = watch.filter(|watch| !reached && watch.reach > 0.0) {
+        picture.extend(h + watch.reach);
         for u in quadrature(h, h + watch.reach, bandwidth).map(|(u, _)| u).chain(std::iter::once(h + watch.reach)) {
-            let before = state;
-            let bound = picture.hop(&mut state[..n], at, u - at);
-            picture.leave(&state[..n], &mut x[..n]);
+            let bound = picture.advance(u, &mut x[..n]);
             let now = norm_sqr(&x[..n]);
             if now <= watch.theta {
                 let floor = 2.0 * (picture.rounding + bound) + rounding(n + 1);
-                let crossing = root(|time| through(picture, &before, at, time), (at + h, norm), (u + h, now), watch.theta, floor);
+                let crossing = root(|time| between(picture, time), (at + h, norm), (u + h, now), watch.theta, floor);
                 if crossing <= tau + watch.slack {
                     reached = true;
                 } else if crossing <= tau + watch.reach {
@@ -997,7 +1015,7 @@ fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [
 /// the two logarithms' beside it: within it s is the root as far as the norm tells, and the interpolation's next point,
 /// taken without another evaluation, is the root to the norm's actual rounding over its rate. (Beyond it the points
 /// wander in that rounding until the bracket closes on neighbouring numbers: some ten evaluations more.) The norm's rate
-/// 2 Im⟨x|Ĥ|x⟩ is not asked: along a hop it is not the slope of the hop's own norm to the last digit, and a Newton
+/// 2 Im⟨x|Ĥ|x⟩ is not asked: between two nodes it is not the slope of the state's own norm to the last digit, and a Newton
 /// iteration with it converged at that difference's pace, in twice the evaluations.
 fn root(mut norm: impl FnMut(f64) -> f64, (lo, at_lo): (f64, f64), (hi, at_hi): (f64, f64), theta: f64, floor: f64) -> f64 {
     let target = theta.ln();
@@ -1283,9 +1301,9 @@ impl Brownian {
 /// counts, priced without taking the step -- the solve's price of a model it has not run, at its pilot's states and
 /// steps. It makes no middle: the caller's is a state's own, or one of the cluster made once -- the nodes' counts are
 /// the cluster's whatever the point (`Middle::work`), and the point gives the generator's picture alone: its
-/// decomposition and its slopes as the step makes them (`pictured`), the quadrature's nodes at its bandwidth, and a hop
-/// to each of them and to each half's end at the hops' mean width (`spectral::Picture::price`), a state in and out at
-/// each; the kick's sums and forms, and the shear. The middle itself is the model's (`Dynamics::assembly_work`, one a
+/// decomposition, its slopes and its following as the step makes them (`pictured`), the quadrature's nodes at its
+/// bandwidth, and the launch with a state at each of them, at the middle and at the end (`spectral::Picture::price`);
+/// the kick's sums and forms, and the shear. The middle itself is the model's (`Dynamics::assembly_work`, one a
 /// step).
 pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> f64 {
     let (n, costs, still) = (middle.states(), middle.work(), middle.still());
@@ -1295,10 +1313,7 @@ pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau
     let picture = &mut scratch.picture;
     pictured(&along, picture, tau);
     let nodes = nodes(tau, picture.bandwidth);
-    let hops = nodes + 2;
-    let width = tau / hops as f64;
-    let states = if picture.decomposed() { ((hops + 1) * n * n) as f64 } else { 0.0 };
-    let own = picture.work + picture.powers(width) + hops as f64 * picture.price(0.5 * tau, width) + states;
+    let own = picture.work + picture.price(nodes + 2);
     count::propagation(costs, still, own) + count::impulse(n, costs, nodes, still) + count::shear(n, costs)
 }
 
