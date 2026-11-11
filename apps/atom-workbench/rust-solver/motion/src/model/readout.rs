@@ -149,6 +149,7 @@ impl Model {
             Unit::Drive { component, excited, ground } => {
                 format!("{} → {} 的驱动按原子处能级折叠（{}）", self.state_label(*ground), self.state_label(*excited), self.component_label(*component))
             }
+            Unit::Second { ground } => format!("{} 所在簇按原子处能级的折叠只取到二阶", self.state_label(*ground)),
             Unit::Term { a, b, beat } if beat.is_zero() => format!("{} 与 {} 的静态耦合", self.state_label(*a), self.state_label(*b)),
             Unit::Term { a, b, beat } if a == b => format!("{} 上拍频 {} 的能级拍动", self.state_label(*a), self.beat_label(beat)),
             Unit::Term { a, b, beat } => format!("{} 与 {} 在拍频 {} 上的耦合", self.state_label(*a), self.state_label(*b), self.beat_label(beat)),
