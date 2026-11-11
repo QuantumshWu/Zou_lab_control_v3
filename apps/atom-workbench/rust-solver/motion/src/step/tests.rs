@@ -2299,20 +2299,14 @@ fn thermal(trap: &crate::model::Trap, hm: f64, kt: f64, stream: &mut crate::rand
     (r, kappa)
 }
 
-/// A scene's step on its own model (run by name, alone: `SCENE=<a reference scene's name or a native request's path>
-/// TAU=<µs> … a_scene_s_step_cost -- --ignored --nocapture`): the scene's model as the solve closes it (solve.rs
-/// `attempt`: every unit whose fold does not exist over the reach kept, until none fails) with its near tables
-/// (`Model::tabulate`); what the ensemble's draw meets (the prepared well's depth against its envelope's top); and per
-/// cluster what the propagation meets (the generator at the trap's centre, at rest, less its trace, its fastest tone,
-/// each times τ, and the bounds of its Hermitian and decay parts) and a cost case (`cost`): sixteen atoms of the scene's
-/// temperature in the trap's harmonic approximation, each a random state of the cluster, held, one step of τ each.
-#[test]
-#[ignore = "a measurement, not a check: run by name"]
-fn a_scene_s_step_cost() {
+/// A scene's model as the solve closes it (solve.rs `attempt`: every unit whose fold does not exist over the reach kept,
+/// until none fails) with its near tables (`Model::tabulate`), and what the ensemble's draw meets (the prepared well's
+/// depth at its bottom against its envelope's top), said; then per cluster sixteen atoms of the scene's temperature in
+/// the trap's harmonic approximation, each a random state of the cluster, held: to `each` the model, its prepared
+/// trap, the cluster's number, the run and the atoms.
+fn scene_clusters(name: &str, each: &mut dyn FnMut(&crate::model::Model, &crate::model::Trap, usize, &crate::model::Run, &[Trajectory])) {
     use crate::model::{Model, Run, Unit, GROUND};
-    let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
-    let tau: f64 = std::env::var("TAU").expect("TAU: the step (µs)").parse().expect("TAU: a number");
-    let request = scene(&name);
+    let request = scene(name);
     let light = crate::field::Light::new(&request);
     let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
     let mut p = [0.0; GROUND];
@@ -2345,6 +2339,33 @@ fn a_scene_s_step_cost() {
         trap.frequencies
     );
     for (cluster, c) in model.clusters().iter().enumerate() {
+        let starts: Vec<Trajectory> = (0..16)
+            .map(|i| {
+                let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, cluster as u32);
+                let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
+                let mut t = Trajectory::new(&run, c.states[0], r, kappa, 17, i);
+                let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(stream.normal(), stream.normal())).collect();
+                let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+                t.psi = psi.iter().map(|z| *z / norm).collect();
+                t.threshold = f64::MIN_POSITIVE;
+                t
+            })
+            .collect();
+        each(&model, &trap, cluster, &run, &starts);
+    }
+}
+
+/// A scene's step on its own model (run by name, alone: `SCENE=<a reference scene's name or a native request's path>
+/// TAU=<µs> … a_scene_s_step_cost -- --ignored --nocapture`), per cluster on the atoms of `scene_clusters`: what the
+/// propagation meets (the generator at the trap's centre, at rest, less its trace, its fastest tone, each times τ, and
+/// the bounds of its Hermitian and decay parts) and a cost case (`cost`), one step of τ an atom.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn a_scene_s_step_cost() {
+    let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
+    let tau: f64 = std::env::var("TAU").expect("TAU: the step (µs)").parse().expect("TAU: a number");
+    scene_clusters(&name, &mut |model, trap, cluster, run, starts| {
+        let c = &model.clusters()[cluster];
         // What the propagation meets: the generator at the trap's centre, at rest, less its trace, and its fastest tone.
         {
             let (middle, n) = (run.middle(cluster, trap.centre, 0.0), c.states.len());
@@ -2367,20 +2388,8 @@ fn a_scene_s_step_cost() {
             let crate::linalg::Bounds { rho, gamma, .. } = crate::linalg::bounds(&h, &mut vec![C64::ZERO; n]);
             eprintln!("{name} cluster {cluster}: its generator's bounds ρ {rho:.3e}, γ {gamma:.3e} rad/µs, times τ {:.3e}, {:.3e}", rho * tau, gamma * tau);
         }
-        let starts: Vec<Trajectory> = (0..16)
-            .map(|i| {
-                let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, cluster as u32);
-                let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
-                let mut t = Trajectory::new(&run, c.states[0], r, kappa, 17, i);
-                let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(stream.normal(), stream.normal())).collect();
-                let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
-                t.psi = psi.iter().map(|z| *z / norm).collect();
-                t.threshold = f64::MIN_POSITIVE;
-                t
-            })
-            .collect();
-        cost(&format!("{}+{} of {}", c.ground, c.states.len() - c.ground, std::path::Path::new(&name).file_stem().unwrap().to_string_lossy()), &run, &starts, tau);
-    }
+        cost(&format!("{}+{} of {}", c.ground, c.states.len() - c.ground, std::path::Path::new(&name).file_stem().unwrap().to_string_lossy()), run, starts, tau);
+    });
 }
 
 /// The step's cost (run by name, alone: `the_step_s_cost -- --ignored --nocapture`): µs per `step_of` and per phase,
@@ -2640,50 +2649,9 @@ fn a_diffusion_s_energy_input_does_not_know_the_trap() {
 // ---------------------------------------------------------------------------------------------------------------------
 // The split of the propagation's pairs (spectral.rs) on a scene's own model.
 
-/// A scene's model as the solve closes it, tabulated (as `a_scene_s_step_cost` makes it), and per cluster its label and
-/// sixteen held atoms of the scene's temperature, each a random state of the cluster -- that harness's draws --, to `each`.
-fn scene_clusters(name: &str, each: &mut dyn FnMut(&str, &crate::model::Run, &[Trajectory])) {
-    use crate::model::{Model, Run, Unit, GROUND};
-    let request = scene(name);
-    let light = crate::field::Light::new(&request);
-    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let mut p = [0.0; GROUND];
-    p[state] = 1.0;
-    let mut kept: Vec<Unit> = vec![];
-    let (model, trap, reach) = loop {
-        let model = Model::new(&request, &light, &kept).unwrap();
-        let trap = model.trap(&p, &model.prepared()).unwrap();
-        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
-        let units = model.units();
-        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-        if failing.is_empty() {
-            break (model, trap, reach);
-        }
-        kept.extend(failing);
-    };
-    let tables = model.tabulate(&reach, 1 << 20);
-    let run = Run::tabulated(&model, &tables, p);
-    let kt = crate::units::KT_PER_UK * request.temperature_uk;
-    for (cluster, c) in model.clusters().iter().enumerate() {
-        let starts: Vec<Trajectory> = (0..16)
-            .map(|i| {
-                let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, cluster as u32);
-                let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
-                let mut t = Trajectory::new(&run, c.states[0], r, kappa, 17, i);
-                let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(stream.normal(), stream.normal())).collect();
-                let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
-                t.psi = psi.iter().map(|z| *z / norm).collect();
-                t.threshold = f64::MIN_POSITIVE;
-                t
-            })
-            .collect();
-        each(&format!("{}+{}", c.ground, c.states.len() - c.ground), &run, &starts);
-    }
-}
-
 /// What the split of the propagation's pairs does to a scene's step (run by name, alone: `SCENE=<a reference scene's
 /// name or a native request's path> TAU=<µs> SPLITS=<`rule`, and the turns to force in the rule's place, comma separated> …
-/// a_scene_s_step_error_by_the_split -- --ignored --nocapture`), per cluster on the atoms of `scene_clusters`, held:
+/// a_scene_s_step_error_by_the_split -- --ignored --nocapture`), per cluster on the atoms of `scene_clusters`:
 /// - what the split meets: the pairs of the middle's generator by their turn x = |ω| h, and the sizes of their change
 ///   over a half step, its slope's and its curvature's parts (`spectral::Picture::pairs`), at τ, τ/2 and τ/4;
 /// - the propagation's own error: the frame's state over the span τ on the step's path (the path of the step of τ:
@@ -2693,7 +2661,13 @@ fn scene_clusters(name: &str, each: &mut dyn FnMut(&str, &crate::model::Run, &[T
 ///   and what those states' errors make of the path's impulse: the force's form (`Middle::force`) on the picture's
 ///   state less on the flow's at the sixteenths, by Simpson's weights, relative to the atom's momentum;
 /// - what a check reads: one step of the engine against its two halves, at τ, τ/2 and τ/4 -- the state's difference
-///   and the momentum's, relative to the momentum.
+///   and the momentum's, relative to the momentum --, from states a run holds: the atom's state on the ground states
+///   alone, as a jump leaves it (no jump lands in an explicit excited state), and that state a step of τ on. Not from
+///   the cluster's random state: an excited share of that size (five of GMD1C's thirteen amplitudes) is none a
+///   trajectory holds. It decays within 1/Γ of the step's start and takes the far light's force on the excited
+///   states the while, a kick the step reads with the light at its middle -- the first order of what a state does
+///   within 1/Γ (step.rs, # Jumps) --, and a step against its halves then falls twofold a halving where the scheme's
+///   falls eightfold.
 /// Each the mean over the atoms, and the falls from a level to the next.
 #[test]
 #[ignore = "a measurement, not a check: run by name"]
@@ -2703,8 +2677,10 @@ fn a_scene_s_step_error_by_the_split() {
     let tau: f64 = std::env::var("TAU").expect("TAU: the step (µs)").parse().expect("TAU: a number");
     let splits: Vec<Option<f64>> = std::env::var("SPLITS").map_or(vec![None], |s| s.split(',').map(|x| (x != "rule").then(|| x.parse().expect("SPLITS: `rule` or numbers"))).collect());
     let apart = |a: &[C64], b: &[C64]| a.iter().zip(b).map(|(x, y)| (*x - *y).norm_sqr()).sum::<f64>().sqrt();
-    scene_clusters(&name, &mut |label, run, starts| {
+    scene_clusters(&name, &mut |model, _, cluster, run, starts| {
         let (hm, n, count) = (run.hbar_over_mass(), starts[0].psi.len(), starts.len() as f64);
+        let ground = model.clusters()[cluster].ground;
+        let label = format!("{ground}+{}", n - ground);
         let falls = |e: &[f64; 3]| format!("{:.3e} {:.3e} {:.3e} (falls {:.1}, {:.1})", e[0], e[1], e[2], e[0] / e[1], e[1] / e[2]);
         // Each atom's path of the step of τ, its frame's start state and the path's own flow to the span's end.
         let middles: Vec<_> = starts.iter().map(|s| step::Midway::new(run, s, tau).unwrap()).collect();
@@ -2747,12 +2723,21 @@ fn a_scene_s_step_error_by_the_split() {
         for &split in &splits {
             let mut pairs = [[0usize; 5]; 3];
             let mut sizes = [[[0.0_f64; 2]; 5]; 3];
-            let (mut own, mut inside, mut impulse, mut state, mut momentum) = ([0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3]);
+            let (mut own, mut inside, mut impulse) = ([0.0; 3], [0.0; 3], [0.0; 3]);
+            // What a check reads, the state's difference and the momentum's, from each of its two states.
+            let mut read = [([0.0; 3], [0.0; 3]); 2];
             let size = |k: [f64; 3]| dot3(k, k).sqrt();
             let mut rho = vec![C64::ZERO; n * n];
             SPLIT.set(split);
             for ((s, (along, start, exact)), through) in starts.iter().zip(&cases).zip(&middles) {
                 let still = through.generator.still();
+                // The states a check reads from: the atom's on the ground states alone, and that state a step of τ on.
+                let mut scratch = step::Scratch::default();
+                let mut landed = s.clone();
+                landed.psi[ground..].fill(C64::ZERO);
+                let norm = crate::linalg::norm_sqr(&landed.psi).sqrt();
+                landed.psi.iter_mut().for_each(|z| *z = *z / norm);
+                let later = step_of(run, &landed, tau, &mut scratch).unwrap().end;
                 for level in 0..3 {
                     let steps = 1 << level;
                     let (t, mut x, marks) = (tau / steps as f64, start.clone(), exact.len());
@@ -2794,12 +2779,13 @@ fn a_scene_s_step_error_by_the_split() {
                     }
                     own[level] += apart(&x, &exact[marks - 1]) / count;
                     impulse[level] += size(kick) / size(s.kappa) / count;
-                    let mut scratch = step::Scratch::default();
-                    let whole = step_of(run, s, t, &mut scratch).unwrap().end;
-                    let half = step_of(run, s, 0.5 * t, &mut scratch).unwrap().end;
-                    let halves = step_of(run, &half, 0.5 * t, &mut scratch).unwrap().end;
-                    state[level] += apart(&whole.psi, &halves.psi) / count;
-                    momentum[level] += size(std::array::from_fn(|a| whole.kappa[a] - halves.kappa[a])) / size(s.kappa) / count;
+                    for (from, (state, momentum)) in [&landed, &later].into_iter().zip(&mut read) {
+                        let whole = step_of(run, from, t, &mut scratch).unwrap().end;
+                        let half = step_of(run, from, 0.5 * t, &mut scratch).unwrap().end;
+                        let halves = step_of(run, &half, 0.5 * t, &mut scratch).unwrap().end;
+                        state[level] += apart(&whole.psi, &halves.psi) / crate::linalg::norm_sqr(&from.psi).sqrt() / count;
+                        momentum[level] += size(std::array::from_fn(|a| whole.kappa[a] - halves.kappa[a])) / size(from.kappa) / count;
+                    }
                 }
             }
             SPLIT.set(None);
@@ -2811,8 +2797,10 @@ fn a_scene_s_step_error_by_the_split() {
             eprintln!("  the propagation's own error over the span in 1, 2, 4 steps: {}", falls(&own));
             eprintln!("  the propagation's own error inside those steps (at the span's sixteenths): {}", falls(&inside));
             eprintln!("  the path's impulse by those states against the flow's, relative to the momentum: {}", falls(&impulse));
-            eprintln!("  a step against its halves at τ, τ/2, τ/4: the state {}", falls(&state));
-            eprintln!("  a step against its halves at τ, τ/2, τ/4: the momentum {}", falls(&momentum));
+            for (from, (state, momentum)) in ["as a jump leaves it", "a step of τ on"].into_iter().zip(&read) {
+                eprintln!("  a step against its halves at τ, τ/2, τ/4, from a state {from}: the state {}", falls(state));
+                eprintln!("  a step against its halves at τ, τ/2, τ/4, from a state {from}: the momentum {}", falls(momentum));
+            }
         }
     });
 }
