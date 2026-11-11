@@ -413,9 +413,7 @@
     0.0624058579348366,
     0.06303622013619858
    ],
-   "target": {
-    "relative": 0.1
-   }
+   "target": null
   },
   {
    "quantity": "Tincrease",
@@ -729,9 +727,7 @@
     0.051844383957760865,
     0.05236806460379885
    ],
-   "target": {
-    "relative": 0.1
-   }
+   "target": null
   },
   {
    "quantity": "Tincrease",
@@ -1045,13 +1041,11 @@
     0.00011799807472303216,
     0.00011918997446770927
    ],
-   "target": {
-    "relative": 0.1
-   }
+   "target": null
   }
  ],
  "info": {
-  "source": "kick/runs/qrt_R5051_n.jsonl (NS scratchpad)",
+  "source": "refs/data/qrt_R5051_n.jsonl",
   "cutoffs": [
    {
     "gamma": 0,

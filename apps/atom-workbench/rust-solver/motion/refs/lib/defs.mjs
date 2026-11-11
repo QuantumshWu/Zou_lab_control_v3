@@ -21,7 +21,7 @@ const DEFAULT_TWEEZER={nm:852,powerMW:4,waistUm:1.2};
 export const R10_S0=0.02;
 /** R10's two settings. The app's scene: 87Rb at 2 µK, in the tweezer's radial ground state (ħω/k_B = 8.2 µK: the atom's
  * extent is the zero-point one, kσ_z = 0.15), 120 µs -- 43 photons at the antinode, 8 µK of heating along z at the
- * node; k_BT is below 4ħω, where the solver reports T without holding it to its target (it runs 96 trajectories). And
+ * node; k_BT is below the solver's validated regime (its result says so per output: `classical`). And
  * the held atom: the request's mass ×100 (the R8 device) makes it a classical point in the same light and the same
  * springs -- the extent σ² = k_BT/mω² does not depend on the mass, ħω ∝ m^{−1/2} does: at 5 µK k_BT = 6.1ħω on the
  * stiff axes and kσ_z = 0.17 --, the recoil energy and with it every heating rate 100 times smaller: 7.2 ms (2700

@@ -1,0 +1,40 @@
+{
+ "id": "R4D_TW2",
+ "reference": "R4",
+ "title": "R4D 一维阱内 T_z(t)：引擎对同一模型的相空间方程（只报告：点粒子模型的已知缺陷）",
+ "kind": "tool",
+ "reported": true,
+ "tool": {
+  "command": "node r4d.mjs tz",
+  "scene": "R4_TW2",
+  "temperatureUK": 30,
+  "atoms": 8192,
+  "tauUs": 0.3125,
+  "spanUs": 1000,
+  "everyUs": 10,
+  "shownUs": [
+   100,
+   200,
+   300,
+   400,
+   500,
+   600,
+   700,
+   800,
+   900,
+   1000
+  ],
+  "data": "data/R4D_TW2.json"
+ },
+ "derivation": "T_z(t) of R4_TW2 with x and y held at the trap's centre (the 1D problem; a 3D run differs from it by the tweezer's own exchange between its two tight axes, which the engine integrates exactly: diffusion.status.md §9) from the thermal start, the engine's own dynamics (diffusion free), against the same closed model's second-order phase-space (Wigner) equation and its master equation in the position representation (diffusion/pde.py b and x: no trajectories; recorded in data/R4D_TW2.json from the model of the line at 0491ae13, diffusion/export.py). Reported, never judged: the gap is the Ehrenfest mean force's dropped traceless part (expect.mjs r4d), measured at 0491ae13 as −2.3 % at 100 µs, −9.7 % at 500 µs, −13.6 % at 1 ms against the second-order equation, which itself is within 2.6 % of the quantum answer; in the steady states of the R4_LIN scenes the coordinator's 1D figure is 18–27 %. Accepted by the owner; no part of the error budget.",
+ "conditions": [
+  {
+   "what": "second-order equation against the same model's quantum answer at 100, 500, 1000 µs (relative)",
+   "value": [
+    -0.005875707088523363,
+    -0.013789856416007162,
+    -0.026287225375906553
+   ]
+  }
+ ]
+}

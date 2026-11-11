@@ -263,6 +263,76 @@ export function preparedTrap(line,label){
   return {beams:form.beams,centre,focus,depth:-at.value.re,omegas,
     u:omegas.map((w,a)=>w*((bound(at.hessian[a][a])+Math.hypot(...at.third[a].map(real))*off)/(2*H[a][a])+roundoff(6)))};
 }
+/** A x = b for a complex n × n matrix (rows of {re, im}): Gauss–Jordan elimination with partial pivoting. */
+function solveComplex(A,b){
+  const n=b.length,M=A.map((row,i)=>[...row.map(z=>({re:z.re,im:z.im})),{re:b[i].re,im:b[i].im}]);
+  for(let c=0;c<n;c++){
+    let p=c;for(let r=c+1;r<n;r++)if(Math.hypot(M[r][c].re,M[r][c].im)>Math.hypot(M[p][c].re,M[p][c].im))p=r;
+    [M[c],M[p]]=[M[p],M[c]];const d=M[c][c],dd=d.re*d.re+d.im*d.im;
+    for(let k=c;k<=n;k++){const z=M[c][k];M[c][k]={re:(z.re*d.re+z.im*d.im)/dd,im:(z.im*d.re-z.re*d.im)/dd};}
+    for(let r=0;r<n;r++){const f=M[r][c];if(r===c||(!f.re&&!f.im))continue;for(let k=c;k<=n;k++){const z=M[c][k];M[r][k]={re:M[r][k].re-(f.re*z.re-f.im*z.im),im:M[r][k].im-(f.re*z.im+f.im*z.re)};}}
+  }
+  return M.map(row=>row[n]);
+}
+/** The running trap of the ground state `label` (SPEC §1.3: the reported trap): the trap light's potential with the
+ * other lights' smooth shift of that state, each beam's own intensity, their phases averaged -- in second order of
+ * those lights, from the request alone, for a trap of one beam (y(r) = |a(r)|², its intensity over the focus').
+ *
+ * A beam l of another frequency drives g at ν_l with the couplings x_l = X^l[:, g] into the excited states, whose
+ * Hamiltonian at the intensity y is K(y) = H0_ee + (y − 1) O_ee + y C_ee − (i/2)D: the request's H0 (diagonal: it holds
+ * the trap light's outside form at the focus), the outside form O of the trap beam's field, the excited block of the
+ * trap light's own couplings through the ground states b, C_fe = ½ Σ_b [X_fb conj(X_eb) (1/(E_e − E_b − Δ) +
+ * 1/(E_f − E_b − Δ)) + R_fb conj(R_eb) (1/(E_e − E_b + Δ + 2ω_f) + 1/(E_f − E_b + Δ + 2ω_f))] (co- and counter-rotating;
+ * each excited state read at its own energy), and the decay D = Σ_a C_a†C_a. The ground state sits at
+ * E_g(y) = E_g + y s_g − O_gg, s_g = V_prep at the focus (`trapForm`: outside and couplings). The atom at rest that
+ * absorbs a photon of beam l moves with ħk_l: the excited states stand ħk_l²/2m higher. So
+ *   U(y) = −Σ_l Re[x_l† M_l(y)⁻¹ x_l],  M_l(y) = K(y) + ħk_l²/2m − E_g(y) − ν_l,
+ * which for one excited level alone is |X|²δ/(δ² + Γ²/4), δ the light's detuning from the line. The trap light does
+ * not only move the excited levels: its C and O couple those of one m across the hyperfine levels (10 to 25 MHz
+ * against splittings of 72 to 267 MHz in the references' tweezers), so the levels and the couplings x_l change
+ * together and neither is linear in y: the matrix is kept whole. V_run = s_g y + U(y) is a function of y alone, whose
+ * gradient vanishes at the focus, so there ∂²V_run = (s_g + U′(1)) ∂²y = ∂²V_prep (1 + U′(1)/s_g) with
+ *   U′(1) = Σ_l Re[(M_l⁻†x_l)† (O_ee + C_ee − s_g) (M_l⁻¹x_l)]
+ * (dM/dy = dK/dy − dE_g/dy). Returns the prepared trap, that factor, the excited population the lights make in second
+ * order, s = Σ_l ‖M_l⁻¹x_l‖², the running frequencies along the lab axes (rad/µs) and their uncertainty u:
+ * - the prepared trap's (`preparedTrap`);
+ * - the next order of the other lights, which this potential leaves out: for one level far from the light the dressed
+ *   state's shift is (−δ + sgn δ √(δ² + 4|X|²))/2 = |X|²/δ − |X|⁴/δ³ + …, whose derivative with the line's position is
+ *   −|X|²/δ² (1 − 3|X|²/δ² + …): the factor's departure from 1 is uncertain by 3s of itself;
+ * - the solves' rounding: that of each x → M⁻¹x as one step of iterative refinement reads it (‖M⁻¹(x − My)‖/‖y‖),
+ *   of the term it enters. */
+export function runningTrap(line,label){
+  const m=line.model.motion,labels=line.model.states,g=index(line,label),E=frameEnergies(line),of=x=>String(x.frequencyIndex),trap=m.beams.find(x=>x.id===m.trapBeamId),prepared=preparedTrap(line,label);
+  if(m.beams.filter(x=>of(x)===of(trap)).length!==1)throw new Error(`${line.id}: the running trap is written for a trap of one beam`);
+  const ground=labels.map((_,i)=>i).filter(i=>labels[i].startsWith('ground-')),ex=labels.map((_,i)=>i).filter(i=>!labels[i].startsWith('ground-'));
+  const add=(a,b)=>({re:a.re+b.re,im:a.im+b.im}),mul=(a,b)=>({re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re}),conj=a=>({re:a.re,im:-a.im}),times=(a,s)=>({re:a.re*s,im:a.im*s}),norm=v=>Math.hypot(...v.flatMap(z=>[z.re,z.im]));
+  const O=m.outsideForms.find(x=>of(x)===of(trap)).matrices,F=trap.electricField,delta=frameDetuning(line,trap.id),frame=e=>2*RAD_PER_MHZ*(m.frameFrequenciesMHz[e]-m.frameFrequenciesMHz[g]);
+  // The outside form on a pair of states in the trap beam's field (`trapForm`'s, off the diagonal too).
+  const outside=(i,j)=>{let z={re:0,im:0};
+    for(let p=0;p<3;p++)for(let q=0;q<3;q++){const at=3+2*(p+q-1);let form=entry(O[q],i,j);
+      if(p!==q){const X=entry(O[at],i,j),Y=entry(O[at+1],i,j);form=times(add(X,times({re:-Y.im,im:Y.re},p<q?-1:1)),0.5);}
+      z=add(z,mul(mul(conj(F[p]),F[q]),form));}
+    return z;};
+  const C=ex.map(f=>ex.map(e=>{let z={re:0,im:0};
+    for(const b of ground){const xf=entry(trap.coupling,f,b),xe=entry(trap.coupling,e,b),rf=entry(trap.counterCoupling,f,b),re=entry(trap.counterCoupling,e,b);
+      z=add(z,times(mul(xf,conj(xe)),0.5*(1/(E[e]-E[b]-delta)+1/(E[f]-E[b]-delta))));
+      z=add(z,times(mul(rf,conj(re)),0.5*(1/(E[e]-E[b]+delta+frame(e))+1/(E[f]-E[b]+delta+frame(f)))));}
+    return z;}));
+  const D=ex.map(f=>ex.map(e=>{let z={re:0,im:0};for(const c of m.emission)for(const b of ground)z=add(z,mul(conj(entry(c,b,f)),entry(c,b,e)));return z;}));
+  const sg=-prepared.focus,ground0=E[g]+sg-outside(g,g).re,slopeOf=ex.map((f,i)=>ex.map((e,j)=>add(add(C[i][j],outside(f,e)),{re:i===j?-sg:0,im:0})));
+  let derivative=0,population=0,rounding=0;
+  for(const b of m.beams.filter(x=>of(x)!==of(trap))){
+    const x=ex.map(e=>entry(b.coupling,e,g));if(!norm(x))continue;
+    const level=frameDetuning(line,b.id)+ground0-recoilRate(b.waveNumberPerUm,m.massKg);
+    const M=ex.map((e,i)=>ex.map((_,j)=>add(add(C[i][j],{re:i===j?E[e]-level:0,im:0}),{re:D[i][j].im/2,im:-D[i][j].re/2}))),Mh=ex.map((_,i)=>ex.map((_,j)=>conj(M[j][i])));
+    const solved=A=>{const y=solveComplex(A,x),rest=x.map((z,i)=>A[i].reduce((t,a,j)=>add(t,times(mul(a,y[j]),-1)),z));return {y,error:norm(solveComplex(A,rest))/norm(y)};};
+    const right=solved(M),left=solved(Mh);
+    const term=ex.reduce((t,_,i)=>t+ex.reduce((q,_,j)=>q+mul(mul(conj(left.y[i]),slopeOf[i][j]),right.y[j]).re,0),0);
+    derivative+=term;population+=norm(right.y)**2;rounding+=(right.error+left.error)*Math.abs(term);
+  }
+  const factor=1+derivative/sg,uFactor=3*population*Math.abs(factor-1)+rounding/Math.abs(sg),omegas=prepared.omegas.map(w=>w*Math.sqrt(factor));
+  return {prepared,factor,population,omegas,u:omegas.map((w,a)=>Math.hypot(prepared.u[a]*Math.sqrt(factor),w*uFactor/(2*factor)))};
+}
 /** The thermal harmonic oscillator's Wigner temperature T* = (ħω/2k_B) coth(ħω/2k_BT) (µK) at ω (rad/µs), T (µK). */
 export function wignerTemperature(omega,T){const h=omega/(2*KT_PER_UK*T);return h>1e-8?T*h/Math.tanh(h):T;}
 
@@ -275,14 +345,15 @@ export function kineticRatio(measure){
 }
 /** The space integral ∫ d³r F(y(r)) for a single Gaussian beam of peak depth y₀ (k_BT units): with u = 2ρ²/w(z)² the
  * radial integral is (π w(z)²/2) ∫_0^{y_z} F(t) dt/t, y_z = y₀/(1 + z²/z_R²); with z = z_R tan θ the axial one is
- * (π w₀² z_R/2) ∫ sec⁴θ G(y₀ cos²θ) dθ over (−π/2, π/2), whose integrand ~ cos^{2s−2}θ at the ends (finite). */
-export function beamMeasure(y0){
+ * (π w₀² z_R/2) ∫ sec⁴θ G(y₀ cos²θ) dθ over (−π/2, π/2), whose integrand ~ cos^{2s−2}θ at the ends (finite); `n` panels
+ * of n nodes along the axis and 2n nodes across (a coarser n reads the quadrature's error). */
+export function beamMeasure(y0,n=24){
   const m=F=>{
     const G=Y=>{if(!(Y>0))return 0;let s=0;const lo=Math.max(Y*1e-12,1e-300);
       // ∫_0^Y F(t)/t dt with t = Y e^{−v}, v ∈ (0, ln(Y/lo)): F(t)/t dt = F(t) dv.
-      const V=Math.log(Y/lo);for(const [v,w] of gaussLegendre(48,0,Math.min(V,6)))s+=w*F(Y*Math.exp(-v));
-      if(V>6)for(const [v,w] of gaussLegendre(48,6,V))s+=w*F(Y*Math.exp(-v));return s;};
-    return integrate(th=>{const c=Math.cos(th);return G(y0*c*c)/(c*c*c*c);},-Math.PI/2,Math.PI/2,{panels:24,n:24});
+      const V=Math.log(Y/lo);for(const [v,w] of gaussLegendre(2*n,0,Math.min(V,6)))s+=w*F(Y*Math.exp(-v));
+      if(V>6)for(const [v,w] of gaussLegendre(2*n,6,V))s+=w*F(Y*Math.exp(-v));return s;};
+    return integrate(th=>{const c=Math.cos(th);return G(y0*c*c)/(c*c*c*c);},-Math.PI/2,Math.PI/2,{panels:n,n});
   };
   m.shift=y0;return m;
 }

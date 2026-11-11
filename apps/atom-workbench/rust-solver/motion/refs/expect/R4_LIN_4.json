@@ -6,7 +6,7 @@
  "durationUs": 400,
  "samples": 101,
  "kind": "pass-fail",
- "derivation": "A member of R4_LINEAR (the scaling law at three intensities): alone it is judged by its reported trap only, the prepared one of |2,2⟩ with the lin⊥lin pairs’ phase-averaged shift.",
+ "derivation": "A member of R4_LINEAR (the scaling law at three intensities): alone it is judged by its reported trap only, the prepared one of |2,2⟩ with the lin⊥lin pairs’ phase-averaged shift (lib/phys.mjs runningTrap: the trap light mixes the excited levels these pairs reach, so the resolvent is kept whole).",
  "conditions": [
   {
    "what": "δ from the cycle’s line in the trap / Γ",
@@ -34,42 +34,49 @@
   {
    "what": "pumping times over the run",
    "value": 40.77832369234565
+  },
+  {
+   "what": "running trap: ∂²V_run over ∂²V_prep, less 1",
+   "value": -0.042675530381738325
+  },
+  {
+   "what": "excited population the other lights make in second order (the running trap's next order is 3 times it, of the line above)",
+   "value": 0.036152054995809875,
+   "limit": "≪ 1"
+  },
+  {
+   "what": "the one-level formula on the level chart, its factor less the running trap's (zero but for the trap light's mixing of the excited levels the light reaches, the far fold's fourth order and the recoil)",
+   "value": 0.0002466113636380163
   }
  ],
  "series": [
   {
    "quantity": "trapFrequency",
    "axis": "x",
-   "value": 0.7654490169398007,
-   "u": 0.0002430422361498143,
-   "target": {
-    "relative": 0
-   }
+   "value": 0.7653504443194705,
+   "u": 0.001850138984239838,
+   "target": null
   },
   {
    "quantity": "trapFrequency",
    "axis": "y",
-   "value": 19.957748693614636,
-   "u": 0.006336902594359355,
-   "target": {
-    "relative": 0
-   }
+   "value": 19.955178584383212,
+   "u": 0.04823914862685888,
+   "target": null
   },
   {
    "quantity": "trapFrequency",
    "axis": "z",
-   "value": 19.957748693614636,
-   "u": 0.006336902594359355,
-   "target": {
-    "relative": 0
-   }
+   "value": 19.955178584383212,
+   "u": 0.04823914862685888,
+   "target": null
   }
  ],
  "info": {
   "trapKHz": [
-   0.7654490169398007,
-   19.957748693614636,
-   19.957748693614636
+   0.7653504443194705,
+   19.955178584383212,
+   19.955178584383212
   ],
   "modulationUK": 156.56262230613194,
   "deepestShiftUK": 348.6061846577147,
