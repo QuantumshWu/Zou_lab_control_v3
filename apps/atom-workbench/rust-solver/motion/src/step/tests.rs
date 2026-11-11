@@ -583,12 +583,15 @@ fn a_step_integrates_its_internal_frequencies_whatever_the_detuning() {
 /// does not move: the steps' paths are the reference's, and a step is its propagation. The state against the path's
 /// sub-stepped reference, and the kick against the reference of the step's own decomposition (`decomposed`): what
 /// the propagation leaves of the path's change, without the splitting.
-/// - Where the hops resolve the generator (Δτ = 1 over the span: two hops a step) both fall as the fourth order,
-///   sixteen a halving: a hop's second Magnus term is then of the fifth order in the step, and so is the three nodes'
-///   representation of the change (Simpson's rule's).
-/// - Where they do not (Δτ = 10 and more: the hops follow the detuning, not the step) the state falls as the second
-///   order: a hop leaves the light shift of the change itself, the second Magnus term, which the hop's width does not
-///   shrink. It does not grow with the detuning. The kick's error there is what that leaves of the state's.
+/// - Where the step's nodes resolve the pair (it turns less than a radian between two of them: Δτ = 1 in two and in
+///   four steps) the state is hopped, and both fall as the fourth order, sixteen a halving: a hop's second Magnus term
+///   is of the fifth order in the step, and so is the three nodes' representation of the change (Simpson's rule's).
+/// - Where they do not (Δτ = 1 in one step, Δτ = 10 and more in any) the state follows the change, by the following
+///   X = D/ω and its rate's corrections, to the second order. Its error is within the square of the following at the
+///   step's end, (k·v h V/ω)² with V the light's largest coupling and ω the dressed pair's frequency -- held to that
+///   here, and measured an order and more below it --, so it falls with the step and with the detuning. (The hops
+///   through an unresolved pair that this replaces left the light shift of the change, (k·v τ)²/24 of the light shift's
+///   turn at any detuning: 3·10⁻³ a step here, where the following leaves 2·10⁻⁵ at Δτ = 50 and 2·10⁻⁶ at 200.)
 #[test]
 fn a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the_generator() {
     let (span, shift, v, z0, hm) = (0.0625, 3.0, 0.4, 0.11, 1e-9);
@@ -623,9 +626,60 @@ fn a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the
                 "Γ {gamma:6.3}, Δτ {turns:5}: in 1, 2, 4 steps ψ {:.2e} {:.2e} {:.2e} (falls {:.1}, {:.1}), kick {:.2e} {:.2e} {:.2e} (falls {:.1}, {:.1})",
                 errors[0][0], errors[1][0], errors[2][0], falls[0][0], falls[1][0], errors[0][1], errors[1][1], errors[2][1], falls[0][1], falls[1][1]
             );
-            let least = if turns == 1.0 { 12.0 } else { 3.0 };
-            if !falls.iter().all(|f| f[0] > least && (turns > 1.0 || f[1] > least)) {
+            // The pair's frequency at the light's largest coupling V, and the following's size at the end of a step
+            // of the span's n-th part: k·v h V/ω.
+            let coupling = beams.iter().map(|b| 0.5 * b.rabi).sum::<f64>();
+            let omega = detuning.hypot(2.0 * coupling);
+            let following = |steps: usize| K * v * 0.5 * span / steps as f64 * coupling / omega;
+            // Resolved by the step's nodes: less than a radian between two of them, at the pair's largest frequency.
+            let resolved = |steps: usize| omega * 0.5 * span / (steps as f64) < 1.0;
+            let hopped = (0..2).all(|i| !resolved(1 << i) || (0..2).all(|q| falls[i][q] > 12.0));
+            let followed = (0..3).all(|i| resolved(1 << i) || errors[i][0] < following(1 << i).powi(2));
+            if !(hopped && followed) {
                 failures.push(format!("Γ {gamma}, Δτ {turns}: {errors:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Where a step's norm reaches a threshold (step.rs, # Jumps): the same atom with the decay, from the bare ground
+/// state, at Δτ = 1, 10, 50 and 200, at rest and at 0.4 µm/µs, the threshold the sub-stepped reference's ‖ψ‖² at 0.37
+/// of the step -- between the step's nodes, where the state is the nodes' quintic and the following. The step tried
+/// for it (`Midway::attempt`, no slack) proposes that time: its error, as the norm's logarithm there (the time's error
+/// times the norm's rate), is the reference's own accuracy at rest -- the state is exact at any time of the step --
+/// and within the square of the following where the atom moves (`a_step_is_of_the_fourth_order…`), as the state is.
+/// And without the decay the norm stays one within the same.
+#[test]
+fn a_step_s_norm_reaches_a_threshold_where_the_path_s_does_whatever_the_detuning() {
+    let (tau, shift, hm, z0) = (0.0625, 3.0, 1e-9, 0.11);
+    let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
+    let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
+    let mut failures = Vec::new();
+    for turns in [1.0_f64, 10.0, 50.0, 200.0] {
+        let detuning: f64 = -turns / tau;
+        let rabi = (shift / tau * detuning.abs()).sqrt();
+        let beams = [Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase: 0.3 }];
+        let coupling = beams.iter().map(|b| 0.5 * b.rabi).sum::<f64>();
+        for v in [0.0, 0.4] {
+            let following = K * v * 0.5 * tau * coupling / detuning.hypot(2.0 * coupling);
+            let steps = ((2000.0 * detuning.abs() * tau) as usize).max(20_000);
+            let at = 0.37 * tau;
+            let reference = |time: f64| norm(&substepped(&beams, detuning, GAMMA, z0, v, [C64::ONE, C64::ZERO], time, steps, None).0);
+            let (theta, rate) = (reference(at), (reference(0.99 * at) / reference(1.01 * at)).ln() / (0.02 * at));
+            let model = Atom::new(hm, flat, beams.to_vec(), detuning, GAMMA);
+            let mut start = held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]);
+            start.threshold = theta;
+            let tried = step::Midway::new(&model, &start, tau).unwrap().attempt(&start, &step::Brownian::STILL, 0.0, 0.0, &mut step::Scratch::default()).unwrap();
+            let step::Attempt::Proposes { length, .. } = tried else { panic!("Δτ {turns}, v {v}: no crossing within the step") };
+            let error = (length - at) * rate;
+            // Without the decay: the norm after the step.
+            let free = Atom::new(hm, flat, beams.to_vec(), detuning, 0.0);
+            let kept = norm(&step::step(&free, &held(&free, [0.0, 0.0, z0], [0.0, 0.0, v / hm]), tau, &mut step::Scratch::default()).unwrap().end.psi) - 1.0;
+            eprintln!("Δτ {turns:5}, v {v}: the threshold {theta:.6} is reached at {length:.9} µs against {at:.9} (ln‖ψ‖² off by {error:+.2e}, its rate {rate:.3}/µs); without the decay ‖ψ‖² − 1 = {kept:+.2e}");
+            let within = if v == 0.0 { 1e-9 } else { following * following };
+            if !(error.abs() < within && kept.abs() < within) {
+                failures.push(format!("Δτ {turns}, v {v}: ln‖ψ‖² off by {error:e}, ‖ψ‖² − 1 = {kept:e} (within {within:e})"));
             }
         }
     }
@@ -635,8 +689,8 @@ fn a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the
 /// The step's doubling reads what the step leaves (adapt.rs, # The read): the same atom moving at 0.2 µm/µs, the decay
 /// on, at Δτ = 50 and 200 -- the detuning unresolved by the step and by its halves alike. The step's error of the
 /// state's fall of ln‖ψ‖² (the hazard, which times the jumps) against the sub-stepped reference is the doubling's
-/// estimate of it, 4/3 of the step less its two halves, within a half of itself; before, the two agreed in an error the
-/// difference held none of.
+/// estimate of it, 4/3 of the step less its two halves, within a half of itself -- an error of 6·10⁻⁷ and of 5·10⁻⁸
+/// of the hazard's integral here, a thousand times the sub-stepped reference's own (10⁻⁹ is asked of it).
 #[test]
 fn the_doubling_reads_what_a_step_leaves_of_the_path_s_change() {
     let (hm, tau, shift, v, z0) = (1e-9, 0.0625, 3.0, 0.2, 0.11);
@@ -653,7 +707,7 @@ fn the_doubling_reads_what_a_step_leaves_of_the_path_s_change() {
         let fall = |psi: &[C64]| -psi.iter().map(|z| z.norm_sqr()).sum::<f64>().ln();
         let (error, read) = (fall(&whole.psi) - fall(&exact), 4.0 / 3.0 * (fall(&whole.psi) - fall(&halves.psi)));
         eprintln!("Δτ {turns}: the hazard's integral {:.5}, the step's error of it {error:+.3e}, the doubling reads {read:+.3e}", fall(&exact));
-        assert!((read - error).abs() < 0.5 * error.abs() && error.abs() > 1e-7, "Δτ {turns}: error {error:e}, read {read:e}");
+        assert!((read - error).abs() < 0.5 * error.abs() && error.abs() > 1e-9, "Δτ {turns}: error {error:e}, read {read:e}");
     }
 }
 
@@ -1593,8 +1647,16 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let own = whole - calls[0] * reference - calls[1] * point - nodes;
     let fixed = middle - calls[0] * reference;
     let work = steps.iter().map(|s| s.work).sum::<f64>() / count as f64;
+    // What the propagations took: the picture's hops and the quadrature's nodes at its bandwidth, the starts' means.
+    let [hops, nodes, turned] = pieces.iter().zip(starts).fold([0.0; 3], |sums, (p, s)| {
+        let mut scratch = fitted(s.psi.len());
+        let _ = super::propagate(&mut scratch, &p.middle, &s.psi, p.kappa, hm, tau, None);
+        let picture = &scratch.picture;
+        let found = [picture.hops as f64, super::nodes(tau, picture.bandwidth) as f64, picture.bandwidth * tau];
+        std::array::from_fn(|i| sums[i] + found[i] / count as f64)
+    });
     eprintln!(
-        "{name:<22} n {n} τ {tau:<6} | step {whole:8.2} = model {:8.2} (reference {reference:5.2} × {:4.1} + middle {point:7.2} × {:.0} + generator {generator:6.2} × {:4.1} + force {force:6.2} × {:4.1} + tones {tones:6.2} × {:3.1}) + own {own:8.2} (scattering {scattering:6.2}) | fixed point {fixed:6.2}  propagation {propagated:8.2}  (root {root:8.2}, {crossings}/{count}) | counted {work:9.0} | pace {:.3} ns",
+        "{name:<22} n {n} τ {tau:<6} | step {whole:8.2} = model {:8.2} (reference {reference:5.2} × {:4.1} + middle {point:7.2} × {:.0} + generator {generator:6.2} × {:4.1} + force {force:6.2} × {:4.1} + tones {tones:6.2} × {:3.1}) + own {own:8.2} (scattering {scattering:6.2}) | fixed point {fixed:6.2}  propagation {propagated:8.2}  (root {root:8.2}, {crossings}/{count}; {hops:.1} hops, {nodes:.1} nodes at the bandwidth × τ {turned:.2}) | counted {work:9.0} | pace {:.3} ns",
         whole - own,
         calls[0],
         calls[1],
