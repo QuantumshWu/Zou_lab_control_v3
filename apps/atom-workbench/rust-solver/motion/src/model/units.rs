@@ -942,7 +942,11 @@ impl Model {
             bare,
             rates,
             shifts,
-            energies: self.far_energies(&amplitudes, &lights, 1, &self.coherent_dressing()).0,
+            energies: {
+                let mut energies = vec![];
+                self.far_energies(&amplitudes, &lights, 1, &self.coherent_dressing(), &mut energies);
+                energies
+            },
             force,
             populations,
             classes: OnceCell::new(),

@@ -315,8 +315,9 @@ impl Model {
     /// columns laid for the lanes on the class's rows a n + b', assemble.rs `laid`: u, then per lab axis i ∇_i u, which hold
     /// nothing where the class takes no gradients), whether it took gradients, and the explicit states' part --, a class
     /// the state gives nothing left out; and the complex multiply-adds, counted as the definition's entries (assemble.rs,
-    /// # Work). Module documentation, # A state's photons at a point: the sums are a thread's spare's (`Held`), and a
-    /// step's scattering (`scattering_of`) reads them where they are made and asks the heap for nothing.
+    /// # Work). Module documentation, # A state's photons at a point: the sums are a thread's spare's (`Held`), as are
+    /// the levels' energies an explicit state's part reads, and a step's scattering (`scattering_of`) and a jump's kick
+    /// (`kick_of`) read them where they are made and ask the heap for nothing.
     #[allow(clippy::too_many_arguments)]
     fn classes_at(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], populations: Option<&[f64]>, gradients: Gradients, each: &mut dyn FnMut(usize, &ClassPlan, &[f64], bool, &[[f64; 3]; 3])) -> f64 {
         let (cluster, len) = (plan.cluster, plan.near.len());
@@ -364,8 +365,14 @@ impl Model {
             })
         });
         // The lab axes along which the fourth order's matrices change at all (a light along one axis: that one).
-        let live: Vec<usize> = bent.as_ref().map_or(vec![], |b| (0..3).filter(|&a| b[2 + a].iter().chain(&b[5 + a]).any(|z| *z != C64::ZERO)).collect());
-        let Site { beams: amplitudes, directions, jumps, jump_slopes, fields, member: vectors, class: sums, .. } = &mut *site;
+        let (mut axes, mut count) = ([0; 3], 0);
+        for a in 0..3 {
+            if bent.as_ref().is_some_and(|b| b[2 + a].iter().chain(&b[5 + a]).any(|z| *z != C64::ZERO)) {
+                (axes[count], count) = (a, count + 1);
+            }
+        }
+        let live = &axes[..count];
+        let Site { beams: amplitudes, directions, jumps, jump_slopes, fields, member: vectors, class: sums, dressing, energies, .. } = &mut *site;
         self.fields_into(plan, amplitudes, at.kappa, order, fields);
         // Each field component's value (and gradient) from its beams, plain and Doppler-weighted.
         work += plan.scalars.iter().map(|s| (2 * jet::parts(order) * s.beams.len()) as f64).sum::<f64>();
@@ -379,7 +386,8 @@ impl Model {
         sized(vectors, MOST * 2 * most);
         sized(sums, 8 * most);
         let one = [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO];
-        let mut energies: Option<Vec<Vec<f64>>> = None;
+        // Whether the levels' energies at the point are made: the first explicit member makes them.
+        let mut levelled = false;
         let (mut x, mut weights) = ([C64::ZERO; STATES], [C64::ZERO; 4 * MOST]);
         for (place, class) in plan.classes.iter().enumerate() {
             let with = match gradients {
@@ -516,10 +524,15 @@ impl Model {
                 work += (more * (m.entries.len() + 4 * rows)) as f64;
                 // An explicit state's part: its decay rate into the class over its population, `MemberPlan::decay`.
                 if !m.folded && with {
-                    let h = energies.get_or_insert_with(|| self.far_energies(amplitudes, &plan.lights, 1, &self.coherent_dressing()).0);
+                    if !levelled {
+                        dressing.clear();
+                        dressing.extend((0..self.carriers.len()).map(|d| self.dressed_coherently(d)));
+                        self.far_energies(amplitudes, &plan.lights, 1, dressing, energies);
+                        levelled = true;
+                    }
                     let norm = crate::linalg::norm_sqr(psi);
                     let population = m.entries.first().map_or(0.0, |&(_, _, sp, _, _)| populations.map_or(psi[sp].norm_sqr(), |p| p[sp] * norm));
-                    let (moment, w) = self.explicit_moment(cluster, amplitudes, h, at.kappa, m.source, m.decay, population, psi);
+                    let (moment, w) = self.explicit_moment(cluster, amplitudes, energies, at.kappa, m.source, m.decay, population, psi);
                     for i in 0..3 {
                         for j in 0..3 {
                             explicit[i][j] += moment[i][j];
@@ -676,6 +689,18 @@ impl Model {
             out.add(&mut sizes, &moments(sums, with, explicit, class.absorbed), class.states);
         });
         (out.over(sizes, norm), work)
+    }
+
+    /// The mean a jump of class `class` of a plan's cluster carries from the state ψ at a point (`Moments::kick`): that
+    /// class alone made with its gradients (`Gradients::Of`), its moments read from its sums where they are made, as
+    /// a step's scattering reads them -- no photon is made of them (`Photon::kick` is the same numbers from a photon's
+    /// vectors), and the heap is asked for nothing.
+    pub(crate) fn kick_of(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], class: usize) -> [f64; 3] {
+        let mut kick = None;
+        self.classes_at(plan, table, at, psi, None, Gradients::Of(class), &mut |_, class, sums, with, explicit| {
+            kick = Some(moments(sums, with, explicit, class.absorbed).kick);
+        });
+        kick.expect("the drawn class at the state it was drawn at")
     }
 }
 

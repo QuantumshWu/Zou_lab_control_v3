@@ -359,7 +359,7 @@ pub struct Model {
     pub(crate) beats: Vec<(Beat, Vec<(usize, usize)>)>,
     pub(crate) forms: Arc<reach::Forms>,
     /// Per cluster the co-resonant pairs of its folded channels' places under the running lights, found at its first readout
-    /// (readout.rs `Model::readout_with`).
+    /// (readout.rs `Model::readout_of`).
     pub(crate) resonances: Vec<std::sync::OnceLock<Vec<[usize; 4]>>>,
     /// The states' labels and the beams' names (the ledger's and the method's words).
     pub(crate) labels: Vec<String>,
@@ -629,8 +629,8 @@ impl Model {
     /// one's 1/γ_exact to the fourth order either way (two levels: units.rs `ORDER_RATES`). Clamped at zero, p < 0 left
     /// the rate too high by −p, 1.52 s on resonance, more than the second order's s. Where the cluster's fold is the
     /// second order's the slow state is f: there the fast part is within the fold's own order.
-    pub(crate) fn landed(&self, plan: &assemble::Plan, table: Option<&tabulate::NearTable>, at: &Point, f: &[C64]) -> Vec<C64> {
-        let Some(fourth) = &plan.fourth else { return f.to_vec() };
+    pub(crate) fn landed(&self, plan: &assemble::Plan, table: Option<&tabulate::NearTable>, at: &Point, f: &[C64]) -> crate::step::Internal {
+        let Some(fourth) = &plan.fourth else { return f.iter().copied().collect() };
         let (n, size) = (fourth.n, fourth.n * fourth.n);
         let mut site = assemble::Held::<assemble::Site>::take();
         self.light.amplitudes_into(at.r, 1, |_| true, &mut site.beams);
@@ -794,11 +794,10 @@ impl<'a> Run<'a> {
         self.model.photons_of(plan, *table, at, psi, photon::Gradients::None).0
     }
     /// The mean a jump of the drawn photon's class carries (`Photon::kick`), from the state it was drawn at: that class
-    /// alone made again, with its gradients (photon.rs `Gradients::Of`).
+    /// alone made again, with its gradients (photon.rs `Model::kick_of`).
     pub fn kick_at(&self, cluster: usize, at: &Point, psi: &[C64], photon: &Photon) -> [f64; 3] {
         let (plan, table) = &self.plans[cluster];
-        let drawn = self.model.photons_of(plan, *table, at, psi, photon::Gradients::Of(photon.class)).0;
-        drawn.first().expect("the drawn class at the state it was drawn at").kick()
+        self.model.kick_of(plan, *table, at, psi, photon.class)
     }
     /// The scattering of a cluster's state at a point per unit time, an explicit state's decay at the populations
     /// `populations` of unit sum (None: the state's own; photon.rs `Model::scattering_of`).
@@ -808,9 +807,14 @@ impl<'a> Run<'a> {
     }
     /// Where a jump's bare state `f` lands in a cluster at a point (assemble.rs, # The fourth order; `Model::landed`): the
     /// slow state it continues in, with its norm.
-    pub fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> Vec<C64> {
+    pub fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> crate::step::Internal {
         let (plan, table) = &self.plans[cluster];
         self.model.landed(plan, *table, at, f)
+    }
+    /// The displayed rows of a cluster's state at a point (readout.rs `Model::readout_of`).
+    pub fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
+        let (plan, table) = &self.plans[cluster];
+        self.model.readout_of(plan, *table, at, psi)
     }
     /// A cluster's generator at a position and time, for every momentum and along every path through the point (assemble.rs
     /// `Middle`): a step's one middle.
@@ -853,7 +857,7 @@ impl crate::step::Dynamics for Run<'_> {
         self.kick_at(cluster, at, psi, photon)
     }
     fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> crate::step::Internal {
-        Run::landed(self, cluster, at, f).into_iter().collect()
+        Run::landed(self, cluster, at, f)
     }
     fn scattering(&self, cluster: usize, at: &Point, psi: &[C64], populations: &[f64]) -> Scattering {
         self.scattering_at(cluster, at, psi, Some(populations))
@@ -865,6 +869,6 @@ impl crate::step::Dynamics for Run<'_> {
         self.model.lost_with(cluster, at, psi, self.tables)
     }
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
-        self.model.readout_with(cluster, at, psi, self.tables)
+        Run::readout(self, cluster, at, psi)
     }
 }

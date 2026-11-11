@@ -536,7 +536,9 @@ impl Model {
         let coherent = self.coherent_dressing();
         let energies = |x: &[f64]| -> Vec<f64> {
             let near = self.light_at(lights, coordinates, polarizations, x);
-            self.far_energies(&near, lights, 0, &coherent).0.swap_remove(0)
+            let mut energies = vec![];
+            self.far_energies(&near, lights, 0, &coherent, &mut energies);
+            energies.swap_remove(0)
         };
         let at_focus = energies(focus);
         // The largest change of a line's E_e − E_b from the focus, in its half-widths.
@@ -662,6 +664,18 @@ impl Model {
         sized(&mut point.jump_slopes, slopes * width);
         table.table.eval_onto(&point.coordinates, first, &plan.jumps_start, &mut point.jumps, (order >= 1).then_some(&mut point.jump_slopes[..]));
         work + (4usize.pow(d as u32) * (1 + slopes) * 2 * plan.near.jumping().len()) as f64 / crate::decide::COMPLEX
+    }
+
+    /// A point's responses from a table (the near forms' responding section, to order 0: what the readout reads,
+    /// readout.rs), into the point's vectors from its beams' amplitudes: the axes' coordinates there and the section's
+    /// reals, a response's real part and its imaginary part in the forms' order.
+    pub(crate) fn near_responses(&self, table: &NearTable, point: &mut Site) {
+        let (d, entries) = (table.axes(), table.layout.plan.near.responding());
+        sized(&mut point.coordinates, d);
+        sized(&mut point.directions, d);
+        self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &point.beams, &mut point.coordinates, &mut point.directions);
+        sized(&mut point.responses, 2 * entries.len());
+        table.table.eval_range(&point.coordinates, 2 * entries.start, &mut point.responses, None);
     }
 
     /// A middle's near terms' values at a point from a table (module documentation, # At a point; assemble.rs `Site`), and
