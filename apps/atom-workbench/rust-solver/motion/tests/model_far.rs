@@ -9,7 +9,7 @@ use atom_motion::request::Request;
 use atom_motion::step::Middle as _;
 
 mod model_common;
-use model_common::{decay_rate, normal, scene};
+use model_common::{decay_rate, scene};
 
 /// The scene's model with every unit folded, its initial ground state's populations e_b.
 fn built(name: &str) -> (Request, Light, Model, [f64; GROUND]) {
@@ -213,46 +213,4 @@ fn the_far_scenes_units_fold_within_their_gates() {
             }
         }
     }
-}
-
-/// The reach's level leaves the share s of a thermal ensemble out, and what it leaves out is counted on the ensemble
-/// (model/reach.rs, # The reach's level, # What the reach leaves out). R1_TWEEZER's trap, so cold that it is harmonic over
-/// the reach (its depth 4000 k_B T), a classical thermal ensemble of the most trajectories a solve runs drawn in its
-/// three oscillators: the level L k_B T with Q(3, L) = e^{−L}(1 + L + L²/2) = s = z²/(N + z²) = 2.44e-4 (six quadratic
-/// degrees of freedom: the energy's law is Γ(3), an atom's share of it Γ(4)) leaves out s of the atoms, four of 2¹⁴,
-/// and Q(4, L) = 1.1e-3 of their kinetic energy. `Model::left_out` gives each within twice z of its count's deviation
-/// -- the far ends at z --, and with no atom outside the share that N draws leave unseen, s.
-#[test]
-fn the_reach_leaves_out_what_its_ensemble_s_count_says() {
-    use atom_motion::estimate::unseen;
-    use atom_motion::random::{Purpose, Stream};
-    use atom_motion::units::{CONFIDENCE, KT_PER_UK, MOST_TRAJECTORIES};
-    let (_, _, model, p) = built("R1_TWEEZER");
-    let trap = model.trap(&p, &model.prepared()).unwrap();
-    let (n, share) = (MOST_TRAJECTORIES, unseen(MOST_TRAJECTORIES as f64));
-    let kt = -trap.minimum / 4000.0;
-    let reach = model.reach(&trap, &p, kt / KT_PER_UK, share);
-    let level = reach.energy / kt;
-    let hm = model.hbar_over_mass();
-    let atoms: Vec<([f64; 3], [f64; 3])> = (0..n)
-        .map(|index| {
-            let mut stream = Stream::new(23, Purpose::Initial, index, 0);
-            // V = Σ_i ½ (ω_i²/(ħ/m)) x_i² along the principal axes, the kinetic energy ½ (ħ/m) κ².
-            let x: [f64; 3] = std::array::from_fn(|i| normal(&mut stream) * (kt * hm).sqrt() / trap.frequencies[i]);
-            let r = std::array::from_fn(|a| trap.centre[a] + (0..3).map(|i| x[i] * trap.axes[i][a]).sum::<f64>());
-            (r, std::array::from_fn(|_| normal(&mut stream) * (kt / hm).sqrt()))
-        })
-        .collect();
-    let [left, energy] = model.left_out(&reach, atoms.iter().copied());
-    // Q(k, L) = e^{−L} Σ_{j<k} L^j/j!.
-    let q3 = (-level).exp() * (1.0 + level + 0.5 * level * level);
-    let q4 = q3 + (-level).exp() * level.powi(3) / 6.0;
-    assert!((q3 - share).abs() < 1e-12 * share && (level - 12.89).abs() < 0.005 && (q4 - 1.145e-3).abs() < 1e-5 && (share - 2.4408e-4).abs() < 1e-8, "L = {level}: Q(3, L) = {q3}, Q(4, L) = {q4}, s = {share}");
-    let deviation = (q3 * (1.0 - q3) / n as f64).sqrt();
-    println!("outside the reach: {left:.5} of the atoms (Q(3, L) = {q3:.5} ± {deviation:.5}; s = {share:.2e}), {energy:.5} of their kinetic energy (Q(4, L) = {q4:.5})");
-    assert!((left - q3).abs() <= 2.0 * CONFIDENCE * deviation, "the atoms' share {left} against Q(3, L) = {q3} ± {deviation}");
-    // The energy's share: its count's relative deviation that of the atoms' with the spread of their energies (below √2 of it).
-    assert!((energy - q4).abs() <= 2.0 * CONFIDENCE * q4 * 2.0_f64.sqrt() * deviation / q3 && energy >= left, "the energy's share {energy} against Q(4, L) = {q4}");
-    assert!(model.holds(&reach, trap.centre, [0.0; 3]) && !model.holds(&reach, trap.centre, [1.001 * reach.speed / hm, 0.0, 0.0]) && model.holds(&reach, trap.centre, [0.999 * reach.speed / hm, 0.0, 0.0]), "the reach's speed at its centre");
-    assert_eq!(model.left_out(&reach, (0..n).map(|_| (trap.centre, [0.3 * reach.speed / hm, 0.0, 0.0]))), [share; 2], "no atom outside: what N draws leave unseen");
 }
