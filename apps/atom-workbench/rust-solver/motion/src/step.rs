@@ -20,7 +20,7 @@
 //!
 //! # The kick (B)
 //! The position stays at r_h; the internal state goes along the straight path r_h + v_m(t − t_m), the path's phases
-//! exact: with ψ_s = e^{iK_s·v(t − t_m)} x_s in the cluster's Doppler frame (`Cluster::waves`) x evolves under Ĥ(t), the
+//! exact: with ψ_s = e^{iK_s·v(t − t_m)} x_s in the cluster's Doppler frame (`Plan::waves`) x evolves under Ĥ(t), the
 //! generator on the path in that frame with the frame's diag(K_s·v). The model gives it by its fields, not by a list of
 //! beating matrices (`Middle`): at the middle point, once a step, everything that depends on neither the momentum nor the
 //! time; per momentum the beams' Doppler weights and path rates (`Middle::path`); and at a time s from the middle Ĥ(s)
@@ -60,7 +60,7 @@
 //! beams' cooling in a tweezer (PGC3D, F = 2, atoms at 25 µK, τ = 0.625 µs: k·v τ = 0.25): the propagation's own error
 //! on the step's path is 8 % of the step's difference from its two halves in the kick and three tenths in the state,
 //! and at half the step it falls seventyfold and fiftyfold, where the difference falls fourteenfold and eightfold. The
-//! step's doubling reads all of it (adapt.rs, # The read).
+//! pilot's companion at twice the step reads all of it (solve.rs, # The step).
 //!
 //! The impulse is exact in its decomposition about the state at the step's middle, held in the frame, x_m = x(t_m)
 //! (= ψ(t_m), U(t_m) = 1):
@@ -70,7 +70,7 @@
 //!   and the step symplectic (propagation.md §2.3);
 //! - what the state's change along the path adds: the evolved state's force along the path less x_m's held in the frame,
 //!   −∫(⟨x(t)|Ĝ(t)|x(t)⟩/‖x(t)‖² − ⟨x_m|Ĝ(t)|x_m⟩/‖x_m‖²)dt, Ĝ(t) the gradient on the path, one quadrature of the
-//!   difference on the propagation's nodes (B1's `force_change`): it vanishes at every node where the state does not
+//!   difference on the propagation's nodes: it vanishes at every node where the state does not
 //!   change -- a lone ground state in a standing wave's far light takes no error of the path's nodes, however long its
 //!   step. The lag that friction and the Sisyphus effect live in;
 //! - less the reference's force: + τ∇V_ref(r_h), since V_ref's force is the A flow's.
@@ -112,7 +112,8 @@
 //! same both ways and the step its own inverse with the internal state changing too. About the start state the reverse
 //! took its own start, x(t₀ + τ), and Q(x) = ∫[F(r_h, x) − F(path, x)]dt, the midpoint rule's O(τ³(v·∇)²F) on that state,
 //! differed between the two: a two-level atom in a far-detuned standing wave missed its start by two hundred times the
-//! step's own error (tests). B1's PGC read the same T on the middle state as on the start state (propagation.md §2.3).
+//! step's own error (tests). A one-dimensional PGC read the same T on the middle state as on the start state
+//! (propagation.md §2.3).
 //!
 //! # The path's momentum
 //! v_m = (ħ/m)κ_m, κ_m the momentum at the step's middle time: the mean of the momenta before and after the kick,
@@ -121,14 +122,15 @@
 //! state (`predicted`). The generator and the path are both taken at κ_m: one middle, one propagation a step.
 //! - The prediction errs by half of what the state's change adds to the kick, τ ΔF/2 (ΔF the force's change over the
 //!   step through the state): O(τ²) where the step resolves the internal state. The kick's sensitivity to v_m,
-//!   (τ/2)|∂Δκ/∂κ_m|, is O(τ), so the kick errs by O(τ³), the scheme's own local order; the step's doubling reads it
-//!   with the rest of the step's error (adapt.rs, # The read: the halves predict from their own starts).
+//!   (τ/2)|∂Δκ/∂κ_m|, is O(τ), so the kick errs by O(τ³), the scheme's own local order; the pilot's companion at twice
+//!   the step reads it with the rest of the step's error (solve.rs, # The step: each level predicts from its own
+//!   steps' starts).
 //! - The reverse step predicts from its own start, the step's end: its path's momentum is κ_h + Δκ − K(ψ₁)/2 against the
 //!   step's κ_h + K(ψ₀)/2. They differ by (K(ψ₀) + K(ψ₁))/2 − Δκ, the held kick's trapezoid against the kick: O(τ³), so a
 //!   step and its reverse miss the start by O(τ⁴), beyond the scheme's order (tests), and by nothing where the kick
 //!   does not depend on the path (one internal state: a conservative trap's step is its own inverse to round-off).
 //! - Where the step does not resolve the internal state (a jump's bare state relaxing in 1/Γ ≪ τ) ΔF is O(1) and the
-//!   path's velocity errs in first order over that step; the doubling reads that too.
+//!   path's velocity errs in first order over that step; the companion reads that too.
 //!
 //! # Jumps (SPEC §1.6)
 //! ‖ψ‖² falls monotonically between jumps (the decay is −(i/2)ΣJ†J by the model's construction). A jump is made at the
@@ -377,32 +379,25 @@ pub struct Trajectory {
     pub threshold: f64,
     /// The jumps made: the next one draws from `Stream::jump(seed, index, jumps + 1)`.
     pub jumps: u32,
-    /// The steps taken (their parts of the Brownian path are the path's own, adapt.rs `Path`)
-    /// (adapt.rs).
-    pub taken: u32,
     /// The time the atom was lost (SPEC §1.7: checked at every step's end and after every jump); None while held.
     pub lost: Option<f64>,
     /// The run's seed and the trajectory's number: its jumps' streams.
     pub seed: u64,
     pub index: u64,
-    /// The step control's own (`adapt`): its step (µs), its count of steps, the time its cap was met, and the hazard's
-    /// rate over the last step taken (1/µs: that step's fall of ln‖ψ‖² over its length; none before the first).
-    pub tau: f64,
-    pub steps: u64,
-    pub capped: Option<f64>,
+    /// The advance's own (`adapt`): the hazard's rate over the last step taken (1/µs: that step's fall of ln‖ψ‖² over
+    /// its length; none before the first).
     pub rate: f64,
     /// The work counted (`decide::Work`, real multiply-adds) of the integrator's own algorithms over the trajectory --
-    /// the generator's decomposition, its following and hops, the states at the kick's nodes and their sums, with the model's generators
-    /// and forces at the step's nodes, the doubling (`adapt` adds each step's) --, the middles it asked the model for
-    /// (each costed by
-    /// `Dynamics::assembly_work`) and its jumps' photons (`Dynamics::photon_work`).
+    /// the generator's decomposition, its following and hops, the states at the kick's nodes and their sums, with the
+    /// model's generators and forces at the step's nodes (`adapt` adds each step's, tried or taken) --, the middles it
+    /// asked the model for (each costed by `Dynamics::assembly_work`) and its jumps' photons (`Dynamics::photon_work`).
     pub work: f64,
     pub assemblies: u64,
 }
 
 impl Trajectory {
     /// A trajectory at a basis state (a ground state of the model basis) at (r, κ) and time 0: ψ the unit vector of that
-    /// state on its cluster, the first threshold from jump 0's stream (SPEC §2.4); the step control's own unset.
+    /// state on its cluster, the first threshold from jump 0's stream (SPEC §2.4); the advance's own unset.
     pub fn new<D: Dynamics>(model: &D, state: usize, r: [f64; 3], kappa: [f64; 3], seed: u64, index: u64) -> Trajectory {
         let cluster = model.cluster_of(state);
         let states = &model.cluster(cluster).states;
@@ -418,13 +413,9 @@ impl Trajectory {
             time: 0.0,
             threshold,
             jumps: 0,
-            taken: 0,
             lost: None,
             seed,
             index,
-            tau: f64::INFINITY,
-            steps: 0,
-            capped: None,
             rate: 0.0,
             work: 0.0,
             assemblies: 0,
@@ -664,7 +655,7 @@ fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize) -> impl Iterator<Ite
 /// quadratic and κ² a quartic of the time, which the rule of three nodes integrates exactly (to the degree 5).
 const MOMENTS: usize = 3;
 
-/// One step's path (`step`; module documentation, # The path between a step's ends): the reference's flow from the
+/// One step's path (`Step`; module documentation, # The path between a step's ends): the reference's flow from the
 /// step's start under the step's kick spread over the step -- the force linear in the time that ends the step where
 /// the kick at the middle ends it. Second order in τ at every time of the step, the step's own start and end at its
 /// two ends. T's window means are its integrals of κ (`Segment::moments`, SPEC §1.7), an output inside the step its
@@ -916,7 +907,7 @@ struct Propagated {
 
 /// What a propagation looks at of a jump's threshold (`Midway::attempt`): the threshold θ of ‖ψ‖²; the slack (µs) --
 /// a crossing within it of the step's end is the step's end --; and the reach (µs) to which the propagation is followed
-/// on its path beyond the step's end where it ends above θ.
+/// on its path beyond the step's end where it ends above θ, no longer than the step itself (`spectral::Picture::extend`).
 #[derive(Clone, Copy, Debug)]
 struct Watch {
     theta: f64,
@@ -991,12 +982,13 @@ fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64) {
 /// the rounding of that difference, and nothing where there is one state. Where Ĥ is still along every path Ĝ is one
 /// matrix, and the kick its one form with ∫ρ(u)du.
 ///
-/// Watched for a threshold (`Watch`), it says whether ‖ψ‖² reaches it at the step's end, and ends where it reaches it
-/// elsewhere (`Crossed`): the norm's root between the nodes that bracket it, the state read at the root's times
+/// It is watched for a threshold (`Watch`): it says whether ‖ψ‖² reaches it at the step's end, and ends where it
+/// reaches it elsewhere (`Crossed`): the norm's root between the nodes that bracket it, the state read at the root's times
 /// (`spectral::Picture::between`; `root`) -- within the step, or, where the step ends above the threshold, on further
 /// nodes of the same quadrature on the same path followed beyond its end (`spectral::Picture::extend`), as far as the
-/// reach.
-fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [f64; 3], hbar_over_mass: f64, tau: f64, watch: Option<Watch>) -> Result<Propagated, Crossed> {
+/// reach. A threshold of zero is reached nowhere (the norm stays above it) and a reach of zero follows nothing: the
+/// flow between jumps, and the only watch of a reverse step (τ < 0), whose crossings' times are a forward step's.
+fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [f64; 3], hbar_over_mass: f64, tau: f64, watch: Watch) -> Result<Propagated, Crossed> {
     let along = Along::new(middle, kappa, kappa.map(|k| hbar_over_mass * k), tau);
     let (n, h, still, model) = (along.n, 0.5 * tau, middle.still(), middle.work());
     let Carved { picture, held, sum, sums } = scratch.carve();
@@ -1004,7 +996,7 @@ fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [
     let count = if still { 1 } else { SUMS };
     let sums = &mut sums[..count * 2 * n * row(n)];
     pictured(&along, picture, tau);
-    let (bandwidth, watch) = (picture.bandwidth, watch.filter(|_| tau > 0.0));
+    let bandwidth = picture.bandwidth;
     let mut x = [C64::ZERO; STATES];
     for (x, (z, phase)) in x.iter_mut().zip(psi.iter().zip(&along.half)) {
         *x = *z * *phase;
@@ -1042,7 +1034,7 @@ fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [
         };
         let bound = picture.advance(u, &mut x[..n]);
         let now = norm_sqr(&x[..n]);
-        if let Some(watch) = watch.filter(|watch| !reached && now <= watch.theta) {
+        if !reached && now <= watch.theta {
             let floor = 2.0 * (picture.rounding + bound) + rounding(n + 1);
             let crossing = root(|time| between(picture, time), (at + h, norm), (u + h, now), watch.theta, floor);
             if crossing < tau - watch.slack {
@@ -1069,7 +1061,7 @@ fn propagate<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa: [
         (at, norm) = (u, now);
     }
     // Above the threshold at its end: the same path followed beyond it, as far as the reach.
-    if let Some(watch) = watch.filter(|watch| !reached && watch.reach > 0.0) {
+    if !reached && watch.reach > 0.0 {
         picture.extend(h + watch.reach);
         for u in quadrature(h, h + watch.reach, bandwidth, FORMS).map(|(u, _)| u).chain(std::iter::once(h + watch.reach)) {
             let bound = picture.advance(u, &mut x[..n]);
@@ -1185,7 +1177,7 @@ fn root(mut norm: impl FnMut(f64) -> f64, (lo, at_lo): (f64, f64), (hi, at_hi): 
 // ---------------------------------------------------------------------------------------------------------------------
 // The step.
 
-/// One step of τ from a trajectory's state (`step`).
+/// One step of τ from a trajectory's state (`Midway::attempt`).
 #[derive(Clone, Debug)]
 pub struct Step {
     /// The state at the step's end; jumps, the loss and the trajectory's counters are the caller's.
@@ -1196,10 +1188,8 @@ pub struct Step {
     /// through is counted where it is made (`Midway`: one a step, or one for the steps that share it).
     pub work: f64,
     /// The factor Λ of the scattered light's diffusion the step put its part of the Brownian path through (`factor`;
-    /// 1/µm/√µs), and the kinetic energy that diffusion puts in over the step per lab axis in the mean, (ħ/m) 2D_aa
-    /// |τ|/2 of the step's own 2D at its middle (rad/µs).
+    /// 1/µm/√µs): a state read inside the step draws through it what the step's moments do not tell (`Step::at`).
     pub spread: [[f64; 3]; 3],
-    pub heating: [f64; 3],
     /// The Doppler frames' rates K_s·v_m on the step's path, per state of the cluster (rad/µs).
     gauge: [f64; STATES],
 }
@@ -1236,7 +1226,8 @@ impl Step {
 
 /// Why a step or a jump could not be made: the reference's fixed point is not a contraction at this step (`middle`); the
 /// state left the floating-point range; or the norm reached its threshold with no photon to emit (`jump`: the model's
-/// decay and its photons contradict each other). The step control halves τ at the first two (its more accurate level).
+/// decay and its photons contradict each other). The advance takes the step at its half at the first two (adapt.rs, #
+/// The step).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Refused {
     Reference,
@@ -1292,28 +1283,13 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// any internal state of the cluster --: the path's momentum predicted from the state (`predicted`), the propagation
     /// at it and on its path (`propagate`), the kick -- the propagation's impulse, the reference's τ∇V_ref(r_h), and
     /// the scattered light's force and its diffusion's part of the Brownian path `brownian` (module documentation, # The
-    /// absorbed light's momentum) -- and the second half flow. The flow between jumps: the state's threshold is not
-    /// looked at (`attempt` looks). `scratch` is the trajectory's.
+    /// absorbed light's momentum) -- and the second half flow. `scratch` is the trajectory's.
     ///
-    /// `spread` is the factor the path's part goes through in the stead of the step's own (None: its own): a step read
-    /// against its halves gives them its own factor (adapt.rs, # The read), so that the three are one realization of
-    /// the diffusion and differ by the scheme's error alone.
-    pub fn step(&self, from: &Trajectory, brownian: &Brownian, spread: Option<&[[f64; 3]; 3]>, scratch: &mut Scratch) -> Result<Step, Refused> {
-        match self.tried(from, brownian, spread, None, scratch)? {
-            Attempt::Whole(step) => Ok(step),
-            Attempt::Reached(_) | Attempt::Proposes { .. } => unreachable!("a step without a threshold meets no crossing"),
-        }
-    }
-
-    /// The same step tried for the state's jump (module documentation, # Jumps): where its own propagation reaches
-    /// the state's threshold -- nowhere (within the step and `reach` µs beyond its end): the step; at its end within
-    /// `slack` µs: the step to the jump; elsewhere: the length to try next (`Attempt`).
+    /// The step is tried for the state's jump (module documentation, # Jumps): where its own propagation reaches the
+    /// state's threshold -- nowhere (within the step and `reach` µs beyond its end, `reach` no longer than the step):
+    /// the step; at its end within `slack` µs: the step to the jump; elsewhere: the length to try next (`Attempt`).
     pub fn attempt(&self, from: &Trajectory, brownian: &Brownian, slack: f64, reach: f64, scratch: &mut Scratch) -> Result<Attempt, Refused> {
-        self.tried(from, brownian, None, Some(Watch { theta: from.threshold, slack, reach }), scratch)
-    }
-
-    /// `step`, or watched for the state's threshold `attempt`.
-    fn tried(&self, from: &Trajectory, brownian: &Brownian, spread: Option<&[[f64; 3]; 3]>, watch: Option<Watch>, scratch: &mut Scratch) -> Result<Attempt, Refused> {
+        let watch = Watch { theta: from.threshold, slack, reach };
         let (tau, hm, n) = (self.tau, self.hbar_over_mass, from.psi.len());
         let (flow, (r_h, kappa_h), reference, generator) = (self.flow, self.reached, self.reference, &self.generator);
         scratch.fit(n);
@@ -1326,8 +1302,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         // The scattered light at the middle, on the state there: its force over the step, and its diffusion's factor on
         // the Brownian path's increment (the momentum) and on its first moment about the middle (the position).
         let scattered = self.model.scattering(from.cluster, &Point { r: r_h, kappa: kappa_m, t: from.time + 0.5 * tau }, &made.middle[..n], &made.populations[..n]);
-        let spread = spread.copied().unwrap_or_else(|| factor(&scattered.diffusion, scattered.size, scattered.links));
-        let heating = std::array::from_fn(|a| 0.5 * hm * scattered.diffusion[a][a] * tau.abs());
+        let spread = factor(&scattered.diffusion, scattered.size, scattered.links);
         let through = |w: &[f64; 3]| -> [f64; 3] { std::array::from_fn(|a| (0..3).map(|c| spread[a][c] * w[c]).sum()) };
         let (push, shift) = spreading(&flow, tau, through(&brownian.increment), through(&brownian.moment));
         let kicked = (
@@ -1346,16 +1321,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         end.psi.copy_from_slice(&made.end[..n]);
         end.time = from.time + tau;
         let segment = Segment::new(from.time, tau, flow, (from.r, from.kappa), kicked, kick, &spread);
-        let step = Step { end, segment, work: made.work + shear, spread, heating, gauge: made.gauge };
+        let step = Step { end, segment, work: made.work + shear, spread, gauge: made.gauge };
         Ok(if made.reached { Attempt::Reached(step) } else { Attempt::Whole(step) })
     }
-}
-
-/// One step of τ (negative: the reverse step) from a trajectory's state (module documentation): its middle
-/// (`Midway::new`) and the step through it (`Midway::step`) on a Brownian path that does not move (`Brownian::STILL`)
-/// -- the step's drift alone, the scattered light's diffusion left out.
-pub fn step<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, scratch: &mut Scratch) -> Result<Step, Refused> {
-    Midway::new(model, from, tau)?.step(from, &Brownian::STILL, None, scratch)
 }
 
 /// The Stumpff function c₃(x) = (1 − c₁(x))/x = Σ_j (−x)^j/(3 + 2j)!, entire in x, by its series to round-off: the
