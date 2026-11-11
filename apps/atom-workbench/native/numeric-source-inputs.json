@@ -3,8 +3,7 @@
   "trees": [
     { "path": "rust-solver/src", "extensions": ["rs"], "required": true },
     { "path": "rust-solver/population-core/src", "extensions": ["rs"], "required": true },
-    { "path": "rust-solver/motion-3d/src", "extensions": ["rs"], "required": true },
-    { "path": "rust-solver/motion-3d/kernels", "extensions": ["cu", "ptx"], "required": true }
+    { "path": "rust-solver/motion/src", "extensions": ["rs"], "required": true }
   ],
   "files": [
     { "path": "native/numeric-source-inputs.json", "required": true },
@@ -16,8 +15,7 @@
     { "path": "rust-solver/population-core/Cargo.toml", "required": true },
     { "path": "rust-solver/population-core/Cargo.lock", "required": false },
     { "path": "rust-solver/population-core/build.rs", "required": false },
-    { "path": "rust-solver/motion-3d/Cargo.toml", "required": true },
-    { "path": "rust-solver/motion-3d/build.rs", "required": true },
+    { "path": "rust-solver/motion/Cargo.toml", "required": true },
     { "path": "desktop-native/Cargo.toml", "required": true },
     { "path": "desktop-native/Cargo.lock", "required": true },
     { "path": "desktop-native/build.rs", "required": true },

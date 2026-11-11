@@ -35,7 +35,7 @@ dependencies = [
 name = "atom-lindblad-embedded"
 version = "0.1.0"
 dependencies = [
- "atom-motion-3d",
+ "atom-motion",
  "atom-population-core",
  "serde",
  "serde_json",
@@ -43,12 +43,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "atom-motion-3d"
+name = "atom-motion"
 version = "0.1.0"
 dependencies = [
- "atom-population-core",
- "miniz_oxide",
  "rayon",
+ "serde_json",
 ]
 
 [[package]]
