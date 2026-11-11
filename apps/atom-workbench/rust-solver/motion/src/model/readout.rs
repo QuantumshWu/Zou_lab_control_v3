@@ -42,9 +42,10 @@ impl Model {
         let (f, tone) = (&self.light.frequencies[frequency], &self.tones[frequency]);
         for (j, &l) in f.beams.iter().enumerate() {
             let a = if side == 0 { amplitudes[l].value } else { amplitudes[l].value.conj() };
-            for x in 0..EXCITED {
-                for (y, &b) in c.states[..c.ground].iter().enumerate() {
-                    response[x * c.ground + y] += a * tone.responses[side][j][(x, b)];
+            // Row by row of R_l (EXCITED × GROUND), the cluster's ground places picked from it.
+            for (to, from) in response.chunks_exact_mut(c.ground).zip(tone.responses[side][j].data.chunks_exact(GROUND)) {
+                for (z, &b) in to.iter_mut().zip(&c.states[..c.ground]) {
+                    *z += a * from[b];
                 }
             }
         }
@@ -135,24 +136,32 @@ impl Model {
             let at = &mut first[p * c.ground + b1];
             *at = (*at).min(q * c.ground + b2);
         }
+        // Place by place the amplitudes a_pb, and after them the classes' sums.
         excited.clear();
-        excited.resize(places * EXCITED, C64::ZERO);
-        let amplitude = |place: usize, i: usize| channels[(place / c.ground) * size + i * c.ground + place % c.ground] * psi[place % c.ground];
-        for (place, &class) in first.iter().enumerate() {
-            for (i, sum) in excited[class * EXCITED..(class + 1) * EXCITED].iter_mut().enumerate() {
-                *sum += amplitude(place, i);
+        excited.resize(2 * places * EXCITED, C64::ZERO);
+        let (own, sums) = excited.split_at_mut(places * EXCITED);
+        for (p, response) in channels.chunks_exact(size).enumerate() {
+            for (i, row) in response.chunks_exact(c.ground).enumerate() {
+                for (b, r) in row.iter().enumerate() {
+                    own[(p * c.ground + b) * EXCITED + i] = *r * psi[b];
+                }
+            }
+        }
+        for (&class, a) in first.iter().zip(own.chunks_exact(EXCITED)) {
+            for (sum, a) in sums[class * EXCITED..(class + 1) * EXCITED].iter_mut().zip(a) {
+                *sum += *a;
             }
         }
         // The excited populations |A_k|², a class once (at its first place); and what each ground place gives up,
         // Re⟨a_pb, A_k⟩.
-        for (place, &class) in first.iter().enumerate() {
-            let of = &excited[class * EXCITED..(class + 1) * EXCITED];
+        for ((place, &class), a) in first.iter().enumerate().zip(own.chunks_exact(EXCITED)) {
+            let of = &sums[class * EXCITED..(class + 1) * EXCITED];
             if class == place {
                 for (i, sum) in of.iter().enumerate() {
                     out[GROUND + i] += sum.norm_sqr() / norm;
                 }
             }
-            let given: f64 = of.iter().enumerate().map(|(i, sum)| (amplitude(place, i).conj() * *sum).re).sum();
+            let given: f64 = a.iter().zip(of).map(|(a, sum)| (a.conj() * *sum).re).sum();
             out[c.states[place % c.ground]] -= given / norm;
         }
         out
