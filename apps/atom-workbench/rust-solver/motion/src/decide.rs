@@ -2,30 +2,33 @@
 //!
 //! # A decision
 //! Every decision is made of four things (SPEC §5.1): the current level, a more exact one, the output the two are
-//! compared on, and the work. A read is the difference d of the two levels' outputs on the same trajectories or on the
-//! same sampled states, with its statistical error (`Read`). The current level's own error follows from it: where the
-//! finer level's parameter is the fraction r of the current one's and the level's error goes as its parameter to the
-//! order q, e(h) − e(rh) = d gives e(h) = d/(1 − r^q) (`richardson`). Against the share σ of
-//! its target that the level may take there are three outcomes and no fourth (`Read::outcome`):
-//! - within, |e| + t·SE ≤ σ: keep the level;
-//! - beyond, |e| − t·SE > σ: refine by the measured ratio at the level's order, h' = h (σ/|e|)^{1/q} (`Read::refined`),
-//!   the parameter at which the measured error meets the share -- on a ladder of halvings, the first rung at or below it
+//! compared on, and the work. The two levels differ by d on the same trajectories or on the same sampled states, and
+//! the current level's own error follows from it: where the finer level's parameter is the fraction r of the current
+//! one's and the level's error goes as its parameter to the order q, e(h) − e(rh) = d gives e(h) = d/(1 − r^q)
+//! (`richardson`). A read (`Read`) is an estimate of the error's size with its statistical error: a quantity x ≥ 0 that
+//! grows with the level's parameter to some order -- the error's mean square over the outputs it is read at, of the
+//! order 2q (estimate.rs `between`) -- estimated without bias, so that the read itself lies on either side of zero
+//! where there is no error. Against the bound b that x may reach -- the square of the share σ of its target that the
+//! level may take -- there are three outcomes and no fourth (`Read::outcome`):
+//! - within, max(x, 0) + t·SE ≤ b: keep the level;
+//! - beyond, x − t·SE > b: refine by the measured ratio at the read's order, h' = h (b/x)^{1/order} (`Read::refined`),
+//!   the parameter at which the measured size meets the bound -- on a ladder of halvings, the first rung at or below it
 //!   (`halved`);
-//! - unreadable, neither: refine within the work bound (on a ladder, the next rung); where it is spent, flag the output
-//!   and book the readable bound |e| + t·SE (`Read::bound`) into its total.
+//! - unreadable, neither: the far end (`Read::most`) is what the read does not exclude, the near end x − t·SE
+//!   (`Read::least`) what it shows clearly.
+//!
+//! The far end is taken from zero where the read lies below it: a size is not negative, a read below zero is a read
+//! of none, and a read of none excludes nothing smaller than its own interval -- so no read is within a bound that
+//! its interval alone exceeds, however far below zero the noise has put it.
 //!
 //! t·SE is the interval at the confidence z over the looks the decision takes (estimate.rs `Spread::interval_over`).
 //!
 //! # Many reads
-//! A decision that looks at a family of m reads, each against its own share (`judge`; SPEC §5.1), refines where any of
+//! A decision that looks at a family of m reads, each against its own bound (`judge`; SPEC §5.1), refines where any of
 //! them lies beyond, and so takes the largest of m noisy reads: beyond is judged with the family's interval (Šidák over
 //! the m looks, so that the largest noisy read refines no more often than one look would), by the read that asks for the
-//! finest level. Within is judged with each read's own interval, one look: every read has to lie within its share by
+//! finest level. Within is judged with each read's own interval, one look: every read has to lie within its bound by
 //! itself, whatever the others are. Any other family is unreadable.
-//!
-//! A falsifier is a decision whose current level is already booked at a bound that the read can only refute (SPEC §5.2,
-//! §5.3): beyond refines; within and unreadable leave the booked bound standing. What it reads clearly of the level's
-//! error is the near end of the read's interval, |e| − t·SE (`Read::clear`).
 //!
 //! # pays
 //! A spend W for a predicted saving ΔC pays where ΔC − t·SE(ΔC) > W (`pays`; the left side is `assured`, by which savings
@@ -43,14 +46,14 @@ pub type Work = f64;
 /// A complex multiply-add a + b c: (b_r c_r − b_i c_i) and (b_r c_i + b_i c_r) are four real multiplies, each added.
 pub const COMPLEX: Work = 4.;
 
-/// A read (module documentation): a difference between two levels and its statistical error.
+/// A read (module documentation): an estimate and its statistical error.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Read {
     pub value: f64,
     pub spread: Spread,
 }
 
-/// A read's outcome against a share (module documentation).
+/// A read's outcome against a bound (module documentation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Within,
@@ -72,51 +75,54 @@ pub fn halved(parameter: f64, factor: f64) -> f64 {
 }
 
 impl Read {
-    /// The readable bound |e| + t·SE among `looks` reads; unbounded for a read that is not a number.
-    pub fn bound(&self, looks: f64) -> f64 {
-        let bound = self.value.abs() + self.spread.interval_over(looks);
-        if bound.is_nan() { f64::INFINITY } else { bound }
+    /// The read's far end among `looks` reads, max(x, 0) + t·SE: what it does not exclude (module documentation);
+    /// unbounded for a read that is not a number or whose spread is unread.
+    pub fn most(&self, looks: f64) -> f64 {
+        let most = self.value.max(0.) + self.spread.interval_over(looks);
+        if self.value.is_nan() || most.is_nan() { f64::INFINITY } else { most }
     }
-    /// What the read shows clearly of the error among `looks` reads, |e| − t·SE: nothing (−∞) where its spread is unread,
-    /// no number for a read that is none.
-    pub fn clear(&self, looks: f64) -> f64 {
-        self.value.abs() - self.spread.interval_over(looks)
+    /// The read's near end among `looks` reads, x − t·SE: what it shows clearly; nothing (−∞) where its spread is
+    /// unread, no number for a read that is none.
+    pub fn least(&self, looks: f64) -> f64 {
+        self.value - self.spread.interval_over(looks)
     }
-    /// Within, beyond or unreadable against `share` among `looks` reads (module documentation); a read that is not a
+    /// Within, beyond or unreadable against `bound` among `looks` reads (module documentation); a read that is not a
     /// number is unreadable.
-    pub fn outcome(&self, share: f64, looks: f64) -> Outcome {
-        if self.bound(looks) <= share {
+    pub fn outcome(&self, bound: f64, looks: f64) -> Outcome {
+        if self.most(looks) <= bound {
             Outcome::Within
-        } else if self.clear(looks) > share {
+        } else if self.least(looks) > bound {
             Outcome::Beyond
         } else {
             Outcome::Unreadable
         }
     }
-    /// The factor on the level's parameter at which its measured error meets `share` at its `order`, (σ/|e|)^{1/q}.
-    pub fn refined(&self, share: f64, order: f64) -> f64 {
-        (share / self.value.abs()).powf(1. / order)
+    /// The factor on the level's parameter at which the measured size meets `bound` at the read's `order`,
+    /// (b/x)^{1/order}.
+    pub fn refined(&self, bound: f64, order: f64) -> f64 {
+        (bound / self.value).powf(1. / order)
     }
 }
 
 /// A family's outcome (module documentation, # Many reads).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Judgement {
-    /// Every read lies within its share by itself.
+    /// Every read lies within its bound by itself.
     Within,
-    /// Some read lies beyond its share among them all: the least factor on the level's parameter at which a read beyond
-    /// meets its share (`Read::refined`).
+    /// Some read lies beyond its bound among them all: the least factor on the level's parameter at which a read beyond
+    /// meets its bound (`Read::refined`).
     Beyond(f64),
     Unreadable,
 }
 
-/// The outcome of a family of reads, each with its share, at the level's `order` (module documentation, # Many reads).
+/// The outcome of a family of reads, each with its bound, at the reads' `order` in the level's parameter (module
+/// documentation, # Many reads).
 pub fn judge(reads: &[(Read, f64)], order: f64) -> Judgement {
     let looks = reads.len() as f64;
-    let beyond = reads.iter().filter(|(r, share)| r.outcome(*share, looks) == Outcome::Beyond).map(|(r, share)| r.refined(*share, order)).reduce(f64::min);
+    let beyond = reads.iter().filter(|(r, bound)| r.outcome(*bound, looks) == Outcome::Beyond).map(|(r, bound)| r.refined(*bound, order)).reduce(f64::min);
     match beyond {
         Some(factor) => Judgement::Beyond(factor),
-        None if reads.iter().all(|(r, share)| r.outcome(*share, 1.) == Outcome::Within) => Judgement::Within,
+        None if reads.iter().all(|(r, bound)| r.outcome(*bound, 1.) == Outcome::Within) => Judgement::Within,
         None => Judgement::Unreadable,
     }
 }
@@ -143,41 +149,47 @@ mod tests {
     }
 
     /// The three outcomes at their edges (one look, unlimited groups: t = z), the unreadable one also for a read that is
-    /// not a number and one on a single group.
+    /// not a number and one on a single group. A read below zero -- an unbiased read of a size that is none -- is
+    /// within where its interval is, and never beyond, however far below it lies.
     #[test]
     fn a_read_has_three_outcomes() {
         assert_eq!(read(0.5, 0.25).outcome(1., 1.), Outcome::Within);
-        assert_eq!(read(-0.5, 0.26).outcome(1., 1.), Outcome::Unreadable);
+        assert_eq!(read(0.5, 0.26).outcome(1., 1.), Outcome::Unreadable);
         assert_eq!(read(1.5, 0.24).outcome(1., 1.), Outcome::Beyond);
         assert_eq!(read(1.5, 0.25).outcome(1., 1.), Outcome::Unreadable);
         assert_eq!(read(f64::NAN, 0.).outcome(1., 1.), Outcome::Unreadable);
         assert_eq!(Read { value: 5., spread: Spread { error: 0.1, groups: 1. } }.outcome(1., 1.), Outcome::Unreadable);
-        assert!((read(-0.5, 0.25).bound(1.) - (0.5 + CONFIDENCE * 0.25)).abs() < 1e-15);
+        assert_eq!((read(-0.5, 0.5).outcome(1., 1.), read(-0.5, 0.51).outcome(1., 1.), read(-5., 0.1).outcome(1., 1.)), (Outcome::Within, Outcome::Unreadable, Outcome::Within));
+        assert!((read(-0.5, 0.25).most(1.) - CONFIDENCE * 0.25).abs() < 1e-15 && (read(0.5, 0.25).most(1.) - (0.5 + CONFIDENCE * 0.25)).abs() < 1e-15);
+        assert!((read(0.5, 0.25).least(1.) - (0.5 - CONFIDENCE * 0.25)).abs() < 1e-15 && (read(-0.5, 0.25).least(1.) - (-0.5 - CONFIDENCE * 0.25)).abs() < 1e-15);
+        assert_eq!((read(f64::NAN, 0.).most(1.), Read { value: 1., spread: Spread::UNREAD }.least(1.)), (f64::INFINITY, f64::NEG_INFINITY));
     }
 
     /// Richardson: a halving at order 2 reads 3/4 of the coarse error, a quartering at order 1 too, an exact
     /// finer level all of it -- a halving's factors at the orders 2 and 4 are 4/3 and 16/15 to the bit, 2^q/(2^q − 1);
-    /// refining by the measured ratio meets the share: an error four times the share takes half the parameter at order
-    /// 2, a quarter at order 1. On a ladder of halvings a factor takes whole halvings, one at least.
+    /// refining by the measured ratio meets the bound: a size four times its bound takes half the parameter at order
+    /// 2, a quarter at order 1 -- and an error's mean square sixteen times the share's square, of the order 4 at a
+    /// scheme of the order 2, half the step. On a ladder of halvings a factor takes whole halvings, one at least.
     #[test]
     fn the_level_s_error_and_its_refinement_follow_its_order() {
         assert_eq!((richardson(0.5, 2.), richardson(0.5, 4.), richardson(0., 1.)), (4. / 3., 16. / 15., 1.));
-        let e = read(-0.2, 0.);
+        let e = read(0.2, 0.);
         assert!((e.refined(0.05, 2.) - 0.5).abs() < 1e-15 && (e.refined(0.05, 1.) - 0.25).abs() < 1e-15);
+        assert!((read(0.04, 0.).refined(0.0025, 4.) - 0.5).abs() < 1e-15);
         assert_eq!((halved(1., 0.5), halved(1., 0.3), halved(1., 0.25), halved(1., 1.), halved(3., 2.)), (0.5, 0.25, 0.25, 0.5, 1.5));
     }
 
     /// A family's outcome (`judge`; one look's interval is z of the error on unlimited groups): within where every read
-    /// lies within its own share; an error four times its share, clear among all the looks, is beyond with the factor ½
+    /// lies within its own bound; a size four times its bound, clear among all the looks, is beyond with the factor ½
     /// at order 2, and of two reads beyond the finer level is taken; one read within and one whose interval straddles its
-    /// share are unreadable; a read that is clear at one look but not among the family's looks is unreadable too, not
+    /// bound are unreadable; a read that is clear at one look but not among the family's looks is unreadable too, not
     /// beyond; a read that is no number makes its family unreadable; no read at all is within.
     #[test]
     fn a_family_is_beyond_by_all_its_looks_and_within_by_each() {
         let quiet = (read(0., 0.), 1.);
         assert_eq!(judge(&[quiet, (read(0.5, 0.1), 1.)], 2.), Judgement::Within);
         assert_eq!(judge(&[quiet, (read(4., 0.01), 1.)], 2.), Judgement::Beyond(0.5));
-        assert_eq!(judge(&[(read(4., 0.01), 1.), (read(-0.5, 0.001), 0.03125)], 2.), Judgement::Beyond(0.25));
+        assert_eq!(judge(&[(read(4., 0.01), 1.), (read(0.5, 0.001), 0.03125)], 2.), Judgement::Beyond(0.25));
         assert_eq!(judge(&[quiet, (read(0.5, 1.), 1.)], 2.), Judgement::Unreadable);
         // 1.5 ± 0.24: beyond 1 at one look (z = 2), not at Šidák's interval over a thousand (about 4.08).
         let family: Vec<(Read, f64)> = std::iter::once((read(1.5, 0.24), 1.)).chain(std::iter::repeat_n(quiet, 999)).collect();
@@ -193,11 +205,12 @@ mod tests {
         assert!(pays(0., read(1., 0.)) && !pays(0., read(0., 0.)) && !pays(1., read(f64::NAN, 0.)));
     }
 
-    /// Over m looks of pure noise against a zero share, some read lies beyond by chance as often as one look does at z
-    /// (Šidák): of 4000 repetitions of 100 independent normal reads, the share with a read beyond the family's interval
-    /// is P(|N| > 2) = 0.0455, where one look's interval at every read refutes in 1 − (1 − 0.0455)¹⁰⁰ = 99 % of them --
-    /// each share a count's, with the standard error √(p(1 − p)/4000), within its interval at the confidence z over the
-    /// two looks.
+    /// Over m looks of pure noise against a zero bound, some read lies beyond by chance no more often than one look
+    /// does at z (Šidák). A read is beyond on one side, so each look refutes by chance with half its two-sided tail: of
+    /// 4000 repetitions of 100 independent normal reads, the share with a read beyond the family's interval is
+    /// 1 − (1 − q/2)¹⁰⁰ = 0.0230 at Šidák's tail q = 1 − (1 − p)^{1/100}, p = P(|N| > 2) = 0.0455 -- one look's own
+    /// p/2 = 0.0228 --, where one look's interval at every read refutes in 1 − (1 − p/2)¹⁰⁰ = 90 % of them; each share
+    /// a count's, with the standard error √(s(1 − s)/4000), within its interval at the confidence z over the two looks.
     #[test]
     fn many_looks_refute_by_chance_as_rarely_as_one() {
         let (repetitions, looks) = (4000, 100);
@@ -209,7 +222,8 @@ mod tests {
             single += usize::from(draws.iter().any(|r| r.outcome(0., 1.) == Outcome::Beyond));
         }
         let (p, n) = (0.04550026389635842_f64, repetitions as f64);
-        for (count, share) in [(sidak, p), (single, 1. - (1. - p).powi(looks))] {
+        let q = -((-p).ln_1p() / looks as f64).exp_m1();
+        for (count, share) in [(sidak, 1. - (1. - 0.5 * q).powi(looks)), (single, 1. - (1. - 0.5 * p).powi(looks))] {
             let within = Spread { error: (share * (1. - share) / n).sqrt(), groups: f64::INFINITY }.interval_over(2.);
             assert!((count as f64 / n - share).abs() <= within, "{count} of {n} against {share} ± {within}");
         }
