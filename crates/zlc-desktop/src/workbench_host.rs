@@ -126,6 +126,16 @@ impl Host for View {
     fn close_panel(&mut self, _: &str) {}
 }
 
+/// The console's line and the apparatus's, said to the journal whenever either changes.
+fn journal_reports(state: &Value) {
+    if !zlc_core::journal::is_open() { return; }
+    static SAID: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let reports = json!({"console": state["board"]["report"], "apparatus": state["apparatus"]["report"]});
+    let text = reports.to_string();
+    let mut said = SAID.lock().unwrap_or_else(|error| error.into_inner());
+    if *said != text { zlc_core::journal::note("app", "report", reports); *said = text; }
+}
+
 /// Put the workbench sections into a state message, and publish the open
 /// devices' commands as MCP tools.
 pub fn decorate(workbench: &Workbench, runtime: &Runtime, bindings: &Panels, targets: &BTreeMap<String, Value>,
@@ -133,6 +143,7 @@ pub fn decorate(workbench: &Workbench, runtime: &Runtime, bindings: &Panels, tar
     let _span = crate::trace::span("workbench.decorate", || json!({}));
     let view = View { signals: signals(runtime), panels: panel_contents(bindings, state, targets) };
     workbench.decorate(state, &view);
+    journal_reports(state);
     tools.publish(workbench.plugin_tools());
 }
 

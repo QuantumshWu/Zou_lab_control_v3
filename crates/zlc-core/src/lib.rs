@@ -20,6 +20,7 @@ pub mod scientific;
 pub mod parameters;
 pub mod restrict;
 pub mod checkout;
+pub mod journal;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DType {

@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "science" / "src"))
+import zlc_plugin.journal  # as in a plugin process, where the SDK is loaded before any device: its import is not a capture's time
 from zlc_atom.devices.camera.contract import CAPTURE_REST_SECONDS
 from zlc_atom.devices.simulation.camera.adapter import VirtualCamera
 

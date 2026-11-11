@@ -462,7 +462,17 @@ fn main() {
         return;
     }
     trace::point("startup.main", || json!({"created_ns": trace::process_created_ns()}));
-    let routed = diagnostics::route(if std::env::args().any(|arg| arg == "--installer") { "installation" } else { "zlc-desktop" });
+    let installer = std::env::args().any(|arg| arg == "--installer");
+    let routed = diagnostics::route(if installer { "installation" } else { "zlc-desktop" });
+    // The application keeps its flight journal from its first moment; the installer has nothing to keep.
+    if !installer {
+        match zlc_core::journal::open(&zlc_core::checkout::local("journal")) {
+            Ok(()) => zlc_core::journal::note("app", "started", json!({"pid": std::process::id(),
+                "release": std::fs::read_to_string(zlc_core::checkout::path("bin/release.json")).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .map(|release| json!({"version": release["version"], "commit": release["commit"]}))})),
+            Err(error) => eprintln!("The flight journal is not kept: {error}"),
+        }
+    }
     // `run` returns only when the application cannot start; its event loop ends the process.
     let log = routed.log.as_ref().map(|path| path.display().to_string());
     let error = match std::panic::catch_unwind(move || run(log)) {
@@ -784,6 +794,22 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Event::UserEvent(AppEvent::Command { window: from, mut command }) if !closing => {
                     let action = command["action"].as_str().ok_or("Command has no action")?.to_owned();
+                    if action == "journal" {
+                        // What a window says of itself (ui/src/journal.ts): the operator's clicks and keys, its popups, its errors.
+                        for line in command["lines"].as_array().into_iter().flatten() {
+                            if let (Some(us), Some(event)) = (line["us"].as_u64(), line["ev"].as_str()) {
+                                let mut facts = line["facts"].clone();
+                                if facts.is_object() { facts["window"] = json!(from.as_ref().map(|kind| format!("{kind:?}"))); }
+                                zlc_core::journal::note_at(us, "ui", event, facts);
+                            }
+                        }
+                        return Ok(());
+                    }
+                    // Every command a window or a client sends, but the ones sent at display cadence (a board's sync, a pointer's
+                    // moves, a page's own mappings): those are read from what they led to.
+                    if !matches!(action.as_str(), "sync_panels"|"pointer"|"map_ready"|"frame_consumed"|"mappings_released"|"describe"|"ready") {
+                        zlc_core::journal::note_with("app", "action", || json!({"action": action, "window": from.as_ref().map(|kind| format!("{kind:?}")), "command": command}));
+                    }
                     if matches!(action.as_str(), "map_ready"|"frame_consumed"|"mappings_released") {
                         // A page's own mappings: they are its window's.
                         return match from.as_ref().and_then(|kind| windows.get_mut(kind)) { Some(window) => window.pixels.acknowledge(&command), None => Ok(()) };
@@ -2176,7 +2202,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         "inputs":inputs.iter().map(|input|json!({"panel":input.panel,"window":input.window,"epoch":input.epoch,
                             "source":input.read.as_ref().map(|read|trace::key(read.key())),
                             "overlay":input.overlay.as_ref().map(|read|trace::key(read.key()))})).collect::<Vec<_>>()}));
-                    if !in_viewer && importing.is_none() { cadence.dispatch(std::time::Instant::now()); }
+                    if !in_viewer && importing.is_none() { panels::journal_drawn(&inputs); cadence.dispatch(std::time::Instant::now()); }
                     let selected=importing.map(|candidate|&candidate.bindings).unwrap_or(viewers.get(&document).map_or(&bindings, |viewer| &viewer.bindings));
                     let archive=importing.map(|candidate|candidate.data.clone());
                     if let Err(error) = sender.send(science::Job{ticket,command,inputs,authorities:selected.authorities(),

@@ -1232,6 +1232,10 @@ impl Workbench {
         // v2 _activate_candidate: said when a run starts, however it was asked for (Start, a
         // follow restart, a task's acquisition).
         self.console_report = (format!("{} started", node.name), "task");
+        // The configuration this run plays, beside the id every later line names it by.
+        zlc_core::journal::note_with("workbench", "launch", || json!({"run": spec.run, "node": id, "type": spec.type_id, "origin": spec.origin,
+            "source_signal": spec.source_signal, "values": spec.values, "devices": spec.devices, "artifacts": spec.artifacts,
+            "acquisition_parent": pending.acquisition.as_ref().map(|(parent, _, completion)| json!([parent, completion]))}));
         self.plugins.start(&spec);
         Ok(())
     }

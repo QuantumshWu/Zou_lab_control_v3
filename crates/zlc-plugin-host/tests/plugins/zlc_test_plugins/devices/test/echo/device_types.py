@@ -59,6 +59,9 @@ class EchoDevice:
         return int(array.astype("i8").sum())
 
     def fire(self):
+        # What a device says for the application's flight journal.
+        from zlc_plugin import journal
+        journal.note("test", "fired", gain=self.opened_with.get("gain"))
         return "fired"
 
     def tell(self, size):

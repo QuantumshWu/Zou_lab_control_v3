@@ -67,7 +67,10 @@ export class TaskConsoleView {
         const open = command("Open…", () => void this.openLayout(), { title: "Open a saved layout and signal wiring" });
         const clear = command("Clear", () => void this.clearBoard(), { role: "destructive", title: "Remove every panel and logic node from the board" });
         this.fileCommands = [save, open, clear];
-        header.append(identity, this.summary, this.kinds.root, this.add.root, this.selectors, this.pause.root, image.root, save.root, open.root, clear.root);
+        // The last hour as the application's journal kept it, with the board and the files it names: one archive
+        // to hand to whoever looks into a fault. Never held back by a running task: a fault is exported while it shows.
+        const diagnostics = command("Diagnostics…", () => this.send({ action: "export_diagnostics" }, "Exporting diagnostics…"), { title: "Export the last hour's record of commands, runs, board commands, camera frames and drawn data, with the layout and the files it names, as one archive in the workspace's diagnostics folder" });
+        header.append(identity, this.summary, this.kinds.root, this.add.root, this.selectors, this.pause.root, image.root, save.root, open.root, clear.root, diagnostics.root);
         this.strip = new StatusStrip({ action: ["Stop task", () => { const task = this.boardState()?.active_task; if (task)
                     this.send({ action: "stop_node", node: task }, "Stopping the task…"); }] });
         this.strip.root.id = "status";

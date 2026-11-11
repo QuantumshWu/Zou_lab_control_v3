@@ -104,7 +104,7 @@ export class Transport {
     const id = this.nextRequest++;
     if (this.shared) {
       // A pointer's own motion is no intent; anything else is said once, in the status line.
-      if (command.action !== "pointer" && command.action !== "frontend_error") this.note(READ_ONLY, "warning");
+      if (command.action !== "pointer" && command.action !== "frontend_error" && command.action !== "journal") this.note(READ_ONLY, "warning");
       return id;
     }
     if (!window.ipc) { this.lastError = "The native desktop connection is unavailable."; this.handlers?.changed(); return id; }
