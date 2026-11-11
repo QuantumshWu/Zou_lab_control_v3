@@ -12,10 +12,11 @@
 //!
 //! # The state at any time of the step
 //! With Ĥ₀ = c + RΛR⁻¹ (its scalar part c apart, `linalg::Eigen`) and x = R d, i ḋ = (Λ + Dᵉ(u)) d, Dᵉ = R⁻¹DR,
-//! ω_ab = λ_a − λ_b. What D does to a pair of states depends on how far the pair turns between the step's nodes.
+//! ω_ab = λ_a − λ_b. What D does to a pair of states depends on how far the pair turns between the step's nodes
+//! against the size of what changes (# The split).
 //!
-//! **A fast pair, |ω_ab| |h| ≥ 1** -- it turns a radian and more between two nodes: an explicit state's detuning, its
-//! decay. The state follows the change: d = (1 + X(u)) g, with X on the fast pairs the polynomial that solves
+//! **A fast pair** -- it turns far between two nodes for what changes: an explicit state's detuning, its decay, at
+//! any step. The state follows the change: d = (1 + X(u)) g, with X on the fast pairs the polynomial that solves
 //! ω_ab X_ab − i Ẋ_ab + Dᵉ_ab = 0 exactly,
 //!   X = X₀ + uX₁ + u²X₂,  X₂ = −B/ω,  X₁ = (2iX₂ − A)/ω,  X₀ = iX₁/ω  (element by element)
 //! -- the generator's own eigenvectors along the path to the first order of the change, with the corrections of its
@@ -38,13 +39,15 @@
 //! its middle and to its end: two hops, whatever Ĥ₀ --, each the first Magnus term, m ← e^{−iJ} m with J = ∫D̃₂ over the
 //! hop, the integral over the pair's turn exact: for a hop from u over w, with D₂ = uA + u²B,
 //!   J_ab = e^{iω_ab(u − u₀)} w [A_ab (u I₀ + w I₁) + B_ab (u² I₀ + 2uw I₁ + w² I₂)],  I_p = ∫₀¹ s^p e^{zs} ds,  z = iω_ab w,
-//! the moments by their series Σ_j z^j/(j!(j + p + 1)) -- |z| < 1 for a slow pair over a half step: no cancellation,
-//! and summed until its terms are within the round-off of the state the exponent acts on or of the exponent's own
-//! first term (`series`, `Picture::exponent`).
+//! the moments by their series Σ_j z^j/(j!(j + p + 1)) -- |z| is below the split for a slow pair over a half step, of
+//! the order of one: the terms' moduli sum to e^{|z|} at most, a digit of the rounding --, summed until its terms are
+//! within the round-off of the state the exponent acts on or of the exponent's own first term (`series`,
+//! `Picture::exponent`).
 //!
 //! Between its three stops m is their quintic: its values there and its rates ṁ = −iD̃₂m (zero at the step's middle,
 //! where D₂ is), the Hermite interpolant. m changes by the slow pairs alone, so its sixth derivative is of the size
-//! |ω|⁵ |D₂| with |ω| |h| < 1, and the quintic errs by no more than (4/27)/720 of w⁶ times it, w the stops' spacing. So
+//! |ω|⁵ |D₂| with |ω| |h| below the split, and the quintic errs by no more than (4/27)/720 of w⁶ times it, w the stops'
+//! spacing. So
 //! the state at any time u from the launch on is x(u) = R (1 + X(u)) e^{−iΛ(u − u₀)} m(u) -- n exponentials, the matrix
 //! R(1 + X(u)) from its three (R(1 + X₀), RX₁ and RX₂, made once a step) and its product of n² (`Picture::at`), no hop
 //! --, and at the three stops it is the hops' own.
@@ -57,25 +60,50 @@
 //! Where nothing moves (D = 0: an atom at rest, a generator still along every path) X = 0 and m is constant: the state
 //! is e^{−i(c + Λ)(u − u₀)} on its launch, exact at any detuning times step.
 //!
-//! What is left out, all of the change alone:
-//! - of the slow pairs, the hop's second Magnus term, −½∫∫[D̃₂(t₁), D̃₂(t₂)]: over a half step it is
-//!   (h⁵/60)[A, [Λ, A]] and terms of [A, B] -- the fifth order in the step, so the propagation is of the fourth order
-//!   there like the three nodes of D (Simpson's rule's: their cubic is odd about the middle; what stays is τ⁵D⁗/2880 a
-//!   step);
-//! - of the fast pairs, the third order of the following and what the three nodes miss of F between them: within
-//!   the square of the following at the step's end, |X|² ≤ (|D|/|ω|)² -- with |D| ≈ k·v |h| times the coupling V that is
-//!   (k·v h)² (V/ω)², falling with the step and with the detuning --, and measured an order and more below it.
-//!   (A hop through such a pair left the light shift of the change, (k·v τ)²/24 of the light shift's turn over the
-//!   step at any detuning.)
+//! What is left out, all of the change alone. On one pair, with s_A = |A| h² and s_B = |B| |h|³ the sizes of its
+//! change's slope and curvature over a half step and x = |ω| |h| its turn between two nodes (derived, and read against
+//! the flow: tests, `a_pair_hopped_and_followed_against_its_flow`), at the step's end:
+//! - of a slow pair, the hops' second Magnus term, −½∫∫[D̃₂(t₁), D̃₂(t₂)] -- (h⁵/60)[A, [Λ, A]] a hop and terms of
+//!   [A, B] --: over the step's two hops x s_A²/15 and x s_B²/42, and Im(A B*) h⁵/15 where slope and curvature are out
+//!   of phase. The fifth order in the step, so the propagation is of the fourth order there like the three nodes of D
+//!   (Simpson's rule's: their cubic is odd about the middle; what stays is τ⁵D⁗/2880 a step);
+//! - of a fast pair, in the second order what the three nodes' parabola of D₂ misses of the change's own light shift
+//!   between them, the quartic u⁴|B|²/ω: ∫(u⁴ − h²u²)du |B|²/ω = (4/15) s_B²/x, and nothing else; and the third order
+//!   of the following, D₂ on the pair itself, −X D X = −(|A|²A/ω²) u (u + i/ω)² for a slope: s_A³ |I(x)|/x² with
+//!   I(x) = ∫₋₁¹ e^{ixt} t (t + i/x)² dt = i(2/(3x) + x/15 + …), that is (2/3)(s_A/x)³ to the leading order. Both fall
+//!   with the step and with the detuning. (A hop through an unresolved pair left the light shift of the change,
+//!   (k·v τ)²/24 of the light shift's turn over the step at any detuning.)
 //! (step/tests.rs, `a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the_generator`.)
 //!
-//! A radian between nodes is where the two treatments meet: a pair slower than that is resolved by the nodes (its
-//! moments' series converge without cancellation, its quintic holds), a pair faster is followed more closely than a
-//! hop over a half step would take it (|X| ≤ |D| |h| there, the size of the hop's own exponent). A half step takes
-//! the pairs by its own nodes. The radian is where the two sizes meet, not where the two errors do: a hopped pair
-//! leaves (|D| h)² |ω| h/60 (the second Magnus term), a followed one a part c of (|D| h)²/(|ω| h)² (c measured an
-//! order below one), equal at |ω| h = (60 c)^{1/3} -- about two for c = 0.1, and no number without c. The split is
-//! not derived.
+//! # The split
+//! A pair is followed where its following leaves no more than its hops would (`followed`):
+//!   (2/3)(S_A/x)³ + (4/15) S_B²/x ≤ x (S_A²/15 + S_B²/42).
+//! The left side falls with x and the right side rises: the pairs are split at one turn, and a pair that crosses it
+//! with the step changes its treatment where the two leave the same. For a slope alone that turn is x⁴ = 10 S_A -- a
+//! radian between two nodes where the change over a half step is a tenth, 0.56 rad where it is a hundredth: no number.
+//! S_A and S_B are the sizes of all the pairs' changes together -- the root of the sum of their squared slopes h²|A_ab|
+//! (and curvatures |h|³|B_ab|), each pair once, the mean of its two ways round --, one pair's own where there is one.
+//! With several, either remainder is a sum over the states the pairs share (the commutator's, X D X's), and a pair's
+//! own slope does not bound what its following leaves (measured: with the pair's own size in the rule, pairs of a
+//! small slope beside large ones were followed at a small turn, and the state erred up to twice more than with every
+//! pair split at a radian).
+//!
+//! The rule holds the two leading remainders of the state at the step's end. It does not hold the hops' term of
+//! [A, B] (of either sign), the curvature's third order -- the next order in what the change itself turns between two
+//! nodes, which the step's choice keeps below π (SPEC §2.2) --, or the state inside the step and the kick read on it
+//! (a hopped pair's state between the stops is the quintic's, a followed one's the polynomial's). A half step takes
+//! the pairs by its own nodes.
+//!
+//! Measured on scenes' own paths against every pair split at a radian (step/tests.rs,
+//! `a_scene_s_step_error_by_the_split`: the state over a span in one step against the path's flow, its fall on
+//! halving the step, and the same of the path's impulse on those states; sixteen atoms, random states). At the
+//! scenes' steps the two are within a tenth: PGC3D's five ground states at 0.625 µs 1.80·10⁻⁴ against 1.95·10⁻⁴,
+//! GMD1C's thirteen states at 0.5 µs 7.3·10⁻⁵ against 6.5·10⁻⁵. At twice those steps, where the pairs' changes over a
+//! half step reach 0.3 to 0.5 and a radian follows pairs a hop takes better: 4.3·10⁻³ against 8.4·10⁻³ (falling 14.7
+//! against 28.7 on halving, where the order's fall is 16) and 1.9·10⁻³ against 2.7·10⁻³ (14.2 against 22.1); the
+//! impulse 3.0·10⁻⁴ against 6.8·10⁻⁴ of the momentum (falling 17.6 against 40.4) and 9.6·10⁻⁵ against 2.0·10⁻⁴ (13.9
+//! against 35.0). The propagation's own error is a hundredth to a seventh of what one step differs from its two halves
+//! by, which is the splitting's.
 //!
 //! # What follows the generator's own frequencies, and what does not
 //! The propagation's own work -- the decomposition, the following, two hops -- is the same whatever Ĥ₀'s frequencies
@@ -263,19 +291,25 @@ impl Default for Picture {
     }
 }
 
-/// The turn |ω| |h| of a pair between two of the step's nodes from which the pair is followed (module documentation:
-/// not derived). The tests force it either way (`SPLIT`) to read the two treatments on the same pair.
-fn split() -> f64 {
+/// Whether a pair that turns x = |ω| |h| between two of the step's nodes is followed (module documentation, # The
+/// split), the pairs' changes over a half step being of the sizes `slope` = S_A and `curvature` = S_B: where what its
+/// following leaves, (2/3)(S_A/x)³ + (4/15) S_B²/x, is no more than what its hops would, x (S_A²/15 + S_B²/42) -- the
+/// two times x³; a pair that does not turn is hopped. The tests may force a turn in the rule's place (`SPLIT`), to
+/// read the two treatments on the same pair.
+fn followed(x: f64, [slope, curvature]: [f64; 2]) -> bool {
     #[cfg(test)]
-    return SPLIT.get();
-    #[cfg(not(test))]
-    1.0
+    if let Some(split) = SPLIT.get() {
+        return x >= split;
+    }
+    let (first, second) = (slope * slope, curvature * curvature);
+    x > 0.0 && 2.0 / 3.0 * first * slope + 4.0 / 15.0 * second * (x * x) <= x.powi(4) * (first / 15.0 + second / 42.0)
 }
 
 #[cfg(test)]
 thread_local! {
-    /// `split` in a test's thread: zero follows every pair, infinity hops every pair.
-    pub(crate) static SPLIT: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
+    /// A turn forced in the place of `followed`'s rule in a test's thread: zero follows every pair, infinity hops
+    /// every pair.
+    pub(crate) static SPLIT: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
 }
 
 /// The terms of ∫₀¹ t^p e^{zt} dt's series Σ_j z^j/(j!(j + p + 1)) at |z| ≤ x for an integral of the size `size` at
@@ -412,8 +446,8 @@ impl Picture {
         self.slopes = if self.moving { [0, 1].map(|i| self.ends[i].data.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()) } else { [0.0; 2] };
     }
 
-    /// The fast pairs and their following X (module documentation, # The state at any time of the step), and in the
-    /// place of the slopes of D those of D₂ on the slow pairs.
+    /// The fast pairs (`followed`, at the sizes of the pairs' changes) and their following X (module documentation, #
+    /// The state at any time of the step), and in the place of the slopes of D those of D₂ on the slow pairs.
     /// - X's first order from the slopes of D, pair by pair.
     /// - At the two ends the second order D X − X D_s. Its fast part F is followed in its turn (X's second order: the
     ///   same polynomial of F through the three nodes -- F is zero at the middle, as D is).
@@ -430,12 +464,16 @@ impl Picture {
             let one = (C64::I * two * 2.0 - a) * inverse;
             [C64::I * one * inverse, one, two]
         };
+        // The sizes of the pairs' changes over a half step: the root of the sum of their squared slopes, and of their
+        // curvatures, each pair once -- the mean of its two ways round.
+        let pairs = |slope: &Mat| (0.5 * (0..size).filter(|k| k / n != k % n).map(|k| slope.data[k].norm_sqr()).sum::<f64>()).sqrt();
+        let sizes = [pairs(a) * (h * h), pairs(b) * (h * h * h).abs()];
         // A pair and its reverse turn alike, ω_ba = −ω_ab.
         for row in 0..n {
             for column in row..n {
                 let omega = self.lambda[row] - self.lambda[column];
                 let turn = omega.abs();
-                let fast = row != column && turn * h.abs() >= split();
+                let fast = row != column && followed(turn * h.abs(), sizes);
                 if !fast && row != column {
                     self.spread = self.spread.max(turn);
                 }
@@ -453,7 +491,8 @@ impl Picture {
                 }
             }
         }
-        self.work += (3 * size) as f64;
+        // Per entry the sizes' squares (one) and the following (three).
+        self.work += (4 * size) as f64;
         if !self.followed {
             return;
         }
@@ -601,8 +640,9 @@ impl Picture {
     }
 
     /// `matrix`'s slow pairs turned by e^{iω_ab s}: from a pair's own time to the path's, s = u − u₀ from the launch.
-    /// A slow pair's rates differ by less than 1/|h|, so the factor is bounded whatever the states' own decays over s
-    /// are: the turn by the two states' phases, the modulus by the rates' difference.
+    /// A slow pair's rates differ by less than the split's turn over |h| (module documentation, # The split), so the
+    /// factor is bounded whatever the states' own decays over s are: the turn by the two states' phases, the modulus
+    /// by the rates' difference.
     fn turn(&mut self, s: f64) {
         if s == 0.0 {
             return;
@@ -1054,7 +1094,7 @@ mod tests {
         use crate::units::rounding;
         let entry = |seed: f64, i: usize, j: usize| C64::new((seed * (1.0 + i as f64) + 0.7 * j as f64).sin(), (seed * (2.0 + j as f64) - 0.3 * i as f64).cos());
         let hermitian = |n: usize, seed: f64, size: f64| Mat::from_fn(n, n, |i, j| (entry(seed, i, j) + entry(seed, j, i).conj()) * (0.5 * size));
-        // The slopes: light shifts of five states, none a radian from another over the half step.
+        // The slopes: light shifts of five states, none far enough from another over the half step to be followed.
         let (n, half) = (5, 0.08);
         let mut base = hermitian(n, 1.3, 2.0);
         for i in 0..n {
@@ -1121,7 +1161,8 @@ mod tests {
         eprintln!("a state at a time: within {worst:.3} of its rounding's bound");
     }
 
-    /// Slow pairs are hopped (module documentation): Ĥ₀ of light shifts that turn less than a radian over a half step,
+    /// Slow pairs are hopped (module documentation): Ĥ₀ of light shifts that turn less over a half step than their
+    /// change's split,
     /// with a small decay, and slopes that change it by a tenth over the step, on three states -- no pair fast. The
     /// state at the end and between the nodes is the flow within the fifth order of the step -- the hop's second Magnus
     /// term, (h⁵/60)‖[A, [Λ, A]]‖ ≈ (|ω|h)(h²‖A‖)²/60 = 0.4 × 0.064²/60 = 3·10⁻⁵ at the half 0.08 --: at half the step
@@ -1149,22 +1190,22 @@ mod tests {
         assert!(found[0] < 1e-4 && found[1] < found[0] / 24.0, "{found:?}");
     }
 
-    /// One pair under the two treatments, the split forced either way (`SPLIT`): Ĥ₀ = diag(0, −ω) with the change
+    /// One pair under the two treatments, the split forced either way (`SPLIT`), and under the rule: Ĥ₀ = diag(0, −ω) with the change
     /// uA + u²B on the pair alone, x = |ω| h from 0.5 to 4 and the change's size s = (|A| h + |B| h²) h from 0.01 to
     /// 0.3 -- A and B in equal parts (their phases 1.1 rad apart), A alone, B alone --, from three states; the state's
     /// largest error at the step's end and inside it (u = ±h/2) against the flow. A measurement of the two remainders.
-    fn a_pair_s_remainders(parts: [f64; 2], size: f64, x: f64) -> [[f64; 2]; 2] {
+    fn a_pair_s_remainders(parts: [f64; 2], size: f64, x: f64) -> [[f64; 2]; 3] {
         let half = 1.0;
         let starts = [[C64::ONE, C64::ZERO], [C64::real(0.5_f64.sqrt()); 2], [C64::real(0.6), C64::new(0.0, 0.8)]];
         let base = Mat::from_fn(2, 2, |i, j| if i == 1 && j == 1 { C64::real(-x / half) } else { C64::ZERO });
         let pair = |z: C64| Mat::from_fn(2, 2, |i, j| if i == j { C64::ZERO } else if i < j { z } else { z.conj() });
         let (a, b) = (pair(C64::cis(0.7) * (parts[0] * size / half.powi(2))), pair(C64::cis(-0.4) * (parts[1] * size / half.powi(3))));
-        let mut found = [[0.0_f64; 2]; 2];
-        for (treatment, split) in [f64::INFINITY, 0.0].into_iter().enumerate() {
+        let mut found = [[0.0_f64; 2]; 3];
+        for (treatment, split) in [Some(f64::INFINITY), Some(0.0), None].into_iter().enumerate() {
             SPLIT.set(split);
             let mut picture = pictured(&base, &a, &b, half, true);
-            SPLIT.set(1.0);
-            assert!(picture.through && picture.followed == (treatment == 1));
+            SPLIT.set(None);
+            assert!(picture.through && (split.is_none() || picture.followed == (treatment == 1)));
             for start in &starts {
                 picture.launch(-half, start);
                 for (place, times) in [&[half][..], &[-0.5 * half, 0.5 * half][..]].into_iter().enumerate() {
@@ -1189,7 +1230,9 @@ mod tests {
     ///   that is (2/3)(s_A/x)³ to the leading order in x (within a thirtieth at the size 0.01 for x from 0.75 to 2.5);
     /// - so the two are equal at no number of x. For a slope alone (2/3)(s_A/x)³ = x s_A²/15 at x⁴ = 10 s_A: at
     ///   x = 1 for s_A = 0.1, at 0.56 for 0.01 and at 1.3 for 0.3; at x = 1 and the size 0.01 the followed pair errs ten
-    ///   times less than the hopped one for a slope alone and ten times more for a curvature alone (which cross at 4).
+    ///   times less than the hopped one for a slope alone and ten times more for a curvature alone (which cross at 4);
+    /// - the rule (`followed`: the leading remainders compared) takes the treatment that errs less, or one within a
+    ///   half more than the other where the two are close -- at every x and size here.
     #[test]
     fn a_pair_hopped_and_followed_against_its_flow() {
         // |I(x)|, by Simpson's rule.
@@ -1205,7 +1248,8 @@ mod tests {
         for (name, parts) in [("A and B", [0.5, 0.5]), ("A alone", [1.0, 0.0]), ("B alone", [0.0, 1.0])] {
             for size in [0.01, 0.1, 0.3] {
                 for x in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0] {
-                    let [hop, follow] = a_pair_s_remainders(parts, size, x);
+                    let [hop, follow, rule] = a_pair_s_remainders(parts, size, x);
+                    assert!(rule[0] <= 1.5 * hop[0].min(follow[0]), "{name}, size {size}, x {x}: the rule's {:e}, hopped {:e}, followed {:e}", rule[0], hop[0], follow[0]);
                     if size == 0.01 {
                         let (slope, curvature) = (parts[0] * size, parts[1] * size);
                         let mut held = vec![];
@@ -1226,7 +1270,7 @@ mod tests {
                         }
                     }
                     eprintln!(
-                        "{name}, size {size:4}, x {x:4}: end hop {:.3e} follow {:.3e} (follow/hop {:8.3}; hop/size² {:.4}, follow x/size² {:.4}) | inside hop {:.3e} follow {:.3e} ({:8.3})",
+                        "{name}, size {size:4}, x {x:4}: end hop {:.3e} follow {:.3e} (follow/hop {:8.3}; hop/size² {:.4}, follow x/size² {:.4}) | inside hop {:.3e} follow {:.3e} ({:8.3}) | the rule's: end {:.3e}, inside {:.3e}",
                         hop[0],
                         follow[0],
                         follow[0] / hop[0],
@@ -1234,7 +1278,9 @@ mod tests {
                         follow[0] * x / (size * size),
                         hop[1],
                         follow[1],
-                        follow[1] / hop[1]
+                        follow[1] / hop[1],
+                        rule[0],
+                        rule[1]
                     );
                 }
             }
