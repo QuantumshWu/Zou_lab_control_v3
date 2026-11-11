@@ -4,14 +4,15 @@
 // exact tools of refs/diffusion. Build it first:
 //   cargo build -p atom-motion --example diffusion --release --target x86_64-pc-windows-msvc
 // force (judged): the engine's mean force at constant velocities against the master equation of its own model,
-//   python diffusion/uniform_engine.py <velocities> <trajectories> <span> <τ> 1 rows.json  (R4D_PYTHON, else `python`:
-//   one with numpy and scipy), then check.mjs's rule 0 on F_engine − F_exact: the count beyond 2σ and the mean deviation,
+//   python diffusion/uniform_engine.py <velocity> <trajectories> <span> <τ> 1 rows.json  (R4D_PYTHON, else `python`:
+//   one with numpy and scipy) once a velocity, then check.mjs's rule 0 on F_engine − F_exact: the count beyond 2σ and the mean deviation,
 //   σ² = SE² + u², u the harmonic balance's truncation. The momentum diffusion of the same runs is printed, not judged.
 // tz (reported): T_z(t) of the 1D trapped problem, `diffusion free R4_TW2 1d ...`, against the same model's phase-space
 //   equation and its master equation in the position representation (data/R4D_TW2.json: recorded runs of
 //   diffusion/pde.py, exported by diffusion/export.py). Never judged.
-// Each run is one command on all cores, killed at the limit of lib/worker.mjs (the user's 5 minutes); results in
-// out/results/<id>.json.
+// Each run is one command on all cores, killed at the limit of lib/worker.mjs (the user's 5 minutes) -- of `force` each
+// velocity is a run (the seven in one command take 230 s on a free machine and pass the limit on a shared one, which is
+// no finding about the engine); results in out/results/<id>.json.
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -32,9 +33,11 @@ function run(command,args){
 }
 
 function force(){
-  const e=read(path.join(here,'expect','R4D_FORCE.json')),t=e.tool,rows=path.join(scratch,'force_rows.json');
-  const wall=run(process.env.R4D_PYTHON??'python',[path.join(here,'diffusion','uniform_engine.py'),t.velocities.join(','),String(t.trajectories),String(t.spanUs),String(t.tauUs),'1',rows]);
-  const out=read(rows),test=consistency(out.map(r=>({d:r.engine-r.exact,u:r.u,fixed:0,random:Z*r.se}))),verdict=test.reject?'FAIL':'PASS';
+  const e=read(path.join(here,'expect','R4D_FORCE.json')),t=e.tool;let wall=0;
+  // A velocity is a run of its own: the same driver, the same arguments, its row; the rows are judged together as before.
+  const out=t.velocities.flatMap(v=>{const rows=path.join(scratch,`force_rows_${v}.json`);
+    wall+=run(process.env.R4D_PYTHON??'python',[path.join(here,'diffusion','uniform_engine.py'),String(v),String(t.trajectories),String(t.spanUs),String(t.tauUs),'1',rows]);return read(rows);});
+  const test=consistency(out.map(r=>({d:r.engine-r.exact,u:r.u,fixed:0,random:Z*r.se}))),verdict=test.reject?'FAIL':'PASS';
   console.log(`${e.id} [${e.reference}, ${e.kind}] ${e.title}`);
   console.log(`  ${verdict}: ${out.length} velocities, ${t.trajectories} trajectories each, τ ${t.tauUs} µs, ${wall.toFixed(0)} s; beyond 2σ: ${test.beyond} (n_eff ${test.neff.toFixed(1)}, p ${test.p.toPrecision(2)}${test.count?'!':''}); mean deviation ${test.dbar.toExponential(2)} against ${test.M.toExponential(2)}${test.common?'!':''}`);
   console.log('  v µm/µs    F exact       u    F engine      se   d/σ  |  2D exact  2D engine      se  (reported)');
