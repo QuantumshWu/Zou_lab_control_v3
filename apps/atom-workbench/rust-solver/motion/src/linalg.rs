@@ -277,7 +277,7 @@ pub fn norm_sqr(v: &[C64]) -> f64 {
 // Dense matrices.
 
 /// A dense complex matrix, row-major: entry (i, j) at `data[i * cols + j]`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Mat {
     pub rows: usize,
     pub cols: usize,
@@ -386,9 +386,66 @@ impl Mat {
 // ---------------------------------------------------------------------------------------------------------------------
 // LU.
 
-/// The LU factorization with partial pivoting of a square matrix, P A = L U (L unit lower, U upper, in one array).
-/// Backward stable: the computed factors are those of A + ΔA, |ΔA| ≤ γ_n |L||U| (Higham, Theorem 9.3).
-/// Cost n³/3 complex multiply-adds; a solve n².
+/// P A = L U of the n × n matrix in `f` (row by row), in its place: L unit lower, U upper, partial pivoting, the pivots'
+/// rows. Backward stable: the computed factors are those of A + ΔA, |ΔA| ≤ γ_n |L||U| (Higham, Theorem 9.3). Cost n³/3
+/// complex multiply-adds. Returns whether no pivot column was exactly zero: with one there is no factorization (the
+/// factors then hold what a division by zero makes). A nearly singular A factors, its solutions large: its condition is
+/// the caller's to read.
+pub fn factor(f: &mut [C64], pivots: &mut [usize], n: usize) -> bool {
+    let mut regular = true;
+    for k in 0..n {
+        let p = (k..n).max_by(|&i, &j| f[i * n + k].abs1().total_cmp(&f[j * n + k].abs1())).unwrap();
+        regular &= f[p * n + k] != C64::ZERO;
+        pivots[k] = p;
+        if p != k {
+            let (above, below) = f.split_at_mut(p * n);
+            above[k * n..(k + 1) * n].swap_with_slice(&mut below[..n]);
+        }
+        let (above, below) = f.split_at_mut((k + 1) * n);
+        let pivot_row = &above[k * n..];
+        for row in below.chunks_exact_mut(n) {
+            let l = row[k] / pivot_row[k];
+            row[k] = l;
+            for (z, upper) in row[k + 1..].iter_mut().zip(&pivot_row[k + 1..]) {
+                *z -= l * *upper;
+            }
+        }
+    }
+    regular
+}
+
+/// B ← A⁻¹B by A's factors (`factor`), B of n rows of `columns` numbers, row by row: n² complex multiply-adds a column.
+pub fn solve(f: &[C64], pivots: &[usize], n: usize, b: &mut [C64], columns: usize) {
+    for (k, &p) in pivots.iter().enumerate() {
+        if p != k {
+            let (above, below) = b.split_at_mut(p * columns);
+            above[k * columns..(k + 1) * columns].swap_with_slice(&mut below[..columns]);
+        }
+    }
+    for i in 0..n {
+        let (above, row) = b.split_at_mut(i * columns);
+        for (l, other) in f[i * n..i * n + i].iter().zip(above.chunks_exact(columns)) {
+            for (z, other) in row[..columns].iter_mut().zip(other) {
+                *z -= *l * *other;
+            }
+        }
+    }
+    for i in (0..n).rev() {
+        let (rest, below) = b.split_at_mut((i + 1) * columns);
+        let row = &mut rest[i * columns..];
+        for (upper, other) in f[i * n + i + 1..(i + 1) * n].iter().zip(below.chunks_exact(columns)) {
+            for (z, other) in row.iter_mut().zip(other) {
+                *z -= *upper * *other;
+            }
+        }
+        let diagonal = f[i * n + i];
+        for z in row.iter_mut() {
+            *z = *z / diagonal;
+        }
+    }
+}
+
+/// The LU factorization with partial pivoting of a square matrix (`factor`), held.
 #[derive(Clone, Debug)]
 pub struct Lu {
     factors: Mat,
@@ -396,70 +453,21 @@ pub struct Lu {
 }
 
 impl Lu {
-    /// The factorization; None when a pivot column is exactly zero, so that no factorization exists. A nearly
-    /// singular A factors, its solutions large: its condition is the caller's to read (`Lu::inverse`).
+    /// The factorization; None when a pivot column is exactly zero, so that no factorization exists.
     pub fn new(a: &Mat) -> Option<Lu> {
         let n = a.rows;
         assert_eq!(n, a.cols, "LU of a {}x{} matrix", a.rows, a.cols);
-        let mut f = a.clone();
-        let mut pivots = vec![0; n];
-        for k in 0..n {
-            let p = (k..n).max_by(|&i, &j| f[(i, k)].abs1().total_cmp(&f[(j, k)].abs1())).unwrap();
-            if f[(p, k)] == C64::ZERO {
-                return None;
-            }
-            pivots[k] = p;
-            if p != k {
-                for j in 0..n {
-                    f.data.swap(k * n + j, p * n + j);
-                }
-            }
-            let pivot = f[(k, k)];
-            for i in k + 1..n {
-                let l = f[(i, k)] / pivot;
-                f[(i, k)] = l;
-                for j in k + 1..n {
-                    let u = f.data[k * n + j];
-                    f.data[i * n + j] -= l * u;
-                }
-            }
-        }
-        Some(Lu { factors: f, pivots })
+        let mut lu = Lu { factors: a.clone(), pivots: vec![0; n] };
+        factor(&mut lu.factors.data, &mut lu.pivots, n).then_some(lu)
     }
     /// b ← A⁻¹ b.
     pub fn solve(&self, b: &mut [C64]) {
-        let (f, n) = (&self.factors, self.factors.rows);
-        for (k, &p) in self.pivots.iter().enumerate() {
-            b.swap(k, p);
-        }
-        for i in 0..n {
-            let mut x = b[i];
-            for j in 0..i {
-                x -= f.data[i * n + j] * b[j];
-            }
-            b[i] = x;
-        }
-        for i in (0..n).rev() {
-            let mut x = b[i];
-            for j in i + 1..n {
-                x -= f.data[i * n + j] * b[j];
-            }
-            b[i] = x / f.data[i * n + i];
-        }
+        solve(&self.factors.data, &self.pivots, self.factors.rows, b, 1);
     }
-    /// A⁻¹ B, column by column.
+    /// A⁻¹ B.
     pub fn solve_columns(&self, b: &Mat) -> Mat {
         let mut out = b.clone();
-        let mut column = vec![C64::ZERO; b.rows];
-        for j in 0..b.cols {
-            for i in 0..b.rows {
-                column[i] = b[(i, j)];
-            }
-            self.solve(&mut column);
-            for i in 0..b.rows {
-                out[(i, j)] = column[i];
-            }
-        }
+        solve(&self.factors.data, &self.pivots, self.factors.rows, &mut out.data, b.cols);
         out
     }
     /// A⁻¹.
@@ -595,14 +603,23 @@ pub fn hermitian_eigen(h: &Mat) -> Hermitian {
 /// decomposition: e^{tA}v through it errs by about κ(R)·u·(1 + |t|·(max Re λ − min Re λ)) relative to ‖v‖,
 /// and κ grows without bound towards an exceptional point. `work` is the count of its complex multiply-adds as its
 /// algorithm made them (`decide::Work` counts, SPEC §5.1): the reduction's, the QR iteration's rotations', the back
-/// substitution's, R's and its inverse's.
-#[derive(Clone, Debug)]
+/// substitution's, R's and its inverse's. It keeps its memory: decomposing again (`Eigen::decompose`) asks the heap for
+/// nothing while the size stays.
+#[derive(Clone, Debug, Default)]
 pub struct Eigen {
     pub values: Vec<C64>,
     pub vectors: Mat,
     pub inverse: Mat,
     pub condition: f64,
     pub work: f64,
+    /// The decomposition's own: H (the Hessenberg and then the Schur form, row by row); Q, T's eigenvectors Y and R,
+    /// each column by column (a column's numbers side by side, as the rotations and the sums take them); a
+    /// reflection's vector and its sums; R's factors and their pivots.
+    schur: Vec<C64>,
+    columns: [Vec<C64>; 3],
+    reflection: [Vec<C64>; 2],
+    factors: Vec<C64>,
+    pivots: Vec<usize>,
 }
 
 /// The Givens rotation G = [[c, s], [−s*, c]] (c real) with G [x, y]ᵀ = [r, 0]ᵀ.
@@ -618,149 +635,225 @@ fn givens(x: C64, y: C64) -> (f64, C64) {
     (ax / norm, (x / ax) * y.conj() / norm)
 }
 
-/// The eigendecomposition of a general complex matrix: Householder reduction to Hessenberg form; the single-shift
-/// implicit QR iteration to the complex Schur form T = Q†AQ, with Wilkinson shifts (an exceptional shift every tenth
-/// iteration) and deflation where a subdiagonal entry is within the precision of its two diagonal neighbours (LAPACK
-/// zlahqr's criterion); the eigenvectors of T by back substitution (a difference of eigenvalues below the precision of
-/// T's scale taken at it, LAPACK ztrevc's rule); R = QY with unit columns, and R⁻¹ by LU. None when the QR iteration
-/// does not converge within LAPACK zlahqr's 30·max(10, n) iterations per eigenvalue, or R is singular.
+/// (u, w) ← (c u + s w, c w − s* u) on two vectors, number by number.
+fn rotate(first: &mut [C64], second: &mut [C64], c: f64, s: C64) {
+    for (x, y) in first.iter_mut().zip(second.iter_mut()) {
+        let (u, w) = (*x, *y);
+        *x = u * c + w * s;
+        *y = w * c - u * s.conj();
+    }
+}
+
+/// The eigendecomposition of a general complex matrix (`Eigen::decompose`), on memory of its own.
 pub fn eigen(a: &Mat) -> Option<Eigen> {
-    let n = a.rows;
-    assert_eq!(n, a.cols, "the eigendecomposition of a {}x{} matrix", a.rows, a.cols);
-    let mut h = a.clone();
-    let mut work = 0;
-    let mut q = Mat::identity(n);
-    // Householder reduction: H ← P H P, Q ← Q P, P = I − β v v† zeroing column k below its subdiagonal.
-    let mut v = vec![C64::ZERO; n];
-    for k in 0..n.saturating_sub(2) {
-        let alpha = (k + 1..n).map(|i| h[(i, k)].norm_sqr()).sum::<f64>().sqrt();
-        if alpha == 0.0 {
-            continue;
+    let mut e = Eigen::default();
+    e.decompose(a).then_some(e)
+}
+
+impl Eigen {
+    /// The eigendecomposition of a general complex matrix: Householder reduction to Hessenberg form; the single-shift
+    /// implicit QR iteration to the complex Schur form T = Q†AQ, with Wilkinson shifts (an exceptional shift every tenth
+    /// iteration) and deflation where a subdiagonal entry is within the precision of its two diagonal neighbours (LAPACK
+    /// zlahqr's criterion); the eigenvectors of T by back substitution (a difference of eigenvalues below the precision of
+    /// T's scale taken at it, LAPACK ztrevc's rule); R = QY with unit columns, and R⁻¹ by LU. False -- and nothing of
+    /// the decomposition to read -- when the QR iteration does not converge within LAPACK zlahqr's 30·max(10, n)
+    /// iterations per eigenvalue, or R is singular.
+    pub fn decompose(&mut self, a: &Mat) -> bool {
+        let n = a.rows;
+        assert_eq!(n, a.cols, "the eigendecomposition of a {}x{} matrix", a.rows, a.cols);
+        if self.values.len() != n {
+            self.values.resize(n, C64::ZERO);
+            for m in [&mut self.vectors, &mut self.inverse] {
+                (m.rows, m.cols) = (n, n);
+                m.data.resize(n * n, C64::ZERO);
+            }
+            for v in self.columns.iter_mut().chain([&mut self.schur, &mut self.factors]) {
+                v.resize(n * n, C64::ZERO);
+            }
+            self.reflection.iter_mut().for_each(|v| v.resize(n, C64::ZERO));
+            self.pivots.resize(n, 0);
         }
-        let x0 = h[(k + 1, k)];
-        let phase = if x0 == C64::ZERO { C64::ONE } else { x0 / x0.abs() };
-        for i in 0..n {
-            v[i] = if i > k { h[(i, k)] } else { C64::ZERO };
+        let h = &mut self.schur[..];
+        let [q, y, r] = &mut self.columns;
+        let [v, sums] = &mut self.reflection;
+        h.copy_from_slice(&a.data);
+        let mut work = 0;
+        for (k, column) in q.chunks_exact_mut(n).enumerate() {
+            column.fill(C64::ZERO);
+            column[k] = C64::ONE;
         }
-        v[k + 1] += phase * alpha;
-        let beta = 2.0 / (k + 1..n).map(|i| v[i].norm_sqr()).sum::<f64>();
-        // The two norms, the reflection on H's rows, and on H's and Q's columns: of n − k − 1 terms each.
-        work += (2 + 6 * n) * (n - k - 1);
-        for j in 0..n {
-            let s = (k + 1..n).map(|i| v[i].conj() * h[(i, j)]).sum::<C64>() * beta;
-            for i in k + 1..n {
-                h[(i, j)] -= v[i] * s;
+        // Householder reduction: H ← P H P, Q ← Q P, P = I − β v v† zeroing column k below its subdiagonal.
+        for k in 0..n.saturating_sub(2) {
+            let alpha = (k + 1..n).map(|i| h[i * n + k].norm_sqr()).sum::<f64>().sqrt();
+            if alpha == 0.0 {
+                continue;
+            }
+            let x0 = h[(k + 1) * n + k];
+            let phase = if x0 == C64::ZERO { C64::ONE } else { x0 / x0.abs() };
+            for i in 0..n {
+                v[i] = if i > k { h[i * n + k] } else { C64::ZERO };
+            }
+            v[k + 1] += phase * alpha;
+            let beta = 2.0 / (k + 1..n).map(|i| v[i].norm_sqr()).sum::<f64>();
+            // The two norms, the reflection on H's rows, and on H's and Q's columns: of n − k − 1 terms each.
+            work += (2 + 6 * n) * (n - k - 1);
+            // H ← H − v (β v†H): a column's sum over the rows below k, row after row.
+            sums.fill(C64::ZERO);
+            for (v, row) in v[k + 1..].iter().zip(h[(k + 1) * n..].chunks_exact(n)) {
+                for (s, z) in sums.iter_mut().zip(row) {
+                    *s += v.conj() * *z;
+                }
+            }
+            for s in sums.iter_mut() {
+                *s = *s * beta;
+            }
+            for (v, row) in v[k + 1..].iter().zip(h[(k + 1) * n..].chunks_exact_mut(n)) {
+                for (z, s) in row.iter_mut().zip(sums.iter()) {
+                    *z -= *v * *s;
+                }
+            }
+            // H ← H − (β H v) v†: a row's sum over the columns beyond k.
+            for row in h.chunks_exact_mut(n) {
+                let s = row[k + 1..].iter().zip(&v[k + 1..]).map(|(z, v)| *z * *v).sum::<C64>() * beta;
+                for (z, v) in row[k + 1..].iter_mut().zip(&v[k + 1..]) {
+                    *z -= s * v.conj();
+                }
+            }
+            // Q ← Q − (β Q v) v†: a row's sum over Q's columns beyond k, column after column.
+            sums.fill(C64::ZERO);
+            for (v, column) in v[k + 1..].iter().zip(q[(k + 1) * n..].chunks_exact(n)) {
+                for (s, z) in sums.iter_mut().zip(column) {
+                    *s += *z * *v;
+                }
+            }
+            for s in sums.iter_mut() {
+                *s = *s * beta;
+            }
+            for (v, column) in v[k + 1..].iter().zip(q[(k + 1) * n..].chunks_exact_mut(n)) {
+                for (z, s) in column.iter_mut().zip(sums.iter()) {
+                    *z -= *s * v.conj();
+                }
+            }
+            for i in k + 2..n {
+                h[i * n + k] = C64::ZERO;
             }
         }
-        for m in [&mut h, &mut q] {
-            for i in 0..n {
-                let s = (k + 1..n).map(|j| m[(i, j)] * v[j]).sum::<C64>() * beta;
-                for j in k + 1..n {
-                    m[(i, j)] -= s * v[j].conj();
+        // The QR iteration on the active block [lo, hi), the rotations accumulated into Q.
+        let scale = h.iter().map(|z| z.abs1()).fold(0.0, f64::max).max(f64::MIN_POSITIVE);
+        let most = 30 * n.max(10);
+        let (mut hi, mut iterations) = (n, 0);
+        while hi > 1 {
+            let mut lo = hi - 1;
+            while lo > 0 {
+                let s = h[(lo - 1) * n + lo - 1].abs1() + h[lo * n + lo].abs1();
+                if h[lo * n + lo - 1].abs1() <= f64::EPSILON * if s > 0.0 { s } else { scale } {
+                    h[lo * n + lo - 1] = C64::ZERO;
+                    break;
+                }
+                lo -= 1;
+            }
+            if lo == hi - 1 {
+                hi -= 1;
+                iterations = 0;
+                continue;
+            }
+            iterations += 1;
+            if iterations > most {
+                return false;
+            }
+            // The Wilkinson shift: the eigenvalue of the trailing 2 × 2 block nearer its corner.
+            let (p, pq, qp, s) = (h[(hi - 2) * n + hi - 2], h[(hi - 2) * n + hi - 1], h[(hi - 1) * n + hi - 2], h[(hi - 1) * n + hi - 1]);
+            let mut mu = if iterations % 10 == 0 {
+                s + C64::real(qp.abs1())
+            } else {
+                let half = (p - s) * 0.5;
+                let d = (half * half + pq * qp).sqrt();
+                let (m1, m2) = (s + half - d, s + half + d);
+                if (m1 - s).abs1() <= (m2 - s).abs1() {
+                    m1
+                } else {
+                    m2
+                }
+            };
+            if !mu.is_finite() {
+                mu = s;
+            }
+            // The bulge chased down the block: rows by G, columns by G†.
+            for k in lo..hi - 1 {
+                let from = if k == lo { lo } else { k - 1 };
+                let (x, y) = if k == lo { (h[k * n + k] - mu, h[(k + 1) * n + k]) } else { (h[k * n + k - 1], h[(k + 1) * n + k - 1]) };
+                let (c, sn) = givens(x, y);
+                // Two products an entry of each rotated pair: H's rows from the bulge on, H's columns above it, Q's columns.
+                work += 4 * ((n - from) + (k + 3).min(hi) + n);
+                let (upper, lower) = h[k * n..(k + 2) * n].split_at_mut(n);
+                rotate(&mut upper[from..], &mut lower[from..], c, sn);
+                for row in h.chunks_exact_mut(n).take((k + 3).min(hi)) {
+                    let (u, w) = (row[k], row[k + 1]);
+                    row[k] = u * c + w * sn.conj();
+                    row[k + 1] = w * c - u * sn;
+                }
+                let (first, second) = q[k * n..(k + 2) * n].split_at_mut(n);
+                rotate(first, second, c, sn.conj());
+                if k > lo {
+                    h[(k + 1) * n + k - 1] = C64::ZERO;
                 }
             }
         }
-        for i in k + 2..n {
-            h[(i, k)] = C64::ZERO;
+        // T's eigenvectors: y_kk = 1, upwards by back substitution.
+        for (i, value) in self.values.iter_mut().enumerate() {
+            *value = h[i * n + i];
         }
+        let values = &self.values;
+        let floor = f64::EPSILON * scale;
+        for (k, y) in y.chunks_exact_mut(n).enumerate() {
+            y.fill(C64::ZERO);
+            y[k] = C64::ONE;
+            for j in (0..k).rev() {
+                let s: C64 = h[j * n + j + 1..=j * n + k].iter().zip(&y[j + 1..=k]).map(|(t, y)| *t * *y).sum();
+                work += k - j + 1;
+                let mut d = h[j * n + j] - values[k];
+                if d.abs1() < floor {
+                    d = C64::real(floor);
+                }
+                y[j] = -(s / d);
+            }
+        }
+        // R = QY and its columns' norms and scaling; its LU (Σ_k (n − k − 1)(n − k)), its inverse (n solves of n²), the norms.
+        work += n * n * n + 2 * n * n + (0..n).map(|k| (n - k - 1) * (n - k)).sum::<usize>() + n * n * n + 2 * n * n;
+        // A column of R: Q's columns up to its own by its column of Y (upper triangular), then of unit norm.
+        let mut one = 0.0_f64;
+        for (k, (r, y)) in r.chunks_exact_mut(n).zip(y.chunks_exact(n)).enumerate() {
+            r.fill(C64::ZERO);
+            for (y, q) in y[..=k].iter().zip(q.chunks_exact(n)) {
+                for (z, q) in r.iter_mut().zip(q) {
+                    *z += *q * *y;
+                }
+            }
+            let norm = r.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+            if !(norm > 0.0 && norm.is_finite()) {
+                return false;
+            }
+            for z in r.iter_mut() {
+                *z = *z / norm;
+            }
+            one = one.max(r.iter().map(|z| z.abs()).sum::<f64>());
+            for (i, z) in r.iter().enumerate() {
+                self.vectors.data[i * n + k] = *z;
+            }
+        }
+        self.factors.copy_from_slice(&self.vectors.data);
+        if !factor(&mut self.factors, &mut self.pivots, n) {
+            return false;
+        }
+        for (i, row) in self.inverse.data.chunks_exact_mut(n).enumerate() {
+            row.fill(C64::ZERO);
+            row[i] = C64::ONE;
+        }
+        solve(&self.factors, &self.pivots, n, &mut self.inverse.data, n);
+        self.condition = one * self.inverse.norm1();
+        self.work = work as f64;
+        self.condition.is_finite()
     }
-    // The QR iteration on the active block [lo, hi), the rotations accumulated into Q.
-    let scale = h.data.iter().map(|z| z.abs1()).fold(0.0, f64::max).max(f64::MIN_POSITIVE);
-    let most = 30 * n.max(10);
-    let (mut hi, mut iterations) = (n, 0);
-    while hi > 1 {
-        let mut lo = hi - 1;
-        while lo > 0 {
-            let s = h[(lo - 1, lo - 1)].abs1() + h[(lo, lo)].abs1();
-            if h[(lo, lo - 1)].abs1() <= f64::EPSILON * if s > 0.0 { s } else { scale } {
-                h[(lo, lo - 1)] = C64::ZERO;
-                break;
-            }
-            lo -= 1;
-        }
-        if lo == hi - 1 {
-            hi -= 1;
-            iterations = 0;
-            continue;
-        }
-        iterations += 1;
-        if iterations > most {
-            return None;
-        }
-        // The Wilkinson shift: the eigenvalue of the trailing 2 × 2 block nearer its corner.
-        let (p, pq, qp, s) = (h[(hi - 2, hi - 2)], h[(hi - 2, hi - 1)], h[(hi - 1, hi - 2)], h[(hi - 1, hi - 1)]);
-        let mut mu = if iterations % 10 == 0 {
-            s + C64::real(qp.abs1())
-        } else {
-            let half = (p - s) * 0.5;
-            let d = (half * half + pq * qp).sqrt();
-            let (m1, m2) = (s + half - d, s + half + d);
-            if (m1 - s).abs1() <= (m2 - s).abs1() {
-                m1
-            } else {
-                m2
-            }
-        };
-        if !mu.is_finite() {
-            mu = s;
-        }
-        // The bulge chased down the block: rows by G, columns by G†.
-        for k in lo..hi - 1 {
-            let (x, y) = if k == lo { (h[(k, k)] - mu, h[(k + 1, k)]) } else { (h[(k, k - 1)], h[(k + 1, k - 1)]) };
-            let (c, sn) = givens(x, y);
-            // Two products an entry of each rotated pair: H's rows from the bulge on, H's columns above it, Q's columns.
-            work += 4 * ((n - if k == lo { lo } else { k - 1 }) + (k + 3).min(hi) + n);
-            for j in if k == lo { lo } else { k - 1 }..n {
-                let (u, w) = (h[(k, j)], h[(k + 1, j)]);
-                h[(k, j)] = u * c + w * sn;
-                h[(k + 1, j)] = w * c - u * sn.conj();
-            }
-            for i in 0..(k + 3).min(hi) {
-                let (u, w) = (h[(i, k)], h[(i, k + 1)]);
-                h[(i, k)] = u * c + w * sn.conj();
-                h[(i, k + 1)] = w * c - u * sn;
-            }
-            for i in 0..n {
-                let (u, w) = (q[(i, k)], q[(i, k + 1)]);
-                q[(i, k)] = u * c + w * sn.conj();
-                q[(i, k + 1)] = w * c - u * sn;
-            }
-            if k > lo {
-                h[(k + 1, k - 1)] = C64::ZERO;
-            }
-        }
-    }
-    // T's eigenvectors: y_kk = 1, upwards by back substitution.
-    let values: Vec<C64> = (0..n).map(|i| h[(i, i)]).collect();
-    let floor = f64::EPSILON * scale;
-    let mut y = Mat::zeros(n, n);
-    for k in 0..n {
-        y[(k, k)] = C64::ONE;
-        for j in (0..k).rev() {
-            let s: C64 = (j + 1..=k).map(|m| h[(j, m)] * y[(m, k)]).sum();
-            work += k - j + 1;
-            let mut d = h[(j, j)] - values[k];
-            if d.abs1() < floor {
-                d = C64::real(floor);
-            }
-            y[(j, k)] = -(s / d);
-        }
-    }
-    let mut r = q.product(&y);
-    // R = QY and its columns' norms and scaling; its LU (Σ_k (n − k − 1)(n − k)), its inverse (n solves of n²), the norms.
-    work += n * n * n + 2 * n * n + (0..n).map(|k| (n - k - 1) * (n - k)).sum::<usize>() + n * n * n + 2 * n * n;
-    for k in 0..n {
-        let norm = (0..n).map(|i| r[(i, k)].norm_sqr()).sum::<f64>().sqrt();
-        if !(norm > 0.0 && norm.is_finite()) {
-            return None;
-        }
-        for i in 0..n {
-            r[(i, k)] = r[(i, k)] / norm;
-        }
-    }
-    let inverse = Lu::new(&r)?.inverse();
-    let condition = r.norm1() * inverse.norm1();
-    condition.is_finite().then_some(Eigen { values, vectors: r, inverse, condition, work: work as f64 })
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

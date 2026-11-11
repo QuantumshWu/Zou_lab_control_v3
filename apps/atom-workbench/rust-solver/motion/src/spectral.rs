@@ -80,7 +80,7 @@
 //! # Towards a defective generator
 //! A state taken through the eigenvectors rounds by κ(R) u (1 + |τ| × the decay rates' spread) relative to its norm
 //! (`linalg::Eigen`), and κ(R) grows without bound towards an exceptional point. There the state is taken without the
-//! decomposition (`Picture::basis` None): from stop to stop of the caller's (`Picture::advance`) by CF4 (Blanes & Moan
+//! decomposition (`Picture::decomposed` false): from stop to stop of the caller's (`Picture::advance`) by CF4 (Blanes & Moan
 //! 2006) of the same Ĥ₀ + uA + u²B, two exponentials on the vector to round-off (`linalg::exp_apply`), whose rounding
 //! does not know κ. It is exact where nothing moves; with D it is of fourth order in the stride's width, which is the
 //! caller's nodes' spacing -- a few radians of Ĥ₀'s bound at most --, so its error is a share of D's own effect, not an
@@ -103,13 +103,16 @@ pub struct Picture {
     pub ends: [Mat; 2],
     /// A hop's exponent.
     matrix: Mat,
-    /// Ĥ₀'s decomposition of its traceless part, where the state goes through it.
-    basis: Option<linalg::Eigen>,
+    /// Ĥ₀'s decomposition of its traceless part, and whether the state goes through it.
+    basis: linalg::Eigen,
+    through: bool,
     /// Ĥ₀'s eigenvalues, the scalar part with them.
     lambda: Vec<C64>,
-    /// The slow pairs' moments I_p = ∫₀¹ s^p e^{iω_ab w s} ds, p = 0, 1, 2 (3n²), of the hops of the width `width`.
+    /// The slow pairs' moments I_p = ∫₀¹ s^p e^{iω_ab w s} ds, p = 0, 1, 2 (3n²), of the hops of the width `width`,
+    /// and the whole numbers' reciprocals 1/k their series take, as far as a series went (k its index; none at 0).
     moments: Vec<C64>,
     width: f64,
+    reciprocals: Vec<f64>,
     /// The exponential's work vectors (2n), a state's coordinates (2n) and the pairs' turns (n).
     vectors: Vec<C64>,
     coordinates: Vec<C64>,
@@ -161,10 +164,12 @@ impl Default for Picture {
             base: none(),
             ends: [none(), none()],
             matrix: none(),
-            basis: None,
+            basis: linalg::Eigen::default(),
+            through: false,
             lambda: Vec::new(),
             moments: Vec::new(),
             width: f64::NAN,
+            reciprocals: vec![f64::INFINITY],
             vectors: Vec::new(),
             coordinates: Vec::new(),
             turns: Vec::new(),
@@ -212,62 +217,6 @@ fn quintic(s: f64) -> ([f64; 3], [f64; 2]) {
     ([(1.0 + 3.0 * (s + 1.0)) * m2, middle * middle, (1.0 - 3.0 * (s - 1.0)) * p2], [(s + 1.0) * m2, (s - 1.0) * p2])
 }
 
-/// P A = L U of the n × n matrix in `f`, in its place (L unit lower, U upper; partial pivoting, the pivots' rows).
-fn factor(f: &mut [C64], pivots: &mut [usize], n: usize) {
-    for k in 0..n {
-        let p = (k..n).max_by(|&i, &j| f[i * n + k].abs1().total_cmp(&f[j * n + k].abs1())).unwrap();
-        pivots[k] = p;
-        if p != k {
-            for j in 0..n {
-                f.swap(k * n + j, p * n + j);
-            }
-        }
-        let (above, below) = f.split_at_mut((k + 1) * n);
-        let pivot_row = &above[k * n..];
-        for row in below.chunks_mut(n) {
-            let l = row[k] / pivot_row[k];
-            row[k] = l;
-            for (z, upper) in row[k + 1..].iter_mut().zip(&pivot_row[k + 1..]) {
-                *z -= l * *upper;
-            }
-        }
-    }
-}
-
-/// B ← A⁻¹B by A's factors (`factor`), B of n rows of `columns` numbers, row by row.
-fn solve(f: &[C64], pivots: &[usize], n: usize, b: &mut [C64], columns: usize) {
-    for (k, &p) in pivots.iter().enumerate() {
-        if p != k {
-            for j in 0..columns {
-                b.swap(k * columns + j, p * columns + j);
-            }
-        }
-    }
-    for i in 0..n {
-        let (above, row) = b.split_at_mut(i * columns);
-        for j in 0..i {
-            let l = f[i * n + j];
-            for (z, other) in row[..columns].iter_mut().zip(&above[j * columns..(j + 1) * columns]) {
-                *z -= l * *other;
-            }
-        }
-    }
-    for i in (0..n).rev() {
-        let (rest, below) = b.split_at_mut((i + 1) * columns);
-        let row = &mut rest[i * columns..];
-        for j in i + 1..n {
-            let upper = f[i * n + j];
-            for (z, other) in row.iter_mut().zip(&below[(j - i - 1) * columns..(j - i) * columns]) {
-                *z -= upper * *other;
-            }
-        }
-        let diagonal = f[i * n + i];
-        for z in row.iter_mut() {
-            *z = *z / diagonal;
-        }
-    }
-}
-
 impl Picture {
     /// The picture for n states.
     pub fn fit(&mut self, n: usize) {
@@ -304,7 +253,7 @@ impl Picture {
 
     /// Whether the state goes through Ĥ₀'s decomposition.
     pub fn decomposed(&self) -> bool {
-        self.basis.is_some()
+        self.through
     }
 
     /// Whether the generator changes along the path at all.
@@ -340,13 +289,14 @@ impl Picture {
         let tau = 2.0 * half.abs();
         let exponential = linalg::Chebyshev::plan(rho * tau, gamma * tau).rounding(n);
         let mut rounding = 0.0;
-        self.basis = linalg::eigen(&self.matrix).filter(|e| {
-            let decay = |pick: fn(f64, f64) -> f64, from: f64| e.values.iter().map(|l| l.im).fold(from, pick);
-            rounding = e.condition * UNIT_ROUNDOFF * (1.0 + tau * (decay(f64::max, f64::NEG_INFINITY) - decay(f64::min, f64::INFINITY)));
+        self.through = self.basis.decompose(&self.matrix) && {
+            let decay = |pick: fn(f64, f64) -> f64, from: f64| self.basis.values.iter().map(|l| l.im).fold(from, pick);
+            rounding = self.basis.condition * UNIT_ROUNDOFF * (1.0 + tau * (decay(f64::max, f64::NEG_INFINITY) - decay(f64::min, f64::INFINITY)));
             rounding <= exponential
-        });
-        match &self.basis {
-            Some(e) => {
+        };
+        let e = &self.basis;
+        match self.through {
+            true => {
                 for (l, value) in self.lambda.iter_mut().zip(&e.values) {
                     *l = *value + scalar;
                 }
@@ -370,9 +320,9 @@ impl Picture {
                     self.work += (4 * n * n * n) as f64;
                 }
             }
-            None => (self.bandwidth, self.rounding) = (2.0 * (rho + gamma), 0.0),
+            false => (self.bandwidth, self.rounding) = (2.0 * (rho + gamma), 0.0),
         }
-        if self.basis.is_some() && self.moving {
+        if self.through && self.moving {
             self.follow();
         }
         self.slopes = if self.moving { [0, 1].map(|i| self.ends[i].data.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()) } else { [0.0; 2] };
@@ -477,8 +427,8 @@ impl Picture {
             for i in 0..n {
                 f[i * n + i] += C64::ONE;
             }
-            factor(f, pivots, n);
-            solve(f, pivots, n, whole, n);
+            linalg::factor(f, pivots, n);
+            linalg::solve(f, pivots, n, whole, n);
             out.copy_from_slice(whole);
         }
         for k in 0..size {
@@ -513,12 +463,17 @@ impl Picture {
                     }
                     let z = C64::I * (self.lambda[a] - self.lambda[b]) * w;
                     let terms = series(z.abs(), bound);
+                    while self.reciprocals.len() < terms + 3 {
+                        self.reciprocals.push(1.0 / self.reciprocals.len() as f64);
+                    }
                     let (mut power, mut parts) = (C64::ONE, [[C64::ZERO; 3]; 2]);
                     for j in 0..terms {
-                        for (p, moment) in parts[j % 2].iter_mut().enumerate() {
-                            *moment += power * (1.0 / (j + p + 1) as f64);
+                        // 1/(j + p + 1) for the moment p.
+                        let inverse = &self.reciprocals[j + 1..j + 4];
+                        for (moment, inverse) in parts[j % 2].iter_mut().zip(inverse) {
+                            *moment += power * *inverse;
                         }
-                        power = power * z * (1.0 / (j + 1) as f64);
+                        power = power * z * inverse[0];
                     }
                     for p in 0..3 {
                         (self.moments[p * size + k], self.moments[p * size + b * n + a]) = (parts[0][p] + parts[1][p], parts[0][p] - parts[1][p]);
@@ -625,12 +580,13 @@ impl Picture {
     pub fn launch(&mut self, x: &[C64]) {
         let (n, h) = (self.n, self.half);
         (self.far, self.bound) = (h, 0.0);
-        let Some(e) = &self.basis else {
+        if !self.through {
             self.stops[..n].copy_from_slice(x);
             self.stops[n..].copy_from_slice(x);
             self.times = [-h; 2];
             return;
-        };
+        }
+        let e = &self.basis;
         let mut path = std::mem::take(&mut self.path);
         for (a, d) in path[..n].iter_mut().enumerate() {
             *d = e.inverse.data[a * n..(a + 1) * n].iter().zip(x).map(|(r, x)| *r * *x).sum();
@@ -639,7 +595,7 @@ impl Picture {
         if self.moving {
             if self.followed {
                 // g = (1 + X(−h))⁻¹ d by the factors.
-                solve(&self.factors, &self.pivots, n, &mut path[..n], 1);
+                linalg::solve(&self.factors, &self.pivots, n, &mut path[..n], 1);
                 self.work += (n * n) as f64;
             }
             let (start, rest) = path.split_at_mut(n);
@@ -660,7 +616,7 @@ impl Picture {
     /// uA + u²B continued: one more hop of m and its rate there. Nothing where the state takes strides or nothing moves.
     pub fn extend(&mut self, far: f64) {
         let (n, h) = (self.n, self.half);
-        if self.basis.is_some() && self.moving && far != h {
+        if self.through && self.moving && far != h {
             let mut path = std::mem::take(&mut self.path);
             let (before, beyond) = path.split_at_mut(6 * n);
             let (m, rate) = beyond.split_at_mut(n);
@@ -678,7 +634,8 @@ impl Picture {
     fn at(&mut self, u: f64, x: &mut [C64]) {
         let (n, h) = (self.n, self.half);
         let size = n * n;
-        let e = self.basis.as_ref().expect("a state through the decomposition");
+        assert!(self.through, "a state through the decomposition");
+        let e = &self.basis;
         let (d, v) = self.coordinates.split_at_mut(n);
         let path = &self.path;
         let node = |k: usize| &path[k * n..(k + 1) * n];
@@ -727,7 +684,7 @@ impl Picture {
     /// kept for `between`. Returns the rounding of the exponentials behind it relative to the state's norm.
     pub fn advance(&mut self, u: f64, x: &mut [C64]) -> f64 {
         let n = self.n;
-        if self.basis.is_some() {
+        if self.through {
             self.at(u, x);
             return self.bound;
         }
@@ -746,7 +703,7 @@ impl Picture {
     /// stride from the earlier stop without it.
     pub fn between(&mut self, u: f64, x: &mut [C64]) {
         let n = self.n;
-        if self.basis.is_some() {
+        if self.through {
             return self.at(u, x);
         }
         x.copy_from_slice(&self.stops[..n]);
@@ -761,7 +718,7 @@ impl Picture {
     pub fn price(&self, stops: usize) -> f64 {
         let (n, h) = (self.n, self.half.abs());
         let size = (n * n) as f64;
-        if self.basis.is_none() {
+        if !self.through {
             let w = 2.0 * h / stops as f64;
             let moved = self.moved(h - w, w);
             let plan = linalg::Chebyshev::plan(0.5 * self.bounds[0] * w + moved, 0.5 * self.bounds[1] * w + moved);

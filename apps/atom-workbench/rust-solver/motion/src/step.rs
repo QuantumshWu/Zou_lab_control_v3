@@ -581,15 +581,22 @@ fn rules() -> &'static [Rule] {
     RULES.get_or_init(|| (2..=64).map(Rule::new).collect())
 }
 
-/// The rule and the panels over a width of an entire integrand of bandwidth ν to round-off: the fewest nodes, each panel
-/// of width w within its rule's phase, νw ≤ x_m. Its node count is the propagation's states and the kick's sums
-/// (`propagate`, `count::impulse`).
+/// The rule and the panels over a width of an entire integrand of bandwidth ν to round-off: the fewest nodes (the
+/// smaller rule of two that take as many), each panel of width w within its rule's phase, νw ≤ x_m. Its node count is
+/// the propagation's states and the kick's sums (`propagate`, `count::impulse`). The rules are looked at from the
+/// smallest up as far as the first that takes one panel: every larger rule has more nodes than that one.
 fn plan(width: f64, bandwidth: f64) -> (&'static Rule, usize) {
-    rules()
-        .iter()
-        .map(|rule| (rule, ((bandwidth * width / rule.phase).ceil() as usize).max(1)))
-        .min_by_key(|(rule, panels)| rule.nodes.len() * panels)
-        .unwrap()
+    let mut least: Option<(&'static Rule, usize)> = None;
+    for rule in rules() {
+        let panels = ((bandwidth * width / rule.phase).ceil() as usize).max(1);
+        if least.map_or(true, |(best, most)| rule.nodes.len() * panels < best.nodes.len() * most) {
+            least = Some((rule, panels));
+        }
+        if panels == 1 {
+            break;
+        }
+    }
+    least.expect("a rule")
 }
 
 /// The nodes and weights over [a, b] of an entire integrand of bandwidth ν to round-off (`plan`), in their order from a
