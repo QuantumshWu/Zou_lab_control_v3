@@ -437,7 +437,8 @@ fn lowered(read: &Between) -> Between {
 
 /// Whether a rung's own read refutes the read it inherits (module documentation, # The step): some look's mean square
 /// lies clearly above what the order allows it -- its near end above the inherited read's far end, both among the
-/// family's looks. The step's error does not fall at the scheme's order between these levels.
+/// family's looks. The step's error does not fall at the scheme's order between these levels. Two reads that do not
+/// hold the same looks -- the total T read at one rung and not at the other -- refute nothing, on any look.
 fn refuted(own: &Between, inherited: &Between) -> bool {
     let (own, inherited) = (judged(own), judged(inherited));
     let looks = own.len() as f64;
@@ -1134,8 +1135,9 @@ struct Plan {
     listed: Vec<usize>,
     end: f64,
     /// The cells of a trajectory's Brownian path (adapt.rs `Path`), µs: the companion's step at the attempt's first
-    /// rung, a whole part of the run. Every step of the attempt -- a rung's, its companion's -- is a cell over a power
-    /// of two, so every level reads the same path. The run until the first rung is known.
+    /// step (its first rung, or the shorter step the attempt before stood at), a whole part of the run. Every step of
+    /// the attempt -- a rung's, its companion's -- is a cell over a power of two, so every level reads the same path.
+    /// The run until the first rung is known.
     cell: f64,
 }
 impl Plan {
