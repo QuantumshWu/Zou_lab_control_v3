@@ -342,8 +342,10 @@ pub struct Model {
     pub(crate) pairs: Vec<Vec<(usize, usize)>>,
     /// Per cluster the blocks of the excited states its eliminations can mix (assemble.rs `Model::mix`).
     pub(crate) mixing: Vec<Vec<usize>>,
-    /// Per cluster the frequency whose drives folded at the atom are taken to the fourth order (`Unit::Second` kept;
-    /// assemble.rs, # The fourth order), none where its fold is the second order's.
+    /// Per cluster the frequency whose fold at the atom on it has a fourth order (`Model::fold_frequency`), and the one
+    /// whose drives folded at the atom are taken to it (`Unit::Second` kept; assemble.rs, # The fourth order), none
+    /// where its fold is the second order's.
+    pub(crate) fold: Vec<Option<usize>>,
     pub(crate) fourth: Vec<Option<usize>>,
     /// The photons' sources (photon.rs) and per cluster its classes.
     pub(crate) sources: Vec<photon::Source>,
@@ -358,6 +360,9 @@ pub struct Model {
     /// the couplings that are not zero: (component, excited, ground).
     pub(crate) levels: Vec<Vec<Level>>,
     pub(crate) driven: Vec<(Component, usize, usize)>,
+    /// Per component and drive, as the levels: the beam whose photon the drive's Doppler shift is taken with
+    /// (eliminate.rs `Model::strongest_made`).
+    pub(crate) strongest: Vec<Vec<usize>>,
     /// Per ground state its drives in the tail rule's order (units.rs `Model::ranked_made`); the model's beats, each with its
     /// pairs of frequencies (units.rs `Model::beats_made`); and what the regions' bounds read of the model's forms (reach.rs).
     pub(crate) ranked: Vec<Vec<units::Ranked>>,
@@ -510,6 +515,7 @@ impl Model {
             legs: vec![],
             pairs: vec![],
             mixing: vec![],
+            fold: vec![],
             fourth: vec![],
             sources: vec![],
             classes: vec![],
@@ -518,6 +524,7 @@ impl Model {
             crosses: Mutex::new(Default::default()),
             levels,
             driven,
+            strongest: vec![],
             ranked: vec![],
             beats: vec![],
             forms: Arc::new(reach::Forms::new()),
@@ -556,6 +563,7 @@ impl Model {
         let levels = model.levels.clone();
         let read = model.read_made();
         model.tones = model.tones.iter().enumerate().map(|(frequency, tone)| tone.folded(&|side, e, g| levels[2 * frequency + side][(e - GROUND) * GROUND + g], &read)).collect();
+        model.strongest = model.strongest_made();
         model.carriers = eliminate::Carrier::all(&model);
         model.legs = model.legs_made();
         model.pairs = model.pairs_made();
@@ -568,6 +576,7 @@ impl Model {
                 return Err(format!("反旋分量的折叠不存在（S = {:.2}）：请求超出模型的适用范围", saturation));
             }
         }
+        model.fold = (0..model.clusters.len()).map(|c| model.fold_frequency_made(c)).collect();
         model.fourth = (0..model.clusters.len())
             .map(|c| model.fold_frequency(c).filter(|_| kept.iter().any(|u| matches!(u, Unit::Second { ground } if *ground < GROUND && model.membership[*ground] == c))))
             .collect();
@@ -609,8 +618,11 @@ impl Model {
     /// The frequency whose fold at the atom on a cluster has a fourth order (assemble.rs, # The fourth order): the cluster
     /// holds ground states alone, and the drives folded at the atom from them are one frequency's co-rotating ones. None
     /// where there is none, or the expansion is not this one's: beside explicit states the fold's next order has their
-    /// couplings in it, and two frequencies' have their beats.
+    /// couplings in it, and two frequencies' have their beats. Made once (`Model::new`).
     pub(crate) fn fold_frequency(&self, cluster: usize) -> Option<usize> {
+        self.fold[cluster]
+    }
+    fn fold_frequency_made(&self, cluster: usize) -> Option<usize> {
         let c = &self.clusters[cluster];
         if c.states.len() != c.ground {
             return None;
