@@ -378,6 +378,20 @@ fn screen(read: &Between) -> Judgement {
     judge(&judged(read), ORDER as f64)
 }
 
+/// The halvings a check that cannot see owes (module documentation, # The step). A look whose bound |e| + t·SE reaches
+/// its target cannot exclude a step error that alone would break the target: of that look the check says nothing. By
+/// the scheme's order the error of the step τ/2^j is at most that bound over 2^{pj}; the halvings owed are the least j
+/// that brings every such look's bound below its target -- none where every look that is read excludes it. A look that
+/// is no number asks nothing: no rung reads it.
+fn blind(read: &Between) -> u32 {
+    let owed = |r: &Read, target: f64| -> u32 {
+        let bound = r.bound(1.);
+        if bound.is_finite() && bound >= target { ((bound / target).log2() / ORDER as f64).floor() as u32 + 1 } else { 0 }
+    };
+    let shown = read.shown.iter().map(|r| owed(r, POPULATION_TARGET)).fold(owed(&read.loss, POPULATION_TARGET), u32::max);
+    read.temperature.map_or(shown, |t| shown.max(owed(&t, TEMPERATURE_TARGET)))
+}
+
 /// The step's part of an output's accounts (module documentation, # The step): on what is shown -- the largest of the
 /// rows' and the loss's, a probability's error at most 1 -- and on the total T (relative). The step's share until the
 /// pilot's two levels are read; then the clear part of their difference's average over the run (`checked`), the same
@@ -808,22 +822,32 @@ enum Settled {
 /// The members `members` of the pilot's groups `numbers` at both levels, joined to those the levels hold, and the
 /// screen (module documentation, # The step): while some difference between the levels lies clearly beyond the step's
 /// share among all the looks (`screen`), the step is halved -- the level at τ becomes the companion, and the members so
-/// far run anew at τ/2 alone. The finer level keeps its states (the model is read at them).
+/// far run anew at τ/2 alone. The finer level keeps its states (the model is read at them). The pilot's check (all the
+/// members of a group in: the last word on the step) must also be able to see: where a look's bound reaches its target
+/// the step takes the rungs below that the order owes (`blind`), once -- the rung it then stands on is held by the
+/// bound it inherits, and its own check halves it further only on a clear difference.
 #[allow(clippy::too_many_arguments)]
 fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, dearer: &dyn Fn(f64) -> bool, messages: &mut Messages) -> Settled {
     let more = level(run, ensemble, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
     absorb(&mut levels.fine, more);
     let more = level(run, ensemble, &context.plan, 2. * context.tau, numbers, members.clone(), false, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
     absorb(&mut levels.coarse, more);
+    // The halvings still owed, and whether the rung stands on a bound inherited from the rung above.
+    let (mut owed, mut inherited) = (0u32, false);
     loop {
-        let beyond = {
+        if owed == 0 {
             let (fine, coarse) = levels.paired();
-            matches!(screen(&between(&fine, &coarse, &context.scales)), Judgement::Beyond(_))
-        };
+            let read = between(&fine, &coarse, &context.scales);
+            let beyond = matches!(screen(&read), Judgement::Beyond(_));
+            let unseen = if beyond || inherited || members.end < GROUP { 0 } else { blind(&read) };
+            if !beyond && unseen == 0 {
+                return Settled::Standing;
+            }
+            (owed, inherited) = if beyond { (1, inherited) } else { (unseen, true) };
+        }
+        owed -= 1;
         let below = halved(context.tau, 1.);
-        if !beyond {
-            return Settled::Standing;
-        } else if context.plan.end / below > MOST_STEPS as f64 {
+        if context.plan.end / below > MOST_STEPS as f64 {
             return Settled::Capped;
         } else if dearer(below) {
             return Settled::Dearer;
@@ -1738,6 +1762,29 @@ mod tests {
         let pilot = |value: f64, error: f64| at(Read { value, spread: Spread { error, groups: 11. } });
         assert_eq!(judged(&pilot(0.24, 0.05)).len(), 1 + STATES + 1);
         assert!(halved(&pilot(0.65, 0.11)) && halved(&pilot(0.32, 0.05)) && !halved(&pilot(0.12, 0.04)));
+    }
+
+    /// A check that cannot see owes the rungs below by the order (`blind`): on eleven groups a standard error of 6 % on
+    /// T is an interval of 13 %, which with a difference of 2 % bounds the step's error at 15 % -- past the 10 % target:
+    /// one halving brings the bound to 15 %/4, below it; a bound of 45 % asks two (45/16 < 10 ≤ 45/4). A bound below
+    /// the target owes none, whatever its share; a row's bound of 6 % against the populations' 5 % owes one; a look
+    /// that is no number owes none.
+    #[test]
+    fn a_check_that_cannot_exclude_the_target_owes_the_rungs_below() {
+        let quiet = Read { value: 0., spread: Spread { error: 0., groups: f64::INFINITY } };
+        let pilot = |value: f64, error: f64| Read { value, spread: Spread { error, groups: 11. } };
+        let at = |t: Option<Read>| Between { loss: quiet, shown: [quiet; STATES], temperature: t };
+        let interval = Spread { error: 0.06, groups: 11. }.interval();
+        assert!(interval > 0.13 && interval < 0.14, "{interval}");
+        assert_eq!(blind(&at(Some(pilot(0.02, 0.06)))), 1);
+        assert_eq!(blind(&at(Some(pilot(0.02, 0.19)))), 2);
+        assert_eq!(blind(&at(Some(pilot(0.03, 0.02)))), 0);
+        assert_eq!(blind(&at(None)), 0);
+        let mut row = at(Some(quiet));
+        row.shown[1] = pilot(0.016, 0.02);
+        assert_eq!(blind(&row), 1);
+        row.shown[1] = Read { value: 0.3, spread: Spread::UNREAD };
+        assert_eq!(blind(&row), 0);
     }
 
     /// The step's check on the pilot's averages (`checked`): a difference of 12 % on the total T with a standard error
