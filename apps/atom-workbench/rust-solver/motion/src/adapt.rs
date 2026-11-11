@@ -46,7 +46,7 @@
 //! trajectory at τ and at 2τ -- see the same noise, and differ by what the step does and by nothing drawn anew. The
 //! product, at one step, needs the path's law alone; there is one path for both.
 //!
-//! - The path is made on a tree. Time is cut into cells, one output interval each; a cell's part of the path (its
+//! - The path is made on a tree. Time is cut into cells of one width, the caller's (a whole part of an output interval); a cell's part of the path (its
 //!   increment and its first moment about its middle, `step::Brownian::over`) is drawn from the cell's stream
 //!   (`random::Stream::brownian`). A cell's two halves are the Brownian bridge between its ends (`step::Brownian::split`)
 //!   from the stream of that node of the tree, and so on down: the part over any bin of any rung's grid is a function of

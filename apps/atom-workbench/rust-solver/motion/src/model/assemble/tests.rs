@@ -283,7 +283,8 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
         }
     }
     // The states' Doppler frames along the path.
-    let rate = |x: usize| dot3(c.waves[x], velocity);
+    let frames = model.plan(cluster, &lights).waves.clone();
+    let rate = |x: usize| dot3(frames[x], velocity);
     let turn = |x: usize| leaf(C64::cis(-rate(x) * s));
     for x in 0..n {
         for y in 0..n {
@@ -366,7 +367,7 @@ fn a_path_s_generator_and_force_are_the_definitions_written_out() {
             let path = middle.path(kappa, velocity);
             let mut rates = vec![0.0; n];
             middle.gauge(&path, &mut rates);
-            assert!(rates.iter().zip(&model.clusters[cluster].waves).all(|(rate, k)| *rate == dot3(*k, velocity)), "{name}, cluster {cluster}: the frames' rates {rates:?}");
+            assert!(rates.iter().zip(&plan.waves).all(|(rate, k)| *rate == dot3(*k, velocity)), "{name}, cluster {cluster}: the frames' rates {rates:?}");
             if middle.still() { still += 1 } else { beating += 1 }
             let mut first: Option<Mat> = None;
             for s in times {

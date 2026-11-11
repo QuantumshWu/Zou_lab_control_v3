@@ -18,7 +18,8 @@
 //! 5. The result (contract §2.2, `assemble`).
 //!
 //! # The step (SPEC §2.2)
-//! One step τ for the run (adapt.rs). The ladder's rungs are the output interval over powers of two. A step is
+//! One step τ for the run (adapt.rs). A step divides the output interval evenly, and so does its companion's at twice
+//! the step: the ladder's rungs are the output interval over the even numbers, and below a rung its halves. A step is
 //! admissible where its nodes resolve what the scheme samples along an atom's path (`admissible`): the reference flow,
 //! ω τ < π at the prepared trap's largest frequency; and the generator, whose change along the path the propagation
 //! reads at nodes half a step apart, (|Ω| + |K| v) τ/2 < π for every residual beat Ω and wave vector K of the model's
@@ -332,9 +333,10 @@ fn admissible(tau: f64, frequency: f64, sampled: &[[f64; 2]], speed: f64) -> boo
     frequency * tau < PI && sampled.iter().all(|[beat, wave]| 0.5 * (beat + wave * speed) * tau < PI)
 }
 
-/// The ladder's first rung (module documentation, # The step): the largest rung -- the output interval over a power of
-/// two -- that is admissible for the run and whose double is admissible for the companion (`admissible`), at the speeds
-/// `fastest` and `typical` (µm/µs) of the reach the model is judged over.
+/// The ladder's first rung (module documentation, # The step): the largest rung -- the output interval over an even
+/// number, its double a whole part of the interval too -- that is admissible for the run and whose double is admissible
+/// for the companion (`admissible`), at the speeds `fastest` and `typical` (µm/µs) of the reach the model is judged over.
+/// (Admissibility is a bound on the step from above: the least even number is found by counting up.)
 /// - The run's step is the result's: it is admissible for every atom the model is judged for, at the reach's largest
 ///   speed (model.rs `Reach::speed`) -- one domain for the model's folds and for the step.
 /// - The companion at twice the step is a probe of the step, not a result: it must be stable, which the trap's
@@ -344,11 +346,9 @@ fn admissible(tau: f64, frequency: f64, sampled: &[[f64; 2]], speed: f64) -> boo
 /// Where the trap's resonance binds, the first rung is the rung below the largest stable one. Half the output interval
 /// at the most: the companion's step is a rung itself, and no step crosses an output.
 fn first_rung(interval: f64, frequency: f64, sampled: &[[f64; 2]], fastest: f64, typical: f64) -> f64 {
-    let mut tau = 0.5 * interval;
-    while !(admissible(tau, frequency, sampled, fastest) && admissible(2. * tau, frequency, sampled, typical)) {
-        tau *= 0.5;
-    }
-    tau
+    let step = |pairs: u64| interval / (2 * pairs) as f64;
+    let pairs = (1..).find(|&m| admissible(step(m), frequency, sampled, fastest) && admissible(2. * step(m), frequency, sampled, typical)).expect("a step short enough is admissible");
+    step(pairs)
 }
 
 /// The rms speed (µm/µs) of atoms at the temperature T (µK): √(3 (ħ/m) k_BT/ħ), the reach's typical atom at the
@@ -482,14 +482,15 @@ fn held_to(estimates: &[Estimate], frequencies: &V3) -> Vec<[bool; 3]> {
 /// The states the model is read at and the folded units' errors there (SPEC §5.2): at every output the first member of
 /// every group of `parts` that still holds its atom -- one a group keeps every group in a mean's spread, and a unit's
 /// error is a function of the state; the first held one, so that an output some atom reaches is read wherever a group
-/// has one there --, with each state's output and group.
+/// has one there --, with each state's output and group. A state `known` already holds -- the same trajectory at the same
+/// output and step, the scout's inside the pilot -- keeps the errors read there: a unit's error is a function of the state.
 struct Sampled {
     samples: Vec<State>,
     at: Vec<usize>,
     from: Vec<usize>,
     errors: Vec<Vec<UnitError>>,
 }
-fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Tables, parts: &[&Part]) -> Sampled {
+fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Tables, parts: &[&Part], known: Option<&Sampled>) -> Sampled {
     let mut samples: Vec<State> = vec![];
     let (mut at, mut from) = (vec![], vec![]);
     for (g, p) in parts.iter().enumerate() {
@@ -501,8 +502,16 @@ fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Table
             }
         }
     }
-    let each: Vec<Vec<UnitError>> =
-        samples.par_iter().map(|s| model.errors_with(units, std::slice::from_ref(&s.sample), Some(tables)).into_iter().map(|e| e[0]).collect()).collect();
+    let read: std::collections::HashMap<(u64, usize, u64), usize> =
+        known.map_or_else(Default::default, |k| k.samples.iter().zip(&k.at).enumerate().map(|(j, (s, &at))| ((s.index, at, s.tau.to_bits()), j)).collect());
+    let each: Vec<Vec<UnitError>> = samples
+        .par_iter()
+        .zip(&at)
+        .map(|(s, &k)| match (known, read.get(&(s.index, k, s.tau.to_bits()))) {
+            (Some(known), Some(&j)) => known.errors.iter().map(|unit| unit[j]).collect(),
+            _ => model.errors_with(units, std::slice::from_ref(&s.sample), Some(tables)).into_iter().map(|e| e[0]).collect(),
+        })
+        .collect();
     let errors = (0..units.len()).map(|u| each.iter().map(|e| e[u]).collect()).collect();
     Sampled { samples, at, from, errors }
 }
@@ -538,19 +547,20 @@ fn keep(
     let held: Vec<f64> = estimates.iter().map(|e| 1. - e.loss).collect();
     // A unit weighs where it was read: an output with no state read carries every unit's bound alike, and tells none
     // of them apart.
-    let read = |k: usize| measured.output.contains(&k);
-    let weight = |u: usize, over: &[usize]| -> f64 {
-        over.iter().filter(|&&k| held[k] > 0. && read(k)).map(|&k| held[k] * (means[u][k][0] / POPULATION_TARGET + means[u][k][1] / TEMPERATURE_TARGET)).sum()
-    };
-    let crowded = crowded(&looks(estimates, fixed, &vec![Bound::share(); fixed.model.len()]));
-    if let Some(u) = (0..units.len()).max_by(|&a, &b| weight(a, &crowded).total_cmp(&weight(b, &crowded))).filter(|&u| weight(u, &crowded) > 0.) {
+    let mut read = vec![false; fixed.model.len()];
+    measured.output.iter().for_each(|&k| read[k] = true);
+    let crowded: Vec<usize> = crowded(&looks(estimates, fixed, &vec![Bound::share(); fixed.model.len()])).into_iter().filter(|&k| held[k] > 0. && read[k]).collect();
+    let weights: Vec<f64> = (0..units.len()).map(|u| crowded.iter().map(|&k| held[k] * (means[u][k][0] / POPULATION_TARGET + means[u][k][1] / TEMPERATURE_TARGET)).sum()).collect();
+    if let Some(u) = (0..units.len()).max_by(|&a, &b| weights[a].total_cmp(&weights[b])).filter(|&u| weights[u] > 0.) {
         return Some((u, None));
     }
-    let pricing = Pricing::new(request, light, kept, model, reference, centre, units, measured, states, parts, fixed, scales, unsampled, again);
+    let mut pricing = Pricing::new(request, light, kept, model, reference, centre, units, measured, states, parts, fixed, scales, unsampled, again);
     let saving = pricing.saving_at_all();
     let mut ranked: Vec<Candidate> = if saving.is_empty() {
         vec![]
     } else {
+        pricing.rate();
+        let pricing = &pricing;
         let others = pricing.leave_one_out();
         saving.into_par_iter().filter(|&u| !barred.contains(&units[u]) && pays(0., pricing.saving(&others, u, &pricing.own))).filter_map(|u| pricing.priced(&others, u)).collect()
     };
@@ -634,7 +644,7 @@ fn attempt(
         step: vec![Bound::share(); outputs],
         checked: None,
         tau: step.map_or(first_rung, |step| step.min(first_rung)),
-        plan,
+        plan: Plan { cell: 2. * step.map_or(first_rung, |step| step.min(first_rung)), ..plan },
         scales,
         initial: row,
         ledger,
@@ -661,7 +671,7 @@ fn attempt(
     if settle(&run, &ensemble, &mut context, &mut levels, &numbers, 0..1, &report.lab, &dearer, messages) == Settled::Dearer {
         return Ok(Attempt::Undo);
     }
-    {
+    let scouted = {
         let tau = context.tau;
         let scout: Vec<&Part> = levels.fine.iter().collect();
         let estimates = pooled(&scout, &context.scales).0;
@@ -669,14 +679,15 @@ fn attempt(
             return Ok(Attempt::Grow(t, tau));
         }
         let units = model.units();
-        let Sampled { samples, at, from, errors } = sampled(&model, &units, &tables, &scout);
-        let measured = Measured { errors: &errors, output: &at, group: &from };
+        let read = sampled(&model, &units, &tables, &scout, None);
+        let measured = Measured { errors: &read.errors, output: &read.at, group: &read.from };
         let unsampled = unseen(MOST_TRAJECTORIES as f64);
-        let fixed = Fixed { model: model_error(&measured.means(outputs, None), None, unsampled), temperature: held_to(&estimates, &report.lab), ..context.fixed.clone() };
-        if let Some((u, share)) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &samples, &scout, &estimates, &fixed, &context.scales, unsampled, scout.len() as f64, barred) {
+        let fixed = Fixed { model: model_error(&sums(&measured.means(outputs, None), unsampled), None, unsampled), temperature: held_to(&estimates, &report.lab), ..context.fixed.clone() };
+        if let Some((u, share)) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &read.samples, &scout, &estimates, &fixed, &context.scales, unsampled, scout.len() as f64, barred) {
             return Ok(Attempt::Keep(units[u].clone(), tau, share));
         }
-    }
+        read
+    };
     // The pilot: its groups' other members at both levels, screened.
     match settle(&run, &ensemble, &mut context, &mut levels, &numbers, 1..GROUP, &report.lab, &dearer, messages) {
         Settled::Dearer => return Ok(Attempt::Undo),
@@ -697,13 +708,13 @@ fn attempt(
         // the first member of every group -- one a group keeps every group in the mean's spread, and a unit's error is a
         // function of the state, read as well on eleven states an output as on eighty-eight.
         let units = model.units();
-        let Sampled { samples, at, from, errors } = sampled(&model, &units, &tables, &pilot);
+        let Sampled { samples, at, from, errors } = sampled(&model, &units, &tables, &pilot, Some(&scouted));
         let measured = Measured { errors: &errors, output: &at, group: &from };
         let means = measured.means(outputs, None);
         let (population, temperature): (Vec<Vec<f64>>, Vec<Vec<f64>>) =
             means.iter().map(|unit| (unit.iter().map(|m| m[0]).collect(), unit.iter().map(|m| m[1]).collect())).unzip();
         let unsampled = unseen(MOST_TRAJECTORIES as f64);
-        context.fixed.model = model_error(&means, None, unsampled);
+        context.fixed.model = model_error(&sums(&means, unsampled), None, unsampled);
         // The tables' errors (SPEC §5.4): each table's whole error against the elimination itself, read at one state of
         // each pilot trajectory (`one_each`) and averaged over them -- a state on another cluster reads none of it. A table
         // beyond the tables' shares has the axis of its largest read halved and is read again, until it is within them or
@@ -909,6 +920,10 @@ struct Plan {
     halves: Vec<V3>,
     listed: Vec<usize>,
     end: f64,
+    /// The cells of a trajectory's Brownian path (adapt.rs `Path`), µs: the companion's step at the attempt's first
+    /// rung, a whole part of the output interval. Every step of the attempt -- a rung's, its companion's -- is a cell
+    /// over a power of two, so every level reads the same path. The output interval until the first rung is known.
+    cell: f64,
 }
 impl Plan {
     /// The plan of the request's times with the trap's frequency per lab axis (rad/µs).
@@ -918,7 +933,7 @@ impl Plan {
         let count = times.len().min(DISTRIBUTION_TIMES);
         let mut listed: Vec<usize> = (0..count).map(|i| ((i * last) as f64 / (count - 1) as f64).round() as usize).collect();
         listed.dedup();
-        Plan { end: times[last] + halves[last].iter().fold(0., |a: f64, &b| a.max(b)), times: times.to_vec(), halves, listed }
+        Plan { end: times[last] + halves[last].iter().fold(0., |a: f64, &b| a.max(b)), times: times.to_vec(), halves, listed, cell: interval }
     }
 }
 
@@ -974,9 +989,9 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
     let widest = plan.halves.iter().flatten().fold(0., |a: f64, &b| a.max(b));
     let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
     let mut scratch = Scratch::default();
-    // The trajectory's Brownian path in cells of an output interval, its grid the multiples of τ (the ladder's rungs
-    // are the interval over powers of two): the same path at every rung.
-    let mut path = adapt::Path::new(SEED, index, interval, (interval / tau).log2().round() as u32);
+    // The trajectory's Brownian path in the plan's cells, its grid the multiples of τ (a cell over a power of two):
+    // the same path at every rung and at its companion.
+    let mut path = adapt::Path::new(SEED, index, plan.cell, (plan.cell / tau).log2().round() as u32);
     // Per output and lab axis: the window's time held, ∫κ dt and ∫κ² dt.
     let mut moments = vec![[[0.; 3]; 3]; outputs];
     let mut out = vec![Fate::Lost; outputs];
@@ -1317,25 +1332,23 @@ impl Measured<'_> {
     }
 }
 
-/// The model's error per output (populations, T; none at t = 0, the request's state) from the units' mean errors, every
-/// folded unit's but `without`'s added (SPEC §4), and the unsampled share; a population's at most 1.
-fn model_error(means: &[Vec<[f64; 2]>], without: Option<usize>, unsampled: f64) -> Vec<[f64; 2]> {
+/// The units' mean errors added up per output (populations, T; SPEC §4), every folded unit's and the unsampled share.
+fn sums(means: &[Vec<[f64; 2]>], unsampled: f64) -> Vec<[f64; 2]> {
     let outputs = means.first().map_or(0, Vec::len);
-    (0..outputs)
-        .map(|k| {
-            if k == 0 {
-                return [0.; 2];
-            }
-            let mut a = [unsampled; 2];
-            for (u, m) in means.iter().enumerate() {
-                if Some(u) != without {
-                    a[0] += m[k][0];
-                    a[1] += m[k][1];
-                }
-            }
-            [a[0].min(1.), a[1]]
-        })
-        .collect()
+    (0..outputs).map(|k| means.iter().fold([unsampled; 2], |a, m| [a[0] + m[k][0], a[1] + m[k][1]])).collect()
+}
+
+/// The model's error per output from the sums `whole` of its units' (`sums`), less one unit's where `without` gives its
+/// mean errors and the units' number: none at t = 0, the request's state; a population's at most 1. A read error leaves
+/// the sum by subtraction -- an output's work, not every unit's again; at an output no state was read at, every unit's
+/// error is its bound alike (`Measured::means`), and the others' bounds stand.
+fn model_error(whole: &[[f64; 2]], without: Option<(&[[f64; 2]], usize)>, unsampled: f64) -> Vec<[f64; 2]> {
+    let less = |k: usize, i: usize| match without {
+        None => whole[k][i],
+        Some((unit, _)) if unit[k][i].is_finite() => whole[k][i] - unit[k][i],
+        Some((_, units)) => if units > 1 { f64::INFINITY } else { unsampled },
+    };
+    (0..whole.len()).map(|k| if k == 0 { [0.; 2] } else { [less(k, 0).min(1.), less(k, 1)] }).collect()
 }
 
 /// The counted work (decide.rs `Work`) a trajectory spends per µs at a pilot state under a model: one step's -- the
@@ -1367,7 +1380,10 @@ struct Level {
     left: Option<usize>,
     estimates: Vec<Estimate>,
     means: Vec<Vec<[f64; 2]>>,
-    base: f64,
+    /// The units' mean errors added up (`sums`).
+    whole: Vec<[f64; 2]>,
+    /// The trajectories the current model needs there.
+    need: f64,
 }
 
 /// The pricing of keeps (SPEC §5.2; module documentation, # The model): the predicted saving of total work W = w·N by
@@ -1421,15 +1437,19 @@ impl<'a> Pricing<'a> {
         again: f64,
     ) -> Pricing<'a> {
         let rated = one_each(states, measured.output, fixed.model.len());
-        let current = Run::new(model, reference);
-        let assembly = current.assembly_work();
-        let middles: Vec<crate::model::Middle> = (0..model.clusters().len()).map(|c| current.middle(c, centre, 0.)).collect();
-        let own: Vec<f64> = rated.iter().map(|&j| rate(&current, assembly, &middles[states[j].sample.cluster], &states[j])).collect();
-        drop(middles);
-        let all = Level { left: None, estimates: vec![], means: vec![], base: 0. };
-        let mut pricing = Pricing { request, light, kept, model, reference, centre, units, states, measured, pilot, fixed, scales, unsampled, rated, own, again, all };
+        let all = Level { left: None, estimates: vec![], means: vec![], whole: vec![], need: 0. };
+        let mut pricing = Pricing { request, light, kept, model, reference, centre, units, states, measured, pilot, fixed, scales, unsampled, rated, own: vec![], again, all };
         pricing.all = pricing.level(None);
         pricing
+    }
+
+    /// The current model's rates at the rated states (`own`): read once a unit's keep saves at all (`saving_at_all`
+    /// asks no rate), before any saving is priced.
+    fn rate(&mut self) {
+        let current = Run::new(self.model, self.reference);
+        let assembly = current.assembly_work();
+        let middles: Vec<crate::model::Middle> = (0..self.model.clusters().len()).map(|c| current.middle(c, self.centre, 0.)).collect();
+        self.own = self.rated.iter().map(|&j| rate(&current, assembly, &middles[self.states[j].sample.cluster], &self.states[j])).collect();
     }
 
     /// The pilot's groups but `left` as the pricing reads them. Its pooling runs on the thread pool: made on the calling
@@ -1437,8 +1457,9 @@ impl<'a> Pricing<'a> {
     fn level(&self, left: Option<usize>) -> Level {
         let parts: Vec<&Part> = self.pilot.iter().enumerate().filter(|(g, _)| Some(*g) != left).map(|(_, p)| *p).collect();
         let (estimates, means) = (pooled(&parts, self.scales).0, self.measured.means(self.fixed.model.len(), left));
-        let base = self.mean(&self.own, left) * self.need(&estimates, &means, None);
-        Level { left, estimates, means, base }
+        let whole = sums(&means, self.unsampled);
+        let need = self.need(&estimates, &whole, None);
+        Level { left, estimates, means, whole, need }
     }
 
     /// The jackknife's levels: each group left out.
@@ -1453,8 +1474,8 @@ impl<'a> Pricing<'a> {
     }
 
     /// The trajectories the looks need beside the units' errors but `without`'s and the step's share.
-    fn need(&self, estimates: &[Estimate], means: &[Vec<[f64; 2]>], without: Option<usize>) -> f64 {
-        let fixed = Fixed { model: model_error(means, without, self.unsampled), ..self.fixed.clone() };
+    fn need(&self, estimates: &[Estimate], whole: &[[f64; 2]], without: Option<&[[f64; 2]]>) -> f64 {
+        let fixed = Fixed { model: model_error(whole, without.map(|unit| (unit, self.units.len())), self.unsampled), ..self.fixed.clone() };
         looks(estimates, &fixed, &vec![Bound::share(); fixed.model.len()]).iter().map(Look::need).fold(0., f64::max)
     }
 
@@ -1462,7 +1483,7 @@ impl<'a> Pricing<'a> {
     /// a model's W (per µs of run) is its mean rate times its product's trajectories (`need`), the kept model's with the
     /// pilot its new attempt runs.
     fn share(&self, level: &Level, u: usize, rates: &[f64]) -> f64 {
-        1. - self.mean(rates, level.left) * (self.need(&level.estimates, &level.means, Some(u)) + self.again) / level.base
+        1. - self.mean(rates, level.left) * (self.need(&level.estimates, &level.whole, Some(&level.means[u])) + self.again) / (self.mean(&self.own, level.left) * level.need)
     }
 
     /// The saving of keeping unit `u` at the rates `rates` of its kept model, spread over the jackknife's levels `others`.
@@ -1475,7 +1496,12 @@ impl<'a> Pricing<'a> {
     /// none before its spread pays at no confidence: only these are read on the jackknife's levels and given a kept
     /// model.
     fn saving_at_all(&self) -> Vec<usize> {
-        (0..self.units.len()).into_par_iter().filter(|&u| self.share(&self.all, u, &self.own) > 0.).collect()
+        // No unit's removal saves more than the removal of them all (a look's need falls with the model's error):
+        // where even that does not pay for the new pilot, none is tried.
+        if self.need(&self.all.estimates, &vec![[self.unsampled; 2]; self.all.whole.len()], None) + self.again >= self.all.need {
+            return vec![];
+        }
+        (0..self.units.len()).into_par_iter().filter(|&u| self.need(&self.all.estimates, &self.all.whole, Some(&self.all.means[u])) + self.again < self.all.need).collect()
     }
 
     /// The rates of the model that keeps unit `u`, built for it, at the rated states: a keep costs less per µs than the
@@ -1684,19 +1710,13 @@ mod tests {
         assert!(n % GROUP == 0 && unseen(n as f64) <= room && unseen((n - GROUP) as f64) > room, "{n}");
     }
 
-    /// The ladder's first rung: the largest rung admissible for the run at the reach's largest speed whose double is
-    /// admissible for the companion at the reach's rms speed.
-    /// - Where the trap's resonance binds it is the rung below the largest stable one: of a 10 µs interval, 2.5 µs at a
-    ///   tweezer's 74.65 kHz (π/ω = 6.7 µs: 5 µs is stable, its double is not) and 0.15625 µs at a lattice's 910.7 kHz
-    ///   (0.55 µs); half the interval in a slow trap (the companion is one step an interval).
-    /// - The light: a standing wave of the D2 line (|K| = 2k = 16.1 /µm) at the reach of 30 µK -- its largest speed
-    ///   0.2185 µm/µs, √(2 ln(1/s) k_BT/m) with the unsampled share s of 2¹⁴ trajectories, its rms speed 0.0928 µm/µs --
-    ///   lets the run's step be below 2π/(K v) = 1.79 µs and the companion's below 4.20 µs: the first rung is 1.25 µs,
-    ///   its companion 2.5 µs. With the largest residual wave vector √10 k of six beams' cooling, 1.13 µs and 2.66 µs:
-    ///   0.625 µs with its companion at 1.25 µs -- the rung below 1.25 µs only because 1.25 µs itself is beyond the
-    ///   run's limit, not by a second halving. At 141 µK (0.473 and 0.201 µm/µs) the standing wave gives 0.82 µs and
-    ///   1.94 µs: 0.625 µs. A heavier, colder atom at 0.0089 µm/µs leaves the trap's rung.
-    /// - A residual beat counts with the motion at both levels, |Ω| + |K| v.
+    /// The first rung is the largest even part of the output interval that is admissible for the run and whose double is
+    /// for the companion (`first_rung`). Rb-87 at 30 µK: the reach's largest speed 0.2185 µm/µs, its rms speed 0.0928.
+    /// - No light, a 74.65 kHz trap, 10 µs between outputs: π/ω = 6.70 µs bounds the companion, 3.35 µs the run: the
+    ///   interval over 4, 2.5 µs. A 1 kHz trap bounds nothing: half the interval.
+    /// - A pattern of 2k = 16.1 µm⁻¹: the run below 2π/(K v_max) = 1.79 µs, the companion below 4.20 µs, so the run
+    ///   below 1.79 µs: the interval over 6, 1.667 µs. At √10 k the run below 1.13 µs: the interval over 10, 1 µs.
+    /// - In every case the rung is admissible with its double, and the next larger even part is not.
     #[test]
     fn the_first_rung_is_admissible_and_its_double_is_for_the_typical_atom() {
         let khz = |f: f64| std::f64::consts::TAU * f * 1e-3;
@@ -1705,17 +1725,26 @@ mod tests {
         let (fast, typical) = (fastest(30.), typical_speed(hm, 30.));
         assert!((fast - 0.2185).abs() < 5e-4 && (typical - 0.0928).abs() < 5e-4, "{fast} {typical}");
         assert_eq!(first_rung(10., khz(74.65), &[], fast, typical), 2.5);
-        assert_eq!(first_rung(10., khz(910.7), &[[0., 16.1]], fast, typical), 0.15625);
         assert_eq!(first_rung(10., khz(1.), &[[0., 0.]], fast, typical), 5.);
         assert!((TAU / (16.1 * fast) - 1.79).abs() < 5e-3 && (TAU / (16.1 * typical) - 4.20).abs() < 1e-2);
-        assert_eq!(first_rung(10., khz(74.65), &[[0., 16.1]], fast, typical), 1.25);
+        assert_eq!(first_rung(10., khz(74.65), &[[0., 16.1]], fast, typical), 10. / 6.);
         let k = 16.106 / 2. * 10f64.sqrt();
         assert!((TAU / (k * fast) - 1.13).abs() < 5e-3 && (TAU / (k * typical) - 2.66).abs() < 1e-2);
-        assert_eq!(first_rung(10., khz(100.), &[[0., k]], fast, typical), 0.625);
-        assert_eq!(first_rung(20., khz(79.), &[[0., 16.1]], fastest(141.), typical_speed(hm, 141.)), 0.625);
-        assert_eq!(first_rung(16., khz(20.3), &[[0., 32.2]], fast, typical), 0.5);
-        assert_eq!(first_rung(10., khz(74.65), &[[0., 16.1]], 0.0089, 0.0038), 2.5);
-        assert_eq!(first_rung(10., khz(74.65), &[[0., 0.], [2., 16.1], [0.5, 8.]], fast, typical), 0.625);
+        assert_eq!(first_rung(10., khz(100.), &[[0., k]], fast, typical), 1.);
+        let both = |tau: f64, w: f64, sampled: &[[f64; 2]], fast: f64, typical: f64| admissible(tau, w, sampled, fast) && admissible(2. * tau, w, sampled, typical);
+        for (interval, w, sampled, fast, typical) in [
+            (10., khz(910.7), vec![[0., 16.1]], fast, typical),
+            (20., khz(79.), vec![[0., 16.1]], fastest(141.), typical_speed(hm, 141.)),
+            (16., khz(20.3), vec![[0., 32.2]], fast, typical),
+            (10., khz(74.65), vec![[0., 16.1]], 0.0089, 0.0038),
+            (10., khz(74.65), vec![[0., 0.], [2., 16.1], [0.5, 8.]], fast, typical),
+            (100., khz(100.), vec![[0., k]], fast, typical),
+        ] {
+            let tau = first_rung(interval, w, &sampled, fast, typical);
+            let pairs = (interval / (2. * tau)).round();
+            assert!((interval / (2. * pairs) - tau).abs() <= 1e-12 * tau && both(tau, w, &sampled, fast, typical), "{interval} {tau}");
+            assert!(pairs == 1. || !both(interval / (2. * (pairs - 1.)), w, &sampled, fast, typical), "{interval} {tau}: a larger rung is admissible");
+        }
         assert!(admissible(1.25, khz(74.65), &[[0., 16.1]], fast) && !admissible(2.5, khz(74.65), &[[0., 16.1]], fast) && admissible(2.5, khz(74.65), &[[0., 16.1]], typical));
     }
 
