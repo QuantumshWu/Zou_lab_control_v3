@@ -141,7 +141,7 @@
 //! first groups at a finer step are no better than the result before them --; else the last result goes out again, so
 //! that the app hears from the solve whatever stage it is in.
 use crate::adapt;
-use crate::decide::{assured, halved, judge, pays, Judgement, Read};
+use crate::decide::{assured, judge, pays, Judgement, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
 use crate::estimate::{between, draws_for, half_window, occupation, spread, summarize, unseen, Between, Estimate, Fate, Group, Held, Scales, Spread};
 use crate::field::{Geometry, Light};
@@ -397,10 +397,10 @@ fn judged(read: &Between) -> Vec<(Read, f64)> {
 }
 
 /// The screen of a step on the reads between its two levels (module documentation, # The step; decide.rs `judge`):
-/// the family of its reads, each against the square of the step's share -- a mean square goes as the step to twice
-/// the scheme's order. The step is halved where the family is beyond.
+/// the family of its reads, each against the square of the step's share. The step is halved where the family is
+/// beyond.
 fn screen(read: &Between) -> Judgement {
-    judge(&judged(read), 2. * ORDER as f64)
+    judge(&judged(read))
 }
 
 /// A read as the scheme's order gives it at half the step (module documentation, # The step): a mean square goes as
@@ -1000,7 +1000,7 @@ fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Le
         let read = between(&fine, &coarse, &context.scales);
         let failed = inherited.as_ref().is_some_and(|inherited| refuted(&read, inherited));
         let held = held(&read, inherited.as_ref().filter(|_| !failed));
-        let beyond = matches!(screen(&read), Judgement::Beyond(_));
+        let beyond = screen(&read) == Judgement::Beyond;
         if !(beyond || failed) {
             let Some(unseen) = blind(&read, &held).filter(|_| members.end == GROUP) else { return Settled::Standing };
             // The product's trajectories as the pairs' finer level predicts them, beside the step's share.
@@ -1017,7 +1017,7 @@ fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Le
                 continue;
             }
         }
-        let below = halved(context.tau, 1.);
+        let below = 0.5 * context.tau;
         if context.plan.end / below > MOST_STEPS as f64 {
             return if beyond || failed { Settled::Capped } else { Settled::Standing };
         } else if dearer(below) {
@@ -1110,24 +1110,17 @@ impl Plan {
     }
 }
 
-/// Counts over trajectories: the steps taken, the integrator's counted work (decide.rs `Work`) and its generator
-/// assemblies, the time held (µs), and the trajectories the scheme could not advance (adapt.rs `advance`'s refusal) with
-/// the earliest time one stopped at.
+/// Counts over trajectories: the steps taken, and the trajectories the scheme could not advance (adapt.rs `advance`'s
+/// refusal) with the earliest time one stopped at.
 #[derive(Clone, Copy, Debug, Default)]
 struct Counts {
     steps: u64,
-    work: f64,
-    assemblies: u64,
-    held: f64,
     failed: u64,
     since: Option<f64>,
 }
 impl Counts {
     fn add(&mut self, o: &Counts) {
         self.steps += o.steps;
-        self.work += o.work;
-        self.assemblies += o.assemblies;
-        self.held += o.held;
         self.failed += o.failed;
         self.since = match (self.since, o.since) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -1232,7 +1225,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
             h.kappa2 = std::array::from_fn(|a| w[a][2] / w[a][0]);
         }
     }
-    let counts = Counts { steps, work: t.work, assemblies: t.assemblies, held: t.lost.unwrap_or(t.time).min(plan.end), failed: u64::from(failed), since: failed.then_some(t.time) };
+    let counts = Counts { steps, failed: u64::from(failed), since: failed.then_some(t.time) };
     Record { outputs: out, listed, samples, counts }
 }
 
@@ -1993,7 +1986,7 @@ mod tests {
     /// standard error of 0.01 is clear among them, and one of 0.03 -- clear at one look -- is not.
     #[test]
     fn the_screen_halves_the_step_on_a_clear_mean_square_alone() {
-        let halved = |read: &Between| matches!(screen(read), Judgement::Beyond(_));
+        let halved = |read: &Between| screen(read) == Judgement::Beyond;
         let [sp, st] = step_bound();
         let (bp, bt) = (sp * sp, st * st);
         assert!(!halved(&at(Some(read(0.5 * bt, 0.1 * bt)))));
@@ -2111,7 +2104,7 @@ mod tests {
         let (step, _) = checked(&clear);
         let family = Spread { error: 0.04, groups: 11. }.interval_over(judged(&clear).len() as f64);
         assert!((step.temperature - (0.36 - family).sqrt()).abs() < 1e-15 && step.temperature > step_bound()[1], "{step:?}");
-        assert!(matches!(screen(&clear), Judgement::Beyond(_)));
+        assert!(screen(&clear) == Judgement::Beyond);
         let mut lossy = at(None);
         (lossy.loss, lossy.shown[2]) = (read(0.04, 0.0001), pilot(1e-4, 4e-4));
         let (step, resolution) = checked(&lossy);
@@ -2151,7 +2144,6 @@ mod tests {
             held: trajectories,
             loss: 0.,
             loss_error: exact,
-            shown: [0.; STATES],
             shown_errors: [exact; STATES],
             populations: [0.; STATES],
             motion: Some(crate::estimate::Motion {

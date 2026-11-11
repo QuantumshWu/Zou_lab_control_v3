@@ -11,9 +11,8 @@
 //! where there is no error. Against the bound b that x may reach -- the square of the share σ of its target that the
 //! level may take -- there are three outcomes and no fourth (`Read::outcome`):
 //! - within, max(x, 0) + t·SE ≤ b: keep the level;
-//! - beyond, x − t·SE > b: refine by the measured ratio at the read's order, h' = h (b/x)^{1/order} (`Read::refined`),
-//!   the parameter at which the measured size meets the bound -- on a ladder of halvings, the first rung at or below it
-//!   (`halved`);
+//! - beyond, x − t·SE > b: refine -- the level's next finer one (the step's half, solve.rs `settle`), and the read is
+//!   taken again there;
 //! - unreadable, neither: the far end (`Read::most`) is what the read does not exclude, the near end x − t·SE
 //!   (`Read::least`) what it shows clearly.
 //!
@@ -26,9 +25,9 @@
 //! # Many reads
 //! A decision that looks at a family of m reads, each against its own bound (`judge`; SPEC §5.1), refines where any of
 //! them lies beyond, and so takes the largest of m noisy reads: beyond is judged with the family's interval (Šidák over
-//! the m looks, so that the largest noisy read refines no more often than one look would), by the read that asks for the
-//! finest level. Within is judged with each read's own interval, one look: every read has to lie within its bound by
-//! itself, whatever the others are. Any other family is unreadable.
+//! the m looks, so that the largest noisy read refines no more often than one look would). Within is judged with each
+//! read's own interval, one look: every read has to lie within its bound by itself, whatever the others are. Any other
+//! family is unreadable.
 //!
 //! # pays
 //! A spend W for a predicted saving ΔC pays where ΔC − t·SE(ΔC) > W (`pays`; the left side is `assured`, by which savings
@@ -67,13 +66,6 @@ pub fn richardson(ratio: f64, order: f64) -> f64 {
     1. / (1. - ratio.powf(order))
 }
 
-/// The parameter a refinement by `factor` takes a level's `parameter` to on a ladder of halvings (module documentation):
-/// the fewest whole halvings that bring it to the factor, one at least -- a refinement takes a finer level, and an
-/// unreadable read (the factor 1) the next one.
-pub fn halved(parameter: f64, factor: f64) -> f64 {
-    parameter * 0.5_f64.powf((1. / factor).log2().ceil().max(1.))
-}
-
 impl Read {
     /// The read's far end among `looks` reads, max(x, 0) + t·SE: what it does not exclude (module documentation);
     /// unbounded for a read that is not a number or whose spread is unread.
@@ -97,33 +89,27 @@ impl Read {
             Outcome::Unreadable
         }
     }
-    /// The factor on the level's parameter at which the measured size meets `bound` at the read's `order`,
-    /// (b/x)^{1/order}.
-    pub fn refined(&self, bound: f64, order: f64) -> f64 {
-        (bound / self.value).powf(1. / order)
-    }
 }
 
 /// A family's outcome (module documentation, # Many reads).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Judgement {
     /// Every read lies within its bound by itself.
     Within,
-    /// Some read lies beyond its bound among them all: the least factor on the level's parameter at which a read beyond
-    /// meets its bound (`Read::refined`).
-    Beyond(f64),
+    /// Some read lies beyond its bound among them all.
+    Beyond,
     Unreadable,
 }
 
-/// The outcome of a family of reads, each with its bound, at the reads' `order` in the level's parameter (module
-/// documentation, # Many reads).
-pub fn judge(reads: &[(Read, f64)], order: f64) -> Judgement {
+/// The outcome of a family of reads, each with its bound (module documentation, # Many reads).
+pub fn judge(reads: &[(Read, f64)]) -> Judgement {
     let looks = reads.len() as f64;
-    let beyond = reads.iter().filter(|(r, bound)| r.outcome(*bound, looks) == Outcome::Beyond).map(|(r, bound)| r.refined(*bound, order)).reduce(f64::min);
-    match beyond {
-        Some(factor) => Judgement::Beyond(factor),
-        None if reads.iter().all(|(r, bound)| r.outcome(*bound, 1.) == Outcome::Within) => Judgement::Within,
-        None => Judgement::Unreadable,
+    if reads.iter().any(|(r, bound)| r.outcome(*bound, looks) == Outcome::Beyond) {
+        Judgement::Beyond
+    } else if reads.iter().all(|(r, bound)| r.outcome(*bound, 1.) == Outcome::Within) {
+        Judgement::Within
+    } else {
+        Judgement::Unreadable
     }
 }
 
@@ -166,36 +152,29 @@ mod tests {
     }
 
     /// Richardson: a halving at order 2 reads 3/4 of the coarse error, a quartering at order 1 too, an exact
-    /// finer level all of it -- a halving's factors at the orders 2 and 4 are 4/3 and 16/15 to the bit, 2^q/(2^q − 1);
-    /// refining by the measured ratio meets the bound: a size four times its bound takes half the parameter at order
-    /// 2, a quarter at order 1 -- and an error's mean square sixteen times the share's square, of the order 4 at a
-    /// scheme of the order 2, half the step. On a ladder of halvings a factor takes whole halvings, one at least.
+    /// finer level all of it -- a halving's factors at the orders 2 and 4 are 4/3 and 16/15 to the bit, 2^q/(2^q − 1).
     #[test]
-    fn the_level_s_error_and_its_refinement_follow_its_order() {
+    fn the_level_s_error_follows_its_order() {
         assert_eq!((richardson(0.5, 2.), richardson(0.5, 4.), richardson(0., 1.)), (4. / 3., 16. / 15., 1.));
-        let e = read(0.2, 0.);
-        assert!((e.refined(0.05, 2.) - 0.5).abs() < 1e-15 && (e.refined(0.05, 1.) - 0.25).abs() < 1e-15);
-        assert!((read(0.04, 0.).refined(0.0025, 4.) - 0.5).abs() < 1e-15);
-        assert_eq!((halved(1., 0.5), halved(1., 0.3), halved(1., 0.25), halved(1., 1.), halved(3., 2.)), (0.5, 0.25, 0.25, 0.5, 1.5));
     }
 
     /// A family's outcome (`judge`; one look's interval is z of the error on unlimited groups): within where every read
-    /// lies within its own bound; a size four times its bound, clear among all the looks, is beyond with the factor ½
-    /// at order 2, and of two reads beyond the finer level is taken; one read within and one whose interval straddles its
-    /// bound are unreadable; a read that is clear at one look but not among the family's looks is unreadable too, not
-    /// beyond; a read that is no number makes its family unreadable; no read at all is within.
+    /// lies within its own bound; a size four times its bound, clear among all the looks, is beyond, and so are two
+    /// reads beyond; one read within and one whose interval straddles its bound are unreadable; a read that is clear
+    /// at one look but not among the family's looks is unreadable too, not beyond; a read that is no number makes its
+    /// family unreadable; no read at all is within.
     #[test]
     fn a_family_is_beyond_by_all_its_looks_and_within_by_each() {
         let quiet = (read(0., 0.), 1.);
-        assert_eq!(judge(&[quiet, (read(0.5, 0.1), 1.)], 2.), Judgement::Within);
-        assert_eq!(judge(&[quiet, (read(4., 0.01), 1.)], 2.), Judgement::Beyond(0.5));
-        assert_eq!(judge(&[(read(4., 0.01), 1.), (read(0.5, 0.001), 0.03125)], 2.), Judgement::Beyond(0.25));
-        assert_eq!(judge(&[quiet, (read(0.5, 1.), 1.)], 2.), Judgement::Unreadable);
+        assert_eq!(judge(&[quiet, (read(0.5, 0.1), 1.)]), Judgement::Within);
+        assert_eq!(judge(&[quiet, (read(4., 0.01), 1.)]), Judgement::Beyond);
+        assert_eq!(judge(&[(read(4., 0.01), 1.), (read(0.5, 0.001), 0.03125)]), Judgement::Beyond);
+        assert_eq!(judge(&[quiet, (read(0.5, 1.), 1.)]), Judgement::Unreadable);
         // 1.5 ± 0.24: beyond 1 at one look (z = 2), not at Šidák's interval over a thousand (about 4.08).
         let family: Vec<(Read, f64)> = std::iter::once((read(1.5, 0.24), 1.)).chain(std::iter::repeat_n(quiet, 999)).collect();
-        assert_eq!((family[0].0.outcome(1., 1.), judge(&family, 2.)), (Outcome::Beyond, Judgement::Unreadable));
-        assert_eq!(judge(&[quiet, (read(f64::NAN, 0.), 1.)], 2.), Judgement::Unreadable);
-        assert_eq!(judge(&[], 2.), Judgement::Within);
+        assert_eq!((family[0].0.outcome(1., 1.), judge(&family)), (Outcome::Beyond, Judgement::Unreadable));
+        assert_eq!(judge(&[quiet, (read(f64::NAN, 0.), 1.)]), Judgement::Unreadable);
+        assert_eq!(judge(&[]), Judgement::Within);
     }
 
     /// A spend pays only for a saving beyond it and the saving's interval; a saving that is not a number pays nothing.
