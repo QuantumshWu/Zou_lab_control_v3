@@ -49,7 +49,7 @@ const fn square_root(a: f64) -> f64 {
 ///
 /// Derivation: a jump made δt from where its step's own propagation reaches the threshold is, to first order, the
 /// hazard's integral off by γδt for that waiting time -- a share γδt of a jump too many or too few -- and the jump's
-/// kick taken ωδt away in the orbit's phase. The step's error is measured between the run's two levels at the scheme's
+/// kick taken ωδt away in the orbit's phase. The step's error is checked between the pilot's two levels at the scheme's
 /// order (solve.rs, # The step), which a tolerance does not follow: it is a share of the step's length, of the first
 /// order in it. So it is admitted at the second order of what the step may take, its share s·ε of a target:
 /// δt ≤ (s·ε)² L of the step's length L makes the hazard's part at most (s·ε)² of that step's own hazard and the

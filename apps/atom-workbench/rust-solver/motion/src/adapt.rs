@@ -6,8 +6,8 @@
 //! from there; a step the scheme refuses (`step::Refused`) is taken at its half, and one refused down to the time's
 //! round-off ends the advance with its refusal -- a numerical failure the solve counts and flags, never a loss. A step
 //! takes its generator's change along the path through its own three nodes, its middle and its ends, whatever its
-//! length (step.rs, # The kick): what that leaves is an error of the step's length like the splitting's, and the run's
-//! companion at twice the step measures both at the outputs (solve.rs, # The step). The generator's own frequencies
+//! length (step.rs, # The kick): what that leaves is an error of the step's length like the splitting's, and the
+//! pilot's companion at twice the step checks both at the outputs (solve.rs, # The step). The generator's own frequencies
 //! are no matter of the step's length: they are integrated exactly.
 //!
 //! τ is one for the run because the splitting is symplectic in its conservative part and its own inverse: at a constant
@@ -42,8 +42,9 @@
 //! # The Brownian path
 //! The light a trajectory scatters diffuses its momentum (SPEC §1.6; step.rs, # The absorbed light's momentum) along
 //! the trajectory's own Brownian path W, three independent standard ones. The path is one function of the time for a
-//! trajectory, whatever step it is taken at (`Path`): a run's two levels (solve.rs, # The step) -- the same trajectory
-//! at τ and at 2τ -- see the same noise, and differ by what the step does and by nothing drawn anew.
+//! trajectory, whatever step it is taken at (`Path`): the pilot's two levels (solve.rs, # The step) -- the same
+//! trajectory at τ and at 2τ -- see the same noise, and differ by what the step does and by nothing drawn anew. The
+//! product, at one step, needs the path's law alone; there is one path for both.
 //!
 //! - The path is made on a tree. Time is cut into cells, one output interval each; a cell's part of the path (its
 //!   increment and its first moment about its middle, `step::Brownian::over`) is drawn from the cell's stream
@@ -59,6 +60,9 @@
 //! - Every part has the law of a Brownian path's over its stretch, exactly, and parts of stretches that do not overlap
 //!   are independent: nothing of the scheme's law knows the tree. What two levels share is the path at the bins' ends
 //!   of the coarser one; within a bin each level's cuts are its own.
+//! - The tree is read by its branches: the nodes from a cell down to the bin last read are kept, and the next bin's
+//!   branch is made from where it leaves them -- two nodes a bin on average, whatever the depth, and the same parts to
+//!   the bit as a branch made from its cell.
 
 use crate::linalg::norm_sqr;
 use crate::random::Stream;
@@ -76,7 +80,9 @@ pub struct Cursor {
 
 /// A trajectory's Brownian path (module documentation, # The Brownian path) as a trajectory at one step goes along it:
 /// the run's seed and the trajectory's number, the cells' width (µs), the depth of the trajectory's grid in a cell's
-/// tree (2^depth bins a cell), and where the trajectory stands.
+/// tree (2^depth bins a cell), where the trajectory stands, and the branch of the tree last read -- its cell, the bin's
+/// place in it, and the parts of the nodes from the cell down to the bin: a bin's branch is read on from where it
+/// leaves the last one's (the next bin's shares all but two nodes with it on average), no part made twice.
 #[derive(Clone, Debug)]
 pub struct Path {
     seed: u64,
@@ -84,13 +90,14 @@ pub struct Path {
     cell: f64,
     depth: u32,
     cursor: Cursor,
+    branch: (u32, u64, Vec<Brownian>),
 }
 
 impl Path {
     /// The path of trajectory `index` of the run `seed` from t = 0, in cells of the width `cell`, for a trajectory whose
     /// grid has 2^depth bins a cell.
     pub fn new(seed: u64, index: u64, cell: f64, depth: u32) -> Path {
-        let mut path = Path { seed, index, cell, depth, cursor: Cursor { at: 0.0, bin: 0, rest: Brownian::STILL } };
+        let mut path = Path { seed, index, cell, depth, cursor: Cursor { at: 0.0, bin: 0, rest: Brownian::STILL }, branch: (0, 0, vec![]) };
         path.cursor.rest = path.whole(0);
         path
     }
@@ -106,26 +113,36 @@ impl Path {
         (time - end).abs() <= rounding((1usize << self.depth) + 2) * end
     }
 
-    /// The path's part over a whole bin: its cell's, through the halves of the tree's nodes down to it.
-    fn whole(&self, bin: u64) -> Brownian {
-        let (cell, place) = ((bin >> self.depth) as u32, bin & ((1u64 << self.depth) - 1));
+    /// The path's part over a whole bin: its cell's, through the halves of the tree's nodes down to it. The node of
+    /// the level l on the bin's branch is the one the first l bits of its place name, the 2^l + (place >> (depth − l))-th
+    /// of the cell's tree; the levels above the first where the place leaves the last branch's are the last branch's.
+    fn whole(&mut self, bin: u64) -> Brownian {
+        let (seed, index, depth) = (self.seed, self.index, self.depth);
+        let (cell, place) = ((bin >> depth) as u32, bin & ((1u64 << depth) - 1));
         let deviates = |node: u32| {
-            let mut stream = Stream::brownian(self.seed, self.index, cell, node);
+            let mut stream = Stream::brownian(seed, index, cell, node);
             [stream.normals(), stream.normals(), stream.normals()]
         };
-        let root = deviates(0);
-        let (mut part, mut width, mut node) = (Brownian::over(self.cell, &[root[0], root[1]]), self.cell, 1);
-        for level in (0..self.depth).rev() {
-            let half = ((place >> level) & 1) as usize;
-            part = part.split(width, 0.5 * width, &deviates(node))[half];
-            (width, node) = (0.5 * width, 2 * node + half as u32);
+        let (last_cell, last_place, parts) = &mut self.branch;
+        if parts.is_empty() || *last_cell != cell {
+            let root = deviates(0);
+            *parts = vec![Brownian::over(self.cell, &[root[0], root[1]])];
+        } else {
+            let shared = (0..=depth).rev().find(|&level| place >> (depth - level) == *last_place >> (depth - level)).unwrap_or(0);
+            parts.truncate(shared as usize + 1);
         }
-        part
+        for level in parts.len() as u32 - 1..depth {
+            let (width, node, half) = (self.cell / (1u64 << level) as f64, (1u64 << level) + (place >> (depth - level)), (place >> (depth - level - 1)) & 1);
+            let part = parts[level as usize].split(width, 0.5 * width, &deviates(node as u32))[half as usize];
+            parts.push(part);
+        }
+        (*last_cell, *last_place) = (cell, place);
+        parts[depth as usize]
     }
 
     /// The path's part from where the trajectory stands to the time `to`, and where it stands then: the rest of its
     /// bin and the bins after it, joined, up to the bin `to` lies in, which is cut there.
-    fn reach(&self, to: f64) -> (Brownian, Cursor) {
+    fn reach(&mut self, to: f64) -> (Brownian, Cursor) {
         let mut cursor = self.cursor;
         let (mut part, mut length) = (Brownian::STILL, 0.0);
         loop {
@@ -270,8 +287,9 @@ mod tests {
     /// The Brownian path is one function of the time whatever the step (module documentation, # The Brownian path).
     /// Over three cells of 8 µs, at the steps 1, 2 and 4 µs (depths 3, 2, 1): every step of 2τ on the grid takes the
     /// two steps of τ it spans, joined, to rounding. A trajectory whose steps end off the grid (a jump's) meets the
-    /// same path again at every bin's end: its parts from one end of a bin to the next, joined, are the bin's own. And
-    /// the parts have a Brownian path's law at any cut: over 4096 trajectories the increment and the first moment of a
+    /// same path again at every bin's end: its parts from one end of a bin to the next, joined, are the bin's own. A
+    /// bin's part is the same to the bit whatever branch was read before it (the bins in a scattered order on one path
+    /// against each on a path of its own). And the parts have a Brownian path's law at any cut: over 4096 trajectories the increment and the first moment of a
     /// stretch of the length s cut out of a bin have the variances s and s³/12 and no covariance, each within its
     /// interval at the confidence z over the looks.
     #[test]
@@ -300,6 +318,10 @@ mod tests {
                     (joined, length, bin) = (Brownian::STILL, 0.0, bin + 1);
                 }
             }
+        }
+        let mut one = Path::new(5, 3, cell, 5);
+        for bin in [77, 3, 4, 95, 0, 31, 32, 33, 64, 12, 13, 12] {
+            assert_eq!(one.whole(bin), Path::new(5, 3, cell, 5).whole(bin), "bin {bin} after another branch");
         }
         let (n, from, to) = (4096, 2.37, 3.81);
         let mut sums = [0.0; 3];
