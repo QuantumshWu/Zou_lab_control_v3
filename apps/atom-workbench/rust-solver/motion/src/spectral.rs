@@ -833,6 +833,29 @@ impl Picture {
         (2 + 4 * terms + 2 * (6 + plan.parts * plan.terms) + 4) as f64 * size + state
     }
 
+    /// What a split meets: every pair's turn |ω_ab| |h| between two nodes, and the sizes of its change over a half
+    /// step, the slope's |A_ab| h² and the curvature's |B_ab| |h|³ (the larger of the pair's two ways round). None where
+    /// nothing moves or the state does not go through the decomposition.
+    #[cfg(test)]
+    pub(crate) fn pairs(&self) -> Vec<[f64; 3]> {
+        let (n, h) = (self.n, self.half.abs());
+        if !(self.through && self.moving) {
+            return Vec::new();
+        }
+        let mut slopes = [vec![C64::ZERO; n * n], vec![C64::ZERO; n * n]];
+        for (slope, change) in slopes.iter_mut().zip(&self.changes) {
+            unlay(change, n, slope);
+        }
+        let mut pairs = Vec::new();
+        for a in 0..n {
+            for b in a + 1..n {
+                let size = |j: usize| slopes[j][a * n + b].abs().max(slopes[j][b * n + a].abs());
+                pairs.push([(self.lambda[a] - self.lambda[b]).abs() * h, size(0) * h * h, size(1) * h * h * h]);
+            }
+        }
+        pairs
+    }
+
     /// The largest row sum of |X| at the step's end: the size of the following there.
     #[cfg(test)]
     fn following(&self) -> f64 {
@@ -1152,30 +1175,51 @@ mod tests {
         found
     }
 
-    /// What the two treatments leave of one pair, read in the crate (`a_pair_s_remainders`; the table is printed):
-    /// - hopped, at the step's end: the second Magnus term of the two hops, x (|A| h²)²/15 for a slope alone while the
-    ///   nodes resolve the pair (x ≤ 1: within a twentieth);
-    /// - followed, at the step's end: in the second order of the change the three nodes' parabola of D₂ misses the
-    ///   quartic of the change's own light shift, u⁴|B|²/ω, and nothing else -- (4/15)(|B| h³)²/x, within a fiftieth at
-    ///   the size 0.01 from x = 1 on; a slope alone leaves the third order;
-    /// - so where the two are equal is no number of x: at x = 1 the followed pair errs ten times less than the hopped
-    ///   one for a slope alone and ten times more for a curvature alone (they cross at 0.6 … 1.3, at 2.1 for equal
-    ///   parts, at 4 for a curvature alone).
+    /// What the two treatments leave of one pair at the step's end, derived and read in the crate
+    /// (`a_pair_s_remainders`; the table is printed). With s_A = |A| h², s_B = |B| h³ the sizes of the change's slope
+    /// and curvature over a half step and x = |ω| h:
+    /// - hopped: the second Magnus term of the two hops, −½∫∫[D̃(t₁), D̃(t₂)] -- on the pair a phase of
+    ///   ∫∫ Im(e^{iω(t₁ − t₂)} D(t₁) D(t₂)*) over t₂ < t₁ of each hop --: x s_A²/15 for a slope alone and x s_B²/42 for a
+    ///   curvature alone while the nodes resolve the pair (x ≤ 1: within a twentieth), and Im(A B*) h⁵/15 at any x
+    ///   where the two are out of phase -- the second order of the change, the fifth of the step;
+    /// - followed: of the second order the three nodes' parabola of D₂ misses the quartic of the change's own light
+    ///   shift, u⁴|B|²/ω, and nothing else -- ∫(u⁴ − h²u²)du |B|²/ω = (4/15) s_B²/x, within a fiftieth at the size 0.01
+    ///   from x = 1 on. A slope alone leaves the third order, D₂'s part on the pair itself that is left out,
+    ///   −X D X = −(|A|² A/ω²) u (u + i/ω)²: s_A³ |I(x)|/x² with I(x) = ∫₋₁¹ e^{ixt} t (t + i/x)² dt = i(2/(3x) + x/15 + …),
+    ///   that is (2/3)(s_A/x)³ to the leading order in x (within a thirtieth at the size 0.01 for x from 0.75 to 2.5);
+    /// - so the two are equal at no number of x. For a slope alone (2/3)(s_A/x)³ = x s_A²/15 at x⁴ = 10 s_A: at
+    ///   x = 1 for s_A = 0.1, at 0.56 for 0.01 and at 1.3 for 0.3; at x = 1 and the size 0.01 the followed pair errs ten
+    ///   times less than the hopped one for a slope alone and ten times more for a curvature alone (which cross at 4).
     #[test]
     fn a_pair_hopped_and_followed_against_its_flow() {
+        // |I(x)|, by Simpson's rule.
+        let third = |x: f64| {
+            let panels = 2000;
+            let term = |k: usize| {
+                let t = -1.0 + 2.0 * k as f64 / panels as f64;
+                let weight = if k == 0 || k == panels { 1.0 } else if k % 2 == 1 { 4.0 } else { 2.0 };
+                C64::cis(x * t) * (C64::new(t, 1.0 / x) * C64::new(t, 1.0 / x)) * (t * weight)
+            };
+            (0..=panels).map(term).sum::<C64>().abs() * (2.0 / (3.0 * panels as f64))
+        };
         for (name, parts) in [("A and B", [0.5, 0.5]), ("A alone", [1.0, 0.0]), ("B alone", [0.0, 1.0])] {
             for size in [0.01, 0.1, 0.3] {
                 for x in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0] {
                     let [hop, follow] = a_pair_s_remainders(parts, size, x);
                     if size == 0.01 {
                         let (slope, curvature) = (parts[0] * size, parts[1] * size);
-                        if parts[1] == 0.0 && x <= 1.0 {
-                            let second = x * slope * slope / 15.0;
-                            assert!((hop[0] / second - 1.0).abs() < 0.05, "{name}, x {x}: hopped {:e} against {second:e}", hop[0]);
+                        let mut held = vec![];
+                        if parts[0] * parts[1] == 0.0 && x <= 1.0 {
+                            held.push(("hopped", hop[0], x * (slope * slope / 15.0 + curvature * curvature / 42.0), 0.05));
                         }
                         if parts[1] > 0.0 && x >= 1.0 {
-                            let quartic = 4.0 / 15.0 * curvature * curvature / x;
-                            assert!((follow[0] / quartic - 1.0).abs() < 0.02, "{name}, x {x}: followed {:e} against {quartic:e}", follow[0]);
+                            held.push(("followed", follow[0], 4.0 / 15.0 * curvature * curvature / x, 0.02));
+                        }
+                        if parts[1] == 0.0 && (0.75..=2.5).contains(&x) {
+                            held.push(("followed", follow[0], slope.powi(3) * third(x) / (x * x), 0.03));
+                        }
+                        for (treatment, found, derived, within) in held {
+                            assert!((found / derived - 1.0).abs() < within, "{name}, x {x}: {treatment} {found:e} against {derived:e}");
                         }
                         if x == 1.0 && parts[0] * parts[1] == 0.0 {
                             assert!(if parts[1] == 0.0 { follow[0] < 0.2 * hop[0] } else { follow[0] > 5.0 * hop[0] }, "{name}, x {x}: hopped {:e}, followed {:e}", hop[0], follow[0]);

@@ -2428,3 +2428,152 @@ fn a_diffusion_s_energy_input_does_not_know_the_trap() {
     eprintln!("the mean energy {mean:.4e} against the diffusion's input {input:.4e}");
     assert!((mean - input).abs() <= within(input / (runs as f64).sqrt(), 1.0), "the mean energy {mean} against the diffusion's input {input}");
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The split of the propagation's pairs (spectral.rs) on a scene's own model.
+
+/// A scene's model as the solve closes it, tabulated (as `a_scene_s_step_cost` makes it), and per cluster its label and
+/// sixteen held atoms of the scene's temperature, each a random state of the cluster -- that harness's draws --, to `each`.
+fn scene_clusters(name: &str, each: &mut dyn FnMut(&str, &crate::model::Run, &[Trajectory])) {
+    use crate::model::{Model, Run, Unit, GROUND};
+    let request = scene(name);
+    let light = crate::field::Light::new(&request);
+    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let mut p = [0.0; GROUND];
+    p[state] = 1.0;
+    let mut kept: Vec<Unit> = vec![];
+    let (model, trap, reach) = loop {
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+        let units = model.units();
+        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+        if failing.is_empty() {
+            break (model, trap, reach);
+        }
+        kept.extend(failing);
+    };
+    let tables = model.tabulate(&reach, 1 << 20);
+    let run = Run::tabulated(&model, &tables, p);
+    let kt = crate::units::KT_PER_UK * request.temperature_uk;
+    for (cluster, c) in model.clusters().iter().enumerate() {
+        let starts: Vec<Trajectory> = (0..16)
+            .map(|i| {
+                let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, cluster as u32);
+                let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
+                let mut t = Trajectory::new(&run, c.states[0], r, kappa, 17, i);
+                let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(stream.normal(), stream.normal())).collect();
+                let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+                t.psi = psi.iter().map(|z| *z / norm).collect();
+                t.threshold = f64::MIN_POSITIVE;
+                t
+            })
+            .collect();
+        each(&format!("{}+{}", c.ground, c.states.len() - c.ground), &run, &starts);
+    }
+}
+
+/// What the split of the propagation's pairs does to a scene's step (run by name, alone: `SCENE=<a reference scene's
+/// name or a native request's path> TAU=<µs> SPLITS=<the splits to force, comma separated> …
+/// a_scene_s_step_error_by_the_split -- --ignored --nocapture`), per cluster on the atoms of `scene_clusters`, held:
+/// - what the split meets: the pairs of the middle's generator by their turn x = |ω| h, and the sizes of their change
+///   over a half step, its slope's and its curvature's parts (`spectral::Picture::pairs`), at τ, τ/2 and τ/4;
+/// - the propagation's own error: the frame's state over the span τ on the step's path (the path of the step of τ:
+///   its middle, its predicted momentum) in one, two and four steps of the picture, each on its own three nodes of
+///   that path, against RK4 of the path's generator less its scalar part at 400 steps a radian of its bound (the scalar
+///   part's phase by Simpson's rule);
+/// - what a check reads: one step of the engine against its two halves, at τ, τ/2 and τ/4 -- the state's difference
+///   and the momentum's, relative to the momentum.
+/// Each the mean over the atoms, and the falls from a level to the next.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn a_scene_s_step_error_by_the_split() {
+    use crate::spectral::{Picture, SPLIT};
+    let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
+    let tau: f64 = std::env::var("TAU").expect("TAU: the step (µs)").parse().expect("TAU: a number");
+    let splits: Vec<f64> = std::env::var("SPLITS").map_or(vec![1.0], |s| s.split(',').map(|x| x.parse().expect("SPLITS: numbers")).collect());
+    let apart = |a: &[C64], b: &[C64]| a.iter().zip(b).map(|(x, y)| (*x - *y).norm_sqr()).sum::<f64>().sqrt();
+    scene_clusters(&name, &mut |label, run, starts| {
+        let (hm, n, count) = (run.hbar_over_mass(), starts[0].psi.len(), starts.len() as f64);
+        let falls = |e: &[f64; 3]| format!("{:.3e} {:.3e} {:.3e} (falls {:.1}, {:.1})", e[0], e[1], e[2], e[0] / e[1], e[1] / e[2]);
+        // Each atom's path of the step of τ, its frame's start state and the path's own flow to the span's end.
+        let middles: Vec<_> = starts.iter().map(|s| step::Midway::new(run, s, tau).unwrap()).collect();
+        let cases: Vec<_> = starts
+            .iter()
+            .zip(&middles)
+            .map(|(s, through)| {
+                let kappa = super::predicted(&mut fitted(n), &through.generator, &s.psi, through.reached.1, through.reference, tau);
+                let along = super::Along::new(&through.generator, kappa, kappa.map(|k| hm * k));
+                let start = along.turned(&s.psi, -0.5 * tau, true)[..n].to_vec();
+                // The generator less its scalar part, which is a factor of its own: Simpson's rule of it on the path.
+                let scalar = |time: f64| {
+                    let mut h = Mat::zeros(n, n);
+                    along.middle.generator(&along.path, time - 0.5 * tau, &mut h);
+                    (h.trace() / n as f64, h)
+                };
+                let at = |time: f64| {
+                    let (z, mut h) = scalar(time);
+                    (0..n).for_each(|i| h[(i, i)] -= z);
+                    h
+                };
+                let crate::linalg::Bounds { rho, gamma, .. } = crate::linalg::bounds(&at(0.5 * tau), &mut vec![C64::ZERO; n]);
+                let panels = 2000;
+                let phase = (0..=2 * panels).map(|k| scalar(tau * k as f64 / (2 * panels) as f64).0 * if k == 0 || k == 2 * panels { 1.0 } else if k % 2 == 1 { 4.0 } else { 2.0 }).sum::<C64>() * (tau / (6 * panels) as f64);
+                let factor = (C64::new(0.0, -1.0) * phase).exp();
+                let exact: Vec<C64> = rk4_state(&at, &start, tau, ((400.0 * (rho + gamma) * tau) as usize).max(4000)).into_iter().map(|z| z * factor).collect();
+                (along, start, exact)
+            })
+            .collect();
+        for &split in &splits {
+            let mut pairs = [[0usize; 5]; 3];
+            let mut sizes = [[[0.0_f64; 2]; 5]; 3];
+            let (mut own, mut state, mut momentum) = ([0.0; 3], [0.0; 3], [0.0; 3]);
+            SPLIT.set(split);
+            for ((s, (along, start, exact)), through) in starts.iter().zip(&cases).zip(&middles) {
+                let still = through.generator.still();
+                for level in 0..3 {
+                    let steps = 1 << level;
+                    let (t, mut x) = (tau / steps as f64, start.clone());
+                    let mut picture = Picture::default();
+                    picture.fit(n);
+                    for i in 0..steps {
+                        let middle = -0.5 * tau + (i as f64 + 0.5) * t;
+                        along.middle.generator(&along.path, middle, &mut picture.base);
+                        if !still {
+                            along.middle.generator(&along.path, middle - 0.5 * t, &mut picture.ends[0]);
+                            along.middle.generator(&along.path, middle + 0.5 * t, &mut picture.ends[1]);
+                        }
+                        picture.prepare(0.5 * t, still);
+                        if i == 0 {
+                            for [turn, slope, curvature] in picture.pairs() {
+                                let bin = [0.5, 1.0, 2.0, 4.0].iter().filter(|edge| turn >= **edge).count();
+                                pairs[level][bin] += 1;
+                                sizes[level][bin] = [sizes[level][bin][0].max(slope), sizes[level][bin][1].max(curvature)];
+                            }
+                        }
+                        let from = x.clone();
+                        picture.launch(-0.5 * t, &from);
+                        picture.advance(0.5 * t, &mut x);
+                    }
+                    own[level] += apart(&x, exact) / count;
+                    let mut scratch = step::Scratch::default();
+                    let whole = step_of(run, s, t, &mut scratch).unwrap().end;
+                    let half = step_of(run, s, 0.5 * t, &mut scratch).unwrap().end;
+                    let halves = step_of(run, &half, 0.5 * t, &mut scratch).unwrap().end;
+                    state[level] += apart(&whole.psi, &halves.psi) / count;
+                    let size = |k: [f64; 3]| dot3(k, k).sqrt();
+                    momentum[level] += size(std::array::from_fn(|a| whole.kappa[a] - halves.kappa[a])) / size(s.kappa) / count;
+                }
+            }
+            SPLIT.set(1.0);
+            eprintln!("{name} {label}, τ {tau}, split {split}:");
+            for level in 0..3 {
+                let row: Vec<String> = (0..5).map(|bin| format!("{} ({:.2e}, {:.2e})", pairs[level][bin], sizes[level][bin][0], sizes[level][bin][1])).collect();
+                eprintln!("  τ/{}: pairs of the first step by x < 0.5 | < 1 | < 2 | < 4 | beyond, with their largest slope's and curvature's sizes: {}", 1 << level, row.join(" | "));
+            }
+            eprintln!("  the propagation's own error over the span in 1, 2, 4 steps: {}", falls(&own));
+            eprintln!("  a step against its halves at τ, τ/2, τ/4: the state {}", falls(&state));
+            eprintln!("  a step against its halves at τ, τ/2, τ/4: the momentum {}", falls(&momentum));
+        }
+    });
+}
