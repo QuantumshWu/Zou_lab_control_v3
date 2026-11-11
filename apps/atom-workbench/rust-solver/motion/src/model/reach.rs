@@ -477,14 +477,14 @@ impl TermForm {
                 beams.iter().zip(&model.tones[c.frequency].couplings[0]).map(|(&l, x)| (l, x[(e, s)], x[(e, s)].abs())).filter(|entry| entry.2 != 0.0).collect()
             };
             for e in GROUND..STATES {
-                let (to_beams, from_beams) = (entries(ct, e, a), entries(cf, e, b));
-                if to_beams.is_empty() || from_beams.is_empty() {
-                    continue;
-                }
                 let (lt, lf) = (model.level(ct, e, a), model.level(cf, e, b));
                 if lt == Level::Explicit || lf == Level::Explicit || (lt == Level::Bare && lf == Level::Bare) {
                     continue;
                 }
+                if !model.tones[to].drives(false, e, a) || !model.tones[from].drives(false, e, b) {
+                    continue;
+                }
+                let (to_beams, from_beams) = (entries(ct, e, a), entries(cf, e, b));
                 for &(lj, ..) in &to_beams {
                     for &(li, ..) in &from_beams {
                         out.wave = out.wave.max(between(lj, li));
