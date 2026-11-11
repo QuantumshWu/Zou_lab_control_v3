@@ -35,15 +35,34 @@
 //! the same output at twice the step differs by Q(2τ) − Q(τ) = (2^p − 1) e(τ) to the leading order, and
 //! e(τ) = [Q(2τ) − Q(τ)]/(2^p − 1) (decide.rs `richardson` at the ratio ½, less the level's own share). `between` takes it
 //! from two ensembles of the same trajectories -- the same numbers, so the same initial atoms and the same streams -- at
-//! τ and at 2τ: the loss and each row as shown as they are, T per lab axis relative to the finer level's T; and it takes
-//! each quantity's average over the outputs after t = 0, one number a quantity. The step's error is a smooth function of
-//! the time, and the outputs' reads of it one question asked at every output: the average answers it once, with the
-//! noise of the run's whole length. Its error is the delete-one-group jackknife of the average itself, each group left
-//! out of both levels and of every output at once, so that the outputs' correlations in time are in it: what the two
-//! levels share (the initial atoms, as long as the motion remembers them) cancels, and where they have decorrelated
-//! it is the two levels' own errors. Nothing is assumed of how an error is carried from a step to an output: the two
-//! ensembles are carried by the dynamics itself. What the average does not see: an error confined to a short stretch
-//! of the run, which the run's length dilutes.
+//! τ and at 2τ: the loss and each row as shown as they are, the total T relative to the finer level's.
+//!
+//! What it reads of a quantity is the error's size over the run: its mean square over the K outputs after t = 0,
+//! M = (1/K) Σ_k e_k² -- the square of the mean error plus the error's variance over the outputs, so an error that
+//! changes its sign in time (an oscillating population's) counts by its size, where its signed mean reads nothing.
+//! The square of an estimate holds the estimate's own variance, a floor that no error is needed for. The groups are
+//! independent, and a product of two different groups' values holds none: with x_ik group i's own value of e_k,
+//!   M̂ = (1/K) Σ_k [(Σ_i x_ik)² − Σ_i x_ik²]/(G(G − 1)),
+//! the mean over the outputs of the mean product of two different groups (per output the estimate's square less its
+//! squared standard error), is M in the mean whatever the noise, and lies on either side of zero where there is no
+//! error. A group's own value is the jackknife's, G times the whole ensemble's e_k less G − 1 times the e_k without the
+//! group: the group's own difference where the quantity is a mean over the trajectories (the loss, a row as shown),
+//! and for T, a ratio, its linear part about the pooled levels. The error of M̂ is its delete-one-group jackknife --
+//! without group i the same mean product over the other groups, [(S_k − x_ik)² − (Q_k − x_ik²)]/((G − 1)(G − 2)) from
+//! the outputs' sums S_k and Q_k of the values and of their squares --, each group left out of both levels and of
+//! every output at once, so that the outputs' correlations in time are in it: what the two levels share (the initial
+//! atoms, as long as the motion remembers them) cancels, and where they have decorrelated it is the two levels' own
+//! errors. Its variance has two parts, (4/G)⟨μ, Cμ⟩ + (2/(G(G − 1))) tr C² (μ the errors over the outputs, C their
+//! noise's covariance over one group, both in the outputs' mean product): the first is there with an error and falls
+//! as 1/G, the second is the floor's own scatter and falls as 1/G²; the jackknife counts the second twice
+//! (2(G − 1)/(G − 2) times: Efron and Stein), so it is high where there is no error, and never low.
+//!
+//! Nothing is assumed of how an error is carried from a step to an output: the two ensembles are carried by the
+//! dynamics itself. What the mean square does not single out: an error confined to a short stretch of the run, which
+//! the run's length dilutes. Against the signed mean, for an error constant in time: where the noise has K' independent
+//! stretches over the run and σ at an output, the mean resolves t σ/√K' and the mean square's rms √(t·SE) about
+//! (2/K')^{1/4} √t σ -- the same at one stretch, K'^{1/4} more at many; the mean's noise is the noise's slowest mode,
+//! which the mean square weighs as one mode among K'.
 //!
 //! # Many looks
 //! A decision that acts where any of m reads lies beyond its interval (decide.rs) takes the largest of m noisy reads: at
@@ -460,9 +479,11 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
         .collect()
 }
 
-/// The step's error as two ensembles measure it, averaged over the outputs after t = 0 (module documentation, # The
-/// step's error): the loss's and each row's as shown (absolute), and the total T's (the mean over the three lab axes, the
-/// T the target is on) relative to it -- none where no output reads it at both levels.
+/// The size of the step's error over the run as two ensembles measure it (module documentation, # The step's error):
+/// per quantity the read of its mean square over the outputs after t = 0 -- the loss's and each row's as shown
+/// (absolute, squared), and the total T's (the mean over the three lab axes, the T the target is on) relative to it --
+/// none where no output reads it at both levels. A read is of the mean square itself, unbiased, so it lies about zero,
+/// on either side, where there is no error.
 #[derive(Clone, Debug)]
 pub struct Between {
     pub loss: Read,
@@ -471,21 +492,33 @@ pub struct Between {
 }
 
 /// The step's error of the level `fine`, from it and the level `coarse` at twice its step on the same trajectories,
-/// group by group in the same order (module documentation, # The step's error): each quantity's average over the
-/// outputs after t = 0 -- T's on a lab axis over the outputs of `over` (per output and axis) where both levels, and
-/// both without any one group, hold two atoms at least.
+/// group by group in the same order (module documentation, # The step's error): each quantity's mean square over the
+/// outputs after t = 0 -- T's over the outputs where both levels, and both without any one group, hold two atoms at
+/// least. No number on a single group; no spread on fewer than three (a mean square without a group needs two more).
 pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scales) -> Between {
     assert_eq!(fine.len(), coarse.len(), "the two levels hold the same groups");
     let outputs = fine.first().map_or(0, |g| g.borrow().sums.len());
     let (hm, groups) = (scales.hbar_over_mass, fine.len());
+    let g = groups as f64;
     // The finer level's share of the difference: 1/(2^p − 1).
     let share = richardson(0.5, ORDER as f64) - 1.;
     let each: Vec<Jackknife> = (1..outputs).into_par_iter().map(|k| jackknife(&[fine, coarse], k, hm)).collect();
-    // A quantity's average over some outputs, spread over the groups left out of every one of them.
-    let averaged = |at: &[&Jackknife], f: &dyn Fn(&[Moments]) -> f64, read: f64| -> Read {
-        let mean = |of: &dyn Fn(&Jackknife) -> f64| at.iter().map(|j| of(j)).sum::<f64>() / at.len() as f64;
-        let leave: Vec<f64> = if groups >= 2 { (0..groups).map(|i| mean(&|j| f(&j.leave[i]))).collect() } else { vec![] };
-        Read { value: mean(&|j| f(&j.full)), spread: if leave.is_empty() { Spread::UNREAD } else { spread(leave.iter().copied(), read) } }
+    // A quantity's mean square over some outputs: at each, the groups' own values of it (g times the whole less g − 1
+    // times the rest) and the mean of their products two by two; the same without each group, spread over the groups.
+    let size = |at: &[&Jackknife], f: &dyn Fn(&[Moments]) -> f64, read: f64| -> Read {
+        let (mut whole, mut without, mut own) = (0., vec![0.; groups], vec![0.; groups]);
+        for j in at {
+            let full = f(&j.full);
+            own.iter_mut().zip(&j.leave).for_each(|(x, rest)| *x = g * full - (g - 1.) * f(rest));
+            let (sum, squares) = own.iter().fold((0., 0.), |(s, q), x| (s + x, q + x * x));
+            whole += sum * sum - squares;
+            without.iter_mut().zip(&own).for_each(|(w, x)| *w += (sum - x).powi(2) - (squares - x * x));
+        }
+        let n = at.len() as f64;
+        Read {
+            value: if groups >= 2 { whole / (n * g * (g - 1.)) } else { f64::NAN },
+            spread: if groups >= 3 { spread(without.iter().map(|w| w / (n * (g - 1.) * (g - 2.))), read) } else { Spread::UNREAD },
+        }
     };
     let all: Vec<&Jackknife> = each.iter().collect();
     let temperature = {
@@ -494,12 +527,12 @@ pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scale
         (!at.is_empty()).then(|| {
             let total = |m: &Moments| m.temperature.map_or(f64::NAN, |t| t.iter().sum::<f64>());
             let e = |m: &[Moments]| share * (total(&m[1]) / total(&m[0]) - 1.);
-            averaged(&at, &e, at.iter().map(|j| j.holding).fold(f64::INFINITY, f64::min))
+            size(&at, &e, at.iter().map(|j| j.holding).fold(f64::INFINITY, f64::min))
         })
     };
     Between {
-        loss: averaged(&all, &|m| share * (m[1].loss - m[0].loss), groups as f64),
-        shown: std::array::from_fn(|s| averaged(&all, &|m| share * (m[1].shown[s] - m[0].shown[s]), groups as f64)),
+        loss: size(&all, &|m| share * (m[1].loss - m[0].loss), g),
+        shown: std::array::from_fn(|s| size(&all, &|m| share * (m[1].shown[s] - m[0].shown[s]), g)),
         temperature,
     }
 }
@@ -509,30 +542,141 @@ mod tests {
     use super::*;
     use crate::ensemble::GROUP;
 
-    /// The step's error between two ensembles (`between`) against synthetic levels of a known bias. Each atom has an
-    /// exponential energy E (⟨κ²⟩ = E, ⟨κ⟩ = 0) at the finer level and (1 + 3b)(ρE + (1 − ρ)E') at the coarser, E' an
-    /// independent one: the coarser T is (1 + 3b) times the finer in the mean, so the step's error at p = 2 is b, and
-    /// the levels' correlation is set by ρ. Over 1000 repetitions of 64 groups of 8 atoms: the read's mean meets b
-    /// within its interval at the confidence z; the reads' standard deviation over the repetitions is the jackknife's
-    /// error within the relative error of a standard deviation of 1000 draws at z, z/√(2·1000), twice (the jackknife's
-    /// mean has its own); and against the finer level's own relative error of T it is √2/3 for independent levels
-    /// (ρ = 0) and a small part of that for levels that share their atoms: √(1 + q − 2ρ)/3 times 1 + 3b, q = ρ² + (1 − ρ)²
-    /// the coarser energy's relative variance and ρ its covariance with the finer (0.024 at ρ = 0.95, a twentieth of the
-    /// independent levels'). The rows and the loss are differences of means: a row
-    /// shown by 6 of 8 atoms at the finer level and by 3 of 8 at the coarser reads (3/8 − 6/8)/3.
+    /// A uniform deviate in (0, 1) from a splitmix64 state (the tests' own stream).
+    fn uniform(state: &mut u64) -> f64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (((z ^ (z >> 31)) >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+    }
+
+    /// A group of `GROUP` atoms at t = 0 and at the outputs after it: at output k its first `counts[k]` atoms show
+    /// state 0 and the others state 1, every atom with ⟨κ²⟩ = `energy[k]`, ⟨κ⟩ = 0.
+    fn showing(counts: &[usize], energy: &[f64]) -> Group {
+        let mut g = Group::new(counts.len() + 1);
+        for i in 0..GROUP as usize {
+            let fates: Vec<Fate> = std::iter::once(Fate::Held(atom(0, 0., 1.))).chain(counts.iter().zip(energy).map(|(&c, &e)| Fate::Held(atom(usize::from(i >= c), 0., e)))).collect();
+            g.add(&fates);
+        }
+        g
+    }
+
+    /// The step's size between two ensembles (`between`) on constructed levels. Three groups, two outputs after t = 0;
+    /// a row shown by c of 8 atoms at the coarser level and by a at the finer has the group's own error (c − a)/8/3
+    /// (p = 2). With the groups' own errors x = (3, −1, 1)/24 at the first output and (2, 2, 2)/24 at the second, the
+    /// mean square is the mean over the outputs of the mean of the products of two different groups,
+    /// ((3·(−1) + 3·1 + (−1)·1)/3 + 4)/24²/2 -- at the first output below zero: the three errors are no more than
+    /// their scatter --, and without a group the product of the other two; its spread is the jackknife of those. The
+    /// other row is the first's mirror; the loss has none. T is 7 at the finer level and 4 and 6 at the coarser on
+    /// every atom: the groups agree, and its mean square is the mean of (4/7 − 1)²/9 and (6/7 − 1)²/9 with no spread.
+    /// Two groups read a value and no spread; one reads none.
     #[test]
-    fn the_step_s_error_between_two_ensembles_is_the_paired_difference() {
-        let (bias, groups, repetitions) = (0.02, 64, 1000);
+    fn the_step_s_size_is_the_mean_product_of_two_groups_errors() {
+        let level = |counts: [[usize; 2]; 3], energy: [f64; 2]| -> Vec<Group> { counts.iter().map(|c| showing(c, &energy)).collect() };
+        let (fine, coarse) = (level([[4, 4], [4, 4], [4, 4]], [7., 7.]), level([[7, 6], [3, 6], [5, 6]], [4., 6.]));
+        let read = between(&fine, &coarse, &UNIT);
+        let pairs = |x: [f64; 3]| [x[1] * x[2], x[0] * x[2], x[0] * x[1]];
+        let (first, second) = (pairs([3., -1., 1.]), pairs([2., 2., 2.]));
+        let without: Vec<f64> = (0..3).map(|i| 0.5 * (first[i] + second[i]) / 576.).collect();
+        let whole = without.iter().sum::<f64>() / 3.;
+        assert!(first.iter().sum::<f64>() < 0. && (read.shown[0].value - whole).abs() < 1e-17 && (read.shown[1].value - whole).abs() < 1e-17, "{:?} against {whole}", read.shown[0]);
+        let expected = spread(without.iter().copied(), 3.);
+        assert!((read.shown[0].spread.error - expected.error).abs() < 1e-17 && read.shown[0].spread.groups == 3., "{:?} against {expected:?}", read.shown[0].spread);
+        assert!(read.loss.value == 0. && read.loss.spread.error == 0.);
+        let t = read.temperature.expect("T is read at both levels");
+        assert!((t.value - 0.5 * ((4. / 7. - 1.0f64).powi(2) + (6. / 7. - 1.0f64).powi(2)) / 9.).abs() < 1e-15 && t.spread.error < 1e-15, "{t:?}");
+        let two = between(&fine[..2], &coarse[..2], &UNIT).shown[0];
+        assert!((two.value - 0.5 * (-3. + 4.) / 576.).abs() < 1e-17 && !two.spread.read(), "{two:?}");
+        assert!(between(&fine[..1], &coarse[..1], &UNIT).shown[0].value.is_nan());
+    }
+
+    /// The step's size (`between`) against synthetic levels: 11 groups of 8 atoms, 8 outputs after t = 0; at each an
+    /// atom shows state 0 with probability ½ at the finer level and ½ + 3 b_k at the coarser, drawn anew at each level,
+    /// output and atom, so that the row's step error at p = 2 is b_k and its noise at an output is √(2·¼/88)/3 = 0.025,
+    /// as large as the bias 0.03. Over 1000 repetitions:
+    /// - a constant bias b: the read's mean meets b² within its interval at the confidence z;
+    /// - a bias that alternates in sign from output to output: the same b², where the errors' signed mean over the
+    ///   outputs (the mean of the two levels' rows' differences) reads zero within its interval;
+    /// - no bias: the read's mean meets zero within its interval -- no floor: the differences' plain mean square is the
+    ///   noise's own, 2·¼/88/9 = 6.3e-4, many intervals away --, a read lies above its own interval no more often than
+    ///   the normal's one-sided tail, and the jackknife's variance is the read's own times 2(G − 1)/(G − 2) (the
+    ///   jackknife counts twice the part of a product's variance that belongs to two groups together, the only part
+    ///   where there is no error: Efron and Stein), within the relative error of a variance of 1000 draws at z, twice.
+    /// With the bias the jackknife's variance lies between the reads' own and that multiple of it.
+    #[test]
+    fn the_step_s_size_reads_a_bias_of_either_sign_and_no_floor() {
+        let (bias, groups, outputs, repetitions) = (0.03, 11usize, 8usize, 1000usize);
         let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-        let mut exponential = || {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            -((((z ^ (z >> 31)) >> 11) as f64 + 0.5) / (1u64 << 53) as f64).ln()
-        };
+        let noise = 2. * 0.25 / (groups as f64 * GROUP as f64) / 9.;
+        for (case, signs) in [[1.; 8], [1., -1., 1., -1., 1., -1., 1., -1.], [0.; 8]].into_iter().enumerate() {
+            let (mut sum, mut squares, mut variances, mut signed, mut signed_squares, mut above) = (0., 0., 0., 0., 0., 0usize);
+            for _ in 0..repetitions {
+                let mut level = |shift: f64| -> Vec<Group> {
+                    (0..groups)
+                        .map(|_| {
+                            let mut g = Group::new(outputs + 1);
+                            for _ in 0..GROUP {
+                                let fates: Vec<Fate> = std::iter::once(Fate::Held(atom(0, 0., 1.)))
+                                    .chain(signs.iter().map(|sign| Fate::Held(atom(usize::from(uniform(&mut state) >= 0.5 + shift * sign), 0., 1.))))
+                                    .collect();
+                                g.add(&fates);
+                            }
+                            g
+                        })
+                        .collect()
+                };
+                let (fine, coarse) = (level(0.), level(3. * bias));
+                let read = between(&fine, &coarse, &UNIT).shown[0];
+                let (f, c) = (summarize(&fine, &UNIT), summarize(&coarse, &UNIT));
+                let mean = (1..=outputs).map(|k| (c[k].shown[0] - f[k].shown[0]) / 3.).sum::<f64>() / outputs as f64;
+                sum += read.value;
+                squares += read.value * read.value;
+                variances += read.spread.error * read.spread.error;
+                signed += mean;
+                signed_squares += mean * mean;
+                above += usize::from(read.least(1.) > 0.);
+            }
+            let n = repetitions as f64;
+            let (mean, signed) = (sum / n, signed / n);
+            let variance = squares / n - mean * mean;
+            let within = Spread { error: (variance / n).sqrt(), groups: n }.interval();
+            let truth = signs[0] * signs[0] * bias * bias;
+            assert!((mean - truth).abs() <= within, "case {case}: the read's mean {mean} ± {within} against {truth}");
+            let tolerance = 2. * CONFIDENCE * (2. / n).sqrt();
+            let ratio = variances / n / variance;
+            if case == 1 {
+                let within = Spread { error: ((signed_squares / n - signed * signed) / n).sqrt(), groups: n }.interval();
+                assert!(signed.abs() <= within && within < 0.1 * bias, "the signed mean {signed} ± {within} reads no bias");
+            }
+            if case == 2 {
+                assert!((noise - mean).abs() > 10. * within, "the noise's own mean square {noise} is no floor of {mean} ± {within}");
+                let tail = 0.5 * normal_tail(CONFIDENCE);
+                let chance = Spread { error: (tail * (1. - tail) / n).sqrt(), groups: f64::INFINITY }.interval();
+                assert!(above as f64 / n <= tail + chance, "{above} of {n} reads lie above their interval, against {tail} ± {chance}");
+                let twice = 2. * (groups as f64 - 1.) / (groups as f64 - 2.);
+                assert!((ratio / twice - 1.).abs() <= tolerance, "the jackknife's variance over the reads', {ratio}, against {twice}");
+            } else {
+                let twice = 2. * (groups as f64 - 1.) / (groups as f64 - 2.);
+                assert!(ratio >= 1. - tolerance && ratio <= twice * (1. + tolerance), "case {case}: the jackknife's variance over the reads', {ratio}");
+            }
+        }
+    }
+
+    /// T's step size against synthetic levels of a known bias. Each atom has an exponential energy E (⟨κ²⟩ = E,
+    /// ⟨κ⟩ = 0) at the finer level and (1 + 3b)(ρE + (1 − ρ)E') at the coarser, E' an independent one: the coarser T is
+    /// (1 + 3b) times the finer in the mean, so the step's error at p = 2 is b, and the levels' correlation is set by
+    /// ρ. T is a ratio, and the groups' own errors its linearization about the pooled levels (the jackknife's
+    /// pseudo-values): over 1000 repetitions of 64 groups of 8 atoms the read's mean meets b² within its interval at
+    /// the confidence z -- for independent levels (ρ = 0), where one read's noise √(2/512)/3 = 0.021 is the bias's
+    /// size, and for levels that share their atoms (ρ = 0.95), where it is a twentieth of that.
+    #[test]
+    fn the_temperature_s_step_size_is_the_paired_ratio_s() {
+        let (bias, groups, repetitions) = (0.02, 64, 1000);
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut exponential = || -uniform(&mut state).ln();
         for rho in [0., 0.95] {
-            let (mut sum, mut squares, mut errors, mut own) = (0., 0., 0., 0.);
+            let (mut sum, mut squares) = (0., 0.);
             for _ in 0..repetitions {
                 let (mut fine, mut coarse) = (vec![], vec![]);
                 for _ in 0..groups {
@@ -541,45 +685,14 @@ mod tests {
                     coarse.push(group(energies.iter().map(|&(e, other)| Some(atom(0, 0., (1. + 3. * bias) * (rho * e + (1. - rho) * other)))).collect()));
                 }
                 let read = between(&twice(&fine), &twice(&coarse), &UNIT).temperature.unwrap();
-                let m = summarize(&fine, &UNIT)[0].motion.unwrap();
                 sum += read.value;
                 squares += read.value * read.value;
-                errors += read.spread.error;
-                own += m.temperature_errors[0].error / m.temperature[0];
             }
             let n = repetitions as f64;
-            let (mean, error, own) = (sum / n, errors / n, own / n);
-            let deviation = (squares / n - mean * mean).sqrt();
-            let within = Spread { error: deviation / n.sqrt(), groups: n }.interval();
-            assert!((mean - bias).abs() <= within, "ρ = {rho}: the read's mean {mean} ± {within} against the bias {bias}");
-            let tolerance = 2. * CONFIDENCE / (2. * n).sqrt();
-            assert!((deviation / error - 1.).abs() <= tolerance, "ρ = {rho}: the reads' deviation {deviation} against the jackknife's error {error}");
-            let expected = (1. + 3. * bias) * (1. + rho * rho + (1. - rho) * (1. - rho) - 2. * rho).sqrt() / 3.;
-            assert!((error / own / expected - 1.).abs() <= 3. * tolerance, "ρ = {rho}: the error over T's own, {}, against {expected}", error / own);
+            let mean = sum / n;
+            let within = Spread { error: ((squares / n - mean * mean) / n).sqrt(), groups: n }.interval();
+            assert!((mean - bias * bias).abs() <= within, "ρ = {rho}: the read's mean {mean} ± {within} against {}", bias * bias);
         }
-        let shows = |count: usize| group((0..GROUP as usize).map(|i| Some(atom(usize::from(i >= count), 0., 1.))).collect());
-        let read = between(&twice(&[shows(6), shows(6)]), &twice(&[shows(3), shows(3)]), &UNIT);
-        assert!((read.shown[0].value + 0.125).abs() < 1e-15 && (read.shown[1].value - 0.125).abs() < 1e-15 && read.loss.value == 0. && read.shown[0].spread.error == 0.);
-        // The average over the outputs: three outputs after t = 0 whose rows read (3 − 6)/8, (5 − 6)/8 and (4 − 6)/8 a
-        // third each -- their mean; the total T's over the same outputs.
-        let series = |counts: [usize; 3]| -> Vec<Group> {
-            (0..2)
-                .map(|_| {
-                    let mut g = Group::new(4);
-                    for i in 0..GROUP as usize {
-                        let at = |count: usize| Fate::Held(atom(usize::from(i >= count), 0., 1. + count as f64));
-                        g.add(&[at(6), at(counts[0]), at(counts[1]), at(counts[2])]);
-                    }
-                    g
-                })
-                .collect()
-        };
-        let read = between(&series([6; 3]), &series([3, 5, 4]), &UNIT);
-        assert!((read.shown[0].value + (3. + 1. + 2.) / 8. / 3. / 3.).abs() < 1e-15, "{:?}", read.shown[0]);
-        // T is 1 + count at each output on every atom: 7 at the finer level, 4, 6 and 5 at the coarser, on every axis
-        // and so in the total.
-        let t = read.temperature.expect("T is read at both levels");
-        assert!((t.value - ((4. / 7. - 1.) + (6. / 7. - 1.) + (5. / 7. - 1.)) / 3. / 3.).abs() < 1e-15, "{t:?}");
     }
 
     /// Groups of one output as groups of two: t = 0 and the output itself.
