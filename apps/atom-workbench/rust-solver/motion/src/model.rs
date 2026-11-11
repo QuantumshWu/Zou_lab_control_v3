@@ -761,9 +761,10 @@ pub struct Run<'a> {
     prepared: Lights,
     plans: Vec<(Arc<assemble::Plan>, Option<&'a tabulate::NearTable>)>,
     /// The counted real multiply-adds of one middle (`decide::COMPLEX` per complex one, assemble.rs # Work) with its state's
-    /// scattering (photon.rs `Model::scattering_of`: every class's photons with their gradients, once a step), and of one
-    /// jump's photons (photon.rs `Model::photons_counted`): the largest over the clusters at the focus, every light on, made
-    /// once.
+    /// scattering (photon.rs `Model::scattering_of`: every class's photons with their gradients, once a step:
+    /// `Model::photons_counted`), and of one jump's photon (photon.rs `Model::emission_of`: the site once, every class's
+    /// rate, the class drawn alone with its gradients: `Model::emission_counted`): each the largest over the clusters at
+    /// the focus, every light on, made once.
     assembly: f64,
     photons: f64,
 }
@@ -782,14 +783,11 @@ impl<'a> Run<'a> {
         let at = Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
         let plans = (0..model.clusters.len()).map(|c| (model.plan(c, &running), tables.and_then(|t| t.of(c, &running)))).collect();
         let plans: Vec<(Arc<assemble::Plan>, Option<&tabulate::NearTable>)> = plans;
-        let photons = (0..model.clusters.len())
-            .map(|c| {
-                let psi: Vec<C64> = (0..model.clusters[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
-                model.photons_counted(c, &at, &psi, tables).1
-            })
-            .fold(0.0, f64::max)
-            * crate::decide::COMPLEX;
-        let assembly = plans.iter().map(|(plan, table)| model.middle(plan, at.r, at.t, *table).work).fold(0.0, f64::max) * crate::decide::COMPLEX + photons;
+        let first = |c: usize| -> Vec<C64> { (0..model.clusters[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect() };
+        let largest = |count: &dyn Fn(usize) -> f64| (0..model.clusters.len()).map(count).fold(0.0, f64::max) * crate::decide::COMPLEX;
+        let scattering = largest(&|c| model.photons_counted(c, &at, &first(c), tables).1);
+        let photons = largest(&|c| model.emission_counted(c, &at, &first(c), tables));
+        let assembly = plans.iter().map(|(plan, table)| model.middle(plan, at.r, at.t, *table).work).fold(0.0, f64::max) * crate::decide::COMPLEX + scattering;
         Run { model, tables, reference, prepared: model.prepared(), plans, assembly, photons }
     }
     /// The photon classes of a cluster's state at a point with their amplitudes alone (photon.rs `Gradients::None`): the
