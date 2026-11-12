@@ -439,9 +439,11 @@ def simulate(S, atoms, end_us, every_us, dt, noise, seed=12345, still=False, sta
     P = trap_params(S)
     Om = p['gamma'] * np.sqrt(S['s'] / 2)
     t_start = time.time()
+    lost_before = np.isfinite(out_loss[:, 0])
     run(atoms, seed, S['T'], dt, n_steps, every, P, S['H0'], S['diagL'], S['C'], S['k'], S['eps'].astype(np.complex128), Om, noise, still,
         out_v, out_r, out_alive, out_pop, out_jumps, out_fy, out_loss, out_flow, resume, state, rng)
     wall = time.time() - t_start
+    out_loss[np.isfinite(out_loss[:, 0]) & ~lost_before, 0] += t0     # run() counts a segment's time from its start
     if state_path is not None:
         np.savez(state_path, state=state, rng=rng, loss=out_loss, flow=out_flow, t=t0 + n_steps * dt)
     times = t0 + np.arange(n_out) * every * dt
