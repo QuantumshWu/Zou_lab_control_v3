@@ -137,10 +137,13 @@
 //! # Outputs and windows
 //! The outputs are the request's times, from 0 and evenly spaced. At an output a trajectory is read inside the step
 //! the output falls in (`run`; step.rs `Step::at`): its rows as shown, its (r, κ) for the listed distributions, the
-//! pilot's kept state, and its loss test there. T's window about an output (estimate.rs `half_window`) takes a
-//! trajectory's κ and κ² over the cuts of its steps' paths (step.rs `Segment::moments`: the path with the kick spread
-//! over the step, of the scheme's order at any cut); two outputs' windows never overlap (each at most half an interval
-//! on either side), the first is the instant t = 0, and the run goes on through the last output's window (`Plan`).
+//! pilot's kept state, and its loss test there. T's window about an output (estimate.rs `half_window`: one period of the
+//! axis, cut at t = 0) takes a trajectory's κ and κ² over the cuts of its steps' paths (step.rs `Segment::moments`: the
+//! path with the kick spread over the step, of the scheme's order at any cut); the first is the instant t = 0, and the
+//! run goes on through the last output's window (`Plan`). Outputs closer than a period have overlapping windows, so a
+//! window is not summed by itself: per lab axis the trajectory's running integrals of 1, κ and κ² from t = 0 are kept
+//! at every window's two ends, and a window is their difference (`run`) -- each step's path integrated once, and once
+//! more up to each end that falls inside it, whatever the windows' overlap.
 //!
 //! # The model (SPEC §5.2)
 //! The units are the model's (model.rs), listed again in every model a keep closes. A unit whose fold does not exist over
@@ -1781,8 +1784,8 @@ struct Plan {
 impl Plan {
     /// The plan of the request's times with the trap's frequency per lab axis (rad/µs).
     fn new(times: &[f64], frequencies: V3) -> Plan {
-        let (interval, last) = (times[1] - times[0], times.len() - 1);
-        let halves: Vec<V3> = times.iter().map(|&t| frequencies.map(|w| half_window(w, interval, t))).collect();
+        let last = times.len() - 1;
+        let halves: Vec<V3> = times.iter().map(|&t| frequencies.map(|w| half_window(w, t))).collect();
         let count = times.len().min(DISTRIBUTION_TIMES);
         let mut listed: Vec<usize> = (0..count).map(|i| ((i * last) as f64 / (count - 1) as f64).round() as usize).collect();
         listed.dedup();
@@ -1834,20 +1837,88 @@ struct Record {
     unproven: Option<[f64; 2]>,
 }
 
+/// One trajectory's T windows (module documentation, # Outputs and windows): per lab axis the running integrals from
+/// t = 0 of the time held, κ and κ² (µs, 1/µm·µs, 1/µm²·µs), and per output and axis their values at its window's two
+/// ends -- the window's time held, ∫κ dt and ∫κ² dt are the differences. An axis's windows' lower ends come in the
+/// outputs' order, and so do their upper ends (a window is cut at t = 0 alone): per axis and side, the next output whose
+/// end is to come. Output 0 is the instant t = 0 and has none.
+struct Windows<'a> {
+    plan: &'a Plan,
+    running: [[f64; 3]; 3],
+    ends: Vec<[[[f64; 3]; 2]; 3]>,
+    next: [[usize; 2]; 3],
+}
+impl<'a> Windows<'a> {
+    fn new(plan: &'a Plan) -> Windows<'a> {
+        Windows { plan, running: [[0.; 3]; 3], ends: vec![[[[0.; 3]; 2]; 3]; plan.times.len()], next: [[1; 2]; 3] }
+    }
+    /// The lower (side 0) or upper (1) end of output k's window on axis a.
+    fn end(&self, k: usize, a: usize, side: usize) -> f64 {
+        let (t, h) = (self.plan.times[k], self.plan.halves[k][a]);
+        if side == 0 { t - h } else { t + h }
+    }
+    /// The path's piece from `from` to `to` (the next piece starts where this one ends), with its integrals of κ and κ²
+    /// per lab axis between two of its times (step.rs `Segment::moments`): each end inside it reads the integrals up to
+    /// it -- once for the ends that coincide, the axes of one frequency and the windows cut at t = 0 --, and the running
+    /// integrals take the whole piece.
+    fn add(&mut self, from: f64, to: f64, moments: &dyn Fn(f64, f64) -> (V3, V3)) {
+        let outputs = self.ends.len();
+        let mut made: Vec<(f64, (V3, V3))> = vec![];
+        for a in 0..3 {
+            for side in 0..2 {
+                while self.next[a][side] < outputs && self.end(self.next[a][side], a, side) <= to {
+                    let k = self.next[a][side];
+                    let at = self.end(k, a, side).max(from);
+                    let (m1, m2) = match made.iter().find(|(x, _)| *x == at) {
+                        Some((_, same)) => *same,
+                        None => {
+                            let m = moments(from, at);
+                            made.push((at, m));
+                            m
+                        }
+                    };
+                    let r = self.running[a];
+                    self.ends[k][a][side] = [r[0] + (at - from), r[1] + m1[a], r[2] + m2[a]];
+                    self.next[a][side] += 1;
+                }
+            }
+        }
+        let (m1, m2) = moments(from, to);
+        for a in 0..3 {
+            let r = self.running[a];
+            self.running[a] = [r[0] + (to - from), r[1] + m1[a], r[2] + m2[a]];
+        }
+    }
+    /// The trajectory has ended (run through, lost, or stopped): the ends it did not reach -- within a window, or past
+    /// its last piece by the rounding -- take the running integrals where it ended, the window over its held part.
+    fn close(&mut self) {
+        for a in 0..3 {
+            for side in 0..2 {
+                for e in &mut self.ends[self.next[a][side]..] {
+                    e[a][side] = self.running[a];
+                }
+                self.next[a][side] = self.ends.len();
+            }
+        }
+    }
+    /// Output k's window (k ≥ 1) per lab axis: its time held, ∫κ dt and ∫κ² dt.
+    fn window(&self, k: usize) -> [[f64; 3]; 3] {
+        let e = &self.ends[k];
+        std::array::from_fn(|a| std::array::from_fn(|i| e[a][1][i] - e[a][0][i]))
+    }
+}
+
 /// One trajectory from its initial state through the plan at the step τ (module documentation, # Outputs and windows):
 /// advanced to the run's end by steps that know no output, and read at every output where it falls (adapt.rs, # The
 /// reads). A trajectory the scheme cannot advance (adapt.rs) fails from the first output it does not reach.
 fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f64, plan: &Plan, keep: bool) -> Record {
     let outputs = plan.times.len();
-    let interval = plan.times[1] - plan.times[0];
-    let widest = plan.halves.iter().flatten().fold(0., |a: f64, &b| a.max(b));
     let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
     let mut scratch = Scratch::default();
     // The trajectory's Brownian path in the plan's cells, its grid the multiples of τ (a cell over a power of two):
     // the same path at every rung and at its companion.
     let mut path = adapt::Path::new(SEED, index, plan.cell, (plan.cell / tau).log2().round() as u32);
-    // Per output and lab axis: the window's time held, ∫κ dt and ∫κ² dt.
-    let mut moments = vec![[[0.; 3]; 3]; outputs];
+    let mut windows = Windows::new(plan);
     let mut out = vec![Fate::Lost; outputs];
     let mut listed = vec![None; plan.listed.len()];
     let mut samples: Vec<Option<State>> = vec![None; outputs];
@@ -1875,35 +1946,13 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
             record(k + 1, t, &mut out);
             reached = k + 2;
         };
-        // A step's path as far as the trajectory is on it, into the windows it cuts: piece by piece, from the step's
-        // start and from each of its jumps -- the step is counted at the first of them.
+        // A step's path as far as the trajectory is on it, into T's windows: piece by piece, from the step's start and
+        // from each of its jumps -- the step is counted at the first of them.
         let mut each = |s: &Segment, until: f64| {
             if counted != Some(s.step.0) {
                 (steps, counted) = (steps + 1, Some(s.step.0));
             }
-            let (s0, s1) = (s.start, until);
-            let first = (((s0 - widest) / interval).floor().max(1.)) as usize;
-            let last = (((s1 + widest) / interval).ceil() as usize).min(outputs - 1);
-            for k in first..=last {
-                // The step's moments over an axis's cut of it (`Segment::moments` gives every axis's): made once for
-                // the axes whose windows cut the step alike.
-                let mut made: [Option<((f64, f64), (V3, V3))>; 3] = [None; 3];
-                for a in 0..3 {
-                    let h = plan.halves[k][a];
-                    let (lo, hi) = (s0.max(plan.times[k] - h), s1.min(plan.times[k] + h));
-                    if hi > lo {
-                        let (m1, m2) = match made[..a].iter().flatten().find(|(cut, _)| *cut == (lo, hi)) {
-                            Some((_, same)) => *same,
-                            None => s.moments(lo, hi),
-                        };
-                        made[a] = Some(((lo, hi), (m1, m2)));
-                        let w = &mut moments[k][a];
-                        w[0] += hi - lo;
-                        w[1] += m1[a];
-                        w[2] += m2[a];
-                    }
-                }
-            }
+            windows.add(s.start, until, &|from, to| s.moments(from, to));
         };
         // Through the last output's window; a failure there leaves every output read.
         match adapt::advance(model, domain, tau, &mut t, &mut scratch, &mut path, plan.end, &plan.times[1..], &mut read, &mut each) {
@@ -1916,9 +1965,10 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     if reached < outputs {
         out[reached..].fill(if failed { Fate::Failed } else { Fate::Lost });
     }
+    windows.close();
     for (k, o) in out.iter_mut().enumerate().skip(1) {
         if let Fate::Held(h) = o {
-            let w = &moments[k];
+            let w = windows.window(k);
             h.kappa = std::array::from_fn(|a| w[a][1] / w[a][0]);
             h.kappa2 = std::array::from_fn(|a| w[a][2] / w[a][0]);
         }
@@ -3418,19 +3468,71 @@ mod tests {
         assert_eq!(over_the_run(&[], std::iter::empty(), None), 0.);
     }
 
-    /// The plan: the windows half a period (at most half an interval) cut at t = 0, the listed outputs evenly spread with
-    /// the first and the last, the run's end the last window's.
+    /// The plan: the windows half a period -- whatever the outputs' interval, longer than it on a slow axis -- cut at
+    /// t = 0, the listed outputs evenly spread with the first and the last, the run's end the last window's.
     #[test]
     fn the_plan_holds_the_windows_and_the_listed_outputs() {
         let times: Vec<f64> = (0..101).map(|k| k as f64).collect();
         let w = std::f64::consts::TAU / 0.5;
         let p = Plan::new(&times, [w, 0.1, w]);
         assert_eq!(p.halves[0], [0.; 3]);
-        assert_eq!(p.halves[7], [0.25, 0.5, 0.25]);
+        assert_eq!(p.halves[7], [0.25, 7., 0.25]);
+        assert_eq!(p.halves[40], [0.25, 0.5 * std::f64::consts::TAU / 0.1, 0.25]);
         assert_eq!((p.listed.len(), p.listed[0], p.listed[20], p.listed[1]), (21, 0, 100, 5));
-        assert_eq!(p.end, 100.5);
+        assert_eq!(p.end, 100. + 0.5 * std::f64::consts::TAU / 0.1);
         let p = Plan::new(&[0., 2.], [w; 3]);
         assert_eq!((p.listed.clone(), p.end), (vec![0, 1], 2.25));
+    }
+
+    /// T's windows by the running integrals at their ends (`Windows`) against the closed forms of a path
+    /// κ_a = A_a cos(ω_a t + φ_a): outputs 1 µs apart, periods of 0.7, 2.3 and 23 µs on the three axes (windows shorter
+    /// and longer than the interval, overlapping, cut at t = 0), the path in pieces of a step of 0.37 µs and a jump inside
+    /// every third step. Run through to the plan's end, every window's time, ∫κ and ∫κ² within 1e-12 of its own scale;
+    /// an atom lost at 17.6 µs, the windows that reach past it over their held part.
+    #[test]
+    fn the_windows_are_their_ends_differences() {
+        let w = [TAU / 0.7, TAU / 2.3, TAU / 23.];
+        let (amp, phase) = ([1.3, 0.4, 2.1], [0.3, -1.1, 2.0]);
+        let times: Vec<f64> = (0..31).map(|k| k as f64).collect();
+        let plan = Plan::new(&times, w);
+        let antiderivative = |a: usize, t: f64| -> [f64; 3] {
+            let x = w[a] * t + phase[a];
+            [t, amp[a] * x.sin() / w[a], amp[a] * amp[a] * (0.5 * t + (2. * x).sin() / (4. * w[a]))]
+        };
+        let moments = |from: f64, to: f64| -> (V3, V3) {
+            let d = |a: usize| { let (p, q) = (antiderivative(a, from), antiderivative(a, to)); [q[1] - p[1], q[2] - p[2]] };
+            (std::array::from_fn(|a| d(a)[0]), std::array::from_fn(|a| d(a)[1]))
+        };
+        // The pieces: steps of τ, the third of every three cut by a jump at 0.43 τ.
+        let tau = 0.37;
+        let mut cuts = vec![0.];
+        for i in 0.. {
+            let (start, step_end) = (i as f64 * tau, ((i + 1) as f64 * tau).min(plan.end));
+            if i % 3 == 2 && start + 0.43 * tau < step_end {
+                cuts.push(start + 0.43 * tau);
+            }
+            cuts.push(step_end);
+            if step_end >= plan.end {
+                break;
+            }
+        }
+        for stop in [plan.end, 17.6] {
+            let mut windows = Windows::new(&plan);
+            for piece in cuts.windows(2).filter(|p| p[0] < stop) {
+                windows.add(piece[0], piece[1].min(stop), &moments);
+            }
+            windows.close();
+            for k in 1..times.len() {
+                for a in 0..3 {
+                    let (lo, hi) = (times[k] - plan.halves[k][a], (times[k] + plan.halves[k][a]).min(stop));
+                    let exact: [f64; 3] = if hi > lo { let (p, q) = (antiderivative(a, lo), antiderivative(a, hi)); std::array::from_fn(|i| q[i] - p[i]) } else { [0.; 3] };
+                    let got = windows.window(k)[a];
+                    for i in 0..3 {
+                        assert!((got[i] - exact[i]).abs() <= 1e-12 * stop * amp[a].max(1.).powi(2), "stop {stop}, output {k}, axis {a}, moment {i}: {} against {}", got[i], exact[i]);
+                    }
+                }
+            }
+        }
     }
 
     /// The histograms hold every atom, sum to one, put 0 at a bin's centre, and carry a listed output with no atom.

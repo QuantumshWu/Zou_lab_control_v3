@@ -10,7 +10,13 @@
 //! - per lab axis a the temperature T_a = (ħ²/m k_B) Var(κ_a), the variance over the held atoms and over the times of the
 //!   window about t_k (`half_window`): E[A ⟨κ_a²⟩]/E[A] − (E[A ⟨κ_a⟩]/E[A])², ⟨·⟩ the atom's mean over the window (over
 //!   its held part when it is lost within it). Over a whole period of a harmonic axis the window takes the oscillation's
-//!   phase out of ⟨κ_a²⟩, so the spread between atoms is that of their energies;
+//!   phase out of ⟨κ_a²⟩, so the spread between atoms is that of their energies. Over less it does not, whatever the
+//!   outputs' spacing asks: an atom's κ_a² is E_a(1 + cos 2θ)/(ħ²/m) at its phase θ, the window's mean of it
+//!   E_a(1 + sinc(ωW) cos 2θ̄)/(ħ²/m) over a width W, and N atoms' phases do not cancel -- the estimate breathes at 2ω
+//!   about its mean by its statistics, an rms of |sinc ωW|/√N of T for a thermal axis (E_a exponential), while its
+//!   variance is (1 + sinc²ωW)/N against the energies' 1/N. A noise that looks like a motion, and twice the trajectories
+//!   for the same error at W → 0 (measured, R1's tweezer at 1 µs outputs, four seeds: 7.9–8.7 % rms at 2ω on 200
+//!   atoms, 1.9–2.4 % on 3200, 0.3 % over whole periods; no part of it common to the seeds);
 //! - n̄_a = (ħ/m ω_a) E[A ⟨κ_a²⟩]/E[A] − ½ (over a period of a harmonic axis the kinetic energy is half the axis's energy,
 //!   E_a/ħω_a = n̄_a + ½) and the mean velocity (ħ/m) E[A ⟨κ_a⟩]/E[A].
 //!
@@ -146,9 +152,12 @@ pub fn tail_among(looks: f64) -> f64 {
 }
 
 /// The half width of T's window on a lab axis about an output at t (SPEC §1.7): half of one trap period of the axis,
-/// 2π/ω at its frequency ω > 0, the window no longer than an output interval, cut at t = 0 so that it stays centred there.
-pub fn half_window(frequency: f64, interval: f64, t: f64) -> f64 {
-    (0.5 * (TAU / frequency).min(interval)).min(t)
+/// 2π/ω at its frequency ω > 0, cut at t = 0 so that it stays centred there; whatever the outputs' spacing (module
+/// documentation): outputs closer than a period have overlapping windows. A window reaches no further than twice its
+/// output's time, so the run goes on past its last output by half a period, and by no more than its own length
+/// (solve.rs `Plan`).
+pub fn half_window(frequency: f64, t: f64) -> f64 {
+    (0.5 * TAU / frequency).min(t)
 }
 
 /// n̄ of a lab axis of frequency ω > 0 (rad/µs; module documentation): (ħ/m)Σ⟨κ²⟩ (rad/µs) summed over `atoms` atoms, over
@@ -948,14 +957,13 @@ mod tests {
         assert!((wilson(100., 100.) - 1.).abs() < 1e-15);
     }
 
-    /// The window: half a period of the axis, at most half an output interval, cut at t = 0.
+    /// The window: half a period of the axis, cut at t = 0.
     #[test]
-    fn the_window_is_a_period_at_most_an_interval() {
+    fn the_window_is_a_period_cut_at_t_0() {
         let w = TAU / 4.;
-        assert_eq!(half_window(w, 10., 100.), 2.);
-        assert_eq!(half_window(w, 1., 100.), 0.5);
-        assert_eq!(half_window(w, 10., 0.75), 0.75);
-        assert_eq!(half_window(w, 10., 0.), 0.);
+        assert_eq!(half_window(w, 100.), 2.);
+        assert_eq!(half_window(w, 0.75), 0.75);
+        assert_eq!(half_window(w, 0.), 0.);
     }
 
     /// A held atom in `state` with ⟨κ⟩ = x, ⟨κ²⟩ = y on every axis.
