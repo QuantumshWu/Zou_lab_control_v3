@@ -135,6 +135,32 @@ def arm_groups(
     return expected, groups
 
 
+#: What in a working point's ``readout_mode`` (``<family>:<key>=<value>;...``) changes what one
+#: count is, by the family that writes it: the readout speed and the sensor mode on a qCMOS (the
+#: dcam adapter), the pixel format on a Basler (the pylon adapter).  Every other key routes the
+#: trigger or paces the grab, and no count depends on which line fired it or how frames are
+#: queued; the virtual sensor's counts depend on none of its keys.
+COUNTING_READOUT_KEYS: dict[str, tuple[str, ...]] = {
+    "dcam": ("readout", "sensor"),
+    "pylon": ("format",),
+    "virtual": (),
+}
+
+
+def counting_readout(readout_mode: str | None) -> dict[str, str] | None:
+    """The readout conditions a count depends on, from a working point's ``readout_mode``
+    (``COUNTING_READOUT_KEYS``); None when no mode is recorded or its family declares none."""
+
+    if readout_mode is None:
+        return None
+    family, _, settings = str(readout_mode).partition(":")
+    keys = COUNTING_READOUT_KEYS.get(family)
+    if keys is None:
+        return None
+    stated = dict(item.partition("=")[::2] for item in settings.split(";") if "=" in item)
+    return {key: stated[key] for key in keys if key in stated}
+
+
 class CameraAcquisitionMode(str, Enum):
     EXTERNAL_TRIGGERED = "EXTERNAL_TRIGGERED"
     FREE_RUNNING = "FREE_RUNNING"

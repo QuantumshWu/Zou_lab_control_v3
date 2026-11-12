@@ -17,6 +17,7 @@ from zlc_data import SITE, AxisId, AxisSpec
 from zlc_durable import strict_json_loads, write_readable_json
 
 from zlc_atom.authoring import AuthoringChoice
+from zlc_atom.devices.camera.contract import counting_readout
 
 from .bimodal import (
     fit_bimodal, gaussian_fidelity, optimal_gaussian_threshold, per_site_fidelity,
@@ -510,8 +511,74 @@ def reads_photoelectrons(calibration: "TrapCalibration") -> bool | None:
     return bool((record.get("request") or {}).get("photoelectrons", False))
 
 
+def trained_light_window_seconds(calibration: "TrapCalibration") -> float | None:
+    """How long the light its thresholds were trained on shone: the readout frame's window.
+
+    The thresholds separate the readout frame's signals (the reference frames
+    only find and shape the sites), and that frame's counts are the atoms'
+    fluorescence over the window the pulse gated -- not the camera's
+    exposure, which only has to cover it (a longer one adds dark counts to
+    every frame alike, ``task.camera_exposure_seconds``).  Read from the
+    pulse facts of the run it was fitted on; None when its report records no
+    window (a calibration from before they were recorded, or one built by
+    hand), which says nothing either way.
+    """
+
+    record = calibration.report.get("run_record")
+    pulse = record.get("pulse") if isinstance(record, Mapping) else None
+    if not isinstance(pulse, Mapping):
+        return None
+    windows, index = pulse.get("frame_exposures"), pulse.get("readout_frame_index")
+    if not isinstance(windows, (list, tuple)) or type(index) is not int or not 0 <= index < len(windows):
+        return None
+    return float(windows[index])
+
+
+def refuse_other_acquisition(
+    calibration: "TrapCalibration",
+    exposure_seconds: float | None,
+    readout_mode: str | None,
+    *,
+    name: str = "the calibration",
+) -> None:
+    """Refuse frames whose acquisition changes what the calibration's thresholds separate.
+
+    Two facts of the camera do.  An exposure SHORTER than the light window
+    the thresholds were trained on cuts that light off, so a loaded site
+    collects fewer counts than any it was trained on; an exposure that covers
+    the window -- shorter or longer than the calibration's own camera
+    exposure -- collects the same fluorescence, plus dark counts the
+    thresholds were already trained beside.  And a readout that counts
+    differently (``counting_readout``: a qCMOS's readout speed or sensor
+    mode, a Basler's pixel format) changes every count's noise and scale;
+    which line triggered it changes nothing.  Both are compared as recorded,
+    with no tolerance the records do not state; a fact either side does not
+    record is not compared.
+    """
+
+    window = trained_light_window_seconds(calibration)
+    if exposure_seconds is not None and window is not None and float(exposure_seconds) < window:
+        raise ValueError(
+            f"these frames were exposed {_milliseconds(exposure_seconds)}, shorter than the "
+            f"{_milliseconds(window)} light window {name} was trained on: the camera cut the "
+            f"atoms' light short and its thresholds do not apply -- expose at least "
+            f"{_milliseconds(window)}, or calibrate with a readout window the exposure covers"
+        )
+    frames = counting_readout(readout_mode)
+    trained = counting_readout(calibration.frame_contract.readout_mode)
+    if frames is None or trained is None:
+        return
+    differing = sorted(key for key in frames.keys() & trained.keys() if frames[key] != trained[key])
+    if differing:
+        said = ", ".join(f"{key}={frames[key]} (trained at {key}={trained[key]})" for key in differing)
+        raise ValueError(
+            f"these frames were read out at {said}, not as {name} was trained; its thresholds "
+            "do not apply -- calibrate at this readout, or read the frames out as it was trained"
+        )
+
+
 def _milliseconds(seconds: float) -> str:
-    """An exposure as the operator reads it, to every digit it was recorded with."""
+    """A duration as the operator reads it, to every digit it was recorded with."""
 
     return f"{float(seconds) * 1e3:.12g} ms"
 
@@ -559,40 +626,6 @@ class FrameContract:
                     raise TypeError(f"{name} must be a string or None")
                 if not value.strip():
                     raise ValueError(f"{name} cannot be blank")
-
-    def refuse_other_acquisition(
-        self,
-        exposure_seconds: float | None,
-        readout_mode: str | None,
-        *,
-        name: str = "the calibration",
-    ) -> None:
-        """Refuse frames taken at another exposure or readout than these thresholds were trained at.
-
-        A site's counts are what the sensor integrated over its exposure --
-        background, stray light, and the signal of every light window the
-        exposure covers -- read out as its readout mode reads it.  Thresholds
-        trained on one acquisition separate the counts of THAT acquisition; at
-        another they no longer stand between the same two distributions, and
-        nothing here can say by how much, so nothing is rescaled.  Both sides
-        are the camera's own readback (this contract's, and the one the frames
-        were taken with), compared as recorded: the contract keeps no exposure
-        resolution to compare within.  A fact either side does not record is
-        not compared.
-        """
-
-        for what, frames, trained, shown in (
-            ("exposure", None if exposure_seconds is None else float(exposure_seconds),
-             self.exposure_seconds, _milliseconds),
-            ("readout mode", None if readout_mode is None else str(readout_mode), self.readout_mode, str),
-        ):
-            if frames is None or trained is None or frames == trained:
-                continue
-            raise ValueError(
-                f"these frames were taken at {what} {shown(frames)} and {name} was "
-                f"trained at {shown(trained)}; its thresholds do not apply -- "
-                f"calibrate at {shown(frames)}, or take the frames at {shown(trained)}"
-            )
 
     def assert_image(self, image: object) -> np.ndarray:
         payload = image.values if hasattr(image, "values") else image.image if hasattr(image, "image") else image

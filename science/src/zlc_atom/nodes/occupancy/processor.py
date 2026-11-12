@@ -27,7 +27,7 @@ from zlc_data.point_overlay import IMAGE_POINT_OVERLAY_CONTRACT, IMAGE_POINT_OVE
 
 from zlc_atom.nodes._framework.frames import REST, assign_frames, canonical_frames, check_claims, claim_names
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
-from zlc_atom.nodes.calibration.calibration import classify_threshold, reads_photoelectrons
+from zlc_atom.nodes.calibration.calibration import classify_threshold, reads_photoelectrons, refuse_other_acquisition
 
 
 #: The frame a camera's pixel axes are counted in: the whole sensor's own.
@@ -250,11 +250,11 @@ class OccupancyProcessor:
         snapshots = source.run_record.get("device_snapshots")
         camera = snapshots.get("camera") if isinstance(snapshots, Mapping) else None
         camera = camera if isinstance(camera, Mapping) else {}
-        # Each calibration's thresholds hold for the exposure and readout it
-        # was trained at (FrameContract.refuse_other_acquisition).
+        # Each calibration's thresholds hold while the exposure covers the light
+        # window they were trained on and the readout counts as it did then.
         for name, reading in zip(self._names, self.readings):
-            reading.calibration.frame_contract.refuse_other_acquisition(
-                camera.get("exposure_seconds"), camera.get("readout_mode"), name=name)
+            refuse_other_acquisition(reading.calibration, camera.get("exposure_seconds"),
+                                     camera.get("readout_mode"), name=name)
         sensor = camera.get("sensor_shape_yx")
         if sensor is not None:
             sensor = tuple(int(item) for item in sensor)

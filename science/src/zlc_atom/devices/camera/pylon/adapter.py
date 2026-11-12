@@ -672,12 +672,9 @@ class PylonCameraAdapter:
             # cannot be confused (and 1.0 was simply not the camera's answer).
             gain=float(10.0 ** (float(camera.Gain.GetValue()) / 20.0)),
             readout_mode=(
-                "pylon:Mono8;free-running;grab=OneByOne"
-                if free_running
-                else (
-                    f"pylon:Mono8;external={self.config.trigger_source};"
-                    "grab=OneByOne"
-                )
+                "pylon:format=Mono8;"
+                f"trigger={'free-running' if free_running else self.config.trigger_source};"
+                "grab=OneByOne"
             ),
             offset_counts=None if conversion is None else conversion[0],
             electrons_per_count=None if conversion is None else conversion[1],

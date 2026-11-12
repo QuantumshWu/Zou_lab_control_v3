@@ -35,7 +35,8 @@ from zlc_atom.devices.slm.solver import (
 )
 from zlc_atom.nodes.slm.rearrangement import compact_target, run_rearrangement
 from zlc_atom.nodes.calibration import TrapCalibration
-from zlc_atom.nodes.calibration.calibration import reads_photoelectrons, registration_order as _registration_order
+from zlc_atom.nodes.calibration.calibration import (
+    reads_photoelectrons, refuse_other_acquisition, registration_order as _registration_order)
 from zlc_atom.nodes._framework.pulse import PULSE_CHANGED, STATUS_DONE, PulseBoard, check_cancelled, pulse_description
 from zlc_atom.nodes.camera.measurement import (
     CameraMeasurementNode, CameraMeasurementRequest, frames_snapshot)
@@ -328,8 +329,8 @@ class SlmRearrangementTask:
         classification_started = perf_counter()
         point = node.actual_working_point
         roi = (*tuple(point.roi_origin_yx)[::-1], *tuple(point.roi_shape_yx)[::-1])
-        self.calibration.frame_contract.refuse_other_acquisition(
-            point.exposure_seconds, point.readout_mode, name="the selected Calibration")
+        refuse_other_acquisition(self.calibration, point.exposure_seconds, point.readout_mode,
+                                 name="the selected Calibration")
         cal = self.calibration.rebased(roi, point.binning_yx, point.frame_shape_yx)
         wanted = reads_photoelectrons(cal)
         if wanted is not None and wanted != node.reads_photoelectrons:

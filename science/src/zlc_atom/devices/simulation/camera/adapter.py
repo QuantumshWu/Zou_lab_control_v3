@@ -140,11 +140,7 @@ class VirtualCamera:
             None if self._free_running else exposure,
             None if self._free_running else 0.0,
             1.0,
-            (
-                "virtual-free-running"
-                if self._free_running
-                else "virtual-external-trigger"
-            ),
+            f"virtual:trigger={'free-running' if self._free_running else 'external'}",
             self.config.offset_counts,
             self.config.electrons_per_count,
         )

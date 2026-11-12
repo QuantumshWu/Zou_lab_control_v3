@@ -8,7 +8,7 @@ import numpy as np
 from zlc_atom.devices.slm.solver import (
     acquire_rearrangement, plan_rearrangement, sample_rearrangement, rearrangement_is_noop,
 )
-from zlc_atom.nodes.calibration.calibration import reads_photoelectrons, registration_order
+from zlc_atom.nodes.calibration.calibration import reads_photoelectrons, refuse_other_acquisition, registration_order
 from zlc_atom.nodes.camera.measurement import CameraMeasurementNode, photoelectron_frame
 from zlc_atom.nodes.slm.rearrangement import compact_target, run_rearrangement
 
@@ -62,8 +62,8 @@ class RearrangementMeasurement(CameraMeasurementNode):
     def _freeze_working_point(self, point):
         super()._freeze_working_point(point)
         roi = (*point.roi_origin_yx[::-1], *point.roi_shape_yx[::-1])
-        self.calibration.frame_contract.refuse_other_acquisition(
-            point.exposure_seconds, point.readout_mode, name="the Calibration")
+        refuse_other_acquisition(self.calibration, point.exposure_seconds, point.readout_mode,
+                                 name="the Calibration")
         self._calibration = self.calibration.rebased(roi, point.binning_yx, point.frame_shape_yx)
         if reads_photoelectrons(self._calibration) and point.electrons_per_count is None:
             raise ValueError("the Calibration was trained in photoelectrons and the camera states no "
