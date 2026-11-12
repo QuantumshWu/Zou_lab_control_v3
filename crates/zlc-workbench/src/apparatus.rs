@@ -986,10 +986,13 @@ impl Workbench {
         Ok(json!({"closing": self.devices.keys().collect::<Vec<_>>()}))
     }
 
-    pub(crate) fn device_opened(&mut self, id: &str, working_point: Value) -> bool {
+    pub(crate) fn device_opened(&mut self, id: &str, mut working_point: Value) -> bool {
         let Some(live) = self.devices.get_mut(id) else { return false };
+        // `ms`: the device's own open, as its opener timed it; `since_asked_ms`: from the ask to now, its
+        // wait for a process or an earlier close and this loop's turn besides.
+        let open_ms = working_point.as_object_mut().and_then(|point| point.remove(crate::OPEN_MS));
         // What the device says of itself, when its type says it (`device_info`); a remote one's publisher type.
-        say_device("device_opened", &live.entry, json!({"ms": ms_since(live.asked.take()), "device_info": working_point.get("device_info"),
+        say_device("device_opened", &live.entry, json!({"ms": open_ms, "since_asked_ms": ms_since(live.asked.take()), "device_info": working_point.get("device_info"),
             "served_as": working_point.get("descriptor").and_then(|descriptor| descriptor.get("type_id"))}));
         if live.state == LiveState::Opening { live.state = LiveState::Open; }
         live.error = None;

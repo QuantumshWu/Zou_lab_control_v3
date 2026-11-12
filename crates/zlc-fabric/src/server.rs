@@ -107,6 +107,9 @@ impl Publisher {
         self.shared.host.lend_out(instance, forward).map_err(|error| error.message)?;
         // Local calls admitted before lend_out must settle before the first
         // remote owner can attach, including the admission-to-send interval.
+        if !self.shared.idle(instance) {
+            self.shared.note(instance, &format!("FABRIC PUBLISH WAITING device={instance}: its local requests settle before another computer may attach"));
+        }
         if let Err(error) = self.shared.drain(instance) {
             self.shared.host.take_back(instance);
             return Err(error.to_string());
@@ -140,6 +143,7 @@ impl Publisher {
             (offer.attached.clone(), offer.descriptor.clone())
         };
         if let Some((connection, _)) = &attached { self.shared.withdrawn(*connection, instance); }
+        self.shared.retiring(instance, "withdrawn");
         // Retain the publication on failure: taking it back would admit local writes
         // while the old remote operation can still be touching the hardware.
         self.shared.drain(instance).map_err(|error| error.to_string())?;
@@ -243,11 +247,22 @@ impl Shared {
             .ok_or_else(|| CallError::lost(format!("{instance} is no longer published on {}", self.bench.name)))
     }
 
+    /// The device's owner goes (`reason`): nothing new is admitted while its requests settle and SAFE runs.
+    fn retiring(&self, instance: &str, reason: &str) { self.note(instance, &format!("FABRIC RETIRING device={instance} reason={reason:?}")); }
+
+    /// Whether no request to `instance` is in flight, here or in its plugin.
+    fn idle(&self, instance: &str) -> bool { self.settled(&lock(&self.in_flight), instance) }
+
+    /// As [`Shared::idle`], with the fabric's requests in flight (`in_flight`) already in hand.
+    fn settled(&self, in_flight: &HashMap<String, usize>, instance: &str) -> bool {
+        in_flight.get(instance).copied().unwrap_or(0) == 0 && !self.host.requests_pending(instance)
+    }
+
+    /// Wait until the requests to `instance` in flight have settled (at most [`WITHDRAW_WAIT`]).
     fn drain(&self, instance: &str) -> Result<(), CallError> {
-        self.note(instance, &format!("FABRIC RETIRING device={instance}"));
         let mut busy = lock(&self.in_flight);
         let until = Instant::now() + WITHDRAW_WAIT;
-        while busy.get(instance).copied().unwrap_or(0) > 0 || self.host.requests_pending(instance) {
+        while !self.settled(&busy, instance) {
             if Instant::now() >= until {
                 return Err(CallError::new(ErrorKind::Timeout, format!("{instance} remains reserved: its previous requests have not settled")));
             }
@@ -271,6 +286,7 @@ impl Shared {
             offer.retiring = true;
             offer.descriptor.clone()
         };
+        self.retiring(instance, reason);
         self.drain(instance)?;
         self.make_safe(instance, &descriptor, reason)?;
         if let Some(offer) = lock(&self.offers).get_mut(instance) { offer.attached = None; offer.retiring = false; }
@@ -337,7 +353,12 @@ impl Shared {
         };
         // The same core again on a new connection: the old one broke, and what
         // the device drove then is not known to it -- safe before it goes on.
-        if takeover { self.drain(instance)?; self.make_safe(instance, &descriptor, "its user reconnected")?; }
+        if takeover {
+            const RECONNECTED: &str = "its user reconnected";
+            self.retiring(instance, RECONNECTED);
+            self.drain(instance)?;
+            self.make_safe(instance, &descriptor, RECONNECTED)?;
+        }
         if let Some(offer) = lock(&self.offers).get_mut(instance) {
             // The reader removes the peer before scanning its offers on EOF.
             // Record ownership while holding both locks so even a queued attach
@@ -356,7 +377,7 @@ impl Shared {
         self.note(instance, &format!("FABRIC ATTACH device={instance} client={client}"));
         Ok(json!({"descriptor": serde_json::to_value(&*descriptor).unwrap_or(Value::Null), "role": role,
                   "tunable": self.host.tunable(instance), "snapshot": self.host.reports_settings(instance),
-                  "reads": self.host.reads(instance), "publisher": self.bench.name}))
+                  "reads": self.host.reads(instance), "device_info": self.host.device_info(instance), "publisher": self.bench.name}))
     }
 
     #[allow(clippy::too_many_arguments)]

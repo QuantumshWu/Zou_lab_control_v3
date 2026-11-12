@@ -15,8 +15,11 @@ use serde_json::{Map, Value, json};
 /// Reads one workspace file of a contract family into what a build receives
 /// (a pulse document resolves, in the core, to its description).
 pub type Resolver = Arc<dyn Fn(&Path) -> Result<Value, String> + Send + Sync>;
+/// The files one workspace file of a contract family names, as its own reader finds them (a pulse:
+/// its Subpulse files, beside it).
+pub type Names = Arc<dyn Fn(&Path) -> Vec<PathBuf> + Send + Sync>;
 
-pub struct Workspace { pub root: PathBuf, resolvers: Vec<(String, Resolver)> }
+pub struct Workspace { pub root: PathBuf, resolvers: Vec<(String, Resolver)>, names: Vec<(String, Names)> }
 
 /// The apparatus Devices@ edits.
 pub const APPARATUS: &str = "apparatus.json";
@@ -34,7 +37,7 @@ impl Workspace {
         let data = made(&root.join(DATA))?;
         let root = data.parent().unwrap_or(root).to_path_buf();
         for folder in [PULSES, LAYOUTS] { made(&root.join(folder))?; }
-        Ok(Self { root, resolvers: Vec::new() })
+        Ok(Self { root, resolvers: Vec::new(), names: Vec::new() })
     }
     pub fn data(&self) -> PathBuf { self.root.join(DATA) }
     pub fn pulses(&self) -> PathBuf { self.root.join(PULSES) }
@@ -57,6 +60,10 @@ impl Workspace {
     }
     /// Files of `contract_prefix...` resolve through `resolver`; any other contract resolves to its absolute path.
     pub fn add_resolver(&mut self, contract_prefix: &str, resolver: Resolver) { self.resolvers.push((contract_prefix.to_owned(), resolver)); }
+    /// The files a file of `contract_prefix...` names are found by `names`; any other contract names none.
+    pub fn add_names(&mut self, contract_prefix: &str, names: Names) { self.names.push((contract_prefix.to_owned(), names)); }
+    /// What finds the files a file of each contract names, wherever it runs (off the owner turn).
+    pub fn names(&self) -> Vec<(String, Names)> { self.names.clone() }
     /// What reads the files a draft names, wherever it runs (off the owner turn).
     pub fn draft_files(&self, resources: Vec<ResourceAsk>, artifacts: Vec<String>) -> DraftFiles {
         DraftFiles { root: self.root.clone(), resolvers: self.resolvers.clone(), resources, artifacts }
@@ -93,8 +100,7 @@ impl DraftFiles {
     fn resource(&self, ask: &ResourceAsk) -> Result<Value, String> {
         let spec = &ask.spec;
         let directory = self.root.join(&spec.directory);
-        let chosen = Path::new(ask.selected.trim());
-        let path = if chosen.is_absolute() { chosen.to_path_buf() } else { directory.join(chosen) };
+        let path = spec.path(&self.root, &ask.selected);
         let suffixed = spec.suffixes.iter().any(|suffix| path.to_string_lossy().to_lowercase().ends_with(&suffix.to_lowercase()));
         if ask.selected.trim().is_empty() || path.parent() != Some(directory.as_path()) || !suffixed || !path.is_file() {
             return Err(format!("{} must be a file in {}/", ask.label, spec.directory));
