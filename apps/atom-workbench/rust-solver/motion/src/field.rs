@@ -40,7 +40,8 @@
 //! # The region
 //! An atom is outside the trap's region where every beam of the trap light -- the tweezer's frequency, its focused
 //! beams: the tweezer, its reflection, a crossed beam of the same laser -- is below `REGION_INTENSITY` of its focus
-//! value, |a_l(r)|² < 1/20 (SPEC §1.3, the UI's definition of loss). Only the trap light makes the trap: a probe or a
+//! value, |a_l(r)|² < 1/20 (SPEC §1.3, the UI's region; a lost atom is first outside it with its loss energy above the far
+//! value, model.rs `Model::lost`). Only the trap light makes the trap: a probe or a
 //! cooling beam given by its waist is focused too, on the millimetre scale, and an atom it pushes out of the tweezer
 //! moves along it for metres (√19 z_R) -- counted by its intensity, such an atom would never be lost.
 
@@ -573,9 +574,9 @@ mod tests {
         }
     }
 
-    /// The region (SPEC §1.3): outside where every focused beam's intensity is below 1/20 of its focus value -- on the
-    /// tweezer's axis beyond z = z_R√19, across it beyond ρ = w₀√(ln 20/2); a plane wave, bright everywhere, holds no
-    /// atom in; a second focused beam does.
+    /// The region (SPEC §1.3): outside where every beam of the trap light (the tweezer's frequency) is below 1/20 of its
+    /// focus value -- on the tweezer's axis beyond z = z_R√19, across it beyond ρ = w₀√(ln 20/2); a crossed beam of the
+    /// trap's frequency widens it, a beam of another frequency, focused or a plane wave, does not.
     #[test]
     fn the_region_is_where_a_focused_beam_is_bright() {
         let (k, w) = (7.37, 0.8);

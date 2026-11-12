@@ -183,8 +183,10 @@ function cartesianEmission(n:Vec3,frame:Frame,spherical:readonly MasterMatrix[])
 }
 function motionText(motion:MotionRequest,tweezer:Laser):string[] {
  const temperature=withUnit(motion.temperatureUK,'μK',{digits:6});
- return [`3D 运动（半经典）：光镊「${tweezer.name}」中的单个原子在三维中运动，初态为上述内态，运动为温度 ${temperature} 的热分布；各轴温度 T = m·Var(v)/k_B。`,
-  '光束分开保留（同频的对射光不合并）：每束光是完整的三维光束——按功率与束腰或按数值孔径给出强度的光是焦点在原子处的高斯光束，按局域强度给出的光是平面波；光镊是操作者指定的那一束。',
+ return [`3D 运动（半经典）：光镊「${tweezer.name}」中的单个原子在三维中运动，初态为上述内态，运动为温度 ${temperature} 下初态势阱中束缚原子的降低的等温分布（阱深比 k_B T 大得多时即热分布）；各轴温度 T = m·Var(v)/k_B，取该轴一个阱周期内的平均。`,
+  '光束分开保留（同频的对射光不合并）：每束光是完整的三维光束——按功率与束腰或按数值孔径给出强度的光是焦点在原子处的高斯光束，按局域强度给出的光是平面波；光镊是操作者指定的那一束，与它同频的各束光（反射光、同一激光的交叉光束）一起构成光阱。',
+  '光学驱动：每束光的 D1、D2 全部允许电偶极耦合都在模型里；同向旋转项按各自的失谐取三级之一（按裸能级绝热消去、按原子所在处的能级绝热消去、显式跟踪），反向旋转项按裸能级二阶绝热消去（给出光移与散射），二者的交叉项以两倍光频拍动，不在模型里。',
+  '返回仍在光阱中的原子的瞬时布居（绝热消去后的读出，加上被消去的激发态布居；不含光频微运动）与丢失的概率；能级图的长期布居 p̄(T) 是原子静止于焦点时内态的长期布居，不是运动的结果。',
   `半经典方法：原子的质心是经典质点（位置、动量），内态按量子跳跃演化；每个光学驱动按它的失谐或者绝热消去激发态，或者显式跟踪激发态。自发辐射的反冲按偶极辐射的方向图抽样，一次跳跃同时带走所吸收的光的平均动量（至多一个光子的 ħk），其余的散射力与动量扩散在每一步里加上；跳跃之间的力是内态上的平均力。点粒子带不了内态与动量之间的关联：亚多普勒冷却（偏振梯度冷却）算出的温度偏低，这是模型的限制，不计入误差预算。点粒子也没有零点运动：各轴 k_B T 不小于 ${SEMICLASSICAL_REGIME}ħω 是方法的验证范围，更冷时仅供参考。`];
 }
 function initialText(spec:InitialStateSpec):string {
@@ -283,14 +285,15 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
    outsideShift:scaled(transformOperator(laserModelCorrection(scene,laser),u),TAU),electricField:field};}),
   outsideForms:couplings.filter((c,i)=>couplings.findIndex(x=>x.beat.join()===c.beat.join())===i).map(({laser,beat})=>({frequencyIndex:beat,matrices:outsideFieldForm(a,laser).map(m=>scaled(transformOperator(m,u),TAU))})),
   emission:MOTION_FRAME.map(n=>cartesianEmission(n,composeMagneticField(scene.fields).frame,spherical)) as MotionModel['emission']} satisfies MotionModel}:{}),
+ // A motion solve is not the 32-state master equation: what is said of that equation's drives and returned populations is
+ // said of the motion's own in motionText.
  assumptions:[
-  `每束开启且强度非零的激光（${lasers.length} 束）都是 32 态主方程中的显式光学驱动：保留 D1、D2 全部允许电偶极耦合，旋转项与反旋转项都保留（不作 RWA），不按近/远失谐区分。`,
+  ...(motion?[]:[`每束开启且强度非零的激光（${lasers.length} 束）都是 32 态主方程中的显式光学驱动：保留 D1、D2 全部允许电偶极耦合，旋转项与反旋转项都保留（不作 RWA），不按近/远失谐区分。`]),
   `统一光学旋转系：激发态以参考光${reference?`「${reference.name}」`:''}的载频旋转，基态不旋转；激光间拍频和反旋转项（频率 ω_L+ω_ref，参考载频是独立频率轴）都以精确整数相位坐标进入。`,
   '自发辐射：每个光子球分量 q 一个塌缩算符，同时包含 D1、D2 两条线和两个基态 F 通道（Born–Markov 形式，无 secular 近似，按跃迁频率保留 ω³ 因子）；远失谐 Raman 散射因此保留 D1/D2 干涉。',
   '32 态以外的能级（5S 的 6–9P；5P 的 6–10S、4–9D）和 Rb+ 芯极化（Arora & Sahoo 2012：α_c = 9.1 au，5S 另加 α_vc = −0.26 au）只作为二阶静态（van Vleck）光移进入 H0；耦合/失谐比超过 1% 或失谐不足 10 GHz 时它不再代表这些能级，界面写明超出模型范围，结果照常给出。不含这些能级的跨载频项和散射、更高价态尾项与连续谱（5P 的光电离：5P₃/₂ 低于 479.1 nm、5P₁/₂ 低于 473.7 nm 的光，同样写明）。',
   '基矢：H0 静态部分（磁场 + 上述 32 态外静态光移）的本征基，初态与返回布居都在此基中；态标签 F、mF 指与之重叠最大的磁场本征态。D 线光学缀饰不进入基矢，而由动力学显式给出。',
   initialText(initialState),
-  '返回瞬时布居（含反旋转项引起的光频微运动，幅度约 (Ω/ω)²）；长期布居 p̄(T) 是时刻 T 的相位平均，只平均掉这些快振荡，不是 0 到 T 的时间平均。',
-  ...(motion?motionText(motion,tweezerOf(scene)!):[]),
+  ...(motion?motionText(motion,tweezerOf(scene)!):['返回瞬时布居（含反旋转项引起的光频微运动，幅度约 (Ω/ω)²）；长期布居 p̄(T) 是时刻 T 的相位平均，只平均掉这些快振荡，不是 0 到 T 的时间平均。']),
  ]};
 }

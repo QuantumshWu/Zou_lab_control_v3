@@ -6,6 +6,14 @@ import {timeDisplayUnit} from './duration.js';
 
 /** A population error (an absolute probability) as a percentage: "0.61%". */
 export function errorPercent(error:number):string{return `${formatNumber(error*100,{digits:2})}%`;}
+/** The tolerance a result's trajectory was solved to and is marked against (ui-design.md §6.16, §6.20): the one it
+ * echoes, ε for the population core and the semiclassical 3D motion's own target (5%) for a motion result; ε where it
+ * states none (a mean alone). Every sentence about a trajectory's samples names this one: the test and the words take
+ * the same number. */
+export function resultTolerance(result:{populationAccuracy?:{requestedTolerance?:number}}):number{return result.populationAccuracy?.requestedTolerance??POPULATION_TOLERANCE;}
+/** A value marked beyond its tolerance, as the note beside it: its estimated error (unknown where it has none) and the
+ * tolerance it was tested against ("（估计误差 6.2%，超过 5%）"). */
+export function exceedsNote(error:number|null|undefined,tolerance:number):string{return `（估计误差 ${error==null?'未知':errorPercent(error)}，超过 ${errorPercent(tolerance)}）`;}
 
 /** The most decimals `Number.prototype.toFixed` writes (the language's bound). */
 const MOST_PLACES=100;
