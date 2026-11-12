@@ -84,31 +84,52 @@ files/          the JSON files the board names (a node's pulse, the Subpulses an
 pub struct Exported { pub path: PathBuf, pub segments: usize, pub bytes: u64 }
 
 impl Workbench {
-    /// Write the archive into the workspace's diagnostics folder and say where.
-    pub(crate) fn export_diagnostics(&mut self, with_data: bool, host: &dyn Host) -> Result<Value, String> {
-        let stamp: String = workspace::utc_now().chars().filter(char::is_ascii_digit).take(14).collect();
+    /// Take what the archive holds of the board now (its state, layout and apparatus, the recent
+    /// data kept), and write the archive into the workspace's diagnostics folder off the owner
+    /// turn; `diagnostics_exported` says where.
+    pub(crate) fn export_diagnostics(&mut self, with_data: bool, request: u64, host: &dyn Host) {
+        let board = Board { state: Value::Object(self.state(host)), layout: self.layout_document(host), apparatus: self.apparatus.tree(),
+            data: with_data.then(|| host.diagnostic_data()) };
         let folder = self.workspace.root.join(FOLDER);
-        std::fs::create_dir_all(&folder).map_err(|error| format!("{}: {error}", folder.display()))?;
+        let (root, ticket) = (self.workspace.root.clone(), self.ticket(crate::Ticket::Diagnostics { request }));
+        self.plugins.work(ticket, crate::Lane::Export, Box::new(move || board.export(&folder, &root)));
+    }
+
+    /// The archive was written (or why not): said on the console's line.
+    pub(crate) fn diagnostics_exported(&mut self, exported: Result<Value, String>) -> Result<Value, String> {
+        let exported = exported?;
+        self.console_report = (format!("diagnostics exported to {}", exported["path"].as_str().unwrap_or_default()), "task");
+        Ok(exported)
+    }
+}
+
+/// What the owner turn takes of the board for an archive; the rest is read when it is written.
+struct Board { state: Value, layout: Value, apparatus: Value, data: Option<crate::DiagnosticData> }
+
+impl Board {
+    /// Write the archive into `folder`: its path and what it holds.
+    fn export(self, folder: &Path, workspace: &Path) -> Result<Value, String> {
+        let stamp: String = workspace::utc_now().chars().filter(char::is_ascii_digit).take(14).collect();
+        std::fs::create_dir_all(folder).map_err(|error| format!("{}: {error}", folder.display()))?;
         let path = folder.join(format!("zlc-diagnostics-{}-{}.zip", &stamp[..8.min(stamp.len())], &stamp[8.min(stamp.len())..]));
         let mut members: Vec<(String, Vec<u8>)> = vec![("README.txt".into(), README.as_bytes().to_vec())];
         let pretty = |value: &Value| serde_json::to_vec_pretty(value).unwrap_or_default();
-        members.push(("state.json".into(), pretty(&Value::Object(self.state(host)))));
-        members.push(("layout.json".into(), pretty(&self.layout_document(host))));
+        members.push(("state.json".into(), pretty(&self.state)));
+        members.push(("layout.json".into(), pretty(&self.layout)));
         // The apparatus as it is loaded and edited now, whichever file it came from.
-        members.push(("apparatus.json".into(), pretty(&self.apparatus.tree())));
+        members.push(("apparatus.json".into(), pretty(&self.apparatus)));
         if let Ok(bytes) = std::fs::read(zlc_core::checkout::path("bin/release.json")) { members.push(("release.json".into(), bytes)); }
         members.extend(newest_logs(&zlc_core::checkout::local("logs")));
-        let named = named_files(&[&members[1].1, &members[2].1], &self.workspace.root);
+        let named = named_files(&[&members[1].1, &members[2].1], workspace);
         let files = named.len();
         members.push(("files.json".into(), pretty(&Value::Object(named.iter().map(|(member, path, _)| (member.clone(), json!(path))).collect()))));
         members.extend(named.into_iter().map(|(member, _, bytes)| (member, bytes)));
         // The data of the publications the journal names, as far back as the application keeps it.
-        let data = if with_data { host.diagnostic_data() } else { Vec::new() };
+        let data = self.data.map(|data| data()).unwrap_or_default();
         let data_files = data.len();
         members.extend(data);
         journal::note("workbench", "diagnostics_exported", json!({"path": path}));
         let exported = write(&path, &journal::segments(), &members).map_err(|error| format!("{}: {error}", path.display()))?;
-        self.console_report = (format!("diagnostics exported to {}", exported.path.display()), "task");
         Ok(json!({"path": exported.path, "segments": exported.segments, "files": files, "data_files": data_files, "bytes": exported.bytes}))
     }
 }

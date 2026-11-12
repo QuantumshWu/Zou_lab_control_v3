@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections import Counter
 import inspect
 import itertools
+import json
 import logging
 import os
 import queue
@@ -254,6 +255,13 @@ class Process:
             instance = self.instances.get(str(params.get("instance")))
             if instance is not None:
                 instance.stop_run(str(params.get("run")))
+        elif op == "run.watched":
+            # A change of a read a run watches (ctx.watch), told by the core as it happens.
+            instance = self.instances.get(str(params.get("instance")))
+            run = None if instance is None else instance.runs.get(str(params.get("run")))
+            watched = None if run is None else run.watches.get(str(params.get("watch")))
+            if watched is not None:
+                watched.tell(params.get("told") or {})
         elif op == "abandon":
             # The core gave up on an instance whose call overran its deadline (§7): it
             # rejects new opens until its lane returns and releases its device.
@@ -405,6 +413,78 @@ def process() -> Process:
     return _PROCESS
 
 
+class _Description:
+    """What one open device says of its knobs -- its tunable fields with their
+    limits and units, a knob read in a unit, a quantity converted by its own
+    law -- known once per change of the device and answered from then on.
+
+    Only its own requests change a device (open, configure, a tune, a command,
+    make_safe, any SPI call that is not a read): each begins and ends a new
+    epoch, and what was known before is forgotten.  Within an epoch the
+    instrument is read once, when the fields are first asked
+    (``refresh_tunable_fields``); every later ask -- a scan editor's, a scan
+    plan's, a run's -- is answered from that reading, so no consumer keeps a
+    memo of its own.  Device Control's open and Refresh (the ``fields`` op) are
+    the operator asking the instrument again: each begins an epoch of its own.
+    An answer computed across a change is not kept.
+    """
+
+    def __init__(self) -> None:
+        self._state = threading.Lock()
+        #: One reader at a time: a second asker waits for the first's reading.
+        self._reading = threading.RLock()
+        self._epoch = 0
+        self._known: dict[Any, Any] = {}
+
+    def changed(self) -> None:
+        with self._state:
+            self._epoch += 1
+            self._known.clear()
+
+    def changing(self) -> "_Changing":
+        return _Changing(self)
+
+    def answer(self, key: Any, read: Callable[[], Any]) -> Any:
+        with self._reading:
+            with self._state:
+                if key in self._known:
+                    return self._known[key]
+                epoch = self._epoch
+            value = read()
+            with self._state:
+                if epoch == self._epoch:
+                    self._known[key] = value
+            return value
+
+
+class _Changing:
+    """A request that may change its device: what was known is forgotten when it
+    begins (a concurrent read does not keep the state it saw) and when it ends."""
+
+    def __init__(self, description: _Description) -> None:
+        self._description = description
+
+    def __enter__(self) -> None:
+        self._description.changed()
+
+    def __exit__(self, *_exc: object) -> None:
+        self._description.changed()
+
+
+#: The ops that only read their device: they leave what it is known to say standing
+#: (``fields``, the operator's Refresh, begins its own epoch).
+_READING_OPS = frozenset(("values", "snapshot", "query", "fields"))
+
+
+def _changes(op: str, params: dict[str, Any]) -> bool:
+    """Whether a request may change its device's description: anything but a read."""
+
+    if op == "spi":
+        method = str(params.get("method"))
+        return not (method.startswith("get:") or method in capabilities.READS)
+    return op not in _READING_OPS
+
+
 class Instance:
     """One device or node instance and its lane."""
 
@@ -417,6 +497,8 @@ class Instance:
         self.closer: Callable[[], None] | None = None
         self.admit_peers: Callable[[bool], None] | None = None
         self.values: dict[str, Any] = {}
+        #: What the open device says of its knobs, known once per change (``_Description``).
+        self.description = _Description()
         #: ``device=<identity>``: how this device's own log lines end (v2 identity_token).
         self.log_token: str | None = None
         self.runs: dict[str, Run] = {}
@@ -527,7 +609,11 @@ class Instance:
             if handler is None:
                 self.process.reply(identity, error=PluginError("unknown_op", f"unknown operation {op!r}"))
                 return True
-            result = handler(self, params)
+            if _changes(op, params):
+                with self.description.changing():
+                    result = handler(self, params)
+            else:
+                result = handler(self, params)
         except BaseException as error:  # noqa: BLE001 -- report the failure and keep cleanup ownership
             cause = error.cause if isinstance(error, _Invalid) else error
             keep = True
@@ -734,12 +820,22 @@ def _spi(instance: Instance, params: dict[str, Any]) -> Any:
         return getattr(instance.adapter, method[4:])
     if method.startswith("_"):
         raise PluginError("invalid", f"{method} is not part of a device contract")
+    args, kwargs = tuple(params.get("args", ())), dict(params.get("kwargs", {}))
     if method == "tunable_fields":
-        # As data -- the rows Device Control shows -- so a run's proxy can read the knobs it moves.
-        return _fields(instance, params)
+        # As data -- the rows Device Control shows -- so a run's proxy can read the knobs it moves;
+        # what the device is known to say, read from the instrument once per change.
+        return _described_fields(instance, {})
     if method == "read_tunable_in_unit":
-        # One knob read in a unit, by the device's own conversion: a row as well.
-        return _row(instance.adapter.read_tunable_in_unit(*params.get("args", ()), **params.get("kwargs", {})))
+        # One knob read in a unit, by the device's own conversion: a row as well,
+        # from the same reading the fields are answered from.
+        def read() -> Any:
+            _described_fields(instance, {})
+            return _row(instance.adapter.read_tunable_in_unit(*args, **kwargs))
+        return instance.description.answer(_asked(method, args, kwargs), read)
+    if method == "convert_tunable_value":
+        # A quantity by the device's own law (an RF level into its load): it holds until the device changes.
+        return instance.description.answer(_asked(method, args, kwargs),
+                                           lambda: instance.adapter.convert_tunable_value(*args, **kwargs))
     if method == "tune_in_unit":
         return tunable.tune_in_unit(instance.adapter, *params.get("args", ()), **params.get("kwargs", {}))
     target = getattr(instance.adapter, method)
@@ -825,17 +921,37 @@ def notifier() -> Notifier:
 
 
 def _fields(instance: Instance, params: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every tunable field, read fresh; `units` names the spelling a field is shown in."""
+    """Device Control's open and Refresh: every tunable field read from the instrument
+    again; `units` names the spelling a field is shown in.  What it read is what the
+    device is known to say until it changes (``_Description``)."""
+    instance.device()
+    instance.description.changed()
+    return _described_fields(instance, dict(params.get("units") or {}))
+
+
+def _described_fields(instance: Instance, units: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every tunable field as the device is known to say it: the instrument is read
+    once per change of the device (each field in its own unit), every other
+    spelling from that reading by the device's own conversion."""
     instance.device()
     adapter: Any = instance.adapter
-    units = dict(params.get("units") or {})
-    rows = []
-    for item in tunable.refresh_tunable_fields(adapter):
-        unit = str(units.get(item.metadata.name) or "")
-        if unit and unit != (item.metadata.unit or ""):
-            item = tunable.read_tunable_in_unit(adapter, item.metadata.name, unit)
-        rows.append(_row(item))
-    return rows
+    own = instance.description.answer(("fields",), lambda: tunable.refresh_tunable_fields(adapter))
+    spelled = tuple(sorted((str(name), str(unit)) for name, unit in units.items() if unit))
+
+    def rows() -> list[dict[str, Any]]:
+        answer = []
+        for item in own:
+            unit = dict(spelled).get(item.metadata.name, "")
+            if unit and unit != (item.metadata.unit or ""):
+                item = tunable.read_tunable_in_unit(adapter, item.metadata.name, unit)
+            answer.append(_row(item))
+        return answer
+    return instance.description.answer(("rows", spelled), rows)
+
+
+def _asked(method: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    """One read's question as a key (its arguments are plain JSON from the core)."""
+    return json.dumps([method, args, kwargs], sort_keys=True, default=repr)
 
 
 def _row(item: Any) -> dict[str, Any]:
@@ -1144,6 +1260,8 @@ class Run:
         self.deliveries: queue.Queue[tuple[int, dict[str, Any]]] = queue.Queue()
         #: What this run's deliveries name by number: schemas, source run records.
         self.refs = RunRefs()
+        #: The reads it watches (ctx.watch), by name: what the core last told of each.
+        self.watches: dict[str, Any] = {}
         self.thread = threading.Thread(target=self._main, name=f"zlc-run-{instance.name}", daemon=True)
 
     def deliver(self, identity: int, params: dict[str, Any]) -> None:

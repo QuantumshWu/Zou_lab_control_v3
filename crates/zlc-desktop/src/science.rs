@@ -52,7 +52,6 @@ pub struct Completion {
     pub intents:BTreeMap<String,BindingAuthority>,
     pub action:String,
     pub decision:Option<mpsc::Sender<PresentationDecision>>,
-    pub sync: bool,
     pub publications: Vec<(String,PublicationKey)>,
     pub cohorts:Vec<Vec<String>>,
     pub imported:Option<DecodedArchive>,
@@ -138,15 +137,15 @@ impl Science {
             let (imported,result)=match self.open(job.command["path"].as_str().unwrap_or("")) {
                 Ok(value)=>(Some(value),Ok((Value::Null,BTreeMap::new()))),Err(error)=>(None,Err(error))};
             return Completion {ticket:job.ticket,document:job.document,request,target:None,authorities:job.authorities.clone(),intents:job.intents.clone(),
-                action:"open".into(),decision:None,sync:false,publications:Vec::new(),cohorts:Vec::new(),imported,result};
+                action:"open".into(),decision:None,publications:Vec::new(),cohorts:Vec::new(),imported,result};
         }
         if job.command["action"]=="drop_document" {
             // A closed Figure Viewer's document goes, with its sessions and reads.
+            // It presents nothing: there is nothing for the window to decide.
             self.documents.remove(&job.document);
             self.current = job.document;
-            self.pending=Some(PendingEffects{effects:Vec::new(),intents:BTreeMap::new(),authorities:BTreeMap::new()});
             return Completion {ticket:job.ticket,document:job.document,request,target:None,authorities:BTreeMap::new(),intents:BTreeMap::new(),
-                action:"drop_document".into(),decision:None,sync:false,publications:Vec::new(),cohorts:Vec::new(),imported:None,result:Ok((Value::Null,BTreeMap::new()))};
+                action:"drop_document".into(),decision:None,publications:Vec::new(),cohorts:Vec::new(),imported:None,result:Ok((Value::Null,BTreeMap::new()))};
         }
         self.derivatives.sync_sources();
         self.derivatives.set_published(&job.command["published_outputs"]);
@@ -173,7 +172,7 @@ impl Science {
         self.pending=Some(PendingEffects{effects,intents:job.intents.clone(),authorities:job.authorities.clone()});
         if matches!(action.as_str(),"close"|"close_panel") && result.is_ok() { if let Some(document) = self.documents.get_mut(&self.current) { document.reads.clear(); } }
         Completion { ticket:job.ticket, document:job.document, request, target:job.command["panel"].as_str().map(str::to_owned),
-            authorities:job.authorities.clone(), sync:action == "sync_panels", intents:job.intents.clone(),action,decision:None,
+            authorities:job.authorities.clone(), intents:job.intents.clone(),action,decision:None,
             publications, cohorts, imported:None, result }
     }
 
@@ -288,6 +287,10 @@ impl Science {
         Ok((execution.state, execution.fronts))
     }
 
+    /// Whether the last job's presentation waits for the window's decision (what it accepted): a job
+    /// that presented something does; an opened file's decoding and a dropped document do not.
+    pub fn awaits_decision(&self) -> bool { self.pending.is_some() }
+
     pub fn finish_presentation(&mut self, decision:PresentationDecision) {
         let pending=self.pending.take();
         if let Some(document) = self.documents.get_mut(&self.current) { document.figure.finish_presentation(&decision.targets,&decision.fronts); }
@@ -323,6 +326,24 @@ mod tests {
     use super::*;
     use crate::panels::tests::{event, geometry, image_schema, latest, status_schema};
     use crate::panels::Panels;
+
+    /// The worker waits for the window's decision only after a job that presented something: an
+    /// opened file's decoding and a dropped document go on without the window.
+    #[test]
+    fn only_a_presentation_waits_for_the_windows_decision() {
+        let mut science = Science::new(Runtime::new(), Arc::new(|_| {}), Arc::new(|| {}), Arc::new(|_| {}));
+        let job = |command: Value, document: u32| Job { ticket: 1, command, inputs: Vec::new(), authorities: BTreeMap::new(), intents: BTreeMap::new(), archive: None, document };
+        let opened = science.execute(&job(json!({"id": 1, "action": "open", "path": "no such figure.npz"}), 1));
+        assert!(opened.result.is_err() && !science.awaits_decision());
+        let ready = science.execute(&job(json!({"id": 0, "action": "ready", "dpr": 1.0}), 0));
+        assert!(ready.result.is_ok() && science.awaits_decision(), "{:?}", ready.result.err());
+        science.finish_presentation(PresentationDecision::default());
+        assert!(!science.awaits_decision());
+        science.execute(&job(json!({"id": 0, "action": "drop_document"}), 1));
+        assert!(!science.awaits_decision());
+        // The next job runs without a decision for the last.
+        science.execute(&job(json!({"id": 0, "action": "ready", "dpr": 1.0}), 0));
+    }
 
     /// The document draws what the board captured: once the camera and its Occupancy have
     /// both ended, every later sync (held or not) shows the same last shot with its rings,

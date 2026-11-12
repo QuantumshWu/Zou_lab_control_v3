@@ -137,3 +137,20 @@ fn preparation_is_once_before_publication_and_resources_expire_with_run(){
     let spec=json!({"axes":[{"port":"x","identity":"x","label":"x","unit":"","values":[1.],"host_advanced":false}],"scan_repeats":1,"run_repeats":1});
     assert!(execution::dispatch("run.scan.prepare",&json!({"spec":spec}),&published).unwrap_err().contains("before outputs"));
 }
+
+#[test]
+fn the_plan_is_read_while_a_collect_waits_for_its_source(){
+    let run=Run::new();let handle=prepare(&run);configure(&run,&handle);
+    let collect=json!({"handle":handle,"timeout_seconds":1.0,"max_events":1024});
+    std::thread::scope(|scope|{
+        // No source event comes: the collect waits its whole slice for one.
+        let waiting=scope.spawn(||execution::dispatch("run.scan.collect",&collect,&run));
+        std::thread::sleep(Duration::from_millis(100));
+        let started=std::time::Instant::now();
+        assert_eq!(execution::plan(&handle,&run).unwrap().axes()[0].values,[1.,2.,3.]);
+        execution::accept_pulse(&handle,None,json!({"config":{}}),&run).unwrap();
+        assert!(started.elapsed()<Duration::from_millis(200),"the plan never waits for a scan operation");
+        assert!(execution::dispatch("run.scan.rows",&json!({"handle":handle,"scope":"all","start":0,"count":1}),&run).unwrap_err().contains("another operation"));
+        assert_eq!(waiting.join().unwrap().unwrap()["collected"],0);
+    });
+}

@@ -69,6 +69,11 @@ impl PluginProcess {
         self.writer.send(message)
     }
 
+    /// Queue a message and go on: `failed` runs, on the writer's thread, only if it was not written.
+    pub fn post(&self, message: &Value, failed: impl FnOnce(CallError) + Send + 'static) {
+        self.writer.post(message, move |sent| if let Err(error) = sent { failed(error); });
+    }
+
     pub fn event(&self, op: &str, params: Value) -> Result<(), CallError> {
         self.send(&json!({"t": "evt", "op": op, "p": params}))
     }

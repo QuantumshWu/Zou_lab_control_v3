@@ -537,7 +537,8 @@ impl Deflater {
             self.bi_buf |= (value << self.bi_valid) as u16;
             self.out.extend_from_slice(&self.bi_buf.to_le_bytes());
             self.bi_buf = (value >> (16 - self.bi_valid)) as u16;
-            self.bi_valid += length - 16;
+            // More than 16 bits in all: the buffer took 16, the rest stay (zlib's bi_valid += length - Buf_size, summed first in unsigned arithmetic).
+            self.bi_valid = self.bi_valid + length - 16;
         } else {
             self.bi_buf |= (value << self.bi_valid) as u16;
             self.bi_valid += length;

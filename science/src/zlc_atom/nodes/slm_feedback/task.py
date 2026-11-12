@@ -2478,13 +2478,13 @@ class SlmFeedbackTask:
             except Exception:
                 # Preserve a board fault that stopped the triggers; otherwise
                 # retain the camera's original failure. Never repeat the batch.
-                report = self._board.wait_done(command_id, 0.0)
+                report = self._board.reported(self._board.watch_done(command_id))
                 if report is None or report.get("status") == STATUS_DONE:
                     raise
                 raise RuntimeError(f"the pulse failed: {report.get('status')}")
             else:
                 check_cancelled(context)
-                report = self._board.wait_report(command_id, context.cancel_requested)
+                report = self._board.wait_report(self._board.watch_done(command_id), context.cancel_requested)
                 if report.get("status") != STATUS_DONE:
                     raise RuntimeError(f"the pulse did not confirm DONE: status={report.get('status')}")
                 completed = True

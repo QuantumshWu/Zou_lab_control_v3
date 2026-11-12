@@ -29,7 +29,7 @@ export class DiagnosticsPopup {
   private state: DiagnosticsState | undefined;
 
   constructor(anchor: Button, private send: Send) {
-    const body = element("div", "form diagnostics-form");
+    const body = element("div", "form");
     this.budget = new Field("diagnostics", this.spec(), {
       commit: value => this.send({ action: "set_diagnostics", budget_mib: Number(value) }, "Setting the data budget…"),
     });

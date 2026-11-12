@@ -307,12 +307,85 @@ pub fn parse_pulse_json(text: &str) -> Result<Json> {
     Ok(value)
 }
 
-pub fn read_subpulse(path: &Path) -> Result<Subpulse> {
-    let text = std::fs::read_to_string(path).map_err(|error| Error::new(Kind::Io, format!("{}: {error}", path.display())))?;
-    subpulse_from_tree(&parse_pulse_json(&text)?)
+// ------------------------------------------------------------------ reading files
+/// What identifies one version of a file: its modification time and length.
+pub type Stamp = (std::time::SystemTime, u64);
+
+/// The stamp of the file at `path` now (None: it cannot be read).
+pub fn stamp(path: &Path) -> Option<Stamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
 }
 
-pub fn write_subpulse(path: &Path, subpulse: &Subpulse) -> Result<()> { atomic_write(path, subpulse_to_tree(subpulse).readable().as_bytes()) }
+fn files<T>(held: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> { held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) }
+
+/// Files read ahead, off the window's turn, for the command about to read them there (or why they could not be).
+static READ_AHEAD: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Result<Vec<u8>>>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Read `path` now, for the next [`read_file`] of it to take (whoever reads it later need not wait on the disk).
+pub fn read_ahead(path: &Path) {
+    let path = absolute(path);
+    let bytes = std::fs::read(&path).map_err(|error| Error::new(Kind::Io, format!("{}: {error}", path.display())));
+    // A Subpulse file is parsed here too: the Subpulse its sources resolve to is then known.
+    if let Some(text) = bytes.as_ref().ok().and_then(|bytes| std::str::from_utf8(bytes).ok()) {
+        if let (Some(stamp), Ok(subpulse)) = (stamp(&path), parse_pulse_json(text).and_then(|tree| subpulse_from_tree(&tree))) {
+            files(&SUBPULSES).insert(path.clone(), (stamp, Arc::new(subpulse)));
+        }
+    }
+    files(&READ_AHEAD).insert(path, bytes);
+}
+
+/// Forget what was read ahead of `path` and not taken (the command that wanted it refused).
+pub fn forget_read_ahead(path: &Path) { files(&READ_AHEAD).remove(&absolute(path)); }
+
+/// The bytes of `path`: what was read ahead of it, else the disk's.
+pub fn read_file(path: &Path) -> Result<Vec<u8>> {
+    if let Some(read) = files(&READ_AHEAD).remove(&absolute(path)) { return read; }
+    std::fs::read(path).map_err(|error| Error::new(Kind::Io, format!("{}: {error}", path.display())))
+}
+
+/// [`read_file`] as text.
+pub fn read_text(path: &Path) -> Result<String> {
+    String::from_utf8(read_file(path)?).map_err(|_| Error::new(Kind::Io, format!("{}: stream did not contain valid UTF-8", path.display())))
+}
+
+/// Each Subpulse file as last read, by its stamp then: a Subpulse source resolves without reading
+/// its file again until the file changes.
+static SUBPULSES: std::sync::Mutex<std::collections::BTreeMap<PathBuf, (Stamp, Arc<Subpulse>)>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The Subpulse file at `path`, read again only when its stamp changed since it was last read.
+pub fn read_subpulse(path: &Path) -> Result<Subpulse> {
+    let path = absolute(path);
+    let now = stamp(&path);
+    if let Some((_, subpulse)) = files(&SUBPULSES).get(&path).filter(|(was, _)| Some(*was) == now) { return Ok((**subpulse).clone()); }
+    let subpulse = subpulse_from_tree(&parse_pulse_json(&read_text(&path)?)?)?;
+    match now {
+        Some(stamp) => { files(&SUBPULSES).insert(path, (stamp, Arc::new(subpulse.clone()))); }
+        None => { files(&SUBPULSES).remove(&path); }
+    }
+    Ok(subpulse)
+}
+
+/// Write `path` (atomically); a Subpulse file is known as written, so its sources resolve without reading it back.
+pub fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let path = absolute(path);
+    atomic_write(&path, bytes)?;
+    let written = std::str::from_utf8(bytes).ok().and_then(|text| parse_pulse_json(text).and_then(|tree| subpulse_from_tree(&tree)).ok());
+    match written.zip(stamp(&path)) {
+        Some((subpulse, stamp)) => { files(&SUBPULSES).insert(path, (stamp, Arc::new(subpulse))); }
+        None => { files(&SUBPULSES).remove(&path); }
+    }
+    Ok(())
+}
+
+/// The Subpulse files whose stamp changed since they were read (each is read again at its next use).
+pub fn changed_subpulses() -> Vec<PathBuf> {
+    let known: Vec<(PathBuf, Stamp)> = files(&SUBPULSES).iter().map(|(path, (stamp, _))| (path.clone(), *stamp)).collect();
+    let changed: Vec<PathBuf> = known.into_iter().filter(|(path, was)| stamp(path) != Some(*was)).map(|(path, _)| path).collect();
+    let mut held = files(&SUBPULSES);
+    for path in &changed { held.remove(path); }
+    changed
+}
 
 /// Replace one file atomically: a sibling temporary file renamed over the target.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -369,12 +442,7 @@ pub fn read_config_values(path: &Path) -> Result<ConfigValues> {
     if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("json")) {
         return value_error(format!("config values must be JSON: {}", path.display()));
     }
-    let text = std::fs::read_to_string(path).map_err(|error| Error::new(Kind::Io, format!("{}: {error}", path.display())))?;
-    config_values_from_tree(&parse_pulse_json(&text)?)
-}
-
-pub fn write_config_values(path: &Path, values: &ConfigValues) -> Result<()> {
-    atomic_write(path, config_values_to_tree(values)?.readable().as_bytes())
+    config_values_from_tree(&parse_pulse_json(&read_text(path)?)?)
 }
 
 // ------------------------------------------------------------------ documents
@@ -465,8 +533,7 @@ pub fn editor_section_to_tree(section: &EditorSection, sequence: &Sequence) -> J
 /// relative Subpulse source is resolved beside the file.
 pub fn read_pulse_document(path: &Path) -> Result<(Sequence, EditorSection)> {
     let source = absolute(path);
-    let text = std::fs::read_to_string(&source).map_err(|error| Error::new(Kind::Io, format!("{}: {error}", source.display())))?;
-    let (tree, section) = split_document(&parse_pulse_json(&text)?)?;
+    let (tree, section) = split_document(&parse_pulse_json(&read_text(&source)?)?)?;
     let sequence = sequence_from_tree(&tree)?;
     let parent = source.parent().map(Path::to_path_buf).unwrap_or_default();
     let sequence = sequence.with(|parts| for component in &mut parts.components {

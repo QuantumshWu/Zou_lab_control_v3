@@ -14,6 +14,17 @@ from zlc_plugin.tunable import convert_tunable_field, read_tunable_in_unit, snap
 from scan_reference import attach_scan_oracle
 
 
+def watching(core):
+    """A run context's watch as the core answers a watched read: at once (these fakes' reports are in)."""
+    from zlc_plugin.context import Watched
+
+    def watch(command, **params):
+        watched = Watched()
+        watched.answered(core(command, _watch="0", **params))
+        return watched
+    return watch
+
+
 def field(unit='Hz', current=1001000.0, step=1000.0):
     return TunableField(AuthoringField('frequency', 'float', 'Frequency', 1001000.0,
         minimum=1000.0, maximum=200000000.0, step=step, unit=unit), current, True,
@@ -120,8 +131,8 @@ class NumericUnits(unittest.TestCase):
                     if command == 'pulse_run':
                         if fail_second and params.get('stage') is None: raise RuntimeError('second fire failed')
                         return {'command_id': 1, 'applied': {'config': {'clock': 50e6}}}
-                    return {'done': True, 'status': 'done'}
-                context = types.SimpleNamespace(core=core, cancel_requested=lambda: False,
+                    return {'done': True, 'status': 'done', 'elapsed_seconds': 0.0}
+                context = types.SimpleNamespace(core=core, watch=watching(core), cancel_requested=lambda: False,
                     discard_inputs=lambda: None, next_input=lambda timeout: source,
                     acquire=lambda node, **kwargs: ordering.append(('acquire', knob.entry.current)),
                     report_progress=lambda *args, **kwargs: None,
@@ -255,8 +266,8 @@ class LinkedScan(unittest.TestCase):
             if command=='pulse_run':
                 if 'scan' in params:held.update(scan=params['scan'])
                 return {'command_id':1,'applied':{'config':{}},'scan':held['scan']}
-            return {'done':True,'status':'done'}
-        context=types.SimpleNamespace(core=core,cancel_requested=lambda:False,discard_inputs=lambda:None,next_input=lambda t:source,
+            return {'done':True,'status':'done','elapsed_seconds':0.0}
+        context=types.SimpleNamespace(core=core,watch=watching(core),cancel_requested=lambda:False,discard_inputs=lambda:None,next_input=lambda t:source,
             report_progress=lambda *a,**k:None,record_devices=lambda:None,set_run_record=records.append,commit_live=lambda data,**k:outputs.append(data['scan']))
         attach_scan_oracle(context, lambda: source, outputs.append, records.append)
         scan=SeamlessScanMeasurement(pulse={'path':'test.json','api_fields':[]},plan=plan,
@@ -289,7 +300,7 @@ class LinkedScan(unittest.TestCase):
             if command=='pulse_stop':stops.append(True);return {}
             if command=='pulse_run':return receipt['loaded' if params.get('stage')=='load' else 'fired']
             return receipt['done']
-        context=types.SimpleNamespace(core=core,cancel_requested=lambda:False,discard_inputs=lambda:None,next_input=lambda t:source,
+        context=types.SimpleNamespace(core=core,watch=watching(core),cancel_requested=lambda:False,discard_inputs=lambda:None,next_input=lambda t:source,
             report_progress=lambda *a,**k:None,record_devices=lambda:None,set_run_record=records.append,commit_live=lambda data,**k:outputs.append(data['scan']))
         attach_scan_oracle(context, lambda: source, outputs.append, records.append)
         scan=SeamlessScanMeasurement(pulse={'path':'test.json','api_fields':[]},plan=plan,

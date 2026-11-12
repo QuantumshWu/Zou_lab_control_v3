@@ -8,7 +8,7 @@
 //! that advances STATUS and CURSOR the way the RTL does, one run at a time,
 //! handing each run to the [`World`] (the simulation's `simulation.board`).
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
 use zlc_core::journal::{self, json, Value};
@@ -247,8 +247,10 @@ pub fn trigger_points(program: &CompiledProgram, rows: &[Vec<u64>], lane: &str) 
 /// One attached board, as the application holds it.
 pub struct Board { link: Link, description: BoardDescription, name: String, last: Mutex<Option<(u32, Fate)>>, play: Mutex<Play>,
                    /// What the board confirmed it holds at its last LOAD or FIRE, and the schedules worked out from it
-                   /// (revision, lane, points): asked for at every frame's pace, they are neither fetched nor walked twice.
-                   held: Mutex<Option<AppliedState>>, schedules: Mutex<Vec<(u64, String, Json)>> }
+                   /// (revision, lane, points): each is walked once, however many readers it has.
+                   held: Mutex<Option<AppliedState>>, schedules: Mutex<Vec<(u64, String, Json)>>,
+                   /// Whoever is told each change of the play ([`Board::on_change`]).
+                   watchers: Mutex<Vec<Box<dyn Fn(u64) -> bool + Send>>> }
 
 const NOTHING: Play = Play { revision: 0, state: "none", command_id: None, run_repeats: 0, scan_repeats: 0, sent_us: 0, answered_us: 0 };
 
@@ -259,7 +261,7 @@ impl Board {
     pub fn virtual_board(config_path: Option<&Path>) -> Result<Board> {
         let board = VirtualBoard::open(config_path)?;
         let description = board.streamer.describe()?;
-        Ok(Board { link: Link::Virtual(board), description, name: "virtual".into(), last: Mutex::new(None), play: Mutex::new(NOTHING), held: Mutex::default(), schedules: Mutex::default() })
+        Ok(Board { link: Link::Virtual(board), description, name: "virtual".into(), last: Mutex::new(None), play: Mutex::new(NOTHING), held: Mutex::default(), schedules: Mutex::default(), watchers: Mutex::default() })
     }
 
     /// A pulse server at `host:port` (v2's `pulse_server` or `zlc-pulse-server`).
@@ -267,7 +269,7 @@ impl Board {
         let client = RemotePulseStreamer::new(host, port, None, CONNECT_TIMEOUT)?;
         client.open()?;
         let description = match client.describe() { Ok(description) => description, Err(error) => { let _ = client.close(); return Err(error); } };
-        Ok(Board { link: Link::Remote(client), description, name: format!("remote {host}:{port}"), last: Mutex::new(None), play: Mutex::new(NOTHING), held: Mutex::default(), schedules: Mutex::default() })
+        Ok(Board { link: Link::Remote(client), description, name: format!("remote {host}:{port}"), last: Mutex::new(None), play: Mutex::new(NOTHING), held: Mutex::default(), schedules: Mutex::default(), watchers: Mutex::default() })
     }
 
     /// Take a remote board back after another client held it (the server SAFEs
@@ -301,14 +303,31 @@ impl Board {
         loaded
     }
 
-    /// The board now holds or plays something else: every reader of its schedule sees a new revision.
+    /// The board now holds or plays something else: a new revision, told to every watcher.
     fn playing(&self, state: &'static str, command_id: Option<u32>, repeats: (u64, u64), sent_us: u64) {
-        let mut play = guard(&self.play);
-        *play = Play { revision: play.revision + 1, state, command_id, run_repeats: repeats.0, scan_repeats: repeats.1, sent_us, answered_us: journal::now_us() };
+        let revision = {
+            let mut play = guard(&self.play);
+            *play = Play { revision: play.revision + 1, state, command_id, run_repeats: repeats.0, scan_repeats: repeats.1, sent_us, answered_us: journal::now_us() };
+            play.revision
+        };
+        guard(&self.watchers).retain(|watcher| watcher(revision));
     }
 
     /// Counts every LOAD, FIRE, stop and report: what a reader of the schedule compares.
     pub fn revision(&self) -> u64 { guard(&self.play).revision }
+
+    /// Each later change of what the board holds or plays, as it happens: the new revision. Told
+    /// by whoever changed it, never asked for; the channel ends when the board is dropped, and a
+    /// watcher that drops its end is forgotten at the next change.
+    pub fn changes(&self) -> mpsc::Receiver<u64> {
+        let (watcher, changes) = mpsc::channel();
+        self.on_change(move |revision| watcher.send(revision).is_ok());
+        changes
+    }
+
+    /// `told` hears each later change of what the board holds or plays (its new revision), from
+    /// whoever made it, until it answers false.
+    pub fn on_change(&self, told: impl Fn(u64) -> bool + Send + 'static) { guard(&self.watchers).push(Box::new(told)); }
 
     /// The digital lanes a camera can be triggered from: (raw lane, port key, label), in the target's order.
     pub fn trigger_lanes(&self) -> Vec<(String, String, String)> {
@@ -332,13 +351,12 @@ impl Board {
     /// `{revision, state: none|loaded|playing|stopped|done, command_id, run_repeats, scan_repeats,
     /// sent_us, answered_us, lane, points: [{rising: [s], duration: s}]}`. A shot is one play of one
     /// point; each point is played `run_repeats` times before the next, the table `scan_repeats`
-    /// times (0: without end). `known`: the revision the asker already has, answered `unchanged`.
-    pub fn trigger_schedule(&self, lane: &str, known: Option<u64>) -> Result<Json> {
+    /// times (0: without end). A reader that follows it watches [`Board::changes`].
+    pub fn trigger_schedule(&self, lane: &str) -> Result<Json> {
         let play = *guard(&self.play);
         let mut facts = vec![("revision", int(play.revision)), ("state", Json::str(play.state)),
             ("command_id", play.command_id.map_or(Json::Null, int)), ("run_repeats", int(play.run_repeats)), ("scan_repeats", int(play.scan_repeats)),
             ("sent_us", int(play.sent_us)), ("answered_us", int(play.answered_us)), ("lane", Json::str(lane))];
-        if known == Some(play.revision) { facts.push(("unchanged", Json::Bool(true))); return Ok(Json::object(facts)); }
         let known = guard(&self.schedules).iter().find(|(revision, of, _)| *revision == play.revision && of == lane).map(|(.., points)| points.clone());
         let points = match known {
             Some(points) => points,

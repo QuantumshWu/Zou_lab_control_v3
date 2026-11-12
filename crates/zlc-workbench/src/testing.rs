@@ -4,7 +4,16 @@ use std::rc::Rc;
 
 use serde_json::{Value, json};
 
-use crate::{Host, PanelContent, Plugins, RunSpec, SignalInfo, TypeCatalog};
+use crate::{Event, Host, Lane, PanelContent, Plugins, RunSpec, SignalInfo, TypeCatalog, Work};
+
+thread_local! {
+    /// Work handed off and facts its starts produced, until a test lets them land (`settle`):
+    /// each test runs on its own thread.
+    static HANDED: RefCell<(Vec<(u64, Lane, Work)>, Vec<Event>)> = RefCell::default();
+}
+
+/// The work handed off and the facts produced since, taken.
+pub fn handed() -> (Vec<(u64, Lane, Work)>, Vec<Event>) { HANDED.with(|handed| std::mem::take(&mut *handed.borrow_mut())) }
 
 #[derive(Default)]
 pub struct Calls(pub Vec<String>, pub Vec<RunSpec>, pub Vec<(String, u64, Value)>, pub Vec<(String, u64, Result<Value, String>)>);
@@ -30,6 +39,7 @@ impl Plugins for LatePlugins {
     fn discover(&mut self, ticket: u64, type_id: &str, excluded: &[String]) { self.plugins.discover(ticket, type_id, excluded) }
     fn resolve(&mut self, ticket: u64, instance: &str, type_id: &str, parameters: &Value, excluded: &[String]) { self.plugins.resolve(ticket, instance, type_id, parameters, excluded) }
     fn publish(&mut self, ticket: u64, instance: &str, role: &str, published: bool) { self.plugins.publish(ticket, instance, role, published) }
+    fn work(&mut self, ticket: u64, lane: Lane, work: Work) { self.plugins.work(ticket, lane, work) }
 }
 
 impl Plugins for FakePlugins {
@@ -46,7 +56,17 @@ impl Plugins for FakePlugins {
         calls.0.push(format!("call {instance} {ticket} {op}"));
         calls.2.push((op.to_owned(), ticket, params.clone()));
     }
-    fn start(&mut self, run: &RunSpec) { let mut calls = self.calls.borrow_mut(); calls.0.push(format!("start {}", run.run)); calls.1.push(run.clone()); }
+    fn start(&mut self, run: &RunSpec) {
+        let mut calls = self.calls.borrow_mut(); calls.0.push(format!("start {}", run.run)); calls.1.push(run.clone());
+        // As the application's start does, before the plugin hears of the run.
+        if let Some(folder) = &run.folder {
+            let made = match folder.create() {
+                Ok(directory) => Event::RunDirectory { run: run.run.clone(), directory },
+                Err(error) => Event::RunFinished { run: run.run.clone(), outcome: "failed".into(), error: Some(json!({"message": error})), generation: None },
+            };
+            HANDED.with(|handed| handed.borrow_mut().1.push(made));
+        }
+    }
     fn stop(&mut self, run: &str) { self.calls.borrow_mut().0.push(format!("stop {run}")); }
     fn answer(&mut self, run: &str, request: &str, response: Option<&Value>) { self.calls.borrow_mut().0.push(format!("answer {run} {request} {}", response.is_some())); }
     fn acquired(&mut self, run: &str, ticket: u64, result: Result<Value, String>) {
@@ -65,6 +85,7 @@ impl Plugins for FakePlugins {
         calls.2.push(("resolve".into(), ticket, json!({"instance": instance, "parameters": parameters, "excluded": excluded})));
     }
     fn publish(&mut self, ticket: u64, instance: &str, _: &str, published: bool) { self.calls.borrow_mut().0.push(format!("publish {ticket} {instance} {published}")); }
+    fn work(&mut self, ticket: u64, lane: Lane, work: Work) { HANDED.with(|handed| handed.borrow_mut().0.push((ticket, lane, work))); }
 }
 
 #[derive(Default)]
@@ -149,24 +170,31 @@ mod tests {
         (Workbench::new(root, Box::new(plugins)).unwrap(), calls)
     }
 
+    /// A command's reply: at once, or once the work it handed off has landed.
     fn apply(workbench: &mut Workbench, host: &mut FakeHost, name: &str, params: Value) -> Result<Value, String> {
         workbench.apply(name, &params, &Origin::Operator, 1, host);
-        let result = workbench.take_replies().pop().unwrap().1;
-        settle_preparations(workbench, host);
+        let mut replies = workbench.take_replies();
+        if replies.is_empty() { settle(workbench, host); replies = workbench.take_replies(); }
+        let result = replies.pop().unwrap().1;
+        settle(workbench, host);
         result
     }
 
-    fn settle_preparations(workbench: &mut Workbench, host: &mut FakeHost) {
+    /// Every preparation answered, every handed-off work done and its answer applied, until none is left.
+    fn settle(workbench: &mut Workbench, host: &mut FakeHost) {
         loop {
             let tickets: Vec<u64> = workbench.tickets.iter().filter_map(|(ticket, value)| matches!(value, crate::Ticket::Prepare { .. }).then_some(*ticket)).collect();
-            if tickets.is_empty() { break; }
-            for ticket in tickets { workbench.on_event(Event::Answered { ticket, result: Ok(json!({"prepared": format!("test-{ticket}")})) }, host); }
+            for ticket in &tickets { workbench.on_event(Event::Answered { ticket: *ticket, result: Ok(json!({"prepared": format!("test-{ticket}")})) }, host); }
+            let (works, events) = handed();
+            if tickets.is_empty() && works.is_empty() && events.is_empty() { break; }
+            for event in events { workbench.on_event(event, host); }
+            for (ticket, _, work) in works { workbench.on_event(Event::Answered { ticket, result: work() }, host); }
         }
     }
 
     fn event(workbench: &mut Workbench, event: Event, host: &mut FakeHost) {
         workbench.on_event(event, host);
-        settle_preparations(workbench, host);
+        settle(workbench, host);
     }
 
     #[test]
@@ -184,6 +212,7 @@ mod tests {
         assert!(apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap_err().contains("still being discovered"));
         ready.set(true);
         workbench.refresh_catalog();
+        settle(&mut workbench, &mut host);
         assert!(workbench.notes.len() == 1 && workbench.notes[0].starts_with("old: device type camera.gone is not installed"), "only what discovery lacks: {:?}", workbench.notes);
         assert!(!workbench.console_report.0.contains("virtual_mot"));
         let applied = apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
@@ -273,7 +302,7 @@ mod tests {
         let spec = calls.borrow().1.last().cloned().unwrap();
         assert_eq!((spec.run.as_str(), spec.devices["sequencer"].as_str()), ("seamless_scan#1", "sequencer"));
         assert_eq!(spec.outputs["scan"], "@logic/seamless_scan/scan");
-        let directory = spec.directory.clone().unwrap();
+        let directory = workbench.run("seamless_scan#1").unwrap().directory.clone().unwrap();
         assert!(directory.starts_with(workbench.workspace.today()) && directory.ends_with("seamless_scan"));
         let start = workspace::read_strict(&directory.join("start.json"), "start").unwrap();
         assert_eq!(start["schema"], "zlc.task-start");
@@ -531,6 +560,53 @@ mod tests {
         assert_eq!(args["bundle"], expected);
         event(&mut workbench,Event::Answered { ticket, result: Ok(json!(["bad · term 2: and needs booleans"])) }, &mut host);
         assert!(issues(&workbench, &host).as_array().unwrap().iter().any(|issue| issue == "bad · term 2: and needs booleans"));
+        // Each launch of the source's producer is a new generation with the schemas it had: the
+        // reader is told nothing new, so nothing is asked of it (nor, through an editor, of the bench).
+        let count = || calls.borrow().2.len();
+        let before = count();
+        for generation in ["g2", "g3", "g4"] {
+            host.signals[0].generation = generation.into();
+            workbench.on_runtime(&mut host);
+        }
+        assert_eq!(count(), before, "a publication with the same schemas asks nothing");
+        // A schema that changes is told, to the queries that read the bundle only.
+        host.schemas.insert("@logic/camera_measurement/frames".into(), (json!({"tree": "run2"}), json!({"tree": "event"})));
+        host.signals[0].generation = "g5".into();
+        workbench.on_runtime(&mut host);
+        let asked: Vec<String> = calls.borrow().2[before..].iter().map(|(query, ..)| query.clone()).collect();
+        assert_eq!(asked, ["editor_facts", "admit_source"]);
+    }
+
+    /// A producer asked again (the bench changed) that answers the same frames tells its readers
+    /// nothing: they are not asked again for it.
+    #[test]
+    fn the_same_frames_under_a_new_revision_do_not_ask_the_readers_again() {
+        let root = scratch("frames-same");
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "derive", "kind": "node", "label": "Derive", "parameters": [],
+            "node": {"node_kind": "processor", "inputs": [{"name": "bundle", "delivery": "exact"}], "outputs": [], "queries": ["editor_facts"]}}));
+        for item in catalog["types"].as_array_mut().unwrap().iter_mut().filter(|item| item["type_id"] == "camera_measurement") {
+            item["node"]["queries"] = json!(["describe_output_frames"]);
+        }
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "derive", "source_signal": "@logic/camera_measurement/frames"})).unwrap();
+        event(&mut workbench, Event::Opened { instance: node_instance("camera_measurement"), working_point: Value::Null }, &mut host);
+        event(&mut workbench, Event::Opened { instance: node_instance("derive"), working_point: Value::Null }, &mut host);
+        let frames = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().rev().find(|(query, ..)| query == "describe_output_frames").unwrap().1;
+        let editors = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().filter(|(query, ..)| query == "editor_facts").count();
+        event(&mut workbench, Event::Answered { ticket: frames(&calls), result: Ok(json!(["frame", ["0", "1"]])) }, &mut host);
+        let told = editors(&calls);
+        // Asked again (a check), it answers the same frames: the reader is not asked again.
+        apply(&mut workbench, &mut host, "check_node", json!({"node": "camera_measurement"})).unwrap();
+        event(&mut workbench, Event::Answered { ticket: frames(&calls), result: Ok(json!(["frame", ["0", "1"]])) }, &mut host);
+        assert_eq!(editors(&calls), told);
+        // Other frames are told.
+        apply(&mut workbench, &mut host, "check_node", json!({"node": "camera_measurement"})).unwrap();
+        event(&mut workbench, Event::Answered { ticket: frames(&calls), result: Ok(json!(["frame", ["0", "1", "2"]])) }, &mut host);
+        assert_eq!(editors(&calls), told + 1);
     }
 
     /// A whole-bundle input is offered one entry per producer, as v2's `_source_choices`:
@@ -1666,7 +1742,7 @@ mod tests {
         apply(&mut wb,&mut host,"edit_node",json!({"node":"dynamic","values":{"output":"new"}})).unwrap();
         event(&mut wb,Event::Answered{ticket:asked(&calls,"declare_outputs"),result:Ok(json!([{"name":"new"}]))},&mut host);
         event(&mut wb,Event::RunFinished{run:"dynamic#1".into(),outcome:"completed".into(),error:None,generation:None},&mut host);
-        host.signals[0].generation="g2".into(); wb.follow_sources(&mut host); settle_preparations(&mut wb, &mut host);
+        host.signals[0].generation="g2".into(); wb.follow_sources(&mut host); settle(&mut wb, &mut host);
         let spec=calls.borrow().1.last().unwrap().clone();
         assert_eq!(spec.values["output"],"old"); assert_eq!(spec.outputs.keys().collect::<Vec<_>>(),["old"]);
     }
@@ -1806,6 +1882,43 @@ mod tests {
         assert_eq!(wb.node_row(wb.node("camera_measurement").unwrap(),&[])["state"],"warning");
     }
     #[test]
+    fn a_panels_preparing_line_goes_once_it_has_drawn() {
+        let (_root,mut wb,_calls,_host)=rig("panel-line",catalog());
+        wb.console_panel_note("panel-6","panel-6 is preparing survival".into(),"task");
+        wb.panels_drawn(["panel-2"]);
+        assert_eq!(wb.console_report.0,"panel-6 is preparing survival","another panel's drawing leaves it");
+        wb.panels_drawn(["panel-6"]);
+        assert_eq!(wb.console_report,(String::new(),"idle"));
+        // A later line is not taken away by the panel's drawing.
+        wb.console_panel_note("panel-6","frames has not published yet; panel-6 remains ready".into(),"warning");
+        wb.console_note("camera started".into());
+        wb.panels_drawn(["panel-6"]);
+        assert_eq!(wb.console_report.0,"camera started");
+        // A panel closed before it drew takes its line with it.
+        wb.console_panel_note("panel-7","panel-7 is preparing frames".into(),"task");
+        wb.panel_closed("panel-7");
+        assert_eq!(wb.console_report,(String::new(),"idle"));
+    }
+
+    #[test]
+    fn a_restarted_run_says_it_was_restarted_and_a_displaced_one_why() {
+        let (_root,mut wb,_calls,mut host)=rig("restart-reason",catalog());
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement", "node_id":"next_camera"}));
+        apply(&mut wb,&mut host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+        event(&mut wb,Event::RunStarted{run:"camera_measurement#1".into()},&mut host);
+        apply(&mut wb,&mut host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+        let run=wb.run("camera_measurement#1").unwrap();
+        assert_eq!((run.state.as_str(),run.stop_reason.as_deref()),("stopping",Some("it was restarted")));
+        event(&mut wb,Event::RunFinished{run:"camera_measurement#1".into(),outcome:"stopped".into(),error:None,generation:None},&mut host);
+        let restarted=wb.node("camera_measurement").unwrap().run.clone().unwrap();
+        event(&mut wb,Event::RunStarted{run:restarted.clone()},&mut host);
+        // Another node's start that needs the same camera: that run says so.
+        apply(&mut wb,&mut host,"start_node",json!({"node":"next_camera"})).unwrap();
+        assert_eq!(wb.run(&restarted).unwrap().stop_reason.as_deref(),Some("another start needs its devices"));
+    }
+
+    #[test]
     fn restart_to_an_unpublished_source_stops_the_previous_run() {
         let mut catalog=catalog(); catalog["types"][3]["node"]["artifact_inputs"]=json!([]);
         let (_root,mut wb,calls,mut host)=rig("restart-waiting",catalog);
@@ -1821,7 +1934,7 @@ mod tests {
         event(&mut wb,Event::RunFinished{run:"occupancy#1".into(),outcome:"stopped".into(),error:None,generation:None},&mut host);
         assert_eq!(calls.borrow().1.iter().filter(|run|run.node_id=="occupancy").count(),1);
         host.signals.push(SignalInfo{name:"@logic/next_camera/frames".into(),owner:"next_camera".into(),generation:"g2".into(),published:true,sealed:false,shape:"".into()});
-        wb.follow_sources(&mut host); settle_preparations(&mut wb,&mut host);
+        wb.follow_sources(&mut host); settle(&mut wb,&mut host);
         assert_eq!(calls.borrow().1.last().unwrap().source_signal,"@logic/next_camera/frames");
     }
 
@@ -2131,6 +2244,88 @@ mod tests {
             assert_eq!(snapshot_reply(&calls, "seamless_scan#1", 402).unwrap().unwrap(), Value::Null);
             assert!(snapshot_calls(&calls).is_empty(), "no capture means no empty apparatus record or later hardware read");
         }
+    }
+
+    /// File work a command needs is handed off: no reply until it is done, then applied on the turn.
+    #[test]
+    fn documents_are_read_and_written_off_the_owner_turn_and_applied_on_it() {
+        let (root, mut wb, _calls, mut host) = rig("off-turn", catalog());
+        let ask = |wb: &mut Workbench, host: &mut FakeHost, name: &str, params: Value| -> Vec<(u64, Lane, Work)> {
+            wb.apply(name, &params, &Origin::Operator, 9, host);
+            assert!(wb.take_replies().is_empty(), "{name} answers once its file work is done");
+            handed().0
+        };
+        let done = |wb: &mut Workbench, host: &mut FakeHost, works: Vec<(u64, Lane, Work)>| -> Result<Value, String> {
+            for (ticket, _, work) in works { wb.on_event(Event::Answered { ticket, result: work() }, host); }
+            wb.take_replies().pop().unwrap().1
+        };
+        // A save writes the board as it was asked; an edit made meanwhile leaves the board changed.
+        let saved = ask(&mut wb, &mut host, "save_layout", json!({"path": "layouts/mine.json"}));
+        assert!(saved.len() == 1 && saved[0].1 == Lane::Files && !root.join("layouts/mine.json").exists());
+        wb.apply("add_node", &json!({"type_id": "camera_measurement"}), &Origin::Operator, 10, &mut host);
+        assert_eq!(done(&mut wb, &mut host, saved).unwrap()["path"], json!(root.join("layouts").join("mine.json")));
+        assert!(wb.board.dirty, "the node added while it was written is not in the file");
+        assert!(workspace::read_strict(&root.join("layouts/mine.json"), "layout").unwrap()["logic"].as_array().unwrap().is_empty());
+        let again = ask(&mut wb, &mut host, "save_layout", json!({"path": "layouts/mine.json"}));
+        done(&mut wb, &mut host, again).unwrap();
+        assert!(!wb.board.dirty && wb.console_report.0.starts_with("layout saved to"));
+        // A read refuses as before, once read.
+        let missing = ask(&mut wb, &mut host, "load_apparatus", json!({"path": "nowhere.json"}));
+        assert!(done(&mut wb, &mut host, missing).unwrap_err().starts_with("Cannot read"));
+        assert_eq!(wb.report.1, "error");
+        let read = ask(&mut wb, &mut host, "read_layout", json!({"path": "layouts/mine.json"}));
+        assert_eq!(done(&mut wb, &mut host, read).unwrap()["nodes"].as_array().unwrap().len(), 1);
+        // The archive is written on its own lane and said when it is.
+        let export = ask(&mut wb, &mut host, "export_diagnostics", json!({"data": false}));
+        assert!(export.len() == 1 && export[0].1 == Lane::Export);
+        let exported = done(&mut wb, &mut host, export).unwrap();
+        assert!(std::path::Path::new(exported["path"].as_str().unwrap()).is_file());
+        assert!(wb.console_report.0.starts_with("diagnostics exported to"));
+    }
+
+    /// The files a draft names are read off the turn at each boundary (a change, a Start): its
+    /// row says so meanwhile, and a Start waits for its own read.
+    #[test]
+    fn a_draft_reads_the_files_it_names_off_the_turn_and_a_start_reads_them_again() {
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "player", "kind": "node", "label": "Player",
+            "parameters": [{"name": "pulse", "type": "str", "label": "Pulse", "default": ""}],
+            "node": {"node_kind": "measurement", "outputs": [], "workspace_resources": [
+                {"field": "pulse", "contract": "zlc.pulse/1", "directory": "pulses", "suffixes": [".json"], "argument": "description"}]}}));
+        let (root, mut wb, calls, mut host) = rig("draft-files", catalog);
+        std::fs::write(root.join("pulses").join("a.json"), b"{}").unwrap();
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = reads.clone();
+        wb.add_resource_resolver("zlc.pulse/", std::sync::Arc::new(move |path: &std::path::Path| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(json!({"read": path}))
+        }));
+        wb.apply("add_node", &json!({"type_id": "player", "values": {"pulse": "a.json"}}), &Origin::Operator, 1, &mut host);
+        wb.on_event(Event::Opened { instance: node_instance("player"), working_point: Value::Null }, &mut host);
+        let row = |wb: &Workbench| wb.node_row(wb.node("player").unwrap(), &[]);
+        assert!(row(&wb)["issues"].as_array().unwrap().contains(&json!(crate::logic::READING)), "{}", row(&wb));
+        let (works, _) = handed();
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing is read on the turn");
+        for (ticket, _, work) in works { wb.on_event(Event::Answered { ticket, result: work() }, &mut host); }
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(wb.node("player").unwrap().resources["pulse"]["read"], json!(root.join("pulses").join("a.json")));
+        assert!(row(&wb)["issues"].as_array().unwrap().is_empty(), "{}", row(&wb));
+        // Start reads the file again, and waits for it.
+        wb.apply("start_node", &json!({"node": "player"}), &Origin::Operator, 2, &mut host);
+        assert_eq!(wb.take_replies().pop().unwrap().1.unwrap()["phase"], "checking");
+        let (works, _) = handed();
+        assert_eq!(works.len(), 1);
+        for (ticket, _, work) in works { wb.on_event(Event::Answered { ticket, result: work() }, &mut host); }
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+        settle(&mut wb, &mut host);
+        let spec = calls.borrow().1.last().cloned().unwrap();
+        assert_eq!(spec.resources["description"]["read"], json!(root.join("pulses").join("a.json")));
+        // A file gone by a Start refuses it with the reason, once read.
+        apply(&mut wb, &mut host, "stop_node", json!({"node": "player"})).unwrap();
+        event(&mut wb, Event::RunFinished { run: spec.run.clone(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
+        std::fs::remove_file(root.join("pulses").join("a.json")).unwrap();
+        assert!(apply(&mut wb, &mut host, "start_node", json!({"node": "player"})).is_ok());
+        assert_eq!(wb.node("player").unwrap().error.as_deref(), Some("Pulse must be a file in pulses/"));
     }
 
 }

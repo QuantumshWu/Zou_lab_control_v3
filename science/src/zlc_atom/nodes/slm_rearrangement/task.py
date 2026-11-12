@@ -970,7 +970,7 @@ class SlmRearrangementTask:
                             firing_started+self._pulse_timing['after_end_seconds']-monotonic()+camera_timeout)
 
                     terminal = capture.read_cycles(photograph)
-                    report = board.wait_report(receipt["command_id"], context.cancel_requested)
+                    report = board.wait_report(board.watch_done(receipt["command_id"]), context.cancel_requested)
                     if report["status"] != STATUS_DONE:
                         raise RuntimeError(f"Pulse did not complete successfully: {report.get('fault') or report['status']}")
                     if not terminal.no_more_frames or capture.completed_cycles != 2:

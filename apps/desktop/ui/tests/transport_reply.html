@@ -1,0 +1,52 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Transport reply regression tests</title>
+<pre id="result">pending</pre>
+<script>
+// A fake host connection: messages in through chrome.webview, commands out through ipc.
+const hostEvents = new EventTarget();
+window.chrome = { webview: { addEventListener: (type, listener) => hostEvents.addEventListener(type, listener) } };
+window.ipc = { postMessage() {} };
+</script>
+<script type="module">
+import { Transport } from '../dist/transport.js';
+const assert=(value,message)=>{if(!value)throw Error(message)};
+const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)}`);
+const checks=[];
+const check=(name,test)=>{test();checks.push(name)};
+const states=[];
+const transport=new Transport(1);
+transport.attach({state:state=>states.push(state),frame(){},shared(){},releaseMappings(){},image(){},changed(){}});
+const say=message=>{const event=new Event('message');event.data=JSON.stringify(message);hostEvents.dispatchEvent(event)};
+(async()=>{try {
+  const answer=transport.request({action:'show_window'},'Showing…');
+  say({type:'state',request:1,result:{windows:[]},changes:[]});
+  equal(await answer,{windows:[]},'the answer');
+  assert(!transport.pending.has(1),'no longer pending');
+  checks.push('a request is answered by the message that answers it');
+
+  check('an error stands through broadcasts that answer none of this window\'s commands',()=>{
+    transport.send({action:'start_camera'},'Starting…');
+    say({type:'state',request:2,error:'Camera acquisition is already active',changes:[]});
+    equal(transport.lastError,'Camera acquisition is already active','the refusal is shown');
+    say({type:'state',changes:[[['acquisition'],{state:'idle'}]]});
+    say({type:'state',request:0,changes:[[['acquisition','state'],'running']]});
+    equal(transport.lastError,'Camera acquisition is already active','a broadcast (request 0 or none) leaves it');
+    say({type:'state',request:1e13,error:'not ours',changes:[]});
+    equal(transport.lastError,'Camera acquisition is already active','another window\'s refusal is not shown here');
+  });
+
+  check('request 0 is no request: the views are not told one',()=>{
+    say({type:'state',request:0,changes:[[['acquisition','state'],'stopped']]});
+    equal(states.at(-1).request,undefined,'request 0 reads as none');
+  });
+
+  check('this window\'s next command answered without an error takes the error away',()=>{
+    transport.send({action:'stop_camera'},'Stopping…');
+    say({type:'state',request:3,result:null,changes:[]});
+    equal(transport.lastError,'','cleared by its own answer');
+  });
+
+  document.getElementById('result').textContent=`PASS ${checks.length}\n${checks.join('\n')}`;
+} catch(error) { document.getElementById('result').textContent=`FAIL ${error.message}\n${error.stack}`; }})();
+</script>

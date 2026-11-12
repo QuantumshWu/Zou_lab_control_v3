@@ -24,8 +24,16 @@ fn settle(editor: &mut Editor) {
     }
 }
 
+/// As the host does: the files a command wrote put on the disk, then its answer settled.
+fn written(editor: &mut Editor, answer: zlc_pulse_editor::editor::Answer) -> zlc_pulse_editor::editor::Answer {
+    let Some(writes) = editor.take_writes() else { return answer };
+    let result = writes.files.iter().try_for_each(|(path, bytes)| zlc_pulse::codec::write_file(path, bytes).map_err(|error| error.message));
+    editor.written(writes, result, answer)
+}
+
 fn command(editor: &mut Editor, action: &str, value: Value) -> Value {
     let answer = editor.command(action, &args(value), true);
+    let answer = written(editor, answer);
     settle(editor);
     answer.unwrap_or_else(|error| panic!("{action}: {error}"))
 }
@@ -238,6 +246,34 @@ fn the_scan_page_says_where_the_board_is() {
     let progress = editor.state()["scan"]["progress_text"].as_str().unwrap().to_owned();
     assert!(progress.starts_with("Scan: point ") && progress.contains(" / 3  "), "{progress}");
     command(&mut editor, "pulse_stop", json!({}));
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// The status poll asks twice a second: an answer that finds the board as it was changes nothing
+/// the window shows (no view is made of it); one that finds it changed does.
+#[test]
+fn a_status_answer_that_finds_the_board_as_it_was_changes_nothing_shown() {
+    let (folder, mut editor) = connected("poll");
+    // The status question asked, answered by the board, and delivered.
+    let answer = |editor: &mut Editor| {
+        let mut jobs = editor.take_jobs();
+        assert_eq!(jobs.len(), 1, "one status question");
+        let Job::Device { work, done } = jobs.remove(0) else { panic!("the status question is a device job") };
+        let outcome = work(); done.set();
+        assert!(matches!(outcome, Outcome::Polled { .. }));
+        editor.deliver(outcome)
+    };
+    let poll = |editor: &mut Editor| { editor.poll(); answer(editor) };
+    assert!(!poll(&mut editor), "idle and idle again");
+    assert!(!poll(&mut editor));
+    // Something else drove the board: the next answer finds it playing.
+    let board = editor.board().unwrap().clone();
+    let sequence = editor.sequence().unwrap().clone();
+    zlc_pulse::run::run_sequence(&board, &sequence, &[], None, 0, 1).unwrap();
+    editor.board_touched();
+    assert!(answer(&mut editor), "the board now plays");
+    board.safe().unwrap();
+    assert!(poll(&mut editor), "stopped");
     let _ = std::fs::remove_dir_all(&folder);
 }
 

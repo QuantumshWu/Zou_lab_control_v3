@@ -431,6 +431,9 @@ that ends before `ready` answers too. `produced`/`panel` waits are unchanged.
   error, and `apply_devices` reopens it.
 - `stop_all` stops every run and drives every registered output safe: the pulse board's
   SAFE and each open device's `physical_outputs` (PLUGIN_PROTOCOL §7). Never refused.
+  Every output is asked at once, off the window's turn; the state's `stop_all.state` is
+  `making_safe` until each has answered, then `safe` or `not_safe` (with `failures`),
+  and the command is answered then.
 
 ## 6. Plugin host interface (B ↔ A)
 
@@ -461,8 +464,10 @@ The host's application requests map as: `run.operator_input` → `RunRequest`
 inside the run directory, `run.acquire` → `RunAcquire`, `core {command, params}` → that
 catalogue command, sent exactly as a remote client's call under the run's origin, its
 result answering the run; the command arrives with
-`_run` (the asking run id) beside its parameters, and `Workbench::run_claims(run)`
-names the devices that run holds. Device instances open when the
+`_run` (the asking run id) beside its parameters. The pulse board's own commands are
+answered before they reach the window (PULSE_V3 "Run claims"), held to
+`Workbench::active_runs()` -- each active run by its node's plugin instance, with the
+devices it holds -- as the window last stated them. Device instances open when the
 apparatus is applied and stay open across runs; a run claims them by `RunSpec.devices`.
 `RunSpec`: `run`, `node_id`, `type_id`, `values` (enabled fields), `source_signal`,
 `devices` (argument → instance_id), `artifacts` (name → path or frame claims),
@@ -524,6 +529,9 @@ once at terminal: `{"schema": "zlc.task-run", "run_id", "task", "input", "status
 {"state", "started_at", "ended_at", "progress", "stop_reason"}, "artifacts": [{"name",
 "path", "role", "contract_id", "size_bytes"}], "error"}`. Nothing in between; a
 crash leaves only `start.json`. Measurements and processors have no run directory.
+The directory and `start.json` are made by the run's start, off the window's turn and
+before the plugin hears of the run (`Event::RunDirectory` names it); `run.json` is
+written off the turn too, and `get_run` answers the record it wrote.
 
 ## 8. v2 design mistakes fixed here
 

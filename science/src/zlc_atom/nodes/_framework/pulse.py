@@ -3,8 +3,8 @@
 The pulse stack is native (docs/PULSE_V3.md): a plugin never decodes or
 compiles a pulse. A pulse workspace resource resolves, in the core, to its
 description (``pulse_describe``), which is what a node's build and queries
-receive; a run plays a document through ``pulse_run``, waits through
-``pulse_wait_done`` and makes the board safe through ``pulse_stop``. These
+receive; a run plays a document through ``pulse_run``, watches its report
+through ``pulse_wait_done`` and makes the board safe through ``pulse_stop``. These
 are the same catalogue entries the UI and MCP use, so a run's claims apply
 to a node exactly as to any other client.
 
@@ -91,10 +91,11 @@ class PulseBoard:
     """One run's use of the board: play a document, wait for it, make it safe."""
 
     def __init__(self, context: object) -> None:
-        core = getattr(context, "core", None)
-        if not callable(core):
-            raise TypeError("driving the pulse board needs a run context with core()")
+        core, watch = getattr(context, "core", None), getattr(context, "watch", None)
+        if not callable(core) or not callable(watch):
+            raise TypeError("driving the pulse board needs a run context with core() and watch()")
         self._core = core
+        self._watch = watch
 
     def run(
         self,
@@ -164,28 +165,39 @@ class PulseBoard:
                           run_repeats=int(run_repeats), scan_repeats=int(scan_repeats),
                           **({"scan_plan": dict(scan_plan)} if scan_plan is not None else {}))
 
-    def wait_done(self, command_id: int, timeout_seconds: float) -> Mapping[str, Any] | None:
-        """That FIRE's completion report, or None when it has not completed in time."""
+    def watch_done(self, command_id: int) -> Any:
+        """Watch that FIRE's report (``pulse_wait_done`` under ``context.watch``): answered at once --
+        its report if it is in, else not done -- and told once when the board reports, or when the
+        FIRE can no longer report (the board was made safe, its report taken). The watch takes the
+        report, which frees the board for the next FIRE; nothing asks the board again."""
 
-        report = self._core("pulse_wait_done", command_id=int(command_id), timeout_seconds=float(timeout_seconds))
-        return None if not report or not report.get("done") else report
+        return self._watch("pulse_wait_done", command_id=int(command_id))
 
-    def wait_report(self, command_id: int, should_stop: Callable[[], bool]) -> Mapping[str, Any]:
-        """Wait for that FIRE's report and stay stoppable meanwhile.
+    @staticmethod
+    def reported(done: Any) -> Mapping[str, Any] | None:
+        """The watched FIRE's report, or None while it plays; raises when it can no longer report."""
 
-        The board is asked in slices and Stop is read between them, so a
-        Stop leaves within one slice and the caller's cleanup makes the board
-        safe. A FIRE that can no longer report (the board was made safe, its
-        report was already taken) is refused by ``pulse_wait_done`` itself:
-        nothing here waits unconditionally.
+        report = done.latest
+        return report if report and report.get("done") else None
+
+    def wait_report(self, done: Any, should_stop: Callable[[], bool]) -> Mapping[str, Any]:
+        """Wait for the watched FIRE's report (:meth:`watch_done`) and stay stoppable meanwhile.
+
+        The core tells the report when the board has it; Stop is read between
+        slices, so a Stop leaves within one and the caller's cleanup makes the
+        board safe (which also ends the watch). A FIRE that can no longer
+        report is told as a refusal and raised here: nothing waits
+        unconditionally.
         """
 
         while True:
-            if should_stop():
-                raise RuntimeError(CANCELLED)
-            report = self.wait_done(command_id, _REPORT_SLICE_SECONDS)
+            seen = done.count
+            report = self.reported(done)
             if report is not None:
                 return report
+            if should_stop():
+                raise RuntimeError(CANCELLED)
+            done.wait(seen, _REPORT_SLICE_SECONDS)
 
     def stop(self) -> Mapping[str, Any]:
         """SAFE now; answers once the board is safe, raises when it is not."""
@@ -197,7 +209,7 @@ class PulseBoard:
 CANCELLED = "the run was cancelled"
 #: In the words of a fire refused because the run's pulse file changed (the core's PULSE_CHANGED).
 PULSE_CHANGED = "changed during this run"
-#: How long one wait for a report blocks before Stop is read again.
+#: How long one wait for a report sleeps before Stop is read again.
 _REPORT_SLICE_SECONDS = 0.1
 
 

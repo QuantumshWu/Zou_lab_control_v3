@@ -52,9 +52,16 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     assert_eq!(host.registry().owner_of(&first).unwrap(), pid);
     drop((frame, reply));
     assert_eq!(host.registry().holds(&first), 0);
+    // A size's pace is known from its second frame on (the arena gives a size back once it has gone
+    // unallocated for longer than its own longest gap): within that pace a released block is recycled.
     std::thread::sleep(Duration::from_millis(200));
-    let again = host.spi("echo", "frame", json!([256, 8]), json!({}), Duration::from_secs(10)).unwrap();
-    assert_eq!(block_of(&again.array(&again.value).unwrap().values), first, "a released block is recycled");
+    let paced = host.spi("echo", "frame", json!([256, 8]), json!({}), Duration::from_secs(10)).unwrap();
+    let second = block_of(&paced.array(&paced.value).unwrap().values);
+    drop(paced);
+    assert_eq!(host.registry().holds(&second), 0);
+    std::thread::sleep(Duration::from_millis(50));
+    let again = host.spi("echo", "frame", json!([256, 9]), json!({}), Duration::from_secs(10)).unwrap();
+    assert_eq!(block_of(&again.array(&again.value).unwrap().values), second, "a released block is recycled within its size's pace");
     drop(again);
     assert_eq!(host.spi("echo", "get:opened_with", json!([]), json!({}), Duration::from_secs(5)).unwrap().value, json!({"gain": 2.0}));
 

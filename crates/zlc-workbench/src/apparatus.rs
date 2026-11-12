@@ -175,6 +175,9 @@ pub(crate) fn resource(template: &str, parameters: &Map<String, Value>) -> Optio
 /// zlc_ui.status.counted: "1 device", "2 devices".
 fn counted(count: usize, noun: &str) -> String { format!("{count} {noun}{}", if count == 1 { "" } else { "s" }) }
 
+/// What a strict read of an apparatus file calls it.
+pub(crate) fn what(path: &Path) -> String { format!("apparatus {}", path.display()) }
+
 pub(crate) fn file_name(path: &Path) -> String { path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default() }
 
 /// v2 DeviceInstanceConfig `_text`: an id, name or type is non-empty text with no surrounding space.
@@ -454,13 +457,42 @@ impl Workbench {
         Ok(json!({"device": id}))
     }
 
-    /// Replace the draft from a `zlc.installation` file, entry by entry: a device
+    /// Read an apparatus file off the owner turn: for `load_apparatus` (`request`), or again once
+    /// discovery has answered (None: a file that is not there is no error then).
+    pub(crate) fn read_apparatus_file(&mut self, path: &Path, request: Option<u64>) {
+        let ticket = self.ticket(crate::Ticket::ApparatusRead { path: path.to_path_buf(), request });
+        let path = path.to_path_buf();
+        self.plugins.work(ticket, crate::Lane::Files, Box::new(move || {
+            if request.is_none() && !path.is_file() { return Ok(Value::Null); }
+            workspace::read_strict(&path, &what(&path))
+        }));
+    }
+
+    /// Whether the apparatus file is read again once discovery answers: nothing applied or edited since.
+    pub(crate) fn apparatus_rereadable(&self) -> bool { self.devices.is_empty() && !self.apparatus.edited() }
+
+    /// The apparatus file read again after discovery: it replaces the draft if nothing was applied
+    /// or edited meanwhile; else (or with no file) the draft is checked against the types.
+    pub(crate) fn apparatus_reread(&mut self, path: &Path, read: Result<Value, String>) {
+        if !self.apparatus_rereadable() || *path != self.apparatus.path || read.as_ref().is_ok_and(Value::is_null) { return self.draft_checked(); }
+        self.notes.clear();
+        if let Err(error) = self.apparatus_read(path, read) { self.notes.push(error); }
+        self.say_new_notes();
+    }
+
+    /// The draft against the discovered types: what is not installed is said.
+    pub(crate) fn draft_checked(&mut self) {
+        for note in self.uninstalled_draft() { if !self.notes.contains(&note) { self.notes.push(note); } }
+        self.say_new_notes();
+    }
+
+    /// Replace the draft from a `zlc.installation` file as read, entry by entry: a device
     /// entry v2 would refuse is left out with its reason and every other one loads.
     /// An unknown type is kept (it fails to open with its reason); a parameter the
     /// type no longer has is dropped, and a value its field refuses is left at its
     /// default, each with a note. The Devices@ line says all of it (v2 `_report`).
-    pub(crate) fn load_apparatus(&mut self, path: &Path) -> Result<Value, String> {
-        let read = workspace::read_strict(path, &format!("apparatus {}", path.display())).and_then(|document| self.read_apparatus(&document, path));
+    pub(crate) fn apparatus_read(&mut self, path: &Path, read: Result<Value, String>) -> Result<Value, String> {
+        let read = read.and_then(|document| self.read_apparatus(&document, path));
         let (draft, simulation, skipped, notes, lost) = match read {
             Ok(read) => read,
             // v2 load: a file that cannot be read leaves the draft as it was and says why; when it is
@@ -561,15 +593,27 @@ impl Workbench {
         Ok(Entry { instance_id, role, type_id, parameters, units })
     }
 
-    pub(crate) fn save_apparatus(&mut self, path: &Path, replace_unread: bool) -> Result<Value, String> {
-        // v2: a draft not read from its file goes to another file, or replaces it only when the operator says so.
-        if let Some(why) = self.apparatus.unread.as_ref().filter(|_| path == self.apparatus.path && path.is_file() && !replace_unread) {
-            return Err(format!("{} was not read in full ({why}); save it under another name, or replace it (what was left out is lost)", file_name(path)));
-        }
+    /// Write the apparatus as it stands now, off the owner turn; `apparatus_saved` applies it.
+    pub(crate) fn save_apparatus(&mut self, path: &Path, replace_unread: bool, request: u64) -> Result<(), String> {
         let roles: BTreeSet<&str> = self.apparatus.draft.iter().map(|entry| entry.role.as_str()).collect();
         if roles.len() != self.apparatus.draft.len() { return Err("Two devices have the same name; rename one before saving".into()); }
+        // v2: a draft not read from its file goes to another file, or replaces it only when the operator says so.
+        let unread = self.apparatus.unread.clone().filter(|_| path == self.apparatus.path && !replace_unread);
         let tree = self.apparatus.tree();
-        workspace::write_readable(path, &tree)?;
+        let ticket = self.ticket(crate::Ticket::ApparatusSaved { path: path.to_path_buf(), tree: tree.clone(), request });
+        let path = path.to_path_buf();
+        self.plugins.work(ticket, crate::Lane::Files, Box::new(move || {
+            if let Some(why) = unread.filter(|_| path.is_file()) {
+                return Err(format!("{} was not read in full ({why}); save it under another name, or replace it (what was left out is lost)", file_name(&path)));
+            }
+            workspace::write_readable(&path, &tree).map(|_| Value::Null)
+        }));
+        Ok(())
+    }
+
+    /// The apparatus was written as `tree`: that file is now what it is.
+    pub(crate) fn apparatus_saved(&mut self, path: &Path, tree: Value, written: Result<Value, String>) -> Result<Value, String> {
+        written?;
         self.apparatus.path = path.to_path_buf();
         self.apparatus.baseline = tree;
         self.apparatus.unread = None;

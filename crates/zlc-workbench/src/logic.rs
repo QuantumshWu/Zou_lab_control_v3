@@ -62,6 +62,14 @@ pub struct Node {
     pub resources: Map<String, Value>,
     /// Why a named resource could not be read (Start is refused while any).
     pub resource_issues: Vec<String>,
+    /// The artifact inputs (paths as written) that were not there when the draft's files were read.
+    pub missing_artifacts: Vec<String>,
+    /// The draft's files being read off the owner turn: the ticket, and the draft queries to ask
+    /// once they are (None: every one).
+    pub reading: Option<(u64, Option<Vec<String>>)>,
+    /// A Start's read of the files its configuration names: in flight, then its answer (what was read, the files).
+    pub start_reading: Option<u64>,
+    pub start_read: Option<(Value, Value)>,
     /// A Start that waits for the plugin to finish checking the draft: (origin, acquisition request).
     pub start_after_check: Option<(String, Option<(String, u64, String)>)>,
 }
@@ -76,7 +84,7 @@ impl Node {
         let answers = descriptor.map(|item| item.node().answers.iter().map(|(query, answer)| (query.clone(), (0, Ok(answer.clone())))).collect()).unwrap_or_default();
         Node { id, name, type_id, draft, auto_preview, revision: 1, running: None, frozen: None, run: None, error: None, follow: false, follow_attempted: None,
                pending: None, preparing: None, removing: false, preview_panels: BTreeMap::new(), instance: Instance::Opening, answers, checked: BTreeSet::new(), resources: Map::new(), resource_issues: Vec::new(),
-               start_after_check: None }
+               missing_artifacts: Vec::new(), reading: None, start_reading: None, start_read: None, start_after_check: None }
     }
 
     /// A new draft, or the same one asked again: its queries are outstanding until answered anew.
@@ -127,6 +135,8 @@ pub struct Run {
     pub children: Vec<String>,
     pub snapshot_owner: String,
     pub bench: Option<crate::bench::Bench>,
+    /// The `run.json` written at its end.
+    pub record: Option<Value>,
 }
 
 impl Run {
@@ -225,10 +235,22 @@ pub(crate) const CHECKING: &str = "Checking the draft…";
 pub(crate) const STARTING_PLUGIN: &str = " is starting its plugin";
 /// A device the draft needs is still opening or reopening (Init/Apply in flight): a Start waits for it.
 pub(crate) const DEVICE_OPENING: &str = " is still opening";
+/// The files the draft names are being read (off the owner turn): a Start waits for them.
+pub(crate) const READING: &str = "Reading the files the draft names…";
 
 /// Whether an admission issue only means "not yet": Start waits it out (v2's start_camera
 /// opened the camera, then started).
-fn waiting(issue: &str) -> bool { issue == CHECKING || issue.ends_with(STARTING_PLUGIN) || issue.ends_with(DEVICE_OPENING) }
+fn waiting(issue: &str) -> bool { issue == CHECKING || issue == READING || issue.ends_with(STARTING_PLUGIN) || issue.ends_with(DEVICE_OPENING) }
+
+/// The paths an artifact input names, as written (a path, or claims of `{path, frames}`; a
+/// claim's empty path is one not chosen yet).
+fn artifact_paths(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(path) if !path.is_empty() => vec![path.clone()],
+        Value::Array(claims) => claims.iter().filter_map(|claim| claim["path"].as_str().map(str::to_owned)).collect(),
+        _ => Vec::new(),
+    }
+}
 
 impl Workbench {
     pub(crate) fn node(&self, id: &str) -> Option<&Node> { self.nodes.iter().find(|node| node.id == id) }
@@ -355,13 +377,69 @@ impl Workbench {
     /// Ask the node's process every draft query its type answers, for this revision.
     fn send_queries(&mut self, id: &str) { self.ask_queries(id, None) }
 
-    /// Ask the draft queries (`only`: just that one) for the node's current draft.
-    fn ask_queries(&mut self, id: &str, only: Option<&str>) {
+    /// Ask the draft queries (`only`: just those) for the node's current draft, once the files it
+    /// names are read (v2 reads them at a draft's boundaries: a change, Refresh, Start), off the turn.
+    fn ask_queries(&mut self, id: &str, only: Option<&[&str]>) {
         let Some(node) = self.node(id) else { return };
-        let (resources, resource_issues) = self.read_resources(&node.type_id, &node.draft.values);
-        let node = self.node_mut(id).unwrap();
-        (node.resources, node.resource_issues) = (resources, resource_issues);
-        let node = self.node(id).unwrap();
+        let (key, files) = self.draft_files(node, &node.draft.values);
+        let Some(files) = files else {
+            let node = self.node_mut(id).unwrap();
+            node.resources.clear(); node.resource_issues.clear(); node.missing_artifacts.clear(); node.reading = None;
+            return self.send_draft_queries(id, only);
+        };
+        // A read still in flight is replaced: this one asks what both asked.
+        let only = only.map(|only| only.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>());
+        let wanted = match node.reading.as_ref().map(|(_, wanted)| wanted.clone()) {
+            None => only,
+            Some(None) => None,
+            Some(Some(earlier)) => only.map(|only| earlier.into_iter().chain(only).collect::<BTreeSet<_>>().into_iter().collect()),
+        };
+        let ticket = self.ticket(Ticket::DraftFiles { node: id.to_owned(), key, start: false });
+        self.node_mut(id).unwrap().reading = Some((ticket, wanted));
+        self.plugins.work(ticket, crate::Lane::Files, Box::new(move || Ok(files.read())));
+    }
+
+    /// The files a draft with `values` names (its enabled workspace resources, its artifact inputs),
+    /// and what identifies that read; None when it names none.
+    fn draft_files(&self, node: &Node, values: &Map<String, Value>) -> (Value, Option<workspace::DraftFiles>) {
+        let Some(descriptor) = self.catalog.get(&node.type_id) else { return (Value::Null, None) };
+        let effective = fields::effective(&descriptor.parameters, values);
+        let resources: Vec<workspace::ResourceAsk> = descriptor.node().workspace_resources.iter().filter_map(|spec| {
+            let field = descriptor.parameters.iter().find(|field| field.name == spec.field)?;
+            fields::enabled(field, &effective).then(|| workspace::ResourceAsk { spec: spec.clone(),
+                label: if field.label.is_empty() { field.name.clone() } else { field.label.clone() },
+                selected: values.get(&spec.field).and_then(Value::as_str).unwrap_or("").to_owned() })
+        }).collect();
+        let artifacts: Vec<String> = descriptor.node().artifact_inputs.iter().filter_map(|spec| node.draft.artifact_inputs.get(&spec.name))
+            .flat_map(artifact_paths).filter(|path| !path.is_empty()).collect();
+        if resources.is_empty() && artifacts.is_empty() { return (Value::Null, None); }
+        let key = json!({"resources": resources.iter().map(|ask| json!([ask.spec.field, ask.selected])).collect::<Vec<_>>(), "artifacts": artifacts});
+        (key, Some(self.workspace.draft_files(resources, artifacts)))
+    }
+
+    /// The draft's files were read: for its queries (sent now), or for a Start (which goes on).
+    pub(crate) fn draft_files_read(&mut self, id: &str, ticket: u64, key: Value, start: bool, result: Result<Value, String>, host: &mut dyn Host) {
+        let read = result.unwrap_or_else(|error| json!({"resolved": {}, "issues": [error], "missing": []}));
+        let Ok(node) = self.node_mut(id) else { return };
+        if start {
+            if node.start_reading != Some(ticket) { return; }
+            node.start_reading = None;
+            node.start_read = Some((key, read));
+            return self.start_checked(id, host);
+        }
+        if node.reading.as_ref().is_none_or(|(asked, _)| *asked != ticket) { return; }
+        let (_, wanted) = node.reading.take().unwrap();
+        node.resources = read["resolved"].as_object().cloned().unwrap_or_default();
+        node.resource_issues = read["issues"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+        node.missing_artifacts = read["missing"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+        let wanted: Option<Vec<&str>> = wanted.as_ref().map(|names| names.iter().map(String::as_str).collect());
+        self.send_draft_queries(id, wanted.as_deref());
+        self.start_checked(id, host);
+    }
+
+    /// Ask the draft queries (`only`: just those) for the node's current draft and the files it read.
+    fn send_draft_queries(&mut self, id: &str, only: Option<&[&str]>) {
+        let Some(node) = self.node(id) else { return };
         if node.instance != Instance::Open { return; }
         let Some(descriptor) = self.catalog.get(&node.type_id) else { return };
         let names: Vec<String> = descriptor.node().queries.iter().filter(|name| DRAFT_QUERIES.contains(&name.as_str())).cloned().collect();
@@ -386,7 +464,7 @@ impl Workbench {
             self.node_outputs(node).into_iter().filter_map(|(signal, _)| split_signal(&signal).map(|(_, output)| output.to_owned())).collect()
         } else { Vec::new() };
         for name in names {
-            if (name == ADMIT_SOURCE && !complete) || only.is_some_and(|only| only != name) { continue; }
+            if (name == ADMIT_SOURCE && !complete) || only.is_some_and(|only| !only.contains(&name.as_str())) { continue; }
             self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Query { node, name: query, .. } if node == id && query == &name));
             let ticket = self.ticket(Ticket::Query { node: id.to_owned(), revision, name: name.clone() });
             let facts = match name.as_str() { EDITOR_FACTS => &editor, ADMIT_SOURCE => &admit, ADMIT => &admitted, _ => &args };
@@ -422,7 +500,10 @@ impl Workbench {
 
     /// The source bundles the nodes' queries read (an editor, an admission check), each member
     /// with its schemas (v2 `input_bundle`), rebuilt when a member is declared anew or first
-    /// publishes; a node whose bundle changed asks again.
+    /// publishes. Only the queries that read the bundle ask again, and only when what they
+    /// are told differs: a source's new generation with the schemas it had (every launch of
+    /// its producer) tells them nothing new, so nothing is asked of the node (nor, through
+    /// its editor, of the bench's devices).
     pub(crate) fn refresh_bundles(&mut self, host: &mut dyn Host) {
         let signals = host.signals();
         let readers: Vec<String> = self.nodes.iter().filter(|node| self.catalog.get(&node.type_id)
@@ -438,8 +519,9 @@ impl Workbench {
                 let (schema, event) = host.schemas(signal).unwrap_or((Value::Null, Value::Null));
                 json!({"name": name, "schema": schema, "event_schema": event})
             }).collect());
+            let same = self.bundles.get(&id).is_some_and(|(_, known)| *known == bundle);
             self.bundles.insert(id.clone(), (key, bundle));
-            self.send_queries(&id);
+            if !same { self.ask_queries(&id, Some(&[EDITOR_FACTS, ADMIT_SOURCE])); }
         }
     }
 
@@ -447,15 +529,9 @@ impl Workbench {
     /// path as the workspace resolves it, so an editor can read what a file is.
     fn artifact_facts(&self, node: &Node) -> Value {
         let mut resolved = Map::new();
-        for value in node.draft.artifact_inputs.values() {
-            let paths: Vec<&str> = match value {
-                Value::String(path) => vec![path.as_str()],
-                Value::Array(claims) => claims.iter().filter_map(|claim| claim["path"].as_str()).collect(),
-                _ => Vec::new(),
-            };
-            for path in paths.into_iter().filter(|path| !path.is_empty()) {
-                resolved.insert(path.to_owned(), json!(self.workspace.resolve(path).display().to_string()));
-            }
+        for path in node.draft.artifact_inputs.values().flat_map(artifact_paths).filter(|path| !path.is_empty()) {
+            let shown = self.workspace.resolve(&path).display().to_string();
+            resolved.insert(path, json!(shown));
         }
         json!({"inputs": node.draft.artifact_inputs, "resolved": resolved})
     }
@@ -497,24 +573,6 @@ impl Workbench {
         let Some((_, Ok(Value::Object(named)))) = node.answers.get("resolve_device_claims") else { return Vec::new() };
         named.iter().filter_map(|(argument, claim)| claim["instance"].as_str().map(|device| Claim { argument: argument.clone(), device: device.to_owned(),
             protected: Some(claim["fields"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()), exclusive: false })).collect()
-    }
-
-    /// Each enabled workspace resource a draft names, read now (v2 reads files at a draft's
-    /// explicit boundaries: a change, Refresh, Start): field -> resolved value, and the issues.
-    fn read_resources(&self, type_id: &str, values: &Map<String, Value>) -> (Map<String, Value>, Vec<String>) {
-        let (mut resolved, mut issues) = (Map::new(), Vec::new());
-        let Some(descriptor) = self.catalog.get(type_id) else { return (resolved, issues) };
-        let effective = fields::effective(&descriptor.parameters, values);
-        for spec in &descriptor.node().workspace_resources {
-            let Some(field) = descriptor.parameters.iter().find(|field| field.name == spec.field) else { continue };
-            if !fields::enabled(field, &effective) { continue; }
-            let label = if field.label.is_empty() { &field.name } else { &field.label };
-            match self.workspace.resource(spec, label, values.get(&spec.field).and_then(Value::as_str).unwrap_or("")) {
-                Ok(value) => { resolved.insert(spec.field.clone(), value); }
-                Err(issue) => issues.push(issue),
-            }
-        }
-        (resolved, issues)
     }
 
     /// The draft as it takes effect: the node's own defaults in its empty and derived fields
@@ -571,8 +629,10 @@ impl Workbench {
             if node.revision == revision {
                 node.checked.insert(name.to_owned());
                 let previous = node.answers.insert(name.to_owned(), (revision, result.clone()));
-                let fresh = previous.is_none_or(|(before, answer)| before != revision || answer != result);
-                changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| fresh).map(|output| signal_key(id, output));
+                let differs = previous.as_ref().is_none_or(|(_, answer)| *answer != result);
+                let fresh = differs || previous.is_some_and(|(before, _)| before != revision);
+                // Its readers are told the frames, not the revision: the same frames under a new one tell them nothing.
+                changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| differs).map(|output| signal_key(id, output));
                 // Defaults the node fills in change what its schema admits: ask that again.
                 if name == "resolve_defaults" && fresh { node.checked.remove(ADMIT); readmit = true; }
             }
@@ -582,7 +642,7 @@ impl Workbench {
             let readers: Vec<String> = self.nodes.iter().filter(|node| node.draft.source_signal == signal).map(|node| node.id.clone()).collect();
             for reader in readers { self.send_queries(&reader); }
         }
-        if readmit { self.ask_queries(id, Some(ADMIT)); }
+        if readmit { self.ask_queries(id, Some(&[ADMIT])); }
         self.start_checked(id, host);
     }
 
@@ -834,6 +894,7 @@ impl Workbench {
             Instance::Opening => issues.push(format!("{}{STARTING_PLUGIN}", node.name)),
             Instance::Open => {}
         }
+        if node.reading.is_some() || node.start_reading.is_some() { issues.push(READING.into()); }
         issues.extend(node.resource_issues.iter().cloned());
         issues.extend(fields::completeness_issue(&descriptor.parameters, &self.draft_values(node)));
         let answer = |name: &str| node.answers.get(name).map(|(_, answer)| answer);
@@ -912,20 +973,23 @@ impl Workbench {
                 }
             }
         }
-        for spec in &spec.artifact_inputs {
-            let value = node.draft.artifact_inputs.get(&spec.name).cloned().unwrap_or(Value::Null);
-            let paths: Vec<String> = match &value {
-                Value::String(path) if !path.is_empty() => vec![path.clone()],
-                Value::Array(claims) => claims.iter().filter_map(|claim| claim["path"].as_str().map(str::to_owned)).collect(),
-                _ => Vec::new(),
-            };
+        issues.extend(self.artifact_issues(node, &node.missing_artifacts));
+        let _ = signals;
+        issues
+    }
+
+    /// What the draft's artifact inputs lack: one not chosen, or a file `missing` (as read) names.
+    fn artifact_issues(&self, node: &Node, missing: &[String]) -> Vec<String> {
+        let Some(descriptor) = self.catalog.get(&node.type_id) else { return Vec::new() };
+        let mut issues = Vec::new();
+        for spec in &descriptor.node().artifact_inputs {
+            let paths = node.draft.artifact_inputs.get(&spec.name).map(artifact_paths).unwrap_or_default();
             let label = if spec.label.is_empty() { &spec.name } else { &spec.label };
             if paths.is_empty() && spec.required.unwrap_or(true) { issues.push(format!("{label} must be selected")); }
-            for path in paths.iter().filter(|path| path.is_empty() || !self.workspace.resolve(path).is_file()) {
+            for path in paths.iter().filter(|path| path.is_empty() || missing.contains(path)) {
                 issues.push(if path.is_empty() { format!("{label} must be selected") } else { format!("{label}: {path} does not exist") });
             }
         }
-        let _ = signals;
         issues
     }
 
@@ -1006,13 +1070,33 @@ impl Workbench {
             node.frozen.as_ref().filter(|frozen| frozen.draft == draft).cloned().ok_or("the running configuration is missing")?
         } else {
             let values = self.draft_values(node);
-            let (resolved, issues) = self.read_resources(&node.type_id, &values);
+            // Start is a boundary at which named files are read again: off the turn, the Start
+            // waiting for them as it waits for the draft's check.
+            let (key, files) = self.draft_files(node, &values);
+            let read = match (files, self.node_mut(id)?.start_read.take()) {
+                (None, _) => json!({"resolved": {}, "issues": [], "missing": []}),
+                (Some(_), Some((read_key, read))) if read_key == key => read,
+                (Some(files), _) => {
+                    self.cancel_start(id, "superseded by another Start");
+                    let ticket = self.ticket(Ticket::DraftFiles { node: id.to_owned(), key, start: true });
+                    let node = self.node_mut(id)?;
+                    node.start_reading = Some(ticket);
+                    node.start_after_check = Some((origin.to_owned(), acquisition));
+                    self.plugins.work(ticket, crate::Lane::Files, Box::new(move || Ok(files.read())));
+                    return Ok(json!({"node": id, "phase": "checking"}));
+                }
+            };
+            let node = self.node(id).unwrap();
+            let missing: Vec<String> = read["missing"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            let issues: Vec<String> = read["issues"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned)
+                .chain(self.artifact_issues(node, &missing)).collect();
             if let Some(issue) = issues.first() { self.node_mut(id)?.error = Some(issue.clone()); return Err(issue.clone()); }
+            let resolved = read["resolved"].as_object().cloned().unwrap_or_default();
             Frozen { draft: node.draft.clone(), values, named: Self::named_claims(node), resolved,
                 outputs: self.node_outputs(node).into_iter().filter_map(|(signal, _)| split_signal(&signal).map(|(_, output)| (output.to_owned(), signal.clone()))).collect(),
                 previews: self.node_previews(node) }
         };
-        let claims = self.frozen_claims(&node.type_id, &frozen);
+        let claims = self.frozen_claims(&self.node(id).unwrap().type_id, &frozen);
         if let Some(error) = self.outside_use(&claims) { self.node_mut(id)?.error = Some(error.clone()); return Err(error); }
         self.prepare_start(id, frozen, origin.to_owned(), acquisition)?;
         Ok(json!({"node": id, "phase": "preparing"}))
@@ -1058,8 +1142,10 @@ impl Workbench {
         node.error = None; node.running = Some(frozen.draft.clone()); node.frozen = Some(frozen);
         node.follow = processor; node.follow_attempted = None;
         node.pending = Some(PendingStart { origin, acquisition, prepared: Some(token) });
+        // Its own run makes way for its restart; another's for the devices this start takes.
         let mut holders = self.conflicting_nodes(&claims);
-        if self.active_run(self.node(id).unwrap()).is_some() { holders.insert(id.to_owned()); }
+        holders.remove(id);
+        self.stop_run_of(id, "it was restarted");
         for holder in holders { self.stop_run_of(&holder, "another start needs its devices"); }
         self.launch_pending(host);
     }
@@ -1082,6 +1168,7 @@ impl Workbench {
 
     pub(crate) fn cancel_start(&mut self, id: &str, reason: &str) {
         let Ok(node) = self.node_mut(id) else { return };
+        (node.start_reading, node.start_read) = (None, None);
         let checking = node.start_after_check.take().and_then(|(_, acquisition)| acquisition);
         let preparing = node.preparing.take(); let pending = node.pending.take();
         let preparing = preparing.and_then(|ticket| match self.tickets.get_mut(&ticket) { Some(Ticket::Prepare { acquisition, .. }) => acquisition.take(), _ => None });
@@ -1182,7 +1269,7 @@ impl Workbench {
         Ok(RunSpec { node_name: node.name.clone(), run: String::new(), node_id: id.to_owned(), instance: node_instance(id), type_id: node.type_id.clone(),
             values, source_signal: draft.source_signal.clone(), device_labels: devices.values().map(|key| (key.clone(), self.device_role(key).to_owned())).collect(),
             device_units: devices.values().map(|key| (key.clone(), self.device_units(key))).filter(|(_, units)| !units.is_empty()).collect(),
-            devices, shared, reads, artifacts, resources, directory: None, outputs, origin: origin.to_owned(), prepared: None, record_devices: self.takes_bench(&node.type_id) })
+            devices, shared, reads, artifacts, resources, folder: None, outputs, origin: origin.to_owned(), prepared: None, record_devices: self.takes_bench(&node.type_id) })
     }
 
     fn frozen_claims(&self, type_id: &str, frozen: &Frozen) -> Vec<Claim> {
@@ -1212,14 +1299,10 @@ impl Workbench {
                 "capability": descriptor.node().devices.iter().find(|requirement| requirement.argument == claim.argument).map(|requirement| requirement.capability.clone())})))
                 .collect::<Map<String, Value>>(),
             "artifacts": artifacts, "resources": resolved});
-        let (directory, start_record) = if task {
-            let folder = self.workspace.day_folder()?;
-            let directory = workspace::unique_directory(&folder, &node.type_id)?;
-            let record = json!({"schema": "zlc.task-start", "run_id": directory.file_name().map(|name| name.to_string_lossy().into_owned()),
-                "task": {"api_name": node.type_id, "instance_id": id}, "input": input, "started_at": started_at});
-            workspace::write_readable(&directory.join("start.json"), &record)?;
-            (Some(directory), Some(record))
-        } else { (None, None) };
+        // A Task's run directory and its start.json are made by the start, off the owner turn
+        // (`Event::RunDirectory` names it); its `run_id` is that directory's name.
+        let folder = task.then(|| workspace::RunFolder { parent: self.workspace.today(), stem: node.type_id.clone(),
+            record: json!({"schema": "zlc.task-start", "task": {"api_name": node.type_id, "instance_id": id}, "input": input, "started_at": started_at})});
         let signals = host.signals();
         let preview_baseline = frozen.previews.iter().map(|preview| {
             let signal = self.preview_signal(node, preview);
@@ -1227,7 +1310,7 @@ impl Workbench {
             (signal, generation)
         }).collect();
         spec.run = run_id.clone();
-        spec.directory = directory.clone();
+        spec.folder = folder.clone();
         spec.prepared = pending.prepared.clone();
         let snapshot_owner = pending.acquisition.as_ref().filter(|(_, _, completion)| completion == "ready")
             .and_then(|(parent, _, _)| self.run(parent)).map(|parent| parent.snapshot_owner.clone()).unwrap_or_else(|| run_id.clone());
@@ -1235,9 +1318,9 @@ impl Workbench {
         let follow_generation = self.source_published(&signals, &draft.source_signal).map(|signal| signal.generation.clone());
         self.run_sequences.insert(id.to_owned(), sequence);
         self.runs.push(Run { id: run_id.clone(), node: id.to_owned(), state: "starting".into(), ready: false,
-            started_at, ended_at: None, progress: None, request: None, directory, artifacts: Vec::new(), generation: None, stop_reason: None,
-            error: None, claims, frozen: frozen.clone(), start_record, previewed: BTreeSet::new(), preview_baseline, preview_panels: Vec::new(),
-            acquisition: pending.acquisition.clone(), children: Vec::new(), snapshot_owner, bench: None });
+            started_at, ended_at: None, progress: None, request: None, directory: None, artifacts: Vec::new(), generation: None, stop_reason: None,
+            error: None, claims, frozen: frozen.clone(), start_record: folder.map(|folder| folder.record), previewed: BTreeSet::new(), preview_baseline, preview_panels: Vec::new(),
+            acquisition: pending.acquisition.clone(), children: Vec::new(), snapshot_owner, bench: None, record: None });
         self.trim_runs();
         // v2 _activate_candidate: what a run starts with is its producer's own; a region that
         // wrote it no longer gives it back.
@@ -1437,6 +1520,21 @@ impl Workbench {
         if let Some(run) = self.run_mut(id).filter(|run| run.state == "starting") { run.state = "running".into(); }
     }
 
+    /// The start made the run's directory and wrote its start.json there.
+    pub(crate) fn run_directory(&mut self, id: &str, directory: PathBuf) {
+        let Some(run) = self.run_mut(id) else { return };
+        if let Some(record) = &mut run.start_record { record["run_id"] = json!(directory.file_name().map(|name| name.to_string_lossy().into_owned())); }
+        run.directory = Some(directory);
+    }
+
+    /// A run's `run.json` was written (or why not).
+    pub(crate) fn run_recorded(&mut self, id: &str, record: Value, written: Result<Value, String>) {
+        match written {
+            Ok(_) => if let Some(run) = self.run_mut(id) { run.record = Some(record); },
+            Err(failure) => self.notes.push(format!("{id}: the run record could not be written: {failure}")),
+        }
+    }
+
     pub(crate) fn run_ready(&mut self, id: &str) {
         let Some(run) = self.run_mut(id) else { return };
         if run.terminal() || run.state == "stopping" { return; }
@@ -1508,9 +1606,9 @@ impl Workbench {
         let directory = run.directory.clone();
         let row = run.row();
         if let (Some(record), Some(directory)) = (record, directory) {
-            if let Err(failure) = workspace::write_readable(&directory.join("run.json"), &record) {
-                self.notes.push(format!("{id}: the run record could not be written: {failure}"));
-            }
+            let ticket = self.ticket(Ticket::RunRecord { run: id.to_owned(), record: record.clone() });
+            let path = directory.join("run.json");
+            self.plugins.work(ticket, crate::Lane::Files, Box::new(move || workspace::write_readable(&path, &record).map(|_| Value::Null)));
         }
         if let Some((parent, ticket, completion)) = acquisition {
             let reply = if outcome == "completed" && completion == "terminal" { Ok(row) } else { Err(format!("the acquisition ended {outcome} before the requested {completion}")) };
@@ -1851,8 +1949,7 @@ impl Workbench {
         let run = self.run(id).ok_or_else(|| format!("No run {id:?} in this session"))?;
         let mut row = run.row();
         row["start"] = run.start_record.clone().unwrap_or(Value::Null);
-        row["record"] = run.directory.as_ref().map(|directory| directory.join("run.json")).filter(|path| path.is_file())
-            .and_then(|path| workspace::read_strict(&path, "run record").ok()).unwrap_or(Value::Null);
+        row["record"] = run.record.clone().unwrap_or(Value::Null);
         Ok(row)
     }
 

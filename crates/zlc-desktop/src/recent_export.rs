@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use zlc_archive::npy::{NpyArray, numeric_from_bytes};
 use zlc_core::DType;
 use zlc_core::dataset::Validity;
-use zlc_core::runtime::{Publication, Runtime};
+use zlc_core::runtime::{Publication, RecentData, Runtime};
 
 /// The budget a workspace starts with until its operator sets another (MiB).
 pub const DEFAULT_BUDGET_MIB: u64 = 256;
@@ -54,10 +54,9 @@ fn npy(bytes: &[u8], dtype: DType, shape: Vec<usize>) -> Vec<u8> {
     out
 }
 
-/// The archive members of everything kept now: `data/index.json` and the files it names. Empty while
+/// The archive members of everything `recent` kept (taken with `Runtime::recent`): `data/index.json` and the files it names. Empty while
 /// nothing is kept.
-pub fn members(runtime: &Runtime) -> Vec<(String, Vec<u8>)> {
-    let recent = runtime.recent();
+pub fn members(recent: RecentData) -> Vec<(String, Vec<u8>)> {
     // Per signal and run, in commit order.
     let mut groups: BTreeMap<(String, String), Vec<(u64, Arc<Publication>)>> = BTreeMap::new();
     for (us, publication) in recent.publications {
@@ -126,14 +125,14 @@ mod tests {
         let cells = Domain::dense(vec![2, 3], vec![axis("y", 2), axis("x", 3)]).unwrap();
         let schema = DatasetSchema::new(scalar.clone(), scalar, cells, ValueSchema::new(DType::U16, Some("count".into()), None, ValidityContract::Value).unwrap()).unwrap();
         let generation = runtime.begin("camera", vec![Declaration { signal: "@logic/camera/frames".into(), schema: schema.clone(), storage: Storage::Latest }], json!({})).unwrap();
-        assert!(members(&runtime).is_empty(), "nothing kept, nothing carried");
+        assert!(members(runtime.recent()).is_empty(), "nothing kept, nothing carried");
         runtime.keep_recent(1 << 20);
         for ordinal in 0..3u16 {
             let data = DataBlock::new(schema.clone(), OwnedBuffer::from_vec(vec![ordinal; 6]).into(), Validity::Uniform(ordinal != 1), None).unwrap();
             runtime.commit(&generation, &Bundle { inputs: vec![Input::Event { signal: "@logic/camera/frames".into(), ordinal: u64::from(ordinal),
                 data, origin: None, shot_time: None }], metadata: json!({}), parents: vec![] }).unwrap();
         }
-        let carried = members(&runtime);
+        let carried = members(runtime.recent());
         let names: Vec<&str> = carried.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["data/index.json", "data/001-logic_camera_frames.npy"]);
         let index: Value = serde_json::from_slice(&carried[0].1).unwrap();

@@ -2985,6 +2985,7 @@ dependencies = [
 name = "zlc-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "png",
  "rayon",
  "serde_json",

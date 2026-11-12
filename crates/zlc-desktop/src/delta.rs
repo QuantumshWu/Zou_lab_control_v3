@@ -9,10 +9,10 @@
 use serde_json::{Map, Value};
 
 /// Keys of a state message that belong to the message, not to the document.
-const ENVELOPE: [&str; 4] = ["type", "request", "error", "result"];
+pub const ENVELOPE: [&str; 4] = ["type", "request", "error", "result"];
 
 #[derive(Default)]
-pub struct Sent { sections: Map<String, Value>, error: Value }
+pub struct Sent { sections: Map<String, Value> }
 
 impl Sent {
     /// The page was (re)loaded: it holds nothing.
@@ -23,22 +23,31 @@ impl Sent {
 
     /// The message for `state` on a page that reads the sections `reads`
     /// accepts, or `None` when it would tell the page nothing: no section it
-    /// reads changed, the error is the one it already shows, and the request
-    /// is not its own (`owns`).
+    /// reads changed, the request it answers is not its own (`owns`), and it
+    /// says no error of no request (an error of another's request is that
+    /// page's). The reply is the message's own (reply.rs): said with it, once.
     pub fn encode(&mut self, state: &Map<String, Value>, reads: impl Fn(&str) -> bool, owns: impl Fn(&Value) -> bool) -> Option<String> {
+        self.encode_noting(state, reads, owns, |_| {})
+    }
+
+    /// As [`Sent::encode`], naming each section it found changed to `changed` (windows.rs: the
+    /// sections the journal is handed).
+    pub fn encode_noting(&mut self, state: &Map<String, Value>, reads: impl Fn(&str) -> bool, owns: impl Fn(&Value) -> bool,
+                         mut changed: impl FnMut(&str)) -> Option<String> {
         let mut changes = Changes(String::new());
         let mut path = Vec::new();
         for (key, value) in state {
             if ENVELOPE.contains(&key.as_str()) || !reads(key) { continue; }
+            let before = changes.0.len();
             match self.sections.get_mut(key) {
                 Some(previous) => { path.push(Step::Key(key)); diff(&mut path, previous, value, &mut changes); path.pop(); }
                 None => { changes.set(&path, Some(key), value); self.sections.insert(key.clone(), value.clone()); }
             }
+            if changes.0.len() != before { changed(key); }
         }
-        let error = state.get("error").cloned().unwrap_or(Value::Null);
-        let request = state.get("request").cloned().unwrap_or(Value::Null);
-        if changes.0.is_empty() && error == self.error && !owns(&request) { return None; }
-        self.error = error;
+        let request = state.get("request").filter(|request| crate::reply::answers(request).is_some());
+        let error = state.get("error").is_some_and(|error| !error.is_null());
+        if changes.0.is_empty() && !request.is_some_and(&owns) && !(error && request.is_none()) { return None; }
         let envelope: Map<String, Value> = ENVELOPE.iter().filter_map(|key| state.get(*key).map(|value| ((*key).to_owned(), value.clone()))).collect();
         let mut text = Value::Object(envelope).to_string();
         text.pop();
@@ -195,5 +204,12 @@ mod tests {
         // A new error is told; a second section arrives whole.
         let error = round(&mut sent, &mut page, json!({"type": "state", "error": "no", "board": [1], "pulse": {"periods": [{"id": "a", "on": "x"}]}})).unwrap();
         assert_eq!(error["changes"], json!([[["board"], [1]]]));
+        // A reply is the message's own: the next message, which answers nothing, says nothing new.
+        assert!(round(&mut sent, &mut page, json!({"type": "state", "board": [1], "pulse": {"periods": [{"id": "a", "on": "x"}]}})).is_none());
+        // An error of no request is said with its message; one of another page's request is not this page's.
+        assert_eq!(round(&mut sent, &mut page, json!({"type": "state", "error": "worker stopped", "board": [1]})).unwrap()["error"], "worker stopped");
+        let mine = |request: &Value| request.as_u64().is_some_and(|id| id < 100);
+        assert!(sent.encode(json!({"type": "state", "request": 500, "error": "no", "board": [1]}).as_object().unwrap(), |_| true, mine).is_none());
+        assert!(sent.encode(json!({"type": "state", "request": 0, "board": [1]}).as_object().unwrap(), |_| true, |_| true).is_none(), "request 0 is no request");
     }
 }

@@ -189,7 +189,7 @@ pub fn pending(call: &RemoteCall, accepted: &Value) -> Pending {
         save: call.name == "save" }
 }
 
-/// Answer every remote command whose request the accepted state reports.
+/// Answer the remote command a state message answers: its reply (reply.rs) and the state it carries.
 pub fn settle(accepted: &Value, pending: &mut BTreeMap<u64, Pending>) {
     let Some(request) = accepted["request"].as_u64() else { return };
     let Some(entry) = pending.remove(&request) else { return };
