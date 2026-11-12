@@ -82,12 +82,24 @@ pub trait Plugins {
     fn work(&mut self, ticket: u64, lane: Lane, work: Work);
 }
 
+/// The working point's word for how long a device's own open took (ms), as its opener timed it
+/// around the open alone (a plugin's, a link's, a native board's): put there by the opener
+/// ([`with_open_time`]) and taken out again into the session's `device_opened` line.
+pub const OPEN_MS: &str = "open_ms";
+
+/// `working_point` with how long the open that answered it took ([`OPEN_MS`]).
+pub fn with_open_time(mut working_point: Value, took: std::time::Duration) -> Value {
+    if let Value::Object(fields) = &mut working_point { fields.insert(OPEN_MS.into(), json!(took.as_secs_f64() * 1e3)); }
+    working_point
+}
+
 /// Facts the plugin host reports.
 #[derive(Clone, Debug)]
 pub enum Event {
     /// Lifecycle work is ordered by its host, but its reply can already be in
     /// the UI queue when a newer Open/Close supersedes it. Check at consumption.
     Lifecycle { current: std::sync::Arc<std::sync::atomic::AtomicU64>, revision: u64, event: Box<Event> },
+    /// A device's working point carries how long its own open took ([`with_open_time`]).
     Opened { instance: String, working_point: Value },
     Failed { instance: String, error: String },
     Closed { instance: String, error: Option<String> },
@@ -307,6 +319,8 @@ pub struct Workbench {
     pub(crate) device_users: DeviceUsers,
     /// A processor follows its source across its runs (the apparatus's); a Figure Viewer's data has no next run.
     pub(crate) follows_sources: bool,
+    /// The documents the application holds or used beside the board's, for a diagnostics archive.
+    pub(crate) diagnostic_documents: Option<diagnostics::DiagnosticDocuments>,
 }
 
 /// v2 DeviceUseCoordinator's other owners: each device driven from outside the workbench, by
@@ -363,7 +377,8 @@ impl Workbench {
             console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None, panel_said: None,
             tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), device_opens: BTreeMap::new(), applied_simulation: None, scan: None,
             resolution: None, found: Vec::new(), bundles: BTreeMap::new(), bundles_stale: false,
-            selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default(), follows_sources: false })
+            selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default(), follows_sources: false,
+            diagnostic_documents: None })
     }
 
     pub fn handles(name: &str) -> bool { COMMANDS.contains(&name) }
@@ -399,6 +414,10 @@ impl Workbench {
     }
     /// Workspace resources of `contract_prefix...` resolve through `resolver` (the application knows the formats).
     pub fn add_resource_resolver(&mut self, contract_prefix: &str, resolver: workspace::Resolver) { self.workspace.add_resolver(contract_prefix, resolver); }
+    /// The files a workspace resource of `contract_prefix...` names are found by `names` (its format's own reader).
+    pub fn add_resource_names(&mut self, contract_prefix: &str, names: workspace::Names) { self.workspace.add_names(contract_prefix, names); }
+    /// What a diagnostics archive carries beside the board's documents (the pulse host's).
+    pub fn set_diagnostic_documents(&mut self, documents: diagnostics::DiagnosticDocuments) { self.diagnostic_documents = Some(documents); }
 
     pub(crate) fn ticket(&mut self, ticket: Ticket) -> u64 {
         let id = self.next_ticket;

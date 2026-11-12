@@ -364,6 +364,8 @@ struct Instance {
     snapshot: bool,
     /// The read-only methods the opened device implements (its open reply): what a draft query may call.
     reads: Vec<String>,
+    /// What the device said of itself at its open (`device_info`; a remote one's, its publisher's open); Null when it says nothing.
+    device_info: Value,
     /// The runs that claim this device, each exclusively or not (v2 DeviceClaim): two
     /// exclusive claims never hold one device; a shared one (a scan's axis) sits beside either.
     claims: Vec<(String, bool)>,
@@ -573,7 +575,7 @@ impl PluginHost {
             let tunable = reply.message["ok"]["tunable"].as_bool().unwrap_or(false);
             let snapshot = reply.message["ok"]["snapshot"] == true;
             let reads = reply.message["ok"]["reads"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
-            inner.admit(instance, descriptor.clone(), Serving::Process(process), tunable, snapshot, reads)?;
+            inner.admit(instance, descriptor.clone(), Serving::Process(process), tunable, snapshot, reads, reply.message["ok"]["device_info"].clone())?;
             Ok(reply.message["ok"].clone())
         })();
         // Held by another client: who on this computer has the vendor's transport loaded, looked up once, now.
@@ -599,8 +601,11 @@ impl PluginHost {
 
     /// Admit a device instance served by `endpoint` (another core's published
     /// device) under `descriptor`, the type it has there: its outputs join this
-    /// core's Stop all (made safe through the endpoint), its commands the catalogue.
-    pub fn attach(&self, instance: &str, descriptor: TypeDescriptor, endpoint: Arc<dyn Endpoint>, tunable: bool, snapshot: bool, reads: Vec<String>) -> Result<(), CallError> {
+    /// core's Stop all (made safe through the endpoint), its commands the catalogue; `device_info` is
+    /// what it said of itself at its open there.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach(&self, instance: &str, descriptor: TypeDescriptor, endpoint: Arc<dyn Endpoint>, tunable: bool, snapshot: bool, reads: Vec<String>,
+                  device_info: Value) -> Result<(), CallError> {
         if !descriptor.is_device() { return Err(CallError::new(ErrorKind::Invalid, format!("{} is not a device type", descriptor.type_id))); }
         named(instance)?;
         {
@@ -608,7 +613,7 @@ impl PluginHost {
             if state.closed { return Err(CallError::lost("the plugin host is closed")); }
             if state.instances.contains_key(instance) { return Err(CallError::new(ErrorKind::Refused, format!("{instance} is already open"))); }
         }
-        self.inner.admit(instance, Arc::new(descriptor), Serving::Remote(endpoint), tunable, snapshot, reads)
+        self.inner.admit(instance, Arc::new(descriptor), Serving::Remote(endpoint), tunable, snapshot, reads, device_info)
     }
 
     /// The type an open instance has (a remote device's is its publisher's).
@@ -619,6 +624,10 @@ impl PluginHost {
     /// Whether an open device speaks the tunable quartet.
     pub fn tunable(&self, instance: &str) -> bool { self.inner.state.lock().unwrap().instances.get(instance).is_some_and(|entry| entry.tunable) }
     pub fn reports_settings(&self, instance: &str) -> bool { self.inner.state.lock().unwrap().instances.get(instance).is_some_and(|entry| entry.snapshot) }
+    /// What an open device said of itself at its open (`device_info`); Null when it said nothing.
+    pub fn device_info(&self, instance: &str) -> Value {
+        self.inner.state.lock().unwrap().instances.get(instance).map_or(Value::Null, |entry| entry.device_info.clone())
+    }
     pub fn reads(&self, instance: &str) -> Vec<String> {
         self.inner.state.lock().unwrap().instances.get(instance).map(|entry| entry.reads.clone()).unwrap_or_default()
     }
@@ -1234,9 +1243,11 @@ impl Inner {
     }
 
     /// An opened instance joins the host: its outputs Stop all, its commands the catalogue.
-    fn admit(self: &Arc<Self>, instance: &str, descriptor: Arc<TypeDescriptor>, serving: Serving, tunable: bool, snapshot: bool, reads: Vec<String>) -> Result<(), CallError> {
+    #[allow(clippy::too_many_arguments)]
+    fn admit(self: &Arc<Self>, instance: &str, descriptor: Arc<TypeDescriptor>, serving: Serving, tunable: bool, snapshot: bool, reads: Vec<String>,
+             device_info: Value) -> Result<(), CallError> {
         self.state.lock().unwrap().instances.insert(instance.to_owned(),
-            Instance { display_name: public_instance(instance).to_owned(), descriptor: descriptor.clone(), serving, tunable, snapshot, reads, claims: Vec::new(), published: None,
+            Instance { display_name: public_instance(instance).to_owned(), descriptor: descriptor.clone(), serving, tunable, snapshot, reads, device_info, claims: Vec::new(), published: None,
                 local_requests: Arc::default(), run: None });
         for output in &descriptor.physical_outputs {
             let (weak, name, port) = (Arc::downgrade(self), instance.to_owned(), output.name.clone());

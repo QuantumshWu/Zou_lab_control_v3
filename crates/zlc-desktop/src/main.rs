@@ -544,8 +544,19 @@ fn main() {
         Ok(Err(error)) => error.to_string(),
         Err(panic) => panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|text| text.to_string())).unwrap_or_default(),
     };
+    journal_ended("failed", json!({"error": error}));
     routed.fatal(&error);
     std::process::exit(1);
+}
+
+/// The journal's last line, `app ended`: how the process ended, and how long it had run since it was
+/// created. Everything said before it is on disk when this returns (journal::close).
+fn journal_ended(reason: &str, facts: Value) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let uptime = match trace::process_created_ns() { 0 => None, created => u64::try_from(now.saturating_sub(created)).ok() };
+    let mut line = json!({"reason": reason, "uptime_s": uptime.map(|ns| std::time::Duration::from_nanos(ns).as_secs_f64())});
+    if let (Value::Object(line), Value::Object(facts)) = (&mut line, facts) { line.extend(facts); }
+    zlc_core::journal::close("app", "ended", line);
 }
 
 fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
@@ -660,6 +671,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     // close (the worker's last job) and the board's SAFE close (PulseHost::shutdown), then the plugins'.
     let (mut document_closed, mut plugins_closing) = (false, false);
     let mut worker_failed = false;
+    // Who began the close (the journal's `app ended` says it): a window's ×, the operator's Close, a client's close_experiment.
+    let mut closed_by: Option<String> = None;
     let mut sequence = 0u64;
     let mut ticket = 0u64;
     let mut bindings = panels::Panels::new();
@@ -763,8 +776,12 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     pulse.users = workbench.device_users();
     // A pulse document chosen as a node's workspace resource resolves to its
     // description (PULSE_V3 `pulse_describe`), read by the one pulse codec.
-    workbench.add_resource_resolver("zlc.pulse/", Arc::new(|path| zlc_pulse::run::describe_document(path).map_err(|error| error.to_string())
+    workbench.add_resource_resolver(pulse_host::PULSE_CONTRACT, Arc::new(|path| zlc_pulse::run::describe_document(path).map_err(|error| error.to_string())
         .and_then(|description| serde_json::from_str(&description.compact_text()).map_err(|error| error.to_string()))));
+    // A diagnostics archive carries the Subpulses a pulse names, and the pulses the board played and holds.
+    workbench.add_resource_names(pulse_host::PULSE_CONTRACT, Arc::new(pulse_host::named_by_pulse));
+    let desk = pulse.desk.clone();
+    workbench.set_diagnostic_documents(Arc::new(move || desk.diagnostic_documents()));
     if let Some(missing) = zlc_workbench::COMMANDS.iter().find(|name| zlc_bus::catalog::find(name).is_none()) {
         return Err(format!("Workbench command {missing} is not in the catalogue").into());
     }
@@ -817,6 +834,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(kind) = windows.kind_of(window_id) { let _ = self_proxy.send_event(AppEvent::CloseWindow(kind)); }
                 }
                 Event::UserEvent(AppEvent::CloseWindow(kind)) => {
+                    let window = kind.title();
                     match Some(kind) {
                         // A viewer's window takes its document with it (v2: one Figure, one window).
                         Some(kind @ windows::Kind::FigureViewer(_)) => {
@@ -869,6 +887,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         // Devices and TaskConsole close the experiment (v2 close guards).
                         _ => {}
                     }
+                    closed_by.get_or_insert_with(|| format!("{window} window closed"));
                     if worker_failed { *flow = ControlFlow::Exit; return Ok(()); }
                     if !closing {
                         closing = true;
@@ -969,6 +988,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if action == "close_window" {
                         if !origin.is_operator() { return Err("Name the window to close".into()); }
+                        closed_by.get_or_insert_with(|| "close_window".into());
                         closing = true;
                         builtin.stop_all();
                         pulse.shutdown();
@@ -1890,6 +1910,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 return Ok(());
                             }
                             answer(Ok(zlc_bus::mcp::ToolOutput { json: json!({"closing": true}), png: None }));
+                            closed_by.get_or_insert_with(|| "close_experiment".into());
                             if worker_failed { *flow = ControlFlow::Exit; return Ok(()); }
                             closing = true;
                             tools.set_closing();
@@ -2081,9 +2102,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             answered = Some((request, pulse_host::Handled::Now(result)));
                         }
                         pulse_host::PulseEvent::FilesChanged => pulse.files_changed(),
-                        pulse_host::PulseEvent::Opened { instance, result } => {
+                        pulse_host::PulseEvent::Opened { instance, result, took } => {
                             let event = match pulse.device_opened(&instance, &workbench.device_label(&instance), result) {
-                                Ok(point) => zlc_workbench::Event::Opened { instance, working_point: point },
+                                Ok(point) => zlc_workbench::Event::Opened { instance, working_point: zlc_workbench::with_open_time(point, took) },
                                 Err(error) => zlc_workbench::Event::Failed { instance, error },
                             };
                             let _ = self_proxy.send_event(AppEvent::Workbench(event));
@@ -2347,6 +2368,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             trace::flush();
             // What was written to the run log so far is in its file before the process ends.
             diagnostics::drain();
+            // The last act: what every part said while closing (a plugin's close, its process's end) is on disk.
+            journal_ended(if worker_failed { "scientific worker failed" } else { "closed" }, json!({"closed_by": closed_by}));
         }
     });
 }

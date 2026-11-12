@@ -3,12 +3,14 @@
 //! One file an operator hands to whoever looks into a fault: the journal's segments (what happened,
 //! in order), the session's lifecycle (how the process began and each device was opened, failed or
 //! closed, however long ago), each device's log as its window shows it, the board as it stands (its layout, the apparatus, the workbench's own state), the
-//! release that was running, the newest program logs, and the text files the board names -- a
-//! node's pulse, the Subpulses and the Config that pulse names in turn -- as they are now. It
+//! release that was running, the newest program logs, and the documents the board uses -- a node's
+//! pulse (found where its field's collection keeps it), the Subpulses it names (found as its reader
+//! finds them), the pulses the board played this session and the one it holds -- as they are now. It
 //! names a calibration or a dataset the board uses without carrying it; the one data it does carry is
 //! what the application keeps of recent publications within its budget (`data/`), when asked to.
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 use zlc_archive::zip::ZipWriter;
@@ -21,7 +23,7 @@ pub const FOLDER: &str = "diagnostics";
 /// The newest program logs it carries, and the most of each.
 const LOGS: usize = 3;
 pub const LOG_LIMIT: u64 = 8 << 20;
-/// The files the board names that it carries: JSON documents, each at most this large, at most this many.
+/// The documents it carries: each at most this large, at most this many.
 const NAMED_LIMIT: u64 = 4 << 20;
 const NAMED_FILES: usize = 128;
 
@@ -76,6 +78,10 @@ journal/session.jsonl
     a secret's word (password, secret, token, key, auth, credential, ...) is written <redacted>.
 
     app started                        pid, release, machine, the program's arguments
+    app ended                          the process's last line, written as it ends with everything before it:
+                                       `reason` (closed, scientific worker failed, failed), `closed_by` (the
+                                       window or command that began the close), `error`, `uptime_s`; a
+                                       session without it ended without a word (killed, or the machine stopped)
     system machine                     the machine's processors
     plugins process_started / ended    a plugin process (`key`: the one shared process, or `type:<id>`), its
       / process_not_started            pid and start time; at its end the reason, exit code, whether it was
@@ -90,9 +96,12 @@ journal/session.jsonl
                                        with `error` when refused before reaching the device
     plugins device_open                the plugin side of that open: process, pid, `ms`, outcome, and on a
                                        failure `error` {kind, type, message, traceback}
-    workbench device_opened            `ms` since it was asked, and `device_info`: what the device says of
-                                       itself (model, serial, firmware, driver or SDK version), when its type
-                                       says it
+    workbench device_opened            `ms`: the device's own open (plugin, bench link or board, as its opener
+                                       timed it); `since_asked_ms`: from the ask to this line, its wait for a
+                                       process or an earlier close and the event loop's turn besides; and
+                                       `device_info`: what the device says of itself (model, serial, firmware,
+                                       driver or SDK version, a remote one's as its publisher opened it), when
+                                       its type says it
     workbench device_failed            `phase`: resolve, open (it did not open) or lost (it was open), `error`;
                                        `looking_again` when its named serial port could not be used and its
                                        type's resolve looks for it on the ports there are
@@ -117,9 +126,23 @@ data/           the data of recent publications, as far back as the application'
                 in commit order; data/index.json names each file's signal, run, ordinals and commit times,
                 by which a `runtime commit` line of the journal finds its event. Absent when the archive
                 was exported without data, or none was kept
-files/          the JSON files the board names (a node's pulse, the Subpulses and Config it names),
-                as they were when this was exported; files.json says which path each one is
+files/          the documents the board uses, as they were when this was exported: each node's
+                workspace resource (a pulse) from its collection's folder, the Subpulse files a pulse
+                names, each pulse document played on the board this session, the pulse the board
+                holds and the Config values it compiles against; files.json says, for each, every reason
+                it is there (`why`) and which file it is (`path`; none for one held in memory)
 ";
+
+/// A document the application holds or used, for the archive: why it is there (`why`), its contract
+/// (the files a file of it names are found by the workspace's [`workspace::Names`]), and the file or,
+/// for one held only in memory, its bytes.
+pub struct NamedDocument { pub why: String, pub contract: String, pub source: DocumentSource }
+
+pub enum DocumentSource { File(PathBuf), Held { name: String, bytes: Vec<u8> } }
+
+/// The documents the application holds or used this session beside the board's (the pulse host's:
+/// each pulse played, the one the board holds), taken when an archive is written, off the owner turn.
+pub type DiagnosticDocuments = Arc<dyn Fn() -> Vec<NamedDocument> + Send + Sync>;
 
 /// What one export wrote.
 pub struct Exported { pub path: PathBuf, pub segments: usize, pub bytes: u64 }
@@ -130,10 +153,23 @@ impl Workbench {
     /// turn; `diagnostics_exported` says where.
     pub(crate) fn export_diagnostics(&mut self, with_data: bool, request: u64, host: &dyn Host) {
         let board = Board { state: Value::Object(self.state(host)), layout: self.layout_document(host), apparatus: self.apparatus.tree(),
-            data: with_data.then(|| host.diagnostic_data()), device_logs: self.device_logs() };
+            data: with_data.then(|| host.diagnostic_data()), device_logs: self.device_logs(), resources: self.resource_documents(),
+            documents: self.diagnostic_documents.clone(), names: self.workspace.names() };
         let folder = self.workspace.root.join(FOLDER);
-        let (root, ticket) = (self.workspace.root.clone(), self.ticket(crate::Ticket::Diagnostics { request }));
-        self.plugins.work(ticket, crate::Lane::Export, Box::new(move || board.export(&folder, &root)));
+        let ticket = self.ticket(crate::Ticket::Diagnostics { request });
+        self.plugins.work(ticket, crate::Lane::Export, Box::new(move || board.export(&folder)));
+    }
+
+    /// Each node's workspace resources, where its field's collection keeps them (as a Start reads them).
+    fn resource_documents(&self) -> Vec<NamedDocument> {
+        self.nodes.iter().flat_map(|node| {
+            let specs = self.catalog.get(&node.type_id).map(|descriptor| descriptor.node().workspace_resources.clone()).unwrap_or_default();
+            specs.into_iter().filter_map(move |spec| {
+                let selected = node.draft.values.get(&spec.field).and_then(Value::as_str).filter(|text| !text.trim().is_empty())?;
+                Some(NamedDocument { why: format!("node {} {}", node.id, spec.field), source: DocumentSource::File(spec.path(&self.workspace.root, selected)),
+                                     contract: spec.contract })
+            })
+        }).collect()
     }
 
     /// Every device seen this session -- opened, failed, closed, or one whose lines came another way --
@@ -153,11 +189,12 @@ impl Workbench {
 }
 
 /// What the owner turn takes of the board for an archive; the rest is read when it is written.
-struct Board { state: Value, layout: Value, apparatus: Value, data: Option<crate::DiagnosticData>, device_logs: Vec<(String, Vec<String>)> }
+struct Board { state: Value, layout: Value, apparatus: Value, data: Option<crate::DiagnosticData>, device_logs: Vec<(String, Vec<String>)>,
+               resources: Vec<NamedDocument>, documents: Option<DiagnosticDocuments>, names: Vec<(String, workspace::Names)> }
 
 impl Board {
     /// Write the archive into `folder`: its path and what it holds.
-    fn export(self, folder: &Path, workspace: &Path) -> Result<Value, String> {
+    fn export(self, folder: &Path) -> Result<Value, String> {
         let stamp: String = workspace::utc_now().chars().filter(char::is_ascii_digit).take(14).collect();
         std::fs::create_dir_all(folder).map_err(|error| format!("{}: {error}", folder.display()))?;
         let path = folder.join(format!("zlc-diagnostics-{}-{}.zip", &stamp[..8.min(stamp.len())], &stamp[8.min(stamp.len())..]));
@@ -170,9 +207,11 @@ impl Board {
         if let Ok(bytes) = std::fs::read(zlc_core::checkout::path("bin/release.json")) { members.push(("release.json".into(), bytes)); }
         members.extend(newest_logs(&zlc_core::checkout::local("logs")));
         members.extend(device_log_members(self.device_logs));
-        let named = named_files(&[&members[1].1, &members[2].1], workspace);
+        let mut documents = self.resources;
+        documents.extend(self.documents.map(|documents| documents()).unwrap_or_default());
+        let named = named_files(documents, &self.names);
         let files = named.len();
-        members.push(("files.json".into(), pretty(&Value::Object(named.iter().map(|(member, path, _)| (member.clone(), json!(path))).collect()))));
+        members.push(("files.json".into(), pretty(&Value::Object(named.iter().map(|(member, said, _)| (member.clone(), said.clone())).collect()))));
         members.extend(named.into_iter().map(|(member, _, bytes)| (member, bytes)));
         // The data of the publications the journal names, as far back as the application keeps it.
         let data = self.data.map(|data| data()).unwrap_or_default();
@@ -218,38 +257,34 @@ fn session_members(sessions: Option<(PathBuf, Vec<PathBuf>)>) -> Vec<(String, Ve
         .collect()
 }
 
-/// Every text value of `document`, wherever it stands.
-fn texts<'a>(document: &'a Value, found: &mut Vec<&'a str>) {
-    match document {
-        Value::String(text) => found.push(text),
-        Value::Array(items) => for item in items { texts(item, found); },
-        Value::Object(fields) => for value in fields.values() { texts(value, found); },
-        _ => {}
-    }
-}
-
-/// The JSON files `documents` name (a path as written, or one inside `workspace`), and the ones
-/// those name in turn: (archive member, the file's path, its bytes). Each file once, the first
-/// [`NAMED_FILES`] found, none over [`NAMED_LIMIT`].
-fn named_files(documents: &[&Vec<u8>], workspace: &Path) -> Vec<(String, PathBuf, Vec<u8>)> {
-    let mut waiting: Vec<Vec<u8>> = documents.iter().map(|document| (*document).clone()).collect();
-    let (mut seen, mut found) = (BTreeSet::new(), Vec::new());
-    while let Some(bytes) = waiting.pop() {
-        let Ok(document) = serde_json::from_slice::<Value>(&bytes) else { continue };
-        let mut named = Vec::new();
-        texts(&document, &mut named);
-        for text in named {
-            if found.len() >= NAMED_FILES { return found; }
-            // A name of a file, not a sentence that happens to end in one.
-            if text.len() > 512 || !text.to_ascii_lowercase().ends_with(".json") { continue; }
-            let path = if Path::new(text).is_absolute() { PathBuf::from(text) } else { workspace.join(text) };
-            let Ok(file) = std::fs::metadata(&path) else { continue };
-            if !file.is_file() || file.len() > NAMED_LIMIT || !seen.insert(path.clone()) { continue; }
-            let Ok(bytes) = std::fs::read(&path) else { continue };
-            let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-            found.push((format!("files/{:03}-{name}", found.len() + 1), path, bytes.clone()));
-            waiting.push(bytes);
-        }
+/// `documents`, then the files each names in turn (found by its contract's [`workspace::Names`]):
+/// (archive member, what files.json says of it -- every reason it is there, and its path -- its bytes).
+/// Each file once, the first [`NAMED_FILES`], none over [`NAMED_LIMIT`]; a file not there is left out.
+fn named_files(documents: Vec<NamedDocument>, names: &[(String, workspace::Names)]) -> Vec<(String, Value, Vec<u8>)> {
+    let (mut seen, mut found): (std::collections::BTreeMap<PathBuf, usize>, Vec<(String, Value, Vec<u8>)>) = Default::default();
+    let mut waiting: std::collections::VecDeque<NamedDocument> = documents.into();
+    while let Some(document) = waiting.pop_front() {
+        if found.len() >= NAMED_FILES { break; }
+        let (name, path, bytes) = match document.source {
+            DocumentSource::Held { name, bytes } => (name, None, bytes),
+            DocumentSource::File(path) => {
+                if let Some(&carried) = seen.get(&path) {
+                    if let Some(reasons) = found[carried].1["why"].as_array_mut() { reasons.push(json!(document.why)); }
+                    continue;
+                }
+                let Ok(file) = std::fs::metadata(&path) else { continue };
+                if !file.is_file() || file.len() > NAMED_LIMIT { continue; }
+                let Ok(bytes) = std::fs::read(&path) else { continue };
+                seen.insert(path.clone(), found.len());
+                // What it names in turn, as its own reader finds them.
+                if let Some((_, named)) = names.iter().find(|(prefix, _)| document.contract.starts_with(prefix.as_str())) {
+                    waiting.extend(named(&path).into_iter().map(|named| NamedDocument { why: format!("named by {}", path.display()),
+                        contract: String::new(), source: DocumentSource::File(named) }));
+                }
+                (path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(), Some(path), bytes)
+            }
+        };
+        found.push((format!("files/{:03}-{name}", found.len() + 1), json!({"why": [document.why], "path": path}), bytes));
     }
     found
 }
@@ -305,8 +340,9 @@ mod tests {
         let mut workbench = Workbench::new(&folder, Box::new(FakePlugins { calls: Default::default(), catalog: types })).unwrap();
         let mut host = FakeHost::default();
         workbench.apply("apply_devices", &json!({}), &zlc_core::control::Origin::Operator, 1, &mut host);
-        workbench.on_event(Event::Opened { instance: "life_camera".into(), working_point: json!({"narrates": true,
-            "device_info": {"model": "MOT-1", "serial": "42"}}) }, &mut host);
+        workbench.on_event(Event::Opened { instance: "life_camera".into(), working_point: crate::with_open_time(json!({"narrates": true,
+            "device_info": {"model": "MOT-1", "serial": "42"}}), std::time::Duration::from_millis(12)) }, &mut host);
+        assert!(workbench.devices["life_camera"].working_point.get(crate::OPEN_MS).is_none(), "the timing is the line's, not the working point's");
         workbench.on_event(Event::Log { instance: "life_camera".into(), line: "exposure 0.1 s".into() }, &mut host);
         workbench.apply("close_device", &json!({"device": "life_camera"}), &zlc_core::control::Origin::Operator, 2, &mut host);
         workbench.on_event(Event::Closed { instance: "life_camera".into(), error: None }, &mut host);
@@ -322,7 +358,8 @@ mod tests {
         assert_eq!(open["parameters"], json!({"exposure_seconds": 0.1, "api_token": journal::REDACTED}), "its type's defaults filled in, its secret hidden");
         assert_eq!(open["simulation"]["seed"], 3);
         assert_eq!(camera[1]["device_info"], json!({"model": "MOT-1", "serial": "42"}));
-        assert!(camera[1]["ms"].is_f64() && camera[3]["ms"].is_f64());
+        assert_eq!(camera[1]["ms"], json!(12.0), "the device's own open, as its opener timed it");
+        assert!(camera[1]["since_asked_ms"].is_f64() && camera[3]["ms"].is_f64());
         assert_eq!(camera[3]["outcome"], "closed");
         let basler = of("life:basler");
         assert_eq!((basler.len(), &basler[0]["outcome"]), (1, &json!("failed")), "refused before it reached any device: {basler:?}");
@@ -347,20 +384,29 @@ mod tests {
     }
 
     #[test]
-    fn the_files_a_board_names_are_carried_with_the_ones_they_name() {
+    fn the_documents_are_carried_with_the_files_they_name() {
         let workspace = std::env::temp_dir().join(format!("zlc-diagnostics-named-{}", journal::now_us()));
         std::fs::create_dir_all(workspace.join("pulses")).unwrap();
-        let subpulse = workspace.join("pulses").join("detect.subpulse.json");
+        let (pulse, subpulse) = (workspace.join("pulses").join("scan.json"), workspace.join("pulses").join("detect.subpulse.json"));
         std::fs::write(&subpulse, br#"{"format": "zlc.pulse"}"#).unwrap();
-        // A pulse named relative to the workspace names its Subpulse by a whole path, and itself.
-        std::fs::write(workspace.join("pulses").join("scan.json"), serde_json::to_vec(&json!({"components": [{"config_path": subpulse}],
-            "self": "pulses/scan.json", "note": "see the file notes.json"})).unwrap()).unwrap();
-        std::fs::write(workspace.join("calibration.npz"), b"data").unwrap();
-        let layout = serde_json::to_vec(&json!({"nodes": [{"values": {"pulse": "pulses/scan.json", "calibration": "calibration.npz", "missing": "gone.json"}}]})).unwrap();
-        let found = named_files(&[&layout], &workspace);
+        std::fs::write(&pulse, br#"{"components": [{"config_path": "detect.subpulse.json"}]}"#).unwrap();
+        // A bare name is the pulse collection's file, not the workspace root's (seamless_scan's pulse_template).
+        let spec = crate::types::WorkspaceResource { field: "pulse_template".into(), contract: "zlc.pulse/v1".into(), directory: "pulses".into(), ..Default::default() };
+        assert_eq!(spec.path(&workspace, " scan.json "), pulse);
+        // The pulse's own reader finds its Subpulse beside it (a relative path written in it).
+        let names: workspace::Names = Arc::new(|path: &Path| vec![path.with_file_name("detect.subpulse.json")]);
+        let documents = vec![
+            NamedDocument { why: "node scan pulse_template".into(), contract: "zlc.pulse/v1".into(), source: DocumentSource::File(spec.path(&workspace, "scan.json")) },
+            NamedDocument { why: "played on the board".into(), contract: "zlc.pulse/v1".into(), source: DocumentSource::File(pulse.clone()) },
+            NamedDocument { why: "held by the board".into(), contract: String::new(), source: DocumentSource::Held { name: "board-held-pulse.json".into(), bytes: b"{}".to_vec() } },
+            NamedDocument { why: "node gone".into(), contract: String::new(), source: DocumentSource::File(workspace.join("gone.json")) },
+        ];
+        let found = named_files(documents, &[("zlc.pulse/".into(), names)]);
         let members: Vec<&str> = found.iter().map(|(member, _, _)| member.as_str()).collect();
-        assert_eq!(members, ["files/001-scan.json", "files/002-detect.subpulse.json"], "each once; data and missing files are only named");
-        assert_eq!(found[1].1, subpulse);
+        assert_eq!(members, ["files/001-scan.json", "files/002-board-held-pulse.json", "files/003-detect.subpulse.json"], "each file once; a missing one left out");
+        assert_eq!(found[0].1, json!({"why": ["node scan pulse_template", "played on the board"], "path": pulse}), "every reason it is there");
+        assert_eq!(found[1].1, json!({"why": ["held by the board"], "path": null}));
+        assert_eq!(found[2].1["path"], json!(subpulse));
         std::fs::remove_dir_all(&workspace).unwrap();
     }
 }

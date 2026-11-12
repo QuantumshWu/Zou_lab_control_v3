@@ -586,7 +586,12 @@ impl Builtin {
         // Whether a plugin type is another computer's client is the catalogue's to say, read here,
         // off the window's turn: the catalogue may still be in discovery.
         let _ = std::thread::Builder::new().name("zlc-fabric-watch".into()).spawn(move || {
-            let announced = native || host.as_ref().and_then(|host| host.catalog().ok()).is_some_and(|catalog| catalog.types.iter().any(|item| item.announces == kind));
+            let announced = native || match host.as_ref().map(|host| host.catalog()) {
+                Some(Ok(catalog)) => catalog.types.iter().any(|item| item.announces == kind),
+                // Whether it is another computer's client cannot be known: said, not passed over.
+                Some(Err(error)) => { bench.say(&name, &format!("FABRIC NOT WATCHED {kind}: the plugin catalogue could not be read ({error})")); false }
+                None => false,
+            };
             if !announced { return; }
             let lost = name.clone();
             bench.watch(registry, &name, &kind, &parameters, move |reason| match host.as_ref().filter(|host| host.descriptor(&lost).is_some()) {
@@ -662,9 +667,23 @@ impl Plugins for Builtin {
         let group = if group.is_object() { group } else { json!({}) };
         let bench = self.bench().filter(|_| type_id == zlc_fabric::REMOTE_TYPE);
         let (turn, gate) = self.turn(instance);
-        let started = self.spawn("open", move |host| gate.event(turn, gate.run(turn, || match match &bench { Some(bench) => bench.open(host, &name, &parameters), None => host.open(&name, &kind, parameters, group) } {
-            Ok(point) => Event::Opened { instance: name, working_point: point },
-            Err(error) => Event::Failed { instance: name, error: error.to_string() },
+        let reply = self.0.borrow().reply.clone();
+        let started = self.spawn("open", move |host| gate.event(turn, gate.run(turn, || {
+            let endpoint = format!("{}:{}", parameters["host"].as_str().unwrap_or_default(), parameters["port"]);
+            // The device's own open, timed around it alone (not its turn's wait).
+            let began = std::time::Instant::now();
+            match match &bench { Some(bench) => bench.open(host, &name, &parameters), None => host.open(&name, &kind, parameters, group) } {
+                Ok(point) => {
+                    // A client of another computer's own server (the catalogue's announced types) says where it
+                    // connected and what the server said it is, as a native board does.
+                    if bench.is_none() && host.catalog().is_ok_and(|catalog| catalog.types.iter().any(|item| item.announces == kind)) {
+                        let said = point.get("device_info").filter(|info| !info.is_null()).map_or_else(|| "it says nothing of itself".to_owned(), Value::to_string);
+                        reply(Event::Log { instance: name.clone(), line: format!("SERVER CONNECTED {kind} at {endpoint}: {said}") });
+                    }
+                    Event::Opened { instance: name, working_point: zlc_workbench::with_open_time(point, began.elapsed()) }
+                }
+                Err(error) => Event::Failed { instance: name, error: error.to_string() },
+            }
         })));
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Failed { instance: instance.into(), error }); }
     }
