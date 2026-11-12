@@ -26,8 +26,8 @@
 //!    next is the reach's temperature and the step it stood at, the next's first rung; nothing read on its
 //!    trajectories (# An attempt's own).
 //! 3. The model's decisions (SPEC §5.2; # The model), at the scout's states and again at the pilot's, the step's error
-//!    taken at its share: a unit to keep ends the attempt, and the next begins with its model at the step this one
-//!    stood at; a keep to undo ends it too (# The model).
+//!    taken at its share: units to keep end the attempt, and the next begins with their model at the step this one
+//!    stood at (# The model).
 //! 4. The product: batches of whole groups at the settled step, one level, every trajectory run to the last output,
 //!    until every held quantity's total lies within its target (# Stopping) or the trajectories reach
 //!    `MOST_TRAJECTORIES`. Its atoms that leave the reach are read where they are, and what they carry is booked
@@ -176,23 +176,31 @@
 //!
 //! # The model (SPEC §5.2)
 //! The units are the model's (model.rs), listed again in every model a keep closes. A unit whose fold does not exist over
-//! the reach is kept, and so is one whose measured error leaves an output no room for the statistics. Beyond these the
-//! model keeps a unit where keeping it pays (decide.rs `pays`): the run's predicted total work W = w·N, N the trajectories
-//! its looks need beside its errors and the step's share (`Look::need` on the pilot's estimates) and w the
-//! counted work a trajectory spends per µs (`rate`, the step's count through the model's generator at the pilot's states),
-//! falls by a share of itself beyond that share's spread, the jackknife over the pilot's groups (`Pricing`) -- the kept
-//! model's W counting the pilot its attempt runs again: every keep is a new attempt, a new model and its own pilot. A
-//! kept model is built and rated only for a unit whose keep would pay were it to cost no more per µs than the fold
-//! (`Pricing::saving_at_all`: the trajectories its error's removal saves, less the new pilot): a fold is made to cost less than
-//! what it folds, so a keep that pays by its rate alone is not looked for -- where one exists the fold is at fault, not
-//! the choice.
+//! the reach is kept. Beyond that a keep is one comparison of the units' booked errors against what keeping them costs,
+//! over the whole set the reads give (`keep`), made once and never undone: the kept set only grows, and every keep is
+//! a new attempt, a new model and its own pilot.
+//! - The errors no number of trajectories fits beside: where the model's error and the step's share leave a look no
+//!   room for the statistics, the units are taken by their weight there (their errors on what is shown and on T,
+//!   weighed by the held share as the totals are, each over its target), the heaviest first, until every look has
+//!   room again -- the set the looks need, in one keep (`needed`). (Taken one at a time, a keep an attempt, S3's probe
+//!   kept fourteen bare drives over fourteen attempts, each a model, its gates and a scout.)
+//! - Else the work: the run's predicted total work W = w·N, N the trajectories its looks need beside its errors and the
+//!   step's share (`Look::need` on the pilot's estimates) and w the counted work a trajectory spends per µs (`rate`,
+//!   the step's count through the model's generator at the pilot's states), and the kept model's W counting the pilot
+//!   its attempt runs again. A unit is a candidate where its keep alone saves beyond that saving's spread (decide.rs
+//!   `pays`; the jackknife over the pilot's groups, `Pricing`), and the set kept is, of the candidates taken by their
+//!   saving, the largest first, the one whose keep together saves the most beyond its spread: their errors leave the
+//!   looks together, and their kept model is rated once (`Pricing::joint`). A kept model is built and rated only for a
+//!   unit whose keep would pay were it to cost no more per µs than the fold (`Pricing::saving_at_all`: the trajectories
+//!   its error's removal saves, less the new pilot): a fold is made to cost less than what it folds, so a keep that
+//!   pays by its rate alone is not looked for -- where one exists the fold is at fault, not the choice.
 //!
-//! The price of a keep knows the kept model's work a step, not the step it needs: the pricing reads no step. So a keep
-//! made for its predicted saving is tried, and undone where its model's check is about to take a step at which it
-//! costs more than the model before it did, (1 − share)·τ_before/τ > 1 (`Attempt::Undo`; `attempt`): the fold's error
-//! stands again, measured and booked. A unit once kept for its saving is not priced again in the solve, undone or not
-//! (`barred`). A model's rate is its mean over the run's held states, read at one state of every pilot trajectory,
-//! the states spread evenly over the run (`one_each`), the same for every model.
+//! The price of a keep knows the kept model's work a step at the step the model stands at; a kept model's check may
+//! take a shorter one. That is the accuracy the kept model asks, read as every model's is, and it is not traded back:
+//! a keep undone where its check took a shorter step (as it was) is a decision taken again on the same reads, and it
+//! went back and forth -- on PGC3D, with a batch of bare drives booked too high, some twenty keeps and undos, a model,
+//! its gates and a pilot each (bounds3.status.md). A model's rate is its mean over the run's held states, read at one
+//! state of every pilot trajectory, the states spread evenly over the run (`one_each`), the same for every model.
 //!
 //! A unit is read at the states only where its error can matter. A unit whose gate bounds its error over the reach
 //! (units.rs `Gate::error_bound`) is booked at that bound at every output, unread, as long as such bounds, the smallest
@@ -431,9 +439,6 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     // The units kept, the reach's temperature and the prepared energy it holds outside the trap's region (model/reach.rs,
     // # The trap's region: only grows), the step the last attempt stood at.
     let (mut kept, mut reach, mut beyond, mut step) = (vec![], request.temperature_uk, f64::NEG_INFINITY, None);
-    // The last keep made for its predicted saving (`Attempt::Keep`): the units kept before it, the step then and the
-    // saving's share; and the units such a keep has been undone for (`Attempt::Undo`), not priced again.
-    let (mut priced, mut barred): (Option<(Vec<Unit>, f64, f64)>, Vec<Unit>) = (None, vec![]);
     let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
     loop {
         let model = Model::new(request, &light, &kept)?;
@@ -462,7 +467,7 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
             while more.is_empty() {
                 // An attempt's results improve on its own last one (module documentation, # Checkpoints).
                 messages.least = 0;
-                match attempt(request, &light, &setting, &judged, &gates, &kept, reach, step, priced.as_ref().map(|p| (p.1, p.2)), &barred, &mut messages)? {
+                match attempt(request, &light, &setting, &judged, &gates, &kept, reach, step, &mut messages)? {
                     Attempt::Grow(t, outside, tau) => {
                         // The reach grown holds the one before it: outside the region too, its level there kept.
                         beyond = beyond.max(judged.minimum + judged.outside).max(outside);
@@ -470,16 +475,9 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
                         (judged, gates) = over(reach, beyond);
                         more = failing(&gates);
                     }
-                    Attempt::Keep(u, tau, share) => {
-                        priced = share.map(|share| (kept.clone(), tau, share));
-                        barred.extend(share.map(|_| u.clone()));
-                        more = vec![u];
+                    Attempt::Keep(units, tau) => {
+                        more = units;
                         step = Some(tau);
-                    }
-                    Attempt::Undo => {
-                        let (before, tau, _) = priced.take().expect("only an attempt told of a priced keep undoes one");
-                        (kept, step) = (before, Some(tau));
-                        break;
                     }
                     Attempt::Done(s) => return Ok(s),
                 }
@@ -567,14 +565,11 @@ impl Messages<'_> {
 /// How one attempt at a model ends (`attempt`): the reach the model was judged over is outgrown -- by the pilot's
 /// atoms, or by a step not proven (`Domain`) -- (its new temperature, µK, and the prepared energy it is to hold outside
 /// the trap's region, rad/µs, −∞ where nothing asks: the model is attempted again as it stands unless a fold fails
-/// over the grown reach, `solve`), a unit is to be kept -- each with the step the attempt stood at, the next attempt's
-/// first rung; a keep with the share of the work it was predicted to save where that is why it is kept (`keep`) --,
-/// the last such keep is undone (its model's step, once screened, makes it dearer than the model before it), or the
-/// solution.
+/// over the grown reach, `solve`), units are to be kept (`keep`) -- each with the step the attempt stood at, the next
+/// attempt's first rung --, or the solution.
 enum Attempt {
     Grow(f64, f64, f64),
-    Keep(Unit, f64, Option<f64>),
-    Undo,
+    Keep(Vec<Unit>, f64),
     Done(Solution),
 }
 
@@ -1217,15 +1212,13 @@ fn booked(bounds: &[Option<f64>]) -> Vec<Booked> {
         .collect()
 }
 
-/// The folded unit to keep, if any (SPEC §5.2), from the units' errors `measured` at the states of the trajectories
-/// `parts` (their `estimates`; the units' mean errors over them `means`, per output and unit) and the errors `fixed`
-/// beside them, the step's taken at its share (a pilot's measured
-/// bound is its own noise): a unit whose error leaves an output no room for the statistics -- of the
-/// outputs left none, the unit of the largest weight there (its errors on what is shown and on T where they were read,
-/// weighed by the held share as the totals are, each over its target, added up) --; else, of the units whose error's removal alone would pay
-/// for the `again` trajectories its model runs before it stands where this one does, each rated with its kept model,
-/// the one whose keeping saves the most predicted work beyond its spread -- with that saving's share, and never a unit
-/// of `barred` (a keep of this kind once made is not priced again: undone or not, its price has been read).
+/// The folded units to keep, if any (SPEC §5.2; module documentation, # The model), from the units' errors `measured`
+/// at the states of the trajectories `parts` (their `estimates`; the units' mean errors over them `means`, per output
+/// and unit) and the errors `fixed` beside them, the step's taken at its share (a pilot's measured bound is its own
+/// noise): the units the looks need kept to have room for the statistics (`needed`); else, of the units whose error's
+/// removal alone would pay for the `again` trajectories its model runs before it stands where this one does, each
+/// rated with its kept model and paying beyond its spread, the leading ones by their saving whose keep together saves
+/// the most beyond its spread (`Pricing::joint`).
 #[allow(clippy::too_many_arguments)]
 fn keep(
     request: &Request,
@@ -1243,8 +1236,7 @@ fn keep(
     scales: &Scales,
     unsampled: [f64; 2],
     again: f64,
-    barred: &[Unit],
-) -> Option<(usize, Option<f64>)> {
+) -> Option<Vec<usize>> {
     let held: Vec<f64> = estimates.iter().map(|e| 1. - e.loss).collect();
     // A unit weighs where it was read: an output with no state read carries every unit's bound alike, and tells none
     // of them apart. And where the units' errors crowd it: the share of trajectories not counted (estimate.rs, # What is
@@ -1252,32 +1244,27 @@ fn keep(
     let mut read = vec![false; fixed.model.len()];
     measured.output.iter().for_each(|&k| read[k] = true);
     let counted: Vec<Estimate> = estimates.iter().map(|e| Estimate { uncounted: 0., ..e.clone() }).collect();
-    let crowded: Vec<usize> = crowded(&looks(&counted, fixed, &vec![Bound::share(); fixed.model.len()])).into_iter().filter(|&k| held[k] > 0. && read[k]).collect();
-    let weights: Vec<f64> = (0..units.len()).map(|u| crowded.iter().map(|&k| held[k] * (means[k][u][0] / POPULATION_TARGET + means[k][u][1] / TEMPERATURE_TARGET)).sum()).collect();
-    if let Some(u) = (0..units.len()).max_by(|&a, &b| weights[a].total_cmp(&weights[b])).filter(|&u| weights[u] > 0.) {
-        return Some((u, None));
+    let needed = needed(&counted, fixed, means, &held, &read);
+    if !needed.is_empty() {
+        return Some(needed);
     }
     let mut pricing = Pricing::new(request, light, kept, model, reference, centre, units, measured, means, parts, estimates, fixed, scales, unsampled, again);
     let saving = pricing.saving_at_all();
-    let mut ranked: Vec<Candidate> = if saving.is_empty() {
-        vec![]
-    } else {
-        pricing.own = pricing.rates(model);
-        let pricing = &pricing;
-        let others = pricing.leave_one_out();
-        saving.into_par_iter().filter(|&u| !barred.contains(&units[u]) && pays(0., pricing.saving(&others, u, &pricing.own))).filter_map(|u| pricing.priced(&others, u)).collect()
-    };
+    if saving.is_empty() {
+        return None;
+    }
+    pricing.own = pricing.rates(model);
+    let pricing = &pricing;
+    let others = pricing.leave_one_out();
+    let mut ranked: Vec<Candidate> = saving.into_par_iter().filter(|&u| pays(0., pricing.saving(&others, u, &pricing.own))).filter_map(|u| pricing.priced(&others, u)).filter(|c| pays(0., c.saving)).collect();
     ranked.sort_by(|a, b| assured(b.saving).total_cmp(&assured(a.saving)));
-    ranked.first().filter(|c| pays(0., c.saving)).map(|c| (c.unit, Some(c.saving.value)))
+    let ranked: Vec<usize> = ranked.into_iter().map(|c| c.unit).collect();
+    (!ranked.is_empty()).then(|| pricing.joint(&others, &ranked))
 }
 
 /// One attempt at the solve (module documentation, # The pipeline) with the model of the units `kept` as `setting`
 /// holds it, judged over the reach `judged` of the temperature `reach` µK, where none of its `gates` fails.
-/// `step`: the step the attempt before stood at, this one's first rung. `priced`: the model's last unit was kept for a
-/// predicted saving -- the step of the model before it and the saving's share of the work. The price knew the kept
-/// model's work a step, not the step it needs (pricing reads no step); where the screen then takes a step at which the
-/// kept model costs more than the one before it, (1 − share)·τ_before/τ > 1, the keep is undone (`Attempt::Undo`): the
-/// fold's error stands, measured and booked as before.
+/// `step`: the step the attempt before stood at, this one's first rung.
 #[allow(clippy::too_many_arguments)]
 fn attempt(
     request: &Request,
@@ -1288,8 +1275,6 @@ fn attempt(
     kept: &[Unit],
     reach: f64,
     step: Option<f64>,
-    priced: Option<(f64, f64)>,
-    barred: &[Unit],
     messages: &mut Messages,
 ) -> Result<Attempt, String> {
     let hm = hbar_over_mass(request.mass_kg);
@@ -1371,8 +1356,6 @@ fn attempt(
     // The pilot's groups (module documentation, # The pipeline): the run's first trajectories, at two levels.
     let first = MOST_TRAJECTORIES / GROUP;
     let numbers: Vec<u64> = (first..first + pilot_size() / GROUP).collect();
-    // A priced keep's model at the step `step` against the model before it at its own (see `priced`).
-    let dearer = |step: f64| priced.is_some_and(|(before, share)| (1. - share) * before / step > 1.);
     // Whether the pilot's atoms have outgrown the reach (`outgrown`), and the temperature it then grows to: the
     // attempt ends there, and its check spends nothing further on a step the next attempt settles anew (`settle`).
     let scales = context.scales;
@@ -1382,8 +1365,7 @@ fn attempt(
     // The scout (module documentation, # The pipeline): the first member of every pilot group at both levels, screened;
     // where a unit is to be kept at its states, the attempt ends here -- for the price of the scout, not of a pilot.
     // The pilot's read of the same below stands for the result.
-    match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &dearer, &|pilot| grown(pilot).is_some(), None, messages) {
-        Settled::Dearer => return Ok(Attempt::Undo),
+    match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &|pilot| grown(pilot).is_some(), None, messages) {
         Settled::Unproven(asked) => return Ok(hold(asked, context.tau)),
         _ => {}
     }
@@ -1395,8 +1377,8 @@ fn attempt(
         let measured = Measured { errors: &read.errors, output: &read.at, group: &read.from, booked: &booking };
         let means = measured.means(outputs, None, &estimates);
         let fixed = Fixed { model: model_error(&sums(&means, unsampled), unsampled), ..context.fixed.clone() };
-        if let Some((u, share)) = keep(request, light, kept, model, reference, trap.centre, units, &measured, &means, &scout, &estimates, &fixed, &context.scales, unsampled, scout.len() as f64, barred) {
-            return Ok(Attempt::Keep(units[u].clone(), tau, share));
+        if let Some(u) = keep(request, light, kept, model, reference, trap.centre, units, &measured, &means, &scout, &estimates, &fixed, &context.scales, unsampled, scout.len() as f64) {
+            return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), tau));
         }
         read
     };
@@ -1424,8 +1406,7 @@ fn attempt(
     };
     // The pilot: its groups' other members at both levels, screened. Where the check ended unable to see, the reads
     // its last rung is held by: what they do not exclude is booked (`unexcluded`), and flagged.
-    let unseen = match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &dearer, &|pilot| grown(pilot).is_some(), ran, messages) {
-        Settled::Dearer => return Ok(Attempt::Undo),
+    let unseen = match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &|pilot| grown(pilot).is_some(), ran, messages) {
         Settled::Unproven(asked) => return Ok(hold(asked, context.tau)),
         Settled::Capped => {
             context.ledger.flag(capped());
@@ -1507,9 +1488,9 @@ fn attempt(
         let (clear, resolution) = checked(&read);
         let step = unseen.as_ref().map_or(clear, unexcluded);
         (context.step, context.checked) = (vec![step; outputs], Some(Checked { companion, pairs, resolution, saw: unseen.is_none() }));
-        // A unit to keep at the pilot's states (`keep`): its model then runs a pilot again.
-        if let Some((u, share)) = keep(request, light, kept, model, reference, trap.centre, units, &measured, &means, &pilot, &estimates, &context.fixed, &context.scales, unsampled, pilot_size() as f64, barred) {
-            return Ok(Attempt::Keep(units[u].clone(), tau, share));
+        // Units to keep at the pilot's states (`keep`): their model then runs a pilot again.
+        if let Some(u) = keep(request, light, kept, model, reference, trap.centre, units, &measured, &means, &pilot, &estimates, &context.fixed, &context.scales, unsampled, pilot_size() as f64) {
+            return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), tau));
         }
         // The ledger's items: each folded unit's error on what is shown and on T (its largest over the outputs, weighed by
         // the pilot's held share as the totals are; an output where the pilot holds no atom weighs nothing: its units'
@@ -1721,15 +1702,14 @@ fn absorb(level: &mut Vec<Part>, more: Vec<Part>) {
 }
 
 /// How the pilot's check leaves the step (`settle`): standing; clearly beyond its share, or refuting its order, at the
-/// steps' cap; unable to see with no remedy left, with the reads the rung is held by (`held`); at a step that makes
-/// a priced keep dearer than the model before it (`attempt`); or not at all: a step of its trajectories was not proven,
+/// steps' cap; unable to see with no remedy left, with the reads the rung is held by (`held`); or not at all: a step
+/// of its trajectories was not proven,
 /// and the attempt ends with what the reach is to hold for it (`run_groups`).
 #[derive(Clone, Debug)]
 enum Settled {
     Standing,
     Capped,
     Unseen(Between),
-    Dearer,
     Unproven([f64; 2]),
 }
 
@@ -1766,9 +1746,7 @@ enum Settled {
 ///   not exclude is booked and flagged (SPEC §5.1). A rung whose order is tested and whose reads exclude nothing ends
 ///   the check the same way.
 /// A rung below at which a trajectory would take more than `MOST_STEPS` steps does not exist: a check that is beyond
-/// or refuted there leaves the step capped. Nor is a rung taken at which a priced keep's model costs more than the
-/// model before it (`dearer`): the attempt ends, and the keep is undone -- a rung read as a third level is taken
-/// only where the rung above it is then left. And a first rung that does not read within is settled no further
+/// or refuted there leaves the step capped. And a first rung that does not read within is settled no further
 /// where the pilot's atoms already end the attempt (`outgrown`: the reach outgrown, `attempt`): the step stands as
 /// it is for the next attempt to begin at, and no third level and no pair is run for it.
 ///
@@ -1777,7 +1755,7 @@ enum Settled {
 /// read before its companion) -- its companion alone is run then, and the check goes on as from a pair: a trajectory
 /// is a function of its number and step (`trajectory`), not of the hand-out it was run in.
 #[allow(clippy::too_many_arguments)]
-fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, dearer: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, ran: Option<(Vec<Part>, Option<[f64; 2]>)>, messages: &mut Messages) -> Settled {
+fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, ran: Option<(Vec<Part>, Option<[f64; 2]>)>, messages: &mut Messages) -> Settled {
     // The finer level joined to the groups the levels hold, its companion, and what each level's paths not proven ask.
     let (joined, coarse, departed) = match ran {
         Some((joined, asked)) => {
@@ -1824,9 +1802,6 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
                 *levels = Levels { below: Some(read), ..*upper };
                 context.tau *= 2.;
                 return Settled::Standing;
-            }
-            if dearer(context.tau) {
-                return Settled::Dearer;
             }
             levels.coarse = upper.fine;
             forget(&mut levels.coarse);
@@ -1885,8 +1860,6 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
                 return Settled::Unproven(asked);
             } else if lowest {
                 return Settled::Capped;
-            } else if dearer(below) {
-                return Settled::Dearer;
             }
         }
         // A rung left unread (its companion departed) hands nothing down: the rung below is of untested order.
@@ -2520,6 +2493,28 @@ fn crowded(looks: &[Look]) -> Vec<usize> {
     outputs
 }
 
+/// The units the looks need kept (module documentation, # The model; `keep`): at the `estimates` (every trajectory
+/// counted), the model's errors `fixed` beside the step's share, and the units' errors `means` per output, at the
+/// outputs `read` where the held share `held` is some: while a look leaves the statistics no room, the unit of the
+/// largest weight at those outputs (its errors on what is shown and on T, weighed by the held share, each over its
+/// target, added up) leaves the model's error, until every such look has room or no unit weighs there. One pass, the
+/// set growing: the units the room needs together.
+fn needed(estimates: &[Estimate], fixed: &Fixed, means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool]) -> Vec<usize> {
+    let units = means.first().map_or(0, Vec::len);
+    let mut taken: Vec<usize> = vec![];
+    let mut model = fixed.model.clone();
+    loop {
+        let crowded: Vec<usize> = crowded(&looks(estimates, &Fixed { model: model.clone(), ..fixed.clone() }, &vec![Bound::share(); model.len()])).into_iter().filter(|&k| held[k] > 0. && read[k]).collect();
+        let weights: Vec<f64> = (0..units).map(|u| if taken.contains(&u) { 0. } else { crowded.iter().map(|&k| held[k] * (means[k][u][0] / POPULATION_TARGET + means[k][u][1] / TEMPERATURE_TARGET)).sum() }).collect();
+        let Some(u) = (0..units).max_by(|&a, &b| weights[a].total_cmp(&weights[b])).filter(|&u| weights[u] > 0.) else { return taken };
+        // Its error leaves the model's at the outputs read (a read output's errors are numbers, `Measured::means`).
+        for k in (1..model.len()).filter(|&k| read[k]) {
+            model[k] = [probability_error((model[k][0] - means[k][u][0]).max(0.)), (model[k][1] - means[k][u][1]).max(0.)];
+        }
+        taken.push(u);
+    }
+}
+
 /// Each output's accounts of what is shown and of the total T (ledger.rs `Account`) by the run's estimates, the model's
 /// errors on the held atoms per output (`Fixed`) and the step's part, T's where read: the held share 1 − L weighs the
 /// model's error on the rows as shown, and T's whole accounts (module documentation, # Stopping); t = 0 is the
@@ -2759,6 +2754,16 @@ impl<'a> Level<'a> {
         self.need_beside(&|k| model_error_at(self.whole[k], Some((self.means[k][u], self.means[k].len())), self.unsampled))
     }
 
+    /// The trajectories the looks need beside the units' errors but those of the units `set` and the step's share: at an
+    /// output where some of them is unread, the bounds of the units read left there (`model_error_at`).
+    fn need_without_all(&self, set: &[usize]) -> f64 {
+        self.need_beside(&|k| {
+            let less = set.iter().fold([0.; 2], |a, &u| [a[0] + self.means[k][u][0], a[1] + self.means[k][u][1]]);
+            let rest = if set.len() < self.means[k].len() { f64::INFINITY } else { self.unsampled[1] };
+            [probability_error(self.whole[k][0] - less[0]), if less[1].is_finite() { self.whole[k][1] - less[1] } else { rest }]
+        })
+    }
+
     /// The trajectories the looks need beside the step's share alone: every unit kept, what the reach leaves out left.
     fn need_alone(&self) -> f64 {
         self.need_beside(&|_| model_error_at(self.unsampled, None, self.unsampled))
@@ -2858,8 +2863,33 @@ impl<'a> Pricing<'a> {
     /// a model's W (per µs of run) is its mean rate times its product's trajectories (`need`), the kept model's with the
     /// pilot its new attempt runs.
     fn share(&self, level: &Level, u: usize, rates: &[f64]) -> f64 {
+        self.share_of(level, level.need_without(u), rates)
+    }
+
+    /// The share of the current model's W at a level that a kept model saves, which needs `need` trajectories at the
+    /// rates `rates` (`share`).
+    fn share_of(&self, level: &Level, need: f64, rates: &[f64]) -> f64 {
         let spent = self.mean(&self.own, level.left) * level.need;
-        if spent > 0. { 1. - self.mean(rates, level.left) * (level.need_without(u) + self.again) / spent } else { 0. }
+        if spent > 0. { 1. - self.mean(rates, level.left) * (need + self.again) / spent } else { 0. }
+    }
+
+    /// The units to keep of the candidates `ranked` (each paying by itself, by their saving, the largest first): of the
+    /// sets of their leading ones, the one whose keep together saves the most beyond its spread over the jackknife's
+    /// levels `others` -- its errors leave the looks together, and its kept model is rated once --; the leading one
+    /// where no larger set does better, or where a larger set's model is refused (`Model::new`): no candidate after it
+    /// is taken then.
+    fn joint(&self, others: &[Level], ranked: &[usize]) -> Vec<usize> {
+        let mut best: (usize, f64) = (1, f64::NEG_INFINITY);
+        for j in 1..=ranked.len() {
+            let set = &ranked[..j];
+            let Ok(with) = Model::new(self.request, self.light, &[self.kept, &set.iter().map(|&u| self.units[u].clone()).collect::<Vec<_>>()].concat()) else { break };
+            let rates = self.rates(&with);
+            let saving = Read { value: self.share_of(&self.all, self.all.need_without_all(set), &rates), spread: spread(others.iter().map(|l| self.share_of(l, l.need_without_all(set), &rates)), others.len() as f64) };
+            if pays(0., saving) && assured(saving) > best.1 {
+                best = (j, assured(saving));
+            }
+        }
+        ranked[..best.0].to_vec()
     }
 
     /// The saving of keeping unit `u` at the rates `rates` of its kept model, spread over the jackknife's levels `others`.
@@ -3471,6 +3501,26 @@ mod tests {
         let shown = Look { target: POPULATION_TARGET, shown: true, ..look(0.03, 0.02, 0.) };
         assert_eq!(shown.need(), draws_for(room(POPULATION_TARGET, 0.03, 0.02)));
         assert_eq!((batch(1147.3, 800), batch(300., 800), batch(5000., 800), batch(f64::INFINITY, 800), batch(1e9, MOST_TRAJECTORIES - 8)), (1152, 808, 1600, 1600, MOST_TRAJECTORIES));
+    }
+
+    /// The units the looks need kept (`needed`), in one pass. One output after t = 0, its T read exactly, the step at its
+    /// share: T's look has room while the model's error on T is below √(1 − 1/5) of the target, 0.0894. Three units of
+    /// errors 0.06, 0.05 and 0.04 on T beside 0.05 of the rest (0.2): the heaviest first, 0.14 and 0.09 still leave no
+    /// room, 0.05 does -- all three, together. With 0.02, 0.08 and 0.03 beside 0.02 (0.15): the second alone, 0.07. With
+    /// room from the start, none; at an output not read, or where no atom is held, none.
+    #[test]
+    fn the_units_the_looks_need_kept_are_taken_heaviest_first_until_they_have_room() {
+        let estimates = vec![estimate([10.; 3], 0., 88.), estimate([10.; 3], 0., 88.)];
+        let case = |errors: [f64; 3], rest: f64, held: f64, read: bool| {
+            let means = vec![vec![[0.; 2]; 3], errors.iter().map(|&e| [0., e]).collect::<Vec<_>>()];
+            let fixed = Fixed { model: vec![[0.; 2], [0., errors.iter().sum::<f64>() + rest]], start: 0. };
+            needed(&estimates, &fixed, &means, &[1., held], &[false, read])
+        };
+        assert_eq!(case([0.06, 0.05, 0.04], 0.05, 1., true), [0, 1, 2]);
+        assert_eq!(case([0.02, 0.08, 0.03], 0.02, 1., true), [1]);
+        assert_eq!(case([0.02, 0.03, 0.01], 0.02, 1., true), Vec::<usize>::new());
+        assert_eq!(case([0.06, 0.05, 0.04], 0.05, 1., false), Vec::<usize>::new());
+        assert_eq!(case([0.06, 0.05, 0.04], 0.05, 0., true), Vec::<usize>::new());
     }
 
     /// An output's estimate with T = `temperature` (µK) per lab axis and the total T's standard error `error` (µK), read
