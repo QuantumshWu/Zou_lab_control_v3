@@ -76,13 +76,31 @@
 //! All the quantities of a model share one tree of cells, and each quantity halves only the cells it still needs -- one
 //! decided on the coarse cells costs nothing further. A cell has one pair of halves a side (# A cell's sides), each made when
 //! a quantity first asks for it. The tree holds of a cell what the reach says of it (`Node`), a few numbers: a cell's regions
-//! -- its beams, beam pairs and the parts the units' bounds have in common (the constant forms' energies and their slopes,
-//! the carriers' couplings, resolvents and dressings, the clusters' force bounds, each ground state's drives' gates, the
+//! -- its beams, beam pairs and the parts the units' bounds have in common (the excited states' Gershgorin radii, the
+//! carriers' couplings, resolvents and dressings, the clusters' force bounds, each ground state's drives' gates, the
 //! levels' slope and the atoms' acceleration) -- are made where a round reads them, once for all the quantities that ask
 //! there, and let go with the round's cell (# Rounds): functions of the cell alone, they are the same whenever made. (Kept in
 //! the tree they were 28 kB a cell: the lin-perp-lin scene's 464 215 cells over a reach of 120 µK held 13 GB, and letting
 //! them go took 39 s of the proof's 55.) What the bounds read of the model itself -- its forms' entries that are not zero,
 //! with their moduli (`Forms`) -- is made once for the model.
+//!
+//! # Own forms
+//! What a proof needs of a bound is that it tends to the quantity's largest value over the cell as fast as the quantity
+//! itself varies there: its excess at most a few times the quantity's own variation, Σ_a h_a |∂_a f| and its curvature's
+//! term, at every scale (units.rs `a_gate_s_bound_over_a_cell_is_within_its_own_variation_of_its_largest_value`). A bound
+//! assembled from the separate ranges of parts that share a term is not that: it is as wide as the parts move, and where
+//! the shared term cancels in the quantity it is wide where the quantity is flat, and the proof halves cells far below the
+//! light's length before it answers. (The user's experiment, S3: the two-photon distance between F=1 m=0 and m=−1, their
+//! 13.2 rad/µs Zeeman splitting, was read as each level's own slack -- the tweezer's scalar light shift, 236 rad/µs a
+//! micrometre and the same on both, so nothing of the difference -- and the dressings' moduli: 0.38 rad/µs from nothing at
+//! the point, nothing on every cell wider than 0.001 µm; the self-energy read infinite there, a repump drive's share 0.64
+//! where it is 0.07, and the gates' proofs over the reach ran past 4000 halvings a quantity and out of memory.) So every
+//! bound the gates read is the quantity's own form (own.rs `Own`): its value and gradient at the centre and a remainder of
+//! the second order, beside its range -- each part made of its own sum (a level difference of its weights P_xx − P_yy,
+//! eliminate.rs `Gap`; a sum of beam pairs of its own gradient and Hessian, `Combination`, `steepness`; a norm of its
+//! vector's, `Region::summed`), and every composite of them in own-form arithmetic, so that two parts that move together
+//! cancel at the first order where the quantity does. The speeds' bound is one too (`Region::pace`): a level's slope is
+//! largest on the trap's flank and the speed at its bottom, and the product of the two maxima was neither's.
 //!
 //! # A cell's sides
 //! The light does not change alike along a cell's three sides. A beam's amplitude is a = e^{ik·r} b: its plane wave turns by
@@ -160,7 +178,8 @@
 //! edge is: where a companion lies in such a band its trajectories differ from the run's without bound, and the check
 //! halves.
 
-use super::eliminate::{CellEnergies, Couplings};
+use super::eliminate::Couplings;
+use super::own::Own;
 use super::far::EXCITED;
 use super::{Component, Envelope, Level, Lights, Model, Reach, Trap};
 use crate::field::{Amplitude, Geometry};
@@ -184,12 +203,21 @@ use std::sync::{Arc, Mutex, OnceLock};
 ///   (x + 1)e^{−x/2} ≤ 2e^{−1/2}), across-across (2e^{−1/2}/w₀)² + 2/w₀²; across-along -- the vector h of n hᵀ + h nᵀ --
 ///   (2e^{−1/2}/w₀)(2e^{−1/2}/z_R) + 2/(√(2e) z_R w₀) (|b| 2ρ/(z_R w₀²|q|²) ≤ 2√x e^{−x}/(z_R w₀)); along-along
 ///   (2e^{−1/2}/z_R)² + 2e^{−1/2}/z_R² ((1 + 2x)e^{−x} ≤ 2e^{−1/2}).
+/// - `third`, sup of the blocks of ∇∇∇b, ∂_i∂_j∂_k b = b(g_i g_j g_k + g_i ∂_j g_k + g_j ∂_i g_k + g_k ∂_i g_j + ∂_i∂_j g_k),
+///   with p = |q| ≥ 1, |b| ≤ e^{−x}, |g_t| = 2√x/w₀, |g_n| ≤ (x + 1)/z_R, |∂_t g_t| ≤ 2/w₀², |∂_n g_t|, |∂_t g_n| ≤ 2√x/(w₀ z_R),
+///   |∂_n g_n| ≤ (2x + 1)/z_R², ∂_t∂_t g_t = 0, |∂_t∂_n g_t|, |∂_t∂_t g_n| ≤ 2/(w₀² z_R), |∂_n∂_n g_t|, |∂_t∂_n g_n| ≤
+///   4√x/(w₀ z_R²), |∂_n∂_n g_n| ≤ (6x + 2)/z_R³ (each a derivative of g along t or ζ, q' = i/z_R): across³
+///   e^{−x}(8x^{3/2} + 12x^{1/2})/w₀³, across² along e^{−x}(4x² + 14x + 4)/(w₀² z_R), across along² e^{−x}x^{1/2}(2x² + 12x +
+///   12)/(w₀ z_R²), along³ e^{−x}(x³ + 9x² + 18x + 6)/z_R³, each term at its own largest, e^{−x}x^a ≤ (a/e)^a: 8.43/w₀³,
+///   11.32/(w₀² z_R), 11.69/(w₀ z_R²), 18.84/z_R³ -- what a gradient's Taylor remainder takes (`rest`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Bends {
     /// sup |∇b| across the beam and along it (1/µm).
     pub(crate) slope: [f64; 2],
     /// sup of ∇∇b's blocks: across-across, across-along, along-along (1/µm²).
     pub(crate) curvature: [f64; 3],
+    /// sup of ∇∇∇b's blocks: across³, across² along, across along², along³ (1/µm³).
+    pub(crate) third: [f64; 4],
 }
 
 impl Bends {
@@ -197,12 +225,20 @@ impl Bends {
         match (beam.waist, beam.rayleigh()) {
             (Some(w), Some(z)) => {
                 let (h, e) = ((-0.5_f64).exp(), std::f64::consts::E);
+                // e^{−x} x^a at its largest, (a/e)^a.
+                let top = |a: f64| if a == 0.0 { 1.0 } else { (a / e).powf(a) };
                 Bends {
                     slope: [(2.0 / e).sqrt() / w, (1.0 + 1.0 / e) / z],
                     curvature: [(2.0 * h / w).powi(2) + 2.0 / (w * w), (2.0 * h / w) * (2.0 * h / z) + 2.0 / ((2.0 * e).sqrt() * z * w), (2.0 * h / z).powi(2) + 2.0 * h / (z * z)],
+                    third: [
+                        (8.0 * top(1.5) + 12.0 * top(0.5)) / w.powi(3),
+                        (4.0 * top(2.0) + 14.0 * top(1.0) + 4.0) / (w * w * z),
+                        (2.0 * top(2.5) + 12.0 * top(1.5) + 12.0 * top(0.5)) / (w * z * z),
+                        (top(3.0) + 9.0 * top(2.0) + 18.0 * top(1.0) + 6.0) / z.powi(3),
+                    ],
                 }
             }
-            _ => Bends { slope: [0.0; 2], curvature: [0.0; 3] },
+            _ => Bends { slope: [0.0; 2], curvature: [0.0; 3], third: [0.0; 4] },
         }
     }
     /// L_b = sup |∇b|, whatever the direction.
@@ -260,6 +296,7 @@ impl Cell {
 pub(crate) struct Span {
     pub(crate) centre: C64,
     pub(crate) gradient: [C64; 3],
+    pub(crate) hessian: [[C64; 3]; 3],
     pub(crate) wave: [f64; 3],
     pub(crate) half: [f64; 3],
     pub(crate) rho: f64,
@@ -269,6 +306,7 @@ pub(crate) struct Span {
     pub(crate) swing: f64,
     pub(crate) bend: f64,
     pub(crate) twist: f64,
+    pub(crate) third: f64,
 }
 
 impl Span {
@@ -290,11 +328,12 @@ impl Span {
 
     /// A beam of amplitude `value` and gradient `gradient` at a cell's centre over the cell; over the whole space (an
     /// infinite half-width) its global bounds, nothing at a centre.
-    fn over(beam: &Geometry, value: C64, gradient: [C64; 3], cell: &Cell) -> Span {
+    fn over(beam: &Geometry, at: &Amplitude, cell: &Cell) -> Span {
         let (k, n, bends, half) = (beam.wave_vector(), beam.direction, Bends::of(beam), cell.half);
+        let (value, gradient, hessian) = (at.value, at.gradient, at.hessian);
         let rho = cell.radius();
         if !rho.is_finite() {
-            return Span { centre: C64::ZERO, gradient: [C64::ZERO; 3], wave: k, half, rho, most: 1.0, least: 0.0, slope: bends.lipschitz(), swing: f64::INFINITY, bend: f64::INFINITY, twist: f64::INFINITY };
+            return Span { centre: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3], wave: k, half, rho, most: 1.0, least: 0.0, slope: bends.lipschitz(), swing: f64::INFINITY, bend: f64::INFINITY, twist: f64::INFINITY, third: f64::INFINITY };
         }
         // The envelope's gradient at the centre (its phase e^{ik·c} left on: only moduli are read), and the cell's extents
         // across the beam and along it.
@@ -304,12 +343,16 @@ impl Span {
         let [tt, tn, nn] = bends.curvature;
         let bend = tt * across * across + 2.0 * tn * across * along + nn * along * along;
         let twist = tt * across + tn * (across + along) + nn * along;
+        // |∇∇∇b[·, d, d]|: its component across and its component along, each over the blocks of d's two extents.
+        let [ttt, ttn, tnn, nnn] = bends.third;
+        let third = (ttt + ttn) * across * across + 2.0 * (ttn + tnn) * across * along + (tnn + nnn) * along * along;
         let swing = ((0..3).map(|i| half[i] * envelope[i].abs()).sum::<f64>() + bend).min(bends.slope[0] * across + bends.slope[1] * along);
         // The centre's modulus is one of the cell's: the range holds it whatever its own rounding.
         let [least, most] = Span::moduli(beam, cell.centre, along, across);
         Span {
             centre: value,
             gradient,
+            hessian,
             wave: k,
             half,
             rho,
@@ -319,13 +362,14 @@ impl Span {
             swing,
             bend,
             twist,
+            third,
         }
     }
     /// The same beam on the cell's centre point alone: its envelope's slope there.
     pub(crate) fn point(&self) -> Span {
         let k = self.wave;
         let slope = (0..3).map(|i| (self.gradient[i] - C64::new(0.0, k[i]) * self.centre).norm_sqr()).sum::<f64>().sqrt();
-        Span { most: self.centre.abs(), least: self.centre.abs(), slope, half: [0.0; 3], rho: 0.0, swing: 0.0, bend: 0.0, twist: 0.0, ..*self }
+        Span { most: self.centre.abs(), least: self.centre.abs(), slope, half: [0.0; 3], rho: 0.0, swing: 0.0, bend: 0.0, twist: 0.0, third: 0.0, ..*self }
     }
     /// The bound over a bounded cell of |dᵀ∇∇a d| = |−(k·d)² b + 2i (k·d)(∇b·d) + dᵀ∇∇b d|: τ² max|b| + 2τ swing + bend, τ its
     /// plane wave's turn.
@@ -342,6 +386,22 @@ impl Span {
     pub(crate) fn moved(&self) -> f64 {
         self.turn(&self.wave) * self.most + self.swing
     }
+    /// The bound over a bounded cell of |∇a − ∇a(c)| = |∇∇a d| = |e^{ik·r}(−k (k·d) b + i k (∇b·d) + i ∇b (k·d) + ∇∇b d)|:
+    /// |k| τ max|b| + |k| swing + τ slope + twist, τ its plane wave's turn.
+    pub(crate) fn veer(&self) -> f64 {
+        let (k, turn) = (norm3(self.wave), self.turn(&self.wave));
+        k * turn * self.most + k * self.swing + turn * self.slope + self.twist
+    }
+    /// The bound over the cell of |∇a| = |e^{ik·r}(ik b + ∇b)|, every phase blind: |k| max|b| + max|∇b|.
+    pub(crate) fn steepest(&self) -> f64 {
+        norm3(self.wave) * self.most + self.slope
+    }
+    /// The bound over a bounded cell of the remainder |∇a(c + d) − ∇a(c) − ∇∇a(c) d| of its gradient's first-order Taylor
+    /// form (`rest`, of a = e^{ik·r} b: its envelope's bounds and its turn).
+    pub(crate) fn rest(&self) -> f64 {
+        let (k, turn) = (norm3(self.wave), self.turn(&self.wave));
+        rest(k, turn, self.most, self.swing, self.bend, self.twist, self.slope, self.third)
+    }
 }
 
 /// A beam pair's coefficient c = a_j'* a_i = e^{iq·r} B, B = b_j* b_i (q = k_i − k_j), over a cell: its value and gradient at the
@@ -350,17 +410,38 @@ impl Span {
 /// (`Span`) -- its slope G = max|∇B|, its swing D = max|∇B·d|, its bend Q = max|dᵀ∇∇B d| and its twist T = max|∇∇B d| --:
 /// - `veer`, of |∇c − ∇c(c)|: ∇∇c d = e^{iq·r}(−q (q·d) B + i q (∇B·d) + i ∇B (q·d) + ∇∇B d), at most |q| τ B̄ + |q| D + τ G + T.
 /// - `slope`, of |∇c|: |∇c(c)| + `veer`, at most |q| B̄ + G.
-/// - `radius`, of |c − c(c)|: to second order Σ_a h_a |∂_a c(c)| + ½(τ² B̄ + 2τ D + Q) (dᵀ∇∇c d = e^{iq·r}(−(q·d)² B +
-///   2i (q·d)(∇B·d) + dᵀ∇∇B d)), at most the first order's τ B̄ + D, at most |c(c)| + B̄; and of a beam with itself,
-///   c = |b|² between its modulus's least and largest squared (`Span::moduli`), at most the farther of the two from c(c).
+/// - `curve`, of the remainder |c − c(c) − ∇c(c)·d| of its first-order Taylor form: ½ max|dᵀ∇∇c d| = ½(τ² B̄ + 2τ D + Q)
+///   (dᵀ∇∇c d = e^{iq·r}(−(q·d)² B + 2i (q·d)(∇B·d) + dᵀ∇∇B d)) -- what a sum of pairs adds to its own first order
+///   (`Region::combined`).
+/// - `radius`, of |c − c(c)|: to second order Σ_a h_a |∂_a c(c)| + `curve`, at most the first order's τ B̄ + D, at most
+///   |c(c)| + B̄; and of a beam with itself, c = |b|² between its modulus's least and largest squared (`Span::moduli`), at
+///   most the farther of the two from c(c).
+/// - `most`, of |c|: B̄; `hessian`, ∇∇c at the centre; and `rest`, of the remainder |∇c − ∇c(c) − ∇∇c(c) d| of its
+///   gradient's first-order Taylor form (`rest`).
 /// On a point: its value, its gradient's norm, the rest zero. On the whole space: nothing at the centre, B̄ and |q| B̄ + G.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PairSpan {
     pub(crate) centre: C64,
     pub(crate) gradient: [C64; 3],
+    pub(crate) hessian: [[C64; 3]; 3],
     pub(crate) radius: f64,
+    pub(crate) curve: f64,
+    pub(crate) most: f64,
     pub(crate) slope: f64,
     pub(crate) veer: f64,
+    pub(crate) rest: f64,
+}
+
+/// The bound over a cell of the remainder |∇c(c + d) − ∇c(c) − ∇∇c(c) d| of the gradient's first-order Taylor form of a
+/// plane wave times an envelope, c = e^{iq·r} B, with τ = Σ_a |q_a| h_a its turn and of B its bounds B̄ = max|B|,
+/// D = max|∇B·d|, Q = max|dᵀ∇∇B d|, T = max|∇∇B d|, G = max|∇B| and E = max|∇∇∇B[·, d, d]|. With ∇c = e^{iq·r}(iqB + ∇B),
+/// the remainder is e^{iq·c}(iq X + Y), X = B(c + d) e^{iq·d} − B − i(q·d)B − ∇B·d = B R_e + (∇B·d)(i q·d + R_e) + R_B
+/// e^{iq·d} and Y = ∇B(c + d) e^{iq·d} − ∇B − i(q·d)∇B − ∇∇B d = ∇B R_e + ∇∇B d (e^{iq·d} − 1) + R'_B e^{iq·d}, with
+/// |R_e| = |e^{iq·d} − 1 − iq·d| ≤ τ²/2, |R_B| ≤ Q/2 and |R'_B| = |∇B(c + d) − ∇B − ∇∇B d| ≤ E/2: at most
+/// |q|(B̄τ²/2 + Dτ(1 + τ/2) + Q/2) + Gτ²/2 + Tτ + E/2 -- of the cell's second order throughout.
+#[allow(clippy::too_many_arguments)]
+fn rest(q: f64, turn: f64, most: f64, swing: f64, bend: f64, twist: f64, steep: f64, third: f64) -> f64 {
+    q * (0.5 * most * turn * turn + swing * turn * (1.0 + 0.5 * turn) + 0.5 * bend) + 0.5 * steep * turn * turn + twist * turn + 0.5 * third
 }
 
 /// The pair (j, i) of beams over a cell (`PairSpan`).
@@ -371,19 +452,27 @@ pub(crate) fn pair_span(spans: &[Span], j: usize, i: usize) -> PairSpan {
     let steep = a.slope * b.most + a.most * b.slope;
     let blind = q * most + steep;
     if !a.rho.is_finite() {
-        return PairSpan { centre: C64::ZERO, gradient: [C64::ZERO; 3], radius: most, slope: blind, veer: f64::INFINITY };
+        return PairSpan { centre: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3], radius: most, curve: f64::INFINITY, most, slope: blind, veer: f64::INFINITY, rest: f64::INFINITY };
     }
     let turn = a.turn(&wave);
     let swing = a.swing * b.most + a.most * b.swing;
     let bend = a.bend * b.most + 2.0 * a.swing * b.swing + a.most * b.bend;
     let twist = a.twist * b.most + a.slope * b.swing + a.swing * b.slope + a.most * b.twist;
+    // |∇∇∇B[·, d, d]| of B = b_j* b_i: the product rule's terms, ∇∇∇b_j b_i + 2 (∇∇b_j d)(∇b_i·d) + (dᵀ∇∇b_j d)∇b_i and the same
+    // with j and i exchanged, and b_j ∇∇∇b_i.
+    let third = a.third * b.most + 2.0 * a.twist * b.swing + a.bend * b.slope + 2.0 * a.swing * b.twist + a.slope * b.bend + a.most * b.third;
     let centre = a.centre.conj() * b.centre;
     let gradient: [C64; 3] = std::array::from_fn(|x| a.gradient[x].conj() * b.centre + a.centre.conj() * b.gradient[x]);
+    let hessian: [[C64; 3]; 3] = std::array::from_fn(|x| {
+        std::array::from_fn(|y| a.hessian[x][y].conj() * b.centre + a.gradient[x].conj() * b.gradient[y] + a.gradient[y].conj() * b.gradient[x] + a.centre.conj() * b.hessian[x][y])
+    });
     let lean: f64 = (0..3).map(|x| gradient[x].abs() * a.half[x]).sum();
     let veer = q * turn * most + q * swing + turn * steep + twist;
-    let radius = (lean + 0.5 * (turn * turn * most + 2.0 * turn * swing + bend)).min(turn * most + swing).min(centre.abs() + most);
+    let curve = 0.5 * (turn * turn * most + 2.0 * turn * swing + bend);
+    let radius = (lean + curve).min(turn * most + swing).min(centre.abs() + most);
     let radius = if j == i { radius.min((most - centre.re).max(centre.re - a.least * a.least)) } else { radius };
-    PairSpan { centre, gradient, radius, slope: (gradient.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + veer).min(blind), veer }
+    let rest = rest(q, turn, most, swing, bend, twist, steep, third);
+    PairSpan { centre, gradient, hessian, radius, curve, most, slope: (gradient.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + veer).min(blind), veer, rest }
 }
 
 /// One weighting w of the far light's static forms P_l'l (an entry's, a diagonal difference's), as a sum over the beam pairs
@@ -523,8 +612,6 @@ impl TermForm {
 /// --, each as its bound sums it: the entries that are not zero, with their moduli. The same for every region of a model, it
 /// is the model's (`Model::forms`), each part made when first asked.
 pub(crate) struct Forms {
-    /// [frequency][pair][state]: [P_l'l]_ss and its modulus.
-    levels: OnceLock<Vec<Vec<[(C64, f64); STATES]>>>,
     /// Per excited state x (less GROUND) the excited states y ≠ x it is coupled to somewhere -- by the base or by a form --,
     /// ascending, each with the base's entry.
     mixed: OnceLock<Vec<Vec<(usize, C64)>>>,
@@ -550,7 +637,7 @@ pub(crate) struct Forms {
 impl Forms {
     pub(crate) fn new() -> Forms {
         let cells = || (0..STATES * STATES).map(|_| OnceLock::new()).collect();
-        Forms { levels: OnceLock::new(), mixed: OnceLock::new(), entries: cells(), differences: cells(), folded: OnceLock::new(), drives: OnceLock::new(), terms: Mutex::new(HashMap::new()), decay: OnceLock::new(), taken: OnceLock::new() }
+        Forms { mixed: OnceLock::new(), entries: cells(), differences: cells(), folded: OnceLock::new(), drives: OnceLock::new(), terms: Mutex::new(HashMap::new()), decay: OnceLock::new(), taken: OnceLock::new() }
     }
 
     /// A weighting of the model's far static forms (`Weights`).
@@ -565,11 +652,6 @@ impl Forms {
             }
         }
         out
-    }
-
-    /// The far static forms' diagonals with their moduli, [frequency][pair][state].
-    pub(crate) fn levels(&self, model: &Model) -> &[Vec<[(C64, f64); STATES]>] {
-        self.levels.get_or_init(|| model.tones.iter().map(|t| t.pairs.iter().map(|p| std::array::from_fn(|s| (p[(s, s)], p[(s, s)].abs()))).collect()).collect())
     }
 
     /// Per excited state (less GROUND) the excited states it is coupled to somewhere, with the base's entries (`Forms::mixed`).
@@ -681,50 +763,71 @@ impl Forms {
 
 /// A cell's beams, or its centre point's (its radius zero), with what the units' bounds share over it, each part made once for
 /// every quantity that asks (module documentation, # Provable extrema): the reach's speeds over it, the beam pairs per frequency,
-/// the constant forms' energies and their slopes, the carriers' coherent couplings, resolvents and dressings of the ground
-/// states, the clusters' force bounds (eliminate.rs) and the ground states' drives' gates (units.rs).
+/// the excited states' Gershgorin radii, the carriers' coherent couplings, resolvents and dressings of the ground states, the
+/// clusters' force bounds (eliminate.rs) and the ground states' drives' gates (units.rs).
 pub(crate) struct Region {
     pub(crate) spans: Vec<Span>,
     /// The cell's half-widths and its radius (0: a point).
     pub(crate) half: [f64; 3],
     pub(crate) rho: f64,
     /// The bound of the atoms' speed over it (µm/µs): the reach's at its least V_prep (module documentation, # The reach); a
-    /// sample's own on its point.
+    /// sample's own on its point. And the speed's own form (own.rs): (2 (ħ/m)(level − V_prep))^{1/2} of V_prep's own form,
+    /// within the reach's -- a constant on a point, on a path's box and on the whole space.
     pub(crate) speed: f64,
+    pub(crate) pace: Own,
     /// Per frequency, its beam pairs (j, i) row-major (`PairSpan`).
     pub(crate) pairs: Vec<Vec<PairSpan>>,
     /// What its bounds read of the model's forms.
     pub(crate) forms: Arc<Forms>,
-    pub(crate) energies: OnceLock<Box<CellEnergies>>,
+    /// Per state (eliminate.rs `Model::radii`).
+    pub(crate) radii: OnceLock<[Own; STATES]>,
     /// Per carrier.
     pub(crate) couplings: OnceLock<Vec<Couplings>>,
-    /// [carrier][ground state]: the bound of its dressing's resolvent (eliminate.rs `Model::resolvent`).
-    pub(crate) resolvents: OnceLock<Vec<[f64; GROUND]>>,
+    /// [carrier][ground state]: its dressing's resolvent (eliminate.rs `Model::resolvent_own`).
+    pub(crate) resolvents: OnceLock<Vec<[Own; GROUND]>>,
     /// [carrier][ground state].
-    pub(crate) dressings: OnceLock<Vec<[f64; GROUND]>>,
+    pub(crate) dressings: OnceLock<Vec<[Own; GROUND]>>,
     /// Per cluster.
-    pub(crate) forces: Vec<OnceLock<f64>>,
+    pub(crate) forces: Vec<OnceLock<Own>>,
     /// Per ground state its drives' sizes and distances (units.rs `Model::across`), and the first places of their gates
     /// in the tail rule's order (units.rs `Model::folds`).
     pub(crate) across: [OnceLock<Vec<super::units::Across>>; GROUND],
     pub(crate) drives: [OnceLock<Vec<[f64; 5]>>; GROUND],
     /// Per ground state: the slope of its level under the near light (units.rs `Model::near_slope`), and its shift's
     /// bound (units.rs `Model::near_shift`).
-    pub(crate) slopes: [OnceLock<f64>; GROUND],
-    pub(crate) shifts: [OnceLock<f64>; GROUND],
+    pub(crate) slopes: [OnceLock<Own>; GROUND],
+    pub(crate) shifts: [OnceLock<Own>; GROUND],
     /// Per ground state: the slopes of the constant forms' levels from it to the excited states its folded drives reach
     /// (units.rs `Model::level_slopes`).
-    pub(crate) levels: Vec<OnceLock<[f64; EXCITED]>>,
+    pub(crate) levels: Vec<OnceLock<[Own; EXCITED]>>,
     /// Per coupling of two states asked its saturation and sweep (units.rs `Model::term_bound`).
     pub(crate) terms: Mutex<HashMap<Coupling, (f64, f64)>>,
-    /// The bounds of the slope of any two levels' difference and of an atom's acceleration (units.rs `Model::swept_over`).
-    pub(crate) moving: OnceLock<(f64, f64)>,
+    /// The slope of any two levels' difference and an atom's acceleration (units.rs `Model::gate_over`).
+    pub(crate) moving: OnceLock<(Own, Own)>,
 }
 
 /// A coupling of two states a ← b at a beat, its place among the model's beats (`Unit::Term`'s identity in a model).
 pub(crate) type Coupling = (usize, usize, usize);
 
 impl Region {
+    /// The bound over the region of how far a sum f = Σ_p w_p c_p of beam pairs' coefficients (`PairSpan`, each with its
+    /// weight and the weight's modulus) moves from its value at the centre -- of its real part where `real` --, from its own
+    /// form: its first order Σ_a h_a |∂_a f(c)| from its gradient at the centre, Σ_p w_p ∇c_p(c), and its Taylor remainder
+    /// Σ_p |w_p| `curve`_p; at most Σ_p |w_p| `radius`_p, each pair's own range, which a coarse cell's turn of the phases
+    /// leaves the tighter. Never only the latter: two pairs' movements that cancel in the sum -- a level difference's shift
+    /// the two levels share, a standing wave's two counter-rotating coefficients at a crest, Re(c₁₂ + c₂₁) = 2cos 2kx flat
+    /// where each |∇c| = 2k -- read added there, and the bound reaches its value only on cells far below the light's
+    /// length (the gates' proofs over the lin⊥lin scene's reach never ended). Nothing on a point; each pair's range on the
+    /// whole space.
+    pub(crate) fn combined(&self, terms: impl Iterator<Item = (PairSpan, C64, f64)>) -> Combination {
+        Combination::of(&self.half, terms)
+    }
+
+    /// |∇f| over the region of a sum f = Σ_p w_p c_p of beam pairs' coefficients, in its own form (`steepness`).
+    pub(crate) fn steepness(&self, terms: impl Iterator<Item = (PairSpan, C64, f64)>) -> Own {
+        steepness(&self.half, terms)
+    }
+
     /// A coupling's saturation and sweep over the region, made once for both of its gates' bounds.
     pub(crate) fn term(&self, coupling: Coupling, make: impl FnOnce() -> (f64, f64)) -> (f64, f64) {
         let terms = || self.terms.lock().expect("the couplings' lock");
@@ -739,9 +842,14 @@ impl Region {
     /// The bound over the region of |Σ_l a_l x_l| of beams' entries (the request's beam, x_l, |x_l|), the beams coherent at the
     /// request's phases (`summed`); on a point, the value there.
     pub(crate) fn coherent(&self, entries: &[(usize, C64, f64)]) -> f64 {
+        self.coherent_own(entries).upper()
+    }
+
+    /// |Σ_l a_l x_l| over the region in its own form (`summed`).
+    pub(crate) fn coherent_own(&self, entries: &[(usize, C64, f64)]) -> Own {
         let blind: f64 = entries.iter().map(|&(l, _, size)| size * self.spans[l].most).sum();
         if !self.rho.is_finite() {
-            return blind;
+            return Own::range(0.0, 0.0, blind);
         }
         let sum = |of: &dyn Fn(&Span) -> C64| -> C64 { entries.iter().map(|&(l, x, _)| of(&self.spans[l]) * x).sum() };
         let bound = |of: &dyn Fn(&Span) -> f64| -> f64 { entries.iter().map(|&(l, _, size)| size * of(&self.spans[l])).sum() };
@@ -749,23 +857,14 @@ impl Region {
         self.summed(&[sum(&|span| span.centre)], [&slopes[..1], &slopes[1..2], &slopes[2..]], bound(&Span::moved), bound(&Span::bowed), blind)
     }
 
-    /// The bound over the region of ‖u‖, u = Σ_l a_l x_l a sum of beams' amplitudes times vectors x_l, from its value `u` and
-    /// its slopes ∂_a u = Σ_l ∂_a a_l x_l at the centre, and from its beams over the cell `moved` = Σ_l ‖x_l‖ max|a_l − a_l(c)|
-    /// (`Span::moved`), `bowed` = Σ_l ‖x_l‖ max|dᵀ∇∇a_l d| (`Span::bowed`) and `blind` = Σ_l ‖x_l‖ max|a_l|: to first order
-    /// ‖u(c)‖ + moved; to second order ‖u(c) + Σ_a d_a ∂_a u(c)‖ + ½ bowed, the first term's square at most ‖u‖² +
-    /// 2 Σ_a h_a |Re⟨u, ∂_a u⟩| + (Σ_a h_a ‖∂_a u‖)² -- at a crest of ‖u‖, where the first order has no slope to read, it moves
-    /// by the cell's size squared --; at most every beam at its largest amplitude and in phase. On the whole space the last.
-    pub(crate) fn summed(&self, u: &[C64], slopes: [&[C64]; 3], moved: f64, bowed: f64, blind: f64) -> f64 {
-        if !self.rho.is_finite() {
-            return blind;
-        }
-        let size = if let [one] = u { one.abs() } else { u.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() };
-        let (mut cross, mut steep) = (0.0, 0.0);
-        for a in 0..3 {
-            cross += self.half[a] * u.iter().zip(slopes[a]).map(|(z, g)| (z.conj() * *g).re).sum::<f64>().abs();
-            steep += self.half[a] * slopes[a].iter().map(|g| g.norm_sqr()).sum::<f64>().sqrt();
-        }
-        (size + moved).min((size * size + 2.0 * cross + steep * steep).sqrt() + 0.5 * bowed).min(blind)
+    /// ‖u‖ over the region in its own form (own.rs `Own::norm`), u = Σ_l a_l x_l a sum of beams' amplitudes times vectors
+    /// x_l: its value `u` and its slopes ∂_a u = Σ_l ∂_a a_l x_l at the centre, its Taylor remainder ½ `bowed`, `bowed` =
+    /// Σ_l ‖x_l‖ max|dᵀ∇∇a_l d| (`Span::bowed`); within ‖u(c)‖ ± `moved`, `moved` = Σ_l ‖x_l‖ max|a_l − a_l(c)|
+    /// (`Span::moved`), and at most `blind` = Σ_l ‖x_l‖ max|a_l|, every beam at its largest amplitude and in phase -- at a
+    /// crest of ‖u‖, where the first order has no slope to read, it moves by the cell's size squared. On the whole space
+    /// [0, blind].
+    pub(crate) fn summed(&self, u: &[C64], slopes: [&[C64]; 3], moved: f64, bowed: f64, blind: f64) -> Own {
+        Own::norm(u, slopes, 0.5 * bowed, moved, blind, self.half)
     }
 }
 
@@ -776,6 +875,7 @@ struct Node {
     cell: Cell,
     over: f64,
     at: Option<f64>,
+    pace: Own,
     inside: bool,
     halves: [Option<[Option<usize>; 2]>; 3],
 }
@@ -836,7 +936,8 @@ impl Cells<'_> {
         let spans = model.spans(&cell);
         let node = if cell.bounded() {
             let centre = model.potential(cell.centre, &reach.populations, &self.prepared);
-            let below = centre - prepared_slack(&self.envelope, &spans);
+            let prepared = prepared_own(&self.envelope, &spans, centre);
+            let below = prepared.lower();
             // The cell's largest level and its centre's.
             let level = reach.minimum + reach.energy;
             let (most, at) = if reach.outside < reach.energy {
@@ -848,9 +949,11 @@ impl Cells<'_> {
             if below > most {
                 return None;
             }
-            Node { cell, over: speed(most, below), at: Some(speed(at, centre)), inside: centre <= at, halves: [None; 3] }
+            // The speeds' own form: (2 (ħ/m)(level − V_prep))^{1/2}, within the reach's.
+            let pace = prepared.scale(-2.0 * model.hbar_over_mass).plus(2.0 * model.hbar_over_mass * most).max(Own::constant(0.0)).sqrt().within(0.0, reach.speed);
+            Node { cell, over: speed(most, below), at: Some(speed(at, centre)), pace, inside: centre <= at, halves: [None; 3] }
         } else {
-            Node { cell, over: reach.speed, at: None, inside: false, halves: [None; 3] }
+            Node { cell, over: reach.speed, at: None, pace: Own::constant(reach.speed), inside: false, halves: [None; 3] }
         };
         let regions = self.over(&node, spans);
         Some((node, regions))
@@ -859,7 +962,7 @@ impl Cells<'_> {
     /// A node's regions from its cell's beams.
     fn over(&self, node: &Node, spans: Vec<Span>) -> Regions {
         let at = node.at.map(|speed| Box::new(self.model.region(spans.iter().map(Span::point).collect(), speed)));
-        Regions { over: Box::new(self.model.region(spans, node.over)), at }
+        Regions { over: Box::new(self.model.region_paced(spans, node.over, node.pace)), at }
     }
 
     /// A node's regions, made again.
@@ -868,20 +971,87 @@ impl Cells<'_> {
     }
 }
 
-/// How far V_prep(r; p) moves over a bounded cell from its centre's value: each beam pair's coefficient by at most its radius
-/// (`pair_span`), weighted by the envelope's |Q_l'l| (the near trap light's included, potential.rs).
-fn prepared_slack(envelope: &Envelope, spans: &[Span]) -> f64 {
-    let n = envelope.beams.len();
-    let mut slack = 0.0;
-    for (j, &lj) in envelope.beams.iter().enumerate() {
-        for (i, &li) in envelope.beams.iter().enumerate() {
-            let w = envelope.weights[j * n + i];
-            if w != 0.0 {
-                slack += w * pair_span(spans, lj, li).radius;
+/// A sum f = Σ_p w_p c_p of beam pairs' coefficients over a cell of half-widths `half` (`Region::combined`): its value and
+/// gradient at the centre, its Taylor remainder's bound Σ_p |w_p| `curve`_p, its pairs' own ranges Σ_p |w_p| `radius`_p and
+/// their phase-blind bound Σ_p |w_p| B̄_p.
+pub(crate) struct Combination {
+    half: [f64; 3],
+    value: C64,
+    gradient: [C64; 3],
+    curve: f64,
+    each: f64,
+    blind: f64,
+}
+
+impl Combination {
+    pub(crate) fn of(half: &[f64; 3], terms: impl Iterator<Item = (PairSpan, C64, f64)>) -> Combination {
+        let mut out = Combination { half: *half, value: C64::ZERO, gradient: [C64::ZERO; 3], curve: 0.0, each: 0.0, blind: 0.0 };
+        for (pair, w, size) in terms {
+            out.value += pair.centre * w;
+            for (g, x) in out.gradient.iter_mut().zip(pair.gradient) {
+                *g += x * w;
+            }
+            out.curve += size * pair.curve;
+            out.each += size * pair.radius;
+            out.blind += size * pair.most;
+        }
+        out
+    }
+
+    fn bounded(&self) -> bool {
+        self.half.iter().all(|h| h.is_finite())
+    }
+
+    /// Re f in its own form (own.rs): its value and gradient at the centre and the Taylor remainder, within the pairs' own
+    /// ranges -- a coarse cell's turn of the phases leaves those the tighter.
+    pub(crate) fn real(&self) -> Own {
+        let at = self.value.re;
+        Own::new(at, self.gradient.map(|g| g.re), self.curve, self.half).within(at - self.each, at + self.each)
+    }
+
+    /// |f + base| (`base` a constant) in its own form (own.rs `Own::norm`), within |f(c) + base| ± how far f moves and at
+    /// most |base| + Σ_p |w_p| max|c_p|: an entry that turns its phase across the cell at constant modulus (two
+    /// counter-propagating beams' coefficient a₁* a₂ = |a₁||a₂| e^{2ikx}) moves by the cell's size squared, not 2k h.
+    pub(crate) fn modulus(&self, base: C64) -> Own {
+        let first = if self.bounded() { ((0..3).map(|a| self.half[a] * self.gradient[a].abs()).sum::<f64>() + self.curve).min(self.each) } else { self.each };
+        let g = self.gradient;
+        Own::norm(&[self.value + base], [&g[0..1], &g[1..2], &g[2..3]], self.curve, first, base.abs() + self.blind, self.half)
+    }
+
+}
+
+/// |∇f| of a sum f = Σ_p w_p c_p of beam pairs' coefficients over a cell of half-widths `half` in its own form (own.rs
+/// `Own::norm`; `Region::steepness`): of its gradient and Hessian at the centre, Σ_p w_p ∇c_p(c) and Σ_p w_p ∇∇c_p(c), and
+/// the gradient's Taylor remainder Σ_p |w_p| `rest`_p; within |∇f(c)| ± Σ_p |w_p| `veer`_p, each pair's gradient's own
+/// range, and at most Σ_p |w_p| `slope`_p. (With each pair's range alone, a standing wave's term 2|w| cos 2kx read its
+/// gradient's change at its node, where it is flat, as 2k² h |w| -- added over its two counter-rotating pairs, a first
+/// order the sum does not have.)
+fn steepness(half: &[f64; 3], terms: impl Iterator<Item = (PairSpan, C64, f64)>) -> Own {
+    let (mut gradient, mut hessian) = ([C64::ZERO; 3], [[C64::ZERO; 3]; 3]);
+    let (mut veer, mut rest, mut steep) = (0.0, 0.0, 0.0);
+    for (pair, w, size) in terms {
+        for a in 0..3 {
+            gradient[a] += pair.gradient[a] * w;
+            for b in 0..3 {
+                hessian[b][a] += pair.hessian[a][b] * w;
             }
         }
+        veer += size * pair.veer;
+        rest += size * pair.rest;
+        steep += size * pair.slope;
     }
-    slack
+    Own::norm(&gradient, [&hessian[0], &hessian[1], &hessian[2]], rest, veer, steep, *half)
+}
+
+/// V_prep(r; p) over a bounded cell in its own form (own.rs), its value at the centre `centre`: its far part Re Σ_l'l Q_l'l
+/// c_l'l in its own form and range (`Region::combined`), and the near trap light's shift within each beam pair's radius
+/// (`pair_span`) times its bound per pair (potential.rs `Model::envelope`).
+fn prepared_own(envelope: &Envelope, spans: &[Span], centre: f64) -> Own {
+    let n = envelope.beams.len();
+    let pairs = || (0..n * n).map(|x| (x, pair_span(spans, envelope.beams[x / n], envelope.beams[x % n])));
+    let far = Combination::of(&spans[envelope.beams[0]].half, pairs().filter(|&(x, _)| envelope.form[x] != C64::ZERO).map(|(x, pair)| (pair, envelope.form[x], envelope.form[x].abs()))).real();
+    let near: f64 = pairs().filter(|&(x, _)| envelope.near[x] != 0.0).map(|(x, pair)| envelope.near[x] * pair.radius).sum();
+    far.plus(centre - far.value).add(Own::range(0.0, -near, near))
 }
 
 /// A quantity on a cell: its value at the centre (−∞ on an unbounded cell, which has none) and its upper bound over the cell.
@@ -1340,10 +1510,11 @@ impl Model {
     /// Every beam over a cell (`Span`).
     pub(crate) fn spans(&self, cell: &Cell) -> Vec<Span> {
         if !cell.bounded() {
-            return self.light.beams.iter().map(|beam| Span::over(beam, C64::ZERO, [C64::ZERO; 3], cell)).collect();
+            let nothing = Amplitude { value: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3] };
+            return self.light.beams.iter().map(|beam| Span::over(beam, &nothing, cell)).collect();
         }
         let amplitudes = self.light.amplitudes(cell.centre);
-        self.light.beams.iter().zip(&amplitudes).map(|(beam, a)| Span::over(beam, a.value, a.gradient, cell)).collect()
+        self.light.beams.iter().zip(&amplitudes).map(|(beam, a)| Span::over(beam, a, cell)).collect()
     }
 
     /// A bounded cell's region along its side `a` alone, from the beams' amplitudes at its centre: the same centre and speeds,
@@ -1351,11 +1522,16 @@ impl Model {
     fn along(&self, amplitudes: &[Amplitude], node: &Node, a: usize) -> Region {
         let mut side = Cell { centre: node.cell.centre, half: [0.0; 3] };
         side.half[a] = node.cell.half[a];
-        self.region(self.light.beams.iter().zip(amplitudes).map(|(beam, at)| Span::over(beam, at.value, at.gradient, &side)).collect(), node.over)
+        self.region(self.light.beams.iter().zip(amplitudes).map(|(beam, at)| Span::over(beam, at, &side)).collect(), node.over)
     }
 
     /// A region of the beams `spans` at speeds up to `speed` (`Region`): its beam pairs made, the rest when asked.
     pub(crate) fn region(&self, spans: Vec<Span>, speed: f64) -> Region {
+        self.region_paced(spans, speed, Own::constant(speed))
+    }
+
+    /// A region of the beams `spans` at speeds up to `speed`, their own form `pace` (`Region`).
+    fn region_paced(&self, spans: Vec<Span>, speed: f64, pace: Own) -> Region {
         let pairs = self
             .light
             .frequencies
@@ -1367,9 +1543,10 @@ impl Model {
             half: spans.first().map_or([0.0; 3], |s| s.half),
             rho: spans.first().map_or(0.0, |s| s.rho),
             speed,
+            pace,
             spans,
             forms: self.forms.clone(),
-            energies: OnceLock::new(),
+            radii: OnceLock::new(),
             couplings: OnceLock::new(),
             resolvents: OnceLock::new(),
             dressings: OnceLock::new(),
@@ -1387,6 +1564,14 @@ impl Model {
     /// The region of a point alone at one speed (a sample's: the errors measured there).
     pub(crate) fn point_region(&self, r: [f64; 3], speed: f64) -> Region {
         self.region(self.spans(&Cell { centre: r, half: [0.0; 3] }), speed)
+    }
+
+    /// Bounded cells' regions as a reach's proofs make them (`Cells::make`): over each cell at the reach's speeds there, and
+    /// on its centre point at the reach's speed there; none where a cell cannot meet the reach.
+    #[cfg(test)]
+    pub(crate) fn proof_regions(&self, reach: &Reach, cells: &[Cell]) -> Vec<Option<(Region, Region)>> {
+        let made = Cells { model: self, reach, prepared: self.prepared(), envelope: self.envelope(&reach.populations) };
+        cells.iter().map(|&cell| made.make(cell).map(|(_, regions)| (*regions.over, *regions.at.expect("a bounded cell has its centre's region")))).collect()
     }
 
     /// The provable bounds over the reach of quantities given per region, each asked against `threshold` from the band's lower
@@ -1464,15 +1649,6 @@ impl Model {
     }
 }
 
-/// The distance of a range [lo, hi] from zero: 0 where it holds zero.
-pub(crate) fn distance(lo: f64, hi: f64) -> f64 {
-    if lo <= 0.0 && hi >= 0.0 {
-        0.0
-    } else {
-        lo.abs().min(hi.abs())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1516,7 +1692,7 @@ mod tests {
     /// # Provable extrema): on the six-beam lattice, each beam's modulus between its least and its largest, each beam pair's
     /// coefficient within its radius of the centre's and its
     /// gradient within its slope; every carrier's coherent coupling |Σ_l a_l X^f_l[e,s]|, its columns and its units' columns within
-    /// their bounds; the far light's energies within their slack and their differences' gradients within `energy_slope_over` --
+    /// their bounds; the far light's energies' differences within their slack (`Model::gap`) and their gradients within `energy_slope_over` --
     /// and on a cell a thousand times smaller the couplings' bounds within that factor of the centre's values.
     /// The reach's level is the quantile of its ensemble's energy (module documentation, # The reach's level). Classical
     /// (every scale one): Q(n/2, L) = s to the format's resolution for the n = 3 to 6 degrees of a trap that holds along
@@ -1582,7 +1758,7 @@ mod tests {
         ];
         for cell in cells {
             let region = model.region(model.spans(&cell), 0.0);
-            let (energies, couplings) = (model.energies(&region), model.couplings(&region));
+            let couplings = model.couplings(&region);
             for r in points(&cell) {
                 let a = model.light.amplitudes(r);
                 for (l, span) in region.spans.iter().enumerate() {
@@ -1606,12 +1782,15 @@ mod tests {
                         }
                     }
                 }
-                for s in 0..STATES {
-                    assert!(within((energy[s] - energies.centre[s]).abs(), energies.slack[s]), "E_{s} at {r:?}");
+                for x in 0..STATES {
+                    for y in 0..x {
+                        let (gap, here) = (model.gap(x, y, &region).all, energy[x] - energy[y]);
+                        assert!(within(here, gap.upper()) && within(gap.lower(), here), "E_{x} − E_{y} {here} at {r:?} outside [{}, {}]", gap.lower(), gap.upper());
+                    }
                 }
                 for (x, y) in [(0, 3), (GROUND, 1), (GROUND + 5, 6), (STATES - 1, GROUND)] {
                     let g = (0..3).map(|i| (gradient[x][i] - gradient[y][i]).powi(2)).sum::<f64>().sqrt();
-                    assert!(within(g, model.energy_slope_over(x, y, &region)), "|∇(E_{x} − E_{y})| {g} at {r:?}");
+                    assert!(within(g, model.energy_slope_over(x, y, &region).upper()), "|∇(E_{x} − E_{y})| {g} at {r:?}");
                 }
                 for (cc, bound) in model.carriers.iter().zip(couplings) {
                     let mut units: Vec<usize> = cc.units.clone();
@@ -1623,11 +1802,11 @@ mod tests {
                         };
                         let u = field(&|_| true);
                         for e in 0..EXCITED {
-                            assert!(within(u[e].abs(), bound.entry[s][e]), "|u_{s}[{e}]| {} beyond {} at {r:?}", u[e].abs(), bound.entry[s][e]);
+                            assert!(within(u[e].abs(), bound.entry[s][e].upper()), "|u_{s}[{e}]| {} beyond {} at {r:?}", u[e].abs(), bound.entry[s][e].upper());
                         }
-                        assert!(within(norm(&u), bound.column[s]), "‖u_{s}‖ at {r:?}");
+                        assert!(within(norm(&u), bound.column[s].upper()), "‖u_{s}‖ at {r:?}");
                         for (ui, &unit) in units.iter().enumerate() {
-                            assert!(within(norm(&field(&|l| cc.units[l] == unit)), bound.units[ui][s]), "unit {ui}'s ‖u_{s}‖ at {r:?}");
+                            assert!(within(norm(&field(&|l| cc.units[l] == unit)), bound.units[ui][s].upper()), "unit {ui}'s ‖u_{s}‖ at {r:?}");
                         }
                     }
                 }
@@ -1641,9 +1820,9 @@ mod tests {
                 for s in 0..GROUND {
                     for e in 0..EXCITED {
                         let exact = cc.beams.iter().enumerate().map(|(l, &b)| a[b].value * cc.folded[l][(GROUND + e, s)]).sum::<C64>().abs();
-                        let (at, near) = (model.couplings(&point)[ci].entry[s][e], model.couplings(&tiny)[ci].entry[s][e]);
+                        let (at, near) = (model.couplings(&point)[ci].entry[s][e].value, model.couplings(&tiny)[ci].entry[s][e].upper());
                         assert!((at - exact).abs() <= 1e-12 * exact + 1e-15, "the centre's |u| {at} against {exact}");
-                        let scale = model.couplings(&region)[ci].entry[s][e] - exact;
+                        let scale = model.couplings(&region)[ci].entry[s][e].upper() - exact;
                         assert!(near - exact <= 2e-3 * scale + 1e-12 * exact.max(1e-3), "a thousandth of the cell: {} over the centre's, the cell's {scale}", near - exact);
                     }
                 }

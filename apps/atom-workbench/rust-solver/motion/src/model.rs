@@ -40,6 +40,7 @@ pub mod readout;
 pub mod photon;
 pub mod tabulate;
 pub(crate) mod jet;
+pub(crate) mod own;
 
 use crate::field::Light;
 use crate::linalg::{C64, Mat};
@@ -131,6 +132,11 @@ pub struct Envelope {
     pub beams: Vec<usize>,
     /// |Q_l'l| (rad/µs), row-major over `beams`.
     pub weights: Vec<f64>,
+    /// The far static form's own Q_l'l = [P_l'l]_p (rad/µs), row-major over `beams`, and the near light shift's bound per
+    /// pair beside it (eliminate.rs `Model::near_envelope`): how far V_prep moves over a cell is read of the far part's own
+    /// form (reach.rs `prepared_own`).
+    pub(crate) form: Vec<crate::linalg::C64>,
+    pub(crate) near: Vec<f64>,
 }
 
 /// The atoms' reach (SPEC §1.8): the sublevel set {(r, κ) : V_prep(r) + (ħ/m)κ²/2 − V_min ≤ L k_B T_r} of the prepared

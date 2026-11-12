@@ -694,9 +694,9 @@ impl Model {
 
     /// The bound over a region of an intensity coordinate's distance from its focus value `at` (module documentation, # Axes). The
     /// intensity is a field's squared modulus over N, the field F = Σ_l a_l c_l (a frequency's, c_l = E_l; a unit's, c_l = κ_l):
-    /// |F|² = Σ_l'l a_l'* a_l c_l'†c_l, each beam pair's coefficient within its radius of its centre value over the region
-    /// (reach.rs `PairSpan`) -- so |F|² lies within Σ |c_l'†c_l| times the pairs' radii of its centre value, at least 0 and at
-    /// most every beam at its largest amplitude and in phase; on a point it is the value. A pair of beams whose fields are
+    /// |F|² = Σ_l'l a_l'* a_l c_l'†c_l, a sum of beam pairs' coefficients (reach.rs `PairSpan`) -- so |F|² lies within how far
+    /// that sum moves of its own form (reach.rs `Region::combined`) of its centre value, at least 0 and at most every beam at
+    /// its largest amplitude and in phase; on a point it is the value. A pair of beams whose fields are
     /// orthogonal is no term of it, and a plane wave's pair with itself does not move: light whose intensity is the same
     /// everywhere weighs nothing, on any cell. (Bounded by the field's modulus within the region's radius times Σ_l |c_l|
     /// (|k_l − k₀| max|b_l| + max|∇b_l|) of its centre value, the intensity of two counter-propagating plane waves of
@@ -717,16 +717,15 @@ impl Model {
         let f = &self.light.frequencies[frequency];
         let size = |c: &[C64; 3]| c.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
         let blind: f64 = beams.iter().map(|(l, c)| region.spans[f.beams[*l]].most * size(c)).sum();
-        let (mut centre, mut radius) = (0.0, 0.0);
-        for (j, to) in &beams {
-            for (i, from) in &beams {
-                let weight: C64 = (0..3).map(|q| to[q].conj() * from[q]).sum();
-                let pair = &region.pairs[frequency][j * f.beams.len() + i];
-                centre += (pair.centre * weight).re;
-                radius += pair.radius * weight.abs();
-            }
-        }
-        let (lo, hi) = ((centre - radius).max(0.0), (centre + radius).min(blind * blind));
+        let intensity = region.combined(
+            beams
+                .iter()
+                .flat_map(|(j, to)| beams.iter().map(move |(i, from)| (j * f.beams.len() + i, (0..3).map(|q| to[q].conj() * from[q]).sum::<C64>())))
+                .filter(|(_, weight)| *weight != C64::ZERO)
+                .map(|(pair, weight)| (region.pairs[frequency][pair], weight, weight.abs())),
+        );
+        let intensity = intensity.real();
+        let (lo, hi) = (intensity.lower().max(0.0), intensity.upper().min(blind * blind));
         (hi / norm - at).abs().max((at - lo / norm).abs())
     }
 
