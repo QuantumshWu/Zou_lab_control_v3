@@ -66,9 +66,6 @@ MANUAL_AXIS_REQUEST = "manual-axis"
 #: frames will not come -- a trigger the camera missed -- and waiting longer
 #: is a scan that hangs with nothing on screen saying why.
 _SOURCE_GRACE_SECONDS = 5.0
-#: How often an idle wait for the source asks the board whether it is done;
-#: a remote board answers each ask over its own connection.
-_BOARD_POLL_SECONDS = 0.5
 #: How long one wait for the source blocks before Stop and the board are looked at.
 _INPUT_SLICE_SECONDS = 0.1
 
@@ -368,12 +365,14 @@ class SeamlessScanMeasurement:
                 total=progress_total * shots,
             )
             # Readouts are assigned by arrival, so the board's own report is
-            # the one witness that no more triggers are coming.  Once it is
-            # in, a source that falls silent gets a bounded grace instead of
-            # being waited for forever; one still delivering is behind, not
-            # stuck, so the grace runs from its latest value.
+            # the one witness that no more triggers are coming: the core tells
+            # it when the board has it (nothing asks).  Once it is in, a source
+            # that falls silent gets a bounded grace instead of being waited
+            # for forever; one still delivering is behind, not stuck, so the
+            # grace runs from its latest value.
+            done = board.watch_done(command_id)
             report = None
-            report_seen = next_ask = 0.0
+            report_seen = 0.0
             last_delivery = monotonic()
             delivered = 0
             while delivered < readouts:
@@ -391,10 +390,7 @@ class SeamlessScanMeasurement:
                     continue
                 now = monotonic()
                 if report is None:
-                    if now < next_ask:
-                        continue
-                    next_ask = now + _BOARD_POLL_SECONDS
-                    report = board.wait_done(command_id, 0.0)
+                    report = board.reported(done)
                     if report is None:
                         continue
                     if report["status"] != STATUS_DONE:
@@ -410,7 +406,7 @@ class SeamlessScanMeasurement:
                         "leaves every later frame without its shot"
                     )
             if report is None:
-                report = board.wait_report(command_id, context.cancel_requested)
+                report = board.wait_report(done, context.cancel_requested)
                 if report["status"] != STATUS_DONE:
                     raise RuntimeError(f"the pulse failed: {report.get('fault') or report['status']}")
             journal.note("scan", "segment_done", command_id=command_id, shots=readouts, delivered=delivered,

@@ -63,11 +63,18 @@ every played run is handed to its `play_run(timeline)` (`board::run_timeline`, t
 grammar of D's `SimulationWorld.fire`), and a SAFE calls its `safe()`. Without one
 the virtual board still plays at wall time.
 
-Run claims: a `core` command from a plugin run arrives with `_run`. `pulse_run`,
-`pulse_wait_done` and `pulse_stop` carrying `_run` are refused unless that run
-claims the open sequencer device instance (`Workbench::run_claims`), exactly as a
-plugin device call is refused for an unclaimed device; a board attached only by
-the editor cannot be driven by a run. While a run claims the sequencer the editor's
+Run claims: a plugin run's board commands (`pulse_run`, `pulse_wait_done`,
+`pulse_stop`, `pulse_estimate`, `pulse_describe`, `pulse_schedule`) are answered
+where they arrive, by the pulse desk (`pulse_host::PulseDesk`), off the window's
+turn: the plugin host's event reaches the desk before the window hears of it.
+`pulse_run`, `pulse_wait_done` and `pulse_stop` are refused unless the run claims
+the open sequencer device instance, as the window last stated the workbench's runs
+(`Workbench::active_runs`, by each node's plugin instance) -- exactly as a plugin
+device call is refused for an unclaimed device; a run that asks before the window
+has stated it (its start reply still on the way) is judged at the next statement.
+A board attached only by the editor cannot be driven by a run. What a run did to
+the board reaches the window as one coalesced notice; the window makes the Pulse
+Editor's view only when something it shows changed, never for an answer. While a run claims the sequencer the editor's
 On Pulse / Hold / Step / Stop and any other client's `pulse_run` / `pulse_wait_done` /
 `pulse_stop` are refused, "device is in use by <node>" (v2's device-use lease): the
 operator stops the node, whose own Stop makes the board safe. A run's `pulse_stop`
@@ -88,7 +95,7 @@ read-only MCP client too; every other one is `control`.
 | Command | Access | Meaning |
 |---|---|---|
 | `pulse_state` | read | The `pulse` section of the app state: document, every page's projection, connection, board snapshot, last message. |
-| `pulse_open`, `pulse_save`, `pulse_new`, `pulse_clear` | control | File and document lifecycle (explicit paths for remote clients). |
+| `pulse_open`, `pulse_save`, `pulse_new`, `pulse_clear` | control | File and document lifecycle (explicit paths for remote clients). The file a command reads (open, a value file, a Subpulse file, a scan table or program) is read ahead on the board's lane and the command then runs on the window's turn; the files it writes are written on that lane, and it answers once they are (a file that cannot be written leaves the drafts marked as they were). A Subpulse source is read again only when its file changes (the status poll looks, off the window's turn). |
 | `pulse_edit` | control | One edit: `period_name`, `duration`, `digital`, `analog`, `delay`, `binding`, `config_binding`, `bracket`, `bracket_add`, `bracket_name` (how its count reads, `name.repeats`; an edit that makes two fields read alike is refused), `bracket_remove`, `period_add`, `spacer_add`, `period_remove`, `remove_items`, `reorder`, `run_repeats`, `visible_ports`, `fill_port`, `clear_port`, `document_name`, `port_label`. Same arguments as v2's `control_action`. |
 | `pulse_scan` | control | Scan page, by `op`: `template`, `edit_source`, `load_program`, `run` (the Python program in a child process, 2 GB / 120 s cap, returning the table), `load_array` (.npy/.csv/.txt), `save_array`, `clear`, `repeats`. |
 | `pulse_config` | control | Value Config page, by `op`: `edit`, `new`, `load`, `refresh`, `unload`, `save`, `mode`, `binding`. |
@@ -103,7 +110,7 @@ read-only MCP client too; every other one is `control`.
 | `pulse_hold`, `pulse_step` | control | Play one scan point as an ordinary pulse. |
 | `pulse_describe` | read | `{document}` → `{path, name, api_fields, scan_fields, unscannable, periods}` (what a node's pulse resource resolves to). `api_fields` in played order: `{field_id, label, kind, unit, value}`; `scan_fields` the template's scan slots in slot order: `{field_id, label, kind, unit, value}` (a DAC's unit is the signed code; `value` what the slot holds in the pulse, where a plan's first sweep is centred); both with the column facts `is_dac, limit_lo, limit_hi` (v2 `api_parameter_columns_for` / `scan_columns_for`; v2's seeded `lo, hi` are not stated); `unscannable` maps an API count of an empty bracket to the sentence why; `periods` `{period_id, name, label}`. |
 | `pulse_run` | control | `{document, api_values:{field_id:[number, unit]}, run_repeats, scan_repeats, scan?:{fields, rows}}`: a time converted exactly into its field's unit (any other field takes its own unit only); with `scan` exactly those fields are the board's scan slots (rows in the fields' units and order, quantized to what plays; two rows that play the same, a field the pulse lacks or more fields than the board's slots are refused), without it no slot streams; ABI check, compile, load, fire (a run's `stage: load` loads only and `stage: fire` fires what that load left on the board, v2's load-then-arm-then-fire) → `{command_id, api_values, applied (v2 sequencer archive snapshot), timing, scan?:{fields, rows as played}}`. `timing` is the program the FIRE plays (Config filled), one run of the table's first row, every loop body replayed at most twice: `{clock_hz, digest, duration_ticks, earliest_lane_delay_ticks, periods:[{period_id, name, label, starts, duration_ticks}], rising_edges:{lane: ticks}}` (non-clock lanes; v2 `frame_visits` / `trigger_edge_ticks`, `bracket_bodies=2`). |
-| `pulse_wait_done` | control | `{command_id, timeout_seconds}` → `{done, status: done\|error\|underflow, cursor, elapsed_seconds, command_id, fault}`, or `{done: false}` while that FIRE plays; waits off the command lane. See "One report per FIRE". |
+| `pulse_wait_done` | control | `{command_id, timeout_seconds?}` → `{done, status: done\|error\|underflow, cursor, elapsed_seconds, command_id, fault}`, or `{done: false}` while that FIRE plays; waits off the command lane. A run watches it (`ctx.watch`, `PulseBoard.watch_done`): answered at once and told once, as `run.watched`, when the board reports or the FIRE can no longer report -- nothing polls. See "One report per FIRE". |
 | `pulse_estimate` | read | `{document, api_points?:[{field_id:[number, unit]}] (≤ 256), scan?:{fields, columns}}` → `{clock_hz, table_ticks, delay_ticks, points:[{api_values, board_rows, first_row_ticks, table_ticks, delay_ticks}]}`: v2 `estimate_scan_time`'s compile loop, on the attached board's geometry with the Config it holds; the node multiplies by its host points, shots per point and sweeps. |
 | `pulse_stop` | control | SAFE now, never queued behind a pending LOAD/FIRE (a superseded On Pulse / Hold goes no further and leaves the board SAFE); refused while a run holds the board. |
 
@@ -111,7 +118,7 @@ read-only MCP client too; every other one is `control`.
 
 The board keeps what became of its last FIRE (`Board::last_fire`: pending,
 reported or made safe). Its report is taken exactly once, by whoever waits for it
-(`pulse_wait_done`, or the editor's completion lane); until then a LOAD or FIRE
+(`pulse_wait_done` or a run's watch of it, or the editor's completion lane); until then a LOAD or FIRE
 is refused with a sentence naming that FIRE (the device's own rule, now said
 plainly). `pulse_wait_done` refuses, instead of answering `{done: false}`
 forever, a FIRE that can no longer report: its report already taken, the board

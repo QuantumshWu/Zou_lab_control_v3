@@ -743,9 +743,11 @@ impl Workbench {
         self.restore_producer_draft(panel);
     }
 
-    /// The device instances an active run holds (a `core` command checks its asking run against them).
-    pub fn run_claims(&self, run: &str) -> Vec<String> {
-        self.run(run).filter(|record| !record.terminal()).map(|record| record.claims.iter().map(|claim| claim.device.clone()).collect()).unwrap_or_default()
+    /// Each active run as its node's plugin instance knows it: (that instance, the run, the device
+    /// instances it claims). The pulse desk holds a run's board commands to them.
+    pub fn active_runs(&self) -> Vec<(String, String, Vec<String>)> {
+        self.nodes.iter().filter_map(|node| self.active_run(node).map(|run| (zlc_core::control::node_instance(&node.id), run.id.clone(),
+            run.claims.iter().map(|claim| claim.device.clone()).collect()))).collect()
     }
 
     /// The active run that holds a device instance, if one does (the pulse

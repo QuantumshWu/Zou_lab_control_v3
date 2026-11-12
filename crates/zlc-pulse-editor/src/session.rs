@@ -526,7 +526,7 @@ impl Editor {
     /// armed table's fields, and the table quantized as the board plays it.
     fn scan_points(&self) -> zlc_pulse::Result<(Sequence, Vec<Vec<f64>>)> {
         let sequence = self.state.sequence.as_ref().ok_or_else(|| Error::new(Kind::Runtime, "no pulse is open"))?;
-        let resolved = resolve_subpulse_sources(sequence, self.base_directory().as_deref())?;
+        let resolved = self.resolved(sequence)?;
         let source = self.played_scan(&zlc_pulse::binding::resolve_api_parameters(&resolved, None)?)?;
         let (geometry, _) = self.compiler_target()?;
         let effective = prepare_scan_application(&source, &self.state.section.scan_rows, &geometry)?.0;
