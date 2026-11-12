@@ -1853,6 +1853,43 @@ mod tests {
         assert_eq!(wb.node_row(wb.node("camera_measurement").unwrap(),&[])["state"],"warning");
     }
     #[test]
+    fn a_panels_preparing_line_goes_once_it_has_drawn() {
+        let (_root,mut wb,_calls,_host)=rig("panel-line",catalog());
+        wb.console_panel_note("panel-6","panel-6 is preparing survival".into(),"task");
+        wb.panels_drawn(["panel-2"]);
+        assert_eq!(wb.console_report.0,"panel-6 is preparing survival","another panel's drawing leaves it");
+        wb.panels_drawn(["panel-6"]);
+        assert_eq!(wb.console_report,(String::new(),"idle"));
+        // A later line is not taken away by the panel's drawing.
+        wb.console_panel_note("panel-6","frames has not published yet; panel-6 remains ready".into(),"warning");
+        wb.console_note("camera started".into());
+        wb.panels_drawn(["panel-6"]);
+        assert_eq!(wb.console_report.0,"camera started");
+        // A panel closed before it drew takes its line with it.
+        wb.console_panel_note("panel-7","panel-7 is preparing frames".into(),"task");
+        wb.panel_closed("panel-7");
+        assert_eq!(wb.console_report,(String::new(),"idle"));
+    }
+
+    #[test]
+    fn a_restarted_run_says_it_was_restarted_and_a_displaced_one_why() {
+        let (_root,mut wb,_calls,mut host)=rig("restart-reason",catalog());
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement", "node_id":"next_camera"}));
+        apply(&mut wb,&mut host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+        event(&mut wb,Event::RunStarted{run:"camera_measurement#1".into()},&mut host);
+        apply(&mut wb,&mut host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+        let run=wb.run("camera_measurement#1").unwrap();
+        assert_eq!((run.state.as_str(),run.stop_reason.as_deref()),("stopping",Some("it was restarted")));
+        event(&mut wb,Event::RunFinished{run:"camera_measurement#1".into(),outcome:"stopped".into(),error:None,generation:None},&mut host);
+        let restarted=wb.node("camera_measurement").unwrap().run.clone().unwrap();
+        event(&mut wb,Event::RunStarted{run:restarted.clone()},&mut host);
+        // Another node's start that needs the same camera: that run says so.
+        apply(&mut wb,&mut host,"start_node",json!({"node":"next_camera"})).unwrap();
+        assert_eq!(wb.run(&restarted).unwrap().stop_reason.as_deref(),Some("another start needs its devices"));
+    }
+
+    #[test]
     fn restart_to_an_unpublished_source_stops_the_previous_run() {
         let mut catalog=catalog(); catalog["types"][3]["node"]["artifact_inputs"]=json!([]);
         let (_root,mut wb,calls,mut host)=rig("restart-waiting",catalog);

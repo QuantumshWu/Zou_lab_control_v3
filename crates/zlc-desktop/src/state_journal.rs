@@ -34,10 +34,17 @@ pub fn say(state: &Value) {
     let Some(object) = state.as_object().filter(|object| object.get("type").and_then(Value::as_str) == Some("state")) else { return };
     let mut told = TOLD.lock().unwrap_or_else(|error| error.into_inner());
     let Some(sent) = told.as_mut() else { return };
-    // Every section, and every message that answers a request (its result and error ride in the envelope).
-    if let Some(text) = sent.encode(object, |_| true, |request| !request.is_null()) {
-        zlc_core::journal::note_fields("app", "state", &text);
-    }
+    if let Some(text) = line(sent, object) { zlc_core::journal::note_fields("app", "state", &text); }
+}
+
+/// The journal's line for a state message, or `None` when it says nothing new: every section's
+/// changes, and every reply that says something -- a request answered with a result (a read-only
+/// command's reply is all the journal has of it) or an error. A bare "done" of a request that
+/// changed nothing (a hover answered) says nothing the journal does not have; a message that
+/// answers no request (0 is none) and changed nothing is not a line at all.
+fn line(sent: &mut Sent, object: &Map<String, Value>) -> Option<String> {
+    let says = object.get("result").is_some_and(|result| !result.is_null()) || object.get("error").is_some_and(|error| !error.is_null());
+    sent.encode(object, |_| true, |_| says)
 }
 
 #[cfg(test)]
@@ -49,18 +56,32 @@ mod tests {
     fn a_reader_arrives_at_the_state_by_applying_what_was_said() {
         let mut sent = Sent::default();
         let first = json!({"type": "state", "logic": [{"node": "camera", "status": "idle"}], "report": {"text": ""}});
-        let text = sent.encode(first.as_object().unwrap(), |_| true, |request| !request.is_null()).unwrap();
+        let text = line(&mut sent, first.as_object().unwrap()).unwrap();
         let said: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(said["changes"].as_array().unwrap().len(), 2, "a section first said is said whole");
         // One field changes, and the message answers request 7 with a result.
         let second = json!({"type": "state", "request": 7, "result": {"node": "camera"}, "logic": [{"node": "camera", "status": "running"}], "report": {"text": ""}});
-        let text = sent.encode(second.as_object().unwrap(), |_| true, |request| !request.is_null()).unwrap();
+        let text = line(&mut sent, second.as_object().unwrap()).unwrap();
         let said: Value = serde_json::from_str(&text).unwrap();
         assert_eq!((&said["request"], &said["result"]["node"]), (&json!(7), &json!("camera")), "the reply rides with the change");
         assert_eq!(said["changes"], json!([[["logic", 0, "status"], "running"]]), "only what changed, by its path");
         assert_eq!(sent.sections()["logic"][0]["status"], "running", "what a snapshot would say now");
         // Nothing changed and nothing is answered: nothing is said.
         let third = json!({"type": "state", "logic": [{"node": "camera", "status": "running"}], "report": {"text": ""}});
-        assert!(sent.encode(third.as_object().unwrap(), |_| true, |request| !request.is_null()).is_none());
+        assert!(line(&mut sent, third.as_object().unwrap()).is_none());
+        // Request 0 is no request: a broadcast that changed nothing is no line.
+        let broadcast = json!({"type": "state", "request": 0, "error": null, "logic": [{"node": "camera", "status": "running"}]});
+        assert!(line(&mut sent, broadcast.as_object().unwrap()).is_none());
+        // A request answered with nothing (a hover) is no line; one answered with a result, or refused, is.
+        let done = json!({"type": "state", "request": 8, "result": null, "logic": [{"node": "camera", "status": "running"}]});
+        assert!(line(&mut sent, done.as_object().unwrap()).is_none());
+        let read = json!({"type": "state", "request": 9, "result": {"windows": []}, "logic": [{"node": "camera", "status": "running"}]});
+        assert_eq!(serde_json::from_str::<Value>(&line(&mut sent, read.as_object().unwrap()).unwrap()).unwrap()["result"], json!({"windows": []}));
+        let refused = json!({"type": "state", "request": 10, "error": "no", "logic": [{"node": "camera", "status": "running"}]});
+        assert!(line(&mut sent, refused.as_object().unwrap()).is_some());
+        // An error of no request is said once, with its message.
+        let error = json!({"type": "state", "error": "worker stopped", "logic": [{"node": "camera", "status": "running"}]});
+        assert!(line(&mut sent, error.as_object().unwrap()).is_some());
+        assert!(line(&mut sent, third.as_object().unwrap()).is_none(), "and not again with the next message");
     }
 }
