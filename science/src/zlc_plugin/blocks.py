@@ -10,13 +10,19 @@ An arena keeps the free blocks its work comes back for and gives the rest back
 to the system. Which are which is read from its own use, never from a number:
 a size's free blocks that sat untouched through one whole turn of that size --
 as many allocations as it has blocks -- were not needed by that turn, and a
-size that has gone unallocated for longer than it ever did before, counted in
-the arena's own allocations, is not in use at all. A block given back is unmapped here and
-said to the core (``retired``), which unmaps it too; a process that only
-borrowed it lets its mapping go with its last view.
+size that has gone unallocated for longer than it ever went between two of its
+own allocations is not in use at all. That second rule is read on the clock,
+not on the arena's allocations: when the work ends nothing allocates, and the
+blocks it leaves free are given back once their size has been idle for longer
+than its own longest gap -- the moment the arena's watcher is armed for, so
+idle memory goes back while the process is idle, not at its next allocation.
+A block given back is unmapped here and said to the core (``retired``), which
+unmaps it too; a process that only borrowed it lets its mapping go with its
+last view.
 
-Finalizers only enqueue: they may run inside any lock (garbage collection),
-so the arena and the release sender drain their queues themselves.
+Finalizers only enqueue (and wake the watcher): they may run inside any lock
+(garbage collection), so the arena and the release sender drain their queues
+themselves.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ import mmap
 import os
 import queue
 import threading
+import time
 import weakref
 from typing import Any, Callable
 
@@ -69,25 +76,27 @@ class _Use:
 
     __slots__ = ("blocks", "turn", "least_free", "used_at", "widest")
 
-    def __init__(self, clock: int) -> None:
+    def __init__(self, clock: float) -> None:
         #: The blocks of this size that exist, free or not.
         self.blocks = 0
         #: Its own allocations since the last look, and the fewest free blocks it had after any of them.
         self.turn = 0
         self.least_free = 0
-        #: The arena's allocation count when this size was last allocated, and the most allocations of
-        #: other sizes that ever passed between two of its own.
+        #: When this size was last allocated (or its idle blocks given back), and the longest time
+        #: that ever passed between two of its own allocations.
         self.used_at = clock
-        self.widest = 0
+        self.widest = 0.0
 
 
 class Arena:
     """Blocks this process writes; sizes are 64 KiB multiples and recycled exactly.
 
-    ``retired`` is told the names of blocks given back to the system (module docstring).
+    ``retired`` is told the names of blocks given back to the system (module docstring);
+    ``clock`` is the one idleness is read on.
     """
 
-    def __init__(self, session: str, retired: Callable[[list[str]], None] | None = None) -> None:
+    def __init__(self, session: str, retired: Callable[[list[str]], None] | None = None,
+                 clock: Callable[[], float] = time.perf_counter) -> None:
         self._prefix = f"Local\\zlc.{session}.{os.getpid()}."
         self._counter = itertools.count()
         self._lock = threading.Lock()
@@ -97,8 +106,11 @@ class Arena:
         self._dropped: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._retired = retired
         self._use: dict[int, _Use] = {}
-        #: Every allocation this arena has made: the clock a size's idleness is counted on.
-        self._clock = 0
+        self._clock = clock
+        #: Wakes the watcher: a block came free, or a local view of one went.
+        self._wake = threading.Event()
+        self._watcher: threading.Thread | None = None
+        weakref.finalize(self, self._wake.set)
 
     def allocate(self, shape: tuple[int, ...] | int, dtype: Any) -> np.ndarray:
         """A writable C-contiguous array in a block, sent by reference when lent."""
@@ -111,10 +123,10 @@ class Arena:
             self._drain()
             pool = self._free.get(size)
             block = pool.pop() if pool else None
-            self._clock += 1
+            now = self._clock()
             use = self._use.get(size)
             if use is None:
-                use = self._use[size] = _Use(self._clock)
+                use = self._use[size] = _Use(now)
             if block is None:
                 block = _Block(f"{self._prefix}{next(self._counter)}", size)
                 self._by_name[block.name] = block
@@ -122,19 +134,23 @@ class Arena:
             block.local = True
             owner = _Allocation(block.mapping)
             self._by_owner[id(owner)] = block
-            given_back = self._give_back(size, use)
-        weakref.finalize(owner, self._dropped.put, block.name)
-        if given_back and self._retired is not None:
-            self._retired(given_back)
+            given_back = self._give_back(size, use, now)
+        weakref.finalize(owner, _dropped, self._dropped, self._wake, block.name)
+        self._tell(given_back)
         return np.frombuffer(owner, dtype=kind, count=count).reshape(shape)
 
-    def _give_back(self, size: int, use: _Use) -> list[str]:
-        """After an allocation of ``size``: the free blocks no turn of their size came back for (lock held)."""
+    def _tell(self, names: list[str]) -> None:
+        if names and self._retired is not None:
+            self._retired(names)
+
+    def _give_back(self, size: int, use: _Use, now: float) -> list[str]:
+        """After an allocation of ``size``: the free blocks no turn of their size came back for,
+        and every idle size's (lock held)."""
 
         surplus: list[_Block] = []
         pool = self._free.get(size, [])
-        use.widest = max(use.widest, self._clock - use.used_at)
-        use.used_at = self._clock
+        use.widest = max(use.widest, now - use.used_at)
+        use.used_at = now
         use.turn += 1
         use.least_free = min(use.least_free, len(pool)) if use.turn > 1 else len(pool)
         if use.turn >= use.blocks:
@@ -142,14 +158,43 @@ class Arena:
             surplus.extend(pool[: use.least_free])
             del pool[: use.least_free]
             use.turn = 0
-        for other, idle in self._use.items():
-            if other == size or not self._free.get(other):
-                continue
-            if self._clock - idle.used_at > idle.widest:
-                # Unallocated for longer than it ever went before: it is not in use.
-                surplus.extend(self._free[other])
-                self._free[other] = []
-                idle.used_at, idle.turn = self._clock, 0
+        return self._unmap(surplus) + self._give_back_idle(now)
+
+    def _give_back_idle(self, now: float) -> list[str]:
+        """The free blocks of every size not in use: unallocated for longer than it ever went
+        between two of its own allocations (lock held)."""
+
+        surplus: list[_Block] = []
+        for size, idle in self._use.items():
+            if self._free.get(size) and now - idle.used_at > idle.widest:
+                surplus.extend(self._free[size])
+                self._free[size] = []
+                idle.used_at, idle.turn = now, 0
+        return self._unmap(surplus)
+
+    def _idle_deadline(self) -> float | None:
+        """When the next size holding free blocks becomes idle (lock held); None while none holds any."""
+
+        due = [idle.used_at + idle.widest for size, idle in self._use.items() if self._free.get(size)]
+        return min(due) if due else None
+
+    def _watch(self) -> float | None:
+        """One look of the watcher: what has gone idle is given back; how long until the next look."""
+
+        with self._lock:
+            self._drain()
+            now = self._clock()
+            names = self._give_back_idle(now)
+            due = self._idle_deadline()
+        self._tell(names)
+        if due is None or (due <= now and not names):
+            # Nothing free, or only a block a view still pins (``_unmap``): until a block comes free.
+            return None
+        return max(0.0, due - now)
+
+    def _unmap(self, surplus: list[_Block]) -> list[str]:
+        """Unmap the given-back blocks; their names (lock held)."""
+
         names = []
         for block in surplus:
             try:
@@ -218,6 +263,35 @@ class Arena:
     def _recycle(self, block: _Block) -> None:
         if block.lends == 0 and not block.local:
             self._free.setdefault(block.size, []).append(block)
+            # Free now: the watcher looks when its size would be idle (lock held; only wakes it).
+            if self._watcher is None:
+                self._watcher = threading.Thread(target=_watcher, args=(weakref.ref(self), self._wake),
+                                                 name="zlc-arena-idle", daemon=True)
+                self._watcher.start()
+            self._wake.set()
+
+
+def _dropped(dropped: queue.SimpleQueue, wake: threading.Event, name: str) -> None:
+    """An allocation's last local view went (a finalizer: only enqueue and wake)."""
+
+    dropped.put(name)
+    wake.set()
+
+
+def _watcher(arena: "weakref.ref[Arena]", wake: threading.Event) -> None:
+    """Gives an arena's idle blocks back while nothing allocates; ends with the arena.
+
+    It sleeps until the next size holding free blocks would be idle, or until a block
+    comes free; it holds the arena only while it looks."""
+
+    while True:
+        owner = arena()
+        if owner is None:
+            return
+        timeout = owner._watch()
+        del owner
+        wake.wait(timeout)
+        wake.clear()
 
 
 def _placement(array: np.ndarray, name: str, size: int, base: int) -> tuple[str, int, int] | None:

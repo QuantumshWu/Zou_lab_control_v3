@@ -88,6 +88,19 @@ class AlignedCapture(unittest.TestCase):
         self.assertEqual(len(bench.published), 3)
         self.assertEqual(bench.published[2], ((9, 10, 11), (True, True, True), {"shot": 0, "missing": []}))
 
+    def test_the_frames_of_the_shot_a_camera_started_inside_are_journaled_as_dropped(self):
+        bench = Bench()
+        # The play began before the camera was armed: the alignment finds its place from the frames' spacing.
+        bench.board = answer(1, "playing", command_id=1, sent_us=ARMED - 1)
+        with mock.patch.object(measurement.journal, "note") as note:
+            bench.poll(frame(0, RISING[1]), frame(1, RISING[2]),
+                       *(frame(2 + 3 * shot + at, (shot + 1) * SHOT + edge) for shot in range(2) for at, edge in enumerate(RISING)))
+        dropped = [call.kwargs for call in note.call_args_list if call.args == ("camera", "frame_dropped")]
+        self.assertEqual(dropped, [{"key": "qcmos", "ordinal": ordinal, "reason": "the camera started in the middle of its shot"}
+                                   for ordinal in (0, 1)])
+        self.assertEqual(bench.capture.dropped, 2)
+        self.assertEqual([item[0] for item in bench.published], [(2, 3, 4), (5, 6, 7)])
+
     def test_a_shot_whose_last_frames_never_come_is_published_once_its_length_has_passed(self):
         bench = Bench()
         bench.board = answer(1, "playing", command_id=1, sent_us=ARMED + 1)

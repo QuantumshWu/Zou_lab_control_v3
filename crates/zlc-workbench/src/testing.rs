@@ -531,6 +531,53 @@ mod tests {
         assert_eq!(args["bundle"], expected);
         event(&mut workbench,Event::Answered { ticket, result: Ok(json!(["bad · term 2: and needs booleans"])) }, &mut host);
         assert!(issues(&workbench, &host).as_array().unwrap().iter().any(|issue| issue == "bad · term 2: and needs booleans"));
+        // Each launch of the source's producer is a new generation with the schemas it had: the
+        // reader is told nothing new, so nothing is asked of it (nor, through an editor, of the bench).
+        let count = || calls.borrow().2.len();
+        let before = count();
+        for generation in ["g2", "g3", "g4"] {
+            host.signals[0].generation = generation.into();
+            workbench.on_runtime(&mut host);
+        }
+        assert_eq!(count(), before, "a publication with the same schemas asks nothing");
+        // A schema that changes is told, to the queries that read the bundle only.
+        host.schemas.insert("@logic/camera_measurement/frames".into(), (json!({"tree": "run2"}), json!({"tree": "event"})));
+        host.signals[0].generation = "g5".into();
+        workbench.on_runtime(&mut host);
+        let asked: Vec<String> = calls.borrow().2[before..].iter().map(|(query, ..)| query.clone()).collect();
+        assert_eq!(asked, ["editor_facts", "admit_source"]);
+    }
+
+    /// A producer asked again (the bench changed) that answers the same frames tells its readers
+    /// nothing: they are not asked again for it.
+    #[test]
+    fn the_same_frames_under_a_new_revision_do_not_ask_the_readers_again() {
+        let root = scratch("frames-same");
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "derive", "kind": "node", "label": "Derive", "parameters": [],
+            "node": {"node_kind": "processor", "inputs": [{"name": "bundle", "delivery": "exact"}], "outputs": [], "queries": ["editor_facts"]}}));
+        for item in catalog["types"].as_array_mut().unwrap().iter_mut().filter(|item| item["type_id"] == "camera_measurement") {
+            item["node"]["queries"] = json!(["describe_output_frames"]);
+        }
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "derive", "source_signal": "@logic/camera_measurement/frames"})).unwrap();
+        event(&mut workbench, Event::Opened { instance: node_instance("camera_measurement"), working_point: Value::Null }, &mut host);
+        event(&mut workbench, Event::Opened { instance: node_instance("derive"), working_point: Value::Null }, &mut host);
+        let frames = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().rev().find(|(query, ..)| query == "describe_output_frames").unwrap().1;
+        let editors = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().filter(|(query, ..)| query == "editor_facts").count();
+        event(&mut workbench, Event::Answered { ticket: frames(&calls), result: Ok(json!(["frame", ["0", "1"]])) }, &mut host);
+        let told = editors(&calls);
+        // Asked again (a check), it answers the same frames: the reader is not asked again.
+        apply(&mut workbench, &mut host, "check_node", json!({"node": "camera_measurement"})).unwrap();
+        event(&mut workbench, Event::Answered { ticket: frames(&calls), result: Ok(json!(["frame", ["0", "1"]])) }, &mut host);
+        assert_eq!(editors(&calls), told);
+        // Other frames are told.
+        apply(&mut workbench, &mut host, "check_node", json!({"node": "camera_measurement"})).unwrap();
+        event(&mut workbench, Event::Answered { ticket: frames(&calls), result: Ok(json!(["frame", ["0", "1", "2"]])) }, &mut host);
+        assert_eq!(editors(&calls), told + 1);
     }
 
     /// A whole-bundle input is offered one entry per producer, as v2's `_source_choices`:

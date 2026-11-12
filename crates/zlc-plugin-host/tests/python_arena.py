@@ -1,9 +1,10 @@
 """An arena keeps the free blocks its work comes back for and gives the rest back: what stayed free
-through a whole turn of its size, and a size that has gone unused for longer than it ever did. A
-borrower lets a mapping go with its last view."""
+through a whole turn of its size, and a size that has gone unused for longer than it ever did --
+while nothing allocates too. A borrower lets a mapping go with its last view."""
 import gc
 import pathlib
 import sys
+import time
 import unittest
 import uuid
 
@@ -17,14 +18,18 @@ OTHER = (GRANULARITY * 5,)
 
 
 class Bench:
+    """An arena on a clock that moves one tick per allocation: the work's own pace."""
+
     def __init__(self):
         self.retired = []
-        self.arena = Arena(uuid.uuid4().hex, retired=self.retired.extend)
+        self.now = 0.0
+        self.arena = Arena(uuid.uuid4().hex, retired=self.retired.extend, clock=lambda: self.now)
 
     def hold(self, shape, count):
         """``count`` allocations of ``shape``, each lent once (as frames kept by the core are)."""
         held = []
         for _ in range(count):
+            self.now += 1
             array = self.arena.allocate(shape, "u1")
             reference = self.arena.lend(array, None)
             held.append(reference["block"])
@@ -88,6 +93,40 @@ class GiveBack(unittest.TestCase):
         for _ in range(12):
             bench.release(bench.hold(OTHER, 1))
         self.assertEqual(bench.mapped, OTHER[0], "only the size still in use is mapped")
+
+    def test_idle_blocks_are_given_back_while_nothing_allocates(self):
+        bench = Bench()
+        for _ in range(5):
+            bench.release(bench.hold(FRAME, 1))
+        ring = bench.hold(FRAME, 3)
+        bench.release(ring)
+        self.assertEqual((bench.mapped, bench.retired), (3 * FRAME[0], []), "within its usual gap: kept for the work")
+        # The run ends: nothing allocates again, and the clock passes the size's longest gap.
+        bench.now += 2
+        deadline = time.monotonic() + 5
+        while bench.mapped and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(bench.mapped, 0, "given back without waiting for an allocation")
+        self.assertEqual(sorted(bench.retired), sorted(set(bench.retired)))
+        self.assertEqual(len(bench.retired), 3)
+
+    def test_on_the_real_clock_a_finished_run_leaves_nothing_mapped(self):
+        retired = []
+        arena = Arena(uuid.uuid4().hex, retired=retired.extend)
+        for _ in range(3):
+            names = []
+            for shape in (FRAME, OTHER):
+                array = arena.allocate(shape, "u1")
+                names.append(arena.lend(array, None)["block"])
+                del array
+            gc.collect()
+            for name in names:
+                arena.released(name)
+        deadline = time.monotonic() + 5
+        while arena.mapped_bytes and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(arena.mapped_bytes, 0)
+        self.assertEqual(len(retired), len(set(retired)), "each block is given back once")
 
     def test_a_borrower_unmaps_a_block_with_its_last_view(self):
         bench = Bench()
