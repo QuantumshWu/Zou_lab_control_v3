@@ -101,7 +101,7 @@ impl Model {
             }
             _ => (folded > 0).then(|| self.near_exact(plan, &site.beams, 0, &self.coherent_dressing())),
         };
-        let Site { beams: amplitudes, responses, weights, channels, resonant: first, excited, .. } = &mut *site;
+        let Site { beams: amplitudes, responses, weights, channels, excited, .. } = &mut *site;
         let (far, size) = (self.bare_components(&plan.lights).count(), EXCITED * c.ground);
         channels.clear();
         channels.resize((far + folded) * size, C64::ZERO);
@@ -114,31 +114,28 @@ impl Model {
             let place = |carrier: usize| far + self.folded_carriers(plan).take_while(|&d| d < carrier).count();
             self.responses_each(plan, near, amplitudes, at.kappa, weights, |carrier, e, y, z| channels[place(carrier) * size + e * c.ground + y] += z);
         }
-        // The co-resonant channels and places (p, b1, q, b2), θ_b1 + ν_p = θ_b2 + ν_q: the cluster's own under the running
-        // lights, exact, found once.
-        let resonant = self.resonances[plan.cluster].get_or_init(|| {
+        // The co-resonant channels and places (p, b1) and (q, b2), θ_b1 + ν_p = θ_b2 + ν_q, and with them a place's class:
+        // the first of the places co-resonant with it (itself among them). The cluster's own under the running lights,
+        // exact, found once.
+        let places = (far + folded) * c.ground;
+        let first = self.resonances[plan.cluster].get_or_init(|| {
             let bare = self.bare_components(&plan.lights).map(|(frequency, side)| self.frequency(Component { frequency, counter: side == 1 }));
             let sums: Vec<Vec<Beat>> = bare.chain(self.folded_carriers(plan).map(|d| self.carriers[d].beat.clone())).map(|nu| c.frames[..c.ground].iter().map(|theta| theta.plus(1, &nu)).collect()).collect();
-            let mut pairs = vec![];
+            let mut first = vec![usize::MAX; places];
             for (p, left) in sums.iter().enumerate() {
                 for (q, right) in sums.iter().enumerate() {
                     for (b1, one) in left.iter().enumerate() {
-                        pairs.extend(right.iter().enumerate().filter(|(_, two)| one == *two).map(|(b2, _)| [p, b1, q, b2]));
+                        for (b2, _) in right.iter().enumerate().filter(|(_, two)| one == *two) {
+                            let at = &mut first[p * c.ground + b1];
+                            *at = (*at).min(q * c.ground + b2);
+                        }
                     }
                 }
             }
-            pairs
+            first
         });
-        // A place's class by the first of the places co-resonant with it (itself among them: every place is paired
-        // with itself), and the classes' amplitudes A_k = Σ R_p[:, b] x_b, held at the class's first place.
-        let places = (far + folded) * c.ground;
-        first.clear();
-        first.resize(places, usize::MAX);
-        for &[p, b1, q, b2] in resonant {
-            let at = &mut first[p * c.ground + b1];
-            *at = (*at).min(q * c.ground + b2);
-        }
-        // Place by place the amplitudes a_pb, and after them the classes' sums.
+        // The classes' amplitudes A_k = Σ R_p[:, b] x_b, held at the class's first place: place by place the amplitudes
+        // a_pb, and after them the classes' sums.
         excited.clear();
         excited.resize(2 * places * EXCITED, C64::ZERO);
         let (own, sums) = excited.split_at_mut(places * EXCITED);

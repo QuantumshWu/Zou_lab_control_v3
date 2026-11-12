@@ -368,9 +368,9 @@ pub struct Model {
     pub(crate) ranked: Vec<Vec<units::Ranked>>,
     pub(crate) beats: Vec<(Beat, Vec<(usize, usize)>)>,
     pub(crate) forms: Arc<reach::Forms>,
-    /// Per cluster the co-resonant pairs of its folded channels' places under the running lights, found at its first readout
-    /// (readout.rs `Model::readout_of`).
-    pub(crate) resonances: Vec<std::sync::OnceLock<Vec<[usize; 4]>>>,
+    /// Per cluster the classes of its readout's places under the running lights -- per channel and ground place the first
+    /// of the places co-resonant with it --, found at its first readout (readout.rs `Model::readout_of`).
+    pub(crate) resonances: Vec<std::sync::OnceLock<Vec<usize>>>,
     /// The states' labels and the beams' names (the ledger's and the method's words).
     pub(crate) labels: Vec<String>,
     pub(crate) names: Vec<String>,
