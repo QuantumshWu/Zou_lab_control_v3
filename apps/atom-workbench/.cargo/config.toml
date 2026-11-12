@@ -1,0 +1,6 @@
+# The solver's kernels (rust-solver/motion/src/linalg.rs) are written once, for 256-bit vectors of reals with fused
+# multiply-add: every build from this folder takes those instructions, and the built solver needs a processor that has
+# them (AVX2 and FMA: Intel from Haswell, AMD from Excavator and Zen). A build that sets RUSTFLAGS itself
+# (scripts/build-desktop-native.ps1) names the features there: the environment replaces these flags.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+avx2,+fma"]

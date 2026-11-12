@@ -1,0 +1,87 @@
+{
+ "id": "R4_LIN_4",
+ "reference": "R4",
+ "title": "R4 西西弗斯标度律：每束 160 mW/cm²，阱内 δ = -20.0Γ",
+ "request": "scenes/R4_LIN_4.json",
+ "durationUs": 400,
+ "samples": 101,
+ "kind": "pass-fail",
+ "derivation": "A member of R4_LINEAR (the scaling law at three intensities): alone it is judged by its reported trap only, the prepared one of |2,2⟩ with the lin⊥lin pairs’ phase-averaged shift (lib/phys.mjs runningTrap: the trap light mixes the excited levels these pairs reach, so the resolvent is kept whole).",
+ "conditions": [
+  {
+   "what": "δ from the cycle’s line in the trap / Γ",
+   "value": -20.00036997316686
+  },
+  {
+   "what": "largest excited population in the lowest light-shift potential",
+   "value": 0.059867827915596285,
+   "limit": "≪ 1"
+  },
+  {
+   "what": "the lowest light-shift potential’s modulation over E_rec",
+   "value": 865.1021715289367,
+   "limit": "≫ 100"
+  },
+  {
+   "what": "Ω_osc τ_p: oscillations in the light’s wells between two pumpings",
+   "value": 20.57536044495,
+   "limit": "≫ 1"
+  },
+  {
+   "what": "photons scattered over the run",
+   "value": 767.6190105371255
+  },
+  {
+   "what": "pumping times over the run",
+   "value": 40.77832369234565
+  },
+  {
+   "what": "running trap: ∂²V_run over ∂²V_prep, less 1",
+   "value": -0.042675530381738325
+  },
+  {
+   "what": "excited population the other lights make in second order (the running trap's next order is 3 times it, of the line above)",
+   "value": 0.036152054995809875,
+   "limit": "≪ 1"
+  },
+  {
+   "what": "the one-level formula on the level chart, its factor less the running trap's (zero but for the trap light's mixing of the excited levels the light reaches, the far fold's fourth order and the recoil)",
+   "value": 0.0002466113636380163
+  }
+ ],
+ "series": [
+  {
+   "quantity": "trapFrequency",
+   "axis": "x",
+   "value": 0.7653504443194705,
+   "u": 0.001850138984239838,
+   "target": null
+  },
+  {
+   "quantity": "trapFrequency",
+   "axis": "y",
+   "value": 19.955178584383212,
+   "u": 0.04823914862685888,
+   "target": null
+  },
+  {
+   "quantity": "trapFrequency",
+   "axis": "z",
+   "value": 19.955178584383212,
+   "u": 0.04823914862685888,
+   "target": null
+  }
+ ],
+ "info": {
+  "trapKHz": [
+   0.7653504443194705,
+   19.955178584383212,
+   19.955178584383212
+  ],
+  "modulationUK": 156.56262230613194,
+  "deepestShiftUK": 348.6061846577147,
+  "oscillationKHz": 333.8389158092019,
+  "photonRatePerUs": 1.9190475263428137,
+  "pumpRatePerUs": 0.10194580923086413
+ }
+}

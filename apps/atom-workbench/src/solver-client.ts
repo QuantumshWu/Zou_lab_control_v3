@@ -40,17 +40,6 @@ export class DynamicsClient {
       this.current=job;job.timer=setTimeout(()=>{job.timer=undefined;void this.run(job);},this.debounceMs);
     });
   }
-  /** Starts the GPU (POST /api/gpu): answered once it has started, the driver's first compile of the
-   * kernels included, with why it cannot run if so (a solve that asks for it then runs on the CPU and
-   * says so); rejected if its worker ended first. No deadline runs: a compile takes minutes on a loaded
-   * machine. A service that does not serve it answers nothing: its solves start the GPU themselves. */
-  async startGpu():Promise<string|undefined>{
-    const response=await this.transport(this.base+'/api/gpu',{method:'POST'});
-    if(response.status===404||response.status===405)return undefined;
-    const data=await response.json();
-    if(!response.ok)throw new Error(data.error||`Local solver: ${response.status}`);
-    return data.reason;
-  }
   private async run(job:Job):Promise<void>{
     if(this.current!==job||job.controller.signal.aborted)return;
     job.attempt++;let evidence:unknown;const motion=motionOf(job);
@@ -132,7 +121,7 @@ export class DynamicsClient {
  * p̄(T) -- is the internal state's, the atom at rest at the focus, and carries none. */
 function motionOf(job:Pick<Job,'settings'|'includeMean'>):MotionRequest|undefined{return job.includeMean?undefined:motionRequest(job.settings);}
 /** Reads the one native result contract (documented in
- * rust-solver/src/lattice_core_adapter.rs, and its motion block in motion3d_adapter.rs) and
+ * rust-solver/src/lattice_core_adapter.rs, and its motion block in motion_adapter.rs) and
  * rejects anything else. `initial` is the requested initial state (an id is a single state),
  * `horizon` the requested time T of the mean (us: 1e5 or 1e6), `motion` the requested motion. */
 export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics),horizon:number=scene.dynamics.meanHorizonUs,motion?:MotionRequest):DynamicsResult{

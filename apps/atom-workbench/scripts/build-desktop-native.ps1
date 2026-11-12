@@ -15,7 +15,8 @@ try {
   $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=Join-Path $taskTools 'lld-link-1.99.1\lld-link.exe'
   $env:LIB=(@('crt\lib\x86_64','sdk\lib\um\x86_64','sdk\lib\ucrt\x86_64') | ForEach-Object {Join-Path (Join-Path $taskTools 'msvc-sdk') $_}) -join ';'
   # The launcher does not require a separately installed MSVC redistributable.
-  $env:RUSTFLAGS='-C target-feature=+crt-static'
+  # AVX2 and FMA: the solver's kernels are written for them (.cargo/config.toml; rust-solver/motion/src/linalg.rs).
+  $env:RUSTFLAGS='-C target-feature=+crt-static,+avx2,+fma'
   $taskCargo=Join-Path $taskRust 'bin\cargo.exe'
   if($RestoreDependencies){
     $taskFetch=@('fetch','--manifest-path',(Join-Path $taskApp 'desktop-native\Cargo.toml'),'--target','x86_64-pc-windows-msvc','--locked')

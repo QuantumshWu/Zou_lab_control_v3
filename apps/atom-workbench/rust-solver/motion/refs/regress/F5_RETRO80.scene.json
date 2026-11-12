@@ -1,0 +1,175 @@
+{
+ "version": 3,
+ "name": "探测光 + 852 nm 光镊",
+ "fields": [
+  {
+   "id": "bias",
+   "name": "偏置磁场",
+   "enabled": true,
+   "magnitudeG": 3,
+   "direction": {
+    "reference": {
+     "kind": "axis",
+     "axis": "+z"
+    },
+    "thetaDeg": 0,
+    "phiDeg": 0
+   }
+  }
+ ],
+ "lasers": [
+  {
+   "id": "probe",
+   "name": "探测光",
+   "enabled": true,
+   "line": "D2",
+   "frequency": {
+    "base": {
+     "kind": "transition",
+     "line": "D2",
+     "Fg": 2,
+     "Fe": 3
+    },
+    "offsetMHz": 80
+   },
+   "frequencyUnit": "MHz",
+   "showLightShift": false,
+   "intensityMode": "intensity",
+   "intensityMWcm2": 0.3,
+   "powerUnit": "mW",
+   "waistUnit": "μm",
+   "intensityUnit": "mW/cm²",
+   "direction": {
+    "reference": {
+     "kind": "field",
+     "id": "bias"
+    },
+    "thetaDeg": 0,
+    "phiDeg": 0
+   },
+   "polarizationAngleDeg": 0,
+   "ellipticityDeg": 45,
+   "phaseDeg": 0,
+   "frequencyAnchor": {
+    "line": "D2",
+    "offsetMHz": -2289.265229089109,
+    "viewKey": "[\"expr\",{\"base\":{\"kind\":\"transition\",\"line\":\"D2\",\"Fg\":2,\"Fe\":3},\"offsetMHz\":80}]"
+   },
+   "intensityAnchor": {
+    "intensityMWcm2": 0.3,
+    "viewKey": "[\"intensity\",0.3]"
+   }
+  },
+  {
+   "id": "tweezer",
+   "name": "光镊",
+   "enabled": true,
+   "line": "D2",
+   "frequency": {
+    "wavelengthNm": 852
+   },
+   "frequencyUnit": "nm",
+   "showLightShift": true,
+   "intensityMode": "power",
+   "intensityMWcm2": 176838825.6576615,
+   "powerUnit": "mW",
+   "waistUnit": "μm",
+   "intensityUnit": "kW/cm²",
+   "direction": {
+    "reference": {
+     "kind": "axis",
+     "axis": "+x"
+    },
+    "thetaDeg": 0,
+    "phiDeg": 0
+   },
+   "polarizationAngleDeg": 0,
+   "ellipticityDeg": 0,
+   "phaseDeg": 0,
+   "frequencyAnchor": {
+    "line": "D2",
+    "offsetMHz": -32361402.30887562,
+    "viewKey": "[\"expr\",{\"wavelengthNm\":852}]"
+   },
+   "intensityAnchor": {
+    "intensityMWcm2": 176838825.6576615,
+    "viewKey": "[\"power\",4,1.2]"
+   },
+   "powerMW": 4,
+   "waistUm": 1.2
+  },
+  {
+   "id": "tweezer-reflection",
+   "name": "光镊（反射）",
+   "enabled": true,
+   "line": "D2",
+   "frequency": {
+    "base": {
+     "kind": "laser",
+     "id": "tweezer"
+    },
+    "offsetMHz": 0
+   },
+   "frequencyUnit": "MHz",
+   "showLightShift": true,
+   "intensityMode": "power",
+   "intensityMWcm2": 176838825.6576615,
+   "powerUnit": "mW",
+   "waistUnit": "μm",
+   "intensityUnit": "kW/cm²",
+   "direction": {
+    "reference": {
+     "kind": "axis",
+     "axis": "+x"
+    },
+    "thetaDeg": 180,
+    "phiDeg": 180
+   },
+   "polarizationAngleDeg": 0,
+   "ellipticityDeg": 0,
+   "phaseDeg": 0,
+   "frequencyAnchor": {
+    "line": "D2",
+    "offsetMHz": -32361402.30887562,
+    "viewKey": "[\"expr\",{\"base\":{\"kind\":\"laser\",\"id\":\"tweezer\"},\"offsetMHz\":0},[\"D2\",-32361402.30887562]]"
+   },
+   "intensityAnchor": {
+    "intensityMWcm2": 176838825.6576615,
+    "viewKey": "[\"power\",4,1.2]"
+   },
+   "powerMW": 4,
+   "waistUm": 1.2,
+   "reflection": {
+    "of": "tweezer",
+    "reflectivity": 1,
+    "phaseDeg": 0,
+    "quarterWave": false
+   }
+  }
+ ],
+ "tweezerId": "tweezer",
+ "referenceFrequencies": [],
+ "references": [],
+ "marks": {},
+ "dynamics": {
+  "initialStateId": "ground-2-2",
+  "monitoredStateIds": [
+   "ground-2-0",
+   "ground-1--1",
+   "ground-1-0",
+   "ground-1-1"
+  ],
+  "monitorMode": "auto",
+  "monitoredGroupIds": [],
+  "durationUs": 10,
+  "durationUnit": "μs",
+  "samples": 11,
+  "meanHorizonUs": 1000000,
+  "motion": {
+   "enabled": true,
+   "temperatureUK": 20,
+   "temperatureUnit": "μK",
+   "device": "gpu"
+  }
+ }
+}

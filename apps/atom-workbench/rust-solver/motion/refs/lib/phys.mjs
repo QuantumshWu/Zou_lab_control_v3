@@ -1,0 +1,359 @@
+// Physics and numerics shared by the references: constants (SI 2019, as motion/src/units.rs), special functions,
+// quadrature, the request's own atomic data (decay rates, couplings, detunings, read from the native request so that a
+// reference describes exactly the model the solver receives), the paraxial Gaussian beam, and the initial ensemble's
+// exact moments (the lowered isothermal times each axis' Wigner factor, SPEC §2.5).
+export const H=6.62607015e-34,HBAR=H/(2*Math.PI),KB=1.380649e-23,C=299792458;
+/** rad/µs per MHz; k_B/ħ in rad/µs per µK (units.rs KT_PER_UK). */
+export const RAD_PER_MHZ=2*Math.PI,KT_PER_UK=KB/HBAR*1e-12;
+const N=32;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Special functions and quadrature.
+
+/** erf(x) to ~1e-16 relative: its Maclaurin series below 2.5, else 1 − erfc by the continued fraction (Lentz). */
+export function erf(x){
+  if(x<0)return -erf(-x);
+  if(x<2.5){let term=x,sum=x;for(let n=1;n<200;n++){term*=-x*x/n;const add=term/(2*n+1);sum+=add;if(Math.abs(add)<1e-17*Math.abs(sum))break;}return 2/Math.sqrt(Math.PI)*sum;}
+  return 1-erfc(x);
+}
+/** erfc(x) for x ≥ 2.5 by its continued fraction (modified Lentz). */
+export function erfc(x){
+  if(x<2.5)return 1-erf(x);
+  const tiny=1e-300;let f=x,c=x,d=0;
+  for(let n=1;n<500;n++){const a=n/2;d=x+a*d;d=Math.abs(d)<tiny?tiny:d;c=x+a/c;c=Math.abs(c)<tiny?tiny:c;d=1/d;const delta=c*d;f*=delta;if(Math.abs(delta-1)<1e-16)break;}
+  return Math.exp(-x*x)/(Math.sqrt(Math.PI)*f);
+}
+/** Γ(s) at a positive multiple of ½. */
+export function gammaHalf(s){let g=(2*s)%2===0?1:Math.sqrt(Math.PI),t=(2*s)%2===0?1:0.5;while(t<s-0.25){g*=t;t+=1;}return g;}
+/** The lowered isothermal's weight K(s, y) = e^y P(s, y) − y^s/Γ(s + 1) for s a positive half-integer, y ≥ 0 (ensemble
+ * module of the old crate, SPEC §2.5): by its series e^y P(s,y) = y^s/Γ(s+1) Σ_{n≥0} y^n/((s+1)…(s+n)), the first term
+ * cancelled exactly: K = y^s/Γ(s+1) Σ_{n≥1} y^n/((s+1)…(s+n)); scaled by e^{−shift} against overflow. */
+export function lowered(s,y,shift=0){
+  if(!(y>0))return 0;
+  if(y<s+40){
+    let term=1,sum=0,a=s;for(let n=1;n<2000;n++){a+=1;term*=y/a;sum+=term;if(term<1e-17*sum)break;}
+    return Math.exp(s*Math.log(y)-shift)/gammaHalf(s+1)*sum;
+  }
+  // e^y P(s,y) − y^s/Γ(s+1) with e^y P = e^y − e^y Q(s,y), e^y Q = y^s h/Γ(s), h the incomplete gamma function's
+  // continued fraction (Numerical Recipes gcf, Lentz); y large: e^y dominates, no cancellation.
+  const tiny=1e-300;let b=y+1-s,c=1/tiny,d=1/b,h=d;
+  for(let i=1;i<2000;i++){const an=-i*(i-s);b+=2;d=an*d+b;if(Math.abs(d)<tiny)d=tiny;c=b+an/c;if(Math.abs(c)<tiny)c=tiny;d=1/d;const del=d*c;h*=del;if(Math.abs(del-1)<1e-16)break;}
+  const power=Math.exp(s*Math.log(y)-shift);
+  return Math.exp(y-shift)-power*(h/gammaHalf(s)+1/gammaHalf(s+1));
+}
+/** Gauss–Legendre nodes and weights on [a, b] (Newton on P_n). */
+const legendreCache=new Map();
+export function gaussLegendre(n,a=-1,b=1){
+  let base=legendreCache.get(n);
+  if(!base){base=[];for(let i=0;i<n;i++){let x=Math.cos(Math.PI*(i+0.75)/(n+0.5)),slope=1;for(let it=0;it<100;it++){let p0=1,p1=x;for(let k=2;k<=n;k++){const p2=((2*k-1)*x*p1-(k-1)*p0)/k;p0=p1;p1=p2;}slope=n*(x*p1-p0)/(x*x-1);const dx=p1/slope;x-=dx;if(Math.abs(dx)<=1e-15)break;}base.push([x,2/((1-x*x)*slope*slope)]);}legendreCache.set(n,base);}
+  const half=(b-a)/2,mid=(a+b)/2;return base.map(([x,w])=>[mid+half*x,half*w]);
+}
+/** ∫_a^b f by composite Gauss–Legendre on `panels` equal panels of n points. */
+export function integrate(f,a,b,{panels=16,n=16}={}){
+  let s=0;const h=(b-a)/panels;for(let p=0;p<panels;p++)for(const [x,w] of gaussLegendre(n,a+p*h,a+(p+1)*h))s+=w*f(x);return s;
+}
+
+/** The eigenvalues and eigenvectors of a real symmetric matrix by Jacobi's rotations (cyclic sweeps until the
+ * off-diagonal part is below `floor` times the matrix' scale): `values[i]` with the vector `vectors[k][i]` over k. The
+ * matrix is used up. */
+export function symmetricEigen(a,floor=1e-15){
+  const n=a.length,v=Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>+(i===j))),scale=Math.max(...a.map(row=>Math.max(...row.map(Math.abs))))||1;
+  for(let it=0;it<200;it++){let off=0;for(let p=0;p<n;p++)for(let q=p+1;q<n;q++){if(Math.abs(a[p][q])<floor*scale)continue;off+=(a[p][q]/scale)**2;const th=0.5*Math.atan2(2*a[p][q],a[q][q]-a[p][p]),c=Math.cos(th),s=Math.sin(th);
+    for(let k=0;k<n;k++){const akp=a[k][p],akq=a[k][q];a[k][p]=c*akp-s*akq;a[k][q]=s*akp+c*akq;}for(let k=0;k<n;k++){const apk=a[p][k],aqk=a[q][k];a[p][k]=c*apk-s*aqk;a[q][k]=s*apk+c*aqk;}
+    for(let k=0;k<n;k++){const vkp=v[k][p],vkq=v[k][q];v[k][p]=c*vkp-s*vkq;v[k][q]=s*vkp+c*vkq;}}if(off<1e-28)break;}
+  return {values:a.map((row,i)=>row[i]),vectors:v};
+}
+/** A Hermitian matrix A + iB (A symmetric, B antisymmetric, n × n) through the real symmetric [[A, −B], [B, A]], whose
+ * eigenvalues are its own, each twice, with the vectors (Re c; Im c): sorted upward, one of each pair. */
+export function hermitianEigen(A,B){
+  const n=A.length,{values,vectors}=symmetricEigen([...A.map((row,i)=>[...row,...B[i].map(x=>-x)]),...B.map((row,i)=>[...row,...A[i]])]);
+  return values.map((value,i)=>({value,vector:Array.from({length:n},(_,k)=>({re:vectors[k][i],im:vectors[n+k][i]}))})).sort((x,y)=>x.value-y.value).filter((_,i)=>i%2===0);
+}
+/** Gauss–Hermite nodes and weights of the standard normal, ∫ f(x) e^{−x²/2} dx/√(2π) ≈ Σ w f(x): the eigenvalues of the
+ * Jacobi matrix of the Hermite recurrence (off-diagonal √k; Golub and Welsch, Math. Comp. 23 (1969) 221), the weights
+ * the squares of the eigenvectors' first components. */
+const hermiteCache=new Map();
+export function gaussHermite(n){
+  let out=hermiteCache.get(n);if(out)return out;
+  const {values,vectors}=symmetricEigen(Array.from({length:n},(_,i)=>Array.from({length:n},(_,j)=>Math.abs(i-j)===1?Math.sqrt(Math.max(i,j)):0)));
+  out=values.map((x,i)=>[x,vectors[0][i]**2]);hermiteCache.set(n,out);return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The native request's atomic data.
+
+/** The request's states and the index of a label. */
+export function states(line){return line.model.states;}
+export function index(line,label){const i=line.model.states.indexOf(label);if(i<0)throw new Error(`no state ${label}`);return i;}
+const entry=(m,i,j)=>({re:m.real[i*N+j],im:m.imag[i*N+j]});
+/** Γ_e (1/µs) of every state (0 for the ground states): Σ_a Σ_g |C_a[g, e]|² over the lab-axis emission operators. */
+export function decayRates(line){
+  const em=line.model.motion.emission,out=Array(N).fill(0);
+  for(let e=0;e<N;e++)for(let g=0;g<N;g++)for(const c of em){const z=entry(c,g,e);out[e]+=z.re*z.re+z.im*z.im;}
+  return out;
+}
+/** The polarization-summed branching rate Γ_{e→g} (1/µs): Σ_a |C_a[g, e]|². */
+export function branchRate(line,e,g){let s=0;for(const c of line.model.motion.emission){const z=entry(c,g,e);s+=z.re*z.re+z.im*z.im;}return s;}
+/** The co-rotating coupling X^l_{eg} of beam `id` at the focus (rad/µs): the drive is X e^{−iΔt} + h.c., so the Rabi
+ * frequency of the transition is Ω = 2|X|. */
+export function coupling(line,id,e,g){const b=line.model.motion.beams.find(x=>x.id===id);if(!b)throw new Error(`no beam ${id}`);return entry(b.coupling,e,g);}
+/** A beam's detuning from the excited states' frame, Δ_l = 2π Σ_k index_k ν_k (rad/µs). */
+export function frameDetuning(line,id){const b=line.model.motion.beams.find(x=>x.id===id),f=line.model.frequencyCoordinates.frequenciesMHz;return RAD_PER_MHZ*b.frequencyIndex.reduce((s,n,k)=>s+n*f[k],0);}
+/** H0's diagonal (rad/µs) in the frames. */
+export function frameEnergies(line){const h=line.model.motion.hamiltonian;return line.model.states.map((_,i)=>h.real[i*N+i]);}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Units.
+
+/** An energy given as a frequency shift (MHz) in µK: h·ν/k_B. */
+export const uKOfMHz=mhz=>H*mhz*1e6/KB*1e6;
+/** ħ/m in µm²/µs; the recoil energy E_rec = ħk²/2m of wave number k (rad/µm) as a rate (rad/µs) and in µK. */
+export const hbarOverMass=m=>HBAR/m*1e6;
+export const recoilRate=(k,m)=>hbarOverMass(m)*k*k/2;
+export const recoilUK=(k,m)=>recoilRate(k,m)/KT_PER_UK;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The paraxial Gaussian beam and the trap.
+
+/** Rayleigh range z_R = k w₀²/2 (µm). */
+export const rayleigh=(k,w0)=>k*w0*w0/2;
+
+// Double-precision arithmetic that carries its rounding: what the evaluation of an exact formula leaves uncertain.
+
+/** γ_n = nε/(1 − nε), ε = 2⁻⁵³ the relative rounding of one double-precision operation: n of them in composition,
+ * (1 + δ₁)…(1 + δ_n) with |δ_i| ≤ ε, stay within 1 ± γ_n (Higham, Accuracy and Stability of Numerical Algorithms, 2nd
+ * ed., Lemma 3.1). */
+export const roundoff=n=>n*2**-53/(1-n*2**-53);
+/** A complex number as a formula's evaluation: `re`, `im` the computed value; `m` no less than the sum of the moduli of
+ * the products of given numbers that its exact value is the sum of; `n` no less than the number of rounded operations
+ * any of them has passed through: |computed − exact| ≤ γ_n m, to first order in ε. A given number is exact (n = 0). */
+const exact=(re,im=0)=>({re,im,m:Math.hypot(re,im),n:0});
+/** A sum: each partial sum is one more rounded operation on all it holds; the m add. */
+const sum=(...z)=>z.reduce((a,b)=>({re:a.re+b.re,im:a.im+b.im,m:a.m+b.m,n:Math.max(a.n,b.n)+1}));
+/** A product: each part is a rounded sum of two rounded products, two more operations on each factor's; the m multiply. */
+const product=(...z)=>z.reduce((a,b)=>({re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re,m:a.m*b.m,n:a.n+b.n+2}));
+/** Exact: the conjugate, the opposite, the product with i. */
+const conjugate=a=>({...a,im:-a.im}),opposite=a=>({...a,re:-a.re,im:-a.im}),turned=a=>({...a,re:-a.im,im:a.re});
+/** 1/a = conj(a)/|a|²: three more operations (|a|²'s product and sum, the division); a's own bound γ_n m is γ_n m/|a|²
+ * of 1/a. */
+const inverse=a=>{const d=a.re*a.re+a.im*a.im;return {re:a.re/d,im:-a.im/d,m:a.m/d,n:a.n+3};};
+/** e^a: the argument's bound γ_n m is the result's relative one, that of ⌈m⌉n operations; the library's exp, cos and
+ * sin (each within one unit in the last place, 2ε) and their product are five more. */
+const exponential=a=>{const e=Math.exp(a.re);return {re:e*Math.cos(a.im),im:e*Math.sin(a.im),m:e,n:Math.ceil(a.m)*a.n+5};};
+/** The bound γ_n m of a carried number. */
+const bound=z=>roundoff(z.n)*z.m;
+
+/** A x = y for a 3 × 3 matrix A: Gauss–Jordan elimination with partial pivoting. */
+export function solve3(A,y){
+  const a=A.map((r,i)=>[...r,y[i]]);
+  for(let c=0;c<3;c++){let p=c;for(let r=c+1;r<3;r++)if(Math.abs(a[r][c])>Math.abs(a[p][c]))p=r;[a[c],a[p]]=[a[p],a[c]];for(let r=0;r<3;r++)if(r!==c){const f=a[r][c]/a[c][c];for(let k=c;k<4;k++)a[r][k]-=f*a[c][k];}}
+  return a.map((r,i)=>r[3]/r[i]);
+}
+
+/** The inverse of a 3 × 3 matrix by its cofactors. */
+export function inverse3(m){
+  const [[a,b,c],[d,e,f],[g,h,i]]=m,A=e*i-f*h,B=f*g-d*i,C=d*h-e*g,det=a*A+b*B+c*C;
+  return [[A/det,(c*h-b*i)/det,(b*f-c*e)/det],[B/det,(a*i-c*g)/det,(c*d-a*f)/det],[C/det,(b*g-a*h)/det,(a*e-b*d)/det]];
+}
+
+// The trap light's potential of a ground state and its trap as the solver's model states them (SPEC §1.2, §1.3), from
+// the request alone.
+
+/** The trap light's static shift of the ground state `label` (SPEC §1.2): V(r) = Σ_l′l Re[conj(a_l′(r)) a_l(r) Q_l′l] over
+ * the beams of the trap beam's frequency, a_l the beam's amplitude over its focus value (`beamJet`), and (rad/µs)
+ *   Q_l′l = Σ_e conj(X^l′_eb) X^l_eb/(E_b + Δ − E_e) + Σ_e conj(R^l_eb) R^l′_eb/(E_b − Δ − 2ω_f − E_e) + Σ_pq conj(E^l′_p) E^l_q [O_pq]_bb.
+ * The light drives Σ_l a_l X^l e^{−iΔt} + Σ_l conj(a_l) R^l e^{+i(Δ + 2ω_f)t} + h.c. (excited ← ground; its co- and its
+ * counter-rotating part in the request's frame, Δ the frequency's detuning from the frame and ω_f the frame's own, the
+ * request's motion block): in second order a level is shifted by |coupling|² over the difference of its energy with
+ * the photon and the excited state's -- E the request's H0, real and exact --, summed over the excited states: the
+ * co-rotating conj(Σ a_l′X^l′)(Σ a_l X^l) and the counter-rotating conj(Σ conj(a_l)R^l)(Σ conj(a_l′)R^l′) both hold
+ * conj(a_l′) a_l. The states outside the model shift it by the request's form in the field E = Σ_l a_l E^l,
+ * Σ_pq conj(E_p) E_q O_pq on the spherical components (O_qq the |E_q|² matrix; for p < q, O_pq = (X − iY)/2 and
+ * O_qp = (X + iY)/2 of the pair's Re and Im matrices, so that the pair gives Re(conj(E_p)E_q) X + Im(conj(E_p)E_q) Y).
+ * Returns the beams and Q, row-major over them, each with its rounding. */
+export function trapForm(line,label){
+  const m=line.model.motion,b=index(line,label),E=frameEnergies(line),of=x=>String(x.frequencyIndex),trap=m.beams.find(x=>x.id===m.trapBeamId);
+  const beams=m.beams.filter(x=>of(x)===of(trap)),O=m.outsideForms.find(x=>of(x)===of(trap)).matrices,given=z=>exact(z.re,z.im);
+  const delta=product(exact(RAD_PER_MHZ),sum(exact(0),...trap.frequencyIndex.map((n,k)=>product(exact(n),exact(line.model.frequencyCoordinates.frequenciesMHz[k])))));
+  const pair=(first,second)=>{
+    const terms=[exact(0)];
+    for(let e=0;e<N;e++){
+      const frame=product(exact(2*RAD_PER_MHZ),sum(exact(m.frameFrequenciesMHz[e]),exact(-m.frameFrequenciesMHz[b])));
+      for(const [x,y,d] of [[entry(first.coupling,e,b),entry(second.coupling,e,b),sum(exact(E[b]),delta,exact(-E[e]))],
+        [entry(second.counterCoupling,e,b),entry(first.counterCoupling,e,b),sum(exact(E[b]),opposite(delta),opposite(frame),exact(-E[e]))]])
+        if((x.re||x.im)&&(y.re||y.im))terms.push(product(conjugate(given(x)),given(y),inverse(d)));
+    }
+    for(let p=0;p<3;p++)for(let q=0;q<3;q++){
+      const at=3+2*(p+q-1),Y=p===q?null:turned(given(entry(O[at+1],b,b)));
+      const form=p===q?given(entry(O[q],b,b)):product(exact(0.5),sum(given(entry(O[at],b,b)),p<q?opposite(Y):Y));
+      terms.push(product(conjugate(given(first.electricField[p])),given(second.electricField[q]),form));
+    }
+    return sum(...terms);
+  };
+  return {beams,Q:beams.flatMap(first=>beams.map(second=>pair(first,second)))};
+}
+/** A paraxial Gaussian beam focused at the origin (SPEC §1.2): a = e^{ikζ} exp(−ρ²/(w₀²q))/q, q = 1 + iζ/z_R, ζ = n·r,
+ * t = r − ζn, ρ² = |t|². With u = 1/q and s = ρ²/w₀², its logarithm φ = ikζ − su + ln u has (∇ζ = n, ∇t = 1 − nnᵀ,
+ * ∇ρ² = 2t, ∇u = −(i/z_R)u² n)
+ *   g = ∇φ = i[k + (su² − u)/z_R] n − (2u/w₀²) t,
+ *   G = ∇g = c₁(1 − nnᵀ) + c₂(ntᵀ + tnᵀ) + c₃nnᵀ,  c₁ = −2u/w₀², c₂ = 2iu²/(z_R w₀²), c₃ = (2su³ − u²)/z_R²,
+ *   T = ∇G: T_abc = c₂(n_c P_ab + n_a P_bc + n_b P_ac) + c₄(n_a n_b t_c + n_a t_b n_c + t_a n_b n_c) + c₅ n_a n_b n_c,
+ *       P = 1 − nnᵀ, c₄ = 4u³/(z_R²w₀²), c₅ = i(2u³ − 6su⁴)/z_R³
+ * (∇c₁ = c₂n, ∇c₂ = c₄n, ∇c₃ = c₄t + c₅n). Returns a and the components of g, G, T at r, each with its rounding. */
+function beamJet(beam,r){
+  const length=Math.hypot(...beam.direction),n=beam.direction.map(x=>({...exact(x/length),n:3})),at=r.map(x=>exact(x)),axes=[0,1,2];
+  const k=exact(beam.waveNumberPerUm),w2=product(exact(beam.waistUm),exact(beam.waistUm)),zR=product(exact(0.5),k,w2);
+  const zeta=sum(...axes.map(a=>product(n[a],at[a]))),t=axes.map(a=>sum(at[a],opposite(product(zeta,n[a]))));
+  const u=inverse(sum(exact(1),turned(product(zeta,inverse(zR))))),s=product(sum(...t.map(x=>product(x,x))),inverse(w2));
+  const along=turned(sum(k,product(sum(product(s,u,u),opposite(u)),inverse(zR)))),c1=product(exact(-2),u,inverse(w2));
+  const c2=turned(product(exact(2),u,u,inverse(product(zR,w2)))),c3=product(sum(product(exact(2),s,u,u,u),opposite(product(u,u))),inverse(product(zR,zR)));
+  const c4=product(exact(4),u,u,u,inverse(product(zR,zR,w2))),c5=turned(product(sum(product(exact(2),u,u,u),opposite(product(exact(6),s,u,u,u,u))),inverse(product(zR,zR,zR))));
+  const P=(a,b)=>sum(exact(+(a===b)),opposite(product(n[a],n[b])));
+  return {a:product(exponential(sum(turned(product(k,zeta)),opposite(product(s,u)))),u),
+    g:a=>sum(product(along,n[a]),product(c1,t[a])),
+    G:(a,b)=>sum(product(c1,P(a,b)),product(c2,sum(product(n[a],t[b]),product(t[a],n[b]))),product(c3,n[a],n[b])),
+    T:(a,b,c)=>sum(product(c2,sum(product(n[c],P(a,b)),product(n[a],P(b,c)),product(n[b],P(a,c)))),
+      product(c4,sum(product(n[a],n[b],t[c]),product(n[a],t[b],n[c]),product(t[a],n[b],n[c]))),product(c5,n[a],n[b],n[c]))};
+}
+/** V and its derivatives at r. A pair's coefficient c = conj(a_l′) a_l is the exponential of conj(φ_l′) + φ_l, so with
+ * γ = conj(g_l′) + g_l, Γ = conj(G_l′) + G_l, Θ = conj(T_l′) + T_l (`beamJet`):
+ *   V = Σ Re[Qc], ∂_aV = Σ Re[Qc γ_a], ∂_a∂_bV = Σ Re[Qc (γ_aγ_b + Γ_ab)],
+ *   ∂_b∂_a²V = Σ Re[Qc (γ_a²γ_b + 2γ_aΓ_ab + γ_bΓ_aa + Θ_aab)] (`third[a][b]`),
+ * each a carried number: its real part the value, its bound the rounding. */
+function trapAt(form,r){
+  const jets=form.beams.map(b=>beamJet(b,r)),axes=[0,1,2],out={value:[exact(0)],gradient:axes.map(()=>[exact(0)]),hessian:axes.map(()=>axes.map(()=>[exact(0)])),third:axes.map(()=>axes.map(()=>[exact(0)]))};
+  jets.forEach((first,j)=>jets.forEach((second,i)=>{
+    const w=product(form.Q[j*jets.length+i],conjugate(first.a),second.a),g=axes.map(a=>sum(conjugate(first.g(a)),second.g(a))),G=(a,b)=>sum(conjugate(first.G(a,b)),second.G(a,b));
+    out.value.push(w);
+    for(const a of axes){
+      out.gradient[a].push(product(w,g[a]));
+      for(const b of axes){
+        out.hessian[a][b].push(product(w,sum(product(g[a],g[b]),G(a,b))));
+        out.third[a][b].push(product(w,sum(product(g[a],g[a],g[b]),product(exact(2),g[a],G(a,b)),product(g[b],G(a,a)),conjugate(first.T(a,a,b)),second.T(a,a,b))));
+      }
+    }
+  }));
+  return {value:sum(...out.value),gradient:out.gradient.map(z=>sum(...z)),hessian:out.hessian.map(row=>row.map(z=>sum(...z))),third:out.third.map(row=>row.map(z=>sum(...z)))};
+}
+/** The prepared trap of the ground state `label` (SPEC §1.3): the trap light's potential V (`trapForm`), its centre --
+ * the minimum the descent from the focus reaches, here by Newton's steps on the analytic gradient for as long as each is
+ * shorter than the one before (quadratic convergence, down to the rounding) --, and the frequencies along the lab axes
+ * there, ω_a = √((ħ/m) ∂_a²V) (rad/µs). Returns the beams, the centre (µm), V's depth below the far level at the focus
+ * and at the centre (rad/µs), ω and its uncertainty u, a bound of what a double-precision evaluation leaves open:
+ * - the rounding of ∂_a²V's evaluation (the arithmetic's own bound) and of ω's from it (ħ/m, the product, the root and
+ *   the conversion to kHz: six operations);
+ * - the centre: a descent ends where V no longer falls, and V is resolved to its rounding η only, so that every point
+ *   with V within η of its least value is the centre as well as any other -- within |δr| ≤ √(2η/λ) of the minimum, λ
+ *   the Hessian's least eigenvalue (no less than min_a(H_aa − Σ_b≠a |H_ab|), Gershgorin), plus the |∇V|'s rounding over
+ *   λ by which this evaluation's own zero of the gradient is off; over that ball ∂_a²V changes by at most
+ *   |∇∂_a²V| |δr| (the next order is k|δr| of it, k the light's wave number). Where the centre is the focus by
+ *   symmetry, ∇∂_a²V = 0 and nothing of it remains. */
+export function preparedTrap(line,label){
+  const form=trapForm(line,label),real=z=>z.re;
+  let centre=[0,0,0],at=trapAt(form,centre),last=Infinity;
+  const focus=-at.value.re;
+  for(;;){
+    const step=solve3(at.hessian.map(row=>row.map(real)),at.gradient.map(z=>-z.re)),size=Math.hypot(...step);
+    if(!(size<last))break;
+    last=size;centre=centre.map((x,a)=>x+step[a]);at=trapAt(form,centre);
+  }
+  const H=at.hessian.map(row=>row.map(real)),least=Math.min(...H.map((row,a)=>row[a]-row.reduce((s,x,b)=>s+(b===a?0:Math.abs(x)),0)));
+  if(!(least>0))throw new Error(`${line.id}: the trap light's potential of ${label} has no minimum where its descent from the focus ends`);
+  const off=Math.sqrt(2*bound(at.value)/least)+Math.hypot(...at.gradient.map(bound))/least,omegas=H.map((row,a)=>Math.sqrt(hbarOverMass(line.model.motion.massKg)*row[a]));
+  return {beams:form.beams,centre,focus,depth:-at.value.re,omegas,
+    u:omegas.map((w,a)=>w*((bound(at.hessian[a][a])+Math.hypot(...at.third[a].map(real))*off)/(2*H[a][a])+roundoff(6)))};
+}
+/** A x = b for a complex n × n matrix (rows of {re, im}): Gauss–Jordan elimination with partial pivoting. */
+function solveComplex(A,b){
+  const n=b.length,M=A.map((row,i)=>[...row.map(z=>({re:z.re,im:z.im})),{re:b[i].re,im:b[i].im}]);
+  for(let c=0;c<n;c++){
+    let p=c;for(let r=c+1;r<n;r++)if(Math.hypot(M[r][c].re,M[r][c].im)>Math.hypot(M[p][c].re,M[p][c].im))p=r;
+    [M[c],M[p]]=[M[p],M[c]];const d=M[c][c],dd=d.re*d.re+d.im*d.im;
+    for(let k=c;k<=n;k++){const z=M[c][k];M[c][k]={re:(z.re*d.re+z.im*d.im)/dd,im:(z.im*d.re-z.re*d.im)/dd};}
+    for(let r=0;r<n;r++){const f=M[r][c];if(r===c||(!f.re&&!f.im))continue;for(let k=c;k<=n;k++){const z=M[c][k];M[r][k]={re:M[r][k].re-(f.re*z.re-f.im*z.im),im:M[r][k].im-(f.re*z.im+f.im*z.re)};}}
+  }
+  return M.map(row=>row[n]);
+}
+/** The running trap of the ground state `label` (SPEC §1.3: the reported trap): the trap light's potential with the
+ * other lights' smooth shift of that state, each beam's own intensity, their phases averaged -- in second order of
+ * those lights, from the request alone, for a trap of one beam (y(r) = |a(r)|², its intensity over the focus').
+ *
+ * A beam l of another frequency drives g at ν_l with the couplings x_l = X^l[:, g] into the excited states, whose
+ * Hamiltonian at the intensity y is K(y) = H0_ee + (y − 1) O_ee + y C_ee − (i/2)D: the request's H0 (diagonal: it holds
+ * the trap light's outside form at the focus), the outside form O of the trap beam's field, the excited block of the
+ * trap light's own couplings through the ground states b, C_fe = ½ Σ_b [X_fb conj(X_eb) (1/(E_e − E_b − Δ) +
+ * 1/(E_f − E_b − Δ)) + R_fb conj(R_eb) (1/(E_e − E_b + Δ + 2ω_f) + 1/(E_f − E_b + Δ + 2ω_f))] (co- and counter-rotating;
+ * each excited state read at its own energy), and the decay D = Σ_a C_a†C_a. The ground state sits at
+ * E_g(y) = E_g + y s_g − O_gg, s_g = V_prep at the focus (`trapForm`: outside and couplings). The atom at rest that
+ * absorbs a photon of beam l moves with ħk_l: the excited states stand ħk_l²/2m higher. So
+ *   U(y) = −Σ_l Re[x_l† M_l(y)⁻¹ x_l],  M_l(y) = K(y) + ħk_l²/2m − E_g(y) − ν_l,
+ * which for one excited level alone is |X|²δ/(δ² + Γ²/4), δ the light's detuning from the line. The trap light does
+ * not only move the excited levels: its C and O couple those of one m across the hyperfine levels (10 to 25 MHz
+ * against splittings of 72 to 267 MHz in the references' tweezers), so the levels and the couplings x_l change
+ * together and neither is linear in y: the matrix is kept whole. V_run = s_g y + U(y) is a function of y alone, whose
+ * gradient vanishes at the focus, so there ∂²V_run = (s_g + U′(1)) ∂²y = ∂²V_prep (1 + U′(1)/s_g) with
+ *   U′(1) = Σ_l Re[(M_l⁻†x_l)† (O_ee + C_ee − s_g) (M_l⁻¹x_l)]
+ * (dM/dy = dK/dy − dE_g/dy). Returns the prepared trap, that factor, the excited population the lights make in second
+ * order, s = Σ_l ‖M_l⁻¹x_l‖², the running frequencies along the lab axes (rad/µs) and their uncertainty u:
+ * - the prepared trap's (`preparedTrap`);
+ * - the next order of the other lights, which this potential leaves out: for one level far from the light the dressed
+ *   state's shift is (−δ + sgn δ √(δ² + 4|X|²))/2 = |X|²/δ − |X|⁴/δ³ + …, whose derivative with the line's position is
+ *   −|X|²/δ² (1 − 3|X|²/δ² + …): the factor's departure from 1 is uncertain by 3s of itself;
+ * - the solves' rounding: that of each x → M⁻¹x as one step of iterative refinement reads it (‖M⁻¹(x − My)‖/‖y‖),
+ *   of the term it enters. */
+export function runningTrap(line,label){
+  const m=line.model.motion,labels=line.model.states,g=index(line,label),E=frameEnergies(line),of=x=>String(x.frequencyIndex),trap=m.beams.find(x=>x.id===m.trapBeamId),prepared=preparedTrap(line,label);
+  if(m.beams.filter(x=>of(x)===of(trap)).length!==1)throw new Error(`${line.id}: the running trap is written for a trap of one beam`);
+  const ground=labels.map((_,i)=>i).filter(i=>labels[i].startsWith('ground-')),ex=labels.map((_,i)=>i).filter(i=>!labels[i].startsWith('ground-'));
+  const add=(a,b)=>({re:a.re+b.re,im:a.im+b.im}),mul=(a,b)=>({re:a.re*b.re-a.im*b.im,im:a.re*b.im+a.im*b.re}),conj=a=>({re:a.re,im:-a.im}),times=(a,s)=>({re:a.re*s,im:a.im*s}),norm=v=>Math.hypot(...v.flatMap(z=>[z.re,z.im]));
+  const O=m.outsideForms.find(x=>of(x)===of(trap)).matrices,F=trap.electricField,delta=frameDetuning(line,trap.id),frame=e=>2*RAD_PER_MHZ*(m.frameFrequenciesMHz[e]-m.frameFrequenciesMHz[g]);
+  // The outside form on a pair of states in the trap beam's field (`trapForm`'s, off the diagonal too).
+  const outside=(i,j)=>{let z={re:0,im:0};
+    for(let p=0;p<3;p++)for(let q=0;q<3;q++){const at=3+2*(p+q-1);let form=entry(O[q],i,j);
+      if(p!==q){const X=entry(O[at],i,j),Y=entry(O[at+1],i,j);form=times(add(X,times({re:-Y.im,im:Y.re},p<q?-1:1)),0.5);}
+      z=add(z,mul(mul(conj(F[p]),F[q]),form));}
+    return z;};
+  const C=ex.map(f=>ex.map(e=>{let z={re:0,im:0};
+    for(const b of ground){const xf=entry(trap.coupling,f,b),xe=entry(trap.coupling,e,b),rf=entry(trap.counterCoupling,f,b),re=entry(trap.counterCoupling,e,b);
+      z=add(z,times(mul(xf,conj(xe)),0.5*(1/(E[e]-E[b]-delta)+1/(E[f]-E[b]-delta))));
+      z=add(z,times(mul(rf,conj(re)),0.5*(1/(E[e]-E[b]+delta+frame(e))+1/(E[f]-E[b]+delta+frame(f)))));}
+    return z;}));
+  const D=ex.map(f=>ex.map(e=>{let z={re:0,im:0};for(const c of m.emission)for(const b of ground)z=add(z,mul(conj(entry(c,b,f)),entry(c,b,e)));return z;}));
+  const sg=-prepared.focus,ground0=E[g]+sg-outside(g,g).re,slopeOf=ex.map((f,i)=>ex.map((e,j)=>add(add(C[i][j],outside(f,e)),{re:i===j?-sg:0,im:0})));
+  let derivative=0,population=0,rounding=0;
+  for(const b of m.beams.filter(x=>of(x)!==of(trap))){
+    const x=ex.map(e=>entry(b.coupling,e,g));if(!norm(x))continue;
+    const level=frameDetuning(line,b.id)+ground0-recoilRate(b.waveNumberPerUm,m.massKg);
+    const M=ex.map((e,i)=>ex.map((_,j)=>add(add(C[i][j],{re:i===j?E[e]-level:0,im:0}),{re:D[i][j].im/2,im:-D[i][j].re/2}))),Mh=ex.map((_,i)=>ex.map((_,j)=>conj(M[j][i])));
+    const solved=A=>{const y=solveComplex(A,x),rest=x.map((z,i)=>A[i].reduce((t,a,j)=>add(t,times(mul(a,y[j]),-1)),z));return {y,error:norm(solveComplex(A,rest))/norm(y)};};
+    const right=solved(M),left=solved(Mh);
+    const term=ex.reduce((t,_,i)=>t+ex.reduce((q,_,j)=>q+mul(mul(conj(left.y[i]),slopeOf[i][j]),right.y[j]).re,0),0);
+    derivative+=term;population+=norm(right.y)**2;rounding+=(right.error+left.error)*Math.abs(term);
+  }
+  const factor=1+derivative/sg,uFactor=3*population*Math.abs(factor-1)+rounding/Math.abs(sg),omegas=prepared.omegas.map(w=>w*Math.sqrt(factor));
+  return {prepared,factor,population,omegas,u:omegas.map((w,a)=>Math.hypot(prepared.u[a]*Math.sqrt(factor),w*uFactor/(2*factor)))};
+}
+/** The thermal harmonic oscillator's Wigner temperature T* = (ħω/2k_B) coth(ħω/2k_BT) (µK) at ω (rad/µs), T (µK). */
+export function wignerTemperature(omega,T){const h=omega/(2*KT_PER_UK*T);return h>1e-8?T*h/Math.tanh(h):T;}
+
+/** The lowered isothermal's classical kinetic temperature over T, T_kin/T = I(5/2)/I(3/2), I(s) = ∫ d³r K(s, y(r)), y the
+ * depth below the far level in k_BT at r (SPEC §2.5; old ensemble.rs): at r the bound momenta's weight is K(3/2, y) and
+ * their kinetic energy K(5/2, y)·k_BT·Γ(5/2)/Γ(3/2) = (3/2)K(5/2, y)k_BT, so ⟨KE⟩ = (3/2)k_BT I(5/2)/I(3/2) and
+ * T_kin = (2/3)⟨KE⟩/k_B. `depth(r)` gives y; `measure` integrates over space (see beamMeasure, latticeMeasure). */
+export function kineticRatio(measure){
+  const top=measure(y=>lowered(2.5,y,measure.shift)),bottom=measure(y=>lowered(1.5,y,measure.shift));return top/bottom;
+}
+/** The space integral ∫ d³r F(y(r)) for a single Gaussian beam of peak depth y₀ (k_BT units): with u = 2ρ²/w(z)² the
+ * radial integral is (π w(z)²/2) ∫_0^{y_z} F(t) dt/t, y_z = y₀/(1 + z²/z_R²); with z = z_R tan θ the axial one is
+ * (π w₀² z_R/2) ∫ sec⁴θ G(y₀ cos²θ) dθ over (−π/2, π/2), whose integrand ~ cos^{2s−2}θ at the ends (finite); `n` panels
+ * of n nodes along the axis and 2n nodes across (a coarser n reads the quadrature's error). */
+export function beamMeasure(y0,n=24){
+  const m=F=>{
+    const G=Y=>{if(!(Y>0))return 0;let s=0;const lo=Math.max(Y*1e-12,1e-300);
+      // ∫_0^Y F(t)/t dt with t = Y e^{−v}, v ∈ (0, ln(Y/lo)): F(t)/t dt = F(t) dv.
+      const V=Math.log(Y/lo);for(const [v,w] of gaussLegendre(2*n,0,Math.min(V,6)))s+=w*F(Y*Math.exp(-v));
+      if(V>6)for(const [v,w] of gaussLegendre(2*n,6,V))s+=w*F(Y*Math.exp(-v));return s;};
+    return integrate(th=>{const c=Math.cos(th);return G(y0*c*c)/(c*c*c*c);},-Math.PI/2,Math.PI/2,{panels:n,n});
+  };
+  m.shift=y0;return m;
+}

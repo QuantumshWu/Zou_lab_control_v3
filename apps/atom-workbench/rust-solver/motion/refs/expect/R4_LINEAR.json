@@ -1,0 +1,153 @@
+{
+ "id": "R4_LINEAR",
+ "reference": "R4",
+ "title": "R4 西西弗斯标度律：T(4I) − 3T(2I) + 2T(I) = 0（lin⊥lin 稳态 T_z 对光强线性；不检验斜率与 T 本身）",
+ "kind": "relation",
+ "members": [
+  {
+   "id": "R4_LIN_1",
+   "request": "scenes/R4_LIN_1.json",
+   "durationUs": 1600,
+   "samples": 101,
+   "window": [
+    67,
+    100
+   ]
+  },
+  {
+   "id": "R4_LIN_2",
+   "request": "scenes/R4_LIN_2.json",
+   "durationUs": 800,
+   "samples": 101,
+   "window": [
+    67,
+    100
+   ]
+  },
+  {
+   "id": "R4_LIN_4",
+   "request": "scenes/R4_LIN_4.json",
+   "durationUs": 400,
+   "samples": 101,
+   "window": [
+    67,
+    100
+   ]
+  }
+ ],
+ "quantity": "T",
+ "axis": "z",
+ "coefficients": [
+  2,
+  -3,
+  1
+ ],
+ "scale": 2,
+ "value": 0,
+ "u": {
+  "relative": 0.07526277930452788
+ },
+ "target": null,
+ "derivation": "k_BT = c·ħΩ²/|δ| + O(E_rec) at |δ| ≫ Γ and low saturation: at one detuning T is linear in the intensity, so T(4I) − 3T(2I) + 2T(I) = 0 for the steady states of three scenes that differ in the intensity alone. Tested: that the steady T_z rises with I and is an affine function of it, the second difference zero within z·√(SE² + u²) (no user's target: D is no temperature). Not tested: the slope c, the offset, T itself -- every T = a + bI with b > 0 passes, so does a deficit of T that keeps it affine in I.",
+ "conditions": [
+  {
+   "what": "δ from the cycle’s line in the trap / Γ",
+   "value": -20.000369973166872
+  },
+  {
+   "what": "(Γ/2δ)²",
+   "value": 0.0006249768773186802,
+   "limit": "≪ 1"
+  },
+  {
+   "what": "largest excited population in the lowest light-shift potential, at I, 2I, 4I",
+   "value": [
+    0.01496695697889908,
+    0.029933913957798146,
+    0.059867827915596285
+   ],
+   "limit": "≪ 1"
+  },
+  {
+   "what": "the lowest light-shift potential’s modulation over E_rec, at I, 2I, 4I",
+   "value": [
+    216.27554125753497,
+    432.55108359820287,
+    865.1021715289367
+   ],
+   "limit": "≫ 100"
+  },
+  {
+   "what": "that modulation U (µK), at I, 2I, 4I",
+   "value": [
+    39.140655282501626,
+    78.28131076102419,
+    156.56262230613194
+   ]
+  },
+  {
+   "what": "Ω_osc τ_p, at I, 2I, 4I: oscillations in the light’s wells between two pumpings",
+   "value": [
+    41.15072088956392,
+    29.09795379181088,
+    20.57536044495
+   ],
+   "limit": "≫ 1"
+  },
+  {
+   "what": "pumping times over the run, at I, 2I, 4I",
+   "value": [
+    40.77832369268502,
+    40.77832369257179,
+    40.77832369234565
+   ]
+  },
+  {
+   "what": "photons scattered over the run, at I, 2I, 4I",
+   "value": [
+    767.6190105259184,
+    767.619010529654,
+    767.6190105371255
+   ]
+  },
+  {
+   "what": "(ω_z/Ω_osc)² at I: the tweezer against the oscillation in the light’s wells",
+   "value": 0.014769974511612905,
+   "limit": "≪ 1"
+  },
+  {
+   "what": "ħω_z/k_B (µK)",
+   "value": 0.9735753855319553
+  },
+  {
+   "what": "κ = δ_LS(0)/U₀ (the line’s shift over the cloud is κk_BT)",
+   "value": 1.1059461375993092
+  },
+  {
+   "what": "u from the scenes (relative to T(4I))",
+   "value": 0.07526277930452788
+  }
+ ],
+ "requirements": [
+  "classical: every output of the window is one the result calls classical, in every member",
+  "steady: T̄ over the window’s two halves equal within twice their standard errors, in every member",
+  "a rise: T̄(4I) − T̄(I) beyond twice its standard error (a fall beyond it fails)"
+ ],
+ "info": {
+  "k": 8.052823800669486,
+  "kappa": 1.1059461375993092,
+  "deltaRadPerUs": -762.3399997323784,
+  "trapZ": 0.12746081963953265,
+  "hbarOverMass": 0.0007307375228700509,
+  "modulationUK": [
+   39.140655282501626,
+   78.28131076102419,
+   156.56262230613194
+  ],
+  "intensities": [
+   40,
+   80,
+   160
+  ]
+ }
+}

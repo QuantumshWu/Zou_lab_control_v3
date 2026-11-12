@@ -3,10 +3,10 @@ import {POPULATION_TOLERANCE} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
 import {MOTION_AXES} from './motion.js';
 /** The semiclassical 3D motion's population accuracy target (absolute): its trajectories are run
- * until each sample's total estimated error lies within it (rust-solver/motion-3d solve.rs). */
+ * until each sample's total estimated error lies within it (rust-solver/motion units.rs `POPULATION_TARGET`). */
 export const SEMICLASSICAL_POPULATION_TARGET=0.05;
 /** The semiclassical 3D motion's validated regime: k_B T ≥ SEMICLASSICAL_REGIME ħω on every axis
- * (rust-solver/motion-3d solve.rs CLASSICAL); its result marks each sample (`classical`). */
+ * (rust-solver/motion units.rs `CLASSICAL`); its result marks each sample (`classical`). */
 export const SEMICLASSICAL_REGIME=4;
 /** A trajectory's estimated population error (ui-design.md §6.16). Every computed trajectory is
  * shown: 'estimated-converged' when every sample's bound is within the requested tolerance ε,
@@ -73,8 +73,8 @@ export interface Distributions {grid:number[];samples:number[];probabilities:num
 /** A target's a-priori total in a motion solve's ledger, at the output where it takes most of the target, and the target there. */
 export interface LedgerTotal {error:number;target:number}
 /** A motion solve's approximation ledger (`diagnostics.approximations`): the a-priori totals of the
- * populations and of T, and each approximation -- what it is, its estimated error (its largest over the outputs) and
- * what the engine did about it; `flagged`, when present, says where an output's total error exceeds a target,
+ * populations and of T, and each approximation, from the largest down -- what it is, its estimated error (its largest
+ * over the outputs) and what the engine did about it; `flagged`, when present, says where an output's total error exceeds a target,
  * shown as the validated regime is (a reference only). */
 export interface ApproximationLedger {totals:{population:LedgerTotal;temperature:LedgerTotal};items:{label:string;estimate:number;action:string}[];flagged?:string;note?:string}
 /** The motion of a motion result (ui-design.md §6.20): a single atom in the tweezer moving in 3D,
@@ -95,7 +95,7 @@ export interface MotionResult {
   device:MotionDevice;deviceNote?:string;approximations:ApproximationLedger;
 }
 /** The motion block of a result on the grid `timesUs` and the motion entries of its diagnostics,
- * read strictly (rust-solver/src/motion3d_adapter.rs). */
+ * read strictly (rust-solver/src/motion_adapter.rs). */
 export function readMotionResult(value:unknown,diagnostics:Record<string,unknown>,timesUs:readonly number[]):MotionResult {
   const invalid=():never=>{throw new Error('Invalid motion result');};
   const samples=timesUs.length;
@@ -133,6 +133,8 @@ export function readMotionResult(value:unknown,diagnostics:Record<string,unknown
   const totals=object(ledger.totals,['population','temperature']);
   const total=(v:unknown):LedgerTotal=>{const t=object(v,['error','target']);return {error:size(t.error),target:size(t.target)};};
   const items=Array.isArray(ledger.items)?ledger.items.map(item=>{const i=object(item,['label','estimate','action']);return {label:text(i.label),estimate:size(i.estimate),action:text(i.action,true)};}):invalid();
+  // From the largest down (rust-solver/motion/src/ledger.rs `Ledger::close`): the order the details page lists them in.
+  if(items.some((item,i)=>i>0&&item.estimate>items[i-1]!.estimate))invalid();
   return {temperatureUK:perAxis(m.temperatureUK,v=>series(v,samples,x=>x>=0)),temperatureErrorUK:perAxis(m.temperatureErrorUK,errors),
     temperatureTotalUK:series(m.temperatureTotalUK,samples,x=>x>=0),temperatureTotalErrorUK:errors(m.temperatureTotalErrorUK),
     meanOccupation:perAxis(m.meanOccupation,v=>series(v,samples,()=>true)),trapFrequencyKHz:perAxis(m.trapFrequencyKHz,v=>typeof v==='number'&&Number.isFinite(v)&&v>0?v:invalid()),

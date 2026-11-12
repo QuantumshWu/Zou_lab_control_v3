@@ -27,8 +27,6 @@ export interface MotionRequest {axis:'3d';temperatureUK:number}
 export function motionRequest(settings:Pick<DynamicsSettings,'motion'>):MotionRequest|undefined{
   const motion=settings.motion;return motion.enabled?{axis:'3d',temperatureUK:motion.temperatureUK}:undefined;
 }
-/** A solve with these settings asks for the GPU: 运动 on, 计算设备 GPU. */
-export function asksGpu(settings:Pick<DynamicsSettings,'motion'>):boolean{return settings.motion.enabled&&settings.motion.device==='gpu';}
 /** A request's motion as sent: 3D and a finite positive temperature, nothing else. */
 export function readMotionRequest(value:unknown):MotionRequest{
   const m=value as Record<string,unknown>|null;

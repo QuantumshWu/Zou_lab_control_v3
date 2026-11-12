@@ -1,6 +1,6 @@
 /** Experimental browser transport for the existing DynamicsClient protocol.
  * This is a native desktop bridge, NOT a pure-HTML/WASM population solver.
- * Only /api/solve and /api/gpu are intercepted. No historical result cache is maintained. */
+ * Only /api/solve is intercepted. No historical result cache is maintained. */
 export function installNativeFetch({worker,postNative,originalFetch=globalThis.fetch?.bind(globalThis),timeoutMs=120000,shutdownTimeoutMs=500}){
  if(!worker?.postMessage||!worker?.addEventListener||!worker?.terminate||typeof postNative!=='function')throw new TypeError('Native fetch requires a Worker and native bridge');
  if(!Number.isFinite(timeoutMs)||timeoutMs<=0||!Number.isFinite(shutdownTimeoutMs)||shutdownTimeoutMs<=0)throw new TypeError('Invalid native fetch timeout');
@@ -74,8 +74,7 @@ export function installNativeFetch({worker,postNative,originalFetch=globalThis.f
   let url,request;
   try{url=new URL(input instanceof Request?input.url:String(input),globalThis.location?.href??'http://127.0.0.1:4180/');}
   catch(error){return Promise.reject(error);}
-  const gpu=url.pathname==='/api/gpu';
-  if(url.pathname!=='/api/solve'&&!gpu)return originalFetch?originalFetch(input,init):Promise.reject(new TypeError('No fallback fetch is available.'));
+  if(url.pathname!=='/api/solve')return originalFetch?originalFetch(input,init):Promise.reject(new TypeError('No fallback fetch is available.'));
   if(phase!=='active')return Promise.reject(aborted('The native fetch adapter is closed.'));
   try{request=input instanceof Request?new Request(input,init):new Request(url,init);}
   catch(error){return Promise.reject(error);}
@@ -85,8 +84,6 @@ export function installNativeFetch({worker,postNative,originalFetch=globalThis.f
    job.abort=()=>fail(job,aborted());pending.set(job.channel,job);
    if(job.signal.aborted){fail(job,aborted());return;}
    job.signal.addEventListener('abort',job.abort,{once:true});
-   // The GPU's start has no deadline: the driver's first compile takes minutes on a loaded machine.
-   if(gpu){job.dispatched=true;worker.postMessage({kind:'gpu',channel:job.channel});return;}
    job.timer=setTimeout(()=>fail(job,expired()),timeoutMs);
    void request.text().then(text=>{
     if(!isCurrent(job)||phase!=='active')return;let body;

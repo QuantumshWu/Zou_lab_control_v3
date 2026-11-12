@@ -1,0 +1,205 @@
+{
+ "id": "CONTROL_CYCLE",
+ "reference": "regress",
+ "kind": "regression-anchor",
+ "title": "旧门 CONTROL_CYCLE 的真值（线头 7231b1e9 的模型 all-folded 2nd [1+1+1+1+1+1+1+1] 收敛值）",
+ "request": "out/regress/CONTROL_CYCLE.json",
+ "durationUs": 300,
+ "samples": 31,
+ "derivation": "The old engine's own model at its line head, run to convergence (gate/truth/README.md): a regression value, not a physical one. u = hypot(SE, last step-halving residual).",
+ "excluded": null,
+ "series": [
+  {
+   "quantity": "T",
+   "axis": "x",
+   "indices": [
+    3,
+    15,
+    30
+   ],
+   "values": [
+    30.988005735195475,
+    28.880020953013855,
+    28.31622855917056
+   ],
+   "u": [
+    0.2491534181502092,
+    0.29167867590611807,
+    0.34136156659332095
+   ],
+   "weights": [
+    1,
+    1,
+    1
+   ],
+   "judged": [
+    true,
+    true,
+    true
+   ],
+   "target": {
+    "relative": 0.1
+   }
+  },
+  {
+   "quantity": "T",
+   "axis": "y",
+   "indices": [
+    3,
+    15,
+    30
+   ],
+   "values": [
+    30.003267000469318,
+    33.48335719950945,
+    37.33493038705245
+   ],
+   "u": [
+    0.2546155989139112,
+    0.40044568037426864,
+    0.48998117961572585
+   ],
+   "weights": [
+    1,
+    1,
+    1
+   ],
+   "judged": [
+    true,
+    true,
+    true
+   ],
+   "target": {
+    "relative": 0.1
+   }
+  },
+  {
+   "quantity": "T",
+   "axis": "z",
+   "indices": [
+    3,
+    15,
+    30
+   ],
+   "values": [
+    33.93022203814799,
+    39.215092996744424,
+    40.36914569877013
+   ],
+   "u": [
+    0.2697696142191813,
+    0.39135416014951824,
+    0.5052303199560384
+   ],
+   "weights": [
+    1,
+    1,
+    1
+   ],
+   "judged": [
+    true,
+    true,
+    true
+   ],
+   "target": {
+    "relative": 0.1
+   }
+  },
+  {
+   "quantity": "loss",
+   "indices": [
+    3,
+    15,
+    30
+   ],
+   "values": [
+    0.053679435483870996,
+    0.2202620967741935,
+    0.41192036290322576
+   ],
+   "u": [
+    0.0024196327504540697,
+    0.004544190831389641,
+    0.00508798791663486
+   ],
+   "judged": [
+    true,
+    true,
+    true
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "ground-2-2",
+   "indices": [
+    3,
+    15,
+    30
+   ],
+   "values": [
+    0.9857229080385309,
+    0.9866139616596211,
+    0.9872708005755564
+   ],
+   "u": [
+    0.00005856158108861188,
+    0.000060454897864615455,
+    0.00006822739608572254
+   ],
+   "judged": [
+    true,
+    true,
+    true
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  },
+  {
+   "quantity": "population",
+   "state": "D2-3-3",
+   "indices": [
+    3,
+    15,
+    30
+   ],
+   "values": [
+    0.014277091961469344,
+    0.013386038340379233,
+    0.012729199424444176
+   ],
+   "u": [
+    0.00005856158108864571,
+    0.00006045489786453451,
+    0.00006822739608564721
+   ],
+   "judged": [
+    true,
+    true,
+    true
+   ],
+   "target": {
+    "absolute": 0.05
+   }
+  }
+ ],
+ "info": {
+  "lineHead": {
+   "reachUk": null,
+   "commit": "7231b1e9",
+   "record": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/baseline/7231b1e9/CONTROL_CYCLE.json",
+   "model": "all-folded 2nd [1+1+1+1+1+1+1+1]",
+   "dt": 1.25,
+   "stepsPerInterval": 8
+  },
+  "truthLevel": {
+   "steps": 64,
+   "dt": 0.15625,
+   "N": 7936
+  },
+  "converged": true
+ }
+}

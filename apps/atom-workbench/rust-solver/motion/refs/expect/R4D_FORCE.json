@@ -1,0 +1,29 @@
+{
+ "id": "R4D_FORCE",
+ "reference": "R4",
+ "title": "R4D 沿给定路径的平均力（摩擦）：引擎对它自己模型的主方程",
+ "kind": "tool",
+ "tool": {
+  "command": "node r4d.mjs force",
+  "scene": "R4_TW2",
+  "velocities": [
+   0.2,
+   0.1,
+   0.07,
+   0.05,
+   0.035,
+   0.02,
+   0.01
+  ],
+  "trajectories": 8192,
+  "spanUs": 400,
+  "tauUs": 0.15625
+ },
+ "derivation": "An atom carried at a constant velocity v along z through R4_TW2's light in the uniform configuration (the tweezer's waist 2000 µm: the same light at the focus, nothing changing along the path but the cooling light's own pattern). Exact: the master equation of the engine's closed model at the atom's momentum, its periodic steady state by harmonic balance (diffusion/ref.py), F(v) = the period's mean of Tr 𝓕[ρ]. Engine: trajectories held on the same path (diffusion engine), the mean drift of their momentum after a burn-in. The Ehrenfest force drops only a traceless part of 𝓕[|ψ⟩⟨ψ|], so the two are equal: judged, F_engine − F_exact against the trajectories' standard error and the harmonic balance's truncation (check.mjs, rule 0: the count beyond 2σ and the mean deviation). The momentum diffusion of the same runs is printed and not judged: the engine's is above exact at low velocity (the slow part of the force's correlation; R4D_TW2 reports what it does to T).",
+ "conditions": [
+  {
+   "what": "thermal v_rms at 30 µK (µm/µs)",
+   "value": 0.05357286747233984
+  }
+ ]
+}
