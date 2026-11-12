@@ -258,8 +258,10 @@ impl Model {
     /// The near light's elimination at a far Hamiltonian `h` (its jet) and the near beams' amplitudes (module documentation): per
     /// lit carrier, basis vector of its field and cluster ground place its responses T_k and T2_k (`Responses`) -- every carrier's
     /// dressing of the ground states, the self-energy of the folded channels to the other clusters' ground states, one factorization
-    /// per ground place.
-    pub(crate) fn eliminate(&self, cluster: usize, h: &[Mat], amplitudes: &[Amplitude], lights: &Lights, order: usize, coherent: &[bool]) -> Responses {
+    /// per ground place. Of the ground places `places` takes: a place's responses are its own factorization's, whatever
+    /// the others' (one not taken is left zero).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn eliminate(&self, cluster: usize, h: &[Mat], amplitudes: &[Amplitude], lights: &Lights, order: usize, coherent: &[bool], places: &dyn Fn(usize) -> bool) -> Responses {
         let np = jet::parts(order);
         let c = &self.clusters[cluster];
         let g = c.ground;
@@ -344,7 +346,7 @@ impl Model {
             }
             let zeros = || -> Vec<Vec<Mat>> { (0..n).map(|_| (0..np).map(|_| Mat::zeros(EXCITED, g)).collect()).collect() };
             let (mut out, mut out2) = (zeros(), zeros());
-            for (pb, &b) in c.states[..g].iter().enumerate() {
+            for (pb, &b) in c.states[..g].iter().enumerate().filter(|of| places(of.0)) {
                 let mut z = dressed(b, Some(ci));
                 z[0] += carrier.detuning;
                 let mut m = shifted(&k, &z);

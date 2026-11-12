@@ -189,7 +189,7 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
     // The elimination at the middle with its gradient: a frequency's coupling on its field (its every folded drive's, those
     // folded at the atom alone, or as it is) and its response on the path.
     let far = model.far_hamiltonian(&amplitudes, &lights, 1, &model.coherent_dressing());
-    let responses = model.eliminate(cluster, &far, &amplitudes, &lights, 1, &model.coherent_dressing());
+    let responses = model.eliminate(cluster, &far, &amplitudes, &lights, 1, &model.coherent_dressing(), &|_| true);
     let coupling = |frequency: usize, basis: &[Mat], e: usize, b: usize| -> Jet { (0..basis.len()).fold(NONE, |sum, k| plus(sum, scaled(field(frequency, k, false), leaf(basis[k][(e, b)])))) };
     let folded = |frequency: usize, e: usize, b: usize| coupling(frequency, &model.tones[frequency].coupled[0], e, b);
     let response = |frequency: usize, e: usize, y: usize| -> Jet {

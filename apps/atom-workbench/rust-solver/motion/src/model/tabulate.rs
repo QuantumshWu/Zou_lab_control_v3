@@ -347,10 +347,10 @@ impl Model {
         let near = self.light_at(lights, &layout.coordinates, &layout.polarizations, x);
         let coherent = self.coherent_dressing();
         let h = self.far_hamiltonian(&near, lights, 0, &coherent);
-        let r = self.eliminate(layout.cluster, &h, &near, lights, 0, &coherent);
+        let r = self.eliminate(layout.cluster, &h, &near, lights, 0, &coherent, &|_| true);
         let energies = vec![(0..STATES).map(|s| h[0][(s, s)].re).collect::<Vec<f64>>()];
         let mut values = vec![C64::ZERO; plan.near.len()];
-        self.forms(plan, &r, &energies, &mut values);
+        self.forms(plan, &r, &energies, &mut values, &|_| true);
         let (forms, point) = out.split_at_mut(2 * values.len());
         for (pair, z) in forms.chunks_mut(2).zip(&values) {
             pair.copy_from_slice(&[z.re, z.im]);

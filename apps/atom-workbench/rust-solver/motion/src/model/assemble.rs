@@ -212,7 +212,7 @@ impl NearLayout {
     }
 }
 
-/// The near forms at a point over the entries before `len` (zero outside the sections evaluated), to an order, and the complex
+/// The near forms at a point over the entries before `len` (zero outside the sections and the places evaluated), to an order, and the complex
 /// multiply-adds that made them: jets in the position (jet.rs: `data[part * len + entry]`), or, from a table, the values and to
 /// first order their slopes along its axes, whose coordinates' gradients are `directions` (`data[(1 + f) * len + entry]` =
 /// ∂v/∂s_f).
@@ -1610,11 +1610,15 @@ impl Model {
 
     /// A plan's near forms from the elimination's responses and the constant forms' energies (jets, [part][state]), into
     /// `out[part * len + entry]` (module documentation, # Near forms); and their complex multiply-adds (per part each pair's two
-    /// sums and its partner's, each jump's two, each shift's two per ground state).
-    pub(crate) fn forms(&self, plan: &Plan, responses: &Responses, energies: &[Vec<f64>], out: &mut [C64]) -> f64 {
+    /// sums and its partner's, each jump's two, each shift's two per ground state). The forms of the ground places
+    /// `places` takes -- those the responses were made of (eliminate.rs `Model::eliminate`): a form that reads another
+    /// place's response is left as `out` holds it.
+    pub(crate) fn forms(&self, plan: &Plan, responses: &Responses, energies: &[Vec<f64>], out: &mut [C64], places: &dyn Fn(usize) -> bool) -> f64 {
         let cluster = &self.clusters[plan.cluster];
         let states = &cluster.states;
         let (near, len) = (&plan.near, plan.near.len());
+        // The pairs and the jumps made, a part's.
+        let (pairs, jumps) = (near.pairs.iter().filter(|pair| places(pair[4]) && places(pair[5])).count(), near.jumps.iter().filter(|jump| places(jump[4])).count());
         // A frequency's carrier; one that is none has no response at the atom.
         let carriers: Vec<Option<usize>> = (0..self.tones.len()).map(|w| self.carrier_of(w)).collect();
         let none = Mat::zeros(EXCITED, cluster.ground);
@@ -1623,19 +1627,19 @@ impl Model {
             let (first, second) = (|c: usize, k: usize| &responses.first[c][k][part], |c: usize, k: usize| &responses.second[c][k][part]);
             // The fold's one contraction (eliminate.rs `shift`, `jump`) of the legs -- each its frequency's every folded
             // coupling and its response at the point --; a Doppler partner is the absorbed half with −T2 for T.
-            for (i, &[wl, kl, wr, kr, x, y]) in near.pairs.iter().enumerate() {
+            for (i, &[wl, kl, wr, kr, x, y]) in near.pairs.iter().enumerate().filter(|(_, pair)| places(pair[4]) && places(pair[5])) {
                 let (ul, ur) = (&self.tones[wl].coupled[0][kl], &self.tones[wr].coupled[0][kr]);
                 let emitted = Leg { coupling: ul, state: states[x], response: carriers[wl].map_or(&none, |c| first(c, kl)), place: x };
                 let absorbed = Leg { coupling: ur, state: states[y], response: carriers[wr].map_or(&none, |c| first(c, kr)), place: y };
                 out[near.at(Operand::Pair(i))] = shift(emitted, absorbed);
                 out[near.at(Operand::Doppler(i))] = -half(ul, states[x], carriers[wr].map_or(&none, |c| second(c, kr)), y);
             }
-            for (i, &[c, k, a, b, y]) in near.jumps.iter().enumerate() {
+            for (i, &[c, k, a, b, y]) in near.jumps.iter().enumerate().filter(|(_, jump)| places(jump[4])) {
                 out[near.at(Operand::Jump(i))] = jump(&self.emission[a], b, first(c, k), y);
                 out[near.at(Operand::Jump2(i))] = jump(&self.emission[a], b, second(c, k), y);
             }
             let responding = near.responding().start;
-            for (i, &[c, k, e, y]) in near.responses.iter().enumerate() {
+            for (i, &[c, k, e, y]) in near.responses.iter().enumerate().filter(|(_, response)| places(response[3])) {
                 out[responding + i] = first(c, k)[(e, y)];
                 out[responding + near.responses.len() + i] = second(c, k)[(e, y)];
             }
@@ -1646,7 +1650,7 @@ impl Model {
         if near.fourth > 0 {
             let np = energies.len();
             let rates: Vec<(usize, usize, C64)> = (0..EXCITED * EXCITED).map(|i| (i / EXCITED, i % EXCITED, self.decay[(i / EXCITED, i % EXCITED)])).filter(|r| r.2 != C64::ZERO).collect();
-            for (i, &[wl, kl, wr, kr, x, y]) in near.pairs.iter().enumerate() {
+            for (i, &[wl, kl, wr, kr, x, y]) in near.pairs.iter().enumerate().filter(|(_, pair)| places(pair[4]) && places(pair[5])) {
                 let (Some(cl), Some(cr)) = (carriers[wl], carriers[wr]) else { continue };
                 if responses.first[cl].is_empty() || responses.first[cr].is_empty() {
                     continue;
@@ -1704,21 +1708,28 @@ impl Model {
                 out[part * len + near.at(Operand::Shift(i))] = z;
             }
         }
-        (energies.len() * ((3 * near.pairs.len() + 2 * near.jumps.len()) * EXCITED + 2 * GROUND * near.shifts.len())) as f64 + fourth as f64 * 3.0 * jet::product_work(energies.len())
+        (energies.len() * ((3 * pairs + 2 * jumps) * EXCITED + 2 * GROUND * near.shifts.len())) as f64 + fourth as f64 * 3.0 * jet::product_work(energies.len())
     }
 
     /// A plan's near forms at a point from the exact elimination there, jets to `order`, each carrier's dressing coherent or not as
     /// `coherent` says (eliminate.rs).
     pub(crate) fn near_exact(&self, plan: &Plan, amplitudes: &[Amplitude], order: usize, coherent: &[bool]) -> NearValues {
+        self.near_exact_on(plan, amplitudes, order, coherent, &|_| true)
+    }
+
+    /// `near_exact` of the cluster's ground places `places` takes: the responses from those places alone and the forms
+    /// that read no other's (zero elsewhere) -- what a reader of a few places' forms asks for (the potential: the
+    /// populated states' own shifts). A form made is the same number whichever places are taken with it.
+    pub(crate) fn near_exact_on(&self, plan: &Plan, amplitudes: &[Amplitude], order: usize, coherent: &[bool], places: &dyn Fn(usize) -> bool) -> NearValues {
         let len = plan.near.len();
         let mut data = vec![C64::ZERO; jet::parts(order) * len];
         if len == 0 {
             return NearValues { len, order, data, directions: None, work: 0.0 };
         }
         let h = self.far_hamiltonian(amplitudes, &plan.lights, order, coherent);
-        let responses = self.eliminate(plan.cluster, &h, amplitudes, &plan.lights, order, coherent);
+        let responses = self.eliminate(plan.cluster, &h, amplitudes, &plan.lights, order, coherent, places);
         let energies: Vec<Vec<f64>> = h.iter().map(|m| (0..STATES).map(|s| m[(s, s)].re).collect()).collect();
-        let work = self.forms(plan, &responses, &energies, &mut data);
+        let work = self.forms(plan, &responses, &energies, &mut data, places);
         NearValues { len, order, data, directions: None, work: responses.work + self.far_work(&plan.lights, order, coherent) + work }
     }
 
