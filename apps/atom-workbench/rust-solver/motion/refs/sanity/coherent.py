@@ -76,12 +76,23 @@ def lab_beams(k_um, tilt_deg=4.0, power_mW=1.0, waist_um=1000.0, plate_deg=45.0,
     I = 2 * power_mW / (math.pi * (waist_um * 1e-4) ** 2)
     return [dict(name='probe (lab)', k=k_um * k1, eps=spherical(a.astype(complex)), I=I), dict(name='reflection (lab)', k=-k_um * k1, eps=spherical(e2), I=I)]
 
-def setup(request, field_G=None, offset_MHz=None, s_scale=1.0, depth_scale=1.0, phase_deg=0.0, field_dir=None, reflect=1.0, lab=False):
-    tables = M.app_tables(); shifts = M.light_shifts(tables); p = M.parameters(tables, shifts)
+def setup(request, field_G=None, offset_MHz=None, s_scale=1.0, depth_scale=1.0, phase_deg=0.0, field_dir=None, reflect=1.0, lab=False, magic=False):
+    """`magic`: the dipole-force-fluctuation control -- every excited level's tweezer shift made the ground's, g(r) U_g, plus
+    its own focus value less the ground's as a constant: the excited states feel the ground's trap force (no force
+    difference between the internal states, no DFF), and every transition keeps its detuning at the focus everywhere (so the
+    probe also no longer comes nearer its lines at the trap's edge: that and the DFF are one thing, ħ∇δ)."""
+    tables = M.app_tables()
+    # the tweezer as the request has it: its wavelength, power and waist (model.py's sum over states at that wavelength)
+    tw_ = next(b for b in request['model']['motion']['beams'] if b['id'] == request['model']['motion']['trapBeamId'])
+    lam_nm = 2 * math.pi / tw_['waveNumberPerUm'] * 1e3; w0 = tw_['waistUm']
+    power_mW = tw_['intensityMWcm2'] * math.pi * (w0 * 1e-4) ** 2 / 2
+    shifts = M.light_shifts(tables, wavelength_nm=lam_nm, power_mw=power_mW, waist_um=w0); p = M.parameters(tables, shifts)
+    p = dict(p); p['w0'] = w0; p['zR'] = math.pi * w0 ** 2 / (lam_nm * 1e-3); p['tweezerNm'] = lam_nm; p['tweezerMW'] = power_mW
     mo = request['model']['motion']
     Bvec = np.array(mo['fieldVectorG'], float)
     B = float(np.linalg.norm(Bvec)) if field_G is None else field_G
-    axis = Bvec / np.linalg.norm(Bvec) if field_dir is None else np.array(field_dir, float) / np.linalg.norm(field_dir)
+    # the field's axis: the request's (z where it is zero), or `field_dir`
+    axis = (Bvec / np.linalg.norm(Bvec) if np.linalg.norm(Bvec) > 0 else np.array([0.0, 0.0, 1.0])) if field_dir is None else np.array(field_dir, float) / np.linalg.norm(field_dir)
     Bvec = B * axis
     mt = M.multilevel_tables(shifts, field_G=B)
     # g_F μ_B (MHz/G) of F=2 and F'=3: the tables' Zeeman shift of m = 1 at 1 G (model.py, with g_I)
@@ -105,7 +116,11 @@ def setup(request, field_G=None, offset_MHz=None, s_scale=1.0, depth_scale=1.0, 
     for i in range(5, 12):
         H0[i, i] -= tw * offset_MHz
     diagL = depth_scale * np.array([tw * mt['LSg'][i] for i in gi] + [tw * mt['LSe'][i] for i in ei])
-    p = dict(p); p['U0'] *= depth_scale
+    p['U0'] *= depth_scale
+    if magic:
+        for i in range(5, 12):
+            H0[i, i] += diagL[i] - diagL[0]
+            diagL[i] = diagL[0]
     # Clebsch–Gordan C[q+1, m+2] = <2 m; 1 q | 3 m+q>
     C = np.array([[cg(2, m, 1, q, 3, m + q) if abs(m + q) <= 3 else 0.0 for m in range(-2, 3)] for q in (-1, 0, 1)])
     # the probe beams: of the beams but the tweezer, those on the frequency most of them share (S3: the probe and its
@@ -128,7 +143,7 @@ def setup(request, field_G=None, offset_MHz=None, s_scale=1.0, depth_scale=1.0, 
             beams.append(dict(name=b['name'], k=d * b['waveNumberPerUm'], eps=E / np.linalg.norm(E), I=b['intensityMWcm2']))
     kvec = [b['k'] for b in beams]; eps = [b['eps'] for b in beams]
     s = [s_scale * b['I'] / p['Isat'] * (reflect if i else 1.0) for i, b in enumerate(beams)]
-    return dict(p=p, mt=mt, shifts=shifts, B=B, Bvec=Bvec, reflect=reflect, lab=lab, phase=phase_deg, offset=offset_MHz, sScale=s_scale, depthScale=depth_scale, H0=H0, diagL=diagL, C=C,
+    return dict(p=p, mt=mt, magic=magic, shifts=shifts, B=B, Bvec=Bvec, reflect=reflect, lab=lab, phase=phase_deg, offset=offset_MHz, sScale=s_scale, depthScale=depth_scale, H0=H0, diagL=diagL, C=C,
                 k=np.array(kvec), eps=np.array(eps), s=np.array(s), names=[b['name'] for b in beams], T=mo['temperatureUK'])
 
 @nb.njit(inline='always')
@@ -192,7 +207,7 @@ def force(psi, H, Hb, k, diagL, gx, gy, gz, f):
 
 @nb.njit(parallel=True)
 def run(n_atoms, seed, T_uK, dt, n_steps, every, P, H0, diagL, C, k, eps, Om, noise, still,
-        out_v, out_r, out_alive, out_pop, out_jumps, out_fy, out_loss):
+        out_v, out_r, out_alive, out_pop, out_jumps, out_fy, out_loss, out_flow):
     gamma, w0, zR, U0, hbar_m, uK = P[0], P[1], P[2], P[3], P[4], P[5]
     kT = T_uK * uK; vth = math.sqrt(kT * hbar_m)
     wR = math.sqrt(4 * U0 * hbar_m / w0 ** 2); wA = math.sqrt(2 * U0 * hbar_m / zR ** 2)
@@ -255,6 +270,7 @@ def run(n_atoms, seed, T_uK, dt, n_steps, every, P, H0, diagL, C, k, eps, Om, no
             g, gx, gy, gz = hamiltonian(x, y, z, P, H0, diagL, C, k, eps, Om, H, Hb)
             nrm = 0.0
             for i in range(12): nrm += psi[i].real ** 2 + psi[i].imag ** 2
+            v0x, v0y, v0z = vx, vy, vz
             if nrm < theta:
                 # the jump: its channel q by ||L_q psi||^2, the absorbed beam's noise, the emitted photon's recoil
                 w = np.zeros(3)
@@ -303,8 +319,18 @@ def run(n_atoms, seed, T_uK, dt, n_steps, every, P, H0, diagL, C, k, eps, Om, no
                 theta = M.rnd(st)
                 while theta <= 0.0: theta = M.rnd(st)
                 jumps += 1
+                if alive:
+                    out_flow[a, 3] += 0.5 * (vx * vx - v0x * v0x) / hbar_m; out_flow[a, 4] += 0.5 * (vy * vy - v0y * v0y) / hbar_m
+                    out_flow[a, 5] += 0.5 * (vz * vz - v0z * v0z) / hbar_m; out_flow[a, 11] += 1.0
             force(psi, H, Hb, k, diagL, gx, gy, gz, f)
             fy_acc += f[1]; fy_n += 1
+            if alive and not still:
+                # the light force: all of it but the ground trap's, U0 ∇g; the trap's coupling: its force less the cuts'
+                lx, ly, lz = f[0] - U0 * gx, f[1] - U0 * gy, f[2] - U0 * gz
+                _, cx, _, _ = M.beam(x, 0.0, 0.0, w0, zR); _, _, cy, _ = M.beam(0.0, y, 0.0, w0, zR); _, _, _, cz = M.beam(0.0, 0.0, z, w0, zR)
+                out_flow[a, 0] += dt * vx * lx; out_flow[a, 1] += dt * vy * ly; out_flow[a, 2] += dt * vz * lz
+                out_flow[a, 6] += dt * vx * U0 * (gx - cx); out_flow[a, 7] += dt * vy * U0 * (gy - cy); out_flow[a, 8] += dt * vz * U0 * (gz - cz)
+                out_flow[a, 9] += dt; out_flow[a, 10] += dt * ly
             if not still:
                 vx += 0.5 * dt * hbar_m * f[0]; vy += 0.5 * dt * hbar_m * f[1]; vz += 0.5 * dt * hbar_m * f[2]
                 E = 0.5 * (vx * vx + vy * vy + vz * vz) / hbar_m - U0 * g
@@ -314,17 +340,30 @@ def run(n_atoms, seed, T_uK, dt, n_steps, every, P, H0, diagL, C, k, eps, Om, no
                     out_loss[a, 4] = vx; out_loss[a, 5] = vy; out_loss[a, 6] = vz
     return 0
 
+def flow_summary(F, p):
+    """The held atoms' energy flow per lab axis (µK/µs, over every atom's held time together): the light force's work,
+    the kicks' heat, the trap's coupling from the other axes; their sum; the photons a µs; the mean light force along y
+    (µm/µs²) and over the trap's largest radial restoring acceleration."""
+    held = F[:, 9].sum()
+    if held <= 0: return None
+    rate = lambda c: float(F[:, c].sum() / held / p['uK'])
+    a_max = p['U0'] * p['hbar_m'] * 2 / p['w0'] * math.exp(-0.5)
+    light = [rate(c) for c in (0, 1, 2)]; kick = [rate(c) for c in (3, 4, 5)]; coupling = [rate(c) for c in (6, 7, 8)]
+    push = float(F[:, 10].sum() / held * p['hbar_m'])
+    return dict(heldUs=float(held), light=light, kick=kick, coupling=coupling, net=[light[i] + kick[i] + coupling[i] for i in range(3)],
+                photonsPerUs=float(F[:, 11].sum() / held), pushY=push, pushOverAmax=push / a_max, aMax=a_max)
+
 def simulate(S, atoms, end_us, every_us, dt, noise, seed=12345, still=False):
     p = S['p']
     n_steps = int(round(end_us / dt)); every = int(round(every_us / dt)); n_out = n_steps // every + 1
     out_v = np.zeros((n_out, atoms, 3)); out_r = np.zeros((n_out, atoms, 3)); out_alive = np.zeros((n_out, atoms), np.bool_)
     out_pop = np.zeros((n_out, atoms, 6)); out_jumps = np.zeros((n_out, atoms), np.int64); out_fy = np.zeros((n_out, atoms))
-    out_loss = np.full((atoms, 7), np.nan)
+    out_loss = np.full((atoms, 7), np.nan); out_flow = np.zeros((atoms, 12))
     P = np.array([p['gamma'], p['w0'], p['zR'], p['U0'], p['hbar_m'], p['uK']])
     Om = p['gamma'] * np.sqrt(S['s'] / 2)
     t0 = time.time()
     run(atoms, seed, S['T'], dt, n_steps, every, P, S['H0'], S['diagL'], S['C'], S['k'], S['eps'].astype(np.complex128), Om, noise, still,
-        out_v, out_r, out_alive, out_pop, out_jumps, out_fy, out_loss)
+        out_v, out_r, out_alive, out_pop, out_jumps, out_fy, out_loss, out_flow)
     wall = time.time() - t0
     times = np.arange(n_out) * every * dt
     r = M.summarize('S3C', 'coherent F=2 -> F\'=3 quantum jumps', p, atoms, dt, wall, times, out_v, out_alive)
@@ -339,7 +378,9 @@ def simulate(S, atoms, end_us, every_us, dt, noise, seed=12345, still=False):
     r.update(groundPopulationsF2=pops[:, :5].round(4).tolist(), excited=pops[:, 5].round(4).tolist(), jumpRatePerUs=rate.round(3).tolist(),
              meanForceY_um_per_us2=fy.tolist(), meanY_um=ry.tolist(), noise=noise, fieldG=S['B'], beams=S['names'], s=S['s'].tolist(),
              lostAt=[[round(float(v), 4) for v in row] for row in out_loss if np.isfinite(row[0])],
-             offsetMHz=S['offset'], depthScale=S['depthScale'], phaseDeg=S['phase'], still=still, fieldVectorG=S['Bvec'].tolist(), reflect=S['reflect'], lab=S['lab'])
+             flow=flow_summary(out_flow, p),
+             offsetMHz=S['offset'], depthScale=S['depthScale'], phaseDeg=S['phase'], still=still, fieldVectorG=S['Bvec'].tolist(), reflect=S['reflect'], lab=S['lab'],
+             magic=S['magic'], tweezerNm=p['tweezerNm'], tweezerMW=p['tweezerMW'], depthUK=p['U0'] / p['uK'], excitedShiftsMHz=(S['diagL'][5:] / (2 * math.pi)).tolist())
     return r
 
 def selftest(S):
@@ -370,10 +411,11 @@ def main():
     ap.add_argument('--field-dir', default=None, help="the field along this axis (x, y or z) instead of the request's")
     ap.add_argument('--reflect', type=float, default=1.0, help="the reflection's power over the probe's (R)")
     ap.add_argument('--lab', action='store_true', help="the probe beams from the lab's description (lab_beams), not the request's")
+    ap.add_argument('--magic', action='store_true', help='the excited levels feel the ground trap (no dipole-force fluctuation), their focus detunings kept')
     a = ap.parse_args()
     req = json.load(open(a.request, encoding='utf-8'))
     axes = dict(x=(1, 0, 0), y=(0, 1, 0), z=(0, 0, 1))
-    S = setup(req, a.field, a.offset, a.s_scale, a.depth_scale, a.phase, axes[a.field_dir] if a.field_dir else None, a.reflect, a.lab)
+    S = setup(req, a.field, a.offset, a.s_scale, a.depth_scale, a.phase, axes[a.field_dir] if a.field_dir else None, a.reflect, a.lab, a.magic)
     p = S['p']
     print(f"probe offset {S['offset']:.3f} MHz from the free F=2 -> F'=3 line; field {np.round(S['Bvec'], 4).tolist()} G; R {S['reflect']}; beams {S['names']}: s {np.round(S['s'], 3)}, k {np.round(S['k'], 4).tolist()}; eps {np.round(S['eps'], 4).tolist()}")
     print(f"U0 {p['U0']/p['uK']:.1f} uK, Gamma {p['gamma']:.3f}/us, Isat {p['Isat']:.4f} mW/cm2; detunings at the focus (MHz) |2,m> -> |3',m+q>:")
