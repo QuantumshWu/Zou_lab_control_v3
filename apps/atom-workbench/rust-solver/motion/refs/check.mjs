@@ -27,19 +27,44 @@
 //   interval at z): populations, groups and loss: the result's sampleErrors (the total; of it S is taken as z·SE of
 //   the Bernoulli bound above, no more than the total, the rest systematic); T: S = z·SE, A ⊕ b = the ledger's
 //   totals.temperature.error × T. With the reference's own u the claim is |d| ≤ B, B² = E² + (zu)². Two tests:
-//   (a) the count of outputs with |d| > B against effectively independent outputs. For a stationary Gaussian series
-//       of autocorrelation ρ_k the indicators 1{|r_i| > z} of two outputs k apart have a covariance between 0 and
-//       ρ_k² q(1 − q), q = 2Φ(−z) (Mehler's expansion of the bivariate normal: a two-sided event holds only the even
-//       Hermite orders, each term ∝ ρ^{2m} ≤ ρ², their weights summing to q(1 − q)): the count's variance is at most
-//       that of n_eff = n/(1 + 2Σ_k ρ_k²) independent outputs. ρ_k from the standardized residuals r_i = z d_i/B_i in
-//       time order, about their mean (the tapered sample estimate Σ_i r_i r_{i+k}/Σ_i r_i²); of each ρ_k² only what
-//       exceeds (z/√n)² enters -- the sample autocorrelation of n independent outputs has the standard deviation
-//       1/√n, and what lies within z of it is not told from none. The square holds a residual that oscillates as it
-//       holds one that drifts: the kinetic energy of N atoms in a harmonic trap carries a part at twice the trap
-//       frequency that does not decay (the sample's own breathing, of the size of its standard error), and a sum of ρ_k
-//       to its first sign change, the rule before, took such a series for independent outputs (R3's T_z: 18 of 201
-//       beyond 2σ at "n_eff" 164). The count scaled by n_eff/n; a one-sided binomial test (Bin(n_eff, 2Φ(−z)), the
-//       regularized incomplete beta for non-integer counts) rejects where the tail probability is below Φ(−z);
+//   (a) the count K of outputs with |d| > B against effectively independent outputs. The null: the standardized
+//       residuals r_i = z d_i/B_i (in standard deviations of the claim: beyond is |r_i| > z), in time order, are a
+//       stationary Gaussian series of mean zero, a variance of no more than one, and an autocorrelation ρ_k that the
+//       claim leaves open -- a result states the size of its errors, not what the outputs of one run share. Then
+//       E K ≤ nq, q = 2Φ(−z), and the indicators 1{|r_i| > z} of two outputs k apart have the covariance
+//       q(1 − q)κ(ρ_k), κ(ρ) = (1/π)∫_0^{asin|ρ|} [e^{−z²/(1 + sin θ)} − e^{−z²/(1 − sin θ)}] dθ / q(1 − q) (Plackett:
+//       dP(X > h, Y > k)/dρ is the bivariate density at (h, k); the four corners of the two-sided event, t = sin θ):
+//       even in ρ, 0 at ρ = 0, 1 at |ρ| = 1, 0.54ρ² for small ρ and no more than ρ² (Mehler: a two-sided event holds
+//       only the even Hermite orders) -- a residual that oscillates counts as one that drifts (the kinetic energy of
+//       N atoms in a harmonic trap carries a part at twice the trap frequency that does not decay: the sample's own
+//       breathing, of the size of its standard error). So
+//       Var K = q(1 − q)[n + 2Σ_k (n − k)κ(ρ_k)]: that of n_eff = n/(1 + 2Σ_k (1 − k/n)κ(ρ_k)) independent outputs,
+//       each counted n/n_eff times. The count scaled by n_eff/n; a one-sided binomial test (Bin(n_eff, q), the
+//       regularized incomplete beta for non-integer counts) rejects where the tail probability is below Φ(−z). The
+//       binomial has the null's mean and variance, and is the null's own law at both ends: independent outputs
+//       (n_eff = n), and outputs that are one draw (n_eff = 1: K is n with the probability q and 0 otherwise, and the
+//       tail I_q(K/n, 2 − K/n) is never below q: one event of 4.55 % is no evidence, however many outputs it shows
+//       on). Between the ends the shape is the binomial's, not derived: measured (the end of (b)).
+//       ρ_k is the sample's about ZERO, the null's mean, each lag from its own n − k products:
+//       ρ̂_k = [Σ_i r_i r_{i+k}/(n − k)]/[Σ_i r_i²/n], its square no more than 1; of each ρ̂_k² only what exceeds
+//       z²(1 − ρ̂_k²)²/(n − k) enters -- a correlation from n − k pairs has the standard deviation (1 − ρ²)/√(n − k)
+//       (1/√(n − k) for independent outputs, none for outputs that are one draw), and what lies within z of it is
+//       not told from none. About zero, not about the run's mean: an offset the whole run shares is, under the null,
+//       noise whose correlation time is the run or longer (ρ_k → 1: a held trap conserves each atom's energy, and a
+//       sample's energy is one draw for the run); taken about the run's mean it is removed, the small remainder
+//       decorrelates fast, and the exceedances that one offset causes are counted as so many independent events
+//       (the rule before: over 64 seeds of R10_HELD_ANTINODE, whose reported errors are the seed-to-seed scatter
+//       within 0.96 ± 0.07, the count rejected 10 of the 192 judged T series and the mean deviation 6, with tail
+//       probabilities to 1e-37 for one offset of 1.2 bounds; this rule: 0 and the same 6). The ratio to the series'
+//       own mean square, not to the null's variance: the estimate is of the structure, whatever the size.
+//       What (a) sees: more exceedances than the residual's own structure leaves room for -- errors understated on
+//       outputs that are many draws (noise that decorrelates within the run, a breathing the errors do not state,
+//       populations at separated times). What it cannot see: a residual that is one draw or a few (n_eff → 1) -- any
+//       number of its outputs beyond the bound is one event, and whether that draw is too large is (b)'s question,
+//       for the part common to the run: of a series that is one draw a single run tells an error understated f times
+//       only with the probability 2Φ(−z/f). A slow residual that changes sign within the run is a few draws to (a)
+//       and averages out of (b): it is seen where it is large enough to be more than those few draws allow, or by
+//       rule 1;
 //   (b) the mean deviation d̄ = Σd_i/n against the bound the claims leave it: M² = (mean A⊕b)² + (z·mean u)² +
 //       (mean S)²; rejected where |d̄| > M. Derivation: d_i = a_i + v_i + e_i, three independent sources: the solver's
 //       systematic error (claimed |a_i| ≤ A_i ⊕ b_i; common to the outputs at worst, so |ā| ≤ mean A⊕b), the
@@ -47,15 +72,20 @@
 //       deviation S_i/z; the outputs of one run are read from the same trajectories, and what their errors share the
 //       result does not say -- at worst all of it: in a conservative trap the sample's energy is one draw for the
 //       whole run, R1 --, so that of ē ≤ mean S/z), combined in quadrature at the confidence z as the ledger combines
-//       its own parts. Nothing is granted for averaging over the outputs: the autocorrelation of the residuals about
-//       their mean, which gives (a) its n_eff, is blind to exactly the common part this test is about (with it the
-//       mean's statistics were taken to fall as 1/√n_eff, and R1's total T, 0.7 standard errors off for the whole
-//       run, was rejected: measured, not kept). A series whose every output is beyond its bound on one side has
-//       |d̄| > mean B ≥ M (the norm of a mean is no more than the mean of the norms): rejected whatever its
-//       correlation -- test (a) alone cannot: its n_eff → 1 for a constant residual, where a count of one in one is
-//       no evidence. On independent residuals of the reported size (a) is the rule as it was and (b) does not reject
-//       (the mean of n ≥ 2 such outputs has the standard deviation S/z√n: it reaches M = S with the probability
-//       2Φ(−z√n) ≤ 0.5 %): measured by `node selftest.mjs`.
+//       its own parts. Nothing is granted for averaging over the outputs (with a 1/√n_eff of the residuals about
+//       their mean, R1's total T, 0.7 standard errors off for the whole run, was rejected: measured, not kept). An
+//       honest error whose outputs are one draw is beyond M with the probability 2Φ(−z) = 4.55 % a series (less
+//       where the ledger or u is part of M): that, and no more, is what a run of honest errors fails by. A series whose every output is beyond its bound on one side
+//       has |d̄| > mean B ≥ M (the norm of a mean is no more than the mean of the norms): rejected whatever its
+//       correlation -- test (a) alone cannot: its n_eff is 1 for a constant residual, where a count of one in one is
+//       no evidence. On independent residuals of the reported size (a) is the binomial test of n outputs and (b)
+//       does not reject (the mean of n ≥ 2 such outputs has the standard deviation S/z√n: it reaches M = S with the
+//       probability 2Φ(−z√n) ≤ 0.5 %): measured by `node selftest.mjs`. So the two divide a series between them:
+//       (b) answers for the part the whole run shares, at 2Φ(−z) a series for honest errors; (a) for what varies
+//       within the run: honest errors -- independent, drifting, breathing (selftest.mjs: 0.02 to 1.4 % of series),
+//       or one draw with a remainder -- it rejects less often than Φ(−z), and a series that is one draw with a
+//       remainder next to never where (b) does not (constructed as selftest's, 49 and 201 outputs, a white or AR(1)
+//       remainder of 0.02 to 0.8 of the variance: (a) alone 0.13 % at most, where the rule before had 2 to 15 %).
 // A series without a user's target (`target: null`: trap frequencies, a mean position or velocity, one axis's T --
 //   each axis's T is shown with its statistics and held to nothing by the solver) is judged against the reference's own
 //   uncertainty and the result's statistics alone, by the same two tests with B = zσ (no systematic part of the
@@ -95,12 +125,20 @@ function upperTail(z){const x=z/Math.SQRT2;let term=x,sum=x;for(let n=1;n<200;n+
 /** Φ(−z), the level of a one-sided test at the confidence z; 2Φ(−z), the share of outputs a Gaussian error leaves
  * beyond zσ. */
 const ALPHA=upperTail(Z),BEYOND=2*ALPHA;
+/** κ(ρ), the correlation of the indicators 1{|X| > z}, 1{|Y| > z} of two standard normal variables of correlation
+ * ρ in [0, 1] (the header's (a)): (1/π)∫_0^{asin ρ} [e^{−z²/(1 + sin θ)} − e^{−z²/(1 − sin θ)}] dθ over q(1 − q), by
+ * Simpson's rule on 32 panels (the integrand is smooth to the end: within 1e-7 of the integral for every ρ). */
+export function exceedanceCorrelation(rho){
+  const panels=32,h=Math.asin(rho)/panels,f=t=>{const s=Math.sin(t);return Math.exp(-Z*Z/(1+s))-Math.exp(-Z*Z/(1-s));};
+  let sum=0;for(let i=0;i<=panels;i++)sum+=(i===0||i===panels?1:i%2?4:2)*f(i*h);
+  return sum*h/3/Math.PI/(BEYOND*(1-BEYOND));
+}
 /** The effective number of independent outputs of a residual series for a count of its two-sided exceedances (the
- * header's (a)): n/(1 + 2Σ_k max(0, ρ_k² − z²/n)), ρ_k its autocorrelation about its mean; 1 for a constant series
- * (nothing but a common part). */
+ * header's (a)): n/(1 + 2Σ_k (1 − k/n)κ(ρ_k)), ρ_k² = max(0, ρ̂_k² − z²(1 − ρ̂_k²)²/(n − k)), ρ̂_k the autocorrelation
+ * about zero from the n − k products of the lag, ρ̂_k² ≤ 1; n for a series of no deviation at all (nothing to count). */
 export function effectiveCount(r){
-  const n=r.length;if(n<3)return n;const mean=r.reduce((a,b)=>a+b,0)/n,c0=r.reduce((a,b)=>a+(b-mean)**2,0);if(!(c0>0))return 1;
-  let s=0;for(let k=1;k<n;k++){let c=0;for(let i=0;i+k<n;i++)c+=(r[i]-mean)*(r[i+k]-mean);s+=Math.max(0,(c/c0)**2-Z*Z/n);}
+  const n=r.length,c0=r.reduce((a,b)=>a+b*b,0)/n;if(!(c0>0))return n;
+  let s=0;for(let k=1;k<n;k++){const m=n-k;let c=0;for(let i=0;i<m;i++)c+=r[i]*r[i+k];const e2=Math.min(1,(c/m/c0)**2),rho2=e2-(Z*(1-e2))**2/m;if(rho2>0)s+=m/n*exceedanceCorrelation(Math.sqrt(rho2));}
   return n/(1+2*s);
 }
 /** The two tests of a series against the errors claimed for it (the header's rule 2; rule 0 with no systematic part of
@@ -111,7 +149,7 @@ export function effectiveCount(r){
 export function consistency(outputs){
   const n=outputs.length,B=outputs.map(o=>Math.hypot(o.fixed,o.random,Z*o.u)),r=outputs.map((o,i)=>B[i]>0?Z*o.d/B[i]:o.d?Math.sign(o.d)*Infinity:0);
   const beyond=outputs.filter((o,i)=>Math.abs(o.d)>B[i]).length,mean=f=>outputs.reduce((t,o)=>t+f(o),0)/n;
-  const neff=r.every(Number.isFinite)?effectiveCount(r):1,p=binomialTail(beyond*neff/n,neff,BEYOND);
+  const neff=r.every(Number.isFinite)?effectiveCount(r):1,p=binomialTail(neff*(beyond/n),neff,BEYOND);
   const dbar=mean(o=>o.d),M=Math.hypot(mean(o=>o.fixed),Z*mean(o=>o.u),mean(o=>o.random));
   return {n,beyond,neff,p,dbar,M,count:p<ALPHA,common:Math.abs(dbar)>M,reject:p<ALPHA||Math.abs(dbar)>M};
 }
@@ -236,7 +274,7 @@ function print(e,c,run){
     console.log('  '+[r.name.slice(0,30).padEnd(30),String(r.n).padStart(4),r.maxD.toPrecision(3).padStart(10),(Number.isFinite(r.worst)?r.worst.toFixed(2)+(r.own?'°':' '):'-').padStart(8),(r.own?'-':String(r.fail)).padStart(5),(r.own?'-':String(r.unresolved)).padStart(6),
       (t?String(t.beyond):'-').padStart(5),(t?t.neff.toFixed(1):'-').padStart(7),(t?t.p.toPrecision(2)+(t.count?'!':' '):'-').padStart(9),(t?(t.M>0?(Math.abs(t.dbar)/t.M).toFixed(2):t.dbar?'inf':'0.00')+(t.common?'!':' '):'-').padStart(8),
       w?`  t=${w.t.toPrecision(4)}: ${w.x.toPrecision(5)} vs ${w.ref.toPrecision(5)} ± ${w.se.toPrecision(2)}, ${w.u.toPrecision(2)}`:''].join(''));}
-  console.log('  score: (|d| − 2σ)/target, beyond 1 fails; ° no user\'s target: |d|/2σ, judged by the two tests (out, p: the count beyond the bound; |d̄|/M: the mean deviation over its bound; ! rejects)\n');
+  console.log('  score: (|d| − 2σ)/target, beyond 1 fails; ° no user\'s target: |d|/2σ, judged by the two tests (out, n_eff, p: the count beyond the bound against n_eff independent outputs, n_eff from the residual\'s autocorrelation about zero -- an offset the whole run shares is one draw; |d̄|/M: the mean deviation over its bound; ! rejects)\n');
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
