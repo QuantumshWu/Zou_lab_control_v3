@@ -28,7 +28,8 @@ from zlc_data.point_overlay import IMAGE_POINT_OVERLAY_CONTRACT, IMAGE_POINT_OVE
 from zlc_atom.nodes._framework.frames import REST, assign_frames, canonical_frames, check_claims, claim_names
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
 from zlc_atom.nodes.calibration.calibration import (
-    acquisition_cautions, classify_threshold, reads_photoelectrons, tell_acquisition_cautions)
+    acquisition_cautions, classify_threshold, reads_photoelectrons, refuse_other_count_scale,
+    tell_acquisition_cautions)
 
 
 #: The frame a camera's pixel axes are counted in: the whole sensor's own.
@@ -262,6 +263,9 @@ class OccupancyProcessor:
         camera = camera if isinstance(camera, Mapping) else {}
         # An exposure that cuts the light window a calibration was trained on,
         # or a readout that counts otherwise, is said once a run and read anyway.
+        # A readout that changes what a count is worth is refused, as another unit is.
+        for name, reading in zip(self._names, self.readings):
+            refuse_other_count_scale(reading.calibration, camera.get("readout_mode"), name=name)
         for name, reading in zip(self._names, self.readings):
             tell_acquisition_cautions(self._context, "occupancy", acquisition_cautions(
                 reading.calibration, camera.get("exposure_seconds"), camera.get("readout_mode"),
@@ -569,8 +573,8 @@ class OccupancyProcessor:
             result = self.process(snapshot)
         except ValueError as refusal:
             # Frames a calibration does not apply to -- another sensor, crop,
-            # binning or unit -- are refused, and the journal says why beside
-            # the run it ends.
+            # binning, unit or count scale -- are refused, and the journal says
+            # why beside the run it ends.
             journal.note("occupancy", "frames_refused", signal=signal_value.name, reason=str(refusal))
             raise
         return self._live_outputs(

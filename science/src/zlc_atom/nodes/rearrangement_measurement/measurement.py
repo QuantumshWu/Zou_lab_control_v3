@@ -9,7 +9,8 @@ from zlc_atom.devices.slm.solver import (
     acquire_rearrangement, plan_rearrangement, sample_rearrangement, rearrangement_is_noop,
 )
 from zlc_atom.nodes.calibration.calibration import (
-    acquisition_cautions, reads_photoelectrons, registration_order, tell_acquisition_cautions)
+    acquisition_cautions, reads_photoelectrons, refuse_other_count_scale, registration_order,
+    tell_acquisition_cautions)
 from zlc_atom.nodes.camera.measurement import CameraMeasurementNode, photoelectron_frame
 from zlc_atom.nodes.slm.rearrangement import compact_target, run_rearrangement
 
@@ -65,6 +66,7 @@ class RearrangementMeasurement(CameraMeasurementNode):
     def _freeze_working_point(self, point):
         super()._freeze_working_point(point)
         roi = (*point.roi_origin_yx[::-1], *point.roi_shape_yx[::-1])
+        refuse_other_count_scale(self.calibration, point.readout_mode, name="the Calibration")
         tell_acquisition_cautions(self._context, "rearrangement", acquisition_cautions(
             self.calibration, point.exposure_seconds, point.readout_mode,
             exposure_step_seconds=point.exposure_step_seconds, name="the Calibration"), self._cautions_said)

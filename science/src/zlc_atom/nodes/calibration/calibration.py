@@ -17,7 +17,7 @@ from zlc_data import SITE, AxisId, AxisSpec
 from zlc_durable import strict_json_loads, write_readable_json
 
 from zlc_atom.authoring import AuthoringChoice
-from zlc_atom.devices.camera.contract import counting_readout
+from zlc_atom.devices.camera.contract import READOUT_SCALE, counting_readout
 
 from .bimodal import (
     fit_bimodal, gaussian_fidelity, optimal_gaussian_threshold, per_site_fidelity,
@@ -567,10 +567,10 @@ def acquisition_cautions(
     is a whole number of the camera's steps (``exposure_step_seconds``, as it
     reports it), so one short of the window by less than a step is the
     nearest the camera could come, not a cut; with no step reported it is
-    compared as recorded.  And a readout that counts differently
-    (``counting_readout``: a qCMOS's readout speed or sensor mode, a Basler's
-    pixel format) changes a count's noise or scale; which line triggered it
-    changes nothing.  A fact either side does not record is not compared.
+    compared as recorded.  And a readout setting that changes a count's noise
+    (``counting_readout``: a qCMOS's readout speed) is said; one that changes
+    its scale is refused (``refuse_other_count_scale``); which line triggered
+    it changes nothing.  A fact either side does not record is not compared.
     """
 
     cautions = []
@@ -586,19 +586,61 @@ def acquisition_cautions(
             {"calibration": name, "exposure": float(exposure_seconds), "light_window": window,
              "exposure_step": exposure_step_seconds},
         ))
-    frames = counting_readout(readout_mode)
-    trained = counting_readout(calibration.frame_contract.readout_mode)
-    differing = sorted(key for key in (frames or {}).keys() & (trained or {}).keys() if frames[key] != trained[key])
+    differing = _readout_differences(calibration, readout_mode)
     if differing:
-        said = ", ".join(f"{key}={frames[key]} (trained at {key}={trained[key]})" for key in differing)
         cautions.append(AcquisitionCaution(
             "readout_differs",
-            f"these frames were read out at {said}, not as {name} was trained: a count's noise or scale "
-            "differs from what its thresholds were fitted to; read as they are",
-            {"calibration": name, "frames": {key: frames[key] for key in differing},
-             "trained": {key: trained[key] for key in differing}},
+            f"these frames were read out at {_readout_said(differing)}, not as {name} was trained: a "
+            "count's noise differs from what its thresholds were fitted to; read as they are",
+            {"calibration": name, "frames": {key: ours for key, (ours, _) in differing.items()},
+             "trained": {key: theirs for key, (_, theirs) in differing.items()}},
         ))
     return tuple(cautions)
+
+
+def refuse_other_count_scale(
+    calibration: "TrapCalibration",
+    readout_mode: str | None,
+    *,
+    name: str = "the calibration",
+) -> None:
+    """Refuse frames read out at a setting that changes what one count is worth.
+
+    A camera family declares which of its readout settings do
+    (``COUNTING_READOUT_KEYS``: a Basler's bit depth, a qCMOS's sensor mode):
+    thresholds fitted in counts of one are numbers in another unit at the
+    other, so every site reads off the same way -- refused, as another unit
+    is (``reads_photoelectrons``).  A setting that changes only the noise is
+    said instead (``acquisition_cautions``).
+    """
+
+    differing = _readout_differences(calibration, readout_mode, scale=True)
+    if differing:
+        raise ValueError(
+            f"these frames were read out at {_readout_said(differing)}, which changes what one count "
+            f"is worth, and {name} was trained otherwise; its thresholds do not apply -- calibrate at "
+            "this readout, or read the frames out as it was trained"
+        )
+
+
+def _readout_differences(
+    calibration: "TrapCalibration", readout_mode: str | None, *, scale: bool = False,
+) -> dict[str, tuple[str, str]]:
+    """The counting readout settings the frames and the calibration both record and differ in,
+    ``{key: (frames', calibration's)}``: those that change a count's scale, or (``scale`` false)
+    those that change only its noise."""
+
+    frames = counting_readout(readout_mode) or {}
+    trained = counting_readout(calibration.frame_contract.readout_mode) or {}
+    return {
+        key: (frames[key][0], trained[key][0])
+        for key in sorted(frames.keys() & trained.keys())
+        if frames[key][0] != trained[key][0] and (frames[key][1] == READOUT_SCALE) == scale
+    }
+
+
+def _readout_said(differing: Mapping[str, tuple[str, str]]) -> str:
+    return ", ".join(f"{key}={ours} (trained at {key}={theirs})" for key, (ours, theirs) in differing.items())
 
 
 def tell_acquisition_cautions(

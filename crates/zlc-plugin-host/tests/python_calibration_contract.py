@@ -1,8 +1,8 @@
 """A calibration's thresholds were trained on one light window and one readout: frames exposed
-shorter than that window (by a camera step or more), or read out at another readout speed /
-sensor mode / pixel format, are read anyway and said once a run -- on the node and in the
-journal, naming both values; an exposure that covers the window, or another trigger line, is
-not said."""
+shorter than that window (by a camera step or more), or read out at another readout speed, are
+read anyway and said once a run -- on the node and in the journal, naming both values; frames
+read out at a setting that changes what a count is worth (pixel format, sensor mode) are refused
+as another unit is; an exposure that covers the window, or another trigger line, is not said."""
 import pathlib
 import sys
 import types
@@ -11,7 +11,8 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'science' / 'src'))
 from zlc_plugin import host
 from zlc_atom.devices.camera.contract import counting_readout
-from zlc_atom.nodes.calibration.calibration import FrameContract, acquisition_cautions, trained_light_window_seconds
+from zlc_atom.nodes.calibration.calibration import (
+    FrameContract, acquisition_cautions, refuse_other_count_scale, trained_light_window_seconds)
 from zlc_atom.nodes.occupancy.processor import CalibrationReading, OccupancyProcessor
 
 READOUT = 'dcam:readout=1;sensor=1;global_exposure=2'
@@ -76,22 +77,35 @@ class AcquisitionCautions(unittest.TestCase):
         self.assertEqual(kinds(calibration(windows=None), 0.001, READOUT), [])
 
     def test_only_what_changes_a_count_is_compared_of_the_readout(self):
-        self.assertEqual(counting_readout(READOUT), {'readout': '1', 'sensor': '1'})
-        self.assertEqual(counting_readout('pylon:format=Mono8;trigger=Line1;grab=OneByOne'), {'format': 'Mono8'})
+        self.assertEqual(counting_readout(READOUT), {'readout': ('1', 'noise'), 'sensor': ('1', 'scale')})
+        self.assertEqual(counting_readout('pylon:format=Mono8;trigger=Line1;grab=OneByOne'), {'format': ('Mono8', 'scale')})
         self.assertEqual(counting_readout('virtual:trigger=external'), {})
         self.assertIsNone(counting_readout(None))
         # How the exposure is triggered is not how a count is read.
         self.assertEqual(kinds(calibration(), 0.02, 'dcam:readout=1;sensor=1;global_exposure=5'), [])
-        (speed,) = acquisition_cautions(calibration(), 0.02, 'dcam:readout=2;sensor=1;global_exposure=2')
+        refuse_other_count_scale(calibration(), 'dcam:readout=1;sensor=1;global_exposure=5')
+
+    def test_another_readout_speed_is_said_and_read(self):
+        other = 'dcam:readout=2;sensor=1;global_exposure=2'
+        refuse_other_count_scale(calibration(), other)
+        (speed,) = acquisition_cautions(calibration(), 0.02, other)
         self.assertEqual(speed.kind, 'readout_differs')
         self.assertIn('read out at readout=2 (trained at readout=1)', speed.message)
-        (mode,) = acquisition_cautions(calibration(), 0.02, 'dcam:readout=1;sensor=18;global_exposure=2')
-        self.assertIn('sensor=18 (trained at sensor=1)', mode.message)
+
+    def test_a_readout_changing_what_a_count_is_worth_is_refused(self):
+        with self.assertRaisesRegex(ValueError, r'sensor=18 \(trained at sensor=1\), which changes what one count is worth'):
+            refuse_other_count_scale(calibration(), 'dcam:readout=1;sensor=18;global_exposure=2')
+        basler = calibration(readout_mode='pylon:format=Mono8;trigger=Line1;grab=OneByOne')
+        with self.assertRaisesRegex(ValueError, r'format=Mono12 \(trained at format=Mono8\)'):
+            refuse_other_count_scale(basler, 'pylon:format=Mono12;trigger=Line1;grab=OneByOne', name='basler.json')
+        # A scale difference is refused, not also said.
+        self.assertEqual(kinds(basler, 0.02, 'pylon:format=Mono12;trigger=Line1;grab=OneByOne'), [])
 
     def test_a_basler_on_another_trigger_line_says_nothing(self):
         basler = calibration(readout_mode='pylon:format=Mono8;trigger=Line1;grab=OneByOne')
-        self.assertEqual(kinds(basler, 0.02, 'pylon:format=Mono8;trigger=Line3;grab=OneByOne'), [])
-        self.assertEqual(kinds(basler, 0.02, 'pylon:format=Mono8;trigger=free-running;grab=OneByOne'), [])
+        for other in ('pylon:format=Mono8;trigger=Line3;grab=OneByOne', 'pylon:format=Mono8;trigger=free-running;grab=OneByOne'):
+            refuse_other_count_scale(basler, other)
+            self.assertEqual(kinds(basler, 0.02, other), [])
 
     def test_calibrations_of_different_camera_exposures_share_one_run_that_covers_both_windows(self):
         load = calibration(camera_exposure=0.05, windows=(0.05, 0.03, 0.05))
@@ -144,10 +158,10 @@ class OccupancyExposure(unittest.TestCase):
         self.processor.bind_run(self.context)
 
     @staticmethod
-    def frames(exposure_seconds, step=None):
+    def frames(exposure_seconds, step=None, readout_mode=READOUT):
         schema = types.SimpleNamespace(value_schema=types.SimpleNamespace(value_unit='count'),
                                        cell_domain=types.SimpleNamespace(axes=()))
-        camera = {'exposure_seconds': exposure_seconds, 'exposure_step_seconds': step, 'readout_mode': READOUT,
+        camera = {'exposure_seconds': exposure_seconds, 'exposure_step_seconds': step, 'readout_mode': readout_mode,
                   'sensor_shape_yx': [2304, 4096]}
         return types.SimpleNamespace(name='camera/frames', snapshot=types.SimpleNamespace(block=types.SimpleNamespace(schema=schema)),
                                      run_record={'device_snapshots': {'camera': camera}})
@@ -173,6 +187,20 @@ class OccupancyExposure(unittest.TestCase):
         self.processor.bind_run(Context())
         self.processor.evaluate(self.frames(0.003))
         self.assertEqual(len(self.core.lines), 2)
+
+    def test_another_readout_speed_is_read_and_said(self):
+        self.assertEqual(self.processor.evaluate(self.frames(0.005, readout_mode='dcam:readout=2;sensor=1;global_exposure=2')),
+                         {'counts': 'classified'})
+        (line,) = self.core.lines
+        self.assertEqual((line['ev'], line['facts']['frames'], line['facts']['trained']),
+                         ('readout_differs', {'readout': '2'}, {'readout': '1'}))
+
+    def test_another_sensor_mode_is_refused_as_another_unit_is(self):
+        with self.assertRaises(ValueError) as refused:
+            self.processor.evaluate(self.frames(0.005, readout_mode='dcam:readout=1;sensor=18;global_exposure=2'))
+        self.assertEqual(self.read, [], 'nothing is classified')
+        (line,) = self.core.lines
+        self.assertEqual((line['ev'], line['facts']['reason']), ('frames_refused', str(refused.exception)))
 
 
 if __name__ == '__main__':
