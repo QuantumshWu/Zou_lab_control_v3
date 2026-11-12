@@ -1,4 +1,4 @@
-// node sanity.mjs --worker=<atom-lindblad.exe> [--scenes=S1,S2,S2Q] [--duration=5000] [--old] [--app=<apps/atom-workbench>]
+// node sanity.mjs --worker=<atom-lindblad.exe> [--scenes=S1,S2,S2Q,S3] [--duration=5000] [--old] [--app=<apps/atom-workbench>]
 //                 [--save=<summary.json>]
 //
 // The two most basic motion scenes, built exactly as the app builds them and solved by a worker over its JSONL protocol
@@ -10,6 +10,11 @@
 //       + a repump added with ＋ and set to F=1 → F'=2 (along +x, π);
 //   S2Q S2 with the mirror's λ/4 plate passed twice (reflection quarterWave: true): σ+ and σ− about the field, the
 //       PGC-like polarization gradient; no longer a two-level problem (the atom is pumped over the m sublevels).
+//   S3  the user's experiment (2026-11-12) in the lab's geometry, with the app's default tweezer (along +x), field and
+//       detunings: a probe added with ＋ along +y tilted 4° toward the tweezer's axis, set π, 1 mW in a 1 mm waist
+//       (63.7 mW/cm²), its reflection by the mirror with the λ/4 plate at its default 45° (lin⊥lin), S2's repump; 100 ms
+//       (or --duration), 201 samples. Report mode: the run's checks only, its T and held share printed beside the user's
+//       statement (held over 100 ms, little heating -- a physical fact the engine is to reproduce).
 // What the check expects is physics, derived independently of every engine: sanity/model.py (its header holds the
 // derivation; its output sanity/model.json is read here, python is not run): light shifts from a sum over states on the
 // app's atomic tables, and a classical-atom Monte Carlo in two independent formulations (K: scattering events at the
@@ -54,7 +59,7 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 const here=dirname(fileURLToPath(import.meta.url));
 const args=process.argv.slice(2),opt=name=>args.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3),flag=name=>args.includes(`--${name}`);
 const exe=opt('worker');
-if(!exe){console.error('usage: node sanity.mjs --worker=<exe> [--scenes=S1,S2,S2Q] [--duration=5000] [--old] [--app=<dir>] [--save=<file>]');process.exit(2);}
+if(!exe){console.error('usage: node sanity.mjs --worker=<exe> [--scenes=S1,S2,S2Q,S3] [--duration=5000] [--old] [--app=<dir>] [--save=<file>]');process.exit(2);}
 const app=resolve(opt('app')??resolve(here,'../../..')),old=flag('old'),durationUs=Number(opt('duration')??5000),wanted=(opt('scenes')??'S1,S2,S2Q').split(',');
 const from=path=>import(pathToFileURL(join(app,path)).href);
 /** The app's dist must be newer than its sources (node scripts/build.mjs). */
@@ -93,9 +98,36 @@ function s2(quarterWave=false){
   scene.name=`sanity S2${quarterWave?'Q':''}: 光镊 + σ+ 探测光 + 反射${quarterWave?'（λ/4）':''} + 回泵光`;
   return scene;
 }
+/** S3, the user's experiment as far as it is known (report mode): S1's tweezer (along +x), field and initial state; a
+ * probe added with ＋, in the lab's geometry across the tweezer -- along +y, tilted 4° toward its axis (the user: roughly
+ * perpendicular, a few degrees toward the axis; the ＋ default runs along the tweezer's own axis) -- and set π (the app's
+ * π preset), 1 mW in a 1 mm waist (63.7 mW/cm²), at the free-space F=2 → F'=3 frequency; its reflection by the app's
+ * mirror with the λ/4 plate at its default fast axis (45°: π comes back ⊥, σ+ and σ− half each about the field --
+ * lin⊥lin); S2's repump. Its own duration (S3_US, or --duration) and samples (S3_SAMPLES). */
+const S3_US=100_000,S3_SAMPLES=201,S3_TILT_DEG=4;
+function s3(){
+  const scene=types.defaultScene();
+  const tweezer=scene.lasers.find(l=>l.id===scene.tweezerId),probe=types.newLaser('laser-probe','激光 1','D2');
+  scene.lasers=[tweezer,probe];
+  // The π preset points a probe across the field along +x; the lab's direction after it, its linear polarization turned
+  // to the field (π: 90° in this direction's frame, checked below as the scene's polarization).
+  physics.setPolarizationPreset(probe,scene.fields,'pi');
+  Object.assign(probe,{direction:{reference:{kind:'axis',axis:'+y'},thetaDeg:S3_TILT_DEG,phiDeg:0},polarizationAngleDeg:90});
+  Object.assign(probe,{powerMW:1,waistUm:1000});
+  physics.resolveSceneFrequencies(scene);
+  reflection.addReflection(scene,probe).reflection.quarterWave=true;
+  const repump=types.newLaser('laser-repump','激光 2','D2');
+  repump.frequency={base:{kind:'transition',line:'D2',Fg:1,Fe:2},offsetMHz:0};
+  scene.lasers.push(repump);
+  const duration=Number(opt('duration')??S3_US);
+  Object.assign(scene.dynamics,{initialStateId:'ground-2-2',durationUs:duration,durationUnit:'μs',samples:S3_SAMPLES});
+  delete scene.dynamics.initialState;
+  scene.name='sanity S3: 光镊 + π 探测光 1 mW + 反射（λ/4 45°）+ 回泵光';
+  return scene;
+}
 /** Resolved and read back through the app's importer (a saved file opened). */
 function finish(scene){physics.resolveSceneFrequencies(scene);scene.lasers.forEach(intensity.normalizeLaserIntensity);return sceneFile.validateScene(JSON.parse(JSON.stringify(scene)));}
-const SCENES={S1:()=>finish(s1()),S2:()=>finish(s2()),S2Q:()=>finish(s2(true))};
+const SCENES={S1:()=>finish(s1()),S2:()=>finish(s2()),S2Q:()=>finish(s2(true)),S3:()=>finish(s3())};
 
 /** What the app makes of a scene: polarizations, the levels chart's light shifts of the tweezer alone (all-order Floquet,
  * spectroscopy.ts) and the detunings at the trap centre. */
@@ -201,6 +233,7 @@ function judge(sceneId,f,r){
   add(true,'run',`completed in ${r.solveS.toFixed(1)} s, ${r.checkpoints} checkpoint(s)`);
   if(!old)add(!r.rejected.length,'run: the app\'s reader accepts every checkpoint and the result',r.rejected.length?`${r.rejected.length} rejected -- ${r.rejected[0]} (the app shows this error)`:'');
   const finite=[...r.Ttotal,...r.loss].every(x=>x===null||Number.isFinite(x));add(finite,'run: numbers finite','');
+  if(sceneId==='S3')return out;
   const p=model.parameters,wx=p.omegaAx/2/Math.PI*1e3,wy=p.omegaR/2/Math.PI*1e3;
   if(r.trapKHz){add(Math.abs(r.trapKHz[0]/wx-1)<=0.03,'trap x (axial)',`${r.trapKHz[0].toFixed(2)} kHz vs ${wx.toFixed(2)} ± 3 %`);
     add(Math.abs(r.trapKHz[1]/wy-1)<=0.03,'trap y (radial)',`${r.trapKHz[1].toFixed(2)} kHz vs ${wy.toFixed(2)} ± 3 %`);}
@@ -244,13 +277,26 @@ function judgeS2Q(r,add,N,index,stateIndex){
       add(Math.abs(p-q)<=tol,`populations: ${id} of the held atom's ground states at ${t/1e3} ms`,`${p.toFixed(3)} vs ${q.toFixed(3)} ± ${tol.toFixed(3)}`);}}
 }
 
+/** S3 in report mode, beside the user's experiment (2026-11-12, verbatim: "我很确定我们的pi偏振的，差不多半径1mm, 功率1mW的
+ * probe光，在带lambda/4反射镜反射之后，加上repump，对于光镊里面的原子的加热效果非常小，吹100ms也是基本吹不飞的，这是物理实验结果"):
+ * the held share and T over the run; no criterion until the experiment's numbers (its tweezer, field and detunings) are
+ * known -- the scene takes the app's defaults for them. */
+function reportS3(r){
+  console.log(`     t ms | T_total ± SE µK (x/y/z)                 | L ± SE`);
+  for(const t of [0,500,1000,2000,5000,10000,20000,50000,100000]){const k=r.times.findIndex(x=>Math.abs(x-t)<1e-6);if(k<0)continue;
+    const L=r.loss[k],se=Math.sqrt(Math.max(L*(1-L),1/r.trajectories)/r.trajectories);
+    console.log(`   ${(t/1e3).toFixed(1).padStart(6)} | ${(r.Ttotal[k]==null?'—':`${r.Ttotal[k].toFixed(1)} ± ${(r.TtotalSE[k]??0).toFixed(1)}`).padEnd(16)} (${r.T.map(a=>a[k]==null?'—':a[k].toFixed(0)).join('/')})`.padEnd(54)+`| ${L.toFixed(3)} ± ${se.toFixed(3)}`);}
+  const end=r.times.length-1;
+  console.log(`   REPORT experiment: held over 100 ms ("基本吹不飞"), little heating; engine: held ${(1-r.loss[end]).toFixed(3)} at ${(r.times[end]/1e3).toFixed(1)} ms, T_total ${r.Ttotal[end]?.toFixed(1)??'—'} µK (from ${r.Ttotal[0]?.toFixed(1)} µK)`);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 console.log(`worker ${resolve(exe)}${old?' (old request format)':''}\napp    ${app}\nmodel  sanity/model.json (${model.generator}; ${Object.values(model.runs)[0].atoms} atoms per model)`);
 const ls=model.lightShifts,summary={worker:resolve(exe),old,durationUs,scenes:{}};
 let failures=0;const results={};
 for(const id of wanted){
   const scene=SCENES[id](),f=facts(scene);
-  console.log(`\n== ${id}: ${scene.name}; ${durationUs} µs, ${scene.dynamics.samples} samples, motion at ${scene.dynamics.motion.temperatureUK} µK (device ${scene.dynamics.motion.device}), initial ${scene.dynamics.initialStateId}`);
+  console.log(`\n== ${id}: ${scene.name}; ${scene.dynamics.durationUs} µs, ${scene.dynamics.samples} samples, motion at ${scene.dynamics.motion.temperatureUK} µK (device ${scene.dynamics.motion.device}), initial ${scene.dynamics.initialStateId}`);
   for(const l of f.lasers)console.log(`   ${l.name.padEnd(10)} k ${l.k.map(x=>x.toFixed(0)).join(',').padEnd(7)} σ− ${l.sigmaMinus.toFixed(3)} π ${l.pi.toFixed(3)} σ+ ${l.sigmaPlus.toFixed(3)}  ${l.intensityMWcm2.toPrecision(4)} mW/cm²${l.reflection?`  mirror R ${l.reflection.reflectivity} φ ${l.reflection.phaseDeg}° λ/4 ${l.reflection.quarterWave}`:''}`);
   const both=f.lasers.filter(l=>l.id.startsWith('laser-probe'));
   if(both.length===2)console.log(`   the probe pair on the field's axis: ${both.map(l=>l.sigmaPlus>0.999?'σ+':l.sigmaMinus>0.999?'σ−':'mixed').join(' + ')} (${both[0].sigmaPlus>0.999&&both[1].sigmaPlus>0.999?'σ+σ+: a pure σ+ standing wave, no polarization gradient':'opposite circular: a polarization gradient'})`);
@@ -259,13 +305,16 @@ for(const id of wanted){
   if(f.repumpCentreMHz)console.log(`   repump detuning from F=1 → F'=2 (π) at the centre: ${f.repumpCentreMHz.map(x=>`m ${x.m}: ${x.MHz.toFixed(2)}`).join(', ')} MHz`);
   const sceneChecks=[[Math.abs(f.groundShiftMHz/ls.groundShiftMHz-1)<0.005&&Math.abs(f.excitedShiftMHz/ls.excitedShiftMHz-1)<0.005,'scene: the levels chart\'s shifts within 0.5 % of the independent sum over states'],
     [Math.abs(f.probeFreeMHz-model.chart.zeemanDetuningMHz)<1e-3,'scene: the probe\'s free detuning is the model\'s'],
-    [f.lasers.filter(l=>l.id.startsWith('laser-probe')).every(l=>id==='S2Q'&&l.id.endsWith('reflection')?l.sigmaMinus>0.999:l.sigmaPlus>0.999),'scene: the probe beams\' polarization as described']];
+    [f.lasers.filter(l=>l.id.startsWith('laser-probe')).every(l=>id==='S3'?(l.id.endsWith('reflection')?Math.abs(l.sigmaMinus-0.5)<1e-3&&Math.abs(l.sigmaPlus-0.5)<1e-3:l.pi>0.999):id==='S2Q'&&l.id.endsWith('reflection')?l.sigmaMinus>0.999:l.sigmaPlus>0.999),'scene: the probe beams\' polarization as described']];
   for(const [pass,what] of sceneChecks){console.log(`   ${ok(pass)} ${what}`);if(!pass)failures++;}
   const r=await solve(scene,id);results[id]=r;
   if(r.error)console.log(`   engine: ERROR after ${r.solveS?.toFixed(1)} s: ${r.error}`);
   else{
     console.log(`   engine ${r.engine??''}: solve ${r.solveS.toFixed(1)} s, ${r.trajectories} trajectories, step ${r.stepUs} µs, trap ${r.trapKHz?.map(x=>x.toFixed(2)).join('/')} kHz (model ${(model.parameters.omegaAx/2/Math.PI*1e3).toFixed(2)}/${(model.parameters.omegaR/2/Math.PI*1e3).toFixed(2)}/${(model.parameters.omegaR/2/Math.PI*1e3).toFixed(2)} bare)`);
     if(r.flagged)console.log(`   flagged: ${r.flagged.slice(0,300)}`);
+  }
+  if(!r.error&&id==='S3')reportS3(r);
+  else if(!r.error){
     const band=EXPECT[id].low?[model.runs[EXPECT[id].low],model.runs[EXPECT[id].high]]:null;
     console.log(`     t ms | T_total engine (x/y/z)          | model T  | L engine | model L${band?' (band: z frozen – z frictionless)':''}`);
     for(const t of [0,250,500,1000,1500,2000,3000,4000,5000]){const k=r.times.findIndex(x=>Math.abs(x-t)<1e-6);if(k<0)continue;const j=Math.round(t/SAMPLE_US),e=expectation(id,j);
