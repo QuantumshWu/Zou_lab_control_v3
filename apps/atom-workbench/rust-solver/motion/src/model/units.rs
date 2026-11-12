@@ -31,11 +31,17 @@
 //! with each kept drive V_a of that state (far.rs, # A fold onto an explicit state): beside its own gate it has the
 //! pair's (`Model::pair_gate`), the one gate of the two-photon coupling |U V_a| over the nearer of the two one-photon
 //! distances -- the amplitude either of the pair's states holds of the other is that over the two-photon distance --
-//! across the two-photon distance |E_g + ν − E_a − ν_a| over the region, less the two photons' Doppler shifts and
-//! what the folded and the kept drives move the two ground levels. The pair is the second-order coupling of two slow
-//! states -- g and the state a of e's cluster --, as a coupling of two states is (# A coupling of two states), not an
-//! amplitude of an excited state of g's: its own statement, judged alone (# The tail rule); failing, the drive is kept as
-//! any other.
+//! across the two-photon distance |E_g + ν − E_a − ν_a| over the region, less the two-photon Doppler shift and what the
+//! folded and the kept drives move the two ground levels. The pair's coupling U V_a* turns in space as e^{i(q − k')·r},
+//! q the folded drive's photon (k_l, a counter-rotating component's −k_l) and k' the kept one's, so a moving atom's
+//! two-photon detuning moves by (q − k')·v: at most |q − k'| v over the two components' beams -- nothing for two photons
+//! of one beam, 2kv for counter-propagating ones (`Model::two_photon_wave`). Its centre moves over the region as the
+//! difference E_g − E_a does, a shift the two levels share moving nothing. (Taken as |q| + |k'| for any two beams and
+//! each level's own movement, the bound of two legs of the one repump beam between F=1 m=1 and m=0, 2.1 MHz apart,
+//! reached zero at an atom of 0.53 µm/µs: the pair's gate read ∞ for a two-photon coupling |U V|/d of 1e-18 rad/µs.)
+//! The pair is the second-order coupling of two slow states -- g and the state a of e's cluster --, as a coupling of two
+//! states is (# A coupling of two states), not an amplitude of an excited state of g's: its own statement, judged alone
+//! (# The tail rule); failing, the drive is kept as any other.
 //!
 //! A drive has exactly one level, the highest its kept units give it, and one more where its two states are one cluster's
 //! at a residual beat of exactly zero (model.rs `Model::settled`); a carrier is a component with a drive not bare, never listed.
@@ -303,8 +309,8 @@ impl Across {
 }
 
 /// One kept drive over a region (`Model::kept_over`): its carrier, its excited state (less GROUND) and its ground state;
-/// its coupling's coherent bound there, its one-photon distance at least (`Across::distance`, of its two levels' slack,
-/// its Doppler shift and its excited state's Gershgorin radius), and its beams' largest wave number.
+/// its coupling's coherent bound there and its one-photon distance at least (`Across::distance`, of its two levels' slack,
+/// its Doppler shift and its excited state's Gershgorin radius).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Kept {
     pub(crate) carrier: usize,
@@ -312,7 +318,6 @@ pub(crate) struct Kept {
     pub(crate) ground: usize,
     pub(crate) size: f64,
     pub(crate) distance: f64,
-    pub(crate) wave: f64,
 }
 
 /// What a unit's gate reads of a region (`Model::judged`, `Model::gate_of`).
@@ -754,7 +759,7 @@ impl Model {
                 let wave = self.wave_of(d.component);
                 let moved = energies.slack[e] + energies.slack[a] + wave * region.speed + energies.radius[e];
                 let across = Across { size: region.coherent(&d.beams), centre: energies.centre[e] - energies.centre[a] - self.carriers[carrier].detuning, moved };
-                out.push(Kept { carrier, excited: d.excited, ground: a, size: across.size, distance: across.distance(d.gamma), wave });
+                out.push(Kept { carrier, excited: d.excited, ground: a, size: across.size, distance: across.distance(d.gamma) });
             }
         }
         out
@@ -764,11 +769,13 @@ impl Model {
     /// that state's kept drives (module documentation, # Levels; far.rs, # A fold onto an explicit state): per kept
     /// drive V_a (e ← a at ν_a) whose channel is another Floquet state than the drive's (eliminate.rs `Model::apart`),
     /// the one gate of |U| |V_a| over the nearer of the two one-photon distances, across the two-photon distance
-    /// |E_g + ν − E_a − ν_a| over the region less the two photons' Doppler shifts, the shifts of the two ground levels by
-    /// their drives folded at the atom (`near_shift`) and by their kept drives -- a kept drive of coupling v across the
-    /// distance d moves its ground level by at most v and at most v²/d --, at the rate v |∇(E_g − E_a)| + (k + k_a) a_max.
-    /// The pairs' saturations summed (the drive's couplings to e's cluster), their largest sweep; nothing where the
-    /// drive's excited state has no kept drive.
+    /// |E_g + ν − E_a − ν_a| over the region -- its centre's, within how far the difference E_g − E_a moves over the
+    /// region (the constant forms' diagonal difference, as a coupling's distance takes it: a shift the two levels share
+    /// moves no distance) -- less the two-photon Doppler shift |q − k'| v (`two_photon_wave`), the shifts
+    /// of the two ground levels by their drives folded at the atom (`near_shift`) and by their kept drives -- a kept drive
+    /// of coupling v across the distance d moves its ground level by at most v and at most v²/d --, at the rate
+    /// v |∇(E_g − E_a)| + |q − k'| a_max. The pairs' saturations summed (the drive's couplings to e's cluster), their
+    /// largest sweep; nothing where the drive's excited state has no kept drive.
     fn pair_gate(&self, g: usize, d: &super::reach::DriveForm, of: &Across, kept: &[Kept], region: &Region) -> Gate {
         let mut out = Gate { saturation: 0.0, sweep: 0.0 };
         if kept.iter().all(|leg| leg.excited != d.excited) {
@@ -776,20 +783,38 @@ impl Model {
         }
         let energies = self.energies(region);
         let (frequency, side) = (d.component / 2, d.component % 2);
-        let (from, nu, wave) = (self.frequency(Component { frequency, counter: side == 1 }), self.tones[frequency].nu[side], self.wave_of(d.component));
+        let (from, nu) = (self.frequency(Component { frequency, counter: side == 1 }), self.tones[frequency].nu[side]);
         let lifted = |s: usize| -> f64 { kept.iter().filter(|leg| leg.ground == s).map(|leg| leg.size.min(leg.size * leg.size / leg.distance)).sum() };
         for leg in kept.iter().filter(|leg| leg.excited == d.excited && self.apart(g, &from, leg.ground, &self.carriers[leg.carrier].beat)) {
             let a = leg.ground;
             let size = of.size * leg.size / of.distance(d.gamma).min(leg.distance);
-            let (at, slack) = (energies.centre[g] + nu - energies.centre[a] - self.carriers[leg.carrier].detuning, energies.slack[g] + energies.slack[a]);
-            let apart = distance(at - slack, at + slack) - (wave + leg.wave) * region.speed - self.near_shift(g, region) - self.near_shift(a, region) - lifted(g) - lifted(a);
+            let wave = self.two_photon_wave(d, self.carriers[leg.carrier].frequency);
+            let at = energies.centre[g] + nu - energies.centre[a] - self.carriers[leg.carrier].detuning;
+            let slack: f64 = region.forms.difference(self, g, a).iter().map(|&(frequency, pair, _, modulus)| modulus * region.pairs[frequency][pair].radius).sum();
+            let apart = distance(at - slack, at + slack) - wave * region.speed - self.near_shift(g, region) - self.near_shift(a, region) - lifted(g) - lifted(a);
             let slope = self.energy_slope_over(g, a, region) + self.near_slope(g, region) + self.near_slope(a, region);
             let acceleration = self.acceleration(region, &|c| c.states.contains(&g) || c.states.contains(&a));
-            let pair = gate(size, apart, region.speed * slope + (wave + leg.wave) * acceleration);
+            let pair = gate(size, apart, region.speed * slope + wave * acceleration);
             out.saturation += pair.saturation;
             out.sweep = out.sweep.max(pair.sweep);
         }
         out
+    }
+
+    /// The largest wave number of a Raman pair's two photons together (1/µm; module documentation, # Levels): |q − k'|
+    /// over the beams of a drive folded onto an explicit state -- q = k_l, a counter-rotating component's −k_l -- and the
+    /// beams k' of its kept leg's frequency, the pair's coupling turning in space as e^{i(q − k')·r}.
+    fn two_photon_wave(&self, d: &super::reach::DriveForm, frequency: usize) -> f64 {
+        let sign = if d.component % 2 == 1 { -1.0 } else { 1.0 };
+        let mut most = 0.0_f64;
+        for &(l, _, _) in &d.beams {
+            let q = self.light.beams[l].wave_vector();
+            for &m in &self.light.frequencies[frequency].beams {
+                let k = self.light.beams[m].wave_vector();
+                most = most.max(norm3(std::array::from_fn(|i| sign * q[i] - k[i])));
+            }
+        }
+        most
     }
 
     /// A ground state's drives' gate at a place of the tail rule's order over a region (`folds_made`): [saturation, sweep]
