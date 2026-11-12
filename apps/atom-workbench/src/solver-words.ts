@@ -17,7 +17,6 @@ const SENTENCES:Record<string,string>={
   'meanHorizonUs must be 1e5 or 1e6 us (100 ms or 1 s)':'长期布居的时刻 T 只能是 100 ms 或 1 s。',
   'A motion request is a trajectory alone: meanOnly and includeMean are false':'运动只计算时间演化，不计算长期布居。',
   'Returned population probabilities failed fixed trace/initial checks':'算出的布居没有通过检查（各态布居之和不是 1，或初始时刻与初态不符），结果未显示。',
-  "frameFrequenciesMHz: the ground states' frames must be 0 and the excited states' one frame":'请求不符合求解器的接口：基态的旋转系频率应为 0，激发态应共用一个旋转系频率。',
 };
 /** What a mean's reason adds when its bound is above the tolerance (lattice_core_adapter.rs `OUTSIDE`). */
 const OUTSIDE=' Not converged: its error estimate (estimatedError) is above the tolerance, so the populations are an estimate.';

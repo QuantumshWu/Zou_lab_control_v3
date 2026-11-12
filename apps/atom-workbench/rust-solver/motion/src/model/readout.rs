@@ -21,6 +21,7 @@ use super::tabulate::NearTable;
 use super::{Beat, Cluster, Component, Level, Lights, Model, Point, Unit, GROUND, STATES};
 use crate::field::Amplitude;
 use crate::linalg::{Mat, C64};
+use std::collections::HashSet;
 
 /// A component's bare drives' channels on a cluster at a point: the component and its response R (EXCITED × the cluster's
 /// ground places).
@@ -206,54 +207,132 @@ impl Model {
     /// A component's name: its beams' names, and which rotation.
     fn component_label(&self, c: Component) -> String {
         let names: Vec<&str> = self.light.frequencies[c.frequency].beams.iter().map(|&l| self.names[l].as_str()).collect();
-        format!("{}{}", names.join("、"), if c.counter { "（反旋）" } else { "" })
+        format!("{}{}", names.join("、"), if c.counter { "（反旋转项）" } else { "" })
     }
 
-    /// A beat's value as the ledger writes it (MHz).
+    /// A beat as the ledger writes it (`frequency_reading`), to the digits that tell the model's beats apart
+    /// (`telling_apart`): `Model::beats` holds every beat a unit can carry (units.rs `Model::units`). So no two of a
+    /// run's items share a name, and no digit is written that tells nothing apart.
     fn beat_label(&self, beat: &Beat) -> String {
-        format!("{:.6} MHz", self.omega(beat) / crate::units::RAD_PER_US_PER_MHZ)
+        let mhz = |beat: &Beat| self.omega(beat) / crate::units::RAD_PER_US_PER_MHZ;
+        let beats: Vec<f64> = self.beats.iter().map(|(beat, _)| mhz(beat)).collect();
+        frequency_reading(mhz(beat), telling_apart(&beats))
     }
 
     /// A unit's label for the ledger (Chinese).
     pub fn label(&self, unit: &Unit) -> String {
         match unit {
             Unit::Bare { component, excited, ground } => {
-                format!("{} → {} 的驱动按裸能级折叠（{}）", self.state_label(*ground), self.state_label(*excited), self.component_label(*component))
+                format!("{} → {} 的驱动：按裸能级绝热消去（{}）", self.state_label(*ground), self.state_label(*excited), self.component_label(*component))
             }
             Unit::Drive { component, excited, ground } => {
-                format!("{} → {} 的驱动按原子处能级折叠（{}）", self.state_label(*ground), self.state_label(*excited), self.component_label(*component))
+                format!("{} → {} 的驱动：按原子所在处的能级（含光移）绝热消去（{}）", self.state_label(*ground), self.state_label(*excited), self.component_label(*component))
             }
-            Unit::Second { ground } => format!("{} 所在簇按原子处能级的折叠只取到二阶", self.state_label(*ground)),
+            Unit::Second { ground } => format!("{} 所在子空间按原子所在处能级的绝热消去只取到二阶", self.state_label(*ground)),
             Unit::Term { a, b, beat } if beat.is_zero() => format!("{} 与 {} 的静态耦合", self.state_label(*a), self.state_label(*b)),
             Unit::Term { a, b, beat } if a == b => format!("{} 上拍频 {} 的能级拍动", self.state_label(*a), self.beat_label(beat)),
             Unit::Term { a, b, beat } => format!("{} 与 {} 在拍频 {} 上的耦合", self.state_label(*a), self.state_label(*b), self.beat_label(beat)),
-            Unit::Coherence { landing, .. } => format!("落到 {} 所在子空间的两组光子的相干", self.state_label(*landing)),
-            Unit::Dressing { carrier } => format!("{} 的缀饰：偏振单元之间的干涉", self.component_label(*carrier)),
+            Unit::Coherence { landing, first, second } => {
+                format!("落到 {} 所在子空间的两组光子（频率相差 {}）的相干", self.state_label(*landing), self.beat_label(&second.plus(-1, first)).trim_start_matches('−'))
+            }
+            Unit::Dressing { carrier } => format!("{} 引起的能级移动（进入绝热消去的失谐）：偏振不同的光束之间的干涉取平均", self.component_label(*carrier)),
         }
     }
 
-    /// The model in words (Chinese, the result's method text): its subspaces, explicit excited states and what is folded.
+    /// The model in words (Chinese, the result's method text): its subspaces -- those of one make-up said once, with
+    /// their number, in the order they first come --, their explicit excited states, and how many drives are taken at
+    /// each level.
     pub fn describe(&self) -> String {
-        let clusters: Vec<String> = self
-            .clusters
+        let mut kinds: Vec<((usize, usize), usize)> = vec![];
+        for c in &self.clusters {
+            let kind = (c.ground, c.states.len() - c.ground);
+            match kinds.iter_mut().find(|(k, _)| *k == kind) {
+                Some((_, number)) => *number += 1,
+                None => kinds.push((kind, 1)),
+            }
+        }
+        let subspaces: Vec<String> = kinds
             .iter()
-            .map(|c| {
-                let explicit = c.states.len() - c.ground;
-                if explicit > 0 {
-                    format!("{} 个基态 + {} 个显式激发态", c.ground, explicit)
-                } else {
-                    format!("{} 个基态", c.ground)
-                }
+            .map(|&((ground, explicit), number)| {
+                let holds = if explicit > 0 { format!("{} 个基态和 {} 个显式跟踪的激发态", ground, explicit) } else { format!("{} 个基态", ground) };
+                format!("{} 个{}含 {}的子空间", number, if number > 1 { "各" } else { "" }, holds)
             })
             .collect();
         let count = |level: Level| self.driven.iter().filter(|&&(c, e, g)| self.level(c, e, g) == level).count();
         format!(
-            "内态分为 {} 个子空间（{}）；每个驱动按它自己的失谐处理：{} 个按裸能级的二阶消去（光移和散射）折叠，{} 个按原子处能级的缀饰二阶消去折叠，{} 个显式保留。",
-            self.clusters.len(),
-            clusters.join("；"),
+            "内态分为 {}；每个驱动按它自己的失谐处理：{} 个按裸能级绝热消去（给出光移和散射），{} 个按原子所在处的能级（含光移）绝热消去，{} 个显式跟踪。",
+            subspaces.join("、"),
             count(Level::Bare),
             count(Level::Atom),
             count(Level::Explicit)
         )
+    }
+}
+
+/// A frequency (MHz) as the app reads a frequency difference (src/laser-frequency.ts `naturalDetuningUnit`, src/format.ts
+/// `formatNumber`): in the largest of Hz, kHz, MHz, GHz and THz in which it reads at least 1 (zero in MHz), rounded to
+/// `digits` significant digits, the trailing zeros dropped, with the true minus sign.
+fn frequency_reading(mhz: f64, digits: usize) -> String {
+    let magnitude = mhz.abs();
+    let (scale, unit) = if magnitude >= 1e6 {
+        (1e6, "THz")
+    } else if magnitude >= 1e3 {
+        (1e3, "GHz")
+    } else if magnitude >= 1.0 || magnitude == 0.0 {
+        (1.0, "MHz")
+    } else if magnitude >= 1e-3 {
+        (1e-3, "kHz")
+    } else {
+        (1e-6, "Hz")
+    };
+    // The decimal rounding is the formatter's, exact; the rounded decimal read back prints as itself, without zeros after it.
+    let rounded: f64 = format!("{:.*e}", digits - 1, magnitude / scale).parse().expect("a number as written parses");
+    format!("{}{} {}", if mhz < 0.0 { "−" } else { "" }, rounded, unit)
+}
+
+/// The fewest significant digits at which frequencies (MHz) all read differently (`frequency_reading`), two of one
+/// double counted once: the digits follow from the frequencies themselves. Two beams 80 MHz apart on a carrier 32 THz
+/// from a third take seven (32.35877 THz, 32.35885 THz); a single beat and its opposite take one. Distinct doubles
+/// differ within the 17 digits that determine a double, so the search ends.
+fn telling_apart(mhz: &[f64]) -> usize {
+    let mut values = mhz.to_vec();
+    values.sort_by(f64::total_cmp);
+    values.dedup();
+    let apart = |digits: &usize| values.iter().map(|&value| frequency_reading(value, *digits)).collect::<HashSet<String>>().len() == values.len();
+    (1..).find(apart).expect("distinct doubles read differently at some number of digits")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A frequency reads in the unit of its size, rounded in decimal, without trailing zeros and with the true minus
+    /// (the cut-over's finding: a 32 THz beat was written "-32358766.391647 MHz").
+    #[test]
+    fn a_frequency_reads_in_its_own_unit() {
+        assert_eq!(frequency_reading(-32358766.391647, 4), "−32.36 THz");
+        assert_eq!(frequency_reading(6834.682610904, 6), "6.83468 GHz");
+        assert_eq!(frequency_reading(80.0, 7), "80 MHz");
+        assert_eq!(frequency_reading(-0.0025, 2), "−2.5 kHz");
+        assert_eq!(frequency_reading(3.0e-6, 3), "3 Hz");
+        assert_eq!(frequency_reading(0.0, 3), "0 MHz");
+        // A digit count below the integer digits rounds them too.
+        assert_eq!(frequency_reading(323.6, 1), "300 MHz");
+    }
+
+    /// The digits are the fewest that tell a set's frequencies apart: every reading differs at them, and two coincide
+    /// at one digit fewer.
+    #[test]
+    fn the_digits_tell_the_frequencies_apart() {
+        let carrier = 32358766.391647;
+        for (set, digits) in [(vec![carrier, -carrier, 0.0], 1), (vec![carrier, carrier + 80.0, 80.0, -80.0, 0.0], 7), (vec![6834.68, 6834.68, 6568.0], 2)] {
+            assert_eq!(telling_apart(&set), digits, "{set:?}");
+            let readings = |d: usize| set.iter().map(|&f| frequency_reading(f, d)).collect::<HashSet<String>>().len();
+            let distinct = { let mut v = set.clone(); v.sort_by(f64::total_cmp); v.dedup(); v.len() };
+            assert_eq!(readings(digits), distinct, "{set:?}");
+            assert!(digits == 1 || readings(digits - 1) < distinct, "{set:?}");
+        }
+        assert_eq!(frequency_reading(carrier + 80.0, 7), "32.35885 THz");
+        assert_eq!(frequency_reading(carrier, 7), "32.35877 THz");
     }
 }
