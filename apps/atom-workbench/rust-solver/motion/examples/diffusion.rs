@@ -26,8 +26,8 @@ use atom_motion::step::{stumpff, Brownian, Dynamics, Middle, Midway, Scratch, St
 /// are held to the reach its model was judged over, atom_motion's solve.rs `Domain`).
 struct Everywhere;
 impl atom_motion::step::Domain for Everywhere {
-    fn proven(&self, _: &atom_motion::step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> Result<(), atom_motion::step::Unproven> {
-        Ok(())
+    fn proven(&self, _: &atom_motion::step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> Result<bool, atom_motion::step::Unproven> {
+        Ok(true)
     }
 }
 

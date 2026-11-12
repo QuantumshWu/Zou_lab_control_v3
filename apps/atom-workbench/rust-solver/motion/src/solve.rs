@@ -171,32 +171,45 @@
 //!
 //! # The reach's atoms (SPEC §1.8)
 //! The reach is where the model's statements are made before a trajectory runs: the folds exist (the gates are proofs
-//! over it), the tables are refined over its ranges, the first rung is admissible at its largest speed. No step of a
-//! held trajectory is taken where these are not established (step.rs, # The domain; `Domain`): a step asks the model
-//! everything at points of its straight path and at one momentum, so before its propagation the path is placed --
-//! within the reach, where its largest prepared energy is within the reach's level (with its box within the trap's
-//! region where the reach holds only a lower level outside it, model/reach.rs, # The trap's region), and nothing more is
-//! read; else at its own state, by the statements the reach's proofs make over a cell, made along the path at its
-//! speed (model/reach.rs `Model::holds_along`: every unit the whole space at that speed leaves open has its fold, the
-//! tables hold as verified), and the step admissible at that speed where the level's step is the run's. A step that is
-//! not proven is not taken: the hand-out ends (`run_groups`), and so does the attempt, with the reach grown to hold the
-//! paths not proven (`Attempt::Grow`; model/reach.rs `holding`, `Model::outside_to`): the model is judged again over it
-//! -- a fold that does not exist there is kept, at the level the level rule gives (SPEC §1.5) -- and the next attempt
-//! begins. A state that fails is held by the reach that ends its attempt, and the reach and the units kept only grow.
+//! over it), the tables are refined over its ranges, the first rung is admissible at its largest speed. Of these, what
+//! is wrong without bound where it fails is proven for every step of a held trajectory (step.rs, # The domain;
+//! `Domain`): a fold that does not exist, and a step past the edge of its reference's turn and its kick's curvature. A
+//! step asks the model everything at points of its straight path and at one momentum, so before its propagation the
+//! path is placed -- within the reach, where its largest prepared energy is within the reach's level (with its box
+//! within the trap's region where the reach holds only a lower level outside it, model/reach.rs, # The trap's region),
+//! and nothing more is read; else at its own state, by the statements the reach's proofs make over a cell, made along
+//! the path at its speed (model/reach.rs `Model::holds_along`: every unit the whole space at that speed leaves open has
+//! its fold), and the step stable there. A step that is not proven is not taken: the hand-out ends (`run_groups`), and
+//! so does the attempt, with the reach grown to hold the paths not proven (`Attempt::Grow`; model/reach.rs `holding`,
+//! `Model::outside_to`): the model is judged again over it -- a fold that does not exist there is kept, at the level the
+//! level rule gives (SPEC §1.5) -- and the next attempt begins. A state that fails is held by the reach that ends its
+//! attempt, and the reach and the units kept only grow.
+//!
+//! What is accuracy is booked where the atom is. The tables' error at a state is read there, as every unit's is (an
+//! interpolant of the elimination's own nodes is bounded by them; beyond the ranges the tables were verified over its
+//! error is unverified, not unbounded). A step of the run that does not resolve the light along its path at its speed
+//! has no read at a state: such a step is taken, and its trajectory is unresolved from it on (step.rs
+//! `Trajectory::unresolved`) -- every later state of it is a wrong step's descendant. What it shows is booked whole:
+//! its share of the held atoms on what is shown -- an atom's row is a probability, so its error is at most one,
+//! whatever its state, and the mean over the held atoms errs by at most the share --, its share of the held atoms'
+//! kinetic energy on T -- the part of T it makes, which bounds its error while its true kinetic energy is within twice
+//! the one computed (its step's force within 5/4 of the true one's bound, step.rs; a hypothesis on T, not a bound). The
+//! loss of an atom lost after such a step is no held atom's: as every model error's, it is in what the held atoms'
+//! errors are weighed by (the held share, `accounts`), and not booked apart.
 //!
 //! Atoms outside the reach whose steps are proven at their own states are computed as any other, and what they carry is
 //! read where they are. Every trajectory places its atom at every output (`Domain::outside`), and an output's estimate
-//! holds the share of the held atoms outside the reach with their share of the kinetic energy (estimate.rs
-//! `Estimate::outside`); a group keeps the state of its first atom outside (`Shape::fold`). Before each batch's looks the
-//! product reads them (`apart`), and the model's error at an output is the pilot's with the atoms outside, by their
-//! shares, times what the model's error read at their states -- every folded unit's and the tables', at most the whole
-//! of what an atom carries -- exceeds the error booked. The booked error is already a mean over the held atoms wherever
-//! they are (the pilot's states are not chosen by the reach), so only the excess is theirs: a cloud driven out whole
-//! (every atom outside) adds nothing twice. The read is the product's own, at as many states an output as the pilot
-//! reads the model at. It is in the looks: the run stops on totals that hold it. Where the product ends with a look that
-//! it leaves no room for the statistics and that has room without it, the reach is outgrown as far as the product
-//! reads: it grows to the temperature read where that is above it (`attempt`), else the item stands booked and the
-//! ledger flags the output.
+//! holds the share of the held atoms unresolved and of those outside the reach, resolved, each with its share of the
+//! kinetic energy (estimate.rs `Estimate::unresolved`, `Estimate::outside`); a group keeps the state of its first atom
+//! outside (`Shape::fold`). Before each batch's looks the product reads them (`apart`), and the model's error at an
+//! output is the pilot's with the unresolved atoms whole and the atoms outside, by their shares, times what the model's
+//! error read at their states -- every folded unit's and the tables', at most the whole of what an atom carries --
+//! exceeds the error booked. The booked error is already a mean over the held atoms wherever they are (the pilot's
+//! states are not chosen by the reach), so only the excess is theirs: a cloud driven out whole (every atom outside) adds
+//! nothing twice. The read is the product's own, at as many states an output as the pilot reads the model at. It is in
+//! the looks: the run stops on totals that hold it. Where the product ends with a look that it leaves no room for the
+//! statistics and that has room without it, the reach is outgrown as far as the product reads: it grows to the
+//! temperature read where that is above it (`attempt`), else the item stands booked and the ledger flags the output.
 //!
 //! Measured (2026-11-11, seeds' runs of the reference scenes, before every step was placed). Six beams' Doppler heating
 //! in a tweezer, the reach grown to 84--139 µK, 448--704 atoms, 200 outputs: at most 0.2--1.1 % of the held atoms
@@ -580,12 +593,29 @@ impl Well for Prepared<'_> {
 ///   velocity, ρ = |Ω + K·v| ≤ |Ω| + |K| v (`sampled`: the model's own entries, per beat the largest |K|) -- advances by
 ///   ρ τ/2 from node to node; at π the nodes read it as its alias. So (|Ω| + |K| v) τ/2 < π for every entry.
 /// Both are edges -- where the scheme stops meaning anything --, not accuracies within a share: how well a step below
-/// them does is the check's to say (the pilot's two levels).
+/// them does is the check's to say (the pilot's two levels). They are not edges of one kind (step.rs, # The domain):
+/// beyond the first (`stable`) the step multiplies every error by e^μ, cosh μ = |trace|/2, a step after a step -- no
+/// atom's step means anything there --; beyond the second (`resolves`) the nodes read an alias, a parabola through
+/// three samples of the entry, at most 5/4 of it anywhere and Hermitian where it is: the atom goes on under a wrong
+/// generator as bounded as the true one, its step inaccurate, not unstable. So a step of an atom past the second is
+/// taken, and what the atom shows is booked whole from it on (# The reach's atoms); past the first it is not.
 fn admissible(tau: f64, frequency: f64, kick: f64, sampled: &[[f64; 2]], speed: f64) -> bool {
+    stable(tau, frequency, kick) && resolves(tau, sampled, speed)
+}
+
+/// Whether a step of τ is below the edge of its reference's turn and its kick's curvature (`admissible`): the same for
+/// every atom of the trap's largest frequency and the kick's largest curvature, whatever its speed.
+fn stable(tau: f64, frequency: f64, kick: f64) -> bool {
     let turn = frequency * tau;
     // cos ωτ and sin(ωτ)/(ωτ): the Stumpff functions the reference's flow is made of (step.rs).
     let (cos, sinc, _) = stumpff(turn * turn);
-    turn < PI && cos - 0.5 * kick * tau * tau * sinc > -1. && sampled.iter().all(|[beat, wave]| 0.5 * (beat + wave * speed) * tau < PI)
+    turn < PI && cos - 0.5 * kick * tau * tau * sinc > -1.
+}
+
+/// Whether a step of τ resolves the generator's turn along the path of an atom of a speed (`admissible`): every entry's
+/// (|Ω| + |K| v) τ/2 below π.
+fn resolves(tau: f64, sampled: &[[f64; 2]], speed: f64) -> bool {
+    sampled.iter().all(|[beat, wave]| 0.5 * (beat + wave * speed) * tau < PI)
 }
 
 /// The ladder's first rung (module documentation, # The step): the largest rung -- the run's length `run` (µs) over an
@@ -617,45 +647,43 @@ fn typical_speed(hbar_over_mass: f64, temperature_uk: f64) -> f64 {
 
 /// Where a level's steps are proven (SPEC §1.8; module documentation, # The reach's atoms; step.rs, # The domain): the
 /// model with its units' gates (`judged`; those the whole space at the reach's speeds leaves `open`, and all of them,
-/// `every`), the reach it was judged over, its tables, and the edge of the step -- the frequency, the kick's curvature and
-/// the entries `admissible` reads. A level whose step is the run's (`resolves`: the run's rungs and those below) is a
-/// result: its trajectories are the model's, accurate as the run books them -- the folds exist, the tables hold as they
-/// were verified and the step resolves the light, at every atom's state and speed. A companion's is a probe of the step
-/// (`first_rung`): its trajectories are the model's -- the folds exist where it steps: one that does not is no model,
-/// and its series diverges (a fold's rate went as the Doppler shift squared, SPEC §1.8) -- and its step is stable, the
-/// edge every atom shares; what is accuracy -- the tables as verified (an interpolant of the elimination's own nodes,
-/// bounded by them), the light resolved at the atom's speed -- is the run's, and a companion's atoms beyond it weigh in
-/// its difference by their share, as its fast atoms beyond its light's limit do. (A companion at twice the step heats
-/// some atoms beyond the run's: on PGC3D's pilot, at 2.6 µs, two of them to 1.8 and 2.0 times the reach's level, past
-/// the trap intensity's verified range; held to it, the reach grew from 30 to 54 µK and the run's step fell from 0.649
-/// to 0.532 µs, 64 % more work.)
+/// `every`), the reach it was judged over, the trap, and the edge of the step -- the trap's largest frequency, the kick's
+/// curvature over the reach with the beams' largest moduli it was bounded by (`moduli`), and the entries `resolves`
+/// reads.
+/// Proven is what is wrong without bound where it fails (step.rs, # The domain): the folds exist, at every level -- one
+/// that does not is no model, and its series diverges (a fold's rate went as the Doppler shift squared, SPEC §1.8) --,
+/// and the step is stable, the edge of every level (`stable`, `first_rung`). What is accuracy is booked, not proven: the
+/// tables' error, an interpolant of the elimination's own nodes, is read at the atoms outside the reach as every unit's
+/// is (`apart`); a step that does not resolve the light at the atom's speed is taken, and on a level whose step is the
+/// run's (`result`: its rungs and those below) the atom is unresolved from it on and booked whole (`apart`). A
+/// companion's atoms beyond its light's limit weigh in its difference by their share. (Held to the tables' verified
+/// ranges, PGC3D's pilot's companion at 2.6 µs, which heats two atoms to 1.8 and 2.0 times the reach's level, grew the
+/// reach from 30 to 54 µK and the run's step fell from 0.649 to 0.532 µs, 64 % more work; held to the light's resolution
+/// at their speeds, R3_DOPPLER's run took 6 attempts and 2.7 times the steps, the reach growing by atoms 1--6 % faster than
+/// its largest speed, each grown reach's product finding a faster one.)
 #[derive(Clone, Copy)]
 struct Domain<'a> {
-    bounds: Bounds<'a>,
-    tables: &'a crate::model::tabulate::Tables,
-    resolves: bool,
-}
-/// What a domain holds beside the tables (`Domain`), made once an attempt: the tables are refined after its pilot.
-#[derive(Clone, Copy)]
-struct Bounds<'a> {
     model: &'a Model,
     reach: &'a crate::model::Reach,
+    trap: &'a Trap,
     judged: &'a Judged<'a>,
     open: &'a [usize],
     every: &'a [usize],
     hbar_over_mass: f64,
     frequency: f64,
     kick: f64,
+    moduli: &'a [f64],
     sampled: &'a [[f64; 2]],
+    result: bool,
 }
 impl Domain<'_> {
     /// Whether an atom at r with the momentum κ lies outside the reach (`Model::holds`).
     fn outside(&self, r: V3, kappa: V3) -> bool {
-        !self.bounds.model.holds(self.bounds.reach, r, kappa)
+        !self.model.holds(self.reach, r, kappa)
     }
-    /// The same domain for a companion's level (`resolves` off).
+    /// The same domain for a companion's level (`result` off).
     fn companion(&self) -> Self {
-        Domain { resolves: false, ..*self }
+        Domain { result: false, ..*self }
     }
 }
 impl crate::step::Domain for Domain<'_> {
@@ -666,8 +694,10 @@ impl crate::step::Domain for Domain<'_> {
     /// first rung is admissible, and nothing more is read. Else at its own state, by the same statements the reach's
     /// proofs make over a cell, made along the path at the path's speed (`Model::holds_along`): every unit whose gate the
     /// whole space at that speed does not settle has its fold there (of a speed within the reach's, the units the whole
-    /// space at the reach's speed leaves open, else every one); and where the level's step is the run's, the tables hold
-    /// there as they were verified and the step is admissible at the speed.
+    /// space at the reach's speed leaves open, else every one); and the step is stable there -- the kick's curvature
+    /// the reach's, unless a beam is stronger over the path's box than over the reach's, and then the curvature with
+    /// the stronger moduli (model/reach.rs `Model::kick_curvature`). A step so proven is taken; whether it resolves the
+    /// light along its path at its speed is told where the level's step is the run's (`resolves`).
     ///
     /// Else the reach is to hold the path (`Unproven`, `attempt`): within the region its energy; outside it the same,
     /// where the path lies outside the region (its box does not meet it) or where the reach already holds its energy
@@ -675,23 +705,28 @@ impl crate::step::Domain for Domain<'_> {
     /// above the reach's level asks for the region first: an atom outside the region above the far value is lost (SPEC
     /// §1.7), and an unbound atom crossing the edge on its way out, held outside the region, would make the reach the
     /// whole space.
-    fn proven(&self, flow: &crate::step::Flow, (r, kappa): (V3, V3), half: f64) -> Result<(), crate::step::Unproven> {
-        let b = &self.bounds;
-        let (model, reach) = (b.model, b.reach);
-        let v = kappa.map(|k| b.hbar_over_mass * k);
-        let energy = flow.highest(r, v, half) + 0.5 * b.hbar_over_mass * kappa.iter().map(|k| k * k).sum::<f64>();
+    fn proven(&self, flow: &crate::step::Flow, (r, kappa): (V3, V3), half: f64) -> Result<bool, crate::step::Unproven> {
+        let (model, reach) = (self.model, self.reach);
+        let v = kappa.map(|k| self.hbar_over_mass * k);
+        let energy = flow.highest(r, v, half) + 0.5 * self.hbar_over_mass * kappa.iter().map(|k| k * k).sum::<f64>();
         if energy <= reach.minimum + reach.outside {
-            return Ok(());
+            return Ok(true);
         }
-        let [meets, within] = model.region_of(&model.spans(&Cell { centre: r, half: v.map(|x| (x * half).abs()) }));
+        let spans = model.spans(&Cell { centre: r, half: v.map(|x| (x * half).abs()) });
+        let [meets, within] = model.region_of(&spans);
         let held = energy <= reach.minimum + reach.energy;
         if held && within {
-            return Ok(());
+            return Ok(true);
         }
         let speed = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-        let units = if speed <= reach.speed { b.open } else { b.every };
-        if (!self.resolves || admissible(2. * half.abs(), b.frequency, b.kick, b.sampled, speed)) && model.holds_along(b.judged, units, self.resolves.then_some(self.tables), r, v, half, speed) {
-            return Ok(());
+        let units = if speed <= reach.speed { self.open } else { self.every };
+        let kick = if spans.iter().zip(self.moduli).all(|(span, most)| span.most <= *most) {
+            self.kick
+        } else {
+            model.kick_curvature(reach, &spans.iter().zip(self.moduli).map(|(span, most)| span.most.max(*most)).collect::<Vec<f64>>(), self.trap)
+        };
+        if stable(2. * half.abs(), self.frequency, kick) && model.holds_along(self.judged, units, r, v, half, speed) {
+            return Ok(!self.result || resolves(2. * half.abs(), self.sampled, speed));
         }
         Err(crate::step::Unproven { region: energy, outside: if !within && (!meets || held) { energy } else { f64::NEG_INFINITY } })
     }
@@ -980,13 +1015,14 @@ fn hottest(estimates: &[Estimate]) -> f64 {
 
 /// What the atoms outside the reach add to the model's error at every output (SPEC §1.8, §4; module documentation,
 /// # The reach's atoms), on the held atoms' populations (absolute) and on T (relative), from the run's `estimates`
-/// (their share apart, estimate.rs `Estimate::outside`), the outside states its groups `parts` keep and the model's
-/// error `booked` there (`Fixed::model`, the pilot's): the atoms outside, by their share of the atoms and of the kinetic
-/// energy, times what the model's error at their states -- `read` at a state: every folded unit's and the tables', at
-/// most the whole of what the atom carries -- exceeds the error booked. The mean over the first outside state of each of
-/// the first groups that hold one at the output, as many groups as the pilot has: as many states an output as the
-/// model's booked error was read at. A state's read is kept (`known`, by trajectory and output): it is read once in a
-/// run. (Every step of theirs is proven at its own state, `Domain`: their errors are the model's, read.)
+/// (their shares apart, estimate.rs `Estimate::outside`, `Estimate::unresolved`), the outside states its groups `parts`
+/// keep and the model's error `booked` there (`Fixed::model`, the pilot's):
+/// - the unresolved atoms, whole: their share of the atoms on what is shown, of the kinetic energy on T;
+/// - the atoms outside, resolved, by their share of the atoms and of the kinetic energy, times what the model's error
+///   at their states -- `read` at a state: every folded unit's and the tables', at most the whole of what the atom
+///   carries -- exceeds the error booked. The mean over the first outside state of each of the first groups that hold
+///   one at the output, as many groups as the pilot has: as many states an output as the model's booked error was read
+///   at. A state's read is kept (`known`, by trajectory and output): it is read once in a run.
 fn apart(estimates: &[Estimate], parts: &[&Part], booked: &[[f64; 2]], read: &(dyn Fn(&State) -> [f64; 2] + Sync), known: &mut HashMap<(u64, usize), [f64; 2]>) -> Vec<[f64; 2]> {
     let groups = (pilot_size() / GROUP) as usize;
     let states: Vec<Vec<&State>> = (0..estimates.len()).map(|k| parts.iter().filter(|_| k > 0).filter_map(|p| p.samples.get(k).and_then(|s| s.first())).take(groups).collect()).collect();
@@ -1001,7 +1037,7 @@ fn apart(estimates: &[Estimate], parts: &[&Part], booked: &[[f64; 2]], read: &(d
         .map(|(k, ((e, states), booked))| {
             std::array::from_fn(|i| {
                 let mean = states.iter().map(|state| known[&(state.index, k)][i]).sum::<f64>() / states.len() as f64;
-                if states.is_empty() { 0. } else { e.outside[i] * (mean - booked[i]).max(0.) }
+                e.unresolved[i] + if states.is_empty() { 0. } else { e.outside[i] * (mean - booked[i]).max(0.) }
             })
         })
         .collect()
@@ -1178,8 +1214,10 @@ fn attempt(
     // What the reach the model was judged over leaves out of the initial ensemble (model/reach.rs `Model::left_out`): of
     // the atoms and of their kinetic energy, by the ensemble's quadrature of its own density -- no atom is drawn --, a
     // level of it with no more evaluations of the potential than the most trajectories a solve runs have initial atoms.
-    // It and the kick's curvature over the reach (`admissible`) ask nothing of one another: side by side on the pool.
-    let (unsampled, kick) = rayon::join(|| model.left_out(judged, ensemble, MOST_TRAJECTORIES), || model.kick_curvature(judged, trap));
+    // It and the kick's curvature over the reach (`admissible`), of the beams' largest moduli over the reach's box, ask
+    // nothing of one another: side by side on the pool.
+    let moduli = model.moduli(judged);
+    let (unsampled, kick) = rayon::join(|| model.left_out(judged, ensemble, MOST_TRAJECTORIES), || model.kick_curvature(judged, &moduli, trap));
     let (report, unheld) = (setting.reported.as_ref().unwrap_or(trap), setting.reported.is_none());
     let scales = Scales { hbar_over_mass: hm, frequencies: report.lab };
     let plan = Plan::new(&request.times_us, report.lab);
@@ -1210,9 +1248,9 @@ fn attempt(
     let (frequency, typical, end) = (trap.frequencies.iter().copied().fold(0., f64::max), typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3.), plan.end);
     let above = |tau: f64| 4. * tau <= end && admissible(2. * tau, frequency, kick, entries, judged.speed) && admissible(4. * tau, frequency, kick, entries, typical);
     // Where the attempt's steps are proven (`Domain`): of the units' gates, those the whole space at the reach's speeds
-    // leaves open, and all of them; the tables join it once made, and again once refined.
+    // leaves open, and all of them.
     let (open, every): (Vec<usize>, Vec<usize>) = (model.everywhere(setting.gates, judged.speed).1, (0..units.len()).collect());
-    let bounds = Bounds { model, reach: judged, judged: setting.gates, open: &open, every: &every, hbar_over_mass: hm, frequency, kick, sampled: entries };
+    let domain = Domain { model, reach: judged, trap, judged: setting.gates, open: &open, every: &every, hbar_over_mass: hm, frequency, kick, moduli: &moduli, sampled: entries, result: true };
     // An attempt that ends on a step not proven: the reach that holds its path (model/reach.rs, # The trap's region) --
     // the temperature whose level holds the path's energy within the region, and the level outside it --, from the step
     // the attempt stands at.
@@ -1240,7 +1278,6 @@ fn attempt(
     let most = (pilot_size() as f64 * (context.plan.end / context.tau + context.plan.end / (2. * context.tau))).ceil() as usize;
     let mut tables = model.tabulate(judged, most);
     let run = Run::tabulated(model, &tables, reference);
-    let domain = Domain { bounds, tables: &tables, resolves: true };
 
     // The pilot's groups (module documentation, # The pipeline): the run's first trajectories, at two levels.
     let first = MOST_TRAJECTORIES / GROUP;
@@ -1381,7 +1418,6 @@ fn attempt(
         context.ledger.item("初始时就在估计的活动范围之外的原子占初始动能的比例", unsampled[1], "对初始分布数值积分得到（含积分最后两级之差），计入温度的模型误差");
         Run::tabulated(model, &tables, reference)
     };
-    let domain = Domain { bounds, tables: &tables, resolves: true };
 
     // The product (module documentation, # Stopping): on from the pilot's trajectories at the run's step, the run's
     // first; the pilot's companions have done their part, and its states have been read -- but those outside the
@@ -1812,8 +1848,9 @@ impl Counts {
 }
 
 /// A trajectory's state at an output (model.rs `Sample`) with the run's step, the trajectory's number and whether the
-/// atom lies outside the reach there (`Domain::place`): where the units' errors are measured and a model is priced
-/// (`rate`) -- a pilot trajectory's at every output; any trajectory's where its atom is outside the reach (`apart`).
+/// atom lies outside the reach there, resolved (`Domain::outside`, estimate.rs `Held`): where the units' errors are
+/// measured and a model is priced (`rate`) -- a pilot trajectory's at every output; any trajectory's where its atom is
+/// outside the reach (`apart`).
 #[derive(Clone)]
 struct State {
     sample: Sample,
@@ -1854,9 +1891,10 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     // The steps taken, and the start of the last one counted.
     let (mut steps, mut counted) = (0, None);
     let mut record = |k: usize, t: &Trajectory, out: &mut Vec<Fate>| {
-        // The atom at the output's instant; from the first output on its κ and κ² are its window's means (below).
-        let outside = domain.outside(t.r, t.kappa);
-        out[k] = Fate::Held(Held { rows: model.readout(t.cluster, &t.point(), &t.psi), kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), outside });
+        // The atom at the output's instant; from the first output on its κ and κ² are its window's means (below). An
+        // unresolved one is booked whole, its state not read (`apart`).
+        let outside = !t.unresolved && domain.outside(t.r, t.kappa);
+        out[k] = Fate::Held(Held { rows: model.readout(t.cluster, &t.point(), &t.psi), kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), outside, unresolved: t.unresolved });
         if let Ok(j) = plan.listed.binary_search(&k) {
             listed[j] = Some((t.r, t.kappa));
         }
@@ -2655,7 +2693,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     // What the atoms outside the reach carry (`apart`): its largest over the outputs, weighed by the held share.
     for (i, what) in ["布居", "温度"].into_iter().enumerate() {
         let largest = (1..outputs).map(|k| c.outside[k][i] * (1. - estimates[k].loss)).fold(0., f64::max);
-        ledger.item(&format!("计算中跑出估计的活动范围的原子（{what}）"), largest, "在每个输出时刻统计：速率太大、时间步长对它已不适用的原子，按它们所占的比例全部计入；其余的按所占的比例乘以在它们的状态上实测的模型误差（只计超出已计入的部分）");
+        ledger.item(&format!("计算中跑出估计的活动范围的原子（{what}）"), largest, "在每个输出时刻统计：曾有一步因速率太大而时间步长对它不适用的原子（从那一步起），按它们所占的比例全部计入；其余的按所占的比例乘以在它们的状态上实测的模型误差（只计超出已计入的部分）");
     }
     ledger.close(times, &population, &temperature);
     // T and the motion at t = 0: exact.
@@ -3133,22 +3171,24 @@ mod tests {
             }),
             failed: 0.,
             outside: [0.; 2],
+            unresolved: [0.; 2],
         }
     }
 
     /// What the atoms outside the reach add to the model's error (`apart`), in a run whose model's error is booked
     /// at 2 % on what is shown and 3 % on T. At the first output after t = 0 a tenth of the atoms are outside with a
-    /// fifth of the kinetic energy; three groups hold an outside state there, read at 1 %, 5 % and 9 % on what is
-    /// shown and at 3 %, 13 % and 23 % on T: the means, 5 % and 13 %, exceed the booked error by 3 % and 10 %, and the
-    /// atoms add 0.1·0.03 and 0.2·0.10. At the second, 1 % of the atoms with 4 % of the energy are outside; their state
-    /// reads below the booked error: they add nothing. At the third no atom is outside: nothing; nor at t = 0, where
-    /// half of them are and no state is read. A state is read once in a run, and of the groups that hold an outside
+    /// fifth of the kinetic energy, none unresolved; three groups hold an outside state there, read at 1 %, 5 % and 9 %
+    /// on what is shown and at 3 %, 13 % and 23 % on T: the means, 5 % and 13 %, exceed the booked error by 3 % and
+    /// 10 %, and the atoms add 0.1·0.03 and 0.2·0.10. At the second, 1 % of the atoms with 4 % of the energy are outside
+    /// and as many unresolved; the outside state reads below the booked error: the unresolved add their whole shares. At
+    /// the third no atom is outside: nothing; nor at t = 0, where half of them are, as many unresolved, and no state is
+    /// read: the unresolved add their whole shares. A state is read once in a run, and of the groups that hold an outside
     /// state at an output only as many as the pilot has are read: a twelfth group's state, read at the whole, changes
     /// nothing.
     #[test]
     fn the_atoms_outside_the_reach_add_what_their_states_read_beyond_the_booked_error() {
-        let with = |outside: [f64; 2]| Estimate { outside, ..estimate([10.; 3], 0., 800.) };
-        let estimates = [with([0.5; 2]), with([0.1, 0.2]), with([0.01, 0.04]), with([0.; 2])];
+        let with = |outside: [f64; 2], unresolved: [f64; 2]| Estimate { outside, unresolved, ..estimate([10.; 3], 0., 800.) };
+        let estimates = [with([0.5; 2], [0.5; 2]), with([0.1, 0.2], [0.; 2]), with([0.01, 0.04], [0.01, 0.04]), with([0.; 2], [0.; 2])];
         let state = |index: u64, k: usize| State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t: k as f64 }, psi: vec![] }, tau: 1., index, outside: true };
         let part = |states: [Option<u64>; 4]| Part { sums: Group::new(4), listed: vec![], samples: states.iter().enumerate().map(|(k, index)| index.map(|index| state(index, k)).into_iter().collect()).collect(), counts: Counts::default() };
         let parts = [part([Some(0), Some(0), None, None]), part([Some(8), Some(8), Some(9), None]), part([None, None, None, None]), part([None, Some(24), None, None])];
@@ -3168,7 +3208,7 @@ mod tests {
         let mut known = HashMap::new();
         let adds = apart(&estimates, &all, &booked, &read, &mut known);
         let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-15 && (a[1] - b[1]).abs() < 1e-15;
-        assert!(near(adds[0], [0.; 2]) && near(adds[1], [0.1 * 0.03, 0.2 * 0.10]) && near(adds[2], [0.; 2]) && near(adds[3], [0.; 2]), "{adds:?}");
+        assert!(near(adds[0], [0.5; 2]) && near(adds[1], [0.1 * 0.03, 0.2 * 0.10]) && near(adds[2], [0.01, 0.04]) && near(adds[3], [0.; 2]), "{adds:?}");
         assert_eq!((reads.load(Ordering::Relaxed), known.len()), (4, 4));
         assert_eq!(apart(&estimates, &all, &booked, &read, &mut known), adds);
         assert_eq!(reads.load(Ordering::Relaxed), 4);
@@ -3187,7 +3227,7 @@ mod tests {
         let plan = Plan::new(&[0., 1.], [1.; 3]);
         let record = |index: u64, keep: bool| {
             let outside = index % 2 == 1;
-            let held = |outside: bool| Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], outside });
+            let held = |outside: bool| Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], outside, unresolved: false });
             let state = |k: usize, outside: bool| State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t: k as f64 }, psi: vec![] }, tau: 1., index, outside };
             let samples = vec![keep.then(|| state(0, false)), (keep || outside).then(|| state(1, outside))];
             Record { outputs: vec![held(false), held(outside)], listed: vec![None; plan.listed.len()], samples, counts: Counts::default(), unproven: None }
@@ -3470,7 +3510,7 @@ mod tests {
         };
         let shape = Shape::of(&context.plan, false);
         let record = |i: u64| {
-            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], outside: false };
+            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], outside: false, unresolved: false };
             Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], samples: vec![], counts: Counts::default(), unproven: None }
         };
         let whole = [shape.fold((0..GROUP).map(record)), shape.fold((GROUP..2 * GROUP).map(record))];
@@ -3555,7 +3595,7 @@ mod tests {
         let record = |i: u64| {
             let mut rows = [0.; STATES];
             rows[(i % STATES as u64) as usize] = 1.;
-            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], outside: false };
+            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], outside: false, unresolved: false };
             let outputs = vec![Fate::Held(held.clone()), if i % 3 > 0 { Fate::Held(held) } else { Fate::Lost }];
             Record { outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], samples: vec![], counts: Counts { steps: i, ..Counts::default() }, unproven: None }
         };

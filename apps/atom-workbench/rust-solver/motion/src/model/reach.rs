@@ -704,7 +704,7 @@ pub(crate) struct Region {
     /// Per ground state its drives' sizes and distances (units.rs `Model::across`), and the first places of their gates
     /// in the tail rule's order (units.rs `Model::folds`).
     pub(crate) across: [OnceLock<Vec<super::units::Across>>; GROUND],
-    pub(crate) drives: [OnceLock<Vec<[f64; 4]>>; GROUND],
+    pub(crate) drives: [OnceLock<Vec<[f64; 5]>>; GROUND],
     /// Per ground state: the slope of its level under the near light (units.rs `Model::near_slope`), and its shift's
     /// bound (units.rs `Model::near_shift`).
     pub(crate) slopes: [OnceLock<f64>; GROUND],
@@ -1253,35 +1253,31 @@ impl Model {
     }
 
     /// Whether the model holds along a straight path r + v u, |u| ≤ |half|, at the speed `speed` (step.rs, # The domain;
-    /// solve.rs `Domain`): every one of the units `units` has its fold (units.rs `Model::exist_over`) and the tables
-    /// `tables`, where asked, hold as they were verified (tabulate.rs `Model::within`) -- by the reach's proofs' own rule along the path (module
-    /// documentation, # Provable extrema): a piece of the path is settled where every bound over its box is below ½ and
-    /// within the tables' ranges, and the path fails where a piece's middle, a point of the path, attains ½ or leaves a
-    /// range; else the piece is halved, each half asked only what its whole left open. A bound over the path's whole box
-    /// moves with the box: a step of 3.3 µs at 0.17 µm/µs spans half a waist of a tweezer, its trap's shift of a probe
-    /// over it reads a fold at 0.78 that no point of the path has, and reaches grown for such boxes alone crept up in
-    /// seven attempts.
-    pub(crate) fn holds_along(&self, judged: &super::units::Judged, units: &[usize], tables: Option<&super::tabulate::Tables>, r: [f64; 3], v: [f64; 3], half: f64, speed: f64) -> bool {
+    /// solve.rs `Domain`): every one of the units `units` has its fold (units.rs `Model::exist_over`) -- by the reach's
+    /// proofs' own rule along the path (module documentation, # Provable extrema): a piece of the path is settled where
+    /// every bound over its box is below ½, and the path fails where a piece's middle, a point of the path, attains ½;
+    /// else the piece is halved, each half asked only what its whole left open. A bound over the path's whole box moves
+    /// with the box: a step of 3.3 µs at 0.17 µm/µs spans half a waist of a tweezer, its trap's shift of a probe over it
+    /// reads a fold at 0.78 that no point of the path has, and reaches grown for such boxes alone crept up in seven
+    /// attempts.
+    pub(crate) fn holds_along(&self, judged: &super::units::Judged, units: &[usize], r: [f64; 3], v: [f64; 3], half: f64, speed: f64) -> bool {
         let at = |u: f64| -> [f64; 3] { std::array::from_fn(|a| r[a] + v[a] * u) };
-        // A region's verdict: the units it leaves open, and whether the tables hold over it.
-        let open = |region: &Region, asked: &[usize], tables_asked: bool| -> (Vec<usize>, bool) {
-            (asked.iter().copied().filter(|&u| !self.exist_over(judged, &[u], region)).collect(), tables_asked && tables.is_some_and(|tables| !self.within(tables, region)))
-        };
-        let mut pieces = vec![(-half.abs(), half.abs(), units.to_vec(), tables.is_some())];
-        while let Some((a, b, asked, tables_asked)) = pieces.pop() {
+        // The units a region leaves open.
+        let open = |region: &Region, asked: &[usize]| -> Vec<usize> { asked.iter().copied().filter(|&u| !self.exist_over(judged, &[u], region)).collect() };
+        let mut pieces = vec![(-half.abs(), half.abs(), units.to_vec())];
+        while let Some((a, b, asked)) = pieces.pop() {
             let (middle, width) = (0.5 * (a + b), 0.5 * (b - a));
             let over = self.region(self.spans(&Cell { centre: at(middle), half: v.map(|x| (x * width).abs()) }), speed);
-            let (left, tables_left) = open(&over, &asked, tables_asked);
-            if left.is_empty() && !tables_left {
+            let left = open(&over, &asked);
+            if left.is_empty() {
                 continue;
             }
             let point = self.point_region(at(middle), speed);
-            let (failing, tables_failing) = open(&point, &left, tables_left);
-            if !failing.is_empty() || tables_failing || !(a < middle && middle < b) {
+            if !open(&point, &left).is_empty() || !(a < middle && middle < b) {
                 return false;
             }
-            pieces.push((a, middle, left.clone(), tables_left));
-            pieces.push((middle, b, left, tables_left));
+            pieces.push((a, middle, left.clone()));
+            pieces.push((middle, b, left));
         }
         true
     }
@@ -1314,18 +1310,24 @@ impl Model {
         ensemble.beyond(&|r| self.room(reach, r, &prepared), most).map(|share| share.value + share.difference)
     }
 
+    /// The beams' largest moduli over a reach's box (`Span::most`, per request beam): what the kick's curvature over the
+    /// reach takes the fringes' beams at (`kick_curvature`).
+    pub fn moduli(&self, reach: &Reach) -> Vec<f64> {
+        self.spans(&reach.whole()).iter().map(|span| span.most).collect()
+    }
+
     /// What the model bounds of the curvature of the kick's potential, (ħ/m) λ_max ∂∂(Ĥ_h − V_ref) of any state held in
     /// its cluster's frames along any direction (rad²/µs²; module documentation, # The kick's curvature), every light
-    /// on: the largest over the clusters' states of how much stiffer than the reference's the state's trap is at the
-    /// trap's centre (`stiffer`) with the state's row of the constant terms' fringes over the reach's box (assemble.rs
-    /// `Plan::fringes`). Negative where every state's well is softer than the reference's and no such light makes a
-    /// fringe.
-    pub fn kick_curvature(&self, reach: &Reach, trap: &Trap) -> f64 {
-        let most: Vec<f64> = self.spans(&reach.whole()).iter().map(|span| span.most).collect();
+    /// on, the beams' moduli at most `most`: the largest over the clusters' states of how much stiffer than the
+    /// reference's (of the reach's populations) the state's trap is at the trap's centre (`stiffer`) with the state's
+    /// row of the constant terms' fringes (assemble.rs `Plan::fringes`) -- over the reach's box with its `moduli`, over a
+    /// step's path outside it with the larger of those and the path's (solve.rs `Domain`). Negative where every state's
+    /// well is softer than the reference's and no such light makes a fringe.
+    pub fn kick_curvature(&self, reach: &Reach, most: &[f64], trap: &Trap) -> f64 {
         let stiffer = self.stiffer(trap.centre, &reach.populations);
         let mut largest = f64::NEG_INFINITY;
         for (c, cluster) in self.clusters.iter().enumerate() {
-            let rows = self.plan(c, &self.running()).fringes(self, &most);
+            let rows = self.plan(c, &self.running()).fringes(self, most);
             largest = cluster.states.iter().zip(&rows).fold(largest, |most, (&s, row)| most.max(stiffer[s] + row));
         }
         self.hbar_over_mass * largest
@@ -1719,7 +1721,7 @@ mod tests {
             let reach = model.reach(&trap, &alone(state), request.temperature_uk, share);
             let rate = |trap: &Trap| trap.frequencies.iter().copied().fold(0.0, f64::max);
             let stiffest = (0..GROUND).map(|s| rate(&model.trap(&alone(s), &model.prepared()).unwrap()).powi(2) - rate(&trap).powi(2)).fold(f64::NEG_INFINITY, f64::max);
-            let (kick, own) = (model.kick_curvature(&reach, &trap), rate(&trap).powi(2));
+            let (kick, own) = (model.kick_curvature(&reach, &model.moduli(&reach), &trap), rate(&trap).powi(2));
             eprintln!("{scene}: ω_k² = {:.4} ω²; the traps' {:.4} ω²", kick / own, stiffest / own);
             assert!((kick - stiffest).abs() <= 1e-9 * own, "{scene}: the bound {kick}, the wells' difference {stiffest}");
             assert!(if scene == "R1_SIGMA_P" { kick > 0.1 * own } else { kick.abs() <= 1e-9 * own }, "{scene}: {kick} of {own}");
@@ -1728,7 +1730,7 @@ mod tests {
         let reference = alone((0..GROUND).find(|&s| request.initial_density[(s, s)].re > 0.0).unwrap());
         let trap = model.trap(&reference, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &reference, request.temperature_uk, share);
-        let bound = model.kick_curvature(&reach, &trap) / model.hbar_over_mass;
+        let bound = model.kick_curvature(&reach, &model.moduli(&reach), &trap) / model.hbar_over_mass;
         let (lights, prepared) = (model.running(), model.prepared());
         let mut stream = crate::random::Stream::jump(11, 0, 0);
         let mut largest = f64::NEG_INFINITY;
@@ -1816,7 +1818,7 @@ mod tests {
                 let u = half * (i as f64 / 32.0 - 1.0);
                 !model.exist_over(&judged, &open, &model.point_region(std::array::from_fn(|a| r[a] + v[a] * u), speed))
             });
-            let along = model.holds_along(&judged, &open, None, r, v, half, speed);
+            let along = model.holds_along(&judged, &open, r, v, half, speed);
             assert!(!(points_fail && along), "a path with a failing point held to hold: r {r:?} v {v:?}");
             if along { held += 1 } else { failed += 1 }
         }

@@ -21,8 +21,8 @@ use crate::step::{self, Dynamics, Middle, Trajectory};
 /// The domain the tests' steps are taken in: every step proven -- a test model is the model, at every point it is asked.
 struct Everywhere;
 impl step::Domain for Everywhere {
-    fn proven(&self, _: &step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> Result<(), step::Unproven> {
-        Ok(())
+    fn proven(&self, _: &step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> Result<bool, step::Unproven> {
+        Ok(true)
     }
 }
 
@@ -909,6 +909,51 @@ fn a_standing_wave_s_force_is_the_bloch_equations_along_the_path() {
         let miss = (f[2] - expected).abs();
         eprintln!("v {v}: F_z {} ± {} against {expected} (scale {scale})", f[2], e[2]);
         assert!(miss <= 3.0 * e[2] && miss <= 0.03 * scale, "v {v}: F_z {} ± {} against {expected} (scale {scale})", f[2], e[2]);
+    }
+}
+
+/// A step past its light's resolution at its speed (solve.rs `resolves`: an entry's (|Ω| + |K| v) τ/2 beyond π) is
+/// inaccurate, not unstable (module documentation, # The domain): a two-level atom moving uniformly through a standing
+/// wave (Ω = Γ, Δ = −Γ/2), its second beam a beat of the residual wave vector 2k, steps of 2 µs at speeds where the
+/// beat turns by 2.6π to 20π from node to node, 200 steps each, the state set back to norm one after each. What a step
+/// does is bounded whatever the steps before it left:
+/// - its impulse: the force on a state is at most |G_eg| ≤ kΩ; the impulse is the exact tones' integral on the middle
+///   state plus the three nodes' parabola (Lebesgue constant 5/4) of the force on what the state does besides (a
+///   difference of density matrices, trace norm at most 2): at most (1 + 5/2) τ kΩ (measured: 0.41 to 0.56);
+/// - its hazard, −ln‖ψ‖²/τ from norm one, at most Γ -- no more jumps than the line can give (measured: 0.20 to 0.33 Γ;
+///   the released runaway was a fold whose series diverged, 10⁵ jumps/µs).
+/// Its norm may grow from one (printed) -- the atom then waits for its next jump too long --, and not past the edge
+/// alone: a step this long against the light's change does so below it too (the slowest atom here, 0.51π: ×30), which
+/// the check reads at the typical atom (solve.rs, # The step). What the steps make of the force is not the master
+/// equation's (printed): inaccurate.
+#[test]
+fn a_step_past_its_light_s_resolution_is_inaccurate_not_unstable() {
+    let hm = 1e-9;
+    let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
+    let (rabi, detuning, tau, steps) = (GAMMA, -0.5 * GAMMA, 2.0, 200);
+    let beams = vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase: 0.0 }];
+    let model = Atom::new(hm, flat, beams.clone(), detuning, GAMMA);
+    let mut scratch = step::Scratch::default();
+    for v in [0.1, 0.5, 1.0, 2.0, 4.0] {
+        let turn = 2.0 * K * v * 0.5 * tau / std::f64::consts::PI;
+        let mut t = held(&model, [0.0; 3], [0.0, 0.0, v / hm]);
+        let (start, mut impulse, mut hazard, mut grown) = (t.kappa[2], 0.0_f64, 0.0_f64, 0.0_f64);
+        for _ in 0..steps {
+            let s = step_of(&model, &t, tau, &mut scratch).unwrap();
+            let norm = crate::linalg::norm_sqr(&s.end.psi);
+            assert!(norm.is_finite() && norm > 0.0, "v {v}: the norm {norm} after a step from one");
+            impulse = impulse.max((s.end.kappa[2] - t.kappa[2]).abs() / (tau * K * rabi));
+            hazard = hazard.max(-norm.ln() / (GAMMA * tau));
+            grown = grown.max(norm);
+            t = s.end;
+            let scale = 1.0 / norm.sqrt();
+            t.psi.iter_mut().for_each(|z| *z = *z * scale);
+        }
+        let mean = (t.kappa[2] - start) / (steps as f64 * tau);
+        eprintln!("v {v} µm/µs, the beat's turn node to node {turn:.2}π: impulse at most {impulse:.3} τkΩ, hazard {hazard:.2} Γ, norm at most {grown:.3e} after a step from one; the mean force {mean:.2}, the master equation's {:.2}", bloch_force(&beams, detuning, 0.0, v, 3.0, 33.0));
+        if turn > 1.0 {
+            assert!(impulse <= 3.5 && hazard <= 1.0, "v {v}: impulse {impulse} τkΩ, hazard {hazard} Γ");
+        }
     }
 }
 
