@@ -555,16 +555,19 @@ impl Builtin {
     /// computer is gone decides it for this one too, and it is lost with that reason -- a plugin
     /// device as a remote.device is (`PluginHost::lost`), the native board through the workbench.
     fn watch(&self, instance: &str, type_id: &str, parameters: &Value) {
-        let (bench, host, reply, announced) = {
+        let (bench, host, reply, native) = {
             let stand = self.0.borrow();
             let native = stand.native.as_ref().is_some_and(|(types, _)| types.iter().any(|item| item["announces"] == type_id));
-            let plugin = || stand.host.as_ref().and_then(|host| host.catalog().ok()).is_some_and(|catalog| catalog.types.iter().any(|item| item.announces == type_id));
-            (stand.bench.clone(), stand.host.clone(), stand.reply.clone(), native || plugin())
+            (stand.bench.clone(), stand.host.clone(), stand.reply.clone(), native)
         };
-        let Some(bench) = bench.filter(|_| announced) else { return };
+        let Some(bench) = bench else { return };
         let (name, kind, parameters) = (instance.to_owned(), type_id.to_owned(), parameters.clone());
         let registry = host.as_ref().map(|host| host.registry().clone()).unwrap_or_else(|| zlc_plugin_host::Registry::standalone("fabric-watch"));
+        // Whether a plugin type is another computer's client is the catalogue's to say, read here,
+        // off the window's turn: the catalogue may still be in discovery.
         let _ = std::thread::Builder::new().name("zlc-fabric-watch".into()).spawn(move || {
+            let announced = native || host.as_ref().and_then(|host| host.catalog().ok()).is_some_and(|catalog| catalog.types.iter().any(|item| item.announces == kind));
+            if !announced { return; }
             let lost = name.clone();
             bench.watch(registry, &name, &kind, &parameters, move |reason| match host.as_ref().filter(|host| host.descriptor(&lost).is_some()) {
                 Some(host) => host.lost(&lost, reason),
