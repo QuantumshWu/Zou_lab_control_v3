@@ -442,8 +442,8 @@ impl TermForm {
     /// coupling (units.rs `rounding`: a quantity within γ_N of its operands' scale) -- a field's component that is zero comes
     /// as the last bits of its vector's, and so does every product with it: per pair of basis vectors two coefficients times
     /// an entry, itself the outside forms' nine terms and two folds' sums over the excited states, of the forms' largest
-    /// entry.
-    fn rounding_of(model: &Model, to: usize, from: usize, pairs: &[Mat]) -> f64 {
+    /// entry. The same for every entry of a form: made once with it (units.rs `Model::constants`).
+    pub(crate) fn rounding_of(model: &Model, to: usize, from: usize, pairs: &[Mat]) -> f64 {
         let terms = model.tones[to].basis[0].len() * model.tones[from].basis[0].len() * (2 * EXCITED + 11);
         rounding(terms) * pairs.iter().map(|m| m.max_abs()).fold(0.0, f64::max)
     }
@@ -453,13 +453,13 @@ impl TermForm {
         let between = |lj: usize, li: usize| norm3(model.wave_value(&model.pair_wave(lj, li)));
         // The states' own coupling with every light off is H0, diagonal, less the outside forms at the focus: theirs.
         let own = model.base[(a, b)];
-        if model.beats[beat].0.is_zero() && own.abs() > (0..model.tones.len()).map(|f| TermForm::rounding_of(model, f, f, &model.tones[f].pairs)).fold(0.0, f64::max) {
+        if model.beats[beat].0.is_zero() && own.abs() > (0..model.tones.len()).map(|f| model.constants(f, f).rounding).fold(0.0, f64::max) {
             out.base = own;
         }
         for &(to, from) in &model.beats[beat].1 {
             let (bt, bf) = (&model.light.frequencies[to].beams, &model.light.frequencies[from].beams);
             let constants = model.constants(to, from);
-            let least = TermForm::rounding_of(model, to, from, &constants.pairs);
+            let least = constants.rounding;
             for (x, m) in constants.pairs.iter().enumerate() {
                 let v = m[(a, b)];
                 if v.abs() > least {
@@ -477,14 +477,14 @@ impl TermForm {
                 beams.iter().zip(&model.tones[c.frequency].couplings[0]).map(|(&l, x)| (l, x[(e, s)], x[(e, s)].abs())).filter(|entry| entry.2 != 0.0).collect()
             };
             for e in GROUND..STATES {
-                let (to_beams, from_beams) = (entries(ct, e, a), entries(cf, e, b));
-                if to_beams.is_empty() || from_beams.is_empty() {
-                    continue;
-                }
                 let (lt, lf) = (model.level(ct, e, a), model.level(cf, e, b));
                 if lt == Level::Explicit || lf == Level::Explicit || (lt == Level::Bare && lf == Level::Bare) {
                     continue;
                 }
+                if !model.tones[to].drives(false, e, a) || !model.tones[from].drives(false, e, b) {
+                    continue;
+                }
+                let (to_beams, from_beams) = (entries(ct, e, a), entries(cf, e, b));
                 for &(lj, ..) in &to_beams {
                     for &(li, ..) in &from_beams {
                         out.wave = out.wave.max(between(lj, li));
@@ -1247,10 +1247,11 @@ impl Model {
     }
 
     /// The provable bounds over the reach of quantities given per region, each to `resolution`: each one's largest upper bound of
-    /// the cells left once it is within the resolution of a value attained at a centre in the reach. The cells are halved one
-    /// after another (`InTurn`).
-    pub(crate) fn extents_over(&self, reach: &Reach, resolution: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
-        self.proven_over::<_, InTurn>(reach, Rule { settled: &|upper, attained| upper - attained <= resolution, scale: resolution }, quantities)
+    /// the cells left once it is within the resolution of a value attained at a centre in the reach. Of quantities any
+    /// thread may ask, proven on all the cores (`AtOnce`): an extent's cells are those of the whole place of its largest
+    /// values, each to be halved whatever the order.
+    pub(crate) fn extents_over(&self, reach: &Reach, resolution: f64, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &|upper, attained| upper - attained <= resolution, scale: resolution }, quantities)
     }
 
     /// The proofs' subdivision (module documentation, # Provable extrema, # Rounds): per quantity the cell of its largest upper

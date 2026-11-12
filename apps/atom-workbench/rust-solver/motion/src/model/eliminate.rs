@@ -866,6 +866,17 @@ impl Model {
         })
     }
 
+    /// Per component (2 frequency + counter) and pair of an excited state and a ground one ((excited − GROUND) GROUND +
+    /// ground) the request's beam of the component's largest coupling between them, of equal ones the last: the beam whose
+    /// photon a drive's motion is read with (`drive_motion`), the same at every sample.
+    pub(crate) fn strongest_made(&self) -> Vec<Vec<usize>> {
+        let of = |frequency: usize, side: usize, excited: usize, ground: usize| -> usize {
+            let beams = &self.light.frequencies[frequency].beams;
+            beams.iter().zip(&self.tones[frequency].couplings[side]).max_by(|x, y| x.1[(excited, ground)].abs().total_cmp(&y.1[(excited, ground)].abs())).map(|(&l, _)| l).expect("a frequency has a beam")
+        };
+        (0..2 * self.tones.len()).map(|c| (GROUND..STATES).flat_map(|e| (0..GROUND).map(move |g| (e, g))).map(|(e, g)| of(c / 2, c % 2, e, g)).collect()).collect()
+    }
+
     /// A drive's motion at a sample (SPEC §1.5; units.rs `Measured`): how far its two levels are there from the bare ones,
     /// δΔ = (E_e − E_b)(r) − (E_e − E_b)₀ + w + Σ_ee, with its strongest beam's Doppler shift w = (ħ/m)(q·κ + q²/2) at the
     /// sample's momentum (module documentation, # First-order Doppler; q = k_l, a counter-rotating component's −k_l) and
@@ -875,8 +886,7 @@ impl Model {
     /// moves, v̇ the force on the state at the point over m.
     pub(crate) fn drive_motion(&self, component: Component, excited: usize, ground: usize, at: &Measured) -> (f64, f64) {
         let side = component.counter as usize;
-        let beams = &self.light.frequencies[component.frequency].beams;
-        let strongest = beams.iter().zip(&self.tones[component.frequency].couplings[side]).max_by(|x, y| x.1[(excited, ground)].abs().total_cmp(&y.1[(excited, ground)].abs())).map(|(&l, _)| l).expect("a frequency has a beam");
+        let strongest = self.strongest[2 * component.frequency + side][(excited - GROUND) * GROUND + ground];
         let q = self.light.beams[strongest].wave_vector().map(|k| if component.counter { -k } else { k });
         let h = &at.energies;
         let v: [f64; 3] = at.sample.at.kappa.map(|k| k * self.hbar_over_mass);

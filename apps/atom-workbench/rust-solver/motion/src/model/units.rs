@@ -302,10 +302,12 @@ pub(crate) struct Kept {
     pub(crate) wave: f64,
 }
 
-/// Two frequencies' constant form (far.rs `constant`): on their fields' bases and per pair of their beams.
+/// Two frequencies' constant form (far.rs `constant`): on their fields' bases and per pair of their beams, with the
+/// rounding of an entry's own sums (reach.rs `TermForm::rounding_of`) -- the form's, whichever entry is read.
 pub(crate) struct Cross {
     pub(crate) forms: Vec<Mat>,
     pub(crate) pairs: Vec<Mat>,
+    pub(crate) rounding: f64,
 }
 
 impl Model {
@@ -392,7 +394,8 @@ impl Model {
             .or_insert_with(|| {
                 let (t, f) = (&self.tones[to], &self.tones[from]);
                 let forms = if to == from { t.forms.clone() } else { super::far::constant(t, f) };
-                Arc::new(Cross { pairs: if to == from { t.pairs.clone() } else { super::far::per_pair(t, f, &forms) }, forms })
+                let pairs = if to == from { t.pairs.clone() } else { super::far::per_pair(t, f, &forms) };
+                Arc::new(Cross { rounding: TermForm::rounding_of(self, to, from, &pairs), pairs, forms })
             })
             .clone()
     }
