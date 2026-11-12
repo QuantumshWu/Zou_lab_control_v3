@@ -347,10 +347,10 @@ impl Model {
         let near = self.light_at(lights, &layout.coordinates, &layout.polarizations, x);
         let coherent = self.coherent_dressing();
         let h = self.far_hamiltonian(&near, lights, 0, &coherent);
-        let r = self.eliminate(layout.cluster, &h, &near, lights, 0, &coherent);
+        let r = self.eliminate(layout.cluster, &h, &near, lights, 0, &coherent, &|_| true);
         let energies = vec![(0..STATES).map(|s| h[0][(s, s)].re).collect::<Vec<f64>>()];
         let mut values = vec![C64::ZERO; plan.near.len()];
-        self.forms(plan, &r, &energies, &mut values);
+        self.forms(plan, &r, &energies, &mut values, &|_| true);
         let (forms, point) = out.split_at_mut(2 * values.len());
         for (pair, z) in forms.chunks_mut(2).zip(&values) {
             pair.copy_from_slice(&[z.re, z.im]);
@@ -739,10 +739,11 @@ impl Model {
         let len = sections.iter().map(|s| s.0.end).max().unwrap_or(0);
         let order = sections.iter().map(|s| s.1).max().unwrap_or(0);
         let mut data = vec![C64::ZERO; (1 + if order >= 1 { d } else { 0 }) * len];
+        let place = table.table.place(&x);
         for (entries, order) in sections {
             let w = 2 * entries.len();
             let (mut value, mut slope) = (vec![0.0; w], vec![0.0; if *order >= 1 { d * w } else { 0 }]);
-            table.table.eval_range(&x, 2 * entries.start, &mut value, if *order >= 1 { Some(&mut slope) } else { None });
+            table.table.read(&place, 2 * entries.start, None, &mut value, if *order >= 1 { Some(&mut slope) } else { None });
             for (i, e) in entries.clone().enumerate() {
                 data[e] = C64::new(value[2 * i], value[2 * i + 1]);
                 if *order >= 1 {
@@ -757,54 +758,59 @@ impl Model {
         NearValues { len, order, data, directions: Some(gradients), work }
     }
 
-    /// A point's jumps' matrices from a table (assemble.rs, # The jumps' matrices), to an order (0 or 1), into the
-    /// point's vectors from its beams' amplitudes, and their counted work: the axes' coordinates there and their gradients (the slopes'
-    /// directions; none to order 0), the matrices -- the table's interpolant of them onto their constant part -- and to
-    /// first order their slopes per axis, in one pass over the stencil's rows. Counted as the jumps' own interpolation
-    /// is, each jump once (assemble.rs, # Work).
-    pub(crate) fn near_jumps(&self, table: &NearTable, order: usize, point: &mut Site) -> f64 {
-        let (d, plan) = (table.axes(), &table.layout.plan);
-        let slopes = if order >= 1 { d } else { 0 };
+    /// A site's point on a table (module documentation, # At a point), from the site's beams' amplitudes: the axes'
+    /// coordinates there, their gradients -- the directions the forms' and the jumps' slopes are along --, and the
+    /// point's place on the table's grid with the coordinates' counted work (`Site::place`). Every read of the table
+    /// at the point takes that place (`near_point`, `near_jumps`, `near_responses`; assemble.rs `Model::quartic`): a
+    /// site is placed once, after its beams and before its first read, whatever is read of the table there.
+    pub(crate) fn placed(&self, table: &NearTable, point: &mut Site) {
+        let d = table.axes();
         sized(&mut point.coordinates, d);
         sized(&mut point.directions, d);
         let work = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &point.beams, &mut point.coordinates, &mut point.directions);
-        point.directions.truncate(slopes);
+        point.place = Some((table.table.place(&point.coordinates), work));
+    }
+
+    /// A point's jumps' matrices from a table (assemble.rs, # The jumps' matrices), to an order (0 or 1), into the
+    /// vectors of a site placed there (`placed`), and their counted work: the matrices -- the table's interpolant of
+    /// them onto their constant part -- and to first order their slopes per axis, in one pass over the stencil's rows.
+    /// Counted with the coordinates as the jumps' own interpolation is, each jump once (assemble.rs, # Work).
+    pub(crate) fn near_jumps(&self, table: &NearTable, order: usize, point: &mut Site) -> f64 {
+        let (d, plan) = (table.axes(), &table.layout.plan);
+        let slopes = if order >= 1 { d } else { 0 };
+        let (place, work) = point.place.expect("a site placed on its table");
         let (first, width) = (2 * plan.near.len() + plan.generator_start.len() + plan.form_start.len(), plan.jumps_start.len());
         sized(&mut point.jumps, width);
         sized(&mut point.jump_slopes, slopes * width);
-        table.table.eval_onto(&point.coordinates, first, &plan.jumps_start, &mut point.jumps, (order >= 1).then_some(&mut point.jump_slopes[..]));
+        table.table.read(&place, first, Some(&plan.jumps_start), &mut point.jumps, (order >= 1).then_some(&mut point.jump_slopes[..]));
         work + (4usize.pow(d as u32) * (1 + slopes) * 2 * plan.near.jumping().len()) as f64 / crate::decide::COMPLEX
     }
 
     /// A point's responses from a table (the near forms' responding section, to order 0: what the readout reads,
-    /// readout.rs), into the point's vectors from its beams' amplitudes: the axes' coordinates there and the section's
-    /// reals, a response's real part and its imaginary part in the forms' order.
+    /// readout.rs), into the vectors of a site placed there (`placed`): the section's reals, a response's real part
+    /// and its imaginary part in the forms' order.
     pub(crate) fn near_responses(&self, table: &NearTable, point: &mut Site) {
-        let (d, entries) = (table.axes(), table.layout.plan.near.responding());
-        sized(&mut point.coordinates, d);
-        sized(&mut point.directions, d);
-        self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &point.beams, &mut point.coordinates, &mut point.directions);
+        let entries = table.layout.plan.near.responding();
+        let (place, _) = point.place.expect("a site placed on its table");
         sized(&mut point.responses, 2 * entries.len());
-        table.table.eval_range(&point.coordinates, 2 * entries.start, &mut point.responses, None);
+        table.table.read(&place, 2 * entries.start, None, &mut point.responses, None);
     }
 
-    /// A middle's near terms' values at a point from a table (module documentation, # At a point; assemble.rs `Site`), and
-    /// their counted work: the table's interpolant of the generator's values -- the Hermitian forms and the decay's sums of
-    /// the jumps' products, as the nodes hold them -- and of the forms' with their slopes along the axes, each straight to its
-    /// place onto its constant part, in one pass over the stencil's rows. Counted as the forms' interpolation is (the
-    /// Hermitian ones to first order, the jumps to order 0): the count is the definition's, not the layout's (assemble.rs,
-    /// # Work).
+    /// A middle's near terms' values at a point from a table (module documentation, # At a point; assemble.rs `Site`),
+    /// into a site placed there (`placed`), and their counted work: the table's interpolant of the generator's values
+    /// -- the Hermitian forms and the decay's sums of the jumps' products, as the nodes hold them -- and of the forms'
+    /// with their slopes along the axes, each straight to its place onto its constant part, in one pass over the
+    /// stencil's rows. Counted with the coordinates as the forms' interpolation is (the Hermitian ones to first order,
+    /// the jumps to order 0): the count is the definition's, not the layout's (assemble.rs, # Work).
     pub(crate) fn near_point(&self, table: &NearTable, point: &mut Site) -> f64 {
         let (d, plan) = (table.axes(), &table.layout.plan);
-        sized(&mut point.coordinates, d);
-        sized(&mut point.directions, d);
-        let mut work = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &point.beams, &mut point.coordinates, &mut point.directions);
+        let (place, mut work) = point.place.expect("a site placed on its table");
         let (first, generator, forms) = (2 * plan.near.len(), plan.generator_start.len(), plan.form_start.len());
         sized(&mut point.generator, generator);
         sized(&mut point.forms, forms);
         sized(&mut point.slopes, d * forms);
-        table.table.eval_onto(&point.coordinates, first, &plan.generator_start, &mut point.generator, None);
-        table.table.eval_onto(&point.coordinates, first + generator, &plan.form_start, &mut point.forms, Some(&mut point.slopes));
+        table.table.read(&place, first, Some(&plan.generator_start), &mut point.generator, None);
+        table.table.read(&place, first + generator, Some(&plan.form_start), &mut point.forms, Some(&mut point.slopes));
         for (entries, order) in [(plan.near.hermitian(), 1), (plan.near.jumping(), 0)] {
             work += (4usize.pow(d as u32) * (1 + if order >= 1 { d } else { 0 }) * 2 * entries.len()) as f64 / crate::decide::COMPLEX;
         }
@@ -840,7 +846,8 @@ impl Model {
                         table.table.axis_error(f, &x, &mut dv, &mut ds);
                         read[k] = self.form_error(sample, &far, &ours, &self.action(sample, &tabulated.moved(&dv[generator.clone()])), tables.thermal);
                     }
-                    let exact = self.middle_of(plan, sample.at.t, &amplitudes, Some(&self.near_exact(plan, &amplitudes, 1, &self.coherent_dressing())));
+                    // The exact elimination's forms to order 0: the generator on a state reads their values alone.
+                    let exact = self.middle_of(plan, sample.at.t, &amplitudes, Some(&self.near_exact(plan, &amplitudes, 0, &self.coherent_dressing())));
                     whole[k] = self.form_error(sample, &far, &self.action(sample, &exact), &ours, tables.thermal);
                 }
                 TableRead { axes, whole }

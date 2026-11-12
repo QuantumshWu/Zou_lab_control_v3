@@ -1060,22 +1060,36 @@ fn tail_at(shape: f64, scales: &[f64], level: f64, nodes: &[(f64, f64)]) -> f64 
     (-level / a).exp() + within
 }
 
+/// The Gauss–Legendre rules of 2, 4, 8, … nodes (`tail`), each made where it is first asked: a quantile's bisection
+/// asks the same few rules at every level.
+#[derive(Default)]
+struct Rules(Vec<Vec<(f64, f64)>>);
+
+impl Rules {
+    /// The rule of two nodes doubled `times` times.
+    fn doubled(&mut self, times: usize) -> &[(f64, f64)] {
+        while self.0.len() <= times {
+            self.0.push(crate::special::gauss_legendre(2 << self.0.len()));
+        }
+        &self.0[times]
+    }
+}
+
 /// P(Y + Σ_k a_k E_k > level) (`tail_at`), its nodes doubled from two until two levels' difference stops falling: the
 /// integrands are entire, the rule converges geometrically, and a difference no smaller than the one before is the
 /// round-off's floor (or nothing).
-fn tail(shape: f64, scales: &[f64], level: f64) -> f64 {
-    let mut n = 2;
-    let mut last = tail_at(shape, scales, level, &crate::special::gauss_legendre(n));
+fn tail(shape: f64, scales: &[f64], level: f64, rules: &mut Rules) -> f64 {
+    let mut last = tail_at(shape, scales, level, rules.doubled(0));
     let mut before = f64::INFINITY;
-    loop {
-        n *= 2;
-        let next = tail_at(shape, scales, level, &crate::special::gauss_legendre(n));
+    for times in 1.. {
+        let next = tail_at(shape, scales, level, rules.doubled(times));
         let difference = (next - last).abs();
         if !(difference < before) {
-            return last;
+            break;
         }
         (last, before) = (next, difference);
     }
+    last
 }
 
 /// The L with P(Y + Σ_k a_k E_k > L) = share, 0 < share < 1 (`tail`; the scales ascending): the level, in units of
@@ -1083,7 +1097,8 @@ fn tail(shape: f64, scales: &[f64], level: f64) -> f64 {
 /// monotonically from 1 at L = 0: the bracket's top is doubled from one until it is below the share, then halved until
 /// its two ends are neighbours in the format.
 fn quantile(shape: f64, scales: &[f64], share: f64) -> f64 {
-    let above = |level: f64| tail(shape, scales, level) > share;
+    let mut rules = Rules::default();
+    let mut above = |level: f64| tail(shape, scales, level, &mut rules) > share;
     let (mut lo, mut hi) = (0.0, 1.0);
     while above(hi) {
         (lo, hi) = (hi, 2.0 * hi);
