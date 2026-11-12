@@ -27,6 +27,24 @@
 //! by Var(x)/n, since E[x̄²] = μ_x² + Var(x)/n; with x̄² taken as its U-statistic ((Σx)² − Σx²)/(n(n − 1)) = x̄² − s²_x/n
 //! the estimate is unbiased for n ≥ 2, and no less than the held atoms' mean of ⟨κ²⟩ − ⟨κ⟩² ≥ 0.
 //!
+//! # What is counted
+//! A trajectory counts at an output where it has an outcome there under the run's model: its atom is held, or was lost
+//! by then. One that ended before the output without an outcome (`Fate::Failed`) counts at no output after its end:
+//! - the scheme refused its step at every length, or the model gave a jump no photon (adapt.rs): a numerical failure;
+//! - a step of it was not proven (step.rs, # The domain): the attempt's model is no model of its path, and the attempt
+//!   ends with the reach grown to hold it (solve.rs, # The reach's atoms). Such trajectories are in no final result,
+//!   only in the results sent while their attempt runs -- and there a whole hand-out can end so: the scout's eleven
+//!   atoms of a scene that heats them out of the first reaches (S2Q at 79cb5075: every one not proven by 1.1 ms, and
+//!   the checkpoint made of them held 79 of 101 outputs no trajectory counted at; measured).
+//!
+//! The estimates are over the trajectories counted. What the others would show is unknown, and a probability errs by
+//! at most its share: with u the share of an output's trajectories not counted (`Estimate::uncounted`), a row as shown
+//! or the loss over the counted ones, P_c, and the whole ensemble's, P = (1 − u)P_c + u P_u with P_u ∈ [0, 1] unknown,
+//! differ by u|P_u − P_c| ≤ u -- booked whole on what is shown (solve.rs `accounts`). Of T nothing bounds the part the
+//! held atoms of unknown fate make: an atom's kinetic energy after its last state is bounded by nothing the run read,
+//! so T has no account where some trajectory is not counted. Where none is counted (u = 1) nothing is estimated: the
+//! loss stands at the output before it, what is shown is booked whole, and the result says so (solve.rs `assemble`).
+//!
 //! # Errors
 //! The trajectories come in groups, a Latin hypercube inside each and the groups independent (ensemble.rs): an
 //! estimate's standard error is its delete-one-group jackknife, SE² = ((g − 1)/g) Σ_i (θ_(−i) − θ̄)², each quantity's
@@ -277,9 +295,10 @@ pub struct Held {
     pub unresolved: bool,
 }
 
-/// One trajectory at one output, what became of it by then: its atom is held; it was lost (SPEC §1.7); or the scheme
-/// could not advance its state (adapt.rs) -- no physical outcome: the trajectory is left out of the output's estimates
-/// and counted.
+/// One trajectory at one output, what became of it by then: its atom is held; it was lost (SPEC §1.7); or it ended
+/// before the output with no outcome -- the scheme could not advance its state (adapt.rs), or a step of it was not
+/// proven (solve.rs `run`) --: the trajectory is not counted at the output, and its share is booked (module
+/// documentation, # What is counted).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Fate {
     Held(Held),
@@ -287,7 +306,7 @@ pub enum Fate {
     Failed,
 }
 
-/// One output's sums over a group's trajectories: their number (the failed ones apart), the atoms held, and over the held
+/// One output's sums over a group's trajectories: the number counted and of the others (`Fate::Failed`), the atoms held, and over the held
 /// atoms Σρ_s, Σ⟨κ⟩, Σ⟨κ⟩² (for the U-statistic, module documentation) and Σ⟨κ²⟩ per lab axis; and of the held atoms
 /// those outside the reach and those unresolved (`Held`), each kind's number and its Σ_a ⟨κ_a²⟩ over the three axes.
 #[derive(Clone, Debug, PartialEq)]
@@ -382,7 +401,8 @@ pub struct Scales {
 
 /// The estimates at one output (module documentation): the loss, the held atoms' populations (a row as shown is its
 /// population times 1 − L) and the rows' spreads as shown, the held atoms' motion where at least two are held; each
-/// spread over the groups that read it, and the trajectories and held atoms behind them.
+/// spread over the groups that read it, and the trajectories counted and held atoms behind them. Where no trajectory is
+/// counted the loss is the output's before (module documentation, # What is counted), and nothing is read.
 #[derive(Clone, Debug)]
 pub struct Estimate {
     pub trajectories: f64,
@@ -392,8 +412,11 @@ pub struct Estimate {
     pub shown_errors: [Spread; STATES],
     pub populations: [f64; STATES],
     pub motion: Option<Motion>,
-    /// The trajectories the scheme could not advance to the output (`Fate::Failed`): none of the above counts them.
+    /// The trajectories that ended before the output with no outcome (`Fate::Failed`): none of the above counts them.
     pub failed: f64,
+    /// Their share of the output's trajectories, u (module documentation, # What is counted): what the estimates over
+    /// the counted ones err by at most on what is shown; one where none is counted.
+    pub uncounted: f64,
     /// Of the held atoms those outside the reach, and those unresolved (`Held`): each kind's share of the atoms and its
     /// share of their kinetic energy, Σ_a ⟨κ_a²⟩ of the kind over that of all -- what the kind carries of what is shown
     /// and of the total T (SPEC §1.8).
@@ -418,21 +441,23 @@ impl Estimate {
         self.shown_errors.iter().map(Spread::interval).fold(self.loss_error.interval(), f64::max)
     }
     /// The statistics' error of what is shown (ledger.rs `Account::statistics`): the jackknife interval, at least what the
-    /// trajectories leave unseen (`unseen`) -- a loss or a state none of them reached reads no spread.
+    /// trajectories leave unseen (`unseen`) -- a loss or a state none of them reached reads no spread --, and at most
+    /// one: what is shown is probabilities, none of which errs by more than its range (an interval unread, or wider,
+    /// says no more than that).
     pub fn shown_statistics(&self) -> f64 {
-        self.shown_interval().max(unseen(self.trajectories))
+        self.shown_interval().max(unseen(self.trajectories)).min(1.)
     }
     /// The interval of the total T (the mean over the lab axes) at the confidence z, relative to it; unbounded where T
-    /// is not read.
+    /// is not read, or is none (atoms that do not move: no error is relative to it).
     pub fn temperature_interval(&self) -> f64 {
-        self.motion.as_ref().map_or(f64::INFINITY, |m| m.temperature_total_error.interval() / m.temperature_total)
+        self.motion.as_ref().filter(|m| m.temperature_total > 0.).map_or(f64::INFINITY, |m| m.temperature_total_error.interval() / m.temperature_total)
     }
 }
 
-/// What the jackknife spreads, of one set of sums.
+/// What the jackknife spreads, of one set of sums: the loss and the rows as shown, none where no trajectory is counted;
+/// T per lab axis, none below two atoms held.
 struct Moments {
-    loss: f64,
-    shown: [f64; STATES],
+    shown: Option<(f64, [f64; STATES])>,
     temperature: Option<[f64; 3]>,
 }
 /// T per lab axis (µK) of held-atom sums (module documentation, # Estimators); none below two atoms.
@@ -446,7 +471,8 @@ fn temperature(s: &Sums, hbar_over_mass: f64) -> Option<[f64; 3]> {
     })
 }
 fn moments(s: &Sums, hbar_over_mass: f64) -> Moments {
-    Moments { loss: 1. - s.held / s.trajectories, shown: s.rows.map(|r| r / s.trajectories), temperature: temperature(s, hbar_over_mass) }
+    let n = s.trajectories;
+    Moments { shown: (n > 0.).then(|| (1. - s.held / n, s.rows.map(|r| r / n))), temperature: temperature(s, hbar_over_mass) }
 }
 /// The jackknife's standard error of the values with each group left out (module documentation, # Errors), read on
 /// `groups`.
@@ -500,9 +526,10 @@ fn jackknife<G: Borrow<Group>>(levels: &[&[G]], k: usize, hm: f64) -> Jackknife 
     Jackknife { full: all.iter().map(|s| moments(s, hm)).collect(), all, leave, count: count as f64, holding }
 }
 impl Jackknife {
-    /// A quantity of the levels' moments spread over every group.
+    /// A quantity of the levels' moments spread over every group: unread where a group left out leaves some level no
+    /// trajectory counted (`Moments::shown`).
     fn every(&self, f: impl Fn(&[Moments]) -> f64) -> Spread {
-        if self.leave.is_empty() {
+        if self.leave.is_empty() || !self.leave.iter().all(|m| counted(m)) {
             return Spread::UNREAD;
         }
         spread(self.leave.iter().map(|m| f(m)), self.count)
@@ -518,11 +545,25 @@ impl Jackknife {
     }
 }
 
-/// The estimates at every output from the groups' sums (module documentation).
+/// Whether every level's moments count a trajectory.
+fn counted(levels: &[Moments]) -> bool {
+    levels.iter().all(|m| m.shown.is_some())
+}
+/// The loss of a level's moments that count a trajectory (`counted`).
+fn loss(m: &Moments) -> f64 {
+    m.shown.expect("moments that count a trajectory").0
+}
+/// A row as shown of a level's moments that count a trajectory (`counted`).
+fn shown(m: &Moments, s: usize) -> f64 {
+    m.shown.expect("moments that count a trajectory").1[s]
+}
+
+/// The estimates at every output from the groups' sums (module documentation): where no trajectory is counted, the
+/// loss of the output before (# What is counted) -- at t = 0 every trajectory is held.
 pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<Estimate> {
     let outputs = groups.first().map_or(0, |g| g.borrow().sums.len());
     let hm = scales.hbar_over_mass;
-    (0..outputs)
+    let made: Vec<(Option<f64>, Estimate)> = (0..outputs)
         .into_par_iter()
         .map(|k| {
             let j = jackknife(&[groups], k, hm);
@@ -538,18 +579,28 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
             });
             let kinetic: f64 = all.kappa2.iter().sum();
             let shares = |kind: &[f64; 2]| [if n > 0. { kind[0] / n } else { 0. }, if kinetic > 0. { kind[1] / kinetic } else { 0. }];
-            Estimate {
+            let estimate = Estimate {
                 outside: shares(&all.outside),
                 unresolved: shares(&all.unresolved),
                 trajectories: all.trajectories,
                 held: n,
-                loss: full.loss,
-                loss_error: j.every(|m| m[0].loss),
-                shown_errors: std::array::from_fn(|s| j.every(|m| m[0].shown[s])),
+                loss: 0.,
+                loss_error: j.every(|m| loss(&m[0])),
+                shown_errors: std::array::from_fn(|s| j.every(|m| shown(&m[0], s))),
                 populations: if n > 0. { all.rows.map(|r| r / n) } else { [0.; STATES] },
                 motion,
                 failed: all.failed,
-            }
+                uncounted: if all.trajectories > 0. { all.failed / (all.trajectories + all.failed) } else { 1. },
+            };
+            (full.shown.map(|(loss, _)| loss), estimate)
+        })
+        .collect();
+    let mut before = 0.;
+    made.into_iter()
+        .map(|(loss, mut e)| {
+            e.loss = loss.unwrap_or(before);
+            before = e.loss;
+            e
         })
         .collect()
 }
@@ -568,8 +619,10 @@ pub struct Between {
 
 /// The step's error of the level `fine`, from it and the level `coarse` at twice its step on the same trajectories,
 /// group by group in the same order (module documentation, # The step's error): each quantity's mean square over the
-/// outputs after t = 0 -- T's over the outputs where both levels, and both without any one group, hold two atoms at
-/// least. No number on a single group; no spread on fewer than three (a mean square without a group needs two more).
+/// outputs after t = 0 -- the loss's and the rows' over the outputs where both levels, and both without any one group,
+/// count a trajectory (module documentation, # What is counted), T's over those where they hold two atoms at least. No
+/// number on a single group, or where no output reads it; no spread on fewer than three groups (a mean square without
+/// a group needs two more).
 pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scales) -> Between {
     assert_eq!(fine.len(), coarse.len(), "the two levels hold the same groups");
     let outputs = fine.first().map_or(0, |g| g.borrow().sums.len());
@@ -581,6 +634,9 @@ pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scale
     // A quantity's mean square over some outputs: at each, the groups' own values of it (g times the whole less g − 1
     // times the rest) and the mean of their products two by two; the same without each group, spread over the groups.
     let size = |at: &[&Jackknife], f: &dyn Fn(&[Moments]) -> f64, read: f64| -> Read {
+        if at.is_empty() {
+            return Read { value: f64::NAN, spread: Spread::UNREAD };
+        }
         let (mut whole, mut without, mut own) = (0., vec![0.; groups], vec![0.; groups]);
         for j in at {
             let full = f(&j.full);
@@ -595,9 +651,10 @@ pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scale
             spread: if groups >= 3 { spread(without.iter().map(|w| w / (n * (g - 1.) * (g - 2.))), read) } else { Spread::UNREAD },
         }
     };
-    let all: Vec<&Jackknife> = each.iter().collect();
+    let all: Vec<&Jackknife> = each.iter().filter(|j| counted(&j.full) && j.leave.iter().all(|l| counted(l))).collect();
     let temperature = {
-        let read = |m: &[Moments]| m.iter().all(|x| x.temperature.is_some());
+        // T's error is relative to the finer level's T: read where every level's total T is a positive number.
+        let read = |m: &[Moments]| m.iter().all(|x| x.temperature.is_some_and(|t| t.iter().sum::<f64>() > 0.));
         let at: Vec<&Jackknife> = each.iter().filter(|j| read(&j.full) && j.leave.iter().all(|l| read(l))).collect();
         (!at.is_empty()).then(|| {
             let total = |m: &Moments| m.temperature.map_or(f64::NAN, |t| t.iter().sum::<f64>());
@@ -606,8 +663,8 @@ pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scale
         })
     };
     Between {
-        loss: size(&all, &|m| share * (m[1].loss - m[0].loss), g),
-        shown: std::array::from_fn(|s| size(&all, &|m| share * (m[1].shown[s] - m[0].shown[s]), g)),
+        loss: size(&all, &|m| share * (loss(&m[1]) - loss(&m[0])), g),
+        shown: std::array::from_fn(|s| size(&all, &|m| share * (shown(&m[1], s) - shown(&m[0], s)), g)),
         temperature,
     }
 }
@@ -631,14 +688,19 @@ fn on_more(read: &Read, factor: f64) -> (Spread, f64) {
 /// look (decide.rs `Read::outcome`) -- on `factor` times its pairs, those it has among them (module documentation,
 /// # A read on more pairs; `on_more`): that the estimate's change, by Student's t at the groups that read the
 /// present spread, stays below the bound less the size read and the interval of the spread on the more pairs; none
-/// where that interval alone exceeds the bound. None for a read that is no number or whose spread is unread; a read
-/// without spread, or on no more pairs, is within or not as it stands.
+/// where that interval alone exceeds the bound. None for a read that is no number or whose spread is unread, or read
+/// on fewer than three groups -- the floor's part 4ζ₂/(G(G − 2)) is no number at two, and a T's read is spread over the
+/// groups holding an atom, which can be two --; a read without spread, or on no more pairs, is within or not as it
+/// stands. A probability: a number, always.
 pub fn within_on(read: &Read, bound: f64, factor: f64) -> f64 {
     if read.value.is_nan() || !read.spread.read() {
         return 0.;
     }
     if read.spread.error == 0. || factor <= 1. {
         return f64::from(u8::from(read.most(1.) <= bound));
+    }
+    if read.spread.groups < 3. {
+        return 0.;
     }
     let (spread, change) = on_more(read, factor);
     let interval = spread.interval();
@@ -1108,5 +1170,50 @@ mod tests {
             assert!((e.unresolved[0] - 1. / 3.).abs() < 1e-15 && (e.unresolved[1] - 6. / 48.).abs() < 1e-15, "{:?}", e.unresolved);
         }
         assert_eq!(summarize(&[group(vec![None, None])], &scales)[0].outside, [0.; 2]);
+    }
+
+    /// What is counted (module documentation, # What is counted). Four groups of two trajectories at t = 0 and three
+    /// outputs, every atom held in state 0 with ⟨κ²⟩ = 1 + its group's number until it ends with no outcome: the first
+    /// of each group after the first output, the second after the second. At the first output all eight count; at the
+    /// second four of eight, u = ½, and the estimates are the four's -- nothing lost, state 0 whole, T read on the four
+    /// groups --; at the third none: u = 1, the loss the second's, nothing read, no atom held, no T, and what is shown
+    /// errs by its statistics at most one. The step's size between two such levels reads the outputs that count a
+    /// trajectory at both levels with every group left out: none of the identical levels' differences, zero read with
+    /// a spread; where no output counts one, no number. And atoms lost before the others end: the loss is the counted
+    /// ones', the share of the others apart.
+    #[test]
+    fn an_output_no_trajectory_counts_at_estimates_nothing_and_its_share_is_known() {
+        let made = || -> Vec<Group> {
+            (0..4)
+                .map(|g| {
+                    let mut group = Group::new(4);
+                    let held = Fate::Held(atom(0, 0., 1. + g as f64));
+                    group.add(&[held.clone(), held.clone(), Fate::Failed, Fate::Failed]);
+                    group.add(&[held.clone(), held.clone(), held, Fate::Failed]);
+                    group
+                })
+                .collect()
+        };
+        let groups = made();
+        let e = summarize(&groups, &UNIT);
+        assert!(e.iter().all(|e| e.loss == 0.) && (e[1].uncounted, e[2].uncounted, e[3].uncounted) == (0., 0.5, 1.), "{e:?}");
+        assert!((e[2].trajectories, e[2].held, e[2].failed) == (4., 4., 4.) && e[2].populations[0] == 1. && e[2].loss_error.read() && e[2].motion.is_some_and(|m| m.temperature_errors[0].read()));
+        assert!((e[3].trajectories, e[3].held, e[3].failed) == (0., 0., 8.) && e[3].motion.is_none() && !e[3].loss_error.read() && e[3].shown_errors.iter().all(|s| !s.read()));
+        assert_eq!((e[3].shown_interval(), e[3].shown_statistics()), (f64::INFINITY, 1.));
+        let read = between(&groups, &made(), &UNIT);
+        assert!(read.loss.value == 0. && read.shown[0].value == 0. && read.loss.spread.read() && read.temperature.is_some_and(|t| t.value == 0.), "{read:?}");
+        let late: Vec<Group> = groups.iter().map(|g| Group { sums: vec![g.sums[0].clone(), g.sums[3].clone()] }).collect();
+        let none = between(&late, &late, &UNIT);
+        assert!(none.loss.value.is_nan() && !none.loss.spread.read() && none.temperature.is_none(), "{none:?}");
+        let lost: Vec<Group> = (0..4)
+            .map(|_| {
+                let mut g = Group::new(3);
+                g.add(&[Fate::Held(atom(0, 0., 1.)), Fate::Lost, Fate::Lost]);
+                g.add(&[Fate::Held(atom(0, 0., 1.)), Fate::Held(atom(0, 0., 1.)), Fate::Failed]);
+                g
+            })
+            .collect();
+        let e = summarize(&lost, &UNIT);
+        assert!((e[1].loss, e[1].uncounted) == (0.5, 0.) && (e[2].loss, e[2].uncounted, e[2].held) == (1., 0.5, 0.), "{e:?}");
     }
 }

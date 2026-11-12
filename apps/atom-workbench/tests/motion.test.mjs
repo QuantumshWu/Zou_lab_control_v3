@@ -334,7 +334,7 @@ test('the notes and the chart titles say what the engine computes: the loss, the
   assert.match(source('estimate.rs'),/quantile\(tail_among\(looks\), freedom\) \* self\.error/);
   assert.match(notes,/区间按组数取 Student t，组少时比两倍标准误差宽/);
   // The total T's target: its three parts weighed by the held share (solve.rs `accounts`; SPEC §0).
-  assert.match(source('solve.rs'),/Account \{ model: h \* a\[1\], step: h \* bound, statistics: h \* relative \}/);
+  assert.match(source('solve.rs'),/Account \{ model: h \* model, step: h \* bound, statistics: h \* relative \}/);
   assert.match(notes,/按仍在光阱中的份额 1 − L 计权后与 10% 比较/);
   // A motion trajectory's sample errors are its total estimates against its own target.
   assert.match(notes,/按运动自己的目标 5% 判断与标出/);
