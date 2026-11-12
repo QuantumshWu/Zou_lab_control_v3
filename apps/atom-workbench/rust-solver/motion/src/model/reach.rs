@@ -704,7 +704,7 @@ pub(crate) struct Region {
     /// Per ground state its drives' sizes and distances (units.rs `Model::across`), and the first places of their gates
     /// in the tail rule's order (units.rs `Model::folds`).
     pub(crate) across: [OnceLock<Vec<super::units::Across>>; GROUND],
-    pub(crate) drives: [OnceLock<Vec<[f64; 4]>>; GROUND],
+    pub(crate) drives: [OnceLock<Vec<[f64; 5]>>; GROUND],
     /// Per ground state: the slope of its level under the near light (units.rs `Model::near_slope`), and its shift's
     /// bound (units.rs `Model::near_shift`).
     pub(crate) slopes: [OnceLock<f64>; GROUND],

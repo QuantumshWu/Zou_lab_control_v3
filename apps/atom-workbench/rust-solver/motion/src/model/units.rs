@@ -23,8 +23,19 @@
 //!   across the bare distance: below it the fold exists (|V| against what is left of the distance, |Δ₀ − iΓ/2| − |δΔ|) and
 //!   the series converges with |ε| < ½; failing, the unit is kept and the drive is folded with the levels at the atom.
 //!   Inside the gate its error is the series' first order, measured at the atoms (# The errors).
-//! - folded with the levels at the atom (`Unit::Drive`, eliminate.rs): its distance over a region is its actual
-//!   denominator's modulus there, at least. Its gate failing, the unit is kept and the drive is explicit.
+//! - folded with the levels at the atom (`Unit::Drive`, eliminate.rs): the levels at the atom hold the atom at rest --
+//!   its energies, the dressings, the self-energy at its denominator D --, and a moving atom's photon of beam l is
+//!   Doppler-shifted by w_l = (ħ/m)(k_l·κ + k_l²/2), which the response takes to first order, T − w T2 (eliminate.rs,
+//!   # First-order Doppler): the first two terms of the series in ε = w/D of (D + w)⁻¹. So the levels at the atom are a
+//!   perturbation theory about the atom at rest, as the bare ones are about H0: what it folds across the distance at
+//!   rest is the coupling and the Doppler shift together, and its own gate is the one gate of the size |V| + |w| across
+//!   D (`Across::distance_at_rest`). Below it the fold exists (|V| against what is left, D − |w|, below the moving atom's
+//!   actual denominator) and the series converges with |ε| < ½. The share it adds to its ground state's tail is |V|
+//!   across the actual denominator, its own gate taking that share's place (# The tail rule) -- as a bare drive's.
+//!   (The actual denominator alone, |V| across D − |w|, is no gate of the series: for |V| < Γ/4 it passes at any speed,
+//!   the distance never below Γ/2, while |w/D| > 1 makes the series diverge -- the released runaway, a resonant probe's
+//!   cycling drive folded at the atom with |w/D| ≈ 85 at the atoms it pushed out, 10⁵ jumps/µs.) Its gate failing, the
+//!   unit is kept and the drive is explicit.
 //! - explicit: in the generator as it is.
 //!
 //! A drive folded onto an excited state that another drive makes explicit is, at either level, one leg of a Raman pair
@@ -43,8 +54,9 @@
 //! sum is below ½, each share across its drive's actual distance -- whatever level it is computed at. A drive's gate is
 //! therefore the sum of its ground state's folded shares that are not larger than its own -- so that the strongest fails
 //! first and is kept first, drives of one share fail together, and a distant line is never kept for a near one's sake --,
-//! and a bare drive's takes its own gate's value for its share: that its bare fold exists is its own matter and no other
-//! drive's. The order is one fixed order per ground state, by each drive's share with every
+//! and each drive's takes its own gate's value for its share, at either level (# Levels: a bare drive's levels moved, a
+//! drive at the atom's Doppler shift): that its own series converges is its own matter and no other drive's. The order
+//! is one fixed order per ground state, by each drive's share with every
 //! beam at its peak and the bare levels (`Model::ranked`): a region's shares in a region's order would not be monotone in
 //! the region, and the proof over the reach needs that; which of two is kept first is a choice of cost, each gate a
 //! statement about a fixed set. Two shares within the rounding of their own arithmetic are one place in the order (drives
@@ -274,18 +286,25 @@ pub(crate) struct Ranked {
 }
 
 /// One drive of a ground state over a region (`Model::across`): its coupling's size v, its detuning at the region's
-/// centre Δ_c, and how far from it its detuning lies at most over the region.
+/// centre Δ_c, how far from it its detuning lies at most over the region, and how far for an atom at rest -- all but
+/// the Doppler shift of the region's speeds (`still`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Across {
     pub(crate) size: f64,
     pub(crate) centre: f64,
     pub(crate) moved: f64,
+    pub(crate) still: f64,
 }
 
 impl Across {
     /// Its distance over the region, at least: |max(|Δ_c| − moved, 0) − iΓ_e/2|.
     pub(crate) fn distance(&self, gamma: f64) -> f64 {
         C64::new((self.centre.abs() - self.moved).max(0.0), 0.5 * gamma).abs()
+    }
+    /// Its distance over the region for an atom at rest, at least: |max(|Δ_c| − still, 0) − iΓ_e/2| -- the denominator
+    /// a fold at the atom takes, whose response the Doppler shift enters to first order (module documentation, # Levels).
+    pub(crate) fn distance_at_rest(&self, gamma: f64) -> f64 {
+        C64::new((self.centre.abs() - self.still).max(0.0), 0.5 * gamma).abs()
     }
 }
 
@@ -598,7 +617,7 @@ impl Model {
                 .iter()
                 .map(|d| {
                     if d.level == Level::Explicit {
-                        return Across { size: 0.0, centre: 0.0, moved: 0.0 };
+                        return Across { size: 0.0, centre: 0.0, moved: 0.0, still: 0.0 };
                     }
                     let (frequency, side) = (d.component / 2, d.component % 2);
                     let nu = self.tones[frequency].nu[side];
@@ -634,7 +653,8 @@ impl Model {
                     });
                     let (x, e) = (d.excited, GROUND + d.excited);
                     let moved = energies.slack[e] + energies.slack[g] + energies.averaged[e] + energies.averaged[g] + *others + *wave * region.speed + energies.radius[e] + sigma[x];
-                    Across { size: region.coherent(&d.beams), centre: energies.centre[e] - energies.centre[g] - nu, moved }
+                    let still = energies.slack[e] + energies.slack[g] + energies.averaged[e] + energies.averaged[g] + *others + energies.radius[e] + sigma[x];
+                    Across { size: region.coherent(&d.beams), centre: energies.centre[e] - energies.centre[g] - nu, moved, still }
                 })
                 .collect()
         })
@@ -675,21 +695,24 @@ impl Model {
     }
 
     /// A ground state's drives' gates over a region (module documentation, # Levels, # The tail rule), per place of the tail
-    /// rule's order: the folded shares from there down and the place's largest sweep, of its drives at the atom; and the
-    /// same of its bare drives, each one's own share and sweep across its own distance (the largest of them). Every share
-    /// is the region's own, the weaker places' as the place's: a point's are the values there. A folded drive's gate is
-    /// of its size across its distance over the region (`across`); a bare drive's own gate of v + |Δ_c − Δ₀| + moved
-    /// across its bare |Δ₀ − iΓ_e/2|; its rate v L + k a_max, L the slope of E_e − E_g and of the other components'
+    /// rule's order: the gate of its drives at the atom -- the folded shares from there down, the place's own share in
+    /// each one's own gate's stead -- and the place's largest sweep; the same of its bare drives; and the folded shares
+    /// from there down, the tail. Every share is the region's own, the weaker places' as the place's: a point's are the
+    /// values there. A folded drive's share is of its size across its distance over the region (`across`). Its own gate:
+    /// a bare drive's of v + |Δ_c − Δ₀| + moved across its bare |Δ₀ − iΓ_e/2|; a drive at the atom's of v + |w| across its
+    /// distance at rest (`Across::distance_at_rest`), |w| ≤ k v_max + (ħ/m) k²/2 the Doppler shift and recoil of its
+    /// photon -- the size of what its response takes to first order (eliminate.rs, # First-order Doppler); the largest of
+    /// a place's own gates over its shares. Its rate v L + k a_max, L the slope of E_e − E_g and of the other components'
     /// carriers' dressings of g. A drive onto an explicit state has the share and the sweep of its Raman pairs with
     /// that state's kept drives beside its own (`pair_gate`).
-    fn folds_made(&self, g: usize, region: &Region) -> Vec<[f64; 4]> {
+    fn folds_made(&self, g: usize, region: &Region) -> Vec<[f64; 5]> {
         let drives = &region.forms.drives(self)[g];
         let kept = self.kept_over(region);
         let acceleration = self.hbar_over_mass * self.force_over(self.membership[g], region);
         let slopes = self.level_slopes(g, region);
         // Per component the slope of the other components' carriers' dressings of g and its beams' largest wave number.
         let mut shared: Vec<Option<(f64, f64)>> = vec![None; 2 * self.tones.len()];
-        let mut out = vec![[0.0; 4]; drives.last().map_or(0, |d| d.group + 1)];
+        let mut out = vec![[0.0; 5]; drives.last().map_or(0, |d| d.group + 1)];
         for (d, of) in drives.iter().zip(self.across(g, region)).filter(|of| of.0.level != Level::Explicit) {
             let (others, wave) = *shared[d.component].get_or_insert_with(|| {
                 let others: f64 = (0..self.carriers.len()).filter(|&c| self.other(&self.carriers[c], d.component)).map(|c| self.shift_slope(c, g, region, true)).sum();
@@ -699,19 +722,22 @@ impl Model {
             let actual = gate(of.size, of.distance(d.gamma), rate);
             let pair = self.pair_gate(g, d, of, &kept, region);
             let place = &mut out[d.group];
-            place[0] += actual.saturation + pair.saturation;
+            place[4] += actual.saturation + pair.saturation;
             if d.level == Level::Bare {
                 let own = gate(of.size + (of.centre - d.detuning).abs() + of.moved, d.bare, rate);
                 place[2] = place[2].max(own.saturation - actual.saturation);
                 place[3] = place[3].max(own.sweep).max(pair.sweep);
             } else {
+                let own = gate(of.size + wave * region.speed + 0.5 * self.hbar_over_mass * wave * wave, of.distance_at_rest(d.gamma), rate);
+                place[0] = place[0].max(own.saturation - actual.saturation);
                 place[1] = place[1].max(actual.sweep).max(pair.sweep);
             }
         }
-        // The tails: each place's shares with every weaker one's; a bare drive's own share in its own's stead.
+        // The tails: each place's shares with every weaker one's; a drive's own gate in its own share's stead.
         for place in (0..out.len()).rev() {
-            let tail = out[place][0] + out.get(place + 1).map_or(0.0, |weaker| weaker[0]);
-            out[place][0] = tail;
+            let tail = out[place][4] + out.get(place + 1).map_or(0.0, |weaker| weaker[4]);
+            out[place][4] = tail;
+            out[place][0] += tail;
             out[place][2] += tail;
         }
         out
@@ -730,7 +756,8 @@ impl Model {
                 let carrier = self.carrier_of(frequency).expect("an explicit drive's component is a carrier");
                 let wave = self.wave_of(d.component);
                 let moved = energies.slack[e] + energies.slack[a] + wave * region.speed + energies.radius[e];
-                let across = Across { size: region.coherent(&d.beams), centre: energies.centre[e] - energies.centre[a] - self.carriers[carrier].detuning, moved };
+                let still = energies.slack[e] + energies.slack[a] + energies.radius[e];
+                let across = Across { size: region.coherent(&d.beams), centre: energies.centre[e] - energies.centre[a] - self.carriers[carrier].detuning, moved, still };
                 out.push(Kept { carrier, excited: d.excited, ground: a, size: across.size, distance: across.distance(d.gamma), wave });
             }
         }
@@ -770,10 +797,10 @@ impl Model {
     }
 
     /// A ground state's drives' gate at a place of the tail rule's order over a region (`folds_made`): [saturation, sweep]
-    /// of its drives at the atom, then of its bare ones. The region keeps the order's first `places` places -- those a
+    /// of its drives at the atom, then of its bare ones, then the tail. The region keeps the order's first `places` places -- those a
     /// proof over many cells still asks (`Model::gates`); every place's value is its own on the region whatever is
     /// kept --, and a place beyond them is made again.
-    pub(crate) fn folds(&self, g: usize, place: usize, region: &Region, places: usize) -> [f64; 4] {
+    pub(crate) fn folds(&self, g: usize, place: usize, region: &Region, places: usize) -> [f64; 5] {
         let kept = region.drives[g].get_or_init(|| {
             let mut made = self.folds_made(g, region);
             made.truncate(places);
@@ -1417,6 +1444,62 @@ mod tests {
         }
         eprintln!("the largest shift {largest:.2} rad/µs, the steepest slope {steepest:.1} rad/µs/µm, the least bound over its shift {tightest:.2}");
         assert!(largest > 20.0 && steepest > 100.0, "the points read a light shift: {largest}, {steepest}");
+    }
+
+    /// The gate of a drive folded at the atom says that its first-order Doppler series converges (module documentation,
+    /// # Levels). R2_RECOIL's σ⁺ probe, its drives folded at the atom, made weak and near its line: its beams' couplings
+    /// scaled to |V| = Γ/10 on the atoms' |2,2⟩ → |3′,3′⟩, that excited level moved to put the drive Γ from its line at
+    /// the trap's centre (D = |Γ − iΓ/2|). |V| below Γ/4: its share across the moving atom's actual distance -- never
+    /// below Γ/2 -- is below ½ at any speed, and so is the tail it is the one share of: the gate before. At the speed
+    /// where the photon's Doppler shift is 1.5 D (the series in w/D diverges) the gate, the one gate of |V| + |w| across
+    /// D, is beyond ½; at rest it is the share's, with the recoil, below ½.
+    #[test]
+    fn a_drive_at_the_atom_fails_where_its_doppler_series_diverges() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R2_RECOIL.json");
+        let load = || Request::from_native(&serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()).unwrap();
+        let at_the_atom = |request: &Request| -> Model {
+            let light = Light::new(request);
+            let bare = Model::new(request, &light, &[]).unwrap();
+            let kept: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).flat_map(|frequency| bare.bare_units(Component { frequency, counter: false })).collect();
+            Model::new(request, &light, &kept).unwrap()
+        };
+        // The strongest drive at the atom of the ground state g at the trap's centre: the centre, its place among g's
+        // drives, its component, excited state and width, its size and its detuning there.
+        let request = load();
+        let g = (0..GROUND).find(|&s| request.initial_density[(s, s)].re == 1.0).unwrap();
+        let strongest = |model: &Model| -> ([f64; 3], usize, (usize, usize, f64), Across) {
+            let centre = model.trap(&std::array::from_fn(|s| if s == g { 1.0 } else { 0.0 }), &model.prepared()).unwrap().centre;
+            let region = model.point_region(centre, 0.0);
+            let drives = &region.forms.drives(model)[g];
+            let place = (0..drives.len()).filter(|&i| drives[i].level == Level::Atom).max_by(|&a, &b| model.across(g, &region)[a].size.total_cmp(&model.across(g, &region)[b].size)).expect("a drive folded at the atom");
+            (centre, place, (drives[place].component, drives[place].excited, drives[place].gamma), model.across(g, &region)[place])
+        };
+        let (_, _, (component, excited, gamma), of) = strongest(&at_the_atom(&request));
+        let mut weak = load();
+        let light = Light::new(&weak);
+        for &l in &light.frequencies[component / 2].beams {
+            let beam = &mut weak.beams[l];
+            for z in beam.coupling.data.iter_mut().chain(beam.counter_coupling.data.iter_mut()) {
+                *z = *z * (0.1 * gamma / of.size);
+            }
+        }
+        weak.hamiltonian[(GROUND + excited, GROUND + excited)] += C64::real(gamma - of.centre);
+        let model = at_the_atom(&weak);
+        let (centre, place, (component, _, gamma), of) = strongest(&model);
+        let group = model.point_region(centre, 0.0).forms.drives(&model)[g][place].group;
+        let (size, distance, wave) = (of.size, of.distance_at_rest(gamma), model.wave_of(component));
+        let speed = 1.5 * distance / wave;
+        let (rest, moving) = (model.point_region(centre, 0.0), model.point_region(centre, speed));
+        let w = wave * speed + 0.5 * model.hbar_over_mass * wave * wave;
+        let [gate, _, _, _, tail] = model.folds(g, group, &moving, usize::MAX);
+        let share = 2.0 * (size / model.across(g, &moving)[place].distance(gamma)).powi(2);
+        eprintln!("|V| {:.3} Γ, D {:.3} Γ, k {wave:.3}/µm; at {speed:.2} µm/µs |w/D| {:.2}: its share {share:.3}, the tail {tail:.3}, its gate {gate:.3}", size / gamma, distance / gamma, w / distance);
+        assert!(size < 0.25 * gamma && w / distance > 1.0, "|V| {size} against Γ {gamma}, |w/D| {}", w / distance);
+        assert!(share < 0.5 && tail < 0.5, "before: its share {share}, the tail {tail}");
+        assert!(gate >= 0.5, "its gate {gate} with the Doppler series diverging");
+        let [still, _, _, _, still_tail] = model.folds(g, group, &rest, usize::MAX);
+        eprintln!("at rest: its gate {still:.4}, the tail {still_tail:.4}");
+        assert!(still < 0.5 && still_tail < 0.5 && still >= still_tail, "at rest: its gate {still}, the tail {still_tail}");
     }
 
     /// The slow states of a cluster's generator at a point, the atom at rest: its eigenvalues nearest the real axis, as
