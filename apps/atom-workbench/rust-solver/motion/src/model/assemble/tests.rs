@@ -476,7 +476,7 @@ fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation
             tables_met += 1;
             axes += table.axes();
             let (plan, n) = (model.plan(cluster, &lights), model.clusters[cluster].states.len());
-            let finer = (0..table.axes()).try_fold(table.clone(), |t, f| model.halved(&t, f, usize::MAX).map(|finer| crate::model::tabulate::NearTable { layout: t.layout.clone(), table: finer }));
+            let finer = Some((0..table.axes()).fold(table.clone(), |t, f| crate::model::tabulate::NearTable { table: model.halved(&t, f), layout: t.layout }));
             let sections = [(plan.near.hermitian(), 1), (plan.near.jumping(), 0)];
             let (mut coarse, mut fine, mut read) = (0.0, 0.0, 0.0);
             for _ in 0..16 {

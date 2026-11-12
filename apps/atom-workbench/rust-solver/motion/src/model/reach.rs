@@ -1246,8 +1246,10 @@ trait Pace<Q: ?Sized> {
 }
 
 /// One after another, no cell ahead of a proof's order: the pace of quantities that only their own thread may ask.
+#[cfg(test)]
 struct InTurn;
 
+#[cfg(test)]
 impl<Q: Fn(&Region) -> f64 + ?Sized> Pace<Q> for InTurn {
     const AHEAD: bool = false;
     fn proofs<T: Send, R: Send>(proofs: &mut [Proof], made: Vec<T>, step: impl Fn(&mut Proof, T) -> R + Sync) -> Vec<R> {
@@ -1621,6 +1623,7 @@ impl Model {
     /// edge `attains` (module documentation, # Provable extrema): each one's largest upper bound of the cells left when it is
     /// decided -- below the threshold everywhere, or a value at or above `attains` at a centre in the reach --, or within the
     /// rounding of its centre's value; 0 where no cell meets the reach. The cells are halved one after another (`InTurn`).
+    #[cfg(test)]
     pub(crate) fn bounds_over(&self, reach: &Reach, threshold: f64, attains: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
         self.proven_over::<_, InTurn>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: None }, quantities)
     }
