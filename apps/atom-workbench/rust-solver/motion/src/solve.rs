@@ -22,7 +22,8 @@
 //!    stood at; a keep to undo ends it too (# The model).
 //! 4. The product: batches of whole groups at the settled step, one level, every trajectory run to the last output,
 //!    until every held quantity's total lies within its target (# Stopping) or the trajectories reach
-//!    `MOST_TRAJECTORIES`.
+//!    `MOST_TRAJECTORIES`. Its atoms that leave the reach are read where they are, and what they carry is booked
+//!    (# The reach's atoms); where that leaves a look no room, the reach grows and the next attempt begins.
 //! 5. The result (contract §2.2, `assemble`).
 //!
 //! # The step (SPEC §2.2)
@@ -81,12 +82,24 @@
 //!       the attempt before stood at), that rung is read on a third level -- the pilot's trajectories at 4τ, a
 //!       quarter of a trajectory each -- and its read, lowered, is what this rung inherits: its order is tested like
 //!       any other's, for a quarter of what its pairs' companions cost;
-//!     - at the ladder's top, more pairs or the rung below (`blind`, `remedy`). The pairs are asked for what they
-//!       could do: were the error the least the read allows -- its near end at one look --, what the read holds
-//!       above it is the pairs' noise and falls as 1/N; the pairs that could bring the far end within b are run, a
-//!       batch at a time, where they cost less than the rung below and no more of them than cost what the rung below
-//!       does (they are lost with the rung: at most twice the rung's work is spent, whatever they show). A read the
-//!       noise has put above b so costs pairs, not a rung; one whose near end is at b is left for the rung below.
+//!     - at the ladder's top the third level is the rung below: its pilot -- the same trajectories at τ/2, twice
+//!       a pilot's steps -- read against this rung's level tests the order between the three levels as it does
+//!       for any rung reached by a halving (`refuted`, by this rung's read lowered). Where it refutes nothing and
+//!       nothing lies beyond, this rung is a rung of tested order and stands as it was: the rung below was read,
+//!       not taken, and its pilot is what the test cost. Where the order is refuted or a read lies beyond, this
+//!       rung is left on what the reads leave no doubt of, and the pilot run is the rung below's own. (Before,
+//!       the rung below was taken for the whole run wherever the first rung did not read within: twice the run's
+//!       work, by the draw. Measured, gray molasses at 1.4585 µs: T's mean square is 0.43 ± 0.10 b on 4096 pairs
+//!       against 2.917 µs and no more than 0.33 b by the level below -- well inside --, while a read on 88 pairs
+//!       has an interval of 1.7 b; one seed of four did not read within on 360 pairs and ran at 0.7292 µs, 1029k
+//!       trajectory steps where the others took 370k to 453k; with the third level it stands, at 535k. SPEC §5.3.)
+//!     - before that level, more pairs where they could spare it (`blind`, `remedy`). The pairs are asked for
+//!       what they could do: were the error the least the read allows -- its near end at one look --, what the
+//!       read holds above it is the pairs' noise and falls as 1/N; the pairs that could bring the far end within b
+//!       are run, a batch at a time, where what they cost beyond the run's own trajectories -- their companions,
+//!       and what of their finer level the product would not run -- is less than the rung below's pilot, and no
+//!       more of them than cost what it does: at most twice the third level's work is spent before it is read,
+//!       whatever the pairs show.
 //!       Where neither is to be had -- no rung below at the steps' cap, no number of pairs within a run's
 //!       trajectories, a read that is no number -- the work's bounds are used up and the check ends unable to see
 //!       (SPEC §5.1): the step stands, flagged, and every quantity's account takes what the check does not exclude,
@@ -141,13 +154,54 @@
 //! unread units' bounds overstate together lies below what any run resolves. The others are read, once per state: a
 //! state's errors are kept as read and their means per output made once for every decision that asks (`Measured`).
 //!
+//! # The reach's atoms (SPEC §1.8)
+//! The reach is where the model's statements are made before a trajectory runs. An atom that leaves it is computed
+//! like any other: its light, force and decay are assembled at its own point and momentum -- the far light exactly,
+//! the near light from tables whose axes span each coordinate's whole range (model/tabulate.rs; nothing is
+//! extrapolated, and a trajectory consults no gate). What is the reach's alone, and so is not established for such
+//! an atom:
+//! - that the folds exist where it is (the gates are proofs over the reach), and the bounds over the reach at which
+//!   the unread units are booked;
+//! - the tables' refinement, verified over the reach's ranges of their axes;
+//! - that the step is admissible at its speed: the first rung is, at the reach's largest.
+//! The first two are functions of the state and are read at the atom as on the pilot: a fold's small parameter at
+//! a state is its gate's own quantity there, of the order of one where the fold does not exist; a table's error is
+//! its distance from the elimination there. The third is a yes or a no at the atom's speed, and beyond that edge
+//! nothing is read -- the step's check compares two levels below it.
+//!
+//! So every trajectory places its atom at every output (`Domain::place`), and an output's estimate holds the share
+//! of the held atoms outside the reach and the share the step does not resolve, each with its share of the kinetic
+//! energy (estimate.rs `Estimate::outside`, `Estimate::unresolved`); a group keeps the state of its first atom
+//! outside (`Shape::fold`). Before each batch's looks the product reads them (`apart`), and the model's error at an
+//! output is the pilot's with
+//! - the unresolved atoms, whole: their share of the atoms on what is shown, of the kinetic energy on T;
+//! - the atoms outside, by their shares, times what the model's error read at their states -- every folded unit's
+//!   and the tables', at most the whole of what an atom carries -- exceeds the error booked. The booked error is
+//!   already a mean over the held atoms wherever they are (the pilot's states are not chosen by the reach), so only
+//!   the excess is theirs: a cloud driven out whole (every atom outside) adds nothing twice.
+//! The read is the product's own, at as many states an output as the pilot reads the model at. It is in the looks:
+//! the run stops on totals that hold it. Where the product ends with a look that it leaves no room for the
+//! statistics and that has room without it, the reach is outgrown as far as the product reads: it grows to the
+//! temperature read where that is above it (`attempt`), else the item stands booked and the ledger flags the output.
+//!
+//! Measured (2026-11-11, seeds' runs of the reference scenes). Six beams' Doppler heating in a tweezer, the reach
+//! grown to 84--139 µK, 448--704 atoms, 200 outputs: at most 0.2--1.1 % of the held atoms outside at an output, with
+//! 1.9--5.6 % of the kinetic energy (the heated tail is heavier than thermal), the farthest at 1.44 of the reach's
+//! level and 1.04 of its largest speed; the model's error at 113 outside states 0.77 % on what is shown and 2.2 % on
+//! T against 0.65 % and 0.88 % at the states inside, the tables' 1e-5 at both; over a reach raised to hold the
+//! farthest atom none of the 200 gates fails. One atom is unresolved at up to 16 outputs: 0.14--0.37 % of the atoms
+//! and 1.3--2.2 % of the kinetic energy, booked whole -- 2 % more trajectories. An atom held at a lattice's antinode:
+//! one or two of 176 outside, none unresolved, 1e-5 added. A cloud pushed out of its trap: every atom outside from
+//! 40 µs on, 6e-5 added. Six beams' sub-Doppler cooling, gray molasses, a Raman transfer: none outside.
+//!
 //! # Stopping (SPEC §3)
 //! Every quantity held to a target -- at every output after t = 0 what is shown, and the total T -- has the total
 //! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, from the units measured at the pilot's states and the
-//! tables' errors there, and c the step's clear part (its rms over the run), both fixed by the pilot; S the
+//! tables' errors there, and c the step's clear part (its rms over the run), both fixed by the pilot -- A with what
+//! the run's atoms outside the reach carry, read before each batch's looks (# The reach's atoms) --; S the
 //! statistics' interval. The run stops where every one of them lies
-//! within its target: the test the ledger flags an output by (`Look::met`). The stop reads the run's standard errors
-//! and nothing else of its estimates. A look that no number of trajectories brings within its target (A² + c² ≥ ε²:
+//! within its target: the test the ledger flags an output by (`Look::met`). The stop reads the run's standard errors,
+//! its atoms outside the reach, and nothing else of its estimates. A look that no number of trajectories brings within its target (A² + c² ≥ ε²:
 //! the model's decisions have kept what they could) is not chased: the ledger flags it.
 //!
 //! The trajectories a look needs (`Look::need`): the statistics may take the room R² = ε² − A² − c², and fall as
@@ -201,6 +255,7 @@ use crate::request::STATES;
 use crate::step::{stumpff, Dynamics, Scratch, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE, TEMPERATURE_TARGET};
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::f64::consts::{PI, TAU};
 use std::sync::mpsc;
@@ -457,6 +512,29 @@ fn typical_speed(hbar_over_mass: f64, temperature_uk: f64) -> f64 {
     (3. * hbar_over_mass * KT_PER_UK * temperature_uk).sqrt()
 }
 
+/// What an atom is placed against at an output (SPEC §1.8; module documentation, # The reach's atoms): the reach the
+/// model is judged over, and the edge of its trajectory's step -- the frequency, the kick's curvature and the entries
+/// `admissible` reads.
+struct Domain<'a> {
+    model: &'a Model,
+    reach: &'a crate::model::Reach,
+    hbar_over_mass: f64,
+    frequency: f64,
+    kick: f64,
+    sampled: &'a [[f64; 2]],
+}
+impl Domain<'_> {
+    /// Whether an atom at r with the momentum κ lies outside the reach (`Model::holds`), and whether, outside it, the
+    /// step τ of its trajectory is not admissible at its speed (`admissible`: unresolved). An atom the reach holds is
+    /// no faster than the reach's largest speed, at which the attempt's first step is admissible and every rung below
+    /// it the more: the run's step leaves none of them unresolved.
+    fn place(&self, tau: f64, r: V3, kappa: V3) -> [bool; 2] {
+        let outside = !self.model.holds(self.reach, r, kappa);
+        let speed = self.hbar_over_mass * kappa.iter().map(|k| k * k).sum::<f64>().sqrt();
+        [outside, outside && !admissible(tau, self.frequency, self.kick, self.sampled, speed)]
+    }
+}
+
 /// The reads a step is judged by (module documentation, # The step): the mean squares over the run of the step's
 /// error on the loss, on every row as shown and on the total T, each with the square of the step's share of its
 /// target. One family: what is clear of one of them is clear among them all.
@@ -541,8 +619,8 @@ fn blind(own: &Between) -> Option<f64> {
 enum Remedy {
     /// More pairs at the step and its double: the pairs to have.
     Pairs(u64),
-    /// The rung below.
-    Rung,
+    /// The rung below's pilot: the third level, which tests this rung's order.
+    Below,
     /// Neither: no number of pairs within a run's trajectories could bring it within, and there is no rung below, or
     /// the read excludes nothing.
     Neither,
@@ -552,28 +630,30 @@ enum Remedy {
 /// (`blind`), of a run whose product is predicted to take `product` trajectories at its step and whose pilot is
 /// `pilot` trajectories; `begins`: the trajectories the rung's check began with; `rung`: whether the rung below is to
 /// be had -- the ladder has it (`MOST_STEPS`), and the read excludes something (`readable`). Work in trajectories at
-/// the step τ -- a trajectory's steps go as 1/τ:
-/// - the rung below: the product over again at τ/2, 2·max(product, pilot). It inherits this rung's read: its order is
-///   tested, and it stands unless a look is clearly beyond its share;
-/// - the pairs that could bring the rung within, P = factor·have: their companions at 2τ, half a trajectory each, and
-///   the trajectories at τ still to run, the product's or the pairs', whichever are more:
-///   ½(P − have) + max(P, product) − have.
-/// The pairs where that is the less work, a batch of them, to the number asked and at most to twice the pairs the
-/// prediction rests on (`batch`); they are read again. What the pairs could do is a hope, and it is bounded: a rung's
-/// further pairs are lost with it -- a trajectory at τ and half a one at 2τ each, 3/2 (P − begins) --, and no more
-/// are asked than cost what the rung below does. Whatever the pairs then show, the check has spent at most twice the
-/// work of the rung taken at once -- the least a rule can promise that does not know what the pairs will show (the
-/// rented skis: rent until the rent paid is the price). Else the rung below, where it is to be had; else neither --
-/// the work's bounds are used up, and the check stays unable to see (SPEC §5.1).
+/// the step τ -- a trajectory's steps go as 1/τ --, beyond the trajectories the run takes at τ whatever the check
+/// does (the product's):
+/// - the rung below's pilot, the third level: the pilot's trajectories at τ/2, 2·pilot. It tests this rung's order
+///   (`settle`): the rung then stands unless a read leaves no doubt, and where it is left the pilot run is the rung
+///   below's own;
+/// - the pairs that could bring the rung within, P = factor·have, from N pairs on: their companions at 2τ, half a
+///   trajectory each, and what of their finer level the product would not run, ½(P − N) + (P − max(product, N))₊.
+/// The pairs where from the pairs in hand on that is the less work, a batch of them, to the number asked and at most
+/// to twice the pairs the prediction rests on (`batch`); they are read again. What the pairs could do is a hope, and
+/// it is bounded: where they do not bring the rung within, the third level is read all the same and what they cost
+/// was spent beside it, so no more are asked than cost, from the pairs the check began with on, what it does.
+/// Whatever the pairs then show, the check has spent at most twice the third level's work before it reads it -- the
+/// least a rule can promise that does not know what the pairs will show (the rented skis: rent until the rent paid is
+/// the price). Else the rung below's pilot, where it is to be had; else neither -- the work's bounds are used up,
+/// and the check stays unable to see (SPEC §5.1).
 fn remedy(factor: f64, have: u64, begins: u64, product: f64, pilot: u64, rung: bool) -> Remedy {
     let pairs = factor * have as f64;
-    let by_rung = if rung { 2. * product.max(pilot as f64) } else { f64::INFINITY };
-    let to_be_had = pairs <= MOST_TRAJECTORIES as f64 && have < MOST_TRAJECTORIES && 1.5 * (pairs - begins as f64) <= by_rung;
-    let by_pairs = if to_be_had { 0.5 * (pairs - have as f64) + pairs.max(product) - have as f64 } else { f64::INFINITY };
-    if by_pairs < by_rung {
+    let cost = |from: u64| 0.5 * (pairs - from as f64) + (pairs - product.max(from as f64)).max(0.);
+    let below = if rung { 2. * pilot as f64 } else { f64::INFINITY };
+    let to_be_had = pairs <= MOST_TRAJECTORIES as f64 && have < MOST_TRAJECTORIES && cost(begins) <= below;
+    if to_be_had && cost(have) < below {
         Remedy::Pairs(batch(pairs, have))
-    } else if by_rung < f64::INFINITY {
-        Remedy::Rung
+    } else if rung {
+        Remedy::Below
     } else {
         Remedy::Neither
     }
@@ -685,8 +765,43 @@ fn outgrown(outside: &[(f64, f64)], left: f64, estimates: &[Estimate], reach: f6
     let hot = read.iter().any(|m| (0..3).any(|a| m.temperature[a] - m.temperature_errors[a].interval_over(looks) > reach));
     let tail = 0.5 * crate::estimate::tail_among(looks);
     let crowded = outside.iter().any(|&(count, atoms)| crate::estimate::at_least(count, atoms, left) < tail);
-    let hottest = read.iter().flat_map(|m| m.temperature).fold(reach, f64::max);
-    ((hot || crowded) && hottest > reach).then_some(hottest)
+    (hot || crowded).then(|| hottest(estimates)).filter(|t| *t > reach)
+}
+
+/// The temperature a reach grows to (SPEC §1.8): the largest T read along a lab axis at an output; no number where
+/// none is read.
+fn hottest(estimates: &[Estimate]) -> f64 {
+    estimates.iter().skip(1).filter_map(|e| e.motion.as_ref()).flat_map(|m| m.temperature).fold(f64::NEG_INFINITY, f64::max)
+}
+
+/// What the atoms outside the reach add to the model's error at every output (SPEC §1.8, §4; module documentation,
+/// # The reach's atoms), on the held atoms' populations (absolute) and on T (relative), from the run's `estimates`
+/// (the shares apart, estimate.rs `Estimate::outside`, `Estimate::unresolved`), the outside states its groups `parts`
+/// keep and the model's error `booked` there (`Fixed::model`, the pilot's):
+/// - the atoms the step does not resolve, whole: their share of the atoms, their share of the kinetic energy;
+/// - the atoms outside, by their share of each, times what the model's error at their states -- `read` at a state:
+///   every folded unit's and the tables', at most the whole of what the atom carries -- exceeds the error booked.
+///   The mean over the first outside state of each of the first groups that hold one at the output, as many groups
+///   as the pilot has: as many states an output as the model's booked error was read at. A state's read is kept
+///   (`known`, by trajectory and output): it is read once in a run.
+fn apart(estimates: &[Estimate], parts: &[&Part], booked: &[[f64; 2]], read: &(dyn Fn(&State) -> [f64; 2] + Sync), known: &mut HashMap<(u64, usize), [f64; 2]>) -> Vec<[f64; 2]> {
+    let groups = (pilot_size() / GROUP) as usize;
+    let states: Vec<Vec<&State>> = (0..estimates.len()).map(|k| parts.iter().filter(|_| k > 0).filter_map(|p| p.samples.get(k).and_then(|s| s.first())).take(groups).collect()).collect();
+    let new: Vec<(u64, usize, &State)> = states.iter().enumerate().flat_map(|(k, at)| at.iter().map(move |state| (state.index, k, *state))).filter(|(index, k, _)| !known.contains_key(&(*index, *k))).collect();
+    let errors: Vec<[f64; 2]> = new.par_iter().map(|(_, _, state)| read(state)).collect();
+    known.extend(new.iter().zip(errors).map(|((index, k, _), e)| ((*index, *k), e)));
+    estimates
+        .iter()
+        .zip(&states)
+        .zip(booked)
+        .enumerate()
+        .map(|(k, ((e, states), booked))| {
+            std::array::from_fn(|i| {
+                let mean = states.iter().map(|state| known[&(state.index, k)][i]).sum::<f64>() / states.len() as f64;
+                e.unresolved[i] + if states.is_empty() { 0. } else { e.outside[i] * (mean - booked[i]).max(0.) }
+            })
+        })
+        .collect()
 }
 
 /// Whether a lab axis's temperature (µK) lies in the validated regime of that axis's frequency (rad/µs), k_BT ≥
@@ -928,9 +1043,11 @@ fn attempt(
     let begins = step.map_or(first_rung, |step| step.min(first_rung));
     let (frequency, typical, end) = (trap.frequencies.iter().copied().fold(0., f64::max), typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3.), plan.end);
     let above = |tau: f64| 4. * tau <= end && admissible(2. * tau, frequency, kick, &entries, judged.speed) && admissible(4. * tau, frequency, kick, &entries, typical);
+    let domain = Domain { model: &model, reach: &judged, hbar_over_mass: hm, frequency, kick, sampled: &entries };
     let mut context = Context {
         momentum,
         fixed: Fixed { model: vec![[0.; 2]; outputs], start },
+        outside: vec![[0.; 2]; outputs],
         step: vec![Bound::share(); outputs],
         checked: None,
         tau: begins,
@@ -956,12 +1073,16 @@ fn attempt(
     let numbers: Vec<u64> = (first..first + pilot_size() / GROUP).collect();
     // A priced keep's model at the step `step` against the model before it at its own (see `priced`).
     let dearer = |step: f64| priced.is_some_and(|(before, share)| (1. - share) * before / step > 1.);
+    // Whether the pilot's atoms have outgrown the reach (`outgrown`), and the temperature it then grows to: the
+    // attempt ends there, and its check spends nothing further on a step the next attempt settles anew (`settle`).
+    let scales = context.scales;
+    let grown = |pilot: &[&Part]| outgrown(&outside(&model, &judged, pilot), left, &pooled(pilot, &scales).0, held);
     let mut levels = Levels::default();
 
     // The scout (module documentation, # The pipeline): the first member of every pilot group at both levels, screened;
     // where a unit is to be kept at its states, the attempt ends here -- for the price of the scout, not of a pilot.
     // The pilot's read of the same below stands for the result.
-    if matches!(settle(&run, &ensemble, &mut context, &mut levels, &numbers, 0..1, &above, &dearer, messages), Settled::Dearer) {
+    if matches!(settle(&run, &ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &dearer, &|pilot| grown(pilot).is_some(), messages), Settled::Dearer) {
         return Ok(Attempt::Undo);
     }
     let scouted = {
@@ -979,7 +1100,7 @@ fn attempt(
     };
     // The pilot: its groups' other members at both levels, screened. Where the check ended unable to see, the reads
     // its last rung is held by: what they do not exclude is booked (`unexcluded`), and flagged.
-    let unseen = match settle(&run, &ensemble, &mut context, &mut levels, &numbers, 1..GROUP, &above, &dearer, messages) {
+    let unseen = match settle(&run, &ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &dearer, &|pilot| grown(pilot).is_some(), messages) {
         Settled::Dearer => return Ok(Attempt::Undo),
         Settled::Capped => {
             context.ledger.flag(capped());
@@ -995,7 +1116,7 @@ fn attempt(
     let run = {
         let pilot: Vec<&Part> = levels.fine.iter().collect();
         let (estimates, _, counts) = pooled(&pilot, &context.scales);
-        if let Some(t) = outgrown(&outside(&model, &judged, &pilot), left, &estimates, held) {
+        if let Some(t) = grown(&pilot) {
             return Ok(Attempt::Grow(t, tau));
         }
         let steps = counts.steps + levels.coarse.iter().map(|p| p.counts.steps).sum::<u64>();
@@ -1081,11 +1202,28 @@ fn attempt(
     };
 
     // The product (module documentation, # Stopping): on from the pilot's trajectories at the run's step, the run's
-    // first; the pilot's companions have done their part, and its states have been read.
+    // first; the pilot's companions have done their part, and its states have been read -- but those outside the
+    // reach, which the product reads with its own (# The reach's atoms): at a state every folded unit's error and the
+    // tables', at most the whole of what the atom carries.
     let mut parts = levels.fine;
-    forget(&mut parts);
+    outside_alone(&mut parts);
     parts.append(&mut levels.further[0]);
-    let (e, l, c) = product(&run, &ensemble, &context, &mut parts, &numbers, messages);
+    let booked = context.fixed.clone();
+    let read = |state: &State| -> [f64; 2] {
+        let errors = model.errors_at(&units, &state.sample, Some(&tables));
+        let reads = model.table_reads(&tables, std::slice::from_ref(&state.sample));
+        let sum = errors.iter().chain(reads.iter().map(|table| &table.whole[0])).fold([0.; 2], |sum, e| [sum[0] + e.population, sum[1] + e.temperature]);
+        sum.map(|x| x.min(1.))
+    };
+    let (e, l, c) = product(&run, &ensemble, &domain, &mut context, &mut parts, &numbers, &read, messages);
+    // The reach outgrown as far as the product reads (# The reach's atoms): some look has no room for the statistics
+    // with what the atoms outside the reach carry, and has room without it. The reach grows to the temperature read
+    // where that is above it, and the next attempt begins; else the account stands as read, flagged.
+    if looks(&e, &context.fixed, &context.step).iter().zip(&looks(&e, &booked, &context.step)).any(|(with, without)| !with.fits() && without.fits()) {
+        if let Some(t) = Some(hottest(&e)).filter(|t| *t > held) {
+            return Ok(Attempt::Grow(t, context.tau));
+        }
+    }
     // A point of the prepared potential below the bottom the ensemble was drawn about (ensemble.rs, # Its draw).
     if ensemble.deeper() > 0 {
         context.ledger.flag("准备势在所取阱底之外还有更深的地方：初始系综按该阱底的深度封顶".into());
@@ -1118,26 +1256,30 @@ fn unseen_at_the_end() -> String {
 /// order, at 2τ; the further pairs a check took (`settle`), at the two levels: the groups the product runs next, by
 /// their place in its list; and the read the rung in hand inherits from the rung above (`lowered`) -- a check of this
 /// attempt came down from it (the scout's read serves the pilot on the rung the scout left standing: the same model at
-/// the same steps), or the pilot read it on a third level (`settle`).
+/// the same steps), or the pilot read it on a third level (`settle`). And, while the rung in hand is read as the
+/// third level of the rung above it (`settle`: a first rung at the ladder's top), that rung's levels whole, `upper`:
+/// its finer level is the companion of the rung in hand, and the rung stands again as it was where the test lets it.
 #[derive(Default)]
 struct Levels {
     fine: Vec<Part>,
     coarse: Vec<Part>,
     further: [Vec<Part>; 2],
     above: Option<Between>,
+    upper: Option<Box<Levels>>,
 }
 impl Levels {
     /// The finer level's groups and their companions: the pilot's, then the further pairs'.
     fn paired(&self) -> (Vec<&Part>, Vec<&Part>) {
-        (self.fine.iter().chain(&self.further[0]).collect(), self.coarse.iter().chain(&self.further[1]).collect())
+        let coarse = self.upper.as_ref().map_or(&self.coarse, |upper| &upper.fine);
+        (self.fine.iter().chain(&self.further[0]).collect(), coarse.iter().chain(&self.further[1]).collect())
     }
 }
 
 /// The members `members` of the groups `numbers` at the step `tau`, each trajectory through the plan: a hand-out of
 /// its own (`run_groups`).
 #[allow(clippy::too_many_arguments)]
-fn level(run: &Run, ensemble: &Ensemble, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
-    let hand = Hand { groups: numbers, members, shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, tau, plan, keep, i) };
+fn level(run: &Run, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
+    let hand = Hand { groups: numbers, members, shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, domain, tau, plan, keep, i) };
     run_groups(&[hand], messages, progress).pop().expect("the hand-out's one level")
 }
 
@@ -1146,9 +1288,9 @@ fn level(run: &Run, ensemble: &Ensemble, plan: &Plan, tau: f64, numbers: &[u64],
 /// whatever either shows --, the finer level first, whose trajectories take twice the steps. `progress` takes the finer
 /// level's groups.
 #[allow(clippy::too_many_arguments)]
-fn pair(run: &Run, ensemble: &Ensemble, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> [Vec<Part>; 2] {
-    let fine = Hand { groups: numbers, members: members.clone(), shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, tau, plan, keep, i) };
-    let coarse = Hand { groups: numbers, members, shape: Shape::of(plan, false), record: &|i| trajectory(run, ensemble, 2. * tau, plan, false, i) };
+fn pair(run: &Run, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> [Vec<Part>; 2] {
+    let fine = Hand { groups: numbers, members: members.clone(), shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, domain, tau, plan, keep, i) };
+    let coarse = Hand { groups: numbers, members, shape: Shape::of(plan, false), record: &|i| trajectory(run, ensemble, domain, 2. * tau, plan, false, i) };
     let mut levels = run_groups(&[fine, coarse], messages, progress).into_iter();
     std::array::from_fn(|_| levels.next().expect("the hand-out's two levels"))
 }
@@ -1157,6 +1299,12 @@ fn pair(run: &Run, ensemble: &Ensemble, plan: &Plan, tau: f64, numbers: &[u64], 
 /// own, and a pilot keeps one for every trajectory at every output.
 fn forget(parts: &mut [Part]) {
     parts.par_iter_mut().for_each(|part| part.samples = vec![]);
+}
+
+/// The states kept in some groups' parts freed (`forget`) but, at every output, the first that lies outside the reach:
+/// what a group of the product keeps (`Shape::fold`).
+fn outside_alone(parts: &mut [Part]) {
+    parts.par_iter_mut().for_each(|part| part.samples.iter_mut().for_each(|states| *states = states.iter().filter(|state| state.outside).min_by_key(|state| state.index).cloned().into_iter().collect()));
 }
 
 /// Some groups' further members joined to those a level holds of them (all of them where it holds none).
@@ -1193,15 +1341,22 @@ enum Settled {
 ///   of the ladder, is read on a third level -- the pilot's trajectories at 4τ, a quarter of a trajectory each -- and
 ///   its read, lowered by the order, is the one this rung inherits: its order is tested like any other's. Where there
 ///   is no rung above (the ladder's top), the remedy of `remedy`: more pairs -- the product's next groups at both
-///   levels --, bounded by the rung below's work; or the rung below; where neither is to be had, the check ends
-///   unable to see (`Settled::Unseen`), and what it does not exclude is booked and flagged (SPEC §5.1). A rung
-///   whose order is tested and whose reads exclude nothing ends the check the same way.
+///   levels --, bounded by the third level's work; or that level, the rung below's pilot: the members so far at τ/2,
+///   read against this rung's level, this rung's levels kept whole meanwhile (`Levels::upper`). Where that read
+///   refutes nothing and nothing lies beyond, this rung's order is tested and it stands as it was -- the rung below
+///   was read, not taken --; else this rung is left as any is, and the pilot run is the rung below's own. Where
+///   neither pairs nor a rung below are to be had, the check ends unable to see (`Settled::Unseen`), and what it does
+///   not exclude is booked and flagged (SPEC §5.1). A rung whose order is tested and whose reads exclude nothing ends
+///   the check the same way.
 /// A rung below at which a trajectory would take more than `MOST_STEPS` steps does not exist: a check that is beyond
 /// or refuted there leaves the step capped. Nor is a rung taken at which a priced keep's model costs more than the
-/// model before it (`dearer`): the attempt ends, and the keep is undone.
+/// model before it (`dearer`): the attempt ends, and the keep is undone -- a rung read as a third level is taken
+/// only where the rung above it is then left. And a first rung that does not read within is settled no further
+/// where the pilot's atoms already end the attempt (`outgrown`: the reach outgrown, `attempt`): the step stands as
+/// it is for the next attempt to begin at, and no third level and no pair is run for it.
 #[allow(clippy::too_many_arguments)]
-fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, dearer: &dyn Fn(f64) -> bool, messages: &mut Messages) -> Settled {
-    let [fine, coarse] = pair(run, ensemble, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
+fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, dearer: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, messages: &mut Messages) -> Settled {
+    let [fine, coarse] = pair(run, ensemble, domain, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
     absorb(&mut levels.fine, fine);
     absorb(&mut levels.coarse, coarse);
     // The trajectories a rung's check begins with, and whether it is the pilot's.
@@ -1215,14 +1370,27 @@ fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Le
         // The rung below, and whether the ladder has it.
         let below = 0.5 * context.tau;
         let lowest = context.plan.end / below > MOST_STEPS as f64;
+        // Whether the rung below is read as this rung's third level, not taken.
+        let mut third = false;
         if !(failed || screen(&read) || screen(&held)) {
             if inherited.is_some() {
+                // The rung in hand was read as the third level of the rung above: that one's order is tested, and
+                // it stands as it was.
+                if let Some(upper) = levels.upper.take() {
+                    *levels = *upper;
+                    context.tau *= 2.;
+                    return Settled::Standing;
+                }
                 return if pilot && !readable(&held) { Settled::Unseen(held) } else { Settled::Standing };
             }
             let Some(factor) = blind(&read).filter(|_| pilot) else { return Settled::Standing };
+            // The pilot's atoms end the attempt as they are: nothing further is spent on its step.
+            if outgrown(&levels.fine.iter().collect::<Vec<_>>()) {
+                return Settled::Standing;
+            }
             if above(context.tau) {
                 // The rung above on the pilot's trajectories: its finer level is this rung's companion.
-                let coarser = level(run, ensemble, &context.plan, 4. * context.tau, numbers, 0..GROUP, false, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
+                let coarser = level(run, ensemble, domain, &context.plan, 4. * context.tau, numbers, 0..GROUP, false, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
                 let read = between(&coarse, &coarser.iter().collect::<Vec<_>>(), &context.scales);
                 levels.above = Some(lowered(&read));
                 continue;
@@ -1233,28 +1401,46 @@ fn settle(run: &Run, ensemble: &Ensemble, context: &mut Context, levels: &mut Le
             match remedy(factor, have, begins, product, pilot_size(), !lowest && readable(&read)) {
                 Remedy::Pairs(pairs) => {
                     let next: Vec<u64> = (have / GROUP..pairs / GROUP).collect();
-                    let more = pair(run, ensemble, &context.plan, context.tau, &next, 0..GROUP, false, messages, &mut |prefix, messages| {
+                    let more = pair(run, ensemble, domain, &context.plan, context.tau, &next, 0..GROUP, false, messages, &mut |prefix, messages| {
                         so_far(context, &levels.fine, &levels.further[0].iter().chain(prefix.iter().copied()).collect::<Vec<_>>(), messages)
                     });
                     levels.further.iter_mut().zip(more).for_each(|(further, more)| further.extend(more));
                     continue;
                 }
-                Remedy::Rung => {}
+                Remedy::Below => third = true,
                 Remedy::Neither => return Settled::Unseen(held),
             }
         }
-        if lowest {
-            return Settled::Capped;
-        } else if dearer(below) {
-            return Settled::Dearer;
+        if !third {
+            // The rung in hand is left. Where it was read as the third level of the rung above, that one is left with
+            // it: the rung in hand is the one taken, the level above its companion.
+            if let Some(upper) = levels.upper.take() {
+                if dearer(context.tau) {
+                    return Settled::Dearer;
+                }
+                levels.coarse = upper.fine;
+                forget(&mut levels.coarse);
+            }
+            if lowest {
+                return Settled::Capped;
+            } else if dearer(below) {
+                return Settled::Dearer;
+            }
         }
-        levels.above = Some(lowered(&held));
+        let inherits = lowered(&held);
         context.tau = below;
-        // The level at the step is the companion from here on: its states are read no more.
-        forget(&mut levels.fine);
-        let finer = level(run, ensemble, &context.plan, below, numbers, 0..members.end, true, messages, &mut |prefix, messages| so_far(context, &[], prefix, messages));
-        levels.coarse = std::mem::replace(&mut levels.fine, finer);
-        levels.further = Default::default();
+        let finer = level(run, ensemble, domain, &context.plan, below, numbers, 0..members.end, true, messages, &mut |prefix, messages| so_far(context, &[], prefix, messages));
+        if third {
+            // The rung's levels are kept whole, its states with them: it may stand yet.
+            let upper = std::mem::take(levels);
+            *levels = Levels { fine: finer, above: Some(inherits), upper: Some(Box::new(upper)), ..Levels::default() };
+        } else {
+            // The level at the step is the companion from here on: its states are read no more.
+            forget(&mut levels.fine);
+            levels.coarse = std::mem::replace(&mut levels.fine, finer);
+            levels.further = Default::default();
+            levels.above = Some(inherits);
+        }
     }
 }
 
@@ -1277,10 +1463,14 @@ fn batch(need: f64, have: u64) -> u64 {
 /// The product (module documentation, # Stopping): batches of whole groups at the run's step, on from the pilot's
 /// groups (their numbers `pilot`; the product's own follow in the list's order), to the number the looks predict
 /// (`batch`), until every look that some number of trajectories can meet is met, or the trajectories reach
-/// `MOST_TRAJECTORIES`. Each batch's result is a checkpoint; returns the estimates, the listed atoms and the counts at
-/// its end.
-fn product(run: &Run, ensemble: &Ensemble, context: &Context, parts: &mut Vec<Part>, pilot: &[u64], messages: &mut Messages) -> (Vec<Estimate>, Vec<Vec<(V3, V3)>>, Counts) {
+/// `MOST_TRAJECTORIES`. Before every batch's looks the atoms outside the reach are read (`apart`, with `read` at a
+/// state): what they carry joins the model's error the pilot fixed, in the looks and in the results. Each batch's
+/// result is a checkpoint; returns the estimates, the listed atoms and the counts at its end.
+#[allow(clippy::too_many_arguments)]
+fn product(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, parts: &mut Vec<Part>, pilot: &[u64], read: &(dyn Fn(&State) -> [f64; 2] + Sync), messages: &mut Messages) -> (Vec<Estimate>, Vec<Vec<(V3, V3)>>, Counts) {
     let (started, from) = (Instant::now(), parts.len() as u64 * GROUP);
+    // The model's error as the pilot fixed it, and the outside states read so far.
+    let (booked, mut known) = (context.fixed.model.clone(), HashMap::new());
     // The group at the list's place g.
     let number = |g: u64| pilot.get(g as usize).copied().unwrap_or(g);
     // The wall time (ms) the trajectories from `done` to `want` take at the product's pace so far; none before its own
@@ -1290,6 +1480,8 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, parts: &mut Vec<Pa
         let all: Vec<&Part> = parts.iter().collect();
         let n = all.len() as u64 * GROUP;
         let (e, l, c) = pooled(&all, &context.scales);
+        context.outside = apart(&e, &all, &booked, read, &mut known);
+        context.fixed.model = booked.iter().zip(&context.outside).map(|(model, more)| [(model[0] + more[0]).min(1.), model[1] + more[1]]).collect();
         let chased: Vec<Look> = looks(&e, &context.fixed, &context.step).into_iter().filter(Look::fits).collect();
         if chased.iter().all(Look::met) || n >= MOST_TRAJECTORIES {
             return (e, l, c);
@@ -1297,7 +1489,7 @@ fn product(run: &Run, ensemble: &Ensemble, context: &Context, parts: &mut Vec<Pa
         let want = batch(chased.iter().map(Look::need).fold(0., f64::max), n);
         messages.result(all.len(), n, left(n, want), || assemble(context, &e, &l, &c, n));
         let numbers: Vec<u64> = (n / GROUP..want / GROUP).map(number).collect();
-        let new = level(run, ensemble, &context.plan, context.tau, &numbers, 0..GROUP, false, messages, &mut |prefix, messages| {
+        let new = level(run, ensemble, domain, &context.plan, context.tau, &numbers, 0..GROUP, false, messages, &mut |prefix, messages| {
             let all: Vec<&Part> = parts.iter().chain(prefix.iter().copied()).collect();
             let done = all.len() as u64 * GROUP;
             let (e, l, c) = pooled(&all, &context.scales);
@@ -1363,17 +1555,20 @@ impl Counts {
     }
 }
 
-/// A pilot trajectory's state at an output (model.rs `Sample`) with the run's step and the trajectory's number: where
-/// the units' errors are measured and a model is priced (`rate`).
+/// A trajectory's state at an output (model.rs `Sample`) with the run's step, the trajectory's number and whether the
+/// atom lies outside the reach there (`Domain::place`): where the units' errors are measured and a model is priced
+/// (`rate`) -- a pilot trajectory's at every output; any trajectory's where its atom is outside the reach (`apart`).
 #[derive(Clone)]
 struct State {
     sample: Sample,
     tau: f64,
     index: u64,
+    outside: bool,
 }
 
 /// What one trajectory leaves: what became of it by every output (estimate.rs `Fate`), its (r, κ) at the listed outputs
-/// where held, its states at the outputs where held (`keep`: the pilot's, for the model's errors and prices), its counts.
+/// where held, its states at the outputs where held (`keep`: the pilot's, for the model's errors and prices; without
+/// it those where its atom lies outside the reach), its counts.
 struct Record {
     outputs: Vec<Fate>,
     listed: Vec<Option<(V3, V3)>>,
@@ -1384,7 +1579,7 @@ struct Record {
 /// One trajectory from its initial state through the plan at the step τ (module documentation, # Outputs and windows):
 /// advanced to the run's end by steps that know no output, and read at every output where it falls (adapt.rs, # The
 /// reads). A trajectory the scheme cannot advance (adapt.rs) fails from the first output it does not reach.
-fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, keep: bool) -> Record {
+fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f64, plan: &Plan, keep: bool) -> Record {
     let outputs = plan.times.len();
     let interval = plan.times[1] - plan.times[0];
     let widest = plan.halves.iter().flatten().fold(0., |a: f64, &b| a.max(b));
@@ -1397,18 +1592,19 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
     let mut moments = vec![[[0.; 3]; 3]; outputs];
     let mut out = vec![Fate::Lost; outputs];
     let mut listed = vec![None; plan.listed.len()];
-    let mut samples: Vec<Option<State>> = vec![None; if keep { outputs } else { 0 }];
+    let mut samples: Vec<Option<State>> = vec![None; outputs];
     // The steps taken, and the start of the last one counted.
     let (mut steps, mut counted) = (0, None);
     let mut record = |k: usize, t: &Trajectory, out: &mut Vec<Fate>| {
         // The atom at the output's instant; from the first output on its κ and κ² are its window's means (below).
-        out[k] = Fate::Held(Held { rows: model.readout(t.cluster, &t.point(), &t.psi), kappa: t.kappa, kappa2: t.kappa.map(|x| x * x) });
+        let [outside, unresolved] = domain.place(tau, t.r, t.kappa);
+        out[k] = Fate::Held(Held { rows: model.readout(t.cluster, &t.point(), &t.psi), kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), outside, unresolved });
         if let Ok(j) = plan.listed.binary_search(&k) {
             listed[j] = Some((t.r, t.kappa));
         }
-        if keep {
+        if keep || outside {
             let sample = Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() };
-            samples[k] = Some(State { sample, tau, index });
+            samples[k] = Some(State { sample, tau, index, outside });
         }
     };
     record(0, &t, &mut out);
@@ -1468,7 +1664,7 @@ fn run<D: Dynamics>(model: &D, start: Start, index: u64, tau: f64, plan: &Plan, 
 }
 
 /// What a group of trajectories leaves: its sums (estimate.rs `Group`), its held atoms' (r, κ) at the listed outputs, its
-/// states at the outputs (the pilot's), its counts.
+/// states at the outputs (the pilot's: every member's; else the first that lies outside the reach), its counts.
 struct Part {
     sums: Group,
     listed: Vec<Vec<(V3, V3)>>,
@@ -1510,7 +1706,7 @@ impl Shape {
         let mut part = Part {
             sums: Group::new(self.outputs),
             listed: vec![vec![]; self.listed],
-            samples: vec![vec![]; if self.keep { self.outputs } else { 0 }],
+            samples: vec![vec![]; self.outputs],
             counts: Counts::default(),
         };
         for r in records {
@@ -1519,7 +1715,9 @@ impl Shape {
                 l.extend(x);
             }
             for (s, x) in part.samples.iter_mut().zip(r.samples) {
-                s.extend(x);
+                if self.keep || s.is_empty() {
+                    s.extend(x);
+                }
             }
             part.counts.add(&r.counts);
         }
@@ -1530,8 +1728,8 @@ impl Shape {
 /// Trajectory `index` of a run at the step τ: its initial state from the ensemble (ensemble.rs `Ensemble::draw`), run
 /// through the plan (`run`). A function of the index and the step: the same index at another step is the same atom on
 /// the same streams (module documentation, # The step).
-fn trajectory(model: &Run, ensemble: &Ensemble, tau: f64, plan: &Plan, keep: bool, index: u64) -> Record {
-    run(model, ensemble.draw(SEED, index), index, tau, plan, keep)
+fn trajectory(model: &Run, ensemble: &Ensemble, domain: &Domain, tau: f64, plan: &Plan, keep: bool, index: u64) -> Record {
+    run(model, domain, ensemble.draw(SEED, index), index, tau, plan, keep)
 }
 
 /// A level of a hand-out (`run_groups`): the members `members` of the groups of the numbers `groups` (all of them:
@@ -1639,8 +1837,9 @@ fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut
 }
 
 /// What the pilot fixes for the run (module documentation, # Stopping), per output: the model's error on the held atoms
-/// (populations absolute, T relative; T's unbounded where no pilot atom reads it); and T(0)'s relative error, its
-/// quadrature's last two levels' difference (ensemble.rs `Ensemble::kinetic`).
+/// (populations absolute, T relative; T's unbounded where no pilot atom reads it) -- to which the product adds what
+/// its atoms outside the reach carry (`Context::outside`) --; and T(0)'s relative error, its quadrature's last two
+/// levels' difference (ensemble.rs `Ensemble::kinetic`).
 #[derive(Clone)]
 struct Fixed {
     model: Vec<[f64; 2]>,
@@ -2115,6 +2314,9 @@ struct Context {
     initial: [f64; STATES],
     momentum: V3,
     fixed: Fixed,
+    /// What the atoms outside the reach add to the model's error per output (`apart`), in `fixed` with the pilot's:
+    /// nothing until the product reads them.
+    outside: Vec<[f64; 2]>,
     step: Vec<Bound>,
     checked: Option<Checked>,
     ledger: Ledger,
@@ -2142,6 +2344,11 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         ledger.item(&format!("时间步长 τ = {} μs（全程不变）", c.tau), largest, &format!("轨迹在 τ 与 2τ 下逐条配对比较：两者之差的 1/{share} 在全程各输出时刻上的方均根（已扣除统计噪声的本底）{part}"));
         let relative = if check.resolution[1].is_finite() { format!("、在温度上低于 {} 时分辨不出", percent(check.resolution[1])) } else { " 时分辨不出，温度上读不出".into() };
         step = format!("（收敛检查：与 {} μs 在 {} 对同号轨迹上比较，看两者之差在全程各输出时刻上的方均根（已扣除统计噪声的本底）；步长误差的方均根在布居上低于 {}{relative}；这是检查，不是误差界，未计入总误差）", check.companion, check.pairs, percent(check.resolution[0]));
+    }
+    // What the atoms outside the reach carry (`apart`): its largest over the outputs, weighed by the held share.
+    for (i, what) in ["布居", "温度"].into_iter().enumerate() {
+        let largest = (1..outputs).map(|k| c.outside[k][i] * (1. - estimates[k].loss)).fold(0., f64::max);
+        ledger.item(&format!("运行中到了可达范围之外的原子（{what}）"), largest, "逐输出读出：步长对其速率不可用的原子按它们的全部份额记；其余按它们的份额乘以在它们的状态上实测的模型误差超出已记部分的量");
     }
     ledger.close(times, &population, &temperature);
     // T and the motion at t = 0: exact.
@@ -2391,32 +2598,31 @@ mod tests {
         assert!(blind(&row) == Some(f64::INFINITY) && !readable(&row) && readable(&at(None)));
     }
 
-    /// The remedy of a rung of untested order (`remedy`) on a pilot of 88 pairs, in trajectories at τ.
-    /// - A product of 400 trajectories and a rung that asks twice its pairs: 176 pairs cost their 88 companions' 44
-    ///   and the product's own 312 still to run, 356, against the product twice over at τ/2, 800: pairs, to 176.
-    ///   Asking 5 % more pairs takes one group more (a batch's least); asking six times takes them by doubling.
-    /// - The pairs asked are bounded by the rung below: 3/2 a trajectory for each pair beyond those the check began
-    ///   with, no more than the 800 -- 621 pairs: seven times the pilot are asked for, 7.1 times are not.
-    /// - The bound counts the pairs already run: of 352 read (264 beyond the pilot), 1.5 times as many leave 264
-    ///   trajectories to pay and have cost 1.5·440 = 660 in all: pairs; 1.8 times as many, 422 and 818: the rung, though
-    ///   what is left would be the less.
-    /// - A run that needs no more than its pilot: twice the pairs cost 44 + 88 against 176; three times, 264 lost with
-    ///   the rung against 176: the rung.
-    /// - No number of pairs, or a run already at its most: the rung.
+    /// The remedy of a rung of untested order (`remedy`) on a pilot of 88 pairs, in trajectories at τ beyond the
+    /// product's own; the third level, the rung below's pilot, is 176.
+    /// - A product of 400 trajectories and a rung that asks twice its pairs: the 88 further pairs cost their
+    ///   companions' 44 (their finer level is the product's): pairs, to 176. Asking 5 % more pairs takes one group
+    ///   more (a batch's least); asking 4.5 times, 396 pairs for 154, takes them by doubling.
+    /// - Pairs beyond the product's cost their finer level too: 4.69 times the pilot, 413 pairs, cost 162 + 13; 4.7
+    ///   times cost more than the third level, which is read instead.
+    /// - The bound counts the pairs already run: of 352 read, 1.1 times as many cost 18 more and 150 since the check
+    ///   began: pairs; 1.2 times as many, 58 and 190: the third level, though what is left would be the less.
+    /// - A run that needs no more than its pilot: twice the pairs cost 44 + 88; three times, 88 + 176: the third level.
+    /// - No number of pairs, or a run already at its most: the third level.
     /// - On the ladder's last rung, or beside a read that excludes nothing, there is no rung below and no bound: the
     ///   pairs wherever a run can take them, however many; neither where it cannot.
     #[test]
-    fn the_pairs_a_rung_asks_for_cost_no_more_than_the_rung_below() {
+    fn the_pairs_a_rung_asks_for_cost_no_more_than_its_third_level() {
         assert_eq!(remedy(2., 88, 88, 400., 88, true), Remedy::Pairs(176));
         assert_eq!(remedy(1.05, 88, 88, 400., 88, true), Remedy::Pairs(96));
-        assert_eq!(remedy(6., 88, 88, 400., 88, true), Remedy::Pairs(176));
-        assert!((1.5 * (800. / 1.5 + 88. - 88.) - 800.0f64).abs() < 1e-9 && ((800. / 1.5 + 88.) / 88. - 7.06f64).abs() < 0.01);
-        assert_eq!((remedy(7., 88, 88, 400., 88, true), remedy(7.1, 88, 88, 400., 88, true)), (Remedy::Pairs(176), Remedy::Rung));
-        assert_eq!((remedy(1.5, 352, 88, 400., 88, true), remedy(1.8, 352, 88, 400., 88, true)), (Remedy::Pairs(528), Remedy::Rung));
-        assert!((0.5 * (1.8 * 352. - 352.) + 1.8 * 352. - 352. - 422.4f64).abs() < 1e-9 && 1.5 * (1.8 * 352. - 88.) > 800.);
-        assert_eq!((remedy(2., 88, 88, 88., 88, true), remedy(3., 88, 88, 88., 88, true)), (Remedy::Pairs(176), Remedy::Rung));
-        assert_eq!(remedy(f64::INFINITY, 88, 88, 400., 88, true), Remedy::Rung);
-        assert_eq!(remedy(1.01, MOST_TRAJECTORIES, 88, 16000., 88, true), Remedy::Rung);
+        assert_eq!(remedy(4.5, 88, 88, 400., 88, true), Remedy::Pairs(176));
+        assert!((0.5 * (4.69 * 88. - 88.) + 4.69 * 88. - 400. - 175.08f64).abs() < 1e-9 && 0.5 * (4.7 * 88. - 88.) + 4.7 * 88. - 400. > 176.);
+        assert_eq!((remedy(4.69, 88, 88, 400., 88, true), remedy(4.7, 88, 88, 400., 88, true)), (Remedy::Pairs(176), Remedy::Below));
+        assert_eq!((remedy(1.1, 352, 88, 400., 88, true), remedy(1.2, 352, 88, 400., 88, true)), (Remedy::Pairs(392), Remedy::Below));
+        assert!((0.5 * (1.2 * 352. - 352.) + 1.2 * 352. - 400. - 57.6f64).abs() < 1e-9 && 0.5 * (1.2 * 352. - 88.) + 1.2 * 352. - 400. > 176.);
+        assert_eq!((remedy(2., 88, 88, 88., 88, true), remedy(3., 88, 88, 88., 88, true)), (Remedy::Pairs(176), Remedy::Below));
+        assert_eq!(remedy(f64::INFINITY, 88, 88, 400., 88, true), Remedy::Below);
+        assert_eq!(remedy(1.01, MOST_TRAJECTORIES, 88, 16000., 88, true), Remedy::Below);
         assert_eq!((remedy(7.1, 88, 88, 400., 88, false), remedy(200., 88, 88, 400., 88, false)), (Remedy::Pairs(176), Remedy::Neither));
         assert_eq!((remedy(f64::INFINITY, 88, 88, 400., 88, false), remedy(1.01, MOST_TRAJECTORIES, 88, 16000., 88, false)), (Remedy::Neither, Remedy::Neither));
     }
@@ -2526,7 +2732,75 @@ mod tests {
                 mean_velocity: [0.; 3],
             }),
             failed: 0.,
+            outside: [0.; 2],
+            unresolved: [0.; 2],
         }
+    }
+
+    /// What the atoms outside the reach add to the model's error (`apart`), in a run whose model's error is booked
+    /// at 2 % on what is shown and 3 % on T. At the first output after t = 0 a tenth of the atoms are outside with a
+    /// fifth of the kinetic energy, none of them unresolved; three groups hold an outside state there, read at 1 %,
+    /// 5 % and 9 % on what is shown and at 3 %, 13 % and 23 % on T: the means, 5 % and 13 %, exceed the booked error
+    /// by 3 % and 10 %, and the atoms add 0.1·0.03 and 0.2·0.10. At the second, 1 % of the atoms with 4 % of the
+    /// energy are unresolved, and they are all that is outside; their state reads below the booked error: they add
+    /// their whole shares. At the third no atom is outside: nothing; nor at t = 0. A state is read once in a run,
+    /// and of the groups that hold an outside state at an output only as many as the pilot has are read: a twelfth
+    /// group's state, read at the whole, changes nothing.
+    #[test]
+    fn the_atoms_outside_the_reach_add_what_their_states_read_beyond_the_booked_error() {
+        let with = |outside: [f64; 2], unresolved: [f64; 2]| Estimate { outside, unresolved, ..estimate([10.; 3], 0., 800.) };
+        let estimates = [with([0.5; 2], [0.5; 2]), with([0.1, 0.2], [0.; 2]), with([0.01, 0.04], [0.01, 0.04]), with([0.; 2], [0.; 2])];
+        let state = |index: u64, k: usize| State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t: k as f64 }, psi: vec![] }, tau: 1., index, outside: true };
+        let part = |states: [Option<u64>; 4]| Part { sums: Group::new(4), listed: vec![], samples: states.iter().enumerate().map(|(k, index)| index.map(|index| state(index, k)).into_iter().collect()).collect(), counts: Counts::default() };
+        let parts = [part([Some(0), Some(0), None, None]), part([Some(8), Some(8), Some(9), None]), part([None, None, None, None]), part([None, Some(24), None, None])];
+        let all: Vec<&Part> = parts.iter().collect();
+        let booked = [[0.02, 0.03]; 4];
+        let reads = AtomicU64::new(0);
+        let read = |state: &State| -> [f64; 2] {
+            reads.fetch_add(1, Ordering::Relaxed);
+            match state.index {
+                0 => [0.01, 0.03],
+                8 => [0.05, 0.13],
+                9 => [0.001, 0.002],
+                24 => [0.09, 0.23],
+                _ => [1.; 2],
+            }
+        };
+        let mut known = HashMap::new();
+        let adds = apart(&estimates, &all, &booked, &read, &mut known);
+        let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-15 && (a[1] - b[1]).abs() < 1e-15;
+        assert!(near(adds[0], [0.5; 2]) && near(adds[1], [0.1 * 0.03, 0.2 * 0.10]) && near(adds[2], [0.01, 0.04]) && near(adds[3], [0.; 2]), "{adds:?}");
+        assert_eq!((reads.load(Ordering::Relaxed), known.len()), (4, 4));
+        assert_eq!(apart(&estimates, &all, &booked, &read, &mut known), adds);
+        assert_eq!(reads.load(Ordering::Relaxed), 4);
+        let many: Vec<Part> = (0..12).map(|g| part([None, Some(if g < 11 { 8 } else { 100 }), None, None])).collect();
+        let adds = apart(&estimates, &many.iter().collect::<Vec<_>>(), &booked, &read, &mut HashMap::new());
+        assert!(near(adds[1], [0.1 * 0.03, 0.2 * 0.10]), "{adds:?}");
+    }
+
+    /// What a group keeps of its trajectories' states (`Shape::fold`, `outside_alone`). Four trajectories at two
+    /// outputs; the second and the fourth are outside the reach at the last output and leave their states there,
+    /// the pilot's leave every state. A product's group keeps, per output, the first state it is handed: the second
+    /// trajectory's; a pilot's keeps them all, and of those `outside_alone` leaves the first that is outside -- the
+    /// same state.
+    #[test]
+    fn a_group_keeps_its_first_state_outside_the_reach() {
+        let plan = Plan::new(&[0., 1.], [1.; 3]);
+        let record = |index: u64, keep: bool| {
+            let outside = index % 2 == 1;
+            let held = |outside: bool| Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], outside, unresolved: false });
+            let state = |k: usize, outside: bool| State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t: k as f64 }, psi: vec![] }, tau: 1., index, outside };
+            let samples = vec![keep.then(|| state(0, false)), (keep || outside).then(|| state(1, outside))];
+            Record { outputs: vec![held(false), held(outside)], listed: vec![None; plan.listed.len()], samples, counts: Counts::default() }
+        };
+        let kept = |part: &Part| -> Vec<Vec<u64>> { part.samples.iter().map(|states| states.iter().map(|state| state.index).collect()).collect() };
+        let product = Shape::of(&plan, false).fold((0..4).map(|i| record(i, false)));
+        assert_eq!(kept(&product), [vec![], vec![1]]);
+        assert_eq!(product.sums.sums[1].outside[0], 2.);
+        let mut pilot = [Shape::of(&plan, true).fold((0..4).map(|i| record(i, true)))];
+        assert_eq!(kept(&pilot[0]), [vec![0, 1, 2, 3], vec![0, 1, 2, 3]]);
+        outside_alone(&mut pilot);
+        assert_eq!(kept(&pilot[0]), kept(&product));
     }
 
     /// The reach's falsifier (`outgrown`) on a pilot of 88 atoms, 200 outputs after t = 0 and 21 listed ones (621
@@ -2671,6 +2945,7 @@ mod tests {
                     sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t: k as f64 }, psi: vec![] },
                     tau: g as f64,
                     index: MOST_TRAJECTORIES + (g as u64) * GROUP + m as u64,
+                    outside: false,
                 };
                 let samples = (0..=outputs).map(|k| (0..members).filter(|&m| k <= held(g, m)).map(|m| state(m, k)).collect()).collect();
                 Part { sums: Group::new(outputs + 1), listed: vec![], samples, counts: Counts::default() }
@@ -2782,6 +3057,7 @@ mod tests {
             initial: [0.; STATES],
             momentum: [1.; 3],
             fixed: Fixed { model: vec![[0.; 2]; 2], start: 0. },
+            outside: vec![[0.; 2]; 2],
             step: vec![Bound::share(); 2],
             checked: None,
             ledger: Ledger::default(),
@@ -2789,7 +3065,7 @@ mod tests {
         };
         let shape = Shape::of(&context.plan, false);
         let record = |i: u64| {
-            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3] };
+            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], outside: false, unresolved: false };
             Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], samples: vec![], counts: Counts::default() }
         };
         let whole = [shape.fold((0..GROUP).map(record)), shape.fold((GROUP..2 * GROUP).map(record))];
@@ -2850,7 +3126,7 @@ mod tests {
         let record = |i: u64| {
             let mut rows = [0.; STATES];
             rows[(i % STATES as u64) as usize] = 1.;
-            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3] };
+            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], outside: false, unresolved: false };
             let outputs = vec![Fate::Held(held.clone()), if i % 3 > 0 { Fate::Held(held) } else { Fate::Lost }];
             Record { outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], samples: vec![], counts: Counts { steps: i, ..Counts::default() } }
         };
