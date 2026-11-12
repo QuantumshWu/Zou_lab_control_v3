@@ -304,12 +304,12 @@ mod tests {
         let ledger = &result["diagnostics"]["approximations"];
         assert!(ledger["totals"]["population"]["target"].is_number() && ledger["items"].is_array());
     }
-    /// Every atom lost (R9_PUSH: radiation pressure far beyond the trap's force pushes the atoms out within 40 us): the loss
+    /// Every atom lost (R9_PUSH: radiation pressure far beyond the trap's force pushes the atoms out within the scene's own 200 us): the loss
     /// one from the output every atom has left by and never decreasing, the rows there the last held ones, outside the
     /// validated regime, and the flag from when.
     #[test]
     fn a_motion_whose_every_atom_is_lost_reports_the_loss() {
-        let mut line = scene("R9_PUSH", 40., 41);
+        let mut line = scene("R9_PUSH", 200., 41);
         line["id"] = json!(10);
         let out = request(line);
         assert!(out["error"].is_null(), "{}", out["error"]);
