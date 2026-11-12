@@ -1354,7 +1354,7 @@ mod tests {
     fn ports_catalog() -> Value {
         let mut catalog = catalog();
         let types = catalog["types"].as_array_mut().unwrap();
-        types.push(json!({"type_id": "waveform.n100", "kind": "device", "family": "waveform", "label": "IMU", "resources": ["serial:{port}"], "queries": ["discover"],
+        types.push(json!({"type_id": "waveform.n100", "kind": "device", "family": "waveform", "label": "IMU", "resources": ["serial:{port}"], "queries": ["discover", "resolve"],
             "parameters": [{"name": "port", "type": "str", "label": "Serial port", "default": "", "blank_label": "found on Init"}]}));
         types.push(json!({"type_id": "sequencer.local", "kind": "device", "family": "sequencer", "label": "Board", "resources": ["serial:{uart_port}"], "queries": ["resolve"],
             "parameters": [{"name": "backend", "type": "str", "label": "Board transport", "default": "auto"},
@@ -1443,6 +1443,82 @@ mod tests {
         assert_eq!((state["action"].as_str(), wb.apparatus.draft[0].parameters["uart_port"].as_str()), (Some("apply"), Some("")));
         apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
         assert_eq!(resolves(&calls).len(), 2, "Apply looks again");
+    }
+
+    /// The shared wording of a serial port that is not there (zlc_pulse::serial::OpenFailure, zlc_atom.devices.SerialPortError).
+    const GONE: &str = "SerialPortUnusable: COM3 could not be opened: not present (os error 2: The system cannot find the file specified) \
+                        -- serial ports on this PC: COM5 (USB-SERIAL CH340)";
+
+    /// A filled-in port is a record of an earlier find: a row whose port cannot be used at all is
+    /// looked for again with its type's resolve (without that port), found elsewhere, pinned and
+    /// opened there, and the Init line and the row's own log say what happened.
+    #[test]
+    fn a_named_port_that_is_gone_is_looked_for_again_and_found_elsewhere() {
+        let (mut wb, calls, mut host) = ports_rig("stale", &[("n100", "waveform.n100", json!({"port": "COM3"}))]);
+        apply(&mut wb, &mut host, "save_apparatus", json!({"path": "apparatus.json"})).unwrap();
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        assert_eq!((count(&calls, "open n100 waveform.n100"), resolves(&calls).len()), (1, 0), "a named port opens at once");
+        event(&mut wb, Event::Failed { instance: "n100".into(), error: GONE.into() }, &mut host);
+        let asked = resolves(&calls);
+        assert_eq!((asked.len(), &asked[0].1["parameters"]["port"]), (1, &json!("")), "looked for without the port it named");
+        assert_eq!((wb.device_rows()[0]["state"].as_str(), wb.device_rows()[0]["resolving"].as_bool()), (Some("opening"), Some(true)));
+        assert_eq!(wb.apparatus_state()["busy"], "initializing devices · finding n100's serial port");
+        let log = wb.device_log("n100", 10);
+        assert!(log[0].ends_with(&format!("] open failed: {GONE}")) && log[1].ends_with("] looking for it again on the serial ports there are"), "{log:?}");
+        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"parameters": {"port": "COM5"}, "note": "N100 streaming on COM5"})) }, &mut host);
+        assert_eq!((count(&calls, "open n100 waveform.n100"), wb.apparatus.draft[0].parameters["port"].as_str()), (2, Some("COM5")));
+        assert_eq!(wb.apparatus_state()["dirty"], true, "pinned into the apparatus, not saved");
+        event(&mut wb, Event::Opened { instance: "n100".into(), working_point: json!({}) }, &mut host);
+        let found = "COM3 could not be opened: not present (os error 2: The system cannot find the file specified); looked again: \
+                     N100 streaming on COM5, written into the apparatus -- Save to keep it";
+        assert_eq!(wb.apparatus_state()["report"]["text"], format!("1 device initialized: n100 · n100: {found}"));
+        assert!(wb.device_log("n100", 10)[2].ends_with(&format!("] found: {found}")));
+    }
+
+    /// Looked for again and not found, the row fails with both failures; a port another program holds
+    /// is not looked past; and the open of what a resolve found is not looked for once more. Every
+    /// failure is in the device's own log.
+    #[test]
+    fn a_port_looked_for_again_fails_once_with_both_reasons() {
+        let (mut wb, calls, mut host) = ports_rig("stale-error", &[("n100", "waveform.n100", json!({"port": "COM3"})),
+            ("imu", "waveform.n100", json!({"port": "COM7"})), ("board", "sequencer.local", json!({"uart_port": "COM10"}))]);
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        event(&mut wb, Event::Failed { instance: "n100".into(), error: GONE.into() }, &mut host);
+        let nothing = "RuntimeError: no WHEELTEC N100 streams on the free serial ports (listened to COM5)";
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[0].0, result: Err(nothing.into()) }, &mut host);
+        let busy = "SerialPortBusy: COM7 could not be opened: in use by another program (os error 5: Access is denied) -- serial ports on this PC: COM7";
+        event(&mut wb, Event::Failed { instance: "imu".into(), error: busy.into() }, &mut host);
+        assert_eq!(resolves(&calls).len(), 1, "a held port is not looked past");
+        // The board's COM10 refused: found again on COM4, whose open then fails the same way -- once.
+        let refused = "SerialPortUnusable: COM10 could not be opened: driver refused (os error 1: Incorrect function) -- this PC has no serial port";
+        event(&mut wb, Event::Failed { instance: "board".into(), error: refused.into() }, &mut host);
+        assert_eq!(resolves(&calls)[1].1["parameters"]["uart_port"], "");
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[1].0, result: Ok(json!({"parameters": {"uart_port": "COM4"}, "note": "board UART found on COM4"})) }, &mut host);
+        let again = refused.replace("COM10", "COM4");
+        event(&mut wb, Event::Failed { instance: "board".into(), error: again.clone() }, &mut host);
+        assert_eq!(resolves(&calls).len(), 2, "what a resolve found is not looked for again");
+        let rows = wb.device_rows();
+        assert_eq!(rows.iter().map(|row| row["state"].as_str().unwrap()).collect::<Vec<_>>(), ["failed", "failed", "failed"]);
+        assert_eq!((rows[0]["error"].as_str(), rows[1]["error"].as_str(), rows[2]["error"].as_str()),
+                   (Some(format!("{GONE}; looked again: {nothing}").as_str()), Some(busy), Some(again.as_str())));
+        assert!(wb.device_log("n100", 10).last().unwrap().ends_with(&format!("] not found: {GONE}; looked again: {nothing}")));
+        assert!(wb.device_log("imu", 10).last().unwrap().ends_with(&format!("] open failed: {busy}")));
+        assert!(wb.device_log("board", 10).last().unwrap().ends_with(&format!("] open failed: {again}")));
+    }
+
+    /// The local board on Auto that came up over JTAG says so on the Init line, from its open: after
+    /// Init found no UART for it, the row stays as it was (no port to pin), and the open's note follows.
+    #[test]
+    fn an_open_says_its_note_on_the_init_line() {
+        let (mut wb, calls, mut host) = ports_rig("open-note", &[("sequencer", "sequencer.local", json!({}))]);
+        apply(&mut wb, &mut host, "save_apparatus", json!({"path": "apparatus.json"})).unwrap();
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        let tried = "no board UART on the free ports (tried COM4: opened, no board answered (timeout))";
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[0].0, result: Ok(json!({"parameters": {"uart_port": ""}, "note": tried})) }, &mut host);
+        assert_eq!((count(&calls, "open sequencer sequencer.local"), wb.apparatus_state()["dirty"].as_bool()), (1, Some(false)), "nothing to write");
+        event(&mut wb, Event::Opened { instance: "sequencer".into(), working_point: json!({"note": "opened over JTAG-to-AXI under Auto, not its UART"}) }, &mut host);
+        assert_eq!(wb.apparatus_state()["report"]["text"],
+                   format!("1 device initialized: sequencer · sequencer: {tried} · sequencer: opened over JTAG-to-AXI under Auto, not its UART"));
     }
 
     /// Two rows to be found are found one after the other, the second passing over what the first found.

@@ -2,6 +2,7 @@
 
 from collections import deque
 from typing import Callable
+import re
 import threading
 import time
 
@@ -270,4 +271,94 @@ def free_serial_ports(excluded: frozenset[str] = frozenset()) -> tuple[tuple[str
     return tuple(port for port in ports if serial_name(port) not in bound), tuple(port for port in ports if serial_name(port) in bound)
 
 
-__all__ = ["RecordQueue", "discovered", "free_serial_ports", "serial_name", "underscored"]
+#: Why a serial port could not be opened, by the OS's error code: one table for every serial open
+#: of the application (Rust's twin: ``zlc_pulse::serial::PortFault``). Any other code is ``refused``.
+SERIAL_FAULTS = {
+    # ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_NO_SUCH_DEVICE, ERROR_DEVICE_NOT_CONNECTED: no such port here.
+    2: "not present", 3: "not present", 433: "not present", 1167: "not present",
+    # ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION: a COM port opens once, and another program holds it.
+    5: "in use by another program", 32: "in use by another program",
+    # ERROR_INVALID_FUNCTION, ERROR_GEN_FAILURE: the name exists and its driver refused the open.
+    1: "driver refused", 31: "driver refused",
+}
+
+
+class SerialPortError(OSError):
+    """A serial port that could not be opened, in the one wording every serial open uses
+    (:func:`open_serial_port`): ``COM10 could not be opened: driver refused (os error 1: Incorrect
+    function) -- serial ports on this PC: COM3 (USB-SERIAL CH340)``."""
+
+    def __init__(self, message: str, *, port: str = "", fault: str = "", code: int | None = None) -> None:
+        super().__init__(message)
+        self.port, self.fault, self.code = port, fault, code
+
+    @property
+    def short(self) -> str:
+        """The class alone, as a search lists it beside the other ports it tried."""
+
+        return f"could not open ({self.fault})"
+
+
+class SerialPortUnusable(SerialPortError):
+    """The port cannot be used at all (not present, its driver refused, another OS error): a port a
+    row names is a record of an earlier find, so the core's Init looks for the device again with its
+    type's ``resolve``."""
+
+
+class SerialPortBusy(SerialPortError):
+    """Another program holds the port: the device is still behind it, and looking elsewhere finds nothing."""
+
+
+def serial_ports_here() -> str:
+    """The serial ports this PC has, with their friendly names: ``serial ports on this PC: COM3
+    (USB-SERIAL CH340), COM4``, or that it has none."""
+
+    try:
+        from serial.tools import list_ports
+
+        listed = sorted(list_ports.comports(), key=lambda item: item.device)
+    except Exception as error:  # noqa: BLE001 -- this is already part of an error message
+        return f"the serial ports on this PC could not be listed ({error})"
+    if not listed:
+        return "this PC has no serial port"
+
+    def named(item) -> str:
+        friendly = re.sub(r"\s*\(COM\d+\)\s*$", "", str(item.description or "")).strip()
+        return f"{item.device} ({friendly})" if friendly and friendly.lower() != "n/a" and friendly != item.device else str(item.device)
+
+    return "serial ports on this PC: " + ", ".join(named(item) for item in listed)
+
+
+#: pyserial's words for a failed Windows open, ``... FileNotFoundError(2, 'The system cannot find
+#: the file specified.', None, 2)``: the system's text and its Windows error code (the last field).
+_WINDOWS_ERROR = re.compile(r"\(\d+, (['\"])(?P<text>.*?)\1, None, (?P<code>\d+)\)")
+
+
+def serial_open_failure(port: str, error: BaseException) -> SerialPortError:
+    """``error`` from opening ``port``, in the shared wording and typed by its class."""
+
+    code, text = getattr(error, "winerror", None), str(getattr(error, "strerror", "") or "")
+    if not isinstance(code, int):
+        found = _WINDOWS_ERROR.search(str(error))
+        code, text = (int(found["code"]), found["text"]) if found else (None, str(error))
+    text = text.strip().rstrip(".\u3002 ")
+    fault = SERIAL_FAULTS.get(code, "refused") if code is not None else "refused"
+    said = f"os error {code}: {text}" if code is not None else text
+    kind = SerialPortBusy if fault == SERIAL_FAULTS[5] else SerialPortUnusable
+    return kind(f"{port} could not be opened: {fault} ({said}) -- {serial_ports_here()}", port=port, fault=fault, code=code)
+
+
+def open_serial_port(port: str, baud: int, **settings):
+    """``serial.Serial(port, baud, **settings)``: every serial open of the devices goes through here,
+    so a port that cannot be opened is said one way (:class:`SerialPortError`)."""
+
+    import serial
+
+    try:
+        return serial.Serial(port, baud, **settings)
+    except OSError as error:  # serial.SerialException is one
+        raise serial_open_failure(port, error) from error
+
+
+__all__ = ["RecordQueue", "SERIAL_FAULTS", "SerialPortBusy", "SerialPortError", "SerialPortUnusable", "discovered", "free_serial_ports",
+           "open_serial_port", "serial_name", "serial_open_failure", "serial_ports_here", "underscored"]

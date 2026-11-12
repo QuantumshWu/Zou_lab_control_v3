@@ -195,6 +195,20 @@ pub fn local_date() -> (i64, u32, u32) {
     (i64::from(time.wYear), u32::from(time.wMonth), u32::from(time.wDay))
 }
 
+/// The local time of day as a device log line stamps it (`HH:MM:SS`).
+#[cfg(windows)]
+pub fn local_clock() -> String {
+    let mut time = unsafe { std::mem::zeroed::<windows_sys::Win32::Foundation::SYSTEMTIME>() };
+    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut time) };
+    format!("{:02}:{:02}:{:02}", time.wHour, time.wMinute, time.wSecond)
+}
+
+#[cfg(not(windows))]
+pub fn local_clock() -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() % 86_400;
+    format!("{:02}:{:02}:{:02}", now / 3600, now / 60 % 60, now % 60)
+}
+
 #[cfg(not(windows))]
 pub fn local_date() -> (i64, u32, u32) {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();

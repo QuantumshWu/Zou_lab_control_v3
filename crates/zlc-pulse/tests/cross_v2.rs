@@ -107,7 +107,9 @@ fn a_v2_client_drives_this_server() {
     let mut lines = BufReader::new(stdout).lines();
     let port: u16 = loop {
         let line = lines.next().expect("the server ended before listening").unwrap();
-        if let Some(rest) = line.strip_prefix("{\"type\":\"pulse-server\",\"port\":") { break rest.trim_end_matches('}').parse().unwrap(); }
+        if line.starts_with("{\"type\":\"pulse-server\"") {
+            break zlc_pulse::json::parse(&line, "ready line").unwrap().get("port").and_then(|port| port.as_int()).expect("ready with its port") as u16;
+        }
     };
     std::thread::spawn(move || for _ in lines {});
     let script = std::env::temp_dir().join(format!("zlc_pulse_v2_client_{}.py", std::process::id()));
