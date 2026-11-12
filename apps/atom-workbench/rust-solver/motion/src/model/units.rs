@@ -2582,12 +2582,15 @@ mod tests {
     /// which the shared term cancels, and a proof that halves cells until the bound answers then never ends. On the closure's
     /// first two models of the sanity scenes S2, S2Q and S3 (the user's experiment), PGC3D for 1 ms and R4_LIN_2, at points
     /// the reach holds at rest (seeded), on cells of random shape about each point -- the point anywhere in the cell -- of
-    /// radius ℓ, ℓ/4 and ℓ/16, ℓ the light's shortest length 1/k: every quantity the gates read (`read_by_gates`) over the
+    /// radius ℓ, ℓ/4, ℓ/16 and ℓ/64, ℓ the light's shortest length 1/k: every quantity the gates read (`read_by_gates`) over the
     /// cell, against its values on a 5³ grid of the cell, 32 random points of it and the point (the proofs' own point
     /// regions, at the reach's speed there), its derivatives at the centre by the grid's central differences. An upper bound
     /// at least the largest value, a lower one at most the least (to the rounding), and its excess within `OWN` times the
     /// variation (with the rounding of its value) -- or, beyond it, of the second order: falling by `FALL` from that scale to
-    /// the next (at the finest, from the one before). A first-order Taylor form leaves of its parts their curvature, which
+    /// the next. (Read from the scale before, a coupling whose two levels cross within a cell of ℓ/4 -- PGC3D's F=2
+    /// sublevels 4 and 6, its saturation infinite at points of that cell -- had no excess there to fall from, ∞ against ∞,
+    /// while on ℓ/16 its distance's second-order remainder, 0.023 of a least distance of 0.031, read through 1/d² a bound of
+    /// 2442 where the points reach 88; on ℓ/64 the bound is within 0.11 of their 1.87, a fall of 2·10⁴.) A first-order Taylor form leaves of its parts their curvature, which
     /// the sum need not have (two counter-propagating beams' |q|² on a flat level difference): its excess falls as the
     /// cell's square. The class this test is for does not: a bound of the parts' separate ranges exceeds by the parts' own
     /// first orders, which fall as the cell -- four times a scale -- and where a shared term's slack reaches a threshold
@@ -2595,18 +2598,18 @@ mod tests {
     /// taken further by a local search from the best of them (a kink of max(|Δ| − moved, 0) or a pole of 1/d between two
     /// grid points holds the largest value no sample meets). Every bound holds, every quantity at every scale; the gates'
     /// statements, the saturations and sweeps the proofs bound, are within their variation or of the second order on the
-    /// cells below the light's length (ℓ/4, ℓ/16) -- on a cell of ℓ a beam pair's phase turns by up to 2 rad and its
+    /// cells below the light's length (ℓ/4, ℓ/16; ℓ/64 is read for the fall alone) -- on a cell of ℓ a beam pair's phase turns by up to 2 rad and its
     /// range, not its first order, bounds it -- and finite there (an infinite one is its distance's nothing, and the
     /// distance is a quantity of its own here). The worst ratio per scene and per quantity, the parts' and ℓ's readings
     /// beyond `OWN`, and those that fall as the second order, are printed.
     ///
     /// A measurement, run by name (`POINTS`, default 32; `SCENES`), not a gate on the crate: at 16 points the line
     /// (09bc9784) has 482 statements beyond, falling at most 4.5 times a scale (327 of them between 4 and 4.5: the first
-    /// order), and this one 10 -- seven couplings' and drives' statements on cells of ℓ/4 falling 5 to 7 times (a first
-    /// order left beside the second: the two states' shifts by their folded drives added as each one's bound,
-    /// whose Doppler part is no function of the place), two resonant drives' saturations at ℓ/16 beyond their values by
-    /// 5e-8 of them (the rounding of the bare transition energies, 10⁹ rad/µs, in the detuning) and one beside a crossing
-    /// of two ground sublevels. Every bound holds.
+    /// order), and this one none. (The last seven of the class: three of S2Q's through a resolvent's bound read as a range
+    /// on every cell where Varah's denominator reached nothing -- eliminate.rs `Model::resolvent_own` --, two of S3's resonant
+    /// probe drives whose size, the probe with its reflection 4·10⁻⁸ of it, read the beams' phase-blind sum -- reach.rs
+    /// `Frame` --, R4_LIN_2's and PGC3D's through a norm's remainder that had no value from w = n on -- own.rs `measured`.)
+    /// Every bound holds.
     #[test]
     #[ignore]
     fn a_gate_s_bound_over_a_cell_is_within_its_own_variation_of_its_largest_value() {
@@ -2644,7 +2647,7 @@ mod tests {
                     .map(|(r, [shape, place], inner)| {
                         let mut out = vec![];
                         let norm = shape.iter().map(|x| x * x).sum::<f64>().sqrt();
-                        for (j, radius) in [length, length / 4.0, length / 16.0].into_iter().enumerate() {
+                        for (j, radius) in [length, length / 4.0, length / 16.0, length / 64.0].into_iter().enumerate() {
                             let half: [f64; 3] = std::array::from_fn(|a| radius * shape[a] / norm);
                             let cell = Cell { centre: std::array::from_fn(|a| r[a] - place[a] * half[a]), half };
                             // The cell, its 5³ grid (offsets −h, −h/2, 0, h/2, h along each side; index Σ_a i_a 5^a), the
@@ -2713,7 +2716,7 @@ mod tests {
                     .collect();
                 // Per point and quantity, per scale: the excess over the points' extreme (nothing where the bound is their
                 // value, an infinite one too), its lack of validity and its ratio to the variation, and the reading.
-                let mut scales: std::collections::HashMap<(usize, usize), [Option<(f64, f64, f64, String)>; 3]> = std::collections::HashMap::new();
+                let mut scales: std::collections::HashMap<(usize, usize), [Option<(f64, f64, f64, String)>; 4]> = std::collections::HashMap::new();
                 for (p, readings) in read.iter().enumerate() {
                     for &(j, q, bound, extreme, own) in readings {
                         let (_, side, _) = &quantities[q];
@@ -2721,20 +2724,20 @@ mod tests {
                         let rounding = 1e-9 * extreme.abs() + 1e-12;
                         let (invalid, excess) = if beyond.is_nan() { (f64::INFINITY, f64::INFINITY) } else { (-beyond - rounding, (beyond - rounding).max(0.0)) };
                         let what = format!("point {p} at {:?}, radius ℓ/{}: bound {bound:.6e}, the points' {extreme:.6e}, its own variation {own:.3e}", drawn[p].0, 4_usize.pow(j as u32));
-                        scales.entry((p, q)).or_insert([None, None, None])[j] = Some((invalid, excess, excess / own, what));
+                        scales.entry((p, q)).or_insert([None, None, None, None])[j] = Some((invalid, excess, excess / own, what));
                     }
                 }
                 // Per quantity: the worst lack of validity, the worst ratio, and the worst ratio not of the second order.
                 let mut worst: Vec<[(f64, String); 3]> = quantities.iter().map(|_| std::array::from_fn(|_| (0.0, String::new()))).collect();
                 // Per radius: the quantities failing there, the worst ratio with its quantity, and the readings beyond `OWN`
                 // that fall as the second order.
-                let mut by_radius: [(std::collections::HashSet<usize>, f64, usize, usize); 3] = std::array::from_fn(|_| (std::collections::HashSet::new(), 0.0, 0, 0));
+                let mut by_radius: [(std::collections::HashSet<usize>, f64, usize, usize); 4] = std::array::from_fn(|_| (std::collections::HashSet::new(), 0.0, 0, 0));
                 let mut unasked = 0;
                 for (&(_, q), at) in &scales {
-                    for j in 0..3 {
+                    for j in 0..4 {
                         let Some((invalid, excess, ratio, what)) = &at[j] else { continue };
                         // The fall of the excess from this scale to the next, or at the finest from the one before.
-                        let (from, to) = if j < 2 { (j, j + 1) } else { (1, 2) };
+                        let (from, to) = if j < 3 { (j, j + 1) } else { (2, 3) };
                         let fall = at[from].as_ref().zip(at[to].as_ref()).map_or(f64::INFINITY, |(a, b)| if b.1 == 0.0 || (a.1.is_infinite() && b.1.is_finite()) { f64::INFINITY } else { a.1 / b.1 });
                         let second = fall >= FALL;
                         if *invalid > worst[q][0].0 {
@@ -2745,7 +2748,7 @@ mod tests {
                         }
                         // Asserted: validity everywhere; the gates' statements below the light's length.
                         let statement = quantities[q].0.ends_with(" saturation") || quantities[q].0.ends_with(" sweep");
-                        let asked = statement && j > 0 && !excess.is_infinite();
+                        let asked = statement && (1..3).contains(&j) && !excess.is_infinite();
                         if asked && *ratio > OWN && !second && *ratio > worst[q][2].0 {
                             worst[q][2] = (*ratio, format!("{what}, its excess {excess:.3e} falling {fall:.2} to the next scale"));
                         }
