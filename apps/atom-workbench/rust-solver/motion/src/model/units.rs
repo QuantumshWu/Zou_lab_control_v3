@@ -1021,7 +1021,7 @@ impl Model {
     /// A coupling's (`Unit::Term`: a ← b at the model's beat `beat`) saturation and sweep over a region (module documentation,
     /// # A coupling of two states), made once per region. Its size: the constant part's value |H_ab + Σ_ji c_ji C_ji[a, b]| at
     /// the centre (H_ab the two states' own coupling with every light off, a static one's), its modulus over the region of
-    /// its own form (reach.rs `Combination::modulus`), at most every beam at its largest amplitude and in phase; and the part at the atom, per excited state ½ |u'_a[e]| |u_b[e]| (1/σ_eb + 1/σ'_ea), u the two
+    /// its own form (reach.rs `Region::modulus`), at most every beam at its largest amplitude and in phase; and the part at the atom, per excited state ½ |u'_a[e]| |u_b[e]| (1/σ_eb + 1/σ'_ea), u the two
     /// frequencies' folded couplings' coherent bounds and σ the denominator's bound of each drive folded at the atom (the
     /// bare drives' halves are the constants'). Its distance: |β + E_a + δ_a − E_b − δ_b| over the region, of the dressed
     /// levels -- the two levels' difference (eliminate.rs `Gap`) and their shifts by their drives folded at the atom with
@@ -1042,7 +1042,7 @@ impl Model {
     /// nothing (∞).
     pub(crate) fn term_parts(&self, form: &TermForm, a: usize, b: usize, beat: usize, region: &Region) -> (Own, Own, Own) {
         let none = Own::constant(0.0);
-        let mut size = region.combined(form.pairs.iter().map(|&(lj, li, v, size)| (pair_span(&region.spans, lj, li), v, size))).modulus(form.base);
+        let mut size = region.modulus(form.pairs.iter().map(|&(lj, li, v, size)| (pair_span(&region.spans, lj, li), v, size)), form.base);
         for leg in &form.legs {
             let e = GROUND + leg.excited;
             let half = |detuning: Option<f64>, s: usize| detuning.map_or(none, |detuning| self.denominator_own(region, e, s, detuning).recip());

@@ -98,7 +98,7 @@
 //! bound the gates read is the quantity's own form (own.rs `Own`): its value and gradient at the centre and a remainder of
 //! the second order, beside its range -- each part made of its own sum (a level difference of its weights P_xx − P_yy,
 //! eliminate.rs `Gap`; a sum of beam pairs of its own gradient and Hessian, `Combination`, `steepness`; a norm of its
-//! vector's, `Region::summed`), and every composite of them in own-form arithmetic, so that two parts that move together
+//! vector's, `Frame`), and every composite of them in own-form arithmetic, so that two parts that move together
 //! cancel at the first order where the quantity does. The speeds' bound is one too (`Region::pace`): a level's slope is
 //! largest on the trap's flank and the speed at its bottom, and the product of the two maxima was neither's.
 //!
@@ -107,7 +107,7 @@
 //! |k·d| over a displacement d, at most Σ_a |k_a| h_a over a cell of half-widths h -- nothing along a side across the beam --,
 //! and its envelope b changes over the waist across the beam and over the Rayleigh range along it (`Bends`). A fringe, the
 //! coefficient a_j* a_i of two beams, turns only along k_i − k_j. So the bounds over a cell are made side by side, not from
-//! the cell's radius times one Lipschitz constant: a pair's coefficient (`PairSpan`) and a sum of beams (`Region::summed`)
+//! the cell's radius times one Lipschitz constant: a pair's coefficient (`PairSpan`) and a sum of beams (`Frame`)
 //! each from its value and gradient at the centre to second order, Σ_a h_a |∂_a ·| and half the bound of its second
 //! derivative along the cell's displacements, at most the first order's, at most the phase-blind one -- at a crest, where the
 //! largest values are, a first-order bound has no slope to read and gives the cell's size where the truth is its square.
@@ -377,20 +377,21 @@ impl Span {
         let slope = (0..3).map(|i| (self.gradient[i] - C64::new(0.0, k[i]) * self.centre).norm_sqr()).sum::<f64>().sqrt();
         Span { most: self.centre.abs(), least: self.centre.abs(), slope, half: [0.0; 3], rho: 0.0, swing: 0.0, bend: 0.0, twist: 0.0, third: 0.0, ..*self }
     }
-    /// The bound over a bounded cell of |dᵀ∇∇a d| = |−(k·d)² b + 2i (k·d)(∇b·d) + dᵀ∇∇b d|: τ² max|b| + 2τ swing + bend, τ its
-    /// plane wave's turn.
-    pub(crate) fn bowed(&self) -> f64 {
-        let turn = self.turn(&self.wave);
+    /// The bound over a bounded cell of |dᵀ∇∇a′ d| of its amplitude in the frame of a wave vector k₀ (`Frame`), a′ =
+    /// e^{−ik₀·d} a(c + d) = e^{ik·c} e^{iq·d} b(c + d), q = k − k₀: |−(q·d)² b + 2i (q·d)(∇b·d) + dᵀ∇∇b d| ≤ τ² max|b| +
+    /// 2τ swing + bend, τ its plane wave's turn at q.
+    pub(crate) fn bowed(&self, frame: &[f64; 3]) -> f64 {
+        let turn = self.turn(&std::array::from_fn(|a| self.wave[a] - frame[a]));
         turn * turn * self.most + 2.0 * turn * self.swing + self.bend
     }
     /// The bound over a bounded cell of |q·d|, the turn of a plane wave of wave vector q from the centre: Σ_a |q_a| h_a.
     pub(crate) fn turn(&self, q: &[f64; 3]) -> f64 {
         (0..3).map(|a| q[a].abs() * self.half[a]).sum()
     }
-    /// The bound over a bounded cell of |a − a(c)| = |(e^{ik·d} − 1) b + e^{ik·c}(b − b(c))|: its plane wave's turn times
-    /// max|b|, and its envelope's swing.
-    pub(crate) fn moved(&self) -> f64 {
-        self.turn(&self.wave) * self.most + self.swing
+    /// The bound over a bounded cell of |a′ − a(c)| in the frame of k₀ (`bowed`): |(e^{iq·d} − 1) b + (b − b(c))|, its
+    /// plane wave's turn at q = k − k₀ times max|b|, and its envelope's swing.
+    pub(crate) fn moved(&self, frame: &[f64; 3]) -> f64 {
+        self.turn(&std::array::from_fn(|a| self.wave[a] - frame[a])) * self.most + self.swing
     }
     /// The bound over a bounded cell of |∇a − ∇a(c)| = |∇∇a d| = |e^{ik·r}(−k (k·d) b + i k (∇b·d) + i ∇b (k·d) + ∇∇b d)|:
     /// |k| τ max|b| + |k| swing + τ slope + twist, τ its plane wave's turn.
@@ -424,10 +425,14 @@ impl Span {
 ///   most the farther of the two from c(c).
 /// - `most`, of |c|: B̄; `hessian`, ∇∇c at the centre; and `rest`, of the remainder |∇c − ∇c(c) − ∇∇c(c) d| of its
 ///   gradient's first-order Taylor form (`rest`).
+/// - `wave`, q; `swing` and `bend`, D and Q: what its modulus reads in another frame (`Region::modulus`).
 /// On a point: its value, its gradient's norm, the rest zero. On the whole space: nothing at the centre, B̄ and |q| B̄ + G.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PairSpan {
     pub(crate) centre: C64,
+    pub(crate) wave: [f64; 3],
+    pub(crate) swing: f64,
+    pub(crate) bend: f64,
     pub(crate) gradient: [C64; 3],
     pub(crate) hessian: [[C64; 3]; 3],
     pub(crate) radius: f64,
@@ -458,7 +463,7 @@ pub(crate) fn pair_span(spans: &[Span], j: usize, i: usize) -> PairSpan {
     let steep = a.slope * b.most + a.most * b.slope;
     let blind = q * most + steep;
     if !a.rho.is_finite() {
-        return PairSpan { centre: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3], radius: most, curve: f64::INFINITY, most, slope: blind, veer: f64::INFINITY, rest: f64::INFINITY };
+        return PairSpan { centre: C64::ZERO, wave, swing: f64::INFINITY, bend: f64::INFINITY, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3], radius: most, curve: f64::INFINITY, most, slope: blind, veer: f64::INFINITY, rest: f64::INFINITY };
     }
     let turn = a.turn(&wave);
     let swing = a.swing * b.most + a.most * b.swing;
@@ -478,7 +483,7 @@ pub(crate) fn pair_span(spans: &[Span], j: usize, i: usize) -> PairSpan {
     let radius = (lean + curve).min(turn * most + swing).min(centre.abs() + most);
     let radius = if j == i { radius.min((most - centre.re).max(centre.re - a.least * a.least)) } else { radius };
     let rest = rest(q, turn, most, swing, bend, twist, steep, third);
-    PairSpan { centre, gradient, hessian, radius, curve, most, slope: (gradient.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + veer).min(blind), veer, rest }
+    PairSpan { centre, wave, swing, bend, gradient, hessian, radius, curve, most, slope: (gradient.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + veer).min(blind), veer, rest }
 }
 
 /// One weighting w of the far light's static forms P_l'l (an entry's, a diagonal difference's), as a sum over the beam pairs
@@ -874,7 +879,7 @@ impl Region {
                     second[a][b] += span.hessian[a][b] * x;
                 }
             }
-            let over = if bounded { [span.moved(), span.bowed(), span.most, span.veer(), span.rest(), span.steepest()] } else { [0.0, 0.0, span.most, 0.0, 0.0, span.steepest()] };
+            let over = if bounded { [span.moved(&[0.0; 3]), span.bowed(&[0.0; 3]), span.most, span.veer(), span.rest(), span.steepest()] } else { [0.0, 0.0, span.most, 0.0, 0.0, span.steepest()] };
             for (sum, x) in sums.iter_mut().zip(over) {
                 *sum += size * x;
             }
@@ -913,19 +918,108 @@ impl Region {
         (self.combined(pairs()).real().within(0.0, f64::INFINITY), self.gradient(pairs()).re())
     }
 
-    /// |Σ_l a_l x_l| over the region in its own form (`field`, own.rs `Form::norm`).
+    /// |Σ_l a_l x_l| over the region in its own form (`Frame`): of the beams `entries` (the request's beam, x_l, |x_l|).
     pub(crate) fn coherent_own(&self, entries: &[(usize, C64, f64)]) -> Own {
-        self.field(entries.iter().copied()).0.norm()
+        let mut sum = Frame::of(self, entries.iter().map(|&(l, _, size)| (l, size)));
+        for &(l, x, size) in entries {
+            sum.add(self, l, size, std::iter::once((0, x)));
+        }
+        sum.norm(self)
     }
 
-    /// ‖u‖ over the region in its own form (own.rs `Own::norm`), u = Σ_l a_l x_l a sum of beams' amplitudes times vectors
-    /// x_l: its value `u` and its slopes ∂_a u = Σ_l ∂_a a_l x_l at the centre, its Taylor remainder ½ `bowed`, `bowed` =
-    /// Σ_l ‖x_l‖ max|dᵀ∇∇a_l d| (`Span::bowed`); within ‖u(c)‖ ± `moved`, `moved` = Σ_l ‖x_l‖ max|a_l − a_l(c)|
-    /// (`Span::moved`), and at most `blind` = Σ_l ‖x_l‖ max|a_l|, every beam at its largest amplitude and in phase -- at a
-    /// crest of ‖u‖, where the first order has no slope to read, it moves by the cell's size squared. On the whole space
-    /// [0, blind].
-    pub(crate) fn summed(&self, u: &[C64], slopes: [&[C64]; 3], moved: f64, bowed: f64, blind: f64) -> Own {
-        Own::norm(u, slopes, 0.5 * bowed, moved, blind, self.half)
+    /// |f + base| of a sum f = Σ_p w_p c_p of beam pairs' coefficients (`PairSpan`, each with its weight and the weight's
+    /// modulus) and a constant `base` over the region, in its own form (own.rs `Own::norm`) in the frame of a wave vector q₀
+    /// as a sum of beams' is (`Frame`): |f + base| = |e^{−iq₀·(r − c)}(f + base)|, and in that frame a pair turns by τ_p =
+    /// Σ_a |q_p,a − q₀,a| h_a and the base by τ₀ = Σ_a |q₀,a| h_a, not each by its own q (a pair's modulus |b_j||b_i| has no
+    /// phase to follow, two pairs of one q turn together). Its value and slopes ∂_a f − iq₀,a (f + base) at the centre, its
+    /// remainder Σ_p |w_p| ½(τ_p² B̄_p + 2τ_p D_p + Q_p) + |base| ½τ₀²; it moves by Σ_p |w_p| min(τ_p B̄_p + D_p, |c_p(c)| +
+    /// B̄_p) + |base| τ₀ at most and is at most |base| + Σ_p |w_p| B̄_p. q₀ the pairs' wave vectors' mean weighted by |w_p| B̄_p,
+    /// the base's (q = 0) by |base|. On the whole space, [0, that bound].
+    pub(crate) fn modulus(&self, terms: impl Iterator<Item = (PairSpan, C64, f64)> + Clone, base: C64) -> Own {
+        let (mut mean, mut weight) = ([0.0; 3], base.abs());
+        for (pair, _, size) in terms.clone() {
+            for a in 0..3 {
+                mean[a] += size * pair.most * pair.wave[a];
+            }
+            weight += size * pair.most;
+        }
+        let frame = if weight > 0.0 { mean.map(|x| x / weight) } else { [0.0; 3] };
+        let turn = |q: [f64; 3]| -> f64 { (0..3).map(|a| (q[a] - frame[a]).abs() * self.half[a]).sum() };
+        let base_turn = turn([0.0; 3]);
+        let (mut value, mut slopes) = (base, [C64::ZERO; 3]);
+        let (mut rest, mut moved, mut blind) = (0.5 * base_turn * base_turn * base.abs(), base_turn * base.abs(), base.abs());
+        for (pair, w, size) in terms {
+            value += pair.centre * w;
+            for a in 0..3 {
+                slopes[a] += pair.gradient[a] * w;
+            }
+            let tau = turn(pair.wave);
+            rest += size * 0.5 * (tau * tau * pair.most + 2.0 * tau * pair.swing + pair.bend);
+            moved += size * (tau * pair.most + pair.swing).min(pair.centre.abs() + pair.most);
+            blind += size * pair.most;
+        }
+        let slopes: [C64; 3] = std::array::from_fn(|a| slopes[a] - C64::new(0.0, frame[a]) * value);
+        Own::norm(&[value], [&slopes[0..1], &slopes[1..2], &slopes[2..3]], rest, moved, blind, self.half)
+    }
+}
+
+/// A sum u = Σ_l a_l x_l of beams' amplitudes times vectors x_l (over the excited states) gathered for its norm over a region
+/// (`Region::coherent_own`, eliminate.rs `Model::couplings`), in the frame of a wave vector k₀. ‖u‖ = ‖e^{−ik₀·(r − c)} u‖ for
+/// any constant k₀, and in that frame a beam's amplitude is e^{ik·c} e^{i(k − k₀)·d} b(c + d): it turns by τ = Σ_a |k_a −
+/// k₀,a| h_a, not by its own wave vector's turn (`Span::moved`, `Span::bowed`). So the norm's own form (own.rs `Own::norm`)
+/// is of u's value and slopes ∂_a u − ik₀,a u at the centre -- its first order Re⟨u, ∂_a u⟩/‖u‖ the same in every frame --,
+/// its Taylor remainder ½ Σ_l ‖x_l‖ max|dᵀ∇∇a′_l d|, within ‖u(c)‖ ± Σ_l ‖x_l‖ max|a′_l − a_l(c)| and at most Σ_l ‖x_l‖
+/// max|a_l|. k₀ is the beams' wave vectors' mean weighted by ‖x_l‖ max|a_l|, the minimizer of Σ_l w_l |k_l − k₀|²: one
+/// beam does not turn at all (its modulus is its envelope's), a beam with a weak partner turns by the partner's share, a
+/// balanced counter-propagating pair by ±k about k₀ = 0. (In the lab's frame, each beam turning by its own k·d, the
+/// norm of the user's probe's drive -- its reflection on that line 4·10⁻⁸ of it -- had a remainder ½ τ² ‖u‖ of the cell's
+/// square where the modulus moves by the partner's 10⁻⁸: its bound was the beams' phase-blind sum, 8.5·10⁻⁸ of it above
+/// the largest value on every cell down to ℓ/4000.)
+pub(crate) struct Frame {
+    wave: [f64; 3],
+    u: [C64; EXCITED],
+    slopes: [[C64; EXCITED]; 3],
+    moved: f64,
+    bowed: f64,
+    blind: f64,
+}
+
+impl Frame {
+    /// An empty sum in the frame of the beams `beams` (the request's beam, ‖x_l‖).
+    pub(crate) fn of(region: &Region, beams: impl Iterator<Item = (usize, f64)>) -> Frame {
+        let (mut sum, mut weight) = ([0.0; 3], 0.0);
+        for (l, size) in beams {
+            let span = &region.spans[l];
+            let w = size * span.most;
+            for a in 0..3 {
+                sum[a] += w * span.wave[a];
+            }
+            weight += w;
+        }
+        let wave = if weight > 0.0 { sum.map(|x| x / weight) } else { [0.0; 3] };
+        Frame { wave, u: [C64::ZERO; EXCITED], slopes: [[C64::ZERO; EXCITED]; 3], moved: 0.0, bowed: 0.0, blind: 0.0 }
+    }
+
+    /// The beam l's amplitude times x_l, of norm `size` and entries (excited state less GROUND, value) that are not zero.
+    pub(crate) fn add(&mut self, region: &Region, l: usize, size: f64, entries: impl Iterator<Item = (usize, C64)>) {
+        let span = &region.spans[l];
+        let slopes: [C64; 3] = std::array::from_fn(|a| span.gradient[a] - C64::new(0.0, self.wave[a]) * span.centre);
+        for (e, x) in entries {
+            self.u[e] += span.centre * x;
+            for a in 0..3 {
+                self.slopes[a][e] += slopes[a] * x;
+            }
+        }
+        if region.rho.is_finite() {
+            self.moved += size * span.moved(&self.wave);
+            self.bowed += size * span.bowed(&self.wave);
+        }
+        self.blind += size * span.most;
+    }
+
+    /// ‖u‖ over the region in its own form (own.rs `Own::norm`); on the whole space [0, Σ_l ‖x_l‖ max|a_l|].
+    pub(crate) fn norm(&self, region: &Region) -> Own {
+        Own::norm(&self.u, [&self.slopes[0], &self.slopes[1], &self.slopes[2]], 0.5 * self.bowed, self.moved, self.blind, region.half)
     }
 }
 
@@ -1033,20 +1127,18 @@ impl Cells<'_> {
 }
 
 /// A sum f = Σ_p w_p c_p of beam pairs' coefficients over a cell of half-widths `half` (`Region::combined`): its value and
-/// gradient at the centre, its Taylor remainder's bound Σ_p |w_p| `curve`_p, its pairs' own ranges Σ_p |w_p| `radius`_p and
-/// their phase-blind bound Σ_p |w_p| B̄_p.
+/// gradient at the centre, its Taylor remainder's bound Σ_p |w_p| `curve`_p and its pairs' own ranges Σ_p |w_p| `radius`_p.
 pub(crate) struct Combination {
     half: [f64; 3],
     value: C64,
     gradient: [C64; 3],
     curve: f64,
     each: f64,
-    blind: f64,
 }
 
 impl Combination {
     pub(crate) fn of(half: &[f64; 3], terms: impl Iterator<Item = (PairSpan, C64, f64)>) -> Combination {
-        let mut out = Combination { half: *half, value: C64::ZERO, gradient: [C64::ZERO; 3], curve: 0.0, each: 0.0, blind: 0.0 };
+        let mut out = Combination { half: *half, value: C64::ZERO, gradient: [C64::ZERO; 3], curve: 0.0, each: 0.0 };
         for (pair, w, size) in terms {
             out.value += pair.centre * w;
             for (g, x) in out.gradient.iter_mut().zip(pair.gradient) {
@@ -1054,13 +1146,8 @@ impl Combination {
             }
             out.curve += size * pair.curve;
             out.each += size * pair.radius;
-            out.blind += size * pair.most;
         }
         out
-    }
-
-    fn bounded(&self) -> bool {
-        self.half.iter().all(|h| h.is_finite())
     }
 
     /// Re f in its own form (own.rs): its value and gradient at the centre and the Taylor remainder, within the pairs' own
@@ -1069,16 +1156,6 @@ impl Combination {
         let at = self.value.re;
         Own::new(at, self.gradient.map(|g| g.re), self.curve, self.half).within(at - self.each, at + self.each)
     }
-
-    /// |f + base| (`base` a constant) in its own form (own.rs `Own::norm`), within |f(c) + base| ± how far f moves and at
-    /// most |base| + Σ_p |w_p| max|c_p|: an entry that turns its phase across the cell at constant modulus (two
-    /// counter-propagating beams' coefficient a₁* a₂ = |a₁||a₂| e^{2ikx}) moves by the cell's size squared, not 2k h.
-    pub(crate) fn modulus(&self, base: C64) -> Own {
-        let first = if self.bounded() { ((0..3).map(|a| self.half[a] * self.gradient[a].abs()).sum::<f64>() + self.curve).min(self.each) } else { self.each };
-        let g = self.gradient;
-        Own::norm(&[self.value + base], [&g[0..1], &g[1..2], &g[2..3]], self.curve, first, base.abs() + self.blind, self.half)
-    }
-
 }
 
 /// V_prep(r; p) over a bounded cell in its own form (own.rs), its value at the centre `centre`: its far part Re Σ_l'l Q_l'l

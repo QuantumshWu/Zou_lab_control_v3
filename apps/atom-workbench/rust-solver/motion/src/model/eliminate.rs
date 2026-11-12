@@ -60,7 +60,7 @@
 
 use super::assemble::{NearValues, Plan};
 use super::photon::Origin;
-use super::reach::Region;
+use super::reach::{Frame, Region};
 use super::units::{gate, Flow, Measured};
 use super::{Beat, Component, Gate, Level, Lights, Model, Unit, UnitError};
 use crate::field::Amplitude;
@@ -696,7 +696,7 @@ impl Shift {
 /// A carrier's coherent couplings over a region (reach.rs `Region`), each in its own form (own.rs). With u_s = Σ_l a_l X^f_l[:, s]
 /// the excited amplitudes its field drives from ground state s -- its beams coherent at the request's phases (SPEC §1.2), what
 /// the atom feels at r --, per ground state |u_s[e]| per excited state, ‖u_s‖, and ‖u_s‖ per polarization unit (its beams
-/// alone) (reach.rs `Region::summed`). On a point, the values there.
+/// alone) (reach.rs `Frame`). On a point, the values there.
 pub(crate) struct Couplings {
     /// [s][e − GROUND].
     pub(crate) entry: [[Own; EXCITED]; GROUND],
@@ -807,7 +807,7 @@ impl Model {
 
     /// The Gershgorin radii over a region of the constant forms' couplings among the excited states (per state; nothing for a
     /// ground one), made once per region, every light on: an excited state's row over the states it is coupled to somewhere
-    /// (the others' terms are zero), Σ_y |H_xy|, each entry's modulus in its own form (reach.rs `Combination::modulus`) and the
+    /// (the others' terms are zero), Σ_y |H_xy|, each entry's modulus in its own form (reach.rs `Region::modulus`) and the
     /// row their sum: the moduli's own first orders add with their signs, two entries that move apart moving the row less.
     pub(crate) fn radii<'r>(&self, region: &'r Region) -> &'r [Own; STATES] {
         region.radii.get_or_init(|| {
@@ -815,7 +815,7 @@ impl Model {
             let mut radius = [Own::constant(0.0); STATES];
             for (x, mixed) in (GROUND..STATES).zip(forms.mixed(self)) {
                 for &(y, base) in mixed {
-                    radius[x] = radius[x].add(region.combined(forms.entry(self, x, y).iter().map(|&(frequency, pair, v, size)| (region.pairs[frequency][pair], v, size))).modulus(base));
+                    radius[x] = radius[x].add(region.modulus(forms.entry(self, x, y).iter().map(|&(frequency, pair, v, size)| (region.pairs[frequency][pair], v, size)), base));
                 }
             }
             radius
@@ -823,23 +823,10 @@ impl Model {
     }
 
     /// The carriers' coherent couplings over a region (`Couplings`), made once per region, their folded couplings from the region's
-    /// `Forms`: of a beam its entries that are not zero (the others add nothing), an excited state no beam reaches nothing.
+    /// `Forms`: of a beam its entries that are not zero (the others add nothing), an excited state no beam reaches nothing. Each
+    /// norm of its own beams in its own frame (reach.rs `Frame`): a polarization unit's, the whole column's, an entry's.
     pub(crate) fn couplings<'r>(&self, region: &'r Region) -> &'r [Couplings] {
         region.couplings.get_or_init(|| {
-            let spans = &region.spans;
-            // A sum Σ_{l ∈ beams} a_l x_l over the excited states as its forms read it (reach.rs `Region::summed`): its value and
-            // slopes at the centre, and how far its beams move from theirs, how far they bow and their phase-blind sum --
-            // [moved, bowed, blind], of the whole vector and per excited state.
-            #[derive(Clone, Copy)]
-            struct Sum {
-                u: [C64; EXCITED],
-                slopes: [[C64; EXCITED]; 3],
-                whole: [f64; 3],
-                each: [[f64; 3]; EXCITED],
-            }
-            let nothing = Sum { u: [C64::ZERO; EXCITED], slopes: [[C64::ZERO; EXCITED]; 3], whole: [0.0; 3], each: [[0.0; 3]; EXCITED] };
-            let bounded = region.rho.is_finite();
-            let norm_over = |sum: &Sum| region.summed(&sum.u, [&sum.slopes[0], &sum.slopes[1], &sum.slopes[2]], sum.whole[0], sum.whole[1], sum.whole[2]);
             let none = Own::constant(0.0);
             self.carriers
                 .iter()
@@ -849,33 +836,24 @@ impl Model {
                     let mut column = [none; GROUND];
                     let mut per_unit = vec![[none; GROUND]; folded.units.len()];
                     for s in 0..GROUND {
-                        // Per polarization unit, and in all.
-                        let mut all = nothing;
-                        for (ui, beams) in folded.beams[s].iter().enumerate() {
-                            let mut unit = nothing;
+                        // The norm of a set of the carrier's beams (its place among them, its column's entries), ‖X^f_l[:, s]‖ each.
+                        let norm = |beams: &mut dyn Iterator<Item = &(usize, Vec<(usize, C64, f64)>)>| -> Own {
+                            let beams: Vec<&(usize, Vec<(usize, C64, f64)>)> = beams.collect();
+                            let mut sum = Frame::of(region, beams.iter().map(|(l, _)| (cc.beams[*l], folded.columns[s][*l])));
                             for (l, entries) in beams {
-                                let span = &spans[cc.beams[*l]];
-                                let over = if bounded { [span.moved(), span.bowed(), span.most] } else { [0.0, 0.0, span.most] };
-                                for sum in [&mut unit, &mut all] {
-                                    for &(e, v, size) in entries {
-                                        sum.u[e] += span.centre * v;
-                                        for a in 0..3 {
-                                            sum.slopes[a][e] += span.gradient[a] * v;
-                                            sum.each[e][a] += size * over[a];
-                                        }
-                                    }
-                                    for a in 0..3 {
-                                        sum.whole[a] += folded.columns[s][*l] * over[a];
-                                    }
-                                }
+                                sum.add(region, cc.beams[*l], folded.columns[s][*l], entries.iter().map(|&(e, v, _)| (e, v)));
                             }
-                            per_unit[ui][s] = norm_over(&unit);
+                            sum.norm(region)
+                        };
+                        for (ui, beams) in folded.beams[s].iter().enumerate() {
+                            per_unit[ui][s] = norm(&mut beams.iter());
                         }
+                        column[s] = norm(&mut folded.beams[s].iter().flatten());
                         for &e in &folded.reached[s] {
-                            let slopes: [&[C64]; 3] = std::array::from_fn(|a| std::slice::from_ref(&all.slopes[a][e]));
-                            entry[s][e] = region.summed(&[all.u[e]], slopes, all.each[e][0], all.each[e][1], all.each[e][2]);
+                            let beams = folded.beams[s].iter().flatten().filter_map(|(l, entries)| entries.iter().find(|x| x.0 == e).map(|x| (cc.beams[*l], x.1, x.2)));
+                            let beams: Vec<(usize, C64, f64)> = beams.collect();
+                            entry[s][e] = region.coherent_own(&beams);
                         }
-                        column[s] = norm_over(&all);
                     }
                     Couplings { entry, column, units: per_unit }
                 })
@@ -895,21 +873,25 @@ impl Model {
     }
 
     /// ‖(K − z)⁻¹‖ over a region in its own form: the smaller of the dissipation's 2/Γ_min (Im⟨x|K − z|x⟩ ≤ −(Γ_min/2)‖x‖²)
-    /// and, where every excited row of K − z is diagonally dominant, Varah's 1/min_e (|E_e − z − iΓ_e/2| − r_e), r_e the far
-    /// couplings' Gershgorin radius (`radii`), E_e − E_b of the levels the eliminations take (`gap`); within [0, 2/Γ_min].
+    /// and, where every excited row of K − z is diagonally dominant, Varah's 1/m, m = min_e (|E_e − z − iΓ_e/2| − r_e), r_e
+    /// the far couplings' Gershgorin radius (`radii`), E_e − E_b of the levels the eliminations take (`gap`). Where m ≤ 0
+    /// Varah's bound says nothing and the dissipation's is the bound, so the smaller of the two is 1/max(m, Γ_min/2)
+    /// everywhere -- one quotient of a quantity at least Γ_min/2, its own form at every place. (As the minimum of Varah's
+    /// and the dissipation's, a cell on which m reached nothing read Varah's as [0, ∞] and the minimum as [0, 2/Γ_min], the
+    /// constant 2/Γ_min of every point of the cell with a remainder of its whole size: every dressing's band through it was
+    /// as wide as the dressing at every scale, and S2Q's self-energy and the drives' distances that read it never tended
+    /// to their values.)
     pub(crate) fn resolvent_own(&self, d: usize, b: usize, region: &Region) -> Own {
         let made = region.resolvents.get_or_init(|| {
             let radii = self.radii(region);
-            let dissipation = 2.0 / region.forms.least_decay(self);
+            let dissipated = 0.5 * region.forms.least_decay(self);
             let of = |delta: f64, b: usize| -> Own {
                 let mut least: Option<Own> = None;
                 for x in 0..EXCITED {
                     let apart = self.gap(GROUND + x, b, region, delta).taken.abs().hypot(0.5 * self.decay[(x, x)].re).sub(radii[GROUND + x]);
                     least = Some(least.map_or(apart, |least| least.min(apart)));
                 }
-                let least = least.expect("an atom has excited states");
-                let varah = if least.lower() > 0.0 { least.recip() } else { Own::range(dissipation, 0.0, f64::INFINITY) };
-                varah.min(Own::constant(dissipation)).within(0.0, dissipation)
+                least.expect("an atom has excited states").max(Own::constant(dissipated)).recip()
             };
             self.carriers.iter().map(|carrier| std::array::from_fn(|b| of(carrier.detuning, b))).collect()
         });
