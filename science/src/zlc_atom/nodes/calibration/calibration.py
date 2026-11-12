@@ -539,6 +539,7 @@ def refuse_other_acquisition(
     exposure_seconds: float | None,
     readout_mode: str | None,
     *,
+    exposure_step_seconds: float | None = None,
     name: str = "the calibration",
 ) -> None:
     """Refuse frames whose acquisition changes what the calibration's thresholds separate.
@@ -551,13 +552,16 @@ def refuse_other_acquisition(
     thresholds were already trained beside.  And a readout that counts
     differently (``counting_readout``: a qCMOS's readout speed or sensor
     mode, a Basler's pixel format) changes every count's noise and scale;
-    which line triggered it changes nothing.  Both are compared as recorded,
-    with no tolerance the records do not state; a fact either side does not
-    record is not compared.
+    which line triggered it changes nothing.  The exposure is a whole number
+    of the camera's steps (``exposure_step_seconds``, as it reports it), so
+    one that falls short of the window by less than a step is the nearest the
+    camera could come, not a cut; with no step reported it is compared as
+    recorded.  A fact either side does not record is not compared.
     """
 
     window = trained_light_window_seconds(calibration)
-    if exposure_seconds is not None and window is not None and float(exposure_seconds) < window:
+    step = 0.0 if exposure_step_seconds is None else float(exposure_step_seconds)
+    if exposure_seconds is not None and window is not None and float(exposure_seconds) + step < window:
         raise ValueError(
             f"these frames were exposed {_milliseconds(exposure_seconds)}, shorter than the "
             f"{_milliseconds(window)} light window {name} was trained on: the camera cut the "

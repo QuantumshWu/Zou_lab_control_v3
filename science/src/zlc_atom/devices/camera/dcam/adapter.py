@@ -132,6 +132,7 @@ class DcamCameraAdapter:
             raise TypeError("config must be DcamCameraConfig")
         self._config = config
         self._working_point: CameraWorkingPoint | None = None
+        self._exposure_step_seconds: float | None = None
         self._requested_settings: dict[str, object] = {}
         self._driver = DcamSdkDriver() if driver is None else driver
         self._lane = CameraSdkOwnerLane("zlc-dcam-camera-owner")
@@ -308,6 +309,11 @@ class DcamCameraAdapter:
                 DcamProperty.TRIGGER_GLOBAL_EXPOSURE,
                 config.trigger_global_exposure,
             )
+        # The step the exposure is set in follows the readout just applied
+        # (its line time), not the exposure itself: read once here.  A step of
+        # zero states none.
+        step, _longest = device.property_attributes(DcamProperty.EXPOSURE_TIME)
+        self._exposure_step_seconds = float(step) if step > 0 else None
 
         self._apply_roi_on_owner(config.roi_xywh)
         return self._read_working_point_on_owner()
@@ -467,6 +473,7 @@ class DcamCameraAdapter:
             ),
             offset_counts=None if conversion is None else conversion[0],
             electrons_per_count=None if conversion is None else conversion[1],
+            exposure_step_seconds=self._exposure_step_seconds,
         )
 
     def working_point(self) -> CameraWorkingPoint:

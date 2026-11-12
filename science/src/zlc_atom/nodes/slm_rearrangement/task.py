@@ -330,7 +330,7 @@ class SlmRearrangementTask:
         point = node.actual_working_point
         roi = (*tuple(point.roi_origin_yx)[::-1], *tuple(point.roi_shape_yx)[::-1])
         refuse_other_acquisition(self.calibration, point.exposure_seconds, point.readout_mode,
-                                 name="the selected Calibration")
+                                 exposure_step_seconds=point.exposure_step_seconds, name="the selected Calibration")
         cal = self.calibration.rebased(roi, point.binning_yx, point.frame_shape_yx)
         wanted = reads_photoelectrons(cal)
         if wanted is not None and wanted != node.reads_photoelectrons:

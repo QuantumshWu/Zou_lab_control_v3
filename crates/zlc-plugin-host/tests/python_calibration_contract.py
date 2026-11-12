@@ -48,6 +48,41 @@ class AcquisitionContract(unittest.TestCase):
             refuse_other_acquisition(calibration(), 0.003, READOUT, name='readout.json')
         self.assertIn('exposed 3 ms, shorter than the 5 ms light window readout.json was trained on', str(refused.exception))
 
+    def test_a_readback_within_one_camera_step_of_the_window_is_not_a_cut(self):
+        # 4.9998 ms read back for a 5 ms request, on a camera that sets its exposure in 1 us steps.
+        refuse_other_acquisition(calibration(), 0.0049998, READOUT, exposure_step_seconds=1e-6)
+        with self.assertRaisesRegex(ValueError, 'exposed 4.9998 ms, shorter than the 5 ms light window'):
+            refuse_other_acquisition(calibration(), 0.0049998, READOUT)  # no step reported: as recorded
+        with self.assertRaisesRegex(ValueError, 'exposed 3 ms, shorter than the 5 ms light window'):
+            refuse_other_acquisition(calibration(), 0.003, READOUT, exposure_step_seconds=1e-6)
+
+    def test_a_camera_reports_its_exposure_step_when_the_exposure_is_set(self):
+        from zlc_atom.devices.camera.pylon import PylonCameraAdapter, PylonCameraConfig
+        from python_pylon_lifecycle import Camera
+
+        class Exposure:
+            def __init__(self, increment):
+                self.increment, self.reads = increment, 0
+
+            def SetValue(self, value):
+                self.value = value
+
+            def HasInc(self):
+                return self.increment is not None
+
+            def GetInc(self):
+                self.reads += 1
+                return self.increment
+
+        adapter = PylonCameraAdapter(PylonCameraConfig('123'), camera=Camera())
+        adapter._camera.ExposureTime = Exposure(1.0)  # microseconds, as Basler states it
+        adapter._apply_exposure(0.005)
+        self.assertEqual((adapter._exposure_step_seconds, adapter._camera.ExposureTime.reads), (1e-6, 1))
+        adapter._camera.ExposureTime = Exposure(None)
+        adapter._apply_exposure(0.005)
+        self.assertIsNone(adapter._exposure_step_seconds)
+        adapter.close()
+
     def test_a_calibration_recording_no_window_compares_no_exposure(self):
         refuse_other_acquisition(calibration(windows=None), 0.001, READOUT)
 
@@ -86,16 +121,19 @@ class OccupancyExposure(unittest.TestCase):
         self.processor._names = ('readout.json',)
 
     @staticmethod
-    def frames(exposure_seconds):
+    def frames(exposure_seconds, step=None):
         schema = types.SimpleNamespace(value_schema=types.SimpleNamespace(value_unit='count'),
                                        cell_domain=types.SimpleNamespace(axes=()))
-        camera = {'exposure_seconds': exposure_seconds, 'readout_mode': READOUT, 'sensor_shape_yx': [2304, 4096]}
+        camera = {'exposure_seconds': exposure_seconds, 'exposure_step_seconds': step, 'readout_mode': READOUT,
+                  'sensor_shape_yx': [2304, 4096]}
         return types.SimpleNamespace(name='camera/frames', snapshot=types.SimpleNamespace(block=types.SimpleNamespace(schema=schema)),
                                      run_record={'device_snapshots': {'camera': camera}})
 
     def test_the_labs_run_reads_and_says_nothing(self):
         # Measured at 5 ms against a calibration whose camera exposed 20.03 ms around a 5 ms window.
         self.processor._place_against_the_frames(self.frames(0.005))
+        # A readback a hair under the window, on a camera that states its step.
+        self.processor._place_against_the_frames(self.frames(0.0049998, step=1e-6))
         self.assertEqual(self.core.lines, [])
 
     def test_an_exposure_cutting_the_window_is_refused_and_journaled(self):

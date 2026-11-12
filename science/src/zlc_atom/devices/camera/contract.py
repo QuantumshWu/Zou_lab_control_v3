@@ -189,6 +189,11 @@ class CameraWorkingPoint:
     #: nothing downstream may invent it.  Both or neither.
     offset_counts: float | None = None
     electrons_per_count: float | None = None
+    #: The step the camera sets its exposure in, as it reports it (a qCMOS's
+    #: exposure property step, a Basler's ExposureTime increment); None when
+    #: it reports none.  An exposure can only be one of these steps, so a
+    #: window it misses by less than one is not a cut the operator could avoid.
+    exposure_step_seconds: float | None = None
 
     def __post_init__(self) -> None:
         # Stored as the plain mode name whichever spelling the adapter used,
@@ -222,6 +227,11 @@ class CameraWorkingPoint:
             raise ValueError("integration start offset cannot be negative")
         if float(self.gain) < 0:
             raise ValueError("camera gain cannot be negative")
+        if self.exposure_step_seconds is not None:
+            step = float(self.exposure_step_seconds)
+            if not np.isfinite(step) or step <= 0:
+                raise ValueError("exposure_step_seconds must be finite and positive")
+            object.__setattr__(self, "exposure_step_seconds", step)
         conversion = stated_conversion(
             self.offset_counts, self.electrons_per_count, camera="camera working point"
         )

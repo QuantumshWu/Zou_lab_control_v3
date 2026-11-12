@@ -349,6 +349,7 @@ def _camera_working_point_snapshot(point: CameraWorkingPoint) -> dict[str, objec
             else float(point.electrons_per_count)
         ),
         "exposure_seconds": float(point.exposure_seconds),
+        "exposure_step_seconds": point.exposure_step_seconds,
         "required_external_trigger_interval_seconds": (
             None
             if point.required_external_trigger_interval_seconds is None

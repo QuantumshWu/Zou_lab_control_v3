@@ -253,8 +253,8 @@ class OccupancyProcessor:
         # Each calibration's thresholds hold while the exposure covers the light
         # window they were trained on and the readout counts as it did then.
         for name, reading in zip(self._names, self.readings):
-            refuse_other_acquisition(reading.calibration, camera.get("exposure_seconds"),
-                                     camera.get("readout_mode"), name=name)
+            refuse_other_acquisition(reading.calibration, camera.get("exposure_seconds"), camera.get("readout_mode"),
+                                     exposure_step_seconds=camera.get("exposure_step_seconds"), name=name)
         sensor = camera.get("sensor_shape_yx")
         if sensor is not None:
             sensor = tuple(int(item) for item in sensor)

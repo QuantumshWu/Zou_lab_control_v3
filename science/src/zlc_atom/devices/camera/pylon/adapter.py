@@ -131,6 +131,7 @@ class PylonCameraAdapter:
         self._configured = False
         self._monitor_mode = False
         self._working_point: CameraWorkingPoint | None = None
+        self._exposure_step_seconds: float | None = None
         self._requested_settings: dict[str, object] = {}
 
     # ------------------------------------------------------------------ open
@@ -314,7 +315,13 @@ class PylonCameraAdapter:
     def _apply_exposure(self, seconds: float) -> None:
         # Basler exposes ExposureTime in microseconds, and it is legal to change
         # while grabbing -- no stream pause needed.
-        self._camera.ExposureTime.SetValue(float(seconds) * 1e6)
+        node = self._camera.ExposureTime
+        node.SetValue(float(seconds) * 1e6)
+        # The increment it is set in, when the camera states one (GenICam
+        # HasInc); read here, once per exposure setting.
+        has_increment, increment = getattr(node, "HasInc", None), getattr(node, "GetInc", None)
+        stated = callable(increment) and (not callable(has_increment) or bool(has_increment()))
+        self._exposure_step_seconds = float(increment()) / 1e6 if stated else None
 
     def _apply_gain(self) -> None:
         # Analog gain, like the exposure above it: legal to change while
@@ -678,6 +685,7 @@ class PylonCameraAdapter:
             ),
             offset_counts=None if conversion is None else conversion[0],
             electrons_per_count=None if conversion is None else conversion[1],
+            exposure_step_seconds=self._exposure_step_seconds,
         )
 
     @_serialized
