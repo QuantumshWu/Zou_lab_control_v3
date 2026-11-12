@@ -2137,8 +2137,9 @@ fn fitted(n: usize) -> super::Scratch {
 /// phases, the model's calls within them: the middle's fixed point less its reference expansions; the step through a
 /// middle made before -- the propagation on its path with its impulse, the scattered light and the second half flow
 /// (also with the threshold reached halfway down the step's fall of the norm: its root, its jump and the step from
-/// there on). The timed steps share one scratch, as a trajectory's steps do (adapt.rs). Returns the time of the step
-/// through its middle.
+/// there on). The timed steps share one scratch, as a trajectory's steps do (adapt.rs). Beside the step, one readout
+/// of a state at the middle (`Dynamics::readout`: an output's, not a step's). Returns the time of the step through its
+/// middle.
 fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> f64 {
     let (count, half, hm) = (starts.len(), 0.5 * tau, model.hbar_over_mass());
     let kept = std::cell::RefCell::new(fitted(starts[0].psi.len()));
@@ -2185,7 +2186,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let n = starts[0].psi.len();
     let mut h = Mat::zeros(n, n);
     let populations: Vec<Vec<f64>> = starts.iter().map(|s| s.psi.iter().map(|z| z.norm_sqr()).collect()).collect();
-    let [whole, reference, point, generator, force, tones, middle, propagated, root, scattering, pace] = microseconds(
+    let [whole, reference, point, generator, force, tones, middle, propagated, root, scattering, readout, pace] = microseconds(
         count,
         [
             &mut || starts.iter().map(|s| step_of(model, s, tau, &mut kept.borrow_mut()).unwrap().end.kappa[0]).sum::<f64>(),
@@ -2205,6 +2206,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || propagation(false),
             &mut || propagation(true),
             &mut || pieces.iter().zip(starts).zip(&populations).map(|((p, s), populations)| model.scattering(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi, populations).force[0]).sum::<f64>(),
+            &mut || pieces.iter().zip(starts).map(|(p, s)| model.readout(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi)[0]).sum::<f64>(),
             &mut yardstick,
         ],
     );
@@ -2225,7 +2227,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
         std::array::from_fn(|i| sums[i] + found[i] / count as f64)
     });
     eprintln!(
-        "{name:<22} n {n} τ {tau:<6} | step {whole:8.2} = model {:8.2} (reference {reference:5.2} × {:4.1} + middle {point:7.2} × {:.0} + generator {generator:6.2} × {:4.1} + force {force:6.2} × {:4.1} + tones {tones:6.2} × {:3.1}) + own {own:8.2} (scattering {scattering:6.2}) | fixed point {fixed:6.2}  through the middle {propagated:8.2}  (with a jump {root:8.2}, {crossings}/{count}; {nodes:.1} nodes at the bandwidth × τ {turned:.2}) | counted {work:9.0} | pace {:.3} ns",
+        "{name:<22} n {n} τ {tau:<6} | step {whole:8.2} = model {:8.2} (reference {reference:5.2} × {:4.1} + middle {point:7.2} × {:.0} + generator {generator:6.2} × {:4.1} + force {force:6.2} × {:4.1} + tones {tones:6.2} × {:3.1}) + own {own:8.2} (scattering {scattering:6.2}) | a readout {readout:6.2} | fixed point {fixed:6.2}  through the middle {propagated:8.2}  (with a jump {root:8.2}, {crossings}/{count}; {nodes:.1} nodes at the bandwidth × τ {turned:.2}) | counted {work:9.0} | pace {:.3} ns",
         whole - own,
         calls[0],
         calls[1],
