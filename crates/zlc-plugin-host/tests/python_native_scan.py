@@ -11,6 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "science" /
 from zlc_atom.nodes.scan.plan import ScanAxis, ScanPlan, scan_row_count
 from zlc_atom.nodes.scan.seamless import SeamlessScanMeasurement, estimate_scan_time
 from zlc_plugin import DatasetInput
+from zlc_plugin.context import Watched
 from zlc_plugin.scan import NativeScan
 
 
@@ -126,7 +127,12 @@ class NativeScanTests(unittest.TestCase):
                 return {"command_id": 1, "applied": {"config": {}},
                         "scan": {**reference, "fields": [], "row_count": 1}}
             return {"done": True, "status": "done", "elapsed_seconds": 0.0}
-        context = types.SimpleNamespace(_request=service.request, core=core, cancel_requested=lambda: False,
+        def watch(command, **params):
+            # As the core answers a watched read: at once, and nothing more is told (the fake's report is in).
+            watched = Watched()
+            watched.answered(core(command, _watch="0", **params))
+            return watched
+        context = types.SimpleNamespace(_request=service.request, core=core, watch=watch, cancel_requested=lambda: False,
             report_progress=lambda *a, **k: None, request_operator_input=lambda *a, **k: None,
             record_devices=lambda: None, next_input=forbidden, discard_inputs=forbidden,
             commit_live=forbidden, set_run_record=forbidden)

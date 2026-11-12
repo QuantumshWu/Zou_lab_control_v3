@@ -461,8 +461,10 @@ The host's application requests map as: `run.operator_input` → `RunRequest`
 inside the run directory, `run.acquire` → `RunAcquire`, `core {command, params}` → that
 catalogue command, sent exactly as a remote client's call under the run's origin, its
 result answering the run; the command arrives with
-`_run` (the asking run id) beside its parameters, and `Workbench::run_claims(run)`
-names the devices that run holds. Device instances open when the
+`_run` (the asking run id) beside its parameters. The pulse board's own commands are
+answered before they reach the window (PULSE_V3 "Run claims"), held to
+`Workbench::active_runs()` -- each active run by its node's plugin instance, with the
+devices it holds -- as the window last stated them. Device instances open when the
 apparatus is applied and stay open across runs; a run claims them by `RunSpec.devices`.
 `RunSpec`: `run`, `node_id`, `type_id`, `values` (enabled fields), `source_signal`,
 `devices` (argument → instance_id), `artifacts` (name → path or frame claims),

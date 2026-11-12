@@ -269,14 +269,39 @@ fn pulse_unsaved(state: &Value) -> Vec<&'static str> {
         .into_iter().filter(|(_, dirty)| **dirty == true).map(|(what, _)| what).collect()
 }
 
-/// Whether any document shows `panel`.
 /// A run taking or leaving the session's sequencer is the Pulse Editor's news on this turn,
-/// not at its next poll (its On Pulse is enabled the moment the board is free).
-/// A run that has ended lets the board go on this turn too (a FIRE it left unreported goes SAFE).
+/// not at its next poll (its On Pulse is enabled the moment the board is free); the pulse desk
+/// holds the runs' board commands to the claims stated here.
 fn tell_editor_claims(pulse: &mut pulse_host::PulseHost, workbench: &zlc_workbench::Workbench) {
-    let claimant = pulse.apparatus_device().and_then(|device| workbench.device_claimant(&device));
-    if pulse.editor.set_claimed_by(claimant) { pulse.editor.poll(); pulse.dispatch(); }
-    pulse.settle_runs(|run| !workbench.run_claims(run).is_empty());
+    pulse.claimed_by(pulse.apparatus_device().and_then(|device| workbench.device_claimant(&device)));
+    pulse.desk.stated(pulse_host::Claims(workbench.active_runs().into_iter().map(|(instance, run, devices)| (instance, (run, devices))).collect()));
+}
+
+/// A pulse command's answer (none yet: `Later`) to the window or client that asked, with the pulse view
+/// when something it shows changed.
+fn pulse_answer(pulse: &mut pulse_host::PulseHost, windows: &windows::Windows, remote_pending: &mut BTreeMap<u64, remote::Pending>,
+                request: u64, handled: pulse_host::Handled) -> Result<(), String> {
+    let mut state = json!({"type": "state"});
+    match handled {
+        pulse_host::Handled::Now(Ok(result)) => { state["request"] = json!(request); state["result"] = result; }
+        pulse_host::Handled::Now(Err(error)) => { state["request"] = json!(request); state["error"] = json!(error); }
+        pulse_host::Handled::Later => {}
+    }
+    if let Some(view) = pulse.view() { state["pulse"] = view; }
+    if state.get("request").is_none() && state.get("pulse").is_none() { return Ok(()); }
+    remote::settle(&state, remote_pending);
+    let sent = windows.send(&state);
+    if state.get("pulse").is_some() { pulse.recycle(&mut state["pulse"]); }
+    sent
+}
+
+/// The pulse view, when something it shows changed, to the windows.
+fn show_pulse(pulse: &mut pulse_host::PulseHost, windows: &windows::Windows) -> Result<(), String> {
+    let Some(view) = pulse.view() else { return Ok(()) };
+    let mut state = json!({"type": "state", "pulse": view});
+    let sent = windows.send(&state);
+    pulse.recycle(&mut state["pulse"]);
+    sent
 }
 
 /// A pointer resting or leaving, no button held: it only says where the pointer is.
@@ -643,6 +668,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     // offers the pure processors from it. Nothing else is started ahead: a plugin process
     // starts when its device or node opens.
     let science_src = zlc_core::checkout::path("science/src");
+    // The pulse board's commands a run gives are answered where they arrive, before the window hears of them.
+    let pulse_proxy = std::sync::Mutex::new(event_loop.create_proxy());
+    let pulse_post: pulse_host::Post = Arc::new(move |event| { if let Ok(proxy) = pulse_proxy.lock() { let _ = proxy.send_event(AppEvent::Pulse(event)); } });
+    let pulse_desk = pulse_host::PulseDesk::new(pulse_post.clone());
+    let heard = pulse_desk.clone();
     let plugin_proxy = std::sync::Mutex::new(event_loop.create_proxy());
     let plugins = zlc_plugin_host::HostConfig::from_env(science_src).map(|mut config| {
         // Further plugin packages beside zlc_atom (a site's own): "package=source root;...".
@@ -652,6 +682,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
         config
     }).and_then(|config| zlc_plugin_host::PluginHost::new(
         config, runtime.clone(), safe_actions.clone(), move |event| {
+            let Some(event) = heard.hears(event) else { return };
             if let Ok(proxy) = plugin_proxy.lock() { let _ = proxy.send_event(AppEvent::Plugin(event)); }
         })).and_then(|host| { plugin_services::install(&host)?; Ok(host) });
     match &plugins {
@@ -696,10 +727,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     // <checkout>/workspace (.gitignore), made on demand with each kind's folder.
     let mut workbench = zlc_workbench::Workbench::new(&workspace_root.unwrap_or_else(|| zlc_core::checkout::path("workspace")), Box::new(builtin.clone()))?;
     // The pulse board and the Pulse Editor; the sequencer device types are native.
-    let pulse_proxy = std::sync::Mutex::new(event_loop.create_proxy());
-    let mut pulse = pulse_host::PulseHost::new(Arc::new(move |event| {
-        if let Ok(proxy) = pulse_proxy.lock() { let _ = proxy.send_event(AppEvent::Pulse(event)); }
-    }), safe_actions.clone(), plugins.as_ref().ok().cloned(), &workbench.workspace().pulses());
+    let mut pulse = pulse_host::PulseHost::new(pulse_desk, pulse_post, safe_actions.clone(), plugins.as_ref().ok().cloned(), &workbench.workspace().pulses());
     pulse.users = workbench.device_users();
     // A pulse document chosen as a node's workspace resource resolves to its
     // description (PULSE_V3 `pulse_describe`), read by the one pulse codec.
@@ -1025,15 +1053,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             .filter_map(|archive| archive.record_if_read()).find_map(|record| record.pulses.iter().find(|pulse| pulse.key == key))
                             .or_else(|| asking.and_then(|viewer| viewer.archive.as_ref()).and_then(|archive| archive.record().pulses.iter().find(|pulse| pulse.key == key)))
                             .ok_or_else(|| format!("This Figure played no pulse {key:?}"))?;
-                        let answer = pulse.editor.open_recorded(&played.tree.to_string(), command["discard_changes"] == true);
-                        pulse.dispatch();
-                        let mut state = json!({"type": "state", "request": command["id"]});
-                        state["pulse"] = pulse.state();
-                        match answer { Ok(result) => state["result"] = result, Err(error) => state["error"] = json!(error) }
-                        remote::settle(&state, &mut remote_pending);
-                        let sent = windows.send(&state);
-                        pulse.recycle(&mut state["pulse"]);
-                        return sent;
+                        let answer = pulse.open_recorded(&played.tree.to_string(), command["discard_changes"] == true);
+                        return pulse_answer(&mut pulse, &windows, &mut remote_pending, command["id"].as_u64().unwrap_or(0), pulse_host::Handled::Now(answer));
                     }
                     if action.starts_with("pulse_") {
                         // The Pulse Editor and the board: answered on this turn or by a lane later.
@@ -1045,18 +1066,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let request = command["id"].as_u64().unwrap_or(0);
                         let claimant = pulse.apparatus_device().and_then(|device| workbench.device_claimant(&device));
-                        let handled = pulse.command(&action, &command, origin.is_operator(), request, |run| workbench.run_claims(run), claimant);
-                        let mut state = json!({"type": "state", "request": request});
-                        state["pulse"] = pulse.state();
-                        match handled {
-                            pulse_host::Handled::Now(Ok(result)) => { state["result"] = result; }
-                            pulse_host::Handled::Now(Err(error)) => { state["error"] = json!(error); }
-                            pulse_host::Handled::Later => { state.as_object_mut().unwrap().remove("request"); }
-                        }
-                        remote::settle(&state, &mut remote_pending);
-                        let sent = windows.send(&state);
-                        pulse.recycle(&mut state["pulse"]);
-                        return sent;
+                        let handled = pulse.command(&action, &command, origin.is_operator(), request, claimant);
+                        return pulse_answer(&mut pulse, &windows, &mut remote_pending, request, handled);
                     }
                     if worker_failed { return Err("Scientific worker stopped; restart after the displayed error".into()); }
                     // A Figure Viewer's board is its own (v2 panel_only): its order, panel names,
@@ -1115,6 +1126,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         };
                         if workbench.on_runtime(&mut host) { workbench_host::deliver(&mut workbench, &builtin, &mut host); }
                         tell_editor_claims(&mut pulse, &workbench);
+                        show_pulse(&mut pulse, &windows)?;
                         // What the sequencer states of itself (its trigger lanes, how often each rises in what it holds)
                         // reaches the workbench when it changes, as any device's facts do.
                         if let Some((instance, facts)) = pulse.device_facts() { let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Facts { instance, facts })); }
@@ -1986,9 +1998,10 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     if !closing { tell(&windows, &mut remote_pending, &mut accepted, replies)?; }
                     else { for reply in replies { reply.send(&mut accepted, |message| remote::settle(message, &mut remote_pending)); } }
                     tell_editor_claims(&mut pulse, &workbench);
-                        // What the sequencer states of itself (its trigger lanes, how often each rises in what it holds)
-                        // reaches the workbench when it changes, as any device's facts do.
-                        if let Some((instance, facts)) = pulse.device_facts() { let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Facts { instance, facts })); }
+                    if !closing { show_pulse(&mut pulse, &windows)?; }
+                    // What the sequencer states of itself (its trigger lanes, how often each rises in what it holds)
+                    // reaches the workbench when it changes, as any device's facts do.
+                    if let Some((instance, facts)) = pulse.device_facts() { let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Facts { instance, facts })); }
                 }
                 // v2 _route_exact_panel_selection: an Edit's region is its panel's.
                 Event::UserEvent(AppEvent::Selection(note)) => {
@@ -2000,19 +2013,17 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Event::UserEvent(AppEvent::RebaseNeeded) => {pending.store(true,Ordering::Release); for viewer in viewers.values_mut() { viewer.pending = true; }}
                 Event::UserEvent(AppEvent::Pulse(event)) => {
-                    let mut state = json!({"type": "state"});
-                    // Whether what the window shows may have changed: not by a status answer that found the board as it
-                    // was, nor by a reply that touched nothing (a report wait that ran out, an estimate).
-                    let mut shown = true;
+                    let mut answered = None;
                     match event {
-                        pulse_host::PulseEvent::Outcome(outcome) => { shown = pulse.editor.deliver(outcome); pulse.dispatch(); }
-                        pulse_host::PulseEvent::Reply { request, result, touched, run } => {
-                            state["request"] = json!(request);
-                            match result { Ok(value) => state["result"] = value, Err(error) => state["error"] = json!(error) }
-                            pulse.replied(touched, run);
-                            shown = touched;
+                        pulse_host::PulseEvent::Outcome(outcome) => pulse.deliver(outcome),
+                        pulse_host::PulseEvent::Reply { request, result } => answered = Some((request, pulse_host::Handled::Now(result))),
+                        pulse_host::PulseEvent::Touched => pulse.touched(),
+                        pulse_host::PulseEvent::Read(ahead) => answered = Some(pulse.read(*ahead)),
+                        pulse_host::PulseEvent::Written(written) => {
+                            let (request, result) = pulse.written(*written);
+                            answered = Some((request, pulse_host::Handled::Now(result)));
                         }
-                        pulse_host::PulseEvent::Touched => pulse.replied(true, None),
+                        pulse_host::PulseEvent::FilesChanged => pulse.files_changed(),
                         pulse_host::PulseEvent::Opened { instance, result } => {
                             let event = match pulse.device_opened(&instance, &workbench.device_label(&instance), result) {
                                 Ok(point) => zlc_workbench::Event::Opened { instance, working_point: point },
@@ -2038,14 +2049,13 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Log { instance, line }));
                         }
                     }
-                    // A page is told only what changed (delta.rs): an unchanged pulse sends nothing, and an
-                    // answer that changed nothing shown is not made into a view at all.
-                    if shown { state["pulse"] = pulse.state(); }
-                    if shown || !state["request"].is_null() {
-                        remote::settle(&state, &mut remote_pending);
-                        if !closing { windows.send(&state)?; }
+                    if closing { return Ok(()); }
+                    // A page is told only what changed (delta.rs): the view is made only when something it shows
+                    // changed, and an answer carries its result.
+                    match answered {
+                        Some((request, handled)) => pulse_answer(&mut pulse, &windows, &mut remote_pending, request, handled)?,
+                        None => show_pulse(&mut pulse, &windows)?,
                     }
-                    if shown { pulse.recycle(&mut state["pulse"]); }
                 }
                 Event::UserEvent(AppEvent::Native(request)) => match request {
                     workbench_host::NativeRequest::Open { instance, type_id, parameters, context } => pulse.open_device(&instance, &type_id, &parameters, &context),
@@ -2103,8 +2113,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         // What the sequencer states of itself (its trigger lanes, how often each rises in what it holds)
                         // reaches the workbench when it changes, as any device's facts do.
                         if let Some((instance, facts)) = pulse.device_facts() { let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Facts { instance, facts })); }
-                        pulse.editor.poll();
-                        pulse.dispatch();
+                        pulse.poll();
+                        show_pulse(&mut pulse, &windows)?;
                     }
                 }
                 _ => {}

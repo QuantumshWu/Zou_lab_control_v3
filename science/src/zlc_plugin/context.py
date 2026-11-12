@@ -245,18 +245,21 @@ class Watched:
     begins, then told by the core each time what it reads changes -- nothing asks again.
 
     ``latest`` is the newest answer, the same object until something new is told; a read the
-    core could not answer is raised there.
+    core could not answer is raised there. :meth:`wait` sleeps until something new is told.
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.Condition()
         self._told: tuple[Any, str | None] | None = None
+        self._count = 0
 
     def tell(self, told: Mapping[str, Any]) -> None:
         """What the core told: ``{value}`` or ``{error}``."""
 
         with self._lock:
             self._told = (told.get("value"), None if told.get("error") is None else str(told["error"]))
+            self._count += 1
+            self._lock.notify_all()
 
     def answered(self, value: Any) -> None:
         """The watch's first answer -- unless a change was told before it arrived, which is newer."""
@@ -264,6 +267,23 @@ class Watched:
         with self._lock:
             if self._told is None:
                 self._told = (value, None)
+                self._count += 1
+                self._lock.notify_all()
+
+    @property
+    def count(self) -> int:
+        """How many answers it has been told: what :meth:`wait` compares."""
+
+        with self._lock:
+            return self._count
+
+    def wait(self, since: int, timeout: float) -> int:
+        """Sleep until it has been told more than ``since`` answers (a :attr:`count`) or ``timeout``
+        seconds passed; the count then."""
+
+        with self._lock:
+            self._lock.wait_for(lambda: self._count > since, timeout)
+            return self._count
 
     @property
     def latest(self) -> Any:

@@ -810,8 +810,8 @@ pub struct PulseSchedule {
 pub struct PulseWait {
     /// The FIRE's command_id from pulse_run.
     pub command_id: u64,
-    /// At most this long (at most 600).
-    pub timeout_seconds: f64,
+    /// At most this long (at most 600; none: not at all). A run that watches the report (ctx.watch) gives none.
+    pub timeout_seconds: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1175,7 +1175,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!("pulse_wait_done", PulseWait, control, false,
         "Wait for one FIRE's report, taken once: {done, status done|error|underflow, cursor, elapsed_seconds, command_id, fault}; \
          {done: false} while it plays. A FIRE that can no longer report (already reported, made safe, replaced) is refused, \
-         and so is any client but the run while a run holds the board (taking the report is that run's)."),
+         and so is any client but the run while a run holds the board (taking the report is that run's). A run that watches it          (ctx.watch) is answered at once and told once when the board reports or the FIRE can no longer report."),
     command!("pulse_schedule", PulseSchedule, read, false,
         "When one digital lane of the attached board rises in every shot it holds or plays, for whoever that lane triggers: {revision, \
          state none|loaded|playing|stopped|done, command_id, run_repeats (shots per scan point; 0: the first point without end), scan_repeats \

@@ -249,8 +249,8 @@ pub struct Board { link: Link, description: BoardDescription, name: String, last
                    /// What the board confirmed it holds at its last LOAD or FIRE, and the schedules worked out from it
                    /// (revision, lane, points): each is walked once, however many readers it has.
                    held: Mutex<Option<AppliedState>>, schedules: Mutex<Vec<(u64, String, Json)>>,
-                   /// Whoever is told each change of the play ([`Board::changes`]).
-                   watchers: Mutex<Vec<mpsc::Sender<u64>>> }
+                   /// Whoever is told each change of the play ([`Board::on_change`]).
+                   watchers: Mutex<Vec<Box<dyn Fn(u64) -> bool + Send>>> }
 
 const NOTHING: Play = Play { revision: 0, state: "none", command_id: None, run_repeats: 0, scan_repeats: 0, sent_us: 0, answered_us: 0 };
 
@@ -310,7 +310,7 @@ impl Board {
             *play = Play { revision: play.revision + 1, state, command_id, run_repeats: repeats.0, scan_repeats: repeats.1, sent_us, answered_us: journal::now_us() };
             play.revision
         };
-        guard(&self.watchers).retain(|watcher| watcher.send(revision).is_ok());
+        guard(&self.watchers).retain(|watcher| watcher(revision));
     }
 
     /// Counts every LOAD, FIRE, stop and report: what a reader of the schedule compares.
@@ -321,9 +321,13 @@ impl Board {
     /// watcher that drops its end is forgotten at the next change.
     pub fn changes(&self) -> mpsc::Receiver<u64> {
         let (watcher, changes) = mpsc::channel();
-        guard(&self.watchers).push(watcher);
+        self.on_change(move |revision| watcher.send(revision).is_ok());
         changes
     }
+
+    /// `told` hears each later change of what the board holds or plays (its new revision), from
+    /// whoever made it, until it answers false.
+    pub fn on_change(&self, told: impl Fn(u64) -> bool + Send + 'static) { guard(&self.watchers).push(Box::new(told)); }
 
     /// The digital lanes a camera can be triggered from: (raw lane, port key, label), in the target's order.
     pub fn trigger_lanes(&self) -> Vec<(String, String, String)> {

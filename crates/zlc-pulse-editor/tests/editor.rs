@@ -24,8 +24,16 @@ fn settle(editor: &mut Editor) {
     }
 }
 
+/// As the host does: the files a command wrote put on the disk, then its answer settled.
+fn written(editor: &mut Editor, answer: zlc_pulse_editor::editor::Answer) -> zlc_pulse_editor::editor::Answer {
+    let Some(writes) = editor.take_writes() else { return answer };
+    let result = writes.files.iter().try_for_each(|(path, bytes)| zlc_pulse::codec::write_file(path, bytes).map_err(|error| error.message));
+    editor.written(writes, result, answer)
+}
+
 fn command(editor: &mut Editor, action: &str, value: Value) -> Value {
     let answer = editor.command(action, &args(value), true);
+    let answer = written(editor, answer);
     settle(editor);
     answer.unwrap_or_else(|error| panic!("{action}: {error}"))
 }

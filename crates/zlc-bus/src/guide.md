@@ -85,7 +85,7 @@ Two ways to play a pulse document (`zlc.pulse` JSON in `pulses/`):
 - Directly on the board: `pulse_describe {document}` lists its API fields in play order (field_id, label,
   unit, value), scan fields and periods; `pulse_run {document, api_values: {field_id: [value, unit]},
   run_repeats}` compiles, loads and fires, answering `command_id`; `pulse_wait_done {command_id,
-  timeout_seconds}` reports it once (done, status); `pulse_stop` makes the board safe. `pulse_estimate`
+  timeout_seconds}` reports it once (done, status; a run watches it and is told); `pulse_stop` makes the board safe. `pulse_estimate`
   times a scan plan. While a run holds the sequencer, only that run plays on it.
 - The Pulse Editor (what the operator sees): `pulse_open {path}`, `pulse_state` (periods, ports, bindings,
   scan table, Config, board), `pulse_edit`, `pulse_scan`, `pulse_config`, `pulse_subpulse`, `pulse_target`,
