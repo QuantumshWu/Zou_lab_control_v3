@@ -1,7 +1,8 @@
 //! Per-axis cubic tables (SPEC §2.3): a function of a few bounded coordinates, given by the model (the near light's
 //! eliminated nonlinear part, model/tabulate.rs), tabulated on a tensor grid and interpolated per axis by the cubic Hermite
 //! interpolant with Catmull–Rom slopes; each axis refined by halving its spacing, every node kept; the work bound checked
-//! before any grid is built. Generic over what is tabulated: `width` reals per node. A table is asked on its axes' ranges
+//! before the first grid is built -- how far an axis is refined is its caller's (model/tabulate.rs, # Refinement). Generic
+//! over what is tabulated: `width` reals per node. A table is asked on its axes' ranges
 //! alone: nothing extrapolates, and a bounded coordinate outside its range (or no number) is its caller's error, refused
 //! aloud (`Axis::place`).
 //!
@@ -116,7 +117,7 @@ impl Axis {
         Axis { nodes: if self.periodic { self.nodes / 2 } else { (self.nodes + 1) / 2 }, ..*self }
     }
     /// How many halvings make this axis `finer`, if `finer` is a nested refinement of it.
-    fn halvings_to(&self, finer: &Axis) -> Option<u32> {
+    pub fn halvings_to(&self, finer: &Axis) -> Option<u32> {
         if (finer.lo, finer.hi, finer.periodic) != (self.lo, self.hi, self.periodic) {
             return None;
         }
@@ -207,17 +208,21 @@ impl Table {
     /// The table of f on the grid of `axes` (each of at least a stencil's nodes, a range of positive length), its nodes
     /// evaluated in parallel. Err(the grid's nodes) when they are more than `most`: nothing is built.
     pub fn build(axes: Vec<Axis>, width: usize, most: usize, f: Function) -> Result<Table, usize> {
-        Table::empty(axes, width).refine_from(None, most, f)
+        let nodes = Table::nodes(&axes);
+        if nodes > most {
+            return Err(nodes);
+        }
+        Ok(Table::empty(axes, width).refine_from(None, f))
     }
-    /// The nodes `refine` would evaluate for `axes`: those of the finer grid not in this one.
+    /// The nodes `refine` evaluates for `axes`: those of the finer grid not in this one.
     pub fn new_nodes(&self, axes: &[Axis]) -> usize {
         Table::nodes(axes).saturating_sub(Table::nodes(&self.axes))
     }
     /// This table on finer axes, each a nested refinement of this one's (`Axis::halved`): its nodes copied, only the
-    /// new ones evaluated. Err(the new nodes) when they are more than `most`: nothing is built.
-    pub fn refine(&self, axes: Vec<Axis>, most: usize, f: Function) -> Result<Table, usize> {
+    /// new ones evaluated. How far to refine is the caller's: its rule bounds the axes it asks for.
+    pub fn refine(&self, axes: Vec<Axis>, f: Function) -> Table {
         assert_eq!(axes.len(), self.axes.len(), "a refinement keeps the table's axes");
-        Table::empty(axes, self.width).refine_from(Some(self), most, f)
+        Table::empty(axes, self.width).refine_from(Some(self), f)
     }
     /// A table of these axes with no values yet.
     fn empty(axes: Vec<Axis>, width: usize) -> Table {
@@ -229,12 +234,8 @@ impl Table {
         Table { axes, width, values: vec![] }
     }
     /// Fills this table's values: from `old`'s nodes where it has them (its axes nested in this one's), from f
-    /// elsewhere, in parallel; the new nodes counted against `most` first.
-    fn refine_from(mut self, old: Option<&Table>, most: usize, f: Function) -> Result<Table, usize> {
-        let fresh = old.map_or(Table::nodes(&self.axes), |t| t.new_nodes(&self.axes));
-        if fresh > most {
-            return Err(fresh);
-        }
+    /// elsewhere, in parallel.
+    fn refine_from(mut self, old: Option<&Table>, f: Function) -> Table {
         let steps: Vec<u32> = match old {
             Some(t) => t.axes.iter().zip(&self.axes).map(|(a, b)| a.halvings_to(b).expect("a refinement's axes are nested in the table's")).collect(),
             None => vec![],
@@ -254,7 +255,7 @@ impl Table {
             f(&s, out);
         });
         self.values = values;
-        Ok(self)
+        self
     }
     /// The interpolant at s: `value` (width) and, when asked, `gradient` (axes × width, axis-major: ∂I/∂s_f); s on the
     /// axes' ranges (`Axis::place`).
@@ -497,9 +498,9 @@ mod tests {
         }
     }
 
-    /// The work bound before any grid: a build or refinement over its bound returns the nodes it would take and calls
-    /// the function on none; a refinement evaluates exactly its new nodes and equals the table built at once on the
-    /// finer axes (its nodes' coordinates are the same numbers); the first axes are readable and nested.
+    /// The work bound before the first grid: a build over its bound returns the nodes it would take and calls the
+    /// function on none; a refinement evaluates exactly its new nodes and equals the table built at once on the finer
+    /// axes (its nodes' coordinates are the same numbers); the first axes are readable and nested.
     #[test]
     fn the_work_bound_comes_first_and_refinement_reuses_nodes() {
         let calls = AtomicUsize::new(0);
@@ -518,9 +519,8 @@ mod tests {
         assert_eq!((finer[0].nodes, finer[1].nodes), (25, 16));
         let fresh = coarse.new_nodes(&finer);
         assert_eq!(fresh, 25 * 16 - 56);
-        assert_eq!(coarse.refine(finer.clone(), fresh - 1, &f).unwrap_err(), fresh);
         calls.store(0, Ordering::Relaxed);
-        let refined = coarse.refine(finer.clone(), fresh, &f).unwrap();
+        let refined = coarse.refine(finer.clone(), &f);
         assert_eq!(calls.load(Ordering::Relaxed), fresh);
         let direct = Table::build(finer, 2, usize::MAX, &f).unwrap();
         assert_eq!(refined.values, direct.values);

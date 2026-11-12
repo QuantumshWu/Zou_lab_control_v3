@@ -1379,11 +1379,11 @@ fn attempt(
     };
 
     // The near light's tables (SPEC §2.3, §5.4; model/tabulate.rs): refined over the reach to the largest ensemble's
-    // resolution, no grid of more nodes than the middles the pilot takes at the attempt's first step and at its double,
-    // pilot_size·(end/τ + end/(2τ)) -- a node counted as a middle without a table. The bound is on each grid by
-    // itself, and against the pilot's middles, not the run's: it keeps a grid's nodes below the pilot's middles
-    // before a trajectory has run; it is not the work the table saves. What a grid held back misses is read at the
-    // atoms below.
+    // resolution, as far as their functions' structure asks (model/tabulate.rs, # Refinement). The work's bound decides
+    // which coordinates are axes -- no first grid of more nodes than the middles the pilot takes at the attempt's first
+    // step and at its double, pilot_size·(end/τ + end/(2τ)), a node counted as a middle without a table --, never how
+    // far an axis is refined: a table's nodes do not grow with the run. What a coordinate held back misses is read at
+    // the atoms below.
     let most = (pilot_size() as f64 * (context.plan.end / context.tau + context.plan.end / (2. * context.tau))).ceil() as usize;
     let mut tables = model.tabulate(judged, most);
     let run = Run::tabulated(model, &tables, reference);
@@ -1480,27 +1480,38 @@ fn attempt(
         // run's held states read at one state of every pilot trajectory (`one_each`, `over_the_run`) -- a state on another
         // cluster reads none of it. A table
         // beyond the tables' shares has the axis of its largest read halved and is read again, until it is within them,
-        // or it has no axis to halve (its coordinates all held at the focus: model/tabulate.rs, # Axes), or its next
-        // grid would exceed the work's bound; what it reads then is booked on every output, and flagged where it still
-        // lies beyond -- with which of the two ended its refinement (`Stuck`).
+        // or it has no axis to halve (its coordinates all held at the focus: model/tabulate.rs, # Axes), or what is
+        // beyond is not its axes' interpolation -- the whole less every axis's own read still beyond the shares: a
+        // coordinate held at the focus, which no halving lowers --, or its axis's reads predict no finer grid within
+        // them (model/tabulate.rs, # Refinement: its error no longer falls at the interpolant's order); what it reads
+        // then is booked on every output, and flagged where it still lies beyond -- with which of these ended its
+        // refinement (`Stuck`).
         let read_at = one_each(&pilot);
         let (shown_share, temperature_share) = crate::model::tabulate::shares();
         drop(run);
         let mut stuck: Vec<Option<Stuck>> = vec![None; tables.tables.len()];
+        let mut predicted: Vec<Vec<usize>> = tables.tables.iter().map(|table| vec![usize::MAX; table.axes()]).collect();
         let booked = loop {
             let reads: Vec<Vec<crate::model::tabulate::TableRead>> = read_at.par_iter().map(|pick| model.table_reads(&tables, std::slice::from_ref(&pick.state.sample))).collect();
             let mean = |f: &dyn Fn(&crate::model::tabulate::TableRead) -> f64, t: usize| over_the_run(&read_at, reads.iter().map(|r| f(&r[t])), None);
             let whole: Vec<[f64; 2]> = (0..tables.tables.len()).map(|t| [mean(&|r| r.whole[0].population, t), mean(&|r| r.whole[0].temperature, t)]).collect();
             let beyond = (0..whole.len()).find(|&t| stuck[t].is_none() && (whole[t][0] > shown_share || whole[t][1] > temperature_share));
             let Some(t) = beyond else { break whole };
-            let axes = tables.tables[t].axes();
-            let weight = |f: usize| mean(&|r| r.axes[f][0].population / shown_share + r.axes[f][0].temperature / temperature_share, t);
-            let worst = (0..axes).max_by(|&a, &b| weight(a).total_cmp(&weight(b)));
-            match worst.map(|f| model.halved(&tables.tables[t], f, most)) {
-                Some(Some(finer)) => tables.tables[t].table = finer,
-                Some(None) => stuck[t] = Some(Stuck::Work),
-                None => stuck[t] = Some(Stuck::Axes),
-            }
+            // Each axis's read over the shares, on what is shown and on T.
+            let axes: Vec<[f64; 2]> = (0..tables.tables[t].axes()).map(|f| [mean(&|r| r.axes[f][0].population, t) / shown_share, mean(&|r| r.axes[f][0].temperature, t) / temperature_share]).collect();
+            let held = (0..2).any(|k| whole[t][k] / [shown_share, temperature_share][k] - axes.iter().map(|a| a[k]).sum::<f64>() > 1.);
+            let worst = (0..axes.len()).max_by(|&a, &b| (axes[a][0] + axes[a][1]).total_cmp(&(axes[b][0] + axes[b][1])));
+            stuck[t] = match worst {
+                None => Some(Stuck::Axes),
+                Some(_) if held => Some(Stuck::Held),
+                Some(f) => match model.halved_by(&tables.tables[t], f, axes[f][0].max(axes[f][1]), &mut predicted[t][f]) {
+                    Some(finer) => {
+                        tables.tables[t].table = finer;
+                        None
+                    }
+                    None => Some(Stuck::Order),
+                },
+            };
         };
         for (t, table) in tables.tables.iter().enumerate() {
             let label = format!(
@@ -1513,7 +1524,8 @@ fn attempt(
             }
             context.ledger.item(&label, booked[t][0].max(booked[t][1]), TABLE_MEASURED);
             match stuck[t] {
-                Some(Stuck::Work) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而网格再加密一次就超过节点数上限（{most} 个）：按实测的误差计入误差预算")),
+                Some(Stuck::Order) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它的误差不再按插值的阶下降（已加密到它的函数结构所预言的网格）：按实测的误差计入误差预算")),
+                Some(Stuck::Held) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而超出的部分来自取焦点处的值的坐标，不是插值的误差（加密网格不能降低它）：按实测的误差计入误差预算")),
                 Some(Stuck::Axes) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它没有可以加密的坐标（它依赖的量都取焦点处的值）：按实测的误差计入误差预算")),
                 None => {}
             }
@@ -1580,11 +1592,14 @@ fn attempt(
     Ok(Attempt::Done(assemble(&context, &e, &l, &c, parts.len() as u64 * GROUP)))
 }
 
-/// Why a table beyond the tables' shares is refined no further (`attempt`): the grid with its worst axis halved would
-/// hold more nodes than the work's bound allows; or the table has no axis -- nothing to halve.
+/// Why a table beyond the tables' shares is refined no further (`attempt`): its worst axis's reads predict no finer grid
+/// within the shares (its error no longer falls at the interpolant's order: model/tabulate.rs, # Refinement); what is
+/// beyond is the coordinates it holds at the focus, not its axes' interpolation; or the table has no axis -- nothing to
+/// halve.
 #[derive(Clone, Copy)]
 enum Stuck {
-    Work,
+    Order,
+    Held,
     Axes,
 }
 
