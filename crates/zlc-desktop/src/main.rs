@@ -65,6 +65,8 @@ enum AppEvent { Command { window: Option<windows::Kind>, command: Value }, Compl
     CloseWindow(windows::Kind),
     /// Save image… finished: the window's request and where the picture went.
     ImageSaved { request: u64, result: Result<Value, String> },
+    /// A file dialog answered the command that asked it (dialog.rs).
+    Answered { ask: dialog::Ask, answer: dialog::Answer },
     /// A browser asked to watch, or left (the Browser sharing card changes).
     ShareChanged,
     /// A window shown last turn becomes the active one (windows.rs `show`).
@@ -703,6 +705,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let (endpoint, endpoint_record, connection_record) = remote::start_endpoint(move |call| remote_proxy.lock().map_err(|_| "instrument closing".to_owned())?
         .send_event(AppEvent::Remote(call)).map_err(|_| "the instrument window has closed".to_owned()), mcp_control, tools.clone(), root.clone(), runtime.clone())?;
     let self_proxy = event_loop.create_proxy();
+    // The operator's file dialogs, each on its own thread; their answers come back as events.
+    let mut dialogs = { let proxy = event_loop.create_proxy(); dialog::Dialogs::new(move |ask, answer| { let _ = proxy.send_event(AppEvent::Answered { ask, answer }); }) };
     let mut remote_pending: std::collections::BTreeMap<u64, remote::Pending> = Default::default();
     let mut waiters: Vec<remote::Waiter> = Vec::new();
     let mut latest_fronts: std::collections::BTreeMap<String, science::Front> = Default::default();
@@ -727,6 +731,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             Event::UserEvent(AppEvent::Pulse(_)) => "pulse-event".into(),
             Event::UserEvent(AppEvent::Plugin(_) | AppEvent::Workbench(_)) => "workbench-event".into(),
             Event::UserEvent(AppEvent::RuntimeChanged) => "runtime".into(),
+            Event::UserEvent(AppEvent::Answered { .. }) => "dialog".into(),
             Event::UserEvent(_) => "other".into(),
             _ => "window".into(),
         };
@@ -863,12 +868,12 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             let device = command["device"].as_str().ok_or("Name the SLM")?.to_owned();
                             let file = command["file"].as_str().ok_or("Name the file action")?.to_owned();
                             let spec = slm.file(&device, &file).ok_or_else(|| format!("{device}'s SLM Editor has no file action {file}"))?;
-                            // v2 SlmEditor._choose: its caption and filter, offered in the workspace's data.
-                            let data = workbench.workspace().data();
-                            let chosen = dialog::file(windows.hwnd(from.as_ref()), spec["title"].as_str().unwrap_or(""), spec["filter"].as_str().unwrap_or(""),
-                                                      spec["save"] == true, &data.join(spec["name"].as_str().unwrap_or("")), &data)?;
-                            let Some(path) = chosen else {
-                                return windows.send(&json!({"type": "state", "request": command["id"], "error": null, "result": null}));
+                            let Some(path) = command["path"].as_str().map(str::to_owned) else {
+                                // v2 SlmEditor._choose: its caption and filter, offered in the workspace's data.
+                                let data = workbench.workspace().data();
+                                let spec = dialog::Spec::file(spec["title"].as_str().unwrap_or(""), spec["filter"].as_str().unwrap_or(""),
+                                                              spec["save"] == true, data.join(spec["name"].as_str().unwrap_or("")), data);
+                                return dialogs.ask(windows.hwnd(from.as_ref()), spec, dialog::Ask::new(from, command), origin.is_operator());
                             };
                             let named = format!("{device}__editor_{file}");
                             (named.clone(), json!({"id": command["id"], "action": named, "path": path}))
@@ -964,13 +969,15 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         let home = folder.clone().unwrap_or_else(|| if file { workspace.data() } else { workspace.today() });
                         let start = command["start"].as_str().map(str::trim).filter(|path| !path.is_empty())
                             .map_or_else(PathBuf::new, |path| folder.as_ref().map_or_else(|| workspace.resolve(path), |folder| folder.join(path)));
-                        let (hwnd, title) = (windows.hwnd(from.as_ref()), command["title"].as_str().unwrap_or(""));
-                        let chosen = if file { dialog::file(hwnd, title, command["filter"].as_str().unwrap_or(""), false, &start, &home)? }
-                                     else { dialog::folder(hwnd, title, &start, &home)? };
-                        let chosen = chosen.map(|path| folder.as_ref().and_then(|folder| std::path::Path::new(&path).strip_prefix(folder).ok())
-                            .filter(|inside| !inside.as_os_str().is_empty()).map_or_else(|| path.clone(), |inside| inside.display().to_string()));
+                        let Some(path) = command["path"].as_str() else {
+                            let title = command["title"].as_str().unwrap_or("").to_owned();
+                            let choose = if file { dialog::Choose::Open(command["filter"].as_str().unwrap_or("").to_owned()) } else { dialog::Choose::Folder };
+                            return dialogs.ask(windows.hwnd(from.as_ref()), dialog::Spec { choose, title, start, home }, dialog::Ask::new(from, command), origin.is_operator());
+                        };
+                        let chosen = folder.as_ref().and_then(|folder| std::path::Path::new(path).strip_prefix(folder).ok())
+                            .filter(|inside| !inside.as_os_str().is_empty()).map_or_else(|| path.to_owned(), |inside| inside.display().to_string());
                         // Only the asking window is told: the reply carries no section of anyone's.
-                        let state = json!({"type": "state", "request": command["id"], "error": null, "result": chosen.map_or(Value::Null, |path| json!({"path": path}))});
+                        let state = json!({"type": "state", "request": command["id"], "error": null, "result": {"path": chosen}});
                         return windows.send(&state);
                     }
                     if action == "save_image" {
@@ -978,14 +985,14 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         let request = command["id"].as_u64().unwrap_or(0);
                         let shown = command["window"].as_str().and_then(windows::Kind::parse).or(from.clone()).unwrap_or(windows::Kind::TaskConsole);
                         let path = match command["path"].as_str() {
-                            Some(path) => PathBuf::from(path),
-                            None => match dialog::file(windows.hwnd(from.as_ref()), "Save screenshot", "PNG images (*.png)", true,
-                                                       &workbench.workspace().today().join("screenshot.png"), &workbench.workspace().data())? {
-                                // A name's own dots stay ("scan_1.5us"): a name not ending in .png gets it added.
-                                Some(path) if path.to_ascii_lowercase().ends_with(".png") => PathBuf::from(path),
-                                Some(path) => PathBuf::from(format!("{path}.png")),
-                                None => { let mut state = accepted.clone(); state["request"] = command["id"].clone(); state["result"] = Value::Null; return windows.send(&state); }
-                            },
+                            // A name's own dots stay ("scan_1.5us"): a name not ending in .png gets it added.
+                            Some(path) if path.to_ascii_lowercase().ends_with(".png") => PathBuf::from(path),
+                            Some(path) => PathBuf::from(format!("{path}.png")),
+                            None => {
+                                let spec = dialog::Spec::file("Save screenshot", "PNG images (*.png)", true,
+                                                              workbench.workspace().today().join("screenshot.png"), workbench.workspace().data());
+                                return dialogs.ask(windows.hwnd(from.as_ref()), spec, dialog::Ask::new(from, command), origin.is_operator());
+                            }
                         };
                         let saved = self_proxy.clone();
                         return windows.get(&shown).ok_or_else(|| format!("The {} window is not open", shown.title()))?.pixels.capture(move |png| {
@@ -1024,11 +1031,15 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if action.starts_with("pulse_") {
                         // The Pulse Editor and the board: answered on this turn or by a lane later.
+                        // The window asks where a file goes when its command does not say (v2: Save Pulse always asks).
+                        if origin.is_operator() {
+                            if let Some((title, filter, save, start, home)) = remote::parameters(&command).as_object().and_then(|args| pulse.editor.file_dialog(&action, args)) {
+                                return dialogs.ask(windows.hwnd(from.as_ref()), dialog::Spec::file(title, filter, save, start, home), dialog::Ask::new(from, command), true);
+                            }
+                        }
                         let request = command["id"].as_u64().unwrap_or(0);
                         let claimant = pulse.apparatus_device().and_then(|device| workbench.device_claimant(&device));
-                        let hwnd = windows.hwnd(from.as_ref());
-                        let handled = pulse.command(&action, &command, origin.is_operator(), request, |run| workbench.run_claims(run), claimant,
-                                                    |title, filter, save, start, home| dialog::file(hwnd, title, filter, save, start, home));
+                        let handled = pulse.command(&action, &command, origin.is_operator(), request, |run| workbench.run_claims(run), claimant);
                         let mut state = json!({"type": "state", "request": request});
                         state["pulse"] = pulse.state();
                         match handled {
@@ -1084,18 +1095,10 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     if matches!(action.as_str(), "start_camera" | "stop_camera") || zlc_workbench::Workbench::handles(&action)
                         || workbench.handles_command(&action) {
                         if let Some((title, filter, save, start, home)) = workbench.file_dialog(&action).filter(|_| command["path"].is_null()) {
-                            // v2 present=False: only the operator at the window is asked where a file goes; a
-                            // client or a run names it (no dialog appears for a command nobody at the window gave).
-                            if !origin.is_operator() || command.get("_run").is_some() {
-                                return Err(format!("provide {} path{}", match action.as_str() {
-                                    "load_apparatus" => "an apparatus", "save_apparatus" => "an explicit apparatus save", "load_layout" => "a layout", _ => "an explicit layout save",
-                                }, if save { "" } else { " to load without a dialog" }));
-                            }
-                            match dialog::file(windows.hwnd(from.as_ref()), title, filter, save, &start, &home)? {
-                                // The save dialog asked before replacing a file: it may replace one not read in full.
-                                Some(path) => { command["path"] = json!(path); if action == "save_apparatus" { command["replace_unread"] = json!(true); } }
-                                None => { let mut state = accepted.clone(); state["request"] = command["id"].clone(); return windows.send(&state); }
-                            }
+                            let ask = dialog::Ask::new(from.clone(), command);
+                            // The save dialog asked before replacing a file: it may replace one not read in full.
+                            let ask = if action == "save_apparatus" { ask.marking("/replace_unread", json!(true)) } else { ask };
+                            return dialogs.ask(windows.hwnd(from.as_ref()), dialog::Spec::file(title, filter, save, start, home), ask, origin.is_operator());
                         }
                         let request = command["id"].as_u64().unwrap_or(0);
                         if action == "start_camera" && builtin.active() { return Err("Camera acquisition is already active".into()); }
@@ -1199,22 +1202,22 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             manual::Effect::Discarded { panel, signal } => close.extend(discard_data(&runtime, viewer, panel, &signal)),
-                            manual::Effect::Save { editor, panel, path, overwrite, suggested } => {
+                            manual::Effect::Save { editor, panel, path, asked, overwrite, suggested } => {
                                 // A named archive, or the one the Save dialog chose (asking, as it was chosen, before replacing it).
-                                let chosen = match path { Some(path) => Some((path, false)), None => {
+                                let Some(path) = path else {
                                     // Beside its source Figure, else in today's folder (as the viewer opens).
                                     let home = viewer_folder(workbench.workspace());
                                     let start = if std::path::Path::new(&suggested).parent().is_some_and(|folder| !folder.as_os_str().is_empty()) { PathBuf::from(&suggested) }
                                                 else { home.join(&suggested) };
-                                    dialog::file(windows.hwnd(from.as_ref()), "Save edited figure", "Saved figure archives (*.npz)", true, &start, &home)?.map(|path| (path, true))
-                                } };
-                                if let Some((path, asked)) = chosen {
-                                    let applies = viewer.drafts.get_mut(&editor).map_or(0, |draft| draft.applies);
-                                    queue.push_back(manual::save_command(&command["id"], &panel, document, &path, asked, overwrite));
-                                    viewer.drafts.saving = Some((command["id"].as_u64().unwrap_or(0), editor, applies, path));
-                                    viewer.state["data"] = viewer.drafts.state();
-                                    return Ok(());
-                                }
+                                    // A cancelled Save as saved nothing, whatever an earlier save did.
+                                    let ask = dialog::Ask::new(from.clone(), command).at("/intent/path").marking("/intent/asked", json!(true)).unanswered(json!({"saved": null}));
+                                    return dialogs.ask(windows.hwnd(from.as_ref()), dialog::Spec::file("Save edited figure", "Saved figure archives (*.npz)", true, start, home), ask, origin.is_operator());
+                                };
+                                let applies = viewer.drafts.get_mut(&editor).map_or(0, |draft| draft.applies);
+                                queue.push_back(manual::save_command(&command["id"], &panel, document, &path, asked, overwrite));
+                                viewer.drafts.saving = Some((command["id"].as_u64().unwrap_or(0), editor, applies, path));
+                                viewer.state["data"] = viewer.drafts.state();
+                                return Ok(());
                             }
                         }
                         for panel in close { queue.push_back(json!({"id": 0, "action": "close_panel", "panel": panel, "document": document})); }
@@ -1223,7 +1226,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         viewer.state["data_focus"] = json!(focus);
                         viewer.state["request"] = command["id"].clone();
                         viewer.state["error"] = Value::Null;
-                        // This answer saved nothing (a Save as whose dialog was cancelled too), whatever an earlier save did.
+                        // This answer saved nothing, whatever an earlier save did.
                         viewer.state["saved"] = Value::Null;
                         viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(document), message))?;
                         viewer.state["data_focus"] = Value::Null;
@@ -1379,10 +1382,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         let shown = match &from { Some(windows::Kind::FigureViewer(number)) => viewers.get(number).and_then(|viewer| viewer.state["document"]["path"].as_str()), _ => None };
                         let home = viewer_folder(workbench.workspace());
                         let start = shown.filter(|path| !path.is_empty()).map_or_else(|| home.clone(), PathBuf::from);
-                        match dialog::figure(windows.hwnd(from.as_ref()), &start, &home)? {
-                            Some(path) => command["path"] = json!(path),
-                            None => { let mut state = accepted.clone(); state["request"] = command["id"].clone(); return windows.send(&state); }
-                        }
+                        let spec = dialog::Spec { choose: dialog::Choose::Figure, title: "Open figure — choose data or its image preview".into(), start, home };
+                        return dialogs.ask(windows.hwnd(from.as_ref()), spec, dialog::Ask::new(from, command), origin.is_operator());
                     }
                     // Coalesce only unsent pointer movement from the same panel.
                     // Press/release/configure/file operations keep exact order.
@@ -1896,6 +1897,12 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if !closing { windows.send(&state)?; }
                 }
+                // A dialog answered: its command runs with the chosen path, else its window is told nothing was chosen.
+                Event::UserEvent(AppEvent::Answered { ask, answer }) => match dialogs.answered(ask, answer) {
+                    dialog::Answered::Run { window, command } => self_proxy.send_event(AppEvent::Command { window, command }).map_err(|_| "event loop closed".to_owned())?,
+                    dialog::Answered::Reply { window: Some(window), reply } => windows.send_to(&window, &reply)?,
+                    dialog::Answered::Reply { window: None, reply } => windows.send(&reply)?,
+                },
                 Event::UserEvent(AppEvent::Title { window, title }) => if let Some(shown) = windows.get(&window) { shown.window.set_title(&title); },
                 Event::UserEvent(AppEvent::Caption { window, message }) => { windows.send_to(&window, &message)?; }
                 Event::UserEvent(AppEvent::Activate(window)) => windows.activate(&window),
