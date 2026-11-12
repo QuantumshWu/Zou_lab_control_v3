@@ -13,11 +13,14 @@
 //!
 //! The sweep is a relative error, of the fold's own effect: the instantaneous fold of a linear sweep is the exact
 //! response times ∫₀^∞ e^{−x + iax²/2} dx, of modulus at most one at any a (internal.md 1B.1), so a moving fold is off
-//! by at most twice its own amplitude m, (2m)² = 2S of its states' population, however fast it sweeps. Where that is
-//! below the least share any output resolves, unseen(2¹⁴) (SPEC §5.4: the share the ledger cannot feel), the sweep
-//! asks nothing (`Gate::resolved`): a coupling of 1e-9 of its line's, which the H0 states' mixing gives the repump
+//! by at most twice its own amplitude m, (2m)² = 2S of its states' population, however fast it sweeps. So the sweep is
+//! read against the larger of that effect and the least share any output resolves, unseen(2¹⁴) (SPEC §5.4: the share
+//! the ledger cannot feel): a · min(1, 2S/unseen) (`Gate::resolved`) -- the sweep itself where the fold's effect is
+//! resolved, scaled down with it below. (A coupling of 1e-9 of its line's, which the H0 states' mixing gives the repump
 //! between Zeeman sublevels two apart, swept at the tweezer's light-shift gradient read a = 0.5000 over the reach of the
-//! user's lin⊥lin probe, and its proof was 95 % of 133 s.
+//! user's lin⊥lin probe, and its proof was 95 % of 133 s. Cut off at 2S = unseen instead, the quantity jumped there:
+//! a coupling's bound over a cell, its S a little above the cutoff, kept its sweep of 0.8 to 8 while the cell's centre,
+//! a little below, read 0 -- a bound that no longer tends to its point value, and the proof never ended.)
 //!
 //! Keeping a unit is always exact -- the more exact level -- so a proof over the reach only has to settle the fold:
 //! below ½ everywhere it holds; a unit whose proof meets a centre in the reach attaining ¼ first is kept (`KEEP`,
@@ -247,12 +250,13 @@ impl Gate {
         self.saturation < EXISTS && self.sweep < EXISTS
     }
 
-    /// The gate with its sweep as far as an output can see it (module documentation, # One rule): none where the fold's
-    /// largest error from any motion, (2m)² = 2S of its states' population, is below the least share any output resolves,
-    /// unseen(2¹⁴).
+    /// The gate with its sweep as far as an output can see it (module documentation, # One rule): the sweep read against
+    /// the larger of the fold's largest error from any motion, (2m)² = 2S of its states' population, and the least share
+    /// any output resolves, unseen(2¹⁴) -- a · min(1, 2S/unseen), continuous and monotone in both, so that a bound over a
+    /// cell tends to its point value.
     pub(crate) fn resolved(self) -> Gate {
-        let seen = 2.0 * self.saturation >= crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
-        Gate { saturation: self.saturation, sweep: if seen { self.sweep } else { 0.0 } }
+        let seen = (2.0 * self.saturation / crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64)).min(1.0);
+        Gate { saturation: self.saturation, sweep: if self.sweep == 0.0 { 0.0 } else { self.sweep * seen } }
     }
 
     /// The error of the unit this is the gate of, at most, at any state the reach holds -- where the unit's error is its
@@ -1287,8 +1291,9 @@ mod tests {
     /// 1B.1), of modulus at most one at any a -- so the fold is off by at most twice its own amplitude: |I(a) − 1| ≤ 2
     /// (Simpson on [0, 40], the step resolving the phase's largest rate a·40). At a = ½ the response holds 0.71 of the
     /// fold's population, at a = 1.75 0.39 (the gate's edge, internal.md). A coupling whose whole effect, 2S, is below the
-    /// least resolved share has no sweep -- the user's lin⊥lin pair, S = 9e-38 at a sweep of 0.83 --; one above it keeps
-    /// its sweep, and a fold of a share at the target's scale with a sweep beyond ½ is kept.
+    /// least resolved share has its sweep scaled down with it -- the user's lin⊥lin pair, S = 9e-38 at a sweep of 0.83,
+    /// has none --; one above it keeps its sweep, and a fold of a share at the target's scale with a sweep beyond ½ is
+    /// kept. Continuous across the resolution (a cut-off there left a cell's bound at 8.4 over its centre's 0).
     #[test]
     fn a_fold_s_sweep_counts_as_far_as_its_own_effect_is_seen() {
         let response = |a: f64| -> C64 {
@@ -1305,10 +1310,13 @@ mod tests {
         assert!((response(0.5).norm_sqr() - 0.71).abs() < 0.01 && (response(1.75).norm_sqr() - 0.39).abs() < 0.01, "{} {}", response(0.5).norm_sqr(), response(1.75).norm_sqr());
         let unseen = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
         assert!(Gate { saturation: 9e-38, sweep: 0.83 }.resolved().exists());
-        assert!(Gate { saturation: 0.25 * unseen, sweep: 7.6 }.resolved().exists());
+        assert!(Gate { saturation: 0.25 * unseen, sweep: 0.9 }.resolved().exists());
         assert!(!Gate { saturation: unseen, sweep: 0.6 }.resolved().exists());
         assert!(!Gate { saturation: 0.1, sweep: 0.6 }.resolved().exists());
         assert_eq!(Gate { saturation: 0.1, sweep: 0.3 }.resolved().sweep, 0.3);
+        // Continuous across the resolution: just below and just above 2S = unseen the sweep is the same to the rounding.
+        let (below, above) = (Gate { saturation: 0.5 * unseen * (1.0 - 1e-12), sweep: 8.4 }.resolved().sweep, Gate { saturation: 0.5 * unseen * (1.0 + 1e-12), sweep: 8.4 }.resolved().sweep);
+        assert!((above - below).abs() <= 1e-10, "{below} {above}");
     }
 
     /// A gate's bound of its unit's error (`Gate::error_bound`) at states the reach holds. On the closed models of
