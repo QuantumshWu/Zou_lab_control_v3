@@ -120,24 +120,32 @@ impl Middle for Parts {
         [size, 3.0 * size, 3.0 * size]
     }
     /// The two-level atom's optical sector (model/optical.rs) where it is asked: K of its generator and gradient at the
-    /// point at rest (step.rs, # The optical sector's noise), the fastest turn of its couplings' lab wave vectors on the
-    /// path -- a part's e ← g entry turns with its wave plus the excited state's frame, its g ← e entry with the opposite
-    /// -- and the excited state's decay over two.
-    fn optical(&self, velocity: &[f64; 3]) -> Option<step::Optical> {
+    /// middle in its Doppler frame, to the first order along the path (the slopes through ±`half`) where it beats, the
+    /// parts' fastest beat on the path and the excited state's decay over two.
+    fn optical(&self, velocity: &[f64; 3], half: f64) -> Option<step::Optical> {
         let n = self.states();
         if !self.optical || n < 2 {
             return None;
         }
         let mut h = Mat::zeros(n, n);
-        self.generator(&[0.0; 3], 0.0, &mut h);
+        self.generator(velocity, 0.0, &mut h);
         let mut gradient: [Vec<C64>; 3] = Default::default();
-        self.gradient(&[0.0; 3], 0.0, &mut gradient);
+        self.gradient(velocity, 0.0, &mut gradient);
         let sector = crate::model::optical::Sector::new(&h, &gradient, 1)?;
-        let k = sector.operators()?;
-        let turn = |wave: [f64; 3]| dot3(std::array::from_fn(|a| wave[a] + self.waves[1][a] - self.waves[0][a]), *velocity).abs();
-        let beat = self.parts.iter().map(|p| if p.generator[(1, 0)] != C64::ZERO { turn(p.wave) } else if p.generator[(0, 1)] != C64::ZERO { turn(p.wave.map(|x| -x)) } else { 0.0 }).fold(0.0, f64::max);
+        let slope = (!self.still()).then(|| {
+            let (mut early, mut late) = (Mat::zeros(n, n), Mat::zeros(n, n));
+            self.generator(velocity, -half, &mut early);
+            self.generator(velocity, half, &mut late);
+            let (mut before, mut after): ([Vec<C64>; 3], [Vec<C64>; 3]) = Default::default();
+            self.gradient(velocity, -half, &mut before);
+            self.gradient(velocity, half, &mut after);
+            let scale = 0.5 / half;
+            (Mat::from_fn(n, n, |i, j| (late[(i, j)] - early[(i, j)]) * scale), std::array::from_fn(|a| after[a].iter().zip(&before[a]).map(|(x, y)| (*x - *y) * scale).collect::<Vec<C64>>()))
+        });
+        let (k, along) = sector.operators(slope.as_ref().map(|(h1, g1)| (h1, g1)))?;
+        let beat = if self.still() { 0.0 } else { self.parts.iter().map(|p| (p.omega + dot3(p.wave, *velocity)).abs()).fold(0.0, f64::max) };
         let decay = (1..n).map(|e| -h[(e, e)].im).fold(f64::INFINITY, f64::min);
-        Some(step::Optical { k, gradient, beat, decay, work: sector.work / crate::decide::COMPLEX })
+        Some(step::Optical { k, gradient, beat, decay, work: (sector.work + along) / crate::decide::COMPLEX })
     }
 }
 
@@ -1057,8 +1065,9 @@ fn engine_diffusion(model: &Atom, v: f64, tau: f64, burn: usize, span: usize, co
 /// a 64th of the light's period (at a sixteenth the step's own error in the Ehrenfest force at Ω₀ = 10Γ on resonance was
 /// 0.27 D_x where the exact D_E is nil -- by hypothesis the beat's parabola through the step's nodes), two periods'
 /// burn-in and four periods measured; a mass the kicks do not move (ħ/m of 10⁻⁹ µm²/µs, as the force's tests: a step's
-/// path is at its predicted κ_m = κ_h + K(ψ₀)/2, the master equation's at v). K is the point's at rest; its locality,
-/// booked at the first order ε_Q = kv/(Γ/2) = 0.2, is printed with each (measured: within 0.42 ε_Q).
+/// path is at its predicted κ_m = κ_h + K(ψ₀)/2, the master equation's at v). K is the Doppler frame's to the first order
+/// along the path; what is left, booked at ε_Q = (2kv/(Γ/2))² = 0.16 on a standing wave and nothing on a running one
+/// (still in its frame), is printed with each (measured: within 0.53 ε_Q).
 #[test]
 fn a_moving_two_level_atom_diffuses_as_its_master_equation() {
     let (v, count) = (0.1 * GAMMA / K, 8192);
@@ -1078,7 +1087,7 @@ fn a_moving_two_level_atom_diffuses_as_its_master_equation() {
                 let exact = bloch_diffusion(&beams, detuning, v);
                 let (d, se, pending) = engine_diffusion(&model, v, tau, 128, 256, count);
                 let ratio = d / exact;
-                let epsilon = K * v / (0.5 * GAMMA);
+                let epsilon = if standing { (2.0 * K * v / (0.5 * GAMMA)).powi(2) } else { 0.0 };
                 eprintln!("{} Ω₀ {:.0}Γ Δ {:+.0}Γ: D {d:.2} ± {se:.2} against {exact:.2}, {ratio:.4} ± {:.4} (ε_Q {epsilon:.2}; pending at the end {pending:.3e})", if standing { "standing" } else { "running " }, rabi / GAMMA, detuning / GAMMA, se / exact);
                 worst = worst.max((ratio - 1.0).abs() - 3.0 * se / exact);
                 if (ratio - 1.0).abs() > 0.05 + 3.0 * se / exact {
@@ -2270,8 +2279,8 @@ impl<M: Middle> Middle for Probe<'_, M> {
     fn gradient(&self, path: &M::Path, s: f64, g: &mut [Vec<C64>; 3]) {
         self.middle.gradient(path, s, g)
     }
-    fn optical(&self, path: &M::Path) -> Option<step::Optical> {
-        self.middle.optical(path)
+    fn optical(&self, path: &M::Path, half: f64) -> Option<step::Optical> {
+        self.middle.optical(path, half)
     }
 }
 

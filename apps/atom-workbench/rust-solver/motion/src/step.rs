@@ -252,25 +252,36 @@
 //! to the sum of the C. What is pending at a trajectory's end is booked (ledger.rs `optical`), and so is the static K's
 //! locality (below).
 //!
-//! K is the point's at rest (`Middle::optical`; DESIGN §7: the point's K turned into the step's frames, which at the
-//! middle are the lab's): the resolvent of the generator held still, while on the moving atom each coupling turns at its
-//! beam's k_l·v within the sector's memory 1/γ_Q. Held in the cluster's Doppler frame instead, a running wave is exact,
-//! but a second beam's coupling is held at the first's frequency, 2kv off, a systematic error of the first order that
-//! the pattern's phases do not average: on the two-level atom at kv = Γ/10 (tests,
-//! `a_moving_two_level_atom_diffuses_as_its_master_equation`) the frame's K read a standing wave 3Γ red at Ω₀ = 2Γ
-//! 0.888 ± 0.014 of the master equation, the point's 1.001; the point's K errs where no symmetry cancels the first
-//! order -- a running wave off resonance, 1.044 at Ω₀ = 2Γ, Δ = −3Γ -- and its largest error over the twelve cases was
-//! 0.083 (a standing wave at 10Γ, 3Γ red). So the locality is booked at the first order, ε_Q = ν/γ_Q of the fastest
-//! turn ν = max_l |k_l·v| of the cluster's beams, of each step's C (the twelve cases' errors within 0.42 ε_Q). Its first
-//! order is a resolvent's derivative along the path and could be taken exactly (two more solves an axis with the same
-//! factorization and the generator at the step's ends): not done.
+//! K along the path. The static K of the middle -- the resolvent of the generator held still there -- is wrong at the
+//! first order on a moving atom, whose couplings turn within the sector's memory 1/γ_Q: held at rest it misses a
+//! running wave's Doppler shift (two-level, kv = Γ/10, Ω₀ = 2Γ, Δ = −3Γ: 1.044 of the master equation); held in the
+//! cluster's Doppler frame, where a running wave is still and exact, it holds a second beam's coupling at the first's
+//! frequency, 2kv off (a standing wave there: 0.888). So K is taken to the first order along the path, exactly: with
+//! 𝓛(s) = 𝓛₀ + s𝓛₁ and F(s) = F₀ + sF₁ on the path in the frame (s the time after the middle),
 //!
-//! The work is one K a step whose middle state lies in an explicit cluster: the gradient's matrices, the excited
-//! sector's factorization (m = n_e² + 2 n_e n_g reals, m³/3; S3: 96) and twelve forms (`Optical::forms`), which
-//! `step_work` prices. The factorization is made anew at every middle: reused along the path as an iterative
-//! refinement's preconditioner it contracts the error by the light pattern's change over a step -- S3's standing wave
-//! turns 0.26 rad a step at 30 µK -- for an iteration of a third of its cost (the rebuild and four solves), so it costs
-//! more than itself to its own accuracy.
+//! ```text
+//!   K = ∫₀^∞ 𝒰_Q†(s)[F(s)] ds = K₀ + 𝓡_Q†𝓡_Q†(F₁ + 𝓛₁†K₀) + O(s²),   K₀ = 𝓡_Q†F₀,
+//! ```
+//! (∫ s e^{𝓛₀s} ds = 𝓡², and the propagator's first order ∫∫ e^{𝓛₀w} u𝓛₁ e^{𝓛₀u} = 𝓡𝓛₁𝓡²): two more solves an axis
+//! on the same factorization, 𝓛₁†K₀ = i(H₁†K₀ − K₀H₁), and the generator's and the gradient's slopes H₁, G₁ at the
+//! middle through the step's two ends -- the parabola the step's own propagation takes. A still cluster has none and its
+//! K₀ is exact. What is left is of the second order: a Q mode of rate λ (Re λ ≥ γ_Q) answering a coupling that turns at
+//! ω responds as 1/(λ − iω), and 1/λ + iω/λ² misses it by ω²/(λ²(λ − iω)), at most (ω/γ_Q)² of 1/λ -- for normal modes;
+//! for a non-normal Q𝓛Q that bound is a hypothesis. It is booked: ε_Q = (ν/γ_Q)² of each step's C, ν = max |(k_l −
+//! k_m)·v| the pattern's fastest beat over the cluster's beams (none where the cluster is still). On the two-level atom
+//! at kv = Γ/10 (tests; σ 0.016): the running waves read 0.999–1.018 of the master equation (still in the frame: ε_Q
+//! none, the error statistics alone); the standing waves at Ω₀ = 2, 5, 10Γ read 1.063, 1.053, 1.049 on resonance and
+//! 0.998, 1.037, 1.084 at Δ = −3Γ -- the frame's static K 1.024, 1.034, 1.039 and 0.888, 0.921, 1.048 --, within 0.53 of
+//! ε_Q = 0.16.
+//!
+//! The work is one K a step whose middle state lies in an explicit cluster: the gradient's matrices; the excited
+//! blocks' Schur forms, ℳ's e² basis solves and its factorization (model/optical.rs, # The solve; S3: 36 reals where the
+//! whole sector is 96); where the cluster beats, the generator and the gradient at the step's two ends, four rotations
+//! and two solves of three sides; and twelve forms (`Optical::forms`) -- which `step_work` prices. It is made anew at
+//! every middle: a factorization reused along the path as an iterative refinement's preconditioner contracts the error
+//! by the light pattern's change over a step -- S3's standing wave turns 0.26 rad a step at 30 µK -- for an iteration
+//! that applies the operator and solves, a third of the whole sector's factorization (measured on its 96 reals): more
+//! than the factorization to its own accuracy.
 //!
 //! # The path between a step's ends
 //! A trajectory is read at times that are no step's end (an output, a cut of T's window: adapt.rs, # The reads), and
@@ -478,16 +489,18 @@ pub trait Middle {
         }
     }
 
-    /// The optical sector's operators at the middle along the path (# The optical sector's noise; model/optical.rs):
-    /// None where the cluster has no explicit excited state.
-    fn optical(&self, _path: &Self::Path) -> Option<Optical> {
+    /// The optical sector's operators at the middle along the path, to the first order along it -- the generator's slope
+    /// through the step's ends, `half` from the middle (# The optical sector's noise; model/optical.rs): None where the
+    /// cluster has no explicit excited state.
+    fn optical(&self, _path: &Self::Path, _half: f64) -> Option<Optical> {
         None
     }
 }
 
 /// The optical sector of a cluster at a step's middle along its path (# The optical sector's noise; model/optical.rs):
 /// K_a and the gradient Ĝ_a there (n × n each, row by row, Hermitian, in the cluster's Doppler frames at the middle;
-/// 1/µm and rad/µs/µm), the fastest turn of the cluster's beams on the path ν = max_l |k_l·v|
+/// 1/µm and rad/µs/µm), the light pattern's fastest beat on the path where the cluster beats, ν = max |(k_l − k_m)·v|
+/// over the cluster's beams (none where it is still)
 /// and the slowest optical rate γ_Q, the least of its excited states' decay over two (rad/µs), and the counted complex
 /// multiply-adds that made them.
 #[derive(Clone, Debug, PartialEq)]
@@ -1654,8 +1667,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         }
         if let Some(middle) = &middle {
             march.scattered = Some(along.middle.scattering(&along.path, &middle[..n]));
-            if let Some(optical) = along.middle.optical(&along.path) {
-                march.optical = Some((optical.within(&middle[..n]), optical.beat / optical.decay));
+            if let Some(optical) = along.middle.optical(&along.path, h) {
+                march.optical = Some((optical.within(&middle[..n]), (optical.beat / optical.decay).powi(2)));
                 march.work += COMPLEX * (optical.work + Optical::forms(n));
             }
         }
@@ -1770,7 +1783,7 @@ pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau
     pictured(&along, picture, tau);
     let nodes = nodes(tau, picture.bandwidth);
     let own = picture.work + picture.price(nodes + 2);
-    let optical = middle.optical(&along.path).map_or(0.0, |optical| COMPLEX * (optical.work + Optical::forms(n)));
+    let optical = middle.optical(&along.path, 0.5 * tau).map_or(0.0, |optical| COMPLEX * (optical.work + Optical::forms(n)));
     count::propagation(costs, still, own) + count::impulse(n, costs, nodes, still) + count::shear(n, costs) + optical
 }
 
