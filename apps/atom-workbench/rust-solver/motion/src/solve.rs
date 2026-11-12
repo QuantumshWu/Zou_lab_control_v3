@@ -2446,12 +2446,14 @@ fn histograms(listed: &[Vec<(V3, V3)>], outputs: &[usize], value: &dyn Fn(&(V3, 
     let probabilities = listed
         .iter()
         .map(|s| {
+            // A bin's share is its count over the atoms', one division: n added shares of 1/n can round past one, and a
+            // probability above one is no probability (the app's reader refuses it).
             if !s.is_empty() {
-                last = vec![0.; bins];
+                let mut counts = vec![0_usize; bins];
                 for x in s {
-                    let i = ((value(x) / width).round() as isize + (bins / 2) as isize).clamp(0, bins as isize - 1) as usize;
-                    last[i] += 1. / s.len() as f64;
+                    counts[((value(x) / width).round() as isize + (bins / 2) as isize).clamp(0, bins as isize - 1) as usize] += 1;
                 }
+                last = counts.iter().map(|&c| c as f64 / s.len() as f64).collect();
             }
             last.clone()
         })
@@ -3310,6 +3312,12 @@ mod tests {
         assert_eq!(d.grid[1], 0.);
         assert_eq!(d.probabilities[1], d.probabilities[0]);
         assert!((d.probabilities[0].iter().sum::<f64>() - 1.).abs() < 1e-15);
+        // Every atom in one bin is a share of exactly one, however many atoms (S2Q's checkpoint: 1.0000000000000002 from
+        // n added shares of 1/n).
+        for n in 1..2000 {
+            let one = histograms(&[vec![([0.; 3], [0.; 3]); n]], &[0], &|x| x.1[0]);
+            assert!(one.probabilities[0].iter().all(|&p| p <= 1.) && one.probabilities[0].contains(&1.), "{n}");
+        }
     }
 
     /// What the messages pass on (`Messages::result`): a result of two groups at least -- of one member each as well as
