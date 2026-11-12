@@ -847,10 +847,11 @@ pub(crate) struct Region {
     pub(crate) shifted: OnceLock<Vec<[Shift; GROUND]>>,
     /// Per cluster.
     pub(crate) forces: Vec<OnceLock<Own>>,
-    /// Per ground state its drives' sizes and distances (units.rs `Model::across`), and the first places of their gates
-    /// in the tail rule's order (units.rs `Model::folds`).
+    /// Per ground state its drives' sizes and distances (units.rs `Model::across`), the tails of their shares and the gates
+    /// of the places asked in the tail rule's order (units.rs `Model::tails`, `Model::folds`).
     pub(crate) across: [OnceLock<Vec<super::units::Across>>; GROUND],
-    pub(crate) drives: [OnceLock<Vec<[f64; 5]>>; GROUND],
+    pub(crate) tails: [OnceLock<Vec<Own>>; GROUND],
+    pub(crate) folds: [Mutex<Vec<(usize, [f64; 5])>>; GROUND],
     /// Per ground state its shift by its drives folded at the atom, signed (units.rs `Model::near_level`).
     pub(crate) shifts: [OnceLock<Shift>; GROUND],
     /// The constant forms' diagonal per state, and the levels' differences and their gradients asked, each made once
@@ -1830,7 +1831,8 @@ impl Model {
             shifted: OnceLock::new(),
             forces: (0..self.clusters.len()).map(|_| OnceLock::new()).collect(),
             across: std::array::from_fn(|_| OnceLock::new()),
-            drives: std::array::from_fn(|_| OnceLock::new()),
+            tails: std::array::from_fn(|_| OnceLock::new()),
+            folds: std::array::from_fn(|_| Mutex::new(vec![])),
             shifts: std::array::from_fn(|_| OnceLock::new()),
             diagonal: OnceLock::new(),
             gaps: Mutex::new(HashMap::new()),
@@ -2258,9 +2260,9 @@ mod tests {
         };
         let trap = model.trap(&p, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &p, 20.0, 2e-3);
-        let s = |r: &Region| model.folds(b, 0, r, usize::MAX)[0];
-        let a = |r: &Region| model.folds(b, 0, r, usize::MAX)[1];
-        let other = |r: &Region| model.folds(3, 0, r, usize::MAX)[0];
+        let s = |r: &Region| model.folds(b, 0, r)[0];
+        let a = |r: &Region| model.folds(b, 0, r)[1];
+        let other = |r: &Region| model.folds(3, 0, r)[0];
         let together = model.bounds_over(&reach, 0.5, 0.5, &[&s, &a, &other]);
         let alone: Vec<f64> = [&s as &dyn Fn(&Region) -> f64, &a, &other].iter().map(|q| model.bounds_over(&reach, 0.5, 0.5, &[*q])[0]).collect();
         assert_eq!(together, alone);
@@ -2284,7 +2286,7 @@ mod tests {
         };
         let trap = model.trap(&p, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &p, 20.0, 2e-3);
-        let s = |r: &Region| model.folds(b, 0, r, usize::MAX)[0];
+        let s = |r: &Region| model.folds(b, 0, r)[0];
         let largest = model.extents_over(&reach, 1e-3, &[&s])[0];
         for (target, kept) in [(0.45, true), (0.2, false), (0.7, true)] {
             let (scale, asked) = (target / largest, AtomicUsize::new(0));
@@ -2389,11 +2391,11 @@ mod tests {
     }
 
     /// A reach above the potential's far value is held within the trap's region (module documentation, # The trap's
-    /// region). R2_RECOIL's tweezer: at 30 µK its level lies below the far value, the sublevel set whole; at the least
-    /// temperature whose level lies half the trap's depth above it (`holding`: one temperature an ulp lower does not hold
-    /// it), the set within the region -- its box the trap beam's ellipsoid u ≤ 19, the focus held at rest and at the
-    /// speed the level leaves there, a point on the axis at six Rayleigh ranges (|a|² = 1/37, outside the region) not
-    /// held even at rest, though bound. Holding that point's prepared energy outside the region too (`outside_to`) holds
+    /// region). R2_RECOIL's tweezer: at 30 µK its level lies below the far value, the sublevel set whole; no temperature
+    /// holds a level half the trap's depth above it (`holding`), and raised there within the region (`inside_to`) the set
+    /// is the region's -- its box the trap beam's ellipsoid u ≤ 19, the focus held at rest and at the speed the level leaves
+    /// there, a point on the axis at six Rayleigh ranges (|a|² = 1/37, outside the region) not held even at rest, though
+    /// bound, the level outside the region the temperature's. Holding that point's prepared energy outside the region too (`outside_to`) holds
     /// it, and everything the reach held before; its box is larger.
     #[test]
     fn a_reach_above_the_far_value_is_held_within_the_trap_s_region() {
@@ -2404,13 +2406,12 @@ mod tests {
         let cold = model.reach(&trap, &p, 30.0, share);
         assert!(cold.minimum + cold.energy < 0.0 && cold.outside == cold.energy && cold.cell.iter().all(|c| c[1].is_finite()), "{cold:?}");
         let level = -0.5 * trap.minimum;
-        let t = holding(&trap, level, share, 30.0);
-        assert!(trap.minimum + energy_at(&trap, t, share).0 >= level && trap.minimum + energy_at(&trap, t * (1.0 - f64::EPSILON), share).0 < level, "{t} µK");
-        let hot = model.reach(&trap, &p, t, share);
+        assert!(holding(&trap, level, share, 30.0).is_infinite(), "no temperature holds a level above the far value");
+        let hot = model.inside_to(&cold, level);
         let beam = model.light.beams[model.light.frequencies[model.light.trap].beams[0]];
         let (w, z, n) = (beam.waist.unwrap(), beam.rayleigh().unwrap(), beam.direction);
         let region: [f64; 3] = std::array::from_fn(|a| (19.0 * (0.5 * w * w * (1.0 - n[a] * n[a]) + z * z * n[a] * n[a])).sqrt());
-        assert!(hot.outside == f64::NEG_INFINITY && (0..3).all(|a| (hot.cell[a][1] - region[a]).abs() <= 1e-12 * region[a]), "{:?} against {region:?}", hot.cell);
+        assert!(hot.outside == cold.outside && hot.temperature_uk == 30.0 && (0..3).all(|a| (hot.cell[a][1] - region[a]).abs() <= 1e-12 * region[a]), "{:?} against {region:?}", hot.cell);
         let kinetic = |r: [f64; 3]| model.room(&hot, r, &prepared);
         let focus = [0.0; 3];
         let at_rest = |r: [f64; 3]| [0.0; 3].map(|x: f64| x + 0.0 * r[0]);

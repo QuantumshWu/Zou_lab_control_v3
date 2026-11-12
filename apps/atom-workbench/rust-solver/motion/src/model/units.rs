@@ -858,59 +858,69 @@ impl Model {
         })
     }
 
-    /// A ground state's drives' gates over a region (module documentation, # Levels, # The tail rule), per place of the tail
-    /// rule's order: the gate of its drives at the atom -- the folded shares from there down, or the place's largest
-    /// series gate where that is larger -- and the place's largest sweep; the same of its bare drives -- the shares from
-    /// there down, the place's own share in each one's own gate's stead --; and the folded shares from there down, the
-    /// tail. Every share is the region's own, the weaker places' as the place's: a point's are the values there. A folded
-    /// drive's share is of its size across its distance over the region (`across`). A bare drive's own gate is of
-    /// v + |Δ_c − Δ₀| + moved across its bare |Δ₀ − iΓ_e/2|; a drive at the atom's series gate of |w| across its distance
-    /// at rest (`Across::distance_at_rest`), |w| ≤ k v_max + (ħ/m) k²/2 the Doppler shift and recoil of its photon, what its
-    /// response takes to first order (eliminate.rs, # First-order Doppler). Its rate v L + k a_max, L the slope of its
-    /// detuning, of its dressed levels' difference E_e − E_g − ΔE_g (`Across::slope`). A drive onto an explicit state has the share and the sweep
-    /// of its Raman pairs with that state's kept drives beside its own (`pair_gate`): its own statements, not shares in
-    /// the tail -- a place's gate is the larger of its tail and its drives' largest pair.
-    fn folds_made(&self, g: usize, region: &Region) -> Vec<[f64; 5]> {
+    /// A ground state's folded drives' tails over a region (module documentation, # The tail rule): per place of the tail
+    /// rule's order the sum of the folded shares from there down, each of its drive's size across its distance over the
+    /// region (`across`) -- every share the region's own, the weaker places' as the place's: a point's are the values
+    /// there. Made once per region and state: a place's gate reads the shares of every place below it, and nothing else of
+    /// them.
+    fn tails<'r>(&self, g: usize, region: &'r Region) -> &'r [Own] {
+        region.tails[g].get_or_init(|| {
+            let drives = &region.forms.drives(self)[g];
+            let mut out = vec![Own::constant(0.0); drives.last().map_or(0, |d| d.group + 1)];
+            for (d, of) in drives.iter().zip(self.across(g, region)).filter(|of| of.0.level != Level::Explicit) {
+                out[d.group] = out[d.group].add(gate_own(of.size, of.distance, Own::constant(0.0)).saturation);
+            }
+            for place in (1..out.len()).rev() {
+                out[place - 1] = out[place - 1].add(out[place]);
+            }
+            out
+        })
+    }
+
+    /// A ground state's drives' gates at a place of the tail rule's order over a region (module documentation, # Levels, # The
+    /// tail rule): [saturation, sweep] of its drives at the atom -- the tail from the place down (`tails`), or the place's
+    /// largest series gate where that is larger -- and the same of its bare drives -- the tail, the place's own share in each
+    /// one's own gate's stead --, then the tail. A bare drive's own gate is of v + |Δ_c − Δ₀| + moved across its bare |Δ₀ −
+    /// iΓ_e/2|; a drive at the atom's series gate of |w| across its distance at rest (`Across::distance_at_rest`), |w| ≤ k v_max
+    /// + (ħ/m) k²/2 the Doppler shift and recoil of its photon, what its response takes to first order (eliminate.rs, # First-order
+    /// Doppler). Its rate v L + k a_max, L the slope of its detuning, of its dressed levels' difference E_e − E_g − ΔE_g
+    /// (`Across::slope`). A drive onto an explicit state has the share and the sweep of its Raman pairs with that state's kept
+    /// drives beside its own (`pair_gate`): its own statements, not shares in the tail -- a place's gate is the larger of its
+    /// tail and its drives' largest pair. Made where a place is asked, once per region and place: the rates, the series and
+    /// the pairs are of the place's own drives, the shares below it of the tails.
+    pub(crate) fn folds(&self, g: usize, place: usize, region: &Region) -> [f64; 5] {
+        if let Some(&(_, made)) = region.folds[g].lock().expect("the folds' lock").iter().find(|of| of.0 == place) {
+            return made;
+        }
         let none = Own::constant(0.0);
-        let drives = &region.forms.drives(self)[g];
+        let tail = self.tails(g, region)[place];
         let kept = self.kept_over(region);
-        let acceleration = self.force_over(self.membership[g], region).scale(self.hbar_over_mass);
         let pace = region.pace;
-        let mut out = vec![[none; 5]; drives.last().map_or(0, |d| d.group + 1)];
-        // Per place its drives' largest pair saturation, at the atom and with the bare levels.
-        let mut pairs = vec![[none; 2]; out.len()];
-        for (d, of) in drives.iter().zip(self.across(g, region)).filter(|of| of.0.level != Level::Explicit) {
+        // [the atom's series and pairs, the atom's sweeps, the bare drives' own gates over their shares and pairs, their
+        // sweeps]; the place's pairs' saturations, at the atom and with the bare levels.
+        let (mut out, mut pairs) = ([none; 4], [none; 2]);
+        let mut acceleration = None;
+        for (d, of) in region.forms.drives(self)[g].iter().zip(self.across(g, region)).filter(|of| of.0.group == place && of.0.level != Level::Explicit) {
             let wave = self.wave_of(d.component);
-            let rate = pace.mul(of.slope.norm()).add(acceleration.scale(wave));
+            let a = *acceleration.get_or_insert_with(|| self.force_over(self.membership[g], region).scale(self.hbar_over_mass));
+            let rate = pace.mul(of.slope.norm()).add(a.scale(wave));
             let actual = gate_own(of.size, of.distance, rate);
             let pair = self.pair_gate(g, d, of, kept, region);
-            let place = &mut out[d.group];
-            place[4] = place[4].add(actual.saturation);
             let bare = d.level == Level::Bare;
-            pairs[d.group][bare as usize] = pairs[d.group][bare as usize].max(pair.saturation);
+            pairs[bare as usize] = pairs[bare as usize].max(pair.saturation);
             if bare {
                 let own = gate_own(of.size.add(of.centre.plus(-d.detuning).abs()).add(of.moved), Own::constant(d.bare), rate);
-                place[2] = place[2].max(own.saturation.sub(actual.saturation));
-                place[3] = place[3].max(own.resolved().sweep).max(pair.resolved().sweep);
+                out[2] = out[2].max(own.saturation.sub(actual.saturation));
+                out[3] = out[3].max(own.resolved().sweep).max(pair.resolved().sweep);
             } else {
                 let series = gate_own(pace.scale(wave).plus(0.5 * self.hbar_over_mass * wave * wave), of.distance_at_rest(d.gamma), rate);
-                place[0] = place[0].max(series.saturation);
-                place[1] = place[1].max(actual.resolved().sweep).max(pair.resolved().sweep);
+                out[0] = out[0].max(series.saturation);
+                out[1] = out[1].max(actual.resolved().sweep).max(pair.resolved().sweep);
             }
         }
-        // The tails: each place's shares with every weaker one's; a bare drive's own gate in its own share's stead, a drive
-        // at the atom's series beside them. Then the place's pairs, each its own statement.
-        for place in (0..out.len()).rev() {
-            let tail = out[place][4].add(out.get(place + 1).map_or(none, |weaker| weaker[4]));
-            out[place][4] = tail;
-            out[place][0] = out[place][0].max(tail);
-            out[place][2] = out[place][2].add(tail);
-        }
-        for (place, pair) in out.iter_mut().zip(&pairs) {
-            place[0] = place[0].max(pair[0]);
-            place[2] = place[2].max(pair[1]);
-        }
-        out.iter().map(|place| place.map(|x| x.upper())).collect()
+        let made = [out[0].max(tail).max(pairs[0]).upper(), out[1].upper(), out[2].add(tail).max(pairs[1]).upper(), out[3].upper(), tail.upper()];
+        region.folds[g].lock().expect("the folds' lock").push((place, made));
+        made
     }
 
     /// The model's kept drives over a region (`Kept`), nothing where it has none; made once per region.
@@ -997,20 +1007,6 @@ impl Model {
         most
     }
 
-    /// A ground state's drives' gate at a place of the tail rule's order over a region (`folds_made`): [saturation, sweep]
-    /// of its drives at the atom, then of its bare ones, then the tail. The region keeps the order's first `places` places -- those a
-    /// proof over many cells still asks (`Model::gates`); every place's value is its own on the region whatever is
-    /// kept --, and a place beyond them is made again.
-    pub(crate) fn folds(&self, g: usize, place: usize, region: &Region, places: usize) -> [f64; 5] {
-        let kept = region.drives[g].get_or_init(|| {
-            let mut made = self.folds_made(g, region);
-            made.truncate(places);
-            made.shrink_to_fit();
-            made
-        });
-        kept.get(place).copied().unwrap_or_else(|| self.folds_made(g, region)[place])
-    }
-
     /// The bound over a region of the denominator of a drive e ← s folded at the atom at the detuning δ: its two levels'
     /// distance there, |E_e − E_s − δ| at the centre less the spread of the difference of the levels the eliminations take
     /// (eliminate.rs `Gap`) and the excited state's Gershgorin radius (`Model::radii`), across Γ_e/2, in its own form (own.rs).
@@ -1094,12 +1090,12 @@ impl Model {
     /// A unit's gate over a region, [saturation, sweep] (module documentation, # One rule): its read (`Judged`) of the
     /// region -- a cell of a reach's proof, the whole space, or a step's path (solve.rs `Domain`): one statement, its value
     /// on a point the point's own --, every kind through the one gate (`gate`): a drive's by its ground state's tail
-    /// (`folds`, the region keeping its first `places` places), a coupling's (`term_bound`), a photon coherence's
+    /// (`folds`), a coupling's (`term_bound`), a photon coherence's
     /// (`gate_over`, its size its two classes' jumps' bound, photon.rs).
-    pub(crate) fn gate_of(&self, judged: &Judged, u: usize, region: &Region, places: usize) -> [f64; 2] {
+    pub(crate) fn gate_of(&self, judged: &Judged, u: usize, region: &Region) -> [f64; 2] {
         match &judged.reads[u] {
             Read::Fold { ground, place, bare } => {
-                let made = self.folds(*ground, *place, region, places);
+                let made = self.folds(*ground, *place, region);
                 if *bare { [made[2], made[3]] } else { [made[0], made[1]] }
             }
             Read::Term { form, a, b, beat } => {
@@ -1118,7 +1114,7 @@ impl Model {
     /// region at those speeds; and the units it leaves open -- some bound at ½ or above --, the others' gates.
     pub(crate) fn everywhere(&self, judged: &Judged, speed: f64) -> (Vec<[f64; 2]>, Vec<usize>) {
         let whole = self.region(self.spans(&Cell { centre: [0.0; 3], half: [f64::INFINITY; 3] }), speed);
-        let everywhere: Vec<[f64; 2]> = (0..judged.reads.len()).map(|u| self.gate_of(judged, u, &whole, usize::MAX)).collect();
+        let everywhere: Vec<[f64; 2]> = (0..judged.reads.len()).map(|u| self.gate_of(judged, u, &whole)).collect();
         let open = (0..everywhere.len()).filter(|&u| !(everywhere[u][0] < EXISTS && everywhere[u][1] < EXISTS)).collect();
         (everywhere, open)
     }
@@ -1126,7 +1122,7 @@ impl Model {
     /// Whether every one of the units `which` has its fold over a region (`gate_of`, `Gate::exists`).
     pub(crate) fn exist_over(&self, judged: &Judged, which: &[usize], region: &Region) -> bool {
         which.iter().all(|&u| {
-            let [saturation, sweep] = self.gate_of(judged, u, region, usize::MAX);
+            let [saturation, sweep] = self.gate_of(judged, u, region);
             saturation < EXISTS && sweep < EXISTS
         })
     }
@@ -1143,13 +1139,6 @@ impl Model {
     pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
         let judged = self.judged(units);
         let (everywhere, open) = self.everywhere(&judged, reach.speed);
-        // Per ground state the places its open drives' gates ask of a cell.
-        let mut places = [0; GROUND];
-        for &u in &open {
-            if let Read::Fold { ground, place, .. } = judged.reads[u] {
-                places[ground] = places[ground].max(place + 1);
-            }
-        }
         let mut quantities: Vec<Box<dyn Fn(&Region) -> f64 + Sync + '_>> = vec![];
         let mut shared: HashMap<(usize, usize, bool), usize> = HashMap::new();
         // Per open unit where its two bounds lie among the quantities: the saturation's, then the sweep's.
@@ -1157,13 +1146,13 @@ impl Model {
         let asked: Vec<usize> = open
             .iter()
             .map(|&u| {
-                let (key, asks) = if let Read::Fold { ground, place, bare } = judged.reads[u] { (Some((ground, place, bare)), places[ground]) } else { (None, 0) };
+                let key = if let Read::Fold { ground, place, bare } = judged.reads[u] { Some((ground, place, bare)) } else { None };
                 if let Some(found) = key.and_then(|k| shared.get(&k)) {
                     return *found;
                 }
                 let first = quantities.len();
-                quantities.push(Box::new(move |r: &Region| self.gate_of(judged, u, r, asks)[0]));
-                quantities.push(Box::new(move |r: &Region| self.gate_of(judged, u, r, asks)[1]));
+                quantities.push(Box::new(move |r: &Region| self.gate_of(judged, u, r)[0]));
+                quantities.push(Box::new(move |r: &Region| self.gate_of(judged, u, r)[1]));
                 if let Some(k) = key {
                     shared.insert(k, first);
                 }
@@ -1646,7 +1635,7 @@ mod tests {
                 _ => C64::ZERO,
             });
             let region = model.point_region([0.0; 3], 0.0);
-            let gate = model.folds(b, 0, &region, usize::MAX);
+            let gate = model.folds(b, 0, &region);
             let exists = if atom { gate[0] < EXISTS && gate[1] < EXISTS } else { gate[2] < EXISTS && gate[3] < EXISTS };
             let mut errors = [0.0; 2];
             let mut booked = [0.0; 2];
@@ -1883,13 +1872,13 @@ mod tests {
         let speed = 1.5 * distance / wave;
         let (rest, moving) = (model.point_region(centre, 0.0), model.point_region(centre, speed));
         let w = wave * speed + 0.5 * model.hbar_over_mass * wave * wave;
-        let [gate, _, _, _, tail] = model.folds(g, group, &moving, usize::MAX);
+        let [gate, _, _, _, tail] = model.folds(g, group, &moving);
         let share = 2.0 * (size / model.across(g, &moving)[place].distance.value).powi(2);
         eprintln!("|V| {:.3} Γ, D {:.3} Γ, k {wave:.3}/µm; at {speed:.2} µm/µs |w/D| {:.2}: its share {share:.3}, the tail {tail:.3}, its gate {gate:.3}", size / gamma, distance / gamma, w / distance);
         assert!(size < 0.25 * gamma && w / distance > 1.0, "|V| {size} against Γ {gamma}, |w/D| {}", w / distance);
         assert!(share < 0.5 && tail < 0.5, "before: its share {share}, the tail {tail}");
         assert!(gate >= 0.5, "its gate {gate} with the Doppler series diverging");
-        let [still, _, _, _, still_tail] = model.folds(g, group, &rest, usize::MAX);
+        let [still, _, _, _, still_tail] = model.folds(g, group, &rest);
         eprintln!("at rest: its gate {still:.4}, the tail {still_tail:.4}");
         assert!(still < 0.5 && still_tail < 0.5 && still >= still_tail, "at rest: its gate {still}, the tail {still_tail}");
     }
@@ -2538,7 +2527,7 @@ mod tests {
         let mut out: Vec<Quantity<'m>> = vec![];
         for &u in open {
             for (which, name) in ["saturation", "sweep"].into_iter().enumerate() {
-                out.push((format!("{:?} {name}", units[u]), Side::Upper, Box::new(move |r: &Region| model.gate_of(judged, u, r, usize::MAX)[which])));
+                out.push((format!("{:?} {name}", units[u]), Side::Upper, Box::new(move |r: &Region| model.gate_of(judged, u, r)[which])));
             }
         }
         for g in 0..GROUND {

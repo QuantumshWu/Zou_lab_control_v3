@@ -731,31 +731,28 @@ impl Model {
         Gap { all: made.all.plus(constant), taken: made.taken.plus(constant) }
     }
 
-    /// The beam pairs a difference of two levels' weights reads (`gap`, `gap_slope`), per part (the pairs the eliminations'
-    /// levels hold, the others): per pair its frequency, its place and |w_p|.
-    fn weighed(&self, x: usize, y: usize, region: &Region) -> [Vec<(usize, usize, f64)>; 2] {
+    /// Per part of a difference of two levels' weights (`gap`, `gap_slope`) -- the pairs the eliminations' levels hold, the
+    /// others -- the sum over its beam pairs of |w_p| times their bounds `bound` reads.
+    fn weighed<const N: usize>(&self, x: usize, y: usize, region: &Region, bound: impl Fn(&super::reach::PairSpan) -> [f64; N]) -> [[f64; N]; 2] {
         let taken = region.forms.taken(self);
-        let mut parts: [Vec<(usize, usize, f64)>; 2] = [vec![], vec![]];
+        let mut sums = [[0.0; N]; 2];
         for (frequency, pair, w) in region.forms.diagonals(self) {
             let size = (w[x] - w[y]).abs();
             if size > 0.0 {
-                parts[!taken[*frequency][*pair] as usize].push((*frequency, *pair, size));
+                let (sum, of) = (&mut sums[!taken[*frequency][*pair] as usize], bound(&region.pairs[*frequency][*pair]));
+                for (total, part) in sum.iter_mut().zip(of) {
+                    *total += size * part;
+                }
             }
         }
-        parts
+        sums
     }
 
     /// The spatial part of a gap (`gap`), of the region's diagonal sums and the beam pairs' bounds.
     fn gap_made(&self, x: usize, y: usize, region: &Region) -> Gap {
         let diagonal = region.diagonal.get_or_init(|| self.diagonal(region));
-        let parts = self.weighed(x, y, region);
         // Per part the weighted bounds: curve, radius.
-        let bounds = parts.each_ref().map(|part| {
-            part.iter().fold([0.0; 2], |sum, &(f, p, size)| {
-                let pair = &region.pairs[f][p];
-                [sum[0] + size * pair.curve, sum[1] + size * pair.radius]
-            })
-        });
+        let bounds = self.weighed(x, y, region, |pair| [pair.curve, pair.radius]);
         let level = |of: &[usize]| -> Own {
             let (mut value, mut gradient, mut bound) = (0.0, [0.0; 3], [0.0; 2]);
             for &k in of {
@@ -792,13 +789,7 @@ impl Model {
     /// A difference's gradients (`gap_slope`), [taken, all].
     fn gap_slope_made(&self, x: usize, y: usize, region: &Region) -> [Form<[f64; 3]>; 2] {
         let diagonal = region.diagonal.get_or_init(|| self.diagonal(region));
-        let parts = self.weighed(x, y, region);
-        let bounds = parts.each_ref().map(|part| {
-            part.iter().fold([0.0; 3], |sum, &(f, p, size)| {
-                let pair = &region.pairs[f][p];
-                [sum[0] + size * pair.rest, sum[1] + size * pair.veer, sum[2] + size * pair.slope]
-            })
-        });
+        let bounds = self.weighed(x, y, region, |pair| [pair.rest, pair.veer, pair.slope]);
         if !region.rho.is_finite() {
             return [bounds[0][2], bounds[0][2] + bounds[1][2]].map(Form::whole);
         }
