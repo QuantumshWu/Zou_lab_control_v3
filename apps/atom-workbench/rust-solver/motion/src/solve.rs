@@ -19,8 +19,8 @@
 //!    root), the model's units' errors at the states of the first held member of every group, and the tables' errors
 //!    at one state of every trajectory (SPEC §5.4; `one_each`). Its trajectories at the run's step stay in the
 //!    result: they are trajectories of the run's own model and step.
-//!    Where the scout's atoms already refute the reach (read after its keep, which costs its states alone), the
-//!    pilot's own level is run before its companion and read: where its atoms refute the reach too, the attempt ends
+//!    Where the scout's atoms already refute the reach (read before its keep, as on the pilot: the units' errors are
+//!    read at the states of a reach that stands), the pilot's own level is run before its companion and read: where its atoms refute the reach too, the attempt ends
 //!    there, and its companion -- the step's check at a model the next attempt judges anew over the grown reach,
 //!    which settles its step anew -- is never run (`attempt`). What the pilot's work of an attempt so ended leaves the
 //!    next is the reach's temperature and the step it stood at, the next's first rung; nothing read on its
@@ -1376,6 +1376,30 @@ fn attempt(
         Settled::Unproven(asked) => return Ok(hold(asked, context.tau)),
         _ => {}
     }
+    // Where the scout's atoms already refute the reach (`outgrown`), the pilot's own level is run first, and the reach
+    // is read on its atoms -- the scout's among them -- as after a whole pilot: where they refute it, the attempt ends
+    // with the reach grown to the temperature they read, and the pilot's companion, a check of the step at a model
+    // judged over a reach the run does not keep (`settle`: the next attempt settles its step anew), is never run. Else
+    // -- they do not refute it, or a path of theirs was not proven, which their companion's says what of (`settle`,
+    // `own_departure`) -- the pilot's check goes on from that level, its companion run then (`settle`, `ran`). Before the
+    // scout's keep, as on the pilot: the units' errors are read at the states of a reach that stands -- at a refuted
+    // one, of atoms past it (S3's scout at 30 µK kept its carrier's dressing on atoms heated past the reach).
+    let ran = if grown(&levels.fine.iter().collect::<Vec<_>>()).is_some() {
+        let (tau, plan) = (context.tau, &context.plan);
+        let hand = Hand { groups: &numbers, members: 1..GROUP, shape: Shape::of(plan, true), record: &|i| trajectory(&run, ensemble, &domain, tau, plan, true, i) };
+        let (mut rest, unproven) = run_groups(&[hand], messages, &mut |prefix, messages| so_far(&context, &levels.fine, prefix, messages));
+        // The scout's groups stay as they are for its keep's read (below).
+        let mut joined = levels.fine.clone();
+        absorb(&mut joined, rest.pop().expect("the hand-out's one level"));
+        if unproven[0].is_none() {
+            if let Some(t) = grown(&joined.iter().collect::<Vec<_>>()) {
+                return Ok(Attempt::Grow(t, f64::NEG_INFINITY, tau));
+            }
+        }
+        Some((joined, unproven[0]))
+    } else {
+        None
+    };
     let scouted = {
         let tau = context.tau;
         let scout: Vec<&Part> = levels.fine.iter().collect();
@@ -1388,28 +1412,6 @@ fn attempt(
             return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), tau));
         }
         read
-    };
-    // Where the scout's atoms already refute the reach (`outgrown`), the pilot's own level is run first, and the reach
-    // is read on its atoms -- the scout's among them -- as after a whole pilot: where they refute it, the attempt ends
-    // with the reach grown to the temperature they read, and the pilot's companion, a check of the step at a model
-    // judged over a reach the run does not keep (`settle`: the next attempt settles its step anew), is never run. Else
-    // -- they do not refute it, or a path of theirs was not proven, which their companion's says what of (`settle`,
-    // `own_departure`) -- the pilot's check goes on from that level, its companion run then (`settle`, `ran`). After
-    // the scout's keep: that read costs the scout's states alone, this one the pilot's own level.
-    let ran = if grown(&levels.fine.iter().collect::<Vec<_>>()).is_some() {
-        let (tau, plan) = (context.tau, &context.plan);
-        let hand = Hand { groups: &numbers, members: 1..GROUP, shape: Shape::of(plan, true), record: &|i| trajectory(&run, ensemble, &domain, tau, plan, true, i) };
-        let (mut rest, unproven) = run_groups(&[hand], messages, &mut |prefix, messages| so_far(&context, &levels.fine, prefix, messages));
-        let mut joined = std::mem::take(&mut levels.fine);
-        absorb(&mut joined, rest.pop().expect("the hand-out's one level"));
-        if unproven[0].is_none() {
-            if let Some(t) = grown(&joined.iter().collect::<Vec<_>>()) {
-                return Ok(Attempt::Grow(t, f64::NEG_INFINITY, tau));
-            }
-        }
-        Some((joined, unproven[0]))
-    } else {
-        None
     };
     // The pilot: its groups' other members at both levels, screened. Where the check ended unable to see, the reads
     // its last rung is held by: what they do not exclude is booked (`unexcluded`), and flagged.
@@ -2215,6 +2217,7 @@ fn both(a: Option<[f64; 2]>, b: Option<[f64; 2]>) -> Option<[f64; 2]> {
 
 /// What a group of trajectories leaves: its sums (estimate.rs `Group`), its held atoms' (r, κ) at the listed outputs, its
 /// states at the outputs (the pilot's: every member's; else the first that lies outside the reach), its counts.
+#[derive(Clone)]
 struct Part {
     sums: Group,
     listed: Vec<Vec<(V3, V3)>>,
