@@ -1544,15 +1544,21 @@ impl Model {
         (0..self.clusters.len()).flat_map(|c| self.plan(c, lights).sampled.clone()).collect()
     }
 
-    /// A cluster's plan under a light set, made once.
+    /// A cluster's plan under a light set, made once: the plans' lock is held to find its place or to give it one, and
+    /// the plan is made in that place alone -- whoever asks for the same plan meanwhile waits for it, and two plans
+    /// asked side by side are made side by side.
     pub(crate) fn plan(&self, cluster: usize, lights: &Lights) -> Arc<Plan> {
-        let mut plans = self.plans.lock().expect("the plans' lock");
-        if let Some(p) = plans.iter().find(|p| p.cluster == cluster && p.lights == *lights) {
-            return p.clone();
-        }
-        let plan = Arc::new(Plan::new(self, cluster, lights));
-        plans.push(plan.clone());
-        plan
+        let place = {
+            let mut plans = self.plans.lock().expect("the plans' lock");
+            match plans.iter().find(|of| of.0 == cluster && of.1 == *lights) {
+                Some(found) => found.2.clone(),
+                None => {
+                    plans.push((cluster, lights.clone(), Arc::default()));
+                    plans.last().expect("the place just given").2.clone()
+                }
+            }
+        };
+        place.get_or_init(|| Arc::new(Plan::new(self, cluster, lights))).clone()
     }
 
     /// The excited states the response of a carrier's basis coupling k from ground state b can reach on a cluster: those in a
