@@ -486,6 +486,9 @@ mod snapshot_tests {
         let started = Instant::now();
         assert_eq!(process.snapshot(&instance, &json!({}), Duration::from_millis(200)).err().unwrap().kind, ErrorKind::Timeout);
         assert!(started.elapsed() < Duration::from_secs(1));
+        // The writer thread takes the frame up when it is scheduled (late on a loaded machine), then holds the full pipe.
+        let until = Instant::now() + Duration::from_secs(2);
+        while !process.writer.writing() && Instant::now() < until { std::thread::sleep(Duration::from_millis(5)); }
         assert!(process.writer.writing(), "the frame write really owns the full pipe");
         assert!(!process.wait_exit(Duration::ZERO), "metadata timeout must leave its owner alive");
         assert_eq!(process.snapshots.lock().unwrap().len(), 1);
