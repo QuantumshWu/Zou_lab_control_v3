@@ -195,6 +195,11 @@ class RigolDg4000RfSource(RfSourceBase):
                 )
             raise
 
+    def device_info(self) -> dict[str, str]:
+        """What the generator said of itself when it opened (its ``*IDN?``)."""
+
+        return visa.idn_device_info(self.identity, self.config.resource)
+
     @staticmethod
     def _source(channel: str) -> str:
         return f":SOURce{channel[2:]}"

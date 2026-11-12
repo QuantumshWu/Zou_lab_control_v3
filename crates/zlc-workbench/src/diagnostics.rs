@@ -1,7 +1,8 @@
 //! The diagnostics archive: the last hour as the journal kept it, with what the board holds now.
 //!
 //! One file an operator hands to whoever looks into a fault: the journal's segments (what happened,
-//! in order), the board as it stands (its layout, the apparatus, the workbench's own state), the
+//! in order), the session's lifecycle (how the process began and each device was opened, failed or
+//! closed, however long ago), each device's log as its window shows it, the board as it stands (its layout, the apparatus, the workbench's own state), the
 //! release that was running, the newest program logs, and the text files the board names -- a
 //! node's pulse, the Subpulses and the Config that pulse names in turn -- as they are now. It
 //! names a calibration or a dataset the board uses without carrying it; the one data it does carry is
@@ -60,17 +61,55 @@ journal/journal-<start us>.jsonl
                                        over, its definition) since the page's last batch: count, total, longest
     system machine / resources         once at start the machine's processors and the sampling period; then per
                                        period `processes` -- the application and its descendants (plugin and
-                                       page processes; `plugins process` says which pid a plugin is), each with
+                                       page processes; `plugins process_started` says which pid a plugin is), each with
                                        `cpu` (processors used since the last line: 1 is one whole processor) and
                                        its working and private memory -- `machine` (its processors' busy share,
                                        free memory) and `loop`: the event loop's turns in the period, their
                                        time together and the longest with what it handled
+    and the lifecycle lines below, each in its place.
 
-state.json      the workbench's state when this was exported (nodes, runs, devices, board)
+journal/session.jsonl
+    How this process began and how each device came to be as it is, for the process's whole life (the
+    journal above keeps an hour): the lifecycle lines alone, the same lines (same `n`) the journal holds.
+    Texts are cut only past 64 KB, so a plugin's Python traceback stays whole; past 8 MB a process says
+    `journal session_full` and further lines are in the hourly journal alone. A setting whose name has
+    a secret's word (password, secret, token, key, auth, credential, ...) is written <redacted>.
+
+    app started                        pid, release, machine, the program's arguments
+    system machine                     the machine's processors
+    plugins process_started / ended    a plugin process (`key`: the one shared process, or `type:<id>`), its
+      / process_not_started            pid and start time; at its end the reason, exit code, whether it was
+                                       asked to end (`expected`; else it crashed), its instances, its last log
+    workbench devices_apply            an Init, Apply, Close or shut down: rows to open (`retrying`: ones that
+                                       had failed), to close, to close and open again as they now stand
+    workbench device_resolving /       a row whose port is left blank, found before it opens
+      device_resolved
+    workbench device_open              a row opened: instance, role, type_id, the parameters it opens with
+                                       (its type's defaults filled in), the simulation for a simulated type,
+                                       `attempt` (its how-many-th open in this process); `outcome: failed`
+                                       with `error` when refused before reaching the device
+    plugins device_open                the plugin side of that open: process, pid, `ms`, outcome, and on a
+                                       failure `error` {kind, type, message, traceback}
+    workbench device_opened            `ms` since it was asked, and `device_info`: what the device says of
+                                       itself (model, serial, firmware, driver or SDK version), when its type
+                                       says it
+    workbench device_failed            `phase`: resolve, open (it did not open) or lost (it was open), `error`
+    workbench device_close / closed    a close asked, and its outcome with `ms`;
+    plugins device_close /             the plugin side of a close; a device whose call overran its deadline
+      device_unresponsive
+    workbench devices_settled          the Device Manager's line once all of it is done, the rows open
+
+journal/sessions/session-<start us>.jsonl
+    The same, of earlier processes (the newest eight sessions are kept): how one that ended badly ended.
+
+state.json     the workbench's state when this was exported (nodes, runs, devices, board)
 layout.json     the board as Save would write it
 apparatus.json  the apparatus as it is loaded now, whichever file it was read from
 release.json    the release that was running
 logs/           the newest program logs
+logs/devices/<instance>.log
+                each device seen this session (open, failed or closed): the lines its Log window shows,
+                its newest 2000
 data/           the data of recent publications, as far back as the application's budget for it holds --
                 every signal for the same length of time: one .npy per signal and run, its events stacked
                 in commit order; data/index.json names each file's signal, run, ordinals and commit times,
@@ -89,10 +128,18 @@ impl Workbench {
     /// turn; `diagnostics_exported` says where.
     pub(crate) fn export_diagnostics(&mut self, with_data: bool, request: u64, host: &dyn Host) {
         let board = Board { state: Value::Object(self.state(host)), layout: self.layout_document(host), apparatus: self.apparatus.tree(),
-            data: with_data.then(|| host.diagnostic_data()) };
+            data: with_data.then(|| host.diagnostic_data()), device_logs: self.device_logs() };
         let folder = self.workspace.root.join(FOLDER);
         let (root, ticket) = (self.workspace.root.clone(), self.ticket(crate::Ticket::Diagnostics { request }));
         self.plugins.work(ticket, crate::Lane::Export, Box::new(move || board.export(&folder, &root)));
+    }
+
+    /// Every device seen this session -- opened, failed, closed, or one whose lines came another way --
+    /// with what its Log window shows: (instance, lines).
+    fn device_logs(&self) -> Vec<(String, Vec<String>)> {
+        let mut seen: BTreeSet<&String> = self.device_opens.keys().collect();
+        seen.extend(self.logs.keys().filter(|instance| !instance.starts_with(zlc_core::control::NODE_INSTANCE)));
+        seen.into_iter().map(|instance| (instance.clone(), self.device_log(instance, crate::LOG_LINES))).collect()
     }
 
     /// The archive was written (or why not): said on the console's line.
@@ -104,7 +151,7 @@ impl Workbench {
 }
 
 /// What the owner turn takes of the board for an archive; the rest is read when it is written.
-struct Board { state: Value, layout: Value, apparatus: Value, data: Option<crate::DiagnosticData> }
+struct Board { state: Value, layout: Value, apparatus: Value, data: Option<crate::DiagnosticData>, device_logs: Vec<(String, Vec<String>)> }
 
 impl Board {
     /// Write the archive into `folder`: its path and what it holds.
@@ -120,6 +167,7 @@ impl Board {
         members.push(("apparatus.json".into(), pretty(&self.apparatus)));
         if let Ok(bytes) = std::fs::read(zlc_core::checkout::path("bin/release.json")) { members.push(("release.json".into(), bytes)); }
         members.extend(newest_logs(&zlc_core::checkout::local("logs")));
+        members.extend(device_log_members(self.device_logs));
         let named = named_files(&[&members[1].1, &members[2].1], workspace);
         let files = named.len();
         members.push(("files.json".into(), pretty(&Value::Object(named.iter().map(|(member, path, _)| (member.clone(), json!(path))).collect()))));
@@ -129,6 +177,7 @@ impl Board {
         let data_files = data.len();
         members.extend(data);
         journal::note("workbench", "diagnostics_exported", json!({"path": path}));
+        members.extend(session_members(journal::sessions()));
         let exported = write(&path, &journal::segments(), &members).map_err(|error| format!("{}: {error}", path.display()))?;
         Ok(json!({"path": exported.path, "segments": exported.segments, "files": files, "data_files": data_files, "bytes": exported.bytes}))
     }
@@ -144,6 +193,27 @@ fn newest_logs(folder: &Path) -> Vec<(String, Vec<u8>)> {
         let from = bytes.len().saturating_sub(LOG_LIMIT as usize);
         Some((format!("logs/{}", path.file_name()?.to_string_lossy()), bytes[from..].to_vec()))
     }).collect()
+}
+
+/// Each device's log as `logs/devices/<instance>.log`, one line each; a character a file name cannot
+/// hold is written `_` (the instance itself is the file's first line when its name was changed so).
+fn device_log_members(logs: Vec<(String, Vec<String>)>) -> Vec<(String, Vec<u8>)> {
+    logs.into_iter().map(|(instance, lines)| {
+        let file: String = instance.chars().map(|character| if character.is_alphanumeric() || "-_.".contains(character) { character } else { '_' }).collect();
+        let mut text = if file == instance { String::new() } else { format!("(device {instance})\n") };
+        for line in lines { text.push_str(&line); text.push('\n'); }
+        (format!("logs/devices/{file}.log"), text.into_bytes())
+    }).collect()
+}
+
+/// The session files ([`journal::sessions`]): this process's as `journal/session.jsonl`, the earlier
+/// processes' still kept under `journal/sessions/` by their own names. A file not there is left out.
+fn session_members(sessions: Option<(PathBuf, Vec<PathBuf>)>) -> Vec<(String, Vec<u8>)> {
+    let Some((current, earlier)) = sessions else { return Vec::new() };
+    let read = |path: &Path, member: String| std::fs::read(path).ok().map(|bytes| (member, bytes));
+    read(&current, "journal/session.jsonl".into()).into_iter()
+        .chain(earlier.iter().filter_map(|path| read(path, format!("journal/sessions/{}", path.file_name()?.to_string_lossy()))))
+        .collect()
 }
 
 /// Every text value of `document`, wherever it stands.
@@ -215,6 +285,59 @@ mod tests {
         assert_eq!(archive.names(), ["journal/journal-1.jsonl", "state.json"]);
         assert!(String::from_utf8(archive.read("journal/journal-1.jsonl").unwrap()).unwrap().contains("\"ev\":\"fire\""));
         std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// Every device's life is the session's, whatever the hour: what it opened with (a secret said
+    /// only to be there), how long, what it said of itself, its failure; and its log goes with it.
+    #[test]
+    fn a_devices_life_and_log_go_into_the_archive() {
+        use crate::testing::{FakeHost, FakePlugins, catalog, handed};
+        use crate::Event;
+        let folder = std::env::temp_dir().join(format!("zlc-diagnostics-lifecycle-{}", journal::now_us()));
+        journal::open(&folder.join("journal")).unwrap();
+        let mut types = catalog();
+        types["types"][0]["parameters"].as_array_mut().unwrap().push(json!({"name": "api_token", "type": "str", "label": "Token", "default": ""}));
+        std::fs::write(folder.join("apparatus.json"), serde_json::to_vec(&json!({"format": "zlc.installation", "simulation": {"seed": 3},
+            "devices": [{"instance_id": "life_camera", "role": "Imaging", "type_id": "camera.virtual_mot", "parameters": {"api_token": "s3cret"}},
+                        {"instance_id": "life:basler", "role": "Basler", "type_id": "camera.pylon", "parameters": {"serial": "x"}}]})).unwrap()).unwrap();
+        let mut workbench = Workbench::new(&folder, Box::new(FakePlugins { calls: Default::default(), catalog: types })).unwrap();
+        let mut host = FakeHost::default();
+        workbench.apply("apply_devices", &json!({}), &zlc_core::control::Origin::Operator, 1, &mut host);
+        workbench.on_event(Event::Opened { instance: "life_camera".into(), working_point: json!({"narrates": true,
+            "device_info": {"model": "MOT-1", "serial": "42"}}) }, &mut host);
+        workbench.on_event(Event::Log { instance: "life_camera".into(), line: "exposure 0.1 s".into() }, &mut host);
+        workbench.apply("close_device", &json!({"device": "life_camera"}), &zlc_core::control::Origin::Operator, 2, &mut host);
+        workbench.on_event(Event::Closed { instance: "life_camera".into(), error: None }, &mut host);
+
+        let (session, _) = journal::sessions().unwrap();
+        let lines: Vec<Value> = std::fs::read_to_string(&session).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let of = |instance: &str| lines.iter().filter(|line| line["instance"] == instance).cloned().collect::<Vec<_>>();
+        let camera = of("life_camera");
+        let events: Vec<&str> = camera.iter().map(|line| line["ev"].as_str().unwrap()).collect();
+        assert_eq!(events, ["device_open", "device_opened", "device_close", "device_closed"]);
+        let open = &camera[0];
+        assert_eq!((&open["role"], &open["type_id"], &open["attempt"]), (&json!("Imaging"), &json!("camera.virtual_mot"), &json!(1)));
+        assert_eq!(open["parameters"], json!({"exposure_seconds": 0.1, "api_token": journal::REDACTED}), "its type's defaults filled in, its secret hidden");
+        assert_eq!(open["simulation"]["seed"], 3);
+        assert_eq!(camera[1]["device_info"], json!({"model": "MOT-1", "serial": "42"}));
+        assert!(camera[1]["ms"].is_f64() && camera[3]["ms"].is_f64());
+        assert_eq!(camera[3]["outcome"], "closed");
+        let basler = of("life:basler");
+        assert_eq!((basler.len(), &basler[0]["outcome"]), (1, &json!("failed")), "refused before it reached any device: {basler:?}");
+        assert!(basler[0]["error"].as_str().unwrap().contains("not installed"));
+        assert!(lines.iter().any(|line| line["ev"] == "devices_apply" && line["opening"] == json!(["life_camera", "life:basler"])));
+
+        // The archive carries the session and each device's log, the failed one's too.
+        workbench.apply("export_diagnostics", &json!({"data": false}), &zlc_core::control::Origin::Operator, 3, &mut host);
+        let (works, _) = handed();
+        let exported = works.into_iter().map(|(_, _, work)| work()).find_map(Result::ok).expect("exported");
+        let mut archive = zlc_archive::zip::ZipReader::open(std::path::Path::new(exported["path"].as_str().unwrap())).unwrap();
+        let session = String::from_utf8(archive.read("journal/session.jsonl").unwrap()).unwrap();
+        assert!(session.contains("\"ev\":\"device_opened\"") && !session.contains("s3cret"));
+        assert_eq!(String::from_utf8(archive.read("logs/devices/life_camera.log").unwrap()).unwrap(), "exposure 0.1 s\n");
+        assert_eq!(String::from_utf8(archive.read("logs/devices/life_basler.log").unwrap()).unwrap(), "(device life:basler)\n");
+        assert!(String::from_utf8(archive.read("README.txt").unwrap()).unwrap().contains("journal/session.jsonl"));
+        std::fs::remove_dir_all(&folder).ok();
     }
 
     #[test]

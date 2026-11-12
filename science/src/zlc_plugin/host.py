@@ -784,10 +784,30 @@ def _open(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
         # What a draft query may call on it: the core refuses every other method then.
         # `narrates`: whether anything is its device log (v2 says so when not).
         # `snapshot`: whether it reports its configured state for an acquisition.
-        return {"state": "open", "tunable": _tunable(instance.adapter), "reads": list(capabilities.reads(instance.adapter)),
-                "narrates": bool(declared.log_channels or instance.log_token), "snapshot": tunable.reports_settings(instance.adapter)}
+        opened = {"state": "open", "tunable": _tunable(instance.adapter), "reads": list(capabilities.reads(instance.adapter)),
+                  "narrates": bool(declared.log_channels or instance.log_token), "snapshot": tunable.reports_settings(instance.adapter)}
+        info = device_info(instance.adapter)
+        if info is not None:
+            opened["device_info"] = info
+        return opened
     instance.values = dict(params.get("parameters") or {})
     return {"state": "open"}
+
+
+def device_info(adapter: object) -> dict[str, str] | None:
+    """What an open device states of itself (model, serial, firmware, driver or SDK version), when its
+    adapter says it (``device_info()``): text facts it already read while opening, read again without
+    side effects. None when the adapter has no such method; a failure to say is said as ``{error}``,
+    never the open's failure. Facts with no value are left out."""
+
+    read = getattr(adapter, "device_info", None)
+    if not callable(read):
+        return None
+    try:
+        facts = dict(read() or {})
+    except Exception as error:  # noqa: BLE001 - what it says of itself never fails its open
+        return {"error": f"{type(error).__name__}: {error}"}
+    return {str(name): str(value).strip() for name, value in facts.items() if value is not None and str(value).strip()}
 
 
 def _configure(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:

@@ -81,7 +81,9 @@ enum AppEvent { Command { window: Option<windows::Kind>, command: Value }, Compl
     /// A live panel's region changed: its producer is told (science.rs SelectionNote).
     Selection(science::SelectionNote),
     /// installation.exe's checks and steps (installer.rs).
-    Installer(installer::Report) }
+    Installer(installer::Report),
+    /// Closing: every plugin instance has closed and its process ended (`PluginHost::shutdown`, off the turn).
+    PluginsClosed }
 
 /// Write the window's picture to `path` (a .png); its path and size.
 fn write_image(path: &std::path::Path, png: &[u8]) -> Result<Value, String> {
@@ -525,9 +527,14 @@ fn main() {
     // The application keeps its flight journal from its first moment; the installer has nothing to keep.
     if !installer {
         match zlc_core::journal::open(&zlc_core::checkout::local("journal")) {
-            Ok(()) => { state_journal::open(); resources::start(); zlc_core::journal::note("app", "started", json!({"pid": std::process::id(),
-                "release": std::fs::read_to_string(zlc_core::checkout::path("bin/release.json")).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                    .map(|release| json!({"version": release["version"], "commit": release["commit"]}))})) }
+            Ok(()) => {
+                // The session's first line: which program, which release, on which machine.
+                zlc_core::journal::lifecycle("app", "started", json!({"pid": std::process::id(),
+                    "release": std::fs::read_to_string(zlc_core::checkout::path("bin/release.json")).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                        .map(|release| json!({"version": release["version"], "commit": release["commit"]})),
+                    "machine": std::env::var("COMPUTERNAME").ok(), "args": std::env::args().skip(1).collect::<Vec<_>>()}));
+                state_journal::open(); resources::start();
+            }
             Err(error) => eprintln!("The flight journal is not kept: {error}"),
         }
     }
@@ -650,6 +657,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut queue: VecDeque<Value> = VecDeque::new();
     let mut active = false;
     let mut closing = false;
+    // Closing, in order and each off the window's turn, which goes on answering meanwhile: the document's
+    // close (the worker's last job) and the board's SAFE close (PulseHost::shutdown), then the plugins'.
+    let (mut document_closed, mut plugins_closing) = (false, false);
     let mut worker_failed = false;
     let mut sequence = 0u64;
     let mut ticket = 0u64;
@@ -1802,10 +1812,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(feedback)=feedback {let _=feedback.send(decision);}
                     if closing && queue.is_empty() {
                         if let Some(worker) = worker.take() { let _ = worker.join(); }
-                        *flow = ControlFlow::Exit;
+                        document_closed = true;
                     }
                     }
                 }
+                Event::UserEvent(AppEvent::PluginsClosed) => *flow = ControlFlow::Exit,
                 Event::UserEvent(AppEvent::WorkerError(error)) => {
                     worker_failed = true; active = false; queue.clear();
                     if closing { *flow = ControlFlow::Exit; }
@@ -2095,6 +2106,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         pulse_host::PulseEvent::Log { instance, line } => {
                             let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Log { instance, line }));
                         }
+                        // Closing: the end of this turn reads it (PulseHost::shut_down).
+                        pulse_host::PulseEvent::ShutDown => {}
                     }
                     // An answer is told at the end of this turn; a change answering nothing at the beat (present.rs).
                     // The view is made only when something it shows changed (PulseHost::view).
@@ -2303,12 +2316,29 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         remote::check_waiters(&accepted, &mut waiters, None);
+        // Closing: once the document and the board have closed, the plugins close on a thread of their own;
+        // the turn keeps answering what a stopping run asks until they have, then the application ends.
+        if closing && document_closed && pulse.shut_down() && !plugins_closing && *flow != ControlFlow::Exit {
+            plugins_closing = true;
+            match &plugins {
+                Ok(host) => {
+                    let (host, closed) = (host.clone(), self_proxy.clone());
+                    let spawned = std::thread::Builder::new().name("zlc-plugins-close".into())
+                        .spawn(move || { host.shutdown(); let _ = closed.send_event(AppEvent::PluginsClosed); });
+                    if spawned.is_err() { *flow = ControlFlow::Exit; }
+                }
+                Err(_) => *flow = ControlFlow::Exit,
+            }
+        }
         // The turn at which a held panel may take its new data, or the windows are next told what is pending.
         beat.arm([cadence.wake_at(), presentation.wake_at().filter(|_| !closing)].into_iter().flatten().min());
         if *flow == ControlFlow::Exit {
             // No client can reach this instrument any more.
             let _ = std::fs::remove_file(&connection_record);
             share.stop();
+            // Whichever way it ends, a board close begun is waited for (the board SAFE before the process
+            // goes) and every plugin closes: at once when the close sequence has already closed them.
+            pulse.await_shutdown();
             if let Ok(host) = &plugins { host.shutdown(); }
             runtime.close();
             drop(pending_archive.take());viewers.clear();

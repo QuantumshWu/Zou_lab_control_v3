@@ -42,7 +42,7 @@ impl Context for Run {
         self.check_active()?;
         match self.input.next(timeout).map_err(|error|error.to_string())? {
             Some(delivery) if matches!(delivery.kind,DeliveryKind::Data)=>Ok(Some(delivery.reads[0].clone())),
-            Some(_) if terminal_errors=>Err("the source signal ended during collection".into()),
+            Some(_) if terminal_errors=>Err("the source run ended during collection; a scan's source cannot change once collection began".into()),
             _=>Ok(None),
         }
     }

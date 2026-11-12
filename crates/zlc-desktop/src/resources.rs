@@ -206,7 +206,7 @@ impl Sampler {
 pub fn start() {
     let root = std::process::id();
     let cores = std::thread::available_parallelism().map_or(0, |cores| cores.get());
-    zlc_core::journal::note("system", "machine", json!({"processors": cores, "resources_every_s": PERIOD.as_secs()}));
+    zlc_core::journal::lifecycle("system", "machine", json!({"processors": cores, "resources_every_s": PERIOD.as_secs()}));
     let _ = std::thread::Builder::new().name("zlc-resources".into()).spawn(move || {
         let mut sampler = Sampler::default();
         loop {
