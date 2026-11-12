@@ -3,8 +3,9 @@
 //! # The total error
 //! An output's error against its target has three parts from independent sources, combined in quadrature (GUM):
 //! E² = A² + b² + S² (`Account`):
-//! - A, the model's: each unit's error measured along the trajectories (SPEC §5.2), and the share of the thermal ensemble
-//!   that the model's reach leaves out -- the unseen share at the most trajectories a solve runs (SPEC §1.8);
+//! - A, the model's: each unit's error measured along the trajectories (SPEC §5.2), the share of the thermal ensemble
+//!   that the model's reach leaves out -- the unseen share at the most trajectories a solve runs (SPEC §1.8) --, and
+//!   what the run's atoms that leave that reach carry, read where they are (solve.rs, # The reach's atoms);
 //! - b, the discretization's, the part a finer one takes away: the step's, what the pilot's check between two steps
 //!   reads clearly of its error at the output (SPEC §2.2: a check at the pilot's resolution, not a bound; the step's
 //!   share until it is read); and at t = 0, where T is the
