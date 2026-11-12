@@ -492,7 +492,7 @@ impl Model {
                 continue;
             }
             if component.counter {
-                return Err("反旋分量的驱动只按裸能级折叠（模型的适用范围），不能保留".into());
+                return Err("反旋转项的驱动只能按裸能级绝热消去，不能显式跟踪（模型的适用范围）".into());
             }
             let at = &mut levels[2 * component.frequency][(excited - GROUND) * GROUND + ground];
             *at = (*at).max(level);
@@ -573,7 +573,7 @@ impl Model {
         for g in 0..GROUND {
             let saturation: f64 = model.driven.iter().filter(|d| d.0.counter && d.2 == g).map(|&(c, e, _)| model.share_anywhere(c, e, g)).sum();
             if !(saturation < units::EXISTS) {
-                return Err(format!("反旋分量的折叠不存在（S = {:.2}）：请求超出模型的适用范围", saturation));
+                return Err(format!("反旋转项不能绝热消去：同一个基态的各个反旋转项驱动的饱和参数之和 S = {:.2}（各束光取峰值强度、同相叠加）不小于 {}，光强超出模型的适用范围", saturation, units::EXISTS));
             }
         }
         model.fold = (0..model.clusters.len()).map(|c| model.fold_frequency_made(c)).collect();

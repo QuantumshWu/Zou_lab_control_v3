@@ -144,21 +144,20 @@ fn write_line(message: &Value) -> bool {
     serde_json::to_writer(&mut out, message).is_ok() && writeln!(out).is_ok() && out.flush().is_ok()
 }
 
-/// One protocol response to a request and its line. `capabilities`, `warmup` (the
-/// worker start-up LAPACK self-check) and `gpu` (answered at once: the motion
-/// solver runs on the CPU) are operations; anything else is an rb87-full/2 solve,
+/// One protocol response to a request and its line. `capabilities` and `warmup` (the
+/// worker start-up LAPACK self-check) are operations; anything else is an rb87-full/2 solve,
 /// which with `progress` first streams every checkpoint's result as `checkpoint`
 /// progress (the same contract, marked `progress`).
 fn respond(request: Request, line: &Value) -> Value {
     let id = request.id;
-    let ready = |outcome: Result<(), String>| match outcome {
-        Ok(()) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"ready":true}),
-        Err(error) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":error}),
-    };
     match request.op.as_deref() {
         Some("capabilities") => return json!({"id":id,"protocol":NATIVE_PROTOCOL,"capabilities":[FULL_MODEL_SCHEMA]}),
-        Some("warmup") => return ready(lattice_core_adapter::warmup()),
-        Some("gpu") => return ready(motion_adapter::start_gpu()),
+        Some("warmup") => {
+            return match lattice_core_adapter::warmup() {
+                Ok(()) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"ready":true}),
+                Err(error) => json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":error}),
+            }
+        }
         Some(_) => return json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":"Unknown native operation"}),
         None => {}
     }
@@ -225,14 +224,6 @@ mod tests {
         let warm = request(json!({"id":-1,"op":"warmup"}));
         assert_eq!(warm["ready"], true, "{warm}");
         assert!(request(json!({"id":1,"op":"unknown"}))["error"].is_string());
-    }
-    /// The `gpu` operation answers at once with why there is no GPU: the motion solver runs on the CPU (SPEC §9), and the
-    /// app, answered, never waits behind its compile screen.
-    #[test]
-    fn the_gpu_operation_answers_at_once() {
-        let out = request(json!({"id":-2,"op":"gpu"}));
-        assert_eq!((out["id"].clone(), out["protocol"].clone()), (json!(-2), json!(NATIVE_PROTOCOL)), "{out}");
-        assert_eq!(out["error"], motion_adapter::GPU_ABSENT, "{out}");
     }
     #[test]
     fn solves_require_the_full_model_schema() {
@@ -332,6 +323,6 @@ mod tests {
         let classical = result["motion"]["classical"].as_array().unwrap();
         assert!(classical[gone..].iter().all(|c| c == false), "{classical:?}");
         let flagged = result["diagnostics"]["approximations"]["flagged"].as_str().unwrap_or("");
-        assert!(flagged.contains("无原子被俘获"), "{flagged}");
+        assert!(flagged.contains("无原子留在光阱中"), "{flagged}");
     }
 }

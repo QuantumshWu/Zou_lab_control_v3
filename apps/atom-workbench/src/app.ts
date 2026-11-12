@@ -34,11 +34,10 @@ import {addReflection,detachReflection,reflectionOf,sourceOf} from './reflection
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionDevice,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
 import type {ApproximationLedger,Distributions,DynamicsResult,LedgerTotal} from './solver-types.js';
 import {SEMICLASSICAL_REGIME} from './solver-types.js';
-import {MOTION_AXES,asksGpu,motionRefusal,motionTemperatureReading,setMotionTemperature} from './motion.js';
+import {MOTION_AXES,motionRefusal,motionTemperatureReading,setMotionTemperature} from './motion.js';
 import {AXIS_INKS,MOTION_INKS,TOTAL_INK,TOTAL_WIDTH,bindDistribution,bindSeries,distributionChart,distributions,lengthText,motionSeries,rootMeanSquare,seriesChart} from './motion-chart.js';
 import {keepTweezer,setTweezer,tweezerOf,tweezerRefusal} from './tweezer.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
-import {holdWhileCompiling} from './compile-hold.js';
 import {startupScene,validateScene} from './scene-file.js';
 import {incidentTransitions,laserEmits,laserReferenceStateId,setLaserReferenceState,transitionEndpoints} from './transition-view.js';
 import {escapeHtml as esc,levelsChart,number,populationChart,bindPopulationChart,populationColor,populationValue,populationSamplingInfo} from './charts.js';
@@ -54,7 +53,7 @@ import {idMappingError} from './population-basis.js';
 import {installWindowChrome} from './window-chrome.js';
 import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,remainingWords,signedInteger,stateLabel,subscript,withUnit} from './format.js';
 import {solverText} from './solver-words.js';
-import {errorPercent,outsideRuns,partialSentence,partialShort,sampleErrors} from './accuracy.js';
+import {errorPercent,ledgerRows,outsideRuns,partialSentence,partialShort,sampleErrors} from './accuracy.js';
 import {definitionNotes,modelNotes} from './model-notes.js';
 import {InlineName} from './inline-name.js';
 import {EXAMPLES,exampleScene} from './examples.js';
@@ -254,11 +253,6 @@ function sceneEdited():boolean{return baseline!==editKey();}
 
 function update():void{try{resolveSceneFrequencies(scene);}catch{/* analyze() reports it */}invalidateObsoletePopulation();if(dirty)return;dirty=true;requestAnimationFrame(()=>{dirty=false;renderResults();});}
 function note(text:string,word:StatusWord='task'):void{notice={text,word,until:performance.now()+6000};refreshStatus();window.setTimeout(refreshStatus,6100);}
-/** A note that stands until the operator's next press: who waited out a compile may have left the machine. */
-function standingNote(text:string,word:StatusWord):void{
-  const standing=notice={text,word,until:Infinity};refreshStatus();
-  addEventListener('pointerdown',()=>{if(notice===standing){notice=undefined;refreshStatus();}},{capture:true,once:true});
-}
 
 // ---------------------------------------------------------------- status
 /** The solver's line: words, their status, the solve's wall time, written last so a time of
@@ -1022,26 +1016,6 @@ function refreshPopulationOnly():void{
   else if(view==='details')renderDetailsPage();
   renderedPopulationKey=shownKey();root.dataset.populationFresh=String(!!currentResult());root.dataset.populationPaintCount=String(++populationPaintCount);refreshStatus();
 }
-/** The GPU's start under way, and that a start has answered without freezing the window: the kernels
- * are in the driver's cache, and a later worker loads them beside its first solve. After a compile
- * the next solve asks once more: a cache that does not keep them freezes again, no solve's deadline
- * ending the compile. */
-let gpuStart:Promise<void>|undefined,gpuCached=false;
-/** Starts the GPU, the window frozen while the driver's first compile of its kernels takes long
- * (compile-hold.ts). A GPU that cannot run freezes nothing and says so with its solves (deviceNote);
- * what ended a compile the operator waited for is said here. */
-function startGpu():Promise<void>{
-  return gpuStart??=(async()=>{
-    const lift=holdWhileCompiling();
-    try{
-      const why=await solver.startGpu(),froze=lift();gpuCached=!why&&!froze;
-      if(froze&&why)standingNote(why,'warning');
-    }catch(error){
-      if(lift())standingNote(`GPU 内核的编译中断（${message(error)}）：下次用 GPU 计算时重新编译`,'error');
-      throw error;
-    }finally{gpuStart=undefined;}
-  })();
-}
 /** Every change solves automatically what the page shows and is not here: the mean at T in the
  * levels' long-time mode, else the trajectory, with its mean unless that is cached. A cached
  * mean is shown at once, with no request; a new duration or new samples with the mean cached ask
@@ -1067,9 +1041,6 @@ function requestSolve():void{
   solverTimer=window.setTimeout(async()=>{
     if(!stillCurrent())return;solverQueued=false;refreshPopulationOnly();
     try{
-      // A start that may compile waits here, no request's deadline running: a motion solve that asks
-      // for the GPU, and whatever else its lane would hold behind it (only a mean has a lane of its own).
-      if(kind!=='mean'&&(gpuStart||(asksGpu(submittedSettings)&&!gpuCached))){await startGpu();if(!stillCurrent())return;}
       const begin=performance.now(),result=await solver.solve(submittedScene,submittedSettings,submittedOptions);if(!stillCurrent())return;
       solverWallMs=performance.now()-begin;lastCheckpoint=undefined;
       storeResult({result,wallMs:solverWallMs,horizon},submitted);
@@ -1183,16 +1154,21 @@ function approximationTotal(ledger:ApproximationLedger):string{
   const total=(name:string,t:LedgerTotal)=>`${name} ${errorPercent(t.error)}（目标 ${errorPercent(t.target)}）`;
   return `${total('布居',ledger.totals.population)}，${total('温度',ledger.totals.temperature)}；${ledger.flagged?'超出目标（见下）':'未超出'}`;
 }
-/** A ledger's largest item, named by its `label`, on a line of its own (none in an empty ledger). */
+/** A ledger's largest item -- its first --, named by its `label`, on a line of its own (none in an empty ledger). */
 function largestApproximation(ledger:ApproximationLedger):string[]{
-  const [largest]=[...ledger.items].sort((a,b)=>b.estimate-a.estimate);
+  const [largest]=ledger.items;
   return largest?[`<p class="ledger-note">最大一项：${esc(largest.label)} ${errorPercent(largest.estimate)}</p>`]:[];
 }
-/** A motion result's approximation ledger (solver-types.ts ApproximationLedger): each approximation,
- * its estimated error and what the engine did about it. */
+/** A motion result's approximation ledger (solver-types.ts ApproximationLedger): each approximation, its estimated
+ * error and what the engine did about it, from the largest down as the engine lists them, at the column's one
+ * precision (accuracy.ts `ledgerRows`).
+ * The items that read zero there close the table in one line: their number, the half unit of the last place they
+ * all lie under, and the largest of them. The totals above are the engine's; nothing is summed here. */
 function approximationLedger(ledger:ApproximationLedger):string{
-  const rows=ledger.items.map(item=>`<tr><td>${esc(item.label)}</td><td class="num">${esc(errorPercent(item.estimate))}</td><td>${esc(item.action)}</td></tr>`).join('');
-  return rows?`<table class="ledger-table"><thead><tr><th>近似</th><th class="num">估计误差</th><th>处理</th></tr></thead><tbody>${rows}</tbody></table>`:'';
+  const {places,listed,rest}=ledgerRows(ledger.items),[largest]=rest;
+  const rows=listed.map(item=>`<tr><td>${esc(item.label)}</td><td class="num">${formatNumber(item.estimate*100,{places})}%</td><td>${esc(item.action)}</td></tr>`).join('');
+  const closing=largest?`<tr class="ledger-rest"><td colspan="3">${rest.length} 项各不到 ${formatNumber(.5*10**-places,{digits:1})}%，不逐项列出；其中最大的一项：${esc(largest.label)}，${errorPercent(largest.estimate)}</td></tr>`:'';
+  return ledger.items.length?`<table class="ledger-table"><thead><tr><th>近似</th><th class="num">估计误差</th><th>处理</th></tr></thead><tbody>${rows}${closing}</tbody></table>`:'';
 }
 /** 详情's first section: what is computed now -- the quantization axis, the levels chart's scope,
  * the sampling and the solve; then the definitions and the model, written once. */
@@ -1591,5 +1567,3 @@ let chartWidth=0,resizeFrame=0;new ResizeObserver(entries=>{const width=Math.rou
 // ---------------------------------------------------------------- start
 normalizeScene(scene);markBaseline();
 syncLayout();latestAnalysis=analyze(scene);renderInitial();renderObjects();renderInspector();renderResults();
-// The GPU's kernels at once, for the first motion solve; what goes wrong is said (startGpu), and the next solve that asks starts them again.
-if(asksGpu(dynamics()))startGpu().catch(()=>{});

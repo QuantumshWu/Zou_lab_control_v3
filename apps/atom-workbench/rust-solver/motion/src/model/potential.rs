@@ -359,7 +359,7 @@ impl Model {
                 let gain = -(0..3).map(|i| along[i] * steps[i] * scale + 0.5 * values[i] * (steps[i] * scale).powi(2)).sum::<f64>();
                 if !(gain > noise) {
                     if !bowl {
-                        return Err("光镊不约束原子：准备势从焦点下降没有到达局部极小".into());
+                        return Err("光镊不约束原子：原子的势能从焦点往下走，找不到局部极小".into());
                     }
                     let frequencies = values.map(|l| (l * self.hbar_over_mass).sqrt());
                     let lab = std::array::from_fn(|a| (here.quadratic.hessian[a][a] * self.hbar_over_mass).sqrt());
@@ -367,7 +367,7 @@ impl Model {
                 }
                 let next: [f64; 3] = std::array::from_fn(|a| r[a] + (0..3).map(|i| steps[i] * scale * vectors[i][a]).sum::<f64>());
                 if self.light.outside(next) {
-                    return Err("光镊不约束原子：准备势的下降离开了光镊的区域".into());
+                    return Err("光镊不约束原子：原子的势能从焦点往下走，一直走出了光镊的范围".into());
                 }
                 let there = self.expand(next, p, lights, 2, None);
                 if there.quadratic.value < here.quadratic.value {

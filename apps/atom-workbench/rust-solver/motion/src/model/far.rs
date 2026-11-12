@@ -101,7 +101,7 @@ impl Axes {
         let frames = &request.frame_frequencies_mhz;
         let frame = frames[GROUND];
         if frames[..GROUND].iter().any(|&f| f != 0.0) || frames[GROUND..].iter().any(|&f| f != frame) {
-            return Err("frameFrequenciesMHz: the ground states' frames must be 0 and the excited states' one frame".into());
+            return Err("请求不符合求解器的接口：基态的旋转系频率（frameFrequenciesMHz）应为 0，激发态应共用一个旋转系频率".into());
         }
         let mut axes = request.frequencies_mhz.clone();
         axes.push(frame);

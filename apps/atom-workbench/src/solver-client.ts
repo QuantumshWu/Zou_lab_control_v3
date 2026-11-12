@@ -40,17 +40,6 @@ export class DynamicsClient {
       this.current=job;job.timer=setTimeout(()=>{job.timer=undefined;void this.run(job);},this.debounceMs);
     });
   }
-  /** Starts the GPU (POST /api/gpu): answered once it has started, the driver's first compile of the
-   * kernels included, with why it cannot run if so (a solve that asks for it then runs on the CPU and
-   * says so); rejected if its worker ended first. No deadline runs: a compile takes minutes on a loaded
-   * machine. A service that does not serve it answers nothing: its solves start the GPU themselves. */
-  async startGpu():Promise<string|undefined>{
-    const response=await this.transport(this.base+'/api/gpu',{method:'POST'});
-    if(response.status===404||response.status===405)return undefined;
-    const data=await response.json();
-    if(!response.ok)throw new Error(data.error||`Local solver: ${response.status}`);
-    return data.reason;
-  }
   private async run(job:Job):Promise<void>{
     if(this.current!==job||job.controller.signal.aborted)return;
     job.attempt++;let evidence:unknown;const motion=motionOf(job);

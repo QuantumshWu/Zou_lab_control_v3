@@ -17,6 +17,7 @@ import {meanInputsKey,trajectoryInputsKey} from '../dist/js/atom-workbench/src/d
 import {plannedSolve} from '../dist/js/atom-workbench/src/solve-plan.js';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
+import {ledgerRows} from '../dist/js/atom-workbench/src/accuracy.js';
 import {typedDigits} from '../dist/js/atom-workbench/src/unit-input.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {prepareNativeSolve} from '../scripts/native-protocol.mjs';
@@ -234,6 +235,21 @@ function readMotion(change=()=>{}){
   const data=motionResult({states,initialIndex:states.findIndex(s=>s.id===scene.dynamics.initialStateId),timesUs:[0,5000,10000]});change(data);
   return normalizeDynamicsResult(data,scene,undefined,undefined,request(scene));
 }
+test('the ledger\'s table lists its items, the largest first, at the largest one\'s precision, and those that read zero there together',()=>{
+  const item=estimate=>({label:`${estimate}`,estimate}),rows=estimates=>{const {places,listed,rest}=ledgerRows(estimates.map(item));return [places,listed.map(i=>i.estimate),rest.map(i=>i.estimate)];};
+  // 0.59 % is written to its second digit, the second decimal: 0.005 % and above reads above zero there.
+  assert.deepEqual(rows([5.9e-3,2e-4,5.1e-5,4.9e-5,1.3e-17,0]),[2,[5.9e-3,2e-4,5.1e-5],[4.9e-5,1.3e-17,0]]);
+  // The place follows the largest item: 2.1 % to the first decimal, 12 % to the unit, 0.0031 % to the fourth decimal.
+  assert.deepEqual(rows([.021,6e-4,4e-4]),[1,[.021,6e-4],[4e-4]]);
+  assert.deepEqual(rows([.12,.006,.004]),[0,[.12,.006],[.004]]);
+  assert.deepEqual(rows([3.1e-5,1e-9]),[4,[3.1e-5],[1e-9]]);
+  // The largest rounded to two digits may gain a place (0.0996 % reads 0.10 %): its place is the rounded reading's.
+  assert.deepEqual(rows([9.96e-4,6e-6]),[2,[9.96e-4],[6e-6]]);
+  // Nothing above zero: nothing listed; no item: nothing at all; an item below every decimal the language writes is not listed.
+  assert.deepEqual(rows([0,0]),[1,[],[0,0]]);assert.deepEqual(rows([]),[1,[],[]]);assert.deepEqual(rows([1e-200]),[100,[],[1e-200]]);
+  // The fixture's ledger: both items read above zero at 0.12 %'s place.
+  assert.equal(ledgerRows(MOTION_DIAGNOSTICS.approximations.items).rest.length,0);
+});
 test('a motion result is read strictly: the 3D block with the total temperature, the device, a fallback\'s note and the approximation ledger',()=>{
   const result=readMotion(),m=result.motion,block=motionBlock(3);
   assert.deepEqual([m.temperatureUK,m.temperatureErrorUK],[[block.temperatureUK.x,block.temperatureUK.y,block.temperatureUK.z],[[1.5,1.5,1.5],[1.5,1.5,1.5],[1.5,1.5,1.5]]]);
@@ -252,7 +268,7 @@ test('a motion result is read strictly: the 3D block with the total temperature,
     ['one axis missing',d=>{delete d.motion.temperatureUK.z;}],['no regime',d=>{delete d.motion.classical;}],['no trajectories',d=>{d.motion.trajectories=0;}],
     ['a loss that decreases',d=>{d.motion.lossProbability[2]=0;}],['an unknown key',d=>{d.motion.axes=['x','y','z'];}],
     ['no device',d=>{delete d.diagnostics.device;}],['another device',d=>{d.diagnostics.device='tpu';}],['an empty note',d=>{d.diagnostics.deviceNote=' ';}],
-    ['no ledger',d=>{delete d.diagnostics.approximations;}],['a ledger key',d=>{d.diagnostics.approximations.total=1;}],['no totals',d=>{delete d.diagnostics.approximations.totals;}],['a negative total',d=>{d.diagnostics.approximations.totals.temperature.error=-1;}],['a negative estimate',d=>{d.diagnostics.approximations.items[0].estimate=-1;}],
+    ['no ledger',d=>{delete d.diagnostics.approximations;}],['a ledger key',d=>{d.diagnostics.approximations.total=1;}],['no totals',d=>{delete d.diagnostics.approximations.totals;}],['a negative total',d=>{d.diagnostics.approximations.totals.temperature.error=-1;}],['a negative estimate',d=>{d.diagnostics.approximations.items[0].estimate=-1;}],['items not from the largest down',d=>{d.diagnostics.approximations.items.reverse();}],
     ['an item without its action',d=>{delete d.diagnostics.approximations.items[1].action;}],['an empty flag',d=>{d.diagnostics.approximations.flagged='';}],['an empty ledger note',d=>{d.diagnostics.approximations.note='';}],
   ])assert.throws(()=>readMotion(change),/运动结果/,label);
   assert.throws(()=>readMotion(d=>{d.populationAccuracy.requestedTolerance=.01;}),/布居精度/);

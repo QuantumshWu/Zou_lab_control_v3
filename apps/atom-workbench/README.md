@@ -117,10 +117,8 @@ validated regime, and outputs below it are marked reference-only.
 
 This version computes on the CPU only. `options.device` (计算设备) is accepted:
 a request for the GPU is computed on the CPU, `diagnostics.device` is "cpu" and
-`diagnostics.deviceNote` says so. The worker's `gpu` operation answers at once
-with the same sentence, so the window's wait for a kernel compile
-(docs/ui-design.md §6.24) ends as soon as the worker has started. A GPU engine is
-to follow as separate code.
+`diagnostics.deviceNote` says so. Nothing is started, awaited or shown for a GPU
+when the app starts. A GPU engine is to follow as separate code.
 
 Every request asks for the same absolute population error,
 `populationTolerance: 0.01` on the probability scale (1%); it is not a user

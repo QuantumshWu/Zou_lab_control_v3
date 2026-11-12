@@ -245,6 +245,8 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .ledger-table th, .ledger-table td { height: var(--table-row-h); padding: 0 var(--table-cell-pad); border-bottom: var(--edge) solid var(--divider); }
 .ledger-table th { font-weight: 400; color: var(--muted-ink); white-space: nowrap; }
 .ledger-table .num { text-align: right; white-space: nowrap; }
+/* The closing line: the items that read zero at the column's precision, not listed one by one. */
+.ledger-table .ledger-rest td { color: var(--muted-ink); }
 .solver-details > button { margin-top: var(--row-gap); }
 
 /* ---------- 布居演化 ------------------------------------------------------ */
@@ -356,22 +358,6 @@ button.legend-item.selected { background: var(--selected); border-color: var(--s
 .pair-part > select.frequency-base { flex: 0 1 auto; width: auto; min-width: 0; }
 /* The one warning beside 显示光移: the light is too close for a static shift. */
 .mixing-warning { grid-column: 1 / -1; margin: 0; color: var(--orange-dark); }
-
-/* ---------- the wait for the GPU kernels' first compile (compile-hold.ts) ---- */
-/* The Task Console's disabled look over the whole window: a veil of the window's face that turns the
- * body ink into the disabled ink, (--disabled-ink - --text) / (--bg - --text) = 45%. The native title
- * bar is left as it is: it stays live. The card is the one every modal wears (fluent Dialog). */
-dialog.compile-hold::backdrop { background: color-mix(in srgb, var(--bg) 45%, transparent); }
-body.atom-native-window dialog.compile-hold::backdrop { top: var(--title-bar-h); }
-dialog.compile-hold, dialog.compile-hold::backdrop { cursor: wait; animation: compile-appear var(--anim-switch) ease-out; }
-@keyframes compile-appear { from { opacity: 0; } }
-.compile-hold .dialog-actions { display: none; }
-.compile-hold .compile-longer { color: var(--muted-ink); }
-.compile-elapsed { font-variant-numeric: tabular-nums; }
-/* The driver reports no progress: a part of the track (.bar-fill, --sweep of its width) crosses it
- * without end, slowly enough to read as waiting and not as a flicker. */
-.compile-sweep { --sweep: .4; width: calc(100% * var(--sweep)); animation: compile-sweep 1.6s ease-in-out infinite; }
-@keyframes compile-sweep { from { transform: translateX(-100%); } to { transform: translateX(calc(100% / var(--sweep))); } }
 
 /* ---------- 详情 ---------------------------------------------------------- */
 /* One readable column: what is computed now, the definitions, the model. */
