@@ -3,7 +3,7 @@
 // scene file, and the export -- an ordinary beam, the master model of the same beam written by hand.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {MAXIMUM_LASERS,defaultScene} from '../dist/js/atom-workbench/src/types.js';
+import {DEFAULT_PLATE_ANGLE_DEG,MAXIMUM_LASERS,defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {analyze,captureLaserFrequencyAnchor,drivingLasers,laserIntensityMWcm2,polarization,resolveSceneFrequencies} from '../dist/js/atom-workbench/src/physics.js';
 import {addReflection,detachReflection,partnerOf,reflectionOf,sourceOf} from '../dist/js/atom-workbench/src/reflection.js';
 import {directionVector} from '../dist/js/atom-workbench/src/direction.js';
@@ -33,12 +33,12 @@ const close=(a,b,tol,what)=>assert.ok(Math.abs(a-b)<=tol,`${what}: ${a} vs ${b}`
 /** Components with a zero written +0: a turn by 180° may leave a −0. */
 const plain=v=>v.map(x=>x+0);
 /** The scene of one source along `direction` (the default scene's probe) with the given polarization, and its reflection. */
-function pair(direction,{psi=0,chi=0,phase=0,quarterWave=false,reflectivity=1,mirrorPhase=0,fields}={}){
+function pair(direction,{psi=0,chi=0,phase=0,quarterWave=false,plate=psi,reflectivity=1,mirrorPhase=0,fields}={}){
   const scene=defaultScene();if(fields)scene.fields=fields;
   const source=scene.lasers[0];Object.assign(source,{direction,polarizationAngleDeg:psi,ellipticityDeg:chi,phaseDeg:phase});
   // The probe alone: no tweezer.
   scene.lasers=[source];delete scene.tweezerId;const reflection=addReflection(scene,source);
-  Object.assign(reflection.reflection,{quarterWave,reflectivity,phaseDeg:mirrorPhase});resolveSceneFrequencies(scene);
+  Object.assign(reflection.reflection,{quarterWave,plateAngleDeg:plate,reflectivity,phaseDeg:mirrorPhase});resolveSceneFrequencies(scene);
   return {scene,source,reflection};
 }
 const GEOMETRIES=[['along the bias field (a link)',{reference:{kind:'field',id:'bias'},thetaDeg:0,phiDeg:0}],['along +x',axis('+x')],
@@ -113,15 +113,34 @@ test('polarization: linear stays linear on the same lab axis; a plain mirror sen
   }
 });
 
-test('the lab-frame field: a plain mirror returns the source\'s Jones vector times e^{iφ}, a λ/4 double pass its mirror image about the major axis',()=>{
+test('the lab-frame field: a plain mirror returns the source\'s Jones vector times e^{iφ}, a λ/4 double pass its mirror image about the plate\'s fast axis',()=>{
   const fields=[field('bias',2,0,0)];fields[0].direction=along(61,19);
-  for(const [where,direction] of GEOMETRIES)for(const quarterWave of [false,true])for(const [chi,mirrorPhase,phase] of [[17,0,0],[-33,73,40],[45,180,-150]]){
-    const {scene,source,reflection}=pair(direction,{psi:24,chi,phase,quarterWave,mirrorPhase,fields}),words=`${where}, ${quarterWave?'λ/4':'plain'}, χ ${chi}°`;
+  for(const [where,direction] of GEOMETRIES)for(const [quarterWave,plate] of [[false,45],[true,24],[true,69],[true,-80],[true,90]])for(const [chi,mirrorPhase,phase] of [[17,0,0],[-33,73,40],[45,180,-150],[0,0,170]]){
+    const {scene,source,reflection}=pair(direction,{psi:24,chi,phase,quarterWave,plate,mirrorPhase,fields}),words=`${where}, ${quarterWave?`λ/4 at ${plate}°`:'plain'}, χ ${chi}°`;
     const p=polarization(source,scene.fields),c=Math.cos(chi*DEG),s=Math.sin(chi*DEG),total=(phase+mirrorPhase)*DEG;
-    // e^{i(φ₀+φ)} (cos χ u ± i sin χ v): + for the plain mirror, − for the double pass.
-    const expected=[0,1,2].map(i=>{const re=c*p.u[i],im=(quarterWave?-1:1)*s*p.v[i];return [re*Math.cos(total)-im*Math.sin(total),re*Math.sin(total)+im*Math.cos(total)];});
+    // The half-wave plate R(θ) diag(1, −1) R(−θ) in the source's frame mirrors u, v about the fast axis, at θ − ψ from u:
+    // u″ = cos 2(θ − ψ) u + sin 2(θ − ψ) v, v″ = sin 2(θ − ψ) u − cos 2(θ − ψ) v; the field e^{i(φ₀+φ)} (cos χ u″ + i sin χ v″).
+    // The plain mirror keeps u and v.
+    const t=quarterWave?2*(plate-24)*DEG:0,cu=Math.cos(t),su=Math.sin(t);
+    const u=[0,1,2].map(i=>quarterWave?cu*p.u[i]+su*p.v[i]:p.u[i]),v=[0,1,2].map(i=>quarterWave?su*p.u[i]-cu*p.v[i]:p.v[i]);
+    const expected=[0,1,2].map(i=>{const re=c*u[i],im=s*v[i];return [re*Math.cos(total)-im*Math.sin(total),re*Math.sin(total)+im*Math.cos(total)];});
     jones(reflection,scene.fields).forEach(([re,im],i)=>{close(re,expected[i][0],1e-14,`${words}: Re ε_${i}`);close(im,expected[i][1],1e-14,`${words}: Im ε_${i}`);});
   }
+});
+
+test('a linear source and the λ/4 plate at 45° to it: the reflection comes back polarized at right angles (lin⊥lin); π about the field comes back half σ⁺, half σ⁻',()=>{
+  const fields=[field('bias',3,0,0)];fields[0].direction=axis('+z');
+  for(const [where,direction] of GEOMETRIES)for(const psi of [0,30,-71])for(const plate of [psi+45,psi-45].filter(t=>Math.abs(t)<=90)){
+    const {scene,source,reflection}=pair(direction,{psi,quarterWave:true,plate,fields});
+    const s=polarization(source,scene.fields),r=polarization(reflection,scene.fields);
+    close(s.u.reduce((sum,v,i)=>sum+v*r.u[i],0),0,1e-15,`${where}, ψ ${psi}°, θ ${plate}°: u′ ⊥ u`);
+    close(helicity(reflection,scene.fields),0,1e-15,`${where}: still linear`);
+  }
+  // The π probe across the field (the app's π preset: along +x, polarized along B) and its reflection through the default plate.
+  const {scene,reflection}=pair(axis('+x'),{psi:0,quarterWave:true,plate:45,fields}),a=analyze(scene);
+  const q=a.polarizations[reflection.id];close(q.pi,0,1e-15,'no π');close(q.minus,.5,1e-15,'σ⁻ half');close(q.plus,.5,1e-15,'σ⁺ half');
+  // A new mirror's plate sits at the default.
+  const fresh=defaultScene();assert.equal(addReflection(fresh,fresh.lasers[0]).reflection.plateAngleDeg,DEFAULT_PLATE_ANGLE_DEG);
 });
 
 test('the scene file: a reflection round-trips, its beam is derived again on reading, and what is not a reflection is refused',()=>{
@@ -133,6 +152,9 @@ test('the scene file: a reflection round-trips, its beam is derived again on rea
   const stale=JSON.parse(JSON.stringify(scene)),at=stale.lasers.findIndex(l=>l.id===reflection.id);
   Object.assign(stale.lasers[at],{enabled:false,ellipticityDeg:-7,powerMW:99,polarizationAngleDeg:5});
   assert.deepEqual(validateScene(stale).lasers[at],reflection);
+  // A file written before the plate had an angle reads with the default's.
+  const older=JSON.parse(JSON.stringify(scene));delete older.lasers[at].reflection.plateAngleDeg;
+  assert.equal(validateScene(older).lasers[at].reflection.plateAngleDeg,DEFAULT_PLATE_ANGLE_DEG);
   // A scene without reflections reads as before: no field added.
   assert.ok(roundtrip(defaultScene()).lasers.every(l=>!Object.hasOwn(l,'reflection')));
   const file=()=>JSON.parse(JSON.stringify(scene));
@@ -145,6 +167,7 @@ test('the scene file: a reflection round-trips, its beam is derived again on rea
     ['a negative reflectivity',f=>{f.lasers[at].reflection.reflectivity=-.1;},/reflection\.reflectivity/],
     ['a mirror phase out of range',f=>{f.lasers[at].reflection.phaseDeg=200;},/reflection\.phaseDeg/],
     ['no wave-plate switch',f=>{delete f.lasers[at].reflection.quarterWave;},/reflection 缺少 quarterWave/],
+    ['a plate angle out of range',f=>{f.lasers[at].reflection.plateAngleDeg=120;},/reflection\.plateAngleDeg/],
     ['an unknown mirror field',f=>{f.lasers[at].reflection.angleDeg=45;},/reflection 含有未知字段 angleDeg/],
     ['a laser following a reflection',f=>{f.lasers[0].frequency={base:{kind:'laser',id:f.lasers[at].id},offsetMHz:5};f.lasers[0].frequencyUnit='MHz';},/lasers\[0\]\.frequency\.base 不能跟随反射光/],
     ['a ninth laser',f=>{for(let i=0;i<6;i++)f.lasers.push({...structuredClone(f.lasers[0]),id:`more-${i}`});},/lasers 应为至多 8 项的数组/],
@@ -153,14 +176,17 @@ test('the scene file: a reflection round-trips, its beam is derived again on rea
 
 /** The reflection written by hand as an independent laser, by the rules of reflection.ts. */
 function byHand(source,reflection){
-  const {reflection:mirror,...own}=structuredClone(reflection),d=source.direction,phase=source.phaseDeg+mirror.phaseDeg;
+  const {reflection:mirror,...own}=structuredClone(reflection),d=source.direction;
+  let axis=mirror.quarterWave?source.polarizationAngleDeg-2*mirror.plateAngleDeg:0-source.polarizationAngleDeg,phase=source.phaseDeg+mirror.phaseDeg;
+  if(axis>90){axis-=180;phase+=180;}else if(axis<-90){axis+=180;phase+=180;}
+  phase=phase>180?phase-360:phase<-180?phase+360:phase;
   return {...own,frequency:structuredClone(source.frequency),frequencyUnit:source.frequencyUnit,frequencyAnchor:structuredClone(source.frequencyAnchor),
     direction:{reference:structuredClone(d.reference),thetaDeg:180-d.thetaDeg,phiDeg:d.phiDeg>0?d.phiDeg-180:d.phiDeg+180},
-    polarizationAngleDeg:0-source.polarizationAngleDeg,ellipticityDeg:mirror.quarterWave?source.ellipticityDeg:0-source.ellipticityDeg,phaseDeg:phase>180?phase-360:phase<-180?phase+360:phase};
+    polarizationAngleDeg:axis,ellipticityDeg:mirror.quarterWave?source.ellipticityDeg:0-source.ellipticityDeg,phaseDeg:phase};
 }
 test('the export: a reflection is an ordinary beam -- its master model, with motion too, is that of the same beam written by hand',()=>{
   for(const quarterWave of [false,true]){
-    const {scene,source,reflection}=pair({reference:{kind:'angles',thetaDeg:37,phiDeg:21},thetaDeg:28,phiDeg:-117},{psi:24,chi:31,phase:40,quarterWave,reflectivity:.64,mirrorPhase:73});
+    const {scene,source,reflection}=pair({reference:{kind:'angles',thetaDeg:37,phiDeg:21},thetaDeg:28,phiDeg:-117},{psi:24,chi:31,phase:40,quarterWave,plate:-63,reflectivity:.64,mirrorPhase:73});
     const hand=structuredClone(scene);hand.lasers[1]=byHand(source,reflection);
     assert.deepEqual(buildFullMasterModel(scene),buildFullMasterModel(hand),quarterWave?'λ/4':'plain');
   }

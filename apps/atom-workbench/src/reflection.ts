@@ -6,14 +6,14 @@
 // laser: what reads a scene -- the analysis, the master model, every motion engine -- knows no
 // reflections.
 import type {FrequencyExpr,Laser,LaserReflection,Scene} from './types.js';
-import {MAXIMUM_LASERS} from './types.js';
+import {DEFAULT_PLATE_ANGLE_DEG,MAXIMUM_LASERS} from './types.js';
 import {captureLaserFrequencyAnchor,expressionKey,resolveSceneFrequencies} from './physics.js';
 import {laserIntensityMWcm2,laserIntensityViewKey} from './laser-intensity.js';
 import {oppositeDirection} from './direction.js';
 
 /** The mirror a new reflection starts with: a perfect one, the reflection in phase with the source
- * at the atom, no wave plate. */
-const DEFAULT_MIRROR:Omit<LaserReflection,'of'>={reflectivity:1,phaseDeg:0,quarterWave:false};
+ * at the atom, no wave plate (its fast axis at 45° once it is put in). */
+const DEFAULT_MIRROR:Omit<LaserReflection,'of'>={reflectivity:1,phaseDeg:0,quarterWave:false,plateAngleDeg:DEFAULT_PLATE_ANGLE_DEG};
 type Lasers=Pick<Scene,'lasers'>;
 
 /** The reflection of `source`, when it has one (a source has at most one). */
@@ -29,16 +29,23 @@ export function partnerOf(scene:Lasers,laser:Laser):Laser|undefined{return laser
  * - A plain mirror at normal incidence keeps the lab-frame field, cos χ u + i sin χ v (up to an
  *   overall phase, the mirror's φ): in the reflection's frame that is χ′ = −χ, the handedness about
  *   the reversed k flips (σ⁺ comes back σ⁻ about its own k, still driving Δm = +1 about the source's).
- * - A double pass through a quarter-wave plate whose fast axis is along u retards v by a half wave:
- *   cos χ u − i sin χ v, the same axes traced the other way round in the lab, so χ′ = χ -- the
- *   handedness about the beam's own k stays (the MOT retro-reflection: σ⁺ comes back σ⁺). Linear
- *   light is unchanged by either.
+ * - A double pass through a quarter-wave plate whose fast axis lies at θ in the source's frame is a
+ *   half-wave plate there: it mirrors the lab field about that axis, R(θ) diag(1, −1) R(−θ). The
+ *   ellipse R(ψ)(cos χ, i sin χ) becomes R(2θ − ψ)(cos χ, −i sin χ), which the reflection's frame reads
+ *   as ψ′ = ψ − 2θ, χ′ = χ -- the handedness about the beam's own k stays (the MOT retro-reflection: σ⁺
+ *   comes back σ⁺), and linear light comes back mirrored about the fast axis: kept at θ = ψ, turned by
+ *   90° at θ = ψ ± 45° (lin⊥lin). The plate's own phase, common to both axes, is the mirror's φ.
+ *   An axis ψ′ outside −90°..90° is the same axis turned by 180°, the field's sign reversed: the sign
+ *   goes to the phase.
  * The optical phase at the atom is the source's plus the mirror's. */
-function reflectedPolarization(source:Pick<Laser,'polarizationAngleDeg'|'ellipticityDeg'|'phaseDeg'>,mirror:Pick<LaserReflection,'phaseDeg'|'quarterWave'>):Pick<Laser,'polarizationAngleDeg'|'ellipticityDeg'|'phaseDeg'>{
-  const phase=source.phaseDeg+mirror.phaseDeg;
+function reflectedPolarization(source:Pick<Laser,'polarizationAngleDeg'|'ellipticityDeg'|'phaseDeg'>,mirror:Pick<LaserReflection,'phaseDeg'|'quarterWave'|'plateAngleDeg'>):Pick<Laser,'polarizationAngleDeg'|'ellipticityDeg'|'phaseDeg'>{
   // 0 − x: the negation of a zero is a zero, never −0.
-  return {polarizationAngleDeg:0-source.polarizationAngleDeg,ellipticityDeg:mirror.quarterWave?source.ellipticityDeg:0-source.ellipticityDeg,
-    phaseDeg:phase>180?phase-360:phase<-180?phase+360:phase};
+  let axis=mirror.quarterWave?source.polarizationAngleDeg-2*mirror.plateAngleDeg:0-source.polarizationAngleDeg,phase=source.phaseDeg+mirror.phaseDeg;
+  while(axis>90){axis-=180;phase+=180;}
+  while(axis<-90){axis+=180;phase+=180;}
+  while(phase>180)phase-=360;
+  while(phase<-180)phase+=360;
+  return {polarizationAngleDeg:axis,ellipticityDeg:mirror.quarterWave?source.ellipticityDeg:0-source.ellipticityDeg,phaseDeg:phase};
 }
 
 /** Writes a reflection's beam from its (resolved) source: the source's carrier, which it follows at

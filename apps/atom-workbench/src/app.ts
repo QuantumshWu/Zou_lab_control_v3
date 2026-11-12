@@ -422,10 +422,10 @@ function frequencyDetail(object:DefinedFrequency):string{
 }
 function laserDetail(l:Laser):string{return frequencyDetail(l);}
 /** A reflection in a list line (its ↩ says what it is): its mirror, as a laser's line is its frequency
- * -- R 90% · λ/4; the phase, like a laser's, only in the inspector. */
+ * -- R 90% · λ/4 45° (the plate's fast axis); the phase, like a laser's, only in the inspector. */
 function reflectionDetail(l:Laser):string{
   const m=l.reflection!;
-  return [`R ${formatNumber(m.reflectivity*100,{digits:4})}%`,...m.quarterWave?['λ/4']:[]].join(' · ');
+  return [`R ${formatNumber(m.reflectivity*100,{digits:4})}%`,...m.quarterWave?[`λ/4 ${formatNumber(m.plateAngleDeg,{digits:4})}°`]:[]].join(' · ');
 }
 /** A reference level in a list line: 5S₁/₂ · F=2 · m=0 + 探测光 −12 MHz. */
 function levelDetail(r:ReferenceLevel):string{
@@ -712,7 +712,11 @@ function reflectionInspector(l:Laser):void{
     v=>{const p=Number(v);if(!(Math.abs(p)<=180))throw new Error('相位应为 −180° 至 180°');mirror.phaseDeg=p;});
   const plate=switchButton(on=>{mirror.quarterWave=on;setChecked(plate,on);renderObjects();update();},'双次通过 λ/4 波片（MOT 常用圆偏振）');
   setChecked(plate,mirror.quarterWave);plate.classList.add('full-form-row');plate.id='quarter-wave';
-  plate.title='关：普通反射镜，实验室中偏振椭圆不变，相对自身 k 的旋向反转（σ⁺ 回来是 σ⁻）。开：光两次通过快轴沿偏振主轴的 λ/4 波片，相对自身 k 的旋向保持（σ⁺ 回来仍是 σ⁺），线偏振不变。';m.append(plate);
+  plate.title='关：普通反射镜，实验室中偏振椭圆不变，相对自身 k 的旋向反转（σ⁺ 回来是 σ⁻）。开：光两次通过快轴在 θ 的 λ/4 波片，等于一块以快轴为轴的半波片：相对自身 k 的旋向保持（σ⁺ 回来仍是 σ⁺），线偏振以快轴为镜像返回（与快轴成 45° 时转 90°，lin⊥lin）。';m.append(plate);
+  bindField(fields,m,'inspector',()=>({...numberSpec('plate-angle','快轴角 θ',mirror.plateAngleDeg,'°',{minimum:-90,maximum:90,step:1,
+      description:'λ/4 波片快轴的方向，与源的偏振主轴 ψ 用同一参考轴。线偏振以快轴为镜像返回：θ = ψ 时不变，θ = ψ ± 45° 时转 90°（lin⊥lin）；圆偏振的旋向与 θ 无关'}),
+    ...(mirror.quarterWave?{}:{unavailable_reason:'没有 λ/4 波片：先打开“双次通过 λ/4 波片”'})}),
+    v=>{const t=Number(v);if(!(Math.abs(t)<=90))throw new Error('快轴角应为 −90° 至 90°');mirror.plateAngleDeg=t;});
   // What the source gives it: greyed, the tooltip saying where it comes from.
   const d=group(`由「${source.name}」决定`),from=`由源「${source.name}」决定`;d.parentElement!.classList.add('derived-section');
   const derived=(name:string,label:string,value:()=>number,unit:string,why:()=>string)=>bindField(fields,d,'inspector',()=>({...numberSpec(name,label,value(),unit),unavailable_reason:why()}),()=>{throw new Error(why());});
@@ -725,7 +729,7 @@ function reflectionInspector(l:Laser):void{
     bindDerived(fields,d,'inspector',scope,{name:'waist',label:'束腰 w₀',description:'反射光重新聚焦在原子处，束腰与源相同',from:'与源相同：反射光重新聚焦在原子处'},()=>attempt(()=>waistReading(l),()=>l.waistUnit),unitChoices(WAIST_UNITS,'长度'),u=>{l.waistUnit=u as WaistUnit;});
   }
   bindDerived(fields,d,'inspector',scope,{name:'intensity',label:'强度 I',description:'原子处的局域强度',from:share},()=>attempt(()=>intensityReading(l),()=>l.intensityUnit),unitChoices(INTENSITY_UNITS,'强度'),u=>{l.intensityUnit=u as IntensityUnit;});
-  const turned=()=>mirror.quarterWave?'双次通过 λ/4 波片：相对自身 k 的旋向保持':'普通反射镜：实验室中偏振不变，相对自身 k 的旋向反转';
+  const turned=()=>mirror.quarterWave?`双次通过快轴 ${formatNumber(mirror.plateAngleDeg,{digits:4})}° 的 λ/4 波片：线偏振以快轴为镜像，相对自身 k 的旋向保持`:'普通反射镜：实验室中偏振不变，相对自身 k 的旋向反转';
   derived('polarization','主轴 ψ',()=>l.polarizationAngleDeg,'°',()=>`${from}（${turned()}；ψ 在反射光自己的坐标系中读出）`);
   derived('ellipticity','椭圆率 χ',()=>l.ellipticityDeg,'°',()=>`${from}（${turned()}）`);
   const pol=element('div','polarization-bars full-form-row');pol.id='polarization-bars';d.append(pol);
