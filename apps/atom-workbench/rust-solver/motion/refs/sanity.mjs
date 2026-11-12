@@ -12,7 +12,8 @@
 //       PGC-like polarization gradient; no longer a two-level problem (the atom is pumped over the m sublevels).
 //   S3  the user's experiment (2026-11-12) in the lab's geometry, with the app's default tweezer (along +x), field and
 //       detunings: a probe added with ＋ along +y tilted 4° toward the tweezer's axis, set π, 1 mW in a 1 mm waist
-//       (63.7 mW/cm²), its reflection by the mirror with the λ/4 plate at its default 45° (lin⊥lin), S2's repump; 100 ms
+//       (63.7 mW/cm²), its F=2 → F'=3 offset −20 MHz (the user, 2026-11-12: "探测光应该是失谐的，对自由空间也红失谐差不多20MHz"),
+//       its reflection by the mirror with the λ/4 plate at its default 45° (lin⊥lin), S2's repump; 100 ms
 //       (or --duration), 201 samples. Report mode: the run's checks only, its T and held share printed beside the user's
 //       statement (held over 100 ms, little heating -- a physical fact the engine is to reproduce).
 // What the check expects is physics, derived independently of every engine: sanity/model.py (its header holds the
@@ -101,10 +102,11 @@ function s2(quarterWave=false){
 /** S3, the user's experiment as far as it is known (report mode): S1's tweezer (along +x), field and initial state; a
  * probe added with ＋, in the lab's geometry across the tweezer -- along +y, tilted 4° toward its axis (the user: roughly
  * perpendicular, a few degrees toward the axis; the ＋ default runs along the tweezer's own axis) -- and set π (the app's
- * π preset), 1 mW in a 1 mm waist (63.7 mW/cm²), at the free-space F=2 → F'=3 frequency; its reflection by the app's
+ * π preset), 1 mW in a 1 mm waist (63.7 mW/cm²), its F=2 → F'=3 transition's offset −20 MHz as the operator sets it (the user:
+ * about 20 MHz red of the free-space line); its reflection by the app's
  * mirror with the λ/4 plate at its default fast axis (45°: π comes back ⊥, σ+ and σ− half each about the field --
  * lin⊥lin); S2's repump. Its own duration (S3_US, or --duration) and samples (S3_SAMPLES). */
-const S3_US=100_000,S3_SAMPLES=201,S3_TILT_DEG=4;
+const S3_US=100_000,S3_SAMPLES=201,S3_TILT_DEG=4,S3_OFFSET_MHZ=-20;
 function s3(){
   const scene=types.defaultScene();
   const tweezer=scene.lasers.find(l=>l.id===scene.tweezerId),probe=types.newLaser('laser-probe','激光 1','D2');
@@ -114,6 +116,7 @@ function s3(){
   physics.setPolarizationPreset(probe,scene.fields,'pi');
   Object.assign(probe,{direction:{reference:{kind:'axis',axis:'+y'},thetaDeg:S3_TILT_DEG,phiDeg:0},polarizationAngleDeg:90});
   Object.assign(probe,{powerMW:1,waistUm:1000});
+  probe.frequency.offsetMHz=S3_OFFSET_MHZ;
   physics.resolveSceneFrequencies(scene);
   reflection.addReflection(scene,probe).reflection.quarterWave=true;
   const repump=types.newLaser('laser-repump','激光 2','D2');
@@ -304,7 +307,7 @@ for(const id of wanted){
   console.log(`   probe detuning from |2,2⟩ → |3',3'⟩: ${f.probeCentreMHz.toFixed(3)} MHz at the trap centre (${(f.probeCentreMHz/(model.parameters.gamma/2/Math.PI)).toFixed(2)}Γ), ${f.probeFreeMHz.toFixed(3)} MHz without the tweezer (3 G Zeeman)`);
   if(f.repumpCentreMHz)console.log(`   repump detuning from F=1 → F'=2 (π) at the centre: ${f.repumpCentreMHz.map(x=>`m ${x.m}: ${x.MHz.toFixed(2)}`).join(', ')} MHz`);
   const sceneChecks=[[Math.abs(f.groundShiftMHz/ls.groundShiftMHz-1)<0.005&&Math.abs(f.excitedShiftMHz/ls.excitedShiftMHz-1)<0.005,'scene: the levels chart\'s shifts within 0.5 % of the independent sum over states'],
-    [Math.abs(f.probeFreeMHz-model.chart.zeemanDetuningMHz)<1e-3,'scene: the probe\'s free detuning is the model\'s'],
+    [Math.abs(f.probeFreeMHz-model.chart.zeemanDetuningMHz-(id==='S3'?S3_OFFSET_MHZ:0))<1e-3,`scene: the probe's free detuning is the model's${id==='S3'?` with S3's offset ${S3_OFFSET_MHZ} MHz`:''}`],
     [f.lasers.filter(l=>l.id.startsWith('laser-probe')).every(l=>id==='S3'?(l.id.endsWith('reflection')?Math.abs(l.sigmaMinus-0.5)<1e-3&&Math.abs(l.sigmaPlus-0.5)<1e-3:l.pi>0.999):id==='S2Q'&&l.id.endsWith('reflection')?l.sigmaMinus>0.999:l.sigmaPlus>0.999),'scene: the probe beams\' polarization as described']];
   for(const [pass,what] of sceneChecks){console.log(`   ${ok(pass)} ${what}`);if(!pass)failures++;}
   const r=await solve(scene,id);results[id]=r;
