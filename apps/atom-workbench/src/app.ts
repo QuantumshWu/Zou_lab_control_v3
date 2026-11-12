@@ -1168,7 +1168,8 @@ function solverDetails():string{
     ...(result.mean?.slowestRelaxationUs!=null?[readout('最慢弛豫时间',(()=>{const unit=timeDisplayUnit(result.mean.slowestRelaxationUs!);return withUnit(result.mean.slowestRelaxationUs!*unit.factor,unit.name,{digits:3});})())]:[]),
     // Its approximation ledger: the approximations' totals against their targets, and whether
     // an output's total error exceeds a target (`flagged`).
-    ...(motion?[readout('近似误差',approximationTotal(motion.approximations)),
+    // The largest item on a line of its own: its label is a sentence of the engine's, longer than a readout's row.
+    ...(motion?[readout('近似误差',approximationTotal(motion.approximations)),...largestApproximation(motion.approximations),
       ...(motion.approximations.flagged?[`<p class="horizon-note">${esc(motion.approximations.flagged)}</p>`]:[]),
       // What the setup's initial ensemble leaves out: true of the setup, no error of the solve's, so no warning; beside the ledger.
       ...(motion.approximations.note?[`<p class="ledger-note">${esc(motion.approximations.note)}</p>`]:[])]:[]),
@@ -1176,12 +1177,16 @@ function solverDetails():string{
   const notes=result?[...(result.method?[`时间演化：${solverText(result.method)}`]:[]),...(result.mean.method?[`长期布居：${solverText(result.mean.method)}`]:[]),...(result.mean.reason?[solverText(result.mean.reason)]:[]),...result.assumptions.map(labelStateIds)]:[];
   return `<section class="solver-details"><h4>计算详情</h4>${error?`<p class="solver-error">${esc(solverText(error))}</p>`:''}${result?`<div class="form solver-readouts">${rows}</div>${motion?approximationLedger(motion.approximations):''}${notes.map(text=>`<p>${esc(text)}</p>`).join('')}`:'<p>没有当前参数的求解结果。</p>'}${failureRecords.length?'<button data-export-solver-failures>导出失败记录</button>':''}</section>`;
 }
-/** A ledger's a-priori totals, the populations' and T's, each against its target, with its largest item named by its `label`, and whether an output's total estimated
- * error exceeds a target, or the a-priori resonance bound does (`flagged`, its reason on the next line). */
+/** A ledger's a-priori totals, the populations' and T's, each against its target, and whether an output's total estimated
+ * error exceeds a target (`flagged`, its reason on a line below). */
 function approximationTotal(ledger:ApproximationLedger):string{
-  const [largest]=[...ledger.items].sort((a,b)=>b.estimate-a.estimate);
   const total=(name:string,t:LedgerTotal)=>`${name} ${errorPercent(t.error)}（目标 ${errorPercent(t.target)}）`;
-  return `${total('布居',ledger.totals.population)}，${total('温度',ledger.totals.temperature)}${largest?`；最大一项：${largest.label} ${errorPercent(largest.estimate)}`:''}；${ledger.flagged?'超出目标（见下）':'未超出'}`;
+  return `${total('布居',ledger.totals.population)}，${total('温度',ledger.totals.temperature)}；${ledger.flagged?'超出目标（见下）':'未超出'}`;
+}
+/** A ledger's largest item, named by its `label`, on a line of its own (none in an empty ledger). */
+function largestApproximation(ledger:ApproximationLedger):string[]{
+  const [largest]=[...ledger.items].sort((a,b)=>b.estimate-a.estimate);
+  return largest?[`<p class="ledger-note">最大一项：${esc(largest.label)} ${errorPercent(largest.estimate)}</p>`]:[];
 }
 /** A motion result's approximation ledger (solver-types.ts ApproximationLedger): each approximation,
  * its estimated error and what the engine did about it. */
