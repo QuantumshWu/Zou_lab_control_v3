@@ -843,9 +843,11 @@ pub(crate) struct Region {
     pub(crate) drives: [OnceLock<Vec<[f64; 5]>>; GROUND],
     /// Per ground state its shift by its drives folded at the atom, signed (units.rs `Model::near_level`).
     pub(crate) shifts: [OnceLock<Shift>; GROUND],
-    /// The constant forms' diagonal per state, and the levels' differences asked, each made once (eliminate.rs `Model::gap`).
+    /// The constant forms' diagonal per state, and the levels' differences and their gradients asked, each made once
+    /// (eliminate.rs `Model::gap`, `Model::gap_slope`).
     pub(crate) diagonal: OnceLock<Diagonal>,
     pub(crate) gaps: Mutex<HashMap<(usize, usize), Gap>>,
+    pub(crate) slopes: Mutex<HashMap<(usize, usize), [Form<[f64; 3]>; 2]>>,
     /// Per coupling of two states asked its saturation and sweep (units.rs `Model::term_bound`).
     pub(crate) terms: Mutex<HashMap<Coupling, (f64, f64)>>,
     /// The model's kept drives (units.rs `Model::kept_over`).
@@ -1540,8 +1542,11 @@ fn degrees(trap: &Trap, temperature_uk: f64) -> (Degrees, [f64; 3]) {
 
 /// The energy above V_min (rad/µs) of the reach of a trap at temperature T_r (µK) that leaves out the share s (module
 /// documentation, # The reach's level) -- the (1 − s) quantile of an atom's energy in the lowered isothermal as drawn at
-/// T_r (`Degrees::level`) --, and the squares s_i² per axis.
+/// T_r (`Degrees::level`) --, and the squares s_i² per axis; at T_r = ∞ its limit, the top (`top`), every s_i² one.
 fn energy_at(trap: &Trap, temperature_uk: f64, share: f64) -> (f64, [f64; 3]) {
+    if temperature_uk.is_infinite() {
+        return (top(trap, share), [1.0; 3]);
+    }
     let (degrees, squares) = degrees(trap, temperature_uk);
     (degrees.level(share) * KT_PER_UK * temperature_uk, squares)
 }
@@ -1565,25 +1570,25 @@ fn top(trap: &Trap, share: f64) -> f64 {
 
 /// The least temperature (µK) at which the reach of a trap that leaves out the share s holds the level `level` (rad/µs,
 /// the prepared energy; module documentation, # The reach's level), from a temperature `from` whose reach does not: the
-/// reach's energy rises with its temperature towards its top (`top`), so the bracket's top is doubled from `from` until
-/// it holds the level, then the bracket halved until its two ends are neighbours in the format. None (∞) where the level
-/// is at the top or above it: no temperature's reach holds it -- an atom at the trap's top or above its depth, leaving
-/// or lost, is no atom of a temperature's ensemble.
+/// reach's energy rises with its temperature towards its top (`top`), its limit at T_r → ∞, so on the inverse temperature
+/// the bracket is [0, 1/from] -- 0 the top's, which holds every level below it -- and it is halved until its two ends are
+/// neighbours in the format. None (∞) where the level is at the top or above it: no temperature's reach holds it -- an
+/// atom at the trap's top or above its depth, leaving or lost, is no atom of a temperature's ensemble.
 pub fn holding(trap: &Trap, level: f64, share: f64, from: f64) -> f64 {
     if level - trap.minimum >= top(trap, share) {
         return f64::INFINITY;
     }
-    let holds = |t: f64| trap.minimum + energy_at(trap, t, share).0 >= level;
-    let (mut lo, mut hi) = (from, from);
-    while !holds(hi) {
-        (lo, hi) = (hi, 2.0 * hi);
+    let holds = |beta: f64| trap.minimum + energy_at(trap, 1.0 / beta, share).0 >= level;
+    let (mut lo, mut hi) = (0.0, 1.0 / from);
+    if holds(hi) {
+        return from;
     }
     loop {
         let middle = 0.5 * (lo + hi);
         if !(lo < middle && middle < hi) {
-            return hi;
+            return 1.0 / lo;
         }
-        if holds(middle) { hi = middle } else { lo = middle }
+        if holds(middle) { lo = middle } else { hi = middle }
     }
 }
 
@@ -1806,6 +1811,7 @@ impl Model {
             shifts: std::array::from_fn(|_| OnceLock::new()),
             diagonal: OnceLock::new(),
             gaps: Mutex::new(HashMap::new()),
+            slopes: Mutex::new(HashMap::new()),
             terms: Mutex::new(HashMap::new()),
             kept: OnceLock::new(),
             moving: OnceLock::new(),
@@ -2127,7 +2133,7 @@ mod tests {
                 }
                 for (x, y) in [(0, 3), (GROUND, 1), (GROUND + 5, 6), (STATES - 1, GROUND)] {
                     let g = (0..3).map(|i| (gradient[x][i] - gradient[y][i]).powi(2)).sum::<f64>().sqrt();
-                    assert!(within(g, model.gap(x, y, &region, 0.0).all_slope.norm().upper()), "|∇(E_{x} − E_{y})| {g} at {r:?}");
+                    assert!(within(g, model.gap_slope(x, y, &region, false).norm().upper()), "|∇(E_{x} − E_{y})| {g} at {r:?}");
                 }
                 for (cc, bound) in model.carriers.iter().zip(couplings) {
                     let mut units: Vec<usize> = cc.units.clone();

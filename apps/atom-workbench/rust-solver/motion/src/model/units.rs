@@ -614,7 +614,7 @@ impl Model {
         let (slope, acceleration) = *region.moving.get_or_init(|| {
             let near: Vec<Shift> = (0..STATES).map(|s| self.near_level(s, region)).collect();
             let pairs = (0..STATES).flat_map(|i| (i + 1..STATES).map(move |j| (i, j)));
-            let slope = pairs.map(|(i, j)| Shift::of(Own::constant(0.0), self.gap(i, j, region, 0.0).all_slope).add(&near[i]).sub(&near[j]).steepness()).fold(Own::constant(0.0), Own::max);
+            let slope = pairs.map(|(i, j)| Shift::of(Own::constant(0.0), self.gap_slope(i, j, region, false)).add(&near[i]).sub(&near[j]).steepness()).fold(Own::constant(0.0), Own::max);
             (slope, self.acceleration(region, &|_| true))
         });
         let pace = region.pace;
@@ -802,7 +802,8 @@ impl Model {
                     });
                     let (x, e) = (d.excited, GROUND + d.excited);
                     let gap = self.gap(e, g, region, nu);
-                    let (levels, slope) = if d.level == Level::Atom { (gap.taken, gap.taken_slope) } else { (gap.all, gap.all_slope) };
+                    let atom = d.level == Level::Atom;
+                    let (levels, slope) = (if atom { gap.taken } else { gap.all }, self.gap_slope(e, g, region, atom));
                     let still = others.band.rad.add(radii[e]).add(sigma[x]);
                     Across::new(region.coherent_own(&d.beams), levels.sub(others.band.mid), slope.sub(others.slope), still.add(region.pace.scale(*wave)), still, d.gamma)
                 })
@@ -926,7 +927,7 @@ impl Model {
                     let carrier = self.carrier_of(frequency).expect("an explicit drive's component is a carrier");
                     let (wave, gap) = (self.wave_of(d.component), self.gap(e, a, region, self.carriers[carrier].detuning));
                     let still = radii[e];
-                    let across = Across::new(region.coherent_own(&d.beams), gap.all, gap.all_slope, still.add(region.pace.scale(wave)), still, d.gamma);
+                    let across = Across::new(region.coherent_own(&d.beams), gap.all, self.gap_slope(e, a, region, false), still.add(region.pace.scale(wave)), still, d.gamma);
                     out.push(Kept { carrier, excited: d.excited, ground: a, size: across.size, detuning: across.centre, moved: across.moved, distance: across.distance });
                 }
             }
@@ -970,7 +971,7 @@ impl Model {
             let size = of.size.mul(leg.size).div(of.distance.min(leg.distance));
             let wave = self.two_photon_wave(d, self.carriers[leg.carrier].frequency);
             let gap = self.gap(g, a, region, self.carriers[leg.carrier].detuning - nu);
-            let dressed = Shift::of(gap.taken, gap.taken_slope).add(&near_g).sub(&self.near_level(a, region));
+            let dressed = Shift::of(gap.taken, self.gap_slope(g, a, region, true)).add(&near_g).sub(&self.near_level(a, region));
             let apart = dressed.band.apart().sub(region.pace.scale(wave)).sub(lift_g.sub(lifted(a)).most());
             let acceleration = self.acceleration(region, &|c| c.states.contains(&g) || c.states.contains(&a));
             let pair = gate_own(size, apart, region.pace.mul(dressed.steepness()).add(acceleration.scale(wave)));
@@ -1052,7 +1053,7 @@ impl Model {
             return (none, Own::constant(f64::INFINITY), none);
         }
         let gap = self.gap(a, b, region, -self.omega(&self.beats[beat].0));
-        let dressed = if a == b { Shift::of(gap.all, Form::zero()) } else { Shift::of(gap.all, gap.all_slope).add(&self.near_level(a, region)).sub(&self.near_level(b, region)) };
+        let dressed = if a == b { Shift::of(gap.all, Form::zero()) } else { Shift::of(gap.all, self.gap_slope(a, b, region, false)).add(&self.near_level(a, region)).sub(&self.near_level(b, region)) };
         let acceleration = self.acceleration(region, &|c| c.states.contains(&a) || c.states.contains(&b));
         let rate = region.pace.mul(dressed.steepness()).add(acceleration.scale(form.wave));
         let apart = dressed.band.apart().sub(region.pace.scale(form.wave));
@@ -1133,9 +1134,12 @@ impl Model {
     /// Each unit's existence gate over the reach (SPEC §1.5; module documentation), provable bounds at this model's clusters
     /// and levels (`gate_of`). Each is bounded on the whole space first, every beam at its peak (`everywhere`): a bound over
     /// any reach, and where both of a unit's are below ½ there its gate. The others are proven together over the reach's
-    /// cells, on all the cores (reach.rs `Model::bounds_over_in_parallel`) -- a ground state's drive's with every weaker
-    /// one's share on the same cell: what a cell's centre attains is a value there, never a bound from elsewhere --, each
-    /// until it is below ½ everywhere or a centre attains `KEEP` (module documentation, # One rule).
+    /// cells, on all the cores (reach.rs `Model::statements_over`) -- a ground state's drive's with every weaker one's
+    /// share on the same cell: what a cell's centre attains is a value there, never a bound from elsewhere --, each until it
+    /// is below ½ everywhere or a centre attains `KEEP` (module documentation, # One rule). Where a unit fails, the model is
+    /// not taken (its failures are kept and the next model judged over the reach, solve.rs): the proofs still open end with
+    /// the round (reach.rs, # Rounds), and those units' gates are the largest values attained at a centre, below `KEEP` --
+    /// no bounds, read by nothing.
     pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
         let judged = self.judged(units);
         let (everywhere, open) = self.everywhere(&judged, reach.speed);
