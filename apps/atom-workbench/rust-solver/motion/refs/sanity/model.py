@@ -3,7 +3,7 @@ S2, the same + the probe's retro-reflection (the app's plain mirror) + a repump.
 with the motion engine: the light shifts come from a sum over states on the app's own atomic tables (read from
 src/physics.ts and src/spectroscopy-data.ts), the dynamics from a classical-atom Monte Carlo written here.
 
-    python model.py [--atoms N] [--end µs] [--every µs] [--models S1K,S1F,S2K,S2F] [--out model.json]
+    python model.py [--atoms 4000] [--end 5000] [--every 50] [--models S1K,S1F,S2K,S2F,S2R,S2QR,S2QZ,S2QV] [--out model.json]
 
 (the science env's python with numba; a few seconds to a minute on all cores). Writes the expectations the check reads
 (sanity/model.json); refs/sanity.mjs never runs python.
@@ -67,6 +67,28 @@ coth(ħω/2k_BT)·ħω/2k_BT − 1 < 2e-3 is left out). Loss: the app's definiti
 the atom is first outside the region where the tweezer's intensity exceeds 1/20 of its focus value, with energy above
 the value far away (E = mv²/2 + U_g > 0). T_a = m Var(v_a)/k_B over the atoms still held (the app's T); total = mean of
 the three axes. Velocity Verlet (dt below), stochastic kicks after each step. No gravity (2e-4 of the trap's force).
+
+# S2Q: the mirror with its λ/4 plate (σ+ and σ− about the field) -- part C, the multilevel rate model
+With σ− present the atom leaves |2,2⟩: quantum jumps over the 8 ground sublevels; every beam excites every allowed
+|F',m'⟩ (F' = 0..3) at the two-level rate at its own detuning -- hyperfine intervals, linear Zeeman shifts (3 G), the
+tweezer's shift of each sublevel (Σ|⟨m_J m_I|F'm'⟩|² δE(m_J), δE(±1/2) from the same sum over states), Doppler --,
+decays by the dipole branching (F'=2 → F=1: 1/2, F'=1: 5/6, checked), each photon's kick in its pattern. Ground
+coherences are left out: the 3 G field's Larmor precession (2.1 MHz per Δm; the Δm = 2 Raman pair σ+σ− drives is
+4.2 MHz apart) is ≫ the probe's ground light shift (~0.4 MHz) and the pumping rates (≲ 1/µs), so they are dephased.
+That same fact disables σ+σ− sub-Doppler cooling near v = 0: the motion-induced orientation responds to kv + ω_L, so
+its resonance sits at v = ω_L/k ≈ 1.6 m/s, far above the atoms' 0.05–0.3 m/s; near v = 0 what remains is a friction of
+either sign, ≲ (Δ'/ω_L)² ≈ 3 % of the zero-field σ+σ− friction (Δ' the ground light shift) -- comparable to the Doppler
+friction at most. What the rate model cannot say is that remainder along z; it is bracketed by two variants: z frozen
+(v_z damped at 1/µs: the best ANY cooling acting on z alone can do, sub-Doppler included) and z without Doppler shifts
+(no velocity-dependent force along z). x and y have no cooling beam in any variant.
+Result: the atom is pumped mostly into |2,−2⟩ (56 %; |2,2⟩ 22 %, the rest spread): the 3 G field puts the σ− cycle
+|2,−2⟩ → |3',−3'⟩ 8.4 MHz nearer the probe than σ+'s: −2.45Γ at the centre, +0.69Γ -- blue, heating and pushing -- at
+the trap's edge. Half the atoms lost at 0.52 ms (z frictionless 0.45 ms; z frozen 2.99 ms): no faster cooling along
+z can make S2Q "much slower" than S1 (1.82 ms). What would: cooling on all three axes (the x, y spontaneous-emission
+heating is what loses the atom in every variant), with the light red of the light-shifted line throughout the trap,
+and at a field whose Larmor frequency is below the ground light shift if sub-Doppler cooling is wanted.
+S2 by the same model (S2R, independent beams) agrees with S2K within 0.04 in L, and gives S2's physical leaks out of
+the cycle (all from the repump, 6.5–6.8 GHz off its F=2 lines): 2.1/s to |2,1⟩, 1.2/s to |1,1⟩ at the centre.
 
 # What this gives (printed by --summary; the numbers are in model.json)
 Centre: U0/k_B = 828 µK, ω/2π = 74.5 kHz radial, 11.9 kHz axial; δ(0) = −23.27 MHz = −3.84Γ at the focus,
@@ -142,17 +164,18 @@ def light_shifts(tables, wavelength_nm=852.0, power_mw=4.0, waist_um=1.2):
         return a, parts
     g_partners = [('5P1/2', .5, E_D1, reduced('D1', .5)), ('5P3/2', 1.5, E_D2, reduced('D2', 1.5))]
     g_partners += [(v['name'], v['J'], v['E'] * EV / EH, v['D'] ** 2) for v in tables['virtual']['ground']]
-    e_partners = [('5S1/2', .5, -E_D2, reduced('D2', 1.5) * 4 / 2)]  # |<3/2||D||1/2>|² = |<1/2||D||3/2>|²
+    e_partners = [('5S1/2', .5, -E_D2, reduced('D2', 1.5))]  # |<3/2||D||1/2>|² = |<1/2||D||3/2>|² (Edmonds)
     e_partners += [(v['name'], v['J'], v['E'] * EV / EH - E_D2, v['D'] ** 2) for v in tables['virtual']['D2']]
     ag, gparts = alpha(.5, .5, g_partners, tables['core']['ground'])
     ae, eparts = alpha(1.5, 1.5, e_partners, tables['core']['D2'])
+    ae_half, _ = alpha(1.5, .5, e_partners, tables['core']['D2'])    # |3/2, ±1/2⟩ in π (for S2Q's other sublevels)
     # scalar and tensor of 5P3/2 (α(m=J, π) = α0 + α2)
     a0e = np.mean([sum(alpha(1.5, m, e_partners, 0)[0] for m in (1.5, .5, -.5, -1.5)) / 4])
     I0 = 2 * power_mw * 1e-3 / (math.pi * (waist_um * 1e-6) ** 2)
     shift = lambda a: -a * AU_POL * I0 / (2 * EPS0 * C) / H / 1e6   # MHz
     return dict(I0Wm2=I0, alphaGroundAU=ag, alphaExcitedAU=ae, alphaExcitedScalarAU=a0e + tables['core']['D2'],
                 alphaExcitedTensorAU=ae - (a0e + tables['core']['D2']),
-                groundShiftMHz=shift(ag), excitedShiftMHz=shift(ae),
+                groundShiftMHz=shift(ag), excitedShiftMHz=shift(ae), excitedHalfShiftMHz=shift(ae_half),
                 excitedParts={k: v for k, v in eparts.items() if abs(v) > 1e-3}, groundParts=gparts,
                 reducedD1=math.sqrt(reduced('D1', .5)), reducedD2=math.sqrt(reduced('D2', 1.5)))
 
@@ -465,6 +488,217 @@ def simulate(name, p, atoms, end_us, every_us, dt, seed=12345):
                 Ttotal=[None if not np.isfinite(x) else round(float(x), 3) for x in Ttot],
                 TtotalSE=[None if not np.isfinite(x) else round(float(x), 3) for x in setot])
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Part C: the multilevel rate model (S2Q, where σ+σ− makes the atom leave |2,2⟩; and S2 again as its check).
+# Rate equations over the 8 ground sublevels, excitation of each |F',m'⟩ (F' = 0..3) by each beam at the two-level rate
+# at its own local light-shifted, Zeeman-shifted, Doppler-shifted detuning, decay by the dipole branching, kicks of
+# both photons (π emission ∝ sin²θ, σ ∝ 1 + cos²θ): a quantum-jump Monte Carlo of the internal state along each
+# classical trajectory (Gillespie within the step). Ground-state coherences are left out: they are dephased by the
+# 3 G field (Larmor 2.1 MHz per Δm, 4.2 MHz for the Δm = 2 Raman pair σ+σ− couples) against a ground light shift of
+# ≈ 0.4 MHz and pumping rates ≲ 1/µs -- this is what removes σ+σ− sub-Doppler cooling (see SUB_DOPPLER below) and
+# what makes rate equations valid. Excited sublevels: linear Zeeman (g_F' with g_I; ≤ 0.3 MHz = 0.05Γ nonlinear
+# corrections for F' ≠ 3 left out), tweezer shift Σ|⟨m_J m_I|F'm'⟩|² δE(m_J) (the tensor's F'-mixing, ~(6 MHz)²/267 MHz,
+# left out). Hyperfine intervals: Steck, Rb 87 D line data, Table 7 (5P3/2: 266.650, 156.947, 72.218 MHz; 5S1/2
+# 6834.682611 MHz) -- the values physics.ts holds as A, B.
+
+def sixj(a, b, c, d, e, f):
+    """Racah's formula for {a b c; d e f}."""
+    def tri(x, y, z):
+        if z < abs(x - y) - 1e-9 or z > x + y + 1e-9 or abs((x + y + z) - round(x + y + z)) > 1e-9: return None
+        F = lambda t: math.factorial(int(round(t)))
+        return F(x + y - z) * F(x - y + z) * F(-x + y + z) / F(x + y + z + 1)
+    ts = [tri(a, b, c), tri(a, e, f), tri(d, b, f), tri(d, e, c)]
+    if any(t is None for t in ts): return 0.0
+    pre = math.sqrt(np.prod(ts)); F = lambda t: math.factorial(int(round(t)))
+    s = 0.0
+    for k in range(0, 60):
+        args = [k - a - b - c, k - a - e - f, k - d - b - f, k - d - e - c, a + b + d + e - k, a + c + d + f - k, b + c + e + f - k]
+        if min(args) < -1e-9: continue
+        s += (-1) ** k * F(k + 1) / np.prod([F(x) for x in args])
+    return pre * s
+
+GROUND = [(2, m) for m in (-2, -1, 0, 1, 2)] + [(1, m) for m in (-1, 0, 1)]
+EXCITED = [(Fp, m) for Fp in (0, 1, 2, 3) for m in range(-Fp, Fp + 1)]
+HFS_GROUND = {2: 0.0, 1: -6834.682611}
+HFS_EXCITED = {3: 0.0, 2: -266.650, 1: -266.650 - 156.947, 0: -266.650 - 156.947 - 72.218}
+
+def multilevel_tables(shifts, field_G=3.0, gJ=2.00233107, gJp=1.3341, gI=-0.0009951414, muB=1.39962449361):
+    """Strengths S[g, e] (cycling = 1), branching B[g, e] (e → g), and per state its zero-field energy, Zeeman shift and
+    tweezer shift at the focus (MHz), relative to |2⟩ → |3'⟩."""
+    I, J, Jp = 1.5, 0.5, 1.5
+    def strength(F, m, Fp, mp):
+        q = mp - m
+        if abs(q) > 1: return 0.0
+        # |⟨F'm'|d_q|F m⟩|² = |⟨J'‖d‖J⟩|² (2F+1)(2F'+1) {J J' 1; F' F I}² (F' 1 F; −m' q m)² (Edmonds)
+        return (2 * F + 1) * (2 * Fp + 1) * sixj(J, Jp, 1, Fp, F, I) ** 2 * wigner3j(Fp, 1, F, -mp, q, m) ** 2
+    S = np.array([[strength(F, m, Fp, mp) for (Fp, mp) in EXCITED] for (F, m) in GROUND])
+    S /= strength(2, 2, 3, 3)
+    B = S / S.sum(0)
+    gF = lambda F, j, gj: gj * (F * (F + 1) - I * (I + 1) + j * (j + 1)) / (2 * F * (F + 1)) + gI * (F * (F + 1) + I * (I + 1) - j * (j + 1)) / (2 * F * (F + 1)) if F > 0 else 0.0
+    Zg = np.array([muB * field_G * gF(F, J, gJ) * m for (F, m) in GROUND])
+    Ze = np.array([muB * field_G * gF(Fp, Jp, gJp) * m for (Fp, m) in EXCITED])
+    Eg = np.array([HFS_GROUND[F] for (F, m) in GROUND]); Ee = np.array([HFS_EXCITED[Fp] for (Fp, m) in EXCITED])
+    def cg(j1, m1, j2, m2, Jt, M): return (-1) ** int(round(j1 - j2 + M)) * math.sqrt(2 * Jt + 1) * wigner3j(j1, j2, Jt, m1, m2, -M)
+    LSmJ = {1.5: shifts['excitedShiftMHz'], 0.5: shifts['excitedHalfShiftMHz']}
+    LSe = np.array([sum(cg(Jp, mJ, I, mp - mJ, Fp, mp) ** 2 * LSmJ[abs(mJ)] for mJ in (-1.5, -.5, .5, 1.5) if abs(mp - mJ) <= I) for (Fp, mp) in EXCITED])
+    LSg = np.full(len(GROUND), shifts['groundShiftMHz'])
+    return dict(S=S, B=B, Eg=Eg, Ee=Ee, Zg=Zg, Ze=Ze, LSg=LSg, LSe=LSe, mg=np.array([m for _, m in GROUND]), me=np.array([m for _, m in EXCITED]))
+
+@nb.njit(inline='always')
+def emission_pi(state):
+    """A unit vector in the π dipole pattern (sin²θ about z)."""
+    while True:
+        c = 2 * rnd(state) - 1
+        if rnd(state) < 1 - c * c: break
+    s = math.sqrt(max(0.0, 1 - c * c)); ph = 2 * math.pi * rnd(state)
+    return s * math.cos(ph), s * math.sin(ph), c
+
+@nb.njit(parallel=True)
+def run_multi(variant, n_atoms, seed, T_uK, dt, n_steps, every, P, beams, S, B, Eg, Ee, Zg, Ze, LSg, LSe, mg, me, g0,
+              out_v, out_alive, out_g):
+    """variant: 0 the rate model; 1 the same with the z motion frozen (v_z damped at 1/µs: any cooling acting on z alone
+    can do no better); 2 the same with no Doppler shift from v_z (no velocity-dependent force along z: what the beams'
+    z friction would be if a sub-Doppler force cancelled it). beams[b] = [k̂x, k̂y, k̂z, q, s, ν (MHz from |2⟩→|3'⟩), k]."""
+    gamma, w0, zR, U0, hbar_m, uK = P[0], P[1], P[2], P[3], P[4], P[5]
+    kT = T_uK * uK; vth = math.sqrt(kT * hbar_m)
+    wR = math.sqrt(4 * U0 * hbar_m / w0 ** 2); wA = math.sqrt(2 * U0 * hbar_m / zR ** 2)
+    sig = np.array([1.5 * vth / wA, 1.25 * vth / wR, 1.25 * vth / wR])
+    nb_ = beams.shape[0]; ng = S.shape[0]; ne = S.shape[1]; n_out = out_v.shape[0]; twopi = 2 * math.pi
+    for a in nb.prange(n_atoms):
+        st = np.zeros(1, np.uint64)
+        z0 = np.uint64(seed) * np.uint64(0x9E3779B97F4A7C15) + np.uint64(a + 1) * np.uint64(0xBF58476D1CE4E5B9)
+        z0 = (z0 ^ (z0 >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9); z0 = (z0 ^ (z0 >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+        z0 = z0 ^ (z0 >> np.uint64(31)); st[0] = z0 if z0 != np.uint64(0) else np.uint64(1)
+        for _ in range(4): rnd(st)
+        rates = np.zeros(nb_ * ne); tb = np.zeros(nb_ * ne, np.int64); te = np.zeros(nb_ * ne, np.int64); dls = np.zeros(nb_ * ne)
+        while True:
+            x = sig[0] * gauss(st); y = sig[1] * gauss(st); z = sig[2] * gauss(st)
+            g, _, _, _ = beam(x, y, z, w0, zR)
+            if g < 0.05: continue
+            logw = -U0 * (1 - g) / kT + 0.5 * ((x / sig[0]) ** 2 + (y / sig[1]) ** 2 + (z / sig[2]) ** 2)
+            if math.log(max(rnd(st), 1e-300)) < logw: break
+        vx = vth * gauss(st); vy = vth * gauss(st); vz = vth * gauss(st)
+        gs = g0; alive = True; k_out = 0
+        for step in range(n_steps + 1):
+            if step % every == 0 and k_out < n_out:
+                out_v[k_out, a, 0] = vx; out_v[k_out, a, 1] = vy; out_v[k_out, a, 2] = vz
+                out_alive[k_out, a] = alive; out_g[k_out, a] = gs; k_out += 1
+            if step == n_steps or not alive: continue
+            ree = 0.0; nt = 0
+            for half in range(2):
+                g, gx, gy, gz = beam(x, y, z, w0, zR)
+                # the transitions from the present ground state, their rates and their excited-minus-ground shift
+                nt = 0; ree = 0.0; fsum = 0.0
+                for b in range(nb_):
+                    kv = beams[b, 0] * vx + beams[b, 1] * vy + (0.0 if variant == 2 else beams[b, 2] * vz)
+                    for e in range(ne):
+                        if S[gs, e] <= 0.0 or me[e] - mg[gs] != int(beams[b, 3]): continue
+                        d = twopi * (beams[b, 5] - (Ee[e] - Eg[gs]) - (Ze[e] - Zg[gs]) - (LSe[e] - LSg[gs]) * g) - beams[b, 6] * kv
+                        s = beams[b, 4] * S[gs, e]
+                        r = 0.5 * gamma * s / (1.0 + s + 4.0 * d * d / (gamma * gamma))
+                        rates[nt] = r; tb[nt] = b; te[nt] = e; dls[nt] = twopi * (LSe[e] - LSg[gs]); nt += 1
+                        fsum += r / gamma * twopi * (LSe[e] - LSg[gs])
+                # mean force: −∇U_g − Σ ρ_ee,t ∇ΔU_t (U_g = −U0 g for every ground sublevel: its hyperfine dependence 4 kHz)
+                ax = hbar_m * (U0 - fsum) * gx; ay = hbar_m * (U0 - fsum) * gy; az = hbar_m * (U0 - fsum) * gz
+                vx += 0.5 * dt * ax; vy += 0.5 * dt * ay; vz += 0.5 * dt * az
+                if half == 0:
+                    x += dt * vx; y += dt * vy; z += dt * vz
+            # jumps within the step (Gillespie at the step's end point; the rates recomputed after each jump)
+            trem = dt; jumps = 0
+            while jumps < 64:
+                R = 0.0
+                for t in range(nt): R += rates[t]
+                if R <= 0.0: break
+                u = rnd(st)
+                tau = -math.log(max(u, 1e-300)) / R
+                if tau > trem: break
+                trem -= tau; jumps += 1
+                pick = rnd(st) * R; t = 0; acc = rates[0]
+                while acc < pick and t < nt - 1:
+                    t += 1; acc += rates[t]
+                b = tb[t]; e = te[t]; kk = beams[b, 6] * hbar_m
+                vx += kk * beams[b, 0]; vy += kk * beams[b, 1]; vz += kk * beams[b, 2]
+                pick = rnd(st); acc = 0.0; gn = ng - 1
+                for g2 in range(ng):
+                    acc += B[g2, e]
+                    if pick < acc:
+                        gn = g2; break
+                if me[e] == mg[gn]: ex, ey, ez = emission_pi(st)
+                else: ex, ey, ez = emission(st)
+                vx += kk * ex; vy += kk * ey; vz += kk * ez
+                gs = gn
+                # the new state's transitions at the same point
+                g, _, _, _ = beam(x, y, z, w0, zR); nt = 0
+                for b2 in range(nb_):
+                    kv = beams[b2, 0] * vx + beams[b2, 1] * vy + (0.0 if variant == 2 else beams[b2, 2] * vz)
+                    for e2 in range(ne):
+                        if S[gs, e2] <= 0.0 or me[e2] - mg[gs] != int(beams[b2, 3]): continue
+                        d = twopi * (beams[b2, 5] - (Ee[e2] - Eg[gs]) - (Ze[e2] - Zg[gs]) - (LSe[e2] - LSg[gs]) * g) - beams[b2, 6] * kv
+                        s = beams[b2, 4] * S[gs, e2]
+                        rates[nt] = 0.5 * gamma * s / (1.0 + s + 4.0 * d * d / (gamma * gamma)); tb[nt] = b2; te[nt] = e2; nt += 1
+            if variant == 1: vz *= math.exp(-dt / 1.0)
+            g, _, _, _ = beam(x, y, z, w0, zR)
+            E = 0.5 * (vx * vx + vy * vy + vz * vz) / hbar_m - U0 * g
+            if g < 0.05 and E > 0: alive = False
+    return 0
+
+MULTI = {'S2QR': (0, 'S2Q, multilevel rate model (Doppler, optical pumping, Zeeman, light shifts; no ground coherences)'),
+         'S2QZ': (1, 'S2Q rate model with z frozen: the best any z-only cooling (sub-Doppler included) can do'),
+         'S2QV': (2, 'S2Q rate model without z Doppler shifts: z friction cancelled'),
+         'S2R': (0, 'S2 by the multilevel rate model (independent beams): checks S2K and gives the depumping')}
+
+def scene_beams(name, p):
+    """The beams of S2Q / S2 for the multilevel model: probe +z σ+, reflection −z (σ− about z with the λ/4 plate, σ+
+    without), repump +x π at F=1 → F'=2 (6568.03 MHz above F=2 → F'=3), every one at s = I/I_sat(cycling)."""
+    rep = HFS_EXCITED[2] - HFS_GROUND[1]
+    q_back = -1 if name.startswith('S2Q') else 1
+    return np.array([[0, 0, 1, 1, p['s1'], 0.0, p['kp']], [0, 0, -1, q_back, p['s1'], 0.0, p['kp']],
+                     [1, 0, 0, 0, p['s1'], rep, p['kp'] * (1 + rep / 384230484.4685)]], dtype=np.float64)
+
+def simulate_multi(name, p, mt, atoms, end_us, every_us, dt, seed=12345):
+    variant, desc = MULTI[name]
+    n_steps = int(round(end_us / dt)); every = int(round(every_us / dt)); n_out = n_steps // every + 1
+    out_v = np.zeros((n_out, atoms, 3)); out_alive = np.zeros((n_out, atoms), np.bool_); out_g = np.zeros((n_out, atoms), np.int64)
+    P = np.array([p['gamma'], p['w0'], p['zR'], p['U0'], p['hbar_m'], p['uK']])
+    t0 = time.time()
+    run_multi(variant, atoms, seed, 30.0, dt, n_steps, every, P, scene_beams(name, p), mt['S'], mt['B'], mt['Eg'], mt['Ee'], mt['Zg'], mt['Ze'],
+              mt['LSg'], mt['LSe'], mt['mg'], mt['me'], GROUND.index((2, 2)), out_v, out_alive, out_g)
+    r = summarize(name, desc, p, atoms, dt, time.time() - t0, np.arange(n_out) * every * dt, out_v, out_alive)
+    pops = np.zeros((n_out, len(GROUND)))
+    for k in range(n_out):
+        held = out_alive[k]
+        if held.sum(): pops[k] = np.bincount(out_g[k][held], minlength=len(GROUND)) / held.sum()
+    r['groundStates'] = [f'ground-{F}-{m}' for (F, m) in GROUND]; r['groundPopulations'] = pops.round(4).tolist()
+    return r
+
+def depumping(p, mt):
+    """S2 (σ+σ+ and the π repump) at the trap's centre, the atom at rest in |2,2⟩: the rate of every way out of the cycle
+    (1/s), per excited state and final state, from the rate tables; plus the closed-form other paths."""
+    G = p['gamma']; beams = scene_beams('S2R', p); gs = GROUND.index((2, 2)); out = []
+    for b in range(3):
+        for e, (Fp, mp) in enumerate(EXCITED):
+            if mt['S'][gs, e] <= 0 or mp - 2 != int(beams[b, 3]): continue
+            d = 2 * math.pi * (beams[b, 5] - (mt['Ee'][e] - mt['Eg'][gs]) - (mt['Ze'][e] - mt['Zg'][gs]) - (mt['LSe'][e] - mt['LSg'][gs]))
+            s = beams[b, 4] * mt['S'][gs, e]; R = 0.5 * G * s / (1 + s + 4 * d * d / G ** 2) * 1e6
+            for g2, (F2, m2) in enumerate(GROUND):
+                if (F2, m2) != (2, 2) and mt['B'][g2, e] > 0:
+                    out.append(dict(beam=['probe', 'reflection', 'repump'][b], excited=f'D2-{Fp}-{mp}', final=f'ground-{F2}-{m2}', detuningMHz=d / 2 / math.pi, ratePerS=R * mt['B'][g2, e]))
+    return out
+
+def summarize(name, desc, p, atoms, dt, wall, times, out_v, out_alive):
+    n_out = len(times); held = out_alive.sum(1); loss = 1 - held / atoms
+    T = np.full((n_out, 3), np.nan); se = np.full((n_out, 3), np.nan)
+    for k in range(n_out):
+        v = out_v[k][out_alive[k]]
+        if len(v) > 10:
+            var = v.var(0, ddof=1); T[k] = var / p['hbar_m'] / p['uK']
+            m4 = ((v - v.mean(0)) ** 4).mean(0); se[k] = np.sqrt(np.maximum(m4 - var ** 2 * (len(v) - 3) / (len(v) - 1), 0) / len(v)) / p['hbar_m'] / p['uK']
+    Ttot = T.mean(1); setot = np.sqrt((se ** 2).sum(1)) / 3
+    f = lambda arr: [None if not np.isfinite(x) else round(float(x), 3) for x in arr]
+    return dict(model=name, description=desc, atoms=atoms, dtUs=dt, wallS=wall, timesUs=times.tolist(), loss=loss.tolist(),
+                lossSE=np.sqrt(np.maximum(loss * (1 - loss), 1 / atoms) / atoms).tolist(),
+                T=[f(T[:, a]) for a in range(3)], TSE=[f(se[:, a]) for a in range(3)], Ttotal=f(Ttot), TtotalSE=f(setot))
+
 def analytic(p):
     """The semi-analytic numbers at the focus (two-level formulas): rates, Doppler limit, initial heating per axis."""
     G = p['gamma']; s = p['s1']; out = {}
@@ -515,11 +749,12 @@ def selftest(p):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--selftest', action='store_true')
-    ap.add_argument('--atoms', type=int, default=2000); ap.add_argument('--end', type=float, default=10000.0)
-    ap.add_argument('--every', type=float, default=50.0); ap.add_argument('--models', default='S1K,S1F,S2K,S2F')
+    ap.add_argument('--atoms', type=int, default=4000); ap.add_argument('--end', type=float, default=5000.0)
+    ap.add_argument('--every', type=float, default=50.0); ap.add_argument('--models', default='S1K,S1F,S2K,S2F,S2R,S2QR,S2QZ,S2QV')
     ap.add_argument('--dt', type=float, default=0.05); ap.add_argument('--out', default=os.path.join(HERE, 'model.json'))
     ap.add_argument('--summary', action='store_true')
     ap.add_argument('--seed', type=int, default=12345)
+    ap.add_argument('--keep', action='store_true', help='keep the other models\' runs already in --out')
     ap.add_argument('--s-scale', type=float, default=1.0, help='tests only: the probe intensity times this (0: the conservative trap)')
     a = ap.parse_args()
     tables = app_tables(); shifts = light_shifts(tables); p = parameters(tables, shifts)
@@ -532,15 +767,28 @@ def main():
     an = analytic(p)
     for k, v in an.items(): print(' ', k, {kk: round(vv, 5) for kk, vv in v.items()})
     tests = selftest(p)
+    mt = multilevel_tables(shifts)
+    # the tables' checks: F' → F=1 branching (Steck: F'=2 1/2, F'=1 5/6, F'=0 1), |3',3'⟩'s shift, the cycling Zeeman shift
+    toF1 = {Fp: sum(mt['B'][g, EXCITED.index((Fp, 0))] for g, (F, m) in enumerate(GROUND) if F == 1) for Fp in (0, 1, 2, 3)}
+    print('  multilevel: branching to F=1 from F\' = 0..3 (m\'=0):', {k: round(v, 6) for k, v in toF1.items()},
+          "|3',3'⟩ shift", round(mt['LSe'][EXCITED.index((3, 3))], 4), 'cycling Zeeman', round(mt['Ze'][EXCITED.index((3, 3))] - mt['Zg'][GROUND.index((2, 2))], 4))
+    print('  excited shifts at the focus (MHz):', {f'D2-{Fp}-{m}': round(float(v), 3) for (Fp, m), v in zip(EXCITED, mt['LSe']) if Fp >= 2})
+    dep = depumping(p, mt)
+    for d in sorted(dep, key=lambda d: -d['ratePerS'])[:6]: print('  depumping S2:', {k: (round(v, 3) if isinstance(v, float) else v) for k, v in d.items()})
     if a.summary or a.selftest: return
     p['s1'] *= a.s_scale
     models = [m for m in a.models.split(',') if m]
     result = dict(generator='motion/refs/sanity/model.py', lightShifts={k: v for k, v in shifts.items() if not isinstance(v, dict)},
                   chart=CHART, parameters={k: v for k, v in p.items()}, analytic=an,
-                  selftest=[{k: float(v) for k, v in t.items()} for t in tests], runs={})
+                  selftest=[{k: float(v) for k, v in t.items()} for t in tests],
+                  multilevel=dict(branchingToF1=toF1, excitedShiftsMHz={f'D2-{Fp}-{m}': float(v) for (Fp, m), v in zip(EXCITED, mt['LSe'])},
+                                  zeemanMHz={**{f'ground-{F}-{m}': float(v) for (F, m), v in zip(GROUND, mt['Zg'])}, **{f'D2-{Fp}-{m}': float(v) for (Fp, m), v in zip(EXCITED, mt['Ze'])}},
+                                  depumpingS2=dep), runs={})
+    if a.keep and os.path.exists(a.out):
+        old = json.load(open(a.out)); result['runs'] = {k: v for k, v in old['runs'].items() if k not in models}
     for m in models:
-        r = simulate(m, p, a.atoms, a.end, a.every, a.dt, a.seed)
-        print(f"{m}: {r['wallS']:.1f} s; " + '; '.join(f"t {r['timesUs'][k]/1e3:.1f} ms T {r['Ttotal'][k]} ({'/'.join(str(r['T'][i][k]) for i in range(3))}) L {r['loss'][k]:.3f} unb {r['unbound'][k]:.3f}"
+        r = simulate_multi(m, p, mt, a.atoms, a.end, a.every, a.dt, a.seed) if m in MULTI else simulate(m, p, a.atoms, a.end, a.every, a.dt, a.seed)
+        print(f"{m}: {r['wallS']:.1f} s; " + '; '.join(f"t {r['timesUs'][k]/1e3:.1f} ms T {r['Ttotal'][k]} ({'/'.join(str(r['T'][i][k]) for i in range(3))}) L {r['loss'][k]:.3f}"
                                                for k in range(0, len(r['timesUs']), max(1, len(r['timesUs']) // 10))))
         result['runs'][m] = r
     json.dump(result, open(a.out, 'w'))

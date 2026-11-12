@@ -1,4 +1,4 @@
-// node sanity.mjs --worker=<atom-lindblad.exe> [--scenes=S1,S2] [--duration=5000] [--old] [--app=<apps/atom-workbench>]
+// node sanity.mjs --worker=<atom-lindblad.exe> [--scenes=S1,S2,S2Q] [--duration=5000] [--old] [--app=<apps/atom-workbench>]
 //                 [--save=<summary.json>]
 //
 // The two most basic motion scenes, built exactly as the app builds them and solved by a worker over its JSONL protocol
@@ -8,7 +8,8 @@
 //       frequency (the default probe of the default scene removed); initial |F=2, m=2⟩, motion at 30 µK (the defaults);
 //   S2  S1 + the probe's reflection by the app's mirror (reflection.ts addReflection, default mirror: R 1, φ 0, no λ/4)
 //       + a repump added with ＋ and set to F=1 → F'=2 (along +x, π);
-//   S2Q (information only, no criteria) S2 with the mirror's λ/4 plate (σ+σ− about the field: not a two-level problem).
+//   S2Q S2 with the mirror's λ/4 plate passed twice (reflection quarterWave: true): σ+ and σ− about the field, the
+//       PGC-like polarization gradient; no longer a two-level problem (the atom is pumped over the m sublevels).
 // What the check expects is physics, derived independently of every engine: sanity/model.py (its header holds the
 // derivation; its output sanity/model.json is read here, python is not run): light shifts from a sum over states on the
 // app's atomic tables, and a classical-atom Monte Carlo in two independent formulations (K: scattering events at the
@@ -19,6 +20,14 @@
 // app builds it is a pure σ+ standing wave on a closed two-level cycle -- Doppler cooling along z only (the light-shifted
 // line puts the probe at −3.8Γ, T_D ≈ 410 µK, half the trap depth), x and y heated by spontaneous emission at twice
 // S1's photon rate, the repump idle -- so it loses the atom FASTER than S1 (half at 1.17 ms), not slower.
+// S2Q is judged against model.py's multilevel rate model (quantum jumps over the 8 ground sublevels, each beam's rate on
+// each |F',m'⟩ at its own light-shifted, Zeeman-shifted, Doppler-shifted detuning, dipole branching; no ground
+// coherences: the 3 G field dephases them -- Larmor 2.1 MHz per Δm against a ground light shift of ~0.4 MHz -- which
+// also moves the σ+σ− sub-Doppler resonance to v = ω_L/k ≈ 1.6 m/s, far above the atoms' 0.05–0.3 m/s). The atom is
+// pumped mostly into |2,−2⟩ (56 %), whose σ− line the 3 G field puts 8.4 MHz nearer than σ+'s: −2.45Γ at the centre,
+// +0.69Γ (blue: heating, pushing) at the trap's edge. Rate model: half lost at 0.52 ms. Bounds for whatever the
+// model leaves out along z (sub-Doppler of either sign): z frozen (the best any z-only cooling can do: half at 2.99 ms)
+// and z without friction (half at 0.45 ms). x and y have no cooling beam in any variant.
 //
 // Criteria (tolerances: the user's accuracy targets -- loss 0.05 absolute, T 10 % -- plus twice the combined standard
 // error of engine and model; they exceed the model's systematic uncertainty, ≤ 0.01 in L and ≤ 2 % in T):
@@ -29,7 +38,11 @@
 //   heating  T_total at 0.25, 0.5, 1, 2 ms (while the model keeps ≥ 10 % of the atoms) within 10 % + 2σ;
 //   loss     L at 1, 2, 3, 4, 5 ms within 0.05 + 2σ;
 //   lost     L at the end ≥ 0.9 (both scenes: model 0.97 and 1.00);
-//   S2 vs S1 t½(S1)/t½(S2) in [1.25, 2.0] (model 1.57; each t½ is known to ~7 % from the loss tolerance).
+//   S2 vs S1 t½(S1)/t½(S2) in [1.25, 2.0] (model 1.57; each t½ is known to ~7 % from the loss tolerance);
+//   S2Q      loss at 0.25, 0.5, 1, 2, 3, 5 ms inside the band [z frozen − tol, z frictionless + tol] (tol 0.05 + 2σ; a loose
+//            criterion, as wide as the model's ignorance along z); T_total at 0.25, 0.5 ms inside [min − 10 %, max + 10 %]
+//            of the three variants; the held atom's |2,−2⟩ and |2,2⟩ shares at 0.25 and 0.5 ms within 0.05 + 2σ of the
+//            rate model's (insensitive to the z variants: they agree to 0.03).
 // A run shorter than 5 ms (--duration) is judged on the times it reaches. The script ends with exit code 1 on any FAIL.
 // --old: the previous release's worker (old request format: no outside forms, beams without electricField; its result
 // read raw). Run under the guard (one heavy job at a time); one scene takes seconds to minutes.
@@ -41,8 +54,8 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 const here=dirname(fileURLToPath(import.meta.url));
 const args=process.argv.slice(2),opt=name=>args.find(a=>a.startsWith(`--${name}=`))?.slice(name.length+3),flag=name=>args.includes(`--${name}`);
 const exe=opt('worker');
-if(!exe){console.error('usage: node sanity.mjs --worker=<exe> [--scenes=S1,S2] [--duration=5000] [--old] [--app=<dir>] [--save=<file>]');process.exit(2);}
-const app=resolve(opt('app')??resolve(here,'../../..')),old=flag('old'),durationUs=Number(opt('duration')??5000),wanted=(opt('scenes')??'S1,S2').split(',');
+if(!exe){console.error('usage: node sanity.mjs --worker=<exe> [--scenes=S1,S2,S2Q] [--duration=5000] [--old] [--app=<dir>] [--save=<file>]');process.exit(2);}
+const app=resolve(opt('app')??resolve(here,'../../..')),old=flag('old'),durationUs=Number(opt('duration')??5000),wanted=(opt('scenes')??'S1,S2,S2Q').split(',');
 const from=path=>import(pathToFileURL(join(app,path)).href);
 /** The app's dist must be newer than its sources (node scripts/build.mjs). */
 const newest=folder=>Math.max(...readdirSync(folder,{withFileTypes:true}).map(e=>e.isDirectory()?newest(join(folder,e.name)):statSync(join(folder,e.name)).mtimeMs));
@@ -148,7 +161,8 @@ async function solve(scene,name){
     populationTolerance:types.POPULATION_TOLERANCE,meanHorizonUs:settings.meanHorizonUs,includeMean:false,meanOnly:false,motion,device:settings.motion.device};
   const native=prepareNativeSolve({modelSchema:FULL_MODEL_SCHEMA,scene,options}),token={clientId:'sanity',sequence:2};
   const read=r=>normalizeDynamicsResult(native.respond(r,token),scene,types.resolveInitialState(settings),settings.meanHorizonUs,motion);
-  let checkpoints=0;
+  // A checkpoint the app's reader rejects is recorded (the app would show "求解结果不完整或无效") and the run read on.
+  let checkpoints=0;const rejected=[];
   try{
     if(!old){
       nativeCapabilities((await w.ask({op:'capabilities',id:0})).message);
@@ -156,42 +170,51 @@ async function solve(scene,name){
       if(warm.message.error||warm.message.ready!==true||warm.message.protocol!==NATIVE_PROTOCOL)throw new Error(`warmup: ${JSON.stringify(warm.message).slice(0,200)}`);
     }
     const t0=performance.now();
-    const reply=await w.ask({id:2,...(old?oldFormat(native.payload):native.payload),progress:true},m=>{checkpoints++;if(!old)read(m.result);});
+    const reply=await w.ask({id:2,...(old?oldFormat(native.payload):native.payload),progress:true},m=>{checkpoints++;if(!old)try{read(m.result);}catch(e){rejected.push(`checkpoint ${checkpoints}: ${e.message}`);}});
     const solveS=(performance.now()-t0)/1000;
     if(reply.message.error)return {name,error:`the worker answered an error: ${reply.message.error}`,solveS,checkpoints};
     const raw=reply.message.result;
-    return {name,solveS,checkpoints,engine:raw.diagnostics?.engine,...series(old?null:read(raw),raw,raw.states??native.payload.model.states)};
+    return {name,solveS,checkpoints,rejected,engine:raw.diagnostics?.engine,...series(old?null:read(raw),raw,raw.states??native.payload.model.states)};
   }catch(error){return {name,error:error.message,solveS:(performance.now()-started)/1000,checkpoints};}
   finally{await w.end();}
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The expectation and the criteria.
-/** The model's expectation at sample k: the mean of K and F; u = half their difference ⊕ their standard errors. */
+/** The model runs a scene's expectation is made of (model.json): S1, S2 the mean of the two formulations; S2Q the rate
+ * model, with the band of its z variants. */
+const EXPECT={S1:{central:['S1K','S1F']},S2:{central:['S2K','S2F']},S2Q:{central:['S2QR'],low:'S2QZ',high:'S2QV'}};
+/** The model's expectation at sample k: the mean of the central runs; u = half their difference ⊕ their standard errors. */
 function expectation(scene,k){
-  const [a,b]=[`${scene}K`,`${scene}F`].map(id=>model.runs[id]);
-  const pick=(r,key,seKey)=>({v:r[key][k],se:r[seKey]?.[k]??0});
-  const one=(key,seKey)=>{const x=pick(a,key,seKey),y=pick(b,key,seKey);if(x.v==null||y.v==null)return null;
-    return {v:(x.v+y.v)/2,u:Math.hypot(Math.abs(x.v-y.v)/2,Math.hypot(x.se,y.se)/2)};};
-  return {t:a.timesUs[k],loss:one('loss','lossSE'),T:one('Ttotal','TtotalSE')};
+  const runs=EXPECT[scene].central.map(id=>model.runs[id]);
+  const one=(key,seKey)=>{const xs=runs.map(r=>({v:r[key][k],se:r[seKey]?.[k]??0}));if(xs.some(x=>x.v==null))return null;
+    const v=xs.reduce((s,x)=>s+x.v,0)/xs.length,spread=xs.length>1?Math.abs(xs[0].v-xs[1].v)/2:0;
+    return {v,u:Math.hypot(spread,Math.hypot(...xs.map(x=>x.se))/xs.length)};};
+  return {t:runs[0].timesUs[k],loss:one('loss','lossSE'),T:one('Ttotal','TtotalSE')};
 }
 const half=(t,L)=>{const i=L.findIndex(x=>x>=0.5);return i>0?t[i-1]+(0.5-L[i-1])*(t[i]-t[i-1])/(L[i]-L[i-1]):NaN;};
+const modelHalf=scene=>{const runs=EXPECT[scene].central.map(id=>model.runs[id]);return half(runs[0].timesUs,runs[0].loss.map((_,k)=>runs.reduce((s,r)=>s+r.loss[k],0)/runs.length));};
 const ok=b=>b?'PASS':'FAIL';
 function judge(sceneId,f,r){
   const out=[],add=(pass,what,detail)=>out.push({pass,what,detail});
   if(r.error){add(false,'run',r.error);return out;}
-  add(true,'run',`completed in ${r.solveS.toFixed(1)} s, ${r.checkpoints} checkpoint(s)${old?'':' all read by the app\'s reader'}`);
+  add(true,'run',`completed in ${r.solveS.toFixed(1)} s, ${r.checkpoints} checkpoint(s)`);
+  if(!old)add(!r.rejected.length,'run: the app\'s reader accepts every checkpoint and the result',r.rejected.length?`${r.rejected.length} rejected -- ${r.rejected[0]} (the app shows this error)`:'');
   const finite=[...r.Ttotal,...r.loss].every(x=>x===null||Number.isFinite(x));add(finite,'run: numbers finite','');
   const p=model.parameters,wx=p.omegaAx/2/Math.PI*1e3,wy=p.omegaR/2/Math.PI*1e3;
   if(r.trapKHz){add(Math.abs(r.trapKHz[0]/wx-1)<=0.03,'trap x (axial)',`${r.trapKHz[0].toFixed(2)} kHz vs ${wx.toFixed(2)} ± 3 %`);
     add(Math.abs(r.trapKHz[1]/wy-1)<=0.03,'trap y (radial)',`${r.trapKHz[1].toFixed(2)} kHz vs ${wy.toFixed(2)} ± 3 %`);}
+  const N=r.trajectories,index=t=>r.times.findIndex(x=>Math.abs(x-t)<1e-6),stateIndex=id=>r.states.findIndex(s=>(s.id??s)===id);
+  if(sceneId==='S2Q')return judgeS2Q(r,add,N,index,stateIndex),out;
   if(r.rows){
-    // While at least 10 % of the atoms are held (the rest of the series is a few trajectories' noise).
-    const keepIdx=['ground-2-2','D2-3-3'].map(id=>r.states.findIndex(s=>(s.id??s)===id));
-    const other=r.rows.map((row,k)=>r.loss[k]<=0.9?1-keepIdx.reduce((s,i)=>s+row[i],0):0),worst=Math.max(...other),kw=other.indexOf(worst),at=r.times[kw];
-    const top=r.rows[kw].map((p,i)=>({id:r.states[i].id??r.states[i],p})).filter((_,i)=>!keepIdx.includes(i)).sort((a,b)=>b.p-a.p).slice(0,3);
-    add(worst<=0.01,'closed cycle',`largest population outside |2,2⟩, |3',3'⟩ of the held atom ${worst.toExponential(2)} at ${(at/1e3).toFixed(2)} ms while L ≤ 0.9 (${top.map(s=>`${s.id} ${s.p.toExponential(1)}`).join(', ')}; physics: off-resonant leaks only, ≲ 1e-4; limit 0.01, the app's population tolerance)`);}
-  const N=r.trajectories,index=t=>r.times.findIndex(x=>Math.abs(x-t)<1e-6);
+    // Time-averaged while ≥ 10 % of the atoms are held: a single sample is granular (one depumped trajectory is 1/N, or
+    // 2/N for a pair), its dwell outside the cycle ~10–20 µs. Physics (model.json multilevel.depumpingS2): the repump's
+    // off-resonant excitation of |3',2'⟩, |2',2'⟩ from 6.5–6.8 GHz away, 2.1/s to |2,1⟩ and 1.2/s to |1,1⟩ at the centre,
+    // back within ~20 µs: ~4e-5; S1 has no path (0). Limit 1e-3: 25× the physical rate.
+    const keepIdx=['ground-2-2','D2-3-3'].map(stateIndex),ks=r.rows.map((_,k)=>k).filter(k=>k>0&&r.loss[k]<=0.9);
+    const other=k=>1-keepIdx.reduce((s,i)=>s+r.rows[k][i],0),avg=ks.reduce((s,k)=>s+other(k),0)/Math.max(1,ks.length),kw=ks.reduce((a,k)=>other(k)>other(a)?k:a,ks[0]??0);
+    const top=r.rows[kw].map((p,i)=>({id:r.states[i].id??r.states[i],p})).filter((_,i)=>!keepIdx.includes(i)).sort((a,b)=>b.p-a.p).slice(0,2);
+    add(avg<=1e-3,'closed cycle',`population outside |2,2⟩, |3',3'⟩ of the held atom, time average ${avg.toExponential(2)} (largest sample ${other(kw).toExponential(1)} at ${(r.times[kw]/1e3).toFixed(2)} ms: ${top.map(s=>`${s.id} ${s.p.toExponential(1)}`).join(', ')}); physics ${sceneId==='S2'?'~4e-5':'0'}, limit 1e-3`);}
   for(const t of [250,500,1000,2000]){const k=index(t),e=expectation(sceneId,Math.round(t/SAMPLE_US));
     if(k<0||!e.T||e.loss.v>0.9)continue;
     const se=r.TtotalSE[k]??0,tol=0.1*e.T.v+2*Math.hypot(se,e.T.u),T=r.Ttotal[k];
@@ -202,6 +225,23 @@ function judge(sceneId,f,r){
   const kEnd=r.times.length-1,e=expectation(sceneId,Math.round(r.times[kEnd]/SAMPLE_US));
   if(r.times[kEnd]>=5000-1e-6)add(r.loss[kEnd]>=0.9,'lost: L(end) ≥ 0.9',`${r.loss[kEnd].toFixed(3)} at ${r.times[kEnd]/1e3} ms (model ${e.loss.v.toFixed(3)})`);
   return out;
+}
+/** S2Q: the loss and T inside the band of the rate model's z variants; the held atom's ground populations the rate model's. */
+function judgeS2Q(r,add,N,index,stateIndex){
+  const {low,high}=EXPECT.S2Q,lo=model.runs[low],hi=model.runs[high],mid=model.runs.S2QR;
+  for(const t of [250,500,1000,2000,3000,5000]){const k=index(t),j=Math.round(t/SAMPLE_US);if(k<0)continue;
+    const L=r.loss[k],se=Math.sqrt(Math.max(L*(1-L),1/N)/N),a=lo.loss[j]-0.05-2*Math.hypot(se,lo.lossSE[j]),b=hi.loss[j]+0.05+2*Math.hypot(se,hi.lossSE[j]);
+    add(L>=a&&L<=b,`loss: L(${t/1e3} ms) in the band`,`${L.toFixed(3)} ± ${se.toFixed(3)} vs [${Math.max(0,a).toFixed(3)}, ${Math.min(1,b).toFixed(3)}] (z frozen ${lo.loss[j].toFixed(3)}, rate model ${mid.loss[j].toFixed(3)}, z frictionless ${hi.loss[j].toFixed(3)})`);}
+  for(const t of [250,500]){const k=index(t),j=Math.round(t/SAMPLE_US);if(k<0)continue;
+    const vs=[lo,mid,hi].map(m=>m.Ttotal[j]).filter(v=>v!=null),T=r.Ttotal[k],se=r.TtotalSE[k]??0,a=0.9*Math.min(...vs)-2*se,b=1.1*Math.max(...vs)+2*se;
+    add(T!=null&&T>=a&&T<=b,`heating: T_total(${t/1e3} ms) in the band`,`${T?.toFixed(1)} ± ${se.toFixed(1)} µK vs [${a.toFixed(1)}, ${b.toFixed(1)}] (z frozen ${vs[0]?.toFixed(1)}, rate model ${mid.Ttotal[j]?.toFixed(1)}, z frictionless ${hi.Ttotal[j]?.toFixed(1)})`);}
+  if(r.rows)for(const t of [250,500]){const k=index(t),j=Math.round(t/SAMPLE_US);if(k<0)continue;
+    // The engine's rows hold the excited states too: its ground shares are taken among the ground states (the rate
+    // model's atom is always in a ground state between its jumps).
+    const ground=mid.groundStates.map(stateIndex),sum=ground.reduce((s,i)=>s+r.rows[k][i],0),held=N*(1-r.loss[k]),heldModel=mid.atoms*(1-mid.loss[j]);
+    for(const id of ['ground-2--2','ground-2-2']){const p=r.rows[k][stateIndex(id)]/sum,q=mid.groundPopulations[j][mid.groundStates.indexOf(id)];
+      const tol=0.05+2*Math.hypot(Math.sqrt(p*(1-p)/Math.max(held,1)),Math.sqrt(q*(1-q)/Math.max(heldModel,1)));
+      add(Math.abs(p-q)<=tol,`populations: ${id} of the held atom's ground states at ${t/1e3} ms`,`${p.toFixed(3)} vs ${q.toFixed(3)} ± ${tol.toFixed(3)}`);}}
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -226,21 +266,24 @@ for(const id of wanted){
   else{
     console.log(`   engine ${r.engine??''}: solve ${r.solveS.toFixed(1)} s, ${r.trajectories} trajectories, step ${r.stepUs} µs, trap ${r.trapKHz?.map(x=>x.toFixed(2)).join('/')} kHz (model ${(model.parameters.omegaAx/2/Math.PI*1e3).toFixed(2)}/${(model.parameters.omegaR/2/Math.PI*1e3).toFixed(2)}/${(model.parameters.omegaR/2/Math.PI*1e3).toFixed(2)} bare)`);
     if(r.flagged)console.log(`   flagged: ${r.flagged.slice(0,300)}`);
-    const hasModel=!!model.runs[`${id}K`];
-    console.log(`     t ms | T_total engine (x/y/z)          | model T  | L engine | model L`);
-    for(const t of [0,250,500,1000,1500,2000,3000,4000,5000]){const k=r.times.findIndex(x=>Math.abs(x-t)<1e-6);if(k<0)continue;const e=hasModel?expectation(id,Math.round(t/SAMPLE_US)):null;
-      console.log(`   ${(t/1e3).toFixed(2).padStart(5)} | ${(r.Ttotal[k]==null?'—':`${r.Ttotal[k].toFixed(1)} ± ${(r.TtotalSE[k]??0).toFixed(1)}`).padEnd(12)} (${r.T.map(a=>a[k]==null?'—':a[k].toFixed(0)).join('/')})`.padEnd(46)+`| ${e?.T?e.T.v.toFixed(1).padStart(7):'      —'}  | ${r.loss[k].toFixed(3)}    | ${e?e.loss.v.toFixed(3):'—'}`);}
-    const th=half(r.times,r.loss);console.log(`   t½ engine ${Number.isFinite(th)?(th/1e3).toFixed(2)+' ms':'not reached'}${hasModel?`, model ${(half(model.runs[`${id}K`].timesUs,model.runs[`${id}K`].loss.map((x,k)=>(x+model.runs[`${id}F`].loss[k])/2))/1e3).toFixed(2)} ms`:''}`);
+    const band=EXPECT[id].low?[model.runs[EXPECT[id].low],model.runs[EXPECT[id].high]]:null;
+    console.log(`     t ms | T_total engine (x/y/z)          | model T  | L engine | model L${band?' (band: z frozen – z frictionless)':''}`);
+    for(const t of [0,250,500,1000,1500,2000,3000,4000,5000]){const k=r.times.findIndex(x=>Math.abs(x-t)<1e-6);if(k<0)continue;const j=Math.round(t/SAMPLE_US),e=expectation(id,j);
+      console.log(`   ${(t/1e3).toFixed(2).padStart(5)} | ${(r.Ttotal[k]==null?'—':`${r.Ttotal[k].toFixed(1)} ± ${(r.TtotalSE[k]??0).toFixed(1)}`).padEnd(12)} (${r.T.map(a=>a[k]==null?'—':a[k].toFixed(0)).join('/')})`.padEnd(46)+`| ${e?.T?e.T.v.toFixed(1).padStart(7):'      —'}  | ${r.loss[k].toFixed(3)}    | ${e?e.loss.v.toFixed(3):'—'}${band?` (${band[0].loss[j].toFixed(3)} – ${band[1].loss[j].toFixed(3)})`:''}`);}
+    const th=half(r.times,r.loss);console.log(`   t½ engine ${Number.isFinite(th)?(th/1e3).toFixed(2)+' ms':'not reached'}, model ${(modelHalf(id)/1e3).toFixed(2)} ms${band?` (band ${(half(band[1].timesUs,band[1].loss)/1e3).toFixed(2)}–${(half(band[0].timesUs,band[0].loss)/1e3).toFixed(2)} ms)`:''}`);
   }
-  if(model.runs[`${id}K`]){for(const c of judge(id,f,r)){console.log(`   ${ok(c.pass)} ${c.what}${c.detail?`: ${c.detail}`:''}`);if(!c.pass)failures++;}}
-  else console.log('   (information only: no physics criteria for this scene)');
-  summary.scenes[id]={facts:f,run:r.error?{error:r.error,solveS:r.solveS}:{solveS:r.solveS,trajectories:r.trajectories,stepUs:r.stepUs,trapKHz:r.trapKHz,flagged:r.flagged,times:r.times,Ttotal:r.Ttotal,TtotalSE:r.TtotalSE,T:r.T,loss:r.loss},
-    checks:model.runs[`${id}K`]?judge(id,f,r):[]};
+  const checks=judge(id,f,r);
+  for(const c of checks){console.log(`   ${ok(c.pass)} ${c.what}${c.detail?`: ${c.detail}`:''}`);if(!c.pass)failures++;}
+  summary.scenes[id]={facts:f,run:r.error?{error:r.error,solveS:r.solveS}:{solveS:r.solveS,trajectories:r.trajectories,stepUs:r.stepUs,trapKHz:r.trapKHz,flagged:r.flagged,rejected:r.rejected,times:r.times,Ttotal:r.Ttotal,TtotalSE:r.TtotalSE,T:r.T,loss:r.loss},checks};
 }
 if(results.S1&&results.S2&&!results.S1.error&&!results.S2.error){
   const a=half(results.S1.times,results.S1.loss),b=half(results.S2.times,results.S2.loss),ratio=a/b,pass=Number.isFinite(ratio)&&ratio>=1.25&&ratio<=2.0;
   console.log(`\n${ok(pass)} S2 vs S1: t½(S1)/t½(S2) = ${Number.isFinite(ratio)?ratio.toFixed(2):'undefined'} (model 1.57, accepted 1.25–2.0: S2 as built loses the atom faster than S1)`);
   if(!pass)failures++;summary.ratio=ratio;
+}
+if(results.S1&&results.S2Q&&!results.S1.error&&!results.S2Q.error){
+  const a=half(results.S1.times,results.S1.loss),b=half(results.S2Q.times,results.S2Q.loss);
+  console.log(`\n   S2Q vs S1 (information): t½(S1)/t½(S2Q) = ${(a/b).toFixed(2)}; physics: rate model ${(modelHalf('S1')/modelHalf('S2Q')).toFixed(2)}, and even with z frozen ${(modelHalf('S1')/half(model.runs.S2QZ.timesUs,model.runs.S2QZ.loss)).toFixed(2)} -- the λ/4 mirror does not make S2 slow either`);
 }
 if(opt('save'))writeFileSync(opt('save'),JSON.stringify(summary));
 console.log(`\n${failures?`FAILED: ${failures} criteria`:'PASS'}`);
