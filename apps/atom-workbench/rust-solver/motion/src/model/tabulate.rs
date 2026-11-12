@@ -149,26 +149,13 @@ pub(crate) struct Polarization {
 }
 
 /// What one cluster's near table for one light set tabulates (module documentation): its coordinates, the axes first, their
-/// values at the focus, the range each was verified over where the reach bounds it, its carriers' units, and the cluster's
-/// plan under the lights (its near forms).
-///
-/// The range (`verified`; module documentation, # Axes, # Refinement) of an intensity whose weight per unit intensity is
-/// within half the tables' shares is its whole range (None): it is held at the focus whatever it is. Of a heavier one, the
-/// reach is what makes the table hold, over its range over the reach -- its focus value ± the proven bound of its
-/// distance from it (`reach_range`): an axis is refined over the intervals that meet that range of its grid before the
-/// last halving (the table before it read against the elimination at the new nodes there); a coordinate held
-/// after a look is looked at its first grid's nodes within a spacing of it (the error rises with an intensity's move,
-/// so between them too); one the axes' bounds leave held unlooked has its error read at the atoms there; and one held
-/// because its weight over the reach, per unit intensity times that distance, is within half the shares holds wherever
-/// the distance keeps it so, within half the shares over its weight per unit intensity of the focus value. Angles and
-/// phases are held or refined over their whole ranges (None).
+/// values at the focus, its carriers' units, and the cluster's plan under the lights (its near forms).
 #[derive(Clone, Debug)]
 pub struct Layout {
     pub cluster: usize,
     pub lights: Lights,
     pub coordinates: Vec<Coordinate>,
     focus: Vec<f64>,
-    verified: Vec<Option<(f64, f64)>>,
     polarizations: Vec<Vec<Polarization>>,
     plan: Arc<Plan>,
 }
@@ -420,17 +407,7 @@ impl Model {
             .map(|&(cluster, lights)| {
                 let mut needed = vec![];
                 while let Some(First { table, ranges, held }) = self.first_table(cluster, lights, reach, most, &needed) {
-                    let mut table = self.refined(table, &ranges, reach, most);
-                    // An axis is verified over the intervals that meet its range of its grid before the last halving,
-                    // where the table before it was read against the elimination at the new nodes (# Refinement): of
-                    // twice the spacing.
-                    for (f, axis) in table.table.axes().to_vec().into_iter().enumerate() {
-                        table.layout.verified[f] = table.layout.verified[f].map(|(lo, hi)| {
-                            let h = 2.0 * axis.spacing();
-                            let (below, above) = (((lo - axis.lo) / h).floor(), ((hi - axis.lo) / h).ceil());
-                            ((axis.lo + below * h).max(axis.lo).min(lo), (axis.lo + above * h).min(axis.hi).max(hi))
-                        });
-                    }
+                    let table = self.refined(table, &ranges, reach, most);
                     match held.iter().find(|(coordinate, worst)| self.look(&table, &ranges, *coordinate, &[*worst], reach).0 > 1.0) {
                         Some((coordinate, _)) => needed.push(*coordinate),
                         None => return Some(table),
@@ -600,14 +577,7 @@ impl Model {
             let refs: Vec<&dyn Fn(&Region) -> f64> = quantities.iter().map(|q| q.as_ref() as &dyn Fn(&Region) -> f64).collect();
             self.bounds_over(reach, target, target, &refs)
         };
-        // Per coordinate the range it was verified over where the reach bounds it (`Layout::verified`): of one held by its
-        // weight over the reach, the distance from the focus value that keeps its weight within the target.
-        let mut verified: Vec<Option<(f64, f64)>> = vec![None; all.len()];
         for (&c, w) in intensities.iter().zip(moved) {
-            if w < target {
-                let span = target / weights[c];
-                verified[c] = Some((focus[c] - span, focus[c] + span));
-            }
             weights[c] = w;
         }
         let mut order: Vec<usize> = (0..all.len()).collect();
@@ -622,7 +592,6 @@ impl Model {
                 lights: lights.clone(),
                 coordinates: picked.iter().map(|&c| all[c]).collect(),
                 focus: picked.iter().map(|&c| focus[c]).collect(),
-                verified: vec![None; picked.len()],
                 polarizations: polarizations.clone(),
                 plan: plan.clone(),
             };
@@ -645,18 +614,11 @@ impl Model {
             }
             let place = table.layout.coordinates.iter().position(|x| *x == all[c]).expect("a coordinate of the table's layout");
             let (range, axis) = (self.reach_range(&table.layout, place, reach), first[d - 1]);
-            let values: Vec<f64> = (0..axis.nodes).map(|i| axis.node(i)).filter(|v| v - axis.spacing() <= range.1 && v + axis.spacing() >= range.0).collect();
-            if intensity(all[c]) {
-                verified[c] = Some(range);
-            }
             let take = needed.contains(&all[c]) || {
+                let values: Vec<f64> = (0..axis.nodes).map(|i| axis.node(i)).filter(|v| v - axis.spacing() <= range.1 && v + axis.spacing() >= range.0).collect();
                 let (error, worst) = self.look(&table, &ranges, all[c], &values, reach);
                 if error <= 1.0 {
                     held.push((all[c], worst));
-                    // Held after a look: over the values looked at, its first grid's nodes within a spacing of the range.
-                    if let (true, Some(&least), Some(&most)) = (intensity(all[c]), values.first(), values.last()) {
-                        verified[c] = Some((least, most));
-                    }
                 }
                 error > 1.0
             };
@@ -666,14 +628,6 @@ impl Model {
                 table = made(&axes)?;
             }
         }
-        // The intensities the axes' bounds left held unlooked: their range over the reach.
-        for &c in &intensities {
-            if verified[c].is_none() {
-                let place = table.layout.coordinates.iter().position(|x| *x == all[c]).expect("a coordinate of the table's layout");
-                verified[c] = Some(self.reach_range(&table.layout, place, reach));
-            }
-        }
-        table.layout.verified = table.layout.coordinates.iter().map(|x| verified[all.iter().position(|y| y == x).expect("a coordinate of the light set")]).collect();
         Some(First { table, ranges, held })
     }
 
@@ -749,12 +703,6 @@ impl Model {
     /// orthogonal polarizations -- a constant -- was taken to move by 2kρ: with the lin-perp-lin scene's cooling light on its
     /// chart no cell of the reach was small enough, the proof had cut 8 million cells in 43 s and went on.)
     fn intensity_moved(&self, c: Coordinate, polarizations: &[Vec<Polarization>], at: f64, region: &Region) -> f64 {
-        let (lo, hi) = self.intensity_over(c, polarizations, region);
-        (hi - at).abs().max((at - lo).abs())
-    }
-
-    /// The bounds over a region of an intensity coordinate (`intensity_moved`): its least and its largest value there.
-    fn intensity_over(&self, c: Coordinate, polarizations: &[Vec<Polarization>], region: &Region) -> (f64, f64) {
         // The coordinate's field: its frequency, its beams' places among the frequency's with their c_l, and N.
         let (frequency, beams, norm): (usize, Vec<(usize, [C64; 3])>, f64) = match c {
             Coordinate::Chart { frequency, .. } => {
@@ -779,22 +727,7 @@ impl Model {
             }
         }
         let (lo, hi) = ((centre - radius).max(0.0), (centre + radius).min(blind * blind));
-        (lo / norm, hi / norm)
-    }
-
-    /// Whether the tables hold over a region as they were verified over the reach they were made for (module
-    /// documentation, # Axes, # Refinement): every intensity coordinate whose verification the reach bounded
-    /// (`Layout::verified`) keeps within its range over the region (`intensity_over`).
-    pub(crate) fn within(&self, tables: &Tables, region: &Region) -> bool {
-        tables.tables.iter().all(|t| {
-            let layout = &t.layout;
-            layout.coordinates.iter().zip(&layout.verified).all(|(&c, range)| {
-                range.is_none_or(|(lo, hi)| {
-                    let (least, most) = self.intensity_over(c, &layout.polarizations, region);
-                    lo <= least && most <= hi
-                })
-            })
-        })
+        (hi / norm - at).abs().max((at - lo / norm).abs())
     }
 
     /// The near forms at a point from a table (module documentation, # At a point), the sections asked each to its order (0 or

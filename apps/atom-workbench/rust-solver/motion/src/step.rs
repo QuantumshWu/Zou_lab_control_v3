@@ -261,14 +261,28 @@
 //! phases; each jump's photons, kick and landing at its point on the path; the reads' rows at points of the path. A
 //! jump changes the state and the cluster, not the path or κ_m. So a step is proven where the model holds over the
 //! path at the speed |v_m| -- the path's box, the cell r_h ± |v_m,a| h, the region every bound of the model is a function
-//! of (model/reach.rs `Region`) -- and the step itself at that speed: one question a step, asked before its propagation
-//! (`Domain::proven`), with the middle the reference's fixed point gives and the path's momentum the prediction gives.
-//! What the step's own error control sees between its nodes is how the model's values change along the path -- the
-//! three nodes' parabola, checked against twice the step (solve.rs, # The step) --, not whether the model exists there:
-//! a fold that does not exist is no error of τ, and an atom that left the proven set and came back between two nodes,
-//! or between the middle and a jump, would be unseen by a test at points. The path's box holds every point the step reads
-//! the model at. A step the domain does not prove is not taken: the advance ends there (adapt.rs), and what its path
-//! would need is told (`Unproven`).
+//! of (model/reach.rs `Region`) -- and the step itself is stable there: one question a step, asked before its
+//! propagation (`Domain::proven`), with the middle the reference's fixed point gives and the path's momentum the
+//! prediction gives. What the step's own error control sees between its nodes is how the model's values change along
+//! the path -- the three nodes' parabola, checked against twice the step (solve.rs, # The step) --, not whether the
+//! model exists there: a fold that does not exist is no error of τ, and an atom that left the proven set and came back
+//! between two nodes, or between the middle and a jump, would be unseen by a test at points. The path's box holds every
+//! point the step reads the model at. A step the domain does not prove is not taken: the advance ends there (adapt.rs),
+//! and what its path would need is told (`Unproven`).
+//!
+//! What the domain proves is what is wrong without bound where it fails, and nothing else: a fold that does not exist
+//! (its series diverges: a fold's rate went as the Doppler shift squared, SPEC §1.8), and a step beyond the edge of its
+//! reference's turn and its kick's curvature (the map about a minimum has an eigenvalue past −1: a step multiplies any
+//! error by e^μ, step/tests.rs). Whether the step resolves the generator's turn along its path at its speed -- each
+//! entry's (|Ω| + |K| v) τ/2 below π, its three nodes no alias -- is its accuracy: beyond it the nodes read an alias,
+//! and the step takes the parabola through three samples of the entry, at most 5/4 of the entry anywhere (the three
+//! points' Lebesgue constant), Hermitian where the entry is: the state goes on under a wrong generator as bounded as the
+//! true one; the impulse is the exact tones' on the middle state and that parabola's on the rest, at most (1 + 5/2) τ
+//! times the force's bound, a step after a step, and the hazard no more than the decay's. The norm may grow over such a
+//! step -- the atom waits too long for its next jump --, as it does below the edge over a step long against the light's
+//! change, which the check reads (step/tests.rs: an atom past its standing wave's resolution). So such a step is taken,
+//! and the trajectory is unresolved from it on (`Trajectory::unresolved`): what it shows is booked whole (solve.rs,
+//! # The reach's atoms).
 
 use std::sync::OnceLock;
 
@@ -464,6 +478,10 @@ pub struct Trajectory {
     pub jumps: u32,
     /// The time the atom was lost (SPEC §1.7: checked at every step's end and after every jump); None while held.
     pub lost: Option<f64>,
+    /// Whether a step of it did not resolve what it samples along its path at its speed (`Domain::proven`; module
+    /// documentation, # The domain): from that step on the trajectory is not the model's to the step's accuracy, and
+    /// what it shows is booked whole (solve.rs, # The reach's atoms).
+    pub unresolved: bool,
     /// The run's seed and the trajectory's number: its jumps' streams.
     pub seed: u64,
     pub index: u64,
@@ -493,6 +511,7 @@ impl Trajectory {
             threshold,
             jumps: 0,
             lost: None,
+            unresolved: false,
             seed,
             index,
             work: 0.0,
@@ -1176,8 +1195,10 @@ pub enum Refused {
 /// model it takes, and the step itself, hold along the step's path.
 pub trait Domain {
     /// Whether the step of half-length `half` (µs) through its middle -- the reference's flow there (`Flow`) and the
-    /// middle point and path momentum (r_h, κ_m) -- is proven; else what is to be held for it (`Unproven`).
-    fn proven(&self, flow: &Flow, middle: ([f64; 3], [f64; 3]), half: f64) -> Result<(), Unproven>;
+    /// middle point and path momentum (r_h, κ_m) -- is proven, and then whether it resolves what it samples along its
+    /// path at its speed (true: its accuracy is the run's; false: the trajectory is the model's no longer to the step's
+    /// accuracy, `Trajectory::unresolved`); else what is to be held for it (`Unproven`).
+    fn proven(&self, flow: &Flow, middle: ([f64; 3], [f64; 3]), half: f64) -> Result<bool, Unproven>;
 }
 
 /// What a step its domain does not prove asks of the reach (`Domain`; model/reach.rs, # The trap's region): the
@@ -1261,8 +1282,11 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let (flow, (r_h, kappa_h), reference) = (self.flow, self.reached, self.reference);
         scratch.fit(n);
         let kappa_m = predicted(scratch, &self.generator, &from.psi, kappa_h, reference, tau);
-        domain.proven(&flow, (r_h, kappa_m), h).map_err(Refused::Unproven)?;
+        let resolves = domain.proven(&flow, (r_h, kappa_m), h).map_err(Refused::Unproven)?;
         let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, weights: [0.0; 3], impulse: [0.0; 3], scattered: None, work: count::shear(n, self.generator.work()), made: Vec::new() };
+        // A step that does not resolve its path at its speed is taken, and the trajectory is unresolved from it on: its
+        // states inside the step and after it.
+        march.state.unresolved |= !resolves;
         // Cluster by cluster: the start's generator, then that of every cluster a jump lands in, at the same middle.
         let mut landed: Option<D::Middle<'a>> = None;
         while !self.stretch(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time, reads, &mut march, scratch)? {
