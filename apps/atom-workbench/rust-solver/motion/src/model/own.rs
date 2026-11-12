@@ -181,25 +181,34 @@ impl Own {
         }
     }
 
-    /// max(a, b): the one whose range lies above the other's, else the range of the maximum.
+    /// max(a, b): the one whose range lies above the other's; else, of its own form, (a + b)/2 + |a − b|/2 -- the mean's first
+    /// order, and the difference's where it keeps one sign (`abs`) -- within the range of the maximum; an operand of no finite
+    /// form (an infinite value, the whole space), the range. (As the range alone it
+    /// had no first order where two close quantities cross over a cell, and a rate read through it -- the larger of two
+    /// clusters' forces -- exceeded its value by the range's whole width at every scale.)
     pub(crate) fn max(self, o: Own) -> Own {
         if self.lo >= o.hi {
             self
         } else if o.lo >= self.hi {
             o
-        } else {
+        } else if !(self.value.is_finite() && o.value.is_finite() && self.width().is_finite() && o.width().is_finite()) {
             Own::range(self.value.max(o.value), self.lo.max(o.lo), self.hi.max(o.hi))
+        } else {
+            self.add(o).scale(0.5).add(self.sub(o).abs().scale(0.5)).within(self.lo.max(o.lo), self.hi.max(o.hi))
         }
     }
 
-    /// min(a, b): the one whose range lies below the other's, else the range of the minimum.
+    /// min(a, b): the one whose range lies below the other's; else (a + b)/2 − |a − b|/2 of its own form (`max`), within
+    /// the range of the minimum.
     pub(crate) fn min(self, o: Own) -> Own {
         if self.hi <= o.lo {
             self
         } else if o.hi <= self.lo {
             o
-        } else {
+        } else if !(self.value.is_finite() && o.value.is_finite() && self.width().is_finite() && o.width().is_finite()) {
             Own::range(self.value.min(o.value), self.lo.min(o.lo), self.hi.min(o.hi))
+        } else {
+            self.add(o).scale(0.5).sub(self.sub(o).abs().scale(0.5)).within(self.lo.min(o.lo), self.hi.min(o.hi))
         }
     }
 
