@@ -56,7 +56,11 @@
 //! outputs by the dynamics itself. An error that changes its sign in time counts by its size.
 //!
 //! - A comparison of two levels says something only where the coarser one still resolves what the scheme samples: the
-//!   first rung's double is admissible for the typical atom, and stable for every atom.
+//!   first rung's double is admissible for the typical atom, and stable for every atom. Where a path of the coarser
+//!   level is not proven, the coarser one has left the model's domain for that atom: the two levels are apart by more
+//!   than any share, and the rung is left as one beyond, unread -- the rung below inherits nothing, and no third level
+//!   reads the step that left (# The reach's atoms: where the finer level's path is not proven either, the rung below's
+//!   decides whether the reach grows).
 //! - A rung is left only on what its reads leave no doubt of (`settle`), read again at every rung and after every
 //!   batch of pairs. A rung costs twice the work of the one above and is not climbed again; a read on the pilot's
 //!   pairs is noisy (the pairs part early: a row's mean square reads with an error of the order of the bound), and a
@@ -186,7 +190,20 @@
 //! so does the attempt, with the reach grown to hold the paths not proven (`Attempt::Grow`; model/reach.rs `holding`,
 //! `Model::outside_to`): the model is judged again over it -- a fold that does not exist there is kept, at the level the
 //! level rule gives (SPEC §1.5) -- and the next attempt begins. A state that fails is held by the reach that ends its
-//! attempt, and the reach and the units kept only grow.
+//! attempt, and the reach and the units kept only grow. The paths a reach holds are the run's own: a level at the run's
+//! step or below it. A companion's level (twice the step, or four times it as a third level) is the step's probe, not
+//! the atoms': where its path is not proven and the rung's own is, the companion's step has left the model's domain
+//! where the rung's did not -- its error, the levels apart by more than any share --, and the rung is left as one
+//! beyond (`settle`, # The step); the reach is not grown for it. Where the rung's own paths left the domain too, the
+//! two levels say nothing of each other, and the finer step decides: the rung is left, and the reach grows for the
+//! rung below's own paths where they leave the domain as well (the next attempt beginning at the rung, which no read
+//! left), else the rung below is left in turn, its companion
+//! the level that departed (`own_departure`). A growth so costs one level of the rung below at the most, and a step's
+//! departure grows nothing. (Grown for its paths, the lab's probe scenes S3 grew
+//! the reach from 30 µK to 145--666 µK on the scout's companions at 2.5--2.9 µs, which heated their atoms past the
+//! trap's depth within 0.03--5 ms where the run's own level held them: the reach's largest speed then set a step 2.3--4
+//! times shorter, its proofs took up to three quarters of the solve, and its edge, past the depth, kept the probe's
+//! excited states explicit.)
 //!
 //! What is accuracy is booked where the atom is. The tables' error at a state is read there, as every unit's is (an
 //! interpolant of the elimination's own nodes is bounded by them; beyond the ranges the tables were verified over its
@@ -1498,7 +1515,10 @@ fn unseen_at_the_end() -> String {
 /// third level of the rung above it (`settle`: a first rung at the ladder's top), that rung's levels whole, `upper`:
 /// its finer level is the companion of the rung in hand, and the rung stands again as it was where that read
 /// certifies it (`certifies`) -- with the read it then stands by, `below`: the level below's pilot against the
-/// rung's own.
+/// rung's own. And what the paths of each of the rung's two levels that left the model's domain ask of a reach
+/// (`departed`, `pair`; module documentation, # The reach's atoms): where the companion's did, the rung is left, its
+/// read unread; and whether the rung above the rung in hand is a step whose paths did (`above_departs`): no third
+/// level reads it.
 #[derive(Default)]
 struct Levels {
     fine: Vec<Part>,
@@ -1507,6 +1527,8 @@ struct Levels {
     above: Option<Between>,
     upper: Option<Box<Levels>>,
     below: Option<Between>,
+    departed: [Option<[f64; 2]>; 2],
+    above_departs: bool,
 }
 impl Levels {
     /// The finer level's groups and their companions: the pilot's, then the further pairs'.
@@ -1557,25 +1579,48 @@ impl Levels {
     }
 }
 
+impl Levels {
+    /// The paths of a pair's two levels that left the model's domain, joined to what the rung's levels held (`pair`).
+    fn depart(&mut self, departed: [Option<[f64; 2]>; 2]) {
+        self.departed = [both(self.departed[0], departed[0]), both(self.departed[1], departed[1])];
+    }
+}
+
+/// What a pair's paths not proven ask of the reach (module documentation, # The reach's atoms): where the finer level's
+/// left the model's domain and its companion's did not, the finer level's -- the run's own, which the coarser step did
+/// not leave the domain at; else nothing yet. Where both left it, the rung is left and the finer level becomes the
+/// companion of the rung below (`settle`): the departure is the reach's where the finer step confirms it, a step's error
+/// where it does not.
+fn own_departure(departed: [Option<[f64; 2]>; 2]) -> Option<[f64; 2]> {
+    departed[0].filter(|_| departed[1].is_none())
+}
+
 /// The members `members` of the groups `numbers` at the step `tau`, each trajectory through the plan in the `domain`
-/// (a companion's level takes `Domain::companion`): a hand-out of its own (`run_groups`).
+/// (a companion's level takes `Domain::companion`): a hand-out of its own (`run_groups`); or, where a step of it was not
+/// proven, what a reach is to hold for its paths.
 #[allow(clippy::too_many_arguments)]
 fn level(run: &Run, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Result<Vec<Part>, [f64; 2]> {
     let hand = Hand { groups: numbers, members, shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, domain, tau, plan, keep, i) };
-    Ok(run_groups(&[hand], messages, progress)?.pop().expect("the hand-out's one level"))
+    match run_groups(&[hand], messages, progress) {
+        (_, unproven) if unproven[0].is_some() => Err(unproven[0].expect("a path not proven")),
+        (mut parts, _) => Ok(parts.pop().expect("the hand-out's one level")),
+    }
 }
 
 /// The members `members` of the groups `numbers` at the step `tau` (their states kept where `keep`) and at twice it,
 /// the two levels of a check (module documentation, # The step): one hand-out (`run_groups`) -- a check runs both
 /// whatever either shows --, the finer level first, whose trajectories take twice the steps; the coarser one is the
-/// companion's (`Domain::companion`). `progress` takes the finer level's groups.
+/// companion's (`Domain::companion`). `progress` takes the finer level's groups. With the two levels, what a reach is to
+/// hold for each level's paths not proven (`run_groups`): which of them asks it of the reach is `settle`'s (module
+/// documentation, # The reach's atoms; `own_departure`).
 #[allow(clippy::too_many_arguments)]
-fn pair(run: &Run, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Result<[Vec<Part>; 2], [f64; 2]> {
+fn pair(run: &Run, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> ([Vec<Part>; 2], [Option<[f64; 2]>; 2]) {
     let companion = domain.companion();
     let fine = Hand { groups: numbers, members: members.clone(), shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, domain, tau, plan, keep, i) };
     let coarse = Hand { groups: numbers, members, shape: Shape::of(plan, false), record: &|i| trajectory(run, ensemble, &companion, 2. * tau, plan, false, i) };
-    let mut levels = run_groups(&[fine, coarse], messages, progress)?.into_iter();
-    Ok(std::array::from_fn(|_| levels.next().expect("the hand-out's two levels")))
+    let (levels, unproven) = run_groups(&[fine, coarse], messages, progress);
+    let mut levels = levels.into_iter();
+    (std::array::from_fn(|_| levels.next().expect("the hand-out's two levels")), [unproven[0], unproven[1]])
 }
 
 /// The states kept in some groups' parts freed, on the pool, a group's by itself: a state is a block of memory of its
@@ -1619,6 +1664,12 @@ enum Settled {
 ///   share among all the looks, on the rung's own read or on the read it is held by (`screen`, `held`): the step is
 ///   halved -- the level at τ becomes the companion, and the members so far run anew at τ/2 alone. The finer level
 ///   keeps its states (the model is read at them);
+/// - a path of its companion's level left the model's domain (not proven, `pair`; `Levels::departed`): the rung is
+///   left as one beyond, its read unread -- the rung below inherits nothing, and no third level reads the step that
+///   departed (`Levels::above_departs`), nor one whose own path is not proven. Where the rung's own level's paths left
+///   it too, that level is the rung below's companion: the reach grows for the rung below's own paths where they leave
+///   it as well (`level`), else the rung below is left in turn (`own_departure`; module documentation, # The reach's atoms); at
+///   the ladder's bottom for the rung's own paths, the finest there are;
 /// - else a rung whose order is tested -- it inherits a read -- stands;
 /// - else, its order untested (an attempt's first rung: two levels), it stands where every look reads within the
 ///   step's share (`blind`), and on the scout, which has the pilot to come. On the pilot (all the members of a group
@@ -1646,12 +1697,13 @@ enum Settled {
 /// it is for the next attempt to begin at, and no third level and no pair is run for it.
 #[allow(clippy::too_many_arguments)]
 fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, dearer: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, messages: &mut Messages) -> Settled {
-    let [fine, coarse] = match pair(run, ensemble, domain, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages)) {
-        Ok(levels) => levels,
-        Err(asked) => return Settled::Unproven(asked),
-    };
+    let ([fine, coarse], departed) = pair(run, ensemble, domain, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
+    if let Some(asked) = own_departure(departed) {
+        return Settled::Unproven(asked);
+    }
     absorb(&mut levels.fine, fine);
     absorb(&mut levels.coarse, coarse);
+    levels.depart(departed);
     // Whether the check is the pilot's: all the members of a group in.
     let pilot = members.end == GROUP;
     loop {
@@ -1665,8 +1717,9 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
         // The rung below, and whether the ladder has it.
         let below = 0.5 * context.tau;
         let lowest = context.plan.end / below > MOST_STEPS as f64;
-        // Whether the rung in hand is left on its reads, as any rung is.
-        let left = failed || screen(&read) || screen(&held);
+        // Whether the rung in hand is left on its reads, as any rung is; or as a rung beyond, unread, where its
+        // companion's step left the model's domain (`Levels::departed`).
+        let left = failed || screen(&read) || screen(&held) || levels.departed[1].is_some();
         // The rung in hand was read as the third level of the rung above. That one stands as it was where this read
         // certifies it (`certifies`), and by this read; else it is left, and the rung in hand is the one taken, the
         // level above its companion -- its states are read no more.
@@ -1694,11 +1747,15 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
                 return Settled::Standing;
             }
             let (fine, coarse) = levels.paired();
-            if above(context.tau) {
-                // The rung above on the pilot's trajectories: its finer level is this rung's companion.
+            if above(context.tau) && !levels.above_departs {
+                // The rung above on the pilot's trajectories: its finer level is this rung's companion. Where its
+                // companion's step leaves the model's domain the rung above is unread, and the remedy decides.
                 let coarser = match level(run, ensemble, &domain.companion(), &context.plan, 4. * context.tau, numbers, 0..GROUP, false, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages)) {
                     Ok(coarser) => coarser,
-                    Err(asked) => return Settled::Unproven(asked),
+                    Err(_) => {
+                        levels.above_departs = true;
+                        continue;
+                    }
                 };
                 let read = between(&coarse, &coarser.iter().collect::<Vec<_>>(), &context.scales);
                 levels.above = Some(carried(&read, 0.5));
@@ -1713,10 +1770,11 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
                     let more = pair(run, ensemble, domain, &context.plan, context.tau, &next, 0..GROUP, false, messages, &mut |prefix, messages| {
                         so_far(context, &levels.fine, &levels.further[0].iter().chain(prefix.iter().copied()).collect::<Vec<_>>(), messages)
                     });
-                    let more = match more {
-                        Ok(more) => more,
-                        Err(asked) => return Settled::Unproven(asked),
-                    };
+                    let (more, departed) = more;
+                    if let Some(asked) = own_departure(departed) {
+                        return Settled::Unproven(asked);
+                    }
+                    levels.depart(departed);
                     levels.further.iter_mut().zip(more).for_each(|(further, more)| further.extend(more));
                     continue;
                 }
@@ -1725,29 +1783,45 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
             }
         }
         if !third {
-            // The rung in hand is left.
-            if lowest {
+            // The rung in hand is left. At the ladder's bottom the paths of the rung's own level that left the model's
+            // domain are the finest there are: the reach is to hold them.
+            if let (true, Some(asked)) = (lowest, levels.departed[0]) {
+                return Settled::Unproven(asked);
+            } else if lowest {
                 return Settled::Capped;
             } else if dearer(below) {
                 return Settled::Dearer;
             }
         }
-        let inherits = carried(&held, 0.5);
+        // A rung left unread (its companion departed) hands nothing down: the rung below is of untested order.
+        let inherits = levels.departed[1].is_none().then(|| carried(&held, 0.5));
+        // A rung left for its companion's departure, not for a read: where the rung below's own paths leave the domain
+        // too, the departure is the atoms', and the next attempt begins at this rung (`attempt`).
+        let (rung, departed) = (context.tau, levels.departed[1].is_some());
         context.tau = below;
         let finer = match level(run, ensemble, domain, &context.plan, below, numbers, 0..members.end, true, messages, &mut |prefix, messages| so_far(context, &[], prefix, messages)) {
             Ok(finer) => finer,
-            Err(asked) => return Settled::Unproven(asked),
+            Err(asked) => {
+                if departed {
+                    context.tau = rung;
+                }
+                return Settled::Unproven(asked);
+            }
         };
         if third {
             // The rung's levels are kept whole, its states with them: it may stand yet.
             let upper = std::mem::take(levels);
-            *levels = Levels { fine: finer, above: Some(inherits), upper: Some(Box::new(upper)), ..Levels::default() };
+            *levels = Levels { fine: finer, above: inherits, upper: Some(Box::new(upper)), ..Levels::default() };
         } else {
             // The level at the step is the companion from here on: its states are read no more.
             forget(&mut levels.fine);
             levels.coarse = std::mem::replace(&mut levels.fine, finer);
             levels.further = Default::default();
-            levels.above = Some(inherits);
+            levels.above = inherits;
+            // The rung above the one taken is the step whose companion departed, where it did: no third level reads it.
+            // The level at the step is the companion now, with what its own paths asked.
+            levels.above_departs = levels.departed[1].is_some();
+            levels.departed = [None, levels.departed[0]];
         }
     }
 }
@@ -2173,11 +2247,12 @@ impl Hand<'_> {
 ///
 /// A trajectory a step of which its domain did not prove ends there (`Domain`; module documentation, # The reach's
 /// atoms): the attempt's model is no model of that step. The hand-out goes on to its end, every trajectory to its own
-/// end or its first step not proven, and ends with what the reach is to hold for all of them (`both`): a function of
-/// the list, not of the threads, and one reach that holds every path the hand-out did not prove. (Held to the first
-/// path not proven, the reach of the default tweezer with a resonant probe grew five times over 5 ms, each attempt
-/// proving the region anew; to all of them, three.)
-fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Result<Vec<Vec<Part>>, [f64; 2]> {
+/// end or its first step not proven, and tells per level what the reach is to hold for all of that level's paths not
+/// proven (`both`): a function of the list, not of the threads, and one reach that holds every such path of the level.
+/// (Held to the first path not proven, the reach of the default tweezer with a resonant probe grew five times over
+/// 5 ms, each attempt proving the region anew; to all of them, three.) Which level's paths a reach is to hold is the
+/// caller's (`level`, `pair`): a companion's are its step's, not the atoms'.
+fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> (Vec<Vec<Part>>, Vec<Option<[f64; 2]>>) {
     // Where each level's trajectories begin in the list, and the list's length.
     let starts: Vec<u64> = levels.iter().scan(0, |next, level| Some(std::mem::replace(next, *next + level.count()))).collect();
     let stop: u64 = levels.iter().map(Hand::count).sum();
@@ -2187,8 +2262,8 @@ fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut
         (level, k - starts[level])
     };
     let next = AtomicU64::new(0);
-    // What the steps not proven so far ask of the reach.
-    let mut unproven: Option<[f64; 2]> = None;
+    // What each level's steps not proven so far ask of the reach.
+    let mut unproven: Vec<Option<[f64; 2]>> = vec![None; levels.len()];
     let threads = rayon::current_num_threads().min(stop as usize);
     let mut waiting: Vec<Vec<Vec<Option<Record>>>> = levels.iter().map(|level| (0..level.groups.len()).map(|_| (0..level.size()).map(|_| None).collect()).collect()).collect();
     let mut parts: Vec<Vec<Option<Part>>> = levels.iter().map(|level| (0..level.groups.len()).map(|_| None).collect()).collect();
@@ -2227,7 +2302,7 @@ fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut
             let received = if due.is_zero() { receiver.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected) } else { receiver.recv_timeout(due) };
             match received {
                 Ok((level, k, r)) => {
-                    unproven = both(unproven, r.unproven);
+                    unproven[level] = both(unproven[level], r.unproven);
                     let size = levels[level].size();
                     let (g, m) = ((k / size) as usize, (k % size) as usize);
                     let members = &mut waiting[level][g];
@@ -2243,10 +2318,7 @@ fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut
             }
         }
     });
-    if let Some(asked) = unproven {
-        return Err(asked);
-    }
-    Ok(parts.into_iter().map(|level| level.into_iter().map(|p| p.expect("a group's trajectories ended without their part")).collect()).collect())
+    (parts.into_iter().map(|level| level.into_iter().map(|p| p.expect("a group's trajectories ended without their part")).collect()).collect(), unproven)
 }
 
 /// What the pilot fixes for the run (module documentation, # Stopping), per output: the model's error on the held atoms
@@ -3990,11 +4062,11 @@ mod tests {
         let mut messages = Messages { send: &mut silent, clock: Instant::now() - CHECKPOINT, last: None, least: 0 };
         let numbers: Vec<u64> = (0..rayon::current_num_threads() as u64).collect();
         let mut seen = vec![];
-        let levels = run_groups(&[Hand { groups: &numbers, members: 0..GROUP, shape, record: &record }], &mut messages, &mut |_, messages| {
+        let (levels, unproven) = run_groups(&[Hand { groups: &numbers, members: 0..GROUP, shape, record: &record }], &mut messages, &mut |_, messages| {
             seen.push((0..2).into_par_iter().map(|_| over.load(Ordering::Relaxed)).max().expect("the loop's two items"));
             messages.again();
-        })
-        .expect("every step proven");
+        });
+        assert_eq!(unproven, [None], "every step proven");
         assert_eq!(levels[0].len(), numbers.len());
         assert!(2 * seen[0] < numbers.len() as u64 * GROUP, "{seen:?} of {}", numbers.len() as u64 * GROUP);
         // Nothing was sent (there is no last result): the message stayed due, and was asked for again as the groups came
@@ -4002,27 +4074,54 @@ mod tests {
         assert!(messages.due().is_zero() && seen.len() > 1 && seen.len() <= numbers.len(), "{seen:?}");
     }
 
-    /// Steps not proven end a hand-out with what all of them ask of the reach together (`run_groups`, `both`): of 40
-    /// groups of eight, the trajectories of the numbers 157, 230 and 231 have one (each asking its own number within the
-    /// region, and the 230th also its number less a hundred outside it). The hand-out runs every trajectory and tells
-    /// [231, 130] -- the same at every run, whatever the threads did.
+    /// Steps not proven end a hand-out with what all of a level's ask of the reach together (`run_groups`, `both`),
+    /// each level's apart: of 40 groups of eight on two levels (members 0..8 and 2..5), the trajectories of the numbers
+    /// 157, 230 and 231 have one on the first level (each asking its own number within the region, and the 230th also
+    /// its number less a hundred outside it), and of the numbers 155, 156 and 159 on the second -- each a coarser
+    /// level's own: its paths ask nothing of the first's. The hand-out runs every trajectory and tells [231, 130] for
+    /// the first level and [156, −∞] for the second (the number 159 is not its member) -- the same at every
+    /// run, whatever the threads did.
     #[test]
-    fn steps_not_proven_end_the_hand_out_with_what_they_ask_together() {
+    fn steps_not_proven_end_the_hand_out_with_what_each_level_asks() {
         let shape = Shape { outputs: 1, listed: 0, keep: false };
         let numbers: Vec<u64> = (20..40).chain(0..20).collect();
         for _ in 0..3 {
             let ran = AtomicU64::new(0);
-            let record = |i: u64| {
-                ran.fetch_add(1, Ordering::Relaxed);
-                let unproven = [157, 230, 231].contains(&i).then_some([i as f64, if i == 230 { i as f64 - 100. } else { f64::NEG_INFINITY }]);
-                Record { outputs: vec![Fate::Lost], listed: vec![], samples: vec![], counts: Counts::default(), unproven }
+            let record = |level: usize| {
+                let ran = &ran;
+                move |i: u64| {
+                    ran.fetch_add(1, Ordering::Relaxed);
+                    let ends: &[u64] = if level == 0 { &[157, 230, 231] } else { &[155, 156, 159] };
+                    let unproven = ends.contains(&i).then_some([i as f64, if i == 230 { i as f64 - 100. } else { f64::NEG_INFINITY }]);
+                    Record { outputs: vec![Fate::Lost], listed: vec![], samples: vec![], counts: Counts::default(), unproven }
+                }
             };
+            let (first, second) = (record(0), record(1));
             let mut silent = |_: &Solution, _: Option<f64>| {};
             let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0 };
-            let told = run_groups(&[Hand { groups: &numbers, members: 0..GROUP, shape, record: &record }], &mut messages, &mut |_, _| {}).err();
-            assert_eq!(told, Some([231., 130.]));
-            assert_eq!(ran.load(Ordering::Relaxed), numbers.len() as u64 * GROUP);
+            let hands = [Hand { groups: &numbers, members: 0..GROUP, shape, record: &first }, Hand { groups: &numbers, members: 2..5, shape, record: &second }];
+            let (levels, told) = run_groups(&hands, &mut messages, &mut |_, _| {});
+            assert_eq!(told, [Some([231., 130.]), Some([156., f64::NEG_INFINITY])]);
+            assert_eq!(levels.iter().map(Vec::len).collect::<Vec<_>>(), [numbers.len(), numbers.len()]);
+            assert_eq!(ran.load(Ordering::Relaxed), numbers.len() as u64 * (GROUP + 3));
         }
+    }
+
+    /// What a pair's paths not proven ask of the reach (`own_departure`; module documentation, # The reach's atoms): the
+    /// finer level's where its companion's are all proven -- the run's own level left the domain where the coarser step
+    /// did not --; nothing where the companion's left it too (the rung below decides) or alone (a step's departure), or
+    /// where nothing left it.
+    #[test]
+    fn a_reach_holds_the_paths_of_the_run_s_own_level_alone() {
+        let (fine, coarse) = (Some([12., f64::NEG_INFINITY]), Some([900., 3.]));
+        assert_eq!(own_departure([fine, None]), fine);
+        assert_eq!(own_departure([fine, coarse]), None);
+        assert_eq!(own_departure([None, coarse]), None);
+        assert_eq!(own_departure([None, None]), None);
+        let mut levels = Levels::default();
+        levels.depart([None, coarse]);
+        levels.depart([fine, Some([4., 7.])]);
+        assert_eq!(levels.departed, [fine, Some([900., 7.])], "a rung's levels hold the most every pair of them asked");
     }
 
     /// The groups come back in their order whatever the threads do: 37 groups' records (five of a pilot's numbers, then a
@@ -4043,7 +4142,8 @@ mod tests {
         let numbers: Vec<u64> = (2048..2053).chain(5..37).collect();
         let members = [0..GROUP, 1..3];
         let hands = members.clone().map(|members| Hand { groups: &numbers, members, shape, record: &record });
-        let levels = run_groups(&hands, &mut messages, &mut |_, _| {}).expect("every step proven");
+        let (levels, unproven) = run_groups(&hands, &mut messages, &mut |_, _| {});
+        assert_eq!(unproven, [None, None], "every step proven");
         assert_eq!(levels.len(), 2);
         for (parts, members) in levels.iter().zip(members) {
             assert_eq!(parts.len(), 37);
