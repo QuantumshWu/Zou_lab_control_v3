@@ -84,15 +84,19 @@
 //!       any other's, for a quarter of what its pairs' companions cost;
 //!     - at the ladder's top the third level is the rung below: its pilot -- the same trajectories at τ/2, twice
 //!       a pilot's steps -- read against this rung's level tests the order between the three levels as it does
-//!       for any rung reached by a halving (`refuted`, by this rung's read lowered). Where it refutes nothing and
-//!       nothing lies beyond, this rung is a rung of tested order and stands as it was: the rung below was read,
-//!       not taken, and its pilot is what the test cost. Where the order is refuted or a read lies beyond, this
-//!       rung is left on what the reads leave no doubt of, and the pilot run is the rung below's own. (Before,
-//!       the rung below was taken for the whole run wherever the first rung did not read within: twice the run's
-//!       work, by the draw. Measured, gray molasses at 1.4585 µs: T's mean square is 0.43 ± 0.10 b on 4096 pairs
-//!       against 2.917 µs and no more than 0.33 b by the level below -- well inside --, while a read on 88 pairs
-//!       has an interval of 1.7 b; one seed of four did not read within on 360 pairs and ran at 0.7292 µs, 1029k
-//!       trajectory steps where the others took 370k to 453k; with the third level it stands, at 535k. SPEC §5.3.)
+//!       for any rung reached by a halving (`refuted`, by this rung's read lowered). This rung stands as it was
+//!       -- the rung below read, not taken, its pilot what the test cost -- where that read refutes nothing, nothing
+//!       lies beyond, and the read certifies this rung (`certifies`): carried to this rung's step, e(τ) =
+//!       2^p d₁/(2^p − 1) of the difference with τ/2 (`Levels::told`), every look reads within the share, the
+//!       criterion this rung's own read did not meet. A first rung stands only by a read of its own error that
+//!       reads within: a read of two levels says 2^p times less, in the rms, of its coarser level than of its finer
+//!       one, and one that could not have told an error of the share's size at τ from none says nothing for τ by
+//!       showing none. Else this rung is left, and the pilot run is the rung below's own: its own read is that same
+//!       read, its order tested by it, and it goes on as any rung does. (Measured, SPEC §5.3: where the pairs part
+//!       early -- gray molasses, a MOT, lin⊥lin cooling -- the level below's 88 pairs carried to τ cannot tell 4 to
+//!       16 % on what is shown and 10 to 16 % on T from none, far ends of 4 to 73 b, and the rung below is the one
+//!       taken; a held atom's at an antinode come to 1.3 to 2.3 b on T, and it is taken too; a tweezer's atom over
+//!       100 µs is certified at 3.34 µs, T told to 3.3 % where its own read against 6.67 µs told 8.1 %.)
 //!     - before that level, more pairs where they could spare it (`blind`, `remedy`). The pairs are asked for
 //!       what they could do: were the error the least the read allows -- its near end at one look --, what the
 //!       read holds above it is the pairs' noise and falls as 1/N; the pairs that could bring the far end within b
@@ -106,8 +110,7 @@
 //!       the far end's root (`unexcluded`).
 //! - What enters a quantity's account, at every output alike, is the clear part of its rms, √(M̂ − t·SE) where
 //!   positive, among the same looks (`checked`): nothing where no change is seen, at most the step's share where the
-//!   check let the step stand on its own read. It is fixed after the pilot; the product runs one level and reads no
-//!   step.
+//!   check let the step stand. It is fixed after the pilot; the product runs one level and reads no step.
 //! - The check's resolution -- √(t·SE), the rms error the pairs cannot tell from none -- is said in the result's
 //!   method line beside the two steps compared and the number of pairs (`Checked`). It is in no total and raises no
 //!   flag.
@@ -116,9 +119,8 @@
 //!   difference holds the rung's error itself, and the order supplies the remainder: e(τ) = 2^p d₁/(2^p − 1), the
 //!   mean square 2^{2p} times the read of the level below (`carried`). The own read's e(τ) = d₂/(2^p − 1) rests
 //!   wholly on the companion at 2τ -- at the ladder's top the coarsest level there is --, and it is the read that
-//!   could not show the rung within; the level below's is the test the rung passed, so what that read resolves and
-//!   what is clear of it are what the result says and books -- a larger resolution where the pairs part early
-//!   (the same noise, on 2^p times the part of the difference), and it is said as it is.
+//!   could not show the rung within; the level below's is the read that did (`certifies`), so what that read
+//!   resolves and what is clear of it are what the result says and books.
 //!
 //! It is a check, not a bound: an error confined to a short stretch of the run is diluted by the run's length in the
 //! mean square; e rests on the scheme's order, which only three levels test -- a first rung that reads within is
@@ -620,6 +622,16 @@ fn blind(own: &Between) -> Option<f64> {
         .reduce(f64::max)
 }
 
+/// Whether the read of the level below a rung, against the rung's own level, certifies the rung (module
+/// documentation, # The step): carried to the rung's step (`carried`: the rung's error is 2^p times the level
+/// below's, `Levels::told`), every look reads within the step's share -- the criterion the rung's own read has to
+/// meet (`blind`: nothing asked for). A read of two levels says 2^p times less, in the rms, of its coarser level than
+/// of its finer one: where it could not have told an error of the size of the share at the rung's step from none, it
+/// says nothing for the rung by showing none, and what it reads is the level below.
+fn certifies(below: &Between) -> bool {
+    blind(&carried(below, 2.)).is_none()
+}
+
 /// What is done about a rung of untested order that does not read within the step's share (module documentation,
 /// # The step).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -640,8 +652,8 @@ enum Remedy {
 /// the step τ -- a trajectory's steps go as 1/τ --, beyond the trajectories the run takes at τ whatever the check
 /// does (the product's):
 /// - the rung below's pilot, the third level: the pilot's trajectories at τ/2, 2·pilot. It tests this rung's order
-///   (`settle`): the rung then stands unless a read leaves no doubt, and where it is left the pilot run is the rung
-///   below's own;
+///   (`settle`): the rung then stands where that read certifies it (`certifies`), and where it is left the pilot
+///   run is the rung below's own;
 /// - the pairs that could bring the rung within, P = factor·have, from N pairs on: their companions at 2τ, half a
 ///   trajectory each, and what of their finer level the product would not run, ½(P − N) + (P − max(product, N))₊.
 /// The pairs where from the pairs in hand on that is the less work, a batch of them, to the number asked and at most
@@ -1266,8 +1278,9 @@ fn unseen_at_the_end() -> String {
 /// attempt came down from it (the scout's read serves the pilot on the rung the scout left standing: the same model at
 /// the same steps), or the pilot read it on a third level (`settle`). And, while the rung in hand is read as the
 /// third level of the rung above it (`settle`: a first rung at the ladder's top), that rung's levels whole, `upper`:
-/// its finer level is the companion of the rung in hand, and the rung stands again as it was where the test lets it
-/// -- with the read it then stands by, `below`: the level below's pilot against the rung's own.
+/// its finer level is the companion of the rung in hand, and the rung stands again as it was where that read
+/// certifies it (`certifies`) -- with the read it then stands by, `below`: the level below's pilot against the
+/// rung's own.
 #[derive(Default)]
 struct Levels {
     fine: Vec<Part>,
@@ -1304,17 +1317,17 @@ impl Levels {
     ///   between τ and τ/2.
     /// Where the order holds between all three levels, 2^p d₁ = d₂ and the two are one number. Where they differ, the
     /// read against τ/2 is the one told, by which levels were read and not by what they read:
-    /// - it is the read the rung stands by. Its own did not read within the share; it stands because the level below
-    ///   refutes nothing, and what that test can find is what this read resolves: an error it cannot tell from none
-    ///   is one the test would have passed. The own read's resolution holds under the order between τ and 2τ -- the
-    ///   premise the level below was run to test;
+    /// - it is the read the rung stands by. Its own did not read within the share; it stands because this one,
+    ///   carried to its step, does (`certifies`). The own read's resolution holds under the order between τ and 2τ
+    ///   -- the premise the level below was run to test;
     /// - the lesser, or the sharper, of the two reads is not taken: they estimate one mean square only where the
     ///   order holds across the three levels, and the lesser of two noisy reads books a clear part that is biased
     ///   low -- the more so as the own read is here one selected for reading high.
-    /// The resolution so told is the larger where the pairs part early: the difference's noise is then the same at
-    /// either pair of levels, and it is 2^p/(2^p − 1) of the difference against τ/2 that is the rung's error, where
-    /// it is 1/(2^p − 1) of the one against 2τ. That is what a comparison with the finer level resolves; it is said
-    /// as it is.
+    /// A read against τ/2 resolves the rung's error 2^p times less finely, in the rms, than it resolves the level
+    /// below's: where the pairs part early the difference's noise is the same at either pair of levels, and it is
+    /// 2^p/(2^p − 1) of the difference against τ/2 that is the rung's error, where it is 1/(2^p − 1) of the one
+    /// against 2τ. So the rung stands by it only where it reads within the share all the same, and the resolution
+    /// told is then within the share too.
     fn told(&self, tau: f64, scales: &Scales) -> (Between, f64, u64) {
         match &self.below {
             Some(finer) => (carried(finer, 2.), 0.5 * tau, self.fine.len() as u64 * GROUP),
@@ -1394,9 +1407,12 @@ enum Settled {
 ///   is no rung above (the ladder's top), the remedy of `remedy`: more pairs -- the product's next groups at both
 ///   levels --, bounded by the third level's work; or that level, the rung below's pilot: the members so far at τ/2,
 ///   read against this rung's level, this rung's levels kept whole meanwhile (`Levels::upper`). Where that read
-///   refutes nothing and nothing lies beyond, this rung's order is tested and it stands as it was -- the rung below
+///   refutes nothing, nothing lies beyond, and carried to this rung's step it reads within the step's share
+///   (`certifies`: the criterion this rung's own read did not meet), this rung stands as it was -- the rung below
 ///   was read, not taken --, and that read stays with it (`Levels::below`): the one its check is told and booked by
-///   (`Levels::told`); else this rung is left as any is, and the pilot run is the rung below's own. Where
+///   (`Levels::told`). Else this rung is left, and the pilot run is the rung below's own, its own read that same
+///   read: a rung of tested order, which stands where the read only could not certify the rung above, and is left in
+///   its turn where the read left no doubt. Where
 ///   neither pairs nor a rung below are to be had, the check ends unable to see (`Settled::Unseen`), and what it does
 ///   not exclude is booked and flagged (SPEC §5.1). A rung whose order is tested and whose reads exclude nothing ends
 ///   the check the same way.
@@ -1414,25 +1430,37 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
     // The trajectories a rung's check begins with, and whether it is the pilot's.
     let (begins, pilot) = (numbers.len() as u64 * members.end, members.end == GROUP);
     loop {
-        let (fine, coarse) = levels.paired();
-        let read = between(&fine, &coarse, &context.scales);
+        let read = {
+            let (fine, coarse) = levels.paired();
+            between(&fine, &coarse, &context.scales)
+        };
         let failed = levels.above.as_ref().is_some_and(|inherited| refuted(&read, inherited));
         let inherited = levels.above.as_ref().filter(|_| !failed);
         let held = held(&read, inherited);
         // The rung below, and whether the ladder has it.
         let below = 0.5 * context.tau;
         let lowest = context.plan.end / below > MOST_STEPS as f64;
+        // Whether the rung in hand is left on its reads, as any rung is.
+        let left = failed || screen(&read) || screen(&held);
+        // The rung in hand was read as the third level of the rung above. That one stands as it was where this read
+        // certifies it (`certifies`), and by this read; else it is left, and the rung in hand is the one taken, the
+        // level above its companion -- its states are read no more.
+        if let Some(upper) = levels.upper.take() {
+            if !left && certifies(&read) {
+                *levels = Levels { below: Some(read), ..*upper };
+                context.tau *= 2.;
+                return Settled::Standing;
+            }
+            if dearer(context.tau) {
+                return Settled::Dearer;
+            }
+            levels.coarse = upper.fine;
+            forget(&mut levels.coarse);
+        }
         // Whether the rung below is read as this rung's third level, not taken.
         let mut third = false;
-        if !(failed || screen(&read) || screen(&held)) {
+        if !left {
             if inherited.is_some() {
-                // The rung in hand was read as the third level of the rung above: that one's order is tested, and
-                // it stands as it was, by this read.
-                if let Some(upper) = levels.upper.take() {
-                    *levels = Levels { below: Some(read), ..*upper };
-                    context.tau *= 2.;
-                    return Settled::Standing;
-                }
                 return if pilot && !readable(&held) { Settled::Unseen(held) } else { Settled::Standing };
             }
             let Some(factor) = blind(&read).filter(|_| pilot) else { return Settled::Standing };
@@ -1440,6 +1468,7 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
             if outgrown(&levels.fine.iter().collect::<Vec<_>>()) {
                 return Settled::Standing;
             }
+            let (fine, coarse) = levels.paired();
             if above(context.tau) {
                 // The rung above on the pilot's trajectories: its finer level is this rung's companion.
                 let coarser = level(run, ensemble, domain, &context.plan, 4. * context.tau, numbers, 0..GROUP, false, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
@@ -1464,15 +1493,7 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
             }
         }
         if !third {
-            // The rung in hand is left. Where it was read as the third level of the rung above, that one is left with
-            // it: the rung in hand is the one taken, the level above its companion.
-            if let Some(upper) = levels.upper.take() {
-                if dearer(context.tau) {
-                    return Settled::Dearer;
-                }
-                levels.coarse = upper.fine;
-                forget(&mut levels.coarse);
-            }
+            // The rung in hand is left.
             if lowest {
                 return Settled::Capped;
             } else if dearer(below) {
@@ -2785,21 +2806,34 @@ mod tests {
     /// e(τ) − e(τ/2), the level below's error by the order; the order makes e(τ/2) = 2^{−p} e(τ), so the rung's own is
     /// e(τ) = d₁/(1 − 2^{−p}) = 2^p d₁/(2^p − 1): 2^p times the read's error, its mean square 2^{2p} = 16 times --
     /// value and standard error alike, on the same groups, and exactly the lowering undone (a power of two).
-    /// - Gray molasses at 1.4585 µs (SPEC §5.3), in units of T's share's square b: the own read on 360 pairs is
-    ///   1.03 ± 0.62 b; the pilot at 0.72925 µs against it reads −0.22 ± 0.35 b. The order is not refuted (the level
-    ///   below's near end is under the own read's far end over 16 -- which is the told read's near end under the own
-    ///   read's far end), so the rung stands, and its check is the level below's: the companion is half the step, the
-    ///   pairs are the pilot's 88 -- not the 360 the own read took --, the read is 16 × (−0.22 ± 0.35) b. Nothing of
-    ///   it is clear, nothing is booked; the resolution is 2^p = 4 times the level below's own, √(t·16·0.35 b).
-    /// - What is clear of such a read is booked as the rung's: of 0.1 ± 0.01 b at the level below, 16 times it less
-    ///   16 times its interval among the looks, the root -- 4 times the level below's own clear part.
+    /// A rung stands by the level below only where that read, carried to the rung's step, reads within the share
+    /// (`certifies`) -- the criterion of its own read (`blind`), on the rung's error by the read against τ/2. In
+    /// units of T's share's square b, on the pilot's eleven groups (one look's interval 2.3 standard errors):
+    /// - gray molasses at 1.4585 µs (SPEC §5.3): the own read on 360 pairs is 1.03 ± 0.62 b; the pilot at
+    ///   0.72925 µs against it reads −0.22 ± 0.35 b. It refutes nothing and nothing lies beyond -- and it does not
+    ///   certify the rung: carried, 16 × (−0.22 ± 0.35) b has a far end of 13 b, an rms it could not tell from
+    ///   none of 3.6 shares. The rung is left; the rung below, whose own read this is, reads within by itself.
+    /// - a read of 0.005 ± 0.01 b at the level below is 0.08 ± 0.16 b of the rung, far end 0.44 b: it certifies.
+    ///   One of 0.02 ± 0.02 b, far end 16 × 0.066 b = 1.05 b: it does not; nor does a read that is no number, or
+    ///   one whose spread is unread. A read below zero's far end is from zero.
+    /// - A rung so certified is told and booked by that read: the companion is half the step, the pairs are the
+    ///   pilot's 88 -- not the 360 its own read took --, the read is 16 times the level below's, value and standard
+    ///   error, on the same groups, the lowering undone exactly. Its resolution is 2^p = 4 times the level below's
+    ///   own and within the share; nothing is clear of it, nothing is booked.
+    /// - What is clear of a read carried is booked as the rung's: of 0.1 ± 0.01 b at the level below, 16 times it
+    ///   less 16 times its interval among the looks, the root -- 4 times the level below's own clear part.
     /// - A rung that stands by its own read is told by it: the companion at twice the step, the pairs all those it
     ///   was read on.
     #[test]
     fn a_rung_that_stands_by_the_level_below_is_told_and_booked_by_that_read() {
         let (b, tau, scales) = (step_bound()[1].powi(2), 1.4585, Scales { hbar_over_mass: 1., frequencies: [1.; 3] });
-        let (own, finer) = (at(Some(pilot(1.03 * b, 0.62 * b))), at(Some(pilot(-0.22 * b, 0.35 * b))));
-        assert!(!refuted(&finer, &carried(&own, 0.5)) && !screen(&finer));
+        let (own, parted) = (at(Some(pilot(1.03 * b, 0.62 * b))), at(Some(pilot(-0.22 * b, 0.35 * b))));
+        assert!(!refuted(&parted, &carried(&own, 0.5)) && !screen(&parted) && !certifies(&parted) && blind(&parted).is_none());
+        let far = carried(&parted, 2.).temperature.unwrap().most(1.) / b;
+        assert!(far > 12.5 && far < 13., "{far}");
+        let finer = at(Some(pilot(0.005 * b, 0.01 * b)));
+        assert!(certifies(&finer) && !certifies(&at(Some(pilot(0.02 * b, 0.02 * b)))) && certifies(&at(Some(pilot(-0.05 * b, 0.01 * b)))));
+        assert!(!certifies(&at(Some(pilot(f64::NAN, 0.)))) && !certifies(&at(Some(Read { value: 0., spread: Spread::UNREAD }))));
         let pilot_groups = || kept(11, GROUP as usize, 4, &|_, _| 4);
         let mut levels = Levels { fine: pilot_groups(), coarse: pilot_groups(), further: [kept(34, GROUP as usize, 4, &|_, _| 4), kept(34, GROUP as usize, 4, &|_, _| 4)], ..Levels::default() };
         let (_, companion, pairs) = levels.told(tau, &scales);
@@ -2811,11 +2845,10 @@ mod tests {
         assert_eq!((t.value, t.spread.error, t.spread.groups), (16. * f.value, 16. * f.spread.error, 11.));
         assert_eq!((carried(&told, 0.5).temperature, told.loss, told.shown), (finer.temperature, finer.loss, finer.shown));
         let looks = judged(&told).len() as f64;
-        assert!(t.least(looks) < own.temperature.unwrap().most(looks));
         let ((step, resolution), (_, below)) = (checked(&told), checked(&finer));
         assert!(step.temperature == 0. && step.shown == 0., "{step:?}");
         assert!((resolution[1] - 4. * below[1]).abs() < 1e-15 && (resolution[1] - (16. * f.spread.interval()).sqrt()).abs() < 1e-15, "{resolution:?}");
-        assert!(resolution[1] > step_bound()[1] && resolution[0] == 0.);
+        assert!(resolution[1] < step_bound()[1] && resolution[0] == 0.);
         let clear = at(Some(pilot(0.1 * b, 0.01 * b)));
         let (booked, lower) = (checked(&carried(&clear, 2.)).0, checked(&clear).0);
         let family = Spread { error: 0.01 * b, groups: 11. }.interval_over(looks);
