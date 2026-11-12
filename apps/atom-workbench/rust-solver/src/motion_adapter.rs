@@ -19,7 +19,7 @@
 //! trap's frequencies; the loss; `classical`; the momentum and position distributions; the trajectories and the run's step.
 //! Every output but the loss describes the atom still held.
 use crate::{lattice_core_adapter, Device, Model, Options};
-use atom_motion::ledger::{Ledger, Total};
+use atom_motion::ledger::{percent, Ledger, Total};
 use atom_motion::request::{Request, STATES};
 use atom_motion::solve::{self as engine, Distributions, Solution, POPULATION_TARGET};
 use atom_population_core::lattice::accuracy;
@@ -105,7 +105,7 @@ fn result(request: &Request, initial: &[f64], solution: &Solution, groups: &[lat
         result["populationAccuracy"]["reason"] = json!(solution
             .reason
             .clone()
-            .unwrap_or_else(|| format!("估计误差 {estimated:.2e} 超过目标 {POPULATION_TARGET}（含投影到概率单纯形的改变量）")));
+            .unwrap_or_else(|| format!("估计误差 {}，超过目标 {}（含把布居的负值去掉、总和归一所作的改动）", percent(estimated), percent(POPULATION_TARGET))));
     }
     if let Some(remaining) = remaining {
         result["progress"] = json!(true);
