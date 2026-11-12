@@ -12,6 +12,8 @@ export type WorkbenchControl = FieldSpec & Partial<Pick<Control, "section">> & {
   blank_label?: string;
   /** The form section the field stands in (AuthoringField.group); the Edit page titles each change. */
   group?: string;
+  /** Its switch is off: the row is not drawn (its value stays in the draft). */
+  hidden?: boolean;
 };
 
 export type Workspace = {
@@ -125,6 +127,8 @@ export type LogicRow = {
   device_choices: Record<string, [string, string][]>;
   /** How each device argument reads as a row label. */
   device_labels: Record<string, string>;
+  /** A device a field turns on, by argument: that field's name; its row stands under the field. */
+  device_gates?: Record<string, string>;
   /** Each file input as the draft holds it: a path, or the files with the frames each claims. */
   artifact_inputs: Record<string, ArtifactValue>;
   /** The node's file inputs as it declares them (label, its codec's dialog filter, frame claims). */

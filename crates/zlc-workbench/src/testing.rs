@@ -1026,7 +1026,8 @@ mod tests {
     fn a_device_a_node_only_reads_is_never_claimed_and_tells_the_draft_its_facts() {
         let mut catalog = catalog();
         catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "watcher", "kind": "node", "label": "Watcher",
-            "parameters": [{"name": "trigger_by_channel", "type": "bool", "label": "Trigger by channel", "default": true}],
+            "parameters": [{"name": "trigger_by_channel", "type": "bool", "label": "Trigger by channel", "default": true},
+                           {"name": "trigger_channel", "type": "str", "label": "Trigger channel", "enabled_when": ["trigger_by_channel", [true]]}],
             "node": {"node_kind": "measurement", "outputs": [{"name": "frames"}], "queries": ["resolve_field_choices"],
                      "devices": [{"capability": "camera.adapter", "argument": "camera", "protected_fields": []},
                                  {"capability": "sequencer.streamer", "argument": "trigger_source", "protected_fields": [], "reads_only": true,
@@ -1062,11 +1063,19 @@ mod tests {
 
         // Without the sequencer, the switch on asks for one; off, nothing of any sequencer is asked.
         event(&mut workbench, Event::Closed { instance: "sequencer".into(), error: None }, &mut host);
-        let issues = workbench.state(&host)["logic"][0]["issues"].to_string();
-        assert!(issues.contains("sequencer.streamer"), "{issues}");
+        let row = workbench.state(&host)["logic"][0].clone();
+        assert!(row["issues"].to_string().contains("sequencer.streamer"), "{}", row["issues"]);
+        // The device the switch turns on stands under the switch, with the channel; both are drawn while it is on.
+        assert_eq!(row["device_gates"], json!({"trigger_source": "trigger_by_channel"}));
+        assert!(row["controls"].as_array().unwrap().iter().all(|control| control.get("hidden").is_none()));
         apply(&mut workbench, &mut host, "edit_node", json!({"node": node, "values": {"trigger_by_channel": false}})).unwrap();
-        let issues = workbench.state(&host)["logic"][0]["issues"].to_string();
+        let row = workbench.state(&host)["logic"][0].clone();
+        let issues = row["issues"].to_string();
         assert!(!issues.contains("sequencer") && !issues.contains("trigger_source"), "{issues}");
+        // Off, the switch's rows are not drawn: no device row is offered, the channel is hidden.
+        assert!(row["device_choices"].get("trigger_source").is_none());
+        let channel = row["controls"].as_array().unwrap().iter().find(|control| control["name"] == "trigger_channel").unwrap();
+        assert_eq!(channel["hidden"], true);
     }
 
     /// v2 _active_differs: a failed device and changed simulation settings are an Apply, not a Shut down.
