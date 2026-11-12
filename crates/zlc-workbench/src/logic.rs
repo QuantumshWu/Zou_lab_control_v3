@@ -1058,8 +1058,10 @@ impl Workbench {
         node.error = None; node.running = Some(frozen.draft.clone()); node.frozen = Some(frozen);
         node.follow = processor; node.follow_attempted = None;
         node.pending = Some(PendingStart { origin, acquisition, prepared: Some(token) });
+        // Its own run makes way for its restart; another's for the devices this start takes.
         let mut holders = self.conflicting_nodes(&claims);
-        if self.active_run(self.node(id).unwrap()).is_some() { holders.insert(id.to_owned()); }
+        holders.remove(id);
+        self.stop_run_of(id, "it was restarted");
         for holder in holders { self.stop_run_of(&holder, "another start needs its devices"); }
         self.launch_pending(host);
     }

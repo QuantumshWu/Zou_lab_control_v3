@@ -52,7 +52,6 @@ pub struct Completion {
     pub intents:BTreeMap<String,BindingAuthority>,
     pub action:String,
     pub decision:Option<mpsc::Sender<PresentationDecision>>,
-    pub sync: bool,
     pub publications: Vec<(String,PublicationKey)>,
     pub cohorts:Vec<Vec<String>>,
     pub imported:Option<DecodedArchive>,
@@ -138,7 +137,7 @@ impl Science {
             let (imported,result)=match self.open(job.command["path"].as_str().unwrap_or("")) {
                 Ok(value)=>(Some(value),Ok((Value::Null,BTreeMap::new()))),Err(error)=>(None,Err(error))};
             return Completion {ticket:job.ticket,document:job.document,request,target:None,authorities:job.authorities.clone(),intents:job.intents.clone(),
-                action:"open".into(),decision:None,sync:false,publications:Vec::new(),cohorts:Vec::new(),imported,result};
+                action:"open".into(),decision:None,publications:Vec::new(),cohorts:Vec::new(),imported,result};
         }
         if job.command["action"]=="drop_document" {
             // A closed Figure Viewer's document goes, with its sessions and reads.
@@ -146,7 +145,7 @@ impl Science {
             self.current = job.document;
             self.pending=Some(PendingEffects{effects:Vec::new(),intents:BTreeMap::new(),authorities:BTreeMap::new()});
             return Completion {ticket:job.ticket,document:job.document,request,target:None,authorities:BTreeMap::new(),intents:BTreeMap::new(),
-                action:"drop_document".into(),decision:None,sync:false,publications:Vec::new(),cohorts:Vec::new(),imported:None,result:Ok((Value::Null,BTreeMap::new()))};
+                action:"drop_document".into(),decision:None,publications:Vec::new(),cohorts:Vec::new(),imported:None,result:Ok((Value::Null,BTreeMap::new()))};
         }
         self.derivatives.sync_sources();
         self.derivatives.set_published(&job.command["published_outputs"]);
@@ -173,7 +172,7 @@ impl Science {
         self.pending=Some(PendingEffects{effects,intents:job.intents.clone(),authorities:job.authorities.clone()});
         if matches!(action.as_str(),"close"|"close_panel") && result.is_ok() { if let Some(document) = self.documents.get_mut(&self.current) { document.reads.clear(); } }
         Completion { ticket:job.ticket, document:job.document, request, target:job.command["panel"].as_str().map(str::to_owned),
-            authorities:job.authorities.clone(), sync:action == "sync_panels", intents:job.intents.clone(),action,decision:None,
+            authorities:job.authorities.clone(), intents:job.intents.clone(),action,decision:None,
             publications, cohorts, imported:None, result }
     }
 

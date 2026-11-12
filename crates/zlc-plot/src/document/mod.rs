@@ -19,7 +19,6 @@ mod pipeline;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
 
 use rayon::prelude::*;
 
@@ -429,7 +428,6 @@ impl<R: DocumentRead> FigureDocument<R> {
     /// `execute(command, reads, publisher, initial_overlays)`.
     pub fn execute(&mut self, command_json: &str, mut reads: BTreeMap<String, R>, publisher: Option<&dyn FitPublisher<R>>,
                    initial_overlays: Option<BTreeMap<String, Option<Arc<ImagePointOverlay>>>>) -> Result<Execution<R>> {
-        let started = Instant::now();
         let command: Json = serde_json::from_str(command_json).map_err(|error| PlotError::value(error.to_string()))?;
         let action = command.get("action").and_then(Json::as_str).ok_or_else(|| json_key_error("action"))?.to_owned();
         let replacing = command.get("initial_document").is_some_and(|value| truthy_json(value));
@@ -521,7 +519,6 @@ impl<R: DocumentRead> FigureDocument<R> {
             "type": "state", "request": command.get("id").cloned().unwrap_or(json!(0)),
             "document": {"path": self.path, "title": title}, "panels": panels, "plot_kinds": plot_kinds(), "error": null,
             "saved": saved, "result": if action == "get_fit" { saved.clone() } else { Json::Null },
-            "scientific_ms": started.elapsed().as_secs_f64() * 1000.0,
         });
         let admitted: BTreeMap<String, R> = self.staged.iter().filter(|(_, staged)| !matches!(staged.scene, StagedScene::Display))
             .map(|(key, staged)| (key.clone(), staged.read.clone())).collect();

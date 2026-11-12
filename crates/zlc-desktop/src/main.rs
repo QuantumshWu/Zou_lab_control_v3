@@ -9,6 +9,7 @@ mod delta;
 mod recent_export;
 mod resources;
 mod state_journal;
+mod reply;
 mod pixels;
 mod windows;
 mod science;
@@ -47,6 +48,7 @@ use serde_json::{Map, Value, json};
 use tao::{event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoopBuilder}, platform::windows::WindowExtWindows};
 use wry::WebContext;
 use zlc_core::runtime::Runtime;
+use reply::Reply;
 
 /// `window`: the page a command came from (None: a remote client or the host itself).
 enum AppEvent { Command { window: Option<windows::Kind>, command: Value }, Completed(science::Completion), Plugin(zlc_plugin_host::HostEvent),
@@ -101,7 +103,7 @@ struct PendingArchive {data:Arc<archive::MountedArchive>,bindings:panels::Panels
 /// One Figure Viewer's document (v2: one window per opened Figure), numbered
 /// as its window is: its panels (`figure-<n>-<k>`), its accepted state and its archive.
 struct Viewer {
-    bindings: panels::Panels, state: Value, error: Option<String>, pending: bool,
+    bindings: panels::Panels, state: Value, pending: bool,
     archive: Option<Arc<archive::MountedArchive>>,
     /// Its window is gone; its panels close, then the document is dropped.
     closing: bool,
@@ -175,9 +177,9 @@ fn settle_board(board: &mut Vec<ViewerPanel>, state: &mut Value) {
 
 impl Viewer {
     fn new(number: u32) -> Self {
-        Self { bindings: panels::Panels::with_prefix(panels::viewer_prefix(number)), error: None, pending: false, archive: None, closing: false,
+        Self { bindings: panels::Panels::with_prefix(panels::viewer_prefix(number)), pending: false, archive: None, closing: false,
             drafts: manual::Drafts::default(), waiting: None, targets: BTreeMap::new(), generations: BTreeMap::new(), derived: Vec::new(), board: Vec::new(), logic: None,
-            state: json!({"type":"state", "request":0, "document":{"path":"", "title":"Figure Viewer"}, "panels":[], "signals":[], "error":null}) }
+            state: json!({"type":"state", "document":{"path":"", "title":"Figure Viewer"}, "panels":[], "signals":[]}) }
     }
 
     fn settle_board(&mut self) { settle_board(&mut self.board, &mut self.state); }
@@ -197,16 +199,10 @@ impl Viewer {
         let window = windows::Kind::FigureViewer(number);
         if replies.is_empty() {
             if !changed { return Ok(()); }
-            self.state["request"] = json!(0);
-            return viewer_message(&mut self.state, |message| windows.send_to(&window, message));
+            return viewer_message(&mut self.state, Reply::default(), |message| windows.send_to(&window, message));
         }
         for (request, result) in replies {
-            self.state["request"] = json!(request);
-            match result {
-                Ok(value) => { self.state["result"] = value; self.state["error"] = Value::Null; }
-                Err(error) => { self.state["result"] = Value::Null; self.state["error"] = json!(error); }
-            }
-            viewer_message(&mut self.state, |message| { remote::settle(message, remote_pending); windows.send_to(&window, message) })?;
+            viewer_message(&mut self.state, Reply::to(&json!(request), result), |message| { remote::settle(message, remote_pending); windows.send_to(&window, message) })?;
         }
         Ok(())
     }
@@ -287,6 +283,20 @@ fn hovering(command: &Value) -> bool {
         && command["buttons"].as_array().is_none_or(|buttons| buttons.is_empty())))
 }
 
+/// The live document told to every page with each reply in turn (reply.rs): the first message
+/// carries what changed, the others only answer; with none it is told as it is. A remote client's
+/// command is answered by the message that answers it.
+fn tell(windows: &windows::Windows, remote_pending: &mut BTreeMap<u64, remote::Pending>, accepted: &mut Value, mut replies: Vec<Reply>) -> Result<(), String> {
+    if replies.is_empty() { replies.push(Reply::default()); }
+    for reply in replies { reply.send(accepted, |message| { remote::settle(message, remote_pending); windows.send(message) })?; }
+    Ok(())
+}
+
+/// The workbench's answers to the commands it took, each a reply of its own.
+fn workbench_replies(workbench: &mut zlc_workbench::Workbench) -> Vec<Reply> {
+    workbench.take_replies().into_iter().map(|(request, result)| Reply::to(&json!(request), result)).collect()
+}
+
 fn shows_panel(accepted: &Value, viewers: &BTreeMap<u32, Viewer>, panel: &Value) -> bool {
     std::iter::once(accepted).chain(viewers.values().map(|viewer| &viewer.state))
         .any(|state| state["panels"].as_array().is_some_and(|rows| rows.iter().any(|row| row["id"] == *panel)))
@@ -301,9 +311,10 @@ fn shows_panel(accepted: &Value, viewers: &BTreeMap<u32, Viewer>, panel: &Value)
 /// page is sent it as a `record` section of its own, only when it changed since
 /// the page was last sent it (`RECORD_UNSENT`). Delta.rs compares only the
 /// sections a message has, so a gesture's message does not walk the record.
-fn viewer_message<T>(viewer: &mut Value, deliver: impl FnOnce(&Value) -> T) -> T {
+/// `reply` is this message's own (reply.rs): the document holds none.
+fn viewer_message<T>(viewer: &mut Value, reply: Reply, deliver: impl FnOnce(&Value) -> T) -> T {
     let (saved, unsent) = viewer.as_object_mut().map_or((Value::Null, false), |document| (document.remove("saved").unwrap_or(Value::Null), document.remove(RECORD_UNSENT).is_some()));
-    let mut message = json!({"type":"state", "request":viewer["request"], "error":viewer["error"], "result":viewer["result"], "saved": saved});
+    let mut message = json!({"type":"state", "saved": saved});
     let mut record = Map::new();
     if let Some(document) = viewer.get_mut("document").and_then(Value::as_object_mut) {
         // The last keys first: each leaves the others' order as it was, and goes back as it was.
@@ -311,7 +322,7 @@ fn viewer_message<T>(viewer: &mut Value, deliver: impl FnOnce(&Value) -> T) -> T
     }
     message["viewer"] = std::mem::take(viewer);
     if unsent { message["record"] = Value::Object(std::mem::take(&mut record)); }
-    let delivered = deliver(&message);
+    let delivered = reply.send(&mut message, deliver);
     *viewer = message["viewer"].take();
     viewer["saved"] = message["saved"].take();
     if unsent { if let Value::Object(sent) = message["record"].take() { record = sent; } }
@@ -581,7 +592,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             if watch_proxy.send_event(AppEvent::RuntimeChanged).is_err() { break; }
         }
     })?);
-    let mut accepted = json!({"type":"state", "request":0, "document":{"path":"", "title":"Figure Viewer"}, "panels":[], "error":null,
+    // The live document as every page is told it; a reply rides only on the message that answers (reply.rs).
+    let mut accepted = json!({"type":"state", "document":{"path":"", "title":"Figure Viewer"}, "panels":[],
         "acquisition":{"state":"idle","produced":0}});
     // The live document's panel rows as its last accepted job answered them, before they were decorated.
     let mut answered_rows = Value::Null;
@@ -618,7 +630,6 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut discard_pulse = false;
     let mut reset_document = false;
     let mut pending_archive:Option<PendingArchive>=None;
-    let mut user_error: Option<String> = None;
     // What Stop all drives safe: the pulse board and every open device's outputs.
     let safe_actions = zlc_core::control::SafeActions::new();
     accepted["share"] = share.state();
@@ -826,7 +837,6 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     if action == "frontend_error" {
                         let error = format!("Frontend: {}", command["error"].as_str().unwrap_or("unknown presentation error"));
                         eprintln!("{}",json!({"type":"frontend-error","error":error}));
-                        accepted["error"] = json!(error);
                         // Do not echo the state which failed to reconcile: that
                         // would turn one view error into an IPC feedback loop.
                         return match &from { Some(kind) => windows.send_to(kind, &json!({"type":"error","request":command["id"],"error":error})), None => Ok(()) };
@@ -904,9 +914,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         accepted["acquisition"] = builtin.acquisition();
                         workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
                         let failures = safe_actions.make_safe();
-                        accepted["request"] = command["id"].clone();
-                        accepted["error"] = if failures.is_empty() { Value::Null } else { json!(format!("Not every output reported safe: {}", failures.join("; "))) };
-                        return windows.send(&accepted);
+                        let reply = Reply::to(&command["id"], if failures.is_empty() { Ok(Value::Null) } else { Err(format!("Not every output reported safe: {}", failures.join("; "))) });
+                        return tell(&windows, &mut remote_pending, &mut accepted, vec![reply]);
                     }
                     if matches!(action.as_str(), "share_start" | "share_stop" | "share_decide") {
                         // Browser sharing: the window's state and pictures to approved browsers.
@@ -923,9 +932,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             _ => share.decide(command["client"].as_str().unwrap_or(""), command["allow"].as_bool().unwrap_or(false)),
                         };
                         accepted["share"] = share.state();
-                        accepted["request"] = command["id"].clone();
-                        accepted["error"] = outcome.err().map_or(Value::Null, Value::String);
-                        return windows.send(&accepted);
+                        return tell(&windows, &mut remote_pending, &mut accepted, vec![Reply::to(&command["id"], outcome.map(|_| Value::Null))]);
                     }
                     if action == "show_window" {
                         let kind = command["window"].as_str().and_then(windows::Kind::parse)
@@ -1002,8 +1009,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             archive.read_record(move |saved| { let _ = read.send_event(AppEvent::RecordRead { document, saved }); });
                             show_record(&mut viewer.state, &archive);
                         }
-                        viewer.state["request"] = command["id"].clone();
-                        return viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(document), message));
+                        return viewer_message(&mut viewer.state, Reply::done(&command["id"]), |message| windows.send_to(&windows::Kind::FigureViewer(document), message));
                     }
                     if action == "open_recorded_pulse" {
                         let key = command["key"].as_str().unwrap_or("");
@@ -1052,10 +1058,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(number) = viewer_number {
                             let viewer = viewers.get_mut(&number).filter(|viewer| !viewer.closing).ok_or_else(|| format!("FigureViewer {number} is not open"))?;
                             let result = viewer.board_command(&action, &command)?;
-                            viewer.state["request"] = command["id"].clone();
-                            viewer.state["result"] = result;
-                            viewer.state["error"] = Value::Null;
-                            return viewer_message(&mut viewer.state, |message| {
+                            return viewer_message(&mut viewer.state, Reply::to(&command["id"], Ok(result)), |message| {
                                 remote::settle(message, &mut remote_pending);
                                 windows.send_to(&windows::Kind::FigureViewer(number), message)
                             });
@@ -1099,7 +1102,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let request = command["id"].as_u64().unwrap_or(0);
                         if action == "start_camera" && builtin.active() { return Err("Camera acquisition is already active".into()); }
-                        if action == "start_camera" { reset_document = bindings.is_empty(); user_error = None; }
+                        if action == "start_camera" { reset_document = bindings.is_empty(); }
                         let mut host = workbench_host::DesktopHost { runtime: &runtime, bindings: &mut bindings, accepted: &accepted,
                             queue: &mut queue, targets: &mut pending_targets };
                         let alias = match action.as_str() {
@@ -1115,25 +1118,15 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         // A changed Overlay redraws the picture it is of, data or not.
                         if action == "set_panel_overlay" { pending.store(true, Ordering::Release); }
                         accepted["acquisition"] = builtin.acquisition();
-                        if let Some(result) = alias {
-                            result?;
-                            accepted["request"] = command["id"].clone(); accepted["error"] = Value::Null;
-                        }
-                        let mut replied = false;
-                        for (request, result) in workbench.take_replies() {
-                            replied = true;
-                            accepted["request"] = json!(request);
-                            match result {
-                                Ok(value) => { accepted["result"] = value; accepted["error"] = Value::Null; }
-                                Err(error) => { accepted["result"] = Value::Null; accepted["error"] = json!(error); }
-                            }
-                            remote::settle(&accepted, &mut remote_pending);
-                        }
+                        let mut replies = Vec::new();
+                        if let Some(result) = alias { result?; replies.push(Reply::done(&command["id"])); }
+                        let answered = workbench_replies(&mut workbench);
                         // A device command handed to its device changes nothing here until the device
                         // answers (an SLM Editor's paint stroke is one): no state goes out for it now.
-                        if !replied && workbench.handles_command(&action) { return Ok(()); }
+                        if answered.is_empty() && workbench.handles_command(&action) { return Ok(()); }
+                        replies.extend(answered);
                         workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
-                        return windows.send(&accepted);
+                        return tell(&windows, &mut remote_pending, &mut accepted, replies);
                     }
                     // A command of an opened Figure goes to its Figure Viewer's document: one
                     // from that window, of one of its panels, of its data, or `open {window}`.
@@ -1221,11 +1214,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         viewer.drafts.list.retain(|draft| draft.open || draft.applied());
                         viewer.state["data"] = viewer.drafts.state();
                         viewer.state["data_focus"] = json!(focus);
-                        viewer.state["request"] = command["id"].clone();
-                        viewer.state["error"] = Value::Null;
                         // This answer saved nothing (a Save as whose dialog was cancelled too), whatever an earlier save did.
                         viewer.state["saved"] = Value::Null;
-                        viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(document), message))?;
+                        viewer_message(&mut viewer.state, Reply::done(&command["id"]), |message| windows.send_to(&windows::Kind::FigureViewer(document), message))?;
                         viewer.state["data_focus"] = Value::Null;
                         return Ok(());
                     }
@@ -1240,8 +1231,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 if signal.is_empty() { workbench.console_note(format!("added {panel}; choose a signal in Setting")); }
                                 // v2 update_panel_state: a panel given a signal says what it is doing.
                                 else if runtime.signals().iter().any(|item| item.signal.as_ref() == signal && item.published) {
-                                    workbench.console_note(format!("{panel} is preparing {}", workbench.signal_label(signal)));
-                                } else { workbench.console_warning(format!("{} has not published yet; {panel} remains ready", workbench.signal_label(signal))); }
+                                    workbench.console_panel_note(&panel, format!("{panel} is preparing {}", workbench.signal_label(signal)), "task");
+                                } else { workbench.console_panel_note(&panel, format!("{} has not published yet; {panel} remains ready", workbench.signal_label(signal)), "warning"); }
                                 panel
                             };
                         // A new grid starts with its cell the data's choice (v2 cell_kind "").
@@ -1271,8 +1262,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             // v2 update_panel_state: a panel given another signal says what it is doing.
                             if let Some(signal) = patch["signal"].as_str().filter(|signal| !in_viewer && !signal.is_empty() && *signal != before) {
                                 let words = workbench.signal_label(signal);
-                                if runtime.signals().iter().any(|item| item.signal.as_ref() == signal && item.published) { workbench.console_note(format!("{panel} is preparing {words}")); }
-                                else { workbench.console_warning(format!("{words} has not published yet; {panel} remains ready")); }
+                                if runtime.signals().iter().any(|item| item.signal.as_ref() == signal && item.published) { workbench.console_panel_note(&panel, format!("{panel} is preparing {words}"), "task"); }
+                                else { workbench.console_panel_note(&panel, format!("{words} has not published yet; {panel} remains ready"), "warning"); }
                             }
                         }
                         if let Some(epoch) = set.epoch(&panel) {
@@ -1431,7 +1422,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             windows.send_to(&kind, &slm.message(device))?;
                             for (panel, sequence, front) in slm.fronts(device) { windows.submit(panel, sequence, front)?; }
                         }
-                        if let windows::Kind::FigureViewer(number) = &kind { if let Some(viewer) = viewers.get_mut(number) { viewer.state["processor_types"] = workbench.pure_processors(); viewer.state[RECORD_UNSENT] = json!(true); viewer_message(&mut viewer.state, |message| windows.send_to(&kind, message))?; } }
+                        if let windows::Kind::FigureViewer(number) = &kind { if let Some(viewer) = viewers.get_mut(number) { viewer.state["processor_types"] = workbench.pure_processors(); viewer.state[RECORD_UNSENT] = json!(true); viewer_message(&mut viewer.state, Reply::default(), |message| windows.send_to(&kind, message))?; } }
                         if kind == windows::Kind::PulseEditor {
                             let mut state = json!({"type": "state"});
                             state["pulse"] = pulse.state();
@@ -1500,7 +1491,6 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         // Parsing has not touched the viewer's document. Only
                         // a fully rendered candidate can replace its panels.
                         if let Some(feedback)=completion.decision.take() {let _=feedback.send(science::PresentationDecision::default());}
-                        viewer.state["request"]=json!(completion.request);
                         let ids=viewer.bindings.reserve_ids(decoded.items.len())?;
                         let data=Arc::new(archive::MountedArchive::mount(runtime.clone(),decoded,ids)?);
                         let candidate=panels::Panels::from_inputs(&runtime,&data.inputs(),&panels::viewer_prefix(document))?;
@@ -1531,7 +1521,6 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 let mut next=candidate.bindings;next.continue_ids_from(&viewer.bindings);
                                 viewer.bindings=next;
                                 drop(viewer.archive.replace(candidate.data));
-                                viewer.error=None;
                             }
                         }
                     }
@@ -1541,9 +1530,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     let archive = viewers.get(&document).and_then(|viewer| viewer.archive.clone());
                     // The data working copies this viewer applied are its data too (v2 `_project_data_choices`).
                     let manual_data = viewers.get(&document).map(|viewer| viewer.drafts.offered()).unwrap_or_default();
-                    let (bindings, accepted, user_error, viewer_pending, mut viewer_data) = match viewers.get_mut(&document) {
-                        Some(viewer) => (&mut viewer.bindings, &mut viewer.state, &mut viewer.error, Some(&mut viewer.pending), Some((&mut viewer.drafts, &mut viewer.targets, &mut viewer.board))),
-                        None => (&mut bindings, &mut accepted, &mut user_error, None, None),
+                    let (bindings, accepted, viewer_pending, mut viewer_data) = match viewers.get_mut(&document) {
+                        Some(viewer) => (&mut viewer.bindings, &mut viewer.state, Some(&mut viewer.pending), Some((&mut viewer.drafts, &mut viewer.targets, &mut viewer.board))),
+                        None => (&mut bindings, &mut accepted, None, None),
                     };
                     let feedback=completion.decision;
                     let mut decision=science::PresentationDecision::default();
@@ -1570,11 +1559,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         Ok((state, fronts)) if !in_viewer && completion.action == "pointer" && fronts.is_empty() && stale.is_empty()
                             && stale_targets.is_empty() && state["error"].is_null() && state["panels"] == answered_rows
                             && current_authorities.keys().eq(completion.authorities.keys()) => {
-                            *user_error = None;
                             decision.targets.extend(panel_ids(&state));
-                            accepted["request"] = json!(completion.request);
-                            accepted["error"] = Value::Null;
-                            windows.send(accepted)?;
+                            tell(&windows, &mut remote_pending, accepted, vec![Reply::done(&json!(completion.request))])?;
                         }
                         Ok((mut state, mut fronts)) => {
                             if !in_viewer { answered_rows = state["panels"].clone(); }
@@ -1586,10 +1572,6 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                     stale.extend(cohort.iter().cloned());
                                 }
                             }
-                            if completion.sync {
-                                if state["error"].is_null() { state["error"] = json!(*user_error); }
-                            }
-                            else { *user_error = None; }
                             if superseded && completion.request != 0 { state["error"] = json!(superseded_error); }
                             if !in_viewer {
                                 state["acquisition"] = accepted["acquisition"].clone();
@@ -1684,6 +1666,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             if !in_viewer {
+                                // A panel that has drawn is no longer preparing: its console line goes.
+                                workbench.panels_drawn(fronts.keys().map(String::as_str));
                                 // A prepared panel's document now holds the target it was added with.
                                 pending_targets.retain(|panel, _| !ids.contains(panel));
                                 workbench_host::decorate(&workbench, &runtime, bindings, &pending_targets, &tools, &mut state);
@@ -1723,8 +1707,12 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 state["data"] = drafts.state();
                                 settle_board(board, &mut state);
                             }
+                            // The worker's answer is this message's (reply.rs), not the document's.
+                            let reply = Reply::take(&mut state);
                             *accepted = state;
-                            if in_viewer { viewer_message(accepted, |message| windows.send_to(&windows::Kind::FigureViewer(document), message))?; } else { windows.send(accepted)?; }
+                            if in_viewer {
+                                viewer_message(accepted, reply, |message| { remote::settle(message, &mut remote_pending); windows.send_to(&windows::Kind::FigureViewer(document), message) })?;
+                            } else { tell(&windows, &mut remote_pending, accepted, vec![reply])?; }
                             let mut kept = ids.clone();
                             kept.extend(other.iter().cloned());
                             kept.push(pulse_host::PREVIEW_PANEL.to_owned());
@@ -1741,15 +1729,15 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                     accepted["data"] = drafts.state();
                                 }
                             }
-                            if completion.request != 0 { *user_error = Some(error.clone()); }
-                            accepted["request"] = json!(completion.request);
-                            accepted["error"] = json!(error);
-                            if in_viewer { viewer_message(accepted, |message| windows.send_to(&windows::Kind::FigureViewer(document), message))?; } else { windows.send(accepted)?; }
+                            let reply = Reply::to(&json!(completion.request), Err(error.clone()));
+                            if in_viewer {
+                                viewer_message(accepted, reply, |message| { remote::settle(message, &mut remote_pending); windows.send_to(&windows::Kind::FigureViewer(document), message) })?;
+                            } else { tell(&windows, &mut remote_pending, accepted, vec![reply])?; }
                             eprintln!("{}", json!({"type":"scientific-error","request":completion.request,"error":error}));
                         }
                     }
-                    // The live board's answers settle at the end of the turn; the viewer's here.
-                    if in_viewer { remote::settle(accepted, &mut remote_pending); remote::check_waiters(accepted, &mut waiters, None); }
+                    // The live board's waits are checked at the end of the turn; the viewer's here.
+                    if in_viewer { remote::check_waiters(accepted, &mut waiters, None); }
                     if let Some(feedback)=feedback {let _=feedback.send(decision);}
                     if closing && queue.is_empty() {
                         if let Some(worker) = worker.take() { let _ = worker.join(); }
@@ -1763,10 +1751,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     return Err(error);
                 }
                 Event::UserEvent(AppEvent::InvalidMessage(error)) => return Err(format!("Invalid UI command: {error}")),
-                Event::UserEvent(AppEvent::DerivationError(error)) => {
-                    user_error = Some(error.clone());
-                    return Err(format!("Scientific derivation: {error}"));
-                }
+                Event::UserEvent(AppEvent::DerivationError(error)) => return Err(format!("Scientific derivation: {error}")),
                 Event::UserEvent(AppEvent::Remote(call)) => {
                     let answer = |result: Result<zlc_bus::mcp::ToolOutput, String>| { let _ = call.reply.send(result); };
                     if closing { answer(Err("The instrument is closing".into())); return Ok(()); }
@@ -1780,7 +1765,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             // The Figure Viewer's document: the opened archive, its panels and its Data.
                             state["viewers"] = Value::Array(viewers.iter().filter(|(_, viewer)| !viewer.closing).map(|(number, viewer)| {
                                 let mut shown = viewer.state.clone();
-                                if let Some(object) = shown.as_object_mut() { for key in ["type", "request", "error", "result"] { object.remove(key); } }
+                                if let Some(object) = shown.as_object_mut() { object.remove("type"); }
                                 shown["window"] = json!(windows::Kind::FigureViewer(*number).key());
                                 shown
                             }).collect());
@@ -1794,7 +1779,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(rows) = state["logic"].as_array_mut() { rows.retain(|row| row["node_id"] == node); }
                             }
                             if let (Some(sections), Some(object)) = (call.params["sections"].as_array(), state.as_object_mut()) {
-                                object.retain(|key, _| key == "type" || key == "request" || sections.iter().any(|section| section == key.as_str()));
+                                object.retain(|key, _| key == "type" || sections.iter().any(|section| section == key.as_str()));
                             }
                             answer(Ok(zlc_bus::mcp::ToolOutput { json: state, png: None }));
                         }
@@ -1882,8 +1867,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(viewer) = viewers.get_mut(&document) {
                         if let Some(archive) = viewer.archive.clone().filter(|archive| archive.holds(&saved) && viewer.state["document"]["path"] == archive.path()) {
                             show_record(&mut viewer.state, &archive);
-                            viewer.state["request"] = json!(0);
-                            viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(document), message))?;
+                            viewer_message(&mut viewer.state, Reply::default(), |message| windows.send_to(&windows::Kind::FigureViewer(document), message))?;
                         }
                     }
                 }
@@ -1979,8 +1963,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             // What the open Viewers can add is known now.
                             for (number, viewer) in viewers.iter_mut().filter(|(_, viewer)| !viewer.closing) {
                                 viewer.state["processor_types"] = workbench.pure_processors();
-                                viewer.state["request"] = json!(0);
-                                if !closing { viewer_message(&mut viewer.state, |message| windows.send_to(&windows::Kind::FigureViewer(*number), message))?; }
+                                if !closing { viewer_message(&mut viewer.state, Reply::default(), |message| windows.send_to(&windows::Kind::FigureViewer(*number), message))?; }
                             }
                             Vec::new()
                         }
@@ -1991,16 +1974,10 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     workbench_host::deliver(&mut workbench, &builtin, &mut host);
                     workbench.on_runtime(&mut host);
                     accepted["acquisition"] = builtin.acquisition();
-                    for (request, result) in workbench.take_replies() {
-                        accepted["request"] = json!(request);
-                        match result {
-                            Ok(value) => { accepted["result"] = value; accepted["error"] = Value::Null; }
-                            Err(error) => { accepted["result"] = Value::Null; accepted["error"] = json!(error); }
-                        }
-                        remote::settle(&accepted, &mut remote_pending);
-                    }
+                    let replies = workbench_replies(&mut workbench);
                     workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
-                    if !closing { windows.send(&accepted)?; }
+                    if !closing { tell(&windows, &mut remote_pending, &mut accepted, replies)?; }
+                    else { for reply in replies { reply.send(&mut accepted, |message| remote::settle(message, &mut remote_pending)); } }
                     tell_editor_claims(&mut pulse, &workbench);
                         // What the sequencer states of itself (its trigger lanes, how often each rises in what it holds)
                         // reaches the workbench when it changes, as any device's facts do.
@@ -2236,9 +2213,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
         })();
         if let Err(error) = result {
             eprintln!("{}", json!({"type":"desktop-error","error":error}));
-            accepted["error"] = json!(error);
-            if let Some(request) = error_request { accepted["request"] = request; }
-            if let Err(error) = windows.send(&accepted) { eprintln!("Cannot report UI error: {error}"); }
+            let reply = Reply::to(&error_request.unwrap_or(Value::Null), Err(error));
+            if let Err(error) = tell(&windows, &mut remote_pending, &mut accepted, vec![reply]) { eprintln!("Cannot report UI error: {error}"); }
         }
         // v2's opening rules: Init opens TaskConsole in front of Devices; Shut down puts Devices back.
         let now = matches!(accepted["apparatus"]["action"].as_str(), Some("apply" | "shut_down"));
@@ -2252,7 +2228,6 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 if !live_device(&accepted, device) { windows.close(&kind); slm.forget(device); }
             }
         }
-        remote::settle(&accepted, &mut remote_pending);
         remote::check_waiters(&accepted, &mut waiters, None);
         // The turn at which a held panel may take its new data.
         beat.arm(cadence.wake_at());
@@ -2280,11 +2255,12 @@ mod tests {
     #[test]
     fn a_viewer_message_carries_the_save_answer_as_its_own_section() {
         let refused = json!({"exists": [r"C:\d\a.png", r"C:\d\a.npz"]});
-        let mut viewer = json!({"request": 7, "error": null, "result": null, "panels": [], "saved": refused});
-        let sent = viewer_message(&mut viewer, |message| message.clone());
+        let mut viewer = json!({"panels": [], "saved": refused});
+        let sent = viewer_message(&mut viewer, Reply::done(&json!(7)), |message| message.clone());
         assert_eq!(sent["saved"], refused);
         assert!(sent["viewer"].get("saved").is_none(), "{sent}");
         assert_eq!((sent["request"].clone(), viewer["saved"].clone(), viewer["panels"].clone()), (json!(7), refused.clone(), json!([])), "the document is given back whole");
+        assert!(viewer.get("request").is_none() && sent["viewer"].get("request").is_none(), "the reply is the message's, not the document's: {viewer}");
         // What the page is sent (windows.send_to): `saved` a section of its own.
         let text = delta::Sent::default().encode(sent.as_object().unwrap(), |_| true, |_| true).unwrap();
         let page: Value = serde_json::from_str(&text).unwrap();
@@ -2301,15 +2277,14 @@ mod tests {
         };
         let mut sent = delta::Sent::default();
         let mut message = |viewer: &mut Value, request: u64| -> (Value, String) {
-            viewer["request"] = json!(request);
-            let text = viewer_message(viewer, |message| {
+            let text = viewer_message(viewer, Reply::done(&json!(request)), |message| {
                 assert!(message["viewer"]["document"].get("info").is_none() && message["viewer"]["document"].get("flow").is_none(), "{message}");
                 sent.encode(message.as_object().unwrap(), |_| true, |_| true)
             }).unwrap();
             (serde_json::from_str(&text).unwrap(), text)
         };
         let told = |page: &Value, path: Value| page["changes"].as_array().unwrap().iter().find(|change| change[0] == path).map(|change| change[1].clone());
-        let mut viewer = json!({"request": 0, "error": null, "result": null, "panels": [], "signals": []});
+        let mut viewer = json!({"panels": [], "signals": []});
 
         opened(&mut viewer, "a.npz", "Logic");
         let (first, _) = message(&mut viewer, 1);
@@ -2319,7 +2294,7 @@ mod tests {
 
         let held = viewer["document"].clone();
         let (second, text) = message(&mut viewer, 2);
-        assert_eq!(second["changes"], json!([[["viewer", "request"], 2]]), "{text}");
+        assert_eq!((&second["request"], &second["changes"]), (&json!(2), &json!([])), "{text}");
         assert!(!text.contains("Logic"), "{text}");
         assert_eq!(viewer["document"], held, "the host's document keeps it whole");
         assert_eq!(viewer["document"].as_object().unwrap().keys().collect::<Vec<_>>(), ["path", "title", "record", "info", "flow"], "and in its order");
@@ -2341,12 +2316,12 @@ mod tests {
     /// A page made again (a reload) holds nothing: its first state has the record whole.
     #[test]
     fn a_reloaded_viewer_page_is_sent_the_record_again() {
-        let mut viewer = json!({"request": 0, "error": null, "result": null, "document": {"path": "a.npz", "record": "read", "info": [["Logic", []]], "flow": {"nodes": [], "edges": []}}, RECORD_UNSENT: true});
+        let mut viewer = json!({"document": {"path": "a.npz", "record": "read", "info": [["Logic", []]], "flow": {"nodes": [], "edges": []}}, RECORD_UNSENT: true});
         let mut sent = delta::Sent::default();
-        assert!(viewer_message(&mut viewer, |message| sent.encode(message.as_object().unwrap(), |_| true, |_| true)).unwrap().contains("Logic"));
-        assert!(viewer_message(&mut viewer, |message| sent.encode(message.as_object().unwrap(), |_| true, |_| true)).is_none_or(|text| !text.contains("Logic")));
+        assert!(viewer_message(&mut viewer, Reply::default(), |message| sent.encode(message.as_object().unwrap(), |_| true, |_| true)).unwrap().contains("Logic"));
+        assert!(viewer_message(&mut viewer, Reply::default(), |message| sent.encode(message.as_object().unwrap(), |_| true, |_| true)).is_none_or(|text| !text.contains("Logic")));
         sent.reset();
         viewer[RECORD_UNSENT] = json!(true);
-        assert!(viewer_message(&mut viewer, |message| sent.encode(message.as_object().unwrap(), |_| true, |_| true)).unwrap().contains("Logic"));
+        assert!(viewer_message(&mut viewer, Reply::default(), |message| sent.encode(message.as_object().unwrap(), |_| true, |_| true)).unwrap().contains("Logic"));
     }
 }

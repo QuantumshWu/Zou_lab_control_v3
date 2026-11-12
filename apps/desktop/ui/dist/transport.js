@@ -151,8 +151,11 @@ export class Transport {
         const handlers = this.handlers;
         if (data.type === "state") {
             const state = this.expand(data);
+            // A reply rides on the one message that answers it (reply.rs); request 0, or none, answers nothing.
+            if (!state.request)
+                state.request = undefined;
             // Another window's answer: its sections are news, its request and error are not ours.
-            if (state.request !== undefined && state.request !== 0 && !this.owns(state.request)) {
+            if (state.request !== undefined && !this.owns(state.request)) {
                 handlers.state({ ...state, request: undefined, error: undefined });
                 handlers.changed();
                 return;
@@ -168,6 +171,8 @@ export class Transport {
                         answer.resolve(answer.pick(state, this.sections));
                 }
             }
+            // An error stands until this window's next command is answered without one: a message that
+            // answers none of its commands (a broadcast) never takes it away.
             if (state.error)
                 this.lastError = state.error;
             else if (state.request !== undefined)
@@ -192,11 +197,11 @@ export class Transport {
             this.post({ action: "mappings_released", mapping: data.mapping });
         }
         else if (data.type === "error") {
-            if (data.request !== undefined && data.request !== 0 && !this.owns(data.request)) {
+            if (data.request && !this.owns(data.request)) {
                 handlers.changed();
                 return;
             }
-            if (data.request !== undefined) {
+            if (data.request) {
                 const request = Number(data.request);
                 this.pending.delete(request);
                 this.answers.get(request)?.reject(Error(String(data.error)));

@@ -239,6 +239,9 @@ pub struct Workbench {
     /// each is said again only when it changes.
     pub(crate) notes_said: Vec<String>,
     pub(crate) task_said: Option<(String, String)>,
+    /// A panel's own line (v2 update_panel_state: "<panel> is preparing <signal>", or that its
+    /// signal has not published): the panel, and the line, which goes once that panel has drawn.
+    pub(crate) panel_said: Option<(String, (String, &'static str))>,
     pub(crate) tickets: BTreeMap<u64, Ticket>,
     pub(crate) next_ticket: u64,
     pub(crate) replies: Vec<(u64, Result<Value, String>)>,
@@ -311,7 +314,7 @@ impl Workbench {
             devices: BTreeMap::new(), nodes: Vec::new(), runs: Vec::new(), run_sequences: BTreeMap::new(), board: layout::Board::default(), notes: Vec::new(),
             report: (String::new(), "idle"), settling: None, settling_since: None,
             // v2 set_deriving(False) when the console is built.
-            console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None,
+            console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None, panel_said: None,
             tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), applied_simulation: None, scan: None,
             resolution: None, found: Vec::new(), bundles: BTreeMap::new(),
             selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default(), follows_sources: false })
@@ -410,6 +413,21 @@ impl Workbench {
     /// The desktop's own console commands (a blank panel added) say their line here too.
     pub fn console_note(&mut self, text: String) { self.console_report = (text, "task"); }
     pub fn console_warning(&mut self, text: String) { self.console_report = (text, "warning"); }
+    /// A panel's own line of what it is waiting for (`task`: its signal is being prepared; `warning`:
+    /// its signal has not published): it stands until that panel has drawn (`panels_drawn`) or closed.
+    pub fn console_panel_note(&mut self, panel: &str, text: String, severity: &'static str) {
+        self.console_report = (text, severity);
+        self.panel_said = Some((panel.to_owned(), self.console_report.clone()));
+    }
+    /// Panels have drawn: a line still saying what one of them was waiting for is no longer true.
+    pub fn panels_drawn<'a>(&mut self, drawn: impl IntoIterator<Item = &'a str>) {
+        let Some((panel, _)) = &self.panel_said else { return };
+        if drawn.into_iter().any(|drawn| drawn == panel) { self.panel_line_over(); }
+    }
+    fn panel_line_over(&mut self) {
+        // Only the line it set: a later line (a run started meanwhile) stays.
+        if self.panel_said.take().is_some_and(|(_, line)| line == self.console_report) { self.console_report = (String::new(), "idle"); }
+    }
 
     fn dispatch_command(&mut self, name: &str, params: &Value, origin: &Origin, request: u64, host: &mut dyn Host) -> Result<Option<Value>, String> {
         let origin_text = match origin { Origin::Operator => "operator".to_owned(), Origin::Remote(client) => client.clone() };
@@ -673,6 +691,7 @@ impl Workbench {
     pub fn panel_added(&mut self, panel: &str) { self.board.add(panel); }
     /// A closed panel's region gives back what it set (v2 `_remove_panel_now`).
     pub fn panel_closed(&mut self, panel: &str) {
+        if self.panel_said.as_ref().is_some_and(|(said, _)| said == panel) { self.panel_line_over(); }
         self.board.remove(panel);
         self.routed_selections.remove(panel);
         self.restore_producer_draft(panel);
