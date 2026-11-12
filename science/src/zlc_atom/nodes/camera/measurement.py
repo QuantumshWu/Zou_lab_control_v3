@@ -786,7 +786,7 @@ class AlignedCapture:
         self.dropped += 1
         journal.note("camera", "frame_dropped", key=self.node.request.camera_key, ordinal=int(record.source_ordinal), reason=reason)
         if self._say is not None:
-            self._say(f"frame {int(record.source_ordinal)} is no trigger of the pulse ({reason}); {self.dropped} dropped so far")
+            self._say(f"frame {int(record.source_ordinal)} is in no shot ({reason}); {self.dropped} dropped so far")
 
     def _publish(self, shot: "Shot[CameraFrameRecord]") -> None:
         if self.finished:
