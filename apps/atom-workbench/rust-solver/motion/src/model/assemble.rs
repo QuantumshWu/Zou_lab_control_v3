@@ -2131,7 +2131,9 @@ impl Model {
 
     /// The same from every beam's amplitude and the near forms there (the Hermitian ones to first order; `Site::formed`),
     /// the fourth order's part made of the same forms. Without near forms (None): the terms that hold none, and no
-    /// fourth order.
+    /// fourth order. Of forms to order 0 the generator is the same, bit for bit -- a form's value is the same number
+    /// at every order --, and the force's forms are without their values' slopes: what a reader of the generator
+    /// alone asks for (tabulate.rs `Model::table_reads`).
     pub(crate) fn middle_of(&self, plan: &Arc<Plan>, t: f64, amplitudes: &[Amplitude], near: Option<&NearValues>) -> Middle<'_> {
         let mut point = Held::<Site>::take();
         point.beams.clear();

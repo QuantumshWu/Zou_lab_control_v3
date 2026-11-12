@@ -510,6 +510,8 @@ fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation
                 let sample = crate::model::Sample { cluster, at: crate::model::Point { r, kappa, t }, psi };
                 let far = model.action(&sample, &model.middle_of(&plan, t, &amplitudes, None));
                 let exact = model.action(&sample, &model.middle_of(&plan, t, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1, &model.coherent_dressing()))));
+                // The generator reads the forms' values alone: of the forms to order 0 it is the same, bit for bit.
+                assert_eq!(exact, model.action(&sample, &model.middle_of(&plan, t, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 0, &model.coherent_dressing())))), "{name}, cluster {cluster}: the generator of the forms' values alone");
                 let (a, b) = (model.action(&sample, &ours), model.action(&sample, &theirs));
                 let error = |first: &[C64], second: &[C64]| model.form_error(&sample, &far, first, second, tables.thermal).parameter;
                 coarse += error(&b, &a);
