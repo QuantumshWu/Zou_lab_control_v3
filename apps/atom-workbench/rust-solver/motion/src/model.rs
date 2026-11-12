@@ -837,9 +837,9 @@ impl<'a> Run<'a> {
     }
     /// A cluster's generator at a position and time, for every momentum and along every path through the point (assemble.rs
     /// `Middle`): a step's one middle.
-    pub fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Middle<'_> {
+    pub fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Middle<'a> {
         let (plan, table) = &self.plans[cluster];
-        self.model.middle(plan, r, t, *table).among(&self.plans)
+        self.model.middle(plan, r, t, *table)
     }
 }
 

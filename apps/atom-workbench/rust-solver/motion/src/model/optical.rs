@@ -4,16 +4,26 @@
 //! The exact first-order correlation of the force at a point is D_x = Re Tr[𝓕 𝓡 X̄], 𝓡 = (−𝓛)⁻¹ on the traceless
 //! densities, X̄ = 𝓕[ρ̄] − F̄ρ̄; a trajectory carries its Ehrenfest mean's own fluctuation D_E, and what it drops of a state
 //! ψ is within(ψ) = Re Tr[𝓕 𝓡 X_ψ], X_ψ = 𝓕[ψψ†] − ⟨F⟩ψψ† (D_x = D_E + E[within]). The densities split by the model's
-//! structure: P, the ground manifold's traceless part (its populations less their mean over every ground state of the
-//! model, and its coherences within each cluster) -- the slow optical pumping a folded cluster keeps --, and Q = 1 − P:
-//! every entry with an excited index, and the ground block's trace, the identity on the ground states over their number.
-//! 𝓡_Q = Q(−Q𝓛Q)⁻¹Q relaxes at about Γ/2 or faster: every Q direction holds an excited index or the excited trace
-//! (measured 19.06–19.7/µs on three models; that it holds in general is the design's hypothesis). Its part of a state's
-//! correlation, within_Q(ψ) = Re Tr[𝓕 𝓡_Q X_ψ], is local: the trajectory takes it as white noise of that rate, and its
-//! mean over the trajectories is Re Tr[𝓕 𝓡_Q E[X_ψ]] by linearity, whatever the state's own fast dynamics. The rest
-//! passes through the ground manifold's own state, which the trajectory keeps (the Ehrenfest error of the ground
-//! manifold's superpositions, a model limitation the ledger names). A folded cluster has no Q direction a state of it
-//! enters: its fold holds that part as its photons' local second moment (photon.rs).
+//! structure into Q -- every entry with an excited index, and the ground trace -- and P, the ground manifold's traceless
+//! part (its population differences and its coherences): the slow optical pumping a folded cluster keeps. 𝓡_Q =
+//! Q(−Q𝓛Q)⁻¹Q relaxes at about Γ/2 or faster: every Q direction holds an excited index or the excited trace (measured
+//! 19.06–19.7/µs on three models; that it holds in general is the design's hypothesis). Its part of a state's correlation,
+//! within_Q(ψ) = Re Tr[𝓕 𝓡_Q X_ψ], is local: the trajectory takes it as white noise of that rate, and its mean over the
+//! trajectories is Re Tr[𝓕 𝓡_Q E[X_ψ]] by linearity, whatever the state's own fast dynamics. The rest passes through the
+//! ground manifold's own state, which the trajectory keeps (the Ehrenfest error of the ground manifold's superpositions, a
+//! model limitation the ledger names). A folded cluster has no Q direction a state of it enters: its fold holds that part
+//! as its photons' local second moment (photon.rs).
+//!
+//! # The ground trace: the state's own cluster's
+//! Q takes a state's ground trace as the identity on the ground states of the cluster it lies in, over their number, d =
+//! 1_g/g: Q X = E X + (Tr_g X) d, a projector whatever X's other blocks (P = 1 − Q keeps every ground block's traceless part
+//! and every other cluster's ground populations). The excited states' decay is read as landing where their own cluster's
+//! drives take it up again -- a cycling transition's photon does, and a leak's is the rare event P carries. The split is
+//! exact in the mean for any projector (above); this one leaves the least to P where it was compared: on R2_RECOIL's
+//! kept probe (a two-state cluster beside seven other ground states) the trajectory's D_E + E[within_Q] reads the folded
+//! drive's absorbed diffusion to 3·10⁻⁴, where the trace spread over every ground state of the model read it to 8·10⁻³ --
+//! the mean ground force over states the atom does not visit (tests, `a_kept_and_a_folded_drive_diffuse_alike`). And a
+//! cluster's K is its own: no other cluster at the point enters.
 //!
 //! # K_Q
 //! within_Q(ψ) = Re Tr[K X_ψ] for the Hermitian K = 𝓡_Q†[F] (one per lab axis), F = −G the force of the generator's
@@ -21,25 +31,23 @@
 //! ⟨K_a⟩⟨F_b⟩. K is defined up to the identity (X_ψ is traceless); it is taken with no ground-ground entries.
 //!
 //! In the coordinates y_E of the entries with an excited index (a Hermitian y by its excited block's upper triangle and
-//! its excited-ground block, `Coordinates`), a traceless Q density is y_E − (τ/N) 1_g, τ = Tr y_E the excited trace and
-//! N the model's ground states, and −Q𝓛Q on it is
+//! its excited-ground block, `Coordinates`), a traceless Q density is y_E − τ d, τ = Tr y_E the excited trace, and −Q𝓛Q
+//! on it is
 //!
 //! ```text
-//!   A′ y = A y − (τ/N) b,    A y = E[𝓛 y],   b = E[𝓛 1_g],
+//!   A′ y = A y − (τ/g) b,    A y = E[𝓛 y],   b = E[𝓛 1_g],
 //! ```
 //! E the entries with an excited index: the jumps land in ground states and take no part (only H, the generator with its
-//! decay, enters), and the ground trace's equation is the trace's, which 𝓛 keeps. A is block-diagonal over the clusters;
-//! they are joined by the one direction 1_g alone, a rank-one border -- a scalar Schur complement (Sherman–Morrison).
-//! within_Q = Tr[F′ Y] with F′ = F less the mean of its diagonal over the model's ground states φ̄ (the identity is free:
-//! F′ pairs with Y's E part alone), so K = −W⁻¹ A′⁻ᵀ W f′ in the coordinates (W the trace form's weights: one on the
-//! excited block's diagonal, two on a pair of entries' real and imaginary parts), and
+//! decay, enters), and the ground trace's equation is the trace's, which 𝓛 keeps. The border is of rank one -- a scalar
+//! Schur complement (Sherman–Morrison). within_Q = Tr[F′ Y] with F′ = F less the mean φ̄ of its diagonal over the
+//! cluster's ground states (the identity is free: F′ pairs with Y's E part alone), so K = −W⁻¹ A′⁻ᵀ W f′ in the coordinates
+//! (W the trace form's weights: one on the excited block's diagonal, two on a pair of entries' real and imaginary parts):
 //!
 //! ```text
-//!   K_c = −W⁻¹ A_c⁻ᵀ (W f_c + μ s_c),   μ = ζ/N − φ̄,   ζ = (Σ_c u_c·W f_c − φ̄ Σ_c u_c·s_c)/(1 − Σ_c u_c·s_c/N),
+//!   K = −W⁻¹ A⁻ᵀ (W f + μ s),   μ = ζ/g − φ̄,   ζ = (u·W f − φ̄ u·s)/(1 − u·s/g),
 //! ```
-//! u_c = A_c⁻¹ b_c, s the excited trace's coordinates: per cluster one LU of its excited sector (dimension n_e² + 2 n_e n_g
-//! in reals), one solve for u and four transposed ones (three axes and s); a cluster without excited states gives its
-//! ground states' force to φ̄ and nothing else.
+//! u = A⁻¹ b, s the excited trace's coordinates: one LU of the excited sector (dimension n_e² + 2 n_e n_g in reals), one
+//! solve for u and four transposed ones (three axes and s).
 
 use crate::linalg::{Mat, C64};
 
@@ -195,10 +203,11 @@ pub(crate) struct Sector {
     /// W f_a, f the coordinates of F = −G on the excited entries; s the excited trace's.
     forces: [Vec<f64>; 3],
     trace: Vec<f64>,
-    /// u·W f_a, u·s (u = A⁻¹ b), and Σ_g F_a,gg over the cluster's ground states.
-    pub(crate) paired: [f64; 3],
-    pub(crate) returned: f64,
-    pub(crate) ground_force: [f64; 3],
+    /// u·W f_a, u·s (u = A⁻¹ b), and Σ_g F_a,gg over the cluster's `ground` ground states.
+    paired: [f64; 3],
+    returned: f64,
+    ground_force: [f64; 3],
+    ground: usize,
     /// The real multiply-adds that made it.
     pub(crate) work: f64,
 }
@@ -211,7 +220,7 @@ impl Sector {
         let m = coordinates.len();
         let ground_force = std::array::from_fn(|a| -(0..ground).map(|i| gradient[a][i * n + i].re).sum::<f64>());
         if m == 0 {
-            return Some(Sector { coordinates, lu: None, forces: Default::default(), trace: vec![], paired: [0.0; 3], returned: 0.0, ground_force, work: 0.0 });
+            return Some(Sector { coordinates, lu: None, forces: Default::default(), trace: vec![], paired: [0.0; 3], returned: 0.0, ground_force, ground, work: 0.0 });
         }
         // A's columns: 𝓛 on each coordinate's Hermitian basis matrix, read on the coordinates.
         let mut a = vec![0.0; m * m];
@@ -244,27 +253,24 @@ impl Sector {
         }
         // The columns (n² each, 2 entries a column), the factorization (m³/3) and its solve (m²).
         let work = (m * 2 * n * 8 + m * m * m / 3 + m * m) as f64;
-        Some(Sector { coordinates, lu: Some(lu), forces, trace, paired, returned, ground_force, work })
+        Some(Sector { coordinates, lu: Some(lu), forces, trace, paired, returned, ground_force, ground, work })
     }
 
-    /// A cluster without excited states: its ground states' force Σ_g F_a,gg alone.
-    pub(crate) fn folded(ground_force: [f64; 3]) -> Sector {
-        Sector { coordinates: Coordinates { n: 0, entries: vec![] }, lu: None, forces: Default::default(), trace: vec![], paired: [0.0; 3], returned: 0.0, ground_force, work: 0.0 }
-    }
-
-    /// K_a of this cluster (n × n, row by row, Hermitian; module documentation, # K_Q) given every cluster's part at the
-    /// point (this one among them) and the model's ground states `ground`; with the real multiply-adds of its four
-    /// transposed solves. None for a cluster without excited states.
-    pub(crate) fn operators(&self, all: &[&Sector], ground: usize) -> Option<([Vec<C64>; 3], f64)> {
+    /// K_a (n × n, row by row, Hermitian; module documentation, # K_Q), with the real multiply-adds of its four
+    /// transposed solves. None for a cluster without excited or without ground states (no trajectory lies in the latter:
+    /// it starts in a ground state, and every jump lands in one).
+    pub(crate) fn operators(&self) -> Option<([Vec<C64>; 3], f64)> {
         let lu = self.lu.as_ref()?;
-        let n = ground as f64;
-        let returned: f64 = all.iter().map(|s| s.returned).sum();
-        let mean: [f64; 3] = std::array::from_fn(|a| all.iter().map(|s| s.ground_force[a]).sum::<f64>() / n);
+        if self.ground == 0 {
+            return None;
+        }
+        let g = self.ground as f64;
+        let mean = self.ground_force.map(|f| f / g);
         let mut s = self.trace.clone();
         lu.solve_transposed(&mut s);
         let k = std::array::from_fn(|a| {
-            let zeta = (all.iter().map(|s| s.paired[a]).sum::<f64>() - mean[a] * returned) / (1.0 - returned / n);
-            let mu = zeta / n - mean[a];
+            let zeta = (self.paired[a] - mean[a] * self.returned) / (1.0 - self.returned / g);
+            let mu = zeta / g - mean[a];
             let mut z = self.forces[a].clone();
             lu.solve_transposed(&mut z);
             let y: Vec<f64> = z.iter().zip(&s).enumerate().map(|(c, (z, s))| -(z + mu * s) / self.coordinates.weight(c)).collect();

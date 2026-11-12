@@ -356,7 +356,8 @@ fn form_size(sizes: &Written, a: usize, rho: &[C64], n: usize) -> f64 {
 /// along the path, and its force's form with a Hermitian ρ (`Middle::force`) is the written-out Hermitian part's gradient in
 /// the middle's position with it, Re Σ ∂_a H[x, y] ρ[y, x] -- entry by entry to the rounding of the entry's sum: γ_N of its
 /// terms' moduli (`chain`; the gradient's product rule doubles the chain, and its form with ρ adds its n² terms). The frames'
-/// rates are K_s·v. A still cluster's generator is the same at every time along the path, to the same rounding twice.
+/// rates are K_s·v. A still cluster's generator is the same at every time along the path, to the same rounding twice. The
+/// gradient's matrices (`Middle::gradient`, the optical sector's) are the same entries.
 #[test]
 fn a_path_s_generator_and_force_are_the_definitions_written_out() {
     let (mut still, mut beating) = (0, 0);
@@ -397,6 +398,16 @@ fn a_path_s_generator_and_force_are_the_definitions_written_out() {
                     let (apart, size) = ((pull[a] - form(&written, a, &rho, n).re).abs(), form_size(&sizes, a, &rho, n));
                     assert!(apart <= rounding(2 * links + n * n) * size, "{name}, cluster {cluster}, s {s}, axis {a}: the force's form {} is {apart:e} apart of {size:e}", pull[a]);
                     force = force.max(if size > 0.0 { apart / size } else { 0.0 });
+                }
+                // The gradient's matrices (`Middle::gradient`) are the written-out Hermitian part's gradient, entry by entry.
+                let mut g: [Vec<C64>; 3] = Default::default();
+                middle.gradient(&path, s, &mut g);
+                for a in 0..3 {
+                    for i in 0..n * n {
+                        let mirror = (i % n) * n + i / n;
+                        let (apart, size) = ((g[a][i] - written.hermitian[i][1 + a]).abs(), sizes.hermitian[i][1 + a].re.max(sizes.hermitian[mirror][1 + a].re));
+                        assert!(apart <= rounding(2 * links + 2) * size, "{name}, cluster {cluster}, s {s}, axis {a}, entry ({}, {}): the gradient's matrix {apart:e} apart of {size:e}", i / n, i % n);
+                    }
                 }
             }
         }

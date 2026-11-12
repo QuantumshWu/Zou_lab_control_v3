@@ -1526,9 +1526,6 @@ pub struct Middle<'a> {
     point: RefCell<Held<Site>>,
     /// The complex multiply-adds that made it.
     pub(crate) work: f64,
-    /// Every cluster's plan and table under the same lights, where a run holds them (model.rs `Run`): the optical
-    /// sector's other clusters at the point (`Middle::optical`); None: their exact elimination.
-    others: Option<&'a [(Arc<Plan>, Option<&'a NearTable>)]>,
 }
 
 impl Model {
@@ -2120,7 +2117,7 @@ impl Model {
             }
         };
         let work = work + plan.fourth.as_ref().map_or(0.0, |fourth| self.fourth_site(plan, fourth, table, None, Some(r), &mut point));
-        Middle { model: self, plan: plan.clone(), r: Some(r), t, table, point: RefCell::new(point), work, others: None }
+        Middle { model: self, plan: plan.clone(), r: Some(r), t, table, point: RefCell::new(point), work }
     }
 
     /// The same from every beam's amplitude and the near forms there (the Hermitian ones to first order; `Site::formed`),
@@ -2140,7 +2137,7 @@ impl Model {
         if let (Some(fourth), Some(_)) = (plan.fourth.as_ref(), near) {
             work += self.fourth_site(plan, fourth, None, near, None, &mut point);
         }
-        Middle { model: self, plan: plan.clone(), r: None, t, table: None, point: RefCell::new(point), work, others: None }
+        Middle { model: self, plan: plan.clone(), r: None, t, table: None, point: RefCell::new(point), work }
     }
 
     /// The one generator assembly (module documentation): a cluster's generator at a position and a time under a light set, the
@@ -2156,7 +2153,6 @@ impl Model {
 /// turns.
 pub struct Path {
     kappa: [f64; 3],
-    velocity: [f64; 3],
     rates: Held<Rates>,
     turning: bool,
 }
@@ -2207,7 +2203,7 @@ impl crate::step::Middle for Middle<'_> {
         path.extend(plan.beams.iter().map(|&l| dot3(model.light.beams[l].wave_vector(), velocity)));
         gauge.clear();
         gauge.extend(plan.waves.iter().map(|k| dot3(*k, velocity)));
-        Path { kappa, velocity, turning: gauge.iter().any(|rate| *rate != 0.0), rates }
+        Path { kappa, turning: gauge.iter().any(|rate| *rate != 0.0), rates }
     }
 
     fn gauge(&self, path: &Path, rates: &mut [f64]) {
@@ -2295,7 +2291,8 @@ impl crate::step::Middle for Middle<'_> {
             }
             let (real, imaginary) = plan.values(term, &point.forms);
             let (c, phase) = (of.1[term.flag], phases[term.tone] * term.weight);
-            for i in 0..term.len {
+            // A span is whole vectors of places: those past the n² entries are its padding.
+            for i in 0..term.len.min((n * n).saturating_sub(term.first)) {
                 let place = term.first + i;
                 let value = C64::new(real[i], imaginary[i]) * phase;
                 let mut slope = [C64::ZERO; 3];
@@ -2335,10 +2332,9 @@ impl crate::step::Middle for Middle<'_> {
         }
     }
 
-    /// The optical sector's operators K_a at the middle along the path (optical.rs): the cluster's generator and its
-    /// gradient there, in its Doppler frames at the path's velocity, and every other cluster's part at the same point and
-    /// path -- an explicit one's sector, a folded one's ground states' force alone (`Middle::force` on its ground
-    /// identity). None for a cluster without excited states, or where a sector has no number.
+    /// The optical sector's operators K_a at the middle along the path (optical.rs): of the cluster's generator and its
+    /// gradient there, in its Doppler frames at the path's velocity. None for a cluster without excited states, or where
+    /// its sector has no number.
     fn optical(&self, path: &Path) -> Option<crate::step::Optical> {
         let (model, plan, n) = (self.model, &*self.plan, self.plan.states);
         let c = &model.clusters[plan.cluster];
@@ -2349,46 +2345,15 @@ impl crate::step::Middle for Middle<'_> {
         crate::step::Middle::generator(self, path, 0.0, &mut h);
         let mut g: [Vec<C64>; 3] = Default::default();
         crate::step::Middle::gradient(self, path, 0.0, &mut g);
-        let own = super::optical::Sector::new(&h, &g, c.ground)?;
-        // The other clusters at the point, on the same path.
-        let r = self.r?;
-        let (mut others, mut work) = (vec![], 0.0);
-        for other in (0..model.clusters.len()).filter(|&o| o != plan.cluster) {
-            let k = &model.clusters[other];
-            let (of, table) = match self.others {
-                Some(all) => (all[other].0.clone(), all[other].1),
-                None => (model.plan(other, &plan.lights), None),
-            };
-            let middle = model.middle(&of, r, self.t, table);
-            let m = k.states.len();
-            let along = crate::step::Middle::path(&middle, path.kappa, path.velocity);
-            work += middle.work + crate::step::Middle::work(&middle)[1];
-            if k.ground == m {
-                let mut rho = vec![C64::ZERO; m * m];
-                for i in 0..m {
-                    rho[i * m + i] = C64::ONE;
-                }
-                let force = crate::step::Middle::force(&middle, &along, 0.0, &rho);
-                others.push(super::optical::Sector::folded(force.map(|f| -f)));
-            } else {
-                let mut h = Mat::zeros(m, m);
-                crate::step::Middle::generator(&middle, &along, 0.0, &mut h);
-                let mut g: [Vec<C64>; 3] = Default::default();
-                crate::step::Middle::gradient(&middle, &along, 0.0, &mut g);
-                let sector = super::optical::Sector::new(&h, &g, k.ground)?;
-                work += crate::step::Middle::work(&middle)[0] + sector.work / crate::decide::COMPLEX;
-                others.push(sector);
-            }
-        }
-        let all: Vec<&super::optical::Sector> = std::iter::once(&own).chain(&others).collect();
-        let (k, solves) = own.operators(&all, GROUND)?;
+        let sector = super::optical::Sector::new(&h, &g, c.ground)?;
+        let (k, solves) = sector.operators()?;
         // The light pattern's fastest beat on the path, the largest (k_l − k_m)·v over the plan's beams, and the slowest
         // optical rate, the least of the cluster's excited states' decay over two.
         let rates = &path.rates.path;
         let (most, least) = rates.iter().fold((f64::NEG_INFINITY, f64::INFINITY), |(most, least), x| (most.max(*x), least.min(*x)));
         let beat = if most >= least { most - least } else { 0.0 };
         let rate = c.states[c.ground..].iter().map(|&e| 0.5 * model.decay[(e - GROUND, e - GROUND)].re).fold(f64::INFINITY, f64::min);
-        let work = work + crate::step::Middle::work(self)[0] + (own.work + solves) / crate::decide::COMPLEX;
+        let work = crate::step::Middle::work(self)[0] + (sector.work + solves) / crate::decide::COMPLEX;
         Some(crate::step::Optical { k, beat, rate, work })
     }
 
@@ -2406,13 +2371,6 @@ fn side(fields: &[[C64; 4]], scalar: Option<usize>) -> [C64; 4] {
     scalar.map_or([C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO], |s| fields[s])
 }
 
-impl<'a> Middle<'a> {
-    /// This middle among every cluster's plan and table of its run (`Middle::others`).
-    pub(crate) fn among(self, others: &'a [(Arc<Plan>, Option<&'a NearTable>)]) -> Middle<'a> {
-        Middle { others: Some(others), ..self }
-    }
-}
-
 impl Middle<'_> {
     /// This middle with its generator's near values moved by `by` (a table's error read of them, tabulate.rs).
     pub(crate) fn moved(&self, by: &[f64]) -> Middle<'_> {
@@ -2427,7 +2385,7 @@ impl Middle<'_> {
         point.slopes.clone_from(&from.slopes);
         point.directions.clone_from(&from.directions);
         point.quartic.clone_from(&from.quartic);
-        Middle { model: self.model, plan: self.plan.clone(), r: self.r, t: self.t, table: self.table, point: RefCell::new(point), work: self.work, others: self.others }
+        Middle { model: self.model, plan: self.plan.clone(), r: self.r, t: self.t, table: self.table, point: RefCell::new(point), work: self.work }
     }
 
     /// A node's field components into its scratch, their first `parts` parts (the value; with the gradient, four),
