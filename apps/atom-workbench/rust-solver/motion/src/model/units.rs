@@ -216,6 +216,25 @@
 //! the shares of a state's drives, folded and kept, add up to one: beside an explicit line a distant one's rate is a
 //! small part of what moves the populations); a coupling of two states m²(p_a + p_b); a carrier's dressing its relative rate error on the state's rates (eliminate.rs); a photon
 //! coherence m²√(p_i p_j) (photon.rs).
+//!
+//! # A rate's error on the populations
+//! A fold that errs on a rate -- a bare drive's denominator's first order, its response off by ε and its rate by 2ε; a
+//! fold's next order, its line's rate off by c M^k (# The fold's order); a kept line read through a folded drive's
+//! self-energy, off by 2ε (eliminate.rs `Model::pair_error`) -- errs on the populations by what that rate moves, not by its
+//! share of the photons. A jump that lands where it began moves nothing; one that lands in another ground state b moves
+//! population into it. With W_b the rates of the sample's flows into b (each source's: a folded drive e ← g, |R[e, g]|²
+//! p_g Σ_a |C_a[b, e]|², b ≠ g; an explicit excited state, p_e Σ_a |C_a[b, e]|²) and x their rates' relative errors, b's
+//! inflow errs relatively by Σ x W_b/Σ W_b. What that does to the populations, to first order: between the states the
+//! flow joins and those it comes back from, of rates R one way and R' the other, the share s = R/(R + R') on the far side
+//! moves by ∂s/∂ln R = s(1 − s), at most the population on the flow's own side. So a sample books, of its cluster's
+//! ground population P, the inflow most in error: P max_b Σ x W_b/Σ W_b, each source its part x W_b/Σ W_b P of it, on the
+//! populations and on T (`Model::moved`) -- the flows into one state from the sample's sources are its fold's, those
+//! within a hyperfine level and those between two; a flow that a hyperfine level gets from no other source is all its
+//! inflow, whatever the photons of the cycling lines beside it. (The rate agent's e3 -- S3's tweezer, a σ+σ− probe pair
+//! at 1 mW 20 MHz red of the free F=2 → F'=3 line, the atom at rest: the probe's drives F=2 → F'=2, F'=1, folded with the
+//! bare levels at 247 MHz where the trap puts them at 200, pump F=2 → F=1 35 % too slowly -- F=1 0.33 where it is 0.40,
+//! the populations 7 % off --, and booked by their share of the photons, about a percent of them, they read 1.5 %.) A
+//! drive's rate errs on T by its share of the photons beside that (their recoils' heating): `Measured::rates`.
 
 use super::assemble::{NearValues, Plan};
 use super::cluster::Edge;
@@ -380,6 +399,17 @@ pub(crate) struct Measured<'a> {
     pub(crate) doppler: Vec<OnceCell<Vec<f64>>>,
     pub(crate) kept: OnceCell<Vec<C64>>,
     pub(crate) lifts: OnceCell<[f64; GROUND]>,
+    pub(crate) moved: OnceCell<Vec<(Flow, f64)>>,
+}
+
+/// A source of a flow into the ground states at a sample whose rate a fold errs on (module documentation, # A rate's error on
+/// the populations), by the unit that books it: a drive e ← g folded with the bare levels, one at the atom (its line's
+/// order), and a folded drive e ← g onto an explicit state e (the kept lines through e, read through its self-energy).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Flow {
+    Bare(Component, usize, usize),
+    Atom(Component, usize, usize),
+    Kept(Component, usize, usize),
 }
 
 /// What a carrier's fold at the atom makes of a ground state g of a sample's cluster (`Measured::folds`; the numbers the
@@ -793,13 +823,14 @@ impl Model {
 
     /// The shift of a ground state's level by its drives folded at the atom over a region, with its sign (eliminate.rs
     /// `Shift`; module documentation, # What a folded drive does to its level): Σ −v² φ(Δ), φ(x) = x/(x² + Γ²/4) a two-level
-    /// atom's dispersive shape (own.rs `Own::dispersion`), each drive's coupling v at its detuning Δ there (`across`). Its
-    /// band: the smooth part at each drive's detuning's centre, −Σ v² φ(Δ_c), and how far the parameters its denominator
-    /// moves by (the Doppler shift, the Gershgorin radius, the self-energy, what the other carriers' dressing does not know:
-    /// `moved`, m) move it -- |φ(Δ_c + μ) − φ(Δ_c)| ≤ m max|φ'| ≤ m/d², d the drive's distance |max(|Δ_c| − m, 0) − iΓ/2|, and
-    /// at most |φ(Δ_c)| + 1/Γ. Its gradient −Σ (∇v² φ(Δ_c) + v² φ'(Δ_c) ∇Δ_c), of the field's own forms (reach.rs
-    /// `Region::field`) and the detuning's (`Across::slope`), and how far the parameters move that: |∇v²| m/d² + v² m
-    /// max|φ''| |∇Δ_c|, max|φ''| ≤ 2/d³. Made once per region and state. Of its own form, not each drive's bound: two levels
+    /// atom's dispersive shape (own.rs `Own::dispersion`), each drive's coupling v at its detuning Δ there (`across`), v² its
+    /// field's own intensity (reach.rs `Region::intensity`). Its band: per drive the least and the largest of φ over its
+    /// detuning's centre ± how far the parameters its denominator moves by (the Doppler shift, the Gershgorin radius, the
+    /// self-energy, what the other carriers' dressing does not know: `moved`, m) move it, each end its own form (own.rs
+    /// `Own::dispersion_ends`). Its gradient −Σ (∇v² φ(Δ_c) + v² φ'(Δ_c) ∇Δ_c), of the intensity's own form and the
+    /// detuning's (`Across::slope`), and how far the parameters move that: |∇v²| m/d² + v² m max|φ''| |∇Δ_c| --
+    /// |φ(Δ_c + μ) − φ(Δ_c)| ≤ m max|φ'| ≤ m/d², d the drive's distance |max(|Δ_c| − m, 0) − iΓ/2|, at most |φ(Δ_c)| + 1/Γ,
+    /// and max|φ''| ≤ 2/d³. Made once per region and state. Of its own form, not each drive's bound: two levels
     /// the same light shifts alike move the distance between them by the difference of their shifts, the dressed levels'
     /// difference (`term_parts`, `pair_gate`), and its rate by the difference of their gradients. Nothing for an excited state:
     /// an explicit one's shift by the folded drives is in no distance.
@@ -811,13 +842,13 @@ impl Model {
             let drives = &region.forms.drives(self)[s];
             drives.iter().zip(self.across(s, region)).filter(|of| of.0.level == Level::Atom).fold(Shift::none(), |sum, (d, of)| {
                 let gamma = 0.5 * d.gamma;
-                let (u, gradient) = region.field(d.beams.iter().copied());
-                let (square, square_slope) = u.square(&gradient);
+                let (square, square_slope) = region.intensity(self, d.component / 2, &d.beams);
                 let (shape, bend) = (of.centre.dispersion(gamma), of.centre.dispersion_slope(gamma));
+                let [lo, hi] = of.centre.dispersion_ends(of.moved, gamma);
                 let across = of.distance.square().recip();
                 let moves = of.moved.mul(across).min(shape.abs().plus(0.5 / gamma));
                 let swing = square_slope.norm().mul(moves).add(square.mul(of.moved).mul(across.mul(of.distance.recip()).scale(2.0)).mul(of.slope.norm()));
-                let shift = Shift { band: Band { mid: square.mul(shape), rad: square.mul(moves) }, slope: square_slope.by(&shape).add(of.slope.by(&square.mul(bend))), swing };
+                let shift = Shift { band: Band::between(square.mul(lo), square.mul(hi)), slope: square_slope.by(&shape).add(of.slope.by(&square.mul(bend))), swing };
                 sum.sub(&shift)
             })
         })
@@ -976,12 +1007,7 @@ impl Model {
 
     /// The bound over a region of the denominator of a drive e ← s folded at the atom at the detuning δ: its two levels'
     /// distance there, |E_e − E_s − δ| at the centre less the spread of the difference of the levels the eliminations take
-    /// (eliminate.rs `Gap`) and the excited state's Gershgorin radius (`Model::radii`), across Γ_e/2.
-    pub(crate) fn denominator_over(&self, region: &Region, e: usize, s: usize, detuning: f64) -> f64 {
-        self.denominator_own(region, e, s, detuning).lower()
-    }
-
-    /// The same denominator in its own form (own.rs).
+    /// (eliminate.rs `Gap`) and the excited state's Gershgorin radius (`Model::radii`), across Γ_e/2, in its own form (own.rs).
     pub(crate) fn denominator_own(&self, region: &Region, e: usize, s: usize, detuning: f64) -> Own {
         let apart = self.gap(e, s, region, detuning).taken.abs().sub(self.radii(region)[e]);
         apart.max(Own::constant(0.0)).hypot(0.5 * self.decay[(e - GROUND, e - GROUND)].re)
@@ -1249,6 +1275,7 @@ impl Model {
             doppler: self.carriers.iter().map(|_| OnceCell::new()).collect(),
             kept: OnceCell::new(),
             lifts: OnceCell::new(),
+            moved: OnceCell::new(),
             amplitudes,
             plan,
         }
@@ -1273,12 +1300,66 @@ impl Model {
         }
     }
 
+    /// The part of the populations a flow's rate error moves at a sample (module documentation, # A rate's error on the
+    /// populations; `moved_made`), every flow's made once for the sample; nothing for a flow the sample does not have.
+    pub(crate) fn moved(&self, at: &Measured, flow: Flow) -> f64 {
+        at.moved.get_or_init(|| self.moved_made(at)).iter().find(|of| of.0 == flow).map_or(0.0, |of| of.1)
+    }
+
+    /// The sample's flows into the ground states (`moved`): per source its rates W_b into each ground state b and its
+    /// rate's relative error x, by the units that own it -- a bare drive's 2ε (`bare_error`), a drive at the atom's line
+    /// order c M^k (eliminate.rs `Folded`: M = S_b L_e/S_b, k = 2 where its cluster's fold is the fourth order's), the kept
+    /// lines through an explicit state 2ε per folded drive onto it (eliminate.rs `Model::pair_reading`) --; the ground
+    /// state b whose inflow errs relatively the most, Σ x W_b/Σ W_b; and each owner's part x W_b/Σ W_b of the cluster's
+    /// ground population there.
+    fn moved_made(&self, at: &Measured) -> Vec<(Flow, f64)> {
+        let (cluster, p) = (at.sample.cluster, &at.populations);
+        let c = &self.clusters[cluster];
+        let land = |e: usize, b: usize| -> f64 { (0..3).map(|a| self.emission[a][(b, e)].norm_sqr()).sum() };
+        let into = |e: usize, from: Option<usize>, weight: f64| -> [f64; GROUND] { std::array::from_fn(|b| if Some(b) == from { 0.0 } else { weight * land(e, b) }) };
+        let mut sources: Vec<(Vec<(Flow, f64)>, [f64; GROUND])> = vec![];
+        for (y, &g) in c.states[..c.ground].iter().enumerate() {
+            for x in 0..EXCITED {
+                let e = GROUND + x;
+                for channel in &at.bare {
+                    let size = channel.response[(x, y)].norm_sqr();
+                    if size > 0.0 {
+                        let epsilon = self.drive_motion(channel.component, e, g, at).0.abs() / self.bare_distance(channel.component, e, g);
+                        sources.push((vec![(Flow::Bare(channel.component, e, g), 2.0 * epsilon)], into(e, Some(g), size * p[g])));
+                    }
+                }
+                for (cc, response) in self.carriers.iter().zip(&at.responses) {
+                    let component = Component { frequency: cc.frequency, counter: false };
+                    let size = response.as_ref().map_or(0.0, |r| r[(x, y)].norm_sqr());
+                    if size > 0.0 && self.level(component, e, g) == Level::Atom {
+                        let line = self.drive_parameters(&Unit::Drive { component, excited: e, ground: g }, at).map_or(0.0, |d| {
+                            let m = d.total * d.reads;
+                            if self.fourth[cluster].is_some() { ORDER_RATES * m * m } else { m }
+                        });
+                        sources.push((vec![(Flow::Atom(component, e, g), line)], into(e, Some(g), size * p[g])));
+                    }
+                }
+            }
+        }
+        for &e in &c.states[c.ground..] {
+            let owners = self.driven.iter().filter(|d| d.1 == e && self.level(d.0, d.1, d.2) != Level::Explicit && !self.pair_legs(d.0, d.1, d.2).is_empty());
+            let owners = owners.filter_map(|&(component, _, g)| self.pair_reading(component, e, g, at).map(|read| (Flow::Kept(component, e, g), 2.0 * read.1))).collect();
+            sources.push((owners, into(e, None, p[e])));
+        }
+        let total: [f64; GROUND] = std::array::from_fn(|b| sources.iter().map(|of| of.1[b]).sum());
+        let erring: [f64; GROUND] = std::array::from_fn(|b| sources.iter().map(|of| of.0.iter().map(|o| o.1).sum::<f64>() * of.1[b]).sum());
+        let Some(b) = (0..GROUND).filter(|&b| total[b] > 0.0).max_by(|&x, &y| (erring[x] / total[x]).total_cmp(&(erring[y] / total[y]))) else { return vec![] };
+        let held: f64 = p[..GROUND].iter().sum();
+        sources.into_iter().flat_map(|(owners, rates)| owners.into_iter().map(move |(flow, x)| (flow, x * rates[b] / total[b] * held))).collect()
+    }
+
     /// The error at a sample of the second order of a cluster's fold at the atom (`Unit::Second`; module documentation,
-    /// # The errors, # The fold's order): Σ s M/S_g p_g over the drives folded at the atom from the sample's ground
-    /// states -- s = 2|R[e, g]|² each one's share, M the larger of its ground state's share S_g and of that level's own
-    /// term across the drive's distance (eliminate.rs `Folded::order`; at one distance Σ s p_g) -- on the populations,
-    /// the rates' relative error of that order; on T the same, which bounds the force's (Σ s p_g at any distances).
-    /// Zero off the cluster, and where its fold is the fourth order's.
+    /// # The errors, # The fold's order): of each drive folded at the atom from the sample's ground states -- s = 2|R[e, g]|²
+    /// its share, M the larger of its ground state's share S_g and of that level's own term across the drive's distance
+    /// (eliminate.rs `Folded::order`), its line's rate off by M -- what its flows move (`moved`, # A rate's error on the
+    /// populations) and its folded excited population s/2 p_g off by M, on the populations; on T s M/S_g p_g, the rates'
+    /// share, which bounds the force's (Σ s p_g at any distances), and the flows' part. Zero off the cluster, and where its
+    /// fold is the fourth order's.
     fn order_error(&self, ground: usize, at: &Measured) -> UnitError {
         let cluster = self.membership[ground];
         let Some(frequency) = self.fold_frequency(cluster).filter(|_| at.sample.cluster == cluster && self.fourth[cluster].is_none()) else {
@@ -1286,28 +1367,30 @@ impl Model {
         };
         let component = Component { frequency, counter: false };
         let c = &self.clusters[cluster];
-        let (mut sum, mut held) = (0.0, 0.0);
+        let (mut rates, mut moved, mut held) = (0.0, 0.0, 0.0);
         if self.carrier_of(frequency).is_some_and(|ci| at.responses[ci].is_some()) {
             for &g in &c.states {
                 held += at.populations[g];
                 for e in (GROUND..STATES).filter(|&e| self.level(component, e, g) == Level::Atom) {
                     if let Some(drive) = self.drive_parameters(&Unit::Drive { component, excited: e, ground: g }, at) {
-                        sum += drive.order(1) * drive.population;
+                        rates += drive.order(1) * drive.population;
+                        moved += self.moved(at, Flow::Atom(component, e, g)) + 0.5 * drive.share * drive.total * drive.reads * drive.population;
                     }
                 }
             }
         }
-        UnitError { parameter: if held > 0.0 { sum / held } else { 0.0 }, population: sum, temperature: sum }
+        UnitError { parameter: if held > 0.0 { rates / held } else { 0.0 }, population: moved, temperature: rates + moved }
     }
 
     /// The error at a sample of a drive folded with the bare levels (module documentation, # Levels, # The errors): its own
     /// share s = 2|R⁰[e, g]|² of its ground state, as every fold's -- s p_g on the populations, (s + a) p_g on T, a its
     /// sweep across its denominator at the atom --; and the first order of its denominator, ε = |δΔ|/|Δ₀ − iΓ_e/2|
-    /// (eliminate.rs `Model::drive_motion`), the relative error of its response: of the state's rates, quadratic in the
-    /// responses, 2ε times its share |R⁰[e, g]|² p_g of them, and of its light shifts, linear, ε times its share
-    /// |V R⁰| p_g of those (`Measured::rates`, `Measured::shifts`: shares that add up to one over the state's drives,
-    /// folded and kept, so that the units' errors add up to the state's) -- the rates' on the populations, both on T, booked on
-    /// the state's ground population as a dressing's relative rate error is. Zero where the sample's cluster does not
+    /// (eliminate.rs `Model::drive_motion`), the relative error of its response: of its rate 2ε, which moves the
+    /// populations by what its flows move (`moved`, # A rate's error on the populations), on the populations and on T;
+    /// and on T the state's rates' and light shifts' relative errors, 2ε times its share |R⁰[e, g]|² p_g of the rates and ε
+    /// times its share |V R⁰| p_g of the light shifts (`Measured::rates`, `Measured::shifts`: shares that add up to one
+    /// over the state's drives, folded and kept, so that the units' errors add up to the state's), booked on the state's
+    /// ground population as a dressing's relative rate error is. Zero where the sample's cluster does not
     /// hold its ground state. With the drive's response there, where the cluster holds it (the Raman pairs' error reads
     /// it, eliminate.rs `Model::pair_error`).
     fn bare_error(&self, unit: &Unit, at: &Measured) -> (UnitError, Option<C64>) {
@@ -1325,7 +1408,8 @@ impl Model {
         let (epsilon, p, held) = (moved.abs() / own, at.populations[ground], at.populations[..GROUND].iter().sum::<f64>());
         let share = |of: f64, all: f64| if all > 0.0 { of * p / all } else { 0.0 };
         let (rates, shifts) = (2.0 * epsilon * share(response.norm_sqr(), at.rates) * held, epsilon * share(response.norm_sqr() * own, at.shifts) * held);
-        (UnitError { parameter: epsilon, population: s * p + rates, temperature: (s + sweep) * p + rates + shifts }, Some(response))
+        let moved = self.moved(at, Flow::Bare(component, excited, ground));
+        (UnitError { parameter: epsilon, population: s * p + moved, temperature: (s + sweep) * p + rates + shifts + moved }, Some(response))
     }
 
     /// A sample's populations of the model basis' states on its cluster (|ψ_s|²/‖ψ‖²; zero off its cluster).
@@ -1659,6 +1743,88 @@ mod tests {
         }
         eprintln!("the largest shift {largest:.2} rad/µs, the steepest slope {steepest:.1} rad/µs/µm, the least bound over its shift {tightest:.2}");
         assert!(largest > 20.0 && steepest > 100.0, "the points read a light shift: {largest}, {steepest}");
+    }
+
+    /// A fold's error on a rate is booked by what the rate moves (module documentation, # A rate's error on the
+    /// populations): the rate agent's e3 (rate.status.md §4) -- S3's tweezer and repump, a σ+σ− probe pair at 1 mW 20 MHz
+    /// red of the free F=2 → F'=3 line, mass ×100 at 1 µK: an atom at rest at the trap's centre --, whose probe drives F=2 →
+    /// F'=2, F'=1 the closure leaves folded with the bare levels, 247 MHz from their lines where the trap puts them at 200.
+    /// The rate equations of the ground states at the point -- each one's jumps into the others, its photons' classes on
+    /// their landing states (model.rs `Photon`) -- have their stationary populations; of the closure's model and of the same
+    /// model with the probe's bare drives at the atom they differ by the bare folds' error on the populations, which the
+    /// probe's bare units book at the stationary state (each ground state's units' errors weighed by its population): the
+    /// booking holds the largest row's difference and the F=1 share's. (Booked by the drives' share of the photons, about a
+    /// percent of them, the engine read 1.5 % on the populations where they were 7 % off.)
+    #[test]
+    fn a_fold_s_rate_error_is_booked_by_the_population_it_moves() {
+        let request = request_of("E3_SPSM");
+        let light = Light::new(&request);
+        let models = closure(&request, &light, 3);
+        let model = &models.last().expect("a closure").0;
+        let probe = (0..light.frequencies.len()).find(|&f| f != light.trap && light.frequencies[f].beams.len() == 2).expect("the probe pair");
+        let bare = model.bare_units(Component { frequency: probe, counter: false });
+        let units = model.units();
+        let folded: Vec<usize> = (0..units.len()).filter(|&u| bare.contains(&units[u])).collect();
+        let at = model.rekept(&[model.kept.clone(), bare].concat()).unwrap();
+        assert!(!folded.is_empty() && model.clusters.iter().chain(&at.clusters).all(|c| c.ground == c.states.len()), "the probe's bare drives, no explicit state");
+        let state = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
+        let reference: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
+        let centre = model.trap(&reference, &model.prepared()).unwrap().centre;
+        let point = Point { r: centre, kappa: [0.0; 3], t: 0.0 };
+        let pure = |m: &Model, g: usize| -> Sample {
+            let cluster = m.membership[g];
+            Sample { cluster, at: point, psi: m.clusters[cluster].states.iter().map(|&s| if s == g { C64::ONE } else { C64::ZERO }).collect() }
+        };
+        // The stationary populations of a model's ground states' rate equations at the point.
+        let stationary = |m: &Model| -> [f64; GROUND] {
+            let mut q = [[0.0; GROUND]; GROUND];
+            for g in 0..GROUND {
+                let sample = pure(m, g);
+                for photon in m.photons(sample.cluster, &point, &sample.psi) {
+                    let landing = &m.clusters[photon.landing].states;
+                    for a in 0..3 {
+                        for (j, z) in photon.amplitudes[a].iter().enumerate() {
+                            if landing[j] != g {
+                                q[g][landing[j]] += z.norm_sqr();
+                            }
+                        }
+                    }
+                }
+            }
+            // π Q = 0 with Σ π = 1, by elimination: the generator's columns, the last equation the normalization.
+            let mut a = [[0.0; GROUND + 1]; GROUND];
+            for b in 0..GROUND {
+                for g in 0..GROUND {
+                    a[b][g] = if b == g { -q[g].iter().sum::<f64>() } else { q[g][b] };
+                }
+            }
+            a[GROUND - 1] = [1.0; GROUND + 1];
+            for i in 0..GROUND {
+                let pivot = (i..GROUND).max_by(|&x, &y| a[x][i].abs().total_cmp(&a[y][i].abs())).unwrap();
+                a.swap(i, pivot);
+                for k in 0..GROUND {
+                    if k != i {
+                        let f = a[k][i] / a[i][i];
+                        for j in i..=GROUND {
+                            a[k][j] -= f * a[i][j];
+                        }
+                    }
+                }
+            }
+            std::array::from_fn(|g| a[g][GROUND] / a[g][g])
+        };
+        let (bare, exact) = (stationary(model), stationary(&at));
+        let largest = (0..GROUND).map(|g| (bare[g] - exact[g]).abs()).fold(0.0, f64::max);
+        let f1 = (bare[..3].iter().sum::<f64>() - exact[..3].iter().sum::<f64>()).abs();
+        let booked: f64 = (0..GROUND)
+            .map(|g| {
+                let errors = model.errors_at(&units, &pure(model, g), None);
+                bare[g] * folded.iter().map(|&u| errors[u].population).sum::<f64>()
+            })
+            .sum();
+        eprintln!("e3 at rest: F=1 {:.4} with the bare folds, {:.4} at the atom; the largest row off by {largest:.4}; booked {booked:.4}", bare[..3].iter().sum::<f64>(), exact[..3].iter().sum::<f64>());
+        assert!(f1 > 0.02, "the bare folds move the F=1 share: {f1}");
+        assert!(booked >= largest && booked >= f1, "booked {booked} against the rows' {largest} and the F=1 share's {f1}");
     }
 
     /// The gate of a drive folded at the atom says that its first-order Doppler series converges (module documentation,

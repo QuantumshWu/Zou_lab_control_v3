@@ -61,7 +61,7 @@
 use super::assemble::{NearValues, Plan};
 use super::photon::Origin;
 use super::reach::Region;
-use super::units::{gate, Measured};
+use super::units::{gate, Flow, Measured};
 use super::{Beat, Component, Gate, Level, Lights, Model, Unit, UnitError};
 use crate::field::Amplitude;
 use crate::linalg::{dot3, Lu, Mat, C64};
@@ -945,9 +945,9 @@ impl Model {
     /// of the levels the eliminations take (`Gap`) -- and C the far couplings among the excited states, u†(D + C)⁻¹u = u†D⁻¹u −
     /// u†D⁻¹C(D + C)⁻¹u: the first Σ_e |u_e|²/(Δ_e − iΓ_e/2), whose real part is each excited state's dispersive shape φ
     /// (own.rs `Own::dispersion`) times each unit's |u_e|² -- the band's smooth part, its gradient Σ (∇|u_e|² φ(Δ_e) + |u_e|²
-    /// φ'(Δ_e) ∇Δ_e) of the field's own forms and the gap's (reach.rs `Region::field`, `Gap`) --, the second at most ‖u‖² ‖C‖
-    /// ‖(K − z)⁻¹‖/min_e |Δ_e − iΓ_e/2|, ‖C‖ at most the largest Gershgorin radius (`radii`) and the resolvent's bound
-    /// `resolvent_own`: the band's radius, at most the dressing's bound (`dressings`) and the smooth part's modulus together.
+    /// φ'(Δ_e) ∇Δ_e) of the intensity's own forms and the gap's (reach.rs `Region::intensity`, `Gap`) --, the second at most
+    /// ‖u‖² ‖C‖ ‖(K − z)⁻¹‖/min_e |Δ_e − iΓ_e/2|, ‖C‖ at most the largest Gershgorin radius (`radii`) and the resolvent's
+    /// bound `resolvent_own`: the band's radius; its ends each within the dressing's bound (`dressings`).
     /// A two-photon distance moves by the difference of its two levels' dressings (units.rs `Model::across`): two Zeeman
     /// sublevels the same light dresses alike stay as far apart as they were, where the two dressings' bounds added -- 12.8
     /// rad/µs on the user's F=1 m=−1 -- closed the 13.2 rad/µs between them.
@@ -974,18 +974,21 @@ impl Model {
                         let (mut shift, mut norms) = (Shift::none(), none);
                         for (beams, size) in of.beams[b].iter().zip(&couplings[d].units) {
                             for (e, shape, bend, slope, _) in &lines {
-                                let (u, gradient) = region.field(beams.iter().flat_map(|(l, entries)| entries.iter().filter(|x| x.0 == *e).map(|&(_, v, size)| (cc.beams[*l], v, size))));
-                                let (square, square_slope) = u.square(&gradient);
+                                let entries: Vec<(usize, C64, f64)> = beams.iter().flat_map(|(l, entries)| entries.iter().filter(|x| x.0 == *e).map(|&(_, v, size)| (cc.beams[*l], v, size))).collect();
+                                if entries.is_empty() {
+                                    continue;
+                                }
+                                let (square, square_slope) = region.intensity(self, cc.frequency, &entries);
                                 shift.band.mid = shift.band.mid.sub(square.mul(*shape));
                                 shift.slope = shift.slope.sub(square_slope.by(shape).add(slope.by(&square.mul(*bend))));
                             }
                             norms = norms.add(size[b].square());
                         }
-                        let beyond = match lines.iter().map(|x| x.4).reduce(Own::min) {
-                            Some(least) if norms.upper() > 0.0 => norms.mul(coupled).mul(self.resolvent_own(d, b, region)).div(least),
+                        shift.band.rad = match lines.iter().map(|x| x.4).reduce(Own::min) {
+                            Some(least) if norms.upper() > 0.0 => norms.mul(coupled).mul(self.resolvent_own(d, b, region)).div(least).within(0.0, f64::INFINITY),
                             _ => none,
                         };
-                        shift.band.rad = beyond.min(dressings[d][b].add(shift.band.mid.abs())).within(0.0, f64::INFINITY);
+                        shift.band = shift.band.within(dressings[d][b]);
                         shift
                     })
                 })
@@ -1089,24 +1092,30 @@ impl Model {
     /// state's and not the drive's alone (units.rs, # The fold's order): the drive's line errs by M^k, M the larger of the
     /// state's excited share S_b = 2 Σ_e |R[e, b]|² and of twice its level's own second-order term across the drive's
     /// distance, 2|N_bb|/|ΔE| -- on one line both are s --, on the drive's part s/S_b of the state's excitation
-    /// (`Folded::order`). The second order's s M/S_b p_b on the populations and on T, where its cluster's fold has no
-    /// other order; where it has, nothing at the second order (the order is the cluster's own unit's, `Unit::Second`),
-    /// and at the fourth what it leaves: `ORDER_RATES` s M²/S_b p_b on the populations and (`ORDER_FORCE` s M²/S_b + the
-    /// cluster's ground levels' spread over the drive's distance times s) p_b on T. A state's drives at one distance add
-    /// up to S_b p_b and c S_b² p_b. With the drive's response there, where the cluster holds it (`pair_error` reads it).
+    /// (`Folded::order`). Its line's rate off by M^k moves the populations by what its flows move (units.rs `Model::moved`,
+    /// # A rate's error on the populations) and its folded excited population s/2 p_b by M^k of it, on the populations
+    /// and on T, where its cluster's fold has no other order -- and the second order's s M/S_b p_b on T; where it has,
+    /// nothing at the second order (the order is the cluster's own unit's, `Unit::Second`), and at the fourth what it
+    /// leaves: `ORDER_RATES` M² of the flows and the excited population, and (`ORDER_FORCE` s M²/S_b + the cluster's ground
+    /// levels' spread over the drive's distance times s) p_b on T. A state's drives at one distance add up to S_b p_b and
+    /// c S_b² p_b on T. With the drive's response there, where the cluster holds it (`pair_error` reads it).
     pub(crate) fn drive_error(&self, unit: &Unit, at: &Measured) -> (UnitError, Option<C64>) {
         let Some(drive) = self.drive_parameters(unit, at) else { return (UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 }, None) };
         let (s, cluster) = (drive.share, at.sample.cluster);
-        let (rates, force) = match (self.fourth[cluster], self.fold_frequency(cluster)) {
+        let Unit::Drive { component, excited, ground } = *unit else { unreachable!("a drive's parameters are a drive's") };
+        let m = drive.total * drive.reads;
+        // What its line's order moves: its flows' part and its excited population's.
+        let moved = |line: f64| self.moved(at, Flow::Atom(component, excited, ground)) + 0.5 * s * line * drive.population;
+        let (populations, force) = match (self.fourth[cluster], self.fold_frequency(cluster)) {
             (Some(_), _) => {
                 let levels = self.clusters[cluster].states.iter().map(|&b| at.energies[0][b]);
                 let spread = levels.clone().fold(f64::NEG_INFINITY, f64::max) - levels.fold(f64::INFINITY, f64::min);
-                (super::units::ORDER_RATES * drive.order(2), super::units::ORDER_FORCE * drive.order(2) + spread / drive.distance * s)
+                (moved(super::units::ORDER_RATES * m * m), (super::units::ORDER_FORCE * drive.order(2) + spread / drive.distance * s) * drive.population)
             }
             (None, Some(_)) => (0.0, 0.0),
-            (None, None) => (drive.order(1), drive.order(1)),
+            (None, None) => (moved(m), drive.order(1) * drive.population),
         };
-        (UnitError { parameter: s, population: rates * drive.population, temperature: (force + drive.doppler + drive.sweep) * drive.population }, Some(drive.response))
+        (UnitError { parameter: s, population: populations, temperature: force + populations + (drive.doppler + drive.sweep) * drive.population }, Some(drive.response))
     }
 
     /// A carrier's explicit coupling e ← a at a point, Σ_l a_l X_l[e, a].
@@ -1187,29 +1196,41 @@ impl Model {
                 error.temperature += s * p[ground];
             }
         }
-        let c = &self.clusters[at.sample.cluster];
-        if let Some(pe) = c.states.iter().position(|&s| s == excited).filter(|_| c.ground > 0 && p[excited] > 0.0) {
-            let beams = &self.light.frequencies[component.frequency].beams;
-            let u: C64 = beams.iter().zip(&self.tones[component.frequency].couplings[side]).map(|(&l, x)| if component.counter { at.amplitudes[l].value.conj() } else { at.amplitudes[l].value } * x[(excited, ground)]).sum();
-            let frame = |place: usize| self.axes.omega(&c.frames[place]);
-            let read = self.read(c, pe, h, true);
-            let each = |pa: usize| frame(pe) - frame(pa) + h[c.states[pa]];
-            let nearest = (0..c.ground).map(|pa| ((each(pa) - h[ground] - nu).abs() - lift(c.states[pa]) - lift(ground)).max(0.0)).fold(f64::INFINITY, f64::min);
-            let off = (0..c.ground).map(|pa| (each(pa) - read).abs()).fold(0.0, f64::max);
-            let s = super::units::PAIR * 0.5 * gate(u.abs() * p[excited].sqrt(), nearest, 0.0).saturation;
-            // The kept lines through e: their nearest denominator, and their coupling's energy in the state.
-            let gamma = self.decay[(excited - GROUND, excited - GROUND)].re;
-            let own = (0..c.ground).map(|pa| C64::new(h[excited] - each(pa), 0.5 * gamma).abs()).fold(f64::INFINITY, f64::min);
-            let kept: f64 = (0..c.ground).map(|pa| self.legs[excited - GROUND].iter().filter(|leg| leg.1 == c.states[pa]).map(|&(d, a)| self.kept_at(at, d, excited, a)).sum::<C64>().abs() * (p[excited] * p[c.states[pa]]).sqrt()).sum();
-            let epsilon = gate(0.0, nearest, u.norm_sqr() * off).sweep / own;
+        if let Some((s, epsilon, kept)) = self.pair_reading(component, excited, ground, at) {
             let held: f64 = p[..GROUND].iter().sum();
             let share = |of: f64, all: f64| if all > 0.0 { of / all } else { 0.0 };
             let (rates, shifts) = (2.0 * epsilon * share(p[excited], at.rates) * held, epsilon * share(kept, at.shifts) * held);
+            let moved = self.moved(at, Flow::Kept(component, excited, ground));
             error.parameter = error.parameter.max(s);
-            error.population += s + rates;
-            error.temperature += s + rates + shifts;
+            error.population += s + moved;
+            error.temperature += s + rates + shifts + moved;
         }
         error
+    }
+
+    /// The reading of a drive U (e ← b at ν) folded onto an explicit state e by the kept lines through e, at a sample in
+    /// e's cluster (`pair_error`): the pair's mixing `units::PAIR` m², m² = |U|² p_e/d_R² over the nearest two-photon
+    /// distance; the relative error ε of the kept lines' response, |U|² off/d_R² over their nearest denominator; and the
+    /// kept couplings' energy in the state. None off e's cluster or where e is empty.
+    pub(crate) fn pair_reading(&self, component: Component, excited: usize, ground: usize, at: &Measured) -> Option<(f64, f64, f64)> {
+        let side = component.counter as usize;
+        let (nu, h, p) = (self.tones[component.frequency].nu[side], &at.energies[0], &at.populations);
+        let lift = |s: usize| self.lifts_at(at, s);
+        let c = &self.clusters[at.sample.cluster];
+        let pe = c.states.iter().position(|&s| s == excited).filter(|_| c.ground > 0 && p[excited] > 0.0)?;
+        let beams = &self.light.frequencies[component.frequency].beams;
+        let u: C64 = beams.iter().zip(&self.tones[component.frequency].couplings[side]).map(|(&l, x)| if component.counter { at.amplitudes[l].value.conj() } else { at.amplitudes[l].value } * x[(excited, ground)]).sum();
+        let frame = |place: usize| self.axes.omega(&c.frames[place]);
+        let read = self.read(c, pe, h, true);
+        let each = |pa: usize| frame(pe) - frame(pa) + h[c.states[pa]];
+        let nearest = (0..c.ground).map(|pa| ((each(pa) - h[ground] - nu).abs() - lift(c.states[pa]) - lift(ground)).max(0.0)).fold(f64::INFINITY, f64::min);
+        let off = (0..c.ground).map(|pa| (each(pa) - read).abs()).fold(0.0, f64::max);
+        let s = super::units::PAIR * 0.5 * gate(u.abs() * p[excited].sqrt(), nearest, 0.0).saturation;
+        // The kept lines through e: their nearest denominator, and their coupling's energy in the state.
+        let gamma = self.decay[(excited - GROUND, excited - GROUND)].re;
+        let own = (0..c.ground).map(|pa| C64::new(h[excited] - each(pa), 0.5 * gamma).abs()).fold(f64::INFINITY, f64::min);
+        let kept: f64 = (0..c.ground).map(|pa| self.legs[excited - GROUND].iter().filter(|leg| leg.1 == c.states[pa]).map(|&(d, a)| self.kept_at(at, d, excited, a)).sum::<C64>().abs() * (p[excited] * p[c.states[pa]]).sqrt()).sum();
+        Some((s, gate(0.0, nearest, u.norm_sqr() * off).sweep / own, kept))
     }
 
     /// The response an explicit state's kept drives would make folded at the atom, of a cluster's state ψ at a point

@@ -892,10 +892,17 @@ impl Region {
         made
     }
 
-    /// The bound over the region of |Σ_l a_l x_l| of beams' entries (the request's beam, x_l, |x_l|), the beams coherent at the
-    /// request's phases (`summed`); on a point, the value there.
-    pub(crate) fn coherent(&self, entries: &[(usize, C64, f64)]) -> f64 {
-        self.coherent_own(entries).upper()
+    /// |u|² = |Σ_l a_l x_l|² over the region of a frequency's beams (the request's beam, x_l, |x_l|), and its gradient, each in
+    /// its own form: of its own beam pairs, Σ_{j,i} x_j* x_i c_ji (`PairSpan`; `combined`, `gradient`) -- a beam's own pair its
+    /// intensity, read from its modulus with no phase to turn (`Span::moduli`); two beams' pair turning at their wave vectors'
+    /// difference. (As the square of |u|'s own form, one beam's plane wave turned u's phase across the cell and put the turn's
+    /// square into the intensity's remainder, k²h²|u|², where the intensity does not move.)
+    pub(crate) fn intensity(&self, model: &Model, frequency: usize, entries: &[(usize, C64, f64)]) -> (Own, Form<[f64; 3]>) {
+        let beams = &model.light.frequencies[frequency].beams;
+        let n = beams.len();
+        let place = |l: usize| beams.iter().position(|&b| b == l).expect("an entry's beam is its frequency's");
+        let pairs = || entries.iter().flat_map(move |&(lj, xj, sj)| entries.iter().map(move |&(li, xi, si)| (self.pairs[frequency][place(lj) * n + place(li)], xj.conj() * xi, sj * si)));
+        (self.combined(pairs()).real().within(0.0, f64::INFINITY), self.gradient(pairs()).re())
     }
 
     /// |Σ_l a_l x_l| over the region in its own form (`field`, own.rs `Form::norm`).

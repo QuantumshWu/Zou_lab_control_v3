@@ -241,6 +241,30 @@ impl Own {
         self.through(f(a), slope, curved, lo, hi)
     }
 
+    /// The least and the largest of φ(x) = x/(x² + γ²) (`dispersion`) over the interval x ∈ [a − m, a + m] at each place of
+    /// the cell, m (`moved`) not negative, each in its own form (module documentation, # Bands): φ falls to −1/(2γ) at −γ,
+    /// rises to 1/(2γ) at γ and falls again to nothing, so its largest is 1/(2γ) where the interval holds γ and else the
+    /// larger of its ends' values, its least −1/(2γ) where it holds −γ and else the smaller -- the ends a ± m each a form
+    /// of its own, no interval in a remainder. Where the interval holds the peak at some places of the cell and not at
+    /// others, the range of the two.
+    pub(crate) fn dispersion_ends(self, moved: Own, gamma: f64) -> [Own; 2] {
+        let (a, b) = (self.sub(moved), self.add(moved));
+        let (fa, fb) = (a.dispersion(gamma), b.dispersion(gamma));
+        let top = 0.5 / gamma;
+        // The end at the peak `x` of value `peak`, else `ends` of the two ends' values.
+        let end = |x: f64, peak: f64, ends: fn(Own, Own) -> Own| -> Own {
+            if a.upper() <= x && b.lower() >= x {
+                Own::constant(peak)
+            } else if a.lower() > x || b.upper() < x {
+                ends(fa, fb)
+            } else {
+                let (at, off) = (if a.value <= x && b.value >= x { peak } else { ends(fa, fb).value }, ends(fa, fb));
+                Own::range(at, off.lower().min(peak), off.upper().max(peak))
+            }
+        };
+        [end(-gamma, -top, Own::min), end(gamma, top, Own::max)]
+    }
+
     /// φ'(a) = (γ² − a²)/(a² + γ²)², the dispersive shape's slope (`dispersion`): its own slope φ''(a) = 2a(a² − 3γ²)/(a² +
     /// γ²)³ and |φ'''| ≤ 6/(m² + γ²)² between the operand's values (`through`). Its range: φ' is even, falls from 1/γ² at 0 to
     /// −1/(8γ²) at |x| = √3 γ and rises from there towards 0 -- over the operand's moduli [m, M] the larger of its ends'
@@ -412,6 +436,7 @@ impl<T: Space> Form<T> {
 
 impl Form<f64> {
     /// The real quantity as an `Own`: within its value ± how far it moves and ± how large it is.
+    #[cfg(test)]
     pub(crate) fn own(&self) -> Own {
         Own::made(self.value, self.first, self.rest, (self.value - self.moved).max(-self.most), (self.value + self.moved).min(self.most))
     }
@@ -422,12 +447,6 @@ impl Form<C64> {
     pub(crate) fn turned(self, z: C64) -> Form<C64> {
         let size = z.abs();
         Form { value: self.value * z, first: self.first.map(|x| x * z), rest: times(self.rest, size), moved: times(self.moved, size), most: times(self.most, size) }
-    }
-
-    /// |u|² and its gradient 2 Re(u* ∇u) over the cell, of u's form and its gradient's (`product`): |u|² not negative.
-    pub(crate) fn square(&self, gradient: &Form<[C64; 3]>) -> (Own, Form<[f64; 3]>) {
-        let square = product(self, self, |a: C64, b: C64| (a.conj() * b).re).own().within(0.0, f64::INFINITY);
-        (square, product(self, gradient, |a: C64, g: [C64; 3]| g.map(|z| (a.conj() * z).re)).scale(2.0))
     }
 }
 
@@ -494,6 +513,16 @@ impl Band {
     /// A quantity of no width: its own form.
     pub(crate) fn exact(mid: Own) -> Band {
         Band { mid, rad: Own::constant(0.0) }
+    }
+
+    /// The band between two ends, `lo` at most `hi` at every place: its middle and half its width.
+    pub(crate) fn between(lo: Own, hi: Own) -> Band {
+        Band { mid: lo.add(hi).scale(0.5), rad: hi.sub(lo).scale(0.5).within(0.0, f64::INFINITY) }
+    }
+
+    /// The same quantity known also to be at most `most` in modulus (an own form): its ends each within ±most.
+    pub(crate) fn within(self, most: Own) -> Band {
+        Band::between(self.mid.sub(self.rad).max(most.scale(-1.0)), self.mid.add(self.rad).min(most))
     }
 
     pub(crate) fn add(self, o: Band) -> Band {
@@ -580,7 +609,7 @@ mod tests {
             let vector = move |r: [f64; 3]| [a(r), b(r), a(r) * b(r)];
             let length = |v: [f64; 3]| v.iter().map(|x| x * x).sum::<f64>().sqrt();
             let others: Vec<(Own, Box<dyn Fn([f64; 3]) -> f64>)> = vec![
-                (u.square(&Form::zero()).0, Box::new(move |r| a(r) * a(r) + b(r) * b(r))),
+                (product(&u, &u, |x: C64, y: C64| (x.conj() * y).re).own(), Box::new(move |r| a(r) * a(r) + b(r) * b(r))),
                 (u.norm(), Box::new(move |r| a(r).hypot(b(r)))),
                 (v.norm(), Box::new(move |r| length(vector(r)))),
                 (v.by(&fa.sub(fb)).norm(), Box::new(move |r| (a(r) - b(r)).abs() * length(vector(r)))),
