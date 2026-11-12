@@ -7,8 +7,20 @@
 //! V_min + E_r is below the far value 0 where the trap holds the reach; there −V_prep ≥ −(V_min + E_r) > 0 on it, and the proven
 //! envelope −V_prep ≤ B max_l A_l(r) (model.rs `Envelope`) puts it inside the union of the ellipsoids u_l ≤ B/(−V_min − E_r) − 1
 //! of the trap light's focused beams, u_l = xᵀ M_l x, M_l = (2/w₀²)(1 − nnᵀ) + nnᵀ/z_R²: their lab-axis extents √(U (M_l⁻¹)_aa),
-//! M_l⁻¹ = (w₀²/2)(1 − nnᵀ) + z_R² nnᵀ, bound `Reach::cell`. A level at or above the far value -- or a plane wave in the trap
-//! light -- leaves the reach unbounded: the whole space, its bounds the global ones.
+//! M_l⁻¹ = (w₀²/2)(1 − nnᵀ) + z_R² nnᵀ, bound `Reach::cell`.
+//!
+//! # The trap's region
+//! An atom is held while it is in the trap's region or bound (SPEC §1.7: lost is outside the region and above the
+//! potential's far value; field.rs, # The region). So a level at or above the far value -- an atom that has gained the
+//! trap's depth and is still in its light -- is held within the region alone: there the reach is the sublevel set within
+//! the region, and outside it the sublevel set of a level below the far value (`Reach::outside`; none at first, a bound
+//! atom's where one is to be held, `Model::outside_to`). Two levels, not one: the sublevel sets of the levels just below
+//! the far value reach out without bound (an atom at rest far from the focus is bound), and a family clipped to the
+//! region above the far value alone would drop, as it grows past it, the bound atoms outside the region it held below
+//! it. Both levels only grow, so a reach grown holds the one before it. The region lies within the ellipsoids u_l ≤
+//! 1/`REGION_INTENSITY` − 1 of the trap light's beams (|a_l|² ≤ 1/(1 + u_l), model.rs `Envelope`): their extents bound
+//! it as the level's do the sublevel set. An outside level at or above the far value -- a held atom that V_run binds and
+//! V_prep does not -- leaves the reach unbounded: the whole space, its bounds the global ones.
 //!
 //! # The reach's level
 //! The reach is the set that holds all but the share s of the initial ensemble: its level is the (1 − s) quantile of an
@@ -151,7 +163,7 @@ use super::{Component, Envelope, Level, Lights, Model, Reach, Trap};
 use crate::field::{Amplitude, Geometry};
 use crate::linalg::{dot3, norm3, Mat, C64};
 use crate::request::{GROUND, STATES};
-use crate::units::{rounding, KT_PER_UK};
+use crate::units::{rounding, KT_PER_UK, REGION_INTENSITY};
 use rayon::prelude::*;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -812,20 +824,28 @@ struct Cells<'a> {
 
 impl Cells<'_> {
     /// A cell's node with its regions, none where the cell cannot meet the reach: a lower bound of V_prep over it above the
-    /// reach's level.
+    /// reach's level -- above its level outside the trap's region where the cell cannot meet the region (module
+    /// documentation, # The trap's region).
     fn make(&self, cell: Cell) -> Option<(Node, Regions)> {
         let (model, reach) = (self.model, self.reach);
-        let level = reach.minimum + reach.energy;
-        // The reach's speeds where V_prep is at least v.
-        let speed = |v: f64| reach.speed.min((2.0 * model.hbar_over_mass * (level - v).max(0.0)).sqrt());
+        // The reach's speeds at a level where V_prep is at least v.
+        let speed = |level: f64, v: f64| reach.speed.min((2.0 * model.hbar_over_mass * (level - v).max(0.0)).sqrt());
         let spans = model.spans(&cell);
         let node = if cell.bounded() {
             let centre = model.potential(cell.centre, &reach.populations, &self.prepared);
             let below = centre - prepared_slack(&self.envelope, &spans);
-            if below > level {
+            // The cell's largest level and its centre's.
+            let level = reach.minimum + reach.energy;
+            let (most, at) = if reach.outside < reach.energy {
+                let beyond = reach.minimum + reach.outside;
+                (if model.region_of(&spans)[0] { level } else { beyond }, if model.light.outside(cell.centre) { beyond } else { level })
+            } else {
+                (level, level)
+            };
+            if below > most {
                 return None;
             }
-            Node { cell, over: speed(below), at: Some(speed(centre)), inside: centre <= level, halves: [None; 3] }
+            Node { cell, over: speed(most, below), at: Some(speed(at, centre)), inside: centre <= at, halves: [None; 3] }
         } else {
             Node { cell, over: reach.speed, at: None, inside: false, halves: [None; 3] }
         };
@@ -1112,55 +1132,171 @@ fn quantile(shape: f64, scales: &[f64], share: f64) -> f64 {
     }
 }
 
+/// The energy above V_min (rad/µs) of the reach of a trap at temperature T_r (µK) that leaves out the share s (module
+/// documentation, # The reach's level) -- the (1 − s) quantile of an atom's energy in the ensemble as drawn at T_r, per
+/// principal axis along which the trap holds the atom an exponential scaled by the Wigner factor's s_i² = x_i coth x_i,
+/// x_i = ħω_i/2k_BT_r, per axis it does not hold the momentum's degree alone --, and the squares s_i² per axis.
+fn energy_at(trap: &Trap, temperature_uk: f64, share: f64) -> (f64, [f64; 3]) {
+    let kt = KT_PER_UK * temperature_uk;
+    let squares = trap.frequencies.map(|omega| { let x = 0.5 * omega / kt; if x > 0.0 { x / x.tanh() } else { 1.0 } });
+    let mut held: Vec<f64> = (0..3).filter(|&i| trap.frequencies[i] > 0.0).map(|i| squares[i]).collect();
+    held.sort_by(f64::total_cmp);
+    (quantile(0.5 * (3 - held.len()) as f64, &held, share) * kt, squares)
+}
+
+/// The least temperature (µK) at which the reach of a trap that leaves out the share s holds the level `level` (rad/µs,
+/// the prepared energy; module documentation, # The reach's level), from a temperature `from` whose reach does not. The
+/// reach's energy rises with its temperature -- every oscillator's mean energy (ħω_i/2) coth(ħω_i/2k_BT) and the free
+/// axes' scale k_BT rise with it, and with them every quantile of their sum --, so the bracket's top is doubled from
+/// `from` until it holds the level, then the bracket halved until its two ends are neighbours in the format.
+pub fn holding(trap: &Trap, level: f64, share: f64, from: f64) -> f64 {
+    let holds = |t: f64| trap.minimum + energy_at(trap, t, share).0 >= level;
+    let (mut lo, mut hi) = (from, from);
+    while !holds(hi) {
+        (lo, hi) = (hi, 2.0 * hi);
+    }
+    loop {
+        let middle = 0.5 * (lo + hi);
+        if !(lo < middle && middle < hi) {
+            return hi;
+        }
+        if holds(middle) { hi = middle } else { lo = middle }
+    }
+}
+
 impl Model {
     /// The reach of a trap at temperature T_r (µK) that leaves out the share s (module documentation, # The reach's
-    /// level): its level the (1 − s) quantile of an atom's energy in the ensemble as drawn at T_r -- per principal axis
-    /// along which the trap holds the atom an exponential scaled by the Wigner factor's s_i² = x_i coth x_i,
-    /// x_i = ħω_i/2k_BT_r, per axis it does not hold the momentum's degree alone.
+    /// level, `energy_at`): the sublevel set of its level, where that is below the far value; else the set within the
+    /// trap's region, and none outside it (# The trap's region; `outside_to` adds a level there).
     pub fn reach(&self, trap: &Trap, p: &[f64; GROUND], temperature_uk: f64, share: f64) -> Reach {
-        let kt = KT_PER_UK * temperature_uk;
-        let squares = trap.frequencies.map(|omega| { let x = 0.5 * omega / kt; if x > 0.0 { x / x.tanh() } else { 1.0 } });
-        let mut held: Vec<f64> = (0..3).filter(|&i| trap.frequencies[i] > 0.0).map(|i| squares[i]).collect();
-        held.sort_by(f64::total_cmp);
-        let energy = quantile(0.5 * (3 - held.len()) as f64, &held, share) * kt;
-        let level = trap.minimum + energy;
-        let envelope = self.envelope(p);
-        let b = envelope.peak();
-        let n = envelope.beams.len();
-        let mut extent = [0.0_f64; 3];
-        for (j, &l) in envelope.beams.iter().enumerate() {
-            let weight: f64 = (0..n).map(|i| envelope.weights[j * n + i] + envelope.weights[i * n + j]).sum();
-            if weight == 0.0 {
-                continue;
-            }
-            let beam = &self.light.beams[l];
-            match (beam.waist, beam.rayleigh()) {
-                (Some(w), Some(z)) if level < 0.0 => {
-                    let u = b / -level - 1.0;
-                    for a in 0..3 {
-                        let na = beam.direction[a];
-                        extent[a] = extent[a].max((u.max(0.0) * (0.5 * w * w * (1.0 - na * na) + z * z * na * na)).sqrt());
-                    }
-                }
-                _ => extent = [f64::INFINITY; 3],
-            }
-        }
-        Reach {
+        let (energy, squares) = energy_at(trap, temperature_uk, share);
+        let outside = if trap.minimum + energy < 0.0 { energy } else { f64::NEG_INFINITY };
+        let mut reach = Reach {
             temperature_uk,
             kinetic_uk: squares.map(|square| square * temperature_uk),
             energy,
+            outside,
             minimum: trap.minimum,
-            cell: std::array::from_fn(|a| [-extent[a], extent[a]]),
+            cell: [[0.0; 2]; 3],
             speed: (2.0 * self.hbar_over_mass * energy).sqrt(),
             populations: *p,
+        };
+        reach.cell = self.reach_box(&reach);
+        reach
+    }
+
+    /// The reach that holds, beside `reach`, the prepared energies up to `level` (rad/µs) outside the trap's region (module
+    /// documentation, # The trap's region): its outside level raised to it, no higher than its own level inside.
+    pub fn outside_to(&self, reach: &Reach, level: f64) -> Reach {
+        let mut wider = Reach { outside: reach.outside.max((level - reach.minimum).min(reach.energy)), ..reach.clone() };
+        wider.cell = self.reach_box(&wider);
+        wider
+    }
+
+    /// A box that holds a reach (`Reach::cell`; module documentation, # The reach, # The trap's region): the envelope's
+    /// ellipsoids of its level where that is below the far value; else the trap light's ellipsoids of the region with
+    /// the envelope's of the outside level. Unbounded where a level that bounds no set is asked, or a trap beam is a plane
+    /// wave.
+    fn reach_box(&self, reach: &Reach) -> [[f64; 2]; 3] {
+        let envelope = self.envelope(&reach.populations);
+        let (b, n) = (envelope.peak(), envelope.beams.len());
+        // The sublevel set's extents at a level: of the envelope's beams, u = B/(−level) − 1 (none below every level).
+        let below = |level: f64| -> [f64; 3] {
+            let mut extent = [0.0_f64; 3];
+            for (j, &l) in envelope.beams.iter().enumerate() {
+                let weight: f64 = (0..n).map(|i| envelope.weights[j * n + i] + envelope.weights[i * n + j]).sum();
+                if weight == 0.0 {
+                    continue;
+                }
+                let beam = &self.light.beams[l];
+                match (beam.waist, beam.rayleigh()) {
+                    (Some(w), Some(z)) if level < 0.0 => {
+                        let u = b / -level - 1.0;
+                        for a in 0..3 {
+                            let na = beam.direction[a];
+                            extent[a] = extent[a].max((u.max(0.0) * (0.5 * w * w * (1.0 - na * na) + z * z * na * na)).sqrt());
+                        }
+                    }
+                    _ => extent = [f64::INFINITY; 3],
+                }
+            }
+            extent
+        };
+        let extent = if reach.outside == reach.energy {
+            below(reach.minimum + reach.energy)
+        } else {
+            // The region: of every beam of the trap light, u ≤ 1/REGION_INTENSITY − 1.
+            let (u, mut extent) = (1.0 / REGION_INTENSITY - 1.0, below(reach.minimum + reach.outside));
+            for &l in &self.light.frequencies[self.light.trap].beams {
+                let beam = &self.light.beams[l];
+                match (beam.waist, beam.rayleigh()) {
+                    (Some(w), Some(z)) => {
+                        for a in 0..3 {
+                            let na = beam.direction[a];
+                            extent[a] = extent[a].max((u * (0.5 * w * w * (1.0 - na * na) + z * z * na * na)).sqrt());
+                        }
+                    }
+                    _ => extent = [f64::INFINITY; 3],
+                }
+            }
+            extent
+        };
+        std::array::from_fn(|a| [-extent[a], extent[a]])
+    }
+
+    /// Of a cell's beams (`Span`): whether the cell may meet the trap's region -- some beam of the trap light reaches
+    /// `REGION_INTENSITY` at its largest over the cell -- and whether it lies within it -- one beam does at its least
+    /// (field.rs, # The region).
+    pub(crate) fn region_of(&self, spans: &[Span]) -> [bool; 2] {
+        let beams = &self.light.frequencies[self.light.trap].beams;
+        [beams.iter().any(|&l| spans[l].most * spans[l].most >= REGION_INTENSITY), beams.iter().any(|&l| spans[l].least * spans[l].least >= REGION_INTENSITY)]
+    }
+
+    /// Whether the model holds along a straight path r + v u, |u| ≤ |half|, at the speed `speed` (step.rs, # The domain;
+    /// solve.rs `Domain`): every one of the units `units` has its fold (units.rs `Model::exist_over`) and the tables
+    /// `tables`, where asked, hold as they were verified (tabulate.rs `Model::within`) -- by the reach's proofs' own rule along the path (module
+    /// documentation, # Provable extrema): a piece of the path is settled where every bound over its box is below ½ and
+    /// within the tables' ranges, and the path fails where a piece's middle, a point of the path, attains ½ or leaves a
+    /// range; else the piece is halved, each half asked only what its whole left open. A bound over the path's whole box
+    /// moves with the box: a step of 3.3 µs at 0.17 µm/µs spans half a waist of a tweezer, its trap's shift of a probe
+    /// over it reads a fold at 0.78 that no point of the path has, and reaches grown for such boxes alone crept up in
+    /// seven attempts.
+    pub(crate) fn holds_along(&self, judged: &super::units::Judged, units: &[usize], tables: Option<&super::tabulate::Tables>, r: [f64; 3], v: [f64; 3], half: f64, speed: f64) -> bool {
+        let at = |u: f64| -> [f64; 3] { std::array::from_fn(|a| r[a] + v[a] * u) };
+        // A region's verdict: the units it leaves open, and whether the tables hold over it.
+        let open = |region: &Region, asked: &[usize], tables_asked: bool| -> (Vec<usize>, bool) {
+            (asked.iter().copied().filter(|&u| !self.exist_over(judged, &[u], region)).collect(), tables_asked && tables.is_some_and(|tables| !self.within(tables, region)))
+        };
+        let mut pieces = vec![(-half.abs(), half.abs(), units.to_vec(), tables.is_some())];
+        while let Some((a, b, asked, tables_asked)) = pieces.pop() {
+            let (middle, width) = (0.5 * (a + b), 0.5 * (b - a));
+            let over = self.region(self.spans(&Cell { centre: at(middle), half: v.map(|x| (x * width).abs()) }), speed);
+            let (left, tables_left) = open(&over, &asked, tables_asked);
+            if left.is_empty() && !tables_left {
+                continue;
+            }
+            let point = self.point_region(at(middle), speed);
+            let (failing, tables_failing) = open(&point, &left, tables_left);
+            if !failing.is_empty() || tables_failing || !(a < middle && middle < b) {
+                return false;
+            }
+            pieces.push((a, middle, left.clone(), tables_left));
+            pieces.push((middle, b, left, tables_left));
         }
+        true
+    }
+
+    /// The level of a reach at r (rad/µs): the reach's own; where it holds only a lower level outside the trap's region
+    /// (module documentation, # The trap's region) and r lies outside the region, that one.
+    fn level_at(&self, reach: &Reach, r: [f64; 3]) -> f64 {
+        reach.minimum + if reach.outside < reach.energy && self.light.outside(r) { reach.outside } else { reach.energy }
     }
 
     /// The kinetic energy a reach holds at r (rad/µs; module documentation, # The reach), under the prepared lights
-    /// `prepared`: A(r) = V_min + E_r − V_prep(r; p) -- an atom at r is in the reach with (ħ/m) κ²/2 ≤ A(r), none where A
-    /// is negative.
+    /// `prepared`: A(r) = V_min + E_r − V_prep(r; p), the reach's level at r (`level_at`) -- an atom at r is in the reach
+    /// with (ħ/m) κ²/2 ≤ A(r), none where A is negative.
     pub fn room(&self, reach: &Reach, r: [f64; 3], prepared: &Lights) -> f64 {
-        reach.minimum + reach.energy - self.potential(r, &reach.populations, prepared)
+        self.level_at(reach, r) - self.potential(r, &reach.populations, prepared)
     }
 
     /// Whether a reach holds an atom at r with the momentum κ: its kinetic energy (ħ/m) κ²/2 within the reach's `room`
@@ -1620,5 +1756,70 @@ mod tests {
         }
         eprintln!("R8_R5051, every drive bare: the largest curvature found {largest:.3} rad/µs/µm², the bound {bound:.3}");
         assert!(largest > 0.0 && bound.is_finite(), "{largest} {bound}");
+    }
+
+    /// A reach above the potential's far value is held within the trap's region (module documentation, # The trap's
+    /// region). R2_RECOIL's tweezer: at 30 µK its level lies below the far value, the sublevel set whole; at the least
+    /// temperature whose level lies half the trap's depth above it (`holding`: one temperature an ulp lower does not hold
+    /// it), the set within the region -- its box the trap beam's ellipsoid u ≤ 19, the focus held at rest and at the
+    /// speed the level leaves there, a point on the axis at six Rayleigh ranges (|a|² = 1/37, outside the region) not
+    /// held even at rest, though bound. Holding that point's prepared energy outside the region too (`outside_to`) holds
+    /// it, and everything the reach held before; its box is larger.
+    #[test]
+    fn a_reach_above_the_far_value_is_held_within_the_trap_s_region() {
+        let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
+        let model = at_the_atom("R2_RECOIL");
+        let p = { let mut p = [0.0; GROUND]; p[7] = 1.0; p };
+        let (trap, prepared) = (model.trap(&p, &model.prepared()).unwrap(), model.prepared());
+        let cold = model.reach(&trap, &p, 30.0, share);
+        assert!(cold.minimum + cold.energy < 0.0 && cold.outside == cold.energy && cold.cell.iter().all(|c| c[1].is_finite()), "{cold:?}");
+        let level = -0.5 * trap.minimum;
+        let t = holding(&trap, level, share, 30.0);
+        assert!(trap.minimum + energy_at(&trap, t, share).0 >= level && trap.minimum + energy_at(&trap, t * (1.0 - f64::EPSILON), share).0 < level, "{t} µK");
+        let hot = model.reach(&trap, &p, t, share);
+        let beam = model.light.beams[model.light.frequencies[model.light.trap].beams[0]];
+        let (w, z, n) = (beam.waist.unwrap(), beam.rayleigh().unwrap(), beam.direction);
+        let region: [f64; 3] = std::array::from_fn(|a| (19.0 * (0.5 * w * w * (1.0 - n[a] * n[a]) + z * z * n[a] * n[a])).sqrt());
+        assert!(hot.outside == f64::NEG_INFINITY && (0..3).all(|a| (hot.cell[a][1] - region[a]).abs() <= 1e-12 * region[a]), "{:?} against {region:?}", hot.cell);
+        let kinetic = |r: [f64; 3]| model.room(&hot, r, &prepared);
+        let focus = [0.0; 3];
+        let at_rest = |r: [f64; 3]| [0.0; 3].map(|x: f64| x + 0.0 * r[0]);
+        let speed = (2.0 * kinetic(focus) / model.hbar_over_mass).sqrt() * (1.0 - 1e-9);
+        assert!(model.holds(&hot, focus, at_rest(focus)) && model.holds(&hot, focus, [0.0, 0.0, speed]), "the focus");
+        let far = n.map(|x| 6.0 * z * x);
+        let bound = model.potential(far, &p, &prepared);
+        assert!(model.light.outside(far) && bound < 0.0 && !model.holds(&hot, far, at_rest(far)), "six Rayleigh ranges out: V {bound}");
+        let wider = model.outside_to(&hot, bound);
+        assert!(model.holds(&wider, far, at_rest(far)) && model.holds(&wider, focus, [0.0, 0.0, speed]) && (0..3).all(|a| wider.cell[a][1] >= hot.cell[a][1]), "{wider:?}");
+        assert!(wider.outside < wider.energy && model.outside_to(&wider, 0.5 * bound).outside > wider.outside, "the outside level grows, below the far value");
+    }
+
+    /// The model holds along a path where every point of it does, and fails where a point of it fails (`holds_along`):
+    /// R2_RECOIL with its resonant beam's drives folded at the atom, whose folds the whole space does not settle. On 200
+    /// paths of 0.5 µm about points across the trap's region at speeds up to 0.5 µm/µs, against their gates at 65 points
+    /// each: a path with a point that fails is never held to hold; both outcomes occur.
+    #[test]
+    fn a_path_holds_where_its_points_do_and_fails_where_one_does_not() {
+        let model = at_the_atom("R2_RECOIL");
+        let units = model.units();
+        let judged = model.judged(&units);
+        let open = model.everywhere(&judged, 0.5).1;
+        assert!(!open.is_empty(), "the folds at the atom are open over the whole space");
+        let mut stream = crate::random::Stream::jump(11, 3, 0);
+        let (mut held, mut failed) = (0, 0);
+        for _ in 0..200 {
+            let r: [f64; 3] = std::array::from_fn(|_| 6.0 * (stream.uniform() - 0.5));
+            let v: [f64; 3] = std::array::from_fn(|_| 0.29 * (stream.uniform() - 0.5));
+            let speed = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+            let half = 0.25 / speed;
+            let points_fail = (0..=64).any(|i| {
+                let u = half * (i as f64 / 32.0 - 1.0);
+                !model.exist_over(&judged, &open, &model.point_region(std::array::from_fn(|a| r[a] + v[a] * u), speed))
+            });
+            let along = model.holds_along(&judged, &open, None, r, v, half, speed);
+            assert!(!(points_fail && along), "a path with a failing point held to hold: r {r:?} v {v:?}");
+            if along { held += 1 } else { failed += 1 }
+        }
+        assert!(held > 0 && failed > 0, "{held} held, {failed} failed");
     }
 }

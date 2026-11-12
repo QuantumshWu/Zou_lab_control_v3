@@ -10,7 +10,9 @@
 //! through its own three nodes, its middle and its ends, whatever its length (step.rs, # The kick): what that leaves
 //! is an error of the step's length like the splitting's, and the pilot's companion at twice the step checks both at
 //! the outputs (solve.rs, # The step). The generator's own frequencies are no matter of the step's length: they are
-//! integrated exactly.
+//! integrated exactly. A step is taken only where its domain proves it (step.rs, # The domain): the model the run takes
+//! holds over its path, and the step at its speed. One that is not proven ends the advance with what its path needs
+//! (`step::Unproven`): the run's model is no model of that step, and no length of a step makes it one.
 //!
 //! τ is one for the run because the splitting is symplectic in its conservative part and its own inverse: at a constant
 //! step the energy of a trap's motion errs by a bounded amount (measured on the reference traps R1: no drift over 10³
@@ -77,7 +79,7 @@
 //!   node a level.
 
 use crate::random::Stream;
-use crate::step::{step_work, test_loss, Brownian, Dynamics, Middle, Midway, Refused, Scratch, Segment, Trajectory};
+use crate::step::{step_work, test_loss, Brownian, Domain, Dynamics, Middle, Midway, Refused, Scratch, Segment, Trajectory};
 use crate::units::rounding;
 
 /// Where a trajectory stands on its Brownian path (`Path`): the time, the bin of its grid that time lies in, and the
@@ -184,12 +186,14 @@ impl Path {
 /// every piece of every step's path -- from the step's start or a jump of the step -- with the time the trajectory is
 /// on it to: the next jump, the step's end, or the read it is found lost at. A trajectory lost on the way stops at
 /// its loss time. Where the scheme refuses a step at every length down to the time's round-off, the advance ends
-/// there with the refusal; so it does where the model gives a jump no photon (`step::jump`). `scratch` is the
-/// trajectory's (`step::Scratch`): its steps' memory, made once with it; `path` its Brownian path, which it goes along
-/// as it is advanced (`Path`).
+/// there with the refusal; so it does where the model gives a jump no photon (`step::jump`), and where `domain` does
+/// not prove the step (step.rs, # The domain: a shorter step is no answer to that). `scratch` is the trajectory's
+/// (`step::Scratch`): its steps' memory, made once with it; `path` its Brownian path, which it goes along as it is
+/// advanced (`Path`).
 #[allow(clippy::too_many_arguments)]
 pub fn advance<D: Dynamics>(
     model: &D,
+    domain: &dyn Domain,
     tau: f64,
     trajectory: &mut Trajectory,
     scratch: &mut Scratch,
@@ -214,9 +218,9 @@ pub fn advance<D: Dynamics>(
             let (brownian, beyond) = path.reach(trajectory.time + length);
             let end = if length == rest { to } else { beyond.at };
             let reads = &at[next..next + at[next..].partition_point(|&time| time <= end)];
-            match Midway::new(model, trajectory, length).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch)) {
+            match Midway::new(model, trajectory, length).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch, domain)) {
                 Ok(step) => break (step, end, beyond),
-                Err(Refused::Emission) => return Err(Refused::Emission),
+                Err(refusal @ (Refused::Emission | Refused::Unproven(_))) => return Err(refusal),
                 Err(refusal) => {
                     length *= 0.5;
                     if !(trajectory.time + length > trajectory.time) {

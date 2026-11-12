@@ -134,9 +134,11 @@ pub struct Envelope {
 }
 
 /// The atoms' reach (SPEC §1.8): the sublevel set {(r, κ) : V_prep(r) + (ħ/m)κ²/2 − V_min ≤ L k_B T_r} of the prepared
-/// energy, L the level a thermal ensemble's share s lies above (reach.rs, # The reach's level). Its extrema are provable
-/// bounds over its cells, made side by side (reach.rs, # A cell's sides); what it leaves out of the initial ensemble
-/// beyond that is counted on the ensemble (reach.rs `Model::left_out`).
+/// energy, L the level a thermal ensemble's share s lies above (reach.rs, # The reach's level) -- within the trap's region
+/// where that level is at or above the potential's far value, and outside the region the sublevel set of a level below
+/// it (reach.rs, # The trap's region). Its extrema are provable bounds over its cells, made side by side (reach.rs, # A
+/// cell's sides); what it leaves out of the initial ensemble beyond that is counted on the ensemble (reach.rs
+/// `Model::left_out`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reach {
     /// T_r (µK): the temperature the atoms reach (never lowered; the solve's trials read it).
@@ -151,9 +153,13 @@ pub struct Reach {
     /// (SPEC §3; reach.rs, # The reach's level: classically Q(3, L) = s, L = 12.89, where the trap holds along three
     /// axes).
     pub energy: f64,
+    /// The energy above V_min it holds outside the trap's region (rad/µs; field.rs, # The region): `energy` itself where
+    /// the level is below the far value -- the sublevel set whole --, else that of a level below the far value, or none
+    /// (−∞): an atom outside the region above the far value is lost (SPEC §1.7), and one below it is bound.
+    pub outside: f64,
     /// V_min (rad/µs).
     pub minimum: f64,
-    /// A box (µm, [low, high] per lab axis) that provably holds the sublevel set: where the subdivisions start.
+    /// A box (µm, [low, high] per lab axis) that provably holds the reach: where the subdivisions start.
     pub cell: [[f64; 2]; 3],
     /// The largest speed |v| (µm/µs) in the reach: √(2 (ħ/m) energy).
     pub speed: f64,

@@ -22,6 +22,15 @@ use atom_motion::model::{Model, Point, Run, Unit, GROUND};
 use atom_motion::request::Request;
 use atom_motion::step::{stumpff, Brownian, Dynamics, Middle, Midway, Scratch, Step, Trajectory};
 
+/// The domain the tool's steps are taken in: every step proven -- its courses and models are its own to choose (a run's
+/// are held to the reach its model was judged over, atom_motion's solve.rs `Domain`).
+struct Everywhere;
+impl atom_motion::step::Domain for Everywhere {
+    fn proven(&self, _: &atom_motion::step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> Result<(), atom_motion::step::Unproven> {
+        Ok(())
+    }
+}
+
 /// The distance (µm) over which a jump operator's gradient is read as a central difference: the operators change over
 /// 1/k ≈ 0.12 µm, so the difference errs by (kε)²/6 ≈ 10⁻⁷ of the gradient.
 const EPSILON: f64 = 1e-4;
@@ -248,7 +257,7 @@ const WIDTH: usize = 11;
 fn stepped(run: &Run, t: &Trajectory, mut length: f64, brownian: &mut dyn FnMut(f64) -> Brownian, scratch: &mut Scratch) -> (Step, Brownian, f64) {
     loop {
         let part = brownian(length);
-        match Midway::new(run, t, length).and_then(|through| through.attempt(t, &part, &[], scratch)) {
+        match Midway::new(run, t, length).and_then(|through| through.attempt(t, &part, &[], scratch, &Everywhere)) {
             Ok(step) => return (step, part, length),
             Err(e) => {
                 length *= 0.5;
@@ -472,7 +481,7 @@ fn free(name: &str, dimension: &str, temperature: f64, tau: f64, count: u64, spa
                 let mut sums = [0.0; 7];
                 for s in 0..per {
                     let to = (w * per + s + 1) as f64 * tau;
-                    atom_motion::adapt::advance(&run, tau, &mut t, &mut scratch, &mut path, to, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
+                    atom_motion::adapt::advance(&run, &Everywhere, tau, &mut t, &mut scratch, &mut path, to, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
                     for &axis in &held {
                         // Held at its offset; or, `SWING=1`, on the trap's own oscillation of that amplitude along the
                         // axis, each atom at its own phase: the axis moves as a trapped atom's does and takes nothing

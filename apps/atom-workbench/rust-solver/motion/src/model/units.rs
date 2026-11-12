@@ -302,6 +302,22 @@ pub(crate) struct Kept {
     pub(crate) wave: f64,
 }
 
+/// What a unit's gate reads of a region (`Model::judged`, `Model::gate_of`).
+pub(crate) enum Read<'u> {
+    Fold { ground: usize, place: usize, bare: bool },
+    Term { form: Arc<TermForm>, a: usize, b: usize, beat: usize },
+    Coherence { unit: &'u Unit, apart: f64 },
+    Nothing,
+}
+
+/// A model's units' gates as functions of a region (`Model::judged`): what each unit's gate reads, in the units' order,
+/// and the largest wave number of the light's beams twice, a photon coherence's two photons'. The proofs over a reach
+/// (`Model::gates`) and the steps outside it (solve.rs `Domain`) read the same gates.
+pub struct Judged<'u> {
+    reads: Vec<Read<'u>>,
+    wave: f64,
+}
+
 /// Two frequencies' constant form (far.rs `constant`): on their fields' bases and per pair of their beams, with the
 /// rounding of an entry's own sums (reach.rs `TermForm::rounding_of`) -- the form's, whichever entry is read.
 pub(crate) struct Cross {
@@ -825,24 +841,12 @@ impl Model {
         self.beats.iter().position(|b| b.0 == *beat)
     }
 
-    /// Each unit's existence gate over the reach (SPEC §1.5; module documentation), provable bounds at this model's clusters
-    /// and levels: every kind through the one gate (`gate`) -- a drive's by its ground state's tail (`folds`), a coupling's
-    /// (`term_bound`), a photon coherence's (`gate_over`, its size its two classes' jumps' bound, photon.rs). Each is bounded on the
-    /// whole space first, every beam at its peak: a bound over any reach, and where both of a unit's are below ½ there its
-    /// gate. The others are proven together over the reach's cells, on all the cores (reach.rs
-    /// `Model::bounds_over_in_parallel`) -- a ground state's drive's with every weaker one's share on the same cell: what a
-    /// cell's centre attains is a value there, never a bound from elsewhere. A dressing folds nothing and has no gate; a
-    /// unit of nothing in this model has nothing to fold.
-    pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
-        // What a unit's gate reads: a drive's its ground state, its place in the tail rule's order and whether it is bare; a
-        // coupling's its form; a coherence's its unit and its distance over all space.
-        enum Read<'u> {
-            Fold { ground: usize, place: usize, bare: bool },
-            Term { form: Arc<TermForm>, a: usize, b: usize, beat: usize },
-            Coherence { unit: &'u Unit, apart: f64 },
-            Nothing,
-        }
-        let reads: Vec<Read> = units
+    /// What each unit's gate reads (`Judged`), made once for a model's units: a drive's its ground state, its place in the
+    /// tail rule's order and whether it is bare; a coupling's its form; a coherence's its unit and its distance over all
+    /// space; nothing for a dressing, which folds nothing, a fold's order -- where the fold exists, so does its next order
+    /// -- and a unit of nothing in this model.
+    pub(crate) fn judged<'u>(&self, units: &'u [Unit]) -> Judged<'u> {
+        let reads = units
             .iter()
             .map(|u| match *u {
                 Unit::Bare { component, excited, ground } | Unit::Drive { component, excited, ground } => {
@@ -850,54 +854,82 @@ impl Model {
                     level.filter(|of| of.1 != Level::Explicit).map_or(Read::Nothing, |(place, level)| Read::Fold { ground, place, bare: level == Level::Bare })
                 }
                 Unit::Term { a, b, ref beat } => self.beat_index(beat).map_or(Read::Nothing, |index| Read::Term { form: self.forms.term(self, a, b, index), a, b, beat: index }),
-                // A dressing folds nothing; a fold's order is no fold of its own: where the fold exists, so does its next order.
                 Unit::Dressing { .. } | Unit::Second { .. } => Read::Nothing,
                 Unit::Coherence { ref first, ref second, .. } => Read::Coherence { unit: u, apart: self.omega(&first.plus(-1, second)).abs() - self.spread() },
             })
             .collect();
-        // The largest wave number of the light's beams: a coherence's two photons'.
-        let wave = 2.0 * self.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
-        let read = |of: &Read, region: &Region, places: usize| -> [f64; 2] {
-            match of {
-                Read::Fold { ground, place, bare } => {
-                    let made = self.folds(*ground, *place, region, places);
-                    if *bare { [made[2], made[3]] } else { [made[0], made[1]] }
-                }
-                Read::Term { form, a, b, beat } => {
-                    let made = self.term_bound(form, *a, *b, *beat, region);
-                    [made.0, made.1]
-                }
-                Read::Coherence { unit, apart } => {
-                    let made = self.gate_over(region, self.coherence_bound(unit, region), wave, *apart);
-                    [made.saturation, made.sweep]
-                }
-                Read::Nothing => [0.0; 2],
+        Judged { reads, wave: 2.0 * self.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max) }
+    }
+
+    /// A unit's gate over a region, [saturation, sweep] (module documentation, # One rule): its read (`Judged`) of the
+    /// region -- a cell of a reach's proof, the whole space, or a step's path (solve.rs `Domain`): one statement, its value
+    /// on a point the point's own --, every kind through the one gate (`gate`): a drive's by its ground state's tail
+    /// (`folds`, the region keeping its first `places` places), a coupling's (`term_bound`), a photon coherence's
+    /// (`gate_over`, its size its two classes' jumps' bound, photon.rs).
+    pub(crate) fn gate_of(&self, judged: &Judged, u: usize, region: &Region, places: usize) -> [f64; 2] {
+        match &judged.reads[u] {
+            Read::Fold { ground, place, bare } => {
+                let made = self.folds(*ground, *place, region, places);
+                if *bare { [made[2], made[3]] } else { [made[0], made[1]] }
             }
-        };
-        let whole = self.region(self.spans(&Cell { centre: [0.0; 3], half: [f64::INFINITY; 3] }), reach.speed);
-        let everywhere: Vec<[f64; 2]> = reads.iter().map(|of| read(of, &whole, usize::MAX)).collect();
-        let open: Vec<usize> = (0..units.len()).filter(|&u| !(everywhere[u][0] < EXISTS && everywhere[u][1] < EXISTS)).collect();
+            Read::Term { form, a, b, beat } => {
+                let made = self.term_bound(form, *a, *b, *beat, region);
+                [made.0, made.1]
+            }
+            Read::Coherence { unit, apart } => {
+                let made = self.gate_over(region, self.coherence_bound(unit, region), judged.wave, *apart);
+                [made.saturation, made.sweep]
+            }
+            Read::Nothing => [0.0; 2],
+        }
+    }
+
+    /// Each unit's gate over the whole space at the speeds up to `speed`, every beam at its peak (`gate_of`): a bound over any
+    /// region at those speeds; and the units it leaves open -- some bound at ½ or above --, the others' gates.
+    pub(crate) fn everywhere(&self, judged: &Judged, speed: f64) -> (Vec<[f64; 2]>, Vec<usize>) {
+        let whole = self.region(self.spans(&Cell { centre: [0.0; 3], half: [f64::INFINITY; 3] }), speed);
+        let everywhere: Vec<[f64; 2]> = (0..judged.reads.len()).map(|u| self.gate_of(judged, u, &whole, usize::MAX)).collect();
+        let open = (0..everywhere.len()).filter(|&u| !(everywhere[u][0] < EXISTS && everywhere[u][1] < EXISTS)).collect();
+        (everywhere, open)
+    }
+
+    /// Whether every one of the units `which` has its fold over a region (`gate_of`, `Gate::exists`).
+    pub(crate) fn exist_over(&self, judged: &Judged, which: &[usize], region: &Region) -> bool {
+        which.iter().all(|&u| {
+            let [saturation, sweep] = self.gate_of(judged, u, region, usize::MAX);
+            saturation < EXISTS && sweep < EXISTS
+        })
+    }
+
+    /// Each unit's existence gate over the reach (SPEC §1.5; module documentation), provable bounds at this model's clusters
+    /// and levels (`gate_of`). Each is bounded on the whole space first, every beam at its peak (`everywhere`): a bound over
+    /// any reach, and where both of a unit's are below ½ there its gate. The others are proven together over the reach's
+    /// cells, on all the cores (reach.rs `Model::bounds_over_in_parallel`) -- a ground state's drive's with every weaker
+    /// one's share on the same cell: what a cell's centre attains is a value there, never a bound from elsewhere.
+    pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
+        let judged = self.judged(units);
+        let (everywhere, open) = self.everywhere(&judged, reach.speed);
         // Per ground state the places its open drives' gates ask of a cell.
         let mut places = [0; GROUND];
         for &u in &open {
-            if let Read::Fold { ground, place, .. } = reads[u] {
+            if let Read::Fold { ground, place, .. } = judged.reads[u] {
                 places[ground] = places[ground].max(place + 1);
             }
         }
         let mut quantities: Vec<Box<dyn Fn(&Region) -> f64 + Sync + '_>> = vec![];
         let mut shared: HashMap<(usize, usize, bool), usize> = HashMap::new();
         // Per open unit where its two bounds lie among the quantities: the saturation's, then the sweep's.
+        let judged = &judged;
         let asked: Vec<usize> = open
             .iter()
             .map(|&u| {
-                let of = &reads[u];
-                let (key, asks) = if let Read::Fold { ground, place, bare } = *of { (Some((ground, place, bare)), places[ground]) } else { (None, 0) };
+                let (key, asks) = if let Read::Fold { ground, place, bare } = judged.reads[u] { (Some((ground, place, bare)), places[ground]) } else { (None, 0) };
                 if let Some(found) = key.and_then(|k| shared.get(&k)) {
                     return *found;
                 }
                 let first = quantities.len();
-                quantities.push(Box::new(move |r: &Region| read(of, r, asks)[0]));
-                quantities.push(Box::new(move |r: &Region| read(of, r, asks)[1]));
+                quantities.push(Box::new(move |r: &Region| self.gate_of(judged, u, r, asks)[0]));
+                quantities.push(Box::new(move |r: &Region| self.gate_of(judged, u, r, asks)[1]));
                 if let Some(k) = key {
                     shared.insert(k, first);
                 }
