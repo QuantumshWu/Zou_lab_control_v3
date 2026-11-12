@@ -62,6 +62,18 @@ def spherical(v):
     """A field vector's components ε_q = ê_q*·v, q = −1, 0, +1 (the request's order and convention)."""
     return np.array([(v[0] + 1j * v[1]) / math.sqrt(2), v[2], -(v[0] - 1j * v[1]) / math.sqrt(2)])
 
+def cartesian(e):
+    """The field vector of spherical components ε_q (q = −1, 0, +1; `spherical`'s inverse): v = Σ_q ε_q ê_q."""
+    return np.array([(e[0] - e[2]) / math.sqrt(2), -1j * (e[0] + e[2]) / math.sqrt(2), e[1]])
+
+def tilted(beams, axis, deg):
+    """The beams turned by `deg` toward `axis` (the tweezer's) about k̂₁ × axis -- k and the polarization together, so each
+    keeps its polarization about its own k (σ stays σ, π stays ⊥ k)."""
+    k1 = beams[0]['k'] / np.linalg.norm(beams[0]['k']); n = np.cross(k1, axis); n /= np.linalg.norm(n)
+    t = math.radians(deg); K = np.array([[0, -n[2], n[1]], [n[2], 0, -n[0]], [-n[1], n[0], 0]])
+    R = np.eye(3) * math.cos(t) + math.sin(t) * K + (1 - math.cos(t)) * np.outer(n, n)
+    return [dict(b, k=R @ b['k'], eps=spherical(R @ cartesian(b['eps']))) for b in beams]
+
 def lab_beams(k_um, tilt_deg=4.0, power_mW=1.0, waist_um=1000.0, plate_deg=45.0, mirror_deg=180.0):
     """The probe and its reflection from the lab's description alone, none of the app's conversion: the probe along +y
     tilted toward +x, its polarization along the field's axis z (π), I = 2P/(πw²) at the focus; the reflection back along
@@ -76,8 +88,12 @@ def lab_beams(k_um, tilt_deg=4.0, power_mW=1.0, waist_um=1000.0, plate_deg=45.0,
     I = 2 * power_mW / (math.pi * (waist_um * 1e-4) ** 2)
     return [dict(name='probe (lab)', k=k_um * k1, eps=spherical(a.astype(complex)), I=I), dict(name='reflection (lab)', k=-k_um * k1, eps=spherical(e2), I=I)]
 
-def setup(request, field_G=None, offset_MHz=None, s_scale=1.0, depth_scale=1.0, phase_deg=0.0, field_dir=None, reflect=1.0, lab=False, magic=False):
-    """`magic`: the dipole-force-fluctuation control -- every excited level's tweezer shift made the ground's, g(r) U_g, plus
+def setup(request, field_G=None, offset_MHz=None, s_scale=1.0, depth_scale=1.0, phase_deg=0.0, field_dir=None, reflect=1.0, lab=False, magic=False, tilt_deg=0.0,
+          ellipticity=0.0, ell_deg=0.0):
+    """`tilt_deg`: the probe beams turned that much further toward the tweezer's axis (`tilted`).
+    `ellipticity`, `ell_deg`: the tweezer's focus elliptical (`trap`), its long axis `ell_deg` from the probe's transverse
+    direction in the radial plane (x̂ × the probe's radial direction) toward the probe's radial direction.
+    `magic`: the dipole-force-fluctuation control -- every excited level's tweezer shift made the ground's, g(r) U_g, plus
     its own focus value less the ground's as a constant: the excited states feel the ground's trap force (no force
     difference between the internal states, no DFF), and every transition keeps its detuning at the focus everywhere (so the
     probe also no longer comes nearer its lines at the trap's edge: that and the DFF are one thing, ħ∇δ)."""
@@ -98,12 +114,20 @@ def setup(request, field_G=None, offset_MHz=None, s_scale=1.0, depth_scale=1.0, 
     # g_F μ_B (MHz/G) of F=2 and F'=3: the tables' Zeeman shift of m = 1 at 1 G (model.py, with g_I)
     m1 = M.multilevel_tables(shifts, field_G=1.0)
     gg, ge = m1['Zg'][M.GROUND.index((2, 1))], m1['Ze'][M.EXCITED.index((3, 1))]
-    # The probe's offset from the free F=2 -> F'=3 line: the request's rotating frame on the excited states is the probe's
-    # frequency; the line is the D2 centre (the app's table) with the hyperfine shifts of F'=3 (+193.7407 MHz) and F=2
-    # (+2563.005979 MHz; Steck, Rb 87 D line data, Table 7).
+    # the probe beams: of the beams but the tweezer, those on the frequency most of them share (S3: the probe and its
+    # reflection; the repump has its own)
+    trap = mo['trapBeamId']
+    others = [b for b in mo['beams'] if b['id'] != trap]
+    index = max((tuple(b['frequencyIndex']) for b in others), key=lambda f: sum(tuple(b['frequencyIndex']) == f for b in others))
+    probes = [b for b in others if tuple(b['frequencyIndex']) == index]
+    # The probe's offset from the free F=2 -> F'=3 line: the probe's frequency is the request's rotating frame on the
+    # excited states plus its frequency index on the coordinates (expect.mjs `frameDetuning`; the frame is not always the
+    # probe's -- with the repump's index at 0 it is the repump's); the line is the D2 centre (the app's table) with the
+    # hyperfine shifts of F'=3 (+193.7407 MHz) and F=2 (+2563.005979 MHz; Steck, Rb 87 D line data, Table 7).
     if offset_MHz is None:
         line = tables['lines']['D2']['nu'] / 1e6 + 193.7407 - 2563.005979
-        offset_MHz = max(mo['frameFrequenciesMHz']) - line
+        coords = request['model']['frequencyCoordinates']['frequenciesMHz']
+        offset_MHz = max(mo['frameFrequenciesMHz']) + sum(n * f for n, f in zip(index, coords)) - line
     gi = [M.GROUND.index((2, m)) for m in range(-2, 3)]
     ei = [M.EXCITED.index((3, m)) for m in range(-3, 4)]
     tw = 2 * math.pi
@@ -141,16 +165,43 @@ def setup(request, field_G=None, offset_MHz=None, s_scale=1.0, depth_scale=1.0, 
             d = np.array(b['direction'], float); d /= np.linalg.norm(d)
             if i: E = E * np.exp(1j * math.radians(phase_deg))
             beams.append(dict(name=b['name'], k=d * b['waveNumberPerUm'], eps=E / np.linalg.norm(E), I=b['intensityMWcm2']))
+    if tilt_deg:
+        beams = tilted(beams, np.array(tw_['direction'], float) / np.linalg.norm(tw_['direction']), tilt_deg)
     kvec = [b['k'] for b in beams]; eps = [b['eps'] for b in beams]
+    kr = np.array(kvec[0], float); kr[0] = 0.0; kr /= np.linalg.norm(kr); tr = np.cross([1.0, 0.0, 0.0], kr)
+    ell_axis = math.cos(math.radians(ell_deg)) * tr + math.sin(math.radians(ell_deg)) * kr
     s = [s_scale * b['I'] / p['Isat'] * (reflect if i else 1.0) for i, b in enumerate(beams)]
-    return dict(p=p, mt=mt, magic=magic, shifts=shifts, B=B, Bvec=Bvec, reflect=reflect, lab=lab, phase=phase_deg, offset=offset_MHz, sScale=s_scale, depthScale=depth_scale, H0=H0, diagL=diagL, C=C,
+    return dict(p=p, mt=mt, magic=magic, shifts=shifts, B=B, Bvec=Bvec, reflect=reflect, lab=lab, tilt=tilt_deg, ell=ellipticity, ellAxis=ell_axis, ellDeg=ell_deg, phase=phase_deg, offset=offset_MHz, sScale=s_scale, depthScale=depth_scale, H0=H0, diagL=diagL, C=C,
                 k=np.array(kvec), eps=np.array(eps), s=np.array(s), names=[b['name'] for b in beams], T=mo['temperatureUK'])
+
+@nb.njit(inline='always')
+def trap(x, y, z, P):
+    """g = I/I0 of the tweezer (along x) and its gradient: model.py's paraxial Gaussian, or with P[6] = e > 0 an elliptical
+    one -- its 1/e² radii w0·√(1+e) along â = (0, P[7], P[8]) and w0/√(1+e) along x̂ × â (their product w0², so the
+    depth at a given power is kept), each with its own Rayleigh range ∝ w²."""
+    w0, zR, e = P[1], P[2], P[6]
+    if e == 0.0:
+        return M.beam(x, y, z, w0, zR)
+    ay, az = P[7], P[8]
+    wa2 = w0 * w0 * (1.0 + e); wb2 = w0 * w0 / (1.0 + e); zA = zR * (1.0 + e); zB = zR / (1.0 + e)
+    a = ay * y + az * z; b = -az * y + ay * z
+    Aa = 1.0 / (1.0 + (x / zA) ** 2); Ab = 1.0 / (1.0 + (x / zB) ** 2)
+    g = math.sqrt(Aa * Ab) * math.exp(-2.0 * a * a * Aa / wa2 - 2.0 * b * b * Ab / wb2)
+    gx = g * (-x * (Aa / zA ** 2 + Ab / zB ** 2) + 4.0 * x * (a * a * Aa * Aa / (wa2 * zA ** 2) + b * b * Ab * Ab / (wb2 * zB ** 2)))
+    ga = -4.0 * g * a * Aa / wa2; gb = -4.0 * g * b * Ab / wb2
+    return g, gx, ay * ga - az * gb, az * ga + ay * gb
+
+def trap_params(S):
+    """The P array of `hamiltonian`, `run` and friction.py: Γ, w0, z_R, U0, ħ/m, the µK unit, and the trap's ellipticity
+    and long axis."""
+    p = S['p']
+    return np.array([p['gamma'], p['w0'], p['zR'], p['U0'], p['hbar_m'], p['uK'], S['ell'], S['ellAxis'][1], S['ellAxis'][2]])
 
 @nb.njit(inline='always')
 def hamiltonian(x, y, z, P, H0, diagL, C, k, eps, Om, H, Hb):
     """H (12×12, non-Hermitian) at r and each beam's |e><g| part Hb[b] (for the force); g and its gradient."""
-    gamma, w0, zR = P[0], P[1], P[2]
-    g, gx, gy, gz = M.beam(x, y, z, w0, zR)
+    gamma = P[0]
+    g, gx, gy, gz = trap(x, y, z, P)
     for i in range(12):
         for j in range(12):
             H[i, j] = H0[i, j]
@@ -225,7 +276,7 @@ def run(n_atoms, seed, T_uK, dt, n_steps, every, P, H0, diagL, C, k, eps, Om, no
         f = np.zeros(3)
         while True:
             x = sig[0] * M.gauss(st); y = sig[1] * M.gauss(st); z = sig[2] * M.gauss(st)
-            g, _, _, _ = M.beam(x, y, z, w0, zR)
+            g, _, _, _ = trap(x, y, z, P)
             if g < 0.05: continue
             logw = -U0 * (1 - g) / kT + 0.5 * ((x / sig[0]) ** 2 + (y / sig[1]) ** 2 + (z / sig[2]) ** 2)
             if math.log(max(M.rnd(st), 1e-300)) < logw: break
@@ -327,7 +378,7 @@ def run(n_atoms, seed, T_uK, dt, n_steps, every, P, H0, diagL, C, k, eps, Om, no
             if alive and not still:
                 # the light force: all of it but the ground trap's, U0 ∇g; the trap's coupling: its force less the cuts'
                 lx, ly, lz = f[0] - U0 * gx, f[1] - U0 * gy, f[2] - U0 * gz
-                _, cx, _, _ = M.beam(x, 0.0, 0.0, w0, zR); _, _, cy, _ = M.beam(0.0, y, 0.0, w0, zR); _, _, _, cz = M.beam(0.0, 0.0, z, w0, zR)
+                _, cx, _, _ = trap(x, 0.0, 0.0, P); _, _, cy, _ = trap(0.0, y, 0.0, P); _, _, _, cz = trap(0.0, 0.0, z, P)
                 out_flow[a, 0] += dt * vx * lx; out_flow[a, 1] += dt * vy * ly; out_flow[a, 2] += dt * vz * lz
                 out_flow[a, 6] += dt * vx * U0 * (gx - cx); out_flow[a, 7] += dt * vy * U0 * (gy - cy); out_flow[a, 8] += dt * vz * U0 * (gz - cz)
                 out_flow[a, 9] += dt; out_flow[a, 10] += dt * ly
@@ -359,7 +410,7 @@ def simulate(S, atoms, end_us, every_us, dt, noise, seed=12345, still=False):
     out_v = np.zeros((n_out, atoms, 3)); out_r = np.zeros((n_out, atoms, 3)); out_alive = np.zeros((n_out, atoms), np.bool_)
     out_pop = np.zeros((n_out, atoms, 6)); out_jumps = np.zeros((n_out, atoms), np.int64); out_fy = np.zeros((n_out, atoms))
     out_loss = np.full((atoms, 7), np.nan); out_flow = np.zeros((atoms, 12))
-    P = np.array([p['gamma'], p['w0'], p['zR'], p['U0'], p['hbar_m'], p['uK']])
+    P = trap_params(S)
     Om = p['gamma'] * np.sqrt(S['s'] / 2)
     t0 = time.time()
     run(atoms, seed, S['T'], dt, n_steps, every, P, S['H0'], S['diagL'], S['C'], S['k'], S['eps'].astype(np.complex128), Om, noise, still,
@@ -380,7 +431,7 @@ def simulate(S, atoms, end_us, every_us, dt, noise, seed=12345, still=False):
              lostAt=[[round(float(v), 4) for v in row] for row in out_loss if np.isfinite(row[0])],
              flow=flow_summary(out_flow, p),
              offsetMHz=S['offset'], depthScale=S['depthScale'], phaseDeg=S['phase'], still=still, fieldVectorG=S['Bvec'].tolist(), reflect=S['reflect'], lab=S['lab'],
-             magic=S['magic'], tweezerNm=p['tweezerNm'], tweezerMW=p['tweezerMW'], depthUK=p['U0'] / p['uK'], excitedShiftsMHz=(S['diagL'][5:] / (2 * math.pi)).tolist())
+             magic=S['magic'], tiltDeg=S['tilt'], ellipticity=S['ell'], ellAngleDeg=S['ellDeg'], ellAxis=S['ellAxis'].tolist(), tweezerNm=p['tweezerNm'], tweezerMW=p['tweezerMW'], depthUK=p['U0'] / p['uK'], excitedShiftsMHz=(S['diagL'][5:] / (2 * math.pi)).tolist())
     return r
 
 def selftest(S):
@@ -412,10 +463,13 @@ def main():
     ap.add_argument('--reflect', type=float, default=1.0, help="the reflection's power over the probe's (R)")
     ap.add_argument('--lab', action='store_true', help="the probe beams from the lab's description (lab_beams), not the request's")
     ap.add_argument('--magic', action='store_true', help='the excited levels feel the ground trap (no dipole-force fluctuation), their focus detunings kept')
+    ap.add_argument('--tilt', type=float, default=0.0, help="the probe beams turned this much further toward the tweezer's axis (degrees)")
+    ap.add_argument('--ellipticity', type=float, default=0.0, help="the tweezer's focus: its long 1/e² radius over the short one, less 1 (focus.py)")
+    ap.add_argument('--ell-angle', type=float, default=0.0, help="the long axis's angle from the probe's transverse radial direction (degrees)")
     a = ap.parse_args()
     req = json.load(open(a.request, encoding='utf-8'))
     axes = dict(x=(1, 0, 0), y=(0, 1, 0), z=(0, 0, 1))
-    S = setup(req, a.field, a.offset, a.s_scale, a.depth_scale, a.phase, axes[a.field_dir] if a.field_dir else None, a.reflect, a.lab, a.magic)
+    S = setup(req, a.field, a.offset, a.s_scale, a.depth_scale, a.phase, axes[a.field_dir] if a.field_dir else None, a.reflect, a.lab, a.magic, a.tilt, a.ellipticity, a.ell_angle)
     p = S['p']
     print(f"probe offset {S['offset']:.3f} MHz from the free F=2 -> F'=3 line; field {np.round(S['Bvec'], 4).tolist()} G; R {S['reflect']}; beams {S['names']}: s {np.round(S['s'], 3)}, k {np.round(S['k'], 4).tolist()}; eps {np.round(S['eps'], 4).tolist()}")
     print(f"U0 {p['U0']/p['uK']:.1f} uK, Gamma {p['gamma']:.3f}/us, Isat {p['Isat']:.4f} mW/cm2; detunings at the focus (MHz) |2,m> -> |3',m+q>:")
