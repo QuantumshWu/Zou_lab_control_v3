@@ -534,51 +534,93 @@ def trained_light_window_seconds(calibration: "TrapCalibration") -> float | None
     return float(windows[index])
 
 
-def refuse_other_acquisition(
+@dataclass(frozen=True)
+class AcquisitionCaution:
+    """A fact of the frames' acquisition that changes what a calibration's thresholds separate.
+
+    Said, never refused: the frames are read as they are and the operator
+    judges (``tell_acquisition_cautions``).  ``kind`` is its journal event,
+    ``message`` the sentence on the node, ``facts`` the journal line's values.
+    """
+
+    kind: str
+    message: str
+    facts: Mapping[str, Any]
+
+
+def acquisition_cautions(
     calibration: "TrapCalibration",
     exposure_seconds: float | None,
     readout_mode: str | None,
     *,
     exposure_step_seconds: float | None = None,
     name: str = "the calibration",
-) -> None:
-    """Refuse frames whose acquisition changes what the calibration's thresholds separate.
+) -> tuple[AcquisitionCaution, ...]:
+    """What in the frames' acquisition changes what the calibration's thresholds separate.
 
     Two facts of the camera do.  An exposure SHORTER than the light window
     the thresholds were trained on cuts that light off, so a loaded site
     collects fewer counts than any it was trained on; an exposure that covers
     the window -- shorter or longer than the calibration's own camera
     exposure -- collects the same fluorescence, plus dark counts the
-    thresholds were already trained beside.  And a readout that counts
-    differently (``counting_readout``: a qCMOS's readout speed or sensor
-    mode, a Basler's pixel format) changes every count's noise and scale;
-    which line triggered it changes nothing.  The exposure is a whole number
-    of the camera's steps (``exposure_step_seconds``, as it reports it), so
-    one that falls short of the window by less than a step is the nearest the
-    camera could come, not a cut; with no step reported it is compared as
-    recorded.  A fact either side does not record is not compared.
+    thresholds were already trained beside, and is not said.  The exposure
+    is a whole number of the camera's steps (``exposure_step_seconds``, as it
+    reports it), so one short of the window by less than a step is the
+    nearest the camera could come, not a cut; with no step reported it is
+    compared as recorded.  And a readout that counts differently
+    (``counting_readout``: a qCMOS's readout speed or sensor mode, a Basler's
+    pixel format) changes a count's noise or scale; which line triggered it
+    changes nothing.  A fact either side does not record is not compared.
     """
 
+    cautions = []
     window = trained_light_window_seconds(calibration)
     step = 0.0 if exposure_step_seconds is None else float(exposure_step_seconds)
     if exposure_seconds is not None and window is not None and float(exposure_seconds) + step < window:
-        raise ValueError(
-            f"these frames were exposed {_milliseconds(exposure_seconds)}, shorter than the "
-            f"{_milliseconds(window)} light window {name} was trained on: the camera cut the "
-            f"atoms' light short and its thresholds do not apply -- expose at least "
-            f"{_milliseconds(window)}, or calibrate with a readout window the exposure covers"
-        )
+        cautions.append(AcquisitionCaution(
+            "exposure_short",
+            f"exposure {_milliseconds(exposure_seconds)} is shorter than the {_milliseconds(window)} light "
+            f"window {name} was trained on: its thresholds expect {_milliseconds(window)} of light and these "
+            f"frames received at most {_milliseconds(exposure_seconds)}, so loaded sites read low and may be "
+            "judged empty; read as they are",
+            {"calibration": name, "exposure": float(exposure_seconds), "light_window": window,
+             "exposure_step": exposure_step_seconds},
+        ))
     frames = counting_readout(readout_mode)
     trained = counting_readout(calibration.frame_contract.readout_mode)
-    if frames is None or trained is None:
-        return
-    differing = sorted(key for key in frames.keys() & trained.keys() if frames[key] != trained[key])
+    differing = sorted(key for key in (frames or {}).keys() & (trained or {}).keys() if frames[key] != trained[key])
     if differing:
         said = ", ".join(f"{key}={frames[key]} (trained at {key}={trained[key]})" for key in differing)
-        raise ValueError(
-            f"these frames were read out at {said}, not as {name} was trained; its thresholds "
-            "do not apply -- calibrate at this readout, or read the frames out as it was trained"
-        )
+        cautions.append(AcquisitionCaution(
+            "readout_differs",
+            f"these frames were read out at {said}, not as {name} was trained: a count's noise or scale "
+            "differs from what its thresholds were fitted to; read as they are",
+            {"calibration": name, "frames": {key: frames[key] for key in differing},
+             "trained": {key: trained[key] for key in differing}},
+        ))
+    return tuple(cautions)
+
+
+def tell_acquisition_cautions(
+    context: Any,
+    source: str,
+    cautions: tuple[AcquisitionCaution, ...],
+    said: list[str],
+    **facts: Any,
+) -> None:
+    """Say each caution ``said`` does not hold yet: one journal line ``<source> / <kind>`` with its
+    values (and ``facts``), and the run's progress line, which is the node's status while it runs.
+    ``said`` is the run's, so a caution every frame repeats is said once."""
+
+    from zlc_plugin import journal  # noqa: PLC0415 -- the analysis itself needs no plugin
+
+    for caution in cautions:
+        if caution.message in said:
+            continue
+        said.append(caution.message)
+        journal.note(source, caution.kind, **facts, **caution.facts)
+        if context is not None:
+            context.report_progress(caution.message)
 
 
 def _milliseconds(seconds: float) -> str:

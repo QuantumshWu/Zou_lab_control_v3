@@ -27,7 +27,8 @@ from zlc_data.point_overlay import IMAGE_POINT_OVERLAY_CONTRACT, IMAGE_POINT_OVE
 
 from zlc_atom.nodes._framework.frames import REST, assign_frames, canonical_frames, check_claims, claim_names
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
-from zlc_atom.nodes.calibration.calibration import classify_threshold, reads_photoelectrons, refuse_other_acquisition
+from zlc_atom.nodes.calibration.calibration import (
+    acquisition_cautions, classify_threshold, reads_photoelectrons, tell_acquisition_cautions)
 
 
 #: The frame a camera's pixel axes are counted in: the whole sensor's own.
@@ -190,6 +191,15 @@ class OccupancyProcessor:
         #: Which calibration reads each frame, per frame count seen.
         self._entries: dict[int, tuple[int, ...]] = {}
         self.source_signal = None if source_signal is None else str(source_signal).strip()
+        #: The run this processor follows for, and the cautions said in it.
+        self._context: object | None = None
+        self._cautions_said: list[str] = []
+
+    def bind_run(self, context: object) -> None:
+        """The run whose node says what this processor cautions (``tell_acquisition_cautions``)."""
+
+        self._context = context
+        self._cautions_said = []
 
     @property
     def model_kind(self) -> ReadoutModelKind:
@@ -250,11 +260,13 @@ class OccupancyProcessor:
         snapshots = source.run_record.get("device_snapshots")
         camera = snapshots.get("camera") if isinstance(snapshots, Mapping) else None
         camera = camera if isinstance(camera, Mapping) else {}
-        # Each calibration's thresholds hold while the exposure covers the light
-        # window they were trained on and the readout counts as it did then.
+        # An exposure that cuts the light window a calibration was trained on,
+        # or a readout that counts otherwise, is said once a run and read anyway.
         for name, reading in zip(self._names, self.readings):
-            refuse_other_acquisition(reading.calibration, camera.get("exposure_seconds"), camera.get("readout_mode"),
-                                     exposure_step_seconds=camera.get("exposure_step_seconds"), name=name)
+            tell_acquisition_cautions(self._context, "occupancy", acquisition_cautions(
+                reading.calibration, camera.get("exposure_seconds"), camera.get("readout_mode"),
+                exposure_step_seconds=camera.get("exposure_step_seconds"), name=name),
+                self._cautions_said, signal=source.name)
         sensor = camera.get("sensor_shape_yx")
         if sensor is not None:
             sensor = tuple(int(item) for item in sensor)
@@ -557,8 +569,8 @@ class OccupancyProcessor:
             result = self.process(snapshot)
         except ValueError as refusal:
             # Frames a calibration does not apply to -- another sensor, crop,
-            # binning, unit, exposure or readout -- are refused, and the
-            # journal says why beside the run it ends.
+            # binning or unit -- are refused, and the journal says why beside
+            # the run it ends.
             journal.note("occupancy", "frames_refused", signal=signal_value.name, reason=str(refusal))
             raise
         return self._live_outputs(

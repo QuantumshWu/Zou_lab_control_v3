@@ -8,7 +8,8 @@ import numpy as np
 from zlc_atom.devices.slm.solver import (
     acquire_rearrangement, plan_rearrangement, sample_rearrangement, rearrangement_is_noop,
 )
-from zlc_atom.nodes.calibration.calibration import reads_photoelectrons, refuse_other_acquisition, registration_order
+from zlc_atom.nodes.calibration.calibration import (
+    acquisition_cautions, reads_photoelectrons, registration_order, tell_acquisition_cautions)
 from zlc_atom.nodes.camera.measurement import CameraMeasurementNode, photoelectron_frame
 from zlc_atom.nodes.slm.rearrangement import compact_target, run_rearrangement
 
@@ -58,12 +59,15 @@ class RearrangementMeasurement(CameraMeasurementNode):
         self._cycle_evidence = {}
         self._restored_at_ns = 0
         self._at_source = False
+        self._context = None
+        self._cautions_said: list[str] = []
 
     def _freeze_working_point(self, point):
         super()._freeze_working_point(point)
         roi = (*point.roi_origin_yx[::-1], *point.roi_shape_yx[::-1])
-        refuse_other_acquisition(self.calibration, point.exposure_seconds, point.readout_mode,
-                                 exposure_step_seconds=point.exposure_step_seconds, name="the Calibration")
+        tell_acquisition_cautions(self._context, "rearrangement", acquisition_cautions(
+            self.calibration, point.exposure_seconds, point.readout_mode,
+            exposure_step_seconds=point.exposure_step_seconds, name="the Calibration"), self._cautions_said)
         self._calibration = self.calibration.rebased(roi, point.binning_yx, point.frame_shape_yx)
         if reads_photoelectrons(self._calibration) and point.electrons_per_count is None:
             raise ValueError("the Calibration was trained in photoelectrons and the camera states no "
@@ -177,6 +181,7 @@ class RearrangementMeasurement(CameraMeasurementNode):
 
     def execute(self, context):
         self._context = context
+        self._cautions_said = []
         with acquire_rearrangement(source_yx=self._source, target_yx=self._destination, shape_yx=self.slm.shape_yx,
                 pupil_amplitude=self.science_context["pupil_amplitude"],
                 pupil_phase=-np.asarray(self.science_context["operator_wavefront"]),
