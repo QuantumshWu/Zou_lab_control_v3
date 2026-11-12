@@ -27,7 +27,7 @@ use atom_population_core::lattice::pipeline;
 use serde_json::{json, Value};
 use std::time::Instant;
 
-const ENGINE: &str = "rust-motion-3d";
+const ENGINE: &str = "rust-atom-motion";
 const AXES: [&str; 3] = ["x", "y", "z"];
 /// Why a request for the GPU runs on the CPU, and the `gpu` operation's answer (SPEC §9).
 pub const GPU_ABSENT: &str = "GPU 计算尚未提供：本次在 CPU 上计算";

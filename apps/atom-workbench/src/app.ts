@@ -1035,7 +1035,7 @@ function startGpu():Promise<void>{
     const lift=holdWhileCompiling();
     try{
       const why=await solver.startGpu(),froze=lift();gpuCached=!why&&!froze;
-      if(froze&&why)standingNote(`${why}：运动将在 CPU 上计算`,'warning');
+      if(froze&&why)standingNote(why,'warning');
     }catch(error){
       if(lift())standingNote(`GPU 内核的编译中断（${message(error)}）：下次用 GPU 计算时重新编译`,'error');
       throw error;
@@ -1200,7 +1200,7 @@ function renderDetailsPage():void{
   const outside=scopeNotes.map(note=>`超出模型范围（结果照常给出）：${note.text}`);
   const motion=dynamics().motion,temperature=motionTemperatureReading(motion),tweezer=tweezerOf(scene);
   const motionLines=[!motion.enabled?'运动已关闭：时间演化只计算内态，原子静止于焦点。':motionRefusal(scene)||
-    `运动：光镊「${tweezer!.name}」中的单个原子在三维中运动（半经典），初始温度 ${withUnit(temperature.value,temperature.unit,{digits:6})}，计算设备 ${motion.device.toUpperCase()}；原子是经典质点，携带内态按量子跳跃演化。各轴 k_BT ≥ ${SEMICLASSICAL_REGIME}ħω 时与量子参考相符（T 约 10% 以内），更冷时偏冷，仅供参考。能级图的长期布居 p̄(T) 是原子静止于焦点时内态的长期布居。`];
+    `运动：光镊「${tweezer!.name}」中的单个原子在三维中运动（半经典），初始温度 ${withUnit(temperature.value,temperature.unit,{digits:6})}；原子是经典质点，携带内态按量子跳跃演化。各轴 k_BT ≥ ${SEMICLASSICAL_REGIME}ħω 时与量子参考相符（T 约 10% 以内），更冷时偏冷，仅供参考。能级图的长期布居 p̄(T) 是原子静止于焦点时内态的长期布居。`];
   const markup=`<section class="details-current"><h3>当前计算</h3>${[field,...motionLines,...outside,...scope,...sampling].map(line=>`<p>${esc(line)}</p>`).join('')}${solverDetails()}</section>`;
   const host=$('details-current');if(host.dataset.markup!==markup){host.dataset.markup=markup;host.innerHTML=markup;}
   const notes=$('details-static');if(!notes.childElementCount)notes.innerHTML=definitionNotes()+modelNotes();
@@ -1286,7 +1286,7 @@ function renderDynamicsControls(a:Analysis):void{
     bindQuantity(dynamicsFields,motion,'motion','motion',()=>({name:'temperature',label:'初始温度',spin:true,inexact:true,description:'初态的运动温度（各轴相同）：动量为 Maxwell 分布，位置为该温度下势阱中的热分布；内态为场景的初态'}),
       {read:()=>motionTemperatureReading(settings()),write:(v,u)=>setMotionTemperature(settings(),v,u as TemperatureUnit),units:()=>unitChoices(TEMPERATURE_UNITS,'温度')},after);
     bindField(dynamicsFields,motion,'motion',()=>({name:'device',label:'计算设备',kind:'choice',segmented:true,choices:[['gpu','GPU'],['cpu','CPU']],value:settings().device,
-      description:'运动在哪里计算：NVIDIA 显卡（GPU，默认）或处理器（CPU）。GPU 不能计算时引擎改用 CPU，状态栏写明原因。'}),v=>{settings().device=v as MotionDevice;},{after});
+      description:'运动在哪里计算。本版本只在处理器（CPU）上计算：选 GPU 时同样在 CPU 上计算，状态栏写明。'}),v=>{settings().device=v as MotionDevice;},{after});
   }
   const monitors=element('details','monitor-controls');monitors.open=monitorsWereOpen;
   const summary=element('summary');summary.append(element('span','monitor-title','观察曲线'),element('span','monitor-count',`${populationDisplayIds(d).length} 条`),element('span','spacer'),monitorAll.root,monitorNone.root);

@@ -160,8 +160,8 @@ export interface DynamicsSettings {
 }
 /** A lab coordinate axis: motion's results come per axis, x, y and z. */
 export type MotionAxis='x'|'y'|'z';
-/** Where a motion solve runs: an NVIDIA GPU, or the CPU. The engine falls back to the CPU, saying
- * why, when the GPU cannot run it. */
+/** Where a motion solve is asked to run: the GPU, or the CPU. The engine computes on the CPU either
+ * way; asked for the GPU, its result says so (`deviceNote`). */
 export type MotionDevice='gpu'|'cpu';
 /** A single atom in the tweezer (Scene.tweezerId) moving in 3D (semiclassical). It starts in the
  * internal initial state, its motion thermal at temperatureUK along each axis. The trajectory is the
