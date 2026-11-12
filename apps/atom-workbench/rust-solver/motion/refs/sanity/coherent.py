@@ -20,6 +20,12 @@ equations and the force does not follow from them. This model keeps them.
 Internal state ψ on |F=2, m⟩ (5) and |F'=3, m'⟩ (7), in the frame rotating at the probe's frequency (one frequency: the
 repump acts on F=1, which this closed F=2 → F'=3 cycle does not reach -- off-resonant F'=2 excitation by the probe,
 267 MHz = 44Γ below, is left out: its light shift Ω²|c|²/(4·267 MHz) ≲ 0.7 MHz and its depumping to F=1 ≲ 0.1/µs).
+That depumping is small against the photon rate, not against the repump: the tweezer moves the repump ~46 MHz (7.6Γ) off
+its free F=1 → F'=2 line at the focus, and the time in F=1 follows the ratio of the two slow rates. obe_rate.py's D2
+model (every F, F' and the repump) at the focus with the scene's repump (3.18 mW/cm², at the free line): F=1 holds 0.23
+of the time with S3's lin⊥lin probe (pattern average; 0.33 at the focus point), 0.40 with a σ+σ− pair at 1 mW, 0.07 with
+S3c's 0.29 mW and S4's beams. So this model is the atom that never leaves F=2: its photon rate -- and the light's cooling
+and heating with it -- above the D2 atom's by about 1/(1 − share) (S3 at rest: 1.92 against 1.54/µs).
 H/ħ = Σ_m (Z_g m + U_g g(r)) |g_m⟩⟨g_m| + Σ_m' (Z_e m' + U_e(m') g(r) − ν) |e_m'⟩⟨e_m'| − iΓ/2 Σ|e⟩⟨e|
       + ½ Σ_b Σ_q Ω_b ε_b,q e^{i k_b·r} Σ_m ⟨2 m; 1 q|3 m+q⟩ |e_{m+q}⟩⟨g_m| + h.c.
 - the beams b: the probe and its reflection, each its wave vector, its intensity's s_b = I_b/I_sat (Ω_b = Γ√(s_b/2)) and
@@ -114,20 +120,22 @@ def setup(request, field_G=None, offset_MHz=None, s_scale=1.0, depth_scale=1.0, 
     # g_F μ_B (MHz/G) of F=2 and F'=3: the tables' Zeeman shift of m = 1 at 1 G (model.py, with g_I)
     m1 = M.multilevel_tables(shifts, field_G=1.0)
     gg, ge = m1['Zg'][M.GROUND.index((2, 1))], m1['Ze'][M.EXCITED.index((3, 1))]
-    # the probe beams: of the beams but the tweezer, those on the frequency most of them share (S3: the probe and its
-    # reflection; the repump has its own)
+    # The probe beams: of the beams but the tweezer, those on the frequency nearest the free F=2 -> F'=3 line -- the line
+    # this model holds (S3: the probe and its reflection; the repump, 6.57 GHz above it, has its own; a single probe beam
+    # and the repump are one beam each, so the count of beams on a frequency cannot tell them apart). A beam's frequency:
+    # the request's rotating frame on the excited states plus its frequency index on the coordinates (expect.mjs
+    # `frameDetuning`; the frame is not always the probe's -- with the repump's index at 0 it is the repump's); the line:
+    # the D2 centre (the app's table) with the hyperfine shifts of F'=3 (+193.7407 MHz) and F=2 (+2563.005979 MHz; Steck,
+    # Rb 87 D line data, Table 7).
     trap = mo['trapBeamId']
     others = [b for b in mo['beams'] if b['id'] != trap]
-    index = max((tuple(b['frequencyIndex']) for b in others), key=lambda f: sum(tuple(b['frequencyIndex']) == f for b in others))
+    line = tables['lines']['D2']['nu'] / 1e6 + 193.7407 - 2563.005979
+    coords = request['model']['frequencyCoordinates']['frequenciesMHz']
+    from_line = lambda f: max(mo['frameFrequenciesMHz']) + sum(n * c for n, c in zip(f, coords)) - line
+    index = min({tuple(b['frequencyIndex']) for b in others}, key=lambda f: abs(from_line(f)))
     probes = [b for b in others if tuple(b['frequencyIndex']) == index]
-    # The probe's offset from the free F=2 -> F'=3 line: the probe's frequency is the request's rotating frame on the
-    # excited states plus its frequency index on the coordinates (expect.mjs `frameDetuning`; the frame is not always the
-    # probe's -- with the repump's index at 0 it is the repump's); the line is the D2 centre (the app's table) with the
-    # hyperfine shifts of F'=3 (+193.7407 MHz) and F=2 (+2563.005979 MHz; Steck, Rb 87 D line data, Table 7).
     if offset_MHz is None:
-        line = tables['lines']['D2']['nu'] / 1e6 + 193.7407 - 2563.005979
-        coords = request['model']['frequencyCoordinates']['frequenciesMHz']
-        offset_MHz = max(mo['frameFrequenciesMHz']) + sum(n * f for n, f in zip(index, coords)) - line
+        offset_MHz = from_line(index)
     gi = [M.GROUND.index((2, m)) for m in range(-2, 3)]
     ei = [M.EXCITED.index((3, m)) for m in range(-3, 4)]
     tw = 2 * math.pi
@@ -147,12 +155,6 @@ def setup(request, field_G=None, offset_MHz=None, s_scale=1.0, depth_scale=1.0, 
             diagL[i] = diagL[0]
     # Clebsch–Gordan C[q+1, m+2] = <2 m; 1 q | 3 m+q>
     C = np.array([[cg(2, m, 1, q, 3, m + q) if abs(m + q) <= 3 else 0.0 for m in range(-2, 3)] for q in (-1, 0, 1)])
-    # the probe beams: of the beams but the tweezer, those on the frequency most of them share (S3: the probe and its
-    # reflection; the repump has its own)
-    trap = mo['trapBeamId']
-    others = [b for b in mo['beams'] if b['id'] != trap]
-    index = max((tuple(b['frequencyIndex']) for b in others), key=lambda f: sum(tuple(b['frequencyIndex']) == f for b in others))
-    probes = [b for b in others if tuple(b['frequencyIndex']) == index]
     # `phase_deg`: the second probe beam's phase at the focus against the first's moved by this much (the mirror's
     # distance, which the lab does not fix to λ/2): its field times e^{iφ}
     # `reflect`: the reflection's power over the probe's (the mirror's reflectivity R): its s times R
