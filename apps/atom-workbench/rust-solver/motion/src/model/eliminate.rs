@@ -839,7 +839,7 @@ impl Model {
                         // The norm of a set of the carrier's beams (its place among them, its column's entries), ‖X^f_l[:, s]‖ each.
                         let norm = |beams: &mut dyn Iterator<Item = &(usize, Vec<(usize, C64, f64)>)>| -> Own {
                             let beams: Vec<&(usize, Vec<(usize, C64, f64)>)> = beams.collect();
-                            let mut sum = Frame::of(region, beams.iter().map(|(l, _)| (cc.beams[*l], folded.columns[s][*l])));
+                            let mut sum = Frame::<EXCITED>::of(region, beams.iter().map(|(l, _)| (cc.beams[*l], folded.columns[s][*l])));
                             for (l, entries) in beams {
                                 sum.add(region, cc.beams[*l], folded.columns[s][*l], entries.iter().map(|&(e, v, _)| (e, v)));
                             }

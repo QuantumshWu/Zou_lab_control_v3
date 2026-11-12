@@ -2,7 +2,7 @@
 //!
 //! # The reach
 //! The sublevel set {(r, v) : V_prep(r; p) + v²/(2 ħ/m) ≤ V_min + E_r} of the prepared energy, E_r = L k_B T_r the level that
-//! holds all but the share s of a thermal ensemble in the trap (# The reach's level): at r the
+//! holds all but the share s of the trap's lowered isothermal at T_r (# The reach's level): at r the
 //! speeds |v| ≤ √(2 (ħ/m)(V_min + E_r − V_prep(r))), at most √(2 (ħ/m) E_r) (`Reach::speed`), the positions where that is real. Its level
 //! V_min + E_r is below the far value 0 where the trap holds the reach; there −V_prep ≥ −(V_min + E_r) > 0 on it, and the proven
 //! envelope −V_prep ≤ B max_l A_l(r) (model.rs `Envelope`) puts it inside the union of the ellipsoids u_l ≤ B/(−V_min − E_r) − 1
@@ -23,38 +23,66 @@
 //! V_prep does not -- leaves the reach unbounded: the whole space, its bounds the global ones.
 //!
 //! # The reach's level
-//! The reach is the set that holds all but the share s of the initial ensemble: its level is the (1 − s) quantile of an
-//! atom's energy above the trap's bottom in the ensemble as it is drawn (ensemble.rs: the thermal distribution times
-//! each axis's harmonic-oscillator Wigner factor), in the trap's harmonic form. Along a principal axis i of the
-//! prepared trap that holds the atom (frequency ω_i > 0, model.rs `Trap`) the oscillator's two quadratic degrees of
-//! freedom hold k_B T E_i classically, E_i a unit exponential, and the Wigner factor scales both by
-//! s_i² = x_i coth x_i, x_i = ħω_i/2k_BT (the oscillator's own mean energy over k_B T: one where ħω_i ≪ k_BT, x_i --
-//! the zero point's ½ħω_i -- where it is cold); along an axis the trap does not hold there is the momentum's degree
-//! alone, ½ k_BT x² with x a standard normal, of Γ(½). So the energy over k_B T is
+//! The reach is the set that holds all but the share s of the initial ensemble -- its bound atoms alone (ensemble.rs,
+//! # The lowered isothermal: f ∝ e^{−E/k_BT} − 1 below the far level, nothing above it) --: its level is the (1 − s)
+//! quantile of an atom's energy above the trap's bottom in that ensemble as it is drawn (each axis's harmonic-oscillator
+//! Wigner factor on the classical draw), in the trap's harmonic form. Along a principal axis i of the prepared trap that
+//! holds the atom (frequency ω_i > 0, model.rs `Trap`) the oscillator's two quadratic degrees of freedom hold k_B T E_i
+//! classically, E_i a unit exponential, and the Wigner factor scales both by s_i² = x_i coth x_i, x_i = ħω_i/2k_BT (the
+//! oscillator's own mean energy over k_B T: one where ħω_i ≪ k_BT, x_i -- the zero point's ½ħω_i -- where it is cold);
+//! along an axis the trap does not hold there is the momentum's degree alone, ½ k_BT x² with x a standard normal, of
+//! Γ(½). So of the thermal draw the energy over k_B T and the classical one are
 //!
 //! ```text
-//! X = Y + Σ_held s_i² E_i,   Y of Γ(f/2), f the axes not held;          P(X > L) = s          (`quantile`)
+//! X = Y + Σ_held s_i² E_i,   C = Y + Σ_held E_i,   Y of Γ(f/2), f the axes not held, C of Γ(k), k = f/2 + the axes held.
 //! ```
 //!
-//! one statement for every temperature: with every s_i = 1 it is Γ(n/2) of the n = 6 − f quadratic degrees of freedom,
-//! P(X > L) = Q(n/2, L), for a trap that holds along its three axes Q(3, L) = e^{−L}(1 + L + L²/2): L = 12.89 at
-//! s = 2.44e-4. (ln(1/s) = 8.32, the level where the Boltzmann factor is s, is one oscillator's quantile; six degrees
-//! leave 1.07 % of the atoms above it. And a level of 12.89 k_B T holds none of an ensemble whose zero point is above
-//! it: at ħω = 14, 14, 61 k_BT, s² = 7.2, 7.2, 30.6, the quantile is 271 k_BT.) The tail of X is the convolution of its
-//! terms, one exponential after another from the smallest scale, P(Y + aE > L) = e^{−L/a} + (1/a)∫₀^L e^{−(L−u)/a}
-//! P(Y > u) du, each integral by Gauss–Legendre with its nodes doubled until two levels' difference stops falling
-//! (`tail`) -- no difference of exponentials, so scales that are equal or nearly so (a round trap's) are no case of
-//! their own --, and the level by bisection to the format's resolution (the tail falls monotonically). The ensemble's
-//! kinetic temperature along axis i is s_i² T (`Reach::kinetic_uk`): its speeds' and the reach's falsifier's scale.
+//! The lowering weighs the draw by (e^{−C} − e^{−d})₊, d = D/k_BT, D = −V_min the trap's depth (the far value is nothing).
+//! With one more unit exponential S, (e^{−C} − e^{−d})₊ = ∫₀^∞ e^{−C−S} [C + S < d] dS: the lowered ensemble is the thermal
+//! one on the condition C + S < d, C + S of Γ(k + 1). Given C + S = τ the parts over τ are Dirichlet's, so X = τ W, W =
+//! Σ_j a_j z_j (a_j the scales, the slack's none) independent of τ; below the least scale a₀ (one where an axis is free)
+//! Σ a_j z_j ≤ w forces Σ z_j ≤ 1, so P(W ≤ w) = A w^k there, A = Π s_i^{−2}, the cone's measure. A level L ≤ a₀ d reads
+//! W only there at every τ ≥ d: P(X > L, C + S ≥ d) = ∫_d^∞ γ_{k+1}(τ)(1 − A L^k τ^{−k}) dτ = Q(k + 1, d) − A L^k e^{−d}/Γ(k + 1),
+//! and
+//!
+//! ```text
+//! P(X > L | C + S < d) = 1 − [P(X ≤ L) − A L^k e^{−d}/Γ(k + 1)] / P(k + 1, d),   L ≤ a₀ d          (`Degrees::above`)
+//! ```
+//!
+//! -- the thermal draw's distribution (`below`) and the incomplete gamma function's (P(k + 1, d) the lowered isothermal's
+//! own number, ensemble.rs `kept`). Classical (every s_i = 1) it is ∫_L^d x^{k−1}(e^{−x} − e^{−d}) dx over its integral
+//! from nothing, and nothing at the depth; at d → ∞ the thermal draw's tail, P(X > L) = Q(n/2, L) of the n = 6 − f
+//! quadratic degrees, for a trap that holds along its three axes Q(3, L) = e^{−L}(1 + L + L²/2): L = 12.89 at s =
+//! 2.44e-4. (ln(1/s) = 8.32, the level where the Boltzmann factor is s, is one oscillator's quantile; six degrees leave
+//! 1.07 % of the atoms above it. And a level of 12.89 k_B T holds none of an ensemble whose zero point is above it: at ħω
+//! = 14, 14, 61 k_BT, s² = 7.2, 7.2, 30.6, the quantile is 271 k_BT.) The thermal draw's distribution is the convolution
+//! of its terms, one exponential after another from the smallest scale, P(Y + aE ≤ L) = (1/a)∫₀^L e^{−(L−u)/a} P(Y ≤ u) du,
+//! each integral by Gauss–Legendre with its nodes doubled until two levels' difference stops falling, below the mean and
+//! as its complement's above it (`below`) -- no difference of exponentials, so scales that are equal or nearly so (a round
+//! trap's) are no case of their own, and every part positive, so a hot trap's few atoms below a level are read to their
+//! own precision --, and the level by bisection
+//! to the format's resolution between nothing and a₀ d (the tail falls monotonically there). Above a₀ d the Wigner widths
+//! alone carry atoms, the zero point lifting them above the depth -- outside the validated regime (k_BT ≥ 4ħω_i, where
+//! a_max/a₀ ≤ 1.005 and they are fewer than 1.6·10⁻⁴ ≤ s at any depth) --; where more than s are, the level is a_max d,
+//! which every atom of the harmonic form is below (X ≤ a_max C < a_max d).
+//!
+//! The level is below the depth: a reach does not reach the trap's edge, where its light no longer shifts the others. (Taken
+//! as the thermal draw's quantile, 12.89 k_BT_r crossed the user's 1.5 mK tweezer's depth at 116 µK; the reach then held
+//! the whole region, to its edge, where the probe is 3.3 Γ from its line and its fold does not exist -- every excited
+//! state it reaches was kept, a step 50 → 160 µs.) At 1.5 mK and 30 µK the level is 12.91 k_BT (387 µK), at 300 µK 4.93
+//! k_BT (1480 µK). It rises with T_r to its top (`top`): at T_r → ∞ every s_i → 1 and the energy over D has the density
+//! ∝ u^{k−1}(1 − u) on [0, 1], Beta(k, 2), whose share above q is 1 − (k + 1)q^k + k q^{k+1} = s at q = 0.9936 for three
+//! axes held. No temperature's reach holds a level at its top or above: an atom there is at the trap's top or above its
+//! depth, leaving or lost (`holding`). The ensemble's kinetic temperature along axis i is s_i² T (`Reach::kinetic_uk`):
+//! its speeds' and the reach's falsifier's scale.
 //!
 //! # What the reach leaves out
-//! The level's quantile is the harmonic trap's. What the real trap adds -- the tweezer's anharmonic flanks, the lowered
-//! isothermal's cut, the Wigner factors' widths -- is read off the initial ensemble's own density, not off a formula for
-//! one trap's shape, and by no draw of an atom (`Model::left_out`; ensemble.rs, # What a level leaves out): the share of
-//! the atoms beyond the set, the momenta above the kinetic energy A(r) = V_min + E_r − V_prep(r) the set holds at each
-//! place integrated over the places, booked on what is shown; and the share of the kinetic energy they hold, on T --
-//! each with its quadrature's own difference between its last two levels. A reach grown with the atoms' temperature
-//! leaves out less of the same ensemble.
+//! The level's quantile is the harmonic trap's. What the real trap adds -- the tweezer's anharmonic flanks, the Wigner
+//! factors' widths over them -- is read off the initial ensemble's own density, not off a formula for one trap's shape, and
+//! by no draw of an atom (`Model::left_out`; ensemble.rs, # What a level leaves out): the share of the atoms beyond the
+//! set, the momenta above the kinetic energy A(r) = V_min + E_r − V_prep(r) the set holds at each place integrated over the
+//! places, booked on what is shown; and the share of the kinetic energy they hold, on T -- each with its quadrature's own
+//! difference between its last two levels. A reach grown with the atoms' temperature leaves out less of the same ensemble.
 //!
 //! # Provable extrema (`Model::bounds_over`)
 //! A quantity's bound over the reach is the largest of its upper bounds over cells covering the reach's box, a cell taken where
@@ -142,10 +170,18 @@
 //! more. One that ends at a cell whose bound is within the rounding of its centre's value: the cells it had asked for by then.
 //! A unit's statements (its saturation and its sweep) are proven side by side, and a unit one of whose statements is
 //! proven at the threshold or above is kept whatever the others read: their proofs end with it, each at the largest bound
-//! of its cells left (`Model::statements_over`); which units are kept is the same as theirs proven to the end. (Proven to the end alone, the sweep of a coupling of two
-//! Zeeman sublevels of a heavy atom at rest -- B 0, the sublevels crossing where the tweezer's tensor shift does, its
-//! saturation infinite there -- halved the cells along the crossing towards a speed's square root that no centre met,
-//! and the proof over S3's reach at 1 µK did not end in five minutes.)
+//! of its cells left (`Model::statements_over`); which units are kept is the same as theirs proven to the end. (Proven to the
+//! end alone, the sweep of a coupling of two Zeeman sublevels of a heavy atom at rest -- B 0, the sublevels crossing where
+//! the tweezer's tensor shift does, its saturation infinite there -- halved the cells along the crossing towards a speed's
+//! square root that no centre met, and the proof over S3's reach at 1 µK did not end in five minutes.) And a model with a
+//! unit kept is not taken: its units' gates are asked to find whether its folds exist over the reach, and where one does
+//! not, the units failing are kept and the next model -- the closure's next, or the old one's on a grown reach -- is judged
+//! over the same reach again (solve.rs). What decides is that some unit fails, and which: the round in which a unit is
+//! first kept ends every proof still open, the units kept by then are the model's failures, and the others are judged
+//! again on the next model, proven to the end where nothing fails. Which unit is kept first is a choice of cost, as the
+//! tail rule's order is (units.rs, # The tail rule): keeping is always exact. (Proven to the end on every model, the units
+//! that pass were proven on each model the closure passed through and again on the last: S2Q's gates over its reach grown
+//! to 61 µK took 250 + 141 CPU-s of a solve of 770.)
 //!
 //! # The kick's curvature (`Model::kick_curvature`)
 //! A step is the reference's flow, a kick, the flow again (step.rs); the kick is −τ∇(⟨x|Ĥ_h|x⟩ − V_ref) at the step's
@@ -920,7 +956,7 @@ impl Region {
 
     /// |Σ_l a_l x_l| over the region in its own form (`Frame`): of the beams `entries` (the request's beam, x_l, |x_l|).
     pub(crate) fn coherent_own(&self, entries: &[(usize, C64, f64)]) -> Own {
-        let mut sum = Frame::of(self, entries.iter().map(|&(l, _, size)| (l, size)));
+        let mut sum = Frame::<1>::of(self, entries.iter().map(|&(l, _, size)| (l, size)));
         for &(l, x, size) in entries {
             sum.add(self, l, size, std::iter::once((0, x)));
         }
@@ -975,18 +1011,18 @@ impl Region {
 /// norm of the user's probe's drive -- its reflection on that line 4·10⁻⁸ of it -- had a remainder ½ τ² ‖u‖ of the cell's
 /// square where the modulus moves by the partner's 10⁻⁸: its bound was the beams' phase-blind sum, 8.5·10⁻⁸ of it above
 /// the largest value on every cell down to ℓ/4000.)
-pub(crate) struct Frame {
+pub(crate) struct Frame<const N: usize> {
     wave: [f64; 3],
-    u: [C64; EXCITED],
-    slopes: [[C64; EXCITED]; 3],
+    u: [C64; N],
+    slopes: [[C64; N]; 3],
     moved: f64,
     bowed: f64,
     blind: f64,
 }
 
-impl Frame {
-    /// An empty sum in the frame of the beams `beams` (the request's beam, ‖x_l‖).
-    pub(crate) fn of(region: &Region, beams: impl Iterator<Item = (usize, f64)>) -> Frame {
+impl<const N: usize> Frame<N> {
+    /// An empty sum of N places in the frame of the beams `beams` (the request's beam, ‖x_l‖).
+    pub(crate) fn of(region: &Region, beams: impl Iterator<Item = (usize, f64)>) -> Frame<N> {
         let (mut sum, mut weight) = ([0.0; 3], 0.0);
         for (l, size) in beams {
             let span = &region.spans[l];
@@ -997,10 +1033,10 @@ impl Frame {
             weight += w;
         }
         let wave = if weight > 0.0 { sum.map(|x| x / weight) } else { [0.0; 3] };
-        Frame { wave, u: [C64::ZERO; EXCITED], slopes: [[C64::ZERO; EXCITED]; 3], moved: 0.0, bowed: 0.0, blind: 0.0 }
+        Frame { wave, u: [C64::ZERO; N], slopes: [[C64::ZERO; N]; 3], moved: 0.0, bowed: 0.0, blind: 0.0 }
     }
 
-    /// The beam l's amplitude times x_l, of norm `size` and entries (excited state less GROUND, value) that are not zero.
+    /// The beam l's amplitude times x_l, of norm `size` and entries (place, value) that are not zero.
     pub(crate) fn add(&mut self, region: &Region, l: usize, size: f64, entries: impl Iterator<Item = (usize, C64)>) {
         let span = &region.spans[l];
         let slopes: [C64; 3] = std::array::from_fn(|a| span.gradient[a] - C64::new(0.0, self.wave[a]) * span.centre);
@@ -1355,11 +1391,24 @@ fn decided(threshold: f64, attains: f64) -> impl Fn(f64, f64) -> bool + Sync {
     move |upper, attained| upper < threshold || attained >= attains
 }
 
-/// P(Y + Σ_k a_k E_k > level) at a level above zero: Y of Γ(`shape`) (nothing at shape zero), E_k unit exponentials of
+/// P(Y + Σ_k a_k E_k ≤ level) at a level above zero: Y of Γ(`shape`) (nothing at shape zero), E_k unit exponentials of
 /// the scales `scales` (module documentation, # The reach's level), by the convolution's recursion over the scales from
-/// the last one in -- e^{−L/a} + (1/a)∫₀^L e^{−(L−u)/a} P(rest > u) du on the Gauss–Legendre nodes `nodes` of [−1, 1] in
-/// v, u = L v² (a Γ of half-integer shape has its tail entire in √u, not in u); with nothing left the integrand is
-/// nothing.
+/// the last one in -- (1/a)∫₀^L e^{−(L−u)/a} P(rest ≤ u) du on the Gauss–Legendre nodes `nodes` of [−1, 1] in v, u = L v²
+/// (a Γ of half-integer shape has its distribution entire in √u, not in u); with nothing left, Y's P(shape, u) (`lower`)
+/// or one, and one exponential alone 1 − e^{−L/a}. Every part is positive: the distribution is read to its own relative
+/// precision however small it is, as a hot trap's few atoms below a level ask (`Degrees::above`).
+fn head_at(shape: f64, scales: &[f64], level: f64, nodes: &[(f64, f64)]) -> f64 {
+    let Some((&a, rest)) = scales.split_last() else {
+        return if shape > 0.0 { lower(shape, level) } else { 1.0 };
+    };
+    if shape == 0.0 && rest.is_empty() {
+        return -(-level / a).exp_m1();
+    }
+    nodes.iter().map(|&(x, w)| { let v = 0.5 * (x + 1.0); let u = level * v * v; w * level * v / a * (-(level - u) / a).exp() * head_at(shape, rest, u, nodes) }).sum()
+}
+
+/// P(Y + Σ_k a_k E_k > level) at a level above zero (`head_at`'s complement), by the same recursion -- e^{−L/a} +
+/// (1/a)∫₀^L e^{−(L−u)/a} P(rest > u) du in v, u = L v² --; with nothing left Y's Q(shape, u) or nothing.
 fn tail_at(shape: f64, scales: &[f64], level: f64, nodes: &[(f64, f64)]) -> f64 {
     let Some((&a, rest)) = scales.split_last() else {
         return if shape > 0.0 { crate::special::upper(shape, level) } else { 0.0 };
@@ -1372,7 +1421,14 @@ fn tail_at(shape: f64, scales: &[f64], level: f64, nodes: &[(f64, f64)]) -> f64 
     (-level / a).exp() + within
 }
 
-/// The Gauss–Legendre rules of 2, 4, 8, … nodes (`tail`), each made where it is first asked: a quantile's bisection
+/// P(s, x), the regularized lower incomplete gamma function at a whole or half-integer s: the lowered isothermal's momenta
+/// below its escape at the depth x (ensemble.rs `kept`, whose series takes the leading power exactly) and the power it
+/// subtracts.
+fn lower(s: f64, x: f64) -> f64 {
+    crate::ensemble::kept(s, x, x, x) + (s * x.ln() - x).exp() / crate::special::gamma(s + 1.0)
+}
+
+/// The Gauss–Legendre rules of 2, 4, 8, … nodes (`below`), each made where it is first asked: a quantile's bisection
 /// asks the same few rules at every level.
 #[derive(Default)]
 struct Rules(Vec<Vec<(f64, f64)>>);
@@ -1385,63 +1441,138 @@ impl Rules {
         }
         &self.0[times]
     }
-}
 
-/// P(Y + Σ_k a_k E_k > level) (`tail_at`), its nodes doubled from two until two levels' difference stops falling: the
-/// integrands are entire, the rule converges geometrically, and a difference no smaller than the one before is the
-/// round-off's floor (or nothing).
-fn tail(shape: f64, scales: &[f64], level: f64, rules: &mut Rules) -> f64 {
-    let mut last = tail_at(shape, scales, level, rules.doubled(0));
-    let mut before = f64::INFINITY;
-    for times in 1.. {
-        let next = tail_at(shape, scales, level, rules.doubled(times));
-        let difference = (next - last).abs();
-        if !(difference < before) {
-            break;
+    /// A recursion's value (`head_at`, `tail_at`) on rules of nodes doubled from two until two levels' difference stops
+    /// falling: the integrands are entire, the rule converges geometrically, and a difference no smaller than the one
+    /// before is the round-off's floor (or nothing).
+    fn converged(&mut self, at: impl Fn(&[(f64, f64)]) -> f64) -> f64 {
+        let mut last = at(self.doubled(0));
+        let mut before = f64::INFINITY;
+        for times in 1.. {
+            let next = at(self.doubled(times));
+            let difference = (next - last).abs();
+            if !(difference < before) {
+                break;
+            }
+            (last, before) = (next, difference);
         }
-        (last, before) = (next, difference);
+        last
     }
-    last
 }
 
-/// The L with P(Y + Σ_k a_k E_k > L) = share, 0 < share < 1 (`tail`; the scales ascending): the level, in units of
-/// k_B T, that the share `share` of the ensemble lies above (module documentation, # The reach's level). The tail falls
-/// monotonically from 1 at L = 0: the bracket's top is doubled from one until it is below the share, then halved until
-/// its two ends are neighbours in the format.
-fn quantile(shape: f64, scales: &[f64], share: f64) -> f64 {
-    let mut rules = Rules::default();
-    let mut above = |level: f64| tail(shape, scales, level, &mut rules) > share;
-    let (mut lo, mut hi) = (0.0, 1.0);
-    while above(hi) {
-        (lo, hi) = (hi, 2.0 * hi);
+/// P(Y + Σ_k a_k E_k ≤ level), as the incomplete gamma function's two expansions are taken (special.rs), each where it
+/// converges: up to the mean f/2 + Σ a_k its own recursion (`head_at`), whose exponential spans its interval and whose
+/// small values keep their own precision; above it one less the tail's (`tail_at`), whose values are small there -- the
+/// distribution's recursion at a level of many scales has its weight in the last 1/L of its interval, which the first
+/// rules do not see.
+fn below(shape: f64, scales: &[f64], level: f64, rules: &mut Rules) -> f64 {
+    if level <= shape + scales.iter().sum::<f64>() {
+        rules.converged(|nodes| head_at(shape, scales, level, nodes))
+    } else {
+        1.0 - rules.converged(|nodes| tail_at(shape, scales, level, nodes))
     }
+}
+
+/// The drawn energy's degrees in units of k_BT (module documentation, # The reach's level): Y's shape f/2, the held axes'
+/// scales s_i² ascending, and the depth d = D/k_BT.
+struct Degrees {
+    shape: f64,
+    scales: Vec<f64>,
+    depth: f64,
+}
+
+impl Degrees {
+    /// k: half the classical draw's quadratic degrees, f/2 and one a held axis.
+    fn half(&self) -> f64 {
+        self.shape + self.scales.len() as f64
+    }
+
+    /// The least scale a₀ -- one where an axis is free.
+    fn least(&self) -> f64 {
+        if self.shape > 0.0 { 1.0 } else { self.scales[0] }
+    }
+
+    /// The largest scale.
+    fn most(&self) -> f64 {
+        self.scales.last().copied().unwrap_or(1.0).max(1.0)
+    }
+
+    /// P(X > L) of the lowered isothermal at a level L ≤ a₀ d (module documentation, # The reach's level): 1 − [P(X ≤ L) −
+    /// A L^k e^{−d}/Γ(k + 1)]/P(k + 1, d), A = Π_i s_i^{−2}, of the thermal draw's distribution (`below`).
+    fn above(&self, level: f64, rules: &mut Rules) -> f64 {
+        let k = self.half();
+        let cone: f64 = self.scales.iter().map(|a| a.ln()).sum();
+        let cut = (k * level.ln() - self.depth - cone).exp() / crate::special::gamma(k + 1.0);
+        1.0 - (below(self.shape, &self.scales, level, rules) - cut) / lower(k + 1.0, self.depth)
+    }
+
+    /// The level (in units of k_BT) that the share `share` of the lowered isothermal lies above, 0 < share < 1 (module
+    /// documentation, # The reach's level): its tail falls monotonically from one at nothing to the least scale's depth
+    /// a₀ d, and the bracket between them is halved until its two ends are neighbours in the format; where the zero point
+    /// lifts more than the share above a₀ d, the largest scale's depth, which every atom of the harmonic form is below.
+    fn level(&self, share: f64) -> f64 {
+        let mut rules = Rules::default();
+        let mut above = |level: f64| self.above(level, &mut rules) > share;
+        let (mut lo, mut hi) = (0.0, self.least() * self.depth);
+        if above(hi) {
+            return self.most() * self.depth;
+        }
+        loop {
+            let middle = 0.5 * (lo + hi);
+            if !(lo < middle && middle < hi) {
+                return hi;
+            }
+            if above(middle) { lo = middle } else { hi = middle }
+        }
+    }
+}
+
+/// The drawn energy's degrees of a trap at temperature T_r (µK) (`Degrees`), and the squares s_i² per axis: per principal
+/// axis along which the trap holds the atom an exponential scaled by the Wigner factor's s_i² = x_i coth x_i, x_i =
+/// ħω_i/2k_BT_r, per axis it does not hold the momentum's degree alone; its depth −V_min over k_BT_r.
+fn degrees(trap: &Trap, temperature_uk: f64) -> (Degrees, [f64; 3]) {
+    let kt = KT_PER_UK * temperature_uk;
+    let squares = trap.frequencies.map(|omega| { let x = 0.5 * omega / kt; if x > 0.0 { x / x.tanh() } else { 1.0 } });
+    let mut scales: Vec<f64> = (0..3).filter(|&i| trap.frequencies[i] > 0.0).map(|i| squares[i]).collect();
+    scales.sort_by(f64::total_cmp);
+    (Degrees { shape: 0.5 * (3 - scales.len()) as f64, scales, depth: -trap.minimum / kt }, squares)
+}
+
+/// The energy above V_min (rad/µs) of the reach of a trap at temperature T_r (µK) that leaves out the share s (module
+/// documentation, # The reach's level) -- the (1 − s) quantile of an atom's energy in the lowered isothermal as drawn at
+/// T_r (`Degrees::level`) --, and the squares s_i² per axis.
+fn energy_at(trap: &Trap, temperature_uk: f64, share: f64) -> (f64, [f64; 3]) {
+    let (degrees, squares) = degrees(trap, temperature_uk);
+    (degrees.level(share) * KT_PER_UK * temperature_uk, squares)
+}
+
+/// The energy above V_min (rad/µs) that the reach's level rises to with its temperature (module documentation, # The
+/// reach's level): at T_r → ∞ every s_i → 1 and the energy over the depth D has the density ∝ u^{k−1}(1 − u) on [0, 1],
+/// whose share above q is 1 − (k + 1)q^k + k q^{k+1}, falling from one to nothing -- the q where it is s, by bisection to
+/// the format's resolution, times D.
+fn top(trap: &Trap, share: f64) -> f64 {
+    let k = degrees(trap, 1.0).0.half();
+    let above = |q: f64| 1.0 - (k + 1.0) * q.powf(k) + k * q.powf(k + 1.0) > share;
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
     loop {
         let middle = 0.5 * (lo + hi);
         if !(lo < middle && middle < hi) {
-            return hi;
+            return -trap.minimum * hi;
         }
         if above(middle) { lo = middle } else { hi = middle }
     }
 }
 
-/// The energy above V_min (rad/µs) of the reach of a trap at temperature T_r (µK) that leaves out the share s (module
-/// documentation, # The reach's level) -- the (1 − s) quantile of an atom's energy in the ensemble as drawn at T_r, per
-/// principal axis along which the trap holds the atom an exponential scaled by the Wigner factor's s_i² = x_i coth x_i,
-/// x_i = ħω_i/2k_BT_r, per axis it does not hold the momentum's degree alone --, and the squares s_i² per axis.
-fn energy_at(trap: &Trap, temperature_uk: f64, share: f64) -> (f64, [f64; 3]) {
-    let kt = KT_PER_UK * temperature_uk;
-    let squares = trap.frequencies.map(|omega| { let x = 0.5 * omega / kt; if x > 0.0 { x / x.tanh() } else { 1.0 } });
-    let mut held: Vec<f64> = (0..3).filter(|&i| trap.frequencies[i] > 0.0).map(|i| squares[i]).collect();
-    held.sort_by(f64::total_cmp);
-    (quantile(0.5 * (3 - held.len()) as f64, &held, share) * kt, squares)
-}
-
 /// The least temperature (µK) at which the reach of a trap that leaves out the share s holds the level `level` (rad/µs,
-/// the prepared energy; module documentation, # The reach's level), from a temperature `from` whose reach does not. The
-/// reach's energy rises with its temperature -- every oscillator's mean energy (ħω_i/2) coth(ħω_i/2k_BT) and the free
-/// axes' scale k_BT rise with it, and with them every quantile of their sum --, so the bracket's top is doubled from
-/// `from` until it holds the level, then the bracket halved until its two ends are neighbours in the format.
+/// the prepared energy; module documentation, # The reach's level), from a temperature `from` whose reach does not: the
+/// reach's energy rises with its temperature towards its top (`top`), so the bracket's top is doubled from `from` until
+/// it holds the level, then the bracket halved until its two ends are neighbours in the format. None (∞) where the level
+/// is at the top or above it: no temperature's reach holds it -- an atom at the trap's top or above its depth, leaving
+/// or lost, is no atom of a temperature's ensemble.
 pub fn holding(trap: &Trap, level: f64, share: f64, from: f64) -> f64 {
+    if level - trap.minimum >= top(trap, share) {
+        return f64::INFINITY;
+    }
     let holds = |t: f64| trap.minimum + energy_at(trap, t, share).0 >= level;
     let (mut lo, mut hi) = (from, from);
     while !holds(hi) {
@@ -1711,7 +1842,9 @@ impl Model {
 
     /// The bounds of units' statements (`bounds_over_in_parallel`), consecutive quantities `together` at a time one unit's
     /// (module documentation, # Rounds): a unit one of whose statements is proven at the threshold or above is kept whatever
-    /// its others read, and their proofs end there, each at the largest bound of its cells left -- a bound, if not the least.
+    /// its others read, and their proofs end there, each at the largest bound of its cells left -- a bound, if not the least;
+    /// and the other units' proofs still open end with the round, each at the largest value attained at a centre, below
+    /// `attains` -- no bound: the model with a unit kept is not taken.
     pub(crate) fn statements_over(&self, reach: &Reach, threshold: f64, attains: f64, together: usize, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
         self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: Some((together, threshold)) }, quantities)
     }
@@ -1739,12 +1872,14 @@ impl Model {
         let mut made = nothing();
         loop {
             let mut asking = P::proofs(&mut proofs, made, |proof, made| proof.advance(made, rule, P::AHEAD));
-            // A unit kept by one statement: its other statements' proofs end at the bounds of their cells left.
+            // A unit kept by one statement: the model is not taken, and every proof still open ends -- its unit's others at the
+            // bounds of their cells left, the other units' at the largest value attained at a centre, below `attains`.
             if let Some((together, threshold)) = rule.together {
-                for (unit, asks) in proofs.chunks_mut(together).zip(asking.chunks_mut(together)) {
-                    if unit.iter().any(|proof| proof.bound.is_some_and(|bound| bound >= threshold)) {
+                if proofs.iter().any(|proof| proof.bound.is_some_and(|bound| bound >= threshold)) {
+                    for (unit, asks) in proofs.chunks_mut(together).zip(asking.chunks_mut(together)) {
+                        let kept = unit.iter().any(|proof| proof.bound.is_some_and(|bound| bound >= threshold));
                         for (proof, asked) in unit.iter_mut().zip(asks).filter(|of| of.0.bound.is_none()) {
-                            proof.bound = Some(proof.queue.peek().map_or(0.0, |top| top.upper));
+                            proof.bound = Some(if kept { proof.queue.peek().map_or(0.0, |top| top.upper) } else { proof.attained.max(0.0) });
                             asked.clear();
                         }
                     }
@@ -1827,35 +1962,35 @@ mod tests {
         out
     }
 
-    /// A region's bounds hold at every point of its cell and are the values on its centre point (module documentation,
-    /// # Provable extrema): on the six-beam lattice, each beam's modulus between its least and its largest, each beam pair's
-    /// coefficient within its radius of the centre's and its
-    /// gradient within its slope; every carrier's coherent coupling |Σ_l a_l X^f_l[e,s]|, its columns and its units' columns within
-    /// their bounds; the far light's energies' differences within their slack (`Model::gap`) and their gradients within the gap's --
-    /// and on a cell a thousand times smaller the couplings' bounds within that factor of the centre's values.
-    /// The reach's level is the quantile of its ensemble's energy (module documentation, # The reach's level). Classical
-    /// (every scale one): Q(n/2, L) = s to the format's resolution for the n = 3 to 6 degrees of a trap that holds along
-    /// none to three of its axes; one oscillator's is ln(1/s); three axes' 12.89 at s = z²/(2¹⁴ + z²), where
+    /// The thermal draw's level (module documentation, # The reach's level), its ensemble not lowered: of a depth beyond
+    /// every level asked, where e^{−d} is nothing and P(k + 1, d) one.
+    fn thermal(shape: f64, scales: &[f64], share: f64) -> f64 {
+        Degrees { shape, scales: scales.to_vec(), depth: 1e3 }.level(share)
+    }
+
+    /// The reach's level is the quantile of its ensemble's energy (module documentation, # The reach's level). Of the thermal
+    /// draw, classical (every scale one): Q(n/2, L) = s to the format's resolution for the n = 3 to 6 degrees of a trap that
+    /// holds along none to three of its axes; one oscillator's is ln(1/s); three axes' 12.89 at s = z²/(2¹⁴ + z²), where
     /// ln(1/s) = 8.32 left Q(3, 8.32) = 1.07 % above it; scales equal to nine digits are the same level. With the Wigner
     /// factor (two axes of one scale a, one of b): P(X > L) = e^{−L/a}(1 + L/a) + e^{−L/b}(1 − e^{−cL}(1 + cL))/(a c)²,
     /// c = 1/a − 1/b, is s at the level -- at s² = 1.66, 1.66, 1.04 and at R8_R5051's 7.2, 7.2, 30.6 (271 k_BT). On
-    /// R2_RECOIL's tweezer at 30 µK the reach's level is that of its own three scales, a trap free along an axis has
-    /// five degrees, and the ensemble's kinetic temperatures are s_i² T.
+    /// R2_RECOIL's tweezer at 30 µK the reach's level is that of its own three scales and its depth, a trap free along an
+    /// axis has five degrees, and the ensemble's kinetic temperatures are s_i² T.
     #[test]
     fn the_reach_s_level_is_the_quantile_of_its_trap_s_degrees_of_freedom() {
         let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
         for held in 0..=3 {
             let (shape, scales) = (0.5 * (3 - held) as f64, vec![1.0; held]);
-            let level = quantile(shape, &scales, share);
+            let level = thermal(shape, &scales, share);
             let above = crate::special::upper(shape + held as f64, level);
             assert!((above - share).abs() <= 1e-11 * share, "{held} axes held: Q({}, {level}) = {above} against s = {share}", shape + held as f64);
         }
-        assert!((quantile(0.0, &[1.0], share) - (1.0 / share).ln()).abs() <= 1e-12 * (1.0 / share).ln(), "one oscillator's level is ln(1/s)");
-        let classical = quantile(0.0, &[1.0; 3], share);
+        assert!((thermal(0.0, &[1.0], share) - (1.0 / share).ln()).abs() <= 1e-12 * (1.0 / share).ln(), "one oscillator's level is ln(1/s)");
+        let classical = thermal(0.0, &[1.0; 3], share);
         assert!((classical - 12.89).abs() < 0.005 && (crate::special::upper(3.0, (1.0 / share).ln()) - 0.01072).abs() < 1e-5, "six degrees: {classical}");
-        assert!((quantile(0.0, &[1.0, 1.0 + 1e-9, 1.0 + 2e-9], share) - classical).abs() <= 1e-8 * classical, "scales equal to nine digits");
+        assert!((thermal(0.0, &[1.0, 1.0 + 1e-9, 1.0 + 2e-9], share) - classical).abs() <= 1e-8 * classical, "scales equal to nine digits");
         for (a, b, expected) in [(1.657, 1.041, None), (7.2, 30.6, Some(271.0))] {
-            let level = quantile(0.0, &if a < b { [a, a, b] } else { [b, a, a] }, share);
+            let level = thermal(0.0, &if a < b { [a, a, b] } else { [b, a, a] }, share);
             let c = 1.0 / a - 1.0 / b;
             let closed = (-level / a).exp() * (1.0 + level / a) + (-level / b).exp() * (1.0 - (-c * level).exp() * (1.0 + c * level)) / (a * c).powi(2);
             assert!((closed - share).abs() <= 1e-10 * share && expected.is_none_or(|l: f64| (level - l).abs() < 1.0), "scales {a}, {a}, {b}: the closed form's {closed} at L = {level} against s = {share}");
@@ -1872,11 +2007,74 @@ mod tests {
         scales.sort_by(f64::total_cmp);
         assert!(squares.iter().all(|s| *s > 1.0 && *s < 1.01) && held.kinetic_uk == squares.map(|s| s * 30.0), "a tweezer at 30 µK is nearly classical: s² = {squares:?}");
         let across: Vec<f64> = { let mut two = vec![squares[0], squares[1]]; two.sort_by(f64::total_cmp); two };
-        assert!((held.energy - quantile(0.0, &scales, share) * kt).abs() <= 1e-12 * held.energy && (free.energy - quantile(0.5, &across, share) * kt).abs() <= 1e-12 * free.energy, "the degrees are the trap's: {} and {}", held.energy / kt, free.energy / kt);
-        assert!(held.energy / kt > classical && held.energy / kt < 1.01 * classical && free.energy < held.energy, "the levels: {} and {} k_BT against the classical {classical}", held.energy / kt, free.energy / kt);
+        let depth = -trap.minimum / kt;
+        let (own, five) = (Degrees { shape: 0.0, scales, depth }.level(share), Degrees { shape: 0.5, scales: across, depth }.level(share));
+        assert!((held.energy - own * kt).abs() <= 1e-12 * held.energy && (free.energy - five * kt).abs() <= 1e-12 * free.energy, "the degrees are the trap's: {} and {}", held.energy / kt, free.energy / kt);
+        assert!(held.energy / kt > classical && held.energy / kt < 1.01 * classical && free.energy < held.energy, "the levels: {} and {} k_BT against the classical {classical} (depth {depth} k_BT)", held.energy / kt, free.energy / kt);
         assert!((held.speed / (2.0 * model.hbar_over_mass * (1.0 / share).ln() * kt).sqrt() - 1.245).abs() < 0.005, "the reach's speed, 1.245 of the Boltzmann factor's level's");
     }
 
+    /// The reach's level is the quantile of the lowered isothermal, the initial ensemble's bound atoms alone, below the depth
+    /// (module documentation, # The reach's level). A harmonic well of depth D = 1.5 mK, a tweezer's frequencies (100 kHz
+    /// across, 15 kHz along: s² up to 1.002 at 30 µK), from 30 µK to 1 mK: the reach's level is below D, rises with T_r
+    /// and at T_r → ∞ to its top (the Beta(3, 2) quantile, 0.9936 D), and is the level at which the share s of the
+    /// lowered isothermal lies above -- that share integrated directly over the classical draw's energies, the radial
+    /// two's sum r (of the measure r dr) and the axial one's e, of the weight (e^{−r−e} − e^{−d})₊ where a r + b e > L
+    /// (the inner integral in closed form, the outer by Gauss–Legendre on the pieces between its kinks, a r = L and the
+    /// depth's edge), and the level that share's bisection to 10⁻¹⁰ (D 1.5 mK at 30 µK: 12.912 k_BT, 387 µK; at 300 µK
+    /// 4.935 k_BT, 1480 µK). Its holding temperature holds a level, and no temperature holds one at the top.
+    #[test]
+    fn a_reach_s_level_is_its_lowered_isothermal_s_quantile_below_the_depth() {
+        let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
+        let per_khz = std::f64::consts::TAU * 1e-3;
+        let depth_uk = 1500.0;
+        let trap = Trap { centre: [0.0; 3], minimum: -depth_uk * KT_PER_UK, axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], frequencies: [100.0 * per_khz, 100.0 * per_khz, 15.0 * per_khz], lab: [0.0; 3] };
+        let rule = crate::special::gauss_legendre(64);
+        // ∫ f over [lo, hi] by the rule.
+        let integral = |f: &dyn Fn(f64) -> f64, lo: f64, hi: f64| -> f64 { rule.iter().map(|&(x, w)| 0.5 * (hi - lo) * w * f(lo + 0.5 * (hi - lo) * (x + 1.0))).sum() };
+        let mut last = 0.0;
+        for t in [30.0, 100.0, 300.0, 1000.0] {
+            let (degrees, _) = degrees(&trap, t);
+            let (a, b, d) = (degrees.scales[1], degrees.scales[0], degrees.depth);
+            assert!(degrees.scales[2] == a && b < a, "two radial scales and an axial one");
+            // The share above L of the lowered isothermal, directly: per r, ∫ (e^{−r−e} − e^{−d}) de over e from max(0, (L − a r)/b)
+            // to d − r.
+            let share_above = |level: f64| -> f64 {
+                let inner = |r: f64| -> f64 {
+                    let (lo, hi) = (((level - a * r) / b).max(0.0), d - r);
+                    if hi <= lo { 0.0 } else { r * ((-r - lo).exp() - (-r - hi).exp() - (-d).exp() * (hi - lo)) }
+                };
+                let all = |r: f64| r * ((-r).exp() - (-d).exp() - (-d).exp() * (d - r));
+                let mut cuts: Vec<f64> = [level / a, (b * d - level) / (b - a)].into_iter().filter(|&c| c > 0.0 && c < d).collect();
+                cuts.sort_by(f64::total_cmp);
+                let ends: Vec<f64> = std::iter::once(0.0).chain(cuts).chain(std::iter::once(d)).collect();
+                let part: f64 = ends.windows(2).map(|w| integral(&inner, w[0], w[1])).sum();
+                part / integral(&all, 0.0, d)
+            };
+            let (mut lo, mut hi) = (0.0, a.min(b) * d);
+            while hi - lo > 1e-10 * hi {
+                let middle = 0.5 * (lo + hi);
+                if share_above(middle) > share { lo = middle } else { hi = middle }
+            }
+            let level = degrees.level(share);
+            let energy = energy_at(&trap, t, share).0;
+            assert!((level - hi).abs() <= 1e-8 * hi, "{t} µK: the level {level} k_BT against the integrated quantile {hi} (depth {d} k_BT)");
+            assert!(energy < -trap.minimum && energy > last, "{t} µK: the level {} µK below the depth and above the colder one's", energy / KT_PER_UK);
+            last = energy;
+            let warmer = holding(&trap, trap.minimum + energy, share, 0.5 * t);
+            assert!((warmer - t).abs() <= 1e-9 * t, "{t} µK: its own level's holding temperature {warmer}");
+        }
+        let top = top(&trap, share);
+        assert!((top / (-trap.minimum) - 0.9936).abs() < 5e-5 && last < top, "the top {} D above 1 mK's level {}", top / -trap.minimum, last / -trap.minimum);
+        assert!(holding(&trap, trap.minimum + top, share, 1000.0).is_infinite() && holding(&trap, 0.0, share, 1000.0).is_infinite(), "nothing holds the top or the far value");
+    }
+
+    /// A region's bounds hold at every point of its cell and are the values on its centre point (module documentation,
+    /// # Provable extrema): on the six-beam lattice, each beam's modulus between its least and its largest, each beam pair's
+    /// coefficient within its radius of the centre's and its
+    /// gradient within its slope; every carrier's coherent coupling |Σ_l a_l X^f_l[e,s]|, its columns and its units' columns within
+    /// their bounds; the far light's energies' differences within their slack (`Model::gap`) and their gradients within the gap's --
+    /// and on a cell a thousand times smaller the couplings' bounds within that factor of the centre's values.
     #[test]
     fn a_region_s_bounds_hold_over_its_cell_and_are_the_values_at_its_centre() {
         let model = lattice();
