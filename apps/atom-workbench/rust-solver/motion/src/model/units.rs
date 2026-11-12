@@ -830,7 +830,9 @@ impl Model {
     /// `Own::dispersion_ends`). Its gradient −Σ (∇v² φ(Δ_c) + v² φ'(Δ_c) ∇Δ_c), of the intensity's own form and the
     /// detuning's (`Across::slope`), and how far the parameters move that: |∇v²| m/d² + v² m max|φ''| |∇Δ_c| --
     /// |φ(Δ_c + μ) − φ(Δ_c)| ≤ m max|φ'| ≤ m/d², d the drive's distance |max(|Δ_c| − m, 0) − iΓ/2|, at most |φ(Δ_c)| + 1/Γ,
-    /// and max|φ''| ≤ 2/d³. Made once per region and state. Of its own form, not each drive's bound: two levels
+    /// and |φ'(Δ_c + μ) − φ'(Δ_c)| ≤ m max|φ''| ≤ 2m/d³, at most |φ'(Δ_c)| + 4/Γ² (|φ'| ≤ 1/(x² + Γ²/4)): where the
+    /// parameters are unbounded (a self-energy's channel through its own resonance) the shape's own bounds. Made once per
+    /// region and state. Of its own form, not each drive's bound: two levels
     /// the same light shifts alike move the distance between them by the difference of their shifts, the dressed levels'
     /// difference (`term_parts`, `pair_gate`), and its rate by the difference of their gradients. Nothing for an excited state:
     /// an explicit one's shift by the folded drives is in no distance.
@@ -847,7 +849,8 @@ impl Model {
                 let [lo, hi] = of.centre.dispersion_ends(of.moved, gamma);
                 let across = of.distance.square().recip();
                 let moves = of.moved.mul(across).min(shape.abs().plus(0.5 / gamma));
-                let swing = square_slope.norm().mul(moves).add(square.mul(of.moved).mul(across.mul(of.distance.recip()).scale(2.0)).mul(of.slope.norm()));
+                let bends = of.moved.mul(across.mul(of.distance.recip()).scale(2.0)).min(bend.abs().plus(1.0 / (gamma * gamma)));
+                let swing = square_slope.norm().mul(moves).add(square.mul(bends).mul(of.slope.norm()));
                 let shift = Shift { band: Band::between(square.mul(lo), square.mul(hi)), slope: square_slope.by(&shape).add(of.slope.by(&square.mul(bend))), swing };
                 sum.sub(&shift)
             })
@@ -879,7 +882,7 @@ impl Model {
             let wave = self.wave_of(d.component);
             let rate = pace.mul(of.slope.norm()).add(acceleration.scale(wave));
             let actual = gate_own(of.size, of.distance, rate);
-            let pair = self.pair_gate(g, d, of, &kept, region);
+            let pair = self.pair_gate(g, d, of, kept, region);
             let place = &mut out[d.group];
             place[4] = place[4].add(actual.saturation);
             let bare = d.level == Level::Bare;
@@ -909,24 +912,26 @@ impl Model {
         out.iter().map(|place| place.map(|x| x.upper())).collect()
     }
 
-    /// The model's kept drives over a region (`Kept`), nothing where it has none.
-    pub(crate) fn kept_over(&self, region: &Region) -> Vec<Kept> {
-        if self.legs.iter().all(|of| of.is_empty()) {
-            return vec![];
-        }
-        let radii = self.radii(region);
-        let mut out = vec![];
-        for (a, drives) in region.forms.drives(self).iter().enumerate() {
-            for d in drives.iter().filter(|d| d.level == Level::Explicit) {
-                let (frequency, e) = (d.component / 2, GROUND + d.excited);
-                let carrier = self.carrier_of(frequency).expect("an explicit drive's component is a carrier");
-                let (wave, gap) = (self.wave_of(d.component), self.gap(e, a, region, self.carriers[carrier].detuning));
-                let still = radii[e];
-                let across = Across::new(region.coherent_own(&d.beams), gap.all, gap.all_slope, still.add(region.pace.scale(wave)), still, d.gamma);
-                out.push(Kept { carrier, excited: d.excited, ground: a, size: across.size, detuning: across.centre, moved: across.moved, distance: across.distance });
+    /// The model's kept drives over a region (`Kept`), nothing where it has none; made once per region.
+    pub(crate) fn kept_over<'r>(&self, region: &'r Region) -> &'r [Kept] {
+        region.kept.get_or_init(|| {
+            if self.legs.iter().all(|of| of.is_empty()) {
+                return vec![];
             }
-        }
-        out
+            let radii = self.radii(region);
+            let mut out = vec![];
+            for (a, drives) in region.forms.drives(self).iter().enumerate() {
+                for d in drives.iter().filter(|d| d.level == Level::Explicit) {
+                    let (frequency, e) = (d.component / 2, GROUND + d.excited);
+                    let carrier = self.carrier_of(frequency).expect("an explicit drive's component is a carrier");
+                    let (wave, gap) = (self.wave_of(d.component), self.gap(e, a, region, self.carriers[carrier].detuning));
+                    let still = radii[e];
+                    let across = Across::new(region.coherent_own(&d.beams), gap.all, gap.all_slope, still.add(region.pace.scale(wave)), still, d.gamma);
+                    out.push(Kept { carrier, excited: d.excited, ground: a, size: across.size, detuning: across.centre, moved: across.moved, distance: across.distance });
+                }
+            }
+            out
+        })
     }
 
     /// The gate over a region of the Raman pairs that a folded drive of ground state g onto an explicit state makes with
@@ -2543,7 +2548,7 @@ mod tests {
                         format!("{name} pairs' {part}"),
                         Side::Upper,
                         Box::new(move |r: &Region| {
-                            let made = model.pair_gate(g, &r.forms.drives(model)[g][i], &model.across(g, r)[i], &model.kept_over(r), r);
+                            let made = model.pair_gate(g, &r.forms.drives(model)[g][i], &model.across(g, r)[i], model.kept_over(r), r);
                             [made.saturation.upper(), made.sweep.upper()][which]
                         }),
                     ));

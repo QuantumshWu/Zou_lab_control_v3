@@ -801,6 +801,8 @@ pub(crate) struct Region {
     pub(crate) gaps: Mutex<HashMap<(usize, usize), Gap>>,
     /// Per coupling of two states asked its saturation and sweep (units.rs `Model::term_bound`).
     pub(crate) terms: Mutex<HashMap<Coupling, (f64, f64)>>,
+    /// The model's kept drives (units.rs `Model::kept_over`).
+    pub(crate) kept: OnceLock<Vec<super::units::Kept>>,
     /// The slope of any two levels' difference and an atom's acceleration (units.rs `Model::gate_over`).
     pub(crate) moving: OnceLock<(Own, Own)>,
 }
@@ -1588,6 +1590,7 @@ impl Model {
             diagonal: OnceLock::new(),
             gaps: Mutex::new(HashMap::new()),
             terms: Mutex::new(HashMap::new()),
+            kept: OnceLock::new(),
             moving: OnceLock::new(),
         }
     }
