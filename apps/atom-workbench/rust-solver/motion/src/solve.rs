@@ -1246,15 +1246,13 @@ fn keep(
     measured.output.iter().for_each(|&k| read[k] = true);
     let counted: Vec<Estimate> = estimates.iter().map(|e| Estimate { uncounted: 0., ..e.clone() }).collect();
     let mut pricing = Pricing::new(request, light, kept, model, reference, centre, units, measured, means, parts, estimates, fixed, scales, unsampled, again);
-    // The units that weigh where the looks have no room, each with what its keep adds to the work a µs, its kept
-    // model's mean rate less the current one's (none where its model is refused, `Model::new`).
+    // The units that weigh where the looks have no room, each with the work a µs of its kept model, its mean rate
+    // (none where its model is refused, `Model::new`).
     let weighing = weighing(&counted, fixed, means, &held, &read);
     if !weighing.is_empty() {
-        pricing.own = pricing.rates(model);
-        let own = pricing.mean(&pricing.own, None);
-        let added: Vec<(usize, Option<f64>)> = weighing.into_par_iter().map(|u| (u, pricing.kept_rates(u).map(|rates| pricing.mean(&rates, None) - own))).collect();
+        let rated: Vec<(usize, Option<f64>)> = weighing.into_par_iter().map(|u| (u, pricing.kept_rates(u).map(|rates| pricing.mean(&rates, None)))).collect();
         let mut cost = vec![None; units.len()];
-        added.into_iter().for_each(|(u, c)| cost[u] = c);
+        rated.into_iter().for_each(|(u, c)| cost[u] = c);
         let needed = needed(&counted, fixed, means, &held, &read, &cost);
         return (!needed.is_empty()).then_some(needed);
     }
@@ -2518,20 +2516,22 @@ fn weighing(estimates: &[Estimate], fixed: &Fixed, means: &[Vec<[f64; 2]>], held
 }
 
 /// The units the looks need kept (module documentation, # The model; `keep`): while a look leaves the statistics no
-/// room (`weights`), the unit whose weight there is the most for the work its keep adds a µs (`cost`: its kept model's
-/// mean rate less the current one's; none where its keep is refused, never taken; one that adds none first, by its
-/// weight) leaves the model's error, until every such look has room or no unit weighs there. One pass, the set
-/// growing: the error that leaves no room is removed where it costs the least, the units the room needs together. (By
-/// weight alone, S3's probe took its carrier's dressing with thirteen bare drives on its scout -- the generator's
-/// assembly, the jumps and the photons three to four times dearer a step --, where the bare drives alone leave room.)
+/// room (`weights`), the unit whose weight there is the most for the work a µs of its kept model (`cost`: its mean
+/// rate; none where its keep is refused, never taken) leaves the model's error, until every such look has room or no
+/// unit weighs there. One pass, the set growing: the error that leaves no room is removed where the run it leaves
+/// costs the least, the units the room needs together. (By weight alone, S3's probe took its carrier's dressing with
+/// thirteen bare drives on its scout -- the generator's assembly, the jumps and the photons three to four times
+/// dearer a step --, where the bare drives alone leave room. By the work a keep adds, the difference of two rates,
+/// PGC3D took 129 units whose keeps cost nothing at the step it stood at, their weights a trifle, before any that the
+/// room needed, and its model had no step left: a keep's work is the kept model's, at any step.)
 fn needed(estimates: &[Estimate], fixed: &Fixed, means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool], cost: &[Option<f64>]) -> Vec<usize> {
     let mut taken: Vec<usize> = vec![];
     let mut model = fixed.model.clone();
     loop {
         let weights = weights(estimates, &Fixed { model: model.clone(), ..fixed.clone() }, means, held, read);
-        // Error per added work, those adding none first.
-        let value = |u: usize| cost[u].filter(|_| weights[u] > 0. && !taken.contains(&u)).map(|c| if c > 0. { (0, weights[u] / c) } else { (1, weights[u]) });
-        let Some(u) = (0..weights.len()).filter(|&u| value(u).is_some()).max_by(|&a, &b| value(a).partial_cmp(&value(b)).expect("weights and costs are numbers")) else { return taken };
+        // Error per work a µs (a model's rate is some work: every step costs some).
+        let value = |u: usize| cost[u].filter(|_| weights[u] > 0. && !taken.contains(&u)).map(|c| weights[u] / c);
+        let Some(u) = (0..weights.len()).filter(|&u| value(u).is_some()).max_by(|&a, &b| value(a).partial_cmp(&value(b)).expect("weights and rates are numbers")) else { return taken };
         // Its error leaves the model's at the outputs read (a read output's errors are numbers, `Measured::means`).
         for k in (1..model.len()).filter(|&k| read[k]) {
             model[k] = [probability_error((model[k][0] - means[k][u][0]).max(0.)), (model[k][1] - means[k][u][1]).max(0.)];
@@ -3546,13 +3546,14 @@ mod tests {
         assert_eq!(case([0.02, 0.03, 0.01], 0.02, 1., true), Vec::<usize>::new());
         assert_eq!(case([0.06, 0.05, 0.04], 0.05, 1., false), Vec::<usize>::new());
         assert_eq!(case([0.06, 0.05, 0.04], 0.05, 0., true), Vec::<usize>::new());
-        // By error per added work: the second unit, three times dearer than the others, is taken last -- the first and
-        // the third leave 0.10, no room yet --; a unit whose keep is refused, never.
+        // By error per work: the second unit's kept model three times dearer than the others', it is taken last -- the
+        // first and the third leave 0.10, no room yet --; a unit whose keep is refused, never; one whose model is the
+        // cheaper first.
         let means = vec![vec![[0.; 2]; 3], vec![[0., 0.06], [0., 0.05], [0., 0.04]]];
         let fixed = Fixed { model: vec![[0.; 2], [0., 0.2]], start: 0. };
         assert_eq!(needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &[Some(1.), Some(3.), Some(1.)]), [0, 2, 1]);
         assert_eq!(needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &[Some(1.), None, Some(1.)]), [0, 2]);
-        assert_eq!(needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &[Some(1.), Some(0.), Some(1.)]), [1, 0, 2]);
+        assert_eq!(needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &[Some(1.), Some(0.5), Some(1.)]), [1, 0, 2]);
     }
 
     /// An output's estimate with T = `temperature` (µK) per lab axis and the total T's standard error `error` (µK), read
