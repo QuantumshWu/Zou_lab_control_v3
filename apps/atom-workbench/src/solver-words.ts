@@ -4,7 +4,7 @@
 import {formatNumber} from './format.js';
 
 /** Sentences the native solver is known to write (rust-solver/src/lattice_core_adapter.rs and
- * motion3d_adapter.rs), and the client's own. */
+ * motion_adapter.rs; rust-solver/motion), and the client's own. */
 const SENTENCES:Record<string,string>={
   "Full32 density-matrix Lindblad dynamics on the folded Fourier lattice (explicit charges by mixing, seed amplitude and ring condition, and their ring; far harmonics folded statically, the pieces negligible over the run left out): one rational Krylov space from the initial state and its translations, every output read from one Galerkin reduced model, each output's error estimated by its change between consecutive checkpoints":
     '完整 32 态密度矩阵在折叠 Fourier 晶格上的 Lindblad 动力学（显式电荷按混合、种子幅度与环条件选取，连同其环；远离的谐波静态折叠，在本次计算时长内可忽略的部分略去）：从初态及其平移出发的一个有理 Krylov 空间，每个输出都由同一个 Galerkin 约化模型读出，误差按输出在相邻两个检查点之间的变化估计。',

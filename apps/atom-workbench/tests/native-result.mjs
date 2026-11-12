@@ -1,5 +1,5 @@
 // One contract-valid native result (rust-solver/src/lattice_core_adapter.rs, and with motion
-// motion3d_adapter.rs) for the transport and reader tests: populations stay in the initial state.
+// motion_adapter.rs) for the transport and reader tests: populations stay in the initial state.
 import {POPULATION_GROUPS} from '../dist/js/atom-workbench/src/population-selection.js';
 import {FULL_MODEL_SCHEMA,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {POPULATION_TOLERANCE} from '../dist/js/atom-workbench/src/types.js';

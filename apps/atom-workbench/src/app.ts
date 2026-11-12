@@ -1200,7 +1200,7 @@ function renderDetailsPage():void{
   const outside=scopeNotes.map(note=>`超出模型范围（结果照常给出）：${note.text}`);
   const motion=dynamics().motion,temperature=motionTemperatureReading(motion),tweezer=tweezerOf(scene);
   const motionLines=[!motion.enabled?'运动已关闭：时间演化只计算内态，原子静止于焦点。':motionRefusal(scene)||
-    `运动：光镊「${tweezer!.name}」中的单个原子在三维中运动（半经典），初始温度 ${withUnit(temperature.value,temperature.unit,{digits:6})}；原子是经典质点，携带内态按量子跳跃演化。各轴 k_BT ≥ ${SEMICLASSICAL_REGIME}ħω 时与量子参考相符（T 约 10% 以内），更冷时偏冷，仅供参考。能级图的长期布居 p̄(T) 是原子静止于焦点时内态的长期布居。`];
+    `运动：光镊「${tweezer!.name}」中的单个原子在三维中运动（半经典），初始温度 ${withUnit(temperature.value,temperature.unit,{digits:6})}；原子的质心是经典质点，内态按量子跳跃演化。偏振梯度冷却的温度偏低（点粒子模型的限制，见下面“运动”的适用范围）；各轴 k_BT < ${SEMICLASSICAL_REGIME}ħω 的时刻在验证范围之外，仅供参考。能级图的长期布居 p̄(T) 是原子静止于焦点时内态的长期布居。`];
   const markup=`<section class="details-current"><h3>当前计算</h3>${[field,...motionLines,...outside,...scope,...sampling].map(line=>`<p>${esc(line)}</p>`).join('')}${solverDetails()}</section>`;
   const host=$('details-current');if(host.dataset.markup!==markup){host.dataset.markup=markup;host.innerHTML=markup;}
   const notes=$('details-static');if(!notes.childElementCount)notes.innerHTML=definitionNotes()+modelNotes();
