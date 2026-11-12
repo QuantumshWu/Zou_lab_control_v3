@@ -1241,9 +1241,9 @@ fn attempt(
     let outputs = plan.times.len();
     let row: [f64; STATES] = std::array::from_fn(|s| request.initial_density[(s, s)].re);
     let mut ledger = Ledger::default();
-    ledger.note = Some(format!("初始系综：每个初态分量的原子束缚在它自己的势阱里（只含束缚原子的热分布，每个轴再乘谐振子的 Wigner 因子，T = {} μK）；布居最大的初态的阱深为 {:.1} k_BT", request.temperature_uk, depth));
+    ledger.note = Some(format!("初始系综：每个初态分量的原子束缚在它自己的势阱里（降低的等温分布 f ∝ e^(−E/k_BT) − 1，只含束缚原子，阱深比 k_BT 大得多时即热分布；每个主轴再乘谐振子的 Wigner 因子，T = {} μK）；布居最大的初态的阱深为 {:.1} k_BT", request.temperature_uk, depth));
     if unheld {
-        ledger.flag("计算所用光场中的势没有极小：阱频与 n̄ 按初始势阱给出".into());
+        ledger.flag("计算所用光场中的势没有极小：阱频、n̄、温度的窗口（一个阱周期）与验证范围都按初始势阱给出".into());
     }
     let (momentum, start) = setting.start;
     // The ladder's first rung over the reach the model is judged over: an attempt that begins at the step the one
@@ -2723,15 +2723,19 @@ impl<'a> Pricing<'a> {
 }
 
 /// Histograms of one coordinate of the held atoms at the listed outputs on one grid symmetric about 0 that holds them all
-/// (the bins' centres): a listed output with no atom carries the one before it. The number of bins is for the display
-/// alone -- no estimate reads a histogram --: the square-root choice, ⌊√n⌋ for the n atoms of the fullest listed output
-/// (bins of about √n atoms each), made odd so that 0 is a bin's centre, and three at least -- the contract's grid has two
-/// points or more (contract §2.2), and the least odd count that has is three.
+/// (the bins' centres), every bin as wide as the grid's spacing: a listed output with no atom carries the one before it.
+/// The number of bins is for the display alone -- no estimate reads a histogram --: the square-root choice, ⌊√n⌋ for the
+/// n atoms of the fullest listed output (bins of about √n atoms each), made odd so that 0 is a bin's centre, and three at
+/// least -- the contract's grid has two points or more (contract §2.2), and the least odd count that has is three.
 fn histograms(listed: &[Vec<(V3, V3)>], outputs: &[usize], value: &dyn Fn(&(V3, V3)) -> f64) -> Distributions {
     let reach = listed.iter().flatten().map(|s| value(s).abs()).fold(f64::MIN_POSITIVE, f64::max);
     let most = listed.iter().map(Vec::len).fold(0, usize::max);
     let bins = ((most as f64).sqrt() as usize | 1).max(3);
-    let width = 2. * reach / (bins - 1) as f64;
+    // Every bin as wide as the grid's spacing w = 2·reach/bins, the bins tiling [−reach, reach] exactly (the outermost
+    // centred w/2 inside the farthest atom): a share over its bin's width is the density, as the app reads it -- every
+    // cell, the end ones too, one spacing wide (src/motion-chart.ts `density`). Bins centred on ±reach would hold atoms on
+    // their inner halves alone, and read half the density there.
+    let width = 2. * reach / bins as f64;
     let grid: Vec<f64> = (0..bins).map(|i| (i as f64 - (bins / 2) as f64) * width).collect();
     let mut last: Vec<f64> = (0..bins).map(|i| if i == bins / 2 { 1. } else { 0. }).collect();
     let probabilities = listed
@@ -2785,8 +2789,9 @@ fn step_reading(run: f64, step: f64) -> String {
 
 /// The result of the estimates of `trajectories` trajectories (contract §2.2): at t = 0 the request's initial state and the
 /// ensemble's exact moments (T, and n̄ as of one atom with that mean, estimate.rs `occupation`); an output with no atom
-/// held carries the last one's populations, one with fewer than two atoms the last T read (its error unknown); each
-/// flagged.
+/// held carries the last one's populations, one with fewer than two atoms the last T read with its judgement of the
+/// validated regime (`classical`: a statement about that T) and n̄, their error unknown; one whose T is its own but whose
+/// jackknife reads no error (some group's removal leaves fewer than two atoms) says so; each flagged, apart.
 fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], counts: &Counts, trajectories: u64) -> Solution {
     let (times, outputs) = (&c.plan.times, c.plan.times.len());
     let hm = c.scales.hbar_over_mass;
@@ -2815,7 +2820,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     // What the atoms outside the reach carry (`apart`): its largest over the outputs, weighed by the held share.
     for (i, what) in ["布居", "温度"].into_iter().enumerate() {
         let largest = (1..outputs).map(|k| c.outside[k][i] * (1. - estimates[k].loss)).fold(0., f64::max);
-        ledger.item(&format!("计算中跑出估计的活动范围的原子（{what}）"), largest, "在每个输出时刻统计：曾有一步因速率太大而时间步长对它不适用的原子（从那一步起），按它们所占的比例全部计入；其余的按所占的比例乘以在它们的状态上实测的模型误差（只计超出已计入的部分）");
+        ledger.item(&format!("计算中跑出估计的活动范围的原子（{what}）"), largest, "在每个输出时刻统计：曾有一步因速率太大而时间步长对它不适用的原子（从那一步起），按它们所占的比例全部计入（布居上是原子数的比例，温度上是动能的比例）；其余的按所占的比例乘以在它们的状态上实测的模型误差（只计超出已计入的部分）");
     }
     ledger.close(times, &population, &temperature);
     // T and the motion at t = 0: exact.
@@ -2842,7 +2847,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     };
     // The first output where every trajectory counted is lost; the outputs no trajectory is counted at (estimate.rs,
     // # What is counted), and those where T is read and some trajectory is not counted.
-    let (mut empty, mut unread) = (None, vec![]);
+    let (mut empty, mut carried, mut unread) = (None, vec![], vec![]);
     let none: Vec<usize> = (1..outputs).filter(|&k| estimates[k].trajectories == 0.).collect();
     let partly: Vec<usize> = (1..outputs).filter(|&k| estimates[k].uncounted > 0. && estimates[k].motion.is_some()).collect();
     for (k, e) in estimates.iter().enumerate() {
@@ -2884,9 +2889,9 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
                 s.temperature_total_errors_uk.push(None);
                 s.mean_velocity_mps.push(v);
                 s.mean_occupation.push(n);
-                s.classical.push([false; 3]);
+                s.classical.push(s.classical[last]);
                 if e.held > 0. {
-                    unread.push(k);
+                    carried.push(k);
                 }
             }
         }
@@ -2894,8 +2899,11 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     if let Some(k) = empty {
         s.approximations.flag(format!("{} 起已无原子留在光阱中（丢失概率 1）：此后的布居、温度与分布沿用此前的值，仅供参考", when(times[k])));
     }
+    if !carried.is_empty() {
+        s.approximations.flag(format!("{}：仍在光阱中的原子不足两个，温度与 n̄ 沿用此前的值，误差未知", span(&carried, times)));
+    }
     if !unread.is_empty() {
-        s.approximations.flag(format!("{}：仍在光阱中的原子不足两组，温度沿用此前的值，误差未知", span(&unread, times)));
+        s.approximations.flag(format!("{}：仍在光阱中的原子太少（去掉任一组后不足两个），温度的统计误差未知", span(&unread, times)));
     }
     // T shown with its statistics where its model error or its step error is unread.
     let unbooked: Vec<usize> = (1..outputs)
@@ -3377,6 +3385,53 @@ mod tests {
         assert!(s.reason.as_ref().is_some_and(|r| r.starts_with("t = 30 μs") && r.ends_with("：没有一条轨迹计入估计")), "{:?}", s.reason);
     }
 
+    /// The two ways T goes unread, said apart (`assemble`): an output whose atoms sit in one group (two of them) has its
+    /// own T with no error -- the jackknife, every group's removal leaving fewer than two atoms, reads none --; an output
+    /// of one atom carries the last T, n̄, mean velocity and the judgement of the validated regime that goes with that T
+    /// (`classical`), not a fresh "below 4ħω". Five groups of four: every atom held at 10 μs, one group's two at 20 μs,
+    /// one atom at 30 μs, none at 40 μs.
+    #[test]
+    fn a_t_carried_keeps_its_judgement_and_a_t_unread_is_its_own() {
+        let held = |g: usize, m: usize| Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [100. + (4 * g + m) as f64; 3], outside: false, unresolved: false });
+        let groups: Vec<Group> = (0..5)
+            .map(|g| {
+                let mut group = Group::new(5);
+                for m in 0..4 {
+                    group.add(&[held(g, m), held(g, m), if g == 0 && m < 2 { held(g, m) } else { Fate::Lost }, if g == 0 && m == 0 { held(g, m) } else { Fate::Lost }, Fate::Lost]);
+                }
+                group
+            })
+            .collect();
+        let scales = Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] };
+        let estimates = summarize(&groups, &scales);
+        let times = [0., 10., 20., 30., 40.];
+        let plan = Plan::new(&times, [1.; 3]);
+        let listed = vec![vec![]; plan.listed.len()];
+        let context = Context {
+            plan,
+            tau: 1.,
+            scales,
+            initial: std::array::from_fn(|s| f64::from(u8::from(s == 0))),
+            momentum: [1.; 3],
+            fixed: Fixed { model: vec![[0.01, 0.02]; 5], start: 0. },
+            outside: vec![[0.; 2]; 5],
+            step: vec![Bound::share(); 5],
+            checked: None,
+            ledger: Ledger::default(),
+            method: String::new(),
+        };
+        let s = assemble(&context, &estimates, &listed, &Counts::default(), 20);
+        let own = estimates[2].motion.as_ref().expect("two atoms: a T").temperature;
+        assert!(own != estimates[1].motion.as_ref().unwrap().temperature && s.temperature_uk[2] == own && s.temperature_errors_uk[2] == [None; 3], "{s:?}");
+        assert!(estimates[3].motion.is_none() && s.classical[2] == [true; 3], "{:?}", s.classical);
+        assert!(s.temperature_uk[3] == s.temperature_uk[2] && s.mean_occupation[3] == s.mean_occupation[2] && s.mean_velocity_mps[3] == s.mean_velocity_mps[2] && s.classical[3] == s.classical[2], "{s:?}");
+        let flagged = s.approximations.flagged.expect("flagged");
+        for said in ["20 μs：仍在光阱中的原子太少（去掉任一组后不足两个），温度的统计误差未知", "30 μs：仍在光阱中的原子不足两个，温度与 n̄ 沿用此前的值，误差未知"] {
+            assert!(flagged.contains(said), "{said} in {flagged}");
+        }
+        assert!(!flagged.contains("20 μs：仍在光阱中的原子不足两个") && !flagged.contains("30 μs：仍在光阱中的原子太少"), "{flagged}");
+    }
+
     /// Every estimator and every account on every kind of output a run can hold (estimate.rs, # What is counted): a
     /// ratio over a count, a share or a weight that can be none gives a number or an explicit "unread", never one that
     /// is no number, and no cap or extremum turns one that is none into a bound. Two levels of five groups of four
@@ -3849,6 +3904,28 @@ mod tests {
         for n in 1..2000 {
             let one = histograms(&[vec![([0.; 3], [0.; 3]); n]], &[0], &|x| x.1[0]);
             assert!(one.probabilities[0].iter().all(|&p| p <= 1.) && one.probabilities[0].contains(&1.), "{n}");
+        }
+    }
+
+    /// A uniform density reads uniform in every bin, the end ones too: N atoms one to each of N equal cells of [−1, 1]
+    /// (at the cells' centres, so that none sits on a bin's edge) have the density N/2, and every bin -- the end ones too
+    /// -- holds its width's worth, N·w/2, to within one atom, its share over the grid's spacing w (the density as the app
+    /// reads it, every cell one spacing wide: src/motion-chart.ts `density`) is ½ to within 1/(N w). The bins tile the
+    /// atoms' reach. (Bins centred on ±reach held about half the end bin's worth.)
+    #[test]
+    fn a_uniform_density_reads_uniform_to_the_ends() {
+        for n in [9_usize, 100, 1001, 4096] {
+            let atoms: Vec<(V3, V3)> = (0..n).map(|j| ([0.; 3], [-1. + (2 * j + 1) as f64 / n as f64, 0., 0.])).collect();
+            let reach = 1. - 1. / n as f64;
+            let d = histograms(&[atoms], &[0], &|x| x.1[0]);
+            let (bins, spacing) = (d.grid.len(), d.grid[1] - d.grid[0]);
+            assert!(d.grid.windows(2).all(|g| (g[1] - g[0] - spacing).abs() < 1e-12) && d.grid[bins / 2] == 0., "{n}: an even grid about 0");
+            assert!((spacing * bins as f64 - 2. * reach).abs() < 1e-12, "{n}: the bins tile [−reach, reach]");
+            let worth = n as f64 * spacing / 2.;
+            for (i, p) in d.probabilities[0].iter().enumerate() {
+                assert!((p * n as f64 - worth).abs() <= 1. + 1e-9, "{n} atoms, bin {i} of {bins}: {} against {worth}", p * n as f64);
+                assert!((p / spacing - 0.5).abs() <= 1. / (n as f64 * spacing) + 1e-12, "{n} atoms, bin {i}: density {}", p / spacing);
+            }
         }
     }
 
