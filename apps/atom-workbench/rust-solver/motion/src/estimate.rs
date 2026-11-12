@@ -448,9 +448,9 @@ impl Estimate {
         self.shown_interval().max(unseen(self.trajectories)).min(1.)
     }
     /// The interval of the total T (the mean over the lab axes) at the confidence z, relative to it; unbounded where T
-    /// is not read.
+    /// is not read, or is none (atoms that do not move: no error is relative to it).
     pub fn temperature_interval(&self) -> f64 {
-        self.motion.as_ref().map_or(f64::INFINITY, |m| m.temperature_total_error.interval() / m.temperature_total)
+        self.motion.as_ref().filter(|m| m.temperature_total > 0.).map_or(f64::INFINITY, |m| m.temperature_total_error.interval() / m.temperature_total)
     }
 }
 
@@ -653,7 +653,8 @@ pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scale
     };
     let all: Vec<&Jackknife> = each.iter().filter(|j| counted(&j.full) && j.leave.iter().all(|l| counted(l))).collect();
     let temperature = {
-        let read = |m: &[Moments]| m.iter().all(|x| x.temperature.is_some());
+        // T's error is relative to the finer level's T: read where every level's total T is a positive number.
+        let read = |m: &[Moments]| m.iter().all(|x| x.temperature.is_some_and(|t| t.iter().sum::<f64>() > 0.));
         let at: Vec<&Jackknife> = each.iter().filter(|j| read(&j.full) && j.leave.iter().all(|l| read(l))).collect();
         (!at.is_empty()).then(|| {
             let total = |m: &Moments| m.temperature.map_or(f64::NAN, |t| t.iter().sum::<f64>());
@@ -687,14 +688,19 @@ fn on_more(read: &Read, factor: f64) -> (Spread, f64) {
 /// look (decide.rs `Read::outcome`) -- on `factor` times its pairs, those it has among them (module documentation,
 /// # A read on more pairs; `on_more`): that the estimate's change, by Student's t at the groups that read the
 /// present spread, stays below the bound less the size read and the interval of the spread on the more pairs; none
-/// where that interval alone exceeds the bound. None for a read that is no number or whose spread is unread; a read
-/// without spread, or on no more pairs, is within or not as it stands.
+/// where that interval alone exceeds the bound. None for a read that is no number or whose spread is unread, or read
+/// on fewer than three groups -- the floor's part 4ζ₂/(G(G − 2)) is no number at two, and a T's read is spread over the
+/// groups holding an atom, which can be two --; a read without spread, or on no more pairs, is within or not as it
+/// stands. A probability: a number, always.
 pub fn within_on(read: &Read, bound: f64, factor: f64) -> f64 {
     if read.value.is_nan() || !read.spread.read() {
         return 0.;
     }
     if read.spread.error == 0. || factor <= 1. {
         return f64::from(u8::from(read.most(1.) <= bound));
+    }
+    if read.spread.groups < 3. {
+        return 0.;
     }
     let (spread, change) = on_more(read, factor);
     let interval = spread.interval();
