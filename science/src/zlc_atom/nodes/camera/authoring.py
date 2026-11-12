@@ -165,7 +165,8 @@ CAMERA_MEASUREMENT_SCHEMA = AuthoringSchema(
         AuthoringField("frames_per_cycle", "int", "Frames per cycle", 1, minimum=1,
                        # A cycle's size is the trigger lane's to say while the switch is on.
                        enabled_when=(TRIGGERED, (False,)),
-                       description="Counted by hand while Trigger by channel is off."),
+                       description="Typed while Trigger by channel is off; on, it is the chosen lane's triggers in "
+                                   "one shot, shown here once the board holds its pulse."),
         AuthoringField(
             TRIGGERED, "bool", "Trigger by channel", False,
             description=(

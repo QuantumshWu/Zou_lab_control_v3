@@ -1026,9 +1026,10 @@ mod tests {
     fn a_device_a_node_only_reads_is_never_claimed_and_tells_the_draft_its_facts() {
         let mut catalog = catalog();
         catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "watcher", "kind": "node", "label": "Watcher",
-            "parameters": [{"name": "trigger_by_channel", "type": "bool", "label": "Trigger by channel", "default": true},
+            "parameters": [{"name": "frames_per_cycle", "type": "int", "label": "Frames per cycle", "default": 1, "enabled_when": ["trigger_by_channel", [false]]},
+                           {"name": "trigger_by_channel", "type": "bool", "label": "Trigger by channel", "default": true},
                            {"name": "trigger_channel", "type": "str", "label": "Trigger channel", "enabled_when": ["trigger_by_channel", [true]]}],
-            "node": {"node_kind": "measurement", "outputs": [{"name": "frames"}], "queries": ["resolve_field_choices"],
+            "node": {"node_kind": "measurement", "outputs": [{"name": "frames"}], "queries": ["resolve_field_choices", "resolve_defaults"],
                      "devices": [{"capability": "camera.adapter", "argument": "camera", "protected_fields": []},
                                  {"capability": "sequencer.streamer", "argument": "trigger_source", "protected_fields": [], "reads_only": true,
                                   "enabled_when": ["trigger_by_channel", [true]]}]}}));
@@ -1049,6 +1050,8 @@ mod tests {
         event(&mut workbench, Event::Facts { instance: "sequencer".into(), facts: lanes(json!(3)) }, &mut host);
         assert_eq!(asked(&calls).1, second, "the same facts said again ask nothing");
         event(&mut workbench, Event::Answered { ticket: second, result: Ok(json!({})) }, &mut host);
+        let defaults = calls.borrow().2.iter().rev().find(|(query, ..)| query == "resolve_defaults").cloned().unwrap();
+        event(&mut workbench, Event::Answered { ticket: defaults.1, result: Ok(json!({})) }, &mut host);
 
         apply(&mut workbench, &mut host, "start_node", json!({"node": node})).unwrap();
         let prepared = calls.borrow().2.iter().rev().find(|(query, ..)| query == "prepare_run").cloned().unwrap();
@@ -1068,6 +1071,9 @@ mod tests {
         // The device the switch turns on stands under the switch, with the channel; both are drawn while it is on.
         assert_eq!(row["device_gates"], json!({"trigger_source": "trigger_by_channel"}));
         assert!(row["controls"].as_array().unwrap().iter().all(|control| control.get("hidden").is_none()));
+        // On, Frames per cycle stays, held: the switch decides it, it is not one of the switch's own rows.
+        let frames = |row: &Value| row["controls"].as_array().unwrap().iter().find(|control| control["name"] == "frames_per_cycle").unwrap().clone();
+        assert_eq!(frames(&row)["enabled"], false);
         apply(&mut workbench, &mut host, "edit_node", json!({"node": node, "values": {"trigger_by_channel": false}})).unwrap();
         let row = workbench.state(&host)["logic"][0].clone();
         let issues = row["issues"].to_string();
@@ -1076,6 +1082,14 @@ mod tests {
         assert!(row["device_choices"].get("trigger_source").is_none());
         let channel = row["controls"].as_array().unwrap().iter().find(|control| control["name"] == "trigger_channel").unwrap();
         assert_eq!(channel["hidden"], true);
+        assert_eq!((frames(&row)["enabled"].clone(), frames(&row).get("hidden").cloned()), (json!(true), None));
+        // On again, the field shows the count the node says the lane makes; the typed 1 stays in the draft.
+        apply(&mut workbench, &mut host, "edit_node", json!({"node": node, "values": {"trigger_by_channel": true}})).unwrap();
+        let (_, ticket, _) = calls.borrow().2.iter().rev().find(|(query, ..)| query == "resolve_defaults").cloned().unwrap();
+        event(&mut workbench, Event::Answered { ticket, result: Ok(json!({"frames_per_cycle": 3})) }, &mut host);
+        let row = workbench.state(&host)["logic"][0].clone();
+        assert_eq!((frames(&row)["value"].clone(), frames(&row)["enabled"].clone()), (json!(3), json!(false)));
+        assert_eq!(workbench.node(&node).unwrap().draft.values.get("frames_per_cycle").cloned().unwrap_or(json!(1)), json!(1));
     }
 
     /// v2 _active_differs: a failed device and changed simulation settings are an Apply, not a Shut down.

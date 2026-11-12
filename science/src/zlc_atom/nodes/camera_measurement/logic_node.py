@@ -52,6 +52,15 @@ def _availability(devices: object) -> dict[str, str]:
     return unavailable
 
 
+def _defaults(values, resources, devices=None):
+    """While Trigger by channel is on, Frames per cycle is what the chosen lane triggers in one shot:
+    shown in the field (held, not typed); nothing while the board holds no pulse or no lane is chosen."""
+
+    del resources
+    frames = trigger_frames(values, devices)
+    return {} if frames is None else {"frames_per_cycle": frames}
+
+
 def _describe_frames(values, output_name, source=None, devices=None):
     """The frame axis of the draft: as many as the chosen lane triggers a shot, else as many as counted."""
 
@@ -116,6 +125,7 @@ LOGIC_NODE = NodeType(
     # this node's: the conversion is configured on the device.
     resolve_field_availability=_availability,
     resolve_field_choices=_trigger_choices,
+    resolve_defaults=_defaults,
 )
 
 __all__ = ["LOGIC_NODE"]

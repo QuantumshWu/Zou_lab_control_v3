@@ -93,17 +93,18 @@ pub fn controls(fields: &[Field], values: &Map<String, Value>, section: &str, pr
             control["columns"] = Value::Array(controls(&field.columns, &Map::new(), section, &[]));
         }
         if let Some((_, problem)) = problems.iter().find(|(name, _)| name == &field.name) { control["problem"] = json!(problem); }
-        // A switch shows what it turns on: a row a boolean field gates stands only while that
-        // switch holds its value (Occupancy's post-selection); one a choice gates is shown disabled.
-        if control["enabled"] == false && switched_by(fields, field).is_some() { control["hidden"] = json!(true); }
+        // A switch shows what it turns on: a row a boolean switch turns on stands only while it is on
+        // (Occupancy's post-selection). A row the switch holds while on (a value the switch then
+        // decides) stays, shown disabled, as does one a choice gates.
+        if control["enabled"] == false && turned_on_by_switch(fields, field) { control["hidden"] = json!(true); }
         control
     }).collect()
 }
 
-/// The boolean field that turns `gated` on or off, when one does.
-pub fn switched_by<'a>(fields: &'a [Field], gated: &Field) -> Option<&'a Field> {
-    let (name, _) = gated.enabled_when.as_ref()?;
-    fields.iter().find(|field| &field.name == name && field.kind == "bool")
+/// `gated` is enabled only while a boolean field is on.
+fn turned_on_by_switch(fields: &[Field], gated: &Field) -> bool {
+    gated.enabled_when.as_ref().is_some_and(|(name, values)| values.as_slice() == [json!(true)]
+        && fields.iter().any(|field| &field.name == name && field.kind == "bool"))
 }
 
 #[cfg(test)]

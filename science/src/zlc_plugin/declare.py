@@ -340,7 +340,7 @@ QUERY_PARAMETERS: dict[str, tuple[str, ...]] = {
 }
 #: Facts a query's callable is handed by name when it has a parameter of that name (the v2
 #: callables that never took them are called as before).
-QUERY_OPTIONAL: dict[str, tuple[str, ...]] = {"describe_output_frames": ("devices",)}
+QUERY_OPTIONAL: dict[str, tuple[str, ...]] = {"describe_output_frames": ("devices",), "resolve_defaults": ("devices",)}
 NODE_QUERIES = tuple(QUERY_PARAMETERS)
 #: Every node answers it, from its schema, admit_resources and artifact codecs (host._admit).
 ADMIT = "admit"
