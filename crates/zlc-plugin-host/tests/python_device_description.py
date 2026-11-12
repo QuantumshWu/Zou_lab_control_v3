@@ -135,5 +135,48 @@ class Description(unittest.TestCase):
         self.assertEqual(self.source.reads, 2)
 
 
+class DeviceInfo(unittest.TestCase):
+    """What a device states of itself at open (`device_info`), kept with its open in the session journal."""
+
+    def test_an_adapter_without_it_says_nothing(self):
+        self.assertIsNone(host.device_info(object()))
+
+    def test_its_facts_are_text_and_the_empty_ones_are_left_out(self):
+        class Camera:
+            def device_info(self):
+                return {'model': 'a2A1920', 'serial': 40123456, 'firmware': None, 'driver': ' '}
+        self.assertEqual(host.device_info(Camera()), {'model': 'a2A1920', 'serial': '40123456'})
+
+    def test_a_failure_to_say_is_said_and_fails_nothing(self):
+        class Broken:
+            def device_info(self):
+                raise OSError('link down')
+        self.assertEqual(host.device_info(Broken()), {'error': 'OSError: link down'})
+
+    def test_a_scpi_instrument_says_its_idn_without_being_asked_again(self):
+        from zlc_atom.devices.waveform.tek_scope.source import TekScopeConfig, TekScopeWaveformSource
+
+        class Link:
+            def __init__(self):
+                self.asked = []
+            def query(self, command):
+                self.asked.append(command)
+                return {'*IDN?': 'TEKTRONIX,MSO44,C012345,CF:91.1CT FV:1.44.3.433\n',
+                        ':HORizontal:RECOrdlength?': '10000'}[command]
+            def write(self, command):
+                self.asked.append(command)
+            def close(self):
+                pass
+
+        link = Link()
+        scope = TekScopeWaveformSource(TekScopeConfig('USB0::0x0699::0x0527::C012345::INSTR'), link=link)
+        asked = len(link.asked)
+        info = host.device_info(scope)
+        self.assertEqual((info['vendor'], info['model'], info['serial'], info['firmware']),
+                         ('TEKTRONIX', 'MSO44', 'C012345', 'CF:91.1CT FV:1.44.3.433'))
+        self.assertEqual(info['resource'], 'USB0::0x0699::0x0527::C012345::INSTR')
+        self.assertEqual(len(link.asked), asked, 'nothing is asked again')
+
+
 if __name__ == '__main__':
     unittest.main()

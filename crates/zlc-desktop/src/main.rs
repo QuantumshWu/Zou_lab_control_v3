@@ -525,9 +525,14 @@ fn main() {
     // The application keeps its flight journal from its first moment; the installer has nothing to keep.
     if !installer {
         match zlc_core::journal::open(&zlc_core::checkout::local("journal")) {
-            Ok(()) => { state_journal::open(); resources::start(); zlc_core::journal::note("app", "started", json!({"pid": std::process::id(),
-                "release": std::fs::read_to_string(zlc_core::checkout::path("bin/release.json")).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                    .map(|release| json!({"version": release["version"], "commit": release["commit"]}))})) }
+            Ok(()) => {
+                // The session's first line: which program, which release, on which machine.
+                zlc_core::journal::lifecycle("app", "started", json!({"pid": std::process::id(),
+                    "release": std::fs::read_to_string(zlc_core::checkout::path("bin/release.json")).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                        .map(|release| json!({"version": release["version"], "commit": release["commit"]})),
+                    "machine": std::env::var("COMPUTERNAME").ok(), "args": std::env::args().skip(1).collect::<Vec<_>>()}));
+                state_journal::open(); resources::start();
+            }
             Err(error) => eprintln!("The flight journal is not kept: {error}"),
         }
     }

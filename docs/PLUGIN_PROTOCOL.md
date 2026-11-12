@@ -210,7 +210,7 @@ spawned -> ready -> open -> (idle <-> running) -> closing -> closed
 | Step | Core sends | Plugin does | Reply |
 |---|---|---|---|
 | handshake (process) | `hello {protocol, session}` | creates its block arena | `{protocol, pid, python, sdk}` |
-| open | `open {instance, type_id, module, parameters, simulation}` | imports the type's module; device: `factory(instance, projected parameters)` builds and opens the adapter; node: keeps the draft | `{state, tunable, reads, narrates, snapshot}` |
+| open | `open {instance, type_id, module, parameters, simulation}` | imports the type's module; device: `factory(instance, projected parameters)` builds and opens the adapter; node: keeps the draft | `{state, tunable, reads, narrates, snapshot, device_info?}`; `device_info`: what the device states of itself, when its adapter has `device_info()` -- a mapping of text (`model`, `serial`, `firmware`, `driver`, `sdk`, ...) from reads the adapter already made while opening, without side effects; a failure to say is `{error}`, never the open's failure. The core keeps it with the open in the session journal |
 | configure | `configure {instance, parameters}` | device: `adapter.reconfigure(values)` or refuses | `{state}` |
 | prepare (node) | `query {instance, name: "prepare_run", values, devices, resources, source_signal}` | projects and builds a candidate with read-only device proxies; the active run is untouched | `{prepared: token}` |
 | discard (node) | `run.discard {instance, prepared}` | releases an unstarted candidate; idempotent | `{}` |

@@ -162,6 +162,23 @@ def identity_fields(identity: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in str(identity).split(","))
 
 
+def idn_device_info(identity: str, resource: str) -> dict[str, str]:
+    """What a SCPI instrument said of itself at open (its ``*IDN?``: manufacturer, model, serial,
+    firmware), where it was reached, and the PyVISA that reached it -- the ``device_info`` of an
+    adapter that asked ``*IDN?`` while opening; nothing is asked again."""
+
+    fields = identity_fields(identity)
+    facts = dict(zip(("vendor", "model", "serial", "firmware"), fields))
+    facts.update(idn=str(identity), resource=str(resource))
+    try:
+        from importlib.metadata import version  # noqa: PLC0415
+
+        facts["driver"] = f"pyvisa {version('pyvisa')}"
+    except Exception:  # noqa: BLE001 -- a VISA installed some other way is still the one in use
+        pass
+    return facts
+
+
 def probeable_resources(listed: object) -> tuple[str, ...]:
     """The listed resources worth opening, in the order VISA gave them."""
 
@@ -261,6 +278,7 @@ __all__ = [
     "VisaScpiLink",
     "identify_resources",
     "identity_fields",
+    "idn_device_info",
     "probeable_resources",
     "visa_resources",
 ]

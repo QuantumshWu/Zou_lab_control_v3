@@ -1032,8 +1032,13 @@ impl PulseHost {
         self.dirty = true;
         // `snapshot`: it reports its state for the bench a Start records (`bench_snapshot`).
         let facts = self.device_facts().map_or(Value::Null, |(_, facts)| facts);
-        Ok(json!({"board": self.editor.board().map(|b| b.name().to_owned()), "ports": description.target.ports.len(),
-                  "clock_hz": description.clock_hz, "snapshot": true, "facts": facts}))
+        let board = self.editor.board().map(|b| b.name().to_owned());
+        // What the board says of itself (PLUGIN_PROTOCOL `device_info`), from the description its open read:
+        // which board, the protocol it speaks, and the build its layout and target fingerprints name.
+        let info = json!({"board": board, "board_protocol": zlc_pulse::wire::LAYOUT_STRUCT_VERSION, "clock_hz": description.clock_hz,
+            "layout_fingerprint": format!("{:08x}", description.layout_fingerprint()), "target_abi_fingerprint": description.target.abi_fingerprint()});
+        Ok(json!({"board": board, "ports": description.target.ports.len(),
+                  "clock_hz": description.clock_hz, "snapshot": true, "facts": facts, "device_info": info}))
     }
 
     /// What the apparatus' sequencer states of itself, when it differs from what was last said: its
