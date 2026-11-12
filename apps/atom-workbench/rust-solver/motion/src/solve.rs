@@ -14,11 +14,17 @@
 //!    `MOST_TRAJECTORIES` on: beyond every number a group of the product takes, which is its place in the run's list
 //!    (`product`). It checks the step -- on a third level, or on further pairs, where its first rung does not read
 //!    within the step's share (# The step) --, reads the reach's falsifier (`outgrown`: where its atoms have outgrown
-//!    the reach the attempt ends, and the next begins with the reach of the temperature read; on the pilot alone -- a
-//!    reach is grown to a temperature, which the scout's eleven atoms tell to √(2/11), and the work goes as its
+//!    the reach the attempt ends, and the next begins with the reach of the temperature read; on the pilot's atoms --
+//!    a reach is grown to a temperature, which the scout's eleven atoms tell to √(2/11), and the work goes as its
 //!    root), the model's units' errors at the states of the first held member of every group, and the tables' errors
 //!    at one state of every trajectory (SPEC §5.4; `one_each`). Its trajectories at the run's step stay in the
 //!    result: they are trajectories of the run's own model and step.
+//!    Where the scout's atoms already refute the reach (read after its keep, which costs its states alone), the
+//!    pilot's own level is run before its companion and read: where its atoms refute the reach too, the attempt ends
+//!    there, and its companion -- the step's check at a model the next attempt judges anew over the grown reach,
+//!    which settles its step anew -- is never run (`attempt`). What the pilot's work of an attempt so ended leaves the
+//!    next is the reach's temperature and the step it stood at, the next's first rung; nothing read on its
+//!    trajectories (# An attempt's own).
 //! 3. The model's decisions (SPEC §5.2; # The model), at the scout's states and again at the pilot's, the step's error
 //!    taken at its share: a unit to keep ends the attempt, and the next begins with its model at the step this one
 //!    stood at; a keep to undo ends it too (# The model).
@@ -27,6 +33,25 @@
 //!    `MOST_TRAJECTORIES`. Its atoms that leave the reach are read where they are, and what they carry is booked
 //!    (# The reach's atoms); where that leaves a look no room, the reach grows and the next attempt begins.
 //! 5. The result (contract §2.2, `assemble`).
+//!
+//! # An attempt's own
+//! What a reach that grows leaves valid of the attempt before it. The model's own set-up (`Setting`) serves every
+//! attempt at the model while no unit is kept. A grown reach changes, for the same model: the gates (proofs over more
+//! cells) and with them which units are read and which booked at their bounds, what the reach leaves out of the
+//! ensemble, the kick's curvature and the first rung (the reach's largest speed), the tables (refined over the
+//! reach's ranges: other nodes, another interpolant -- part of the generator a trajectory is integrated with) and the
+//! Brownian path's cell (the first rung's companion). An earlier pilot's trajectories are then of another generator,
+//! on another tree of the path, and at a step the new attempt need not stand at (R3_DOPPLER: the first rung over
+//! 90 µK is 0.83 µs, below the pilot's 1.43 µs). Where the grown reach keeps units (their folds fail over it), the
+//! model changes at every state -- a kept unit is explicit everywhere --, and every read of the pilot is the old
+//! model's: its trajectories, the step's reads (the old generator's error), the units' reads (of folds the new model
+//! may not hold), the tables (other clusters), its statistics, and the ensemble's draw (the prepared potential holds
+//! the folded drives' shifts alone). What stays is what the reads say of the atoms: the reach's verdict and the
+//! temperature it grows to, and the step the attempt stood at, the next attempt's first rung where its ladder has it.
+//! Measured (2026-11-12, S1, S2, S2Q, S3, S3c over 1 and 10 ms, e038, e077, PGC3D_1ms, R3_DOPPLER): every growth after a
+//! pilot kept units (S3 82 → 84, S3c over 10 ms 69 → 75) or lowered the first rung below the pilot's step
+//! (R3_DOPPLER); the others grew on the scout's paths not proven. No pilot carries over, so none is made to: a pilot
+//! on a refuted reach is not spent instead (# The pipeline: its own level alone, where the scout's atoms refute it).
 //!
 //! # The step (SPEC §2.2)
 //! One step τ for the run (adapt.rs), which follows from what the scheme must resolve and from nothing of the outputs:
@@ -1327,7 +1352,7 @@ fn attempt(
     // The scout (module documentation, # The pipeline): the first member of every pilot group at both levels, screened;
     // where a unit is to be kept at its states, the attempt ends here -- for the price of the scout, not of a pilot.
     // The pilot's read of the same below stands for the result.
-    match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &dearer, &|pilot| grown(pilot).is_some(), messages) {
+    match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &dearer, &|pilot| grown(pilot).is_some(), None, messages) {
         Settled::Dearer => return Ok(Attempt::Undo),
         Settled::Unproven(asked) => return Ok(hold(asked, context.tau)),
         _ => {}
@@ -1345,9 +1370,31 @@ fn attempt(
         }
         read
     };
+    // Where the scout's atoms already refute the reach (`outgrown`), the pilot's own level is run first, and the reach
+    // is read on its atoms -- the scout's among them -- as after a whole pilot: where they refute it, the attempt ends
+    // with the reach grown to the temperature they read, and the pilot's companion, a check of the step at a model
+    // judged over a reach the run does not keep (`settle`: the next attempt settles its step anew), is never run. Else
+    // -- they do not refute it, or a path of theirs was not proven, which their companion's says what of (`settle`,
+    // `own_departure`) -- the pilot's check goes on from that level, its companion run then (`settle`, `ran`). After
+    // the scout's keep: that read costs the scout's states alone, this one the pilot's own level.
+    let ran = if grown(&levels.fine.iter().collect::<Vec<_>>()).is_some() {
+        let (tau, plan) = (context.tau, &context.plan);
+        let hand = Hand { groups: &numbers, members: 1..GROUP, shape: Shape::of(plan, true), record: &|i| trajectory(&run, ensemble, &domain, tau, plan, true, i) };
+        let (mut rest, unproven) = run_groups(&[hand], messages, &mut |prefix, messages| so_far(&context, &levels.fine, prefix, messages));
+        let mut joined = std::mem::take(&mut levels.fine);
+        absorb(&mut joined, rest.pop().expect("the hand-out's one level"));
+        if unproven[0].is_none() {
+            if let Some(t) = grown(&joined.iter().collect::<Vec<_>>()) {
+                return Ok(Attempt::Grow(t, f64::NEG_INFINITY, tau));
+            }
+        }
+        Some((joined, unproven[0]))
+    } else {
+        None
+    };
     // The pilot: its groups' other members at both levels, screened. Where the check ended unable to see, the reads
     // its last rung is held by: what they do not exclude is booked (`unexcluded`), and flagged.
-    let unseen = match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &dearer, &|pilot| grown(pilot).is_some(), messages) {
+    let unseen = match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &dearer, &|pilot| grown(pilot).is_some(), ran, messages) {
         Settled::Dearer => return Ok(Attempt::Undo),
         Settled::Unproven(asked) => return Ok(hold(asked, context.tau)),
         Settled::Capped => {
@@ -1695,13 +1742,33 @@ enum Settled {
 /// only where the rung above it is then left. And a first rung that does not read within is settled no further
 /// where the pilot's atoms already end the attempt (`outgrown`: the reach outgrown, `attempt`): the step stands as
 /// it is for the next attempt to begin at, and no third level and no pair is run for it.
+///
+/// `ran`: the finer level of the members already run, joined to the groups the levels hold, with what its paths not
+/// proven ask of a reach (`attempt`: the pilot's own level, run first where the scout's atoms refuted the reach and
+/// read before its companion) -- its companion alone is run then, and the check goes on as from a pair: a trajectory
+/// is a function of its number and step (`trajectory`), not of the hand-out it was run in.
 #[allow(clippy::too_many_arguments)]
-fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, dearer: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, messages: &mut Messages) -> Settled {
-    let ([fine, coarse], departed) = pair(run, ensemble, domain, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
+fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, dearer: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, ran: Option<(Vec<Part>, Option<[f64; 2]>)>, messages: &mut Messages) -> Settled {
+    // The finer level joined to the groups the levels hold, its companion, and what each level's paths not proven ask.
+    let (joined, coarse, departed) = match ran {
+        Some((joined, asked)) => {
+            let companion = domain.companion();
+            let (tau, plan) = (context.tau, &context.plan);
+            let hand = Hand { groups: numbers, members: members.clone(), shape: Shape::of(plan, false), record: &|i| trajectory(run, ensemble, &companion, 2. * tau, plan, false, i) };
+            let (mut coarse, unproven) = run_groups(&[hand], messages, &mut |_, messages| so_far(context, &joined, &[], messages));
+            (joined, coarse.pop().expect("the hand-out's one level"), [asked, unproven[0]])
+        }
+        None => {
+            let ([fine, coarse], departed) = pair(run, ensemble, domain, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
+            let mut joined = std::mem::take(&mut levels.fine);
+            absorb(&mut joined, fine);
+            (joined, coarse, departed)
+        }
+    };
     if let Some(asked) = own_departure(departed) {
         return Settled::Unproven(asked);
     }
-    absorb(&mut levels.fine, fine);
+    levels.fine = joined;
     absorb(&mut levels.coarse, coarse);
     levels.depart(departed);
     // Whether the check is the pilot's: all the members of a group in.
