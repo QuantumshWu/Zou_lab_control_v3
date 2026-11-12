@@ -20,11 +20,19 @@
 //!    at one state of every trajectory (SPEC §5.4; `one_each`). Its trajectories at the run's step stay in the
 //!    result: they are trajectories of the run's own model and step.
 //!    Where the scout's atoms already refute the reach (read before its keep, as on the pilot: the units' errors are
-//!    read at the states of a reach that stands), the pilot's own level is run before its companion and read: where its atoms refute the reach too, the attempt ends
-//!    there, and its companion -- the step's check at a model the next attempt judges anew over the grown reach,
-//!    which settles its step anew -- is never run (`attempt`). What the pilot's work of an attempt so ended leaves the
-//!    next is the reach's temperature and the step it stood at, the next's first rung; nothing read on its
-//!    trajectories (# An attempt's own).
+//!    read at the states of a reach that stands), the pilot's own level is run before its companion, its members
+//!    doubling a hand-out (`batch`), and the reach read after each: where the atoms in hand refute it, the attempt ends
+//!    there, and the rest of the pilot -- its own level's other members, its companion: the step's check at a model the
+//!    next attempt judges anew over the grown reach, which settles its step anew -- is never run (`attempt`). The
+//!    scout's refutation is the read that selected the attempt for ending; its eleven atoms, one a group, are confirmed
+//!    by the next eleven, read with them, before the reach grows to the temperature they read (a reach grown on the
+//!    scout's own read, R3_DOPPLER, over-read its atoms' T by up to 2.4 times and cost 16 % more work). What the
+//!    falsifier needs is significance, which the doubled atoms give where it stands; what more atoms would buy is the
+//!    grown temperature read closer, and a reach read low is refuted again by the next pilot's atoms, read high costs
+//!    its own proofs -- both the next attempt's to tell. (Measured, S3 at 30 µK: on 22 atoms the reach grows to 99.7 µK,
+//!    on 44 to 95.7, on 88 to 113.0, none refuted by the next pilot's 88; 957, 949 and 1128 CPU-s in all, the same
+//!    result.) What the pilot's work of an attempt so ended leaves the next is the reach's temperature and the step it
+//!    stood at, the next's first rung; nothing read on its trajectories (# An attempt's own).
 //! 3. The model's decisions (SPEC §5.2; # The model), at the scout's states and again at the pilot's, the step's error
 //!    taken at its share: units to keep end the attempt, and the next begins with their model at the step this one
 //!    stood at (# The model).
@@ -1404,27 +1412,37 @@ fn attempt(
         Settled::Unproven(asked) => return Ok(hold(asked, context.tau)),
         _ => {}
     }
-    // Where the scout's atoms already refute the reach (`outgrown`), the pilot's own level is run first, and the reach
-    // is read on its atoms -- the scout's among them -- as after a whole pilot: where they refute it, the attempt ends
-    // with the reach grown to the temperature they read, and the pilot's companion, a check of the step at a model
-    // judged over a reach the run does not keep (`settle`: the next attempt settles its step anew), is never run. Else
+    // Where the scout's atoms already refute the reach (`outgrown`), the pilot's own level is run first, its members
+    // doubling a hand-out, and the reach is read on the atoms in hand -- the scout's among them -- after each: where they
+    // refute it, the attempt ends with the reach grown to the temperature they read, and the rest of the pilot, a check
+    // of the step at a model judged over a reach the run does not keep (`settle`: the next attempt settles its step
+    // anew), is never run. Else
     // -- they do not refute it, or a path of theirs was not proven, which their companion's says what of (`settle`,
     // `own_departure`) -- the pilot's check goes on from that level, its companion run then (`settle`, `ran`). Before the
     // scout's keep, as on the pilot: the units' errors are read at the states of a reach that stands -- at a refuted
     // one, of atoms past it (S3's scout at 30 µK kept its carrier's dressing on atoms heated past the reach).
     let ran = if grown(&levels.fine.iter().collect::<Vec<_>>()).is_some() {
         let (tau, plan) = (context.tau, &context.plan);
-        let hand = Hand { groups: &numbers, members: 1..GROUP, shape: Shape::of(plan, true), record: &|i| trajectory(&run, ensemble, &domain, tau, plan, true, i) };
-        let (mut rest, unproven) = run_groups(&[hand], messages, &mut |prefix, messages| so_far(&context, &levels.fine, prefix, messages));
         // The scout's groups stay as they are for its keep's read (below).
         let mut joined = levels.fine.clone();
-        absorb(&mut joined, rest.pop().expect("the hand-out's one level"));
-        if unproven[0].is_none() {
+        // The members in hand of every group; each hand-out doubles them (`batch`), and the reach is read after each.
+        let mut members = 1;
+        loop {
+            let more = (2 * members).min(GROUP);
+            let hand = Hand { groups: &numbers, members: members..more, shape: Shape::of(plan, true), record: &|i| trajectory(&run, ensemble, &domain, tau, plan, true, i) };
+            let (mut rest, unproven) = run_groups(&[hand], messages, &mut |prefix, messages| so_far(&context, &joined, prefix, messages));
+            absorb(&mut joined, rest.pop().expect("the hand-out's one level"));
+            members = more;
+            if unproven[0].is_some() {
+                break Some((joined, unproven[0]));
+            }
             if let Some(t) = grown(&joined.iter().collect::<Vec<_>>()) {
                 return Ok(Attempt::Grow(t, [f64::NEG_INFINITY; 2], tau));
             }
+            if members == GROUP {
+                break Some((joined, None));
+            }
         }
-        Some((joined, unproven[0]))
     } else {
         None
     };
