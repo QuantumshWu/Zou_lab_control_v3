@@ -2,7 +2,8 @@
 // holds the atom in. A scene names at most one (Scene.tweezerId); designating another moves it.
 // The designation says nothing about the beam: a laser given by power and waist or by NA is a
 // Gaussian beam focused at the atom whether it is the tweezer or not, and every motion solve keeps
-// each beam's profile; it only says which beam is the trap.
+// each beam's profile; it only says which beam is the trap -- with the beams of its frequency (its reflection, a
+// crossed beam of the same laser), one coherent field: the motion engine's trap light (rust-solver/motion SPEC §1.3).
 import type {Laser,Scene} from './types.js';
 import {laserIntensityMWcm2} from './laser-intensity.js';
 

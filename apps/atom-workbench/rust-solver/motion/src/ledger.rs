@@ -15,15 +15,18 @@
 //!   trajectories leave unseen -- an event none of them showed has no spread to read (estimate.rs
 //!   `Estimate::shown_statistics`). The same function as A's share, another error: that one is the model's, at the most
 //!   trajectories; this one the sample's, at its own number.
-//! The populations' are absolute against `POPULATION_TARGET`, every row as shown and the loss; T's relative, per lab
-//! axis, against `TEMPERATURE_TARGET` at the outputs that axis is held to (solve.rs).
+//! The populations' are absolute against `POPULATION_TARGET`, every row as shown and the loss; T's relative, of the total
+//! T (the mean over the three lab axes, the one T the target is on; no lab axis is held to it), against
+//! `TEMPERATURE_TARGET` at the outputs where it has an account, its three parts weighed by the held share 1 − L (SPEC §0,
+//! §4: the temperature describes the held atoms; solve.rs `accounts`).
 //!
 //! # The contract's shape (contract §2.2)
 //! `totals`: the populations' and T's a-priori part √(A² + b²) -- what the approximations leave, the statistics aside (the
 //! result reports T's statistical error itself, src/solver-types.ts `LedgerTotal`) -- at the output where it is largest,
-//! T's over every output and lab axis where T has an account, with the target; `items`:
-//! each approximation's label, its estimated error (its largest over the outputs on what is shown, so that an output
-//! without atoms takes no part) and what the engine did to get it, in Chinese as the app shows them; `flagged`: where
+//! T's over every output where the total T has an account, with the target; `items`:
+//! each approximation's label, its estimated error (on the populations absolute, on T relative; its largest over the
+//! outputs, so that an output without atoms takes no part) and what the engine did to get it, in Chinese as the app shows
+//! them; `flagged`: where
 //! some output's total exceeds its target -- the span, the largest total and its three parts --, and every other reason
 //! a span is less than the solve claims; `note`: what is true of the setup whatever the solve does, never an accuracy
 //! conclusion.
