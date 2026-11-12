@@ -93,10 +93,17 @@ export interface LaserReflection {
   reflectivity: number;
   /** The reflected beam's optical phase at the atom relative to the source's: the mirror's distance. */
   phaseDeg: number;
-  /** A double pass through a quarter-wave plate (the MOT retro-reflection): the handedness about the
-   * beam's own k stays, so σ⁺ comes back σ⁺. */
+  /** A double pass through a quarter-wave plate: the handedness about the beam's own k stays, so σ⁺
+   * comes back σ⁺ (the MOT retro-reflection), and linear light comes back mirrored about the plate's
+   * fast axis (at 45° to it, turned by 90°: lin⊥lin). */
   quarterWave: boolean;
+  /** The plate's fast axis in the source's transverse frame, measured as its polarization angle ψ is
+   * (−90° to 90°); read only with `quarterWave`. */
+  plateAngleDeg: number;
 }
+/** A new mirror's λ/4 fast axis, and a file's that names none: 45°, where a source linear along its
+ * frame's x axis -- every polarization preset's linear light -- comes back turned by 90° (lin⊥lin). */
+export const DEFAULT_PLATE_ANGLE_DEG=45;
 /** The most lasers a scene holds; a reflection is one of them. */
 export const MAXIMUM_LASERS=8;
 /** The one scene schema (scene-file.ts validates files strictly against it). */
