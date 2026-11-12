@@ -183,15 +183,11 @@
 //! of its cells left (`Model::statements_over`); which units are kept is the same as theirs proven to the end. (Proven to the
 //! end alone, the sweep of a coupling of two Zeeman sublevels of a heavy atom at rest -- B 0, the sublevels crossing where
 //! the tweezer's tensor shift does, its saturation infinite there -- halved the cells along the crossing towards a speed's
-//! square root that no centre met, and the proof over S3's reach at 1 µK did not end in five minutes.) And a model with a
-//! unit kept is not taken: its units' gates are asked to find whether its folds exist over the reach, and where one does
-//! not, the units failing are kept and the next model -- the closure's next, or the old one's on a grown reach -- is judged
-//! over the same reach again (solve.rs). What decides is that some unit fails, and which: the round in which a unit is
-//! first kept ends every proof still open, the units kept by then are the model's failures, and the others are judged
-//! again on the next model, proven to the end where nothing fails. Which unit is kept first is a choice of cost, as the
-//! tail rule's order is (units.rs, # The tail rule): keeping is always exact. (Proven to the end on every model, the units
-//! that pass were proven on each model the closure passed through and again on the last: S2Q's gates over its reach grown
-//! to 61 µK took 250 + 141 CPU-s of a solve of 770.)
+//! square root that no centre met, and the proof over S3's reach at 1 µK did not end in five minutes.) Every other unit's
+//! proofs go to the end though a unit fails: the units failing together are the next model's, the closure's path. (Ended
+//! with the round in which a first unit failed, the units failing later were left folded on the next model, and their
+//! shares failed others there: the tweezer ×4 variant of S3 kept 114 units where 115 fail together, then 26 more where 6
+//! do, 142 at 30 µK where the proofs to the end keep 121 there -- its 1 ms ran past five minutes, against 93 s.)
 //!
 //! # The kick's curvature (`Model::kick_curvature`)
 //! A step is the reference's flow, a kick, the flow again (step.rs); the kick is −τ∇(⟨x|Ĥ_h|x⟩ − V_ref) at the step's
@@ -1873,9 +1869,7 @@ impl Model {
 
     /// The bounds of units' statements (`bounds_over_in_parallel`), consecutive quantities `together` at a time one unit's
     /// (module documentation, # Rounds): a unit one of whose statements is proven at the threshold or above is kept whatever
-    /// its others read, and their proofs end there, each at the largest bound of its cells left -- a bound, if not the least;
-    /// and the other units' proofs still open end with the round, each at the largest value attained at a centre, below
-    /// `attains` -- no bound: the model with a unit kept is not taken.
+    /// its others read, and their proofs end there, each at the largest bound of its cells left -- a bound, if not the least.
     pub(crate) fn statements_over(&self, reach: &Reach, threshold: f64, attains: f64, together: usize, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
         self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: Some((together, threshold)) }, quantities)
     }
@@ -1903,14 +1897,12 @@ impl Model {
         let mut made = nothing();
         loop {
             let mut asking = P::proofs(&mut proofs, made, |proof, made| proof.advance(made, rule, P::AHEAD));
-            // A unit kept by one statement: the model is not taken, and every proof still open ends -- its unit's others at the
-            // bounds of their cells left, the other units' at the largest value attained at a centre, below `attains`.
+            // A unit kept by one statement: its other statements' proofs end at the bounds of their cells left.
             if let Some((together, threshold)) = rule.together {
-                if proofs.iter().any(|proof| proof.bound.is_some_and(|bound| bound >= threshold)) {
-                    for (unit, asks) in proofs.chunks_mut(together).zip(asking.chunks_mut(together)) {
-                        let kept = unit.iter().any(|proof| proof.bound.is_some_and(|bound| bound >= threshold));
+                for (unit, asks) in proofs.chunks_mut(together).zip(asking.chunks_mut(together)) {
+                    if unit.iter().any(|proof| proof.bound.is_some_and(|bound| bound >= threshold)) {
                         for (proof, asked) in unit.iter_mut().zip(asks).filter(|of| of.0.bound.is_none()) {
-                            proof.bound = Some(if kept { proof.queue.peek().map_or(0.0, |top| top.upper) } else { proof.attained.max(0.0) });
+                            proof.bound = Some(proof.queue.peek().map_or(0.0, |top| top.upper));
                             asked.clear();
                         }
                     }

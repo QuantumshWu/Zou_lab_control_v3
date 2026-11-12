@@ -1132,10 +1132,7 @@ impl Model {
     /// any reach, and where both of a unit's are below ½ there its gate. The others are proven together over the reach's
     /// cells, on all the cores (reach.rs `Model::statements_over`) -- a ground state's drive's with every weaker one's
     /// share on the same cell: what a cell's centre attains is a value there, never a bound from elsewhere --, each until it
-    /// is below ½ everywhere or a centre attains `KEEP` (module documentation, # One rule). Where a unit fails, the model is
-    /// not taken (its failures are kept and the next model judged over the reach, solve.rs): the proofs still open end with
-    /// the round (reach.rs, # Rounds), and those units' gates are the largest values attained at a centre, below `KEEP` --
-    /// no bounds, read by nothing.
+    /// is below ½ everywhere or a centre attains `KEEP` (module documentation, # One rule).
     pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
         let judged = self.judged(units);
         let (everywhere, open) = self.everywhere(&judged, reach.speed);
