@@ -120,7 +120,7 @@ class NumericUnits(unittest.TestCase):
                     if command == 'pulse_run':
                         if fail_second and params.get('stage') is None: raise RuntimeError('second fire failed')
                         return {'command_id': 1, 'applied': {'config': {'clock': 50e6}}}
-                    return {'done': True, 'status': 'done'}
+                    return {'done': True, 'status': 'done', 'elapsed_seconds': 0.0}
                 context = types.SimpleNamespace(core=core, cancel_requested=lambda: False,
                     discard_inputs=lambda: None, next_input=lambda timeout: source,
                     acquire=lambda node, **kwargs: ordering.append(('acquire', knob.entry.current)),
@@ -255,7 +255,7 @@ class LinkedScan(unittest.TestCase):
             if command=='pulse_run':
                 if 'scan' in params:held.update(scan=params['scan'])
                 return {'command_id':1,'applied':{'config':{}},'scan':held['scan']}
-            return {'done':True,'status':'done'}
+            return {'done':True,'status':'done','elapsed_seconds':0.0}
         context=types.SimpleNamespace(core=core,cancel_requested=lambda:False,discard_inputs=lambda:None,next_input=lambda t:source,
             report_progress=lambda *a,**k:None,record_devices=lambda:None,set_run_record=records.append,commit_live=lambda data,**k:outputs.append(data['scan']))
         attach_scan_oracle(context, lambda: source, outputs.append, records.append)
