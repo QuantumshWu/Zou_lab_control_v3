@@ -20,7 +20,7 @@ use crate::{Host, Workbench, workspace};
 pub const FOLDER: &str = "diagnostics";
 /// The newest program logs it carries, and the most of each.
 const LOGS: usize = 3;
-const LOG_LIMIT: u64 = 8 << 20;
+pub const LOG_LIMIT: u64 = 8 << 20;
 /// The files the board names that it carries: JSON documents, each at most this large, at most this many.
 const NAMED_LIMIT: u64 = 4 << 20;
 const NAMED_FILES: usize = 128;

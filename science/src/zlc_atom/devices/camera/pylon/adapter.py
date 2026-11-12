@@ -54,6 +54,15 @@ def _serialized(method):
     return call
 
 
+def _held_elsewhere(factory: object, info: object) -> bool:
+    """Whether pylon says the camera cannot be opened because another client holds it."""
+
+    try:
+        return not factory.IsDeviceAccessible(info)
+    except Exception:  # noqa: BLE001 -- no answer is no claim; the open's own error stands
+        return False
+
+
 @dataclass(frozen=True)
 class PylonCameraConfig:
     """What an operator writes down to reach and set up one Basler camera."""
@@ -194,7 +203,15 @@ class PylonCameraAdapter:
         # Own the handle before Open: even a partial SDK failure is cleaned up
         # by open()'s ordinary close path, with ownership retained on failure.
         self._camera = camera
-        camera.Open()
+        try:
+            camera.Open()
+        except Exception as error:
+            # pylon's own word on why: a camera another client has open (exclusively) is not accessible.
+            if _held_elsewhere(factory, devices[0]):
+                from zlc_plugin import DeviceHeld  # noqa: PLC0415 -- the plugin SDK, only on this path
+
+                raise DeviceHeld(f"Basler camera {self.config.serial!r} is open in another client: {error}") from error
+            raise
 
     def device_info(self) -> dict[str, object]:
         """What the camera says of itself: its pylon device info (found when it was enumerated,

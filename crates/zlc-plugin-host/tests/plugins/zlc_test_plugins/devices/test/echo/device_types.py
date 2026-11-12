@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema, TunableField
-from zlc_plugin import Command, DeviceType, FileParam, Opened, PhysicalOutput, allocate, notifier
+from zlc_plugin import Command, DeviceHeld, DeviceType, FileParam, Opened, PhysicalOutput, allocate, notifier
 
 SCHEMA = AuthoringSchema((AuthoringField("gain", "float", "Gain", 1.0, minimum=0.0),))
 SIZE = AuthoringSchema((AuthoringField("size", "int", "Size", 4, required=True, minimum=1),))
@@ -196,7 +196,14 @@ class FailedInitDevice:
         Path(self.path).write_text("released", encoding="utf-8")
 
 
+def _held(key, values):
+    """A device its SDK says another client has open, as pylon says of an exclusively opened camera."""
+    raise DeviceHeld("the test SDK says another client has this device open")
+
+
 DEVICE_TYPES = (
+    # Held elsewhere: the processes with the fixture "SDK" (a DLL a test helper loads) are named.
+    DeviceType("test.held", "test", SCHEMA, ("test.echo",), factory=_held, sdk_modules=("zlc_fixture_sdk_*.dll",)),
     DeviceType("test.fabric", "test", SCHEMA, ("test.echo",), factory=lambda key, values: FabricDevice(values),
                concurrent=("slow_write",), physical_outputs=(PhysicalOutput("beam"),)),
     DeviceType("test.plain", "test", SCHEMA, ("test.echo",), factory=lambda key, values: PlainDevice()),

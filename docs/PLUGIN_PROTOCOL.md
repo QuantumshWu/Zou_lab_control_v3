@@ -89,6 +89,7 @@ A type descriptor (JSON, the only form the core sees):
   "announces": "",                       // device only: the client type its own server is opened as (section 10)
   "identity": "visa:{resource}",         // device only: the instrument a row names, over its parameters ("" = every row its own)
   "resources": ["serial:{port}"],        // device only: the physical resources a row binds, over its parameters (below)
+  "sdk_modules": ["Pylon*.dll"],         // device only: its vendor transport's file names, to name who holds it (section 7)
   "node": {                              // node only
     "node_kind": "measurement",          // measurement | task | processor
     "inputs": [{"name": "source", "contract": "zlc.camera.frames", "delivery": "exact", "select_bundle": false}],
@@ -797,6 +798,15 @@ outcome distinctions:
 | `cancelled` | Stopped by `run.stop` | as reported |
 | `stale_run`, `unknown_op`, `not_claimed` | Protocol/authority refusals | known old |
 
+An open the device's SDK refuses because another client has the device open
+raises `zlc_plugin.DeviceHeld` (kind `refused`). The core then names, once, the
+processes on this computer that have one of the type's `sdk_modules` loaded
+(`DeviceType(sdk_modules=("Pylon*.dll", ...))`, file-name patterns: `*` any run,
+`?` one character, case ignored): each one's pid, executable, command line, start
+time and whether it is this application's, in the error's message, as
+`error.holders` (`{processes, uninspected}`), in the session journal's
+`device_open` line and in the device's log.
+
 Python exceptions round-trip: a plugin calling another plugin through `device`
 receives the original type when it is a builtin (`TimeoutError`, `ValueError`,
 `RuntimeError`, `TypeError`, ...) or `zlc_plugin.PluginError(kind, ...)` otherwise,
@@ -923,7 +933,7 @@ Declarations: `DeviceType`, `Opened`, `NodeType`, `NodeKind`, `Command`,
 Fields are the plugin package's own `AuthoringField`/`AuthoringSchema` (read by
 attribute; the SDK has no second field grammar). Runtime side: `RunContext`
 (section 5), `LiveDatasetOutput`, `Read`, `allocate(shape, dtype)`, `share`,
-`group`, `PluginError`, `Refused`. Porting a v2 device: replace
+`group`, `PluginError`, `Refused`, `DeviceHeld`. Porting a v2 device: replace
 `DeviceTypeDescriptor(type_id, domain, schema, capabilities, factory=...)` with
 `DeviceType(type_id, family, schema, capabilities, factory=...)`; the factory
 takes `(key, projected values)` and returns the adapter, or `Opened(adapter,

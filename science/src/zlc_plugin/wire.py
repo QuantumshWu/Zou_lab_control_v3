@@ -254,6 +254,15 @@ class Refused(ValueError):
     """Rejected before anything was written: the device is as it was."""
 
 
+class DeviceHeld(PluginError):
+    """The device's SDK says another client has it open (pylon's exclusive open): this
+    open changed nothing.  The core then names the processes on this computer that
+    have the type's ``sdk_modules`` loaded, beside this error."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("refused", message)
+
+
 def error_payload(error: BaseException, *, kind: str | None = None) -> dict[str, Any]:
     if kind is None:
         if isinstance(error, PluginError):
