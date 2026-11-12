@@ -63,10 +63,10 @@ fn result(request: &Request, initial: &[f64], solution: &Solution, groups: &[lat
     let times = &request.times_us;
     let rows: Vec<Vec<f64>> = solution.populations.iter().map(|row| row.to_vec()).collect();
     if rows.len() != times.len() || rows.iter().any(|row| row.iter().any(|x| !x.is_finite())) {
-        return Err("The 3D motion engine returned populations that are not 32 finite values per time".into());
+        return Err("算出的布居不是有限数（每个时刻应有 32 个态的布居）".into());
     }
     if solution.estimated_errors.len() != times.len() || solution.estimated_errors.iter().chain(&solution.loss_probability).any(|x| !x.is_finite()) {
-        return Err("The 3D motion engine returned an estimated error or a loss that is not a finite value per time".into());
+        return Err("算出的估计误差或丢失概率不是有限数".into());
     }
     // The trace gate checks the engine's rows as they are: a systematic trace error still fails.
     let (trace, initial_error) = lattice_core_adapter::row_errors(&rows, initial)?;

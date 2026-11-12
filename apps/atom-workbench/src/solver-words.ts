@@ -16,6 +16,8 @@ const SENTENCES:Record<string,string>={
   'The trajectory duration must be a positive finite time':'轨迹时长必须是正的有限时间。',
   'meanHorizonUs must be 1e5 or 1e6 us (100 ms or 1 s)':'长期布居的时刻 T 只能是 100 ms 或 1 s。',
   'A motion request is a trajectory alone: meanOnly and includeMean are false':'运动只计算时间演化，不计算长期布居。',
+  'Returned population probabilities failed fixed trace/initial checks':'算出的布居没有通过检查（各态布居之和不是 1，或初始时刻与初态不符），结果未显示。',
+  "frameFrequenciesMHz: the ground states' frames must be 0 and the excited states' one frame":'请求不符合求解器的接口：基态的旋转系频率应为 0，激发态应共用一个旋转系频率。',
 };
 /** What a mean's reason adds when its bound is above the tolerance (lattice_core_adapter.rs `OUTSIDE`). */
 const OUTSIDE=' Not converged: its error estimate (estimatedError) is above the tolerance, so the populations are an estimate.';
@@ -46,7 +48,6 @@ const PATTERNS:readonly [RegExp,(...groups:string[])=>string][]=[
     (modes,need,budget)=>`未求解（不收敛）：此请求的晶格有 ${modes} 个模式，约需 ${need} GB 内存，超过 ${budget} GB 的内存预算。`],
   [/^The trajectory duration is limited to 10 s \(requested (\S+) s\)$/,seconds=>`轨迹时长最长 10 s（请求为 ${num(seconds)} s），未计算。`],
   [/^A trajectory has 2 to (\d+) samples \(requested (\d+)\)$/,(most,samples)=>`轨迹的采样点数应为 2 至 ${most}（请求为 ${samples}），未计算。`],
-  [/^The estimated error is (\S+) against the target (\S+)$/,(error,target)=>`估计误差为 ${num(error)}，目标 ${num(target)}。`],
   [/^An output time is at most (\S+) us \(10 s; requested (\S+) us\)$/,(most,requested)=>`输出时刻最长 10 s（${num(most)} µs；请求为 ${num(requested)} µs），未计算。`],
 ];
 /** A solver sentence in Chinese; one this table does not know is shown as written. */

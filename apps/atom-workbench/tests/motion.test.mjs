@@ -25,7 +25,8 @@ import {LOSS_CURVE,recommendedCurves,withPopulationGroups} from '../dist/js/atom
 import {TOTAL_INK,TOTAL_WIDTH,lineReading,motionSeries,seriesChart} from '../dist/js/atom-workbench/src/motion-chart.js';
 import {MOTION_DIAGNOSTICS,motionBlock,motionResult} from './native-result.mjs';
 import {spherical} from './directions.mjs';
-import {readFileSync} from 'node:fs';
+import {readFileSync,readdirSync} from 'node:fs';
+import {chinese,english,filled,rustLiterals} from './rust-sentences.mjs';
 
 const N=32,C=299792458;
 const axis=name=>({reference:{kind:'axis',axis:name},thetaDeg:0,phiDeg:0});
@@ -323,18 +324,34 @@ test('the examples: 3D PGC and 光镊 + 探测光 + 回泵光 run motion in thei
 });
 
 test('the motion engine\'s sentences are shown in Chinese',()=>{
-  assert.equal(solverText('A motion request is a trajectory alone: meanOnly and includeMean are false'),'运动只计算时间演化，不计算长期布居。');
-  // The 3D engine's refusals and its device note are written in Chinese: motion along an axis or in
-  // a plane, a scene whose light does not confine the atom, and a request for the GPU that ran on the CPU.
-  const adapter=readFileSync(new URL('../rust-solver/src/motion3d_adapter.rs',import.meta.url),'utf8');
-  assert.match(/pub const ONLY_3D:&str="([^"]+)";/.exec(adapter)?.[1]??'',/^[一-鿿]/);
-  const solve=readFileSync(new URL('../rust-solver/motion-3d/src/solve.rs',import.meta.url),'utf8');
-  assert.match(/pub const NOT_CONFINED:&str="([^"]+)";/.exec(solve)?.[1]??'',/^[一-鿿]/);
-  const notes=[...solve.matchAll(/format!\("((?:\{reason\}|GPU 计算出错)[^"]*)"\)/g)].map(m=>m[1]);
-  assert.deepEqual(notes,['GPU 计算出错（{error}）：本次在 CPU 上计算','{reason}：本次在 CPU 上计算']);
-  const gpu=readFileSync(new URL('../rust-solver/motion-3d/src/gpu/mod.rs',import.meta.url),'utf8');
-  for(const reason of ['NVIDIA 驱动太旧','没有 NVIDIA 显卡','驱动无法编译 GPU 内核'])assert.ok(gpu.includes(reason),reason);
-  // A result short of its target says why in Chinese.
-  const partial=[...adapter.matchAll(/format!\("(The estimated error is[^"]*)"\)/g)].map(m=>m[1].replace(/\{[A-Za-z_]*(?::[^}]*)?\}/g,'1'));
-  assert.equal(partial.length,1);assert.equal(solverText(partial[0]),'估计误差为 1，目标 1。');
+  const solver=new URL('../rust-solver/',import.meta.url),source=path=>readFileSync(new URL(path,solver),'utf8');
+  // Shown: written in Chinese, or an English sentence solver-words.ts translates -- with 10 in each placeholder, the
+  // longest duration in seconds as its translation has it.
+  const shown=text=>chinese(text)||solverText(filled(text,'10'))!==filled(text,'10');
+  // The engine (rust-solver/motion/src) and its adapter: every sentence of the shipped code -- a refusal, the method,
+  // the ledger's items, a flag, a note -- is shown. What an assertion says goes with a fault in the program, to no user.
+  const ASSERTED=['assert!','assert_eq!','assert_ne!','debug_assert!','debug_assert_eq!','debug_assert_ne!','expect','unreachable!','panic!','compile_error!'];
+  const files=['src/motion_adapter.rs',...readdirSync(new URL('motion/src/',solver),{recursive:true}).map(name=>`motion/src/${name.replaceAll('\\','/')}`)
+    .filter(path=>path.endsWith('.rs')&&!path.endsWith('/tests.rs')&&path!=='motion/src/request.rs')];
+  assert.ok(files.length>20,`${files.length} files`);
+  let sentences=0;
+  for(const file of files)for(const {text,within} of rustLiterals(source(file))){
+    if(!chinese(text)&&!(english(text)&&!within.some(name=>ASSERTED.includes(name))))continue;
+    sentences++;assert.ok(shown(text),`${file}: ${text}`);
+  }
+  assert.ok(sentences>60,`${sentences} sentences`);
+  // The request (motion/src/request.rs). What a scene or a setting can meet is shown: motion along an axis or in a
+  // plane, a tweezer that is a plane wave and an initial state on an excited state in Chinese; the mean, the duration
+  // and the samples in the words the population core's adapter refuses them with, translated. Its other refusals are of
+  // requests off the contract, which the app's own model (full-master-model.ts) does not send: in English, as written.
+  const request=source('motion/src/request.rs'),constant=name=>new RegExp(`const ${name}: &str = "([^"]+)";`).exec(request)?.[1]??'';
+  for(const name of ['ONLY_3D','NO_WAIST','ON_GROUND'])assert.ok(chinese(constant(name)),name);
+  const translated=rustLiterals(request).map(l=>l.text).filter(text=>english(text)&&shown(text));
+  assert.deepEqual(translated,[constant('TRAJECTORY_ALONE'),'The trajectory duration must be a positive finite time',
+    'The trajectory duration is limited to {} s (requested {} s)','A trajectory has 2 to {MOST_SAMPLES} samples (requested {samples})']);
+  assert.equal(solverText(constant('TRAJECTORY_ALONE')),'运动只计算时间演化，不计算长期布居。');
+  // The rows' check the adapter shares with the population core's.
+  assert.ok(shown(/fn row_errors[^]*?Err\("([^"]+)"/.exec(source('src/lattice_core_adapter.rs'))?.[1]??''));
+  // A request for the GPU is computed on the CPU, and the result says so in the adapter's words.
+  assert.equal(/pub const GPU_ABSENT: &str = "([^"]+)";/.exec(source('src/motion_adapter.rs'))?.[1],MOTION_DIAGNOSTICS.deviceNote);
 });
