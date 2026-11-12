@@ -245,6 +245,8 @@ details > summary > span { font-weight: 400; color: var(--muted-ink); }
 .ledger-table th, .ledger-table td { height: var(--table-row-h); padding: 0 var(--table-cell-pad); border-bottom: var(--edge) solid var(--divider); }
 .ledger-table th { font-weight: 400; color: var(--muted-ink); white-space: nowrap; }
 .ledger-table .num { text-align: right; white-space: nowrap; }
+/* The closing line: the items that read zero at the column's precision, not listed one by one. */
+.ledger-table .ledger-rest td { color: var(--muted-ink); }
 .solver-details > button { margin-top: var(--row-gap); }
 
 /* ---------- 布居演化 ------------------------------------------------------ */

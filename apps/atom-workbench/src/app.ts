@@ -53,7 +53,7 @@ import {idMappingError} from './population-basis.js';
 import {installWindowChrome} from './window-chrome.js';
 import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,remainingWords,signedInteger,stateLabel,subscript,withUnit} from './format.js';
 import {solverText} from './solver-words.js';
-import {errorPercent,outsideRuns,partialSentence,partialShort,sampleErrors} from './accuracy.js';
+import {errorPercent,ledgerRows,outsideRuns,partialSentence,partialShort,sampleErrors} from './accuracy.js';
 import {definitionNotes,modelNotes} from './model-notes.js';
 import {InlineName} from './inline-name.js';
 import {EXAMPLES,exampleScene} from './examples.js';
@@ -1159,11 +1159,15 @@ function largestApproximation(ledger:ApproximationLedger):string[]{
   const [largest]=[...ledger.items].sort((a,b)=>b.estimate-a.estimate);
   return largest?[`<p class="ledger-note">最大一项：${esc(largest.label)} ${errorPercent(largest.estimate)}</p>`]:[];
 }
-/** A motion result's approximation ledger (solver-types.ts ApproximationLedger): each approximation,
- * its estimated error and what the engine did about it. */
+/** A motion result's approximation ledger (solver-types.ts ApproximationLedger): each approximation, its estimated
+ * error and what the engine did about it, the largest first, at the column's one precision (accuracy.ts `ledgerRows`).
+ * The items that read zero there close the table in one line: their number, the half unit of the last place they
+ * all lie under, and the largest of them. The totals above are the engine's; nothing is summed here. */
 function approximationLedger(ledger:ApproximationLedger):string{
-  const rows=ledger.items.map(item=>`<tr><td>${esc(item.label)}</td><td class="num">${esc(errorPercent(item.estimate))}</td><td>${esc(item.action)}</td></tr>`).join('');
-  return rows?`<table class="ledger-table"><thead><tr><th>近似</th><th class="num">估计误差</th><th>处理</th></tr></thead><tbody>${rows}</tbody></table>`:'';
+  const {places,listed,rest}=ledgerRows(ledger.items),[largest]=rest;
+  const rows=listed.map(item=>`<tr><td>${esc(item.label)}</td><td class="num">${formatNumber(item.estimate*100,{places})}%</td><td>${esc(item.action)}</td></tr>`).join('');
+  const closing=largest?`<tr class="ledger-rest"><td colspan="3">${rest.length} 项各不到 ${formatNumber(.5*10**-places,{digits:1})}%，不逐项列出；其中最大的一项：${esc(largest.label)}，${errorPercent(largest.estimate)}</td></tr>`:'';
+  return ledger.items.length?`<table class="ledger-table"><thead><tr><th>近似</th><th class="num">估计误差</th><th>处理</th></tr></thead><tbody>${rows}${closing}</tbody></table>`:'';
 }
 /** 详情's first section: what is computed now -- the quantization axis, the levels chart's scope,
  * the sampling and the solve; then the definitions and the model, written once. */
