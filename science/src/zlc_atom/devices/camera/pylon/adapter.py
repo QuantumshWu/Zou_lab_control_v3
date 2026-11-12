@@ -229,7 +229,11 @@ class PylonCameraAdapter:
             return
         primary: BaseException | None = None
         try:
-            self._stop_and_restore_external()
+            # Stop the stream, nothing more: the next open writes every setting again, and a
+            # restore written to a camera that is going (or gone off the bus) would only fail
+            # the close and leave its handle with an instance that no longer serves it.
+            if camera.IsOpen() and camera.IsGrabbing():
+                camera.StopGrabbing()
         except BaseException as error:
             primary = error
         released = False

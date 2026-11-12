@@ -234,6 +234,7 @@ def _build(
     *,
     camera: object = None,
     camera_key: str = "",
+    sequencer: object = None,  # the core's own board: driven by its key, never an authored value
     sequencer_key: str = "",
     pulse_resource: object = None,
     save_figure_artifact: object = None,

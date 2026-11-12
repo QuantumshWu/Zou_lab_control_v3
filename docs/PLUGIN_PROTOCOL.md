@@ -97,7 +97,7 @@ A type descriptor (JSON, the only form the core sees):
     "outputs": [{"name": "frames", "contract": "zlc.camera.frames", "index_by_source": false}],
     "devices": [{"capability": "camera.adapter", "argument": "camera",
                  "protected_fields": ["exposure", "roi_x"], "enabled_when": null,
-                 "reads_only": false, "optional": false}],
+                 "reads_only": false}],
     "previews": [...], "reports_ready": true, "acquisition_input": "", "acquisition_completion": "ready",
     "artifact_outputs": [...], "selection_mappings": [...], "workspace_resources": [...],
     "replaces": {"post_selected_occupancy": {"post_selection": true}},  // types it took over: a saved row naming one loads as this type, these values over its own
@@ -856,9 +856,9 @@ into its channel's load). Anything that changes the device is refused.
 
 A requirement with `reads_only` is read, never claimed: the run holds nothing of the
 device, beside whoever does hold it, and its `device` calls are answered only for the
-reads above (`this run only reads <device>; <method> is not a read` otherwise). With
-`optional` a draft may leave it unset or name a device that is not open; the build is
-then called without it.
+reads above (`this run only reads <device>; <method> is not a read` otherwise). A
+device a node needs only in some configurations is required under `enabled_when` (a
+camera's trigger source, while its Trigger by channel switch is on); off, it is not asked for.
 
 **Facts.** A device may state facts of itself that a draft needs before any run: plain
 JSON under `facts` in its working point, said again whenever they change (a sequencer:

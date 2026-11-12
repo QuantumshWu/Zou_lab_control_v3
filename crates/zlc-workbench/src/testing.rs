@@ -1025,10 +1025,12 @@ mod tests {
     #[test]
     fn a_device_a_node_only_reads_is_never_claimed_and_tells_the_draft_its_facts() {
         let mut catalog = catalog();
-        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "watcher", "kind": "node", "label": "Watcher", "parameters": [],
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "watcher", "kind": "node", "label": "Watcher",
+            "parameters": [{"name": "trigger_by_channel", "type": "bool", "label": "Trigger by channel", "default": true}],
             "node": {"node_kind": "measurement", "outputs": [{"name": "frames"}], "queries": ["resolve_field_choices"],
                      "devices": [{"capability": "camera.adapter", "argument": "camera", "protected_fields": []},
-                                 {"capability": "sequencer.streamer", "argument": "trigger_source", "protected_fields": [], "reads_only": true, "optional": true}]}}));
+                                 {"capability": "sequencer.streamer", "argument": "trigger_source", "protected_fields": [], "reads_only": true,
+                                  "enabled_when": ["trigger_by_channel", [true]]}]}}));
         let (_root, mut workbench, calls, mut host) = rig("reads-only", catalog);
         let lanes = |frames: Value| json!({"trigger_lanes": [{"lane": "ch11", "port": "emCCD", "label": "emCCD", "frames": frames}]});
         event(&mut workbench, Event::Opened { instance: "sequencer".into(), working_point: json!({"facts": lanes(Value::Null)}) }, &mut host);
@@ -1058,8 +1060,11 @@ mod tests {
         apply(&mut workbench, &mut host, "stop_node", json!({"node": node})).unwrap();
         event(&mut workbench, Event::RunFinished { run: spec.run.clone(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
 
-        // Without the sequencer the node still starts: an optional device that is not there is not asked for.
+        // Without the sequencer, the switch on asks for one; off, nothing of any sequencer is asked.
         event(&mut workbench, Event::Closed { instance: "sequencer".into(), error: None }, &mut host);
+        let issues = workbench.state(&host)["logic"][0]["issues"].to_string();
+        assert!(issues.contains("sequencer.streamer"), "{issues}");
+        apply(&mut workbench, &mut host, "edit_node", json!({"node": node, "values": {"trigger_by_channel": false}})).unwrap();
         let issues = workbench.state(&host)["logic"][0]["issues"].to_string();
         assert!(!issues.contains("sequencer") && !issues.contains("trigger_source"), "{issues}");
     }

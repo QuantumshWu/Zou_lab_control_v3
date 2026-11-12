@@ -318,8 +318,6 @@ class DeviceRequirement:
     #: as reads, beside whoever holds it.  A device the core implements itself is then handed to draft
     #: queries as what it states of itself (``facts``) and to the build as its key alone.
     reads_only: bool = False
-    #: A draft may leave it unset or name a device that is not open; the build is then called without it.
-    optional: bool = False
 
 
 #: NodeType callables answered through ``query`` (PLUGIN_PROTOCOL.md §2), each
@@ -491,8 +489,7 @@ class NodeType:
                             for item in self.outputs],
                 "devices": [{"capability": item.capability_token, "argument": item.argument_name,
                              "protected_fields": None if item.protected_fields is None else list(item.protected_fields),
-                             "enabled_when": plain(item.enabled_when), "reads_only": bool(item.reads_only),
-                             "optional": bool(item.optional)} for item in self.device_requirements],
+                             "enabled_when": plain(item.enabled_when), "reads_only": bool(item.reads_only)} for item in self.device_requirements],
                 "previews": previews, "reports_ready": self.reports_ready,
                 "acquisition_input": self.acquisition_input, "acquisition_completion": self.acquisition_completion,
                 "artifact_outputs": [{"name": item.name, "contract": item.contract_id} for item in self.artifact_outputs],

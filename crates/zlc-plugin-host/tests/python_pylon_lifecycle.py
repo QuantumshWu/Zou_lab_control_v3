@@ -17,17 +17,18 @@ class Node:
 
 class Camera:
     def __init__(self, *, fail_close=False, fail_destroy=False, fail_open=False):
-        self.calls = []; self.attached = True; self.grabbing = False
+        self.calls = []; self.attached = True; self.grabbing = False; self.opened = not fail_open
         self.fail_close = fail_close; self.fail_destroy = fail_destroy; self.fail_open = fail_open
         for name in ['TriggerSelector', 'TriggerMode', 'TriggerSource', 'TriggerActivation']:
             setattr(self, name, Node())
+    def IsOpen(self): return self.opened
     def IsGrabbing(self): return self.grabbing
     def StopGrabbing(self): self.calls.append('stop'); self.grabbing = False
     def Open(self):
         self.calls.append('open')
         if self.fail_open: raise RuntimeError('SDK open failed')
     def Close(self):
-        self.calls.append('close')
+        self.calls.append('close'); self.opened = False
         if self.fail_close: raise RuntimeError('SDK close failed')
     def DestroyDevice(self):
         self.calls.append('destroy')
@@ -52,6 +53,16 @@ class PylonLifecycle(unittest.TestCase):
         self.assertIsNone(adapter._camera)
         adapter.close()
         self.assertEqual(camera.calls, ['close', 'destroy'])
+
+    def test_a_camera_gone_off_the_bus_still_closes_and_gives_its_handle_back(self):
+        camera = Camera(); camera.grabbing = True; adapter = self.adapter(camera)
+        class Gone:
+            def SetValue(self, value): raise RuntimeError('device removed')
+            def GetValue(self): raise RuntimeError('device removed')
+        camera.TriggerSelector = camera.TriggerMode = camera.TriggerSource = Gone()
+        adapter.close()
+        self.assertEqual(camera.calls, ['stop', 'close', 'destroy'])
+        self.assertIsNone(adapter._camera)
 
     def test_failed_destroy_retains_ownership_for_retry(self):
         camera = Camera(fail_destroy=True); adapter = self.adapter(camera)
