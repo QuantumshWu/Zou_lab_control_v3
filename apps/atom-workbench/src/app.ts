@@ -53,7 +53,7 @@ import {idMappingError} from './population-basis.js';
 import {installWindowChrome} from './window-chrome.js';
 import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,remainingWords,signedInteger,stateLabel,subscript,withUnit} from './format.js';
 import {solverText} from './solver-words.js';
-import {errorPercent,ledgerRows,outsideRuns,partialSentence,partialShort,sampleErrors} from './accuracy.js';
+import {errorPercent,exceedsNote,ledgerRows,outsideRuns,partialSentence,partialShort,resultTolerance,sampleErrors} from './accuracy.js';
 import {definitionNotes,modelNotes} from './model-notes.js';
 import {InlineName} from './inline-name.js';
 import {EXAMPLES,exampleScene} from './examples.js';
@@ -280,10 +280,11 @@ function solverStatus():[string,StatusWord,string?,string?]{
   }
   const elapsed=formatElapsed(record?.wallMs??solverWallMs),partial=trajectorySentence(result),mean=meanSentence(result),both=partial&&mean?bothSentence(result):'';
   const trajectory=showsTrajectory();
-  // 停止 keeps the last checkpoint, marked as any partial result is: where the trajectory misses ε,
-  // short (with p̄(T)'s error when that misses it too), or p̄(T)'s error; the full words in the tooltip.
+  // 停止 keeps the last checkpoint, marked as any partial result is: where the trajectory misses its
+  // tolerance -- ε, or a 3D motion's own target: the one its samples were tested against --, short
+  // (with p̄(T)'s error when that misses it too), or p̄(T)'s error; the full words in the tooltip.
   if(record?.checkpoint){
-    const head=`${record.checkpoint==='stopped'?'计算已停止':'计算未完成'} · 显示最后的中间结果`,tolerance=errorPercent(POPULATION_TOLERANCE);
+    const head=`${record.checkpoint==='stopped'?'计算已停止':'计算未完成'} · 显示最后的中间结果`,tolerance=errorPercent(resultTolerance(result));
     const miss=trajectoryMiss(result),words=trajectory?both||(miss?`${miss}（超过 ${tolerance}）`:mean):mean,full=trajectory?[partial,mean].filter(Boolean).join(' · '):mean;
     return [`${head}${words?`：${words}`:trajectory?`（各时刻 ≤ ${tolerance}）`:''}`,'warning',undefined,words!==full?`${head}：${full}`:undefined];
   }
@@ -308,8 +309,6 @@ function solverStatus():[string,StatusWord,string?,string?]{
 function trajectorySentence(result:DynamicsResult):string{
   const errors=sampleErrors(result);return result.timesUs.length>1&&errors?partialSentence(result.timesUs,errors,dynamics().durationUnit,resultTolerance(result)):'';
 }
-/** The tolerance a result's populations were solved to: ε, or a 3D motion's own target. */
-function resultTolerance(result:DynamicsResult):number{return result.populationAccuracy?.requestedTolerance??POPULATION_TOLERANCE;}
 /** Where a motion result lies outside the semiclassical method's validated regime (k_B T ≥
  * SEMICLASSICAL_REGIME ħω on every axis): a reference only there (empty: nowhere). */
 function referenceSentence(result:DynamicsResult):string{
@@ -1002,11 +1001,13 @@ function invalidateObsoletePopulation():void{
     root.dataset.populationFresh='false';if(latestAnalysis&&view==='levels')populationToolbar();
   }
 }
-/** The levels chart's populations and their hover words; a value outside the tolerance says its error. */
+/** The levels chart's populations and their hover words; a value outside its tolerance says its error and that
+ * tolerance: the snapshot's own (a motion trajectory's p(t) is tested against 5%), p̄(T)'s ε. */
 function paintLevelPopulations(snapshot:ReturnType<typeof populationSnapshot>):void{
-  const result=currentResult(),outside=(error:number|null|undefined,over:boolean|undefined)=>over?`（估计误差 ${error==null?'未知':errorPercent(error)}，超过 ${errorPercent(POPULATION_TOLERANCE)}）`:'';
+  const result=currentResult();
   patchLevelPopulations($('levels-chart'),{populations:snapshot.populations,mean:meanPopulationsInView(),label:snapshot.label,meanLabel:meanSymbol(),initialId:singleInitialId(),
-    note:outside(snapshot.error,snapshot.outside),meanNote:result?.mean.converged?outside(result.mean.estimatedError,!result.mean.withinTolerance):''});
+    note:snapshot.outside&&snapshot.tolerance!==undefined?exceedsNote(snapshot.error,snapshot.tolerance):'',
+    meanNote:result?.mean.converged&&!result.mean.withinTolerance?exceedsNote(result.mean.estimatedError,POPULATION_TOLERANCE):''});
 }
 function refreshPopulationOnly():void{
   if(analysisError){refreshStatus();return;}
@@ -1102,14 +1103,14 @@ function meanPopulationsInView(a=latestAnalysis):Record<string,number>|undefined
   let entries=projectedPopulationCache.get(a);if(!entries){entries=new WeakMap();projectedPopulationCache.set(a,entries);}if(entries.has(mean))return entries.get(mean)??undefined;
   const projected=projectSpectroscopyPopulations(a,{states:result.states.map(state=>state.id),populations:result.states.map(state=>mean.populations![state.id]??0),density:mean.density,basis:result.states});entries.set(mean,projected);return projected??undefined;
 }
-/** The populations the levels chart is coloured by, what they are, and their estimated error:
- * p̄(T)'s, or the chosen sample's. */
-function populationSnapshot():{populations?:Record<string,number>;label:string;timeUs?:number;error?:number|null;outside?:boolean;loss?:number}{
+/** The populations the levels chart is coloured by, what they are, and their estimated error with the tolerance it
+ * is tested against: p̄(T)'s (ε), or the chosen sample's (the trajectory's own, `resultTolerance`). */
+function populationSnapshot():{populations?:Record<string,number>;label:string;timeUs?:number;error?:number|null;outside?:boolean;tolerance?:number;loss?:number}{
   const result=currentResult();
   if(!result)return {label:currentSolverBusy()?'计算中':'待计算'};
-  if(populationMode==='mean'){const populations=meanPopulationsInView(),s=result.mean;return s?.converged&&s.populations?{populations,label:populations?meanSymbol(result):'当前背景布居未定义',error:s.estimatedError,outside:!s.withinTolerance}:{label:`${meanName()}未解析`};}
+  if(populationMode==='mean'){const populations=meanPopulationsInView(),s=result.mean;return s?.converged&&s.populations?{populations,label:populations?meanSymbol(result):'当前背景布居未定义',error:s.estimatedError,outside:!s.withinTolerance,tolerance:POPULATION_TOLERANCE}:{label:`${meanName()}未解析`};}
   const index=populationTimeIndex<0?result.timesUs.length-1:Math.min(populationTimeIndex,result.timesUs.length-1),timeUs=result.timesUs[index]??0;
-  const error=sampleErrors(result)?.[index],accuracy=error===undefined?{}:{error,outside:error>resultTolerance(result)};
+  const tolerance=resultTolerance(result),error=sampleErrors(result)?.[index],accuracy=error===undefined?{}:{error,outside:error>tolerance,tolerance};
   // A motion result's populations are those of the atom still held; 丢失 is the rest.
   const loss=result.motion?{loss:result.motion.lossProbability[index]!}:{};
   // p(t) is in the model basis; on the chart's states it reads by id only while the bases'
@@ -1233,9 +1234,9 @@ function populationToolbar():void{
     (p&&snap.loss!==undefined?`<span class="population-total">${LOSS_CURVE.label} <b class="slot percent">${populationPercent(snap.loss)}</b></span>`:'');
   if(populationTotals.innerHTML!==markup)populationTotals.innerHTML=markup;
   const uncoloured=!!result&&!p&&populationMode==='time';populationNote.textContent=uncoloured?snap.label:'';populationNote.hidden=!uncoloured;
-  const marked=!!p&&snap.outside===true,words=marked?`⚠ 估计误差 ${snap.error==null?'未知':errorPercent(snap.error)}`:'';
+  const tolerance=p&&snap.outside===true?snap.tolerance:undefined,marked=tolerance!==undefined,words=marked?`⚠ 估计误差 ${snap.error==null?'未知':errorPercent(snap.error)}`:'';
   if(populationAccuracy.textContent!==words)populationAccuracy.textContent=words;populationAccuracy.hidden=!marked;
-  populationAccuracy.title=marked?`${snap.label} 的估计误差超过 ${errorPercent(POPULATION_TOLERANCE)}；能级仍按算出的布居着色`:'';
+  populationAccuracy.title=marked?`${snap.label} 的估计误差超过 ${errorPercent(tolerance)}；能级仍按算出的布居着色`:'';
 }
 
 // ---------------------------------------------------------------- 布居演化
@@ -1268,7 +1269,7 @@ function renderDynamicsControls(a:Analysis):void{
     v=>{dynamics().motion.enabled=v===true;},{after});
   if(motionOn()){
     const settings=()=>dynamics().motion;
-    bindQuantity(dynamicsFields,motion,'motion','motion',()=>({name:'temperature',label:'初始温度',spin:true,inexact:true,description:'初态的运动温度（各轴相同）：动量为 Maxwell 分布，位置为该温度下势阱中的热分布；内态为场景的初态'}),
+    bindQuantity(dynamicsFields,motion,'motion','motion',()=>({name:'temperature',label:'初始温度',spin:true,inexact:true,description:'初态的运动温度 T（各轴相同）：初态势阱中束缚原子的降低的等温分布 f ∝ e^(−E/k_BT) − 1；阱深比 k_BT 大得多时即动量为 Maxwell 分布、位置为 Boltzmann 分布，浅阱里动能温度低于 T；各轴再按谐振子的热 Wigner 分布放大。内态为场景的初态'}),
       {read:()=>motionTemperatureReading(settings()),write:(v,u)=>setMotionTemperature(settings(),v,u as TemperatureUnit),units:()=>unitChoices(TEMPERATURE_UNITS,'温度')},after);
     bindField(dynamicsFields,motion,'motion',()=>({name:'device',label:'计算设备',kind:'choice',segmented:true,choices:[['gpu','GPU'],['cpu','CPU']],value:settings().device,
       description:'运动在哪里计算。本版本只在处理器（CPU）上计算：选 GPU 时同样在 CPU 上计算，状态栏写明。'}),v=>{settings().device=v as MotionDevice;},{after});

@@ -2,7 +2,7 @@ import {timeDisplayUnit} from './duration.js';
 import type {DurationUnit} from './types.js';
 import {SEMICLASSICAL_REGIME,type MeanResult} from './solver-types.js';
 import {POPULATION_TOLERANCE} from './types.js';
-import {errorPercent,outsideRuns,sampleErrors} from './accuracy.js';
+import {errorPercent,outsideRuns,resultTolerance,sampleErrors} from './accuracy.js';
 import {LOSS_CURVE} from './population-selection.js';
 
 export interface PopulationPlot {timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];mean?:MeanResult;
@@ -100,7 +100,7 @@ export function populationChart(result:PopulationPlot,monitoredIds:string[],labe
     if(scale==='log')for(const i of [0,values.length-1])if(values[i]!<=g.floor)markup+=`<circle cx="${x(result.timesUs[i]!)}" cy="${bottom}" r="2.6" fill="white" stroke="${color}"><title>${esc(`${title}: ${populationValue(values[i]!)}（对数轴下界以下）`)}</title></circle>`;
     return markup;
   };
-  const tolerance=result.populationAccuracy?.requestedTolerance??POPULATION_TOLERANCE;
+  const tolerance=resultTolerance(result);
   // A motion result's samples outside its validated regime: a grey band behind them.
   svg+=referenceBands(result.timesUs.map(x),options.reference,[[top,bottom]]);
   // Samples whose estimated error exceeds the tolerance: a light band behind them (half-way to
@@ -136,7 +136,7 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     const mean=result.mean?.converged&&result.mean.populations?result.mean:undefined;
     const meanLabel=options.meanLabel??'p̄(T)',error=sampleErrors(result)?.[index];
     // The sample's estimated error (an absolute bound on every population), marked when above ε.
-    const tolerance=result.populationAccuracy?.requestedTolerance??POPULATION_TOLERANCE;
+    const tolerance=resultTolerance(result);
     const accuracy=error===undefined?'':`<span class="readout-error${error>tolerance?' outside':''}" title="该时刻布居的估计误差（概率的绝对误差）">±${esc(errorPercent(error))}${error>tolerance?`（超过 ${esc(errorPercent(tolerance))}）`:''}</span>`;
     const meanOutside=mean&&!mean.withinTolerance?`<p class="note wrap readout-outside">${esc(meanLabel)} 估计误差 ${esc(mean.estimatedError===null?'未知':errorPercent(mean.estimatedError))}，超过 ${esc(errorPercent(POPULATION_TOLERANCE))}。</p>`:'';
     const head=mean?`<div class="readout-row readout-head"><span></span><span>p(t)</span><span>${esc(meanLabel)}</span></div>`:'';
