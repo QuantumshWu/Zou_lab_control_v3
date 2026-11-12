@@ -1073,12 +1073,16 @@ fn attempt(
     let numbers: Vec<u64> = (first..first + pilot_size() / GROUP).collect();
     // A priced keep's model at the step `step` against the model before it at its own (see `priced`).
     let dearer = |step: f64| priced.is_some_and(|(before, share)| (1. - share) * before / step > 1.);
+    // Whether the pilot's atoms have outgrown the reach (`outgrown`), and the temperature it then grows to: the
+    // attempt ends there, and its check spends nothing further on a step the next attempt settles anew (`settle`).
+    let scales = context.scales;
+    let grown = |pilot: &[&Part]| outgrown(&outside(&model, &judged, pilot), left, &pooled(pilot, &scales).0, held);
     let mut levels = Levels::default();
 
     // The scout (module documentation, # The pipeline): the first member of every pilot group at both levels, screened;
     // where a unit is to be kept at its states, the attempt ends here -- for the price of the scout, not of a pilot.
     // The pilot's read of the same below stands for the result.
-    if matches!(settle(&run, &ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &dearer, messages), Settled::Dearer) {
+    if matches!(settle(&run, &ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &dearer, &|pilot| grown(pilot).is_some(), messages), Settled::Dearer) {
         return Ok(Attempt::Undo);
     }
     let scouted = {
@@ -1096,7 +1100,7 @@ fn attempt(
     };
     // The pilot: its groups' other members at both levels, screened. Where the check ended unable to see, the reads
     // its last rung is held by: what they do not exclude is booked (`unexcluded`), and flagged.
-    let unseen = match settle(&run, &ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &dearer, messages) {
+    let unseen = match settle(&run, &ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &dearer, &|pilot| grown(pilot).is_some(), messages) {
         Settled::Dearer => return Ok(Attempt::Undo),
         Settled::Capped => {
             context.ledger.flag(capped());
@@ -1112,7 +1116,7 @@ fn attempt(
     let run = {
         let pilot: Vec<&Part> = levels.fine.iter().collect();
         let (estimates, _, counts) = pooled(&pilot, &context.scales);
-        if let Some(t) = outgrown(&outside(&model, &judged, &pilot), left, &estimates, held) {
+        if let Some(t) = grown(&pilot) {
             return Ok(Attempt::Grow(t, tau));
         }
         let steps = counts.steps + levels.coarse.iter().map(|p| p.counts.steps).sum::<u64>();
@@ -1347,9 +1351,11 @@ enum Settled {
 /// A rung below at which a trajectory would take more than `MOST_STEPS` steps does not exist: a check that is beyond
 /// or refuted there leaves the step capped. Nor is a rung taken at which a priced keep's model costs more than the
 /// model before it (`dearer`): the attempt ends, and the keep is undone -- a rung read as a third level is taken
-/// only where the rung above it is then left.
+/// only where the rung above it is then left. And a first rung that does not read within is settled no further
+/// where the pilot's atoms already end the attempt (`outgrown`: the reach outgrown, `attempt`): the step stands as
+/// it is for the next attempt to begin at, and no third level and no pair is run for it.
 #[allow(clippy::too_many_arguments)]
-fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, dearer: &dyn Fn(f64) -> bool, messages: &mut Messages) -> Settled {
+fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, dearer: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, messages: &mut Messages) -> Settled {
     let [fine, coarse] = pair(run, ensemble, domain, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
     absorb(&mut levels.fine, fine);
     absorb(&mut levels.coarse, coarse);
@@ -1378,6 +1384,10 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
                 return if pilot && !readable(&held) { Settled::Unseen(held) } else { Settled::Standing };
             }
             let Some(factor) = blind(&read).filter(|_| pilot) else { return Settled::Standing };
+            // The pilot's atoms end the attempt as they are: nothing further is spent on its step.
+            if outgrown(&levels.fine.iter().collect::<Vec<_>>()) {
+                return Settled::Standing;
+            }
             if above(context.tau) {
                 // The rung above on the pilot's trajectories: its finer level is this rung's companion.
                 let coarser = level(run, ensemble, domain, &context.plan, 4. * context.tau, numbers, 0..GROUP, false, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
