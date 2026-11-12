@@ -1291,17 +1291,15 @@ impl Plan {
     /// is not a constant: none of it is here.
     pub(crate) fn fringes(&self, model: &Model, most: &[f64]) -> Vec<f64> {
         let (n, ground) = (self.states, model.clusters[self.cluster].ground);
-        let mut rows = vec![0.0; n];
+        // A component's beams: per beam its place among the plan's and whether it is conjugated, and c_l; of no component, 1.
+        let side = |component: Option<usize>| -> Vec<(Option<(usize, bool)>, C64)> {
+            component.map_or(vec![(None, C64::ONE)], |s| self.scalars[s].beams.iter().map(|&(at, c)| (Some((at, self.scalars[s].conjugate)), c)).collect())
+        };
+        // Per entry (x, y), tone and pair of beams: the coefficient of the pair's plane waves, every term's at that entry and
+        // tone summed -- the blocks of one frequency's basis components are one field's, whose sum the basis does not change.
+        let mut pairs: std::collections::BTreeMap<(usize, usize, usize, Option<(usize, bool)>, Option<(usize, bool)>), C64> = std::collections::BTreeMap::new();
         for term in self.form.iter().filter(|term| term.flag == PLAIN) {
             let block = &self.blocks[term.block];
-            // A component's beams: |c_l| max|a_l| and the wave vector it turns at.
-            let side = |component: Option<usize>| -> Vec<(f64, [f64; 3])> {
-                component.map_or(vec![(1.0, [0.0; 3])], |s| {
-                    let scalar = &self.scalars[s];
-                    let sign = if scalar.conjugate { -1.0 } else { 1.0 };
-                    scalar.beams.iter().map(|&(at, c)| (c.abs() * most[self.beams[at]], model.light.beams[self.beams[at]].wave_vector().map(|k| sign * k))).collect()
-                })
-            };
             let (left, right) = (side(block.left), side(block.right));
             let trap = [block.left, block.right].iter().all(|s| s.is_some_and(|s| self.scalars[s].frequency == model.light.trap));
             let (re, im) = self.values(term, &self.form_start);
@@ -1310,17 +1308,24 @@ impl Plan {
                 if (trap && x == y) || (x < ground) != (y < ground) {
                     continue;
                 }
-                let mut turned = 0.0;
-                for (a, k) in &left {
-                    for (b, q) in &right {
-                        let wave: [f64; 3] = std::array::from_fn(|j| k[j] + q[j] - (self.waves[x][j] - self.waves[y][j]));
-                        turned += a * b * dot3(wave, wave);
+                let value = C64::new(*re, *im) * term.weight;
+                for &(l, a) in &left {
+                    for &(r, b) in &right {
+                        *pairs.entry((x, y, term.tone, l, r)).or_insert(C64::ZERO) += value * a * b;
                     }
                 }
-                let half = 0.5 * term.weight * re.hypot(*im) * turned;
-                rows[x] += half;
-                rows[y] += half;
             }
+        }
+        // A beam's wave vector as its product takes it, and its largest modulus.
+        let wave = |beam: Option<(usize, bool)>| beam.map_or([0.0; 3], |(at, conjugate)| model.light.beams[self.beams[at]].wave_vector().map(|k| if conjugate { -k } else { k }));
+        let modulus = |beam: Option<(usize, bool)>| beam.map_or(1.0, |(at, _)| most[self.beams[at]]);
+        let mut rows = vec![0.0; n];
+        for ((x, y, _, l, r), c) in pairs {
+            let (k, q) = (wave(l), wave(r));
+            let turned: [f64; 3] = std::array::from_fn(|j| k[j] + q[j] - (self.waves[x][j] - self.waves[y][j]));
+            let half = 0.5 * c.abs() * modulus(l) * modulus(r) * dot3(turned, turned);
+            rows[x] += half;
+            rows[y] += half;
         }
         rows
     }

@@ -241,6 +241,16 @@ pub struct UnitError {
     /// twice its level's own second-order term over the drive's distance (eliminate.rs `Model::drive_error`) --; a;
     /// (w/σ)².
     pub temperature: f64,
+    /// The part of both that a flow's rate error moves (units.rs, # A rate's error on the populations): x times the
+    /// sample's cluster's ground population, the flow's source side as the sample sees it; and the flow's far side, the
+    /// ground states of the hyperfine level it moves population into, a bit each (none: 0). The sample sees its own side alone:
+    /// the run takes this part against the output's populations of both sides (units.rs `destined`).
+    pub moved: f64,
+    pub into: u32,
+}
+impl UnitError {
+    /// No error.
+    pub const NONE: UnitError = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0, moved: 0.0, into: 0 };
 }
 
 /// A trajectory state the units' errors are measured at (the solve's trial states).

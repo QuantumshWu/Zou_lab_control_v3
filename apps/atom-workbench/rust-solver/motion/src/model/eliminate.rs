@@ -60,15 +60,15 @@
 
 use super::assemble::{NearValues, Plan};
 use super::photon::Origin;
-use super::reach::{Region, Weights};
-use super::units::{gate, Measured};
+use super::reach::Region;
+use super::units::{gate, Flow, Measured};
 use super::{Beat, Component, Gate, Level, Lights, Model, Unit, UnitError};
 use crate::field::Amplitude;
 use crate::linalg::{dot3, Lu, Mat, C64};
 use crate::request::{GROUND, STATES};
 use super::far::EXCITED;
 use super::jet;
-use super::own::Own;
+use super::own::{Band, Form, Own};
 
 /// One leg of a second-order term (module documentation, # The fold's terms): a coupling's column from a ground state,
 /// U[GROUND + e, `state`], and its response's, R[e, `place`] = ((K − z)⁻¹U)[e, `state`] -- a constant with the bare levels
@@ -571,7 +571,7 @@ impl Model {
     /// relative rate error, as a drive's S_b p_b).
     pub(crate) fn dressing_error(&self, carrier: Component, at: &Measured) -> UnitError {
         let mut toggled = self.coherent_dressing();
-        let Some(d) = self.carrier_of(carrier.frequency) else { return UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 } };
+        let Some(d) = self.carrier_of(carrier.frequency) else { return UnitError::NONE };
         toggled[d] = !toggled[d];
         let other = self.carrier_responses(&at.plan, &self.near_exact(&at.plan, &at.amplitudes, 0, &toggled), &at.amplitudes, at.sample.at.kappa);
         let ground = &at.sample.psi[..self.clusters[at.sample.cluster].ground];
@@ -586,7 +586,7 @@ impl Model {
             }
         }
         let weight: f64 = at.populations[..GROUND].iter().sum();
-        UnitError { parameter: delta, population: delta * weight, temperature: delta * weight }
+        UnitError { parameter: delta, population: delta * weight, temperature: delta * weight, ..UnitError::NONE }
     }
 
 }
@@ -617,58 +617,192 @@ impl Folded {
 }
 
 /// The difference E_x − E_y of two levels of the constant forms over a region (`Model::gap`; the gates' distances), in its own
-/// form (own.rs): of every beam pair, the levels themselves, and of the pairs the eliminations' levels hold (module
-/// documentation, # The response: a carrier's frequency's form with its polarization units' interference averaged) -- the
-/// levels the eliminations take, whose difference a drive's denominator at the atom and a self-energy's channel read.
+/// form (own.rs) with its gradient's: of every beam pair, the levels themselves, and of the pairs the eliminations' levels
+/// hold (module documentation, # The response: a carrier's frequency's form with its polarization units' interference
+/// averaged) -- the levels the eliminations take, whose difference a drive's denominator at the atom and a self-energy's
+/// channel read.
 ///
-/// Of the difference itself, never of each level: a shift the two levels share moves no distance. (Read as each level's own
-/// slack, the tweezer's scalar light shift -- the same on every Zeeman sublevel of a ground manifold, 236 rad/µs a
+/// Of the difference itself, never of each level: a shift the two levels share moves no distance and no rate. (Read as each
+/// level's own slack, the tweezer's scalar light shift -- the same on every Zeeman sublevel of a ground manifold, 236 rad/µs a
 /// micrometre across its waist -- moved the 13 rad/µs between the user's F=1 m=0 and m=−1 by twice that: the self-energy's
 /// two-photon distance between them read zero on every cell wider than 0.03 µm across the beam, and the gates' proofs over
 /// the lin⊥lin scene's reach never ended. The difference's weights w = [P_l'l]_xx − [P_l'l]_yy hold nothing of a shift the
-/// two share, at every order.)
+/// two share, at every order: its value, gradient and Hessian at the centre are the two levels' differences, its bounds
+/// the beam pairs' bounds weighted by |w|.)
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Gap {
     pub(crate) all: Own,
     pub(crate) taken: Own,
+    pub(crate) all_slope: Form<[f64; 3]>,
+    pub(crate) taken_slope: Form<[f64; 3]>,
+}
+
+/// The constant forms' diagonal over a region (`Model::gap`): per state x, of the beam pairs the eliminations' levels hold and
+/// of the others, Σ_p [P_p]_xx c_p's value, gradient and Hessian at the centre (the Hessian on a cell alone); made once per
+/// region where a gap is first asked.
+pub(crate) struct Diagonal {
+    sums: Vec<[PairSum; 2]>,
+}
+
+/// A sum of beam pairs' coefficients at a cell's centre: its value, gradient and Hessian.
+#[derive(Clone, Copy)]
+struct PairSum {
+    value: C64,
+    gradient: [C64; 3],
+    hessian: [[C64; 3]; 3],
+}
+
+impl PairSum {
+    const ZERO: PairSum = PairSum { value: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3] };
+}
+
+/// A ground level's shift over a region with its sign (own.rs, # Bands): by its drives folded at the atom (units.rs
+/// `Model::near_level`) or by a carrier's dressing (`Model::dressing_shifts`) -- a band, its smooth part with the parameters it
+/// is not computed at (the drives' Doppler shifts, the excited states' couplings and self-energy) at their centre and how
+/// far they move it; the smooth part's gradient (own.rs `Form`); and `swing`, how far the parameters move that gradient.
+/// What a rate reads of a level is its gradient, of two levels' difference the gradient of the difference (`Shift::sub`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Shift {
+    pub(crate) band: Band,
+    pub(crate) slope: Form<[f64; 3]>,
+    pub(crate) swing: Own,
+}
+
+impl Shift {
+    pub(crate) fn none() -> Shift {
+        Shift { band: Band::exact(Own::constant(0.0)), slope: Form::zero(), swing: Own::constant(0.0) }
+    }
+
+    pub(crate) fn add(&self, o: &Shift) -> Shift {
+        Shift { band: self.band.add(o.band), slope: self.slope.add(o.slope), swing: self.swing.add(o.swing) }
+    }
+
+    pub(crate) fn sub(&self, o: &Shift) -> Shift {
+        Shift { band: self.band.sub(o.band), slope: self.slope.sub(o.slope), swing: self.swing.add(o.swing) }
+    }
+
+    /// The level's difference with another's: a gap (`Gap`) with this shift, less the other's -- of the dressed levels, one
+    /// band and one gradient.
+    pub(crate) fn of(level: Own, slope: Form<[f64; 3]>) -> Shift {
+        Shift { band: Band::exact(level), slope, swing: Own::constant(0.0) }
+    }
+
+    /// The bound of its gradient's norm over the region and the parameters: |∇mid| + swing.
+    pub(crate) fn steepness(&self) -> Own {
+        self.slope.norm().add(self.swing)
+    }
 }
 
 /// A carrier's coherent couplings over a region (reach.rs `Region`), each in its own form (own.rs). With u_s = Σ_l a_l X^f_l[:, s]
 /// the excited amplitudes its field drives from ground state s -- its beams coherent at the request's phases (SPEC §1.2), what
 /// the atom feels at r --, per ground state |u_s[e]| per excited state, ‖u_s‖, and ‖u_s‖ per polarization unit (its beams
-/// alone) (reach.rs `Region::summed`); and ‖∇u_s‖ = (Σ_a ‖∂_a u_s‖²)^{1/2}, in all and per unit, of its gradient and second
-/// derivatives at the centre and its beams' gradients' Taylor remainders (`Span::rest`), within its value ± Σ_l ‖X^f_l[:, s]‖
-/// max|∇a_l − ∇a_l(c)| (`Span::veer`) and at most Σ_l ‖X^f_l[:, s]‖ max|∇a_l| (`Span::steepest`) -- a standing wave's ∇u is
-/// nothing at its crests and its nodes, where each beam's |∇a| is k. On a point, the values there.
+/// alone) (reach.rs `Region::summed`). On a point, the values there.
 pub(crate) struct Couplings {
     /// [s][e − GROUND].
     pub(crate) entry: [[Own; EXCITED]; GROUND],
     /// [s].
     pub(crate) column: [Own; GROUND],
-    /// [unit][s], over the carrier's distinct polarization units; and [unit][s][e − GROUND], each unit's entries.
+    /// [unit][s], over the carrier's distinct polarization units.
     pub(crate) units: Vec<[Own; GROUND]>,
-    pub(crate) unit_entries: Vec<[[Own; EXCITED]; GROUND]>,
-    /// ‖∇u_s‖: [s], and [unit][s].
-    pub(crate) slope: [Own; GROUND],
-    pub(crate) unit_slopes: Vec<[Own; GROUND]>,
 }
 
 impl Model {
-    /// The difference E_x − E_y of two levels of the constant forms over a region (`Gap`), every light on: from the region's
-    /// `Forms` the weighting w = [P_l'l]_xx − [P_l'l]_yy of the beam pairs, Re Σ w c over the beam pairs' coefficients
-    /// c = a_l'* a_l in its own form (reach.rs `Combination::real`) -- over every pair, and over the pairs the eliminations'
-    /// levels hold (`Forms::taken`). Nothing between a level and itself.
-    pub(crate) fn gap(&self, x: usize, y: usize, region: &Region) -> Gap {
-        let base = self.base[(x, x)].re - self.base[(y, y)].re;
+    /// The difference E_x − E_y − `at` of two levels of the constant forms over a region less a constant (`Gap`), every light
+    /// on: Re Σ w c over the beam pairs' coefficients c = a_l'* a_l, w = [P_l'l]_xx − [P_l'l]_yy -- over every pair, and over
+    /// the pairs the eliminations' levels hold (`Forms::taken`) --, in its own form: its value, gradient and Hessian at the
+    /// centre the two levels' (`Diagonal`), its remainder Σ_p |w_p| `curve`_p, its range Σ_p |w_p| `radius`_p about its value
+    /// (reach.rs `Combination`); its gradient's remainder Σ_p |w_p| `rest`_p, moving by Σ_p |w_p| `veer`_p, at most Σ_p |w_p|
+    /// `slope`_p (reach.rs `Region::gradient`). The bare levels' difference less `at` is one constant, taken first: a
+    /// transition's 10⁹ rad/µs less its light's frequency is its detuning, and what the light does at a place is added to that
+    /// -- added to the transition instead, each place's sum was rounded apart from the next one's by 10⁻⁷ rad/µs. Between a
+    /// level and itself, the constant.
+    pub(crate) fn gap(&self, x: usize, y: usize, region: &Region, at: f64) -> Gap {
+        let constant = (self.base[(x, x)].re - at) - self.base[(y, y)].re;
         if x == y {
-            return Gap { all: Own::constant(0.0), taken: Own::constant(0.0) };
+            let level = Own::constant(constant);
+            return Gap { all: level, taken: level, all_slope: Form::zero(), taken_slope: Form::zero() };
         }
-        let (taken, weights) = (region.forms.taken(self), region.forms.difference(self, x, y));
-        let span = |&(frequency, pair, w, modulus): &(usize, usize, C64, f64)| (region.pairs[frequency][pair], w, modulus);
-        Gap {
-            all: region.combined(weights.iter().map(span)).real().plus(base),
-            taken: region.combined(weights.iter().filter(|of| taken[of.0][of.1]).map(span)).real().plus(base),
+        let made = region.gaps.lock().expect("the gaps' lock").get(&(x, y)).copied();
+        let made = made.unwrap_or_else(|| {
+            let made = self.gap_made(x, y, region);
+            region.gaps.lock().expect("the gaps' lock").insert((x, y), made);
+            made
+        });
+        Gap { all: made.all.plus(constant), taken: made.taken.plus(constant), ..made }
+    }
+
+    /// The spatial part of a gap (`gap`), of the region's diagonal sums and the beam pairs' bounds.
+    fn gap_made(&self, x: usize, y: usize, region: &Region) -> Gap {
+        let diagonal = region.diagonal.get_or_init(|| self.diagonal(region));
+        let taken = region.forms.taken(self);
+        // Per part (the pairs held, the others): the weighted bounds -- curve, radius, rest, veer, slope.
+        let mut bounds = [[0.0; 5]; 2];
+        for (frequency, pair, w) in region.forms.diagonals(self) {
+            let size = (w[x] - w[y]).abs();
+            if size == 0.0 {
+                continue;
+            }
+            let p = &region.pairs[*frequency][*pair];
+            let part = &mut bounds[!taken[*frequency][*pair] as usize];
+            for (sum, bound) in part.iter_mut().zip([p.curve, p.radius, p.rest, p.veer, p.slope]) {
+                *sum += size * bound;
+            }
         }
+        let bounded = region.rho.is_finite();
+        let half = region.half;
+        // The difference of the two levels' sums over the parts, and its bounds.
+        let level = |parts: &[usize]| -> (Own, Form<[f64; 3]>) {
+            let mut sum = PairSum::ZERO;
+            let mut bound = [0.0; 5];
+            for &k in parts {
+                let (a, b) = (&diagonal.sums[x][k], &diagonal.sums[y][k]);
+                sum.value += a.value - b.value;
+                for i in 0..3 {
+                    sum.gradient[i] += a.gradient[i] - b.gradient[i];
+                    for j in 0..3 {
+                        sum.hessian[i][j] += a.hessian[i][j] - b.hessian[i][j];
+                    }
+                }
+                for (total, part) in bound.iter_mut().zip(bounds[k]) {
+                    *total += part;
+                }
+            }
+            let [curve, radius, rest, veer, slope] = bound;
+            let at = sum.value.re;
+            let own = Own::new(at, sum.gradient.map(|z| z.re), curve, half).within(at - radius, at + radius);
+            let gradient = if bounded {
+                Form { value: sum.gradient.map(|z| z.re), first: std::array::from_fn(|i| sum.hessian[i].map(|z| z.re * half[i])), rest, moved: veer, most: slope }
+            } else {
+                Form::whole(slope)
+            };
+            (own, gradient)
+        };
+        let ((taken, taken_slope), (all, all_slope)) = (level(&[0]), level(&[0, 1]));
+        Gap { all, taken, all_slope, taken_slope }
+    }
+
+    /// The region's diagonal sums per state (`Diagonal`).
+    fn diagonal(&self, region: &Region) -> Diagonal {
+        let taken = region.forms.taken(self);
+        let curved = region.rho.is_finite() && region.rho > 0.0;
+        let mut sums = vec![[PairSum::ZERO; 2]; STATES];
+        for (frequency, pair, w) in region.forms.diagonals(self) {
+            let p = &region.pairs[*frequency][*pair];
+            let k = !taken[*frequency][*pair] as usize;
+            for (s, &x) in w.iter().enumerate().filter(|of| *of.1 != C64::ZERO) {
+                let sum = &mut sums[s][k];
+                sum.value += p.centre * x;
+                for i in 0..3 {
+                    sum.gradient[i] += p.gradient[i] * x;
+                    if curved {
+                        for j in 0..3 {
+                            sum.hessian[i][j] += p.hessian[i][j] * x;
+                        }
+                    }
+                }
+            }
+        }
+        Diagonal { sums }
     }
 
     /// The Gershgorin radii over a region of the constant forms' couplings among the excited states (per state; nothing for a
@@ -693,30 +827,19 @@ impl Model {
     pub(crate) fn couplings<'r>(&self, region: &'r Region) -> &'r [Couplings] {
         region.couplings.get_or_init(|| {
             let spans = &region.spans;
-            // A sum Σ_{l ∈ beams} a_l x_l over the excited states as its forms read it (reach.rs `Region::summed`): its value,
-            // slopes and second derivatives at the centre, and how far its beams move from theirs, how far they bow and their
-            // phase-blind sum -- [moved, bowed, blind], of the whole vector and per excited state --, and of the whole vector
-            // how far its beams' gradients move from theirs, their phase-blind sum and their gradients' Taylor remainders.
+            // A sum Σ_{l ∈ beams} a_l x_l over the excited states as its forms read it (reach.rs `Region::summed`): its value and
+            // slopes at the centre, and how far its beams move from theirs, how far they bow and their phase-blind sum --
+            // [moved, bowed, blind], of the whole vector and per excited state.
             #[derive(Clone, Copy)]
             struct Sum {
                 u: [C64; EXCITED],
                 slopes: [[C64; EXCITED]; 3],
-                second: [[[C64; EXCITED]; 3]; 3],
-                whole: [f64; 6],
+                whole: [f64; 3],
                 each: [[f64; 3]; EXCITED],
             }
-            let nothing = Sum { u: [C64::ZERO; EXCITED], slopes: [[C64::ZERO; EXCITED]; 3], second: [[[C64::ZERO; EXCITED]; 3]; 3], whole: [0.0; 6], each: [[0.0; 3]; EXCITED] };
+            let nothing = Sum { u: [C64::ZERO; EXCITED], slopes: [[C64::ZERO; EXCITED]; 3], whole: [0.0; 3], each: [[0.0; 3]; EXCITED] };
             let bounded = region.rho.is_finite();
-            // The second derivatives move ‖∇u‖ over a cell; on a point its own form is its value.
-            let curved = bounded && region.rho > 0.0;
             let norm_over = |sum: &Sum| region.summed(&sum.u, [&sum.slopes[0], &sum.slopes[1], &sum.slopes[2]], sum.whole[0], sum.whole[1], sum.whole[2]);
-            // ‖∇u‖ over the region: the norm of its Jacobian J = (∂_b u_e), its slopes ∂_a J the second derivatives (own.rs
-            // `Own::norm`).
-            let slope_over = |sum: &Sum| -> Own {
-                let value: Vec<C64> = sum.slopes.iter().flatten().copied().collect();
-                let second: [Vec<C64>; 3] = std::array::from_fn(|a| sum.second[a].iter().flatten().copied().collect());
-                Own::norm(&value, [&second[0], &second[1], &second[2]], sum.whole[5], sum.whole[3], sum.whole[4], region.half)
-            };
             let none = Own::constant(0.0);
             self.carriers
                 .iter()
@@ -724,9 +847,7 @@ impl Model {
                 .map(|(cc, folded)| {
                     let mut entry = [[none; EXCITED]; GROUND];
                     let mut column = [none; GROUND];
-                    let (mut per_unit, mut unit_slopes) = (vec![[none; GROUND]; folded.units.len()], vec![[none; GROUND]; folded.units.len()]);
-                    let mut unit_entries = vec![[[none; EXCITED]; GROUND]; folded.units.len()];
-                    let mut slope = [none; GROUND];
+                    let mut per_unit = vec![[none; GROUND]; folded.units.len()];
                     for s in 0..GROUND {
                         // Per polarization unit, and in all.
                         let mut all = nothing;
@@ -734,40 +855,29 @@ impl Model {
                             let mut unit = nothing;
                             for (l, entries) in beams {
                                 let span = &spans[cc.beams[*l]];
-                                let over = if bounded { [span.moved(), span.bowed(), span.most, span.veer(), span.steepest(), span.rest()] } else { [0.0, 0.0, span.most, f64::INFINITY, span.steepest(), f64::INFINITY] };
+                                let over = if bounded { [span.moved(), span.bowed(), span.most] } else { [0.0, 0.0, span.most] };
                                 for sum in [&mut unit, &mut all] {
                                     for &(e, v, size) in entries {
                                         sum.u[e] += span.centre * v;
                                         for a in 0..3 {
                                             sum.slopes[a][e] += span.gradient[a] * v;
                                             sum.each[e][a] += size * over[a];
-                                            if curved {
-                                                for b in 0..3 {
-                                                    sum.second[a][b][e] += span.hessian[a][b] * v;
-                                                }
-                                            }
                                         }
                                     }
-                                    for a in 0..6 {
+                                    for a in 0..3 {
                                         sum.whole[a] += folded.columns[s][*l] * over[a];
                                     }
                                 }
                             }
                             per_unit[ui][s] = norm_over(&unit);
-                            unit_slopes[ui][s] = slope_over(&unit);
-                            for &e in &folded.reached[s] {
-                                let slopes: [&[C64]; 3] = std::array::from_fn(|a| std::slice::from_ref(&unit.slopes[a][e]));
-                                unit_entries[ui][s][e] = region.summed(&[unit.u[e]], slopes, unit.each[e][0], unit.each[e][1], unit.each[e][2]);
-                            }
                         }
                         for &e in &folded.reached[s] {
                             let slopes: [&[C64]; 3] = std::array::from_fn(|a| std::slice::from_ref(&all.slopes[a][e]));
                             entry[s][e] = region.summed(&[all.u[e]], slopes, all.each[e][0], all.each[e][1], all.each[e][2]);
                         }
                         column[s] = norm_over(&all);
-                        slope[s] = slope_over(&all);
                     }
-                    Couplings { entry, column, units: per_unit, unit_entries, slope, unit_slopes }
+                    Couplings { entry, column, units: per_unit }
                 })
                 .collect()
         })
@@ -791,11 +901,10 @@ impl Model {
         let made = region.resolvents.get_or_init(|| {
             let radii = self.radii(region);
             let dissipation = 2.0 / region.forms.least_decay(self);
-            let gaps: Vec<[Own; EXCITED]> = (0..GROUND).map(|b| std::array::from_fn(|x| self.gap(GROUND + x, b, region).taken)).collect();
             let of = |delta: f64, b: usize| -> Own {
                 let mut least: Option<Own> = None;
-                for (x, gap) in gaps[b].iter().enumerate() {
-                    let apart = gap.plus(-delta).abs().hypot(0.5 * self.decay[(x, x)].re).sub(radii[GROUND + x]);
+                for x in 0..EXCITED {
+                    let apart = self.gap(GROUND + x, b, region, delta).taken.abs().hypot(0.5 * self.decay[(x, x)].re).sub(radii[GROUND + x]);
                     least = Some(least.map_or(apart, |least| least.min(apart)));
                 }
                 let least = least.expect("an atom has excited states");
@@ -832,102 +941,80 @@ impl Model {
     }
 
     /// The carriers' dressings ΔE_b^d of the ground states over a region with their signs, [carrier][state], made once per
-    /// region, each in its own form: ΔE = −Re Σ_units u†(K − z)⁻¹u, z = E_b + δ_d. With K − z = D + C, D its diagonal --
-    /// E_e − z − iΓ_e/2 of the levels the eliminations take (`Gap`) -- and C the far couplings among the excited states,
-    /// u†(D + C)⁻¹u = u†D⁻¹u − u†D⁻¹C(D + C)⁻¹u: the first Σ_e |u_e|²/(Δ_e − iΓ_e/2), whose real part is each excited
-    /// state's dispersive shape (own.rs `Own::dispersion`) of each unit's entry (`Couplings::unit_entries`), the second at
-    /// most ‖u‖² ‖C‖ ‖(K − z)⁻¹‖/min_e |Δ_e − iΓ_e/2|, ‖C‖ at most the largest Gershgorin radius (`radii`) and the
-    /// resolvent's bound `resolvent_own`; within the dressing's bound (`dressings`). A two-photon distance moves by the
-    /// difference of its two levels' dressings (units.rs `Model::across`): two Zeeman sublevels the same light dresses alike
-    /// stay as far apart as they were, where the two dressings' bounds added -- 12.8 rad/µs on the user's F=1 m=−1 --
-    /// closed the 13.2 rad/µs between them.
-    pub(crate) fn dressing_shifts<'r>(&self, region: &'r Region) -> &'r [[Own; GROUND]] {
+    /// region (`Shift`): ΔE = −Re Σ_units u†(K − z)⁻¹u, z = E_b + δ_d. With K − z = D + C, D its diagonal -- E_e − z − iΓ_e/2
+    /// of the levels the eliminations take (`Gap`) -- and C the far couplings among the excited states, u†(D + C)⁻¹u = u†D⁻¹u −
+    /// u†D⁻¹C(D + C)⁻¹u: the first Σ_e |u_e|²/(Δ_e − iΓ_e/2), whose real part is each excited state's dispersive shape φ
+    /// (own.rs `Own::dispersion`) times each unit's |u_e|² -- the band's smooth part, its gradient Σ (∇|u_e|² φ(Δ_e) + |u_e|²
+    /// φ'(Δ_e) ∇Δ_e) of the intensity's own forms and the gap's (reach.rs `Region::intensity`, `Gap`) --, the second at most
+    /// ‖u‖² ‖C‖ ‖(K − z)⁻¹‖/min_e |Δ_e − iΓ_e/2|, ‖C‖ at most the largest Gershgorin radius (`radii`) and the resolvent's
+    /// bound `resolvent_own`: the band's radius; its ends each within the dressing's bound (`dressings`).
+    /// A two-photon distance moves by the difference of its two levels' dressings (units.rs `Model::across`): two Zeeman
+    /// sublevels the same light dresses alike stay as far apart as they were, where the two dressings' bounds added -- 12.8
+    /// rad/µs on the user's F=1 m=−1 -- closed the 13.2 rad/µs between them.
+    pub(crate) fn dressing_shifts<'r>(&self, region: &'r Region) -> &'r [[Shift; GROUND]] {
         region.shifted.get_or_init(|| {
             let (couplings, dressings, radii) = (self.couplings(region), self.dressings(region), self.radii(region));
             let folded = region.forms.folded(self);
             let none = Own::constant(0.0);
-            let coupled = (GROUND..STATES).map(|x| radii[x].upper()).fold(0.0, f64::max);
+            let coupled = (GROUND..STATES).map(|x| radii[x]).fold(none, Own::max);
             (0..self.carriers.len())
                 .map(|d| {
+                    let (cc, of) = (&self.carriers[d], &folded[d]);
                     std::array::from_fn(|b| {
-                        let (cd, of) = (&couplings[d], &folded[d]);
-                        let shapes: Vec<(usize, Own, f64)> = of.reached[b]
+                        // Per excited state the dispersive shape at its detuning and its slope there, the detuning's gradient,
+                        // and |Δ_e − iΓ_e/2|.
+                        let lines: Vec<(usize, Own, Own, Form<[f64; 3]>, Own)> = of.reached[b]
                             .iter()
                             .map(|&e| {
                                 let gamma = 0.5 * self.decay[(e, e)].re;
-                                let detuning = self.gap(GROUND + e, b, region).taken.plus(-self.carriers[d].detuning);
-                                (e, detuning.dispersion(gamma), detuning.abs().hypot(gamma).lower())
+                                let gap = self.gap(GROUND + e, b, region, cc.detuning);
+                                (e, gap.taken.dispersion(gamma), gap.taken.dispersion_slope(gamma), gap.taken_slope, gap.taken.abs().hypot(gamma))
                             })
                             .collect();
-                        let least = shapes.iter().map(|x| x.2).fold(f64::INFINITY, f64::min);
-                        let (mut shift, mut norms) = (none, 0.0);
-                        for (unit, size) in cd.unit_entries.iter().zip(&cd.units) {
-                            for &(e, shape, _) in &shapes {
-                                shift = shift.sub(unit[b][e].square().mul(shape));
+                        let (mut shift, mut norms) = (Shift::none(), none);
+                        for (beams, size) in of.beams[b].iter().zip(&couplings[d].units) {
+                            for (e, shape, bend, slope, _) in &lines {
+                                let entries: Vec<(usize, C64, f64)> = beams.iter().flat_map(|(l, entries)| entries.iter().filter(|x| x.0 == *e).map(|&(_, v, size)| (cc.beams[*l], v, size))).collect();
+                                if entries.is_empty() {
+                                    continue;
+                                }
+                                let (square, square_slope) = region.intensity(self, cc.frequency, &entries);
+                                shift.band.mid = shift.band.mid.sub(square.mul(*shape));
+                                shift.slope = shift.slope.sub(square_slope.by(shape).add(slope.by(&square.mul(*bend))));
                             }
-                            norms += size[b].upper().powi(2);
+                            norms = norms.add(size[b].square());
                         }
-                        let beyond = if norms == 0.0 { 0.0 } else { norms * coupled * self.resolvent(d, b, region) / least };
-                        let most = dressings[d][b].upper();
-                        shift.add(Own::range(0.0, -beyond, beyond)).within(-most, most)
+                        shift.band.rad = match lines.iter().map(|x| x.4).reduce(Own::min) {
+                            Some(least) if norms.upper() > 0.0 => norms.mul(coupled).mul(self.resolvent_own(d, b, region)).div(least).within(0.0, f64::INFINITY),
+                            _ => none,
+                        };
+                        shift.band = shift.band.within(dressings[d][b]);
+                        shift
                     })
                 })
                 .collect()
         })
     }
 
-    /// |∇ Σ_pairs c_l'l w(P_l'l)| over a region, the far light's static forms each weighted by `w` (an entry, a diagonal's
-    /// difference; reach.rs `Weights`), in its own form (reach.rs `Region::steepness`; rad/µs/µm).
-    pub(crate) fn far_gradient(&self, region: &Region, w: &Weights) -> Own {
-        region.steepness(w.iter().map(|&(frequency, pair, x, size)| (region.pairs[frequency][pair], x, size)))
-    }
-
-    /// |∇(E_x − E_y)| of the far light's diagonal over a region (rad/µs/µm, `far_gradient`).
-    pub(crate) fn energy_slope_over(&self, x: usize, y: usize, region: &Region) -> Own {
-        self.far_gradient(region, region.forms.difference(self, x, y))
-    }
-
-    /// The bound over a region of |∇| of a carrier's light shift of ground state b (module documentation, # Derivatives),
-    /// ΔE = −Re u_b† R u_b with u_b its field's coherent column (in all, or per polarization unit: its dressing, T̄), in its own
-    /// form: |∂ΔE| ≤ 2 ‖R‖ ‖u_b‖ ‖∂u_b‖ + ‖u_b‖² ‖∂R‖ -- ‖u_b‖ and ‖∇u_b‖ the field's own forms (`Couplings`), never its beam
-    /// pairs' slopes added blind to their phases, which at a standing wave's crests and nodes read 2k|X|² where the shift is
-    /// flat --, the resolvent's derivative ∂R = −R ∂(K − z) R at most L_b ‖R‖², L_b the slope of the levels the column reaches
-    /// (b's and its excited states', `energy_slope_over`); ‖R‖ the dressing's resolvent bound (`resolvent_own`), or for the
-    /// shift in the generator one over the least distance of the carrier's drives of b folded at the atom, each as its own
-    /// gate reads it over the region -- its self-energy, the other carriers' dressing and the Doppler shift in it (units.rs
-    /// `Model::least_across`, # What a folded drive does to its level).
-    pub(crate) fn shift_slope(&self, carrier: usize, b: usize, region: &Region, dressing: bool) -> Own {
-        let none = Own::constant(0.0);
-        let couplings = &self.couplings(region)[carrier];
-        let folded = &region.forms.folded(self)[carrier];
-        if folded.columns[b].iter().all(|&c| c == 0.0) {
-            return none;
-        }
-        let slopes = self.level_slopes(b, region);
-        let levels = folded.reached[b].iter().map(|&e| slopes[e]).fold(none, Own::max);
-        let resolvent = if dressing { self.resolvent_own(carrier, b, region) } else { self.least_across(carrier, b, region).map_or(none, Own::recip) };
-        let (field, square) = if dressing {
-            (
-                couplings.units.iter().zip(&couplings.unit_slopes).fold(none, |sum, (u, g)| sum.add(u[b].mul(g[b]).scale(2.0))),
-                couplings.units.iter().fold(none, |sum, u| sum.add(u[b].square())),
-            )
-        } else {
-            (couplings.column[b].mul(couplings.slope[b]).scale(2.0), couplings.column[b].square())
-        };
-        field.mul(resolvent).add(square.mul(levels).mul(resolvent.square())).within(0.0, f64::INFINITY)
+    /// ∇ Σ_pairs c_l'l [P_l'l]_xy over a region, the far light's static forms' entry (x, y) (reach.rs `Region::gradient`;
+    /// rad/µs/µm).
+    pub(crate) fn entry_slope(&self, x: usize, y: usize, region: &Region) -> Form<[C64; 3]> {
+        region.gradient(region.forms.entry(self, x, y).iter().map(|&(frequency, pair, w, size)| (region.pairs[frequency][pair], w, size)))
     }
 
     /// The bound of the force on a cluster's state over a region (rad/µs/µm), made once per region and cluster, in its own form:
-    /// −⟨ψ|∇H_h|ψ⟩ at most the gradient's norm, at most the largest over its states of their rows' sums -- the far light's
-    /// |∇H_xy| (`far_gradient`) and each lit carrier's light shift's (`shift_slope`) --, and the scattering's mean recoil
-    /// k_max Γ_max/2 (the jumps' mean force at most).
+    /// −⟨ψ|∇H_h|ψ⟩ at most the gradient's norm, at most the largest over its states of their rows' sums -- a state's own level
+    /// with its shift by its drives folded at the atom, one gradient (units.rs `Model::near_level`), and the far light's
+    /// |∇H_xy| to the cluster's other states (`entry_slope`) --, and the scattering's mean recoil k_max Γ_max/2 (the jumps'
+    /// mean force at most).
     pub(crate) fn force_over(&self, cluster: usize, region: &Region) -> Own {
         *region.forces[cluster].get_or_init(|| {
             let states = &self.clusters[cluster].states;
             let k_max = self.carriers.iter().flat_map(|c| c.beams.iter().map(|&l| self.light.beams[l].wave_number)).fold(0.0, f64::max);
             let mut most: Option<Own> = None;
             for &x in states {
-                let row = states.iter().fold(self.near_slope(x, region), |row, &y| row.add(self.far_gradient(region, region.forms.entry(self, x, y))));
+                let own = Shift::of(Own::constant(0.0), self.entry_slope(x, x, region).re()).add(&self.near_level(x, region)).steepness();
+                let row = states.iter().filter(|&&y| y != x).fold(own, |row, &y| row.add(self.entry_slope(x, y, region).norm()));
                 most = Some(most.map_or(row, |most| most.max(row)));
             }
             let gamma_max = (0..EXCITED).map(|x| self.decay[(x, x)].re).fold(0.0, f64::max);
@@ -1005,24 +1092,32 @@ impl Model {
     /// state's and not the drive's alone (units.rs, # The fold's order): the drive's line errs by M^k, M the larger of the
     /// state's excited share S_b = 2 Σ_e |R[e, b]|² and of twice its level's own second-order term across the drive's
     /// distance, 2|N_bb|/|ΔE| -- on one line both are s --, on the drive's part s/S_b of the state's excitation
-    /// (`Folded::order`). The second order's s M/S_b p_b on the populations and on T, where its cluster's fold has no
-    /// other order; where it has, nothing at the second order (the order is the cluster's own unit's, `Unit::Second`),
-    /// and at the fourth what it leaves: `ORDER_RATES` s M²/S_b p_b on the populations and (`ORDER_FORCE` s M²/S_b + the
-    /// cluster's ground levels' spread over the drive's distance times s) p_b on T. A state's drives at one distance add
-    /// up to S_b p_b and c S_b² p_b. With the drive's response there, where the cluster holds it (`pair_error` reads it).
+    /// (`Folded::order`). Its line's rate off by M^k moves the populations by what its flows move (units.rs `Model::moved`,
+    /// # A rate's error on the populations) and its folded excited population s/2 p_b by M^k of it, on the populations
+    /// and on T, where its cluster's fold has no other order -- and the second order's s M/S_b p_b on T; where it has,
+    /// nothing at the second order (the order is the cluster's own unit's, `Unit::Second`), and at the fourth what it
+    /// leaves: `ORDER_RATES` M² of the flows and the excited population, and (`ORDER_FORCE` s M²/S_b + the cluster's ground
+    /// levels' spread over the drive's distance times s) p_b on T. A state's drives at one distance add up to S_b p_b and
+    /// c S_b² p_b on T. With the drive's response there, where the cluster holds it (`pair_error` reads it).
     pub(crate) fn drive_error(&self, unit: &Unit, at: &Measured) -> (UnitError, Option<C64>) {
-        let Some(drive) = self.drive_parameters(unit, at) else { return (UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 }, None) };
+        let Some(drive) = self.drive_parameters(unit, at) else { return (UnitError::NONE, None) };
         let (s, cluster) = (drive.share, at.sample.cluster);
-        let (rates, force) = match (self.fourth[cluster], self.fold_frequency(cluster)) {
+        let Unit::Drive { component, excited, ground } = *unit else { unreachable!("a drive's parameters are a drive's") };
+        let m = drive.total * drive.reads;
+        // What its line's order moves: its flows' part and its excited population's.
+        let moved = |line: f64| self.moved(at, Flow::Atom(component, excited, ground)) + 0.5 * s * line * drive.population;
+        let flow = self.moved(at, Flow::Atom(component, excited, ground));
+        let (populations, force) = match (self.fourth[cluster], self.fold_frequency(cluster)) {
             (Some(_), _) => {
                 let levels = self.clusters[cluster].states.iter().map(|&b| at.energies[0][b]);
                 let spread = levels.clone().fold(f64::NEG_INFINITY, f64::max) - levels.fold(f64::INFINITY, f64::min);
-                (super::units::ORDER_RATES * drive.order(2), super::units::ORDER_FORCE * drive.order(2) + spread / drive.distance * s)
+                (moved(super::units::ORDER_RATES * m * m), (super::units::ORDER_FORCE * drive.order(2) + spread / drive.distance * s) * drive.population)
             }
             (None, Some(_)) => (0.0, 0.0),
-            (None, None) => (drive.order(1), drive.order(1)),
+            (None, None) => (moved(m), drive.order(1) * drive.population),
         };
-        (UnitError { parameter: s, population: rates * drive.population, temperature: (force + drive.doppler + drive.sweep) * drive.population }, Some(drive.response))
+        let flow = if populations > 0.0 { flow } else { 0.0 };
+        (UnitError { parameter: s, population: populations, temperature: force + populations + (drive.doppler + drive.sweep) * drive.population, moved: flow, into: 0 }, Some(drive.response))
     }
 
     /// A carrier's explicit coupling e ← a at a point, Σ_l a_l X_l[e, a].
@@ -1088,7 +1183,7 @@ impl Model {
         let side = component.counter as usize;
         let (nu, h) = (self.tones[component.frequency].nu[side], &at.energies[0]);
         let legs = self.pair_legs(component, excited, ground);
-        let mut error = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
+        let mut error = UnitError::NONE;
         if legs.is_empty() {
             return error;
         }
@@ -1103,29 +1198,42 @@ impl Model {
                 error.temperature += s * p[ground];
             }
         }
-        let c = &self.clusters[at.sample.cluster];
-        if let Some(pe) = c.states.iter().position(|&s| s == excited).filter(|_| c.ground > 0 && p[excited] > 0.0) {
-            let beams = &self.light.frequencies[component.frequency].beams;
-            let u: C64 = beams.iter().zip(&self.tones[component.frequency].couplings[side]).map(|(&l, x)| if component.counter { at.amplitudes[l].value.conj() } else { at.amplitudes[l].value } * x[(excited, ground)]).sum();
-            let frame = |place: usize| self.axes.omega(&c.frames[place]);
-            let read = self.read(c, pe, h, true);
-            let each = |pa: usize| frame(pe) - frame(pa) + h[c.states[pa]];
-            let nearest = (0..c.ground).map(|pa| ((each(pa) - h[ground] - nu).abs() - lift(c.states[pa]) - lift(ground)).max(0.0)).fold(f64::INFINITY, f64::min);
-            let off = (0..c.ground).map(|pa| (each(pa) - read).abs()).fold(0.0, f64::max);
-            let s = super::units::PAIR * 0.5 * gate(u.abs() * p[excited].sqrt(), nearest, 0.0).saturation;
-            // The kept lines through e: their nearest denominator, and their coupling's energy in the state.
-            let gamma = self.decay[(excited - GROUND, excited - GROUND)].re;
-            let own = (0..c.ground).map(|pa| C64::new(h[excited] - each(pa), 0.5 * gamma).abs()).fold(f64::INFINITY, f64::min);
-            let kept: f64 = (0..c.ground).map(|pa| self.legs[excited - GROUND].iter().filter(|leg| leg.1 == c.states[pa]).map(|&(d, a)| self.kept_at(at, d, excited, a)).sum::<C64>().abs() * (p[excited] * p[c.states[pa]]).sqrt()).sum();
-            let epsilon = gate(0.0, nearest, u.norm_sqr() * off).sweep / own;
+        if let Some((s, epsilon, kept)) = self.pair_reading(component, excited, ground, at) {
             let held: f64 = p[..GROUND].iter().sum();
             let share = |of: f64, all: f64| if all > 0.0 { of / all } else { 0.0 };
             let (rates, shifts) = (2.0 * epsilon * share(p[excited], at.rates) * held, epsilon * share(kept, at.shifts) * held);
+            let moved = self.moved(at, Flow::Kept(component, excited, ground));
             error.parameter = error.parameter.max(s);
-            error.population += s + rates;
-            error.temperature += s + rates + shifts;
+            error.population += s + moved;
+            error.temperature += s + rates + shifts + moved;
+            error.moved += moved;
         }
         error
+    }
+
+    /// The reading of a drive U (e ← b at ν) folded onto an explicit state e by the kept lines through e, at a sample in
+    /// e's cluster (`pair_error`): the pair's mixing `units::PAIR` m², m² = |U|² p_e/d_R² over the nearest two-photon
+    /// distance; the relative error ε of the kept lines' response, |U|² off/d_R² over their nearest denominator; and the
+    /// kept couplings' energy in the state. None off e's cluster or where e is empty.
+    pub(crate) fn pair_reading(&self, component: Component, excited: usize, ground: usize, at: &Measured) -> Option<(f64, f64, f64)> {
+        let side = component.counter as usize;
+        let (nu, h, p) = (self.tones[component.frequency].nu[side], &at.energies[0], &at.populations);
+        let lift = |s: usize| self.lifts_at(at, s);
+        let c = &self.clusters[at.sample.cluster];
+        let pe = c.states.iter().position(|&s| s == excited).filter(|_| c.ground > 0 && p[excited] > 0.0)?;
+        let beams = &self.light.frequencies[component.frequency].beams;
+        let u: C64 = beams.iter().zip(&self.tones[component.frequency].couplings[side]).map(|(&l, x)| if component.counter { at.amplitudes[l].value.conj() } else { at.amplitudes[l].value } * x[(excited, ground)]).sum();
+        let frame = |place: usize| self.axes.omega(&c.frames[place]);
+        let read = self.read(c, pe, h, true);
+        let each = |pa: usize| frame(pe) - frame(pa) + h[c.states[pa]];
+        let nearest = (0..c.ground).map(|pa| ((each(pa) - h[ground] - nu).abs() - lift(c.states[pa]) - lift(ground)).max(0.0)).fold(f64::INFINITY, f64::min);
+        let off = (0..c.ground).map(|pa| (each(pa) - read).abs()).fold(0.0, f64::max);
+        let s = super::units::PAIR * 0.5 * gate(u.abs() * p[excited].sqrt(), nearest, 0.0).saturation;
+        // The kept lines through e: their nearest denominator, and their coupling's energy in the state.
+        let gamma = self.decay[(excited - GROUND, excited - GROUND)].re;
+        let own = (0..c.ground).map(|pa| C64::new(h[excited] - each(pa), 0.5 * gamma).abs()).fold(f64::INFINITY, f64::min);
+        let kept: f64 = (0..c.ground).map(|pa| self.legs[excited - GROUND].iter().filter(|leg| leg.1 == c.states[pa]).map(|&(d, a)| self.kept_at(at, d, excited, a)).sum::<C64>().abs() * (p[excited] * p[c.states[pa]]).sqrt()).sum();
+        Some((s, gate(0.0, nearest, u.norm_sqr() * off).sweep / own, kept))
     }
 
     /// The response an explicit state's kept drives would make folded at the atom, of a cluster's state ψ at a point
