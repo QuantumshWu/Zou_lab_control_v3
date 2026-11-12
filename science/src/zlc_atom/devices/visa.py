@@ -13,6 +13,8 @@ from __future__ import annotations
 import threading
 from typing import Protocol
 
+from zlc_atom.devices.vendor import installed_distribution
+
 
 class ScpiLink(Protocol):
     """The whole transport surface a SCPI instrument needs."""
@@ -68,7 +70,7 @@ def visa_resources() -> VisaResources:
         except Exception:  # noqa: BLE001 - the first failure is the one to report
             backends = "unknown"
         raise RuntimeError(
-            f"PyVISA {pyvisa.__version__} is installed for {sys.executable} "
+            f"{installed_distribution('pyvisa') or 'PyVISA'} is installed for {sys.executable} "
             f"but no backend answered (it offers: {backends}); 'ivi' means a "
             "system NI-VISA whose visa32/visa64 DLL was not found, so install "
             "NI-VISA, or `pip install PyVISA-py` into that same interpreter "
@@ -170,12 +172,9 @@ def idn_device_info(identity: str, resource: str) -> dict[str, str]:
     fields = identity_fields(identity)
     facts = dict(zip(("vendor", "model", "serial", "firmware"), fields))
     facts.update(idn=str(identity), resource=str(resource))
-    try:
-        from importlib.metadata import version  # noqa: PLC0415
-
-        facts["driver"] = f"pyvisa {version('pyvisa')}"
-    except Exception:  # noqa: BLE001 -- a VISA installed some other way is still the one in use
-        pass
+    driver = installed_distribution("pyvisa")
+    if driver is not None:
+        facts["driver"] = driver
     return facts
 
 

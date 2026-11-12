@@ -22,7 +22,7 @@ from zlc_data import (
     owned_snapshot_from_arrays,
 )
 from zlc_data.value import dataset_validity_storage
-from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput
+from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput, journal
 from zlc_data.point_overlay import IMAGE_POINT_OVERLAY_CONTRACT, IMAGE_POINT_OVERLAY_GEOMETRY_RECORD, image_point_overlay_geometry
 
 from zlc_atom.nodes._framework.frames import REST, assign_frames, canonical_frames, check_claims, claim_names
@@ -239,8 +239,9 @@ class OccupancyProcessor:
         them.  The camera's run record does not: read from that record alone,
         a scan's frames were neither placed nor checked, and a scan whose ROI
         had moved read every site off by the move, or classified counts by
-        thresholds trained in photoelectrons.  The record still says the one
-        thing the frames cannot, the shape of the whole sensor.
+        thresholds trained in photoelectrons.  The record still says what the
+        frames cannot: the shape of the whole sensor, and the exposure and
+        readout the camera read back for them.
         """
 
         self.placed = tuple(reading.calibration for reading in self.readings)
@@ -248,7 +249,13 @@ class OccupancyProcessor:
         self._refuse_a_different_unit(schema.value_schema.value_unit)
         snapshots = source.run_record.get("device_snapshots")
         camera = snapshots.get("camera") if isinstance(snapshots, Mapping) else None
-        sensor = camera.get("sensor_shape_yx") if isinstance(camera, Mapping) else None
+        camera = camera if isinstance(camera, Mapping) else {}
+        # Each calibration's thresholds hold for the exposure and readout it
+        # was trained at (FrameContract.refuse_other_acquisition).
+        for name, reading in zip(self._names, self.readings):
+            reading.calibration.frame_contract.refuse_other_acquisition(
+                camera.get("exposure_seconds"), camera.get("readout_mode"), name=name)
+        sensor = camera.get("sensor_shape_yx")
         if sensor is not None:
             sensor = tuple(int(item) for item in sensor)
             for name, placed in zip(self._names, self.placed):
@@ -545,8 +552,15 @@ class OccupancyProcessor:
         # the frame shape was compared with the crop the calibration was
         # MEASURED on and a run that had moved its ROI was refused before the
         # translation it needed had been computed.
-        self._place_against_the_frames(signal_value)
-        result = self.process(snapshot)
+        try:
+            self._place_against_the_frames(signal_value)
+            result = self.process(snapshot)
+        except ValueError as refusal:
+            # Frames a calibration does not apply to -- another sensor, crop,
+            # binning, unit, exposure or readout -- are refused, and the
+            # journal says why beside the run it ends.
+            journal.note("occupancy", "frames_refused", signal=signal_value.name, reason=str(refusal))
+            raise
         return self._live_outputs(
             result,
             source=signal_value,

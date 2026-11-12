@@ -510,6 +510,12 @@ def reads_photoelectrons(calibration: "TrapCalibration") -> bool | None:
     return bool((record.get("request") or {}).get("photoelectrons", False))
 
 
+def _milliseconds(seconds: float) -> str:
+    """An exposure as the operator reads it, to every digit it was recorded with."""
+
+    return f"{float(seconds) * 1e3:.12g} ms"
+
+
 @dataclass(frozen=True)
 class FrameContract:
     """Physical image facts on which a calibration is valid."""
@@ -553,6 +559,40 @@ class FrameContract:
                     raise TypeError(f"{name} must be a string or None")
                 if not value.strip():
                     raise ValueError(f"{name} cannot be blank")
+
+    def refuse_other_acquisition(
+        self,
+        exposure_seconds: float | None,
+        readout_mode: str | None,
+        *,
+        name: str = "the calibration",
+    ) -> None:
+        """Refuse frames taken at another exposure or readout than these thresholds were trained at.
+
+        A site's counts are what the sensor integrated over its exposure --
+        background, stray light, and the signal of every light window the
+        exposure covers -- read out as its readout mode reads it.  Thresholds
+        trained on one acquisition separate the counts of THAT acquisition; at
+        another they no longer stand between the same two distributions, and
+        nothing here can say by how much, so nothing is rescaled.  Both sides
+        are the camera's own readback (this contract's, and the one the frames
+        were taken with), compared as recorded: the contract keeps no exposure
+        resolution to compare within.  A fact either side does not record is
+        not compared.
+        """
+
+        for what, frames, trained, shown in (
+            ("exposure", None if exposure_seconds is None else float(exposure_seconds),
+             self.exposure_seconds, _milliseconds),
+            ("readout mode", None if readout_mode is None else str(readout_mode), self.readout_mode, str),
+        ):
+            if frames is None or trained is None or frames == trained:
+                continue
+            raise ValueError(
+                f"these frames were taken at {what} {shown(frames)} and {name} was "
+                f"trained at {shown(trained)}; its thresholds do not apply -- "
+                f"calibrate at {shown(frames)}, or take the frames at {shown(trained)}"
+            )
 
     def assert_image(self, image: object) -> np.ndarray:
         payload = image.values if hasattr(image, "values") else image.image if hasattr(image, "image") else image

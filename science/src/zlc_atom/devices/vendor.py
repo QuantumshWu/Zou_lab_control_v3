@@ -70,4 +70,22 @@ def resolve_vendor_file(anchor_file: str, filename: str, *, what: str) -> str:
     )
 
 
-__all__ = ["MANIFEST_NAME", "resolve_vendor_file", "vendor_directory"]
+def installed_distribution(name: str) -> str | None:
+    """``"<name> <version>"`` of the Python distribution ``name`` as installed for this
+    interpreter, for a ``device_info`` that says which SDK binding reached the device; None when
+    it is not installed.
+
+    Read from the installed distribution's metadata, which every installer writes, never from
+    the module's ``__version__``: that attribute is optional, and some vendor bindings do not
+    set it (the lab's pypylon), so reading it said ``"pypylon ?"`` of a binding that was there.
+    """
+
+    from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+
+    try:
+        return f"{name} {version(name)}"
+    except PackageNotFoundError:
+        return None
+
+
+__all__ = ["MANIFEST_NAME", "installed_distribution", "resolve_vendor_file", "vendor_directory"]

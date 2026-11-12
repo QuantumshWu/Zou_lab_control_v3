@@ -41,6 +41,7 @@ import numpy as np
 
 from zlc_atom.authoring import AuthoringField, TunableField, TuneRefused
 from zlc_atom.devices import RecordQueue, free_serial_ports
+from zlc_atom.devices.vendor import installed_distribution
 from zlc_atom.devices.waveform.contract import (
     WaveformAcquisitionMode,
     WaveformCaptureTerminalRecord,
@@ -274,6 +275,19 @@ class Hwt3100WaveformSource:
     @property
     def identity(self) -> str:
         return f"witmotion-hwt3100:{self.config.port}"
+
+    def device_info(self) -> dict[str, object]:
+        """Where the sensor answered when it opened -- port, Modbus address, the baud it is on and
+        how that baud was found -- and the pyserial that reached it.  The sensor has no register
+        that states its model or firmware (``modbus``), so nothing is asked."""
+
+        return {
+            "port": self.config.port,
+            "address": f"0x{self.config.address:02X}",
+            "baud": self._baud,
+            "baud_note": self._baud_note,
+            "driver": installed_distribution("pyserial"),
+        }
 
     @property
     def outputs(self) -> tuple[WaveformOutput, ...]:

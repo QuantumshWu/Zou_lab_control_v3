@@ -24,7 +24,7 @@ def positive_real(value: object, field: str) -> float:
     return finite_real(value, field, positive=True)
 
 
-from ._dcam_driver import DcamProperty, DcamSdkDriver, DcamValue
+from ._dcam_driver import DcamIdString, DcamProperty, DcamSdkDriver, DcamValue
 from ..roi_grid import snap_roi_axis
 from ._owner_lane import CameraSdkOwnerLane
 from ..contract import (
@@ -40,6 +40,18 @@ from ..photoelectrons import stated_conversion
 
 
 _CAPTURE_STATUS_BUSY = 1
+#: What the camera states of itself at open (``dcamdev_getstring``), by the
+#: name ``device_info`` gives each.
+_DEVICE_STRINGS = (
+    ("vendor", DcamIdString.VENDOR),
+    ("model", DcamIdString.MODEL),
+    ("serial", DcamIdString.CAMERAID),
+    ("firmware", DcamIdString.CAMERAVERSION),
+    ("driver", DcamIdString.DRIVERVERSION),
+    ("module", DcamIdString.MODULEVERSION),
+    ("sdk", DcamIdString.DCAMAPIVERSION),
+    ("bus", DcamIdString.BUS),
+)
 _WAIT_SLICE_SECONDS = 0.05
 
 
@@ -127,6 +139,7 @@ class DcamCameraAdapter:
         self._records = RecordQueue("qCMOS", join_timeout_seconds=config.timeout_seconds)
         self._finish_requested = threading.Event()
         self._device: object | None = None
+        self._device_facts: dict[str, str] = {}
         self._open = False
         self._armed = False
         self._capture_running = False
@@ -180,6 +193,7 @@ class DcamCameraAdapter:
         try:
             self._device = self._driver.open_device(self._config.device_index)
             self._open = True
+            self._device_facts = self._read_device_facts_on_owner()
             self._working_point = self._apply_settings_on_owner(self._config)
             self._requested_settings = {
                 "roi_xywh": self._config.roi_xywh,
@@ -195,6 +209,31 @@ class DcamCameraAdapter:
                 except BaseException as secondary:
                     primary.add_note(f"DCAM close after open failure also failed: {secondary}")
             raise
+
+    def _read_device_facts_on_owner(self) -> dict[str, str]:
+        """Each string the open camera answers; one it refuses is named with
+        its error under ``unanswered``, never the open's failure."""
+
+        device = self._require_device()
+        facts: dict[str, str] = {}
+        unanswered: list[str] = []
+        for name, string_id in _DEVICE_STRINGS:
+            try:
+                facts[name] = device.get_string(string_id)
+            except Exception as error:  # noqa: BLE001 -- what it says of itself never fails its open
+                unanswered.append(f"{name} ({error})")
+        if "sdk" in facts:
+            facts["sdk"] = f"DCAM-API {facts['sdk']}"
+        if unanswered:
+            facts["unanswered"] = "; ".join(unanswered)
+        return facts
+
+    def device_info(self) -> dict[str, str]:
+        """What the camera stated of itself when it opened (``dcamdev_getstring``:
+        vendor, model, serial, firmware, driver, module and DCAM-API versions,
+        bus); nothing is asked again."""
+
+        return dict(self._device_facts)
 
     @staticmethod
     def _integral(value: float, field: str, *, positive: bool = False) -> int:

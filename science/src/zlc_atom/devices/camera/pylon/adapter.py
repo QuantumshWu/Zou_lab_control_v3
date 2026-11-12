@@ -24,6 +24,7 @@ from uuid import uuid4
 
 import numpy as np
 from zlc_atom.devices import RecordQueue
+from zlc_atom.devices.vendor import installed_distribution
 
 from ....authoring import AuthoringField, TunableField
 from ..roi_grid import snap_roi_axis
@@ -200,12 +201,10 @@ class PylonCameraAdapter:
         """What the camera says of itself: its pylon device info (found when it was enumerated,
         no camera traffic) and the pylon and pypylon in use."""
 
-        facts: dict[str, object] = {}
+        facts: dict[str, object] = {"sdk": installed_distribution("pypylon")}
         try:
-            import pypylon  # noqa: PLC0415 -- lazy, as open()
-            from pypylon import pylon  # noqa: PLC0415
+            from pypylon import pylon  # noqa: PLC0415 -- lazy, as open()
 
-            facts["sdk"] = f"pypylon {getattr(pypylon, '__version__', '?')}"
             version = getattr(pylon, "GetPylonVersionString", None)
             if callable(version):
                 facts["driver"] = f"pylon {version()}"
