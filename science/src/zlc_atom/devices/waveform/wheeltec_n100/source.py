@@ -48,7 +48,7 @@ from uuid import uuid4
 
 import numpy as np
 
-from zlc_atom.devices import RecordQueue, free_serial_ports
+from zlc_atom.devices import RecordQueue, SerialPortError, free_serial_ports, open_serial_port, serial_ports_here
 from zlc_atom.authoring import (
     AuthoringChoice,
     AuthoringField,
@@ -397,21 +397,6 @@ class WheeltecN100Config:
         object.__setattr__(self, "timeout_seconds", float(self.timeout_seconds))
 
 
-def _other_ports_on_this_machine() -> str:
-    """The rest of the serial ports, named, so the next guess is informed."""
-
-    try:
-        from serial.tools import list_ports
-
-        listed = [
-            f"{item.device} ({item.description})"
-            for item in sorted(list_ports.comports(), key=lambda item: item.device)
-        ]
-    except Exception:  # noqa: BLE001 -- this is already an error message
-        return ""
-    return ("This machine has: " + "; ".join(listed)) if listed else ""
-
-
 def wake_from_config_mode(port) -> None:
     """Take a module that was left in its console back on the air.
 
@@ -435,9 +420,7 @@ def wake_from_config_mode(port) -> None:
 
 
 def _open_serial(port: str, baud: int):
-    import serial
-
-    return serial.Serial(port, baud, timeout=0.05, write_timeout=1.0)
+    return open_serial_port(port, baud, timeout=0.05, write_timeout=1.0)
 
 
 #: How many of a silent port's bytes to keep as evidence: enough to show
@@ -739,8 +722,7 @@ class WheeltecN100WaveformSource:
             return (
                 "Not one byte arrived. The port opened, so it exists and nothing "
                 "else holds it, but nothing is talking on it: either this is not "
-                "the module's port, or the module has no power. "
-                + _other_ports_on_this_machine()
+                f"the module's port, or the module has no power ({serial_ports_here()})."
             )
         shown = seen[:48].hex(" ")
         if all(32 <= byte < 127 or byte in (9, 10, 13) for byte in seen):
@@ -1208,6 +1190,7 @@ def discover_n100(
     excluded: frozenset[str] = frozenset(),
     ports: tuple[str, ...] | None = None,
     first: bool = False,
+    unopened: list[str] | None = None,
 ) -> tuple[str, ...]:
     """Every serial port with an FDILink IMU talking on it, found by listening.
 
@@ -1217,7 +1200,8 @@ def discover_n100(
     program holds cannot be opened and is passed over, which is the ordinary
     case on a bench whose pulse board owns one; a port the apparatus binds
     (``excluded``) is not even opened.  ``ports``: just these, in order;
-    ``first``: stop at the first that streams.
+    ``first``: stop at the first that streams; ``unopened``: told each port that
+    could not be opened, with its class (``COM4: could not open (in use by another program)``).
 
     Listening is all it does.  A scan reaches every serial port on the
     bench -- the pulse board's side-channel, an SLM, whatever else is idle
@@ -1230,6 +1214,10 @@ def discover_n100(
     for device in free_serial_ports(excluded)[0] if ports is None else ports:
         try:
             port = _open_serial(device, baud)
+        except SerialPortError as error:
+            if unopened is not None:
+                unopened.append(f"{device}: {error.short}")
+            continue
         except Exception:
             continue
         try:

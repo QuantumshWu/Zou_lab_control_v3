@@ -72,10 +72,11 @@ def _resolve(values: Mapping[str, Any], excluded: frozenset[str]) -> dict[str, A
 
     free, passed = free_serial_ports(excluded)
     address = int(values["address"])
-    found = discover_hwt3100(addresses=(address,), ports=free, first=True)
+    unopened: list[str] = []
+    found = discover_hwt3100(addresses=(address,), ports=free, first=True, unopened=unopened)
     bound = [f"passed over {', '.join(passed)}: bound"] if passed else []
     if not found:
-        said = "; ".join([f"asked {', '.join(free) or 'no free port'}", *bound])
+        said = "; ".join([f"asked {', '.join(free) or 'no free port'}", *unopened, *bound])
         raise RuntimeError(
             f"no WitMotion HWT3100 answered at Modbus address {address} (0x{address:02X}) at "
             f"{', '.join(str(b) for b in SUPPORTED_BAUDS)} baud on the free serial ports ({said}); "

@@ -56,10 +56,11 @@ def _resolve(values: Mapping[str, Any], excluded: frozenset[str]) -> dict[str, A
     scan finds one (listening only; a bound port is not opened), pinned into the apparatus."""
 
     free, passed = free_serial_ports(excluded)
-    found = discover_n100(baud=int(values["baud"]), ports=free, first=True)
+    unopened: list[str] = []
+    found = discover_n100(baud=int(values["baud"]), ports=free, first=True, unopened=unopened)
     bound = [f"passed over {', '.join(passed)}: bound"] if passed else []
     if not found:
-        said = "; ".join([f"listened to {', '.join(free) or 'no free port'}", *bound])
+        said = "; ".join([f"listened to {', '.join(free) or 'no free port'}", *unopened, *bound])
         raise RuntimeError(f"no WHEELTEC N100 streams on the free serial ports ({said}); set its port, or power it and Init again")
     return {"parameters": {"port": found[0]}, "note": f"N100 streaming on {found[0]}" + "".join(f" ({said})" for said in bound)}
 

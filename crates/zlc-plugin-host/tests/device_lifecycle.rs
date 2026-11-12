@@ -20,7 +20,7 @@ fn an_open_is_kept_with_its_process_its_time_and_a_failure_whole() {
     let folder = std::env::temp_dir().join(format!("zlc-journal-lifecycle-{}", journal::now_us()));
     journal::open(&folder).unwrap();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let config = HostConfig { python: python.into(), python_path: vec![root.join("../../science/src"), root.join("tests/plugins")],
+    let config = HostConfig { python: python.clone().into(), python_path: vec![root.join("../../science/src"), root.join("tests/plugins")],
         packages: vec!["zlc_test_plugins".into()], memory_limit_mib: Some(3072) };
     let host = PluginHost::new(config, Runtime::new(), SafeActions::new(), |_| {}).unwrap();
     support::install(&host).unwrap();
@@ -33,6 +33,25 @@ fn an_open_is_kept_with_its_process_its_time_and_a_failure_whole() {
     let held = folder.join("held.txt");
     let failed = host.open("broken", "test.failed_init", json!({"path": held}), json!({})).unwrap_err();
     assert!(failed.traceback.contains("initialization verification failed"), "{failed:?}");
+    // A device another client holds: the processes with its SDK loaded are named. The "SDK" is a
+    // copy of a system DLL under the fixture type's module name, loaded by a helper of this test.
+    let sdk = folder.join(format!("zlc_fixture_sdk_{}.dll", std::process::id()));
+    std::fs::copy(std::path::Path::new(&std::env::var("SystemRoot").unwrap()).join("System32").join("version.dll"), &sdk).unwrap();
+    let helpers = zlc_core::process::Job::new(None).unwrap();
+    let mut helper = helpers.spawn(std::process::Command::new(&python).args(["-c",
+        "import ctypes, os, sys, time; ctypes.WinDLL(sys.argv[1]); print(os.getpid(), flush=True); time.sleep(60)"]).arg(&sdk)
+        .stdout(std::process::Stdio::piped()), 0x0800_0000).unwrap();
+    let mut said = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(helper.stdout.take().unwrap()), &mut said).unwrap();
+    let holder: u32 = said.trim().parse().expect("the helper's interpreter pid");
+    let refused = host.open("held", "test.held", json!({}), json!({})).unwrap_err();
+    let named = refused.holders.as_ref().expect("the holders, beside the refusal")["processes"].as_array().unwrap().clone();
+    let found = named.iter().find(|process| process["pid"] == holder).unwrap_or_else(|| panic!("the helper among {named:#?}"));
+    assert_eq!((&found["ours"], &found["modules"]), (&json!(true), &json!([sdk.file_name().unwrap().to_string_lossy()])));
+    assert!(found["command_line"].as_str().is_some_and(|line| line.contains("ctypes.WinDLL")) && found["started_us"].as_u64().is_some(), "{found}");
+    assert!(refused.message.contains(&format!("pid {holder} ")), "the operator reads who holds it: {}", refused.message);
+    drop(helpers);
+    let _ = helper.wait();
     host.close("echo").unwrap();
 
     let read = || -> Vec<Value> {
@@ -51,9 +70,9 @@ fn an_open_is_kept_with_its_process_its_time_and_a_failure_whole() {
     // The process the device opened in (discovery may have had one of its own before it).
     let started = lines.iter().find(|line| line["ev"] == "process_started" && line["pid"] == pid).expect("the process's start");
     assert_eq!(started["key"], "plugins");
-    // It ended once nothing used it any more: asked to, not a crash.
+    // It ended once nothing used it any more: asked to, not a crash, and it exited when asked.
     let ended = lines.iter().find(|line| line["ev"] == "process_ended" && line["pid"] == pid).expect("the process's end");
-    assert_eq!(ended["expected"], true);
+    assert_eq!((&ended["expected"], &ended["ended_by"]), (&json!(true), &json!("exited when asked")));
 
     let open = said("device_open", "echo");
     assert_eq!((&open["src"], &open["type_id"], &open["pid"], &open["outcome"], &open["error"]), (&json!("plugins"), &json!("test.echo"), &json!(pid), &json!("opened"), &Value::Null));
@@ -63,6 +82,10 @@ fn an_open_is_kept_with_its_process_its_time_and_a_failure_whole() {
     assert_eq!((&broken["outcome"], &broken["error"]["type"]), (&json!("failed"), &json!("builtins:RuntimeError")));
     let traceback = broken["error"]["traceback"].as_str().unwrap();
     assert!(traceback.starts_with("Traceback") && traceback.contains("initialization verification failed"), "the traceback whole: {traceback}");
+
+    let held = said("device_open", "held");
+    assert_eq!((&held["outcome"], &held["error"]["type"]), (&json!("failed"), &json!("zlc_plugin.wire:DeviceHeld")));
+    assert!(held["error"]["holders"]["processes"].as_array().is_some_and(|named| named.iter().any(|process| process["pid"] == holder)), "{held}");
 
     let closed = said("device_close", "echo");
     assert_eq!((&closed["pid"], &closed["outcome"]), (&json!(pid), &json!("closed")));

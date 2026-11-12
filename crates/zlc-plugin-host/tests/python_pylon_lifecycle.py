@@ -84,6 +84,19 @@ class PylonLifecycle(unittest.TestCase):
         self.assertFalse(camera.attached)
         self.assertIsNone(adapter._camera)
 
+    def test_an_open_pylon_says_is_held_elsewhere_is_device_held_and_still_gives_its_handle_back(self):
+        from zlc_plugin import DeviceHeld
+        camera = Camera(fail_open=True)
+        info = types.SimpleNamespace(GetSerialNumber=lambda: '123')
+        factory = types.SimpleNamespace(EnumerateDevices=lambda: [info], CreateDevice=lambda info: object(),
+                                        IsDeviceAccessible=lambda asked: asked is not info)
+        pylon = types.SimpleNamespace(TlFactory=types.SimpleNamespace(GetInstance=lambda: factory), InstantCamera=lambda device: camera)
+        adapter = PylonCameraAdapter(PylonCameraConfig('123'))
+        with patch.dict(sys.modules, {'pypylon': types.SimpleNamespace(pylon=pylon)}):
+            with self.assertRaisesRegex(DeviceHeld, "'123' is open in another client: SDK open failed"): adapter.open()
+        self.assertEqual(camera.calls, ['open', 'close', 'destroy'])
+        self.assertIsNone(adapter._camera)
+
     def test_receiver_is_joined_before_sdk_destruction(self):
         camera = Camera(); adapter = self.adapter(camera)
         def receive():

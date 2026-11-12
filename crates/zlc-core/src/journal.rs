@@ -26,6 +26,9 @@
 //! plugin process's start and end. Said with [`lifecycle`], such a line goes into the rolling journal
 //! in its order like any other, and also into this process's session file (`session-<start us>.jsonl`),
 //! which nothing rotates: it holds the whole life of the process ([`SESSION_LIMIT`]).
+//!
+//! A process ends with [`close`]: its last lifecycle line (how and why it ended), and everything said
+//! before it written at once -- the writer's next turn would come after the process is gone.
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -65,7 +68,7 @@ const SESSIONS_KEPT: usize = 8;
 
 struct Journal { folder: PathBuf, session: PathBuf, waiting: Mutex<Waiting> }
 #[derive(Default)]
-struct Waiting { lines: Vec<u8>, dropped: u64, session: Vec<u8>, session_said: usize, session_full: bool }
+struct Waiting { lines: Vec<u8>, dropped: u64, session: Vec<u8>, session_said: usize, session_full: bool, closed: bool }
 
 static OPEN: AtomicBool = AtomicBool::new(false);
 static ORDER: AtomicU64 = AtomicU64::new(0);
@@ -102,9 +105,7 @@ pub fn note_fields(source: &str, event: &str, fields: &str) {
     if !is_open() { return; }
     let Some(journal) = JOURNAL.get() else { return };
     let line = whole_line(source, event, fields);
-    let mut waiting = journal.waiting.lock().unwrap_or_else(|error| error.into_inner());
-    if waiting.lines.len() > WAITING_LIMIT { waiting.dropped += 1; return; }
-    waiting.lines.extend_from_slice(&line);
+    journal.waiting.lock().unwrap_or_else(|error| error.into_inner()).take(&line);
 }
 
 /// One line with `fields` (a JSON object's text) after its stamp.
@@ -142,17 +143,48 @@ pub fn lifecycle(source: &str, event: &str, facts: Value) {
     if !is_open() { return; }
     let Some(journal) = JOURNAL.get() else { return };
     let line = line(now_us(), source, event, facts, LIFECYCLE_TEXT_LIMIT);
-    let mut waiting = journal.waiting.lock().unwrap_or_else(|error| error.into_inner());
-    if waiting.session_said + line.len() <= SESSION_LIMIT {
-        waiting.session_said += line.len();
-        waiting.session.extend_from_slice(&line);
-    } else if !waiting.session_full {
-        waiting.session_full = true;
-        let full = self::line(now_us(), "journal", "session_full", serde_json::json!({"limit_bytes": SESSION_LIMIT}), TEXT_LIMIT);
-        waiting.session.extend_from_slice(&full);
+    journal.waiting.lock().unwrap_or_else(|error| error.into_inner()).take_lifecycle(&line);
+}
+
+/// The process's last line: as [`lifecycle`], said after everything else and followed by nothing --
+/// no note is kept after it -- and with all that was said written before this returns. A process
+/// that ends calls it on every way out (closed, failed), as its last act before it goes.
+pub fn close(source: &str, event: &str, facts: Value) {
+    let Some(journal) = JOURNAL.get() else { return };
+    // What waits first, so a count of lost notes it may say is written before the last line.
+    write_waiting(journal, &mut WRITER.lock().unwrap_or_else(|error| error.into_inner()));
+    let line = line(now_us(), source, event, facts, LIFECYCLE_TEXT_LIMIT);
+    {
+        let mut waiting = journal.waiting.lock().unwrap_or_else(|error| error.into_inner());
+        if waiting.closed { return; }
+        waiting.take_lifecycle(&line);
+        waiting.closed = true;
     }
-    if waiting.lines.len() > WAITING_LIMIT { waiting.dropped += 1; return; }
-    waiting.lines.extend_from_slice(&line);
+    OPEN.store(false, Ordering::Release);
+    write_waiting(journal, &mut WRITER.lock().unwrap_or_else(|error| error.into_inner()));
+}
+
+impl Waiting {
+    /// `line` for the rolling journal; none once the journal has closed.
+    fn take(&mut self, line: &[u8]) {
+        if self.closed { return; }
+        if self.lines.len() > WAITING_LIMIT { self.dropped += 1; return; }
+        self.lines.extend_from_slice(line);
+    }
+
+    /// `line` for the session file (within [`SESSION_LIMIT`]) and the rolling journal.
+    fn take_lifecycle(&mut self, line: &[u8]) {
+        if self.closed { return; }
+        if self.session_said + line.len() <= SESSION_LIMIT {
+            self.session_said += line.len();
+            self.session.extend_from_slice(line);
+        } else if !self.session_full {
+            self.session_full = true;
+            let full = self::line(now_us(), "journal", "session_full", serde_json::json!({"limit_bytes": SESSION_LIMIT}), TEXT_LIMIT);
+            self.session.extend_from_slice(&full);
+        }
+        self.take(line);
+    }
 }
 
 /// One line: its stamp, then the event's facts bounded at `text_limit`.
@@ -175,9 +207,7 @@ fn line(us: u64, source: &str, event: &str, facts: Value, text_limit: usize) -> 
 fn keep(us: u64, source: &str, event: &str, facts: Value) {
     let Some(journal) = JOURNAL.get() else { return };
     let line = line(us, source, event, facts, TEXT_LIMIT);
-    let mut waiting = journal.waiting.lock().unwrap_or_else(|error| error.into_inner());
-    if waiting.lines.len() > WAITING_LIMIT { waiting.dropped += 1; return; }
-    waiting.lines.extend_from_slice(&line);
+    journal.waiting.lock().unwrap_or_else(|error| error.into_inner()).take(&line);
 }
 
 /// `value` with nothing in it large: the journal names things, it does not hold them.
@@ -419,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_reach_their_segment_in_the_order_they_were_said() {
+    fn notes_reach_their_segment_in_order_and_close_writes_the_last() {
         // The one journal of this test process.
         let folder = std::env::temp_dir().join(format!("zlc-journal-open-{}", now_us()));
         note("early", "before open", Value::Null);
@@ -442,6 +472,21 @@ mod tests {
         assert_eq!(kept.len(), 1, "only lifecycle facts are the session's");
         assert_eq!(kept[0], lines[3], "the same line, the same order");
         assert_eq!(kept[0]["error"]["traceback"], json!(traceback), "a traceback is kept whole");
+        // The process ends: a plugin's last lines, then the process's own, all on disk when `close`
+        // returns -- before the writer's next turn -- and nothing said after it is kept.
+        note("plugins", "close_timing", json!({"ms": 3}));
+        lifecycle("plugins", "process_ended", json!({"instance": "camera"}));
+        close("app", "ended", json!({"reason": "test", "uptime_s": 1.5}));
+        note("late", "note", Value::Null);
+        lifecycle("late", "lifecycle", Value::Null);
+        close("late", "ended again", Value::Null);
+        assert!(!is_open());
+        let on_disk = |path: &Path| -> Vec<(String, String)> { std::fs::read_to_string(path).unwrap().lines().map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .map(|line| (line["src"].as_str().unwrap().to_owned(), line["ev"].as_str().unwrap().to_owned())).collect() };
+        let rolling: Vec<(String, String)> = segments_in(&folder).iter().flat_map(|(_, path)| on_disk(path)).collect();
+        let pair = |source: &str, event: &str| (source.to_owned(), event.to_owned());
+        assert_eq!(rolling[rolling.len() - 3..], [pair("plugins", "close_timing"), pair("plugins", "process_ended"), pair("app", "ended")]);
+        assert_eq!(on_disk(&session)[1..], [pair("plugins", "process_ended"), pair("app", "ended")], "the session ends with the process's last line");
         std::fs::remove_dir_all(&folder).ok();
     }
 }

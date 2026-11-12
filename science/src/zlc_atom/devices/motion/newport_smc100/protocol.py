@@ -192,11 +192,14 @@ def parse_number(command: str, value: str) -> float:
 
 
 def open_serial(port: str):
-    """The controller's line, read with a time-out (no busy wait)."""
+    """The controller's line, read with a time-out (no busy wait); a port that cannot be opened
+    says so in the shared wording (``zlc_atom.devices.SerialPortError``)."""
 
     import serial
 
-    return serial.Serial(
+    from zlc_atom.devices import open_serial_port
+
+    return open_serial_port(
         port, BAUD, bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE,
         xonxoff=True, timeout=REPLY_TIMEOUT_SECONDS, write_timeout=1.0,
     )

@@ -85,6 +85,8 @@ DEVICE_TYPES = (
         ("camera.adapter",),
         factory=_pylon_factory,
         identity="pylon-camera:serial={serial}",
+        # Every program that can hold a Basler camera has pylon's base or Basler's GenICam build loaded.
+        sdk_modules=("Pylon*.dll", "GCBase*Basler*.dll"),
         label="Basler camera (pylon)",
         description=(
             "Basler machine-vision camera over pypylon, Mono8: FrameStart on the configured "

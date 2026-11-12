@@ -102,23 +102,24 @@ impl VivadoLauncher {
 }
 
 struct VivadoProcess { child: std::process::Child, stdin: Option<std::process::ChildStdin>, lines: mpsc::Receiver<Option<String>>,
-                       _job: Option<KillJob>, ended: bool }
+                       _job: zlc_core::process::Job, ended: bool }
 
 impl TclLauncher for VivadoLauncher {
     fn describe(&self) -> String { self.vivado.display().to_string() }
 
     fn launch(&self, state_dir: &Path) -> Result<Box<dyn TclSession>> {
-        use std::os::windows::process::CommandExt;
-        let mut child = std::process::Command::new(&self.vivado).args(["-mode", "tcl", "-nolog", "-nojournal"]).current_dir(state_dir)
-            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .spawn().map_err(|error| {
-                let note = if error.kind() == std::io::ErrorKind::NotFound { format!("Vivado executable was not found: {:?}", self.vivado.display().to_string()) }
-                           else { format!("Vivado could not start ({}): {error}", self.vivado.display()) };
-                record_diagnostic(state_dir, "start_failure", &note);
-                Error::new(Kind::Runtime, format!("persistent Vivado transport could not start: {note}"))
-            })?;
-        let job = KillJob::new().and_then(|job| job.assign(&child).map(|()| job)).ok();
+        // In a job that ends it with this process from its first instruction, so a crash never
+        // leaves a Vivado (or a hw_server it starts) holding the cable; one that cannot be placed never runs.
+        let failed = |note: String| {
+            record_diagnostic(state_dir, "start_failure", &note);
+            Error::new(Kind::Runtime, format!("persistent Vivado transport could not start: {note}"))
+        };
+        let job = zlc_core::process::Job::new(None).map_err(|error| failed(format!("its job could not be made: {error}")))?;
+        let mut child = job.spawn(std::process::Command::new(&self.vivado).args(["-mode", "tcl", "-nolog", "-nojournal"]).current_dir(state_dir)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()),
+            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+            .map_err(|error| failed(if error.kind() == std::io::ErrorKind::NotFound { format!("Vivado executable was not found: {:?}", self.vivado.display().to_string()) }
+                                    else { format!("Vivado could not start ({}): {error}", self.vivado.display()) }))?;
         let (sender, lines) = mpsc::channel();
         for stream in [child.stdout.take().map(|out| Box::new(out) as Box<dyn std::io::Read + Send>),
                        child.stderr.take().map(|err| Box::new(err) as Box<dyn std::io::Read + Send>)].into_iter().flatten() {
@@ -171,34 +172,6 @@ impl TclSession for VivadoProcess {
 
 impl Drop for VivadoProcess {
     fn drop(&mut self) { if !self.ended { self.end(false); } }
-}
-
-/// A job object that ends its processes when this process ends.
-struct KillJob(usize);
-
-impl KillJob {
-    fn new() -> Result<KillJob> {
-        use windows_sys::Win32::System::JobObjects::{CreateJobObjectW, JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, SetInformationJobObject};
-        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if handle.is_null() { return Err(Error::new(Kind::Io, std::io::Error::last_os_error().to_string())); }
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        unsafe { SetInformationJobObject(handle, JobObjectExtendedLimitInformation, (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                                         size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32) };
-        Ok(KillJob(handle as usize))
-    }
-    fn assign(&self, child: &std::process::Child) -> Result<()> {
-        use std::os::windows::io::AsRawHandle;
-        if unsafe { windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(self.0 as _, child.as_raw_handle() as _) } == 0 {
-            return Err(Error::new(Kind::Io, std::io::Error::last_os_error().to_string()));
-        }
-        Ok(())
-    }
-}
-
-impl Drop for KillJob {
-    fn drop(&mut self) { unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0 as _) }; }
 }
 
 fn record_diagnostic(state_dir: &Path, name: &str, text: &str) { let _ = std::fs::write(state_dir.join(format!("{name}.log")), text); }
@@ -768,5 +741,23 @@ mod tests {
         assert!(parse_read("nothing", "ZLCDATA", 1).unwrap_err().message.contains("no DATA"));
         assert!(parse_read("ZLCDATA xyz", "ZLCDATA", 1).unwrap_err().message.contains("non-binary"));
         assert!(parse_read("ZLCDATA 123456789", "ZLCDATA", 1).unwrap_err().message.contains("non-binary"));
+    }
+
+    #[test]
+    fn the_vivado_process_runs_in_its_job_and_a_missing_one_is_said() {
+        let folder = std::env::temp_dir().join(format!("zlc-axi-launch-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let missing = VivadoLauncher { vivado: folder.join("no-vivado.exe") }.launch(&folder).err().unwrap();
+        assert!(missing.message.contains("was not found"), "{}", missing.message);
+        assert!(std::fs::read_to_string(folder.join("start_failure.log")).unwrap().contains("was not found"));
+        // cmd.exe stands in for Vivado's Tcl prompt: it answers a line and leaves on `exit`.
+        let mut session = VivadoLauncher { vivado: std::path::PathBuf::from("cmd.exe") }.launch(&folder).unwrap();
+        session.write("echo zlc-ready\r\n").unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while !matches!(session.read_line(Duration::from_millis(200)), Ok(Some(line)) if line.trim() == "zlc-ready") {
+            assert!(Instant::now() < until, "the stand-in never ran");
+        }
+        session.end(true);
+        std::fs::remove_dir_all(&folder).ok();
     }
 }

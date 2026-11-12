@@ -226,6 +226,11 @@ class DeviceType:
     #: the values the core pins into the apparatus and opens the row with (none: as authored),
     #: or raises with what it tried and what it passed over.
     resolve: Callable[[Mapping[str, Any], frozenset[str]], Mapping[str, Any]] | None = None
+    #: The file names of the vendor transport library a process that can hold this device
+    #: has loaded (``("Pylon*", "GCBase*Basler*")``; ``*`` any run, ``?`` one character, case
+    #: ignored).  When an open fails with :class:`DeviceHeld`, the core names the processes
+    #: on this computer that have one of them loaded.
+    sdk_modules: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.type_id or not self.family:
@@ -240,6 +245,9 @@ class DeviceType:
         object.__setattr__(self, "log_channels", tuple(str(name) for name in self.log_channels))
         if any(not name for name in self.log_channels):
             raise ValueError(f"{self.type_id}: log_channels must be non-empty logger names")
+        object.__setattr__(self, "sdk_modules", tuple(str(pattern) for pattern in self.sdk_modules))
+        if any(not pattern.strip("*?") for pattern in self.sdk_modules):
+            raise ValueError(f"{self.type_id}: sdk_modules must name files, not match every module")
         names = [command.name for command in self.commands]
         if len(set(names)) != len(names):
             raise ValueError(f"{self.type_id}: command names must be unique")
@@ -259,7 +267,7 @@ class DeviceType:
             "queries": [name for name, answer in (("discover", self.discover), ("resolve", self.resolve)) if answer is not None],
             "addable": self.addable, "concurrent": list(self.concurrent), "control_window": self.control_window,
             "announces": self.announce[0] if self.announce is not None else "",
-            "identity": self.identity, "resources": list(self.resources),
+            "identity": self.identity, "resources": list(self.resources), "sdk_modules": list(self.sdk_modules),
         }
 
 

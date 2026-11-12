@@ -116,10 +116,8 @@ class Smc100Axis:
     ) -> None:
         self.config = config
         if serial_port is None:
-            try:
-                serial_port = open_serial(config.port)
-            except Exception as error:  # noqa: BLE001 -- pyserial's own words, with the port named
-                raise RuntimeError(f"could not open {config.port} for the SMC100: {error}") from error
+            # A port that cannot be opened says so in the shared wording (SerialPortError).
+            serial_port = open_serial(config.port)
         self._link = Smc100Link(serial_port, config.address)
         self._clock = clock
         #: Moves, homing, settings and reads: one at a time.  Stop never takes it.
@@ -565,16 +563,22 @@ class Smc100Axis:
 
 
 # ------------------------------------------------------------------ finding
-def probe_port(device: str, addresses: tuple[int, ...], *, opener=open_serial) -> list[tuple[int, str, str]]:
+def probe_port(device: str, addresses: tuple[int, ...], *, opener=open_serial, unopened: list[str] | None = None) -> list[tuple[int, str, str]]:
     """``(address, version, stage)`` of each controller that answers VE on ``device``.
 
-    TE, VE and ID? only read; nothing is set. A port another program holds
-    cannot be opened and is passed over.
+    TE, VE and ID? only read; nothing is set. A port that cannot be opened (another
+    program holds it, or it is gone) is passed over, told to ``unopened`` with its class.
     """
+
+    from zlc_atom.devices import SerialPortError
 
     try:
         port = opener(device)
-    except Exception:  # noqa: BLE001 -- held by another program, or gone
+    except SerialPortError as error:
+        if unopened is not None:
+            unopened.append(f"{device}: {error.short}")
+        return []
+    except Exception:  # noqa: BLE001 -- a stand-in opener's own failure
         return []
     found = []
     try:
@@ -608,6 +612,7 @@ def discover_smc100(
     ports: tuple[str, ...] | None = None,
     first: bool = False,
     opener=open_serial,
+    unopened: list[str] | None = None,
 ) -> tuple[tuple[str, int, str, str], ...]:
     """``(port, address, version, stage)`` for each controller answering on a free serial port."""
 
@@ -615,7 +620,7 @@ def discover_smc100(
 
     found: list[tuple[str, int, str, str]] = []
     for device in free_serial_ports(excluded)[0] if ports is None else ports:
-        for hit in probe_port(device, addresses, opener=opener):
+        for hit in probe_port(device, addresses, opener=opener, unopened=unopened):
             found.append((device, *hit))
             if first:
                 return tuple(found)

@@ -1,11 +1,21 @@
-//! A Windows COM port as the pulse board's UART link, and how the board's port is found.
+//! A Windows COM port as the pulse board's UART link, how the board's port is found, and what
+//! an open that fails says.
 //!
 //! Opened with DTR and RTS low and kept low: opening the pulse streamer's port
 //! must never reset or drive another instrument on the bus. Reads wait at most
 //! 10 ms per slice so a deadline and a Stop stay responsive.
+//!
+//! Every serial open of the application words its failure one way ([`OpenFailure`], twinned in
+//! Python as `zlc_atom.devices.open_serial_port`): the OS's error class, its code and text, and
+//! the serial ports this PC does have.
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+    DIGCF_PRESENT, GUID_DEVCLASS_PORTS, SP_DEVINFO_DATA, SPDRP_FRIENDLYNAME, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo,
+    SetupDiGetClassDevsW, SetupDiGetDeviceRegistryPropertyW,
+};
 use windows_sys::Win32::Devices::Communication::{
     COMMTIMEOUTS, COMSTAT, ClearCommError, DCB, EscapeCommFunction, GetCommState, PURGE_RXABORT, PURGE_RXCLEAR, PurgeComm,
     SetCommState, SetCommTimeouts, SetupComm, CLRDTR, CLRRTS, NOPARITY, ONESTOPBIT,
@@ -24,6 +34,102 @@ use crate::wire::StreamerParams;
 fn wide(text: &str) -> Vec<u16> { text.encode_utf16().chain(std::iter::once(0)).collect() }
 
 fn last_error(what: &str) -> Error { Error::new(Kind::Io, format!("{what}: {}", std::io::Error::last_os_error())) }
+
+/// Why a serial port could not be opened, by the OS's error code: one table for every serial open
+/// of the application (Python's twin: `zlc_atom.devices.SERIAL_FAULTS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortFault { Absent, Busy, Refused, Other }
+
+impl PortFault {
+    pub fn of(code: u32) -> PortFault {
+        match code {
+            // ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_NO_SUCH_DEVICE, ERROR_DEVICE_NOT_CONNECTED: no such port here.
+            2 | 3 | 433 | 1167 => PortFault::Absent,
+            // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION: a COM port opens once, and another program holds it.
+            5 | 32 => PortFault::Busy,
+            // ERROR_INVALID_FUNCTION, ERROR_GEN_FAILURE: the name exists and its driver refused the open.
+            1 | 31 => PortFault::Refused,
+            _ => PortFault::Other,
+        }
+    }
+
+    pub fn words(self) -> &'static str {
+        match self { PortFault::Absent => "not present", PortFault::Busy => "in use by another program",
+                     PortFault::Refused => "driver refused", PortFault::Other => "refused" }
+    }
+
+    /// The error type an open failing so is raised as, which the workbench reads: a port that cannot
+    /// be used at all is a stale record of where the device was, and Init looks for the device again;
+    /// a port another program holds still has the device behind it, and looking elsewhere finds nothing.
+    pub fn error_type(self) -> &'static str { if self == PortFault::Busy { "SerialPortBusy" } else { "SerialPortUnusable" } }
+}
+
+/// A serial port that could not be opened, with what the OS said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenFailure { pub port: String, pub fault: PortFault, pub code: u32, pub detail: String }
+
+impl OpenFailure {
+    /// `step` failed on `port` with the calling thread's last OS error.
+    fn last(port: &str, step: &str) -> OpenFailure {
+        let error = std::io::Error::last_os_error();
+        let code = error.raw_os_error().unwrap_or(0) as u32;
+        let text = error.to_string();
+        let text = text.trim_end_matches(&format!(" (os error {code})")).trim_end_matches(['.', '\u{3002}', ' ']).to_owned();
+        OpenFailure { port: port.to_owned(), fault: PortFault::of(code), code, detail: if step.is_empty() { text } else { format!("{step}: {text}") } }
+    }
+
+    /// The class alone, as a probe lists it beside the other ports it tried.
+    pub fn short(&self) -> String { format!("could not open ({})", self.fault.words()) }
+}
+
+/// The one wording of a failed serial open: `COM10 could not be opened: driver refused (os error 1:
+/// Incorrect function) -- serial ports on this PC: COM3 (USB-SERIAL CH340)`. What precedes ` -- ` is
+/// the failure; what follows, the ports there are to choose from.
+impl fmt::Display for OpenFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} could not be opened: {} (os error {}: {}) -- {}", self.port, self.fault.words(), self.code, self.detail, ports_here())
+    }
+}
+
+impl From<OpenFailure> for Error { fn from(failure: OpenFailure) -> Error { Error::new(Kind::Io, failure.to_string()) } }
+
+/// The serial ports this PC has, with their friendly names where Windows has them:
+/// `serial ports on this PC: COM3 (USB-SERIAL CH340), COM4`, or that it has none.
+pub fn ports_here() -> String {
+    // In name order, as the Python twin lists them (a probe goes USB first; a listing is for reading).
+    let mut ports = list_com_ports();
+    ports.sort();
+    if ports.is_empty() { return "this PC has no serial port".into(); }
+    let names = friendly_names();
+    let named: Vec<String> = ports.iter().map(|port| match names.iter().find(|(name, _)| com_name(name) == com_name(port)) {
+        Some((_, friendly)) => format!("{port} ({friendly})"),
+        None => port.clone(),
+    }).collect();
+    format!("serial ports on this PC: {}", named.join(", "))
+}
+
+/// The present Ports-class devices' friendly names by their port (`USB-SERIAL CH340 (COM3)` is
+/// COM3's `USB-SERIAL CH340`), as Device Manager shows them.
+fn friendly_names() -> Vec<(String, String)> {
+    let set = unsafe { SetupDiGetClassDevsW(&GUID_DEVCLASS_PORTS, std::ptr::null(), std::ptr::null_mut(), DIGCF_PRESENT) };
+    if set == INVALID_HANDLE_VALUE as isize { return Vec::new(); }
+    let mut names = Vec::new();
+    for index in 0.. {
+        let mut device: SP_DEVINFO_DATA = unsafe { std::mem::zeroed() };
+        device.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
+        if unsafe { SetupDiEnumDeviceInfo(set, index, &mut device) } == 0 { break; }
+        let mut buffer = [0u16; 256];
+        let ok = unsafe { SetupDiGetDeviceRegistryPropertyW(set, &device, SPDRP_FRIENDLYNAME, std::ptr::null_mut(), buffer.as_mut_ptr().cast(),
+                                                             (buffer.len() * 2) as u32, std::ptr::null_mut()) };
+        if ok == 0 { continue; }
+        let text = String::from_utf16_lossy(&buffer[..buffer.iter().position(|unit| *unit == 0).unwrap_or(buffer.len())]);
+        if let Some((friendly, port)) = text.trim_end().strip_suffix(')').and_then(|rest| rest.rsplit_once(" (")) {
+            names.push((port.to_owned(), friendly.trim().to_owned()));
+        }
+    }
+    unsafe { SetupDiDestroyDeviceInfoList(set) };
+    names
+}
 
 pub struct ComPortLink { port: String, baud: u64, handle: HANDLE, last_shortfall: String }
 
@@ -69,31 +175,36 @@ impl Drop for ComPortLink {
     fn drop(&mut self) { let _ = self.close(); }
 }
 
-impl UartLink for ComPortLink {
-    fn open(&mut self) -> Result<()> {
+impl ComPortLink {
+    /// Open the port as [`UartLink::open`] does, saying why it could not be in the shared wording.
+    pub fn open_port(&mut self) -> std::result::Result<(), OpenFailure> {
         if self.handle != INVALID_HANDLE_VALUE { return Ok(()); }
         let path = wide(&format!(r"\\.\{}", self.port));
         let handle = unsafe { CreateFileW(path.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0, std::ptr::null(), OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, std::ptr::null_mut()) };
-        if handle == INVALID_HANDLE_VALUE { return Err(last_error(&format!("could not open port {}", self.port))); }
+        if handle == INVALID_HANDLE_VALUE { return Err(OpenFailure::last(&self.port, "")); }
         self.handle = handle;
-        let configured = (|| -> Result<()> {
+        let configured = (|| -> std::result::Result<(), OpenFailure> {
             unsafe { SetupComm(handle, 1 << 16, 1 << 16) };
             let mut dcb: DCB = unsafe { std::mem::zeroed() };
             dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
-            if unsafe { GetCommState(handle, &mut dcb) } == 0 { return Err(last_error("GetCommState")); }
+            if unsafe { GetCommState(handle, &mut dcb) } == 0 { return Err(OpenFailure::last(&self.port, "GetCommState")); }
             dcb.BaudRate = self.baud as u32;
             dcb.ByteSize = 8;
             dcb.Parity = NOPARITY;
             dcb.StopBits = ONESTOPBIT;
             // fBinary only: no parity check, no flow control, DTR and RTS disabled (low).
             dcb._bitfield = 1;
-            if unsafe { SetCommState(handle, &dcb) } == 0 { return Err(last_error("SetCommState")); }
+            if unsafe { SetCommState(handle, &dcb) } == 0 { return Err(OpenFailure::last(&self.port, "SetCommState")); }
             unsafe { EscapeCommFunction(handle, CLRDTR); EscapeCommFunction(handle, CLRRTS); }
-            self.timeouts(50, 1000)
+            self.timeouts(50, 1000).map_err(|_| OpenFailure::last(&self.port, "SetCommTimeouts"))
         })();
-        if let Err(error) = configured { let _ = self.close(); return Err(error); }
+        if let Err(failure) = configured { let _ = self.close(); return Err(failure); }
         Ok(())
     }
+}
+
+impl UartLink for ComPortLink {
+    fn open(&mut self) -> Result<()> { Ok(self.open_port()?) }
 
     /// Release the port; the handle is forgotten only once it is released.
     fn close(&mut self) -> Result<()> {
@@ -188,24 +299,61 @@ pub fn free_ports(ports: &[String], excluded: &[String]) -> (Vec<String>, Vec<St
     ports.iter().cloned().partition(|port| !excluded.contains(&com_name(port)))
 }
 
+/// What a probe of one port came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// The board answered with this build's word-63 fingerprint.
+    Matched,
+    /// The port could not be opened at all; nothing was asked.
+    NotOpened(OpenFailure),
+    /// The port opened and no board of this build answered (`timeout`, `fingerprint mismatch`, ...).
+    NoBoard(String),
+    /// Nothing to open: the port or the baud is not one (`UART port is required`).
+    Invalid(String),
+}
+
+/// One port a probe tried, as the lines say it: `COM10: could not open (driver refused)`,
+/// `COM4: opened, no board answered (timeout)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attempt { pub port: String, pub probe: Probe }
+
+impl fmt::Display for Attempt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.probe {
+            Probe::Matched => write!(f, "{}: word63 fingerprint matched", self.port),
+            Probe::NotOpened(failure) => write!(f, "{}: {}", self.port, failure.short()),
+            Probe::NoBoard(why) => write!(f, "{}: opened, no board answered ({why})", self.port),
+            Probe::Invalid(why) => write!(f, "{}: {why}", self.port),
+        }
+    }
+}
+
 /// The board's UART among `ports`, found as v2's server found it: each port opened in turn with
 /// the board's handshake (open and the word-63 fingerprint, 0.5 s) and released again. The first
-/// that answers, and what each port tried said (`COM4: timeout`).
-pub fn find_board_uart(ports: &[String], baud: u64, geometry: StreamerParams, clock_hz: f64, target: &Arc<Target>) -> (Option<String>, Vec<String>) {
+/// that answers, and every port tried with what it came to.
+pub fn find_board_uart(ports: &[String], baud: u64, geometry: StreamerParams, clock_hz: f64, target: &Arc<Target>) -> (Option<String>, Vec<Attempt>) {
     let mut attempts = Vec::new();
     for port in ports {
-        let probe = ComPortLink::new(port, baud).and_then(|link| {
-            let transport: Arc<dyn RegisterTransport> = Arc::new(UartRegisterTransport::new(Box::new(link), Duration::from_millis(500)));
-            let streamer = PulseStreamer::new(transport.clone(), geometry, clock_hz, target.clone())?;
-            let opened = streamer.open();
-            let _ = transport.close();
-            opened
-        });
-        match probe {
-            Ok(()) => { attempts.push(format!("{port}: word63 fingerprint matched")); return (Some(port.clone()), attempts); }
-            Err(error) => attempts.push(format!("{port}: {}", if error.message.contains("layout mismatch") { "fingerprint mismatch".into() }
-                                                           else if error.kind == Kind::Timeout { "timeout".into() } else { error.message })),
-        }
+        let probe = match ComPortLink::new(port, baud) {
+            Err(error) => Probe::Invalid(error.message),
+            Ok(mut link) => match link.open_port() {
+                Err(failure) => Probe::NotOpened(failure),
+                Ok(()) => {
+                    let transport: Arc<dyn RegisterTransport> = Arc::new(UartRegisterTransport::new(Box::new(link), Duration::from_millis(500)));
+                    let opened = PulseStreamer::new(transport.clone(), geometry, clock_hz, target.clone()).and_then(|streamer| streamer.open());
+                    let _ = transport.close();
+                    match opened {
+                        Ok(()) => Probe::Matched,
+                        Err(error) if error.message.contains("layout mismatch") => Probe::NoBoard("fingerprint mismatch".into()),
+                        Err(error) if error.kind == Kind::Timeout => Probe::NoBoard("timeout".into()),
+                        Err(error) => Probe::NoBoard(error.message),
+                    }
+                }
+            },
+        };
+        let matched = probe == Probe::Matched;
+        attempts.push(Attempt { port: port.clone(), probe });
+        if matched { return (Some(port.clone()), attempts); }
     }
     (None, attempts)
 }
@@ -226,5 +374,31 @@ mod tests {
         let lane = ["d0".to_owned()];
         let target = Target::new(&lane, vec![crate::model::PortSpec::new("probe", "digital", &lane, "", None, None, None, None, None).unwrap()], Vec::new()).unwrap();
         assert_eq!(find_board_uart(&[], 115_200, StreamerParams::default(), 1.0e8, &target), (None, Vec::new()), "no free port: nothing opened, nothing tried");
+    }
+
+    /// A port that is not there is said with its class and the ports this PC does have, and a probe
+    /// tells it apart from a port that opened with no board behind it.
+    #[test]
+    fn a_failed_open_names_its_class_and_the_ports_here() {
+        let absent = "COM250";
+        let mut link = ComPortLink::new(absent, 115_200).unwrap();
+        let failure = link.open_port().unwrap_err();
+        assert_eq!((failure.fault, failure.code, failure.fault.error_type()), (PortFault::Absent, 2, "SerialPortUnusable"));
+        let said = failure.to_string();
+        let (failed, listed) = said.split_once(" -- ").unwrap();
+        assert!(failed.starts_with("COM250 could not be opened: not present (os error 2: "), "{said}");
+        assert_eq!(listed, ports_here());
+        assert!(listed == "this PC has no serial port" || listed.starts_with("serial ports on this PC: "), "{listed}");
+        assert_eq!(UartLink::open(&mut link).unwrap_err().message, link.open_port().unwrap_err().to_string());
+        let lane = ["d0".to_owned()];
+        let target = Target::new(&lane, vec![crate::model::PortSpec::new("probe", "digital", &lane, "", None, None, None, None, None).unwrap()], Vec::new()).unwrap();
+        let (found, attempts) = find_board_uart(&[absent.to_owned()], 115_200, StreamerParams::default(), 1.0e8, &target);
+        assert_eq!((found, attempts.len(), attempts[0].to_string()), (None, 1, "COM250: could not open (not present)".to_owned()));
+        assert_eq!(Attempt { port: "COM4".into(), probe: Probe::NoBoard("timeout".into()) }.to_string(), "COM4: opened, no board answered (timeout)");
+        // One table with Python's (zlc_atom.devices.SERIAL_FAULTS): the OS codes by class.
+        let classes: Vec<(u32, &str)> = [2, 3, 433, 1167, 5, 32, 1, 31, 87].iter().map(|code| (*code, PortFault::of(*code).words())).collect();
+        assert_eq!(classes, [(2, "not present"), (3, "not present"), (433, "not present"), (1167, "not present"), (5, "in use by another program"),
+                             (32, "in use by another program"), (1, "driver refused"), (31, "driver refused"), (87, "refused")]);
+        assert_eq!((PortFault::Busy.error_type(), PortFault::Refused.error_type()), ("SerialPortBusy", "SerialPortUnusable"));
     }
 }

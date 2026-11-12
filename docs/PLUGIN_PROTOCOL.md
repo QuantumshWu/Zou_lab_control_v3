@@ -89,6 +89,7 @@ A type descriptor (JSON, the only form the core sees):
   "announces": "",                       // device only: the client type its own server is opened as (section 10)
   "identity": "visa:{resource}",         // device only: the instrument a row names, over its parameters ("" = every row its own)
   "resources": ["serial:{port}"],        // device only: the physical resources a row binds, over its parameters (below)
+  "sdk_modules": ["Pylon*.dll"],         // device only: its vendor transport's file names, to name who holds it (section 7)
   "node": {                              // node only
     "node_kind": "measurement",          // measurement | task | processor
     "inputs": [{"name": "source", "contract": "zlc.camera.frames", "delivery": "exact", "select_bundle": false}],
@@ -187,6 +188,21 @@ without an instance: `discover` (its hardware scan; an SDK `discover` that takes
 resolved before it opens, one row at a time in the operator's order while the other
 rows open, and what it finds is pinned into the apparatus (WORKBENCH_COMMANDS §4.2).
 
+**A filled-in serial port is a record of an earlier resolve.** Every serial open says
+its failure one way (SDK `zlc_atom.devices.open_serial_port`, Rust
+`zlc_pulse::serial::OpenFailure`): `COM10 could not be opened: driver refused (os error
+1: Incorrect function) -- serial ports on this PC: COM3 (USB-SERIAL CH340)` -- the OS
+error's class (`not present`, `in use by another program`, `driver refused`, else
+`refused`) with its code and text, then the ports this PC has. It is raised as
+`SerialPortUnusable` when the port cannot be used at all and `SerialPortBusy` when
+another program holds it. An open of a row whose type resolves that fails with
+`SerialPortUnusable` is not the row's failure yet: the core runs the type's resolve once
+more with the row's serial ports blank, pins what it finds (the Init line says the port
+that failed and what was found) and opens that; nothing found fails the row with both
+reasons. A held port is not looked past, and an open of what a resolve found is not
+looked for again. Every device's open failure, resolve outcome and close failure is
+also written into that device's own log (`[HH:MM:SS] open failed: ...`).
+
 Packages may export `configuration.APPARATUS_SCHEMAS`: a mapping from apparatus
 namespace to an authoring schema. Discovery serializes these under
 `configuration_schemas`; conflicting declarations are catalogue errors. The
@@ -210,7 +226,7 @@ spawned -> ready -> open -> (idle <-> running) -> closing -> closed
 | Step | Core sends | Plugin does | Reply |
 |---|---|---|---|
 | handshake (process) | `hello {protocol, session}` | creates its block arena | `{protocol, pid, python, sdk}` |
-| open | `open {instance, type_id, module, parameters, simulation}` | imports the type's module; device: `factory(instance, projected parameters)` builds and opens the adapter; node: keeps the draft | `{state, tunable, reads, narrates, snapshot, device_info?}`; `device_info`: what the device states of itself, when its adapter has `device_info()` -- a mapping of text (`model`, `serial`, `firmware`, `driver`, `sdk`, ...) from reads the adapter already made while opening, without side effects; a failure to say is `{error}`, never the open's failure. The core keeps it with the open in the session journal |
+| open | `open {instance, type_id, module, parameters, simulation}` | imports the type's module; device: `factory(instance, projected parameters)` builds and opens the adapter; node: keeps the draft | `{state, tunable, reads, narrates, snapshot, device_info?}`; `device_info`: what the device states of itself, when its adapter has `device_info()` -- a mapping of text (`model`, `serial`, `firmware`, `driver`, `sdk`, ...; `sdk`/`driver` as the installed distribution's version, `zlc_atom.devices.vendor.installed_distribution`, never a module's optional `__version__`; `unanswered`: what the device refused to say, and why) from reads the adapter already made while opening, without side effects; a failure to say is `{error}`, never the open's failure. The core keeps it with the open in the session journal; `note?`: what the open says on the Init or Apply line (the local pulse board on Auto that came up over JTAG) |
 | configure | `configure {instance, parameters}` | device: `adapter.reconfigure(values)` or refuses | `{state}` |
 | prepare (node) | `query {instance, name: "prepare_run", values, devices, resources, source_signal}` | projects and builds a candidate with read-only device proxies; the active run is untouched | `{prepared: token}` |
 | discard (node) | `run.discard {instance, prepared}` | releases an unstarted candidate; idempotent | `{}` |
@@ -797,6 +813,15 @@ outcome distinctions:
 | `cancelled` | Stopped by `run.stop` | as reported |
 | `stale_run`, `unknown_op`, `not_claimed` | Protocol/authority refusals | known old |
 
+An open the device's SDK refuses because another client has the device open
+raises `zlc_plugin.DeviceHeld` (kind `refused`). The core then names, once, the
+processes on this computer that have one of the type's `sdk_modules` loaded
+(`DeviceType(sdk_modules=("Pylon*.dll", ...))`, file-name patterns: `*` any run,
+`?` one character, case ignored): each one's pid, executable, command line, start
+time and whether it is this application's, in the error's message, as
+`error.holders` (`{processes, uninspected}`), in the session journal's
+`device_open` line and in the device's log.
+
 Python exceptions round-trip: a plugin calling another plugin through `device`
 receives the original type when it is a builtin (`TimeoutError`, `ValueError`,
 `RuntimeError`, `TypeError`, ...) or `zlc_plugin.PluginError(kind, ...)` otherwise,
@@ -923,7 +948,7 @@ Declarations: `DeviceType`, `Opened`, `NodeType`, `NodeKind`, `Command`,
 Fields are the plugin package's own `AuthoringField`/`AuthoringSchema` (read by
 attribute; the SDK has no second field grammar). Runtime side: `RunContext`
 (section 5), `LiveDatasetOutput`, `Read`, `allocate(shape, dtype)`, `share`,
-`group`, `PluginError`, `Refused`. Porting a v2 device: replace
+`group`, `PluginError`, `Refused`, `DeviceHeld`. Porting a v2 device: replace
 `DeviceTypeDescriptor(type_id, domain, schema, capabilities, factory=...)` with
 `DeviceType(type_id, family, schema, capabilities, factory=...)`; the factory
 takes `(key, projected values)` and returns the adapter, or `Opened(adapter,

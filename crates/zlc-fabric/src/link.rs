@@ -28,7 +28,13 @@ pub struct Attached {
     pub descriptor: TypeDescriptor, pub role: String, pub tunable: bool,
     /// None identifies an older publisher that does not advertise snapshots.
     pub snapshot: Option<bool>, pub reads: Vec<String>, pub publisher: String,
+    /// What the device said of itself at its open there (`device_info`); Null when it says nothing
+    /// (or the publisher is older than this word).
+    pub device_info: Value,
 }
+
+/// Who announces a watched server: the instance it is there, and the computer.
+pub struct Watched { pub instance: String, pub publisher: String }
 
 type Answer = Result<(Value, Vec<Arc<Lend>>), CallError>;
 type Hook = Box<dyn Fn(&str) + Send + Sync>;
@@ -95,7 +101,7 @@ impl Link {
             Ok(Attached { descriptor, role: value["role"].as_str().unwrap_or("").to_owned(), tunable: value["tunable"] == true,
                           snapshot: value["snapshot"].as_bool(),
                           reads: serde_json::from_value(value["reads"].clone()).map_err(|error| format!("the publisher's reads: {error}"))?,
-                          publisher: value["publisher"].as_str().unwrap_or("").to_owned() })
+                          publisher: value["publisher"].as_str().unwrap_or("").to_owned(), device_info: value["device_info"].clone() })
         });
         match attached {
             Ok(attached) => { link.note(format!("FABRIC LINKED device={} at {}:{} publisher={}", link.0.instance, link.0.host, link.0.port, attached.publisher)); Ok((link, attached)) }
@@ -105,10 +111,14 @@ impl Link {
 
     /// Dial `host:port` and watch what it announces as `type_id` at its own server's `server_port`:
     /// the link breaks, relinks and is lost exactly as a served device's does (withdrawn, silent).
-    pub fn watch(host: &str, port: u16, type_id: &str, server_port: &Value, bench: Bench, registry: Arc<Registry>) -> Result<Link, String> {
+    pub fn watch(host: &str, port: u16, type_id: &str, server_port: &Value, bench: Bench, registry: Arc<Registry>) -> Result<(Link, Watched), String> {
         let link = Link::new(host, port, &format!("{type_id} at {}:{server_port}", host.trim()), ("watch", json!({"type_id": type_id, "port": server_port})), bench, registry);
         match link.connect() {
-            Ok(answer) => { link.note(format!("FABRIC WATCHING {} publisher={}", answer["instance"], answer["publisher"])); Ok(link) }
+            Ok(answer) => {
+                let watched = Watched { instance: answer["instance"].as_str().unwrap_or_default().to_owned(), publisher: answer["publisher"].as_str().unwrap_or_default().to_owned() };
+                link.note(format!("FABRIC WATCHING {} publisher={}", watched.instance, watched.publisher));
+                Ok((link, watched))
+            }
             Err(error) => { link.shut(Status::Closed); Err(error) }
         }
     }

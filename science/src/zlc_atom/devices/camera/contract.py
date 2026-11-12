@@ -135,6 +135,40 @@ def arm_groups(
     return expected, groups
 
 
+#: A readout setting that changes what one count is worth -- the bit depth, a mode that converts
+#: photons to counts differently -- as another unit would: a count at one is not a count at the other.
+READOUT_SCALE = "scale"
+#: A readout setting that changes only how a count scatters around what it is worth.
+READOUT_NOISE = "noise"
+
+#: What in a working point's ``readout_mode`` (``<family>:<key>=<value>;...``) changes a count, and
+#: how, by the family that writes it: on a qCMOS (the dcam adapter) the readout speed sets the read
+#: noise and the sensor mode how photons become counts; on a Basler (the pylon adapter) the pixel
+#: format sets the bit depth.  Every other key routes the trigger or paces the grab, and no count
+#: depends on which line fired it or how frames are queued; the virtual sensor's counts depend on
+#: none of its keys.
+COUNTING_READOUT_KEYS: dict[str, dict[str, str]] = {
+    "dcam": {"readout": READOUT_NOISE, "sensor": READOUT_SCALE},
+    "pylon": {"format": READOUT_SCALE},
+    "virtual": {},
+}
+
+
+def counting_readout(readout_mode: str | None) -> dict[str, tuple[str, str]] | None:
+    """The readout settings a count depends on, from a working point's ``readout_mode``: each key
+    with its value and how it changes a count (``COUNTING_READOUT_KEYS``); None when no mode is
+    recorded or its family declares none."""
+
+    if readout_mode is None:
+        return None
+    family, _, settings = str(readout_mode).partition(":")
+    keys = COUNTING_READOUT_KEYS.get(family)
+    if keys is None:
+        return None
+    stated = dict(item.partition("=")[::2] for item in settings.split(";") if "=" in item)
+    return {key: (stated[key], effect) for key, effect in keys.items() if key in stated}
+
+
 class CameraAcquisitionMode(str, Enum):
     EXTERNAL_TRIGGERED = "EXTERNAL_TRIGGERED"
     FREE_RUNNING = "FREE_RUNNING"
@@ -163,6 +197,11 @@ class CameraWorkingPoint:
     #: nothing downstream may invent it.  Both or neither.
     offset_counts: float | None = None
     electrons_per_count: float | None = None
+    #: The step the camera sets its exposure in, as it reports it (a qCMOS's
+    #: exposure property step, a Basler's ExposureTime increment); None when
+    #: it reports none.  An exposure can only be one of these steps, so a
+    #: window it misses by less than one is not a cut the operator could avoid.
+    exposure_step_seconds: float | None = None
 
     def __post_init__(self) -> None:
         # Stored as the plain mode name whichever spelling the adapter used,
@@ -196,6 +235,11 @@ class CameraWorkingPoint:
             raise ValueError("integration start offset cannot be negative")
         if float(self.gain) < 0:
             raise ValueError("camera gain cannot be negative")
+        if self.exposure_step_seconds is not None:
+            step = float(self.exposure_step_seconds)
+            if not np.isfinite(step) or step <= 0:
+                raise ValueError("exposure_step_seconds must be finite and positive")
+            object.__setattr__(self, "exposure_step_seconds", step)
         conversion = stated_conversion(
             self.offset_counts, self.electrons_per_count, camera="camera working point"
         )

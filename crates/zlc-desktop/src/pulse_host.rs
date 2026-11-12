@@ -9,7 +9,7 @@
 //! made only when something it shows changed. The board's SAFE is one of Stop all's safe actions,
 //! and the sequencer apparatus devices (`sequencer.virtual|hardware|local`) are native: opening one
 //! attaches the board the editor and the runs share.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
@@ -35,12 +35,22 @@ use zlc_pulse_editor::session::{Job, Outcome};
 use zlc_pulse_editor::{tables, to_value};
 use zlc_plugin_host::{HostEvent, PluginHost};
 
+use zlc_workbench::diagnostics::{DocumentSource, NamedDocument};
+
 use crate::science::Front;
 
 /// The Pixels panel id the Preview page's timeline is delivered as.
 pub const PREVIEW_PANEL: &str = "pulse-preview";
 /// Stop all's name for the board's SAFE.
 pub const SAFE_OUTPUT: &str = "pulse-streamer";
+/// The contract family of a pulse document chosen as a node's workspace resource.
+pub const PULSE_CONTRACT: &str = "zlc.pulse/";
+
+/// The files a pulse document names: its Subpulse files, found as its reader finds them (beside it).
+pub fn named_by_pulse(path: &Path) -> Vec<PathBuf> {
+    zlc_pulse::codec::read_pulse_document(path).map(|(sequence, _)| sequence.components.iter().filter(|component| component.from_file())
+        .map(|component| PathBuf::from(&component.config_path)).collect()).unwrap_or_default()
+}
 
 /// What a lane, the desk or a worker tells the window's turn.
 pub enum PulseEvent {
@@ -55,8 +65,8 @@ pub enum PulseEvent {
     Written(Box<Written>),
     /// A Subpulse file the open pulse resolves changed on the disk.
     FilesChanged,
-    /// A native sequencer device opened (or did not).
-    Opened { instance: String, result: Result<(Arc<Board>, Option<Served>), String> },
+    /// A native sequencer device opened (or did not); `took`: its own open (its world's and its board's).
+    Opened { instance: String, result: Result<(Arc<Board>, Option<Served>), String>, took: Duration },
     Closed { instance: String, error: Option<String> },
     /// A preview front, the words above it and its axes (what the page hit-tests).
     Preview { result: Result<(Front, String, Vec<Value>), String>, key: String },
@@ -178,8 +188,34 @@ struct Given { instance: String, child: Option<Served>, world: Option<String>, p
 
 /// The pulse server this application started for `sequencer.local`: its
 /// process, its port, and the line it hears admission on (`admit` / `refuse`;
-/// the line closing ends the server, which drives the board SAFE first).
-pub struct Served { child: std::process::Child, port: u16, control: Option<std::process::ChildStdin> }
+/// the line closing ends the server, which drives the board SAFE first); the
+/// transport its row asked for (`backend`) and what its ready line says it took.
+/// Its job ends it and what it started (Vivado) with this application, crash or not.
+pub struct Served { child: std::process::Child, port: u16, control: Option<std::process::ChildStdin>, backend: String, ready: Value, _job: zlc_core::process::Job }
+
+/// The transport a local board's server took, as its `device_info` says it: `UART COM5`,
+/// `JTAG-to-AXI (Vivado)`, `memory mock`; `ready` is the server's ready line.
+fn transport_taken(ready: &Value) -> String {
+    match ready["transport"].as_str() {
+        Some("uart") => format!("UART {}", ready["uart_port"].as_str().unwrap_or("?")),
+        Some("jtag-axi") => "JTAG-to-AXI (Vivado)".into(),
+        Some("memory") => "memory mock".into(),
+        other => other.unwrap_or("unknown").to_owned(),
+    }
+}
+
+/// Each port the server's probe tried, with what it came to.
+fn probe_attempts(ready: &Value) -> Vec<&str> { ready["attempts"].as_array().into_iter().flatten().filter_map(Value::as_str).collect() }
+
+/// What the Init or Apply line says of the open: a row on Auto (`backend`) that came up over JTAG
+/// (a resident Vivado of 1-2 GB, a 20 s open) rather than its UART, with what the server's probe
+/// tried -- the one note whether Init found no UART first or the row named a port no board answered on.
+fn transport_note(backend: &str, ready: &Value) -> Option<String> {
+    if backend != "auto" || ready["transport"] != "jtag-axi" { return None; }
+    let attempts = probe_attempts(ready);
+    let tried = if attempts.is_empty() { String::new() } else { format!(": no board UART answered ({})", attempts.join("; ")) };
+    Some(format!("opened over JTAG-to-AXI under Auto, not its UART{tried}"))
+}
 
 impl Served {
     fn end(mut self) {
@@ -279,6 +315,8 @@ struct Desk {
     watching: AtomicUsize,
     /// A notice for the window is on its way.
     noticed: AtomicBool,
+    /// Each pulse document played on the board this session (a run's, a client's, the editor's).
+    played: Mutex<BTreeSet<PathBuf>>,
 }
 
 /// The board's commands, answered off the window's turn by whoever owns each fact: the board its
@@ -296,7 +334,7 @@ impl PulseDesk {
     pub fn new(post: Post) -> PulseDesk {
         PulseDesk(Arc::new(Desk { device: Lane::new("pulse-command"), safe: Lane::new("pulse-safe"), post, root: Mutex::default(),
             plugins: Mutex::default(), held: Mutex::default(), runs: Mutex::default(), watches: Mutex::default(),
-            watching: AtomicUsize::new(0), noticed: AtomicBool::new(false) }))
+            watching: AtomicUsize::new(0), noticed: AtomicBool::new(false), played: Mutex::default() }))
     }
 
     pub fn set_plugins(&self, plugins: Option<PluginHost>) { *lock(&self.0.plugins) = plugins; }
@@ -515,11 +553,42 @@ impl PulseDesk {
                     if let Err(error) = accept_native_receipt(plugins, hosted, handle, native, &board, receipt) { result = Err(error); }
                 }
             }
+            if let Some((path, _)) = &pin { lock(&desk.0.played).insert(path.clone()); }
             if let Some(hosted) = &hosted { desk.played(hosted, pin, fired, loaded); }
             reply(result);
             desk.notice();
         });
     }
+
+    /// The pulse documents a diagnostics archive carries: each played on the board this session, the
+    /// pulse the board holds now as it holds it, and the Config values it compiles against (its
+    /// file, or the values when it follows none). Asks the board: off the window's turn.
+    pub fn diagnostic_documents(&self) -> Vec<NamedDocument> {
+        let file = |why: &str, path: PathBuf| NamedDocument { why: why.into(), contract: PULSE_CONTRACT.into(), source: DocumentSource::File(path) };
+        let held = |why: &str, name: &str, text: String| NamedDocument { why: why.into(), contract: String::new(),
+            source: DocumentSource::Held { name: name.into(), bytes: text.into_bytes() } };
+        let mut documents: Vec<NamedDocument> = lock(&self.0.played).iter().map(|path| file("played on the board", path.clone())).collect();
+        let Some(board) = lock(&self.0.held).board.clone() else { return documents };
+        match board.applied() {
+            Ok(Some(applied)) => if let Some(source) = applied.source {
+                documents.push(held("held by the board (as loaded, its Subpulses resolved)", "board-held-pulse.json", zlc_pulse::codec::sequence_to_tree(&source).readable()));
+            },
+            Ok(None) => {}
+            Err(error) => documents.push(held("the board did not say what it holds", "board-held-pulse-error.txt", error.message)),
+        }
+        let (values, _, path) = board.config().held();
+        match path {
+            Some(path) => documents.push(NamedDocument { contract: String::new(), ..file("Config values the board compiles against", path) }),
+            None if !values.is_empty() => if let Ok(tree) = zlc_pulse::codec::config_values_to_tree(&values) {
+                documents.push(held("Config values the board compiles against (held, no file)", "board-config-values.json", tree.readable()));
+            },
+            None => {}
+        }
+        documents
+    }
+
+    /// The editor's document, played on the board by its own Fire, Hold or Step.
+    fn editor_played(&self, path: &str) { if !path.is_empty() { lock(&self.0.played).insert(zlc_pulse::codec::absolute(Path::new(path))); } }
 
     /// What one of a run's `pulse_run`s left it holding; a run that ended meanwhile is let go once its last is in.
     fn played(&self, hosted: &str, pinned: Option<(PathBuf, Arc<Sequence>)>, fired: Option<u32>, loaded: Option<Arc<Value>>) {
@@ -962,6 +1031,7 @@ impl PulseHost {
 
     fn edit(&mut self, action: &str, args: &Map<String, Value>, operator: bool, request: u64) -> Handled {
         let answer = self.editor.command(action, args, operator);
+        if answer.is_ok() && matches!(action, "pulse_fire" | "pulse_hold" | "pulse_step") { self.desk.editor_played(&self.editor.path); }
         self.dirty = true;
         // Selectors off ends a drag in progress (v2 cancelled the active interaction).
         if action == "pulse_preview" && args.get("selectors") == Some(&Value::Bool(false)) { self.pointer(json!({"event": "cancel", "x": 0.0, "y": 0.0})); }
@@ -1002,24 +1072,26 @@ impl PulseHost {
     pub fn open_device(&mut self, instance: &str, type_id: &str, parameters: &Value, context: &Value) {
         let post = self.post.clone();
         if let Some(given) = &self.given {
-            post(PulseEvent::Opened { instance: instance.to_owned(), result: Err(format!("the pulse board is already attached as {}", given.instance)) });
+            post(PulseEvent::Opened { instance: instance.to_owned(), result: Err(format!("the pulse board is already attached as {}", given.instance)), took: Duration::ZERO });
             return;
         }
         let (instance, type_id, parameters) = (instance.to_owned(), type_id.to_owned(), parameters.clone());
         let world = (type_id == "sequencer.virtual").then(|| (self.desk.plugins(), world_instance(&instance), context["simulation"].clone()));
         self.desk.device_lane().run(move || {
+            let began = std::time::Instant::now();
             // The world opens first: a virtual board without one would play into nothing.
             if let Some((plugins, name, group)) = &world {
                 let opened = plugins.as_ref().ok_or_else(|| "the virtual sequencer needs the plugin host for its world".to_owned())
                     .and_then(|host| host.open(name, "simulation.board", json!({}), if group.is_object() { group.clone() } else { json!({}) })
                         .map_err(|error| format!("its world side: {error}")));
-                if let Err(error) = opened { post(PulseEvent::Opened { instance, result: Err(error) }); return; }
+                if let Err(error) = opened { post(PulseEvent::Opened { instance, result: Err(error), took: began.elapsed() }); return; }
             }
             let (logs, name) = (post.clone(), instance.clone());
             let narrate = Box::new(move |line| logs(PulseEvent::Log { instance: name.clone(), line }));
             let result = open_device(&type_id, &parameters, narrate).map(|(board, child)| (Arc::new(board), child));
+            if let Some(line) = result.as_ref().ok().and_then(|(board, _)| connected_line(board)) { post(PulseEvent::Log { instance: instance.clone(), line }); }
             if result.is_err() { if let Some((Some(host), name, _)) = &world { let _ = host.close(name); } }
-            post(PulseEvent::Opened { instance, result });
+            post(PulseEvent::Opened { instance, result, took: began.elapsed() });
         });
     }
 
@@ -1041,10 +1113,17 @@ impl PulseHost {
         let board = self.editor.board().map(|b| b.name().to_owned());
         // What the board says of itself (PLUGIN_PROTOCOL `device_info`), from the description its open read:
         // which board, the protocol it speaks, and the build its layout and target fingerprints name.
-        let info = json!({"board": board, "board_protocol": zlc_pulse::wire::LAYOUT_STRUCT_VERSION, "clock_hz": description.clock_hz,
+        let mut info = json!({"board": board, "board_protocol": zlc_pulse::wire::LAYOUT_STRUCT_VERSION, "clock_hz": description.clock_hz,
             "layout_fingerprint": format!("{:08x}", description.layout_fingerprint()), "target_abi_fingerprint": description.target.abi_fingerprint()});
-        Ok(json!({"board": board, "ports": description.target.ports.len(),
-                  "clock_hz": description.clock_hz, "snapshot": true, "facts": facts, "device_info": info}))
+        // The board on this computer: the transport its server took, and what its probe tried.
+        let served = self.given.as_ref().and_then(|given| given.child.as_ref());
+        if let Some(served) = served {
+            info["transport"] = json!(transport_taken(&served.ready));
+            let attempts = probe_attempts(&served.ready);
+            if !attempts.is_empty() { info["probe"] = json!(attempts.join("; ")); }
+        }
+        Ok(json!({"board": board, "ports": description.target.ports.len(), "clock_hz": description.clock_hz, "snapshot": true, "facts": facts,
+                  "device_info": info, "note": served.and_then(|served| transport_note(&served.backend, &served.ready))}))
     }
 
     /// What the apparatus' sequencer states of itself, when it differs from what was last said: its
@@ -1235,15 +1314,14 @@ else:
 
 fn run_scan_program(python: Option<&Path>, source: &str) -> Result<Option<ScanTable>, String> {
     use std::io::{Read, Write};
-    use std::os::windows::process::CommandExt;
     let python = python.ok_or_else(|| format!("{} (scan programs run in it)", zlc_plugin_host::NOT_INSTALLED))?;
     // Run as the plugin processes are (no -I: the same packages, user site and PYTHONPATH; no
     // PYTHONHOME; the base installation's DLLs and the thread policy); a console program, given no
     // console window (this application has none).
-    let mut child = std::process::Command::new(python).env_remove("PYTHONHOME").envs(zlc_plugin_host::plugin_environment(python)).args(["-c", SCAN_RUNNER]).stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-        .spawn().map_err(|error| error.to_string())?;
-    let job = crate::job::limit(&child, Some(2048));
+    let job = zlc_core::process::Job::new(Some(2048)).map_err(|error| format!("the scan program's job: {error}"))?;
+    let mut child = job.spawn(std::process::Command::new(python).env_remove("PYTHONHOME").envs(zlc_plugin_host::plugin_environment(python)).args(["-c", SCAN_RUNNER])
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()),
+        windows_sys::Win32::System::Threading::CREATE_NO_WINDOW).map_err(|error| error.to_string())?;
     if let Some(mut stdin) = child.stdin.take() { let _ = stdin.write_all(source.as_bytes()); }
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
     let status = loop {
@@ -1277,23 +1355,24 @@ fn run_scan_program(python: Option<&Path>, source: &str) -> Result<Option<ScanTa
 /// (its `zlc_pulse.remote` logger: `[HH:MM:SS] ZLC <event> ...`).
 fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Result<(Board, Served), String> {
     use std::io::BufRead;
-    use std::os::windows::process::CommandExt;
     let server = std::env::current_exe().map_err(|error| error.to_string())?.with_file_name("zlc-pulse-server.exe");
     if !server.is_file() { return Err(format!("{} is not built", server.display())); }
     let (backend, arguments) = server_arguments(parameters)?;
     // A console program, given no console window; its errors go where this application's go.
-    let mut child = std::process::Command::new(&server).args(&arguments).stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit())
-        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-        .spawn().map_err(|error| error.to_string())?;
+    let job = zlc_core::process::Job::new(None).map_err(|error| format!("the local pulse server's job: {error}"))?;
+    let mut child = job.spawn(std::process::Command::new(&server).args(&arguments).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()),
+        windows_sys::Win32::System::Threading::CREATE_NO_WINDOW).map_err(|error| error.to_string())?;
     let control = child.stdin.take();
     let stdout = child.stdout.take().ok_or("no server output")?;
-    let (found, port) = mpsc::channel();
+    let (found, said) = mpsc::channel::<Result<Value, String>>();
     std::thread::spawn(move || {
         let mut lines = std::io::BufReader::new(stdout).lines();
         for line in lines.by_ref().map_while(Result::ok) {
-            if let Some(rest) = line.strip_prefix("{\"type\":\"pulse-server\",\"port\":") {
-                let _ = found.send(rest.trim_end_matches('}').parse::<u16>().ok());
+            // Its one line on how it came up (zlc-pulse-server): ready, with the transport it took, or why it could not.
+            if line.starts_with("{\"type\":\"pulse-server\"") {
+                let ready: Value = serde_json::from_str(&line).unwrap_or_default();
+                let _ = found.send(ready["error"].as_str().map_or(Ok(ready.clone()), |error| Err(error.to_owned())));
                 break;
             }
             if let Some(line) = narration(&line) { narrate(line); }
@@ -1302,13 +1381,20 @@ fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Res
     });
     // A JTAG board waits for Vivado to come up and open its target first.
     let startup = if matches!(backend, "uart" | "memory") { Duration::ZERO } else { zlc_pulse::axi::STARTUP_TIMEOUT };
-    let port = match port.recv_timeout(Duration::from_secs(60) + startup) {
-        Ok(Some(port)) => port,
-        _ => { let _ = child.kill(); return Err("the local pulse server did not start (see its log)".into()); }
+    let ended = |mut child: std::process::Child, error: String| { let _ = child.kill(); let _ = child.wait(); Err(error) };
+    let (ready, port) = match said.recv_timeout(Duration::from_secs(60) + startup) {
+        Ok(Ok(ready)) => match ready["port"].as_u64().and_then(|port| u16::try_from(port).ok()) {
+            Some(port) => (ready, port),
+            None => return ended(child, format!("the local pulse server said it was ready without a port: {ready}")),
+        },
+        // Its own words, typed as it raised them: a UART port that cannot be opened is `SerialPortUnusable`.
+        Ok(Err(error)) => return ended(child, error),
+        Err(_) => return ended(child, "the local pulse server did not start (see its log)".into()),
     };
+    let asked = parameters["backend"].as_str().unwrap_or("auto").to_owned();
     match Board::remote("127.0.0.1", port) {
-        Ok(board) => Ok((board, Served { child, port, control })),
-        Err(error) => { let _ = child.kill(); Err(error.message) }
+        Ok(board) => Ok((board, Served { child, port, control, backend: asked, ready, _job: job })),
+        Err(error) => ended(child, error.message),
     }
 }
 
@@ -1331,10 +1417,11 @@ fn server_arguments(parameters: &Value) -> Result<(&str, Vec<String>), String> {
 /// How long the local board's UART is looked for on Init: what its server's start was given for the same probe.
 pub const RESOLVE_WAIT: Duration = Duration::from_secs(60);
 
-/// `resolve` of the local board (`sequencer.local`) before it opens: its blank UART port, looked
-/// for on the free ports only (a bound one -- an IMU's COM3 -- is never opened) with the server's
-/// own handshake, against the deployed config its server loads. A JTAG or memory board has nothing
-/// to find; `auto` with no UART answering opens over JTAG, `uart` fails with what it tried.
+/// `resolve` of the local board (`sequencer.local`) before it opens: its UART port, looked for on
+/// the free ports only (a bound one -- an IMU's COM3 -- is never opened) with the server's own
+/// handshake, against the deployed config its server loads. A JTAG or memory board has nothing to
+/// find; `auto` with no UART answering is left without a port, so it opens over JTAG (its open says
+/// so), and `uart` fails with what it tried.
 pub fn resolve(type_id: &str, parameters: &Value, excluded: &[String], wait: Duration) -> Result<Value, String> {
     if type_id != "sequencer.local" { return Err(format!("{type_id} finds nothing before it opens")); }
     let backend = parameters["backend"].as_str().unwrap_or("auto").to_owned();
@@ -1355,14 +1442,14 @@ pub fn resolve(type_id: &str, parameters: &Value, excluded: &[String], wait: Dur
     let (port, attempts, passed) = answer.recv_timeout(wait).unwrap_or_else(|_| Err(format!("its UART was not found within {} s", wait.as_secs())))?;
     // What it tried (the one that answered aside) and what it passed over, as the line says them.
     let mut said: Vec<String> = Vec::new();
-    let tried = &attempts[..attempts.len() - usize::from(port.is_some())];
+    let tried: Vec<String> = attempts[..attempts.len() - usize::from(port.is_some())].iter().map(ToString::to_string).collect();
     if !tried.is_empty() { said.push(format!("tried {}", tried.join("; "))); }
     if !passed.is_empty() { said.push(format!("passed over {}: bound", passed.join(", "))); }
     let context = if said.is_empty() { String::new() } else { format!(" ({})", said.join("; ")) };
     match port {
         Some(port) => Ok(json!({"parameters": {"uart_port": port}, "note": format!("board UART found on {port}{context}")})),
         None if backend == "uart" => Err(format!("no board UART on the free ports{}", if context.is_empty() { " (no COM port is free)".to_owned() } else { context })),
-        None => Ok(json!({"parameters": {}, "note": format!("no board UART on the free ports{context}; opening over JTAG")})),
+        None => Ok(json!({"parameters": {"uart_port": ""}, "note": format!("no board UART on the free ports{context}")})),
     }
 }
 
@@ -1370,10 +1457,23 @@ pub fn resolve(type_id: &str, parameters: &Value, excluded: &[String], wait: Dur
 /// computer's local time; anything else is not narration.
 fn narration(line: &str) -> Option<String> {
     let message = line.split_once("] ").map_or(line, |(_, rest)| rest);
-    if !message.starts_with("ZLC ") { return None; }
+    message.starts_with("ZLC ").then(|| stamped(message))
+}
+
+/// `message` as a device log line: stamped with the local time.
+fn stamped(message: &str) -> String {
     let mut time = unsafe { std::mem::zeroed::<windows_sys::Win32::Foundation::SYSTEMTIME>() };
     unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut time) };
-    Some(format!("[{:02}:{:02}:{:02}] {message}", time.wHour, time.wMinute, time.wSecond))
+    format!("[{:02}:{:02}:{:02}] {message}", time.wHour, time.wMinute, time.wSecond)
+}
+
+/// The line a board reached over a pulse server leaves in its device log once connected: where,
+/// which protocol, and the fingerprints its description proved. None for the virtual board.
+fn connected_line(board: &Board) -> Option<String> {
+    if board.is_virtual() { return None; }
+    let description = board.description();
+    Some(stamped(&format!("ZLC CONNECTED {} (pulse server, board protocol v{}): clock {} Hz, layout fingerprint {:08x}, target ABI fingerprint {}",
+        board.name(), zlc_pulse::wire::LAYOUT_STRUCT_VERSION, description.clock_hz, description.layout_fingerprint(), description.target.abi_fingerprint())))
 }
 
 fn open_device(type_id: &str, parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Result<(Board, Option<Served>), String> {
@@ -1514,6 +1614,26 @@ mod tests {
 
     fn board(host: &PulseHost) -> Arc<Board> { host.editor.board().unwrap().clone() }
 
+    /// A diagnostics archive carries the pulse documents the board played this session, as files, and
+    /// the pulse it holds now, as it holds it.
+    #[test]
+    fn the_pulses_played_and_held_are_named_for_a_diagnostics_archive() {
+        let (host, _events, document) = host("diagnostics");
+        claim(&host, &["scan#1"]);
+        let held = |documents: &[NamedDocument]| documents.iter().find_map(|named| match &named.source {
+            DocumentSource::Held { name, bytes } if name == "board-held-pulse.json" => Some(bytes.clone()), _ => None });
+        let before = host.desk.diagnostic_documents();
+        assert!(before.iter().all(|named| named.why != "played on the board") && held(&before).is_none(), "nothing played, nothing held");
+        run_asks(&host, "scan#1", "pulse_run", played(&document, 1)).unwrap();
+        let documents = host.desk.diagnostic_documents();
+        let files: Vec<(&str, &str, &Path)> = documents.iter().filter_map(|named| match &named.source {
+            DocumentSource::File(path) => Some((named.why.as_str(), named.contract.as_str(), path.as_path())), _ => None }).collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!((files[0].0, files[0].1, files[0].2.file_name()), ("played on the board", PULSE_CONTRACT, document.file_name()));
+        let held: Value = serde_json::from_slice(&held(&documents).expect("the board holds what it played")).unwrap();
+        assert!(held.is_object(), "a pulse document: {held}");
+    }
+
     /// A run's play, its report wait and its Stop are answered off the window's turn: nothing here
     /// turns the loop, and what the board did reaches the window as one coalesced notice.
     #[test]
@@ -1649,6 +1769,22 @@ mod tests {
         assert!(backend == "auto" && arguments.ends_with("--backend auto --port 18861 --uart-port COM5"), "{arguments}");
         assert_eq!(line(json!({"backend": "uart", "uart_port": ""})).unwrap_err(), "no UART port: Init finds it, or set one");
         assert!(line(json!({"backend": "uart", "uart_port": "COM5"})).unwrap().1.ends_with("--backend uart --port 0 --uart-port COM5"));
+    }
+
+    /// The transport the server took is the board's `device_info`, and a row on Auto that came up
+    /// over JTAG says so on the Init line -- from the server's ready line, whichever way it got there.
+    #[test]
+    fn the_transport_taken_is_said_and_jtag_under_auto_is_noted() {
+        let uart = json!({"type": "pulse-server", "port": 1, "transport": "uart", "uart_port": "COM5", "attempts": ["COM5: word63 fingerprint matched"]});
+        assert_eq!((transport_taken(&uart), transport_note("auto", &uart)), ("UART COM5".to_owned(), None));
+        let probed = json!({"transport": "jtag-axi", "attempts": ["COM10: opened, no board answered (timeout)"]});
+        assert_eq!((transport_taken(&probed), probe_attempts(&probed)), ("JTAG-to-AXI (Vivado)".to_owned(), vec!["COM10: opened, no board answered (timeout)"]));
+        assert_eq!(transport_note("auto", &probed).unwrap(),
+                   "opened over JTAG-to-AXI under Auto, not its UART: no board UART answered (COM10: opened, no board answered (timeout))");
+        // Init found no UART first (its resolve said what it tried): the server was sent to JTAG and probed nothing.
+        let sent = json!({"transport": "jtag-axi", "attempts": [], "reason": "explicit jtag-axi backend"});
+        assert_eq!(transport_note("auto", &sent).unwrap(), "opened over JTAG-to-AXI under Auto, not its UART");
+        assert_eq!(transport_note("jtag-axi", &sent), None, "chosen, not fallen back to");
     }
 
     /// v2 slm_rearrangement: the Pulse is loaded first and the FIRE is then the FIRE alone.

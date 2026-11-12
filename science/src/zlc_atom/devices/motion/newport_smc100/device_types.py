@@ -52,10 +52,11 @@ def _resolve(values: Mapping[str, Any], excluded: frozenset[str]) -> dict[str, A
 
     free, passed = free_serial_ports(excluded)
     address = int(values["address"])
-    found = discover_smc100(addresses=(address,), ports=free, first=True)
+    unopened: list[str] = []
+    found = discover_smc100(addresses=(address,), ports=free, first=True, unopened=unopened)
     bound = [f"passed over {', '.join(passed)}: bound"] if passed else []
     if not found:
-        said = "; ".join([f"asked {', '.join(free) or 'no free port'}", *bound])
+        said = "; ".join([f"asked {', '.join(free) or 'no free port'}", *unopened, *bound])
         raise RuntimeError(
             f"no Newport SMC100 answered at address {address} on the free serial ports ({said}); "
             "set its port and address, or power it and Init again"
