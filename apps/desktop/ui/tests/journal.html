@@ -55,9 +55,11 @@ try {
     assert(sent.length === 0, 'a line was sent alone');
     await wait(1300);
     assert(sent.length === 1 && sent[0].action === 'journal', `batches ${sent.length}`);
-    const said = lines().map(line => line.ev);
+    // What the window itself went through (shown, hidden, focus) is the browser's, not this test's doing.
+    const own = lines().filter(line => !['shown', 'hidden', 'focused', 'blurred'].includes(line.ev));
+    const said = own.map(line => line.ev);
     assert(said.join() === 'opened,click,key,page', said.join());
-    const [, click, key] = lines();
+    const [, click, key] = own;
     assert(click.facts.id === 'fire' && click.facts.page === 'task-console', JSON.stringify(click));
     assert(key.facts.key === 'Ctrl+Enter' && key.facts.name === 'duration', JSON.stringify(key));
     const after = Date.now() * 1000;
