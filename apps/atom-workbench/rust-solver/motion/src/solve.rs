@@ -2768,6 +2768,31 @@ mod tests {
         assert!(near(adds[1], [0.1 * 0.03, 0.2 * 0.10]), "{adds:?}");
     }
 
+    /// What a group keeps of its trajectories' states (`Shape::fold`, `outside_alone`). Four trajectories at two
+    /// outputs; the second and the fourth are outside the reach at the last output and leave their states there,
+    /// the pilot's leave every state. A product's group keeps, per output, the first state it is handed: the second
+    /// trajectory's; a pilot's keeps them all, and of those `outside_alone` leaves the first that is outside -- the
+    /// same state.
+    #[test]
+    fn a_group_keeps_its_first_state_outside_the_reach() {
+        let plan = Plan::new(&[0., 1.], [1.; 3]);
+        let record = |index: u64, keep: bool| {
+            let outside = index % 2 == 1;
+            let held = |outside: bool| Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], outside, unresolved: false });
+            let state = |k: usize, outside: bool| State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t: k as f64 }, psi: vec![] }, tau: 1., index, outside };
+            let samples = vec![keep.then(|| state(0, false)), (keep || outside).then(|| state(1, outside))];
+            Record { outputs: vec![held(false), held(outside)], listed: vec![None; plan.listed.len()], samples, counts: Counts::default() }
+        };
+        let kept = |part: &Part| -> Vec<Vec<u64>> { part.samples.iter().map(|states| states.iter().map(|state| state.index).collect()).collect() };
+        let product = Shape::of(&plan, false).fold((0..4).map(|i| record(i, false)));
+        assert_eq!(kept(&product), [vec![], vec![1]]);
+        assert_eq!(product.sums.sums[1].outside[0], 2.);
+        let mut pilot = [Shape::of(&plan, true).fold((0..4).map(|i| record(i, true)))];
+        assert_eq!(kept(&pilot[0]), [vec![0, 1, 2, 3], vec![0, 1, 2, 3]]);
+        outside_alone(&mut pilot);
+        assert_eq!(kept(&pilot[0]), kept(&product));
+    }
+
     /// The reach's falsifier (`outgrown`) on a pilot of 88 atoms, 200 outputs after t = 0 and 21 listed ones (621
     /// looks), a reach made for 30.04 µK that leaves out s = 2.44e-4.
     /// - Every T at the reach's and no atom outside: the reach stands. A T of 75 µK read exactly: refuted, to 75.
