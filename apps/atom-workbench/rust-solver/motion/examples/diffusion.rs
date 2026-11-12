@@ -324,7 +324,7 @@ fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64,
         let (step, _, taken) = stepped(run, &t, length, &mut |_| Brownian::STILL, &mut scratch);
         if t.time >= burn {
             let (r_h, k_h, whole, jumped) = kicks(&step);
-            let spread = taken * run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi, None).diffusion[2][2];
+            let spread = taken * run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi).diffusion[2][2];
             let w = course.weights(t.time + 0.5 * taken);
             for (i, w) in [1.0, w[0], w[1]].into_iter().enumerate() {
                 sums[3 * i] += w * (whole[2] - jumped[2]);
@@ -582,7 +582,7 @@ fn account(name: &str, dimension: &str, temperature: f64, tau: f64, count: u64, 
                         let (step, _, taken) = stepped(&run, &t, rest, &mut |length| Brownian::over(length, &[noise.normals(), noise.normals()]), &mut scratch);
                         let quiet = stepped(&run, &t, taken, &mut |_| Brownian::STILL, &mut scratch).0;
                         let ((r_h, k_h, whole, jumped), still) = (kicks(&step), kicks(&quiet).2);
-                        let scattering = run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi, None);
+                        let scattering = run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi);
                         for a in 0..3 {
                             let (random, force) = (whole[a] - still[a], taken * scattering.force[a]);
                             let middle = hm * (k_h[a] + 0.5 * whole[a]);

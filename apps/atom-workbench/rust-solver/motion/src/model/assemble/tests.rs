@@ -640,7 +640,7 @@ fn a_state_s_photons_in_parts_are_its_photons() {
             assert_eq!((&whole, work), (&model.photons_counted(cluster, &at, &psi, tables).0, model.photons_counted(cluster, &at, &psi, tables).1), "{name}, cluster {cluster}: the photons by the cluster's own plan and table");
             // A step's scattering reads the same photons where they are made: the same sums in the same order.
             let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
-            assert_eq!(model.scattering_of(&plan, table, &at, &psi, None).0, crate::model::Scattering::of(&whole, norm), "{name}, cluster {cluster}: the scattering");
+            assert_eq!(model.scattering_of(&plan, table, &at, &psi).0, crate::model::Scattering::of(&whole, norm), "{name}, cluster {cluster}: the scattering");
             let bare = model.photons_of(&plan, table, &at, &psi, Gradients::None).0;
             assert_eq!(bare, run.photon_amplitudes(cluster, &at, &psi));
             assert_eq!(whole.len(), bare.len(), "{name}, cluster {cluster}: the classes");
@@ -648,7 +648,7 @@ fn a_state_s_photons_in_parts_are_its_photons() {
                 assert!(alone.gradients.iter().flatten().all(|g| g.is_empty()), "{name}, cluster {cluster}, class {}: gradients where none are asked", photon.class);
                 assert!((alone.class, &alone.amplitudes) == (photon.class, &photon.amplitudes), "{name}, cluster {cluster}, class {}: the amplitudes alone", photon.class);
                 let one = model.photons_of(&plan, table, &at, &psi, Gradients::Of(photon.class)).0;
-                assert!(one.len() == 1 && crate::model::Photon { explicit: photon.explicit, ..one[0].clone() } == *photon && one[0].explicit == [[0.0; 3]; 3], "{name}, cluster {cluster}, class {}: the class alone", photon.class);
+                assert!(one.len() == 1 && one[0] == *photon, "{name}, cluster {cluster}, class {}: the class alone", photon.class);
                 let mut draw = |rates: &[f64]| {
                     assert!(rates.len() == bare.len() && rates.iter().zip(&bare).all(|(rate, photon)| *rate == photon.weight()), "{name}, cluster {cluster}: the classes' rates to a jump's draw");
                     Some(drawn)
@@ -725,7 +725,7 @@ fn photons_written(model: &Model, plan: &Plan, near: Option<&NearValues>, bound:
                 terms: 0,
             };
             for m in &class.members {
-                let folded = !matches!(model.sources[m.source].origin, Origin::Explicit { .. });
+                let folded = m.folded;
                 let (c, cw): (&[C64], &[C64]) = m.scalar.map_or((&one, &one), |s| (fields.plain(s), fields.doppler(s)));
                 let phase = C64::cis(m.phase * at.t);
                 for &(a, bp, sp, first, second) in &m.entries {
@@ -836,7 +836,7 @@ fn a_state_s_photons_are_their_entries_summed() {
                         let (mean, size): (f64, f64) = ((0..3).map(|a| crate::linalg::inner(&u[a], &du[i][a]).im).sum(), (0..3).map(|a| scale(&u[a], &du[i][a])).sum());
                         assert!((moments.mean[i] - mean).abs() <= sum * 2.0 * size, "{name}, cluster {cluster}, class {place}: the mean along {i}, {} for {mean}", moments.mean[i]);
                         for j in 0..3 {
-                            let (second, size): (f64, f64) = ((0..3).map(|a| crate::linalg::inner(&du[i][a], &du[j][a]).re).sum::<f64>() + photon.explicit[i][j], (0..3).map(|a| scale(&du[i][a], &du[j][a])).sum::<f64>() + photon.explicit[i][j].abs());
+                            let (second, size): (f64, f64) = ((0..3).map(|a| crate::linalg::inner(&du[i][a], &du[j][a]).re).sum::<f64>(), (0..3).map(|a| scale(&du[i][a], &du[j][a])).sum::<f64>());
                             assert!((moments.second[i][j] - second).abs() <= sum * 2.0 * size, "{name}, cluster {cluster}, class {place}: the second moment ({i}, {j}), {} for {second}", moments.second[i][j]);
                         }
                     }
@@ -904,7 +904,7 @@ fn the_scattering_s_table_error_on_a_scene() {
             let kappa: [f64; 3] = std::array::from_fn(|_| stream.normal() * (kt / model.hbar_over_mass).sqrt());
             let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect();
             let at = crate::model::Point { r, kappa, t: 0.0 };
-            let (ours, exact) = (model.scattering_of(&plan, Some(table), &at, &psi, None).0, model.scattering_of(&plan, None, &at, &psi, None).0);
+            let (ours, exact) = (model.scattering_of(&plan, Some(table), &at, &psi).0, model.scattering_of(&plan, None, &at, &psi).0);
             let norm = crate::linalg::norm_sqr(&psi);
             let means: f64 = model.photons_of(&plan, None, &at, &psi, Gradients::All).0.iter().map(|photon| norm3(photon.moments().mean)).sum::<f64>() / norm;
             let force = norm3(std::array::from_fn(|i| ours.force[i] - exact.force[i])) / means;

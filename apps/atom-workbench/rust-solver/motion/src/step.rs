@@ -388,13 +388,63 @@ pub trait Middle {
 
     /// What the light a state scatters at the point gives the momentum per unit time beside the Ehrenfest force and the
     /// jumps' kicks (`Model::scattering_on`): the force and the second moment's rate the jumps do not carry, of the
-    /// state ψ at the middle's time and the path's momentum, with the states' populations averaged over the step (of
-    /// unit sum) for what goes with an explicit state's decay -- its rate is the step's mean, not the middle's. Asked
-    /// of the middle, which holds the point: the model makes nothing there a second time.
-    fn scattering(&self, path: &Self::Path, psi: &[C64], populations: &[f64]) -> Scattering;
+    /// state ψ at the middle's time and the path's momentum. Asked of the middle, which holds the point: the model makes
+    /// nothing there a second time.
+    fn scattering(&self, path: &Self::Path, psi: &[C64]) -> Scattering;
 
     /// The counted complex multiply-adds of one `generator`, one `force` and one `tones`.
     fn work(&self) -> [f64; 3];
+
+    /// Ĝ_a(s) as matrices at the time s from the middle along the path (n × n each, row by row, Hermitian): what
+    /// `force` contracts. Here from its forms -- a Hermitian G is fixed by tr(Gρ) over the Hermitian ρ: a diagonal ρ
+    /// reads G_ii, ρ = E_ij + E_ji twice Re G_ij, ρ = i(E_ij − E_ji) twice Im G_ij --; a model may make it at once.
+    fn gradient(&self, path: &Self::Path, s: f64, g: &mut [Vec<C64>; 3]) {
+        let n = self.states();
+        for m in g.iter_mut() {
+            m.clear();
+            m.resize(n * n, C64::ZERO);
+        }
+        let mut rho = vec![C64::ZERO; n * n];
+        for i in 0..n {
+            for j in i..n {
+                rho.fill(C64::ZERO);
+                if i == j {
+                    rho[i * n + i] = C64::ONE;
+                    let f = self.force(path, s, &rho);
+                    for a in 0..3 {
+                        g[a][i * n + i] = C64::real(f[a]);
+                    }
+                    continue;
+                }
+                (rho[i * n + j], rho[j * n + i]) = (C64::ONE, C64::ONE);
+                let re = self.force(path, s, &rho);
+                (rho[i * n + j], rho[j * n + i]) = (C64::new(0.0, 1.0), C64::new(0.0, -1.0));
+                let im = self.force(path, s, &rho);
+                for a in 0..3 {
+                    g[a][i * n + j] = C64::new(0.5 * re[a], 0.5 * im[a]);
+                    g[a][j * n + i] = C64::new(0.5 * re[a], -0.5 * im[a]);
+                }
+            }
+        }
+    }
+
+    /// The optical sector's operators at the middle along the path (# The optical sector's noise; model/optical.rs):
+    /// None where the cluster has no explicit excited state.
+    fn optical(&self, _path: &Self::Path) -> Option<Optical> {
+        None
+    }
+}
+
+/// The optical sector of a cluster at a step's middle along its path (# The optical sector's noise; model/optical.rs):
+/// K_a (n × n each, row by row, Hermitian, in the cluster's Doppler frames at the middle, 1/µm), the light pattern's
+/// fastest beat on the path ν = max |(k_l − k_m)·v| over the cluster's beams and the slowest optical rate γ_Q, the
+/// least of its excited states' decay over two (rad/µs), and the counted complex multiply-adds that made them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Optical {
+    pub k: [Vec<C64>; 3],
+    pub beat: f64,
+    pub rate: f64,
+    pub work: f64,
 }
 
 /// A cluster's internal state: its amplitudes on the cluster's states -- at most the model's `STATES` --, held in place,
@@ -490,6 +540,13 @@ pub struct Trajectory {
     /// model's generators and forces at the step's nodes (`adapt` adds each step's) --, and its jumps' photons
     /// (`Dynamics::photon_work`).
     pub work: f64,
+    /// The optical sector's pending covariance (1/µm², symmetric, negative semidefinite after every step: # The optical
+    /// sector's noise): what of the noise's covariance its draws have not taken -- its negative excursions --, carried
+    /// across steps and jumps.
+    pub pending: [[f64; 3]; 3],
+    /// The optical sector's booking over the trajectory (# The optical sector's noise; the ledger's): Σ ε_Q tr C of its
+    /// steps' covariances C, Σ tr C, and the scattered light's Σ tr(2D)|τ| (1/µm²).
+    pub booked: [f64; 3],
 }
 
 impl Trajectory {
@@ -515,6 +572,8 @@ impl Trajectory {
             seed,
             index,
             work: 0.0,
+            pending: [[0.0; 3]; 3],
+            booked: [0.0; 3],
         }
     }
     /// The trajectory's point.
@@ -992,6 +1051,78 @@ fn shear<M: Middle>(along: &Along<M>, rho: &mut [C64], psi: &[C64], tau: f64) ->
     f
 }
 
+/// The optical sector's noise over a stretch of a step (module documentation, # The optical sector's noise): K_a at the
+/// middle held in the frames, Ĝ_b at the step's nodes (its middle where Ĥ is still along the path, else −h, 0, h), the
+/// quadrature's Σ w ⟨K_a⟩⟨G_b⟩ over the stretch's nodes -- and as it stood where the piece being propagated began --, and
+/// the linear part −Σ_j Re tr(Ĝ_b(s_j) S_j K_a) from the kick's own sums S_j. ∫within_Q,ab dt over the stretch is the
+/// linear part and the products' sum.
+struct Within {
+    optical: Optical,
+    g: Vec<[Vec<C64>; 3]>,
+    product: [[f64; 3]; 3],
+    saved: [[f64; 3]; 3],
+    linear: [[f64; 3]; 3],
+}
+
+impl Within {
+    /// The cluster's optical sector on the path, with the gradient at the step's nodes; None where it has none.
+    fn new<M: Middle>(along: &Along<M>, still: bool, h: f64) -> Option<Within> {
+        let optical = along.middle.optical(&along.path)?;
+        let times: &[f64] = if still { &[0.0] } else { &[-h, 0.0, h] };
+        let g = times
+            .iter()
+            .map(|&s| {
+                let mut g: [Vec<C64>; 3] = Default::default();
+                along.middle.gradient(&along.path, s, &mut g);
+                g
+            })
+            .collect();
+        Some(Within { optical, g, product: [[0.0; 3]; 3], saved: [[0.0; 3]; 3], linear: [[0.0; 3]; 3] })
+    }
+    /// A node's state x at the time u from the middle, of the quadrature weight w: w ⟨K_a⟩⟨G_b(u)⟩, Ĝ through the
+    /// step's three nodes' Lagrange polynomials on a beating path.
+    fn node(&mut self, h: f64, u: f64, w: f64, x: &[C64]) {
+        let (n, norm) = (x.len(), norm_sqr(x));
+        let form = |m: &[C64]| -> f64 { (0..n).map(|i| (x[i].conj() * (0..n).map(|j| m[i * n + j] * x[j]).sum::<C64>()).re).sum::<f64>() / norm };
+        let k: [f64; 3] = std::array::from_fn(|a| form(&self.optical.k[a]));
+        let lagrange = if self.g.len() == 1 { [1.0, 0.0, 0.0] } else { let s = u / h; [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)] };
+        let mut g = [0.0; 3];
+        for (gj, l) in self.g.iter().zip(lagrange) {
+            for b in 0..3 {
+                g[b] += l * form(&gj[b]);
+            }
+        }
+        for a in 0..3 {
+            for b in 0..3 {
+                self.product[a][b] += w * k[a] * g[b];
+            }
+        }
+    }
+    /// The linear part of the kick's sum S_j of node j (n × n, Hermitian; the still path's one sum is node 0's).
+    fn linear(&mut self, j: usize, sum: &[C64]) {
+        let n = (sum.len() as f64).sqrt() as usize;
+        for a in 0..3 {
+            let k = &self.optical.k[a];
+            // T = S_j K_a; −Re tr(Ĝ_b T) per b.
+            let t: Vec<C64> = (0..n * n).map(|p| (0..n).map(|m| sum[(p / n) * n + m] * k[m * n + p % n]).sum()).collect();
+            for b in 0..3 {
+                let g = &self.g[j][b];
+                self.linear[a][b] -= (0..n * n).map(|p| (g[p] * t[(p % n) * n + p / n]).re).sum::<f64>();
+            }
+        }
+    }
+    /// ∫within_Q,ab dt over the stretch (the quadrature's sign: negative on a reverse step).
+    fn integral(&self) -> [[f64; 3]; 3] {
+        std::array::from_fn(|a| std::array::from_fn(|b| self.linear[a][b] + self.product[a][b]))
+    }
+    /// The counted complex multiply-adds beside the sector's: the gradient at its nodes (as a generator's), per node
+    /// the forms (3 + 3 a node of Ĝ, n² each), and the linear part's products (n³ and 3 n² an axis and a node of Ĝ).
+    fn work(&self, n: usize, nodes: usize, generator: f64) -> f64 {
+        let g = self.g.len() as f64;
+        self.optical.work + g * 3.0 * generator + (nodes * (3 + 3 * self.g.len()) * n * n) as f64 + g * 3.0 * ((n * n * n) as f64 + (3 * n * n) as f64)
+    }
+}
+
 /// A trajectory's scratch memory for its steps, made with it and fitted to each step's cluster (`Scratch::fit`): the
 /// generator's picture along the step's path (`spectral::Picture`: the generator at the step's nodes, its decomposition,
 /// its following, the state's path), one array carved (`Scratch::carve`) into the middle state's density and a
@@ -1075,8 +1206,12 @@ fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64) {
 }
 
 /// A node's state into the kick's sums (`accumulate`): with its weight where Ĥ is still along the path, with its
-/// weight times the Lagrange polynomials of the step's three nodes on a beating one, whose sums `weights` takes.
-fn gather(still: bool, h: f64, u: f64, weight: f64, x: &[C64], weights: &mut [f64; 3], sums: &mut [f64]) {
+/// weight times the Lagrange polynomials of the step's three nodes on a beating one, whose sums `weights` takes; and
+/// into the optical sector's products where the cluster has one (`Within::node`).
+fn gather(still: bool, h: f64, u: f64, weight: f64, x: &[C64], weights: &mut [f64; 3], sums: &mut [f64], within: Option<&mut Within>) {
+    if let Some(within) = within {
+        within.node(h, u, weight, x);
+    }
     if still {
         accumulate(x, &[weight], sums);
     } else {
@@ -1243,8 +1378,8 @@ enum Stop {
 /// state on the path there -- its internal state, cluster, threshold and counters; its position and momentum the
 /// path's at its last jump --; the next of the times to read; whether the middle is behind; the sums of the quadrature's
 /// weights times the three nodes' Lagrange polynomials over what is behind; the kick's part of the state so far; the
-/// scattered light's force and its diffusion's factor at the middle, once it is passed; the counted work; and the
-/// states made.
+/// scattered light at the middle, once it is passed; the optical sector's ∫within_Q dt so far and its booking (# The
+/// optical sector's noise); the counted work; and the states made.
 struct March {
     u: f64,
     state: Trajectory,
@@ -1252,7 +1387,9 @@ struct March {
     passed: bool,
     weights: [f64; 3],
     impulse: [f64; 3],
-    scattered: Option<([f64; 3], [[f64; 3]; 3])>,
+    scattered: Option<Scattering>,
+    optical: [[f64; 3]; 3],
+    booked: f64,
     work: f64,
     made: Vec<Made>,
 }
@@ -1283,7 +1420,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         scratch.fit(n);
         let kappa_m = predicted(scratch, &self.generator, &from.psi, kappa_h, reference, tau);
         let resolves = domain.proven(&flow, (r_h, kappa_m), h).map_err(Refused::Unproven)?;
-        let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, weights: [0.0; 3], impulse: [0.0; 3], scattered: None, work: count::shear(n, self.generator.work()), made: Vec::new() };
+        let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, weights: [0.0; 3], impulse: [0.0; 3], scattered: None, optical: [[0.0; 3]; 3], booked: 0.0, work: count::shear(n, self.generator.work()), made: Vec::new() };
         // A step that does not resolve its path at its speed is taken, and the trajectory is unresolved from it on: its
         // states inside the step and after it.
         march.state.unresolved |= !resolves;
@@ -1292,10 +1429,28 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         while !self.stretch(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time, reads, &mut march, scratch)? {
             landed = Some(self.model.middle(march.state.cluster, r_h, from.time + h));
         }
-        let March { state: mut end, read, impulse, scattered, work, mut made, .. } = march;
-        // The scattered light at the middle, on the state there: its force over the step, and its diffusion's factor on
-        // the Brownian path's increment (the momentum) and on its first moment about the middle (the position).
-        let (force, spread) = scattered.expect("a step passes its middle");
+        let March { state: mut end, read, impulse, scattered, optical, booked, work, mut made, .. } = march;
+        // The scattered light at the middle, on the state there: its force over the step; and its diffusion with the
+        // optical sector's drawn covariance over the step (# The optical sector's noise), their factor on the Brownian
+        // path's increment (the momentum) and on its first moment about the middle (the position).
+        let scattered = scattered.expect("a step passes its middle");
+        let force = scattered.force;
+        let (mut rate, mut size, step) = (scattered.diffusion, scattered.size, tau.abs());
+        let covariance: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|b| from.pending[a][b] + tau.signum() * (optical[a][b] + optical[b][a])));
+        if covariance.iter().flatten().any(|x| *x != 0.0) {
+            let (drawn, pending) = split(&covariance);
+            for a in 0..3 {
+                for b in 0..3 {
+                    rate[a][b] += drawn[a][b] / step;
+                }
+            }
+            size += (0..3).map(|a| drawn[a][a]).fold(0.0, f64::max) / step;
+            end.pending = pending;
+            end.booked[0] += booked;
+            end.booked[1] += 2.0 * tau.signum() * (optical[0][0] + optical[1][1] + optical[2][2]);
+        }
+        end.booked[2] += step * (scattered.diffusion[0][0] + scattered.diffusion[1][1] + scattered.diffusion[2][2]);
+        let spread = factor(&rate, size, scattered.links);
         let through = |w: &[f64; 3]| -> [f64; 3] { std::array::from_fn(|a| (0..3).map(|c| spread[a][c] * w[c]).sum()) };
         let (push, shift) = spreading(&flow, tau, through(&brownian.increment), through(&brownian.moment));
         let mut kicked: ([f64; 3], [f64; 3]) = (
@@ -1364,8 +1519,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         pictured(&along, picture, tau);
         let bandwidth = picture.bandwidth;
         sums.fill(0.0);
+        let mut within = Within::new(&along, still, h);
         let ahead = |u: f64| (u + h) / tau;
-        let (begin, mut counted, mut middle) = (march.u, 0, None);
+        let (mut counted, mut middle) = (0, None);
         let mut x = [C64::ZERO; STATES];
         let done = loop {
             // A piece: from the state the march stands at, the sums and the weights as they are.
@@ -1373,6 +1529,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let launched = along.turned(&march.state.psi, from, true);
             picture.launch(from, &launched[..n]);
             saved.copy_from_slice(sums);
+            if let Some(within) = &mut within {
+                within.saved = within.product;
+            }
             let (theta, weights) = (march.state.threshold, march.weights);
             let (mut at, mut norm) = (from, norm_sqr(&march.state.psi));
             let mut nodes = quadrature(from, h, bandwidth, FORMS).peekable();
@@ -1410,7 +1569,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 }
                 if let Some(w) = weight {
                     counted += 1;
-                    gather(still, h, u, w, &x[..n], &mut march.weights, sums);
+                    gather(still, h, u, w, &x[..n], &mut march.weights, sums, within.as_mut());
                 }
                 match keep {
                     Some(Stop::Middle) => {
@@ -1435,12 +1594,15 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             // The piece again, as far as the root: its nodes, and the state at the root.
             sums.copy_from_slice(saved);
             march.weights = weights;
+            if let Some(within) = &mut within {
+                within.product = within.saved;
+            }
             picture.again(&launched[..n]);
             if ahead(crossed) > ahead(from) {
                 for (u, w) in quadrature(from, crossed, bandwidth, FORMS) {
                     picture.advance(u, &mut x[..n]);
                     counted += 1;
-                    gather(still, h, u, w, &x[..n], &mut march.weights, sums);
+                    gather(still, h, u, w, &x[..n], &mut march.weights, sums, within.as_mut());
                 }
             }
             picture.advance(crossed, &mut x[..n]);
@@ -1459,17 +1621,13 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 break false;
             }
         };
-        // The stretch's part of the kick; in the middle's stretch about the middle state, with the scattered light.
-        let length = march.u - begin;
-        let mut populations = [0.0; STATES];
-        let mut mean = |sum: &[C64]| {
-            for (s, p) in populations[..n].iter_mut().enumerate() {
-                *p += sum[s * n + s].re / length;
-            }
-        };
+        // The stretch's part of the kick; in the middle's stretch about the middle state, with the scattered light. The
+        // optical sector's linear part reads the same sums.
         let part = if still {
             whole(sums, 0, n, sum);
-            mean(sum);
+            if let Some(within) = &mut within {
+                within.linear(0, sum);
+            }
             along.middle.force(&along.path, 0.0, sum).map(|f| -f)
         } else {
             let mut out = [0.0; 3];
@@ -1486,7 +1644,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             }
             for (j, at) in [-h, 0.0, h].into_iter().enumerate() {
                 whole(sums, j, n, sum);
-                mean(sum);
+                if let Some(within) = &mut within {
+                    within.linear(j, sum);
+                }
                 if middle.is_some() {
                     for (q, rho) in sum.iter_mut().zip(held.iter()) {
                         *q -= *rho * march.weights[j];
@@ -1503,15 +1663,18 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             march.impulse[a] += part[a];
         }
         if let Some(middle) = &middle {
-            // A stretch of no length (two jumps at the middle's own time) has no mean: its populations are the middle state's.
-            if !(length != 0.0) {
-                let norm = norm_sqr(&middle[..n]);
-                for (p, z) in populations[..n].iter_mut().zip(&middle[..n]) {
-                    *p = z.norm_sqr() / norm;
+            march.scattered = Some(along.middle.scattering(&along.path, &middle[..n]));
+        }
+        if let Some(within) = &within {
+            let integral = within.integral();
+            let epsilon = (within.optical.beat / within.optical.rate).powi(2);
+            for a in 0..3 {
+                for b in 0..3 {
+                    march.optical[a][b] += integral[a][b];
                 }
             }
-            let scattered = along.middle.scattering(&along.path, &middle[..n], &populations[..n]);
-            march.scattered = Some((scattered.force, factor(&scattered.diffusion, scattered.size, scattered.links)));
+            march.booked += epsilon * 2.0 * tau.signum() * (integral[0][0] + integral[1][1] + integral[2][2]);
+            march.work += COMPLEX * within.work(n, counted, costs[0]);
         }
         march.work += count::propagation(costs, still, picture.work) + count::impulse(n, costs, counted, still);
         Ok(done)
@@ -1629,6 +1792,23 @@ pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The jump.
+
+/// A symmetric covariance's positive and negative parts (module documentation, # The optical sector's noise): C = V Λ Vᵀ
+/// by its eigenvectors, the part of the positive eigenvalues -- drawn -- and of the others -- kept pending --, which add up
+/// to C; nothing of it is clipped.
+fn split(c: &[[f64; 3]; 3]) -> ([[f64; 3]; 3], [[f64; 3]; 3]) {
+    let (values, vectors) = linalg::symmetric3_eigen(c);
+    let (mut drawn, mut pending) = ([[0.0; 3]; 3], [[0.0; 3]; 3]);
+    for (lambda, v) in values.iter().zip(&vectors) {
+        let part = if *lambda > 0.0 { &mut drawn } else { &mut pending };
+        for a in 0..3 {
+            for b in 0..3 {
+                part[a][b] += lambda * v[a] * v[b];
+            }
+        }
+    }
+    (drawn, pending)
+}
 
 /// A factor Λ of a diffusion's second-moment rate C = 2D, Λ Λᵀ = C (positive semidefinite: the second moment's rate less
 /// what the jumps carry of it, Cauchy–Schwarz; model/photon.rs): its Cholesky factor's columns, so that Λ on a Brownian

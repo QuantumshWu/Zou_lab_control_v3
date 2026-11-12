@@ -50,7 +50,7 @@ impl Folded {
         let ((f, df), third) = (self.field, (1.0_f64 / 3.0).sqrt());
         let u = vec![f * psi[0] * third];
         let gradients = std::array::from_fn(|i| std::array::from_fn(|_| vec![df[i] * psi[0] * third]));
-        vec![Photon { class: 0, landing: 0, wave_number: self.emission, absorbed: self.absorbed, amplitudes: [u.clone(), u.clone(), u], gradients, explicit: [[0.0; 3]; 3] }]
+        vec![Photon { class: 0, landing: 0, wave_number: self.emission, absorbed: self.absorbed, amplitudes: [u.clone(), u.clone(), u], gradients }]
     }
 }
 
@@ -110,7 +110,7 @@ impl Middle for Parts {
             each(p.omega, std::array::from_fn(|a| self.trace(&p.force[a], rho).re));
         }
     }
-    fn scattering(&self, _: &[f64; 3], psi: &[C64], _: &[f64]) -> Scattering {
+    fn scattering(&self, _: &[f64; 3], psi: &[C64]) -> Scattering {
         self.folded.map_or(Scattering::NONE, |folded| Scattering::of(&folded.made(psi), psi.iter().map(|z| z.norm_sqr()).sum()))
     }
     fn work(&self) -> [f64; 3] {
@@ -1262,7 +1262,7 @@ fn a_diffusion_s_factor_has_its_rate_and_no_column_in_a_null_direction() {
     let amplitudes: [Vec<C64>; 3] = std::array::from_fn(|_| (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect());
     for alpha in [[0.0; 3], [0.21, -0.13, 0.08], [1e-5, 0.2, 0.0]] {
         let gradients: [[Vec<C64>; 3]; 3] = std::array::from_fn(|i| std::array::from_fn(|a| amplitudes[a].iter().map(|u| *u * C64::new(alpha[i], k[i])).collect()));
-        let photon = Photon { class: 0, landing: 0, wave_number: 0.0, absorbed: crate::linalg::norm3(k), amplitudes: amplitudes.clone(), gradients, explicit: [[0.0; 3]; 3] };
+        let photon = Photon { class: 0, landing: 0, wave_number: 0.0, absorbed: crate::linalg::norm3(k), amplitudes: amplitudes.clone(), gradients };
         let (weight, scattered) = (photon.weight(), Scattering::of(std::slice::from_ref(&photon), 1.0));
         let rounded = crate::units::rounding(scattered.links) * scattered.size;
         // The jumps carry k: the force they leave is the rounding of the mean's sum.
@@ -2082,8 +2082,8 @@ impl<M: Middle> Middle for Probe<'_, M> {
         self.count(4);
         self.middle.tones(path, rho, each)
     }
-    fn scattering(&self, path: &M::Path, psi: &[C64], populations: &[f64]) -> Scattering {
-        self.middle.scattering(path, psi, populations)
+    fn scattering(&self, path: &M::Path, psi: &[C64]) -> Scattering {
+        self.middle.scattering(path, psi)
     }
     fn work(&self) -> [f64; 3] {
         self.middle.work()
@@ -2279,7 +2279,6 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let paths: Vec<_> = pieces.iter().map(|p| p.through.generator.path(p.kappa, p.kappa.map(|k| hm * k))).collect();
     let n = starts[0].psi.len();
     let mut h = Mat::zeros(n, n);
-    let populations: Vec<Vec<f64>> = starts.iter().map(|s| s.psi.iter().map(|z| z.norm_sqr()).collect()).collect();
     let [whole, reference, point, generator, force, tones, middle, propagated, root, scattering, readout, pace] = microseconds(
         count,
         [
@@ -2299,7 +2298,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || starts.iter().map(|s| super::middle(model, s.r, s.kappa, half).unwrap().1 .0[0]).sum::<f64>(),
             &mut || propagation(false),
             &mut || propagation(true),
-            &mut || pieces.iter().zip(&paths).zip(starts).zip(&populations).map(|(((p, path), s), populations)| p.through.generator.scattering(path, &s.psi, populations).force[0]).sum::<f64>(),
+            &mut || pieces.iter().zip(&paths).zip(starts).map(|((p, path), s)| p.through.generator.scattering(path, &s.psi).force[0]).sum::<f64>(),
             &mut || pieces.iter().zip(starts).map(|(p, s)| model.readout(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi)[0]).sum::<f64>(),
             &mut yardstick,
         ],
@@ -2633,7 +2632,7 @@ fn a_jump_s_kick_is_one_photon_s_at_most() {
         assert!((kick[2] - expected).abs() <= 1e-9 * k && kick[0] == 0.0 && kick[1] == 0.0, "kz = {phase}: the jump carries {kick:?} of b = {b}");
         carried_whole += (b <= k) as usize;
         let middle = model.middle(0, at.r, at.t);
-        let scattered = middle.scattering(&middle.path(at.kappa, [0.0; 3]), &psi, &[1.0]);
+        let scattered = middle.scattering(&middle.path(at.kappa, [0.0; 3]), &psi);
         let (mean, second) = (scattered.force[2] + weight * kick[2], scattered.diffusion[2][2] + weight * kick[2] * kick[2]);
         let closed = (k * c * c * epsilon, k * k * c * c * (phase.sin().powi(2) + (epsilon * phase.cos()).powi(2)));
         assert!((mean - closed.0).abs() <= 1e-9 * closed.0, "kz = {phase}: the mean per unit time {mean} against {}", closed.0);

@@ -337,17 +337,15 @@ impl Laid {
     }
 }
 
-/// One member of a photon class at a point (photon.rs): its source, its field component (None: 1), whether its jumps take the
+/// One member of a photon class at a point (photon.rs): its field component (None: 1), whether its jumps take the
 /// Doppler partner, its relative beat's value in a merged class (rad/µs), and its entries (axis a, landing place, source place,
 /// where its jump and its partner's lie among a point's values and constants). And the same jumps as one matrix (module
 /// documentation, # The jumps' matrices): the source places that hold an entry (`columns`) and where its columns lie
 /// (`at`) -- among a point's jumps where any of them is a near form (`near`; its partner's matrix after its own), else
 /// among the plan's: a carrier's member whose jumps are all its bare drives' is a constant one, its partner nothing. An
-/// explicit state's member is not `folded`, and `decay` is its rate into the class over its population, Σ |C_a[b, e]|²
-/// of its entries.
+/// explicit state's member is not `folded`.
 #[derive(Clone, Debug)]
 pub(crate) struct MemberPlan {
-    pub(crate) source: usize,
     pub(crate) scalar: Option<usize>,
     pub(crate) doppler: bool,
     pub(crate) phase: f64,
@@ -356,7 +354,6 @@ pub(crate) struct MemberPlan {
     pub(crate) near: bool,
     pub(crate) columns: Vec<usize>,
     pub(crate) at: usize,
-    pub(crate) decay: f64,
 }
 
 /// One photon class of the cluster under the plan's lights (photon.rs `Class`): its landing cluster, its wave number, the
@@ -1150,7 +1147,6 @@ impl<'a> Builder<'a> {
                         let at = values.len();
                         values.resize(at + if varies { 2 * matrix } else { matrix }, 0.0);
                         let folded = !matches!(model.sources[source].origin, Origin::Explicit { .. });
-                        let mut decay = 0.0;
                         for &(a, bp, sp, first, second) in &entries {
                             let column = columns.iter().position(|&x| x == sp).expect("an entry's column");
                             let own = at + laid(a * states + bp, column, columns.len());
@@ -1166,11 +1162,8 @@ impl<'a> Builder<'a> {
                                 values[slot] += constant.re;
                                 values[slot + LANES] += constant.im;
                             }
-                            if !folded {
-                                decay += constants[first - len].norm_sqr();
-                            }
                         }
-                        MemberPlan { source, scalar, doppler, phase, entries, folded, near: varies, columns, at, decay }
+                        MemberPlan { scalar, doppler, phase, entries, folded, near: varies, columns, at }
                     })
                     .collect();
                 ClassPlan { landing, wave_number, absorbed, members, states, rows }
@@ -1433,13 +1426,6 @@ pub(crate) struct Site {
     /// plan's classes and their rates.
     pub(crate) emitting: Vec<usize>,
     pub(crate) rates: Vec<f64>,
-    /// What an explicit state's part of the photons reads (eliminate.rs `Model::explicit_response`): the carriers'
-    /// dressings and the levels' energies at the point to first order (eliminate.rs `Model::far_energies`); and the
-    /// explicit sources' responses of the state whose photons are in the making, each made once (photon.rs
-    /// `Model::classes_on`).
-    pub(crate) dressing: Vec<bool>,
-    pub(crate) energies: Vec<Vec<f64>>,
-    pub(crate) answers: Vec<(usize, super::eliminate::Answer)>,
     /// What the readout reads (readout.rs `Model::readout_of`): a table's responses at the point (tabulate.rs
     /// `Model::near_responses`), the carriers' field components (eliminate.rs `Model::responses_each`), and its channels'
     /// responses, one after another, each row-major on the excited states and the cluster's ground places.
@@ -1540,6 +1526,9 @@ pub struct Middle<'a> {
     point: RefCell<Held<Site>>,
     /// The complex multiply-adds that made it.
     pub(crate) work: f64,
+    /// Every cluster's plan and table under the same lights, where a run holds them (model.rs `Run`): the optical
+    /// sector's other clusters at the point (`Middle::optical`); None: their exact elimination.
+    others: Option<&'a [(Arc<Plan>, Option<&'a NearTable>)]>,
 }
 
 impl Model {
@@ -2131,7 +2120,7 @@ impl Model {
             }
         };
         let work = work + plan.fourth.as_ref().map_or(0.0, |fourth| self.fourth_site(plan, fourth, table, None, Some(r), &mut point));
-        Middle { model: self, plan: plan.clone(), r: Some(r), t, table, point: RefCell::new(point), work }
+        Middle { model: self, plan: plan.clone(), r: Some(r), t, table, point: RefCell::new(point), work, others: None }
     }
 
     /// The same from every beam's amplitude and the near forms there (the Hermitian ones to first order; `Site::formed`),
@@ -2151,7 +2140,7 @@ impl Model {
         if let (Some(fourth), Some(_)) = (plan.fourth.as_ref(), near) {
             work += self.fourth_site(plan, fourth, None, near, None, &mut point);
         }
-        Middle { model: self, plan: plan.clone(), r: None, t, table: None, point: RefCell::new(point), work }
+        Middle { model: self, plan: plan.clone(), r: None, t, table: None, point: RefCell::new(point), work, others: None }
     }
 
     /// The one generator assembly (module documentation): a cluster's generator at a position and a time under a light set, the
@@ -2167,6 +2156,7 @@ impl Model {
 /// turns.
 pub struct Path {
     kappa: [f64; 3],
+    velocity: [f64; 3],
     rates: Held<Rates>,
     turning: bool,
 }
@@ -2217,7 +2207,7 @@ impl crate::step::Middle for Middle<'_> {
         path.extend(plan.beams.iter().map(|&l| dot3(model.light.beams[l].wave_vector(), velocity)));
         gauge.clear();
         gauge.extend(plan.waves.iter().map(|k| dot3(*k, velocity)));
-        Path { kappa, turning: gauge.iter().any(|rate| *rate != 0.0), rates }
+        Path { kappa, velocity, turning: gauge.iter().any(|rate| *rate != 0.0), rates }
     }
 
     fn gauge(&self, path: &Path, rates: &mut [f64]) {
@@ -2277,8 +2267,129 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     /// photon.rs `Model::scattering_on` this middle's own site, at the path's momentum and the middle's time.
-    fn scattering(&self, path: &Path, psi: &[C64], populations: &[f64]) -> Scattering {
-        self.model.scattering_on(&self.plan, self.table, self.r, path.kappa, self.t, psi, Some(populations), &mut self.point.borrow_mut(), true).0
+    fn scattering(&self, path: &Path, psi: &[C64]) -> Scattering {
+        self.model.scattering_on(&self.plan, self.table, self.r, path.kappa, self.t, psi, &mut self.point.borrow_mut(), true).0
+    }
+
+    /// Ĝ_a(s) as matrices: the forms' own terms (`contract`), each entry where it lies -- a flag's values times the
+    /// gradient of its components' product, and its slopes along the point's directions times the product, at its
+    /// tone's phase and in its states' Doppler frames --, then the Hermitian part of their weighted sum (of a block and its
+    /// adjoint the form takes one twice: its Hermitian part is the pair's), and the fourth order's gradient.
+    fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3]) {
+        let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
+        let mut scratch = point.scratch.borrow_mut();
+        self.along(&point.amplitudes, path, Some(s), 4, &mut scratch);
+        let Scratch { plain, doppler, phases, turns, .. } = &mut *scratch;
+        for m in g.iter_mut() {
+            m.clear();
+            m.resize(n * n, C64::ZERO);
+        }
+        let width = point.forms.len();
+        let mut of = (usize::MAX, [[C64::ZERO; 4]; 3]);
+        for term in &plan.form {
+            if of.0 != term.block {
+                let block = &plan.blocks[term.block];
+                let (l, lw, r, rw) = (side(plain, block.left), side(doppler, block.left), side(plain, block.right), side(doppler, block.right));
+                let product = |l: &[C64; 4], r: &[C64; 4]| -> [C64; 4] { std::array::from_fn(|part| if part == 0 { l[0] * r[0] } else { l[part] * r[0] + l[0] * r[part] }) };
+                of = (term.block, [product(&l, &r), product(&l, &rw), product(&lw, &r)]);
+            }
+            let (real, imaginary) = plan.values(term, &point.forms);
+            let (c, phase) = (of.1[term.flag], phases[term.tone] * term.weight);
+            for i in 0..term.len {
+                let place = term.first + i;
+                let value = C64::new(real[i], imaginary[i]) * phase;
+                let mut slope = [C64::ZERO; 3];
+                for (f, direction) in point.directions.iter().enumerate().filter(|_| term.near) {
+                    let at = f * width + term.at;
+                    let z = C64::new(point.slopes[at + i], point.slopes[at + term.len + i]) * phase;
+                    for a in 0..3 {
+                        slope[a] += z * direction[a];
+                    }
+                }
+                for a in 0..3 {
+                    g[a][place] += c[1 + a] * value + c[0] * slope[a];
+                }
+            }
+        }
+        for m in g.iter_mut() {
+            // The entry x ← y in the frames: `contract` turns ρ[y, x] by turns[x] turns[y]*.
+            for x in 0..n {
+                for y in 0..n {
+                    m[x * n + y] *= turns[x] * turns[y].conj();
+                }
+            }
+        }
+        for (a, m) in g.iter_mut().enumerate() {
+            if plan.fourth.is_some() && point.quartic.len() >= 4 * n * n {
+                for (z, more) in m.iter_mut().zip(&point.quartic[(1 + a) * n * n..(2 + a) * n * n]) {
+                    *z += *more;
+                }
+            }
+            for x in 0..n {
+                for y in x..n {
+                    let z = (m[x * n + y] + m[y * n + x].conj()) * 0.5;
+                    m[x * n + y] = z;
+                    m[y * n + x] = z.conj();
+                }
+            }
+        }
+    }
+
+    /// The optical sector's operators K_a at the middle along the path (optical.rs): the cluster's generator and its
+    /// gradient there, in its Doppler frames at the path's velocity, and every other cluster's part at the same point and
+    /// path -- an explicit one's sector, a folded one's ground states' force alone (`Middle::force` on its ground
+    /// identity). None for a cluster without excited states, or where a sector has no number.
+    fn optical(&self, path: &Path) -> Option<crate::step::Optical> {
+        let (model, plan, n) = (self.model, &*self.plan, self.plan.states);
+        let c = &model.clusters[plan.cluster];
+        if c.ground == n {
+            return None;
+        }
+        let mut h = Mat::zeros(n, n);
+        crate::step::Middle::generator(self, path, 0.0, &mut h);
+        let mut g: [Vec<C64>; 3] = Default::default();
+        crate::step::Middle::gradient(self, path, 0.0, &mut g);
+        let own = super::optical::Sector::new(&h, &g, c.ground)?;
+        // The other clusters at the point, on the same path.
+        let r = self.r?;
+        let (mut others, mut work) = (vec![], 0.0);
+        for other in (0..model.clusters.len()).filter(|&o| o != plan.cluster) {
+            let k = &model.clusters[other];
+            let (of, table) = match self.others {
+                Some(all) => (all[other].0.clone(), all[other].1),
+                None => (model.plan(other, &plan.lights), None),
+            };
+            let middle = model.middle(&of, r, self.t, table);
+            let m = k.states.len();
+            let along = crate::step::Middle::path(&middle, path.kappa, path.velocity);
+            work += middle.work + crate::step::Middle::work(&middle)[1];
+            if k.ground == m {
+                let mut rho = vec![C64::ZERO; m * m];
+                for i in 0..m {
+                    rho[i * m + i] = C64::ONE;
+                }
+                let force = crate::step::Middle::force(&middle, &along, 0.0, &rho);
+                others.push(super::optical::Sector::folded(force.map(|f| -f)));
+            } else {
+                let mut h = Mat::zeros(m, m);
+                crate::step::Middle::generator(&middle, &along, 0.0, &mut h);
+                let mut g: [Vec<C64>; 3] = Default::default();
+                crate::step::Middle::gradient(&middle, &along, 0.0, &mut g);
+                let sector = super::optical::Sector::new(&h, &g, k.ground)?;
+                work += crate::step::Middle::work(&middle)[0] + sector.work / crate::decide::COMPLEX;
+                others.push(sector);
+            }
+        }
+        let all: Vec<&super::optical::Sector> = std::iter::once(&own).chain(&others).collect();
+        let (k, solves) = own.operators(&all, GROUND)?;
+        // The light pattern's fastest beat on the path, the largest (k_l − k_m)·v over the plan's beams, and the slowest
+        // optical rate, the least of the cluster's excited states' decay over two.
+        let rates = &path.rates.path;
+        let (most, least) = rates.iter().fold((f64::NEG_INFINITY, f64::INFINITY), |(most, least), x| (most.max(*x), least.min(*x)));
+        let beat = if most >= least { most - least } else { 0.0 };
+        let rate = c.states[c.ground..].iter().map(|&e| 0.5 * model.decay[(e - GROUND, e - GROUND)].re).fold(f64::INFINITY, f64::min);
+        let work = work + crate::step::Middle::work(self)[0] + (own.work + solves) / crate::decide::COMPLEX;
+        Some(crate::step::Optical { k, beat, rate, work })
     }
 
     fn work(&self) -> [f64; 3] {
@@ -2295,6 +2406,13 @@ fn side(fields: &[[C64; 4]], scalar: Option<usize>) -> [C64; 4] {
     scalar.map_or([C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO], |s| fields[s])
 }
 
+impl<'a> Middle<'a> {
+    /// This middle among every cluster's plan and table of its run (`Middle::others`).
+    pub(crate) fn among(self, others: &'a [(Arc<Plan>, Option<&'a NearTable>)]) -> Middle<'a> {
+        Middle { others: Some(others), ..self }
+    }
+}
+
 impl Middle<'_> {
     /// This middle with its generator's near values moved by `by` (a table's error read of them, tabulate.rs).
     pub(crate) fn moved(&self, by: &[f64]) -> Middle<'_> {
@@ -2309,7 +2427,7 @@ impl Middle<'_> {
         point.slopes.clone_from(&from.slopes);
         point.directions.clone_from(&from.directions);
         point.quartic.clone_from(&from.quartic);
-        Middle { model: self.model, plan: self.plan.clone(), r: self.r, t: self.t, table: self.table, point: RefCell::new(point), work: self.work }
+        Middle { model: self.model, plan: self.plan.clone(), r: self.r, t: self.t, table: self.table, point: RefCell::new(point), work: self.work, others: self.others }
     }
 
     /// A node's field components into its scratch, their first `parts` parts (the value; with the gradient, four),
