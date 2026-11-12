@@ -177,6 +177,163 @@ class DeviceInfo(unittest.TestCase):
         self.assertEqual(info['resource'], 'USB0::0x0699::0x0527::C012345::INSTR')
         self.assertEqual(len(link.asked), asked, 'nothing is asked again')
 
+    def test_an_sdk_version_is_its_installed_distribution_not_a_module_attribute(self):
+        import importlib.metadata
+        import types
+        from unittest.mock import patch
+        from zlc_atom.devices.vendor import installed_distribution
+        from zlc_atom.devices.camera.pylon import PylonCameraAdapter, PylonCameraConfig
+        from python_pylon_lifecycle import Camera
+
+        self.assertEqual(installed_distribution('numpy'), f"numpy {importlib.metadata.version('numpy')}")
+        self.assertIsNone(installed_distribution('zlc-no-such-distribution'))
+        # The lab's pypylon has no __version__; its metadata says the version all the same.
+        installed = importlib.metadata.version
+        answer = lambda name: '26.1.0' if name == 'pypylon' else installed(name)  # noqa: E731
+        adapter = PylonCameraAdapter(PylonCameraConfig('123'), camera=Camera())
+        pylon = types.SimpleNamespace(GetPylonVersionString=lambda: '8.1.0.123')
+        with patch.dict(sys.modules, {'pypylon': types.SimpleNamespace(pylon=pylon), 'pypylon.pylon': pylon}), \
+                patch.object(importlib.metadata, 'version', answer):
+            info = host.device_info(adapter)
+        self.assertEqual((info['sdk'], info['driver']), ('pypylon 26.1.0', 'pylon 8.1.0.123'))
+        adapter.close()
+
+
+class DcamDeviceStrings(unittest.TestCase):
+    """dcamdev_getstring: DCAMDEV_STRING laid out as dcamapi4.h, answered into the caller's buffer."""
+
+    def test_the_struct_is_the_vendor_layout(self):
+        import ctypes
+        from zlc_atom.devices.camera.dcam._dcam_driver import _DcamDeviceString
+
+        offsets = {name: getattr(_DcamDeviceString, name).offset for name, _ in _DcamDeviceString._fields_}
+        # int32 size, int32 iString, char* text, int32 textbytes, padded to the pointer's alignment.
+        self.assertEqual(offsets, {'size': 0, 'string_id': 4, 'text': 8, 'text_bytes': 16})
+        self.assertEqual(ctypes.sizeof(_DcamDeviceString), 24)
+
+    def test_a_string_is_asked_of_the_open_handle_and_read_from_the_buffer(self):
+        import ctypes
+        import types
+        from zlc_atom.devices.camera.dcam._dcam_driver import (
+            DcamDriverError, DcamIdString, DcamSdkDevice, DcamSdkDriver, _DcamDeviceString)
+
+        asked = []
+        answers = {int(DcamIdString.MODEL): b'C15550-20UP', int(DcamIdString.CAMERAID): b'S/N: 000123'}
+
+        def getstring(handle, request):
+            request = request.contents
+            asked.append((handle, request.size, request.string_id, request.text_bytes))
+            text = answers.get(request.string_id)
+            if text is None:
+                return -2147481566  # DCAMERR_NOTSUPPORT
+            ctypes.memmove(request.text, text + b'\0', len(text) + 1)
+            return 1
+
+        prototype = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.POINTER(_DcamDeviceString))
+        callback = prototype(getstring)
+
+        class Dll:
+            """dcamdev_getstring a real C function pointer; every other export a recorder."""
+
+            def __init__(self):
+                self.dcamdev_getstring = ctypes.cast(callback, prototype)
+
+            def __getattr__(self, name):
+                export = types.SimpleNamespace()
+                setattr(self, name, export)
+                return export
+
+        dll = Dll()
+        driver = object.__new__(DcamSdkDriver)
+        driver._dll = dll
+        driver._bind()
+        self.assertEqual(dll.dcamdev_getstring.argtypes, [ctypes.c_void_p, ctypes.POINTER(_DcamDeviceString)])
+        self.assertIs(dll.dcamdev_getstring.restype, ctypes.c_int32)
+        device = DcamSdkDevice(dll, 0x1234)
+        self.assertEqual(device.get_string(DcamIdString.MODEL), 'C15550-20UP')
+        self.assertEqual(device.get_string(DcamIdString.CAMERAID), 'S/N: 000123')
+        with self.assertRaisesRegex(DcamDriverError, r'dcamdev_getstring\(0x04000108\) failed with DCAM error -2147481566'):
+            device.get_string(DcamIdString.DCAMAPIVERSION)
+        self.assertEqual(asked[0], (0x1234, 24, int(DcamIdString.MODEL), 256))
+        device._closed = True
+        with self.assertRaisesRegex(RuntimeError, 'closed'):
+            device.get_string(DcamIdString.MODEL)
+
+    def test_the_camera_says_what_it_answered_at_open_and_names_what_it_refused(self):
+        from zlc_atom.devices.camera.dcam._dcam_driver import DcamDriverError, DcamIdString
+        from zlc_atom.devices.camera.dcam.adapter import DcamCameraAdapter
+
+        class Device:
+            def __init__(self):
+                self.asked = 0
+
+            def get_string(self, string_id):
+                self.asked += 1
+                if string_id == DcamIdString.BUS:
+                    raise DcamDriverError('dcamdev_getstring(0x04000101)', -2147481566)
+                return {DcamIdString.VENDOR: 'HAMAMATSU', DcamIdString.MODEL: 'C15550-20UP',
+                        DcamIdString.CAMERAID: 'S/N: 000123', DcamIdString.CAMERAVERSION: '1.10.A',
+                        DcamIdString.DRIVERVERSION: '5.2.6812', DcamIdString.MODULEVERSION: '24.4.6764',
+                        DcamIdString.DCAMAPIVERSION: '4.00'}[string_id]
+
+        adapter = object.__new__(DcamCameraAdapter)
+        adapter._device, adapter._open = Device(), True
+        adapter._device_facts = adapter._read_device_facts_on_owner()
+        asked = adapter._device.asked
+        info = host.device_info(adapter)
+        self.assertEqual(adapter._device.asked, asked, 'nothing is asked again')
+        self.assertEqual({key: info[key] for key in ('vendor', 'model', 'serial', 'firmware', 'driver', 'module', 'sdk')},
+                         {'vendor': 'HAMAMATSU', 'model': 'C15550-20UP', 'serial': 'S/N: 000123', 'firmware': '1.10.A',
+                          'driver': '5.2.6812', 'module': '24.4.6764', 'sdk': 'DCAM-API 4.00'})
+        self.assertEqual(info['unanswered'], 'bus (dcamdev_getstring(0x04000101) failed with DCAM error -2147481566)')
+
+
+class SerialAndDllDeviceInfo(unittest.TestCase):
+    def test_the_hwt3100_says_where_it_answered_without_asking_the_sensor_again(self):
+        from python_hwt3100 import Sensor, source
+
+        hwt = source(Sensor(baud=115200))
+        try:
+            hwt._stop.set()
+            hwt._reader.join(1.0)
+            requests = len(hwt._serial.requests)
+            info = host.device_info(hwt)
+            self.assertEqual(len(hwt._serial.requests), requests, 'nothing is asked of the sensor')
+            self.assertEqual({key: info[key] for key in ('port', 'address', 'baud')},
+                             {'port': 'COM9', 'address': '0x00', 'baud': '115200'})
+            self.assertIn('baud_note', info)
+        finally:
+            hwt.close()
+
+    def test_the_lms_says_what_its_dll_exports_and_nothing_it_does_not(self):
+        import types
+        from zlc_atom.devices.rf.vaunix_lms import CtypesLmsLibrary, VaunixLmsConfig, VaunixLmsRfSource
+        from zlc_atom.devices.simulation.rf import InMemoryLmsLibrary
+
+        path = r'C:\vendor\vnx_fmsynth.dll'
+
+        def library(**exports):
+            made = object.__new__(CtypesLmsLibrary)
+            made._path, made._dll = path, types.SimpleNamespace(**exports)
+            return made
+
+        def named(text, status=None):
+            def model(handle, buffer):
+                self.assertEqual(handle, 7)
+                buffer.value = text
+                return len(text) if status is None else status
+            return model
+
+        self.assertEqual(library(fnLMS_GetDLLVersion=lambda: 0x0104, fnLMS_GetModelNameA=named(b'LMS-103')).device_info(7),
+                         {'dll': path, 'sdk': 'vnx_fmsynth 0x0104', 'model': 'LMS-103'})
+        self.assertEqual(library(fnLMS_GetModelName=named(b'LMS-802')).device_info(7), {'dll': path, 'model': 'LMS-802'})
+        self.assertEqual(library().device_info(7), {'dll': path})
+        self.assertEqual(library(fnLMS_GetModelNameA=named(b'', -0x80000000)).device_info(7),
+                         {'dll': path, 'unanswered': 'model (status 0x80000000)'})
+        source = VaunixLmsRfSource(VaunixLmsConfig(1001), library=InMemoryLmsLibrary((1001,)))
+        self.assertEqual(host.device_info(source), {'serial': '1001', 'model': 'virtual LMS'})
+        source.close()
+
 
 if __name__ == '__main__':
     unittest.main()

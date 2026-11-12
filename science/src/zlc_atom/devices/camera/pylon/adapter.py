@@ -24,6 +24,7 @@ from uuid import uuid4
 
 import numpy as np
 from zlc_atom.devices import RecordQueue
+from zlc_atom.devices.vendor import installed_distribution
 
 from ....authoring import AuthoringField, TunableField
 from ..roi_grid import snap_roi_axis
@@ -139,6 +140,7 @@ class PylonCameraAdapter:
         self._configured = False
         self._monitor_mode = False
         self._working_point: CameraWorkingPoint | None = None
+        self._exposure_step_seconds: float | None = None
         self._requested_settings: dict[str, object] = {}
 
     # ------------------------------------------------------------------ open
@@ -217,12 +219,10 @@ class PylonCameraAdapter:
         """What the camera says of itself: its pylon device info (found when it was enumerated,
         no camera traffic) and the pylon and pypylon in use."""
 
-        facts: dict[str, object] = {}
+        facts: dict[str, object] = {"sdk": installed_distribution("pypylon")}
         try:
-            import pypylon  # noqa: PLC0415 -- lazy, as open()
-            from pypylon import pylon  # noqa: PLC0415
+            from pypylon import pylon  # noqa: PLC0415 -- lazy, as open()
 
-            facts["sdk"] = f"pypylon {getattr(pypylon, '__version__', '?')}"
             version = getattr(pylon, "GetPylonVersionString", None)
             if callable(version):
                 facts["driver"] = f"pylon {version()}"
@@ -332,7 +332,13 @@ class PylonCameraAdapter:
     def _apply_exposure(self, seconds: float) -> None:
         # Basler exposes ExposureTime in microseconds, and it is legal to change
         # while grabbing -- no stream pause needed.
-        self._camera.ExposureTime.SetValue(float(seconds) * 1e6)
+        node = self._camera.ExposureTime
+        node.SetValue(float(seconds) * 1e6)
+        # The increment it is set in, when the camera states one (GenICam
+        # HasInc); read here, once per exposure setting.
+        has_increment, increment = getattr(node, "HasInc", None), getattr(node, "GetInc", None)
+        stated = callable(increment) and (not callable(has_increment) or bool(has_increment()))
+        self._exposure_step_seconds = float(increment()) / 1e6 if stated else None
 
     def _apply_gain(self) -> None:
         # Analog gain, like the exposure above it: legal to change while
@@ -690,15 +696,13 @@ class PylonCameraAdapter:
             # cannot be confused (and 1.0 was simply not the camera's answer).
             gain=float(10.0 ** (float(camera.Gain.GetValue()) / 20.0)),
             readout_mode=(
-                "pylon:Mono8;free-running;grab=OneByOne"
-                if free_running
-                else (
-                    f"pylon:Mono8;external={self.config.trigger_source};"
-                    "grab=OneByOne"
-                )
+                "pylon:format=Mono8;"
+                f"trigger={'free-running' if free_running else self.config.trigger_source};"
+                "grab=OneByOne"
             ),
             offset_counts=None if conversion is None else conversion[0],
             electrons_per_count=None if conversion is None else conversion[1],
+            exposure_step_seconds=self._exposure_step_seconds,
         )
 
     @_serialized
