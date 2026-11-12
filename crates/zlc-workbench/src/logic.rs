@@ -355,8 +355,8 @@ impl Workbench {
     /// Ask the node's process every draft query its type answers, for this revision.
     fn send_queries(&mut self, id: &str) { self.ask_queries(id, None) }
 
-    /// Ask the draft queries (`only`: just that one) for the node's current draft.
-    fn ask_queries(&mut self, id: &str, only: Option<&str>) {
+    /// Ask the draft queries (`only`: just those) for the node's current draft.
+    fn ask_queries(&mut self, id: &str, only: Option<&[&str]>) {
         let Some(node) = self.node(id) else { return };
         let (resources, resource_issues) = self.read_resources(&node.type_id, &node.draft.values);
         let node = self.node_mut(id).unwrap();
@@ -386,7 +386,7 @@ impl Workbench {
             self.node_outputs(node).into_iter().filter_map(|(signal, _)| split_signal(&signal).map(|(_, output)| output.to_owned())).collect()
         } else { Vec::new() };
         for name in names {
-            if (name == ADMIT_SOURCE && !complete) || only.is_some_and(|only| only != name) { continue; }
+            if (name == ADMIT_SOURCE && !complete) || only.is_some_and(|only| !only.contains(&name.as_str())) { continue; }
             self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Query { node, name: query, .. } if node == id && query == &name));
             let ticket = self.ticket(Ticket::Query { node: id.to_owned(), revision, name: name.clone() });
             let facts = match name.as_str() { EDITOR_FACTS => &editor, ADMIT_SOURCE => &admit, ADMIT => &admitted, _ => &args };
@@ -422,7 +422,10 @@ impl Workbench {
 
     /// The source bundles the nodes' queries read (an editor, an admission check), each member
     /// with its schemas (v2 `input_bundle`), rebuilt when a member is declared anew or first
-    /// publishes; a node whose bundle changed asks again.
+    /// publishes. Only the queries that read the bundle ask again, and only when what they
+    /// are told differs: a source's new generation with the schemas it had (every launch of
+    /// its producer) tells them nothing new, so nothing is asked of the node (nor, through
+    /// its editor, of the bench's devices).
     pub(crate) fn refresh_bundles(&mut self, host: &mut dyn Host) {
         let signals = host.signals();
         let readers: Vec<String> = self.nodes.iter().filter(|node| self.catalog.get(&node.type_id)
@@ -438,8 +441,9 @@ impl Workbench {
                 let (schema, event) = host.schemas(signal).unwrap_or((Value::Null, Value::Null));
                 json!({"name": name, "schema": schema, "event_schema": event})
             }).collect());
+            let same = self.bundles.get(&id).is_some_and(|(_, known)| *known == bundle);
             self.bundles.insert(id.clone(), (key, bundle));
-            self.send_queries(&id);
+            if !same { self.ask_queries(&id, Some(&[EDITOR_FACTS, ADMIT_SOURCE])); }
         }
     }
 
@@ -571,8 +575,10 @@ impl Workbench {
             if node.revision == revision {
                 node.checked.insert(name.to_owned());
                 let previous = node.answers.insert(name.to_owned(), (revision, result.clone()));
-                let fresh = previous.is_none_or(|(before, answer)| before != revision || answer != result);
-                changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| fresh).map(|output| signal_key(id, output));
+                let differs = previous.as_ref().is_none_or(|(_, answer)| *answer != result);
+                let fresh = differs || previous.is_some_and(|(before, _)| before != revision);
+                // Its readers are told the frames, not the revision: the same frames under a new one tell them nothing.
+                changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| differs).map(|output| signal_key(id, output));
                 // Defaults the node fills in change what its schema admits: ask that again.
                 if name == "resolve_defaults" && fresh { node.checked.remove(ADMIT); readmit = true; }
             }
@@ -582,7 +588,7 @@ impl Workbench {
             let readers: Vec<String> = self.nodes.iter().filter(|node| node.draft.source_signal == signal).map(|node| node.id.clone()).collect();
             for reader in readers { self.send_queries(&reader); }
         }
-        if readmit { self.ask_queries(id, Some(ADMIT)); }
+        if readmit { self.ask_queries(id, Some(&[ADMIT])); }
         self.start_checked(id, host);
     }
 
