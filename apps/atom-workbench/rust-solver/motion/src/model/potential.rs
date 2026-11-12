@@ -402,8 +402,9 @@ impl Model {
         let tone = &self.tones[self.light.trap];
         let n = f.beams.len();
         let near = self.near_envelope(p);
-        let weights = (0..n * n).map(|x| contract(&tone.pairs[x], p).abs() + near[x]).collect();
-        Envelope { beams: f.beams.clone(), weights }
+        let form: Vec<C64> = (0..n * n).map(|x| contract(&tone.pairs[x], p)).collect();
+        let weights = (0..n * n).map(|x| form[x].abs() + near[x]).collect();
+        Envelope { beams: f.beams.clone(), weights, form, near }
     }
 }
 
