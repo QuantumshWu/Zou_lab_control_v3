@@ -542,22 +542,34 @@ impl PluginHost {
             if state.closed { return Err(CallError::lost("the plugin host is closed")); }
             if state.instances.contains_key(instance) { return Err(CallError::new(ErrorKind::Refused, format!("{instance} is already open"))); }
         }
-        let process = inner.acquire(&Self::key_of(&descriptor), Some(instance))?;
-        let opened = process.request("open", json!({"instance": instance, "type_id": type_id, "module": descriptor.module,
-            "parameters": parameters, "simulation": simulation, "plain": true}), OPEN_DEADLINE);
-        let reply = match opened {
-            Ok(reply) => reply,
-            Err(error) => {
-                process.instances.lock().unwrap().remove(instance);
-                inner.release_process(&process);
-                return Err(error);
-            }
-        };
-        let tunable = reply.message["ok"]["tunable"].as_bool().unwrap_or(false);
-        let snapshot = reply.message["ok"]["snapshot"] == true;
-        let reads = reply.message["ok"]["reads"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
-        inner.admit(instance, descriptor, Serving::Process(process), tunable, snapshot, reads)?;
-        Ok(reply.message["ok"].clone())
+        let (began, key) = (Instant::now(), Self::key_of(&descriptor));
+        let mut pid = None;
+        let opened = (|| {
+            let process = inner.acquire(&key, Some(instance))?;
+            pid = Some(process.pid());
+            let reply = match process.request("open", json!({"instance": instance, "type_id": type_id, "module": descriptor.module,
+                "parameters": parameters, "simulation": simulation, "plain": true}), OPEN_DEADLINE) {
+                Ok(reply) => reply,
+                Err(error) => {
+                    process.instances.lock().unwrap().remove(instance);
+                    inner.release_process(&process);
+                    return Err(error);
+                }
+            };
+            let tunable = reply.message["ok"]["tunable"].as_bool().unwrap_or(false);
+            let snapshot = reply.message["ok"]["snapshot"] == true;
+            let reads = reply.message["ok"]["reads"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            inner.admit(instance, descriptor.clone(), Serving::Process(process), tunable, snapshot, reads)?;
+            Ok(reply.message["ok"].clone())
+        })();
+        // How the plugin side of a device's open went: in which process, how long, and a failure whole
+        // (its Python traceback); what the device is and was opened with is the apparatus's to say.
+        if descriptor.is_device() {
+            zlc_core::journal::lifecycle("plugins", "device_open", json!({"instance": instance, "type_id": type_id, "process": key, "pid": pid,
+                "ms": began.elapsed().as_secs_f64() * 1e3, "outcome": if opened.is_ok() { "opened" } else { "failed" },
+                "error": opened.as_ref().err().map(CallError::wire)}));
+        }
+        opened
     }
 
     /// Admit a device instance served by `endpoint` (another core's published
@@ -713,15 +725,29 @@ impl PluginHost {
             for process in processes { process.request("close", json!({"instance": instance}), deadline)?; }
             return Ok(());
         };
+        // Said for a device: where it was served, how long its close took, and a failure whole.
+        let (began, pid) = (Instant::now(), serving.pid());
+        let closed = self.close_admitted(instance, serving, &descriptor, deadline);
+        if descriptor.is_device() {
+            zlc_core::journal::lifecycle("plugins", "device_close", json!({"instance": instance, "type_id": descriptor.type_id, "pid": (pid != 0).then_some(pid),
+                "ms": began.elapsed().as_secs_f64() * 1e3, "outcome": if closed.is_ok() { "closed" } else { "failed" },
+                "error": closed.as_ref().err().map(CallError::wire)}));
+        }
+        closed
+    }
+
+    /// Close an admitted instance served by `serving`.
+    fn close_admitted(&self, instance: &str, serving: Serving, descriptor: &Arc<TypeDescriptor>, deadline: Duration) -> Result<(), CallError> {
+        let inner = &self.inner;
         let process = match serving {
             Serving::Process(process) => process,
-            Serving::Remote(endpoint) => { inner.forget(instance, &descriptor); endpoint.close(); return Ok(()); }
+            Serving::Remote(endpoint) => { inner.forget(instance, descriptor); endpoint.close(); return Ok(()); }
         };
         self.end_waits(instance);
         // A refused/failed close still owns its handle. Keep the host entry so
         // another Init cannot open over it; a later Close retries that owner.
         process.request("close", json!({"instance": instance}), deadline)?;
-        inner.forget(instance, &descriptor);
+        inner.forget(instance, descriptor);
         // A node closed (removed, or its layout replaced) takes its signals with it (v2 retire).
         if !descriptor.is_device() { let _ = inner.runtime.withdraw(public_instance(instance)); }
         process.instances.lock().unwrap().remove(instance);
@@ -1097,7 +1123,20 @@ impl Inner {
         command
     }
 
+    /// Start a plugin process of `key`; its start, or why it did not, is the session's.
     fn spawn(self: &Arc<Self>, key: &str) -> Result<Arc<PluginProcess>, String> {
+        let began = Instant::now();
+        let started = self.start_process(key);
+        let ms = began.elapsed().as_secs_f64() * 1e3;
+        match &started {
+            Ok(process) => zlc_core::journal::lifecycle("plugins", "process_started", json!({"key": key, "pid": process.pid(), "ms": ms,
+                "python": self.config.python})),
+            Err(error) => zlc_core::journal::lifecycle("plugins", "process_not_started", json!({"key": key, "ms": ms, "python": self.config.python, "error": error})),
+        }
+        started
+    }
+
+    fn start_process(self: &Arc<Self>, key: &str) -> Result<Arc<PluginProcess>, String> {
         let child = self.command().args(["-m", "zlc_plugin", "host"])
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
             .map_err(|error| format!("Cannot start a plugin process with {}: {error}", self.config.python.display()))?;
@@ -1121,8 +1160,6 @@ impl Inner {
         let pid = hello.message["ok"]["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
             .ok_or("Plugin process handshake has no pid")?;
         process.set_pid(pid);
-        // Which process a plugin is: what the journal says of a process's use of the machine names it by pid.
-        zlc_core::journal::note("plugins", "process", json!({"key": key, "pid": pid}));
         self.processes.lock().unwrap().insert(pid, process.clone());
         Ok(process)
     }
@@ -1198,6 +1235,10 @@ impl Inner {
         let Some((descriptor, run)) = held else { return };
         let reason = format!("{instance} did not answer within its deadline; it was taken out of the plugin process");
         eprintln!("Plugin {}:{}: {reason}", process.key, process.pid());
+        if descriptor.is_device() {
+            zlc_core::journal::lifecycle("plugins", "device_unresponsive", json!({"instance": instance, "type_id": descriptor.type_id,
+                "pid": process.pid(), "reason": reason}));
+        }
         let _ = process.event("abandon", json!({"instance": instance}));
         if let Some(run) = run { self.end_run(instance, &run, "failed", &json!({"error": reason})); }
         self.forget(instance, &descriptor);
@@ -1251,6 +1292,9 @@ impl Inner {
         let code = process.exit_code().map(|code| format!(" (exit code {code})")).unwrap_or_default();
         let tail = process.tail(6);
         let detail = if tail.is_empty() { format!("{reason}{code}") } else { format!("{reason}{code}; last log: {}", tail.join(" | ")) };
+        // `expected`: it was asked to end (nothing used it any more, or the application closed); else it crashed.
+        zlc_core::journal::lifecycle("plugins", "process_ended", json!({"key": process.key, "pid": process.pid(), "reason": reason,
+            "exit_code": process.exit_code(), "expected": retiring, "instances": names, "last_log": process.tail(40)}));
         for name in &names {
             let (descriptor, run) = {
                 let state = self.state.lock().unwrap();

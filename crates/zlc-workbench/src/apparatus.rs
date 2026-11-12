@@ -102,7 +102,20 @@ pub struct Live {
     pub resources: Vec<String>,
     /// Waiting for its resolve (opening, nothing opened yet): what it leaves blank is found first.
     pub resolving: bool,
+    /// When its open or close now under way was asked: how long it took is said when it settles.
+    pub asked: Option<std::time::Instant>,
 }
+
+/// A device's lifecycle fact, said by the apparatus that owns it (`zlc_core::journal::lifecycle`):
+/// which device -- instance, role, type -- and the event's own facts.
+fn say_device(event: &str, entry: &Entry, facts: Value) {
+    let mut line = json!({"instance": entry.instance_id, "role": entry.role, "type_id": entry.type_id});
+    if let (Some(line), Value::Object(facts)) = (line.as_object_mut(), facts) { line.extend(facts); }
+    zlc_core::journal::lifecycle("workbench", event, line);
+}
+
+/// Milliseconds since `asked`, if it was.
+fn ms_since(asked: Option<std::time::Instant>) -> Option<f64> { asked.map(|asked| asked.elapsed().as_secs_f64() * 1e3) }
 
 const PUBLISHED: &str = "published on the bench fabric -- withdraw Remote to control it here";
 
@@ -664,6 +677,8 @@ impl Workbench {
     fn open_with(&mut self, entry: Entry, resolve: bool) {
         let context = if self.simulated(&entry.type_id) { json!({"simulation": self.apparatus.simulation}) } else { json!({}) };
         let complete = self.catalog.get(&entry.type_id).map(|item| fields::project_values(&item.parameters, &entry.parameters, true));
+        // What it is opened with: its settings as its type completes them (defaults filled in), else as written.
+        let used = match &complete { Some(Ok((values, _))) => values.clone(), _ => entry.parameters.clone() };
         let id = entry.instance_id.clone();
         let failure = match (self.catalog.get(&entry.type_id), complete) {
             (None, _) => Some({
@@ -682,10 +697,22 @@ impl Workbench {
         let (identity, resources) = ((!resolving).then(|| self.identity_of(&entry)).flatten(), self.resources_of(&entry));
         let failure = failure.or_else(|| (!resolving).then(|| self.bound(&id, identity.as_deref(), &resources)).flatten());
         let state = if failure.is_some() { LiveState::Failed } else { LiveState::Opening };
+        let mut facts = json!({"parameters": zlc_core::journal::redacted(&Value::Object(used))});
+        if let Some(simulation) = context.get("simulation") { facts["simulation"] = zlc_core::journal::redacted(simulation); }
+        if resolving {
+            say_device("device_resolving", &entry, facts);
+        } else {
+            // The how-many-th open of this instance in this process: a second is a retry or a change.
+            let attempt = self.device_opens.entry(id.clone()).or_default();
+            *attempt += 1;
+            facts["attempt"] = json!(*attempt);
+            if let Some(error) = &failure { facts["outcome"] = json!("failed"); facts["error"] = json!(error); }
+            say_device("device_open", &entry, facts);
+        }
         if failure.is_none() && !resolving { self.plugins.open(&id, &entry.type_id, &Value::Object(entry.parameters.clone()), &context); }
         let units = entry.units.clone();
         self.devices.insert(id, Live { entry, state, error: failure, working_point: Value::Null, fields: None, fields_ticket: None, close_pending: false, close_failed: false, reopen: None,
-            risk: None, units, descriptor: None, published: false, identity, resources, resolving });
+            risk: None, units, descriptor: None, published: false, identity, resources, resolving, asked: Some(std::time::Instant::now()) });
         if resolving { self.next_resolution(); }
     }
 
@@ -713,10 +740,12 @@ impl Workbench {
             let mut live = self.devices.remove(id).expect("waiting");
             match result.and_then(|answer| self.pin(&live.entry, &answer)) {
                 Ok((entry, line)) => {
+                    say_device("device_resolved", &entry, json!({"ms": ms_since(live.asked), "note": line}));
                     if let Some(line) = line { self.found.push(format!("{}: {line}", entry.role)); }
                     self.open_with(entry, false);
                 }
                 Err(error) => {
+                    say_device("device_failed", &live.entry, json!({"phase": "resolve", "ms": ms_since(live.asked), "error": error}));
                     (live.state, live.error, live.resolving) = (LiveState::Failed, Some(error), false);
                     self.devices.insert(id.to_owned(), live);
                 }
@@ -857,11 +886,16 @@ impl Workbench {
         }
         for id in &reopened { self.devices.remove(id); }
         self.found.clear();
+        let opening: Vec<Entry> = self.apparatus.draft.iter().filter(|entry| !self.devices.contains_key(&entry.instance_id)).cloned().collect();
+        let opened: Vec<String> = opening.iter().map(|entry| entry.instance_id.clone()).collect();
+        // What this Init or Apply sets out to do, before any of it: rows opened (of them, the ones that
+        // failed before, `retrying`), rows closed (`reopening`: to open again as they now stand).
+        zlc_core::journal::lifecycle("workbench", "devices_apply", json!({"kind": if kind == Settling::Init { "init" } else { "apply" },
+            "opening": opened, "retrying": reopened, "closing": closing.iter().filter(|(_, entry)| entry.is_none()).map(|(id, _)| id).collect::<Vec<_>>(),
+            "reopening": closing.iter().filter(|(_, entry)| entry.is_some()).map(|(id, _)| id).collect::<Vec<_>>(),
+            "simulation_changed": simulation_changed}));
         // Opened in the operator's order: of two rows naming one instrument the later is refused.
-        let mut opened = Vec::new();
-        for entry in self.apparatus.draft.clone() {
-            if !self.devices.contains_key(&entry.instance_id) { opened.push(entry.instance_id.clone()); self.open_entry(entry); }
-        }
+        for entry in opening { if !self.devices.contains_key(&entry.instance_id) { self.open_entry(entry); } }
         let stopped = self.close_instances(closing.clone(), host);
         self.applied_simulation = Some(self.apparatus.simulation.clone());
         self.settling = Some(kind);
@@ -919,6 +953,8 @@ impl Workbench {
                 continue;
             }
             live.state = LiveState::Closing;
+            live.asked = Some(std::time::Instant::now());
+            say_device("device_close", &live.entry, json!({"reopening": live.reopen.is_some()}));
             self.plugins.close(&id);
         }
     }
@@ -931,6 +967,7 @@ impl Workbench {
             self.report = (error.clone(), "error");
             return Err(error);
         }
+        zlc_core::journal::lifecycle("workbench", "devices_apply", json!({"kind": "close", "closing": [id]}));
         let stopped = self.close_instances(vec![(id.to_owned(), None)], host);
         self.settling = Some(Settling::Close(id.to_owned()));
         self.settling_since = Some(std::time::Instant::now());
@@ -942,6 +979,7 @@ impl Workbench {
         let nodes: Vec<String> = self.nodes.iter().map(|node| node.id.clone()).collect();
         for node in &nodes { let _ = self.stop_node(node, host); }
         let all: Vec<_> = self.devices.keys().map(|id| (id.clone(), None)).collect();
+        zlc_core::journal::lifecycle("workbench", "devices_apply", json!({"kind": "shutdown", "closing": all.iter().map(|(id, _)| id).collect::<Vec<_>>()}));
         self.close_instances(all, host);
         self.settling = Some(Settling::Shutdown);
         self.settle();
@@ -950,6 +988,9 @@ impl Workbench {
 
     pub(crate) fn device_opened(&mut self, id: &str, working_point: Value) -> bool {
         let Some(live) = self.devices.get_mut(id) else { return false };
+        // What the device says of itself, when its type says it (`device_info`); a remote one's publisher type.
+        say_device("device_opened", &live.entry, json!({"ms": ms_since(live.asked.take()), "device_info": working_point.get("device_info"),
+            "served_as": working_point.get("descriptor").and_then(|descriptor| descriptor.get("type_id"))}));
         if live.state == LiveState::Opening { live.state = LiveState::Open; }
         live.error = None;
         // A device another computer publishes is the type it is there.
@@ -978,6 +1019,7 @@ impl Workbench {
             Settling::Shutdown => {
                 self.report = if failed.is_empty() { ("devices shut down".into(), "task") }
                     else { (format!("devices did not shut down: {}", failed.join("; ")), "error") };
+                zlc_core::journal::lifecycle("workbench", "devices_settled", json!({"kind": "shutdown", "line": self.report.0}));
                 return;
             }
             Settling::Init if open.is_empty() => format!("{loaded} initialized"),
@@ -989,11 +1031,17 @@ impl Workbench {
         // v2 _outcome: each failure's reason on the line; then what a resolve found (a port now in the apparatus).
         if !failed.is_empty() { text += &format!(" · {} failed -- {}", failed.len(), failed.join("; ")); }
         for line in &found { text += &format!(" · {line}"); }
+        let kind = match kind { Settling::Init => "init", Settling::Apply => "apply", Settling::Close(_) => "close", Settling::Shutdown => "shutdown" };
+        // The line the Device Manager shows once it is all done, and which rows stand open.
+        zlc_core::journal::lifecycle("workbench", "devices_settled", json!({"kind": kind, "line": text, "open": open}));
         self.report = (text, if failed.is_empty() { "task" } else { "warning" });
     }
 
     pub(crate) fn device_failed(&mut self, id: &str, error: String) -> bool {
         let Some(live) = self.devices.get_mut(id) else { return false };
+        // `open`: it did not open; `lost`: it was open (or closing) and its process or link went.
+        let phase = if live.state == LiveState::Opening { "open" } else { "lost" };
+        say_device("device_failed", &live.entry, json!({"phase": phase, "ms": ms_since(live.asked.take()), "error": error}));
         // An open device lost (its process, or the computer that publishes it) is said at once;
         // one that failed to open is said by the Init or Apply it belongs to.
         if live.state == LiveState::Open { self.report = (format!("{} lost: {error}", live.entry.role), "error"); }
@@ -1006,6 +1054,10 @@ impl Workbench {
     }
 
     pub(crate) fn device_closed(&mut self, id: &str, error: Option<String>) -> bool {
+        if let Some(live) = self.devices.get_mut(id) {
+            say_device("device_closed", &live.entry, json!({"ms": ms_since(live.asked.take()), "outcome": if error.is_some() { "failed" } else { "closed" },
+                "error": error}));
+        }
         if let Some(error) = error {
             let Some(live) = self.devices.get_mut(id) else { return false };
             live.state = LiveState::Failed;

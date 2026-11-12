@@ -165,6 +165,12 @@ class Smc100Axis:
     def identity(self) -> str:
         return f"newport-smc100:{self.config.port}/{self.config.address}"
 
+    def device_info(self) -> dict[str, str]:
+        """What the controller said of itself when it opened: its ``VE`` (model and firmware) and the
+        stage ``ID`` it reported, and where it was reached."""
+
+        return {"version": str(self.version), "stage": str(self.stage), "port": self.config.port, "address": str(self.config.address)}
+
     @property
     def unit(self) -> str:
         return self.config.unit

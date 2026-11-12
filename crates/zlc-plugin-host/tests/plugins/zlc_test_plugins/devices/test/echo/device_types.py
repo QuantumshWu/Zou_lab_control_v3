@@ -20,6 +20,10 @@ class EchoDevice:
         self.safe = []
         self.amplitude = 0.0
 
+    def device_info(self):
+        """What it says of itself at open; a fact it has no value for is left out."""
+        return {"model": "echo", "serial": f"gain-{self.opened_with.get('gain')}", "firmware": None}
+
     def fail_close_once(self):
         self._fail_close = True
 

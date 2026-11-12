@@ -281,6 +281,9 @@ pub struct Workbench {
     pub(crate) next_ticket: u64,
     pub(crate) replies: Vec<(u64, Result<Value, String>)>,
     pub(crate) logs: BTreeMap<String, VecDeque<String>>,
+    /// How often each device instance has been opened in this process (or refused before it could
+    /// be): every device seen this session, and whether an open is a retry.
+    pub(crate) device_opens: BTreeMap<String, u64>,
     /// The simulation settings the live simulated instances were opened with.
     pub(crate) applied_simulation: Option<Map<String, Value>>,
     /// A hardware scan in flight.
@@ -321,6 +324,9 @@ pub const COMMANDS: &[&str] = &[
     "save_layout", "load_layout", "clear_board", "run_recipe", "export_diagnostics", "set_diagnostics",
 ];
 
+/// The most lines an instance's log keeps (its newest), as its Log window shows them.
+pub(crate) const LOG_LINES: usize = 2000;
+
 /// Commands that leave the result to a later plugin event.
 const DEFERRED: &[&str] = &["estimate_node", "read_device", "tune_device", "discover_devices", "publish_device",
     "read_layout", "load_layout", "save_layout", "load_apparatus", "save_apparatus", "export_diagnostics", "list_recipes", "run_recipe"];
@@ -355,7 +361,7 @@ impl Workbench {
             report: (String::new(), "idle"), settling: None, settling_since: None,
             // v2 set_deriving(False) when the console is built.
             console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None, panel_said: None,
-            tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), applied_simulation: None, scan: None,
+            tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), device_opens: BTreeMap::new(), applied_simulation: None, scan: None,
             resolution: None, found: Vec::new(), bundles: BTreeMap::new(), bundles_stale: false,
             selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default(), follows_sources: false })
     }
@@ -469,13 +475,8 @@ impl Workbench {
             "list_plugins" => Ok(Some(self.list_plugins(params["type_id"].as_str()))),
             "get_device_log" => {
                 let device = text(params, "device")?;
-                let lines = params["lines"].as_u64().unwrap_or(200).min(2000) as usize;
-                let mut log = self.logs.get(device).map(|log| log.iter().skip(log.len().saturating_sub(lines)).cloned().collect::<Vec<_>>()).unwrap_or_default();
-                // v2's words for a device whose code tells its log nothing.
-                if self.devices.get(device).is_some_and(|live| live.working_point["narrates"] == false) {
-                    log.insert(0, "(this device type does not narrate its own interactions yet; fabric lines naming it appear once published)".into());
-                }
-                Ok(Some(json!({"device": device, "lines": log})))
+                let lines = params["lines"].as_u64().unwrap_or(200).min(LOG_LINES as u64) as usize;
+                Ok(Some(json!({"device": device, "lines": self.device_log(device, lines)})))
             }
             "estimate_node" => self.estimate_node(text(params, "node")?, request).map(|()| None),
             "list_runs" => Ok(Some(self.list_runs(params["node"].as_str(), params["limit"].as_u64().unwrap_or(50).min(200) as usize))),
@@ -559,7 +560,7 @@ impl Workbench {
             }
             Event::Log { instance, line } => {
                 let log = self.logs.entry(instance).or_default();
-                if log.len() >= 2000 { log.pop_front(); }
+                if log.len() >= LOG_LINES { log.pop_front(); }
                 log.push_back(line);
             }
             Event::RunStarted { run } => self.run_started(&run),
@@ -577,6 +578,15 @@ impl Workbench {
         self.refresh_stale_bundles(host);
         self.poll_recipe(host);
         self.sync_console_report(host);
+    }
+
+    /// A device's Log window: its newest `lines` lines, after v2's words when its code tells its log nothing.
+    pub(crate) fn device_log(&self, device: &str, lines: usize) -> Vec<String> {
+        let mut log = self.logs.get(device).map(|log| log.iter().skip(log.len().saturating_sub(lines)).cloned().collect::<Vec<_>>()).unwrap_or_default();
+        if self.devices.get(device).is_some_and(|live| live.working_point["narrates"] == false) {
+            log.insert(0, "(this device type does not narrate its own interactions yet; fabric lines naming it appear once published)".into());
+        }
+        log
     }
 
     fn answered(&mut self, ticket: u64, result: Result<Value, String>, host: &mut dyn Host) {

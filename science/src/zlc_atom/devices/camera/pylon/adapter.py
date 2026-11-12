@@ -196,6 +196,31 @@ class PylonCameraAdapter:
         self._camera = camera
         camera.Open()
 
+    def device_info(self) -> dict[str, object]:
+        """What the camera says of itself: its pylon device info (found when it was enumerated,
+        no camera traffic) and the pylon and pypylon in use."""
+
+        facts: dict[str, object] = {}
+        try:
+            import pypylon  # noqa: PLC0415 -- lazy, as open()
+            from pypylon import pylon  # noqa: PLC0415
+
+            facts["sdk"] = f"pypylon {getattr(pypylon, '__version__', '?')}"
+            version = getattr(pylon, "GetPylonVersionString", None)
+            if callable(version):
+                facts["driver"] = f"pylon {version()}"
+        except ImportError:
+            pass
+        info = getattr(self._camera, "GetDeviceInfo", None)
+        if callable(info):
+            info = info()
+            for name, getter in (("vendor", "GetVendorName"), ("model", "GetModelName"), ("serial", "GetSerialNumber"),
+                                 ("device_version", "GetDeviceVersion"), ("transport", "GetDeviceClass")):
+                read = getattr(info, getter, None)
+                if callable(read):
+                    facts[name] = read()
+        return facts
+
     def close(self) -> None:
         primary: BaseException | None = None
         if self._worker is not None:
