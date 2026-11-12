@@ -76,14 +76,6 @@ impl Presentation {
         }
     }
 
-    /// `owner`'s view was just told whole by whoever changed it: nothing of it is pending.
-    pub fn told(&mut self, owner: Owner) {
-        match owner {
-            Owner::Pulse => self.due.pulse = false,
-            Owner::Workbench | Owner::Signals | Owner::Live => {}
-        }
-    }
-
     /// The live document goes out at the end of this turn: a page is up and holds nothing yet.
     pub fn now(&mut self) { self.due.live = true; self.now = true; }
 
@@ -196,11 +188,7 @@ mod tests {
         // A message that answers nothing is no reply: it waits for the beat.
         presentation.reply(Reply::default());
         assert!(!presentation.due(start + beat, false));
-        // A view told whole by its owner is not pending any more.
         let _ = presentation.take(start + beat * 2);
-        presentation.mark(Owner::Pulse);
-        presentation.told(Owner::Pulse);
-        assert!(!presentation.due(start + beat * 4, true));
         // A reader of the held state takes the stale views; the document is still told at the beat.
         presentation.mark(Owner::Workbench);
         let stale = presentation.take_stale();
