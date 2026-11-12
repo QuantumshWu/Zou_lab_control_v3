@@ -670,14 +670,14 @@ class MonitorCapture:
 class AlignedCapture:
     """A capture whose frames are sorted into shots by the schedule of the lane that triggers the camera.
 
-    The board is asked what it plays whenever frames are read (``schedule(known revision)``); each
-    FIRE is a play of its own, with its own alignment.  A frame at no trigger's time is dropped and
+    What the board plays is read whenever frames are read (``schedule()``: the newest answer the
+    board told the run's watch of its lane, never asked for); each FIRE is a play of its own, with its own alignment.  A frame at no trigger's time is dropped and
     said; a shot a trigger of which brought no frame is published with that frame invalid, so every
     consumer still counts it.  Until a pulse plays, frames belong to nothing and none is published.
     """
 
     def __init__(self, node: "CameraMeasurementNode", *, commit_live: Callable[..., object],
-                 schedule: Callable[[int | None], Mapping[str, object]], armed_us: int,
+                 schedule: Callable[[], Mapping[str, object]], armed_us: int,
                  say: Callable[..., object] | None = None) -> None:
         self.node = node
         self.camera = node.camera
@@ -685,7 +685,8 @@ class AlignedCapture:
         self._schedule = schedule
         self._armed_us = int(armed_us)
         self._say = say
-        self._revision: int | None = None
+        #: The board's answer the frames were last sorted by: a new one is a change of what it plays.
+        self._told: Mapping[str, object] | None = None
         self._play: tuple[int, int] | None = None
         self._alignment: TriggerAlignment[CameraFrameRecord] | None = None
         #: When the last frame of the play in hand was received (ns), for a shot whose end never comes.
@@ -706,11 +707,11 @@ class AlignedCapture:
     def _follow_board(self, records: Sequence[CameraFrameRecord]) -> Sequence[CameraFrameRecord]:
         """Learn what the board plays now; the frames of ``records`` that are the new play's."""
 
-        answer = self._schedule(self._revision)
-        if answer.get("unchanged"):
+        answer = self._schedule()
+        if answer is self._told:
             return records
+        self._told = answer
         schedule = TriggerSchedule.from_answer(answer)
-        self._revision = schedule.revision
         fired = schedule.command_id is not None and schedule.state in ("playing", "done", "stopped")
         play = (int(schedule.command_id), schedule.sent_us) if fired else None
         if play == self._play:
@@ -1222,10 +1223,11 @@ class CameraMeasurementNode:
             self._freeze_working_point(self.camera.working_point())
             self._run_record["acquisition"] = {"buffer_frame_count": buffer_frames}
             context.record_devices()
+            # The board tells the run each change of what it plays on the lane; nothing polls it.
+            board = context.watch("pulse_schedule", lane=lane)
             capture = AlignedCapture(
                 self, commit_live=context.commit_live, armed_us=armed_us,
-                schedule=lambda known: context.core("pulse_schedule", lane=lane, known=known),
-                say=context.report_progress,
+                schedule=lambda: board.latest, say=context.report_progress,
             )
         except BaseException as error:
             try:

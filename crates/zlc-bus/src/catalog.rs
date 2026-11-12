@@ -803,9 +803,6 @@ pub struct ExportDiagnostics {
 pub struct PulseSchedule {
     /// A raw digital lane of the board (ch11), or a port's key.
     pub lane: String,
-    /// The revision the asker already has: answered {unchanged: true} while the board still plays that.
-    #[serde(default)]
-    pub known: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1183,7 +1180,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "When one digital lane of the attached board rises in every shot it holds or plays, for whoever that lane triggers: {revision, \
          state none|loaded|playing|stopped|done, command_id, run_repeats (shots per scan point; 0: the first point without end), scan_repeats \
          (table sweeps; 0: without end), sent_us, answered_us (this computer's clock when the FIRE was sent and answered), lane, \
-         points: [{rising: [seconds after the point begins], duration: seconds}]}. Any client may read it, whoever holds the board."),
+         points: [{rising: [seconds after the point begins], duration: seconds}]}. Any client may read it, whoever holds the board; a node's run          that watches it (ctx.watch) is told each change as the board makes it, never asking again."),
     command!("pulse_estimate", PulseEstimate, read, false,
         "The Pulse ticks a scan plan schedules, compiled for the attached board with its Config: per API point the board table's \
          ticks, its first row's and the output-delay bound; sums over the points; clock_hz."),

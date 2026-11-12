@@ -228,6 +228,21 @@ pub struct PulseHost {
     /// What the sequencer device last stated of itself, and the board and revision that was of.
     facts: Value,
     facts_of: Option<(usize, u64)>,
+    /// The runs that watch a lane's schedule (`pulse_schedule` under `ctx.watch`): each is told
+    /// whatever board is attached, as it changes, until the run ends.
+    watches: Vec<Watch>,
+}
+
+/// One run's watch of one lane's schedule: the plugin host's id of the run, the watch's name.
+#[derive(Clone)]
+struct Watch { lane: String, run: String, id: String }
+
+/// `pulse_schedule` of `board` (none attached: nothing held, nothing played).
+fn schedule(board: Option<&Board>, lane: &str) -> Result<Value, String> {
+    match board {
+        None => Ok(json!({"revision": 0, "state": "none", "lane": lane, "points": []})),
+        Some(board) => board.trigger_schedule(lane).map(|schedule| to_value(&schedule)).map_err(|error| error.message),
+    }
 }
 
 /// The preview's front and its axes, as panels report theirs.
@@ -504,7 +519,7 @@ impl PulseHost {
                     preview: Lane::new("pulse-preview"), post, safe_actions, plugins, given: None, python, session: Arc::new(Mutex::new(None)),
                     dpr: 1.0, preview_busy: false, preview_key: String::new(), preview_wanted: false, frame: None, frames: 0,
                     axes: Vec::new(), pointers: Default::default(), pointer_busy: false, users: Default::default(), runs: BTreeMap::new(),
-                    facts: Value::Null, facts_of: None }
+                    facts: Value::Null, facts_of: None, watches: Vec::new() }
     }
 
     /// The pulse section of a state message: the editor's view plus the preview's frame.
@@ -724,11 +739,16 @@ impl PulseHost {
             "pulse_describe" => return Handled::Now(describe_document(Path::new(command["document"].as_str().unwrap_or("")))
                 .map(|description| to_value(&description)).map_err(|error| error.message)),
             // A read whoever holds the board: a camera aligning its frames to the lane that triggers it claims no sequencer.
-            "pulse_schedule" => return Handled::Now(match self.editor.board() {
-                None => Ok(json!({"revision": 0, "state": "none", "lane": command["lane"], "points": []})),
-                Some(board) => board.trigger_schedule(command["lane"].as_str().unwrap_or(""), command["known"].as_u64())
-                    .map(|schedule| to_value(&schedule)).map_err(|error| error.message),
-            }),
+            // A run that watches it (`_watch`) is answered now and then told each change by the board itself.
+            "pulse_schedule" => {
+                let lane = command["lane"].as_str().unwrap_or("");
+                // Watched from before the answer is read: no change falls between the two.
+                let watch = command["_watch"].as_str().zip(plugin_run).map(|(id, run)| Watch { lane: lane.to_owned(), run: run.to_owned(), id: id.to_owned() });
+                if let Some(watch) = &watch { self.tell(watch, false); }
+                let answer = schedule(self.editor.board().map(|board| &**board), lane);
+                if let Some(watch) = watch.filter(|_| answer.is_ok()) { self.watches.push(watch); }
+                return Handled::Now(answer);
+            }
             "pulse_run" | "pulse_wait_done" | "pulse_stop" if run.is_some() => {
                 if let Err(error) = self.check_claims(run, &claims) { return Handled::Now(Err(error)); }
             }
@@ -806,8 +826,11 @@ impl PulseHost {
                 let timeout = Duration::from_secs_f64(command["timeout_seconds"].as_f64().unwrap_or(0.0).clamp(0.0, 600.0));
                 let post = self.post.clone();
                 let _ = std::thread::Builder::new().name("zlc-pulse-wait".into()).spawn(move || {
-                    let result = board.wait_report(id, Some(timeout)).map(|report| to_value(&done_json(report.as_ref()))).map_err(|error| error.message);
-                    post(PulseEvent::Reply { request, result, touched: true, run: None });
+                    let report = board.wait_report(id, Some(timeout));
+                    // Only a report taken changes the board (its FIRE is over); a wait that ran out touched nothing.
+                    let touched = matches!(report, Ok(Some(_)));
+                    let result = report.map(|report| to_value(&done_json(report.as_ref()))).map_err(|error| error.message);
+                    post(PulseEvent::Reply { request, result, touched, run: None });
                 });
                 return Handled::Later;
             }
@@ -924,6 +947,8 @@ impl PulseHost {
         self.given = Some(Given { instance: instance.to_owned(), child, world, published: false });
         self.editor.attach_given(board, label);
         self.dispatch();
+        // Each watch is of whatever board is attached: told this one's schedule, then its changes.
+        for watch in self.watched() { self.tell(&watch, true); }
         // `snapshot`: it reports its state for the bench a Start records (`bench_snapshot`).
         let facts = self.device_facts().map_or(Value::Null, |(_, facts)| facts);
         Ok(json!({"board": self.editor.board().map(|b| b.name().to_owned()), "ports": description.target.ports.len(),
@@ -982,6 +1007,8 @@ impl PulseHost {
         let board = self.editor.board().cloned();
         self.editor.detach_given();
         self.dispatch();
+        // No board: each watch is told nothing is held any more.
+        for watch in self.watched() { self.tell(&watch, true); }
         let instance = instance.to_owned();
         let plugins = self.plugins.clone();
         self.device.run(move || {
@@ -989,6 +1016,36 @@ impl PulseHost {
             if let Some(served) = given.child { served.end(); }
             if let (Some(host), Some(world)) = (plugins, &given.world) { let _ = host.close(world); }
             if closed { post(PulseEvent::Closed { instance, error }); }
+        });
+    }
+
+    /// The watches whose runs go on (one that ended is forgotten).
+    fn watched(&mut self) -> Vec<Watch> {
+        let plugins = self.plugins.clone();
+        self.watches.retain(|watch| plugins.as_ref().is_some_and(|host| host.run_context(&watch.run).is_ok()));
+        self.watches.clone()
+    }
+
+    /// Tell `watch` the attached board's schedule (`now`: at once) and then each change of it, on a
+    /// thread of its own: the board says when it changed, nothing asks, and the window's turn is not
+    /// in the way. It ends when the run has ended or the board is gone; with no board attached it
+    /// tells that once.
+    fn tell(&self, watch: &Watch, now: bool) {
+        let Some(host) = self.plugins.clone() else { return };
+        let board = self.editor.board();
+        let changes = board.map(|board| board.changes());
+        let (board, watch) = (board.map(Arc::downgrade), watch.clone());
+        if changes.is_none() && !now { return; }
+        let _ = std::thread::Builder::new().name("zlc-pulse-watch".into()).spawn(move || {
+            let told = |board: Option<&Board>| host.tell_watch(&watch.run, &watch.id, schedule(board, &watch.lane)).is_ok();
+            if now && !told(board.as_ref().and_then(std::sync::Weak::upgrade).as_deref()) { return; }
+            let (Some(changes), Some(board)) = (changes, board) else { return };
+            while changes.recv().is_ok() {
+                // Changes that came together are told once, as the board now is.
+                while changes.try_recv().is_ok() {}
+                let Some(board) = board.upgrade() else { return };
+                if !told(Some(&*board)) { return; }
+            }
         });
     }
 
@@ -1279,6 +1336,61 @@ mod tests {
         assert_eq!(latest.canonical().unwrap().written_cells(),8);
         assert_eq!(latest.run().metadata["device_snapshots"]["sequencer"]["program"]["rows"].as_array().unwrap().len(),2);
         assert_ne!(latest.run().metadata["plan"]["axes"][0]["values"][0],json!(0.000200003));
+        plugins.shutdown(); pulse.shutdown();
+    }
+
+    /// A run that watches a lane's schedule (ctx.watch) asks once; each later change reaches it as
+    /// the board makes it -- a FIRE played meanwhile is told without the run asking again.
+    #[test]
+    fn a_watching_run_is_told_each_play_without_asking() {
+        use zlc_core::control::Origin;
+        use zlc_core::runtime::Runtime;
+        use zlc_plugin_host::{HostConfig, HostEvent, RunRequest};
+        let Some(python) = std::env::var_os("ZLC_PLUGIN_PYTHON") else { return };
+        let (mut pulse, events, document) = host("watch");
+        // A first play, so the lane that rises in this pulse is known.
+        let first = ask(&mut pulse, &events, "pulse_run", played(&document, "scan#1", 1), None).unwrap();
+        ask(&mut pulse, &events, "pulse_wait_done", json!({"command_id": first["command_id"], "timeout_seconds": 30, "_run": "scan#1"}), None).unwrap();
+        let counts = board(&pulse).trigger_counts().unwrap().1.unwrap();
+        let lane = board(&pulse).trigger_lanes()[counts.iter().position(|count| *count > 0).unwrap()].0.clone();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let (sender, plugin_events) = channel(); let sender = Mutex::new(sender);
+        let plugins = PluginHost::new(HostConfig { python: python.into(), python_path: vec![root.join("../../science/src"), root.join("../zlc-plugin-host/tests/plugins")],
+            packages: vec!["zlc_test_plugins".into()], memory_limit_mib: Some(3072) }, Runtime::new(), SafeActions::new(),
+            move |event| { let _ = sender.lock().unwrap().send(event); }).unwrap();
+        crate::plugin_services::install(&plugins).unwrap();
+        pulse.plugins = Some(plugins.clone());
+        plugins.open("camera", "watcher", json!({}), json!({})).unwrap();
+        let run = plugins.start_run("camera", RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), devices: Default::default(),
+            shared: Default::default(), reads: Default::default(), values: json!({"lane": lane}), origin: Origin::Operator, resources: json!({}), source_signal: None,
+            run_directory: None, outputs: Default::default(), record_devices: false }).unwrap();
+        let (mut asked, mut fired) = (0, None);
+        let (outcome, result, error) = loop {
+            match plugin_events.recv_timeout(Duration::from_secs(30)).expect("a watcher event") {
+                HostEvent::Request { run: id, ticket, op, params, .. } if id == run => {
+                    assert_eq!((op.as_str(), params["command"].as_str()), ("core", Some("pulse_schedule")));
+                    asked += 1;
+                    let mut command = params["params"].clone(); command["_run"] = json!("camera#1"); command["_plugin_run"] = json!(run);
+                    let answer = ask(&mut pulse, &events, "pulse_schedule", command, None);
+                    plugins.respond(ticket, answer.map_err(zlc_plugin_host::CallError::from));
+                }
+                // Watching: the board plays again, and nobody asks it what.
+                HostEvent::RunReady { run: id, .. } if id == run => {
+                    fired = ask(&mut pulse, &events, "pulse_run", played(&document, "scan#1", 1), None).unwrap()["command_id"].as_u64();
+                }
+                HostEvent::RunFinished { run: id, outcome, result, error, .. } if id == run => break (outcome, result, error),
+                HostEvent::Failed { reason, .. } => panic!("plugin failed: {reason}"),
+                _ => {}
+            }
+        };
+        assert_eq!(outcome, "completed", "{error:?}");
+        assert_eq!(asked, 1, "the watch is asked once");
+        assert_eq!(result["states"][0], "done", "answered with what the board held when the watch began");
+        assert_eq!((result["states"].as_array().unwrap().last().unwrap(), result["command_id"].as_u64()), (&json!("playing"), fired), "{result}");
+        assert_eq!(result["revision"].as_u64(), Some(board(&pulse).revision()));
+        assert_eq!(result["points"], 1);
+        let id = fired.unwrap();
+        ask(&mut pulse, &events, "pulse_wait_done", json!({"command_id": id, "timeout_seconds": 30, "_run": "scan#1"}), None).unwrap();
         plugins.shutdown(); pulse.shutdown();
     }
 

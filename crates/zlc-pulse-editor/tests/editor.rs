@@ -241,6 +241,34 @@ fn the_scan_page_says_where_the_board_is() {
     let _ = std::fs::remove_dir_all(&folder);
 }
 
+/// The status poll asks twice a second: an answer that finds the board as it was changes nothing
+/// the window shows (no view is made of it); one that finds it changed does.
+#[test]
+fn a_status_answer_that_finds_the_board_as_it_was_changes_nothing_shown() {
+    let (folder, mut editor) = connected("poll");
+    // The status question asked, answered by the board, and delivered.
+    let answer = |editor: &mut Editor| {
+        let mut jobs = editor.take_jobs();
+        assert_eq!(jobs.len(), 1, "one status question");
+        let Job::Device { work, done } = jobs.remove(0) else { panic!("the status question is a device job") };
+        let outcome = work(); done.set();
+        assert!(matches!(outcome, Outcome::Polled { .. }));
+        editor.deliver(outcome)
+    };
+    let poll = |editor: &mut Editor| { editor.poll(); answer(editor) };
+    assert!(!poll(&mut editor), "idle and idle again");
+    assert!(!poll(&mut editor));
+    // Something else drove the board: the next answer finds it playing.
+    let board = editor.board().unwrap().clone();
+    let sequence = editor.sequence().unwrap().clone();
+    zlc_pulse::run::run_sequence(&board, &sequence, &[], None, 0, 1).unwrap();
+    editor.board_touched();
+    assert!(answer(&mut editor), "the board now plays");
+    board.safe().unwrap();
+    assert!(poll(&mut editor), "stopped");
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
 /// v2 device use: while a run holds the sequencer the editor's Stop is refused; the node's Stop
 /// makes the board safe.
 #[test]
