@@ -132,7 +132,7 @@ export class DynamicsClient {
  * p̄(T) -- is the internal state's, the atom at rest at the focus, and carries none. */
 function motionOf(job:Pick<Job,'settings'|'includeMean'>):MotionRequest|undefined{return job.includeMean?undefined:motionRequest(job.settings);}
 /** Reads the one native result contract (documented in
- * rust-solver/src/lattice_core_adapter.rs, and its motion block in motion3d_adapter.rs) and
+ * rust-solver/src/lattice_core_adapter.rs, and its motion block in motion_adapter.rs) and
  * rejects anything else. `initial` is the requested initial state (an id is a single state),
  * `horizon` the requested time T of the mean (us: 1e5 or 1e6), `motion` the requested motion. */
 export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|InitialStateSpec=resolveInitialState(scene.dynamics),horizon:number=scene.dynamics.meanHorizonUs,motion?:MotionRequest):DynamicsResult{

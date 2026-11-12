@@ -1035,7 +1035,7 @@ function startGpu():Promise<void>{
     const lift=holdWhileCompiling();
     try{
       const why=await solver.startGpu(),froze=lift();gpuCached=!why&&!froze;
-      if(froze&&why)standingNote(`${why}：运动将在 CPU 上计算`,'warning');
+      if(froze&&why)standingNote(why,'warning');
     }catch(error){
       if(lift())standingNote(`GPU 内核的编译中断（${message(error)}）：下次用 GPU 计算时重新编译`,'error');
       throw error;
@@ -1168,7 +1168,8 @@ function solverDetails():string{
     ...(result.mean?.slowestRelaxationUs!=null?[readout('最慢弛豫时间',(()=>{const unit=timeDisplayUnit(result.mean.slowestRelaxationUs!);return withUnit(result.mean.slowestRelaxationUs!*unit.factor,unit.name,{digits:3});})())]:[]),
     // Its approximation ledger: the approximations' totals against their targets, and whether
     // an output's total error exceeds a target (`flagged`).
-    ...(motion?[readout('近似误差',approximationTotal(motion.approximations)),
+    // The largest item on a line of its own: its label is a sentence of the engine's, longer than a readout's row.
+    ...(motion?[readout('近似误差',approximationTotal(motion.approximations)),...largestApproximation(motion.approximations),
       ...(motion.approximations.flagged?[`<p class="horizon-note">${esc(motion.approximations.flagged)}</p>`]:[]),
       // What the setup's initial ensemble leaves out: true of the setup, no error of the solve's, so no warning; beside the ledger.
       ...(motion.approximations.note?[`<p class="ledger-note">${esc(motion.approximations.note)}</p>`]:[])]:[]),
@@ -1176,12 +1177,16 @@ function solverDetails():string{
   const notes=result?[...(result.method?[`时间演化：${solverText(result.method)}`]:[]),...(result.mean.method?[`长期布居：${solverText(result.mean.method)}`]:[]),...(result.mean.reason?[solverText(result.mean.reason)]:[]),...result.assumptions.map(labelStateIds)]:[];
   return `<section class="solver-details"><h4>计算详情</h4>${error?`<p class="solver-error">${esc(solverText(error))}</p>`:''}${result?`<div class="form solver-readouts">${rows}</div>${motion?approximationLedger(motion.approximations):''}${notes.map(text=>`<p>${esc(text)}</p>`).join('')}`:'<p>没有当前参数的求解结果。</p>'}${failureRecords.length?'<button data-export-solver-failures>导出失败记录</button>':''}</section>`;
 }
-/** A ledger's a-priori totals, the populations' and T's, each against its target, with its largest item named by its `label`, and whether an output's total estimated
- * error exceeds a target, or the a-priori resonance bound does (`flagged`, its reason on the next line). */
+/** A ledger's a-priori totals, the populations' and T's, each against its target, and whether an output's total estimated
+ * error exceeds a target (`flagged`, its reason on a line below). */
 function approximationTotal(ledger:ApproximationLedger):string{
-  const [largest]=[...ledger.items].sort((a,b)=>b.estimate-a.estimate);
   const total=(name:string,t:LedgerTotal)=>`${name} ${errorPercent(t.error)}（目标 ${errorPercent(t.target)}）`;
-  return `${total('布居',ledger.totals.population)}，${total('温度',ledger.totals.temperature)}${largest?`；最大一项：${largest.label} ${errorPercent(largest.estimate)}`:''}；${ledger.flagged?'超出目标（见下）':'未超出'}`;
+  return `${total('布居',ledger.totals.population)}，${total('温度',ledger.totals.temperature)}；${ledger.flagged?'超出目标（见下）':'未超出'}`;
+}
+/** A ledger's largest item, named by its `label`, on a line of its own (none in an empty ledger). */
+function largestApproximation(ledger:ApproximationLedger):string[]{
+  const [largest]=[...ledger.items].sort((a,b)=>b.estimate-a.estimate);
+  return largest?[`<p class="ledger-note">最大一项：${esc(largest.label)} ${errorPercent(largest.estimate)}</p>`]:[];
 }
 /** A motion result's approximation ledger (solver-types.ts ApproximationLedger): each approximation,
  * its estimated error and what the engine did about it. */
@@ -1200,7 +1205,7 @@ function renderDetailsPage():void{
   const outside=scopeNotes.map(note=>`超出模型范围（结果照常给出）：${note.text}`);
   const motion=dynamics().motion,temperature=motionTemperatureReading(motion),tweezer=tweezerOf(scene);
   const motionLines=[!motion.enabled?'运动已关闭：时间演化只计算内态，原子静止于焦点。':motionRefusal(scene)||
-    `运动：光镊「${tweezer!.name}」中的单个原子在三维中运动（半经典），初始温度 ${withUnit(temperature.value,temperature.unit,{digits:6})}，计算设备 ${motion.device.toUpperCase()}；原子是经典质点，携带内态按量子跳跃演化。各轴 k_BT ≥ ${SEMICLASSICAL_REGIME}ħω 时与量子参考相符（T 约 10% 以内），更冷时偏冷，仅供参考。能级图的长期布居 p̄(T) 是原子静止于焦点时内态的长期布居。`];
+    `运动：光镊「${tweezer!.name}」中的单个原子在三维中运动（半经典），初始温度 ${withUnit(temperature.value,temperature.unit,{digits:6})}；原子的质心是经典质点，内态按量子跳跃演化。偏振梯度冷却的温度偏低（点粒子模型的限制，见下面“运动”的适用范围）；各轴 k_BT < ${SEMICLASSICAL_REGIME}ħω 的时刻在验证范围之外，仅供参考。能级图的长期布居 p̄(T) 是原子静止于焦点时内态的长期布居。`];
   const markup=`<section class="details-current"><h3>当前计算</h3>${[field,...motionLines,...outside,...scope,...sampling].map(line=>`<p>${esc(line)}</p>`).join('')}${solverDetails()}</section>`;
   const host=$('details-current');if(host.dataset.markup!==markup){host.dataset.markup=markup;host.innerHTML=markup;}
   const notes=$('details-static');if(!notes.childElementCount)notes.innerHTML=definitionNotes()+modelNotes();
@@ -1286,7 +1291,7 @@ function renderDynamicsControls(a:Analysis):void{
     bindQuantity(dynamicsFields,motion,'motion','motion',()=>({name:'temperature',label:'初始温度',spin:true,inexact:true,description:'初态的运动温度（各轴相同）：动量为 Maxwell 分布，位置为该温度下势阱中的热分布；内态为场景的初态'}),
       {read:()=>motionTemperatureReading(settings()),write:(v,u)=>setMotionTemperature(settings(),v,u as TemperatureUnit),units:()=>unitChoices(TEMPERATURE_UNITS,'温度')},after);
     bindField(dynamicsFields,motion,'motion',()=>({name:'device',label:'计算设备',kind:'choice',segmented:true,choices:[['gpu','GPU'],['cpu','CPU']],value:settings().device,
-      description:'运动在哪里计算：NVIDIA 显卡（GPU，默认）或处理器（CPU）。GPU 不能计算时引擎改用 CPU，状态栏写明原因。'}),v=>{settings().device=v as MotionDevice;},{after});
+      description:'运动在哪里计算。本版本只在处理器（CPU）上计算：选 GPU 时同样在 CPU 上计算，状态栏写明。'}),v=>{settings().device=v as MotionDevice;},{after});
   }
   const monitors=element('details','monitor-controls');monitors.open=monitorsWereOpen;
   const summary=element('summary');summary.append(element('span','monitor-title','观察曲线'),element('span','monitor-count',`${populationDisplayIds(d).length} 条`),element('span','spacer'),monitorAll.root,monitorNone.root);

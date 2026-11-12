@@ -3,10 +3,10 @@ import {POPULATION_TOLERANCE} from './types.js';
 import {POPULATION_GROUPS} from './population-selection.js';
 import {MOTION_AXES} from './motion.js';
 /** The semiclassical 3D motion's population accuracy target (absolute): its trajectories are run
- * until each sample's total estimated error lies within it (rust-solver/motion-3d solve.rs). */
+ * until each sample's total estimated error lies within it (rust-solver/motion units.rs `POPULATION_TARGET`). */
 export const SEMICLASSICAL_POPULATION_TARGET=0.05;
 /** The semiclassical 3D motion's validated regime: k_B T ≥ SEMICLASSICAL_REGIME ħω on every axis
- * (rust-solver/motion-3d solve.rs CLASSICAL); its result marks each sample (`classical`). */
+ * (rust-solver/motion units.rs `CLASSICAL`); its result marks each sample (`classical`). */
 export const SEMICLASSICAL_REGIME=4;
 /** A trajectory's estimated population error (ui-design.md §6.16). Every computed trajectory is
  * shown: 'estimated-converged' when every sample's bound is within the requested tolerance ε,
@@ -95,7 +95,7 @@ export interface MotionResult {
   device:MotionDevice;deviceNote?:string;approximations:ApproximationLedger;
 }
 /** The motion block of a result on the grid `timesUs` and the motion entries of its diagnostics,
- * read strictly (rust-solver/src/motion3d_adapter.rs). */
+ * read strictly (rust-solver/src/motion_adapter.rs). */
 export function readMotionResult(value:unknown,diagnostics:Record<string,unknown>,timesUs:readonly number[]):MotionResult {
   const invalid=():never=>{throw new Error('Invalid motion result');};
   const samples=timesUs.length;

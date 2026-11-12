@@ -39,9 +39,9 @@ pub const STATES: usize = 32;
 pub const GROUND: usize = 8;
 
 /// Why a motion block along an axis or in a plane is refused (contract §2.4; shown in the app).
-pub const ONLY_3D: &str = "运动只计算 3D（半经典）：运动轴需为 3d";
+pub const ONLY_3D: &str = "运动只按三维计算（半经典）：不计算沿单个轴或在平面内的运动";
 /// Why a tweezer without a waist is refused (contract §2.4; shown in the app).
-pub const NO_WAIST: &str = "光镊（trapBeamId 所指的光束）需要束腰：3D 运动计算聚焦在原子处的光镊中的单个原子";
+pub const NO_WAIST: &str = "光镊需要束腰（按功率与束腰或按数值孔径给出的聚焦光束）：运动计算的是聚焦在原子处的光镊中的单个原子";
 /// Why an initial state with population in an excited state is refused (shown in the app): the initial ensemble is each
 /// ground state's atoms in its own prepared well (SPEC §2.5), and no prepared well describes an excited state's motion.
 pub const ON_GROUND: &str = "运动计算的初态需在基态上：初态在激发态上有布居";

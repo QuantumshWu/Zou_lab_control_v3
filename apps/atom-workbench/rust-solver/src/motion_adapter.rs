@@ -19,7 +19,7 @@
 //! trap's frequencies; the loss; `classical`; the momentum and position distributions; the trajectories and the run's step.
 //! Every output but the loss describes the atom still held.
 use crate::{lattice_core_adapter, Device, Model, Options};
-use atom_motion::ledger::{Ledger, Total};
+use atom_motion::ledger::{percent, Ledger, Total};
 use atom_motion::request::{Request, STATES};
 use atom_motion::solve::{self as engine, Distributions, Solution, POPULATION_TARGET};
 use atom_population_core::lattice::accuracy;
@@ -27,7 +27,7 @@ use atom_population_core::lattice::pipeline;
 use serde_json::{json, Value};
 use std::time::Instant;
 
-const ENGINE: &str = "rust-motion-3d";
+const ENGINE: &str = "rust-atom-motion";
 const AXES: [&str; 3] = ["x", "y", "z"];
 /// Why a request for the GPU runs on the CPU, and the `gpu` operation's answer (SPEC §9).
 pub const GPU_ABSENT: &str = "GPU 计算尚未提供：本次在 CPU 上计算";
@@ -63,10 +63,10 @@ fn result(request: &Request, initial: &[f64], solution: &Solution, groups: &[lat
     let times = &request.times_us;
     let rows: Vec<Vec<f64>> = solution.populations.iter().map(|row| row.to_vec()).collect();
     if rows.len() != times.len() || rows.iter().any(|row| row.iter().any(|x| !x.is_finite())) {
-        return Err("The 3D motion engine returned populations that are not 32 finite values per time".into());
+        return Err("算出的布居不是有限数（每个时刻应有 32 个态的布居）".into());
     }
     if solution.estimated_errors.len() != times.len() || solution.estimated_errors.iter().chain(&solution.loss_probability).any(|x| !x.is_finite()) {
-        return Err("The 3D motion engine returned an estimated error or a loss that is not a finite value per time".into());
+        return Err("算出的估计误差或丢失概率不是有限数".into());
     }
     // The trace gate checks the engine's rows as they are: a systematic trace error still fails.
     let (trace, initial_error) = lattice_core_adapter::row_errors(&rows, initial)?;
@@ -105,7 +105,7 @@ fn result(request: &Request, initial: &[f64], solution: &Solution, groups: &[lat
         result["populationAccuracy"]["reason"] = json!(solution
             .reason
             .clone()
-            .unwrap_or_else(|| format!("估计误差 {estimated:.2e} 超过目标 {POPULATION_TARGET}（含投影到概率单纯形的改变量）")));
+            .unwrap_or_else(|| format!("估计误差 {}，超过目标 {}（含把布居的负值去掉、总和归一所作的改动）", percent(estimated), percent(POPULATION_TARGET))));
     }
     if let Some(remaining) = remaining {
         result["progress"] = json!(true);

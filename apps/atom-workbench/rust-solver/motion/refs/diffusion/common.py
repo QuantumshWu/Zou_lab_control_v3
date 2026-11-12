@@ -15,7 +15,7 @@ The transverse part (`diffusion account`: every change of an axis's kinetic ener
   python <this dir>/account.py 500,1000 acc_yz.json      the parts;  atoms.py: per atom;  flow.py, split.py: against 1D
   TEMPS=30,30,10 diffusion account R1_TWEEZER free:yz 30 0.3125 8192 1000 10 off_yz.json;  python <this dir>/bare.py
                                                          the bare exchange against the classical motion (toy2d.py)
-  python <this dir>/old_worker.py old.json               the frozen old engine's own worker on R4_TW2"""
+  python <this dir>/old_worker.py <old atom-lindblad.exe> old.json   the old engine's own worker on R4_TW2"""
 import subprocess, json, os, sys, numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

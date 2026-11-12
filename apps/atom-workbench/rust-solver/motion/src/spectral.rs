@@ -103,7 +103,8 @@
 //! against 28.7 on halving, where the order's fall is 16) and 1.9·10⁻³ against 2.7·10⁻³ (14.2 against 22.1); the
 //! impulse 3.0·10⁻⁴ against 6.8·10⁻⁴ of the momentum (falling 17.6 against 40.4) and 9.6·10⁻⁵ against 2.0·10⁻⁴ (13.9
 //! against 35.0). The propagation's own error is a hundredth to a seventh of what one step differs from its two halves
-//! by, which is the splitting's.
+//! by, which is the splitting's. (The radian's numbers were read with the turn forced in the rule's place, a switch for
+//! the tests that the engine no longer has: the measurement reads the rule's alone.)
 //!
 //! # What follows the generator's own frequencies, and what does not
 //! The propagation's own work -- the decomposition, the following, two hops -- is the same whatever Ĥ₀'s frequencies
@@ -294,22 +295,10 @@ impl Default for Picture {
 /// Whether a pair that turns x = |ω| |h| between two of the step's nodes is followed (module documentation, # The
 /// split), the pairs' changes over a half step being of the sizes `slope` = S_A and `curvature` = S_B: where what its
 /// following leaves, (2/3)(S_A/x)³ + (4/15) S_B²/x, is no more than what its hops would, x (S_A²/15 + S_B²/42) -- the
-/// two times x³; a pair that does not turn is hopped. The tests may force a turn in the rule's place (`SPLIT`), to
-/// read the two treatments on the same pair.
+/// two times x³; a pair that does not turn is hopped.
 fn followed(x: f64, [slope, curvature]: [f64; 2]) -> bool {
-    #[cfg(test)]
-    if let Some(split) = SPLIT.get() {
-        return x >= split;
-    }
     let (first, second) = (slope * slope, curvature * curvature);
     x > 0.0 && 2.0 / 3.0 * first * slope + 4.0 / 15.0 * second * (x * x) <= x.powi(4) * (first / 15.0 + second / 42.0)
-}
-
-#[cfg(test)]
-thread_local! {
-    /// A turn forced in the place of `followed`'s rule in a test's thread: zero follows every pair, infinity hops
-    /// every pair.
-    pub(crate) static SPLIT: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
 }
 
 /// The terms of ∫₀¹ t^p e^{zt} dt's series Σ_j z^j/(j!(j + p + 1)) at |z| ≤ x for an integral of the size `size` at
@@ -872,48 +861,45 @@ impl Picture {
         let (plan, terms) = (linalg::Chebyshev::plan(moved, moved), series(self.spread * h, moved));
         (2 + 4 * terms + 2 * (6 + plan.parts * plan.terms) + 4) as f64 * size + state
     }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
 
     /// What a split meets: every pair's turn |ω_ab| |h| between two nodes, and the sizes of its change over a half
     /// step, the slope's |A_ab| h² and the curvature's |B_ab| |h|³ (the larger of the pair's two ways round). None where
     /// nothing moves or the state does not go through the decomposition.
-    #[cfg(test)]
-    pub(crate) fn pairs(&self) -> Vec<[f64; 3]> {
-        let (n, h) = (self.n, self.half.abs());
-        if !(self.through && self.moving) {
+    pub(crate) fn pairs(picture: &Picture) -> Vec<[f64; 3]> {
+        let (n, h) = (picture.n, picture.half.abs());
+        if !(picture.through && picture.moving) {
             return Vec::new();
         }
         let mut slopes = [vec![C64::ZERO; n * n], vec![C64::ZERO; n * n]];
-        for (slope, change) in slopes.iter_mut().zip(&self.changes) {
+        for (slope, change) in slopes.iter_mut().zip(&picture.changes) {
             unlay(change, n, slope);
         }
         let mut pairs = Vec::new();
         for a in 0..n {
             for b in a + 1..n {
                 let size = |j: usize| slopes[j][a * n + b].abs().max(slopes[j][b * n + a].abs());
-                pairs.push([(self.lambda[a] - self.lambda[b]).abs() * h, size(0) * h * h, size(1) * h * h * h]);
+                pairs.push([(picture.lambda[a] - picture.lambda[b]).abs() * h, size(0) * h * h, size(1) * h * h * h]);
             }
         }
         pairs
     }
 
-    /// Whether some pair's change is followed: the split's choice on this step, as the tests read it.
-    #[cfg(test)]
-    pub(crate) fn follows(&self) -> bool {
-        self.followed
+    /// Whether some pair's change is followed: the split's choice on a step.
+    pub(crate) fn follows(picture: &Picture) -> bool {
+        picture.followed
     }
 
     /// The largest row sum of |X| at the step's end: the size of the following there.
-    #[cfg(test)]
-    fn following(&self) -> f64 {
-        let (n, h) = (self.n, self.half);
+    fn following(picture: &Picture) -> f64 {
+        let (n, h) = (picture.n, picture.half);
         let size = n * n;
-        (0..n).map(|a| (0..n).map(|b| (self.follow[b * n + a] + self.follow[size + b * n + a] * h + self.follow[2 * size + b * n + a] * (h * h)).abs()).sum::<f64>()).fold(0.0, f64::max)
+        (0..n).map(|a| (0..n).map(|b| (picture.follow[b * n + a] + picture.follow[size + b * n + a] * h + picture.follow[2 * size + b * n + a] * (h * h)).abs()).sum::<f64>()).fold(0.0, f64::max)
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     /// Dense RK4 of iẋ = (Ĥ₀ + uA + u²B)x from −h to h in `steps` steps: the tests' reference of a picture's state.
     fn flow(base: &Mat, a: &Mat, b: &Mat, half: f64, start: &[C64], steps: usize) -> Vec<C64> {
@@ -1021,8 +1007,8 @@ mod tests {
             assert!(!moving || picture.fast.iter().enumerate().all(|(k, fast)| *fast || k / n == k % n), "a slow pair");
             picture.launch(-half, &start);
             let error = errors(&mut picture, &base, &a, &b, half, &start, &[half, 0.37 * half, -0.6 * half], 400_000);
-            eprintln!("slopes × {scale}: the state's error {error:e}, the following's size {:e}", picture.following());
-            found.push((error, picture.following()));
+            eprintln!("slopes × {scale}: the state's error {error:e}, the following's size {:e}", following(&picture));
+            found.push((error, following(&picture)));
         }
         assert!(found[0].0 < 1e-11, "{found:?}");
         assert!(found[1].0 < found[1].1 * found[1].1 && found[2].0 < 0.4 * found[1].0, "{found:?}");
@@ -1058,7 +1044,7 @@ mod tests {
             let start: Vec<C64> = (0..n).map(|i| C64::cis(0.9 * i as f64) * 0.5).collect();
             let mut picture = pictured(&base, &a, &b, half, true);
             assert!(picture.through && picture.followed == (name == "fast pairs"));
-            let within = if picture.followed { picture.following().powi(2) } else { 1e-4 };
+            let within = if picture.followed { following(&picture).powi(2) } else { 1e-4 };
             for from in [-0.55 * half, 0.0, 0.3 * half] {
                 let later = [from + 0.21 * (half - from), from + 0.5 * (half - from), from + 0.83 * (half - from), half];
                 picture.launch(-half, &start);
@@ -1196,28 +1182,51 @@ mod tests {
         assert!(found[0] < 1e-4 && found[1] < found[0] / 24.0, "{found:?}");
     }
 
-    /// One pair under the two treatments, the split forced either way (`SPLIT`), and under the rule: Ĥ₀ = diag(0, −ω) with the change
-    /// uA + u²B on the pair alone, x = |ω| h from 0.5 to 4 and the change's size s = (|A| h + |B| h²) h from 0.01 to
-    /// 0.3 -- A and B in equal parts (their phases 1.1 rad apart), A alone, B alone --, from three states; the state's
-    /// largest error at the step's end and inside it (u = ±h/2) against the flow. A measurement of the two remainders.
-    fn a_pair_s_remainders(parts: [f64; 2], size: f64, x: f64) -> [[f64; 2]; 3] {
+    /// One pair hopped, followed and under the rule: Ĥ₀ = diag(0, −ω) with the change uA + u²B on the pair alone,
+    /// x = |ω| h from 0.5 to 4 and the change's size s = (|A| h + |B| h²) h from 0.01 to 0.3 -- A and B in equal parts
+    /// (their phases 1.1 rad apart), A alone, B alone --, from three states; the state's largest error at the step's end
+    /// and inside it (u = ±h/2) against the flow. A measurement of the two remainders.
+    ///
+    /// The treatment the rule does not take is reached by what the rule reads, and by nothing else: it splits a pair by
+    /// the sizes of all the pairs' changes together (module documentation, # The split). So a second pair, of two
+    /// further states with no coupling to the first two and no amplitude of the start, changes the first pair's
+    /// treatment by its own slope and leaves that pair's state as it was. The slope is the least at which the rule
+    /// decides so, of eight a decade from 10⁻³ to 10²; where the rule decides so at none (a pair too slow to be followed
+    /// beside any other) that treatment is not read.
+    fn a_pair_s_remainders(parts: [f64; 2], size: f64, x: f64) -> [Option<[f64; 2]>; 3] {
         let half = 1.0;
         let starts = [[C64::ONE, C64::ZERO], [C64::real(0.5_f64.sqrt()); 2], [C64::real(0.6), C64::new(0.0, 0.8)]];
-        let base = Mat::from_fn(2, 2, |i, j| if i == 1 && j == 1 { C64::real(-x / half) } else { C64::ZERO });
-        let pair = |z: C64| Mat::from_fn(2, 2, |i, j| if i == j { C64::ZERO } else if i < j { z } else { z.conj() });
-        let (a, b) = (pair(C64::cis(0.7) * (parts[0] * size / half.powi(2))), pair(C64::cis(-0.4) * (parts[1] * size / half.powi(3))));
-        let mut found = [[0.0_f64; 2]; 3];
-        for (treatment, split) in [Some(f64::INFINITY), Some(0.0), None].into_iter().enumerate() {
-            SPLIT.set(split);
+        let own = [parts[0] * size, parts[1] * size];
+        let beside = |fast: bool| (0..=40).map(|k| 10_f64.powf(-3.0 + k as f64 / 8.0)).find(|other| followed(x, [own[0].hypot(*other), own[1]]) == fast);
+        let mut found = [None; 3];
+        for (treatment, wanted) in [Some(false), Some(true), None].into_iter().enumerate() {
+            let (n, other) = match wanted.map(beside) {
+                None => (2, 0.0),
+                Some(Some(other)) => (4, other),
+                Some(None) => continue,
+            };
+            // The first pair's states and the second's: 0 and −ω; 7.3 and 3/h below it.
+            let base = Mat::from_fn(n, n, |i, j| if i == j { C64::real([0.0, -x / half, 7.3, 7.3 - 3.0 / half][i]) } else { C64::ZERO });
+            let change = |z: C64, other: f64| {
+                Mat::from_fn(n, n, |i, j| match (i.min(j), i.max(j)) {
+                    (0, 1) if i < j => z,
+                    (0, 1) => z.conj(),
+                    (2, 3) => C64::real(other),
+                    _ => C64::ZERO,
+                })
+            };
+            let (a, b) = (change(C64::cis(0.7) * (own[0] / half.powi(2)), other / half.powi(2)), change(C64::cis(-0.4) * (own[1] / half.powi(3)), 0.0));
             let mut picture = pictured(&base, &a, &b, half, true);
-            SPLIT.set(None);
-            assert!(picture.through && (split.is_none() || picture.followed == (treatment == 1)));
+            assert!(picture.through && wanted.is_none_or(|fast| picture.fast[1] == fast), "x {x}, size {size}: a second pair's slope {other} for {wanted:?}");
+            let mut worst = [0.0_f64; 2];
             for start in &starts {
-                picture.launch(-half, start);
+                let start: Vec<C64> = (0..n).map(|state| if state < 2 { start[state] } else { C64::ZERO }).collect();
+                picture.launch(-half, &start);
                 for (place, times) in [&[half][..], &[-0.5 * half, 0.5 * half][..]].into_iter().enumerate() {
-                    found[treatment][place] = found[treatment][place].max(errors(&mut picture, &base, &a, &b, half, start, times, 20_000));
+                    worst[place] = worst[place].max(errors(&mut picture, &base, &a, &b, half, &start, times, 20_000));
                 }
             }
+            found[treatment] = Some(worst);
         }
         found
     }
@@ -1238,7 +1247,8 @@ mod tests {
     ///   x = 1 for s_A = 0.1, at 0.56 for 0.01 and at 1.3 for 0.3; at x = 1 and the size 0.01 the followed pair errs ten
     ///   times less than the hopped one for a slope alone and ten times more for a curvature alone (which cross at 4);
     /// - the rule (`followed`: the leading remainders compared) takes the treatment that errs less, or one within a
-    ///   half more than the other where the two are close -- at every x and size here.
+    ///   half more than the other where the two are close -- at every x and size here where the other is read
+    ///   (`a_pair_s_remainders`): the hops wherever the rule follows the pair, the following at some x where it hops.
     #[test]
     fn a_pair_hopped_and_followed_against_its_flow() {
         // |I(x)|, by Simpson's rule.
@@ -1251,45 +1261,52 @@ mod tests {
             };
             (0..=panels).map(term).sum::<C64>().abs() * (2.0 / (3.0 * panels as f64))
         };
+        // The cells where both treatments are read.
+        let mut both = 0;
         for (name, parts) in [("A and B", [0.5, 0.5]), ("A alone", [1.0, 0.0]), ("B alone", [0.0, 1.0])] {
             for size in [0.01, 0.1, 0.3] {
                 for x in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0] {
                     let [hop, follow, rule] = a_pair_s_remainders(parts, size, x);
-                    assert!(rule[0] <= 1.5 * hop[0].min(follow[0]), "{name}, size {size}, x {x}: the rule's {:e}, hopped {:e}, followed {:e}", rule[0], hop[0], follow[0]);
+                    let rule = rule.expect("the rule's own treatment");
+                    // The hops are read wherever the rule follows the pair: a second pair's slope takes any pair to them.
+                    assert!(hop.is_some() || follow.is_none(), "{name}, size {size}, x {x}: followed, and not hopped beside any slope");
+                    both += usize::from(hop.is_some() && follow.is_some());
+                    for (treatment, other) in [("hopped", hop), ("followed", follow)] {
+                        assert!(other.is_none_or(|other| rule[0] <= 1.5 * other[0]), "{name}, size {size}, x {x}: the rule's {:e}, {treatment} {other:?}", rule[0]);
+                    }
                     if size == 0.01 {
                         let (slope, curvature) = (parts[0] * size, parts[1] * size);
                         let mut held = vec![];
-                        if parts[0] * parts[1] == 0.0 && x <= 1.0 {
+                        if let (Some(hop), true) = (hop, parts[0] * parts[1] == 0.0 && x <= 1.0) {
                             held.push(("hopped", hop[0], x * (slope * slope / 15.0 + curvature * curvature / 42.0), 0.05));
                         }
-                        if parts[1] > 0.0 && x >= 1.0 {
+                        if let (Some(follow), true) = (follow, parts[1] > 0.0 && x >= 1.0) {
                             held.push(("followed", follow[0], 4.0 / 15.0 * curvature * curvature / x, 0.02));
                         }
-                        if parts[1] == 0.0 && (0.75..=2.5).contains(&x) {
+                        if let (Some(follow), true) = (follow, parts[1] == 0.0 && (0.75..=2.5).contains(&x)) {
                             held.push(("followed", follow[0], slope.powi(3) * third(x) / (x * x), 0.03));
                         }
                         for (treatment, found, derived, within) in held {
                             assert!((found / derived - 1.0).abs() < within, "{name}, x {x}: {treatment} {found:e} against {derived:e}");
                         }
-                        if x == 1.0 && parts[0] * parts[1] == 0.0 {
+                        if let (Some(hop), Some(follow), true) = (hop, follow, x == 1.0 && parts[0] * parts[1] == 0.0) {
                             assert!(if parts[1] == 0.0 { follow[0] < 0.2 * hop[0] } else { follow[0] > 5.0 * hop[0] }, "{name}, x {x}: hopped {:e}, followed {:e}", hop[0], follow[0]);
                         }
                     }
+                    let read = |found: Option<[f64; 2]>, place: usize| found.map_or("   not read".into(), |found| format!("{:.3e}", found[place]));
                     eprintln!(
-                        "{name}, size {size:4}, x {x:4}: end hop {:.3e} follow {:.3e} (follow/hop {:8.3}; hop/size² {:.4}, follow x/size² {:.4}) | inside hop {:.3e} follow {:.3e} ({:8.3}) | the rule's: end {:.3e}, inside {:.3e}",
-                        hop[0],
-                        follow[0],
-                        follow[0] / hop[0],
-                        hop[0] / (size * size),
-                        follow[0] * x / (size * size),
-                        hop[1],
-                        follow[1],
-                        follow[1] / hop[1],
+                        "{name}, size {size:4}, x {x:4}: end hop {} follow {} | inside hop {} follow {} | the rule's: end {:.3e}, inside {:.3e}",
+                        read(hop, 0),
+                        read(follow, 0),
+                        read(hop, 1),
+                        read(follow, 1),
                         rule[0],
                         rule[1]
                     );
                 }
             }
         }
+        eprintln!("both treatments read at {both} of 81");
+        assert!(both > 0);
     }
 }

@@ -77,49 +77,50 @@ because it is small or labelled forbidden.
 
 Motion (运动, on by default; docs/ui-design.md §6.20–§6.21): a single atom moving in 3D
 in the optical tweezer the operator designates (设为光镊; the motion block's
-`trapBeamId`), semiclassically, served
-by `rust-solver/motion` (crate `atom-motion`, specified in `motion/SPEC.md`,
-through `src/motion_adapter.rs`; its `model` eliminates the excited states). A request whose model carries the `motion`
-block is a trajectory alone; only 3D motion is served. Each trajectory is a
-classical point carrying the internal state of the eliminated ground manifold
-on one cluster of states, evolved by quantum jumps: dipole-pattern emission
-recoil, beam-resolved absorption recoil with the exact mean force, the
-Ehrenfest force between jumps. Every coupling between ground states is folded
-at second order (van Vleck) or kept by one rule; the states kept couplings join
-form the clusters (whole hyperfine levels near B = 0, single sublevels at large
-fields, F = 1 and F = 2 together through a Raman-resonant pair). The trap's
-harmonic part is moved exactly, the time step comes from step doubling
-(populations, impulse and friction), and trajectories run in batches until each
-output's total estimated error -- the approximation ledger
-(`diagnostics.approximations`), the step's bias and two standard errors --
-meets 5% in the populations and 10% in T; an output that cannot is flagged. An
-atom is lost when its mechanical energy in the trap is positive. A point
-particle has no zero-point motion: results are validated for k_B T >= 4 hbar
-omega on every axis and marked reference-only below. The Ehrenfest force averages
-the dipole force's fluctuations in a superposition of ground states, so the
-momentum diffusion at a fixed point of a polarization gradient is low (0.23-0.27
-of the second-order expansion's at a lin-perp-lin focus); in the tweezer the
-trapped T stays within a few percent of the 1D GMW references in the validated
-regime. The example 光镊 · 3D PGC
-cools the atom with sigma+sigma- pairs along x, y and z; with motion on, the
-Raman-resonant Lambda of 光镊 + 探测光 + 回泵光 runs on one cluster spanning
-F = 1 and F = 2.
+`trapBeamId`), semiclassically, served by `rust-solver/motion` (crate
+`atom-motion`, specified in `motion/SPEC.md`) through `src/motion_adapter.rs`.
+A request whose model carries the `motion` block is a trajectory alone; only 3D
+motion is served. Each trajectory is a quantum-jump trajectory of the internal
+state, carried by a classical centre of mass: between jumps the atom moves under
+the mean force on its internal state; a jump gives the emitted photon's recoil
+and the mean momentum of the light it absorbed (one photon's at most); the rest
+of the scattering force and the momentum diffusion act within each step. Each
+optical drive is treated by its own detuning: its excited state is adiabatically
+eliminated (a light shift and a scattering rate) or tracked explicitly, and the
+states the tracked couplings join form the clusters the internal state lives on.
 
-The trajectories run on the device the request names (`options.device`, 计算设备):
-an NVIDIA GPU by default, or the CPU. The GPU engine (`motion-3d/src/gpu`,
-`kernels/motion3d.cu`) runs the CPU engine's steps, jumps, losses and readouts
-with the same initial states, random streams, ledger, time step and statistics,
-one warp per trajectory, single precision where a step is local and double where
-it accumulates. It needs compute capability 7.5 (Turing) or newer and a driver
-of CUDA 12.0 (R525, Windows 527.41) or newer: the EXE embeds PTX for compute_75,
-compiled by a pinned NVRTC 12.0 (`motion-3d/scripts/ptx.ps1`; a test checks it
-against the source), and loads `nvcuda.dll` at run time, the driver API alone.
-Without such a GPU, with an older driver or with a model beyond the kernel the
-solve runs on the CPU and `diagnostics.deviceNote` says why; `diagnostics.device`
-is the device used. The worker keeps its CUDA context for every later solve. The
-driver compiles the PTX at its first load, and after a driver update (a minute or
-two): the worker's `gpu` operation answers when it has, and the window waits
-frozen meanwhile, a moving bar and the elapsed time on it (docs/ui-design.md §6.24).
+One constant time step serves the whole run. It is chosen on a few pilot
+trajectories by a step-convergence check: they are run at a candidate step and
+at twice it, and the step is halved while the difference exceeds the step's part
+of the error budget. This is the check one makes by halving a step by hand, not
+an error bound; the method line of a result says what it could not resolve.
+Trajectories then run in batches until each output's total estimated error --
+the model's approximations (the ledger, `diagnostics.approximations`), the step
+and two standard errors -- meets the targets: 5% absolute in the populations and
+the loss, 10% relative in the total temperature (T_x + T_y + T_z)/3. An output
+that cannot meet them is returned and flagged. An atom is lost when it first
+leaves the focused beams' region (every focused beam below 1/20 of its focal
+intensity at the atom) with an energy above the value far away (SPEC §1.7).
+The example 光镊 · 3D PGC cools the atom with sigma+sigma- pairs along x, y and z.
+
+Known limits (SPEC §8). The centre of mass is a point that moves under the mean
+force: it cannot carry the correlation between the momentum and the components
+of the internal state that sub-Doppler cooling builds. The friction is exact;
+the temperature of polarization-gradient cooling comes out low. Against the same
+model's quantum answer in 1D, lin-perp-lin is 2% to 27% low and sigma+sigma- as
+low as a quarter to a third of the true value; for six beams in 3D there is no
+quantum reference and the bias is unknown. This is the model's own limit, not a
+numerical error, and it is not in the error budget. Doppler cooling, recoil
+heating and a closed transition in a standing wave have no such bias. A point
+has no zero-point motion either: k_B T >= 4 hbar omega on every axis is the
+validated regime, and outputs below it are marked reference-only.
+
+This version computes on the CPU only. `options.device` (计算设备) is accepted:
+a request for the GPU is computed on the CPU, `diagnostics.device` is "cpu" and
+`diagnostics.deviceNote` says so. The worker's `gpu` operation answers at once
+with the same sentence, so the window's wait for a kernel compile
+(docs/ui-design.md §6.24) ends as soon as the worker has started. A GPU engine is
+to follow as separate code.
 
 Every request asks for the same absolute population error,
 `populationTolerance: 0.01` on the probability scale (1%); it is not a user

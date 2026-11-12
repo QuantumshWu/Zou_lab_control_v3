@@ -658,7 +658,7 @@ fn a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the
                         let (end, part) = decomposed(&beams, detuning, gamma, z0 + v * i as f64 * tau, v, exact, tau, subs);
                         (exact, kick) = (end, kick + part);
                         t = step_of(&model, &t, tau, &mut scratch).unwrap().end;
-                        hopped &= !scratch.picture.follows();
+                        hopped &= !crate::spectral::tests::follows(&scratch.picture);
                     }
                     let state = (0..2).map(|a| (t.psi[a] - exact[a]).abs()).fold(0.0, f64::max);
                     ([state, (t.kappa[2] - start.kappa[2] - kick).abs() / kick.abs().max(size)], hopped)
@@ -2652,7 +2652,7 @@ fn a_diffusion_s_energy_input_does_not_know_the_trap() {
 // The split of the propagation's pairs (spectral.rs) on a scene's own model.
 
 /// What the split of the propagation's pairs does to a scene's step (run by name, alone: `SCENE=<a reference scene's
-/// name or a native request's path> TAU=<µs> SPLITS=<`rule`, and the turns to force in the rule's place, comma separated> …
+/// name or a native request's path> TAU=<µs> …
 /// a_scene_s_step_error_by_the_split -- --ignored --nocapture`), per cluster on the atoms of `scene_clusters`:
 /// - what the split meets: the pairs of the middle's generator by their turn x = |ω| h, and the sizes of their change
 ///   over a half step, its slope's and its curvature's parts (`spectral::Picture::pairs`), at τ, τ/2 and τ/4;
@@ -2674,10 +2674,9 @@ fn a_diffusion_s_energy_input_does_not_know_the_trap() {
 #[test]
 #[ignore = "a measurement, not a check: run by name"]
 fn a_scene_s_step_error_by_the_split() {
-    use crate::spectral::{Picture, SPLIT};
+    use crate::spectral::Picture;
     let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
     let tau: f64 = std::env::var("TAU").expect("TAU: the step (µs)").parse().expect("TAU: a number");
-    let splits: Vec<Option<f64>> = std::env::var("SPLITS").map_or(vec![None], |s| s.split(',').map(|x| (x != "rule").then(|| x.parse().expect("SPLITS: `rule` or numbers"))).collect());
     let apart = |a: &[C64], b: &[C64]| a.iter().zip(b).map(|(x, y)| (*x - *y).norm_sqr()).sum::<f64>().sqrt();
     scene_clusters(&name, &mut |model, _, cluster, run, starts| {
         let (hm, n, count) = (run.hbar_over_mass(), starts[0].psi.len(), starts.len() as f64);
@@ -2722,87 +2721,83 @@ fn a_scene_s_step_error_by_the_split() {
                 (along, start, exact)
             })
             .collect();
-        for &split in &splits {
-            let mut pairs = [[0usize; 5]; 3];
-            let mut sizes = [[[0.0_f64; 2]; 5]; 3];
-            let (mut own, mut inside, mut impulse) = ([0.0; 3], [0.0; 3], [0.0; 3]);
-            // What a check reads, the state's difference and the momentum's, from each of its two states.
-            let mut read = [([0.0; 3], [0.0; 3]); 2];
-            let size = |k: [f64; 3]| dot3(k, k).sqrt();
-            let mut rho = vec![C64::ZERO; n * n];
-            SPLIT.set(split);
-            for ((s, (along, start, exact)), through) in starts.iter().zip(&cases).zip(&middles) {
-                let still = through.generator.still();
-                // The states a check reads from: the atom's on the ground states alone, and that state a step of τ on.
-                let mut scratch = step::Scratch::default();
-                let mut landed = s.clone();
-                landed.psi[ground..].fill(C64::ZERO);
-                let norm = crate::linalg::norm_sqr(&landed.psi).sqrt();
-                landed.psi.iter_mut().for_each(|z| *z = *z / norm);
-                let later = step_of(run, &landed, tau, &mut scratch).unwrap().end;
-                for level in 0..3 {
-                    let steps = 1 << level;
-                    let (t, mut x, marks) = (tau / steps as f64, start.clone(), exact.len());
-                    let (per, mut kick) = (marks / steps, [0.0; 3]);
-                    let mut picture = Picture::default();
-                    picture.fit(n);
-                    for i in 0..steps {
-                        let middle = -0.5 * tau + (i as f64 + 0.5) * t;
-                        along.middle.generator(&along.path, middle, &mut picture.base);
-                        if !still {
-                            along.middle.generator(&along.path, middle - 0.5 * t, &mut picture.ends[0]);
-                            along.middle.generator(&along.path, middle + 0.5 * t, &mut picture.ends[1]);
-                        }
-                        picture.prepare(0.5 * t, still);
-                        if i == 0 {
-                            for [turn, slope, curvature] in picture.pairs() {
-                                let bin = [0.5, 1.0, 2.0, 4.0].iter().filter(|edge| turn >= **edge).count();
-                                pairs[level][bin] += 1;
-                                sizes[level][bin] = [sizes[level][bin][0].max(slope), sizes[level][bin][1].max(curvature)];
-                            }
-                        }
-                        let from = x.clone();
-                        picture.launch(-0.5 * t, &from);
-                        for j in 1..=per {
-                            let mark = i * per + j;
-                            picture.advance((j as f64 / per as f64 - 0.5) * t, &mut x);
-                            if j < per {
-                                inside[level] += apart(&x, &exact[mark - 1]) / (count * (marks - steps) as f64);
-                            }
-                            // The force's form on the two states at the mark, by Simpson's weights over the span.
-                            let weight = if mark == marks { 1.0 } else if mark % 2 == 1 { 4.0 } else { 2.0 } * tau / (3 * marks) as f64;
-                            let time = (mark as f64 / marks as f64 - 0.5) * tau;
-                            super::density(&x, &mut rho);
-                            let found = along.middle.force(&along.path, time, &rho);
-                            super::density(&exact[mark - 1], &mut rho);
-                            let held = along.middle.force(&along.path, time, &rho);
-                            (0..3).for_each(|a| kick[a] += weight * (found[a] - held[a]));
+        let mut pairs = [[0usize; 5]; 3];
+        let mut sizes = [[[0.0_f64; 2]; 5]; 3];
+        let (mut own, mut inside, mut impulse) = ([0.0; 3], [0.0; 3], [0.0; 3]);
+        // What a check reads, the state's difference and the momentum's, from each of its two states.
+        let mut read = [([0.0; 3], [0.0; 3]); 2];
+        let size = |k: [f64; 3]| dot3(k, k).sqrt();
+        let mut rho = vec![C64::ZERO; n * n];
+        for ((s, (along, start, exact)), through) in starts.iter().zip(&cases).zip(&middles) {
+            let still = through.generator.still();
+            // The states a check reads from: the atom's on the ground states alone, and that state a step of τ on.
+            let mut scratch = step::Scratch::default();
+            let mut landed = s.clone();
+            landed.psi[ground..].fill(C64::ZERO);
+            let norm = crate::linalg::norm_sqr(&landed.psi).sqrt();
+            landed.psi.iter_mut().for_each(|z| *z = *z / norm);
+            let later = step_of(run, &landed, tau, &mut scratch).unwrap().end;
+            for level in 0..3 {
+                let steps = 1 << level;
+                let (t, mut x, marks) = (tau / steps as f64, start.clone(), exact.len());
+                let (per, mut kick) = (marks / steps, [0.0; 3]);
+                let mut picture = Picture::default();
+                picture.fit(n);
+                for i in 0..steps {
+                    let middle = -0.5 * tau + (i as f64 + 0.5) * t;
+                    along.middle.generator(&along.path, middle, &mut picture.base);
+                    if !still {
+                        along.middle.generator(&along.path, middle - 0.5 * t, &mut picture.ends[0]);
+                        along.middle.generator(&along.path, middle + 0.5 * t, &mut picture.ends[1]);
+                    }
+                    picture.prepare(0.5 * t, still);
+                    if i == 0 {
+                        for [turn, slope, curvature] in crate::spectral::tests::pairs(&picture) {
+                            let bin = [0.5, 1.0, 2.0, 4.0].iter().filter(|edge| turn >= **edge).count();
+                            pairs[level][bin] += 1;
+                            sizes[level][bin] = [sizes[level][bin][0].max(slope), sizes[level][bin][1].max(curvature)];
                         }
                     }
-                    own[level] += apart(&x, &exact[marks - 1]) / count;
-                    impulse[level] += size(kick) / size(s.kappa) / count;
-                    for (from, (state, momentum)) in [&landed, &later].into_iter().zip(&mut read) {
-                        let whole = step_of(run, from, t, &mut scratch).unwrap().end;
-                        let half = step_of(run, from, 0.5 * t, &mut scratch).unwrap().end;
-                        let halves = step_of(run, &half, 0.5 * t, &mut scratch).unwrap().end;
-                        state[level] += apart(&whole.psi, &halves.psi) / crate::linalg::norm_sqr(&from.psi).sqrt() / count;
-                        momentum[level] += size(std::array::from_fn(|a| whole.kappa[a] - halves.kappa[a])) / size(from.kappa) / count;
+                    let from = x.clone();
+                    picture.launch(-0.5 * t, &from);
+                    for j in 1..=per {
+                        let mark = i * per + j;
+                        picture.advance((j as f64 / per as f64 - 0.5) * t, &mut x);
+                        if j < per {
+                            inside[level] += apart(&x, &exact[mark - 1]) / (count * (marks - steps) as f64);
+                        }
+                        // The force's form on the two states at the mark, by Simpson's weights over the span.
+                        let weight = if mark == marks { 1.0 } else if mark % 2 == 1 { 4.0 } else { 2.0 } * tau / (3 * marks) as f64;
+                        let time = (mark as f64 / marks as f64 - 0.5) * tau;
+                        super::density(&x, &mut rho);
+                        let found = along.middle.force(&along.path, time, &rho);
+                        super::density(&exact[mark - 1], &mut rho);
+                        let held = along.middle.force(&along.path, time, &rho);
+                        (0..3).for_each(|a| kick[a] += weight * (found[a] - held[a]));
                     }
                 }
+                own[level] += apart(&x, &exact[marks - 1]) / count;
+                impulse[level] += size(kick) / size(s.kappa) / count;
+                for (from, (state, momentum)) in [&landed, &later].into_iter().zip(&mut read) {
+                    let whole = step_of(run, from, t, &mut scratch).unwrap().end;
+                    let half = step_of(run, from, 0.5 * t, &mut scratch).unwrap().end;
+                    let halves = step_of(run, &half, 0.5 * t, &mut scratch).unwrap().end;
+                    state[level] += apart(&whole.psi, &halves.psi) / crate::linalg::norm_sqr(&from.psi).sqrt() / count;
+                    momentum[level] += size(std::array::from_fn(|a| whole.kappa[a] - halves.kappa[a])) / size(from.kappa) / count;
+                }
             }
-            SPLIT.set(None);
-            eprintln!("{name} {label}, τ {tau}, split {}:", split.map_or("the rule's".to_string(), |turn| turn.to_string()));
-            for level in 0..3 {
-                let row: Vec<String> = (0..5).map(|bin| format!("{} ({:.2e}, {:.2e})", pairs[level][bin], sizes[level][bin][0], sizes[level][bin][1])).collect();
-                eprintln!("  τ/{}: pairs of the first step by x < 0.5 | < 1 | < 2 | < 4 | beyond, with their largest slope's and curvature's sizes: {}", 1 << level, row.join(" | "));
-            }
-            eprintln!("  the propagation's own error over the span in 1, 2, 4 steps: {}", falls(&own));
-            eprintln!("  the propagation's own error inside those steps (at the span's sixteenths): {}", falls(&inside));
-            eprintln!("  the path's impulse by those states against the flow's, relative to the momentum: {}", falls(&impulse));
-            for (from, (state, momentum)) in ["as a jump leaves it", "a step of τ on"].into_iter().zip(&read) {
-                eprintln!("  a step against its halves at τ, τ/2, τ/4, from a state {from}: the state {}", falls(state));
-                eprintln!("  a step against its halves at τ, τ/2, τ/4, from a state {from}: the momentum {}", falls(momentum));
-            }
+        }
+        eprintln!("{name} {label}, τ {tau}:");
+        for level in 0..3 {
+            let row: Vec<String> = (0..5).map(|bin| format!("{} ({:.2e}, {:.2e})", pairs[level][bin], sizes[level][bin][0], sizes[level][bin][1])).collect();
+            eprintln!("  τ/{}: pairs of the first step by x < 0.5 | < 1 | < 2 | < 4 | beyond, with their largest slope's and curvature's sizes: {}", 1 << level, row.join(" | "));
+        }
+        eprintln!("  the propagation's own error over the span in 1, 2, 4 steps: {}", falls(&own));
+        eprintln!("  the propagation's own error inside those steps (at the span's sixteenths): {}", falls(&inside));
+        eprintln!("  the path's impulse by those states against the flow's, relative to the momentum: {}", falls(&impulse));
+        for (from, (state, momentum)) in ["as a jump leaves it", "a step of τ on"].into_iter().zip(&read) {
+            eprintln!("  a step against its halves at τ, τ/2, τ/4, from a state {from}: the state {}", falls(state));
+            eprintln!("  a step against its halves at τ, τ/2, τ/4, from a state {from}: the momentum {}", falls(momentum));
         }
     });
 }
