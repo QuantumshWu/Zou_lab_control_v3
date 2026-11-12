@@ -571,7 +571,7 @@ impl Model {
     /// relative rate error, as a drive's S_b p_b).
     pub(crate) fn dressing_error(&self, carrier: Component, at: &Measured) -> UnitError {
         let mut toggled = self.coherent_dressing();
-        let Some(d) = self.carrier_of(carrier.frequency) else { return UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 } };
+        let Some(d) = self.carrier_of(carrier.frequency) else { return UnitError::NONE };
         toggled[d] = !toggled[d];
         let other = self.carrier_responses(&at.plan, &self.near_exact(&at.plan, &at.amplitudes, 0, &toggled), &at.amplitudes, at.sample.at.kappa);
         let ground = &at.sample.psi[..self.clusters[at.sample.cluster].ground];
@@ -586,7 +586,7 @@ impl Model {
             }
         }
         let weight: f64 = at.populations[..GROUND].iter().sum();
-        UnitError { parameter: delta, population: delta * weight, temperature: delta * weight }
+        UnitError { parameter: delta, population: delta * weight, temperature: delta * weight, ..UnitError::NONE }
     }
 
 }
@@ -1100,12 +1100,13 @@ impl Model {
     /// levels' spread over the drive's distance times s) p_b on T. A state's drives at one distance add up to S_b p_b and
     /// c S_b² p_b on T. With the drive's response there, where the cluster holds it (`pair_error` reads it).
     pub(crate) fn drive_error(&self, unit: &Unit, at: &Measured) -> (UnitError, Option<C64>) {
-        let Some(drive) = self.drive_parameters(unit, at) else { return (UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 }, None) };
+        let Some(drive) = self.drive_parameters(unit, at) else { return (UnitError::NONE, None) };
         let (s, cluster) = (drive.share, at.sample.cluster);
         let Unit::Drive { component, excited, ground } = *unit else { unreachable!("a drive's parameters are a drive's") };
         let m = drive.total * drive.reads;
         // What its line's order moves: its flows' part and its excited population's.
         let moved = |line: f64| self.moved(at, Flow::Atom(component, excited, ground)) + 0.5 * s * line * drive.population;
+        let flow = self.moved(at, Flow::Atom(component, excited, ground));
         let (populations, force) = match (self.fourth[cluster], self.fold_frequency(cluster)) {
             (Some(_), _) => {
                 let levels = self.clusters[cluster].states.iter().map(|&b| at.energies[0][b]);
@@ -1115,7 +1116,8 @@ impl Model {
             (None, Some(_)) => (0.0, 0.0),
             (None, None) => (moved(m), drive.order(1) * drive.population),
         };
-        (UnitError { parameter: s, population: populations, temperature: force + populations + (drive.doppler + drive.sweep) * drive.population }, Some(drive.response))
+        let flow = if populations > 0.0 { flow } else { 0.0 };
+        (UnitError { parameter: s, population: populations, temperature: force + populations + (drive.doppler + drive.sweep) * drive.population, moved: flow, into: 0 }, Some(drive.response))
     }
 
     /// A carrier's explicit coupling e ← a at a point, Σ_l a_l X_l[e, a].
@@ -1181,7 +1183,7 @@ impl Model {
         let side = component.counter as usize;
         let (nu, h) = (self.tones[component.frequency].nu[side], &at.energies[0]);
         let legs = self.pair_legs(component, excited, ground);
-        let mut error = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
+        let mut error = UnitError::NONE;
         if legs.is_empty() {
             return error;
         }
@@ -1204,6 +1206,7 @@ impl Model {
             error.parameter = error.parameter.max(s);
             error.population += s + moved;
             error.temperature += s + rates + shifts + moved;
+            error.moved += moved;
         }
         error
     }

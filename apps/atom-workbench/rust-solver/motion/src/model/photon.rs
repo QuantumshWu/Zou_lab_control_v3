@@ -777,7 +777,7 @@ impl Model {
     /// and the Doppler shift of two photons at the sample's speed (the one gate, units.rs `gate`); p the populations of the
     /// two classes' source states (SPEC §1.5). Zero where the sample's cluster emits no such pair.
     pub(crate) fn coherence_error(&self, unit: &Unit, at: &Measured) -> UnitError {
-        let nothing = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
+        let nothing = UnitError::NONE;
         let Unit::Coherence { first, second, .. } = unit else { return nothing };
         let Some(&(cluster, i, j)) = self.coherence_classes(unit).iter().find(|of| of.0 == at.sample.cluster) else { return nothing };
         let sizes = at.classes.get_or_init(|| self.class_sizes(at));
@@ -789,7 +789,7 @@ impl Model {
         let classes = &self.classes[cluster];
         let source_weight = |class: &Class| -> f64 { class.members.iter().flat_map(|m| m.entries.iter().map(|&(_, sp)| self.clusters[cluster].states[sp])).map(|s| p[s]).fold(0.0, f64::max) };
         let weight = (source_weight(&classes[i]) * source_weight(&classes[j])).sqrt();
-        UnitError { parameter: m2, population: m2 * weight, temperature: m2 * weight }
+        UnitError { parameter: m2, population: m2 * weight, temperature: m2 * weight, ..UnitError::NONE }
     }
 }
 

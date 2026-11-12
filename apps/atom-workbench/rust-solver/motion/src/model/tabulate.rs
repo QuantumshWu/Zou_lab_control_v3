@@ -820,7 +820,7 @@ impl Model {
     /// interpolation error (crate::table `Table::axis_error`) and the whole error (the exact elimination against the table's), each
     /// as the error it makes of the sample's generator (`form_error`).
     pub fn table_reads(&self, tables: &Tables, samples: &[Sample]) -> Vec<TableRead> {
-        let zero = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
+        let zero = UnitError::NONE;
         tables
             .tables
             .iter()
@@ -877,7 +877,7 @@ impl Model {
         let g = self.clusters[sample.cluster].ground;
         let weight = crate::linalg::norm_sqr(&sample.psi[..g]) / norm;
         let shown = if weight == 0.0 { 0.0 } else { delta * weight };
-        UnitError { parameter: delta, population: shown, temperature: shown.max(potential / thermal) }
+        UnitError { parameter: delta, population: shown, temperature: shown.max(potential / thermal), ..UnitError::NONE }
     }
 }
 

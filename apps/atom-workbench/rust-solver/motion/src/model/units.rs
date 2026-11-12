@@ -230,7 +230,11 @@
 //! ground population P, the inflow most in error: P max_b Σ x W_b/Σ W_b, each source its part x W_b/Σ W_b P of it, on the
 //! populations and on T (`Model::moved`) -- the flows into one state from the sample's sources are its fold's, those
 //! within a hyperfine level and those between two; a flow that a hyperfine level gets from no other source is all its
-//! inflow, whatever the photons of the cycling lines beside it. (The rate agent's e3 -- S3's tweezer, a σ+σ− probe pair
+//! inflow, whatever the photons of the cycling lines beside it. That is the flow's own side as the sample sees it --
+//! over the ensemble x(1 − s) for b's population s, where the first order is x s(1 − s), 1/s times less on a sparse
+//! side --: the sample sees no other side, so it tells its part and b (`UnitError::moved`, `into`), and the run takes
+//! that part against the output's populations, min(1, s/(1 − s)) of it, the lesser of the two sides (solve.rs
+//! `destined`). (The rate agent's e3 -- S3's tweezer, a σ+σ− probe pair
 //! at 1 mW 20 MHz red of the free F=2 → F'=3 line, the atom at rest: the probe's drives F=2 → F'=2, F'=1, folded with the
 //! bare levels at 247 MHz where the trap puts them at 200, pump F=2 → F=1 35 % too slowly -- F=1 0.33 where it is 0.40,
 //! the populations 7 % off --, and booked by their share of the photons, about a percent of them, they read 1.5 %.) A
@@ -253,6 +257,16 @@ use crate::units::rounding;
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// The share of a flow's moved population that is booked at an output (module documentation, # A rate's error on the
+/// populations; solve.rs `Booking`). A state books x times its cluster's ground population, the flow's source side as it
+/// sees it -- over the ensemble x(1 − s), s the population of the flow's far side `into` (`UnitError::into`) --, where
+/// the first order is x s(1 − s), at most x times the lesser side, x min(s, 1 − s): the lesser side over the source
+/// side, min(1, s/(1 − s)), s the held population `p` of the far side at the output; all of it where no side is named.
+pub(crate) fn destined(into: u32, p: &[f64; STATES]) -> f64 {
+    let s: f64 = (0..GROUND).filter(|&b| into & 1 << b != 0).map(|b| p[b]).sum();
+    if into != 0 && s < 1.0 - s { s / (1.0 - s) } else { 1.0 }
+}
 
 /// Where a fold exists (module documentation): S = 2m² < ½ and a < ½.
 pub(crate) const EXISTS: f64 = 0.5;
@@ -399,7 +413,7 @@ pub(crate) struct Measured<'a> {
     pub(crate) doppler: Vec<OnceCell<Vec<f64>>>,
     pub(crate) kept: OnceCell<Vec<C64>>,
     pub(crate) lifts: OnceCell<[f64; GROUND]>,
-    pub(crate) moved: OnceCell<Vec<(Flow, f64)>>,
+    pub(crate) moved: OnceCell<(Option<usize>, Vec<(Flow, f64)>)>,
 }
 
 /// A source of a flow into the ground states at a sample whose rate a fold errs on (module documentation, # A rate's error on
@@ -1288,17 +1302,23 @@ impl Model {
 
     /// A unit's error at a sample from what the sample's units share.
     fn unit_error(&self, unit: &Unit, at: &Measured) -> UnitError {
+        let error = self.unit_error_alone(unit, at);
+        UnitError { into: if error.moved > 0.0 { self.moved_into(at) } else { 0 }, ..error }
+    }
+
+    /// A unit's error at a sample (`unit_error`), its flow's destination not yet told.
+    fn unit_error_alone(&self, unit: &Unit, at: &Measured) -> UnitError {
         match unit {
             Unit::Bare { component, excited, ground } | Unit::Drive { component, excited, ground } => {
                 let (own, response) = if matches!(unit, Unit::Bare { .. }) { self.bare_error(unit, at) } else { self.drive_error(unit, at) };
                 let pair = self.pair_error(*component, *excited, *ground, response, at);
-                UnitError { parameter: own.parameter.max(pair.parameter), population: own.population + pair.population, temperature: own.temperature + pair.temperature }
+                UnitError { parameter: own.parameter.max(pair.parameter), population: own.population + pair.population, temperature: own.temperature + pair.temperature, moved: own.moved + pair.moved, into: 0 }
             }
             Unit::Second { ground } => self.order_error(*ground, at),
             Unit::Term { a, b, beat } => {
                 let m2 = self.beat_index(beat).map_or(0.0, |index| 0.5 * self.term_bound(&self.forms.term(self, *a, *b, index), *a, *b, index, &at.region).0);
                 let p = &at.populations;
-                UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 * (p[*a] + p[*b]) }
+                UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 * (p[*a] + p[*b]), ..UnitError::NONE }
             }
             Unit::Dressing { carrier } => self.dressing_error(*carrier, at),
             Unit::Coherence { .. } => self.coherence_error(unit, at),
@@ -1308,7 +1328,18 @@ impl Model {
     /// The part of the populations a flow's rate error moves at a sample (module documentation, # A rate's error on the
     /// populations; `moved_made`), every flow's made once for the sample; nothing for a flow the sample does not have.
     pub(crate) fn moved(&self, at: &Measured, flow: Flow) -> f64 {
-        at.moved.get_or_init(|| self.moved_made(at)).iter().find(|of| of.0 == flow).map_or(0.0, |of| of.1)
+        at.moved.get_or_init(|| self.moved_made(at)).1.iter().find(|of| of.0 == flow).map_or(0.0, |of| of.1)
+    }
+
+    /// The far side of the sample's flows (`UnitError::into`): the ground states of the hyperfine level of the state
+    /// they move population into (`moved_made`: the one whose inflow errs relatively the most), a bit each -- a flow
+    /// between two hyperfine levels moves the one's share against the other's, whichever of its states the sample's
+    /// flows reach the most, and one within a level moves its states' shares within the level's (a cluster is no
+    /// level: its states are those the kept couplings join, a ground state alone where none does); none where the
+    /// sample has no flow.
+    pub(crate) fn moved_into(&self, at: &Measured) -> u32 {
+        let level = |s: usize| crate::request::Level::parse(&self.labels[s]).map(|l| l.f).ok();
+        at.moved.get_or_init(|| self.moved_made(at)).0.map_or(0, |b| (0..GROUND).filter(|&s| level(s) == level(b)).fold(0, |side, s| side | 1 << s))
     }
 
     /// The sample's flows into the ground states (`moved`): per source its rates W_b into each ground state b and its
@@ -1317,7 +1348,7 @@ impl Model {
     /// lines through an explicit state 2ε per folded drive onto it (eliminate.rs `Model::pair_reading`) --; the ground
     /// state b whose inflow errs relatively the most, Σ x W_b/Σ W_b; and each owner's part x W_b/Σ W_b of the cluster's
     /// ground population there.
-    fn moved_made(&self, at: &Measured) -> Vec<(Flow, f64)> {
+    fn moved_made(&self, at: &Measured) -> (Option<usize>, Vec<(Flow, f64)>) {
         let (cluster, p) = (at.sample.cluster, &at.populations);
         let c = &self.clusters[cluster];
         let land = |e: usize, b: usize| -> f64 { (0..3).map(|a| self.emission[a][(b, e)].norm_sqr()).sum() };
@@ -1353,9 +1384,9 @@ impl Model {
         }
         let total: [f64; GROUND] = std::array::from_fn(|b| sources.iter().map(|of| of.1[b]).sum());
         let erring: [f64; GROUND] = std::array::from_fn(|b| sources.iter().map(|of| of.0.iter().map(|o| o.1).sum::<f64>() * of.1[b]).sum());
-        let Some(b) = (0..GROUND).filter(|&b| total[b] > 0.0).max_by(|&x, &y| (erring[x] / total[x]).total_cmp(&(erring[y] / total[y]))) else { return vec![] };
+        let Some(b) = (0..GROUND).filter(|&b| total[b] > 0.0).max_by(|&x, &y| (erring[x] / total[x]).total_cmp(&(erring[y] / total[y]))) else { return (None, vec![]) };
         let held: f64 = p[..GROUND].iter().sum();
-        sources.into_iter().flat_map(|(owners, rates)| owners.into_iter().map(move |(flow, x)| (flow, x * rates[b] / total[b] * held))).collect()
+        (Some(b), sources.into_iter().flat_map(|(owners, rates)| owners.into_iter().map(move |(flow, x)| (flow, x * rates[b] / total[b] * held))).collect())
     }
 
     /// The error at a sample of the second order of a cluster's fold at the atom (`Unit::Second`; module documentation,
@@ -1368,23 +1399,25 @@ impl Model {
     fn order_error(&self, ground: usize, at: &Measured) -> UnitError {
         let cluster = self.membership[ground];
         let Some(frequency) = self.fold_frequency(cluster).filter(|_| at.sample.cluster == cluster && self.fourth[cluster].is_none()) else {
-            return UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
+            return UnitError::NONE;
         };
         let component = Component { frequency, counter: false };
         let c = &self.clusters[cluster];
-        let (mut rates, mut moved, mut held) = (0.0, 0.0, 0.0);
+        let (mut rates, mut moved, mut flows, mut held) = (0.0, 0.0, 0.0, 0.0);
         if self.carrier_of(frequency).is_some_and(|ci| at.responses[ci].is_some()) {
             for &g in &c.states {
                 held += at.populations[g];
                 for e in (GROUND..STATES).filter(|&e| self.level(component, e, g) == Level::Atom) {
                     if let Some(drive) = self.drive_parameters(&Unit::Drive { component, excited: e, ground: g }, at) {
                         rates += drive.order(1) * drive.population;
-                        moved += self.moved(at, Flow::Atom(component, e, g)) + 0.5 * drive.share * drive.total * drive.reads * drive.population;
+                        let flow = self.moved(at, Flow::Atom(component, e, g));
+                        flows += flow;
+                        moved += flow + 0.5 * drive.share * drive.total * drive.reads * drive.population;
                     }
                 }
             }
         }
-        UnitError { parameter: if held > 0.0 { rates / held } else { 0.0 }, population: moved, temperature: rates + moved }
+        UnitError { parameter: if held > 0.0 { rates / held } else { 0.0 }, population: moved, temperature: rates + moved, moved: flows, into: 0 }
     }
 
     /// The error at a sample of a drive folded with the bare levels (module documentation, # Levels, # The errors): its own
@@ -1399,7 +1432,7 @@ impl Model {
     /// hold its ground state. With the drive's response there, where the cluster holds it (the Raman pairs' error reads
     /// it, eliminate.rs `Model::pair_error`).
     fn bare_error(&self, unit: &Unit, at: &Measured) -> (UnitError, Option<C64>) {
-        let nothing = (UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 }, None);
+        let nothing = (UnitError::NONE, None);
         let Unit::Bare { component, excited, ground } = *unit else { return nothing };
         let c = &self.clusters[at.sample.cluster];
         let (Some(y), Some(channel)) = (c.states[..c.ground].iter().position(|&s| s == ground), at.bare.iter().find(|channel| channel.component == component)) else { return nothing };
@@ -1414,7 +1447,7 @@ impl Model {
         let share = |of: f64, all: f64| if all > 0.0 { of * p / all } else { 0.0 };
         let (rates, shifts) = (2.0 * epsilon * share(response.norm_sqr(), at.rates) * held, epsilon * share(response.norm_sqr() * own, at.shifts) * held);
         let moved = self.moved(at, Flow::Bare(component, excited, ground));
-        (UnitError { parameter: epsilon, population: s * p + moved, temperature: (s + sweep) * p + rates + shifts + moved }, Some(response))
+        (UnitError { parameter: epsilon, population: s * p + moved, temperature: (s + sweep) * p + rates + shifts + moved, moved, into: 0 }, Some(response))
     }
 
     /// A sample's populations of the model basis' states on its cluster (|ψ_s|²/‖ψ‖²; zero off its cluster).
@@ -1829,9 +1862,19 @@ mod tests {
                 bare[g] * folded.iter().map(|&u| errors[u].population).sum::<f64>()
             })
             .sum();
-        eprintln!("e3 at rest: F=1 {:.4} with the bare folds, {:.4} at the atom; the largest row off by {largest:.4}; booked {booked:.4}", bare[..3].iter().sum::<f64>(), exact[..3].iter().sum::<f64>());
+        // As the run books it: each state's flows against the populations, the lesser of their two sides (`destined`).
+        let mut p = [0.0; STATES];
+        p[..GROUND].copy_from_slice(&bare);
+        let run: f64 = (0..GROUND)
+            .map(|g| {
+                let errors = model.errors_at(&units, &pure(model, g), None);
+                bare[g] * folded.iter().map(|&u| errors[u].population - errors[u].moved * (1.0 - destined(errors[u].into, &p))).sum::<f64>()
+            })
+            .sum();
+        eprintln!("e3 at rest: F=1 {:.4} with the bare folds, {:.4} at the atom; the largest row off by {largest:.4}; booked {booked:.4}, as the run books it {run:.4}", bare[..3].iter().sum::<f64>(), exact[..3].iter().sum::<f64>());
         assert!(f1 > 0.02, "the bare folds move the F=1 share: {f1}");
         assert!(booked >= largest && booked >= f1, "booked {booked} against the rows' {largest} and the F=1 share's {f1}");
+        assert!(run >= largest, "as the run books it, {run}, against the rows' {largest}");
     }
 
     /// The gate of a drive folded at the atom says that its first-order Doppler series converges (module documentation,
