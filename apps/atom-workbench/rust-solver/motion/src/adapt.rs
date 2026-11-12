@@ -11,8 +11,9 @@
 //! is an error of the step's length like the splitting's, and the pilot's companion at twice the step checks both at
 //! the outputs (solve.rs, # The step). The generator's own frequencies are no matter of the step's length: they are
 //! integrated exactly. A step is taken only where its domain proves it (step.rs, # The domain): the model the run takes
-//! holds over its path, and the step at its speed. One that is not proven ends the advance with what its path needs
-//! (`step::Unproven`): the run's model is no model of that step, and no length of a step makes it one.
+//! holds over its path, and the step is stable there. One that is not proven ends the advance with what its path needs
+//! (`step::Unproven`): the run's model is no model of that step, and no length of a step makes it one. A step that does
+//! not resolve its path at its speed is taken, the trajectory unresolved from it on (`step::Trajectory::unresolved`).
 //!
 //! τ is one for the run because the splitting is symplectic in its conservative part and its own inverse: at a constant
 //! step the energy of a trap's motion errs by a bounded amount (measured on the reference traps R1: no drift over 10³

@@ -256,14 +256,16 @@ fn student_tail(q: f64, nu: u64) -> f64 {
 }
 
 /// An atom held at an output: its readout's populations (SPEC §1.7) and per lab axis its means of κ and κ² over the
-/// output's window (1/µm, 1/µm²); and whether at the output's instant it lies `outside` the reach the model was judged
-/// over (SPEC §1.8).
+/// output's window (1/µm, 1/µm²); and what it is against what the model was judged for (SPEC §1.8): `unresolved` -- a
+/// step of its trajectory, at the output or before it, did not resolve its path at its speed (step.rs
+/// `Trajectory::unresolved`) --, else whether at the output's instant it lies `outside` the reach.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Held {
     pub rows: [f64; STATES],
     pub kappa: [f64; 3],
     pub kappa2: [f64; 3],
     pub outside: bool,
+    pub unresolved: bool,
 }
 
 /// One trajectory at one output, what became of it by then: its atom is held; it was lost (SPEC §1.7); or the scheme
@@ -278,7 +280,7 @@ pub enum Fate {
 
 /// One output's sums over a group's trajectories: their number (the failed ones apart), the atoms held, and over the held
 /// atoms Σρ_s, Σ⟨κ⟩, Σ⟨κ⟩² (for the U-statistic, module documentation) and Σ⟨κ²⟩ per lab axis; and of the held atoms
-/// those outside the reach (`Held`), their number and their Σ_a ⟨κ_a²⟩ over the three axes.
+/// those outside the reach and those unresolved (`Held`), each kind's number and its Σ_a ⟨κ_a²⟩ over the three axes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sums {
     pub trajectories: f64,
@@ -289,9 +291,10 @@ pub struct Sums {
     pub kappa_squared: [f64; 3],
     pub kappa2: [f64; 3],
     pub outside: [f64; 2],
+    pub unresolved: [f64; 2],
 }
 impl Sums {
-    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], outside: [0.; 2] };
+    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], outside: [0.; 2], unresolved: [0.; 2] };
     /// One trajectory at the output.
     pub fn add(&mut self, fate: &Fate) {
         if *fate == Fate::Failed {
@@ -309,9 +312,10 @@ impl Sums {
                 self.kappa_squared[a] += h.kappa[a] * h.kappa[a];
                 self.kappa2[a] += h.kappa2[a];
             }
-            if h.outside {
-                self.outside[0] += 1.;
-                self.outside[1] += h.kappa2.iter().sum::<f64>();
+            let kinetic: f64 = h.kappa2.iter().sum();
+            for (sum, _) in [(&mut self.outside, h.outside), (&mut self.unresolved, h.unresolved)].into_iter().filter(|x| x.1) {
+                sum[0] += 1.;
+                sum[1] += kinetic;
             }
         }
     }
@@ -330,6 +334,7 @@ impl Sums {
         }
         for i in 0..2 {
             self.outside[i] += sign * o.outside[i];
+            self.unresolved[i] += sign * o.unresolved[i];
         }
     }
 }
@@ -380,9 +385,11 @@ pub struct Estimate {
     pub motion: Option<Motion>,
     /// The trajectories the scheme could not advance to the output (`Fate::Failed`): none of the above counts them.
     pub failed: f64,
-    /// Of the held atoms those outside the reach (`Held`): their share of the atoms and their share of the kinetic
-    /// energy, Σ_a ⟨κ_a²⟩ of theirs over that of all -- what they carry of what is shown and of the total T (SPEC §1.8).
+    /// Of the held atoms those outside the reach, and those unresolved (`Held`): each kind's share of the atoms and its
+    /// share of their kinetic energy, Σ_a ⟨κ_a²⟩ of the kind over that of all -- what the kind carries of what is shown
+    /// and of the total T (SPEC §1.8).
     pub outside: [f64; 2],
+    pub unresolved: [f64; 2],
 }
 /// The held atoms' motion at an output where at least two are held: T per lab axis (µK), T_total = (T_x + T_y + T_z)/3
 /// with its own jackknife (the axes' correlations in it), n̄ and the mean velocity (m/s).
@@ -521,8 +528,10 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
                 mean_velocity: std::array::from_fn(|a| hm * all.kappa[a] / n),
             });
             let kinetic: f64 = all.kappa2.iter().sum();
+            let shares = |kind: &[f64; 2]| [if n > 0. { kind[0] / n } else { 0. }, if kinetic > 0. { kind[1] / kinetic } else { 0. }];
             Estimate {
-                outside: [if n > 0. { all.outside[0] / n } else { 0. }, if kinetic > 0. { all.outside[1] / kinetic } else { 0. }],
+                outside: shares(&all.outside),
+                unresolved: shares(&all.unresolved),
                 trajectories: all.trajectories,
                 held: n,
                 loss: full.loss,
@@ -962,7 +971,7 @@ mod tests {
     fn atom(state: usize, x: f64, y: f64) -> Held {
         let mut rows = [0.; STATES];
         rows[state] = 1.;
-        Held { rows, kappa: [x; 3], kappa2: [y; 3], outside: false }
+        Held { rows, kappa: [x; 3], kappa2: [y; 3], outside: false, unresolved: false }
     }
     fn group(atoms: Vec<Option<Held>>) -> Group {
         let mut g = Group::new(1);
@@ -1076,17 +1085,19 @@ mod tests {
         assert!(summarize(&[group(vec![Some(atom(0, 1., 3.)), None])], &scales)[0].motion.is_none());
     }
 
-    /// The atoms apart at an output (`Estimate::outside`): of three held atoms with Σ_a ⟨κ_a²⟩ = 9, 33 and 6, the
-    /// second and the third outside the reach, the atoms outside are two thirds and hold 39/48 of the kinetic energy --
-    /// whatever the groups they come in, and a lost atom is none of them.
+    /// The atoms apart at an output (`Estimate::outside`, `Estimate::unresolved`): of three held atoms with
+    /// Σ_a ⟨κ_a²⟩ = 9, 33 and 6, the second outside the reach and the third unresolved, each kind is a third of the atoms
+    /// and holds 33/48 and 6/48 of the kinetic energy -- whatever the groups they come in, and a lost atom is none of
+    /// them.
     #[test]
     fn the_atoms_apart_are_their_shares_of_the_held_atoms_and_of_their_kinetic_energy() {
         let scales = Scales { hbar_over_mass: 2., frequencies: [4.; 3] };
-        let apart = |y: f64| Some(Held { outside: true, ..atom(0, 1., y) });
-        let one = summarize(&[group(vec![Some(atom(0, 1., 3.)), apart(11.), apart(2.), None])], &scales);
-        let two = summarize(&[group(vec![Some(atom(0, 1., 3.)), None]), group(vec![apart(11.), apart(2.)])], &scales);
+        let apart = |y: f64, unresolved: bool| Some(Held { outside: !unresolved, unresolved, ..atom(0, 1., y) });
+        let one = summarize(&[group(vec![Some(atom(0, 1., 3.)), apart(11., false), apart(2., true), None])], &scales);
+        let two = summarize(&[group(vec![Some(atom(0, 1., 3.)), None]), group(vec![apart(11., false), apart(2., true)])], &scales);
         for e in [&one[0], &two[0]] {
-            assert!((e.outside[0] - 2. / 3.).abs() < 1e-15 && (e.outside[1] - 39. / 48.).abs() < 1e-15, "{:?}", e.outside);
+            assert!((e.outside[0] - 1. / 3.).abs() < 1e-15 && (e.outside[1] - 33. / 48.).abs() < 1e-15, "{:?}", e.outside);
+            assert!((e.unresolved[0] - 1. / 3.).abs() < 1e-15 && (e.unresolved[1] - 6. / 48.).abs() < 1e-15, "{:?}", e.unresolved);
         }
         assert_eq!(summarize(&[group(vec![None, None])], &scales)[0].outside, [0.; 2]);
     }
