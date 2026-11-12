@@ -64,6 +64,28 @@
 //! (2/K')^{1/4} √t σ -- the same at one stretch, K'^{1/4} more at many; the mean's noise is the noise's slowest mode,
 //! which the mean square weighs as one mode among K'.
 //!
+//! # A read on more pairs
+//! What a read of G₀ groups will read on G > G₀ of them -- the same groups and further ones -- follows from the two
+//! parts of its variance, V(G) = 4ζ₁/G + 2ζ₂/(G(G − 1)), ζ₁ = ⟨μ, Cμ⟩ and ζ₂ = tr C² (above):
+//! - the estimate. M̂ is a U-statistic, and the one on G₀ groups is the one on G plus a part the latter does not
+//!   hold (the mean of M̂(G₀) given the larger sample is M̂(G)): the change M̂(G) − M̂(G₀) has no mean and the variance
+//!   V(G₀) − V(G), whatever M is. It is taken about the size read, max(M̂, 0) -- a size is not negative --, by
+//!   Student's t at the groups that read the present spread less one, as that spread's own interval is;
+//! - the jackknife's spread on G groups, J(G) = 4ζ₁/G + 4ζ₂/(G(G − 2)): the floor's part counted 2(G − 1)/(G − 2)
+//!   times (above);
+//! - the two parts. One read gives one number, J(G₀), for two. The floor ζ₂ is the noise's alone; the other part
+//!   holds the error, and is bounded by the floor: ⟨μ, Cμ⟩ ≤ λ_max(C) ⟨μ, μ⟩ ≤ √(tr C²) M, so ζ₁ ≤ M √ζ₂, with
+//!   equality where the error lies along the noise's one mode over the run. The read's error falls the more slowly
+//!   with the groups the more of it is ζ₁'s (as 1/√G, the floor's as 1/G), so at that bound it falls as slowly as
+//!   the read allows: ζ₁ = M √ζ₂ at M = max(M̂, 0), and √ζ₂ = s from J(G₀) = 4 M s/G₀ + 4 s²/(G₀(G₀ − 2)). A read
+//!   of none (M̂ ≤ 0) is all floor.
+//! So the read comes within a bound b on G groups -- M̂(G) + t_{G−1} √J(G) ≤ b -- with the probability that the
+//! change stays below b − t_{G−1} √J(G) − max(M̂, 0), none where the interval alone exceeds b (`within_on`). It takes
+//! the present spread as the noise's own: a spread that eleven groups read low or high is not corrected, beyond
+//! Student's wider tails. (Measured, gray molasses at 1.4585 µs, the total T's read in units of its bound: on 88
+//! pairs the four seeds' standard errors are 0.32 to 0.75, on 1024 pairs 0.14 to 0.24 at a mean square of 0.44; from
+//! their mean on 88 the law gives 0.15 on 1024, the floor's 1/G alone 0.05.)
+//!
 //! # Many looks
 //! A decision that acts where any of m reads lies beyond its interval (decide.rs) takes the largest of m noisy reads: at
 //! one look's tail p = P(|N| > z) each, some read of m independent ones lies beyond by chance with probability
@@ -581,6 +603,44 @@ pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scale
     }
 }
 
+/// What a read of a mean square (`between`) is to read on `factor` > 1 times its groups, those it has among them
+/// (module documentation, # A read on more pairs): the spread the jackknife reads there, J(G), and the standard
+/// deviation of the estimate's change, √(V(G₀) − V(G)) -- the part of the spread that holds the error at its bound
+/// by the floor, ζ₁ = M √ζ₂ at the size read, M = max(M̂, 0). A read with a spread, on three groups at least.
+fn on_more(read: &Read, factor: f64) -> (Spread, f64) {
+    let (size, groups) = (read.value.max(0.), read.spread.groups);
+    // s = √ζ₂ from J(G₀) = 4 M s/G₀ + 4 s²/(G₀(G₀ − 2)): ½(G₀ − 2)(√(M² + f²) − M) at f² = J(G₀) G₀/(G₀ − 2), written
+    // without the difference of two near numbers and without f's square.
+    let floor = read.spread.error * (groups / (groups - 2.)).sqrt();
+    let s = 0.5 * (groups - 2.) * floor * (floor / (size.hypot(floor) + size));
+    let more = factor * groups;
+    let variance = |g: f64| 2. * s * (2. * size / g + s / (g * (g - 1.)));
+    (Spread { error: (4. * s * (size / more + s / (more * (more - 2.)))).sqrt(), groups: more }, (variance(groups) - variance(more)).sqrt())
+}
+
+/// The probability that a read of a mean square (`between`) reads within `bound` -- max(M̂, 0) + t·SE ≤ bound at one
+/// look (decide.rs `Read::outcome`) -- on `factor` times its pairs, those it has among them (module documentation,
+/// # A read on more pairs; `on_more`): that the estimate's change, by Student's t at the groups that read the
+/// present spread, stays below the bound less the size read and the interval of the spread on the more pairs; none
+/// where that interval alone exceeds the bound. None for a read that is no number or whose spread is unread; a read
+/// without spread, or on no more pairs, is within or not as it stands.
+pub fn within_on(read: &Read, bound: f64, factor: f64) -> f64 {
+    if read.value.is_nan() || !read.spread.read() {
+        return 0.;
+    }
+    if read.spread.error == 0. || factor <= 1. {
+        return f64::from(u8::from(read.most(1.) <= bound));
+    }
+    let (spread, change) = on_more(read, factor);
+    let interval = spread.interval();
+    if interval > bound {
+        return 0.;
+    }
+    let rise = (bound - interval - read.value.max(0.)) / change;
+    let tail = 0.5 * student_tail(rise.abs(), (read.spread.groups.floor() - 1.) as u64);
+    if rise < 0. { tail } else { 1. - tail }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,6 +766,73 @@ mod tests {
                 assert!(ratio >= 1. - tolerance && ratio <= twice * (1. + tolerance), "case {case}: the jackknife's variance over the reads', {ratio}");
             }
         }
+    }
+
+    /// A read on more pairs (`on_more`, `within_on`) against synthetic levels as above, 22 groups of 8 atoms, read on
+    /// the first eleven and on all of them, 4000 times. From the size and the mean of the jackknife's variance on
+    /// eleven groups, the law gives the jackknife's variance on the 22 and the variance of the estimate's change:
+    /// - at one output, where the error lies along the noise's one mode and the part that holds it is at its bound,
+    ///   both meet the measured ones -- with no error (the floor alone) and with one of 0.05, where that part is
+    ///   most of the spread -- within the relative error of a variance of 4000 draws at z, twice;
+    /// - at eight independent outputs and an error of 0.02 the part that holds the error is below its bound: the
+    ///   law's two variances are the measured ones and more, and the floor's alone falls short of the spread.
+    /// And the probability to read within a bound b, on the pilot's eleven groups:
+    /// - a read of none whose interval is I reads, on f times its pairs, the interval I·(t_{11f−1}/t_10)·
+    ///   √(11·9/(11f(11f − 2))): no chance where that exceeds b, some where it does not; on 200 times the pairs the
+    ///   chance that the estimate itself, whose own variance is the jackknife's over 2(G − 1)/(G − 2), lies below b;
+    /// - more pairs make a read of none more likely within, and a larger size less, a read below zero as one of
+    ///   none; a read without spread, or on no more pairs, is within or not as it stands; one that is no number
+    ///   or unread has no chance.
+    #[test]
+    fn a_read_on_more_pairs_changes_and_spreads_by_its_two_parts() {
+        let (groups, repetitions) = (11usize, 4000usize);
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let tolerance = 2. * CONFIDENCE * (2. / repetitions as f64).sqrt();
+        for (outputs, bias) in [(1usize, 0.), (1, 0.05), (8, 0.02)] {
+            let (mut fewer, mut more, mut change, mut squares) = (0., 0., 0., 0.);
+            for _ in 0..repetitions {
+                let mut level = |shift: f64| -> Vec<Group> {
+                    (0..2 * groups)
+                        .map(|_| {
+                            let mut g = Group::new(outputs + 1);
+                            for _ in 0..GROUP {
+                                let fates: Vec<Fate> = std::iter::once(Fate::Held(atom(0, 0., 1.))).chain((0..outputs).map(|_| Fate::Held(atom(usize::from(uniform(&mut state) >= 0.5 + shift), 0., 1.)))).collect();
+                                g.add(&fates);
+                            }
+                            g
+                        })
+                        .collect()
+                };
+                let (fine, coarse) = (level(0.), level(3. * bias));
+                let (half, whole) = (between(&fine[..groups], &coarse[..groups], &UNIT).shown[0], between(&fine, &coarse, &UNIT).shown[0]);
+                fewer += half.spread.error.powi(2);
+                more += whole.spread.error.powi(2);
+                change += whole.value - half.value;
+                squares += (whole.value - half.value).powi(2);
+            }
+            let n = repetitions as f64;
+            let read = Read { value: bias * bias, spread: Spread { error: (fewer / n).sqrt(), groups: groups as f64 } };
+            let (spread, foreseen) = on_more(&read, 2.);
+            let ratios = [spread.error.powi(2) / (more / n), foreseen * foreseen / (squares / n - (change / n).powi(2))];
+            if outputs == 1 {
+                assert!(ratios.iter().all(|r| (r - 1.).abs() <= tolerance), "{outputs} output, bias {bias}: the law over the measured, {ratios:?}");
+            } else {
+                let floor = on_more(&Read { value: 0., ..read }, 2.).0.error.powi(2) / (more / n);
+                assert!(ratios.iter().all(|r| *r >= 1. - tolerance) && floor < 1. - tolerance, "{outputs} outputs, bias {bias}: {ratios:?}, the floor's alone {floor}");
+            }
+        }
+        let none = |interval: f64| Read { value: 0., spread: Spread { error: interval / Spread { error: 1., groups: 11. }.interval(), groups: 11. } };
+        let twice = Spread { error: 1., groups: 22. }.interval() / Spread { error: 1., groups: 11. }.interval() * (99.0f64 / 440.).sqrt();
+        assert!(within_on(&none(0.99 / twice), 1., 2.) > 0. && within_on(&none(1.01 / twice), 1., 2.) == 0., "{twice}");
+        let own = none(1.5).spread.error * (9.0f64 / 20.).sqrt();
+        assert!((within_on(&none(1.5), 1., 200.) - (1. - 0.5 * student_tail(1. / own, 10))).abs() < 0.005);
+        assert!(within_on(&none(1.5), 1., 2.) < within_on(&none(1.5), 1., 3.) && within_on(&none(1.5), 1., 3.) < within_on(&none(1.5), 1., 200.));
+        let sized = |value: f64| Read { value, ..none(0.6) };
+        assert!(within_on(&sized(0.5), 1., 2.) < within_on(&sized(0.3), 1., 2.) && within_on(&sized(0.3), 1., 2.) < within_on(&sized(-0.3), 1., 2.));
+        assert_eq!((within_on(&sized(0.3), 1., 1.), within_on(&sized(0.5), 1., 1.), within_on(&sized(-0.3), 1., 2.) == within_on(&sized(0.), 1., 2.)), (1., 0., true));
+        let exact = |value: f64| Read { value, spread: Spread { error: 0., groups: 11. } };
+        assert_eq!((within_on(&exact(0.9), 1., 2.), within_on(&exact(1.1), 1., 2.)), (1., 0.));
+        assert_eq!((within_on(&Read { value: f64::NAN, ..none(0.1) }, 1., 2.), within_on(&Read { value: 0., spread: Spread::UNREAD }, 1., 2.)), (0., 0.));
     }
 
     /// T's step size against synthetic levels of a known bias. Each atom has an exponential energy E (⟨κ²⟩ = E,
