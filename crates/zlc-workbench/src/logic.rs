@@ -106,6 +106,21 @@ pub struct Claim { pub argument: String, pub device: String, pub protected: Opti
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frozen { pub draft: Draft, pub values: Map<String, Value>, pub named: Vec<Claim>, pub resolved: Map<String, Value>, pub outputs: BTreeMap<String, String>, pub previews: Vec<crate::types::Preview> }
 
+/// A reader's source bundle as its queries were last told it: what it was looked at for (each
+/// member's run and whether it had published), and each member's signal with what was told of it.
+pub(crate) struct SourceBundle { built: String, members: Vec<(String, Value)> }
+
+impl SourceBundle {
+    /// The `bundle` fact.
+    fn told(&self) -> Value { Value::Array(self.members.iter().map(|(_, member)| member.clone()).collect()) }
+}
+
+/// Why a run's source run ended while it ran, when an upstream node's end explains it: the
+/// words (`occupancy was restarted`), and the run that asked for that end (a run's own
+/// acquisition restarts are no cause of its failure).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceLost { pub cause: String, pub by: Option<String> }
+
 pub struct Run {
     pub id: String,
     pub node: String,
@@ -120,6 +135,8 @@ pub struct Run {
     pub artifacts: Vec<Value>,
     pub generation: Option<String>,
     pub stop_reason: Option<String>,
+    /// Its source run ended under it because of an upstream node (a failure says so).
+    pub source_lost: Option<SourceLost>,
     pub error: Option<Value>,
     pub claims: Vec<Claim>,
     pub frozen: Frozen,
@@ -228,6 +245,8 @@ const ADMIT: &str = "admit";
 const TUNABLE: &str = "tunable:";
 /// Asked per output; its answers feed the consumers' `source` fact.
 const FRAMES_QUERY: &str = "describe_output_frames";
+/// Why a run that makes way for its node's next start is stopped.
+const RESTARTED: &str = "it was restarted";
 /// A run asking the operator to set a physical axis by hand (v2 manual_axis_setting).
 const MANUAL_AXIS: &str = "manual-axis";
 /// Admission issues that only mean "not yet": a Start waits them out.
@@ -453,7 +472,7 @@ impl Workbench {
         bench.extend(self.devices.iter().filter(|(key, live)| self.device_open(key) && live.working_point["tunable"] == true)
             .map(|(key, _)| (format!("{TUNABLE}{key}"), key.clone())));
         let source = self.source_frames(node);
-        let bundle = self.bundles.get(id).map_or_else(|| json!([]), |(_, bundle)| bundle.clone());
+        let bundle = self.bundles.get(id).map_or_else(|| json!([]), SourceBundle::told);
         let complete = self.bundle_complete(id);
         let editor = json!({"values": args["values"], "devices": self.device_infos(&bench), "resources": args["resources"], "source": source,
             "bundle": bundle, "artifacts": self.artifact_facts(node)});
@@ -499,28 +518,41 @@ impl Workbench {
     }
 
     /// The source bundles the nodes' queries read (an editor, an admission check), each member
-    /// with its schemas (v2 `input_bundle`), rebuilt when a member is declared anew or first
-    /// publishes. Only the queries that read the bundle ask again, and only when what they
-    /// are told differs: a source's new generation with the schemas it had (every launch of
-    /// its producer) tells them nothing new, so nothing is asked of the node (nor, through
-    /// its editor, of the bench's devices).
+    /// with its schemas (v2 `input_bundle`), looked at again when a member is declared anew,
+    /// first publishes or goes. Only the queries that read the bundle ask again, and only when
+    /// what they would be told differs from what they were last told. A relaunch of the
+    /// source's producer is no change of what the reader reads: between the old run and the new
+    /// one's first event the member is absent, then has no event yet, and neither says anything
+    /// of its schemas -- the reader keeps what it was told, so a relaunch with the schemas it
+    /// had asks nothing of the node (nor, through its editor, of the bench's devices), and one
+    /// with other schemas asks as soon as they are known.
     pub(crate) fn refresh_bundles(&mut self, host: &mut dyn Host) {
         let signals = host.signals();
         let readers: Vec<String> = self.nodes.iter().filter(|node| self.catalog.get(&node.type_id)
             .is_some_and(|item| item.node().queries.iter().any(|name| name == EDITOR_FACTS || name == ADMIT_SOURCE))).map(|node| node.id.clone()).collect();
         for id in readers {
             let members = self.bundle_signals(self.node(&id).unwrap());
-            let key = members.iter().map(|(name, signal)| {
+            let built = members.iter().map(|(name, signal)| {
                 let seen = signals.iter().find(|info| info.name == *signal);
                 format!("{name}={}", seen.map_or_else(String::new, |info| format!("{}:{}", info.generation, info.published)))
             }).collect::<Vec<_>>().join(";");
-            if self.bundles.get(&id).is_some_and(|(known, _)| *known == key) { continue; }
-            let bundle = Value::Array(members.iter().map(|(name, signal)| {
-                let (schema, event) = host.schemas(signal).unwrap_or((Value::Null, Value::Null));
-                json!({"name": name, "schema": schema, "event_schema": event})
-            }).collect());
-            let same = self.bundles.get(&id).is_some_and(|(_, known)| *known == bundle);
-            self.bundles.insert(id.clone(), (key, bundle));
+            let known = self.bundles.get(&id);
+            if known.is_some_and(|known| known.built == built) { continue; }
+            let members: Vec<(String, Value)> = members.iter().map(|(name, signal)| {
+                // What the reader was told of this member, the same signal.
+                let told = known.and_then(|known| known.members.iter().find(|(was, member)| was == signal && member["name"] == name.as_str())).map(|(_, member)| member);
+                let seen = signals.iter().find(|info| info.name == *signal);
+                let now = seen.and_then(|_| host.schemas(signal));
+                let schema = now.as_ref().map(|(schema, _)| schema.clone()).filter(|schema| !schema.is_null())
+                    .or_else(|| told.map(|member| member["schema"].clone())).unwrap_or(Value::Null);
+                // An event is described once the member has published one; until then its events
+                // are what the reader was told of this schema's.
+                let event = match now { Some((_, event)) if seen.is_some_and(|info| info.published) => event,
+                    _ => told.filter(|member| member["schema"] == schema).map_or(Value::Null, |member| member["event_schema"].clone()) };
+                (signal.clone(), json!({"name": name, "schema": schema, "event_schema": event}))
+            }).collect();
+            let same = known.is_some_and(|known| known.members.iter().map(|(_, member)| member).eq(members.iter().map(|(_, member)| member)));
+            self.bundles.insert(id.clone(), SourceBundle { built, members });
             if !same { self.ask_queries(&id, Some(&[EDITOR_FACTS, ADMIT_SOURCE])); }
         }
     }
@@ -538,8 +570,7 @@ impl Workbench {
 
     /// Every member of the node's source bundle has a schema.
     fn bundle_complete(&self, id: &str) -> bool {
-        self.bundles.get(id).and_then(|(_, bundle)| bundle.as_array())
-            .is_some_and(|members| !members.is_empty() && members.iter().all(|member| !member["schema"].is_null()))
+        self.bundles.get(id).is_some_and(|bundle| !bundle.members.is_empty() && bundle.members.iter().all(|(_, member)| !member["schema"].is_null()))
     }
 
     /// The bench's devices changed: editors that offer them ask again.
@@ -1138,6 +1169,7 @@ impl Workbench {
         self.cancel_start(id, "superseded by another Start");
         let processor = self.follows_sources && self.catalog.get(&self.node(id).unwrap().type_id).is_some_and(|descriptor| descriptor.node().node_kind == "processor");
         if processor { self.plugins.follow(&node_instance(id), Some(&frozen.draft.source_signal)); }
+        let by = acquisition.as_ref().map(|(parent, ..)| parent.clone());
         let node = self.node_mut(id).unwrap();
         node.error = None; node.running = Some(frozen.draft.clone()); node.frozen = Some(frozen);
         node.follow = processor; node.follow_attempted = None;
@@ -1145,8 +1177,8 @@ impl Workbench {
         // Its own run makes way for its restart; another's for the devices this start takes.
         let mut holders = self.conflicting_nodes(&claims);
         holders.remove(id);
-        self.stop_run_of(id, "it was restarted");
-        for holder in holders { self.stop_run_of(&holder, "another start needs its devices"); }
+        self.stop_run_of(id, RESTARTED, by.as_deref());
+        for holder in holders { self.stop_run_of(&holder, "another start needs its devices", by.as_deref()); }
         self.launch_pending(host);
     }
 
@@ -1193,7 +1225,7 @@ impl Workbench {
         let children = self.run(parent).map(|run| run.children.clone()).unwrap_or_default();
         for child in children {
             let node = self.run(&child).filter(|run| !run.terminal()).map(|run| run.node.clone());
-            if let Some(node) = node.filter(|node| self.node(node).and_then(|node| node.run.as_deref()) == Some(child.as_str())) { self.stop_run_of(&node, reason); }
+            if let Some(node) = node.filter(|node| self.node(node).and_then(|node| node.run.as_deref()) == Some(child.as_str())) { self.stop_run_of(&node, reason, Some(parent)); }
         }
     }
 
@@ -1319,7 +1351,7 @@ impl Workbench {
         self.run_sequences.insert(id.to_owned(), sequence);
         self.runs.push(Run { id: run_id.clone(), node: id.to_owned(), state: "starting".into(), ready: false,
             started_at, ended_at: None, progress: None, request: None, directory: None, artifacts: Vec::new(), generation: None, stop_reason: None,
-            error: None, claims, frozen: frozen.clone(), start_record: folder.map(|folder| folder.record), previewed: BTreeSet::new(), preview_baseline, preview_panels: Vec::new(),
+            source_lost: None, error: None, claims, frozen: frozen.clone(), start_record: folder.map(|folder| folder.record), previewed: BTreeSet::new(), preview_baseline, preview_panels: Vec::new(),
             acquisition: pending.acquisition.clone(), children: Vec::new(), snapshot_owner, bench: None, record: None });
         self.trim_runs();
         // v2 _activate_candidate: what a run starts with is its producer's own; a region that
@@ -1349,21 +1381,36 @@ impl Workbench {
         }
     }
 
-    fn stop_run_of(&mut self, id: &str, reason: &str) {
-        let Some(run) = self.node(id).and_then(|node| self.active_run(node)).map(|run| run.id.clone()) else { return };
+    /// Stop the node's run for `reason`, asked for by the run `by` (a parent's acquisition) or
+    /// none. The runs reading its outputs lose their source run with it, and are told why.
+    fn stop_run_of(&mut self, id: &str, reason: &str, by: Option<&str>) {
+        let Some(node) = self.node(id) else { return };
+        let name = node.name.clone();
+        let Some(run) = self.active_run(node).map(|run| run.id.clone()) else { return };
         let run = self.run_mut(&run).unwrap();
         run.state = "stopping".into();
-        run.stop_reason.get_or_insert_with(|| reason.to_owned());
+        let stopped = run.stop_reason.get_or_insert_with(|| reason.to_owned()).clone();
+        let cause = if stopped == RESTARTED { format!("{name} was restarted") } else { format!("{name} was stopped because {stopped}") };
         let acquisition = run.acquisition.take();
-        let id = run.id.clone();
         // The operator's request it waits on is cancelled with it (v2: Stop wakes the wait).
         let request = run.request.take().and_then(|request| request["request"].as_str().map(str::to_owned));
+        let (node, id) = (id, run.id.clone());
+        self.sources_lost(node, &SourceLost { cause, by: by.map(str::to_owned) });
         self.cancel_bench(&id);
         // Every Stop is sent (v2 cancelled the host each time): one asked again is never a no-op.
         self.plugins.stop(&id);
         if let Some((parent, ticket, _)) = acquisition { self.plugins.acquired(&parent, ticket, Err("the acquisition was stopped".into())); }
         if let Some(request) = request { self.plugins.answer(&id, &request, None); }
         self.stop_acquisitions(&id, reason);
+    }
+
+    /// The running consumers of `producer`'s outputs lose their source run: each keeps the
+    /// first cause it is told, unless it asked for that end itself.
+    fn sources_lost(&mut self, producer: &str, lost: &SourceLost) {
+        for run in self.runs.iter_mut().filter(|run| !run.terminal() && run.node != producer && lost.by.as_deref() != Some(run.id.as_str())
+            && split_signal(&run.frozen.draft.source_signal).is_some_and(|(owner, _)| owner.split('/').next() == Some(producer))) {
+            run.source_lost.get_or_insert_with(|| lost.clone());
+        }
     }
 
     /// A run asks the operator. One asked after its Stop is answered as stopped and never
@@ -1379,7 +1426,7 @@ impl Workbench {
         let node = self.node_mut(id)?;
         if std::mem::take(&mut node.follow) { self.plugins.follow(&node_instance(id), None); }
         self.cancel_start(id, "the operator pressed Stop");
-        self.stop_run_of(id, "the operator pressed Stop");
+        self.stop_run_of(id, "the operator pressed Stop", None);
         let active = self.node(id).and_then(|node| self.active_run(node)).is_some();
         if !active { let node = self.node_mut(id)?; node.running = None; node.frozen = None; }
         Ok(json!({"node": id, "stopping": active}))
@@ -1421,7 +1468,7 @@ impl Workbench {
         let run_id = run.id.clone();
         if response.is_some_and(|response| !response.is_object()) { return Err("A response is an object of the request's fields, or null to cancel".into()); }
         // A cancel stops the run first, as v2's Stop woke the wait with the stop already set.
-        if response.is_none() { self.stop_run_of(id, "the operator cancelled the request"); }
+        if response.is_none() { self.stop_run_of(id, "the operator cancelled the request", None); }
         self.plugins.answer(&run_id, request, response);
         if let Some(run) = self.run_mut(&run_id) { run.request = None; }
         Ok(json!({"node": id, "request": request}))
@@ -1483,7 +1530,7 @@ impl Workbench {
             if self.device_failed(instance, error) {
                 self.bench_changed();
                 self.cancel_device_starts(instance, "a required device failed");
-                for node in self.claiming_nodes(instance) { self.stop_run_of(&node, "its device failed"); }
+                for node in self.claiming_nodes(instance) { self.stop_run_of(&node, "its device failed", None); }
                 self.close_released();
                 // A Start that waited for this device now says why it cannot.
                 let waiting: Vec<String> = self.nodes.iter().filter(|node| node.start_after_check.is_some()).map(|node| node.id.clone()).collect();
@@ -1598,6 +1645,14 @@ impl Workbench {
         run.ended_at = Some(workspace::utc_now());
         run.request = None;
         if generation.is_some() { run.generation = generation; }
+        // A failure its source run's end explains names the upstream node that ended it, and why.
+        let failed = run.state == "failed";
+        let lost = run.source_lost.clone();
+        let cause = lost.as_ref().filter(|_| failed).map(|lost| lost.cause.clone());
+        let error = match (error, &cause) {
+            (Some(Value::Object(mut error)), Some(cause)) => { error.insert("cause".into(), json!(cause)); Some(Value::Object(error)) }
+            (error, _) => error,
+        };
         run.error = error.clone();
         let (node_id, acquisition, preview_panels) = (run.node.clone(), run.acquisition.take(), std::mem::take(&mut run.preview_panels));
         let record = run.start_record.as_ref().map(|start| json!({"schema": "zlc.task-run", "run_id": start["run_id"], "task": start["task"],
@@ -1617,11 +1672,15 @@ impl Workbench {
         self.stop_acquisitions(id, "its parent run ended");
         for panel in preview_panels { host.close_panel(&panel); self.board.remove(&panel); }
         let message = error.as_ref().map(|error| error["message"].as_str().map(str::to_owned).unwrap_or_else(|| error.to_string()));
+        // Its consumers lose their source run with it: for the upstream end that ended it, else for its own failure.
+        let name = self.node(&node_id).map_or_else(|| node_id.clone(), |node| node.name.clone());
+        if let Some(passed) = lost.or_else(|| failed.then(|| SourceLost { cause: format!("{name} failed"), by: None })) { self.sources_lost(&node_id, &passed); }
         // On saved data what completed stands as the configuration it came from: an edit reads "edited" until it runs again.
         let stands = !self.follows_sources && outcome == "completed";
         if let Ok(node) = self.node_mut(&node_id) {
             if outcome == "failed" {
                 let message = message.unwrap_or_else(|| "the run failed".into());
+                let message = match cause { Some(cause) => format!("{message} ({cause})"), None => message };
                 node.error = Some(if node.follow { format!("failed; restarts with the source's next run: {message}") } else { message });
             }
             if !node.follow && node.pending.is_none() && !stands { node.running = None; node.frozen = None; }

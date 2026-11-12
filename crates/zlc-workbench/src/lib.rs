@@ -290,9 +290,8 @@ pub struct Workbench {
     pub(crate) resolution: Option<(u64, Option<String>)>,
     /// What this Init's or Apply's resolves found, said on its line once it settles.
     pub(crate) found: Vec<String>,
-    /// Each node's source bundle as its queries read it (`bundle`): node -> (what it was
-    /// built from, the members).
-    pub(crate) bundles: BTreeMap<String, (String, Value)>,
+    /// Each node's source bundle as its queries were last told it (`bundle`).
+    pub(crate) bundles: BTreeMap<String, logic::SourceBundle>,
     /// v2 `selection_restore`: (node, draft field) -> the panel whose region set it, and
     /// what it held before.
     pub(crate) selection_restore: BTreeMap<(String, String), (String, Value)>,

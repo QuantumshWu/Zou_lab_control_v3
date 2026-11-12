@@ -577,6 +577,54 @@ mod tests {
         assert_eq!(asked, ["editor_facts", "admit_source"]);
     }
 
+    /// A relaunch of a bundle reader's source is no change of what it reads: between the old
+    /// run and the new one's first event the member is absent, then has not published, and
+    /// neither asks the reader anything (lab 2026-11-12: two editor_facts per relaunch of the
+    /// scan's source, each re-reading the bench's devices). A relaunch with other schemas
+    /// asks once, as soon as they are known.
+    #[test]
+    fn a_relaunch_of_the_source_asks_a_bundle_reader_nothing() {
+        let root = scratch("bundle-relaunch");
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "derive", "kind": "node", "label": "Derive", "parameters": [],
+            "node": {"node_kind": "processor", "inputs": [{"name": "bundle", "delivery": "exact", "select_bundle": true}], "outputs": [],
+                     "queries": ["editor_facts", "admit_source"]}}));
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        let signal = "@logic/camera_measurement/frames";
+        let run = |generation: &str, published: bool| SignalInfo { name: signal.into(), generation: generation.into(), owner: "camera_measurement".into(),
+            published, sealed: false, shape: String::new() };
+        let bundle = |schema: &str| json!([{"name": "frames", "schema": {"tree": schema}, "event_schema": {"tree": "event"}}]);
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "derive", "source_signal": signal})).unwrap();
+        host.signals = vec![run("g1", true)];
+        host.schemas.insert(signal.into(), (json!({"tree": "run"}), json!({"tree": "event"})));
+        workbench.on_runtime(&mut host);
+        event(&mut workbench, Event::Opened { instance: node_instance("derive"), working_point: Value::Null }, &mut host);
+        let told = |from: usize| calls.borrow().2[from..].iter().map(|(query, _, args)| (query.clone(), args["bundle"].clone())).collect::<Vec<_>>();
+        assert_eq!(told(0), [("editor_facts".to_owned(), bundle("run")), ("admit_source".to_owned(), bundle("run"))]);
+        let before = calls.borrow().2.len();
+        // The old run retires (the member is absent), the new one begins (no event yet), then publishes.
+        let relaunch = |workbench: &mut Workbench, host: &mut FakeHost, generation: &str, schema: &str, early: bool| {
+            host.signals.clear(); host.schemas.clear();
+            workbench.on_runtime(host);
+            if early {
+                host.signals = vec![run(generation, false)];
+                host.schemas.insert(signal.into(), (json!({"tree": schema}), Value::Null));
+                workbench.on_runtime(host);
+            }
+            host.signals = vec![run(generation, true)];
+            host.schemas.insert(signal.into(), (json!({"tree": schema}), json!({"tree": "event"})));
+            workbench.on_runtime(host);
+        };
+        relaunch(&mut workbench, &mut host, "g2", "run", true);
+        relaunch(&mut workbench, &mut host, "g3", "run", false);
+        assert_eq!(told(before), [], "a relaunch with the schemas it had asks nothing");
+        relaunch(&mut workbench, &mut host, "g4", "run2", false);
+        assert_eq!(told(before), [("editor_facts".to_owned(), bundle("run2")), ("admit_source".to_owned(), bundle("run2"))], "another schema is told once");
+    }
+
     /// A producer asked again (the bench changed) that answers the same frames tells its readers
     /// nothing: they are not asked again for it.
     #[test]
@@ -1916,6 +1964,45 @@ mod tests {
         // Another node's start that needs the same camera: that run says so.
         apply(&mut wb,&mut host,"start_node",json!({"node":"next_camera"})).unwrap();
         assert_eq!(wb.run(&restarted).unwrap().stop_reason.as_deref(),Some("another start needs its devices"));
+    }
+
+    /// A run that fails because an upstream node's restart ended its source run says which
+    /// node and why, down the chain (lab 2026-11-12: occupancy restarted mid-scan; frame
+    /// survival failed "the source run was replaced", the scan "the source signal ended").
+    #[test]
+    fn a_consumer_failed_by_an_upstream_restart_names_the_restarted_node() {
+        let mut catalog=catalog(); catalog["types"][3]["node"]["artifact_inputs"]=json!([]);
+        for (type_id,input,output) in [("survival","occupied","survival"),("reader","survival","read")] {
+            catalog["types"].as_array_mut().unwrap().push(json!({"type_id":type_id,"kind":"node","label":type_id,"parameters":[],
+                "node":{"node_kind":"processor","inputs":[{"name":input,"delivery":"exact"}],"outputs":[{"name":output}]}}));
+        }
+        let (_root,mut wb,_calls,mut host)=rig("upstream-restart",catalog);
+        add_open_node(&mut wb,&mut host,json!({"type_id":"occupancy","source_signal":"@logic/camera_measurement/frames"}));
+        add_open_node(&mut wb,&mut host,json!({"type_id":"survival","source_signal":"@logic/occupancy/occupied"}));
+        add_open_node(&mut wb,&mut host,json!({"type_id":"reader","source_signal":"@logic/survival/survival"}));
+        for (signal,owner) in [("@logic/camera_measurement/frames","camera_measurement"),("@logic/occupancy/occupied","occupancy"),("@logic/survival/survival","survival")] {
+            host.signals.push(SignalInfo{name:signal.into(),owner:owner.into(),generation:format!("{owner}-1"),published:true,sealed:false,shape:"".into()});
+        }
+        for node in ["occupancy","survival","reader"] {
+            if let Err(error)=apply(&mut wb,&mut host,"start_node",json!({"node":node})) { panic!("{node}: {error}"); }
+            event(&mut wb,Event::RunStarted{run:format!("{node}#1")},&mut host);
+        }
+        // The operator restarts occupancy: survival's source run is replaced, and so, through it, the reader's.
+        apply(&mut wb,&mut host,"start_node",json!({"node":"occupancy"})).unwrap();
+        event(&mut wb,Event::RunFinished{run:"occupancy#1".into(),outcome:"stopped".into(),error:None,generation:None},&mut host);
+        event(&mut wb,Event::RunFinished{run:"survival#1".into(),outcome:"failed".into(),error:Some(json!({"message":"the source run was replaced"})),generation:None},&mut host);
+        event(&mut wb,Event::RunFinished{run:"reader#1".into(),outcome:"failed".into(),
+            error:Some(json!({"message":"the source run ended during collection; a scan's source cannot change once collection began"})),generation:None},&mut host);
+        assert_eq!(wb.run("survival#1").unwrap().error.as_ref().unwrap()["cause"],"occupancy was restarted");
+        let error=|wb:&Workbench,node:&str|wb.node(node).unwrap().error.clone().unwrap();
+        assert!(error(&wb,"survival").ends_with("the source run was replaced (occupancy was restarted)"),"{}",error(&wb,"survival"));
+        assert!(error(&wb,"reader").ends_with("a scan's source cannot change once collection began (occupancy was restarted)"),"{}",error(&wb,"reader"));
+        // A failure no upstream end explains says only what it says.
+        apply(&mut wb,&mut host,"start_node",json!({"node":"reader"})).unwrap();
+        let again=wb.node("reader").unwrap().run.clone().unwrap();
+        event(&mut wb,Event::RunStarted{run:again.clone()},&mut host);
+        event(&mut wb,Event::RunFinished{run:again.clone(),outcome:"failed".into(),error:Some(json!({"message":"bad input"})),generation:None},&mut host);
+        assert!(error(&wb,"reader").ends_with("bad input"),"{}",error(&wb,"reader"));
     }
 
     #[test]
