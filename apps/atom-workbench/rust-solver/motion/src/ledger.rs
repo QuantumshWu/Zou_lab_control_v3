@@ -85,7 +85,7 @@ impl Ledger {
     /// where it is no item.
     pub fn item(&mut self, label: &str, estimate: f64, action: &str) -> Option<usize> {
         if !estimate.is_finite() {
-            self.flag(format!("{label}：误差读不出"));
+            self.flag(format!("{label}：误差无法估计"));
             return None;
         }
         (estimate >= UNIT_ROUNDOFF * POPULATION_TARGET).then(|| {
@@ -107,14 +107,14 @@ impl Ledger {
         self.items.sort_by(|a, b| b.estimate.total_cmp(&a.estimate));
         let populations: Vec<Option<Account>> = population.iter().map(|&a| Some(a)).collect();
         self.totals = Totals { population: largest(&populations, POPULATION_TARGET), temperature: largest(temperature, TEMPERATURE_TARGET) };
-        for (accounts, target, what) in [(&populations[..], POPULATION_TARGET, "布居与损失"), (temperature, TEMPERATURE_TARGET, "总温度")] {
+        for (accounts, target, what) in [(&populations[..], POPULATION_TARGET, "布居与丢失"), (temperature, TEMPERATURE_TARGET, "总温度")] {
             // Not within the target: beyond it, or no number.
             let beyond: Vec<usize> =
                 (0..times.len()).filter(|&k| accounts[k].is_some_and(|a| !(a.total() <= target))).collect();
             if let Some(&worst) = beyond.iter().max_by(|&&i, &&j| accounts[i].unwrap().total().total_cmp(&accounts[j].unwrap().total())) {
                 let a = accounts[worst].unwrap();
                 self.flag(format!(
-                    "{}：{what}的估计误差超出目标，最大 {}（目标 {}；模型 {}、步长 {}、统计 {}）",
+                    "{}：{what}的估计误差超出目标，最大 {}（目标 {}；模型近似 {}、时间步长 {}、统计 {}）",
                     span(&beyond, times),
                     percent(a.total()),
                     percent(target),
@@ -149,7 +149,7 @@ pub fn when(us: f64) -> String {
     }
 }
 /// x rounded to `digits` significant digits: the nearest double to the rounded decimal, so that it prints as one.
-fn significant(x: f64, digits: i32) -> f64 {
+pub(crate) fn significant(x: f64, digits: i32) -> f64 {
     if x == 0. || !x.is_finite() {
         return x;
     }
@@ -219,8 +219,8 @@ mod tests {
         assert!((l.totals.population.error - population[3].a_priori()).abs() < 1e-16);
         assert_eq!(l.totals.temperature.error, temperature[4].unwrap().a_priori(), "the statistics take no part");
         let flagged = l.flagged.unwrap();
-        assert!(flagged.starts_with("750 μs 至 1.25 ms 之间 2 个时刻：布居与损失的估计误差超出目标，最大 6.5%（目标 5%；模型 1%、步长 2.2%、统计 6%）"), "{flagged}");
-        assert!(flagged.ends_with("；500 μs：总温度的估计误差超出目标，最大 20%（目标 10%；模型 0%、步长 4.5%、统计 20%）"), "{flagged}");
+        assert!(flagged.starts_with("750 μs 至 1.25 ms 之间 2 个时刻：布居与丢失的估计误差超出目标，最大 6.5%（目标 5%；模型近似 1%、时间步长 2.2%、统计 6%）"), "{flagged}");
+        assert!(flagged.ends_with("；500 μs：总温度的估计误差超出目标，最大 20%（目标 10%；模型近似 0%、时间步长 4.5%、统计 20%）"), "{flagged}");
     }
 
     /// An item below u·ε is none, the others have their places; the items come out largest first.

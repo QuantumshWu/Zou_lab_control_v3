@@ -248,7 +248,7 @@ use crate::decide::{assured, pays, Outcome, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
 use crate::estimate::{between, draws_for, half_window, occupation, spread, summarize, unseen, Between, Estimate, Fate, Group, Held, Scales, Spread};
 use crate::field::{Geometry, Light};
-use crate::ledger::{percent, span, when, Account, Ledger};
+use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::V3;
 use crate::model::{Envelope, Lights, Model, Run, Sample, Trap, Unit, GROUND};
 use crate::request::STATES;
@@ -277,12 +277,12 @@ const DISTRIBUTION_TIMES: usize = 21;
 const CHECKPOINT: Duration = Duration::from_secs(60);
 /// What the engine did with a folded unit (the ledger's `action`, shown by the app): its booked error is read at the
 /// pilot's states (SPEC §5.2).
-const FOLD_MEASURED: &str = "二阶消去（折叠），沿试探轨迹实测";
+const FOLD_MEASURED: &str = "绝热消去（二阶），误差沿先导轨迹实测";
 /// What the engine did with a folded unit it did not read (`booked`): its gate's bound over the reach is its error.
-const FOLD_BOUNDED: &str = "二阶消去（折叠），按可达范围上的界记账";
+const FOLD_BOUNDED: &str = "绝热消去（二阶），误差按原子活动范围上的上界计入误差预算";
 /// What the engine did with a near table's error (SPEC §5.4): refined over the reach when it was built, and read
 /// against the elimination itself at the pilot's states.
-const TABLE_MEASURED: &str = "按可达范围加密的表，在试探状态上对照消去本身实测";
+const TABLE_MEASURED: &str = "在原子的活动范围上加密的插值表，误差在先导轨迹的状态上与直接计算对照实测";
 
 /// A distribution along one lab axis on one grid (strictly increasing, at least two points) at some of the output
 /// times (`samples`: increasing indices, the last output among them), each the probability at every grid point
@@ -322,10 +322,6 @@ pub struct Solution {
     /// Per output and lab axis: in the validated regime, k_BT_a ≥ CLASSICAL ħω_a at the run's own T_a (reporting only; the
     /// contract's `classical` is every axis's, contract §2.2).
     pub classical: Vec<[bool; 3]>,
-    /// Per output: the total T's estimated error (relative, ledger.rs `Account`: model, step and statistics, weighed by
-    /// the held share), none where one of the three is not read. T's target is on the total T, the mean over the three
-    /// lab axes; each axis's T is shown with its statistics.
-    pub temperature_estimated_errors: Vec<Option<f64>>,
     pub trajectories: u64,
     /// The run's step τ (µs, adapt.rs).
     pub time_step_us: f64,
@@ -1012,9 +1008,9 @@ fn attempt(
     let row: [f64; STATES] = std::array::from_fn(|s| request.initial_density[(s, s)].re);
     let depth = ensemble.depths()[chief];
     let mut ledger = Ledger::default();
-    ledger.note = Some(format!("初始系综：各初态在自己的准备阱中的束缚原子（降低的等温分布乘每轴谐振子的 Wigner 因子，T = {} μK），参考态阱深 {:.1} k_BT", request.temperature_uk, depth));
+    ledger.note = Some(format!("初始系综：每个初态分量的原子束缚在它自己的势阱里（只含束缚原子的热分布，每个轴再乘谐振子的 Wigner 因子，T = {} μK）；布居最大的初态的阱深为 {:.1} k_BT", request.temperature_uk, depth));
     if unheld {
-        ledger.flag("运行中的势没有极小：阱频与 n̄ 按准备阱报告".into());
+        ledger.flag("计算所用光场中的势没有极小：阱频与 n̄ 按初始势阱给出".into());
     }
     let exact = |kinetic: &[Quadrature]| -> (V3, f64) {
         (ensemble.momentum(&kinetic.iter().map(|k| k.eta).collect::<Vec<_>>()), kinetic.iter().map(|k| k.difference / k.eta).fold(0., f64::max))
@@ -1028,7 +1024,7 @@ fn attempt(
     // The ladder's first rung over the reach the model is judged over: an attempt that begins at the step the one
     // before stood at begins no higher than its own first rung (a reach that has grown lowers it).
     let first_rung = first_rung(plan.end, trap.frequencies.iter().copied().fold(0., f64::max), kick, &entries, judged.speed, typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3.))
-        .ok_or_else(|| format!("时间步长：每条轨迹至多 {MOST_STEPS} 步之内没有可用的步长（阱的共振、光场中势阱的曲率或光场沿原子路径的变化要求更小的步长；或者阱频、曲率、原子速率不是有限数）"))?;
+        .ok_or_else(|| format!("找不到可用的时间步长：在每条轨迹的步数上限（{MOST_STEPS} 步）之内，没有步长能分辨阱中的振荡、光场中势阱的曲率和光场沿原子路径的变化（或者阱频、曲率、原子速率不是有限数）"))?;
     // What the reach's falsifier compares the T read with: the largest kinetic temperature along an axis of the
     // ensemble the reach was made for (model.rs `Reach::kinetic_uk`: T_r where the trap is classical, the zero point's
     // where it is cold) -- no lab axis's T is above it while the atoms are that ensemble.
@@ -1055,7 +1051,7 @@ fn attempt(
         scales,
         initial: row,
         ledger,
-        method: format!("半经典 3D：{}", model.describe().trim_end_matches('。')),
+        method: format!("三维半经典运动：{}", model.describe().trim_end_matches('。')),
     };
 
     // The near light's tables (SPEC §2.3, §5.4; model/tabulate.rs): refined over the reach to the largest ensemble's
@@ -1157,7 +1153,7 @@ fn attempt(
         };
         for (t, table) in tables.tables.iter().enumerate() {
             let label = format!(
-                "近共振光的表（{} 所在子空间{}）",
+                "近共振光的插值表（{} 所在的子空间{}）",
                 model.state_label(model.clusters()[table.layout.cluster].states[0]),
                 if table.layout.lights == model.running() { "" } else { "，光镊关闭时" }
             );
@@ -1166,8 +1162,8 @@ fn attempt(
             }
             context.ledger.item(&label, booked[t][0].max(booked[t][1]), TABLE_MEASURED);
             match stuck[t] {
-                Some(Stuck::Work) => context.ledger.flag(format!("{label}的误差超出表的份额，而再加密一档的网格就超过工作量的界（{most} 个节点）：按实测记账")),
-                Some(Stuck::Axes) => context.ledger.flag(format!("{label}的误差超出表的份额，而它没有可加密的轴（它依赖的坐标都取在焦点处的值上）：按实测记账")),
+                Some(Stuck::Work) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而网格再加密一次就超过节点数上限（{most} 个）：按实测的误差计入误差预算")),
+                Some(Stuck::Axes) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它没有可以加密的坐标（它依赖的量都取焦点处的值）：按实测的误差计入误差预算")),
                 None => {}
             }
         }
@@ -1196,8 +1192,8 @@ fn attempt(
         for ((unit, most), how) in units.iter().zip(largest).zip(&booking) {
             context.ledger.item(&model.label(unit), most, if matches!(how, Booked::Read(_)) { FOLD_MEASURED } else { FOLD_BOUNDED });
         }
-        context.ledger.item("可达范围之外的初始原子份额", unsampled[0], "按初始系综的密度求积（含求积两级之差），计入布居的模型误差");
-        context.ledger.item("可达范围之外的初始原子的动能份额", unsampled[1], "按初始系综的密度求积（含求积两级之差），计入 T 的模型误差");
+        context.ledger.item("初始时就在估计的活动范围之外的原子所占的比例", unsampled[0], "对初始分布数值积分得到（含积分最后两级之差），计入布居的模型误差");
+        context.ledger.item("初始时就在估计的活动范围之外的原子占初始动能的比例", unsampled[1], "对初始分布数值积分得到（含积分最后两级之差），计入温度的模型误差");
         Run::tabulated(&model, &tables, reference)
     };
 
@@ -1226,7 +1222,7 @@ fn attempt(
     }
     // A point of the prepared potential below the bottom the ensemble was drawn about (ensemble.rs, # Its draw).
     if ensemble.deeper() > 0 {
-        context.ledger.flag("准备势在所取阱底之外还有更深的地方：初始系综按该阱底的深度封顶".into());
+        context.ledger.flag("初态的势在所取的阱底之外还有更深的地方：初始系综只取到该阱底的阱深为止".into());
     }
     Ok(Attempt::Done(assemble(&context, &e, &l, &c, parts.len() as u64 * GROUP)))
 }
@@ -1242,14 +1238,14 @@ enum Stuck {
 /// The flag of a step whose error lies clearly beyond what it may take at the steps' cap (module documentation, # The
 /// step): its clear part is booked as measured.
 fn capped() -> String {
-    format!("时间步长的误差明显超出它可占的部分，而每条轨迹的步数已达上限 {MOST_STEPS}，无法再减半：按读清的部分记账")
+    format!("时间步长的误差明显超出误差预算中分给它的部分，而每条轨迹的步数已达上限 {MOST_STEPS}，步长无法再减半：按步长收敛检查分辨出的部分计入误差预算")
 }
 
 /// The flag of a step whose check ended unable to see (module documentation, # The step; SPEC §5.1): no number of
 /// pairs within a run's trajectories and no rung of the ladder is predicted to bring it within the step's share; what
 /// it does not exclude is booked.
 fn unseen_at_the_end() -> String {
-    format!("时间步长的收敛检查读不清（误差既没有明显超出、也没有落在它可占的部分之内），而加轨迹对（上限 {MOST_TRAJECTORIES} 条）与减半步长（每条轨迹上限 {MOST_STEPS} 步）都已无余地：按检查没有排除的上限记账")
+    format!("步长收敛检查没有结论（步长误差既没有明显超出误差预算中分给它的部分，也不能确定在其内），而增加成对的先导轨迹（上限 {MOST_TRAJECTORIES} 条）和把步长减半（每条轨迹上限 {MOST_STEPS} 步）都已不可能：按检查不能排除的最大误差计入误差预算")
 }
 
 /// The pilot's two levels (module documentation, # The step): its groups at the step τ and the same groups, in the same
@@ -2323,6 +2319,17 @@ struct Context {
     method: String,
 }
 
+/// A step (µs) of a run of the length `run` as the result writes it. A step is the run over a whole number N of steps
+/// (`first_rung`, and halvings of it), so its digits say nothing beyond N; it is written to one significant digit more
+/// than N has decimal digits, and N is the run over the step as written, rounded. Rounded to d significant digits the
+/// step reads τ(1 + ε) with |ε| ≤ ½·10^(1−d); the run over that is N/(1 + ε), within N|ε|/(1 − |ε|) of N, which is less
+/// than ½ where 10^(d−1) ≥ N + 1 -- d − 1 the digits of N. (30 steps of a 100.05 µs run: 3.34 µs; 1548 of 1005 µs:
+/// 0.64922 µs. The run ends with the last output's window, `Plan::end`.)
+fn step_reading(run: f64, step: f64) -> String {
+    let count = (run / step).round() as u64;
+    significant(step, count.to_string().len() as i32 + 1).to_string()
+}
+
 /// The result of the estimates of `trajectories` trajectories (contract §2.2): at t = 0 the request's initial state and the
 /// ensemble's exact moments (T, and n̄ as of one atom with that mean, estimate.rs `occupation`); an output with no atom
 /// held carries the last one's populations, one with fewer than two atoms the last T read (its error unknown); each
@@ -2340,15 +2347,15 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     if let Some(check) = &c.checked {
         let largest = (1..outputs).flat_map(|k| temperature[k].iter().map(|a| a.step).chain([population[k].step])).fold(0., f64::max);
         let share = (1 << ORDER) - 1;
-        let part = if check.saw { "里读清的部分" } else { "没有被排除的上限（检查读不清，加轨迹对与减半步长都已无余地）" };
-        ledger.item(&format!("时间步长 τ = {} μs（全程不变）", c.tau), largest, &format!("轨迹在 τ 与 2τ 下逐条配对比较：两者之差的 1/{share} 在全程各输出时刻上的方均根（已扣除统计噪声的本底）{part}"));
-        let relative = if check.resolution[1].is_finite() { format!("、在温度上低于 {} 时分辨不出", percent(check.resolution[1])) } else { " 时分辨不出，温度上读不出".into() };
-        step = format!("（收敛检查：与 {} μs 在 {} 对同号轨迹上比较，看两者之差在全程各输出时刻上的方均根（已扣除统计噪声的本底）；步长误差的方均根在布居上低于 {}{relative}；这是检查，不是误差界，未计入总误差）", check.companion, check.pairs, percent(check.resolution[0]));
+        let part = if check.saw { "中分辨出的部分" } else { "不能排除的最大值（检查没有结论，增加成对轨迹和把步长减半都已不可能）" };
+        ledger.item(&format!("时间步长 τ = {} μs（全程不变）", step_reading(c.plan.end, c.tau)), largest, &format!("步长收敛检查：先导轨迹用 τ 和 2τ 各算一遍、逐条比较，取两者之差的 1/{share} 在各输出时刻上的方均根（已扣除统计噪声）{part}"));
+        let relative = if check.resolution[1].is_finite() { format!("、在温度上低于 {} 时检查分辨不出", percent(check.resolution[1])) } else { " 时检查分辨不出，在温度上无法估计".into() };
+        step = format!("（步长收敛检查：{} 对先导轨迹用本步长与 {} μs 各算一遍（同一初始原子、同一组随机数），比较两者之差在各输出时刻上的方均根（已扣除统计噪声）；步长误差的方均根在布居上低于 {}{relative}；这是收敛检查，不是误差上界，分辨不出的部分没有计入误差预算）", check.pairs, step_reading(c.plan.end, check.companion), percent(check.resolution[0]));
     }
     // What the atoms outside the reach carry (`apart`): its largest over the outputs, weighed by the held share.
     for (i, what) in ["布居", "温度"].into_iter().enumerate() {
         let largest = (1..outputs).map(|k| c.outside[k][i] * (1. - estimates[k].loss)).fold(0., f64::max);
-        ledger.item(&format!("运行中到了可达范围之外的原子（{what}）"), largest, "逐输出读出：步长对其速率不可用的原子按它们的全部份额记；其余按它们的份额乘以在它们的状态上实测的模型误差超出已记部分的量");
+        ledger.item(&format!("计算中跑出估计的活动范围的原子（{what}）"), largest, "在每个输出时刻统计：速率太大、时间步长对它已不适用的原子，按它们所占的比例全部计入；其余的按所占的比例乘以在它们的状态上实测的模型误差（只计超出已计入的部分）");
     }
     ledger.close(times, &population, &temperature);
     // T and the motion at t = 0: exact.
@@ -2367,10 +2374,9 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         velocity: std::array::from_fn(|a| histograms(listed, &c.plan.listed, &|x| x.1[a] * hm)),
         position: std::array::from_fn(|a| histograms(listed, &c.plan.listed, &|x| x.0[a])),
         classical: Vec::with_capacity(outputs),
-        temperature_estimated_errors: temperature.iter().map(|a| a.map(|a| a.total())).collect(),
         trajectories,
         time_step_us: c.tau,
-        method: format!("{}；{trajectories} 条轨迹（每组 {GROUP} 条拉丁超立方），步长 {} μs{step}。", c.method, c.tau),
+        method: format!("{}；{trajectories} 条轨迹（每 {GROUP} 条一组，组内按拉丁超立方抽取初始原子），时间步长 {} μs{step}。", c.method, step_reading(c.plan.end, c.tau)),
         reason: None,
         approximations: ledger,
     };
@@ -2422,17 +2428,17 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         }
     }
     if let Some(k) = empty {
-        s.approximations.flag(format!("{} 起已无原子被俘获（丢失概率 1）：此后的布居、温度与分布沿用此前的值，仅供参考", when(times[k])));
+        s.approximations.flag(format!("{} 起已无原子留在光阱中（丢失概率 1）：此后的布居、温度与分布沿用此前的值，仅供参考", when(times[k])));
     }
     if !unread.is_empty() {
-        s.approximations.flag(format!("{}：被俘获的原子不足两个组，温度沿用此前读到的值，误差未知", span(&unread, times)));
+        s.approximations.flag(format!("{}：仍在光阱中的原子不足两组，温度沿用此前的值，误差未知", span(&unread, times)));
     }
     // T shown with its statistics where its model error or its step error is unread.
     let unbooked: Vec<usize> = (1..outputs)
         .filter(|&k| estimates[k].motion.as_ref().is_some_and(|m| m.temperature_errors.iter().all(Spread::read)) && !(c.fixed.model[k][1].is_finite() && c.step[k].temperature.is_finite()))
         .collect();
     if !unbooked.is_empty() {
-        s.approximations.flag(format!("{}：这些时刻被俘获的原子不足，模型或步长对温度的误差读不出", span(&unbooked, times)));
+        s.approximations.flag(format!("{}：这些时刻仍在光阱中的原子太少，无法估计模型近似或时间步长给温度带来的误差", span(&unbooked, times)));
     }
     if let Some(t) = counts.since {
         s.approximations.flag(format!("{} 条轨迹的状态在数值上无法再推进（最早在 {}）：此后不计入结果", counts.failed, when(t)));
@@ -2451,7 +2457,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
             } else {
                 format!("时间步长误差 {}", percent(a.step))
             };
-            s.reason = Some(format!("{}估计误差 {}（目标 {}）：{cause}", when(times[k]), percent(a.total()), percent(POPULATION_TARGET)));
+            s.reason = Some(format!("t = {} 处布居的估计误差 {}（目标 {}）：{cause}", when(times[k]), percent(a.total()), percent(POPULATION_TARGET)));
         }
     }
     s
@@ -2460,6 +2466,28 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A step as written gives its count back (`step_reading`): the run over the reading, rounded, is the number of
+    /// steps, for every rung -- the run over an even number, halved down to the steps' cap -- of runs short and long;
+    /// and the digits are no more than that takes: with one fewer some rungs' counts are lost.
+    #[test]
+    fn a_step_as_written_gives_its_count_back() {
+        let default = 100. + 100. / 1998.;
+        assert_eq!((step_reading(default, default / 30.), step_reading(default, default / 15.)), ("3.34".to_string(), "6.67".to_string()));
+        assert_eq!(step_reading(1005., 1005. / 1548.), "0.64922");
+        let mut fewer = 0;
+        for run in [default, 1005., 20.025, 1e7] {
+            for pairs in 1..=64_u64 {
+                for count in (0..).map(|halvings| 2 * pairs << halvings).take_while(|&count| count <= MOST_STEPS) {
+                    let step = run / count as f64;
+                    let read: f64 = step_reading(run, step).parse().unwrap();
+                    assert_eq!((run / read).round() as u64, count, "{run} µs over {count}: {read}");
+                    fewer += ((run / significant(step, count.to_string().len() as i32)).round() as u64 != count) as u32;
+                }
+            }
+        }
+        assert!(fewer > 0);
+    }
 
     /// The pilot is the smallest ensemble of whole groups that sees a share as large as the statistics' share of the
     /// population target, z²(1/(√(1 − s²) ε) − 1) = 85.4 trajectories at z = 2, s² = 1/5, ε = 0.05: whole groups whose

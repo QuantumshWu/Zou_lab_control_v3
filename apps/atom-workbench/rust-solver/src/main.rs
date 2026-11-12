@@ -323,6 +323,6 @@ mod tests {
         let classical = result["motion"]["classical"].as_array().unwrap();
         assert!(classical[gone..].iter().all(|c| c == false), "{classical:?}");
         let flagged = result["diagnostics"]["approximations"]["flagged"].as_str().unwrap_or("");
-        assert!(flagged.contains("无原子被俘获"), "{flagged}");
+        assert!(flagged.contains("无原子留在光阱中"), "{flagged}");
     }
 }

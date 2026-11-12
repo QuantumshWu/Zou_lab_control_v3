@@ -272,7 +272,7 @@ impl Model {
 /// A frequency (MHz) as the app reads a frequency difference (src/laser-frequency.ts `naturalDetuningUnit`, src/format.ts
 /// `formatNumber`): in the largest of Hz, kHz, MHz, GHz and THz in which it reads at least 1 (zero in MHz), rounded to
 /// `digits` significant digits, the trailing zeros dropped, with the true minus sign.
-fn frequency_reading(mhz: f64, digits: usize) -> String {
+fn frequency_reading(mhz: f64, digits: i32) -> String {
     let magnitude = mhz.abs();
     let (scale, unit) = if magnitude >= 1e6 {
         (1e6, "THz")
@@ -285,21 +285,20 @@ fn frequency_reading(mhz: f64, digits: usize) -> String {
     } else {
         (1e-6, "Hz")
     };
-    // The decimal rounding is the formatter's, exact; the rounded decimal read back prints as itself, without zeros after it.
-    let rounded: f64 = format!("{:.*e}", digits - 1, magnitude / scale).parse().expect("a number as written parses");
-    format!("{}{} {}", if mhz < 0.0 { "−" } else { "" }, rounded, unit)
+    // The rounded decimal prints as itself, without zeros after it (ledger.rs `significant`).
+    format!("{}{} {}", if mhz < 0.0 { "−" } else { "" }, crate::ledger::significant(magnitude / scale, digits), unit)
 }
 
 /// The fewest significant digits at which frequencies (MHz) all read differently (`frequency_reading`), two of one
 /// double counted once: the digits follow from the frequencies themselves. Two beams 80 MHz apart on a carrier 32 THz
-/// from a third take seven (32.35877 THz, 32.35885 THz); a single beat and its opposite take one. Distinct doubles
-/// differ within the 17 digits that determine a double, so the search ends.
-fn telling_apart(mhz: &[f64]) -> usize {
+/// from a third take seven (32.35877 THz, 32.35885 THz); a single beat and its opposite take one. No more than the
+/// decimal digits a double holds (`f64::DIGITS`): two frequencies alike in all of them read alike.
+fn telling_apart(mhz: &[f64]) -> i32 {
     let mut values = mhz.to_vec();
     values.sort_by(f64::total_cmp);
     values.dedup();
-    let apart = |digits: &usize| values.iter().map(|&value| frequency_reading(value, *digits)).collect::<HashSet<String>>().len() == values.len();
-    (1..).find(apart).expect("distinct doubles read differently at some number of digits")
+    let apart = |digits: &i32| values.iter().map(|&value| frequency_reading(value, *digits)).collect::<HashSet<String>>().len() == values.len();
+    (1..f64::DIGITS as i32).find(apart).unwrap_or(f64::DIGITS as i32)
 }
 
 #[cfg(test)]
@@ -327,7 +326,7 @@ mod tests {
         let carrier = 32358766.391647;
         for (set, digits) in [(vec![carrier, -carrier, 0.0], 1), (vec![carrier, carrier + 80.0, 80.0, -80.0, 0.0], 7), (vec![6834.68, 6834.68, 6568.0], 2)] {
             assert_eq!(telling_apart(&set), digits, "{set:?}");
-            let readings = |d: usize| set.iter().map(|&f| frequency_reading(f, d)).collect::<HashSet<String>>().len();
+            let readings = |d: i32| set.iter().map(|&f| frequency_reading(f, d)).collect::<HashSet<String>>().len();
             let distinct = { let mut v = set.clone(); v.sort_by(f64::total_cmp); v.dedup(); v.len() };
             assert_eq!(readings(digits), distinct, "{set:?}");
             assert!(digits == 1 || readings(digits - 1) < distinct, "{set:?}");
