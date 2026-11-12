@@ -181,9 +181,10 @@
 //! a new attempt, a new model and its own pilot.
 //! - The errors no number of trajectories fits beside: where the model's error and the step's share leave a look no
 //!   room for the statistics, the units are taken by their weight there (their errors on what is shown and on T,
-//!   weighed by the held share as the totals are, each over its target), the heaviest first, until every look has
-//!   room again -- the set the looks need, in one keep (`needed`). (Taken one at a time, a keep an attempt, S3's probe
-//!   kept fourteen bare drives over fourteen attempts, each a model, its gates and a scout.)
+//!   weighed by the held share as the totals are, each over its target) for the work their keep adds a µs, the most
+//!   first, until every look has room again -- the set the looks need, in one keep (`needed`). (Taken one at a time,
+//!   a keep an attempt, S3's probe kept fourteen bare drives over fourteen attempts, each a model, its gates and a
+//!   scout; taken by weight alone, it kept its carrier's dressing with them, three to four times dearer a step.)
 //! - Else the work: the run's predicted total work W = w·N, N the trajectories its looks need beside its errors and the
 //!   step's share (`Look::need` on the pilot's estimates) and w the counted work a trajectory spends per µs (`rate`,
 //!   the step's count through the model's generator at the pilot's states), and the kept model's W counting the pilot
@@ -1244,11 +1245,19 @@ fn keep(
     let mut read = vec![false; fixed.model.len()];
     measured.output.iter().for_each(|&k| read[k] = true);
     let counted: Vec<Estimate> = estimates.iter().map(|e| Estimate { uncounted: 0., ..e.clone() }).collect();
-    let needed = needed(&counted, fixed, means, &held, &read);
-    if !needed.is_empty() {
-        return Some(needed);
-    }
     let mut pricing = Pricing::new(request, light, kept, model, reference, centre, units, measured, means, parts, estimates, fixed, scales, unsampled, again);
+    // The units that weigh where the looks have no room, each with what its keep adds to the work a µs, its kept
+    // model's mean rate less the current one's (none where its model is refused, `Model::new`).
+    let weighing = weighing(&counted, fixed, means, &held, &read);
+    if !weighing.is_empty() {
+        pricing.own = pricing.rates(model);
+        let own = pricing.mean(&pricing.own, None);
+        let added: Vec<(usize, Option<f64>)> = weighing.into_par_iter().map(|u| (u, pricing.kept_rates(u).map(|rates| pricing.mean(&rates, None) - own))).collect();
+        let mut cost = vec![None; units.len()];
+        added.into_iter().for_each(|(u, c)| cost[u] = c);
+        let needed = needed(&counted, fixed, means, &held, &read, &cost);
+        return (!needed.is_empty()).then_some(needed);
+    }
     let saving = pricing.saving_at_all();
     if saving.is_empty() {
         return None;
@@ -2493,20 +2502,36 @@ fn crowded(looks: &[Look]) -> Vec<usize> {
     outputs
 }
 
-/// The units the looks need kept (module documentation, # The model; `keep`): at the `estimates` (every trajectory
-/// counted), the model's errors `fixed` beside the step's share, and the units' errors `means` per output, at the
-/// outputs `read` where the held share `held` is some: while a look leaves the statistics no room, the unit of the
-/// largest weight at those outputs (its errors on what is shown and on T, weighed by the held share, each over its
-/// target, added up) leaves the model's error, until every such look has room or no unit weighs there. One pass, the
-/// set growing: the units the room needs together.
-fn needed(estimates: &[Estimate], fixed: &Fixed, means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool]) -> Vec<usize> {
-    let units = means.first().map_or(0, Vec::len);
+/// Of the units' errors `means` (per output and unit) beside the errors `fixed` and the step's share, at the
+/// `estimates` (every trajectory counted): per unit its weight at the outputs whose looks leave the statistics no room,
+/// among those `read` where the held share `held` is some -- its errors on what is shown and on T, weighed by the held
+/// share as the totals are, each over its target, added up. A unit weighs where it was read: an output with no state
+/// read carries every unit's bound alike, and tells none of them apart.
+fn weights(estimates: &[Estimate], fixed: &Fixed, means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool]) -> Vec<f64> {
+    let crowded: Vec<usize> = crowded(&looks(estimates, fixed, &vec![Bound::share(); fixed.model.len()])).into_iter().filter(|&k| held[k] > 0. && read[k]).collect();
+    (0..means.first().map_or(0, Vec::len)).map(|u| crowded.iter().map(|&k| held[k] * (means[k][u][0] / POPULATION_TARGET + means[k][u][1] / TEMPERATURE_TARGET)).sum()).collect()
+}
+
+/// The units that weigh where the looks have no room (`weights`), the candidates for the set they need (`needed`).
+fn weighing(estimates: &[Estimate], fixed: &Fixed, means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool]) -> Vec<usize> {
+    weights(estimates, fixed, means, held, read).iter().enumerate().filter(|(_, w)| **w > 0.).map(|(u, _)| u).collect()
+}
+
+/// The units the looks need kept (module documentation, # The model; `keep`): while a look leaves the statistics no
+/// room (`weights`), the unit whose weight there is the most for the work its keep adds a µs (`cost`: its kept model's
+/// mean rate less the current one's; none where its keep is refused, never taken; one that adds none first, by its
+/// weight) leaves the model's error, until every such look has room or no unit weighs there. One pass, the set
+/// growing: the error that leaves no room is removed where it costs the least, the units the room needs together. (By
+/// weight alone, S3's probe took its carrier's dressing with thirteen bare drives on its scout -- the generator's
+/// assembly, the jumps and the photons three to four times dearer a step --, where the bare drives alone leave room.)
+fn needed(estimates: &[Estimate], fixed: &Fixed, means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool], cost: &[Option<f64>]) -> Vec<usize> {
     let mut taken: Vec<usize> = vec![];
     let mut model = fixed.model.clone();
     loop {
-        let crowded: Vec<usize> = crowded(&looks(estimates, &Fixed { model: model.clone(), ..fixed.clone() }, &vec![Bound::share(); model.len()])).into_iter().filter(|&k| held[k] > 0. && read[k]).collect();
-        let weights: Vec<f64> = (0..units).map(|u| if taken.contains(&u) { 0. } else { crowded.iter().map(|&k| held[k] * (means[k][u][0] / POPULATION_TARGET + means[k][u][1] / TEMPERATURE_TARGET)).sum() }).collect();
-        let Some(u) = (0..units).max_by(|&a, &b| weights[a].total_cmp(&weights[b])).filter(|&u| weights[u] > 0.) else { return taken };
+        let weights = weights(estimates, &Fixed { model: model.clone(), ..fixed.clone() }, means, held, read);
+        // Error per added work, those adding none first.
+        let value = |u: usize| cost[u].filter(|_| weights[u] > 0. && !taken.contains(&u)).map(|c| if c > 0. { (0, weights[u] / c) } else { (1, weights[u]) });
+        let Some(u) = (0..weights.len()).filter(|&u| value(u).is_some()).max_by(|&a, &b| value(a).partial_cmp(&value(b)).expect("weights and costs are numbers")) else { return taken };
         // Its error leaves the model's at the outputs read (a read output's errors are numbers, `Measured::means`).
         for k in (1..model.len()).filter(|&k| read[k]) {
             model[k] = [probability_error((model[k][0] - means[k][u][0]).max(0.)), (model[k][1] - means[k][u][1]).max(0.)];
@@ -3505,22 +3530,29 @@ mod tests {
 
     /// The units the looks need kept (`needed`), in one pass. One output after t = 0, its T read exactly, the step at its
     /// share: T's look has room while the model's error on T is below √(1 − 1/5) of the target, 0.0894. Three units of
-    /// errors 0.06, 0.05 and 0.04 on T beside 0.05 of the rest (0.2): the heaviest first, 0.14 and 0.09 still leave no
-    /// room, 0.05 does -- all three, together. With 0.02, 0.08 and 0.03 beside 0.02 (0.15): the second alone, 0.07. With
-    /// room from the start, none; at an output not read, or where no atom is held, none.
+    /// errors 0.06, 0.05 and 0.04 on T beside 0.05 of the rest (0.2), each adding the same work: the heaviest first,
+    /// 0.14 and 0.09 still leave no room, 0.05 does -- all three, together. With 0.02, 0.08 and 0.03 beside 0.02 (0.15):
+    /// the second alone, 0.07. With room from the start, none; at an output not read, or where no atom is held, none.
     #[test]
-    fn the_units_the_looks_need_kept_are_taken_heaviest_first_until_they_have_room() {
+    fn the_units_the_looks_need_kept_are_taken_by_error_per_work_until_they_have_room() {
         let estimates = vec![estimate([10.; 3], 0., 88.), estimate([10.; 3], 0., 88.)];
         let case = |errors: [f64; 3], rest: f64, held: f64, read: bool| {
             let means = vec![vec![[0.; 2]; 3], errors.iter().map(|&e| [0., e]).collect::<Vec<_>>()];
             let fixed = Fixed { model: vec![[0.; 2], [0., errors.iter().sum::<f64>() + rest]], start: 0. };
-            needed(&estimates, &fixed, &means, &[1., held], &[false, read])
+            needed(&estimates, &fixed, &means, &[1., held], &[false, read], &[Some(1.); 3])
         };
         assert_eq!(case([0.06, 0.05, 0.04], 0.05, 1., true), [0, 1, 2]);
         assert_eq!(case([0.02, 0.08, 0.03], 0.02, 1., true), [1]);
         assert_eq!(case([0.02, 0.03, 0.01], 0.02, 1., true), Vec::<usize>::new());
         assert_eq!(case([0.06, 0.05, 0.04], 0.05, 1., false), Vec::<usize>::new());
         assert_eq!(case([0.06, 0.05, 0.04], 0.05, 0., true), Vec::<usize>::new());
+        // By error per added work: the second unit, three times dearer than the others, is taken last -- the first and
+        // the third leave 0.10, no room yet --; a unit whose keep is refused, never.
+        let means = vec![vec![[0.; 2]; 3], vec![[0., 0.06], [0., 0.05], [0., 0.04]]];
+        let fixed = Fixed { model: vec![[0.; 2], [0., 0.2]], start: 0. };
+        assert_eq!(needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &[Some(1.), Some(3.), Some(1.)]), [0, 2, 1]);
+        assert_eq!(needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &[Some(1.), None, Some(1.)]), [0, 2]);
+        assert_eq!(needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &[Some(1.), Some(0.), Some(1.)]), [1, 0, 2]);
     }
 
     /// An output's estimate with T = `temperature` (µK) per lab axis and the total T's standard error `error` (µK), read
