@@ -38,8 +38,11 @@
 //! undefined coordinate vanishes with the magnitude, so the force stays bounded).
 //!
 //! # The region
-//! An atom is outside the trap's region where every focused beam's intensity is below `REGION_INTENSITY` of its focus
-//! value, |a_l(r)|² < 1/20 (SPEC §1.3, the UI's definition of loss).
+//! An atom is outside the trap's region where every beam of the trap light -- the tweezer's frequency, its focused
+//! beams: the tweezer, its reflection, a crossed beam of the same laser -- is below `REGION_INTENSITY` of its focus
+//! value, |a_l(r)|² < 1/20 (SPEC §1.3, the UI's definition of loss). Only the trap light makes the trap: a probe or a
+//! cooling beam given by its waist is focused too, on the millimetre scale, and an atom it pushes out of the tweezer
+//! moves along it for metres (√19 z_R) -- counted by its intensity, such an atom would never be lost.
 
 use crate::linalg::{dot3, hermitian_eigen, Mat, C64, V3};
 use crate::units::rounding;
@@ -346,10 +349,10 @@ impl Light {
         out.clear();
         out.extend(self.beams.iter().enumerate().map(|(l, b)| if of(l) { b.amplitude_to(r, order) } else { dark }));
     }
-    /// Whether the point r is outside the trap's region: every focused beam's intensity there below `REGION_INTENSITY`
-    /// of its focus value (module documentation, # The region).
+    /// Whether the point r is outside the trap's region: every beam of the trap light there below `REGION_INTENSITY` of
+    /// its focus value (module documentation, # The region; the trap light holds no plane wave, `Request::validate`).
     pub fn outside(&self, r: V3) -> bool {
-        self.beams.iter().filter(|b| b.waist.is_some()).all(|b| b.amplitude_to(r, 0).value.norm_sqr() < crate::units::REGION_INTENSITY)
+        self.frequencies[self.trap].beams.iter().all(|&l| self.beams[l].amplitude_to(r, 0).value.norm_sqr() < crate::units::REGION_INTENSITY)
     }
 }
 
@@ -585,7 +588,12 @@ mod tests {
         let margin = 1.0 + 1e-9;
         assert!(!outside([0.0, 0.0, axial / margin]) && outside([0.0, 0.0, axial * margin]));
         assert!(!outside([radial / margin, 0.0, 0.0]) && outside([0.0, radial * margin, 0.0]));
-        let crossed = light_of(&[([0.0, 0.0, 1.0], Some(w), -4, e), ([1.0, 0.0, 0.0], Some(w), 2, e), probe]);
+        // A crossed beam of the trap's laser widens the region; a probe focused on the millimetre scale, of another
+        // frequency, does not (the cut-over's finding: an atom it pushed out of the tweezer was never lost).
+        let crossed = light_of(&[([0.0, 0.0, 1.0], Some(w), -4, e), ([1.0, 0.0, 0.0], Some(w), -4, e), probe]);
         assert!(!crossed.outside([3.0, 0.0, 0.0]) && crossed.outside([0.0, 3.0, 0.0]));
+        let wide = ([1.0, 0.0, 0.0], Some(1000.0), 0, [C64::real(10.0), C64::ZERO, C64::ZERO]);
+        let probed = light_of(&[([0.0, 0.0, 1.0], Some(w), -4, e), wide]);
+        assert!(probed.outside([0.0, 0.0, axial * margin]) && probed.outside([0.0, 0.0, 1e4]));
     }
 }
