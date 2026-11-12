@@ -809,6 +809,10 @@ fn blind(own: &Between) -> Option<f64> {
         .into_iter()
         .filter(|(read, bound)| read.outcome(*bound, 1.) != Outcome::Within)
         .map(|(read, bound)| {
+            // A read that is no number, or whose spread is unread, excludes nothing: no pairs bring it within.
+            if !read.most(1.).is_finite() {
+                return f64::INFINITY;
+            }
             let least = read.least(1.).max(0.);
             if least < bound { (read.most(1.) - least) / (bound - least) } else { f64::INFINITY }
         })
@@ -936,12 +940,14 @@ struct Checked {
 /// of each rms among the looks the screen judges -- √(M̂ − t·SE) at the family's interval, where positive --, and the
 /// check's resolution, one look's √(t·SE). The family's interval, because clear is one statement: the near end the
 /// screen compares with the share's square (`screen`) is the number booked, and on what is shown the booked part is
-/// the largest of the family's rows and loss, the largest of many noisy reads (decide.rs, # Many reads).
+/// the largest of the family's rows and loss, the largest of many noisy reads (decide.rs, # Many reads). A read that is
+/// no number -- no output counts a trajectory at both levels (estimate.rs `between`) -- has no clear part to read: it
+/// excludes nothing, and its quantity's step error is unbounded, as T's is where no output reads it.
 fn checked(read: &Between) -> (Bound, [f64; 2]) {
     let looks = judged(read).len() as f64;
-    let clear = |read: &Read| read.least(looks).max(0.).sqrt();
+    let clear = |read: &Read| if read.value.is_nan() { f64::INFINITY } else { read.least(looks).max(0.).sqrt() };
     let resolution = |read: &Read| read.spread.interval().sqrt();
-    let step = Bound { shown: read.shown.iter().map(clear).fold(clear(&read.loss), f64::max).min(1.), temperature: read.temperature.map_or(f64::INFINITY, |t| clear(&t)) };
+    let step = Bound { shown: probability_error(read.shown.iter().map(clear).fold(clear(&read.loss), f64::max)), temperature: read.temperature.map_or(f64::INFINITY, |t| clear(&t)) };
     let shown = read.shown.iter().map(resolution).fold(resolution(&read.loss), f64::max);
     (step, [shown, read.temperature.map_or(f64::INFINITY, |t| resolution(&t))])
 }
@@ -952,7 +958,7 @@ fn checked(read: &Between) -> (Bound, [f64; 2]) {
 /// what is shown, and the total T's; unbounded where a read excludes nothing.
 fn unexcluded(held: &Between) -> Bound {
     let far = |read: &Read| read.most(1.).sqrt();
-    Bound { shown: held.shown.iter().map(far).fold(far(&held.loss), f64::max).min(1.), temperature: held.temperature.map_or(f64::INFINITY, |t| far(&t)) }
+    Bound { shown: probability_error(held.shown.iter().map(far).fold(far(&held.loss), f64::max)), temperature: held.temperature.map_or(f64::INFINITY, |t| far(&t)) }
 }
 
 /// The estimates, the listed outputs' atoms and the counts of some groups.
@@ -1039,8 +1045,14 @@ fn apart(estimates: &[Estimate], parts: &[&Part], booked: &[[f64; 2]], read: &(d
         .enumerate()
         .map(|(k, ((e, states), booked))| {
             std::array::from_fn(|i| {
-                let mean = states.iter().map(|state| known[&(state.index, k)][i]).sum::<f64>() / states.len() as f64;
-                e.unresolved[i] + if states.is_empty() { 0. } else { e.outside[i] * (mean - booked[i]).max(0.) }
+                // No outside state read at the output: no atom outside there (the first of every group is kept).
+                let excess = if states.is_empty() {
+                    0.
+                } else {
+                    let mean = states.iter().map(|state| known[&(state.index, k)][i]).sum::<f64>() / states.len() as f64;
+                    (mean - booked[i]).max(0.)
+                };
+                e.unresolved[i] + e.outside[i] * excess
             })
         })
         .collect()
@@ -1163,10 +1175,12 @@ fn keep(
 ) -> Option<(usize, Option<f64>)> {
     let held: Vec<f64> = estimates.iter().map(|e| 1. - e.loss).collect();
     // A unit weighs where it was read: an output with no state read carries every unit's bound alike, and tells none
-    // of them apart.
+    // of them apart. And where the units' errors crowd it: the share of trajectories not counted (estimate.rs, # What is
+    // counted) is no unit's, and no keep takes it away.
     let mut read = vec![false; fixed.model.len()];
     measured.output.iter().for_each(|&k| read[k] = true);
-    let crowded: Vec<usize> = crowded(&looks(estimates, fixed, &vec![Bound::share(); fixed.model.len()])).into_iter().filter(|&k| held[k] > 0. && read[k]).collect();
+    let counted: Vec<Estimate> = estimates.iter().map(|e| Estimate { uncounted: 0., ..e.clone() }).collect();
+    let crowded: Vec<usize> = crowded(&looks(&counted, fixed, &vec![Bound::share(); fixed.model.len()])).into_iter().filter(|&k| held[k] > 0. && read[k]).collect();
     let weights: Vec<f64> = (0..units.len()).map(|u| crowded.iter().map(|&k| held[k] * (means[k][u][0] / POPULATION_TARGET + means[k][u][1] / TEMPERATURE_TARGET)).sum()).collect();
     if let Some(u) = (0..units.len()).max_by(|&a, &b| weights[a].total_cmp(&weights[b])).filter(|&u| weights[u] > 0.) {
         return Some((u, None));
@@ -1227,9 +1241,9 @@ fn attempt(
     let outputs = plan.times.len();
     let row: [f64; STATES] = std::array::from_fn(|s| request.initial_density[(s, s)].re);
     let mut ledger = Ledger::default();
-    ledger.note = Some(format!("初始系综：每个初态分量的原子束缚在它自己的势阱里（只含束缚原子的热分布，每个轴再乘谐振子的 Wigner 因子，T = {} μK）；布居最大的初态的阱深为 {:.1} k_BT", request.temperature_uk, depth));
+    ledger.note = Some(format!("初始系综：每个初态分量的原子束缚在它自己的势阱里（降低的等温分布 f ∝ e^(−E/k_BT) − 1，只含束缚原子，阱深比 k_BT 大得多时即热分布；每个主轴再乘谐振子的 Wigner 因子，T = {} μK）；布居最大的初态的阱深为 {:.1} k_BT", request.temperature_uk, depth));
     if unheld {
-        ledger.flag("计算所用光场中的势没有极小：阱频与 n̄ 按初始势阱给出".into());
+        ledger.flag("计算所用光场中的势没有极小：阱频、n̄、温度的窗口（一个阱周期）与验证范围都按初始势阱给出".into());
     }
     let (momentum, start) = setting.start;
     // The ladder's first rung over the reach the model is judged over: an attempt that begins at the step the one
@@ -1383,7 +1397,7 @@ fn attempt(
                 if table.layout.lights == model.running() { "" } else { "，光镊关闭时" }
             );
             for k in 1..outputs {
-                context.fixed.model[k] = [(context.fixed.model[k][0] + booked[t][0]).min(1.), context.fixed.model[k][1] + booked[t][1]];
+                context.fixed.model[k] = [probability_error(context.fixed.model[k][0] + booked[t][0]), context.fixed.model[k][1] + booked[t][1]];
             }
             context.ledger.item(&label, booked[t][0].max(booked[t][1]), TABLE_MEASURED);
             match stuck[t] {
@@ -1434,7 +1448,7 @@ fn attempt(
         let errors = model.errors_at(units, &state.sample, Some(&tables));
         let reads = model.table_reads(&tables, std::slice::from_ref(&state.sample));
         let sum = errors.iter().chain(reads.iter().map(|table| &table.whole[0])).fold([0.; 2], |sum, e| [sum[0] + e.population, sum[1] + e.temperature]);
-        sum.map(|x| x.min(1.))
+        sum.map(probability_error)
     };
     let (e, l, c) = match product(&run, ensemble, &domain, &mut context, &mut parts, &numbers, &read, messages) {
         Ok(product) => product,
@@ -1750,6 +1764,8 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
 /// bound holds at any g > 1 and does not single out two -- a smaller factor spends less past the need and reads more
 /// often --: the factor is chosen, not derived.
 fn batch(need: f64, have: u64) -> u64 {
+    // A need that is no number asks as much as a need without bound (`Look::need` makes none).
+    let need = if need.is_nan() { f64::INFINITY } else { need };
     let whole = ((need / GROUP as f64).ceil() as u64).saturating_mul(GROUP);
     whole.clamp(have + GROUP, 2 * have).min(MOST_TRAJECTORIES)
 }
@@ -1776,7 +1792,7 @@ fn product(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Contex
         let n = all.len() as u64 * GROUP;
         let (e, l, c) = pooled(&all, &context.scales);
         context.outside = apart(&e, &all, &booked, read, &mut known);
-        context.fixed.model = booked.iter().zip(&context.outside).map(|(model, more)| [(model[0] + more[0]).min(1.), model[1] + more[1]]).collect();
+        context.fixed.model = booked.iter().zip(&context.outside).map(|(model, more)| [probability_error(model[0] + more[0]), model[1] + more[1]]).collect();
         let chased: Vec<Look> = looks(&e, &context.fixed, &context.step).into_iter().filter(Look::fits).collect();
         if chased.iter().all(Look::met) || n >= MOST_TRAJECTORIES {
             return Ok((e, l, c));
@@ -1831,18 +1847,36 @@ impl Plan {
 }
 
 /// Counts over trajectories: the steps taken -- a step with jumps is one step, whatever the pieces its path is handed
-/// on by (adapt.rs, # The jumps) --, and the trajectories the scheme could not advance (adapt.rs `advance`'s refusal)
-/// with the earliest time one stopped at.
+/// on by (adapt.rs, # The jumps) --, and the trajectories that ended with no outcome (estimate.rs, # What is counted),
+/// by why: the scheme could not advance them (adapt.rs `advance`'s refusal), or a step of theirs was not proven
+/// (`Domain`) -- in a result sent while their attempt runs.
 #[derive(Clone, Copy, Debug, Default)]
 struct Counts {
     steps: u64,
-    failed: u64,
-    since: Option<f64>,
+    failed: Stopped,
+    unproven: Stopped,
 }
 impl Counts {
     fn add(&mut self, o: &Counts) {
         self.steps += o.steps;
-        self.failed += o.failed;
+        self.failed.add(&o.failed);
+        self.unproven.add(&o.unproven);
+    }
+}
+
+/// Trajectories that ended with no outcome for one reason (`Counts`): how many, and the earliest time one stopped at.
+#[derive(Clone, Copy, Debug, Default)]
+struct Stopped {
+    count: u64,
+    since: Option<f64>,
+}
+impl Stopped {
+    /// One trajectory stopped at the time t.
+    fn at(t: f64) -> Stopped {
+        Stopped { count: 1, since: Some(t) }
+    }
+    fn add(&mut self, o: &Stopped) {
+        self.count += o.count;
         self.since = match (self.since, o.since) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -2007,11 +2041,15 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     for (k, o) in out.iter_mut().enumerate().skip(1) {
         if let Fate::Held(h) = o {
             let w = windows.window(k);
-            h.kappa = std::array::from_fn(|a| w[a][1] / w[a][0]);
-            h.kappa2 = std::array::from_fn(|a| w[a][2] / w[a][0]);
+            // A held atom was held over its window's part before the output, which is no empty stretch after t = 0
+            // (estimate.rs `half_window`); a window of no length is the instant's own κ and κ².
+            for a in (0..3).filter(|&a| w[a][0] > 0.) {
+                (h.kappa[a], h.kappa2[a]) = (w[a][1] / w[a][0], w[a][2] / w[a][0]);
+            }
         }
     }
-    let counts = Counts { steps, failed: u64::from(failed), since: failed.then_some(t.time) };
+    let stopped = |why: bool| if why { Stopped::at(t.time) } else { Stopped::default() };
+    let counts = Counts { steps, failed: stopped(failed && unproven.is_none()), unproven: stopped(unproven.is_some()) };
     Record { outputs: out, listed, samples, counts, unproven }
 }
 
@@ -2229,9 +2267,17 @@ fn step_bound() -> [f64; 2] {
 }
 
 /// The room the statistics may take of a target ε beside a model error A and a step error b, √(ε² − A² − b²) (module
-/// documentation, # Stopping); none where the two fill the target.
+/// documentation, # Stopping); none where the two fill the target, or where either is no number -- it bounds nothing.
 fn room(target: f64, model: f64, step: f64) -> f64 {
-    (target * target - model * model - step * step).max(0.).sqrt()
+    let rest = target * target - model * model - step * step;
+    if rest > 0. { rest.sqrt() } else { 0. }
+}
+
+/// An error on a probability as it is booked (SPEC §4): at most one, the probability's whole range; one that is no
+/// number is that whole -- nothing bounds it less (estimate.rs, # What is counted). Every cap of an error on what is
+/// shown is this one, so that no cap turns a number that is none into a bound.
+fn probability_error(error: f64) -> f64 {
+    if error.is_nan() { 1. } else { error.min(1.) }
 }
 
 /// One quantity held to its target at one output (module documentation, # Stopping): what is shown, or the total T.
@@ -2261,8 +2307,12 @@ impl Look {
         self.room() > 0.
     }
     /// The trajectories it needs: its interval, falling as N^{−1/2}, within its room; on what is shown no fewer than the
-    /// draws that leave the room unseen (estimate.rs `draws_for`). None where no number fits.
+    /// draws that leave the room unseen (estimate.rs `draws_for`). Unbounded where no number fits, or where its interval
+    /// is unread -- a number, always.
     fn need(&self) -> f64 {
+        if !self.fits() || !self.interval.is_finite() {
+            return f64::INFINITY;
+        }
         let room = self.room();
         let draws = self.trajectories * (self.interval / room).powi(2);
         if self.shown { draws.max(draws_for(room)) } else { draws }
@@ -2274,7 +2324,8 @@ impl Look {
 /// is on). A T without an account -- one of its parts is unread -- is not met; where it is its statistics that are
 /// unread, its need is predicted from the normal theory of one axis's variance over the N h atoms held, the relative
 /// interval z √(2/(N h)) -- the total's is at most that (three axes' mean; equal where one axis holds all the energy).
-/// The outputs' looks are made on the pool, each output's by itself, and come in the outputs' order.
+/// Where no atom is held there is no T, and no look of it: N h = 0 would ask that interval of nothing. The outputs'
+/// looks are made on the pool, each output's by itself, and come in the outputs' order.
 fn looks(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> Vec<Look> {
     let (population, temperature) = accounts(estimates, fixed, step);
     estimates
@@ -2284,9 +2335,12 @@ fn looks(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> Vec<Look> {
         .flat_map_iter(|(k, e)| {
             let (h, n) = (1. - e.loss, e.trajectories);
             let shown = Look { output: k, target: POPULATION_TARGET, account: population[k], interval: e.shown_interval(), trajectories: n, shown: true };
-            let account = temperature[k].unwrap_or(Account { model: h * fixed.model[k][1], step: h * step[k].temperature, statistics: f64::INFINITY });
-            let interval = if account.statistics.is_finite() { account.statistics } else { h * CONFIDENCE * (2. / (n * h)).sqrt() };
-            [shown, Look { output: k, target: TEMPERATURE_TARGET, account, interval, trajectories: n, shown: false }]
+            let held = (e.held > 0.).then(|| {
+                let account = temperature[k].unwrap_or(Account { model: weighed(h, temperature_model(e, fixed.model[k][1])), step: h * step[k].temperature, statistics: f64::INFINITY });
+                let interval = if account.statistics.is_finite() { account.statistics } else { h * CONFIDENCE * (2. / (n * h)).sqrt() };
+                Look { output: k, target: TEMPERATURE_TARGET, account, interval, trajectories: n, shown: false }
+            });
+            std::iter::once(shown).chain(held)
         })
         .collect()
 }
@@ -2302,9 +2356,11 @@ fn crowded(looks: &[Look]) -> Vec<usize> {
 /// errors on the held atoms per output (`Fixed`) and the step's part, T's where read: the held share 1 − L weighs the
 /// model's error on the rows as shown, and T's whole accounts (module documentation, # Stopping); t = 0 is the
 /// request's state, without error, and the ensemble's moments, T's by quadrature: its accounts are the quadrature's
-/// error alone (`Fixed::start`), in the discretization's part (SPEC §4). The model's error on what is shown is at most
-/// 1, a probability's. T has an account where its statistics, the model's error and its step error are all read. The
-/// outputs' accounts are made on the pool, each output's by itself.
+/// error alone (`Fixed::start`), in the discretization's part (SPEC §4). The share of the output's trajectories not
+/// counted is booked whole on what is shown, in the model's part (estimate.rs, # What is counted: what no number of
+/// trajectories takes away), and leaves T no account (`temperature_model`). The model's error on what is shown is at
+/// most 1, a probability's. T has an account where its statistics, the model's error and its step error are all
+/// read. The outputs' accounts are made on the pool, each output's by itself.
 fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> (Vec<Account>, Vec<Option<Account>>) {
     estimates
         .par_iter()
@@ -2316,12 +2372,25 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> (Vec<Accou
                 return (Account::default(), Some(Account { step: fixed.start, ..Account::default() }));
             }
             let h = 1. - e.loss;
-            let population = Account { model: (a[0] * h).min(1.), step: b.shown, statistics: e.shown_statistics() };
-            let (relative, bound) = (e.temperature_interval(), b.temperature);
-            let temperature = (relative.is_finite() && a[1].is_finite() && bound.is_finite()).then_some(Account { model: h * a[1], step: h * bound, statistics: h * relative });
+            let population = Account { model: probability_error(a[0] * h + e.uncounted), step: b.shown, statistics: e.shown_statistics() };
+            let (relative, model, bound) = (e.temperature_interval(), temperature_model(e, a[1]), b.temperature);
+            let temperature = (relative.is_finite() && model.is_finite() && bound.is_finite()).then_some(Account { model: h * model, step: h * bound, statistics: h * relative });
             (population, temperature)
         })
         .unzip()
+}
+
+/// The model's part of T's account at an output whose units' error on T is `units` (relative): theirs where every
+/// trajectory is counted; unbounded where some is not -- the part of T the held atoms of unknown fate make is bounded by
+/// nothing the run read (estimate.rs, # What is counted).
+fn temperature_model(e: &Estimate, units: f64) -> f64 {
+    if e.uncounted > 0. { f64::INFINITY } else { units }
+}
+
+/// An error of the held atoms weighed by their share h, as an account weighs it: unbounded stays so at any share -- h
+/// times it would be no number at h = 0.
+fn weighed(h: f64, error: f64) -> f64 {
+    if error.is_finite() { h * error } else { f64::INFINITY }
 }
 
 /// What the pilot measured of the model's units (SPEC §5.2): the errors of the units read at the states (`Sampled`: the
@@ -2387,7 +2456,7 @@ fn model_error_at(whole: [f64; 2], without: Option<([f64; 2], usize)>, unsampled
         Some((unit, _)) if unit[i].is_finite() => whole[i] - unit[i],
         Some((_, units)) => if units > 1 { f64::INFINITY } else { unsampled[i] },
     };
-    [less(0).min(1.), less(1)]
+    [probability_error(less(0)), less(1)]
 }
 
 /// The model's error per output from the sums `whole` of its units' (`model_error_at`): none at t = 0, the request's
@@ -2487,7 +2556,9 @@ impl<'a> Level<'a> {
         let fixed = Fixed { model: model_error(&whole, unsampled), ..fixed.clone() };
         let mut needs = vec![0.0_f64; whole.len()];
         for look in looks(&estimates, &fixed, &vec![Bound::share(); whole.len()]) {
-            needs[look.output] = needs[look.output].max(look.need());
+            if look.fits() {
+                needs[look.output] = needs[look.output].max(look.need());
+            }
         }
         let mut order: Vec<usize> = (1..whole.len()).collect();
         order.sort_by(|&a, &b| needs[b].total_cmp(&needs[a]));
@@ -2507,7 +2578,7 @@ impl<'a> Level<'a> {
                 break;
             }
             let fixed = Fixed { model: vec![[0.; 2], model(k)], start: self.start };
-            most = looks(&[self.estimates[0].clone(), self.estimates[k].clone()], &fixed, &[Bound::share(); 2]).iter().map(Look::need).fold(most, f64::max);
+            most = looks(&[self.estimates[0].clone(), self.estimates[k].clone()], &fixed, &[Bound::share(); 2]).iter().filter(|l| l.fits()).map(Look::need).fold(most, f64::max);
         }
         most
     }
@@ -2614,7 +2685,8 @@ impl<'a> Pricing<'a> {
     /// a model's W (per µs of run) is its mean rate times its product's trajectories (`need`), the kept model's with the
     /// pilot its new attempt runs.
     fn share(&self, level: &Level, u: usize, rates: &[f64]) -> f64 {
-        1. - self.mean(rates, level.left) * (level.need_without(u) + self.again) / (self.mean(&self.own, level.left) * level.need)
+        let spent = self.mean(&self.own, level.left) * level.need;
+        if spent > 0. { 1. - self.mean(rates, level.left) * (level.need_without(u) + self.again) / spent } else { 0. }
     }
 
     /// The saving of keeping unit `u` at the rates `rates` of its kept model, spread over the jackknife's levels `others`.
@@ -2651,15 +2723,19 @@ impl<'a> Pricing<'a> {
 }
 
 /// Histograms of one coordinate of the held atoms at the listed outputs on one grid symmetric about 0 that holds them all
-/// (the bins' centres): a listed output with no atom carries the one before it. The number of bins is for the display
-/// alone -- no estimate reads a histogram --: the square-root choice, ⌊√n⌋ for the n atoms of the fullest listed output
-/// (bins of about √n atoms each), made odd so that 0 is a bin's centre, and three at least -- the contract's grid has two
-/// points or more (contract §2.2), and the least odd count that has is three.
+/// (the bins' centres), every bin as wide as the grid's spacing: a listed output with no atom carries the one before it.
+/// The number of bins is for the display alone -- no estimate reads a histogram --: the square-root choice, ⌊√n⌋ for the
+/// n atoms of the fullest listed output (bins of about √n atoms each), made odd so that 0 is a bin's centre, and three at
+/// least -- the contract's grid has two points or more (contract §2.2), and the least odd count that has is three.
 fn histograms(listed: &[Vec<(V3, V3)>], outputs: &[usize], value: &dyn Fn(&(V3, V3)) -> f64) -> Distributions {
     let reach = listed.iter().flatten().map(|s| value(s).abs()).fold(f64::MIN_POSITIVE, f64::max);
     let most = listed.iter().map(Vec::len).fold(0, usize::max);
     let bins = ((most as f64).sqrt() as usize | 1).max(3);
-    let width = 2. * reach / (bins - 1) as f64;
+    // Every bin as wide as the grid's spacing w = 2·reach/bins, the bins tiling [−reach, reach] exactly (the outermost
+    // centred w/2 inside the farthest atom): a share over its bin's width is the density, as the app reads it -- every
+    // cell, the end ones too, one spacing wide (src/motion-chart.ts `density`). Bins centred on ±reach would hold atoms on
+    // their inner halves alone, and read half the density there.
+    let width = 2. * reach / bins as f64;
     let grid: Vec<f64> = (0..bins).map(|i| (i as f64 - (bins / 2) as f64) * width).collect();
     let mut last: Vec<f64> = (0..bins).map(|i| if i == bins / 2 { 1. } else { 0. }).collect();
     let probabilities = listed
@@ -2713,8 +2789,9 @@ fn step_reading(run: f64, step: f64) -> String {
 
 /// The result of the estimates of `trajectories` trajectories (contract §2.2): at t = 0 the request's initial state and the
 /// ensemble's exact moments (T, and n̄ as of one atom with that mean, estimate.rs `occupation`); an output with no atom
-/// held carries the last one's populations, one with fewer than two atoms the last T read (its error unknown); each
-/// flagged.
+/// held carries the last one's populations, one with fewer than two atoms the last T read with its judgement of the
+/// validated regime (`classical`: a statement about that T) and n̄, their error unknown; one whose T is its own but whose
+/// jackknife reads no error (some group's removal leaves fewer than two atoms) says so; each flagged, apart.
 fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], counts: &Counts, trajectories: u64) -> Solution {
     let (times, outputs) = (&c.plan.times, c.plan.times.len());
     let hm = c.scales.hbar_over_mass;
@@ -2743,7 +2820,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     // What the atoms outside the reach carry (`apart`): its largest over the outputs, weighed by the held share.
     for (i, what) in ["布居", "温度"].into_iter().enumerate() {
         let largest = (1..outputs).map(|k| c.outside[k][i] * (1. - estimates[k].loss)).fold(0., f64::max);
-        ledger.item(&format!("计算中跑出估计的活动范围的原子（{what}）"), largest, "在每个输出时刻统计：曾有一步因速率太大而时间步长对它不适用的原子（从那一步起），按它们所占的比例全部计入；其余的按所占的比例乘以在它们的状态上实测的模型误差（只计超出已计入的部分）");
+        ledger.item(&format!("计算中跑出估计的活动范围的原子（{what}）"), largest, "在每个输出时刻统计：曾有一步因速率太大而时间步长对它不适用的原子（从那一步起），按它们所占的比例全部计入（布居上是原子数的比例，温度上是动能的比例）；其余的按所占的比例乘以在它们的状态上实测的模型误差（只计超出已计入的部分）");
     }
     ledger.close(times, &population, &temperature);
     // T and the motion at t = 0: exact.
@@ -2768,7 +2845,11 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         reason: None,
         approximations: ledger,
     };
-    let (mut empty, mut unread) = (None, vec![]);
+    // The first output where every trajectory counted is lost; the outputs no trajectory is counted at (estimate.rs,
+    // # What is counted), and those where T is read and some trajectory is not counted.
+    let (mut empty, mut carried, mut unread) = (None, vec![], vec![]);
+    let none: Vec<usize> = (1..outputs).filter(|&k| estimates[k].trajectories == 0.).collect();
+    let partly: Vec<usize> = (1..outputs).filter(|&k| estimates[k].uncounted > 0. && estimates[k].motion.is_some()).collect();
     for (k, e) in estimates.iter().enumerate() {
         if k == 0 {
             s.populations.push(c.initial);
@@ -2783,7 +2864,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         }
         let last = k - 1;
         s.populations.push(if e.held > 0. { e.populations } else { s.populations[last] });
-        if e.held == 0. && empty.is_none() {
+        if e.held == 0. && e.trajectories > 0. && empty.is_none() {
             empty = Some(k);
         }
         match &e.motion {
@@ -2808,9 +2889,9 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
                 s.temperature_total_errors_uk.push(None);
                 s.mean_velocity_mps.push(v);
                 s.mean_occupation.push(n);
-                s.classical.push([false; 3]);
+                s.classical.push(s.classical[last]);
                 if e.held > 0. {
-                    unread.push(k);
+                    carried.push(k);
                 }
             }
         }
@@ -2818,8 +2899,11 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     if let Some(k) = empty {
         s.approximations.flag(format!("{} 起已无原子留在光阱中（丢失概率 1）：此后的布居、温度与分布沿用此前的值，仅供参考", when(times[k])));
     }
+    if !carried.is_empty() {
+        s.approximations.flag(format!("{}：仍在光阱中的原子不足两个，温度与 n̄ 沿用此前的值，误差未知", span(&carried, times)));
+    }
     if !unread.is_empty() {
-        s.approximations.flag(format!("{}：仍在光阱中的原子不足两组，温度沿用此前的值，误差未知", span(&unread, times)));
+        s.approximations.flag(format!("{}：仍在光阱中的原子太少（去掉任一组后不足两个），温度的统计误差未知", span(&unread, times)));
     }
     // T shown with its statistics where its model error or its step error is unread.
     let unbooked: Vec<usize> = (1..outputs)
@@ -2828,18 +2912,34 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     if !unbooked.is_empty() {
         s.approximations.flag(format!("{}：这些时刻仍在光阱中的原子太少，无法估计模型近似或时间步长给温度带来的误差", span(&unbooked, times)));
     }
-    if let Some(t) = counts.since {
-        s.approximations.flag(format!("{} 条轨迹的状态在数值上无法再推进（最早在 {}）：此后不计入结果", counts.failed, when(t)));
+    // The trajectories that ended with no outcome, by why (`Counts`), and what that leaves (estimate.rs, # What is
+    // counted).
+    for (stopped, why) in [(&counts.failed, "的状态在数值上无法再推进"), (&counts.unproven, "走出了本轮计算的活动范围，模型在它们的路径上未经证明（本轮随后扩大活动范围重新计算）")] {
+        if let Some(t) = stopped.since {
+            s.approximations.flag(format!("{} 条轨迹{why}（最早在 {}）：此后它们不计入估计，所占的比例全部计入布居与丢失的误差", stopped.count, when(t)));
+        }
     }
-    // The worst output beyond the population target: what keeps it there.
+    if !partly.is_empty() {
+        s.approximations.flag(format!("{}：有轨迹不计入估计，温度的误差无法估计", span(&partly, times)));
+    }
+    if !none.is_empty() {
+        s.approximations.flag(format!("{}：没有一条轨迹计入估计，丢失概率、布居与温度沿用此前的值，布居与丢失的误差至少 100%", span(&none, times)));
+    }
+    // The worst output beyond the population target: what keeps it there -- where no trajectory is counted, that; else
+    // the largest part, the model's with the share not counted that it holds.
     if let Some((k, a)) = population.iter().enumerate().max_by(|x, y| x.1.total().total_cmp(&y.1.total())) {
         if a.total() > POPULATION_TARGET {
-            let cause = if a.statistics >= a.model.max(a.step) {
+            let uncounted = estimates[k].uncounted;
+            let cause = if estimates[k].trajectories == 0. {
+                "没有一条轨迹计入估计".to_string()
+            } else if a.statistics >= a.model.max(a.step) {
                 if trajectories >= MOST_TRAJECTORIES {
                     format!("统计误差为目标的 {:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}", a.statistics / POPULATION_TARGET)
                 } else {
                     format!("统计误差 {}（{trajectories} 条轨迹，计算未完成）", percent(a.statistics))
                 }
+            } else if a.model >= a.step && uncounted > 0. {
+                format!("模型近似误差 {}（其中不计入估计的轨迹占 {}）", percent(a.model), percent(uncounted))
             } else if a.model >= a.step {
                 format!("模型近似误差 {}", percent(a.model))
             } else {
@@ -3220,9 +3320,224 @@ mod tests {
                 mean_velocity: [0.; 3],
             }),
             failed: 0.,
+            uncounted: 0.,
             outside: [0.; 2],
             unresolved: [0.; 2],
         }
+    }
+
+    /// The share not counted (estimate.rs, # What is counted) in the accounts and in the result. Four groups of two
+    /// trajectories at t = 0 and three outputs, every atom held in state 0 until it ends with no outcome: the first of
+    /// each group after the first output, the second after the second. The units' error booked at 1 % on the held
+    /// atoms' populations and 2 % on T, the step at its share. At the first output the accounts are the units' and T
+    /// has one; at the second what is shown takes the uncounted half whole, 1 % + 50 %, and T has none; at the third,
+    /// none counted, what is shown is booked whole, its model's part and its statistics' at one. Those two outputs are
+    /// crowded, by the share: the looks a unit's keep reads (`keep`, the estimates without it) crowd none. The result:
+    /// every number finite (the app refuses one that is not), the loss and the populations at the third output the
+    /// second's, its error at least the whole, and the flags say why -- the trajectories that ended by their reasons,
+    /// counts and first times, the output where T has no account, the outputs none is counted at -- and nothing of an
+    /// atom lost; the reason a result is partial is the output none is counted at.
+    #[test]
+    fn the_share_not_counted_is_booked_whole_and_an_output_none_counts_at_says_so() {
+        let groups: Vec<Group> = (0..4)
+            .map(|g| {
+                let mut group = Group::new(4);
+                let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [1. + g as f64; 3], outside: false, unresolved: false });
+                group.add(&[held.clone(), held.clone(), Fate::Failed, Fate::Failed]);
+                group.add(&[held.clone(), held.clone(), held, Fate::Failed]);
+                group
+            })
+            .collect();
+        let scales = Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] };
+        let estimates = summarize(&groups, &scales);
+        let (fixed, step) = (Fixed { model: vec![[0.01, 0.02]; 4], start: 0. }, vec![Bound::share(); 4]);
+        let (population, temperature) = accounts(&estimates, &fixed, &step);
+        assert!((population[1].model - 0.01).abs() < 1e-15 && temperature[1].is_some_and(|t| (t.model - 0.02).abs() < 1e-15), "{population:?} {temperature:?}");
+        assert!((population[2].model - 0.51).abs() < 1e-15 && temperature[2].is_none());
+        assert!((population[3].model, population[3].statistics) == (1., 1.) && temperature[3].is_none());
+        assert_eq!(crowded(&looks(&estimates, &fixed, &step)), [2, 3]);
+        let counted: Vec<Estimate> = estimates.iter().map(|e| Estimate { uncounted: 0., ..e.clone() }).collect();
+        assert!(crowded(&looks(&counted, &fixed, &step)).is_empty());
+        let plan = Plan::new(&[0., 10., 20., 30.], [1.; 3]);
+        let listed = vec![vec![]; plan.listed.len()];
+        let context = Context {
+            plan,
+            tau: 1.,
+            scales,
+            initial: std::array::from_fn(|s| f64::from(u8::from(s == 0))),
+            momentum: [1.; 3],
+            fixed,
+            outside: vec![[0.; 2]; 4],
+            step,
+            checked: None,
+            ledger: Ledger::default(),
+            method: String::new(),
+        };
+        let counts = Counts { steps: 0, failed: Stopped { count: 3, since: Some(12.5) }, unproven: Stopped { count: 5, since: Some(15.) } };
+        let s = assemble(&context, &estimates, &listed, &counts, 8);
+        assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| x.is_finite()), "{s:?}");
+        assert!(s.loss_probability[3] == s.loss_probability[2] && s.populations[3] == s.populations[2] && s.estimated_errors[3] >= 1., "{s:?}");
+        let flagged = s.approximations.flagged.expect("flagged");
+        for said in ["3 条轨迹的状态在数值上无法再推进（最早在 12.5 μs）：此后它们不计入估计", "5 条轨迹走出了本轮计算的活动范围", "20 μs：有轨迹不计入估计，温度的误差无法估计", "30 μs 起：没有一条轨迹计入估计"] {
+            assert!(flagged.contains(said), "{said} in {flagged}");
+        }
+        assert!(!flagged.contains("已无原子留在光阱中"), "{flagged}");
+        assert!(s.reason.as_ref().is_some_and(|r| r.starts_with("t = 30 μs") && r.ends_with("：没有一条轨迹计入估计")), "{:?}", s.reason);
+    }
+
+    /// The two ways T goes unread, said apart (`assemble`): an output whose atoms sit in one group (two of them) has its
+    /// own T with no error -- the jackknife, every group's removal leaving fewer than two atoms, reads none --; an output
+    /// of one atom carries the last T, n̄, mean velocity and the judgement of the validated regime that goes with that T
+    /// (`classical`), not a fresh "below 4ħω". Five groups of four: every atom held at 10 μs, one group's two at 20 μs,
+    /// one atom at 30 μs, none at 40 μs.
+    #[test]
+    fn a_t_carried_keeps_its_judgement_and_a_t_unread_is_its_own() {
+        let held = |g: usize, m: usize| Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [100. + (4 * g + m) as f64; 3], outside: false, unresolved: false });
+        let groups: Vec<Group> = (0..5)
+            .map(|g| {
+                let mut group = Group::new(5);
+                for m in 0..4 {
+                    group.add(&[held(g, m), held(g, m), if g == 0 && m < 2 { held(g, m) } else { Fate::Lost }, if g == 0 && m == 0 { held(g, m) } else { Fate::Lost }, Fate::Lost]);
+                }
+                group
+            })
+            .collect();
+        let scales = Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] };
+        let estimates = summarize(&groups, &scales);
+        let times = [0., 10., 20., 30., 40.];
+        let plan = Plan::new(&times, [1.; 3]);
+        let listed = vec![vec![]; plan.listed.len()];
+        let context = Context {
+            plan,
+            tau: 1.,
+            scales,
+            initial: std::array::from_fn(|s| f64::from(u8::from(s == 0))),
+            momentum: [1.; 3],
+            fixed: Fixed { model: vec![[0.01, 0.02]; 5], start: 0. },
+            outside: vec![[0.; 2]; 5],
+            step: vec![Bound::share(); 5],
+            checked: None,
+            ledger: Ledger::default(),
+            method: String::new(),
+        };
+        let s = assemble(&context, &estimates, &listed, &Counts::default(), 20);
+        let own = estimates[2].motion.as_ref().expect("two atoms: a T").temperature;
+        assert!(own != estimates[1].motion.as_ref().unwrap().temperature && s.temperature_uk[2] == own && s.temperature_errors_uk[2] == [None; 3], "{s:?}");
+        assert!(estimates[3].motion.is_none() && s.classical[2] == [true; 3], "{:?}", s.classical);
+        assert!(s.temperature_uk[3] == s.temperature_uk[2] && s.mean_occupation[3] == s.mean_occupation[2] && s.mean_velocity_mps[3] == s.mean_velocity_mps[2] && s.classical[3] == s.classical[2], "{s:?}");
+        let flagged = s.approximations.flagged.expect("flagged");
+        for said in ["20 μs：仍在光阱中的原子太少（去掉任一组后不足两个），温度的统计误差未知", "30 μs：仍在光阱中的原子不足两个，温度与 n̄ 沿用此前的值，误差未知"] {
+            assert!(flagged.contains(said), "{said} in {flagged}");
+        }
+        assert!(!flagged.contains("20 μs：仍在光阱中的原子不足两个") && !flagged.contains("30 μs：仍在光阱中的原子太少"), "{flagged}");
+    }
+
+    /// Every estimator and every account on every kind of output a run can hold (estimate.rs, # What is counted): a
+    /// ratio over a count, a share or a weight that can be none gives a number or an explicit "unread", never one that
+    /// is no number, and no cap or extremum turns one that is none into a bound. Two levels of five groups of four
+    /// trajectories, each output one kind: every atom held; half lost; all lost; all held and unresolved; all held
+    /// outside the reach; half not counted; none counted; one group holding two atoms; two groups holding (T's read on
+    /// two groups); atoms that do not move (T zero); one atom held in all. At both levels, with the units' errors
+    /// booked at a number, at none (an output no pilot state was read at: [1, ∞]) and at no number:
+    /// - each estimate's loss, populations and shares are numbers, the loss and the share in [0, 1]; T's interval a
+    ///   number or unbounded; what is shown errs by its statistics at most one;
+    /// - each account of what is shown is a number at most √3 (three parts of a probability's at most one), T's a
+    ///   number or none; each look's need a number or unbounded, and a batch of it the product's next count;
+    /// - the step's reads are numbers or "no number" with an unread spread; what the check books of them and what it
+    ///   does not exclude are numbers or unbounded on T, numbers at most one on what is shown; a read's chance on more
+    ///   pairs a probability, on every read and factor;
+    /// - the result's errors, losses and populations are numbers, and the outputs of no atom, of none counted and of T
+    ///   without an account are said.
+    #[test]
+    fn every_estimator_and_account_is_a_number_or_says_why_on_every_kind_of_output() {
+        let kinds = 11;
+        let held = |g: usize, m: usize, scale: f64, still: bool, outside: bool, unresolved: bool| {
+            let y = if still { 0. } else { scale * (1. + (g * 4 + m) as f64) };
+            Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == (g + m) % 8))), kappa: [if still { 0. } else { 0.1 * m as f64 }; 3], kappa2: [y; 3], outside, unresolved })
+        };
+        let level = |scale: f64| -> Vec<Group> {
+            (0..5)
+                .map(|g| {
+                    let mut group = Group::new(kinds + 1);
+                    for m in 0..4 {
+                        let fates: Vec<Fate> = (0..=kinds)
+                            .map(|k| match k {
+                                0 | 1 => held(g, m, scale, false, false, false),
+                                2 => if m % 2 == 0 { Fate::Lost } else { held(g, m, scale, false, false, false) },
+                                3 => Fate::Lost,
+                                4 => held(g, m, scale, false, false, true),
+                                5 => held(g, m, scale, false, true, false),
+                                6 => if m % 2 == 0 { Fate::Failed } else { held(g, m, scale, false, false, false) },
+                                7 => Fate::Failed,
+                                8 => if g == 0 && m < 2 { held(g, m, scale, false, false, false) } else { Fate::Lost },
+                                9 => if g < 2 && m < 2 { held(g, m, scale, false, false, false) } else { Fate::Lost },
+                                10 => held(g, m, scale, true, false, false),
+                                _ => if g == 0 && m == 0 { held(g, m, scale, false, false, false) } else { Fate::Lost },
+                            })
+                            .collect();
+                        group.add(&fates);
+                    }
+                    group
+                })
+                .collect()
+        };
+        let (fine, coarse) = (level(1.), level(1.3));
+        let scales = Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] };
+        let number = |x: f64| x.is_finite();
+        let number_or_unbounded = |x: f64| x.is_finite() || x == f64::INFINITY;
+        for groups in [&fine, &coarse] {
+            let estimates = summarize(groups, &scales);
+            for (k, e) in estimates.iter().enumerate() {
+                assert!(number(e.loss) && (0. ..=1.).contains(&e.loss) && (0. ..=1.).contains(&e.uncounted) && e.populations.iter().all(|p| number(*p)), "output {k}: {e:?}");
+                assert!(e.outside.iter().chain(&e.unresolved).all(|x| number(*x)) && number_or_unbounded(e.temperature_interval()), "output {k}: {e:?}");
+                assert!(number(e.shown_statistics()) && e.shown_statistics() <= 1., "output {k}: {e:?}");
+            }
+            for booked in [[0.01, 0.02], [1., f64::INFINITY], [f64::NAN; 2]] {
+                let fixed = Fixed { model: vec![booked; kinds + 1], start: 0. };
+                let step = vec![Bound::share(); kinds + 1];
+                let (population, temperature) = accounts(&estimates, &fixed, &step);
+                assert!(population.iter().all(|a| number(a.total()) && a.total() <= 3f64.sqrt()), "{booked:?}: {population:?}");
+                assert!(temperature.iter().flatten().all(|a| number(a.total())), "{booked:?}: {temperature:?}");
+                for l in looks(&estimates, &fixed, &step) {
+                    assert!(number_or_unbounded(l.need()) && batch(l.need(), 88) >= 96 && batch(l.need(), 88) <= 176, "{booked:?}: {l:?} needs {}", l.need());
+                }
+            }
+            let s = assemble(&Context {
+                plan: Plan::new(&(0..=kinds).map(|k| 10. * k as f64).collect::<Vec<_>>(), [1.; 3]),
+                tau: 1.,
+                scales,
+                initial: std::array::from_fn(|s| f64::from(u8::from(s == 0))),
+                momentum: [1.; 3],
+                fixed: Fixed { model: vec![[0.01, 0.02]; kinds + 1], start: 0. },
+                outside: vec![[0.; 2]; kinds + 1],
+                step: vec![Bound::share(); kinds + 1],
+                checked: None,
+                ledger: Ledger::default(),
+                method: String::new(),
+            }, &estimates, &vec![vec![]; Plan::new(&(0..=kinds).map(|k| 10. * k as f64).collect::<Vec<_>>(), [1.; 3]).listed.len()], &Counts::default(), 20);
+            assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| number(*x)), "{s:?}");
+            let flagged = s.approximations.flagged.expect("flagged");
+            assert!(flagged.contains("30 μs") && flagged.contains("70 μs：没有一条轨迹计入估计") && flagged.contains("有轨迹不计入估计，温度的误差无法估计"), "{flagged}");
+        }
+        let read = between(&fine, &coarse, &scales);
+        let reads: Vec<&Read> = std::iter::once(&read.loss).chain(&read.shown).chain(read.temperature.iter()).collect();
+        assert!(reads.iter().all(|r| (number(r.value) && (number(r.spread.error) || !r.spread.read())) || (r.value.is_nan() && !r.spread.read())), "{read:?}");
+        for r in &reads {
+            for factor in [1., 1.5, 2., 8.] {
+                let p = within_on(r, 1e-4, factor);
+                assert!((0. ..=1.).contains(&p), "{r:?} on {factor}: {p}");
+            }
+        }
+        let two = Read { value: 1e-5, spread: Spread { error: 1e-5, groups: 2. } };
+        assert_eq!(within_on(&two, 1e-4, 2.), 0., "a read on two groups has no law on more pairs");
+        let none = Between { loss: Read { value: f64::NAN, spread: Spread::UNREAD }, ..read.clone() };
+        for b in [checked(&read).0, checked(&none).0, unexcluded(&read), unexcluded(&none)] {
+            assert!(number(b.shown) && b.shown <= 1. && number_or_unbounded(b.temperature), "{b:?}");
+        }
+        assert_eq!(checked(&none).0.shown, 1., "a read that is no number excludes nothing: the whole");
+        assert!(blind(&none).is_some_and(|f| f == f64::INFINITY));
+        assert_eq!(batch(f64::NAN, 88), 176);
+        assert_eq!((probability_error(f64::NAN), probability_error(2.), probability_error(0.3)), (1., 1., 0.3));
     }
 
     /// What the atoms outside the reach add to the model's error (`apart`), in a run whose model's error is booked
@@ -3589,6 +3904,28 @@ mod tests {
         for n in 1..2000 {
             let one = histograms(&[vec![([0.; 3], [0.; 3]); n]], &[0], &|x| x.1[0]);
             assert!(one.probabilities[0].iter().all(|&p| p <= 1.) && one.probabilities[0].contains(&1.), "{n}");
+        }
+    }
+
+    /// A uniform density reads uniform in every bin, the end ones too: N atoms one to each of N equal cells of [−1, 1]
+    /// (at the cells' centres, so that none sits on a bin's edge) have the density N/2, and every bin -- the end ones too
+    /// -- holds its width's worth, N·w/2, to within one atom, its share over the grid's spacing w (the density as the app
+    /// reads it, every cell one spacing wide: src/motion-chart.ts `density`) is ½ to within 1/(N w). The bins tile the
+    /// atoms' reach. (Bins centred on ±reach held about half the end bin's worth.)
+    #[test]
+    fn a_uniform_density_reads_uniform_to_the_ends() {
+        for n in [9_usize, 100, 1001, 4096] {
+            let atoms: Vec<(V3, V3)> = (0..n).map(|j| ([0.; 3], [-1. + (2 * j + 1) as f64 / n as f64, 0., 0.])).collect();
+            let reach = 1. - 1. / n as f64;
+            let d = histograms(&[atoms], &[0], &|x| x.1[0]);
+            let (bins, spacing) = (d.grid.len(), d.grid[1] - d.grid[0]);
+            assert!(d.grid.windows(2).all(|g| (g[1] - g[0] - spacing).abs() < 1e-12) && d.grid[bins / 2] == 0., "{n}: an even grid about 0");
+            assert!((spacing * bins as f64 - 2. * reach).abs() < 1e-12, "{n}: the bins tile [−reach, reach]");
+            let worth = n as f64 * spacing / 2.;
+            for (i, p) in d.probabilities[0].iter().enumerate() {
+                assert!((p * n as f64 - worth).abs() <= 1. + 1e-9, "{n} atoms, bin {i} of {bins}: {} against {worth}", p * n as f64);
+                assert!((p / spacing - 0.5).abs() <= 1. / (n as f64 * spacing) + 1e-12, "{n} atoms, bin {i}: density {}", p / spacing);
+            }
         }
     }
 
