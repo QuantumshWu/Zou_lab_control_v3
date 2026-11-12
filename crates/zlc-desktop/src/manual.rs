@@ -372,8 +372,8 @@ pub struct Apply {
 
 /// What an intent asks of the viewer beyond the copy itself.
 /// `Save`: Save as… onto the archive `path` (None: the window's Save dialog asks), writing
-/// over files already there only when `overwrite`.
-pub enum Effect { None, Apply(Box<Apply>), Save { editor: String, panel: String, path: Option<String>, overwrite: bool, suggested: String }, Discarded { panel: Option<String>, signal: String } }
+/// over files already there only when `overwrite`; `asked`: the Save dialog chose `path`, asking before replacing it.
+pub enum Effect { None, Apply(Box<Apply>), Save { editor: String, panel: String, path: Option<String>, asked: bool, overwrite: bool, suggested: String }, Discarded { panel: Option<String>, signal: String } }
 
 /// The document `save` a Save as… onto the archive `path` becomes: its picture beside it
 /// (v2 `with_suffix(".png")`; a name's own dots, "scan_1.5us", stay), writing over no file
@@ -1020,7 +1020,7 @@ impl Draft {
                 if self.modified || self.applied.is_none() { return Err("Apply & preview the current data before saving".into()); }
                 if !self.save_ready { return Err("the preview Panel has not accepted this data yet".into()); }
                 return Ok(Effect::Save { editor: self.id.clone(), panel: self.panel.clone(), path: op["path"].as_str().map(str::to_owned),
-                                        overwrite: op["overwrite"].as_bool().unwrap_or(false), suggested: self.suggested() });
+                                        asked: op["asked"].as_bool().unwrap_or(false), overwrite: op["overwrite"].as_bool().unwrap_or(false), suggested: self.suggested() });
             }
             other => return Err(format!("unknown data edit operation {}", python_quote(other))),
         }

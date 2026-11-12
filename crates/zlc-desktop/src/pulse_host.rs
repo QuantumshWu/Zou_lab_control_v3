@@ -709,9 +709,9 @@ impl PulseHost {
         })
     }
 
-    /// One `pulse_*` command, whoever sent it; `dialog` asks the operator for a path.
+    /// One `pulse_*` command, whoever sent it (the operator's path already asked: main.rs, dialog.rs).
     pub fn command(&mut self, action: &str, command: &Value, operator: bool, request: u64, claims: impl Fn(&str) -> Vec<String>,
-                   claimant: Option<String>, dialog: impl Fn(&str, &str, bool, &Path, &Path) -> Result<Option<String>, String>) -> Handled {
+                   claimant: Option<String>) -> Handled {
         self.editor.set_claimed_by(claimant.clone());
         // Published, the board is the other computer's: nothing here plays it (Stop still makes it safe).
         let drives = matches!(action, "pulse_fire" | "pulse_hold" | "pulse_step" | "pulse_run" | "pulse_wait_done" | "pulse_sync" | "pulse_estimate");
@@ -719,7 +719,7 @@ impl PulseHost {
         let run = command["_run"].as_str();
         // The plugin host's id of the asking run: its native scan plan is held under it.
         let plugin_run = command["_plugin_run"].as_str();
-        let mut args: Map<String, Value> = crate::remote::parameters(command).as_object().cloned().unwrap_or_default();
+        let args: Map<String, Value> = crate::remote::parameters(command).as_object().cloned().unwrap_or_default();
         match action {
             "pulse_describe" => return Handled::Now(describe_document(Path::new(command["document"].as_str().unwrap_or("")))
                 .map(|description| to_value(&description)).map_err(|error| error.message)),
@@ -829,17 +829,6 @@ impl PulseHost {
             "pulse_preview" if command["save"].as_bool() == Some(true) => return Handled::Now(self.save_preview(command["path"].as_str().map(str::to_owned))),
             "pulse_ready" => { self.dpr = command["dpr"].as_f64().filter(|dpr| *dpr > 0.0).unwrap_or(1.0); self.dispatch(); return Handled::Now(Ok(Value::Null)); }
             _ => {}
-        }
-        // The window asks where a file goes when its command does not say.
-        if operator {
-            // v2: Save Pulse always asks, at the file it has (a Save as… of Value Config, or a first save, likewise).
-            if let Some((title, filter, save, start, home)) = self.editor.file_dialog(action, &args) {
-                match dialog(title, filter, save, &start, &home) {
-                    Ok(Some(path)) => { args.insert("path".into(), json!(path)); }
-                    Ok(None) => return Handled::Now(Ok(Value::Null)),
-                    Err(error) => return Handled::Now(Err(error)),
-                }
-            }
         }
         let answer = self.editor.command(action, &args, operator);
         // Selectors off ends a drag in progress (v2 cancelled the active interaction).
@@ -1058,7 +1047,7 @@ mod tests {
 
     /// One command, answered now or by a lane (the editor's outcomes delivered meanwhile).
     fn ask(host: &mut PulseHost, events: &Receiver<PulseEvent>, action: &str, command: Value, claimant: Option<&str>) -> Result<Value, String> {
-        let handled = host.command(action, &command, false, 1, |_| vec!["sequencer".to_owned()], claimant.map(str::to_owned), |_, _, _, _, _| Ok(None));
+        let handled = host.command(action, &command, false, 1, |_| vec!["sequencer".to_owned()], claimant.map(str::to_owned));
         match handled {
             Handled::Now(answer) => answer,
             Handled::Later => loop {
