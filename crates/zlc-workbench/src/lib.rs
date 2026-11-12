@@ -290,9 +290,11 @@ pub struct Workbench {
     pub(crate) resolution: Option<(u64, Option<String>)>,
     /// What this Init's or Apply's resolves found, said on its line once it settles.
     pub(crate) found: Vec<String>,
-    /// Each node's source bundle as its queries read it (`bundle`): node -> (what it was
-    /// built from, the members).
-    pub(crate) bundles: BTreeMap<String, (String, Value)>,
+    /// Each node's source bundle as its queries were last told it (`bundle`).
+    pub(crate) bundles: BTreeMap<String, logic::SourceBundle>,
+    /// A draft names a source its bundle was not built for: its bundle readers ask once the
+    /// command or event that changed it is done and the host can build that bundle.
+    pub(crate) bundles_stale: bool,
     /// v2 `selection_restore`: (node, draft field) -> the panel whose region set it, and
     /// what it held before.
     pub(crate) selection_restore: BTreeMap<(String, String), (String, Value)>,
@@ -354,7 +356,7 @@ impl Workbench {
             // v2 set_deriving(False) when the console is built.
             console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None, panel_said: None,
             tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), applied_simulation: None, scan: None,
-            resolution: None, found: Vec::new(), bundles: BTreeMap::new(),
+            resolution: None, found: Vec::new(), bundles: BTreeMap::new(), bundles_stale: false,
             selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default(), follows_sources: false })
     }
 
@@ -407,7 +409,7 @@ impl Workbench {
                 zlc_core::journal::note("workbench", "refused", json!({"name": name, "request": request, "error": error}));
                 self.replies.push((request, Err(error)));
             }
-            return;
+            return self.refresh_stale_bundles(host);
         }
         let result = self.dispatch(name, params, origin, request, host);
         if let Err(error) = &result { zlc_core::journal::note("workbench", "refused", json!({"name": name, "request": request, "error": error})); }
@@ -416,6 +418,7 @@ impl Workbench {
             Ok(reply) => self.replies.push((request, Ok(reply.unwrap_or_else(|| json!({}))))),
             Err(error) => self.replies.push((request, Err(error))),
         }
+        self.refresh_stale_bundles(host);
         self.sync_console_report(host);
     }
 
@@ -571,6 +574,7 @@ impl Workbench {
             Event::RunSnapshot { run, ticket, wait } => self.run_snapshot(&run, ticket, wait),
             Event::RunFinished { run, outcome, error, generation } => self.run_finished(&run, &outcome, error, generation, host),
         }
+        self.refresh_stale_bundles(host);
         self.poll_recipe(host);
         self.sync_console_report(host);
     }
