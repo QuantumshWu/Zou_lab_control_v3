@@ -65,6 +65,8 @@ pub enum PulseEvent {
     PreviewSaved(Result<PathBuf, String>),
     /// A line of a native sequencer's device log (the local pulse server's narration).
     Log { instance: String, line: String },
+    /// Closing the window: the board is SAFE and every connection let go (`PulseHost::shutdown`).
+    ShutDown,
 }
 
 /// An editor command waiting for the file it reads.
@@ -670,6 +672,10 @@ pub struct PulseHost {
     dirty: bool,
     /// Editor commands whose files are being written: the view waits for them.
     writing: usize,
+    /// Closing the window: told once the board's close, begun by `shutdown`, has ended.
+    closing: Option<mpsc::Receiver<()>>,
+    /// The board's close at the window's close has ended.
+    closed: bool,
 }
 
 /// How a command was answered.
@@ -689,7 +695,7 @@ impl PulseHost {
                     preview: Lane::new("pulse-preview"), post, safe_actions, given: None, python, session: Arc::new(Mutex::new(None)),
                     dpr: 1.0, preview_busy: false, preview_key: String::new(), preview_wanted: false, frame: None, frames: 0,
                     axes: Vec::new(), pointers: Default::default(), pointer_busy: false, users: Default::default(),
-                    facts: Value::Null, facts_of: None, dirty: true, writing: 0 }
+                    facts: Value::Null, facts_of: None, dirty: true, writing: 0, closing: None, closed: false }
     }
 
     /// The pulse section of a state message: the editor's view plus the preview's frame.
@@ -1101,11 +1107,39 @@ impl PulseHost {
         });
     }
 
-    /// Closing the window: SAFE, then let every connection go.
+    /// Closing the window: SAFE, then let every connection go -- on the board's SAFE lane, as Stop
+    /// all's SAFE is, never on the window's turn, which goes on meanwhile (the runs it stops end and
+    /// are answered). Each step is bounded as it always was (the board's own call, the local
+    /// server's end); [`PulseEvent::ShutDown`] says it is done, [`PulseHost::shut_down`] reads it.
     pub fn shutdown(&mut self) {
-        if let Some(board) = self.editor.board().cloned() { let _ = board.close(); }
-        if let Some(mut given) = self.given.take() { if let Some(served) = given.child.take() { served.end(); } }
+        if self.closing.is_some() || self.closed { return; }
+        let board = self.editor.board().cloned();
+        let served = self.given.take().and_then(|mut given| given.child.take());
         self.safe_actions.unregister(SAFE_OUTPUT);
+        let (done, closing) = mpsc::channel();
+        self.closing = Some(closing);
+        let post = self.post.clone();
+        self.desk.safe_lane().run(move || {
+            if let Some(board) = board { let _ = board.close(); }
+            if let Some(served) = served { served.end(); }
+            let _ = done.send(());
+            post(PulseEvent::ShutDown);
+        });
+    }
+
+    /// Whether the board's close begun by [`PulseHost::shutdown`] has ended.
+    pub fn shut_down(&mut self) -> bool {
+        if self.closing.as_ref().is_some_and(|closing| !matches!(closing.try_recv(), Err(mpsc::TryRecvError::Empty))) {
+            self.closing = None;
+            self.closed = true;
+        }
+        self.closed
+    }
+
+    /// The application ends: a board close begun by [`PulseHost::shutdown`] is waited for, so
+    /// the board is SAFE before the process goes, whichever way it ends.
+    pub fn await_shutdown(&mut self) {
+        if let Some(closing) = self.closing.take() { let _ = closing.recv(); self.closed = true; }
     }
 
     /// Remote on/off for the board on this computer (v2: a local pulse board's
@@ -1560,6 +1594,36 @@ mod tests {
             if let PulseEvent::Log { line, .. } = events.recv_timeout(Duration::from_secs(30)).expect("the SAFE") { assert!(line.contains("ZLC SAFE after scan#1"), "{line}"); break; }
         }
         assert_eq!(board(&host).last_fire(), Some((id, Fate::Safed)));
+    }
+
+    /// Closing the window does not wait for the board: its SAFE close runs on the SAFE lane, however
+    /// slow, and is told when done; the application's end waits for it, so the board is SAFE first.
+    #[test]
+    fn the_windows_close_makes_the_board_safe_off_the_turn_and_its_end_waits_for_it() {
+        struct SlowSafe(Mutex<Option<std::time::Instant>>);
+        impl World for SlowSafe {
+            fn play_run(&self, _timeline: &Json, _stop: &Arc<Event>) -> zlc_pulse::Result<()> { Ok(()) }
+            fn safe(&self) { std::thread::sleep(Duration::from_millis(600)); *lock(&self.0) = Some(std::time::Instant::now()); }
+        }
+        for awaited in [false, true] {
+            let (mut host, events, _document) = host(if awaited { "shutdown_awaited" } else { "shutdown" });
+            let world = Arc::new(SlowSafe(Mutex::new(None)));
+            board(&host).set_world(Some(world.clone()));
+            let began = std::time::Instant::now();
+            host.shutdown();
+            host.shutdown();
+            assert!(began.elapsed() < Duration::from_millis(300), "the turn goes on: {:?}", began.elapsed());
+            assert!(!host.shut_down() && lock(&world.0).is_none(), "the board is still closing");
+            if awaited {
+                // The application ends while it closes: its end waits for the SAFE.
+                host.await_shutdown();
+            } else {
+                loop { if let PulseEvent::ShutDown = events.recv_timeout(Duration::from_secs(30)).expect("the close is told") { break; } }
+            }
+            assert!(host.shut_down());
+            let safed = lock(&world.0).expect("SAFE at the window's close");
+            assert!(safed - began >= Duration::from_millis(600));
+        }
     }
 
     /// The local board's UART is found on Init (it binds that port): a JTAG or memory board has
