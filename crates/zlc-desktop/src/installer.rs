@@ -10,7 +10,6 @@
 //! environment exists the window says so and offers to make it.
 use std::collections::{BTreeMap, VecDeque};
 use std::io::BufRead;
-use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -20,7 +19,8 @@ use tao::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 use wry::WebContext;
 
 use crate::windows::{Kind, Setup, Windows};
-use crate::{AppEvent, frame, job};
+use crate::{AppEvent, frame};
+use zlc_core::process::Job;
 
 /// What the background work tells the window's turn.
 pub enum Report {
@@ -96,15 +96,22 @@ fn fpga_step(name: &str, force: bool) -> Option<Step> {
     Some(step)
 }
 
-/// `powershell -File tools\<script> <arguments>` with no console window, its output piped.
+/// `powershell -File tools\<script> <arguments>`, its output piped; started with [`hidden`].
 fn powershell(script: &str, arguments: &[String]) -> Command {
     let mut command = Command::new("powershell.exe");
     command.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]).arg(zlc_core::checkout::path("tools").join(script)).args(arguments)
         // fpga.ps1 runs the `fpga` command of the pulse server beside this engine (not a build of the sources).
         .env("ZLC_PULSE_SERVER", std::env::current_exe().map(|exe| exe.with_file_name("zlc-pulse-server.exe")).unwrap_or_default())
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     command
+}
+
+/// Start a step's or a check's process in a job of its own, with no console window: Stop
+/// and a deadline end its whole tree, and one the job cannot take never runs.
+fn hidden(command: &mut Command) -> Result<(Job, std::process::Child), String> {
+    let job = Job::new(None).map_err(|error| format!("Cannot supervise the process tree: {error}"))?;
+    let child = job.spawn(command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW).map_err(|error| error.to_string())?;
+    Ok((job, child))
 }
 
 /// A line a step wrote: UTF-8 when it is that, else the console code page Windows PowerShell and
@@ -124,26 +131,13 @@ fn decode_in(bytes: &[u8], page: u32) -> String {
 
 enum CheckOutput { Line(bool, Vec<u8>), Closed(Option<String>) }
 
-/// Never offer Stop for a process we cannot actually stop. Reap an
-/// uncontained child before reporting failure or starting any further work.
-fn require_job(child: &mut std::process::Child, limited: Option<job::Limited>) -> Result<job::Limited, String> {
-    if let Some(limited) = limited { return Ok(limited); }
-    let stopped = child.kill().and_then(|_| child.wait());
-    Err(match stopped {
-        Ok(_) => "Cannot supervise the process tree; the process was stopped and no further step was started".into(),
-        Err(error) => format!("Cannot supervise the process tree; stopping the process also failed: {error}"),
-    })
-}
-
 /// Supervise the whole check, including inherited pipes. Reading either pipe
 /// or waiting for a descendant must never outlive the check's total deadline.
 /// A job is mandatory: cancellation must end every process the script started.
 fn run_check(mut command: Command, timeout: Duration, heard: impl Fn(&Value)) -> Result<Value, String> {
     let until = Instant::now() + timeout;
-    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().map_err(|error| format!("Cannot start check: {error}"))?;
-    let limited = job::limit(&child, None);
-    let limited = require_job(&mut child, limited)?;
+    let (limited, mut child) = hidden(command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()))
+        .map_err(|error| format!("Cannot start check: {error}"))?;
     let mut limited = Some(limited);
     let (send, receive) = std::sync::mpsc::sync_channel(64);
     for (stderr, stream) in [(false, Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>),
@@ -299,7 +293,7 @@ pub struct Installer {
     force_build: bool,
     queue: VecDeque<Step>,
     /// The step under way and the job holding its processes (dropped: they end).
-    running: Option<(Step, Option<job::Limited>)>,
+    running: Option<(Step, Option<Job>)>,
     stopped: bool,
     /// The last step's end: its line and whether it succeeded.
     last: Option<(String, bool)>,
@@ -610,22 +604,11 @@ impl Installer {
             self.line("Plan only: the warmup measures this GPU; nothing is run.".into());
             return self.next();
         }
-        let child = match powershell(step.script, &step.arguments).spawn() {
-            Ok(child) => child,
+        let (job, mut child) = match hidden(&mut powershell(step.script, &step.arguments)) {
+            Ok(started) => started,
             Err(error) => {
+                let reason = format!("{} did not start: {error}", step.title);
                 self.line(format!("Cannot run tools\\{}: {error}", step.script));
-                self.last = Some((format!("{} did not start.", step.title), false));
-                self.queue.clear();
-                return self.next();
-            }
-        };
-        let mut child = child;
-        let job = job::limit(&child, None);
-        let job = match require_job(&mut child, job) {
-            Ok(job) => Some(job),
-            Err(error) => {
-                let reason = format!("{} did not start safely: {error}", step.title);
-                self.line(reason.clone());
                 if let Some(id) = step.component.filter(|_| !self.plan_only) { self.failed.insert(id, reason.clone()); }
                 self.last = Some((reason, false));
                 self.queue.clear();
@@ -633,6 +616,7 @@ impl Installer {
                 return;
             }
         };
+        let job = Some(job);
         for stream in [child.stdout.take().map(|out| Box::new(out) as Box<dyn std::io::Read + Send>),
                        child.stderr.take().map(|err| Box::new(err) as Box<dyn std::io::Read + Send>)].into_iter().flatten() {
             let proxy = self.proxy.clone();
@@ -823,7 +807,7 @@ pub fn run(event_loop: EventLoop<AppEvent>, context: WebContext, setup: Setup, l
             eprintln!("{}", json!({"type": "desktop-error", "error": error}));
             let _ = windows.send_to(&Kind::Installer, &json!({"type": "state", "request": request, "error": error}));
         }
-        if *flow != ControlFlow::Exit {
+        if *flow == ControlFlow::Exit { crate::diagnostics::drain(); } else {
             *flow = match installer.flush_at { Some(at) => ControlFlow::WaitUntil(at), None => ControlFlow::Wait };
         }
     });
@@ -951,10 +935,8 @@ mod tests {
     // These fixtures only print, sleep, or start another sleeping local
     // process. They never run installer scripts, Git, or any network request.
     fn fake_check(source: &str) -> std::process::Command {
-        use std::os::windows::process::CommandExt;
         let mut command = std::process::Command::new("powershell.exe");
-        command.args(["-NoProfile", "-NonInteractive", "-Command", source])
-            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        command.args(["-NoProfile", "-NonInteractive", "-Command", source]);
         command
     }
 
@@ -1004,17 +986,6 @@ mod tests {
         let error = super::run_check(command, std::time::Duration::from_millis(500), |_| {}).unwrap_err();
         assert!(error.contains("deadline"), "{error}");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
-    }
-
-    #[test]
-    fn a_failed_job_assignment_kills_and_reaps_the_child() {
-        let mut child = fake_check("Start-Sleep -Seconds 60").spawn().unwrap();
-        let error = match super::require_job(&mut child, None) {
-            Ok(_) => panic!("an uncontained process was admitted"),
-            Err(error) => error,
-        };
-        assert!(error.contains("Cannot supervise"), "{error}");
-        assert!(child.try_wait().unwrap().is_some(), "the rejected child is still running");
     }
 
     #[test]

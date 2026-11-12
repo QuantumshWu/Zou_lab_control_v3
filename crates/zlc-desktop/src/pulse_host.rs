@@ -178,8 +178,9 @@ struct Given { instance: String, child: Option<Served>, world: Option<String>, p
 
 /// The pulse server this application started for `sequencer.local`: its
 /// process, its port, and the line it hears admission on (`admit` / `refuse`;
-/// the line closing ends the server, which drives the board SAFE first).
-pub struct Served { child: std::process::Child, port: u16, control: Option<std::process::ChildStdin> }
+/// the line closing ends the server, which drives the board SAFE first). Its job
+/// ends it and what it started (Vivado) with this application, crash or not.
+pub struct Served { child: std::process::Child, port: u16, control: Option<std::process::ChildStdin>, _job: zlc_core::process::Job }
 
 impl Served {
     fn end(mut self) {
@@ -1235,15 +1236,14 @@ else:
 
 fn run_scan_program(python: Option<&Path>, source: &str) -> Result<Option<ScanTable>, String> {
     use std::io::{Read, Write};
-    use std::os::windows::process::CommandExt;
     let python = python.ok_or_else(|| format!("{} (scan programs run in it)", zlc_plugin_host::NOT_INSTALLED))?;
     // Run as the plugin processes are (no -I: the same packages, user site and PYTHONPATH; no
     // PYTHONHOME; the base installation's DLLs and the thread policy); a console program, given no
     // console window (this application has none).
-    let mut child = std::process::Command::new(python).env_remove("PYTHONHOME").envs(zlc_plugin_host::plugin_environment(python)).args(["-c", SCAN_RUNNER]).stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-        .spawn().map_err(|error| error.to_string())?;
-    let job = crate::job::limit(&child, Some(2048));
+    let job = zlc_core::process::Job::new(Some(2048)).map_err(|error| format!("the scan program's job: {error}"))?;
+    let mut child = job.spawn(std::process::Command::new(python).env_remove("PYTHONHOME").envs(zlc_plugin_host::plugin_environment(python)).args(["-c", SCAN_RUNNER])
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()),
+        windows_sys::Win32::System::Threading::CREATE_NO_WINDOW).map_err(|error| error.to_string())?;
     if let Some(mut stdin) = child.stdin.take() { let _ = stdin.write_all(source.as_bytes()); }
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
     let status = loop {
@@ -1277,15 +1277,14 @@ fn run_scan_program(python: Option<&Path>, source: &str) -> Result<Option<ScanTa
 /// (its `zlc_pulse.remote` logger: `[HH:MM:SS] ZLC <event> ...`).
 fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Result<(Board, Served), String> {
     use std::io::BufRead;
-    use std::os::windows::process::CommandExt;
     let server = std::env::current_exe().map_err(|error| error.to_string())?.with_file_name("zlc-pulse-server.exe");
     if !server.is_file() { return Err(format!("{} is not built", server.display())); }
     let (backend, arguments) = server_arguments(parameters)?;
     // A console program, given no console window; its errors go where this application's go.
-    let mut child = std::process::Command::new(&server).args(&arguments).stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit())
-        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-        .spawn().map_err(|error| error.to_string())?;
+    let job = zlc_core::process::Job::new(None).map_err(|error| format!("the local pulse server's job: {error}"))?;
+    let mut child = job.spawn(std::process::Command::new(&server).args(&arguments).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()),
+        windows_sys::Win32::System::Threading::CREATE_NO_WINDOW).map_err(|error| error.to_string())?;
     let control = child.stdin.take();
     let stdout = child.stdout.take().ok_or("no server output")?;
     let (found, port) = mpsc::channel();
@@ -1307,7 +1306,7 @@ fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Res
         _ => { let _ = child.kill(); return Err("the local pulse server did not start (see its log)".into()); }
     };
     match Board::remote("127.0.0.1", port) {
-        Ok(board) => Ok((board, Served { child, port, control })),
+        Ok(board) => Ok((board, Served { child, port, control, _job: job })),
         Err(error) => { let _ = child.kill(); Err(error.message) }
     }
 }

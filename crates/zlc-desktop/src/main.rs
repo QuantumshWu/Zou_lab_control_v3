@@ -26,7 +26,6 @@ mod frame;
 mod workbench_host;
 mod animation;
 mod pulse_host;
-mod job;
 mod bench;
 mod share;
 mod slm_host;
@@ -2346,6 +2345,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 if listener.join().is_err() { eprintln!("Runtime change listener panicked"); }
             }
             trace::flush();
+            // What was written to the run log so far is in its file before the process ends.
+            diagnostics::drain();
         }
     });
 }

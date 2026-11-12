@@ -1,20 +1,26 @@
 //! One plugin host process: its stdio channel, pending requests and log.
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io::{BufRead, BufReader};
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, SetInformationJobObject, TerminateJobObject};
-use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    TerminateProcess, WaitForMultipleObjects};
+use zlc_core::journal::now_us;
+use zlc_core::process::{Job, local_time};
 
 use crate::blocks::Lend;
 use crate::{CallError, ErrorKind, outgoing::Outgoing};
+
+/// How long a terminated process may take to be gone. Windows ends it at once and
+/// closes its handles; only an I/O request a driver does not let go of (a stuck USB
+/// transfer) keeps it, and that is reported rather than waited out.
+pub(crate) const KILL_WAIT: Duration = Duration::from_secs(2);
 
 /// A message read from a plugin, with the holds its `blocks` gave the core.
 pub(crate) struct Incoming { pub message: Value, pub lends: Vec<Arc<Lend>> }
@@ -22,6 +28,12 @@ pub(crate) struct Incoming { pub message: Value, pub lends: Vec<Arc<Lend>> }
 pub(crate) struct PluginProcess {
     /// The interpreter's pid (the launcher's until the handshake names it).
     pid: AtomicU32,
+    /// The interpreter, from the handshake on. A venv's python.exe is a launcher whose
+    /// child is the interpreter that opens the devices: the process is gone only when
+    /// this handle (and the launcher's) is signalled.
+    interpreter: OnceLock<OwnedHandle>,
+    /// How the core ended it, once it did (None: it ended on its own, or runs).
+    ended_by: Mutex<Option<String>>,
     /// The process it is: the one plugin process (`plugins`) or an isolated type's (`type:<id>`).
     pub key: String,
     writer: Arc<Outgoing>,
@@ -36,7 +48,7 @@ pub(crate) struct PluginProcess {
     /// Set when the core itself ends the process: its exit is then no failure.
     pub retiring: AtomicBool,
     child: Mutex<Child>,
-    log: Mutex<VecDeque<String>>,
+    log: Mutex<Log>,
     pub instances: Mutex<BTreeSet<String>>,
     /// Requests of no instance's using it now (the catalogue, a hardware scan).
     pub users: AtomicUsize,
@@ -45,25 +57,32 @@ pub(crate) struct PluginProcess {
     pub missed_pings: AtomicU64,
 }
 
-const LOG_LINES: usize = 400;
-
 impl PluginProcess {
     pub fn new(key: String, mut child: Child) -> (Arc<Self>, std::process::ChildStdout, std::process::ChildStderr) {
         let writer = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         let process = Arc::new(Self {
-            pid: AtomicU32::new(child.id()), key, writer: Outgoing::new(writer), pending: Mutex::default(), snapshots: Mutex::default(), snapshot_done: Condvar::new(), next: AtomicU64::new(1),
+            pid: AtomicU32::new(child.id()), interpreter: OnceLock::new(), ended_by: Mutex::default(), key, writer: Outgoing::new(writer), pending: Mutex::default(), snapshots: Mutex::default(), snapshot_done: Condvar::new(), next: AtomicU64::new(1),
             alive: AtomicBool::new(true), retiring: AtomicBool::new(false), child: Mutex::new(child),
             log: Mutex::default(), instances: Mutex::default(), users: AtomicUsize::new(0), overdue: Mutex::default(), missed_pings: AtomicU64::new(0),
         });
         (process, stdout, stderr)
     }
 
-    pub fn raw_handle(&self) -> HANDLE { self.child.lock().unwrap().as_raw_handle() as HANDLE }
-
     pub fn pid(&self) -> u32 { self.pid.load(Ordering::Acquire) }
-    pub fn set_pid(&self, pid: u32) { self.pid.store(pid, Ordering::Release); }
+
+    /// The interpreter the handshake named: held from now on, and only if it is one of
+    /// `job`'s processes (a pid Windows reused for another program is not).
+    pub fn adopt_interpreter(&self, pid: u32, job: &Job) -> Result<(), String> {
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() { return Err(format!("the interpreter (pid {pid}) cannot be held: {}", std::io::Error::last_os_error())); }
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle as _) };
+        if !job.holds(&handle) { return Err(format!("pid {pid}, named at the handshake, is not one of this host's processes")); }
+        self.interpreter.set(handle).map_err(|_| "the interpreter was already named".to_owned())?;
+        self.pid.store(pid, Ordering::Release);
+        Ok(())
+    }
 
     pub fn send(&self, message: &Value) -> Result<(), CallError> {
         self.writer.send(message)
@@ -233,26 +252,35 @@ impl PluginProcess {
         self.writer.close();
     }
 
-    /// End the interpreter (not only its launcher), then the launcher.
-    pub fn kill(&self) {
-        let mut child = self.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if self.pid() != child.id() {
-            unsafe {
-                let handle = OpenProcess(PROCESS_TERMINATE, 0, self.pid());
-                if !handle.is_null() { TerminateProcess(handle, 1); CloseHandle(handle); }
-            }
-        }
-        let _ = child.kill();
+    /// End the interpreter (not only its launcher) and the launcher, and wait for both
+    /// to be gone; `why` is how the session file will say it ended. False when it is
+    /// still there [`KILL_WAIT`] later.
+    pub fn kill(&self, why: &str) -> bool {
+        self.ended_as(why);
+        if let Some(interpreter) = self.interpreter.get() { unsafe { TerminateProcess(interpreter.as_raw_handle() as HANDLE, 1) }; }
+        let _ = self.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).kill();
+        self.wait_exit(KILL_WAIT)
     }
 
-    /// Wait for the process to exit; false if it is still running at the deadline.
+    /// Whether the core is ending it (asked it to exit, or killed it).
+    pub fn ending(&self) -> bool { self.ended_by.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_some() }
+
+    /// Say how the core ends it (the latest word: a kill after an ask is a kill).
+    pub fn ended_as(&self, how: &str) {
+        *self.ended_by.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(how.to_owned());
+    }
+
+    pub fn ended_by(&self) -> Option<String> { self.ended_by.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone() }
+
+    /// Wait until the process is gone: its launcher and, once named, its interpreter
+    /// have exited. False if one is still running at the deadline.
     pub fn wait_exit(&self, deadline: Duration) -> bool {
-        let until = Instant::now() + deadline;
-        loop {
-            if let Ok(Some(_)) = self.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).try_wait() { return true; }
-            if Instant::now() >= until { return false; }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // The handles stay valid while `self` lives: the Child and the OwnedHandle are its own.
+        let mut handles = vec![self.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_raw_handle() as HANDLE];
+        if let Some(interpreter) = self.interpreter.get() { handles.push(interpreter.as_raw_handle() as HANDLE); }
+        let ms = u32::try_from(deadline.as_millis()).unwrap_or(u32::MAX - 1);
+        let waited = unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 1, ms) };
+        waited < WAIT_OBJECT_0 + handles.len() as u32
     }
 
     pub fn exit_code(&self) -> Option<i32> {
@@ -260,71 +288,77 @@ impl PluginProcess {
     }
 
     /// A line the core adds to this process's log (it reads as the plugin's own).
-    pub fn note(&self, line: &str) {
-        let mut log = self.log.lock().unwrap();
-        if log.len() == LOG_LINES { log.pop_front(); }
-        log.push_back(line.to_owned());
-    }
+    pub fn note(&self, line: &str) { self.log.lock().unwrap().keep(line.to_owned()); }
 
-    pub fn tail(&self, lines: usize) -> Vec<String> {
-        let log = self.log.lock().unwrap();
-        log.iter().skip(log.len().saturating_sub(lines)).cloned().collect()
-    }
+    pub fn tail(&self, lines: usize) -> Vec<String> { self.log.lock().unwrap().tail(lines) }
 
-    pub fn read_log(self: &Arc<Self>, stderr: std::process::ChildStderr, echo: impl Fn(&str) + Send + 'static) {
+    /// Read what the plugin writes to stderr into its log, each line also told to
+    /// `echo` with its time (journal microseconds); a line repeating the one before is counted, not repeated.
+    pub fn read_log(self: &Arc<Self>, stderr: std::process::ChildStderr, echo: impl Fn(u64, &str) + Send + 'static) {
         let process = self.clone();
         let _ = std::thread::Builder::new().name(format!("zlc-plugin-log-{}", self.key)).spawn(move || {
+            let tell = |said: Vec<(u64, String)>| for (us, line) in said {
+                echo(us, &line);
+                process.log.lock().unwrap().keep(line);
+            };
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
-                echo(&line);
-                let mut log = process.log.lock().unwrap();
-                if log.len() == LOG_LINES { log.pop_front(); }
-                log.push_back(line);
+                let said = process.log.lock().unwrap().fold.line(line, now_us());
+                tell(said);
             }
+            let said = process.log.lock().unwrap().fold.end();
+            tell(said.into_iter().collect());
         });
     }
 }
 
-/// Every plugin process belongs to this job: none survives the core.
-pub(crate) struct Job(usize);
+const LOG_LINES: usize = 400;
 
-impl Job {
-    pub fn new(memory_limit_mib: Option<u64>) -> Result<Self, String> {
-        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if handle.is_null() { return Err(format!("Cannot create the plugin job: {}", std::io::Error::last_os_error())); }
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if let Some(limit) = memory_limit_mib {
-            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
-            info.JobMemoryLimit = (limit as usize) << 20;
-        }
-        let ok = unsafe { SetInformationJobObject(handle, JobObjectExtendedLimitInformation,
-            (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(), size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32) };
-        if ok == 0 {
-            let error = std::io::Error::last_os_error();
-            unsafe { CloseHandle(handle) };
-            return Err(format!("Cannot limit the plugin job: {error}"));
-        }
-        Ok(Self(handle as usize))
+/// A plugin's last [`LOG_LINES`] lines, and the run of repeats being counted now.
+#[derive(Default)]
+struct Log { lines: VecDeque<String>, fold: Fold }
+
+impl Log {
+    fn keep(&mut self, line: String) {
+        if self.lines.len() == LOG_LINES { self.lines.pop_front(); }
+        self.lines.push_back(line);
     }
 
-    pub fn assign(&self, process: HANDLE) -> Result<(), String> {
-        if unsafe { AssignProcessToJobObject(self.0 as HANDLE, process) } == 0 {
-            return Err(format!("Cannot place the plugin in its job: {}", std::io::Error::last_os_error()));
-        }
-        Ok(())
-    }
-
-    /// Explicit host shutdown only: descendants can retain inherited pipes
-    /// after their parent exits, so the whole owned tree must obey the deadline.
-    pub fn terminate(&self) -> Result<(), String> {
-        if unsafe { TerminateJobObject(self.0 as HANDLE, 1) } == 0 { return Err(std::io::Error::last_os_error().to_string()); }
-        Ok(())
+    fn tail(&self, lines: usize) -> Vec<String> {
+        let mut tail: Vec<String> = self.lines.iter().skip(self.lines.len().saturating_sub(lines)).cloned().collect();
+        tail.extend(self.fold.pending());
+        tail
     }
 }
 
-impl Drop for Job {
-    fn drop(&mut self) { unsafe { CloseHandle(self.0 as HANDLE) }; }
+/// Consecutive identical lines as one, with a count: the first is said at once, the
+/// rest are counted and said as one line when a different line comes (or the stream
+/// ends), as the journal's `device_repeated` says a repeated device call.
+#[derive(Default)]
+pub(crate) struct Fold { last: Option<String>, again: u64, last_us: u64 }
+
+impl Fold {
+    /// What `line`, written at `us`, makes said: the run of repeats it ends, then itself;
+    /// nothing when it repeats the line before.
+    pub fn line(&mut self, line: String, us: u64) -> Vec<(u64, String)> {
+        if self.last.as_ref() == Some(&line) { self.again += 1; self.last_us = us; return Vec::new(); }
+        let mut said: Vec<(u64, String)> = self.end().into_iter().collect();
+        said.push((us, line.clone()));
+        (self.last, self.last_us) = (Some(line), us);
+        said
+    }
+
+    /// The run of repeats not said yet, if any, said now.
+    pub fn end(&mut self) -> Option<(u64, String)> {
+        let said = self.pending().map(|line| (self.last_us, line));
+        self.again = 0;
+        said
+    }
+
+    fn pending(&self) -> Option<String> {
+        (self.again > 0).then(|| format!("(the line above {} more time{}, the last at {})", self.again,
+            if self.again == 1 { "" } else { "s" }, local_time(self.last_us)))
+    }
 }
 
 #[cfg(test)]
@@ -437,17 +471,15 @@ mod snapshot_tests {
 
     #[test]
     fn only_explicit_shutdown_ends_an_owner_with_a_snapshot_write_blocked_in_a_full_pipe() {
-        use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
         let Some((host, _)) = host() else { return };
         // This process deliberately never reads stdin. No device or network
         // is involved; a large instance name fills its real anonymous pipe.
-        let child = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 60"])
-            .creation_flags(0x0800_0000).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let child = host.inner.job.spawn(Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 60"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()), 0x0800_0000).unwrap();
         let (process, stdout, stderr) = PluginProcess::new("blocked-snapshot-test".into(), child);
-        host.inner.job.assign(process.raw_handle()).unwrap();
         host.inner.processes.lock().unwrap().insert(process.pid(), process.clone());
-        process.read_log(stderr, |_| {});
+        process.read_log(stderr, |_, _| {});
         let (inner, reader) = (Arc::downgrade(&host.inner), process.clone());
         let reading = std::thread::spawn(move || crate::read_loop(inner, reader, stdout));
         let instance = "snapshot-instance-".repeat(65536);
@@ -466,5 +498,62 @@ mod snapshot_tests {
         assert!(process.snapshots.lock().unwrap().is_empty());
         assert!(process.pending.lock().unwrap().is_empty());
         assert!(!process.alive.load(Ordering::Acquire));
+    }
+
+    /// (created, exited) of a process, in Windows' 100 ns ticks.
+    fn times(process: &impl AsRawHandle) -> (u64, u64) {
+        use windows_sys::Win32::Foundation::FILETIME;
+        let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+        assert_ne!(unsafe { windows_sys::Win32::System::Threading::GetProcessTimes(process.as_raw_handle() as HANDLE,
+            &mut created, &mut exited, &mut kernel, &mut user) }, 0);
+        let ticks = |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+        (ticks(created), ticks(exited))
+    }
+
+    #[test]
+    fn a_successor_starts_only_after_the_interpreter_not_its_launcher_is_gone() {
+        use std::process::{Command, Stdio};
+        let Some((host, _)) = host() else { return };
+        // A launcher that starts its "interpreter" and exits at once, as a venv's python.exe
+        // would if it did not wait: the child outlives it by seconds.
+        let launcher = host.inner.job.spawn(Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command",
+            "$child = Start-Process -PassThru -WindowStyle Hidden powershell.exe -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 4'; [Console]::Out.WriteLine($child.Id)"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()), 0x0800_0000).unwrap();
+        let (process, stdout, _stderr) = PluginProcess::new("type:successor-test".into(), launcher);
+        let mut said = String::new();
+        BufReader::new(stdout).read_line(&mut said).unwrap();
+        let interpreter: u32 = said.trim().parse().unwrap();
+        process.adopt_interpreter(interpreter, &host.inner.job).expect("the launcher's child was born in the job");
+        assert!(process.child.lock().unwrap().wait().is_ok(), "the launcher has exited");
+        assert!(!process.wait_exit(Duration::ZERO), "its interpreter has not");
+        process.retiring.store(true, Ordering::Release);
+        host.inner.gate("type:successor-test").lock().unwrap().push(process.clone());
+        let successor = host.inner.acquire("type:successor-test", None).unwrap();
+        let (_, gone) = times(process.interpreter.get().unwrap());
+        let (born, _) = times(&*successor.child.lock().unwrap());
+        assert!(gone > 0 && born >= gone, "the successor ({born}) started after the interpreter was gone ({gone})");
+        assert!(host.inner.job.holds(&*successor.child.lock().unwrap()) && host.inner.job.holds(successor.interpreter.get().unwrap()),
+            "the successor's launcher and interpreter are in the job");
+        assert!(host.inner.gate("type:successor-test").lock().unwrap().iter().all(|started| Arc::ptr_eq(started, &successor)));
+        host.inner.done(&successor);
+        assert!(successor.wait_exit(Duration::ZERO), "retired: gone, interpreter and launcher");
+        assert_eq!(successor.ended_by().as_deref(), Some("exited when asked"));
+        host.shutdown();
+    }
+
+    #[test]
+    fn repeated_stderr_lines_are_said_once_with_their_count() {
+        let mut fold = Fold::default();
+        assert_eq!(fold.line("warning".into(), 1_000_000), vec![(1_000_000, "warning".to_owned())]);
+        assert!(fold.line("warning".into(), 2_000_000).is_empty() && fold.line("warning".into(), 3_000_000).is_empty());
+        let said = fold.line("done".into(), 4_000_000);
+        assert_eq!(said.len(), 2);
+        assert_eq!(said[0].0, 3_000_000, "the run is said at its last repeat's time");
+        assert!(said[0].1.starts_with("(the line above 2 more times, the last at "), "{}", said[0].1);
+        assert_eq!(said[1], (4_000_000, "done".to_owned()));
+        assert!(fold.end().is_none(), "nothing pending after a different line");
+        assert!(fold.line("done".into(), 5_000_000).is_empty());
+        assert!(fold.end().unwrap().1.starts_with("(the line above 1 more time, "));
     }
 }
