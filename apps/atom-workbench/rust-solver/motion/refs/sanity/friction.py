@@ -11,8 +11,11 @@ Cases (the request's beams, s and offset):
 - field: as `shifts`, with the request's field (or --field);
 - trap: the atom passing through the focus along û with the tweezer's shifts at its place; the force less the ground
   trap's own (U0 ∇g), averaged over the pass from −2 w0 to +2 w0.
-Printed per velocity: F/(ħk) in units of ħkΓ, and α/(ħk²) = −F/(k² v) (dimensionless, positive where it cools); and the two-level Doppler and
-the lin⊥lin / σ+σ− Sisyphus (low intensity, J=1/2→3/2 and J=1→2) values of α/(ħk²) at the same s and δ for comparison.
+Each speed is run both ways (±v): the force's odd part F_odd = (F(v) − F(−v))/2 is the friction, its even part
+F_even = (F(v) + F(−v))/2 the velocity-independent push (the two beams scattering unequally: a π and a σ beam at different
+detunings). Printed per speed: F_odd and F_even in ħkΓ, and α/(ħk²) = −F_odd/(ħ k² v) (dimensionless, positive where it
+cools; the capture velocity is where −F_odd peaks); and the two-level Doppler and the lin⊥lin / σ+σ− Sisyphus (low
+intensity, J=1/2→3/2 and J=1→2) values of α/(ħk²) at the same s and δ for comparison.
 """
 import argparse, json, math, sys, os
 import numpy as np
@@ -53,9 +56,9 @@ def forces(vs, P, H0, diagL, Cg, k, eps, Om, u, mode, gfix, dt, t_trans, t_avg, 
         k1 = np.zeros((12, 12), np.complex128); k2 = np.zeros((12, 12), np.complex128); k3 = np.zeros((12, 12), np.complex128)
         k4 = np.zeros((12, 12), np.complex128); tmp = np.zeros((12, 12), np.complex128)
         n = int((t_trans[iv] + t_avg[iv]) / dt); n0 = int(t_trans[iv] / dt)
-        start = -2.0 * w0 if mode == 1 else 0.0
+        start = -2.0 * w0 * math.copysign(1.0, v) if mode == 1 else 0.0
         if mode == 1:
-            n0 = 0; n = int(4.0 * w0 / v / dt)
+            n0 = 0; n = int(4.0 * w0 / abs(v) / dt)
         Fsum = 0.0; Rsum = 0.0; cnt = 0
         for s in range(n):
             t = s * dt
@@ -128,12 +131,13 @@ def main():
     P = C.trap_params(S)
     Om = G * np.sqrt(S['s'] / 2)
     kk = float(np.linalg.norm(S['k'][0])); u = S['k'][0] / kk
-    vs = np.array([float(x) for x in a.vs.split(',')])
+    vs = np.array([float(x) for x in a.vs.split(',')]); nv = len(vs); both = np.concatenate([vs, -vs])
     lam2 = math.pi / kk
-    t_trans = np.array([min(max(10.0, lam2 / v), 200.0) for v in vs]); t_avg = np.array([min(max(20.0, 2 * lam2 / v), 400.0) for v in vs])
+    t_trans = np.array([min(max(10.0, lam2 / abs(v)), 200.0) for v in both]); t_avg = np.array([min(max(20.0, 2 * lam2 / abs(v)), 400.0) for v in both])
     mode = 1 if a.case == 'trap' else 0
-    out_F = np.zeros(len(vs)); out_R = np.zeros(len(vs))
-    forces(vs, P, S['H0'], diagL, S['C'], S['k'], S['eps'].astype(np.complex128), Om, u, mode, 1.0, a.dt, t_trans, t_avg, out_F, out_R)
+    out_F = np.zeros(2 * nv); out_R = np.zeros(2 * nv)
+    forces(both, P, S['H0'], diagL, S['C'], S['k'], S['eps'].astype(np.complex128), Om, u, mode, 1.0, a.dt, t_trans, t_avg, out_F, out_R)
+    F_odd = 0.5 * (out_F[:nv] - out_F[nv:]); F_even = 0.5 * (out_F[:nv] + out_F[nv:]); R_mean = 0.5 * (out_R[:nv] + out_R[nv:])
     # the probe's detuning from the cycling line at the case's centre (free: the offset with no Zeeman; else the focus's)
     d0 = S['H0'].diagonal().real; dl = diagL
     delta = -((d0[11] + dl[11]) - (d0[4] + dl[4]))
@@ -141,12 +145,12 @@ def main():
     rows = []
     print(f"case {a.case}: field {np.round(S['Bvec'], 3).tolist()} G, s per beam {s:.2f}, δ(|2,2>→|3',3'>) {delta / G:+.2f}Γ, beams {S['names']}, k {kk:.3f}/µm, Γ/k {G / kk:.2f} µm/µs")
     sis_lin = -3 * delta / G; sis_pm = -(120 / 17) * delta * G / (5 * G * G + 4 * delta * delta)
-    for v, F, R in zip(vs, out_F, out_R):
+    for v, F, Fe, R in zip(vs, F_odd, F_even, R_mean):
         alpha = -F / (kk * kk * v)
-        # α/(ħk²) = −F/(ħ k² v), F/ħ = k ΔR: −ΔR/(k v); positive where it cools
+        # α/(ħk²) = −F_odd/(ħ k² v), F/ħ = k ΔR: −ΔR/(k v); positive where it cools
         alpha_D = -two_level_doppler(s * 7 / 15, delta, G, kk * v) / (kk * v)
-        rows.append(dict(v=float(v), F_over_hbark_gamma=float(F / kk / G), alpha=float(alpha), rate=float(R), alphaDoppler=float(alpha_D)))
-        print(f"  v {v:7.3f} µm/µs (kv/Γ {kk * v / G:.4f}): F/(ħkΓ) {F / kk / G:+.5f}, α/(ħk²) {alpha:+9.3f}, Doppler (2-level, s·7/15) {alpha_D:+8.3f}; scattering {R:.3f}/µs")
+        rows.append(dict(v=float(v), Fodd_over_hbark_gamma=float(F / kk / G), Feven_over_hbark_gamma=float(Fe / kk / G), alpha=float(alpha), rate=float(R), alphaDoppler=float(alpha_D)))
+        print(f"  v {v:7.3f} µm/µs (kv/Γ {kk * v / G:.4f}): F_odd/(ħkΓ) {F / kk / G:+.5f}, F_even {Fe / kk / G:+.5f}, α/(ħk²) {alpha:+9.3f}, Doppler (2-level, s·7/15) {alpha_D:+8.3f}; scattering {R:.3f}/µs")
     print(f"  low-intensity Sisyphus α/(ħk²): lin⊥lin J=1/2→3/2 {sis_lin:+.2f}; σ+σ− J=1→2 {sis_pm:+.2f} (Dalibard & Cohen-Tannoudji 1989)")
     if a.out: json.dump(dict(case=a.case, field=S['Bvec'].tolist(), s=float(s), deltaGamma=float(delta / G), rows=rows, sisyphusLin=sis_lin, sisyphusPM=sis_pm), open(a.out, 'w'))
 
