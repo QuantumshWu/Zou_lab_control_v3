@@ -182,7 +182,9 @@
 //! - The errors no number of trajectories fits beside: where the model's error and the step's share leave a look no
 //!   room for the statistics, the units are taken by their weight there (their errors on what is shown and on T,
 //!   weighed by the held share as the totals are, each over its target) for the work their keep adds a µs, the most
-//!   first, until every look has room again -- the set the looks need, in one keep (`needed`). (Taken one at a time,
+//!   first, until every look has room again -- the set the looks need, in one keep (`needed`); on the scout, whose
+//!   reads are eleven states an output, at the model's error they leave no doubt of (`clear`), the pilot reading the
+//!   same units on all its states. (Taken one at a time,
 //!   a keep an attempt, S3's probe kept fourteen bare drives over fourteen attempts, each a model, its gates and a
 //!   scout; taken by weight alone, it kept its carrier's dressing with them, three to four times dearer a step.)
 //! - Else the work: the run's predicted total work W = w·N, N the trajectories its looks need beside its errors and the
@@ -1219,7 +1221,8 @@ fn booked(bounds: &[Option<f64>]) -> Vec<Booked> {
 /// noise): the units the looks need kept to have room for the statistics (`needed`); else, of the units whose error's
 /// removal alone would pay for the `again` trajectories its model runs before it stands where this one does, each
 /// rated with its kept model and paying beyond its spread, the leading ones by their saving whose keep together saves
-/// the most beyond its spread (`Pricing::joint`).
+/// the most beyond its spread (`Pricing::joint`). On the scout (`early`), whose reads are few, the room is judged at
+/// the model's error they leave no doubt of (`clear`).
 #[allow(clippy::too_many_arguments)]
 fn keep(
     request: &Request,
@@ -1237,6 +1240,7 @@ fn keep(
     scales: &Scales,
     unsampled: [f64; 2],
     again: f64,
+    early: bool,
 ) -> Option<Vec<usize>> {
     let held: Vec<f64> = estimates.iter().map(|e| 1. - e.loss).collect();
     // A unit weighs where it was read: an output with no state read carries every unit's bound alike, and tells none
@@ -1247,13 +1251,15 @@ fn keep(
     let counted: Vec<Estimate> = estimates.iter().map(|e| Estimate { uncounted: 0., ..e.clone() }).collect();
     let mut pricing = Pricing::new(request, light, kept, model, reference, centre, units, measured, means, parts, estimates, fixed, scales, unsampled, again);
     // The units that weigh where the looks have no room, each with the work a µs of its kept model, its mean rate
-    // (none where its model is refused, `Model::new`).
-    let weighing = weighing(&counted, fixed, means, &held, &read);
+    // (none where its model is refused, `Model::new`). On the scout (`early`) the room is judged at the model's error
+    // its few reads leave no doubt of (`clear`); the pilot reads the same units on all its states.
+    let room = if early { clear(measured, fixed, parts, scales, unsampled) } else { fixed.clone() };
+    let weighing = weighing(&counted, &room, means, &held, &read);
     if !weighing.is_empty() {
         let rated: Vec<(usize, Option<f64>)> = weighing.into_par_iter().map(|u| (u, pricing.kept_rates(u).map(|rates| pricing.mean(&rates, None)))).collect();
         let mut cost = vec![None; units.len()];
         rated.into_iter().for_each(|(u, c)| cost[u] = c);
-        let needed = needed(&counted, fixed, means, &held, &read, &cost);
+        let needed = needed(&counted, &room, means, &held, &read, &cost);
         return (!needed.is_empty()).then_some(needed);
     }
     let saving = pricing.saving_at_all();
@@ -1408,7 +1414,7 @@ fn attempt(
         let measured = Measured { errors: &read.errors, output: &read.at, group: &read.from, booked: &booking };
         let means = measured.means(outputs, None, &estimates);
         let fixed = Fixed { model: model_error(&sums(&means, unsampled), unsampled), ..context.fixed.clone() };
-        if let Some(u) = keep(request, light, kept, model, reference, trap.centre, units, &measured, &means, &scout, &estimates, &fixed, &context.scales, unsampled, scout.len() as f64) {
+        if let Some(u) = keep(request, light, kept, model, reference, trap.centre, units, &measured, &means, &scout, &estimates, &fixed, &context.scales, unsampled, scout.len() as f64, true) {
             return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), tau));
         }
         read
@@ -1498,7 +1504,7 @@ fn attempt(
         let step = unseen.as_ref().map_or(clear, unexcluded);
         (context.step, context.checked) = (vec![step; outputs], Some(Checked { companion, pairs, resolution, saw: unseen.is_none() }));
         // Units to keep at the pilot's states (`keep`): their model then runs a pilot again.
-        if let Some(u) = keep(request, light, kept, model, reference, trap.centre, units, &measured, &means, &pilot, &estimates, &context.fixed, &context.scales, unsampled, pilot_size() as f64) {
+        if let Some(u) = keep(request, light, kept, model, reference, trap.centre, units, &measured, &means, &pilot, &estimates, &context.fixed, &context.scales, unsampled, pilot_size() as f64, false) {
             return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), tau));
         }
         // The ledger's items: each folded unit's error on what is shown and on T (its largest over the outputs, weighed by
@@ -2516,6 +2522,34 @@ fn weights(estimates: &[Estimate], fixed: &Fixed, means: &[Vec<[f64; 2]>], held:
 /// The units that weigh where the looks have no room (`weights`), the candidates for the set they need (`needed`).
 fn weighing(estimates: &[Estimate], fixed: &Fixed, means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool]) -> Vec<usize> {
     weights(estimates, fixed, means, held, read).iter().enumerate().filter(|(_, w)| **w > 0.).map(|(u, _)| u).collect()
+}
+
+/// The model's error per output that the reads of a few groups leave no doubt of (`keep` on the scout): its near end,
+/// the errors `fixed` (the units' as `measured` at the states of the groups `parts`, what the reach leaves out,
+/// `unsampled`) less their jackknife interval over the groups at the family of the outputs' two reads, on what is shown
+/// and on T, no less than nothing -- as a rung is left only on what its reads leave no doubt of (# The step). The scout
+/// reads eleven states an output, one a group, and a unit's error is heavy-tailed over the states (it is largest at the
+/// atoms that are hottest): S3's scout read its carrier's dressing as filling the room on eleven states, where its
+/// pilot's eighty-eight booked it at 2.7 % beside 3.7 % in all. An output whose error is no number stays as it is.
+fn clear(measured: &Measured, fixed: &Fixed, parts: &[&Part], scales: &Scales, unsampled: [f64; 2]) -> Fixed {
+    let outputs = fixed.model.len();
+    let left: Vec<Vec<[f64; 2]>> = (0..parts.len())
+        .into_par_iter()
+        .map(|g| {
+            let rest: Vec<&Part> = parts.iter().enumerate().filter(|(h, _)| *h != g).map(|(_, p)| *p).collect();
+            model_error(&sums(&measured.means(outputs, Some(g), &pooled(&rest, scales).0), unsampled), unsampled)
+        })
+        .collect();
+    let looks = 2. * outputs.saturating_sub(1) as f64;
+    let model = (0..outputs)
+        .map(|k| {
+            std::array::from_fn(|i| {
+                let near = fixed.model[k][i] - spread(left.iter().map(|l| l[k][i]), parts.len() as f64).interval_over(looks);
+                if near.is_nan() { fixed.model[k][i] } else { near.max(0.) }
+            })
+        })
+        .collect();
+    Fixed { model, ..fixed.clone() }
 }
 
 /// The units the looks need kept (module documentation, # The model; `keep`): while a look leaves the statistics no
