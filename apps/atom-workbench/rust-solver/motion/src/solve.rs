@@ -3,7 +3,9 @@
 //! # The pipeline
 //! 1. The request's checks; the light; the initial components; the reach and the model with every unit whose existence
 //!    gate fails kept (model.rs, SPEC §1.5); the trap the result reports, the outputs' plan, the initial ensemble and
-//!    what the reach leaves out of it; T(0) by quadrature; the near light's tables over the reach (SPEC §2.3).
+//!    what the reach leaves out of it; T(0) by quadrature; the near light's tables over the reach (SPEC §2.3). What of
+//!    these rests on the model alone is made once for a model and serves every attempt at it; what rests on the
+//!    reach or on the step is an attempt's own (`solve`, `Setting`).
 //! 2. The scout: the first member of every pilot group, at the attempt's first step and at twice it (# The step),
 //!    screened. Where a folded unit is to be kept at its states (`keep`), the attempt ends there and the next begins
 //!    with that model: a model is settled for the price of a few trajectories, not of a pilot.
@@ -97,17 +99,19 @@
 //!       16 % on what is shown and 10 to 16 % on T from none, far ends of 4 to 73 b, and the rung below is the one
 //!       taken; a held atom's at an antinode come to 1.3 to 2.3 b on T, and it is taken too; a tweezer's atom over
 //!       100 µs is certified at 3.34 µs, T told to 3.3 % where its own read against 6.67 µs told 8.1 %.)
-//!     - before that level, more pairs where they could spare it (`blind`, `remedy`). The pairs are asked for
-//!       what they could do: were the error the least the read allows -- its near end at one look --, what the
-//!       read holds above it is the pairs' noise and falls as 1/N; the pairs that could bring the far end within b
-//!       are run, a batch at a time, where what they cost beyond the run's own trajectories -- their companions,
-//!       and what of their finer level the product would not run -- is less than the rung below's pilot, and no
-//!       more of them than cost what it does: at most twice the third level's work is spent before it is read,
-//!       whatever the pairs show.
-//!       Where neither is to be had -- no rung below at the steps' cap, no number of pairs within a run's
-//!       trajectories, a read that is no number -- the work's bounds are used up and the check ends unable to see
-//!       (SPEC §5.1): the step stands, flagged, and every quantity's account takes what the check does not exclude,
-//!       the far end's root (`unexcluded`).
+//!     - before that level, more pairs where their saving is assured (`remedy`). Going down is priced as what it
+//!       mostly is, the rung below's run -- twice the product's work --, the pairs by the probability that the
+//!       read comes within on them (estimate.rs `within_on`: from the read's own value and spread, the spread's
+//!       fall with the pairs bounded by its floor): where it does the rung stands and the run is spared its
+//!       doubling, where it does not the pairs' two levels were run for nothing and the run doubles all the same.
+//!       That saving is a draw, and the pairs are bought, a batch at a time and read again, where its mean lies
+//!       beyond z times its spread (decide.rs `pays`): a read all but within. One that only could come within
+//!       goes down at once.
+//!       Where there is no rung below -- the steps' cap, or a read that excludes nothing -- the pairs are asked
+//!       for what they could do at the best (`blind`), wherever a run's trajectories can take them; where they
+//!       cannot, the work's bounds are used up and the check ends unable to see (SPEC §5.1): the step stands,
+//!       flagged, and every quantity's account takes what the check does not exclude, the far end's root
+//!       (`unexcluded`).
 //! - What enters a quantity's account, at every output alike, is the clear part of its rms, √(M̂ − t·SE) where
 //!   positive, among the same looks (`checked`): nothing where no change is seen, at most the step's share where the
 //!   check let the step stand. It is fixed after the pilot; the product runs one level and reads no step.
@@ -257,11 +261,11 @@
 use crate::adapt;
 use crate::decide::{assured, pays, Outcome, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
-use crate::estimate::{between, draws_for, half_window, occupation, spread, summarize, unseen, Between, Estimate, Fate, Group, Held, Scales, Spread};
+use crate::estimate::{between, draws_for, half_window, occupation, spread, summarize, unseen, within_on, Between, Estimate, Fate, Group, Held, Scales, Spread};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::V3;
-use crate::model::{Envelope, Lights, Model, Run, Sample, Trap, Unit, GROUND};
+use crate::model::{Envelope, Gate, Lights, Model, Reach, Run, Sample, Trap, Unit, GROUND};
 use crate::request::STATES;
 use crate::step::{stumpff, Dynamics, Scratch, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE, TEMPERATURE_TARGET};
@@ -344,32 +348,113 @@ pub struct Solution {
 
 /// The solve of a request (module documentation): every checkpoint handed to `checkpoint` with the estimated wall time
 /// left (ms) where the run's pace gives one, the final solution returned; partial results are never withheld.
+///
+/// A model is made of the units kept, and attempted over a reach (`attempt`) until an attempt changes the units or
+/// gives the solution. What an attempt takes splits by what it rests on:
+/// - on the model alone -- the model with what it holds once made (its plans, its folds), its units, the reference
+///   state's prepared trap, every component's well and the initial ensemble drawn in them, T(0)'s quadrature at its
+///   least, the reported trap, the entries the first rung reads (`Setting`): made once for a model, and the same at
+///   every attempt at it;
+/// - on the reach as well -- the reach itself, the gates over it, how the units are booked, what the reach leaves
+///   out of the ensemble, the kick's curvature, the first rung -- and on the step the attempt begins at too -- the
+///   Brownian path's cell, the tables' bound and so the tables, every trajectory and all that is read on them: an
+///   attempt's own.
+/// So a reach that has grown (`Attempt::Grow`) is attempted with the model as it stands, unless a fold then fails
+/// over it: such units are kept (SPEC §1.5) and the model is closed again, as it is before its first attempt, until
+/// none fails (a model lists only what it folds, model.rs `units`).
 pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64>)) -> Result<Solution, String> {
     request.validate()?;
     let light = Light::new(request);
+    let hm = hbar_over_mass(request.mass_kg);
+    let initial = components(request);
+    // The reference state (SPEC §2.1): the initial component of the largest population, of equal ones the last.
+    let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).expect("a validated request's initial state holds a ground state");
+    let reference = alone(initial[chief].0);
     let (mut kept, mut reach, mut step) = (vec![], request.temperature_uk, None);
     // The last keep made for its predicted saving (`Attempt::Keep`): the units kept before it, the step then and the
     // saving's share; and the units such a keep has been undone for (`Attempt::Undo`), not priced again.
     let (mut priced, mut barred): (Option<(Vec<Unit>, f64, f64)>, Vec<Unit>) = (None, vec![]);
     let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
     loop {
-        // An attempt's results improve on its own last one (module documentation, # Checkpoints).
-        messages.least = 0;
-        match attempt(request, &light, &mut kept, reach, step, priced.as_ref().map(|p| (p.1, p.2)), &barred, &mut messages)? {
-            Attempt::Grow(t, tau) => (reach, step) = (t, Some(tau)),
-            Attempt::Keep(u, tau, share) => {
-                priced = share.map(|share| (kept.clone(), tau, share));
-                barred.extend(share.map(|_| u.clone()));
-                kept.push(u);
-                step = Some(tau);
+        let model = Model::new(request, &light, &kept)?;
+        // A model's units ask nothing of its trap: the two are made side by side on the pool.
+        let (trap, units) = rayon::join(|| model.trap(&reference, &model.prepared()), || model.units());
+        let trap = trap?;
+        // The reach of a temperature with the model's gates over it, and the units whose folds do not exist there.
+        let over = |reach: f64| {
+            let judged = model.reach(&trap, &reference, reach, unseen(MOST_TRAJECTORIES as f64));
+            let gates = model.gates(&units, &judged);
+            (judged, gates)
+        };
+        let failing = |gates: &[Gate]| -> Vec<Unit> { units.iter().zip(gates).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect() };
+        let (mut judged, mut gates) = over(reach);
+        // The units this model is to be closed again with: those that fail over the reach, or the one an attempt keeps.
+        let mut more = failing(&gates);
+        if more.is_empty() {
+            // The reported trap and the entries the first rung reads ask nothing of one another: side by side on the pool.
+            let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, &light, alone(s))).collect::<Result<_, _>>()?;
+            let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
+            let (reported, entries) = rayon::join(|| model.trap(&reference, &model.reported()), || model.sampled(&model.running()));
+            let setting = Setting { model: &model, reference, units: &units, trap: &trap, ensemble: &ensemble, depth: ensemble.depths()[chief], reported: reported.ok(), entries, start: exact(&ensemble, &ensemble.kinetic(0)) };
+            while more.is_empty() {
+                // An attempt's results improve on its own last one (module documentation, # Checkpoints).
+                messages.least = 0;
+                match attempt(request, &light, &setting, &judged, &gates, &kept, reach, step, priced.as_ref().map(|p| (p.1, p.2)), &barred, &mut messages)? {
+                    Attempt::Grow(t, tau) => {
+                        (reach, step) = (t, Some(tau));
+                        (judged, gates) = over(reach);
+                        more = failing(&gates);
+                    }
+                    Attempt::Keep(u, tau, share) => {
+                        priced = share.map(|share| (kept.clone(), tau, share));
+                        barred.extend(share.map(|_| u.clone()));
+                        more = vec![u];
+                        step = Some(tau);
+                    }
+                    Attempt::Undo => {
+                        let (before, tau, _) = priced.take().expect("only an attempt told of a priced keep undoes one");
+                        (kept, step) = (before, Some(tau));
+                        break;
+                    }
+                    Attempt::Done(s) => return Ok(s),
+                }
             }
-            Attempt::Undo => {
-                let (before, tau, _) = priced.take().expect("only an attempt told of a priced keep undoes one");
-                (kept, step) = (before, Some(tau));
-            }
-            Attempt::Done(s) => return Ok(s),
         }
+        kept.extend(more);
     }
+}
+
+/// What an attempt takes of its model alone (`solve`): nothing of it rests on the reach the model is judged over or
+/// on the step, so it is made once for a model and is the same at every attempt at it.
+struct Setting<'a> {
+    model: &'a Model,
+    /// The reference state's ground populations (SPEC §2.1).
+    reference: [f64; GROUND],
+    /// The model's folded units (model.rs `units`).
+    units: &'a [Unit],
+    /// The reference state's prepared trap.
+    trap: &'a Trap,
+    /// The initial ensemble, every component in its own well, and the depth at the reference state's bottom (k_BT).
+    ensemble: &'a Ensemble<'a>,
+    depth: f64,
+    /// The trap every reported quantity describes (SPEC §1.3: trapFrequencyKHz, n̄, the validated regime and T's
+    /// windows): the trap light's potential with the other lights' phase-averaged shifts at the reference state
+    /// (`Model::reported`). None where it has no minimum the descent reaches -- the atoms are not held by the light
+    /// they run in: a mathematical object that does not exist, not a kind of scene --: the prepared trap's is
+    /// reported then, and flagged.
+    reported: Option<Trap>,
+    /// The entries the first rung reads (`admissible`; model/assemble.rs `Model::sampled`).
+    entries: Vec<[f64; 2]>,
+    /// T(0) and n̄(0) by quadrature with no budget (`exact`): the two levels it takes at least -- an error needs two
+    /// to differ --, for the results an attempt's pilot sends before its own (`attempt`).
+    start: (V3, f64),
+}
+
+/// T(0)'s quadrature as a result takes it (ensemble.rs `Ensemble::kinetic`): (ħ/m)⟨κ_a²⟩ per lab axis, and the largest
+/// of the components' differences between their last two levels over their values, T(0)'s booked error
+/// (`Fixed::start`).
+fn exact(ensemble: &Ensemble, kinetic: &[Quadrature]) -> (V3, f64) {
+    (ensemble.momentum(&kinetic.iter().map(|k| k.eta).collect::<Vec<_>>()), kinetic.iter().map(|k| k.difference / k.eta).fold(0., f64::max))
 }
 
 /// The solve's messages to the app (module documentation, # Checkpoints).
@@ -414,7 +499,8 @@ impl Messages<'_> {
 }
 
 /// How one attempt at a model ends (`attempt`): the pilot's atoms outgrew the reach the model was judged over (its new
-/// temperature, µK), a unit is to be kept -- each with the step the attempt stood at, the next attempt's first rung; a
+/// temperature, µK: the model is attempted again as it stands, `solve`), a unit is to be kept -- each with the step
+/// the attempt stood at, the next attempt's first rung; a
 /// keep with the share of the work it was predicted to save where that is why it is kept (`keep`) --, the last such
 /// keep is undone (its model's step, once screened, makes it dearer than the model before it), or the solution.
 enum Attempt {
@@ -640,41 +726,70 @@ enum Remedy {
     Pairs(u64),
     /// The rung below's pilot: the third level, which tests this rung's order.
     Below,
-    /// Neither: no number of pairs within a run's trajectories could bring it within, and there is no rung below, or
-    /// the read excludes nothing.
+    /// Neither: there is no rung below, or the read excludes nothing, and no number of pairs within a run's
+    /// trajectories could bring it within.
     Neither,
 }
 
-/// The remedy (module documentation, # The step) of a rung read on `have` pairs that asks the `factor` of them
-/// (`blind`), of a run whose product is predicted to take `product` trajectories at its step and whose pilot is
-/// `pilot` trajectories; `begins`: the trajectories the rung's check began with; `rung`: whether the rung below is to
-/// be had -- the ladder has it (`MOST_STEPS`), and the read excludes something (`readable`). Work in trajectories at
-/// the step τ -- a trajectory's steps go as 1/τ --, beyond the trajectories the run takes at τ whatever the check
-/// does (the product's):
-/// - the rung below's pilot, the third level: the pilot's trajectories at τ/2, 2·pilot. It tests this rung's order
-///   (`settle`): the rung then stands where that read certifies it (`certifies`), and where it is left the pilot
-///   run is the rung below's own;
-/// - the pairs that could bring the rung within, P = factor·have, from N pairs on: their companions at 2τ, half a
-///   trajectory each, and what of their finer level the product would not run, ½(P − N) + (P − max(product, N))₊.
-/// The pairs where from the pairs in hand on that is the less work, a batch of them, to the number asked and at most
-/// to twice the pairs the prediction rests on (`batch`); they are read again. What the pairs could do is a hope, and
-/// it is bounded: where they do not bring the rung within, the third level is read all the same and what they cost
-/// was spent beside it, so no more are asked than cost, from the pairs the check began with on, what it does.
-/// Whatever the pairs then show, the check has spent at most twice the third level's work before it reads it -- the
-/// least a rule can promise that does not know what the pairs will show (the rented skis: rent until the rent paid is
-/// the price). Else the rung below's pilot, where it is to be had; else neither -- the work's bounds are used up,
+/// The remedy (module documentation, # The step) of a rung at the ladder's top whose `read` on `have` pairs is not
+/// within the step's share, of a run whose product is predicted to take `product` trajectories at its step and whose
+/// pilot is `pilot` trajectories; `factor`: the pairs it could come within on at the best, over those it has
+/// (`blind`); `rung`: whether the rung below is to be had -- the ladder has it (`MOST_STEPS`), and the read excludes
+/// something (`readable`).
+///
+/// With a rung below there are two ways on. Work in trajectories at the step τ (a trajectory's steps go as 1/τ),
+/// from here to the run's end, N = `product`:
+/// - down now: the rung below's pilot -- the pilot's trajectories at τ/2 -- and its product, W_d = 2·max(N, pilot).
+///   That pilot is this rung's third level, and the rung stands by it where its read certifies the rung
+///   (`certifies`); it is priced as the rung taken, because under the order the reads rest on that read, carried
+///   to τ, is this rung's own number again with no less noise -- the same where the pairs stay together, 2^p to
+///   2^{2p} times where they part --, and comes within no more often than the own read, which did not. Where it
+///   does certify -- the companion at 2τ lay beyond the steps the order holds at -- going down has cost less than
+///   its price;
+/// - pairs to P, then down unless they read within. With π(P) the probability that the read comes within on P
+///   pairs (estimate.rs `within_on`: from the read's own value and spread; the least likely look's, which no joint
+///   probability exceeds): where it does, the rung stands, and what was run beside the product is the pairs'
+///   companions at 2τ, half a trajectory each, and what of their finer level lies beyond N -- to the run's end
+///   W_s(P) = ½(P − have) + max(N, P) − have; where it does not, both levels of the pairs were run for the read
+///   alone, (3/2)(P − have), and going down follows whole.
+/// So the pairs' saving over going down now is a draw: S = W_d − W_s(P) with the probability π, −(3/2)(P − have)
+/// with 1 − π. Its mean is the difference of the two ways' expected work, π S − (1 − π)(3/2)(P − have); its spread
+/// is the draw's own, √(π(1 − π)) (S + (3/2)(P − have)). The pairs are bought where that saving is told from
+/// nothing (decide.rs `pays`: the mean beyond z times the spread -- what every spend for a predicted saving is held
+/// to): a batch toward the P of the largest assured saving (`batch`: at most to twice the pairs the read rests on),
+/// read again and decided again from that read -- what is spent is spent, and each decision compares what is still
+/// to come. Else down. A saving that comes with the probability π is so told only above π = z²/(1 + z²), four in
+/// five, were the pairs free: pairs are for a read that is all but within, not for one that could be.
+///
+/// The mean alone -- pairs wherever the expected work is the less -- was built and measured, and is not the rule
+/// (SPEC §5.3). π takes the spread as eleven groups read it, and the pair differences' tails are heavy: on four
+/// times the pairs the spreads read 1.5 to 2.3 times what the law gives from the first eleven groups, and of the
+/// four seeds that bought pairs at π between 0.23 and 0.81 three went down all the same.
+///
+/// Without a rung below nothing prices the pairs: they are asked for what they could do at the best (`factor`),
+/// wherever a run's trajectories can take them, a batch at a time; else neither -- the work's bounds are used up,
 /// and the check stays unable to see (SPEC §5.1).
-fn remedy(factor: f64, have: u64, begins: u64, product: f64, pilot: u64, rung: bool) -> Remedy {
-    let pairs = factor * have as f64;
-    let cost = |from: u64| 0.5 * (pairs - from as f64) + (pairs - product.max(from as f64)).max(0.);
-    let below = if rung { 2. * pilot as f64 } else { f64::INFINITY };
-    let to_be_had = pairs <= MOST_TRAJECTORIES as f64 && have < MOST_TRAJECTORIES && cost(begins) <= below;
-    if to_be_had && cost(have) < below {
-        Remedy::Pairs(batch(pairs, have))
-    } else if rung {
-        Remedy::Below
-    } else {
-        Remedy::Neither
+fn remedy(read: &Between, factor: f64, have: u64, product: f64, pilot: u64, rung: bool) -> Remedy {
+    if !rung {
+        let pairs = factor * have as f64;
+        return if pairs <= MOST_TRAJECTORIES as f64 && have < MOST_TRAJECTORIES { Remedy::Pairs(batch(pairs, have)) } else { Remedy::Neither };
+    }
+    let looks = judged(read);
+    let down = 2. * product.max(pilot as f64);
+    // What P pairs save where the rung then stands and what they cost where it is left, and the saving's read.
+    let ends = |pairs: u64| {
+        let more = (pairs - have) as f64;
+        (down - (0.5 * more + product.max(pairs as f64) - have as f64), 1.5 * more)
+    };
+    let saving = |pairs: u64| {
+        let ((stands, left), within) = (ends(pairs), looks.iter().map(|(read, bound)| within_on(read, *bound, pairs as f64 / have as f64)).fold(1., f64::min));
+        Read { value: within * stands - (1. - within) * left, spread: Spread { error: (within * (1. - within)).sqrt() * (stands + left), groups: f64::INFINITY } }
+    };
+    // The pairs that could save anything: fewer than cost, where the rung stands, what going down does.
+    let most = (have / GROUP + 1..=MOST_TRAJECTORIES / GROUP).map(|groups| groups * GROUP).take_while(|&pairs| ends(pairs).0 > 0.).map(|pairs| (saving(pairs), pairs)).max_by(|a, b| assured(a.0).total_cmp(&assured(b.0)).then(b.1.cmp(&a.1)));
+    match most {
+        Some((saving, pairs)) if pays(0., saving) => Remedy::Pairs(batch(pairs as f64, have)),
+        _ => Remedy::Below,
     }
 }
 
@@ -963,9 +1078,8 @@ fn keep(
     ranked.first().filter(|c| pays(0., c.saving)).map(|c| (c.unit, Some(c.saving.value)))
 }
 
-/// One attempt at the solve with the units `kept` and the reach at `reach` µK (module documentation, # The pipeline). The
-/// units its model's closure keeps join `kept`, the solve's one set: a unit an attempt keeps after its pilot is a unit of
-/// the closed model (a drive of a carrier the closure made near), and the next attempt's model is built from both.
+/// One attempt at the solve (module documentation, # The pipeline) with the model of the units `kept` as `setting`
+/// holds it, judged over the reach `judged` of the temperature `reach` µK, where none of its `gates` fails.
 /// `step`: the step the attempt before stood at, this one's first rung. `priced`: the model's last unit was kept for a
 /// predicted saving -- the step of the model before it and the saving's share of the work. The price knew the kept
 /// model's work a step, not the step it needs (pricing reads no step); where the screen then takes a step at which the
@@ -975,7 +1089,10 @@ fn keep(
 fn attempt(
     request: &Request,
     light: &Light,
-    kept: &mut Vec<Unit>,
+    setting: &Setting,
+    judged: &Reach,
+    gates: &[Gate],
+    kept: &[Unit],
     reach: f64,
     step: Option<f64>,
     priced: Option<(f64, f64)>,
@@ -983,71 +1100,32 @@ fn attempt(
     messages: &mut Messages,
 ) -> Result<Attempt, String> {
     let hm = hbar_over_mass(request.mass_kg);
-    let initial = components(request);
-    // The reference state (SPEC §2.1): the initial component of the largest population, of equal ones the last.
-    let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).expect("a validated request's initial state holds a ground state");
-    let reference = alone(initial[chief].0);
-    // The model: every unit whose fold does not exist over the reach kept (SPEC §1.5), closed again until none fails (a
-    // model lists only what it folds, model.rs `units`). A model's units ask nothing of its trap and reach: the two are
-    // made side by side on the pool.
-    let (model, trap, judged, units, gates) = loop {
-        let model = Model::new(request, light, kept)?;
-        let reached = || model.trap(&reference, &model.prepared()).map(|trap| (model.reach(&trap, &reference, reach, unseen(MOST_TRAJECTORIES as f64)), trap));
-        let (reached, units) = rayon::join(reached, || model.units());
-        let (judged, trap) = reached?;
-        let gates = model.gates(&units, &judged);
-        let failing: Vec<Unit> = units.iter().zip(&gates).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-        if failing.is_empty() {
-            break (model, trap, judged, units, gates);
-        }
-        kept.extend(failing);
-    };
+    let Setting { model, reference, units, trap, ensemble, depth, .. } = *setting;
+    let entries = &setting.entries;
+    // The ensemble's proposals so far that read deeper than their well's bottom: the attempts' before this one.
+    let deeper = ensemble.deeper();
     // The folded units: which are read at the states, which booked at their gates' bounds (`booked`).
-    let booking = booked(&units.iter().zip(&gates).map(|(u, g)| g.error_bound(u)).collect::<Vec<_>>());
+    let booking = booked(&units.iter().zip(gates).map(|(u, g)| g.error_bound(u)).collect::<Vec<_>>());
     let reading: Vec<Unit> = units.iter().zip(&booking).filter(|(_, b)| matches!(b, Booked::Read(_))).map(|(u, _)| u.clone()).collect();
-    // The trap every reported quantity describes (SPEC §1.3: trapFrequencyKHz, n̄, the validated regime and T's
-    // windows): the trap light's potential with the other lights' phase-averaged shifts at the reference state
-    // (`Model::reported`). Where it has no minimum the descent reaches -- the atoms are not held by the light they run in: a
-    // mathematical object that does not exist, not a kind of scene -- the prepared trap's is reported, and flagged.
-    //
     // What the reach the model was judged over leaves out of the initial ensemble (model/reach.rs `Model::left_out`): of
     // the atoms and of their kinetic energy, by the ensemble's quadrature of its own density -- no atom is drawn --, a
     // level of it with no more evaluations of the potential than the most trajectories a solve runs have initial atoms.
-    //
-    // The reported trap, what the reach leaves out and what the first rung reads (`admissible`: the entries, and the
-    // kick's curvature) ask nothing of one another: they are made side by side on the pool.
-    let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, light, alone(s))).collect::<Result<_, _>>()?;
-    let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
-    let (reported, (unsampled, (entries, kick))) = rayon::join(
-        || model.trap(&reference, &model.reported()),
-        || rayon::join(|| model.left_out(&judged, &ensemble, MOST_TRAJECTORIES), || (model.sampled(&model.running()), model.kick_curvature(&judged, &trap))),
-    );
-    let (report, unheld) = match reported {
-        Ok(t) => (t, false),
-        Err(_) => (trap.clone(), true),
-    };
+    // It and the kick's curvature over the reach (`admissible`) ask nothing of one another: side by side on the pool.
+    let (unsampled, kick) = rayon::join(|| model.left_out(judged, ensemble, MOST_TRAJECTORIES), || model.kick_curvature(judged, trap));
+    let (report, unheld) = (setting.reported.as_ref().unwrap_or(trap), setting.reported.is_none());
     let scales = Scales { hbar_over_mass: hm, frequencies: report.lab };
     let plan = Plan::new(&request.times_us, report.lab);
     let outputs = plan.times.len();
     let row: [f64; STATES] = std::array::from_fn(|s| request.initial_density[(s, s)].re);
-    let depth = ensemble.depths()[chief];
     let mut ledger = Ledger::default();
     ledger.note = Some(format!("初始系综：每个初态分量的原子束缚在它自己的势阱里（只含束缚原子的热分布，每个轴再乘谐振子的 Wigner 因子，T = {} μK）；布居最大的初态的阱深为 {:.1} k_BT", request.temperature_uk, depth));
     if unheld {
         ledger.flag("计算所用光场中的势没有极小：阱频与 n̄ 按初始势阱给出".into());
     }
-    let exact = |kinetic: &[Quadrature]| -> (V3, f64) {
-        (ensemble.momentum(&kinetic.iter().map(|k| k.eta).collect::<Vec<_>>()), kinetic.iter().map(|k| k.difference / k.eta).fold(0., f64::max))
-    };
-    // T(0) and n̄(0) by quadrature (ensemble.rs `Ensemble::kinetic`), twice. Here with no budget: the two levels it takes
-    // at least -- an error needs two to differ --, for the results the pilot's stages send. After the pilot with as many
-    // evaluations of the potential as the pilot took steps: a step evaluates the potential's expansion at least once (its
-    // reference flow's, SPEC §2.1), so the quadrature costs no more than the pilot the solve has just run, in any trap;
-    // where that budget ends it before its levels agree, their difference is T(0)'s booked error (`Fixed::start`).
-    let (momentum, start) = exact(&ensemble.kinetic(0));
+    let (momentum, start) = setting.start;
     // The ladder's first rung over the reach the model is judged over: an attempt that begins at the step the one
     // before stood at begins no higher than its own first rung (a reach that has grown lowers it).
-    let first_rung = first_rung(plan.end, trap.frequencies.iter().copied().fold(0., f64::max), kick, &entries, judged.speed, typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3.))
+    let first_rung = first_rung(plan.end, trap.frequencies.iter().copied().fold(0., f64::max), kick, entries, judged.speed, typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3.))
         .ok_or_else(|| format!("找不到可用的时间步长：在每条轨迹的步数上限（{MOST_STEPS} 步）之内，没有步长能分辨阱中的振荡、光场中势阱的曲率和光场沿原子路径的变化（或者阱频、曲率、原子速率不是有限数）"))?;
     // What the reach's falsifier compares the T read with: the largest kinetic temperature along an axis of the
     // ensemble the reach was made for (model.rs `Reach::kinetic_uk`: T_r where the trap is classical, the zero point's
@@ -1062,8 +1140,8 @@ fn attempt(
     // Brownian path.
     let begins = step.map_or(first_rung, |step| step.min(first_rung));
     let (frequency, typical, end) = (trap.frequencies.iter().copied().fold(0., f64::max), typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3.), plan.end);
-    let above = |tau: f64| 4. * tau <= end && admissible(2. * tau, frequency, kick, &entries, judged.speed) && admissible(4. * tau, frequency, kick, &entries, typical);
-    let domain = Domain { model: &model, reach: &judged, hbar_over_mass: hm, frequency, kick, sampled: &entries };
+    let above = |tau: f64| 4. * tau <= end && admissible(2. * tau, frequency, kick, entries, judged.speed) && admissible(4. * tau, frequency, kick, entries, typical);
+    let domain = Domain { model, reach: judged, hbar_over_mass: hm, frequency, kick, sampled: entries };
     let mut context = Context {
         momentum,
         fixed: Fixed { model: vec![[0.; 2]; outputs], start },
@@ -1085,8 +1163,8 @@ fn attempt(
     // before a trajectory has run; it is not the work the table saves. What a grid held back misses is read at the
     // atoms below.
     let most = (pilot_size() as f64 * (context.plan.end / context.tau + context.plan.end / (2. * context.tau))).ceil() as usize;
-    let mut tables = model.tabulate(&judged, most);
-    let run = Run::tabulated(&model, &tables, reference);
+    let mut tables = model.tabulate(judged, most);
+    let run = Run::tabulated(model, &tables, reference);
 
     // The pilot's groups (module documentation, # The pipeline): the run's first trajectories, at two levels.
     let first = MOST_TRAJECTORIES / GROUP;
@@ -1096,31 +1174,31 @@ fn attempt(
     // Whether the pilot's atoms have outgrown the reach (`outgrown`), and the temperature it then grows to: the
     // attempt ends there, and its check spends nothing further on a step the next attempt settles anew (`settle`).
     let scales = context.scales;
-    let grown = |pilot: &[&Part]| outgrown(&outside(&model, &judged, pilot), left, &pooled(pilot, &scales).0, held);
+    let grown = |pilot: &[&Part]| outgrown(&outside(model, judged, pilot), left, &pooled(pilot, &scales).0, held);
     let mut levels = Levels::default();
 
     // The scout (module documentation, # The pipeline): the first member of every pilot group at both levels, screened;
     // where a unit is to be kept at its states, the attempt ends here -- for the price of the scout, not of a pilot.
     // The pilot's read of the same below stands for the result.
-    if matches!(settle(&run, &ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &dearer, &|pilot| grown(pilot).is_some(), messages), Settled::Dearer) {
+    if matches!(settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &dearer, &|pilot| grown(pilot).is_some(), messages), Settled::Dearer) {
         return Ok(Attempt::Undo);
     }
     let scouted = {
         let tau = context.tau;
         let scout: Vec<&Part> = levels.fine.iter().collect();
         let estimates = pooled(&scout, &context.scales).0;
-        let read = sampled(&model, &reading, &tables, &scout, None);
+        let read = sampled(model, &reading, &tables, &scout, None);
         let measured = Measured { errors: &read.errors, output: &read.at, group: &read.from, booked: &booking };
         let means = measured.means(outputs, None);
         let fixed = Fixed { model: model_error(&sums(&means, unsampled), unsampled), ..context.fixed.clone() };
-        if let Some((u, share)) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &means, &scout, &estimates, &fixed, &context.scales, unsampled, scout.len() as f64, barred) {
+        if let Some((u, share)) = keep(request, light, kept, model, reference, trap.centre, units, &measured, &means, &scout, &estimates, &fixed, &context.scales, unsampled, scout.len() as f64, barred) {
             return Ok(Attempt::Keep(units[u].clone(), tau, share));
         }
         read
     };
     // The pilot: its groups' other members at both levels, screened. Where the check ended unable to see, the reads
     // its last rung is held by: what they do not exclude is booked (`unexcluded`), and flagged.
-    let unseen = match settle(&run, &ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &dearer, &|pilot| grown(pilot).is_some(), messages) {
+    let unseen = match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &dearer, &|pilot| grown(pilot).is_some(), messages) {
         Settled::Dearer => return Ok(Attempt::Undo),
         Settled::Capped => {
             context.ledger.flag(capped());
@@ -1139,13 +1217,17 @@ fn attempt(
         if let Some(t) = grown(&pilot) {
             return Ok(Attempt::Grow(t, tau));
         }
+        // T(0) and n̄(0) by quadrature again (`Setting::start`), with as many evaluations of the potential as the pilot
+        // took steps: a step evaluates the potential's expansion at least once (its reference flow's, SPEC §2.1), so
+        // the quadrature costs no more than the pilot the solve has just run, in any trap; where that budget ends it
+        // before its levels agree, their difference is T(0)'s booked error (`Fixed::start`).
         let steps = counts.steps + levels.coarse.iter().map(|p| p.counts.steps).sum::<u64>();
-        (context.momentum, context.fixed.start) = exact(&ensemble.kinetic(steps));
+        (context.momentum, context.fixed.start) = exact(ensemble, &ensemble.kinetic(steps));
 
         // The model's errors at the pilot's states (SPEC §5.2): each folded unit's per output, the held atoms' mean over
         // the first member of every group -- one a group keeps every group in the mean's spread, and a unit's error is a
         // function of the state, read as well on eleven states an output as on eighty-eight.
-        let Sampled { at, from, errors, .. } = sampled(&model, &reading, &tables, &pilot, Some(scouted));
+        let Sampled { at, from, errors, .. } = sampled(model, &reading, &tables, &pilot, Some(scouted));
         let measured = Measured { errors: &errors, output: &at, group: &from, booked: &booking };
         let means = measured.means(outputs, None);
         context.fixed.model = model_error(&sums(&means, unsampled), unsampled);
@@ -1199,7 +1281,7 @@ fn attempt(
         let step = unseen.as_ref().map_or(clear, unexcluded);
         (context.step, context.checked) = (vec![step; outputs], Some(Checked { companion, pairs, resolution, saw: unseen.is_none() }));
         // A unit to keep at the pilot's states (`keep`): its model then runs a pilot again.
-        if let Some((u, share)) = keep(request, light, kept, &model, reference, trap.centre, &units, &measured, &means, &pilot, &estimates, &context.fixed, &context.scales, unsampled, pilot_size() as f64, barred) {
+        if let Some((u, share)) = keep(request, light, kept, model, reference, trap.centre, units, &measured, &means, &pilot, &estimates, &context.fixed, &context.scales, unsampled, pilot_size() as f64, barred) {
             return Ok(Attempt::Keep(units[u].clone(), tau, share));
         }
         // The ledger's items: each folded unit's error on what is shown and on T (its largest over the outputs, weighed by
@@ -1218,7 +1300,7 @@ fn attempt(
         }
         context.ledger.item("初始时就在估计的活动范围之外的原子所占的比例", unsampled[0], "对初始分布数值积分得到（含积分最后两级之差），计入布居的模型误差");
         context.ledger.item("初始时就在估计的活动范围之外的原子占初始动能的比例", unsampled[1], "对初始分布数值积分得到（含积分最后两级之差），计入温度的模型误差");
-        Run::tabulated(&model, &tables, reference)
+        Run::tabulated(model, &tables, reference)
     };
 
     // The product (module documentation, # Stopping): on from the pilot's trajectories at the run's step, the run's
@@ -1230,12 +1312,12 @@ fn attempt(
     parts.append(&mut levels.further[0]);
     let booked = context.fixed.clone();
     let read = |state: &State| -> [f64; 2] {
-        let errors = model.errors_at(&units, &state.sample, Some(&tables));
+        let errors = model.errors_at(units, &state.sample, Some(&tables));
         let reads = model.table_reads(&tables, std::slice::from_ref(&state.sample));
         let sum = errors.iter().chain(reads.iter().map(|table| &table.whole[0])).fold([0.; 2], |sum, e| [sum[0] + e.population, sum[1] + e.temperature]);
         sum.map(|x| x.min(1.))
     };
-    let (e, l, c) = product(&run, &ensemble, &domain, &mut context, &mut parts, &numbers, &read, messages);
+    let (e, l, c) = product(&run, ensemble, &domain, &mut context, &mut parts, &numbers, &read, messages);
     // The reach outgrown as far as the product reads (# The reach's atoms): some look has no room for the statistics
     // with what the atoms outside the reach carry, and has room without it. The reach grows to the temperature read
     // where that is above it, and the next attempt begins; else the account stands as read, flagged.
@@ -1245,7 +1327,7 @@ fn attempt(
         }
     }
     // A point of the prepared potential below the bottom the ensemble was drawn about (ensemble.rs, # Its draw).
-    if ensemble.deeper() > 0 {
+    if ensemble.deeper() > deeper {
         context.ledger.flag("初态的势在所取的阱底之外还有更深的地方：初始系综只取到该阱底的阱深为止".into());
     }
     Ok(Attempt::Done(assemble(&context, &e, &l, &c, parts.len() as u64 * GROUP)))
@@ -1405,8 +1487,9 @@ enum Settled {
 ///   of the ladder, is read on a third level -- the pilot's trajectories at 4τ, a quarter of a trajectory each -- and
 ///   its read, lowered by the order, is the one this rung inherits: its order is tested like any other's. Where there
 ///   is no rung above (the ladder's top), the remedy of `remedy`: more pairs -- the product's next groups at both
-///   levels --, bounded by the third level's work; or that level, the rung below's pilot: the members so far at τ/2,
-///   read against this rung's level, this rung's levels kept whole meanwhile (`Levels::upper`). Where that read
+///   levels --, where their saving over going down is assured; or the third level, the rung below's pilot: the
+///   members so far at τ/2, read against this rung's level, this rung's levels kept whole meanwhile
+///   (`Levels::upper`). Where that read
 ///   refutes nothing, nothing lies beyond, and carried to this rung's step it reads within the step's share
 ///   (`certifies`: the criterion this rung's own read did not meet), this rung stands as it was -- the rung below
 ///   was read, not taken --, and that read stays with it (`Levels::below`): the one its check is told and booked by
@@ -1427,8 +1510,8 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
     let [fine, coarse] = pair(run, ensemble, domain, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
     absorb(&mut levels.fine, fine);
     absorb(&mut levels.coarse, coarse);
-    // The trajectories a rung's check begins with, and whether it is the pilot's.
-    let (begins, pilot) = (numbers.len() as u64 * members.end, members.end == GROUP);
+    // Whether the check is the pilot's: all the members of a group in.
+    let pilot = members.end == GROUP;
     loop {
         let read = {
             let (fine, coarse) = levels.paired();
@@ -1479,7 +1562,7 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
             // The product's trajectories as the pairs' finer level predicts them, beside the step's share.
             let (have, estimates) = (fine.len() as u64 * GROUP, pooled(&fine, &context.scales).0);
             let product = looks(&estimates, &context.fixed, &context.step).into_iter().filter(Look::fits).map(|l| l.need()).fold(0., f64::max).min(MOST_TRAJECTORIES as f64);
-            match remedy(factor, have, begins, product, pilot_size(), !lowest && readable(&read)) {
+            match remedy(&read, factor, have, product, pilot_size(), !lowest && readable(&read)) {
                 Remedy::Pairs(pairs) => {
                     let next: Vec<u64> = (have / GROUP..pairs / GROUP).collect();
                     let more = pair(run, ensemble, domain, &context.plan, context.tau, &next, 0..GROUP, false, messages, &mut |prefix, messages| {
@@ -2710,33 +2793,51 @@ mod tests {
         assert!(blind(&row) == Some(f64::INFINITY) && !readable(&row) && readable(&at(None)));
     }
 
-    /// The remedy of a rung of untested order (`remedy`) on a pilot of 88 pairs, in trajectories at τ beyond the
-    /// product's own; the third level, the rung below's pilot, is 176.
-    /// - A product of 400 trajectories and a rung that asks twice its pairs: the 88 further pairs cost their
-    ///   companions' 44 (their finer level is the product's): pairs, to 176. Asking 5 % more pairs takes one group
-    ///   more (a batch's least); asking 4.5 times, 396 pairs for 154, takes them by doubling.
-    /// - Pairs beyond the product's cost their finer level too: 4.69 times the pilot, 413 pairs, cost 162 + 13; 4.7
-    ///   times cost more than the third level, which is read instead.
-    /// - The bound counts the pairs already run: of 352 read, 1.1 times as many cost 18 more and 150 since the check
-    ///   began: pairs; 1.2 times as many, 58 and 190: the third level, though what is left would be the less.
-    /// - A run that needs no more than its pilot: twice the pairs cost 44 + 88; three times, 88 + 176: the third level.
-    /// - No number of pairs, or a run already at its most: the third level.
-    /// - On the ladder's last rung, or beside a read that excludes nothing, there is no rung below and no bound: the
-    ///   pairs wherever a run can take them, however many; neither where it cannot.
+    /// The remedy of a first rung at the ladder's top that does not read within (`remedy`), on a pilot of 88 pairs:
+    /// the total T's read in units of its bound b, the work in trajectories at τ, going down 2·max(N, 88) for a
+    /// product of N.
+    /// - A read of none whose interval is 1.05 b comes within on half as many pairs again in 92 % of the cases and
+    ///   on twice the pairs in 96 % (estimate.rs `within_on`): the pairs' saving is assured -- a batch, to 176 at the
+    ///   most, for a product of 400; toward 128 where the run needs no more than its pilot, and going down is 176.
+    ///   At an interval of 1.2 b (83 % and 92 %) they are bought against a run of 400 and not against one of 88.
+    /// - At an interval of 1.5 b twice the pairs bring it within in 80 % of the cases. A saving that comes with the
+    ///   probability π is told from nothing at z = 2 only above π = z²/(1 + z²) = 80 %, were the pairs free: against
+    ///   a run of 400 they are not bought, against one of 2000 -- three times the pairs, 90 % -- they are. At 2 b
+    ///   not there either.
+    /// - A read that holds an error falls more slowly: 0.2 b under an interval of 0.9 b, a far end of 1.1 b, comes
+    ///   within on twice the pairs in 85 %: down against a run of 400, pairs against one of 2000.
+    /// - The reads on which the rule before bought pairs for nothing (SPEC §5.3) -- a MOT's 0.31 b under 2.05 b, gray
+    ///   molasses' 0.23 b under 1.71 b: none and 37 % on twice the pairs, 40 % and 55 % on three times -- go down
+    ///   whatever the run's length.
+    /// - Pairs past the product's own trajectories cost their finer level too: the same read of none on 352 pairs
+    ///   of a run of 400 goes down.
+    /// - A look that is unread is not brought within by pairs: down.
+    /// - On the ladder's last rung, or beside a read that excludes nothing, there is no rung below and no price: the
+    ///   pairs the read could come within on at the best, wherever a run can take them; neither where it cannot.
     #[test]
-    fn the_pairs_a_rung_asks_for_cost_no_more_than_its_third_level() {
-        assert_eq!(remedy(2., 88, 88, 400., 88, true), Remedy::Pairs(176));
-        assert_eq!(remedy(1.05, 88, 88, 400., 88, true), Remedy::Pairs(96));
-        assert_eq!(remedy(4.5, 88, 88, 400., 88, true), Remedy::Pairs(176));
-        assert!((0.5 * (4.69 * 88. - 88.) + 4.69 * 88. - 400. - 175.08f64).abs() < 1e-9 && 0.5 * (4.7 * 88. - 88.) + 4.7 * 88. - 400. > 176.);
-        assert_eq!((remedy(4.69, 88, 88, 400., 88, true), remedy(4.7, 88, 88, 400., 88, true)), (Remedy::Pairs(176), Remedy::Below));
-        assert_eq!((remedy(1.1, 352, 88, 400., 88, true), remedy(1.2, 352, 88, 400., 88, true)), (Remedy::Pairs(392), Remedy::Below));
-        assert!((0.5 * (1.2 * 352. - 352.) + 1.2 * 352. - 400. - 57.6f64).abs() < 1e-9 && 0.5 * (1.2 * 352. - 88.) + 1.2 * 352. - 400. > 176.);
-        assert_eq!((remedy(2., 88, 88, 88., 88, true), remedy(3., 88, 88, 88., 88, true)), (Remedy::Pairs(176), Remedy::Below));
-        assert_eq!(remedy(f64::INFINITY, 88, 88, 400., 88, true), Remedy::Below);
-        assert_eq!(remedy(1.01, MOST_TRAJECTORIES, 88, 16000., 88, true), Remedy::Below);
-        assert_eq!((remedy(7.1, 88, 88, 400., 88, false), remedy(200., 88, 88, 400., 88, false)), (Remedy::Pairs(176), Remedy::Neither));
-        assert_eq!((remedy(f64::INFINITY, 88, 88, 400., 88, false), remedy(1.01, MOST_TRAJECTORIES, 88, 16000., 88, false)), (Remedy::Neither, Remedy::Neither));
+    fn the_pairs_a_rung_buys_are_those_whose_saving_over_going_down_is_assured() {
+        let b = step_bound()[1].powi(2);
+        let reads = |value: f64, interval: f64, groups: f64| at(Some(Read { value: value * b, spread: Spread { error: interval * b / Spread { error: 1., groups }.interval(), groups } }));
+        let on_pilot = |value: f64, interval: f64, product: f64| remedy(&reads(value, interval, 11.), 2., 88, product, 88, true);
+        let within = |value: f64, interval: f64, factor: f64| within_on(&reads(value, interval, 11.).temperature.unwrap(), b, factor);
+        assert!((within(0., 1.05, 1.5) - 0.92).abs() < 0.005 && (within(0., 1.05, 2.) - 0.96).abs() < 0.005);
+        assert_eq!((on_pilot(0., 1.05, 400.), on_pilot(0., 1.05, 88.)), (Remedy::Pairs(176), Remedy::Pairs(128)));
+        assert!((within(0., 1.2, 1.5) - 0.83).abs() < 0.005 && (within(0., 1.2, 2.) - 0.92).abs() < 0.005);
+        assert_eq!((on_pilot(0., 1.2, 400.), on_pilot(0., 1.2, 88.)), (Remedy::Pairs(176), Remedy::Below));
+        assert!((within(0., 1.5, 2.) - 0.80).abs() < 0.005 && (within(0., 1.5, 3.) - 0.90).abs() < 0.005);
+        assert_eq!((on_pilot(0., 1.5, 400.), on_pilot(0., 1.5, 2000.), on_pilot(0., 2., 2000.)), (Remedy::Below, Remedy::Pairs(176), Remedy::Below));
+        assert!((within(0.2, 0.9, 2.) - 0.85).abs() < 0.005);
+        assert_eq!((on_pilot(0.2, 0.9, 400.), on_pilot(0.2, 0.9, 2000.)), (Remedy::Below, Remedy::Pairs(176)));
+        for (value, interval, twice, thrice) in [(0.313, 2.052, 0., 0.40), (0.233, 1.71, 0.37, 0.55)] {
+            assert!((within(value, interval, 2.) - twice).abs() < 0.005 && (within(value, interval, 3.) - thrice).abs() < 0.005, "{} {}", within(value, interval, 2.), within(value, interval, 3.));
+            assert!([400., 2000., 16000.].iter().all(|&product| on_pilot(value, interval, product) == Remedy::Below));
+        }
+        assert_eq!(remedy(&reads(0., 1.05, 44.), 2., 352, 400., 88, true), Remedy::Below);
+        let unread = at(Some(Read { value: 0., spread: Spread::UNREAD }));
+        assert_eq!(remedy(&unread, f64::INFINITY, 88, 400., 88, true), Remedy::Below);
+        let read = reads(0., 1.05, 11.);
+        assert_eq!((remedy(&read, 7.1, 88, 400., 88, false), remedy(&read, 200., 88, 400., 88, false)), (Remedy::Pairs(176), Remedy::Neither));
+        assert_eq!((remedy(&read, 1.05, 88, 400., 88, false), remedy(&read, f64::INFINITY, 88, 400., 88, false), remedy(&read, 1.01, MOST_TRAJECTORIES, 16000., 88, false)), (Remedy::Pairs(96), Remedy::Neither, Remedy::Neither));
     }
 
     /// A rung's own read against the one it inherits (`held`, `refuted`). The rung is held, look by look, by the read
