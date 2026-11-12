@@ -316,15 +316,29 @@ impl Workbench {
         Ok(LoadedNode { id, name, type_id, draft: Draft { values, source_signal: source, device_keys, artifact_inputs }, auto_preview })
     }
 
-    pub(crate) fn read_layout(&self, path: &str, host: &mut dyn Host) -> Result<Value, String> {
-        let path = self.workspace.resolve(path);
-        let document = workspace::read_strict(&path, &format!("console layout {}", path.display()))?;
-        let loaded = self.resolve_layout(&document, host)?;
-        Ok(json!({"path": path, "nodes": loaded.nodes.iter().map(|node| json!({"node_id": node.id, "name": node.name, "type_id": node.type_id,
-                "values": node.draft.values, "source_signal": node.draft.source_signal, "device_keys": node.draft.device_keys})).collect::<Vec<_>>(),
-            "panels": loaded.panels.iter().map(|panel| json!({"panel": panel.panel, "signal": panel.signal, "kind": panel.kind, "window": panel.window,
-                "target": panel.target})).collect::<Vec<_>>(),
-            "notes": loaded.notes}))
+    /// Read a layout file off the owner turn: to load it (`load`: whether running nodes may be
+    /// stopped for it), or only to say what it holds (`read_layout`). `layout_read` applies it.
+    pub(crate) fn read_layout_file(&mut self, path: &Path, request: u64, load: Option<bool>) {
+        let ticket = self.ticket(crate::Ticket::LayoutRead { path: path.to_path_buf(), request, load });
+        let path = path.to_path_buf();
+        self.plugins.work(ticket, crate::Lane::Files, Box::new(move || workspace::read_strict(&path, &format!("console layout {}", path.display()))));
+    }
+
+    /// A layout file as read: resolved against this board and loaded, or described.
+    pub(crate) fn layout_read(&mut self, path: &Path, load: Option<bool>, read: Result<Value, String>, host: &mut dyn Host) -> Result<Value, String> {
+        let mut loaded = self.resolve_layout(&read?, host)?;
+        let Some(stop_running) = load else {
+            return Ok(json!({"path": path, "nodes": loaded.nodes.iter().map(|node| json!({"node_id": node.id, "name": node.name, "type_id": node.type_id,
+                    "values": node.draft.values, "source_signal": node.draft.source_signal, "device_keys": node.draft.device_keys})).collect::<Vec<_>>(),
+                "panels": loaded.panels.iter().map(|panel| json!({"panel": panel.panel, "signal": panel.signal, "kind": panel.kind, "window": panel.window,
+                    "target": panel.target})).collect::<Vec<_>>(),
+                "notes": loaded.notes}));
+        };
+        loaded.path = Some(path.to_path_buf());
+        let notes = loaded.notes.clone();
+        let mut reply = self.replace_board(loaded, "layout loaded", stop_running, "Loading this layout needs stop_running=true while Logic is active", host)?;
+        reply["notes"] = json!(notes);
+        Ok(reply)
     }
 
     /// v2 _running_logic: the nodes still at work, started or waiting to start (a follower
@@ -388,16 +402,6 @@ impl Workbench {
         true
     }
 
-    pub(crate) fn load_layout(&mut self, path: &Path, stop_running: bool, host: &mut dyn Host) -> Result<Value, String> {
-        let document = workspace::read_strict(path, &format!("console layout {}", path.display()))?;
-        let mut loaded = self.resolve_layout(&document, host)?;
-        loaded.path = Some(path.to_path_buf());
-        let notes = loaded.notes.clone();
-        let mut reply = self.replace_board(loaded, "layout loaded", stop_running, "Loading this layout needs stop_running=true while Logic is active", host)?;
-        reply["notes"] = json!(notes);
-        Ok(reply)
-    }
-
     pub(crate) fn clear_board(&mut self, stop_running: bool, host: &mut dyn Host) -> Result<Value, String> {
         // v2: an empty board is left as it is ("the board is already empty").
         if self.board.panels.is_empty() && self.nodes.is_empty() {
@@ -441,11 +445,21 @@ impl Workbench {
         json!({"format": FORMAT, "panels": panels, "logic": logic})
     }
 
-    pub(crate) fn save_layout(&mut self, path: &Path, host: &mut dyn Host) -> Result<Value, String> {
+    /// Write the board as it stands now, off the owner turn; `layout_saved` applies it.
+    pub(crate) fn save_layout(&mut self, path: &Path, request: u64, host: &mut dyn Host) {
         let document = self.layout_document(host);
-        let written = workspace::write_readable(path, &document)?;
+        let ticket = self.ticket(crate::Ticket::LayoutSaved { document: document.clone(), request });
+        let path = path.to_path_buf();
+        self.plugins.work(ticket, crate::Lane::Files, Box::new(move || workspace::write_readable(&path, &document).map(|written| json!(written))));
+    }
+
+    /// The board was written as `document`: that file is its layout now, and the board is
+    /// unchanged since only if it would still be written the same.
+    pub(crate) fn layout_saved(&mut self, document: Value, written: Result<Value, String>, host: &mut dyn Host) -> Result<Value, String> {
+        let written = PathBuf::from(written?.as_str().unwrap_or_default());
         self.board.path = Some(written.clone());
-        self.board.dirty = false;
+        self.board.dirty = self.layout_document(host) != document;
+        self.console_report = (format!("layout saved to {}", written.display()), "task");
         Ok(json!({"path": written}))
     }
 
@@ -564,74 +578,34 @@ impl Workbench {
             "pending_load": self.board.pending.as_ref().map(|(loaded, _)| loaded.path.clone())})
     }
 
-    /// v2 experiment_recipes: the recipes shipped with the workbench (`recipes/` beside
-    /// this crate, v2's zlc_workbench/recipes), a workspace recipe of the same name
-    /// replacing one.
-    fn recipe_paths(&self) -> BTreeMap<String, PathBuf> {
-        let found = |folder: PathBuf| std::fs::read_dir(folder).into_iter().flatten().flatten().map(|entry| entry.path())
-            .filter_map(|path| path.file_name().and_then(|name| name.to_str()).and_then(|name| name.strip_suffix(".recipe.json")).map(|name| (name.to_owned(), path.clone())))
-            .collect::<Vec<_>>();
-        let mut paths: BTreeMap<String, PathBuf> = found(zlc_core::checkout::path("crates/zlc-workbench/recipes")).into_iter().collect();
-        paths.extend(found(self.workspace.recipes()));
-        paths
-    }
-
-    fn read_recipe(&self, name: &str, parameters: Option<&Map<String, Value>>) -> Result<(Value, Value, Map<String, Value>), String> {
-        let paths = self.recipe_paths();
-        let path = paths.get(name).ok_or_else(|| format!("Unknown recipe {name:?}; available: {}", paths.keys().cloned().collect::<Vec<_>>().join(", ")))?;
-        let recipe = workspace::read_strict(path, &format!("recipe {name}"))?;
-        let required = ["completion", "description", "entry_node", "followers", "format", "layout", "name", "parameters", "requirements", "result_panels", "save", "title"];
-        let mut keys: Vec<&str> = recipe.as_object().map(|object| object.keys().map(String::as_str).collect()).unwrap_or_default();
-        keys.sort_unstable();
-        if keys != required || recipe["format"] != "zlc.experiment-recipe" || recipe["name"] != name {
-            return Err("Recipe must use the current zlc.experiment-recipe grammar and matching name".into());
-        }
-        let folder = path.parent().unwrap();
-        let layout_path = folder.join(recipe["layout"].as_str().unwrap_or(""));
-        if !layout_path.canonicalize().is_ok_and(|layout| folder.canonicalize().is_ok_and(|folder| layout.starts_with(folder))) {
-            return Err("Recipe Layout must be beside or beneath its recipe file".into());
-        }
-        let mut layout = workspace::read_strict(&layout_path, &format!("recipe layout {}", layout_path.display()))?;
-        let supplied = parameters.cloned().unwrap_or_default();
-        let declared = recipe["parameters"].as_object().cloned().unwrap_or_default();
-        if let Some(unknown) = supplied.keys().find(|key| !declared.contains_key(*key)) { return Err(format!("Unknown recipe parameter {unknown:?}")); }
-        let mut defaults = Map::new();
-        let mut missing = Vec::new();
-        for (key, binding) in &declared {
-            let parts = binding["path"].as_array().cloned().unwrap_or_default();
-            if parts.len() < 3 || !matches!(parts[0].as_str(), Some("logic" | "panels")) { return Err(format!("Recipe parameter {key:?} needs a native Layout field path")); }
-            let mut target = &mut layout;
-            for part in &parts[..parts.len() - 1] {
-                target = match part { Value::String(name) => &mut target[name.as_str()], Value::Number(index) => &mut target[index.as_u64().unwrap_or(0) as usize], _ => return Err(format!("Recipe parameter {key:?} path is malformed")) };
-            }
-            let last = &parts[parts.len() - 1];
-            let slot = match last { Value::String(name) => &mut target[name.as_str()], Value::Number(index) => &mut target[index.as_u64().unwrap_or(0) as usize], _ => return Err(format!("Recipe parameter {key:?} path is malformed")) };
-            defaults.insert(key.clone(), slot.clone());
-            if let Some(value) = supplied.get(key) { *slot = value.clone(); }
-            else if parameters.is_some() && binding["required"] == true { missing.push(key.clone()); }
-        }
-        if !missing.is_empty() { return Err(format!("Recipe requires explicit parameters: {}", missing.join(", "))); }
-        Ok((recipe, layout, defaults))
-    }
-
-    pub(crate) fn list_recipes(&self, name: Option<&str>) -> Result<Value, String> {
-        match name {
-            Some(name) => {
-                let (recipe, layout, defaults) = self.read_recipe(name, None)?;
-                Ok(json!({"recipe": recipe, "defaults": defaults, "layout": layout}))
-            }
+    /// Read recipes off the owner turn: `name`'s with `parameters` (None: as written), or each one.
+    /// `recipes_read` applies what was read: a list, or a run (`run`: start it, under that origin).
+    pub(crate) fn read_recipes(&mut self, name: Option<&str>, parameters: Option<Map<String, Value>>, run: Option<(bool, String)>, request: u64) {
+        let ticket = self.ticket(crate::Ticket::Recipes { request, run });
+        let (folder, name) = (self.workspace.recipes(), name.map(str::to_owned));
+        self.plugins.work(ticket, crate::Lane::Files, Box::new(move || match name {
+            Some(name) => read_recipe(&folder, &name, parameters.as_ref()).map(|(recipe, layout, defaults)| json!({"recipe": recipe, "defaults": defaults, "layout": layout})),
             // Recipe by recipe: one that cannot be read is listed with why, beside the others.
-            None => Ok(Value::Array(self.recipe_paths().into_iter().map(|(name, _)| match self.read_recipe(&name, None) {
+            None => Ok(Value::Array(recipe_paths(&folder).into_iter().map(|(name, _)| match read_recipe(&folder, &name, None) {
                 Ok((recipe, _, _)) => json!({"name": recipe["name"], "title": recipe["title"], "description": recipe["description"], "requirements": recipe["requirements"]}),
                 Err(problem) => json!({"name": name, "problem": problem}),
             }).collect())),
+        }));
+    }
+
+    /// Recipes as read: the reply of `list_recipes`, or the recipe `run_recipe` loads now.
+    pub(crate) fn recipes_read(&mut self, run: Option<(bool, String)>, read: Result<Value, String>, host: &mut dyn Host) -> Result<Value, String> {
+        let read = read?;
+        match run {
+            Some((start, origin)) => self.run_recipe(&read["recipe"], &read["layout"], start, &origin, host),
+            None => Ok(read),
         }
     }
 
     /// Load a recipe's layout with its parameters; start followers then the
     /// entry node once their plugins have answered.
-    pub(crate) fn run_recipe(&mut self, name: &str, parameters: &Value, start: bool, origin: &str, host: &mut dyn Host) -> Result<Value, String> {
-        let (recipe, layout, _) = self.read_recipe(name, Some(&parameters.as_object().cloned().unwrap_or_default()))?;
+    fn run_recipe(&mut self, recipe: &Value, layout: &Value, start: bool, origin: &str, host: &mut dyn Host) -> Result<Value, String> {
+        let name = recipe["name"].as_str().unwrap_or_default();
         let followers: Vec<&str> = recipe["followers"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
         let entry = recipe["entry_node"].as_str().unwrap_or("");
         // v2 lab_run_recipe: each follower once, apart from the entry node, and a standing processor.
@@ -642,7 +616,7 @@ impl Workbench {
         if followers.iter().any(|id| declared(id).as_deref() != Some("processor")) {
             return Err("Recipe followers must be standing processors, not device executions".into());
         }
-        let mut loaded = self.resolve_layout(&layout, host)?;
+        let mut loaded = self.resolve_layout(layout, host)?;
         let renamed = loaded.renamed.clone();
         loaded.path = None;
         let notes = loaded.notes.clone();
@@ -660,7 +634,7 @@ impl Workbench {
         let Some((order, origin)) = self.board.recipe_start.clone() else { return };
         let signals = host.signals();
         let settled = order.iter().all(|id| self.node(id).is_some_and(|node| node.instance != Instance::Opening
-            && !self.issues(node, &signals).iter().any(|issue| issue == crate::logic::CHECKING || issue.ends_with(crate::logic::STARTING_PLUGIN))));
+            && !self.issues(node, &signals).iter().any(|issue| issue == crate::logic::CHECKING || issue == crate::logic::READING || issue.ends_with(crate::logic::STARTING_PLUGIN))));
         if !settled { return; }
         self.board.recipe_start = None;
         let invalid: Vec<String> = order.iter().filter_map(|id| self.node(id)).filter_map(|node| self.issues(node, &signals).first()
@@ -673,6 +647,57 @@ impl Workbench {
             if let Err(error) = self.start_node(&id, None, &origin, None, host) { self.notes.push(format!("recipe: {id}: {error}")); break; }
         }
     }
+}
+
+/// v2 experiment_recipes: the recipes shipped with the workbench (`recipes/` beside
+/// this crate, v2's zlc_workbench/recipes), a workspace recipe (in `recipes`) of the same
+/// name replacing one.
+fn recipe_paths(recipes: &Path) -> BTreeMap<String, PathBuf> {
+    let found = |folder: PathBuf| std::fs::read_dir(folder).into_iter().flatten().flatten().map(|entry| entry.path())
+        .filter_map(|path| path.file_name().and_then(|name| name.to_str()).and_then(|name| name.strip_suffix(".recipe.json")).map(|name| (name.to_owned(), path.clone())))
+        .collect::<Vec<_>>();
+    let mut paths: BTreeMap<String, PathBuf> = found(zlc_core::checkout::path("crates/zlc-workbench/recipes")).into_iter().collect();
+    paths.extend(found(recipes.to_path_buf()));
+    paths
+}
+
+/// A recipe, its layout with `parameters` set, and what the layout held where each parameter goes.
+fn read_recipe(recipes: &Path, name: &str, parameters: Option<&Map<String, Value>>) -> Result<(Value, Value, Map<String, Value>), String> {
+    let paths = recipe_paths(recipes);
+    let path = paths.get(name).ok_or_else(|| format!("Unknown recipe {name:?}; available: {}", paths.keys().cloned().collect::<Vec<_>>().join(", ")))?;
+    let recipe = workspace::read_strict(path, &format!("recipe {name}"))?;
+    let required = ["completion", "description", "entry_node", "followers", "format", "layout", "name", "parameters", "requirements", "result_panels", "save", "title"];
+    let mut keys: Vec<&str> = recipe.as_object().map(|object| object.keys().map(String::as_str).collect()).unwrap_or_default();
+    keys.sort_unstable();
+    if keys != required || recipe["format"] != "zlc.experiment-recipe" || recipe["name"] != name {
+        return Err("Recipe must use the current zlc.experiment-recipe grammar and matching name".into());
+    }
+    let folder = path.parent().unwrap();
+    let layout_path = folder.join(recipe["layout"].as_str().unwrap_or(""));
+    if !layout_path.canonicalize().is_ok_and(|layout| folder.canonicalize().is_ok_and(|folder| layout.starts_with(folder))) {
+        return Err("Recipe Layout must be beside or beneath its recipe file".into());
+    }
+    let mut layout = workspace::read_strict(&layout_path, &format!("recipe layout {}", layout_path.display()))?;
+    let supplied = parameters.cloned().unwrap_or_default();
+    let declared = recipe["parameters"].as_object().cloned().unwrap_or_default();
+    if let Some(unknown) = supplied.keys().find(|key| !declared.contains_key(*key)) { return Err(format!("Unknown recipe parameter {unknown:?}")); }
+    let mut defaults = Map::new();
+    let mut missing = Vec::new();
+    for (key, binding) in &declared {
+        let parts = binding["path"].as_array().cloned().unwrap_or_default();
+        if parts.len() < 3 || !matches!(parts[0].as_str(), Some("logic" | "panels")) { return Err(format!("Recipe parameter {key:?} needs a native Layout field path")); }
+        let mut target = &mut layout;
+        for part in &parts[..parts.len() - 1] {
+            target = match part { Value::String(name) => &mut target[name.as_str()], Value::Number(index) => &mut target[index.as_u64().unwrap_or(0) as usize], _ => return Err(format!("Recipe parameter {key:?} path is malformed")) };
+        }
+        let last = &parts[parts.len() - 1];
+        let slot = match last { Value::String(name) => &mut target[name.as_str()], Value::Number(index) => &mut target[index.as_u64().unwrap_or(0) as usize], _ => return Err(format!("Recipe parameter {key:?} path is malformed")) };
+        defaults.insert(key.clone(), slot.clone());
+        if let Some(value) = supplied.get(key) { *slot = value.clone(); }
+        else if parameters.is_some() && binding["required"] == true { missing.push(key.clone()); }
+    }
+    if !missing.is_empty() { return Err(format!("Recipe requires explicit parameters: {}", missing.join(", "))); }
+    Ok((recipe, layout, defaults))
 }
 
 #[cfg(test)]

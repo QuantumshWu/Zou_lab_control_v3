@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 /// Reads one workspace file of a contract family into what a build receives
 /// (a pulse document resolves, in the core, to its description).
@@ -46,7 +46,7 @@ impl Workspace {
         let (year, month, day) = local_date();
         self.data().join(format!("{year:04}_{month:02}_{day:02}"))
     }
-    /// Today's folder, created durably (a run root or a default save place).
+    /// Today's folder, created durably (a default save place). A run's is made by its start (`RunFolder`).
     pub fn day_folder(&self) -> Result<PathBuf, String> {
         zlc_archive::durable::durable_makedirs(&self.today()).map_err(|error| error.to_string())
     }
@@ -57,20 +57,75 @@ impl Workspace {
     }
     /// Files of `contract_prefix...` resolve through `resolver`; any other contract resolves to its absolute path.
     pub fn add_resolver(&mut self, contract_prefix: &str, resolver: Resolver) { self.resolvers.push((contract_prefix.to_owned(), resolver)); }
-    /// v2 `_resolve_workspace_resources` for one field: the file `selected` names in the
-    /// collection folder, read by its contract's resolver; or the issue a Start reports.
-    pub fn resource(&self, spec: &crate::types::WorkspaceResource, label: &str, selected: &str) -> Result<Value, String> {
+    /// What reads the files a draft names, wherever it runs (off the owner turn).
+    pub fn draft_files(&self, resources: Vec<ResourceAsk>, artifacts: Vec<String>) -> DraftFiles {
+        DraftFiles { root: self.root.clone(), resolvers: self.resolvers.clone(), resources, artifacts }
+    }
+}
+
+/// One workspace resource a draft names: its field's spec, the label its issue uses, the text selected.
+#[derive(Clone, Debug)]
+pub struct ResourceAsk { pub spec: crate::types::WorkspaceResource, pub label: String, pub selected: String }
+
+/// The files a draft names, to be read off the owner turn: its workspace resources and its
+/// artifact inputs (paths as written).
+pub struct DraftFiles { root: PathBuf, resolvers: Vec<(String, Resolver)>, resources: Vec<ResourceAsk>, artifacts: Vec<String> }
+
+impl DraftFiles {
+    /// `{resolved: {field: value}, issues: [...], missing: [artifact path as written]}`.
+    pub fn read(self) -> Value {
+        let (mut resolved, mut issues) = (Map::new(), Vec::new());
+        for ask in &self.resources {
+            match self.resource(ask) {
+                Ok(value) => { resolved.insert(ask.spec.field.clone(), value); }
+                Err(issue) => issues.push(issue),
+            }
+        }
+        let missing: Vec<&String> = self.artifacts.iter().filter(|path| {
+            let path = Path::new(path.as_str());
+            !if path.is_absolute() { path.to_path_buf() } else { self.root.join(path) }.is_file()
+        }).collect();
+        json!({"resolved": resolved, "issues": issues, "missing": missing})
+    }
+
+    /// v2 `_resolve_workspace_resources` for one field: the file selected in the collection
+    /// folder, read by its contract's resolver; or the issue a Start reports.
+    fn resource(&self, ask: &ResourceAsk) -> Result<Value, String> {
+        let spec = &ask.spec;
         let directory = self.root.join(&spec.directory);
-        let chosen = Path::new(selected.trim());
+        let chosen = Path::new(ask.selected.trim());
         let path = if chosen.is_absolute() { chosen.to_path_buf() } else { directory.join(chosen) };
         let suffixed = spec.suffixes.iter().any(|suffix| path.to_string_lossy().to_lowercase().ends_with(&suffix.to_lowercase()));
-        if selected.trim().is_empty() || path.parent() != Some(directory.as_path()) || !suffixed || !path.is_file() {
-            return Err(format!("{label} must be a file in {}/", spec.directory));
+        if ask.selected.trim().is_empty() || path.parent() != Some(directory.as_path()) || !suffixed || !path.is_file() {
+            return Err(format!("{} must be a file in {}/", ask.label, spec.directory));
         }
         match self.resolvers.iter().find(|(prefix, _)| spec.contract.starts_with(prefix.as_str())) {
             Some((_, resolver)) => resolver(&path).map_err(|error| format!("{} resource “{}” is invalid: {error}", spec.contract, path.display())),
             None => Ok(Value::String(path.display().to_string())),
         }
+    }
+}
+
+/// A Task run's directory, made by whoever starts the run (off the owner turn): `<parent>/<stem>`,
+/// or the first free `<stem>-n`, with the run's `start.json` (`record`, its `run_id` the
+/// directory's name) written into it.
+#[derive(Clone, Debug)]
+pub struct RunFolder { pub parent: PathBuf, pub stem: String, pub record: Value }
+
+impl RunFolder {
+    /// Make the directory and write its `start.json`: the directory.
+    pub fn create(&self) -> Result<PathBuf, String> {
+        let parent = zlc_archive::durable::durable_makedirs(&self.parent).map_err(|error| error.to_string())?;
+        let directory = unique_directory(&parent, &self.stem)?;
+        write_readable(&directory.join("start.json"), &self.started(&directory))?;
+        Ok(directory)
+    }
+
+    /// The start record of a run made in `directory`.
+    pub fn started(&self, directory: &Path) -> Value {
+        let mut record = self.record.clone();
+        record["run_id"] = json!(directory.file_name().map(|name| name.to_string_lossy().into_owned()));
+        record
     }
 }
 

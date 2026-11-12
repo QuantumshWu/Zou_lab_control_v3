@@ -67,6 +67,8 @@ enum AppEvent { Command { window: Option<windows::Kind>, command: Value }, Compl
     CloseWindow(windows::Kind),
     /// Save image… finished: the window's request and where the picture went.
     ImageSaved { request: u64, result: Result<Value, String> },
+    /// Stop all's outputs have each answered: the request, and those that did not report safe.
+    MadeSafe { request: Value, failures: Vec<String> },
     /// A file dialog answered the command that asked it (dialog.rs).
     Answered { ask: dialog::Ask, answer: dialog::Answer },
     /// A browser asked to watch, or left (the Browser sharing card changes).
@@ -917,10 +919,12 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         workbench.stop_all(&mut host);
                         workbench_host::deliver(&mut workbench, &builtin, &mut host);
                         accepted["acquisition"] = builtin.acquisition();
+                        // Every output is asked at once, off this turn; the command is answered when each has answered.
+                        accepted["stop_all"] = json!({"state": "making_safe"});
                         workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
-                        let failures = safe_actions.make_safe();
-                        let reply = Reply::to(&command["id"], if failures.is_empty() { Ok(Value::Null) } else { Err(format!("Not every output reported safe: {}", failures.join("; "))) });
-                        return tell(&windows, &mut remote_pending, &mut accepted, vec![reply]);
+                        let (proxy, request) = (self_proxy.clone(), command["id"].clone());
+                        safe_actions.make_safe_then(move |failures| { let _ = proxy.send_event(AppEvent::MadeSafe { request, failures }); });
+                        return tell(&windows, &mut remote_pending, &mut accepted, Vec::new());
                     }
                     if matches!(action.as_str(), "share_start" | "share_stop" | "share_decide") {
                         // Browser sharing: the window's state and pictures to approved browsers.
@@ -1871,6 +1875,12 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             viewer_message(&mut viewer.state, Reply::default(), |message| windows.send_to(&windows::Kind::FigureViewer(document), message))?;
                         }
                     }
+                }
+                Event::UserEvent(AppEvent::MadeSafe { request, failures }) => {
+                    accepted["stop_all"] = if failures.is_empty() { json!({"state": "safe"}) } else { json!({"state": "not_safe", "failures": failures}) };
+                    let reply = Reply::to(&request, if failures.is_empty() { Ok(Value::Null) } else { Err(format!("Not every output reported safe: {}", failures.join("; "))) });
+                    if !closing { tell(&windows, &mut remote_pending, &mut accepted, vec![reply])?; }
+                    else { reply.send(&mut accepted, |message| remote::settle(message, &mut remote_pending)); }
                 }
                 Event::UserEvent(AppEvent::ImageSaved { request, result }) => {
                     let mut state = accepted.clone();

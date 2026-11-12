@@ -30,6 +30,16 @@ pub use layout::INTERVALS;
 pub use types::{TypeCatalog, TypeDescriptor};
 pub use workspace::Workspace;
 
+/// Work the owner turn hands off (prepare off the turn, apply on it): reading or writing a
+/// workspace document, an archive. Its result comes back as [`Event::Answered`] for its ticket.
+pub type Work = Box<dyn FnOnce() -> Result<Value, String> + Send>;
+
+/// Where handed-off work waits its turn. `Files`: workspace documents, in the order asked (a
+/// save never overtakes an earlier one, a read sees every earlier write). `Export`: an archive,
+/// which may take long and holds no document back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lane { Files, Export }
+
 /// The plugin host as the workbench drives it (PLUGIN_PROTOCOL; line A).
 /// Every call returns at once; completion arrives as an [`Event`].
 pub trait Plugins {
@@ -68,6 +78,8 @@ pub trait Plugins {
     fn discovering(&self) -> bool { false }
     /// Offer an open device to another bench computer (Remote on) or take it back.
     fn publish(&mut self, ticket: u64, instance: &str, role: &str, published: bool);
+    /// Do `work` off the owner turn on `lane`; its result is answered as `ticket`.
+    fn work(&mut self, ticket: u64, lane: Lane, work: Work);
 }
 
 /// Facts the plugin host reports.
@@ -85,6 +97,8 @@ pub enum Event {
     Answered { ticket: u64, result: Result<Value, String> },
     Log { instance: String, line: String },
     RunStarted { run: String },
+    /// A Task's run directory was made (with its `start.json`) by the start, off the owner turn.
+    RunDirectory { run: String, directory: PathBuf },
     RunReady { run: String },
     RunProgress { run: String, message: String, current: Option<u64>, total: Option<u64> },
     RunRequest { run: String, request: Value },
@@ -108,6 +122,7 @@ impl Event {
             Event::Answered { ticket, result } => json!({"fact": "answered", "ticket": ticket, "error": failed(result)}),
             Event::Log { instance, line } => json!({"fact": "log", "instance": instance, "line": line}),
             Event::RunStarted { run } => json!({"fact": "run_started", "run": run}),
+            Event::RunDirectory { run, directory } => json!({"fact": "run_directory", "run": run, "directory": directory}),
             Event::RunReady { run } => json!({"fact": "run_ready", "run": run}),
             Event::RunProgress { run, message, current, total } => json!({"fact": "run_progress", "run": run, "message": message, "current": current, "total": total}),
             Event::RunRequest { run, request } => json!({"fact": "run_request", "run": run, "kind": request.get("kind")}),
@@ -145,8 +160,8 @@ pub struct RunSpec {
     pub artifacts: Map<String, Value>,
     /// Workspace resources by build argument, resolved (a pulse: its description).
     pub resources: Map<String, Value>,
-    /// Task run directory.
-    pub directory: Option<PathBuf>,
+    /// A Task's run directory, made by the start off the owner turn.
+    pub folder: Option<workspace::RunFolder>,
     /// Output name -> the signal the run publishes it as.
     pub outputs: BTreeMap<String, String>,
     pub origin: String,
@@ -185,11 +200,15 @@ pub trait Host {
     /// event's (null before one); None while the Runtime has no such signal.
     fn schemas(&self, _signal: &str) -> Option<(Value, Value)> { None }
     /// What the application adds to a diagnostics archive beside the journal and the board: the data it
-    /// keeps of recent publications, as archive members (name, bytes).
-    fn diagnostic_data(&self) -> Vec<(String, Vec<u8>)> { Vec::new() }
+    /// keeps of recent publications, taken now and encoded as archive members (name, bytes) by whoever
+    /// writes the archive, off the owner turn.
+    fn diagnostic_data(&self) -> DiagnosticData { Box::new(Vec::new) }
     /// Keep recent data within `mib` MiB from now on (0: none).
     fn keep_recent_data(&mut self, _mib: u64) {}
 }
+
+/// Recent data taken for an archive, encoded when called.
+pub type DiagnosticData = Box<dyn FnOnce() -> Vec<(String, Vec<u8>)> + Send>;
 
 /// What an answered ticket was for.
 #[derive(Clone, Debug)]
@@ -209,6 +228,22 @@ pub(crate) enum Ticket {
     Selection { node: String, panel: String, selection: Value },
     /// One device's settings for an acquisition observation in flight.
     Snapshot { run: String, device: String },
+    /// An apparatus file read for `load_apparatus` (`request`), or again once discovery answered (None).
+    ApparatusRead { path: PathBuf, request: Option<u64> },
+    /// The apparatus written as `tree`.
+    ApparatusSaved { path: PathBuf, tree: Value, request: u64 },
+    /// A layout file read, to load (`stop_running`) or only to read.
+    LayoutRead { path: PathBuf, request: u64, load: Option<bool> },
+    /// The board written as `document`.
+    LayoutSaved { document: Value, request: u64 },
+    /// A diagnostics archive written.
+    Diagnostics { request: u64 },
+    /// A Task run's `run.json` written.
+    RunRecord { run: String, record: Value },
+    /// Recipes read: listed, or one run (`run`: whether it starts, and who asked).
+    Recipes { request: u64, run: Option<(bool, String)> },
+    /// The files a draft names, read (`key`: the selections read); for a Start when `start`.
+    DraftFiles { node: String, key: Value, start: bool },
 }
 
 pub struct Workbench {
@@ -285,7 +320,8 @@ pub const COMMANDS: &[&str] = &[
 ];
 
 /// Commands that leave the result to a later plugin event.
-const DEFERRED: &[&str] = &["estimate_node", "read_device", "tune_device", "discover_devices", "publish_device"];
+const DEFERRED: &[&str] = &["estimate_node", "read_device", "tune_device", "discover_devices", "publish_device",
+    "read_layout", "load_layout", "save_layout", "load_apparatus", "save_apparatus", "export_diagnostics", "list_recipes", "run_recipe"];
 
 pub(crate) fn text<'a>(params: &'a Value, name: &str) -> Result<&'a str, String> {
     params[name].as_str().ok_or_else(|| format!("{name} is required"))
@@ -296,8 +332,10 @@ impl Workbench {
         let mut workbench = Self::document(root, plugins)?;
         workbench.follows_sources = true;
         let path = workbench.workspace.apparatus();
+        // Read here, before the window's loop runs; later reads are handed off.
         if path.is_file() {
-            if let Err(error) = workbench.load_apparatus(&path) { workbench.notes.push(error); }
+            let read = workspace::read_strict(&path, &apparatus::what(&path));
+            if let Err(error) = workbench.apparatus_read(&path, read) { workbench.notes.push(error); }
         } else {
             // v2 DeviceManagerPresenter.load on a workspace without one.
             workbench.report = (format!("no apparatus at {} yet; add devices and save", apparatus::file_name(&path)), "task");
@@ -328,14 +366,8 @@ impl Workbench {
     /// discovery answered says nothing about which types are installed.
     pub fn refresh_catalog(&mut self) {
         self.catalog = self.plugins.catalog();
-        let path = self.apparatus.path.clone();
-        if self.devices.is_empty() && !self.apparatus.edited() && path.is_file() {
-            self.notes.clear();
-            if let Err(error) = self.load_apparatus(&path) { self.notes.push(error); }
-        } else {
-            for note in self.uninstalled_draft() { if !self.notes.contains(&note) { self.notes.push(note); } }
-        }
-        self.say_new_notes();
+        if self.apparatus_rereadable() { self.read_apparatus_file(&self.apparatus.path.clone(), None); }
+        else { self.draft_checked(); }
     }
     pub fn workspace(&self) -> &Workspace { &self.workspace }
     pub fn catalog(&self) -> &TypeCatalog { &self.catalog }
@@ -402,7 +434,6 @@ impl Workbench {
                 "add_node" => answer.as_ref().and_then(|answer| answer["node"].as_str()).and_then(|id| self.node(id)).map(|node| (format!("added {}", node.name), "task")),
                 "rename_node" => renamed.zip(node_name(self)).filter(|(before, after)| before != after).map(|(before, after)| (format!("renamed {before} to {after}"), "task")),
                 "set_board" => params["selectors"].as_bool().map(|on| ((if on { "selectors enabled" } else { "selectors disabled" }).to_owned(), "task")),
-                "save_layout" => params["path"].as_str().map(|path| (format!("layout saved to {}", self.workspace.resolve(path).display()), "task")),
                 _ => None,
             };
             if let Some(line) = line { self.console_report = line; }
@@ -446,8 +477,8 @@ impl Workbench {
             "estimate_node" => self.estimate_node(text(params, "node")?, request).map(|()| None),
             "list_runs" => Ok(Some(self.list_runs(params["node"].as_str(), params["limit"].as_u64().unwrap_or(50).min(200) as usize))),
             "get_run" => self.get_run(text(params, "run")?).map(Some),
-            "read_layout" => self.read_layout(text(params, "path")?, host).map(Some),
-            "list_recipes" => self.list_recipes(params["name"].as_str()).map(Some),
+            "read_layout" => { let path = self.workspace.resolve(text(params, "path")?); self.read_layout_file(&path, request, None); Ok(None) }
+            "list_recipes" => { self.read_recipes(params["name"].as_str(), None, None, request); Ok(None) }
             "add_device" => self.add_device(params).map(Some),
             "remove_device" => self.remove_device(text(params, "device")?).map(Some),
             "edit_device" => self.edit_device(params).map(Some),
@@ -455,10 +486,10 @@ impl Workbench {
             "use_template" => self.use_template(text(params, "template")?).map(Some),
             "discover_devices" => self.discover_devices(request),
             "add_discovered" => self.add_discovered(text(params, "instance_id")?).map(Some),
-            "load_apparatus" => { let path = self.workspace.resolve(text(params, "path")?); self.load_apparatus(&path).map(Some) }
+            "load_apparatus" => { let path = self.workspace.resolve(text(params, "path")?); self.read_apparatus_file(&path, Some(request)); Ok(None) }
             "save_apparatus" => {
                 let path = self.workspace.resolve(text(params, "path")?);
-                self.save_apparatus(&path, params["replace_unread"].as_bool().unwrap_or(false)).map(Some)
+                self.save_apparatus(&path, params["replace_unread"].as_bool().unwrap_or(false), request).map(|()| None)
             }
             "apply_devices" => self.apply_devices(host).map(Some),
             "close_device" => self.close_device(text(params, "device")?, host).map(Some),
@@ -486,12 +517,13 @@ impl Workbench {
                 if let Some(selectors) = params["selectors"].as_bool() { self.board.selectors = selectors; }
                 Ok(Some(json!({"paused": self.board.paused, "selectors": self.board.selectors})))
             }
-            "save_layout" => { let path = self.workspace.resolve(text(params, "path")?); self.save_layout(&path, host).map(Some) }
+            "save_layout" => { let path = self.workspace.resolve(text(params, "path")?); self.save_layout(&path, request, host); Ok(None) }
             "load_layout" => {
                 let path = self.workspace.resolve(text(params, "path")?);
-                self.load_layout(&path, params["stop_running"].as_bool().unwrap_or(false), host).map(Some)
+                self.read_layout_file(&path, request, Some(params["stop_running"].as_bool().unwrap_or(false)));
+                Ok(None)
             }
-            "export_diagnostics" => self.export_diagnostics(params["data"].as_bool().unwrap_or(true), host).map(Some),
+            "export_diagnostics" => { self.export_diagnostics(params["data"].as_bool().unwrap_or(true), request, host); Ok(None) }
             "set_diagnostics" => {
                 let mib = params["budget_mib"].as_u64().ok_or("budget_mib is required: the memory recent data is kept within, in MiB (0 keeps none)")?;
                 host.keep_recent_data(mib);
@@ -499,7 +531,11 @@ impl Workbench {
                 Ok(Some(json!({"budget_mib": mib})))
             }
             "clear_board" => self.clear_board(params["stop_running"].as_bool().unwrap_or(false), host).map(Some),
-            "run_recipe" => self.run_recipe(text(params, "name")?, &params["parameters"], params["start"].as_bool().unwrap_or(true), &origin_text, host).map(Some),
+            "run_recipe" => {
+                let parameters = params["parameters"].as_object().cloned().unwrap_or_default();
+                self.read_recipes(Some(text(params, "name")?), Some(parameters), Some((params["start"].as_bool().unwrap_or(true), origin_text)), request);
+                Ok(None)
+            }
             _ => Err(format!("{name} is not a workbench command")),
         }
     }
@@ -524,6 +560,7 @@ impl Workbench {
                 log.push_back(line);
             }
             Event::RunStarted { run } => self.run_started(&run),
+            Event::RunDirectory { run, directory } => self.run_directory(&run, directory),
             Event::RunReady { run } => self.run_ready(&run),
             Event::RunProgress { run, message, current, total } => {
                 if let Some(record) = self.run_mut(&run) { record.progress = Some(json!({"message": message, "current": current, "total": total})); }
@@ -561,6 +598,15 @@ impl Workbench {
             Ticket::Publish { device, published, request } => self.published(&device, published, request, result),
             Ticket::Selection { node, panel, selection } => self.selection_patched(&node, &panel, &selection, result),
             Ticket::Snapshot { run, device } => self.bench_answered(&run, &device, ticket, result),
+            Ticket::ApparatusRead { path, request: Some(request) } => { let loaded = self.apparatus_read(&path, result); self.replies.push((request, loaded)); }
+            Ticket::ApparatusRead { path, request: None } => self.apparatus_reread(&path, result),
+            Ticket::ApparatusSaved { path, tree, request } => { let saved = self.apparatus_saved(&path, tree, result); self.replies.push((request, saved)); }
+            Ticket::LayoutRead { path, request, load } => { let read = self.layout_read(&path, load, result, host); self.replies.push((request, read)); }
+            Ticket::LayoutSaved { document, request } => { let saved = self.layout_saved(document, result, host); self.replies.push((request, saved)); }
+            Ticket::Diagnostics { request } => { let exported = self.diagnostics_exported(result); self.replies.push((request, exported)); }
+            Ticket::RunRecord { run, record } => self.run_recorded(&run, record, result),
+            Ticket::Recipes { request, run } => { let read = self.recipes_read(run, result, host); self.replies.push((request, read)); }
+            Ticket::DraftFiles { node, key, start } => self.draft_files_read(&node, ticket, key, start, result, host),
             Ticket::Tune { device, request } => {
                 let reply = result.clone().map(|readback| json!({"device": device, "readback": readback}));
                 self.replies.push((request, reply));

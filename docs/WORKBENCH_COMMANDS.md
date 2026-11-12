@@ -431,6 +431,9 @@ that ends before `ready` answers too. `produced`/`panel` waits are unchanged.
   error, and `apply_devices` reopens it.
 - `stop_all` stops every run and drives every registered output safe: the pulse board's
   SAFE and each open device's `physical_outputs` (PLUGIN_PROTOCOL §7). Never refused.
+  Every output is asked at once, off the window's turn; the state's `stop_all.state` is
+  `making_safe` until each has answered, then `safe` or `not_safe` (with `failures`),
+  and the command is answered then.
 
 ## 6. Plugin host interface (B ↔ A)
 
@@ -524,6 +527,9 @@ once at terminal: `{"schema": "zlc.task-run", "run_id", "task", "input", "status
 {"state", "started_at", "ended_at", "progress", "stop_reason"}, "artifacts": [{"name",
 "path", "role", "contract_id", "size_bytes"}], "error"}`. Nothing in between; a
 crash leaves only `start.json`. Measurements and processors have no run directory.
+The directory and `start.json` are made by the run's start, off the window's turn and
+before the plugin hears of the run (`Event::RunDirectory` names it); `run.json` is
+written off the turn too, and `get_run` answers the record it wrote.
 
 ## 8. v2 design mistakes fixed here
 
