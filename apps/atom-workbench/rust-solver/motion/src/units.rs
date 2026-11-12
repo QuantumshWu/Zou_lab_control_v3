@@ -51,9 +51,9 @@ const fn square_root(a: f64) -> f64 {
 /// `classical`: every axis's; the UI's grey band, src/model-notes.ts `SEMICLASSICAL_REGIME`). Reported per output and
 /// axis (solve.rs `classical`); it decides nothing in the solve. An empirical boundary, not a derived one.
 pub const CLASSICAL: f64 = 4.0;
-/// The trap's region (SPEC §1.3, §1.7): an atom is outside it where every focused beam's intensity at the atom is
-/// below this share of its value at the focus -- the contract's definition of a lost atom, the UI's text word for word
-/// (src/model-notes.ts: "每束聚焦光在原子处的强度都低于焦点处的 1/20").
+/// The trap's region (SPEC §1.3, §1.7): an atom is outside it where every beam of the trap light (the tweezer's
+/// frequency) is at the atom below this share of its value at the focus -- the contract's definition of a lost atom, the
+/// UI's text word for word (src/model-notes.ts: "光镊的各束光在原子处的强度都低于焦点处的 1/20").
 pub const REGION_INTENSITY: f64 = 1.0 / 20.0;
 /// The most trajectories a solve runs (SPEC §3; contract §2.3, whose reason text names 16384): reached, the solve
 /// returns as usual, partial. A cap of the contract, not derived; beside the work it sets the least statistics a

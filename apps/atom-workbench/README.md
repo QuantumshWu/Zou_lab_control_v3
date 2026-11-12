@@ -99,8 +99,8 @@ the model's approximations (the ledger, `diagnostics.approximations`), the step
 and two standard errors -- meets the targets: 5% absolute in the populations and
 the loss, 10% relative in the total temperature (T_x + T_y + T_z)/3. An output
 that cannot meet them is returned and flagged. An atom is lost when it first
-leaves the focused beams' region (every focused beam below 1/20 of its focal
-intensity at the atom) with an energy above the value far away (SPEC §1.7).
+leaves the trap's region (every beam of the tweezer's frequency below 1/20 of its
+focal intensity at the atom; a probe or cooling beam given by its waist is not the trap) with an energy above the value far away (SPEC §1.7).
 The example 光镊 · 3D PGC cools the atom with sigma+sigma- pairs along x, y and z.
 
 Known limits (SPEC §8). The centre of mass is a point that moves under the mean
