@@ -238,29 +238,28 @@ impl Windows {
 
     /// One state message to every page, each told what changed in the
     /// sections its view reads (delta.rs); a page with nothing new in it and
-    /// no request of its own is not sent it.
+    /// no request of its own is not sent it. A page just up holds nothing: it
+    /// is told every section it reads.
     pub fn send(&self, state: &Value) -> Result<(), String> {
-        // The journal is told what the windows are: the changes, and the reply a message carries.
-        crate::state_journal::say(state);
         if let Some(share) = self.share.as_ref().filter(|_| state["type"] == "state") { share.publish_state(state); }
+        let mut changed = std::collections::BTreeSet::new();
+        let mut sent = Ok(());
         for window in self.open.iter().filter(|window| window.ready) {
-            window.pixels.send_state(state, |section| window.kind.reads(section), |request| request.as_u64().is_some_and(|request| window.owns_request(request)))?;
+            let told = window.pixels.send_state(state, |section| window.kind.reads(section),
+                |request| request.as_u64().is_some_and(|request| window.owns_request(request)), |section| { changed.insert(section.to_owned()); });
+            if sent.is_ok() { sent = told; }
         }
-        Ok(())
-    }
-
-    /// A state for one page, as `send` would give it (a page just up).
-    pub fn send_state_to(&self, kind: &Kind, state: &Value) -> Result<(), String> {
-        match self.get(kind).filter(|window| window.ready) {
-            Some(window) => window.pixels.send_state(state, |section| window.kind.reads(section), |request| request.as_u64().is_some_and(|request| window.owns_request(request))),
-            None => Ok(()),
-        }
+        // The journal is told what the windows are: the changes, and the reply a message carries. Its
+        // own thread compares the sections a page found changed and those no page reads (state_journal.rs).
+        crate::state_journal::say(state, |section| changed.contains(section)
+            || !self.open.iter().any(|window| window.ready && window.kind.reads(section)));
+        sent
     }
 
     /// A message for one page whole (its document, a reply only it asked for): always sent.
     pub fn send_to(&self, kind: &Kind, value: &Value) -> Result<(), String> {
         if let Some(share) = self.share.as_ref().filter(|_| *kind == Kind::TaskConsole && value["type"] == "state") { share.publish_state(value); }
-        match self.get(kind).filter(|window| window.ready) { Some(window) => window.pixels.send_state(value, |_| true, |_| true), None => Ok(()) }
+        match self.get(kind).filter(|window| window.ready) { Some(window) => window.pixels.send_state(value, |_| true, |_| true, |_| {}), None => Ok(()) }
     }
 
     /// `kind`'s page was (re)loaded: it holds no state and no pixel mapping yet.

@@ -40,6 +40,7 @@ mod run_artifacts;
 mod run_fit;
 mod viewer_logic;
 mod cadence;
+mod present;
 mod pointer_queue;
 mod installer;
 
@@ -61,7 +62,7 @@ enum AppEvent { Command { window: Option<windows::Kind>, command: Value }, Compl
     RecordRead { document: u32, saved: Arc<archive::SavedRecord> },
     /// The page-drawn title bar's buttons: hover, press, maximized (frame.rs).
     Caption { window: windows::Kind, message: Value }, Pulse(pulse_host::PulseEvent), Native(workbench_host::NativeRequest), PulsePoll,
-    /// A held panel's update interval has passed (cadence::Waker).
+    /// A held panel's update interval has passed, or a presentation beat is due (cadence::Waker, present.rs).
     Beat,
     /// A window's ×, or close_window {window}: what closing it means is its kind's (v2's rules).
     CloseWindow(windows::Kind),
@@ -92,7 +93,8 @@ fn write_image(path: &std::path::Path, png: &[u8]) -> Result<Value, String> {
     Ok(json!({"path": path, "width": width, "height": height}))
 }
 
-/// Where a remote client's Save image goes when it names no file: today's data folder, `screenshot.png` or the next free `screenshot-<n>.png`.
+/// Where a remote client's Save image goes when it names no file: today's data folder, `screenshot.png` or the next free `screenshot-<n>.png`
+/// (looked for on the image thread, pixels::off_thread).
 fn fresh_image_path(today: &std::path::Path) -> PathBuf {
     (1..).map(|n: u32| today.join(if n == 1 { "screenshot.png".to_owned() } else { format!("screenshot-{n}.png") }))
         .find(|path| !path.exists()).expect("a free name")
@@ -279,31 +281,11 @@ fn tell_editor_claims(pulse: &mut pulse_host::PulseHost, workbench: &zlc_workben
     pulse.desk.stated(pulse_host::Claims(workbench.active_runs().into_iter().map(|(instance, run, devices)| (instance, (run, devices))).collect()));
 }
 
-/// A pulse command's answer (none yet: `Later`) to the window or client that asked, with the pulse view
-/// when something it shows changed.
-fn pulse_answer(pulse: &mut pulse_host::PulseHost, windows: &windows::Windows, remote_pending: &mut BTreeMap<u64, remote::Pending>,
-                request: u64, handled: pulse_host::Handled) -> Result<(), String> {
-    let mut state = json!({"type": "state"});
-    match handled {
-        pulse_host::Handled::Now(Ok(result)) => { state["request"] = json!(request); state["result"] = result; }
-        pulse_host::Handled::Now(Err(error)) => { state["request"] = json!(request); state["error"] = json!(error); }
-        pulse_host::Handled::Later => {}
-    }
-    if let Some(view) = pulse.view() { state["pulse"] = view; }
-    if state.get("request").is_none() && state.get("pulse").is_none() { return Ok(()); }
-    remote::settle(&state, remote_pending);
-    let sent = windows.send(&state);
-    if state.get("pulse").is_some() { pulse.recycle(&mut state["pulse"]); }
-    sent
-}
-
-/// The pulse view, when something it shows changed, to the windows.
-fn show_pulse(pulse: &mut pulse_host::PulseHost, windows: &windows::Windows) -> Result<(), String> {
-    let Some(view) = pulse.view() else { return Ok(()) };
-    let mut state = json!({"type": "state", "pulse": view});
-    let sent = windows.send(&state);
-    pulse.recycle(&mut state["pulse"]);
-    sent
+/// A pulse command's answer (none yet: `Later`) to the window or client that asked, at the end of this
+/// turn; the pulse view goes with it when something it shows changed (`PulseHost::view`).
+fn pulse_answer(presentation: &mut present::Presentation, request: u64, handled: pulse_host::Handled) {
+    if let pulse_host::Handled::Now(result) = handled { presentation.reply(Reply::to(&json!(request), result)); }
+    presentation.mark(present::Owner::Pulse);
 }
 
 /// A pointer resting or leaving, no button held: it only says where the pointer is.
@@ -312,13 +294,46 @@ fn hovering(command: &Value) -> bool {
         && command["buttons"].as_array().is_none_or(|buttons| buttons.is_empty())))
 }
 
-/// The live document told to every page with each reply in turn (reply.rs): the first message
-/// carries what changed, the others only answer; with none it is told as it is. A remote client's
-/// command is answered by the message that answers it.
-fn tell(windows: &windows::Windows, remote_pending: &mut BTreeMap<u64, remote::Pending>, accepted: &mut Value, mut replies: Vec<Reply>) -> Result<(), String> {
-    if replies.is_empty() { replies.push(Reply::default()); }
-    for reply in replies { reply.send(accepted, |message| { remote::settle(message, remote_pending); windows.send(message) })?; }
-    Ok(())
+/// The live document's views that may have changed made again (present.rs): the board's signal
+/// list while it has no panel, and the workbench's sections.
+fn build_live(due: &present::Due, state: &mut Value, workbench: &zlc_workbench::Workbench, runtime: &Runtime, bindings: &panels::Panels,
+              targets: &BTreeMap<String, Value>, tools: &remote::Tools) {
+    if due.signals { bindings.decorate(state, runtime, |signal| !archive::viewer_owned(signal)); }
+    if due.workbench { workbench_host::decorate(workbench, runtime, bindings, targets, tools, state); }
+}
+
+/// What is due told (present.rs). The live document goes to every page with each reply in turn
+/// (reply.rs): the first message carries what changed, the others only answer; with none it is told
+/// as it is. A remote client's command is answered by the message that answers it. Its views that
+/// may have changed are made again first (`build`); its board's new pictures follow the rows that
+/// frame them, and the windows let go of the panels it no longer has (`kept`: every document's).
+/// Then the pulse board's view.
+fn present(mut due: present::Due, accepted: &mut Value, windows: &mut windows::Windows, remote_pending: &mut BTreeMap<u64, remote::Pending>,
+           pulse: &mut pulse_host::PulseHost, build: impl FnOnce(&present::Due, &mut Value), kept: impl FnOnce(&Value) -> Vec<String>) -> Result<(), String> {
+    let _present = trace::span("ui.present", || json!({"workbench": due.workbench, "pulse": due.pulse, "replies": due.replies.len(), "fronts": due.fronts.len()}));
+    if due.workbench || due.signals { build(&due, accepted); }
+    let mut told = Ok(());
+    if due.live {
+        if due.replies.is_empty() { due.replies.push(Reply::default()); }
+        // Every reply is settled, whatever a page made of another.
+        for reply in std::mem::take(&mut due.replies) {
+            let sent = reply.send(accepted, |message| { remote::settle(message, remote_pending); windows.send(message) });
+            if told.is_ok() { told = sent; }
+        }
+        if due.board { windows.retain_panels(&kept(accepted))?; }
+        for (panel, (sequence, front)) in std::mem::take(&mut due.fronts) {
+            // A panel closed since its picture was drawn has no row to frame it.
+            if accepted["panels"].as_array().is_some_and(|rows| rows.iter().any(|row| row["id"] == panel.as_str())) { windows.submit(panel, sequence, front)?; }
+        }
+    }
+    // The pulse view only when something it shows changed since it was last made.
+    if let Some(view) = due.pulse.then(|| pulse.view()).flatten() {
+        let mut state = json!({"type": "state", "pulse": view});
+        let sent = windows.send(&state);
+        pulse.recycle(&mut state["pulse"]);
+        sent?;
+    }
+    told
 }
 
 /// The workbench's answers to the commands it took, each a reply of its own.
@@ -593,11 +608,13 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
             };
-            let (feedback,decision)=mpsc::channel();
-            result.decision=Some(feedback);
+            // A presentation waits for what the window accepted of it (sent as soon as the window
+            // has decided, before it shows anything); a job that presented nothing waits for nothing.
+            let decision = science.awaits_decision().then(|| { let (feedback, decision) = mpsc::channel(); result.decision = Some(feedback); decision });
             let delivered=worker_proxy.send_event(AppEvent::Completed(result)).is_ok();
-            let decision=if delivered {decision.recv().unwrap_or_default()}else{science::PresentationDecision::default()};
-            science.finish_presentation(decision);
+            if let Some(decision) = decision {
+                science.finish_presentation(if delivered { decision.recv().unwrap_or_default() } else { science::PresentationDecision::default() });
+            }
             if !delivered || closing {break;}
         }
     })?;
@@ -626,6 +643,10 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
         "acquisition":{"state":"idle","produced":0}});
     // The live document's panel rows as its last accepted job answered them, before they were decorated.
     let mut answered_rows = Value::Null;
+    // The sections of the live board's last answer (present::replace_answer).
+    let mut answered_sections: BTreeSet<String> = BTreeSet::new();
+    // What the windows are yet to be told, and when (present.rs).
+    let mut presentation = present::Presentation::default();
     let mut queue: VecDeque<Value> = VecDeque::new();
     let mut active = false;
     let mut closing = false;
@@ -740,7 +761,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut pending_targets: std::collections::BTreeMap<String, Value> = Default::default();
     let tools: remote::Tools = Default::default();
-    workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
+    presentation.mark(present::Owner::Workbench);
     let remote_proxy = std::sync::Mutex::new(event_loop.create_proxy());
     let root = workbench.workspace().root.clone();
     let (endpoint, endpoint_record, connection_record) = remote::start_endpoint(move |call| remote_proxy.lock().map_err(|_| "instrument closing".to_owned())?
@@ -774,8 +795,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             Event::UserEvent(AppEvent::RuntimeChanged) => "runtime".into(),
             Event::UserEvent(AppEvent::Answered { .. }) => "dialog".into(),
             Event::UserEvent(_) => "other".into(),
+            Event::MainEventsCleared => "present".into(),
             _ => "window".into(),
         };
+        // A presentation beat (present.rs): every event sent has been handled (the loop is about to wait), or the beat's wake.
+        let beat_turn = matches!(&event, Event::MainEventsCleared | Event::UserEvent(AppEvent::Beat));
         let _turn = trace::span("ui.turn", || json!({"event": handles}));
         let _busy = resources::turn(handles);
         let result = (|| -> Result<(), String> {
@@ -949,10 +973,10 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         accepted["acquisition"] = builtin.acquisition();
                         // Every output is asked at once, off this turn; the command is answered when each has answered.
                         accepted["stop_all"] = json!({"state": "making_safe"});
-                        workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
+                        presentation.mark(present::Owner::Workbench);
                         let (proxy, request) = (self_proxy.clone(), command["id"].clone());
                         safe_actions.make_safe_then(move |failures| { let _ = proxy.send_event(AppEvent::MadeSafe { request, failures }); });
-                        return tell(&windows, &mut remote_pending, &mut accepted, Vec::new());
+                        return Ok(());
                     }
                     if matches!(action.as_str(), "share_start" | "share_stop" | "share_decide") {
                         // Browser sharing: the window's state and pictures to approved browsers.
@@ -969,7 +993,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             _ => share.decide(command["client"].as_str().unwrap_or(""), command["allow"].as_bool().unwrap_or(false)),
                         };
                         accepted["share"] = share.state();
-                        return tell(&windows, &mut remote_pending, &mut accepted, vec![Reply::to(&command["id"], outcome.map(|_| Value::Null))]);
+                        presentation.reply(Reply::to(&command["id"], outcome.map(|_| Value::Null)));
+                        return Ok(());
                     }
                     if action == "show_window" {
                         let kind = command["window"].as_str().and_then(windows::Kind::parse)
@@ -1058,7 +1083,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             .or_else(|| asking.and_then(|viewer| viewer.archive.as_ref()).and_then(|archive| archive.record().pulses.iter().find(|pulse| pulse.key == key)))
                             .ok_or_else(|| format!("This Figure played no pulse {key:?}"))?;
                         let answer = pulse.open_recorded(&played.tree.to_string(), command["discard_changes"] == true);
-                        return pulse_answer(&mut pulse, &windows, &mut remote_pending, command["id"].as_u64().unwrap_or(0), pulse_host::Handled::Now(answer));
+                        pulse_answer(&mut presentation, command["id"].as_u64().unwrap_or(0), pulse_host::Handled::Now(answer));
+                        return Ok(());
                     }
                     if action.starts_with("pulse_") {
                         // The Pulse Editor and the board: answered on this turn or by a lane later.
@@ -1071,7 +1097,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         let request = command["id"].as_u64().unwrap_or(0);
                         let claimant = pulse.apparatus_device().and_then(|device| workbench.device_claimant(&device));
                         let handled = pulse.command(&action, &command, origin.is_operator(), request, claimant);
-                        return pulse_answer(&mut pulse, &windows, &mut remote_pending, request, handled);
+                        pulse_answer(&mut presentation, request, handled);
+                        return Ok(());
                     }
                     if worker_failed { return Err("Scientific worker stopped; restart after the displayed error".into()); }
                     // A Figure Viewer's board is its own (v2 panel_only): its order, panel names,
@@ -1130,7 +1157,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         };
                         if workbench.on_runtime(&mut host) { workbench_host::deliver(&mut workbench, &builtin, &mut host); }
                         tell_editor_claims(&mut pulse, &workbench);
-                        show_pulse(&mut pulse, &windows)?;
+                        presentation.mark(present::Owner::Pulse);
                         // What the sequencer states of itself (its trigger lanes, how often each rises in what it holds)
                         // reaches the workbench when it changes, as any device's facts do.
                         if let Some((instance, facts)) = pulse.device_facts() { let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Facts { instance, facts })); }
@@ -1144,8 +1171,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         // answers (an SLM Editor's paint stroke is one): no state goes out for it now.
                         if answered.is_empty() && workbench.handles_command(&action) { return Ok(()); }
                         replies.extend(answered);
-                        workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
-                        return tell(&windows, &mut remote_pending, &mut accepted, replies);
+                        presentation.mark(present::Owner::Workbench);
+                        for reply in replies { presentation.reply(reply); }
+                        return Ok(());
                     }
                     // A command of an opened Figure goes to its Figure Viewer's document: one
                     // from that window, of one of its panels, of its data, or `open {window}`.
@@ -1432,7 +1460,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             windows::Kind::SlmEditor(device) => slm.ready(device, ratio.unwrap_or(1.0)),
                         }
                         windows.page_loaded(&kind);
-                        windows.send_state_to(&kind, &accepted)?;
+                        // The live document at the end of this turn: the page holds nothing, and is told every section it reads.
+                        presentation.now();
                         // Its title bar: the window's width and whether it is maximized.
                         if let Some(caption) = windows.get(&kind).and_then(|shown| frame::caption(&shown.window)) { windows.send_to(&kind, &caption)?; }
                         if let windows::Kind::SlmEditor(device) = &kind {
@@ -1446,12 +1475,15 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             windows.send_to(&kind, &state)?;
                             pulse.recycle(&mut state["pulse"]);
                         }
-                        // Its panels' last pictures, so a window shown again is whole at once.
+                        // Its panels' last pictures, so a window shown again is whole at once: a Figure's after its
+                        // document (sent above), the live board's after the live document (present.rs).
                         for (panel, front) in &latest_fronts {
                             if windows::owner(panel) != kind { continue; }
-                            let shown = match &kind { windows::Kind::FigureViewer(number) => viewers.get(number).map_or(&accepted, |viewer| &viewer.state), _ => &accepted };
+                            let viewer = match &kind { windows::Kind::FigureViewer(number) => viewers.get(number), _ => None };
+                            let shown = viewer.map_or(&accepted, |viewer| &viewer.state);
                             if let Some(sequence) = shown["panels"].as_array().and_then(|rows| rows.iter().find(|row| row["id"] == panel.as_str())).and_then(|row| row["frame"]["sequence"].as_u64()) {
-                                windows.submit(panel.clone(), sequence, front.clone())?;
+                                if viewer.is_some() { windows.submit(panel.clone(), sequence, front.clone())?; }
+                                else { presentation.front([(panel.clone(), (sequence, front.clone()))]); }
                             }
                         }
                         if standalone && !opened {
@@ -1551,7 +1583,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         Some(viewer) => (&mut viewer.bindings, &mut viewer.state, Some(&mut viewer.pending), Some((&mut viewer.drafts, &mut viewer.targets, &mut viewer.board))),
                         None => (&mut bindings, &mut accepted, None, None),
                     };
-                    let feedback=completion.decision;
+                    // What this window accepted goes to the worker as soon as it is decided: the worker
+                    // finishes its presentation while this turn presents (none decided: nothing accepted).
+                    let mut feedback=completion.decision;
                     let mut decision=science::PresentationDecision::default();
                     bindings.sync_generations(&runtime);
                     let current_authorities = bindings.authorities();
@@ -1577,7 +1611,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             && stale_targets.is_empty() && state["error"].is_null() && state["panels"] == answered_rows
                             && current_authorities.keys().eq(completion.authorities.keys()) => {
                             decision.targets.extend(panel_ids(&state));
-                            tell(&windows, &mut remote_pending, accepted, vec![Reply::done(&json!(completion.request))])?;
+                            if let Some(feedback) = feedback.take() { let _ = feedback.send(std::mem::take(&mut decision)); }
+                            // Its reply alone: every window shows what it would be told.
+                            Reply::done(&json!(completion.request)).send(&mut json!({"type": "state"}), |message| { remote::settle(message, &mut remote_pending); windows.send(message) })?;
                         }
                         Ok((mut state, mut fronts)) => {
                             if !in_viewer { answered_rows = state["panels"].clone(); }
@@ -1653,6 +1689,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 decision.targets.extend(completion.target.iter().cloned());
                             }
                             decision.fronts.extend(fronts.keys().cloned());
+                            if let Some(feedback) = feedback.take() { let _ = feedback.send(std::mem::take(&mut decision)); }
                             // A pointer's picture shows the data already on screen: the panel's interval runs on.
                             if !in_viewer && completion.action != "pointer" { cadence.presented(fronts.keys()); }
                             sequence += 1;
@@ -1687,7 +1724,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 workbench.panels_drawn(fronts.keys().map(String::as_str));
                                 // A prepared panel's document now holds the target it was added with.
                                 pending_targets.retain(|panel, _| !ids.contains(panel));
-                                workbench_host::decorate(&workbench, &runtime, bindings, &pending_targets, &tools, &mut state);
+                                // The workbench's view of the new rows is made at the presentation (present.rs).
+                                presentation.mark(present::Owner::Workbench);
                             }
                             // The opened Figure's record: the info pane's tabs and its Flow.
                             if let Some(archive) = archive.as_ref().filter(|archive| state["document"]["path"] == archive.path()) {
@@ -1726,17 +1764,23 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             }
                             // The worker's answer is this message's (reply.rs), not the document's.
                             let reply = Reply::take(&mut state);
-                            *accepted = state;
-                            if in_viewer {
-                                viewer_message(accepted, reply, |message| { remote::settle(message, &mut remote_pending); windows.send_to(&windows::Kind::FigureViewer(document), message) })?;
-                            } else { tell(&windows, &mut remote_pending, accepted, vec![reply])?; }
-                            let mut kept = ids.clone();
-                            kept.extend(other.iter().cloned());
-                            kept.push(pulse_host::PREVIEW_PANEL.to_owned());
-                            kept.extend(slm.panels());
-                            windows.retain_panels(&kept)?;
                             latest_fronts.retain(|id, _| ids.contains(id) || other.contains(id));
-                            for (id, front) in fronts { latest_fronts.insert(id.clone(), front.clone()); windows.submit(id, sequence, front)?; }
+                            for (id, front) in &fronts { latest_fronts.insert(id.clone(), front.clone()); }
+                            if in_viewer {
+                                *accepted = state;
+                                viewer_message(accepted, reply, |message| { remote::settle(message, &mut remote_pending); windows.send_to(&windows::Kind::FigureViewer(document), message) })?;
+                                let mut kept = ids.clone();
+                                kept.extend(other.iter().cloned());
+                                kept.push(pulse_host::PREVIEW_PANEL.to_owned());
+                                kept.extend(slm.panels());
+                                windows.retain_panels(&kept)?;
+                                for (id, front) in fronts { windows.submit(id, sequence, front)?; }
+                            } else {
+                                // The live board is presented at the beat (present.rs), its pictures after their rows; its reply at once.
+                                present::replace_answer(accepted, state, &mut answered_sections);
+                                presentation.board(fronts.into_iter().map(|(id, front)| (id, (sequence, front))));
+                                presentation.reply(reply);
+                            }
                         }
                         Err(error) => {
                             let error = if superseded { superseded_error.to_owned() } else { error };
@@ -1749,7 +1793,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             let reply = Reply::to(&json!(completion.request), Err(error.clone()));
                             if in_viewer {
                                 viewer_message(accepted, reply, |message| { remote::settle(message, &mut remote_pending); windows.send_to(&windows::Kind::FigureViewer(document), message) })?;
-                            } else { tell(&windows, &mut remote_pending, accepted, vec![reply])?; }
+                            } else { presentation.reply(reply); }
                             eprintln!("{}", json!({"type":"scientific-error","request":completion.request,"error":error}));
                         }
                     }
@@ -1774,39 +1818,41 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     if closing { answer(Err("The instrument is closing".into())); return Ok(()); }
                     match call.name.as_str() {
                         "get_state" => {
-                            let mut state = accepted.clone();
+                            // The live document as it is held, its stale views made (present.rs; it is still told at the beat).
+                            let stale = presentation.take_stale();
+                            build_live(&stale, &mut accepted, &workbench, &runtime, &bindings, &pending_targets, &tools);
+                            // Only the sections asked for are copied, and of a section only the rows asked for.
+                            let asked = |key: &str| key == "type" || call.params["sections"].as_array().is_none_or(|sections| sections.iter().any(|section| section == key));
+                            let (panel, node) = (call.params["panel"].as_str(), call.params["node"].as_str());
+                            let rows = |key: &str, value: &Value| match (key, value.as_array(), panel, node) {
+                                ("panels", Some(rows), Some(panel), _) => Value::Array(rows.iter().filter(|row| row["id"] == panel).cloned().collect()),
+                                ("logic", Some(rows), _, Some(node)) => Value::Array(rows.iter().filter(|row| row["node_id"] == node).cloned().collect()),
+                                _ => value.clone(),
+                            };
+                            let mut state: Map<String, Value> = accepted.as_object().into_iter().flatten().filter(|(key, _)| asked(key))
+                                .map(|(key, value)| (key.clone(), rows(key, value))).collect();
                             // The pulse's view is made only for a caller who asks for it (it is the largest section).
-                            if call.params["sections"].as_array().is_none_or(|sections| sections.iter().any(|section| section == "pulse")) { state["pulse"] = pulse.state(); }
-                            state["share"] = share.state();
-                            state["windows"] = listed_windows(&windows, &viewers);
+                            if asked("pulse") { state.insert("pulse".into(), pulse.state()); }
+                            if asked("share") { state.insert("share".into(), share.state()); }
+                            if asked("windows") { state.insert("windows".into(), listed_windows(&windows, &viewers)); }
                             // The Figure Viewer's document: the opened archive, its panels and its Data.
-                            state["viewers"] = Value::Array(viewers.iter().filter(|(_, viewer)| !viewer.closing).map(|(number, viewer)| {
-                                let mut shown = viewer.state.clone();
-                                if let Some(object) = shown.as_object_mut() { object.remove("type"); }
-                                shown["window"] = json!(windows::Kind::FigureViewer(*number).key());
-                                shown
-                            }).collect());
-                            if let Some(panel) = call.params["panel"].as_str() {
-                                if let Some(rows) = state["panels"].as_array_mut() { rows.retain(|row| row["id"] == panel); }
-                                for shown in state["viewers"].as_array_mut().into_iter().flatten() {
-                                    if let Some(rows) = shown["panels"].as_array_mut() { rows.retain(|row| row["id"] == panel); }
-                                }
+                            if asked("viewers") {
+                                state.insert("viewers".into(), Value::Array(viewers.iter().filter(|(_, viewer)| !viewer.closing).map(|(number, viewer)| {
+                                    let mut shown: Map<String, Value> = viewer.state.as_object().into_iter().flatten().filter(|(key, _)| *key != "type")
+                                        .map(|(key, value)| (key.clone(), if key == "panels" { rows(key, value) } else { value.clone() })).collect();
+                                    shown.insert("window".into(), json!(windows::Kind::FigureViewer(*number).key()));
+                                    Value::Object(shown)
+                                }).collect()));
                             }
-                            if let Some(node) = call.params["node"].as_str() {
-                                if let Some(rows) = state["logic"].as_array_mut() { rows.retain(|row| row["node_id"] == node); }
-                            }
-                            if let (Some(sections), Some(object)) = (call.params["sections"].as_array(), state.as_object_mut()) {
-                                object.retain(|key, _| key == "type" || sections.iter().any(|section| section == key.as_str()));
-                            }
-                            answer(Ok(zlc_bus::mcp::ToolOutput { json: state, png: None }));
+                            answer(Ok(zlc_bus::mcp::ToolOutput { json: Value::Object(state), png: None }));
                         }
                         "list_signals" => answer(Ok(zlc_bus::mcp::ToolOutput { json: json!({"signals": remote::signals(&runtime)}), png: None })),
                         "fit_models" => answer(Ok(zlc_bus::mcp::ToolOutput { json: run_fit::fit_models(), png: None })),
                         "save_image" | "get_window_image" => {
                             // The same picture the window's Save image… writes; the reply carries it too
                             // (get_window_image: only the reply, v2 lab_screenshot).
-                            let path = (call.name == "save_image").then(|| call.params["path"].as_str().map(|path| root.join(path))
-                                .unwrap_or_else(|| fresh_image_path(&workbench.workspace().today())));
+                            // The file named, else the next free name in today's folder (looked for with the writing, off this thread).
+                            let path = (call.name == "save_image").then(|| (call.params["path"].as_str().map(|path| root.join(path)), workbench.workspace().today()));
                             // The named window's picture (MCP addresses windows by name); the Task Console's by default.
                             let Some(shown) = call.params["window"].as_str().map_or(Some(windows::Kind::TaskConsole), windows::Kind::parse) else {
                                 answer(Err("Name a window: devices, task-console, pulse-editor, figure-viewer-<n>, control:<device> or log:<device>".into())); return Ok(());
@@ -1814,8 +1860,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             let reply = call.reply.clone();
                             let captured = match windows.get(&shown) {
                                 Some(window) => window.pixels.capture(move |png| {
-                                    let _ = reply.send(png.and_then(|png| Ok(zlc_bus::mcp::ToolOutput { json: match &path {
-                                        Some(path) => write_image(path, &png)?,
+                                    let _ = reply.send(png.and_then(|png| Ok(zlc_bus::mcp::ToolOutput { json: match path {
+                                        Some((named, today)) => write_image(&named.unwrap_or_else(|| fresh_image_path(&today)), &png)?,
                                         None => { let (width, height) = pixels::png_size(&png).unwrap_or_default(); json!({"width": width, "height": height}) }
                                     }, png: Some(png) })));
                                 }),
@@ -1844,12 +1890,17 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         "get_panel_image" => {
                             let panel = call.params["panel"].as_str().unwrap_or("");
-                            answer(match latest_fronts.get(panel) {
-                                Some(front) => remote::png(front).map(|png| zlc_bus::mcp::ToolOutput { png: Some(png), json: json!({"panel": panel,
-                                    "width": front.width, "height": front.height, "sequence": (std::iter::once(&accepted).chain(viewers.values().map(|viewer| &viewer.state)).find_map(|state| state["panels"].as_array()
-                                        .and_then(|rows| rows.iter().find(|row| row["id"] == panel)).map(|row| row["frame"]["sequence"].clone())))}) }),
-                                None => Err(format!("{panel} has no accepted picture yet")),
-                            });
+                            match latest_fronts.get(panel) {
+                                Some(front) => {
+                                    let facts = json!({"panel": panel, "width": front.width, "height": front.height,
+                                        "sequence": (std::iter::once(&accepted).chain(viewers.values().map(|viewer| &viewer.state)).find_map(|state| state["panels"].as_array()
+                                            .and_then(|rows| rows.iter().find(|row| row["id"] == panel)).map(|row| row["frame"]["sequence"].clone())))});
+                                    // Encoded off this thread (pixels::off_thread).
+                                    let (front, reply) = (front.clone(), call.reply.clone());
+                                    pixels::off_thread(move || { let _ = reply.send(remote::png(&front).map(|png| zlc_bus::mcp::ToolOutput { png: Some(png), json: facts })); });
+                                }
+                                None => answer(Err(format!("{panel} has no accepted picture yet"))),
+                            }
                         }
                         "wait" => {
                             next_remote += 1;
@@ -1890,19 +1941,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Event::UserEvent(AppEvent::MadeSafe { request, failures }) => {
                     accepted["stop_all"] = if failures.is_empty() { json!({"state": "safe"}) } else { json!({"state": "not_safe", "failures": failures}) };
-                    let reply = Reply::to(&request, if failures.is_empty() { Ok(Value::Null) } else { Err(format!("Not every output reported safe: {}", failures.join("; "))) });
-                    if !closing { tell(&windows, &mut remote_pending, &mut accepted, vec![reply])?; }
-                    else { reply.send(&mut accepted, |message| remote::settle(message, &mut remote_pending)); }
+                    presentation.reply(Reply::to(&request, if failures.is_empty() { Ok(Value::Null) } else { Err(format!("Not every output reported safe: {}", failures.join("; "))) }));
                 }
-                Event::UserEvent(AppEvent::ImageSaved { request, result }) => {
-                    let mut state = accepted.clone();
-                    state["request"] = json!(request);
-                    match result {
-                        Ok(saved) => { state["result"] = saved; state["error"] = Value::Null; }
-                        Err(error) => { state["result"] = Value::Null; state["error"] = json!(error); }
-                    }
-                    if !closing { windows.send(&state)?; }
-                }
+                Event::UserEvent(AppEvent::ImageSaved { request, result }) => { if !closing { presentation.reply(Reply::to(&json!(request), result)); } }
                 // A dialog answered: its command runs with the chosen path, else its window is told nothing was chosen.
                 Event::UserEvent(AppEvent::Answered { ask, answer }) => match dialogs.answered(ask, answer) {
                     dialog::Answered::Run { window, command } => self_proxy.send_event(AppEvent::Command { window, command }).map_err(|_| "event loop closed".to_owned())?,
@@ -1914,7 +1955,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 Event::UserEvent(AppEvent::Activate(window)) => windows.activate(&window),
                 Event::UserEvent(AppEvent::ShareChanged) => {
                     accepted["share"] = share.state();
-                    if !closing { windows.send(&accepted)?; }
+                    presentation.mark(present::Owner::Live);
                 }
                 Event::UserEvent(AppEvent::RuntimeChanged) => {
                     // A viewer's panel derived a signal (v2: a saved Figure's board keeps its
@@ -1938,8 +1979,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         queue: &mut queue, targets: &mut pending_targets };
                     if workbench.on_runtime(&mut host) {
                         workbench_host::deliver(&mut workbench, &builtin, &mut host);
-                        workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
-                        if !closing { windows.send(&accepted)?; }
+                        presentation.mark(present::Owner::Workbench);
                     }
                 }
                 // An SLM Editor's draft, told by its device: its window's state and pictures.
@@ -2003,12 +2043,12 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     workbench_host::deliver(&mut workbench, &builtin, &mut host);
                     workbench.on_runtime(&mut host);
                     accepted["acquisition"] = builtin.acquisition();
+                    presentation.mark(present::Owner::Workbench);
                     let replies = workbench_replies(&mut workbench);
-                    workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
-                    if !closing { tell(&windows, &mut remote_pending, &mut accepted, replies)?; }
+                    if !closing { for reply in replies { presentation.reply(reply); } }
                     else { for reply in replies { reply.send(&mut accepted, |message| remote::settle(message, &mut remote_pending)); } }
                     tell_editor_claims(&mut pulse, &workbench);
-                    if !closing { show_pulse(&mut pulse, &windows)?; }
+                    presentation.mark(present::Owner::Pulse);
                     // What the sequencer states of itself (its trigger lanes, how often each rises in what it holds)
                     // reaches the workbench when it changes, as any device's facts do.
                     if let Some((instance, facts)) = pulse.device_facts() { let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Facts { instance, facts })); }
@@ -2016,10 +2056,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 // v2 _route_exact_panel_selection: an Edit's region is its panel's.
                 Event::UserEvent(AppEvent::Selection(note)) => {
                     let panel = note.panel.strip_prefix(panels::EDIT_PREFIX).unwrap_or(&note.panel).to_owned();
-                    if workbench.panel_selection(&panel, &note.signal, note.selection.as_ref(), &note.context) && !closing {
-                        workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
-                        windows.send(&accepted)?;
-                    }
+                    if workbench.panel_selection(&panel, &note.signal, note.selection.as_ref(), &note.context) { presentation.mark(present::Owner::Workbench); }
                 }
                 Event::UserEvent(AppEvent::RebaseNeeded) => {pending.store(true,Ordering::Release); for viewer in viewers.values_mut() { viewer.pending = true; }}
                 Event::UserEvent(AppEvent::Pulse(event)) => {
@@ -2059,12 +2096,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Log { instance, line }));
                         }
                     }
-                    if closing { return Ok(()); }
-                    // A page is told only what changed (delta.rs): the view is made only when something it shows
-                    // changed, and an answer carries its result.
+                    // An answer is told at the end of this turn; a change answering nothing at the beat (present.rs).
+                    // The view is made only when something it shows changed (PulseHost::view).
                     match answered {
-                        Some((request, handled)) => pulse_answer(&mut pulse, &windows, &mut remote_pending, request, handled)?,
-                        None => show_pulse(&mut pulse, &windows)?,
+                        Some((request, handled)) => pulse_answer(&mut presentation, request, handled),
+                        None => presentation.mark(present::Owner::Pulse),
                     }
                 }
                 Event::UserEvent(AppEvent::Native(request)) => match request {
@@ -2115,16 +2151,13 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 Event::UserEvent(AppEvent::PulsePoll) => {
                     if !closing {
                         // An Apply or Close that waited 30 s for the runs it stopped gives up and says so.
-                        if workbench.poll(std::time::Instant::now()) {
-                            workbench_host::decorate(&workbench, &runtime, &bindings, &pending_targets, &tools, &mut accepted);
-                            windows.send(&accepted)?;
-                        }
+                        if workbench.poll(std::time::Instant::now()) { presentation.mark(present::Owner::Workbench); }
                         tell_editor_claims(&mut pulse, &workbench);
                         // What the sequencer states of itself (its trigger lanes, how often each rises in what it holds)
                         // reaches the workbench when it changes, as any device's facts do.
                         if let Some((instance, facts)) = pulse.device_facts() { let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Facts { instance, facts })); }
                         pulse.poll();
-                        show_pulse(&mut pulse, &windows)?;
+                        presentation.mark(present::Owner::Pulse);
                     }
                 }
                 _ => {}
@@ -2140,8 +2173,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 let board_turn = live && queue.front().is_none_or(|next| next["action"] == "pointer" && !board_last);
                 let board = if !board_turn { None } else if bindings.is_empty() {
                     pending.store(false, Ordering::Release);
-                    bindings.decorate(&mut accepted, &runtime, |signal| !archive::viewer_owned(signal));
-                    windows.send(&accepted)?;
+                    presentation.mark(present::Owner::Signals);
                     None
                 } else {
                     // Only the panels past their interval take the new data (v2 BoardScheduler);
@@ -2247,8 +2279,16 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
         })();
         if let Err(error) = result {
             eprintln!("{}", json!({"type":"desktop-error","error":error}));
-            let reply = Reply::to(&error_request.unwrap_or(Value::Null), Err(error));
-            if let Err(error) = tell(&windows, &mut remote_pending, &mut accepted, vec![reply]) { eprintln!("Cannot report UI error: {error}"); }
+            presentation.reply(Reply::to(&error_request.unwrap_or(Value::Null), Err(error)));
+        }
+        // What is due told (present.rs): a reply at the end of its turn; any other change at a beat, not while closing.
+        let now = std::time::Instant::now();
+        if presentation.due(now, beat_turn && !closing) {
+            let presented = present(presentation.take(now), &mut accepted, &mut windows, &mut remote_pending, &mut pulse,
+                |due, state| build_live(due, state, &workbench, &runtime, &bindings, &pending_targets, &tools),
+                |state| panel_ids(state).into_iter().chain(viewers.values().flat_map(|viewer| panel_ids(&viewer.state)))
+                    .chain([pulse_host::PREVIEW_PANEL.to_owned()]).chain(slm.panels()).collect());
+            if let Err(error) = presented { eprintln!("{}", json!({"type":"desktop-error","error":format!("Cannot present: {error}")})); }
         }
         // v2's opening rules: Init opens TaskConsole in front of Devices; Shut down puts Devices back.
         let now = matches!(accepted["apparatus"]["action"].as_str(), Some("apply" | "shut_down"));
@@ -2263,8 +2303,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         remote::check_waiters(&accepted, &mut waiters, None);
-        // The turn at which a held panel may take its new data.
-        beat.arm(cadence.wake_at());
+        // The turn at which a held panel may take its new data, or the windows are next told what is pending.
+        beat.arm([cadence.wake_at(), presentation.wake_at().filter(|_| !closing)].into_iter().flatten().min());
         if *flow == ControlFlow::Exit {
             // No client can reach this instrument any more.
             let _ = std::fs::remove_file(&connection_record);
