@@ -572,8 +572,26 @@ impl Editor {
     /// ("device is in use by PulseGUI") until Stop or its finite run ends.
     pub fn drives(&self) -> bool { self.link.driving && self.link.claimed_by.is_none() }
 
-    /// One lane's answer, applied if still current.
-    pub fn deliver(&mut self, outcome: Outcome) {
+    /// One lane's answer, applied if still current; whether what the window shows may have
+    /// changed. A status answer that finds the board as it was changes nothing: the window's view
+    /// is not made again for it (the status poll asks twice a second).
+    pub fn deliver(&mut self, outcome: Outcome) -> bool {
+        match outcome {
+            Outcome::Polled { operation, epoch, state } => self.polled(operation, epoch, state),
+            outcome => { self.apply(outcome); true }
+        }
+    }
+
+    /// A status answer, adopted if still current; whether it found the board changed.
+    fn polled(&mut self, operation: u64, epoch: u64, state: BoardState) -> bool {
+        self.link.poll_in_flight = false;
+        if operation != self.link.operation || epoch != self.link.poll_epoch || self.link.busy.is_some() { return false; }
+        let changed = state != self.link.state;
+        self.adopt_board_state(state);
+        changed
+    }
+
+    fn apply(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Connected { operation, mode, endpoint, released, result } => {
                 // Delivered whatever superseded it (v2 always_deliver): the old board is
@@ -680,10 +698,7 @@ impl Editor {
                     Ok((applied, state)) => { self.adopt_board_state(state); self.adopt_applied(applied, discard, operator); }
                 }
             }
-            Outcome::Polled { operation, epoch, state } => {
-                self.link.poll_in_flight = false;
-                if operation == self.link.operation && epoch == self.link.poll_epoch && self.link.busy.is_none() { self.adopt_board_state(state); }
-            }
+            Outcome::Polled { operation, epoch, state } => { self.polled(operation, epoch, state); }
             Outcome::Completed { run, result, state } => {
                 if self.link.finite_run != Some(run) { return; }
                 self.link.finite_run = None;
@@ -711,7 +726,7 @@ impl Editor {
 
     /// A Stop held back for the command it superseded, now that it delivered.
     fn deliver_deferred_stop(&mut self) {
-        if self.link.busy.is_none() { if let Some(stop) = self.link.deferred_stop.take() { self.deliver(stop); } }
+        if self.link.busy.is_none() { if let Some(stop) = self.link.deferred_stop.take() { self.apply(stop); } }
     }
 
     /// `_adopt_applied`: the board's pulse as the draft (asked first when it

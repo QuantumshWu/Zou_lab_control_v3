@@ -942,6 +942,20 @@ impl PluginHost {
         current.map_or_else(|| Arc::new(AtomicBool::new(true)), |current| current.stop.0.clone())
     }
 
+    /// Tell a run what a core read it watches now says (`ctx.watch`): `watch` names the watch,
+    /// `answer` is the read's new answer or its refusal. Refused (StaleRun) once the run has ended, so the teller stops.
+    pub fn tell_watch(&self, run: &str, watch: &str, answer: Result<Value, String>) -> Result<(), CallError> {
+        let (instance, process) = {
+            let state = self.inner.state.lock().unwrap();
+            let (instance, entry) = state.instances.iter().find(|(_, entry)| entry.run.as_ref().is_some_and(|current| current.id == run))
+                .ok_or_else(|| CallError::new(ErrorKind::StaleRun, format!("{run} has ended")))?;
+            let process = entry.serving.process().cloned().ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not a node of this core")))?;
+            (instance.clone(), process)
+        };
+        let told = match answer { Ok(value) => json!({"value": value}), Err(error) => json!({"error": error}) };
+        process.event("run.watched", json!({"instance": instance, "run": run, "watch": watch, "told": told}))
+    }
+
     /// Open instances: (id, type, pid; 0 for one another core serves).
     pub fn instances(&self) -> Vec<(String, String, u32)> {
         let state = self.inner.state.lock().unwrap();

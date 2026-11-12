@@ -254,6 +254,13 @@ class Process:
             instance = self.instances.get(str(params.get("instance")))
             if instance is not None:
                 instance.stop_run(str(params.get("run")))
+        elif op == "run.watched":
+            # A change of a read a run watches (ctx.watch), told by the core as it happens.
+            instance = self.instances.get(str(params.get("instance")))
+            run = None if instance is None else instance.runs.get(str(params.get("run")))
+            watched = None if run is None else run.watches.get(str(params.get("watch")))
+            if watched is not None:
+                watched.tell(params.get("told") or {})
         elif op == "abandon":
             # The core gave up on an instance whose call overran its deadline (§7): it
             # rejects new opens until its lane returns and releases its device.
@@ -1144,6 +1151,8 @@ class Run:
         self.deliveries: queue.Queue[tuple[int, dict[str, Any]]] = queue.Queue()
         #: What this run's deliveries name by number: schemas, source run records.
         self.refs = RunRefs()
+        #: The reads it watches (ctx.watch), by name: what the core last told of each.
+        self.watches: dict[str, Any] = {}
         self.thread = threading.Thread(target=self._main, name=f"zlc-run-{instance.name}", daemon=True)
 
     def deliver(self, identity: int, params: dict[str, Any]) -> None:

@@ -2017,12 +2017,16 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 Event::UserEvent(AppEvent::RebaseNeeded) => {pending.store(true,Ordering::Release); for viewer in viewers.values_mut() { viewer.pending = true; }}
                 Event::UserEvent(AppEvent::Pulse(event)) => {
                     let mut state = json!({"type": "state"});
+                    // Whether what the window shows may have changed: not by a status answer that found the board as it
+                    // was, nor by a reply that touched nothing (a report wait that ran out, an estimate).
+                    let mut shown = true;
                     match event {
-                        pulse_host::PulseEvent::Outcome(outcome) => { pulse.editor.deliver(outcome); pulse.dispatch(); }
+                        pulse_host::PulseEvent::Outcome(outcome) => { shown = pulse.editor.deliver(outcome); pulse.dispatch(); }
                         pulse_host::PulseEvent::Reply { request, result, touched, run } => {
                             state["request"] = json!(request);
                             match result { Ok(value) => state["result"] = value, Err(error) => state["error"] = json!(error) }
                             pulse.replied(touched, run);
+                            shown = touched;
                         }
                         pulse_host::PulseEvent::Touched => pulse.replied(true, None),
                         pulse_host::PulseEvent::Opened { instance, result } => {
@@ -2050,11 +2054,14 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Log { instance, line }));
                         }
                     }
-                    state["pulse"] = pulse.state();
-                    // A page is told only what changed (delta.rs): an unchanged pulse sends nothing.
-                    remote::settle(&state, &mut remote_pending);
-                    if !closing { windows.send(&state)?; }
-                    pulse.recycle(&mut state["pulse"]);
+                    // A page is told only what changed (delta.rs): an unchanged pulse sends nothing, and an
+                    // answer that changed nothing shown is not made into a view at all.
+                    if shown { state["pulse"] = pulse.state(); }
+                    if shown || !state["request"].is_null() {
+                        remote::settle(&state, &mut remote_pending);
+                        if !closing { windows.send(&state)?; }
+                    }
+                    if shown { pulse.recycle(&mut state["pulse"]); }
                 }
                 Event::UserEvent(AppEvent::Native(request)) => match request {
                     workbench_host::NativeRequest::Open { instance, type_id, parameters, context } => pulse.open_device(&instance, &type_id, &parameters, &context),
