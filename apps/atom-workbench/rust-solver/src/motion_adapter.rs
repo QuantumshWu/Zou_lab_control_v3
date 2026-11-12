@@ -5,8 +5,7 @@
 //!
 //! # Device
 //! Only the CPU solver exists (SPEC §0, §9). `options.device` is read ("gpu" when absent); every solve runs on the CPU,
-//! the result says device "cpu", and a request for the GPU carries `deviceNote` (`GPU_ABSENT`). The native `gpu`
-//! operation answers at once with the same words, so the app never waits behind its compile screen.
+//! the result says device "cpu", and a request for the GPU carries `deviceNote` (`GPU_ABSENT`).
 //!
 //! # Result contract
 //! `states`, `timesUs`, `populations` (the held atom's, each row projected onto the probability simplex as the population
@@ -29,13 +28,8 @@ use std::time::Instant;
 
 const ENGINE: &str = "rust-atom-motion";
 const AXES: [&str; 3] = ["x", "y", "z"];
-/// Why a request for the GPU runs on the CPU, and the `gpu` operation's answer (SPEC §9).
+/// Why a request for the GPU runs on the CPU (SPEC §9).
 pub const GPU_ABSENT: &str = "GPU 计算尚未提供：本次在 CPU 上计算";
-
-/// The `gpu` operation: no GPU solver exists, answered at once.
-pub fn start_gpu() -> Result<(), String> {
-    Err(GPU_ABSENT.into())
-}
 
 fn per_axis<T: serde::Serialize + Copy>(values: &[[T; 3]]) -> Value {
     json!(AXES.iter().enumerate().map(|(a, name)| (name.to_string(), json!(values.iter().map(|v| v[a]).collect::<Vec<T>>()))).collect::<serde_json::Map<String, Value>>())

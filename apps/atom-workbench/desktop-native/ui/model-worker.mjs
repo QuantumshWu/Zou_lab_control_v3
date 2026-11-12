@@ -14,11 +14,6 @@ export function createModelWorker(post){
     if(!service){if(pending.length>=8)finish(channel,503,{error:'Native bridge is not ready.',code:'solver-unavailable'});else pending.push({channel,run});return;}
     void run();
   }
-  /** The GPU's start (IpcNativeLane.startGpu): why it cannot run, if so, or the failure that ended its worker. */
-  async function startGpu(channel){
-    try{finish(channel,200,{reason:await service.lanes.trajectory.startGpu()});}
-    catch(error){finish(channel,error.status??503,{error:error.message,code:error.code??'solver-unavailable'});}
-  }
   async function solve(channel,input){
     let task,streaming=false,token;
     const event=(type,data,status)=>{streaming=true;post({kind:'stream',channel,event:{type,data,...(status===undefined?{}:{status})},done:type==='result'||type==='error'});};
@@ -48,7 +43,7 @@ export function createModelWorker(post){
       }
       if(event.kind==='configuration'){
         if(service)return;
-        service=new NativeService({binarySha256:event.binarySha256,build:{sha256:event.buildSha256},solveTimeoutMs:120000,startupTimeoutMs:15000,workerIdleMs:60000,sendNative});
+        service=new NativeService({binarySha256:event.binarySha256,build:{sha256:event.buildSha256},solveTimeoutMs:120000,startupTimeoutMs:15000,sendNative});
         // Match createAtomServer: initialize both native lanes independently
         // of the first user solve, without blocking UI/static spectroscopy.
         for(const lane of Object.values(service.lanes))void lane.start();
@@ -57,7 +52,6 @@ export function createModelWorker(post){
       service?.lanes[event.lane]?.receive(event);return;
     }
     if(message.kind==='solve'){whenServed(message.channel,()=>solve(message.channel,message.request));return;}
-    if(message.kind==='gpu'){whenServed(message.channel,()=>startGpu(message.channel));return;}
     if(message.kind==='cancel'){
       for(let i=pending.length-1;i>=0;i--)if(pending[i].channel===message.channel)pending.splice(i,1);
       const task=active.get(message.channel);active.delete(message.channel);task?.cancel();return;

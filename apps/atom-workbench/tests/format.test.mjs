@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {clockTime,formatNumber,formatElapsed,stateLabel,idLabel,labelStateIds,signedInteger,MINUS} from '../dist/js/atom-workbench/src/format.js';
+import {formatNumber,formatElapsed,stateLabel,idLabel,labelStateIds,signedInteger,MINUS} from '../dist/js/atom-workbench/src/format.js';
 import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
 import {stateTree} from '../dist/js/atom-workbench/src/choice-trees.js';
 import {POPULATION_GROUPS} from '../dist/js/atom-workbench/src/population-selection.js';
@@ -9,14 +9,6 @@ import {defaultScene} from '../dist/js/atom-workbench/src/types.js';
 import {analyze} from '../dist/js/atom-workbench/src/physics.js';
 
 const NNBSP='\u202f';
-test('a time counted up reads in whole seconds, its minutes uncut',()=>{
-  assert.equal(clockTime(0),'0:00');
-  assert.equal(clockTime(999),'0:00');
-  assert.equal(clockTime(4200),'0:04');
-  assert.equal(clockTime(65000),'1:05');
-  assert.equal(clockTime(3599999),'59:59');
-  assert.equal(clockTime(3720000),'62:00');
-});
 test('numbers use significant digits, the true minus and SI grouping from five integer digits',()=>{
   assert.equal(formatNumber(384.228115203271),'384.228');
   assert.equal(formatNumber(3,{digits:4}),'3');
