@@ -472,6 +472,13 @@ impl Workbench {
         bench.extend(self.devices.iter().filter(|(key, live)| self.device_open(key) && live.working_point["tunable"] == true)
             .map(|(key, _)| (format!("{TUNABLE}{key}"), key.clone())));
         let source = self.source_frames(node);
+        // The queries that read the bundle are told the bundle of the source this draft names: one
+        // built for another source (an edit of it, a node just added or loaded) is built anew by the
+        // host once this turn is done, and they ask then, once.
+        let readers = [EDITOR_FACTS, ADMIT_SOURCE];
+        let current = self.bundles.get(id).is_some_and(|bundle| bundle.members.len() == self.bundle_signals(node).len()
+            && bundle.members.iter().zip(self.bundle_signals(node)).all(|((signal, member), (name, named))| *signal == named && member["name"] == name.as_str()));
+        let stale = !current && names.iter().any(|name| readers.contains(&name.as_str()));
         let bundle = self.bundles.get(id).map_or_else(|| json!([]), SourceBundle::told);
         let complete = self.bundle_complete(id);
         let editor = json!({"values": args["values"], "devices": self.device_infos(&bench), "resources": args["resources"], "source": source,
@@ -482,8 +489,9 @@ impl Workbench {
         let frames: Vec<String> = if descriptor.node().queries.iter().any(|name| name == FRAMES_QUERY) {
             self.node_outputs(node).into_iter().filter_map(|(signal, _)| split_signal(&signal).map(|(_, output)| output.to_owned())).collect()
         } else { Vec::new() };
+        if stale { self.bundles.remove(id); self.bundles_stale = true; }
         for name in names {
-            if (name == ADMIT_SOURCE && !complete) || only.is_some_and(|only| !only.contains(&name.as_str())) { continue; }
+            if (name == ADMIT_SOURCE && !complete) || (stale && readers.contains(&name.as_str())) || only.is_some_and(|only| !only.contains(&name.as_str())) { continue; }
             self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Query { node, name: query, .. } if node == id && query == &name));
             let ticket = self.ticket(Ticket::Query { node: id.to_owned(), revision, name: name.clone() });
             let facts = match name.as_str() { EDITOR_FACTS => &editor, ADMIT_SOURCE => &admit, ADMIT => &admitted, _ => &args };
@@ -527,6 +535,7 @@ impl Workbench {
     /// had asks nothing of the node (nor, through its editor, of the bench's devices), and one
     /// with other schemas asks as soon as they are known.
     pub(crate) fn refresh_bundles(&mut self, host: &mut dyn Host) {
+        self.bundles_stale = false;
         let signals = host.signals();
         let readers: Vec<String> = self.nodes.iter().filter(|node| self.catalog.get(&node.type_id)
             .is_some_and(|item| item.node().queries.iter().any(|name| name == EDITOR_FACTS || name == ADMIT_SOURCE))).map(|node| node.id.clone()).collect();
@@ -555,6 +564,11 @@ impl Workbench {
             self.bundles.insert(id.clone(), SourceBundle { built, members });
             if !same { self.ask_queries(&id, Some(&[EDITOR_FACTS, ADMIT_SOURCE])); }
         }
+    }
+
+    /// A draft named a source its bundle was not built for: build it now and ask its readers.
+    pub(crate) fn refresh_stale_bundles(&mut self, host: &mut dyn Host) {
+        if self.bundles_stale { self.refresh_bundles(host); }
     }
 
     /// The files the draft names (`artifacts`): its artifact inputs as written, and each

@@ -577,6 +577,38 @@ mod tests {
         assert_eq!(asked, ["editor_facts", "admit_source"]);
     }
 
+    /// An edit of a bundle reader's source asks its readers once, with the bundle of the
+    /// source it now names (not first with the old source's, then again).
+    #[test]
+    fn a_source_edit_asks_a_bundle_reader_once_with_the_new_bundle() {
+        let root = scratch("bundle-edit");
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "derive", "kind": "node", "label": "Derive", "parameters": [],
+            "node": {"node_kind": "processor", "inputs": [{"name": "bundle", "delivery": "exact", "select_bundle": true}], "outputs": [],
+                     "queries": ["editor_facts", "admit_source"]}}));
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement", "node_id": "next_camera"})).unwrap();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "derive", "source_signal": "@logic/camera_measurement/frames"})).unwrap();
+        for (owner, schema) in [("camera_measurement", "a"), ("next_camera", "b")] {
+            let signal = format!("@logic/{owner}/frames");
+            host.signals.push(SignalInfo { name: signal.clone(), generation: owner.into(), owner: owner.into(), published: true, sealed: false, shape: String::new() });
+            host.schemas.insert(signal, (json!({"tree": schema}), json!({"tree": "event"})));
+        }
+        let bundle = |schema: &str| json!([{"name": "frames", "schema": {"tree": schema}, "event_schema": {"tree": "event"}}]);
+        let told = |from: usize| calls.borrow().2[from..].iter().filter(|(query, ..)| query == "editor_facts" || query == "admit_source")
+            .map(|(query, _, args)| (query.clone(), args["bundle"].clone())).collect::<Vec<_>>();
+        // Opened before any runtime turn built its bundle: asked once, with it.
+        event(&mut workbench, Event::Opened { instance: node_instance("derive"), working_point: Value::Null }, &mut host);
+        assert_eq!(told(0), [("editor_facts".to_owned(), bundle("a")), ("admit_source".to_owned(), bundle("a"))]);
+        let before = calls.borrow().2.len();
+        apply(&mut workbench, &mut host, "edit_node", json!({"node": "derive", "source_signal": "@logic/next_camera/frames"})).unwrap();
+        workbench.on_runtime(&mut host);
+        assert_eq!(told(before), [("editor_facts".to_owned(), bundle("b")), ("admit_source".to_owned(), bundle("b"))]);
+    }
+
     /// A relaunch of a bundle reader's source is no change of what it reads: between the old
     /// run and the new one's first event the member is absent, then has not published, and
     /// neither asks the reader anything (lab 2026-11-12: two editor_facts per relaunch of the
