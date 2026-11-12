@@ -93,7 +93,9 @@ journal/session.jsonl
     workbench device_opened            `ms` since it was asked, and `device_info`: what the device says of
                                        itself (model, serial, firmware, driver or SDK version), when its type
                                        says it
-    workbench device_failed            `phase`: resolve, open (it did not open) or lost (it was open), `error`
+    workbench device_failed            `phase`: resolve, open (it did not open) or lost (it was open), `error`;
+                                       `looking_again` when its named serial port could not be used and its
+                                       type's resolve looks for it on the ports there are
     workbench device_close / closed    a close asked, and its outcome with `ms`;
     plugins device_close /             the plugin side of a close; a device whose call overran its deadline
       device_unresponsive
@@ -335,7 +337,11 @@ mod tests {
         let session = String::from_utf8(archive.read("journal/session.jsonl").unwrap()).unwrap();
         assert!(session.contains("\"ev\":\"device_opened\"") && !session.contains("s3cret"));
         assert_eq!(String::from_utf8(archive.read("logs/devices/life_camera.log").unwrap()).unwrap(), "exposure 0.1 s\n");
-        assert_eq!(String::from_utf8(archive.read("logs/devices/life_basler.log").unwrap()).unwrap(), "(device life:basler)\n");
+        // The failed one's log says why it did not open, as its Log window does.
+        let basler = String::from_utf8(archive.read("logs/devices/life_basler.log").unwrap()).unwrap();
+        let lines: Vec<&str> = basler.lines().collect();
+        assert_eq!((lines.len(), lines[0]), (2, "(device life:basler)"), "{basler}");
+        assert!(lines[1].starts_with('[') && lines[1].contains("] not opened: camera.pylon is not installed"), "{basler}");
         assert!(String::from_utf8(archive.read("README.txt").unwrap()).unwrap().contains("journal/session.jsonl"));
         std::fs::remove_dir_all(&folder).ok();
     }

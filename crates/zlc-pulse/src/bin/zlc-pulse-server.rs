@@ -5,6 +5,12 @@
 //! board manifest, the backend probe, the listening port (a second server for
 //! this port is refused here), then open + first verified SAFE. Ctrl+C or a
 //! console close drives the board SAFE before the process exits.
+//!
+//! Its stdout says how it came up, one JSON line the application reads: ready
+//! `{"type":"pulse-server","port":N,"transport":"uart","uart_port":"COM5","attempts":[...]}`
+//! (`transport` the one it took: `uart`, `jtag-axi` or `memory`; `attempts` each port its probe tried
+//! and what that came to), or `{"type":"pulse-server","error":"<Type>: <message>"}` when it could not.
+//!
 //! `zlc-pulse-server fpga ...` is the FPGA build's command instead
 //! (zlc_pulse::fpga::command, v2's `zlc fpga`).
 use std::path::PathBuf;
@@ -16,7 +22,8 @@ use zlc_pulse::axi::{JtagAxiRegisterTransport, default_vivado};
 use zlc_pulse::device::PulseStreamer;
 use zlc_pulse::manifest::target_from_config;
 use zlc_pulse::remote::{DEFAULT_BIND_HOST, DEFAULT_PORT, PulseRemoteServer, server_log};
-use zlc_pulse::serial::{ComPortLink, find_board_uart, list_com_ports};
+use zlc_pulse::json::Json;
+use zlc_pulse::serial::{Attempt, ComPortLink, Probe, find_board_uart, list_com_ports};
 use zlc_pulse::transport::{MemoryRegisterTransport, RegisterTransport};
 use zlc_pulse::uart::UartRegisterTransport;
 use zlc_pulse::wire::{load_streamer_config, require_streamer_config};
@@ -75,11 +82,20 @@ fn jtag_transport() -> Result<Arc<dyn RegisterTransport>> {
     Ok(Arc::new(JtagAxiRegisterTransport::from_env(&axi_state_dir())?))
 }
 
-fn run(options: Options) -> Result<()> {
+/// Why the server did not come up: the error type the application reads (a serial open's own,
+/// `SerialPortUnusable` / `SerialPortBusy`, else the pulse error's Python class) and its words.
+struct Failed { kind: String, message: String }
+
+impl From<Error> for Failed { fn from(error: Error) -> Failed { Failed { kind: error.kind.python_name().into(), message: error.message } } }
+
+/// The board's transport as it was taken: its kind, the UART port, and why (a fallback's reason).
+struct Taken { kind: &'static str, uart_port: Option<String>, reason: String }
+
+fn run(options: Options) -> std::result::Result<(), Failed> {
     let found = load_streamer_config(options.config.as_deref())?;
     let source = found.source.clone().ok_or_else(|| Error::new(Kind::Value,
         format!("deployment requires a valid streamer_config.json without fallback: {}", found.warnings.join("; "))))?;
-    if !found.warnings.is_empty() { return Err(Error::new(Kind::Value, format!("deployment requires a valid streamer_config.json without fallback: {}", found.warnings.join("; ")))); }
+    if !found.warnings.is_empty() { return Err(Error::new(Kind::Value, format!("deployment requires a valid streamer_config.json without fallback: {}", found.warnings.join("; "))).into()); }
     let config = require_streamer_config(&source)?;
     let target = target_from_config(&config, None, None)?;
     let baud = options.uart_baud.unwrap_or(config.uart_baud);
@@ -94,29 +110,40 @@ fn run(options: Options) -> Result<()> {
         return Ok(());
     }
     server_log("SERVER STARTING", None, &format!("requested_backend={} endpoint={}:{}", options.backend, options.host, options.port));
-    let transport: Arc<dyn RegisterTransport> = match options.backend.as_str() {
-        "memory" => Arc::new(MemoryRegisterTransport::new(&config.params, options.memory_auto_done, false)?),
+    let mut attempts: Vec<Attempt> = Vec::new();
+    let (transport, taken): (Arc<dyn RegisterTransport>, Taken) = match options.backend.as_str() {
+        "memory" => (Arc::new(MemoryRegisterTransport::new(&config.params, options.memory_auto_done, false)?),
+                     Taken { kind: "memory", uart_port: None, reason: String::new() }),
         "jtag-axi" => {
             server_log("BACKEND RESOLVED", None, "requested=jtag-axi selected=jtag-axi reason=\"explicit jtag-axi backend; UART probe skipped\"");
-            jtag_transport()?
+            (jtag_transport()?, Taken { kind: "jtag-axi", uart_port: None, reason: "explicit jtag-axi backend".into() })
         }
         backend => {
             // Run by hand without --uart-port it probes every port; the application finds the port on Init and names it.
             let ports = options.uart_port.clone().map_or_else(list_com_ports, |port| vec![port]);
-            let (selected, attempts) = find_board_uart(&ports, baud, config.params, config.clock_hz, &target);
-            let failure = if attempts.is_empty() { "no board UART detected".to_owned() } else { attempts.join("; ") };
+            let selected;
+            (selected, attempts) = find_board_uart(&ports, baud, config.params, config.clock_hz, &target);
+            let tried: Vec<String> = attempts.iter().map(ToString::to_string).collect();
+            let failure = if tried.is_empty() { "no board UART detected".to_owned() } else { tried.join("; ") };
             match selected {
                 Some(port) => {
-                    server_log("BACKEND RESOLVED", None, &format!("requested={backend} selected=uart uart_port={port} attempts={:?}", attempts.join("; ")));
-                    uart_transport(&port, baud, Duration::from_secs(5))?
+                    server_log("BACKEND RESOLVED", None, &format!("requested={backend} selected=uart uart_port={port} attempts={:?}", tried.join("; ")));
+                    (uart_transport(&port, baud, Duration::from_secs(5))?, Taken { kind: "uart", uart_port: Some(port), reason: String::new() })
                 }
-                None if backend == "uart" => return Err(Error::new(Kind::Runtime, format!("explicit UART backend failed; no matching device: {failure}"))),
-                // As v2: a board with no UART answering is reached through its JTAG cable.
                 None => {
-                    server_log("BACKEND RESOLVED", None, &format!("requested=auto selected=jtag-axi reason={:?}",
-                                                                  format!("auto fallback to jtag-axi after UART probe: {failure}")));
-                    jtag_transport().map_err(|error| Error::new(error.kind, format!("no matching UART board ({failure}), and the JTAG-to-AXI fallback \
-                                                                                     could not start: {}", error.message)))?
+                    // The port the application names that cannot be opened at all, or that another program
+                    // holds, is not a board that failed to answer: neither backend goes on without it, and
+                    // the application looks for the board again (its Init resolve).
+                    if let (Some(_), [Attempt { probe: Probe::NotOpened(failure), .. }]) = (&options.uart_port, attempts.as_slice()) {
+                        return Err(Failed { kind: failure.fault.error_type().into(), message: failure.to_string() });
+                    }
+                    if backend == "uart" { return Err(Error::new(Kind::Runtime, format!("explicit UART backend failed; no matching device: {failure}")).into()); }
+                    // As v2: a board with no UART answering is reached through its JTAG cable.
+                    let reason = format!("auto fallback to jtag-axi after UART probe: {failure}");
+                    server_log("BACKEND RESOLVED", None, &format!("requested=auto selected=jtag-axi reason={reason:?}"));
+                    (jtag_transport().map_err(|error| Error::new(error.kind, format!("no matching UART board ({failure}), and the JTAG-to-AXI fallback \
+                                                                                      could not start: {}", error.message)))?,
+                     Taken { kind: "jtag-axi", uart_port: None, reason })
                 }
             }
         }
@@ -128,13 +155,17 @@ fn run(options: Options) -> Result<()> {
     let connected = streamer.open().and_then(|()| streamer.safe());
     match connected {
         Ok(readback) if readback.stable() => server_log("HARDWARE CONNECTED", None, &format!("geometry_handshake=True safe_readback=True status={}", readback.status)),
-        Ok(readback) => { let _ = streamer.close(); return Err(Error::new(Kind::Runtime, format!("initial SAFE readback was not stable: status={}", readback.status))); }
-        Err(error) => { let _ = streamer.close(); return Err(error); }
+        Ok(readback) => { let _ = streamer.close(); return Err(Error::new(Kind::Runtime, format!("initial SAFE readback was not stable: status={}", readback.status)).into()); }
+        Err(error) => { let _ = streamer.close(); return Err(error.into()); }
     }
     unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(on_console), 1) };
     server.start()?;
-    server_log("READY", None, &format!("hardware=connected waiting_for_client=True same_computer=127.0.0.1:{}", server.address().port()));
-    println!("{{\"type\":\"pulse-server\",\"port\":{}}}", server.address().port());
+    server_log("READY", None, &format!("hardware=connected waiting_for_client=True same_computer=127.0.0.1:{} transport={}", server.address().port(), taken.kind));
+    let mut ready = vec![("type", Json::str("pulse-server")), ("port", Json::Int(server.address().port().into())), ("transport", Json::str(taken.kind)),
+                         ("attempts", Json::strings(&attempts.iter().map(ToString::to_string).collect::<Vec<_>>()))];
+    if let Some(port) = &taken.uart_port { ready.push(("uart_port", Json::str(port))); }
+    if !taken.reason.is_empty() { ready.push(("reason", Json::str(&taken.reason))); }
+    println!("{}", Json::object(ready).compact_text());
     // `admit` / `refuse` from the application that started this server; its
     // going away (stdin ends) ends the server, which drives the board SAFE.
     let (said, admission) = std::sync::mpsc::channel::<Option<String>>();
@@ -167,8 +198,9 @@ fn main() {
     // `zlc-pulse-server fpga ...`: the board's build-time command (v2 `zlc fpga`), not the server.
     if std::env::args().nth(1).as_deref() == Some("fpga") { std::process::exit(zlc_pulse::fpga::command(std::env::args().skip(2))); }
     let options = match options() { Ok(options) => options, Err(message) => { eprintln!("{message}"); std::process::exit(2); } };
-    if let Err(error) = run(options) {
-        eprintln!("ERROR before LISTENING: {}: {}", error.kind.python_name(), error.message);
+    if let Err(Failed { kind, message }) = run(options) {
+        eprintln!("ERROR before LISTENING: {kind}: {message}");
+        println!("{}", Json::object(vec![("type", Json::str("pulse-server")), ("error", Json::str(format!("{kind}: {message}")))]).compact_text());
         std::process::exit(3);
     }
 }

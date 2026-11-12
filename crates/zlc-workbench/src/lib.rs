@@ -558,11 +558,7 @@ impl Workbench {
                 if current.load(std::sync::atomic::Ordering::Acquire) == revision { self.on_event(*event, host); }
                 return;
             }
-            Event::Log { instance, line } => {
-                let log = self.logs.entry(instance).or_default();
-                if log.len() >= LOG_LINES { log.pop_front(); }
-                log.push_back(line);
-            }
+            Event::Log { instance, line } => self.log_line(&instance, line),
             Event::RunStarted { run } => self.run_started(&run),
             Event::RunDirectory { run, directory } => self.run_directory(&run, directory),
             Event::RunReady { run } => self.run_ready(&run),
@@ -578,6 +574,21 @@ impl Workbench {
         self.refresh_stale_bundles(host);
         self.poll_recipe(host);
         self.sync_console_report(host);
+    }
+
+    /// One line into a device's log (its Log window, `logs/devices/<instance>.log`), the oldest
+    /// going once it holds `LOG_LINES`.
+    pub(crate) fn log_line(&mut self, instance: &str, line: String) {
+        let log = self.logs.entry(instance.to_owned()).or_default();
+        if log.len() >= LOG_LINES { log.pop_front(); }
+        log.push_back(line);
+    }
+
+    /// What the workbench itself says into a device's log -- its open failing, its being looked for
+    /// again -- stamped as the device's own lines are (`[HH:MM:SS] ...`), so the Log window and the
+    /// diagnostics archive have it beside them, for every device type.
+    pub(crate) fn log_device(&mut self, instance: &str, what: &str) {
+        self.log_line(instance, format!("[{}] {what}", workspace::local_clock()));
     }
 
     /// A device's Log window: its newest `lines` lines, after v2's words when its code tells its log nothing.

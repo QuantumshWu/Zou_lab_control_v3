@@ -178,9 +178,34 @@ struct Given { instance: String, child: Option<Served>, world: Option<String>, p
 
 /// The pulse server this application started for `sequencer.local`: its
 /// process, its port, and the line it hears admission on (`admit` / `refuse`;
-/// the line closing ends the server, which drives the board SAFE first). Its job
-/// ends it and what it started (Vivado) with this application, crash or not.
-pub struct Served { child: std::process::Child, port: u16, control: Option<std::process::ChildStdin>, _job: zlc_core::process::Job }
+/// the line closing ends the server, which drives the board SAFE first); the
+/// transport its row asked for (`backend`) and what its ready line says it took.
+/// Its job ends it and what it started (Vivado) with this application, crash or not.
+pub struct Served { child: std::process::Child, port: u16, control: Option<std::process::ChildStdin>, backend: String, ready: Value, _job: zlc_core::process::Job }
+
+/// The transport a local board's server took, as its `device_info` says it: `UART COM5`,
+/// `JTAG-to-AXI (Vivado)`, `memory mock`; `ready` is the server's ready line.
+fn transport_taken(ready: &Value) -> String {
+    match ready["transport"].as_str() {
+        Some("uart") => format!("UART {}", ready["uart_port"].as_str().unwrap_or("?")),
+        Some("jtag-axi") => "JTAG-to-AXI (Vivado)".into(),
+        Some("memory") => "memory mock".into(),
+        other => other.unwrap_or("unknown").to_owned(),
+    }
+}
+
+/// Each port the server's probe tried, with what it came to.
+fn probe_attempts(ready: &Value) -> Vec<&str> { ready["attempts"].as_array().into_iter().flatten().filter_map(Value::as_str).collect() }
+
+/// What the Init or Apply line says of the open: a row on Auto (`backend`) that came up over JTAG
+/// (a resident Vivado of 1-2 GB, a 20 s open) rather than its UART, with what the server's probe
+/// tried -- the one note whether Init found no UART first or the row named a port no board answered on.
+fn transport_note(backend: &str, ready: &Value) -> Option<String> {
+    if backend != "auto" || ready["transport"] != "jtag-axi" { return None; }
+    let attempts = probe_attempts(ready);
+    let tried = if attempts.is_empty() { String::new() } else { format!(": no board UART answered ({})", attempts.join("; ")) };
+    Some(format!("opened over JTAG-to-AXI under Auto, not its UART{tried}"))
+}
 
 impl Served {
     fn end(mut self) {
@@ -1042,10 +1067,17 @@ impl PulseHost {
         let board = self.editor.board().map(|b| b.name().to_owned());
         // What the board says of itself (PLUGIN_PROTOCOL `device_info`), from the description its open read:
         // which board, the protocol it speaks, and the build its layout and target fingerprints name.
-        let info = json!({"board": board, "board_protocol": zlc_pulse::wire::LAYOUT_STRUCT_VERSION, "clock_hz": description.clock_hz,
+        let mut info = json!({"board": board, "board_protocol": zlc_pulse::wire::LAYOUT_STRUCT_VERSION, "clock_hz": description.clock_hz,
             "layout_fingerprint": format!("{:08x}", description.layout_fingerprint()), "target_abi_fingerprint": description.target.abi_fingerprint()});
-        Ok(json!({"board": board, "ports": description.target.ports.len(),
-                  "clock_hz": description.clock_hz, "snapshot": true, "facts": facts, "device_info": info}))
+        // The board on this computer: the transport its server took, and what its probe tried.
+        let served = self.given.as_ref().and_then(|given| given.child.as_ref());
+        if let Some(served) = served {
+            info["transport"] = json!(transport_taken(&served.ready));
+            let attempts = probe_attempts(&served.ready);
+            if !attempts.is_empty() { info["probe"] = json!(attempts.join("; ")); }
+        }
+        Ok(json!({"board": board, "ports": description.target.ports.len(), "clock_hz": description.clock_hz, "snapshot": true, "facts": facts,
+                  "device_info": info, "note": served.and_then(|served| transport_note(&served.backend, &served.ready))}))
     }
 
     /// What the apparatus' sequencer states of itself, when it differs from what was last said: its
@@ -1287,12 +1319,14 @@ fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Res
         windows_sys::Win32::System::Threading::CREATE_NO_WINDOW).map_err(|error| error.to_string())?;
     let control = child.stdin.take();
     let stdout = child.stdout.take().ok_or("no server output")?;
-    let (found, port) = mpsc::channel();
+    let (found, said) = mpsc::channel::<Result<Value, String>>();
     std::thread::spawn(move || {
         let mut lines = std::io::BufReader::new(stdout).lines();
         for line in lines.by_ref().map_while(Result::ok) {
-            if let Some(rest) = line.strip_prefix("{\"type\":\"pulse-server\",\"port\":") {
-                let _ = found.send(rest.trim_end_matches('}').parse::<u16>().ok());
+            // Its one line on how it came up (zlc-pulse-server): ready, with the transport it took, or why it could not.
+            if line.starts_with("{\"type\":\"pulse-server\"") {
+                let ready: Value = serde_json::from_str(&line).unwrap_or_default();
+                let _ = found.send(ready["error"].as_str().map_or(Ok(ready.clone()), |error| Err(error.to_owned())));
                 break;
             }
             if let Some(line) = narration(&line) { narrate(line); }
@@ -1301,13 +1335,20 @@ fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Res
     });
     // A JTAG board waits for Vivado to come up and open its target first.
     let startup = if matches!(backend, "uart" | "memory") { Duration::ZERO } else { zlc_pulse::axi::STARTUP_TIMEOUT };
-    let port = match port.recv_timeout(Duration::from_secs(60) + startup) {
-        Ok(Some(port)) => port,
-        _ => { let _ = child.kill(); return Err("the local pulse server did not start (see its log)".into()); }
+    let ended = |mut child: std::process::Child, error: String| { let _ = child.kill(); let _ = child.wait(); Err(error) };
+    let (ready, port) = match said.recv_timeout(Duration::from_secs(60) + startup) {
+        Ok(Ok(ready)) => match ready["port"].as_u64().and_then(|port| u16::try_from(port).ok()) {
+            Some(port) => (ready, port),
+            None => return ended(child, format!("the local pulse server said it was ready without a port: {ready}")),
+        },
+        // Its own words, typed as it raised them: a UART port that cannot be opened is `SerialPortUnusable`.
+        Ok(Err(error)) => return ended(child, error),
+        Err(_) => return ended(child, "the local pulse server did not start (see its log)".into()),
     };
+    let asked = parameters["backend"].as_str().unwrap_or("auto").to_owned();
     match Board::remote("127.0.0.1", port) {
-        Ok(board) => Ok((board, Served { child, port, control, _job: job })),
-        Err(error) => { let _ = child.kill(); Err(error.message) }
+        Ok(board) => Ok((board, Served { child, port, control, backend: asked, ready, _job: job })),
+        Err(error) => ended(child, error.message),
     }
 }
 
@@ -1330,10 +1371,11 @@ fn server_arguments(parameters: &Value) -> Result<(&str, Vec<String>), String> {
 /// How long the local board's UART is looked for on Init: what its server's start was given for the same probe.
 pub const RESOLVE_WAIT: Duration = Duration::from_secs(60);
 
-/// `resolve` of the local board (`sequencer.local`) before it opens: its blank UART port, looked
-/// for on the free ports only (a bound one -- an IMU's COM3 -- is never opened) with the server's
-/// own handshake, against the deployed config its server loads. A JTAG or memory board has nothing
-/// to find; `auto` with no UART answering opens over JTAG, `uart` fails with what it tried.
+/// `resolve` of the local board (`sequencer.local`) before it opens: its UART port, looked for on
+/// the free ports only (a bound one -- an IMU's COM3 -- is never opened) with the server's own
+/// handshake, against the deployed config its server loads. A JTAG or memory board has nothing to
+/// find; `auto` with no UART answering is left without a port, so it opens over JTAG (its open says
+/// so), and `uart` fails with what it tried.
 pub fn resolve(type_id: &str, parameters: &Value, excluded: &[String], wait: Duration) -> Result<Value, String> {
     if type_id != "sequencer.local" { return Err(format!("{type_id} finds nothing before it opens")); }
     let backend = parameters["backend"].as_str().unwrap_or("auto").to_owned();
@@ -1354,14 +1396,14 @@ pub fn resolve(type_id: &str, parameters: &Value, excluded: &[String], wait: Dur
     let (port, attempts, passed) = answer.recv_timeout(wait).unwrap_or_else(|_| Err(format!("its UART was not found within {} s", wait.as_secs())))?;
     // What it tried (the one that answered aside) and what it passed over, as the line says them.
     let mut said: Vec<String> = Vec::new();
-    let tried = &attempts[..attempts.len() - usize::from(port.is_some())];
+    let tried: Vec<String> = attempts[..attempts.len() - usize::from(port.is_some())].iter().map(ToString::to_string).collect();
     if !tried.is_empty() { said.push(format!("tried {}", tried.join("; "))); }
     if !passed.is_empty() { said.push(format!("passed over {}: bound", passed.join(", "))); }
     let context = if said.is_empty() { String::new() } else { format!(" ({})", said.join("; ")) };
     match port {
         Some(port) => Ok(json!({"parameters": {"uart_port": port}, "note": format!("board UART found on {port}{context}")})),
         None if backend == "uart" => Err(format!("no board UART on the free ports{}", if context.is_empty() { " (no COM port is free)".to_owned() } else { context })),
-        None => Ok(json!({"parameters": {}, "note": format!("no board UART on the free ports{context}; opening over JTAG")})),
+        None => Ok(json!({"parameters": {"uart_port": ""}, "note": format!("no board UART on the free ports{context}")})),
     }
 }
 
@@ -1648,6 +1690,22 @@ mod tests {
         assert!(backend == "auto" && arguments.ends_with("--backend auto --port 18861 --uart-port COM5"), "{arguments}");
         assert_eq!(line(json!({"backend": "uart", "uart_port": ""})).unwrap_err(), "no UART port: Init finds it, or set one");
         assert!(line(json!({"backend": "uart", "uart_port": "COM5"})).unwrap().1.ends_with("--backend uart --port 0 --uart-port COM5"));
+    }
+
+    /// The transport the server took is the board's `device_info`, and a row on Auto that came up
+    /// over JTAG says so on the Init line -- from the server's ready line, whichever way it got there.
+    #[test]
+    fn the_transport_taken_is_said_and_jtag_under_auto_is_noted() {
+        let uart = json!({"type": "pulse-server", "port": 1, "transport": "uart", "uart_port": "COM5", "attempts": ["COM5: word63 fingerprint matched"]});
+        assert_eq!((transport_taken(&uart), transport_note("auto", &uart)), ("UART COM5".to_owned(), None));
+        let probed = json!({"transport": "jtag-axi", "attempts": ["COM10: opened, no board answered (timeout)"]});
+        assert_eq!((transport_taken(&probed), probe_attempts(&probed)), ("JTAG-to-AXI (Vivado)".to_owned(), vec!["COM10: opened, no board answered (timeout)"]));
+        assert_eq!(transport_note("auto", &probed).unwrap(),
+                   "opened over JTAG-to-AXI under Auto, not its UART: no board UART answered (COM10: opened, no board answered (timeout))");
+        // Init found no UART first (its resolve said what it tried): the server was sent to JTAG and probed nothing.
+        let sent = json!({"transport": "jtag-axi", "attempts": [], "reason": "explicit jtag-axi backend"});
+        assert_eq!(transport_note("auto", &sent).unwrap(), "opened over JTAG-to-AXI under Auto, not its UART");
+        assert_eq!(transport_note("jtag-axi", &sent), None, "chosen, not fallen back to");
     }
 
     /// v2 slm_rearrangement: the Pulse is loaded first and the FIRE is then the FIRE alone.
