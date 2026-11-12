@@ -9,7 +9,7 @@
 use serde_json::{Map, Value};
 
 /// Keys of a state message that belong to the message, not to the document.
-const ENVELOPE: [&str; 4] = ["type", "request", "error", "result"];
+pub const ENVELOPE: [&str; 4] = ["type", "request", "error", "result"];
 
 #[derive(Default)]
 pub struct Sent { sections: Map<String, Value> }
@@ -27,14 +27,23 @@ impl Sent {
     /// says no error of no request (an error of another's request is that
     /// page's). The reply is the message's own (reply.rs): said with it, once.
     pub fn encode(&mut self, state: &Map<String, Value>, reads: impl Fn(&str) -> bool, owns: impl Fn(&Value) -> bool) -> Option<String> {
+        self.encode_noting(state, reads, owns, |_| {})
+    }
+
+    /// As [`Sent::encode`], naming each section it found changed to `changed` (windows.rs: the
+    /// sections the journal is handed).
+    pub fn encode_noting(&mut self, state: &Map<String, Value>, reads: impl Fn(&str) -> bool, owns: impl Fn(&Value) -> bool,
+                         mut changed: impl FnMut(&str)) -> Option<String> {
         let mut changes = Changes(String::new());
         let mut path = Vec::new();
         for (key, value) in state {
             if ENVELOPE.contains(&key.as_str()) || !reads(key) { continue; }
+            let before = changes.0.len();
             match self.sections.get_mut(key) {
                 Some(previous) => { path.push(Step::Key(key)); diff(&mut path, previous, value, &mut changes); path.pop(); }
                 None => { changes.set(&path, Some(key), value); self.sections.insert(key.clone(), value.clone()); }
             }
+            if changes.0.len() != before { changed(key); }
         }
         let request = state.get("request").filter(|request| crate::reply::answers(request).is_some());
         let error = state.get("error").is_some_and(|error| !error.is_null());

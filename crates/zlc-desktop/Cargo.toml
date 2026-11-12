@@ -18,6 +18,8 @@ zlc-workbench = { path = "../zlc-workbench" }
 zlc-pulse = { path = "../zlc-pulse" }
 zlc-pulse-editor = { path = "../zlc-pulse-editor" }
 png = "0.18"
+# A window capture's PNG comes base64 in its DevTools answer (pixels.rs).
+base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 tao = "=0.37.1"
 wry = { version = "=0.57.0", features = ["devtools"] }
