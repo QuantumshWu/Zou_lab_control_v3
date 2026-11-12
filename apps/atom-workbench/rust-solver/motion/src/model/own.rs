@@ -534,9 +534,10 @@ impl Band {
     }
 
     /// The least of its modulus over the cell's places and the parameters: |mid| − rad (a distance less what it does not
-    /// know), in its own form.
+    /// know), at least nothing, in its own form -- a modulus is never negative, and a form whose value were (a quotient by
+    /// it, a self-energy's channel through its resonance) would read its own reciprocal's sign wrong.
     pub(crate) fn apart(&self) -> Own {
-        self.mid.abs().sub(self.rad)
+        self.mid.abs().sub(self.rad).max(Own::constant(0.0))
     }
 
     /// The largest of its modulus: |mid| + rad.
@@ -613,7 +614,7 @@ mod tests {
                 (u.norm(), Box::new(move |r| a(r).hypot(b(r)))),
                 (v.norm(), Box::new(move |r| length(vector(r)))),
                 (v.by(&fa.sub(fb)).norm(), Box::new(move |r| (a(r) - b(r)).abs() * length(vector(r)))),
-                (band.apart(), Box::new(move |r| a(r).abs() - b(r))),
+                (band.apart(), Box::new(move |r| (a(r).abs() - b(r)).max(0.0))),
                 (band.most(), Box::new(move |r| a(r).abs() + b(r))),
                 (fa.sub(fb).scale(3.0).resolvent(0.3).norm(), Box::new(move |r| 1.0 / (3.0 * (a(r) - b(r))).hypot(0.3))),
                 (norm_of(&[u, fa.sub(fb).resolvent(0.2).turned(C64::new(0.3, -0.4))]), Box::new(move |r| (a(r).powi(2) + b(r).powi(2) + 0.25 / ((a(r) - b(r)).powi(2) + 0.04)).sqrt())),

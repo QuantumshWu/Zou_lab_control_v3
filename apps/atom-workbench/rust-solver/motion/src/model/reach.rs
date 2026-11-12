@@ -140,6 +140,12 @@
 //! One whose bound is attained at a centre: the cells not settled above the level at which a centre attains it, for the halves
 //! made hold that centre's value from then on (`Proof::sighted`), every cell is settled against it, and the proof asks ahead no
 //! more. One that ends at a cell whose bound is within the rounding of its centre's value: the cells it had asked for by then.
+//! A unit's statements (its saturation and its sweep) are proven side by side, and a unit one of whose statements is
+//! proven at the threshold or above is kept whatever the others read: their proofs end with it, each at the largest bound
+//! of its cells left (`Model::statements_over`); which units are kept is the same as theirs proven to the end. (Proven to the end alone, the sweep of a coupling of two
+//! Zeeman sublevels of a heavy atom at rest -- B 0, the sublevels crossing where the tweezer's tensor shift does, its
+//! saturation infinite there -- halved the cells along the crossing towards a speed's square root that no centre met,
+//! and the proof over S3's reach at 1 µK did not end in five minutes.)
 //!
 //! # The kick's curvature (`Model::kick_curvature`)
 //! A step is the reference's flow, a kick, the flow again (step.rs); the kick is −τ∇(⟨x|Ĥ_h|x⟩ − V_ref) at the step's
@@ -1097,6 +1103,9 @@ fn valued<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, cell: &Regions) -> (f64, f64) {
 struct Rule<'a> {
     settled: &'a (dyn Fn(f64, f64) -> bool + Sync),
     scale: f64,
+    /// The statements of one unit, consecutive quantities `together` at a time, and the threshold one bounded at or above
+    /// keeps the unit (none: each alone).
+    together: Option<(usize, f64)>,
 }
 
 /// One quantity's proof (module documentation, # Provable extrema, # Rounds): the cells left, by their upper bounds, and the
@@ -1613,13 +1622,21 @@ impl Model {
     /// decided -- below the threshold everywhere, or a value at or above `attains` at a centre in the reach --, or within the
     /// rounding of its centre's value; 0 where no cell meets the reach. The cells are halved one after another (`InTurn`).
     pub(crate) fn bounds_over(&self, reach: &Reach, threshold: f64, attains: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
-        self.proven_over::<_, InTurn>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs() }, quantities)
+        self.proven_over::<_, InTurn>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: None }, quantities)
     }
 
     /// The bounds against `threshold` and `attains` (`bounds_over`) of quantities any thread may ask, proven on all the cores
     /// (`AtOnce`): the same bounds, to the bit.
+    #[cfg(test)]
     pub(crate) fn bounds_over_in_parallel(&self, reach: &Reach, threshold: f64, attains: f64, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
-        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs() }, quantities)
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: None }, quantities)
+    }
+
+    /// The bounds of units' statements (`bounds_over_in_parallel`), consecutive quantities `together` at a time one unit's
+    /// (module documentation, # Rounds): a unit one of whose statements is proven at the threshold or above is kept whatever
+    /// its others read, and their proofs end there, each at the largest bound of its cells left -- a bound, if not the least.
+    pub(crate) fn statements_over(&self, reach: &Reach, threshold: f64, attains: f64, together: usize, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: Some((together, threshold)) }, quantities)
     }
 
     /// The provable bounds over the reach of quantities given per region, each to `resolution`: each one's largest upper bound of
@@ -1627,7 +1644,7 @@ impl Model {
     /// thread may ask, proven on all the cores (`AtOnce`): an extent's cells are those of the whole place of its largest
     /// values, each to be halved whatever the order.
     pub(crate) fn extents_over(&self, reach: &Reach, resolution: f64, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
-        self.proven_over::<_, AtOnce>(reach, Rule { settled: &|upper, attained| upper - attained <= resolution, scale: resolution }, quantities)
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &|upper, attained| upper - attained <= resolution, scale: resolution, together: None }, quantities)
     }
 
     /// The proofs' subdivision (module documentation, # Provable extrema, # Rounds): per quantity the cell of its largest upper
@@ -1644,7 +1661,18 @@ impl Model {
         let nothing = || -> Vec<Vec<(usize, [Option<Queued>; 2])>> { quantities.iter().map(|_| vec![]).collect() };
         let mut made = nothing();
         loop {
-            let asking = P::proofs(&mut proofs, made, |proof, made| proof.advance(made, rule, P::AHEAD));
+            let mut asking = P::proofs(&mut proofs, made, |proof, made| proof.advance(made, rule, P::AHEAD));
+            // A unit kept by one statement: its other statements' proofs end at the bounds of their cells left.
+            if let Some((together, threshold)) = rule.together {
+                for (unit, asks) in proofs.chunks_mut(together).zip(asking.chunks_mut(together)) {
+                    if unit.iter().any(|proof| proof.bound.is_some_and(|bound| bound >= threshold)) {
+                        for (proof, asked) in unit.iter_mut().zip(asks).filter(|of| of.0.bound.is_none()) {
+                            proof.bound = Some(proof.queue.peek().map_or(0.0, |top| top.upper));
+                            asked.clear();
+                        }
+                    }
+                }
+            }
             // The cells asked for, each with the quantities asking.
             let mut by_cell: Vec<(usize, usize)> = asking.iter().enumerate().flat_map(|(q, cells)| cells.iter().map(move |&node| (node, q))).collect();
             if by_cell.is_empty() {
@@ -2064,7 +2092,7 @@ mod tests {
 
     /// The model holds along a path where every point of it does, and fails where a point of it fails (`holds_along`):
     /// R2_RECOIL with its resonant beam's drives folded at the atom, whose folds the whole space does not settle. On 200
-    /// paths of 0.5 µm about points across the trap's region at speeds up to 0.5 µm/µs, against their gates at 65 points
+    /// paths of 0.5 µm about points across the trap's region at speeds up to 1 µm/µs, against their gates at 65 points
     /// each: a path with a point that fails is never held to hold; both outcomes occur.
     #[test]
     fn a_path_holds_where_its_points_do_and_fails_where_one_does_not() {
@@ -2077,7 +2105,7 @@ mod tests {
         let (mut held, mut failed) = (0, 0);
         for _ in 0..200 {
             let r: [f64; 3] = std::array::from_fn(|_| 6.0 * (stream.uniform() - 0.5));
-            let v: [f64; 3] = std::array::from_fn(|_| 0.29 * (stream.uniform() - 0.5));
+            let v: [f64; 3] = std::array::from_fn(|_| 1.2 * (stream.uniform() - 0.5));
             let speed = v.iter().map(|x| x * x).sum::<f64>().sqrt();
             let half = 0.25 / speed;
             let points_fail = (0..=64).any(|i| {

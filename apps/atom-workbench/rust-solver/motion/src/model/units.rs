@@ -1167,7 +1167,7 @@ impl Model {
             })
             .collect();
         let refs: Vec<&(dyn Fn(&Region) -> f64 + Sync)> = quantities.iter().map(|q| q.as_ref()).collect();
-        let proven = self.bounds_over_in_parallel(reach, EXISTS, KEEP, &refs);
+        let proven = self.statements_over(reach, EXISTS, KEEP, 2, &refs);
         let mut out: Vec<Gate> = everywhere.iter().map(|of| Gate { saturation: of[0], sweep: of[1] }).collect();
         for (&u, &at) in open.iter().zip(&asked) {
             out[u] = Gate { saturation: proven[at], sweep: proven[at + 1] };
@@ -1753,7 +1753,8 @@ mod tests {
     /// A fold's error on a rate is booked by what the rate moves (module documentation, # A rate's error on the
     /// populations): the rate agent's e3 (rate.status.md §4) -- S3's tweezer and repump, a σ+σ− probe pair at 1 mW 20 MHz
     /// red of the free F=2 → F'=3 line, mass ×100 at 1 µK: an atom at rest at the trap's centre --, whose probe drives F=2 →
-    /// F'=2, F'=1 the closure leaves folded with the bare levels, 247 MHz from their lines where the trap puts them at 200.
+    /// F'=2, F'=1 the closure's second model (the first one's failing folds at the atom, no explicit state) leaves folded
+    /// with the bare levels, 247 MHz from their lines where the trap puts them at 200.
     /// The rate equations of the ground states at the point -- each one's jumps into the others, its photons' classes on
     /// their landing states (model.rs `Photon`) -- have their stationary populations; of the closure's model and of the same
     /// model with the probe's bare drives at the atom they differ by the bare folds' error on the populations, which the
@@ -1764,14 +1765,15 @@ mod tests {
     fn a_fold_s_rate_error_is_booked_by_the_population_it_moves() {
         let request = request_of("E3_SPSM");
         let light = Light::new(&request);
-        let models = closure(&request, &light, 3);
+        let models = closure(&request, &light, 2);
         let model = &models.last().expect("a closure").0;
         let probe = (0..light.frequencies.len()).find(|&f| f != light.trap && light.frequencies[f].beams.len() == 2).expect("the probe pair");
         let bare = model.bare_units(Component { frequency: probe, counter: false });
         let units = model.units();
         let folded: Vec<usize> = (0..units.len()).filter(|&u| bare.contains(&units[u])).collect();
         let at = model.rekept(&[model.kept.clone(), bare].concat()).unwrap();
-        assert!(!folded.is_empty() && model.clusters.iter().chain(&at.clusters).all(|c| c.ground == c.states.len()), "the probe's bare drives, no explicit state");
+        let explicit: Vec<usize> = model.clusters.iter().chain(&at.clusters).flat_map(|c| c.states[c.ground..].to_vec()).collect();
+        assert!(!folded.is_empty() && explicit.is_empty(), "the probe's bare drives ({}), no explicit state: {explicit:?}; kept {:?}", folded.len(), model.kept);
         let state = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
         let reference: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
         let centre = model.trap(&reference, &model.prepared()).unwrap().centre;
