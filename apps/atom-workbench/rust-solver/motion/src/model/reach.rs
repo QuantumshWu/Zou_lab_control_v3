@@ -22,6 +22,16 @@
 //! it as the level's do the sublevel set. An outside level at or above the far value -- a held atom that V_run binds and
 //! V_prep does not -- leaves the reach unbounded: the whole space, its bounds the global ones.
 //!
+//! A temperature's level is below the depth (# The reach's level): no temperature's reach holds an atom that has gained
+//! the trap's depth, or its top, and is still in the region. Such an atom is held there all the same, and a path of it
+//! that the reach's proofs are to hold (solve.rs `Domain`) is held by the region's level raised to its energy, the
+//! temperature kept (`Model::inside_to`): within the region the reach then holds every prepared energy up to it -- the
+//! path's points among them, its largest energy no more --, and outside it what it held. The family stays nested and
+//! only grows: the inside level is the larger of the two, the outside one and the temperature are kept, so the reach so
+//! raised holds the one before it, and a later temperature's reach is raised again to the levels asked before (solve.rs
+//! keeps them as it keeps the outside ones). The temperature is the atoms' own, its ensemble's statements (the kinetic
+//! temperatures, the falsifier's scale) its own; only the set and its speeds, √(2 (ħ/m) E), grow with the path.
+//!
 //! # The reach's level
 //! The reach is the set that holds all but the share s of the initial ensemble -- its bound atoms alone (ensemble.rs,
 //! # The lowered isothermal: f ∝ e^{−E/k_BT} − 1 below the far level, nothing above it) --: its level is the (1 − s)
@@ -1613,6 +1623,19 @@ impl Model {
         reach
     }
 
+    /// The reach that holds, beside `reach`, the prepared energies up to `level` (rad/µs) within the trap's region (module
+    /// documentation, # The trap's region): its level inside raised to it, its speeds with it; its temperature and its
+    /// level outside kept. The same reach where it holds the level already.
+    pub fn inside_to(&self, reach: &Reach, level: f64) -> Reach {
+        if level - reach.minimum <= reach.energy {
+            return reach.clone();
+        }
+        let energy = level - reach.minimum;
+        let mut wider = Reach { energy, speed: (2.0 * self.hbar_over_mass * energy).sqrt(), ..reach.clone() };
+        wider.cell = self.reach_box(&wider);
+        wider
+    }
+
     /// The reach that holds, beside `reach`, the prepared energies up to `level` (rad/µs) outside the trap's region (module
     /// documentation, # The trap's region): its outside level raised to it, no higher than its own level inside.
     pub fn outside_to(&self, reach: &Reach, level: f64) -> Reach {
@@ -2073,6 +2096,36 @@ mod tests {
         let top = top(&trap, share);
         assert!((top / (-trap.minimum) - 0.9936).abs() < 5e-5 && last < top, "the top {} D above 1 mK's level {}", top / -trap.minimum, last / -trap.minimum);
         assert!(holding(&trap, trap.minimum + top, share, 1000.0).is_infinite() && holding(&trap, 0.0, share, 1000.0).is_infinite(), "nothing holds the top or the far value");
+    }
+
+    /// A path no temperature's reach holds is held by the region's level raised to it, the temperature kept (module
+    /// documentation, # The trap's region): S2Q's tweezer (its sanity scene) at 30 µK, its reach's level the lowered
+    /// isothermal's quantile, below the depth; a path's energy of 141.5 rad/µs above the bottom -- an atom of that scene's
+    /// run, above the depth of 108.4 -- has no holding temperature; raised to it, the reach holds an atom of that energy at
+    /// the trap's centre, which the temperature's does not, keeps its temperature, its level outside and its kinetic
+    /// temperatures, and is the same reach where it is asked for a level it holds.
+    #[test]
+    fn a_path_above_the_depth_is_held_by_the_region_s_level_at_the_temperature() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("S2Q.json");
+        let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+        let light = Light::new(&request);
+        let model = Model::new(&request, &light, &[]).unwrap();
+        let state = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
+        let p: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
+        let reach = model.reach(&trap, &p, 30.0, share);
+        let (degrees, _) = degrees(&trap, 30.0);
+        assert!((reach.energy - degrees.level(share) * KT_PER_UK * 30.0).abs() <= 1e-12 * reach.energy && reach.energy < -trap.minimum, "the level {} below the depth {}", reach.energy, -trap.minimum);
+        let level = trap.minimum + 141.5;
+        assert!(141.5 > -trap.minimum && holding(&trap, level, share, 30.0).is_infinite(), "no temperature holds 141.5 above the bottom (depth {})", -trap.minimum);
+        let raised = model.inside_to(&reach, level);
+        let kappa = [0.0, 0.0, (2.0 * 141.5 / model.hbar_over_mass).sqrt() * (1.0 - 1e-12)];
+        assert!(model.holds(&raised, trap.centre, kappa) && !model.holds(&reach, trap.centre, kappa), "the raised reach holds the path's energy at the centre");
+        assert!(raised.temperature_uk == 30.0 && raised.outside == reach.outside && raised.kinetic_uk == reach.kinetic_uk && raised.energy == 141.5, "the temperature and the level outside kept");
+        assert!((raised.speed - (2.0 * model.hbar_over_mass * 141.5).sqrt()).abs() <= 1e-12 * raised.speed && raised.cell.iter().zip(&reach.cell).all(|(a, b)| a[0] <= b[0] && a[1] >= b[1]), "its speeds and its box grown");
+        let same = model.inside_to(&reach, trap.minimum + 0.5 * reach.energy);
+        assert!(same.energy == reach.energy && same.cell == reach.cell && same.speed == reach.speed, "a level held already changes nothing");
     }
 
     /// A region's bounds hold at every point of its cell and are the values on its centre point (module documentation,
