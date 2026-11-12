@@ -17,6 +17,12 @@
 //       its reflection by the mirror with the λ/4 plate at its default 45° (lin⊥lin), S2's repump; 100 ms
 //       (or --duration), 201 samples. Report mode: the run's checks only, its T and held share printed beside the user's
 //       statement (held over 100 ms, little heating -- a physical fact the engine is to reproduce).
+//   S4  a published benchmark of the same physics on the same kind of setup: Lester, Kaufman, Regal, PRA 90, 011804 (2014)
+//       (arXiv:1405.6156), their PGC imaging -- one retro-reflected σ+σ− pair (a probe added with ＋, set σ+ by the app's
+//       preset, its reflection through the mirror's λ/4 plate: S2Q's geometry), 0.61 mW in a 1.66 mm waist (14 mW/cm²), 13 MHz
+//       red of the free-space F=2 → F'=3 line, the repump on, the field zeroed; the tweezer 852 nm, 0.76 µm waist (Kaufman et
+//       al. PRX 2012, the same apparatus), 2.133 mW for its 1.1 mK depth. Measured: a scattering rate of (2.6 ± 0.4)e5/s and
+//       the atom held through 20–25 ms images (it is pre- and post-selected on them); 25 ms, 201 samples. Report mode.
 // What the check expects is physics, derived independently of every engine: sanity/model.py (its header holds the
 // derivation; its output sanity/model.json is read here, python is not run): light shifts from a sum over states on the
 // app's atomic tables, and a classical-atom Monte Carlo in two independent formulations (K: scattering events at the
@@ -133,7 +139,23 @@ function s3(){
 }
 /** Resolved and read back through the app's importer (a saved file opened). */
 function finish(scene){physics.resolveSceneFrequencies(scene);scene.lasers.forEach(intensity.normalizeLaserIntensity);return sceneFile.validateScene(JSON.parse(JSON.stringify(scene)));}
-const SCENES={S1:()=>finish(s1()),S2:()=>finish(s2()),S2Q:()=>finish(s2(true)),S3:()=>finish(s3())};
+/** S4, the PGC benchmark of Lester, Kaufman, Regal (PRA 90, 011804, 2014): S2Q's σ+σ− pair (the app's σ+ preset along the
+ * field's axis, the mirror's λ/4 plate) with the field zeroed, 0.61 mW in a 1.66 mm waist, −13 MHz from the free line, S2's
+ * repump; the tweezer at their 852 nm, 0.76 µm waist and 1.1 mK (2.133 mW: the default's 17.25 MHz at 4 mW and 1.2 µm,
+ * linear in P/w²). */
+const S4_US=25_000,S4_TWEEZER_MW=2.133,S4_TWEEZER_WAIST_UM=0.76,S4_OFFSET_MHZ=-13;
+function s4(){
+  const scene=s2(true),tweezer=scene.lasers.find(l=>l.id===scene.tweezerId),probe=scene.lasers.find(l=>l.id==='laser-probe');
+  scene.fields[0].magnitudeG=0;
+  Object.assign(tweezer,{powerMW:S4_TWEEZER_MW,waistUm:S4_TWEEZER_WAIST_UM});
+  for(const l of scene.lasers.filter(l=>l.id.startsWith('laser-probe')))Object.assign(l,{powerMW:0.61,waistUm:1660});
+  probe.frequency.offsetMHz=S4_OFFSET_MHZ;
+  const duration=Number(opt('duration')??S4_US);
+  Object.assign(scene.dynamics,{durationUs:duration,durationUnit:'μs',samples:201});
+  scene.name='sanity S4: Lester 2014 PGC（σ+σ− 一对，0.61 mW/1.66 mm，−13 MHz，B 0，光镊 1.1 mK）';
+  return scene;
+}
+const SCENES={S1:()=>finish(s1()),S2:()=>finish(s2()),S2Q:()=>finish(s2(true)),S3:()=>finish(s3()),S4:()=>finish(s4())};
 
 /** What the app makes of a scene: polarizations, the levels chart's light shifts of the tweezer alone (all-order Floquet,
  * spectroscopy.ts) and the detunings at the trap centre. */
@@ -239,7 +261,7 @@ function judge(sceneId,f,r){
   add(true,'run',`completed in ${r.solveS.toFixed(1)} s, ${r.checkpoints} checkpoint(s)`);
   if(!old)add(!r.rejected.length,'run: the app\'s reader accepts every checkpoint and the result',r.rejected.length?`${r.rejected.length} rejected -- ${r.rejected[0]} (the app shows this error)`:'');
   const finite=[...r.Ttotal,...r.loss].every(x=>x===null||Number.isFinite(x));add(finite,'run: numbers finite','');
-  if(sceneId==='S3')return out;
+  if(sceneId==='S3'||sceneId==='S4')return out;
   const p=model.parameters,wx=p.omegaAx/2/Math.PI*1e3,wy=p.omegaR/2/Math.PI*1e3;
   if(r.trapKHz){add(Math.abs(r.trapKHz[0]/wx-1)<=0.03,'trap x (axial)',`${r.trapKHz[0].toFixed(2)} kHz vs ${wx.toFixed(2)} ± 3 %`);
     add(Math.abs(r.trapKHz[1]/wy-1)<=0.03,'trap y (radial)',`${r.trapKHz[1].toFixed(2)} kHz vs ${wy.toFixed(2)} ± 3 %`);}
@@ -283,16 +305,17 @@ function judgeS2Q(r,add,N,index,stateIndex){
       add(Math.abs(p-q)<=tol,`populations: ${id} of the held atom's ground states at ${t/1e3} ms`,`${p.toFixed(3)} vs ${q.toFixed(3)} ± ${tol.toFixed(3)}`);}}
 }
 
-/** S3 in report mode, beside the user's experiment (2026-11-12, verbatim: "我很确定我们的pi偏振的，差不多半径1mm, 功率1mW的
+/** S3 and S4 in report mode: S3 beside the user's experiment (2026-11-12, verbatim: "我很确定我们的pi偏振的，差不多半径1mm, 功率1mW的
  * probe光，在带lambda/4反射镜反射之后，加上repump，对于光镊里面的原子的加热效果非常小，吹100ms也是基本吹不飞的，这是物理实验结果"):
  * the held share and T over the run; no criterion until the experiment's numbers (its tweezer, field and detunings) are
  * known -- the scene takes the app's defaults for them. */
-function reportS3(r){
+function reportS3(r,id){
   console.log(`     t ms | T_total ± SE µK (x/y/z)                 | L ± SE`);
   for(const t of [0,500,1000,2000,5000,10000,20000,50000,100000]){const k=r.times.findIndex(x=>Math.abs(x-t)<1e-6);if(k<0)continue;
     const L=r.loss[k],se=Math.sqrt(Math.max(L*(1-L),1/r.trajectories)/r.trajectories);
     console.log(`   ${(t/1e3).toFixed(1).padStart(6)} | ${(r.Ttotal[k]==null?'—':`${r.Ttotal[k].toFixed(1)} ± ${(r.TtotalSE[k]??0).toFixed(1)}`).padEnd(16)} (${r.T.map(a=>a[k]==null?'—':a[k].toFixed(0)).join('/')})`.padEnd(54)+`| ${L.toFixed(3)} ± ${se.toFixed(3)}`);}
   const end=r.times.length-1;
+  if(id==='S4'){console.log(`   REPORT benchmark (Lester 2014): scattering (2.6 ± 0.4)e5/s, the atom held through 20–25 ms; engine: held ${(1-r.loss[end]).toFixed(3)} at ${(r.times[end]/1e3).toFixed(1)} ms, T_total ${r.Ttotal[end]?.toFixed(1)??'—'} µK`);return;}
   console.log(`   REPORT experiment: held over 100 ms ("基本吹不飞"), little heating; engine: held ${(1-r.loss[end]).toFixed(3)} at ${(r.times[end]/1e3).toFixed(1)} ms, T_total ${r.Ttotal[end]?.toFixed(1)??'—'} µK (from ${r.Ttotal[0]?.toFixed(1)} µK)`);
 }
 
@@ -307,13 +330,13 @@ for(const id of wanted){
   const both=f.lasers.filter(l=>l.id.startsWith('laser-probe'));
   if(both.length===2)console.log(`   the probe pair on the field's axis: ${both.map(l=>l.sigmaPlus>0.999?'σ+':l.sigmaMinus>0.999?'σ−':'mixed').join(' + ')} (${both[0].sigmaPlus>0.999&&both[1].sigmaPlus>0.999?'σ+σ+: a pure σ+ standing wave, no polarization gradient':'opposite circular: a polarization gradient'})`);
   // model.json's shifts are the default 4 mW tweezer's, linear in the power (S3's tweezer: S3_TWEEZER_MW)
-  const power=id==='S3'?S3_TWEEZER_MW/4:1,lsg=ls.groundShiftMHz*power,lse=ls.excitedShiftMHz*power;
+  const power=id==='S3'?S3_TWEEZER_MW/4:id==='S4'?S4_TWEEZER_MW/4*(1.2/S4_TWEEZER_WAIST_UM)**2:1,lsg=ls.groundShiftMHz*power,lse=ls.excitedShiftMHz*power;
   console.log(`   tweezer's light shift at the focus (levels chart): |2,2⟩ ${f.groundShiftMHz.toFixed(4)} MHz (model ${lsg.toFixed(4)}), |3',3'⟩ ${f.excitedShiftMHz.toFixed(4)} MHz (model ${lse.toFixed(4)})`);
   console.log(`   probe detuning from |2,2⟩ → |3',3'⟩: ${f.probeCentreMHz.toFixed(3)} MHz at the trap centre (${(f.probeCentreMHz/(model.parameters.gamma/2/Math.PI)).toFixed(2)}Γ), ${f.probeFreeMHz.toFixed(3)} MHz without the tweezer (3 G Zeeman)`);
   if(f.repumpCentreMHz)console.log(`   repump detuning from F=1 → F'=2 (π) at the centre: ${f.repumpCentreMHz.map(x=>`m ${x.m}: ${x.MHz.toFixed(2)}`).join(', ')} MHz`);
   const sceneChecks=[[Math.abs(f.groundShiftMHz/lsg-1)<0.005&&Math.abs(f.excitedShiftMHz/lse-1)<0.005,'scene: the levels chart\'s shifts within 0.5 % of the independent sum over states'],
-    [Math.abs(f.probeFreeMHz-model.chart.zeemanDetuningMHz-(id==='S3'?S3_OFFSET_MHZ:0))<1e-3,`scene: the probe's free detuning is the model's${id==='S3'?` with S3's offset ${S3_OFFSET_MHZ} MHz`:''}`],
-    [f.lasers.filter(l=>l.id.startsWith('laser-probe')).every(l=>id==='S3'?(l.id.endsWith('reflection')?Math.abs(l.sigmaMinus-0.5)<1e-3&&Math.abs(l.sigmaPlus-0.5)<1e-3:l.pi>0.999):id==='S2Q'&&l.id.endsWith('reflection')?l.sigmaMinus>0.999:l.sigmaPlus>0.999),'scene: the probe beams\' polarization as described']];
+    [Math.abs(f.probeFreeMHz-(id==='S4'?S4_OFFSET_MHZ:model.chart.zeemanDetuningMHz+(id==='S3'?S3_OFFSET_MHZ:0)))<1e-3,`scene: the probe's free detuning is the model's${id==='S3'?` with S3's offset ${S3_OFFSET_MHZ} MHz`:''}`],
+    [f.lasers.filter(l=>l.id.startsWith('laser-probe')).every(l=>id==='S3'?(l.id.endsWith('reflection')?Math.abs(l.sigmaMinus-0.5)<1e-3&&Math.abs(l.sigmaPlus-0.5)<1e-3:l.pi>0.999):(id==='S2Q'||id==='S4')&&l.id.endsWith('reflection')?l.sigmaMinus>0.999:l.sigmaPlus>0.999),'scene: the probe beams\' polarization as described']];
   for(const [pass,what] of sceneChecks){console.log(`   ${ok(pass)} ${what}`);if(!pass)failures++;}
   const r=await solve(scene,id);results[id]=r;
   if(r.error)console.log(`   engine: ERROR after ${r.solveS?.toFixed(1)} s: ${r.error}`);
@@ -321,7 +344,7 @@ for(const id of wanted){
     console.log(`   engine ${r.engine??''}: solve ${r.solveS.toFixed(1)} s, ${r.trajectories} trajectories, step ${r.stepUs} µs, trap ${r.trapKHz?.map(x=>x.toFixed(2)).join('/')} kHz (model ${(model.parameters.omegaAx/2/Math.PI*1e3).toFixed(2)}/${(model.parameters.omegaR/2/Math.PI*1e3).toFixed(2)}/${(model.parameters.omegaR/2/Math.PI*1e3).toFixed(2)} bare)`);
     if(r.flagged)console.log(`   flagged: ${r.flagged.slice(0,300)}`);
   }
-  if(!r.error&&id==='S3')reportS3(r);
+  if(!r.error&&(id==='S3'||id==='S4'))reportS3(r,id);
   else if(!r.error){
     const band=EXPECT[id].low?[model.runs[EXPECT[id].low],model.runs[EXPECT[id].high]]:null;
     console.log(`     t ms | T_total engine (x/y/z)          | model T  | L engine | model L${band?' (band: z frozen – z frictionless)':''}`);
