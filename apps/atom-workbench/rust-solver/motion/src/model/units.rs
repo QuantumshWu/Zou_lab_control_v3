@@ -32,8 +32,10 @@
 //! pair's (`Model::pair_gate`), the one gate of the two-photon coupling |U V_a| over the nearer of the two one-photon
 //! distances -- the amplitude either of the pair's states holds of the other is that over the two-photon distance --
 //! across the two-photon distance |E_g + ν − E_a − ν_a| over the region, less the two photons' Doppler shifts and
-//! what the folded and the kept drives move the two ground levels. Its share adds to the drive's in its ground
-//! state's tail; failing, the drive is kept as any other.
+//! what the folded and the kept drives move the two ground levels. The pair is the second-order coupling of two slow
+//! states -- g and the state a of e's cluster --, as a coupling of two states is (# A coupling of two states), not an
+//! amplitude of an excited state of g's: its own statement, judged alone (# The tail rule); failing, the drive is kept as
+//! any other.
 //!
 //! A drive has exactly one level, the highest its kept units give it, and one more where its two states are one cluster's
 //! at a residual beat of exactly zero (model.rs `Model::settled`); a carrier is a component with a drive not bare, never listed.
@@ -53,6 +55,17 @@
 //! point's gate is the value there. (A weaker place's bound from elsewhere in its stead is no value of any point: with
 //! the whole space's 0.49 for one of two equal drives, the other's gate read 0.52 "attained" at the trap's centre where
 //! the two shares are 0.03 each, and a light 20 linewidths off its line was made explicit.)
+//!
+//! What the tail sums is what g's fold holds of the excited states its folded drives reach, the first-order amplitudes
+//! R[e, g] = V_e/D_e: the column whose norm bounds the fold of g's set (Stewart, the block of one ground state against
+//! its folded excited states). A Raman pair's mixing is none of them: it is the amplitude of another slow state in g's,
+//! of the second order, |U V_a|/(d d_R), and as d_R → 0 it has no bound against the drive's own share |U|²/d² -- so it has
+//! no place in an order by the drives' own shares. A drive's gate is therefore the larger of its place's tail and of its
+//! place's drives' pairs (their largest, as their sweeps). (Added at its drive's place, a pair failed every stronger drive
+//! of g with it, which keeping does not cure -- the pair stays until its own drive is kept --, down to the
+//! counter-rotating ones, which can only be folded: the request of a lin⊥lin probe with its repump was refused for a
+//! pair of the repump's 1.7e-9 rad/µs coupling F=1 m=1 → F′=2 m=−1 -- made by the H0 states' mixing -- with the
+//! 1.1e-8 one from F=1 m=0, measured.)
 //!
 //! # What a folded drive does to its level
 //! A drive of coupling v folded across the distance d moves its ground level by at most v²/d = m v, and by less than
@@ -680,8 +693,9 @@ impl Model {
     /// is the region's own, the weaker places' as the place's: a point's are the values there. A folded drive's gate is
     /// of its size across its distance over the region (`across`); a bare drive's own gate of v + |Δ_c − Δ₀| + moved
     /// across its bare |Δ₀ − iΓ_e/2|; its rate v L + k a_max, L the slope of E_e − E_g and of the other components'
-    /// carriers' dressings of g. A drive onto an explicit state has the share and the sweep of its Raman pairs with
-    /// that state's kept drives beside its own (`pair_gate`).
+    /// carriers' dressings of g. A drive onto an explicit state has the saturation and the sweep of its Raman pairs with
+    /// that state's kept drives beside its own (`pair_gate`): its own statements, not shares in the tail -- a place's
+    /// gate is the larger of its tail and its drives' largest pair.
     fn folds_made(&self, g: usize, region: &Region) -> Vec<[f64; 4]> {
         let drives = &region.forms.drives(self)[g];
         let kept = self.kept_over(region);
@@ -690,6 +704,8 @@ impl Model {
         // Per component the slope of the other components' carriers' dressings of g and its beams' largest wave number.
         let mut shared: Vec<Option<(f64, f64)>> = vec![None; 2 * self.tones.len()];
         let mut out = vec![[0.0; 4]; drives.last().map_or(0, |d| d.group + 1)];
+        // Per place its drives' largest pair saturation, at the atom and with the bare levels.
+        let mut pairs = vec![[0.0_f64; 2]; out.len()];
         for (d, of) in drives.iter().zip(self.across(g, region)).filter(|of| of.0.level != Level::Explicit) {
             let (others, wave) = *shared[d.component].get_or_insert_with(|| {
                 let others: f64 = (0..self.carriers.len()).filter(|&c| self.other(&self.carriers[c], d.component)).map(|c| self.shift_slope(c, g, region, true)).sum();
@@ -699,8 +715,10 @@ impl Model {
             let actual = gate(of.size, of.distance(d.gamma), rate);
             let pair = self.pair_gate(g, d, of, &kept, region);
             let place = &mut out[d.group];
-            place[0] += actual.saturation + pair.saturation;
-            if d.level == Level::Bare {
+            place[0] += actual.saturation;
+            let bare = d.level == Level::Bare;
+            pairs[d.group][bare as usize] = pairs[d.group][bare as usize].max(pair.saturation);
+            if bare {
                 let own = gate(of.size + (of.centre - d.detuning).abs() + of.moved, d.bare, rate);
                 place[2] = place[2].max(own.saturation - actual.saturation);
                 place[3] = place[3].max(own.sweep).max(pair.sweep);
@@ -708,11 +726,16 @@ impl Model {
                 place[1] = place[1].max(actual.sweep).max(pair.sweep);
             }
         }
-        // The tails: each place's shares with every weaker one's; a bare drive's own share in its own's stead.
+        // The tails: each place's shares with every weaker one's; a bare drive's own share in its own's stead. Then the
+        // place's pairs, each its own statement.
         for place in (0..out.len()).rev() {
             let tail = out[place][0] + out.get(place + 1).map_or(0.0, |weaker| weaker[0]);
             out[place][0] = tail;
             out[place][2] += tail;
+        }
+        for (place, pair) in out.iter_mut().zip(&pairs) {
+            place[0] = place[0].max(pair[0]);
+            place[2] = place[2].max(pair[1]);
         }
         out
     }
@@ -744,7 +767,7 @@ impl Model {
     /// |E_g + ν − E_a − ν_a| over the region less the two photons' Doppler shifts, the shifts of the two ground levels by
     /// their drives folded at the atom (`near_shift`) and by their kept drives -- a kept drive of coupling v across the
     /// distance d moves its ground level by at most v and at most v²/d --, at the rate v |∇(E_g − E_a)| + (k + k_a) a_max.
-    /// The pairs' saturations summed (shares of g's population, as the tail's), their largest sweep; nothing where the
+    /// The pairs' saturations summed (the drive's couplings to e's cluster), their largest sweep; nothing where the
     /// drive's excited state has no kept drive.
     fn pair_gate(&self, g: usize, d: &super::reach::DriveForm, of: &Across, kept: &[Kept], region: &Region) -> Gate {
         let mut out = Gate { saturation: 0.0, sweep: 0.0 };
