@@ -658,7 +658,7 @@ fn coherent_front(state:&State,requests:&[(Generation,Arc<str>,Option<usize>)],p
         // the signal across runs is one only while it runs (v2: only a processor stays a
         // route once ended).
         let route=run.source.as_ref().filter(|source|source.coherent && source.declared
-            && (source.generation.is_some() || !run.sealed) && owes_its_group(state,source));
+            && (source.generation.is_some() || !run.sealed) && owes_its_group(state,run,source));
         for (name,signal) in &run.signals {
             retained.insert(name.clone(),signal);
             if let Some(event)=&signal.latest {
@@ -768,16 +768,30 @@ struct DerivedSource {
 
 /// Whether a consumer's group waits for it. A consumer with work for the newest source
 /// event alone is about to answer it: its group waits, and they are shown together.
-/// With nothing to do it owes no shot (it answered the last with nothing, as a group of
-/// repeats does until it closes); with more it is catching up. Then its source goes on
+/// With nothing to do it is either caught up -- what it last committed answers the
+/// source's newest event, so it stays a member and its own consumers' shot still holds
+/// the source -- or it owes no shot (it answered the last with nothing, as a group of
+/// repeats does until it closes). With more it is catching up. Then its source goes on
 /// showing its newest, and the consumer what it has answered. A consumer that takes only
 /// the newest is never behind. One whose feed is not known, or has gone, keeps its group
 /// as a declared member does.
-fn owes_its_group(state:&State,source:&DerivedSource) -> bool {
+fn owes_its_group(state:&State,run:&Run,source:&DerivedSource) -> bool {
     let Some(subscriber)=source.consumer.and_then(|ticket|state.subscribers.get(&ticket)) else {return true};
     let queued=subscriber.queue.iter().filter(|delivery|matches!(delivery.kind,DeliveryKind::Data)).take(2).count();
     let owed=usize::from(subscriber.in_hand)+subscriber.replay.len().saturating_add(queued);
-    if matches!(subscriber.policy,DeliveryPolicy::Latest) {owed>0} else {owed==1}
+    match owed {
+        0 => answered_newest(state,run,&source.signal),
+        _ if matches!(subscriber.policy,DeliveryPolicy::Latest) => true,
+        owed => owed==1,
+    }
+}
+
+/// Whether a run's latest commits answer the newest event of the signal it derives from.
+fn answered_newest(state:&State,run:&Run,signal:&Arc<str>) -> bool {
+    let Some(newest)=state.signals.get(signal).and_then(|generation|state.runs.get(generation))
+        .and_then(|source|source.signals.get(signal)).and_then(|signal|signal.latest.as_ref()) else {return false};
+    run.signals.values().filter_map(|signal|signal.latest.as_ref())
+        .any(|event|event.event.parents.iter().any(|parent|parent.key==newest.key))
 }
 struct Subscriber {
     generation: Option<GenerationId>, follow_owner: Option<Arc<str>>,
