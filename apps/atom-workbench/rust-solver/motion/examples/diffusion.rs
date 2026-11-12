@@ -288,15 +288,17 @@ fn kicks(step: &Step) -> ([f64; 3], [f64; 3], [f64; 3], [f64; 3]) {
     (r_h, k_h, std::array::from_fn(|a| after[a] - k_h[a]), jumps)
 }
 
-/// One trajectory of the engine held on a course: the model's steps as the solve takes them (`stepped`, on a Brownian
-/// path that does not move), their jumps made inside them on the step's own path, the position and the momentum put
-/// back on the course before every step. What the engine gives the momentum along z is accumulated apart, from the
-/// time `burn` on, and sampled every `every` µs: with the weights w = 1, w₁, w₂ (`Course::weights`, at a step's middle;
-/// a jump's at its own time) in turn [Σ w Δκ of the steps (the Ehrenfest impulse and the scattered light's force: the
-/// kick at the step's middle less its jumps' part, `kicks`), Σ w Δκ of the jumps (the emitted recoil and the absorbed
-/// mean, each jump's own kick), ∫ w² 2D_zz dt of the Brownian part (the model's 2D of the step's start state at the
-/// step's middle point)], then the jumps' count and the population outside the start's hyperfine level. Beside them
-/// the normalized internal state (its cluster and amplitudes) at every sample.
+/// One trajectory of the engine held on a course: the model's steps as the solve takes them (`stepped`, each on a part
+/// of the trajectory's own Brownian path, drawn from a stream of its own), their jumps made inside them on the step's
+/// own path, the position and the momentum put back on the course before every step (the internal state and the
+/// optical sector's pending covariance go on). What the engine gives the momentum along z is accumulated apart, from
+/// the time `burn` on, and sampled every `every` µs: with the weights w = 1, w₁, w₂ (`Course::weights`, at a step's
+/// middle; a jump's at its own time) in turn [Σ w Δκ of the steps (the Ehrenfest impulse, the scattered light's force
+/// and the drawn noise of the scattered light and the optical sector: the kick at the step's middle less its jumps'
+/// part, `kicks`), Σ w Δκ of the jumps (the emitted recoil and the absorbed mean, each jump's own kick), 0 (the
+/// Brownian part is drawn, inside the steps' column; the column kept for the readers' width)], then the jumps' count and
+/// the population outside the start's hyperfine level. Beside them the normalized internal state (its cluster and
+/// amplitudes) at every sample.
 fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64, every: f64, seed: u64, index: u64) -> (Vec<[f64; WIDTH]>, Vec<(usize, Vec<C64>)>) {
     let hm = run.hbar_over_mass();
     let place = |course: &Course, t: &mut Trajectory| {
@@ -310,6 +312,7 @@ fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64,
     // before every step, from a stream of the trajectory's own): the same amplitude, a path that loses its phase.
     let wander: f64 = std::env::var("DPHI").map_or(0.0, |x| x.parse().unwrap());
     let mut walk = atom_motion::random::Stream::new(67, atom_motion::random::Purpose::Initial, index, 0);
+    let mut noise = atom_motion::random::Stream::new(seed + 1, atom_motion::random::Purpose::Initial, index, 0);
     let mut course = course;
     let (mut sums, mut out, mut states) = ([0.0; WIDTH], vec![], vec![]);
     let mut next = burn;
@@ -321,14 +324,12 @@ fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64,
             *phase += (wander * length).sqrt() * walk.normals()[0];
         }
         place(&course, &mut t);
-        let (step, _, taken) = stepped(run, &t, length, &mut |_| Brownian::STILL, &mut scratch);
+        let (step, _, taken) = stepped(run, &t, length, &mut |length| Brownian::over(length, &[noise.normals(), noise.normals()]), &mut scratch);
         if t.time >= burn {
-            let (r_h, k_h, whole, jumped) = kicks(&step);
-            let spread = taken * run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi).diffusion[2][2];
+            let (_, _, whole, jumped) = kicks(&step);
             let w = course.weights(t.time + 0.5 * taken);
             for (i, w) in [1.0, w[0], w[1]].into_iter().enumerate() {
                 sums[3 * i] += w * (whole[2] - jumped[2]);
-                sums[3 * i + 2] += w * w * spread;
             }
             for (kick, time) in step.made.iter().filter_map(|made| made.kick.map(|kick| (kick, made.state.time))) {
                 let w = course.weights(time);

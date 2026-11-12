@@ -2332,29 +2332,31 @@ impl crate::step::Middle for Middle<'_> {
         }
     }
 
-    /// The optical sector's operators K_a at the middle along the path (optical.rs): of the cluster's generator and its
-    /// gradient there, in its Doppler frames at the path's velocity. None for a cluster without excited states, or where
-    /// its sector has no number.
+    /// The optical sector's operators K_a at the middle (optical.rs), with the gradient they are made of: of the cluster's
+    /// generator and its gradient at the point at rest -- no frame's rate and no plane wave turning (step.rs, # The
+    /// optical sector's noise: K the point's, held at the middle, where the frames are the lab's), the folds' Doppler
+    /// shifts the path's momentum's. None for a cluster without excited states, or where its sector has no number.
     fn optical(&self, path: &Path) -> Option<crate::step::Optical> {
         let (model, plan, n) = (self.model, &*self.plan, self.plan.states);
         let c = &model.clusters[plan.cluster];
         if c.ground == n {
             return None;
         }
+        let still = crate::step::Middle::path(self, path.kappa, [0.0; 3]);
         let mut h = Mat::zeros(n, n);
-        crate::step::Middle::generator(self, path, 0.0, &mut h);
-        let mut g: [Vec<C64>; 3] = Default::default();
-        crate::step::Middle::gradient(self, path, 0.0, &mut g);
-        let sector = super::optical::Sector::new(&h, &g, c.ground)?;
-        let (k, solves) = sector.operators()?;
-        // The light pattern's fastest beat on the path, the largest (k_l − k_m)·v over the plan's beams, and the slowest
-        // optical rate, the least of the cluster's excited states' decay over two.
-        let rates = &path.rates.path;
-        let (most, least) = rates.iter().fold((f64::NEG_INFINITY, f64::INFINITY), |(most, least), x| (most.max(*x), least.min(*x)));
-        let beat = if most >= least { most - least } else { 0.0 };
-        let rate = c.states[c.ground..].iter().map(|&e| 0.5 * model.decay[(e - GROUND, e - GROUND)].re).fold(f64::INFINITY, f64::min);
-        let work = crate::step::Middle::work(self)[0] + (sector.work + solves) / crate::decide::COMPLEX;
-        Some(crate::step::Optical { k, beat, rate, work })
+        crate::step::Middle::generator(self, &still, 0.0, &mut h);
+        let mut gradient: [Vec<C64>; 3] = Default::default();
+        crate::step::Middle::gradient(self, &still, 0.0, &mut gradient);
+        let sector = super::optical::Sector::new(&h, &gradient, c.ground)?;
+        let k = sector.operators()?;
+        // The fastest turn of the plan's beams on the path, the largest |k_l·v|, and the slowest optical rate, the least
+        // of the cluster's excited states' decay over two.
+        let beat = path.rates.path.iter().fold(0.0, |most: f64, x| most.max(x.abs()));
+        let decay = c.states[c.ground..].iter().map(|&e| 0.5 * model.decay[(e - GROUND, e - GROUND)].re).fold(f64::INFINITY, f64::min);
+        // The generator, the gradient's matrices (the force's own terms, entry by entry) and the sector.
+        let [generator, force, _] = crate::step::Middle::work(self);
+        let work = generator + force + sector.work / crate::decide::COMPLEX;
+        Some(crate::step::Optical { k, gradient, beat, decay, work })
     }
 
     fn work(&self) -> [f64; 3] {

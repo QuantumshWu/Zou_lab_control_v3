@@ -54,12 +54,14 @@ impl Folded {
     }
 }
 
-/// A test model's generator at a point (`step::Middle`): its parts and its states' Doppler frames K_s; and the
-/// folded light its ground state alone scatters there, where it scatters any.
+/// A test model's generator at a point (`step::Middle`): its parts and its states' Doppler frames K_s; the folded
+/// light its ground state alone scatters there, where it scatters any; and whether its excited state's optical sector
+/// gives the momentum its noise (`Middle::optical`; the tests of the force and the propagation read the drift alone).
 struct Parts {
     waves: Vec<[f64; 3]>,
     parts: Vec<Part>,
     folded: Option<Folded>,
+    optical: bool,
 }
 
 impl Parts {
@@ -117,6 +119,26 @@ impl Middle for Parts {
         let size = (self.parts.len() * self.waves.len() * self.waves.len()) as f64;
         [size, 3.0 * size, 3.0 * size]
     }
+    /// The two-level atom's optical sector (model/optical.rs) where it is asked: K of its generator and gradient at the
+    /// point at rest (step.rs, # The optical sector's noise), the fastest turn of its couplings' lab wave vectors on the
+    /// path -- a part's e ← g entry turns with its wave plus the excited state's frame, its g ← e entry with the opposite
+    /// -- and the excited state's decay over two.
+    fn optical(&self, velocity: &[f64; 3]) -> Option<step::Optical> {
+        let n = self.states();
+        if !self.optical || n < 2 {
+            return None;
+        }
+        let mut h = Mat::zeros(n, n);
+        self.generator(&[0.0; 3], 0.0, &mut h);
+        let mut gradient: [Vec<C64>; 3] = Default::default();
+        self.gradient(&[0.0; 3], 0.0, &mut gradient);
+        let sector = crate::model::optical::Sector::new(&h, &gradient, 1)?;
+        let k = sector.operators()?;
+        let turn = |wave: [f64; 3]| dot3(std::array::from_fn(|a| wave[a] + self.waves[1][a] - self.waves[0][a]), *velocity).abs();
+        let beat = self.parts.iter().map(|p| if p.generator[(1, 0)] != C64::ZERO { turn(p.wave) } else if p.generator[(0, 1)] != C64::ZERO { turn(p.wave.map(|x| -x)) } else { 0.0 }).fold(0.0, f64::max);
+        let decay = (1..n).map(|e| -h[(e, e)].im).fold(f64::INFINITY, f64::min);
+        Some(step::Optical { k, gradient, beat, decay, work: sector.work / crate::decide::COMPLEX })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -171,6 +193,8 @@ struct Atom {
     region: f64,
     /// The folded light the ground state alone scatters: per plane wave its amplitude c_l (1/√µs) and wave vector.
     folded: Vec<(C64, [f64; 3])>,
+    /// Whether the excited state's optical sector gives the momentum its noise (`Parts::optical`).
+    optical: bool,
     cluster: Cluster,
 }
 
@@ -184,7 +208,7 @@ impl Atom {
             waves: if explicit { vec![[0.0; 3], beams[0].k] } else { vec![[0.0; 3]] },
             waves_exact: if explicit { vec![Beat(vec![]), Beat(vec![1])] } else { vec![Beat(vec![])] },
         };
-        Atom { hm, trap, beams, detuning, gamma, emission: 0.0, region: f64::INFINITY, folded: vec![], cluster }
+        Atom { hm, trap, beams, detuning, gamma, emission: 0.0, region: f64::INFINITY, folded: vec![], optical: false, cluster }
     }
     /// The folded light's jump amplitude f = Σ_l c_l e^{ik_l·r} at a point and its gradient.
     fn field(&self, r: [f64; 3]) -> (C64, [C64; 3]) {
@@ -287,7 +311,7 @@ impl Dynamics for Atom {
             }
         }
         parts.insert(0, Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g });
-        Parts { waves: self.cluster.waves.clone(), parts, folded: (!self.folded.is_empty()).then(|| self.folded_at(r)) }
+        Parts { waves: self.cluster.waves.clone(), parts, folded: (!self.folded.is_empty()).then(|| self.folded_at(r)), optical: self.optical }
     }
     fn emit(&self, _: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         let n = self.n();
@@ -912,6 +936,161 @@ fn a_standing_wave_s_force_is_the_bloch_equations_along_the_path() {
     }
 }
 
+/// The momentum diffusion along z of a two-level atom moving uniformly through its beams, z = vt (refs/diffusion/
+/// twolevel_moving.py `exact`): the periodic regression on the path -- ρ and μ periodic over the light's period
+/// P = 2π/(kv), ρ̇ = 𝓛ρ, μ̇ = 𝓛μ + ½{F, ρ} − Tr(Fρ)ρ, D = (1/P)∫Tr(Fμ)dt (½ dVar(κ_z)/dt; the emitted photon's recoil
+/// left out) --, by RK4 at a hundredth of 1/Γ, the period's propagator by its four basis densities. 𝓛ρ = −i(Hρ − ρH†) +
+/// Γρ_ee|g⟩⟨g|, H = [[0, c*], [c, −Δ − iΓ/2]], c(z) = Σ_l (Ω_l/2) e^{i(k_l z + φ_l)}, F = −∂_z H_h. 2 × 2 densities
+/// row by row.
+fn bloch_diffusion(beams: &[Beam], detuning: f64, v: f64) -> f64 {
+    type M2 = [C64; 4];
+    let at = |time: f64| -> (M2, M2) {
+        let z = v * time;
+        let c: C64 = beams.iter().map(|b| C64::cis(b.k[2] * z + b.phase) * (0.5 * b.rabi)).sum();
+        let dc: C64 = beams.iter().map(|b| C64::new(0.0, b.k[2]) * C64::cis(b.k[2] * z + b.phase) * (0.5 * b.rabi)).sum();
+        ([C64::ZERO, c.conj(), c, C64::new(-detuning, -0.5 * GAMMA)], [C64::ZERO, -dc.conj(), -dc, C64::ZERO])
+    };
+    let product = |a: &M2, b: &M2| -> M2 { [a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3], a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3]] };
+    let adjoint = |a: &M2| -> M2 { [a[0].conj(), a[2].conj(), a[1].conj(), a[3].conj()] };
+    let trace = |a: &M2| a[0] + a[3];
+    let lindblad = |h: &M2, r: &M2| -> M2 {
+        let (hr, rh) = (product(h, r), product(r, &adjoint(h)));
+        let mut out: M2 = std::array::from_fn(|i| C64::new(0.0, -1.0) * (hr[i] - rh[i]));
+        out[0] += r[3] * GAMMA;
+        out
+    };
+    // (ρ, μ)' and the forms Tr(Fρ), Tr(Fμ) at a time.
+    let rates = |time: f64, r: &M2, m: &M2| -> (M2, M2, f64, f64) {
+        let (h, f) = at(time);
+        let (fr, rf) = (product(&f, r), product(r, &f));
+        let mean = trace(&fr).re;
+        let lm = lindblad(&h, m);
+        (lindblad(&h, r), std::array::from_fn(|i| lm[i] + (fr[i] + rf[i]) * 0.5 - r[i] * mean), mean, trace(&product(&f, m)).re)
+    };
+    let period = std::f64::consts::TAU / (beams[0].k[2] * v).abs();
+    let steps = (period * GAMMA * 100.0).ceil() as usize;
+    let dt = period / steps as f64;
+    let add = |a: &M2, b: &M2, s: f64| -> M2 { std::array::from_fn(|i| a[i] + b[i] * s) };
+    // One period from (ρ, μ): their ends, and ∫Tr(Fμ)dt.
+    let sweep = |mut r: M2, mut m: M2| -> (M2, M2, f64) {
+        let mut d = 0.0;
+        for s in 0..steps {
+            let t = s as f64 * dt;
+            let (a1, b1, _, d1) = rates(t, &r, &m);
+            let (a2, b2, _, d2) = rates(t + 0.5 * dt, &add(&r, &a1, 0.5 * dt), &add(&m, &b1, 0.5 * dt));
+            let (a3, b3, _, d3) = rates(t + 0.5 * dt, &add(&r, &a2, 0.5 * dt), &add(&m, &b2, 0.5 * dt));
+            let (a4, b4, _, d4) = rates(t + dt, &add(&r, &a3, dt), &add(&m, &b3, dt));
+            r = std::array::from_fn(|i| r[i] + (a1[i] + a2[i] * 2.0 + a3[i] * 2.0 + a4[i]) * (dt / 6.0));
+            m = std::array::from_fn(|i| m[i] + (b1[i] + b2[i] * 2.0 + b3[i] * 2.0 + b4[i]) * (dt / 6.0));
+            d += dt / 6.0 * (d1 + 2.0 * d2 + 2.0 * d3 + d4);
+        }
+        (r, m, d)
+    };
+    // The period's propagator of ρ by its four basis densities (μ none), and its periodic ρ of unit trace.
+    let mut phi = Mat::zeros(4, 4);
+    for j in 0..4 {
+        let mut e = [C64::ZERO; 4];
+        e[j] = C64::ONE;
+        let (r, _, _) = sweep(e, [C64::ZERO; 4]);
+        for i in 0..4 {
+            phi[(i, j)] = r[i];
+        }
+    }
+    let periodic = |minus: bool, rhs: [C64; 4]| -> M2 {
+        // (Φ − 1) x = 0 with Tr x = 1, or (1 − Φ) x = b with Tr x = 0: the trace's row in the singular direction's place.
+        let one = |i: usize, j: usize| if i == j { C64::ONE } else { C64::ZERO };
+        let mut a = Mat::from_fn(4, 4, |i, j| if minus { phi[(i, j)] - one(i, j) } else { one(i, j) - phi[(i, j)] });
+        for j in 0..4 {
+            a[(0, j)] = if j == 0 || j == 3 { C64::ONE } else { C64::ZERO };
+        }
+        let mut x = rhs.to_vec();
+        crate::linalg::Lu::new(&a).expect("the period's map").solve(&mut x);
+        [x[0], x[1], x[2], x[3]]
+    };
+    let rho = periodic(true, [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO]);
+    let (_, end, _) = sweep(rho, [C64::ZERO; 4]);
+    let mu = periodic(false, [C64::ZERO, end[1], end[2], end[3]]);
+    sweep(rho, mu).2 / period
+}
+
+/// The engine's momentum diffusion along z of a two-level atom held on the uniform path z = z₀ + vt (z₀ uniform over the
+/// light's wavelength): `count` trajectories in parallel at the step τ, the position and the momentum put back on the
+/// path before every step (the internal state, its threshold and the optical sector's pending covariance go on), each
+/// step on a Brownian part of its own; the momentum the steps give over `span` steps after `burn`: D = Var/(2 span τ)
+/// with its standard error, and the mean pending −tr C left at the ends. The emitted photon carries no recoil (the
+/// model's `emission` 0): what the steps give is the Ehrenfest impulse and the optical sector's noise.
+fn engine_diffusion(model: &Atom, v: f64, tau: f64, burn: usize, span: usize, count: u64) -> (f64, f64, f64) {
+    use rayon::prelude::*;
+    let (hm, wavelength) = (model.hm, std::f64::consts::TAU / model.beams[0].k[2].abs());
+    let runs: Vec<(f64, f64)> = (0..count)
+        .into_par_iter()
+        .map(|i| {
+            let mut stream = crate::random::Stream::new(71, crate::random::Purpose::Initial, i, 0);
+            let z0 = wavelength * stream.uniform();
+            let mut t = Trajectory::new(model, 0, [0.0, 0.0, z0], [0.0, 0.0, v / hm], 71, i);
+            let mut scratch = step::Scratch::default();
+            let mut sum = 0.0;
+            for s in 0..burn + span {
+                (t.r, t.kappa) = ([0.0, 0.0, z0 + v * t.time], [0.0, 0.0, v / hm]);
+                let brownian = step::Brownian::over(tau, &[stream.normals(), stream.normals()]);
+                let step = step::Midway::new(model, &t, tau).unwrap().attempt(&t, &brownian, &[], &mut scratch, &Everywhere).unwrap();
+                if s >= burn {
+                    sum += step.end.kappa[2] - v / hm;
+                }
+                t = step.end;
+            }
+            (sum, -(t.pending[0][0] + t.pending[1][1] + t.pending[2][2]))
+        })
+        .collect();
+    let n = count as f64;
+    let mean = runs.iter().map(|r| r.0).sum::<f64>() / n;
+    let var = runs.iter().map(|r| (r.0 - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    let d = var / (2.0 * span as f64 * tau);
+    (d, d * (2.0 / (n - 1.0)).sqrt(), runs.iter().map(|r| r.1).sum::<f64>() / n)
+}
+
+/// The engine's momentum diffusion of a two-level atom moving through a running or a standing wave at kv = Γ/10 is the
+/// master equation's (`bloch_diffusion`; DESIGN §8 phase 3, the acceptance of the optical sector's noise): the Ehrenfest
+/// force the trajectory carries and the noise of its optical sector -- for a two-level atom the whole of its correlation
+/// (P is empty) -- drawn at the steps' middles (module documentation, # The optical sector's noise), within 5 % beside
+/// three standard errors, at Ω₀ = 2, 5, 10 Γ and Δ = 0, −3Γ. A standing wave is Ω₀ cos kz, two beams of Ω₀/2. Steps of
+/// a 64th of the light's period (at a sixteenth the step's own error in the Ehrenfest force at Ω₀ = 10Γ on resonance was
+/// 0.27 D_x where the exact D_E is nil -- by hypothesis the beat's parabola through the step's nodes), two periods'
+/// burn-in and four periods measured; a mass the kicks do not move (ħ/m of 10⁻⁹ µm²/µs, as the force's tests: a step's
+/// path is at its predicted κ_m = κ_h + K(ψ₀)/2, the master equation's at v). K is the point's at rest; its locality,
+/// booked at the first order ε_Q = kv/(Γ/2) = 0.2, is printed with each (measured: within 0.42 ε_Q).
+#[test]
+fn a_moving_two_level_atom_diffuses_as_its_master_equation() {
+    let (v, count) = (0.1 * GAMMA / K, 8192);
+    let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
+    let tau = std::f64::consts::TAU / (K * v) / 64.0;
+    let (mut worst, mut beyond): (f64, Vec<String>) = (0.0, vec![]);
+    for standing in [false, true] {
+        for detuning in [0.0, -3.0 * GAMMA] {
+            for rabi in [2.0 * GAMMA, 5.0 * GAMMA, 10.0 * GAMMA] {
+                let beams = if standing {
+                    vec![Beam { k: [0.0, 0.0, K], rabi: 0.5 * rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi: 0.5 * rabi, phase: 0.0 }]
+                } else {
+                    vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }]
+                };
+                let mut model = Atom::new(1e-9, flat, beams.clone(), detuning, GAMMA);
+                model.optical = true;
+                let exact = bloch_diffusion(&beams, detuning, v);
+                let (d, se, pending) = engine_diffusion(&model, v, tau, 128, 256, count);
+                let ratio = d / exact;
+                let epsilon = K * v / (0.5 * GAMMA);
+                eprintln!("{} Ω₀ {:.0}Γ Δ {:+.0}Γ: D {d:.2} ± {se:.2} against {exact:.2}, {ratio:.4} ± {:.4} (ε_Q {epsilon:.2}; pending at the end {pending:.3e})", if standing { "standing" } else { "running " }, rabi / GAMMA, detuning / GAMMA, se / exact);
+                worst = worst.max((ratio - 1.0).abs() - 3.0 * se / exact);
+                if (ratio - 1.0).abs() > 0.05 + 3.0 * se / exact {
+                    beyond.push(format!("{} Ω₀ {:.0}Γ Δ {:+.0}Γ: {ratio:.4} ± {:.4}", if standing { "standing" } else { "running" }, rabi / GAMMA, detuning / GAMMA, se / exact));
+                }
+            }
+        }
+    }
+    eprintln!("the largest deviation beyond three standard errors: {worst:.4}");
+    assert!(beyond.is_empty(), "beyond 5 % and three standard errors: {beyond:?}");
+}
+
 /// A step past its light's resolution at its speed (solve.rs `resolves`: an entry's (|Ω| + |K| v) τ/2 beyond π) is
 /// inaccurate, not unstable (module documentation, # The domain): a two-level atom moving uniformly through a standing
 /// wave (Ω = Γ, Δ = −Γ/2), its second beam a beat of the residual wave vector 2k, steps of 2 µs at speeds where the
@@ -1433,7 +1612,7 @@ impl Dynamics for Wells {
                 g[a][(s, s)] = C64::real(gradient[a]);
             }
         }
-        Parts { waves: self.cluster.waves.clone(), parts: vec![Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g }], folded: None }
+        Parts { waves: self.cluster.waves.clone(), parts: vec![Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g }], folded: None, optical: false }
     }
     fn emit(&self, _: usize, _: &Point, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         unreachable!("the wells scatter nothing")
@@ -2008,7 +2187,7 @@ impl Dynamics for Synthetic {
             parts.push(Part { omega: 0.0, wave: *q, generator: up, force: gu });
             parts.push(Part { omega: 0.0, wave: q.map(|x| -x), generator: down, force: gd });
         }
-        Parts { waves: k.clone(), parts, folded: None }
+        Parts { waves: k.clone(), parts, folded: None, optical: false }
     }
     fn emit(&self, _: usize, _: &Point, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         unreachable!("the cost harness takes no jump")
@@ -2087,6 +2266,12 @@ impl<M: Middle> Middle for Probe<'_, M> {
     }
     fn work(&self) -> [f64; 3] {
         self.middle.work()
+    }
+    fn gradient(&self, path: &M::Path, s: f64, g: &mut [Vec<C64>; 3]) {
+        self.middle.gradient(path, s, g)
+    }
+    fn optical(&self, path: &M::Path) -> Option<step::Optical> {
+        self.middle.optical(path)
     }
 }
 

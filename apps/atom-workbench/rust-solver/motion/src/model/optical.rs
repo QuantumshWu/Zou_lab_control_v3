@@ -31,8 +31,7 @@
 //! ⟨K_a⟩⟨F_b⟩. K is defined up to the identity (X_ψ is traceless); it is taken with no ground-ground entries.
 //!
 //! In the coordinates y_E of the entries with an excited index (a Hermitian y by its excited block's upper triangle and
-//! its excited-ground block, `Coordinates`), a traceless Q density is y_E − τ d, τ = Tr y_E the excited trace, and −Q𝓛Q
-//! on it is
+//! its excited-ground block), a traceless Q density is y_E − τ d, τ = Tr y_E the excited trace, and −Q𝓛Q on it is
 //!
 //! ```text
 //!   A′ y = A y − (τ/g) b,    A y = E[𝓛 y],   b = E[𝓛 1_g],
@@ -46,253 +45,372 @@
 //! ```text
 //!   K = −W⁻¹ A⁻ᵀ (W f + μ s),   μ = ζ/g − φ̄,   ζ = (u·W f − φ̄ u·s)/(1 − u·s/g),
 //! ```
-//! u = A⁻¹ b, s the excited trace's coordinates: one LU of the excited sector (dimension n_e² + 2 n_e n_g in reals), one
-//! solve for u and four transposed ones (three axes and s).
+//! u = A⁻¹ b, s the excited trace's coordinates. Every vector A⁻¹ enters is paired with W f or s, u·v = b·A⁻ᵀv, and
+//! Aᵀ W p = W E[𝓛†P] for the Hermitian P of coordinates p (the trace form's adjoint, 𝓛†P = i(H†P − PH)). In matrices:
+//!
+//! ```text
+//!   K = −(P + μ S),   E[𝓛†P] = F_E,   E[𝓛†S] = 1_e,   u·W f = Tr[B P],   u·s = Tr[B S],
+//! ```
+//! P and S Hermitian with no ground-ground block, B the matrix of b (B_eg = −iH_eg, its excited block none).
+//!
+//! # The solve: the excited-ground block eliminated
+//! By blocks (g ground, e excited), E[𝓛†P] = R is
+//!
+//! ```text
+//!   eg:  H_ee† P_eg − P_eg H_gg = −i R_eg + P_ee H_eg,
+//!   ee:  i(H_ee† P_ee − P_ee H_ee) + i(Z† − Z) = R_ee,   Z = P_eg H_ge.
+//! ```
+//! The first is a Sylvester equation 𝒮(P_eg) = H_ee†P_eg − P_eg H_gg = C whose spectrum, conj(λ_e) − λ_g over the blocks'
+//! eigenvalues, lies the excited states' decay over two or more off the real axis: in the blocks' complex Schur forms
+//! H_ee = U_e T_e U_e†, H_gg = U_g T_g U_g† it is a triangular substitution, e g (e + g)/2 complex multiply-adds (Bartels
+//! and Stewart; unitary rotations within the blocks keep the entries with an excited index, the traces and the trace
+//! form, so the whole solve is made in the rotated blocks and K rotated back). Its solution put into the second leaves a
+//! real linear system on the Hermitian P_ee alone, e² unknowns: ℳ(P) = i(T_e†P − P T_e) + i(Z† − Z), Z = 𝒮⁻¹(P H̃_eg)
+//! H̃_ge (H̃ the generator in the rotated blocks), built on its e² basis matrices -- a substitution and a product of
+//! e² g each -- and factored (`Lu`), its four right-hand sides -- the three axes and 1_e -- at once. The whole sector's
+//! factorization, m = e² + 2eg reals and m³/3 multiply-adds, is the eliminated block's: S3's cluster of five ground and
+//! six excited states factors 36 reals for 96.
 
 use crate::linalg::{Mat, C64};
 
-/// A Hermitian matrix's coordinates on the entries with an excited index of a cluster of n states, the first g of them
-/// ground: per excited place i and place j ≥ i of the excited block, its diagonal (j = i) or the real and imaginary parts
-/// of y_ij; then per excited place i and ground place j those of y_ij (y_ji is their conjugate).
-struct Coordinates {
-    n: usize,
-    /// Per coordinate: the entry (i, j) and what of it -- 0 its real diagonal, 1 the real part, 2 the imaginary part.
-    entries: Vec<(usize, usize, u8)>,
-}
-
-impl Coordinates {
-    fn new(n: usize, g: usize) -> Coordinates {
-        let mut entries = vec![];
-        for i in g..n {
-            entries.push((i, i, 0));
-            for j in i + 1..n {
-                entries.extend([(i, j, 1), (i, j, 2)]);
-            }
-        }
-        for i in g..n {
-            for j in 0..g {
-                entries.extend([(i, j, 1), (i, j, 2)]);
-            }
-        }
-        Coordinates { n, entries }
-    }
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-    /// The trace form's weight of a coordinate: Tr[P Y] = Σ_c w_c p_c y_c for Hermitian P, Y on these entries.
-    fn weight(&self, c: usize) -> f64 {
-        if self.entries[c].2 == 0 { 1.0 } else { 2.0 }
-    }
-    /// A Hermitian matrix's coordinates (its entries (i, j) as listed).
-    fn of(&self, m: &[C64]) -> Vec<f64> {
-        self.entries
-            .iter()
-            .map(|&(i, j, part)| {
-                let z = m[i * self.n + j];
-                if part == 2 { z.im } else { z.re }
-            })
-            .collect()
-    }
-    /// The Hermitian matrix of coordinates (zero off these entries).
-    fn matrix(&self, y: &[f64]) -> Vec<C64> {
-        let n = self.n;
-        let mut m = vec![C64::ZERO; n * n];
-        for (&(i, j, part), &v) in self.entries.iter().zip(y) {
-            match part {
-                0 => m[i * n + i] = C64::real(v),
-                1 => {
-                    m[i * n + j].re += v;
-                    m[j * n + i].re += v;
-                }
-                _ => {
-                    m[i * n + j].im += v;
-                    m[j * n + i].im -= v;
-                }
-            }
-        }
-        m
-    }
-}
-
-/// −i(H Y − Y H†) of a Hermitian Y given by its nonzero entries (`entries`: (i, j, y_ij)), into `out` (n × n).
-fn coherent(h: &Mat, entries: &[(usize, usize, C64)], out: &mut [C64]) {
-    let n = h.rows;
-    out.fill(C64::ZERO);
-    for &(p, q, y) in entries {
-        // (H Y)[x][q] += H[x][p] y_pq; (Y H†)[p][x] += y_pq conj(H[x][q]).
-        for x in 0..n {
-            out[x * n + q] += C64::new(0.0, -1.0) * h[(x, p)] * y;
-            out[p * n + x] += C64::new(0.0, 1.0) * y * h[(x, q)].conj();
-        }
-    }
-}
-
-/// A real square matrix's LU factorization with partial pivoting (row by row), for its solves and its transpose's.
+/// A real square matrix's LU factorization with partial pivoting, P T = L U, T row by row, in its place: L unit lower,
+/// U upper (Higham, Theorem 9.3: backward stable, the factors those of T + ΔT, |ΔT| ≤ γ_m |L||U|). By panels of `PANEL`
+/// columns (LAPACK's right-looking getrf): a panel is eliminated with the rows exchanged whole -- the pivots are the
+/// unblocked elimination's, every column it takes is up to date --, its rows of U right of it by its unit lower
+/// triangle, and the rest of the matrix takes the panel's columns of L times those rows at once: four multiply-adds
+/// for every number the trailing block reads and writes, which the elimination row by row does once -- it is held by
+/// its memory's bandwidth, not by the arithmetic. The solves go four right-hand sides at once, one vector a row.
 struct Lu {
     m: usize,
     lu: Vec<f64>,
     pivots: Vec<usize>,
 }
 
+/// The columns a panel of `Lu` eliminates at once: the vectors of four reals the trailing update reads per number.
+const PANEL: usize = 4;
+
 impl Lu {
     /// None where a pivot is zero or no number.
-    fn new(mut a: Vec<f64>, m: usize) -> Option<Lu> {
+    fn new(mut t: Vec<f64>, m: usize) -> Option<Lu> {
         let mut pivots = vec![0; m];
-        for k in 0..m {
-            let p = (k..m).max_by(|&x, &y| a[x * m + k].abs().total_cmp(&a[y * m + k].abs()))?;
-            pivots[k] = p;
-            if p != k {
-                for c in 0..m {
-                    a.swap(k * m + c, p * m + c);
+        for k0 in (0..m).step_by(PANEL) {
+            let k1 = (k0 + PANEL).min(m);
+            // The panel: its columns eliminated below the diagonal, the rows exchanged whole.
+            for k in k0..k1 {
+                let p = (k..m).max_by(|&x, &y| t[x * m + k].abs().total_cmp(&t[y * m + k].abs()))?;
+                pivots[k] = p;
+                if p != k {
+                    let (above, below) = t.split_at_mut(p * m);
+                    above[k * m..(k + 1) * m].swap_with_slice(&mut below[..m]);
+                }
+                let (above, below) = t.split_at_mut((k + 1) * m);
+                let (pivot, upper) = (above[k * m + k], &above[k * m + k + 1..k * m + k1]);
+                if !(pivot != 0.0 && pivot.is_finite()) {
+                    return None;
+                }
+                for row in below.chunks_exact_mut(m) {
+                    let f = row[k] / pivot;
+                    row[k] = f;
+                    for (x, u) in row[k + 1..k1].iter_mut().zip(upper) {
+                        *x = (-f).mul_add(*u, *x);
+                    }
                 }
             }
-            let pivot = a[k * m + k];
-            if !(pivot != 0.0 && pivot.is_finite()) {
-                return None;
+            // The panel's rows of U right of it: its unit lower triangle's forward substitution.
+            for k in k0 + 1..k1 {
+                let (above, row) = t.split_at_mut(k * m);
+                let (multipliers, right) = row[k0..m].split_at_mut(k - k0);
+                for (j, l) in (k0..k).zip(multipliers.iter()) {
+                    for (x, u) in right[k1 - k..].iter_mut().zip(&above[j * m + k1..(j + 1) * m]) {
+                        *x = (-l).mul_add(*u, *x);
+                    }
+                }
             }
-            for r in k + 1..m {
-                let f = a[r * m + k] / pivot;
-                a[r * m + k] = f;
-                if f != 0.0 {
-                    for c in k + 1..m {
-                        a[r * m + c] -= f * a[k * m + c];
+            // The trailing block less the panel's L times its rows of U.
+            let (above, below) = t.split_at_mut(k1 * m);
+            let upper: [&[f64]; PANEL] = std::array::from_fn(|j| if k0 + j < k1 { &above[(k0 + j) * m + k1..(k0 + j + 1) * m] } else { &[] });
+            for row in below.chunks_exact_mut(m) {
+                let (multipliers, right) = row[k0..].split_at_mut(k1 - k0);
+                if k1 - k0 == PANEL {
+                    let [l0, l1, l2, l3] = [multipliers[0], multipliers[1], multipliers[2], multipliers[3]];
+                    for ((((x, u0), u1), u2), u3) in right.iter_mut().zip(upper[0]).zip(upper[1]).zip(upper[2]).zip(upper[3]) {
+                        *x = (-l3).mul_add(*u3, (-l2).mul_add(*u2, (-l1).mul_add(*u1, (-l0).mul_add(*u0, *x))));
+                    }
+                } else {
+                    for (l, u) in multipliers.iter().zip(&upper) {
+                        for (x, u) in right.iter_mut().zip(u.iter()) {
+                            *x = (-l).mul_add(*u, *x);
+                        }
                     }
                 }
             }
         }
-        Some(Lu { m, lu: a, pivots })
+        Some(Lu { m, lu: t, pivots })
     }
-    /// A x = b in place.
-    fn solve(&self, b: &mut [f64]) {
-        let (m, a) = (self.m, &self.lu);
-        for k in 0..m {
-            b.swap(k, self.pivots[k]);
+    /// T X = B in place, B of four columns row by row.
+    fn solve(&self, b: &mut [[f64; 4]]) {
+        let (m, f) = (self.m, &self.lu);
+        for (k, &p) in self.pivots.iter().enumerate() {
+            b.swap(k, p);
         }
-        for r in 0..m {
-            let s: f64 = (0..r).map(|c| a[r * m + c] * b[c]).sum();
-            b[r] -= s;
+        for i in 0..m {
+            let (above, row) = b.split_at_mut(i);
+            let row = &mut row[0];
+            for (l, other) in f[i * m..i * m + i].iter().zip(above.iter()) {
+                for (z, o) in row.iter_mut().zip(other) {
+                    *z = (-l).mul_add(*o, *z);
+                }
+            }
         }
-        for r in (0..m).rev() {
-            let s: f64 = (r + 1..m).map(|c| a[r * m + c] * b[c]).sum();
-            b[r] = (b[r] - s) / a[r * m + r];
-        }
-    }
-    /// Aᵀ x = b in place: (P L U)ᵀ with P the row exchanges, Uᵀ then Lᵀ then the exchanges backwards.
-    fn solve_transposed(&self, b: &mut [f64]) {
-        let (m, a) = (self.m, &self.lu);
-        for r in 0..m {
-            let s: f64 = (0..r).map(|c| a[c * m + r] * b[c]).sum();
-            b[r] = (b[r] - s) / a[r * m + r];
-        }
-        for r in (0..m).rev() {
-            let s: f64 = (r + 1..m).map(|c| a[c * m + r] * b[c]).sum();
-            b[r] -= s;
-        }
-        for k in (0..m).rev() {
-            b.swap(k, self.pivots[k]);
+        for i in (0..m).rev() {
+            let (rest, below) = b.split_at_mut(i + 1);
+            let row = &mut rest[i];
+            for (u, other) in f[i * m + i + 1..(i + 1) * m].iter().zip(below.iter()) {
+                for (z, o) in row.iter_mut().zip(other) {
+                    *z = (-u).mul_add(*o, *z);
+                }
+            }
+            let d = f[i * m + i];
+            for z in row.iter_mut() {
+                *z /= d;
+            }
         }
     }
 }
 
-/// One cluster's part of the optical sector at a point (module documentation, # K_Q): from its generator H (with its
-/// decay) and the gradient G_a of its Hermitian part (n × n, row by row), its first `ground` states ground.
+/// A complex matrix of `rows` × `cols`, row by row: a block of the cluster's matrices and the products the solve makes.
+#[derive(Clone)]
+struct Block {
+    rows: usize,
+    cols: usize,
+    data: Vec<C64>,
+}
+
+impl Block {
+    fn zeros(rows: usize, cols: usize) -> Block {
+        Block { rows, cols, data: vec![C64::ZERO; rows * cols] }
+    }
+    /// The block of an n × n matrix (row by row) at the rows `r` and the columns `c`.
+    fn of(m: &[C64], n: usize, r: std::ops::Range<usize>, c: std::ops::Range<usize>) -> Block {
+        let (rows, cols) = (r.len(), c.len());
+        Block { rows, cols, data: r.flat_map(|i| c.clone().map(move |j| m[i * n + j])).collect() }
+    }
+    fn at(&self, i: usize, j: usize) -> C64 {
+        self.data[i * self.cols + j]
+    }
+    /// self · other.
+    fn times(&self, other: &Block) -> Block {
+        let mut out = Block::zeros(self.rows, other.cols);
+        for i in 0..self.rows {
+            for k in 0..self.cols {
+                let x = self.at(i, k);
+                if x != C64::ZERO {
+                    for (o, y) in out.data[i * other.cols..(i + 1) * other.cols].iter_mut().zip(&other.data[k * other.cols..(k + 1) * other.cols]) {
+                        *o += x * *y;
+                    }
+                }
+            }
+        }
+        out
+    }
+    fn adjoint(&self) -> Block {
+        Block { rows: self.cols, cols: self.rows, data: (0..self.cols).flat_map(|j| (0..self.rows).map(move |i| self.at(i, j).conj())).collect() }
+    }
+    /// A Schur form's unitary factor Q (column by column, as `linalg::schur_form` gives it) as a block.
+    fn unitary(q: &[C64], n: usize) -> Block {
+        Block { rows: n, cols: n, data: (0..n).flat_map(|i| (0..n).map(move |j| q[j * n + i])).collect() }
+    }
+}
+
+/// The Hermitian e × e matrices' real coordinates: per place i its diagonal, then per pair i < j the real and the
+/// imaginary part of the entry (i, j).
+fn hermitian_places(e: usize) -> Vec<(usize, usize, u8)> {
+    let mut places = vec![];
+    for i in 0..e {
+        places.push((i, i, 0));
+        for j in i + 1..e {
+            places.extend([(i, j, 1), (i, j, 2)]);
+        }
+    }
+    places
+}
+
+/// One cluster's part of the optical sector at a point (module documentation, # K_Q, # The solve): from its generator H
+/// (with its decay) and the gradient G_a of its Hermitian part (n × n, row by row), its first `ground` states ground.
 pub(crate) struct Sector {
-    coordinates: Coordinates,
-    /// The factorization of A (None for a cluster without excited states).
-    lu: Option<Lu>,
-    /// W f_a, f the coordinates of F = −G on the excited entries; s the excited trace's.
-    forces: [Vec<f64>; 3],
-    trace: Vec<f64>,
-    /// u·W f_a, u·s (u = A⁻¹ b), and Σ_g F_a,gg over the cluster's `ground` ground states.
-    paired: [f64; 3],
-    returned: f64,
-    ground_force: [f64; 3],
-    ground: usize,
+    /// K_a (n × n, row by row, Hermitian; none for a cluster without excited or without ground states).
+    k: Option<[Vec<C64>; 3]>,
     /// The real multiply-adds that made it.
     pub(crate) work: f64,
 }
 
 impl Sector {
-    /// The cluster's part (module documentation, # K_Q). None where A is singular (no number came out).
+    /// The cluster's part (module documentation, # The solve). None where a Schur form does not converge or the
+    /// excited block's system is singular (no number came out).
     pub(crate) fn new(h: &Mat, gradient: &[Vec<C64>; 3], ground: usize) -> Option<Sector> {
         let n = h.rows;
-        let coordinates = Coordinates::new(n, ground);
-        let m = coordinates.len();
-        let ground_force = std::array::from_fn(|a| -(0..ground).map(|i| gradient[a][i * n + i].re).sum::<f64>());
-        if m == 0 {
-            return Some(Sector { coordinates, lu: None, forces: Default::default(), trace: vec![], paired: [0.0; 3], returned: 0.0, ground_force, ground, work: 0.0 });
+        let (g, e) = (ground, n - ground);
+        if e == 0 || g == 0 {
+            return Some(Sector { k: None, work: 0.0 });
         }
-        // A's columns: 𝓛 on each coordinate's Hermitian basis matrix, read on the coordinates.
-        let mut a = vec![0.0; m * m];
-        let mut z = vec![C64::ZERO; n * n];
-        for (c, &(i, j, part)) in coordinates.entries.iter().enumerate() {
-            let basis: &[(usize, usize, C64)] = &match part {
-                0 => [(i, i, C64::ONE), (i, i, C64::ZERO)],
-                1 => [(i, j, C64::ONE), (j, i, C64::ONE)],
-                _ => [(i, j, C64::new(0.0, 1.0)), (j, i, C64::new(0.0, -1.0))],
-            };
-            coherent(h, basis, &mut z);
-            for (r, v) in coordinates.of(&z).into_iter().enumerate() {
-                a[r * m + c] = v;
+        let (ge, ee) = (0..g, g..n);
+        // The blocks' Schur forms, and the couplings and the forces rotated into them (F = −G).
+        let block = |m: &[C64], r: std::ops::Range<usize>, c: std::ops::Range<usize>| Block::of(m, n, r, c);
+        let schur = |b: &Block| -> Option<(Block, Block, f64)> {
+            let (t, q, work) = crate::linalg::schur_form(&Mat { rows: b.rows, cols: b.cols, data: b.data.clone() })?;
+            Some((Block { rows: b.rows, cols: b.cols, data: t }, Block::unitary(&q, b.rows), work))
+        };
+        let (te, ue, we) = schur(&block(&h.data, ee.clone(), ee.clone()))?;
+        let (tg, ug, wg) = schur(&block(&h.data, ge.clone(), ge.clone()))?;
+        let (ue_, ug_) = (ue.adjoint(), ug.adjoint());
+        let coupling = ue_.times(&block(&h.data, ee.clone(), ge.clone())).times(&ug);
+        let back = ug_.times(&block(&h.data, ge.clone(), ee.clone())).times(&ue);
+        let force = |a: usize, r: std::ops::Range<usize>, c: std::ops::Range<usize>| -> Block {
+            let mut f = block(&gradient[a], r, c);
+            for z in f.data.iter_mut() {
+                *z = -*z;
+            }
+            f
+        };
+        let forces: [(Block, Block); 3] = std::array::from_fn(|a| (ue_.times(&force(a, ee.clone(), ee.clone())).times(&ue), ue_.times(&force(a, ee.clone(), ge.clone())).times(&ug)));
+        // 𝒮⁻¹: T_e†X − X T_g = C by substitution, rows and columns upwards.
+        let sylvester = |c: &Block| -> Block {
+            let mut x = Block::zeros(e, g);
+            for i in 0..e {
+                for j in 0..g {
+                    let mut v = c.at(i, j);
+                    for k in 0..i {
+                        v -= te.at(k, i).conj() * x.at(k, j);
+                    }
+                    for k in 0..j {
+                        v += x.at(i, k) * tg.at(k, j);
+                    }
+                    x.data[i * g + j] = v / (te.at(i, i).conj() - tg.at(j, j));
+                }
+            }
+            x
+        };
+        // i(Z† − Z) of Z = X H̃_ge, X the excited-ground block.
+        let coupled = |x: &Block| -> Block {
+            let z = x.times(&back);
+            let mut out = Block::zeros(e, e);
+            for i in 0..e {
+                for j in 0..e {
+                    out.data[i * e + j] = C64::new(0.0, 1.0) * (z.at(j, i).conj() - z.at(i, j));
+                }
+            }
+            out
+        };
+        // ℳ on the Hermitian basis matrices, read on the same coordinates (row by row: output place, input place).
+        let (places, te_) = (hermitian_places(e), te.adjoint());
+        let m = places.len();
+        let mut system = vec![0.0; m * m];
+        for (column, &(i, j, part)) in places.iter().enumerate() {
+            let mut p = Block::zeros(e, e);
+            match part {
+                0 => p.data[i * e + i] = C64::ONE,
+                1 => (p.data[i * e + j], p.data[j * e + i]) = (C64::ONE, C64::ONE),
+                _ => (p.data[i * e + j], p.data[j * e + i]) = (C64::new(0.0, 1.0), C64::new(0.0, -1.0)),
+            }
+            let mut out = coupled(&sylvester(&p.times(&coupling)));
+            let (tp, pt) = (te_.times(&p), p.times(&te));
+            for (o, (a, b)) in out.data.iter_mut().zip(tp.data.iter().zip(&pt.data)) {
+                *o += C64::new(0.0, 1.0) * (*a - *b);
+            }
+            for (row, &(r, c, kind)) in places.iter().enumerate() {
+                let z = out.at(r, c);
+                system[row * m + column] = if kind == 2 { z.im } else { z.re };
             }
         }
-        // b = E[𝓛 1_g].
-        let ones: Vec<(usize, usize, C64)> = (0..ground).map(|i| (i, i, C64::ONE)).collect();
-        coherent(h, &ones, &mut z);
-        let mut u = coordinates.of(&z);
-        let lu = Lu::new(a, m)?;
-        lu.solve(&mut u);
-        let weights: Vec<f64> = (0..m).map(|c| coordinates.weight(c)).collect();
-        let trace: Vec<f64> = coordinates.entries.iter().map(|e| if e.2 == 0 { 1.0 } else { 0.0 }).collect();
-        let forces: [Vec<f64>; 3] = std::array::from_fn(|a| coordinates.of(&gradient[a]).iter().zip(&weights).map(|(g, w)| -g * w).collect());
-        let dot = |x: &[f64], y: &[f64]| x.iter().zip(y).map(|(x, y)| x * y).sum::<f64>();
-        let paired = std::array::from_fn(|a| dot(&u, &forces[a]));
-        let returned = dot(&u, &trace);
-        if !(paired.iter().all(|x| x.is_finite()) && returned.is_finite()) {
-            return None;
-        }
-        // The columns (n² each, 2 entries a column), the factorization (m³/3) and its solve (m²).
-        let work = (m * 2 * n * 8 + m * m * m / 3 + m * m) as f64;
-        Some(Sector { coordinates, lu: Some(lu), forces, trace, paired, returned, ground_force, ground, work })
-    }
-
-    /// K_a (n × n, row by row, Hermitian; module documentation, # K_Q), with the real multiply-adds of its four
-    /// transposed solves. None for a cluster without excited or without ground states (no trajectory lies in the latter:
-    /// it starts in a ground state, and every jump lands in one).
-    pub(crate) fn operators(&self) -> Option<([Vec<C64>; 3], f64)> {
-        let lu = self.lu.as_ref()?;
-        if self.ground == 0 {
-            return None;
-        }
-        let g = self.ground as f64;
-        let mean = self.ground_force.map(|f| f / g);
-        let mut s = self.trace.clone();
-        lu.solve_transposed(&mut s);
-        let k = std::array::from_fn(|a| {
-            let zeta = (self.paired[a] - mean[a] * self.returned) / (1.0 - self.returned / g);
-            let mu = zeta / g - mean[a];
-            let mut z = self.forces[a].clone();
-            lu.solve_transposed(&mut z);
-            let y: Vec<f64> = z.iter().zip(&s).enumerate().map(|(c, (z, s))| -(z + mu * s) / self.coordinates.weight(c)).collect();
-            self.coordinates.matrix(&y)
+        let lu = Lu::new(system, m)?;
+        // The four right-hand sides -- the three axes' F_E and 1_e --: R_ee − i(Z₀† − Z₀) of Z₀ = X₀ H̃_ge, X₀ = 𝒮⁻¹(−iR_eg).
+        let sides: [(Block, Block); 4] = std::array::from_fn(|r| {
+            if r < 3 {
+                forces[r].clone()
+            } else {
+                let mut one = Block::zeros(e, e);
+                for i in 0..e {
+                    one.data[i * e + i] = C64::ONE;
+                }
+                (one, Block::zeros(e, g))
+            }
         });
-        let m = self.coordinates.len();
-        Some((k, (4 * m * m) as f64))
+        let starts: Vec<Block> = sides.iter().map(|(_, eg_part)| sylvester(&Block { rows: e, cols: g, data: eg_part.data.iter().map(|z| C64::new(0.0, -1.0) * *z).collect() })).collect();
+        let mut rhs = vec![[0.0; 4]; m];
+        for (r, ((ee_part, _), x0)) in sides.iter().zip(&starts).enumerate() {
+            let z0 = coupled(x0);
+            for (row, &(i, j, kind)) in places.iter().enumerate() {
+                let v = ee_part.at(i, j) - z0.at(i, j);
+                rhs[row][r] = if kind == 2 { v.im } else { v.re };
+            }
+        }
+        lu.solve(&mut rhs);
+        // P_ee of each side from its coordinates, its P_eg = X₀ + 𝒮⁻¹(P_ee H̃_eg), and Tr[B P] = 2 Re Σ (−i H̃_eg) P_eg*.
+        let solved: Vec<(Block, Block, f64)> = (0..4)
+            .map(|r| {
+                let mut p = Block::zeros(e, e);
+                for (row, &(i, j, kind)) in places.iter().enumerate() {
+                    let v = rhs[row][r];
+                    match kind {
+                        0 => p.data[i * e + i] = C64::real(v),
+                        1 => {
+                            p.data[i * e + j].re += v;
+                            p.data[j * e + i].re += v;
+                        }
+                        _ => {
+                            p.data[i * e + j].im += v;
+                            p.data[j * e + i].im -= v;
+                        }
+                    }
+                }
+                let mut x = sylvester(&p.times(&coupling));
+                for (x, x0) in x.data.iter_mut().zip(&starts[r].data) {
+                    *x += *x0;
+                }
+                let paired = 2.0 * coupling.data.iter().zip(&x.data).map(|(c, x)| (C64::new(0.0, -1.0) * *c * x.conj()).re).sum::<f64>();
+                (p, x, paired)
+            })
+            .collect();
+        let (s_ee, s_eg, returned_s) = &solved[3];
+        if !(solved.iter().all(|(p, x, paired)| paired.is_finite() && p.data.iter().chain(&x.data).all(|z| z.is_finite()))) {
+            return None;
+        }
+        // K_a = −(P_a + μ_a S) rotated back, μ_a = ζ_a/g − φ̄_a (module documentation, # K_Q).
+        let count = g as f64;
+        let k = std::array::from_fn(|a| {
+            let mean = -(0..g).map(|i| gradient[a][i * n + i].re).sum::<f64>() / count;
+            let (p_ee, p_eg, paired) = &solved[a];
+            let zeta = (paired - mean * returned_s) / (1.0 - returned_s / count);
+            let mu = zeta / count - mean;
+            let mix = |p: &Block, s: &Block| Block { rows: p.rows, cols: p.cols, data: p.data.iter().zip(&s.data).map(|(p, s)| -(*p + *s * mu)).collect() };
+            let (k_ee, k_eg) = (ue.times(&mix(p_ee, s_ee)).times(&ue_), ue.times(&mix(p_eg, s_eg)).times(&ug_));
+            let mut out = vec![C64::ZERO; n * n];
+            for i in 0..e {
+                for j in 0..e {
+                    out[(g + i) * n + g + j] = k_ee.at(i, j);
+                }
+                for j in 0..g {
+                    out[(g + i) * n + j] = k_eg.at(i, j);
+                    out[j * n + g + i] = k_eg.at(i, j).conj();
+                }
+            }
+            out
+        });
+        // Complex multiply-adds (four reals each): the Schur forms, the rotations (couplings and forces in, K out), the
+        // basis solves (a Sylvester substitution and the product with H̃_ge each), the right-hand sides' and the
+        // solutions' Sylvester substitutions and products; and ℳ's factorization and solves in reals.
+        let (ef, gf, mf) = (e as f64, g as f64, m as f64);
+        let (syl, product, rotation) = (ef * gf * (ef + gf) / 2.0, ef * ef * gf, 2.0 * ef * ef * ef + ef * ef * gf + ef * gf * gf);
+        let complex = we + wg + 2.0 * (ef * ef * gf + ef * gf * gf) + 6.0 * rotation + mf * (syl + product + 4.0 * ef) + 8.0 * (syl + product);
+        let work = crate::decide::COMPLEX * complex + mf * mf * mf / 3.0 + 4.0 * mf * mf;
+        Some(Sector { k: Some(k), work })
     }
-}
 
-/// The 3 × 3 rate within_Q,ab of a state x (unnormalized; module documentation, # K_Q) from K_a and G_b on it:
-/// −Re⟨K_a x|G_b x⟩/‖x‖² + ⟨K_a⟩⟨G_b⟩ (F = −G). The reference form, read by the tests; the step sums the same over its
-/// quadrature (step.rs `Within`).
-#[cfg(test)]
-pub(crate) fn within(k: &[Vec<C64>; 3], g: &[Vec<C64>; 3], x: &[C64]) -> [[f64; 3]; 3] {
-    let n = x.len();
-    let apply = |m: &[C64]| -> Vec<C64> { (0..n).map(|i| (0..n).map(|j| m[i * n + j] * x[j]).sum()).collect() };
-    let norm = crate::linalg::norm_sqr(x);
-    let kx: [Vec<C64>; 3] = std::array::from_fn(|a| apply(&k[a]));
-    let gx: [Vec<C64>; 3] = std::array::from_fn(|a| apply(&g[a]));
-    let mean = |v: &[C64]| crate::linalg::inner(x, v).re / norm;
-    std::array::from_fn(|a| std::array::from_fn(|b| -crate::linalg::inner(&kx[a], &gx[b]).re / norm + mean(&kx[a]) * mean(&gx[b])))
+    /// K_a (n × n, row by row, Hermitian; module documentation, # K_Q). None for a cluster without excited or without
+    /// ground states (no trajectory lies in the latter: it starts in a ground state, and every jump lands in one).
+    pub(crate) fn operators(&self) -> Option<[Vec<C64>; 3]> {
+        self.k.clone()
+    }
 }
 
 #[cfg(test)]

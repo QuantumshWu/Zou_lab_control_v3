@@ -183,7 +183,7 @@ fn the_optical_operator_is_the_q_resolvent_s_adjoint() {
         let sectors: Vec<Sector> = sizes.iter().enumerate().map(|(c, &(_, g))| Sector::new(&dense.h[c], &dense.g[c], g).expect("a sector")).collect();
         let mut draw = Draw(seed + 100);
         for (c, &(n, _)) in sizes.iter().enumerate().filter(|(_, s)| s.0 > s.1) {
-            let (k, _) = sectors[c].operators().expect("an explicit cluster's K");
+            let k = sectors[c].operators().expect("an explicit cluster's K");
             for _ in 0..3 {
                 let mut x = draw.hermitian(n, 1.0);
                 let t: C64 = (0..n).map(|i| x[i * n + i]).sum::<C64>() * (1.0 / n as f64);
@@ -224,7 +224,7 @@ fn the_two_level_identity() {
                 h[(0, 1)] = rabi.conj() * 0.5;
                 let g: [Vec<C64>; 3] = std::array::from_fn(|a| if a == 2 { vec![C64::ZERO, slope.conj() * 0.5, slope * 0.5, C64::ZERO] } else { vec![C64::ZERO; 4] });
                 let sector = Sector::new(&h, &g, 1).expect("the sector");
-                let (k, _) = sector.operators().expect("K");
+                let k = sector.operators().expect("K");
                 // The no-jump path from g by RK4, its survival, ⟨F⟩ and within_Q, to where the survival is round-off.
                 let force = |x: &[C64]| -> f64 { -(inner(x, &[g[2][0] * x[0] + g[2][1] * x[1], g[2][2] * x[0] + g[2][3] * x[1]])).re / crate::linalg::norm_sqr(x) };
                 let deriv = |x: &[C64; 2]| -> [C64; 2] { [C64::new(0.0, -1.0) * (h[(0, 0)] * x[0] + h[(0, 1)] * x[1]), C64::new(0.0, -1.0) * (h[(1, 0)] * x[0] + h[(1, 1)] * x[1])] };
@@ -235,7 +235,7 @@ fn the_two_level_identity() {
                     let norm = x[0].norm_sqr() + x[1].norm_sqr();
                     s.push(norm);
                     f.push(force(&x));
-                    w.push(super::within(&k, &g, &x)[2][2]);
+                    w.push(crate::step::within(&k, &g, &x)[2][2]);
                     if norm < 1e-14 || t > 400.0 {
                         break;
                     }

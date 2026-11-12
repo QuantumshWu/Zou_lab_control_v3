@@ -134,9 +134,10 @@ impl Ledger {
 /// the scattered light's Σ tr(2D)|τ|, the pending covariances' −tr left at the trajectories' ends] (1/µm²), C a step's
 /// covariance of the noise. Two items, each relative to the momentum diffusion's whole input Σ tr C + Σ tr(2D)|τ| -- T's
 /// relative error where the diffusion sets T (hypothesis: the steady state's T is linear in the diffusion; in heating the
-/// energy's input is): the static K_Q's locality, ε_Q = (ν/γ_Q)² of the light pattern's fastest beat on the path ν =
-/// max |(k_l − k_m)·v| and the optical rate γ_Q = Γ/2 (DESIGN §6: the two-level standing waves' measured error within 0.6
-/// ε_Q; for multilevel clusters a hypothesis), and the noise's covariance the draws left pending (none drawn that is not
+/// energy's input is): the static K_Q's locality, ε_Q = ν/γ_Q of the fastest turn of the cluster's beams on the path ν =
+/// max_l |k_l·v| and the optical rate γ_Q = Γ/2 (step.rs, # The optical sector's noise: the first order; the two-level
+/// atom's twelve cases at kv = Γ/10 within 0.42 ε_Q; for multilevel clusters a hypothesis), and the noise's covariance the
+/// draws left pending (none drawn that is not
 /// the model's, nothing clipped). And the note on what the trajectory keeps of the ground manifold. Returns T's booked
 /// relative error, both items'; nothing where no explicit cluster drew noise.
 pub fn optical(ledger: &mut Ledger, sums: [f64; 4]) -> f64 {
@@ -145,7 +146,7 @@ pub fn optical(ledger: &mut Ledger, sums: [f64; 4]) -> f64 {
         return 0.0;
     }
     let (locality, debt) = (sums[0] / whole, sums[3].max(0.0) / whole);
-    ledger.item("显式激发态的光学扇区动量噪声：静态 K_Q 的局域近似（激发态相干的记忆 1/(Γ/2) 对运动原子所见光场图样的拍频）", locality, "每步按 (光束对的最大 |Δk·v| / (Γ/2))² × 该步的噪声协方差计入，对动量扩散总输入的比例计入温度的模型误差（两能级驻波上实测误差在该尺度的 0.6 倍以内；多能级簇为假设）");
+    ledger.item("显式激发态的光学扇区动量噪声：静态 K_Q 的局域近似（取原子所在点静止时的 K；激发态相干的记忆 1/(Γ/2) 内运动原子所见各光束的转动）", locality, "每步按 (光束的最大 |k·v| / (Γ/2)) × 该步的噪声协方差计入（一阶），对动量扩散总输入的比例计入温度的模型误差（两能级行波/驻波 12 例 kv = Γ/10 实测误差在该尺度的 0.42 倍以内；多能级簇为假设）");
     ledger.item("显式激发态的光学扇区动量噪声：尚未抽取的负协方差", debt, "瞬时为负的部分不截断，留作每条轨迹的待抽协方差；运行结束时剩余的部分对动量扩散总输入的比例计入温度的模型误差");
     let note = "显式激发态的簇：基态流形叠加态的力按平均场（Ehrenfest）沿轨迹携带，其关联中经过基态流形的部分（P 扇区）没有推导的误差界，是模型的已知局限（静止时 lin⊥lin 约为扩散的 −10 %）";
     ledger.note = Some(match ledger.note.take() {
