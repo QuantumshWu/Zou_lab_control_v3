@@ -2,7 +2,7 @@
 //!
 //! # The reach
 //! The sublevel set {(r, v) : V_prep(r; p) + v²/(2 ħ/m) ≤ V_min + E_r} of the prepared energy, E_r = L k_B T_r the level that
-//! holds all but the share s of a thermal ensemble in the trap (# The reach's level): at r the
+//! holds all but the share s of the trap's lowered isothermal at T_r (# The reach's level): at r the
 //! speeds |v| ≤ √(2 (ħ/m)(V_min + E_r − V_prep(r))), at most √(2 (ħ/m) E_r) (`Reach::speed`), the positions where that is real. Its level
 //! V_min + E_r is below the far value 0 where the trap holds the reach; there −V_prep ≥ −(V_min + E_r) > 0 on it, and the proven
 //! envelope −V_prep ≤ B max_l A_l(r) (model.rs `Envelope`) puts it inside the union of the ellipsoids u_l ≤ B/(−V_min − E_r) − 1
@@ -22,39 +22,77 @@
 //! it as the level's do the sublevel set. An outside level at or above the far value -- a held atom that V_run binds and
 //! V_prep does not -- leaves the reach unbounded: the whole space, its bounds the global ones.
 //!
+//! A temperature's level is below the depth (# The reach's level): no temperature's reach holds an atom that has gained
+//! the trap's depth, or its top, and is still in the region. Such an atom is held there all the same, and a path of it
+//! that the reach's proofs are to hold (solve.rs `Domain`) is held by the region's level raised to its energy, the
+//! temperature kept (`Model::inside_to`): within the region the reach then holds every prepared energy up to it -- the
+//! path's points among them, its largest energy no more --, and outside it what it held. The family stays nested and
+//! only grows: the inside level is the larger of the two, the outside one and the temperature are kept, so the reach so
+//! raised holds the one before it, and a later temperature's reach is raised again to the levels asked before (solve.rs
+//! keeps them as it keeps the outside ones). The temperature is the atoms' own, its ensemble's statements (the kinetic
+//! temperatures, the falsifier's scale) its own; only the set and its speeds, √(2 (ħ/m) E), grow with the path.
+//!
 //! # The reach's level
-//! The reach is the set that holds all but the share s of the initial ensemble: its level is the (1 − s) quantile of an
-//! atom's energy above the trap's bottom in the ensemble as it is drawn (ensemble.rs: the thermal distribution times
-//! each axis's harmonic-oscillator Wigner factor), in the trap's harmonic form. Along a principal axis i of the
-//! prepared trap that holds the atom (frequency ω_i > 0, model.rs `Trap`) the oscillator's two quadratic degrees of
-//! freedom hold k_B T E_i classically, E_i a unit exponential, and the Wigner factor scales both by
-//! s_i² = x_i coth x_i, x_i = ħω_i/2k_BT (the oscillator's own mean energy over k_B T: one where ħω_i ≪ k_BT, x_i --
-//! the zero point's ½ħω_i -- where it is cold); along an axis the trap does not hold there is the momentum's degree
-//! alone, ½ k_BT x² with x a standard normal, of Γ(½). So the energy over k_B T is
+//! The reach is the set that holds all but the share s of the initial ensemble -- its bound atoms alone (ensemble.rs,
+//! # The lowered isothermal: f ∝ e^{−E/k_BT} − 1 below the far level, nothing above it) --: its level is the (1 − s)
+//! quantile of an atom's energy above the trap's bottom in that ensemble as it is drawn (each axis's harmonic-oscillator
+//! Wigner factor on the classical draw), in the trap's harmonic form. Along a principal axis i of the prepared trap that
+//! holds the atom (frequency ω_i > 0, model.rs `Trap`) the oscillator's two quadratic degrees of freedom hold k_B T E_i
+//! classically, E_i a unit exponential, and the Wigner factor scales both by s_i² = x_i coth x_i, x_i = ħω_i/2k_BT (the
+//! oscillator's own mean energy over k_B T: one where ħω_i ≪ k_BT, x_i -- the zero point's ½ħω_i -- where it is cold);
+//! along an axis the trap does not hold there is the momentum's degree alone, ½ k_BT x² with x a standard normal, of
+//! Γ(½). So of the thermal draw the energy over k_B T and the classical one are
 //!
 //! ```text
-//! X = Y + Σ_held s_i² E_i,   Y of Γ(f/2), f the axes not held;          P(X > L) = s          (`quantile`)
+//! X = Y + Σ_held s_i² E_i,   C = Y + Σ_held E_i,   Y of Γ(f/2), f the axes not held, C of Γ(k), k = f/2 + the axes held.
 //! ```
 //!
-//! one statement for every temperature: with every s_i = 1 it is Γ(n/2) of the n = 6 − f quadratic degrees of freedom,
-//! P(X > L) = Q(n/2, L), for a trap that holds along its three axes Q(3, L) = e^{−L}(1 + L + L²/2): L = 12.89 at
-//! s = 2.44e-4. (ln(1/s) = 8.32, the level where the Boltzmann factor is s, is one oscillator's quantile; six degrees
-//! leave 1.07 % of the atoms above it. And a level of 12.89 k_B T holds none of an ensemble whose zero point is above
-//! it: at ħω = 14, 14, 61 k_BT, s² = 7.2, 7.2, 30.6, the quantile is 271 k_BT.) The tail of X is the convolution of its
-//! terms, one exponential after another from the smallest scale, P(Y + aE > L) = e^{−L/a} + (1/a)∫₀^L e^{−(L−u)/a}
-//! P(Y > u) du, each integral by Gauss–Legendre with its nodes doubled until two levels' difference stops falling
-//! (`tail`) -- no difference of exponentials, so scales that are equal or nearly so (a round trap's) are no case of
-//! their own --, and the level by bisection to the format's resolution (the tail falls monotonically). The ensemble's
-//! kinetic temperature along axis i is s_i² T (`Reach::kinetic_uk`): its speeds' and the reach's falsifier's scale.
+//! The lowering weighs the draw by (e^{−C} − e^{−d})₊, d = D/k_BT, D = −V_min the trap's depth (the far value is nothing).
+//! With one more unit exponential S, (e^{−C} − e^{−d})₊ = ∫₀^∞ e^{−C−S} [C + S < d] dS: the lowered ensemble is the thermal
+//! one on the condition C + S < d, C + S of Γ(k + 1). Given C + S = τ the parts over τ are Dirichlet's, so X = τ W, W =
+//! Σ_j a_j z_j (a_j the scales, the slack's none) independent of τ; below the least scale a₀ (one where an axis is free)
+//! Σ a_j z_j ≤ w forces Σ z_j ≤ 1, so P(W ≤ w) = A w^k there, A = Π s_i^{−2}, the cone's measure. A level L ≤ a₀ d reads
+//! W only there at every τ ≥ d: P(X > L, C + S ≥ d) = ∫_d^∞ γ_{k+1}(τ)(1 − A L^k τ^{−k}) dτ = Q(k + 1, d) − A L^k e^{−d}/Γ(k + 1),
+//! and
+//!
+//! ```text
+//! P(X > L | C + S < d) = 1 − [P(X ≤ L) − A L^k e^{−d}/Γ(k + 1)] / P(k + 1, d),   L ≤ a₀ d          (`Degrees::above`)
+//! ```
+//!
+//! -- the thermal draw's distribution (`below`) and the incomplete gamma function's (P(k + 1, d) the lowered isothermal's
+//! own number, ensemble.rs `kept`). Classical (every s_i = 1) it is ∫_L^d x^{k−1}(e^{−x} − e^{−d}) dx over its integral
+//! from nothing, and nothing at the depth; at d → ∞ the thermal draw's tail, P(X > L) = Q(n/2, L) of the n = 6 − f
+//! quadratic degrees, for a trap that holds along its three axes Q(3, L) = e^{−L}(1 + L + L²/2): L = 12.89 at s =
+//! 2.44e-4. (ln(1/s) = 8.32, the level where the Boltzmann factor is s, is one oscillator's quantile; six degrees leave
+//! 1.07 % of the atoms above it. And a level of 12.89 k_B T holds none of an ensemble whose zero point is above it: at ħω
+//! = 14, 14, 61 k_BT, s² = 7.2, 7.2, 30.6, the quantile is 271 k_BT.) The thermal draw's distribution is the convolution
+//! of its terms, one exponential after another from the smallest scale, P(Y + aE ≤ L) = (1/a)∫₀^L e^{−(L−u)/a} P(Y ≤ u) du,
+//! each integral by Gauss–Legendre with its nodes doubled until two levels' difference stops falling, below the mean and
+//! as its complement's above it (`below`) -- no difference of exponentials, so scales that are equal or nearly so (a round
+//! trap's) are no case of their own, and every part positive, so a hot trap's few atoms below a level are read to their
+//! own precision --, and the level by bisection
+//! to the format's resolution between nothing and a₀ d (the tail falls monotonically there). Above a₀ d the Wigner widths
+//! alone carry atoms, the zero point lifting them above the depth -- outside the validated regime (k_BT ≥ 4ħω_i, where
+//! a_max/a₀ ≤ 1.005 and they are fewer than 1.6·10⁻⁴ ≤ s at any depth) --; where more than s are, the level is a_max d,
+//! which every atom of the harmonic form is below (X ≤ a_max C < a_max d).
+//!
+//! The level is below the depth: a reach does not reach the trap's edge, where its light no longer shifts the others. (Taken
+//! as the thermal draw's quantile, 12.89 k_BT_r crossed the user's 1.5 mK tweezer's depth at 116 µK; the reach then held
+//! the whole region, to its edge, where the probe is 3.3 Γ from its line and its fold does not exist -- every excited
+//! state it reaches was kept, a step 50 → 160 µs.) At 1.5 mK and 30 µK the level is 12.91 k_BT (387 µK), at 300 µK 4.93
+//! k_BT (1480 µK). It rises with T_r to its top (`top`): at T_r → ∞ every s_i → 1 and the energy over D has the density
+//! ∝ u^{k−1}(1 − u) on [0, 1], Beta(k, 2), whose share above q is 1 − (k + 1)q^k + k q^{k+1} = s at q = 0.9936 for three
+//! axes held. No temperature's reach holds a level at its top or above: an atom there is at the trap's top or above its
+//! depth, leaving or lost (`holding`). The ensemble's kinetic temperature along axis i is s_i² T (`Reach::kinetic_uk`):
+//! its speeds' and the reach's falsifier's scale.
 //!
 //! # What the reach leaves out
-//! The level's quantile is the harmonic trap's. What the real trap adds -- the tweezer's anharmonic flanks, the lowered
-//! isothermal's cut, the Wigner factors' widths -- is read off the initial ensemble's own density, not off a formula for
-//! one trap's shape, and by no draw of an atom (`Model::left_out`; ensemble.rs, # What a level leaves out): the share of
-//! the atoms beyond the set, the momenta above the kinetic energy A(r) = V_min + E_r − V_prep(r) the set holds at each
-//! place integrated over the places, booked on what is shown; and the share of the kinetic energy they hold, on T --
-//! each with its quadrature's own difference between its last two levels. A reach grown with the atoms' temperature
-//! leaves out less of the same ensemble.
+//! The level's quantile is the harmonic trap's. What the real trap adds -- the tweezer's anharmonic flanks, the Wigner
+//! factors' widths over them -- is read off the initial ensemble's own density, not off a formula for one trap's shape, and
+//! by no draw of an atom (`Model::left_out`; ensemble.rs, # What a level leaves out): the share of the atoms beyond the
+//! set, the momenta above the kinetic energy A(r) = V_min + E_r − V_prep(r) the set holds at each place integrated over the
+//! places, booked on what is shown; and the share of the kinetic energy they hold, on T -- each with its quadrature's own
+//! difference between its last two levels. A reach grown with the atoms' temperature leaves out less of the same ensemble.
 //!
 //! # Provable extrema (`Model::bounds_over`)
 //! A quantity's bound over the reach is the largest of its upper bounds over cells covering the reach's box, a cell taken where
@@ -98,7 +136,7 @@
 //! bound the gates read is the quantity's own form (own.rs `Own`): its value and gradient at the centre and a remainder of
 //! the second order, beside its range -- each part made of its own sum (a level difference of its weights P_xx − P_yy,
 //! eliminate.rs `Gap`; a sum of beam pairs of its own gradient and Hessian, `Combination`, `steepness`; a norm of its
-//! vector's, `Region::summed`), and every composite of them in own-form arithmetic, so that two parts that move together
+//! vector's, `Frame`), and every composite of them in own-form arithmetic, so that two parts that move together
 //! cancel at the first order where the quantity does. The speeds' bound is one too (`Region::pace`): a level's slope is
 //! largest on the trap's flank and the speed at its bottom, and the product of the two maxima was neither's.
 //!
@@ -107,7 +145,7 @@
 //! |k·d| over a displacement d, at most Σ_a |k_a| h_a over a cell of half-widths h -- nothing along a side across the beam --,
 //! and its envelope b changes over the waist across the beam and over the Rayleigh range along it (`Bends`). A fringe, the
 //! coefficient a_j* a_i of two beams, turns only along k_i − k_j. So the bounds over a cell are made side by side, not from
-//! the cell's radius times one Lipschitz constant: a pair's coefficient (`PairSpan`) and a sum of beams (`Region::summed`)
+//! the cell's radius times one Lipschitz constant: a pair's coefficient (`PairSpan`) and a sum of beams (`Frame`)
 //! each from its value and gradient at the centre to second order, Σ_a h_a |∂_a ·| and half the bound of its second
 //! derivative along the cell's displacements, at most the first order's, at most the phase-blind one -- at a crest, where the
 //! largest values are, a first-order bound has no slope to read and gives the cell's size where the truth is its square.
@@ -142,10 +180,14 @@
 //! more. One that ends at a cell whose bound is within the rounding of its centre's value: the cells it had asked for by then.
 //! A unit's statements (its saturation and its sweep) are proven side by side, and a unit one of whose statements is
 //! proven at the threshold or above is kept whatever the others read: their proofs end with it, each at the largest bound
-//! of its cells left (`Model::statements_over`); which units are kept is the same as theirs proven to the end. (Proven to the end alone, the sweep of a coupling of two
-//! Zeeman sublevels of a heavy atom at rest -- B 0, the sublevels crossing where the tweezer's tensor shift does, its
-//! saturation infinite there -- halved the cells along the crossing towards a speed's square root that no centre met,
-//! and the proof over S3's reach at 1 µK did not end in five minutes.)
+//! of its cells left (`Model::statements_over`); which units are kept is the same as theirs proven to the end. (Proven to the
+//! end alone, the sweep of a coupling of two Zeeman sublevels of a heavy atom at rest -- B 0, the sublevels crossing where
+//! the tweezer's tensor shift does, its saturation infinite there -- halved the cells along the crossing towards a speed's
+//! square root that no centre met, and the proof over S3's reach at 1 µK did not end in five minutes.) Every other unit's
+//! proofs go to the end though a unit fails: the units failing together are the next model's, the closure's path. (Ended
+//! with the round in which a first unit failed, the units failing later were left folded on the next model, and their
+//! shares failed others there: the tweezer ×4 variant of S3 kept 114 units where 115 fail together, then 26 more where 6
+//! do, 142 at 30 µK where the proofs to the end keep 121 there -- its 1 ms ran past five minutes, against 93 s.)
 //!
 //! # The kick's curvature (`Model::kick_curvature`)
 //! A step is the reference's flow, a kick, the flow again (step.rs); the kick is −τ∇(⟨x|Ĥ_h|x⟩ − V_ref) at the step's
@@ -377,20 +419,21 @@ impl Span {
         let slope = (0..3).map(|i| (self.gradient[i] - C64::new(0.0, k[i]) * self.centre).norm_sqr()).sum::<f64>().sqrt();
         Span { most: self.centre.abs(), least: self.centre.abs(), slope, half: [0.0; 3], rho: 0.0, swing: 0.0, bend: 0.0, twist: 0.0, third: 0.0, ..*self }
     }
-    /// The bound over a bounded cell of |dᵀ∇∇a d| = |−(k·d)² b + 2i (k·d)(∇b·d) + dᵀ∇∇b d|: τ² max|b| + 2τ swing + bend, τ its
-    /// plane wave's turn.
-    pub(crate) fn bowed(&self) -> f64 {
-        let turn = self.turn(&self.wave);
+    /// The bound over a bounded cell of |dᵀ∇∇a′ d| of its amplitude in the frame of a wave vector k₀ (`Frame`), a′ =
+    /// e^{−ik₀·d} a(c + d) = e^{ik·c} e^{iq·d} b(c + d), q = k − k₀: |−(q·d)² b + 2i (q·d)(∇b·d) + dᵀ∇∇b d| ≤ τ² max|b| +
+    /// 2τ swing + bend, τ its plane wave's turn at q.
+    pub(crate) fn bowed(&self, frame: &[f64; 3]) -> f64 {
+        let turn = self.turn(&std::array::from_fn(|a| self.wave[a] - frame[a]));
         turn * turn * self.most + 2.0 * turn * self.swing + self.bend
     }
     /// The bound over a bounded cell of |q·d|, the turn of a plane wave of wave vector q from the centre: Σ_a |q_a| h_a.
     pub(crate) fn turn(&self, q: &[f64; 3]) -> f64 {
         (0..3).map(|a| q[a].abs() * self.half[a]).sum()
     }
-    /// The bound over a bounded cell of |a − a(c)| = |(e^{ik·d} − 1) b + e^{ik·c}(b − b(c))|: its plane wave's turn times
-    /// max|b|, and its envelope's swing.
-    pub(crate) fn moved(&self) -> f64 {
-        self.turn(&self.wave) * self.most + self.swing
+    /// The bound over a bounded cell of |a′ − a(c)| in the frame of k₀ (`bowed`): |(e^{iq·d} − 1) b + (b − b(c))|, its
+    /// plane wave's turn at q = k − k₀ times max|b|, and its envelope's swing.
+    pub(crate) fn moved(&self, frame: &[f64; 3]) -> f64 {
+        self.turn(&std::array::from_fn(|a| self.wave[a] - frame[a])) * self.most + self.swing
     }
     /// The bound over a bounded cell of |∇a − ∇a(c)| = |∇∇a d| = |e^{ik·r}(−k (k·d) b + i k (∇b·d) + i ∇b (k·d) + ∇∇b d)|:
     /// |k| τ max|b| + |k| swing + τ slope + twist, τ its plane wave's turn.
@@ -424,10 +467,14 @@ impl Span {
 ///   most the farther of the two from c(c).
 /// - `most`, of |c|: B̄; `hessian`, ∇∇c at the centre; and `rest`, of the remainder |∇c − ∇c(c) − ∇∇c(c) d| of its
 ///   gradient's first-order Taylor form (`rest`).
+/// - `wave`, q; `swing` and `bend`, D and Q: what its modulus reads in another frame (`Region::modulus`).
 /// On a point: its value, its gradient's norm, the rest zero. On the whole space: nothing at the centre, B̄ and |q| B̄ + G.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PairSpan {
     pub(crate) centre: C64,
+    pub(crate) wave: [f64; 3],
+    pub(crate) swing: f64,
+    pub(crate) bend: f64,
     pub(crate) gradient: [C64; 3],
     pub(crate) hessian: [[C64; 3]; 3],
     pub(crate) radius: f64,
@@ -458,7 +505,7 @@ pub(crate) fn pair_span(spans: &[Span], j: usize, i: usize) -> PairSpan {
     let steep = a.slope * b.most + a.most * b.slope;
     let blind = q * most + steep;
     if !a.rho.is_finite() {
-        return PairSpan { centre: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3], radius: most, curve: f64::INFINITY, most, slope: blind, veer: f64::INFINITY, rest: f64::INFINITY };
+        return PairSpan { centre: C64::ZERO, wave, swing: f64::INFINITY, bend: f64::INFINITY, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3], radius: most, curve: f64::INFINITY, most, slope: blind, veer: f64::INFINITY, rest: f64::INFINITY };
     }
     let turn = a.turn(&wave);
     let swing = a.swing * b.most + a.most * b.swing;
@@ -478,7 +525,7 @@ pub(crate) fn pair_span(spans: &[Span], j: usize, i: usize) -> PairSpan {
     let radius = (lean + curve).min(turn * most + swing).min(centre.abs() + most);
     let radius = if j == i { radius.min((most - centre.re).max(centre.re - a.least * a.least)) } else { radius };
     let rest = rest(q, turn, most, swing, bend, twist, steep, third);
-    PairSpan { centre, gradient, hessian, radius, curve, most, slope: (gradient.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + veer).min(blind), veer, rest }
+    PairSpan { centre, wave, swing, bend, gradient, hessian, radius, curve, most, slope: (gradient.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + veer).min(blind), veer, rest }
 }
 
 /// One weighting w of the far light's static forms P_l'l (an entry's, a diagonal difference's), as a sum over the beam pairs
@@ -796,15 +843,18 @@ pub(crate) struct Region {
     pub(crate) shifted: OnceLock<Vec<[Shift; GROUND]>>,
     /// Per cluster.
     pub(crate) forces: Vec<OnceLock<Own>>,
-    /// Per ground state its drives' sizes and distances (units.rs `Model::across`), and the first places of their gates
-    /// in the tail rule's order (units.rs `Model::folds`).
+    /// Per ground state its drives' sizes and distances (units.rs `Model::across`), the tails of their shares and the gates
+    /// of the places asked in the tail rule's order (units.rs `Model::tails`, `Model::folds`).
     pub(crate) across: [OnceLock<Vec<super::units::Across>>; GROUND],
-    pub(crate) drives: [OnceLock<Vec<[f64; 5]>>; GROUND],
+    pub(crate) tails: [OnceLock<Vec<Own>>; GROUND],
+    pub(crate) folds: [Mutex<Vec<(usize, [f64; 5])>>; GROUND],
     /// Per ground state its shift by its drives folded at the atom, signed (units.rs `Model::near_level`).
     pub(crate) shifts: [OnceLock<Shift>; GROUND],
-    /// The constant forms' diagonal per state, and the levels' differences asked, each made once (eliminate.rs `Model::gap`).
+    /// The constant forms' diagonal per state, and the levels' differences and their gradients asked, each made once
+    /// (eliminate.rs `Model::gap`, `Model::gap_slope`).
     pub(crate) diagonal: OnceLock<Diagonal>,
     pub(crate) gaps: Mutex<HashMap<(usize, usize), Gap>>,
+    pub(crate) slopes: Mutex<HashMap<(usize, usize), [Form<[f64; 3]>; 2]>>,
     /// Per coupling of two states asked its saturation and sweep (units.rs `Model::term_bound`).
     pub(crate) terms: Mutex<HashMap<Coupling, (f64, f64)>>,
     /// The model's kept drives (units.rs `Model::kept_over`).
@@ -874,7 +924,7 @@ impl Region {
                     second[a][b] += span.hessian[a][b] * x;
                 }
             }
-            let over = if bounded { [span.moved(), span.bowed(), span.most, span.veer(), span.rest(), span.steepest()] } else { [0.0, 0.0, span.most, 0.0, 0.0, span.steepest()] };
+            let over = if bounded { [span.moved(&[0.0; 3]), span.bowed(&[0.0; 3]), span.most, span.veer(), span.rest(), span.steepest()] } else { [0.0, 0.0, span.most, 0.0, 0.0, span.steepest()] };
             for (sum, x) in sums.iter_mut().zip(over) {
                 *sum += size * x;
             }
@@ -913,19 +963,108 @@ impl Region {
         (self.combined(pairs()).real().within(0.0, f64::INFINITY), self.gradient(pairs()).re())
     }
 
-    /// |Σ_l a_l x_l| over the region in its own form (`field`, own.rs `Form::norm`).
+    /// |Σ_l a_l x_l| over the region in its own form (`Frame`): of the beams `entries` (the request's beam, x_l, |x_l|).
     pub(crate) fn coherent_own(&self, entries: &[(usize, C64, f64)]) -> Own {
-        self.field(entries.iter().copied()).0.norm()
+        let mut sum = Frame::<1>::of(self, entries.iter().map(|&(l, _, size)| (l, size)));
+        for &(l, x, size) in entries {
+            sum.add(self, l, size, std::iter::once((0, x)));
+        }
+        sum.norm(self)
     }
 
-    /// ‖u‖ over the region in its own form (own.rs `Own::norm`), u = Σ_l a_l x_l a sum of beams' amplitudes times vectors
-    /// x_l: its value `u` and its slopes ∂_a u = Σ_l ∂_a a_l x_l at the centre, its Taylor remainder ½ `bowed`, `bowed` =
-    /// Σ_l ‖x_l‖ max|dᵀ∇∇a_l d| (`Span::bowed`); within ‖u(c)‖ ± `moved`, `moved` = Σ_l ‖x_l‖ max|a_l − a_l(c)|
-    /// (`Span::moved`), and at most `blind` = Σ_l ‖x_l‖ max|a_l|, every beam at its largest amplitude and in phase -- at a
-    /// crest of ‖u‖, where the first order has no slope to read, it moves by the cell's size squared. On the whole space
-    /// [0, blind].
-    pub(crate) fn summed(&self, u: &[C64], slopes: [&[C64]; 3], moved: f64, bowed: f64, blind: f64) -> Own {
-        Own::norm(u, slopes, 0.5 * bowed, moved, blind, self.half)
+    /// |f + base| of a sum f = Σ_p w_p c_p of beam pairs' coefficients (`PairSpan`, each with its weight and the weight's
+    /// modulus) and a constant `base` over the region, in its own form (own.rs `Own::norm`) in the frame of a wave vector q₀
+    /// as a sum of beams' is (`Frame`): |f + base| = |e^{−iq₀·(r − c)}(f + base)|, and in that frame a pair turns by τ_p =
+    /// Σ_a |q_p,a − q₀,a| h_a and the base by τ₀ = Σ_a |q₀,a| h_a, not each by its own q (a pair's modulus |b_j||b_i| has no
+    /// phase to follow, two pairs of one q turn together). Its value and slopes ∂_a f − iq₀,a (f + base) at the centre, its
+    /// remainder Σ_p |w_p| ½(τ_p² B̄_p + 2τ_p D_p + Q_p) + |base| ½τ₀²; it moves by Σ_p |w_p| min(τ_p B̄_p + D_p, |c_p(c)| +
+    /// B̄_p) + |base| τ₀ at most and is at most |base| + Σ_p |w_p| B̄_p. q₀ the pairs' wave vectors' mean weighted by |w_p| B̄_p,
+    /// the base's (q = 0) by |base|. On the whole space, [0, that bound].
+    pub(crate) fn modulus(&self, terms: impl Iterator<Item = (PairSpan, C64, f64)> + Clone, base: C64) -> Own {
+        let (mut mean, mut weight) = ([0.0; 3], base.abs());
+        for (pair, _, size) in terms.clone() {
+            for a in 0..3 {
+                mean[a] += size * pair.most * pair.wave[a];
+            }
+            weight += size * pair.most;
+        }
+        let frame = if weight > 0.0 { mean.map(|x| x / weight) } else { [0.0; 3] };
+        let turn = |q: [f64; 3]| -> f64 { (0..3).map(|a| (q[a] - frame[a]).abs() * self.half[a]).sum() };
+        let base_turn = turn([0.0; 3]);
+        let (mut value, mut slopes) = (base, [C64::ZERO; 3]);
+        let (mut rest, mut moved, mut blind) = (0.5 * base_turn * base_turn * base.abs(), base_turn * base.abs(), base.abs());
+        for (pair, w, size) in terms {
+            value += pair.centre * w;
+            for a in 0..3 {
+                slopes[a] += pair.gradient[a] * w;
+            }
+            let tau = turn(pair.wave);
+            rest += size * 0.5 * (tau * tau * pair.most + 2.0 * tau * pair.swing + pair.bend);
+            moved += size * (tau * pair.most + pair.swing).min(pair.centre.abs() + pair.most);
+            blind += size * pair.most;
+        }
+        let slopes: [C64; 3] = std::array::from_fn(|a| slopes[a] - C64::new(0.0, frame[a]) * value);
+        Own::norm(&[value], [&slopes[0..1], &slopes[1..2], &slopes[2..3]], rest, moved, blind, self.half)
+    }
+}
+
+/// A sum u = Σ_l a_l x_l of beams' amplitudes times vectors x_l (over the excited states) gathered for its norm over a region
+/// (`Region::coherent_own`, eliminate.rs `Model::couplings`), in the frame of a wave vector k₀. ‖u‖ = ‖e^{−ik₀·(r − c)} u‖ for
+/// any constant k₀, and in that frame a beam's amplitude is e^{ik·c} e^{i(k − k₀)·d} b(c + d): it turns by τ = Σ_a |k_a −
+/// k₀,a| h_a, not by its own wave vector's turn (`Span::moved`, `Span::bowed`). So the norm's own form (own.rs `Own::norm`)
+/// is of u's value and slopes ∂_a u − ik₀,a u at the centre -- its first order Re⟨u, ∂_a u⟩/‖u‖ the same in every frame --,
+/// its Taylor remainder ½ Σ_l ‖x_l‖ max|dᵀ∇∇a′_l d|, within ‖u(c)‖ ± Σ_l ‖x_l‖ max|a′_l − a_l(c)| and at most Σ_l ‖x_l‖
+/// max|a_l|. k₀ is the beams' wave vectors' mean weighted by ‖x_l‖ max|a_l|, the minimizer of Σ_l w_l |k_l − k₀|²: one
+/// beam does not turn at all (its modulus is its envelope's), a beam with a weak partner turns by the partner's share, a
+/// balanced counter-propagating pair by ±k about k₀ = 0. (In the lab's frame, each beam turning by its own k·d, the
+/// norm of the user's probe's drive -- its reflection on that line 4·10⁻⁸ of it -- had a remainder ½ τ² ‖u‖ of the cell's
+/// square where the modulus moves by the partner's 10⁻⁸: its bound was the beams' phase-blind sum, 8.5·10⁻⁸ of it above
+/// the largest value on every cell down to ℓ/4000.)
+pub(crate) struct Frame<const N: usize> {
+    wave: [f64; 3],
+    u: [C64; N],
+    slopes: [[C64; N]; 3],
+    moved: f64,
+    bowed: f64,
+    blind: f64,
+}
+
+impl<const N: usize> Frame<N> {
+    /// An empty sum of N places in the frame of the beams `beams` (the request's beam, ‖x_l‖).
+    pub(crate) fn of(region: &Region, beams: impl Iterator<Item = (usize, f64)>) -> Frame<N> {
+        let (mut sum, mut weight) = ([0.0; 3], 0.0);
+        for (l, size) in beams {
+            let span = &region.spans[l];
+            let w = size * span.most;
+            for a in 0..3 {
+                sum[a] += w * span.wave[a];
+            }
+            weight += w;
+        }
+        let wave = if weight > 0.0 { sum.map(|x| x / weight) } else { [0.0; 3] };
+        Frame { wave, u: [C64::ZERO; N], slopes: [[C64::ZERO; N]; 3], moved: 0.0, bowed: 0.0, blind: 0.0 }
+    }
+
+    /// The beam l's amplitude times x_l, of norm `size` and entries (place, value) that are not zero.
+    pub(crate) fn add(&mut self, region: &Region, l: usize, size: f64, entries: impl Iterator<Item = (usize, C64)>) {
+        let span = &region.spans[l];
+        let slopes: [C64; 3] = std::array::from_fn(|a| span.gradient[a] - C64::new(0.0, self.wave[a]) * span.centre);
+        for (e, x) in entries {
+            self.u[e] += span.centre * x;
+            for a in 0..3 {
+                self.slopes[a][e] += slopes[a] * x;
+            }
+        }
+        if region.rho.is_finite() {
+            self.moved += size * span.moved(&self.wave);
+            self.bowed += size * span.bowed(&self.wave);
+        }
+        self.blind += size * span.most;
+    }
+
+    /// ‖u‖ over the region in its own form (own.rs `Own::norm`); on the whole space [0, Σ_l ‖x_l‖ max|a_l|].
+    pub(crate) fn norm(&self, region: &Region) -> Own {
+        Own::norm(&self.u, [&self.slopes[0], &self.slopes[1], &self.slopes[2]], 0.5 * self.bowed, self.moved, self.blind, region.half)
     }
 }
 
@@ -1033,20 +1172,18 @@ impl Cells<'_> {
 }
 
 /// A sum f = Σ_p w_p c_p of beam pairs' coefficients over a cell of half-widths `half` (`Region::combined`): its value and
-/// gradient at the centre, its Taylor remainder's bound Σ_p |w_p| `curve`_p, its pairs' own ranges Σ_p |w_p| `radius`_p and
-/// their phase-blind bound Σ_p |w_p| B̄_p.
+/// gradient at the centre, its Taylor remainder's bound Σ_p |w_p| `curve`_p and its pairs' own ranges Σ_p |w_p| `radius`_p.
 pub(crate) struct Combination {
     half: [f64; 3],
     value: C64,
     gradient: [C64; 3],
     curve: f64,
     each: f64,
-    blind: f64,
 }
 
 impl Combination {
     pub(crate) fn of(half: &[f64; 3], terms: impl Iterator<Item = (PairSpan, C64, f64)>) -> Combination {
-        let mut out = Combination { half: *half, value: C64::ZERO, gradient: [C64::ZERO; 3], curve: 0.0, each: 0.0, blind: 0.0 };
+        let mut out = Combination { half: *half, value: C64::ZERO, gradient: [C64::ZERO; 3], curve: 0.0, each: 0.0 };
         for (pair, w, size) in terms {
             out.value += pair.centre * w;
             for (g, x) in out.gradient.iter_mut().zip(pair.gradient) {
@@ -1054,13 +1191,8 @@ impl Combination {
             }
             out.curve += size * pair.curve;
             out.each += size * pair.radius;
-            out.blind += size * pair.most;
         }
         out
-    }
-
-    fn bounded(&self) -> bool {
-        self.half.iter().all(|h| h.is_finite())
     }
 
     /// Re f in its own form (own.rs): its value and gradient at the centre and the Taylor remainder, within the pairs' own
@@ -1069,16 +1201,6 @@ impl Combination {
         let at = self.value.re;
         Own::new(at, self.gradient.map(|g| g.re), self.curve, self.half).within(at - self.each, at + self.each)
     }
-
-    /// |f + base| (`base` a constant) in its own form (own.rs `Own::norm`), within |f(c) + base| ± how far f moves and at
-    /// most |base| + Σ_p |w_p| max|c_p|: an entry that turns its phase across the cell at constant modulus (two
-    /// counter-propagating beams' coefficient a₁* a₂ = |a₁||a₂| e^{2ikx}) moves by the cell's size squared, not 2k h.
-    pub(crate) fn modulus(&self, base: C64) -> Own {
-        let first = if self.bounded() { ((0..3).map(|a| self.half[a] * self.gradient[a].abs()).sum::<f64>() + self.curve).min(self.each) } else { self.each };
-        let g = self.gradient;
-        Own::norm(&[self.value + base], [&g[0..1], &g[1..2], &g[2..3]], self.curve, first, base.abs() + self.blind, self.half)
-    }
-
 }
 
 /// V_prep(r; p) over a bounded cell in its own form (own.rs), its value at the centre `centre`: its far part Re Σ_l'l Q_l'l
@@ -1278,11 +1400,24 @@ fn decided(threshold: f64, attains: f64) -> impl Fn(f64, f64) -> bool + Sync {
     move |upper, attained| upper < threshold || attained >= attains
 }
 
-/// P(Y + Σ_k a_k E_k > level) at a level above zero: Y of Γ(`shape`) (nothing at shape zero), E_k unit exponentials of
+/// P(Y + Σ_k a_k E_k ≤ level) at a level above zero: Y of Γ(`shape`) (nothing at shape zero), E_k unit exponentials of
 /// the scales `scales` (module documentation, # The reach's level), by the convolution's recursion over the scales from
-/// the last one in -- e^{−L/a} + (1/a)∫₀^L e^{−(L−u)/a} P(rest > u) du on the Gauss–Legendre nodes `nodes` of [−1, 1] in
-/// v, u = L v² (a Γ of half-integer shape has its tail entire in √u, not in u); with nothing left the integrand is
-/// nothing.
+/// the last one in -- (1/a)∫₀^L e^{−(L−u)/a} P(rest ≤ u) du on the Gauss–Legendre nodes `nodes` of [−1, 1] in v, u = L v²
+/// (a Γ of half-integer shape has its distribution entire in √u, not in u); with nothing left, Y's P(shape, u) (`lower`)
+/// or one, and one exponential alone 1 − e^{−L/a}. Every part is positive: the distribution is read to its own relative
+/// precision however small it is, as a hot trap's few atoms below a level ask (`Degrees::above`).
+fn head_at(shape: f64, scales: &[f64], level: f64, nodes: &[(f64, f64)]) -> f64 {
+    let Some((&a, rest)) = scales.split_last() else {
+        return if shape > 0.0 { lower(shape, level) } else { 1.0 };
+    };
+    if shape == 0.0 && rest.is_empty() {
+        return -(-level / a).exp_m1();
+    }
+    nodes.iter().map(|&(x, w)| { let v = 0.5 * (x + 1.0); let u = level * v * v; w * level * v / a * (-(level - u) / a).exp() * head_at(shape, rest, u, nodes) }).sum()
+}
+
+/// P(Y + Σ_k a_k E_k > level) at a level above zero (`head_at`'s complement), by the same recursion -- e^{−L/a} +
+/// (1/a)∫₀^L e^{−(L−u)/a} P(rest > u) du in v, u = L v² --; with nothing left Y's Q(shape, u) or nothing.
 fn tail_at(shape: f64, scales: &[f64], level: f64, nodes: &[(f64, f64)]) -> f64 {
     let Some((&a, rest)) = scales.split_last() else {
         return if shape > 0.0 { crate::special::upper(shape, level) } else { 0.0 };
@@ -1295,7 +1430,14 @@ fn tail_at(shape: f64, scales: &[f64], level: f64, nodes: &[(f64, f64)]) -> f64 
     (-level / a).exp() + within
 }
 
-/// The Gauss–Legendre rules of 2, 4, 8, … nodes (`tail`), each made where it is first asked: a quantile's bisection
+/// P(s, x), the regularized lower incomplete gamma function at a whole or half-integer s: the lowered isothermal's momenta
+/// below its escape at the depth x (ensemble.rs `kept`, whose series takes the leading power exactly) and the power it
+/// subtracts.
+fn lower(s: f64, x: f64) -> f64 {
+    crate::ensemble::kept(s, x, x, x) + (s * x.ln() - x).exp() / crate::special::gamma(s + 1.0)
+}
+
+/// The Gauss–Legendre rules of 2, 4, 8, … nodes (`below`), each made where it is first asked: a quantile's bisection
 /// asks the same few rules at every level.
 #[derive(Default)]
 struct Rules(Vec<Vec<(f64, f64)>>);
@@ -1308,74 +1450,152 @@ impl Rules {
         }
         &self.0[times]
     }
-}
 
-/// P(Y + Σ_k a_k E_k > level) (`tail_at`), its nodes doubled from two until two levels' difference stops falling: the
-/// integrands are entire, the rule converges geometrically, and a difference no smaller than the one before is the
-/// round-off's floor (or nothing).
-fn tail(shape: f64, scales: &[f64], level: f64, rules: &mut Rules) -> f64 {
-    let mut last = tail_at(shape, scales, level, rules.doubled(0));
-    let mut before = f64::INFINITY;
-    for times in 1.. {
-        let next = tail_at(shape, scales, level, rules.doubled(times));
-        let difference = (next - last).abs();
-        if !(difference < before) {
-            break;
+    /// A recursion's value (`head_at`, `tail_at`) on rules of nodes doubled from two until two levels' difference stops
+    /// falling: the integrands are entire, the rule converges geometrically, and a difference no smaller than the one
+    /// before is the round-off's floor (or nothing).
+    fn converged(&mut self, at: impl Fn(&[(f64, f64)]) -> f64) -> f64 {
+        let mut last = at(self.doubled(0));
+        let mut before = f64::INFINITY;
+        for times in 1.. {
+            let next = at(self.doubled(times));
+            let difference = (next - last).abs();
+            if !(difference < before) {
+                break;
+            }
+            (last, before) = (next, difference);
         }
-        (last, before) = (next, difference);
+        last
     }
-    last
 }
 
-/// The L with P(Y + Σ_k a_k E_k > L) = share, 0 < share < 1 (`tail`; the scales ascending): the level, in units of
-/// k_B T, that the share `share` of the ensemble lies above (module documentation, # The reach's level). The tail falls
-/// monotonically from 1 at L = 0: the bracket's top is doubled from one until it is below the share, then halved until
-/// its two ends are neighbours in the format.
-fn quantile(shape: f64, scales: &[f64], share: f64) -> f64 {
-    let mut rules = Rules::default();
-    let mut above = |level: f64| tail(shape, scales, level, &mut rules) > share;
-    let (mut lo, mut hi) = (0.0, 1.0);
-    while above(hi) {
-        (lo, hi) = (hi, 2.0 * hi);
+/// P(Y + Σ_k a_k E_k ≤ level), as the incomplete gamma function's two expansions are taken (special.rs), each where it
+/// converges: up to the mean f/2 + Σ a_k its own recursion (`head_at`), whose exponential spans its interval and whose
+/// small values keep their own precision; above it one less the tail's (`tail_at`), whose values are small there -- the
+/// distribution's recursion at a level of many scales has its weight in the last 1/L of its interval, which the first
+/// rules do not see.
+fn below(shape: f64, scales: &[f64], level: f64, rules: &mut Rules) -> f64 {
+    if level <= shape + scales.iter().sum::<f64>() {
+        rules.converged(|nodes| head_at(shape, scales, level, nodes))
+    } else {
+        1.0 - rules.converged(|nodes| tail_at(shape, scales, level, nodes))
     }
+}
+
+/// The drawn energy's degrees in units of k_BT (module documentation, # The reach's level): Y's shape f/2, the held axes'
+/// scales s_i² ascending, and the depth d = D/k_BT.
+struct Degrees {
+    shape: f64,
+    scales: Vec<f64>,
+    depth: f64,
+}
+
+impl Degrees {
+    /// k: half the classical draw's quadratic degrees, f/2 and one a held axis.
+    fn half(&self) -> f64 {
+        self.shape + self.scales.len() as f64
+    }
+
+    /// The least scale a₀ -- one where an axis is free.
+    fn least(&self) -> f64 {
+        if self.shape > 0.0 { 1.0 } else { self.scales[0] }
+    }
+
+    /// The largest scale.
+    fn most(&self) -> f64 {
+        self.scales.last().copied().unwrap_or(1.0).max(1.0)
+    }
+
+    /// P(X > L) of the lowered isothermal at a level L ≤ a₀ d (module documentation, # The reach's level): 1 − [P(X ≤ L) −
+    /// A L^k e^{−d}/Γ(k + 1)]/P(k + 1, d), A = Π_i s_i^{−2}, of the thermal draw's distribution (`below`).
+    fn above(&self, level: f64, rules: &mut Rules) -> f64 {
+        let k = self.half();
+        let cone: f64 = self.scales.iter().map(|a| a.ln()).sum();
+        let cut = (k * level.ln() - self.depth - cone).exp() / crate::special::gamma(k + 1.0);
+        1.0 - (below(self.shape, &self.scales, level, rules) - cut) / lower(k + 1.0, self.depth)
+    }
+
+    /// The level (in units of k_BT) that the share `share` of the lowered isothermal lies above, 0 < share < 1 (module
+    /// documentation, # The reach's level): its tail falls monotonically from one at nothing to the least scale's depth
+    /// a₀ d, and the bracket between them is halved until its two ends are neighbours in the format; where the zero point
+    /// lifts more than the share above a₀ d, the largest scale's depth, which every atom of the harmonic form is below.
+    fn level(&self, share: f64) -> f64 {
+        let mut rules = Rules::default();
+        let mut above = |level: f64| self.above(level, &mut rules) > share;
+        let (mut lo, mut hi) = (0.0, self.least() * self.depth);
+        if above(hi) {
+            return self.most() * self.depth;
+        }
+        loop {
+            let middle = 0.5 * (lo + hi);
+            if !(lo < middle && middle < hi) {
+                return hi;
+            }
+            if above(middle) { lo = middle } else { hi = middle }
+        }
+    }
+}
+
+/// The drawn energy's degrees of a trap at temperature T_r (µK) (`Degrees`), and the squares s_i² per axis: per principal
+/// axis along which the trap holds the atom an exponential scaled by the Wigner factor's s_i² = x_i coth x_i, x_i =
+/// ħω_i/2k_BT_r, per axis it does not hold the momentum's degree alone; its depth −V_min over k_BT_r.
+fn degrees(trap: &Trap, temperature_uk: f64) -> (Degrees, [f64; 3]) {
+    let kt = KT_PER_UK * temperature_uk;
+    let squares = trap.frequencies.map(|omega| { let x = 0.5 * omega / kt; if x > 0.0 { x / x.tanh() } else { 1.0 } });
+    let mut scales: Vec<f64> = (0..3).filter(|&i| trap.frequencies[i] > 0.0).map(|i| squares[i]).collect();
+    scales.sort_by(f64::total_cmp);
+    (Degrees { shape: 0.5 * (3 - scales.len()) as f64, scales, depth: -trap.minimum / kt }, squares)
+}
+
+/// The energy above V_min (rad/µs) of the reach of a trap at temperature T_r (µK) that leaves out the share s (module
+/// documentation, # The reach's level) -- the (1 − s) quantile of an atom's energy in the lowered isothermal as drawn at
+/// T_r (`Degrees::level`) --, and the squares s_i² per axis; at T_r = ∞ its limit, the top (`top`), every s_i² one.
+fn energy_at(trap: &Trap, temperature_uk: f64, share: f64) -> (f64, [f64; 3]) {
+    if temperature_uk.is_infinite() {
+        return (top(trap, share), [1.0; 3]);
+    }
+    let (degrees, squares) = degrees(trap, temperature_uk);
+    (degrees.level(share) * KT_PER_UK * temperature_uk, squares)
+}
+
+/// The energy above V_min (rad/µs) that the reach's level rises to with its temperature (module documentation, # The
+/// reach's level): at T_r → ∞ every s_i → 1 and the energy over the depth D has the density ∝ u^{k−1}(1 − u) on [0, 1],
+/// whose share above q is 1 − (k + 1)q^k + k q^{k+1}, falling from one to nothing -- the q where it is s, by bisection to
+/// the format's resolution, times D.
+fn top(trap: &Trap, share: f64) -> f64 {
+    let k = degrees(trap, 1.0).0.half();
+    let above = |q: f64| 1.0 - (k + 1.0) * q.powf(k) + k * q.powf(k + 1.0) > share;
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
     loop {
         let middle = 0.5 * (lo + hi);
         if !(lo < middle && middle < hi) {
-            return hi;
+            return -trap.minimum * hi;
         }
         if above(middle) { lo = middle } else { hi = middle }
     }
 }
 
-/// The energy above V_min (rad/µs) of the reach of a trap at temperature T_r (µK) that leaves out the share s (module
-/// documentation, # The reach's level) -- the (1 − s) quantile of an atom's energy in the ensemble as drawn at T_r, per
-/// principal axis along which the trap holds the atom an exponential scaled by the Wigner factor's s_i² = x_i coth x_i,
-/// x_i = ħω_i/2k_BT_r, per axis it does not hold the momentum's degree alone --, and the squares s_i² per axis.
-fn energy_at(trap: &Trap, temperature_uk: f64, share: f64) -> (f64, [f64; 3]) {
-    let kt = KT_PER_UK * temperature_uk;
-    let squares = trap.frequencies.map(|omega| { let x = 0.5 * omega / kt; if x > 0.0 { x / x.tanh() } else { 1.0 } });
-    let mut held: Vec<f64> = (0..3).filter(|&i| trap.frequencies[i] > 0.0).map(|i| squares[i]).collect();
-    held.sort_by(f64::total_cmp);
-    (quantile(0.5 * (3 - held.len()) as f64, &held, share) * kt, squares)
-}
-
 /// The least temperature (µK) at which the reach of a trap that leaves out the share s holds the level `level` (rad/µs,
-/// the prepared energy; module documentation, # The reach's level), from a temperature `from` whose reach does not. The
-/// reach's energy rises with its temperature -- every oscillator's mean energy (ħω_i/2) coth(ħω_i/2k_BT) and the free
-/// axes' scale k_BT rise with it, and with them every quantile of their sum --, so the bracket's top is doubled from
-/// `from` until it holds the level, then the bracket halved until its two ends are neighbours in the format.
+/// the prepared energy; module documentation, # The reach's level), from a temperature `from` whose reach does not: the
+/// reach's energy rises with its temperature towards its top (`top`), its limit at T_r → ∞, so on the inverse temperature
+/// the bracket is [0, 1/from] -- 0 the top's, which holds every level below it -- and it is halved until its two ends are
+/// neighbours in the format. None (∞) where the level is at the top or above it: no temperature's reach holds it -- an
+/// atom at the trap's top or above its depth, leaving or lost, is no atom of a temperature's ensemble.
 pub fn holding(trap: &Trap, level: f64, share: f64, from: f64) -> f64 {
-    let holds = |t: f64| trap.minimum + energy_at(trap, t, share).0 >= level;
-    let (mut lo, mut hi) = (from, from);
-    while !holds(hi) {
-        (lo, hi) = (hi, 2.0 * hi);
+    if level - trap.minimum >= top(trap, share) {
+        return f64::INFINITY;
+    }
+    let holds = |beta: f64| trap.minimum + energy_at(trap, 1.0 / beta, share).0 >= level;
+    let (mut lo, mut hi) = (0.0, 1.0 / from);
+    if holds(hi) {
+        return from;
     }
     loop {
         let middle = 0.5 * (lo + hi);
         if !(lo < middle && middle < hi) {
-            return hi;
+            return 1.0 / lo;
         }
-        if holds(middle) { hi = middle } else { lo = middle }
+        if holds(middle) { lo = middle } else { hi = middle }
     }
 }
 
@@ -1398,6 +1618,19 @@ impl Model {
         };
         reach.cell = self.reach_box(&reach);
         reach
+    }
+
+    /// The reach that holds, beside `reach`, the prepared energies up to `level` (rad/µs) within the trap's region (module
+    /// documentation, # The trap's region): its level inside raised to it, its speeds with it; its temperature and its
+    /// level outside kept. The same reach where it holds the level already.
+    pub fn inside_to(&self, reach: &Reach, level: f64) -> Reach {
+        if level - reach.minimum <= reach.energy {
+            return reach.clone();
+        }
+        let energy = level - reach.minimum;
+        let mut wider = Reach { energy, speed: (2.0 * self.hbar_over_mass * energy).sqrt(), ..reach.clone() };
+        wider.cell = self.reach_box(&wider);
+        wider
     }
 
     /// The reach that holds, beside `reach`, the prepared energies up to `level` (rad/µs) outside the trap's region (module
@@ -1594,10 +1827,12 @@ impl Model {
             shifted: OnceLock::new(),
             forces: (0..self.clusters.len()).map(|_| OnceLock::new()).collect(),
             across: std::array::from_fn(|_| OnceLock::new()),
-            drives: std::array::from_fn(|_| OnceLock::new()),
+            tails: std::array::from_fn(|_| OnceLock::new()),
+            folds: std::array::from_fn(|_| Mutex::new(vec![])),
             shifts: std::array::from_fn(|_| OnceLock::new()),
             diagonal: OnceLock::new(),
             gaps: Mutex::new(HashMap::new()),
+            slopes: Mutex::new(HashMap::new()),
             terms: Mutex::new(HashMap::new()),
             kept: OnceLock::new(),
             moving: OnceLock::new(),
@@ -1750,35 +1985,35 @@ mod tests {
         out
     }
 
-    /// A region's bounds hold at every point of its cell and are the values on its centre point (module documentation,
-    /// # Provable extrema): on the six-beam lattice, each beam's modulus between its least and its largest, each beam pair's
-    /// coefficient within its radius of the centre's and its
-    /// gradient within its slope; every carrier's coherent coupling |Σ_l a_l X^f_l[e,s]|, its columns and its units' columns within
-    /// their bounds; the far light's energies' differences within their slack (`Model::gap`) and their gradients within the gap's --
-    /// and on a cell a thousand times smaller the couplings' bounds within that factor of the centre's values.
-    /// The reach's level is the quantile of its ensemble's energy (module documentation, # The reach's level). Classical
-    /// (every scale one): Q(n/2, L) = s to the format's resolution for the n = 3 to 6 degrees of a trap that holds along
-    /// none to three of its axes; one oscillator's is ln(1/s); three axes' 12.89 at s = z²/(2¹⁴ + z²), where
+    /// The thermal draw's level (module documentation, # The reach's level), its ensemble not lowered: of a depth beyond
+    /// every level asked, where e^{−d} is nothing and P(k + 1, d) one.
+    fn thermal(shape: f64, scales: &[f64], share: f64) -> f64 {
+        Degrees { shape, scales: scales.to_vec(), depth: 1e3 }.level(share)
+    }
+
+    /// The reach's level is the quantile of its ensemble's energy (module documentation, # The reach's level). Of the thermal
+    /// draw, classical (every scale one): Q(n/2, L) = s to the format's resolution for the n = 3 to 6 degrees of a trap that
+    /// holds along none to three of its axes; one oscillator's is ln(1/s); three axes' 12.89 at s = z²/(2¹⁴ + z²), where
     /// ln(1/s) = 8.32 left Q(3, 8.32) = 1.07 % above it; scales equal to nine digits are the same level. With the Wigner
     /// factor (two axes of one scale a, one of b): P(X > L) = e^{−L/a}(1 + L/a) + e^{−L/b}(1 − e^{−cL}(1 + cL))/(a c)²,
     /// c = 1/a − 1/b, is s at the level -- at s² = 1.66, 1.66, 1.04 and at R8_R5051's 7.2, 7.2, 30.6 (271 k_BT). On
-    /// R2_RECOIL's tweezer at 30 µK the reach's level is that of its own three scales, a trap free along an axis has
-    /// five degrees, and the ensemble's kinetic temperatures are s_i² T.
+    /// R2_RECOIL's tweezer at 30 µK the reach's level is that of its own three scales and its depth, a trap free along an
+    /// axis has five degrees, and the ensemble's kinetic temperatures are s_i² T.
     #[test]
     fn the_reach_s_level_is_the_quantile_of_its_trap_s_degrees_of_freedom() {
         let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
         for held in 0..=3 {
             let (shape, scales) = (0.5 * (3 - held) as f64, vec![1.0; held]);
-            let level = quantile(shape, &scales, share);
+            let level = thermal(shape, &scales, share);
             let above = crate::special::upper(shape + held as f64, level);
             assert!((above - share).abs() <= 1e-11 * share, "{held} axes held: Q({}, {level}) = {above} against s = {share}", shape + held as f64);
         }
-        assert!((quantile(0.0, &[1.0], share) - (1.0 / share).ln()).abs() <= 1e-12 * (1.0 / share).ln(), "one oscillator's level is ln(1/s)");
-        let classical = quantile(0.0, &[1.0; 3], share);
+        assert!((thermal(0.0, &[1.0], share) - (1.0 / share).ln()).abs() <= 1e-12 * (1.0 / share).ln(), "one oscillator's level is ln(1/s)");
+        let classical = thermal(0.0, &[1.0; 3], share);
         assert!((classical - 12.89).abs() < 0.005 && (crate::special::upper(3.0, (1.0 / share).ln()) - 0.01072).abs() < 1e-5, "six degrees: {classical}");
-        assert!((quantile(0.0, &[1.0, 1.0 + 1e-9, 1.0 + 2e-9], share) - classical).abs() <= 1e-8 * classical, "scales equal to nine digits");
+        assert!((thermal(0.0, &[1.0, 1.0 + 1e-9, 1.0 + 2e-9], share) - classical).abs() <= 1e-8 * classical, "scales equal to nine digits");
         for (a, b, expected) in [(1.657, 1.041, None), (7.2, 30.6, Some(271.0))] {
-            let level = quantile(0.0, &if a < b { [a, a, b] } else { [b, a, a] }, share);
+            let level = thermal(0.0, &if a < b { [a, a, b] } else { [b, a, a] }, share);
             let c = 1.0 / a - 1.0 / b;
             let closed = (-level / a).exp() * (1.0 + level / a) + (-level / b).exp() * (1.0 - (-c * level).exp() * (1.0 + c * level)) / (a * c).powi(2);
             assert!((closed - share).abs() <= 1e-10 * share && expected.is_none_or(|l: f64| (level - l).abs() < 1.0), "scales {a}, {a}, {b}: the closed form's {closed} at L = {level} against s = {share}");
@@ -1795,11 +2030,104 @@ mod tests {
         scales.sort_by(f64::total_cmp);
         assert!(squares.iter().all(|s| *s > 1.0 && *s < 1.01) && held.kinetic_uk == squares.map(|s| s * 30.0), "a tweezer at 30 µK is nearly classical: s² = {squares:?}");
         let across: Vec<f64> = { let mut two = vec![squares[0], squares[1]]; two.sort_by(f64::total_cmp); two };
-        assert!((held.energy - quantile(0.0, &scales, share) * kt).abs() <= 1e-12 * held.energy && (free.energy - quantile(0.5, &across, share) * kt).abs() <= 1e-12 * free.energy, "the degrees are the trap's: {} and {}", held.energy / kt, free.energy / kt);
-        assert!(held.energy / kt > classical && held.energy / kt < 1.01 * classical && free.energy < held.energy, "the levels: {} and {} k_BT against the classical {classical}", held.energy / kt, free.energy / kt);
+        let depth = -trap.minimum / kt;
+        let (own, five) = (Degrees { shape: 0.0, scales, depth }.level(share), Degrees { shape: 0.5, scales: across, depth }.level(share));
+        assert!((held.energy - own * kt).abs() <= 1e-12 * held.energy && (free.energy - five * kt).abs() <= 1e-12 * free.energy, "the degrees are the trap's: {} and {}", held.energy / kt, free.energy / kt);
+        assert!(held.energy / kt > classical && held.energy / kt < 1.01 * classical && free.energy < held.energy, "the levels: {} and {} k_BT against the classical {classical} (depth {depth} k_BT)", held.energy / kt, free.energy / kt);
         assert!((held.speed / (2.0 * model.hbar_over_mass * (1.0 / share).ln() * kt).sqrt() - 1.245).abs() < 0.005, "the reach's speed, 1.245 of the Boltzmann factor's level's");
     }
 
+    /// The reach's level is the quantile of the lowered isothermal, the initial ensemble's bound atoms alone, below the depth
+    /// (module documentation, # The reach's level). A harmonic well of depth D = 1.5 mK, a tweezer's frequencies (100 kHz
+    /// across, 15 kHz along: s² up to 1.002 at 30 µK), from 30 µK to 1 mK: the reach's level is below D, rises with T_r
+    /// and at T_r → ∞ to its top (the Beta(3, 2) quantile, 0.9936 D), and is the level at which the share s of the
+    /// lowered isothermal lies above -- that share integrated directly over the classical draw's energies, the radial
+    /// two's sum r (of the measure r dr) and the axial one's e, of the weight (e^{−r−e} − e^{−d})₊ where a r + b e > L
+    /// (the inner integral in closed form, the outer by Gauss–Legendre on the pieces between its kinks, a r = L and the
+    /// depth's edge), and the level that share's bisection to 10⁻¹⁰ (D 1.5 mK at 30 µK: 12.912 k_BT, 387 µK; at 300 µK
+    /// 4.935 k_BT, 1480 µK). Its holding temperature holds a level, and no temperature holds one at the top.
+    #[test]
+    fn a_reach_s_level_is_its_lowered_isothermal_s_quantile_below_the_depth() {
+        let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
+        let per_khz = std::f64::consts::TAU * 1e-3;
+        let depth_uk = 1500.0;
+        let trap = Trap { centre: [0.0; 3], minimum: -depth_uk * KT_PER_UK, axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], frequencies: [100.0 * per_khz, 100.0 * per_khz, 15.0 * per_khz], lab: [0.0; 3] };
+        let rule = crate::special::gauss_legendre(64);
+        // ∫ f over [lo, hi] by the rule.
+        let integral = |f: &dyn Fn(f64) -> f64, lo: f64, hi: f64| -> f64 { rule.iter().map(|&(x, w)| 0.5 * (hi - lo) * w * f(lo + 0.5 * (hi - lo) * (x + 1.0))).sum() };
+        let mut last = 0.0;
+        for t in [30.0, 100.0, 300.0, 1000.0] {
+            let (degrees, _) = degrees(&trap, t);
+            let (a, b, d) = (degrees.scales[1], degrees.scales[0], degrees.depth);
+            assert!(degrees.scales[2] == a && b < a, "two radial scales and an axial one");
+            // The share above L of the lowered isothermal, directly: per r, ∫ (e^{−r−e} − e^{−d}) de over e from max(0, (L − a r)/b)
+            // to d − r.
+            let share_above = |level: f64| -> f64 {
+                let inner = |r: f64| -> f64 {
+                    let (lo, hi) = (((level - a * r) / b).max(0.0), d - r);
+                    if hi <= lo { 0.0 } else { r * ((-r - lo).exp() - (-r - hi).exp() - (-d).exp() * (hi - lo)) }
+                };
+                let all = |r: f64| r * ((-r).exp() - (-d).exp() - (-d).exp() * (d - r));
+                let mut cuts: Vec<f64> = [level / a, (b * d - level) / (b - a)].into_iter().filter(|&c| c > 0.0 && c < d).collect();
+                cuts.sort_by(f64::total_cmp);
+                let ends: Vec<f64> = std::iter::once(0.0).chain(cuts).chain(std::iter::once(d)).collect();
+                let part: f64 = ends.windows(2).map(|w| integral(&inner, w[0], w[1])).sum();
+                part / integral(&all, 0.0, d)
+            };
+            let (mut lo, mut hi) = (0.0, a.min(b) * d);
+            while hi - lo > 1e-10 * hi {
+                let middle = 0.5 * (lo + hi);
+                if share_above(middle) > share { lo = middle } else { hi = middle }
+            }
+            let level = degrees.level(share);
+            let energy = energy_at(&trap, t, share).0;
+            assert!((level - hi).abs() <= 1e-8 * hi, "{t} µK: the level {level} k_BT against the integrated quantile {hi} (depth {d} k_BT)");
+            assert!(energy < -trap.minimum && energy > last, "{t} µK: the level {} µK below the depth and above the colder one's", energy / KT_PER_UK);
+            last = energy;
+            let warmer = holding(&trap, trap.minimum + energy, share, 0.5 * t);
+            assert!((warmer - t).abs() <= 1e-9 * t, "{t} µK: its own level's holding temperature {warmer}");
+        }
+        let top = top(&trap, share);
+        assert!((top / (-trap.minimum) - 0.9936).abs() < 5e-5 && last < top, "the top {} D above 1 mK's level {}", top / -trap.minimum, last / -trap.minimum);
+        assert!(holding(&trap, trap.minimum + top, share, 1000.0).is_infinite() && holding(&trap, 0.0, share, 1000.0).is_infinite(), "nothing holds the top or the far value");
+    }
+
+    /// A path no temperature's reach holds is held by the region's level raised to it, the temperature kept (module
+    /// documentation, # The trap's region): S2Q's tweezer (its sanity scene) at 30 µK, its reach's level the lowered
+    /// isothermal's quantile, below the depth; a path's energy of 141.5 rad/µs above the bottom -- an atom of that scene's
+    /// run, above the depth of 108.4 -- has no holding temperature; raised to it, the reach holds an atom of that energy at
+    /// the trap's centre, which the temperature's does not, keeps its temperature, its level outside and its kinetic
+    /// temperatures, and is the same reach where it is asked for a level it holds.
+    #[test]
+    fn a_path_above_the_depth_is_held_by_the_region_s_level_at_the_temperature() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("S2Q.json");
+        let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+        let light = Light::new(&request);
+        let model = Model::new(&request, &light, &[]).unwrap();
+        let state = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
+        let p: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
+        let reach = model.reach(&trap, &p, 30.0, share);
+        let (degrees, _) = degrees(&trap, 30.0);
+        assert!((reach.energy - degrees.level(share) * KT_PER_UK * 30.0).abs() <= 1e-12 * reach.energy && reach.energy < -trap.minimum, "the level {} below the depth {}", reach.energy, -trap.minimum);
+        let level = trap.minimum + 141.5;
+        assert!(141.5 > -trap.minimum && holding(&trap, level, share, 30.0).is_infinite(), "no temperature holds 141.5 above the bottom (depth {})", -trap.minimum);
+        let raised = model.inside_to(&reach, level);
+        let kappa = [0.0, 0.0, (2.0 * 141.5 / model.hbar_over_mass).sqrt() * (1.0 - 1e-12)];
+        assert!(model.holds(&raised, trap.centre, kappa) && !model.holds(&reach, trap.centre, kappa), "the raised reach holds the path's energy at the centre");
+        assert!(raised.temperature_uk == 30.0 && raised.outside == reach.outside && raised.kinetic_uk == reach.kinetic_uk && raised.energy == 141.5, "the temperature and the level outside kept");
+        assert!((raised.speed - (2.0 * model.hbar_over_mass * 141.5).sqrt()).abs() <= 1e-12 * raised.speed && raised.cell.iter().zip(&reach.cell).all(|(a, b)| a[0] <= b[0] && a[1] >= b[1]), "its speeds and its box grown");
+        let same = model.inside_to(&reach, trap.minimum + 0.5 * reach.energy);
+        assert!(same.energy == reach.energy && same.cell == reach.cell && same.speed == reach.speed, "a level held already changes nothing");
+    }
+
+    /// A region's bounds hold at every point of its cell and are the values on its centre point (module documentation,
+    /// # Provable extrema): on the six-beam lattice, each beam's modulus between its least and its largest, each beam pair's
+    /// coefficient within its radius of the centre's and its
+    /// gradient within its slope; every carrier's coherent coupling |Σ_l a_l X^f_l[e,s]|, its columns and its units' columns within
+    /// their bounds; the far light's energies' differences within their slack (`Model::gap`) and their gradients within the gap's --
+    /// and on a cell a thousand times smaller the couplings' bounds within that factor of the centre's values.
     #[test]
     fn a_region_s_bounds_hold_over_its_cell_and_are_the_values_at_its_centre() {
         let model = lattice();
@@ -1852,7 +2180,7 @@ mod tests {
                 }
                 for (x, y) in [(0, 3), (GROUND, 1), (GROUND + 5, 6), (STATES - 1, GROUND)] {
                     let g = (0..3).map(|i| (gradient[x][i] - gradient[y][i]).powi(2)).sum::<f64>().sqrt();
-                    assert!(within(g, model.gap(x, y, &region, 0.0).all_slope.norm().upper()), "|∇(E_{x} − E_{y})| {g} at {r:?}");
+                    assert!(within(g, model.gap_slope(x, y, &region, false).norm().upper()), "|∇(E_{x} − E_{y})| {g} at {r:?}");
                 }
                 for (cc, bound) in model.carriers.iter().zip(couplings) {
                     let mut units: Vec<usize> = cc.units.clone();
@@ -1924,9 +2252,9 @@ mod tests {
         };
         let trap = model.trap(&p, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &p, 20.0, 2e-3);
-        let s = |r: &Region| model.folds(b, 0, r, usize::MAX)[0];
-        let a = |r: &Region| model.folds(b, 0, r, usize::MAX)[1];
-        let other = |r: &Region| model.folds(3, 0, r, usize::MAX)[0];
+        let s = |r: &Region| model.folds(b, 0, r)[0];
+        let a = |r: &Region| model.folds(b, 0, r)[1];
+        let other = |r: &Region| model.folds(3, 0, r)[0];
         let together = model.bounds_over(&reach, 0.5, 0.5, &[&s, &a, &other]);
         let alone: Vec<f64> = [&s as &dyn Fn(&Region) -> f64, &a, &other].iter().map(|q| model.bounds_over(&reach, 0.5, 0.5, &[*q])[0]).collect();
         assert_eq!(together, alone);
@@ -1950,7 +2278,7 @@ mod tests {
         };
         let trap = model.trap(&p, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &p, 20.0, 2e-3);
-        let s = |r: &Region| model.folds(b, 0, r, usize::MAX)[0];
+        let s = |r: &Region| model.folds(b, 0, r)[0];
         let largest = model.extents_over(&reach, 1e-3, &[&s])[0];
         for (target, kept) in [(0.45, true), (0.2, false), (0.7, true)] {
             let (scale, asked) = (target / largest, AtomicUsize::new(0));
@@ -2055,11 +2383,11 @@ mod tests {
     }
 
     /// A reach above the potential's far value is held within the trap's region (module documentation, # The trap's
-    /// region). R2_RECOIL's tweezer: at 30 µK its level lies below the far value, the sublevel set whole; at the least
-    /// temperature whose level lies half the trap's depth above it (`holding`: one temperature an ulp lower does not hold
-    /// it), the set within the region -- its box the trap beam's ellipsoid u ≤ 19, the focus held at rest and at the
-    /// speed the level leaves there, a point on the axis at six Rayleigh ranges (|a|² = 1/37, outside the region) not
-    /// held even at rest, though bound. Holding that point's prepared energy outside the region too (`outside_to`) holds
+    /// region). R2_RECOIL's tweezer: at 30 µK its level lies below the far value, the sublevel set whole; no temperature
+    /// holds a level half the trap's depth above it (`holding`), and raised there within the region (`inside_to`) the set
+    /// is the region's -- its box the trap beam's ellipsoid u ≤ 19, the focus held at rest and at the speed the level leaves
+    /// there, a point on the axis at six Rayleigh ranges (|a|² = 1/37, outside the region) not held even at rest, though
+    /// bound, the level outside the region the temperature's. Holding that point's prepared energy outside the region too (`outside_to`) holds
     /// it, and everything the reach held before; its box is larger.
     #[test]
     fn a_reach_above_the_far_value_is_held_within_the_trap_s_region() {
@@ -2070,13 +2398,12 @@ mod tests {
         let cold = model.reach(&trap, &p, 30.0, share);
         assert!(cold.minimum + cold.energy < 0.0 && cold.outside == cold.energy && cold.cell.iter().all(|c| c[1].is_finite()), "{cold:?}");
         let level = -0.5 * trap.minimum;
-        let t = holding(&trap, level, share, 30.0);
-        assert!(trap.minimum + energy_at(&trap, t, share).0 >= level && trap.minimum + energy_at(&trap, t * (1.0 - f64::EPSILON), share).0 < level, "{t} µK");
-        let hot = model.reach(&trap, &p, t, share);
+        assert!(holding(&trap, level, share, 30.0).is_infinite(), "no temperature holds a level above the far value");
+        let hot = model.inside_to(&cold, level);
         let beam = model.light.beams[model.light.frequencies[model.light.trap].beams[0]];
         let (w, z, n) = (beam.waist.unwrap(), beam.rayleigh().unwrap(), beam.direction);
         let region: [f64; 3] = std::array::from_fn(|a| (19.0 * (0.5 * w * w * (1.0 - n[a] * n[a]) + z * z * n[a] * n[a])).sqrt());
-        assert!(hot.outside == f64::NEG_INFINITY && (0..3).all(|a| (hot.cell[a][1] - region[a]).abs() <= 1e-12 * region[a]), "{:?} against {region:?}", hot.cell);
+        assert!(hot.outside == cold.outside && hot.temperature_uk == 30.0 && (0..3).all(|a| (hot.cell[a][1] - region[a]).abs() <= 1e-12 * region[a]), "{:?} against {region:?}", hot.cell);
         let kinetic = |r: [f64; 3]| model.room(&hot, r, &prepared);
         let focus = [0.0; 3];
         let at_rest = |r: [f64; 3]| [0.0; 3].map(|x: f64| x + 0.0 * r[0]);

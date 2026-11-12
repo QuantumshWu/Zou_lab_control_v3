@@ -302,10 +302,8 @@ impl Own {
     }
 
     /// The norm ‖u‖ over a cell of half-widths `half` of a complex vector u(c + d) = u(c) + Σ_a d_a ∂_a u(c) + R, ‖R‖ ≤
-    /// `remainder`: with δ = u(c + d) − u(c), ‖δ‖ ≤ w = Σ_a h_a ‖∂_a u(c)‖ + R, and x = Re⟨u, δ⟩/‖u‖, ‖u + δ‖² = (‖u‖ + x)² +
-    /// ‖δ‖² − x², so 0 ≤ ‖u + δ‖ − ‖u‖ − x ≤ ‖δ‖²/(2(‖u‖ − ‖δ‖)): its gradient Re⟨u, ∂_a u⟩/‖u‖ and its remainder R +
-    /// w²/(2(‖u‖ − w)), where ‖u‖ > w; else the range ‖u‖ ± w, at least nothing. Its range ‖u(c)‖ ± `first` within
-    /// [0, `blind`]. A turning phase at constant modulus (a counter-propagating pair's a₁* a₂ = |a₁||a₂| e^{2ikx}) moves the
+    /// `remainder`: with δ = u(c + d) − u(c), ‖δ‖ ≤ w = Σ_a h_a ‖∂_a u(c)‖ + R, at most `first` (`measured`): its gradient
+    /// Re⟨u, ∂_a u⟩/‖u‖ and its remainder R + B(w), within ‖u(c)‖ ± w, [0, `blind`]. A turning phase at constant modulus (a counter-propagating pair's a₁* a₂ = |a₁||a₂| e^{2ikx}) moves the
     /// modulus by the second order, not by the 2k h each part moves. On the whole space, [0, blind].
     pub(crate) fn norm(value: &[C64], slopes: [&[C64]; 3], remainder: f64, first: f64, blind: f64, half: [f64; 3]) -> Own {
         let n = value.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
@@ -314,17 +312,29 @@ impl Own {
         }
         let steep: f64 = (0..3).map(|a| times(half[a], slopes[a].iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt())).sum();
         let dots = std::array::from_fn(|a| times(half[a], value.iter().zip(slopes[a]).map(|(u, g)| (u.conj() * *g).re).sum::<f64>()));
-        measured(n, dots, remainder, (steep + remainder).min(first), first, blind)
+        measured(n, dots, remainder, (steep + remainder).min(first), blind)
     }
 }
 
 /// The norm of a quantity over a cell (`Own::norm`, `Form::norm`) from its centre value's norm n, Re⟨u(c), first_a⟩ per side
-/// (its first order times n), its remainder R, a bound w of |u − u(c)| over the cell, how far it moves and how large it is:
-/// where n > w, the first order Re⟨u, first_a⟩/n and the remainder R + w²/(2(n − w)); else the range n ± w, at least
-/// nothing; within n ± `moved`, at most `most`.
-fn measured(n: f64, dots: [f64; 3], rest: f64, w: f64, moved: f64, most: f64) -> Own {
-    let own = if n > w { Own::made(n, dots.map(|x| x / n), rest + w * w / (2.0 * (n - w)), f64::NEG_INFINITY, f64::INFINITY) } else { Own::range(n, (n - w).max(0.0), n + w) };
-    own.within((n - moved).max(0.0), (n + moved).min(most))
+/// (its first order times n), its remainder R, a bound w of |δ| = |u − u(c)| over the cell and how large it is at most:
+/// the first order Re⟨u, first_a⟩/n and the remainder R + B(w), B(w) the largest of |u + δ| − n − Re⟨u, δ⟩/n over |δ| ≤ w;
+/// within n ± w, at least nothing and at most `most`. With δ = −t û + p (û = u/n; p the rest, |p|² ≤ w² − t²), |u + δ| −
+/// n + t = ((n − t)² + w² − t²)^{1/2} − n + t, whose slope in t is 1 − n/(n² − 2nt + w²)^{1/2}: it rises to t = w²/2n, where
+/// it is w²/2n, and where that is beyond w (w > 2n) to t = w, where it is 2(w − n) -- so B(w) = w²/2n up to w = 2n and
+/// 2(w − n) beyond, continuous with its slope at 2n, and never below nothing. (As w²/(2(n − w)), the first bound of |δ|²
+/// over the least |u|, it had no value from w = n on and another rule there, the range n ± w: a modulus whose centre value
+/// came within its movement of w read a remainder 18 times its range on one cell and none on its parent, and the
+/// Gershgorin radii of PGC3D's excited states moved the drives' distances by a first order that did not shrink.) Of a
+/// quantity that is nothing at the centre, no first order: the range [0, w].
+fn measured(n: f64, dots: [f64; 3], rest: f64, w: f64, most: f64) -> Own {
+    let own = if n > 0.0 {
+        let bend = if w <= 2.0 * n { w * w / (2.0 * n) } else { 2.0 * (w - n) };
+        Own::made(n, dots.map(|x| x / n), rest + bend, f64::NEG_INFINITY, f64::INFINITY)
+    } else {
+        Own::range(n, 0.0, w)
+    };
+    own.within((n - w).max(0.0), (n + w).min(most))
 }
 
 /// A vector space a quantity over a cell takes its values in (`Form`): the reals, the complex numbers, real and complex
@@ -433,13 +443,12 @@ impl<T: Space> Form<T> {
     }
 
     /// Its norm over the cell in its own form (`measured`): the value's norm, its first order Re⟨f, first_a⟩/|f| and its
-    /// remainder R + w²/(2(|f| − w)) -- with δ = f(c + d) − f(c), |δ| ≤ w, and x = Re⟨f, δ⟩/|f|, |f + δ|² = (|f| + x)² + |δ|²
-    /// − x², so 0 ≤ |f + δ| − |f| − x ≤ |δ|²/(2(|f| − |δ|)) --, within |f| ± `moved` and at most `most`. A vector that turns
+    /// remainder R + B(w), w its width, within |f| ± w and at most `most`. A vector that turns
     /// at constant length (a counter-propagating pair's coefficient, a gradient along a fringe's crest) moves its norm by the
     /// second order, not by its first order's size.
     pub(crate) fn norm(&self) -> Own {
         let n = self.value.size();
-        measured(n, self.first.map(|x| self.value.dot(x)), self.rest, self.width(), self.moved, self.most)
+        measured(n, self.first.map(|x| self.value.dot(x)), self.rest, self.width(), self.most)
     }
 }
 
@@ -494,7 +503,7 @@ pub(crate) fn product<A: Space, B: Space, R: Space>(x: &Form<A>, y: &Form<B>, p:
 pub(crate) fn norm_of<T: Space>(parts: &[Form<T>]) -> Own {
     let euclid = |f: &dyn Fn(&Form<T>) -> f64| parts.iter().map(|x| f(x).powi(2)).sum::<f64>().sqrt();
     let dots = std::array::from_fn(|a| parts.iter().map(|x| x.value.dot(x.first[a])).sum());
-    measured(euclid(&|x| x.value.size()), dots, euclid(&|x| x.rest), euclid(&|x| x.width()), euclid(&|x| x.moved), euclid(&|x| x.most))
+    measured(euclid(&|x| x.value.size()), dots, euclid(&|x| x.rest), euclid(&|x| x.width()), euclid(&|x| x.most))
 }
 
 impl Own {

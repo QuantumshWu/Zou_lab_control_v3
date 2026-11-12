@@ -628,7 +628,7 @@ impl Model {
         let (slope, acceleration) = *region.moving.get_or_init(|| {
             let near: Vec<Shift> = (0..STATES).map(|s| self.near_level(s, region)).collect();
             let pairs = (0..STATES).flat_map(|i| (i + 1..STATES).map(move |j| (i, j)));
-            let slope = pairs.map(|(i, j)| Shift::of(Own::constant(0.0), self.gap(i, j, region, 0.0).all_slope).add(&near[i]).sub(&near[j]).steepness()).fold(Own::constant(0.0), Own::max);
+            let slope = pairs.map(|(i, j)| Shift::of(Own::constant(0.0), self.gap_slope(i, j, region, false)).add(&near[i]).sub(&near[j]).steepness()).fold(Own::constant(0.0), Own::max);
             (slope, self.acceleration(region, &|_| true))
         });
         let pace = region.pace;
@@ -816,7 +816,8 @@ impl Model {
                     });
                     let (x, e) = (d.excited, GROUND + d.excited);
                     let gap = self.gap(e, g, region, nu);
-                    let (levels, slope) = if d.level == Level::Atom { (gap.taken, gap.taken_slope) } else { (gap.all, gap.all_slope) };
+                    let atom = d.level == Level::Atom;
+                    let (levels, slope) = (if atom { gap.taken } else { gap.all }, self.gap_slope(e, g, region, atom));
                     let still = others.band.rad.add(radii[e]).add(sigma[x]);
                     Across::new(region.coherent_own(&d.beams), levels.sub(others.band.mid), slope.sub(others.slope), still.add(region.pace.scale(*wave)), still, d.gamma)
                 })
@@ -871,59 +872,69 @@ impl Model {
         })
     }
 
-    /// A ground state's drives' gates over a region (module documentation, # Levels, # The tail rule), per place of the tail
-    /// rule's order: the gate of its drives at the atom -- the folded shares from there down, or the place's largest
-    /// series gate where that is larger -- and the place's largest sweep; the same of its bare drives -- the shares from
-    /// there down, the place's own share in each one's own gate's stead --; and the folded shares from there down, the
-    /// tail. Every share is the region's own, the weaker places' as the place's: a point's are the values there. A folded
-    /// drive's share is of its size across its distance over the region (`across`). A bare drive's own gate is of
-    /// v + |Δ_c − Δ₀| + moved across its bare |Δ₀ − iΓ_e/2|; a drive at the atom's series gate of |w| across its distance
-    /// at rest (`Across::distance_at_rest`), |w| ≤ k v_max + (ħ/m) k²/2 the Doppler shift and recoil of its photon, what its
-    /// response takes to first order (eliminate.rs, # First-order Doppler). Its rate v L + k a_max, L the slope of its
-    /// detuning, of its dressed levels' difference E_e − E_g − ΔE_g (`Across::slope`). A drive onto an explicit state has the share and the sweep
-    /// of its Raman pairs with that state's kept drives beside its own (`pair_gate`): its own statements, not shares in
-    /// the tail -- a place's gate is the larger of its tail and its drives' largest pair.
-    fn folds_made(&self, g: usize, region: &Region) -> Vec<[f64; 5]> {
+    /// A ground state's folded drives' tails over a region (module documentation, # The tail rule): per place of the tail
+    /// rule's order the sum of the folded shares from there down, each of its drive's size across its distance over the
+    /// region (`across`) -- every share the region's own, the weaker places' as the place's: a point's are the values
+    /// there. Made once per region and state: a place's gate reads the shares of every place below it, and nothing else of
+    /// them.
+    fn tails<'r>(&self, g: usize, region: &'r Region) -> &'r [Own] {
+        region.tails[g].get_or_init(|| {
+            let drives = &region.forms.drives(self)[g];
+            let mut out = vec![Own::constant(0.0); drives.last().map_or(0, |d| d.group + 1)];
+            for (d, of) in drives.iter().zip(self.across(g, region)).filter(|of| of.0.level != Level::Explicit) {
+                out[d.group] = out[d.group].add(gate_own(of.size, of.distance, Own::constant(0.0)).saturation);
+            }
+            for place in (1..out.len()).rev() {
+                out[place - 1] = out[place - 1].add(out[place]);
+            }
+            out
+        })
+    }
+
+    /// A ground state's drives' gates at a place of the tail rule's order over a region (module documentation, # Levels, # The
+    /// tail rule): [saturation, sweep] of its drives at the atom -- the tail from the place down (`tails`), or the place's
+    /// largest series gate where that is larger -- and the same of its bare drives -- the tail, the place's own share in each
+    /// one's own gate's stead --, then the tail. A bare drive's own gate is of v + |Δ_c − Δ₀| + moved across its bare |Δ₀ −
+    /// iΓ_e/2|; a drive at the atom's series gate of |w| across its distance at rest (`Across::distance_at_rest`), |w| ≤ k v_max
+    /// + (ħ/m) k²/2 the Doppler shift and recoil of its photon, what its response takes to first order (eliminate.rs, # First-order
+    /// Doppler). Its rate v L + k a_max, L the slope of its detuning, of its dressed levels' difference E_e − E_g − ΔE_g
+    /// (`Across::slope`). A drive onto an explicit state has the share and the sweep of its Raman pairs with that state's kept
+    /// drives beside its own (`pair_gate`): its own statements, not shares in the tail -- a place's gate is the larger of its
+    /// tail and its drives' largest pair. Made where a place is asked, once per region and place: the rates, the series and
+    /// the pairs are of the place's own drives, the shares below it of the tails.
+    pub(crate) fn folds(&self, g: usize, place: usize, region: &Region) -> [f64; 5] {
+        if let Some(&(_, made)) = region.folds[g].lock().expect("the folds' lock").iter().find(|of| of.0 == place) {
+            return made;
+        }
         let none = Own::constant(0.0);
-        let drives = &region.forms.drives(self)[g];
+        let tail = self.tails(g, region)[place];
         let kept = self.kept_over(region);
-        let acceleration = self.force_over(self.membership[g], region).scale(self.hbar_over_mass);
         let pace = region.pace;
-        let mut out = vec![[none; 5]; drives.last().map_or(0, |d| d.group + 1)];
-        // Per place its drives' largest pair saturation, at the atom and with the bare levels.
-        let mut pairs = vec![[none; 2]; out.len()];
-        for (d, of) in drives.iter().zip(self.across(g, region)).filter(|of| of.0.level != Level::Explicit) {
+        // [the atom's series and pairs, the atom's sweeps, the bare drives' own gates over their shares and pairs, their
+        // sweeps]; the place's pairs' saturations, at the atom and with the bare levels.
+        let (mut out, mut pairs) = ([none; 4], [none; 2]);
+        let mut acceleration = None;
+        for (d, of) in region.forms.drives(self)[g].iter().zip(self.across(g, region)).filter(|of| of.0.group == place && of.0.level != Level::Explicit) {
             let wave = self.wave_of(d.component);
-            let rate = pace.mul(of.slope.norm()).add(acceleration.scale(wave));
+            let a = *acceleration.get_or_insert_with(|| self.force_over(self.membership[g], region).scale(self.hbar_over_mass));
+            let rate = pace.mul(of.slope.norm()).add(a.scale(wave));
             let actual = gate_own(of.size, of.distance, rate);
             let pair = self.pair_gate(g, d, of, kept, region);
-            let place = &mut out[d.group];
-            place[4] = place[4].add(actual.saturation);
             let bare = d.level == Level::Bare;
-            pairs[d.group][bare as usize] = pairs[d.group][bare as usize].max(pair.saturation);
+            pairs[bare as usize] = pairs[bare as usize].max(pair.saturation);
             if bare {
                 let own = gate_own(of.size.add(of.centre.plus(-d.detuning).abs()).add(of.moved), Own::constant(d.bare), rate);
-                place[2] = place[2].max(own.saturation.sub(actual.saturation));
-                place[3] = place[3].max(own.resolved().sweep).max(pair.resolved().sweep);
+                out[2] = out[2].max(own.saturation.sub(actual.saturation));
+                out[3] = out[3].max(own.resolved().sweep).max(pair.resolved().sweep);
             } else {
                 let series = gate_own(pace.scale(wave).plus(0.5 * self.hbar_over_mass * wave * wave), of.distance_at_rest(d.gamma), rate);
-                place[0] = place[0].max(series.saturation);
-                place[1] = place[1].max(actual.resolved().sweep).max(pair.resolved().sweep);
+                out[0] = out[0].max(series.saturation);
+                out[1] = out[1].max(actual.resolved().sweep).max(pair.resolved().sweep);
             }
         }
-        // The tails: each place's shares with every weaker one's; a bare drive's own gate in its own share's stead, a drive
-        // at the atom's series beside them. Then the place's pairs, each its own statement.
-        for place in (0..out.len()).rev() {
-            let tail = out[place][4].add(out.get(place + 1).map_or(none, |weaker| weaker[4]));
-            out[place][4] = tail;
-            out[place][0] = out[place][0].max(tail);
-            out[place][2] = out[place][2].add(tail);
-        }
-        for (place, pair) in out.iter_mut().zip(&pairs) {
-            place[0] = place[0].max(pair[0]);
-            place[2] = place[2].max(pair[1]);
-        }
-        out.iter().map(|place| place.map(|x| x.upper())).collect()
+        let made = [out[0].max(tail).max(pairs[0]).upper(), out[1].upper(), out[2].add(tail).max(pairs[1]).upper(), out[3].upper(), tail.upper()];
+        region.folds[g].lock().expect("the folds' lock").push((place, made));
+        made
     }
 
     /// The model's kept drives over a region (`Kept`), nothing where it has none; made once per region.
@@ -940,7 +951,7 @@ impl Model {
                     let carrier = self.carrier_of(frequency).expect("an explicit drive's component is a carrier");
                     let (wave, gap) = (self.wave_of(d.component), self.gap(e, a, region, self.carriers[carrier].detuning));
                     let still = radii[e];
-                    let across = Across::new(region.coherent_own(&d.beams), gap.all, gap.all_slope, still.add(region.pace.scale(wave)), still, d.gamma);
+                    let across = Across::new(region.coherent_own(&d.beams), gap.all, self.gap_slope(e, a, region, false), still.add(region.pace.scale(wave)), still, d.gamma);
                     out.push(Kept { carrier, excited: d.excited, ground: a, size: across.size, detuning: across.centre, moved: across.moved, distance: across.distance });
                 }
             }
@@ -984,7 +995,7 @@ impl Model {
             let size = of.size.mul(leg.size).div(of.distance.min(leg.distance));
             let wave = self.two_photon_wave(d, self.carriers[leg.carrier].frequency);
             let gap = self.gap(g, a, region, self.carriers[leg.carrier].detuning - nu);
-            let dressed = Shift::of(gap.taken, gap.taken_slope).add(&near_g).sub(&self.near_level(a, region));
+            let dressed = Shift::of(gap.taken, self.gap_slope(g, a, region, true)).add(&near_g).sub(&self.near_level(a, region));
             let apart = dressed.band.apart().sub(region.pace.scale(wave)).sub(lift_g.sub(lifted(a)).most());
             let acceleration = self.acceleration(region, &|c| c.states.contains(&g) || c.states.contains(&a));
             let pair = gate_own(size, apart, region.pace.mul(dressed.steepness()).add(acceleration.scale(wave)));
@@ -1010,20 +1021,6 @@ impl Model {
         most
     }
 
-    /// A ground state's drives' gate at a place of the tail rule's order over a region (`folds_made`): [saturation, sweep]
-    /// of its drives at the atom, then of its bare ones, then the tail. The region keeps the order's first `places` places -- those a
-    /// proof over many cells still asks (`Model::gates`); every place's value is its own on the region whatever is
-    /// kept --, and a place beyond them is made again.
-    pub(crate) fn folds(&self, g: usize, place: usize, region: &Region, places: usize) -> [f64; 5] {
-        let kept = region.drives[g].get_or_init(|| {
-            let mut made = self.folds_made(g, region);
-            made.truncate(places);
-            made.shrink_to_fit();
-            made
-        });
-        kept.get(place).copied().unwrap_or_else(|| self.folds_made(g, region)[place])
-    }
-
     /// The bound over a region of the denominator of a drive e ← s folded at the atom at the detuning δ: its two levels'
     /// distance there, |E_e − E_s − δ| at the centre less the spread of the difference of the levels the eliminations take
     /// (eliminate.rs `Gap`) and the excited state's Gershgorin radius (`Model::radii`), across Γ_e/2, in its own form (own.rs).
@@ -1035,7 +1032,7 @@ impl Model {
     /// A coupling's (`Unit::Term`: a ← b at the model's beat `beat`) saturation and sweep over a region (module documentation,
     /// # A coupling of two states), made once per region. Its size: the constant part's value |H_ab + Σ_ji c_ji C_ji[a, b]| at
     /// the centre (H_ab the two states' own coupling with every light off, a static one's), its modulus over the region of
-    /// its own form (reach.rs `Combination::modulus`), at most every beam at its largest amplitude and in phase; and the part at the atom, per excited state ½ |u'_a[e]| |u_b[e]| (1/σ_eb + 1/σ'_ea), u the two
+    /// its own form (reach.rs `Region::modulus`), at most every beam at its largest amplitude and in phase; and the part at the atom, per excited state ½ |u'_a[e]| |u_b[e]| (1/σ_eb + 1/σ'_ea), u the two
     /// frequencies' folded couplings' coherent bounds and σ the denominator's bound of each drive folded at the atom (the
     /// bare drives' halves are the constants'). Its distance: |β + E_a + δ_a − E_b − δ_b| over the region, of the dressed
     /// levels -- the two levels' difference (eliminate.rs `Gap`) and their shifts by their drives folded at the atom with
@@ -1056,7 +1053,7 @@ impl Model {
     /// nothing (∞).
     pub(crate) fn term_parts(&self, form: &TermForm, a: usize, b: usize, beat: usize, region: &Region) -> (Own, Own, Own) {
         let none = Own::constant(0.0);
-        let mut size = region.combined(form.pairs.iter().map(|&(lj, li, v, size)| (pair_span(&region.spans, lj, li), v, size))).modulus(form.base);
+        let mut size = region.modulus(form.pairs.iter().map(|&(lj, li, v, size)| (pair_span(&region.spans, lj, li), v, size)), form.base);
         for leg in &form.legs {
             let e = GROUND + leg.excited;
             let half = |detuning: Option<f64>, s: usize| detuning.map_or(none, |detuning| self.denominator_own(region, e, s, detuning).recip());
@@ -1066,7 +1063,7 @@ impl Model {
             return (none, Own::constant(f64::INFINITY), none);
         }
         let gap = self.gap(a, b, region, -self.omega(&self.beats[beat].0));
-        let dressed = if a == b { Shift::of(gap.all, Form::zero()) } else { Shift::of(gap.all, gap.all_slope).add(&self.near_level(a, region)).sub(&self.near_level(b, region)) };
+        let dressed = if a == b { Shift::of(gap.all, Form::zero()) } else { Shift::of(gap.all, self.gap_slope(a, b, region, false)).add(&self.near_level(a, region)).sub(&self.near_level(b, region)) };
         let acceleration = self.acceleration(region, &|c| c.states.contains(&a) || c.states.contains(&b));
         let rate = region.pace.mul(dressed.steepness()).add(acceleration.scale(form.wave));
         let apart = dressed.band.apart().sub(region.pace.scale(form.wave));
@@ -1107,12 +1104,12 @@ impl Model {
     /// A unit's gate over a region, [saturation, sweep] (module documentation, # One rule): its read (`Judged`) of the
     /// region -- a cell of a reach's proof, the whole space, or a step's path (solve.rs `Domain`): one statement, its value
     /// on a point the point's own --, every kind through the one gate (`gate`): a drive's by its ground state's tail
-    /// (`folds`, the region keeping its first `places` places), a coupling's (`term_bound`), a photon coherence's
+    /// (`folds`), a coupling's (`term_bound`), a photon coherence's
     /// (`gate_over`, its size its two classes' jumps' bound, photon.rs).
-    pub(crate) fn gate_of(&self, judged: &Judged, u: usize, region: &Region, places: usize) -> [f64; 2] {
+    pub(crate) fn gate_of(&self, judged: &Judged, u: usize, region: &Region) -> [f64; 2] {
         match &judged.reads[u] {
             Read::Fold { ground, place, bare } => {
-                let made = self.folds(*ground, *place, region, places);
+                let made = self.folds(*ground, *place, region);
                 if *bare { [made[2], made[3]] } else { [made[0], made[1]] }
             }
             Read::Term { form, a, b, beat } => {
@@ -1131,7 +1128,7 @@ impl Model {
     /// region at those speeds; and the units it leaves open -- some bound at ½ or above --, the others' gates.
     pub(crate) fn everywhere(&self, judged: &Judged, speed: f64) -> (Vec<[f64; 2]>, Vec<usize>) {
         let whole = self.region(self.spans(&Cell { centre: [0.0; 3], half: [f64::INFINITY; 3] }), speed);
-        let everywhere: Vec<[f64; 2]> = (0..judged.reads.len()).map(|u| self.gate_of(judged, u, &whole, usize::MAX)).collect();
+        let everywhere: Vec<[f64; 2]> = (0..judged.reads.len()).map(|u| self.gate_of(judged, u, &whole)).collect();
         let open = (0..everywhere.len()).filter(|&u| !(everywhere[u][0] < EXISTS && everywhere[u][1] < EXISTS)).collect();
         (everywhere, open)
     }
@@ -1139,7 +1136,7 @@ impl Model {
     /// Whether every one of the units `which` has its fold over a region (`gate_of`, `Gate::exists`).
     pub(crate) fn exist_over(&self, judged: &Judged, which: &[usize], region: &Region) -> bool {
         which.iter().all(|&u| {
-            let [saturation, sweep] = self.gate_of(judged, u, region, usize::MAX);
+            let [saturation, sweep] = self.gate_of(judged, u, region);
             saturation < EXISTS && sweep < EXISTS
         })
     }
@@ -1147,19 +1144,12 @@ impl Model {
     /// Each unit's existence gate over the reach (SPEC §1.5; module documentation), provable bounds at this model's clusters
     /// and levels (`gate_of`). Each is bounded on the whole space first, every beam at its peak (`everywhere`): a bound over
     /// any reach, and where both of a unit's are below ½ there its gate. The others are proven together over the reach's
-    /// cells, on all the cores (reach.rs `Model::bounds_over_in_parallel`) -- a ground state's drive's with every weaker
-    /// one's share on the same cell: what a cell's centre attains is a value there, never a bound from elsewhere --, each
-    /// until it is below ½ everywhere or a centre attains `KEEP` (module documentation, # One rule).
+    /// cells, on all the cores (reach.rs `Model::statements_over`) -- a ground state's drive's with every weaker one's
+    /// share on the same cell: what a cell's centre attains is a value there, never a bound from elsewhere --, each until it
+    /// is below ½ everywhere or a centre attains `KEEP` (module documentation, # One rule).
     pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
         let judged = self.judged(units);
         let (everywhere, open) = self.everywhere(&judged, reach.speed);
-        // Per ground state the places its open drives' gates ask of a cell.
-        let mut places = [0; GROUND];
-        for &u in &open {
-            if let Read::Fold { ground, place, .. } = judged.reads[u] {
-                places[ground] = places[ground].max(place + 1);
-            }
-        }
         let mut quantities: Vec<Box<dyn Fn(&Region) -> f64 + Sync + '_>> = vec![];
         let mut shared: HashMap<(usize, usize, bool), usize> = HashMap::new();
         // Per open unit where its two bounds lie among the quantities: the saturation's, then the sweep's.
@@ -1167,13 +1157,13 @@ impl Model {
         let asked: Vec<usize> = open
             .iter()
             .map(|&u| {
-                let (key, asks) = if let Read::Fold { ground, place, bare } = judged.reads[u] { (Some((ground, place, bare)), places[ground]) } else { (None, 0) };
+                let key = if let Read::Fold { ground, place, bare } = judged.reads[u] { Some((ground, place, bare)) } else { None };
                 if let Some(found) = key.and_then(|k| shared.get(&k)) {
                     return *found;
                 }
                 let first = quantities.len();
-                quantities.push(Box::new(move |r: &Region| self.gate_of(judged, u, r, asks)[0]));
-                quantities.push(Box::new(move |r: &Region| self.gate_of(judged, u, r, asks)[1]));
+                quantities.push(Box::new(move |r: &Region| self.gate_of(judged, u, r)[0]));
+                quantities.push(Box::new(move |r: &Region| self.gate_of(judged, u, r)[1]));
                 if let Some(k) = key {
                     shared.insert(k, first);
                 }
@@ -1675,7 +1665,7 @@ mod tests {
                 _ => C64::ZERO,
             });
             let region = model.point_region([0.0; 3], 0.0);
-            let gate = model.folds(b, 0, &region, usize::MAX);
+            let gate = model.folds(b, 0, &region);
             let exists = if atom { gate[0] < EXISTS && gate[1] < EXISTS } else { gate[2] < EXISTS && gate[3] < EXISTS };
             let mut errors = [0.0; 2];
             let mut booked = [0.0; 2];
@@ -1922,13 +1912,13 @@ mod tests {
         let speed = 1.5 * distance / wave;
         let (rest, moving) = (model.point_region(centre, 0.0), model.point_region(centre, speed));
         let w = wave * speed + 0.5 * model.hbar_over_mass * wave * wave;
-        let [gate, _, _, _, tail] = model.folds(g, group, &moving, usize::MAX);
+        let [gate, _, _, _, tail] = model.folds(g, group, &moving);
         let share = 2.0 * (size / model.across(g, &moving)[place].distance.value).powi(2);
         eprintln!("|V| {:.3} Γ, D {:.3} Γ, k {wave:.3}/µm; at {speed:.2} µm/µs |w/D| {:.2}: its share {share:.3}, the tail {tail:.3}, its gate {gate:.3}", size / gamma, distance / gamma, w / distance);
         assert!(size < 0.25 * gamma && w / distance > 1.0, "|V| {size} against Γ {gamma}, |w/D| {}", w / distance);
         assert!(share < 0.5 && tail < 0.5, "before: its share {share}, the tail {tail}");
         assert!(gate >= 0.5, "its gate {gate} with the Doppler series diverging");
-        let [still, _, _, _, still_tail] = model.folds(g, group, &rest, usize::MAX);
+        let [still, _, _, _, still_tail] = model.folds(g, group, &rest);
         eprintln!("at rest: its gate {still:.4}, the tail {still_tail:.4}");
         assert!(still < 0.5 && still_tail < 0.5 && still >= still_tail, "at rest: its gate {still}, the tail {still_tail}");
     }
@@ -2577,7 +2567,7 @@ mod tests {
         let mut out: Vec<Quantity<'m>> = vec![];
         for &u in open {
             for (which, name) in ["saturation", "sweep"].into_iter().enumerate() {
-                out.push((format!("{:?} {name}", units[u]), Side::Upper, Box::new(move |r: &Region| model.gate_of(judged, u, r, usize::MAX)[which])));
+                out.push((format!("{:?} {name}", units[u]), Side::Upper, Box::new(move |r: &Region| model.gate_of(judged, u, r)[which])));
             }
         }
         for g in 0..GROUND {
@@ -2625,12 +2615,15 @@ mod tests {
     /// which the shared term cancels, and a proof that halves cells until the bound answers then never ends. On the closure's
     /// first two models of the sanity scenes S2, S2Q and S3 (the user's experiment), PGC3D for 1 ms and R4_LIN_2, at points
     /// the reach holds at rest (seeded), on cells of random shape about each point -- the point anywhere in the cell -- of
-    /// radius ℓ, ℓ/4 and ℓ/16, ℓ the light's shortest length 1/k: every quantity the gates read (`read_by_gates`) over the
+    /// radius ℓ, ℓ/4, ℓ/16 and ℓ/64, ℓ the light's shortest length 1/k: every quantity the gates read (`read_by_gates`) over the
     /// cell, against its values on a 5³ grid of the cell, 32 random points of it and the point (the proofs' own point
     /// regions, at the reach's speed there), its derivatives at the centre by the grid's central differences. An upper bound
     /// at least the largest value, a lower one at most the least (to the rounding), and its excess within `OWN` times the
     /// variation (with the rounding of its value) -- or, beyond it, of the second order: falling by `FALL` from that scale to
-    /// the next (at the finest, from the one before). A first-order Taylor form leaves of its parts their curvature, which
+    /// the next. (Read from the scale before, a coupling whose two levels cross within a cell of ℓ/4 -- PGC3D's F=2
+    /// sublevels 4 and 6, its saturation infinite at points of that cell -- had no excess there to fall from, ∞ against ∞,
+    /// while on ℓ/16 its distance's second-order remainder, 0.023 of a least distance of 0.031, read through 1/d² a bound of
+    /// 2442 where the points reach 88; on ℓ/64 the bound is within 0.11 of their 1.87, a fall of 2·10⁴.) A first-order Taylor form leaves of its parts their curvature, which
     /// the sum need not have (two counter-propagating beams' |q|² on a flat level difference): its excess falls as the
     /// cell's square. The class this test is for does not: a bound of the parts' separate ranges exceeds by the parts' own
     /// first orders, which fall as the cell -- four times a scale -- and where a shared term's slack reaches a threshold
@@ -2638,18 +2631,18 @@ mod tests {
     /// taken further by a local search from the best of them (a kink of max(|Δ| − moved, 0) or a pole of 1/d between two
     /// grid points holds the largest value no sample meets). Every bound holds, every quantity at every scale; the gates'
     /// statements, the saturations and sweeps the proofs bound, are within their variation or of the second order on the
-    /// cells below the light's length (ℓ/4, ℓ/16) -- on a cell of ℓ a beam pair's phase turns by up to 2 rad and its
+    /// cells below the light's length (ℓ/4, ℓ/16; ℓ/64 is read for the fall alone) -- on a cell of ℓ a beam pair's phase turns by up to 2 rad and its
     /// range, not its first order, bounds it -- and finite there (an infinite one is its distance's nothing, and the
     /// distance is a quantity of its own here). The worst ratio per scene and per quantity, the parts' and ℓ's readings
     /// beyond `OWN`, and those that fall as the second order, are printed.
     ///
     /// A measurement, run by name (`POINTS`, default 32; `SCENES`), not a gate on the crate: at 16 points the line
     /// (09bc9784) has 482 statements beyond, falling at most 4.5 times a scale (327 of them between 4 and 4.5: the first
-    /// order), and this one 10 -- seven couplings' and drives' statements on cells of ℓ/4 falling 5 to 7 times (a first
-    /// order left beside the second: the two states' shifts by their folded drives added as each one's bound,
-    /// whose Doppler part is no function of the place), two resonant drives' saturations at ℓ/16 beyond their values by
-    /// 5e-8 of them (the rounding of the bare transition energies, 10⁹ rad/µs, in the detuning) and one beside a crossing
-    /// of two ground sublevels. Every bound holds.
+    /// order), and this one none. (The last seven of the class: three of S2Q's through a resolvent's bound read as a range
+    /// on every cell where Varah's denominator reached nothing -- eliminate.rs `Model::resolvent_own` --, two of S3's resonant
+    /// probe drives whose size, the probe with its reflection 4·10⁻⁸ of it, read the beams' phase-blind sum -- reach.rs
+    /// `Frame` --, R4_LIN_2's and PGC3D's through a norm's remainder that had no value from w = n on -- own.rs `measured`.)
+    /// Every bound holds.
     #[test]
     #[ignore]
     fn a_gate_s_bound_over_a_cell_is_within_its_own_variation_of_its_largest_value() {
@@ -2687,7 +2680,7 @@ mod tests {
                     .map(|(r, [shape, place], inner)| {
                         let mut out = vec![];
                         let norm = shape.iter().map(|x| x * x).sum::<f64>().sqrt();
-                        for (j, radius) in [length, length / 4.0, length / 16.0].into_iter().enumerate() {
+                        for (j, radius) in [length, length / 4.0, length / 16.0, length / 64.0].into_iter().enumerate() {
                             let half: [f64; 3] = std::array::from_fn(|a| radius * shape[a] / norm);
                             let cell = Cell { centre: std::array::from_fn(|a| r[a] - place[a] * half[a]), half };
                             // The cell, its 5³ grid (offsets −h, −h/2, 0, h/2, h along each side; index Σ_a i_a 5^a), the
@@ -2756,7 +2749,7 @@ mod tests {
                     .collect();
                 // Per point and quantity, per scale: the excess over the points' extreme (nothing where the bound is their
                 // value, an infinite one too), its lack of validity and its ratio to the variation, and the reading.
-                let mut scales: std::collections::HashMap<(usize, usize), [Option<(f64, f64, f64, String)>; 3]> = std::collections::HashMap::new();
+                let mut scales: std::collections::HashMap<(usize, usize), [Option<(f64, f64, f64, String)>; 4]> = std::collections::HashMap::new();
                 for (p, readings) in read.iter().enumerate() {
                     for &(j, q, bound, extreme, own) in readings {
                         let (_, side, _) = &quantities[q];
@@ -2764,20 +2757,20 @@ mod tests {
                         let rounding = 1e-9 * extreme.abs() + 1e-12;
                         let (invalid, excess) = if beyond.is_nan() { (f64::INFINITY, f64::INFINITY) } else { (-beyond - rounding, (beyond - rounding).max(0.0)) };
                         let what = format!("point {p} at {:?}, radius ℓ/{}: bound {bound:.6e}, the points' {extreme:.6e}, its own variation {own:.3e}", drawn[p].0, 4_usize.pow(j as u32));
-                        scales.entry((p, q)).or_insert([None, None, None])[j] = Some((invalid, excess, excess / own, what));
+                        scales.entry((p, q)).or_insert([None, None, None, None])[j] = Some((invalid, excess, excess / own, what));
                     }
                 }
                 // Per quantity: the worst lack of validity, the worst ratio, and the worst ratio not of the second order.
                 let mut worst: Vec<[(f64, String); 3]> = quantities.iter().map(|_| std::array::from_fn(|_| (0.0, String::new()))).collect();
                 // Per radius: the quantities failing there, the worst ratio with its quantity, and the readings beyond `OWN`
                 // that fall as the second order.
-                let mut by_radius: [(std::collections::HashSet<usize>, f64, usize, usize); 3] = std::array::from_fn(|_| (std::collections::HashSet::new(), 0.0, 0, 0));
+                let mut by_radius: [(std::collections::HashSet<usize>, f64, usize, usize); 4] = std::array::from_fn(|_| (std::collections::HashSet::new(), 0.0, 0, 0));
                 let mut unasked = 0;
                 for (&(_, q), at) in &scales {
-                    for j in 0..3 {
+                    for j in 0..4 {
                         let Some((invalid, excess, ratio, what)) = &at[j] else { continue };
                         // The fall of the excess from this scale to the next, or at the finest from the one before.
-                        let (from, to) = if j < 2 { (j, j + 1) } else { (1, 2) };
+                        let (from, to) = if j < 3 { (j, j + 1) } else { (2, 3) };
                         let fall = at[from].as_ref().zip(at[to].as_ref()).map_or(f64::INFINITY, |(a, b)| if b.1 == 0.0 || (a.1.is_infinite() && b.1.is_finite()) { f64::INFINITY } else { a.1 / b.1 });
                         let second = fall >= FALL;
                         if *invalid > worst[q][0].0 {
@@ -2788,7 +2781,7 @@ mod tests {
                         }
                         // Asserted: validity everywhere; the gates' statements below the light's length.
                         let statement = quantities[q].0.ends_with(" saturation") || quantities[q].0.ends_with(" sweep");
-                        let asked = statement && j > 0 && !excess.is_infinite();
+                        let asked = statement && (1..3).contains(&j) && !excess.is_infinite();
                         if asked && *ratio > OWN && !second && *ratio > worst[q][2].0 {
                             worst[q][2] = (*ratio, format!("{what}, its excess {excess:.3e} falling {fall:.2} to the next scale"));
                         }

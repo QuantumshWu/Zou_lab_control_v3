@@ -454,20 +454,20 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     // The reference state (SPEC §2.1): the initial component of the largest population, of equal ones the last.
     let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).expect("a validated request's initial state holds a ground state");
     let reference = alone(initial[chief].0);
-    // The units kept, the reach's temperature and the prepared energy it holds outside the trap's region (model/reach.rs,
-    // # The trap's region: only grows), the step the last attempt stood at.
-    let (mut kept, mut reach, mut beyond, mut step) = (vec![], request.temperature_uk, f64::NEG_INFINITY, None);
+    // The units kept, the reach's temperature and the prepared energies it holds within the trap's region and outside it
+    // (model/reach.rs, # The trap's region: only grow), the step the last attempt stood at.
+    let (mut kept, mut reach, mut beyond, mut step) = (vec![], request.temperature_uk, [f64::NEG_INFINITY; 2], None);
     let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
     loop {
         let model = Model::new(request, &light, &kept)?;
         // A model's units ask nothing of its trap: the two are made side by side on the pool.
         let (trap, units) = rayon::join(|| model.trap(&reference, &model.prepared()), || model.units());
         let trap = trap?;
-        // The reach of a temperature that holds a prepared energy outside the trap's region, with the model's gates over
-        // it, and the units whose folds do not exist there.
-        let over = |reach: f64, beyond: f64| {
-            let made = model.reach(&trap, &reference, reach, unseen(MOST_TRAJECTORIES as f64));
-            let judged = if beyond > made.minimum + made.outside { model.outside_to(&made, beyond) } else { made };
+        // The reach of a temperature that holds prepared energies within the trap's region and outside it, with the model's
+        // gates over it, and the units whose folds do not exist there.
+        let over = |reach: f64, beyond: [f64; 2]| {
+            let made = model.inside_to(&model.reach(&trap, &reference, reach, unseen(MOST_TRAJECTORIES as f64)), beyond[0]);
+            let judged = if beyond[1] > made.minimum + made.outside { model.outside_to(&made, beyond[1]) } else { made };
             let gates = model.gates(&units, &judged);
             (judged, gates)
         };
@@ -486,9 +486,9 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
                 // An attempt's results improve on its own last one (module documentation, # Checkpoints).
                 messages.least = 0;
                 match attempt(request, &light, &setting, &judged, &gates, &kept, reach, step, &mut messages)? {
-                    Attempt::Grow(t, outside, tau) => {
-                        // The reach grown holds the one before it: outside the region too, its level there kept.
-                        beyond = beyond.max(judged.minimum + judged.outside).max(outside);
+                    Attempt::Grow(t, [inside, outside], tau) => {
+                        // The reach grown holds the one before it: within the region and outside it, its levels there kept.
+                        beyond = [beyond[0].max(inside), beyond[1].max(judged.minimum + judged.outside).max(outside)];
                         (reach, step) = (t, Some(tau));
                         (judged, gates) = over(reach, beyond);
                         more = failing(&gates);
@@ -581,12 +581,12 @@ impl Messages<'_> {
 }
 
 /// How one attempt at a model ends (`attempt`): the reach the model was judged over is outgrown -- by the pilot's
-/// atoms, or by a step not proven (`Domain`) -- (its new temperature, µK, and the prepared energy it is to hold outside
-/// the trap's region, rad/µs, −∞ where nothing asks: the model is attempted again as it stands unless a fold fails
-/// over the grown reach, `solve`), units are to be kept (`keep`) -- each with the step the attempt stood at, the next
-/// attempt's first rung --, or the solution.
+/// atoms, or by a step not proven (`Domain`) -- (its new temperature, µK, and the prepared energies it is to hold within
+/// the trap's region and outside it, rad/µs, −∞ where nothing asks: the model is attempted again as it stands unless a
+/// fold fails over the grown reach, `solve`), units are to be kept (`keep`) -- each with the step the attempt stood at,
+/// the next attempt's first rung --, or the solution.
 enum Attempt {
-    Grow(f64, f64, f64),
+    Grow(f64, [f64; 2], f64),
     Keep(Vec<Unit>, f64),
     Done(Solution),
 }
@@ -1361,9 +1361,9 @@ fn attempt(
     let (open, every): (Vec<usize>, Vec<usize>) = (model.everywhere(setting.gates, judged.speed).1, (0..units.len()).collect());
     let domain = Domain { model, reach: judged, trap, judged: setting.gates, open: &open, every: &every, hbar_over_mass: hm, frequency, kick, moduli: &moduli, sampled: entries, result: true };
     // An attempt that ends on a step not proven: the reach that holds its path (model/reach.rs, # The trap's region) --
-    // the temperature whose level holds the path's energy within the region, and the level outside it --, from the step
-    // the attempt stands at.
-    let hold = |asked: [f64; 2], tau: f64| Attempt::Grow(holding(trap, asked[0], unseen(MOST_TRAJECTORIES as f64), reach), asked[1], tau);
+    // the temperature whose level holds the path's energy within the region, or the region's level raised to it where no
+    // temperature's does, and the level outside it --, from the step the attempt stands at.
+    let hold = |asked: [f64; 2], tau: f64| Attempt::Grow(Some(holding(trap, asked[0], unseen(MOST_TRAJECTORIES as f64), reach)).filter(|t| t.is_finite()).unwrap_or(reach), asked, tau);
     let mut context = Context {
         momentum,
         fixed: Fixed { model: vec![[0.; 2]; outputs], start },
@@ -1421,7 +1421,7 @@ fn attempt(
         absorb(&mut joined, rest.pop().expect("the hand-out's one level"));
         if unproven[0].is_none() {
             if let Some(t) = grown(&joined.iter().collect::<Vec<_>>()) {
-                return Ok(Attempt::Grow(t, f64::NEG_INFINITY, tau));
+                return Ok(Attempt::Grow(t, [f64::NEG_INFINITY; 2], tau));
             }
         }
         Some((joined, unproven[0]))
@@ -1460,7 +1460,7 @@ fn attempt(
         let pilot: Vec<&Part> = levels.fine.iter().collect();
         let (estimates, _, counts) = pooled(&pilot, &context.scales);
         if let Some(t) = grown(&pilot) {
-            return Ok(Attempt::Grow(t, f64::NEG_INFINITY, tau));
+            return Ok(Attempt::Grow(t, [f64::NEG_INFINITY; 2], tau));
         }
         // T(0) and n̄(0) by quadrature again (`Setting::start`), with as many evaluations of the potential as the pilot
         // took steps: a step evaluates the potential's expansion at least once (its reference flow's, SPEC §2.1), so
@@ -1570,7 +1570,7 @@ fn attempt(
     // where that is above it, and the next attempt begins; else the account stands as read, flagged.
     if looks(&e, &context.fixed, &context.step).iter().zip(&looks(&e, &booked, &context.step)).any(|(with, without)| !with.fits() && without.fits()) {
         if let Some(t) = Some(hottest(&e)).filter(|t| *t > held) {
-            return Ok(Attempt::Grow(t, f64::NEG_INFINITY, context.tau));
+            return Ok(Attempt::Grow(t, [f64::NEG_INFINITY; 2], context.tau));
         }
     }
     // A point of the prepared potential below the bottom the ensemble was drawn about (ensemble.rs, # Its draw).
