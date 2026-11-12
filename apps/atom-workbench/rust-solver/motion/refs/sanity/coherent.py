@@ -205,8 +205,13 @@ def hamiltonian(x, y, z, P, H0, diagL, C, k, eps, Om, H, Hb):
     for i in range(12):
         for j in range(12):
             H[i, j] = H0[i, j]
+    # less the first ground level's energy on every level -- a real multiple of the identity: no change to the state's
+    # evolution but its overall phase, to its norm (the jumps) or to the force (Hb, diagL) -- so that the ground
+    # amplitudes, most of the norm, turn slowly and RK4 does not damp them (|R(iy)|² = 1 − y⁶/72 a step: at the
+    # tweezer's ground shift of ~200 rad/µs, 1e-6 a 1 ns step, 6e-5 a 2 ns step otherwise)
+    c0 = H0[0, 0].real + diagL[0] * g
     for i in range(12):
-        H[i, i] += diagL[i] * g
+        H[i, i] += diagL[i] * g - c0
     for i in range(5, 12):
         H[i, i] -= 0.5j * gamma
     nb_ = k.shape[0]
@@ -258,7 +263,9 @@ def force(psi, H, Hb, k, diagL, gx, gy, gz, f):
 
 @nb.njit(parallel=True)
 def run(n_atoms, seed, T_uK, dt, n_steps, every, P, H0, diagL, C, k, eps, Om, noise, still,
-        out_v, out_r, out_alive, out_pop, out_jumps, out_fy, out_loss, out_flow):
+        out_v, out_r, out_alive, out_pop, out_jumps, out_fy, out_loss, out_flow, resume, state, rng):
+    """`resume`: each atom starts from `state` (x, y, z, v, ψ's 12 real and 12 imaginary parts, θ, jumps, alive) and its
+    random stream from `rng` -- a segment continuing the one before; at the end both hold the atoms' state (`--state`)."""
     gamma, w0, zR, U0, hbar_m, uK = P[0], P[1], P[2], P[3], P[4], P[5]
     kT = T_uK * uK; vth = math.sqrt(kT * hbar_m)
     wR = math.sqrt(4 * U0 * hbar_m / w0 ** 2); wA = math.sqrt(2 * U0 * hbar_m / zR ** 2)
@@ -270,22 +277,28 @@ def run(n_atoms, seed, T_uK, dt, n_steps, every, P, H0, diagL, C, k, eps, Om, no
         z0 = (z0 ^ (z0 >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9); z0 = (z0 ^ (z0 >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
         z0 = z0 ^ (z0 >> np.uint64(31)); st[0] = z0 if z0 != np.uint64(0) else np.uint64(1)
         for _ in range(4): M.rnd(st)
+        if resume: st[0] = rng[a]
         H = np.zeros((12, 12), np.complex128); Hb = np.zeros((nb_, 12, 12), np.complex128)
         psi = np.zeros(12, np.complex128); k1 = np.zeros(12, np.complex128); k2 = np.zeros(12, np.complex128)
         k3 = np.zeros(12, np.complex128); k4 = np.zeros(12, np.complex128); tmp = np.zeros(12, np.complex128)
         f = np.zeros(3)
-        while True:
-            x = sig[0] * M.gauss(st); y = sig[1] * M.gauss(st); z = sig[2] * M.gauss(st)
-            g, _, _, _ = trap(x, y, z, P)
-            if g < 0.05: continue
-            logw = -U0 * (1 - g) / kT + 0.5 * ((x / sig[0]) ** 2 + (y / sig[1]) ** 2 + (z / sig[2]) ** 2)
-            if math.log(max(M.rnd(st), 1e-300)) < logw: break
-        vx = vth * M.gauss(st); vy = vth * M.gauss(st); vz = vth * M.gauss(st)
-        if still: vx = 0.0; vy = 0.0; vz = 0.0; x = 0.0; y = 0.0; z = 0.0
-        psi[4] = 1.0
-        theta = M.rnd(st)
-        while theta <= 0.0: theta = M.rnd(st)
-        alive = True; k_out = 0; jumps = 0
+        if resume:
+            x, y, z, vx, vy, vz = state[a, 0], state[a, 1], state[a, 2], state[a, 3], state[a, 4], state[a, 5]
+            for i in range(12): psi[i] = complex(state[a, 6 + i], state[a, 18 + i])
+            theta = state[a, 30]; jumps = int(state[a, 31]); alive = state[a, 32] > 0.5; k_out = 0
+        else:
+            while True:
+                x = sig[0] * M.gauss(st); y = sig[1] * M.gauss(st); z = sig[2] * M.gauss(st)
+                g, _, _, _ = trap(x, y, z, P)
+                if g < 0.05: continue
+                logw = -U0 * (1 - g) / kT + 0.5 * ((x / sig[0]) ** 2 + (y / sig[1]) ** 2 + (z / sig[2]) ** 2)
+                if math.log(max(M.rnd(st), 1e-300)) < logw: break
+            vx = vth * M.gauss(st); vy = vth * M.gauss(st); vz = vth * M.gauss(st)
+            if still: vx = 0.0; vy = 0.0; vz = 0.0; x = 0.0; y = 0.0; z = 0.0
+            psi[4] = 1.0
+            theta = M.rnd(st)
+            while theta <= 0.0: theta = M.rnd(st)
+            alive = True; k_out = 0; jumps = 0
         g, gx, gy, gz = hamiltonian(x, y, z, P, H0, diagL, C, k, eps, Om, H, Hb)
         force(psi, H, Hb, k, diagL, gx, gy, gz, f)
         fy_acc = 0.0; fy_n = 0
@@ -389,6 +402,10 @@ def run(n_atoms, seed, T_uK, dt, n_steps, every, P, H0, diagL, C, k, eps, Om, no
                     alive = False
                     out_loss[a, 0] = (step + 1) * dt; out_loss[a, 1] = x; out_loss[a, 2] = y; out_loss[a, 3] = z
                     out_loss[a, 4] = vx; out_loss[a, 5] = vy; out_loss[a, 6] = vz
+        state[a, 0] = x; state[a, 1] = y; state[a, 2] = z; state[a, 3] = vx; state[a, 4] = vy; state[a, 5] = vz
+        for i in range(12):
+            state[a, 6 + i] = psi[i].real; state[a, 18 + i] = psi[i].imag
+        state[a, 30] = theta; state[a, 31] = jumps; state[a, 32] = 1.0 if alive else 0.0; rng[a] = st[0]
     return 0
 
 def flow_summary(F, p):
@@ -404,19 +421,30 @@ def flow_summary(F, p):
     return dict(heldUs=float(held), light=light, kick=kick, coupling=coupling, net=[light[i] + kick[i] + coupling[i] for i in range(3)],
                 photonsPerUs=float(F[:, 11].sum() / held), pushY=push, pushOverAmax=push / a_max, aMax=a_max)
 
-def simulate(S, atoms, end_us, every_us, dt, noise, seed=12345, still=False):
+def simulate(S, atoms, end_us, every_us, dt, noise, seed=12345, still=False, state_path=None):
+    """`state_path`: an .npz of the atoms' state -- read if it exists (this run continues it from its time to `end_us`, the
+    held atoms' flows and the losses carried on), written at the end -- so that a long run is a chain of segments, each
+    its own process."""
     p = S['p']
-    n_steps = int(round(end_us / dt)); every = int(round(every_us / dt)); n_out = n_steps // every + 1
+    resume = state_path is not None and os.path.exists(state_path)
+    if resume:
+        saved = np.load(state_path)
+        state, rng, out_loss, out_flow, t0 = saved['state'].copy(), saved['rng'].copy(), saved['loss'].copy(), saved['flow'].copy(), float(saved['t'])
+        atoms = state.shape[0]
+    else:
+        state, rng, out_loss, out_flow, t0 = np.zeros((atoms, 33)), np.zeros(atoms, np.uint64), np.full((atoms, 7), np.nan), np.zeros((atoms, 12)), 0.0
+    n_steps = int(round((end_us - t0) / dt)); every = int(round(every_us / dt)); n_out = n_steps // every + 1
     out_v = np.zeros((n_out, atoms, 3)); out_r = np.zeros((n_out, atoms, 3)); out_alive = np.zeros((n_out, atoms), np.bool_)
     out_pop = np.zeros((n_out, atoms, 6)); out_jumps = np.zeros((n_out, atoms), np.int64); out_fy = np.zeros((n_out, atoms))
-    out_loss = np.full((atoms, 7), np.nan); out_flow = np.zeros((atoms, 12))
     P = trap_params(S)
     Om = p['gamma'] * np.sqrt(S['s'] / 2)
-    t0 = time.time()
+    t_start = time.time()
     run(atoms, seed, S['T'], dt, n_steps, every, P, S['H0'], S['diagL'], S['C'], S['k'], S['eps'].astype(np.complex128), Om, noise, still,
-        out_v, out_r, out_alive, out_pop, out_jumps, out_fy, out_loss, out_flow)
-    wall = time.time() - t0
-    times = np.arange(n_out) * every * dt
+        out_v, out_r, out_alive, out_pop, out_jumps, out_fy, out_loss, out_flow, resume, state, rng)
+    wall = time.time() - t_start
+    if state_path is not None:
+        np.savez(state_path, state=state, rng=rng, loss=out_loss, flow=out_flow, t=t0 + n_steps * dt)
+    times = t0 + np.arange(n_out) * every * dt
     r = M.summarize('S3C', 'coherent F=2 -> F\'=3 quantum jumps', p, atoms, dt, wall, times, out_v, out_alive)
     pops = np.zeros((n_out, 6)); rate = np.zeros(n_out); fy = np.zeros(n_out); ry = np.zeros(n_out)
     for kk in range(n_out):
@@ -463,6 +491,7 @@ def main():
     ap.add_argument('--reflect', type=float, default=1.0, help="the reflection's power over the probe's (R)")
     ap.add_argument('--lab', action='store_true', help="the probe beams from the lab's description (lab_beams), not the request's")
     ap.add_argument('--magic', action='store_true', help='the excited levels feel the ground trap (no dipole-force fluctuation), their focus detunings kept')
+    ap.add_argument('--state', default=None, help="an .npz of the atoms' state: continued from if it exists, written at the end (a segment of a long run)")
     ap.add_argument('--tilt', type=float, default=0.0, help="the probe beams turned this much further toward the tweezer's axis (degrees)")
     ap.add_argument('--ellipticity', type=float, default=0.0, help="the tweezer's focus: its long 1/e² radius over the short one, less 1 (focus.py)")
     ap.add_argument('--ell-angle', type=float, default=0.0, help="the long axis's angle from the probe's transverse radial direction (degrees)")
@@ -478,7 +507,7 @@ def main():
         print('  q', q, [round(float((-(d[5 + m + q + 3] + S['diagL'][5 + m + q + 3]) + d[m + 2] + S['diagL'][m + 2]) / (2 * math.pi)), 2) if abs(m + q) <= 3 else None for m in range(-2, 3)])
     if a.selftest:
         print('selftest', selftest(S)); return
-    r = simulate(S, a.atoms, a.end, a.every, a.dt, a.noise, a.seed, still=a.still)
+    r = simulate(S, a.atoms, a.end, a.every, a.dt, a.noise, a.seed, still=a.still, state_path=a.state)
     n = len(r['timesUs'])
     print(f"wall {r['wallS']:.1f} s")
     for kk in range(0, n, max(1, n // 12)):
