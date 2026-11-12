@@ -27,10 +27,31 @@ struct Part {
     force: [Mat; 3],
 }
 
-/// A test model's generator at a point (`step::Middle`): its parts and its states' Doppler frames K_s.
+/// The folded light a test model's ground state alone scatters at a point: its jump amplitude f = Σ_l c_l e^{ik_l·r}
+/// there with its gradient, the largest wave number of its plane waves, and the emitted photon's.
+#[derive(Clone, Copy)]
+struct Folded {
+    field: (C64, [C64; 3]),
+    absorbed: f64,
+    emission: f64,
+}
+
+impl Folded {
+    /// The folded light's one class of photons of the ground state's amplitude, with its gradients.
+    fn made(&self, psi: &[C64]) -> Vec<Photon> {
+        let ((f, df), third) = (self.field, (1.0_f64 / 3.0).sqrt());
+        let u = vec![f * psi[0] * third];
+        let gradients = std::array::from_fn(|i| std::array::from_fn(|_| vec![df[i] * psi[0] * third]));
+        vec![Photon { class: 0, landing: 0, wave_number: self.emission, absorbed: self.absorbed, amplitudes: [u.clone(), u.clone(), u], gradients, explicit: [[0.0; 3]; 3] }]
+    }
+}
+
+/// A test model's generator at a point (`step::Middle`): its parts and its states' Doppler frames K_s; and the
+/// folded light its ground state alone scatters there, where it scatters any.
 struct Parts {
     waves: Vec<[f64; 3]>,
     parts: Vec<Part>,
+    folded: Option<Folded>,
 }
 
 impl Parts {
@@ -80,6 +101,9 @@ impl Middle for Parts {
         for p in &self.parts {
             each(p.omega, std::array::from_fn(|a| self.trace(&p.force[a], rho).re));
         }
+    }
+    fn scattering(&self, _: &[f64; 3], psi: &[C64], _: &[f64]) -> Scattering {
+        self.folded.map_or(Scattering::NONE, |folded| Scattering::of(&folded.made(psi), psi.iter().map(|z| z.norm_sqr()).sum()))
     }
     fn work(&self) -> [f64; 3] {
         let size = (self.parts.len() * self.waves.len() * self.waves.len()) as f64;
@@ -166,13 +190,13 @@ impl Atom {
         }
         (f, df)
     }
-    /// The folded light's one class of photons of the ground state's amplitude, with its gradients.
+    /// The folded light at a point (`Folded`).
+    fn folded_at(&self, r: [f64; 3]) -> Folded {
+        Folded { field: self.field(r), absorbed: self.folded.iter().map(|(_, k)| crate::linalg::norm3(*k)).fold(0.0, f64::max), emission: self.emission }
+    }
+    /// The folded light's one class of photons of the ground state's amplitude at a point, with its gradients.
     fn made(&self, r: [f64; 3], psi: &[C64]) -> Vec<Photon> {
-        let ((f, df), third) = (self.field(r), (1.0_f64 / 3.0).sqrt());
-        let u = vec![f * psi[0] * third];
-        let gradients = std::array::from_fn(|i| std::array::from_fn(|_| vec![df[i] * psi[0] * third]));
-        let absorbed = self.folded.iter().map(|(_, k)| crate::linalg::norm3(*k)).fold(0.0, f64::max);
-        vec![Photon { class: 0, landing: 0, wave_number: self.emission, absorbed, amplitudes: [u.clone(), u.clone(), u], gradients, explicit: [[0.0; 3]; 3] }]
+        self.folded_at(r).made(psi)
     }
     fn n(&self) -> usize {
         self.cluster.states.len()
@@ -255,7 +279,7 @@ impl Dynamics for Atom {
             }
         }
         parts.insert(0, Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g });
-        Parts { waves: self.cluster.waves.clone(), parts }
+        Parts { waves: self.cluster.waves.clone(), parts, folded: (!self.folded.is_empty()).then(|| self.folded_at(r)) }
     }
     fn emit(&self, _: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         let n = self.n();
@@ -272,9 +296,6 @@ impl Dynamics for Atom {
         let amplitudes = [u; 3];
         draw(&[amplitudes.iter().map(|u| crate::linalg::norm_sqr(u)).sum::<f64>()])?;
         Some(step::Emitted { landing: 0, wave_number: self.emission, amplitudes, kick })
-    }
-    fn scattering(&self, _: usize, at: &Point, psi: &[C64], _: &[f64]) -> Scattering {
-        if self.folded.is_empty() { Scattering::NONE } else { Scattering::of(&self.made(at.r, psi), psi.iter().map(|z| z.norm_sqr()).sum()) }
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
         0.5 * self.hm * at.kappa.iter().map(|k| k * k).sum::<f64>() + self.trap.expansion(at.r).value
@@ -1333,13 +1354,10 @@ impl Dynamics for Wells {
                 g[a][(s, s)] = C64::real(gradient[a]);
             }
         }
-        Parts { waves: self.cluster.waves.clone(), parts: vec![Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g }] }
+        Parts { waves: self.cluster.waves.clone(), parts: vec![Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g }], folded: None }
     }
     fn emit(&self, _: usize, _: &Point, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         unreachable!("the wells scatter nothing")
-    }
-    fn scattering(&self, _: usize, _: &Point, _: &[C64], _: &[f64]) -> Scattering {
-        Scattering::NONE
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
         0.5 * self.hm * dot3(at.kappa, at.kappa) + self.reference(at.r).value
@@ -1911,13 +1929,10 @@ impl Dynamics for Synthetic {
             parts.push(Part { omega: 0.0, wave: *q, generator: up, force: gu });
             parts.push(Part { omega: 0.0, wave: q.map(|x| -x), generator: down, force: gd });
         }
-        Parts { waves: k.clone(), parts }
+        Parts { waves: k.clone(), parts, folded: None }
     }
     fn emit(&self, _: usize, _: &Point, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         unreachable!("the cost harness takes no jump")
-    }
-    fn scattering(&self, _: usize, _: &Point, _: &[C64], _: &[f64]) -> Scattering {
-        Scattering::NONE
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
         0.5 * self.hm * at.kappa.iter().map(|k| k * k).sum::<f64>() + self.trap.expansion(at.r).value
@@ -1988,6 +2003,9 @@ impl<M: Middle> Middle for Probe<'_, M> {
         self.count(4);
         self.middle.tones(path, rho, each)
     }
+    fn scattering(&self, path: &M::Path, psi: &[C64], populations: &[f64]) -> Scattering {
+        self.middle.scattering(path, psi, populations)
+    }
     fn work(&self) -> [f64; 3] {
         self.middle.work()
     }
@@ -2021,9 +2039,6 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
     }
     fn emit(&self, cluster: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         self.model.emit(cluster, at, psi, draw)
-    }
-    fn scattering(&self, cluster: usize, at: &Point, psi: &[C64], populations: &[f64]) -> Scattering {
-        self.model.scattering(cluster, at, psi, populations)
     }
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
         self.model.energy(cluster, at, psi)
@@ -2205,7 +2220,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || starts.iter().map(|s| super::middle(model, s.r, s.kappa, half).unwrap().1 .0[0]).sum::<f64>(),
             &mut || propagation(false),
             &mut || propagation(true),
-            &mut || pieces.iter().zip(starts).zip(&populations).map(|((p, s), populations)| model.scattering(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi, populations).force[0]).sum::<f64>(),
+            &mut || pieces.iter().zip(&paths).zip(starts).zip(&populations).map(|(((p, path), s), populations)| p.through.generator.scattering(path, &s.psi, populations).force[0]).sum::<f64>(),
             &mut || pieces.iter().zip(starts).map(|(p, s)| model.readout(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi)[0]).sum::<f64>(),
             &mut yardstick,
         ],
@@ -2538,7 +2553,8 @@ fn a_jump_s_kick_is_one_photon_s_at_most() {
         let expected = b.min(k);
         assert!((kick[2] - expected).abs() <= 1e-9 * k && kick[0] == 0.0 && kick[1] == 0.0, "kz = {phase}: the jump carries {kick:?} of b = {b}");
         carried_whole += (b <= k) as usize;
-        let scattered = model.scattering(0, &at, &psi, &[1.0]);
+        let middle = model.middle(0, at.r, at.t);
+        let scattered = middle.scattering(&middle.path(at.kappa, [0.0; 3]), &psi, &[1.0]);
         let (mean, second) = (scattered.force[2] + weight * kick[2], scattered.diffusion[2][2] + weight * kick[2] * kick[2]);
         let closed = (k * c * c * epsilon, k * k * c * c * (phase.sin().powi(2) + (epsilon * phase.cos()).powi(2)));
         assert!((mean - closed.0).abs() <= 1e-9 * closed.0, "kz = {phase}: the mean per unit time {mean} against {}", closed.0);

@@ -189,7 +189,7 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
     // The elimination at the middle with its gradient: a frequency's coupling on its field (its every folded drive's, those
     // folded at the atom alone, or as it is) and its response on the path.
     let far = model.far_hamiltonian(&amplitudes, &lights, 1, &model.coherent_dressing());
-    let responses = model.eliminate(cluster, &far, &amplitudes, &lights, 1, &model.coherent_dressing());
+    let responses = model.eliminate(cluster, &far, &amplitudes, &lights, 1, &model.coherent_dressing(), &|_| true);
     let coupling = |frequency: usize, basis: &[Mat], e: usize, b: usize| -> Jet { (0..basis.len()).fold(NONE, |sum, k| plus(sum, scaled(field(frequency, k, false), leaf(basis[k][(e, b)])))) };
     let folded = |frequency: usize, e: usize, b: usize| coupling(frequency, &model.tones[frequency].coupled[0], e, b);
     let response = |frequency: usize, e: usize, y: usize| -> Jet {
@@ -510,6 +510,8 @@ fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation
                 let sample = crate::model::Sample { cluster, at: crate::model::Point { r, kappa, t }, psi };
                 let far = model.action(&sample, &model.middle_of(&plan, t, &amplitudes, None));
                 let exact = model.action(&sample, &model.middle_of(&plan, t, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1, &model.coherent_dressing()))));
+                // The generator reads the forms' values alone: of the forms to order 0 it is the same, bit for bit.
+                assert_eq!(exact, model.action(&sample, &model.middle_of(&plan, t, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 0, &model.coherent_dressing())))), "{name}, cluster {cluster}: the generator of the forms' values alone");
                 let (a, b) = (model.action(&sample, &ours), model.action(&sample, &theirs));
                 let error = |first: &[C64], second: &[C64]| model.form_error(&sample, &far, first, second, tables.thermal).parameter;
                 coarse += error(&b, &a);

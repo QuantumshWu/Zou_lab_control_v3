@@ -276,7 +276,7 @@ pub struct Photon {
     /// ∇u_a of the folded part (`Photon::moments`): gradients[i][a], i the lab axis; empty where none were asked.
     pub gradients: [[Vec<C64>; 3]; 3],
     /// The explicit states' part of the second moment's rate, in the amplitudes' norm (1/µm² times ‖u‖²'s unit; eliminate.rs
-    /// `Model::explicit_moment`): their absorption's mean is the Ehrenfest force's. Zero where it is not made: without
+    /// `Answer::moment`): their absorption's mean is the Ehrenfest force's. Zero where it is not made: without
     /// gradients, and of a class made alone (photon.rs `Gradients`).
     pub explicit: [[f64; 3]; 3],
 }
@@ -350,8 +350,9 @@ pub struct Model {
     /// The photons' sources (photon.rs) and per cluster its classes.
     pub(crate) sources: Vec<photon::Source>,
     pub(crate) classes: Vec<Vec<photon::Class>>,
-    /// The clusters' assemblies under the light sets asked so far (assemble.rs `Model::plan`).
-    pub(crate) plans: Mutex<Vec<Arc<assemble::Plan>>>,
+    /// The clusters' assemblies under the light sets asked so far, each made once where it is first asked (assemble.rs
+    /// `Model::plan`).
+    pub(crate) plans: Mutex<Vec<(usize, Lights, Arc<std::sync::OnceLock<Arc<assemble::Plan>>>)>>,
     /// The spread of what moves the folds' spectra (units.rs `Model::spread`), and the constant forms of two frequencies asked so
     /// far (units.rs `Model::constants`).
     pub(crate) spread: f64,
@@ -368,9 +369,9 @@ pub struct Model {
     pub(crate) ranked: Vec<Vec<units::Ranked>>,
     pub(crate) beats: Vec<(Beat, Vec<(usize, usize)>)>,
     pub(crate) forms: Arc<reach::Forms>,
-    /// Per cluster the co-resonant pairs of its folded channels' places under the running lights, found at its first readout
-    /// (readout.rs `Model::readout_of`).
-    pub(crate) resonances: Vec<std::sync::OnceLock<Vec<[usize; 4]>>>,
+    /// Per cluster the classes of its readout's places under the running lights -- per channel and ground place the first
+    /// of the places co-resonant with it --, found at its first readout (readout.rs `Model::readout_of`).
+    pub(crate) resonances: Vec<std::sync::OnceLock<Vec<usize>>>,
     /// The states' labels and the beams' names (the ledger's and the method's words).
     pub(crate) labels: Vec<String>,
     pub(crate) names: Vec<String>,
@@ -650,7 +651,7 @@ impl Model {
         let Some(fourth) = &plan.fourth else { return f.iter().copied().collect() };
         let (n, size) = (fourth.n, fourth.n * fourth.n);
         let mut site = assemble::Held::<assemble::Site>::take();
-        self.light.amplitudes_into(at.r, 1, |_| true, &mut site.beams);
+        self.pointed(plan, table, at.r, &mut site);
         self.quartic(plan, fourth, table, Some(at.r), &mut site, false);
         Model::quartic_read(|q| {
             let (partner, metric) = (&q.data[4 * size..5 * size], &q.data[8 * size..9 * size]);
@@ -866,9 +867,6 @@ impl crate::step::Dynamics for Run<'_> {
     }
     fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> crate::step::Internal {
         Run::landed(self, cluster, at, f)
-    }
-    fn scattering(&self, cluster: usize, at: &Point, psi: &[C64], populations: &[f64]) -> Scattering {
-        self.scattering_at(cluster, at, psi, Some(populations))
     }
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
         self.model.energy_with(cluster, at, psi, self.tables)

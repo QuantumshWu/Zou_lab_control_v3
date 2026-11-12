@@ -258,8 +258,10 @@ impl Model {
     /// The near light's elimination at a far Hamiltonian `h` (its jet) and the near beams' amplitudes (module documentation): per
     /// lit carrier, basis vector of its field and cluster ground place its responses T_k and T2_k (`Responses`) -- every carrier's
     /// dressing of the ground states, the self-energy of the folded channels to the other clusters' ground states, one factorization
-    /// per ground place.
-    pub(crate) fn eliminate(&self, cluster: usize, h: &[Mat], amplitudes: &[Amplitude], lights: &Lights, order: usize, coherent: &[bool]) -> Responses {
+    /// per ground place. Of the ground places `places` takes: a place's responses are its own factorization's, whatever
+    /// the others' (one not taken is left zero).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn eliminate(&self, cluster: usize, h: &[Mat], amplitudes: &[Amplitude], lights: &Lights, order: usize, coherent: &[bool], places: &dyn Fn(usize) -> bool) -> Responses {
         let np = jet::parts(order);
         let c = &self.clusters[cluster];
         let g = c.ground;
@@ -344,7 +346,7 @@ impl Model {
             }
             let zeros = || -> Vec<Vec<Mat>> { (0..n).map(|_| (0..np).map(|_| Mat::zeros(EXCITED, g)).collect()).collect() };
             let (mut out, mut out2) = (zeros(), zeros());
-            for (pb, &b) in c.states[..g].iter().enumerate() {
+            for (pb, &b) in c.states[..g].iter().enumerate().filter(|of| places(of.0)) {
                 let mut z = dressed(b, Some(ci));
                 z[0] += carrier.detuning;
                 let mut m = shifted(&k, &z);
@@ -1057,31 +1059,18 @@ impl Model {
         error
     }
 
-    /// An explicit state's part of a class's second moment's rate (photon.rs, # The absorbed light's momentum): its photons'
-    /// rate into the class -- its decay's `decay` = Γ_{e→class} = Σ |C_a[b, e]|² over the class's entries, times its
-    /// population `population` in ψ's norm (the state's own |ψ_e|², or a step's mean) -- times the second moment a photon
-    /// takes from the response its kept drives would make folded at the atom, T/S: per carrier c the response summed as a
-    /// folded jump sums it -- over the carrier's beams l and the cluster's ground amplitudes, coherently --, σ_c = Σ_b ψ_b
-    /// Σ_l a_l X_l[e,b]/D_bl, ∇σ_c = Σ_b ψ_b Σ_l (∇a_l − a_l ∇δ_b/D_bl) X_l[e,b]/D_bl, D_bl = δ_b + w_l − iΓ_e/2, δ_b = E_e − E_b
-    /// − δ_c at the atom and w_l the beam's Doppler shift at the atom's momentum (module documentation, # First-order
-    /// Doppler); S = Σ_c |σ_c|² and T = Σ_c Re[∇σ_c*⊗∇σ_c] (two carriers beat against each other and share the photon by
-    /// |σ_c|²). SPEC §1.6, one rule: a running wave's photon has k⊗k, a standing wave's k⊗k tan², none at its antinode, and
-    /// towards its node the rate times it stays the dipole force's fluctuations.
-    ///
-    /// The state's population counts as far as the response's: the rate is Γ_{e→class} min(|ψ_e|², S). An excited
-    /// population beyond what the light makes here was not absorbed here -- it came with the atom or with a transient --, and
-    /// T/S, the moment of a photon absorbed here, is not its; where the response vanishes (a node) and the population does
-    /// not, the quotient has no bound. So the rate times the moment is at most Γ_{e→class} T, the folded drives' own value,
-    /// finite everywhere, and no quotient is taken by a response that is nothing. With the complex multiply-adds that made
-    /// it (`h` the far light's energies to first order, `Model::far_energies`).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn explicit_moment(&self, cluster: usize, amplitudes: &[Amplitude], h: &[Vec<f64>], kappa: [f64; 3], source: usize, decay: f64, population: f64, psi: &[C64]) -> ([[f64; 3]; 3], f64) {
+    /// The response an explicit state's kept drives would make folded at the atom, of a cluster's state ψ at a point
+    /// (photon.rs, # The absorbed light's momentum): per carrier c the response summed as a folded jump sums it -- over
+    /// the carrier's beams l and the cluster's ground amplitudes, coherently --, σ_c = Σ_b ψ_b Σ_l a_l X_l[e,b]/D_bl,
+    /// ∇σ_c = Σ_b ψ_b Σ_l (∇a_l − a_l ∇δ_b/D_bl) X_l[e,b]/D_bl, D_bl = δ_b + w_l − iΓ_e/2, δ_b = E_e − E_b − δ_c at the atom
+    /// and w_l the beam's Doppler shift at the atom's momentum (module documentation, # First-order Doppler); S =
+    /// Σ_c |σ_c|² and T = Σ_c Re[∇σ_c*⊗∇σ_c] (two carriers beat against each other and share the photon by |σ_c|²). They
+    /// are the source's alone, whichever class its photons land in (`Answer::moment`): made once a source. With the
+    /// complex multiply-adds that made them (`h` the far light's energies to first order, `Model::far_energies`).
+    pub(crate) fn explicit_response(&self, cluster: usize, amplitudes: &[Amplitude], h: &[Vec<f64>], kappa: [f64; 3], source: usize, psi: &[C64]) -> Answer {
         let mut out = [[0.0; 3]; 3];
-        let Origin::Explicit { state: e } = self.sources[source].origin else { return (out, 0.0) };
+        let Origin::Explicit { state: e } = self.sources[source].origin else { unreachable!("an explicit state's source") };
         let c = &self.clusters[cluster];
-        if !(decay > 0.0 && population > 0.0) {
-            return (out, 0.0);
-        }
         let gamma = self.decay[(e - GROUND, e - GROUND)].re;
         let (mut response, mut terms) = (0.0, 0);
         for cc in &self.carriers {
@@ -1112,15 +1101,37 @@ impl Model {
                 }
             }
         }
-        // Γ_{e→class} min(population, S)/S, the quotient taken only by an S that is not below a population above zero.
-        let factor = if population <= response { decay * population / response } else { decay };
-        for row in out.iter_mut() {
-            for x in row.iter_mut() {
-                *x *= factor;
-            }
-        }
         // Each term's response and its gradient's three parts; each carrier's products.
-        (out, (10 * terms) as f64 + (10 * self.carriers.len()) as f64)
+        Answer { second: out, size: response, work: (10 * terms) as f64 + (10 * self.carriers.len()) as f64 }
+    }
+}
+
+/// The response an explicit state's kept drives would make folded at the atom (`Model::explicit_response`): T, S and
+/// the complex multiply-adds that made them.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Answer {
+    second: [[f64; 3]; 3],
+    size: f64,
+    pub(crate) work: f64,
+}
+
+impl Answer {
+    /// An explicit state's part of a class's second moment's rate (photon.rs, # The absorbed light's momentum): its
+    /// photons' rate into the class -- its decay's `decay` = Γ_{e→class} = Σ |C_a[b, e]|² over the class's entries,
+    /// times its population `population` in ψ's norm (the state's own |ψ_e|², or a step's mean), both above zero --
+    /// times the second moment a photon takes from this response, T/S. SPEC §1.6, one rule: a running wave's photon
+    /// has k⊗k, a standing wave's k⊗k tan², none at its antinode, and towards its node the rate times it stays the
+    /// dipole force's fluctuations.
+    ///
+    /// The state's population counts as far as the response's: the rate is Γ_{e→class} min(|ψ_e|², S). An excited
+    /// population beyond what the light makes here was not absorbed here -- it came with the atom or with a transient
+    /// --, and T/S, the moment of a photon absorbed here, is not its; where the response vanishes (a node) and the
+    /// population does not, the quotient has no bound. So the rate times the moment is at most Γ_{e→class} T, the
+    /// folded drives' own value, finite everywhere, and no quotient is taken by a response that is nothing.
+    pub(crate) fn moment(&self, decay: f64, population: f64) -> [[f64; 3]; 3] {
+        // Γ_{e→class} min(population, S)/S, the quotient taken only by an S that is not below a population above zero.
+        let factor = if population <= self.size { decay * population / self.size } else { decay };
+        self.second.map(|row| row.map(|x| x * factor))
     }
 }
 

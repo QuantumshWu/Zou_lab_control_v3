@@ -200,7 +200,7 @@
 //! delivered so that no increment of the momentum is a quotient by a rate:
 //! - a jump carries the emitted photon's recoil −k_φ n and its class's conditional mean as far as one absorbed photon's
 //!   momentum goes (`Emitted::kick`: at most k_φ + k_c in all);
-//! - a step carries the rest at its middle, on the state x_m there (`Dynamics::scattering`): the force F_s the jumps do
+//! - a step carries the rest at its middle, on the state x_m there (`Middle::scattering`): the force F_s the jumps do
 //!   not carry, over τ, and the diffusion 2D they do not carry, as the step's part of the trajectory's Brownian path
 //!   (`Brownian`) through a factor Λ of it, Λ Λᵀ = 2D (`factor`): in free flight κ += τ F_s + Λ ΔW and r −= (ħ/m) Λ ΔZ,
 //!   ΔW = ∫dW the path's increment over the step and ΔZ = ∫(s − τ/2)dW its first moment about the middle. With ΔZ the
@@ -305,12 +305,6 @@ pub trait Dynamics {
         f.iter().copied().collect()
     }
 
-    /// What the light the state scatters gives the momentum per unit time beside the Ehrenfest force and the jumps'
-    /// kicks (`Model::scattering_of`): the force and the second moment's rate the jumps do not carry, of the state ψ at
-    /// a step's middle, with the states' populations averaged over the step (of unit sum) for what goes with an
-    /// explicit state's decay -- its rate is the step's mean, not the middle's.
-    fn scattering(&self, cluster: usize, at: &Point, psi: &[C64], populations: &[f64]) -> Scattering;
-
     /// The loss energy E_s = (ħ/m)κ²/2 + V_run(r; p(ψ)) of the cluster's state at a point (`Model::energy`, rad/µs).
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64;
 
@@ -331,7 +325,9 @@ pub trait Dynamics {
 
 /// A cluster's generator at a point (r_h, t_m) (module documentation, # The kick): what of it depends on neither the
 /// momentum nor the time is made with it; a path through the point adds the momentum's part; and the generator and its
-/// gradient's forms are asked at times along that path. In the cluster's Doppler frames throughout.
+/// gradient's forms are asked at times along that path. In the cluster's Doppler frames throughout. The scattered
+/// light of a state at the point is asked of it too (# The absorbed light's momentum): a step asks the model for its
+/// middle point once.
 pub trait Middle {
     /// A path through the point: the Doppler weights at the momentum the generator is taken at, and the rates at which
     /// the light's plane waves and the Doppler frames turn at the path's velocity. Plain numbers.
@@ -360,6 +356,13 @@ pub trait Middle {
     /// The gradient at the fixed point by its tones, G(r_h, t) = Σ_m G_m e^{iΩ_m(t − t_m)}: to `each` every Ω_m (rad/µs)
     /// with Re tr(G_m ρ) per lab axis, for a Hermitian ρ.
     fn tones(&self, path: &Self::Path, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3]));
+
+    /// What the light a state scatters at the point gives the momentum per unit time beside the Ehrenfest force and the
+    /// jumps' kicks (`Model::scattering_on`): the force and the second moment's rate the jumps do not carry, of the
+    /// state ψ at the middle's time and the path's momentum, with the states' populations averaged over the step (of
+    /// unit sum) for what goes with an explicit state's decay -- its rate is the step's mean, not the middle's. Asked
+    /// of the middle, which holds the point: the model makes nothing there a second time.
+    fn scattering(&self, path: &Self::Path, psi: &[C64], populations: &[f64]) -> Scattering;
 
     /// The counted complex multiply-adds of one `generator`, one `force` and one `tones`.
     fn work(&self) -> [f64; 3];
@@ -1431,7 +1434,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     *p = z.norm_sqr() / norm;
                 }
             }
-            let scattered = self.model.scattering(cluster, &Point { r: self.reached.0, kappa: kappa_m, t: start + h }, &middle[..n], &populations[..n]);
+            let scattered = along.middle.scattering(&along.path, &middle[..n], &populations[..n]);
             march.scattered = Some((scattered.force, factor(&scattered.diffusion, scattered.size, scattered.links)));
         }
         march.work += count::propagation(costs, still, picture.work) + count::impulse(n, costs, counted, still);

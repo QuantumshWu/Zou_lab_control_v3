@@ -1949,6 +1949,9 @@ mod tests {
                 let plan = fourth.plan(cluster, lights);
                 let own = fourth.action(&sample, &fourth.middle(&plan, r, 0.0, None));
                 let given = fourth.action(&sample, &fourth.middle_of(&plan, 0.0, &amplitudes, Some(&fourth.near_exact(&plan, &amplitudes, 1, &fourth.coherent_dressing()))));
+                // The generator reads the forms' values alone, the fourth order's part too: of the forms to order 0 it
+                // is the same, bit for bit.
+                assert_eq!(given, fourth.action(&sample, &fourth.middle_of(&plan, 0.0, &amplitudes, Some(&fourth.near_exact(&plan, &amplitudes, 0, &fourth.coherent_dressing())))), "at {r:?}: the generator of the forms' values alone");
                 let lower = second.action(&sample, &second.middle(&second.plan(cluster, lights), r, 0.0, None));
                 let size = |x: &[C64]| crate::linalg::norm_sqr(x).sqrt();
                 let moved = |x: &[C64], y: &[C64]| size(&x.iter().zip(y).map(|(a, b)| *a - *b).collect::<Vec<_>>());

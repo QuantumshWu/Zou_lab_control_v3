@@ -53,6 +53,7 @@ use crate::field::Amplitude;
 use crate::linalg::{dot3, symmetric3_eigen};
 use crate::request::{GROUND, STATES};
 use crate::units::rounding;
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// A potential's expansion with the scale of its sum (Σ of its terms' moduli): the rounding of its value is
@@ -211,83 +212,93 @@ impl Model {
         off.0[self.light.trap] = Lit::Off;
         let parts = jet::parts(order);
         let unit: Vec<C64> = (0..parts).map(|part| if part == 0 { C64::ONE } else { C64::ZERO }).collect();
-        for (lights, sign) in [(lights, 1.0), (&off, -1.0)] {
-            for cluster in 0..self.clusters.len() {
-                let c = &self.clusters[cluster];
-                if c.states[..c.ground].iter().all(|&s| p[s] == 0.0) {
+        // The clusters that hold a population, with the trap light on and off: each one's plan and its near forms -- a
+        // table's Hermitian ones, or the exact elimination's of the populated places alone (the shifts read below are
+        // those places' own).
+        let sets = [(lights, 1.0), (&off, -1.0)];
+        let held: Vec<(usize, usize)> = (0..sets.len()).flat_map(|set| (0..self.clusters.len()).map(move |cluster| (set, cluster))).filter(|&(_, cluster)| { let c = &self.clusters[cluster]; c.states[..c.ground].iter().any(|&s| p[s] != 0.0) }).collect();
+        let read = |&(set, cluster): &(usize, usize)| {
+            let (c, lights) = (&self.clusters[cluster], sets[set].0);
+            let plan = self.plan(cluster, lights);
+            let near = (!plan.links.is_empty()).then(|| match tables.and_then(|t| t.of(cluster, lights)) {
+                Some(table) if order <= 1 => self.near_tabulated(table, amplitudes, &[(plan.near.hermitian(), order)]),
+                _ => self.near_exact_on(&plan, amplitudes, order, &self.coherent_dressing(), &|place| place < c.ground && p[c.states[place]] != 0.0),
+            });
+            (plan, near)
+        };
+        // The eliminations side by side (each a plan made and a factorization per place: milliseconds); a table's
+        // reads one after another (microseconds: a step's loss energy).
+        let tabulated = order <= 1 && held.iter().all(|&(set, cluster)| tables.is_some_and(|t| t.of(cluster, sets[set].0).is_some()));
+        let made: Vec<_> = if tabulated { held.iter().map(read).collect() } else { held.par_iter().map(read).collect() };
+        for (&(set, cluster), (plan, near)) in held.iter().zip(&made) {
+            let (c, (lights, sign)) = (&self.clusters[cluster], sets[set]);
+            let Some(near) = near else { continue };
+            let fields = self.fields(plan, amplitudes, [0.0; 3], order);
+            for link in &plan.links {
+                let (x, y) = link.place;
+                if x != y || x >= c.ground || p[c.states[x]] == 0.0 || !plan.statics[link.block] {
                     continue;
                 }
-                let plan = self.plan(cluster, lights);
-                if plan.links.is_empty() {
-                    continue;
+                let (left, right) = plan.factors(link.block);
+                let side = |s: Option<usize>, weighted: bool| s.map_or(&unit[..], |s| if weighted { fields.doppler(s) } else { fields.plain(s) });
+                // A whole jet's parts hold any order's.
+                let (mut coefficient, mut form, mut term) = ([C64::ZERO; super::jet::WHOLE], [C64::ZERO; super::jet::WHOLE], [C64::ZERO; super::jet::WHOLE]);
+                jet::multiply(side(left, link.flag == LEFT), side(right, link.flag == RIGHT), &mut coefficient[..parts]);
+                near.jet(link.operand, &mut form[..parts]);
+                if link.conjugate {
+                    form.iter_mut().for_each(|z| *z = z.conj());
                 }
-                let near = match tables.and_then(|t| t.of(cluster, lights)) {
-                    Some(table) if order <= 1 => self.near_tabulated(table, amplitudes, &[(plan.near.hermitian(), order)]),
-                    _ => self.near_exact(&plan, amplitudes, order, &self.coherent_dressing()),
-                };
-                let fields = self.fields(&plan, amplitudes, [0.0; 3], order);
-                for link in &plan.links {
-                    let (x, y) = link.place;
-                    if x != y || x >= c.ground || p[c.states[x]] == 0.0 || !plan.statics[link.block] {
-                        continue;
+                jet::multiply(&coefficient[..parts], &form[..parts], &mut term[..parts]);
+                let (q, w) = (&mut out.quadratic, sign * p[c.states[x]]);
+                q.value += w * term[0].re;
+                for i in 0..3 {
+                    if order >= 1 {
+                        q.gradient[i] += w * term[1 + i].re;
                     }
-                    let (left, right) = plan.factors(link.block);
-                    let side = |s: Option<usize>, weighted: bool| s.map_or(&unit[..], |s| if weighted { fields.doppler(s) } else { fields.plain(s) });
-                    // A whole jet's parts hold any order's.
-                    let (mut coefficient, mut form, mut term) = ([C64::ZERO; super::jet::WHOLE], [C64::ZERO; super::jet::WHOLE], [C64::ZERO; super::jet::WHOLE]);
-                    jet::multiply(side(left, link.flag == LEFT), side(right, link.flag == RIGHT), &mut coefficient[..parts]);
-                    near.jet(link.operand, &mut form[..parts]);
-                    if link.conjugate {
-                        form.iter_mut().for_each(|z| *z = z.conj());
-                    }
-                    jet::multiply(&coefficient[..parts], &form[..parts], &mut term[..parts]);
-                    let (q, w) = (&mut out.quadratic, sign * p[c.states[x]]);
-                    q.value += w * term[0].re;
-                    for i in 0..3 {
-                        if order >= 1 {
-                            q.gradient[i] += w * term[1 + i].re;
-                        }
-                        for j in 0..3 {
-                            if order >= 2 {
-                                q.hessian[i][j] += w * term[jet::second(i, j)].re;
-                            }
+                    for j in 0..3 {
+                        if order >= 2 {
+                            q.hessian[i][j] += w * term[jet::second(i, j)].re;
                         }
                     }
-                    out.scale += (coefficient[0] * form[0]).abs() * p[c.states[x]];
-                    out.terms += 1;
                 }
-                // The fourth order's shift (assemble.rs, # The fourth order): the diagonal of H⁽⁴⁾ = Herm[−Y N + ½[X, N]]
-                // at the point, and its gradient -- the generator's whose gradient the force is. Its second derivatives
-                // are not made: a potential asked to that order (a trap's Hessian) is the second order's.
-                if let (Some(fourth), true) = (&plan.fourth, order <= 1) {
-                    let mut site = super::assemble::Held::<super::assemble::Site>::take();
-                    site.beams.clear();
-                    site.beams.extend_from_slice(amplitudes);
-                    self.quartic(&plan, fourth, tables.and_then(|t| t.of(cluster, lights)), None, &mut site, false);
-                    let (n, size) = (fourth.n, fourth.n * fourth.n);
-                    Model::quartic_read(|q| {
-                        let (near, partner, metric) = (&q.data[..4 * size], &q.data[4 * size..8 * size], &q.data[8 * size..]);
-                        // Re Σ_c (−Y + ½X)[b, c] N[c, b] − ½ N[b, c] X[c, b], the factors' parts as given.
-                        let diagonal = |b: usize, first: usize, second: usize| -> f64 {
-                            (0..n)
-                                .map(|k| {
-                                    let (bk, kb) = (b * n + k, k * n + b);
-                                    ((metric[first * size + bk] * 0.5 - partner[first * size + bk]) * near[second * size + kb] - near[first * size + bk] * metric[second * size + kb] * 0.5).re
-                                })
-                                .sum()
-                        };
-                        for (b, &state) in c.states[..n].iter().enumerate().filter(|of| p[*of.1] != 0.0) {
-                            let (quadratic, w) = (&mut out.quadratic, sign * p[state]);
-                            let value = diagonal(b, 0, 0);
-                            quadratic.value += w * value;
-                            for i in 0..3 * order {
-                                quadratic.gradient[i] += w * (diagonal(b, 1 + i, 0) + diagonal(b, 0, 1 + i));
-                            }
-                            out.scale += value.abs() * p[state];
-                            out.terms += 1;
+                out.scale += (coefficient[0] * form[0]).abs() * p[c.states[x]];
+                out.terms += 1;
+            }
+            // The fourth order's shift (assemble.rs, # The fourth order): the diagonal of H⁽⁴⁾ = Herm[−Y N + ½[X, N]]
+            // at the point, and its gradient -- the generator's whose gradient the force is. Its second derivatives
+            // are not made: a potential asked to that order (a trap's Hessian) is the second order's.
+            if let (Some(fourth), true) = (&plan.fourth, order <= 1) {
+                let mut site = super::assemble::Held::<super::assemble::Site>::take();
+                site.beams.clear();
+                site.beams.extend_from_slice(amplitudes);
+                let table = tables.and_then(|t| t.of(cluster, lights));
+                if let Some(table) = table {
+                    self.placed(table, &mut site);
+                }
+                self.quartic(plan, fourth, table, None, &mut site, false);
+                let (n, size) = (fourth.n, fourth.n * fourth.n);
+                Model::quartic_read(|q| {
+                    let (near, partner, metric) = (&q.data[..4 * size], &q.data[4 * size..8 * size], &q.data[8 * size..]);
+                    // Re Σ_c (−Y + ½X)[b, c] N[c, b] − ½ N[b, c] X[c, b], the factors' parts as given.
+                    let diagonal = |b: usize, first: usize, second: usize| -> f64 {
+                        (0..n)
+                            .map(|k| {
+                                let (bk, kb) = (b * n + k, k * n + b);
+                                ((metric[first * size + bk] * 0.5 - partner[first * size + bk]) * near[second * size + kb] - near[first * size + bk] * metric[second * size + kb] * 0.5).re
+                            })
+                            .sum()
+                    };
+                    for (b, &state) in c.states[..n].iter().enumerate().filter(|of| p[*of.1] != 0.0) {
+                        let (quadratic, w) = (&mut out.quadratic, sign * p[state]);
+                        let value = diagonal(b, 0, 0);
+                        quadratic.value += w * value;
+                        for i in 0..3 * order {
+                            quadratic.gradient[i] += w * (diagonal(b, 1 + i, 0) + diagonal(b, 0, 1 + i));
                         }
-                    });
-                }
+                        out.scale += value.abs() * p[state];
+                        out.terms += 1;
+                    }
+                });
             }
         }
         out
