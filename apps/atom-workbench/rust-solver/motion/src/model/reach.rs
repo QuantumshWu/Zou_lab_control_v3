@@ -65,10 +65,13 @@
 //! phase); the first tends to the second as the cell shrinks. The cell of a quantity's largest bound is halved (# A cell's
 //! sides) until
 //! the bound answers the question asked -- a threshold decided: below it everywhere (the largest remaining bound is the answer), or
-//! reached at a centre in the reach (attained); or an extent known: within a resolution of a value attained at a centre in the
-//! reach -- or until it is within the rounding of its centre's value. No point is sampled as a bound. (A threshold near the
-//! quantity's true largest value is the expensive question: every cell along the place of that value has to shrink to their
-//! difference. A range is asked as an extent, never by thresholds closing in on it.)
+//! a value at or above the question's lower edge reached at a centre in the reach (attained); or an extent known: within a
+//! resolution of a value attained at a centre in the reach -- or until it is within the rounding of its centre's value. No
+//! point is sampled as a bound. (A threshold near the quantity's true largest value is the expensive question: every cell
+//! along the place of that value has to shrink to their difference, their number growing as its inverse cube. A question
+//! whose answer may be either side of a band -- a gate, whose fold must be proven below its threshold and whose unit may
+//! always be kept, units.rs `KEEP` -- asks the band, and its cells shrink to the band's width at most. A range is asked as
+//! an extent, never by thresholds closing in on it.)
 //!
 //! All the quantities of a model share one tree of cells, and each quantity halves only the cells it still needs -- one
 //! decided on the coarse cells costs nothing further. A cell has one pair of halves a side (# A cell's sides), each made when
@@ -1058,9 +1061,10 @@ impl<Q: Fn(&Region) -> f64 + Sync + ?Sized> Pace<Q> for AtOnce {
 }
 
 /// Whether a quantity's proof against a threshold is decided (`Model::bounds_over`), by the largest upper bound of the cells left
-/// and the largest value attained at a centre in the reach: below the threshold everywhere, or attained at or above it.
-fn decided(threshold: f64) -> impl Fn(f64, f64) -> bool + Sync {
-    move |upper, attained| upper < threshold || attained >= threshold
+/// and the largest value attained at a centre in the reach: below the threshold everywhere, or attained at or above `attains`
+/// (the threshold itself where the question has no band).
+fn decided(threshold: f64, attains: f64) -> impl Fn(f64, f64) -> bool + Sync {
+    move |upper, attained| upper < threshold || attained >= attains
 }
 
 /// P(Y + Σ_k a_k E_k > level) at a level above zero: Y of Γ(`shape`) (nothing at shape zero), E_k unit exponentials of
@@ -1383,18 +1387,18 @@ impl Model {
         self.region(self.spans(&Cell { centre: r, half: [0.0; 3] }), speed)
     }
 
-    /// The provable bounds over the reach of quantities given per region, each asked against `threshold` (module documentation,
-    /// # Provable extrema): each one's largest upper bound of the cells left when it is decided -- below the threshold everywhere,
-    /// or attained at or above it at a centre in the reach --, or within the rounding of its centre's value; 0 where no cell meets
-    /// the reach. The cells are halved one after another (`InTurn`).
-    pub(crate) fn bounds_over(&self, reach: &Reach, threshold: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
-        self.proven_over::<_, InTurn>(reach, Rule { settled: &decided(threshold), scale: threshold.abs() }, quantities)
+    /// The provable bounds over the reach of quantities given per region, each asked against `threshold` from the band's lower
+    /// edge `attains` (module documentation, # Provable extrema): each one's largest upper bound of the cells left when it is
+    /// decided -- below the threshold everywhere, or a value at or above `attains` at a centre in the reach --, or within the
+    /// rounding of its centre's value; 0 where no cell meets the reach. The cells are halved one after another (`InTurn`).
+    pub(crate) fn bounds_over(&self, reach: &Reach, threshold: f64, attains: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
+        self.proven_over::<_, InTurn>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs() }, quantities)
     }
 
-    /// The bounds against `threshold` (`bounds_over`) of quantities any thread may ask, proven on all the cores (`AtOnce`): the
-    /// same bounds, to the bit.
-    pub(crate) fn bounds_over_in_parallel(&self, reach: &Reach, threshold: f64, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
-        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold), scale: threshold.abs() }, quantities)
+    /// The bounds against `threshold` and `attains` (`bounds_over`) of quantities any thread may ask, proven on all the cores
+    /// (`AtOnce`): the same bounds, to the bit.
+    pub(crate) fn bounds_over_in_parallel(&self, reach: &Reach, threshold: f64, attains: f64, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs() }, quantities)
     }
 
     /// The provable bounds over the reach of quantities given per region, each to `resolution`: each one's largest upper bound of
@@ -1680,10 +1684,59 @@ mod tests {
         let s = |r: &Region| model.folds(b, 0, r, usize::MAX)[0];
         let a = |r: &Region| model.folds(b, 0, r, usize::MAX)[1];
         let other = |r: &Region| model.folds(3, 0, r, usize::MAX)[0];
-        let together = model.bounds_over(&reach, 0.5, &[&s, &a, &other]);
-        let alone: Vec<f64> = [&s as &dyn Fn(&Region) -> f64, &a, &other].iter().map(|q| model.bounds_over(&reach, 0.5, &[*q])[0]).collect();
+        let together = model.bounds_over(&reach, 0.5, 0.5, &[&s, &a, &other]);
+        let alone: Vec<f64> = [&s as &dyn Fn(&Region) -> f64, &a, &other].iter().map(|q| model.bounds_over(&reach, 0.5, 0.5, &[*q])[0]).collect();
         assert_eq!(together, alone);
-        assert_eq!(model.bounds_over_in_parallel(&reach, 0.5, &[&s, &a, &other]), alone);
+        assert_eq!(model.bounds_over_in_parallel(&reach, 0.5, 0.5, &[&s, &a, &other]), alone);
+    }
+
+    /// A gate's proof asks its band [¼, ½) (units.rs `KEEP`), not the margin of a value from ½: R3_DOPPLER's strongest
+    /// cooling drive's saturation scaled to a largest value over the reach (its extent to 1e-3) of 0.45 is settled by
+    /// keeping -- a centre attains ¼ -- in far fewer evaluations than the threshold question alone takes; scaled to 0.2,
+    /// below the band, it is still proven below ½; scaled to 0.7 it is kept.
+    #[test]
+    fn a_gate_s_proof_asks_its_band_not_the_margin() {
+        use crate::model::units::{EXISTS, KEEP};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let model = at_the_atom("R3_DOPPLER");
+        let b = 7;
+        let p = {
+            let mut p = [0.0; GROUND];
+            p[b] = 1.0;
+            p
+        };
+        let trap = model.trap(&p, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &p, 20.0, 2e-3);
+        let s = |r: &Region| model.folds(b, 0, r, usize::MAX)[0];
+        let largest = model.extents_over(&reach, 1e-3, &[&s])[0];
+        for (target, kept) in [(0.45, true), (0.2, false), (0.7, true)] {
+            let (scale, asked) = (target / largest, AtomicUsize::new(0));
+            let q = |r: &Region| {
+                asked.fetch_add(1, Ordering::Relaxed);
+                scale * s(r)
+            };
+            let banded = model.bounds_over(&reach, EXISTS, KEEP, &[&q])[0];
+            let in_band = asked.swap(0, Ordering::Relaxed);
+            let exact = model.bounds_over(&reach, EXISTS, EXISTS, &[&q])[0];
+            let at_threshold = asked.load(Ordering::Relaxed);
+            eprintln!("largest {target}: banded {banded:.4} in {in_band} evaluations, the threshold alone {exact:.4} in {at_threshold}");
+            assert_eq!(banded >= EXISTS, kept, "largest {target}: the banded bound {banded}");
+            assert!(in_band <= at_threshold, "largest {target}: {in_band} evaluations in the band, {at_threshold} at the threshold");
+            if target < KEEP {
+                assert_eq!(banded, exact, "below the band the two questions are one");
+            }
+        }
+        // Its largest value at ½(1 − 1e-6), where the threshold question alone would resolve cells to a millionth of ½:
+        // kept on the root's few halvings.
+        let (scale, asked) = (0.5 * (1.0 - 1e-6) / largest, AtomicUsize::new(0));
+        let q = |r: &Region| {
+            asked.fetch_add(1, Ordering::Relaxed);
+            scale * s(r)
+        };
+        let banded = model.bounds_over(&reach, EXISTS, KEEP, &[&q])[0];
+        let asked = asked.load(Ordering::Relaxed);
+        eprintln!("largest ½(1 − 1e-6): banded {banded:.4} in {asked} evaluations");
+        assert!(banded >= EXISTS && asked <= 64, "a largest value at ½(1 − 1e-6): {banded} in {asked} evaluations");
     }
 
     /// A reference scene's request, its light and its model with every drive folded with the bare levels: a generator

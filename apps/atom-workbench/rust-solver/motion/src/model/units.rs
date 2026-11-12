@@ -11,6 +11,22 @@
 //! beam at the largest amplitude its cell allows and all in phase, over the distance's least, the energies' spread and
 //! every Doppler shift of the reach's speeds taken against it. Neither condition implies the other; a fold needs both.
 //!
+//! The sweep is a relative error, of the fold's own effect: the instantaneous fold of a linear sweep is the exact
+//! response times ∫₀^∞ e^{−x + iax²/2} dx, of modulus at most one at any a (internal.md 1B.1), so a moving fold is off
+//! by at most twice its own amplitude m, (2m)² = 2S of its states' population, however fast it sweeps. Where that is
+//! below the least share any output resolves, unseen(2¹⁴) (SPEC §5.4: the share the ledger cannot feel), the sweep
+//! asks nothing (`Gate::resolved`): a coupling of 1e-9 of its line's, which the H0 states' mixing gives the repump
+//! between Zeeman sublevels two apart, swept at the tweezer's light-shift gradient read a = 0.5000 over the reach of the
+//! user's lin⊥lin probe, and its proof was 95 % of 133 s.
+//!
+//! Keeping a unit is always exact -- the more exact level -- so a proof over the reach only has to settle the fold:
+//! below ½ everywhere it holds; a unit whose proof meets a centre in the reach attaining ¼ first is kept (`KEEP`,
+//! reach.rs # Provable extrema). Within [¼, ½) both are right: a fold attaining S there books its mixing S/2, an eighth
+//! of its states' population or more (# The errors), 2.5 times the population target, which its states cannot meet
+//! where they are held -- keeping it is what the error asks anyway (SPEC §5.2's first rule). The cells then shrink to
+//! the band's width at most, not to a value's margin from ½, whose inverse cube their number grows as: lin⊥lin's
+//! couplings of F=1 m=0 with m=±1 at 0.497 and 0.499 took 1.1 million cells.
+//!
 //! # Levels
 //! A drive is taken at one of three levels (model.rs `Level`), each the more exact one of the one before, and what decides
 //! is the accuracy its own denominator needs -- never its frequency, its line or its beam:
@@ -185,6 +201,11 @@ use std::sync::Arc;
 /// Where a fold exists (module documentation): S = 2m² < ½ and a < ½.
 pub(crate) const EXISTS: f64 = 0.5;
 
+/// Where a gate's proof over the reach may end in keeping its unit (module documentation, # One rule): a value attained at
+/// a centre in the reach at half the threshold, S = ¼ -- a fold there books its mixing S/2 = ⅛ of its states'
+/// population, 2.5 times the population target 0.05.
+pub(crate) const KEEP: f64 = 0.5 * EXISTS;
+
 /// The fourth order's leading errors in one line's share s (module documentation, # The fold's order, where a ground
 /// state's several drives take the line's place; derivation: fourth.status.md), each the next order's: on the force
 /// 3/2 s², the next term of the one line's (1 − s + 3/2 s²); on the rates 9/8 s², the most that the slow state's
@@ -210,6 +231,14 @@ impl Gate {
     /// Whether the fold exists over the reach: both bounds below ½.
     pub fn exists(&self) -> bool {
         self.saturation < EXISTS && self.sweep < EXISTS
+    }
+
+    /// The gate with its sweep as far as an output can see it (module documentation, # One rule): none where the fold's
+    /// largest error from any motion, (2m)² = 2S of its states' population, is below the least share any output resolves,
+    /// unseen(2¹⁴).
+    pub(crate) fn resolved(self) -> Gate {
+        let seen = 2.0 * self.saturation >= crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
+        Gate { saturation: self.saturation, sweep: if seen { self.sweep } else { 0.0 } }
     }
 
     /// The error of the unit this is the gate of, at most, at any state the reach holds -- where the unit's error is its
@@ -475,7 +504,7 @@ impl Model {
             let slope = (0..STATES).map(|s| self.energy_slope_over(s, s, region) + self.near_slope(s, region)).fold(0.0, f64::max);
             (2.0 * slope, self.acceleration(region, &|_| true))
         });
-        gate(size, distance - wave * region.speed, region.speed * slope + wave * acceleration)
+        gate(size, distance - wave * region.speed, region.speed * slope + wave * acceleration).resolved()
     }
 
     /// Whether a state is an explicit excited state of this model.
@@ -726,9 +755,9 @@ impl Model {
             if bare {
                 let own = gate(of.size + (of.centre - d.detuning).abs() + of.moved, d.bare, rate);
                 place[2] = place[2].max(own.saturation - actual.saturation);
-                place[3] = place[3].max(own.sweep).max(pair.sweep);
+                place[3] = place[3].max(own.resolved().sweep).max(pair.resolved().sweep);
             } else {
-                place[1] = place[1].max(actual.sweep).max(pair.sweep);
+                place[1] = place[1].max(actual.resolved().sweep).max(pair.resolved().sweep);
             }
         }
         // The tails: each place's shares with every weaker one's; a bare drive's own share in its own's stead. Then the
@@ -879,7 +908,7 @@ impl Model {
             }
             let (spread, slope) = if a == b { (0.0, 0.0) } else { (self.near_spread(a, b, region), self.energy_slope_over(a, b, region) + self.near_slope(a, region) + self.near_slope(b, region)) };
             let acceleration = self.acceleration(region, &|c| c.states.contains(&a) || c.states.contains(&b));
-            let made = gate(size, distance(at - slack, at + slack) - form.wave * region.speed - spread, region.speed * slope + form.wave * acceleration);
+            let made = gate(size, distance(at - slack, at + slack) - form.wave * region.speed - spread, region.speed * slope + form.wave * acceleration).resolved();
             (made.saturation, made.sweep)
         })
     }
@@ -953,7 +982,8 @@ impl Model {
     /// and levels (`gate_of`). Each is bounded on the whole space first, every beam at its peak (`everywhere`): a bound over
     /// any reach, and where both of a unit's are below ½ there its gate. The others are proven together over the reach's
     /// cells, on all the cores (reach.rs `Model::bounds_over_in_parallel`) -- a ground state's drive's with every weaker
-    /// one's share on the same cell: what a cell's centre attains is a value there, never a bound from elsewhere.
+    /// one's share on the same cell: what a cell's centre attains is a value there, never a bound from elsewhere --, each
+    /// until it is below ½ everywhere or a centre attains `KEEP` (module documentation, # One rule).
     pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
         let judged = self.judged(units);
         let (everywhere, open) = self.everywhere(&judged, reach.speed);
@@ -985,7 +1015,7 @@ impl Model {
             })
             .collect();
         let refs: Vec<&(dyn Fn(&Region) -> f64 + Sync)> = quantities.iter().map(|q| q.as_ref()).collect();
-        let proven = self.bounds_over_in_parallel(reach, EXISTS, &refs);
+        let proven = self.bounds_over_in_parallel(reach, EXISTS, KEEP, &refs);
         let mut out: Vec<Gate> = everywhere.iter().map(|of| Gate { saturation: of[0], sweep: of[1] }).collect();
         for (&u, &at) in open.iter().zip(&asked) {
             out[u] = Gate { saturation: proven[at], sweep: proven[at + 1] };
@@ -1221,6 +1251,35 @@ mod tests {
             }
             kept.extend(failing);
         }
+    }
+
+    /// The sweep is a relative error of the fold's own effect (module documentation, # One rule; `Gate::resolved`). The
+    /// exact response of a linear sweep is the instantaneous fold times I(a) = ∫₀^∞ e^{−x + iax²/2} dx (internal.md
+    /// 1B.1), of modulus at most one at any a -- so the fold is off by at most twice its own amplitude: |I(a) − 1| ≤ 2
+    /// (Simpson on [0, 40], the step resolving the phase's largest rate a·40). At a = ½ the response holds 0.71 of the
+    /// fold's population, at a = 1.75 0.39 (the gate's edge, internal.md). A coupling whose whole effect, 2S, is below the
+    /// least resolved share has no sweep -- the user's lin⊥lin pair, S = 9e-38 at a sweep of 0.83 --; one above it keeps
+    /// its sweep, and a fold of a share at the target's scale with a sweep beyond ½ is kept.
+    #[test]
+    fn a_fold_s_sweep_counts_as_far_as_its_own_effect_is_seen() {
+        let response = |a: f64| -> C64 {
+            let (end, n) = (40.0_f64, (2.0 * (1.0 + a * 40.0) * 40.0 * 20.0).ceil() as usize * 2);
+            let h = end / n as f64;
+            let f = |x: f64| C64::new(-x, 0.5 * a * x * x).exp();
+            let inner: C64 = (1..n).map(|i| f(i as f64 * h) * if i % 2 == 1 { 4.0 } else { 2.0 }).sum();
+            (f(0.0) + inner + f(end)) * (h / 3.0)
+        };
+        for a in [0.0, 0.1, 0.5, 1.0, 1.75, 4.0, 20.0] {
+            let i = response(a);
+            assert!(i.abs() <= 1.0 + 1e-9 && (i - C64::ONE).abs() <= 2.0, "a = {a}: I = {i:?}");
+        }
+        assert!((response(0.5).norm_sqr() - 0.71).abs() < 0.01 && (response(1.75).norm_sqr() - 0.39).abs() < 0.01, "{} {}", response(0.5).norm_sqr(), response(1.75).norm_sqr());
+        let unseen = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
+        assert!(Gate { saturation: 9e-38, sweep: 0.83 }.resolved().exists());
+        assert!(Gate { saturation: 0.25 * unseen, sweep: 7.6 }.resolved().exists());
+        assert!(!Gate { saturation: unseen, sweep: 0.6 }.resolved().exists());
+        assert!(!Gate { saturation: 0.1, sweep: 0.6 }.resolved().exists());
+        assert_eq!(Gate { saturation: 0.1, sweep: 0.3 }.resolved().sweep, 0.3);
     }
 
     /// A gate's bound of its unit's error (`Gate::error_bound`) at states the reach holds. On the closed models of

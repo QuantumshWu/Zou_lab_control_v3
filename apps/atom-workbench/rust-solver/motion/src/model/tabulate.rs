@@ -598,7 +598,7 @@ impl Model {
                 })
                 .collect();
             let refs: Vec<&dyn Fn(&Region) -> f64> = quantities.iter().map(|q| q.as_ref() as &dyn Fn(&Region) -> f64).collect();
-            self.bounds_over(reach, target, &refs)
+            self.bounds_over(reach, target, target, &refs)
         };
         // Per coordinate the range it was verified over where the reach bounds it (`Layout::verified`): of one held by its
         // weight over the reach, the distance from the focus value that keeps its weight within the target.

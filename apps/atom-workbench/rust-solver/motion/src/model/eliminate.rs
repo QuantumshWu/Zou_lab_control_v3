@@ -62,7 +62,7 @@ use super::assemble::{NearValues, Plan};
 use super::photon::Origin;
 use super::reach::{distance, Region, Weights};
 use super::units::{gate, Measured};
-use super::{Beat, Component, Level, Lights, Model, Unit, UnitError};
+use super::{Beat, Component, Gate, Level, Lights, Model, Unit, UnitError};
 use crate::field::Amplitude;
 use crate::linalg::{dot3, Lu, Mat, C64};
 use crate::request::{GROUND, STATES};
@@ -921,7 +921,9 @@ impl Model {
         let fold = &at.folds[ci][pb];
         let across = *fold.across.get_or_init(|| (0..EXCITED).filter(|&x| fold.terms[x] > 0.0).map(|x| fold.terms[x] / self.drive_distance(ci, GROUND + x, ground, at).0).sum());
         let reads = if across > 0.0 { (fold.level.abs() / distance / across).max(1.0) } else { 1.0 };
-        Some(Folded { share: 2.0 * response.norm_sqr(), distance, sweep: gate(0.0, distance, rate).sweep, doppler: doppler * doppler, population: at.populations[ground], total: fold.share, reads, response })
+        // Its sweep as the gate reads it (units.rs `Gate::resolved`): nothing where its whole effect is below what an output resolves.
+        let share = 2.0 * response.norm_sqr();
+        Some(Folded { share, distance, sweep: Gate { saturation: share, sweep: gate(0.0, distance, rate).sweep }.resolved().sweep, doppler: doppler * doppler, population: at.populations[ground], total: fold.share, reads, response })
     }
 
     /// A drive's denominator at a sample, its modulus |E_e − E_b − δ_c + δΔ − iΓ_e/2| with the levels' motion there, and the
