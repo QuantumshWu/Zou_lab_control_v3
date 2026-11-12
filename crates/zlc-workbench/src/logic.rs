@@ -530,10 +530,13 @@ impl Workbench {
     fn node_defaults(&self, node: &Node, values: &mut Map<String, Value>) {
         let Some((_, Ok(Value::Object(offered)))) = node.answers.get("resolve_defaults") else { return };
         let Some(descriptor) = self.catalog.get(&node.type_id) else { return };
+        let effective = fields::effective(&descriptor.parameters, values);
         for (name, value) in offered {
             let Some(field) = descriptor.parameters.iter().find(|field| &field.name == name) else { continue };
             let empty = match values.get(name) { None | Some(Value::Null) => true, Some(Value::String(text)) => text.trim().is_empty(), _ => false };
-            if field.derived || empty { values.insert(name.clone(), value.clone()); }
+            // A field the draft holds (its enabled_when off) shows what the node says it is then
+            // (Frames per cycle, the trigger lane's count); the operator's typed value stays in the draft.
+            if field.derived || empty || !fields::enabled(field, &effective) { values.insert(name.clone(), value.clone()); }
         }
     }
 
