@@ -82,12 +82,24 @@
 //!       the attempt before stood at), that rung is read on a third level -- the pilot's trajectories at 4τ, a
 //!       quarter of a trajectory each -- and its read, lowered, is what this rung inherits: its order is tested like
 //!       any other's, for a quarter of what its pairs' companions cost;
-//!     - at the ladder's top, more pairs or the rung below (`blind`, `remedy`). The pairs are asked for what they
-//!       could do: were the error the least the read allows -- its near end at one look --, what the read holds
-//!       above it is the pairs' noise and falls as 1/N; the pairs that could bring the far end within b are run, a
-//!       batch at a time, where they cost less than the rung below and no more of them than cost what the rung below
-//!       does (they are lost with the rung: at most twice the rung's work is spent, whatever they show). A read the
-//!       noise has put above b so costs pairs, not a rung; one whose near end is at b is left for the rung below.
+//!     - at the ladder's top the third level is the rung below: its pilot -- the same trajectories at τ/2, twice
+//!       a pilot's steps -- read against this rung's level tests the order between the three levels as it does
+//!       for any rung reached by a halving (`refuted`, by this rung's read lowered). Where it refutes nothing and
+//!       nothing lies beyond, this rung is a rung of tested order and stands as it was: the rung below was read,
+//!       not taken, and its pilot is what the test cost. Where the order is refuted or a read lies beyond, this
+//!       rung is left on what the reads leave no doubt of, and the pilot run is the rung below's own. (Before,
+//!       the rung below was taken for the whole run wherever the first rung did not read within: twice the run's
+//!       work, by the draw. Measured, gray molasses at 1.4585 µs: T's mean square is 0.43 ± 0.10 b on 4096 pairs
+//!       against 2.917 µs and no more than 0.33 b by the level below -- well inside --, while a read on 88 pairs
+//!       has an interval of 1.7 b; one seed of four did not read within on 360 pairs and ran at 0.7292 µs, 1029k
+//!       trajectory steps where the others took 370k to 453k; with the third level it stands, at 535k. SPEC §5.3.)
+//!     - before that level, more pairs where they could spare it (`blind`, `remedy`). The pairs are asked for
+//!       what they could do: were the error the least the read allows -- its near end at one look --, what the
+//!       read holds above it is the pairs' noise and falls as 1/N; the pairs that could bring the far end within b
+//!       are run, a batch at a time, where what they cost beyond the run's own trajectories -- their companions,
+//!       and what of their finer level the product would not run -- is less than the rung below's pilot, and no
+//!       more of them than cost what it does: at most twice the third level's work is spent before it is read,
+//!       whatever the pairs show.
 //!       Where neither is to be had -- no rung below at the steps' cap, no number of pairs within a run's
 //!       trajectories, a read that is no number -- the work's bounds are used up and the check ends unable to see
 //!       (SPEC §5.1): the step stands, flagged, and every quantity's account takes what the check does not exclude,
@@ -607,8 +619,8 @@ fn blind(own: &Between) -> Option<f64> {
 enum Remedy {
     /// More pairs at the step and its double: the pairs to have.
     Pairs(u64),
-    /// The rung below.
-    Rung,
+    /// The rung below's pilot: the third level, which tests this rung's order.
+    Below,
     /// Neither: no number of pairs within a run's trajectories could bring it within, and there is no rung below, or
     /// the read excludes nothing.
     Neither,
@@ -618,28 +630,30 @@ enum Remedy {
 /// (`blind`), of a run whose product is predicted to take `product` trajectories at its step and whose pilot is
 /// `pilot` trajectories; `begins`: the trajectories the rung's check began with; `rung`: whether the rung below is to
 /// be had -- the ladder has it (`MOST_STEPS`), and the read excludes something (`readable`). Work in trajectories at
-/// the step τ -- a trajectory's steps go as 1/τ:
-/// - the rung below: the product over again at τ/2, 2·max(product, pilot). It inherits this rung's read: its order is
-///   tested, and it stands unless a look is clearly beyond its share;
-/// - the pairs that could bring the rung within, P = factor·have: their companions at 2τ, half a trajectory each, and
-///   the trajectories at τ still to run, the product's or the pairs', whichever are more:
-///   ½(P − have) + max(P, product) − have.
-/// The pairs where that is the less work, a batch of them, to the number asked and at most to twice the pairs the
-/// prediction rests on (`batch`); they are read again. What the pairs could do is a hope, and it is bounded: a rung's
-/// further pairs are lost with it -- a trajectory at τ and half a one at 2τ each, 3/2 (P − begins) --, and no more
-/// are asked than cost what the rung below does. Whatever the pairs then show, the check has spent at most twice the
-/// work of the rung taken at once -- the least a rule can promise that does not know what the pairs will show (the
-/// rented skis: rent until the rent paid is the price). Else the rung below, where it is to be had; else neither --
-/// the work's bounds are used up, and the check stays unable to see (SPEC §5.1).
+/// the step τ -- a trajectory's steps go as 1/τ --, beyond the trajectories the run takes at τ whatever the check
+/// does (the product's):
+/// - the rung below's pilot, the third level: the pilot's trajectories at τ/2, 2·pilot. It tests this rung's order
+///   (`settle`): the rung then stands unless a read leaves no doubt, and where it is left the pilot run is the rung
+///   below's own;
+/// - the pairs that could bring the rung within, P = factor·have, from N pairs on: their companions at 2τ, half a
+///   trajectory each, and what of their finer level the product would not run, ½(P − N) + (P − max(product, N))₊.
+/// The pairs where from the pairs in hand on that is the less work, a batch of them, to the number asked and at most
+/// to twice the pairs the prediction rests on (`batch`); they are read again. What the pairs could do is a hope, and
+/// it is bounded: where they do not bring the rung within, the third level is read all the same and what they cost
+/// was spent beside it, so no more are asked than cost, from the pairs the check began with on, what it does.
+/// Whatever the pairs then show, the check has spent at most twice the third level's work before it reads it -- the
+/// least a rule can promise that does not know what the pairs will show (the rented skis: rent until the rent paid is
+/// the price). Else the rung below's pilot, where it is to be had; else neither -- the work's bounds are used up,
+/// and the check stays unable to see (SPEC §5.1).
 fn remedy(factor: f64, have: u64, begins: u64, product: f64, pilot: u64, rung: bool) -> Remedy {
     let pairs = factor * have as f64;
-    let by_rung = if rung { 2. * product.max(pilot as f64) } else { f64::INFINITY };
-    let to_be_had = pairs <= MOST_TRAJECTORIES as f64 && have < MOST_TRAJECTORIES && 1.5 * (pairs - begins as f64) <= by_rung;
-    let by_pairs = if to_be_had { 0.5 * (pairs - have as f64) + pairs.max(product) - have as f64 } else { f64::INFINITY };
-    if by_pairs < by_rung {
+    let cost = |from: u64| 0.5 * (pairs - from as f64) + (pairs - product.max(from as f64)).max(0.);
+    let below = if rung { 2. * pilot as f64 } else { f64::INFINITY };
+    let to_be_had = pairs <= MOST_TRAJECTORIES as f64 && have < MOST_TRAJECTORIES && cost(begins) <= below;
+    if to_be_had && cost(have) < below {
         Remedy::Pairs(batch(pairs, have))
-    } else if by_rung < f64::INFINITY {
-        Remedy::Rung
+    } else if rung {
+        Remedy::Below
     } else {
         Remedy::Neither
     }
@@ -1238,18 +1252,22 @@ fn unseen_at_the_end() -> String {
 /// order, at 2τ; the further pairs a check took (`settle`), at the two levels: the groups the product runs next, by
 /// their place in its list; and the read the rung in hand inherits from the rung above (`lowered`) -- a check of this
 /// attempt came down from it (the scout's read serves the pilot on the rung the scout left standing: the same model at
-/// the same steps), or the pilot read it on a third level (`settle`).
+/// the same steps), or the pilot read it on a third level (`settle`). And, while the rung in hand is read as the
+/// third level of the rung above it (`settle`: a first rung at the ladder's top), that rung's levels whole, `upper`:
+/// its finer level is the companion of the rung in hand, and the rung stands again as it was where the test lets it.
 #[derive(Default)]
 struct Levels {
     fine: Vec<Part>,
     coarse: Vec<Part>,
     further: [Vec<Part>; 2],
     above: Option<Between>,
+    upper: Option<Box<Levels>>,
 }
 impl Levels {
     /// The finer level's groups and their companions: the pilot's, then the further pairs'.
     fn paired(&self) -> (Vec<&Part>, Vec<&Part>) {
-        (self.fine.iter().chain(&self.further[0]).collect(), self.coarse.iter().chain(&self.further[1]).collect())
+        let coarse = self.upper.as_ref().map_or(&self.coarse, |upper| &upper.fine);
+        (self.fine.iter().chain(&self.further[0]).collect(), coarse.iter().chain(&self.further[1]).collect())
     }
 }
 
@@ -1319,12 +1337,17 @@ enum Settled {
 ///   of the ladder, is read on a third level -- the pilot's trajectories at 4τ, a quarter of a trajectory each -- and
 ///   its read, lowered by the order, is the one this rung inherits: its order is tested like any other's. Where there
 ///   is no rung above (the ladder's top), the remedy of `remedy`: more pairs -- the product's next groups at both
-///   levels --, bounded by the rung below's work; or the rung below; where neither is to be had, the check ends
-///   unable to see (`Settled::Unseen`), and what it does not exclude is booked and flagged (SPEC §5.1). A rung
-///   whose order is tested and whose reads exclude nothing ends the check the same way.
+///   levels --, bounded by the third level's work; or that level, the rung below's pilot: the members so far at τ/2,
+///   read against this rung's level, this rung's levels kept whole meanwhile (`Levels::upper`). Where that read
+///   refutes nothing and nothing lies beyond, this rung's order is tested and it stands as it was -- the rung below
+///   was read, not taken --; else this rung is left as any is, and the pilot run is the rung below's own. Where
+///   neither pairs nor a rung below are to be had, the check ends unable to see (`Settled::Unseen`), and what it does
+///   not exclude is booked and flagged (SPEC §5.1). A rung whose order is tested and whose reads exclude nothing ends
+///   the check the same way.
 /// A rung below at which a trajectory would take more than `MOST_STEPS` steps does not exist: a check that is beyond
 /// or refuted there leaves the step capped. Nor is a rung taken at which a priced keep's model costs more than the
-/// model before it (`dearer`): the attempt ends, and the keep is undone.
+/// model before it (`dearer`): the attempt ends, and the keep is undone -- a rung read as a third level is taken
+/// only where the rung above it is then left.
 #[allow(clippy::too_many_arguments)]
 fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, dearer: &dyn Fn(f64) -> bool, messages: &mut Messages) -> Settled {
     let [fine, coarse] = pair(run, ensemble, domain, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
@@ -1341,8 +1364,17 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
         // The rung below, and whether the ladder has it.
         let below = 0.5 * context.tau;
         let lowest = context.plan.end / below > MOST_STEPS as f64;
+        // Whether the rung below is read as this rung's third level, not taken.
+        let mut third = false;
         if !(failed || screen(&read) || screen(&held)) {
             if inherited.is_some() {
+                // The rung in hand was read as the third level of the rung above: that one's order is tested, and
+                // it stands as it was.
+                if let Some(upper) = levels.upper.take() {
+                    *levels = *upper;
+                    context.tau *= 2.;
+                    return Settled::Standing;
+                }
                 return if pilot && !readable(&held) { Settled::Unseen(held) } else { Settled::Standing };
             }
             let Some(factor) = blind(&read).filter(|_| pilot) else { return Settled::Standing };
@@ -1365,22 +1397,40 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
                     levels.further.iter_mut().zip(more).for_each(|(further, more)| further.extend(more));
                     continue;
                 }
-                Remedy::Rung => {}
+                Remedy::Below => third = true,
                 Remedy::Neither => return Settled::Unseen(held),
             }
         }
-        if lowest {
-            return Settled::Capped;
-        } else if dearer(below) {
-            return Settled::Dearer;
+        if !third {
+            // The rung in hand is left. Where it was read as the third level of the rung above, that one is left with
+            // it: the rung in hand is the one taken, the level above its companion.
+            if let Some(upper) = levels.upper.take() {
+                if dearer(context.tau) {
+                    return Settled::Dearer;
+                }
+                levels.coarse = upper.fine;
+                forget(&mut levels.coarse);
+            }
+            if lowest {
+                return Settled::Capped;
+            } else if dearer(below) {
+                return Settled::Dearer;
+            }
         }
-        levels.above = Some(lowered(&held));
+        let inherits = lowered(&held);
         context.tau = below;
-        // The level at the step is the companion from here on: its states are read no more.
-        forget(&mut levels.fine);
         let finer = level(run, ensemble, domain, &context.plan, below, numbers, 0..members.end, true, messages, &mut |prefix, messages| so_far(context, &[], prefix, messages));
-        levels.coarse = std::mem::replace(&mut levels.fine, finer);
-        levels.further = Default::default();
+        if third {
+            // The rung's levels are kept whole, its states with them: it may stand yet.
+            let upper = std::mem::take(levels);
+            *levels = Levels { fine: finer, above: Some(inherits), upper: Some(Box::new(upper)), ..Levels::default() };
+        } else {
+            // The level at the step is the companion from here on: its states are read no more.
+            forget(&mut levels.fine);
+            levels.coarse = std::mem::replace(&mut levels.fine, finer);
+            levels.further = Default::default();
+            levels.above = Some(inherits);
+        }
     }
 }
 
@@ -2538,32 +2588,31 @@ mod tests {
         assert!(blind(&row) == Some(f64::INFINITY) && !readable(&row) && readable(&at(None)));
     }
 
-    /// The remedy of a rung of untested order (`remedy`) on a pilot of 88 pairs, in trajectories at τ.
-    /// - A product of 400 trajectories and a rung that asks twice its pairs: 176 pairs cost their 88 companions' 44
-    ///   and the product's own 312 still to run, 356, against the product twice over at τ/2, 800: pairs, to 176.
-    ///   Asking 5 % more pairs takes one group more (a batch's least); asking six times takes them by doubling.
-    /// - The pairs asked are bounded by the rung below: 3/2 a trajectory for each pair beyond those the check began
-    ///   with, no more than the 800 -- 621 pairs: seven times the pilot are asked for, 7.1 times are not.
-    /// - The bound counts the pairs already run: of 352 read (264 beyond the pilot), 1.5 times as many leave 264
-    ///   trajectories to pay and have cost 1.5·440 = 660 in all: pairs; 1.8 times as many, 422 and 818: the rung, though
-    ///   what is left would be the less.
-    /// - A run that needs no more than its pilot: twice the pairs cost 44 + 88 against 176; three times, 264 lost with
-    ///   the rung against 176: the rung.
-    /// - No number of pairs, or a run already at its most: the rung.
+    /// The remedy of a rung of untested order (`remedy`) on a pilot of 88 pairs, in trajectories at τ beyond the
+    /// product's own; the third level, the rung below's pilot, is 176.
+    /// - A product of 400 trajectories and a rung that asks twice its pairs: the 88 further pairs cost their
+    ///   companions' 44 (their finer level is the product's): pairs, to 176. Asking 5 % more pairs takes one group
+    ///   more (a batch's least); asking 4.5 times, 396 pairs for 154, takes them by doubling.
+    /// - Pairs beyond the product's cost their finer level too: 4.69 times the pilot, 413 pairs, cost 162 + 13; 4.7
+    ///   times cost more than the third level, which is read instead.
+    /// - The bound counts the pairs already run: of 352 read, 1.1 times as many cost 18 more and 150 since the check
+    ///   began: pairs; 1.2 times as many, 58 and 190: the third level, though what is left would be the less.
+    /// - A run that needs no more than its pilot: twice the pairs cost 44 + 88; three times, 88 + 176: the third level.
+    /// - No number of pairs, or a run already at its most: the third level.
     /// - On the ladder's last rung, or beside a read that excludes nothing, there is no rung below and no bound: the
     ///   pairs wherever a run can take them, however many; neither where it cannot.
     #[test]
-    fn the_pairs_a_rung_asks_for_cost_no_more_than_the_rung_below() {
+    fn the_pairs_a_rung_asks_for_cost_no_more_than_its_third_level() {
         assert_eq!(remedy(2., 88, 88, 400., 88, true), Remedy::Pairs(176));
         assert_eq!(remedy(1.05, 88, 88, 400., 88, true), Remedy::Pairs(96));
-        assert_eq!(remedy(6., 88, 88, 400., 88, true), Remedy::Pairs(176));
-        assert!((1.5 * (800. / 1.5 + 88. - 88.) - 800.0f64).abs() < 1e-9 && ((800. / 1.5 + 88.) / 88. - 7.06f64).abs() < 0.01);
-        assert_eq!((remedy(7., 88, 88, 400., 88, true), remedy(7.1, 88, 88, 400., 88, true)), (Remedy::Pairs(176), Remedy::Rung));
-        assert_eq!((remedy(1.5, 352, 88, 400., 88, true), remedy(1.8, 352, 88, 400., 88, true)), (Remedy::Pairs(528), Remedy::Rung));
-        assert!((0.5 * (1.8 * 352. - 352.) + 1.8 * 352. - 352. - 422.4f64).abs() < 1e-9 && 1.5 * (1.8 * 352. - 88.) > 800.);
-        assert_eq!((remedy(2., 88, 88, 88., 88, true), remedy(3., 88, 88, 88., 88, true)), (Remedy::Pairs(176), Remedy::Rung));
-        assert_eq!(remedy(f64::INFINITY, 88, 88, 400., 88, true), Remedy::Rung);
-        assert_eq!(remedy(1.01, MOST_TRAJECTORIES, 88, 16000., 88, true), Remedy::Rung);
+        assert_eq!(remedy(4.5, 88, 88, 400., 88, true), Remedy::Pairs(176));
+        assert!((0.5 * (4.69 * 88. - 88.) + 4.69 * 88. - 400. - 175.08f64).abs() < 1e-9 && 0.5 * (4.7 * 88. - 88.) + 4.7 * 88. - 400. > 176.);
+        assert_eq!((remedy(4.69, 88, 88, 400., 88, true), remedy(4.7, 88, 88, 400., 88, true)), (Remedy::Pairs(176), Remedy::Below));
+        assert_eq!((remedy(1.1, 352, 88, 400., 88, true), remedy(1.2, 352, 88, 400., 88, true)), (Remedy::Pairs(392), Remedy::Below));
+        assert!((0.5 * (1.2 * 352. - 352.) + 1.2 * 352. - 400. - 57.6f64).abs() < 1e-9 && 0.5 * (1.2 * 352. - 88.) + 1.2 * 352. - 400. > 176.);
+        assert_eq!((remedy(2., 88, 88, 88., 88, true), remedy(3., 88, 88, 88., 88, true)), (Remedy::Pairs(176), Remedy::Below));
+        assert_eq!(remedy(f64::INFINITY, 88, 88, 400., 88, true), Remedy::Below);
+        assert_eq!(remedy(1.01, MOST_TRAJECTORIES, 88, 16000., 88, true), Remedy::Below);
         assert_eq!((remedy(7.1, 88, 88, 400., 88, false), remedy(200., 88, 88, 400., 88, false)), (Remedy::Pairs(176), Remedy::Neither));
         assert_eq!((remedy(f64::INFINITY, 88, 88, 400., 88, false), remedy(1.01, MOST_TRAJECTORIES, 88, 16000., 88, false)), (Remedy::Neither, Remedy::Neither));
     }
