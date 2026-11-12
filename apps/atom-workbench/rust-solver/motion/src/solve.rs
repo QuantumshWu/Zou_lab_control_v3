@@ -1370,15 +1370,15 @@ fn attempt(
         // beyond the tables' shares has the axis of its largest read halved and is read again, until it is within them,
         // or it has no axis to halve (its coordinates all held at the focus: model/tabulate.rs, # Axes), or what is
         // beyond is not its axes' interpolation -- the whole less every axis's own read still beyond the shares: a
-        // coordinate held at the focus, which no halving lowers --, or its axis's reads predict no finer grid within
-        // them (model/tabulate.rs, # Refinement: its error no longer falls at the interpolant's order); what it reads
+        // coordinate held at the focus, which no halving lowers --, or its worst axis's read on a grid it resolves fell
+        // by no more than an unresolved peak's (model/tabulate.rs, # Refinement: it is not converging); what it reads
         // then is booked on every output, and flagged where it still lies beyond -- with which of these ended its
         // refinement (`Stuck`).
         let read_at = one_each(&pilot);
         let (shown_share, temperature_share) = crate::model::tabulate::shares();
         drop(run);
         let mut stuck: Vec<Option<Stuck>> = vec![None; tables.tables.len()];
-        let mut predicted: Vec<Vec<usize>> = tables.tables.iter().map(|table| vec![usize::MAX; table.axes()]).collect();
+        let mut before: Vec<Vec<Option<f64>>> = tables.tables.iter().map(|table| vec![None; table.axes()]).collect();
         let booked = loop {
             let reads: Vec<Vec<crate::model::tabulate::TableRead>> = read_at.par_iter().map(|pick| model.table_reads(&tables, std::slice::from_ref(&pick.state.sample))).collect();
             let mean = |f: &dyn Fn(&crate::model::tabulate::TableRead) -> f64, t: usize| over_the_run(&read_at, reads.iter().map(|r| f(&r[t])), None);
@@ -1392,7 +1392,7 @@ fn attempt(
             stuck[t] = match worst {
                 None => Some(Stuck::Axes),
                 Some(_) if held => Some(Stuck::Held),
-                Some(f) => match model.halved_by(&tables.tables[t], f, axes[f][0].max(axes[f][1]), &mut predicted[t][f]) {
+                Some(f) => match model.halved_by(&tables.tables[t], f, axes[f][0].max(axes[f][1]), &mut before[t][f]) {
                     Some(finer) => {
                         tables.tables[t].table = finer;
                         None
@@ -1412,7 +1412,7 @@ fn attempt(
             }
             context.ledger.item(&label, booked[t][0].max(booked[t][1]), TABLE_MEASURED);
             match stuck[t] {
-                Some(Stuck::Order) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它的误差不再按插值的阶下降（已加密到它的函数结构所预言的网格）：按实测的误差计入误差预算")),
+                Some(Stuck::Order) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它在已分辨的网格上加密后误差下降不超过未分辨结构的两倍（不收敛）：按实测的误差计入误差预算")),
                 Some(Stuck::Held) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而超出的部分来自取焦点处的值的坐标，不是插值的误差（加密网格不能降低它）：按实测的误差计入误差预算")),
                 Some(Stuck::Axes) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它没有可以加密的坐标（它依赖的量都取焦点处的值）：按实测的误差计入误差预算")),
                 None => {}
@@ -1481,8 +1481,8 @@ fn attempt(
     Ok(Attempt::Done(assemble(&context, &e, &l, &c, parts.len() as u64 * GROUP)))
 }
 
-/// Why a table beyond the tables' shares is refined no further (`attempt`): its worst axis's reads predict no finer grid
-/// within the shares (its error no longer falls at the interpolant's order: model/tabulate.rs, # Refinement); what is
+/// Why a table beyond the tables' shares is refined no further (`attempt`): its worst axis's read on a grid it resolves
+/// fell by no more than an unresolved peak's (it is not converging: model/tabulate.rs, # Refinement); what is
 /// beyond is the coordinates it holds at the focus, not its axes' interpolation; or the table has no axis -- nothing to
 /// halve.
 #[derive(Clone, Copy)]
