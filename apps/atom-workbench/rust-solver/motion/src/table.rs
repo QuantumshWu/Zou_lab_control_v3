@@ -59,11 +59,20 @@ pub struct Axis {
 
 /// One axis's stencil at a coordinate: its four nodes (indices on the axis), their weights in the value and in its
 /// derivative along the coordinate.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Stencil {
     nodes: [usize; STENCIL],
     value: [f64; STENCIL],
     slope: [f64; STENCIL],
+}
+
+/// A point's place on a table's grid (`Table::place`): per axis its stencil there, and the axes' strides among the
+/// nodes. Every read of the table at the point takes it (`Table::read`): a point is placed once, whatever is read
+/// there.
+#[derive(Clone, Copy, Debug)]
+pub struct Place {
+    stencils: [Stencil; MOST_AXES],
+    strides: [usize; MOST_AXES],
 }
 
 impl Axis {
@@ -246,17 +255,11 @@ impl Table {
     /// The interpolant at s: `value` (width) and, when asked, `gradient` (axes × width, axis-major: ∂I/∂s_f); s on the
     /// axes' ranges (`Axis::place`).
     pub fn eval(&self, s: &[f64], value: &mut [f64], gradient: Option<&mut [f64]>) {
-        self.interpolate(s, None, 0, None, value, gradient);
+        self.read(&self.place(s), 0, None, value, gradient);
     }
-    /// The interpolant at s of the reals from `first` on, as many as `value` holds: `value` and, when asked, `gradient`
-    /// (axes × that many, axis-major).
-    pub fn eval_range(&self, s: &[f64], first: usize, value: &mut [f64], gradient: Option<&mut [f64]>) {
-        self.interpolate(s, None, first, None, value, gradient);
-    }
-    /// `eval_range` onto a start: `value` = `start` + the interpolant -- what a caller adds its constants to is made
-    /// in the interpolation's own pass over the rows.
-    pub fn eval_onto(&self, s: &[f64], first: usize, start: &[f64], value: &mut [f64], gradient: Option<&mut [f64]>) {
-        self.interpolate(s, None, first, Some(start), value, gradient);
+    /// The place of s on the grid (`Place`): each axis's stencil there; s on the axes' ranges (`Axis::place`).
+    pub fn place(&self, s: &[f64]) -> Place {
+        self.placed(s, None)
     }
     /// The read of axis f's error at s (module documentation, # The error read of an axis): the value
     /// (I_f − I)/(2³ − 1) into `value` and the gradient (∇I_f − ∇I)/(2² − 1) into `gradient` (axes × width), I_f the
@@ -265,8 +268,8 @@ impl Table {
         assert!(self.axes[f].readable(), "axis {f} of {} nodes has no coarser grid to read against", self.axes[f].nodes);
         let (w, d) = (self.width, self.axes.len());
         let (mut fine, mut slope) = (vec![0.0; w], vec![0.0; d * w]);
-        self.interpolate(s, None, 0, None, &mut fine, Some(&mut slope));
-        self.interpolate(s, Some(f), 0, None, value, Some(gradient));
+        self.read(&self.placed(s, None), 0, None, &mut fine, Some(&mut slope));
+        self.read(&self.placed(s, Some(f)), 0, None, value, Some(gradient));
         let (p, q) = ((1 << VALUE_ORDER) - 1, (1 << GRADIENT_ORDER) - 1);
         for (x, y) in value.iter_mut().zip(&fine) {
             *x = (*x - y) / p as f64;
@@ -275,24 +278,10 @@ impl Table {
             *x = (*x - y) / q as f64;
         }
     }
-    /// The tensor-product interpolant at s of the node's reals from `first` on (as many as `value` holds), axis `coarse`
-    /// (if any) on its grid of every other node: `start` (where given) + Σ over the 4^D stencil nodes of the product of
-    /// the axes' weights times the node's values; the gradient's axis f takes its slope weights in place of its value
-    /// weights. Nothing is allocated and nothing is written before it is known: the last axis' four nodes are one sum
-    /// (`blend`), and each stretch of `BLOCK` reals takes its value and its slopes together, so the rows pass through
-    /// the cache once.
-    fn interpolate(&self, s: &[f64], coarse: Option<usize>, first: usize, start: Option<&[f64]>, value: &mut [f64], mut gradient: Option<&mut [f64]>) {
-        let (w, d) = (value.len(), self.axes.len());
-        assert!(s.len() == d && first + w <= self.width && gradient.as_ref().is_none_or(|g| g.len() == d * w) && start.is_none_or(|b| b.len() == w));
-        if d == 0 {
-            // No axis: the one node's reals.
-            let row = &self.values[first..first + w];
-            match start {
-                Some(base) => value.iter_mut().zip(base).zip(row).for_each(|((x, b), y)| *x = b + y),
-                None => value.copy_from_slice(row),
-            }
-            return;
-        }
+    /// The place of s on the grid, axis `coarse` (if any) on its grid of every other node.
+    fn placed(&self, s: &[f64], coarse: Option<usize>) -> Place {
+        let d = self.axes.len();
+        assert!(s.len() == d, "a table of {d} axes asked at {} coordinates", s.len());
         let mut stencils = [Stencil { nodes: [0; STENCIL], value: [0.0; STENCIL], slope: [0.0; STENCIL] }; MOST_AXES];
         let mut strides = [1; MOST_AXES];
         for f in 0..d {
@@ -304,9 +293,31 @@ impl Table {
                 self.axes[f].stencil(s[f])
             };
         }
-        for f in (0..d - 1).rev() {
+        for f in (0..d.saturating_sub(1)).rev() {
             strides[f] = strides[f + 1] * self.axes[f + 1].nodes;
         }
+        Place { stencils, strides }
+    }
+    /// The tensor-product interpolant at a place (`Table::place`) of the node's reals from `first` on, as many as
+    /// `value` holds: `value` = `start` (where given: what a caller adds its constants to is made in the
+    /// interpolation's own pass over the rows) + Σ over the 4^D stencil nodes of the product of the axes' weights
+    /// times the node's values; and, when asked, `gradient` (axes × that many, axis-major: ∂I/∂s_f), whose axis f takes
+    /// its slope weights in place of its value weights. Nothing is allocated and nothing is written before it is
+    /// known: the last axis' four nodes are one sum (`blend`), and each stretch of `BLOCK` reals takes its value and
+    /// its slopes together, so the rows pass through the cache once.
+    pub fn read(&self, at: &Place, first: usize, start: Option<&[f64]>, value: &mut [f64], mut gradient: Option<&mut [f64]>) {
+        let (w, d) = (value.len(), self.axes.len());
+        assert!(first + w <= self.width && gradient.as_ref().is_none_or(|g| g.len() == d * w) && start.is_none_or(|b| b.len() == w));
+        if d == 0 {
+            // No axis: the one node's reals.
+            let row = &self.values[first..first + w];
+            match start {
+                Some(base) => value.iter_mut().zip(base).zip(row).for_each(|((x, b), y)| *x = b + y),
+                None => value.copy_from_slice(row),
+            }
+            return;
+        }
+        let Place { stencils, strides } = at;
         let last = &stencils[d - 1];
         let mut at = 0;
         while at < w {

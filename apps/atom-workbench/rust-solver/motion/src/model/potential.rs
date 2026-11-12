@@ -263,7 +263,11 @@ impl Model {
                     let mut site = super::assemble::Held::<super::assemble::Site>::take();
                     site.beams.clear();
                     site.beams.extend_from_slice(amplitudes);
-                    self.quartic(&plan, fourth, tables.and_then(|t| t.of(cluster, lights)), None, &mut site, false);
+                    let table = tables.and_then(|t| t.of(cluster, lights));
+                    if let Some(table) = table {
+                        self.placed(table, &mut site);
+                    }
+                    self.quartic(&plan, fourth, table, None, &mut site, false);
                     let (n, size) = (fourth.n, fourth.n * fourth.n);
                     Model::quartic_read(|q| {
                         let (near, partner, metric) = (&q.data[..4 * size], &q.data[4 * size..8 * size], &q.data[8 * size..]);

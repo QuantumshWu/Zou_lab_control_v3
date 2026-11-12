@@ -125,7 +125,7 @@ use super::eliminate::{half, jump, shift, Leg, Responses};
 use super::far::EXCITED;
 use super::photon::{Origin, Source};
 use super::tabulate::NearTable;
-use super::{jet, Beat, Component, Level, Lights, Lit, Model, Wave};
+use super::{jet, Beat, Component, Level, Lights, Lit, Model, Scattering, Wave};
 use crate::field::Amplitude;
 use crate::linalg::{axpy, dot, dot3, Mat, C64, LANES};
 use crate::request::{GROUND, STATES};
@@ -1409,8 +1409,11 @@ pub(crate) struct Site {
     pub(crate) forms: Vec<f64>,
     pub(crate) slopes: Vec<f64>,
     pub(crate) directions: Vec<[f64; 3]>,
-    /// A table's coordinates at the point (tabulate.rs `Model::near_point`); the jumps' products' sums (`formed`).
+    /// A table's coordinates at the point, and the point's place on its grid with the coordinates' counted work
+    /// (tabulate.rs `Model::placed`: every read of the table at the point takes it); the jumps' products' sums
+    /// (`formed`).
     pub(crate) coordinates: Vec<f64>,
+    pub(crate) place: Option<(crate::table::Place, f64)>,
     sums: Vec<C64>,
     /// What a state's photons read (photon.rs `Model::photons_of`): the point's jumps' matrices (module documentation,
     /// # The jumps' matrices) with their slopes along `directions` (`jump_slopes[f * jumps + i]`), the plan's field
@@ -1515,13 +1518,19 @@ impl Fields {
 }
 
 /// A cluster's generator at a position and a time, for every momentum and along every path through the point (module
-/// documentation, # At a point, and along a path through it).
+/// documentation, # At a point, and along a path through it); and what the light a state scatters there gives its
+/// momentum (photon.rs `Model::scattering_on`): the point is made once, whatever a step asks of it.
 pub struct Middle<'a> {
     model: &'a Model,
     plan: Arc<Plan>,
+    /// The position, of a middle the model made at one (`Model::middle`; none of a middle of given amplitudes,
+    /// `Model::middle_of`), its time, and the table its near forms are read from, where one is.
+    r: Option<[f64; 3]>,
     t: f64,
-    /// Its numbers: the beams' amplitudes and the near terms' values at the point.
-    point: Held<Site>,
+    table: Option<&'a NearTable>,
+    /// Its numbers: the beams' amplitudes, the point's place on the table and the near terms' values at the point;
+    /// and, once a state's scattering is asked there, the jumps' matrices and the photons' sums.
+    point: RefCell<Held<Site>>,
     /// The complex multiply-adds that made it.
     pub(crate) work: f64,
 }
@@ -1750,11 +1759,11 @@ impl Model {
         let (size, padded) = (n * n, plan.padded);
         let Quartic { data, work, values, slopes, sums, laid: lanes, .. } = q;
         *work = 0.0;
-        point.select(plan);
         // The exact elimination's forms where no table holds them and none are given.
         let made = (table.is_none() && given.is_none()).then(|| self.near_exact(plan, &point.beams, 1, &self.coherent_dressing()));
         let exact = given.or(made.as_ref());
         if !laid {
+            point.select(plan);
             *work += match (table, exact) {
                 (Some(table), _) => self.near_point(table, point) + plan.values,
                 (None, Some(near)) => {
@@ -1826,7 +1835,7 @@ impl Model {
         sized(slopes, dn * 2 * count);
         match (table, exact) {
             (Some(table), _) => {
-                table.table.eval_range(&point.coordinates, 2 * first, values, Some(slopes));
+                table.table.read(&point.place.expect("a site placed on its table").0, 2 * first, None, values, Some(slopes));
                 *work += (4usize.pow(dn as u32) * (1 + dn) * 2 * count) as f64 / crate::decide::COMPLEX;
             }
             (None, Some(near)) => {
@@ -2070,11 +2079,20 @@ impl Model {
         self.hbar_over_mass * (dot3(k, kappa) + 0.5 * dot3(k, k))
     }
 
+    /// A site's point (`Site`): every beam's amplitude at r with its gradient -- no part of a middle or of a state's
+    /// photons reads a second derivative -- and, where a plan's near forms are a table's, the point's place on it
+    /// (tabulate.rs `Model::placed`). What is read of the model at the point is read on a site that holds it.
+    pub(crate) fn pointed(&self, plan: &Plan, table: Option<&NearTable>, r: [f64; 3], site: &mut Site) {
+        self.light.amplitudes_into(r, 1, |_| true, &mut site.beams);
+        if let Some(table) = table.filter(|_| plan.near.len() > 0) {
+            self.placed(table, site);
+        }
+    }
+
     /// A cluster's generator at a position and time under a plan (`Middle`), the near forms from a table where one is given.
-    pub(crate) fn middle(&self, plan: &Arc<Plan>, r: [f64; 3], t: f64, table: Option<&NearTable>) -> Middle<'_> {
-        // The beams with their gradients: no part of a middle reads a second derivative.
+    pub(crate) fn middle<'a>(&'a self, plan: &Arc<Plan>, r: [f64; 3], t: f64, table: Option<&'a NearTable>) -> Middle<'a> {
         let mut point = Held::<Site>::take();
-        self.light.amplitudes_into(r, 1, |_| true, &mut point.beams);
+        self.pointed(plan, table, r, &mut point);
         point.select(plan);
         let work = match table {
             _ if plan.near.len() == 0 => {
@@ -2089,7 +2107,7 @@ impl Model {
             }
         };
         let work = work + plan.fourth.as_ref().map_or(0.0, |fourth| self.fourth_site(plan, fourth, table, None, Some(r), &mut point));
-        Middle { model: self, plan: plan.clone(), t, point, work }
+        Middle { model: self, plan: plan.clone(), r: Some(r), t, table, point: RefCell::new(point), work }
     }
 
     /// The same from every beam's amplitude and the near forms there (the Hermitian ones to first order; `Site::formed`),
@@ -2107,7 +2125,7 @@ impl Model {
         if let (Some(fourth), Some(_)) = (plan.fourth.as_ref(), near) {
             work += self.fourth_site(plan, fourth, None, near, None, &mut point);
         }
-        Middle { model: self, plan: plan.clone(), t, point, work }
+        Middle { model: self, plan: plan.clone(), r: None, t, table: None, point: RefCell::new(point), work }
     }
 
     /// The one generator assembly (module documentation): a cluster's generator at a position and a time under a light set, the
@@ -2117,10 +2135,12 @@ impl Model {
     }
 }
 
-/// The momentum's part of a cluster's generator along a straight path through its middle (`Middle::path`): per beam of the
-/// plan its Doppler shift w_l at the momentum the generator is taken at (rad/µs) and its path rate k_l·v at the path's
-/// velocity (rad/µs); per state of the cluster its Doppler frame's rate K_s·v, and whether any frame turns.
+/// The momentum's part of a cluster's generator along a straight path through its middle (`Middle::path`): the momentum
+/// the generator is taken at (1/µm); per beam of the plan its Doppler shift w_l at it (rad/µs) and its path rate k_l·v
+/// at the path's velocity (rad/µs); per state of the cluster its Doppler frame's rate K_s·v, and whether any frame
+/// turns.
 pub struct Path {
+    kappa: [f64; 3],
     rates: Held<Rates>,
     turning: bool,
 }
@@ -2171,7 +2191,7 @@ impl crate::step::Middle for Middle<'_> {
         path.extend(plan.beams.iter().map(|&l| dot3(model.light.beams[l].wave_vector(), velocity)));
         gauge.clear();
         gauge.extend(plan.waves.iter().map(|k| dot3(*k, velocity)));
-        Path { turning: gauge.iter().any(|rate| *rate != 0.0), rates }
+        Path { kappa, turning: gauge.iter().any(|rate| *rate != 0.0), rates }
     }
 
     fn gauge(&self, path: &Path, rates: &mut [f64]) {
@@ -2180,9 +2200,9 @@ impl crate::step::Middle for Middle<'_> {
 
     /// Module documentation, # At a point, and along a path through it; # Dense terms.
     fn generator(&self, path: &Path, s: f64, h: &mut Mat) {
-        let (plan, n, point) = (&*self.plan, self.plan.states, &*self.point);
+        let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
         let mut scratch = point.scratch.borrow_mut();
-        self.along(path, Some(s), 1, &mut scratch);
+        self.along(&point.amplitudes, path, Some(s), 1, &mut scratch);
         let Scratch { plain, doppler, phases, turns, sum, .. } = &mut *scratch;
         sum.clear();
         sum.resize(2 * plan.padded, 0.0);
@@ -2230,11 +2250,16 @@ impl crate::step::Middle for Middle<'_> {
         self.contract(path, None, rho, each)
     }
 
+    /// photon.rs `Model::scattering_on` this middle's own site, at the path's momentum and the middle's time.
+    fn scattering(&self, path: &Path, psi: &[C64], populations: &[f64]) -> Scattering {
+        self.model.scattering_on(&self.plan, self.table, self.r, path.kappa, self.t, psi, Some(populations), &mut self.point.borrow_mut(), true).0
+    }
+
     fn work(&self) -> [f64; 3] {
         let node = self.plan.node;
         // The fourth order's: its matrix at a node, its gradient's three forms.
         let (matrix, gradient) = self.plan.fourth.as_ref().map_or((0.0, 0.0), |fourth| ((fourth.n * fourth.n) as f64, (3 * fourth.n * fourth.n) as f64));
-        let form = node[1] + self.point.directions.len() as f64 * node[2] + gradient;
+        let form = node[1] + self.point.borrow().directions.len() as f64 * node[2] + gradient;
         [node[0] + matrix, form, form]
     }
 }
@@ -2247,28 +2272,30 @@ fn side(fields: &[[C64; 4]], scalar: Option<usize>) -> [C64; 4] {
 impl Middle<'_> {
     /// This middle with its generator's near values moved by `by` (a table's error read of them, tabulate.rs).
     pub(crate) fn moved(&self, by: &[f64]) -> Middle<'_> {
-        let (mut point, from) = (Held::<Site>::take(), &*self.point);
+        let (mut point, from) = (Held::<Site>::take(), self.point.borrow());
         assert_eq!(by.len(), from.generator.len(), "an error read of the generator's near values");
         point.beams.clone_from(&from.beams);
         point.amplitudes.clone_from(&from.amplitudes);
+        point.place = from.place;
         point.generator.clear();
         point.generator.extend(from.generator.iter().zip(by).map(|(value, error)| value + error));
         point.forms.clone_from(&from.forms);
         point.slopes.clone_from(&from.slopes);
         point.directions.clone_from(&from.directions);
         point.quartic.clone_from(&from.quartic);
-        Middle { model: self.model, plan: self.plan.clone(), t: self.t, point, work: self.work }
+        Middle { model: self.model, plan: self.plan.clone(), r: self.r, t: self.t, table: self.table, point: RefCell::new(point), work: self.work }
     }
 
-    /// A node's field components into its scratch, their first `parts` parts (the value; with the gradient, four): at the
+    /// A node's field components into its scratch, their first `parts` parts (the value; with the gradient, four),
+    /// from the plan's beams' amplitudes and gradients at the middle (`Site::amplitudes`): at the
     /// time s from the middle along a path (`on`) each beam's amplitude and gradient at the middle times its plane wave's
     /// phase over the path, e^{i k_l·v s}, with the tones' phases at that time and the Doppler frames' turns; at the fixed
     /// middle point (None) the middle's own, at its time.
-    fn along(&self, path: &Path, on: Option<f64>, parts: usize, scratch: &mut Scratch) {
+    fn along(&self, amplitudes: &[[C64; 4]], path: &Path, on: Option<f64>, parts: usize, scratch: &mut Scratch) {
         let plan = &*self.plan;
         let s = on.unwrap_or(0.0);
         scratch.turned.clear();
-        scratch.turned.extend(self.point.amplitudes.iter().zip(&path.rates.path).map(|(a, rate)| {
+        scratch.turned.extend(amplitudes.iter().zip(&path.rates.path).map(|(a, rate)| {
             let phase = if on.is_some() { C64::cis(rate * s) } else { C64::ONE };
             std::array::from_fn(|part| if part < parts { a[part] * phase } else { C64::ZERO })
         }));
@@ -2298,9 +2325,9 @@ impl Middle<'_> {
     /// it: per dense term Σ_entries V[x, y] ρ[y, x] and the same of its slopes, times the fields' product and its gradient
     /// -- of a flag's values and their adjoints, whose forms with a Hermitian ρ are conjugates, one, twice (`Term::weight`).
     fn contract(&self, path: &Path, on: Option<f64>, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
-        let (plan, n, point) = (&*self.plan, self.plan.states, &*self.point);
+        let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
         let mut scratch = point.scratch.borrow_mut();
-        self.along(path, on, 4, &mut scratch);
+        self.along(&point.amplitudes, path, on, 4, &mut scratch);
         let Scratch { plain, doppler, phases, turns, weights, sums, .. } = &mut *scratch;
         // ρ[y, x] in the Doppler frames along the path, laid out as the entries x ← y are.
         weights.clear();

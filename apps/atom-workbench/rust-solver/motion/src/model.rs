@@ -650,7 +650,7 @@ impl Model {
         let Some(fourth) = &plan.fourth else { return f.iter().copied().collect() };
         let (n, size) = (fourth.n, fourth.n * fourth.n);
         let mut site = assemble::Held::<assemble::Site>::take();
-        self.light.amplitudes_into(at.r, 1, |_| true, &mut site.beams);
+        self.pointed(plan, table, at.r, &mut site);
         self.quartic(plan, fourth, table, Some(at.r), &mut site, false);
         Model::quartic_read(|q| {
             let (partner, metric) = (&q.data[4 * size..5 * size], &q.data[8 * size..9 * size]);
@@ -866,9 +866,6 @@ impl crate::step::Dynamics for Run<'_> {
     }
     fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> crate::step::Internal {
         Run::landed(self, cluster, at, f)
-    }
-    fn scattering(&self, cluster: usize, at: &Point, psi: &[C64], populations: &[f64]) -> Scattering {
-        self.scattering_at(cluster, at, psi, Some(populations))
     }
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
         self.model.energy_with(cluster, at, psi, self.tables)

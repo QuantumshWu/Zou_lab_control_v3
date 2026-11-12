@@ -95,6 +95,7 @@ impl Model {
         let folded = self.folded_carriers(plan).count();
         let exact = match table {
             Some(table) if folded > 0 => {
+                self.placed(table, &mut site);
                 self.near_responses(table, &mut site);
                 None
             }
