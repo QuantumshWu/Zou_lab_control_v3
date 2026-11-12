@@ -1,4 +1,5 @@
-# Entry-by-entry comparison of the app-built S3 request with coherent.py's first-principles construction:
+# Comparison of the app-built S3 request with coherent.py's first-principles construction (entry by entry where the field
+# fixes the basis, by basis-free invariants always):
 #   python compare.py <S3 request JSON> <dir holding coherent.py>
 import sys, os, json, math
 import numpy as np
@@ -12,6 +13,25 @@ n = 32
 A = Cm.setup(req)                 # the request's beams
 L = Cm.setup(req, lab=True)       # the lab's description alone
 p = A['p']
+# The request's basis is the app's eigenbasis of its H0. With the field on it is |F, m⟩ about the field (with the field's
+# F' mixing) and the couplings can be compared entry by entry. At B 0 each F is degenerate (and each ±m' pair of the
+# tweezer's tensor-shifted F'=3), and the app's eigenvectors are any orthonormal set inside: an entry is no physical
+# quantity there (the π probe has Δm ≠ 0 entries of 0.5–0.7 of its CG-weighted size). What every basis keeps: the
+# eigenvalues of X†X on F=2 and on F=1 with X over all of 5P3/2 -- (Ω/2)² (ε·d)†(ε·d), d acting on J alone --, compared
+# with obe_rate.py's fresh D2 couplings (Steck's I_sat,cyc, the request's own intensity and polarization).
+import obe_rate as O
+print("== couplings, any basis: eigenvalues of X†X on F=2 and F=1, X over every 5P3/2 state ((rad/µs)²): request | obe_rate.py's fresh D2, Ω = Γ√(I/(2·1.669 mW/cm²))")
+d2 = [i for i, s_ in enumerate(ids) if s_.startswith('D2-')]
+for b in [b for b in mo['beams'] if b['id'] != mo['trapBeamId']]:
+    X = (np.array(b['coupling']['real']) + 1j * np.array(b['coupling']['imag'])).reshape(n, n)
+    E = np.array([complex(c['re'], c['im']) for c in b['electricField']]); E /= np.linalg.norm(E)
+    V = sum(O.sph(Cm.cartesian(E))[q] * O.D24[q] for q in (-1, 0, 1)); Om = O.GAMMA * math.sqrt(b['intensityMWcm2'] / (2 * O.ISAT_CYC))
+    W = (V.conj().T @ V)[:O.NG, :O.NG]
+    for F, P in ((2, O.P_G2), (1, O.P_G1)):
+        Xs = X[np.ix_(d2, [ids.index(f'ground-{F}-{m}') for m in range(-F, F + 1)])]
+        theirs = np.sort(np.linalg.eigvalsh(Xs.conj().T @ Xs)); mine = np.sort(np.linalg.eigvalsh(P @ W @ P))[-(2 * F + 1):] * (Om / 2) ** 2
+        big = mine > 1e-12 * mine.max()
+        print(f"  {b['name']} on F={F}: {np.round(theirs, 3).tolist()} | {np.round(mine, 3).tolist()}; ratio {np.round(theirs[big] / mine[big], 5).tolist()}")
 print('== beams (request | lab): direction, s = I/I_sat, ε_q (q = -1, 0, +1)')
 for a, l in zip(zip(A['names'], A['k'], A['s'], A['eps']), zip(L['names'], L['k'], L['s'], L['eps'])):
     print(f"  {a[0]}: k {np.round(a[1], 5).tolist()} | {np.round(l[1], 5).tolist()};  s {a[2]:.5f} | {l[2]:.5f};  ε {np.round(a[3], 5).tolist()} | {np.round(l[3], 5).tolist()}")
@@ -25,10 +45,12 @@ for ea, el in zip(A['eps'], L['eps']):
     print(f'  ε request/lab: |ratio| {np.round(np.abs(r), 6).tolist()}, phase {np.round(np.degrees(np.angle(r)), 4).tolist()} deg')
 print(f'  max |Δk| {dk:.2e} 1/µm; max |Δs/s| {ds:.2e}; relative phase of the two beams, request less lab: {math.degrees(ph[1] - ph[0]):.4f} deg (the mirror\'s round trip: lab_beams takes 180° as the request\'s)')
 
-print('== couplings X[e<-g] of each probe beam on F=2 -> F\'=3 (rad/µs): request against (Ω/2) ε_q <2 m; 1 q|3 m+q>, Ω = Γ√(s/2)')
+fixed = np.linalg.norm(mo['fieldVectorG']) > 0
+print('== couplings X[e<-g] of each probe beam on F=2 -> F\'=3 (rad/µs): request against (Ω/2) ε_q <2 m; 1 q|3 m+q>, Ω = Γ√(s/2)'
+      + ('' if fixed else ' -- skipped: B 0, the basis inside each degenerate level is the app\'s choice'))
 gidx = {m: ids.index(f'ground-2-{m}') for m in range(-2, 3)}; eidx = {m: ids.index(f'D2-3-{m}') for m in range(-3, 4)}
 probes = [b for b in mo['beams'] if b['name'] in A['names']]
-for b in probes:
+for b in (probes if fixed else []):
     X = np.array(b['coupling']['real']) + 1j * np.array(b['coupling']['imag'])
     X = X.reshape(n, n)
     j = A['names'].index(b['name']); Om = p['gamma'] * math.sqrt(A['s'][j] / 2)
