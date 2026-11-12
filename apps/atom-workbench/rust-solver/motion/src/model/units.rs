@@ -26,16 +26,18 @@
 //! - folded with the levels at the atom (`Unit::Drive`, eliminate.rs): the levels at the atom hold the atom at rest --
 //!   its energies, the dressings, the self-energy at its denominator D --, and a moving atom's photon of beam l is
 //!   Doppler-shifted by w_l = (ħ/m)(k_l·κ + k_l²/2), which the response takes to first order, T − w T2 (eliminate.rs,
-//!   # First-order Doppler): the first two terms of the series in ε = w/D of (D + w)⁻¹. So the levels at the atom are a
-//!   perturbation theory about the atom at rest, as the bare ones are about H0: what it folds across the distance at
-//!   rest is the coupling and the Doppler shift together, and its own gate is the one gate of the size |V| + |w| across
-//!   D (`Across::distance_at_rest`). Below it the fold exists (|V| against what is left, D − |w|, below the moving atom's
-//!   actual denominator) and the series converges with |ε| < ½. The share it adds to its ground state's tail is |V|
-//!   across the actual denominator, its own gate taking that share's place (# The tail rule) -- as a bare drive's.
-//!   (The actual denominator alone, |V| across D − |w|, is no gate of the series: for |V| < Γ/4 it passes at any speed,
-//!   the distance never below Γ/2, while |w/D| > 1 makes the series diverge -- the released runaway, a resonant probe's
-//!   cycling drive folded at the atom with |w/D| ≈ 85 at the atoms it pushed out, 10⁵ jumps/µs.) Its gate failing, the
-//!   unit is kept and the drive is explicit.
+//!   # First-order Doppler): the first two terms of the series in ε = w/D of (D + w)⁻¹. Two expansions, each with its
+//!   own small parameter: the fold of |V| across the moving atom's actual denominator (its distance over a region, the
+//!   Doppler shift an interval of its detuning: its share, # The tail rule), and the series in ε about the atom at rest.
+//!   Each holds where the one gate says it does -- the tail of the shares below ½, and the series' own gate, the one gate
+//!   of |w| across D (`Across::distance_at_rest`; |w| ≤ k v + (ħ/m) k²/2), below ½: |ε| < ½, the margin a bare drive's
+//!   series has --, and the drive's gate is the larger of the two. The share is no gate of the series: for |V| < Γ/4 it
+//!   is below ½ at any speed, the actual distance never below Γ/2, while |w/D| > 1 diverges -- the released runaway, a
+//!   resonant probe's cycling drive folded at the atom with |w/D| ≈ 85 at the atoms it pushed out, 10⁵ jumps/µs. (The
+//!   one gate of |V| + |w| across D, the bare level's construction, says both but asks more than either: (|V| + |w|)/D
+//!   is above |V| across the actual distance by about (|w|/D)(1 − |V|/D) and above |ε| by |V|/D -- on S2's repump at the
+//!   atom over its 30 µK reach 0.4998 where the share reads 0.47, and the reach's proof, a threshold at its quantity's
+//!   largest value, ran out of memory.) Its gate failing, the unit is kept and the drive is explicit.
 //! - explicit: in the generator as it is.
 //!
 //! A drive folded onto an excited state that another drive makes explicit is, at either level, one leg of a Raman pair
@@ -54,9 +56,9 @@
 //! sum is below ½, each share across its drive's actual distance -- whatever level it is computed at. A drive's gate is
 //! therefore the sum of its ground state's folded shares that are not larger than its own -- so that the strongest fails
 //! first and is kept first, drives of one share fail together, and a distant line is never kept for a near one's sake --,
-//! and each drive's takes its own gate's value for its share, at either level (# Levels: a bare drive's levels moved, a
-//! drive at the atom's Doppler shift): that its own series converges is its own matter and no other drive's. The order
-//! is one fixed order per ground state, by each drive's share with every
+//! and a bare drive's takes its own gate's value for its share: that its bare fold exists is its own matter and no other
+//! drive's -- as is a drive at the atom's Doppler series, its gate beside the tail (# Levels). The order is one fixed
+//! order per ground state, by each drive's share with every
 //! beam at its peak and the bare levels (`Model::ranked`): a region's shares in a region's order would not be monotone in
 //! the region, and the proof over the reach needs that; which of two is kept first is a choice of cost, each gate a
 //! statement about a fixed set. Two shares within the rounding of their own arithmetic are one place in the order (drives
@@ -695,16 +697,16 @@ impl Model {
     }
 
     /// A ground state's drives' gates over a region (module documentation, # Levels, # The tail rule), per place of the tail
-    /// rule's order: the gate of its drives at the atom -- the folded shares from there down, the place's own share in
-    /// each one's own gate's stead -- and the place's largest sweep; the same of its bare drives; and the folded shares
-    /// from there down, the tail. Every share is the region's own, the weaker places' as the place's: a point's are the
-    /// values there. A folded drive's share is of its size across its distance over the region (`across`). Its own gate:
-    /// a bare drive's of v + |Δ_c − Δ₀| + moved across its bare |Δ₀ − iΓ_e/2|; a drive at the atom's of v + |w| across its
-    /// distance at rest (`Across::distance_at_rest`), |w| ≤ k v_max + (ħ/m) k²/2 the Doppler shift and recoil of its
-    /// photon -- the size of what its response takes to first order (eliminate.rs, # First-order Doppler); the largest of
-    /// a place's own gates over its shares. Its rate v L + k a_max, L the slope of E_e − E_g and of the other components'
-    /// carriers' dressings of g. A drive onto an explicit state has the share and the sweep of its Raman pairs with
-    /// that state's kept drives beside its own (`pair_gate`).
+    /// rule's order: the gate of its drives at the atom -- the folded shares from there down, or the place's largest
+    /// series gate where that is larger -- and the place's largest sweep; the same of its bare drives -- the shares from
+    /// there down, the place's own share in each one's own gate's stead --; and the folded shares from there down, the
+    /// tail. Every share is the region's own, the weaker places' as the place's: a point's are the values there. A folded
+    /// drive's share is of its size across its distance over the region (`across`). A bare drive's own gate is of
+    /// v + |Δ_c − Δ₀| + moved across its bare |Δ₀ − iΓ_e/2|; a drive at the atom's series gate of |w| across its distance
+    /// at rest (`Across::distance_at_rest`), |w| ≤ k v_max + (ħ/m) k²/2 the Doppler shift and recoil of its photon, what its
+    /// response takes to first order (eliminate.rs, # First-order Doppler). Its rate v L + k a_max, L the slope of E_e − E_g
+    /// and of the other components' carriers' dressings of g. A drive onto an explicit state has the share and the sweep
+    /// of its Raman pairs with that state's kept drives beside its own (`pair_gate`).
     fn folds_made(&self, g: usize, region: &Region) -> Vec<[f64; 5]> {
         let drives = &region.forms.drives(self)[g];
         let kept = self.kept_over(region);
@@ -728,16 +730,17 @@ impl Model {
                 place[2] = place[2].max(own.saturation - actual.saturation);
                 place[3] = place[3].max(own.sweep).max(pair.sweep);
             } else {
-                let own = gate(of.size + wave * region.speed + 0.5 * self.hbar_over_mass * wave * wave, of.distance_at_rest(d.gamma), rate);
-                place[0] = place[0].max(own.saturation - actual.saturation);
+                let series = gate(wave * region.speed + 0.5 * self.hbar_over_mass * wave * wave, of.distance_at_rest(d.gamma), rate);
+                place[0] = place[0].max(series.saturation);
                 place[1] = place[1].max(actual.sweep).max(pair.sweep);
             }
         }
-        // The tails: each place's shares with every weaker one's; a drive's own gate in its own share's stead.
+        // The tails: each place's shares with every weaker one's; a bare drive's own gate in its own share's stead, a drive
+        // at the atom's series beside them.
         for place in (0..out.len()).rev() {
             let tail = out[place][4] + out.get(place + 1).map_or(0.0, |weaker| weaker[4]);
             out[place][4] = tail;
-            out[place][0] += tail;
+            out[place][0] = out[place][0].max(tail);
             out[place][2] += tail;
         }
         out
@@ -1451,8 +1454,8 @@ mod tests {
     /// scaled to |V| = Γ/10 on the atoms' |2,2⟩ → |3′,3′⟩, that excited level moved to put the drive Γ from its line at
     /// the trap's centre (D = |Γ − iΓ/2|). |V| below Γ/4: its share across the moving atom's actual distance -- never
     /// below Γ/2 -- is below ½ at any speed, and so is the tail it is the one share of: the gate before. At the speed
-    /// where the photon's Doppler shift is 1.5 D (the series in w/D diverges) the gate, the one gate of |V| + |w| across
-    /// D, is beyond ½; at rest it is the share's, with the recoil, below ½.
+    /// where the photon's Doppler shift is 1.5 D (the series in w/D diverges) the gate, the larger of the tail and the
+    /// series' one gate of |w| across D, is beyond ½; at rest it is the tail.
     #[test]
     fn a_drive_at_the_atom_fails_where_its_doppler_series_diverges() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R2_RECOIL.json");
