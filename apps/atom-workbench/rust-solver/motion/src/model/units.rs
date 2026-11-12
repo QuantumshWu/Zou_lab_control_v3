@@ -159,7 +159,6 @@ use crate::linalg::norm3;
 use crate::linalg::{Mat, C64};
 use crate::request::{GROUND, STATES};
 use crate::units::rounding;
-use rayon::prelude::*;
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -829,8 +828,7 @@ impl Model {
     /// Each unit's existence gate over the reach (SPEC §1.5; module documentation), provable bounds at this model's clusters
     /// and levels: every kind through the one gate (`gate`) -- a drive's by its ground state's tail (`folds`), a coupling's
     /// (`term_bound`), a photon coherence's (`gate_over`, its size its two classes' jumps' bound, photon.rs). Each is bounded on the
-    /// whole space first, every beam at its peak (on the pool: a unit's bound asks nothing of another's, and what they
-    /// share of the region is made once, whoever asks first): a bound over any reach, and where both of a unit's are below ½ there its
+    /// whole space first, every beam at its peak: a bound over any reach, and where both of a unit's are below ½ there its
     /// gate. The others are proven together over the reach's cells, on all the cores (reach.rs
     /// `Model::bounds_over_in_parallel`) -- a ground state's drive's with every weaker one's share on the same cell: what a
     /// cell's centre attains is a value there, never a bound from elsewhere. A dressing folds nothing and has no gate; a
@@ -877,7 +875,7 @@ impl Model {
             }
         };
         let whole = self.region(self.spans(&Cell { centre: [0.0; 3], half: [f64::INFINITY; 3] }), reach.speed);
-        let everywhere: Vec<[f64; 2]> = reads.par_iter().map(|of| read(of, &whole, usize::MAX)).collect();
+        let everywhere: Vec<[f64; 2]> = reads.iter().map(|of| read(of, &whole, usize::MAX)).collect();
         let open: Vec<usize> = (0..units.len()).filter(|&u| !(everywhere[u][0] < EXISTS && everywhere[u][1] < EXISTS)).collect();
         // Per ground state the places its open drives' gates ask of a cell.
         let mut places = [0; GROUND];

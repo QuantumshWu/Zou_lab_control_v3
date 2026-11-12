@@ -101,8 +101,7 @@
 //! `Model::bounds_over_in_parallel`) it names, ahead of its order, every half the round before made for it whose bound is not
 //! settled: whatever the order, each of these has to be halved before the proof can end with its bound settled everywhere, so
 //! the cells are halved level by level and the rounds are as many as the cells are deep. The cells named are halved once each,
-//! for all the quantities that named them, one after another or on all the cores at once, as the proofs' own steps are, and
-//! on a cell its quantities are asked the same way: a proof's first rounds have a cell or a few, each with every quantity. Each
+//! for all the quantities that named them, one after another or on all the cores at once, as the proofs' own steps are. Each
 //! proof takes its cells in the order it would take them alone, through the same queue, so its bound is the same number
 //! whatever was halved ahead of it and on however many cores. Only a proof that ends otherwise has had cells halved in vain.
 //! One whose bound is attained at a centre: the cells not settled above the level at which a centre attains it, for the halves
@@ -973,12 +972,11 @@ struct Round<'a, Q: ?Sized> {
 impl<Q: Fn(&Region) -> f64 + ?Sized> Round<'_, Q> {
     /// A cell halved for the quantities asking, each along its own side: the halves made where they are not yet, and those
     /// quantities' values on theirs -- each half's regions made once for them all, those of an earlier round's halves again.
-    /// The quantities are asked at the pace `P` (`Pace::each`): what they share of a region is made once, whoever asks first.
-    fn halve<P: Pace<Q>>(&self, asked: &Asked) -> Halved {
+    fn halve(&self, asked: &Asked) -> Halved {
         let (cells, node) = (self.cells, &self.nodes[asked.node]);
         let amplitudes = cells.model.light.amplitudes(node.cell.centre);
         let along: [Box<Region>; 3] = std::array::from_fn(|a| Box::new(cells.model.along(&amplitudes, node, a)));
-        let sides: Vec<usize> = P::each(self.quantities, &asked.quantities, |_, q| side(q, &node.cell, &along));
+        let sides: Vec<usize> = asked.quantities.iter().map(|&q| side(self.quantities[q], &node.cell, &along)).collect();
         let mut made: [Option<[Option<Node>; 2]>; 3] = [None, None, None];
         // Per side asked, each half that meets the reach: whether its centre is in the reach, and its regions.
         let halves: [Option<[Option<(bool, Regions)>; 2]>; 3] = std::array::from_fn(|a| {
@@ -991,24 +989,26 @@ impl<Q: Fn(&Region) -> f64 + ?Sized> Round<'_, Q> {
                 }
             })
         });
-        let of = P::each(self.quantities, &asked.quantities, |at, q| {
-            let a = sides[at];
-            let halves = halves[a].as_ref().expect("the halves of a side asked").each_ref().map(Option::as_ref);
-            (a, halves.map(|half| half.is_some_and(|half| half.0)), halves.map(|half| half.map(|half| valued(q, &half.1))))
-        });
+        let of = asked
+            .quantities
+            .iter()
+            .zip(&sides)
+            .map(|(&q, &a)| {
+                let halves = halves[a].as_ref().expect("the halves of a side asked").each_ref().map(Option::as_ref);
+                (a, halves.map(|half| half.is_some_and(|half| half.0)), halves.map(|half| half.map(|half| valued(self.quantities[q], &half.1))))
+            })
+            .collect();
         Halved { made, of }
     }
 }
 
 /// The pace of a proving (module documentation, # Rounds): whether its proofs ask for cells ahead of their order, and how a
 /// round's independent pieces are gone through -- the proofs' own steps (each with what the round before made for it), the
-/// halving of the cells asked for, and on a cell what each of the quantities `asking` is asked (`ask`: its place among them
-/// and the quantity).
+/// halving of the cells asked for.
 trait Pace<Q: ?Sized> {
     const AHEAD: bool;
     fn proofs<T: Send, R: Send>(proofs: &mut [Proof], made: Vec<T>, step: impl Fn(&mut Proof, T) -> R + Sync) -> Vec<R>;
     fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved>;
-    fn each<T: Send>(quantities: &[&Q], asking: &[usize], ask: impl Fn(usize, &Q) -> T + Sync) -> Vec<T>;
 }
 
 /// One after another, no cell ahead of a proof's order: the pace of quantities that only their own thread may ask.
@@ -1020,10 +1020,7 @@ impl<Q: Fn(&Region) -> f64 + ?Sized> Pace<Q> for InTurn {
         proofs.iter_mut().zip(made).map(|(proof, made)| step(proof, made)).collect()
     }
     fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved> {
-        asked.iter().map(|cell| round.halve::<Self>(cell)).collect()
-    }
-    fn each<T: Send>(quantities: &[&Q], asking: &[usize], ask: impl Fn(usize, &Q) -> T + Sync) -> Vec<T> {
-        asking.iter().enumerate().map(|(at, &q)| ask(at, quantities[q])).collect()
+        asked.iter().map(|cell| round.halve(cell)).collect()
     }
 }
 
@@ -1036,10 +1033,7 @@ impl<Q: Fn(&Region) -> f64 + Sync + ?Sized> Pace<Q> for AtOnce {
         proofs.par_iter_mut().zip(made).map(|(proof, made)| step(proof, made)).collect()
     }
     fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved> {
-        asked.par_iter().map(|cell| round.halve::<Self>(cell)).collect()
-    }
-    fn each<T: Send>(quantities: &[&Q], asking: &[usize], ask: impl Fn(usize, &Q) -> T + Sync) -> Vec<T> {
-        asking.par_iter().enumerate().map(|(at, &q)| ask(at, quantities[q])).collect()
+        asked.par_iter().map(|cell| round.halve(cell)).collect()
     }
 }
 
