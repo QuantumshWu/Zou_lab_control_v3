@@ -254,6 +254,21 @@
 //! What was not taken: the kick's quadrature up to the time read has the same f′(h² − u²)/2 (the shear is taken at the
 //! fixed r_h: a held state's force in a standing wave is constant over the step in the scheme) for a third of a step's
 //! work; a shortened step from the step's start as a side branch is of the third order and costs a whole step a read.
+//!
+//! # The domain (SPEC §1.8)
+//! Everything a step asks of the model is asked at points of its straight path r_h + v_m u, |u| ≤ h, and at the one
+//! momentum κ_m: the generator, its forces and the scattered light at the middle, along the path by the plane waves'
+//! phases; each jump's photons, kick and landing at its point on the path; the reads' rows at points of the path. A
+//! jump changes the state and the cluster, not the path or κ_m. So a step is proven where the model holds over the
+//! path at the speed |v_m| -- the path's box, the cell r_h ± |v_m,a| h, the region every bound of the model is a function
+//! of (model/reach.rs `Region`) -- and the step itself at that speed: one question a step, asked before its propagation
+//! (`Domain::proven`), with the middle the reference's fixed point gives and the path's momentum the prediction gives.
+//! What the step's own error control sees between its nodes is how the model's values change along the path -- the
+//! three nodes' parabola, checked against twice the step (solve.rs, # The step) --, not whether the model exists there:
+//! a fold that does not exist is no error of τ, and an atom that left the proven set and came back between two nodes,
+//! or between the middle and a jump, would be unseen by a test at points. The path's box holds every point the step reads
+//! the model at. A step the domain does not prove is not taken: the advance ends there (adapt.rs), and what its path
+//! would need is told (`Unproven`).
 
 use std::sync::OnceLock;
 
@@ -520,11 +535,12 @@ fn sinc(x: f64) -> f64 {
     stumpff(x * x).1
 }
 
-/// The reference's exact flow (A) of a step: the expansion point p (µm), the principal axes (unit rows), per axis the
-/// curvature λ (rad/µs/µm²) and the gradient g at p along it (rad/µs/µm), and ħ/m.
+/// The reference's exact flow (A) of a step: the expansion point p (µm), the reference potential there (rad/µs), the
+/// principal axes (unit rows), per axis the curvature λ (rad/µs/µm²) and the gradient g at p along it (rad/µs/µm), and ħ/m.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Flow {
     pub centre: [f64; 3],
+    pub value: f64,
     pub axes: [[f64; 3]; 3],
     pub curvatures: [f64; 3],
     pub gradient: [f64; 3],
@@ -536,7 +552,23 @@ impl Flow {
     fn new(q: &Quadratic, centre: [f64; 3], hbar_over_mass: f64) -> Flow {
         let (curvatures, axes) = linalg::symmetric3_eigen(&q.hessian);
         let gradient = std::array::from_fn(|i| linalg::dot3(axes[i], q.gradient));
-        Flow { centre, axes, curvatures, gradient, hbar_over_mass }
+        Flow { centre, value: q.value, axes, curvatures, gradient, hbar_over_mass }
+    }
+    /// The reference potential's largest value on the straight path r + v u, |u| ≤ |half| (rad/µs), by its expansion
+    /// about p -- the potential the step's flow moves in: V(p) + g·y + ½ yᵀΛy along the axes, y = (r − p) + v u, a parabola
+    /// c + b u + ½ a u² in u, its largest at an end, or at its vertex where it bends down within the path.
+    pub fn highest(&self, r: [f64; 3], v: [f64; 3], half: f64) -> f64 {
+        let (mut a, mut b, mut c) = (0.0, 0.0, self.value);
+        for i in 0..3 {
+            let e = self.axes[i];
+            let (y, w) = (linalg::dot3(e, [r[0] - self.centre[0], r[1] - self.centre[1], r[2] - self.centre[2]]), linalg::dot3(e, v));
+            a += self.curvatures[i] * w * w;
+            b += (self.gradient[i] + self.curvatures[i] * y) * w;
+            c += self.gradient[i] * y + 0.5 * self.curvatures[i] * y * y;
+        }
+        let h = half.abs();
+        let ends = (c + b * h + 0.5 * a * h * h).max(c - b * h + 0.5 * a * h * h);
+        if a < 0.0 && b.abs() <= -a * h { ends.max(c - 0.5 * b * b / a) } else { ends }
     }
     /// (r, κ) after the time t (either sign) from (r, κ) (module documentation, # The reference).
     pub fn advance(&self, from: ([f64; 3], [f64; 3]), t: f64) -> ([f64; 3], [f64; 3]) {
@@ -1129,14 +1161,32 @@ pub struct Made {
 }
 
 /// Why a step or a jump could not be made: the reference's fixed point is not a contraction at this step (`middle`); the
-/// state left the floating-point range; or the norm reached its threshold with no photon to emit (`jump`: the model's
-/// decay and its photons contradict each other). The advance takes the step at its half at the first two (adapt.rs, #
-/// The step), and ends at the third.
+/// state left the floating-point range; the norm reached its threshold with no photon to emit (`jump`: the model's
+/// decay and its photons contradict each other); or the domain does not prove the step (`Domain`). The advance takes
+/// the step at its half at the first two (adapt.rs, # The step), and ends at the others.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Refused {
     Reference,
     Overflow,
     Emission,
+    Unproven(Unproven),
+}
+
+/// What the integrator asks before every step's propagation (SPEC §1.8; module documentation, # The domain): whether the
+/// model it takes, and the step itself, hold along the step's path.
+pub trait Domain {
+    /// Whether the step of half-length `half` (µs) through its middle -- the reference's flow there (`Flow`) and the
+    /// middle point and path momentum (r_h, κ_m) -- is proven; else what is to be held for it (`Unproven`).
+    fn proven(&self, flow: &Flow, middle: ([f64; 3], [f64; 3]), half: f64) -> Result<(), Unproven>;
+}
+
+/// What a step its domain does not prove asks of the reach (`Domain`; model/reach.rs, # The trap's region): the
+/// prepared energy (rad/µs: the reference's potential with (ħ/m)κ_m²/2) it is to hold within the trap's region, and
+/// outside it (−∞: nothing there).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Unproven {
+    pub region: f64,
+    pub outside: f64,
 }
 
 /// The path's momentum of the step of τ through a middle from a state (module documentation, # The path's momentum),
@@ -1203,13 +1253,15 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// (`stretch`); the kick -- the propagation's impulse, the reference's τ∇V_ref(r_h), the scattered light's force
     /// and its diffusion's part of the Brownian path `brownian` (module documentation, # The absorbed light's
     /// momentum), and each jump's own where it is made -- and the second half flow. `scratch` is the trajectory's. A
-    /// jump the model gives no photon is refused (`jump`).
-    pub fn attempt(&self, from: &Trajectory, brownian: &Brownian, reads: &[f64], scratch: &mut Scratch) -> Result<Step, Refused> {
+    /// jump the model gives no photon is refused (`jump`); so is a step its `domain` does not prove, before anything of
+    /// it is propagated (module documentation, # The domain).
+    pub fn attempt(&self, from: &Trajectory, brownian: &Brownian, reads: &[f64], scratch: &mut Scratch, domain: &dyn Domain) -> Result<Step, Refused> {
         let (tau, hm, n) = (self.tau, self.hbar_over_mass, from.psi.len());
         let h = 0.5 * tau;
         let (flow, (r_h, kappa_h), reference) = (self.flow, self.reached, self.reference);
         scratch.fit(n);
         let kappa_m = predicted(scratch, &self.generator, &from.psi, kappa_h, reference, tau);
+        domain.proven(&flow, (r_h, kappa_m), h).map_err(Refused::Unproven)?;
         let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, weights: [0.0; 3], impulse: [0.0; 3], scattered: None, work: count::shear(n, self.generator.work()), made: Vec::new() };
         // Cluster by cluster: the start's generator, then that of every cluster a jump lands in, at the same middle.
         let mut landed: Option<D::Middle<'a>> = None;
