@@ -61,7 +61,7 @@
 //! constants: its second moment's rate is that of the response its kept drives would make folded at the atom -- per
 //! carrier c the response σ_c of the carrier's whole field on the cluster's ground amplitudes, summed coherently as a
 //! folded jump sums it, never beam by beam --, Σ_c Re[∇σ_c*⊗∇σ_c]/Σ_c |σ_c|² a photon, at the state's own rate as far as
-//! the response's (eliminate.rs `Model::explicit_moment`).
+//! the response's (eliminate.rs `Model::explicit_response`, `Answer::moment`).
 
 use super::assemble::{laid, sized, ClassPlan, Held, Plan, Site};
 use super::far::EXCITED;
@@ -447,7 +447,8 @@ impl Model {
             }
         }
         let live = &axes[..count];
-        let Site { beams: amplitudes, directions, jumps, jump_slopes, fields, member: vectors, class: sums, dressing, energies, .. } = site;
+        let Site { beams: amplitudes, directions, jumps, jump_slopes, fields, member: vectors, class: sums, dressing, energies, answers, .. } = site;
+        answers.clear();
         // A member's vectors: its matrix on the state, a point's with its partner's and each direction's two slopes.
         // The most a member makes (below: `base + more` of a near member with the fourth order and the gradients), s
         // the directions' slopes, a table's axes or the three lab axes: 2(1 + s) its jumps' and its partner's with their
@@ -595,7 +596,9 @@ impl Model {
                 // The fourth order's vectors: each a matrix on a state more, and its weights.
                 work += (more * (m.entries.len() + 4 * rows)) as f64;
                 // An explicit state's part of the second moment's rate, where every class's is asked: its decay rate into
-                // the class over its population, `MemberPlan::decay`.
+                // the class over its population, `MemberPlan::decay`, on its source's response (eliminate.rs
+                // `Answer::moment`) -- the source's whichever class it lands in: made with the first class that takes
+                // it, and counted with each as the definition has it.
                 if !m.folded && gradients == Gradients::All {
                     if !levelled {
                         dressing.clear();
@@ -605,11 +608,19 @@ impl Model {
                     }
                     let norm = crate::linalg::norm_sqr(psi);
                     let population = m.entries.first().map_or(0.0, |&(_, _, sp, _, _)| populations.map_or(psi[sp].norm_sqr(), |p| p[sp] * norm));
-                    let (moment, w) = self.explicit_moment(cluster, amplitudes, energies, kappa, m.source, m.decay, population, psi);
-                    for i in 0..3 {
-                        for j in 0..3 {
-                            explicit[i][j] += moment[i][j];
+                    let mut w = 0.0;
+                    if m.decay > 0.0 && population > 0.0 {
+                        let at = answers.iter().position(|(source, _)| *source == m.source).unwrap_or_else(|| {
+                            answers.push((m.source, self.explicit_response(cluster, amplitudes, energies, kappa, m.source, psi)));
+                            answers.len() - 1
+                        });
+                        let (answer, moment) = (&answers[at].1, answers[at].1.moment(m.decay, population));
+                        for i in 0..3 {
+                            for j in 0..3 {
+                                explicit[i][j] += moment[i][j];
+                            }
                         }
+                        w = answer.work;
                     }
                     work += w + m.entries.len() as f64;
                 }
