@@ -65,6 +65,7 @@
 
 use super::assemble::{laid, sized, ClassPlan, Held, Plan, Site};
 use super::far::EXCITED;
+use super::own::{norm_of, product, Form, Own};
 use super::reach::Region;
 use super::tabulate::NearTable;
 use super::units::{gate, Measured};
@@ -186,34 +187,43 @@ impl Model {
         at_the_atom || (0..3).any(|a| self.constant_jump(source, a, b, s) != C64::ZERO)
     }
 
-    /// A bound over a region of a source's jump b ← s on axis a per unit of its field component: its constant part's entry,
-    /// and of a carrier's part at the atom Σ_e |C_a[b, e]| |U_k[e, s]|/σ_es, σ_es the drive's denominator's bound there
-    /// (units.rs `Model::denominator_over`) -- each drive at its own distance.
-    fn jump_bound(&self, source: &Source, a: usize, b: usize, s: usize, region: &Region) -> f64 {
-        let at_the_atom = match source.origin {
-            Origin::Near { carrier, component } if s < GROUND => {
+    /// A source's jump b ← s on axis a per unit of its field component over a region, complex (own.rs `Form`): its constant
+    /// part's entry, and of a carrier's part at the atom Σ_e C_a[b, e] U_k[e, s]/(Δ_es − iΓ_e/2), Δ_es the drive's detuning of
+    /// the levels the eliminations take (eliminate.rs `Gap`; own.rs `Own::resolvent`) -- the sum's own form, the excited
+    /// states' paths with their phases: far from the lines, where 1/(Δ − iΓ/2) is nearly one number for every excited
+    /// state, their sum is the couplings' own sum over the manifold, which may be nothing where each path is not. Beside it,
+    /// how far the excited states' far couplings move it (own.rs `Band`): per path |w_e| r_e/(|Δ_es − iΓ_e/2| σ_es), r_e the
+    /// excited state's Gershgorin radius and σ_es the denominator's bound (units.rs `Model::denominator_own`).
+    fn jump_form(&self, source: &Source, a: usize, b: usize, s: usize, region: &Region) -> (Form<C64>, Own) {
+        let mut jump = Form::constant(self.constant_jump(source, a, b, s));
+        let mut spread = Own::constant(0.0);
+        if let Origin::Near { carrier, component } = source.origin {
+            if s < GROUND {
                 let cc = &self.carriers[carrier];
-                (GROUND..STATES)
-                    .map(|e| {
-                        let size = (self.emission[a][(b, e)] * cc.basis[component][(e, s)]).abs();
-                        if size > 0.0 { size / self.denominator_over(region, e, s, cc.detuning) } else { 0.0 }
-                    })
-                    .sum()
+                let radii = self.radii(region);
+                for e in GROUND..STATES {
+                    let w = self.emission[a][(b, e)] * cc.basis[component][(e, s)];
+                    if w == C64::ZERO {
+                        continue;
+                    }
+                    let gamma = 0.5 * self.decay[(e - GROUND, e - GROUND)].re;
+                    let detuning = self.gap(e, s, region, cc.detuning).taken;
+                    jump = jump.add(detuning.resolvent(gamma).turned(w));
+                    spread = spread.add(radii[e].div(detuning.hypot(gamma).mul(self.denominator_own(region, e, s, cc.detuning))).scale(w.abs()));
+                }
             }
-            _ => 0.0,
-        };
-        at_the_atom + self.constant_jump(source, a, b, s).abs()
+        }
+        (jump, spread)
     }
 
-    /// A source's field component's coherent bound over a region, |Σ_l a_l γ_lk| (reach.rs `Region::coherent`; 1 for an
-    /// explicit state's).
-    fn source_bound(&self, source: &Source, region: &Region) -> f64 {
+    /// A source's field component over a region, Σ_l a_l γ_lk (reach.rs `Region::field`; 1 for an explicit state's).
+    fn source_field(&self, source: &Source, region: &Region) -> Form<C64> {
         match (self.source_frequency(source), source.origin) {
             (Some(f), Origin::Far { component, .. } | Origin::Near { component, .. }) => {
                 let f = &self.light.frequencies[f];
-                region.coherent(&f.beams.iter().zip(&f.coefficients).map(|(&l, c)| (l, c[component], c[component].abs())).collect::<Vec<_>>())
+                region.field(f.beams.iter().zip(&f.coefficients).map(|(&l, c)| (l, c[component], c[component].abs()))).0
             }
-            _ => 1.0,
+            _ => Form::constant(C64::ONE),
         }
     }
 
@@ -689,31 +699,52 @@ impl Model {
         out
     }
 
-    /// A bound over a region of a class's jump operators' sizes per axis: Σ_members F ‖L_a‖_F, F the member's field
-    /// component's bound there (`source_bound`) and L_a its entries' (`jump_bound`).
-    fn class_bound(&self, cluster: usize, class: &Class, region: &Region) -> [f64; 3] {
+    /// A class's jump operators' sizes over a region per axis, ‖u_a‖_F of u_a = Σ_members F L_a on the class's entries: per
+    /// member at one relative phase the members' sum, each its field component (`source_field`) times its jump
+    /// (`jump_form`), in one own form -- a carrier's components on its field's basis are one field's, whose sum the basis
+    /// does not change --, the members at different relative phases (a kept coherence's) apart, their norms added; with
+    /// the bands' radii, the field's bound times each jump's.
+    fn class_bound(&self, cluster: usize, class: &Class, region: &Region) -> [Own; 3] {
         let (from, landing) = (&self.clusters[cluster], &self.clusters[class.landing]);
-        let mut out = [0.0; 3];
-        for m in &class.members {
-            let source = &self.sources[m.source];
-            let field = self.source_bound(source, region);
-            for a in 0..3 {
-                out[a] += field * m.entries.iter().map(|&(bp, sp)| self.jump_bound(source, a, landing.states[bp], from.states[sp], region).powi(2)).sum::<f64>().sqrt();
+        let fields: Vec<Form<C64>> = class.members.iter().map(|m| self.source_field(&self.sources[m.source], region)).collect();
+        std::array::from_fn(|a| {
+            let mut size = Own::constant(0.0);
+            let mut phases: Vec<&Beat> = class.members.iter().map(|m| &m.phase).collect();
+            phases.sort();
+            phases.dedup();
+            for phase in phases {
+                // Per entry of the class (landing place, source place) at this phase: the members' sum and its radius.
+                let mut entries: Vec<((usize, usize), Form<C64>, Own)> = vec![];
+                for (m, field) in class.members.iter().zip(&fields).filter(|of| of.0.phase == *phase) {
+                    let source = &self.sources[m.source];
+                    for &(bp, sp) in &m.entries {
+                        let (jump, spread) = self.jump_form(source, a, landing.states[bp], from.states[sp], region);
+                        let (term, spread) = (product(field, &jump, |f: C64, l: C64| f * l), spread.mul(field.norm()));
+                        match entries.iter_mut().find(|x| x.0 == (bp, sp)) {
+                            Some(x) => (x.1, x.2) = (x.1.add(term), x.2.add(spread)),
+                            None => entries.push(((bp, sp), term, spread)),
+                        }
+                    }
+                }
+                let forms: Vec<Form<C64>> = entries.iter().map(|x| x.1).collect();
+                let spread = entries.iter().fold(Own::constant(0.0), |sum, x| sum.add(x.2.square())).sqrt();
+                size = size.add(norm_of(&forms).add(spread));
             }
-        }
-        out
+            size
+        })
     }
 
     /// A coherence's size over a region (the gates', units.rs `Model::gates`): Σ_a ‖L_a‖ ‖L'_a‖ of its two classes' jump
-    /// operators, each bounded there (`class_bound`), the largest over the source clusters it names.
-    pub(crate) fn coherence_bound(&self, unit: &Unit, region: &Region) -> f64 {
-        let mut size = 0.0_f64;
+    /// operators, each in its own form there (`class_bound`), the largest over the source clusters it names.
+    pub(crate) fn coherence_bound(&self, unit: &Unit, region: &Region) -> Own {
+        let mut size: Option<Own> = None;
         for (cluster, i, j) in self.coherence_classes(unit) {
             let classes = &self.classes[cluster];
             let (a, b) = (self.class_bound(cluster, &classes[i], region), self.class_bound(cluster, &classes[j], region));
-            size = size.max((0..3).map(|x| a[x] * b[x]).sum());
+            let here = (0..3).fold(Own::constant(0.0), |sum, x| sum.add(a[x].mul(b[x])));
+            size = Some(size.map_or(here, |size| size.max(here)));
         }
-        size
+        size.unwrap_or(Own::constant(0.0))
     }
 
     /// Per class of a sample's cluster and axis, ‖L_a‖_F of its jump operators at the sample's point (units.rs `Measured`):

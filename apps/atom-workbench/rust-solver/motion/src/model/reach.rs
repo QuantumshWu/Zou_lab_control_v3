@@ -140,6 +140,12 @@
 //! One whose bound is attained at a centre: the cells not settled above the level at which a centre attains it, for the halves
 //! made hold that centre's value from then on (`Proof::sighted`), every cell is settled against it, and the proof asks ahead no
 //! more. One that ends at a cell whose bound is within the rounding of its centre's value: the cells it had asked for by then.
+//! A unit's statements (its saturation and its sweep) are proven side by side, and a unit one of whose statements is
+//! proven at the threshold or above is kept whatever the others read: their proofs end with it, each at the largest bound
+//! of its cells left (`Model::statements_over`); which units are kept is the same as theirs proven to the end. (Proven to the end alone, the sweep of a coupling of two
+//! Zeeman sublevels of a heavy atom at rest -- B 0, the sublevels crossing where the tweezer's tensor shift does, its
+//! saturation infinite there -- halved the cells along the crossing towards a speed's square root that no centre met,
+//! and the proof over S3's reach at 1 µK did not end in five minutes.)
 //!
 //! # The kick's curvature (`Model::kick_curvature`)
 //! A step is the reference's flow, a kick, the flow again (step.rs); the kick is −τ∇(⟨x|Ĥ_h|x⟩ − V_ref) at the step's
@@ -178,8 +184,8 @@
 //! edge is: where a companion lies in such a band its trajectories differ from the run's without bound, and the check
 //! halves.
 
-use super::eliminate::Couplings;
-use super::own::Own;
+use super::eliminate::{Couplings, Diagonal, Gap, Shift};
+use super::own::{Form, Own};
 use super::far::EXCITED;
 use super::{Component, Envelope, Level, Lights, Model, Reach, Trap};
 use crate::field::{Amplitude, Geometry};
@@ -480,7 +486,7 @@ pub(crate) fn pair_span(spans: &[Span], j: usize, i: usize) -> PairSpan {
 /// and |w(P_l'l)|.
 pub(crate) type Weights = Vec<(usize, usize, C64, f64)>;
 
-/// A carrier's folded couplings X^f_l as the regions' bounds read them (eliminate.rs `Model::couplings`, `Model::shift_slope`).
+/// A carrier's folded couplings X^f_l as the regions' bounds read them (eliminate.rs `Model::couplings`, `Model::dressing_shifts`).
 pub(crate) struct Folded {
     /// Its polarization units, distinct and ascending.
     pub(crate) units: Vec<usize>,
@@ -617,14 +623,13 @@ pub(crate) struct Forms {
     mixed: OnceLock<Vec<Vec<(usize, C64)>>>,
     /// Per pair of states (x, y), row-major: the weighting of the forms' entry [P_l'l]_xy.
     entries: Vec<OnceLock<Weights>>,
-    /// Per pair of states (x, y), row-major: the weighting of the forms' diagonal difference [P_l'l]_xx − [P_l'l]_yy (y = x: of
-    /// the diagonal [P_l'l]_xx).
-    differences: Vec<OnceLock<Weights>>,
+    /// Per frequency and beam pair whose form has a diagonal entry that is not zero: the frequency, the pair, and per state
+    /// its diagonal entry [P_l'l]_xx (eliminate.rs `Model::gap`).
+    diagonals: OnceLock<Vec<(usize, usize, Vec<C64>)>>,
     /// Per carrier.
     folded: OnceLock<Vec<Folded>>,
-    /// Per ground state its drives in the tail rule's order (units.rs `Model::ranked`); and the excited states (less GROUND)
-    /// its folded drives reach, ascending.
-    drives: OnceLock<(Vec<Vec<DriveForm>>, Vec<Vec<usize>>)>,
+    /// Per ground state its drives in the tail rule's order (units.rs `Model::ranked`).
+    drives: OnceLock<Vec<Vec<DriveForm>>>,
     /// Per coupling asked.
     terms: Mutex<HashMap<Coupling, Arc<TermForm>>>,
     /// Γ_min (eliminate.rs `Model::least_decay`).
@@ -637,7 +642,7 @@ pub(crate) struct Forms {
 impl Forms {
     pub(crate) fn new() -> Forms {
         let cells = || (0..STATES * STATES).map(|_| OnceLock::new()).collect();
-        Forms { mixed: OnceLock::new(), entries: cells(), differences: cells(), folded: OnceLock::new(), drives: OnceLock::new(), terms: Mutex::new(HashMap::new()), decay: OnceLock::new(), taken: OnceLock::new() }
+        Forms { mixed: OnceLock::new(), entries: cells(), diagonals: OnceLock::new(), folded: OnceLock::new(), drives: OnceLock::new(), terms: Mutex::new(HashMap::new()), decay: OnceLock::new(), taken: OnceLock::new() }
     }
 
     /// A weighting of the model's far static forms (`Weights`).
@@ -668,9 +673,20 @@ impl Forms {
         self.entries[x * STATES + y].get_or_init(|| Forms::weights(model, &|p| p[(x, y)]))
     }
 
-    /// The weighting of the forms' diagonal difference [P_l'l]_xx − [P_l'l]_yy; of the diagonal [P_l'l]_xx where y = x.
-    pub(crate) fn difference(&self, model: &Model, x: usize, y: usize) -> &Weights {
-        self.differences[x * STATES + y].get_or_init(|| Forms::weights(model, &|p| p[(x, x)] - if y == x { C64::ZERO } else { p[(y, y)] }))
+    /// The forms' diagonals per beam pair (`Forms::diagonals`).
+    pub(crate) fn diagonals(&self, model: &Model) -> &[(usize, usize, Vec<C64>)] {
+        self.diagonals.get_or_init(|| {
+            let mut out = vec![];
+            for (frequency, tone) in model.tones.iter().enumerate() {
+                for (pair, p) in tone.pairs.iter().enumerate() {
+                    let w: Vec<C64> = (0..STATES).map(|s| p[(s, s)]).collect();
+                    if w.iter().any(|x| *x != C64::ZERO) {
+                        out.push((frequency, pair, w));
+                    }
+                }
+            }
+            out
+        })
     }
 
     /// Per carrier its couplings folded at the atom (`Folded`).
@@ -698,9 +714,10 @@ impl Forms {
         })
     }
 
-    fn driven(&self, model: &Model) -> &(Vec<Vec<DriveForm>>, Vec<Vec<usize>>) {
+    /// Per ground state its drives in the tail rule's order (`DriveForm`).
+    pub(crate) fn drives(&self, model: &Model) -> &[Vec<DriveForm>] {
         self.drives.get_or_init(|| {
-            let drives: Vec<Vec<DriveForm>> = model
+            model
                 .ranked
                 .iter()
                 .enumerate()
@@ -724,20 +741,8 @@ impl Forms {
                         })
                         .collect()
                 })
-                .collect();
-            let reached = drives.iter().map(|of| (0..EXCITED).filter(|&e| of.iter().any(|d| d.excited == e && d.level != Level::Explicit)).collect()).collect();
-            (drives, reached)
+                .collect()
         })
-    }
-
-    /// Per ground state its drives in the tail rule's order (`DriveForm`).
-    pub(crate) fn drives(&self, model: &Model) -> &[Vec<DriveForm>] {
-        &self.driven(model).0
-    }
-
-    /// Per ground state the excited states (less GROUND) its folded drives reach, ascending.
-    pub(crate) fn reached(&self, model: &Model) -> &[Vec<usize>] {
-        &self.driven(model).1
     }
 
     /// What the bound of the coupling a ← b at the model's beat `beat` reads (`TermForm`), made once.
@@ -788,22 +793,22 @@ pub(crate) struct Region {
     /// [carrier][ground state].
     pub(crate) dressings: OnceLock<Vec<[Own; GROUND]>>,
     /// [carrier][ground state]: the dressing's shift with its sign (eliminate.rs `Model::dressing_shifts`).
-    pub(crate) shifted: OnceLock<Vec<[Own; GROUND]>>,
+    pub(crate) shifted: OnceLock<Vec<[Shift; GROUND]>>,
     /// Per cluster.
     pub(crate) forces: Vec<OnceLock<Own>>,
     /// Per ground state its drives' sizes and distances (units.rs `Model::across`), and the first places of their gates
     /// in the tail rule's order (units.rs `Model::folds`).
     pub(crate) across: [OnceLock<Vec<super::units::Across>>; GROUND],
     pub(crate) drives: [OnceLock<Vec<[f64; 5]>>; GROUND],
-    /// Per ground state: the slope of its level under the near light (units.rs `Model::near_slope`), and its shift's
-    /// own form, signed (units.rs `Model::near_level`).
-    pub(crate) slopes: [OnceLock<Own>; GROUND],
-    pub(crate) shifts: [OnceLock<Own>; GROUND],
-    /// Per ground state: the slopes of the constant forms' levels from it to the excited states its folded drives reach
-    /// (units.rs `Model::level_slopes`).
-    pub(crate) levels: Vec<OnceLock<[Own; EXCITED]>>,
+    /// Per ground state its shift by its drives folded at the atom, signed (units.rs `Model::near_level`).
+    pub(crate) shifts: [OnceLock<Shift>; GROUND],
+    /// The constant forms' diagonal per state, and the levels' differences asked, each made once (eliminate.rs `Model::gap`).
+    pub(crate) diagonal: OnceLock<Diagonal>,
+    pub(crate) gaps: Mutex<HashMap<(usize, usize), Gap>>,
     /// Per coupling of two states asked its saturation and sweep (units.rs `Model::term_bound`).
     pub(crate) terms: Mutex<HashMap<Coupling, (f64, f64)>>,
+    /// The model's kept drives (units.rs `Model::kept_over`).
+    pub(crate) kept: OnceLock<Vec<super::units::Kept>>,
     /// The slope of any two levels' difference and an atom's acceleration (units.rs `Model::gate_over`).
     pub(crate) moving: OnceLock<(Own, Own)>,
 }
@@ -825,9 +830,63 @@ impl Region {
         Combination::of(&self.half, terms)
     }
 
-    /// |∇f| over the region of a sum f = Σ_p w_p c_p of beam pairs' coefficients, in its own form (`steepness`).
-    pub(crate) fn steepness(&self, terms: impl Iterator<Item = (PairSpan, C64, f64)>) -> Own {
-        steepness(&self.half, terms)
+    /// ∇f over the region of a sum f = Σ_p w_p c_p of beam pairs' coefficients, in its own form (own.rs `Form`): of its
+    /// gradient and Hessian at the centre, Σ_p w_p ∇c_p(c) and Σ_p w_p ∇∇c_p(c), and the gradient's Taylor remainder
+    /// Σ_p |w_p| `rest`_p; it moves by Σ_p |w_p| `veer`_p, each pair's gradient's own range, and is at most Σ_p |w_p|
+    /// `slope`_p. (With each pair's range alone, a standing wave's term 2|w| cos 2kx read its gradient's change at its node,
+    /// where it is flat, as 2k² h |w| -- added over its two counter-rotating pairs, a first order the sum does not have.) On
+    /// the whole space, at most the pairs' slopes.
+    pub(crate) fn gradient(&self, terms: impl Iterator<Item = (PairSpan, C64, f64)>) -> Form<[C64; 3]> {
+        let (mut value, mut hessian) = ([C64::ZERO; 3], [[C64::ZERO; 3]; 3]);
+        let (mut veer, mut rest, mut steep) = (0.0, 0.0, 0.0);
+        for (pair, w, size) in terms {
+            for a in 0..3 {
+                value[a] += pair.gradient[a] * w;
+                for b in 0..3 {
+                    hessian[a][b] += pair.hessian[a][b] * w;
+                }
+            }
+            veer += size * pair.veer;
+            rest += size * pair.rest;
+            steep += size * pair.slope;
+        }
+        if !self.rho.is_finite() {
+            return Form::whole(steep);
+        }
+        Form { value, first: std::array::from_fn(|a| hessian[a].map(|z| z * self.half[a])), rest, moved: veer, most: steep }
+    }
+
+    /// A sum u = Σ_l a_l x_l of beams' amplitudes times numbers (the request's beam, x_l, |x_l|) and its gradient over the
+    /// region, each in its own form (own.rs `Form`): u of its value and slopes at the centre, its Taylor remainder ½ Σ_l |x_l|
+    /// max|dᵀ∇∇a_l d| (`Span::bowed`), moving by Σ_l |x_l| max|a_l − a_l(c)| (`Span::moved`) and at most Σ_l |x_l| max|a_l|;
+    /// ∇u of its value and second derivatives at the centre, its Taylor remainder Σ_l |x_l| `Span::rest`, moving by Σ_l |x_l|
+    /// `Span::veer` and at most Σ_l |x_l| `Span::steepest`. On the whole space, each at most its bound.
+    pub(crate) fn field(&self, entries: impl Iterator<Item = (usize, C64, f64)>) -> (Form<C64>, Form<[C64; 3]>) {
+        let (mut u, mut slopes, mut second) = (C64::ZERO, [C64::ZERO; 3], [[C64::ZERO; 3]; 3]);
+        let mut sums = [0.0; 6];
+        let bounded = self.rho.is_finite();
+        for (l, x, size) in entries {
+            let span = &self.spans[l];
+            u += span.centre * x;
+            for a in 0..3 {
+                slopes[a] += span.gradient[a] * x;
+                for b in 0..3 {
+                    second[a][b] += span.hessian[a][b] * x;
+                }
+            }
+            let over = if bounded { [span.moved(), span.bowed(), span.most, span.veer(), span.rest(), span.steepest()] } else { [0.0, 0.0, span.most, 0.0, 0.0, span.steepest()] };
+            for (sum, x) in sums.iter_mut().zip(over) {
+                *sum += size * x;
+            }
+        }
+        if !bounded {
+            return (Form::whole(sums[2]), Form::whole(sums[5]));
+        }
+        let half = self.half;
+        (
+            Form { value: u, first: std::array::from_fn(|a| slopes[a] * half[a]), rest: 0.5 * sums[1], moved: sums[0], most: sums[2] },
+            Form { value: slopes, first: std::array::from_fn(|a| second[a].map(|z| z * half[a])), rest: sums[4], moved: sums[3], most: sums[5] },
+        )
     }
 
     /// A coupling's saturation and sweep over the region, made once for both of its gates' bounds.
@@ -841,22 +900,22 @@ impl Region {
         made
     }
 
-    /// The bound over the region of |Σ_l a_l x_l| of beams' entries (the request's beam, x_l, |x_l|), the beams coherent at the
-    /// request's phases (`summed`); on a point, the value there.
-    pub(crate) fn coherent(&self, entries: &[(usize, C64, f64)]) -> f64 {
-        self.coherent_own(entries).upper()
+    /// |u|² = |Σ_l a_l x_l|² over the region of a frequency's beams (the request's beam, x_l, |x_l|), and its gradient, each in
+    /// its own form: of its own beam pairs, Σ_{j,i} x_j* x_i c_ji (`PairSpan`; `combined`, `gradient`) -- a beam's own pair its
+    /// intensity, read from its modulus with no phase to turn (`Span::moduli`); two beams' pair turning at their wave vectors'
+    /// difference. (As the square of |u|'s own form, one beam's plane wave turned u's phase across the cell and put the turn's
+    /// square into the intensity's remainder, k²h²|u|², where the intensity does not move.)
+    pub(crate) fn intensity(&self, model: &Model, frequency: usize, entries: &[(usize, C64, f64)]) -> (Own, Form<[f64; 3]>) {
+        let beams = &model.light.frequencies[frequency].beams;
+        let n = beams.len();
+        let place = |l: usize| beams.iter().position(|&b| b == l).expect("an entry's beam is its frequency's");
+        let pairs = || entries.iter().flat_map(move |&(lj, xj, sj)| entries.iter().map(move |&(li, xi, si)| (self.pairs[frequency][place(lj) * n + place(li)], xj.conj() * xi, sj * si)));
+        (self.combined(pairs()).real().within(0.0, f64::INFINITY), self.gradient(pairs()).re())
     }
 
-    /// |Σ_l a_l x_l| over the region in its own form (`summed`).
+    /// |Σ_l a_l x_l| over the region in its own form (`field`, own.rs `Form::norm`).
     pub(crate) fn coherent_own(&self, entries: &[(usize, C64, f64)]) -> Own {
-        let blind: f64 = entries.iter().map(|&(l, _, size)| size * self.spans[l].most).sum();
-        if !self.rho.is_finite() {
-            return Own::range(0.0, 0.0, blind);
-        }
-        let sum = |of: &dyn Fn(&Span) -> C64| -> C64 { entries.iter().map(|&(l, x, _)| of(&self.spans[l]) * x).sum() };
-        let bound = |of: &dyn Fn(&Span) -> f64| -> f64 { entries.iter().map(|&(l, _, size)| size * of(&self.spans[l])).sum() };
-        let slopes: [C64; 3] = std::array::from_fn(|a| sum(&|span| span.gradient[a]));
-        self.summed(&[sum(&|span| span.centre)], [&slopes[..1], &slopes[1..2], &slopes[2..]], bound(&Span::moved), bound(&Span::bowed), blind)
+        self.field(entries.iter().copied()).0.norm()
     }
 
     /// ‖u‖ over the region in its own form (own.rs `Own::norm`), u = Σ_l a_l x_l a sum of beams' amplitudes times vectors
@@ -1022,29 +1081,6 @@ impl Combination {
 
 }
 
-/// |∇f| of a sum f = Σ_p w_p c_p of beam pairs' coefficients over a cell of half-widths `half` in its own form (own.rs
-/// `Own::norm`; `Region::steepness`): of its gradient and Hessian at the centre, Σ_p w_p ∇c_p(c) and Σ_p w_p ∇∇c_p(c), and
-/// the gradient's Taylor remainder Σ_p |w_p| `rest`_p; within |∇f(c)| ± Σ_p |w_p| `veer`_p, each pair's gradient's own
-/// range, and at most Σ_p |w_p| `slope`_p. (With each pair's range alone, a standing wave's term 2|w| cos 2kx read its
-/// gradient's change at its node, where it is flat, as 2k² h |w| -- added over its two counter-rotating pairs, a first
-/// order the sum does not have.)
-fn steepness(half: &[f64; 3], terms: impl Iterator<Item = (PairSpan, C64, f64)>) -> Own {
-    let (mut gradient, mut hessian) = ([C64::ZERO; 3], [[C64::ZERO; 3]; 3]);
-    let (mut veer, mut rest, mut steep) = (0.0, 0.0, 0.0);
-    for (pair, w, size) in terms {
-        for a in 0..3 {
-            gradient[a] += pair.gradient[a] * w;
-            for b in 0..3 {
-                hessian[b][a] += pair.hessian[a][b] * w;
-            }
-        }
-        veer += size * pair.veer;
-        rest += size * pair.rest;
-        steep += size * pair.slope;
-    }
-    Own::norm(&gradient, [&hessian[0], &hessian[1], &hessian[2]], rest, veer, steep, *half)
-}
-
 /// V_prep(r; p) over a bounded cell in its own form (own.rs), its value at the centre `centre`: its far part Re Σ_l'l Q_l'l
 /// c_l'l in its own form and range (`Region::combined`), and the near trap light's shift within each beam pair's radius
 /// (`pair_span`) times its bound per pair (potential.rs `Model::envelope`).
@@ -1067,6 +1103,9 @@ fn valued<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, cell: &Regions) -> (f64, f64) {
 struct Rule<'a> {
     settled: &'a (dyn Fn(f64, f64) -> bool + Sync),
     scale: f64,
+    /// The statements of one unit, consecutive quantities `together` at a time, and the threshold one bounded at or above
+    /// keeps the unit (none: each alone).
+    together: Option<(usize, f64)>,
 }
 
 /// One quantity's proof (module documentation, # Provable extrema, # Rounds): the cells left, by their upper bounds, and the
@@ -1556,10 +1595,11 @@ impl Model {
             forces: (0..self.clusters.len()).map(|_| OnceLock::new()).collect(),
             across: std::array::from_fn(|_| OnceLock::new()),
             drives: std::array::from_fn(|_| OnceLock::new()),
-            slopes: std::array::from_fn(|_| OnceLock::new()),
             shifts: std::array::from_fn(|_| OnceLock::new()),
-            levels: (0..GROUND).map(|_| OnceLock::new()).collect(),
+            diagonal: OnceLock::new(),
+            gaps: Mutex::new(HashMap::new()),
             terms: Mutex::new(HashMap::new()),
+            kept: OnceLock::new(),
             moving: OnceLock::new(),
         }
     }
@@ -1582,13 +1622,21 @@ impl Model {
     /// decided -- below the threshold everywhere, or a value at or above `attains` at a centre in the reach --, or within the
     /// rounding of its centre's value; 0 where no cell meets the reach. The cells are halved one after another (`InTurn`).
     pub(crate) fn bounds_over(&self, reach: &Reach, threshold: f64, attains: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
-        self.proven_over::<_, InTurn>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs() }, quantities)
+        self.proven_over::<_, InTurn>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: None }, quantities)
     }
 
     /// The bounds against `threshold` and `attains` (`bounds_over`) of quantities any thread may ask, proven on all the cores
     /// (`AtOnce`): the same bounds, to the bit.
+    #[cfg(test)]
     pub(crate) fn bounds_over_in_parallel(&self, reach: &Reach, threshold: f64, attains: f64, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
-        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs() }, quantities)
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: None }, quantities)
+    }
+
+    /// The bounds of units' statements (`bounds_over_in_parallel`), consecutive quantities `together` at a time one unit's
+    /// (module documentation, # Rounds): a unit one of whose statements is proven at the threshold or above is kept whatever
+    /// its others read, and their proofs end there, each at the largest bound of its cells left -- a bound, if not the least.
+    pub(crate) fn statements_over(&self, reach: &Reach, threshold: f64, attains: f64, together: usize, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: Some((together, threshold)) }, quantities)
     }
 
     /// The provable bounds over the reach of quantities given per region, each to `resolution`: each one's largest upper bound of
@@ -1596,7 +1644,7 @@ impl Model {
     /// thread may ask, proven on all the cores (`AtOnce`): an extent's cells are those of the whole place of its largest
     /// values, each to be halved whatever the order.
     pub(crate) fn extents_over(&self, reach: &Reach, resolution: f64, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
-        self.proven_over::<_, AtOnce>(reach, Rule { settled: &|upper, attained| upper - attained <= resolution, scale: resolution }, quantities)
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &|upper, attained| upper - attained <= resolution, scale: resolution, together: None }, quantities)
     }
 
     /// The proofs' subdivision (module documentation, # Provable extrema, # Rounds): per quantity the cell of its largest upper
@@ -1613,7 +1661,18 @@ impl Model {
         let nothing = || -> Vec<Vec<(usize, [Option<Queued>; 2])>> { quantities.iter().map(|_| vec![]).collect() };
         let mut made = nothing();
         loop {
-            let asking = P::proofs(&mut proofs, made, |proof, made| proof.advance(made, rule, P::AHEAD));
+            let mut asking = P::proofs(&mut proofs, made, |proof, made| proof.advance(made, rule, P::AHEAD));
+            // A unit kept by one statement: its other statements' proofs end at the bounds of their cells left.
+            if let Some((together, threshold)) = rule.together {
+                for (unit, asks) in proofs.chunks_mut(together).zip(asking.chunks_mut(together)) {
+                    if unit.iter().any(|proof| proof.bound.is_some_and(|bound| bound >= threshold)) {
+                        for (proof, asked) in unit.iter_mut().zip(asks).filter(|of| of.0.bound.is_none()) {
+                            proof.bound = Some(proof.queue.peek().map_or(0.0, |top| top.upper));
+                            asked.clear();
+                        }
+                    }
+                }
+            }
             // The cells asked for, each with the quantities asking.
             let mut by_cell: Vec<(usize, usize)> = asking.iter().enumerate().flat_map(|(q, cells)| cells.iter().map(move |&node| (node, q))).collect();
             if by_cell.is_empty() {
@@ -1695,7 +1754,7 @@ mod tests {
     /// # Provable extrema): on the six-beam lattice, each beam's modulus between its least and its largest, each beam pair's
     /// coefficient within its radius of the centre's and its
     /// gradient within its slope; every carrier's coherent coupling |Σ_l a_l X^f_l[e,s]|, its columns and its units' columns within
-    /// their bounds; the far light's energies' differences within their slack (`Model::gap`) and their gradients within `energy_slope_over` --
+    /// their bounds; the far light's energies' differences within their slack (`Model::gap`) and their gradients within the gap's --
     /// and on a cell a thousand times smaller the couplings' bounds within that factor of the centre's values.
     /// The reach's level is the quantile of its ensemble's energy (module documentation, # The reach's level). Classical
     /// (every scale one): Q(n/2, L) = s to the format's resolution for the n = 3 to 6 degrees of a trap that holds along
@@ -1787,13 +1846,13 @@ mod tests {
                 }
                 for x in 0..STATES {
                     for y in 0..x {
-                        let (gap, here) = (model.gap(x, y, &region).all, energy[x] - energy[y]);
+                        let (gap, here) = (model.gap(x, y, &region, 0.0).all, energy[x] - energy[y]);
                         assert!(within(here, gap.upper()) && within(gap.lower(), here), "E_{x} − E_{y} {here} at {r:?} outside [{}, {}]", gap.lower(), gap.upper());
                     }
                 }
                 for (x, y) in [(0, 3), (GROUND, 1), (GROUND + 5, 6), (STATES - 1, GROUND)] {
                     let g = (0..3).map(|i| (gradient[x][i] - gradient[y][i]).powi(2)).sum::<f64>().sqrt();
-                    assert!(within(g, model.energy_slope_over(x, y, &region).upper()), "|∇(E_{x} − E_{y})| {g} at {r:?}");
+                    assert!(within(g, model.gap(x, y, &region, 0.0).all_slope.norm().upper()), "|∇(E_{x} − E_{y})| {g} at {r:?}");
                 }
                 for (cc, bound) in model.carriers.iter().zip(couplings) {
                     let mut units: Vec<usize> = cc.units.clone();
@@ -2033,7 +2092,7 @@ mod tests {
 
     /// The model holds along a path where every point of it does, and fails where a point of it fails (`holds_along`):
     /// R2_RECOIL with its resonant beam's drives folded at the atom, whose folds the whole space does not settle. On 200
-    /// paths of 0.5 µm about points across the trap's region at speeds up to 0.5 µm/µs, against their gates at 65 points
+    /// paths of 0.5 µm about points across the trap's region at speeds up to 1 µm/µs, against their gates at 65 points
     /// each: a path with a point that fails is never held to hold; both outcomes occur.
     #[test]
     fn a_path_holds_where_its_points_do_and_fails_where_one_does_not() {
@@ -2046,7 +2105,7 @@ mod tests {
         let (mut held, mut failed) = (0, 0);
         for _ in 0..200 {
             let r: [f64; 3] = std::array::from_fn(|_| 6.0 * (stream.uniform() - 0.5));
-            let v: [f64; 3] = std::array::from_fn(|_| 0.29 * (stream.uniform() - 0.5));
+            let v: [f64; 3] = std::array::from_fn(|_| 1.2 * (stream.uniform() - 0.5));
             let speed = v.iter().map(|x| x * x).sum::<f64>().sqrt();
             let half = 0.25 / speed;
             let points_fail = (0..=64).any(|i| {
