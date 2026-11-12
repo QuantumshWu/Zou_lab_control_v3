@@ -799,7 +799,8 @@ pub fn run(event_loop: EventLoop<AppEvent>, context: WebContext, setup: Setup, l
                             *flow = ControlFlow::Exit;
                         }
                         "frontend_error" => eprintln!("{}", json!({"type": "frontend-error", "error": command["error"]})),
-                        "map_ready" | "frame_consumed" | "mappings_released" => {}
+                        // The page's own lines (ui/src/journal.ts): the installer keeps no flight journal.
+                        "map_ready" | "frame_consumed" | "mappings_released" | "journal" => {}
                         _ => {
                             let answer = installer.command(&command);
                             installer.flush(&windows)?;

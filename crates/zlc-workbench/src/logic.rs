@@ -1804,6 +1804,10 @@ impl Workbench {
             "auto_preview": node.auto_preview,
             "device_labels": descriptor.map(|item| item.node().devices.iter().map(|requirement| (requirement.argument.clone(), json!(words(&requirement.argument))))
                 .collect::<Map<String, Value>>()).unwrap_or_default(),
+            // A device a field turns on stands under that field, with the rows the field gates.
+            "device_gates": descriptor.map(|item| item.node().devices.iter()
+                .filter_map(|requirement| requirement.enabled_when.as_ref().map(|(field, _)| (requirement.argument.clone(), json!(field))))
+                .collect::<Map<String, Value>>()).unwrap_or_default(),
             "outputs": self.node_outputs(node).into_iter().map(|(signal, contract)| json!({"signal": signal, "contract": contract,
                 "label": self.signal_label(&signal), "shape": signals.iter().find(|item| item.name == signal).map(|item| item.shape.clone())})).collect::<Vec<_>>(),
             "issues": issues, "can_start": issues.is_empty(), "edited": edited,
