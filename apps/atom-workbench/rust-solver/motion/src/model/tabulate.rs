@@ -575,7 +575,7 @@ impl Model {
                 })
                 .collect();
             let refs: Vec<&dyn Fn(&Region) -> f64> = quantities.iter().map(|q| q.as_ref() as &dyn Fn(&Region) -> f64).collect();
-            self.bounds_over(reach, target, &refs)
+            self.bounds_over(reach, target, target, &refs)
         };
         for (&c, w) in intensities.iter().zip(moved) {
             weights[c] = w;

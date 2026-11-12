@@ -11,6 +11,25 @@
 //! beam at the largest amplitude its cell allows and all in phase, over the distance's least, the energies' spread and
 //! every Doppler shift of the reach's speeds taken against it. Neither condition implies the other; a fold needs both.
 //!
+//! The sweep is a relative error, of the fold's own effect: the instantaneous fold of a linear sweep is the exact
+//! response times ∫₀^∞ e^{−x + iax²/2} dx, of modulus at most one at any a (internal.md 1B.1), so a moving fold is off
+//! by at most twice its own amplitude m, (2m)² = 2S of its states' population, however fast it sweeps. So the sweep is
+//! read against the larger of that effect and the least share any output resolves, unseen(2¹⁴) (SPEC §5.4: the share
+//! the ledger cannot feel): a · min(1, 2S/unseen) (`Gate::resolved`) -- the sweep itself where the fold's effect is
+//! resolved, scaled down with it below. (A coupling of 1e-9 of its line's, which the H0 states' mixing gives the repump
+//! between Zeeman sublevels two apart, swept at the tweezer's light-shift gradient read a = 0.5000 over the reach of the
+//! user's lin⊥lin probe, and its proof was 95 % of 133 s. Cut off at 2S = unseen instead, the quantity jumped there:
+//! a coupling's bound over a cell, its S a little above the cutoff, kept its sweep of 0.8 to 8 while the cell's centre,
+//! a little below, read 0 -- a bound that no longer tends to its point value, and the proof never ended.)
+//!
+//! Keeping a unit is always exact -- the more exact level -- so a proof over the reach only has to settle the fold:
+//! below ½ everywhere it holds; a unit whose proof meets a centre in the reach attaining ¼ first is kept (`KEEP`,
+//! reach.rs # Provable extrema). Within [¼, ½) both are right: a fold attaining S there books its mixing S/2, an eighth
+//! of its states' population or more (# The errors), 2.5 times the population target, which its states cannot meet
+//! where they are held -- keeping it is what the error asks anyway (SPEC §5.2's first rule). The cells then shrink to
+//! the band's width at most, not to a value's margin from ½, whose inverse cube their number grows as: lin⊥lin's
+//! couplings of F=1 m=0 with m=±1 at 0.497 and 0.499 took 1.1 million cells.
+//!
 //! # Levels
 //! A drive is taken at one of three levels (model.rs `Level`), each the more exact one of the one before, and what decides
 //! is the accuracy its own denominator needs -- never its frequency, its line or its beam:
@@ -44,9 +63,17 @@
 //! with each kept drive V_a of that state (far.rs, # A fold onto an explicit state): beside its own gate it has the
 //! pair's (`Model::pair_gate`), the one gate of the two-photon coupling |U V_a| over the nearer of the two one-photon
 //! distances -- the amplitude either of the pair's states holds of the other is that over the two-photon distance --
-//! across the two-photon distance |E_g + ν − E_a − ν_a| over the region, less the two photons' Doppler shifts and
-//! what the folded and the kept drives move the two ground levels. Its share adds to the drive's in its ground
-//! state's tail; failing, the drive is kept as any other.
+//! across the two-photon distance |E_g + ν − E_a − ν_a| over the region, less the two-photon Doppler shift and what the
+//! folded and the kept drives move the two ground levels. The pair's coupling U V_a* turns in space as e^{i(q − k')·r},
+//! q the folded drive's photon (k_l, a counter-rotating component's −k_l) and k' the kept one's, so a moving atom's
+//! two-photon detuning moves by (q − k')·v: at most |q − k'| v over the two components' beams -- nothing for two photons
+//! of one beam, 2kv for counter-propagating ones (`Model::two_photon_wave`). Its centre moves over the region as the
+//! difference E_g − E_a does, a shift the two levels share moving nothing. (Taken as |q| + |k'| for any two beams and
+//! each level's own movement, the bound of two legs of the one repump beam between F=1 m=1 and m=0, 2.1 MHz apart,
+//! reached zero at an atom of 0.53 µm/µs: the pair's gate read ∞ for a two-photon coupling |U V|/d of 1e-18 rad/µs.)
+//! The pair is the second-order coupling of two slow states -- g and the state a of e's cluster --, as a coupling of two
+//! states is (# A coupling of two states), not an amplitude of an excited state of g's: its own statement, judged alone
+//! (# The tail rule); failing, the drive is kept as any other.
 //!
 //! A drive has exactly one level, the highest its kept units give it, and one more where its two states are one cluster's
 //! at a residual beat of exactly zero (model.rs `Model::settled`); a carrier is a component with a drive not bare, never listed.
@@ -67,6 +94,17 @@
 //! point's gate is the value there. (A weaker place's bound from elsewhere in its stead is no value of any point: with
 //! the whole space's 0.49 for one of two equal drives, the other's gate read 0.52 "attained" at the trap's centre where
 //! the two shares are 0.03 each, and a light 20 linewidths off its line was made explicit.)
+//!
+//! What the tail sums is what g's fold holds of the excited states its folded drives reach, the first-order amplitudes
+//! R[e, g] = V_e/D_e: the column whose norm bounds the fold of g's set (Stewart, the block of one ground state against
+//! its folded excited states). A Raman pair's mixing is none of them: it is the amplitude of another slow state in g's,
+//! of the second order, |U V_a|/(d d_R), and as d_R → 0 it has no bound against the drive's own share |U|²/d² -- so it has
+//! no place in an order by the drives' own shares. A drive's gate is therefore the larger of its place's tail and of its
+//! place's drives' pairs (their largest, as their sweeps). (Added at its drive's place, a pair failed every stronger drive
+//! of g with it, which keeping does not cure -- the pair stays until its own drive is kept --, down to the
+//! counter-rotating ones, which can only be folded: the request of a lin⊥lin probe with its repump was refused for a
+//! pair of the repump's 1.7e-9 rad/µs coupling F=1 m=1 → F′=2 m=−1 -- made by the H0 states' mixing -- with the
+//! 1.1e-8 one from F=1 m=0, measured.)
 //!
 //! # What a folded drive does to its level
 //! A drive of coupling v folded across the distance d moves its ground level by at most v²/d = m v, and by less than
@@ -180,6 +218,11 @@ use std::sync::Arc;
 /// Where a fold exists (module documentation): S = 2m² < ½ and a < ½.
 pub(crate) const EXISTS: f64 = 0.5;
 
+/// Where a gate's proof over the reach may end in keeping its unit (module documentation, # One rule): a value attained at
+/// a centre in the reach at half the threshold, S = ¼ -- a fold there books its mixing S/2 = ⅛ of its states'
+/// population, 2.5 times the population target 0.05.
+pub(crate) const KEEP: f64 = 0.5 * EXISTS;
+
 /// The fourth order's leading errors in one line's share s (module documentation, # The fold's order, where a ground
 /// state's several drives take the line's place; derivation: fourth.status.md), each the next order's: on the force
 /// 3/2 s², the next term of the one line's (1 − s + 3/2 s²); on the rates 9/8 s², the most that the slow state's
@@ -205,6 +248,15 @@ impl Gate {
     /// Whether the fold exists over the reach: both bounds below ½.
     pub fn exists(&self) -> bool {
         self.saturation < EXISTS && self.sweep < EXISTS
+    }
+
+    /// The gate with its sweep as far as an output can see it (module documentation, # One rule): the sweep read against
+    /// the larger of the fold's largest error from any motion, (2m)² = 2S of its states' population, and the least share
+    /// any output resolves, unseen(2¹⁴) -- a · min(1, 2S/unseen), continuous and monotone in both, so that a bound over a
+    /// cell tends to its point value.
+    pub(crate) fn resolved(self) -> Gate {
+        let seen = (2.0 * self.saturation / crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64)).min(1.0);
+        Gate { saturation: self.saturation, sweep: if self.sweep == 0.0 { 0.0 } else { self.sweep * seen } }
     }
 
     /// The error of the unit this is the gate of, at most, at any state the reach holds -- where the unit's error is its
@@ -311,8 +363,8 @@ impl Across {
 }
 
 /// One kept drive over a region (`Model::kept_over`): its carrier, its excited state (less GROUND) and its ground state;
-/// its coupling's coherent bound there, its one-photon distance at least (`Across::distance`, of its two levels' slack,
-/// its Doppler shift and its excited state's Gershgorin radius), and its beams' largest wave number.
+/// its coupling's coherent bound there and its one-photon distance at least (`Across::distance`, of its two levels' slack,
+/// its Doppler shift and its excited state's Gershgorin radius).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Kept {
     pub(crate) carrier: usize,
@@ -320,7 +372,6 @@ pub(crate) struct Kept {
     pub(crate) ground: usize,
     pub(crate) size: f64,
     pub(crate) distance: f64,
-    pub(crate) wave: f64,
 }
 
 /// What a unit's gate reads of a region (`Model::judged`, `Model::gate_of`).
@@ -478,7 +529,7 @@ impl Model {
             let slope = (0..STATES).map(|s| self.energy_slope_over(s, s, region) + self.near_slope(s, region)).fold(0.0, f64::max);
             (2.0 * slope, self.acceleration(region, &|_| true))
         });
-        gate(size, distance - wave * region.speed, region.speed * slope + wave * acceleration)
+        gate(size, distance - wave * region.speed, region.speed * slope + wave * acceleration).resolved()
     }
 
     /// Whether a state is an explicit excited state of this model.
@@ -706,7 +757,8 @@ impl Model {
     /// at rest (`Across::distance_at_rest`), |w| ≤ k v_max + (ħ/m) k²/2 the Doppler shift and recoil of its photon, what its
     /// response takes to first order (eliminate.rs, # First-order Doppler). Its rate v L + k a_max, L the slope of E_e − E_g
     /// and of the other components' carriers' dressings of g. A drive onto an explicit state has the share and the sweep
-    /// of its Raman pairs with that state's kept drives beside its own (`pair_gate`).
+    /// of its Raman pairs with that state's kept drives beside its own (`pair_gate`): its own statements, not shares in
+    /// the tail -- a place's gate is the larger of its tail and its drives' largest pair.
     fn folds_made(&self, g: usize, region: &Region) -> Vec<[f64; 5]> {
         let drives = &region.forms.drives(self)[g];
         let kept = self.kept_over(region);
@@ -715,6 +767,8 @@ impl Model {
         // Per component the slope of the other components' carriers' dressings of g and its beams' largest wave number.
         let mut shared: Vec<Option<(f64, f64)>> = vec![None; 2 * self.tones.len()];
         let mut out = vec![[0.0; 5]; drives.last().map_or(0, |d| d.group + 1)];
+        // Per place its drives' largest pair saturation, at the atom and with the bare levels.
+        let mut pairs = vec![[0.0_f64; 2]; out.len()];
         for (d, of) in drives.iter().zip(self.across(g, region)).filter(|of| of.0.level != Level::Explicit) {
             let (others, wave) = *shared[d.component].get_or_insert_with(|| {
                 let others: f64 = (0..self.carriers.len()).filter(|&c| self.other(&self.carriers[c], d.component)).map(|c| self.shift_slope(c, g, region, true)).sum();
@@ -724,24 +778,30 @@ impl Model {
             let actual = gate(of.size, of.distance(d.gamma), rate);
             let pair = self.pair_gate(g, d, of, &kept, region);
             let place = &mut out[d.group];
-            place[4] += actual.saturation + pair.saturation;
-            if d.level == Level::Bare {
+            place[4] += actual.saturation;
+            let bare = d.level == Level::Bare;
+            pairs[d.group][bare as usize] = pairs[d.group][bare as usize].max(pair.saturation);
+            if bare {
                 let own = gate(of.size + (of.centre - d.detuning).abs() + of.moved, d.bare, rate);
                 place[2] = place[2].max(own.saturation - actual.saturation);
-                place[3] = place[3].max(own.sweep).max(pair.sweep);
+                place[3] = place[3].max(own.resolved().sweep).max(pair.resolved().sweep);
             } else {
                 let series = gate(wave * region.speed + 0.5 * self.hbar_over_mass * wave * wave, of.distance_at_rest(d.gamma), rate);
                 place[0] = place[0].max(series.saturation);
-                place[1] = place[1].max(actual.sweep).max(pair.sweep);
+                place[1] = place[1].max(actual.resolved().sweep).max(pair.resolved().sweep);
             }
         }
         // The tails: each place's shares with every weaker one's; a bare drive's own gate in its own share's stead, a drive
-        // at the atom's series beside them.
+        // at the atom's series beside them. Then the place's pairs, each its own statement.
         for place in (0..out.len()).rev() {
             let tail = out[place][4] + out.get(place + 1).map_or(0.0, |weaker| weaker[4]);
             out[place][4] = tail;
             out[place][0] = out[place][0].max(tail);
             out[place][2] += tail;
+        }
+        for (place, pair) in out.iter_mut().zip(&pairs) {
+            place[0] = place[0].max(pair[0]);
+            place[2] = place[2].max(pair[1]);
         }
         out
     }
@@ -761,7 +821,7 @@ impl Model {
                 let moved = energies.slack[e] + energies.slack[a] + wave * region.speed + energies.radius[e];
                 let still = energies.slack[e] + energies.slack[a] + energies.radius[e];
                 let across = Across { size: region.coherent(&d.beams), centre: energies.centre[e] - energies.centre[a] - self.carriers[carrier].detuning, moved, still };
-                out.push(Kept { carrier, excited: d.excited, ground: a, size: across.size, distance: across.distance(d.gamma), wave });
+                out.push(Kept { carrier, excited: d.excited, ground: a, size: across.size, distance: across.distance(d.gamma) });
             }
         }
         out
@@ -771,11 +831,13 @@ impl Model {
     /// that state's kept drives (module documentation, # Levels; far.rs, # A fold onto an explicit state): per kept
     /// drive V_a (e ← a at ν_a) whose channel is another Floquet state than the drive's (eliminate.rs `Model::apart`),
     /// the one gate of |U| |V_a| over the nearer of the two one-photon distances, across the two-photon distance
-    /// |E_g + ν − E_a − ν_a| over the region less the two photons' Doppler shifts, the shifts of the two ground levels by
-    /// their drives folded at the atom (`near_shift`) and by their kept drives -- a kept drive of coupling v across the
-    /// distance d moves its ground level by at most v and at most v²/d --, at the rate v |∇(E_g − E_a)| + (k + k_a) a_max.
-    /// The pairs' saturations summed (shares of g's population, as the tail's), their largest sweep; nothing where the
-    /// drive's excited state has no kept drive.
+    /// |E_g + ν − E_a − ν_a| over the region -- its centre's, within how far the difference E_g − E_a moves over the
+    /// region (the constant forms' diagonal difference, as a coupling's distance takes it: a shift the two levels share
+    /// moves no distance) -- less the two-photon Doppler shift |q − k'| v (`two_photon_wave`), the shifts
+    /// of the two ground levels by their drives folded at the atom (`near_shift`) and by their kept drives -- a kept drive
+    /// of coupling v across the distance d moves its ground level by at most v and at most v²/d --, at the rate
+    /// v |∇(E_g − E_a)| + |q − k'| a_max. The pairs' saturations summed (the drive's couplings to e's cluster), their
+    /// largest sweep; nothing where the drive's excited state has no kept drive.
     fn pair_gate(&self, g: usize, d: &super::reach::DriveForm, of: &Across, kept: &[Kept], region: &Region) -> Gate {
         let mut out = Gate { saturation: 0.0, sweep: 0.0 };
         if kept.iter().all(|leg| leg.excited != d.excited) {
@@ -783,20 +845,38 @@ impl Model {
         }
         let energies = self.energies(region);
         let (frequency, side) = (d.component / 2, d.component % 2);
-        let (from, nu, wave) = (self.frequency(Component { frequency, counter: side == 1 }), self.tones[frequency].nu[side], self.wave_of(d.component));
+        let (from, nu) = (self.frequency(Component { frequency, counter: side == 1 }), self.tones[frequency].nu[side]);
         let lifted = |s: usize| -> f64 { kept.iter().filter(|leg| leg.ground == s).map(|leg| leg.size.min(leg.size * leg.size / leg.distance)).sum() };
         for leg in kept.iter().filter(|leg| leg.excited == d.excited && self.apart(g, &from, leg.ground, &self.carriers[leg.carrier].beat)) {
             let a = leg.ground;
             let size = of.size * leg.size / of.distance(d.gamma).min(leg.distance);
-            let (at, slack) = (energies.centre[g] + nu - energies.centre[a] - self.carriers[leg.carrier].detuning, energies.slack[g] + energies.slack[a]);
-            let apart = distance(at - slack, at + slack) - (wave + leg.wave) * region.speed - self.near_shift(g, region) - self.near_shift(a, region) - lifted(g) - lifted(a);
+            let wave = self.two_photon_wave(d, self.carriers[leg.carrier].frequency);
+            let at = energies.centre[g] + nu - energies.centre[a] - self.carriers[leg.carrier].detuning;
+            let slack: f64 = region.forms.difference(self, g, a).iter().map(|&(frequency, pair, _, modulus)| modulus * region.pairs[frequency][pair].radius).sum();
+            let apart = distance(at - slack, at + slack) - wave * region.speed - self.near_shift(g, region) - self.near_shift(a, region) - lifted(g) - lifted(a);
             let slope = self.energy_slope_over(g, a, region) + self.near_slope(g, region) + self.near_slope(a, region);
             let acceleration = self.acceleration(region, &|c| c.states.contains(&g) || c.states.contains(&a));
-            let pair = gate(size, apart, region.speed * slope + (wave + leg.wave) * acceleration);
+            let pair = gate(size, apart, region.speed * slope + wave * acceleration);
             out.saturation += pair.saturation;
             out.sweep = out.sweep.max(pair.sweep);
         }
         out
+    }
+
+    /// The largest wave number of a Raman pair's two photons together (1/µm; module documentation, # Levels): |q − k'|
+    /// over the beams of a drive folded onto an explicit state -- q = k_l, a counter-rotating component's −k_l -- and the
+    /// beams k' of its kept leg's frequency, the pair's coupling turning in space as e^{i(q − k')·r}.
+    fn two_photon_wave(&self, d: &super::reach::DriveForm, frequency: usize) -> f64 {
+        let sign = if d.component % 2 == 1 { -1.0 } else { 1.0 };
+        let mut most = 0.0_f64;
+        for &(l, _, _) in &d.beams {
+            let q = self.light.beams[l].wave_vector();
+            for &m in &self.light.frequencies[frequency].beams {
+                let k = self.light.beams[m].wave_vector();
+                most = most.max(norm3(std::array::from_fn(|i| sign * q[i] - k[i])));
+            }
+        }
+        most
     }
 
     /// A ground state's drives' gate at a place of the tail rule's order over a region (`folds_made`): [saturation, sweep]
@@ -861,7 +941,7 @@ impl Model {
             }
             let (spread, slope) = if a == b { (0.0, 0.0) } else { (self.near_spread(a, b, region), self.energy_slope_over(a, b, region) + self.near_slope(a, region) + self.near_slope(b, region)) };
             let acceleration = self.acceleration(region, &|c| c.states.contains(&a) || c.states.contains(&b));
-            let made = gate(size, distance(at - slack, at + slack) - form.wave * region.speed - spread, region.speed * slope + form.wave * acceleration);
+            let made = gate(size, distance(at - slack, at + slack) - form.wave * region.speed - spread, region.speed * slope + form.wave * acceleration).resolved();
             (made.saturation, made.sweep)
         })
     }
@@ -935,7 +1015,8 @@ impl Model {
     /// and levels (`gate_of`). Each is bounded on the whole space first, every beam at its peak (`everywhere`): a bound over
     /// any reach, and where both of a unit's are below ½ there its gate. The others are proven together over the reach's
     /// cells, on all the cores (reach.rs `Model::bounds_over_in_parallel`) -- a ground state's drive's with every weaker
-    /// one's share on the same cell: what a cell's centre attains is a value there, never a bound from elsewhere.
+    /// one's share on the same cell: what a cell's centre attains is a value there, never a bound from elsewhere --, each
+    /// until it is below ½ everywhere or a centre attains `KEEP` (module documentation, # One rule).
     pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
         let judged = self.judged(units);
         let (everywhere, open) = self.everywhere(&judged, reach.speed);
@@ -967,7 +1048,7 @@ impl Model {
             })
             .collect();
         let refs: Vec<&(dyn Fn(&Region) -> f64 + Sync)> = quantities.iter().map(|q| q.as_ref()).collect();
-        let proven = self.bounds_over_in_parallel(reach, EXISTS, &refs);
+        let proven = self.bounds_over_in_parallel(reach, EXISTS, KEEP, &refs);
         let mut out: Vec<Gate> = everywhere.iter().map(|of| Gate { saturation: of[0], sweep: of[1] }).collect();
         for (&u, &at) in open.iter().zip(&asked) {
             out[u] = Gate { saturation: proven[at], sweep: proven[at + 1] };
@@ -1203,6 +1284,39 @@ mod tests {
             }
             kept.extend(failing);
         }
+    }
+
+    /// The sweep is a relative error of the fold's own effect (module documentation, # One rule; `Gate::resolved`). The
+    /// exact response of a linear sweep is the instantaneous fold times I(a) = ∫₀^∞ e^{−x + iax²/2} dx (internal.md
+    /// 1B.1), of modulus at most one at any a -- so the fold is off by at most twice its own amplitude: |I(a) − 1| ≤ 2
+    /// (Simpson on [0, 40], the step resolving the phase's largest rate a·40). At a = ½ the response holds 0.71 of the
+    /// fold's population, at a = 1.75 0.39 (the gate's edge, internal.md). A coupling whose whole effect, 2S, is below the
+    /// least resolved share has its sweep scaled down with it -- the user's lin⊥lin pair, S = 9e-38 at a sweep of 0.83,
+    /// has none --; one above it keeps its sweep, and a fold of a share at the target's scale with a sweep beyond ½ is
+    /// kept. Continuous across the resolution (a cut-off there left a cell's bound at 8.4 over its centre's 0).
+    #[test]
+    fn a_fold_s_sweep_counts_as_far_as_its_own_effect_is_seen() {
+        let response = |a: f64| -> C64 {
+            let (end, n) = (40.0_f64, (2.0 * (1.0 + a * 40.0) * 40.0 * 20.0).ceil() as usize * 2);
+            let h = end / n as f64;
+            let f = |x: f64| C64::new(-x, 0.5 * a * x * x).exp();
+            let inner: C64 = (1..n).map(|i| f(i as f64 * h) * if i % 2 == 1 { 4.0 } else { 2.0 }).sum();
+            (f(0.0) + inner + f(end)) * (h / 3.0)
+        };
+        for a in [0.0, 0.1, 0.5, 1.0, 1.75, 4.0, 20.0] {
+            let i = response(a);
+            assert!(i.abs() <= 1.0 + 1e-9 && (i - C64::ONE).abs() <= 2.0, "a = {a}: I = {i:?}");
+        }
+        assert!((response(0.5).norm_sqr() - 0.71).abs() < 0.01 && (response(1.75).norm_sqr() - 0.39).abs() < 0.01, "{} {}", response(0.5).norm_sqr(), response(1.75).norm_sqr());
+        let unseen = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
+        assert!(Gate { saturation: 9e-38, sweep: 0.83 }.resolved().exists());
+        assert!(Gate { saturation: 0.25 * unseen, sweep: 0.9 }.resolved().exists());
+        assert!(!Gate { saturation: unseen, sweep: 0.6 }.resolved().exists());
+        assert!(!Gate { saturation: 0.1, sweep: 0.6 }.resolved().exists());
+        assert_eq!(Gate { saturation: 0.1, sweep: 0.3 }.resolved().sweep, 0.3);
+        // Continuous across the resolution: just below and just above 2S = unseen the sweep is the same to the rounding.
+        let (below, above) = (Gate { saturation: 0.5 * unseen * (1.0 - 1e-12), sweep: 8.4 }.resolved().sweep, Gate { saturation: 0.5 * unseen * (1.0 + 1e-12), sweep: 8.4 }.resolved().sweep);
+        assert!((above - below).abs() <= 1e-10, "{below} {above}");
     }
 
     /// A gate's bound of its unit's error (`Gate::error_bound`) at states the reach holds. On the closed models of
