@@ -415,7 +415,8 @@ struct Inner {
     safe: SafeActions,
     registry: Arc<Registry>,
     job: Job,
-    catalog: Mutex<Option<Arc<Catalog>>>,
+    /// The one discovery's answer, once it has answered (a failed one stays this host's answer).
+    catalog: Mutex<Option<Result<Arc<Catalog>, String>>>,
     state: Mutex<State>,
     /// Live plugin processes by pid, apart from `state`: a lent block is released
     /// to its owner from whichever thread drops it, which may hold `state` (the
@@ -484,9 +485,17 @@ impl PluginHost {
 
     /// Every discoverable plugin type: discovery runs once per host, and only when
     /// the catalogue kept for these sources and this environment is not current (cache.rs).
+    /// Its answer, a failure too, is kept: a later call never runs it again, nor waits for
+    /// anything but a discovery in progress.
     pub fn catalog(&self) -> Result<Arc<Catalog>, String> {
         let mut cached = self.inner.catalog.lock().unwrap();
-        if let Some(catalog) = cached.as_ref() { return Ok(catalog.clone()); }
+        if let Some(answer) = cached.as_ref() { return answer.clone(); }
+        let answer = self.discover_types().map(Arc::new);
+        *cached = Some(answer.clone());
+        answer
+    }
+
+    fn discover_types(&self) -> Result<Catalog, String> {
         let key = cache::key(&self.inner.config, &self.inner.environment);
         let kept = cache::read(&key).and_then(|describe| serde_json::from_slice::<Catalog>(&describe).ok());
         let catalog = match kept {
@@ -507,8 +516,6 @@ impl PluginHost {
             return Err(format!("Plugins speak protocol {}, the core {}", catalog.protocol[0], PROTOCOL[0]));
         }
         for error in &catalog.errors { eprintln!("{}", json!({"type": "plugin-discovery-error", "module": error.module, "error": error.error})); }
-        let catalog = Arc::new(catalog);
-        *cached = Some(catalog.clone());
         Ok(catalog)
     }
 
@@ -1985,6 +1992,19 @@ fn watch(weak: Weak<Inner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_discovery_is_the_hosts_answer_and_is_never_run_again() {
+        let missing = std::env::temp_dir().join(format!("zlc-no-python-{}", std::process::id())).join("python.exe");
+        let host = PluginHost::new(HostConfig { python: missing, python_path: Vec::new(), packages: vec!["zlc_test_plugins".into()], memory_limit_mib: None },
+            Runtime::new(), SafeActions::new(), |_| {}).unwrap();
+        let failed = host.catalog().unwrap_err();
+        let asked = Instant::now();
+        assert_eq!(host.catalog().unwrap_err(), failed);
+        assert!(asked.elapsed() < Duration::from_millis(100), "asked again, it answers at once");
+        assert!(host.inner.processes.lock().unwrap().is_empty());
+        host.shutdown();
+    }
 
     #[test]
     fn local_admission_is_pending_before_the_request_reaches_the_plugin() {
