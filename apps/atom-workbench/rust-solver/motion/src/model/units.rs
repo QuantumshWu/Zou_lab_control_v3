@@ -110,11 +110,16 @@
 //! A drive of coupling v folded across the distance d moves its ground level by at most v²/d = m v, and by less than
 //! v/2 wherever its fold exists: the shift is the fold's own second order, across the fold's own distance. So what the
 //! drives folded at the atom do to a ground level over a region is bounded drive by drive, each across the distance its
-//! own gate reads there (`Model::across`, `Model::near_shift`), and the slope of that shift with the response's norm
+//! own gate reads there (`Model::across`, `Model::near_level`), and the slope of that shift with the response's norm
 //! 1/d of the nearest of them (eliminate.rs `Model::shift_slope`). Never across Γ/2, the distance of a resonant drive,
 //! whatever the drive: that bound is 2|Δ|/Γ times the shift of a light Δ off its line, grows with the intensity as the
 //! shift does, and at 80 mW/cm² of light 20 linewidths off it exceeded the 137 MHz between a cooling and a repump
-//! photon -- a coupling's distance read nothing, its gate ∞, and F=1 and F=2 were made one cluster.
+//! photon -- a coupling's distance read nothing, its gate ∞, and F=1 and F=2 were made one cluster. The shift is taken
+//! with its sign, −v² Δ/(Δ² + Γ²/4) at the drive's detuning within how far its denominator moves (`Model::near_level`),
+//! and a distance between two levels is of the two dressed levels, |E_a + δ_a − E_b − δ_b|, in one own form: the same
+//! light shifts two Zeeman sublevels alike and moves the distance between them by nothing, where the two shifts' bounds
+//! taken off it moved it by twice their size. A kept drive's lift of its ground level has the sign of its push away from
+//! the excited level (`pair_gate`).
 //!
 //! # The fold's order
 //! The second-order fold leaves out one term of the next order, the fourth-order light shift: a state's potentials are
@@ -422,14 +427,17 @@ impl Across {
 }
 
 /// One kept drive over a region (`Model::kept_over`): its carrier, its excited state (less GROUND) and its ground state;
-/// its coupling's coherent size there and its one-photon distance (`Across::distance`, of its two levels' difference, its
-/// Doppler shift and its excited state's Gershgorin radius), each in its own form.
+/// its coupling's coherent size there, its detuning and how far its denominator's real part may lie from it, and its
+/// one-photon distance (`Across::distance`, of its two levels' difference, its Doppler shift and its excited state's
+/// Gershgorin radius), each in its own form.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Kept {
     pub(crate) carrier: usize,
     pub(crate) excited: usize,
     pub(crate) ground: usize,
     pub(crate) size: Own,
+    pub(crate) detuning: Own,
+    pub(crate) moved: Own,
     pub(crate) distance: Own,
 }
 
@@ -549,7 +557,7 @@ impl Model {
 
     /// The bound over a region of the slope of a state's level under the carriers (rad/µs/µm), made once per region and ground
     /// state: a ground state's shifts by the carriers (eliminate.rs `Model::shift_slope`). An explicit excited state's shift by
-    /// the folded drives is not in it, as it is not in the couplings' distances (`Model::near_shift`).
+    /// the folded drives is not in it, as it is not in the couplings' distances (`Model::near_level`).
     pub(crate) fn near_slope(&self, s: usize, region: &Region) -> Own {
         if s < GROUND {
             *region.slopes[s].get_or_init(|| (0..self.carriers.len()).fold(Own::constant(0.0), |sum, c| sum.add(self.shift_slope(c, s, region, false))))
@@ -580,13 +588,17 @@ impl Model {
 
     /// The gate over a region of a fold between any two states' levels -- a photon coherence's --, of size `size`, wave vector
     /// at most `wave` and a distance `distance` that is a bound over all space: the one gate across the distance less the
-    /// Doppler shift q v, at the rate v L + q a_max -- L twice the largest slope of a state's level (the constant forms'
-    /// energy, a ground state's shifts by the carriers), a_max the largest acceleration in any cluster, both made once per
-    /// region.
+    /// Doppler shift q v, at the rate v L + q a_max -- L the largest slope of two levels' difference: of the constant forms'
+    /// energies, each pair's of its own form (eliminate.rs `Model::energy_slope_over`; a shift two levels share, the
+    /// tweezer's scalar one, moves none of their differences), and twice the largest slope of a ground state's shifts by
+    /// the carriers --, a_max the largest acceleration in any cluster, both made once per region.
     pub(crate) fn gate_over(&self, region: &Region, size: Own, wave: f64, distance: f64) -> OwnGate {
         let (slope, acceleration) = *region.moving.get_or_init(|| {
-            let slope = (0..STATES).map(|s| self.energy_slope_over(s, s, region).add(self.near_slope(s, region))).fold(Own::constant(0.0), Own::max);
-            (slope.scale(2.0), self.acceleration(region, &|_| true))
+            let none = Own::constant(0.0);
+            let pairs = (0..STATES).flat_map(|i| (i + 1..STATES).map(move |j| (i, j)));
+            let far = pairs.map(|(i, j)| self.energy_slope_over(i, j, region)).fold(none, Own::max);
+            let near = (0..STATES).map(|s| self.near_slope(s, region)).fold(none, Own::max);
+            (far.add(near.scale(2.0)), self.acceleration(region, &|_| true))
         });
         let pace = region.pace;
         gate_own(size, pace.scale(-wave).plus(distance), pace.mul(slope).add(acceleration.scale(wave))).resolved()
@@ -715,7 +727,8 @@ impl Model {
     /// the excited state's Gershgorin radius and the self-energy's bound (eliminate.rs), the folded channels' and the
     /// kept ones' (`kept_over`) --, so its distance there is at least |max(|Δ_c| − moved, 0) − iΓ_e/2|. A channel's
     /// two-photon distance z − Ẽ_a − δ_d = (E_g − E_a) + ν + Σ_{d'≠c} ΔE_g^{d'} − Σ_{d'} ΔE_a^{d'} − δ_d lies within the
-    /// difference E_g − E_a's spread, the other carriers' dressing of g and every carrier's of a (`dressings`) of its
+    /// difference E_g − E_a and of the other carriers' dressing of g and every carrier's of a, each signed
+    /// (eliminate.rs `Model::dressing_shifts`), of its
     /// centre value: of the difference, as every distance between two levels (eliminate.rs `Gap`).
     pub(crate) fn across<'r>(&self, g: usize, region: &'r Region) -> &'r [Across] {
         region.across[g].get_or_init(|| {
@@ -723,11 +736,12 @@ impl Model {
             let (radii, couplings, dressings) = (self.radii(region), self.couplings(region), self.dressings(region));
             let folded = region.forms.folded(self);
             let none = Own::constant(0.0);
-            let dress: [Own; GROUND] = std::array::from_fn(|a| dressings.iter().fold(none, |sum, d| sum.add(d[a])));
+            let shifts = self.dressing_shifts(region);
+            let dress: [Own; GROUND] = std::array::from_fn(|a| shifts.iter().fold(none, |sum, d| sum.add(d[a])));
             // The two-photon distance over the region, the channel's frequency `delta`: the difference of the eliminations'
-            // levels less what the dressings may move it by, with the dressing of g by the other components' carriers,
-            // `others`, nothing where that reaches it.
-            let channel = |o: usize, nu: f64, delta: f64, others: Own| -> Own { self.gap(g, o, region).taken.plus(nu - delta).abs().sub(others.add(dress[o])).max(none) };
+            // levels and of the two levels' dressings with their signs (eliminate.rs `Model::dressing_shifts`), g's by the
+            // other components' carriers, `others`.
+            let channel = |o: usize, nu: f64, delta: f64, others: Own| -> Own { self.gap(g, o, region).taken.plus(nu - delta).add(others).sub(dress[o]).abs() };
             // Per component, what its drives of g share: the dressing of g by the other components' carriers, the largest
             // wave number of its beams, and the self-energy's bound per excited state -- its Gershgorin row,
             // Σ_{d, a∉C} |u_a[e]| ‖u_a‖/|z − Ẽ_a − δ_d| over the carriers' channels folded at the atom to the ground states of
@@ -744,6 +758,7 @@ impl Model {
                     let nu = self.tones[frequency].nu[side];
                     let (others, wave, sigma) = shared[d.component].get_or_insert_with(|| {
                         let others = self.carriers.iter().zip(dressings).filter(|of| self.other(of.0, d.component)).fold(none, |sum, of| sum.add(of.1[g]));
+                        let signed = self.carriers.iter().zip(shifts).filter(|of| self.other(of.0, d.component)).fold(none, |sum, of| sum.add(of.1[g]));
                         let mut sigma = [none; EXCITED];
                         for ((c, cd), of) in self.carriers.iter().zip(couplings).zip(folded) {
                             for o in (0..GROUND).filter(|&o| self.membership[o] != cluster) {
@@ -751,7 +766,7 @@ impl Model {
                                 if size.upper() == 0.0 || of.reached[o].iter().all(|&x| cd.entry[o][x].upper() == 0.0) {
                                     continue;
                                 }
-                                let den = channel(o, nu, c.detuning, others);
+                                let den = channel(o, nu, c.detuning, signed);
                                 for &x in &of.reached[o] {
                                     let reach = cd.entry[o][x];
                                     if reach.upper() > 0.0 {
@@ -766,7 +781,7 @@ impl Model {
                         for leg in kept.iter().filter(|leg| self.apart(g, &from, leg.ground, &self.carriers[leg.carrier].beat)) {
                             let o = leg.ground;
                             let row = kept.iter().filter(|other| other.carrier == leg.carrier && other.ground == o).fold(none, |sum, other| sum.add(other.size));
-                            let den = channel(o, nu, self.carriers[leg.carrier].detuning, others);
+                            let den = channel(o, nu, self.carriers[leg.carrier].detuning, signed);
                             sigma[leg.excited] = sigma[leg.excited].add(leg.size.mul(row).div(den).within(0.0, f64::INFINITY));
                         }
                         (others, self.wave_of(d.component), sigma)
@@ -792,17 +807,25 @@ impl Model {
         self.light.frequencies[component / 2].beams.iter().map(|&l| self.light.beams[l].wave_number).fold(0.0, f64::max)
     }
 
-    /// The bound over a region of the shift of a ground state's level by its drives folded at the atom (rad/µs; module
-    /// documentation, # What a folded drive does to its level): Σ v²/distance, each drive's coupling across its own
-    /// distance there (`across`); made once per region and state. Nothing for an excited state: an explicit one's shift by
-    /// the folded drives is in no distance.
-    pub(crate) fn near_shift(&self, s: usize, region: &Region) -> Own {
+    /// The shift of a ground state's level by its drives folded at the atom over a region, with its sign, in its own form
+    /// (rad/µs; module documentation, # What a folded drive does to its level): Σ −v² Δ/(Δ² + Γ²/4), each drive's coupling
+    /// at its detuning there (`across`) -- its two levels' difference less its frequency, within how far its denominator
+    /// moves (the Doppler shift, the Gershgorin radius, the self-energy, the other carriers' dressing) --, a two-level
+    /// atom's dispersive shape (own.rs `Own::dispersion`); made once per region and state. Of its own form, not each
+    /// drive's bound: two levels the same light shifts alike move the distance between them by the difference of their
+    /// shifts, the dressed levels' difference (`term_parts`, `pair_gate`). Nothing for an excited state: an explicit one's shift by the folded drives is in no
+    /// distance.
+    pub(crate) fn near_level(&self, s: usize, region: &Region) -> Own {
         if s >= GROUND {
             return Own::constant(0.0);
         }
         *region.shifts[s].get_or_init(|| {
             let drives = &region.forms.drives(self)[s];
-            drives.iter().zip(self.across(s, region)).filter(|of| of.0.level == Level::Atom).fold(Own::constant(0.0), |sum, (_, of)| sum.add(of.size.square().div(of.distance)))
+            drives.iter().zip(self.across(s, region)).filter(|of| of.0.level == Level::Atom).fold(Own::constant(0.0), |sum, (d, of)| {
+                let moved = of.moved.upper();
+                let detuning = of.centre.add(Own::range(0.0, -moved, moved));
+                sum.sub(of.size.square().mul(detuning.dispersion(0.5 * d.gamma)))
+            })
         })
     }
 
@@ -890,7 +913,7 @@ impl Model {
                 let (wave, gap) = (self.wave_of(d.component), self.gap(e, a, region));
                 let still = radii[e];
                 let across = Across::new(region.coherent_own(&d.beams), gap.all.plus(-self.carriers[carrier].detuning), still.add(region.pace.scale(wave)), still, d.gamma);
-                out.push(Kept { carrier, excited: d.excited, ground: a, size: across.size, distance: across.distance });
+                out.push(Kept { carrier, excited: d.excited, ground: a, size: across.size, detuning: across.centre, moved: across.moved, distance: across.distance });
             }
         }
         out
@@ -903,8 +926,9 @@ impl Model {
     /// |E_g + ν − E_a − ν_a| over the region -- its centre's, within how far the difference E_g − E_a moves over the
     /// region (the constant forms' diagonal difference, as a coupling's distance takes it: a shift the two levels share
     /// moves no distance) -- less the two-photon Doppler shift |q − k'| v (`two_photon_wave`), the shifts
-    /// of the two ground levels by their drives folded at the atom (`near_shift`) and by their kept drives -- a kept drive
-    /// of coupling v across the distance d moves its ground level by at most v and at most v²/d --, at the rate
+    /// of the two ground levels by their drives folded at the atom, each signed in the dressed levels' difference (`near_level`), and by their kept drives -- a kept drive
+    /// of coupling v across the distance d moves its ground level away from its excited one by at most v and at most v²/d,
+    /// two levels pushed the same way moving their difference by the larger push --, at the rate
     /// v |∇(E_g − E_a)| + |q − k'| a_max. The pairs' saturations summed (the drive's couplings to e's cluster), their
     /// largest sweep; nothing where the drive's excited state has no kept drive.
     fn pair_gate(&self, g: usize, d: &super::reach::DriveForm, of: &Across, kept: &[Kept], region: &Region) -> OwnGate {
@@ -914,13 +938,23 @@ impl Model {
         }
         let (frequency, side) = (d.component / 2, d.component % 2);
         let (from, nu) = (self.frequency(Component { frequency, counter: side == 1 }), self.tones[frequency].nu[side]);
-        let lifted = |s: usize| -> Own { kept.iter().filter(|leg| leg.ground == s).fold(Own::constant(0.0), |sum, leg| sum.add(leg.size.min(leg.size.square().div(leg.distance)))) };
+        // A ground level's lift by its kept drives, signed: each pushes it away from its excited level, by at most v and
+        // v²/d, against its detuning's sign where that is one sign over the region, else either way.
+        let lifted = |s: usize| -> Own {
+            kept.iter().filter(|leg| leg.ground == s).fold(Own::constant(0.0), |sum, leg| {
+                let most = leg.size.min(leg.size.square().div(leg.distance)).upper();
+                let moved = leg.moved.upper();
+                let (lo, hi) = (leg.detuning.lower() - moved, leg.detuning.upper() + moved);
+                sum.add(if lo > 0.0 { Own::range(-most, -most, 0.0) } else if hi < 0.0 { Own::range(most, 0.0, most) } else { Own::range(0.0, -most, most) })
+            })
+        };
         for leg in kept.iter().filter(|leg| leg.excited == d.excited && self.apart(g, &from, leg.ground, &self.carriers[leg.carrier].beat)) {
             let a = leg.ground;
             let size = of.size.mul(leg.size).div(of.distance.min(leg.distance));
             let wave = self.two_photon_wave(d, self.carriers[leg.carrier].frequency);
             let at = self.gap(g, a, region).taken.plus(nu - self.carriers[leg.carrier].detuning);
-            let apart = at.abs().sub(region.pace.scale(wave)).sub(self.near_shift(g, region)).sub(self.near_shift(a, region)).sub(lifted(g)).sub(lifted(a));
+            let dressed = at.add(self.near_level(g, region)).sub(self.near_level(a, region));
+            let apart = dressed.abs().sub(region.pace.scale(wave)).sub(lifted(g).sub(lifted(a)).abs());
             let slope = self.energy_slope_over(g, a, region).add(self.near_slope(g, region)).add(self.near_slope(a, region));
             let acceleration = self.acceleration(region, &|c| c.states.contains(&g) || c.states.contains(&a));
             let pair = gate_own(size, apart, region.pace.mul(slope).add(acceleration.scale(wave)));
@@ -980,7 +1014,7 @@ impl Model {
     /// frequencies' folded couplings' coherent bounds and σ the denominator's bound of each drive folded at the atom (the
     /// bare drives' halves are the constants'). Its distance: |β + E_a − E_b| over the region -- of the difference of the
     /// two levels (eliminate.rs `Gap`) --, less the Doppler shift of its beam pairs' largest wave vector q at the region's speeds and the
-    /// two states' shifts by their drives folded at the atom (`near_shift`); between two excited states across their
+    /// two states' shifts by their drives folded at the atom taken into it with their signs (`near_level`): of the dressed levels; between two excited states across their
     /// coherence's decay rate γ = (Γ_a + Γ_b)/2, its size by √(γ/min(Γ_a, Γ_b)) (module documentation, # A coupling of
     /// two states); its rate v |∇(E_a − E_b)| + q a_max, the two states' constant energies
     /// and shifts by the carriers (one state's beat moves with neither), the acceleration in their clusters. On a point, its
@@ -1007,10 +1041,10 @@ impl Model {
             return (none, Own::constant(f64::INFINITY), none);
         }
         let at = self.gap(a, b, region).all.plus(self.omega(&self.beats[beat].0));
-        let (spread, slope) = if a == b { (none, none) } else { (self.near_spread(a, b, region), self.energy_slope_over(a, b, region).add(self.near_slope(a, region)).add(self.near_slope(b, region))) };
+        let (dressed, slope) = if a == b { (at, none) } else { (at.add(self.near_level(a, region)).sub(self.near_level(b, region)), self.energy_slope_over(a, b, region).add(self.near_slope(a, region)).add(self.near_slope(b, region))) };
         let acceleration = self.acceleration(region, &|c| c.states.contains(&a) || c.states.contains(&b));
         let rate = region.pace.mul(slope).add(acceleration.scale(form.wave));
-        let apart = at.abs().sub(region.pace.scale(form.wave)).sub(spread);
+        let apart = dressed.abs().sub(region.pace.scale(form.wave));
         // Two decaying states' coherence: its width, and the mixing it leaves the state that decays the slower.
         let width = |s: usize| if s >= GROUND { self.decay[(s - GROUND, s - GROUND)].re } else { 0.0 };
         let (gamma, least) = (0.5 * (width(a) + width(b)), width(a).min(width(b)));
@@ -1583,7 +1617,7 @@ mod tests {
     /// What a folded drive does to its ground level is within its own gate's bounds (module documentation, # What a
     /// folded drive does to its level): on the lin-perp-lin scene at 160 mW/cm² a beam, closed, at points across a fringe
     /// of the cooling light and off the trap's axis, the shift of every ground state by its drives folded at the atom --
-    /// the elimination's own, −Re Σ_e V[e, g]* R[e, g] over the carriers -- is within `near_shift` on the point, and its
+    /// the elimination's own, −Re Σ_e V[e, g]* R[e, g] over the carriers -- is within `near_level` on the point, and its
     /// slope along the fringes and across them (a central difference) within `near_slope`. The bounds are the drives'
     /// own: the shift's is below a twentieth of what its far drives' couplings would be across Γ/2, a resonant drive's
     /// distance, with its resonant ones' across their own Γ/2 (the repump's F=1 → D2 F'=2 m=0, folded at the atom once
@@ -1613,8 +1647,9 @@ mod tests {
             let region = model.point_region(r, 0.0);
             for (cluster, c) in model.clusters.iter().enumerate() {
                 for (place, &g) in c.states[..c.ground].iter().enumerate() {
-                    let (here, bound) = (shift(cluster, place, r), model.near_shift(g, &region).value);
-                    assert!(here.abs() <= bound * (1.0 + 1e-9), "the shift {here} of ground state {g} at {r:?} beyond its bound {bound}");
+                    let (here, level) = (shift(cluster, place, r), model.near_level(g, &region));
+                    let bound = level.lower().abs().max(level.upper().abs());
+                    assert!(here >= level.lower() - 1e-9 * bound && here <= level.upper() + 1e-9 * bound, "the shift {here} of ground state {g} at {r:?} beyond its range [{}, {}]", level.lower(), level.upper());
                     // Per drive folded at the atom its coupling across Γ/2: the far ones' (their bare distance beyond twenty
                     // half-widths) and the resonant ones'.
                     let (mut far, mut resonant) = (0.0, 0.0);
@@ -2339,7 +2374,7 @@ mod tests {
 
     /// Every quantity the units' gates read of a region (module documentation, # One rule, # Levels, # A coupling of two
     /// states): each unit's saturation and sweep that the whole space leaves open (`gate_of`, what the reach's proofs
-    /// prove); each ground state's shift and slope by its drives folded at the atom (`near_shift`, `near_slope`); each
+    /// prove); each ground state's shift and slope by its drives folded at the atom (`near_level`, `near_slope`); each
     /// folded drive's distance and distance at rest (`across`) and its Raman pairs' saturation and sweep (`pair_gate`);
     /// each coupling's distance (`term_parts`).
     fn read_by_gates<'m>(model: &'m Model, units: &'m [Unit], judged: &'m Judged<'m>, open: &[usize]) -> Vec<Quantity<'m>> {
@@ -2350,7 +2385,8 @@ mod tests {
             }
         }
         for g in 0..GROUND {
-            out.push((format!("near_shift {}", model.labels[g]), Side::Upper, Box::new(move |r: &Region| model.near_shift(g, r).upper())));
+            out.push((format!("near_level {} upper", model.labels[g]), Side::Upper, Box::new(move |r: &Region| model.near_level(g, r).upper())));
+            out.push((format!("near_level {} lower", model.labels[g]), Side::Lower, Box::new(move |r: &Region| model.near_level(g, r).lower())));
             out.push((format!("near_slope {}", model.labels[g]), Side::Upper, Box::new(move |r: &Region| model.near_slope(g, r).upper())));
             for (i, d) in model.forms.drives(model)[g].iter().enumerate().filter(|of| of.1.level != Level::Explicit) {
                 let (gamma, name) = (d.gamma, format!("drive {} {} -> {}", d.component, model.labels[g], model.labels[GROUND + d.excited]));
@@ -2414,7 +2450,7 @@ mod tests {
     /// A measurement, run by name (`POINTS`, default 32; `SCENES`), not a gate on the crate: at 16 points the line
     /// (09bc9784) has 482 statements beyond, falling at most 4.5 times a scale (327 of them between 4 and 4.5: the first
     /// order), and this one 10 -- seven couplings' and drives' statements on cells of ℓ/4 falling 5 to 7 times (a first
-    /// order left beside the second: the two states' shifts by their folded drives added as each one's bound, `near_spread`,
+    /// order left beside the second: the two states' shifts by their folded drives added as each one's bound,
     /// whose Doppler part is no function of the place), two resonant drives' saturations at ℓ/16 beyond their values by
     /// 5e-8 of them (the rounding of the bare transition energies, 10⁹ rad/µs, in the detuning) and one beside a crossing
     /// of two ground sublevels. Every bound holds.

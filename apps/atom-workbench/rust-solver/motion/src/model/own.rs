@@ -186,6 +186,31 @@ impl Own {
         }
     }
 
+    /// a/(a² + γ²), γ > 0 a constant: a two-level atom's dispersive shape, its level's light shift per |v|² at the
+    /// detuning a and the half-width γ. Smooth everywhere: with t = a/γ its slope (1 − t²)/(γ²(1 + t²)²) is at most 1/γ²
+    /// and its curvature 2t(t² − 3)/(γ³(1 + t²)³) at most K/γ³, K = 2 max |t(t² − 3)|/(1 + t²)³ -- at t = √2 − 1, where
+    /// t⁴ − 6t² + 1 = 0, |t(t² − 3)| = (√2 − 1) 2√2 over (4 − 2√2)³: K = 1.457 --, so its remainder is at most
+    /// |f'(a)| R_a + ½ K W_a²/γ³. Its range is the shape's over the operand's: monotone on each side of ±γ, its extremes
+    /// ±1/(2γ) there.
+    pub(crate) fn dispersion(self, gamma: f64) -> Own {
+        let f = |x: f64| if x.is_infinite() { 0.0 } else { x / (x * x + gamma * gamma) };
+        let (a, w) = (self.value, self.width());
+        let slope = (gamma * gamma - a * a) / (a * a + gamma * gamma).powi(2);
+        let t = std::f64::consts::SQRT_2 - 1.0;
+        let curvature = 2.0 * (t * (3.0 - t * t)) / (1.0 + t * t).powi(3) / gamma.powi(3);
+        let ends = [f(self.lo), f(self.hi)];
+        let mut lo = ends[0].min(ends[1]);
+        let mut hi = ends[0].max(ends[1]);
+        if self.lo <= gamma && gamma <= self.hi {
+            hi = 0.5 / gamma;
+        }
+        if self.lo <= -gamma && -gamma <= self.hi {
+            lo = -0.5 / gamma;
+        }
+        let rest = times(slope.abs(), self.rest) + 0.5 * curvature * w * w;
+        Own::made(f(a), self.first.map(|x| slope * x), rest, lo, hi)
+    }
+
     /// (a² + c²)^{1/2}, c a constant: the modulus of a + ic.
     pub(crate) fn hypot(self, c: f64) -> Own {
         self.square().plus(c * c).sqrt()
@@ -220,7 +245,8 @@ mod tests {
 
     /// Each operation's form bounds its function over a cell: on random cells about random centres, the quantities
     /// a = 1.3 + 0.4 sin(x + 2y) z, b = 0.7 + 0.2 cos(3z − y) x² and their sums, products, quotients, square roots,
-    /// absolute values of their difference, maxima, minima, b's modulus with a constant and a phase-turning modulus
+    /// absolute values of their difference, maxima, minima, b's modulus with a constant, a dispersive shape of their
+    /// difference through its resonance and a phase-turning modulus
     /// |2 + e^{3ix}|, built from the operands' values, gradients and Lagrange remainders, each hold at 2000 points of the
     /// cell.
     #[test]
@@ -250,6 +276,7 @@ mod tests {
                 (fa.max(fb), Box::new(move |r| a(r).max(b(r)))),
                 (fa.min(fb), Box::new(move |r| a(r).min(b(r)))),
                 (fb.hypot(0.5), Box::new(move |r| (b(r) * b(r) + 0.25).sqrt())),
+                (fa.sub(fb).scale(3.0).dispersion(0.3), Box::new(move |r| { let x = 3.0 * (a(r) - b(r)); x / (x * x + 0.09) })),
                 (fa.sub(fb).square(), Box::new(move |r| (a(r) - b(r)).powi(2))),
             ];
             for (own, f) in &cases {

@@ -589,12 +589,6 @@ impl Model {
         UnitError { parameter: delta, population: delta * weight, temperature: delta * weight }
     }
 
-    /// The bound of the differential shift of two states by the drives folded at the atom over a region (what a coupling's
-    /// distance loses, units.rs # What a folded drive does to its level): each state's own shift's bound (units.rs
-    /// `Model::near_shift`).
-    pub(crate) fn near_spread(&self, a: usize, b: usize, region: &Region) -> Own {
-        self.near_shift(a, region).add(self.near_shift(b, region))
-    }
 }
 
 /// A drive folded with the levels at the atom, at a sample (`Model::drive_parameters`): its own saturation s; its
@@ -651,8 +645,9 @@ pub(crate) struct Couplings {
     pub(crate) entry: [[Own; EXCITED]; GROUND],
     /// [s].
     pub(crate) column: [Own; GROUND],
-    /// [unit][s], over the carrier's distinct polarization units.
+    /// [unit][s], over the carrier's distinct polarization units; and [unit][s][e − GROUND], each unit's entries.
     pub(crate) units: Vec<[Own; GROUND]>,
+    pub(crate) unit_entries: Vec<[[Own; EXCITED]; GROUND]>,
     /// ‖∇u_s‖: [s], and [unit][s].
     pub(crate) slope: [Own; GROUND],
     pub(crate) unit_slopes: Vec<[Own; GROUND]>,
@@ -730,6 +725,7 @@ impl Model {
                     let mut entry = [[none; EXCITED]; GROUND];
                     let mut column = [none; GROUND];
                     let (mut per_unit, mut unit_slopes) = (vec![[none; GROUND]; folded.units.len()], vec![[none; GROUND]; folded.units.len()]);
+                    let mut unit_entries = vec![[[none; EXCITED]; GROUND]; folded.units.len()];
                     let mut slope = [none; GROUND];
                     for s in 0..GROUND {
                         // Per polarization unit, and in all.
@@ -759,6 +755,10 @@ impl Model {
                             }
                             per_unit[ui][s] = norm_over(&unit);
                             unit_slopes[ui][s] = slope_over(&unit);
+                            for &e in &folded.reached[s] {
+                                let slopes: [&[C64]; 3] = std::array::from_fn(|a| std::slice::from_ref(&unit.slopes[a][e]));
+                                unit_entries[ui][s][e] = region.summed(&[unit.u[e]], slopes, unit.each[e][0], unit.each[e][1], unit.each[e][2]);
+                            }
                         }
                         for &e in &folded.reached[s] {
                             let slopes: [&[C64]; 3] = std::array::from_fn(|a| std::slice::from_ref(&all.slopes[a][e]));
@@ -767,7 +767,7 @@ impl Model {
                         column[s] = norm_over(&all);
                         slope[s] = slope_over(&all);
                     }
-                    Couplings { entry, column, units: per_unit, slope, unit_slopes }
+                    Couplings { entry, column, units: per_unit, unit_entries, slope, unit_slopes }
                 })
                 .collect()
         })
@@ -825,6 +825,51 @@ impl Model {
                     std::array::from_fn(|b| {
                         let square = couplings[d].units.iter().fold(Own::constant(0.0), |sum, u| sum.add(u[b].square()));
                         square.mul(self.resolvent_own(d, b, region).min(shift)).within(0.0, f64::INFINITY)
+                    })
+                })
+                .collect()
+        })
+    }
+
+    /// The carriers' dressings ΔE_b^d of the ground states over a region with their signs, [carrier][state], made once per
+    /// region, each in its own form: ΔE = −Re Σ_units u†(K − z)⁻¹u, z = E_b + δ_d. With K − z = D + C, D its diagonal --
+    /// E_e − z − iΓ_e/2 of the levels the eliminations take (`Gap`) -- and C the far couplings among the excited states,
+    /// u†(D + C)⁻¹u = u†D⁻¹u − u†D⁻¹C(D + C)⁻¹u: the first Σ_e |u_e|²/(Δ_e − iΓ_e/2), whose real part is each excited
+    /// state's dispersive shape (own.rs `Own::dispersion`) of each unit's entry (`Couplings::unit_entries`), the second at
+    /// most ‖u‖² ‖C‖ ‖(K − z)⁻¹‖/min_e |Δ_e − iΓ_e/2|, ‖C‖ at most the largest Gershgorin radius (`radii`) and the
+    /// resolvent's bound `resolvent_own`; within the dressing's bound (`dressings`). A two-photon distance moves by the
+    /// difference of its two levels' dressings (units.rs `Model::across`): two Zeeman sublevels the same light dresses alike
+    /// stay as far apart as they were, where the two dressings' bounds added -- 12.8 rad/µs on the user's F=1 m=−1 --
+    /// closed the 13.2 rad/µs between them.
+    pub(crate) fn dressing_shifts<'r>(&self, region: &'r Region) -> &'r [[Own; GROUND]] {
+        region.shifted.get_or_init(|| {
+            let (couplings, dressings, radii) = (self.couplings(region), self.dressings(region), self.radii(region));
+            let folded = region.forms.folded(self);
+            let none = Own::constant(0.0);
+            let coupled = (GROUND..STATES).map(|x| radii[x].upper()).fold(0.0, f64::max);
+            (0..self.carriers.len())
+                .map(|d| {
+                    std::array::from_fn(|b| {
+                        let (cd, of) = (&couplings[d], &folded[d]);
+                        let shapes: Vec<(usize, Own, f64)> = of.reached[b]
+                            .iter()
+                            .map(|&e| {
+                                let gamma = 0.5 * self.decay[(e, e)].re;
+                                let detuning = self.gap(GROUND + e, b, region).taken.plus(-self.carriers[d].detuning);
+                                (e, detuning.dispersion(gamma), detuning.abs().hypot(gamma).lower())
+                            })
+                            .collect();
+                        let least = shapes.iter().map(|x| x.2).fold(f64::INFINITY, f64::min);
+                        let (mut shift, mut norms) = (none, 0.0);
+                        for (unit, size) in cd.unit_entries.iter().zip(&cd.units) {
+                            for &(e, shape, _) in &shapes {
+                                shift = shift.sub(unit[b][e].square().mul(shape));
+                            }
+                            norms += size[b].upper().powi(2);
+                        }
+                        let beyond = if norms == 0.0 { 0.0 } else { norms * coupled * self.resolvent(d, b, region) / least };
+                        let most = dressings[d][b].upper();
+                        shift.add(Own::range(0.0, -beyond, beyond)).within(-most, most)
                     })
                 })
                 .collect()

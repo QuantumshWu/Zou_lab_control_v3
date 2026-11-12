@@ -787,6 +787,8 @@ pub(crate) struct Region {
     pub(crate) resolvents: OnceLock<Vec<[Own; GROUND]>>,
     /// [carrier][ground state].
     pub(crate) dressings: OnceLock<Vec<[Own; GROUND]>>,
+    /// [carrier][ground state]: the dressing's shift with its sign (eliminate.rs `Model::dressing_shifts`).
+    pub(crate) shifted: OnceLock<Vec<[Own; GROUND]>>,
     /// Per cluster.
     pub(crate) forces: Vec<OnceLock<Own>>,
     /// Per ground state its drives' sizes and distances (units.rs `Model::across`), and the first places of their gates
@@ -794,7 +796,7 @@ pub(crate) struct Region {
     pub(crate) across: [OnceLock<Vec<super::units::Across>>; GROUND],
     pub(crate) drives: [OnceLock<Vec<[f64; 5]>>; GROUND],
     /// Per ground state: the slope of its level under the near light (units.rs `Model::near_slope`), and its shift's
-    /// bound (units.rs `Model::near_shift`).
+    /// own form, signed (units.rs `Model::near_level`).
     pub(crate) slopes: [OnceLock<Own>; GROUND],
     pub(crate) shifts: [OnceLock<Own>; GROUND],
     /// Per ground state: the slopes of the constant forms' levels from it to the excited states its folded drives reach
@@ -1550,6 +1552,7 @@ impl Model {
             couplings: OnceLock::new(),
             resolvents: OnceLock::new(),
             dressings: OnceLock::new(),
+            shifted: OnceLock::new(),
             forces: (0..self.clusters.len()).map(|_| OnceLock::new()).collect(),
             across: std::array::from_fn(|_| OnceLock::new()),
             drives: std::array::from_fn(|_| OnceLock::new()),
