@@ -143,11 +143,14 @@ pub fn percent(x: f64) -> String {
 /// `partialSummary`), in μs below a millisecond and in ms from there on.
 pub fn when(us: f64) -> String {
     if us >= 1e3 {
-        format!("{} ms", significant(us / 1e3, 3))
+        format!("{} ms", significant(us / 1e3, READING))
     } else {
-        format!("{} μs", significant(us, 3))
+        format!("{} μs", significant(us, READING))
     }
 }
+/// The significant digits a physical quantity is read to in the ledger's words (a time, a frequency): a display
+/// convention, no result depends on it.
+pub(crate) const READING: i32 = 3;
 /// x rounded to `digits` significant digits: the nearest double to the rounded decimal, so that it prints as one.
 pub(crate) fn significant(x: f64, digits: i32) -> f64 {
     if x == 0. || !x.is_finite() {

@@ -212,11 +212,12 @@ impl Model {
 
     /// A beat as the ledger writes it (`frequency_reading`), to the digits that tell the model's beats apart
     /// (`telling_apart`): `Model::beats` holds every beat a unit can carry (units.rs `Model::units`). So no two of a
-    /// run's items share a name, and no digit is written that tells nothing apart.
+    /// run's items share a name; and to no fewer than the ledger's readings have (`ledger::READING`), so that a lone
+    /// beat still reads as its value (32.4 THz, not 30 THz).
     fn beat_label(&self, beat: &Beat) -> String {
         let mhz = |beat: &Beat| self.omega(beat) / crate::units::RAD_PER_US_PER_MHZ;
         let beats: Vec<f64> = self.beats.iter().map(|(beat, _)| mhz(beat)).collect();
-        frequency_reading(mhz(beat), telling_apart(&beats))
+        frequency_reading(mhz(beat), telling_apart(&beats).max(crate::ledger::READING))
     }
 
     /// A unit's label for the ledger (Chinese).
