@@ -445,6 +445,10 @@ const LOST_CLOSE: Duration = Duration::from_secs(10);
 /// How long an instance may take to close when the application ends.
 const SHUTDOWN_CLOSE: Duration = Duration::from_secs(3);
 const SAFE_DEADLINE: Duration = Duration::from_secs(2);
+/// A retiring process is asked to exit within this, then given as long again before it is killed.
+const RETIRE_ASK: Duration = Duration::from_secs(5);
+/// How long a successor waits for a retiring process of its key: both of its waits, and the kill.
+const RETIRE_WAIT: Duration = Duration::from_secs(12);
 /// An unanswered request this long past its deadline makes the instance unresponsive.
 const OVERDUE_GRACE: Duration = Duration::from_secs(5);
 /// The key of the one plugin process every type shares unless it is `isolated`.
@@ -990,7 +994,18 @@ impl Inner {
     fn acquire(self: &Arc<Self>, key: &str, instance: Option<&str>) -> Result<Arc<PluginProcess>, String> {
         let gate = self.gate(key);
         let _held = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let process = match self.live(key) { Some(process) => process, None => self.spawn(key)? };
+        let process = match self.live(key) {
+            Some(process) => process,
+            None => {
+                // A process of this key still retiring may hold hardware its successor is about to
+                // open (a Basler is exclusive to one process): the new one starts once it has gone.
+                // `retire` ends it within RETIRE_WAIT, killing it if it must.
+                let retiring: Vec<Arc<PluginProcess>> = self.processes.lock().unwrap().values()
+                    .filter(|process| process.key == key && process.retiring.load(Ordering::Acquire)).cloned().collect();
+                for process in retiring { process.wait_exit(RETIRE_WAIT); }
+                self.spawn(key)?
+            }
+        };
         match instance {
             Some(instance) => { process.instances.lock().unwrap().insert(instance.to_owned()); }
             None => { process.users.fetch_add(1, Ordering::AcqRel); }
@@ -1139,8 +1154,8 @@ impl Inner {
 
     fn retire(&self, process: &Arc<PluginProcess>) {
         process.retiring.store(true, Ordering::Release);
-        let _ = process.request("exit", json!({}), Duration::from_secs(5));
-        if !process.wait_exit(Duration::from_secs(5)) { process.kill(); }
+        let _ = process.request("exit", json!({}), RETIRE_ASK);
+        if !process.wait_exit(RETIRE_ASK) { process.kill(); }
         self.processes.lock().unwrap().remove(&process.pid());
     }
 

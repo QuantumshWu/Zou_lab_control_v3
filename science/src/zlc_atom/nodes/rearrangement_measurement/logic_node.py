@@ -5,7 +5,7 @@ from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS
 from zlc_atom.devices.camera.photoelectrons import resolve_photoelectron_availability
 from zlc_atom.nodes._framework.descriptor import NodePreviewSpec
-from zlc_atom.nodes.camera.authoring import CAMERA_MEASUREMENT_SCHEMA, IMAGE_AREA_TO_ROI, ROI_FIELD_NAMES
+from zlc_atom.nodes.camera.authoring import CAMERA_MEASUREMENT_SCHEMA, IMAGE_AREA_TO_ROI, ROI_FIELD_NAMES, TRIGGERED, TRIGGER_CHANNEL
 from zlc_atom.nodes.camera.measurement import CameraMeasurementRequest, CAMERA_FRAMES_OUTPUT, describe_camera_frames
 from zlc_atom.nodes.slm import CALIBRATION_INPUT, END_TARGET_INPUT, SCIENCE_CONTEXT_INPUT, SLM_PROTECTED_FIELDS
 from zlc_atom.nodes.slm.rearrangement import REARRANGEMENT_FIELDS, rearrangement_defaults
@@ -18,9 +18,11 @@ _MOVEMENT_FIELDS = {"target_rows", "target_columns", "frame_mode", "motion_frame
                     "max_camera_step", "frame_rate_hz", "minimum_separation", "nominal_playback_seconds",
                     "intensity_error_percent", "motion_intensity_error_percent"}
 REARRANGEMENT_MEASUREMENT_SCHEMA = AuthoringSchema(
-    tuple(replace(field, default=2, minimum=2,
+    # Its frames are counted: the camera's trigger-by-channel switch and lane are not this measurement's.
+    tuple(replace(field, default=2, minimum=2, enabled_when=None,
                   description="First frame starts rearrangement; the last frame restores the initial SLM state. Pulse timing and any verification image remain operator-controlled.")
-          if field.name == "frames_per_cycle" else field for field in CAMERA_MEASUREMENT_SCHEMA.fields)
+          if field.name == "frames_per_cycle" else field for field in CAMERA_MEASUREMENT_SCHEMA.fields
+          if field.name not in (TRIGGERED, TRIGGER_CHANNEL))
     + tuple(field for field in REARRANGEMENT_FIELDS if field.name in _MOVEMENT_FIELDS),
 )
 

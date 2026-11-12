@@ -863,8 +863,6 @@ impl Workbench {
         for requirement in Self::active_requirements(descriptor, &node.draft.values) {
             let options = self.device_options(&requirement.capability);
             let key = node.draft.device_keys.get(&requirement.argument).map(String::as_str).unwrap_or("");
-            // An optional device that is not there is not asked for: the node is built without it.
-            if requirement.optional && !options.iter().any(|(id, _)| id == key) { continue; }
             // Opening, or closed by an Apply that reopens it with new settings.
             let opening = self.devices.iter().find(|(id, live)| (live.state == crate::apparatus::LiveState::Opening || live.reopen.is_some())
                 && (key.is_empty() || key == id.as_str()) && self.catalog.get(&live.entry.type_id).is_some_and(|item| item.capabilities.contains(&requirement.capability)));

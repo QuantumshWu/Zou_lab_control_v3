@@ -12,7 +12,9 @@ from zlc_atom.nodes.camera.authoring import (
     CAMERA_MEASUREMENT_SCHEMA,
     IMAGE_AREA_TO_ROI,
     ROI_FIELD_NAMES,
+    TRIGGERED,
     TRIGGER_CHANNEL,
+    TRIGGER_ON,
     TRIGGER_SOURCE,
     trigger_frames,
     trigger_lanes,
@@ -36,25 +38,24 @@ def _trigger_choices(values: object, resources: object, devices: object = None) 
 
 
 def _availability(devices: object) -> dict[str, str]:
-    """What this draft's devices cannot do: photoelectrons without a stated conversion, and a trigger
-    channel without a camera that stamps its frames or a sequencer that says what it plays."""
+    """What this draft's devices cannot do: photoelectrons without a stated conversion, and triggering by
+    a channel without a camera that stamps its frames.  Off, the switch asks nothing of any sequencer;
+    on, the trigger source and its lane are required fields of the draft, named as such."""
 
     unavailable = dict(resolve_photoelectron_availability(devices))
     camera = (devices or {}).get("camera")
     if camera is not None and not bool(getattr(camera, "stamps_frames", False)):
-        unavailable[TRIGGER_CHANNEL] = (
+        unavailable[TRIGGERED] = (
             "the selected camera does not stamp its frames with its own clock, so a frame cannot be told from "
             "the next by when it came: its frames are counted"
         )
-    elif not trigger_lanes(devices):
-        unavailable[TRIGGER_CHANNEL] = "no sequencer is open in the apparatus to say when its lanes trigger"
     return unavailable
 
 
 def _describe_frames(values, output_name, source=None, devices=None):
     """The frame axis of the draft: as many as the chosen lane triggers a shot, else as many as counted."""
 
-    if str((values or {}).get(TRIGGER_CHANNEL) or "").strip():
+    if (values or {}).get(TRIGGERED):
         frames = trigger_frames(values, devices)
         # While the board holds no pulse nobody knows the cycle's size: say so rather than a guess.
         return None if frames is None else describe_camera_frames({"frames_per_cycle": frames}, output_name, source)
@@ -80,7 +81,7 @@ def _build(
             repeat=int(authored["repeat"]),
             frames_per_cycle=int(authored["frames_per_cycle"]),
             photoelectrons=bool(authored[PHOTOELECTRONS]),
-            trigger_channel=authored.get(TRIGGER_CHANNEL),
+            trigger_channel=authored[TRIGGER_CHANNEL] if authored[TRIGGERED] else None,
         ),
     )
 
@@ -104,9 +105,10 @@ LOGIC_NODE = NodeType(
     node_previews=(NodePreviewSpec(CAMERA_FRAMES_OUTPUT, "facet_grid"),),
     device_requirements=(
         DeviceRequirement("camera.adapter", "camera", CAMERA_PROTECTED_FIELDS),
-        # Whoever fires the camera: read for its lanes and what they play, never claimed -- a scan or the
-        # Pulse Editor holds the sequencer while this measurement watches it.
-        DeviceRequirement("trigger.source", TRIGGER_SOURCE, (), reads_only=True, optional=True),
+        # Only while Trigger by channel is on: whoever fires the camera, read for its lanes and what they
+        # play, never claimed -- a scan or the Pulse Editor holds the sequencer while this measurement
+        # watches it.  Off, the measurement asks for no sequencer at all.
+        DeviceRequirement("trigger.source", TRIGGER_SOURCE, (), reads_only=True, enabled_when=TRIGGER_ON),
     ),
     build=_build,
     selection_mappings=(IMAGE_AREA_TO_ROI,),
