@@ -1154,13 +1154,14 @@ function approximationTotal(ledger:ApproximationLedger):string{
   const total=(name:string,t:LedgerTotal)=>`${name} ${errorPercent(t.error)}（目标 ${errorPercent(t.target)}）`;
   return `${total('布居',ledger.totals.population)}，${total('温度',ledger.totals.temperature)}；${ledger.flagged?'超出目标（见下）':'未超出'}`;
 }
-/** A ledger's largest item, named by its `label`, on a line of its own (none in an empty ledger). */
+/** A ledger's largest item -- its first --, named by its `label`, on a line of its own (none in an empty ledger). */
 function largestApproximation(ledger:ApproximationLedger):string[]{
-  const [largest]=[...ledger.items].sort((a,b)=>b.estimate-a.estimate);
+  const [largest]=ledger.items;
   return largest?[`<p class="ledger-note">最大一项：${esc(largest.label)} ${errorPercent(largest.estimate)}</p>`]:[];
 }
 /** A motion result's approximation ledger (solver-types.ts ApproximationLedger): each approximation, its estimated
- * error and what the engine did about it, the largest first, at the column's one precision (accuracy.ts `ledgerRows`).
+ * error and what the engine did about it, from the largest down as the engine lists them, at the column's one
+ * precision (accuracy.ts `ledgerRows`).
  * The items that read zero there close the table in one line: their number, the half unit of the last place they
  * all lie under, and the largest of them. The totals above are the engine's; nothing is summed here. */
 function approximationLedger(ledger:ApproximationLedger):string{

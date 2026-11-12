@@ -9,14 +9,15 @@ export function errorPercent(error:number):string{return `${formatNumber(error*1
 
 /** The most decimals `Number.prototype.toFixed` writes (the language's bound). */
 const MOST_PLACES=100;
-/** A ledger's items as its table lists them (ui-design.md §6.20), the largest first. The column has one precision,
- * its largest entry's: the decimal place (of a percentage) of that entry's second significant digit, the digits
- * `errorPercent` writes. `listed` are the items that read above zero at that place; `rest`, those that read zero
- * there, are not listed one by one: the table says how many they are and which is the largest (its first). */
+/** A ledger's items as its table lists them (ui-design.md §6.20), in the engine's order: from the largest down
+ * (solver-types.ts `readMotionResult`). The column has one precision, its largest entry's: the decimal place (of a
+ * percentage) of the first item's second significant digit, the digits `errorPercent` writes. `listed` are the items
+ * that read above zero at that place; `rest`, those that read zero there, are not listed one by one: the table says
+ * how many they are and which is the largest (its first). */
 export function ledgerRows<T extends {estimate:number}>(items:readonly T[]):{places:number;listed:T[];rest:T[]}{
-  const sorted=[...items].sort((a,b)=>b.estimate-a.estimate),exponent=Number(((sorted[0]?.estimate??0)*100).toExponential(1).split('e')[1]);
+  const exponent=Number(((items[0]?.estimate??0)*100).toExponential(1).split('e')[1]);
   const places=Math.min(MOST_PLACES,Math.max(0,1-exponent)),shown=(item:T):boolean=>Number((item.estimate*100).toFixed(places))>0;
-  return {places,listed:sorted.filter(shown),rest:sorted.filter(item=>!shown(item))};
+  return {places,listed:items.filter(shown),rest:items.filter(item=>!shown(item))};
 }
 
 /** A trajectory's per-sample error bounds, when its solver sent them. */
