@@ -129,7 +129,7 @@ impl Axis {
     fn place(&self, s: f64) -> (usize, f64) {
         assert!(if self.periodic { s.is_finite() } else { self.lo <= s && s <= self.hi }, "a table's axis on [{}, {}] asked at {s}", self.lo, self.hi);
         let (n, h) = (self.nodes, self.spacing());
-        let (x, last) = if self.periodic { (((s - self.lo) / h).rem_euclid(n as f64), n - 1) } else { ((s - self.lo) / h, n - 2) };
+        let (x, last) = if self.periodic { (periodic((s - self.lo) / h, n as f64), n - 1) } else { ((s - self.lo) / h, n - 2) };
         let i = (x.floor() as usize).min(last);
         (i, x - i as f64)
     }
@@ -167,6 +167,19 @@ impl Axis {
         };
         let live = if first_interval { (0, STENCIL - 1) } else if last_interval { (1, STENCIL) } else { (0, STENCIL) };
         Stencil { nodes, value: combine(basis), slope: combine(derivative).map(|x| x / h), live }
+    }
+}
+
+/// x.rem_euclid(period) of a period > 0, the remainder taken without the library's division where x lies within a
+/// period of the origin: there x % period is x itself, exactly (the remainder of a quotient that truncates to zero), and
+/// the rest is `rem_euclid`'s own sum -- the same number whichever way.
+fn periodic(x: f64, period: f64) -> f64 {
+    if x >= 0.0 && x < period {
+        x
+    } else if x < 0.0 && x > -period {
+        x + period
+    } else {
+        x.rem_euclid(period)
     }
 }
 
@@ -409,6 +422,23 @@ mod tests {
         t.eval(s, &mut v, Some(&mut g));
         (v[0], g)
     }
+    /// A periodic coordinate's remainder is `rem_euclid`'s bit for bit, within a period of the origin and beyond it.
+    #[test]
+    fn the_periodic_remainder_is_rem_euclid_s() {
+        let mut s = Stream::new(31, Purpose::Initial, 0, 0);
+        for k in 0..200_000 {
+            let period = [16.0, 24.0, 64.0, 2.0 * PI][k % 4];
+            let x = match k % 5 {
+                0 => 0.0,
+                1 => -0.0,
+                2 => (s.uniform() - 0.5) * 2.0 * period,
+                3 => (s.uniform() - 0.5) * 40.0 * period,
+                _ => [period, -period, period * (1.0 - f64::EPSILON), -period * (1.0 - f64::EPSILON)][k % 4],
+            };
+            assert_eq!(periodic(x, period).to_bits(), x.rem_euclid(period).to_bits(), "{x} modulo {period}");
+        }
+    }
+
     /// The bounded axis [0, 1.3] and the periodic [−π, π) with smooth functions on them and their derivatives.
     fn cases() -> [(Axis, fn(f64) -> f64, fn(f64) -> f64); 2] {
         [

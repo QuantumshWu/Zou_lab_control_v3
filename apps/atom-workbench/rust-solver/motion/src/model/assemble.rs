@@ -127,7 +127,8 @@ use super::photon::{Origin, Source};
 use super::tabulate::NearTable;
 use super::{jet, Beat, Component, Level, Lights, Lit, Model, Scattering, Wave};
 use crate::field::Amplitude;
-use crate::linalg::{axpy, dot, dot3, Mat, C64, LANES};
+use crate::linalg::{axpy, dot3, dots, Mat, C64, LANES};
+use crate::table::MOST_AXES;
 use crate::request::{GROUND, STATES};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -2394,6 +2395,26 @@ impl crate::step::Middle for Middle<'_> {
     }
 }
 
+/// The forms Σ x_k ρ_k of up to 1 + `MOST_AXES` vectors x with one ρ laid (`linalg::dots`), the first `x.len()` of
+/// those returned.
+fn forms(x: &[(&[f64], &[f64])], re: &[f64], im: &[f64]) -> [C64; 1 + MOST_AXES] {
+    fn of<const K: usize>(x: &[(&[f64], &[f64])], re: &[f64], im: &[f64]) -> [C64; 1 + MOST_AXES] {
+        let mut out = [C64::ZERO; 1 + MOST_AXES];
+        out[..K].copy_from_slice(&dots::<K>(std::array::from_fn(|k| x[k]), re, im));
+        out
+    }
+    match x.len() {
+        1 => of::<1>(x, re, im),
+        2 => of::<2>(x, re, im),
+        3 => of::<3>(x, re, im),
+        4 => of::<4>(x, re, im),
+        5 => of::<5>(x, re, im),
+        6 => of::<6>(x, re, im),
+        7 => of::<7>(x, re, im),
+        count => unreachable!("{count} forms of a term: its value's and at most {MOST_AXES} slopes'"),
+    }
+}
+
 /// A block's field component on one side (1 where it has none).
 fn side(fields: &[[C64; 4]], scalar: Option<usize>) -> [C64; 4] {
     scalar.map_or([C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO], |s| fields[s])
@@ -2505,13 +2526,19 @@ impl Middle<'_> {
                 of = (term.block, [product(&l, &r), product(&l, &rw), product(&lw, &r)]);
             }
             let span = term.first..term.first + term.len;
-            let (real, imaginary) = plan.values(term, &point.forms);
-            let value = dot(real, imaginary, &re[span.clone()], &im[span.clone()]) * phases[term.tone];
-            // The value's gradient by its slopes: a constant term has none.
+            // The value's form and its slopes' -- a constant term has none -- side by side (`linalg::dots`).
+            let mut x = [(&[][..], &[][..]); 1 + MOST_AXES];
+            x[0] = plan.values(term, &point.forms);
+            let count = if term.near { 1 + point.directions.len() } else { 1 };
+            for (f, x) in x[1..count].iter_mut().enumerate() {
+                *x = point.slopes[f * width + term.at..f * width + term.at + 2 * term.len].split_at(term.len);
+            }
+            let found = forms(&x[..count], &re[span.clone()], &im[span.clone()]);
+            let value = found[0] * phases[term.tone];
+            // The value's gradient by its slopes.
             let mut gradient = [C64::ZERO; 3];
-            for (f, direction) in point.directions.iter().enumerate().filter(|_| term.near) {
-                let (real, imaginary) = point.slopes[f * width + term.at..f * width + term.at + 2 * term.len].split_at(term.len);
-                let slope = dot(real, imaginary, &re[span.clone()], &im[span.clone()]) * phases[term.tone];
+            for (slope, direction) in found[1..count].iter().zip(&point.directions) {
+                let slope = *slope * phases[term.tone];
                 for a in 0..3 {
                     gradient[a] += slope * direction[a];
                 }
