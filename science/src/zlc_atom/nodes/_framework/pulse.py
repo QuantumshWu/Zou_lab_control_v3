@@ -9,10 +9,11 @@ are the same catalogue entries the UI and MCP use, so a run's claims apply
 to a node exactly as to any other client.
 
 A run's ``pulse_stop`` answers once the board is SAFE and raises when it would
-not go safe (v2 ``sequencer.safe()``). The documents a run plays are pinned at
-their first fire: a later fire of a file changed meanwhile is refused with
-``PULSE_CHANGED`` in its words, so the run's record names one pulse.  A run
-that ends with a FIRE of its unreported has the board made SAFE by the core.
+not go safe (v2 ``sequencer.safe()``). A run plays the pulse it began with: each
+document is read at the run's first play of it (its Subpulses resolved), and every
+later stage plays that pulse however the file changes meanwhile -- the change
+applies at the next Start, and the sequencer's log says so once -- so the run's
+record names one pulse.  A run that ends with a FIRE of its unreported has the board made SAFE by the core.
 
 The description a pulse resource resolves to::
 
@@ -207,8 +208,6 @@ class PulseBoard:
 
 #: What a run that ends because it was stopped says, wherever it noticed.
 CANCELLED = "the run was cancelled"
-#: In the words of a fire refused because the run's pulse file changed (the core's PULSE_CHANGED).
-PULSE_CHANGED = "changed during this run"
 #: How long one wait for a report sleeps before Stop is read again.
 _REPORT_SLICE_SECONDS = 0.1
 
@@ -222,7 +221,6 @@ def check_cancelled(context: object) -> None:
 
 __all__ = [
     "CANCELLED",
-    "PULSE_CHANGED",
     "PULSE_RESOURCE_PREFIX",
     "PulseBoard",
     "STATUS_DONE",
