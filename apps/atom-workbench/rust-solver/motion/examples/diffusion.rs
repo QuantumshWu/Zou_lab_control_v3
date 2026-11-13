@@ -15,6 +15,8 @@
 //!   change of an axis's kinetic energy booked to the part of the engine that made it (`account`).
 //!
 //! `waist` (µm; 0: the scene's own) replaces the trap beam's waist: the same light at the focus, uniform over the path.
+//! `AXIS=x,y,z` (default 0,0,1) is the direction ê of `engine`'s path and of the momentum it reads, `ORIGIN=x,y,z` (µm,
+//! default 0) its point s = 0: the path is ORIGIN + s ê (as claude/motion-v2-diffusion2's 58acfb30 has it for `dump` too).
 
 use atom_motion::field::Light;
 use atom_motion::linalg::{C64, Mat};
@@ -44,6 +46,25 @@ fn scene(name: &str, waist: f64) -> Request {
         request.beams[trap].waist = Some(waist);
     }
     request
+}
+
+/// The path's direction ê (`AXIS`, normalized) and its origin (`ORIGIN`).
+fn axis() -> ([f64; 3], [f64; 3]) {
+    let read = |name: &str, default: [f64; 3]| -> [f64; 3] {
+        std::env::var(name).map_or(default, |s| {
+            let v: Vec<f64> = s.split(',').map(|x| x.parse().unwrap()).collect();
+            [v[0], v[1], v[2]]
+        })
+    };
+    let e = read("AXIS", [0.0, 0.0, 1.0]);
+    let size = (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt();
+    (e.map(|x| x / size), read("ORIGIN", [0.0; 3]))
+}
+
+/// A vector's component along the path's direction.
+fn on_axis(v: [f64; 3]) -> f64 {
+    let e = axis().0;
+    (0..3).map(|a| e[a] * v[a]).sum()
 }
 
 fn reference(request: &Request) -> (usize, [f64; GROUND]) {
@@ -303,8 +324,9 @@ fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64,
     let hm = run.hbar_over_mass();
     let place = |course: &Course, t: &mut Trajectory| {
         let (z, v) = course.at(t.time);
-        t.r = [0.0, 0.0, z];
-        t.kappa = [0.0, 0.0, v / hm];
+        let (e, o) = axis();
+        t.r = std::array::from_fn(|a| o[a] + z * e[a]);
+        t.kappa = e.map(|x| x * v / hm);
     };
     let mut t = Trajectory::new(run, start, [0.0; 3], [0.0; 3], seed, index);
     let mut scratch = Scratch::default();
@@ -329,12 +351,12 @@ fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64,
             let (_, _, whole, jumped) = kicks(&step);
             let w = course.weights(t.time + 0.5 * taken);
             for (i, w) in [1.0, w[0], w[1]].into_iter().enumerate() {
-                sums[3 * i] += w * (whole[2] - jumped[2]);
+                sums[3 * i] += w * on_axis(std::array::from_fn(|a| whole[a] - jumped[a]));
             }
             for (kick, time) in step.made.iter().filter_map(|made| made.kick.map(|kick| (kick, made.state.time))) {
                 let w = course.weights(time);
                 for (i, w) in [1.0, w[0], w[1]].into_iter().enumerate() {
-                    sums[3 * i + 1] += w * kick[2];
+                    sums[3 * i + 1] += w * on_axis(kick);
                 }
                 sums[9] += 1.0;
             }
