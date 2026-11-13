@@ -255,7 +255,7 @@
 //! halves.
 
 use super::eliminate::{Couplings, Diagonal, Gap, Shift};
-use super::own::{Form, Own};
+use super::own::{least, most, Form, Own};
 use super::far::EXCITED;
 use super::{Component, Envelope, Level, Lights, Model, Reach, Trap};
 use crate::field::{Amplitude, Geometry};
@@ -431,15 +431,15 @@ impl Span {
         // The envelope's gradient at the centre (its phase e^{ik·c} left on: only moduli are read), and the cell's extents
         // across the beam and along it.
         let envelope: [C64; 3] = std::array::from_fn(|i| gradient[i] - C64::new(0.0, k[i]) * value);
-        let across = (0..3).map(|i| half[i] * (1.0 - n[i] * n[i]).max(0.0).sqrt()).sum::<f64>().min(rho);
-        let along = (0..3).map(|i| half[i] * n[i].abs()).sum::<f64>().min(rho);
+        let across = least((0..3).map(|i| half[i] * (1.0 - n[i] * n[i]).max(0.0).sqrt()).sum::<f64>(), rho);
+        let along = least((0..3).map(|i| half[i] * n[i].abs()).sum::<f64>(), rho);
         let [tt, tn, nn] = bends.curvature;
         let bend = tt * across * across + 2.0 * tn * across * along + nn * along * along;
         let twist = tt * across + tn * (across + along) + nn * along;
         // |∇∇∇b[·, d, d]|: its component across and its component along, each over the blocks of d's two extents.
         let [ttt, ttn, tnn, nnn] = bends.third;
         let third = (ttt + ttn) * across * across + 2.0 * (ttn + tnn) * across * along + (tnn + nnn) * along * along;
-        let swing = ((0..3).map(|i| half[i] * envelope[i].abs()).sum::<f64>() + bend).min(bends.slope[0] * across + bends.slope[1] * along);
+        let swing = least((0..3).map(|i| half[i] * envelope[i].abs()).sum::<f64>() + bend, bends.slope[0] * across + bends.slope[1] * along);
         // The centre's modulus is one of the cell's: the range holds it whatever its own rounding.
         let [least, most] = Span::moduli(beam, cell.centre, along, across);
         Span {
@@ -449,9 +449,9 @@ impl Span {
             wave: k,
             half,
             rho,
-            most: (value.abs() + swing).min(most.max(value.abs())),
-            least: (value.abs() - swing).max(least.min(value.abs())),
-            slope: (envelope.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + twist).min(bends.lipschitz()),
+            most: self::least(value.abs() + swing, self::most(most, value.abs())),
+            least: self::most(value.abs() - swing, self::least(least, value.abs())),
+            slope: self::least(envelope.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + twist, bends.lipschitz()),
             swing,
             bend,
             twist,
@@ -567,10 +567,10 @@ pub(crate) fn pair_span(spans: &[Span], j: usize, i: usize) -> PairSpan {
     let lean: f64 = (0..3).map(|x| gradient[x].abs() * a.half[x]).sum();
     let veer = q * turn * most + q * swing + turn * steep + twist;
     let curve = 0.5 * (turn * turn * most + 2.0 * turn * swing + bend);
-    let radius = (lean + curve).min(turn * most + swing).min(centre.abs() + most);
-    let radius = if j == i { radius.min((most - centre.re).max(centre.re - a.least * a.least)) } else { radius };
+    let radius = least(least(lean + curve, turn * most + swing), centre.abs() + most);
+    let radius = if j == i { least(radius, self::most(most - centre.re, centre.re - a.least * a.least)) } else { radius };
     let rest = rest(q, turn, most, swing, bend, twist, steep, third);
-    PairSpan { centre, wave, swing, bend, gradient, hessian, radius, curve, most, slope: (gradient.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + veer).min(blind), veer, rest }
+    PairSpan { centre, wave, swing, bend, gradient, hessian, radius, curve, most, slope: least(gradient.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() + veer, blind), veer, rest }
 }
 
 /// One weighting w of the far light's static forms P_l'l (an entry's, a diagonal difference's), as a sum over the beam pairs
@@ -1045,7 +1045,7 @@ impl Region {
             }
             let tau = turn(pair.wave);
             rest += size * 0.5 * (tau * tau * pair.most + 2.0 * tau * pair.swing + pair.bend);
-            moved += size * (tau * pair.most + pair.swing).min(pair.centre.abs() + pair.most);
+            moved += size * least(tau * pair.most + pair.swing, pair.centre.abs() + pair.most);
             blind += size * pair.most;
         }
         let slopes: [C64; 3] = std::array::from_fn(|a| slopes[a] - C64::new(0.0, frame[a]) * value);
