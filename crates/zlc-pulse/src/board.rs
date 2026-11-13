@@ -274,8 +274,53 @@ impl Board {
 
     /// Take a remote board back after another client held it (the server SAFEs
     /// the one it drops first); a virtual board is always this application's.
+    /// Whatever this application last played was stopped meanwhile, and the
+    /// board holds what it now says it holds.
     pub fn rejoin(&self) -> Result<()> {
-        match &self.link { Link::Virtual(_) => Ok(()), Link::Remote(client) => { client.disconnect(); client.open() } }
+        let Link::Remote(client) = &self.link else { return Ok(()) };
+        client.refuse(None);
+        client.disconnect();
+        client.open()?;
+        self.stopped();
+        // As a LOAD's confirmation does: what it says it holds, or nothing known when it cannot say.
+        *guard(&self.held) = client.applied().ok().flatten();
+        Ok(())
+    }
+
+    /// Another client of the board's pulse server holds it (`reason`: who, and what takes it
+    /// back), or it no longer does (None). Held elsewhere, this application's client sends the
+    /// server nothing -- a request would take the board over -- and every call answers `reason`;
+    /// what this application last played was stopped by the takeover (the server SAFEs the owner
+    /// it drops), and what the board holds now is not this application's to tell. A virtual board
+    /// is always this application's.
+    pub fn hold_elsewhere(&self, reason: Option<String>) {
+        let Link::Remote(client) = &self.link else { return };
+        let taken = reason.is_some() && client.refusal().is_none();
+        client.refuse(reason);
+        if taken {
+            self.stopped();
+            *guard(&self.held) = None;
+        }
+    }
+
+    /// Why this application's client sends the board nothing now ([`Board::hold_elsewhere`]).
+    pub fn held_elsewhere(&self) -> Option<String> {
+        match &self.link { Link::Virtual(_) => None, Link::Remote(client) => client.refusal() }
+    }
+
+    /// This application's end of the board's command lane while connected (`ip:port`): the
+    /// address the board's pulse server names when this application owns the board.
+    pub fn client_address(&self) -> Option<std::net::SocketAddr> {
+        match &self.link { Link::Virtual(_) => None, Link::Remote(client) => client.local_address() }
+    }
+
+    /// The board was made SAFE -- here, or by its server for another client: what this application
+    /// played has stopped (its watchers are told), and an unreported FIRE of its will not report.
+    fn stopped(&self) {
+        let play = *guard(&self.play);
+        if matches!(play.state, "playing" | "loaded") { self.playing("stopped", play.command_id, (play.run_repeats, play.scan_repeats), play.sent_us); }
+        let mut last = guard(&self.last);
+        if let Some((command_id, Fate::Pending)) = *last { *last = Some((command_id, Fate::Safed)); }
     }
 
     /// What was dialled: "virtual" or "remote host:port".
@@ -484,10 +529,7 @@ impl Board {
         let began = Instant::now();
         let readback = match &self.link { Link::Virtual(board) => board.safe(), Link::Remote(client) => client.safe() };
         self.say("safe", json!({"ms": began.elapsed().as_secs_f64() * 1e3, "error": readback.as_ref().err().map(|error| error.message.clone())}));
-        let play = *guard(&self.play);
-        if matches!(play.state, "playing" | "loaded") { self.playing("stopped", play.command_id, (play.run_repeats, play.scan_repeats), play.sent_us); }
-        let mut last = guard(&self.last);
-        if let Some((command_id, Fate::Pending)) = *last { *last = Some((command_id, Fate::Safed)); }
+        self.stopped();
         readback
     }
 

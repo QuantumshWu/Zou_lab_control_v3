@@ -10,6 +10,10 @@
 //! `{"type":"pulse-server","port":N,"transport":"uart","uart_port":"COM5","attempts":[...]}`
 //! (`transport` the one it took: `uart`, `jtag-axi` or `memory`; `attempts` each port its probe tried
 //! and what that came to), or `{"type":"pulse-server","error":"<Type>: <message>"}` when it could not.
+//! Each change of the board's owner is a line of its own, in order:
+//! `{"type":"pulse-owner","owner":"192.168.50.1:61656"}` (the owning client's address), or
+//! `"owner":null` while nobody owns it -- so the application that started it knows when another
+//! client took its board and when it was let go.
 //!
 //! `zlc-pulse-server fpga ...` is the FPGA build's command instead
 //! (zlc_pulse::fpga::command, v2's `zlc fpga`).
@@ -159,6 +163,7 @@ fn run(options: Options) -> std::result::Result<(), Failed> {
         Err(error) => { let _ = streamer.close(); return Err(error.into()); }
     }
     unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(on_console), 1) };
+    server.on_owner(|owner| println!("{}", Json::object(vec![("type", Json::str("pulse-owner")), ("owner", Json::opt_str(owner))]).compact_text()));
     server.start()?;
     server_log("READY", None, &format!("hardware=connected waiting_for_client=True same_computer=127.0.0.1:{} transport={}", server.address().port(), taken.kind));
     let mut ready = vec![("type", Json::str("pulse-server")), ("port", Json::Int(server.address().port().into())), ("transport", Json::str(taken.kind)),

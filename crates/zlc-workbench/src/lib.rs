@@ -279,7 +279,8 @@ pub struct Workbench {
     /// When the Apply or Close under way began (its wait for the runs it stops is bounded).
     pub(crate) settling_since: Option<std::time::Instant>,
     /// The Task Console's one line of what just happened (v2 ConsolePresenter._report):
-    /// "selectors disabled", "added <node>", "<node> started", "board cleared", ...
+    /// "selectors disabled", "added <node>", "<node> started" (then "is stopping" and how the run
+    /// ended, while it is still the line: `run_said`), "board cleared", ...
     /// Said when it happens, never re-derived per state push.
     pub(crate) console_report: (String, &'static str),
     /// What the line last said of the notes and of the running Task (v2 `_shown_task_status`):
@@ -289,6 +290,9 @@ pub struct Workbench {
     /// A panel's own line (v2 update_panel_state: "<panel> is preparing <signal>", or that its
     /// signal has not published): the panel, and the line, which goes once that panel has drawn.
     pub(crate) panel_said: Option<(String, (String, &'static str))>,
+    /// A run's own line (`logic::follow_run_line`): the run, and the line last said of it, which
+    /// follows the run while it is still the line shown.
+    pub(crate) run_said: Option<(String, (String, &'static str))>,
     pub(crate) tickets: BTreeMap<u64, Ticket>,
     pub(crate) next_ticket: u64,
     pub(crate) replies: Vec<(u64, Result<Value, String>)>,
@@ -374,7 +378,7 @@ impl Workbench {
             devices: BTreeMap::new(), nodes: Vec::new(), runs: Vec::new(), run_sequences: BTreeMap::new(), board: layout::Board::default(), notes: Vec::new(),
             report: (String::new(), "idle"), settling: None, settling_since: None,
             // v2 set_deriving(False) when the console is built.
-            console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None, panel_said: None,
+            console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None, panel_said: None, run_said: None,
             tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), device_opens: BTreeMap::new(), applied_simulation: None, scan: None,
             resolution: None, found: Vec::new(), bundles: BTreeMap::new(), bundles_stale: false,
             selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default(), follows_sources: false,

@@ -165,3 +165,46 @@ fn a_remote_client_owns_the_board_until_a_newcomer_takes_it_safe() {
     assert_eq!(board.status(), 0, "a lost owner leaves the board SAFE");
     server.close();
 }
+
+/// The server tells whoever embeds it each change of the board's owner, naming the client by its
+/// end of the command lane; a replaced client says why its lane ended on every later call; a client
+/// held off (another holds the board) sends nothing, Stop included, and only lets its connection go.
+#[test]
+fn the_server_tells_each_change_of_owner_and_a_held_off_client_sends_nothing() {
+    let board = Arc::new(MemoryRegisterTransport::new(&geometry(), false, false).unwrap());
+    let streamer = PulseStreamer::new(board, geometry(), 50e6, target()).unwrap();
+    streamer.open().unwrap();
+    let mut server = PulseRemoteServer::bind("127.0.0.1:0", streamer, false).unwrap();
+    let (told, owners) = std::sync::mpsc::channel::<Option<String>>();
+    let told = std::sync::Mutex::new(told);
+    server.on_owner(move |owner| { let _ = told.lock().unwrap().send(owner.map(str::to_owned)); });
+    server.start().unwrap();
+    let port = server.address().port();
+    let next = || owners.recv_timeout(Duration::from_secs(5)).expect("an owner change");
+    let named = |client: &RemotePulseStreamer| Some(client.local_address().expect("connected").to_string());
+    let first = RemotePulseStreamer::new("127.0.0.1", port, None, Duration::from_secs(2)).unwrap();
+    first.open().unwrap();
+    assert_eq!(next(), named(&first));
+    // A newcomer takes it over: nobody owns it while the takeover SAFE runs, then the newcomer.
+    let newcomer = RemotePulseStreamer::new("127.0.0.1", port, None, Duration::from_secs(2)).unwrap();
+    newcomer.open().unwrap();
+    assert_eq!((next(), next()), (None, named(&newcomer)));
+    let ended = first.snapshot().unwrap_err();
+    assert!(ended.message.starts_with("the connection to the pulse server ended"), "{ended}");
+    assert_eq!(first.snapshot().unwrap_err().message, format!("remote PulseStreamer is not open: {}", ended.message), "said again, not forgotten");
+    // Held off, it sends nothing: every call answers why, and its close only lets go.
+    first.refuse(Some("held by the newcomer".into()));
+    for error in [first.safe().unwrap_err(), first.snapshot().unwrap_err(), first.open().unwrap_err(), first.wait_done(Some(Duration::ZERO), None).unwrap_err()] {
+        assert_eq!((error.kind, error.message.as_str()), (zlc_pulse::Kind::Runtime, "held by the newcomer"));
+    }
+    first.close().unwrap();
+    assert!(newcomer.snapshot().is_ok(), "the newcomer still owns the board");
+    newcomer.disconnect();
+    assert_eq!(next(), None, "it let the board go");
+    // No longer held off, it takes the board back.
+    first.refuse(None);
+    first.open().unwrap();
+    assert_eq!(next(), named(&first));
+    server.close();
+    assert_eq!(next(), None, "the server's shutdown lets it go");
+}
