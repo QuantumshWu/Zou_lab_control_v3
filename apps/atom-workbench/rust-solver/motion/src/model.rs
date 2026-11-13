@@ -39,6 +39,7 @@ pub mod assemble;
 pub mod readout;
 pub mod photon;
 pub mod tabulate;
+pub(crate) mod optical;
 pub(crate) mod jet;
 pub(crate) mod own;
 
@@ -297,10 +298,6 @@ pub struct Photon {
     pub amplitudes: [Vec<C64>; 3],
     /// ∇u_a of the folded part (`Photon::moments`): gradients[i][a], i the lab axis; empty where none were asked.
     pub gradients: [[Vec<C64>; 3]; 3],
-    /// The explicit states' part of the second moment's rate, in the amplitudes' norm (1/µm² times ‖u‖²'s unit; eliminate.rs
-    /// `Answer::moment`): their absorption's mean is the Ehrenfest force's. Zero where it is not made: without
-    /// gradients, and of a class made alone (photon.rs `Gradients`).
-    pub explicit: [[f64; 3]; 3],
 }
 
 /// What the light a class's photons absorb does to the momentum per unit time, at the state the photons were made of and
@@ -312,7 +309,7 @@ pub struct Moments {
     pub weight: f64,
     /// Σ_a Im⟨u_a|∇u_a⟩ (1/µm): the folded part's scattering force.
     pub mean: [f64; 3],
-    /// Σ_a Re⟨∇u_a|⊗|∇u_a⟩ and the explicit states' part (1/µm²): the second moment's rate.
+    /// Σ_a Re⟨∇u_a|⊗|∇u_a⟩ (1/µm²): the second moment's rate.
     pub second: [[f64; 3]; 3],
     /// s b (1/µm): what a jump of the class carries of its conditional mean b = mean/W -- all of it up to one absorbed
     /// photon's momentum, s = min(1, k_c/|b|).
@@ -832,11 +829,10 @@ impl<'a> Run<'a> {
         let (plan, table) = &self.plans[cluster];
         self.model.photons_of(plan, *table, at, psi, photon::Gradients::None).0
     }
-    /// The scattering of a cluster's state at a point per unit time, an explicit state's decay at the populations
-    /// `populations` of unit sum (None: the state's own; photon.rs `Model::scattering_of`).
-    pub fn scattering_at(&self, cluster: usize, at: &Point, psi: &[C64], populations: Option<&[f64]>) -> Scattering {
+    /// The scattering of a cluster's state at a point per unit time (photon.rs `Model::scattering_of`).
+    pub fn scattering_at(&self, cluster: usize, at: &Point, psi: &[C64]) -> Scattering {
         let (plan, table) = &self.plans[cluster];
-        self.model.scattering_of(plan, *table, at, psi, populations).0
+        self.model.scattering_of(plan, *table, at, psi).0
     }
     /// Where a jump's bare state `f` lands in a cluster at a point (assemble.rs, # The fourth order; `Model::landed`): the
     /// slow state it continues in, with its norm.

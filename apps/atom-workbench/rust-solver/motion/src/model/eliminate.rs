@@ -59,7 +59,6 @@
 //! energies' -- the force's exact definition at the point.
 
 use super::assemble::{NearValues, Plan};
-use super::photon::Origin;
 use super::reach::{Frame, Region};
 use super::units::{gate, Flow, Measured};
 use super::{Beat, Component, Gate, Level, Lights, Model, Unit, UnitError};
@@ -1262,81 +1261,6 @@ impl Model {
         let own = (0..c.ground).map(|pa| C64::new(h[excited] - each(pa), 0.5 * gamma).abs()).fold(f64::INFINITY, f64::min);
         let kept: f64 = (0..c.ground).map(|pa| self.legs[excited - GROUND].iter().filter(|leg| leg.1 == c.states[pa]).map(|&(d, a)| self.kept_at(at, d, excited, a)).sum::<C64>().abs() * (p[excited] * p[c.states[pa]]).sqrt()).sum();
         Some((s, gate(0.0, nearest, u.norm_sqr() * off).sweep / own, kept))
-    }
-
-    /// The response an explicit state's kept drives would make folded at the atom, of a cluster's state ψ at a point
-    /// (photon.rs, # The absorbed light's momentum): per carrier c the response summed as a folded jump sums it -- over
-    /// the carrier's beams l and the cluster's ground amplitudes, coherently --, σ_c = Σ_b ψ_b Σ_l a_l X_l[e,b]/D_bl,
-    /// ∇σ_c = Σ_b ψ_b Σ_l (∇a_l − a_l ∇δ_b/D_bl) X_l[e,b]/D_bl, D_bl = δ_b + w_l − iΓ_e/2, δ_b = E_e − E_b − δ_c at the atom
-    /// and w_l the beam's Doppler shift at the atom's momentum (module documentation, # First-order Doppler); S =
-    /// Σ_c |σ_c|² and T = Σ_c Re[∇σ_c*⊗∇σ_c] (two carriers beat against each other and share the photon by |σ_c|²). They
-    /// are the source's alone, whichever class its photons land in (`Answer::moment`): made once a source. With the
-    /// complex multiply-adds that made them (`h` the far light's energies to first order, `Model::far_energies`).
-    pub(crate) fn explicit_response(&self, cluster: usize, amplitudes: &[Amplitude], h: &[Vec<f64>], kappa: [f64; 3], source: usize, psi: &[C64]) -> Answer {
-        let mut out = [[0.0; 3]; 3];
-        let Origin::Explicit { state: e } = self.sources[source].origin else { unreachable!("an explicit state's source") };
-        let c = &self.clusters[cluster];
-        let gamma = self.decay[(e - GROUND, e - GROUND)].re;
-        let (mut response, mut terms) = (0.0, 0);
-        for cc in &self.carriers {
-            let (mut sigma, mut gradient) = (C64::ZERO, [C64::ZERO; 3]);
-            for (pb, &b) in c.states[..c.ground].iter().enumerate() {
-                if psi[pb] == C64::ZERO || self.level(Component { frequency: cc.frequency, counter: false }, e, b) != Level::Explicit {
-                    continue;
-                }
-                for (l, &bl) in cc.beams.iter().enumerate() {
-                    let x = cc.couplings[l][(e, b)];
-                    if x == C64::ZERO {
-                        continue;
-                    }
-                    let a = &amplitudes[bl];
-                    let d = C64::new(h[0][e] - h[0][b] - cc.detuning + self.doppler_shift(bl, kappa), -gamma / 2.0);
-                    let response = x * psi[pb] / d;
-                    sigma += a.value * response;
-                    for i in 0..3 {
-                        gradient[i] += (a.gradient[i] - a.value * (h[1 + i][e] - h[1 + i][b]) / d) * response;
-                    }
-                    terms += 1;
-                }
-            }
-            response += sigma.norm_sqr();
-            for i in 0..3 {
-                for j in 0..3 {
-                    out[i][j] += (gradient[i].conj() * gradient[j]).re;
-                }
-            }
-        }
-        // Each term's response and its gradient's three parts; each carrier's products.
-        Answer { second: out, size: response, work: (10 * terms) as f64 + (10 * self.carriers.len()) as f64 }
-    }
-}
-
-/// The response an explicit state's kept drives would make folded at the atom (`Model::explicit_response`): T, S and
-/// the complex multiply-adds that made them.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Answer {
-    second: [[f64; 3]; 3],
-    size: f64,
-    pub(crate) work: f64,
-}
-
-impl Answer {
-    /// An explicit state's part of a class's second moment's rate (photon.rs, # The absorbed light's momentum): its
-    /// photons' rate into the class -- its decay's `decay` = Γ_{e→class} = Σ |C_a[b, e]|² over the class's entries,
-    /// times its population `population` in ψ's norm (the state's own |ψ_e|², or a step's mean), both above zero --
-    /// times the second moment a photon takes from this response, T/S. SPEC §1.6, one rule: a running wave's photon
-    /// has k⊗k, a standing wave's k⊗k tan², none at its antinode, and towards its node the rate times it stays the
-    /// dipole force's fluctuations.
-    ///
-    /// The state's population counts as far as the response's: the rate is Γ_{e→class} min(|ψ_e|², S). An excited
-    /// population beyond what the light makes here was not absorbed here -- it came with the atom or with a transient
-    /// --, and T/S, the moment of a photon absorbed here, is not its; where the response vanishes (a node) and the
-    /// population does not, the quotient has no bound. So the rate times the moment is at most Γ_{e→class} T, the
-    /// folded drives' own value, finite everywhere, and no quotient is taken by a response that is nothing.
-    pub(crate) fn moment(&self, decay: f64, population: f64) -> [[f64; 3]; 3] {
-        // Γ_{e→class} min(population, S)/S, the quotient taken only by an S that is not below a population above zero.
-        let factor = if population <= self.size { decay * population / self.size } else { decay };
-        self.second.map(|row| row.map(|x| x * factor))
     }
 }
 

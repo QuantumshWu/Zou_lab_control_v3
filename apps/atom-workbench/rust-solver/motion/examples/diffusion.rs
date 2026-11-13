@@ -15,6 +15,8 @@
 //!   change of an axis's kinetic energy booked to the part of the engine that made it (`account`).
 //!
 //! `waist` (µm; 0: the scene's own) replaces the trap beam's waist: the same light at the focus, uniform over the path.
+//! `AXIS=x,y,z` (default 0,0,1) is the direction ê of `engine`'s path and of the momentum it reads, `ORIGIN=x,y,z` (µm,
+//! default 0) its point s = 0: the path is ORIGIN + s ê (as claude/motion-v2-diffusion2's 58acfb30 has it for `dump` too).
 
 use atom_motion::field::Light;
 use atom_motion::linalg::{C64, Mat};
@@ -44,6 +46,25 @@ fn scene(name: &str, waist: f64) -> Request {
         request.beams[trap].waist = Some(waist);
     }
     request
+}
+
+/// The path's direction ê (`AXIS`, normalized) and its origin (`ORIGIN`).
+fn axis() -> ([f64; 3], [f64; 3]) {
+    let read = |name: &str, default: [f64; 3]| -> [f64; 3] {
+        std::env::var(name).map_or(default, |s| {
+            let v: Vec<f64> = s.split(',').map(|x| x.parse().unwrap()).collect();
+            [v[0], v[1], v[2]]
+        })
+    };
+    let e = read("AXIS", [0.0, 0.0, 1.0]);
+    let size = (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt();
+    (e.map(|x| x / size), read("ORIGIN", [0.0; 3]))
+}
+
+/// A vector's component along the path's direction.
+fn on_axis(v: [f64; 3]) -> f64 {
+    let e = axis().0;
+    (0..3).map(|a| e[a] * v[a]).sum()
 }
 
 fn reference(request: &Request) -> (usize, [f64; GROUND]) {
@@ -288,21 +309,24 @@ fn kicks(step: &Step) -> ([f64; 3], [f64; 3], [f64; 3], [f64; 3]) {
     (r_h, k_h, std::array::from_fn(|a| after[a] - k_h[a]), jumps)
 }
 
-/// One trajectory of the engine held on a course: the model's steps as the solve takes them (`stepped`, on a Brownian
-/// path that does not move), their jumps made inside them on the step's own path, the position and the momentum put
-/// back on the course before every step. What the engine gives the momentum along z is accumulated apart, from the
-/// time `burn` on, and sampled every `every` µs: with the weights w = 1, w₁, w₂ (`Course::weights`, at a step's middle;
-/// a jump's at its own time) in turn [Σ w Δκ of the steps (the Ehrenfest impulse and the scattered light's force: the
-/// kick at the step's middle less its jumps' part, `kicks`), Σ w Δκ of the jumps (the emitted recoil and the absorbed
-/// mean, each jump's own kick), ∫ w² 2D_zz dt of the Brownian part (the model's 2D of the step's start state at the
-/// step's middle point)], then the jumps' count and the population outside the start's hyperfine level. Beside them
-/// the normalized internal state (its cluster and amplitudes) at every sample.
+/// One trajectory of the engine held on a course: the model's steps as the solve takes them (`stepped`, each on a part
+/// of the trajectory's own Brownian path, drawn from a stream of its own), their jumps made inside them on the step's
+/// own path, the position and the momentum put back on the course before every step (the internal state and the
+/// optical sector's pending covariance go on). What the engine gives the momentum along z is accumulated apart, from
+/// the time `burn` on, and sampled every `every` µs: with the weights w = 1, w₁, w₂ (`Course::weights`, at a step's
+/// middle; a jump's at its own time) in turn [Σ w Δκ of the steps (the Ehrenfest impulse, the scattered light's force
+/// and the drawn noise of the scattered light and the optical sector: the kick at the step's middle less its jumps'
+/// part, `kicks`), Σ w Δκ of the jumps (the emitted recoil and the absorbed mean, each jump's own kick), 0 (the
+/// Brownian part is drawn, inside the steps' column; the column kept for the readers' width)], then the jumps' count and
+/// the population outside the start's hyperfine level. Beside them the normalized internal state (its cluster and
+/// amplitudes) at every sample.
 fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64, every: f64, seed: u64, index: u64) -> (Vec<[f64; WIDTH]>, Vec<(usize, Vec<C64>)>) {
     let hm = run.hbar_over_mass();
     let place = |course: &Course, t: &mut Trajectory| {
         let (z, v) = course.at(t.time);
-        t.r = [0.0, 0.0, z];
-        t.kappa = [0.0, 0.0, v / hm];
+        let (e, o) = axis();
+        t.r = std::array::from_fn(|a| o[a] + z * e[a]);
+        t.kappa = e.map(|x| x * v / hm);
     };
     let mut t = Trajectory::new(run, start, [0.0; 3], [0.0; 3], seed, index);
     let mut scratch = Scratch::default();
@@ -310,6 +334,7 @@ fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64,
     // before every step, from a stream of the trajectory's own): the same amplitude, a path that loses its phase.
     let wander: f64 = std::env::var("DPHI").map_or(0.0, |x| x.parse().unwrap());
     let mut walk = atom_motion::random::Stream::new(67, atom_motion::random::Purpose::Initial, index, 0);
+    let mut noise = atom_motion::random::Stream::new(seed + 1, atom_motion::random::Purpose::Initial, index, 0);
     let mut course = course;
     let (mut sums, mut out, mut states) = ([0.0; WIDTH], vec![], vec![]);
     let mut next = burn;
@@ -321,19 +346,17 @@ fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64,
             *phase += (wander * length).sqrt() * walk.normals()[0];
         }
         place(&course, &mut t);
-        let (step, _, taken) = stepped(run, &t, length, &mut |_| Brownian::STILL, &mut scratch);
+        let (step, _, taken) = stepped(run, &t, length, &mut |length| Brownian::over(length, &[noise.normals(), noise.normals()]), &mut scratch);
         if t.time >= burn {
-            let (r_h, k_h, whole, jumped) = kicks(&step);
-            let spread = taken * run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi, None).diffusion[2][2];
+            let (_, _, whole, jumped) = kicks(&step);
             let w = course.weights(t.time + 0.5 * taken);
             for (i, w) in [1.0, w[0], w[1]].into_iter().enumerate() {
-                sums[3 * i] += w * (whole[2] - jumped[2]);
-                sums[3 * i + 2] += w * w * spread;
+                sums[3 * i] += w * on_axis(std::array::from_fn(|a| whole[a] - jumped[a]));
             }
             for (kick, time) in step.made.iter().filter_map(|made| made.kick.map(|kick| (kick, made.state.time))) {
                 let w = course.weights(time);
                 for (i, w) in [1.0, w[0], w[1]].into_iter().enumerate() {
-                    sums[3 * i + 1] += w * kick[2];
+                    sums[3 * i + 1] += w * on_axis(kick);
                 }
                 sums[9] += 1.0;
             }
@@ -381,7 +404,8 @@ fn engine(name: &str, waist: f64, course: &str, tau: f64, count: u64, burn: f64,
         Some(tables) => Run::tabulated(&model, tables, p),
         None => Run::new(&model, p),
     };
-    let period = std::f64::consts::TAU / request.beams.iter().find(|b| b.id.starts_with("cool")).expect("a cooling beam").wave_number;
+    // The cooling beam's period, which a constant course's start is spread over (a held course needs none).
+    let period = || std::f64::consts::TAU / request.beams.iter().find(|b| b.id.starts_with("cool")).expect("a cooling beam").wave_number;
     let parts: Vec<&str> = course.split(':').collect();
     let number = |i: usize| -> f64 { parts[i].parse().unwrap() };
     let clock = std::time::Instant::now();
@@ -395,7 +419,7 @@ fn engine(name: &str, waist: f64, course: &str, tau: f64, count: u64, burn: f64,
             let u = grid.map_or(u, |n| (u * n).floor() / n);
             let course = match parts[0] {
                 "rest" => Course::Rest { z: number(1) },
-                "const" => Course::Constant { z: (u - 0.5) * period, v: number(1), period },
+                "const" => Course::Constant { z: (u - 0.5) * period(), v: number(1), period: period() },
                 "osc" => Course::Oscillation { centre: number(3), amplitude: number(1), omega: number(2), phase: std::f64::consts::TAU * u },
                 other => panic!("unknown course {other}"),
             };
@@ -582,7 +606,7 @@ fn account(name: &str, dimension: &str, temperature: f64, tau: f64, count: u64, 
                         let (step, _, taken) = stepped(&run, &t, rest, &mut |length| Brownian::over(length, &[noise.normals(), noise.normals()]), &mut scratch);
                         let quiet = stepped(&run, &t, taken, &mut |_| Brownian::STILL, &mut scratch).0;
                         let ((r_h, k_h, whole, jumped), still) = (kicks(&step), kicks(&quiet).2);
-                        let scattering = run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi, None);
+                        let scattering = run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi);
                         for a in 0..3 {
                             let (random, force) = (whole[a] - still[a], taken * scattering.force[a]);
                             let middle = hm * (k_h[a] + 0.5 * whole[a]);

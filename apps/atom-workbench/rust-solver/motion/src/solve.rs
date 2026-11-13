@@ -1573,6 +1573,11 @@ fn attempt(
         for ((unit, most), how) in units.iter().zip(largest).zip(&booking) {
             context.ledger.item(&model.label(unit), most, if matches!(how, Booked::Read(_)) { FOLD_MEASURED } else { FOLD_BOUNDED });
         }
+        // The optical sector's noise (ledger.rs `optical`): its booking on T at every output.
+        let optical = crate::ledger::optical(&mut context.ledger, counts.optical);
+        for k in 1..outputs {
+            context.fixed.model[k][1] += optical;
+        }
         context.ledger.item("初始时就在估计的活动范围之外的原子所占的比例", unsampled[0], "对初始分布数值积分得到（含积分最后两级之差），计入布居的模型误差");
         context.ledger.item("初始时就在估计的活动范围之外的原子占初始动能的比例", unsampled[1], "对初始分布数值积分得到（含积分最后两级之差），计入温度的模型误差");
         Run::tabulated(model, &tables, reference)
@@ -2069,12 +2074,17 @@ struct Counts {
     steps: u64,
     failed: Stopped,
     unproven: Stopped,
+    /// The optical sector's sums over the trajectories (ledger.rs `optical`; step.rs `Trajectory::booked`, `pending`).
+    optical: [f64; 4],
 }
 impl Counts {
     fn add(&mut self, o: &Counts) {
         self.steps += o.steps;
         self.failed.add(&o.failed);
         self.unproven.add(&o.unproven);
+        for (sum, x) in self.optical.iter_mut().zip(o.optical) {
+            *sum += x;
+        }
     }
 }
 
@@ -2265,7 +2275,8 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         }
     }
     let stopped = |why: bool| if why { Stopped::at(t.time) } else { Stopped::default() };
-    let counts = Counts { steps, failed: stopped(failed && unproven.is_none()), unproven: stopped(unproven.is_some()) };
+    let optical = [t.booked[0], t.booked[1], t.booked[2], -(t.pending[0][0] + t.pending[1][1] + t.pending[2][2])];
+    let counts = Counts { steps, failed: stopped(failed && unproven.is_none()), unproven: stopped(unproven.is_some()), optical };
     Record { outputs: out, listed, samples, counts, unproven }
 }
 
@@ -3855,7 +3866,7 @@ mod tests {
             ledger: Ledger::default(),
             method: String::new(),
         };
-        let counts = Counts { steps: 0, failed: Stopped { count: 3, since: Some(12.5) }, unproven: Stopped { count: 5, since: Some(15.) } };
+        let counts = Counts { steps: 0, failed: Stopped { count: 3, since: Some(12.5) }, unproven: Stopped { count: 5, since: Some(15.) }, optical: [0.0; 4] };
         let s = assemble(&context, &estimates, &listed, &counts, 8);
         assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| x.is_finite()), "{s:?}");
         assert!(s.loss_probability[3] == s.loss_probability[2] && s.populations[3] == s.populations[2] && s.estimated_errors[3] >= 1., "{s:?}");

@@ -130,6 +130,32 @@ impl Ledger {
     }
 }
 
+/// The optical sector's noise over a run's trajectories (step.rs, # The optical sector's noise): `sums` = [Σ ε_Q tr C, Σ tr C,
+/// the scattered light's Σ tr(2D)|τ|, the pending covariances' −tr left at the trajectories' ends] (1/µm²), C a step's
+/// covariance of the noise. Two items, each relative to the momentum diffusion's whole input Σ tr C + Σ tr(2D)|τ| -- T's
+/// relative error where the diffusion sets T (hypothesis: the steady state's T is linear in the diffusion; in heating the
+/// energy's input is): K_Q's locality beyond its first order along the path, ε_Q = (ν/γ_Q)² of the light pattern's fastest
+/// beat on the path ν = max |(k_l − k_m)·v| (none where the cluster is still) and the optical rate γ_Q = Γ/2 (step.rs, #
+/// The optical sector's noise: the second order's bound for normal modes; the two-level atom's twelve cases at kv = Γ/10
+/// within 0.53 ε_Q; for multilevel clusters a hypothesis), and the noise's covariance the draws left pending (none drawn
+/// that is not the model's, nothing clipped). And the note on what the trajectory keeps of the ground manifold. Returns T's booked
+/// relative error, both items'; nothing where no explicit cluster drew noise.
+pub fn optical(ledger: &mut Ledger, sums: [f64; 4]) -> f64 {
+    let whole = sums[1] + sums[2];
+    if !(sums[1] != 0.0 && whole > 0.0) {
+        return 0.0;
+    }
+    let (locality, debt) = (sums[0] / whole, sums[3].max(0.0) / whole);
+    ledger.item("显式激发态的光学扇区动量噪声：K_Q 沿路径一阶之外的局域近似（激发态相干的记忆 1/(Γ/2) 内运动原子所见光场图样的拍频）", locality, "K 沿路径的一阶已精确计入；剩下的二阶每步按 (光束对的最大 |Δk·v| / (Γ/2))² × 该步的噪声协方差计入（正规模式下的推导界），对动量扩散总输入的比例计入温度的模型误差（两能级行波/驻波 12 例 kv = Γ/10 实测误差在该尺度的 0.53 倍以内；多能级簇为假设）");
+    ledger.item("显式激发态的光学扇区动量噪声：尚未抽取的负协方差", debt, "瞬时为负的部分不截断，留作每条轨迹的待抽协方差；运行结束时剩余的部分对动量扩散总输入的比例计入温度的模型误差");
+    let note = "显式激发态的簇：基态流形叠加态的力按平均场（Ehrenfest）沿轨迹携带，其关联中经过基态流形的部分（P 扇区）没有推导的误差界，是模型的已知局限（静止时 lin⊥lin 约为扩散的 −10 %）";
+    ledger.note = Some(match ledger.note.take() {
+        Some(before) => format!("{before}；{note}"),
+        None => note.into(),
+    });
+    locality + debt
+}
+
 /// The largest a-priori part among the accounts given (module documentation, # The contract's shape), and the target; none
 /// given, no error.
 fn largest(accounts: &[Option<Account>], target: f64) -> Total {

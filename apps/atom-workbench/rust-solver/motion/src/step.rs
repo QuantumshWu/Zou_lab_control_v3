@@ -41,7 +41,7 @@
 //!   shift, are two hops of the interaction picture a step, the first Magnus term with its integral over the pair's
 //!   turn exact, and a quintic between the nodes (spectral.rs). The propagation's work is the same whatever Ĥ₀'s
 //!   frequencies times the step are. The gradient's slow change is taken through the same three nodes (`propagate`).
-//! The step's time integrals -- the kick, the mean populations -- are read on that state at the nodes of a
+//! The step's time integral -- the kick -- is read on that state at the nodes of a
 //! Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: to
 //! round-off), piece by piece between the step's jumps (# Jumps), and the norm's root between them. These nodes meet
 //! no model and no hop. Their number still follows the
@@ -217,10 +217,71 @@
 //!   lever puts (ωτ)²/12 of it more into the potential energy: three quarters more at the ladder's top rung.)
 //!   The path's momentum κ_m is predicted without the path's increment (its mean is none): the propagation, its norm
 //!   and so the jumps' times do not depend on the deviates.
-//!   F_s and 2D are those of the state at the step's middle; what of them goes with an explicit excited state's decay
-//!   takes that state's population averaged over the step, by the kick's own quadrature (`propagate`): a jump's bare
-//!   state fills its excited state in 1/Γ, which a step need not resolve, and the photons it scatters over the step
-//!   are its decay's integral, not its middle's value times τ.
+//!   F_s and 2D are those of the state at the step's middle, and so is the optical sector's noise beside them (below).
+//!
+//! # The optical sector's noise (model/optical.rs; refs/diffusion/DESIGN.md)
+//! Of the first-order correlation of the force, within(ψ) = Re Tr[𝓕 𝓡 X_ψ], the trajectory's state drops what the
+//! Ehrenfest force it carries does not hold (D_x = D_E + E[within]). The part of an explicit cluster's optical sector --
+//! every entry with an excited index, and the ground trace: it relaxes at Γ/2 or faster -- is local, and the trajectory
+//! takes it as a white noise of its rate within_Q,ab = −Re⟨K_a x|Ĝ_b x⟩/‖x‖² + ⟨K_a⟩⟨Ĝ_b⟩ of its state (`within`;
+//! model/optical.rs, # K_Q). The rest passes through the ground manifold's own state, which the trajectory keeps. A
+//! folded cluster's fold holds that part as its photons' local second moment (above): nothing of this is asked of it.
+//!
+//! The momentum takes the noise's covariance over a step, C = 2∫sym within_Q dt, and of C nothing but its mean: the
+//! increment Λ ΔW has E[Δκ Δκᵀ | C] = C, ΔW independent of all the step makes. A step takes the middle state's rate
+//! for the whole step, C = |τ|(W + Wᵀ) of W = within_Q(x_m), as it takes the scattered light's 2D: the state at the
+//! middle is the trajectory's state at that time -- its jumps are timed by its own thresholds, on no clock of the
+//! steps --, so E[τ within_Q(x_m)] = τ m(t_m), m(t) = E[within_Q(ψ(t))] over the trajectories, and the steps' sum is
+//! ∫m dt but for the midpoint rule's τ³m″/24 a step, m changing on the ensemble's slow time scales: the second order,
+//! as K and Ĝ taken at the step's middle point are. What was not taken:
+//! - the integral over the step's own quadrature, ∫within_Q(x(u))du on the kick's nodes. The product ⟨K_a⟩⟨Ĝ_b⟩ is
+//!   quadratic in the state, no form of the kick's density sums, and asks its 3 + 9 forms at every node -- as many
+//!   nodes as resolve the explicit states' own frequencies (S3: some 420 a step) --: it made S3's step three times its
+//!   work (512 atoms × 60 µs at τ = 0.3: ×3.0). Its lesser variance changes no mean: over the same 78 451 steps the
+//!   middle's sample read the integral's mean tr C to 0.6 % (2σ), its tr C negative on 4 % of the steps, the
+//!   integral's on none (they are kept pending, below);
+//! - the product of the step's mean forms, ⟨K⟩̄⟨Ĝ⟩̄ of the density sums: it drops ∫δK δĜ, the two forms' covariance
+//!   inside the step. The fast ringing between the manifolds adds little to that (a pair of Ĥ₀'s states turning at
+//!   ω ≫ γ holds K_kl ≈ −iĜ_kl/(ω + iγ), a quarter turn from Ĝ_kl: its product's mean is of γ/ω² -- for multilevel
+//!   clusters a hypothesis), but a jump's transient over 1/Γ ≪ τ is no ringing: on S3 the mean forms' product read
+//!   −15.6 for the integral's −57.0, of the whole 517: 8 % high.
+//!
+//! within_Q is no positive form of a state, and C's negative excursions are kept, not clipped: C with what was pending
+//! is split by its eigenvectors (`split`), its positive part drawn with the scattered light's 2D through one factor on
+//! the same Brownian path, the rest pending to the next step and across the jumps -- the drawn and the pending add up
+//! to the sum of the C. What is pending at a trajectory's end is booked (ledger.rs `optical`), and so is the static K's
+//! locality (below).
+//!
+//! K along the path. The static K of the middle -- the resolvent of the generator held still there -- is wrong at the
+//! first order on a moving atom, whose couplings turn within the sector's memory 1/γ_Q: held at rest it misses a
+//! running wave's Doppler shift (two-level, kv = Γ/10, Ω₀ = 2Γ, Δ = −3Γ: 1.044 of the master equation); held in the
+//! cluster's Doppler frame, where a running wave is still and exact, it holds a second beam's coupling at the first's
+//! frequency, 2kv off (a standing wave there: 0.888). So K is taken to the first order along the path, exactly: with
+//! 𝓛(s) = 𝓛₀ + s𝓛₁ and F(s) = F₀ + sF₁ on the path in the frame (s the time after the middle),
+//!
+//! ```text
+//!   K = ∫₀^∞ 𝒰_Q†(s)[F(s)] ds = K₀ + 𝓡_Q†𝓡_Q†(F₁ + 𝓛₁†K₀) + O(s²),   K₀ = 𝓡_Q†F₀,
+//! ```
+//! (∫ s e^{𝓛₀s} ds = 𝓡², and the propagator's first order ∫∫ e^{𝓛₀w} u𝓛₁ e^{𝓛₀u} = 𝓡𝓛₁𝓡²): two more solves an axis
+//! on the same factorization, 𝓛₁†K₀ = i(H₁†K₀ − K₀H₁), and the generator's and the gradient's slopes H₁, G₁ at the
+//! middle through the step's two ends -- the parabola the step's own propagation takes. A still cluster has none and its
+//! K₀ is exact. What is left is of the second order: a Q mode of rate λ (Re λ ≥ γ_Q) answering a coupling that turns at
+//! ω responds as 1/(λ − iω), and 1/λ + iω/λ² misses it by ω²/(λ²(λ − iω)), at most (ω/γ_Q)² of 1/λ -- for normal modes;
+//! for a non-normal Q𝓛Q that bound is a hypothesis. It is booked: ε_Q = (ν/γ_Q)² of each step's C, ν = max |(k_l −
+//! k_m)·v| the pattern's fastest beat over the cluster's beams (none where the cluster is still). On the two-level atom
+//! at kv = Γ/10 (tests; σ 0.016): the running waves read 0.999–1.018 of the master equation (still in the frame: ε_Q
+//! none, the error statistics alone); the standing waves at Ω₀ = 2, 5, 10Γ read 1.063, 1.053, 1.049 on resonance and
+//! 0.998, 1.037, 1.084 at Δ = −3Γ -- the frame's static K 1.024, 1.034, 1.039 and 0.888, 0.921, 1.048 --, within 0.53 of
+//! ε_Q = 0.16.
+//!
+//! The work is one K a step whose middle state lies in an explicit cluster: the gradient's matrices; the excited
+//! blocks' Schur forms, ℳ's e² basis solves and its factorization (model/optical.rs, # The solve; S3: 36 reals where the
+//! whole sector is 96); where the cluster beats, the generator and the gradient at the step's two ends, four rotations
+//! and two solves of three sides; and twelve forms (`Optical::forms`) -- which `step_work` prices. It is made anew at
+//! every middle: a factorization reused along the path as an iterative refinement's preconditioner contracts the error
+//! by the light pattern's change over a step -- S3's standing wave turns 0.26 rad a step at 30 µK -- for an iteration
+//! that applies the operator and solves, a third of the whole sector's factorization (measured on its 96 reals): more
+//! than the factorization to its own accuracy.
 //!
 //! # The path between a step's ends
 //! A trajectory is read at times that are no step's end (an output, a cut of T's window: adapt.rs, # The reads), and
@@ -388,13 +449,90 @@ pub trait Middle {
 
     /// What the light a state scatters at the point gives the momentum per unit time beside the Ehrenfest force and the
     /// jumps' kicks (`Model::scattering_on`): the force and the second moment's rate the jumps do not carry, of the
-    /// state ψ at the middle's time and the path's momentum, with the states' populations averaged over the step (of
-    /// unit sum) for what goes with an explicit state's decay -- its rate is the step's mean, not the middle's. Asked
-    /// of the middle, which holds the point: the model makes nothing there a second time.
-    fn scattering(&self, path: &Self::Path, psi: &[C64], populations: &[f64]) -> Scattering;
+    /// state ψ at the middle's time and the path's momentum. Asked of the middle, which holds the point: the model makes
+    /// nothing there a second time.
+    fn scattering(&self, path: &Self::Path, psi: &[C64]) -> Scattering;
 
     /// The counted complex multiply-adds of one `generator`, one `force` and one `tones`.
     fn work(&self) -> [f64; 3];
+
+    /// Ĝ_a(s) as matrices at the time s from the middle along the path (n × n each, row by row, Hermitian): what
+    /// `force` contracts. Here from its forms -- a Hermitian G is fixed by tr(Gρ) over the Hermitian ρ: a diagonal ρ
+    /// reads G_ii, ρ = E_ij + E_ji twice Re G_ij, ρ = i(E_ij − E_ji) twice Im G_ij --; a model may make it at once.
+    fn gradient(&self, path: &Self::Path, s: f64, g: &mut [Vec<C64>; 3]) {
+        let n = self.states();
+        for m in g.iter_mut() {
+            m.clear();
+            m.resize(n * n, C64::ZERO);
+        }
+        let mut rho = vec![C64::ZERO; n * n];
+        for i in 0..n {
+            for j in i..n {
+                rho.fill(C64::ZERO);
+                if i == j {
+                    rho[i * n + i] = C64::ONE;
+                    let f = self.force(path, s, &rho);
+                    for a in 0..3 {
+                        g[a][i * n + i] = C64::real(f[a]);
+                    }
+                    continue;
+                }
+                (rho[i * n + j], rho[j * n + i]) = (C64::ONE, C64::ONE);
+                let re = self.force(path, s, &rho);
+                (rho[i * n + j], rho[j * n + i]) = (C64::new(0.0, 1.0), C64::new(0.0, -1.0));
+                let im = self.force(path, s, &rho);
+                for a in 0..3 {
+                    g[a][i * n + j] = C64::new(0.5 * re[a], 0.5 * im[a]);
+                    g[a][j * n + i] = C64::new(0.5 * re[a], -0.5 * im[a]);
+                }
+            }
+        }
+    }
+
+    /// The optical sector's operators at the middle along the path, to the first order along it -- the generator's slope
+    /// through the step's ends, `half` from the middle (# The optical sector's noise; model/optical.rs): None where the
+    /// cluster has no explicit excited state.
+    fn optical(&self, _path: &Self::Path, _half: f64) -> Option<Optical> {
+        None
+    }
+}
+
+/// The optical sector of a cluster at a step's middle along its path (# The optical sector's noise; model/optical.rs):
+/// K_a and the gradient Ĝ_a there (n × n each, row by row, Hermitian, in the cluster's Doppler frames at the middle;
+/// 1/µm and rad/µs/µm), the light pattern's fastest beat on the path where the cluster beats, ν = max |(k_l − k_m)·v|
+/// over the cluster's beams (none where it is still)
+/// and the slowest optical rate γ_Q, the least of its excited states' decay over two (rad/µs), and the counted complex
+/// multiply-adds that made them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Optical {
+    pub k: [Vec<C64>; 3],
+    pub gradient: [Vec<C64>; 3],
+    pub beat: f64,
+    pub decay: f64,
+    pub work: f64,
+}
+
+impl Optical {
+    /// The noise's rate within_Q,ab of a state x of the cluster (unnormalized; 1/µm²/µs): `within` of its K and Ĝ.
+    pub fn within(&self, x: &[C64]) -> [[f64; 3]; 3] {
+        within(&self.k, &self.gradient, x)
+    }
+    /// The counted complex multiply-adds of one `within` on n states: K_a x and Ĝ_b x (n² each), and the inner products.
+    pub fn forms(n: usize) -> f64 {
+        (6 * n * n + 13 * n) as f64
+    }
+}
+
+/// The optical sector's rate of a state x (unnormalized; model/optical.rs, # K_Q) from K_a and Ĝ_b on it (F = −Ĝ):
+/// within_Q,ab = −Re⟨K_a x|Ĝ_b x⟩/‖x‖² + ⟨K_a⟩⟨Ĝ_b⟩, ½ d Var(κ_a, κ_b)/dt of the white noise it stands for in its
+/// symmetric part (1/µm²/µs).
+pub fn within(k: &[Vec<C64>; 3], g: &[Vec<C64>; 3], x: &[C64]) -> [[f64; 3]; 3] {
+    let n = x.len();
+    let apply = |m: &[C64]| -> [C64; STATES] { std::array::from_fn(|i| if i < n { m[i * n..(i + 1) * n].iter().zip(x).map(|(m, x)| *m * *x).sum() } else { C64::ZERO }) };
+    let norm = norm_sqr(x);
+    let (kx, gx): ([[C64; STATES]; 3], [[C64; STATES]; 3]) = (std::array::from_fn(|a| apply(&k[a])), std::array::from_fn(|b| apply(&g[b])));
+    let (km, gm): ([f64; 3], [f64; 3]) = (std::array::from_fn(|a| inner(x, &kx[a][..n]).re / norm), std::array::from_fn(|b| inner(x, &gx[b][..n]).re / norm));
+    std::array::from_fn(|a| std::array::from_fn(|b| -inner(&kx[a][..n], &gx[b][..n]).re / norm + km[a] * gm[b]))
 }
 
 /// A cluster's internal state: its amplitudes on the cluster's states -- at most the model's `STATES` --, held in place,
@@ -490,6 +628,13 @@ pub struct Trajectory {
     /// model's generators and forces at the step's nodes (`adapt` adds each step's) --, and its jumps' photons
     /// (`Dynamics::photon_work`).
     pub work: f64,
+    /// The optical sector's pending covariance (1/µm², symmetric, negative semidefinite after every step: # The optical
+    /// sector's noise): what of the noise's covariance its draws have not taken -- its negative excursions --, carried
+    /// across steps and jumps.
+    pub pending: [[f64; 3]; 3],
+    /// The optical sector's booking over the trajectory (# The optical sector's noise; the ledger's): Σ ε_Q tr C of its
+    /// steps' covariances C, Σ tr C, and the scattered light's Σ tr(2D)|τ| (1/µm²).
+    pub booked: [f64; 3],
 }
 
 impl Trajectory {
@@ -515,6 +660,8 @@ impl Trajectory {
             seed,
             index,
             work: 0.0,
+            pending: [[0.0; 3]; 3],
+            booked: [0.0; 3],
         }
     }
     /// The trajectory's point.
@@ -1243,8 +1390,8 @@ enum Stop {
 /// state on the path there -- its internal state, cluster, threshold and counters; its position and momentum the
 /// path's at its last jump --; the next of the times to read; whether the middle is behind; the sums of the quadrature's
 /// weights times the three nodes' Lagrange polynomials over what is behind; the kick's part of the state so far; the
-/// scattered light's force and its diffusion's factor at the middle, once it is passed; the counted work; and the
-/// states made.
+/// scattered light at the middle, once it is passed, and the optical sector's rate of the middle state with its
+/// locality ε_Q where its cluster has one (# The optical sector's noise); the counted work; and the states made.
 struct March {
     u: f64,
     state: Trajectory,
@@ -1252,7 +1399,8 @@ struct March {
     passed: bool,
     weights: [f64; 3],
     impulse: [f64; 3],
-    scattered: Option<([f64; 3], [[f64; 3]; 3])>,
+    scattered: Option<Scattering>,
+    optical: Option<([[f64; 3]; 3], f64)>,
     work: f64,
     made: Vec<Made>,
 }
@@ -1283,7 +1431,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         scratch.fit(n);
         let kappa_m = predicted(scratch, &self.generator, &from.psi, kappa_h, reference, tau);
         let resolves = domain.proven(&flow, (r_h, kappa_m), h).map_err(Refused::Unproven)?;
-        let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, weights: [0.0; 3], impulse: [0.0; 3], scattered: None, work: count::shear(n, self.generator.work()), made: Vec::new() };
+        let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, weights: [0.0; 3], impulse: [0.0; 3], scattered: None, optical: None, work: count::shear(n, self.generator.work()), made: Vec::new() };
         // A step that does not resolve its path at its speed is taken, and the trajectory is unresolved from it on: its
         // states inside the step and after it.
         march.state.unresolved |= !resolves;
@@ -1292,10 +1440,33 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         while !self.stretch(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time, reads, &mut march, scratch)? {
             landed = Some(self.model.middle(march.state.cluster, r_h, from.time + h));
         }
-        let March { state: mut end, read, impulse, scattered, work, mut made, .. } = march;
-        // The scattered light at the middle, on the state there: its force over the step, and its diffusion's factor on
-        // the Brownian path's increment (the momentum) and on its first moment about the middle (the position).
-        let (force, spread) = scattered.expect("a step passes its middle");
+        let March { state: mut end, read, impulse, scattered, optical, work, mut made, .. } = march;
+        // The scattered light at the middle, on the state there: its force over the step; and its diffusion with the
+        // optical sector's drawn covariance -- the middle state's rate over the step with what was pending (# The
+        // optical sector's noise) --, their factor on the Brownian path's increment (the momentum) and on its first
+        // moment about the middle (the position).
+        let scattered = scattered.expect("a step passes its middle");
+        let force = scattered.force;
+        let (mut rate, mut size, step) = (scattered.diffusion, scattered.size, tau.abs());
+        let trace = |c: &[[f64; 3]; 3]| c[0][0] + c[1][1] + c[2][2];
+        let added: [[f64; 3]; 3] = optical.map_or([[0.0; 3]; 3], |(w, _)| std::array::from_fn(|a| std::array::from_fn(|b| step * (w[a][b] + w[b][a]))));
+        let covariance: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|b| from.pending[a][b] + added[a][b]));
+        if covariance.iter().flatten().any(|x| *x != 0.0) {
+            let (drawn, pending) = split(&covariance);
+            for a in 0..3 {
+                for b in 0..3 {
+                    rate[a][b] += drawn[a][b] / step;
+                }
+            }
+            size += (0..3).map(|a| drawn[a][a]).fold(0.0, f64::max) / step;
+            end.pending = pending;
+        }
+        if let Some((_, epsilon)) = optical {
+            end.booked[0] += epsilon * trace(&added);
+            end.booked[1] += trace(&added);
+        }
+        end.booked[2] += step * trace(&scattered.diffusion);
+        let spread = factor(&rate, size, scattered.links);
         let through = |w: &[f64; 3]| -> [f64; 3] { std::array::from_fn(|a| (0..3).map(|c| spread[a][c] * w[c]).sum()) };
         let (push, shift) = spreading(&flow, tau, through(&brownian.increment), through(&brownian.moment));
         let mut kicked: ([f64; 3], [f64; 3]) = (
@@ -1349,7 +1520,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// over the step -- the weights' sum over every piece of the step, and of what is left of it past this stretch.
     /// Of a state that does not change that difference is its rounding, and nothing where there is one state. Where
     /// Ĥ is still along every path Ĝ is one matrix, and the stretch's part its one form with ∫ρ(u)du. The middle's
-    /// stretch reads the scattered light there, on the middle state and its own populations' mean.
+    /// stretch reads the scattered light there and the optical sector's rate, on the middle state.
     fn stretch(&self, generator: &D::Middle<'a>, kappa_m: [f64; 3], start: f64, reads: &[f64], march: &mut March, scratch: &mut Scratch) -> Result<bool, Refused> {
         let (tau, hm) = (self.tau, self.hbar_over_mass);
         let h = 0.5 * tau;
@@ -1365,7 +1536,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let bandwidth = picture.bandwidth;
         sums.fill(0.0);
         let ahead = |u: f64| (u + h) / tau;
-        let (begin, mut counted, mut middle) = (march.u, 0, None);
+        let (mut counted, mut middle) = (0, None);
         let mut x = [C64::ZERO; STATES];
         let done = loop {
             // A piece: from the state the march stands at, the sums and the weights as they are.
@@ -1459,17 +1630,10 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 break false;
             }
         };
-        // The stretch's part of the kick; in the middle's stretch about the middle state, with the scattered light.
-        let length = march.u - begin;
-        let mut populations = [0.0; STATES];
-        let mut mean = |sum: &[C64]| {
-            for (s, p) in populations[..n].iter_mut().enumerate() {
-                *p += sum[s * n + s].re / length;
-            }
-        };
+        // The stretch's part of the kick; in the middle's stretch about the middle state, with the scattered light and the
+        // optical sector's rate there.
         let part = if still {
             whole(sums, 0, n, sum);
-            mean(sum);
             along.middle.force(&along.path, 0.0, sum).map(|f| -f)
         } else {
             let mut out = [0.0; 3];
@@ -1486,7 +1650,6 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             }
             for (j, at) in [-h, 0.0, h].into_iter().enumerate() {
                 whole(sums, j, n, sum);
-                mean(sum);
                 if middle.is_some() {
                     for (q, rho) in sum.iter_mut().zip(held.iter()) {
                         *q -= *rho * march.weights[j];
@@ -1503,15 +1666,11 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             march.impulse[a] += part[a];
         }
         if let Some(middle) = &middle {
-            // A stretch of no length (two jumps at the middle's own time) has no mean: its populations are the middle state's.
-            if !(length != 0.0) {
-                let norm = norm_sqr(&middle[..n]);
-                for (p, z) in populations[..n].iter_mut().zip(&middle[..n]) {
-                    *p = z.norm_sqr() / norm;
-                }
+            march.scattered = Some(along.middle.scattering(&along.path, &middle[..n]));
+            if let Some(optical) = along.middle.optical(&along.path, h) {
+                march.optical = Some((optical.within(&middle[..n]), (optical.beat / optical.decay).powi(2)));
+                march.work += COMPLEX * (optical.work + Optical::forms(n));
             }
-            let scattered = along.middle.scattering(&along.path, &middle[..n], &populations[..n]);
-            march.scattered = Some((scattered.force, factor(&scattered.diffusion, scattered.size, scattered.links)));
         }
         march.work += count::propagation(costs, still, picture.work) + count::impulse(n, costs, counted, still);
         Ok(done)
@@ -1624,11 +1783,29 @@ pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau
     pictured(&along, picture, tau);
     let nodes = nodes(tau, picture.bandwidth);
     let own = picture.work + picture.price(nodes + 2);
-    count::propagation(costs, still, own) + count::impulse(n, costs, nodes, still) + count::shear(n, costs)
+    let optical = middle.optical(&along.path, 0.5 * tau).map_or(0.0, |optical| COMPLEX * (optical.work + Optical::forms(n)));
+    count::propagation(costs, still, own) + count::impulse(n, costs, nodes, still) + count::shear(n, costs) + optical
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The jump.
+
+/// A symmetric covariance's positive and negative parts (module documentation, # The optical sector's noise): C = V Λ Vᵀ
+/// by its eigenvectors, the part of the positive eigenvalues -- drawn -- and of the others -- kept pending --, which add up
+/// to C; nothing of it is clipped.
+fn split(c: &[[f64; 3]; 3]) -> ([[f64; 3]; 3], [[f64; 3]; 3]) {
+    let (values, vectors) = linalg::symmetric3_eigen(c);
+    let (mut drawn, mut pending) = ([[0.0; 3]; 3], [[0.0; 3]; 3]);
+    for (lambda, v) in values.iter().zip(&vectors) {
+        let part = if *lambda > 0.0 { &mut drawn } else { &mut pending };
+        for a in 0..3 {
+            for b in 0..3 {
+                part[a][b] += lambda * v[a] * v[b];
+            }
+        }
+    }
+    (drawn, pending)
+}
 
 /// A factor Λ of a diffusion's second-moment rate C = 2D, Λ Λᵀ = C (positive semidefinite: the second moment's rate less
 /// what the jumps carry of it, Cauchy–Schwarz; model/photon.rs): its Cholesky factor's columns, so that Λ on a Brownian

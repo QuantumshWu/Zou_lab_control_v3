@@ -356,7 +356,8 @@ fn form_size(sizes: &Written, a: usize, rho: &[C64], n: usize) -> f64 {
 /// along the path, and its force's form with a Hermitian ρ (`Middle::force`) is the written-out Hermitian part's gradient in
 /// the middle's position with it, Re Σ ∂_a H[x, y] ρ[y, x] -- entry by entry to the rounding of the entry's sum: γ_N of its
 /// terms' moduli (`chain`; the gradient's product rule doubles the chain, and its form with ρ adds its n² terms). The frames'
-/// rates are K_s·v. A still cluster's generator is the same at every time along the path, to the same rounding twice.
+/// rates are K_s·v. A still cluster's generator is the same at every time along the path, to the same rounding twice. The
+/// gradient's matrices (`Middle::gradient`, the optical sector's) are the same entries.
 #[test]
 fn a_path_s_generator_and_force_are_the_definitions_written_out() {
     let (mut still, mut beating) = (0, 0);
@@ -397,6 +398,16 @@ fn a_path_s_generator_and_force_are_the_definitions_written_out() {
                     let (apart, size) = ((pull[a] - form(&written, a, &rho, n).re).abs(), form_size(&sizes, a, &rho, n));
                     assert!(apart <= rounding(2 * links + n * n) * size, "{name}, cluster {cluster}, s {s}, axis {a}: the force's form {} is {apart:e} apart of {size:e}", pull[a]);
                     force = force.max(if size > 0.0 { apart / size } else { 0.0 });
+                }
+                // The gradient's matrices (`Middle::gradient`) are the written-out Hermitian part's gradient, entry by entry.
+                let mut g: [Vec<C64>; 3] = Default::default();
+                middle.gradient(&path, s, &mut g);
+                for a in 0..3 {
+                    for i in 0..n * n {
+                        let mirror = (i % n) * n + i / n;
+                        let (apart, size) = ((g[a][i] - written.hermitian[i][1 + a]).abs(), sizes.hermitian[i][1 + a].re.max(sizes.hermitian[mirror][1 + a].re));
+                        assert!(apart <= rounding(2 * links + 2) * size, "{name}, cluster {cluster}, s {s}, axis {a}, entry ({}, {}): the gradient's matrix {apart:e} apart of {size:e}", i / n, i % n);
+                    }
                 }
             }
         }
@@ -640,7 +651,7 @@ fn a_state_s_photons_in_parts_are_its_photons() {
             assert_eq!((&whole, work), (&model.photons_counted(cluster, &at, &psi, tables).0, model.photons_counted(cluster, &at, &psi, tables).1), "{name}, cluster {cluster}: the photons by the cluster's own plan and table");
             // A step's scattering reads the same photons where they are made: the same sums in the same order.
             let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
-            assert_eq!(model.scattering_of(&plan, table, &at, &psi, None).0, crate::model::Scattering::of(&whole, norm), "{name}, cluster {cluster}: the scattering");
+            assert_eq!(model.scattering_of(&plan, table, &at, &psi).0, crate::model::Scattering::of(&whole, norm), "{name}, cluster {cluster}: the scattering");
             let bare = model.photons_of(&plan, table, &at, &psi, Gradients::None).0;
             assert_eq!(bare, run.photon_amplitudes(cluster, &at, &psi));
             assert_eq!(whole.len(), bare.len(), "{name}, cluster {cluster}: the classes");
@@ -648,7 +659,7 @@ fn a_state_s_photons_in_parts_are_its_photons() {
                 assert!(alone.gradients.iter().flatten().all(|g| g.is_empty()), "{name}, cluster {cluster}, class {}: gradients where none are asked", photon.class);
                 assert!((alone.class, &alone.amplitudes) == (photon.class, &photon.amplitudes), "{name}, cluster {cluster}, class {}: the amplitudes alone", photon.class);
                 let one = model.photons_of(&plan, table, &at, &psi, Gradients::Of(photon.class)).0;
-                assert!(one.len() == 1 && crate::model::Photon { explicit: photon.explicit, ..one[0].clone() } == *photon && one[0].explicit == [[0.0; 3]; 3], "{name}, cluster {cluster}, class {}: the class alone", photon.class);
+                assert!(one.len() == 1 && one[0] == *photon, "{name}, cluster {cluster}, class {}: the class alone", photon.class);
                 let mut draw = |rates: &[f64]| {
                     assert!(rates.len() == bare.len() && rates.iter().zip(&bare).all(|(rate, photon)| *rate == photon.weight()), "{name}, cluster {cluster}: the classes' rates to a jump's draw");
                     Some(drawn)
@@ -725,7 +736,7 @@ fn photons_written(model: &Model, plan: &Plan, near: Option<&NearValues>, bound:
                 terms: 0,
             };
             for m in &class.members {
-                let folded = !matches!(model.sources[m.source].origin, Origin::Explicit { .. });
+                let folded = m.folded;
                 let (c, cw): (&[C64], &[C64]) = m.scalar.map_or((&one, &one), |s| (fields.plain(s), fields.doppler(s)));
                 let phase = C64::cis(m.phase * at.t);
                 for &(a, bp, sp, first, second) in &m.entries {
@@ -836,7 +847,7 @@ fn a_state_s_photons_are_their_entries_summed() {
                         let (mean, size): (f64, f64) = ((0..3).map(|a| crate::linalg::inner(&u[a], &du[i][a]).im).sum(), (0..3).map(|a| scale(&u[a], &du[i][a])).sum());
                         assert!((moments.mean[i] - mean).abs() <= sum * 2.0 * size, "{name}, cluster {cluster}, class {place}: the mean along {i}, {} for {mean}", moments.mean[i]);
                         for j in 0..3 {
-                            let (second, size): (f64, f64) = ((0..3).map(|a| crate::linalg::inner(&du[i][a], &du[j][a]).re).sum::<f64>() + photon.explicit[i][j], (0..3).map(|a| scale(&du[i][a], &du[j][a])).sum::<f64>() + photon.explicit[i][j].abs());
+                            let (second, size): (f64, f64) = ((0..3).map(|a| crate::linalg::inner(&du[i][a], &du[j][a]).re).sum::<f64>(), (0..3).map(|a| scale(&du[i][a], &du[j][a])).sum::<f64>());
                             assert!((moments.second[i][j] - second).abs() <= sum * 2.0 * size, "{name}, cluster {cluster}, class {place}: the second moment ({i}, {j}), {} for {second}", moments.second[i][j]);
                         }
                     }
@@ -904,7 +915,7 @@ fn the_scattering_s_table_error_on_a_scene() {
             let kappa: [f64; 3] = std::array::from_fn(|_| stream.normal() * (kt / model.hbar_over_mass).sqrt());
             let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect();
             let at = crate::model::Point { r, kappa, t: 0.0 };
-            let (ours, exact) = (model.scattering_of(&plan, Some(table), &at, &psi, None).0, model.scattering_of(&plan, None, &at, &psi, None).0);
+            let (ours, exact) = (model.scattering_of(&plan, Some(table), &at, &psi).0, model.scattering_of(&plan, None, &at, &psi).0);
             let norm = crate::linalg::norm_sqr(&psi);
             let means: f64 = model.photons_of(&plan, None, &at, &psi, Gradients::All).0.iter().map(|photon| norm3(photon.moments().mean)).sum::<f64>() / norm;
             let force = norm3(std::array::from_fn(|i| ours.force[i] - exact.force[i])) / means;

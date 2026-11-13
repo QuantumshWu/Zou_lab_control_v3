@@ -2881,7 +2881,7 @@ mod tests {
                     drop(middle);
                     let scattering = std::time::Instant::now();
                     let plan = model.plan(cluster, &model.running());
-                    let (scattered, counted) = model.scattering_of(&plan, tables.of(cluster, &model.running()), &at, &psi, None);
+                    let (scattered, counted) = model.scattering_of(&plan, tables.of(cluster, &model.running()), &at, &psi);
                     sink += scattered.force[2];
                     counts[3] = counted;
                     times[2] += scattering.elapsed();
