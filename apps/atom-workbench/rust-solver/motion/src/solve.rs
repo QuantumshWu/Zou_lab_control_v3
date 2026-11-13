@@ -143,13 +143,14 @@
 //!     below -- the pilot's trajectories at τ/2, this rung's levels kept whole meanwhile (`Levels::upper`). The rung
 //!     stands as it was where its own read and that one certify it, the middle of its triple (`Levels::below`); else
 //!     the rung below is taken, its third level above this rung's own read, and is read as any rung is;
-//!   - where they only cannot see -- a first rung at the ladder's top among them, which has no rung above --: more
-//!     pairs where their saving over going down is assured (`remedy`), else the third level below as above, once. A
-//!     rung the check went down to for its sight that still cannot see is not taken further down for it: where the
-//!     pairs part early a level's noise is the two ensembles' own, the same at every step (estimate.rs, # The step's
-//!     error), and where they stay together the noise falls with the error and the rung below sees. Its remedy is
-//!     pairs, else the check ends unable to see (SPEC §5.1): the step stands, flagged, and books what its reads do not
-//!     exclude.
+//!   - where they only cannot see: a rung whose own read sees and whose third level does not, or that has none -- a
+//!     first rung at the ladder's top, which has no rung above --, has the third level below run as above. A rung
+//!     whose own read does not see buys its sight with pairs (`remedy`): a rung below reads its own pair's noise, and
+//!     where the pairs part early that noise is the two ensembles' own, the same at every step (estimate.rs, # The
+//!     step's error) -- going down for it doubles the run and sees no better (measured, R4_LIN_2: its rows read at far
+//!     ends of 1.5 to 2.5 b at 0.43, 0.22, 0.11 and 0.054 µs alike). Only a rung with no third level goes down in
+//!     their stead, where their saving over that is not assured. Else the check ends unable to see (SPEC §5.1): the
+//!     step stands, flagged, and books what its reads do not exclude.
 //! - A read is never carried from one rung to another as a verdict: a rung's third level is a read of levels it holds
 //!   itself, of the same model at the same steps -- the scout's, where the pilot has none of its own and the ladder
 //!   no rung above --, and it certifies nothing alone. An attempt that begins at the step the attempt before stood at
@@ -161,14 +162,14 @@
 //!   third level reads the step that left (# The reach's atoms: where the finer level's path is not proven either, the
 //!   rung below's decides whether the reach grows).
 //!
-//! Going down for sight is priced as what it mostly is, the rung below's run -- twice the product's work --, the pairs
+//! Going down for sight -- a rung with no third level -- is priced as what it mostly is, the rung below's run -- twice the product's work --, the pairs
 //! by the probability that the read comes within on them (estimate.rs `within_on`: from the read's own value and
 //! spread, the spread's fall with the pairs bounded by its floor): where it does the rung stands and the run is spared
 //! its doubling, where it does not the pairs' two levels were run for nothing and the run doubles all the same. That
 //! saving is a draw, and the pairs are bought, a batch at a time and read again, where its mean lies beyond z times
 //! its spread (decide.rs `pays`): a read all but within. One that only could come within goes down at once. Where
-//! there is no rung below -- the steps' cap, a read that excludes nothing, a rung already gone down to for its sight --
-//! the pairs are asked for what they could do at the best (`blind`), wherever a run's trajectories can take them;
+//! there is no rung below -- the steps' cap, a read that excludes nothing, a rung with a third level already -- the
+//! pairs are asked for what they could do at the best (`blind`), wherever a run's trajectories can take them;
 //! where they cannot, the work's bounds are used up and the check ends unable to see.
 //!
 //! What enters a quantity's account, at every output alike, is what the reads the rung stands by do not exclude
@@ -871,7 +872,7 @@ enum Verdict {
     Above,
     /// Its reads contradict the order, or its third level above lies clearly beyond: the triple below is read.
     Contradicted,
-    /// Its reads cannot see: more pairs, the rung below for its sight, or neither (`remedy`).
+    /// Its reads cannot see: more pairs, the triple below, or neither (`remedy`).
     Unseeing,
 }
 
@@ -955,7 +956,7 @@ enum Remedy {
 /// share, of a run whose product is predicted to take `product` trajectories at its step and whose pilot is `pilot`
 /// trajectories; `factor`: the pairs it could come within on at the best, over those it has (`blind`); `rung`: whether
 /// the rung below is to be had -- the ladder has it (`MOST_STEPS`), the read excludes something (`readable`), and the
-/// rung was not itself gone down to for its sight.
+/// rung has no third level (beside one, a rung below reads the same noise of its own pair: pairs or neither).
 ///
 /// With a rung below there are two ways on. Work in trajectories at the step τ (a trajectory's steps go as 1/τ),
 /// from here to the run's end, N = `product`:
@@ -1012,7 +1013,8 @@ fn remedy(read: &Between, factor: f64, have: u64, product: f64, pilot: u64, rung
 }
 
 /// The step's part of an output's accounts (module documentation, # The step): on what is shown -- the largest of the
-/// rows' and the loss's, a probability's error at most 1 -- and on the total T (relative). The step's share until the
+/// rows' and the loss's, a probability's error at most 1 -- and on the total T (relative, weighed by the held share: the
+/// check reads T's error so, estimate.rs `between`, and the account takes it as it is). The step's share until the
 /// pilot's levels are read; then what the reads the rung stands by do not exclude, the rms over the run (`checked`,
 /// `Levels::told`), the same at every output, unbounded on T where no output reads it at both levels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1680,8 +1682,7 @@ fn unseen_at_the_end() -> String {
 /// third level below of the rung above it (`settle`), that rung's levels whole, `upper`: its finer level is the
 /// companion of the rung in hand, and the rung stands again as it was where its own read and this one certify it
 /// (`certifies`) -- with the read below it then stands by, `below`: the level below's pilot against the rung's own.
-/// Whether the rung in hand was gone down to for its sight (`sought`: no further rung is, for that). And what the
-/// paths of each of the rung's two levels that left the model's domain ask of a reach (`departed`, `pair`; module
+/// And what the paths of each of the rung's two levels that left the model's domain ask of a reach (`departed`, `pair`; module
 /// documentation, # The reach's atoms): where the companion's did, the rung is left, its read unread; and whether the
 /// rung above the rung in hand is a step whose paths did (`above_departs`): no third level reads it.
 #[derive(Default)]
@@ -1693,7 +1694,6 @@ struct Levels {
     above_pilot: bool,
     upper: Option<Box<Levels>>,
     below: Option<Between>,
-    sought: bool,
     departed: [Option<[f64; 2]>; 2],
     above_departs: bool,
 }
@@ -1838,11 +1838,11 @@ enum Settled {
 ///     step, certify it, it stands as it was -- the rung below was read, not taken --, and that read stays with it
 ///     (`Levels::below`). Else the rung below is taken, the level above its companion and this rung's own read its
 ///     third level above, and is read as any rung is;
-///   - where they only cannot see, the remedy of `remedy` on its own read: more pairs -- the product's next groups at
-///     both levels --, where their saving over going down is assured; or the rung below run as above, where the ladder
-///     has it, the read excludes something (`readable`) and the rung was not itself gone down to for its sight
-///     (`Levels::sought`); else neither, and the check ends unable to see (`Settled::Unseen`). A rung whose own read
-///     is within and whose third level only cannot see has no pairs to buy: the rung below, else neither.
+///   - where they only cannot see: a rung whose own read is within -- its third level, or the lack of one, is what
+///     does not see -- has the rung below run as above, where the ladder has it, else neither. One whose own read does
+///     not see has the remedy of `remedy` on that read: more pairs -- the product's next groups at both levels --; the
+///     rung below in their stead only where the rung has no third level (the triple below is then its only one) and
+///     their saving over it is not assured; else neither, and the check ends unable to see (`Settled::Unseen`).
 /// A rung below at which a trajectory would take more than `MOST_STEPS` steps does not exist: a check that is clearly
 /// beyond there leaves the step capped, one whose reads contradict the order there ends unable to see.
 ///
@@ -1902,10 +1902,10 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
             forget(&mut levels.coarse);
         }
         // What the reads make of the rung in hand; whether the rung below is run as its third level, the rung kept
-        // whole meanwhile -- and whether for the reads' sight alone -- or taken.
+        // whole meanwhile, or taken.
         let upward = !levels.above_pilot && above(context.tau) && !levels.above_departs;
         let verdict = verdict(&read, levels.above.as_ref(), levels.departed[1].is_some(), pilot, upward);
-        let (mut third, mut sight) = (false, false);
+        let mut third = false;
         if verdict == Verdict::Stands {
             return Settled::Standing;
         }
@@ -1916,11 +1916,16 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
             }
             if verdict == Verdict::Above {
                 // The third level above on the pilot's trajectories: the rung above's coarser level, at 4τ, against its
-                // finer one, this rung's companion. Where its paths leave the model's domain the rung above is unread.
+                // finer one, this rung's companion. Where its paths leave the model's domain, or its read excludes nothing
+                // on some look (`readable`: no output counts a trajectory at both levels), the rung above is unread.
                 match level(run, ensemble, &domain.companion(), &context.plan, 4. * context.tau, numbers, 0..GROUP, false, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages)) {
                     Ok(coarser) => {
                         let read = between(&levels.coarse.iter().collect::<Vec<_>>(), &coarser.iter().collect::<Vec<_>>(), &context.scales);
-                        (levels.above, levels.above_pilot) = (Some(carried(&read, 0.5)), true);
+                        if readable(&read) {
+                            (levels.above, levels.above_pilot) = (Some(carried(&read, 0.5)), true);
+                        } else {
+                            levels.above_departs = true;
+                        }
                     }
                     Err(_) => levels.above_departs = true,
                 }
@@ -1934,16 +1939,18 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
                 }
                 third = true;
             } else {
-                // The reads only cannot see. Where the own read is within, the third level's is what does not: no pair of
-                // this rung's levels helps it.
+                // The reads only cannot see. Where the own read is within, the third level's is what does not -- or there
+                // is none --: no pair of this rung's levels helps it, the triple below does. Where the own read does not
+                // see, beside a third level, its sight is the pairs' to buy: a rung below reads its own pair's noise, and
+                // where the pairs part early that is the two ensembles' own, the same at every step.
                 let (fine, _) = levels.paired();
                 let (have, estimates) = (fine.len() as u64 * GROUP, pooled(&fine, &context.scales).0);
                 let product = looks(&estimates, &context.fixed, &context.step).into_iter().filter(Look::fits).map(|l| l.need()).fold(0., f64::max).min(MOST_TRAJECTORIES as f64);
-                let down = !lowest && readable(&read) && !levels.sought;
+                let down = !lowest && readable(&read);
                 let choice = match blind(&read) {
                     None if down => Remedy::Below,
                     None => Remedy::Neither,
-                    Some(factor) => remedy(&read, factor, have, product, pilot_size(), down),
+                    Some(factor) => remedy(&read, factor, have, product, pilot_size(), down && levels.above.is_none()),
                 };
                 match choice {
                     Remedy::Pairs(pairs) => {
@@ -1959,7 +1966,7 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
                         levels.further.iter_mut().zip(more).for_each(|(further, more)| further.extend(more));
                         continue;
                     }
-                    Remedy::Below => (third, sight) = (true, true),
+                    Remedy::Below => third = true,
                     Remedy::Neither => return Settled::Unseen,
                 }
             }
@@ -1991,13 +1998,13 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
         if third {
             // The rung's levels are kept whole, its states with them: it may stand yet.
             let upper = std::mem::take(levels);
-            *levels = Levels { fine: finer, above: inherits, above_pilot: pilot, upper: Some(Box::new(upper)), sought: sight, ..Levels::default() };
+            *levels = Levels { fine: finer, above: inherits, above_pilot: pilot, upper: Some(Box::new(upper)), ..Levels::default() };
         } else {
             // The level at the step is the companion from here on: its states are read no more.
             forget(&mut levels.fine);
             levels.coarse = std::mem::replace(&mut levels.fine, finer);
             levels.further = Default::default();
-            (levels.above, levels.above_pilot, levels.sought) = (inherits, pilot, false);
+            (levels.above, levels.above_pilot) = (inherits, pilot);
             // The rung above the one taken is the step whose companion departed, where it did: no third level reads it.
             // The level at the step is the companion now, with what its own paths asked.
             levels.above_departs = levels.departed[1].is_some();
@@ -2755,7 +2762,7 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> (Vec<Accou
             let h = 1. - e.loss;
             let population = Account { model: probability_error(a[0] * h + e.uncounted), step: b.shown, statistics: e.shown_statistics() };
             let (relative, model, bound) = (e.temperature_interval(), temperature_model(e, a[1]), b.temperature);
-            let temperature = (relative.is_finite() && model.is_finite() && bound.is_finite()).then_some(Account { model: h * model, step: h * bound, statistics: h * relative });
+            let temperature = (relative.is_finite() && model.is_finite() && bound.is_finite()).then_some(Account { model: h * model, step: bound, statistics: h * relative });
             (population, temperature)
         })
         .unzip()
