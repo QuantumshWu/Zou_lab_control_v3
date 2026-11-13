@@ -9,7 +9,8 @@
 //! Its stdout says how it came up, one JSON line the application reads: ready
 //! `{"type":"pulse-server","port":N,"transport":"uart","uart_port":"COM5","attempts":[...]}`
 //! (`transport` the one it took: `uart`, `jtag-axi` or `memory`; `attempts` each port its probe tried
-//! and what that came to), or `{"type":"pulse-server","error":"<Type>: <message>"}` when it could not.
+//! and what that came to), or `{"type":"pulse-server","error":"<Type>: <message>"}` when it could not;
+//! either with `serial_faults`, each serial port that would not open on the way (`OpenFailure::fact`).
 //! Each change of the board's owner is a line of its own, in order:
 //! `{"type":"pulse-owner","owner":"192.168.50.1:61656"}` (the owning client's address), or
 //! `"owner":null` while nobody owns it -- so the application that started it knows when another
@@ -27,7 +28,7 @@ use zlc_pulse::device::PulseStreamer;
 use zlc_pulse::manifest::target_from_config;
 use zlc_pulse::remote::{DEFAULT_BIND_HOST, DEFAULT_PORT, PulseRemoteServer, server_log};
 use zlc_pulse::json::Json;
-use zlc_pulse::serial::{Attempt, ComPortLink, Probe, find_board_uart, list_com_ports};
+use zlc_pulse::serial::{Attempt, ComPortLink, FaultWatch, OpenFailure, Probe, find_board_uart, list_com_ports};
 use zlc_pulse::transport::{MemoryRegisterTransport, RegisterTransport};
 use zlc_pulse::uart::UartRegisterTransport;
 use zlc_pulse::wire::{load_streamer_config, require_streamer_config};
@@ -95,7 +96,10 @@ impl From<Error> for Failed { fn from(error: Error) -> Failed { Failed { kind: e
 /// The board's transport as it was taken: its kind, the UART port, and why (a fallback's reason).
 struct Taken { kind: &'static str, uart_port: Option<String>, reason: String }
 
-fn run(options: Options) -> std::result::Result<(), Failed> {
+/// Each serial port that would not open while `watch` was held, as the application's line carries them.
+fn serial_faults(watch: &FaultWatch) -> Json { Json::Array(watch.met().iter().map(OpenFailure::fact).collect()) }
+
+fn run(options: Options, watch: &FaultWatch) -> std::result::Result<(), Failed> {
     let found = load_streamer_config(options.config.as_deref())?;
     let source = found.source.clone().ok_or_else(|| Error::new(Kind::Value,
         format!("deployment requires a valid streamer_config.json without fallback: {}", found.warnings.join("; "))))?;
@@ -167,7 +171,7 @@ fn run(options: Options) -> std::result::Result<(), Failed> {
     server.start()?;
     server_log("READY", None, &format!("hardware=connected waiting_for_client=True same_computer=127.0.0.1:{} transport={}", server.address().port(), taken.kind));
     let mut ready = vec![("type", Json::str("pulse-server")), ("port", Json::Int(server.address().port().into())), ("transport", Json::str(taken.kind)),
-                         ("attempts", Json::strings(&attempts.iter().map(ToString::to_string).collect::<Vec<_>>()))];
+                         ("attempts", Json::strings(&attempts.iter().map(ToString::to_string).collect::<Vec<_>>())), ("serial_faults", serial_faults(watch))];
     if let Some(port) = &taken.uart_port { ready.push(("uart_port", Json::str(port))); }
     if !taken.reason.is_empty() { ready.push(("reason", Json::str(&taken.reason))); }
     println!("{}", Json::object(ready).compact_text());
@@ -203,9 +207,11 @@ fn main() {
     // `zlc-pulse-server fpga ...`: the board's build-time command (v2 `zlc fpga`), not the server.
     if std::env::args().nth(1).as_deref() == Some("fpga") { std::process::exit(zlc_pulse::fpga::command(std::env::args().skip(2))); }
     let options = match options() { Ok(options) => options, Err(message) => { eprintln!("{message}"); std::process::exit(2); } };
-    if let Err(Failed { kind, message }) = run(options) {
+    let watch = FaultWatch::start();
+    if let Err(Failed { kind, message }) = run(options, &watch) {
         eprintln!("ERROR before LISTENING: {kind}: {message}");
-        println!("{}", Json::object(vec![("type", Json::str("pulse-server")), ("error", Json::str(format!("{kind}: {message}")))]).compact_text());
+        println!("{}", Json::object(vec![("type", Json::str("pulse-server")), ("error", Json::str(format!("{kind}: {message}"))),
+                                         ("serial_faults", serial_faults(&watch))]).compact_text());
         std::process::exit(3);
     }
 }

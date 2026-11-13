@@ -6,6 +6,8 @@ import re
 import threading
 import time
 
+from zlc_plugin.faults import serial_fault
+
 
 class RecordQueue:
     """Bounded FIFO of already-owned records, shared by device adapters.
@@ -335,7 +337,8 @@ _WINDOWS_ERROR = re.compile(r"\(\d+, (['\"])(?P<text>.*?)\1, None, (?P<code>\d+)
 
 
 def serial_open_failure(port: str, error: BaseException) -> SerialPortError:
-    """``error`` from opening ``port``, in the shared wording and typed by its class."""
+    """``error`` from opening ``port``, in the shared wording and typed by its class; the open or
+    search under way is told it (``zlc_plugin.faults.serial_fault``)."""
 
     code, text = getattr(error, "winerror", None), str(getattr(error, "strerror", "") or "")
     if not isinstance(code, int):
@@ -345,6 +348,8 @@ def serial_open_failure(port: str, error: BaseException) -> SerialPortError:
     fault = SERIAL_FAULTS.get(code, "refused") if code is not None else "refused"
     said = f"os error {code}: {text}" if code is not None else text
     kind = SerialPortBusy if fault == SERIAL_FAULTS[5] else SerialPortUnusable
+    # Told to the open or search under way, which carries it to the core (`serial_faults`).
+    serial_fault(serial_name(port), fault, code)
     return kind(f"{port} could not be opened: {fault} ({said}) -- {serial_ports_here()}", port=port, fault=fault, code=code)
 
 

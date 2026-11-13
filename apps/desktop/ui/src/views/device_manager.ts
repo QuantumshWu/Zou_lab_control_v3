@@ -53,6 +53,8 @@ class DeviceCard {
   private types: ComboBox;
   private disclosure: HTMLButtonElement;
   private params: Fields;
+  /** A line per serial port its open or search found refused by its driver, with the restart that clears it. */
+  private refused = element("div", "device-card");
   private collapsed = false;
   private roleDraft = false;
 
@@ -82,7 +84,8 @@ class DeviceCard {
     header.append(row);
     this.params = new Fields(`device-${id}`, (name, value, words) =>
       this.ctx.transport.send({ action: "edit_device", device: id, parameters: { [name]: value } }, `Updating ${words}…`), ask => this.ctx.transport.choosePath(ask));
-    this.root.append(header, this.params.root);
+    this.refused.hidden = true;
+    this.root.append(header, this.refused, this.params.root);
     this.showCollapsed();
   }
 
@@ -106,6 +109,25 @@ class DeviceCard {
     // v2: the Role label says the internal id; why a device failed is the status line's (v2 _outcome).
     this.label.title = `Internal ID: ${device.instance_id}`;
     this.params.update(device.controls, request, failed);
+    this.showRefused(device, Boolean(apparatus.busy));
+  }
+
+  /** A stuck USB-serial adapter (its driver refuses the open) is cleared by restarting its USB device; the row then opens again. */
+  private showRefused(device: DeviceRow, busy: boolean): void {
+    const ports = device.refused_ports ?? [];
+    const signature = JSON.stringify([ports, device.role, busy]);
+    if (this.refused.dataset.signature === signature) return;
+    this.refused.dataset.signature = signature;
+    this.refused.hidden = !ports.length;
+    this.refused.replaceChildren(...ports.map(port => {
+      const line = element("div", "list-row");
+      const restart = command("Restart USB device and retry", () =>
+        this.ctx.transport.send({ action: "restart_serial_port", device: device.instance_id, port }, `restarting ${port}'s USB device`),
+        { title: `Restart the USB device behind ${port} (Windows asks to allow it), then open ${device.role} again` });
+      restart.disabled = busy;
+      line.append(element("span", "note list-detail error", `${port}: its driver refused the open`), restart.root);
+      return line;
+    }));
   }
 }
 

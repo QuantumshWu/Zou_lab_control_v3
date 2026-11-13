@@ -72,6 +72,8 @@ export type DeviceRow = {
   controls: WorkbenchControl[];
   state: "draft" | "opening" | "open" | "closing" | "failed";
   close_failed?: boolean;
+  /** Serial ports its open or search found refused by their driver: each offers its USB device's restart (restart_serial_port). */
+  refused_ports?: string[];
   pending: "add" | "change" | "remove" | null;
   error: string | null;
   claimed_by: { node_id: string; run: string; protected_fields: string[] }[];

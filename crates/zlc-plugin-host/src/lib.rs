@@ -76,6 +76,8 @@ pub struct CallError {
     /// An open refused because another client holds the device ([`DEVICE_HELD`]): the
     /// processes on this computer with the type's `sdk_modules` loaded (`zlc_core::process::Holders`).
     pub holders: Option<Value>,
+    /// Each serial port that would not open while the call ran (`[{port, fault, code}]`, PLUGIN_PROTOCOL §7).
+    pub serial_faults: Option<Value>,
 }
 
 /// The exception a plugin raises when the device's SDK says another client has it open.
@@ -83,7 +85,7 @@ pub const DEVICE_HELD: &str = "zlc_plugin.wire:DeviceHeld";
 
 impl CallError {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Self { kind, message: message.into(), remote_type: String::new(), traceback: String::new(), holders: None }
+        Self { kind, message: message.into(), remote_type: String::new(), traceback: String::new(), holders: None, serial_faults: None }
     }
     pub fn lost(message: impl Into<String>) -> Self { Self::new(ErrorKind::Lost, message) }
     pub fn from_wire(error: &Value) -> Self {
@@ -91,11 +93,12 @@ impl CallError {
                message: error["message"].as_str().unwrap_or("").to_owned(),
                remote_type: error["type"].as_str().unwrap_or("").to_owned(),
                traceback: error["traceback"].as_str().unwrap_or("").to_owned(),
-               holders: error.get("holders").cloned() }
+               holders: error.get("holders").cloned(), serial_faults: error.get("serial_faults").cloned() }
     }
     pub fn wire(&self) -> Value {
         let mut wire = json!({"kind": self.kind.name(), "type": self.remote_type, "message": self.message, "traceback": self.traceback});
         if let Some(holders) = &self.holders { wire["holders"] = holders.clone(); }
+        if let Some(faults) = &self.serial_faults { wire["serial_faults"] = faults.clone(); }
         wire
     }
     /// The plugin raised this Python exception type (e.g. "builtins:TimeoutError").

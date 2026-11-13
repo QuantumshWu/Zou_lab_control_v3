@@ -831,6 +831,16 @@ time and whether it is this application's, in the error's message, as
 `error.holders` (`{processes, uninspected}`), in the session journal's
 `device_open` line and in the device's log.
 
+An `open` or `resolve` carries each serial port that would not open on its way,
+beside its answer or in its error, as `serial_faults: [{port, fault, code}]`
+(`fault` the shared class: `not present`, `in use by another program`,
+`driver refused`, `refused`). Every serial open goes through
+`zlc_atom.devices.open_serial_port`, which tells each failure to the calls
+watching (`zlc_plugin.faults.watching_serial_faults`, on any thread, a search's
+probes too); the native board's twin is `zlc_pulse::serial::FaultWatch`, and its
+server's ready or error line carries the same list. A port refused by its driver
+offers its USB device's restart (WORKBENCH_COMMANDS §4.2 `restart_serial_port`).
+
 Python exceptions round-trip: a plugin calling another plugin through `device`
 receives the original type when it is a builtin (`TimeoutError`, `ValueError`,
 `RuntimeError`, `TypeError`, ...) or `zlc_plugin.PluginError(kind, ...)` otherwise,

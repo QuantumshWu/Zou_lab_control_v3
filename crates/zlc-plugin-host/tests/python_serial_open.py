@@ -55,6 +55,7 @@ from zlc_atom.devices.waveform.wheeltec_n100.device_types import DEVICE_TYPES as
 from zlc_atom.devices.waveform.wheeltec_n100.source import WheeltecN100Config, WheeltecN100WaveformSource, discover_n100  # noqa: E402
 from zlc_atom.devices.waveform.witmotion_hwt3100.device_types import DEVICE_TYPES as HWT_TYPES  # noqa: E402
 from zlc_atom.devices.waveform.witmotion_hwt3100.source import Hwt3100Config, Hwt3100WaveformSource  # noqa: E402
+from zlc_plugin.faults import watching_serial_faults  # noqa: E402
 from zlc_plugin.wire import error_payload, raise_remote  # noqa: E402
 
 PORTS = 'serial ports on this PC: COM5 (USB-SERIAL CH340), COM7'
@@ -133,6 +134,39 @@ class SerialOpenWording(unittest.TestCase):
             with self.subTest(kind.type_id), mock.patch(finder, return_value=found):
                 answer = kind.resolve(kind.parameters.project_values(values), frozenset())
             self.assertEqual((answer['found'], 'this_open' in answer), ({'port': 'COM5'}, False), 'found is written; nothing for this open only')
+
+    def test_a_watch_hears_every_port_that_would_not_open_and_the_error_carries_them(self):
+        # What an open's or a resolve's answer carries to the core (`serial_faults`): every failed
+        # open while it ran, on any thread (a search's probes are), as {port, fault, code}; none after it.
+        BEHAVIOUR['COM5'] = "could not open port 'COM5': OSError(22, 'Incorrect function.', None, 1)"
+        BEHAVIOUR['COM7'] = "could not open port 'COM7': PermissionError(13, 'Access is denied.', None, 5)"
+        kind = N100_TYPES[0]
+        with watching_serial_faults() as met:
+            with self.assertRaises(RuntimeError):
+                kind.resolve(kind.parameters.project_values({'port': '', 'baud': 921600, 'timeout_seconds': 2.0}), frozenset())
+            probe = threading.Thread(target=lambda: self.assertRaises(SerialPortUnusable, open_serial_port, r'\\.\com12', 9600))
+            probe.start()
+            probe.join()
+        with self.assertRaises(SerialPortUnusable):
+            open_serial_port('COM3', 9600)
+        # The search probes its ports at once: in whichever order they failed.
+        self.assertEqual(sorted(met, key=lambda fact: fact['port']),
+                         [{'port': 'COM12', 'fault': 'not present', 'code': 2}, {'port': 'COM5', 'fault': 'driver refused', 'code': 1},
+                          {'port': 'COM7', 'fault': 'in use by another program', 'code': 5}])
+        failure = RuntimeError('no WHEELTEC N100 streams on the free serial ports')
+        failure.serial_faults = [{'port': 'COM5', 'fault': 'driver refused', 'code': 1}]
+        self.assertEqual(error_payload(failure)['serial_faults'], [{'port': 'COM5', 'fault': 'driver refused', 'code': 1}])
+        self.assertNotIn('serial_faults', error_payload(RuntimeError('nothing met')))
+
+    def test_a_device_open_carries_the_ports_that_would_not_open_in_its_error(self):
+        # The plugin host's open of a row: its error names the port its driver refused (`serial_faults`).
+        from zlc_plugin import host as plugin_host
+        BEHAVIOUR['COM5'] = "could not open port 'COM5': OSError(22, 'Incorrect function.', None, 1)"
+        kind = N100_TYPES[0]
+        instance = types.SimpleNamespace(close_device=lambda: None, name='n100')
+        with mock.patch.object(plugin_host, 'find', lambda type_id, module: kind), self.assertRaises(SerialPortUnusable) as raised:
+            plugin_host._open(instance, {'type_id': kind.type_id, 'module': 'n100', 'parameters': {'port': 'COM5'}})
+        self.assertEqual(error_payload(raised.exception)['serial_faults'], [{'port': 'COM5', 'fault': 'driver refused', 'code': 1}])
 
 
 class OneSearch(unittest.TestCase):
