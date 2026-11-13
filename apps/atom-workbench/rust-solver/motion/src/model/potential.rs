@@ -220,9 +220,9 @@ impl Model {
         let read = |&(set, cluster): &(usize, usize)| {
             let (c, lights) = (&self.clusters[cluster], sets[set].0);
             let plan = self.plan(cluster, lights);
-            let near = (!plan.links.is_empty()).then(|| match tables.and_then(|t| t.of(cluster, lights)) {
-                Some(table) if order <= 1 => self.near_tabulated(table, amplitudes, &[(plan.near.hermitian(), order)]),
-                _ => self.near_exact_on(&plan, amplitudes, order, &self.coherent_dressing(), &|place| place < c.ground && p[c.states[place]] != 0.0),
+            let near = (!plan.links.is_empty()).then(|| {
+                let table = tables.and_then(|t| t.of(cluster, lights)).filter(|_| order <= 1);
+                table.and_then(|table| self.near_tabulated(table, amplitudes, &[(plan.near.hermitian(), order)])).unwrap_or_else(|| self.near_exact_on(&plan, amplitudes, order, &self.coherent_dressing(), &|place| place < c.ground && p[c.states[place]] != 0.0))
             });
             (plan, near)
         };
@@ -271,10 +271,7 @@ impl Model {
                 let mut site = super::assemble::Held::<super::assemble::Site>::take();
                 site.beams.clear();
                 site.beams.extend_from_slice(amplitudes);
-                let table = tables.and_then(|t| t.of(cluster, lights));
-                if let Some(table) = table {
-                    self.placed(table, &mut site);
-                }
+                let table = tables.and_then(|t| t.of(cluster, lights)).filter(|table| self.placed(table, &mut site));
                 self.quartic(plan, fourth, table, None, &mut site, false);
                 let (n, size) = (fourth.n, fourth.n * fourth.n);
                 Model::quartic_read(|q| {

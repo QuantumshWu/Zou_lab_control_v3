@@ -1787,10 +1787,9 @@ impl Model {
     /// A plan's near forms at a point, the sections asked each to its order (0 or 1): from its table where one is given
     /// (tabulate.rs), else the exact elimination's to the largest order.
     pub(crate) fn near_values(&self, plan: &Plan, amplitudes: &[Amplitude], sections: &[(Range<usize>, usize)], table: Option<&NearTable>) -> NearValues {
-        match table {
-            Some(table) => self.near_tabulated(table, amplitudes, sections),
-            None => self.near_exact(plan, amplitudes, sections.iter().map(|s| s.1).max().unwrap_or(0), &self.coherent_dressing()),
-        }
+        table
+            .and_then(|table| self.near_tabulated(table, amplitudes, sections))
+            .unwrap_or_else(|| self.near_exact(plan, amplitudes, sections.iter().map(|s| s.1).max().unwrap_or(0), &self.coherent_dressing()))
     }
 
     /// The fourth order's matrices of a plan's cluster at a point (`Quartic`) into the thread's, and the counted work
@@ -2142,18 +2141,18 @@ impl Model {
 
     /// A site's point (`Site`): every beam's amplitude at r with its gradient -- no part of a middle or of a state's
     /// photons reads a second derivative -- and, where a plan's near forms are a table's, the point's place on it
-    /// (tabulate.rs `Model::placed`). What is read of the model at the point is read on a site that holds it.
-    pub(crate) fn pointed(&self, plan: &Plan, table: Option<&NearTable>, r: [f64; 3], site: &mut Site) {
+    /// (tabulate.rs `Model::placed`). What is read of the model at the point is read on a site that holds it. Returns the
+    /// table the point's forms are read from: the plan's where it holds the point, else none -- the exact elimination's
+    /// there (tabulate.rs, # Axes).
+    pub(crate) fn pointed<'t>(&self, plan: &Plan, table: Option<&'t NearTable>, r: [f64; 3], site: &mut Site) -> Option<&'t NearTable> {
         self.light.amplitudes_into(r, 1, |_| true, &mut site.beams);
-        if let Some(table) = table.filter(|_| plan.near.len() > 0) {
-            self.placed(table, site);
-        }
+        table.filter(|table| plan.near.len() > 0 && self.placed(table, site))
     }
 
     /// A cluster's generator at a position and time under a plan (`Middle`), the near forms from a table where one is given.
     pub(crate) fn middle<'a>(&'a self, plan: &Arc<Plan>, r: [f64; 3], t: f64, table: Option<&'a NearTable>) -> Middle<'a> {
         let mut point = Held::<Site>::take();
-        self.pointed(plan, table, r, &mut point);
+        let table = self.pointed(plan, table, r, &mut point);
         point.select(plan);
         let work = match table {
             _ if plan.near.len() == 0 => {

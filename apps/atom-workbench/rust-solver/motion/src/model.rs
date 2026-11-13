@@ -689,7 +689,7 @@ impl Model {
         let Some(fourth) = &plan.fourth else { return f.iter().copied().collect() };
         let (n, size) = (fourth.n, fourth.n * fourth.n);
         let mut site = assemble::Held::<assemble::Site>::take();
-        self.pointed(plan, table, at.r, &mut site);
+        let table = self.pointed(plan, table, at.r, &mut site);
         self.quartic(plan, fourth, table, Some(at.r), &mut site, false);
         Model::quartic_read(|q| {
             let (partner, metric) = (&q.data[4 * size..5 * size], &q.data[8 * size..9 * size]);

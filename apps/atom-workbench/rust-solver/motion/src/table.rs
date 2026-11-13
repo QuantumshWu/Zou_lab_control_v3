@@ -123,11 +123,15 @@ impl Axis {
         }
         (0..usize::BITS).find(|&k| self.halved(k).nodes >= finer.nodes).filter(|&k| self.halved(k).nodes == finer.nodes)
     }
+    /// Whether the axis holds the coordinate s: a periodic one any number, a bounded one its range.
+    pub fn holds(&self, s: f64) -> bool {
+        if self.periodic { s.is_finite() } else { self.lo <= s && s <= self.hi }
+    }
     /// The interval holding s and the place u ∈ [0, 1] in it: a periodic coordinate modulo the period; a bounded one on
     /// its range (its last node in the last interval) -- outside it, or no number, the table has no value and the call
-    /// is refused: the caller's coordinates are bounded by their construction (module documentation).
+    /// is refused: the caller asks a table only where it holds the point (`Table::holds`; module documentation).
     fn place(&self, s: f64) -> (usize, f64) {
-        assert!(if self.periodic { s.is_finite() } else { self.lo <= s && s <= self.hi }, "a table's axis on [{}, {}] asked at {s}", self.lo, self.hi);
+        assert!(self.holds(s), "a table's axis on [{}, {}] asked at {s}", self.lo, self.hi);
         let (n, h) = (self.nodes, self.spacing());
         let (x, last) = if self.periodic { (periodic((s - self.lo) / h, n as f64), n - 1) } else { ((s - self.lo) / h, n - 2) };
         let i = (x.floor() as usize).min(last);
@@ -278,6 +282,10 @@ impl Table {
     /// The place of s on the grid (`Place`): each axis's stencil there; s on the axes' ranges (`Axis::place`).
     pub fn place(&self, s: &[f64]) -> Place {
         self.placed(s, None)
+    }
+    /// Whether every axis holds its coordinate of s (`Axis::holds`): where the table has a value.
+    pub fn holds(&self, s: &[f64]) -> bool {
+        self.axes.iter().zip(s).all(|(a, &x)| a.holds(x))
     }
     /// The read of axis f's error at s (module documentation, # The error read of an axis): the value
     /// (I_f − I)/(2³ − 1) into `value` and the gradient (∇I_f − ∇I)/(2² − 1) into `gradient` (axes × width), I_f the

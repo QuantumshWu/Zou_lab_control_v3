@@ -283,7 +283,7 @@ impl Model {
     /// asked for nothing (the rates are the site's).
     pub(crate) fn emission_of(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
         let mut site = Held::<Site>::take();
-        self.pointed(plan, table, at.r, &mut site);
+        let table = self.pointed(plan, table, at.r, &mut site);
         let made = self.sited(plan, table, Some(at.r), at.kappa, 1, &mut site, false);
         // u_a on the rows a n + b' (`classes_on`: the sums' first column).
         let amplitude = |sums: &[f64], row: usize| C64::new(sums[laid(row, 0, 4)], sums[laid(row, 0, 4) + LANES]);
@@ -314,7 +314,7 @@ impl Model {
         let lights = self.running();
         let (plan, table) = (self.plan(cluster, &lights), tables.and_then(|t| t.of(cluster, &lights)));
         let mut site = Held::<Site>::take();
-        self.pointed(&plan, table, at.r, &mut site);
+        let table = self.pointed(&plan, table, at.r, &mut site);
         let made = self.sited(&plan, table, Some(at.r), at.kappa, 1, &mut site, false);
         let rates = self.classes_on(&plan, at.t, psi, Gradients::None, &mut site, made, &mut |_, _, _, _| {});
         let drawn = (0..plan.classes.len()).map(|place| self.classes_on(&plan, at.t, psi, Gradients::Of(place), &mut site, 0.0, &mut |_, _, _, _| {})).fold(0.0, f64::max);
@@ -326,7 +326,7 @@ impl Model {
     /// definition's entries (assemble.rs, # Work).
     fn classes_at(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], gradients: Gradients, each: &mut dyn FnMut(usize, &ClassPlan, &[f64], bool)) -> f64 {
         let mut site = Held::<Site>::take();
-        self.pointed(plan, table, at.r, &mut site);
+        let table = self.pointed(plan, table, at.r, &mut site);
         let made = self.sited(plan, table, Some(at.r), at.kappa, if gradients == Gradients::None { 0 } else { 1 }, &mut site, false);
         self.classes_on(plan, at.t, psi, gradients, &mut site, made, each)
     }
@@ -692,7 +692,7 @@ impl Model {
     /// own site.
     pub(crate) fn scattering_of(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64]) -> (Scattering, f64) {
         let mut site = Held::<Site>::take();
-        self.pointed(plan, table, at.r, &mut site);
+        let table = self.pointed(plan, table, at.r, &mut site);
         self.scattering_on(plan, table, Some(at.r), at.kappa, at.t, psi, &mut site, false)
     }
 

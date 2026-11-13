@@ -155,8 +155,7 @@ impl Model {
         // The responses of the drives folded at the atom: their table's at the point, or the exact elimination's.
         let folded = self.folded_carriers(plan).count();
         let exact = match table {
-            Some(table) if folded > 0 => {
-                self.placed(table, site);
+            Some(table) if folded > 0 && self.placed(table, site) => {
                 self.near_responses(table, site);
                 None
             }
