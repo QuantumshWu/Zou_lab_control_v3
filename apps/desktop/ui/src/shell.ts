@@ -32,6 +32,9 @@ export interface View {
   showPage?(page: string): void;
   /** Whether it holds what it shows (a view built from a later state than the first says when). */
   ready?(): boolean;
+  /** A window as large as its content (a device's control, v2's snug fit): the content's size in CSS px,
+   * measured once its first whole state is laid out. */
+  measure?(): { width: number; height: number };
 }
 
 export type ViewFactory = (ctx: ViewContext) => View;
@@ -69,7 +72,17 @@ export class Shell {
       if (value !== undefined) (this.latest as Record<string, unknown>)[name] = value;
     }
     this.view.update(state);
-    if (this.host.style.visibility && (this.view.ready?.() ?? true)) this.host.style.visibility = "";
+    if (this.host.style.visibility && (this.view.ready?.() ?? true)) {
+      this.host.style.visibility = "";
+      // The native window is made hidden and shown once its page holds its first whole state: measured on the
+      // frame that lays it out (after the fits the view asked that frame for), sized to it if the view sizes its
+      // window, and shown once that frame is drawn.
+      if (!this.ctx.transport.shared) requestAnimationFrame(() => {
+        const size = this.view.measure?.();
+        if (size) this.ctx.transport.post({ action: "fit_window", ...size });
+        requestAnimationFrame(() => this.ctx.transport.post({ action: "window_ready" }));
+      });
+    }
   }
 
   status(): void { this.view.status(); }

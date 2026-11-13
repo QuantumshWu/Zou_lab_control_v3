@@ -1032,12 +1032,12 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         match &kind {
                             // A review window is its run's request's: it opens with it, never on its own.
                             windows::Kind::Review(node) if windows.get(&kind).is_none() => return Err(format!("{node} has no open point review")),
-                            // A control opens on its device's reading (v2): made hidden, its page shows it once its fields are read.
                             windows::Kind::Control(device) | windows::Kind::Log(device) | windows::Kind::SlmEditor(device) if !live_device(&accepted, device) => {
                                 return Err(format!("No open device {device:?}"));
                             }
                             windows::Kind::FigureViewer(_) if !listed(&kind, &viewers) => return Err(format!("No Figure Viewer {} (open a Figure to make one)", kind.key())),
-                            windows::Kind::Control(_) if windows.get(&kind).is_none() => windows.make(&kind, target, false)?,
+                            // A window just made comes on screen once its page has drawn its first whole state
+                            // (a control: its device's fields read, in the units it shows them in).
                             _ => windows.show(&kind, target)?,
                         }
                         // TaskConsole's Monitor or Logic page (v2 view.monitor / view.logic): the page switches its tab.
@@ -1466,6 +1466,10 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             *last = command;
                             return Ok(());
                         }
+                    }
+                    if action == "window_ready" {
+                        if let Some(kind) = &from { windows.page_ready(kind); }
+                        return Ok(());
                     }
                     if action == "fit_window" {
                         if let (Some(kind), Some(height)) = (&from, command["height"].as_f64().filter(|height| *height > 0.0)) { windows.fit(kind, command["width"].as_f64().unwrap_or(0.0), height); }

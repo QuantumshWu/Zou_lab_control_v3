@@ -104,7 +104,10 @@ pub fn owner(panel: &str) -> Kind {
 }
 
 /// Fields drop in order: the page's mappings, the page, then its window.
-pub struct AppWindow { pub kind: Kind, pub pixels: Pixels, _webview: WebView, pub window: Window, pub ready: bool, first_request: u64 }
+/// A window is made hidden and comes on screen once its page has drawn its first whole state (`painted`,
+/// the page's `window_ready`) and someone asked to see it (`wanted`): never empty, never half laid out.
+pub struct AppWindow { pub kind: Kind, pub pixels: Pixels, _webview: WebView, pub window: Window, pub ready: bool, first_request: u64,
+                       painted: bool, wanted: bool }
 
 impl AppWindow {
     fn owns_request(&self, request: u64) -> bool { (self.first_request..self.first_request + REQUESTS).contains(&request) }
@@ -127,7 +130,7 @@ impl Windows {
 
     pub fn set_share(&mut self, share: crate::share::Share) { self.share = Some(share); }
 
-    /// Make `kind`'s window (shown or hidden) unless it exists.
+    /// Make `kind`'s window unless it exists: hidden, and shown (`visible`) once its page has drawn its first whole state.
     pub fn make(&mut self, kind: &Kind, target: &EventLoopWindowTarget<AppEvent>, visible: bool) -> Result<(), String> {
         if self.get(kind).is_some() { return Ok(()); }
         if self.made + 1 >= crate::remote::FIRST_REMOTE_REQUEST / REQUESTS { return Err("Too many windows were opened in this session".into()); }
@@ -152,7 +155,6 @@ impl Windows {
         if let Some(parent) = parent { chrome::centre_on(&window, &parent.window, self.setup.parked.is_none()); }
         // Automated runs park every window off the screens (ZLC_V3_WINDOW_AT=x,y); a dialog on its parked parent already is.
         if let Some(position) = self.setup.parked.filter(|_| parent.is_none()) { window.set_outer_position(position); }
-        window.set_visible(visible);
         let root = self.setup.ui_root.clone();
         let (title_proxy, command_proxy) = (self.proxy.clone(), self.proxy.clone());
         let (title_kind, command_kind) = (kind.clone(), kind.clone());
@@ -179,21 +181,34 @@ impl Windows {
         frame::raise(&window);
         let mut pixels = Pixels::new(&webview)?;
         if let Some(share) = self.share.as_ref().filter(|_| *kind == Kind::TaskConsole) { pixels.set_share(share.clone()); }
-        self.open.push(AppWindow { kind: kind.clone(), pixels, _webview: webview, window, ready: false, first_request });
+        self.open.push(AppWindow { kind: kind.clone(), pixels, _webview: webview, window, ready: false, first_request, painted: false, wanted: visible });
         Ok(())
     }
 
-    /// Show `kind` in front (made now if it was not). It is shown at once and
-    /// made the active window on the next turn (`activate`): activating it --
-    /// the focus moving into its page -- took 20-40 ms of this turn, before
-    /// the answer to whoever asked could go out.
+    /// Show `kind` in front (made now if it was not). A window whose page has drawn its first whole state is
+    /// shown at once; one just made is shown when its page says so (`page_ready`). It is made the active window
+    /// on the next turn (`activate`): activating it -- the focus moving into its page -- took 20-40 ms of this
+    /// turn, before the answer to whoever asked could go out.
     pub fn show(&mut self, kind: &Kind, target: &EventLoopWindowTarget<AppEvent>) -> Result<(), String> {
         crate::trace::point("window.show", || serde_json::json!({"window": kind.key(), "made": self.get(kind).is_some()}));
         self.make(kind, target, true)?;
-        let window = &self.get(kind).expect("made").window;
-        chrome::set_visible(window, true);
-        let _ = self.proxy.send_event(AppEvent::Activate(kind.clone()));
+        let shown = self.get_mut(kind).expect("made");
+        shown.wanted = true;
+        if shown.painted { self.reveal(kind); }
         Ok(())
+    }
+
+    /// `kind`'s page has drawn its first whole state (its `window_ready`): shown now if it was asked for.
+    pub fn page_ready(&mut self, kind: &Kind) {
+        crate::trace::point("window.painted", || serde_json::json!({"window": kind.key()}));
+        let Some(shown) = self.get_mut(kind) else { return };
+        shown.painted = true;
+        if shown.wanted { self.reveal(kind); }
+    }
+
+    fn reveal(&self, kind: &Kind) {
+        if let Some(shown) = self.get(kind) { chrome::set_visible(&shown.window, true); }
+        let _ = self.proxy.send_event(AppEvent::Activate(kind.clone()));
     }
 
     /// The second half of `show`, unless the window was hidden again meanwhile.
@@ -203,10 +218,12 @@ impl Windows {
         }
     }
 
-    /// Whether any window is on screen (the application ends with its last, as v2's did).
-    pub fn any_visible(&self) -> bool { self.open.iter().any(|window| window.window.is_visible()) }
+    /// Whether any window is on screen or about to be (the application ends with its last, as v2's did).
+    pub fn any_visible(&self) -> bool { self.open.iter().any(|window| window.window.is_visible() || (window.wanted && !window.painted)) }
 
-    pub fn hide(&self, kind: &Kind) { if let Some(window) = self.get(kind) { chrome::set_visible(&window.window, false); } }
+    pub fn hide(&mut self, kind: &Kind) {
+        if let Some(window) = self.get_mut(kind) { window.wanted = false; chrome::set_visible(&window.window, false); }
+    }
     /// v2's review dialog was application modal: while `modal` is open the other windows take no input.
     pub fn set_modal(&self, modal: &Kind, on: bool) {
         for window in self.open.iter().filter(|window| window.kind != *modal) { window.window.set_enable(!on); }

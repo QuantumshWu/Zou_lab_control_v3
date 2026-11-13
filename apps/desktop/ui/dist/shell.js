@@ -44,8 +44,19 @@ export class Shell {
                 this.latest[name] = value;
         }
         this.view.update(state);
-        if (this.host.style.visibility && (this.view.ready?.() ?? true))
+        if (this.host.style.visibility && (this.view.ready?.() ?? true)) {
             this.host.style.visibility = "";
+            // The native window is made hidden and shown once its page holds its first whole state: measured on the
+            // frame that lays it out (after the fits the view asked that frame for), sized to it if the view sizes its
+            // window, and shown once that frame is drawn.
+            if (!this.ctx.transport.shared)
+                requestAnimationFrame(() => {
+                    const size = this.view.measure?.();
+                    if (size)
+                        this.ctx.transport.post({ action: "fit_window", ...size });
+                    requestAnimationFrame(() => this.ctx.transport.post({ action: "window_ready" }));
+                });
+        }
     }
     status() { this.view.status(); }
 }

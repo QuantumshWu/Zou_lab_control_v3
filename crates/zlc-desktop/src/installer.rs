@@ -776,6 +776,7 @@ pub fn run(event_loop: EventLoop<AppEvent>, context: WebContext, setup: Setup, l
                             if let Some(caption) = windows.get(&kind).and_then(|shown| frame::caption(&shown.window)) { windows.send_to(&kind, &caption)?; }
                             installer.flush(&windows)?;
                         }
+                        "window_ready" => windows.page_ready(&kind),
                         "installation_close" => { installer.stop(); *flow = ControlFlow::Exit; }
                         // installation.exe again: its launcher puts the downloaded engine in place once this one has ended.
                         "installation_restart" => {

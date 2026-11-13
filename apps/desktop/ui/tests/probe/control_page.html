@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>probe</title>
+<link rel="stylesheet" href="../../style.css">
+<script src="../../dist/scale.js"></script>
+</head>
+<body>
+<script type="module">
+// A control window's first open, as the host drives it: page up, ready state (row without fields), the first read
+// (~90 ms, a DG4000's first tunable_fields), then whatever reads the page asks for (each ~15 ms). Every frame
+// after the window is shown is recorded: what the operator sees.
+import { Shell } from '../../dist/shell.js';
+import { deviceControl } from '../../dist/views/device_windows.js';
+const P = window.parent.__probe; const t0 = performance.now(); const now = () => Math.round(performance.now() - t0);
+const params = new URLSearchParams(location.search);
+const FIRST_READ_MS = Number(params.get('first') ?? 90), LATER_READ_MS = Number(params.get('later') ?? 15);
+const spell = rows => rows.map(([value, group, decade]) => ({ value, label: value, group, decade }));
+const hz = { GHz: 9, MHz: 6, kHz: 3, Hz: 0 };
+const hertz = unit => spell(Object.entries(hz).map(([s, e]) => [s, 'Hz', e - hz[unit]]));
+const volts = { Vpp: 0, mVpp: -3 };
+const power = unit => unit === 'dBm' ? spell([['dBm', 'dBm', 0], ['Vpp', 'Vpp', null], ['mVpp', 'Vpp', null], ['mW', 'W', null]])
+  : spell([['Vpp', 'Vpp', volts.Vpp - volts[unit]], ['mVpp', 'Vpp', volts.mVpp - volts[unit]], ['dBm', 'dBm', null], ['mW', 'W', null]]);
+// The device in its own units; each read gives the fields in the session's spellings (live.units).
+const session = {};
+const base = [];
+for (const ch of [1, 2]) {
+  base.push({ name: `ch${ch}_frequency`, label: `Ch${ch} Frequency`, kind: 'number', si: 80e6 + ch * 1e6, unit: 'Hz', lo: 0, hi: 200e6, limits: [1e-6, 200e6] });
+  base.push({ name: `ch${ch}_fsk_hop_frequency`, label: `Ch${ch} FSK hop frequency`, kind: 'number', si: 1e6, unit: 'Hz', lo: 0, hi: 200e6, limits: [1e-6, 200e6] });
+  base.push({ name: `ch${ch}_power`, label: `Ch${ch} Power`, kind: 'number', si: -2.0411998265592475, unit: 'dBm', display_unit: 'Vpp', lo: -30, hi: 20, limits: [-46.99, 23.98] });
+  base.push({ name: `ch${ch}_output`, label: `Ch${ch} Output enabled`, kind: 'bool', si: true });
+}
+if (params.get('kind') === 'stage') { base.length = 0; base.push({ name: 'position', label: 'Position', kind: 'number', si: 12.5, unit: 'mm', lo: 0, hi: 25, limits: [0, 25] }); }
+if (params.get('kind') === 'camera') { base.length = 0; base.push({ name: 'gain', label: 'Gain', kind: 'number', si: 0, unit: 'dB', lo: 0, hi: 24, limits: [0, 24] }); }
+if (!params.get('kind')) base.push({ name: 'frequency_low', label: 'Frequency low', kind: 'number', si: 70e6, unit: 'Hz', lo: null, hi: null });
+if (!params.get('kind')) base.push({ name: 'frequency_high', label: 'Frequency high', kind: 'number', si: 110e6, unit: 'Hz', lo: null, hi: null });
+const dbmToVpp = dbm => 2 * Math.sqrt(2 * 50 * 1e-3 * 10 ** (dbm / 10));
+const conv = (f, v, unit) => {
+  if (v == null) return v;
+  if (f.unit === 'Hz') return v / 10 ** hz[unit];
+  if (f.unit === 'mm') return v * { mm: 1, 'µm': 1e3, m: 1e-3 }[unit];
+  if (f.unit === 'dB') return v;
+  if (unit === 'dBm') return v;
+  return dbmToVpp(v) / 10 ** volts[unit];
+};
+const text = (v, unit) => v == null ? '—' : `${+v.toPrecision(6)} ${unit}`;
+function fields() {
+  return base.map(f => {
+    if (f.kind === 'bool') return { name: f.name, label: f.label, kind: 'bool', current: f.si, desired: f.si, current_text: f.si ? 'True' : 'False', limits_text: '', live_write: true, editable: true, status: 'Ready', severity: 'idle' };
+    const unit = session[f.name] ?? f.unit;
+    const units = f.unit === 'Hz' ? hertz(unit) : f.unit === 'mm' ? spell([['m', 'm', -3], ['mm', 'm', 0], ['µm', 'm', 3]].map(([s, g, d]) => [s, g, (unit === 'mm' ? 0 : 0) - d * (s === 'm' ? -1 : 1) * 0 + ({ m: 3, mm: 0, 'µm': -3 }[s] - { m: 3, mm: 0, 'µm': -3 }[unit])])) : f.unit === 'dB' ? [] : power(unit);
+    const lim = f.limits ? f.limits.map(v => conv(f, v, unit)) : null;
+    return { name: f.name, label: f.label, kind: 'number', allow_none: f.lo == null, unit, ...(f.display_unit ? { display_unit: f.display_unit } : {}), units,
+      current: conv(f, f.si, unit), desired: conv(f, f.si, unit), minimum: conv(f, f.lo, unit), maximum: conv(f, f.hi, unit), step: null,
+      current_text: text(conv(f, f.si, unit), unit), current_exact: text(conv(f, f.si, unit), unit),
+      limits_text: lim ? `${text(lim[0], unit)} to ${text(lim[1], unit)}` : '', live_write: f.lo != null, editable: true, status: 'Ready', severity: 'idle', unit_kept: false };
+  });
+}
+const row = withFields => ({ instance_id: 'rf', role: 'RF', ...(params.get('kind') === 'stage' ? { commands: ['rf__home', 'rf__stop'] } : {}), type_id: 'rigol_dg4000', state: 'open', control: { owners: [], reason: null, risk_enabled: false }, risk_accepted: false,
+  ...(withFields ? { fields: fields() } : {}) });
+let shell, next = 1;
+const pending = new Map();
+const log = (event, more = {}) => P.events.push({ t: now(), event, ...more });
+const transport = {
+  connected: true, shared: false, lastError: '', notice: null, pending,
+  busyText: () => [...pending.values()].at(-1) ?? '',
+  send(command, feedback) { const id = next++; if (feedback) pending.set(id, feedback); host(id, command); return id; },
+  post(command) { host(0, command); },
+  request() { return Promise.resolve(null); },
+  note() {},
+};
+const deliver = state => { if (state.request !== undefined) pending.delete(state.request); shell.accept(state); };
+let shownAt = null;
+function host(id, command) {
+  log('page->host', { id, action: command.action, ...(command.units ? { units: command.units } : {}), ...(command.width ? { width: command.width, height: command.height } : {}) });
+  if (command.action === 'read_device') {
+    const first = !P.readOnce; P.readOnce = true;
+    for (const [field, unit] of Object.entries(command.units ?? {})) session[field] = unit;
+    setTimeout(() => { log('host->page reply', { id }); const devices = [row(true)]; deliver({ type: 'state', request: id, error: null, result: { device: 'rf', fields: devices[0].fields }, devices }); }, first ? FIRST_READ_MS : LATER_READ_MS);
+  } else if (command.action === 'fit_window') {
+    P.fit = { width: command.width, height: command.height };
+    window.parent.__fitFrame(command.width, command.height);
+  } else if (command.action === 'show_window' || command.action === 'window_ready') {
+    shownAt = now(); P.shownAt = shownAt; window.parent.__show(); P.frames.push({ t: shownAt, at: 'show_window (the layout measured for the fit)', ...sample() });
+  }
+}
+// The page loads, its view is made (it asks read_device), it says ready; the host's first state has the row without fields.
+shell = new Shell(transport, deviceControl('rf'));
+setTimeout(() => { log('host->page ready state'); deliver({ type: 'state', devices: [row(false)] }); }, 5);
+// Every frame from the show on: the layout the operator sees.
+const sample = () => {
+  const root = document.querySelector('.device-control'); const table = root.querySelector('.control-table');
+  const rows = [...table.querySelectorAll(':scope > div.field')];
+  const strip = root.querySelector('.strip');
+  return {
+    tableH: Math.round(table.getBoundingClientRect().height), rowsH: rows.map(x => Math.round(x.getBoundingClientRect().height)),
+    notes: [...table.querySelectorAll('.field-note')].filter(n => !n.hidden).length,
+    columns: [...table.querySelectorAll('.column-heading')].map(h => Math.round(h.getBoundingClientRect().x)),
+    values: rows.map(x => x.querySelector('input.number')?.value ?? ''),
+    units: rows.map(x => x.querySelector('select.unit-picker')?.selectedOptions[0]?.text ?? ''),
+    pickerW: rows.map(x => { const p = x.querySelector('select.unit-picker'); return p ? Math.round(p.getBoundingClientRect().width) : 0; }),
+    inputW: rows.map(x => { const p = x.querySelector('input.number, .spin'); return p ? Math.round(p.getBoundingClientRect().width) : 0; }),
+    status: rows.map(x => x.querySelector('.control-status .status-text')?.textContent ?? ''),
+    strip: strip ? [Math.round(strip.getBoundingClientRect().y), strip.textContent] : null, gapAboveStrip: strip ? Math.round(strip.getBoundingClientRect().y - table.getBoundingClientRect().bottom) : null,
+    viewport: [innerWidth, innerHeight], content: [root.scrollWidth, root.scrollHeight, root.clientWidth, root.clientHeight],
+  };
+};
+let lastKey = '';
+const frame = () => {
+  if (shownAt !== null) {
+    const s = sample(); const key = JSON.stringify(s);
+    if (key !== lastKey) { P.frames.push({ t: now(), ...s }); lastKey = key; }
+  }
+  if (now() < 1500) requestAnimationFrame(frame); else P.done = true;
+};
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

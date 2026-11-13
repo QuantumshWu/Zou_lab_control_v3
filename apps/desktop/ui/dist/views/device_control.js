@@ -52,6 +52,8 @@ export class DeviceControlView {
     defaulted = false;
     /** Rows that first reading moved into the family their device shows them in, and the read that brings them. */
     moved = null;
+    /** Whether this window's first reading has answered (read, or refused). */
+    answered = false;
     constructor(id, ctx) {
         this.id = id;
         this.ctx = ctx;
@@ -75,8 +77,13 @@ export class DeviceControlView {
      * another node, its front panel).  A Desired not yet applied stays -- a re-read never replaces a draft. */
     reread() { if (this.device?.state === "open")
         this.read(); }
+    /** Whether the page holds its first whole state: its first reading answered, and every row read in the unit it
+     * shows it in (the default units that reading chose are read too). */
+    complete() { return this.answered && [...this.rows.values()].every(row => row.unitRequest === null); }
     update(device, request, failed = false, result) {
         this.device = device;
+        if (request !== undefined && request === this.reading)
+            this.answered = true;
         const completed = this.active?.request === request ? this.active : null;
         if (completed) {
             this.active = null;
