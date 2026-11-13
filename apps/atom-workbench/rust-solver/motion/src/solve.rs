@@ -276,8 +276,11 @@
 //!   every analysis time) and the temperature it grows to; the product's looks, batches, keeps and atoms apart; the
 //!   tables' reads and the prices at one state of every trajectory among them (`one_each`). States carried to the next
 //!   attempt are at their own analysis times (`Carried`), and the next attempt decides there.
-//! - What the result shows at an output: its own estimates and statistics; the model's error and what the atoms apart
-//!   add on the line through their values at the analysis times (`interpolated`), the step's part one number.
+//! - What the result shows at an output: its own estimates and their standard errors; its accounts -- the model's
+//!   error, the step's part, the statistics and T's allowance -- on the line through the accounts at the analysis
+//!   times (`assemble`, `accounts_along`), so that the ledger flags where the stop reads, whatever the outputs. (Judged
+//!   on its own statistics, a noisy estimate of the same spread, the pgc3d example stopped at the analysis times was
+//!   flagged at 11 of 1000 outputs, at most 5.4 % with 5.1 % of statistics, and 2 of 100, its reason "not finished".)
 //!
 //! # The model (SPEC §5.2)
 //! The units are the model's (model.rs), listed again in every model a keep closes. Every model the solve runs is
@@ -1308,7 +1311,10 @@ fn so_far(context: &Context, have: &[Part], more: &[&Part], messages: &mut Messa
     let n = all.iter().map(|p| p.sums.sums[0].trajectories + p.sums.sums[0].failed).sum::<f64>() as u64;
     messages.result(all.len(), n, None, || {
         let (e, l, c) = pooled(&all, &context.scales);
-        assemble(context, &e, &l, &c, n)
+        // The estimates at the analysis times the context holds, among the times its parts are read at.
+        let at: Vec<usize> = context.at.iter().map(|t| context.plan.reads.iter().position(|r| r == t).expect("an analysis time is a time read")).collect();
+        let reads = summarize(&all.iter().map(|p| p.reads.at(&at)).collect::<Vec<Group>>(), &context.scales);
+        assemble(context, &e, &reads, &l, &c, n)
     });
 }
 
@@ -2033,7 +2039,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     if ensemble.deeper() > deeper {
         context.ledger.flag("初态的势在所取的阱底之外还有更深的地方：初始系综只取到该阱底的阱深为止".into());
     }
-    Ok(Attempt::Done(assemble(&context, &e, &l, &c, parts.len() as u64 * GROUP)))
+    Ok(Attempt::Done(assemble(&context, &e, &reads, &l, &c, parts.len() as u64 * GROUP)))
 }
 
 /// The pilot's reads at the rung it stands at (`attempt`, `pilot_reads`): its estimates and counts, the units' errors
@@ -2469,7 +2475,7 @@ fn product(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Contex
         let want = batch(chased.iter().map(Look::need).fold(0., f64::max), n);
         messages.result(all.len(), n, left(n, want), || {
             let (shown, l, c) = pooled(&all, &context.scales);
-            assemble(context, &shown, &l, &c, n)
+            assemble(context, &shown, &e, &l, &c, n)
         });
         let numbers: Vec<u64> = (n / GROUP..want / GROUP).map(number).collect();
         let new = level(run, ensemble, domain, &context.plan, context.tau, &numbers, 0..GROUP, false, messages, &mut |prefix, messages| {
@@ -2477,7 +2483,7 @@ fn product(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Contex
             let done = all.len() as u64 * GROUP;
             messages.result(all.len(), done, left(done, want), || {
                 let (shown, l, c) = pooled(&all, &context.scales);
-                assemble(context, &shown, &l, &c, done)
+                assemble(context, &shown, &summarize(&reads_of(&all), &context.scales), &l, &c, done)
             });
         });
         parts.extend(new);
@@ -4098,27 +4104,55 @@ struct Context {
     method: String,
 }
 
-/// Values at the analysis times `at` (µs, from t = 0) at the times `times` (from t = 0; module documentation, # The
-/// analysis times): on the line through the two analysis times about each, held at the nearest before the first after
-/// t = 0 -- an error at t = 0 is none, no model having acted (`model_error`), and the line from it is no model's --, and
-/// t = 0's own there. A value that is no bound on one side is none on the line between (unbounded stays so).
+/// Where a time t lies on the line through the analysis times `at` (µs, from t = 0; module documentation, # The analysis
+/// times): the two analysis times about it and its share of the way from the first to the second -- held at the first
+/// analysis time after t = 0 before it (what is booked at t = 0 is no model's and no step's, `accounts`, and the line
+/// from it is neither's) and at the last after it; t = 0 at its own.
+fn bracket(at: &[f64], t: f64) -> (usize, usize, f64) {
+    if t <= 0. {
+        return (0, 0, 0.);
+    }
+    let j = at.partition_point(|&a| a < t).max(2).min(at.len() - 1);
+    if j < 2 {
+        return (1, 1, 0.);
+    }
+    (j - 1, j, ((t - at[j - 1]) / (at[j] - at[j - 1])).clamp(0., 1.))
+}
+
+/// The point at the share s of the way from a to b; a value that is no bound on one side is none on the line between
+/// (unbounded stays so), and the ends are the values themselves.
+fn lerp(a: f64, b: f64, s: f64) -> f64 {
+    if s == 0. { a } else if s == 1. { b } else { (1. - s) * a + s * b }
+}
+
+/// Values at the analysis times `at` at the times `times` (`bracket`): the line through them.
 fn interpolated(at: &[f64], values: &[[f64; 2]], times: &[f64]) -> Vec<[f64; 2]> {
     times
         .iter()
         .map(|&t| {
-            if t <= 0. {
-                return values[0];
-            }
-            // The interval about t among those after the first analysis time after t = 0, or that one alone.
-            let j = at.partition_point(|&a| a < t).max(2).min(at.len() - 1);
-            if j < 2 {
-                return values[1];
-            }
-            let (a, b) = (at[j - 1], at[j]);
-            let s = ((t - a) / (b - a)).clamp(0., 1.);
-            std::array::from_fn(|i| if s == 0. { values[j - 1][i] } else if s == 1. { values[j][i] } else { (1. - s) * values[j - 1][i] + s * values[j][i] })
+            let (a, b, s) = bracket(at, t);
+            std::array::from_fn(|i| lerp(values[a][i], values[b][i], s))
         })
         .collect()
+}
+
+/// Accounts at the analysis times `at` at the times `times` (`bracket`): each part on the line through them; a T with no
+/// account on a side has none between.
+fn accounts_along(at: &[f64], population: &[Account], temperature: &[Option<Account>], times: &[f64]) -> (Vec<Account>, Vec<Option<Account>>) {
+    let mix = |x: &Account, y: &Account, s: f64| Account { model: lerp(x.model, y.model, s), step: lerp(x.step, y.step, s), statistics: lerp(x.statistics, y.statistics, s) };
+    times
+        .iter()
+        .map(|&t| {
+            let (a, b, s) = bracket(at, t);
+            let temperature = match (temperature[a], temperature[b]) {
+                (Some(x), Some(y)) => Some(mix(&x, &y, s)),
+                (x, _) if s == 0. => x,
+                (_, y) if s == 1. => y,
+                _ => None,
+            };
+            (mix(&population[a], &population[b], s), temperature)
+        })
+        .unzip()
 }
 
 /// A step (µs) of a run of the length `run` as the result writes it. A step is the run over a whole number N of steps
@@ -4137,16 +4171,20 @@ fn step_reading(run: f64, step: f64) -> String {
 /// an output with no atom held carries the last one's populations, one with fewer than two atoms the last T read with
 /// its judgement of the validated regime (`classical`: a statement about that T) and n̄, their error unknown; one whose T is its own but whose
 /// jackknife reads no error (some group's removal leaves fewer than two atoms) says so; each flagged, apart.
-fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], counts: &Counts, trajectories: u64) -> Solution {
+fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[Vec<(V3, V3)>], counts: &Counts, trajectories: u64) -> Solution {
     let (times, outputs) = (&c.plan.times, c.plan.times.len());
     let hm = c.scales.hbar_over_mass;
     let w = c.scales.frequencies;
     let classical = |t: &V3| -> [bool; 3] { std::array::from_fn(|a| classical(t[a], w[a])) };
     let mut ledger = c.ledger.clone();
-    // The model's error and what the atoms apart add at the outputs: the line through their values at the analysis times
-    // (# The analysis times).
-    let (fixed, outside) = (Fixed { model: interpolated(&c.at, &c.fixed.model, times) }, interpolated(&c.at, &c.outside, times));
-    let (population, temperature) = accounts(estimates, &fixed, c.step);
+    // The accounts the run's decisions and its stop stand on, at the analysis times of the estimates `reads`, and at the
+    // outputs the line through them (# The analysis times): the ledger flags where the stop reads -- not an output's own
+    // statistics, a noisy estimate of the same spread, the largest of a thousand of them above it --, and so do T's
+    // allowances. The model's error at the outputs likewise, for what is read of it there.
+    let (at_reads, at_temperature) = accounts(reads, &c.fixed, c.step);
+    let (population, temperature) = accounts_along(&c.at, &at_reads, &at_temperature, times);
+    let allowed: Vec<f64> = times.iter().map(|&t| bracket(&c.at, t)).map(|(a, b, s)| lerp(reads[a].temperature_target, reads[b].temperature_target, s)).collect();
+    let fixed = Fixed { model: interpolated(&c.at, &c.fixed.model, times) };
     // The step's item: the largest it is booked at over the accounts (weighed by the held share as the totals are). And
     // the check in the method's words: the steps compared, the pairs, the resolution, and what is booked -- what the
     // reads the rung stands by do not exclude (`Levels::told`, `checked`).
@@ -4164,13 +4202,13 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         let relative = if check.resolution[1].is_finite() { format!("、在温度上低于其允许误差的 {} 时检查分辨不出", percent(check.resolution[1])) } else { " 时检查分辨不出，在温度上无法估计".into() };
         step = format!("（步长收敛检查：{} 对先导轨迹用 {levels} 各算一遍（同一初始原子、同一组随机数），相邻两级之差在各输出时刻上的方均根（已扣除统计噪声）按二阶换算成本步长的误差；{how}；步长误差的方均根在布居上低于 {}{relative}）", check.pairs, percent(check.resolution[0]));
     }
-    // What the unresolved atoms and those past the reach add (`apart`): its largest over the outputs, weighed by the held
-    // share.
+    // What the unresolved atoms and those past the reach add (`apart`): its largest over the analysis times, weighed by
+    // the held share.
     for (i, what) in ["布居", "温度"].into_iter().enumerate() {
-        let largest = (1..outputs).map(|k| outside[k][i] * (1. - estimates[k].loss)).fold(0., f64::max);
+        let largest = (1..reads.len()).map(|k| c.outside[k][i] * (1. - reads[k].loss)).fold(0., f64::max);
         ledger.item(&format!("计算中跑出估计的活动范围的原子（{what}）"), largest, "在每个输出时刻统计：曾有一步因速率太大而时间步长对它不适用、或因散射率超过原子任何状态的上限而停下的原子（从那一步起），按它们所占的比例全部计入（布居上是原子数的比例，温度上是动能的比例）；温度高于活动范围的温度 T_r 时，再按热分布在活动范围之外的比例 s^(T_r/T) − s 计入（s 是活动范围本身留在外面的比例），这些原子上的折叠不另行判定");
     }
-    ledger.close(times, &population, &temperature, &estimates.iter().map(|e| e.temperature_target).collect::<Vec<f64>>());
+    ledger.close(times, &population, &temperature, &allowed);
     let mut s = Solution {
         populations: Vec::with_capacity(outputs),
         estimated_errors: population.iter().map(Account::total).collect(),
@@ -5052,7 +5090,7 @@ mod tests {
         };
         let unmade = [Stopped::default(), Stopped { count: 2, since: Some(14.) }, Stopped::default()];
         let counts = Counts { steps: 0, failed: Stopped { count: 3, since: Some(12.5) }, unmade, runaway: Stopped { count: 5, since: Some(15.) }, optical: [0.0; 4] };
-        let s = assemble(&context, &estimates, &listed, &counts, 8);
+        let s = assemble(&context, &estimates, &estimates, &listed, &counts, 8);
         assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| x.is_finite()), "{s:?}");
         assert!(s.loss_probability[3] == s.loss_probability[2] && s.populations[3] == s.populations[2] && s.estimated_errors[3] >= 1., "{s:?}");
         let flagged = s.approximations.flagged.expect("flagged");
@@ -5098,7 +5136,7 @@ mod tests {
             ledger: Ledger::default(),
             method: String::new(),
         };
-        let s = assemble(&context, &estimates, &listed, &Counts::default(), 20);
+        let s = assemble(&context, &estimates, &estimates, &listed, &Counts::default(), 20);
         let own = estimates[2].motion.as_ref().expect("two atoms: a T").temperature;
         assert!(own != estimates[1].motion.as_ref().unwrap().temperature && s.temperature_uk[2] == own && s.temperature_errors_uk[2] == [None; 3], "{s:?}");
         assert!(estimates[3].motion.is_none() && s.classical[2] == [true; 3], "{:?}", s.classical);
@@ -5191,7 +5229,7 @@ mod tests {
                 checked: None,
                 ledger: Ledger::default(),
                 method: String::new(),
-            }, &estimates, &vec![vec![]; Plan::new(&(0..=kinds).map(|k| 10. * k as f64).collect::<Vec<_>>(), [1.; 3]).listed.len()], &Counts::default(), 20);
+            }, &estimates, &estimates, &vec![vec![]; Plan::new(&(0..=kinds).map(|k| 10. * k as f64).collect::<Vec<_>>(), [1.; 3]).listed.len()], &Counts::default(), 20);
             assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| number(*x)), "{s:?}");
             let flagged = s.approximations.flagged.expect("flagged");
             assert!(flagged.contains("30 μs") && flagged.contains("70 μs：没有一条轨迹计入估计") && flagged.contains("有轨迹不计入估计，温度的误差无法估计"), "{flagged}");
@@ -5651,7 +5689,7 @@ mod tests {
     #[test]
     fn a_result_goes_out_from_two_groups_on() {
         let context = Context {
-            at: vec![0., 1.],
+            at: vec![0., Plan::new(&[0., 1.], [1.; 3]).end],
             plan: Plan::new(&[0., 1.], [1.; 3]),
             tau: 0.5,
             scales: Scales { hbar_over_mass: 1., frequencies: [1.; 3] },
@@ -6113,6 +6151,13 @@ mod tests {
         assert_eq!(got[..3], [[0., 0.], [0.1, 1.], [0.1, 1.]]);
         assert!((got[3][0] - 0.2).abs() < 1e-15 && got[3][1] == f64::INFINITY && got[4] == [0.3, f64::INFINITY] && got[5] == [0.3, f64::INFINITY], "{got:?}");
         assert_eq!(interpolated(&[0., 2.], &[[0.; 2], [0.05, 0.1]], &[0., 0.7, 2.]), [[0.; 2], [0.05, 0.1], [0.05, 0.1]]);
+        // The accounts likewise, part by part: the ledger's at an output are the stop's at the analysis times about it;
+        // a T with no account on a side has none between, and its own at an analysis time.
+        let account = |x: f64| Account { model: x, step: 0.02, statistics: 2. * x };
+        let (population, temperature) = accounts_along(&at, &[Account::default(), account(0.01), account(0.03)], &[Some(account(0.)), Some(account(0.01)), None], &[0., 0.5, 2., 3.]);
+        assert_eq!((population[1], population[3]), (account(0.01), account(0.03)));
+        assert!((population[2].model - 0.02).abs() < 1e-15 && (population[2].statistics - 0.04).abs() < 1e-15 && population[2].step == 0.02, "{population:?}");
+        assert_eq!(temperature, [Some(account(0.)), Some(account(0.01)), None, None]);
     }
 
     /// The guard's class test's step (µs).
@@ -6409,7 +6454,7 @@ mod tests {
                 ledger: Ledger::default(),
                 method: String::new(),
             };
-            let s = assemble(&context, &estimates, &listed, &Counts::default(), (groups * members) as u64);
+            let s = assemble(&context, &estimates, &estimates, &listed, &Counts::default(), (groups * members) as u64);
             assert!(s.temperature_uk[0] == s.temperature_uk[2] && s.temperature_errors_uk[0] == s.temperature_errors_uk[2], "{s:?}");
             assert!(s.temperature_total_uk[0] == s.temperature_total_uk[2] && s.temperature_total_errors_uk[0] == s.temperature_total_errors_uk[2], "{s:?}");
             assert!(s.mean_velocity_mps[0] == s.mean_velocity_mps[2] && s.mean_occupation[0] == s.mean_occupation[2] && s.classical[0] == s.classical[2], "{s:?}");
