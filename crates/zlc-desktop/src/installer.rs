@@ -800,6 +800,7 @@ pub fn run(event_loop: EventLoop<AppEvent>, context: WebContext, setup: Setup, l
                 Event::UserEvent(AppEvent::Title { window, title }) => if let Some(shown) = windows.get(&window) { shown.window.set_title(&title); },
                 Event::UserEvent(AppEvent::Caption { window, message }) => windows.send_to(&window, &message)?,
                 Event::UserEvent(AppEvent::Activate(window)) => windows.activate(&window),
+                Event::UserEvent(AppEvent::PageLoaded(window)) => windows.loaded(&window),
                 _ => {}
             }
             Ok(())

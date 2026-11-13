@@ -86,8 +86,6 @@ export class DeviceControlView {
   private defaulted = false;
   /** Rows that first reading moved into the family their device shows them in, and the read that brings them. */
   private moved: { request: number; rows: Set<string> } | null = null;
-  /** Whether this window's first reading has answered (read, or refused). */
-  private answered = false;
 
   constructor(readonly id: string, private ctx: ViewContext) {
     this.risk = switchButton(on => ctx.transport.send({ action: "accept_device_risk", device: id, accepted: on }, on ? "Accepting the risk…" : "Withdrawing the risk…"), "Accept risk");
@@ -111,19 +109,21 @@ export class DeviceControlView {
    * another node, its front panel).  A Desired not yet applied stays -- a re-read never replaces a draft. */
   reread(): void { if (this.device?.state === "open") this.read(); }
 
-  /** Whether the page holds its first whole state: its first reading answered, and every row read in the unit it
-   * shows it in (the default units that reading chose are read too). */
-  complete(): boolean { return this.answered && [...this.rows.values()].every(row => row.unitRequest === null); }
+  /** Whether the page holds its first whole state: its reading answered (read, or refused), and every row read
+   * in the unit it shows it in (the default units that reading chose are read too, or refused). */
+  complete(): boolean {
+    const pending = this.ctx.transport.pending;
+    return !pending.has(this.reading) && [...this.rows.values()].every(row => row.unitRequest === null || !pending.has(row.unitRequest));
+  }
 
   update(device: DeviceRow, request?: number, failed = false, result?: unknown): void {
     this.device = device;
-    if (request !== undefined && request === this.reading) this.answered = true;
     const completed = this.active?.request === request ? this.active : null;
     if (completed) { this.active = null; completed.row.tuning = null; }
     // The owners by the names the console calls them; the policy's reason under them.
     const control = device.control;
     this.owner.textContent = `Owner: ${control?.owners.length ? control.owners.join(", ") : "none"}`;
-    this.reason.textContent = control?.reason ?? "Reading the device…";
+    this.sayReason();
     setChecked(this.risk, Boolean(device.risk_accepted));
     this.risk.disabled = !control?.risk_enabled;
     this.showActions(device.state === "open" ? device.commands ?? [] : []);
@@ -234,7 +234,15 @@ export class DeviceControlView {
     }));
   }
 
+  /** The policy's reason under the owners; a device whose reading was refused, with no fields to show, says why. */
+  private sayReason(): void {
+    const transport = this.ctx.transport;
+    const refused = !this.device?.fields && this.reading !== -1 && !transport.pending.has(this.reading) && transport.lastError;
+    this.reason.textContent = refused ? `The device was not read: ${transport.lastError}` : this.device?.control?.reason ?? "Reading the device…";
+  }
+
   status(): void {
+    this.sayReason();
     // v2's words: ready (or that it has nothing to tune) once read, what the last Apply did.
     const fields = this.device?.fields;
     const [text, word] = queueStatus(this.ctx.transport, [!fields ? "refreshing device settings" : this.note ?? (fields.length ? "ready" : "No runtime controls"), "idle"]);

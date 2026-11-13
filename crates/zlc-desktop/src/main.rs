@@ -76,6 +76,8 @@ enum AppEvent { Command { window: Option<windows::Kind>, command: Value }, Compl
     ShareChanged,
     /// A window shown last turn becomes the active one (windows.rs `show`).
     Activate(windows::Kind),
+    /// A window's page has loaded (windows.rs `loaded`).
+    PageLoaded(windows::Kind),
     /// An SLM Editor's pictures drawn (slm_host's lane).
     Slm(slm_host::Drawn),
     /// A live panel's region changed: its producer is told (science.rs SelectionNote).
@@ -666,6 +668,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     // What the windows are yet to be told, and when (present.rs).
     let mut presentation = present::Presentation::default();
     let mut queue: VecDeque<Value> = VecDeque::new();
+    // show_window requests answered once their windows are on screen (windows.rs `showing`).
+    let mut shows: Vec<(windows::Kind, Value)> = Vec::new();
     let mut active = false;
     let mut closing = false;
     // Closing, in order and each off the window's turn, which goes on answering meanwhile: the document's
@@ -1045,6 +1049,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             if kind != windows::Kind::TaskConsole || !matches!(page, "monitor" | "logic") { return Err("page is monitor or logic, of task-console".into()); }
                             windows.send_to(&kind, &json!({"type": "page", "page": page}))?;
                         }
+                        // A window just made is answered once it is on screen (its page has drawn its first whole state),
+                        // or once it is gone or hidden again first: the answer never says a window is shown that is not.
+                        if windows.showing(&kind) == windows::Showing::Drawing { shows.push((kind, command["id"].clone())); return Ok(()); }
                         let mut state = json!({"type":"state", "request": command["id"], "result": {"windows": listed_windows(&windows, &viewers)}});
                         state["error"] = Value::Null;
                         remote::settle(&state, &mut remote_pending);
@@ -1468,6 +1475,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     if action == "window_ready" {
+                        // Its page has drawn its first whole state (or failed first): on screen if it was asked for.
                         if let Some(kind) = &from { windows.page_ready(kind); }
                         return Ok(());
                     }
@@ -1989,6 +1997,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 Event::UserEvent(AppEvent::Title { window, title }) => if let Some(shown) = windows.get(&window) { shown.window.set_title(&title); },
                 Event::UserEvent(AppEvent::Caption { window, message }) => { windows.send_to(&window, &message)?; }
                 Event::UserEvent(AppEvent::Activate(window)) => windows.activate(&window),
+                Event::UserEvent(AppEvent::PageLoaded(window)) => windows.loaded(&window),
                 Event::UserEvent(AppEvent::ShareChanged) => {
                     accepted["share"] = share.state();
                     presentation.mark(present::Owner::Live);
@@ -2328,6 +2337,17 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("{}", json!({"type":"desktop-error","error":error}));
             presentation.reply(Reply::to(&error_request.unwrap_or(Value::Null), Err(error)));
         }
+        // show_window's answers waiting for their windows: shown, or gone or hidden again before they were.
+        shows.retain(|(kind, request)| {
+            let answer = match windows.showing(kind) {
+                windows::Showing::Drawing => return true,
+                windows::Showing::Shown => Ok(json!({"windows": listed_windows(&windows, &viewers)})),
+                windows::Showing::Hidden => Err(format!("The {} window was hidden again before it was shown", kind.key())),
+                windows::Showing::Gone => Err(format!("The {} window closed before it was shown", kind.key())),
+            };
+            presentation.reply(Reply::to(request, answer));
+            false
+        });
         // What is due told (present.rs): a reply at the end of its turn; any other change at a beat, not while closing.
         let now = std::time::Instant::now();
         if presentation.due(now, beat_turn && !closing) {

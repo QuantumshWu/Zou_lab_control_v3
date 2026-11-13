@@ -12,7 +12,7 @@ use serde_json::Value;
 use tao::{dpi::{LogicalSize, PhysicalPosition}, event_loop::{EventLoopProxy, EventLoopWindowTarget},
           platform::windows::{WindowBuilderExtWindows, WindowExtWindows}, window::{Window, WindowBuilder, WindowId}};
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
-use wry::{WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindows};
+use wry::{PageLoadEvent, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindows};
 
 use crate::{chrome, frame, pixels::Pixels, science::Front, AppEvent};
 
@@ -117,6 +117,10 @@ impl AppWindow {
 /// (remote clients' start at remote::FIRST_REMOTE_REQUEST, past every window's).
 const REQUESTS: u64 = 1_000_000_000_000;
 
+/// Where a window asked to be shown stands (`Windows::showing`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Showing { Shown, Drawing, Hidden, Gone }
+
 /// What every window is made with.
 pub struct Setup { pub ui_root: PathBuf, pub browser_args: String, pub devtools: bool, pub parked: Option<PhysicalPosition<i32>> }
 
@@ -156,14 +160,16 @@ impl Windows {
         // Automated runs park every window off the screens (ZLC_V3_WINDOW_AT=x,y); a dialog on its parked parent already is.
         if let Some(position) = self.setup.parked.filter(|_| parent.is_none()) { window.set_outer_position(position); }
         let root = self.setup.ui_root.clone();
-        let (title_proxy, command_proxy) = (self.proxy.clone(), self.proxy.clone());
-        let (title_kind, command_kind) = (kind.clone(), kind.clone());
+        let (title_proxy, command_proxy, load_proxy) = (self.proxy.clone(), self.proxy.clone(), self.proxy.clone());
+        let (title_kind, command_kind, load_kind) = (kind.clone(), kind.clone(), kind.clone());
         let builder = WebViewBuilder::new_with_web_context(&mut self.context)
             .with_devtools(self.setup.devtools)
             .with_custom_protocol("zlc".into(), move |_webview, request| serve(&root, &request))
             .with_navigation_handler(|url| url.starts_with("http://zlc.localhost/") || url.starts_with("zlc://localhost/"))
             // The page names what it shows after v2's title; the caption says it.
             .with_document_title_changed_handler(move |title| { let _ = title_proxy.send_event(AppEvent::Title { window: title_kind.clone(), title }); })
+            // Loaded: a page whose script never said `ready` failed before its own fallback could (windows `loaded`).
+            .with_on_page_load_handler(move |event, _| if matches!(event, PageLoadEvent::Finished) { let _ = load_proxy.send_event(AppEvent::PageLoaded(load_kind.clone())); })
             .with_ipc_handler(move |request| {
                 let event = match serde_json::from_str(request.body()) {
                     Ok(command) => AppEvent::Command { window: Some(command_kind.clone()), command },
@@ -204,6 +210,26 @@ impl Windows {
         let Some(shown) = self.get_mut(kind) else { return };
         shown.painted = true;
         if shown.wanted { self.reveal(kind); }
+    }
+
+    /// `kind`'s page has loaded (its load event, after its scripts ran). A page that never said `ready` failed before
+    /// its own fallback (shell.ts) could run -- a script that did not load or threw at the start: it is shown as it
+    /// stands, so no window stays hidden because of its page.
+    pub fn loaded(&mut self, kind: &Kind) {
+        if self.get(kind).is_some_and(|window| !window.ready && !window.painted) {
+            zlc_core::journal::note_with("app", "window_unstarted", || serde_json::json!({"window": kind.key()}));
+            self.page_ready(kind);
+        }
+    }
+
+    /// Where `kind` stands for whoever asked to see it: on screen, still drawing its first state, or neither.
+    pub fn showing(&self, kind: &Kind) -> Showing {
+        match self.get(kind) {
+            None => Showing::Gone,
+            Some(window) if window.window.is_visible() => Showing::Shown,
+            Some(window) if window.wanted && !window.painted => Showing::Drawing,
+            Some(_) => Showing::Hidden,
+        }
     }
 
     fn reveal(&self, kind: &Kind) {

@@ -60,7 +60,8 @@ class DeviceControlWindow {
         return { width, height };
     }
     shown() { this.settle(); }
-    status() { }
+    /** The queue changed (an answer, a refusal that came as an error): the strip and the reason line say it. */
+    status() { this.view.status(); }
 }
 class DeviceLogWindow {
     ctx;

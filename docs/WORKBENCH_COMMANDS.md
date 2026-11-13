@@ -77,18 +77,23 @@ Windows, as v2 had them: Devices@Zou lab (`devices`), TaskConsole@Zou lab
 PulseGUI@Zou lab (`pulse-editor`), and each open device's `<role> control` (`control:<device>`) and
 `<role> log@Zou lab` (`log:<device>`), and a run's point review (`review:<node>`), one native window and page each; `get_state` lists
 them as `windows: [{window, title, visible, size}]`. Devices opens first, and each
-other window is made when it is first shown, as v2 made its windows; Init (the apparatus
+other window is made when it is first shown, as v2 made its windows. Every window is made hidden
+and comes on screen once its page has drawn its first whole state (the page's `window_ready`), so
+it never opens empty or half laid out; a page that fails first is shown as it stands, its error
+said, and one whose script never started is shown when it has loaded. Init (the apparatus
 initialized) shows TaskConsole in front, Shut down hides it and shows Devices; `open`
 shows a FigureViewer with the Figure (closing it drops its Figure); a sequencer's Control shows PulseGUI
 (closing hides it); another device's Control reads it and opens its control window
-once its fields are in, at least half the standard width and as tall as its content
+once its fields are in, each in the unit it shows it in (a refused reading opens it saying why),
+at least half the standard width and as tall as its content
 (v2's snug fit; closing hides it), Log opens its log window at 0.45 of the screen fit
 (closing ends it), and a device that closes takes both; closing Devices or TaskConsole
 closes the experiment. Each page is sent only the sections its view reads (TaskConsole:
 the live board and the workbench; Devices: the workbench; a FigureViewer: its `viewer`;
 PulseGUI: `pulse`; a device's windows: `devices`) and its own plot fronts; each numbers
 its commands from its own base (`?base=`, a multiple of 1e12 per window made).
-`show_window {window}` brings one forward; `close_window {window}` closes one as its ×
+`show_window {window}` brings one forward and answers once it is on screen (a window just made:
+once its page has drawn its first whole state; an error if it closes or is hidden first); `close_window {window}` closes one as its ×
 does (a Figure Viewer drops its Figure; a control or PulseGUI hides; a log ends); `save_image {path?, window?}` captures the
 named window (the asking window, a remote client's default TaskConsole).
 

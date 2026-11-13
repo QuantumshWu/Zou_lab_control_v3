@@ -59,7 +59,8 @@ class DeviceControlWindow implements View {
     return { width, height };
   }
   shown(): void { this.settle(); }
-  status(): void {}
+  /** The queue changed (an answer, a refusal that came as an error): the strip and the reason line say it. */
+  status(): void { this.view.status(); }
 }
 
 class DeviceLogWindow implements View {

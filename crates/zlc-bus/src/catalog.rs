@@ -96,7 +96,7 @@ pub struct CloseWindow {
     pub window: Option<String>,
 }
 
-/// Show one of the instrument's windows in front.
+/// Show one of the instrument's windows in front; the answer comes once it is on screen (its `windows` then list it visible).
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ShowWindow {
@@ -1072,7 +1072,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!("close_experiment", CloseExperiment, control, false,
         "Close the experiment as the window's close button does: stop every run, close the devices, end this endpoint."),
     command!("show_window", ShowWindow, control, false,
-        "Show a window in front by the name get_state windows lists it under (devices, task-console, figure-viewer-<n>, control:<device>, review:<node>, ...)."),
+        "Show a window in front by the name get_state windows lists it under (devices, task-console, figure-viewer-<n>, control:<device>, review:<node>, ...); answers once it is on screen -- a window just made once its page has drawn its first whole state (a control: its device read) -- or with an error if it closes or is hidden first."),
     command!("open_recorded_pulse", OpenRecordedPulse, control, false,
         "Open the pulse a run of the opened Figure played (its Devices row) in the Pulse Editor as an unsaved draft."),
     command!("list_signals", Empty, read, true,
