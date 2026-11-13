@@ -1131,27 +1131,31 @@ const fn row(n: usize) -> usize {
 /// parts, each of `row(n)` reals. Row a takes x_a/⟨x|x⟩ times the state's conjugate from the vector of its own column
 /// on, lane by lane with fused multiply-adds (as the kernels of linalg.rs): two a real for the product, one a sum.
 fn accumulate(x: &[C64], weights: &[f64], sums: &mut [f64]) {
+    use std::arch::x86_64::{_mm256_fmadd_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_storeu_pd, _mm256_xor_pd};
     let (n, scale) = (x.len(), 1.0 / norm_sqr(x));
     let width = row(n);
+    assert!(n <= STATES && sums.len() >= weights.len() * 2 * n * width);
     let (mut re, mut im) = ([0.0; row(STATES)], [0.0; row(STATES)]);
     for (z, (re, im)) in x.iter().zip(re.iter_mut().zip(&mut im)) {
         (*re, *im) = (z.re, z.im);
     }
-    for (a, left) in x.iter().enumerate() {
-        let (left, from) = (*left * scale, a / LANES * LANES);
-        for (at, (re, im)) in re[from..width].chunks_exact(LANES).zip(im[from..width].chunks_exact(LANES)).enumerate() {
-            // x_a x_b*/⟨x|x⟩ on a vector of columns b.
-            let (mut real, mut imaginary) = ([0.0; LANES], [0.0; LANES]);
-            for l in 0..LANES {
-                real[l] = left.re.mul_add(re[l], left.im * im[l]);
-                imaginary[l] = left.im.mul_add(re[l], -(left.re * im[l]));
-            }
-            let place = 2 * a * width + from + at * LANES;
-            for (sum, w) in sums.chunks_exact_mut(2 * n * width).zip(weights) {
-                let (head, tail) = sum[place..place + width + LANES].split_at_mut(width);
-                for l in 0..LANES {
-                    head[l] = w.mul_add(real[l], head[l]);
-                    tail[l] = w.mul_add(imaginary[l], tail[l]);
+    // SAFETY: every vector read and written lies within the row's `width` reals of `re`, `im` and each sum (above); the
+    // build has AVX2 and FMA (linalg.rs).
+    unsafe {
+        let negative = _mm256_set1_pd(-0.0);
+        for (a, left) in x.iter().enumerate() {
+            let (left, from) = (*left * scale, a / LANES * LANES);
+            let (real_part, imaginary_part) = (_mm256_set1_pd(left.re), _mm256_set1_pd(left.im));
+            for column in (from..width).step_by(LANES) {
+                // x_a x_b*/⟨x|x⟩ on a vector of columns b: (left.re re + left.im im, left.im re − left.re im).
+                let (r, i) = (_mm256_loadu_pd(re.as_ptr().add(column)), _mm256_loadu_pd(im.as_ptr().add(column)));
+                let real = _mm256_fmadd_pd(real_part, r, _mm256_mul_pd(imaginary_part, i));
+                let imaginary = _mm256_fmadd_pd(imaginary_part, r, _mm256_xor_pd(_mm256_mul_pd(real_part, i), negative));
+                let place = 2 * a * width + column;
+                for (j, w) in weights.iter().enumerate() {
+                    let (w, head) = (_mm256_set1_pd(*w), sums.as_mut_ptr().add(j * 2 * n * width + place));
+                    _mm256_storeu_pd(head, _mm256_fmadd_pd(w, real, _mm256_loadu_pd(head)));
+                    _mm256_storeu_pd(head.add(width), _mm256_fmadd_pd(w, imaginary, _mm256_loadu_pd(head.add(width))));
                 }
             }
         }
