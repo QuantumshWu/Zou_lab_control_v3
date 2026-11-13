@@ -59,7 +59,12 @@
 //! the same output at twice the step differs by Q(2τ) − Q(τ) = (2^p − 1) e(τ) to the leading order, and
 //! e(τ) = [Q(2τ) − Q(τ)]/(2^p − 1) (decide.rs `richardson` at the ratio ½, less the level's own share). `between` takes it
 //! from two ensembles of the same trajectories -- the same numbers, so the same initial atoms and the same streams -- at
-//! τ and at 2τ: the loss and each row as shown as they are, the total T relative to the finer level's.
+//! τ and at 2τ: the loss and each row as shown as they are, the total T relative to the finer level's and weighed by the
+//! finer level's held share 1 − L -- as T's account weighs it (solve.rs `accounts`): T describes the held atoms, and its
+//! error counts at an output by their share. Unweighed, an output where nearly every atom is lost reads T on the few
+//! groups that still hold one, at a relative noise the target weighs by almost nothing, and that noise is the read's
+//! (measured, S2Q at 0.44 µs: T's read on 5 to 9 of its groups at far ends of 2 to 21 times the bound, from 88 to 5632
+//! pairs alike).
 //!
 //! What it reads of a quantity is the error's size over the run: its mean square over the K outputs after t = 0,
 //! M = (1/K) Σ_k e_k² -- the square of the mean error plus the error's variance over the outputs, so an error that
@@ -607,7 +612,8 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
 
 /// The size of the step's error over the run as two ensembles measure it (module documentation, # The step's error):
 /// per quantity the read of its mean square over the outputs after t = 0 -- the loss's and each row's as shown
-/// (absolute, squared), and the total T's (the mean over the three lab axes, the T the target is on) relative to it --
+/// (absolute, squared), and the total T's (the mean over the three lab axes, the T the target is on) relative to it and
+/// weighed by the held share, as its account is --
 /// none where no output reads it at both levels. A read is of the mean square itself, unbiased, so it lies about zero,
 /// on either side, where there is no error.
 #[derive(Clone, Debug)]
@@ -653,12 +659,13 @@ pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scale
     };
     let all: Vec<&Jackknife> = each.iter().filter(|j| counted(&j.full) && j.leave.iter().all(|l| counted(l))).collect();
     let temperature = {
-        // T's error is relative to the finer level's T: read where every level's total T is a positive number.
+        // T's error is relative to the finer level's T and weighed by its held share, as T's account is: read where every
+        // level's total T is a positive number.
         let read = |m: &[Moments]| m.iter().all(|x| x.temperature.is_some_and(|t| t.iter().sum::<f64>() > 0.));
         let at: Vec<&Jackknife> = each.iter().filter(|j| read(&j.full) && j.leave.iter().all(|l| read(l))).collect();
         (!at.is_empty()).then(|| {
             let total = |m: &Moments| m.temperature.map_or(f64::NAN, |t| t.iter().sum::<f64>());
-            let e = |m: &[Moments]| share * (total(&m[1]) / total(&m[0]) - 1.);
+            let e = |m: &[Moments]| share * (1. - loss(&m[0])) * (total(&m[1]) / total(&m[0]) - 1.);
             size(&at, &e, at.iter().map(|j| j.holding).fold(f64::INFINITY, f64::min))
         })
     };
