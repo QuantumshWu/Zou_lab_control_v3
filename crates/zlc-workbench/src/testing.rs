@@ -1455,6 +1455,45 @@ mod tests {
     const GONE: &str = "SerialPortUnusable: COM3 could not be opened: not present (os error 2: The system cannot find the file specified) \
                         -- serial ports on this PC: COM5 (USB-SERIAL CH340)";
 
+    /// Types whose resources share a kind scan one after another (each opens every free port of its
+    /// kind at once); a type of another kind and one that binds nothing scan beside them. A type that
+    /// misses its deadline frees its kind for the next, and the reply waits for every type, said in
+    /// the catalogue's order.
+    #[test]
+    fn a_scan_asks_types_of_one_resource_kind_one_after_another() {
+        let mut catalog = ports_catalog();
+        let types = catalog["types"].as_array_mut().unwrap();
+        types[0]["queries"] = json!(["discover"]);
+        types.push(json!({"type_id": "waveform.hwt", "kind": "device", "family": "waveform", "label": "Magnetometer", "resources": ["serial:{port}"],
+            "queries": ["discover"], "parameters": [{"name": "port", "type": "str", "label": "Serial port", "default": ""}]}));
+        types.push(json!({"type_id": "rf.scope", "kind": "device", "family": "rf", "label": "Scope", "resources": ["visa:{resource}"],
+            "queries": ["discover"], "parameters": [{"name": "resource", "type": "str", "label": "VISA resource", "default": ""}]}));
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut wb = Workbench::new(&scratch("scan-kinds"), Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        let asked = |calls: &Rc<RefCell<Calls>>| -> Vec<(u64, String)> { calls.borrow().0.iter().filter_map(|call| {
+            let mut parts = call.split(' ');
+            (parts.next()? == "discover").then_some(())?;
+            Some((parts.next()?.parse().ok()?, parts.next()?.to_owned()))
+        }).collect() };
+        let ticket = |calls: &Rc<RefCell<Calls>>, type_id: &str| asked(calls).iter().find(|(_, asked)| asked == type_id).unwrap().0;
+        let names = |calls: &Rc<RefCell<Calls>>| asked(calls).into_iter().map(|(_, type_id)| type_id).collect::<Vec<_>>();
+        wb.apply("discover_devices", &json!({}), &Origin::Operator, 7, &mut host);
+        assert_eq!(names(&calls), ["camera.virtual_mot", "waveform.n100", "rf.scope"], "the second serial type waits; the others scan beside");
+        event(&mut wb, Event::Answered { ticket: ticket(&calls, "rf.scope"), result: Ok(json!({"found": [], "notes": []})) }, &mut host);
+        event(&mut wb, Event::Answered { ticket: ticket(&calls, "camera.virtual_mot"), result: Ok(json!({"found": [], "notes": []})) }, &mut host);
+        assert_eq!(names(&calls).len(), 3, "the serial kind is still taken");
+        event(&mut wb, Event::Answered { ticket: ticket(&calls, "waveform.n100"), result: Ok(json!({"found": [{"instance_id": "n100_COM5", "parameters": {"port": "COM5"}}], "notes": []})) }, &mut host);
+        assert_eq!(names(&calls), ["camera.virtual_mot", "waveform.n100", "rf.scope", "waveform.hwt"], "asked once the one before it answered");
+        assert!(wb.take_replies().is_empty(), "the reply waits for every type");
+        assert_eq!(apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap_err(), "hardware scan still running: waveform.hwt");
+        event(&mut wb, Event::Answered { ticket: ticket(&calls, "waveform.hwt"), result: Err("no answer within 20s".into()) }, &mut host);
+        let (request, reply) = wb.take_replies().pop().unwrap();
+        assert_eq!((request, reply.unwrap()["message"].as_str().map(str::to_owned)),
+                   (7, Some("discovered 1 device; waveform.hwt: no answer within 20s; camera: No module named pypylon".to_owned())));
+        assert_eq!(wb.apparatus_state()["discovered"][0]["parameters"]["port"], "COM5");
+    }
+
     /// A filled-in port is a record of an earlier find: a row whose port cannot be used at all is
     /// looked for again with its type's resolve (without that port), found elsewhere, pinned and
     /// opened there, and the Init line and the row's own log say what happened.

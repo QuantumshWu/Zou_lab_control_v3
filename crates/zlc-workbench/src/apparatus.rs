@@ -70,9 +70,11 @@ pub enum LiveState { Opening, Open, Closing, Failed }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Settling { Init, Apply, Close(String), Shutdown }
 
-/// A hardware scan in flight: who asked, the types still to answer, what came back, and the
-/// bound resources of a kind a scanned type binds, which it passed over (`COM3 (n100)`).
-pub struct Scan { request: u64, asked: Vec<String>, pending: Vec<String>, found: Vec<Entry>, reasons: Vec<(String, Vec<String>)>, passed: Vec<String> }
+/// A hardware scan in flight: who asked, the types still to answer (`queued`: of them, those not
+/// asked yet, waiting for a type of their resource kind), what came back, the bound resources every
+/// type is handed, and those of a kind a scanned type binds, which it passed over (`COM3 (n100)`).
+pub struct Scan { request: u64, asked: Vec<String>, pending: Vec<String>, queued: Vec<String>, found: Vec<Entry>, reasons: Vec<(String, Vec<String>)>,
+                  excluded: Vec<String>, passed: Vec<String> }
 
 /// What a row's resolve answer comes to (`pin`): the row it opens as (with what was found), the
 /// values it opens with over that row for this open only, whether anything was found, and its line.
@@ -367,9 +369,13 @@ impl Workbench {
         Ok(json!({"devices": self.apparatus.draft.iter().map(|entry| &entry.instance_id).collect::<Vec<_>>()}))
     }
 
-    /// Scan hardware (v2 DeviceManagerPresenter.discover): every type with a scan is
-    /// asked at once in its own plugin process; nothing found is opened or joins the
-    /// draft. The reply comes when every type has answered (or missed its deadline).
+    /// Scan hardware (v2 DeviceManagerPresenter.discover): every type with a scan is asked in
+    /// its plugin process, at once but for one rule -- types whose declared resources share a kind
+    /// (`serial` of `serial:{port}`, `visa`) are asked one after another, in the catalogue's
+    /// order, each once the one before it answered (or missed its deadline): each opens every free
+    /// resource of its kind at once, and two such scans would find each other's ports in use.
+    /// Types of other kinds, and types that bind nothing, scan beside them. Nothing found is
+    /// opened or joins the draft. The reply comes when every type has answered (or missed its deadline).
     pub(crate) fn discover_devices(&mut self, request: u64) -> Result<Option<Value>, String> {
         self.not_scanning()?;
         // v2 discover: a device change under way (opening what is on the bus) is not scanned over.
@@ -385,16 +391,38 @@ impl Workbench {
         // those of a kind a scanned type binds (a serial scan passed over COM3).
         let bound = self.bound_resources(None);
         let excluded: Vec<String> = bound.iter().map(|(resource, _)| resource.clone()).collect();
-        let kinds: BTreeSet<String> = types.iter().filter_map(|type_id| self.catalog.get(type_id)).flat_map(|item| &item.resources)
-            .filter_map(|template| template.split_once(':').map(|(kind, _)| kind.trim().to_lowercase())).collect();
+        let kinds: BTreeSet<String> = types.iter().flat_map(|type_id| self.resource_kinds(type_id)).collect();
         let passed = bound.iter().filter_map(|(resource, role)| resource.split_once(':').filter(|(kind, _)| kinds.contains(*kind))
             .map(|(_, value)| format!("{value} ({role})"))).collect();
-        for type_id in &types {
-            let ticket = self.ticket(Ticket::Discover { type_id: type_id.clone() });
-            self.plugins.discover(ticket, type_id, &excluded);
-        }
-        self.scan = Some(Scan { request, asked: types.clone(), pending: types, found: Vec::new(), reasons: Vec::new(), passed });
+        self.scan = Some(Scan { request, asked: types.clone(), pending: types.clone(), queued: types, found: Vec::new(), reasons: Vec::new(), excluded, passed });
+        self.ask_scans();
         Ok(None)
+    }
+
+    /// The kinds of resource a type binds (`serial` of `serial:{port}`), as its catalogue entry declares them.
+    fn resource_kinds(&self, type_id: &str) -> BTreeSet<String> {
+        self.catalog.get(type_id).into_iter().flat_map(|item| &item.resources)
+            .filter_map(|template| template.split_once(':').map(|(kind, _)| kind.trim().to_lowercase())).collect()
+    }
+
+    /// Ask every type of the scan still queued that shares no resource kind with a type asked and
+    /// not yet answered, nor with a queued type before it (so each kind's types go in the catalogue's order).
+    fn ask_scans(&mut self) {
+        let Some(scan) = self.scan.as_ref() else { return };
+        let mut taken: BTreeSet<String> = scan.pending.iter().filter(|type_id| !scan.queued.contains(type_id))
+            .flat_map(|type_id| self.resource_kinds(type_id)).collect();
+        let mut asking: Vec<String> = Vec::new();
+        for type_id in &scan.queued {
+            let kinds = self.resource_kinds(type_id);
+            if kinds.is_disjoint(&taken) { asking.push(type_id.clone()); }
+            taken.extend(kinds);
+        }
+        let excluded = scan.excluded.clone();
+        if let Some(scan) = self.scan.as_mut() { scan.queued.retain(|type_id| !asking.contains(type_id)); }
+        for type_id in asking {
+            let ticket = self.ticket(Ticket::Discover { type_id: type_id.clone() });
+            self.plugins.discover(ticket, &type_id, &excluded);
+        }
     }
 
     /// Every physical resource bound now, once each with the role that binds it: each draft row's,
@@ -453,7 +481,8 @@ impl Workbench {
                 None => scan.reasons.push((reason, vec![type_id.to_owned()])),
             }
         }
-        if !scan.pending.is_empty() { return; }
+        // Its resource kind is free again: the next type of that kind is asked.
+        if !scan.pending.is_empty() { self.ask_scans(); return; }
         let mut scan = self.scan.take().expect("scan");
         // The families that did not load could not be asked: each says why (no plugin environment, a missing vendor runtime).
         for (reason, families) in self.unavailable_families() {
