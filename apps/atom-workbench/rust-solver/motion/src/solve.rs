@@ -291,9 +291,13 @@
 //!   read 138 times its counted work, and a keep's coordinates -- its tables' axes, an interpolation's work going as
 //!   four to their number -- were unseen: S3's carrier's dressing priced as the bare drives, where with its tables it
 //!   is twice them, and its run's steps 2.4 times dearer.)
-//! - Pricing costs work of its own, so it is spent only where it could save: where every unit's error removed, at the
-//!   least work a µs any kept model has (`Pricing::least`), with its pilot run again, would cost less than keeping
-//!   nothing. The scout and the pilot price (`Reads::priced`); the product and carried states ask the room alone -- a
+//! - Pricing costs work of its own -- it builds and rates kept models --, so it is spent only where the most any keep
+//!   could save pays beyond its spread over the pilot's groups (`Pricing::could_save`, decide.rs `pays`: the old
+//!   engine's gate on every spend): every unit's error removed, its pilot run again, at the current model's work a µs,
+//!   which a kept model's is not below where a fold costs less than what it folds. (Gated on the least work a µs a kept
+//!   model can have instead, the step alone, a twentieth of the current model's, PGC3D's scout and pilot priced keeps
+//!   for 0.7 and 1.6 s of a 5.6 s run, where the most any keep could save is 16 % ± 36 %.) The scout and the pilot
+//!   price (`Reads::priced`); the product and carried states ask the room alone -- a
 //!   carried state's attempt runs its own pilot whatever it keeps, so any saving would pay there (every unit priced
 //!   at every attempt's start: R2_RECOIL 98 s, a kept model of 5.7 GB). A keep that pays by its rate alone is not
 //!   looked for: a fold is made to cost less than what it folds, and where one does not the fold is at fault, not the
@@ -1358,8 +1362,8 @@ impl Reads {
 /// product's trajectories, where its looks have room for the statistics; none where some look has none (no number of
 /// trajectories fits beside its errors). A set kept where nothing is an option saves beyond its saving's spread over
 /// the pilot's groups (decide.rs `pays`; `Pricing::share_of`). Keeps are priced (`Reads::priced`) on the scout and
-/// the pilot, and only where some keep could pay at all: every unit's error removed at the least work a µs a kept model
-/// can have (`Pricing::least`), its pilot run again (`Level::need_alone`), against keeping nothing. On the scout, whose
+/// the pilot, and only where the most any keep could save pays beyond its spread (`Pricing::could_save`: every unit's
+/// error removed, its pilot run again, at the current model's work a µs). On the scout, whose
 /// reads are few, all of it is judged at the model's error they leave no doubt of (`Doubt`, `clear`): the room, and
 /// the work the current model's error asks; the units taken to the far end of the doubt (`raised`). In the product
 /// (`Reads::Product`) and on carried states the room alone is asked: the pilot has priced the rest, and the carried
@@ -1400,6 +1404,10 @@ fn keep(
     // Keeping nothing: no option where some look has no room for the statistics; else the current model's work a µs
     // times its product's trajectories, where some keep could save at all.
     let crowded = !weighing(&counted, &clear(fixed, &near), step, means, &held, &read).is_empty();
+    // Keeping nothing: no option where some look has no room for the statistics; else the current model's work a µs
+    // times its product's trajectories -- where the most any keep could save pays (`could_save`): the jackknife's
+    // levels are read for that, and for the set's saving after.
+    let mut others = vec![];
     let none = if crowded {
         None
     } else {
@@ -1407,11 +1415,11 @@ fn keep(
             return None;
         }
         pricing.own = pricing.own();
-        let spent = pricing.mean(&pricing.own, None) * pricing.all.need;
-        if !(pricing.least() * (pricing.again + pricing.all.need_alone()) < spent) {
+        others = pricing.leave_one_out();
+        if !pays(0., pricing.could_save(&others)) {
             return None;
         }
-        Some(spent)
+        Some(pricing.mean(&pricing.own, None) * pricing.all.need)
     };
     let doubts = scouted.unwrap_or_else(doubt);
     let far = |set: &[usize]| raised(&without(fixed, means, &read, set), &doubts.interval(set));
@@ -1440,7 +1448,6 @@ fn keep(
     }
     if none.is_some() {
         let with = pricing.rates(&set)?;
-        let others = pricing.leave_one_out();
         let saving = Read { value: pricing.share_of(&pricing.all, pricing.all.need_without_all(&set), &with), spread: spread(others.iter().map(|l| pricing.share_of(l, l.need_without_all(&set), &with)), others.len() as f64) };
         if !pays(0., saving) {
             return None;
@@ -3578,6 +3585,15 @@ impl<'a> Pricing<'a> {
     fn share_of(&self, level: &Level, need: f64, rates: &[f64]) -> f64 {
         let spent = self.mean(&self.own, level.left) * level.need;
         if spent > 0. { 1. - self.mean(rates, level.left) * (need + self.again) / spent } else { 0. }
+    }
+
+    /// The most any keep could save, spread over the jackknife's levels `others` (`keep`): every unit's error removed
+    /// (`Level::need_alone`), its pilot run again, at the current model's work a µs -- a kept model's is no less: a fold
+    /// is made to cost less than what it folds, and a keep that pays by its rate alone is not looked for (module
+    /// documentation, # One rule for a keep). The old engine's gate on every spend (cost.rs `pays`: what it could save
+    /// beyond the need's own error), read before a kept model is built: pricing builds and rates them.
+    fn could_save(&self, others: &[Level]) -> Read {
+        Read { value: self.share_of(&self.all, self.all.need_alone(), &self.own), spread: spread(others.iter().map(|l| self.share_of(l, l.need_alone(), &self.own)), others.len() as f64) }
     }
 
 }
