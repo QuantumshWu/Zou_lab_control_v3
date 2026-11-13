@@ -358,6 +358,19 @@ pub struct Ensemble<'a> {
     hbar_over_mass: f64,
     /// The proposals that read deeper than their well's bottom (`deeper`).
     over: std::sync::atomic::AtomicU64,
+    /// The draws made, the potential's evaluations they read (one a proposal), and the quadratures' (`evaluations`).
+    drawn: std::sync::atomic::AtomicU64,
+    proposed: std::sync::atomic::AtomicU64,
+    integrated: std::sync::atomic::AtomicU64,
+}
+
+/// What an ensemble's draws and quadratures cost its model so far, in evaluations of the prepared potential
+/// (`Ensemble::evaluations`): per draw the proposals it read -- one at the least, where none was drawn yet --, and the
+/// quadratures' evaluations in all (`summed`) -- what a model's potential costs it beside its steps (solve.rs `Formula`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Evaluations {
+    pub per_draw: f64,
+    pub integrated: f64,
 }
 
 impl<'a> Ensemble<'a> {
@@ -393,7 +406,8 @@ impl<'a> Ensemble<'a> {
                 Ok(component)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        Ok(Ensemble { components, kt, hbar_over_mass, over: std::sync::atomic::AtomicU64::new(0) })
+        let zero = || std::sync::atomic::AtomicU64::new(0);
+        Ok(Ensemble { components, kt, hbar_over_mass, over: zero(), drawn: zero(), proposed: zero(), integrated: zero() })
     }
 
     /// The initial state of trajectory `index` of the run `seed`: its group the `GROUP` trajectories from index − index mod
@@ -414,8 +428,10 @@ impl<'a> Ensemble<'a> {
         let c = self.components.iter().position(|c| { let inside = pick < c.weight; pick -= c.weight; inside }).unwrap_or(self.components.len() - 1);
         let c = &self.components[c];
         let mut proposal = [deviates[1], deviates[2], deviates[3], deviates[4]];
+        self.drawn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (r, y, gradient) = loop {
             let r = c.propose(proposal[0], proposal[1], proposal[2], proposal[3]);
+            self.proposed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (v, gradient) = c.well.potential(r);
             let y = -v / self.kt;
             if y > c.ceiling + rounding(self.components.len()) * c.top {
@@ -494,6 +510,7 @@ impl<'a> Ensemble<'a> {
             })
             .collect();
         // The rows summed in their order: the result does not depend on the threads.
+        self.integrated.fetch_add((n * n * n) as u64, std::sync::atomic::Ordering::Relaxed);
         (rows.iter().fold([0.; K], |s, x| std::array::from_fn(|i| s[i] + x[i])), n * n * n)
     }
 
@@ -574,6 +591,12 @@ impl<'a> Ensemble<'a> {
             }
         }
         out
+    }
+
+    /// The prepared potential's evaluations so far (`Evaluations`): per draw, and the quadratures'.
+    pub fn evaluations(&self) -> Evaluations {
+        let (drawn, proposed) = (self.drawn.load(std::sync::atomic::Ordering::Relaxed), self.proposed.load(std::sync::atomic::Ordering::Relaxed));
+        Evaluations { per_draw: if drawn > 0 { proposed as f64 / drawn as f64 } else { 1. }, integrated: self.integrated.load(std::sync::atomic::Ordering::Relaxed) as f64 }
     }
 
     /// The proposals so far that read deeper than their well's bottom (module documentation, # Its draw): none where the

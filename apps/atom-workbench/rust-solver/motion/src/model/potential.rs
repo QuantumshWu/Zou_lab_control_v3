@@ -57,12 +57,16 @@ use rayon::prelude::*;
 use std::sync::Arc;
 
 /// A potential's expansion with the scale of its sum (Σ of its terms' moduli): the rounding of its value is
-/// `rounding(terms)·scale`.
+/// `rounding(terms)·scale`; and the complex multiply-adds that made it (`work`): each far beam pair's jet and its form,
+/// each near cluster's forms -- their elimination's or their table's read, as counted where they are made
+/// (assemble.rs `NearValues::work`) -- and each of their terms' jets, the fourth order's matrices and their diagonal. What
+/// a model's potential costs a step's reference and an initial atom's draw (solve.rs `Formula`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Expansion {
     pub(crate) quadratic: Quadratic,
     pub(crate) scale: f64,
     pub(crate) terms: usize,
+    pub(crate) work: f64,
 }
 
 impl Expansion {
@@ -84,7 +88,7 @@ impl Model {
     pub(crate) fn far_potential(&self, frequency: usize, amplitudes: &[Amplitude], of: &dyn Fn(&crate::linalg::Mat) -> C64, lights: &Lights) -> Expansion {
         let (f, tone) = (&self.light.frequencies[frequency], &self.tones[frequency]);
         let n = f.beams.len();
-        let mut out = Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
+        let mut out = Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0, work: 0.0 };
         for j in 0..n {
             for i in 0..n {
                 let m = of(&tone.pairs[j * n + i]);
@@ -102,6 +106,8 @@ impl Model {
                 }
                 out.scale += (c.value * m).abs();
                 out.terms += 1;
+                // The pair's whole jet (far.rs `pair`) and its form on every part of it.
+                out.work += jet::product_work(jet::WHOLE) + jet::WHOLE as f64;
             }
         }
         out
@@ -176,7 +182,7 @@ impl Model {
     fn expand_here(&self, r: [f64; 3], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&super::tabulate::Tables>) -> Expansion {
         let trap = self.light.trap;
         if !lights.on(trap) {
-            return Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
+            return Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0, work: 0.0 };
         }
         // The lit beams' amplitudes to the order asked -- V_L and its derivatives read no other light and no further --, into
         // a thread's spare (assemble.rs `Held`): a step's reference asks the heap for nothing.
@@ -196,6 +202,7 @@ impl Model {
         }
         out.scale += near.scale;
         out.terms += near.terms;
+        out.work += near.work;
         out
     }
 
@@ -204,7 +211,7 @@ impl Model {
     /// (assemble.rs `Plan::links`), each times its two field components at zero momentum --, with the trap light on less with it
     /// off, jets to `order`; the near forms from their tables where they serve (to first order).
     pub(crate) fn near_potential(&self, amplitudes: &[Amplitude], p: &[f64; GROUND], lights: &Lights, order: usize, tables: Option<&Tables>) -> Expansion {
-        let mut out = Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0 };
+        let mut out = Expansion { quadratic: Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }, scale: 0.0, terms: 0, work: 0.0 };
         if self.carriers.iter().all(|x| !lights.on(x.frequency)) {
             return out;
         }
@@ -233,6 +240,7 @@ impl Model {
         for (&(set, cluster), (plan, near)) in held.iter().zip(&made) {
             let (c, (lights, sign)) = (&self.clusters[cluster], sets[set]);
             let Some(near) = near else { continue };
+            out.work += near.work;
             let fields = self.fields(plan, amplitudes, [0.0; 3], order);
             for link in &plan.links {
                 let (x, y) = link.place;
@@ -263,6 +271,7 @@ impl Model {
                 }
                 out.scale += (coefficient[0] * form[0]).abs() * p[c.states[x]];
                 out.terms += 1;
+                out.work += 2.0 * jet::product_work(parts);
             }
             // The fourth order's shift (assemble.rs, # The fourth order): the diagonal of H⁽⁴⁾ = Herm[−Y N + ½[X, N]]
             // at the point, and its gradient -- the generator's whose gradient the force is. Its second derivatives
@@ -272,7 +281,7 @@ impl Model {
                 site.beams.clear();
                 site.beams.extend_from_slice(amplitudes);
                 let table = tables.and_then(|t| t.of(cluster, lights)).filter(|table| self.placed(table, &mut site));
-                self.quartic(plan, fourth, table, None, &mut site, false);
+                out.work += self.quartic(plan, fourth, table, None, &mut site, false);
                 let (n, size) = (fourth.n, fourth.n * fourth.n);
                 Model::quartic_read(|q| {
                     let (near, partner, metric) = (&q.data[..4 * size], &q.data[4 * size..8 * size], &q.data[8 * size..]);
@@ -294,6 +303,7 @@ impl Model {
                         }
                         out.scale += value.abs() * p[state];
                         out.terms += 1;
+                        out.work += (2 * n * (1 + 6 * order)) as f64;
                     }
                 });
             }

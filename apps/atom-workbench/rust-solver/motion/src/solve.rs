@@ -332,8 +332,20 @@
 //!   end leaving the room whole, and the product ran 1352 trajectories where the model kept on the pilot's reads ran
 //!   552.)
 //!
-//! The price of a keep knows the kept model's work a step at the step the model stands at; a kept model's check may
-//! take a shorter one. That is the accuracy the kept model asks, read as every model's is, and it is not traded back:
+//! A model's work a µs counts its prepared potential beside its step: a step's reference evaluates it once at the least,
+//! and a trajectory's initial draw as many times as the current ensemble's draws took proposals, each evaluation at its
+//! counted work (potential.rs `Expansion::work`: a near light's elimination where the trap light's drives are folded at
+//! the atom, 3.2·10⁻⁴ s against the far form's 2.6·10⁻⁷ s on R2_RECOIL); and a keep's expected total holds its model's
+//! setup, the prior's atoms and the reach's left-out quadrature at the current attempt's counts (`Setup`,
+//! `Formula::setup`). (Priced by the step alone, R2_RECOIL's scout kept the tweezer's drive at the atom at 3619 a µs, the
+//! cheapest, and the next model's setup ran past 280 s.)
+//!
+//! The price of a keep knows the kept model's work a step at the step the model stands at, or at the kept model's own
+//! first rung where that is shorter: the beats a keep brings into the generator ask it before any check reads it, and a
+//! keep that no rung within `MOST_STEPS` runs is refused, as a fold that does not exist is (`Formula::kept`; a
+//! coherence of photons an optical frequency apart, 4.8·10⁹ rad/µs, asks τ < 1.3·10⁻⁹ µs: 5341246b kept such ones for
+//! the user's 5 mW probe, and its next model had no rung at any run from 0.1 to 1000 µs). A kept model's check may
+//! take a shorter step still. That is the accuracy the kept model asks, read as every model's is, and it is not traded back:
 //! a keep undone where its check took a shorter step (as it was) is a decision taken again on the same reads, and it
 //! went back and forth -- on PGC3D, with a batch of bare drives booked too high, some twenty keeps and undos, a model,
 //! its gates and a pilot each (bounds3.status.md). A model's rate is its mean over the run's held states, read at one
@@ -488,7 +500,7 @@
 //! of keeps.
 use crate::adapt;
 use crate::decide::{pays, Outcome, Read};
-use crate::ensemble::{Ensemble, Start, Well, GROUP};
+use crate::ensemble::{Ensemble, Evaluations, Start, Well, GROUP};
 use crate::estimate::{allowance, between, bound_motion, draws_for, half_window, semiclassical, spread, summarize, unseen, Between, Estimate, Fate, Group, Held, Scales, Spread};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
@@ -899,11 +911,66 @@ fn prior(wave: f64, hbar_over_mass: f64, temperature: f64, scales: &Scales) -> f
 /// inside the steps (adapt.rs, # The reads). The ladder has one bottom, the step at which a trajectory takes `MOST_STEPS`
 /// steps, and the first rung is a rung of it: none where no rung down to that one is admissible -- the light or the
 /// trap asks for a shorter step than the cap allows, or a frequency, a curvature or a speed is no number (nothing is
-/// admissible then). The solve refuses such a request (`attempt`): a step that is not admissible computes nothing.
+/// admissible then). The solve refuses such a request (`attempt`), and a keep whose model has none is refused
+/// (`Formula::kept`): a step that is not admissible computes nothing.
+///
+/// The count of pairs n (the rung run/(2n)) starts where a rung can first be admissible, each bound read off its
+/// condition: within the prior, run/(2n) ≤ prior; the reference's turn, ωτ < π for the rung and for its double,
+/// n > run ω/π; the nodes, ½ ρ τ < π at the largest rate ρ = |Ω| + |K| v of the entries (`resolves`), n > run ρ/(4π) at
+/// the fastest speed and n > run ρ/(2π) for the double at the typical one. Below that n no rung is admissible, so the
+/// rung found is the scan's from n = 1; and a light that asks a beat no rung within the cap resolves is told at once,
+/// not by counting to the cap (a keep of photons 736 THz apart asks 10⁻⁹ µs: measured, 5341246b's second model of the
+/// user's 5 mW probe, 14.8 s to say it).
 fn first_rung(run: f64, prior: f64, frequency: f64, kick: f64, sampled: &[[f64; 2]], fastest: f64, typical: f64) -> Option<f64> {
-    // The fewest pairs whose rung is within the prior: run/(2n) ≤ prior from n = run/(2 prior) on (none past the cap).
-    let least = (run / (2. * prior)).ceil().max(1.).min((MOST_STEPS / 2 + 1) as f64) as u64;
-    (least..=MOST_STEPS / 2).map(|pairs| run / (2 * pairs) as f64).find(|&step| admissible(step, frequency, kick, sampled, fastest) && admissible(2. * step, frequency, kick, sampled, typical))
+    if !sampled.iter().flatten().chain([&frequency, &kick, &fastest, &typical]).all(|x| x.is_finite()) {
+        return None;
+    }
+    let rate = |speed: f64| sampled.iter().map(|[beat, wave]| beat + wave * speed).fold(0., f64::max);
+    // The prior's bound is the rule itself (nothing else checks it): its ceiling. The others are admissibility's, which
+    // decides at each n: their floors start the count at or below the first n each allows, the rounding of the products
+    // taken one before it at most.
+    let least = [(run / (2. * prior)).ceil(), (run * frequency / PI).floor(), (run * rate(fastest) / (4. * PI)).floor(), (run * rate(typical) / (2. * PI)).floor()].into_iter().fold(1., f64::max);
+    (least <= (MOST_STEPS / 2) as f64)
+        .then(|| (least as u64..=MOST_STEPS / 2).map(|pairs| run / (2 * pairs) as f64).find(|&step| admissible(step, frequency, kick, sampled, fastest) && admissible(2. * step, frequency, kick, sampled, typical)))
+        .flatten()
+}
+
+/// What a model's first rung reads beside the entries its steps sample (`first_rung`): the run's length, the physics
+/// prior's step, the trap's largest frequency, the kick's curvature over the reach and the reach's speeds -- an
+/// attempt's, the same for every model priced in it (`Formula::kept`: a kept model's kick, a new curvature of the
+/// light's potential, is its own attempt's to read; its entries -- the beats a keep brings into the generator -- are
+/// read here).
+#[derive(Clone, Copy, Debug)]
+struct Ladder {
+    run: f64,
+    prior: f64,
+    frequency: f64,
+    kick: f64,
+    fastest: f64,
+    typical: f64,
+}
+/// What an attempt's model costs in evaluations of its prepared potential beside its steps' own work (`Formula::rate`,
+/// `Formula::kept`), counted on the current attempt: per trajectory's initial draw the proposals it reads
+/// (`Ensemble::evaluations`), and per attempt its setup's -- the prior's atoms, the pilot's number of draws
+/// (`atoms`), and the reach's left-out quadrature (`Model::left_out`), as many as the current attempt's took. A kept
+/// model's attempt makes the same evaluations, each at its own work. (Each step reads the potential at its reference
+/// once at the least, step.rs `middle`: that one is the rate's.)
+#[derive(Clone, Copy, Debug)]
+struct Setup {
+    per_draw: f64,
+    evaluations: f64,
+}
+impl Setup {
+    fn of(drawn: Evaluations, left_out: f64) -> Setup {
+        Setup { per_draw: drawn.per_draw, evaluations: pilot_size() as f64 * drawn.per_draw + left_out }
+    }
+}
+
+impl Ladder {
+    /// The first rung of a model whose steps sample `sampled` (`first_rung`).
+    fn first(&self, sampled: &[[f64; 2]]) -> Option<f64> {
+        first_rung(self.run, self.prior, self.frequency, self.kick, sampled, self.fastest, self.typical)
+    }
 }
 
 /// The rms speed (µm/µs) of atoms at the temperature T (µK): √(3 (ħ/m) k_BT/ħ), the reach's typical atom at the
@@ -1491,6 +1558,8 @@ fn keep(
     scales: &Scales,
     unsampled: [f64; 2],
     tables: &Tables,
+    ladder: &Ladder,
+    setup: Setup,
     again: f64,
     reads: Reads,
 ) -> Option<Vec<usize>> {
@@ -1507,7 +1576,7 @@ fn keep(
     let doubt = || Doubt::new(measured, fixed.model.len(), parts, scales, unsampled);
     let scouted = reads.few().then(doubt);
     let near = scouted.as_ref().map_or_else(|| vec![[0.; 2]; fixed.model.len()], |d| d.interval(&[]));
-    let mut pricing = Pricing::new(Formula::new(model, kept, units, reference, centre, tables), measured, means, parts, estimates, fixed, step, scales, unsampled, again, &near);
+    let mut pricing = Pricing::new(Formula::new(model, kept, units, reference, centre, tables, *ladder, setup), measured, means, parts, estimates, fixed, step, scales, unsampled, again, &near);
     // Keeping nothing: no option where some look has no room for the statistics; else the current model's work a µs
     // times its product's trajectories, where some keep could save at all.
     let crowded = !weighing(&counted, &clear(fixed, &near), step, means, &held, &read).is_empty();
@@ -1533,14 +1602,14 @@ fn keep(
     // A kept set's work a µs (its mean rate, made once a set) and the bound below every set's (`Pricing::least`); the
     // product's trajectories beside the error it leaves (`Level::need_without_all`), and the chance that the next
     // pilot reads a look without room (`Doubt::chance`).
-    let rates: std::cell::RefCell<HashMap<Vec<usize>, Option<f64>>> = std::cell::RefCell::new(HashMap::new());
-    let rate = |set: &[usize]| -> Option<f64> {
+    let rates: std::cell::RefCell<HashMap<Vec<usize>, Option<[f64; 2]>>> = std::cell::RefCell::new(HashMap::new());
+    let rate = |set: &[usize]| -> Option<[f64; 2]> {
         let mut key = set.to_vec();
         key.sort_unstable();
         if let Some(&made) = rates.borrow().get(&key) {
             return made;
         }
-        let made = pricing.rates(&key).map(|r| pricing.mean(&r, None));
+        let made = pricing.rates(&key).map(|(r, setup)| [pricing.mean(&r, None), setup]);
         rates.borrow_mut().insert(key, made);
         made
     };
@@ -1554,7 +1623,7 @@ fn keep(
         return None;
     }
     if none.is_some() {
-        let with = pricing.rates(&set)?;
+        let (with, _) = pricing.rates(&set)?;
         let saving = Read { value: pricing.share_of(&pricing.all, pricing.all.need_without_all(&set), &with), spread: spread(others.iter().map(|l| pricing.share_of(l, l.need_without_all(&set), &with)), others.len() as f64) };
         if !pays(0., saving) {
             return None;
@@ -1582,7 +1651,13 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     // evaluations of the potential than the most trajectories a solve runs have initial atoms. It and the kick's
     // curvature over the reach (`admissible`), of the beams' largest moduli over its box, ask nothing of one another:
     // side by side on the pool.
+    let integrated = ensemble.evaluations().integrated;
     let (unsampled, kick) = rayon::join(|| model.left_out(judged, ensemble, MOST_TRAJECTORIES), || model.kick_curvature(judged, &model.moduli(judged), trap));
+    // A keep's model's setup as this attempt's counts it (`Setup`), its draws' proposals read when the keep is asked.
+    let setup = {
+        let left_out = ensemble.evaluations().integrated - integrated;
+        move || Setup::of(ensemble.evaluations(), left_out)
+    };
     let (report, unheld) = (setting.reported.as_ref().unwrap_or(trap), setting.reported.is_none());
     let scales = Scales { hbar_over_mass: hm, frequencies: report.lab };
     let plan = Plan::new(&request.times_us, report.lab);
@@ -1598,7 +1673,9 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     // of the ensemble the reach is made for (model.rs `Reach::kinetic_uk`).
     let kinetic = judged.kinetic_uk.iter().sum::<f64>() / 3.;
     let (frequency, typical, end) = (trap.frequencies.iter().copied().fold(0., f64::max), typical_speed(hm, kinetic, fastest), plan.end);
-    let first_rung = first_rung(end, prior(model.carrier_wave_number(), hm, kinetic, &scales), frequency, kick, entries, fastest, typical)
+    let ladder = Ladder { run: end, prior: prior(model.carrier_wave_number(), hm, kinetic, &scales), frequency, kick, fastest, typical };
+    let first_rung = ladder
+        .first(entries)
         .ok_or_else(|| format!("找不到可用的时间步长：在每条轨迹的步数上限（{MOST_STEPS} 步）之内，没有步长能分辨阱中的振荡、光场中势阱的曲率和光场沿原子路径的变化（或者阱频、曲率、原子速率不是有限数）"))?;
     // What the reach's falsifier compares the T read with: the largest kinetic temperature along an axis of the
     // ensemble the reach was made for (model.rs `Reach::kinetic_uk`: T_r where the trap is classical, the zero point's
@@ -1659,7 +1736,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
         let measured = read.measured();
         let means = measured.means(outputs, None, &estimates);
         let fixed = Fixed { model: model_error(&measured.combined(outputs, None, &estimates), unsampled) };
-        let keeps = keep(kept, model, reference, trap.centre, units, &measured, &means, parts, &estimates, &fixed, &shares, &scales, unsampled, &tables, again, reads);
+        let keeps = keep(kept, model, reference, trap.centre, units, &measured, &means, parts, &estimates, &fixed, &shares, &scales, unsampled, &tables, &ladder, setup(), again, reads);
         (keeps.map(|u| u.iter().map(|&u| units[u].clone()).collect()), read)
     };
     // The states the attempt before left (# An attempt's own): decided on before a trajectory runs, for the room (the
@@ -1737,7 +1814,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
             vec![standing(&worse(&own, third.as_ref(), false)); outputs]
         };
         // Units to keep at the pilot's states (`keep`): their model then decides on these states first.
-        let asked = keep(kept, model, reference, trap.centre, units, &measured, &means, &pilot, &read.estimates, &fixed, &step, &scales, unsampled, read.refined.as_ref().unwrap_or(&tables), pilot_size() as f64, Reads::Pilot);
+        let asked = keep(kept, model, reference, trap.centre, units, &measured, &means, &pilot, &read.estimates, &fixed, &step, &scales, unsampled, read.refined.as_ref().unwrap_or(&tables), &ladder, setup(), pilot_size() as f64, Reads::Pilot);
         drop(pilot);
         if let Some(u) = asked {
             return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), Carried { parts: std::mem::take(&mut levels.fine), few: false }));
@@ -1794,7 +1871,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     // made (`pilot_reads`).
     crate::ledger::optical(&mut context.ledger, counts.optical);
     // Units to keep in the product (`keep`), read with the product's estimates and the step's part as the pilot booked it.
-    let keeping = |estimates: &[Estimate], fixed: &Fixed, step: &[Bound]| keep(kept, model, reference, trap.centre, units, &measured, &means, &pilot, estimates, fixed, step, &scales, unsampled, &tables, pilot_size() as f64, Reads::Product);
+    let keeping = |estimates: &[Estimate], fixed: &Fixed, step: &[Bound]| keep(kept, model, reference, trap.centre, units, &measured, &means, &pilot, estimates, fixed, step, &scales, unsampled, &tables, &ladder, setup(), pilot_size() as f64, Reads::Product);
     {
         // The ledger's items: each folded unit's error on what is shown and on T (its largest over the outputs, weighed by
         // the pilot's held share as the totals are; an output where the pilot holds no atom weighs nothing: its units'
@@ -3045,7 +3122,7 @@ fn binding(estimates: &[Estimate], fixed: &Fixed, step: &[Bound], read: &[bool])
 /// A set's expected work is its rate times what it runs, and a set that the bound leaves above the least found -- of
 /// the larger sets, or the set kept -- is never the least: its rate is not made.
 #[allow(clippy::too_many_arguments)]
-fn needed(estimates: &[Estimate], step: &[Bound], means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool], costs: &Costs, work: &dyn Fn(&[usize]) -> Option<f64>, point: &dyn Fn(&[usize]) -> Fixed, far: &dyn Fn(&[usize]) -> Fixed, price: &dyn Fn(&[usize], &[usize]) -> [f64; 2]) -> Vec<usize> {
+fn needed(estimates: &[Estimate], step: &[Bound], means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool], costs: &Costs, work: &dyn Fn(&[usize]) -> Option<[f64; 2]>, point: &dyn Fn(&[usize]) -> Fixed, far: &dyn Fn(&[usize]) -> Fixed, price: &dyn Fn(&[usize], &[usize]) -> [f64; 2]) -> Vec<usize> {
     let tight_at = |set: &[usize]| tight(estimates, &far(set), step, read);
     // The outputs no set has room at: those tight with every unit kept that weighs where the far end is tight.
     let every: Vec<usize> = weights(means, estimates, held, &tight_at(&[])).iter().enumerate().filter(|&(_, w)| *w > 0.).map(|(u, _)| u).collect();
@@ -3061,10 +3138,10 @@ fn needed(estimates: &[Estimate], step: &[Bound], means: &[Vec<[f64; 2]>], held:
     loop {
         // A set with room: what it is expected to cost as the last one kept, and whether a larger one could cost less.
         if !taken.is_empty() && !short(&taken) {
-            let Some(w) = work(&taken) else { break };
+            let Some([w, setup]) = work(&taken) else { break };
             let [n, p] = price(&taken, &beyond);
-            best = best.min(w * (costs.again * (1. + p) + n));
-            if w * (costs.again + costs.floor) >= best {
+            best = best.min(w * (costs.again * (1. + p) + n) + setup);
+            if w * (costs.again + costs.floor) + setup >= best {
                 break;
             }
         }
@@ -3082,7 +3159,7 @@ fn needed(estimates: &[Estimate], step: &[Bound], means: &[Vec<[f64; 2]>], held:
             if chosen.is_some_and(|(_, value)| value > most) {
                 break;
             }
-            if let Some(c) = *made.entry(u).or_insert_with(|| work(&[u])) {
+            if let Some(c) = *made.entry(u).or_insert_with(|| work(&[u]).map(|w| w[0])) {
                 let value = weights[u] / c;
                 // Of equal values the last unit, as a scan of them all in their order takes it.
                 if chosen.is_none_or(|(b, v)| value > v || (value == v && u > b)) {
@@ -3105,7 +3182,7 @@ fn needed(estimates: &[Estimate], step: &[Bound], means: &[Vec<[f64; 2]>], held:
 /// expected to cost no more (`Costs::none`). Then each unit is left out, the dearest first (`single`: its own kept
 /// model's work a µs), where the set without it is expected to cost less. Of the sets, those `short` of room at the
 /// error as read are none where another is not, nor is a set left so (`needed`).
-fn least_expected(taken: &[usize], single: &dyn Fn(usize) -> f64, costs: &Costs, work: &dyn Fn(&[usize]) -> Option<f64>, price: &dyn Fn(&[usize]) -> [f64; 2], short: &dyn Fn(&[usize]) -> bool) -> Vec<usize> {
+fn least_expected(taken: &[usize], single: &dyn Fn(usize) -> f64, costs: &Costs, work: &dyn Fn(&[usize]) -> Option<[f64; 2]>, price: &dyn Fn(&[usize]) -> [f64; 2], short: &dyn Fn(&[usize]) -> bool) -> Vec<usize> {
     let again = costs.again;
     // The first set with room at the error as read: the sets before it are no candidates.
     let from = (0..taken.len()).find(|&j| !short(&taken[..=j]));
@@ -3120,7 +3197,8 @@ fn least_expected(taken: &[usize], single: &dyn Fn(usize) -> f64, costs: &Costs,
         if costs.least * a + b > against {
             return None;
         }
-        Some(work(set)? * a + b)
+        let [w, setup] = work(set)?;
+        Some(w * a + setup + b)
     };
     let mut expected = vec![f64::INFINITY; taken.len()];
     let mut after = f64::INFINITY;
@@ -3512,13 +3590,31 @@ struct Formula<'a> {
     /// over them, as a kept model's axes ask it (`Model::priced_axes`).
     points: Vec<V3>,
     moving: Mutex<HashMap<Key, f64>>,
+    /// The attempt's ladder: a model's first rung (`rung`); and its setup's counts (`potential`).
+    ladder: Ladder,
+    setup: Setup,
 }
 
 impl<'a> Formula<'a> {
-    fn new(model: &'a Model, kept: &'a [Unit], units: &'a [Unit], reference: [f64; GROUND], centre: V3, tables: &'a Tables) -> Formula<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(model: &'a Model, kept: &'a [Unit], units: &'a [Unit], reference: [f64; GROUND], centre: V3, tables: &'a Tables, ladder: Ladder, setup: Setup) -> Formula<'a> {
         let running = model.running();
         let axes = (0..model.clusters().len()).map(|c| tables.of(c, &running).map(|t| model.table_axes(t))).collect();
-        Formula { model, kept, units, reference, centre, tables, axes, points: vec![], moving: Mutex::new(HashMap::new()) }
+        Formula { model, kept, units, reference, centre, tables, axes, points: vec![], moving: Mutex::new(HashMap::new()), ladder, setup }
+    }
+
+    /// A model's first rung on the attempt's ladder (`Ladder::first`), of the entries its steps sample under the running
+    /// lights (model/assemble.rs `Model::sampled`); none where no rung within `MOST_STEPS` is admissible.
+    fn rung(&self, model: &Model) -> Option<f64> {
+        self.ladder.first(&model.sampled(&model.running()))
+    }
+
+    /// A model's prepared potential, one evaluation's counted work (potential.rs `Expansion::work`) as a step's
+    /// reference reads it: at the trap's centre, of the reference's populations, to the second order -- a near light's
+    /// elimination there where the trap light's drives are folded at the atom (milliseconds), a far form's few sums where
+    /// they are not (R2_RECOIL: 3.2·10⁻⁴ s against 2.6·10⁻⁷ s, measured).
+    fn potential(&self, model: &Model) -> f64 {
+        model.expand(self.centre, &self.reference, &model.prepared(), 2, None).work
     }
 
     /// The step's price (step.rs `Price`) at states of the current model, each its cluster, its point and its τ: on the
@@ -3545,10 +3641,14 @@ impl<'a> Formula<'a> {
     /// The model that keeps the units `set` beside the kept ones, of its structure alone (`Model::rekept`), and its price
     /// (`Model::priced`), each cluster's near forms on the axes its table would take (`Model::priced_axes`: those of the
     /// current tables of the clusters it holds -- of every current table where none of them has one --, and the
-    /// coordinates new to them that weigh there beyond the tables' shares). None where the model refuses the keep
-    /// (`Model::new`).
-    fn kept(&self, set: &[usize]) -> Option<(Model, Priced)> {
+    /// coordinates new to them that weigh there beyond the tables' shares), and its first rung (`rung`). None where the
+    /// model refuses the keep (`Model::new`) or no rung is admissible for it: a keep whose beats no step within
+    /// `MOST_STEPS` resolves -- a coherence of photons an optical frequency apart, a beat of 4.8·10⁹ rad/µs asking
+    /// τ < 1.3·10⁻⁹ µs -- makes a model no run can step, its work unbounded (`Pricing::rated_by`). And its potential's
+    /// work an evaluation (`potential`).
+    fn kept(&self, set: &[usize]) -> Option<(Model, Priced, f64, f64)> {
         let with = self.model.rekept(&[self.kept, &set.iter().map(|&u| self.units[u].clone()).collect::<Vec<_>>()].concat()).ok()?;
+        let rung = self.rung(&with)?;
         let moves = |key: Key, moved: &dyn Fn() -> f64| -> f64 {
             if let Some(&known) = self.moving.lock().expect("the coordinates' moves").get(&key) {
                 return known;
@@ -3572,19 +3672,30 @@ impl<'a> Formula<'a> {
             })
             .collect();
         let priced = with.priced(&axes);
-        Some((with, priced))
+        let potential = self.potential(&with);
+        Some((with, priced, rung, potential))
     }
 
     /// The rate at a state of the current model's cluster `cluster` -- the step's price there `price` (`prices`), its τ
     /// and its trajectory's jumps a µs -- under a model priced `priced`: the price grown where the model's cluster that
     /// holds the state's is larger (`Price::grown`, its bandwidth at least its levels' own, `bandwidth`), with that
     /// cluster's counts at a node, the middle with a step's scattering over τ, and the photons.
-    fn rate(&self, model: &Model, priced: &Priced, cluster: usize, price: &Price, tau: f64, jumps: f64) -> f64 {
+    ///
+    /// Beside the step, the model's prepared potential (`potential`: its work an evaluation): a step's reference, and the
+    /// trajectory's initial draw over the run (`Setup::per_draw` evaluations).
+    #[allow(clippy::too_many_arguments)]
+    fn rate(&self, model: &Model, priced: &Priced, cluster: usize, price: &Price, tau: f64, jumps: f64, potential: f64) -> f64 {
         let states = &self.model.clusters()[cluster].states;
         let c = model.cluster_of(states[0]);
         let held = &model.clusters()[c];
         let price = if held.states == *states { *price } else { price.grown(held.states.len(), held.ground, price.bandwidth.max(bandwidth(model, c))) };
-        (price.work(priced.costs[c]) + priced.assembly) / tau + jumps * priced.photons
+        (price.work(priced.costs[c]) + priced.assembly) / tau + jumps * priced.photons + potential * (1. / tau + self.setup.per_draw / self.ladder.run)
+    }
+
+    /// A model's setup a µs of the run (the rate's unit: the expected total work's, `least_expected`): its potential's
+    /// evaluations at the attempt's setup (`Setup::evaluations`), each at its work, over the run's length.
+    fn setup(&self, potential: f64) -> f64 {
+        potential * self.setup.evaluations / self.ladder.run
     }
 }
 
@@ -3642,20 +3753,24 @@ impl<'a> Pricing<'a> {
         self.prices.get_or_init(|| self.formula.prices(&self.rated.iter().map(|pick| (pick.state.sample.cluster, pick.state.sample.at, pick.state.tau)).collect::<Vec<_>>()))
     }
 
-    /// A model's rates at the rated states (`Formula::rate`).
-    fn rated_by(&self, model: &Model, priced: &Priced) -> Vec<f64> {
-        self.rated.iter().zip(self.prices()).map(|(pick, price)| self.formula.rate(model, priced, pick.state.sample.cluster, price, pick.state.tau, pick.jumps)).collect()
+    /// A model's rates at the rated states (`Formula::rate`), each at the step the model would run at there: the state's
+    /// τ, or the model's first rung `rung` where that is shorter -- the step the beats a keep brings in ask before any
+    /// check reads it (`Formula::kept`). The current model's rung is at least the τ its states ran at.
+    fn rated_by(&self, model: &Model, priced: &Priced, rung: f64, potential: f64) -> Vec<f64> {
+        self.rated.iter().zip(self.prices()).map(|(pick, price)| self.formula.rate(model, priced, pick.state.sample.cluster, price, pick.state.tau.min(rung), pick.jumps, potential)).collect()
     }
 
     /// The current model's rates (`Formula::own`).
     fn own(&self) -> Vec<f64> {
-        self.rated_by(self.formula.model, &self.formula.own())
+        let rung = self.formula.rung(self.formula.model).expect("the current model's attempt stands on an admissible rung");
+        self.rated_by(self.formula.model, &self.formula.own(), rung, self.formula.potential(self.formula.model))
     }
 
-    /// The rates of the model that keeps the units `set` beside the kept ones (`Formula::kept`); none for a set the
-    /// model refuses to keep (its folds must exist, `Model::new`): their folds' errors stand.
-    fn rates(&self, set: &[usize]) -> Option<Vec<f64>> {
-        self.formula.kept(set).map(|(with, priced)| self.rated_by(&with, &priced))
+    /// The rates of the model that keeps the units `set` beside the kept ones (`Formula::kept`), and its setup a µs of the
+    /// run (`Formula::setup`: the current model's is spent); none for a set the model refuses to keep (its folds must
+    /// exist, `Model::new`) or no step within the cap runs (its beats): their folds' errors stand.
+    fn rates(&self, set: &[usize]) -> Option<(Vec<f64>, f64)> {
+        self.formula.kept(set).map(|(with, priced, rung, potential)| (self.rated_by(&with, &priced, rung, potential), self.formula.setup(potential)))
     }
 
     /// A bound below every kept set's mean rate (`needed`): the step's price at each rated state with no count at a
@@ -4351,7 +4466,7 @@ mod tests {
             };
             let step = vec![Bound::share(); means.len()];
             let none = tight(estimates, fixed, &step, read).is_empty().then_some(0.);
-            needed(estimates, &step, means, held, read, &Costs { least, floor: 0., again: 1., none }, work, &|set| without(fixed, means, read, set), &|set| without(fixed, means, read, set), &price)
+            needed(estimates, &step, means, held, read, &Costs { least, floor: 0., again: 1., none }, &|set| work(set).map(|w| [w, 0.]), &|set| without(fixed, means, read, set), &|set| without(fixed, means, read, set), &price)
         };
         let summed = |rate: &dyn Fn(usize) -> Option<f64>, set: &[usize]| set.iter().map(|&u| rate(u)).sum::<Option<f64>>();
         let case = |errors: [f64; 3], rest: f64, held: f64, read: bool| {
@@ -4420,7 +4535,7 @@ mod tests {
         // The work a µs of a set of n units: one and the first n of `more`.
         let pick = |more: [f64; 3]| {
             let price = |set: &[usize], _: &[usize]| -> [f64; 2] { [500., [1., 1., 0.05, 0.][set.len()]] };
-            let work = |set: &[usize]| Some(1. + more[..set.len()].iter().sum::<f64>());
+            let work = |set: &[usize]| Some([1. + more[..set.len()].iter().sum::<f64>(), 0.]);
             let costs = Costs { least: 1., floor: 500., again: 88., none: None };
             needed(&estimates, &[Bound::share(); 2], &means, &held, &read, &costs, &work, &|_| Fixed { model: vec![[0.; 2]; 2] }, &|set| without(&fixed, &means, &read, set), &price).len()
         };
@@ -4458,8 +4573,8 @@ mod tests {
         let (again, none) = (88., need(&[]));
         assert!((none / 1000. - 1.).abs() < 0.05, "the current model's need {none}");
         for growth in [0.5, 30.] {
-            let work = |set: &[usize]| Some(1. + if set.is_empty() { 0. } else { growth + 0.001 * set.len() as f64 });
-            let expected = |set: &[usize]| work(set).unwrap() * (again + need(set));
+            let work = |set: &[usize]| Some([1. + if set.is_empty() { 0. } else { growth + 0.001 * set.len() as f64 }, 0.]);
+            let expected = |set: &[usize]| work(set).unwrap()[0] * (again + need(set));
             assert!((0..units).all(|u| expected(&[u]) > none), "growth {growth}: a unit's keep alone pays");
             let costs = Costs { least: 1., floor: need(&(0..units).collect::<Vec<_>>()), again, none: Some(none) };
             let kept = needed(&estimates, &step, &means, &held, &read, &costs, &work, &|set| without(&fixed, &means, &read, set), &|set| without(&fixed, &means, &read, set), &price);
@@ -4523,7 +4638,7 @@ mod tests {
             rows.iter().find(|r| r.0 == mask).unwrap_or_else(|| panic!("a set not recorded: {mask:#06x}"))
         };
         let kept = |by: usize| {
-            let work = |set: &[usize]| Some(if by == 0 { row(set).3 } else { row(set).4 }).filter(|w| w.is_finite());
+            let work = |set: &[usize]| Some(if by == 0 { row(set).3 } else { row(set).4 }).filter(|w| w.is_finite()).map(|w| [w, 0.]);
             least_expected(&(0..16).collect::<Vec<_>>(), &|u| singles[u][by], &Costs { least: 1509565.7, floor: 0., again: 88., none: None }, &work, &|set| [row(set).1, row(set).2], &|_| false)
         };
         assert_eq!((kept(0), kept(1)), ((0..16).collect(), (0..16).collect()));
@@ -5414,7 +5529,8 @@ mod tests {
         let most = (pilot_size() as f64 * (end / tau + end / (2. * tau))).ceil() as usize;
         let reach = &reach;
         let tables = model.tabulate(reach, most);
-        let mut formula = Formula::new(&model, &kept, &units, reference, trap.centre, &tables);
+        let ladder = Ladder { run: end, prior: f64::INFINITY, frequency: trap.frequencies.iter().copied().fold(0., f64::max), kick: 0., fastest: reach.speed, typical: reach.speed };
+        let mut formula = Formula::new(&model, &kept, &units, reference, trap.centre, &tables, ladder, Setup { per_draw: 1., evaluations: 0. });
         // Where the atoms were: the trap's centre and halfway to the reach's box's faces along each lab axis.
         formula.points = std::iter::once(trap.centre)
             .chain((0..3).flat_map(|a| reach.cell[a].map(|edge| std::array::from_fn(|b| if b == a { 0.5 * (trap.centre[b] + edge) } else { trap.centre[b] }))))
@@ -5436,8 +5552,8 @@ mod tests {
         let mean = |rates: &[f64]| rates.iter().sum::<f64>() / rates.len() as f64;
         // A kept set's mean rate over the states by the formula, and by its run with its own tables; a jump a µs.
         let rates = |set: &[usize]| -> [f64; 2] {
-            let (with, priced) = formula.kept(set).unwrap();
-            let priced: Vec<f64> = states.iter().zip(&prices).map(|(&(c, _, tau), price)| formula.rate(&with, &priced, c, price, tau, 1.)).collect();
+            let (with, priced, _, potential) = formula.kept(set).unwrap();
+            let priced: Vec<f64> = states.iter().zip(&prices).map(|(&(c, _, tau), price)| formula.rate(&with, &priced, c, price, tau, 1., potential)).collect();
             let with = Model::new(&request, &light, &[&kept[..], &set.iter().map(|&u| units[u].clone()).collect::<Vec<_>>()].concat()).unwrap();
             let tables = with.tabulate(reach, most);
             let run = Run::tabulated(&with, &tables, reference);
@@ -5860,7 +5976,7 @@ mod tests {
             let room = (stream.uniform() * (units + 1) as f64) as usize;
             let short = |set: &[usize]| set.len() < room;
             let rates: Vec<f64> = (0..units).map(|_| 0.01 + stream.uniform()).collect();
-            let work = |set: &[usize]| Some(1. + set.iter().map(|&u| rates[u]).sum::<f64>());
+            let work = |set: &[usize]| Some([1. + set.iter().map(|&u| rates[u]).sum::<f64>(), 0.]);
             let need = 100. + 400. * stream.uniform();
             let price = |set: &[usize]| [need, if short(set) { 1. } else { 0.1 * stream_free(trial, set.len()) }];
             let chosen = least_expected(&taken, &|u| rates[u], &Costs { least: 1., floor: 0., again: 0., none: None }, &work, &price, &short);
@@ -5959,5 +6075,170 @@ mod tests {
                 assert!(account.is_none(), "{account:?}");
             }
         }
+    }
+
+    /// A keep is priced at the step its model would run at, and refused where no rung within `MOST_STEPS` runs it
+    /// (`Formula::kept`, `Pricing::rated_by`), one rule for every unit: here the photon coherences of R9_HEAT's model
+    /// (its probe's, its repump's and the tweezer's photons, co- and counter-rotating: beats |Δω| from 7.6·10³ to
+    /// 4.8·10⁹ rad/µs), one unit of each beat, on the ladders of runs of 0.1 to 1000 µs. A kept coherence brings its beat
+    /// into the generator: its model has a rung exactly where the cap allows the companion's resolution of it, run·|Δω|/(2π)
+    /// ≤ MOST_STEPS/2 pairs, and the rung then lies below π/|Δω| -- the tweezer's 2.0·10⁸ rad/µs at 0.1 µs, 3·10⁶ steps; an
+    /// optical beat of 4.4·10⁹ at no run. On the formula's 10 µs run every coherence |Δω| ≥ 10⁸ apart is refused (never
+    /// kept), and its read (the one gate at the trap's centre at the reach's speed, photon.rs `Model::coherence_gate`:
+    /// (size/(|Δω| − spread − Doppler))², the fold's own error) is below 1/(|Δω| τ), the share of its interference a step
+    /// of the current model's first rung τ would keep; one at a beat the cap resolves is priced at its model's own first
+    /// rung, below the current one and below π/|Δω|, where its rate is the higher.
+    #[test]
+    fn a_keep_whose_beats_no_rung_resolves_is_refused_and_one_that_a_rung_resolves_is_priced_at_it() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R9_HEAT.json");
+        let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+        let light = Light::new(&request);
+        let initial = components(&request);
+        let reference = alone(initial[0].0);
+        let model = Model::new(&request, &light, &[]).unwrap();
+        let trap = model.trap(&reference, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
+        let units = model.units();
+        let tables = model.tabulate(&reach, 10_000);
+        let hm = model.hbar_over_mass();
+        let kick = model.kick_curvature(&reach, &model.moduli(&reach), &trap);
+        let typical = typical_speed(hm, reach.kinetic_uk.iter().sum::<f64>() / 3., reach.speed);
+        let ladder = |run: f64| Ladder { run, prior: f64::INFINITY, frequency: trap.frequencies.iter().copied().fold(0., f64::max), kick, fastest: reach.speed, typical };
+        let own = ladder(10.).first(&model.sampled(&model.running())).expect("the bare model runs");
+        let mut formula = Formula::new(&model, &[], &units, reference, trap.centre, &tables, ladder(10.), Setup { per_draw: 1., evaluations: 0. });
+        formula.points = vec![trap.centre];
+        let region = model.point_region(trap.centre, reach.speed);
+        let mut seen: Vec<f64> = vec![];
+        let (mut optical, mut resolvable) = (0, 0);
+        for (i, unit) in units.iter().enumerate() {
+            let Unit::Coherence { first, second, .. } = unit else { continue };
+            let beat = (model.omega(first) - model.omega(second)).abs();
+            if seen.iter().any(|b| (b - beat).abs() <= 1e-9 * beat) {
+                continue;
+            }
+            seen.push(beat);
+            let with = model.rekept(std::slice::from_ref(unit)).unwrap();
+            let entries = with.sampled(&with.running());
+            for run in [0.1, 1., 10., 100., 1000.] {
+                match ladder(run).first(&entries) {
+                    None => assert!(run * beat / TAU > (MOST_STEPS / 2) as f64, "{unit:?} (|Δω| {beat:e}) has no rung at {run} µs"),
+                    Some(rung) => assert!(run * beat / TAU <= (MOST_STEPS / 2) as f64 && rung < PI / beat, "{unit:?} (|Δω| {beat:e}): rung {rung} at {run} µs"),
+                }
+            }
+            if beat >= 1e8 {
+                optical += 1;
+                assert!(formula.kept(&[i]).is_none(), "{unit:?} is priced");
+                let read = model.gate_of(&crate::model::units::Read::Coherence(unit.clone()), &region).saturation;
+                assert!(read <= 1. / (beat * own), "{unit:?}: read {read:e} against 1/(|Δω| τ) {:e}", 1. / (beat * own));
+            } else {
+                resolvable += 1;
+                let (_, priced, rung, potential) = formula.kept(&[i]).expect("a coherence a rung resolves is priced");
+                assert!(rung < own && rung < PI / beat, "{unit:?}: its rung {rung} against the current {own} and π/|Δω| {}", PI / beat);
+                let run = Run::tabulated(&model, &tables, reference);
+                let middle = run.middle(0, trap.centre, 0.);
+                let price = Price::of(&middle, [0.; 3], [0.; 3], own);
+                assert!(formula.rate(&with, &priced, 0, &price, rung, 0., potential) > formula.rate(&with, &priced, 0, &price, own, 0., potential), "{unit:?}");
+            }
+        }
+        assert!(optical >= 6 && resolvable >= 1, "{optical} optical and {resolvable} resolvable beats: {seen:?}");
+    }
+
+    /// R2_RECOIL's model as its prior closes it, and its trap light's drive F=2 m=2 → F′=3 m=3 (a unit: kept, it is folded
+    /// with the levels at the atom, model.rs `Unit::Bare`).
+    fn trap_drive_at_the_atom() -> (Request, Light, Vec<Unit>, Unit) {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R2_RECOIL.json");
+        let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+        let light = Light::new(&request);
+        let initial = components(&request);
+        let mut kept = vec![];
+        closed(&request, &light, &mut kept, &initial, request.temperature_uk).unwrap();
+        let (b, e) = (request.states.iter().position(|s| s == "ground-2-2").unwrap(), request.states.iter().position(|s| s == "D2-3-3").unwrap());
+        let drive = Unit::Bare { component: crate::model::Component { frequency: light.trap, counter: false }, excited: e, ground: b };
+        (request, light, kept, drive)
+    }
+
+    /// The trap light's drive folded at the atom moves the well by its levels' shifts over its detuning, and its envelope
+    /// follows (eliminate.rs `Model::near_envelope`: line by line, each its own distance less the spread): B above the
+    /// bare fold's by less than k_BT -- what the rejection sampling's acceptance pays for, as a power of the excess in
+    /// k_BT -- and still above −V at the well's points along the lab axes; the sampling then reads proposals a draw of the
+    /// bare model's order (within a factor 3; measured 4.9 against 2.6), and its 2⁹ draws read the exact
+    /// moments of the model's own lowered isothermal -- (ħ/m)⟨κ_a²⟩ by its quadrature (`Ensemble::kinetic`) -- per lab
+    /// axis within their interval over the groups at the confidence z (three looks) and the quadrature's own difference.
+    /// (With the dissipation's 2/Γ_min the envelope was 4.2·10⁹ rad/µs against 392.6, and no atom was drawn in 140 s.)
+    #[test]
+    fn a_trap_drive_folded_at_the_atom_bounds_its_well_as_tightly_and_draws_its_own_ensemble() {
+        let (request, light, kept, drive) = trap_drive_at_the_atom();
+        let initial = components(&request);
+        let reference = alone(initial[0].0);
+        let hm = hbar_over_mass(request.mass_kg);
+        let models = [Model::new(&request, &light, &kept).unwrap(), Model::new(&request, &light, &[&kept[..], std::slice::from_ref(&drive)].concat()).unwrap()];
+        let mut read: Vec<(f64, f64)> = vec![];
+        for (m, model) in models.iter().enumerate() {
+            let well = Prepared::new(model, &light, reference).unwrap();
+            let bound = well.envelope().1;
+            let centre = well.trap().0;
+            for d in [0., 0.3, 0.7, 1.5, 3.] {
+                for a in 0..3 {
+                    let mut r = centre;
+                    r[a] += d;
+                    assert!(-well.potential(r).0 <= bound, "model {m}: −V {} above B {bound} at {r:?}", -well.potential(r).0);
+                }
+            }
+            let ensemble = Ensemble::new(&[(initial[0].0, 1., &well as &dyn Well)], request.temperature_uk, hm).unwrap();
+            let draws: Vec<V3> = (0..1 << 9).map(|i| ensemble.draw(SEED, i).kappa.map(|k| hm * k * k)).collect();
+            read.push((bound, ensemble.evaluations().per_draw));
+            if m == 1 {
+                let kinetic = ensemble.kinetic(1 << 12);
+                let exact = ensemble.momentum(&[kinetic[0].eta]);
+                let quadrature = kinetic[0].difference / kinetic[0].eta;
+                for a in 0..3 {
+                    let groups: Vec<f64> = draws.chunks(GROUP as usize).map(|g| g.iter().map(|d| d[a]).sum::<f64>() / GROUP as f64).collect();
+                    let g = groups.len() as f64;
+                    let mean = groups.iter().sum::<f64>() / g;
+                    let error = (groups.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (g - 1.) / g).sqrt();
+                    let within = Spread { error, groups: g }.interval_over(3.) + quadrature * exact[a];
+                    assert!((mean - exact[a]).abs() <= within, "axis {a}: {mean} against {} ± {within}", exact[a]);
+                }
+            }
+        }
+        let [(bare, bare_draw), (atom, atom_draw)] = [read[0], read[1]];
+        eprintln!("envelope {bare} -> {atom}; proposals a draw {bare_draw} -> {atom_draw}");
+        assert!(atom >= bare && atom - bare <= KT_PER_UK * request.temperature_uk, "B {atom} against the bare fold's {bare}");
+        assert!(atom_draw <= 3. * bare_draw, "{atom_draw} proposals a draw against {bare_draw}");
+    }
+
+    /// A keep's price holds its model's prepared potential by count (`Formula::potential`, `Formula::rate`,
+    /// `Formula::setup`): the trap drive folded at the atom makes each evaluation an elimination, its count many times the
+    /// bare model's (3.2·10⁻⁴ s against 2.6·10⁻⁷ s measured), and a step's reference alone then outweighs the step's own
+    /// work -- its rate at the step is more than twice what it is without the potential --, and its setup (the prior's
+    /// atoms and the reach's quadrature, at their counts) is in its price.
+    #[test]
+    fn a_keep_that_makes_the_potential_an_elimination_is_priced_by_it() {
+        let (request, light, kept, drive) = trap_drive_at_the_atom();
+        let initial = components(&request);
+        let reference = alone(initial[0].0);
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let trap = model.trap(&reference, &model.prepared()).unwrap();
+        let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
+        let units = model.units();
+        let tables = model.tabulate(&reach, 10_000);
+        let ladder = Ladder { run: 1000., prior: f64::INFINITY, frequency: trap.frequencies.iter().copied().fold(0., f64::max), kick: 0., fastest: reach.speed, typical: reach.speed };
+        let setup = Setup { per_draw: 2., evaluations: pilot_size() as f64 * 2. + 4096. };
+        let mut formula = Formula::new(&model, &kept, &units, reference, trap.centre, &tables, ladder, setup);
+        formula.points = vec![trap.centre];
+        let u = units.iter().position(|x| *x == drive).expect("the trap drive is a unit");
+        let (with, priced, rung, potential) = formula.kept(&[u]).expect("the trap drive at the atom is priced");
+        let own = formula.potential(&model);
+        eprintln!("potential's work an evaluation {own} -> {potential}");
+        assert!(potential > 100. * own, "{potential} against the bare fold's {own}");
+        let tau = rung.min(0.25);
+        let state = reference.iter().position(|&p| p == 1.).unwrap();
+        let c = model.cluster_of(state);
+        let run = Run::tabulated(&model, &tables, reference);
+        let price = Price::of(&run.middle(c, trap.centre, 0.), [0.; 3], [0.; 3], tau);
+        let (with_potential, without) = (formula.rate(&with, &priced, c, &price, tau, 0., potential), formula.rate(&with, &priced, c, &price, tau, 0., 0.));
+        eprintln!("rate {without} -> {with_potential}");
+        assert!(with_potential > 2. * without, "{with_potential} against {without} without the potential");
+        assert!((formula.setup(potential) - potential * setup.evaluations / ladder.run).abs() <= 1e-12 * formula.setup(potential));
     }
 }
