@@ -853,6 +853,36 @@ impl<'a> Run<'a> {
     }
 }
 
+/// What a run of a model counts (`Run::with`) priced from its plans alone, each cluster's near forms read from a table on
+/// given axes (`Model::priced`; solve.rs `Pricing`): no table is made and nothing eliminated -- a count is the
+/// definition's, whatever the numbers. Per cluster its counts at a node (`Middle::work`); a middle with a step's
+/// scattering beside it, and a jump's photons, the largest over the clusters (real multiply-adds).
+pub(crate) struct Priced {
+    pub(crate) costs: Vec<[f64; 3]>,
+    pub(crate) assembly: f64,
+    pub(crate) photons: f64,
+}
+
+impl Model {
+    /// `Priced` with cluster c's near forms from a table on `axes[c].0` axes whose coordinates' values at a point count
+    /// `axes[c].1` (tabulate.rs `Model::table_axes`, `Model::priced_axes`), counted as `Run::with` counts at the focus:
+    /// the scattering makes the fourth order's matrices there, and the middle and a jump's photon at the same point find
+    /// them made (assemble.rs `Model::quartic`); the matrices change along the lab axes the plan's beams change along
+    /// there.
+    pub(crate) fn priced(&self, axes: &[(usize, f64)]) -> Priced {
+        use photon::Gradients;
+        let running = self.running();
+        let plans: Vec<Arc<assemble::Plan>> = (0..self.clusters.len()).map(|c| self.plan(c, &running)).collect();
+        let focus = self.light.amplitudes([0.0; 3]);
+        let live = |p: &assemble::Plan| (0..3).filter(|&a| p.beams.iter().any(|&l| focus[l].gradient[a] != C64::ZERO)).count();
+        let largest = |count: &dyn Fn(&assemble::Plan, usize, f64) -> f64| plans.iter().zip(axes).map(|(p, &(d, place))| count(p, d, place)).fold(0.0, f64::max) * crate::decide::COMPLEX;
+        let scattering = largest(&|p, d, place| p.sited_work(d, place, 1, true) + p.classes_work(d, Gradients::All, live(p)));
+        let photons = largest(&|p, d, place| p.sited_work(d, place, 1, false) + p.classes_work(d, Gradients::None, live(p)) + (0..p.classes.len()).map(|class| p.classes_work(d, Gradients::Of(class), live(p))).fold(0.0, f64::max));
+        let assembly = largest(&|p, d, place| p.middle_work(d, place)) + scattering;
+        Priced { costs: plans.iter().zip(axes).map(|(p, &(d, _))| p.costs(d)).collect(), assembly, photons }
+    }
+}
+
 impl crate::step::Dynamics for Run<'_> {
     type Middle<'a>
         = Middle<'a>
