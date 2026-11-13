@@ -10,10 +10,10 @@
 //! through its own three nodes, its middle and its ends, whatever its length (step.rs, # The kick): what that leaves
 //! is an error of the step's length like the splitting's, and the pilot's companion at twice the step checks both at
 //! the outputs (solve.rs, # The step). The generator's own frequencies are no matter of the step's length: they are
-//! integrated exactly. A step is taken only where its domain proves it (step.rs, # The domain): the model the run takes
-//! holds over its path, and the step is stable there. One that is not proven ends the advance with what its path needs
-//! (`step::Unproven`): the run's model is no model of that step, and no length of a step makes it one. A step that does
-//! not resolve its path at its speed is taken, the trajectory unresolved from it on (`step::Trajectory::unresolved`).
+//! integrated exactly. A step whose state scatters beyond every state of the atom -- a fold far outside its validity
+//! (step.rs, # The domain) -- ends the advance (`step::Refused::Runaway`): no length of a step makes the fold hold. A step
+//! that does not resolve its path at its speed is taken, the trajectory unresolved from it on
+//! (`step::Trajectory::unresolved`).
 //!
 //! τ is one for the run because the splitting is symplectic in its conservative part and its own inverse: at a constant
 //! step the energy of a trap's motion errs by a bounded amount (measured on the reference traps R1: no drift over 10³
@@ -187,8 +187,8 @@ impl Path {
 /// every piece of every step's path -- from the step's start or a jump of the step -- with the time the trajectory is
 /// on it to: the next jump, the step's end, or the read it is found lost at. A trajectory lost on the way stops at
 /// its loss time. Where the scheme refuses a step at every length down to the time's round-off, the advance ends
-/// there with the refusal; so it does where the model gives a jump no photon (`step::jump`), where `domain` does
-/// not prove the step (step.rs, # The domain: a shorter step is no answer to that), and where the middle's optical
+/// there with the refusal; so it does where the model gives a jump no photon (`step::jump`), where a state scatters
+/// beyond every state of the atom (step.rs, # The domain: a shorter step is no answer to that), and where the middle's optical
 /// sector makes no K (step.rs, # The optical sector's noise: a shorter step would only step past it). `scratch` is the trajectory's
 /// (`step::Scratch`): its steps' memory, made once with it; `path` its Brownian path, which it goes along as it is
 /// advanced (`Path`).
@@ -222,7 +222,7 @@ pub fn advance<D: Dynamics>(
             let reads = &at[next..next + at[next..].partition_point(|&time| time <= end)];
             match Midway::new(model, trajectory, length).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch, domain)) {
                 Ok(step) => break (step, end, beyond),
-                Err(refusal @ (Refused::Emission | Refused::Unproven(_) | Refused::Optical(_))) => return Err(refusal),
+                Err(refusal @ (Refused::Emission | Refused::Runaway | Refused::Optical(_))) => return Err(refusal),
                 Err(refusal) => {
                     length *= 0.5;
                     if !(trajectory.time + length > trajectory.time) {

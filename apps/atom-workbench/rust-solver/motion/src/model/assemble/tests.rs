@@ -575,19 +575,7 @@ fn the_decay_s_mismatch_on_a_scene() {
     let request = if name.ends_with(".json") { Request::from_native(&serde_json::from_str(&std::fs::read_to_string(&name).unwrap()).unwrap()).unwrap() } else { scene(&name) };
     let light = Light::new(&request);
     let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let p: [f64; GROUND] = std::array::from_fn(|b| if b == state { 1.0 } else { 0.0 });
-    let mut kept: Vec<Unit> = vec![];
-    let (model, trap, reach) = loop {
-        let model = Model::new(&request, &light, &kept).unwrap();
-        let trap = model.trap(&p, &model.prepared()).unwrap();
-        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
-        let units = model.units();
-        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-        if failing.is_empty() {
-            break (model, trap, reach);
-        }
-        kept.extend(failing);
-    };
+    let (model, _, trap, reach) = Model::closed_at(&request, &light, vec![], state, request.temperature_uk);
     let tables = model.tabulate(&reach, 1 << 20);
     let (lights, kt) = (model.running(), crate::units::KT_PER_UK * request.temperature_uk);
     let mut stream = Stream::new(3, Purpose::Initial, 0, 0);
@@ -903,19 +891,7 @@ fn the_scattering_s_table_error_on_a_scene() {
     let request = if name.ends_with(".json") { Request::from_native(&serde_json::from_str(&std::fs::read_to_string(&name).unwrap()).unwrap()).unwrap() } else { scene(&name) };
     let light = Light::new(&request);
     let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let p: [f64; GROUND] = std::array::from_fn(|b| if b == state { 1.0 } else { 0.0 });
-    let mut kept: Vec<Unit> = vec![];
-    let (model, trap, reach) = loop {
-        let model = Model::new(&request, &light, &kept).unwrap();
-        let trap = model.trap(&p, &model.prepared()).unwrap();
-        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
-        let units = model.units();
-        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-        if failing.is_empty() {
-            break (model, trap, reach);
-        }
-        kept.extend(failing);
-    };
+    let (model, _, trap, reach) = Model::closed_at(&request, &light, vec![], state, request.temperature_uk);
     let tables = model.tabulate(&reach, 1 << 20);
     let (lights, kt) = (model.running(), crate::units::KT_PER_UK * request.temperature_uk);
     let mut stream = Stream::new(3, Purpose::Initial, 0, 0);

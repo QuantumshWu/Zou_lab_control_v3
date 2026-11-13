@@ -181,36 +181,3 @@ fn the_assembly_holds_the_potential_its_force_and_the_photons_rate() {
         }
     }
 }
-
-/// The tweezer scenes' units: every drive's fold with the bare levels exists over the reach (the 852 nm tweezer's saturation
-/// 2m² is 1e-4 or less, a ground state's drives together), its denominator's first order ε far below that and its error at
-/// the trap's centre within its gate's bound and 2ε (the rates'); a static coupling between ground sublevels has its gate and its measured
-/// error there -- the same small parameter, the error m²(p_a + p_b) with m² = S/2 below the gate's bound.
-#[test]
-fn the_far_scenes_units_fold_within_their_gates() {
-    for name in ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED", "R1_SIGMA_P"] {
-        let (_, _, model, p) = built(name);
-        let trap = model.trap(&p, &model.prepared()).unwrap();
-        let reach = model.reach(&trap, &p, 30.0, 2e-3);
-        let units = model.units();
-        let gates = model.gates(&units, &reach);
-        let b = p.iter().position(|&x| x == 1.0).unwrap();
-        let cluster = model.cluster_of(b);
-        let n = model.clusters()[cluster].states.len();
-        let sample = atom_motion::model::Sample { cluster, at: Point { r: trap.centre, kappa: [0.0; 3], t: 0.0 }, psi: vec![C64::ONE; n] };
-        let errors = model.errors(&units, &[sample]);
-        for ((u, g), e) in units.iter().zip(&gates).zip(&errors) {
-            match u {
-                atom_motion::model::Unit::Bare { .. } => {
-                    assert!(g.exists() && g.saturation < 1e-4, "{name}: {u:?} {g:?}");
-                    assert!(e[0].parameter < 1e-4 && e[0].population <= (g.saturation + 2.0 * e[0].parameter) * (1.0 + 1e-9), "{name}: {u:?} measured {:?} above its bound {}", e[0], g.saturation);
-                }
-                atom_motion::model::Unit::Term { .. } => {
-                    assert!(g.saturation.is_finite(), "{name}: {u:?} {g:?}");
-                    assert!(e[0].parameter <= 0.5 * g.saturation * (1.0 + 1e-9), "{name}: {u:?} measured {} above its bound {}", e[0].parameter, g.saturation);
-                }
-                _ => {}
-            }
-        }
-    }
-}

@@ -245,10 +245,10 @@ use super::cluster::Edge;
 use super::eliminate::{term_unit, Shift};
 use super::far::EXCITED;
 use super::own::{Band, Form, Own};
-use super::reach::{pair_span, Cell, Ended, Region, TermForm};
+use super::reach::{pair_span, Region, TermForm};
 use super::readout::Channels;
 use super::tabulate::Tables;
-use super::{Beat, Cluster, Component, Gate, Level, Model, Reach, Sample, Unit, UnitError, Wave};
+use super::{Beat, Cluster, Component, Gate, Level, Model, Sample, Unit, UnitError, Wave};
 use crate::field::Amplitude;
 use crate::linalg::norm3;
 use crate::linalg::{Mat, C64};
@@ -270,11 +270,6 @@ pub(crate) fn destined(into: u32, p: &[f64; STATES]) -> f64 {
 
 /// Where a fold exists (module documentation): S = 2m² < ½ and a < ½.
 pub(crate) const EXISTS: f64 = 0.5;
-
-/// Where a gate's proof over the reach may end in keeping its unit (module documentation, # One rule): a value attained at
-/// a centre in the reach at half the threshold, S = ¼ -- a fold there books its mixing S/2 = ⅛ of its states'
-/// population, 2.5 times the population target 0.05.
-pub(crate) const KEEP: f64 = 0.5 * EXISTS;
 
 /// The fourth order's leading errors in one line's share s (module documentation, # The fold's order, where a ground
 /// state's several drives take the line's place; derivation: fourth.status.md), each the next order's: on the force
@@ -298,7 +293,7 @@ pub(crate) const ORDER_RATES: f64 = {
 pub(crate) const PAIR: f64 = 3.0;
 
 impl Gate {
-    /// Whether the fold exists over the reach: both bounds below ½.
+    /// Whether the fold exists where the gate was read: both values below ½.
     pub fn exists(&self) -> bool {
         self.saturation < EXISTS && self.sweep < EXISTS
     }
@@ -311,21 +306,6 @@ impl Gate {
         OwnGate { saturation: Own::constant(self.saturation), sweep: Own::constant(self.sweep) }.resolved().upper()
     }
 
-    /// The error of the unit this is the gate of, at most, at any state the reach holds -- where the unit's error is its
-    /// gate's own parameter at the state (module documentation, # The errors), on the populations and on T alike. A
-    /// coupling's (`Unit::Term`) is m²(p_a + p_b), m² = S/2 its mixing at the state's point and speed, which the gate
-    /// bounds over the reach, and the two states' populations: together at most 1, and 2 p_a where a = b (a level's
-    /// beating shift counts its one state on both sides). A photon coherence's is m²√(w_i w_j), m² = S/2 of its two
-    /// classes' sizes there and w the largest population among a class's sources, at most 1. None for the others: a
-    /// drive's error carries the first order of its denominator and its pair's mixing, which no gate of its own bounds;
-    /// a dressing and a fold's order have no gate.
-    pub fn error_bound(&self, unit: &Unit) -> Option<f64> {
-        match unit {
-            Unit::Term { a, b, .. } => Some(0.5 * self.saturation * if a == b { 2.0 } else { 1.0 }),
-            Unit::Coherence { .. } => Some(0.5 * self.saturation),
-            Unit::Bare { .. } | Unit::Drive { .. } | Unit::Second { .. } | Unit::Dressing { .. } => None,
-        }
-    }
 }
 
 /// The one gate (module documentation, # One rule) at a point (`gate_own`).
@@ -498,39 +478,6 @@ pub(crate) struct Kept {
     pub(crate) distance: Own,
 }
 
-/// What a unit's gate reads of a region (`Model::judged`, `Model::gate_of`).
-pub(crate) enum Read<'u> {
-    Fold { ground: usize, place: usize, bare: bool },
-    Term { form: Arc<TermForm>, a: usize, b: usize, beat: usize },
-    Coherence { unit: &'u Unit, apart: f64 },
-    Nothing,
-}
-
-/// A model's units' gates as functions of a region (`Model::judged`): what each unit's gate reads, in the units' order,
-/// and the largest wave number of the light's beams twice, a photon coherence's two photons'. The proofs over a reach
-/// (`Model::gates`) and the steps outside it (solve.rs `Domain`) read the same gates.
-pub struct Judged<'u> {
-    reads: Vec<Read<'u>>,
-    wave: f64,
-}
-
-/// What the proofs of the units' statements over a reach ended on (reach.rs, # A proof begun where one ended;
-/// `Model::gates_from`): the reach's box, and per unit proven over its cells what each of its two statements' proofs
-/// ended on -- where a proof of the unit's statements over a reach of that box may begin.
-#[derive(Clone, Default)]
-pub struct Coverings {
-    pub(crate) cell: [[f64; 2]; 3],
-    pub(crate) of: HashMap<Unit, [Ended; 2]>,
-}
-
-impl Coverings {
-    /// What the statement `which` (0 its saturation, 1 its sweep) of `unit` ended on, where a proof of it over a reach of
-    /// the box `cell` may begin: none where the unit was not proven over cells, or over another box.
-    fn begin(&self, unit: &Unit, which: usize, cell: &[[f64; 2]; 3]) -> Option<Ended> {
-        self.of.get(unit).filter(|_| self.cell == *cell).map(|ended| ended[which].clone())
-    }
-}
-
 /// Two frequencies' constant form (far.rs `constant`): on their fields' bases and per pair of their beams, with the
 /// rounding of an entry's own sums (reach.rs `TermForm::rounding_of`) -- the form's, whichever entry is read.
 pub(crate) struct Cross {
@@ -633,23 +580,6 @@ impl Model {
     /// (eliminate.rs `Model::force_over`).
     pub(crate) fn acceleration(&self, region: &Region, within: &dyn Fn(&Cluster) -> bool) -> Own {
         (0..self.clusters.len()).filter(|&c| within(&self.clusters[c])).map(|c| self.force_over(c, region)).fold(Own::constant(0.0), Own::max).scale(self.hbar_over_mass)
-    }
-
-    /// The gate over a region of a fold between any two states' levels -- a photon coherence's --, of size `size`, wave vector
-    /// at most `wave` and a distance `distance` that is a bound over all space: the one gate across the distance less the
-    /// Doppler shift q v, at the rate v L + q a_max -- L the largest slope of two dressed levels' difference, each pair's
-    /// of its own gradient: the constant forms' energies' (eliminate.rs `Gap`; a shift two levels share, the tweezer's
-    /// scalar one, moves none of their differences) with the two levels' shifts by their drives folded at the atom
-    /// (`near_level`) --, a_max the largest acceleration in any cluster, both made once per region.
-    pub(crate) fn gate_over(&self, region: &Region, size: Own, wave: f64, distance: f64) -> OwnGate {
-        let (slope, acceleration) = *region.moving.get_or_init(|| {
-            let near: Vec<Shift> = (0..STATES).map(|s| self.near_level(s, region)).collect();
-            let pairs = (0..STATES).flat_map(|i| (i + 1..STATES).map(move |j| (i, j)));
-            let slope = pairs.map(|(i, j)| Shift::of(Own::constant(0.0), self.gap_slope(i, j, region, false)).add(&near[i]).sub(&near[j]).steepness()).fold(Own::constant(0.0), Own::max);
-            (slope, self.acceleration(region, &|_| true))
-        });
-        let pace = region.pace;
-        gate_own(size, pace.scale(-wave).plus(distance), pace.mul(slope).add(acceleration.scale(wave))).resolved()
     }
 
     /// Whether a state is an explicit excited state of this model.
@@ -1098,121 +1028,6 @@ impl Model {
         self.beats.iter().position(|b| b.0 == *beat)
     }
 
-    /// What each unit's gate reads (`Judged`), made once for a model's units: a drive's its ground state, its place in the
-    /// tail rule's order and whether it is bare; a coupling's its form; a coherence's its unit and its distance over all
-    /// space; nothing for a dressing, which folds nothing, a fold's order -- where the fold exists, so does its next order
-    /// -- and a unit of nothing in this model.
-    pub(crate) fn judged<'u>(&self, units: &'u [Unit]) -> Judged<'u> {
-        let reads = units
-            .iter()
-            .map(|u| match *u {
-                Unit::Bare { component, excited, ground } | Unit::Drive { component, excited, ground } => {
-                    let level = self.ranked[ground].iter().find(|d| d.component == component && d.excited == excited).map(|d| (d.group, self.level(component, excited, ground)));
-                    level.filter(|of| of.1 != Level::Explicit).map_or(Read::Nothing, |(place, level)| Read::Fold { ground, place, bare: level == Level::Bare })
-                }
-                Unit::Term { a, b, ref beat } => self.beat_index(beat).map_or(Read::Nothing, |index| Read::Term { form: self.forms.term(self, a, b, index), a, b, beat: index }),
-                Unit::Dressing { .. } | Unit::Second { .. } => Read::Nothing,
-                Unit::Coherence { ref first, ref second, .. } => Read::Coherence { unit: u, apart: self.omega(&first.plus(-1, second)).abs() - self.spread() },
-            })
-            .collect();
-        Judged { reads, wave: 2.0 * self.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max) }
-    }
-
-    /// A unit's gate over a region, [saturation, sweep] (module documentation, # One rule): its read (`Judged`) of the
-    /// region -- a cell of a reach's proof, the whole space, or a step's path (solve.rs `Domain`): one statement, its value
-    /// on a point the point's own --, every kind through the one gate (`gate`): a drive's by its ground state's tail
-    /// (`folds`), a coupling's (`term_bound`), a photon coherence's
-    /// (`gate_over`, its size its two classes' jumps' bound, photon.rs).
-    pub(crate) fn gate_of(&self, judged: &Judged, u: usize, region: &Region) -> [f64; 2] {
-        match &judged.reads[u] {
-            Read::Fold { ground, place, bare } => {
-                let made = self.folds(*ground, *place, region);
-                if *bare { [made[2], made[3]] } else { [made[0], made[1]] }
-            }
-            Read::Term { form, a, b, beat } => {
-                let made = self.term_bound(form, *a, *b, *beat, region);
-                [made.0, made.1]
-            }
-            Read::Coherence { unit, apart } => {
-                let made = self.gate_over(region, self.coherence_bound(unit, region), judged.wave, *apart).upper();
-                [made.saturation, made.sweep]
-            }
-            Read::Nothing => [0.0; 2],
-        }
-    }
-
-    /// Each unit's gate over the whole space at the speeds up to `speed`, every beam at its peak (`gate_of`): a bound over any
-    /// region at those speeds; and the units it leaves open -- some bound at ½ or above --, the others' gates.
-    pub(crate) fn everywhere(&self, judged: &Judged, speed: f64) -> (Vec<[f64; 2]>, Vec<usize>) {
-        let whole = self.region(self.spans(&Cell { centre: [0.0; 3], half: [f64::INFINITY; 3] }), speed);
-        let everywhere: Vec<[f64; 2]> = (0..judged.reads.len()).map(|u| self.gate_of(judged, u, &whole)).collect();
-        let open = (0..everywhere.len()).filter(|&u| !(everywhere[u][0] < EXISTS && everywhere[u][1] < EXISTS)).collect();
-        (everywhere, open)
-    }
-
-    /// Whether every one of the units `which` has its fold over a region (`gate_of`, `Gate::exists`).
-    pub(crate) fn exist_over(&self, judged: &Judged, which: &[usize], region: &Region) -> bool {
-        which.iter().all(|&u| {
-            let [saturation, sweep] = self.gate_of(judged, u, region);
-            saturation < EXISTS && sweep < EXISTS
-        })
-    }
-
-    /// Each unit's existence gate over the reach (SPEC §1.5; module documentation), provable bounds at this model's clusters
-    /// and levels (`gate_of`). Each is bounded on the whole space first, every beam at its peak (`everywhere`): a bound over
-    /// any reach, and where both of a unit's are below ½ there its gate. The others are proven together over the reach's
-    /// cells, on all the cores (reach.rs `Model::statements_over`) -- a ground state's drive's with every weaker one's
-    /// share on the same cell: what a cell's centre attains is a value there, never a bound from elsewhere --, each until it
-    /// is below ½ everywhere or a centre attains `KEEP` (module documentation, # One rule).
-    pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
-        self.gates_from(units, reach, None).0
-    }
-
-    /// The units' gates over the reach (`gates`), each proven statement begun on the cells its last proof over a reach
-    /// of the same box ended on, where `from` holds one and the statement reads over the box what it read then (reach.rs,
-    /// # A proof begun where one ended; `Coverings`) -- the same bound where the statement and the reach are the same --,
-    /// and what these proofs end on.
-    pub fn gates_from(&self, units: &[Unit], reach: &Reach, from: Option<&Coverings>) -> (Vec<Gate>, Coverings) {
-        let judged = self.judged(units);
-        let (everywhere, open) = self.everywhere(&judged, reach.speed);
-        let mut quantities: Vec<Box<dyn Fn(&Region) -> f64 + Sync + '_>> = vec![];
-        let mut shared: HashMap<(usize, usize, bool), usize> = HashMap::new();
-        // Per open unit where its two bounds lie among the quantities: the saturation's, then the sweep's.
-        let judged = &judged;
-        let asked: Vec<usize> = open
-            .iter()
-            .map(|&u| {
-                let key = if let Read::Fold { ground, place, bare } = judged.reads[u] { Some((ground, place, bare)) } else { None };
-                if let Some(found) = key.and_then(|k| shared.get(&k)) {
-                    return *found;
-                }
-                let first = quantities.len();
-                quantities.push(Box::new(move |r: &Region| self.gate_of(judged, u, r)[0]));
-                quantities.push(Box::new(move |r: &Region| self.gate_of(judged, u, r)[1]));
-                if let Some(k) = key {
-                    shared.insert(k, first);
-                }
-                first
-            })
-            .collect();
-        let refs: Vec<&(dyn Fn(&Region) -> f64 + Sync)> = quantities.iter().map(|q| q.as_ref()).collect();
-        // Each statement may begin where the first of its units ended (a ground state's place's statement is one).
-        let mut begins: Vec<Option<Ended>> = vec![None; quantities.len()];
-        for (&u, &at) in open.iter().zip(&asked).rev() {
-            for which in 0..2 {
-                begins[at + which] = from.and_then(|c| c.begin(&units[u], which, &reach.cell)).or(begins[at + which].take());
-            }
-        }
-        let (proven, ended) = self.statements_over(reach, EXISTS, KEEP, 2, &refs, &begins);
-        let mut out: Vec<Gate> = everywhere.iter().map(|of| Gate { saturation: of[0], sweep: of[1] }).collect();
-        let mut of = HashMap::new();
-        for (&u, &at) in open.iter().zip(&asked) {
-            out[u] = Gate { saturation: proven[at], sweep: proven[at + 1] };
-            of.insert(units[u].clone(), [ended[at].clone(), ended[at + 1].clone()]);
-        }
-        (out, Coverings { cell: reach.cell, of })
-    }
-
     /// The drives folded onto explicit excited states whose Raman pairs cannot be folded anywhere (model.rs
     /// `Model::settled`): of each co-rotating drive e ← w folded (with the bare levels or at the atom) onto an explicit
     /// state e, the one gate (`gate`) of its pairs with e's kept drives e ← a, every beam at its peak (the sum of its beams'
@@ -1366,8 +1181,11 @@ impl Model {
             Unit::Second { ground } => self.order_error(*ground, at),
             Unit::Term { a, b, beat } => {
                 let m2 = self.beat_index(beat).map_or(0.0, |index| 0.5 * self.term_bound(&self.forms.term(self, *a, *b, index), *a, *b, index, &at.region).0);
-                let p = &at.populations;
-                UnitError { parameter: m2, population: m2 * (p[*a] + p[*b]), temperature: m2 * (p[*a] + p[*b]), ..UnitError::NONE }
+                // Its states' populations weigh it: where they are empty it books nothing, whatever its mixing (an
+                // infinite one, across a distance of nothing, too).
+                let weight = at.populations[*a] + at.populations[*b];
+                let error = if weight > 0.0 { m2 * weight } else { 0.0 };
+                UnitError { parameter: m2, population: error, temperature: error, ..UnitError::NONE }
             }
             Unit::Dressing { carrier } => self.dressing_error(*carrier, at),
             Unit::Coherence { .. } => self.coherence_error(unit, at),
@@ -1523,25 +1341,173 @@ mod tests {
     use crate::model::{Point, Sample};
     use crate::request::Request;
 
-    /// A scene's model (a reference scene by name, or a native request by its path) closed over its request's reach (solve.rs `attempt`: every unit whose gate fails kept).
+    /// A reference scene's model with the units the released line kept for it (`released_kept`), and its trap's centre at
+    /// the reference state.
     fn closed(scene: &str) -> (Model, [f64; 3]) {
-        let path = if scene.ends_with(".json") { std::path::PathBuf::from(scene) } else { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{scene}.json")) };
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{scene}.json"));
         let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let request = Request::from_native(&line).unwrap();
         let light = Light::new(&request);
         let state = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
+        let model = Model::new(&request, &light, &released_kept(scene)).unwrap();
         let reference: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
-        let mut kept: Vec<Unit> = vec![];
-        loop {
-            let model = Model::new(&request, &light, &kept).unwrap();
-            let trap = model.trap(&reference, &model.prepared()).unwrap();
-            let reach = model.reach(&trap, &reference, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
-            let units = model.units();
-            let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-            if failing.is_empty() {
-                return (model, trap.centre);
-            }
-            kept.extend(failing);
+        let centre = model.trap(&reference, &model.prepared()).unwrap().centre;
+        (model, centre)
+    }
+
+    /// The units the released line's closure (v2026.11.13.2, 991fa7b0: every unit whose existence gate failed over the
+    /// reach at the request's temperature kept, until none failed; for E3_SPSM its second model, the first one's failing
+    /// folds kept) kept for the scenes these tests take their models from: recorded, the model the tests' statements are
+    /// about -- which folds are taken is no longer proven but measured in a run (solve.rs, # The model).
+    fn released_kept(scene: &str) -> Vec<Unit> {
+        match scene {
+            "R4_LIN_1" => vec![
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 25, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 25, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 26, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 26, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 27, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 27, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 27, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 28, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 28, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 29, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 29, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 29, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 30, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 30, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 31, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 31, ground: 7 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 20, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 20, ground: 2 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 21, ground: 1 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 22, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 22, ground: 2 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 23, ground: 1 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 24, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 24, ground: 2 },
+                Unit::Term { a: 0, b: 2, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 3, b: 5, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 3, b: 7, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 4, b: 6, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 5, b: 7, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Drive { component: Component { frequency: 2, counter: false }, excited: 20, ground: 0 },
+                Unit::Drive { component: Component { frequency: 2, counter: false }, excited: 21, ground: 1 },
+                Unit::Drive { component: Component { frequency: 2, counter: false }, excited: 23, ground: 1 },
+                Unit::Drive { component: Component { frequency: 2, counter: false }, excited: 24, ground: 2 },
+            ],
+            "R4_LIN_2" => vec![
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 21, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 25, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 25, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 26, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 26, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 27, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 27, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 27, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 28, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 28, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 29, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 29, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 29, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 30, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 30, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 31, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 31, ground: 7 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 20, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 20, ground: 2 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 21, ground: 1 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 22, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 22, ground: 2 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 23, ground: 1 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 24, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 24, ground: 2 },
+                Unit::Term { a: 0, b: 2, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 3, b: 5, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 3, b: 7, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 4, b: 6, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 5, b: 7, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Drive { component: Component { frequency: 2, counter: false }, excited: 20, ground: 0 },
+                Unit::Drive { component: Component { frequency: 2, counter: false }, excited: 21, ground: 1 },
+                Unit::Drive { component: Component { frequency: 2, counter: false }, excited: 23, ground: 1 },
+                Unit::Drive { component: Component { frequency: 2, counter: false }, excited: 24, ground: 2 },
+            ],
+            "R4_LIN_4" => vec![
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 21, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 21, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 21, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 22, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 22, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 23, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 23, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 23, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 25, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 26, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 26, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 27, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 27, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 27, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 28, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 28, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 29, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 29, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 29, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 30, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 30, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 31, ground: 7 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 20, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 20, ground: 2 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 21, ground: 1 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 22, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 22, ground: 2 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 23, ground: 1 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 24, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 24, ground: 2 },
+                Unit::Term { a: 0, b: 2, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 3, b: 5, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 3, b: 7, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 4, b: 6, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 5, b: 7, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Drive { component: Component { frequency: 2, counter: false }, excited: 20, ground: 0 },
+                Unit::Drive { component: Component { frequency: 2, counter: false }, excited: 21, ground: 1 },
+                Unit::Drive { component: Component { frequency: 2, counter: false }, excited: 23, ground: 1 },
+                Unit::Drive { component: Component { frequency: 2, counter: false }, excited: 24, ground: 2 },
+            ],
+            "E3_SPSM" => vec![
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 25, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 25, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 25, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 26, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 26, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 27, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 27, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 27, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 28, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 28, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 29, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 29, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 29, ground: 7 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 30, ground: 4 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 30, ground: 6 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 31, ground: 3 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 31, ground: 5 },
+                Unit::Bare { component: Component { frequency: 0, counter: false }, excited: 31, ground: 7 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 17, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 17, ground: 2 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 19, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 19, ground: 2 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 20, ground: 1 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 21, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 21, ground: 2 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 22, ground: 1 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 23, ground: 0 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 23, ground: 2 },
+                Unit::Bare { component: Component { frequency: 2, counter: false }, excited: 24, ground: 1 },
+                Unit::Term { a: 0, b: 2, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 3, b: 7, beat: Beat(vec![0, 0, 0, 0]) },
+                Unit::Term { a: 4, b: 6, beat: Beat(vec![0, 0, 0, 0]) },
+            ],
+            _ => panic!("no recorded kept set for {scene}"),
         }
     }
 
@@ -1695,58 +1661,6 @@ mod tests {
         // Continuous across the resolution: just below and just above 2S = unseen the sweep is the same to the rounding.
         let (below, above) = (Gate { saturation: 0.5 * unseen * (1.0 - 1e-12), sweep: 8.4 }.resolved().sweep, Gate { saturation: 0.5 * unseen * (1.0 + 1e-12), sweep: 8.4 }.resolved().sweep);
         assert!((above - below).abs() <= 1e-10, "{below} {above}");
-    }
-
-    /// A gate's bound of its unit's error (`Gate::error_bound`) at states the reach holds. On the closed models of
-    /// R6_RAMAN_CO (couplings at a Raman pair's beats, photon coherences) and R4_LIN_1 (a lin-perp-lin lattice's): 200
-    /// atoms each drawn in the reach's box with a momentum of a speed up to the reach's and kept where the reach holds
-    /// them (`Model::holds`); on every cluster a random state there and each of its basis states (the populations'
-    /// extremes). Every bounded unit's error on the populations and on T is within its bound, to the rounding of the
-    /// few operations that make both. The bound is attained: on R6_RAMAN_CO a level's beating shift at its own state
-    /// (p_a = 1, the coupling's size the same at every point) reads more than half of it.
-    #[test]
-    fn a_gate_bounds_its_unit_s_error_at_the_states_the_reach_holds() {
-        for (scene, attained) in [("R6_RAMAN_CO", 0.5), ("R4_LIN_1", 0.0)] {
-            let (model, _) = closed(scene);
-            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{scene}.json"));
-            let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
-            let state = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
-            let reference: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
-            let trap = model.trap(&reference, &model.prepared()).unwrap();
-            let reach = model.reach(&trap, &reference, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
-            let units = model.units();
-            let gates = model.gates(&units, &reach);
-            let bounds: Vec<Option<f64>> = units.iter().zip(&gates).map(|(u, g)| g.error_bound(u)).collect();
-            assert!(bounds.iter().flatten().count() > 0, "{scene}: no bounded unit");
-            let mut stream = crate::random::Stream::new(0, crate::random::Purpose::Initial, 0, 0);
-            let (mut held, mut largest) = (0, 0.0_f64);
-            while held < 200 {
-                let r: [f64; 3] = std::array::from_fn(|a| reach.cell[a][0] + (reach.cell[a][1] - reach.cell[a][0]) * stream.uniform());
-                let (direction, speed) = (stream.normals(), reach.speed * stream.uniform());
-                let kappa = direction.map(|x| x / norm3(direction) * speed / model.hbar_over_mass);
-                if !model.holds(&reach, r, kappa) {
-                    continue;
-                }
-                held += 1;
-                for (cluster, c) in model.clusters.iter().enumerate() {
-                    let n = c.states.len();
-                    let random: Vec<C64> = (0..n).map(|_| { let z = stream.normals(); C64::new(z[0], z[1]) }).collect();
-                    let basis = (0..n).map(|i| (0..n).map(|j| if i == j { C64::real(1.0) } else { C64::ZERO }).collect::<Vec<C64>>());
-                    for psi in std::iter::once(random).chain(basis) {
-                        let sample = Sample { cluster, at: Point { r, kappa, t: 0.0 }, psi };
-                        for ((unit, error), bound) in units.iter().zip(model.errors_at(&units, &sample, None)).zip(&bounds) {
-                            let Some(bound) = bound else { continue };
-                            let most = error.population.max(error.temperature);
-                            assert!(most <= bound * (1.0 + rounding(8)), "{scene}: {unit:?} reads {most:e} beyond its bound {bound:e} at {r:?}");
-                            if *bound > 0.0 {
-                                largest = largest.max(most / bound);
-                            }
-                        }
-                    }
-                }
-            }
-            assert!(largest > attained, "{scene}: the largest error over its bound {largest}");
-        }
     }
 
     /// Three levels in a scene's atom: every coupling of R6_RAMAN_CO's request removed but g –V→ e of one frequency and
@@ -1964,8 +1878,8 @@ mod tests {
     /// A fold's error on a rate is booked by what the rate moves (module documentation, # A rate's error on the
     /// populations): the rate agent's e3 (rate.status.md §4) -- S3's tweezer and repump, a σ+σ− probe pair at 1 mW 20 MHz
     /// red of the free F=2 → F'=3 line, mass ×100 at 1 µK: an atom at rest at the trap's centre --, whose probe drives F=2 →
-    /// F'=2, F'=1 the closure's second model (the first one's failing folds at the atom, no explicit state) leaves folded
-    /// with the bare levels, 247 MHz from their lines where the trap puts them at 200.
+    /// F'=2, F'=1 the released closure's second model (`released_kept`: the first one's failing folds at the atom, no
+    /// explicit state) leaves folded with the bare levels, 247 MHz from their lines where the trap puts them at 200.
     /// The rate equations of the ground states at the point -- each one's jumps into the others, its photons' classes on
     /// their landing states (model.rs `Photon`) -- have their stationary populations; of the closure's model and of the same
     /// model with the probe's bare drives at the atom they differ by the bare folds' error on the populations, which the
@@ -1976,9 +1890,8 @@ mod tests {
     fn a_fold_s_rate_error_is_booked_by_the_population_it_moves() {
         let request = request_of("E3_SPSM");
         let light = Light::new(&request);
-        let models = closure(&request, &light, 2);
-        let model = &models.last().expect("a closure").0;
         let probe = (0..light.frequencies.len()).find(|&f| f != light.trap && light.frequencies[f].beams.len() == 2).expect("the probe pair");
+        let model = &Model::new(&request, &light, &released_kept("E3_SPSM")).unwrap();
         let bare = model.bare_units(Component { frequency: probe, counter: false });
         let units = model.units();
         let folded: Vec<usize> = (0..units.len()).filter(|&u| bare.contains(&units[u])).collect();
@@ -2709,309 +2622,6 @@ mod tests {
         let refs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs");
         let path = [refs.join("scenes"), refs.join("requests")].map(|d| d.join(format!("{name}.json"))).into_iter().find(|p| p.exists()).expect("the scene's request");
         Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap()
-    }
-
-    /// The first `count` models of a request's closure (solve.rs `solve`): nothing kept, then each with the units the one
-    /// before fails over its reach kept; each with its reach.
-    fn closure(request: &Request, light: &Light, count: usize) -> Vec<(Model, Reach)> {
-        let state = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
-        let reference: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
-        let (mut kept, mut out): (Vec<Unit>, Vec<(Model, Reach)>) = (vec![], vec![]);
-        while out.len() < count {
-            let model = Model::new(request, light, &kept).unwrap();
-            let trap = model.trap(&reference, &model.prepared()).unwrap();
-            let reach = model.reach(&trap, &reference, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
-            let failing: Vec<Unit> = if out.len() + 1 < count {
-                let units = model.units();
-                units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect()
-            } else {
-                vec![]
-            };
-            out.push((model, reach));
-            if failing.is_empty() {
-                break;
-            }
-            kept.extend(failing);
-        }
-        out
-    }
-
-    /// Whether a quantity is an upper bound over its region (a gate, a shift, a slope) or a lower one (a distance).
-    #[derive(Clone, Copy, PartialEq, Debug)]
-    enum Side {
-        Upper,
-        Lower,
-    }
-
-    /// A quantity a gate reads of a region: its name, its side and how it is read.
-    type Quantity<'m> = (String, Side, Box<dyn Fn(&Region) -> f64 + Sync + 'm>);
-
-    /// Every quantity the units' gates read of a region (module documentation, # One rule, # Levels, # A coupling of two
-    /// states): each unit's saturation and sweep that the whole space leaves open (`gate_of`, what the reach's proofs
-    /// prove); each ground state's shift and slope by its drives folded at the atom (`near_level`); each
-    /// folded drive's distance and distance at rest (`across`) and its Raman pairs' saturation and sweep (`pair_gate`);
-    /// each coupling's distance (`term_parts`).
-    fn read_by_gates<'m>(model: &'m Model, units: &'m [Unit], judged: &'m Judged<'m>, open: &[usize]) -> Vec<Quantity<'m>> {
-        let mut out: Vec<Quantity<'m>> = vec![];
-        for &u in open {
-            for (which, name) in ["saturation", "sweep"].into_iter().enumerate() {
-                out.push((format!("{:?} {name}", units[u]), Side::Upper, Box::new(move |r: &Region| model.gate_of(judged, u, r)[which])));
-            }
-        }
-        for g in 0..GROUND {
-            out.push((format!("near_level {} upper", model.labels[g]), Side::Upper, Box::new(move |r: &Region| model.near_level(g, r).band.upper())));
-            out.push((format!("near_level {} lower", model.labels[g]), Side::Lower, Box::new(move |r: &Region| model.near_level(g, r).band.lower())));
-            out.push((format!("near_level {} slope", model.labels[g]), Side::Upper, Box::new(move |r: &Region| model.near_level(g, r).steepness().upper())));
-            for (i, d) in model.forms.drives(model)[g].iter().enumerate().filter(|of| of.1.level != Level::Explicit) {
-                let (gamma, name) = (d.gamma, format!("drive {} {} -> {}", d.component, model.labels[g], model.labels[GROUND + d.excited]));
-                out.push((format!("{name} distance"), Side::Lower, Box::new(move |r: &Region| model.across(g, r)[i].distance.lower())));
-                out.push((format!("{name} distance at rest"), Side::Lower, Box::new(move |r: &Region| model.across(g, r)[i].distance_at_rest(gamma).lower())));
-                for (which, part) in ["saturation", "sweep"].into_iter().enumerate() {
-                    out.push((
-                        format!("{name} pairs' {part}"),
-                        Side::Upper,
-                        Box::new(move |r: &Region| {
-                            let made = model.pair_gate(g, &r.forms.drives(model)[g][i], &model.across(g, r)[i], model.kept_over(r), r);
-                            [made.saturation.upper(), made.sweep.upper()][which]
-                        }),
-                    ));
-                }
-            }
-        }
-        for unit in units {
-            if let Unit::Term { a, b, beat } = unit {
-                let (a, b, index) = (*a, *b, model.beat_index(beat).expect("a coupling's beat is the model's"));
-                let form = model.forms.term(model, a, b, index);
-                out.push((format!("{unit:?} distance"), Side::Lower, Box::new(move |r: &Region| model.term_parts(&form, a, b, index, r).1.lower())));
-            }
-        }
-        out
-    }
-
-    /// The most a bound over a cell may exceed the quantity's largest value there, in units of the quantity's own variation
-    /// over the cell; and the least an excess beyond that falls from one scale to the next, a quarter of it -- of the square
-    /// of the cell's (16), within a factor of 2 (`a_gate_s_bound_over_a_cell_is_within_its_own_variation_of_its_largest_value`).
-    const OWN: f64 = 4.0;
-    const FALL: f64 = 8.0;
-
-    /// The reach's proofs rest on this (reach.rs, # Provable extrema): a quantity's bound over a cell holds at every point of
-    /// the cell, and exceeds the quantity's largest value there by no more than a few times the quantity's own variation over
-    /// the cell -- Σ_a h_a |∂_a f| + ½ Σ_ab h_a h_b |∂_a∂_b f| of its own gradient and curvature at the centre, or its largest
-    /// distance there from its centre value where that is more -- at every scale. A bound assembled from the separate ranges
-    /// of parts that share a term (a level difference read as each level's slack, a sum of beam pairs read pair by pair) is
-    /// as wide as the parts move, not the quantity: it tends to the quantity's value only on cells far below the length on
-    /// which the shared term cancels, and a proof that halves cells until the bound answers then never ends. On the closure's
-    /// first two models of the sanity scenes S2, S2Q and S3 (the user's experiment), PGC3D for 1 ms and R4_LIN_2, at points
-    /// the reach holds at rest (seeded), on cells of random shape about each point -- the point anywhere in the cell -- of
-    /// radius ℓ, ℓ/4, ℓ/16 and ℓ/64, ℓ the light's shortest length 1/k: every quantity the gates read (`read_by_gates`) over the
-    /// cell, against its values on a 5³ grid of the cell, 32 random points of it and the point (the proofs' own point
-    /// regions, at the reach's speed there), its derivatives at the centre by the grid's central differences. An upper bound
-    /// at least the largest value, a lower one at most the least (to the rounding), and its excess within `OWN` times the
-    /// variation (with the rounding of its value) -- or, beyond it, of the second order: falling by `FALL` from that scale to
-    /// the next. (Read from the scale before, a coupling whose two levels cross within a cell of ℓ/4 -- PGC3D's F=2
-    /// sublevels 4 and 6, its saturation infinite at points of that cell -- had no excess there to fall from, ∞ against ∞,
-    /// while on ℓ/16 its distance's second-order remainder, 0.023 of a least distance of 0.031, read through 1/d² a bound of
-    /// 2442 where the points reach 88; on ℓ/64 the bound is within 0.11 of their 1.87, a fall of 2·10⁴.) A first-order Taylor form leaves of its parts their curvature, which
-    /// the sum need not have (two counter-propagating beams' |q|² on a flat level difference): its excess falls as the
-    /// cell's square. The class this test is for does not: a bound of the parts' separate ranges exceeds by the parts' own
-    /// first orders, which fall as the cell -- four times a scale -- and where a shared term's slack reaches a threshold
-    /// (a distance's nothing) by a jump that does not fall at all. Where a reading is beyond, the points' extreme is first
-    /// taken further by a local search from the best of them (a kink of max(|Δ| − moved, 0) or a pole of 1/d between two
-    /// grid points holds the largest value no sample meets). Every bound holds, every quantity at every scale; the gates'
-    /// statements, the saturations and sweeps the proofs bound, are within their variation or of the second order on the
-    /// cells below the light's length (ℓ/4, ℓ/16; ℓ/64 is read for the fall alone) -- on a cell of ℓ a beam pair's phase turns by up to 2 rad and its
-    /// range, not its first order, bounds it -- and finite there (an infinite one is its distance's nothing, and the
-    /// distance is a quantity of its own here). The worst ratio per scene and per quantity, the parts' and ℓ's readings
-    /// beyond `OWN`, and those that fall as the second order, are printed.
-    ///
-    /// A measurement, run by name (`POINTS`, default 32; `SCENES`), not a gate on the crate: at 16 points the line
-    /// (09bc9784) has 482 statements beyond, falling at most 4.5 times a scale (327 of them between 4 and 4.5: the first
-    /// order), and this one none. (The last seven of the class: three of S2Q's through a resolvent's bound read as a range
-    /// on every cell where Varah's denominator reached nothing -- eliminate.rs `Model::resolvent_own` --, two of S3's resonant
-    /// probe drives whose size, the probe with its reflection 4·10⁻⁸ of it, read the beams' phase-blind sum -- reach.rs
-    /// `Frame` --, R4_LIN_2's and PGC3D's through a norm's remainder that had no value from w = n on -- own.rs `measured`.)
-    /// Every bound holds.
-    #[test]
-    #[ignore]
-    fn a_gate_s_bound_over_a_cell_is_within_its_own_variation_of_its_largest_value() {
-        use rayon::prelude::*;
-        let only = std::env::var("SCENES").ok();
-        let points: usize = std::env::var("POINTS").map_or(32, |n| n.parse().unwrap());
-        let mut failures = vec![];
-        for scene in ["S2", "S2Q", "S3", "PGC3D_1ms", "R4_LIN_2"].into_iter().filter(|s| only.as_ref().is_none_or(|o| o.split(',').any(|x| x == *s))) {
-            let request = request_of(scene);
-            let light = Light::new(&request);
-            for (k, (model, reach)) in closure(&request, &light, 2).iter().enumerate() {
-                let started = std::time::Instant::now();
-                let units = model.units();
-                let judged = model.judged(&units);
-                let open = model.everywhere(&judged, reach.speed).1;
-                let quantities = read_by_gates(model, &units, &judged, &open);
-                let length = model.shortest_length(&model.running());
-                let prepared = model.prepared();
-                // Points the reach holds at rest, uniformly in its box (seeded), each with its cells' random shapes and places,
-                // and a cell's random points.
-                let mut stream = crate::random::Stream::new(k as u64, crate::random::Purpose::Initial, 0, 0);
-                let mut drawn: Vec<([f64; 3], [[f64; 3]; 2], Vec<[f64; 3]>)> = vec![];
-                while drawn.len() < points {
-                    let r: [f64; 3] = std::array::from_fn(|a| reach.cell[a][0] + (reach.cell[a][1] - reach.cell[a][0]) * stream.uniform());
-                    let shape: [f64; 3] = std::array::from_fn(|_| 0.2 + 0.8 * stream.uniform());
-                    let place: [f64; 3] = std::array::from_fn(|_| 2.0 * stream.uniform() - 1.0);
-                    let inner: Vec<[f64; 3]> = (0..32).map(|_| std::array::from_fn(|_| 2.0 * stream.uniform() - 1.0)).collect();
-                    if model.room(reach, r, &prepared) >= 0.0 {
-                        drawn.push((r, [shape, place], inner));
-                    }
-                }
-                // Per point and radius, per quantity: (radius' index, quantity, the bound, the points' extreme, the variation).
-                let read: Vec<Vec<(usize, usize, f64, f64, f64)>> = drawn
-                    .par_iter()
-                    .map(|(r, [shape, place], inner)| {
-                        let mut out = vec![];
-                        let norm = shape.iter().map(|x| x * x).sum::<f64>().sqrt();
-                        for (j, radius) in [length, length / 4.0, length / 16.0, length / 64.0].into_iter().enumerate() {
-                            let half: [f64; 3] = std::array::from_fn(|a| radius * shape[a] / norm);
-                            let cell = Cell { centre: std::array::from_fn(|a| r[a] - place[a] * half[a]), half };
-                            // The cell, its 5³ grid (offsets −h, −h/2, 0, h/2, h along each side; index Σ_a i_a 5^a), the
-                            // point and the random points.
-                            let grid = (0..125).map(|s| -> [f64; 3] { std::array::from_fn(|a| cell.centre[a] + (((s / 5_usize.pow(a as u32)) % 5) as f64 - 2.0) * 0.5 * half[a]) });
-                            let random = inner.iter().map(|u| -> [f64; 3] { std::array::from_fn(|a| cell.centre[a] + u[a] * half[a]) });
-                            let at: Vec<Cell> = std::iter::once(cell).chain(grid.chain(std::iter::once(*r)).chain(random).map(|q| Cell { centre: q, half: [0.0; 3] })).collect();
-                            let regions = model.proof_regions(reach, &at);
-                            let Some((over, _)) = &regions[0] else { continue };
-                            let points: Vec<Option<&Region>> = regions[1..].iter().map(|of| of.as_ref().map(|of| &of.1)).collect();
-                            let sample: Vec<[f64; 3]> = at[1..].iter().map(|c| c.centre).collect();
-                            for (q, (name, side, quantity)) in quantities.iter().enumerate() {
-                                let values: Vec<Option<f64>> = points.iter().map(|region| region.map(|region| quantity(region))).collect();
-                                let present = values.iter().flatten().copied();
-                                let mut extreme = if *side == Side::Upper { present.fold(f64::NEG_INFINITY, f64::max) } else { present.fold(f64::INFINITY, f64::min) };
-                                // The variation: of the grid's derivatives at the centre (where the stencil is whole), at
-                                // least the largest distance of a value from the centre's.
-                                let Some(centre) = values[62] else { continue };
-                                let f = |i: [usize; 3]| values[i[0] + 5 * i[1] + 25 * i[2]];
-                                let at = |a: usize, s: usize| -> [usize; 3] { std::array::from_fn(|b| if b == a { s } else { 2 }) };
-                                let mut own = Some(0.0);
-                                for a in 0..3 {
-                                    let (lo, hi) = (f(at(a, 1)), f(at(a, 3)));
-                                    own = own.zip(lo.zip(hi)).map(|(w, (lo, hi))| w + half[a] * ((hi - lo) / half[a]).abs() + 0.5 * half[a] * half[a] * ((hi - 2.0 * centre + lo) / (0.25 * half[a] * half[a])).abs());
-                                    for b in 0..a {
-                                        let corner = |sa: usize, sb: usize| -> Option<f64> { let mut i = [2; 3]; i[a] = sa; i[b] = sb; f(i) };
-                                        let mixed = corner(3, 3).zip(corner(1, 1)).zip(corner(3, 1).zip(corner(1, 3))).map(|((pp, mm), (pm, mp))| (pp + mm - pm - mp) / (half[a] * half[b]));
-                                        own = own.zip(mixed).map(|(w, m)| w + half[a] * half[b] * m.abs());
-                                    }
-                                }
-                                let range = values.iter().flatten().map(|v| (v - centre).abs()).fold(0.0, f64::max);
-                                let own = own.map_or(range, |w| if w.is_nan() { range } else { w.max(range) });
-                                let bound = quantity(over);
-                                // Beyond: the extreme taken further by a pattern search from the best sample, within the cell.
-                                let sign = if *side == Side::Upper { 1.0 } else { -1.0 };
-                                let statement = name.ends_with(" saturation") || name.ends_with(" sweep");
-                                if statement && j > 0 && sign * (bound - extreme) > OWN * own && extreme.is_finite() {
-                                    let best = values.iter().position(|v| *v == Some(extreme)).expect("the extreme is a sample's");
-                                    let mut x = sample[best];
-                                    let mut step: [f64; 3] = half.map(|h| 0.25 * h);
-                                    let value_at = |x: [f64; 3]| -> Option<f64> {
-                                        let inside = (0..3).all(|a| (x[a] - cell.centre[a]).abs() <= half[a]);
-                                        inside.then(|| model.proof_regions(reach, &[Cell { centre: x, half: [0.0; 3] }]).pop().flatten()).flatten().map(|(_, at)| quantity(&at))
-                                    };
-                                    for _ in 0..12 {
-                                        let mut moved = false;
-                                        for a in 0..3 {
-                                            for s in [-1.0, 1.0] {
-                                                let mut y = x;
-                                                y[a] += s * step[a];
-                                                if let Some(v) = value_at(y).filter(|v| sign * (v - extreme) > 0.0) {
-                                                    (x, extreme, moved) = (y, v, true);
-                                                }
-                                            }
-                                        }
-                                        if !moved {
-                                            step = step.map(|h| 0.5 * h);
-                                        }
-                                    }
-                                }
-                                out.push((j, q, bound, extreme, own));
-                            }
-                        }
-                        out
-                    })
-                    .collect();
-                // Per point and quantity, per scale: the excess over the points' extreme (nothing where the bound is their
-                // value, an infinite one too), its lack of validity and its ratio to the variation, and the reading.
-                let mut scales: std::collections::HashMap<(usize, usize), [Option<(f64, f64, f64, String)>; 4]> = std::collections::HashMap::new();
-                for (p, readings) in read.iter().enumerate() {
-                    for &(j, q, bound, extreme, own) in readings {
-                        let (_, side, _) = &quantities[q];
-                        let beyond = if bound == extreme { 0.0 } else if *side == Side::Upper { bound - extreme } else { extreme - bound };
-                        let rounding = 1e-9 * extreme.abs() + 1e-12;
-                        let (invalid, excess) = if beyond.is_nan() { (f64::INFINITY, f64::INFINITY) } else { (-beyond - rounding, (beyond - rounding).max(0.0)) };
-                        let what = format!("point {p} at {:?}, radius ℓ/{}: bound {bound:.6e}, the points' {extreme:.6e}, its own variation {own:.3e}", drawn[p].0, 4_usize.pow(j as u32));
-                        scales.entry((p, q)).or_insert([None, None, None, None])[j] = Some((invalid, excess, excess / own, what));
-                    }
-                }
-                // Per quantity: the worst lack of validity, the worst ratio, and the worst ratio not of the second order.
-                let mut worst: Vec<[(f64, String); 3]> = quantities.iter().map(|_| std::array::from_fn(|_| (0.0, String::new()))).collect();
-                // Per radius: the quantities failing there, the worst ratio with its quantity, and the readings beyond `OWN`
-                // that fall as the second order.
-                let mut by_radius: [(std::collections::HashSet<usize>, f64, usize, usize); 4] = std::array::from_fn(|_| (std::collections::HashSet::new(), 0.0, 0, 0));
-                let mut unasked = 0;
-                for (&(_, q), at) in &scales {
-                    for j in 0..4 {
-                        let Some((invalid, excess, ratio, what)) = &at[j] else { continue };
-                        // The fall of the excess from this scale to the next, or at the finest from the one before.
-                        let (from, to) = if j < 3 { (j, j + 1) } else { (2, 3) };
-                        let fall = at[from].as_ref().zip(at[to].as_ref()).map_or(f64::INFINITY, |(a, b)| if b.1 == 0.0 || (a.1.is_infinite() && b.1.is_finite()) { f64::INFINITY } else { a.1 / b.1 });
-                        let second = fall >= FALL;
-                        if *invalid > worst[q][0].0 {
-                            worst[q][0] = (*invalid, what.clone());
-                        }
-                        if *ratio > worst[q][1].0 {
-                            worst[q][1] = (*ratio, what.clone());
-                        }
-                        // Asserted: validity everywhere; the gates' statements below the light's length.
-                        let statement = quantities[q].0.ends_with(" saturation") || quantities[q].0.ends_with(" sweep");
-                        let asked = statement && (1..3).contains(&j) && !excess.is_infinite();
-                        if asked && *ratio > OWN && !second && *ratio > worst[q][2].0 {
-                            worst[q][2] = (*ratio, format!("{what}, its excess {excess:.3e} falling {fall:.2} to the next scale"));
-                        }
-                        if !asked && *ratio > OWN && !second {
-                            unasked += 1;
-                        }
-                        if *invalid > 0.0 || (asked && *ratio > OWN && !second) {
-                            by_radius[j].0.insert(q);
-                        }
-                        if *ratio > OWN && second {
-                            by_radius[j].3 += 1;
-                        }
-                        if *ratio > by_radius[j].1 {
-                            (by_radius[j].1, by_radius[j].2) = (*ratio, q);
-                        }
-                    }
-                }
-                let mut ranked: Vec<usize> = (0..quantities.len()).collect();
-                ranked.sort_by(|&a, &b| worst[b][1].0.total_cmp(&worst[a][1].0));
-                let bad = worst.iter().filter(|w| w[0].0 > 0.0 || w[2].0 > OWN).count();
-                eprintln!("{scene} model {k}: {} units, {} open, {} quantities, {} points: worst ratio {:.3}, {bad} failing ({:.1} s)", units.len(), open.len(), quantities.len(), drawn.len(), worst[ranked[0]][1].0, started.elapsed().as_secs_f64());
-                for &q in ranked.iter().take(6) {
-                    eprintln!("  {:.3} {} -- {}", worst[q][1].0, quantities[q].0, worst[q][1].1);
-                }
-                for (j, (failing, ratio, q, second)) in by_radius.iter().enumerate() {
-                    eprintln!("  radius ℓ/{}: {} quantities failing, the worst ratio {ratio:.3} ({}); {second} readings beyond {OWN} of the second order", 4_usize.pow(j as u32), failing.len(), quantities[*q].0);
-                }
-                eprintln!("  {unasked} readings beyond {OWN} not of the second order among the parts, on cells of ℓ and infinite statements (printed, not asserted)");
-                for ((name, side, _), [invalid, _, loose]) in quantities.iter().zip(&worst) {
-                    if invalid.0 > 0.0 {
-                        failures.push(format!("{scene} model {k}: {name} ({side:?}) does not hold: {}", invalid.1));
-                    }
-                    if loose.0 > OWN {
-                        failures.push(format!("{scene} model {k}: {name} ({side:?}) exceeds its largest value by {:.3} times its own variation, not of the second order: {}", loose.0, loose.1));
-                    }
-                }
-            }
-        }
-        for line in &failures {
-            eprintln!("{line}");
-        }
-        assert!(failures.is_empty(), "{} quantities' bounds fail to hold or exceed their values by more than their own variation", failures.len());
     }
 
     /// What the model's part of a step costs at the second order and at the fourth (measured; `SCENE`, default R4_LIN_1):
