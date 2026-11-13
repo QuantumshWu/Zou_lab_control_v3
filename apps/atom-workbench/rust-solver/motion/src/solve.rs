@@ -80,8 +80,9 @@
 //! the check does past the rung's own two levels, where it stands (the reads are the ones made: they are kept, and the
 //! keep is not asked again); where the check goes down a rung instead, its states are the same trajectories at half
 //! the step, read again, and the keep asked again on them. So the pilot runs as far as the first rung whose own read is
-//! in and not clearly beyond (`Settled::Pending`), the reach's falsifier and the keep are read there, and only an
-//! attempt they leave standing pays for the rest of its check -- the third level at 4τ, pairs, a rung below. (Read
+//! in and not clearly beyond (`Settled::Pending`), the keep is read there -- the reach's falsifier before it, on the
+//! pilot's own level as it came in (`own_level`) --, and only an attempt they leave standing pays for the rest of its
+//! check -- the third level at 4τ, pairs, a rung below. (Read
 //! after the whole check, S3's probe kept sixteen units after its check had gone down to 0.187 µs -- the third level,
 //! the rung below, 127 CPU-s of a model that was then replaced --, and its next attempt began at 0.187 µs.) The check's
 //! levels stay on the tables they were run on; a table its reads refine is the product's (`PilotRead::refined`).
@@ -104,7 +105,8 @@
 //! admissible for the run and whose double is for the companion (`first_rung`): the run's step at the largest speed of
 //! the reach the model is judged over; the companion's at the reach's rms speed, below the same edge; and the prior,
 //! the old engine's first step (`prior`): T's step error goes as the square of the phase k_max v_T τ the light's
-//! pattern advances in a step at the request's temperature, and the step may take its share of T's allowance -- so the
+//! pattern advances in a step at the reach's temperature -- the request's until the atoms grow it, one temperature
+//! for every speed the first rung is taken at --, and the step may take its share of T's allowance -- so the
 //! ladder does not begin at an edge's rung the check then leaves (PGC3D: 1.425 µs, left on the pilot for 0.7125 µs,
 //! 11.2 CPU-s). An attempt after a keep begins at the step the one before stood at, where that is the shorter; after
 //! a growth, at its own first rung (# An attempt's own). The first rung is a rung of the ladder, whose bottom is the
@@ -868,7 +870,9 @@ fn resolves(tau: f64, sampled: &[[f64; 2]], speed: f64) -> bool {
 /// error, relative, goes as the square of the phase the light's pattern advances along an atom's path in a step,
 /// (k v τ)², and the step may take its share of T's allowance (`step_bound`, # T's allowance), k_max v_T τ = √(s δT/T)
 /// -- at the carriers' largest wave number `wave` (1/µm; model/eliminate.rs `Model::carrier_wave_number`), the rms
-/// speed along an axis at the request's temperature `temperature` (µK), v_T = √(k_BT/m), and T's allowance there at the
+/// speed along an axis at the temperature `temperature` (µK), v_T = √(k_BT/m) -- the reach's (`attempt`: its
+/// ensemble's mean kinetic temperature, the typical atom's, `typical_speed`; the request's until the atoms grow it, as
+/// the old engine's at the initial temperature) --, and T's allowance there at the
 /// scale T_sc of that light's recoil (estimate.rs `semiclassical`: one photon of k_max). No bound where the light has no
 /// pattern or the atoms no speed. (PGC3D, Rb87 at 30 µK on D2: k_max v_T = 0.43 rad/µs, T_sc = 10.9 µK, δT/T = 0.375:
 /// τ ≤ 0.95 µs, where the ladder's top by admissibility alone, 1.425 µs, was left on the pilot and 0.7125 µs stood.)
@@ -1568,11 +1572,13 @@ fn attempt(
         ledger.flag("计算所用光场中的势没有极小：阱频、n̄、温度的窗口（一个阱周期）与验证范围都按初始势阱给出".into());
     }
     let (momentum, start) = setting.start;
-    // The ladder's first rung: within the physics prior's step at the request's temperature, and admissible over the
-    // proof set the model is judged over, at its largest speed. An attempt that begins at the step the one before stood
-    // at -- after a keep, over the same reach -- begins no higher than its own first rung.
-    let prior = prior(model.carrier_wave_number(), hm, request.temperature_uk, &scales);
-    let first_rung = first_rung(plan.end, prior, trap.frequencies.iter().copied().fold(0., f64::max), kick, entries, fastest, typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3., fastest))
+    // The ladder's first rung: within the physics prior's step, and admissible over the proof set the model is judged
+    // over, at its largest speed -- every speed of it the reach's, at the mean kinetic temperature of the ensemble the
+    // reach is made for (model.rs `Reach::kinetic_uk`). An attempt that begins at the step the one before stood at --
+    // after a keep, over the same reach -- begins no higher than its own first rung.
+    let kinetic = judged.kinetic_uk.iter().sum::<f64>() / 3.;
+    let prior = prior(model.carrier_wave_number(), hm, kinetic, &scales);
+    let first_rung = first_rung(plan.end, prior, trap.frequencies.iter().copied().fold(0., f64::max), kick, entries, fastest, typical_speed(hm, kinetic, fastest))
         .ok_or_else(|| format!("找不到可用的时间步长：在每条轨迹的步数上限（{MOST_STEPS} 步）之内，没有步长能分辨阱中的振荡、光场中势阱的曲率和光场沿原子路径的变化（或者阱频、曲率、原子速率不是有限数）"))?;
     // What the reach's falsifier compares the T read with: the largest kinetic temperature along an axis of the
     // ensemble the reach was made for (model.rs `Reach::kinetic_uk`: T_r where the trap is classical, the zero point's
@@ -1586,7 +1592,7 @@ fn attempt(
     // prior, sets it below the edges. The check then reads that rung on a third level, at 4τ (`settle`): a cell of the
     // Brownian path.
     let begins = begins(step, first_rung);
-    let (frequency, typical, end) = (trap.frequencies.iter().copied().fold(0., f64::max), typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3., fastest), plan.end);
+    let (frequency, typical, end) = (trap.frequencies.iter().copied().fold(0., f64::max), typical_speed(hm, kinetic, fastest), plan.end);
     let above = |tau: f64| 4. * tau <= end && admissible(2. * tau, frequency, kick, entries, fastest) && admissible(4. * tau, frequency, kick, entries, typical);
     // Where the attempt's steps are proven (`Domain`): of the units' gates, those the whole space at the proof set's
     // largest speed leaves open, and all of them; at and above the reach's top, no temperature's reach holds a path.
@@ -4101,7 +4107,7 @@ mod tests {
     }
 
     /// The ladder begins within the physics prior (`prior`, `first_rung`): T's step error (k_max v_T τ)² at the step's
-    /// share of T's allowance at the request's temperature. PGC3D's Rb87 at 30 µK on D2 (k = 8.0528 /µm; its tweezer's
+    /// share of T's allowance at the reach's temperature, the request's to begin with. PGC3D's Rb87 at 30 µK on D2 (k = 8.0528 /µm; its tweezer's
     /// 100, 100 and 19 kHz, a zero point of 1.8 µK below 30 T_rec = 10.9 µK): δT/T = 0.375 and τ ≤ 0.950 µs, where its
     /// ladder's top by the edges alone, 1.425 µs, was left. Over temperatures, wave numbers and traps the phase a step
     /// of the prior advances, squared, is that share to the rounding, and no light's pattern bounds nothing. Over runs,
