@@ -317,22 +317,29 @@ pub(crate) struct Sector {
     pub(crate) work: f64,
 }
 
+/// Why a sector made no K (`Sector::make`): a block's Schur form not made, ℳ singular (a zero pivot of its
+/// factorization), or a number of K that is no finite number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unmade {
+    Schur,
+    Singular,
+    Unfinite,
+}
+
 impl Sector {
     /// K at a point (module documentation, # K_Q, # The solve), and with `slope` -- the generator's and the gradient's
     /// slopes along the path at the point, dH/ds and dG_a/ds -- its first order along the path (# Along the path; step.rs,
-    /// # The optical sector's noise): K + 𝓡_Q†𝓡_Q†(dF/ds + (d𝓛/ds)†K). False for a cluster without excited or without
-    /// ground states (no trajectory lies in the latter: it starts in a ground state, and every jump lands in one), or where
-    /// a Schur form does not converge or ℳ is singular (no number came out): then there is no K.
-    pub(crate) fn make(&mut self, h: &Mat, gradient: &[Vec<C64>; 3], ground: usize, slope: Option<(&Mat, &[Vec<C64>; 3])>) -> bool {
+    /// # The optical sector's noise): K + 𝓡_Q†𝓡_Q†(dF/ds + (d𝓛/ds)†K). Where it makes none, why (`Unmade`): a block's
+    /// Schur form not made -- its QR iteration did not converge, or the cluster has no excited or no ground state (no
+    /// trajectory lies in the latter: it starts in a ground state, and every jump lands in one) --, ℳ singular, or no
+    /// number came out. None of them is to happen: every Q direction relaxes at about Γ/2 or faster (module
+    /// documentation, # The split by the model's own structure), so ℳ is regular, and a step that meets one is refused
+    /// (step.rs `Refused::Optical`) -- its noise is not dropped.
+    pub(crate) fn make(&mut self, h: &Mat, gradient: &[Vec<C64>; 3], ground: usize, slope: Option<(&Mat, &[Vec<C64>; 3])>) -> Result<(), Unmade> {
         let n = h.rows;
         let (g, e) = (ground, n - ground);
         (self.n, self.g, self.e, self.made, self.work) = (n, g, e, false, 0.0);
-        if e == 0 || g == 0 {
-            return false;
-        }
-        let Some(schur) = self.schur(h, ground) else {
-            return false;
-        };
+        let schur = self.schur(h, ground).ok_or(Unmade::Schur)?;
         for k in 0..e {
             for q in 0..g {
                 self.inverse[k * g + q] = (self.t[k * e + k].conj() - self.s[q * g + q]).recip();
@@ -349,7 +356,7 @@ impl Sector {
         // ℳ, and its factorization.
         self.system();
         if !self.lu.factor(e * e) {
-            return false;
+            return Err(Unmade::Singular);
         }
         // K₀: the three axes' F = −G, by blocks, and beside them S: E[𝓛†S] = 1_e, solved at once; S and Tr[B S] first
         // into their places, which the resolve reads.
@@ -395,11 +402,11 @@ impl Sector {
         // Rotated back, K_ee = U_e K̃_ee U_e† and K_eg = U_e K̃_eg U_g†.
         self.back();
         if !(self.returned.is_finite() && self.k.iter().all(|k| k[..n * n].iter().all(|z| z.is_finite()))) {
-            return false;
+            return Err(Unmade::Unfinite);
         }
         self.work = Sector::cost(e, g, slope.is_some(), schur);
         self.made = true;
-        true
+        Ok(())
     }
 
     /// The blocks' Schur forms H_ee = U_e T U_e† and H_gg = U_g S U_g† of a generator with `ground` ground states, in the

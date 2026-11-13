@@ -2522,7 +2522,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || {
                 let mut sum = 0.0;
                 for (p, (along, scratch)) in pieces.iter().zip(alongs.iter().zip(scratches.iter_mut())) {
-                    if let Some((epsilon, _)) = super::optical(along, &scratch.picture, p.through.generator.still(), &mut scratch.noise) {
+                    if let Some((epsilon, _)) = super::optical(along, &scratch.picture, p.through.generator.still(), &mut scratch.noise).expect("a sector made") {
                         sum += epsilon + super::within(scratch.noise.sector.operators().unwrap(), &scratch.noise.gradient, &p.crossed.psi)[0][0];
                     }
                 }

@@ -190,7 +190,7 @@ fn the_optical_operator_is_the_q_resolvent_s_adjoint() {
         let mut draw = Draw(seed + 100);
         for (c, &(n, g)) in sizes.iter().enumerate().filter(|(_, s)| s.0 > s.1) {
             let mut sector = Sector::default();
-            assert!(sector.make(&dense.h[c], &dense.g[c], g, None), "a sector");
+            assert!(sector.make(&dense.h[c], &dense.g[c], g, None).is_ok(), "a sector");
             let k = sector.operators().expect("an explicit cluster's K");
             for _ in 0..3 {
                 let mut x = draw.hermitian(n, 1.0);
@@ -226,9 +226,9 @@ fn k_to_the_first_order_along_the_path_is_the_q_resolvent_s_twice() {
         for (c, &(n, g)) in sizes.iter().enumerate().filter(|(_, s)| s.0 > s.1) {
             let h1 = Mat { rows: n, cols: n, data: (0..n * n).map(|_| draw.complex()).collect() };
             let g1: [Vec<C64>; 3] = std::array::from_fn(|_| draw.hermitian(n, 1.5));
-            assert!(sector.make(&dense.h[c], &dense.g[c], g, None), "the static sector");
+            assert!(sector.make(&dense.h[c], &dense.g[c], g, None).is_ok(), "the static sector");
             let k0 = sector.operators().expect("K₀").clone();
-            assert!(sector.make(&dense.h[c], &dense.g[c], g, Some((&h1, &g1))), "the sector along the path");
+            assert!(sector.make(&dense.h[c], &dense.g[c], g, Some((&h1, &g1))).is_ok(), "the sector along the path");
             let k = sector.operators().expect("K");
             for _ in 0..3 {
                 let mut x = draw.hermitian(n, 1.0);
@@ -283,7 +283,7 @@ fn the_two_level_identity() {
                 h[(0, 1)] = rabi.conj() * 0.5;
                 let g: [Vec<C64>; 3] = std::array::from_fn(|a| if a == 2 { vec![C64::ZERO, slope.conj() * 0.5, slope * 0.5, C64::ZERO] } else { vec![C64::ZERO; 4] });
                 let mut sector = Sector::default();
-                assert!(sector.make(&h, &g, 1, None), "the sector");
+                assert!(sector.make(&h, &g, 1, None).is_ok(), "the sector");
                 let k = sector.operators().expect("K");
                 // The no-jump path from g by RK4, its survival, ⟨F⟩ and within_Q, to where the survival is round-off.
                 let force = |x: &[C64]| -> f64 { -(inner(x, &[g[2][0] * x[0] + g[2][1] * x[1], g[2][2] * x[0] + g[2][3] * x[1]])).re / crate::linalg::norm_sqr(x) };
@@ -453,7 +453,7 @@ fn a_kept_and_a_folded_drive_diffuse_alike() {
             let mut g: [Vec<C64>; 3] = Default::default();
             middle.gradient(&path, 0.0, &mut g, None);
             let mut sector = Sector::default();
-            assert!(middle.optical(&path).is_some() && sector.make(&h, &g, 1, None), "an explicit cluster");
+            assert!(middle.optical(&path).is_some() && sector.make(&h, &g, 1, None).is_ok(), "an explicit cluster");
             let dt = 0.02 / h.max_abs().max(half);
             let (within, d_e, excited) = renewal(&h, &g, sector.operators().expect("K"), 1, axis, dt);
             let photons = folded.photons(folded.cluster_of(b), &at, &[C64::ONE]);

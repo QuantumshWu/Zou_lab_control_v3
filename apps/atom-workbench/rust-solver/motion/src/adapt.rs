@@ -187,8 +187,9 @@ impl Path {
 /// every piece of every step's path -- from the step's start or a jump of the step -- with the time the trajectory is
 /// on it to: the next jump, the step's end, or the read it is found lost at. A trajectory lost on the way stops at
 /// its loss time. Where the scheme refuses a step at every length down to the time's round-off, the advance ends
-/// there with the refusal; so it does where the model gives a jump no photon (`step::jump`), and where `domain` does
-/// not prove the step (step.rs, # The domain: a shorter step is no answer to that). `scratch` is the trajectory's
+/// there with the refusal; so it does where the model gives a jump no photon (`step::jump`), where `domain` does
+/// not prove the step (step.rs, # The domain: a shorter step is no answer to that), and where the middle's optical
+/// sector makes no K (step.rs, # The optical sector's noise: a shorter step would only step past it). `scratch` is the trajectory's
 /// (`step::Scratch`): its steps' memory, made once with it; `path` its Brownian path, which it goes along as it is
 /// advanced (`Path`).
 #[allow(clippy::too_many_arguments)]
@@ -221,7 +222,7 @@ pub fn advance<D: Dynamics>(
             let reads = &at[next..next + at[next..].partition_point(|&time| time <= end)];
             match Midway::new(model, trajectory, length).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch, domain)) {
                 Ok(step) => break (step, end, beyond),
-                Err(refusal @ (Refused::Emission | Refused::Unproven(_))) => return Err(refusal),
+                Err(refusal @ (Refused::Emission | Refused::Unproven(_) | Refused::Optical(_))) => return Err(refusal),
                 Err(refusal) => {
                     length *= 0.5;
                     if !(trajectory.time + length > trajectory.time) {

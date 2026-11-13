@@ -353,6 +353,7 @@ use crate::estimate::{between, draws_for, half_window, occupation, spread, summa
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::V3;
+use crate::model::optical::Unmade;
 use crate::model::reach::{holding, Cell};
 use crate::model::units::{destined, Judged};
 use crate::model::tabulate::Tables;
@@ -2036,12 +2037,14 @@ impl Plan {
 
 /// Counts over trajectories: the steps taken -- a step with jumps is one step, whatever the pieces its path is handed
 /// on by (adapt.rs, # The jumps) --, and the trajectories that ended with no outcome (estimate.rs, # What is counted),
-/// by why: the scheme could not advance them (adapt.rs `advance`'s refusal), or a step of theirs was not proven
-/// (`Domain`) -- in a result sent while their attempt runs.
+/// by why: the scheme could not advance them (adapt.rs `advance`'s refusal), a step's optical sector made no K (step.rs
+/// `Refused::Optical`, by its `Unmade`), or a step of theirs was not proven (`Domain`) -- in a result sent while their
+/// attempt runs.
 #[derive(Clone, Copy, Debug, Default)]
 struct Counts {
     steps: u64,
     failed: Stopped,
+    unmade: [Stopped; 3],
     unproven: Stopped,
     /// The optical sector's sums over the trajectories (ledger.rs `optical`; step.rs `Trajectory::booked`, `pending`).
     optical: [f64; 4],
@@ -2050,6 +2053,9 @@ impl Counts {
     fn add(&mut self, o: &Counts) {
         self.steps += o.steps;
         self.failed.add(&o.failed);
+        for (stopped, other) in self.unmade.iter_mut().zip(&o.unmade) {
+            stopped.add(other);
+        }
         self.unproven.add(&o.unproven);
         for (sum, x) in self.optical.iter_mut().zip(o.optical) {
             *sum += x;
@@ -2208,6 +2214,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     // to hold for a step its domain did not prove (step.rs `Unproven`): the trajectory ends there unfinished, and so
     // does the attempt (`run_groups`).
     let mut reached = 1;
+    let mut unmade = None;
     let (failed, unproven) = {
         let mut read = |k: usize, t: &Trajectory| {
             record(k + 1, t, &mut out);
@@ -2225,6 +2232,10 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         match adapt::advance(model, domain, tau, &mut t, &mut scratch, &mut path, plan.end, &plan.times[1..], &mut read, &mut each) {
             Ok(()) => (false, None),
             Err(Refused::Unproven(step)) => (true, Some([step.region, step.outside])),
+            Err(Refused::Optical(why)) => {
+                unmade = Some(why);
+                (true, None)
+            }
             Err(_) => (true, None),
         }
     };
@@ -2245,7 +2256,13 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     }
     let stopped = |why: bool| if why { Stopped::at(t.time) } else { Stopped::default() };
     let optical = [t.booked[0], t.booked[1], t.booked[2], -(t.pending[0][0] + t.pending[1][1] + t.pending[2][2])];
-    let counts = Counts { steps, failed: stopped(failed && unproven.is_none()), unproven: stopped(unproven.is_some()), optical };
+    let counts = Counts {
+        steps,
+        failed: stopped(failed && unproven.is_none() && unmade.is_none()),
+        unmade: [Unmade::Schur, Unmade::Singular, Unmade::Unfinite].map(|why| stopped(unmade == Some(why))),
+        unproven: stopped(unproven.is_some()),
+        optical,
+    };
     Record { outputs: out, listed, samples, counts, unproven }
 }
 
@@ -3320,7 +3337,14 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     }
     // The trajectories that ended with no outcome, by why (`Counts`), and what that leaves (estimate.rs, # What is
     // counted).
-    for (stopped, why) in [(&counts.failed, "的状态在数值上无法再推进"), (&counts.unproven, "走出了本轮计算的活动范围，模型在它们的路径上未经证明（本轮随后扩大活动范围重新计算）")] {
+    let unmade = "在某一步上，光学扇区的噪声算子 K 做不出";
+    for (stopped, why) in [
+        (&counts.failed, "的状态在数值上无法再推进".to_string()),
+        (&counts.unmade[0], format!("{unmade}（激发态块或基态块的 Schur 形式不收敛；这不应发生，是引擎的缺陷）")),
+        (&counts.unmade[1], format!("{unmade}（ℳ 奇异：按构造 Q 扇区以约 Γ/2 或更快弛豫，ℳ 应当可逆；这不应发生，是引擎的缺陷）")),
+        (&counts.unmade[2], format!("{unmade}（算出的数不是有限数；这不应发生，是引擎的缺陷）")),
+        (&counts.unproven, "走出了本轮计算的活动范围，模型在它们的路径上未经证明（本轮随后扩大活动范围重新计算）".to_string()),
+    ] {
         if let Some(t) = stopped.since {
             s.approximations.flag(format!("{} 条轨迹{why}（最早在 {}）：此后它们不计入估计，所占的比例全部计入布居与丢失的误差", stopped.count, when(t)));
         }
@@ -3752,9 +3776,10 @@ mod tests {
     /// none counted, what is shown is booked whole, its model's part and its statistics' at one. Those two outputs are
     /// crowded, by the share: the looks a unit's keep reads (`keep`, the estimates without it) crowd none. The result:
     /// every number finite (the app refuses one that is not), the loss and the populations at the third output the
-    /// second's, its error at least the whole, and the flags say why -- the trajectories that ended by their reasons,
-    /// counts and first times, the output where T has no account, the outputs none is counted at -- and nothing of an
-    /// atom lost; the reason a result is partial is the output none is counted at.
+    /// second's, its error at least the whole, and the flags say why -- the trajectories that ended by their reasons
+    /// (a step's optical sector that made no K by its own), counts and first times, the output where T has no account,
+    /// the outputs none is counted at -- and nothing of an atom lost; the reason a result is partial is the output none
+    /// is counted at.
     #[test]
     fn the_share_not_counted_is_booked_whole_and_an_output_none_counts_at_says_so() {
         let groups: Vec<Group> = (0..4)
@@ -3791,12 +3816,13 @@ mod tests {
             ledger: Ledger::default(),
             method: String::new(),
         };
-        let counts = Counts { steps: 0, failed: Stopped { count: 3, since: Some(12.5) }, unproven: Stopped { count: 5, since: Some(15.) }, optical: [0.0; 4] };
+        let unmade = [Stopped::default(), Stopped { count: 2, since: Some(14.) }, Stopped::default()];
+        let counts = Counts { steps: 0, failed: Stopped { count: 3, since: Some(12.5) }, unmade, unproven: Stopped { count: 5, since: Some(15.) }, optical: [0.0; 4] };
         let s = assemble(&context, &estimates, &listed, &counts, 8);
         assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| x.is_finite()), "{s:?}");
         assert!(s.loss_probability[3] == s.loss_probability[2] && s.populations[3] == s.populations[2] && s.estimated_errors[3] >= 1., "{s:?}");
         let flagged = s.approximations.flagged.expect("flagged");
-        for said in ["3 条轨迹的状态在数值上无法再推进（最早在 12.5 μs）：此后它们不计入估计", "5 条轨迹走出了本轮计算的活动范围", "20 μs：有轨迹不计入估计，温度的误差无法估计", "30 μs 起：没有一条轨迹计入估计"] {
+        for said in ["3 条轨迹的状态在数值上无法再推进（最早在 12.5 μs）：此后它们不计入估计", "2 条轨迹在某一步上，光学扇区的噪声算子 K 做不出（ℳ 奇异", "5 条轨迹走出了本轮计算的活动范围", "20 μs：有轨迹不计入估计，温度的误差无法估计", "30 μs 起：没有一条轨迹计入估计"] {
             assert!(flagged.contains(said), "{said} in {flagged}");
         }
         assert!(!flagged.contains("已无原子留在光阱中"), "{flagged}");

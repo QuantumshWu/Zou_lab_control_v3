@@ -252,6 +252,14 @@
 //! to the sum of the C. What is pending at a trajectory's end is booked (ledger.rs `optical`), and so is the static K's
 //! locality (below).
 //!
+//! A middle whose cluster makes no K -- a block's Schur form whose QR iteration does not converge, a singular ℳ, a
+//! number that is none (model/optical.rs `Unmade`) -- has no noise to draw, and none is dropped in silence: the step is
+//! refused (`Refused::Optical`), the trajectory ends there with no outcome, and the result tells how many did and why
+//! (solve.rs `Counts`). It is not to happen -- Q relaxes at about Γ/2 or faster, so ℳ is regular -- and it did not on
+//! the measured scenes: none in 25.2 million makes and 0.71 million prices' Schur forms over S1, S2, S2Q, S3, S3c, e038,
+//! m20, R4_LIN_2 and a two-level atom at 10 Γ (motion3d_status/rewrite/int.status.md). A step taken shorter to step past
+//! it would hide what it says about the model.
+//!
 //! K along the path. The static K of the middle -- the resolvent of the generator held still there -- is wrong at the
 //! first order on a moving atom, whose couplings turn within the sector's memory 1/γ_Q: held at rest it misses a
 //! running wave's Doppler shift (two-level, kv = Γ/10, Ω₀ = 2Γ, Δ = −3Γ: 1.044 of the master equation); held in the
@@ -367,7 +375,7 @@ use std::sync::OnceLock;
 
 use crate::decide::COMPLEX;
 use crate::linalg::{self, inner, norm_sqr, C64, Mat, LANES};
-use crate::model::optical::Sector;
+use crate::model::optical::{Sector, Unmade};
 use crate::model::{Cluster, Point, Quadratic, Scattering, STATES};
 use crate::random::Stream;
 use crate::spectral::Picture;
@@ -510,13 +518,13 @@ struct Noise {
 /// workspace `noise`: the gradient there and, where the cluster beats, its slope along the path (`Middle::gradient`);
 /// K of the picture's generator at the middle, to the first order along the path with the picture's slope through the
 /// step's ends (`Picture::slope`). Its locality ε_Q = (ν/γ_Q)² and the counted work (`optical_work`); None where the
-/// cluster has no optical sector or it made no K.
-fn optical<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, noise: &mut Noise) -> Option<(f64, f64)> {
-    let shape = along.middle.optical(&along.path)?;
+/// cluster has no optical sector; the step refused where its sector made no K (`Refused::Optical`).
+fn optical<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, noise: &mut Noise) -> Result<Option<(f64, f64)>, Refused> {
+    let Some(shape) = along.middle.optical(&along.path) else { return Ok(None) };
     let Noise { sector, gradient, slope } = noise;
     along.middle.gradient(&along.path, 0.0, gradient, (!still).then_some(&mut *slope));
-    let made = sector.make(&picture.base, gradient, shape.ground, (!still).then_some((&picture.slope, &*slope)));
-    made.then(|| ((shape.beat / shape.decay).powi(2), optical_work(along, still, sector.work)))
+    sector.make(&picture.base, gradient, shape.ground, (!still).then_some((&picture.slope, &*slope))).map_err(Refused::Optical)?;
+    Ok(Some(((shape.beat / shape.decay).powi(2), optical_work(along, still, sector.work))))
 }
 
 /// The counted work of the optical sector at a middle (`optical`) beside its sector's make (`Sector::cost`, `work`): the
@@ -528,6 +536,7 @@ fn optical_work<M: Middle>(along: &Along<M>, still: bool, work: f64) -> f64 {
 
 /// The price of the optical sector at a middle (`step_work`): `optical`'s count without its make -- the shape's formula
 /// (`Sector::cost`) with the blocks' Schur forms alone made, their QR iteration's count as the matrices ask; no solve.
+/// Where a Schur form is not made the step there is refused (`Refused::Optical`) before its noise: none is priced.
 fn optical_price<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, sector: &mut Sector) -> f64 {
     let Some(shape) = along.middle.optical(&along.path) else { return 0.0 };
     let n = along.n;
@@ -1375,14 +1384,16 @@ pub struct Made {
 
 /// Why a step or a jump could not be made: the reference's fixed point is not a contraction at this step (`middle`); the
 /// state left the floating-point range; the norm reached its threshold with no photon to emit (`jump`: the model's
-/// decay and its photons contradict each other); or the domain does not prove the step (`Domain`). The advance takes
-/// the step at its half at the first two (adapt.rs, # The step), and ends at the others.
+/// decay and its photons contradict each other); the domain does not prove the step (`Domain`); or the middle state's
+/// cluster made no K of its optical sector (`Unmade`: # The optical sector's noise). The advance takes the step at its
+/// half at the first two (adapt.rs, # The step), and ends at the others.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Refused {
     Reference,
     Overflow,
     Emission,
     Unproven(Unproven),
+    Optical(Unmade),
 }
 
 /// What the integrator asks before every step's propagation (SPEC §1.8; module documentation, # The domain): whether the
@@ -1715,7 +1726,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         }
         if let Some(middle) = &middle {
             march.scattered = Some(along.middle.scattering(&along.path, &middle[..n]));
-            if let Some((epsilon, work)) = optical(&along, picture, still, noise) {
+            if let Some((epsilon, work)) = optical(&along, picture, still, noise)? {
                 let k = noise.sector.operators().expect("a sector made");
                 march.optical = Some((within(k, &noise.gradient, &middle[..n]), epsilon));
                 march.work += work;
