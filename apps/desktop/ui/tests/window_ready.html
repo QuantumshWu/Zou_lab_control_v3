@@ -1,0 +1,141 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Window first paint regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. A window is made hidden and shown on its page's window_ready: once its view holds its
+// first whole state (a control: its device read, in the units it shows them in), or once its page failed first.
+// Headless virtual time draws no frames: a frame here is the next task, as the page's own frames would come.
+import { Shell } from '../dist/shell.js';
+import { deviceControl, deviceLog } from '../dist/views/device_windows.js';
+window.requestAnimationFrame = callback => setTimeout(() => callback(performance.now()), 16);
+const wait = (ms = 100) => new Promise(resolve => setTimeout(resolve, ms));
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const equal = (actual, expected, message) => assert(JSON.stringify(actual) === JSON.stringify(expected), `${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results = [];
+const check = async (name, test) => { await test(); results.push(name); };
+const spell = rows => rows.map(([value, group, decade]) => ({ value, label: value, group, decade }));
+const hertz = unit => { const own = { MHz: 6, Hz: 0 }[unit]; return spell([['GHz', 'Hz', 9 - own], ['MHz', 'Hz', 6 - own], ['kHz', 'Hz', 3 - own], ['Hz', 'Hz', -own]]); };
+const level = unit => unit === 'dBm' ? spell([['dBm', 'dBm', 0], ['Vpp', 'Vpp', null], ['mVpp', 'Vpp', null]])
+  : spell([['Vpp', 'Vpp', unit === 'Vpp' ? 0 : 3], ['mVpp', 'Vpp', unit === 'Vpp' ? -3 : 0], ['dBm', 'dBm', null]]);
+// An RF source as its first reading has it: 80 MHz in Hz, its level in dBm though the device shows Vpp.
+const frequency = { Hz: [80e6, 0, 2e8], MHz: [80, 0, 200] };
+const power = { dBm: [-2.0411998265592475, -30, 20], Vpp: [0.5, 0.02, 6.32], mVpp: [500, 20, 6320] };
+const fields = units => [
+  { name: 'frequency', label: 'Frequency', unit: units.frequency ?? 'Hz', units: hertz(units.frequency ?? 'Hz'), values: frequency[units.frequency ?? 'Hz'] },
+  { name: 'power', label: 'Power', unit: units.power ?? 'dBm', display_unit: 'Vpp', units: level(units.power ?? 'dBm'), values: power[units.power ?? 'dBm'] },
+].map(({ values: [current, minimum, maximum], ...field }) => ({ ...field, kind: 'number', current, desired: current, minimum, maximum, step: null,
+  current_text: `${current} ${field.unit}`, limits_text: '', live_write: true, editable: true, status: 'Ready', severity: 'idle' }));
+
+/** One window's page against a host that answers its reads, recording what the page tells the host. */
+function open({ factory = deviceControl('rf'), refuse = null, shared = false, reads = [] } = {}) {
+  const sent = [], pending = new Map(), units = {};
+  const transport = { connected: true, shared, lastError: '', notice: null, pending, busyText: () => '',
+    send(command, feedback) { const id = sent.length + 1; sent.push({ id, ...command }); if (feedback) pending.set(id, feedback); if (command.action === 'read_device') reads.push(id); return id; },
+    post(command) { sent.push({ id: 0, ...command }); },
+    request(command) { sent.push(command); return Promise.resolve({ lines: ['opened'] }); },
+  };
+  const row = withFields => ({ instance_id: 'rf', role: 'RF', state: 'open', control: { owners: [], reason: '', risk_enabled: false }, ...(withFields ? { fields: fields(units) } : {}) });
+  const shell = new Shell(transport, factory);
+  const say = state => { if (state.request !== undefined) { pending.delete(state.request); transport.lastError = state.error ?? ''; } shell.accept(state); shell.status(); };
+  /** The host answers the read `id` (in the units it asked for), or refuses it. */
+  const answer = (id, error = null) => {
+    const asked = sent.find(command => command.id === id);
+    if (error) { say({ type: 'state', request: id, error, devices: [row(false)] }); return; }
+    Object.assign(units, asked.units ?? {});
+    say({ type: 'state', request: id, error: null, devices: [row(true)] });
+  };
+  const posted = action => sent.filter(command => command.action === action);
+  return { shell, transport, sent, say, answer, posted, row };
+}
+const notes = shell => [...shell.host.querySelectorAll('.field-note')].filter(note => !note.hidden && note.textContent.trim());
+
+try {
+  await check('a control is shown once its device is read in the units it shows them in, measured then', async () => {
+    const page = open();
+    page.say({ type: 'state', devices: [page.row(false)] });
+    await wait(); equal(page.posted('window_ready').length, 0, 'shown before its fields were read');
+    page.answer(1); await wait();
+    equal(page.sent.filter(c => c.action === 'read_device').map(c => c.units ?? null), [null, { frequency: 'MHz', power: 'Vpp' }], 'its default units are read');
+    equal(page.posted('window_ready').length, 0, 'shown on its first reading, in Hz and dBm');
+    page.answer(2); await wait();
+    equal(page.sent.at(-1).units, { power: 'mVpp' }, 'its level in its own family, then its prefix');
+    equal(page.posted('window_ready').length, 0, 'shown while a row was still being read');
+    page.answer(3); await wait(200);
+    const order = page.sent.filter(c => c.id === 0).map(c => c.action);
+    equal(order, ['fit_window', 'window_ready'], 'sized to its content, then shown, once');
+    equal([...page.shell.host.querySelectorAll('select.unit-picker')].map(p => p.selectedOptions[0].text), ['MHz', 'mVpp'], 'its final units');
+    equal(notes(page.shell).length, 0, 'a row still says it is being read');
+    assert(page.shell.host.style.visibility === '', 'the view is still hidden');
+  });
+  await check('a refused first reading shows the control, saying why', async () => {
+    const page = open();
+    page.say({ type: 'state', devices: [page.row(false)] });
+    page.answer(1, 'rf: VISA timeout'); await wait(200);
+    equal(page.posted('window_ready').length, 1, 'a refused reading left the window hidden');
+    assert(page.shell.host.textContent.includes('The device was not read: rf: VISA timeout'), 'the refusal is not said');
+  });
+  await check('a reading refused without a state (an error message) shows the control too', async () => {
+    const page = open();
+    page.say({ type: 'state', devices: [page.row(false)] });
+    page.transport.pending.delete(1); page.transport.lastError = 'rf is not open'; page.shell.status(); await wait(200);
+    equal(page.posted('window_ready').length, 1, 'shown');
+    assert(page.shell.host.textContent.includes('The device was not read: rf is not open'), 'the refusal is not said');
+  });
+  await check('a refused default-unit reading does not keep the window hidden', async () => {
+    const page = open();
+    page.say({ type: 'state', devices: [page.row(false)] });
+    page.answer(1); await wait();
+    page.transport.pending.delete(2); page.transport.lastError = 'superseded'; page.shell.status(); await wait(200);
+    equal(page.posted('window_ready').length, 1, 'shown');
+  });
+  const plain = () => ({ key: 'x', title: 'x', windowTitle: 'x', root: document.createElement('div'), update() {}, status() {} });
+  await check('a view without ready() is shown on its first state', async () => {
+    const page = open({ factory: plain });
+    await wait(); equal(page.posted('window_ready').length, 0, 'shown before any state');
+    page.say({ type: 'state' }); await wait(200);
+    equal(page.sent.filter(c => c.id === 0).map(c => c.action), ['window_ready'], 'shown once, unmeasured');
+  });
+  await check('a device log is shown once its log is read, with its text', async () => {
+    const page = open({ factory: deviceLog('rf') });
+    const asked = page.posted('get_device_log');
+    equal(asked.length, 1, 'the log is read at once');
+    page.say({ type: 'state', devices: [page.row(false)] }); await wait(200);
+    equal(page.posted('window_ready').length, 0, 'shown before its log was read');
+    page.say({ type: 'state', request: asked[0].id, error: null, result: { lines: ['12:00:01 open rf', '12:00:02 fields 91 ms'] } }); await wait(200);
+    equal(page.posted('window_ready').length, 1, 'not shown once its log was read');
+    equal(page.shell.host.querySelector('.log-text').textContent, ['12:00:01 open rf', '12:00:02 fields 91 ms'].join('\n'), 'its text');
+  });
+  await check('a device log whose read is refused is shown as it stands', async () => {
+    const page = open({ factory: deviceLog('rf') });
+    page.say({ type: 'state', devices: [page.row(false)] });
+    page.say({ type: 'state', request: page.posted('get_device_log')[0].id, error: 'rf has no log' }); await wait(200);
+    equal(page.posted('window_ready').length, 1, 'a refused read left it hidden');
+    equal(page.shell.host.querySelector('.log-text').textContent, 'No interactions recorded yet.', 'its text');
+  });
+  await check('a view that throws on its first state is shown as it stands', async () => {
+    const page = open({ factory: () => ({ key: 'x', title: 'x', windowTitle: 'x', root: document.createElement('div'), update() { throw Error('broken view'); }, status() {}, ready: () => false }) });
+    let thrown = '';
+    try { page.say({ type: 'state' }); } catch (error) { thrown = error.message; }
+    equal(thrown, 'broken view', 'the error still reaches the transport, which reports it');
+    equal(page.posted('window_ready').length, 1, 'a failing view left its window hidden');
+    assert(page.shell.host.style.visibility === '', 'its view stayed hidden');
+  });
+  await check('an error in the page before its view is ready shows the window', async () => {
+    const page = open({ factory: () => ({ key: 'x', title: 'x', windowTitle: 'x', root: document.createElement('div'), update() {}, status() {}, ready: () => false }) });
+    page.say({ type: 'state' }); await wait(); equal(page.posted('window_ready').length, 0, 'shown before ready');
+    window.dispatchEvent(new ErrorEvent('error', { message: 'late failure' }));
+    equal(page.posted('window_ready').length, 1, 'an uncaught error left the window hidden');
+    window.dispatchEvent(new ErrorEvent('error', { message: 'again' }));
+    equal(page.posted('window_ready').length, 1, 'said twice');
+  });
+  await check('a shared browser view tells the host nothing', async () => {
+    const page = open({ factory: plain, shared: true });
+    page.say({ type: 'state' }); await wait(200);
+    equal(page.posted('window_ready').length + page.posted('fit_window').length, 0, 'a shared view sized or showed a window');
+    assert(page.shell.host.style.visibility === '', 'the shared view stayed hidden');
+  });
+  document.getElementById('result').textContent = JSON.stringify({ passed: true, count: results.length, tests: results });
+} catch (error) { document.getElementById('result').textContent = JSON.stringify({ passed: false, completed: results, error: String(error.stack) }); }
+</script>

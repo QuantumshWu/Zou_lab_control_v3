@@ -769,13 +769,13 @@ pub fn run(event_loop: EventLoop<AppEvent>, context: WebContext, setup: Setup, l
                     match command["action"].as_str().unwrap_or("") {
                         "ready" => {
                             // The page is (re)loaded: it is given the state, its title bar and the whole log.
-                            if let Some(window) = windows.get_mut(&kind) { window.ready = true; }
-                            windows.page_loaded(&kind);
+                            windows.page_up(&kind)?;
                             installer.sent = 0;
                             windows.send_to(&kind, &installer.state())?;
                             if let Some(caption) = windows.get(&kind).and_then(|shown| frame::caption(&shown.window)) { windows.send_to(&kind, &caption)?; }
                             installer.flush(&windows)?;
                         }
+                        "window_ready" => windows.page_ready(&kind),
                         "installation_close" => { installer.stop(); *flow = ControlFlow::Exit; }
                         // installation.exe again: its launcher puts the downloaded engine in place once this one has ended.
                         "installation_restart" => {
@@ -799,6 +799,7 @@ pub fn run(event_loop: EventLoop<AppEvent>, context: WebContext, setup: Setup, l
                 Event::UserEvent(AppEvent::Title { window, title }) => if let Some(shown) = windows.get(&window) { shown.window.set_title(&title); },
                 Event::UserEvent(AppEvent::Caption { window, message }) => windows.send_to(&window, &message)?,
                 Event::UserEvent(AppEvent::Activate(window)) => windows.activate(&window),
+                Event::UserEvent(AppEvent::PageLoaded(window)) => windows.loaded(&window),
                 _ => {}
             }
             Ok(())
