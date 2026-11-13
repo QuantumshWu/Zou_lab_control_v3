@@ -343,13 +343,15 @@ impl Model {
     /// making it (solve.rs `Pricing`): their number and the counted work of their coordinates at a point. Of the
     /// coordinates the cluster's elimination depends on, those of the tables a run has that took them as axes (`axes`,
     /// where they are coordinates still), and those new to the cluster -- that no such table looked at (`known`) --
-    /// whose weight there (`first_table`: its rate, `rates`, times the range it moves across over the reach, `moves` by
-    /// its key, `reach_ranges` on the coordinate's own, cached by the caller) is beyond the tables' shares: a coordinate
-    /// that moves the cluster's lines by less than the shares of a half-width over the reach moves the responses by
-    /// less than a look reads beyond (`over`: twice the responses' error within the shares). The rate is the levels'
-    /// alone (# Axes: a coherent dressing's part of the lines is in the look, which eliminates). At most `MOST_AXES`;
-    /// none where the cluster has no near form.
-    pub(crate) fn priced_axes(&self, cluster: usize, reach: &Reach, axes: &[Key], known: &[Key], moves: &dyn Fn(Key, &dyn Fn() -> f64) -> f64) -> (usize, f64) {
+    /// whose weight there (`first_table`: its rate, `rates`, times the range it moves across where the atoms were, the
+    /// pricing's `points` -- `moves` by its key, `moved_over`, cached by the caller) is beyond the tables' shares: a
+    /// coordinate that moves the cluster's lines by less than the shares of a half-width moves the responses by less
+    /// than a look reads beyond (`over`: twice the responses' error within the shares). A pricing reads where the atoms
+    /// were, as it reads every rate (solve.rs `one_each`), not a proof over the reach: a kept model's table is its own
+    /// attempt's to make. (Proven over the reach, the range of a new coordinate of R2_RECOIL's tweezer, kept to the atom
+    /// on its scout's pricing, took 80 s and 5.7 GB.) The rate is the levels' alone (# Axes: a coherent dressing's part
+    /// of the lines is in the look, which eliminates). At most `MOST_AXES`; none where the cluster has no near form.
+    pub(crate) fn priced_axes(&self, cluster: usize, points: &[[f64; 3]], axes: &[Key], known: &[Key], moves: &dyn Fn(Key, &dyn Fn() -> f64) -> f64) -> (usize, f64) {
         let lights = self.running();
         if self.plan(cluster, &lights).near.len() == 0 {
             return (0, 0.0);
@@ -366,10 +368,7 @@ impl Model {
                 let key = self.key(all[i]);
                 axes.contains(&key)
                     || (!known.contains(&key) && {
-                        let range = moves(key, &|| {
-                            let range = self.reach_ranges(&all[i..=i], &polarizations, &focus[i..=i], reach)[0];
-                            range.1 - range.0
-                        });
+                        let range = moves(key, &|| self.moved_over(all[i], &polarizations, points));
                         range > 0.0 && 2.0 * rates.get_or_init(|| self.rates(cluster, &lights, &all, &polarizations, &focus))[i] * range > shown.min(temperature)
                     })
             })
@@ -377,6 +376,17 @@ impl Model {
             .take(crate::table::MOST_AXES)
             .collect();
         (taken.len(), self.coordinates_work(&taken, &polarizations))
+    }
+
+    /// The range a coordinate moves across over `points` (`priced_axes`): its largest value there less its least.
+    fn moved_over(&self, coordinate: Coordinate, polarizations: &[Vec<Polarization>], points: &[[f64; 3]]) -> f64 {
+        let (mut least, mut most) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &r in points {
+            let mut value = [0.0];
+            self.coordinates_at(&[coordinate], polarizations, &self.light.amplitudes(r), &mut value, &mut [[0.0; 3]]);
+            (least, most) = (least.min(value[0]), most.max(value[0]));
+        }
+        (most - least).max(0.0)
     }
 
     /// Coordinates' values at a point and their gradients (module documentation, # At a point) into `values` and `gradients`,

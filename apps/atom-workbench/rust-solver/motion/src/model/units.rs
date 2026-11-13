@@ -1079,11 +1079,12 @@ impl Model {
         }
     }
 
-    /// The units of `units` whose folds do not exist where the atoms start (SPEC §1.5; solve.rs, # The model's prior):
+    /// The units of `units` whose folds do not exist where the atoms are (SPEC §1.5; solve.rs, # The model's prior):
     /// each unit's gate (`gate_of`) over the whole space at the speeds up to `speed`, every beam at its peak -- a bound
     /// over any place an atom can be at those speeds: a unit it leaves below ½ exists everywhere and is not read again --,
-    /// and the others' at each of the `points` (r, v), the speeds up to v in every direction (`Model::point_region`):
-    /// those whose gate reaches ½ at one of them at least. Each point's gates on the pool, by itself.
+    /// and the others' at each of the atoms `points` (r, |v|), at its place and speed as a state's errors are read
+    /// (`Model::point_region`, `Measured`): those whose gate reaches ½ at one of them at least. Each point's gates on the
+    /// pool, by itself.
     pub(crate) fn failing(&self, units: &[Unit], points: &[([f64; 3], f64)], speed: f64) -> Vec<Unit> {
         let reads = self.judged(units);
         let whole = self.whole_region(speed);

@@ -227,27 +227,33 @@
 //! ## The model's prior (SPEC §1.5)
 //! The old engine's first rung: every fold that exists is folded (Stewart, S = 2m² < ½, and the sweep a < ½), every
 //! other unit kept -- a drive taken up its levels (bare, at the atom, explicit) as far as the first whose fold exists
-//! (`closed`, model/units.rs `Model::failing`). Where a fold exists is read where the atoms start, at points, not proven
-//! over the reach: at the pilot's initial atoms, the run's own draws (the trajectories `MOST_TRAJECTORIES` on, the same
-//! seed), each at the speeds up to the reach's there in every direction, √(2 (ħ/m) A(r)) of the kinetic energy A(r)
-//! the reach holds at r (model/reach.rs `Model::room`), the atom's own where it lies beyond -- the Doppler shift q·v and
-//! the sweep v·∇ΔE at their worst direction. A gate bounded below ½ over the whole space at the points' largest speed,
-//! every beam at its peak, holds at every point and is not read again; the others are read at each point, a value
-//! there: the fold does not exist where it reaches ½ at one of them. The units that fail are kept, and the model they
-//! make read again, until none fails.
-//! - The points are no number of the prior's own: the thermal ensemble's positions in a conservative trap are where
-//!   the atoms are, and where they go once they heat is the reach's falsifier's (# The reach's atoms) and the measured
-//!   errors' to answer -- the reads confirm the prior, or keep beside it (# The model). Their count is the pilot's; the
-//!   prior costs a gate's evaluation a point and open unit (PGC3D, R4_LIN_2: 88 points, 0.07 s a closure; 63 and 29
-//!   units kept), and nothing is subdivided.
+//! (`closed`, `failing`, model/units.rs `Model::failing`). Where a fold exists is read where the atoms are, at points,
+//! not proven over the reach: at the reach's own atoms, the draws of its thermal ensemble at its temperature T_r with
+//! the run's seed, as many as the pilot runs (`atoms`) -- at the request's temperature the pilot's own initial atoms --,
+//! each at its place and its speed, as a state's errors are read (model/units.rs `Measured`). A gate bounded below ½
+//! over the whole space at the atoms' largest speed, every beam at its peak, holds at every one of them and is not read
+//! again; the others are read at each atom, a value there: the fold does not exist where it reaches ½ at one of them.
+//! The units that fail are kept, and the model they make read again, until none fails. Every model is closed so before
+//! its first attempt, and again where its reach grows (`Attempt::Grow`): a grown reach is another ensemble's atoms, and
+//! what fails among them is kept as an attempt's keep is, with the states the attempt left (# An attempt's own).
+//! - The points are no number of the prior's own: the thermal ensemble's positions and speeds in a conservative trap are
+//!   where and how the atoms are, and what only a rare fast atom meets is the measured errors' to answer -- the reads
+//!   confirm the prior, or keep beside it (# The model). Their count is the pilot's; the prior costs a gate's
+//!   evaluation an atom and open unit (PGC3D, R4_LIN_2: 88 atoms, 0.1 s a closure; 63 and 29 units kept), and nothing is
+//!   subdivided. (Read at the reach's largest speed at each place in its worst direction, a probe tilted 2° off the 1D
+//!   PGC kept the Δm = 1 Raman couplings its tilt makes -- S 0.007 at rest, 3.9 at 0.48 µm/µs, where 2kv closes their
+//!   two-photon distance -- and a ground sublevels' coupling at beat zero by its sweep at that speed: the model's first
+//!   rung fell from 0.108 to 0.038 µs and the solve took twice the untilted one's time. Read at 30 µK's atoms after its
+//!   reach grew to 191 µK, S2Q's resonant probe, folded at the atom to the fourth order, was read nowhere on the trap's
+//!   flanks where the tweezer brings it through resonance, and its table was refined there to 9 GB.)
 //! - A gate at a point is its value there, of the levels there: a distance reads nothing only where two levels cross
 //!   there, never because a neighbourhood's steep gradient puts nothing in a cell's range. (Proven over cells, a
 //!   probe tilted 2° off a 1D PGC in a tweezer read infinite gates for its ground sublevels' couplings at beat zero --
 //!   the tweezer's 236 rad/µs a micrometre over cells that had to shrink to 0.01–0.05 µm, 340 000 of them, 208 s a
 //!   model --, where at the points S ≤ 2·10⁻⁴.) Nothing rests on an exact zero: a coupling a broken symmetry makes is
 //!   judged by its size at the points, and folds where it is small.
-//! - A photon coherence's gate is not read (model/units.rs `Read`): its fold leaves the generator as it is and tells
-//!   its classes' photons apart; its error is measured at the states.
+//! - A photon coherence's gate is read at an atom's place alone (photon.rs `Model::coherence_gate`: its classes' jump
+//!   operators there, the exact elimination's at rest); over a region no bound of them is made.
 //! (The first model keeping nothing, as it was, ran the scout and the pilot on a wrong model and kept by their reads,
 //! an attempt each: PGC3D_1ms 3 attempts and 52.5 CPU-s where the prior's line, 717cb386, took one and 12.9; TET_1ms
 //! 4 and 120.6 against 16.6.)
@@ -460,7 +466,7 @@ use crate::linalg::V3;
 use crate::model::optical::Unmade;
 use crate::model::units::destined;
 use crate::model::tabulate::{Key, Tables};
-use crate::model::{Envelope, Lights, Model, Priced, Reach, Run, Sample, Trap, Unit, UnitError, GROUND};
+use crate::model::{Envelope, Lights, Model, Priced, Run, Sample, Trap, Unit, UnitError, GROUND};
 use crate::request::STATES;
 use crate::step::{stumpff, Dynamics, Price, Refused, Scratch, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE};
@@ -567,7 +573,7 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     // The units kept and the reach's temperature -- both only grow --, the model they make, closed by its prior (`closed`),
     // and the states the last attempt's run level left (`Carried`).
     let (mut kept, mut reach) = (vec![], request.temperature_uk);
-    let mut model = closed(request, &light, &mut kept, reference, &initial, reach)?;
+    let mut model = closed(request, &light, &mut kept, &initial, reach)?;
     let mut carried: Option<Carried> = None;
     let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
     loop {
@@ -585,52 +591,67 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
                 // An attempt's results improve on its own last one (module documentation, # Checkpoints).
                 messages.least = 0;
                 match attempt(request, &setting, &kept, reach, carried.take(), &mut messages)? {
-                    Attempt::Grow(t, left) => (reach, carried) = (t, Some(left)),
+                    // A grown reach is the model's prior's again: its atoms are another ensemble's, and what fails
+                    // among them is kept as an attempt's keep is (# The model's prior).
+                    Attempt::Grow(t, left) => {
+                        reach = t;
+                        let more = failing(&model, request, &light, &initial, reach)?;
+                        if !more.is_empty() {
+                            break (more, left);
+                        }
+                        carried = Some(left);
+                    }
                     Attempt::Keep(units, left) => break (units, left),
                     Attempt::Done(s) => return Ok(s),
                 }
             }
         };
         kept.extend(more);
-        let next = closed(request, &light, &mut kept, reference, &initial, reach)?;
+        let next = closed(request, &light, &mut kept, &initial, reach)?;
         carried = Some(left.into(&model, &next));
         model = next;
     }
 }
 
-/// The model of the units `kept` and of every unit whose fold does not exist where the atoms start, added to `kept`
-/// (module documentation, # The model's prior): the model's gates read at the pilot's initial atoms -- the run's own
-/// draws, the trajectories `MOST_TRAJECTORIES` on (`attempt`) --, each at the speeds up to the reach's there in every
-/// direction, √(2 (ħ/m) A(r)), A(r) the kinetic energy the reach of the temperature `temperature` holds at r (model/
-/// reach.rs `Model::room`), and the atom's own where it lies beyond it (model/units.rs `Model::failing`); the units that
-/// fail kept, and the model they make read again, until none fails -- a drive up its levels as far as the first whose
-/// fold exists (model.rs `Level`).
-fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, reference: [f64; GROUND], initial: &[(usize, f64)], temperature: f64) -> Result<Model, String> {
-    let hm = hbar_over_mass(request.mass_kg);
-    let share = unseen(MOST_TRAJECTORIES as f64);
+/// The model of the units `kept` and of every unit whose fold does not exist where the reach's atoms are, added to
+/// `kept` (module documentation, # The model's prior; `failing`): the units that fail kept, and the model they make
+/// read again, until none fails -- a drive up its levels as far as the first whose fold exists (model.rs `Level`).
+fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, initial: &[(usize, f64)], temperature: f64) -> Result<Model, String> {
     loop {
         let model = Model::new(request, light, kept)?;
-        let units = model.units();
-        let prepared = model.prepared();
-        let trap = model.trap(&reference, &prepared)?;
-        let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, light, alone(s))).collect::<Result<_, _>>()?;
-        let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
-        let reach = model.reach(&trap, &reference, temperature, share);
-        let points: Vec<(V3, f64)> = (MOST_TRAJECTORIES..MOST_TRAJECTORIES + pilot_size())
-            .into_par_iter()
-            .map(|index| {
-                let start = ensemble.draw(SEED, index);
-                let own = hm * start.kappa.iter().map(|k| k * k).sum::<f64>().sqrt();
-                (start.r, (2. * hm * model.room(&reach, start.r, &prepared).max(0.)).sqrt().max(own))
-            })
-            .collect();
-        let fastest = points.iter().fold(reach.speed, |most, p| most.max(p.1));
-        let failing = model.failing(&units, &points, fastest);
-        if failing.is_empty() {
+        let more = failing(&model, request, light, initial, temperature)?;
+        if more.is_empty() {
             return Ok(model);
         }
-        kept.extend(failing);
+        kept.extend(more);
     }
+}
+
+/// The atoms a model's prior reads its gates at (module documentation, # The model's prior): the draws of the reach's
+/// own ensemble -- the initial components in their wells, the lowered isothermal at the reach's temperature
+/// `temperature` (µK; ensemble.rs) -- of the pilot's trajectories, `MOST_TRAJECTORIES` on, the run's seed: at the
+/// request's temperature the pilot's own initial atoms. Each its place and its speed |v| = (ħ/m)|κ|.
+fn atoms(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<Vec<(V3, f64)>, String> {
+    let hm = hbar_over_mass(request.mass_kg);
+    let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(model, light, alone(s))).collect::<Result<_, _>>()?;
+    let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), temperature, hm)?;
+    Ok((MOST_TRAJECTORIES..MOST_TRAJECTORIES + pilot_size())
+        .into_par_iter()
+        .map(|index| {
+            let start = ensemble.draw(SEED, index);
+            (start.r, hm * start.kappa.iter().map(|k| k * k).sum::<f64>().sqrt())
+        })
+        .collect())
+}
+
+/// The model's units whose folds do not exist where the reach of the temperature `temperature` (µK) has its atoms
+/// (module documentation, # The model's prior): the gates (model/units.rs `Model::failing`) at its atoms (`atoms`),
+/// each at its place and its speed -- a state's errors are read so (model/units.rs `Measured`) --, bounded first over
+/// the whole space at the fastest of them.
+fn failing(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<Vec<Unit>, String> {
+    let points = atoms(model, request, light, initial, temperature)?;
+    let fastest = points.iter().fold(0., |most: f64, p| most.max(p.1));
+    Ok(model.failing(&model.units(), &points, fastest))
 }
 
 /// What an attempt takes of its model alone (`solve`): nothing of it rests on the reach the model is judged over or
@@ -1383,7 +1404,7 @@ fn keep(
     step: &[Bound],
     scales: &Scales,
     unsampled: [f64; 2],
-    tabled: (&Tables, &Reach),
+    tables: &Tables,
     again: f64,
     reads: Reads,
 ) -> Option<Vec<usize>> {
@@ -1400,7 +1421,7 @@ fn keep(
     let doubt = || Doubt::new(measured, fixed.model.len(), parts, scales, unsampled);
     let scouted = reads.few().then(doubt);
     let near = scouted.as_ref().map_or_else(|| vec![[0.; 2]; fixed.model.len()], |d| d.interval(&[]));
-    let mut pricing = Pricing::new(Formula::new(model, kept, units, reference, centre, tabled), measured, means, parts, estimates, fixed, step, scales, unsampled, again, &near);
+    let mut pricing = Pricing::new(Formula::new(model, kept, units, reference, centre, tables), measured, means, parts, estimates, fixed, step, scales, unsampled, again, &near);
     // Keeping nothing: no option where some look has no room for the statistics; else the current model's work a µs
     // times its product's trajectories, where some keep could save at all.
     let crowded = !weighing(&counted, &clear(fixed, &near), step, means, &held, &read).is_empty();
@@ -1554,7 +1575,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
         let measured = read.measured(units.len());
         let means = measured.means(outputs, None, &estimates);
         let fixed = Fixed { model: model_error(&measured.combined(outputs, None, &estimates), unsampled), start };
-        let keeps = keep(kept, model, reference, trap.centre, units, &measured, &means, parts, &estimates, &fixed, &shares, &scales, unsampled, (&tables, judged), again, reads);
+        let keeps = keep(kept, model, reference, trap.centre, units, &measured, &means, parts, &estimates, &fixed, &shares, &scales, unsampled, &tables, again, reads);
         (keeps.map(|u| u.iter().map(|&u| units[u].clone()).collect()), read)
     };
     // The states the attempt before left (# An attempt's own): decided on before a trajectory runs, for the room (the
@@ -1632,7 +1653,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
             vec![standing(&worse(&own, third.as_ref(), false)); outputs]
         };
         // Units to keep at the pilot's states (`keep`): their model then decides on these states first.
-        let asked = keep(kept, model, reference, trap.centre, units, &measured, &means, &pilot, &read.estimates, &fixed, &step, &scales, unsampled, (read.refined.as_ref().unwrap_or(&tables), judged), pilot_size() as f64, Reads::Pilot);
+        let asked = keep(kept, model, reference, trap.centre, units, &measured, &means, &pilot, &read.estimates, &fixed, &step, &scales, unsampled, read.refined.as_ref().unwrap_or(&tables), pilot_size() as f64, Reads::Pilot);
         drop(pilot);
         if let Some(u) = asked {
             return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), Carried { parts: std::mem::take(&mut levels.fine), few: false }));
@@ -1690,7 +1711,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     // made (`pilot_reads`).
     crate::ledger::optical(&mut context.ledger, counts.optical);
     // Units to keep in the product (`keep`), read with the product's estimates and the step's part as the pilot booked it.
-    let keeping = |estimates: &[Estimate], fixed: &Fixed, step: &[Bound]| keep(kept, model, reference, trap.centre, units, &measured, &means, &pilot, estimates, fixed, step, &scales, unsampled, (&tables, judged), pilot_size() as f64, Reads::Product);
+    let keeping = |estimates: &[Estimate], fixed: &Fixed, step: &[Bound]| keep(kept, model, reference, trap.centre, units, &measured, &means, &pilot, estimates, fixed, step, &scales, unsampled, &tables, pilot_size() as f64, Reads::Product);
     {
         // The ledger's items: each folded unit's error on what is shown and on T (its largest over the outputs, weighed by
         // the pilot's held share as the totals are; an output where the pilot holds no atom weighs nothing: its units'
@@ -3402,21 +3423,21 @@ struct Formula<'a> {
     units: &'a [Unit],
     reference: [f64; GROUND],
     centre: V3,
-    /// The current model's near tables and the reach they are made over; per cluster its table's axes and every
-    /// coordinate it was made over, the axes' number and their coordinates' count at a point (`Model::table_axes`; none
-    /// where it has no table).
+    /// The current model's near tables; per cluster its table's axes and every coordinate it was made over, the axes'
+    /// number and their coordinates' count at a point (`Model::table_axes`; none where it has no table).
     tables: &'a Tables,
-    reach: &'a Reach,
     axes: Vec<Option<(Vec<Key>, Vec<Key>, (usize, f64))>>,
-    /// The range each coordinate moves across over the reach, as a kept model's axes ask it (`Model::priced_axes`).
+    /// Where the atoms were (the rated states' places, set by `Pricing::new`), and the range each coordinate moves across
+    /// over them, as a kept model's axes ask it (`Model::priced_axes`).
+    points: Vec<V3>,
     moving: Mutex<HashMap<Key, f64>>,
 }
 
 impl<'a> Formula<'a> {
-    fn new(model: &'a Model, kept: &'a [Unit], units: &'a [Unit], reference: [f64; GROUND], centre: V3, (tables, reach): (&'a Tables, &'a Reach)) -> Formula<'a> {
+    fn new(model: &'a Model, kept: &'a [Unit], units: &'a [Unit], reference: [f64; GROUND], centre: V3, tables: &'a Tables) -> Formula<'a> {
         let running = model.running();
         let axes = (0..model.clusters().len()).map(|c| tables.of(c, &running).map(|t| model.table_axes(t))).collect();
-        Formula { model, kept, units, reference, centre, tables, reach, axes, moving: Mutex::new(HashMap::new()) }
+        Formula { model, kept, units, reference, centre, tables, axes, points: vec![], moving: Mutex::new(HashMap::new()) }
     }
 
     /// The step's price (step.rs `Price`) at states of the current model, each its cluster, its point and its τ: on the
@@ -3466,7 +3487,7 @@ impl<'a> Formula<'a> {
                         known.extend_from_slice(k);
                     }
                 }
-                with.priced_axes(c, self.reach, &axes, &known, &moves)
+                with.priced_axes(c, &self.points, &axes, &known, &moves)
             })
             .collect();
         let priced = with.priced(&axes);
@@ -3529,6 +3550,8 @@ impl<'a> Pricing<'a> {
         doubt: &[[f64; 2]],
     ) -> Pricing<'a> {
         let rated = one_each(pilot);
+        let mut formula = formula;
+        formula.points = rated.iter().map(|pick| pick.state.sample.at.r).collect();
         let all = Level::new(None, estimates.into(), means.into(), fixed, step, unsampled, doubt);
         Pricing { formula, measured, pilot, fixed, scales, unsampled, rated, prices: OnceLock::new(), own: vec![], again, all }
     }
@@ -5218,11 +5241,12 @@ mod tests {
     }
 
     /// The model's prior (`closed`; module documentation, # The model's prior) is a fixed point of the gates where the
-    /// atoms start: on R4_LIN_2 (lin⊥lin cooling, its folds failing at the atoms' speeds) and PGC3D (six beams' cooling
+    /// atoms are: on R4_LIN_2 (lin⊥lin cooling, its folds failing at the atoms' speeds) and PGC3D (six beams' cooling
     /// and a repump in a tweezer), closed from nothing kept, every unit the model folds has its gate below ½ at each of
-    /// the pilot's initial atoms at the reach's speeds there in every direction (`Model::failing` finds none) -- each
-    /// gate a value there, a number, whatever its neighbourhood does --, and the units kept are among those that failed
-    /// at one of them as their models were read. Printed: the units kept and the time the prior took.
+    /// the reach's atoms (`atoms`: at the request's temperature the pilot's initial ones), each at its place and speed
+    /// (`Model::failing` finds none) -- each gate a value there, a number, whatever its neighbourhood does --, and the
+    /// units kept are among those that failed at one of them as their models were read. Printed: the units kept and the
+    /// time the prior took.
     #[test]
     fn the_prior_s_model_folds_only_what_exists_at_every_atom_s_start() {
         let scenes = [("scenes", "R4_LIN_2"), ("requests", "PGC3D_1ms")];
@@ -5231,28 +5255,15 @@ mod tests {
             let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
             let light = Light::new(&request);
             let initial = components(&request);
-            let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).unwrap();
-            let reference = alone(initial[chief].0);
             let started = Instant::now();
             let mut kept = vec![];
-            let model = closed(&request, &light, &mut kept, reference, &initial, request.temperature_uk).unwrap();
+            let model = closed(&request, &light, &mut kept, &initial, request.temperature_uk).unwrap();
             let took = started.elapsed().as_secs_f64();
             // The pilot's initial atoms again, as `closed` reads them.
-            let hm = hbar_over_mass(request.mass_kg);
-            let prepared = model.prepared();
-            let trap = model.trap(&reference, &prepared).unwrap();
-            let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, &light, alone(s)).unwrap()).collect();
-            let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm).unwrap();
-            let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
-            let points: Vec<(V3, f64)> = (MOST_TRAJECTORIES..MOST_TRAJECTORIES + pilot_size())
-                .map(|index| {
-                    let start = ensemble.draw(SEED, index);
-                    let own = hm * start.kappa.iter().map(|k| k * k).sum::<f64>().sqrt();
-                    (start.r, (2. * hm * model.room(&reach, start.r, &prepared).max(0.)).sqrt().max(own))
-                })
-                .collect();
+            let points = atoms(&model, &request, &light, &initial, request.temperature_uk).unwrap();
+            let fastest = points.iter().fold(0., |most: f64, p| most.max(p.1));
             let units = model.units();
-            assert!(model.failing(&units, &points, points.iter().fold(reach.speed, |m, p| m.max(p.1))).is_empty(), "{name}: the closed model folds a unit that fails at an atom's start");
+            assert!(model.failing(&units, &points, fastest).is_empty(), "{name}: the closed model folds a unit that fails at an atom's start");
             // Every unit the model folds is read at every atom's start as a number below ½ (the whole space's bound
             // stands for the point where it is below ½ already).
             let reads = model.judged(&units);
@@ -5273,7 +5284,8 @@ mod tests {
     /// count, cluster by cluster at a node, and the middle with its scattering and a jump's photons at the focus, to the
     /// bit. A kept model -- a bare drive taken to the atom, a cluster's fold to its fourth order, a carrier's dressing
     /// made coherent -- priced of its structure alone is its run's with its own tables made, at states of every cluster
-    /// at rest and at the reach's speed along each lab axis: the bare drive's and the dressing's within 1 % (measured:
+    /// at rest and at the reach's speed along each lab axis, the coordinates new to a kept model read over the trap's
+    /// centre and halfway to the reach's box along each axis: the bare drive's and the dressing's within 1 % (measured:
     /// to the bit, and 0.3 % below), the fourth order's above its run's and within 15 % (11.5 %: its matrices counted
     /// once at the step's middle, which the run's middle at the focus finds made by its scattering, and their changes
     /// along every lab axis the beams change along); and the three in their runs' order.
@@ -5298,7 +5310,11 @@ mod tests {
         let most = (pilot_size() as f64 * (end / tau + end / (2. * tau))).ceil() as usize;
         let reach = &reach;
         let tables = model.tabulate(reach, most);
-        let formula = Formula::new(&model, &kept, &units, reference, trap.centre, (&tables, reach));
+        let mut formula = Formula::new(&model, &kept, &units, reference, trap.centre, &tables);
+        // Where the atoms were: the trap's centre and halfway to the reach's box's faces along each lab axis.
+        formula.points = std::iter::once(trap.centre)
+            .chain((0..3).flat_map(|a| reach.cell[a].map(|edge| std::array::from_fn(|b| if b == a { 0.5 * (trap.centre[b] + edge) } else { trap.centre[b] }))))
+            .collect();
         // The current model: its counts priced are its run's.
         let run = Run::tabulated(&model, &tables, reference);
         let own = formula.own();
