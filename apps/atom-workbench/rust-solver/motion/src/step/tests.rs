@@ -3807,3 +3807,145 @@ fn r4_lin_2_s_steps_never_raise_the_survival() {
     eprintln!("R4_LIN_2: the survival's largest change from one time to the next, ln: {most:e}; the propagation's own map: largest singular value {widest:.6}, above one on {grown} of {steps} steps");
     assert!(grown > 0, "R4_LIN_2's steps hold propagations whose map grows");
 }
+
+/// What `advance` makes of a trajectory from `start` to the time `run` at the step τ (the Brownian path's grid the
+/// multiples of τ in one cell of the run), read at the times `reads`: its last state, every piece of its path with its
+/// start and the time it is on it to (`Segment`: from a step's start, or from a jump with its place and kick -- the
+/// jumps' sequence), the readings with their places in `reads`, each printed whole (`{:?}`, the numbers' shortest round
+/// trip: equal prints are equal bits), and whether its last step went through the decomposition
+/// (`spectral::Picture::decomposed`).
+struct Advanced {
+    last: Trajectory,
+    printed: String,
+    pieces: Vec<(f64, String)>,
+    readings: Vec<(usize, String)>,
+    decomposed: bool,
+}
+fn advanced<D: Dynamics>(model: &D, start: &Trajectory, tau: f64, run: f64, reads: &[f64]) -> Advanced {
+    let (mut t, mut scratch) = (start.clone(), step::Scratch::default());
+    let mut path = adapt::Path::new(start.seed, start.index, run, (run / tau).log2().round() as u32);
+    let (mut pieces, mut readings) = (vec![], vec![]);
+    adapt::advance(model, &Everywhere, tau, &mut t, &mut scratch, &mut path, run, reads, &mut |k, s| readings.push((k, format!("{s:?}"))), &mut |s, until| pieces.push((s.start, format!("{s:?} to {until:?}")))).unwrap();
+    Advanced { printed: format!("{t:?}"), last: t, pieces, readings, decomposed: scratch.picture.decomposed() }
+}
+
+/// A trajectory against itself read at `reads` and at none: the same last state and the same pieces of its path to the
+/// bit; the readings one a time read, in its order, up to the trajectory's loss; and each reading the same to the bit as
+/// at the times `fewer` (a part of `reads`) read alone. Returns the trajectory read at none, and the readings inside
+/// steps of τ (at no multiple of it).
+fn read_apart<D: Dynamics>(model: &D, start: &Trajectory, tau: f64, run: f64, reads: &[f64], fewer: &[f64], case: &str) -> (Advanced, usize) {
+    let plain = advanced(model, start, tau, run, &[]);
+    let all = advanced(model, start, tau, run, reads);
+    let some = advanced(model, start, tau, run, fewer);
+    assert!(plain.readings.is_empty(), "{case}: nothing read");
+    assert_eq!(plain.printed, all.printed, "{case}: the trajectory read at {} times against itself read at none", reads.len());
+    assert_eq!(plain.pieces, all.pieces, "{case}: the pieces of its path read at {} times against read at none", reads.len());
+    assert_eq!(plain.printed, some.printed, "{case}: the trajectory read at {} times against itself read at none", fewer.len());
+    let held = |t: &f64| plain.last.lost.is_none_or(|lost| *t < lost);
+    assert!(all.readings.iter().map(|(k, _)| *k).eq(0..reads.iter().filter(|t| held(t)).count()), "{case}: {} readings of {} times", all.readings.len(), reads.len());
+    for (k, reading) in &some.readings {
+        let at = reads.iter().position(|&t| t == fewer[*k]).expect("a time of the part is read");
+        assert_eq!(reading, &all.readings[at].1, "{case}: the reading at {} read with {} other times against with {}", fewer[*k], fewer.len() - 1, reads.len() - 1);
+    }
+    let ends: std::collections::HashSet<u64> = (0..=(run / tau).round() as usize).map(|k| (k as f64 * tau).to_bits()).collect();
+    let inside = reads[..all.readings.len()].iter().filter(|t| !ends.contains(&t.to_bits())).count();
+    (plain, inside)
+}
+
+/// A trajectory is the same to the bit whatever times it is read at, and a reading the same whatever else is read
+/// (adapt.rs, # The reads; step.rs `looked`): the times read are no stops of a step's propagation, take nothing of its
+/// roots, nodes and count, draw nothing from its streams, and are no place of its loss test. Two atoms in a Gaussian
+/// trap for some trap periods, four trajectories each, read at 2000 random times, at every step's end and middle and at
+/// the unread run's jumps -- against read at none, and a random half of those times read alone:
+/// - a two-level atom in a resonant standing wave with its photons' recoil, which jumps some times a step and boils out
+///   of the trap: lost where its own states (a step's end, a jump) are first beyond the region above the trap's far
+///   value;
+/// - an atom of the ground state alone scattering folded light, whose diffusion moves it along its Brownian path, and
+///   whose readings draw the bridge's rest from the stream of their times (`Segment::place`).
+#[test]
+fn a_trajectory_is_the_same_to_the_bit_whatever_times_it_is_read_at() {
+    let trap = Trap::Gaussian { depth: 6.0, waists: [1.0, 1.0, 3.0] };
+    let wave = |k: f64| Beam { k: [0.0, 0.0, k], rabi: 20.0, phase: 0.0 };
+    let mut explicit = Atom::new(RB, trap, vec![wave(K), wave(-K)], 0.0, GAMMA);
+    (explicit.emission, explicit.region) = (K, 1.5);
+    let mut folded = Atom::new(RB, trap, vec![], 0.0, 0.0);
+    folded.folded = vec![(C64::real(0.4), [0.0, 0.0, K]), (C64::real(0.25), [0.0, 0.0, -K])];
+    (folded.emission, folded.region) = (K, 1.5);
+    let (tau, run) = (0.5, 256.0);
+    let steps = (run / tau) as usize;
+    let (mut jumps, mut inside, mut lost, mut diffused) = (0, 0, 0, 0);
+    for (name, model) in [("the two-level atom", &explicit), ("the folded light's atom", &folded)] {
+        for index in 0..4 {
+            let start = Trajectory::new(model, 0, [0.3, -0.2, 0.8], [20.0, 15.0, -10.0], 11, index);
+            let unread = advanced(model, &start, tau, run, &[]);
+            let mut s = crate::random::Stream::new(13, crate::random::Purpose::Initial, index, 0);
+            let mut reads: Vec<f64> = (0..2000).map(|_| run * s.uniform()).collect();
+            reads.extend((1..=steps).flat_map(|k| [k as f64 * tau, (k as f64 - 0.5) * tau]));
+            reads.extend(unread.pieces.iter().map(|p| p.0));
+            reads.retain(|&t| t > 0.0 && t <= run);
+            reads.sort_by(f64::total_cmp);
+            reads.dedup();
+            let fewer: Vec<f64> = reads.iter().copied().filter(|_| s.uniform() < 0.5).collect();
+            let (plain, i) = read_apart(model, &start, tau, run, &reads, &fewer, &format!("{name}, trajectory {index}"));
+            (jumps, inside) = (jumps + plain.last.jumps, inside + i);
+            lost += usize::from(plain.last.lost.is_some());
+            diffused += usize::from(plain.last.booked[2] > 0.0);
+            eprintln!("{name}, trajectory {index}: {} jumps, {i} times read inside steps, lost at {:?}", plain.last.jumps, plain.last.lost);
+        }
+    }
+    assert!(jumps > 100 && inside > 4000 && lost > 0 && diffused > 0, "{jumps} jumps, {inside} times read inside steps, {lost} trajectories lost, {diffused} diffused");
+}
+
+/// Random trajectories read at random output grids (`read_apart`): random clusters (`Lindblad`, as `random_steps` makes
+/// them: 1 to 5 states, beat pairs, plane waves of the jumps, sizes 0.3 to 30 rad/µs, speeds of 10⁻³ to 1 µm/µs, steps
+/// whose fastest turn between two nodes is 0.01π to 20π) jumping at their thresholds, the jumps' decay up to 20/τ a
+/// state, over 8 to 64 steps; each read at 1 to 300 times -- uniform, at steps' ends and middles, within a few
+/// roundings of a step's end, or packed into one step -- against read at none and at a random part of its times. Both
+/// routes of the state are taken (`spectral::Picture::decomposed`: the decomposition, and the strides that take every
+/// stop from the last).
+#[test]
+fn a_random_output_grid_leaves_a_random_trajectory_as_it_is() {
+    let (mut routes, mut jumps, mut inside) = ([0, 0], 0, 0);
+    for case in 0..96 {
+        let mut s = crate::random::Stream::new(47, crate::random::Purpose::Initial, case, 0);
+        let n = 1 + (5.0 * s.uniform()) as usize;
+        let beats = (3.0 * s.uniform()) as usize;
+        let waves = 1 + (3.0 * s.uniform()) as usize;
+        let size = 0.3 * 100.0_f64.powf(s.uniform());
+        let mut model = Lindblad::new(&mut s, n, beats, waves, size);
+        let speed = 10.0_f64.powf(-3.0 + 3.0 * s.uniform());
+        let fastest = model.beats.iter().chain(&model.jumps).map(|(q, _)| crate::linalg::norm3(*q)).fold(0.0, f64::max) * 2.0;
+        let turn = std::f64::consts::PI * 10.0_f64.powf(-2.0 + 3.3 * s.uniform());
+        let tau = 2.0 * turn / (fastest * speed + size);
+        let held = (size.min(20.0 / tau) / (size * (n * waves) as f64)).sqrt();
+        model.jumps.iter_mut().for_each(|(_, m)| *m = m.scaled(C64::real(held)));
+        let steps = 1usize << (3 + (4.0 * s.uniform()) as usize);
+        let run = tau * steps as f64;
+        let (place, heading) = (s.direction(), s.direction());
+        let mut start = Trajectory::new(&model, 0, place, heading.map(|x| x * speed / RB), 47, case);
+        start.psi = random_state(&mut s, n);
+        let count = 1 + (300.0 * s.uniform()) as usize;
+        let packed = (steps as f64 * s.uniform()).floor();
+        let mut reads: Vec<f64> = (0..count)
+            .map(|_| {
+                let k = (steps as f64 * s.uniform()).floor();
+                match (4.0 * s.uniform()) as usize {
+                    0 => run * s.uniform(),
+                    1 => tau * (k + if s.uniform() < 0.5 { 0.5 } else { 1.0 }),
+                    2 => tau * (k + 1.0) * (1.0 + f64::EPSILON * (8.0 * s.uniform() - 4.0).round()),
+                    _ => tau * (packed + s.uniform()),
+                }
+            })
+            .filter(|&t| t > 0.0 && t <= run)
+            .collect();
+        reads.sort_by(f64::total_cmp);
+        reads.dedup();
+        let fewer: Vec<f64> = reads.iter().copied().filter(|_| s.uniform() < 0.5).collect();
+        let case = format!("case {case}: n {n}, {waves} waves, size {size:.3}, τ {tau:.4}, {steps} steps, {} times", reads.len());
+        let (plain, i) = read_apart(&model, &start, tau, run, &reads, &fewer, &case);
+        routes[usize::from(plain.decomposed)] += 1;
+        (jumps, inside) = (jumps + plain.last.jumps, inside + i);
+    }
+    eprintln!("96 random trajectories: {jumps} jumps, {inside} times read inside steps; the last step strided on {}, through the decomposition on {}", routes[0], routes[1]);
+    assert!(routes[0] > 0 && routes[1] > 0 && jumps > 500 && inside > 2000, "routes {routes:?}, {jumps} jumps, {inside} times read inside steps");
+}
