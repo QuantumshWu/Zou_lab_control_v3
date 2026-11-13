@@ -214,6 +214,19 @@
 //! at every window's two ends, and a window is their difference (`run`) -- each step's path integrated once, and once
 //! more up to each end that falls inside it, whatever the windows' overlap.
 //!
+//! The output at t = 0 is read as every other one is: T, n̄ and the mean velocity there are the estimates of the
+//! trajectories' initial atoms (their instant κ: the window at t = 0 has no length) -- the same estimator on the same
+//! atoms as at the outputs after it. An output's T is a function of its held atoms' κ over its window; as t → 0 the
+//! window shrinks to the instant and each κ(t) = κ(0) + O(t) along the flow, so T(t) tends to T(0) on the same atoms:
+//! T is continuous at t = 0, and what it does by the first output is the dynamics' alone. Its error there is its
+//! statistics' (no step taken, no model acted: `accounts`). What is shown at t = 0 is the request's state, exact:
+//! every trajectory starts in its component's state, and the readout's dressing by the lights -- the eliminated
+//! excited amplitudes following the ground state (model/readout.rs) -- has not happened at the instant they are
+//! switched on. (T(0) was the ensemble's moment by quadrature (ensemble.rs, now the tests' reference for the draws),
+//! with the pilot's steps for its budget: another estimator, and a short run's budget leaves it unconverged -- the
+//! user's 200 µK tweezer of 7.5 k_BT, 0.1 µs: two levels of 2 and 4 nodes a coordinate 22.5 % apart, 179.5 µK against
+//! the converged 171.08 µK (2¹⁵ draws: 170.8 ± 0.5), and the run's 144 atoms read 164.5 µK 10⁻⁴ µs later.)
+//!
 //! # The model (SPEC §5.2)
 //! The units are the model's (model.rs), listed again in every model a keep closes. Which folds hold is measured, as an
 //! adaptive integrator's tolerance is (QuTiP's way): no fold is proven before a trajectory runs, the first model keeps
@@ -406,7 +419,7 @@
 use crate::adapt;
 use crate::decide::{assured, pays, Outcome, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
-use crate::estimate::{allowance, between, bound_motion, draws_for, half_window, occupation, semiclassical, spread, summarize, unseen, Between, Estimate, Fate, Group, Held, Scales, Spread};
+use crate::estimate::{allowance, between, bound_motion, draws_for, half_window, semiclassical, spread, summarize, unseen, Between, Estimate, Fate, Group, Held, Scales, Spread};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::V3;
@@ -2936,13 +2949,14 @@ fn without(fixed: &Fixed, means: &[Vec<[f64; 2]>], read: &[bool], set: &[usize])
 
 /// Each output's accounts of what is shown and of the total T (ledger.rs `Account`) by the run's estimates, the model's
 /// errors per output (`Fixed`: on what is shown every atom's, `Measured::means`; on T the held atoms') and the step's
-/// part, T's where read: the held share 1 − L weighs T's whole accounts (module documentation, # Stopping); t = 0 is the
-/// request's state, without error, and the ensemble's moments, T's by quadrature: its accounts are the quadrature's
-/// error alone (`Fixed::start`), in the discretization's part (SPEC §4). The share of the output's trajectories not
-/// counted is booked whole on what is shown, in the model's part (estimate.rs, # What is counted: what no number of
-/// trajectories takes away), and leaves T no account (`temperature_model`). The model's error on what is shown is at
-/// most 1, a probability's. T has an account where its statistics, the model's error and its step error are all
-/// read. The outputs' accounts are made on the pool, each output's by itself.
+/// part, T's where read: the held share 1 − L weighs T's whole accounts (module documentation, # Stopping); at t = 0
+/// what is shown is the request's state, without error, and T the initial atoms' estimate (module documentation,
+/// # Outputs and windows): no step is taken and no model has acted there, so T's account is its statistics alone.
+/// The share of the output's trajectories not counted is booked whole on what is shown, in the model's part
+/// (estimate.rs, # What is counted: what no number of trajectories takes away), and leaves T no account
+/// (`temperature_model`). The model's error on what is shown is at most 1, a probability's. T has an account where its
+/// statistics, the model's error and its step error are all read. The outputs' accounts are made on the pool, each
+/// output's by itself.
 fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> (Vec<Account>, Vec<Option<Account>>) {
     estimates
         .par_iter()
@@ -2951,7 +2965,8 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &[Bound]) -> (Vec<Accou
         .enumerate()
         .map(|(k, ((e, a), b))| {
             if k == 0 {
-                return (Account::default(), Some(Account { step: fixed.start, ..Account::default() }));
+                let temperature = temperature_account(e, 0., &Bound { shown: 0., temperature: 0. }, e.temperature_interval());
+                return (Account::default(), temperature.statistics.is_finite().then_some(temperature));
             }
             let population = Account { model: probability_error(a[0] + e.uncounted), step: b.shown, statistics: e.shown_statistics() };
             let temperature = temperature_account(e, a[1], b, e.temperature_interval());
@@ -3578,10 +3593,10 @@ fn step_reading(run: f64, step: f64) -> String {
     significant(step, count.to_string().len() as i32 + 1).to_string()
 }
 
-/// The result of the estimates of `trajectories` trajectories (contract §2.2): at t = 0 the request's initial state and the
-/// ensemble's exact moments (T, and n̄ as of one atom with that mean, estimate.rs `occupation`); an output with no atom
-/// held carries the last one's populations, one with fewer than two atoms the last T read with its judgement of the
-/// validated regime (`classical`: a statement about that T) and n̄, their error unknown; one whose T is its own but whose
+/// The result of the estimates of `trajectories` trajectories (contract §2.2): what is shown at t = 0 the request's
+/// initial state, the motion there the initial atoms' as at every output (module documentation, # Outputs and windows);
+/// an output with no atom held carries the last one's populations, one with fewer than two atoms the last T read with
+/// its judgement of the validated regime (`classical`: a statement about that T) and n̄, their error unknown; one whose T is its own but whose
 /// jackknife reads no error (some group's removal leaves fewer than two atoms) says so; each flagged, apart.
 fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], counts: &Counts, trajectories: u64) -> Solution {
     let (times, outputs) = (&c.plan.times, c.plan.times.len());
@@ -3614,8 +3629,6 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         ledger.item(&format!("计算中跑出估计的活动范围的原子（{what}）"), largest, "在每个输出时刻统计：曾有一步因速率太大而时间步长对它不适用、或因散射率超过原子任何状态的上限而停下的原子（从那一步起），按它们所占的比例全部计入（布居上是原子数的比例，温度上是动能的比例）；温度高于活动范围的温度 T_r 时，再按热分布在活动范围之外的比例 s^(T_r/T) − s 计入（s 是活动范围本身留在外面的比例），这些原子上的折叠不另行判定");
     }
     ledger.close(times, &population, &temperature, &estimates.iter().map(|e| e.temperature_target).collect::<Vec<f64>>());
-    // T and the motion at t = 0: exact.
-    let start_t = c.momentum.map(|m| m / KT_PER_UK);
     let mut s = Solution {
         populations: Vec::with_capacity(outputs),
         estimated_errors: population.iter().map(Account::total).collect(),
@@ -3626,7 +3639,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
         mean_velocity_mps: Vec::with_capacity(outputs),
         mean_occupation: Vec::with_capacity(outputs),
         trap_frequency_khz: w.map(|x| x / TAU * 1e3),
-        loss_probability: estimates.iter().enumerate().map(|(k, e)| if k == 0 { 0. } else { e.loss }).collect(),
+        loss_probability: estimates.iter().map(|e| e.loss).collect(),
         velocity: std::array::from_fn(|a| histograms(listed, &c.plan.listed, &|x| x.1[a] * hm)),
         position: std::array::from_fn(|a| histograms(listed, &c.plan.listed, &|x| x.0[a])),
         classical: Vec::with_capacity(outputs),
@@ -3642,19 +3655,9 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
     let none: Vec<usize> = (1..outputs).filter(|&k| estimates[k].trajectories == 0.).collect();
     let partly: Vec<usize> = (1..outputs).filter(|&k| estimates[k].uncounted > 0. && estimates[k].motion.is_some()).collect();
     for (k, e) in estimates.iter().enumerate() {
-        if k == 0 {
-            s.populations.push(c.initial);
-            s.temperature_uk.push(start_t);
-            s.temperature_errors_uk.push([Some(0.); 3]);
-            s.temperature_total_uk.push(start_t.iter().sum::<f64>() / 3.);
-            s.temperature_total_errors_uk.push(Some(0.));
-            s.mean_velocity_mps.push([0.; 3]);
-            s.mean_occupation.push(std::array::from_fn(|a| occupation(c.momentum[a], 1., w[a])));
-            s.classical.push(classical(&start_t));
-            continue;
-        }
-        let last = k - 1;
-        s.populations.push(if e.held > 0. { e.populations } else { s.populations[last] });
+        // At t = 0 every trajectory holds its atom (`run`), and a result rests on two at least: nothing is carried there.
+        let last = || k.checked_sub(1).expect("t = 0 holds every trajectory's atom, two at least in a result");
+        s.populations.push(if k == 0 { c.initial } else if e.held > 0. { e.populations } else { s.populations[last()] });
         if e.held == 0. && e.trajectories > 0. && empty.is_none() {
             empty = Some(k);
         }
@@ -3673,6 +3676,7 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
                 }
             }
             None => {
+                let last = last();
                 let (t, total, v, n) = (s.temperature_uk[last], s.temperature_total_uk[last], s.mean_velocity_mps[last], s.mean_occupation[last]);
                 s.temperature_uk.push(t);
                 s.temperature_errors_uk.push([None; 3]);
@@ -5603,5 +5607,73 @@ mod tests {
         let estimates = vec![estimate([10.; 3], 0., 88.), estimate([10.; 3], 0., 88.)];
         let fixed = Fixed { model: vec![[0.; 2], [0.0480, 0.]], start: 0. };
         assert_eq!((tight(&estimates, &fixed, &[share; 2], &[false, true]), tight(&estimates, &fixed, &[low; 2], &[false, true])), (vec![1], vec![]));
+    }
+
+    /// t = 0 is read as every output is (module documentation, # Outputs and windows): the result's T per axis, the
+    /// total, their errors, n̄, the mean velocity and the validated regime at an output are the same function of that
+    /// output's sums at t = 0 as after it -- no other estimator there. Random runs (3 to 12 groups of 1 to 8 atoms,
+    /// every atom held in the request's state, random κ and window moments ⟨κ²⟩ ≥ ⟨κ⟩²) whose last output's fates are
+    /// t = 0's: the two outputs show the same numbers, bit for bit, and what is shown at t = 0 is the request's state.
+    /// T's account at t = 0 is its statistics alone (`accounts`: no step taken, no model acted), weighed and read as
+    /// at every output.
+    #[test]
+    fn t_0_is_read_as_every_output_is() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut uniform = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let state = |s: usize| -> [f64; STATES] { std::array::from_fn(|r| f64::from(u8::from(r == s))) };
+        for _ in 0..200 {
+            let (groups, members) = (3 + (uniform() * 10.) as usize, 1 + (uniform() * 8.) as usize);
+            let mut fate = || {
+                let kappa: V3 = std::array::from_fn(|_| 3. * (uniform() - 0.5));
+                let kappa2: V3 = std::array::from_fn(|a| kappa[a] * kappa[a] * (1. + uniform()));
+                Fate::Held(Held { rows: state(0), kappa, kappa2, outside: false, unresolved: false, leaving: false })
+            };
+            let parts: Vec<Group> = (0..groups)
+                .map(|_| {
+                    let mut group = Group::new(3);
+                    for _ in 0..members {
+                        let (first, middle) = (fate(), fate());
+                        group.add(&[first.clone(), middle, first]);
+                    }
+                    group
+                })
+                .collect();
+            let scales = Scales { hbar_over_mass: KT_PER_UK, frequencies: std::array::from_fn(|_| 0.5 + uniform()) };
+            let estimates = summarize(&parts, &scales);
+            let plan = Plan::new(&[0., 10., 20.], scales.frequencies);
+            let listed = vec![vec![]; plan.listed.len()];
+            let context = Context {
+                plan,
+                tau: 1.,
+                scales,
+                initial: state(0),
+                momentum: [1.; 3],
+                fixed: Fixed { model: vec![[0.; 2], [0.01, 0.02], [0.; 2]], start: 0. },
+                outside: vec![[0.; 2]; 3],
+                step: vec![Bound::share(); 3],
+                checked: None,
+                ledger: Ledger::default(),
+                method: String::new(),
+            };
+            let s = assemble(&context, &estimates, &listed, &Counts::default(), (groups * members) as u64);
+            assert!(s.temperature_uk[0] == s.temperature_uk[2] && s.temperature_errors_uk[0] == s.temperature_errors_uk[2], "{s:?}");
+            assert!(s.temperature_total_uk[0] == s.temperature_total_uk[2] && s.temperature_total_errors_uk[0] == s.temperature_total_errors_uk[2], "{s:?}");
+            assert!(s.mean_velocity_mps[0] == s.mean_velocity_mps[2] && s.mean_occupation[0] == s.mean_occupation[2] && s.classical[0] == s.classical[2], "{s:?}");
+            assert!(s.populations[0] == state(0) && s.populations[2] == state(0) && s.loss_probability[0] == 0., "{s:?}");
+            let e = &estimates[0];
+            let interval = e.temperature_interval();
+            let account = accounts(&estimates, &context.fixed, &context.step).1[0];
+            if interval.is_finite() {
+                let a = account.expect("T read at t = 0 has an account");
+                assert!(a.model == 0. && a.step == 0. && a.statistics == interval, "{a:?} against {interval}");
+            } else {
+                assert!(account.is_none(), "{account:?}");
+            }
+        }
     }
 }
