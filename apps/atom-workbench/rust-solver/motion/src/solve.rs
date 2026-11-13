@@ -1289,9 +1289,9 @@ fn attempt(
     // The near light's tables (SPEC §2.3, §5.4; model/tabulate.rs): refined over the reach to the largest ensemble's
     // resolution, as far as their functions' structure asks (model/tabulate.rs, # Refinement). The work's bound decides
     // which coordinates are axes -- no first grid of more nodes than the middles the pilot takes at the attempt's first
-    // step and at its double, pilot_size·(end/τ + end/(2τ)), a node counted as a middle without a table --, never how
-    // far an axis is refined: a table's nodes do not grow with the run. What a coordinate held back misses is read at
-    // the atoms below.
+    // step and at its double, pilot_size·(end/τ + end/(2τ)), a node counted as a middle without a table --, and is the
+    // ceiling no grid passes; how far an axis is refined below it is the table's (its reads), not the run's. What a
+    // coordinate held back misses is read at the atoms below.
     let most = (pilot_size() as f64 * (context.plan.end / context.tau + context.plan.end / (2. * context.tau))).ceil() as usize;
     let mut tables = model.tabulate(judged, most);
     let run = Run::tabulated(model, &tables, reference);
@@ -1392,7 +1392,7 @@ fn attempt(
             stuck[t] = match worst {
                 None => Some(Stuck::Axes),
                 Some(_) if held => Some(Stuck::Held),
-                Some(f) => match model.halved_by(&tables.tables[t], f, axes[f][0].max(axes[f][1]), &mut before[t][f]) {
+                Some(f) => match model.halved_by(&tables.tables[t], f, axes[f][0].max(axes[f][1]), &mut before[t][f], most) {
                     Some(finer) => {
                         tables.tables[t].table = finer;
                         None
@@ -1412,7 +1412,7 @@ fn attempt(
             }
             context.ledger.item(&label, booked[t][0].max(booked[t][1]), TABLE_MEASURED);
             match stuck[t] {
-                Some(Stuck::Order) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它在已分辨的网格上加密后误差下降不超过未分辨结构的两倍（不收敛）：按实测的误差计入误差预算")),
+                Some(Stuck::Order) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它在已分辨的网格上加密后误差下降不超过未分辨结构的两倍（不收敛），或再加密一次就超过节点数上限（{most} 个）：按实测的误差计入误差预算")),
                 Some(Stuck::Held) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而超出的部分来自取焦点处的值的坐标，不是插值的误差（加密网格不能降低它）：按实测的误差计入误差预算")),
                 Some(Stuck::Axes) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它没有可以加密的坐标（它依赖的量都取焦点处的值）：按实测的误差计入误差预算")),
                 None => {}
@@ -1482,7 +1482,8 @@ fn attempt(
 }
 
 /// Why a table beyond the tables' shares is refined no further (`attempt`): its worst axis's read on a grid it resolves
-/// fell by no more than an unresolved peak's (it is not converging: model/tabulate.rs, # Refinement); what is
+/// fell by no more than an unresolved peak's (it is not converging: model/tabulate.rs, # Refinement), or its halved grid
+/// would pass the work bound; what is
 /// beyond is the coordinates it holds at the focus, not its axes' interpolation; or the table has no axis -- nothing to
 /// halve.
 #[derive(Clone, Copy)]
