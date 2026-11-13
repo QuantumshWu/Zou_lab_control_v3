@@ -739,7 +739,7 @@ impl Eigen {
 /// column by column (a column's numbers side by side); `v` and `sums` are n numbers of scratch. Its complex multiply-adds
 /// and the Hessenberg form's largest entry (the deflation's scale); None where the QR iteration does not converge within
 /// LAPACK zlahqr's 30·max(10, n) iterations per eigenvalue.
-fn schur(h: &mut [C64], q: &mut [C64], v: &mut [C64], sums: &mut [C64], n: usize) -> Option<(usize, f64)> {
+pub(crate) fn schur(h: &mut [C64], q: &mut [C64], v: &mut [C64], sums: &mut [C64], n: usize) -> Option<(usize, f64)> {
     let mut work = 0;
     for (k, column) in q.chunks_exact_mut(n).enumerate() {
         column.fill(C64::ZERO);
@@ -863,16 +863,6 @@ fn schur(h: &mut [C64], q: &mut [C64], v: &mut [C64], sums: &mut [C64], n: usize
         }
     }
     Some((work, scale))
-}
-
-/// The complex Schur form A = Q T Q† of a square matrix (`schur`): T upper triangular row by row, Q unitary column by
-/// column, and the complex multiply-adds that made them; None where the QR iteration does not converge.
-pub(crate) fn schur_form(a: &Mat) -> Option<(Vec<C64>, Vec<C64>, f64)> {
-    let n = a.rows;
-    assert_eq!(n, a.cols, "the Schur form of a {}x{} matrix", a.rows, a.cols);
-    let (mut t, mut q, mut v, mut sums) = (a.data.clone(), vec![C64::ZERO; n * n], vec![C64::ZERO; n], vec![C64::ZERO; n]);
-    let (work, _) = schur(&mut t, &mut q, &mut v, &mut sums, n)?;
-    Some((t, q, work as f64))
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

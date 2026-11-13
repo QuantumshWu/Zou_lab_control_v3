@@ -119,33 +119,42 @@ impl Middle for Parts {
         let size = (self.parts.len() * self.waves.len() * self.waves.len()) as f64;
         [size, 3.0 * size, 3.0 * size]
     }
-    /// The two-level atom's optical sector (model/optical.rs) where it is asked: K of its generator and gradient at the
-    /// middle in its Doppler frame, to the first order along the path (the slopes through ±`half`) where it beats, the
-    /// parts' fastest beat on the path and the excited state's decay over two.
-    fn optical(&self, velocity: &[f64; 3], half: f64) -> Option<step::Optical> {
+    /// Ĝ_a(s) = the Hermitian part of Σ_p e^{iΩ_p s} G_p,a (what `force` contracts), Ω_p the part's beat on the path,
+    /// and its slope, the same of iΩ_p e^{iΩ_p s} G_p,a.
+    fn gradient(&self, velocity: &[f64; 3], s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) {
+        let n = self.states();
+        let sum = |turned: bool, a: usize| -> Vec<C64> {
+            let mut m = vec![C64::ZERO; n * n];
+            for p in &self.parts {
+                let omega = p.omega + dot3(p.wave, *velocity);
+                let phase = C64::cis(omega * s) * if turned { C64::new(0.0, omega) } else { C64::ONE };
+                for (z, f) in m.iter_mut().zip(&p.force[a].data) {
+                    *z += phase * *f;
+                }
+            }
+            (0..n * n).map(|i| (m[i] + m[(i % n) * n + i / n].conj()) * 0.5).collect()
+        };
+        for (a, m) in g.iter_mut().enumerate() {
+            *m = sum(false, a);
+        }
+        if let Some(slope) = slope {
+            for (a, m) in slope.iter_mut().enumerate() {
+                *m = sum(true, a);
+            }
+        }
+    }
+    /// The two-level atom's optical sector (model/optical.rs) where it is asked: its one ground state, the excited
+    /// state's decay over two, and the parts' fastest beat on the path where it beats.
+    fn optical(&self, velocity: &[f64; 3]) -> Option<step::Optical> {
         let n = self.states();
         if !self.optical || n < 2 {
             return None;
         }
         let mut h = Mat::zeros(n, n);
         self.generator(velocity, 0.0, &mut h);
-        let mut gradient: [Vec<C64>; 3] = Default::default();
-        self.gradient(velocity, 0.0, &mut gradient);
-        let sector = crate::model::optical::Sector::new(&h, &gradient, 1)?;
-        let slope = (!self.still()).then(|| {
-            let (mut early, mut late) = (Mat::zeros(n, n), Mat::zeros(n, n));
-            self.generator(velocity, -half, &mut early);
-            self.generator(velocity, half, &mut late);
-            let (mut before, mut after): ([Vec<C64>; 3], [Vec<C64>; 3]) = Default::default();
-            self.gradient(velocity, -half, &mut before);
-            self.gradient(velocity, half, &mut after);
-            let scale = 0.5 / half;
-            (Mat::from_fn(n, n, |i, j| (late[(i, j)] - early[(i, j)]) * scale), std::array::from_fn(|a| after[a].iter().zip(&before[a]).map(|(x, y)| (*x - *y) * scale).collect::<Vec<C64>>()))
-        });
-        let (k, along) = sector.operators(slope.as_ref().map(|(h1, g1)| (h1, g1)))?;
         let beat = if self.still() { 0.0 } else { self.parts.iter().map(|p| (p.omega + dot3(p.wave, *velocity)).abs()).fold(0.0, f64::max) };
         let decay = (1..n).map(|e| -h[(e, e)].im).fold(f64::INFINITY, f64::min);
-        Some(step::Optical { k, gradient, beat, decay, work: (sector.work + along) / crate::decide::COMPLEX })
+        Some(step::Optical { ground: 1, decay, beat })
     }
 }
 
@@ -2276,11 +2285,11 @@ impl<M: Middle> Middle for Probe<'_, M> {
     fn work(&self) -> [f64; 3] {
         self.middle.work()
     }
-    fn gradient(&self, path: &M::Path, s: f64, g: &mut [Vec<C64>; 3]) {
-        self.middle.gradient(path, s, g)
+    fn gradient(&self, path: &M::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) {
+        self.middle.gradient(path, s, g, slope)
     }
-    fn optical(&self, path: &M::Path, half: f64) -> Option<step::Optical> {
-        self.middle.optical(path, half)
+    fn optical(&self, path: &M::Path) -> Option<step::Optical> {
+        self.middle.optical(path)
     }
 }
 
@@ -2473,7 +2482,19 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let paths: Vec<_> = pieces.iter().map(|p| p.through.generator.path(p.kappa, p.kappa.map(|k| hm * k))).collect();
     let n = starts[0].psi.len();
     let mut h = Mat::zeros(n, n);
-    let [whole, reference, point, generator, force, tones, middle, propagated, root, scattering, readout, pace] = microseconds(
+    let mut g: [Vec<C64>; 3] = Default::default();
+    // The optical sector as a step's middle makes it (`step::optical`, then one `within`), on each piece's path with its
+    // picture made beforehand.
+    let alongs: Vec<_> = pieces.iter().map(|p| super::Along::new(&p.through.generator, p.kappa, p.kappa.map(|k| hm * k))).collect();
+    let mut scratches: Vec<step::Scratch> = alongs
+        .iter()
+        .map(|along| {
+            let mut scratch = fitted(n);
+            super::pictured(along, &mut scratch.picture, tau);
+            scratch
+        })
+        .collect();
+    let [whole, reference, point, generator, force, tones, middle, propagated, root, scattering, readout, gradient, optical, pace] = microseconds(
         count,
         [
             &mut || starts.iter().map(|s| step_of(model, s, tau, &mut kept.borrow_mut()).unwrap().end.kappa[0]).sum::<f64>(),
@@ -2494,9 +2515,23 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || propagation(true),
             &mut || pieces.iter().zip(&paths).zip(starts).map(|((p, path), s)| p.through.generator.scattering(path, &s.psi).force[0]).sum::<f64>(),
             &mut || pieces.iter().zip(starts).map(|(p, s)| model.readout(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi)[0]).sum::<f64>(),
+            &mut || {
+                pieces.iter().zip(&paths).for_each(|(p, path)| p.through.generator.gradient(path, 0.2 * tau, &mut g, None));
+                g[0][0].re
+            },
+            &mut || {
+                let mut sum = 0.0;
+                for (p, (along, scratch)) in pieces.iter().zip(alongs.iter().zip(scratches.iter_mut())) {
+                    if let Some((epsilon, _)) = super::optical(along, &scratch.picture, p.through.generator.still(), &mut scratch.noise) {
+                        sum += epsilon + super::within(scratch.noise.sector.operators().unwrap(), &scratch.noise.gradient, &p.crossed.psi)[0][0];
+                    }
+                }
+                sum
+            },
             &mut yardstick,
         ],
     );
+    eprintln!("{name:<22} n {n} τ {tau:<6} | the optical sector at the middle {optical:8.2} µs, a gradient's matrices {gradient:6.2} µs");
     let crossings = pieces
         .iter()
         .filter(|p| p.through.attempt(&p.crossed, &step::Brownian::STILL, &[], &mut fitted(p.crossed.psi.len()), &Everywhere).unwrap().made.iter().any(|made| made.kick.is_some()))

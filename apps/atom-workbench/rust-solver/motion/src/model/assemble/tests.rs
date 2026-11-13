@@ -357,7 +357,12 @@ fn form_size(sizes: &Written, a: usize, rho: &[C64], n: usize) -> f64 {
 /// the middle's position with it, Re Σ ∂_a H[x, y] ρ[y, x] -- entry by entry to the rounding of the entry's sum: γ_N of its
 /// terms' moduli (`chain`; the gradient's product rule doubles the chain, and its form with ρ adds its n² terms). The frames'
 /// rates are K_s·v. A still cluster's generator is the same at every time along the path, to the same rounding twice. The
-/// gradient's matrices (`Middle::gradient`, the optical sector's) are the same entries.
+/// gradient's matrices (`Middle::gradient`, the optical sector's) are the same entries; and their slope along the path,
+/// made in the same pass, is their derivative: against their central difference at ±δ, δ a thousandth over the fastest
+/// a term turns at along the path -- every factor along it is a phase e^{iωs}, |ω| at most twice the beams' and the
+/// frames' fastest rates and the fastest tone --, which errs by at most (ωδ)²/6 of ω times the entry's moduli, and by
+/// the two ends' rounding over 2δ: their sums', and their phases' -- a phase's argument Φ = ω(t + s) is rounded to Φu
+/// twice (the sum and the product), which is all of a tone's turn over δ where Φ is a hyperfine beat's at t.
 #[test]
 fn a_path_s_generator_and_force_are_the_definitions_written_out() {
     let (mut still, mut beating) = (0, 0);
@@ -400,13 +405,24 @@ fn a_path_s_generator_and_force_are_the_definitions_written_out() {
                     force = force.max(if size > 0.0 { apart / size } else { 0.0 });
                 }
                 // The gradient's matrices (`Middle::gradient`) are the written-out Hermitian part's gradient, entry by entry.
-                let mut g: [Vec<C64>; 3] = Default::default();
-                middle.gradient(&path, s, &mut g);
+                let (mut g, mut slope): ([Vec<C64>; 3], [Vec<C64>; 3]) = Default::default();
+                middle.gradient(&path, s, &mut g, Some(&mut slope));
+                let fastest = |rates: &[f64]| rates.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+                let omega = 2.0 * (fastest(&path.rates.path) + fastest(&path.rates.gauge)) + fastest(&plan.tones);
+                let delta = 1e-3 / omega.max(f64::MIN_POSITIVE);
+                let phase = (t.abs() + s.abs() + delta) * fastest(&plan.tones) + (s.abs() + delta) * 2.0 * (fastest(&path.rates.path) + fastest(&path.rates.gauge));
+                let (mut ahead, mut behind): ([Vec<C64>; 3], [Vec<C64>; 3]) = Default::default();
+                middle.gradient(&path, s + delta, &mut ahead, None);
+                middle.gradient(&path, s - delta, &mut behind, None);
                 for a in 0..3 {
                     for i in 0..n * n {
                         let mirror = (i % n) * n + i / n;
                         let (apart, size) = ((g[a][i] - written.hermitian[i][1 + a]).abs(), sizes.hermitian[i][1 + a].re.max(sizes.hermitian[mirror][1 + a].re));
                         assert!(apart <= rounding(2 * links + 2) * size, "{name}, cluster {cluster}, s {s}, axis {a}, entry ({}, {}): the gradient's matrix {apart:e} apart of {size:e}", i / n, i % n);
+                        let central = (ahead[a][i] - behind[a][i]) * (0.5 / delta);
+                        let off = (slope[a][i] - central).abs();
+                        let bound = omega * size * (1e-6 / 6.0) + 2.0 * (rounding(2 * links + 2) + 2.0 * phase * crate::units::UNIT_ROUNDOFF) * size / (2.0 * delta);
+                        assert!(off <= bound, "{name}, cluster {cluster}, s {s}, axis {a}, entry ({}, {}): the gradient's slope {} is {off:e} off its central difference {} (bound {bound:e})", i / n, i % n, slope[a][i].abs(), central.abs());
                     }
                 }
             }

@@ -92,11 +92,29 @@ impl Dense {
         out
     }
 
-    /// Re Tr[F_a Y], Y = 𝓡_Q X, of a traceless Hermitian X in cluster `at`, by the projector's definition on the whole vec
-    /// space (module documentation, # The ground trace: Q X = E X + (Tr_g X) d, d the identity on `at`'s ground states over
-    /// their number; P = 1 − Q), solved with the trace's column: (−Q𝓛Q + P + d⊗tr) Y = Q X -- Y in Q's range and
-    /// traceless, since 𝓛 and Q keep the trace, P makes none, and P d = 0.
+    /// Re Tr[F_a Y], Y = 𝓡_Q X, of a traceless Hermitian X in cluster `at` (`resolved`).
     fn reference(&self, at: usize, x: &[C64], a: usize) -> f64 {
+        let offsets = self.offsets();
+        let mut xv = vec![C64::ZERO; *offsets.last().unwrap()];
+        xv[offsets[at]..offsets[at + 1]].copy_from_slice(x);
+        let y = self.resolved(at, &xv);
+        // Re Tr[F_a Y], F = −G.
+        let mut out = 0.0;
+        for (c, &(n, _)) in self.sizes.iter().enumerate() {
+            for i in 0..n {
+                for k in 0..n {
+                    out -= (self.g[c][a][k * n + i] * y[offsets[c] + i * n + k]).re;
+                }
+            }
+        }
+        out
+    }
+
+    /// Y = 𝓡_Q X of a traceless Hermitian X on the whole vec space (every cluster's block, row by row), Q's ground trace
+    /// cluster `at`'s, by the projector's definition (module documentation, # The ground trace: Q X = E X + (Tr_g X) d, d
+    /// the identity on `at`'s ground states over their number; P = 1 − Q), solved with the trace's column: (−Q𝓛Q + P +
+    /// d⊗tr) Y = Q X -- Y in Q's range and traceless, since 𝓛 and Q keep the trace, P makes none, and P d = 0.
+    fn resolved(&self, at: usize, xv: &[C64]) -> Vec<C64> {
         let offsets = self.offsets();
         let (off, d) = (&offsets, *offsets.last().unwrap());
         // 𝓛 as a matrix on vec(ρ).
@@ -155,20 +173,9 @@ impl Dense {
                 m[(r, cc)] += C64::real(1.0 / g_at as f64);
             }
         }
-        let mut xv = vec![C64::ZERO; d];
-        xv[off[at]..off[at + 1]].copy_from_slice(x);
-        let mut y = q.apply(&xv);
+        let mut y = q.apply(xv);
         Complex::new(&m).expect("the bordered system").solve(&mut y);
-        // Re Tr[F_a Y], F = −G.
-        let mut out = 0.0;
-        for (c, &(n, _)) in self.sizes.iter().enumerate() {
-            for i in 0..n {
-                for k in 0..n {
-                    out -= (self.g[c][a][k * n + i] * y[off[c] + i * n + k]).re;
-                }
-            }
-        }
-        out
+        y
     }
 }
 
@@ -180,10 +187,11 @@ impl Dense {
 fn the_optical_operator_is_the_q_resolvent_s_adjoint() {
     for (sizes, seed) in [(vec![(2, 1)], 1), (vec![(5, 2), (3, 3)], 2), (vec![(4, 2), (3, 3), (3, 1)], 3), (vec![(6, 3), (2, 2)], 4)] {
         let dense = Dense::random(&sizes, seed);
-        let sectors: Vec<Sector> = sizes.iter().enumerate().map(|(c, &(_, g))| Sector::new(&dense.h[c], &dense.g[c], g).expect("a sector")).collect();
         let mut draw = Draw(seed + 100);
-        for (c, &(n, _)) in sizes.iter().enumerate().filter(|(_, s)| s.0 > s.1) {
-            let (k, _) = sectors[c].operators(None).expect("an explicit cluster's K");
+        for (c, &(n, g)) in sizes.iter().enumerate().filter(|(_, s)| s.0 > s.1) {
+            let mut sector = Sector::default();
+            assert!(sector.make(&dense.h[c], &dense.g[c], g, None), "a sector");
+            let k = sector.operators().expect("an explicit cluster's K");
             for _ in 0..3 {
                 let mut x = draw.hermitian(n, 1.0);
                 let t: C64 = (0..n).map(|i| x[i * n + i]).sum::<C64>() * (1.0 / n as f64);
@@ -199,6 +207,57 @@ fn the_optical_operator_is_the_q_resolvent_s_adjoint() {
             for a in 0..3 {
                 let size: f64 = (0..n).map(|i| (0..n).map(|j| (k[a][i * n + j] - k[a][j * n + i].conj()).abs()).sum::<f64>()).sum();
                 assert!(size <= 1e-12 * (1.0 + k[a].iter().map(|z| z.abs()).sum::<f64>()), "K is Hermitian");
+            }
+        }
+    }
+}
+
+/// K to the first order along the path (module documentation, # Along the path; step.rs, # The optical sector's noise)
+/// against the projector's definition (`Dense::resolved`): with slopes H₁ (any matrix) and G₁ (Hermitian) of the generator and
+/// the gradient, Tr[K X] = Re Tr[F 𝓡_Q X] + Re Tr[(F₁ + 𝓛₁†K₀) 𝓡_Q 𝓡_Q X], 𝓛₁†K₀ = i(H₁†K₀ − K₀H₁), for random traceless
+/// Hermitian X in an explicit cluster beside a folded one and a second explicit one; each make in one workspace, a larger
+/// cluster after a smaller one and back.
+#[test]
+fn k_to_the_first_order_along_the_path_is_the_q_resolvent_s_twice() {
+    let mut sector = Sector::default();
+    for (sizes, seed) in [(vec![(2, 1)], 5), (vec![(11, 5), (3, 3)], 6), (vec![(7, 3), (4, 4), (5, 2)], 7), (vec![(6, 5)], 8)] {
+        let dense = Dense::random(&sizes, seed);
+        let mut draw = Draw(seed + 200);
+        for (c, &(n, g)) in sizes.iter().enumerate().filter(|(_, s)| s.0 > s.1) {
+            let h1 = Mat { rows: n, cols: n, data: (0..n * n).map(|_| draw.complex()).collect() };
+            let g1: [Vec<C64>; 3] = std::array::from_fn(|_| draw.hermitian(n, 1.5));
+            assert!(sector.make(&dense.h[c], &dense.g[c], g, None), "the static sector");
+            let k0 = sector.operators().expect("K₀").clone();
+            assert!(sector.make(&dense.h[c], &dense.g[c], g, Some((&h1, &g1))), "the sector along the path");
+            let k = sector.operators().expect("K");
+            for _ in 0..3 {
+                let mut x = draw.hermitian(n, 1.0);
+                let t: C64 = (0..n).map(|i| x[i * n + i]).sum::<C64>() * (1.0 / n as f64);
+                for i in 0..n {
+                    x[i * n + i] -= t;
+                }
+                let offsets = dense.offsets();
+                let mut xv = vec![C64::ZERO; *offsets.last().unwrap()];
+                xv[offsets[c]..offsets[c + 1]].copy_from_slice(&x);
+                let yv = dense.resolved(c, &xv);
+                let zv = dense.resolved(c, &yv);
+                let (y, z) = (&yv[offsets[c]..offsets[c + 1]], &zv[offsets[c]..offsets[c + 1]]);
+                for a in 0..3 {
+                    let ours: f64 = (0..n * n).map(|p| (k[a][p] * x[(p % n) * n + p / n]).re).sum();
+                    // R = F₁ + i(H₁†K₀ − K₀H₁), F₁ = −G₁.
+                    let r: Vec<C64> = (0..n * n)
+                        .map(|p| {
+                            let (i, j) = (p / n, p % n);
+                            let turned: C64 = (0..n).map(|m| h1[(m, i)].conj() * k0[a][m * n + j] - k0[a][i * n + m] * h1[(m, j)]).sum();
+                            -g1[a][p] + C64::I * turned
+                        })
+                        .collect();
+                    let pair = |m: &[C64], y: &[C64]| -> f64 { (0..n * n).map(|p| (m[p] * y[(p % n) * n + p / n]).re).sum() };
+                    let force: Vec<C64> = dense.g[c][a].iter().map(|z| -*z).collect();
+                    let exact = pair(&force, y) + pair(&r, z);
+                    let size = pair(&force, y).abs() + pair(&r, z).abs();
+                    assert!((ours - exact).abs() <= 1e-10 * (1.0 + size), "sizes {sizes:?}, cluster {c}, axis {a}: Tr[K X] {ours} against {exact}");
+                }
             }
         }
     }
@@ -223,8 +282,9 @@ fn the_two_level_identity() {
                 h[(1, 0)] = rabi * 0.5;
                 h[(0, 1)] = rabi.conj() * 0.5;
                 let g: [Vec<C64>; 3] = std::array::from_fn(|a| if a == 2 { vec![C64::ZERO, slope.conj() * 0.5, slope * 0.5, C64::ZERO] } else { vec![C64::ZERO; 4] });
-                let sector = Sector::new(&h, &g, 1).expect("the sector");
-                let (k, _) = sector.operators(None).expect("K");
+                let mut sector = Sector::default();
+                assert!(sector.make(&h, &g, 1, None), "the sector");
+                let k = sector.operators().expect("K");
                 // The no-jump path from g by RK4, its survival, ⟨F⟩ and within_Q, to where the survival is round-off.
                 let force = |x: &[C64]| -> f64 { -(inner(x, &[g[2][0] * x[0] + g[2][1] * x[1], g[2][2] * x[0] + g[2][3] * x[1]])).re / crate::linalg::norm_sqr(x) };
                 let deriv = |x: &[C64; 2]| -> [C64; 2] { [C64::new(0.0, -1.0) * (h[(0, 0)] * x[0] + h[(0, 1)] * x[1]), C64::new(0.0, -1.0) * (h[(1, 0)] * x[0] + h[(1, 1)] * x[1])] };
@@ -235,7 +295,7 @@ fn the_two_level_identity() {
                     let norm = x[0].norm_sqr() + x[1].norm_sqr();
                     s.push(norm);
                     f.push(force(&x));
-                    w.push(crate::step::within(&k, &g, &x)[2][2]);
+                    w.push(crate::step::within(k, &g, &x)[2][2]);
                     if norm < 1e-14 || t > 400.0 {
                         break;
                     }
@@ -388,13 +448,14 @@ fn a_kept_and_a_folded_drive_diffuse_alike() {
             let at = Point { r, kappa: [0.0; 3], t: 0.37 };
             let middle = kept.assemble(c, r, at.t, &kept.running());
             let path = middle.path([0.0; 3], [0.0; 3]);
-            let optical = middle.optical(&path, 0.1).expect("an explicit cluster");
             let mut h = Mat::zeros(2, 2);
             middle.generator(&path, 0.0, &mut h);
             let mut g: [Vec<C64>; 3] = Default::default();
-            middle.gradient(&path, 0.0, &mut g);
+            middle.gradient(&path, 0.0, &mut g, None);
+            let mut sector = Sector::default();
+            assert!(middle.optical(&path).is_some() && sector.make(&h, &g, 1, None), "an explicit cluster");
             let dt = 0.02 / h.max_abs().max(half);
-            let (within, d_e, excited) = renewal(&h, &g, &optical.k, 1, axis, dt);
+            let (within, d_e, excited) = renewal(&h, &g, sector.operators().expect("K"), 1, axis, dt);
             let photons = folded.photons(folded.cluster_of(b), &at, &[C64::ONE]);
             let second: f64 = photons.iter().map(|ph| ph.moments().second).map(|m| (0..3).map(|i| (0..3).map(|j| axis[i] * m[i][j] * axis[j]).sum::<f64>()).sum::<f64>()).sum();
             // The kept model's own folded classes from |2,2⟩ (its other drives, folded in both), at its ground share.

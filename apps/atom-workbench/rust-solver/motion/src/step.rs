@@ -274,14 +274,20 @@
 //! 0.998, 1.037, 1.084 at Δ = −3Γ -- the frame's static K 1.024, 1.034, 1.039 and 0.888, 0.921, 1.048 --, within 0.53 of
 //! ε_Q = 0.16.
 //!
-//! The work is one K a step whose middle state lies in an explicit cluster: the gradient's matrices; the excited
-//! blocks' Schur forms, ℳ's e² basis solves and its factorization (model/optical.rs, # The solve; S3: 36 reals where the
-//! whole sector is 96); where the cluster beats, the generator and the gradient at the step's two ends, four rotations
-//! and two solves of three sides; and twelve forms (`Optical::forms`) -- which `step_work` prices. It is made anew at
-//! every middle: a factorization reused along the path as an iterative refinement's preconditioner contracts the error
-//! by the light pattern's change over a step -- S3's standing wave turns 0.26 rad a step at 30 µK -- for an iteration
-//! that applies the operator and solves, a third of the whole sector's factorization (measured on its 96 reals): more
-//! than the factorization to its own accuracy.
+//! The work is one K a step whose middle state lies in an explicit cluster (`optical`), in the trajectory's workspace
+//! (`Scratch`): the generator at the middle and its slope through the step's ends are the picture's own, which the
+//! propagation made (`Picture::slope`); the gradient's matrices and, where the cluster beats, their slope along the path
+//! in one pass of the model's forms (`Middle::gradient`); the blocks' Schur forms, ℳ made at once and factored, and the
+//! sides' solves (model/optical.rs, # The solve; S3: 36 reals where the whole sector is 96); and twelve forms
+//! (`Sector::forms`) -- which `step_work` prices, making the same. It is made anew at every middle: a factorization
+//! reused along the path as an iterative refinement's preconditioner contracts the error by the light pattern's change
+//! over a step -- S3's standing wave turns 0.26 rad a step at 30 µK -- for an iteration that applies the operator and
+//! solves, a third of the whole sector's factorization (measured on its 96 reals): more than the factorization to its
+//! own accuracy. Nor is K a property of the field the trajectories could share (a table, as the near forms'): it is of
+//! the cluster's generator at the point -- the near forms times every beam pair's product there, the light pattern's
+//! phase within λ/2 --, of the time where tones beat, and of the velocity to all orders through the Doppler frames (a
+//! still cluster's K is exact at any speed); and a table's read of its 12 n² numbers at 4³ nodes would cost more than
+//! the solve (S3: some 93 thousand complex multiply-adds against 44).
 //!
 //! # The path between a step's ends
 //! A trajectory is read at times that are no step's end (an output, a cut of T's window: adapt.rs, # The reads), and
@@ -349,6 +355,7 @@ use std::sync::OnceLock;
 
 use crate::decide::COMPLEX;
 use crate::linalg::{self, inner, norm_sqr, C64, Mat, LANES};
+use crate::model::optical::Sector;
 use crate::model::{Cluster, Point, Quadratic, Scattering, STATES};
 use crate::random::Stream;
 use crate::spectral::Picture;
@@ -457,70 +464,62 @@ pub trait Middle {
     fn work(&self) -> [f64; 3];
 
     /// Ĝ_a(s) as matrices at the time s from the middle along the path (n × n each, row by row, Hermitian): what
-    /// `force` contracts. Here from its forms -- a Hermitian G is fixed by tr(Gρ) over the Hermitian ρ: a diagonal ρ
-    /// reads G_ii, ρ = E_ij + E_ji twice Re G_ij, ρ = i(E_ij − E_ji) twice Im G_ij --; a model may make it at once.
-    fn gradient(&self, path: &Self::Path, s: f64, g: &mut [Vec<C64>; 3]) {
-        let n = self.states();
-        for m in g.iter_mut() {
-            m.clear();
-            m.resize(n * n, C64::ZERO);
-        }
-        let mut rho = vec![C64::ZERO; n * n];
-        for i in 0..n {
-            for j in i..n {
-                rho.fill(C64::ZERO);
-                if i == j {
-                    rho[i * n + i] = C64::ONE;
-                    let f = self.force(path, s, &rho);
-                    for a in 0..3 {
-                        g[a][i * n + i] = C64::real(f[a]);
-                    }
-                    continue;
-                }
-                (rho[i * n + j], rho[j * n + i]) = (C64::ONE, C64::ONE);
-                let re = self.force(path, s, &rho);
-                (rho[i * n + j], rho[j * n + i]) = (C64::new(0.0, 1.0), C64::new(0.0, -1.0));
-                let im = self.force(path, s, &rho);
-                for a in 0..3 {
-                    g[a][i * n + j] = C64::new(0.5 * re[a], 0.5 * im[a]);
-                    g[a][j * n + i] = C64::new(0.5 * re[a], -0.5 * im[a]);
-                }
-            }
-        }
-    }
+    /// `force` contracts; and where `slope` is asked, their derivative along the path at s, dĜ_a/ds.
+    fn gradient(&self, path: &Self::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>);
 
-    /// The optical sector's operators at the middle along the path, to the first order along it -- the generator's slope
-    /// through the step's ends, `half` from the middle (# The optical sector's noise; model/optical.rs): None where the
+    /// The cluster's optical sector on the path (# The optical sector's noise; model/optical.rs): None where the
     /// cluster has no explicit excited state.
-    fn optical(&self, _path: &Self::Path, _half: f64) -> Option<Optical> {
+    fn optical(&self, _path: &Self::Path) -> Option<Optical> {
         None
     }
 }
 
-/// The optical sector of a cluster at a step's middle along its path (# The optical sector's noise; model/optical.rs):
-/// K_a and the gradient Ĝ_a there (n × n each, row by row, Hermitian, in the cluster's Doppler frames at the middle;
-/// 1/µm and rad/µs/µm), the light pattern's fastest beat on the path where the cluster beats, ν = max |(k_l − k_m)·v|
-/// over the cluster's beams (none where it is still)
-/// and the slowest optical rate γ_Q, the least of its excited states' decay over two (rad/µs), and the counted complex
-/// multiply-adds that made them.
-#[derive(Clone, Debug, PartialEq)]
+/// The optical sector of a cluster on a path (# The optical sector's noise; model/optical.rs): its ground states (the
+/// cluster's first), the slowest optical rate γ_Q -- the least of its excited states' decay over two (rad/µs) --, and
+/// the light pattern's fastest beat on the path where the cluster beats, ν = max |(k_l − k_m)·v| over its beams (none
+/// where it is still).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Optical {
-    pub k: [Vec<C64>; 3],
-    pub gradient: [Vec<C64>; 3],
-    pub beat: f64,
+    pub ground: usize,
     pub decay: f64,
-    pub work: f64,
+    pub beat: f64,
 }
 
-impl Optical {
-    /// The noise's rate within_Q,ab of a state x of the cluster (unnormalized; 1/µm²/µs): `within` of its K and Ĝ.
-    pub fn within(&self, x: &[C64]) -> [[f64; 3]; 3] {
-        within(&self.k, &self.gradient, x)
-    }
-    /// The counted complex multiply-adds of one `within` on n states: K_a x and Ĝ_b x (n² each), and the inner products.
-    pub fn forms(n: usize) -> f64 {
-        (6 * n * n + 13 * n) as f64
-    }
+/// The trajectory's workspace of the optical sector (`optical`): the sector, and the gradient's matrices with their
+/// slope along the path.
+#[derive(Default)]
+struct Noise {
+    sector: Sector,
+    gradient: [Vec<C64>; 3],
+    slope: [Vec<C64>; 3],
+}
+
+/// The optical sector's operators at a step's middle along its path (# The optical sector's noise), made in the
+/// workspace `noise`: the gradient there and, where the cluster beats, its slope along the path (`Middle::gradient`);
+/// K of the picture's generator at the middle, to the first order along the path with the picture's slope through the
+/// step's ends (`Picture::slope`). Its locality ε_Q = (ν/γ_Q)² and the counted work (`optical_work`); None where the
+/// cluster has no optical sector or it made no K.
+fn optical<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, noise: &mut Noise) -> Option<(f64, f64)> {
+    let shape = along.middle.optical(&along.path)?;
+    let Noise { sector, gradient, slope } = noise;
+    along.middle.gradient(&along.path, 0.0, gradient, (!still).then_some(&mut *slope));
+    let made = sector.make(&picture.base, gradient, shape.ground, (!still).then_some((&picture.slope, &*slope)));
+    made.then(|| ((shape.beat / shape.decay).powi(2), optical_work(along, still, sector.work)))
+}
+
+/// The counted work of the optical sector at a middle (`optical`) beside its sector's make (`Sector::cost`, `work`): the
+/// gradient's three matrices, each of the force's form's count, twice with their slope; and one `within`'s forms.
+fn optical_work<M: Middle>(along: &Along<M>, still: bool, work: f64) -> f64 {
+    let [_, force, _] = along.middle.work();
+    COMPLEX * (if still { 3.0 } else { 6.0 } * force + Sector::forms(along.n)) + work
+}
+
+/// The price of the optical sector at a middle (`step_work`): `optical`'s count without its make -- the shape's formula
+/// (`Sector::cost`) with the blocks' Schur forms alone made, their QR iteration's count as the matrices ask; no solve.
+fn optical_price<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, sector: &mut Sector) -> f64 {
+    let Some(shape) = along.middle.optical(&along.path) else { return 0.0 };
+    let n = along.n;
+    sector.schur(&picture.base, shape.ground).map_or(0.0, |schur| optical_work(along, still, Sector::cost(n - shape.ground, shape.ground, !still, schur)))
 }
 
 /// The optical sector's rate of a state x (unnormalized; model/optical.rs, # K_Q) from K_a and Ĝ_b on it (F = −Ĝ):
@@ -1150,10 +1149,12 @@ pub struct Scratch {
     picture: Picture,
     rest: Vec<C64>,
     sums: Vec<f64>,
+    noise: Noise,
 }
 
 struct Carved<'a> {
     picture: &'a mut Picture,
+    noise: &'a mut Noise,
     held: &'a mut [C64],
     sum: &'a mut [C64],
     sums: &'a mut [f64],
@@ -1172,7 +1173,7 @@ impl Scratch {
         let n = self.picture.states();
         let (held, sum) = self.rest.split_at_mut(n * n);
         let (sums, saved) = self.sums.split_at_mut(SUMS * 2 * n * row(n));
-        Carved { picture: &mut self.picture, held, sum, sums, saved }
+        Carved { picture: &mut self.picture, noise: &mut self.noise, held, sum, sums, saved }
     }
 }
 
@@ -1528,7 +1529,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let along = Along::new(generator, kappa_m, velocity);
         let (n, still, costs, cluster) = (along.n, generator.still(), generator.work(), march.state.cluster);
         scratch.fit(n);
-        let Carved { picture, held, sum, sums, saved } = scratch.carve();
+        let Carved { picture, noise, held, sum, sums, saved } = scratch.carve();
         // The nodes' sums: one where Ĥ is still, the three nodes' on a beating path.
         let size = (if still { 1 } else { SUMS }) * 2 * n * row(n);
         let (sums, saved) = (&mut sums[..size], &mut saved[..size]);
@@ -1667,9 +1668,10 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         }
         if let Some(middle) = &middle {
             march.scattered = Some(along.middle.scattering(&along.path, &middle[..n]));
-            if let Some(optical) = along.middle.optical(&along.path, h) {
-                march.optical = Some((optical.within(&middle[..n]), (optical.beat / optical.decay).powi(2)));
-                march.work += COMPLEX * (optical.work + Optical::forms(n));
+            if let Some((epsilon, work)) = optical(&along, picture, still, noise) {
+                let k = noise.sector.operators().expect("a sector made");
+                march.optical = Some((within(k, &noise.gradient, &middle[..n]), epsilon));
+                march.work += work;
             }
         }
         march.work += count::propagation(costs, still, picture.work) + count::impulse(n, costs, counted, still);
@@ -1779,11 +1781,11 @@ pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau
     let along = Along::new(middle, kappa, velocity);
     let mut scratch = Scratch::default();
     scratch.fit(n);
-    let picture = &mut scratch.picture;
+    let Scratch { picture, noise, .. } = &mut scratch;
     pictured(&along, picture, tau);
     let nodes = nodes(tau, picture.bandwidth);
     let own = picture.work + picture.price(nodes + 2);
-    let optical = middle.optical(&along.path, 0.5 * tau).map_or(0.0, |optical| COMPLEX * (optical.work + Optical::forms(n)));
+    let optical = optical_price(&along, picture, still, &mut noise.sector);
     count::propagation(costs, still, own) + count::impulse(n, costs, nodes, still) + count::shear(n, costs) + optical
 }
 

@@ -174,6 +174,10 @@ pub struct Picture {
     /// Ĥ(−h) and Ĥ(+h), the caller's; after `prepare` the slopes the hops take: A and B of D₂ on the slow pairs in
     /// the eigenbasis, or of D as it is given where there is no decomposition.
     pub ends: [Mat; 2],
+    /// After `prepare` on a beating path, the generator's slope at the middle through the step's ends, (Ĥ(h) − Ĥ(−h))/2h,
+    /// as the caller's matrices are laid out: the first order of the parabola the hops take (the optical sector's along
+    /// the path, step.rs).
+    pub slope: Mat,
     /// A hop's exponent.
     matrix: Mat,
     /// Ĥ₀'s decomposition of its traceless part, and whether the state goes through it.
@@ -249,6 +253,7 @@ impl Default for Picture {
             n: 0,
             base: none(),
             ends: [none(), none()],
+            slope: none(),
             matrix: none(),
             basis: linalg::Eigen::default(),
             through: false,
@@ -327,7 +332,7 @@ impl Picture {
     pub fn fit(&mut self, n: usize) {
         if self.n != n {
             self.n = n;
-            for m in [&mut self.base, &mut self.matrix].into_iter().chain(&mut self.ends) {
+            for m in [&mut self.base, &mut self.matrix, &mut self.slope].into_iter().chain(&mut self.ends) {
                 (m.rows, m.cols) = (n, n);
                 m.data.resize(n * n, C64::ZERO);
             }
@@ -381,6 +386,7 @@ impl Picture {
                 (*m, *p) = (a, b);
                 self.moving |= a != C64::ZERO || b != C64::ZERO;
             }
+            self.slope.data.copy_from_slice(&minus.data);
             self.work += (2 * n * n) as f64;
         }
         self.matrix.data.copy_from_slice(&self.base.data);
