@@ -190,12 +190,14 @@
 //! - The errors no number of trajectories fits beside: where the model's error and the step's share leave a look no
 //!   room for the statistics (`crowded`), the units are taken by their weight there (their errors on what is shown and
 //!   on T, weighed by the held share as the totals are, each over its target) for the work a µs of their kept model,
-//!   the most first, until every look has room again at the far end of the error they leave -- the doubt the reads
-//!   leave on it, which the next pilot's read of it lies within (`Doubt`) --, and none of them to spare: the set the
-//!   looks need, in one keep (`needed`). (Taken one at a time, a keep an attempt, S3's probe kept fourteen bare drives
-//!   over fourteen attempts, each a model, its gates and a scout; taken by weight alone, it kept its carrier's dressing
-//!   with them, three to four times dearer a step; taken until the error read had room, e038 kept 6, 2, 1 and 1 units
-//!   over four pilots.) The product asks the same where a look the pilot left room has none at the product's
+//!   the most first, as far as every look has room at the far end of the error they leave; and of the sets so led
+//!   through, the one of the least expected work is kept, none of it to spare (`needed`): its model's work a µs over
+//!   its pilot and its product, and the chance that the next pilot still reads a look without room -- the doubt the
+//!   reads leave on the error, `Doubt::chance` -- times the work of keeping again. (Taken one at a time, a keep an
+//!   attempt, S3's probe kept fourteen bare drives over fourteen attempts, each a model, its gates and a scout; taken
+//!   by weight alone, it kept its carrier's dressing with them, three to four times dearer a step; taken until the
+//!   error read had room, e038 kept 6, 2, 1 and 1 units over four pilots; taken to the far end of the error, S3c's
+//!   pilot kept ten units where one gave room.) The product asks the same where a look the pilot left room has none at the product's
 //!   statistics (`product`): it ends with the set. A look the model leaves room whose need a run's
 //!   `MOST_TRAJECTORIES` do not meet is not chased (`Look::fits`) -- read again at every batch, as its need is. (Asked
 //!   where what the atoms outside the reach carry left a look no room, R3_DOPPLER's product kept two units for T's
@@ -1420,8 +1422,26 @@ fn keep(
     if !weighing(&counted, &room, means, &held, &read).is_empty() {
         let spread = scouted.unwrap_or_else(doubt);
         let far = |set: &[usize]| raised(&without(fixed, means, &read, set), &spread.interval(set));
-        let floors = |set: &[usize]| -> Vec<Option<f64>> { set.par_iter().map(|&u| pricing.floor(u)).collect() };
-        let needed = needed(&counted, means, &held, &read, &floors, &|u| pricing.kept_rates(u).map(|rates| pricing.mean(&rates, None)), &far);
+        let floor = |set: &[usize]| pricing.floor(set);
+        // A kept set's work a µs (its model's mean rate with its tables, made once a set) and the floor below it; the
+        // product's trajectories beside the error it leaves (`Level::need_without_all`), and the chance that the next
+        // pilot reads a look without room (`Doubt::chance`).
+        let rates: std::cell::RefCell<HashMap<Vec<usize>, Option<f64>>> = std::cell::RefCell::new(HashMap::new());
+        let rate = |set: &[usize]| -> Option<f64> {
+            let mut key = set.to_vec();
+            key.sort_unstable();
+            if let Some(&made) = rates.borrow().get(&key) {
+                return made;
+            }
+            let made = pricing.kept_rates(&key).map(|r| pricing.mean(&r, None));
+            rates.borrow_mut().insert(key, made);
+            made
+        };
+        let price = |set: &[usize], beyond: &[usize]| -> [f64; 2] {
+            let point = without(fixed, means, &read, set);
+            [pricing.all.need_without_all(set), spread.chance(set, &point, &counted, &held, &read, beyond)]
+        };
+        let needed = needed(&counted, means, &held, &read, &floor, &rate, &far, &price, pricing.again);
         return (!needed.is_empty()).then_some(needed);
     }
     if reads == Reads::Product {
@@ -2801,17 +2821,48 @@ impl<'a> Doubt<'a> {
     /// Per output the jackknife interval over the groups, at the family of the outputs' two reads, of the model's error
     /// less the units `set`'s (none: of the whole error); none where no group reads it (a spread that is no number).
     fn interval(&self, set: &[usize]) -> Vec<[f64; 2]> {
-        let rest: Vec<Vec<[f64; 2]>> = self
-            .left
+        let rest = self.replicates(set);
+        let looks = 2. * self.outputs.saturating_sub(1) as f64;
+        (0..self.outputs).map(|k| std::array::from_fn(|i| spread(rest.iter().map(|r| r[k][i]), self.left.len() as f64).interval_over(looks))).collect()
+    }
+
+    /// Per group left out, per output the model's error less the units `set`'s (`remainder`): the jackknife's
+    /// replicates.
+    fn replicates(&self, set: &[usize]) -> Vec<Vec<[f64; 2]>> {
+        self.left
             .par_iter()
             .enumerate()
             .map(|(g, (estimates, error))| {
                 let less = self.measured.means_of(self.outputs, Some(g), estimates, set);
                 error.iter().zip(&less).map(|(e, l)| remainder(*e, l.iter())).collect()
             })
-            .collect();
-        let looks = 2. * self.outputs.saturating_sub(1) as f64;
-        (0..self.outputs).map(|k| std::array::from_fn(|i| spread(rest.iter().map(|r| r[k][i]), self.left.len() as f64).interval_over(looks))).collect()
+            .collect()
+    }
+
+    /// The chance that the next pilot reads the model's error the units `set` leave, `point` (`without`), with some
+    /// look among the `estimates` (`tight`: where an atom is held and a state read) without room, but at the outputs
+    /// `beyond` (`needed`). The estimate's error and the next pilot's own are independent draws of the reads' spread,
+    /// whose jackknife gives its draws over all the outputs together: the deviations δ_g = √(G − 1)(r_g − r̄) of the
+    /// replicates, of mean square the jackknife's variance; so the next read is the point less one draw and plus
+    /// another, Â − δ_g + δ_h, over the G² pairs, and the chance is the share of them that leave a look no room. An
+    /// output whose replicates are no number (no group's states read it) has no draw.
+    fn chance(&self, set: &[usize], point: &Fixed, estimates: &[Estimate], held: &[f64], read: &[bool], beyond: &[usize]) -> f64 {
+        let rest = self.replicates(set);
+        let g = rest.len();
+        let mean: Vec<[f64; 2]> = (0..self.outputs).map(|k| std::array::from_fn(|i| rest.iter().map(|r| r[k][i]).sum::<f64>() / g as f64)).collect();
+        let deviation = |a: usize, k: usize, i: usize| -> f64 {
+            let d = ((g - 1) as f64).sqrt() * (rest[a][k][i] - mean[k][i]);
+            if d.is_finite() { d } else { 0. }
+        };
+        let pairs: Vec<(usize, usize)> = (0..g).flat_map(|a| (0..g).map(move |b| (a, b))).collect();
+        let short = pairs
+            .par_iter()
+            .filter(|&&(a, b)| {
+                let model = point.model.iter().enumerate().map(|(k, m)| if k == 0 { *m } else { std::array::from_fn(|i| (m[i] - deviation(a, k, i) + deviation(b, k, i)).max(0.)) }).map(|m: [f64; 2]| [probability_error(m[0]), m[1]]).collect();
+                tight(estimates, &Fixed { model, ..point.clone() }, held, read).iter().any(|k| !beyond.contains(k))
+            })
+            .count();
+        short as f64 / pairs.len() as f64
     }
 }
 
@@ -2845,40 +2896,47 @@ fn remainder<'a>(error: [f64; 2], less: impl Iterator<Item = &'a [f64; 2]>) -> [
     [probability_error((error[0] - less[0]).max(0.)), (error[1] - less[1]).max(0.)]
 }
 
-/// The units the looks need kept (module documentation, # The model; `keep`): while a look leaves the statistics no
-/// room at the far end of the model's error the units taken so far leave (`far`: the error and the doubt its reads
-/// leave on it, `Doubt`), the unit whose weight there is the most for the work a µs of its kept model (`cost`: its mean
-/// rate; none where its keep is refused, never taken) leaves the model's error, until every such look has room or no
-/// unit weighs there. One pass, the set growing: the error that leaves no room is removed where the run it leaves
-/// costs the least, the units the room needs together. (By weight alone, S3's probe took its carrier's dressing with
-/// thirteen bare drives on its scout -- the generator's assembly, the jumps and the photons three to four times
-/// dearer a step --, where the bare drives alone leave room. By the work a keep adds, the difference of two rates,
-/// PGC3D took 129 units whose keeps cost nothing at the step it stood at, their weights a trifle, before any that the
-/// room needed, and its model had no step left: a keep's work is the kept model's, at any step.)
+/// The units the looks need kept (module documentation, # The model; `keep`). The order: while a look leaves the
+/// statistics no room at the far end of the model's error the units taken so far leave (`far`: the error and the doubt
+/// its reads leave on it, `Doubt`), the unit whose weight there is the most for the work a µs of its kept model
+/// (`cost`: its mean rate; none where its keep is refused, never taken) is taken next, until every such look has room
+/// or no unit weighs there: the error that leaves no room is removed where the run it leaves costs the least. (By
+/// weight alone, S3's probe took its carrier's dressing with thirteen bare drives on its scout -- the generator's
+/// assembly, the jumps and the photons three to four times dearer a step --, where the bare drives alone leave room.
+/// By the work a keep adds, the difference of two rates, PGC3D took 129 units whose keeps cost nothing at the step it
+/// stood at, their weights a trifle, before any that the room needed, and its model had no step left: a keep's work is
+/// the kept model's, at any step.)
 ///
-/// The far end, not the error read: the next pilot reads the error the keep leaves anew, on states of its own, and a
-/// unit's error is heavy-tailed over the states -- the error read, a point of that spread, leaves the next read no room
-/// as often as not. Taken until the read error had room, e038's pilots kept 6, 2, 1 and 1 units over four attempts, a
-/// pilot and its reads each (440 CPU-s), each next pilot reading outputs with no room (187, 21, 11, 4): the doubt the
-/// reads leave is what the set must cover for the next read to have room. Outputs that no set has room at -- every
-/// unit that weighs there kept -- are no set's to cover (the ledger flags them).
+/// The set: of the order's leading sets, the one of the least expected work (`price`: per set the work a µs of its
+/// kept model, the product's trajectories beside the error it leaves, and the chance that the next pilot reads a look
+/// without room, `Doubt::chance`), and of it none to spare. Kept, a set's model runs a pilot again (`again`) and its
+/// product; where the next pilot reads a look without room it keeps again, of the larger sets the one of the least
+/// expected work -- the largest, another pilot and its product at its own work. A cost against a cost: the error read
+/// and its far end are the two ends of it. (Taken until the error read had room, e038's pilots kept 6, 2, 1 and 1 units
+/// over four attempts, a pilot and its reads each, 440 CPU-s, the next pilot reading the outputs left with no room as
+/// often as not; taken to the far end of the error, R4_LIN_2's pilot kept six units where one did, and the next pilot
+/// three more.) Outputs that no set has room at -- every unit that weighs there kept -- are no set's to cover (the
+/// ledger flags them).
 ///
-/// A kept model's rate is made with its tables (`Pricing::kept_rates`), which cost an elimination a node and the memory
-/// of their grids: it is made where the set asks for it, and once. `floors` bounds units' rates from below (`none`: a
-/// keep refused; `Pricing::floor`), so a unit's weight over it bounds its value from above: the units are asked in the
-/// order of that bound, and no further once the best value made is no less than the next one's bound -- the unit
-/// taken is the one of the most value, as were every rate made. (Made for every unit that weighs, R4_LIN_2's 733 kept
-/// models' tables did not fit in 8 GB.) A floor is a model of its own too: it is made for a unit where it first weighs
-/// where some set has room -- none where no set has.
+/// A kept model's rate is made with its tables (`work`, `Pricing::kept_rates`), which cost an elimination a node and the
+/// memory of their grids: it is made where a set asks for it, and once. `floor` bounds a set's rate from below (`none`:
+/// a keep refused; `Pricing::floor`), so a unit's weight over its own bounds its value from above: the units are asked
+/// in the order of that bound, and no further once the best value made is no less than the next one's bound -- the
+/// unit taken is the one of the most value, as were every rate made. (Made for every unit that weighs, R4_LIN_2's 733
+/// kept models' tables did not fit in 8 GB.) A floor is a model of its own too, without tables: it is made for a unit
+/// where it first weighs where some set has room -- none where no set has. A set's expected work is its rate times
+/// what it runs, and a set whose floor's leaves it above the least found -- of the larger sets, or the set kept -- is
+/// never the least: its rate is not made. (Made for every set the choice weighs, S3's probe made 28 kept models'
+/// tables, 200 CPU-s, the run's longest phase.)
 #[allow(clippy::too_many_arguments)]
-fn needed(estimates: &[Estimate], means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool], floors: &dyn Fn(&[usize]) -> Vec<Option<f64>>, cost: &dyn Fn(usize) -> Option<f64>, far: &dyn Fn(&[usize]) -> Fixed) -> Vec<usize> {
+fn needed(estimates: &[Estimate], means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool], floor: &(dyn Fn(&[usize]) -> Option<f64> + Sync), work: &dyn Fn(&[usize]) -> Option<f64>, far: &dyn Fn(&[usize]) -> Fixed, price: &dyn Fn(&[usize], &[usize]) -> [f64; 2], again: f64) -> Vec<usize> {
     let tight_at = |set: &[usize]| tight(estimates, &far(set), held, read);
     // The outputs no set has room at: those tight with every unit kept that weighs where the far end is tight.
     let every: Vec<usize> = weights(means, held, &tight_at(&[])).iter().enumerate().filter(|&(_, w)| *w > 0.).map(|(u, _)| u).collect();
     let beyond = tight_at(&every);
     let open = |set: &[usize]| -> Vec<usize> { tight_at(set).into_iter().filter(|k| !beyond.contains(k)).collect() };
     let mut taken: Vec<usize> = vec![];
-    let (mut made, mut floor): (HashMap<usize, Option<f64>>, HashMap<usize, Option<f64>>) = (HashMap::new(), HashMap::new());
+    let (mut made, mut floors): (HashMap<usize, Option<f64>>, HashMap<usize, Option<f64>>) = (HashMap::new(), HashMap::new());
     loop {
         let outputs = open(&taken);
         if outputs.is_empty() {
@@ -2887,17 +2945,18 @@ fn needed(estimates: &[Estimate], means: &[Vec<[f64; 2]>], held: &[f64], read: &
         let weights = weights(means, held, &outputs);
         let weighing: Vec<usize> = (0..weights.len()).filter(|&u| weights[u] > 0. && !taken.contains(&u)).collect();
         // The floors of the units that weigh here first, made together.
-        let new: Vec<usize> = weighing.iter().copied().filter(|u| !floor.contains_key(u)).collect();
-        floor.extend(new.iter().copied().zip(floors(&new)));
+        let new: Vec<usize> = weighing.iter().copied().filter(|u| !floors.contains_key(u)).collect();
+        let made_now: Vec<Option<f64>> = new.par_iter().map(|&u| floor(&[u])).collect();
+        floors.extend(new.iter().copied().zip(made_now));
         // Error per work a µs (a model's rate is some work: every step costs some), bounded by the floor's.
-        let mut asked: Vec<(usize, f64)> = weighing.iter().filter_map(|&u| floor[&u].map(|f| (u, weights[u] / f))).collect();
+        let mut asked: Vec<(usize, f64)> = weighing.iter().filter_map(|&u| floors[&u].map(|f| (u, weights[u] / f))).collect();
         asked.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.0.cmp(&a.0)));
         let mut best: Option<(usize, f64)> = None;
         for (u, most) in asked {
             if best.is_some_and(|(_, value)| value > most) {
                 break;
             }
-            if let Some(c) = *made.entry(u).or_insert_with(|| cost(u)) {
+            if let Some(c) = *made.entry(u).or_insert_with(|| work(&[u])) {
                 let value = weights[u] / c;
                 // Of equal values the last unit, as a scan of them all in their order takes it.
                 if best.is_none_or(|(b, v)| value > v || (value == v && u > b)) {
@@ -2908,21 +2967,49 @@ fn needed(estimates: &[Estimate], means: &[Vec<[f64; 2]>], held: &[f64], read: &
         let Some((u, _)) = best else { break };
         taken.push(u);
     }
+    // Of the sets the order leads through, the one of the least expected work: a set kept, its model runs a pilot
+    // again and then its product, of the work a µs `w` of its kept model, the trajectories `again` and `n` the looks
+    // need beside the error it leaves; and where the next pilot still reads a look without room (its chance `p`),
+    // the next keep is chosen again among the larger sets, the least of theirs -- for the largest, another pilot
+    // and its product at its own work. E_j = w_j (again + (1 − p_j) n_j) + p_j min_{i > j} E_i. E is w a + b: where the
+    // floor's (w's bound from below) leaves it above `against`, the least of the sets it is weighed against, the set
+    // is not the least, and its rate is not made (none).
+    let expect = |set: &[usize], next: Option<f64>, against: f64| -> Option<f64> {
+        let [n, p] = price(set, &beyond);
+        let (a, b) = match next {
+            Some(next) => (again + (1. - p) * n, p * next),
+            None => (again * (1. + p) + n, 0.),
+        };
+        if floor(set)? * a + b > against {
+            return None;
+        }
+        Some(work(set)? * a + b)
+    };
+    let mut expected = vec![f64::INFINITY; taken.len()];
+    let mut after = f64::INFINITY;
+    for j in (0..taken.len()).rev() {
+        if let Some(e) = expect(&taken[..=j], after.is_finite().then_some(after), after) {
+            expected[j] = e;
+        }
+        after = after.min(expected[j]);
+    }
+    let Some(best) = (0..taken.len()).filter(|&j| expected[j].is_finite()).min_by(|&a, &b| expected[a].total_cmp(&expected[b])) else { return vec![] };
+    let (mut chosen, mut least) = (taken[..=best].to_vec(), expected[best]);
     // The set is the room's together: a unit taken early for its value may be needed no more once those after it are
-    // kept. Where the set gives every look room, each unit is left out whose set without it does too, the dearest
-    // first -- a set of which no unit can be spared. Where it does not (a unit the room needs is refused), every unit
-    // taken lowers an error no number of trajectories fits beside, and stays.
-    if open(&taken).is_empty() {
-        let mut dearest = taken.clone();
-        dearest.sort_by(|a, b| made[b].unwrap_or(0.).total_cmp(&made[a].unwrap_or(0.)).then(b.cmp(a)));
-        for u in dearest {
-            let rest: Vec<usize> = taken.iter().copied().filter(|&v| v != u).collect();
-            if open(&rest).is_empty() {
-                taken = rest;
-            }
+    // kept. Each unit is left out, the dearest first, where the set without it is expected to cost less -- its next
+    // pilot, where it reads a look without room, keeping again what the set holds.
+    let mut dearest = chosen.clone();
+    dearest.sort_by(|a, b| made[b].unwrap_or(0.).total_cmp(&made[a].unwrap_or(0.)).then(b.cmp(a)));
+    for u in dearest {
+        let rest: Vec<usize> = chosen.iter().copied().filter(|&v| v != u).collect();
+        if rest.is_empty() {
+            continue;
+        }
+        if let Some(value) = expect(&rest, Some(least), least).filter(|&value| value < least) {
+            (chosen, least) = (rest, value);
         }
     }
-    taken
+    chosen
 }
 
 /// The model's errors `fixed` less those of the units `set` (`means`) at the outputs read -- a read output's errors are
@@ -3303,13 +3390,13 @@ impl<'a> Pricing<'a> {
         self.rates(with, &with.tabulate(self.reach, self.most))
     }
 
-    /// A floor of the rate of the model that keeps unit `u` (`needed`): its mean over the run of its steps' own work
-    /// alone, the integrator's at the rated states (adapt.rs `advance_work`), without the middles' assembly and the
+    /// A floor of the rate of the model that keeps the units `set` (`needed`): its mean over the run of its steps' own
+    /// work alone, the integrator's at the rated states (adapt.rs `advance_work`), without the middles' assembly and the
     /// jumps' photons -- what its tables would make cheaper -- and so without its tables: a step's counts are its
     /// cluster's plan's and its generator's picture's, which the tables give to their error. None where the model
     /// refuses the keep (`Model::new`).
-    fn floor(&self, u: usize) -> Option<f64> {
-        let with = Model::new(self.request, self.light, &[self.kept, std::slice::from_ref(&self.units[u])].concat()).ok()?;
+    fn floor(&self, set: &[usize]) -> Option<f64> {
+        let with = Model::new(self.request, self.light, &[self.kept, &set.iter().map(|&u| self.units[u].clone()).collect::<Vec<_>>()].concat()).ok()?;
         let run = Run::new(&with, self.reference);
         let mut middles: Vec<Option<crate::model::Middle>> = (0..with.clusters().len()).map(|_| None).collect();
         let steps: Vec<f64> = self
@@ -3366,8 +3453,7 @@ impl<'a> Pricing<'a> {
         let mut best: (usize, f64) = (1, f64::NEG_INFINITY);
         for j in 1..=ranked.len() {
             let set = &ranked[..j];
-            let Ok(with) = Model::new(self.request, self.light, &[self.kept, &set.iter().map(|&u| self.units[u].clone()).collect::<Vec<_>>()].concat()) else { break };
-            let rates = self.kept_model_rates(&with);
+            let Some(rates) = self.kept_rates(set) else { break };
             let saving = Read { value: self.share_of(&self.all, self.all.need_without_all(set), &rates), spread: spread(others.iter().map(|l| self.share_of(l, l.need_without_all(set), &rates)), others.len() as f64) };
             if pays(0., saving) && assured(saving) > best.1 {
                 best = (j, assured(saving));
@@ -3394,17 +3480,17 @@ impl<'a> Pricing<'a> {
         (0..self.units.len()).into_par_iter().filter(|&u| self.all.need_without(u) + self.again < self.all.need).collect()
     }
 
-    /// The rates of the model that keeps unit `u`, built for it, at the rated states: a keep costs less per µs than the
-    /// fold it replaces or far more (a drive kept across a fine-structure splitting, its generator's norm ~10⁷ rad/µs).
-    /// None for a unit the model refuses to keep (its fold must exist, `Model::new`): its fold's error stands.
-    fn kept_rates(&self, u: usize) -> Option<Vec<f64>> {
-        let with = Model::new(self.request, self.light, &[self.kept, std::slice::from_ref(&self.units[u])].concat()).ok()?;
+    /// The rates of the model that keeps the units `set`, built for it, at the rated states: a keep costs less per µs
+    /// than the fold it replaces or far more (a drive kept across a fine-structure splitting, its generator's norm ~10⁷
+    /// rad/µs). None for a set the model refuses to keep (its folds must exist, `Model::new`): their folds' errors stand.
+    fn kept_rates(&self, set: &[usize]) -> Option<Vec<f64>> {
+        let with = Model::new(self.request, self.light, &[self.kept, &set.iter().map(|&u| self.units[u].clone()).collect::<Vec<_>>()].concat()).ok()?;
         Some(self.kept_model_rates(&with))
     }
 
     /// Unit `u` with its kept model built and rated, its saving spread over the jackknife's levels `others`.
     fn priced(&self, others: &[Level], u: usize) -> Option<Candidate> {
-        let rates = self.kept_rates(u)?;
+        let rates = self.kept_rates(&[u])?;
         Some(Candidate { unit: u, saving: self.saving(others, u, &rates) })
     }
 }
@@ -3988,21 +4074,30 @@ mod tests {
     }
 
     /// The units the looks need kept (`needed`), in one pass, none to spare. One output after t = 0, its T read exactly, the step at its
-    /// share: T's look has room while the model's error on T is below √(1 − 1/5) of the target, 0.0894. Three units of
-    /// errors 0.06, 0.05 and 0.04 on T beside 0.05 of the rest (0.2), each adding the same work: the heaviest first,
-    /// 0.14 and 0.09 still leave no room, 0.05 does -- all three, together. With 0.02, 0.08 and 0.03 beside 0.02 (0.15):
-    /// the second alone, 0.07. With room from the start, none; at an output not read, or where no atom is held, none.
+    /// share: T's look has room while the model's error on T is below √(1 − 1/5) of the target, 0.0894. The error read
+    /// without a doubt on it: the far end is the error, and the next pilot reads it again -- its chance of a look
+    /// without room one where the set leaves none, else none --; a set's work a µs the sum of its units', its product
+    /// nothing beside its pilot (the reads exact). Three units of errors 0.06, 0.05 and 0.04 on T beside 0.05 of the
+    /// rest (0.2), each adding the same work: the heaviest first, 0.14 and 0.09 still leave no room, 0.05 does -- all
+    /// three, together: a set that leaves no room costs its pilot and then a larger set's. With 0.02, 0.08 and 0.03
+    /// beside 0.02 (0.15): the second alone, 0.07. With room from the start, none; at an output not read, or where no
+    /// atom is held, none.
     #[test]
     fn the_units_the_looks_need_kept_are_taken_by_error_per_work_until_they_have_room() {
         let estimates = vec![estimate([10.; 3], 0., 88.), estimate([10.; 3], 0., 88.)];
-        // The error read, without a doubt on it: the far end is the error itself.
-        let needed = |estimates: &[Estimate], fixed: &Fixed, means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool], floor: &[Option<f64>], cost: &dyn Fn(usize) -> Option<f64>| {
-            needed(estimates, means, held, read, &|set| set.iter().map(|&u| floor[u]).collect(), cost, &|set| without(fixed, means, read, set))
+        // A set's rate and floor the sums of its units'.
+        let needed = |estimates: &[Estimate], fixed: &Fixed, means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool], floor: &[Option<f64>], work: &dyn Fn(&[usize]) -> Option<f64>| {
+            let price = |set: &[usize], beyond: &[usize]| -> [f64; 2] {
+                let short = tight(estimates, &without(fixed, means, read, set), held, read).iter().any(|k| !beyond.contains(k));
+                [0., f64::from(u8::from(short))]
+            };
+            needed(estimates, means, held, read, &|set| set.iter().map(|&u| floor[u]).sum::<Option<f64>>(), work, &|set| without(fixed, means, read, set), &price, 1.)
         };
+        let summed = |rate: &dyn Fn(usize) -> Option<f64>, set: &[usize]| set.iter().map(|&u| rate(u)).sum::<Option<f64>>();
         let case = |errors: [f64; 3], rest: f64, held: f64, read: bool| {
             let means = vec![vec![[0.; 2]; 3], errors.iter().map(|&e| [0., e]).collect::<Vec<_>>()];
             let fixed = Fixed { model: vec![[0.; 2], [0., errors.iter().sum::<f64>() + rest]], start: 0. };
-            needed(&estimates, &fixed, &means, &[1., held], &[false, read], &[Some(1.); 3], &|_| Some(1.))
+            needed(&estimates, &fixed, &means, &[1., held], &[false, read], &[Some(1.); 3], &|set| summed(&|_| Some(1.), set))
         };
         assert_eq!(case([0.06, 0.05, 0.04], 0.05, 1., true), [0, 1, 2]);
         assert_eq!(case([0.02, 0.08, 0.03], 0.02, 1., true), [1]);
@@ -4014,48 +4109,85 @@ mod tests {
         // cheaper first.
         let means = vec![vec![[0.; 2]; 3], vec![[0., 0.06], [0., 0.05], [0., 0.04]]];
         let fixed = Fixed { model: vec![[0.; 2], [0., 0.2]], start: 0. };
-        let with = |cost: [Option<f64>; 3]| needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &cost, &|u| cost[u]);
+        let with = |cost: [Option<f64>; 3]| needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &cost, &|set| summed(&|u| cost[u], set));
         assert_eq!(with([Some(1.), Some(3.), Some(1.)]), [0, 2, 1]);
         assert_eq!(with([Some(1.), None, Some(1.)]), [0, 2]);
         assert_eq!(with([Some(1.), Some(0.5), Some(1.)]), [1, 0, 2]);
-        // A rate is made where the set asks for it, once, against a floor below it: the same set, in the same order,
-        // as with every rate made. Twelve units of errors 0.004 to 0.048 on T (0.312 in all), their kept models' rates
-        // 1 to 7 by their place, and floors a half to the whole of them: the units taken are the same, and the rates
-        // made fewer than the units that weigh.
+        // A rate is made where a set asks for it, once, against a floor below it: the same set as with every rate made.
+        // Twelve units of errors 0.004 to 0.048 on T (0.312 in all), their kept models' rates 1 to 7 by their place,
+        // and floors a half to the whole of them: the units kept are the same, and the units' rates made fewer than the
+        // units that weigh.
         let means = vec![vec![[0.; 2]; 12], (0..12).map(|u| [0., 0.004 * (1 + (u * 5) % 12) as f64]).collect::<Vec<_>>()];
         let fixed = Fixed { model: vec![[0.; 2], [0., means[1].iter().map(|m| m[1]).sum::<f64>()]], start: 0. };
         let rate = |u: usize| Some(1. + (u * 7 % 12) as f64 / 2.);
         let every: Vec<Option<f64>> = (0..12).map(rate).collect();
-        let all = needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &every, &rate);
+        let all = needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &every, &|set| summed(&rate, set));
         for share in [0.5, 0.8, 1.] {
             let floor: Vec<Option<f64>> = (0..12).map(|u| rate(u).map(|r| r * (share + (1. - share) * (u % 3) as f64 / 2.))).collect();
-            let asked = std::cell::Cell::new(0);
-            let lazy = needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &floor, &|u| {
-                asked.set(asked.get() + 1);
-                rate(u)
+            let made = std::cell::RefCell::new(std::collections::HashSet::<Vec<usize>>::new());
+            let lazy = needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &floor, &|set| {
+                let mut key = set.to_vec();
+                key.sort_unstable();
+                made.borrow_mut().insert(key);
+                summed(&rate, set)
             });
             assert_eq!(lazy, all, "floors at {share} of the rates");
-            assert!(asked.get() <= 12 && (share < 1. || asked.get() < 12), "floors at {share}: {} rates made", asked.get());
+            let units = made.borrow().iter().filter(|set| set.len() == 1).count();
+            assert!(units <= 12 && (share < 1. || units < 12), "floors at {share}: {units} units' rates made");
         }
-        assert!(!all.is_empty() && all.len() < 12, "{all:?}");
+        assert!(all.len() > 1 && all.len() < 12, "{all:?}");
         // None of the set to spare: of errors 0.03 and 0.30 on T beside 0.05, the first's kept model twenty times
         // cheaper, both are taken, the first for its value; the second alone leaves the room, and the first is spared.
         let means = vec![vec![[0.; 2]; 3], vec![[0., 0.03], [0., 0.30], [0., 0.]]];
         let fixed = Fixed { model: vec![[0.; 2], [0., 0.38]], start: 0. };
         let rate = [Some(0.1), Some(2.), Some(1.)];
-        assert_eq!(needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &rate, &|u| rate[u]), [1]);
+        assert_eq!(needed(&estimates, &fixed, &means, &[1., 1.], &[false, true], &rate, &|set| summed(&|u| rate[u], set)), [1]);
     }
 
-    /// One keep is enough for the next pilot (`needed`, `Doubt`): its read of the error the keep leaves has room at
-    /// every output. A pilot of eleven groups of eight states, two outputs after t = 0, twelve units whose errors on T
-    /// are heavy-tailed over the states -- a unit's error a_u X, X = (ln U)² of a uniform U, of mean 2 and variance 20 --,
-    /// 0.17 in all where T's look has room below 0.0894 (the step at its share), every keep alike in price. Over forty
-    /// pilots, each with the next pilot drawn on states of its own: the set taken to the far end of the error it leaves
-    /// leaves the next pilot room at both outputs every time (4.9 units a keep); taken to the error read (no doubt on it)
-    /// it does not in eleven of them -- the next pilot reads the units it left heavier, and asks a keep again.
+    /// The set kept is the one of the least expected work (`needed`): the error read and its far end are its two ends.
+    /// One output, T's look with room below 0.0894; three units of 0.04 each beside 0.05 (0.17), a pilot of 88 and a
+    /// product of 500 trajectories whatever the set. The next pilot's chance of a look without room: one with one unit
+    /// kept (0.13 left), 0.05 with two (0.09, at the edge), none with three. Each unit adding 1 % of the work a µs, two are
+    /// kept -- a pilot more at 5 % costs less than the third unit's work over the product and the pilot; where the
+    /// third unit adds nothing, all three; where each adds 30 %, still two: a set short of room costs a pilot and a larger
+    /// set's work. The least of the three, against the sum written out.
     #[test]
-    fn one_keep_leaves_the_next_pilot_s_read_room() {
-        let (groups, members, units, outputs) = (11_usize, 8_usize, 12_usize, 3_usize);
+    fn the_set_kept_is_the_one_of_the_least_expected_work() {
+        let estimates = vec![estimate([10.; 3], 0., 88.), estimate([10.; 3], 0., 88.)];
+        let means = vec![vec![[0.; 2]; 3], vec![[0., 0.04]; 3]];
+        let fixed = Fixed { model: vec![[0.; 2], [0., 0.17]], start: 0. };
+        let (held, read) = ([1., 1.], [false, true]);
+        // The work a µs of a set of n units: one and the first n of `more`.
+        let pick = |more: [f64; 3]| {
+            let price = |set: &[usize], _: &[usize]| -> [f64; 2] { [500., [1., 1., 0.05, 0.][set.len()]] };
+            let work = |set: &[usize]| Some(1. + more[..set.len()].iter().sum::<f64>());
+            needed(&estimates, &means, &held, &read, &|_| Some(1.), &work, &|set| without(&fixed, &means, &read, set), &price, 88.).len()
+        };
+        // E3 = w3 (88 + 500), E2 = w2 (88 + 0.95 · 500) + 0.05 E3, E1 = w1 · 88 + min(E2, E3).
+        let least = |more: [f64; 3]| {
+            let w = [1. + more[0], 1. + more[0] + more[1], 1. + more.iter().sum::<f64>()];
+            let e3 = w[2] * 588.;
+            let e2 = w[1] * (88. + 475.) + 0.05 * e3;
+            let e = [w[0] * 88. + e2.min(e3), e2, e3];
+            (0..3).min_by(|&a, &b| e[a].total_cmp(&e[b])).unwrap() + 1
+        };
+        for (more, kept) in [([0.01; 3], 2), ([0.01, 0.01, 0.], 3), ([0.3; 3], 2)] {
+            assert_eq!((least(more), pick(more)), (kept, kept), "{more:?}");
+        }
+    }
+
+    /// The chance the keep is priced by is the next pilot's own (`Doubt::chance`, `needed`): a pilot of eleven groups of
+    /// eight states, two outputs after t = 0, twelve units whose errors on T are heavy-tailed over the states -- a unit's
+    /// error a_u X, X = (ln U)² of a uniform U, of mean 2 and variance 20 --, 0.17 in all where T's look has room below
+    /// 0.0894. Over 40 pilots, each with the next pilot drawn on states of its own, and for each set of the heaviest
+    /// units: the chance the pilot's jackknife gives that the next pilot reads the set's remaining error without room,
+    /// against how often it does -- within the binomial's own spread of 40 draws, at every set (four units: 6 short, 11.1
+    /// predicted; three: 38, 36.2). The error read alone (the set that leaves it room, no doubt on it) is short in a
+    /// tenth of the pilots or more, as its chance says (6 of 40, 8.3): a keep taken to the error read asks a keep again
+    /// that often, and the price of it is the next pilot's.
+    #[test]
+    fn the_next_pilot_s_chance_of_a_look_without_room_is_its_reads_own() {
+        let (groups, members, units, outputs, pilots) = (11_usize, 8_usize, 12_usize, 3_usize, 40);
         let scale: Vec<f64> = (0..units).map(|u| 0.17 / 2. * (units - u) as f64 / (units * (units + 1) / 2) as f64).collect();
         let scales = Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] };
         let estimates = vec![estimate([10.; 3], 0., 88.); outputs];
@@ -4084,27 +4216,39 @@ mod tests {
         };
         let parts: Vec<Part> = (0..groups).map(|_| part()).collect();
         let parts: Vec<&Part> = parts.iter().collect();
-        let room = |set: &[usize], next: &[Vec<[f64; 2]>]| -> bool {
+        let short = |set: &[usize], next: &[Vec<[f64; 2]>]| -> bool {
             let model = (0..outputs).map(|k| if k == 0 { [0.; 2] } else { [0., (0..units).filter(|u| !set.contains(u)).map(|u| next[k][u][1]).sum()] }).collect();
-            tight(&estimates, &Fixed { model, start: 0. }, &held, &read).is_empty()
+            !tight(&estimates, &Fixed { model, start: 0. }, &held, &read).is_empty()
         };
-        let (mut far_short, mut read_short, mut kept) = (0, 0, [0, 0]);
-        for trial in 0..40 {
+        let order: Vec<usize> = (0..units).collect();
+        let (mut predicted, mut seen) = (vec![0.; units + 1], vec![0.; units + 1]);
+        let (mut read_short, mut read_predicted) = (0., 0.);
+        for trial in 0..pilots as u64 {
             let (errors, at, from) = draw(2 * trial);
             let measured = Measured { errors: &errors, output: &at, group: &from, booked: &booked };
             let means = measured.means(outputs, None, &estimates);
             let fixed = Fixed { model: model_error(&sums(&means, [0.; 2]), [0.; 2]), start: 0. };
             let doubt = Doubt::new(&measured, outputs, &parts, &scales, [0.; 2]);
-            let take = |far: &dyn Fn(&[usize]) -> Fixed| needed(&estimates, &means, &held, &read, &|set| vec![Some(1.); set.len()], &|_| Some(1.), far);
-            let at_far = take(&|set| raised(&without(&fixed, &means, &read, set), &doubt.interval(set)));
-            let at_read = take(&|set| without(&fixed, &means, &read, set));
             let (errors, at, from) = draw(2 * trial + 1);
             let next = Measured { errors: &errors, output: &at, group: &from, booked: &booked }.means(outputs, None, &estimates);
-            far_short += usize::from(!room(&at_far, &next));
-            read_short += usize::from(!room(&at_read, &next));
-            kept = [kept[0] + at_far.len(), kept[1] + at_read.len()];
+            for j in 0..=units {
+                let set = &order[..j];
+                predicted[j] += doubt.chance(set, &without(&fixed, &means, &read, set), &estimates, &held, &read, &[]);
+                seen[j] += f64::from(u8::from(short(set, &next)));
+            }
+            // The set the error read asks: the heaviest units until it has room.
+            let at_read = (0..=units).find(|&j| tight(&estimates, &without(&fixed, &means, &read, &order[..j]), &held, &read).is_empty()).unwrap_or(units);
+            read_short += f64::from(u8::from(short(&order[..at_read], &next)));
+            read_predicted += doubt.chance(&order[..at_read], &without(&fixed, &means, &read, &order[..at_read]), &estimates, &held, &read, &[]);
         }
-        assert!(far_short == 0 && read_short >= 10, "the next pilot without room: {far_short} of 40 after the far end's keep, {read_short} after the read's (units kept {kept:?})");
+        for j in 0..=units {
+            let p = predicted[j] / pilots as f64;
+            let spread = (pilots as f64 * p * (1. - p)).sqrt();
+            assert!((seen[j] - predicted[j]).abs() <= 2. * spread + 1., "{j} units: {} of {pilots} short, {:.1} predicted", seen[j], predicted[j]);
+        }
+        let p = read_predicted / pilots as f64;
+        let spread = (pilots as f64 * p * (1. - p)).sqrt();
+        assert!(read_short >= pilots as f64 / 10. && (read_short - read_predicted).abs() <= 2. * spread + 1., "the error read's set short in {read_short} of {pilots}, {read_predicted:.1} predicted");
     }
 
     /// An output's estimate with T = `temperature` (µK) per lab axis and the total T's standard error `error` (µK), read
