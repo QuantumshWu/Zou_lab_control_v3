@@ -19,24 +19,26 @@
 //!    root), the model's units' errors at the states of the first held member of every group, and the tables' errors
 //!    at one state of every trajectory (SPEC §5.4; `one_each`). Its trajectories at the run's step stay in the
 //!    result: they are trajectories of the run's own model and step.
-//!    Where the scout's atoms already refute the reach (read before its keep, as on the pilot: the units' errors are
-//!    read at the states of a reach that stands), the pilot's own level is run before its companion, its members
-//!    doubling a hand-out (`batch`), and the reach read after each: where the atoms in hand refute it, the attempt ends
-//!    there, and the rest of the pilot -- its own level's other members, its companion: the step's check at a model the
-//!    next attempt judges anew over the grown reach, which settles its step anew -- is never run (`attempt`). The
-//!    scout's refutation is the read that selected the attempt for ending; its eleven atoms, one a group, are confirmed
-//!    by the next eleven, read with them, before the reach grows to the temperature they read (a reach grown on the
-//!    scout's own read, R3_DOPPLER, over-read its atoms' T by up to 2.4 times and cost 16 % more work). What the
-//!    falsifier needs is significance, which the doubled atoms give where it stands; what more atoms would buy is the
-//!    grown temperature read closer, and a reach read low is refuted again by the next pilot's atoms, read high costs
-//!    its own proofs -- both the next attempt's to tell. (Measured, S3 at 30 µK: on 22 atoms the reach grows to 99.7 µK,
-//!    on 44 to 95.7, on 88 to 113.0, none refuted by the next pilot's 88; 957, 949 and 1128 CPU-s in all, the same
-//!    result.) What the pilot's work of an attempt so ended leaves the next is the reach's temperature and the step it
-//!    stood at, the next's first rung; nothing read on its trajectories (# An attempt's own).
+//!    The falsifier reads the run's own level alone, so the pilot's own level is run before its companion and read as
+//!    it comes in (`own_level`): where its atoms refute the reach the attempt ends there, and the rest of the pilot --
+//!    its companion, the step's check at a model the next attempt judges anew over the grown reach -- is never run
+//!    (`attempt`); so is a rung below's own level read, where the check goes down (`check`). Where the scout's atoms
+//!    already refute the reach, the own level is run before the scout's keep (the units' errors are read at the states
+//!    of a reach that stands), its members doubling a hand-out (`batch`), and the reach read after each. The scout's
+//!    refutation is the read that selected the attempt for ending; its eleven atoms, one a group, are confirmed by the
+//!    next eleven, read with them, before the reach grows to the temperature they read (a reach grown on the scout's own
+//!    read, R3_DOPPLER, over-read its atoms' T by up to 2.4 times and cost 16 % more work). What the falsifier needs is
+//!    significance, which the doubled atoms give where it stands; what more atoms would buy is the grown temperature
+//!    read closer, and a reach read low is refuted again by the next pilot's atoms, read high costs its own proofs --
+//!    both the next attempt's to tell. (Measured, S3 at 30 µK: on 22 atoms the reach grows to 99.7 µK, on 44 to 95.7, on
+//!    88 to 113.0, none refuted by the next pilot's 88; 957, 949 and 1128 CPU-s in all, the same result.) What the work
+//!    of an attempt so ended leaves the next is the reach's temperature and the states of the atoms that refuted it,
+//!    for the next attempt's decisions (# An attempt's own).
 //! 3. The model's decisions (SPEC §5.2; # The model), at the scout's states and again at the pilot's -- at its first rung
 //!    whose own read is in and not clearly beyond, before its check goes on (# Each decision as its evidence is in) --,
 //!    the step's error taken at its share: units to keep end the attempt, and the next begins with their model at the
-//!    step this one stood at (# The model).
+//!    step this one stood at (# The model). An attempt after a growth decides first on the states the refuting atoms
+//!    left, before its scout (# An attempt's own).
 //! 4. The product: batches of whole groups at the settled step, one level, every trajectory run to the last output,
 //!    until every held quantity's total lies within its target (# Stopping) or the trajectories reach
 //!    `MOST_TRAJECTORIES`. Its atoms that leave the reach are read where they are, and what they carry is booked
@@ -56,11 +58,20 @@
 //! model's: its trajectories, the step's reads (the old generator's error), the units' reads (of folds the new model
 //! may not hold), the tables (other clusters), its statistics, and the ensemble's draw (the prepared potential holds
 //! the folded drives' shifts alone). What stays is what the reads say of the atoms: the reach's verdict and the
-//! temperature it grows to, and the step the attempt stood at, the next attempt's first rung where its ladder has it.
-//! Measured (2026-11-12, S1, S2, S2Q, S3, S3c over 1 and 10 ms, e038, e077, PGC3D_1ms, R3_DOPPLER): every growth after a
-//! pilot kept units (S3 82 → 84, S3c over 10 ms 69 → 75) or lowered the first rung below the pilot's step
-//! (R3_DOPPLER); the others grew on the scout's paths not proven. No pilot carries over, so none is made to: a pilot
-//! on a refuted reach is not spent instead (# The pipeline: its own level alone, where the scout's atoms refute it).
+//! temperature it grows to, and where the atoms went -- the states of the run's level whose atoms refuted the reach
+//! (`Attempt::Grow`), a pilot's of the model as it stands. Where no unit is kept over the grown set, the next attempt
+//! reads the model's decision on them first (`keep`, at the units' errors there with its own tables and booking), as
+//! the old engine carried its pilot's states into the grown reach's choice: a keep they ask ends the attempt before it
+//! runs a trajectory, and none asked stands for the scout's keep on its eleven states. They are read for a decision
+//! and booked nowhere: the result's errors are read on its own pilot's states. The step does not stay: a descent the
+//! check took on a reach the atoms refuted, or whose domain its paths left, is that reach's -- its domain, its tables,
+//! its ladder --, and the next attempt begins at its own first rung (`Attempt::stood`; S3c over 1 ms: its 30 µK
+//! reach's companion at 1.43 µs left the domain and the check went down to 0.358 µs, which the next attempt, at 65 µK
+//! and a first rung of 0.971 µs, began at, twice the product's steps). Measured (2026-11-12, S1, S2, S2Q, S3, S3c over
+//! 1 and 10 ms, e038, e077, PGC3D_1ms, R3_DOPPLER): every growth after a pilot kept units (S3 82 → 84, S3c over 10 ms
+//! 69 → 75) or lowered the first rung below the pilot's step (R3_DOPPLER); the others grew on the scout's paths not
+//! proven. No pilot's trajectories carry over, so none is made to: a pilot on a refuted reach is not spent instead
+//! (# The pipeline: its own level, read before its companion).
 //!
 //! # Each decision as its evidence is in
 //! A decision that ends an attempt is taken where what it reads is in, not after the work it would make useless. The
@@ -89,11 +100,16 @@
 //! fringes; the wells of the light folded at the atom and of explicit states are the check's to find) -- ω τ < π for
 //! a kick without curvature, ω_k τ < 2 on a flat reference --; and the generator, whose change along the path the propagation
 //! reads at nodes half a step apart, (|Ω| + |K| v) τ/2 < π for every residual beat Ω and wave vector K of the model's
-//! entries at an atom's speed v. The ladder begins at the largest rung that is admissible for the run and whose double
-//! is for the companion (`first_rung`): the run's step at the largest speed of the reach the model is judged over; the
-//! companion's at the reach's rms speed, below the same edge. An attempt after the first begins at the step the one before stood at, where
-//! that is the shorter. The first rung is a rung of the ladder, whose bottom is the step of `MOST_STEPS` steps a
-//! trajectory: a request for which no rung down to it is admissible is refused with a message.
+//! entries at an atom's speed v. The ladder begins at the largest rung within the physics prior's step that is
+//! admissible for the run and whose double is for the companion (`first_rung`): the run's step at the largest speed of
+//! the reach the model is judged over; the companion's at the reach's rms speed, below the same edge; and the prior,
+//! the old engine's first step (`prior`): T's step error goes as the square of the phase k_max v_T τ the light's
+//! pattern advances in a step at the request's temperature, and the step may take its share of T's allowance -- so the
+//! ladder does not begin at an edge's rung the check then leaves (PGC3D: 1.425 µs, left on the pilot for 0.7125 µs,
+//! 11.2 CPU-s). An attempt after a keep begins at the step the one before stood at, where that is the shorter; after
+//! a growth, at its own first rung (# An attempt's own). The first rung is a rung of the ladder, whose bottom is the
+//! step of `MOST_STEPS` steps a trajectory: a request for which no rung down to it is admissible is refused with a
+//! message.
 //!
 //! The step's convergence is checked on the pilot, as a refinement is checked by hand: the pilot's trajectories run at
 //! τ and, the same trajectory numbers -- the same initial atoms, the same jumps' draws by their number, the same
@@ -167,7 +183,7 @@
 //! - A read is never carried from one rung to another as a verdict: a rung's third level is a read of levels it holds
 //!   itself, of the same model at the same steps -- the scout's, where the pilot has none of its own and the ladder
 //!   no rung above --, and it certifies nothing alone. An attempt that begins at the step the attempt before stood at
-//!   reads that rung anew: the reads before were of another model or reach (# An attempt's own).
+//!   (after a keep) reads that rung anew: the reads before were of another model (# An attempt's own).
 //! - A comparison of two levels says something only where the coarser one still resolves what the scheme samples: the
 //!   first rung's double is admissible for the typical atom, and stable for every atom. Where a path of the coarser
 //!   level is not proven, the coarser one has left the model's domain for that atom: the two levels are apart by more
@@ -293,8 +309,8 @@
 //! where the rung's did not -- its error, the levels apart by more than any share --, and the rung is left as one
 //! beyond (`settle`, # The step); the reach is not grown for it. Where the rung's own paths left the domain too, the
 //! two levels say nothing of each other, and the finer step decides: the rung is left, and the reach grows for the
-//! rung below's own paths where they leave the domain as well (the next attempt beginning at the rung, which no read
-//! left), else the rung below is left in turn, its companion
+//! rung below's own paths where they leave the domain as well (the next attempt beginning at its own first rung, # An
+//! attempt's own), else the rung below is left in turn, its companion
 //! the level that departed (`own_departure`). A growth so costs one level of the rung below at the most, and a step's
 //! departure grows nothing. (Grown for its paths, the lab's probe scenes S3 grew
 //! the reach from 30 µK to 145--666 µK on the scout's companions at 2.5--2.9 µs, which heated their atoms past the
@@ -412,7 +428,7 @@
 use crate::adapt;
 use crate::decide::{assured, pays, Outcome, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
-use crate::estimate::{between, bound_motion, draws_for, half_window, occupation, spread, summarize, unseen, Between, Estimate, Fate, Group, Held, Scales, Spread};
+use crate::estimate::{allowance, between, bound_motion, draws_for, half_window, occupation, semiclassical, spread, summarize, unseen, Between, Estimate, Fate, Group, Held, Scales, Spread};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::V3;
@@ -527,7 +543,8 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).expect("a validated request's initial state holds a ground state");
     let reference = alone(initial[chief].0);
     // The units kept, the reach's temperature and the prepared energy it holds outside the trap's region (model/reach.rs,
-    // # The trap's region), the tubes (# Tubes) -- all only grow --, the step the last attempt stood at.
+    // # The trap's region), the tubes (# Tubes) -- all only grow --, the step the last attempt stood at where it kept
+    // units (`Attempt::stood`).
     let (mut kept, mut reach, mut beyond, mut tubes, mut step) = (vec![], request.temperature_uk, f64::NEG_INFINITY, Vec::<Tube>::new(), None);
     // The last model's proof set: where the next model's proofs begin (`Proven`).
     let mut last: Option<Proven> = None;
@@ -554,22 +571,24 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
             let (reported, entries) = rayon::join(|| model.trap(&reference, &model.reported()), || model.sampled(&model.running()));
             let judged_units = model.judged(&units);
             let setting = Setting { model: &model, reference, units: &units, gates: &judged_units, trap: &trap, ensemble: &ensemble, depth: ensemble.depths()[chief], reported: reported.ok(), entries, start: exact(&ensemble, &ensemble.kinetic(0)) };
+            // The states of the run's level whose atoms refuted the last attempt's reach: the next attempt at this model
+            // decides on them first (# An attempt's own).
+            let mut carried: Option<Vec<Part>> = None;
             while more.is_empty() {
                 // An attempt's results improve on its own last one (module documentation, # Checkpoints).
                 messages.least = 0;
-                match attempt(request, &setting, &proven, &kept, reach, step, &mut messages)? {
-                    Attempt::Grow(t, outside, new, tau) => {
+                let ended = attempt(request, &setting, &proven, &kept, reach, step, carried.take(), &mut messages)?;
+                step = ended.stood();
+                match ended {
+                    Attempt::Grow(t, outside, new, states) => {
                         // The set grown holds the one before it: the reach's level outside the region kept, the tubes.
                         beyond = beyond.max(proven.region.minimum + proven.region.outside).max(outside);
                         tubes.extend(&new);
-                        (reach, step) = (t, Some(tau));
+                        (reach, carried) = (t, states);
                         proven.grow(&model, &units, region(reach, beyond), &new);
                         more = failing(&proven);
                     }
-                    Attempt::Keep(units, tau) => {
-                        more = units;
-                        step = Some(tau);
-                    }
+                    Attempt::Keep(units, _) => more = units,
                     Attempt::Done(s) => return Ok(s),
                 }
             }
@@ -733,13 +752,31 @@ impl Messages<'_> {
 
 /// How one attempt at a model ends (`attempt`): the proof set the model was judged over is outgrown -- by the pilot's
 /// atoms, or by a step not proven (`Domain`) -- (the reach's new temperature, µK, the prepared energy it is to hold
-/// outside the trap's region, rad/µs, −∞ where nothing asks, and the tubes to add: the model is attempted again as it
-/// stands unless a fold fails over the grown set, `solve`), units are to be kept (`keep`) -- each with the step the
-/// attempt stood at, the next attempt's first rung --, or the solution.
+/// outside the trap's region, rad/µs, −∞ where nothing asks, the tubes to add, and the states of the run's level whose
+/// atoms refuted the reach, where they did: the model is attempted again as it stands unless a fold fails over the
+/// grown set, `solve`, and decides on those states first, # An attempt's own); units are to be kept (`keep`), with the
+/// step the attempt stood at; or the solution.
 enum Attempt {
-    Grow(f64, f64, Vec<Tube>, f64),
+    Grow(f64, f64, Vec<Tube>, Option<Vec<Part>>),
     Keep(Vec<Unit>, f64),
     Done(Solution),
+}
+impl Attempt {
+    /// The step the next attempt may begin at (`begins`): after a keep, the one this attempt stood at -- over the same
+    /// reach --; after a growth none. A step the check took on a reach the atoms refuted or whose domain its paths left
+    /// is that reach's -- its domain, its tables, its ladder --, and the next attempt begins at its own first rung.
+    fn stood(&self) -> Option<f64> {
+        match self {
+            Attempt::Keep(_, tau) => Some(*tau),
+            Attempt::Grow(..) | Attempt::Done(_) => None,
+        }
+    }
+}
+
+/// An attempt's first step (module documentation, # The step): its first rung, or the step the attempt before stood
+/// at where it has one and that is the shorter (`Attempt::stood`).
+fn begins(stood: Option<f64>, first_rung: f64) -> f64 {
+    stood.map_or(first_rung, |step| step.min(first_rung))
 }
 
 /// The initial components (SPEC §2.5): the ground states the request's initial density holds and their populations
@@ -827,10 +864,24 @@ fn resolves(tau: f64, sampled: &[[f64; 2]], speed: f64) -> bool {
     sampled.iter().all(|[beat, wave]| 0.5 * (beat + wave * speed) * tau < PI)
 }
 
+/// The step the physics prior allows (module documentation, # The step; the old engine's first step), µs: T's step
+/// error, relative, goes as the square of the phase the light's pattern advances along an atom's path in a step,
+/// (k v τ)², and the step may take its share of T's allowance (`step_bound`, # T's allowance), k_max v_T τ = √(s δT/T)
+/// -- at the carriers' largest wave number `wave` (1/µm; model/eliminate.rs `Model::carrier_wave_number`), the rms
+/// speed along an axis at the request's temperature `temperature` (µK), v_T = √(k_BT/m), and T's allowance there at the
+/// scale T_sc of that light's recoil (estimate.rs `semiclassical`: one photon of k_max). No bound where the light has no
+/// pattern or the atoms no speed. (PGC3D, Rb87 at 30 µK on D2: k_max v_T = 0.43 rad/µs, T_sc = 10.9 µK, δT/T = 0.375:
+/// τ ≤ 0.95 µs, where the ladder's top by admissibility alone, 1.425 µs, was left on the pilot and 0.7125 µs stood.)
+fn prior(wave: f64, hbar_over_mass: f64, temperature: f64, scales: &Scales) -> f64 {
+    let speed = (hbar_over_mass * KT_PER_UK * temperature).sqrt();
+    (step_bound()[1] * allowance(temperature, semiclassical([1., wave * wave], scales))).sqrt() / (wave * speed)
+}
+
 /// The ladder's first rung (module documentation, # The step): the largest rung -- the run's length `run` (µs) over an
-/// even number, its double a whole part of the run too -- that is admissible for the run and whose double is admissible
-/// for the companion (`admissible`), at the speeds `fastest` and `typical` (µm/µs) of the reach the model is judged over.
-/// (Admissibility is a bound on the step from above: the least even number is found by counting up.)
+/// even number, its double a whole part of the run too -- that is no longer than the physics prior's step `prior`
+/// (`prior`), is admissible for the run and whose double is admissible for the companion (`admissible`), at the speeds
+/// `fastest` and `typical` (µm/µs) of the reach the model is judged over. (Both are bounds on the step from above: the
+/// least even number is found by counting up, from the prior's.)
 /// - The run's step is the result's: it is admissible for every atom the model is judged for, at the reach's largest
 ///   speed (model.rs `Reach::speed`) -- one domain for the model's folds and for the step.
 /// - The companion at twice the step is a probe of the step, not a result: it must be stable, which the step's edge
@@ -844,8 +895,10 @@ fn resolves(tau: f64, sampled: &[[f64; 2]], speed: f64) -> bool {
 /// steps, and the first rung is a rung of it: none where no rung down to that one is admissible -- the light or the
 /// trap asks for a shorter step than the cap allows, or a frequency, a curvature or a speed is no number (nothing is
 /// admissible then). The solve refuses such a request (`attempt`): a step that is not admissible computes nothing.
-fn first_rung(run: f64, frequency: f64, kick: f64, sampled: &[[f64; 2]], fastest: f64, typical: f64) -> Option<f64> {
-    (1..=MOST_STEPS / 2).map(|pairs| run / (2 * pairs) as f64).find(|&step| admissible(step, frequency, kick, sampled, fastest) && admissible(2. * step, frequency, kick, sampled, typical))
+fn first_rung(run: f64, prior: f64, frequency: f64, kick: f64, sampled: &[[f64; 2]], fastest: f64, typical: f64) -> Option<f64> {
+    // The fewest pairs whose rung is within the prior: run/(2n) ≤ prior from n = run/(2 prior) on (none past the cap).
+    let least = (run / (2. * prior)).ceil().max(1.).min((MOST_STEPS / 2 + 1) as f64) as u64;
+    (least..=MOST_STEPS / 2).map(|pairs| run / (2 * pairs) as f64).find(|&step| admissible(step, frequency, kick, sampled, fastest) && admissible(2. * step, frequency, kick, sampled, typical))
 }
 
 /// The rms speed (µm/µs) of atoms at the temperature T (µK): √(3 (ħ/m) k_BT/ħ), the reach's typical atom at the
@@ -1475,7 +1528,8 @@ fn keep(
 
 /// One attempt at the solve (module documentation, # The pipeline) with the model of the units `kept` as `setting`
 /// holds it, judged over the proof set `proven` -- the reach of the temperature `reach` µK and the tubes --, where none
-/// of its gates fails. `step`: the step the attempt before stood at, this one's first rung.
+/// of its gates fails. `step`: the step the attempt before stood at where it may begin there (`Attempt::stood`);
+/// `carried`: the states of the run's level whose atoms refuted the reach before this one, where they did.
 #[allow(clippy::too_many_arguments)]
 fn attempt(
     request: &Request,
@@ -1484,6 +1538,7 @@ fn attempt(
     kept: &[Unit],
     reach: f64,
     step: Option<f64>,
+    carried: Option<Vec<Part>>,
     messages: &mut Messages,
 ) -> Result<Attempt, String> {
     let hm = hbar_over_mass(request.mass_kg);
@@ -1513,9 +1568,11 @@ fn attempt(
         ledger.flag("计算所用光场中的势没有极小：阱频、n̄、温度的窗口（一个阱周期）与验证范围都按初始势阱给出".into());
     }
     let (momentum, start) = setting.start;
-    // The ladder's first rung over the proof set the model is judged over, at its largest speed: an attempt that begins
-    // at the step the one before stood at begins no higher than its own first rung (a set that has grown lowers it).
-    let first_rung = first_rung(plan.end, trap.frequencies.iter().copied().fold(0., f64::max), kick, entries, fastest, typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3., fastest))
+    // The ladder's first rung: within the physics prior's step at the request's temperature, and admissible over the
+    // proof set the model is judged over, at its largest speed. An attempt that begins at the step the one before stood
+    // at -- after a keep, over the same reach -- begins no higher than its own first rung.
+    let prior = prior(model.carrier_wave_number(), hm, request.temperature_uk, &scales);
+    let first_rung = first_rung(plan.end, prior, trap.frequencies.iter().copied().fold(0., f64::max), kick, entries, fastest, typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3., fastest))
         .ok_or_else(|| format!("找不到可用的时间步长：在每条轨迹的步数上限（{MOST_STEPS} 步）之内，没有步长能分辨阱中的振荡、光场中势阱的曲率和光场沿原子路径的变化（或者阱频、曲率、原子速率不是有限数）"))?;
     // What the reach's falsifier compares the T read with: the largest kinetic temperature along an axis of the
     // ensemble the reach was made for (model.rs `Reach::kinetic_uk`: T_r where the trap is classical, the zero point's
@@ -1524,11 +1581,11 @@ fn attempt(
     // And the share of its atoms it takes to lie outside the reach: the share the reach is made to leave out of its own
     // ensemble, and no less than what it is known to leave out of the initial one.
     let left = unsampled[0].max(unseen(MOST_TRAJECTORIES as f64));
-    // The attempt's first step, and whether the rung above a step is a rung of the ladder (`first_rung`'s test at twice
-    // the step): the attempt's first step has it where the attempt begins below its own first rung, at the step the
-    // attempt before stood at. The check then reads that rung on a third level, at 4τ (`settle`): a cell of the
+    // The attempt's first step (`begins`), and whether the rung above a step is a rung of the ladder (`first_rung`'s
+    // test at twice the step): the attempt's first step has it where the step the attempt before stood at, or the
+    // prior, sets it below the edges. The check then reads that rung on a third level, at 4τ (`settle`): a cell of the
     // Brownian path.
-    let begins = step.map_or(first_rung, |step| step.min(first_rung));
+    let begins = begins(step, first_rung);
     let (frequency, typical, end) = (trap.frequencies.iter().copied().fold(0., f64::max), typical_speed(hm, judged.kinetic_uk.iter().sum::<f64>() / 3., fastest), plan.end);
     let above = |tau: f64| 4. * tau <= end && admissible(2. * tau, frequency, kick, entries, fastest) && admissible(4. * tau, frequency, kick, entries, typical);
     // Where the attempt's steps are proven (`Domain`): of the units' gates, those the whole space at the proof set's
@@ -1538,9 +1595,8 @@ fn attempt(
     let domain = Domain { model, reach: judged, tubes: &proven.tubes, top: top(trap, share), fastest, trap, judged: setting.gates, open: &open, every: &every, hbar_over_mass: hm, frequency, kick, moduli: &moduli, sampled: entries, result: true };
     // An attempt that ends on a step not proven: the proof set that holds its paths (model/reach.rs, # The trap's
     // region, # Tubes) -- the temperature whose level holds the paths' energy within the region (below the top, where
-    // one does), the level outside it, and the tubes of the paths no temperature's reach holds --, from the step the
-    // attempt stands at.
-    let hold = |asked: Asks, tau: f64| Attempt::Grow(holding(trap, asked.region, share, reach), asked.outside, asked.tubes, tau);
+    // one does), the level outside it, and the tubes of the paths no temperature's reach holds.
+    let hold = |asked: Asks| Attempt::Grow(holding(trap, asked.region, share, reach), asked.outside, asked.tubes, None);
     let mut context = Context {
         momentum,
         fixed: Fixed { model: vec![[0.; 2]; outputs], start },
@@ -1569,84 +1625,93 @@ fn attempt(
     let first = MOST_TRAJECTORIES / GROUP;
     let numbers: Vec<u64> = (first..first + pilot_size() / GROUP).collect();
     // Whether the pilot's atoms have outgrown the reach (`outgrown`), and the temperature it then grows to: the
-    // attempt ends there, and its check spends nothing further on a step the next attempt settles anew (`settle`).
+    // attempt ends there, and nothing further is spent on a step of that reach (`own_level`, `check`).
     let scales = context.scales;
     let grown = |pilot: &[&Part]| outgrown(&outside(model, judged, pilot), left, &bound_motion(pilot, &scales), held);
+    let refuted = |(t, states): (f64, Vec<Part>)| Attempt::Grow(t, f64::NEG_INFINITY, vec![], Some(states));
     let mut levels = Levels::default();
+
+    // The model's decision at some groups' states before the pilot's own (`keep`; module documentation, # The model):
+    // the units' errors read there and the model's error they make, the trajectories `again` that a keep runs again of
+    // what this attempt has run, and whose reads they are; the units to keep, and the states' read (`Sampled`).
+    let start = context.fixed.start;
+    let decided = |parts: &[&Part], again: f64, reads: Reads| -> (Option<Vec<Unit>>, Sampled) {
+        let estimates = pooled(parts, &scales).0;
+        let read = sampled(model, &reading, &tables, parts, None);
+        let measured = Measured { errors: &read.errors, output: &read.at, group: &read.from, booked: &booking };
+        let means = measured.means(outputs, None, &estimates);
+        let fixed = Fixed { model: model_error(&sums(&means, unsampled), unsampled), start };
+        let keeps = keep(kept, model, reference, trap.centre, units, &measured, &means, parts, &estimates, &fixed, &scales, unsampled, (&tables, judged), again, reads);
+        (keeps.map(|u| u.iter().map(|&u| units[u].clone()).collect()), read)
+    };
+    // The states the run's level left where its atoms refuted the reach before this one (# An attempt's own): this
+    // model's atoms where they went, a pilot's of them, read for its decision before the attempt runs a trajectory --
+    // a keep they ask ends it at nothing run again --; they are the decision the scout's eleven states would make here.
+    let decided_before = match &carried {
+        Some(states) => match decided(&states.iter().collect::<Vec<_>>(), 0., Reads::Pilot).0 {
+            Some(units) => return Ok(Attempt::Keep(units, context.tau)),
+            None => true,
+        },
+        None => false,
+    };
+    drop(carried);
 
     // The scout (module documentation, # The pipeline): the first member of every pilot group at both levels, screened;
     // where a unit is to be kept at its states, the attempt ends here -- for the price of the scout, not of a pilot.
     // The pilot's read of the same below stands for the result.
-    match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &|pilot| grown(pilot).is_some(), None, false, messages) {
-        Settled::Unproven(asked) => return Ok(hold(asked, context.tau)),
-        _ => {}
+    if let Settled::Unproven(asked) = settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &|pilot| grown(pilot).is_some(), None, false, messages) {
+        return Ok(hold(asked));
     }
-    // Where the scout's atoms already refute the reach (`outgrown`), the pilot's own level is run first, its members
-    // doubling a hand-out, and the reach is read on the atoms in hand -- the scout's among them -- after each: where they
-    // refute it, the attempt ends with the reach grown to the temperature they read, and the rest of the pilot, a check
-    // of the step at a model judged over a reach the run does not keep (`settle`: the next attempt settles its step
-    // anew), is never run. Else
-    // -- they do not refute it, or a path of theirs was not proven, which their companion's says what of (`settle`,
-    // `own_departure`) -- the pilot's check goes on from that level, its companion run then (`settle`, `ran`). Before the
-    // scout's keep, as on the pilot: the units' errors are read at the states of a reach that stands -- at a refuted
-    // one, of atoms past it (S3's scout at 30 µK kept its carrier's dressing on atoms heated past the reach).
-    let ran = if grown(&levels.fine.iter().collect::<Vec<_>>()).is_some() {
-        let (tau, plan) = (context.tau, &context.plan);
-        // The scout's groups stay as they are for its keep's read (below).
-        let mut joined = levels.fine.clone();
-        // The members in hand of every group; each hand-out doubles them (`batch`), and the reach is read after each.
-        let mut members = 1;
-        loop {
-            let more = (2 * members).min(GROUP);
-            let hand = Hand { groups: &numbers, members: members..more, shape: Shape::of(plan, true), whole: true, record: &|i| trajectory(&run, ensemble, &domain, tau, plan, true, i) };
-            let (mut rest, unproven) = run_groups(&[hand], messages, &mut |prefix, messages| so_far(&context, &joined, prefix, messages));
-            absorb(&mut joined, rest.pop().expect("the hand-out's one level"));
-            members = more;
-            if unproven[0].is_some() {
-                break Some((joined, unproven[0].clone()));
-            }
-            if let Some(t) = grown(&joined.iter().collect::<Vec<_>>()) {
-                return Ok(Attempt::Grow(t, f64::NEG_INFINITY, vec![], tau));
-            }
-            if members == GROUP {
-                break Some((joined, None));
-            }
+    // The pilot's own level is run before its companion and read by the reach's falsifier as it comes in (`own_level`):
+    // where its atoms refute the reach, the attempt ends with the reach grown to the temperature they read, and the
+    // rest of the pilot -- its companion, the step's check at a model judged over a reach the run does not keep -- is
+    // never run. Where the scout's atoms already refute it, before the scout's keep, its members doubling a hand-out:
+    // the units' errors are read at the states of a reach that stands -- at a refuted one, of atoms past it (S3's
+    // scout at 30 µK kept its carrier's dressing on atoms heated past the reach); else after it, one hand-out. Where
+    // they do not refute it, or a path of theirs was not proven, which their companion's says what of (`settle`,
+    // `own_departure`), the pilot's check goes on from that level, its companion run then (`settle`, `ran`).
+    let doubling = grown(&levels.fine.iter().collect::<Vec<_>>()).is_some();
+    let mut ran = None;
+    if doubling {
+        match own_level(&run, ensemble, &domain, &context, &levels.fine, &numbers, true, &grown, messages) {
+            Ok(own) => ran = Some(own),
+            Err(at) => return Ok(refuted(at)),
         }
-    } else {
+    }
+    let scouted = if decided_before {
         None
-    };
-    let scouted = {
-        let tau = context.tau;
-        let scout: Vec<&Part> = levels.fine.iter().collect();
-        let estimates = pooled(&scout, &context.scales).0;
-        let read = sampled(model, &reading, &tables, &scout, None);
-        let measured = Measured { errors: &read.errors, output: &read.at, group: &read.from, booked: &booking };
-        let means = measured.means(outputs, None, &estimates);
-        let fixed = Fixed { model: model_error(&sums(&means, unsampled), unsampled), ..context.fixed.clone() };
-        if let Some(u) = keep(kept, model, reference, trap.centre, units, &measured, &means, &scout, &estimates, &fixed, &context.scales, unsampled, (&tables, judged), scout.len() as f64, Reads::Scout) {
-            return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), tau));
+    } else {
+        match decided(&levels.fine.iter().collect::<Vec<_>>(), levels.fine.len() as f64, Reads::Scout) {
+            (Some(units), _) => return Ok(Attempt::Keep(units, context.tau)),
+            (None, read) => Some(read),
         }
-        read
+    };
+    let ran = match ran {
+        Some(own) => own,
+        None => match own_level(&run, ensemble, &domain, &context, &levels.fine, &numbers, false, &grown, messages) {
+            Ok(own) => own,
+            Err(at) => return Ok(refuted(at)),
+        },
     };
     // The pilot: its groups' other members at both levels, screened, and the step's check (module documentation,
     // # The step) -- first as far as its own two levels: at the first rung whose own read is in and not clearly beyond,
     // the decisions the pilot's reads hold are taken (# Each decision as its evidence is in), and the check goes on
     // past them only where they leave the attempt standing. Whether it saw: a step that stands uncertified -- at the
     // steps' cap, or unable to see -- is flagged.
-    let mut settled = settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &|pilot| grown(pilot).is_some(), ran, true, messages);
+    let mut settled = settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &|pilot| grown(pilot).is_some(), Some(ran), true, messages);
     drop(run);
-    let mut scouted = Some(scouted);
+    let mut scouted = scouted;
     // The pilot's reads, made at the rung they were made at; made again only where the check went on to another rung.
     let mut made: Option<(f64, PilotRead)> = None;
     let read = loop {
         if let Settled::Unproven(asked) = settled {
-            return Ok(hold(asked, context.tau));
+            return Ok(hold(asked));
         }
         let tau = context.tau;
-        let pilot: Vec<&Part> = levels.fine.iter().collect();
-        if let Some(t) = grown(&pilot) {
-            return Ok(Attempt::Grow(t, f64::NEG_INFINITY, vec![], tau));
+        if let Some(t) = grown(&levels.fine.iter().collect::<Vec<_>>()) {
+            return Ok(refuted((t, std::mem::take(&mut levels.fine))));
         }
+        let pilot: Vec<&Part> = levels.fine.iter().collect();
         let read = match made.take() {
             Some((at, read)) if at == tau => read,
             _ => pilot_reads(model, &reading, &booking, &tables, &pilot, &levels.coarse, scouted.take(), ensemble, unsampled, outputs, most, &context.scales),
@@ -1747,15 +1812,16 @@ fn attempt(
     };
     let (e, l, c) = match product(&run, ensemble, &domain, &mut context, &mut parts, &numbers, &read, &|e, fixed| keeping(e, fixed, Reads::Product), messages) {
         Ok(product) => product,
-        Err(Ended::Unproven(asked)) => return Ok(hold(asked, context.tau)),
+        Err(Ended::Unproven(asked)) => return Ok(hold(asked)),
         Err(Ended::Keep(u)) => return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), context.tau)),
     };
     // The reach outgrown as far as the product reads (# The reach's atoms): some look has no room for the statistics
     // with what the atoms outside the reach carry, and has room without it. The reach grows to the temperature read
-    // where that is above it, and the next attempt begins; else the account stands as read, flagged.
+    // where that is above it, and the next attempt begins, deciding on the pilot's states first; else the account
+    // stands as read, flagged.
     if looks(&e, &context.fixed, &context.step).iter().zip(&looks(&e, &booked, &context.step)).any(|(with, without)| !with.fits() && without.fits()) {
         if let Some(t) = Some(hottest(&bound_motion(&parts.iter().collect::<Vec<&Part>>(), &context.scales))).filter(|t| *t > held) {
-            return Ok(Attempt::Grow(t, f64::NEG_INFINITY, vec![], context.tau));
+            return Ok(refuted((t, std::mem::take(&mut levels.fine))));
         }
     }
     // A point of the prepared potential below the bottom the ensemble was drawn about (ensemble.rs, # Its draw).
@@ -1971,6 +2037,41 @@ fn pair(run: &Run, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, 
     (std::array::from_fn(|_| levels.next().expect("the hand-out's two levels")), std::array::from_fn(|_| unproven.next().expect("the hand-out's two levels")))
 }
 
+/// The pilot's own level (module documentation, # The pipeline): the other members of the pilot's groups `numbers` at
+/// the attempt's step, joined to the scout's `scout`, run before their companion, the reach's falsifier reading them
+/// as they come in (`grown`, `outgrown`): it reads the run's own level alone -- the bound atoms' T and their count
+/// outside the reach, on whole groups --, never a companion nor the step's check, so its read here is the one the whole
+/// pilot makes. Where the scout's atoms already refuted the reach (`doubling`) the members double a hand-out (`batch`)
+/// and the reach is read after each -- the scout's refutation is the read that selected the attempt for ending, and
+/// its eleven atoms, one a group, are confirmed by the next eleven read with them --; else they are one hand-out, read
+/// once. (Read on the groups as they finish: S3c's reads at 30 µK, 62–68 µK at 3.7–4.2 µK on eleven groups, would
+/// refute it at the ninth at the earliest, when the threads have begun every trajectory of the level -- nothing saved,
+/// and a look more at each prefix.) The level, with what its paths
+/// not proven ask of a reach; or, where the atoms in hand refute the reach, the temperature it grows to and those
+/// atoms' groups, their states the next attempt's to decide on (`Attempt::Grow`).
+#[allow(clippy::too_many_arguments)]
+fn own_level(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &Context, scout: &[Part], numbers: &[u64], doubling: bool, grown: &dyn Fn(&[&Part]) -> Option<f64>, messages: &mut Messages) -> Result<(Vec<Part>, Option<Asks>), (f64, Vec<Part>)> {
+    let (tau, plan) = (context.tau, &context.plan);
+    let mut joined = scout.to_vec();
+    let mut members = 1;
+    loop {
+        let more = if doubling { (2 * members).min(GROUP) } else { GROUP };
+        let hand = Hand { groups: numbers, members: members..more, shape: Shape::of(plan, true), whole: true, record: &|i| trajectory(run, ensemble, domain, tau, plan, true, i) };
+        let (mut rest, mut unproven) = run_groups(&[hand], messages, &mut |prefix, messages| so_far(context, &joined, prefix, messages));
+        absorb(&mut joined, rest.pop().expect("the hand-out's one level"));
+        members = more;
+        if let Some(asked) = unproven.pop().flatten() {
+            return Ok((joined, Some(asked)));
+        }
+        if let Some(t) = grown(&joined.iter().collect::<Vec<_>>()) {
+            return Err((t, joined));
+        }
+        if members == GROUP {
+            return Ok((joined, None));
+        }
+    }
+}
+
 /// The states kept in some groups' parts freed, on the pool, a group's by itself: a state is a block of memory of its
 /// own, and a pilot keeps one for every trajectory at every output.
 fn forget(parts: &mut [Part]) {
@@ -1993,7 +2094,8 @@ fn absorb(level: &mut Vec<Part>, more: Vec<Part>) {
 }
 
 /// How the pilot's check leaves the step (`settle`): standing -- within on its reads, or on its own two levels where no
-/// cheap third level is to be had --; clearly beyond its share at the steps' cap; unable to see with no remedy left --
+/// cheap third level is to be had; or ended where the pilot's atoms refute the reach (`check`) --; clearly beyond its
+/// share at the steps' cap; unable to see with no remedy left --
 /// each of these two standing, what its reads do not exclude booked (`Levels::told`, `checked`), and flagged --; or not
 /// at all: a step of its trajectories was not proven, and the attempt ends with what the reach is to hold for it
 /// (`run_groups`).
@@ -2022,8 +2124,6 @@ enum Settled {
 ///   reach's atoms); at the ladder's bottom for the rung's own paths, the finest there are;
 /// - else, on the scout (which has the pilot to come), the rung stands. On the pilot (all the members of a group in:
 ///   the last word on the step), every estimate as it reads (`verdict`):
-///   - where its atoms already end the attempt (`outgrown`: the reach outgrown, `attempt`), a rung that does not stand
-///     stands as it is for the next attempt to begin at; no level and no pair is run for it;
 ///   - its own estimate within and its third level's too: it stands; its third level's beyond (the order is not shown
 ///     above it): it is left;
 ///   - its own estimate within and no third level, where `above` says the rung above is a rung of the ladder and that
@@ -2035,10 +2135,13 @@ enum Settled {
 ///     as it reads is beyond the share.
 /// A rung below at which a trajectory would take more than `MOST_STEPS` steps does not exist: a check that is clearly
 /// beyond there leaves the step capped, one whose noise no pairs see through ends unable to see (`Settled::Unseen`).
+/// On the pilot a rung below's own level, once in, is read by the reach's falsifier first (`outgrown`, `own_level`):
+/// where its atoms refute the reach, the check ends there (`Settled::Standing`) and the attempt with it (`attempt`) --
+/// no level and no pair is run for a step of a reach the run does not keep.
 ///
 /// `ran`: the finer level of the members already run, joined to the groups the levels hold, with what its paths not
-/// proven ask of a reach (`attempt`: the pilot's own level, run first where the scout's atoms refuted the reach and
-/// read before its companion) -- its companion alone is run then, and the check goes on as from a pair: a trajectory
+/// proven ask of a reach (`attempt`: the pilot's own level, run first and read by the reach's falsifier before its
+/// companion, `own_level`) -- its companion alone is run then, and the check goes on as from a pair: a trajectory
 /// is a function of its number and step (`trajectory`), not of the hand-out it was run in. `until`: on the pilot, the
 /// check stops where the rung's own read is in, not clearly beyond, and it would go on past its two levels
 /// (`Settled::Pending`; `check` takes it up again).
@@ -2093,10 +2196,6 @@ fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context,
         if until && pilot && read.as_ref().is_some_and(|read| !screen(read)) {
             return Settled::Pending;
         }
-        if verdict != Verdict::Left && outgrown(&levels.fine.iter().collect::<Vec<_>>()) {
-            // The pilot's atoms end the attempt as they are: nothing further is spent on its step.
-            return Settled::Standing;
-        }
         if verdict == Verdict::Above {
             // The third level above on the pilot's trajectories: the rung above's coarser level, at 4τ, against its
             // finer one, this rung's companion. Where its paths leave the model's domain (the level ends at the first
@@ -2147,18 +2246,10 @@ fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context,
         }
         // The rung below's third level above: this rung's own read, lowered -- none where its companion departed.
         let inherits = read.as_ref().map(|read| carried(read, 0.5));
-        // A rung left for its companion's departure, not for a read: where the rung below's own paths leave the domain
-        // too, the departure is the atoms', and the next attempt begins at this rung (`attempt`).
-        let rung = context.tau;
         context.tau = below;
         let finer = match level(run, ensemble, domain, &context.plan, below, numbers, 0..members, true, messages, &mut |prefix, messages| so_far(context, &[], prefix, messages)) {
             Ok(finer) => finer,
-            Err(asked) => {
-                if departs {
-                    context.tau = rung;
-                }
-                return Settled::Unproven(asked);
-            }
+            Err(asked) => return Settled::Unproven(asked),
         };
         // The level at the step is the companion from here on: its states are read no more.
         forget(&mut levels.fine);
@@ -2169,6 +2260,11 @@ fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context,
         // The level at the step is the companion now, with what its own paths asked.
         levels.above_departs = departs;
         levels.departed = [None, levels.departed[0].take()];
+        // The pilot's own level at the rung taken is in: the reach's falsifier reads it before anything more is spent
+        // on the step (`own_level`). Where its atoms refute the reach the check ends there, and the attempt with it.
+        if pilot && outgrown(&levels.fine.iter().collect::<Vec<_>>()) {
+            return Settled::Standing;
+        }
     }
 }
 
@@ -2282,7 +2378,7 @@ struct Plan {
     listed: Vec<usize>,
     end: f64,
     /// The cells of a trajectory's Brownian path (adapt.rs `Path`), µs: the companion's step at the attempt's first
-    /// step (its first rung, or the shorter step the attempt before stood at), a whole part of the run. Every step of
+    /// step (`begins`), a whole part of the run. Every step of
     /// the attempt -- a rung's, its companion's -- is a cell over a power of two, so every level reads the same path.
     /// The run until the first rung is known.
     cell: f64,
@@ -3887,7 +3983,6 @@ fn assemble(c: &Context, estimates: &[Estimate], listed: &[Vec<(V3, V3)>], count
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::estimate::allowance;
     use crate::units::TEMPERATURE_TARGET;
 
     /// A step as written gives its count back (`step_reading`): the run over the reading, rounded, is the number of
@@ -3940,13 +4035,13 @@ mod tests {
         let fastest = |t: f64| (2. * (MOST_TRAJECTORIES as f64 / (CONFIDENCE * CONFIDENCE) + 1.).ln() * KT_PER_UK * t * hm).sqrt();
         let (fast, typical) = (fastest(30.), typical_speed(hm, 30., fastest(30.)));
         assert!((fast - 0.2185).abs() < 5e-4 && (typical - 0.0928).abs() < 5e-4, "{fast} {typical}");
-        assert_eq!(first_rung(10., khz(74.65), 0., &[], fast, typical), Some(2.5));
-        assert_eq!(first_rung(10., khz(1.), 0., &[[0., 0.]], fast, typical), Some(5.));
+        assert_eq!(first_rung(10., f64::INFINITY, khz(74.65), 0., &[], fast, typical), Some(2.5));
+        assert_eq!(first_rung(10., f64::INFINITY, khz(1.), 0., &[[0., 0.]], fast, typical), Some(5.));
         assert!((TAU / (16.1 * fast) - 1.79).abs() < 5e-3 && (TAU / (16.1 * typical) - 4.20).abs() < 1e-2);
-        assert_eq!(first_rung(10., khz(74.65), 0., &[[0., 16.1]], fast, typical), Some(10. / 6.));
+        assert_eq!(first_rung(10., f64::INFINITY, khz(74.65), 0., &[[0., 16.1]], fast, typical), Some(10. / 6.));
         let k = 16.106 / 2. * 10f64.sqrt();
         assert!((TAU / (k * fast) - 1.13).abs() < 5e-3 && (TAU / (k * typical) - 2.66).abs() < 1e-2);
-        assert_eq!(first_rung(10., khz(100.), 0., &[[0., k]], fast, typical), Some(1.));
+        assert_eq!(first_rung(10., f64::INFINITY, khz(100.), 0., &[[0., k]], fast, typical), Some(1.));
         let both = |tau: f64, w: f64, kick: f64, sampled: &[[f64; 2]], fast: f64, typical: f64| admissible(tau, w, kick, sampled, fast) && admissible(2. * tau, w, kick, sampled, typical);
         for (run, w, kick, sampled, fast, typical) in [
             (10., khz(910.7), 0., vec![[0., 16.1]], fast, typical),
@@ -3958,7 +4053,7 @@ mod tests {
             (100., khz(20.), 0.35 * 0.35, vec![[0., 16.1]], 0.05, 0.017),
             (100., khz(74.65), -0.5 * khz(74.65).powi(2), vec![], fast, typical),
         ] {
-            let tau = first_rung(run, w, kick, &sampled, fast, typical).unwrap();
+            let tau = first_rung(run, f64::INFINITY, w, kick, &sampled, fast, typical).unwrap();
             let pairs = (run / (2. * tau)).round();
             assert!((run / (2. * pairs) - tau).abs() <= 1e-12 * tau && both(tau, w, kick, &sampled, fast, typical), "{run} {tau}");
             assert!(pairs == 1. || !both(run / (2. * (pairs - 1.)), w, kick, &sampled, fast, typical), "{run} {tau}: a larger rung is admissible");
@@ -3976,11 +4071,11 @@ mod tests {
         // ω_k = 0.35 rad/µs, K = 16.1 /µm, v_max = 0.050 µm/µs. The trap alone allows 25 µs, the light 7.8 µs; the
         // step's edge is at 5.5 µs.
         assert!(admissible(7.7, khz(20.), 0., &[[0., 16.1]], 0.05) && admissible(5.4, khz(20.), 0.35 * 0.35, &[[0., 16.1]], 0.05) && !admissible(5.6, khz(20.), 0.35 * 0.35, &[[0., 16.1]], 0.05));
-        assert_eq!(first_rung(1e9, khz(74.65), 0., &[], fast, typical), None);
-        assert_eq!(first_rung(10., f64::NAN, 0., &[], fast, typical), None);
-        assert_eq!(first_rung(10., khz(74.65), f64::NAN, &[], fast, typical), None);
-        assert_eq!(first_rung(10., khz(74.65), 0., &[[0., 16.1]], f64::INFINITY, typical), None);
-        assert_eq!(first_rung(10., khz(74.65), 0., &[[0., 16.1]], fast, f64::NAN), None);
+        assert_eq!(first_rung(1e9, f64::INFINITY, khz(74.65), 0., &[], fast, typical), None);
+        assert_eq!(first_rung(10., f64::INFINITY, f64::NAN, 0., &[], fast, typical), None);
+        assert_eq!(first_rung(10., f64::INFINITY, khz(74.65), f64::NAN, &[], fast, typical), None);
+        assert_eq!(first_rung(10., f64::INFINITY, khz(74.65), 0., &[[0., 16.1]], f64::INFINITY, typical), None);
+        assert_eq!(first_rung(10., f64::INFINITY, khz(74.65), 0., &[[0., 16.1]], fast, f64::NAN), None);
     }
 
     /// The typical atom is no faster than the proof set's fastest (`typical_speed`), so the first rung of a reach grown
@@ -3992,17 +4087,80 @@ mod tests {
     fn the_typical_atom_is_no_faster_than_the_set_s_fastest() {
         let (hm, khz) = (hbar_over_mass(1.4432e-25), |f: f64| std::f64::consts::TAU * f * 1e-3);
         let (top, sampled) = (0.397, [[0., 16.1]]);
-        let at_top = first_rung(1000., khz(100.), 0., &sampled, top, top).unwrap();
+        let at_top = first_rung(1000., f64::INFINITY, khz(100.), 0., &sampled, top, top).unwrap();
         let mut last = f64::INFINITY;
         for t in (0..=70).map(|i| 30. * 10f64.powf(i as f64 / 10.)) {
             let fastest = top * (1. - (-t / 300.).exp());
-            let tau = first_rung(1000., khz(100.), 0., &sampled, fastest, typical_speed(hm, t, fastest)).unwrap();
+            let tau = first_rung(1000., f64::INFINITY, khz(100.), 0., &sampled, fastest, typical_speed(hm, t, fastest)).unwrap();
             assert!(tau >= at_top && tau <= last * (1. + 1e-12), "{t} µK: {tau} µs after {last}, at the set's speed {at_top}");
             if t >= 1e5 {
                 assert_eq!(tau, at_top, "{t} µK");
             }
             last = tau;
         }
+    }
+
+    /// The ladder begins within the physics prior (`prior`, `first_rung`): T's step error (k_max v_T τ)² at the step's
+    /// share of T's allowance at the request's temperature. PGC3D's Rb87 at 30 µK on D2 (k = 8.0528 /µm; its tweezer's
+    /// 100, 100 and 19 kHz, a zero point of 1.8 µK below 30 T_rec = 10.9 µK): δT/T = 0.375 and τ ≤ 0.950 µs, where its
+    /// ladder's top by the edges alone, 1.425 µs, was left. Over temperatures, wave numbers and traps the phase a step
+    /// of the prior advances, squared, is that share to the rounding, and no light's pattern bounds nothing. Over runs,
+    /// priors and edges the first rung is the largest even part of the run within the prior that the edges admit with
+    /// its double -- the next larger one is beyond the prior or not admissible --, it is the edges' own rung wherever
+    /// the prior is above that, and it never exceeds the prior.
+    #[test]
+    fn the_first_rung_is_the_prior_s_where_the_edges_allow_it() {
+        let khz = |f: f64| std::f64::consts::TAU * f * 1e-3;
+        let hm = hbar_over_mass(1.4432e-25);
+        let pgc = Scales { hbar_over_mass: hm, frequencies: [khz(100.), khz(100.), khz(19.)] };
+        let (k, t) = (8.0528, 30.);
+        assert!((semiclassical([0.; 2], &pgc) - 1.75).abs() < 0.01 && (semiclassical([1., k * k], &pgc) - 10.86).abs() < 0.01);
+        let tau = prior(k, hm, t, &pgc);
+        assert!((allowance(t, semiclassical([1., k * k], &pgc)) - 0.3755).abs() < 1e-4 && (tau - 0.950).abs() < 1e-3, "{tau}");
+        for (k, t, frequencies) in [(8.0528, 30., pgc.frequencies), (7.3699, 1.5, [khz(150.); 3]), (8.0528, 300., [khz(20.), khz(80.), khz(5.)]), (16.1, 0.2, [khz(400.), khz(400.), khz(90.)])] {
+            let scales = Scales { hbar_over_mass: hm, frequencies };
+            let phase = k * (hm * KT_PER_UK * t).sqrt() * prior(k, hm, t, &scales);
+            let share = step_bound()[1] * allowance(t, semiclassical([1., k * k], &scales));
+            assert!((phase * phase / share - 1.).abs() < 1e-12, "{k} {t}: {phase} {share}");
+        }
+        assert_eq!(prior(0., hm, t, &pgc), f64::INFINITY);
+        let fastest = |t: f64| (2. * (MOST_TRAJECTORIES as f64 / (CONFIDENCE * CONFIDENCE) + 1.).ln() * KT_PER_UK * t * hm).sqrt();
+        let (fast, typical) = (fastest(30.), typical_speed(hm, 30., fastest(30.)));
+        let both = |tau: f64, w: f64, kick: f64, sampled: &[[f64; 2]], fast: f64, typical: f64| admissible(tau, w, kick, sampled, fast) && admissible(2. * tau, w, kick, sampled, typical);
+        for (run, w, kick, sampled) in [
+            (1026.3, khz(100.), 0., vec![[0., 16.1]]),
+            (10., khz(74.65), 0., vec![[0., 16.1]]),
+            (100., khz(20.), 0.35 * 0.35, vec![[0., 16.1]]),
+            (100., khz(910.7), 0., vec![[0., 0.], [2., 16.1], [0.5, 8.]]),
+            (5000., khz(1.), 0., vec![]),
+        ] {
+            let edges = first_rung(run, f64::INFINITY, w, kick, &sampled, fast, typical).unwrap();
+            for prior in [1e-3, 0.0954, 0.3581, 0.7125, 0.950, 1.425, 3.7, 1e3, f64::INFINITY] {
+                let tau = first_rung(run, prior, w, kick, &sampled, fast, typical).unwrap();
+                let pairs = (run / (2. * tau)).round();
+                assert!((run / (2. * pairs) - tau).abs() <= 1e-12 * tau && tau <= prior * (1. + 1e-12) && tau <= edges && both(tau, w, kick, &sampled, fast, typical), "{run} {prior}: {tau}");
+                assert!(pairs == 1. || run / (2. * (pairs - 1.)) > prior || !both(run / (2. * (pairs - 1.)), w, kick, &sampled, fast, typical), "{run} {prior}: {tau}, a larger rung is within both");
+                assert!(prior < edges || tau == edges, "{run} {prior}: {tau} below the edges' {edges}");
+            }
+        }
+    }
+
+    /// A descent decided on a refuted reach does not carry into the next attempt (`Attempt::stood`, `begins`): after any
+    /// growth -- the falsifier's, with the refuting atoms' states or without, at the product's end, or for a path not
+    /// proven, with a tube -- the next attempt begins at its own first rung; after a keep, over the same reach, at the
+    /// step it stood at where that is the shorter. (S3c over 1 ms, seed 2: its 30 µK reach's check went down to 0.3581
+    /// µs; at 65 µK the first rung was 0.9712 µs, and the next attempt began at 0.3581, twice the product's steps.)
+    #[test]
+    fn the_next_attempt_begins_at_its_own_first_rung_after_any_growth() {
+        let first_rung = 0.9712;
+        let tube = Tube { centre: [0.; 3], half: [1.; 3], level: 3. };
+        for grown in [Attempt::Grow(65.179, f64::NEG_INFINITY, vec![], Some(vec![])), Attempt::Grow(65.179, f64::NEG_INFINITY, vec![], None), Attempt::Grow(30., 12., vec![tube], None)] {
+            assert_eq!(grown.stood(), None);
+            assert_eq!(begins(grown.stood(), first_rung), first_rung);
+            assert!((0..8).map(|k| begins(grown.stood(), first_rung) / f64::from(1 << k)).all(|rung| (rung - 0.3581).abs() > 1e-3), "the refuted reach's 0.3581 µs is no rung of the next ladder");
+        }
+        assert_eq!(begins(Attempt::Keep(vec![], 0.3581).stood(), first_rung), 0.3581);
+        assert_eq!(begins(Attempt::Keep(vec![], 1.4325).stood(), first_rung), first_rung);
     }
 
     /// A read on unlimited groups (one look's interval is z of the error), and one on the pilot's eleven.
