@@ -91,7 +91,7 @@
 //! # The count
 //! A make's real multiply-adds are one formula of the cluster's shape (`Sector::cost`: its e excited and g ground states,
 //! whether it beats) and of its blocks' Schur forms, whose QR iteration converges as the matrices ask: the step counts
-//! the make by it, and a price (step.rs `step_work`) by the same formula with the two Schur forms alone made -- no
+//! the make by it, and a price (step.rs `Price`) by the same formula with the two Schur forms alone made -- no
 //! solve.
 
 use crate::linalg::{Mat, C64};

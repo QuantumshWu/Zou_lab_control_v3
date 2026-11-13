@@ -287,7 +287,7 @@
 //! propagation made (`Picture::slope`); the gradient's matrices and, where the cluster beats, their slope along the path
 //! in one pass of the model's forms (`Middle::gradient`); the blocks' Schur forms, ℳ made at once and factored, and the
 //! sides' solves (model/optical.rs, # The solve; S3: 36 reals where the whole sector is 96); and twelve forms
-//! (`Sector::forms`) -- which `step_work` prices, making the same. It is made anew at every middle: a factorization
+//! (`Sector::forms`) -- which `Price` prices, making the same. It is made anew at every middle: a factorization
 //! reused along the path as an iterative refinement's preconditioner contracts the error by the light pattern's change
 //! over a step -- S3's standing wave turns 0.26 rad a step at 30 µK -- for an iteration that applies the operator and
 //! solves, a third of the whole sector's factorization (measured on its 96 reals): more than the factorization to its
@@ -433,7 +433,7 @@ pub trait Dynamics {
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES];
 
     /// The counted work of one middle (`decide::Work`, real multiply-adds), made once per run: the price of a step's
-    /// middle beside its own work and its nodes' (`step_work`).
+    /// middle beside its own work and its nodes' (`Price`).
     fn assembly_work(&self) -> f64;
 
     /// The counted real multiply-adds of one jump's photons (`Dynamics::emit`), made once per run: `jump` adds it to the
@@ -525,23 +525,13 @@ fn optical<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, noise: &
     let Noise { sector, gradient, slope } = noise;
     along.middle.gradient(&along.path, 0.0, gradient, (!still).then_some(&mut *slope));
     sector.make(&picture.base, gradient, shape.ground, (!still).then_some((&picture.slope, &*slope))).map_err(Refused::Optical)?;
-    Ok(Some(((shape.beat / shape.decay).powi(2), optical_work(along, still, sector.work))))
+    Ok(Some(((shape.beat / shape.decay).powi(2), optical_work(along.n, along.middle.work()[1], still, sector.work))))
 }
 
 /// The counted work of the optical sector at a middle (`optical`) beside its sector's make (`Sector::cost`, `work`): the
 /// gradient's three matrices, each of the force's form's count, twice with their slope; and one `within`'s forms.
-fn optical_work<M: Middle>(along: &Along<M>, still: bool, work: f64) -> f64 {
-    let [_, force, _] = along.middle.work();
-    COMPLEX * (if still { 3.0 } else { 6.0 } * force + Sector::forms(along.n)) + work
-}
-
-/// The price of the optical sector at a middle (`step_work`): `optical`'s count without its make -- the shape's formula
-/// (`Sector::cost`) with the blocks' Schur forms alone made, their QR iteration's count as the matrices ask; no solve.
-/// Where a Schur form is not made the step there is refused (`Refused::Optical`) before its noise: none is priced.
-fn optical_price<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, sector: &mut Sector) -> f64 {
-    let Some(shape) = along.middle.optical(&along.path) else { return 0.0 };
-    let n = along.n;
-    sector.schur(&picture.base, shape.ground).map_or(0.0, |schur| optical_work(along, still, Sector::cost(n - shape.ground, shape.ground, !still, schur)))
+fn optical_work(n: usize, force: f64, still: bool, work: f64) -> f64 {
+    COMPLEX * (if still { 3.0 } else { 6.0 } * force + Sector::forms(n)) + work
 }
 
 /// The optical sector's rate of a state x (unnormalized; model/optical.rs, # K_Q) from K_a and Ĝ_b on it (F = −Ĝ):
@@ -1208,7 +1198,7 @@ impl Scratch {
 
 /// The counted work (`decide::Work`, real multiply-adds) of the integrator's operations on n states, one formula each,
 /// the model's own counts of its generator, its force and its tones at a node with them (`Middle::work`): what a
-/// step adds up and what `step_work` prices a step by.
+/// step adds up and what `Price::work` prices a step by.
 mod count {
     use super::COMPLEX;
     /// The propagation: the model's generator at the step's nodes -- three, or the one of a path it is still along --
@@ -1842,25 +1832,72 @@ impl Brownian {
     }
 }
 
-/// The counted work of one step of τ on the path through a middle at a momentum and a velocity: what `Step::work`
-/// counts, priced without taking the step -- the solve's price of a model it has not run, at its pilot's states and
-/// steps. It makes no middle: the caller's is a state's own, or one of the cluster made once -- the nodes' counts are
-/// the cluster's whatever the point (`Middle::work`), and the point gives the generator's picture alone: its
-/// decomposition, its slopes and its following as the step makes them (`pictured`), the quadrature's nodes at its
-/// bandwidth, and the launch with a state at each of them, at the middle and at the end (`spectral::Picture::price`);
-/// the kick's sums and forms, and the shear. The middle itself is the model's (`Dynamics::assembly_work`, one a
-/// step).
-pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> f64 {
-    let (n, costs, still) = (middle.states(), middle.work(), middle.still());
-    let along = Along::new(middle, kappa, velocity);
-    let mut scratch = Scratch::default();
-    scratch.fit(n);
-    let Scratch { picture, noise, .. } = &mut scratch;
-    pictured(&along, picture, tau);
-    let nodes = nodes(tau, picture.bandwidth);
-    let own = picture.work + picture.price(nodes + 2);
-    let optical = optical_price(&along, picture, still, &mut noise.sector);
-    count::propagation(costs, still, own) + count::impulse(n, costs, nodes, still) + count::shear(n, costs) + optical
+/// The counted work of one step of τ on the path through a middle at a momentum and a velocity, priced without taking
+/// the step -- the solve's price of a model it has not run, at its pilot's states and steps (solve.rs `Pricing`) --,
+/// apart from the model's counts at a node (`Middle::work`), which `Price::work` takes: what `Step::work` counts of the
+/// generator's picture along the path -- its decomposition, its slopes and its following as the step makes them
+/// (`pictured`), its bandwidth and the quadrature's nodes there, the launch with a state at each node, at the middle
+/// and at the end (`spectral::Picture::price`) -- and of the optical sector its shape and its blocks' Schur forms
+/// (`Sector::cost`; none where the cluster has no explicit excited state, or where a Schur form is not made: the step
+/// there is refused before its noise). The middle itself is the model's (`Dynamics::assembly_work`, one a step).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Price {
+    pub states: usize,
+    pub still: bool,
+    pub tau: f64,
+    pub bandwidth: f64,
+    pub nodes: usize,
+    /// The picture's preparation, and its states at the nodes, the middle and the end (complex multiply-adds).
+    pub made: f64,
+    pub stops: f64,
+    /// The optical sector's ground states and its Schur forms' count.
+    pub sector: Option<(usize, f64)>,
+}
+
+impl Price {
+    /// The price on the path through a middle at a momentum and a velocity: its own -- the caller's middle is a state's,
+    /// or one of the cluster made once: the nodes' counts are the cluster's whatever the point (`Middle::work`), and the
+    /// point gives the generator's picture alone.
+    pub fn of<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> Price {
+        let (n, still) = (middle.states(), middle.still());
+        let along = Along::new(middle, kappa, velocity);
+        let mut scratch = Scratch::default();
+        scratch.fit(n);
+        let Scratch { picture, noise, .. } = &mut scratch;
+        pictured(&along, picture, tau);
+        let nodes = nodes(tau, picture.bandwidth);
+        let sector = middle.optical(&along.path).and_then(|shape| noise.sector.schur(&picture.base, shape.ground).map(|schur| (shape.ground, schur)));
+        Price { states: n, still, tau, bandwidth: picture.bandwidth, nodes, made: picture.work, stops: picture.price(nodes + 2), sector }
+    }
+
+    /// The step's counted work with a model's counts at a node `costs` (`Middle::work`): what `Step::work` adds up --
+    /// the propagation, the kick's sums and forms, the shear, and the optical sector (`optical`: its shape's formula
+    /// with the Schur forms' count, the gradient's matrices and one `within`'s forms).
+    pub fn work(&self, costs: [f64; 3]) -> f64 {
+        let (n, still) = (self.states, self.still);
+        let optical = self.sector.map_or(0.0, |(ground, schur)| optical_work(n, costs[1], still, Sector::cost(n - ground, ground, !still, schur)));
+        count::propagation(costs, still, self.made + self.stops) + count::impulse(n, costs, self.nodes, still) + count::shear(n, costs) + optical
+    }
+
+    /// The price on the cluster this one's grows into -- `states` states, `ground` of them ground, its generator's
+    /// bandwidth `bandwidth` -- where a keep makes a drive explicit or joins two clusters: each part at its leading
+    /// order in the states, from what this cluster's picture made -- the decomposition's QR sweeps and the following's
+    /// products as n³ (the Schur forms' sweeps on the blocks with them, e³ + g³), a state at a node as n² --, the
+    /// nodes those of the quadrature at the bandwidth.
+    pub fn grown(&self, states: usize, ground: usize, bandwidth: f64) -> Price {
+        let ratio = states as f64 / self.states as f64;
+        let nodes = nodes(self.tau, bandwidth);
+        let excited = states - ground;
+        let cube = (excited.pow(3) + ground.pow(3)) as f64;
+        let sector = (excited > 0).then(|| {
+            let schur = match self.sector {
+                Some((g, schur)) => schur * cube / ((self.states - g).pow(3) + g.pow(3)) as f64,
+                None => self.made * cube / self.states.pow(3) as f64,
+            };
+            (ground, schur)
+        });
+        Price { states, still: self.still, tau: self.tau, bandwidth, nodes, made: self.made * ratio.powi(3), stops: self.stops * ratio * ratio * (nodes + 2) as f64 / (self.nodes + 2) as f64, sector }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

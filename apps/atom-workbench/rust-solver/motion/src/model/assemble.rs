@@ -1219,6 +1219,66 @@ impl Plan {
         plan.fourth = fourth.and_then(|frequency| Fourth::new(model, &plan, frequency));
         plan
     }
+    /// The counts at a node (`Middle::work`): of the generator, and of the force's form with its values' slopes along
+    /// `directions` directions (a table's axes), twice; the fourth order's matrix and its gradient's forms with them.
+    pub(crate) fn costs(&self, directions: usize) -> [f64; 3] {
+        let (matrix, gradient) = self.fourth.as_ref().map_or((0.0, 0.0), |fourth| ((fourth.n * fourth.n) as f64, (3 * fourth.n * fourth.n) as f64));
+        let form = self.node[1] + directions as f64 * self.node[2] + gradient;
+        [self.node[0] + matrix, form, form]
+    }
+    /// The counted complex multiply-adds of a point's near forms from a table on `axes` axes (tabulate.rs
+    /// `Model::near_point`), the coordinates' apart: the Hermitian forms to first order, the jumps to order 0.
+    pub(crate) fn near_read(&self, axes: usize) -> f64 {
+        super::tabulate::read_work(axes, 1, 2 * self.near.hermitian().len()) + super::tabulate::read_work(axes, 0, 2 * self.near.jumping().len())
+    }
+    /// The counted complex multiply-adds of a middle at a point, its near forms from a table on `axes` axes whose
+    /// coordinates' values there count `place` (`Model::middle`): the forms' interpolation, the values made of them, and
+    /// the fourth order's part with its matrices made at the point already (`Model::quartic`: a step's scattering reads
+    /// the same matrices, and `Run`'s middle at the focus finds them made by its scattering).
+    pub(crate) fn middle_work(&self, axes: usize, place: f64) -> f64 {
+        let near = if self.near.len() == 0 { 0.0 } else { place + self.near_read(axes) + self.values };
+        near + self.fourth.as_ref().map_or(0.0, |fourth| self.site_work(fourth))
+    }
+    /// The counted complex multiply-adds of the fourth order's matrices at a point (`Model::quartic_made`) beside their
+    /// forms' reads, on `directions` directions: the frequency's shift forms with their slopes and gradients summed by
+    /// the components (a constant part's subtracted), X's (and L's) pair forms by their fields, and the twelve matrices
+    /// to the lab axes.
+    pub(crate) fn quartic_work(&self, fourth: &Fourth, directions: usize) -> f64 {
+        let own = |s: Option<usize>| s.is_some_and(|s| self.scalars[s].frequency == fourth.frequency);
+        let summed: usize = self
+            .form
+            .iter()
+            .filter(|term| term.near && self.tones[term.tone] == 0.0 && own(self.blocks[term.block].left) && own(self.blocks[term.block].right))
+            .map(|term| term.len * (4 + directions + if term.flag == PLAIN { 4 } else { 0 }))
+            .sum();
+        let size = fourth.n * fourth.n;
+        (summed + fourth.entries.len() * self.near.fourth * (4 + directions) + 12 * size * (1 + directions)) as f64
+    }
+    /// The counted complex multiply-adds of the fourth order's matrices made on a site of their own placed on a table of
+    /// `axes` axes, whose coordinates there count `place` (`Model::quartic_made`, not laid): the point's near forms
+    /// read and their values laid, the X (and L) forms' read with their slopes, and the matrices (`quartic_work`).
+    pub(crate) fn quartic_made_work(&self, fourth: &Fourth, axes: usize, place: f64) -> f64 {
+        place + self.near_read(axes) + self.values + self.quartic_read(axes) + self.quartic_work(fourth, axes)
+    }
+    /// The counted complex multiply-adds of the fourth order's X (and L) forms read from a table on `axes` axes with their
+    /// slopes (`Model::quartic_made`).
+    pub(crate) fn quartic_read(&self, axes: usize) -> f64 {
+        super::tabulate::read_work(axes, 1, 2 * self.near.fourth * self.near.pairs.len())
+    }
+    /// The counted complex multiply-adds of the fourth order's part of a middle (`Model::fourth_site`) beside its
+    /// matrices: the products of H⁽⁴⁾ and its gradient (one where the folded states share one linewidth, two else, the
+    /// gradient's twice) and of the decay's change, the generator's terms at rest summed, and the decays and B.
+    pub(crate) fn site_work(&self, fourth: &Fourth) -> f64 {
+        let (n, size) = (fourth.n, fourth.n * fourth.n);
+        let products = if fourth.uniform.is_some() { 7 } else { 14 };
+        let summed: usize = self.generator.iter().filter(|term| self.tones[term.tone] == 0.0).map(|term| term.len).sum();
+        ((products + 6) * n * size + summed + 8 * size) as f64
+    }
+    /// The counted complex multiply-adds of the plan's field components from their beams to an order (photon.rs `sited`),
+    /// plain and Doppler-weighted.
+    pub(crate) fn fields_work(&self, order: usize) -> f64 {
+        self.scalars.iter().map(|s| (2 * jet::parts(order) * s.beams.len()) as f64).sum()
+    }
     /// The constant part of a near form at `place` among a point's values: a jump entry's (`Plan::offsets`), zero of any
     /// other form.
     pub(crate) fn bare(&self, place: usize) -> C64 {
@@ -1802,7 +1862,6 @@ impl Model {
         lanes.clear();
         lanes.resize(4 * parts * 2 * padded, 0.0);
         let width = point.forms.len();
-        let mut summed = 0;
         for term in plan.form.iter().filter(|term| term.near && plan.tones[term.tone] == 0.0) {
             let block = &plan.blocks[term.block];
             if !own(block.left) || !own(block.right) {
@@ -1836,7 +1895,6 @@ impl Model {
                 let (real, imaginary) = point.slopes[f * width + term.at..f * width + term.at + 2 * term.len].split_at(term.len);
                 add(1 + f, c[0], real, imaginary);
             }
-            summed += term.len * (4 + dn + if start.is_some() { 4 } else { 0 });
         }
         // X, and L where it is not Γ X: Σ e_k'* e_k of the pairs' forms, as the shifts' sums are parted.
         let forms = plan.near.fourth;
@@ -1846,7 +1904,7 @@ impl Model {
         match (table, exact) {
             (Some(table), _) => {
                 table.table.read(&point.place.expect("a site placed on its table").0, 2 * first, None, values, Some(slopes));
-                *work += (4usize.pow(dn as u32) * (1 + dn) * 2 * count) as f64 / crate::decide::COMPLEX;
+                *work += plan.quartic_read(dn);
             }
             (None, Some(near)) => {
                 for e in 0..count {
@@ -1921,7 +1979,7 @@ impl Model {
                 }
             }
         }
-        *work += (summed + fourth.entries.len() * forms * parts + 12 * size * (1 + dn)) as f64;
+        *work += plan.quartic_work(fourth, dn);
     }
 
     /// The fourth order's part of a middle (module documentation, # The fourth order) into the point's `quartic`, from
@@ -1954,21 +2012,16 @@ impl Model {
             for (i, to) in left.iter_mut().enumerate() {
                 *to = x[i] * half - y[i];
             }
-            let mut products = 0;
             for p in 0..4 {
                 let out = &mut raw[part(near, p)];
                 product_onto(out, &left[part(near, p)], &near[..size], n, C64::ONE);
-                products += 1;
                 if p > 0 {
                     product_onto(out, &left[..size], &near[part(near, p)], n, C64::ONE);
-                    products += 1;
                 }
                 if fourth.uniform.is_none() {
                     product_onto(out, &near[part(near, p)], &x[..size], n, C64::real(-0.5));
-                    products += 1;
                     if p > 0 {
                         product_onto(out, &near[..size], &x[part(near, p)], n, C64::real(-0.5));
-                        products += 1;
                     }
                 }
                 for a in 0..n {
@@ -1988,7 +2041,6 @@ impl Model {
             }
             assert!(plan.scalars.len() <= scalars.len(), "a plan's field components");
             let side = |scalar: Option<usize>| scalar.map_or(C64::ONE, |s| scalars[s]);
-            let mut summed = 0;
             for term in plan.generator.iter().filter(|term| plan.tones[term.tone] == 0.0) {
                 let block = &plan.blocks[term.block];
                 let to = match term.flag {
@@ -2003,7 +2055,6 @@ impl Model {
                 for (k, place) in (term.first..(term.first + term.len).min(size)).enumerate() {
                     sums[to * size + place] += c * C64::new(real[k], imaginary[k]);
                 }
-                summed += term.len;
             }
             let (bend, rest) = rest.split_at_mut(size);
             let (decays, turned) = rest.split_at_mut(3 * size);
@@ -2043,7 +2094,7 @@ impl Model {
             for at in 0..size {
                 quartic[at] -= (changed[at] - decays[at]) * C64::new(0.0, 0.5);
             }
-            matrices + ((products + 6) * n * size + summed + 8 * size) as f64
+            matrices + plan.site_work(fourth)
         })
     }
 
@@ -2386,11 +2437,7 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     fn work(&self) -> [f64; 3] {
-        let node = self.plan.node;
-        // The fourth order's: its matrix at a node, its gradient's three forms.
-        let (matrix, gradient) = self.plan.fourth.as_ref().map_or((0.0, 0.0), |fourth| ((fourth.n * fourth.n) as f64, (3 * fourth.n * fourth.n) as f64));
-        let form = node[1] + self.point.borrow().directions.len() as f64 * node[2] + gradient;
-        [node[0] + matrix, form, form]
+        self.plan.costs(self.point.borrow().directions.len())
     }
 }
 

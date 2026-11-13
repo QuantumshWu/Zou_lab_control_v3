@@ -263,6 +263,16 @@ struct First {
     held: Vec<(Coordinate, f64)>,
 }
 
+/// The counted complex multiply-adds of a table's interpolation of `reals` reals on `axes` axes (module documentation,
+/// # Work): 4^D nodes for each value and, to first order, its D slopes.
+pub(crate) fn read_work(axes: usize, order: usize, reals: usize) -> f64 {
+    (4usize.pow(axes as u32) * (1 + if order >= 1 { axes } else { 0 }) * reals) as f64 / crate::decide::COMPLEX
+}
+
+/// A coordinate by what it is of, the same in every model of a request: its frequency, whether it is a carrier's
+/// polarization unit, and its index (a chart's, or the unit's).
+pub(crate) type Key = (usize, bool, usize);
+
 /// The zero amplitude.
 fn dark() -> Amplitude {
     Amplitude { value: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3] }
@@ -313,10 +323,65 @@ impl Model {
         out
     }
 
+    /// A coordinate's key (`Key`).
+    fn key(&self, coordinate: Coordinate) -> Key {
+        match coordinate {
+            Coordinate::Chart { frequency, index } => (frequency, false, index),
+            Coordinate::Unit { carrier, unit } => (self.carriers[carrier].frequency, true, unit),
+        }
+    }
+
+    /// A table's axes and every coordinate it was made over (their keys), its axes' number, and the counted work of their
+    /// coordinates at a point (`coordinates_work`): what a pricing reads of the tables a run has (solve.rs `Pricing`).
+    pub(crate) fn table_axes(&self, table: &NearTable) -> (Vec<Key>, Vec<Key>, (usize, f64)) {
+        let (d, layout) = (table.axes(), &table.layout);
+        let keys = |c: &[Coordinate]| c.iter().map(|&c| self.key(c)).collect::<Vec<_>>();
+        (keys(&layout.coordinates[..d]), keys(&layout.coordinates), (d, self.coordinates_work(&layout.coordinates[..d], &layout.polarizations)))
+    }
+
+    /// The axes a cluster's table under the running lights would take (module documentation, # Axes), priced without
+    /// making it (solve.rs `Pricing`): their number and the counted work of their coordinates at a point. Of the
+    /// coordinates the cluster's elimination depends on, those of the tables a run has that took them as axes (`axes`,
+    /// where they are coordinates still), and those new to the cluster -- that no such table looked at (`known`) --
+    /// whose weight there (`first_table`: its rate, `rates`, times the range it moves across over the reach, `moves` by
+    /// its key, `reach_ranges` on the coordinate's own, cached by the caller) is beyond the tables' shares: a coordinate
+    /// that moves the cluster's lines by less than the shares of a half-width over the reach moves the responses by
+    /// less than a look reads beyond (`over`: twice the responses' error within the shares). The rate is the levels'
+    /// alone (# Axes: a coherent dressing's part of the lines is in the look, which eliminates). At most `MOST_AXES`;
+    /// none where the cluster has no near form.
+    pub(crate) fn priced_axes(&self, cluster: usize, reach: &Reach, axes: &[Key], known: &[Key], moves: &dyn Fn(Key, &dyn Fn() -> f64) -> f64) -> (usize, f64) {
+        let lights = self.running();
+        if self.plan(cluster, &lights).near.len() == 0 {
+            return (0, 0.0);
+        }
+        let coherent = self.coherent_dressing();
+        let polarizations: Vec<Vec<Polarization>> = (0..self.carriers.len()).map(|d| if coherent[d] { vec![] } else { self.polarizations(d) }).collect();
+        let all = self.coordinates(&lights, &polarizations);
+        let mut focus = vec![0.0; all.len()];
+        self.coordinates_at(&all, &polarizations, &self.light.amplitudes([0.0; 3]), &mut focus, &mut vec![[0.0; 3]; all.len()]);
+        let rates = std::cell::OnceCell::new();
+        let (shown, temperature) = shares();
+        let taken: Vec<Coordinate> = (0..all.len())
+            .filter(|&i| {
+                let key = self.key(all[i]);
+                axes.contains(&key)
+                    || (!known.contains(&key) && {
+                        let range = moves(key, &|| {
+                            let range = self.reach_ranges(&all[i..=i], &polarizations, &focus[i..=i], reach)[0];
+                            range.1 - range.0
+                        });
+                        range > 0.0 && 2.0 * rates.get_or_init(|| self.rates(cluster, &lights, &all, &polarizations, &focus))[i] * range > shown.min(temperature)
+                    })
+            })
+            .map(|i| all[i])
+            .take(crate::table::MOST_AXES)
+            .collect();
+        (taken.len(), self.coordinates_work(&taken, &polarizations))
+    }
+
     /// Coordinates' values at a point and their gradients (module documentation, # At a point) into `values` and `gradients`,
     /// and the complex multiply-adds.
     fn coordinates_at(&self, coordinates: &[Coordinate], polarizations: &[Vec<Polarization>], amplitudes: &[Amplitude], values: &mut [f64], gradients: &mut [[f64; 3]]) -> f64 {
-        let mut work = 0.0;
         // The chart of the frequency last read: a frequency's coordinates take one chart.
         let mut held: Option<(usize, Chart)> = None;
         for (i, c) in coordinates.iter().enumerate() {
@@ -326,11 +391,6 @@ impl Model {
                         Some((of, chart)) if of == frequency => chart,
                         _ => {
                             let f = &self.light.frequencies[frequency];
-                            // The field and its derivatives from each beam (13 parts of 3 components), its chart from the
-                            // components: counted once a frequency.
-                            if !coordinates[..i].iter().any(|c| matches!(c, Coordinate::Chart { frequency: other, .. } if *other == frequency)) {
-                                work += (f.beams.len() * 39 + 6 * f.rank() * f.rank()) as f64;
-                            }
                             f.chart(&f.field(amplitudes))
                         }
                     };
@@ -349,13 +409,31 @@ impl Model {
                             df[i] += a.gradient[i] * k;
                         }
                     }
-                    work += (4 * p.beams.len() + 4) as f64;
                     values[i] = (f.norm_sqr() / p.norm).min(1.0);
                     gradients[i] = std::array::from_fn(|a| 2.0 * (f.conj() * df[a]).re / p.norm);
                 }
             }
         }
-        work
+        self.coordinates_work(coordinates, polarizations)
+    }
+
+    /// The counted complex multiply-adds of coordinates' values at a point (`coordinates_at`): a chart's field and its
+    /// derivatives from each beam (13 parts of 3 components) and the chart from the components, once a frequency; a
+    /// unit's field from its beams with its gradient, and its intensity.
+    fn coordinates_work(&self, coordinates: &[Coordinate], polarizations: &[Vec<Polarization>]) -> f64 {
+        let mut charts = vec![];
+        coordinates
+            .iter()
+            .map(|c| match *c {
+                Coordinate::Chart { frequency, .. } if !charts.contains(&frequency) => {
+                    charts.push(frequency);
+                    let f = &self.light.frequencies[frequency];
+                    (f.beams.len() * 39 + 6 * f.rank() * f.rank()) as f64
+                }
+                Coordinate::Chart { .. } => 0.0,
+                Coordinate::Unit { carrier, unit } => (4 * polarizations[carrier][unit].beams.len() + 4) as f64,
+            })
+            .sum()
     }
 
     /// The light at coordinate values x (module documentation, # A node): each lit frequency's beams' amplitudes from its chart,
@@ -871,7 +949,7 @@ impl Model {
                 }
             }
             // The interpolation (4^D nodes: the value and, to first order, D slopes of each real), in complex multiply-adds.
-            work += (4usize.pow(d as u32) * (1 + if *order >= 1 { d } else { 0 }) * w) as f64 / crate::decide::COMPLEX;
+            work += read_work(d, *order, w);
         }
         NearValues { len, order, data, directions: Some(gradients), work }
     }
@@ -901,7 +979,7 @@ impl Model {
         sized(&mut point.jumps, width);
         sized(&mut point.jump_slopes, slopes * width);
         table.table.read(&place, first, Some(&plan.jumps_start), &mut point.jumps, (order >= 1).then_some(&mut point.jump_slopes[..]));
-        work + (4usize.pow(d as u32) * (1 + slopes) * 2 * plan.near.jumping().len()) as f64 / crate::decide::COMPLEX
+        work + read_work(d, order, 2 * plan.near.jumping().len())
     }
 
     /// A point's responses from a table (the near forms' responding section, to order 0: what the readout reads,
@@ -922,17 +1000,14 @@ impl Model {
     /// the jumps to order 0): the count is the definition's, not the layout's (assemble.rs, # Work).
     pub(crate) fn near_point(&self, table: &NearTable, point: &mut Site) -> f64 {
         let (d, plan) = (table.axes(), &table.layout.plan);
-        let (place, mut work) = point.place.expect("a site placed on its table");
+        let (place, work) = point.place.expect("a site placed on its table");
         let (first, generator, forms) = (2 * plan.near.len(), plan.generator_start.len(), plan.form_start.len());
         sized(&mut point.generator, generator);
         sized(&mut point.forms, forms);
         sized(&mut point.slopes, d * forms);
         table.table.read(&place, first, Some(&plan.generator_start), &mut point.generator, None);
         table.table.read(&place, first + generator, Some(&plan.form_start), &mut point.forms, Some(&mut point.slopes));
-        for (entries, order) in [(plan.near.hermitian(), 1), (plan.near.jumping(), 0)] {
-            work += (4usize.pow(d as u32) * (1 + if order >= 1 { d } else { 0 }) * 2 * entries.len()) as f64 / crate::decide::COMPLEX;
-        }
-        work
+        work + plan.near_read(d)
     }
 
     /// The tables' error reads at samples (module documentation; SPEC §2.3, §5.4): per table, per axis the read of its

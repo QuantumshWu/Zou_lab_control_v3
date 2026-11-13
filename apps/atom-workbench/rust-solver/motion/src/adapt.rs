@@ -80,7 +80,7 @@
 //!   node a level.
 
 use crate::random::Stream;
-use crate::step::{step_work, test_loss, Brownian, Domain, Dynamics, Middle, Midway, Refused, Scratch, Segment, Trajectory};
+use crate::step::{test_loss, Brownian, Domain, Dynamics, Midway, Refused, Scratch, Segment, Trajectory};
 use crate::units::rounding;
 
 /// Where a trajectory stands on its Brownian path (`Path`): the time, the bin of its grid that time lies in, and the
@@ -267,14 +267,6 @@ pub fn advance<D: Dynamics>(
         test_loss(model, trajectory);
     }
     Ok(())
-}
-
-/// The counted work of one step of τ on the path through a cluster's middle at a momentum and a velocity (µm/µs), and the
-/// middles a step asks of the model: what `advance` adds to `Trajectory::work` and `Trajectory::assemblies` per step,
-/// priced without taking it and without a middle of its own (`step::step_work`). The model's price of a middle is its
-/// `assembly_work`.
-pub fn advance_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> (f64, u64) {
-    (step_work(middle, kappa, velocity, tau), 1)
 }
 
 #[cfg(test)]

@@ -62,13 +62,13 @@
 //! the optical sector, the trajectory's per-state noise (optical.rs; step.rs, # The optical sector's noise), not a
 //! photon's moment here.
 
-use super::assemble::{laid, sized, ClassPlan, Held, Plan, Site};
+use super::assemble::{laid, sized, ClassPlan, Held, MemberPlan, Plan, Site};
 use super::far::EXCITED;
 use super::own::{norm_of, product, Form, Own};
 use super::reach::Region;
 use super::tabulate::NearTable;
 use super::units::{gate, Measured};
-use super::{jet, Beat, Lights, Model, Moments, Photon, Point, Scattering, Unit, UnitError};
+use super::{Beat, Lights, Model, Moments, Photon, Point, Scattering, Unit, UnitError};
 use crate::step::Emitted;
 use std::sync::Arc;
 
@@ -399,7 +399,7 @@ impl Model {
         };
         let Site { beams, fields, .. } = site;
         self.fields_into(plan, beams, kappa, order, fields);
-        near + fourth + plan.scalars.iter().map(|s| (2 * jet::parts(order) * s.beams.len()) as f64).sum::<f64>()
+        near + fourth + plan.fields_work(order)
     }
 
     /// The classes of a state's photons at the time t on a point's site (`sited`: its work `made`),
@@ -586,10 +586,7 @@ impl Model {
                     }
                 }
                 (first, flat) = (false, flat && !taken);
-                let partner = if m.doppler { 1.0 } else { 0.0 };
-                work += m.entries.len() as f64 * (2.0 + partner + if taken { 3.0 * (3.0 + 2.0 * partner) } else { 0.0 });
-                // The fourth order's vectors: each a matrix on a state more, and its weights.
-                work += (more * (m.entries.len() + 4 * rows)) as f64;
+                work += member_work(m, taken, more, rows);
             }
             // A class the state gives nothing: no amplitude, and no gradient either -- at a node of its light a class has
             // no photon and still its gradients' second moment. Gradients no member made are nothing.
@@ -774,6 +771,55 @@ impl Model {
         (out.over(sizes, norm), work)
     }
 
+}
+
+/// The counted complex multiply-adds of a member's part of its class's sums (`Model::classes_on`): its entries' amplitudes
+/// -- and their Doppler partners' where it takes them, and where the gradients are `taken` theirs, 3(3 + 2 partner) more
+/// each --, and the fourth order's `more` vectors, each a matrix on a state and its weights over the class's `rows`.
+fn member_work(m: &MemberPlan, taken: bool, more: usize, rows: usize) -> f64 {
+    let partner = if m.doppler { 1.0 } else { 0.0 };
+    m.entries.len() as f64 * (2.0 + partner + if taken { 3.0 * (3.0 + 2.0 * partner) } else { 0.0 }) + (more * (m.entries.len() + 4 * rows)) as f64
+}
+
+impl Plan {
+    /// The counted complex multiply-adds of a state's photons' site at a point (`Model::sited`) to `order`, priced without
+    /// making it (solve.rs `Pricing`): the near jumps read from a table on `axes` axes whose coordinates there count
+    /// `place`; the fourth order's matrices made there where `quartic` -- laid there by the site itself, its forms read
+    /// whole (`Plan::quartic_made_work`) -- and none where they are the point's already; the field components.
+    pub(crate) fn sited_work(&self, axes: usize, place: f64, order: usize, quartic: bool) -> f64 {
+        let near = if self.near.len() == 0 { 0.0 } else { place + super::tabulate::read_work(axes, order, 2 * self.near.jumping().len()) };
+        let fourth = self.fourth.as_ref().filter(|_| quartic).map_or(0.0, |fourth| self.quartic_made_work(fourth, axes, place));
+        near + fourth + self.fields_work(order)
+    }
+
+    /// The counted complex multiply-adds of a state's photons' classes on a site whose jumps have `axes` slopes
+    /// (`Model::classes_on`), priced without making them: the fourth order's bent states, and every lit member's part
+    /// (`member_work`) of the classes the gradients ask; `live` the lab axes along which the fourth order's matrices
+    /// change, which `classes_on` reads off the matrices at the point.
+    pub(crate) fn classes_work(&self, axes: usize, gradients: Gradients, live: usize) -> f64 {
+        let order = if gradients == Gradients::None { 0 } else { 1 };
+        let bent = self.fourth.as_ref().map_or(0.0, |fourth| (2 * fourth.n * fourth.n * if order >= 1 { 4 } else { 1 }) as f64);
+        let mut work = bent;
+        for (place, class) in self.classes.iter().enumerate() {
+            let with = match gradients {
+                Gradients::All => true,
+                Gradients::Of(only) if only == place => true,
+                Gradients::Of(_) => continue,
+                Gradients::None => false,
+            };
+            for m in class.members.iter().filter(|m| !m.columns.is_empty()) {
+                let taken = m.folded && with;
+                let slopes = if taken && m.near { axes } else { 0 };
+                let more = match (&self.fourth, m.near) {
+                    (None, _) => 0,
+                    (Some(_), true) => 1 + slopes + if taken { 2 * live } else { 0 },
+                    (Some(_), false) => if taken { live } else { 0 },
+                };
+                work += member_work(m, taken, more, class.rows);
+            }
+        }
+        work
+    }
 }
 
 /// Σ_rows (a b ± c d) of four parts A, B, C, D of a class's four columns laid for the lanes (`Model::classes_at`: each
