@@ -1367,7 +1367,7 @@ fn outside(groups: &[Group]) -> Vec<(f64, f64)> {
 ///   `reach` (µK; model.rs `Reach::kinetic_uk`): refuted by a T read above it beyond its interval;
 /// - of the bound atoms held at a time, those outside the reach (`outside`: per time the count and the atoms) are a
 ///   binomial's of the share `left` at the most: refuted by a count whose tail (estimate.rs `at_least`) is below the
-///   look's -- among the 101 looks of 26 times, two of the pilot's 88. This read estimates no spread. (Read at every
+///   look's -- among the 49 looks of 13 times (PGC3D 1 ms), two of the pilot's 88. This read estimates no spread. (Read at every
 ///   output for T and at the listed ones for the count, as it was, the family was the outputs' -- six hundred looks of
 ///   two hundred --, and the counts were of other times at another number of outputs.) T's interval over six hundred
 ///   looks was 6.4 standard errors, each estimated on eleven groups: a T twice the reach's passed it wherever that
