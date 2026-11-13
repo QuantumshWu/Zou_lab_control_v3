@@ -68,7 +68,7 @@ pub enum LiveState { Opening, Open, Closing, Failed }
 
 /// A device change in progress: v2's busy word while it runs, its line once it settles.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Settling { Init, Apply, Close(String), Shutdown }
+pub enum Settling { Init, Apply, Close(String), Shutdown, Restart { device: String, port: String } }
 
 /// A hardware scan in flight: who asked, the types still to answer, what came back, and the
 /// bound resources of a kind a scanned type binds, which it passed over (`COM3 (n100)`).
@@ -109,11 +109,13 @@ pub struct Live {
     pub stale: Option<String>,
     /// When its open or close now under way was asked: how long it took is said when it settles.
     pub asked: Option<std::time::Instant>,
+    /// The serial ports this open (and the resolve before it) met that would not open.
+    pub serial_faults: Vec<crate::SerialFault>,
 }
 
 /// A device's lifecycle fact, said by the apparatus that owns it (`zlc_core::journal::lifecycle`):
 /// which device -- instance, role, type -- and the event's own facts.
-fn say_device(event: &str, entry: &Entry, facts: Value) {
+pub(crate) fn say_device(event: &str, entry: &Entry, facts: Value) {
     let mut line = json!({"instance": entry.instance_id, "role": entry.role, "type_id": entry.type_id});
     if let (Some(line), Value::Object(facts)) = (line.as_object_mut(), facts) { line.extend(facts); }
     zlc_core::journal::lifecycle("workbench", event, line);
@@ -714,7 +716,7 @@ impl Workbench {
             .map(|(role, _)| format!("RuntimeError: {resource} is already bound (to {role})")))
     }
 
-    fn open_entry(&mut self, entry: Entry) { self.open_with(entry, true) }
+    pub(crate) fn open_entry(&mut self, entry: Entry) { self.open_with(entry, true) }
 
     /// Open a row; `resolve`: one with a resource still blank is found first (Init's resolve phase).
     fn open_with(&mut self, entry: Entry, resolve: bool) {
@@ -756,7 +758,8 @@ impl Workbench {
         if let Some(error) = &failure { self.log_device(&id, &format!("not opened: {error}")); }
         let units = entry.units.clone();
         self.devices.insert(id, Live { entry, state, error: failure, working_point: Value::Null, fields: None, fields_ticket: None, close_pending: false, close_failed: false, reopen: None,
-            risk: None, units, descriptor: None, published: false, identity, resources, resolving, resolved: !resolve, stale: None, asked: Some(std::time::Instant::now()) });
+            risk: None, units, descriptor: None, published: false, identity, resources, resolving, resolved: !resolve, stale: None, asked: Some(std::time::Instant::now()),
+            serial_faults: Vec::new() });
         if resolving { self.next_resolution(); }
     }
 
@@ -796,6 +799,8 @@ impl Workbench {
                         self.found.push(format!("{}: {line}", entry.role));
                     }
                     self.open_with(entry, false);
+                    // What its search met is this open's too (the ports its UART would not open on).
+                    if let Some(opened) = self.devices.get_mut(id) { opened.serial_faults = live.serial_faults; }
                 }
                 Err(error) => {
                     let error = match &live.stale { Some(stale) => format!("{stale}; looked again: {error}"), None => error };
@@ -892,6 +897,7 @@ impl Workbench {
         self.not_scanning()?;
         // Before discovery answers, every plugin device would fail as not installed.
         if self.plugins.discovering() { return Err("the device types are still being discovered; Init once they are in".into()); }
+        self.not_restarting()?;
         // v2: Init starts a session; with one running it is an Apply.
         let kind = if self.devices.is_empty() { Settling::Init } else { Settling::Apply };
         // v2 InstallationConfig: two devices of one name are not a configuration that opens.
@@ -964,7 +970,7 @@ impl Workbench {
     /// is left as it is, the change not applied, and the line says who it waited for.
     pub fn poll(&mut self, now: std::time::Instant) -> bool {
         let Some(since) = self.settling_since else { return false };
-        if now.duration_since(since) < MAINTENANCE_WAIT || !matches!(self.settling, Some(Settling::Apply | Settling::Close(_))) { return false; }
+        if now.duration_since(since) < MAINTENANCE_WAIT || !matches!(self.settling, Some(Settling::Apply | Settling::Close(_) | Settling::Restart { .. })) { return false; }
         let held: Vec<String> = self.devices.iter().filter(|(id, live)| live.close_pending && !self.claiming_nodes(id).is_empty())
             .map(|(id, _)| id.clone()).collect();
         if held.is_empty() { return false; }
@@ -980,7 +986,7 @@ impl Workbench {
     }
 
     /// Close instances after the runs that claim them stop; returns the nodes stopped.
-    fn close_instances(&mut self, closing: Vec<(String, Option<Entry>)>, host: &mut dyn Host) -> Vec<String> {
+    pub(crate) fn close_instances(&mut self, closing: Vec<(String, Option<Entry>)>, host: &mut dyn Host) -> Vec<String> {
         let mut stopped = BTreeSet::new();
         for (id, reopen) in closing {
             self.cancel_device_starts(&id, "a required device is being changed");
@@ -1089,11 +1095,15 @@ impl Workbench {
             Settling::Apply => format!("device changes applied · {loaded} loaded"),
             Settling::Close(id) if self.devices.get(id).is_some_and(|live| live.close_failed) => format!("{} could not be closed", self.device_role(id)),
             Settling::Close(id) => format!("{} closed · {loaded} loaded", self.device_role(id)),
+            Settling::Restart { device, port } if self.devices.get(device).is_some_and(|live| live.state == LiveState::Open) =>
+                format!("{port}'s USB device restarted · {} opened again · {loaded} loaded", self.device_role(device)),
+            Settling::Restart { port, .. } => format!("{port}'s USB device restarted · {loaded} loaded"),
         };
         // v2 _outcome: each failure's reason on the line; then what a resolve found (a port now in the apparatus).
         if !failed.is_empty() { text += &format!(" · {} failed -- {}", failed.len(), failed.join("; ")); }
         for line in &found { text += &format!(" · {line}"); }
-        let kind = match kind { Settling::Init => "init", Settling::Apply => "apply", Settling::Close(_) => "close", Settling::Shutdown => "shutdown" };
+        let kind = match kind { Settling::Init => "init", Settling::Apply => "apply", Settling::Close(_) => "close", Settling::Shutdown => "shutdown",
+                                Settling::Restart { .. } => "restart" };
         // The line the Device Manager shows once it is all done, and which rows stand open.
         zlc_core::journal::lifecycle("workbench", "devices_settled", json!({"kind": kind, "line": text, "open": open}));
         self.report = (text, if failed.is_empty() { "task" } else { "warning" });
@@ -1366,11 +1376,13 @@ impl Workbench {
             // v2's busy words: the scan, else the device change under way.
             "busy": if self.scan.is_some() { Some("scanning hardware".to_owned()) }
                     else if self.plugins.discovering() { Some("discovering device types".to_owned()) }
+                    else if let Some(restarting) = &self.restarting { Some(format!("restarting {}'s USB device", restarting.port)) }
                     else { self.settling.as_ref().map(|state| match state {
                         Settling::Init => "initializing devices".to_owned(),
                         Settling::Apply => "applying device changes".to_owned(),
                         Settling::Close(id) => format!("closing {}", self.device_role(id)),
                         Settling::Shutdown => "shutting down devices".to_owned(),
+                        Settling::Restart { device, .. } => format!("opening {} again", self.device_role(device)),
                     }).or_else(|| (busy > 0).then(|| "applying device changes".to_owned())).map(|words| words + &finding) },
         })
     }
@@ -1407,6 +1419,8 @@ impl Workbench {
                 // Opening, its blank settings being found first (Init's resolve phase).
                 "resolving": live.is_some_and(|live| live.resolving),
                 "close_failed": live.is_some_and(|live| live.close_failed),
+                // Serial ports its open or search found refused by their driver: each offers its USB device's restart.
+                "refused_ports": self.refused_ports(id),
                 "working_point": live.map(|live| live.working_point.clone()).unwrap_or(Value::Null),
                 "claimed_by": claims,
                 "physical_outputs": kind.map(|item| item.physical_outputs.iter().map(|output| json!({"name": output.name})).collect::<Vec<_>>()).unwrap_or_default(),

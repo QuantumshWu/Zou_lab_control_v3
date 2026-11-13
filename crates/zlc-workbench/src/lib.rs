@@ -13,6 +13,7 @@ mod choices;
 pub mod diagnostics;
 mod layout;
 mod logic;
+mod port_restart;
 
 pub mod scan;
 
@@ -27,6 +28,7 @@ use zlc_core::control::Origin;
 pub use bench::SNAPSHOT_WAIT;
 pub use choices::viewer_signal_tree;
 pub use layout::INTERVALS;
+pub use port_restart::{PortRestart, REFUSED, SerialFault};
 pub use types::{TypeCatalog, TypeDescriptor};
 pub use workspace::Workspace;
 
@@ -80,6 +82,10 @@ pub trait Plugins {
     fn publish(&mut self, ticket: u64, instance: &str, role: &str, published: bool);
     /// Do `work` off the owner turn on `lane`; its result is answered as `ticket`.
     fn work(&mut self, ticket: u64, lane: Lane, work: Work);
+    /// Restart the device node that owns serial port `port` on this computer (Windows asks the
+    /// operator to allow it), off the owner turn and within a deadline: answered as `ticket` with
+    /// a [`PortRestart`].
+    fn restart_port(&mut self, ticket: u64, port: &str);
 }
 
 /// The working point's word for how long a device's own open took (ms), as its opener timed it
@@ -103,6 +109,9 @@ pub enum Event {
     Opened { instance: String, working_point: Value },
     Failed { instance: String, error: String },
     Closed { instance: String, error: Option<String> },
+    /// `event`, the outcome of an open or a resolve of `instance` on this computer, with each serial
+    /// port that would not open on its way (PLUGIN_PROTOCOL §7 `serial_faults`; [`Event::met_serial_faults`]).
+    SerialFaults { instance: String, faults: Vec<SerialFault>, event: Box<Event> },
     /// What an open device states of itself changed (its trigger lanes, what it holds): the drafts
     /// that name devices are asked again.
     Facts { instance: String, facts: Value },
@@ -130,6 +139,12 @@ impl Event {
             Event::Opened { instance, .. } => json!({"fact": "opened", "instance": instance}),
             Event::Failed { instance, error } => json!({"fact": "failed", "instance": instance, "error": error}),
             Event::Closed { instance, error } => json!({"fact": "closed", "instance": instance, "error": error}),
+            Event::SerialFaults { instance, faults, event } => {
+                let mut inner = event.journal();
+                inner["serial_faults"] = json!(faults);
+                inner["serial_faults_of"] = json!(instance);
+                inner
+            }
             Event::Facts { instance, facts } => json!({"fact": "device_facts", "instance": instance, "facts": facts}),
             Event::Answered { ticket, result } => json!({"fact": "answered", "ticket": ticket, "error": failed(result)}),
             Event::Log { instance, line } => json!({"fact": "log", "instance": instance, "line": line}),
@@ -256,6 +271,8 @@ pub(crate) enum Ticket {
     Recipes { request: u64, run: Option<(bool, String)> },
     /// The files a draft names, read (`key`: the selections read); for a Start when `start`.
     DraftFiles { node: String, key: Value, start: bool },
+    /// The device node owning a serial port a row met refused, restarted (`restart_serial_port`).
+    Restart { device: String, port: String, request: u64 },
 }
 
 pub struct Workbench {
@@ -305,6 +322,8 @@ pub struct Workbench {
     pub(crate) resolution: Option<(u64, Option<String>)>,
     /// What this Init's or Apply's resolves found, said on its line once it settles.
     pub(crate) found: Vec<String>,
+    /// The restart of a serial port's device node under way (`restart_serial_port`).
+    pub(crate) restarting: Option<port_restart::Restarting>,
     /// Each node's source bundle as its queries were last told it (`bundle`).
     pub(crate) bundles: BTreeMap<String, logic::SourceBundle>,
     /// A draft names a source its bundle was not built for: its bundle readers ask once the
@@ -331,7 +350,7 @@ pub type DeviceUsers = std::sync::Arc<std::sync::Mutex<BTreeMap<String, String>>
 pub const COMMANDS: &[&str] = &[
     "list_plugins", "get_device_log", "estimate_node", "list_runs", "get_run", "read_layout", "list_recipes",
     "add_device", "remove_device", "edit_device", "edit_simulation", "use_template", "discover_devices", "add_discovered",
-    "load_apparatus", "save_apparatus", "apply_devices", "close_device", "shut_down_devices",
+    "load_apparatus", "save_apparatus", "apply_devices", "close_device", "shut_down_devices", "restart_serial_port",
     "read_device", "tune_device", "accept_device_risk", "publish_device",
     "add_node", "rename_node", "edit_node", "check_node", "revert_node", "start_node", "stop_node", "remove_node", "answer_request",
     "order_panels", "rename_panel", "set_panel_interval", "set_panel_overlay", "publish_panel_outputs", "set_board",
@@ -342,7 +361,7 @@ pub const COMMANDS: &[&str] = &[
 pub(crate) const LOG_LINES: usize = 2000;
 
 /// Commands that leave the result to a later plugin event.
-const DEFERRED: &[&str] = &["estimate_node", "read_device", "tune_device", "discover_devices", "publish_device",
+const DEFERRED: &[&str] = &["estimate_node", "read_device", "tune_device", "discover_devices", "publish_device", "restart_serial_port",
     "read_layout", "load_layout", "save_layout", "load_apparatus", "save_apparatus", "export_diagnostics", "list_recipes", "run_recipe"];
 
 pub(crate) fn text<'a>(params: &'a Value, name: &str) -> Result<&'a str, String> {
@@ -376,7 +395,7 @@ impl Workbench {
             // v2 set_deriving(False) when the console is built.
             console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None, panel_said: None,
             tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), device_opens: BTreeMap::new(), applied_simulation: None, scan: None,
-            resolution: None, found: Vec::new(), bundles: BTreeMap::new(), bundles_stale: false,
+            resolution: None, found: Vec::new(), restarting: None, bundles: BTreeMap::new(), bundles_stale: false,
             selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default(), follows_sources: false,
             diagnostic_documents: None })
     }
@@ -517,6 +536,7 @@ impl Workbench {
             "apply_devices" => self.apply_devices(host).map(Some),
             "close_device" => self.close_device(text(params, "device")?, host).map(Some),
             "shut_down_devices" => self.shut_down_devices(host).map(Some),
+            "restart_serial_port" => self.restart_serial_port(text(params, "device")?, text(params, "port")?, request).map(|()| None),
             "read_device" => self.read_device(text(params, "device")?, params["units"].as_object(), params["keep"] == true, Some(request)).map(|()| None),
             "tune_device" => self.tune_device(params, request).map(|()| None),
             "accept_device_risk" => self.accept_device_risk(text(params, "device")?, params["accepted"].as_bool().unwrap_or(false)).map(Some),
@@ -575,6 +595,11 @@ impl Workbench {
             Event::Answered { ticket, result } => self.answered(ticket, result, host),
             Event::Lifecycle { current, revision, event } => {
                 if current.load(std::sync::atomic::Ordering::Acquire) == revision { self.on_event(*event, host); }
+                return;
+            }
+            Event::SerialFaults { instance, faults, event } => {
+                self.serial_faults_met(&instance, faults);
+                self.on_event(*event, host);
                 return;
             }
             Event::Log { instance, line } => self.log_line(&instance, line),
@@ -651,6 +676,7 @@ impl Workbench {
             Ticket::RunRecord { run, record } => self.run_recorded(&run, record, result),
             Ticket::Recipes { request, run } => { let read = self.recipes_read(run, result, host); self.replies.push((request, read)); }
             Ticket::DraftFiles { node, key, start } => self.draft_files_read(&node, ticket, key, start, result, host),
+            Ticket::Restart { device, port, request } => self.port_restarted(&device, &port, request, result, host),
             Ticket::Tune { device, request } => {
                 let reply = result.clone().map(|readback| json!({"device": device, "readback": readback}));
                 self.replies.push((request, reply));

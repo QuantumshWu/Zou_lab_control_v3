@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import builtins
+import contextlib
 import dataclasses
 import enum
 import importlib
@@ -20,7 +21,7 @@ import struct
 import threading
 import traceback
 import types
-from typing import Any, BinaryIO, Callable
+from typing import Any, BinaryIO, Callable, Iterator
 
 import numpy as np
 
@@ -263,6 +264,37 @@ class DeviceHeld(PluginError):
         super().__init__("refused", message)
 
 
+#: The calls under way that watch for serial opens failing, each the list it is told them in.
+_SERIAL_WATCHES: list[list[dict[str, Any]]] = []
+_SERIAL_WATCH_LOCK = threading.Lock()
+
+
+def serial_fault(port: str, fault: str, code: int | None) -> None:
+    """A serial open failed in this process (``zlc_atom.devices.serial_open_failure`` says each):
+    told as ``{port, fault, code}`` to every call watching now, whatever thread met it."""
+
+    fact = {"port": str(port), "fault": str(fault), "code": code}
+    with _SERIAL_WATCH_LOCK:
+        for met in _SERIAL_WATCHES:
+            met.append(dict(fact))
+
+
+@contextlib.contextmanager
+def watching_serial_faults() -> Iterator[list[dict[str, Any]]]:
+    """The serial opens that fail while the block runs, on any thread (a search's probes too):
+    the open or resolve that watched carries them to the core beside its answer or its error
+    (``serial_faults``, PLUGIN_PROTOCOL §7; Rust's twin: ``zlc_pulse::serial::FaultWatch``)."""
+
+    met: list[dict[str, Any]] = []
+    with _SERIAL_WATCH_LOCK:
+        _SERIAL_WATCHES.append(met)
+    try:
+        yield met
+    finally:
+        with _SERIAL_WATCH_LOCK:
+            _SERIAL_WATCHES[:] = [watch for watch in _SERIAL_WATCHES if watch is not met]
+
+
 def error_payload(error: BaseException, *, kind: str | None = None) -> dict[str, Any]:
     if kind is None:
         if isinstance(error, PluginError):
@@ -271,8 +303,13 @@ def error_payload(error: BaseException, *, kind: str | None = None) -> dict[str,
             kind = "refused"
         else:
             kind = "failed"
-    return {"kind": kind, "type": _qualified(type(error)), "message": str(error),
-            "traceback": "".join(traceback.format_exception(error))}
+    payload = {"kind": kind, "type": _qualified(type(error)), "message": str(error),
+               "traceback": "".join(traceback.format_exception(error))}
+    # The serial ports that would not open on the way to it, as the call that watched them put them on it.
+    faults = getattr(error, "serial_faults", None)
+    if faults:
+        payload["serial_faults"] = [dict(fact) for fact in faults]
+    return payload
 
 
 _BUILTIN = {name: getattr(builtins, name) for name in ("TimeoutError", "ValueError", "TypeError", "RuntimeError", "KeyError", "LookupError",
@@ -331,7 +368,7 @@ def plain(value: Any) -> Any:
 
 
 __all__ = ["Channel", "Decoder", "Encoder", "INLINE_BYTES", "KINDS", "MAX_FRAME", "PROTOCOL", "PluginError",
-           "Refused", "error_payload", "plain", "raise_remote"]
+           "Refused", "error_payload", "plain", "raise_remote", "serial_fault", "watching_serial_faults"]
 
 # Preserve existing exception names on the public plugin protocol.
 PluginError.__module__ = "zlc_plugin.wire"

@@ -86,8 +86,9 @@ journal/session.jsonl
     plugins process_started / ended    a plugin process (`key`: the one shared process, or `type:<id>`), its
       / process_not_started            pid and start time; at its end the reason, exit code, whether it was
                                        asked to end (`expected`; else it crashed), its instances, its last log
-    workbench devices_apply            an Init, Apply, Close or shut down: rows to open (`retrying`: ones that
-                                       had failed), to close, to close and open again as they now stand
+    workbench devices_apply            an Init, Apply, Close, shut down or the reopen after a USB device restart:
+                                       rows to open (`retrying`: ones that had failed), to close, to close and
+                                       open again as they now stand
     workbench device_resolving /       a row whose port is left blank, found before it opens
       device_resolved
     workbench device_open              a row opened: instance, role, type_id, the parameters it opens with
@@ -105,6 +106,11 @@ journal/session.jsonl
     workbench device_failed            `phase`: resolve, open (it did not open) or lost (it was open), `error`;
                                        `looking_again` when its named serial port could not be used and its
                                        type's resolve looks for it on the ports there are
+    workbench device_port_restart      the USB device behind a serial port a row met refused by its driver,
+                                       restarted (restart_serial_port): `port`, `outcome` (restarted,
+                                       declined at the Windows confirmation, absent: the port is gone,
+                                       failed with pnputil's `words`), the device `node`, `ms`; restarted,
+                                       a devices_apply of kind restart opens the row again
     workbench device_close / closed    a close asked, and its outcome with `ms`;
     plugins device_close /             the plugin side of a close; a device whose call overran its deadline
       device_unresponsive

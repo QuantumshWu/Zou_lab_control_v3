@@ -7,9 +7,10 @@
 //!
 //! Every serial open of the application words its failure one way ([`OpenFailure`], twinned in
 //! Python as `zlc_atom.devices.open_serial_port`): the OS's error class, its code and text, and
-//! the serial ports this PC does have.
+//! the serial ports this PC does have. Each failure is also told to the [`FaultWatch`]es held
+//! meanwhile: the open or search that holds one carries them to the core (`serial_faults`).
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
@@ -26,6 +27,7 @@ use windows_sys::Win32::System::Registry::{HKEY, HKEY_LOCAL_MACHINE, KEY_READ, R
 
 use crate::device::PulseStreamer;
 use crate::error::{Error, Kind, Result};
+use crate::json::Json;
 use crate::model::Target;
 use crate::transport::{Event, RegisterTransport, aborted};
 use crate::uart::{MAX_FRAME_WORDS, UartLink, UartRegisterTransport, extract_reply, reply_frame_len};
@@ -75,7 +77,15 @@ impl OpenFailure {
         let code = error.raw_os_error().unwrap_or(0) as u32;
         let text = error.to_string();
         let text = text.trim_end_matches(&format!(" (os error {code})")).trim_end_matches(['.', '\u{3002}', ' ']).to_owned();
-        OpenFailure { port: port.to_owned(), fault: PortFault::of(code), code, detail: if step.is_empty() { text } else { format!("{step}: {text}") } }
+        let failure = OpenFailure { port: port.to_owned(), fault: PortFault::of(code), code, detail: if step.is_empty() { text } else { format!("{step}: {text}") } };
+        noticed(&failure);
+        failure
+    }
+
+    /// What the core is told of it beside the answer of the open or search that met it
+    /// (`serial_faults`, PLUGIN_PROTOCOL §7): `{port, fault, code}`, as Python's `zlc_plugin.wire` says one.
+    pub fn fact(&self) -> Json {
+        Json::object(vec![("port", Json::str(com_name(&self.port))), ("fault", Json::str(self.fault.words())), ("code", Json::Int(self.code.into()))])
     }
 
     /// The class alone, as a probe lists it beside the other ports it tried.
@@ -92,6 +102,36 @@ impl fmt::Display for OpenFailure {
 }
 
 impl From<OpenFailure> for Error { fn from(failure: OpenFailure) -> Error { Error::new(Kind::Io, failure.to_string()) } }
+
+/// The watches held now, each told every serial open that fails in this process meanwhile.
+static WATCHES: Mutex<Vec<Weak<Mutex<Vec<OpenFailure>>>>> = Mutex::new(Vec::new());
+
+/// The serial opens that fail while it is held, on any thread (a search's probe thread too):
+/// held around one open or search, whose answer then carries them to the core (Python's twin:
+/// `zlc_plugin.wire.watching_serial_faults`).
+pub struct FaultWatch(Arc<Mutex<Vec<OpenFailure>>>);
+
+impl FaultWatch {
+    pub fn start() -> FaultWatch {
+        let met = Arc::new(Mutex::new(Vec::new()));
+        let mut watches = WATCHES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        watches.retain(|watch| watch.strong_count() > 0);
+        watches.push(Arc::downgrade(&met));
+        FaultWatch(met)
+    }
+
+    /// Each failed open met so far, in order.
+    pub fn met(&self) -> Vec<OpenFailure> { self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone() }
+}
+
+fn noticed(failure: &OpenFailure) {
+    let watches: Vec<_> = WATCHES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().filter_map(Weak::upgrade).collect();
+    for met in watches { met.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(failure.clone()); }
+}
+
+/// A failed open another process met for this one (the local pulse server's `serial_faults`):
+/// told to the watches held here as one met here is.
+pub fn told(port: &str, code: u32) { noticed(&OpenFailure { port: port.to_owned(), fault: PortFault::of(code), code, detail: String::new() }) }
 
 /// The serial ports this PC has, with their friendly names where Windows has them:
 /// `serial ports on this PC: COM3 (USB-SERIAL CH340), COM4`, or that it has none.
@@ -400,5 +440,23 @@ mod tests {
         assert_eq!(classes, [(2, "not present"), (3, "not present"), (433, "not present"), (1167, "not present"), (5, "in use by another program"),
                              (32, "in use by another program"), (1, "driver refused"), (31, "driver refused"), (87, "refused")]);
         assert_eq!((PortFault::Busy.error_type(), PortFault::Refused.error_type()), ("SerialPortBusy", "SerialPortUnusable"));
+    }
+
+    /// A failed open is told to every watch held meanwhile, whichever thread met it, and to none
+    /// started after it; one another process met is told as one met here, classed by its code.
+    #[test]
+    fn a_watch_hears_every_failed_open_while_it_is_held() {
+        // Ports no other test opens: tests share the process, and a watch hears them all.
+        let ours = |watch: &FaultWatch| watch.met().iter().map(OpenFailure::fact).map(|fact| fact.compact_text())
+            .filter(|fact| fact.contains("COM251") || fact.contains("COM252")).collect::<Vec<_>>();
+        let watch = FaultWatch::start();
+        std::thread::spawn(|| ComPortLink::new("com251", 115_200).unwrap().open_port().unwrap_err()).join().unwrap();
+        let later = FaultWatch::start();
+        told("COM252", 31);
+        assert_eq!(ours(&watch), [r#"{"port":"COM251","fault":"not present","code":2}"#, r#"{"port":"COM252","fault":"driver refused","code":31}"#]);
+        assert_eq!(ours(&later), [r#"{"port":"COM252","fault":"driver refused","code":31}"#]);
+        drop(watch);
+        told("COM252", 1);
+        assert_eq!(ours(&later).len(), 2, "the watches still held hear on");
     }
 }

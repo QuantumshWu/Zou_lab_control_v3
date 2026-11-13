@@ -1,6 +1,7 @@
 //! `zlc-pulse-server`'s one line on how it came up: ready with the transport it took and what its
 //! probe tried, or the error it stopped on, typed as raised (a named UART port that cannot be opened
-//! is `SerialPortUnusable`, never a quiet JTAG fallback). Memory boards and an absent port only.
+//! is `SerialPortUnusable`, never a quiet JTAG fallback), each with the serial ports that would not
+//! open on the way (`serial_faults`). Memory boards and an absent port only.
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
@@ -30,6 +31,7 @@ fn the_ready_line_names_the_transport_taken() {
     let (ready, _server) = said(&["--backend", "memory", "--memory-auto-done"]);
     assert!(ready.get("port").and_then(Json::as_int).is_some_and(|port| port > 0), "{ready:?}");
     assert_eq!((ready.get("transport"), ready.get("attempts")), (Some(&Json::str("memory")), Some(&Json::Array(Vec::new()))));
+    assert_eq!(ready.get("serial_faults"), Some(&Json::Array(Vec::new())), "no serial port opened, none failed");
 }
 
 #[test]
@@ -38,5 +40,7 @@ fn a_named_port_that_cannot_be_opened_stops_the_server_with_its_class() {
     let error = said.get("error").and_then(Json::as_str).unwrap_or_default().to_owned();
     assert!(error.starts_with("SerialPortUnusable: COM250 could not be opened: not present (os error 2: "), "{error}");
     assert!(error.contains(" -- serial ports on this PC: ") || error.ends_with(" -- this PC has no serial port"), "{error}");
+    // The port that would not open, as the application is told it (the row it opens is offered what fits its class).
+    assert_eq!(said.get("serial_faults").map(Json::compact_text).as_deref(), Some(r#"[{"port":"COM250","fault":"not present","code":2}]"#));
     assert_eq!(server.0.wait().unwrap().code(), Some(3), "it stops; Auto does not go on over JTAG");
 }

@@ -65,8 +65,9 @@ pub enum PulseEvent {
     Written(Box<Written>),
     /// A Subpulse file the open pulse resolves changed on the disk.
     FilesChanged,
-    /// A native sequencer device opened (or did not); `took`: its own open (its world's and its board's).
-    Opened { instance: String, result: Result<(Arc<Board>, Option<Served>), String>, took: Duration },
+    /// A native sequencer device opened (or did not); `took`: its own open (its world's and its board's);
+    /// `faults`: each serial port that would not open on its way (its server's).
+    Opened { instance: String, result: Result<(Arc<Board>, Option<Served>), String>, took: Duration, faults: Vec<zlc_workbench::SerialFault> },
     Closed { instance: String, error: Option<String> },
     /// A preview front, the words above it and its axes (what the page hit-tests).
     Preview { result: Result<(Front, String, Vec<Value>), String>, key: String },
@@ -1072,26 +1073,28 @@ impl PulseHost {
     pub fn open_device(&mut self, instance: &str, type_id: &str, parameters: &Value, context: &Value) {
         let post = self.post.clone();
         if let Some(given) = &self.given {
-            post(PulseEvent::Opened { instance: instance.to_owned(), result: Err(format!("the pulse board is already attached as {}", given.instance)), took: Duration::ZERO });
+            post(PulseEvent::Opened { instance: instance.to_owned(), result: Err(format!("the pulse board is already attached as {}", given.instance)), took: Duration::ZERO,
+                                      faults: Vec::new() });
             return;
         }
         let (instance, type_id, parameters) = (instance.to_owned(), type_id.to_owned(), parameters.clone());
         let world = (type_id == "sequencer.virtual").then(|| (self.desk.plugins(), world_instance(&instance), context["simulation"].clone()));
         self.desk.device_lane().run(move || {
             let began = std::time::Instant::now();
+            let watch = zlc_pulse::serial::FaultWatch::start();
             // The world opens first: a virtual board without one would play into nothing.
             if let Some((plugins, name, group)) = &world {
                 let opened = plugins.as_ref().ok_or_else(|| "the virtual sequencer needs the plugin host for its world".to_owned())
                     .and_then(|host| host.open(name, "simulation.board", json!({}), if group.is_object() { group.clone() } else { json!({}) })
                         .map_err(|error| format!("its world side: {error}")));
-                if let Err(error) = opened { post(PulseEvent::Opened { instance, result: Err(error), took: began.elapsed() }); return; }
+                if let Err(error) = opened { post(PulseEvent::Opened { instance, result: Err(error), took: began.elapsed(), faults: Vec::new() }); return; }
             }
             let (logs, name) = (post.clone(), instance.clone());
             let narrate = Box::new(move |line| logs(PulseEvent::Log { instance: name.clone(), line }));
             let result = open_device(&type_id, &parameters, narrate).map(|(board, child)| (Arc::new(board), child));
             if let Some(line) = result.as_ref().ok().and_then(|(board, _)| connected_line(board)) { post(PulseEvent::Log { instance: instance.clone(), line }); }
             if result.is_err() { if let Some((Some(host), name, _)) = &world { let _ = host.close(name); } }
-            post(PulseEvent::Opened { instance, result, took: began.elapsed() });
+            post(PulseEvent::Opened { instance, result, took: began.elapsed(), faults: serial_faults(&watch) });
         });
     }
 
@@ -1372,6 +1375,8 @@ fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Res
             // Its one line on how it came up (zlc-pulse-server): ready, with the transport it took, or why it could not.
             if line.starts_with("{\"type\":\"pulse-server\"") {
                 let ready: Value = serde_json::from_str(&line).unwrap_or_default();
+                // The ports it could not open are this open's, as if met here.
+                for fault in zlc_workbench::SerialFault::listed(ready.get("serial_faults")) { zlc_pulse::serial::told(&fault.port, fault.code.unwrap_or_default()); }
                 let _ = found.send(ready["error"].as_str().map_or(Ok(ready.clone()), |error| Err(error.to_owned())));
                 break;
             }
@@ -1396,6 +1401,12 @@ fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Res
         Ok(board) => Ok((board, Served { child, port, control, backend: asked, ready, _job: job })),
         Err(error) => ended(child, error.message),
     }
+}
+
+/// Each serial port that would not open while `watch` was held, as the workbench is told them.
+pub fn serial_faults(watch: &zlc_pulse::serial::FaultWatch) -> Vec<zlc_workbench::SerialFault> {
+    watch.met().iter().map(|failure| zlc_workbench::SerialFault { port: zlc_pulse::serial::com_name(&failure.port), fault: failure.fault.words().to_owned(),
+                                                                  code: Some(failure.code) }).collect()
 }
 
 /// The local server's backend and command line for a row. It never probes a port: Init found
