@@ -105,6 +105,7 @@
 //! A share that n of N independent draws met is bounded at the confidence z by the far end of Wilson's score interval
 //! (`wilson`); at a count of zero, z²/(N + z²) (`unseen`): one function for every such share -- an output's statistics,
 //! whose jackknife reads nothing of a loss or a state no trajectory reached, and the reach's unsampled share.
+use crate::analysis::Reading;
 use crate::decide::{richardson, Read};
 use crate::request::STATES;
 use crate::special::upper;
@@ -311,18 +312,20 @@ pub struct Sums {
     pub leaving: Leaving,
 }
 
-/// Of a set of sums' held atoms the leaving ones (`Held::leaving`): their number and their Σ⟨κ⟩, Σ⟨κ⟩² and Σ⟨κ²⟩ per lab
-/// axis -- the bound atoms' motion is the held atoms' less this (`bound_motion`).
+/// Of a set of sums' held atoms the leaving ones (`Held::leaving`): their number, those of them outside the reach, and
+/// their Σ⟨κ⟩, Σ⟨κ⟩² and Σ⟨κ²⟩ per lab axis -- the bound atoms' motion and their count outside the reach are the held
+/// atoms' less this (`bound_motion`, `Sums::bound_outside`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Leaving {
     pub held: f64,
+    pub outside: f64,
     pub kappa: [f64; 3],
     pub kappa_squared: [f64; 3],
     pub kappa2: [f64; 3],
 }
 
 impl Sums {
-    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], outside: [0.; 2], unresolved: [0.; 2], leaving: Leaving { held: 0., kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3] } };
+    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], outside: [0.; 2], unresolved: [0.; 2], leaving: Leaving { held: 0., outside: 0., kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3] } };
     /// One trajectory at the output.
     pub fn add(&mut self, fate: &Fate) {
         if *fate == Fate::Failed {
@@ -348,6 +351,7 @@ impl Sums {
             if h.leaving {
                 let l = &mut self.leaving;
                 l.held += 1.;
+                l.outside += f64::from(u8::from(h.outside));
                 for a in 0..3 {
                     l.kappa[a] += h.kappa[a];
                     l.kappa_squared[a] += h.kappa[a] * h.kappa[a];
@@ -375,11 +379,17 @@ impl Sums {
         }
         let (l, m) = (&mut self.leaving, &o.leaving);
         l.held += sign * m.held;
+        l.outside += sign * m.outside;
         for a in 0..3 {
             l.kappa[a] += sign * m.kappa[a];
             l.kappa_squared[a] += sign * m.kappa_squared[a];
             l.kappa2[a] += sign * m.kappa2[a];
         }
+    }
+    /// The bound atoms (`Held::leaving`: the held ones less the leaving ones) and how many of them lie outside the reach
+    /// (`Held::outside`): what the reach's falsifier counts (solve.rs `outgrown`).
+    pub fn bound_outside(&self) -> (f64, f64) {
+        (self.outside[0] - self.leaving.outside, self.held - self.leaving.held)
     }
     /// The bound atoms' motion (`bound_motion`): the held atoms less the leaving ones, in the number held and in the
     /// motion's sums -- all T reads of a set of sums.
@@ -417,6 +427,10 @@ impl Group {
     /// A trajectory's photons (`Trajectory::scattered`).
     pub fn scatter(&mut self, scattered: [f64; 2]) {
         self.scattered = [self.scattered[0] + scattered[0], self.scattered[1] + scattered[1]];
+    }
+    /// The group's sums at its places `at`, in their order (solve.rs: a grid's analysis times).
+    pub fn at(&self, at: &[usize]) -> Group {
+        Group { sums: at.iter().map(|&k| self.sums[k].clone()).collect(), scattered: self.scattered }
     }
     /// One trajectory at every output, in order.
     pub fn add(&mut self, outputs: &[Fate]) {
@@ -681,12 +695,12 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
 }
 
 /// The size of the step's error over the run as two ensembles measure it (module documentation, # The step's error):
-/// per quantity the read of its mean square over the outputs after t = 0 -- the loss's and each row's as shown
+/// per quantity the read of its mean square over the times after t = 0 -- the loss's and each row's as shown
 /// (absolute, squared), and the total T's (the mean over the three lab axes, the T the target is on) relative to it and
-/// weighed by the held share, as its account is, over T's allowance at the output (`allowance`: a share of the
-/// allowance, the same at every output, is the step's share of T's target) -- none where no output reads it at both
-/// levels. A read is of the mean square itself, unbiased, so it lies about zero,
-/// on either side, where there is no error.
+/// weighed by the held share, as its account is, over T's allowance at the time (`allowance`: a share of the
+/// allowance, the same at every time, is the step's share of T's target) -- none where no time reads it at both
+/// levels. A read is of the mean square itself, unbiased, so it lies about zero, on either side, where there is no
+/// error.
 #[derive(Clone, Debug)]
 pub struct Between {
     pub loss: Read,
@@ -694,61 +708,108 @@ pub struct Between {
     pub temperature: Option<Read>,
 }
 
+/// The quantities whose step error `between` reads, in its order: the loss, each row as shown, the total T.
+const STEPPED: usize = STATES + 2;
+
+/// A quantity's step error at a time, of the finer and the coarser level's moments `m` (module documentation, # The
+/// step's error): e = [Q(2τ) − Q(τ)]/(2^p − 1) of the loss (q = 0) and of each row as shown (q = 1 + s), and of the
+/// total T (q = 1 + STATES) relative to the finer level's and weighed by its held share -- over T's allowance there
+/// where `between` reads it. One definition for the step's read and for the analysis times' (`readings`).
+fn step_error(m: &[Moments], q: usize) -> f64 {
+    let share = richardson(0.5, ORDER as f64) - 1.;
+    let total = |m: &Moments| m.temperature.map_or(f64::NAN, |t| t.iter().sum::<f64>());
+    match q {
+        0 => share * (loss(&m[1]) - loss(&m[0])),
+        q if q <= STATES => share * (shown(&m[1], q - 1) - shown(&m[0], q - 1)),
+        _ => share * (1. - loss(&m[0])) * (total(&m[1]) / total(&m[0]) - 1.),
+    }
+}
+
+/// Whether a time's moments read a quantity of `step_error` at every level: the loss and the rows where every level
+/// counts a trajectory, T where every level's total T is a positive number besides.
+fn stepped(m: &[Moments], q: usize) -> bool {
+    counted(m) && (q <= STATES || m.iter().all(|x| x.temperature.is_some_and(|t| t.iter().sum::<f64>() > 0.)))
+}
+
+/// Each time's share of the run in a mean over the times `times` (increasing, from t = 0): half the interval to each
+/// neighbour, the last time's half its own -- the trapezoid's weights, the mean of a quantity the line through the
+/// times holds (analysis.rs) over the run.
+pub fn trapezoid(times: &[f64]) -> Vec<f64> {
+    let last = times.len().saturating_sub(1);
+    (0..times.len()).map(|k| 0.5 * (times[(k + 1).min(last)] - times[k.saturating_sub(1)])).collect()
+}
+
 /// The step's error of the level `fine`, from it and the level `coarse` at twice its step on the same trajectories,
-/// group by group in the same order (module documentation, # The step's error): each quantity's mean square over the
-/// outputs after t = 0 -- the loss's and the rows' over the outputs where both levels, and both without any one group,
-/// count a trajectory (module documentation, # What is counted), T's over those where they hold two atoms at least. No
-/// number on a single group, or where no output reads it; no spread on fewer than three groups (a mean square without
-/// a group needs two more).
-pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scales) -> Between {
+/// group by group in the same order, both at the times `times` (module documentation, # The step's error; increasing,
+/// from t = 0): each quantity's mean square over the times after t = 0 -- the loss's and the rows' over the times
+/// where both levels, and both without any one group, count a trajectory (module documentation, # What is counted),
+/// T's over those where they hold two atoms at least --, each time weighed by its share of the run (`trapezoid`: the
+/// trapezoid's, so that the mean is the run's whatever the times' spacing). No number on a single group, or where no
+/// time reads it; no spread on fewer than three groups (a mean square without a group needs two more).
+pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scales, times: &[f64]) -> Between {
     assert_eq!(fine.len(), coarse.len(), "the two levels hold the same groups");
     let outputs = fine.first().map_or(0, |g| g.borrow().sums.len());
     let (hm, groups) = (scales.hbar_over_mass, fine.len());
     let g = groups as f64;
-    // The finer level's share of the difference: 1/(2^p − 1).
-    let share = richardson(0.5, ORDER as f64) - 1.;
-    let each: Vec<Jackknife> = (1..outputs).into_par_iter().map(|k| jackknife(&[fine, coarse], k, hm)).collect();
-    // A quantity's mean square over some outputs: at each, the groups' own values of it (g times the whole less g − 1
-    // times the rest) and the mean of their products two by two; the same without each group, spread over the groups.
-    // Each output's values over its `over`: a quantity held to a target that differs between the outputs, its own.
-    let size = |at: &[&Jackknife], f: &dyn Fn(&[Moments]) -> f64, over: &dyn Fn(&Jackknife) -> f64, read: f64| -> Read {
+    let weights = trapezoid(times);
+    let each: Vec<(f64, Jackknife)> = (1..outputs).into_par_iter().map(|k| (weights[k], jackknife(&[fine, coarse], k, hm))).collect();
+    // A quantity's mean square over some times: at each, the groups' own values of it (g times the whole less g − 1
+    // times the rest) and the mean of their products two by two, weighed by the time's share; the same without each
+    // group, spread over the groups. Each time's values over its `over`: a quantity held to a target that differs
+    // between the times, its own.
+    let size = |q: usize, over: &dyn Fn(&Jackknife) -> f64| -> Option<Read> {
+        let at: Vec<&(f64, Jackknife)> = each.iter().filter(|(_, j)| stepped(&j.full, q) && j.leave.iter().all(|l| stepped(l, q))).collect();
         if at.is_empty() {
-            return Read { value: f64::NAN, spread: Spread::UNREAD };
+            return None;
         }
-        let (mut whole, mut without, mut own) = (0., vec![0.; groups], vec![0.; groups]);
-        for j in at {
+        let (mut whole, mut without, mut own, mut weight) = (0., vec![0.; groups], vec![0.; groups], 0.);
+        for (w, j) in &at {
             let unit = over(j);
-            let full = f(&j.full) / unit;
-            own.iter_mut().zip(&j.leave).for_each(|(x, rest)| *x = g * full - (g - 1.) * f(rest) / unit);
+            let full = step_error(&j.full, q) / unit;
+            own.iter_mut().zip(&j.leave).for_each(|(x, rest)| *x = g * full - (g - 1.) * step_error(rest, q) / unit);
             let (sum, squares) = own.iter().fold((0., 0.), |(s, q), x| (s + x, q + x * x));
-            whole += sum * sum - squares;
-            without.iter_mut().zip(&own).for_each(|(w, x)| *w += (sum - x).powi(2) - (squares - x * x));
+            whole += w * (sum * sum - squares);
+            without.iter_mut().zip(&own).for_each(|(o, x)| *o += w * ((sum - x).powi(2) - (squares - x * x)));
+            weight += w;
         }
-        let n = at.len() as f64;
-        Read {
-            value: if groups >= 2 { whole / (n * g * (g - 1.)) } else { f64::NAN },
-            spread: if groups >= 3 { spread(without.iter().map(|w| w / (n * (g - 1.) * (g - 2.))), read) } else { Spread::UNREAD },
-        }
-    };
-    let all: Vec<&Jackknife> = each.iter().filter(|j| counted(&j.full) && j.leave.iter().all(|l| counted(l))).collect();
-    let temperature = {
-        // T's error is relative to the finer level's T and weighed by its held share, as T's account is, over T's
-        // allowance at the output -- the finer level's (`allowance`, of the finer level's photons): read where every
-        // level's total T is a positive number.
-        let read = |m: &[Moments]| m.iter().all(|x| x.temperature.is_some_and(|t| t.iter().sum::<f64>() > 0.));
-        let at: Vec<&Jackknife> = each.iter().filter(|j| read(&j.full) && j.leave.iter().all(|l| read(l))).collect();
-        (!at.is_empty()).then(|| {
-            let scale = semiclassical(scattered(fine), scales);
-            let total = |m: &Moments| m.temperature.map_or(f64::NAN, |t| t.iter().sum::<f64>());
-            let e = |m: &[Moments]| share * (1. - loss(&m[0])) * (total(&m[1]) / total(&m[0]) - 1.);
-            size(&at, &e, &|j| allowance(total(&j.full[0]) / 3., scale), at.iter().map(|j| j.holding).fold(f64::INFINITY, f64::min))
+        let read = if q <= STATES { g } else { at.iter().map(|(_, j)| j.holding).fold(f64::INFINITY, f64::min) };
+        Some(Read {
+            value: if groups >= 2 { whole / (weight * g * (g - 1.)) } else { f64::NAN },
+            spread: if groups >= 3 { spread(without.iter().map(|w| w / (weight * (g - 1.) * (g - 2.))), read) } else { Spread::UNREAD },
         })
     };
+    let unread = Read { value: f64::NAN, spread: Spread::UNREAD };
+    let total = |m: &Moments| m.temperature.map_or(f64::NAN, |t| t.iter().sum::<f64>());
+    // T's error is relative to the finer level's T and weighed by its held share, as T's account is, over T's allowance
+    // at the time -- the finer level's (`allowance`, of the finer level's photons).
+    let scale = semiclassical(scattered(fine), scales);
     Between {
-        loss: size(&all, &|m| share * (loss(&m[1]) - loss(&m[0])), &|_| 1., g),
-        shown: std::array::from_fn(|s| size(&all, &|m| share * (shown(&m[1], s) - shown(&m[0], s)), &|_| 1., g)),
-        temperature,
+        loss: size(0, &|_| 1.).unwrap_or(unread),
+        shown: std::array::from_fn(|s| size(1 + s, &|_| 1.).unwrap_or(unread)),
+        temperature: size(1 + STATES, &|j| allowance(total(&j.full[0]) / 3., scale)),
     }
+}
+
+/// What the analysis times are read on at the place k of the groups' sums (analysis.rs `Reading`): of the level
+/// `fine`, its loss, each row as shown and T along each lab axis -- as at an output, the held atoms' over their windows
+/// --; and where its companion `coarse` is given (the same groups in the same order, at twice the step: not empty),
+/// each quantity's step error as `between` reads it (`step_error`). Each with its values without each group, the same
+/// groups at every place; a quantity a place does not read (no trajectory counted, fewer than two atoms held, at some
+/// level or without some group) is no number there, and splits nothing.
+pub fn readings<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], k: usize, scales: &Scales) -> Vec<Reading> {
+    let groups = fine.len();
+    let unread = || Reading { whole: f64::NAN, leave: vec![f64::NAN; groups] };
+    let reading = |j: &Jackknife, read: &dyn Fn(&[Moments]) -> bool, f: &dyn Fn(&[Moments]) -> f64| {
+        if read(&j.full) && j.leave.iter().all(|l| read(l)) { Reading { whole: f(&j.full), leave: j.leave.iter().map(|l| f(l)).collect() } } else { unread() }
+    };
+    let own = jackknife(&[fine], k, scales.hbar_over_mass);
+    let mut out: Vec<Reading> = (0..1 + STATES).map(|q| reading(&own, &counted, &|m| if q == 0 { loss(&m[0]) } else { shown(&m[0], q - 1) })).collect();
+    out.extend((0..3).map(|a| reading(&own, &|m| m[0].temperature.is_some(), &|m| m[0].temperature.map_or(f64::NAN, |t| t[a]))));
+    if !coarse.is_empty() {
+        let both = jackknife(&[fine, coarse], k, scales.hbar_over_mass);
+        out.extend((0..STEPPED).map(|q| reading(&both, &|m| stepped(m, q), &|m| step_error(m, q))));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -776,24 +837,25 @@ mod tests {
         g
     }
 
-    /// The step's size between two ensembles (`between`) on constructed levels. Three groups, two outputs after t = 0;
-    /// a row shown by c of 8 atoms at the coarser level and by a at the finer has the group's own error (c − a)/8/3
-    /// (p = 2). With the groups' own errors x = (3, −1, 1)/24 at the first output and (2, 2, 2)/24 at the second, the
-    /// mean square is the mean over the outputs of the mean of the products of two different groups,
-    /// ((3·(−1) + 3·1 + (−1)·1)/3 + 4)/24²/2 -- at the first output below zero: the three errors are no more than
-    /// their scatter --, and without a group the product of the other two; its spread is the jackknife of those. The
-    /// other row is the first's mirror; the loss has none. T is 7 at the finer level and 4 and 6 at the coarser on
-    /// every atom: the groups agree, and its mean square is the mean of (4/7 − 1)²/9 and (6/7 − 1)²/9 with no spread, over
-    /// T's allowance at 7 µK squared.
+    /// The step's size between two ensembles (`between`) on constructed levels. Three groups, two outputs after t = 0 at
+    /// t = 1 and 2, of the run's shares 1 and ½ (the trapezoid's); a row shown by c of 8 atoms at the coarser level and
+    /// by a at the finer has the group's own error (c − a)/8/3 (p = 2). With the groups' own errors x = (3, −1, 1)/24 at
+    /// the first output and (2, 2, 2)/24 at the second, the mean square is the mean over the outputs, by their shares,
+    /// of the mean of the products of two different groups, ((3·(−1) + 3·1 + (−1)·1)/3 + 4/2)/24²/1.5 -- at the first
+    /// output below zero: the three errors are no more than their scatter --, and without a group the product of the
+    /// other two; its spread is the jackknife of those. The other row is the first's mirror; the loss has none. T is 7
+    /// at the finer level and 4 and 6 at the coarser on every atom: the groups agree, and its mean square is the mean of
+    /// (4/7 − 1)²/9 and (6/7 − 1)²/9 by the same shares with no spread, over T's allowance at 7 µK squared.
     /// Two groups read a value and no spread; one reads none.
     #[test]
     fn the_step_s_size_is_the_mean_product_of_two_groups_errors() {
         let level = |counts: [[usize; 2]; 3], energy: [f64; 2]| -> Vec<Group> { counts.iter().map(|c| showing(c, &energy)).collect() };
         let (fine, coarse) = (level([[4, 4], [4, 4], [4, 4]], [7., 7.]), level([[7, 6], [3, 6], [5, 6]], [4., 6.]));
-        let read = between(&fine, &coarse, &UNIT);
+        let times = [0., 1., 2.];
+        let read = between(&fine, &coarse, &UNIT, &times);
         let pairs = |x: [f64; 3]| [x[1] * x[2], x[0] * x[2], x[0] * x[1]];
         let (first, second) = (pairs([3., -1., 1.]), pairs([2., 2., 2.]));
-        let without: Vec<f64> = (0..3).map(|i| 0.5 * (first[i] + second[i]) / 576.).collect();
+        let without: Vec<f64> = (0..3).map(|i| (first[i] + 0.5 * second[i]) / 1.5 / 576.).collect();
         let whole = without.iter().sum::<f64>() / 3.;
         assert!(first.iter().sum::<f64>() < 0. && (read.shown[0].value - whole).abs() < 1e-17 && (read.shown[1].value - whole).abs() < 1e-17, "{:?} against {whole}", read.shown[0]);
         let expected = spread(without.iter().copied(), 3.);
@@ -801,10 +863,10 @@ mod tests {
         assert!(read.loss.value == 0. && read.loss.spread.error == 0.);
         let t = read.temperature.expect("T is read at both levels");
         let allowed = allowance(7., semiclassical([0.; 2], &UNIT));
-        assert!((t.value - 0.5 * ((4. / 7. - 1.0f64).powi(2) + (6. / 7. - 1.0f64).powi(2)) / 9. / (allowed * allowed)).abs() < 1e-15 && t.spread.error < 1e-15, "{t:?}");
-        let two = between(&fine[..2], &coarse[..2], &UNIT).shown[0];
-        assert!((two.value - 0.5 * (-3. + 4.) / 576.).abs() < 1e-17 && !two.spread.read(), "{two:?}");
-        assert!(between(&fine[..1], &coarse[..1], &UNIT).shown[0].value.is_nan());
+        assert!((t.value - ((4. / 7. - 1.0f64).powi(2) + 0.5 * (6. / 7. - 1.0f64).powi(2)) / 1.5 / 9. / (allowed * allowed)).abs() < 1e-15 && t.spread.error < 1e-15, "{t:?}");
+        let two = between(&fine[..2], &coarse[..2], &UNIT, &times).shown[0];
+        assert!((two.value - (-3. + 0.5 * 4.) / 1.5 / 576.).abs() < 1e-17 && !two.spread.read(), "{two:?}");
+        assert!(between(&fine[..1], &coarse[..1], &UNIT, &times).shown[0].value.is_nan());
     }
 
     /// The step's size (`between`) against synthetic levels: 11 groups of 8 atoms, 8 outputs after t = 0; at each an
@@ -843,7 +905,7 @@ mod tests {
                         .collect()
                 };
                 let (fine, coarse) = (level(0.), level(3. * bias));
-                let read = between(&fine, &coarse, &UNIT).shown[0];
+                let read = between(&fine, &coarse, &UNIT, &(0..=outputs).map(|k| k as f64).collect::<Vec<_>>()).shown[0];
                 let (f, c) = (summarize(&fine, &UNIT), summarize(&coarse, &UNIT));
                 let shown = |e: &Estimate| e.populations[0] * (1. - e.loss);
                 let mean = (1..=outputs).map(|k| (shown(&c[k]) - shown(&f[k])) / 3.).sum::<f64>() / outputs as f64;
@@ -903,7 +965,7 @@ mod tests {
                     fine.push(group(energies.iter().map(|&(e, _)| Some(atom(0, 0., e))).collect()));
                     coarse.push(group(energies.iter().map(|&(e, other)| Some(atom(0, 0., (1. + 3. * bias) * (rho * e + (1. - rho) * other)))).collect()));
                 }
-                let read = between(&twice(&fine), &twice(&coarse), &free).temperature.unwrap();
+                let read = between(&twice(&fine), &twice(&coarse), &free, &[0., 1.]).temperature.unwrap();
                 sum += read.value;
                 squares += read.value * read.value;
             }
@@ -1204,10 +1266,10 @@ mod tests {
         assert!((e[2].trajectories, e[2].held, e[2].failed) == (4., 4., 4.) && e[2].populations[0] == 1. && e[2].loss_error.read() && e[2].motion.is_some_and(|m| m.temperature_errors[0].read()));
         assert!((e[3].trajectories, e[3].held, e[3].failed) == (0., 0., 8.) && e[3].motion.is_none() && !e[3].loss_error.read() && e[3].shown_errors.iter().all(|s| !s.read()));
         assert_eq!((e[3].shown_interval(), e[3].shown_statistics()), (f64::INFINITY, 1.));
-        let read = between(&groups, &made(), &UNIT);
+        let read = between(&groups, &made(), &UNIT, &[0., 1., 2., 3.]);
         assert!(read.loss.value == 0. && read.shown[0].value == 0. && read.loss.spread.read() && read.temperature.is_some_and(|t| t.value == 0.), "{read:?}");
         let late: Vec<Group> = groups.iter().map(|g| Group { sums: vec![g.sums[0].clone(), g.sums[3].clone()], scattered: g.scattered }).collect();
-        let none = between(&late, &late, &UNIT);
+        let none = between(&late, &late, &UNIT, &[0., 3.]);
         assert!(none.loss.value.is_nan() && !none.loss.spread.read() && none.temperature.is_none(), "{none:?}");
         let lost: Vec<Group> = (0..4)
             .map(|_| {

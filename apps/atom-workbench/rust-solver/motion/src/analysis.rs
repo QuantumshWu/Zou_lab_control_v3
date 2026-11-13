@@ -11,7 +11,10 @@
 //!   d(t) = y(t) − [y(a)(b − t) + y(b)(t − a)]/(b − a),
 //! is compared with its own noise: d's delete-one-group jackknife (estimate.rs, # Errors) -- the ends and the point are
 //! read on the same trajectories, so their correlation is in it --, its interval at the confidence z among the
-//! interval's looks (the quantities times the points read, Šidák: estimate.rs, # Many looks). Where some deviation lies
+//! interval's looks (the quantities times the points read, Šidák: estimate.rs, # Many looks), and the rounding of d's
+//! own five operations, γ₅(|y(t)| + |y(a)| + |y(b)|) (units.rs `rounding`): a reading the same in every group has no
+//! spread, and the line through its ends misses it by that rounding where it does not change (measured: a T read the
+//! same in eleven identical groups split a 1000 µs run down to its candidates). Where some deviation lies
 //! beyond its interval the interval is halved at its middle and each half judged alike; else the line through its ends
 //! holds what is read inside it within the noise, and the interval stands. The analysis times are the ends of the
 //! intervals that stand.
@@ -40,6 +43,7 @@
 //! each cut's (1.10 at z = 2), whatever the number of candidates.
 
 use crate::estimate::{spread, Spread};
+use crate::units::rounding;
 
 /// A quantity read at an analysis time: its estimate over all the groups and its values with each group left out (the
 /// delete-one-group jackknife's, estimate.rs # Errors), the same groups at every time.
@@ -78,7 +82,7 @@ pub fn analysis_times(times: &[f64], cuts: &[usize], read: &mut dyn FnMut(usize)
                 let off = line(y.whole, ya.whole, yb.whole);
                 let leave = y.leave.iter().zip(ya.leave.iter().zip(&yb.leave)).map(|(&y, (&ya, &yb))| line(y, ya, yb));
                 let noise: Spread = spread(leave, y.leave.len() as f64);
-                off.abs() > noise.interval_over(looks)
+                off.abs() > noise.interval_over(looks) + rounding(5) * (y.whole.abs() + ya.whole.abs() + yb.whole.abs())
             })
         });
         if beyond {
