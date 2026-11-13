@@ -164,7 +164,7 @@ pub fn half_window(frequency: f64, t: f64) -> f64 {
 
 /// n̄ of a lab axis of frequency ω > 0 (rad/µs; module documentation): (ħ/m)Σ⟨κ²⟩ (rad/µs) summed over `atoms` atoms, over
 /// their number and ω, less ½.
-pub fn occupation(kinetic: f64, atoms: f64, frequency: f64) -> f64 {
+fn occupation(kinetic: f64, atoms: f64, frequency: f64) -> f64 {
     kinetic / (atoms * frequency) - 0.5
 }
 
