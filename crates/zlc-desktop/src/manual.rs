@@ -382,7 +382,7 @@ pub enum Effect { None, Apply(Box<Apply>), Save { editor: String, panel: String,
 pub fn save_command(id: &Value, panel: &str, document: u32, path: &str, asked: bool, overwrite: bool) -> Value {
     let image = match path.strip_suffix(".npz").or_else(|| path.strip_suffix(".NPZ")) { Some(stem) => format!("{stem}.png"), None => format!("{path}.png") };
     let agreed = if overwrite { json!(true) } else if asked { json!([path]) } else { json!(false) };
-    json!({"id": id, "action": "save", "panel": panel, "path": image, "document": document, "overwrite": agreed})
+    json!({"id": id, "action": "save", "panel": panel, "path": image, "_document": document, "overwrite": agreed})
 }
 
 pub struct Draft {
@@ -1535,7 +1535,7 @@ mod tests {
             let mut command = save_command(&json!(request), "preview", 1, &archive.display().to_string(), asked, overwrite);
             assert_eq!(command["path"], json!(image.display().to_string()), "the picture beside the archive");
             // Which document it is for is the host's to read (main.rs), not the document's.
-            assert_eq!(command.as_object_mut().unwrap().remove("document"), Some(json!(1)));
+            assert_eq!(command.as_object_mut().unwrap().remove("_document"), Some(json!(1)));
             let state = document.execute(&command.to_string(), Default::default(), None, None).unwrap().state;
             document.finish_presentation(&all, &all);
             assert!(state["error"].is_null(), "{}", state["error"]);

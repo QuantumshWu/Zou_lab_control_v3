@@ -11,7 +11,7 @@ pub fn merge_scroll(pending: &mut Value, incoming: &Value) -> bool {
     if !eligible(pending) || !eligible(incoming) { return false; }
     // Bounds/limits may come from successive fronts; role and cell identify
     // the same axes. The most recent snapshot supplies the final routing.
-    for field in ["panel", "document", "modifiers", "buttons"] {
+    for field in ["panel", "_document", "modifiers", "buttons"] {
         if pending[field] != incoming[field] { return false; }
     }
     if !pending["axes"].is_object() || !incoming["axes"].is_object() { return false; }
@@ -31,7 +31,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     fn scroll(id: u64, steps: f64) -> Value {
-        json!({"id":id,"action":"pointer","event":"scroll","panel":"camera","document":1,
+        json!({"id":id,"action":"pointer","event":"scroll","panel":"camera","_document":1,
             "steps":steps,"axes":{"role":"image","cell_index":null,"x_limits":[0,10]},
             "modifiers":[],"buttons":[],"_coalesce_scroll":true})
     }
@@ -50,7 +50,7 @@ mod tests {
     #[test]
     fn gesture_direction_routing_and_reply_boundaries_are_never_merged() {
         let patches = [json!({"event":"move"}), json!({"event":"press"}), json!({"action":"configure"}),
-            json!({"steps":0.08}), json!({"steps":0}), json!({"panel":"other"}), json!({"document":2}),
+            json!({"steps":0.08}), json!({"steps":0}), json!({"panel":"other"}), json!({"_document":2}),
             json!({"modifiers":["shift"]}), json!({"buttons":["middle"]}), json!({"axes":null}),
             json!({"axes":{"role":"distribution","cell_index":null}}),
             json!({"axes":{"role":"image","cell_index":2}}), json!({"_coalesce_scroll":false}),
