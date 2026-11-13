@@ -136,10 +136,10 @@
 //! by 2 or less on a resolved grid -- a kink, an unread node, a read of no order -- ends the axis there, and what it leaves
 //! stands as `table_reads` reads it at the atoms. Past its rate's resolution every halving at least halves the read, so an
 //! axis takes at most ⌈log₂ λh₀⌉⁺ halvings and then ⌈log₂ r⌉ (r its read there over the shares): the nodes are fixed by
-//! the lines' rates, the reads and the shares alone -- the work bound (solve.rs: the pilot's middles) is only a ceiling no
-//! grid passes, met where a table of many axes needs a verifying halving of each (every one doubles the grid: R4_LIN_4
-//! with both carriers' dressings coherent asks 193 x 13 x 13 x 16 nodes of 1760 reals, 7 GB, of one table; at the ceiling
-//! its error is read at the atoms and booked). (The order's own factor, 2^VALUE_ORDER a halving, holds only past the
+//! the lines' rates, the reads and the shares alone -- what the run's points let a table cost (# Work) is only a ceiling
+//! no grid passes, met where a table of many axes needs a verifying halving of each (every one doubles the grid: R4_LIN_4
+//! with both carriers' dressings coherent asks 193 x 13 x 13 x 16 nodes of 1760 reals, 7 GB, of one table); a table that
+//! meets it with a read beyond the shares is not made (# Work). (The order's own factor, 2^VALUE_ORDER a halving, holds only past the
 //! transition: asked of every halving, or of the halvings a read's order predicts, it ended R4_LIN_2's tweezer axis at
 //! 97 nodes with its read 1.44 times its share, where 193 read it within.) The solve's work bound decides which
 //! coordinates are axes (their first grid, `first_table`); of how far they are refined it is the ceiling alone. (Refined until the
@@ -157,8 +157,15 @@
 //!
 //! # Work
 //! A point costs the table's interpolation of the reals asked, 4^D (1 + D) each on D axes (4^D for a value alone), and the
-//! coordinates (each frequency's field and chart from its beams); the chain rule's 3 D a real is not counted. A node's own
-//! cost -- its elimination and its forms -- is counted nowhere: the tables are made once a model.
+//! coordinates (each frequency's field and chart from its beams); the chain rule's 3 D a real is not counted. A table is
+//! the elimination's cheaper route, not another function: a node costs one elimination E (its counted work, at the
+//! focus), as a point evaluated directly does. So a grid of N nodes on D axes of w reals is made only where it costs
+//! less than the direct evaluation at the P points it serves (P the work bound, the pilot's middles), N E + P 4^D (1 +
+//! D) w < P E (`Layout::pays`): the first grid, every axis taken, every halving -- each counted before the grid is
+//! made, so that no grid is made, and none of its memory taken, that the direct evaluation would better. Where a read
+//! beyond the shares asks a halving that costs more, the table is not made, and the cluster's forms are the exact
+//! elimination's at every point: a table that cannot meet its shares for less than the direct evaluation is no saving
+//! (S2Q's probe at the fourth order, refined on the trap's flanks of a 191 µK reach, reached 529 592 nodes, 9.15 GB).
 
 use super::assemble::{sized, Middle, NearValues, Plan, Site};
 use super::reach::Region;
@@ -200,6 +207,9 @@ pub struct Layout {
     rates: Vec<f64>,
     polarizations: Vec<Vec<Polarization>>,
     plan: Arc<Plan>,
+    /// The elimination's counted work at a point (real multiply-adds, at the focus): a point's direct evaluation, and a
+    /// node's (# Work).
+    exact: f64,
 }
 
 /// A near table: its layout and the table of its nodes' reals (module documentation, # A node's reals).
@@ -220,6 +230,16 @@ impl Layout {
     /// A node's reals (module documentation, # A node's reals).
     fn width(&self) -> usize {
         2 * self.plan.near.len() + self.plan.generator_start.len() + self.plan.form_start.len() + self.plan.jumps_start.len()
+    }
+
+    /// Whether a table of this layout on the grid `axes` costs less than the direct evaluation it stands for at `most`
+    /// points (module documentation, # Work): its nodes' eliminations and the points' interpolations, N E + P 4^D (1 + D)
+    /// w, against P E -- counted before the grid is made, so that no grid is made, and none of its memory taken, that
+    /// the direct evaluation would better.
+    fn pays(&self, axes: &[Axis], most: usize) -> bool {
+        let d = axes.len();
+        let interpolation = (4usize.pow(d as u32) * (1 + d) * self.width()) as f64;
+        (Table::nodes(axes) as f64) * self.exact + most as f64 * interpolation < most as f64 * self.exact
     }
 }
 
@@ -526,7 +546,7 @@ impl Model {
     pub fn halved_by(&self, table: &NearTable, f: usize, over: f64, before: &mut Option<f64>, most: usize) -> Option<Table> {
         let on = halving_on(over, table.table.axes()[f].spacing(), table.layout.rates[f], *before);
         *before = Some(over);
-        (on && Table::nodes(&Model::finer(table, f)) <= most).then(|| self.halved(table, f))
+        (on && table.layout.pays(&Model::finer(table, f), most)).then(|| self.halved(table, f))
     }
 
     /// The near tables for the atoms' reach (module documentation, # Axes, # Refinement): per cluster the running lights'
@@ -551,7 +571,7 @@ impl Model {
             .map(|&(cluster, lights)| {
                 let mut needed = vec![];
                 while let Some(First { table, ranges, held }) = self.first_table(cluster, lights, reach, most, &needed) {
-                    let table = self.refined(table, &ranges, reach, most);
+                    let table = self.refined(table, &ranges, reach, most)?;
                     match held.iter().find(|(coordinate, worst)| self.look(&table, &ranges, *coordinate, &[*worst], reach).0 > 1.0) {
                         Some((coordinate, _)) => needed.push(*coordinate),
                         None => return Some(table),
@@ -599,12 +619,17 @@ impl Model {
 
     /// A table refined over the atoms' reach, its axes' ranges there given (module documentation, # Refinement): each axis in
     /// turn halved, each halving reading the grid before it at the new nodes, while that read asks it (`halving_on`) and the
-    /// halved grid is within the work bound `most`.
-    fn refined(&self, mut table: NearTable, ranges: &[(f64, f64)], reach: &Reach, most: usize) -> NearTable {
+    /// halved grid costs less than the direct evaluation at the work bound's `most` points (`Layout::pays`). None where a
+    /// read beyond the shares asks a halving that costs more: the table cannot meet its shares for less than the direct
+    /// evaluation, which is exact -- the cluster's forms are evaluated so (# Work).
+    fn refined(&self, mut table: NearTable, ranges: &[(f64, f64)], reach: &Reach, most: usize) -> Option<NearTable> {
         let d = table.axes();
         let (mut ended, mut before) = (vec![false; d], vec![None; d]);
         while let Some(f) = ended.iter().position(|e| !e) {
-            if Table::nodes(&Model::finer(&table, f)) > most {
+            if !table.layout.pays(&Model::finer(&table, f), most) {
+                if before[f].is_some_and(|read: f64| read > 1.0) {
+                    return None;
+                }
                 ended[f] = true;
                 continue;
             }
@@ -614,7 +639,7 @@ impl Model {
             before[f] = Some(over);
             table.table = finer;
         }
-        table
+        Some(table)
     }
 
     /// A look at a coordinate a table holds at its focus value (module documentation, # Axes): the table's nodes that the
@@ -732,7 +757,6 @@ impl Model {
         let mut order: Vec<usize> = (0..all.len()).collect();
         order.sort_by(|&a, &b| weights[b].total_cmp(&weights[a]));
         // The table of given axes, each on its first grid, the other coordinates at the focus.
-        let width = 2 * plan.near.len();
         let exact = self.near_exact(&plan, &focus_amplitudes, 1, &coherent).work * crate::decide::COMPLEX;
         let made = |axes: &[usize]| -> Option<NearTable> {
             let picked: Vec<usize> = axes.iter().copied().chain(order.iter().copied().filter(|c| !axes.contains(c))).collect();
@@ -744,6 +768,7 @@ impl Model {
                 rates: picked.iter().map(|&c| rates[c]).collect(),
                 polarizations: polarizations.clone(),
                 plan: plan.clone(),
+                exact,
             };
             let grid = axes.iter().map(|&c| first_axis(all[c])).collect();
             let table = Table::build(grid, layout.width(), most, &|s: &[f64], out: &mut [f64]| self.node_at(&layout, s, out)).ok()?;
@@ -761,7 +786,7 @@ impl Model {
             }
             let d = axes.len() + 1;
             let first: Vec<Axis> = axes.iter().chain(std::iter::once(&c)).map(|&a| first_axis(all[a])).collect();
-            if d > crate::table::MOST_AXES || (4usize.pow(d as u32) * (1 + d) * width) as f64 >= exact || Table::nodes(&first) > most {
+            if d > crate::table::MOST_AXES || !table.layout.pays(&first, most) {
                 break;
             }
             let axis = first[d - 1];
@@ -1165,7 +1190,7 @@ mod tests {
         let (axis, grid) = (first_axis(unit), Table::nodes(first.table.axes()));
         let values: Vec<f64> = (0..axis.nodes).map(|i| axis.node(i)).collect();
         let early = model.look(&first, &ranges, unit, &values, &reach).0;
-        let refined = model.refined(first, &ranges, &reach, most);
+        let refined = model.refined(first, &ranges, &reach, most).expect("a table the run affords");
         let last = model.look(&refined, &ranges, unit, &[worst], &reach).0;
         eprintln!("R3_DOPPLER: the pair's unit over the tweezer's {grid} first nodes reads {early:.1e} of the shares; at its worst value {worst} over the refined table's {} nodes, {last:.1e}", Table::nodes(refined.table.axes()));
         assert!(early <= 1.0 && last <= 1.0, "the table does not need the unit: {early:e}, {last:e} of the shares");
@@ -1270,9 +1295,12 @@ mod tests {
     /// A table's nodes are its function's, not the run's (module documentation, # Refinement). The nearly magic probe of the
     /// test above with its line moved 30 half-widths over the tweezer's whole intensity, over a reach of 120 µK: the line
     /// crosses resonance on the intensity's axis, and the refinement goes on to a grid whose read is within the shares (1537
-    /// nodes). Tabulated under the work bound of a run and of one twice as long -- the bound of the pilot's middles, here 2^12
-    /// and 2^13 nodes -- the tables are the same, node for node and value for value, and the table's error at the atoms
-    /// across the reach is within its shares; the ceiling of a run eight times as short, 2^9 nodes, ends the axis below it.
+    /// nodes). Tabulated for a run whose pilot takes 2^12 middles and for one twice as long, the tables are the same, node
+    /// for node and value for value, and the table's error at the atoms across the reach is within its shares. For a run
+    /// eight times as short, 2^9 middles, the grid its read asks costs more than evaluating the forms at those points
+    /// (`Layout::pays`): a refinement that cannot meet its shares for less than the direct evaluation makes no table, and
+    /// the cluster's forms are the exact elimination's at every point (# Work) -- not a table beyond its shares, nor one
+    /// beyond its cost. (S2Q's probe table, refined on the trap's flanks, reached 529 592 nodes of 2160 reals, 9.15 GB.)
     #[test]
     fn a_table_s_nodes_do_not_grow_with_the_run() {
         let (request, light, kept, b) = nearly_magic(30.0);
@@ -1291,8 +1319,9 @@ mod tests {
         let largest = model.table_reads(&short, &samples)[index].whole.iter().map(|r| r.population.max(r.temperature)).fold(0.0, f64::max);
         let (shown, temperature) = shares();
         eprintln!("the line moved 30 half-widths: {nodes} nodes under either bound; the table's largest read across the reach {largest:.2e}");
-        let ceiling = model.tabulate(&reach, 1 << 9);
-        assert!(nodes > 1 << 9 && Table::nodes(ceiling.tables[index].table.axes()) <= 1 << 9, "the refined grid {nodes} beyond the ceiling 2^9, which ends it below");
+        let short_run = model.tabulate(&reach, 1 << 9);
+        assert!(nodes > 1 << 9, "the refined grid {nodes} beyond a short run's points 2^9");
+        assert!(short_run.of(cluster, &model.running()).is_none(), "a table the short run cannot afford to refine is not made: the forms are evaluated directly");
         assert!(largest <= shown.min(temperature), "the table's read {largest:.3e} across the reach within its share {:.3e}", shown.min(temperature));
     }
 }
