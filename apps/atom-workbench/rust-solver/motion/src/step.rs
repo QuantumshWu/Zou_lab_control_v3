@@ -516,6 +516,19 @@ pub trait Middle {
     /// with Re tr(G_m ρ) per lab axis, for a Hermitian ρ.
     fn tones(&self, path: &Self::Path, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3]));
 
+    /// The middle's two forms at once (`Midway::stretch`): Σ_m w(Ω_m) Re tr(G_m σ) -- the fixed point's tones on σ, each
+    /// weighted by w of its beat (`tones`) -- plus Re tr(Ĝ(0) ρ), the form at the middle along the path (`force` at s = 0),
+    /// per lab axis.
+    fn centre(&self, path: &Self::Path, held: &[C64], weight: &dyn Fn(f64) -> f64, rho: &[C64]) -> [f64; 3] {
+        let mut out = self.force(path, 0.0, rho);
+        self.tones(path, held, &mut |omega, form| {
+            for a in 0..3 {
+                out[a] += weight(omega) * form[a];
+            }
+        });
+        out
+    }
+
     /// What the light a state scatters at the point gives the momentum per unit time beside the Ehrenfest force and the
     /// jumps' kicks (`Model::scattering_on`): the force and the second moment's rate the jumps do not carry, of the
     /// state ψ at the middle's time and the path's momentum. Asked of the middle, which holds the point: the model makes
@@ -1283,9 +1296,10 @@ mod count {
     }
     /// The kick's part of the state through `nodes` nodes: per node its density's upper triangle into the weighted
     /// sums (one on a still path, three on a beating one); then the model's one form of the sum, or on a beating path
-    /// the middle state's density, its tones, and the three nodes' forms.
+    /// the middle state's density, laid with the middle node's sum, and the three nodes' forms (the middle's with the
+    /// tones on it, `Middle::centre`).
     pub fn impulse(n: usize, model: [f64; 3], nodes: usize, still: bool) -> f64 {
-        let (sums, forms) = if still { (1, model[1]) } else { (3, (n * n) as f64 + model[2] + 3.0 * model[1]) };
+        let (sums, forms) = if still { (1, model[1]) } else { (3, (2 * n * n) as f64 + 3.0 * model[1]) };
         COMPLEX * ((nodes * (1 + sums) * n * (n + 1) / 2) as f64 + forms)
     }
     /// The shear of the start state, the prediction of the path's momentum: its density and its tones.
@@ -1316,7 +1330,8 @@ fn root_states() -> f64 {
 /// The picture of the generator along a step's path (`spectral::Picture`), prepared -- each route priced at its
 /// quadrature's nodes, the middle and the end (`nodes`), and at the states a jump's root reads (`root_states`) times the
 /// chance of a jump in what is left of the step, 1 − e^{−h₀|h − u|} at the hazard h₀ of `start`, the frame's state at
-/// the time u it is launched from (none: no root priced) --: the model's generator at the step's middle and, unless it
+/// the time u it is launched from (none: no root priced); the strides' share at what that state forgets, h₀
+/// (`Picture::prepare`) --: the model's generator at the step's middle and, unless it
 /// is still along every path, at the step's two ends. Their decay is laid into `decay` first, node by node in the order
 /// of the kick's sums (`laid_decay`; −h, 0, h, or the middle alone where Ĥ is still): the survival's hazard (# Jumps);
 /// `part` is a sum's scratch. Returns the largest sum of the decay's entries' moduli over the nodes.
@@ -1330,12 +1345,13 @@ fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64, (decay
     decay.fill(0.0);
     let generators = if still { [Some(&picture.base), None, None] } else { [Some(&picture.ends[0]), Some(&picture.base), Some(&picture.ends[1])] };
     let scale = generators.into_iter().flatten().enumerate().map(|(j, generator)| laid_decay(generator, j, decay)).fold(0.0, f64::max);
-    let roots = start.map_or(0.0, |(x, u)| {
+    let rate = start.map_or(0.0, |(x, u)| {
         part.fill(0.0);
         gather(still, h, u, 1.0, x, &mut [0.0; 3], part);
-        -(-hazard(decay, part, x.len()).max(0.0) * (h - u).abs()).exp_m1() * root_states()
+        hazard(decay, part, x.len()).max(0.0)
     });
-    picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots);
+    let roots = -(-rate * (h - start.map_or(h, |(_, u)| u)).abs()).exp_m1() * root_states();
+    picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots, rate);
     scale
 }
 
@@ -1933,8 +1949,11 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         }
                     }
                 }
-                out = shear(&along, held, &middle[..n], tau);
+                density(&middle[..n], held);
             }
+            // The middle node's form and the shear of the middle state -- each tone at its beat alone, τ sinc(Ωτ/2) -- in
+            // one pass of the model's forms (`Middle::centre`).
+            let shear = |omega: f64| tau * sinc(0.5 * omega * tau);
             for (j, at) in [-h, 0.0, h].into_iter().enumerate() {
                 whole(sums, j, n, sum);
                 if middle.is_some() {
@@ -1942,7 +1961,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         *q -= *rho * march.weights[j];
                     }
                 }
-                let form = along.middle.force(&along.path, at, sum);
+                let form = if j == 1 && middle.is_some() { along.middle.centre(&along.path, held, &shear, sum) } else { along.middle.force(&along.path, at, sum) };
                 for a in 0..3 {
                     out[a] -= form[a];
                 }

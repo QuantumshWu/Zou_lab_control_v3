@@ -821,6 +821,13 @@ pub struct Run<'a> {
 }
 
 impl<'a> Run<'a> {
+    /// A cluster's plan and its table's axes and nodes, described (the step's cost harness, step/tests.rs).
+    #[cfg(test)]
+    pub(crate) fn described(&self, cluster: usize) -> String {
+        let (plan, table) = &self.plans[cluster];
+        let grid = table.map_or("no table".to_string(), |t| format!("table axes {} nodes {} width {}", t.axes(), crate::table::Table::nodes(t.table.axes()), t.table.width()));
+        format!("{} | {grid}", plan.described())
+    }
     /// The run of a model with the exact elimination at every point.
     pub fn new(model: &'a Model, reference: [f64; GROUND]) -> Run<'a> {
         Run::with(model, None, reference)
