@@ -43,7 +43,7 @@
 //!   frequencies times the step are. The gradient's slow change is taken through the same three nodes (`propagate`).
 //! The step's time integral -- the kick -- is read on that state at the nodes of a
 //! Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: to
-//! round-off), piece by piece between the step's jumps (# Jumps), and the norm's root between them. These nodes meet
+//! round-off), piece by piece between the step's jumps (# Jumps), and the survival's with it. These nodes meet
 //! no model and no hop. Their number still follows the
 //! bandwidth: the kick is a quotient by the norm, whose sum of exponentials under the forms' has no closed form (below).
 //! What is left is of the slow change alone (spectral.rs), and neither part of it grows with the detuning times the
@@ -85,7 +85,10 @@
 //! whole is its one form with ∫ρ = Σ_k w_k ρ_k. (With a decay the mean is a quotient by the norm, whose own ringing --
 //! of the size Γ/Δ times the excited share -- puts a part of the quotient at twice the forms' bandwidth, which the
 //! quadrature does not resolve: the kick errs by a part of that ringing, measured 2·10⁻⁷ of the dipole kick at twenty
-//! linewidths and Δτ = 50, 10⁻⁵ at Δτ = 200 (tests). Without a decay nothing does.)
+//! linewidths and Δτ = 50, 10⁻⁵ at Δτ = 200 (tests). So does the survival's hazard, the same quotient (# Jumps): at
+//! rest from the bare ground state 2.5·10⁻⁸, 3.4·10⁻⁸ and 3.5·10⁻⁷ of ln N over a step at Δτ = 10, 50, 200, moving
+//! 1.6·10⁻⁵ of the hazard's integral at 200 -- a share that does not fall with the step, so that the doubling does not
+//! read it (tests). Without a decay nothing does.)
 //!
 //! Why a quadrature and not a closed form. On the unnormalized state every form is a sum over the pairs of states of
 //! a slow factor times e^{−i(λ_b − λ_a*)s}, whose integral over the step is a closed form pair by pair (the moments
@@ -135,10 +138,44 @@
 //!   path's velocity errs in first order over that step; the companion reads that too.
 //!
 //! # Jumps (SPEC §1.6)
-//! ‖ψ‖² falls monotonically between jumps (the decay is −(i/2)ΣJ†J by the model's construction). A jump is made inside
-//! the step, where the step's own propagation reaches the trajectory's threshold θ: at the root u* of ln‖x(u)‖² = ln θ
-//! on the step's path, by bracketed inverse interpolation to the norm's rounding (`root`), from the state x(u*) that
-//! propagation has there, and **at the path's own point there** -- the position r_h + v_m u*, the momentum κ_m the
+//! Between jumps ‖ψ‖² is the probability N that no jump happened, and the exact flow only lowers it, at the rate of the
+//! generator's decay on the state's direction x̂: d ln N/du = −h(u), h = x̂†Γ(u)x̂ ≥ 0, Γ = i(Ĥ − Ĥ†) = ΣJ†J (the jumps'
+//! product, by the model's construction). The propagation (spectral.rs) is no such flow: its state goes through a change
+//! of basis that is not unitary, its hops' Magnus terms are taken in a basis that is not orthogonal, and its norm rises
+//! where the flow's falls -- the map's largest singular value 1.0095 on R4_LIN_2's step at the engine's τ, up to 70 on
+//! random long steps, 10²⁰⁰ compounded over a two-level atom's steps at 10 Γ (motion3d_status/rewrite/norm.status.md,
+//! int.status.md) --, which made an atom wait too long for its next jump and a root taken as monotone miss the first
+//! crossing. So the step takes the survival from the law, not from the propagation's norm: ln N(u) = ln N(u₀) − ∫h, h on
+//! the propagation's direction, Γ(u) the parabola of the generator's decay through the step's three nodes -- the
+//! generator the propagation takes, its one matrix where Ĥ is still --, and the trajectory's state is √N times the
+//! direction.
+//! - The integral is the kick's quadrature's: each node's density is in the three nodes' Lagrange sums S_j already
+//!   (`accumulate`), and ∫h over what they hold is Σ_j tr(Γ_j S_j) (`hazard`) -- no work a node; a trace of the laid
+//!   decay at each panel's end (`panels`).
+//! - N does not rise where the decay is positive semidefinite at the quadrature's nodes: the weights are positive and
+//!   each node's h a form of it. The model's decay is the jumps' product exactly, from its near tables to their error;
+//!   along the measured scenes' steps -- PGC3D, GMD1C, S3, S3c, R4_LIN_2, S1, R3_DOPPLER, TET and a two-level atom at
+//!   10 Γ, from the tables, exactly and as the step's parabola, at the nodes and at 21 times across -- it is positive
+//!   definite everywhere, its least eigenvalue 6·10⁻⁷ of its largest at the least (GMD1C's dark ground states), so that
+//!   N rises by nothing but a sum's rounding (step/tests.rs, `a_scene_s_decay_is_positive_along_its_steps`). (The
+//!   parabola of a decay that interferes along the path -- a channel of several plane waves near its zero -- could dip
+//!   below zero between the nodes by its own third-order error; no scene's does.)
+//! - N reaches the trajectory's threshold θ first in the first panel whose end is at θ or below (N is monotone); a jump
+//!   is made there, at the root u* of ln N(u) = ln θ to ln N's rounding, ln N inside the panel its start less ∫h over
+//!   spans of it by their own quadratures on the propagation's states (`Picture::between`), stepped from below at the
+//!   hazard's rate (`root`): the spans below the root are the kick's part of the panel as far as the root, so that the
+//!   root costs the panel's nodes before it and a few more, as laying them again did. The stops met inside that panel
+//!   -- the middle, a time read -- stand where they lie before the root (a time read takes its survival the same way);
+//!   the others are met again after the jump.
+//! - Where to look is the propagation's norm's to tell: it is the survival to the propagation's accuracy and costs n a
+//!   stop. Once it is at θ at a stop, the panel's nodes past it are not taken and the root is sought from the panel's
+//!   start with that stop's time as its first try -- the step does not finish a panel it jumps in, nor lay its nodes
+//!   again; where the survival does not reach θ in the panel after all (a norm that fell too fast), the root's spans
+//!   are the panel's kick to its end, and the step goes on. A crossing the norm misses (a norm that rose) the panel's
+//!   end reads, as above: the survival alone decides.
+//!
+//! The jump is made from the state at the root, √θ times the propagation's direction x̂(u*) there, and **at the path's
+//! own point there** -- the position r_h + v_m u*, the momentum κ_m the
 //! generator is taken at: the photons, the kick and the landing (`jump`) are the model's at the point whose decay timed
 //! the jump. The jump's time, its state and its point are one propagation's; rate × kick is then the scattering force
 //! at one point of the step's path, the path the step's own force is read on, and what is left of it is the step's
@@ -155,8 +192,9 @@
 //! (`spectral::Picture::launch`: a factorization and two hops over what is left of the step), and the step is one
 //! propagation however many jumps it holds:
 //! - the kick's quadrature is taken piece by piece between the jumps (the state is discontinuous there): a piece's
-//!   nodes are laid from its start to the step's end, and where the norm reaches the threshold before that, laid again
-//!   up to the root -- states at nodes, no hop;
+//!   nodes are laid from its start to the step's end, and where the survival reaches the threshold before that, the
+//!   panel it reaches it in is taken again from its start up to the root by the root's own spans (`fallen`) -- states
+//!   at nodes, no hop;
 //! - a jump's kick δκ enters the reference's flow where it is made, exactly: a kick at the time u from the middle ends
 //!   the step as the kick δκ cos ωu and the displacement −(ħ/m) δκ sin(ωu)/ω at the middle do, per principal axis (the
 //!   identity of `spreading` and of `Segment`);
@@ -215,8 +253,8 @@
 //!   Stumpff function. The step takes ΔW and ΔZ at these variances, per principal axis: the energy the diffusion puts
 //!   in is then (ħ/m) tr(2D) τ/2 in the mean at any ωτ, as a white force's is in a harmonic trap. (The free flight's
 //!   lever puts (ωτ)²/12 of it more into the potential energy: three quarters more at the ladder's top rung.)
-//!   The path's momentum κ_m is predicted without the path's increment (its mean is none): the propagation, its norm
-//!   and so the jumps' times do not depend on the deviates.
+//!   The path's momentum κ_m is predicted without the path's increment (its mean is none): the propagation, the
+//!   survival and so the jumps' times do not depend on the deviates.
 //!   F_s and 2D are those of the state at the step's middle, and so is the optical sector's noise beside them (below).
 //!
 //! # The optical sector's noise (model/optical.rs; refs/diffusion/DESIGN.md)
@@ -365,9 +403,10 @@
 //! and the step takes the parabola through three samples of the entry, at most 5/4 of the entry anywhere (the three
 //! points' Lebesgue constant), Hermitian where the entry is: the state goes on under a wrong generator as bounded as the
 //! true one; the impulse is the exact tones' on the middle state and that parabola's on the rest, at most (1 + 5/2) τ
-//! times the force's bound, a step after a step, and the hazard no more than the decay's. The norm may grow over such a
-//! step -- the atom waits too long for its next jump --, as it does below the edge over a step long against the light's
-//! change, which the check reads (step/tests.rs: an atom past its standing wave's resolution). So such a step is taken,
+//! times the force's bound, a step after a step, and the hazard no more than the decay's -- the survival falls by the
+//! decay the step takes, never rises (# Jumps), and its rate is the alias's, as is the state's below the edge over a
+//! step long against the light's change, which the check reads (step/tests.rs: an atom past its standing wave's
+//! resolution). So such a step is taken,
 //! and the trajectory is unresolved from it on (`Trajectory::unresolved`): what it shows is booked whole (solve.rs,
 //! # The reach's atoms).
 
@@ -919,16 +958,22 @@ fn plan(width: f64, bandwidth: f64, nodes: usize) -> (&'static Rule, usize) {
     least.expect("a rule")
 }
 
-/// The nodes and weights over [a, b] of an entire integrand of bandwidth ν to round-off (`plan`, of the rules of
-/// `nodes` nodes and more), in their order from a to b (the rule's nodes are held from the largest down), panel by
-/// panel as they are read: a stiff generator's millions of nodes are never held at once.
-fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize) -> impl Iterator<Item = (f64, f64)> {
+/// The panels over [a, b] of an entire integrand of bandwidth ν to round-off (`plan`, of the rules of `nodes` nodes and
+/// more), in their order from a to b: each panel's end (b itself for the last) and its nodes and weights in their order
+/// (the rule's nodes are held from the largest down), panel by panel as they are read: a stiff generator's millions of
+/// nodes are never held at once.
+fn panels(a: f64, b: f64, bandwidth: f64, nodes: usize) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
     let (rule, panels) = plan((b - a).abs(), bandwidth, nodes);
     let w = (b - a) / panels as f64;
-    (0..panels).flat_map(move |p| {
-        let centre = a + (p as f64 + 0.5) * w;
-        rule.nodes.iter().zip(&rule.weights).rev().map(move |(x, weight)| (centre + 0.5 * w * x, 0.5 * w * weight))
+    (0..panels).map(move |p| {
+        let (centre, end) = (a + (p as f64 + 0.5) * w, if p + 1 == panels { b } else { a + (p + 1) as f64 * w });
+        (end, rule.nodes.iter().zip(&rule.weights).rev().map(move |(x, weight)| (centre + 0.5 * w * x, 0.5 * w * weight)))
     })
+}
+
+/// The nodes and weights over [a, b] of an entire integrand of bandwidth ν to round-off, panel after panel (`panels`).
+fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize) -> impl Iterator<Item = (f64, f64)> {
+    panels(a, b, bandwidth, nodes).flat_map(|(_, nodes)| nodes)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1162,14 +1207,17 @@ fn shear<M: Middle>(along: &Along<M>, rho: &mut [C64], psi: &[C64], tau: f64) ->
 /// A trajectory's scratch memory for its steps, made with it and fitted to each step's cluster (`Scratch::fit`): the
 /// generator's picture along the step's path (`spectral::Picture`: the generator at the step's nodes, its decomposition,
 /// its following, the state's path), one array carved (`Scratch::carve`) into the middle state's density and a
-/// Hermitian sum the model takes, and the nodes' weighted sums of the states' densities as `accumulate` holds them,
-/// twice: the sums, and the sums as they stood where the piece being propagated began (`Midway::attempt`). Every use
-/// writes what it reads: nothing a step left in it is read by another.
+/// Hermitian sum the model takes, and four laid as `accumulate` holds its sums: the nodes' weighted sums of the states'
+/// densities, the sums as they stood where the panel being propagated began (`Midway::stretch`), a span's own inside a
+/// panel (`fallen`), and the generator's decay at the step's nodes (`laid_decay`); and the stops a panel met, kept until
+/// its survival is known (`Midway::stretch`). Every use writes what it reads: nothing a step left in it is read by
+/// another.
 #[derive(Default)]
 pub struct Scratch {
     picture: Picture,
     rest: Vec<C64>,
     sums: Vec<f64>,
+    met: Vec<(Stop, f64, [C64; STATES])>,
     noise: Noise,
 }
 
@@ -1180,6 +1228,9 @@ struct Carved<'a> {
     sum: &'a mut [C64],
     sums: &'a mut [f64],
     saved: &'a mut [f64],
+    part: &'a mut [f64],
+    decay: &'a mut [f64],
+    met: &'a mut Vec<(Stop, f64, [C64; STATES])>,
 }
 
 impl Scratch {
@@ -1187,14 +1238,17 @@ impl Scratch {
     fn fit(&mut self, n: usize) {
         self.picture.fit(n);
         self.rest.resize(2 * n * n, C64::ZERO);
-        self.sums.resize(2 * SUMS * 2 * n * row(n), 0.0);
+        self.sums.resize(4 * SUMS * 2 * n * row(n), 0.0);
     }
     /// The scratch's parts.
     fn carve(&mut self) -> Carved<'_> {
         let n = self.picture.states();
         let (held, sum) = self.rest.split_at_mut(n * n);
-        let (sums, saved) = self.sums.split_at_mut(SUMS * 2 * n * row(n));
-        Carved { picture: &mut self.picture, noise: &mut self.noise, held, sum, sums, saved }
+        let size = SUMS * 2 * n * row(n);
+        let (sums, rest) = self.sums.split_at_mut(size);
+        let (saved, rest) = rest.split_at_mut(size);
+        let (part, decay) = rest.split_at_mut(size);
+        Carved { picture: &mut self.picture, noise: &mut self.noise, held, sum, sums, saved, part, decay, met: &mut self.met }
     }
 }
 
@@ -1223,6 +1277,12 @@ mod count {
     pub fn shear(n: usize, model: [f64; 3]) -> f64 {
         COMPLEX * ((n * n) as f64 + model[2])
     }
+    /// The survival's hazard (# Jumps): the generator's decay laid at the step's nodes -- one, or three on a beating
+    /// path -- once, and `traces` of it on the sums, each over the same upper triangles.
+    pub fn hazard(n: usize, traces: usize, still: bool) -> f64 {
+        let sums = if still { 1 } else { 3 };
+        COMPLEX * ((1 + traces) * sums * n * (n + 1) / 2) as f64
+    }
 }
 
 /// The node count of a quadrature over τ at a bandwidth (`plan`).
@@ -1232,15 +1292,82 @@ fn nodes(tau: f64, bandwidth: f64) -> usize {
 }
 
 /// The picture of the generator along a step's path (`spectral::Picture`), prepared: the model's generator at the
-/// step's middle and, unless it is still along every path, at the step's two ends.
-fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64) {
+/// step's middle and, unless it is still along every path, at the step's two ends. Their decay is laid into `decay`
+/// first, node by node in the order of the kick's sums (`laid_decay`; −h, 0, h, or the middle alone where Ĥ is still):
+/// the survival's hazard (# Jumps). Returns the largest sum of the decay's entries' moduli over the nodes.
+fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64, decay: &mut [f64]) -> f64 {
     let (h, still) = (0.5 * tau, along.middle.still());
     along.middle.generator(&along.path, 0.0, &mut picture.base);
     if !still {
         along.middle.generator(&along.path, -h, &mut picture.ends[0]);
         along.middle.generator(&along.path, h, &mut picture.ends[1]);
     }
+    decay.fill(0.0);
+    let nodes = if still { [Some(&picture.base), None, None] } else { [Some(&picture.ends[0]), Some(&picture.base), Some(&picture.ends[1])] };
+    let scale = nodes.into_iter().flatten().enumerate().map(|(j, generator)| laid_decay(generator, j, decay)).fold(0.0, f64::max);
     picture.prepare(h, still);
+    scale
+}
+
+/// A generator's decay Γ = i(Ĥ − Ĥ†) (Hermitian; Γ_aa = −2 Im Ĥ_aa) laid as the sum j of those `accumulate` holds: on each
+/// entry a ≤ b its real and imaginary parts, twice off the diagonal, so that `hazard` -- the sum of the two laid arrays'
+/// products -- is tr(Γ S) = Σ_a Γ_aa S_aa + 2 Re Σ_{a<b} Γ_ab S_ab* of a Hermitian S held there. Returns Σ_ab |Γ_ab|.
+fn laid_decay(generator: &Mat, j: usize, decay: &mut [f64]) -> f64 {
+    let (n, mut size) = (generator.rows, 0.0);
+    let width = row(n);
+    for a in 0..n {
+        for b in a..n {
+            let (gamma, twice) = (C64::I * (generator.data[a * n + b] - generator.data[b * n + a].conj()), if a == b { 1.0 } else { 2.0 });
+            let at = 2 * (j * n + a) * width + b;
+            (decay[at], decay[at + width]) = (twice * gamma.re, twice * gamma.im);
+            size += twice * gamma.abs();
+        }
+    }
+    size
+}
+
+/// ∫h du over the nodes a laid sum holds (# Jumps): Σ_j tr(Γ_j S_j), Γ_j the generator's decay at the step's node j
+/// (`laid_decay`) and S_j = Σ_k w_k ℓ_j(u_k) x̂_k x̂_k† the sum `accumulate` made -- Σ_k w_k x̂_k†Γ(u_k)x̂_k, Γ(u) = Σ_j ℓ_j(u)Γ_j
+/// the parabola through the step's three nodes the propagation takes (its one matrix where Ĥ is still). On n states,
+/// row by row from the vector of the row's own column on (the laid decay is zero below the diagonal), lane by lane.
+fn hazard(decay: &[f64], sums: &[f64], n: usize) -> f64 {
+    let width = row(n);
+    let mut lanes = [0.0; LANES];
+    for (at, (g, s)) in decay.chunks_exact(width).zip(sums.chunks_exact(width)).enumerate() {
+        let from = at / 2 % n / LANES * LANES;
+        for (g, s) in g[from..].chunks_exact(LANES).zip(s[from..].chunks_exact(LANES)) {
+            for l in 0..LANES {
+                lanes[l] = g[l].mul_add(s[l], lanes[l]);
+            }
+        }
+    }
+    lanes.iter().sum()
+}
+
+/// ∫h over [from, to] (# Jumps) on the propagation's states at the nodes of the span's own quadrature at the step's
+/// bandwidth (`Picture::between`: any time after the launch), their densities summed into `part` as the kick's sums
+/// are, the weights' sums into `weights` (`gather`): the survival inside a panel, where a jump's root or a time read
+/// lies -- and, a span before a jump's root, the kick's part of it. Returns it and the nodes taken.
+fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), bandwidth: f64, decay: &[f64], part: &mut [f64], weights: &mut [f64; 3]) -> (f64, usize) {
+    let n = picture.states();
+    part.fill(0.0);
+    let (mut x, mut nodes) = ([C64::ZERO; STATES], 0);
+    for (u, w) in quadrature(from, to, bandwidth, FORMS) {
+        picture.between(u, &mut x[..n]);
+        gather(still, h, u, w, &x[..n], weights, part);
+        nodes += 1;
+    }
+    (hazard(decay, part, n), nodes)
+}
+
+/// A span's sums (`fallen`) into the kick's: the densities' and the weights'.
+fn taken(part: &[f64], spanned: [f64; 3], sums: &mut [f64], weights: &mut [f64; 3]) {
+    for (sum, p) in sums.iter_mut().zip(part) {
+        *sum += p;
+    }
+    for (sum, w) in weights.iter_mut().zip(spanned) {
+        *sum += w;
+    }
 }
 
 /// A node's state into the kick's sums (`accumulate`): with its weight where Ĥ is still along the path, with its
@@ -1258,67 +1385,80 @@ fn gather(still: bool, h: f64, u: f64, weight: f64, x: &[C64], weights: &mut [f6
     }
 }
 
-/// A root in [lo, hi] of ln D(s) = ln θ for a non-increasing D with D(hi) ≤ θ, D from `norm` and D at the bracket's ends
-/// given (lo itself where D(lo) ≤ θ already): by the inverse interpolation of ln D − ln θ through its last three points
-/// (their parabola's root; their last two's line where three do not tell), kept inside the bracket (its middle where
-/// both step out), until ln D is within its rounding of ln θ or the iteration no longer moves; and where `ROUNDS` of
-/// them have not got there, by the bracket's halving until its ends are neighbours -- the root ends by its rounding or
-/// by its bracket, never by a count.
-///
-/// `floor` is the rounding of ln D as it is computed -- twice the state's relative to its norm, and the norm's own sum --,
-/// the two logarithms' beside it: within it s is the root as far as the norm tells, and the interpolation's next point,
-/// taken without another evaluation, is the root to the norm's actual rounding over its rate. (Beyond it the points
-/// wander in that rounding until the bracket closes on neighbouring numbers: some ten evaluations more.) The norm's rate
-/// 2 Im⟨x|Ĥ|x⟩ is not asked: between two nodes it is not the slope of the state's own norm to the last digit, and a Newton
-/// iteration with it converged at that difference's pace, in twice the evaluations.
-fn root(mut norm: impl FnMut(f64) -> f64, (lo, at_lo): (f64, f64), (hi, at_hi): (f64, f64), theta: f64, floor: f64) -> f64 {
-    let target = theta.ln();
-    let floor = floor + 2.0 * UNIT_ROUNDOFF * target.abs();
-    let (a, b) = (at_lo.ln() - target, at_hi.ln() - target);
-    if !(a > floor) {
-        return lo;
-    }
-    if !(b < -floor) {
-        return hi;
-    }
-    // The last three points (s, ln D − ln θ), the latest first, and their interpolation's root where it lies inside.
-    let interpolated = |[(x1, y1), (x2, y2), (x3, y3)]: [(f64, f64); 3], lo: f64, hi: f64| {
-        let parabola = x1 * y2 * y3 / ((y1 - y2) * (y1 - y3)) + x2 * y1 * y3 / ((y2 - y1) * (y2 - y3)) + x3 * y1 * y2 / ((y3 - y1) * (y3 - y2));
-        let line = x1 - y1 * (x1 - x2) / (y1 - y2);
-        [parabola, line].into_iter().find(|&s| s > lo && s < hi)
-    };
-    let (mut lo, mut hi) = (lo, hi);
-    let mut points = [(hi, b), (lo, a), (f64::NAN, f64::NAN)];
-    let mut s = interpolated(points, lo, hi).unwrap_or(0.5 * (lo + hi));
-    for _ in 0..ROUNDS {
-        let g = norm(s).ln() - target;
-        if g > 0.0 {
-            lo = s;
+/// The hazard at a time u of the step (# Jumps): x̂†Γ(u)x̂ of the propagation's state there (`Picture::between`), its
+/// density through `part` (`gather` at the weight one, `hazard`).
+fn hazard_at(picture: &mut Picture, still: bool, h: f64, u: f64, decay: &[f64], part: &mut [f64]) -> f64 {
+    let n = picture.states();
+    part.fill(0.0);
+    let mut x = [C64::ZERO; STATES];
+    picture.between(u, &mut x[..n]);
+    gather(still, h, u, 1.0, &x[..n], &mut [0.0; 3], part);
+    hazard(decay, part, n)
+}
+
+/// The root in the panel [a, b] of ln N(u) = ln θ (`target`; # Jumps) from the panel's start, ln N(a) = `log`, and
+/// with it the kick's part of the panel as far as the root: from the panel's start on, spans of the panel (`fallen`),
+/// each from the latest time below the root -- a span that stays below it stands, and its sums are the kick's (`taken`,
+/// onto `sums` and `weights` as they stood at the panel's start). `past` is a time known at or past the root with its
+/// ∫h from the panel's start -- the panel's end, where its survival read the crossing there --, or none where the
+/// crossing is the propagation's norm's (`Midway::stretch`) and the panel's end was not read; `guess` the first time
+/// tried (none: the first step's). A step goes from the latest time below to where what is left to fall, ln N − ln θ
+/// there, is fallen at the larger of two rates: the hazard there (`hazard_at`) and its mean over what is left of the
+/// bracket. At the larger rate a step falls short of the root rather than past it where the hazard does not rise, so
+/// that the spans mostly stand; the steps are Newton's from below where it falls -- quadratic -- and the secant's where
+/// the mean is the larger; a time outside the bracket is its middle (without a far end, the panel's end), and after
+/// `ROUNDS` steps every step is. Ends where ln N is within its rounding of ln θ -- `floor` -- or where the bracket has
+/// closed to neighbouring times. The root is then the latest time below and what is left, within that rounding, at the
+/// bracket's mean rate -- not the latest time below itself, which lies on the one side of the root: over a run's
+/// thousands of jumps that side's rounding adds up --, and the kick's sums are the panel's as far as the latest time
+/// below, the sliver past it within the rounding. Without a far end the spans may reach the panel's end below ln θ: the
+/// panel holds no root, and its sums are the spans'. Returns the root (none in the panel), ∫h from the panel's start to
+/// the latest time below, the nodes taken and the hazard's traces.
+fn root(picture: &mut Picture, (still, h, bandwidth): (bool, f64, f64), (decay, part): (&[f64], &mut [f64]), (sums, weights): (&mut [f64], &mut [f64; 3]), (a, b): (f64, f64), log: f64, mut past: Option<(f64, f64)>, guess: f64, target: f64, floor: f64) -> (Option<f64>, f64, usize, usize) {
+    let after = |u: f64, v: f64| (v - u) * (b - a) > 0.0;
+    // (time, ∫h from the panel's start) at the latest time below the root.
+    let (mut below, mut nodes, mut traces) = ((a, 0.0), 0, 0);
+    for round in 0.. {
+        let left = log - below.1 - target;
+        if !(left > floor) {
+            break;
+        }
+        let next = if round == 0 && guess.is_finite() {
+            guess
+        } else if round < ROUNDS {
+            let mean = past.map_or(0.0, |(time, fell)| (fell - below.1) / (time - below.0));
+            let rate = hazard_at(picture, still, h, below.0, decay, part).max(mean);
+            (nodes, traces) = (nodes + 1, traces + 1);
+            below.0 + left / rate
         } else {
-            hi = s;
+            f64::NAN
+        };
+        let u = match past {
+            Some((far, _)) if after(below.0, next) && after(next, far) => next,
+            Some((far, _)) => 0.5 * (below.0 + far),
+            None if after(below.0, next) && after(next, b) => next,
+            None => b,
+        };
+        if !(after(below.0, u) && past.is_none_or(|(far, _)| after(u, far))) {
+            break;
         }
-        points = [(s, g), points[0], points[1]];
-        let refined = interpolated(points, lo, hi);
-        if g.abs() <= floor {
-            return refined.unwrap_or(s);
-        }
-        let next = refined.unwrap_or(0.5 * (lo + hi));
-        if next == s || !(hi > lo) {
-            return s;
-        }
-        s = next;
-    }
-    loop {
-        let middle = 0.5 * (lo + hi);
-        if !(middle > lo && middle < hi) {
-            return hi;
-        }
-        if norm(middle).ln() - target > 0.0 {
-            lo = middle;
+        let mut spanned = [0.0; 3];
+        let (fell, taken_nodes) = fallen(picture, still, h, (below.0, u), bandwidth, decay, part, &mut spanned);
+        (nodes, traces) = (nodes + taken_nodes, traces + 1);
+        // A span that ends within ln N's rounding past the root ends at it: a step aimed at the root lands there within
+        // that rounding either way, and is taken.
+        if log - (below.1 + fell) > target - floor {
+            below = (u, below.1 + fell);
+            taken(part, spanned, sums, weights);
+            if u == b && past.is_none() && log - below.1 - target > floor {
+                return (None, below.1, nodes, traces);
+            }
         } else {
-            hi = middle;
+            past = Some((u, below.1 + fell));
         }
     }
+    let root = past.map_or(below.0, |(far, fell)| below.0 + (log - below.1 - target) * (far - below.0) / (fell - below.1));
+    (Some(if after(below.0, root) && past.is_none_or(|(far, _)| after(root, far)) { root } else { below.0 }), below.1, nodes, traces)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1562,14 +1702,18 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// jumps
     /// - the picture launched from the piece's first state (`spectral::Picture::launch`: the state is then known at
     ///   any time from there on);
-    /// - the frame's state read at the stops in the path's order: the nodes of a quadrature that resolves the
-    ///   generator's own frequencies -- Gauss–Legendre from the piece's start to the step's end at the bandwidth of the
-    ///   forms on a state it propagates (`quadrature`) --, each with its weight; the step's middle, the times read
-    ///   and the step's end, where the state is kept -- a node within the time's round-off of one of them is it;
-    /// - where ‖ψ‖² is at the threshold or below at a stop: the norm's root between the last two stops, the state read
-    ///   at the root's times (`spectral::Picture::between`; `root`); the piece's nodes laid again from its start to
-    ///   the root, the sums as they stood at the piece's start; and the jump at the root on the path's own point
-    ///   (module documentation, # Jumps; `jump`), its state there the next piece's first.
+    /// - the frame's state read at the stops in the path's order, panel by panel: the nodes of a quadrature that
+    ///   resolves the generator's own frequencies -- Gauss–Legendre from the piece's start to the step's end at the
+    ///   bandwidth of the forms on a state it propagates (`panels`) --, each with its weight; the step's middle, the
+    ///   times read and the step's end, where the state is kept -- a node within the time's round-off of one of them is
+    ///   it --, standing once the panel's survival is known;
+    /// - the survival at each panel's end, ln N at the piece's start (‖ψ‖² there) less ∫h over the sums' nodes since
+    ///   (`hazard`; module documentation, # Jumps). Where it is at the threshold or below -- or where the propagation's
+    ///   norm is at the threshold at a stop, from which on the panel's nodes are not taken --: the sums as they stood at
+    ///   the panel's start; the root inside the panel (`root`, ln N there from the panel's start by `fallen`), the
+    ///   spans below it taken into the sums -- the kick's part of the panel as far as the root, its own nodes' --, the
+    ///   stops met before it; and the jump at the root on the path's own point (module documentation, # Jumps; `jump`),
+    ///   from √θ times the direction there, its state the next piece's first.
     ///
     /// The stretch's part of the kick is exact in its decomposition (module documentation, # The kick): the force
     /// along the path, −∫Re tr(Ĝ(u)ρ(u))du over the stretch, Ĝ through the step's three nodes u_j = −h, 0, h and their
@@ -1587,96 +1731,138 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let along = Along::new(generator, kappa_m, velocity);
         let (n, still, costs, cluster) = (along.n, generator.still(), generator.work(), march.state.cluster);
         scratch.fit(n);
-        let Carved { picture, noise, held, sum, sums, saved } = scratch.carve();
-        // The nodes' sums: one where Ĥ is still, the three nodes' on a beating path.
+        let Carved { picture, noise, held, sum, sums, saved, part, decay, met } = scratch.carve();
+        // The nodes' sums: one where Ĥ is still, the three nodes' on a beating path; the decay laid alike.
         let size = (if still { 1 } else { SUMS }) * 2 * n * row(n);
-        let (sums, saved) = (&mut sums[..size], &mut saved[..size]);
-        pictured(&along, picture, tau);
+        let (sums, saved, part, decay) = (&mut sums[..size], &mut saved[..size], &mut part[..size], &mut decay[..size]);
+        let scale = pictured(&along, picture, tau, decay);
         let bandwidth = picture.bandwidth;
         sums.fill(0.0);
         let ahead = |u: f64| (u + h) / tau;
-        let (mut counted, mut middle) = (0, None);
+        let (mut counted, mut traces, mut middle) = (0, 0, None);
         let mut x = [C64::ZERO; STATES];
+        // A state of the frame at a time u in the lab at the survival ln N: the direction at the norm √N.
+        let at = |x: &[C64], u: f64, log: f64| -> Internal {
+            let scale = (0.5 * (log - norm_sqr(x).ln())).exp();
+            along.turned(x, u, false)[..n].iter().map(|z| *z * scale).collect()
+        };
         let done = loop {
-            // A piece: from the state the march stands at, the sums and the weights as they are.
+            // A piece: from the state the march stands at, the sums and the weights as they are, the survival from ‖ψ‖².
             let from = march.u;
             let launched = along.turned(&march.state.psi, from, true);
             picture.launch(from, &launched[..n]);
-            saved.copy_from_slice(sums);
-            let (theta, weights) = (march.state.threshold, march.weights);
-            let (mut at, mut norm) = (from, norm_sqr(&march.state.psi));
-            let mut nodes = quadrature(from, h, bandwidth, FORMS).peekable();
-            let mut fixed = [(!march.passed).then_some((0.0, Stop::Middle)), Some((h, Stop::End))].into_iter().flatten().peekable();
-            let crossed = loop {
-                // The next stop: a node, a kept stop -- the earlier of the next fixed one and the next time read, a
-                // time read at the step's end being the end's own -- or both at once.
-                let read = reads.get(march.read).map(|&time| (time - start) - h).filter(|&u| ahead(u) < 1.0);
-                let kept = match (fixed.peek().copied(), read) {
-                    (Some((stop, _)), Some(u)) if ahead(u) < ahead(stop) => Some((u, Stop::Read)),
-                    (stop, _) => stop,
-                };
-                let (u, weight, keep) = match (nodes.peek().copied(), kept) {
-                    (Some((u, w)), Some((stop, kind))) if (u - stop).abs() <= f64::EPSILON * h.abs() => {
-                        nodes.next();
-                        (stop, Some(w), Some(kind))
-                    }
-                    (Some((u, w)), Some((stop, _))) if ahead(u) < ahead(stop) => {
-                        nodes.next();
-                        (u, Some(w), None)
-                    }
-                    (_, Some((stop, kind))) => (stop, None, Some(kind)),
-                    (_, None) => unreachable!("a piece's stops end with the step's end"),
-                };
-                let bound = picture.advance(u, &mut x[..n]);
-                let now = norm_sqr(&x[..n]);
-                if now <= theta {
-                    let floor = 2.0 * (picture.rounding + bound) + rounding(n + 1);
-                    let between = |time: f64| {
-                        let mut z = [C64::ZERO; STATES];
-                        picture.between(time - h, &mut z[..n]);
-                        norm_sqr(&z[..n])
+            let (target, first, before) = (march.state.threshold.ln(), norm_sqr(&march.state.psi).ln(), hazard(decay, sums, n));
+            traces += 1;
+            // The panel's start and ln N there; the stops met, the middle and the times read as far as they stand.
+            let (mut a, mut log, mut passed, mut read, mut crossed) = (from, first, march.passed, march.read, None);
+            for (b, nodes) in panels(from, h, bandwidth, FORMS) {
+                let mut nodes = nodes.peekable();
+                met.clear();
+                saved.copy_from_slice(sums);
+                let weights = march.weights;
+                // The latest time taken and, once the propagation's norm is at the threshold, that time: the crossing
+                // the norm predicts lies past it (the norm is the survival to the propagation's accuracy, and costs n a
+                // stop). From then on the panel's nodes are not taken -- its kick's part is the root's spans --, its kept
+                // stops still are.
+                let (mut last, mut predicted) = (a, None);
+                loop {
+                    // The next stop of the panel: a node, a kept stop within it -- the earlier of the next fixed one and
+                    // the next time read, a time read at the step's end being the end's own -- or both at once.
+                    let fixed = if passed { (h, Stop::End) } else { (0.0, Stop::Middle) };
+                    let kept = match reads.get(read).map(|&time| (time - start) - h).filter(|&u| ahead(u) < 1.0) {
+                        Some(u) if ahead(u) < ahead(fixed.0) => (u, Stop::Read),
+                        _ => fixed,
                     };
-                    break Some(root(between, (at + h, norm), (u + h, now), theta, floor) - h);
-                }
-                if let Some(w) = weight {
-                    counted += 1;
-                    gather(still, h, u, w, &x[..n], &mut march.weights, sums);
-                }
-                match keep {
-                    Some(Stop::Middle) => {
-                        (middle, march.passed) = (Some(x), true);
-                        fixed.next();
+                    let kept = Some(kept).filter(|&(u, _)| ahead(u) <= ahead(b));
+                    let node = if predicted.is_none() { nodes.peek().copied() } else { None };
+                    let (u, weight, keep) = match (node, kept) {
+                        (Some((u, w)), Some((stop, kind))) if (u - stop).abs() <= f64::EPSILON * h.abs() => {
+                            nodes.next();
+                            (stop, Some(w), Some(kind))
+                        }
+                        (Some((u, w)), Some((stop, _))) if ahead(u) < ahead(stop) => {
+                            nodes.next();
+                            (u, Some(w), None)
+                        }
+                        (_, Some((stop, kind))) => (stop, None, Some(kind)),
+                        (Some((u, w)), None) => {
+                            nodes.next();
+                            (u, Some(w), None)
+                        }
+                        (None, None) => break,
+                    };
+                    picture.advance(u, &mut x[..n]);
+                    if predicted.is_none() && norm_sqr(&x[..n]) <= march.state.threshold {
+                        predicted = Some(last);
                     }
-                    Some(Stop::Read) => {
-                        let state = Trajectory { psi: along.turned(&x[..n], u, false)[..n].iter().copied().collect(), time: reads[march.read], ..march.state.clone() };
-                        march.made.push(Made { kick: None, state });
-                        march.read += 1;
+                    if let (Some(w), None) = (weight, predicted) {
+                        counted += 1;
+                        gather(still, h, u, w, &x[..n], &mut march.weights, sums);
                     }
-                    Some(Stop::End) => break None,
-                    None => {}
+                    last = u;
+                    if let Some(kind) = keep {
+                        met.push((kind, u, x));
+                        match kind {
+                            Stop::Middle => passed = true,
+                            Stop::Read => read += 1,
+                            Stop::End => break,
+                        }
+                    }
                 }
-                (at, norm) = (u, now);
-            };
+                // The panel's end: where the norm predicted a crossing, the root from the panel's start (`root`); else ln N
+                // there by the sums, and where it is at the threshold the root inside the panel. The kick's part of the
+                // panel as far as the root comes with it; a predicted crossing the survival does not reach in the panel
+                // leaves the panel's whole part, ln N at its end (`end`).
+                let mut end = f64::NAN;
+                let search = match predicted {
+                    Some(guess) => Some((None, guess)),
+                    None => {
+                        end = first - (hazard(decay, sums, n) - before);
+                        traces += 1;
+                        (end <= target).then_some((Some((b, log - end)), f64::NAN))
+                    }
+                };
+                let root = search.and_then(|(past, guess)| {
+                    let floor = rounding(2 * counted + size + n + 10) * 1.25 * scale * tau.abs() + 2.0 * UNIT_ROUNDOFF * target.abs();
+                    sums.copy_from_slice(saved);
+                    march.weights = weights;
+                    let (crossed, fell, nodes, spans) = root(picture, (still, h, bandwidth), (decay, part), (sums, &mut march.weights), (a, b), log, past, guess, target, floor);
+                    (counted, traces) = (counted + nodes, traces + spans);
+                    match crossed {
+                        Some(crossed) => picture.between(crossed, &mut x[..n]),
+                        None => end = log - fell,
+                    }
+                    crossed
+                });
+                // The stops met stand as far as the root: the middle state; a time read, at its survival there.
+                let mut below = (a, 0.0);
+                for &(kind, u, state) in met.iter().filter(|m| root.is_none_or(|r| ahead(m.1) < ahead(r))) {
+                    match kind {
+                        Stop::Middle => (middle, march.passed) = (Some(state), true),
+                        Stop::Read => {
+                            let (fell, nodes) = fallen(picture, still, h, (below.0, u), bandwidth, decay, part, &mut [0.0; 3]);
+                            (counted, traces, below) = (counted + nodes, traces + 1, (u, below.1 + fell));
+                            let state = Trajectory { psi: at(&state[..n], u, log - below.1), time: reads[march.read], ..march.state.clone() };
+                            march.made.push(Made { kick: None, state });
+                            march.read += 1;
+                        }
+                        Stop::End => {}
+                    }
+                }
+                if root.is_some() {
+                    crossed = root;
+                    break;
+                }
+                (a, log) = (b, end);
+            }
             let Some(crossed) = crossed else {
-                march.state.psi.copy_from_slice(&along.turned(&x[..n], h, false)[..n]);
+                march.state.psi = at(&x[..n], h, log);
                 march.u = h;
                 break true;
             };
-            // The piece again, as far as the root: its nodes, and the state at the root.
-            sums.copy_from_slice(saved);
-            march.weights = weights;
-            picture.again(&launched[..n]);
-            if ahead(crossed) > ahead(from) {
-                for (u, w) in quadrature(from, crossed, bandwidth, FORMS) {
-                    picture.advance(u, &mut x[..n]);
-                    counted += 1;
-                    gather(still, h, u, w, &x[..n], &mut march.weights, sums);
-                }
-            }
-            picture.advance(crossed, &mut x[..n]);
-            // The jump, on the path's own point.
+            // The jump, on the path's own point, from the state at the threshold.
             let state = &mut march.state;
-            state.psi.copy_from_slice(&along.turned(&x[..n], crossed, false)[..n]);
+            state.psi = at(&x[..n], crossed, target);
             (state.r, state.kappa, state.time) = (std::array::from_fn(|a| self.reached.0[a] + velocity[a] * crossed), kappa_m, start + (crossed + h));
             jump(self.model, state)?;
             let kick = std::array::from_fn(|a| state.kappa[a] - kappa_m[a]);
@@ -1732,7 +1918,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 march.work += work;
             }
         }
-        march.work += count::propagation(costs, still, picture.work) + count::impulse(n, costs, counted, still);
+        march.work += count::propagation(costs, still, picture.work) + count::impulse(n, costs, counted, still) + count::hazard(n, traces, still);
         Ok(done)
     }
 }
@@ -1832,19 +2018,19 @@ impl Brownian {
 /// the cluster's whatever the point (`Middle::work`), and the point gives the generator's picture alone: its
 /// decomposition, its slopes and its following as the step makes them (`pictured`), the quadrature's nodes at its
 /// bandwidth, and the launch with a state at each of them, at the middle and at the end (`spectral::Picture::price`);
-/// the kick's sums and forms, and the shear. The middle itself is the model's (`Dynamics::assembly_work`, one a
-/// step).
+/// the kick's sums and forms, the survival's hazard at the piece's start and at each panel's end, and the shear. The
+/// middle itself is the model's (`Dynamics::assembly_work`, one a step).
 pub fn step_work<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> f64 {
     let (n, costs, still) = (middle.states(), middle.work(), middle.still());
     let along = Along::new(middle, kappa, velocity);
     let mut scratch = Scratch::default();
     scratch.fit(n);
-    let Scratch { picture, noise, .. } = &mut scratch;
-    pictured(&along, picture, tau);
-    let nodes = nodes(tau, picture.bandwidth);
+    let Carved { picture, noise, decay, .. } = scratch.carve();
+    pictured(&along, picture, tau, decay);
+    let (nodes, panels) = (nodes(tau, picture.bandwidth), plan(tau.abs(), picture.bandwidth, FORMS).1);
     let own = picture.work + picture.price(nodes + 2);
     let optical = optical_price(&along, picture, still, &mut noise.sector);
-    count::propagation(costs, still, own) + count::impulse(n, costs, nodes, still) + count::shear(n, costs) + optical
+    count::propagation(costs, still, own) + count::impulse(n, costs, nodes, still) + count::hazard(n, 1 + panels, still) + count::shear(n, costs) + optical
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
