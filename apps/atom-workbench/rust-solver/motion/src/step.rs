@@ -355,7 +355,8 @@
 //! model exists there: a fold that does not exist is no error of τ, and an atom that left the proven set and came back
 //! between two nodes, or between the middle and a jump, would be unseen by a test at points. The path's box holds every
 //! point the step reads the model at. A step the domain does not prove is not taken: the advance ends there (adapt.rs),
-//! and what its path would need is told (`Unproven`).
+//! and what its path would need is told (`Unproven`): a reach that holds its energy, or its own box at its energy
+//! (`Tube`).
 //!
 //! What the domain proves is what is wrong without bound where it fails, and nothing else: a fold that does not exist
 //! (its series diverges: a fold's rate went as the Doppler shift squared, SPEC §1.8), and a step beyond the edge of its
@@ -735,7 +736,7 @@ pub struct Flow {
 
 impl Flow {
     /// The flow of the expansion `q` at p.
-    fn new(q: &Quadratic, centre: [f64; 3], hbar_over_mass: f64) -> Flow {
+    pub(crate) fn new(q: &Quadratic, centre: [f64; 3], hbar_over_mass: f64) -> Flow {
         let (curvatures, axes) = linalg::symmetric3_eigen(&q.hessian);
         let gradient = std::array::from_fn(|i| linalg::dot3(axes[i], q.gradient));
         Flow { centre, value: q.value, axes, curvatures, gradient, hbar_over_mass }
@@ -1406,13 +1407,24 @@ pub trait Domain {
     fn proven(&self, flow: &Flow, middle: ([f64; 3], [f64; 3]), half: f64) -> Result<bool, Unproven>;
 }
 
-/// What a step its domain does not prove asks of the reach (`Domain`; model/reach.rs, # The trap's region): the
-/// prepared energy (rad/µs: the reference's potential with (ħ/m)κ_m²/2) it is to hold within the trap's region, and
-/// outside it (−∞: nothing there).
+/// What a step its domain does not prove asks of the proof set (`Domain`; model/reach.rs, # The trap's region, # Tubes):
+/// the prepared energy (rad/µs: the reference's potential with (ħ/m)κ_m²/2) a temperature's reach is to hold within the
+/// trap's region, and outside it (−∞: nothing there); or, where no temperature's reach holds that energy, the path's own
+/// tube.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Unproven {
     pub region: f64,
     pub outside: f64,
+    pub tube: Option<Tube>,
+}
+
+/// A step's path as a part of the proof set (model/reach.rs, # Tubes): its box -- centre and half-widths (µm), the cell
+/// r_h ± |v_m,a| h -- at its prepared energy (rad/µs).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tube {
+    pub centre: [f64; 3],
+    pub half: [f64; 3],
+    pub level: f64,
 }
 
 /// The path's momentum of the step of τ through a middle from a state (module documentation, # The path's momentum),

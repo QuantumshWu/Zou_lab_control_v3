@@ -245,7 +245,7 @@ use super::cluster::Edge;
 use super::eliminate::{term_unit, Shift};
 use super::far::EXCITED;
 use super::own::{Band, Form, Own};
-use super::reach::{pair_span, Cell, Region, TermForm};
+use super::reach::{pair_span, Cell, Ended, Region, TermForm};
 use super::readout::Channels;
 use super::tabulate::Tables;
 use super::{Beat, Cluster, Component, Gate, Level, Model, Reach, Sample, Unit, UnitError, Wave};
@@ -512,6 +512,23 @@ pub(crate) enum Read<'u> {
 pub struct Judged<'u> {
     reads: Vec<Read<'u>>,
     wave: f64,
+}
+
+/// What the proofs of the units' statements over a reach ended on (reach.rs, # A proof begun where one ended;
+/// `Model::gates_from`): the reach's box, and per unit proven over its cells what each of its two statements' proofs
+/// ended on -- where a proof of the unit's statements over a reach of that box may begin.
+#[derive(Clone, Default)]
+pub struct Coverings {
+    pub(crate) cell: [[f64; 2]; 3],
+    pub(crate) of: HashMap<Unit, [Ended; 2]>,
+}
+
+impl Coverings {
+    /// What the statement `which` (0 its saturation, 1 its sweep) of `unit` ended on, where a proof of it over a reach of
+    /// the box `cell` may begin: none where the unit was not proven over cells, or over another box.
+    fn begin(&self, unit: &Unit, which: usize, cell: &[[f64; 2]; 3]) -> Option<Ended> {
+        self.of.get(unit).filter(|_| self.cell == *cell).map(|ended| ended[which].clone())
+    }
 }
 
 /// Two frequencies' constant form (far.rs `constant`): on their fields' bases and per pair of their beams, with the
@@ -1148,6 +1165,14 @@ impl Model {
     /// share on the same cell: what a cell's centre attains is a value there, never a bound from elsewhere --, each until it
     /// is below ½ everywhere or a centre attains `KEEP` (module documentation, # One rule).
     pub fn gates(&self, units: &[Unit], reach: &Reach) -> Vec<Gate> {
+        self.gates_from(units, reach, None).0
+    }
+
+    /// The units' gates over the reach (`gates`), each proven statement begun on the cells its last proof over a reach
+    /// of the same box ended on, where `from` holds one and the statement reads over the box what it read then (reach.rs,
+    /// # A proof begun where one ended; `Coverings`) -- the same bound where the statement and the reach are the same --,
+    /// and what these proofs end on.
+    pub fn gates_from(&self, units: &[Unit], reach: &Reach, from: Option<&Coverings>) -> (Vec<Gate>, Coverings) {
         let judged = self.judged(units);
         let (everywhere, open) = self.everywhere(&judged, reach.speed);
         let mut quantities: Vec<Box<dyn Fn(&Region) -> f64 + Sync + '_>> = vec![];
@@ -1171,12 +1196,21 @@ impl Model {
             })
             .collect();
         let refs: Vec<&(dyn Fn(&Region) -> f64 + Sync)> = quantities.iter().map(|q| q.as_ref()).collect();
-        let proven = self.statements_over(reach, EXISTS, KEEP, 2, &refs);
+        // Each statement may begin where the first of its units ended (a ground state's place's statement is one).
+        let mut begins: Vec<Option<Ended>> = vec![None; quantities.len()];
+        for (&u, &at) in open.iter().zip(&asked).rev() {
+            for which in 0..2 {
+                begins[at + which] = from.and_then(|c| c.begin(&units[u], which, &reach.cell)).or(begins[at + which].take());
+            }
+        }
+        let (proven, ended) = self.statements_over(reach, EXISTS, KEEP, 2, &refs, &begins);
         let mut out: Vec<Gate> = everywhere.iter().map(|of| Gate { saturation: of[0], sweep: of[1] }).collect();
+        let mut of = HashMap::new();
         for (&u, &at) in open.iter().zip(&asked) {
             out[u] = Gate { saturation: proven[at], sweep: proven[at + 1] };
+            of.insert(units[u].clone(), [ended[at].clone(), ended[at + 1].clone()]);
         }
-        out
+        (out, Coverings { cell: reach.cell, of })
     }
 
     /// Each candidate unit's errors at each sample (`Model::units`), [unit][sample]: its small parameter at the sample's point

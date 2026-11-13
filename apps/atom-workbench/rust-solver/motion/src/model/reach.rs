@@ -22,15 +22,22 @@
 //! it as the level's do the sublevel set. An outside level at or above the far value -- a held atom that V_run binds and
 //! V_prep does not -- leaves the reach unbounded: the whole space, its bounds the global ones.
 //!
-//! A temperature's level is below the depth (# The reach's level): no temperature's reach holds an atom that has gained
-//! the trap's depth, or its top, and is still in the region. Such an atom is held there all the same, and a path of it
-//! that the reach's proofs are to hold (solve.rs `Domain`) is held by the region's level raised to its energy, the
-//! temperature kept (`Model::inside_to`): within the region the reach then holds every prepared energy up to it -- the
-//! path's points among them, its largest energy no more --, and outside it what it held. The family stays nested and
-//! only grows: the inside level is the larger of the two, the outside one and the temperature are kept, so the reach so
-//! raised holds the one before it, and a later temperature's reach is raised again to the levels asked before (solve.rs
-//! keeps them as it keeps the outside ones). The temperature is the atoms' own, its ensemble's statements (the kinetic
-//! temperatures, the falsifier's scale) its own; only the set and its speeds, √(2 (ħ/m) E), grow with the path.
+//! # Tubes
+//! A temperature's level is below its top (# The reach's level): no temperature's reach holds an atom at the trap's top
+//! or above it -- one that has gained the trap's depth and is still in the region, leaving it, or a bound one beyond
+//! every temperature's quantile. Such an atom is held all the same, and a step of it is proven where the atom is: along
+//! its path (solve.rs `Domain`, `Model::holds_along`), and where that fails, over the path's tube (`Model::tube`) -- the
+//! step's box, the cell r_h ± |v_m,a| h, at the path's prepared energy E: the sublevel set of E within that box, a reach
+//! of its own whose two levels are E and whose largest speed is √(2 (ħ/m)(E − V_prep's least over the box)). The proof
+//! set is the temperature's reach and the tubes; each is proven as a reach is, from its own box (`Model::proven_over`),
+//! and a unit's gate is the largest of its gates over them -- a fold failing over a tube is kept as over the reach (units.rs
+//! `KEEP`). What a gate proves is that the fold exists at the states the run's atoms are in: a bound atom's within the
+//! temperature's reach (all but the share it leaves out), a leaving atom's along its own path. (Raised to such a path's
+//! energy within the trap's region instead, the reach proved the folds at every place of the region at every speed up to
+//! the path's -- states no atom of the run is in, the temperature's ensemble holding the share s above its level --: on
+//! S3's probe at −20 MHz one path raised the region from 50.7 to 169 rad/µs above the bottom, its gates 319 CPU-s, five
+//! units kept, the first rung 1.43 → 0.78 µs.) The set only grows: a tube is never taken back, a temperature's reach
+//! only grows, so every set holds the one before it.
 //!
 //! # The reach's level
 //! The reach is the set that holds all but the share s of the initial ensemble -- its bound atoms alone (ensemble.rs,
@@ -189,6 +196,27 @@
 //! shares failed others there: the tweezer ×4 variant of S3 kept 114 units where 115 fail together, then 26 more where 6
 //! do, 142 at 30 µK where the proofs to the end keep 121 there -- its 1 ms ran past five minutes, against 93 s.)
 //!
+//! # A proof begun where one ended (`Ended`; units.rs `Coverings`)
+//! A proof ends with its cells left -- those still in its queue, and the halves it dropped as unable to meet the reach --:
+//! a partition of the box it began on, each cell with the quantity's bound over it. Any partition of a box will do to
+//! begin a proof on: its cells, each made again over the reach (`Cells::make`: dropped where it cannot meet it) and its
+//! bound read, are the queue the proof goes on from by its one rule, and the bound it ends at bounds the quantity over
+//! the reach as one begun on the box does. So a statement proven once over a reach is proven again over a reach of the
+//! same box -- the model changed by a keep -- from the cells its last proof ended on, where it reads over the box the
+//! value and the bound it read there then (`Model::proven_over`): the one exact test of its being the same statement
+//! that costs one region for all of them. Where it is the same function over the same set, every cell reads the bound it
+//! ended with, and the proof ends at once with the bound it ended at, to the bit: what a proof from the box makes again,
+//! cell by cell from the box down, it reads off the cells it ended on. Where the box reads otherwise, the statement
+//! changed -- a keep changes the folds of its ground state and of every state its explicit states couple -- and is
+//! proven from the box: a partition made for another statement, never coarser than it ended, held a statement that
+//! needs it less fine to all its cells. (S2Q's statements over its 78.6 µK reach, after seven units were kept and after
+//! one more: from the box 133 and 77 CPU-s; begun on their old cells whatever they read, 161--165 and 21; begun there
+//! where they read the same, 134 and 58. Begun on the cells of the reach before it grew, with the slabs between the two
+//! boxes, 63 where from the box 54 -- the shell a reach grows by is no smaller than the reach in position and speed:
+//! every cell's speeds grow with the level, so every statement over it is another, and a reach grown is proven from its
+//! box. Proven from the box after every keep, e038's units cost 115 CPU-s after one more unit was kept over its 104.87
+//! µK reach, 17 to 20 after each of four keeps on the pilot.)
+//!
 //! # The kick's curvature (`Model::kick_curvature`)
 //! A step is the reference's flow, a kick, the flow again (step.rs); the kick is −τ∇(⟨x|Ĥ_h|x⟩ − V_ref) at the step's
 //! middle point r_h, of the state x held in its cluster's Doppler frames there (step.rs, # The kick: the shear). About a
@@ -295,6 +323,23 @@ impl Bends {
     }
 }
 
+/// What a quantity's proof over a reach ended on (module documentation, # A proof begun where one ended): the cells left
+/// -- a partition of the reach's box --, and the quantity's value at the box's centre and its bound over the box (none
+/// where the box cannot meet the reach).
+#[derive(Clone, Debug)]
+pub(crate) struct Ended {
+    pub(crate) cells: Arc<Vec<Cell>>,
+    pub(crate) whole: Option<(f64, f64)>,
+}
+
+impl Ended {
+    /// Whether its statement read over the box what `whole` reads there, to the bit.
+    pub(crate) fn reads(&self, whole: Option<(f64, f64)>) -> bool {
+        let bits = |w: Option<(f64, f64)>| w.map(|(value, bound)| [value.to_bits(), bound.to_bits()]);
+        bits(self.whole) == bits(whole)
+    }
+}
+
 /// A box of positions: its centre and half-widths (µm); an infinite half-width is the whole axis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Cell {
@@ -319,7 +364,7 @@ impl Cell {
         self.radius().is_finite()
     }
     /// Its halves along the side `a`.
-    fn halves(&self, a: usize) -> [Cell; 2] {
+    pub(crate) fn halves(&self, a: usize) -> [Cell; 2] {
         let mut half = self.half;
         half[a] *= 0.5;
         [-1.0, 1.0].map(|s| {
@@ -1237,29 +1282,43 @@ struct Rule<'a> {
 struct Proof {
     queue: BinaryHeap<Queued>,
     attained: f64,
-    halved: HashMap<usize, [Option<Queued>; 2]>,
+    halved: HashMap<usize, (usize, [Option<Queued>; 2])>,
     sighted: f64,
     asked: HashSet<usize>,
     bound: Option<f64>,
+    /// The cells it has dropped as unable to meet the reach: of a node, along a side, the lower or the upper half; and
+    /// those of the cells it began on.
+    dropped: Vec<(usize, usize, usize)>,
+    outside: Vec<Cell>,
 }
 
 impl Proof {
-    /// A quantity's proof at the proofs' first cell (none: no cell meets the reach, the bound is 0); on an unbounded cell, which
-    /// is not halved, the bound is the quantity's over it.
-    fn new<Q: Fn(&Region) -> f64 + ?Sized>(q: &Q, first: Option<&(Node, Regions)>) -> Proof {
-        let mut proof = Proof { queue: BinaryHeap::new(), attained: f64::NEG_INFINITY, halved: HashMap::new(), sighted: f64::NEG_INFINITY, asked: HashSet::new(), bound: None };
-        match first {
-            None => proof.bound = Some(0.0),
-            Some((node, regions)) => {
-                let (centre, upper) = valued(q, regions);
-                if node.cell.bounded() {
-                    proof.push(Queued { upper, node: 0, centre, inside: node.inside });
-                } else {
-                    proof.bound = Some(upper);
+    /// A quantity's proof on the cells it begins on (`starts`: each one's node and the quantity's value at its centre and
+    /// bound over it; none where the cell cannot meet the reach), the bound 0 where none meets the reach; on an unbounded
+    /// cell, which is not halved, the bound is the quantity's over it.
+    fn new(starts: &[(Cell, Option<(usize, bool, bool, (f64, f64))>)]) -> Proof {
+        let mut proof = Proof { queue: BinaryHeap::new(), attained: f64::NEG_INFINITY, halved: HashMap::new(), sighted: f64::NEG_INFINITY, asked: HashSet::new(), bound: None, dropped: vec![], outside: vec![] };
+        for (cell, made) in starts {
+            match *made {
+                None => proof.outside.push(*cell),
+                Some((node, bounded, inside, (centre, upper))) => {
+                    if bounded {
+                        proof.push(Queued { upper, node, centre, inside });
+                    } else {
+                        proof.bound = Some(upper);
+                    }
                 }
             }
         }
         proof
+    }
+
+    /// The cells it ended on (module documentation, # A proof begun where one ended): those left in its queue, and those
+    /// it dropped -- a partition of the cells it began on.
+    fn cells(&self, nodes: &[Node]) -> Vec<Cell> {
+        let left = self.queue.iter().map(|q| nodes[q.node].cell);
+        let dropped = self.dropped.iter().map(|&(node, side, half)| nodes[node].cell.halves(side)[half]);
+        left.chain(dropped).chain(self.outside.iter().copied()).collect()
     }
 
     /// A cell into the queue, its centre's value attained where the centre is in the reach.
@@ -1273,8 +1332,8 @@ impl Proof {
     /// The proof as far as the halves made for it reach -- with `made`, those the round before made --, and the cells it asks
     /// to be halved next, none once it is decided (module documentation, # Rounds): the cell its order has come to and, with
     /// `ahead`, each of the halves just made that is not settled against the largest value the halves made hold.
-    fn advance(&mut self, made: Vec<(usize, [Option<Queued>; 2])>, rule: Rule, ahead: bool) -> Vec<usize> {
-        let new: Vec<Queued> = made.iter().flat_map(|(_, halves)| halves.iter().flatten().copied()).collect();
+    fn advance(&mut self, made: Vec<(usize, (usize, [Option<Queued>; 2]))>, rule: Rule, ahead: bool) -> Vec<usize> {
+        let new: Vec<Queued> = made.iter().flat_map(|(_, (_, halves))| halves.iter().flatten().copied()).collect();
         self.sighted = new.iter().filter(|half| half.inside).fold(self.sighted, |sighted, half| sighted.max(half.centre));
         self.halved.extend(made);
         while self.bound.is_none() {
@@ -1286,12 +1345,17 @@ impl Proof {
                 self.bound = Some(top.upper);
                 break;
             }
-            let Some(halves) = self.halved.remove(&top.node) else {
+            let Some((side, halves)) = self.halved.remove(&top.node) else {
                 let unsettled = new.iter().filter(|half| ahead && !(rule.settled)(half.upper, self.sighted)).map(|half| half.node);
                 return [top.node].into_iter().chain(unsettled).filter(|&cell| self.asked.insert(cell)).collect();
             };
             self.queue.pop();
-            halves.into_iter().flatten().for_each(|half| self.push(half));
+            for (x, half) in halves.into_iter().enumerate() {
+                match half {
+                    Some(half) => self.push(half),
+                    None => self.dropped.push((top.node, side, x)),
+                }
+            }
         }
         vec![]
     }
@@ -1326,6 +1390,15 @@ struct Round<'a, Q: ?Sized> {
 }
 
 impl<Q: Fn(&Region) -> f64 + ?Sized> Round<'_, Q> {
+    /// A cell some proofs begin on (`Model::proven_over`): its node, and the values of the quantities `asking` on it
+    /// (`valued`), its regions made for them and let go; none where it cannot meet the reach.
+    fn begin(&self, cell: &Cell, asking: &[usize]) -> Option<(Node, Vec<(f64, f64)>)> {
+        self.cells.make(*cell).map(|(node, regions)| {
+            let values = asking.iter().map(|&q| valued(self.quantities[q], &regions)).collect();
+            (node, values)
+        })
+    }
+
     /// A cell halved for the quantities asking, each along its own side: the halves made where they are not yet, and those
     /// quantities' values on theirs -- each half's regions made once for them all, those of an earlier round's halves again.
     fn halve(&self, asked: &Asked) -> Halved {
@@ -1365,6 +1438,7 @@ trait Pace<Q: ?Sized> {
     const AHEAD: bool;
     fn proofs<T: Send, R: Send>(proofs: &mut [Proof], made: Vec<T>, step: impl Fn(&mut Proof, T) -> R + Sync) -> Vec<R>;
     fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved>;
+    fn begun(round: &Round<Q>, first: &[(Cell, Vec<usize>)]) -> Vec<Option<(Node, Vec<(f64, f64)>)>>;
 }
 
 /// One after another, no cell ahead of a proof's order: the pace of quantities that only their own thread may ask.
@@ -1380,6 +1454,9 @@ impl<Q: Fn(&Region) -> f64 + ?Sized> Pace<Q> for InTurn {
     fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved> {
         asked.iter().map(|cell| round.halve(cell)).collect()
     }
+    fn begun(round: &Round<Q>, first: &[(Cell, Vec<usize>)]) -> Vec<Option<(Node, Vec<(f64, f64)>)>> {
+        first.iter().map(|(cell, asking)| round.begin(cell, asking)).collect()
+    }
 }
 
 /// On all the cores at once, each proof asking ahead of its order: the pace of quantities that any thread may ask.
@@ -1392,6 +1469,9 @@ impl<Q: Fn(&Region) -> f64 + Sync + ?Sized> Pace<Q> for AtOnce {
     }
     fn cells(round: &Round<Q>, asked: &[Asked]) -> Vec<Halved> {
         asked.par_iter().map(|cell| round.halve(cell)).collect()
+    }
+    fn begun(round: &Round<Q>, first: &[(Cell, Vec<usize>)]) -> Vec<Option<(Node, Vec<(f64, f64)>)>> {
+        first.par_iter().map(|(cell, asking)| round.begin(cell, asking)).collect()
     }
 }
 
@@ -1564,7 +1644,7 @@ fn energy_at(trap: &Trap, temperature_uk: f64, share: f64) -> (f64, [f64; 3]) {
 /// reach's level): at T_r → ∞ every s_i → 1 and the energy over the depth D has the density ∝ u^{k−1}(1 − u) on [0, 1],
 /// whose share above q is 1 − (k + 1)q^k + k q^{k+1}, falling from one to nothing -- the q where it is s, by bisection to
 /// the format's resolution, times D.
-fn top(trap: &Trap, share: f64) -> f64 {
+pub(crate) fn top(trap: &Trap, share: f64) -> f64 {
     let k = degrees(trap, 1.0).0.half();
     let above = |q: f64| 1.0 - (k + 1.0) * q.powf(k) + k * q.powf(k + 1.0) > share;
     let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
@@ -1622,17 +1702,29 @@ impl Model {
         reach
     }
 
-    /// The reach that holds, beside `reach`, the prepared energies up to `level` (rad/µs) within the trap's region (module
-    /// documentation, # The trap's region): its level inside raised to it, its speeds with it; its temperature and its
-    /// level outside kept. The same reach where it holds the level already.
-    pub fn inside_to(&self, reach: &Reach, level: f64) -> Reach {
-        if level - reach.minimum <= reach.energy {
-            return reach.clone();
+    /// A path's tube beside the reach `reach` (module documentation, # Tubes): the sublevel set of its prepared energy
+    /// within its box, both levels that energy, its largest speed that of the energy over V_prep's least over the box --
+    /// its own form's lower bound, as a cell's of a proof, and no less than the trap's bottom, as a reach's speed takes it
+    /// (`Cells::make`); the reach's temperature and populations.
+    pub fn tube(&self, reach: &Reach, path: &crate::step::Tube) -> Reach {
+        let cell = Cell { centre: path.centre, half: path.half };
+        let centre = self.potential(cell.centre, &reach.populations, &self.prepared());
+        let least = prepared_own(&self.envelope(&reach.populations), &self.spans(&cell), centre).lower().max(reach.minimum);
+        let energy = path.level - reach.minimum;
+        Reach {
+            energy,
+            outside: energy,
+            cell: std::array::from_fn(|a| [cell.centre[a] - cell.half[a], cell.centre[a] + cell.half[a]]),
+            speed: (2.0 * self.hbar_over_mass * (path.level - least).max(0.0)).sqrt(),
+            ..reach.clone()
         }
-        let energy = level - reach.minimum;
-        let mut wider = Reach { energy, speed: (2.0 * self.hbar_over_mass * energy).sqrt(), ..reach.clone() };
-        wider.cell = self.reach_box(&wider);
-        wider
+    }
+
+    /// Whether a part of the proof set (module documentation, # Tubes) holds a step's path: its box `path` within the
+    /// part's box, its prepared energy `energy` (rad/µs) within the part's level -- a tube's, whose sublevel set within its
+    /// box holds every state of the path.
+    pub(crate) fn tube_holds(tube: &Reach, path: &Cell, energy: f64) -> bool {
+        energy <= tube.minimum + tube.energy && (0..3).all(|a| tube.cell[a][0] <= path.centre[a] - path.half[a] && path.centre[a] + path.half[a] <= tube.cell[a][1])
     }
 
     /// The reach that holds, beside `reach`, the prepared energies up to `level` (rad/µs) outside the trap's region (module
@@ -1748,7 +1840,15 @@ impl Model {
     /// Whether a reach holds an atom at r with the momentum κ: its kinetic energy (ħ/m) κ²/2 within the reach's `room`
     /// there.
     pub fn holds(&self, reach: &Reach, r: [f64; 3], kappa: [f64; 3]) -> bool {
-        0.5 * self.hbar_over_mass * dot3(kappa, kappa) <= self.room(reach, r, &self.prepared())
+        self.situated(reach, r, kappa)[0]
+    }
+
+    /// Where an atom at r with the momentum κ lies (solve.rs, # The reach's atoms): whether a reach holds it (`holds`),
+    /// and whether it is leaving -- its prepared energy V_prep(r; p) + (ħ/m)κ²/2 of the reach's populations at the
+    /// potential's far value, nothing, or above (estimate.rs `Held::leaving`; module documentation, # Tubes).
+    pub fn situated(&self, reach: &Reach, r: [f64; 3], kappa: [f64; 3]) -> [bool; 2] {
+        let (kinetic, potential) = (0.5 * self.hbar_over_mass * dot3(kappa, kappa), self.potential(r, &reach.populations, &self.prepared()));
+        [kinetic <= self.level_at(reach, r) - potential, kinetic + potential >= 0.0]
     }
 
     /// What a reach leaves out of an initial ensemble (module documentation, # What the reach leaves out): the share of
@@ -1760,10 +1860,11 @@ impl Model {
         ensemble.beyond(&|r| self.room(reach, r, &prepared), most).map(|share| share.value + share.difference)
     }
 
-    /// The beams' largest moduli over a reach's box (`Span::most`, per request beam): what the kick's curvature over the
-    /// reach takes the fringes' beams at (`kick_curvature`).
-    pub fn moduli(&self, reach: &Reach) -> Vec<f64> {
-        self.spans(&reach.whole()).iter().map(|span| span.most).collect()
+    /// The beams' largest moduli over the boxes of the proof set's parts `parts` -- the reach and its tubes (module
+    /// documentation, # Tubes) -- (`Span::most`, per request beam): what the kick's curvature over the set takes the
+    /// fringes' beams at (`kick_curvature`).
+    pub fn moduli<'r>(&self, parts: impl IntoIterator<Item = &'r Reach>) -> Vec<f64> {
+        parts.into_iter().map(|part| self.spans(&part.whole()).iter().map(|span| span.most).collect::<Vec<f64>>()).reduce(|a, b| a.iter().zip(&b).map(|(x, y)| x.max(*y)).collect()).unwrap_or_default()
     }
 
     /// What the model bounds of the curvature of the kick's potential, (ħ/m) λ_max ∂∂(Ĥ_h − V_ref) of any state held in
@@ -1860,21 +1961,23 @@ impl Model {
     /// rounding of its centre's value; 0 where no cell meets the reach. The cells are halved one after another (`InTurn`).
     #[cfg(test)]
     pub(crate) fn bounds_over(&self, reach: &Reach, threshold: f64, attains: f64, quantities: &[&dyn Fn(&Region) -> f64]) -> Vec<f64> {
-        self.proven_over::<_, InTurn>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: None }, quantities)
+        self.proven_over::<_, InTurn>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: None }, quantities, &[]).0
     }
 
     /// The bounds against `threshold` and `attains` (`bounds_over`) of quantities any thread may ask, proven on all the cores
     /// (`AtOnce`): the same bounds, to the bit.
     #[cfg(test)]
     pub(crate) fn bounds_over_in_parallel(&self, reach: &Reach, threshold: f64, attains: f64, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
-        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: None }, quantities)
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: None }, quantities, &[]).0
     }
 
     /// The bounds of units' statements (`bounds_over_in_parallel`), consecutive quantities `together` at a time one unit's
     /// (module documentation, # Rounds): a unit one of whose statements is proven at the threshold or above is kept whatever
     /// its others read, and their proofs end there, each at the largest bound of its cells left -- a bound, if not the least.
-    pub(crate) fn statements_over(&self, reach: &Reach, threshold: f64, attains: f64, together: usize, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
-        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: Some((together, threshold)) }, quantities)
+    /// Each proof begins on the cells `from` gives it, where it gives some (module documentation, # A proof begun where
+    /// one ended), and the cells each ended on come with the bounds.
+    pub(crate) fn statements_over(&self, reach: &Reach, threshold: f64, attains: f64, together: usize, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)], from: &[Option<Ended>]) -> (Vec<f64>, Vec<Ended>) {
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &decided(threshold, attains), scale: threshold.abs(), together: Some((together, threshold)) }, quantities, from)
     }
 
     /// The provable bounds over the reach of quantities given per region, each to `resolution`: each one's largest upper bound of
@@ -1882,21 +1985,59 @@ impl Model {
     /// thread may ask, proven on all the cores (`AtOnce`): an extent's cells are those of the whole place of its largest
     /// values, each to be halved whatever the order.
     pub(crate) fn extents_over(&self, reach: &Reach, resolution: f64, quantities: &[&(dyn Fn(&Region) -> f64 + Sync)]) -> Vec<f64> {
-        self.proven_over::<_, AtOnce>(reach, Rule { settled: &|upper, attained| upper - attained <= resolution, scale: resolution, together: None }, quantities)
+        self.proven_over::<_, AtOnce>(reach, Rule { settled: &|upper, attained| upper - attained <= resolution, scale: resolution, together: None }, quantities, &[]).0
     }
 
     /// The proofs' subdivision (module documentation, # Provable extrema, # Rounds): per quantity the cell of its largest upper
     /// bound is halved, along the side that holds that bound up the most (# A cell's sides), until the bound is settled against
     /// the largest value attained at a centre in the reach so far, the cell is unbounded, or the bound is within the rounding
     /// of its centre's value (of the question's own size, where that is larger: `rule`). The proofs go on in rounds, at the
-    /// pace `P`.
-    fn proven_over<Q: Fn(&Region) -> f64 + ?Sized, P: Pace<Q>>(&self, reach: &Reach, rule: Rule, quantities: &[&Q]) -> Vec<f64> {
+    /// pace `P`. Each begins on the reach's box, or on the cells `from` gives it (# A proof begun where one ended): each
+    /// such cell made once for all the proofs that begin on it, its regions read by them and let go, as a round's halves
+    /// are; and each ends with its bound and the cells it ended on.
+    fn proven_over<Q: Fn(&Region) -> f64 + ?Sized, P: Pace<Q>>(&self, reach: &Reach, rule: Rule, quantities: &[&Q], from: &[Option<Ended>]) -> (Vec<f64>, Vec<Ended>) {
         let cells = Cells { model: self, reach, prepared: self.prepared(), envelope: self.envelope(&reach.populations) };
-        let first = cells.make(reach.whole());
-        let mut proofs: Vec<Proof> = quantities.iter().map(|q| Proof::new(*q, first.as_ref())).collect();
-        let mut nodes: Vec<Node> = first.into_iter().map(|(node, _)| node).collect();
+        let round = Round { cells: &cells, nodes: &[], quantities };
+        // The reach's box, and every quantity's value and bound there.
+        let whole = reach.whole();
+        let root = P::begun(&round, &[(whole, (0..quantities.len()).collect())]).pop().expect("the box's one cell");
+        let at_whole: Vec<Option<(f64, f64)>> = (0..quantities.len()).map(|q| root.as_ref().map(|(_, values)| values[q])).collect();
+        // The cells the proofs begin on: where the statement reads over the box what it read where its proof ended on
+        // cells of that box, those cells; else the box. Each once, with the proofs beginning on it.
+        let begins: Vec<Option<&[Cell]>> = (0..quantities.len()).map(|q| from.get(q).and_then(Option::as_ref).filter(|ended| ended.reads(at_whole[q])).map(|ended| ended.cells.as_slice())).collect();
+        let (mut place, mut first): (HashMap<[u64; 6], usize>, Vec<(Cell, Vec<usize>)>) = (HashMap::new(), vec![]);
+        for (q, cells) in begins.iter().enumerate() {
+            for cell in cells.iter().flat_map(|cells| cells.iter()) {
+                let key: [u64; 6] = std::array::from_fn(|i| if i < 3 { cell.centre[i] } else { cell.half[i - 3] }.to_bits());
+                let at = *place.entry(key).or_insert_with(|| {
+                    first.push((*cell, vec![]));
+                    first.len() - 1
+                });
+                first[at].1.push(q);
+            }
+        }
+        let made = P::begun(&round, &first);
+        let mut nodes: Vec<Node> = vec![];
+        let mut starts: Vec<Vec<(Cell, Option<(usize, bool, bool, (f64, f64))>)>> = quantities.iter().map(|_| vec![]).collect();
+        // The box for every proof that begins on it.
+        let on_whole: Vec<usize> = (0..quantities.len()).filter(|&q| begins[q].is_none()).collect();
+        let first: Vec<(Cell, Vec<usize>)> = std::iter::once((whole, on_whole.clone())).chain(first).collect();
+        let made = std::iter::once(root.map(|(node, values)| (node, on_whole.iter().map(|&q| values[q]).collect()))).chain(made);
+        for ((cell, asking), made) in first.iter().zip(made) {
+            match made {
+                None => asking.iter().for_each(|&q| starts[q].push((*cell, None))),
+                Some((node, values)) => {
+                    let (bounded, inside) = (node.cell.bounded(), node.inside);
+                    nodes.push(node);
+                    for (&q, value) in asking.iter().zip(values) {
+                        starts[q].push((*cell, Some((nodes.len() - 1, bounded, inside, value))));
+                    }
+                }
+            }
+        }
+        let mut proofs: Vec<Proof> = starts.iter().map(|s| Proof::new(s)).collect();
         // Per proof, the halves the round before made for it.
-        let nothing = || -> Vec<Vec<(usize, [Option<Queued>; 2])>> { quantities.iter().map(|_| vec![]).collect() };
+        let nothing = || -> Vec<Vec<(usize, (usize, [Option<Queued>; 2]))>> { quantities.iter().map(|_| vec![]).collect() };
         let mut made = nothing();
         loop {
             let mut asking = P::proofs(&mut proofs, made, |proof, made| proof.advance(made, rule, P::AHEAD));
@@ -1941,11 +2082,12 @@ impl Model {
                 for (&q, (a, inside, values)) in cell.quantities.iter().zip(halved.of) {
                     let halves = nodes[cell.node].halves[a].expect("the halves a quantity asked for are made");
                     let queued = std::array::from_fn(|x| halves[x].zip(values[x]).map(|(node, (centre, upper))| Queued { upper, node, centre, inside: inside[x] }));
-                    made[q].push((cell.node, queued));
+                    made[q].push((cell.node, (a, queued)));
                 }
             }
         }
-        proofs.into_iter().map(|proof| proof.bound.expect("a proof left open asks for a cell")).collect()
+        let ended = proofs.iter().zip(at_whole).map(|(proof, whole)| Ended { cells: Arc::new(proof.cells(&nodes)), whole }).collect();
+        (proofs.into_iter().map(|proof| proof.bound.expect("a proof left open asks for a cell")).collect(), ended)
     }
 }
 
@@ -2095,14 +2237,15 @@ mod tests {
         assert!(holding(&trap, trap.minimum + top, share, 1000.0).is_infinite() && holding(&trap, 0.0, share, 1000.0).is_infinite(), "nothing holds the top or the far value");
     }
 
-    /// A path no temperature's reach holds is held by the region's level raised to it, the temperature kept (module
-    /// documentation, # The trap's region): S2Q's tweezer (its sanity scene) at 30 µK, its reach's level the lowered
-    /// isothermal's quantile, below the depth; a path's energy of 141.5 rad/µs above the bottom -- an atom of that scene's
-    /// run, above the depth of 108.4 -- has no holding temperature; raised to it, the reach holds an atom of that energy at
-    /// the trap's centre, which the temperature's does not, keeps its temperature, its level outside and its kinetic
-    /// temperatures, and is the same reach where it is asked for a level it holds.
+    /// A path no temperature's reach holds is held by its own tube (module documentation, # Tubes): S2Q's tweezer (its
+    /// sanity scene) at 30 µK, its reach's level the lowered isothermal's quantile, below the depth; a path of 141.5
+    /// rad/µs above the bottom -- an atom of that scene's run, above the depth of 108.4 -- through the trap's centre
+    /// along the beam has no holding temperature. Its tube is its box at its energy: it holds the path's states (the
+    /// box, the energy), not a box or an energy beyond them; its largest speed is the energy's over V_prep's least over
+    /// the box, at least the path's own and at most the energy's over the bottom; and the reach stands as it was -- its
+    /// level, its speed and its box the temperature's.
     #[test]
-    fn a_path_above_the_depth_is_held_by_the_region_s_level_at_the_temperature() {
+    fn a_path_above_the_top_is_held_by_its_tube_and_the_reach_by_its_temperature() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("S2Q.json");
         let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
         let light = Light::new(&request);
@@ -2112,17 +2255,21 @@ mod tests {
         let trap = model.trap(&p, &model.prepared()).unwrap();
         let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
         let reach = model.reach(&trap, &p, 30.0, share);
+        let before = reach.clone();
         let (degrees, _) = degrees(&trap, 30.0);
         assert!((reach.energy - degrees.level(share) * KT_PER_UK * 30.0).abs() <= 1e-12 * reach.energy && reach.energy < -trap.minimum, "the level {} below the depth {}", reach.energy, -trap.minimum);
         let level = trap.minimum + 141.5;
-        assert!(141.5 > -trap.minimum && holding(&trap, level, share, 30.0).is_infinite(), "no temperature holds 141.5 above the bottom (depth {})", -trap.minimum);
-        let raised = model.inside_to(&reach, level);
-        let kappa = [0.0, 0.0, (2.0 * 141.5 / model.hbar_over_mass).sqrt() * (1.0 - 1e-12)];
-        assert!(model.holds(&raised, trap.centre, kappa) && !model.holds(&reach, trap.centre, kappa), "the raised reach holds the path's energy at the centre");
-        assert!(raised.temperature_uk == 30.0 && raised.outside == reach.outside && raised.kinetic_uk == reach.kinetic_uk && raised.energy == 141.5, "the temperature and the level outside kept");
-        assert!((raised.speed - (2.0 * model.hbar_over_mass * 141.5).sqrt()).abs() <= 1e-12 * raised.speed && raised.cell.iter().zip(&reach.cell).all(|(a, b)| a[0] <= b[0] && a[1] >= b[1]), "its speeds and its box grown");
-        let same = model.inside_to(&reach, trap.minimum + 0.5 * reach.energy);
-        assert!(same.energy == reach.energy && same.cell == reach.cell && same.speed == reach.speed, "a level held already changes nothing");
+        assert!(141.5 > -trap.minimum && 141.5 >= top(&trap, share) && holding(&trap, level, share, 30.0).is_infinite(), "no temperature holds 141.5 above the bottom (depth {})", -trap.minimum);
+        let speed = (2.0 * model.hbar_over_mass * 141.5).sqrt() * (1.0 - 1e-9);
+        let v = [0.0, 0.0, speed];
+        let half = 0.5;
+        let cell = Cell { centre: trap.centre, half: v.map(|x| (x * half).abs()) };
+        let tube = model.tube(&reach, &crate::step::Tube { centre: cell.centre, half: cell.half, level });
+        assert!(Model::tube_holds(&tube, &cell, level) && !Model::tube_holds(&tube, &cell, level + 1e-9 * level.abs()), "the tube holds the path at its energy and no more");
+        let wider = Cell { half: [cell.half[0], cell.half[1], 1.01 * cell.half[2]], ..cell };
+        assert!(!Model::tube_holds(&tube, &wider, level), "nor a box beyond the path's");
+        assert!(tube.speed >= speed && tube.speed <= (2.0 * model.hbar_over_mass * 141.5).sqrt() * (1.0 + 1e-12), "the tube's largest speed {} within the path's {speed} and the bottom's", tube.speed);
+        assert!(reach == before && tube.energy == 141.5 && tube.outside == tube.energy && tube.temperature_uk == 30.0, "the reach stands at its temperature's level");
     }
 
     /// A region's bounds hold at every point of its cell and are the values on its centre point (module documentation,
@@ -2346,7 +2493,7 @@ mod tests {
             let reach = model.reach(&trap, &alone(state), request.temperature_uk, share);
             let rate = |trap: &Trap| trap.frequencies.iter().copied().fold(0.0, f64::max);
             let stiffest = (0..GROUND).map(|s| rate(&model.trap(&alone(s), &model.prepared()).unwrap()).powi(2) - rate(&trap).powi(2)).fold(f64::NEG_INFINITY, f64::max);
-            let (kick, own) = (model.kick_curvature(&reach, &model.moduli(&reach), &trap), rate(&trap).powi(2));
+            let (kick, own) = (model.kick_curvature(&reach, &model.moduli([&reach]), &trap), rate(&trap).powi(2));
             eprintln!("{scene}: ω_k² = {:.4} ω²; the traps' {:.4} ω²", kick / own, stiffest / own);
             assert!((kick - stiffest).abs() <= 1e-9 * own, "{scene}: the bound {kick}, the wells' difference {stiffest}");
             assert!(if scene == "R1_SIGMA_P" { kick > 0.1 * own } else { kick.abs() <= 1e-9 * own }, "{scene}: {kick} of {own}");
@@ -2355,7 +2502,7 @@ mod tests {
         let reference = alone((0..GROUND).find(|&s| request.initial_density[(s, s)].re > 0.0).unwrap());
         let trap = model.trap(&reference, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &reference, request.temperature_uk, share);
-        let bound = model.kick_curvature(&reach, &model.moduli(&reach), &trap) / model.hbar_over_mass;
+        let bound = model.kick_curvature(&reach, &model.moduli([&reach]), &trap) / model.hbar_over_mass;
         let (lights, prepared) = (model.running(), model.prepared());
         let mut stream = crate::random::Stream::jump(11, 0, 0);
         let mut largest = f64::NEG_INFINITY;
@@ -2387,11 +2534,12 @@ mod tests {
 
     /// A reach above the potential's far value is held within the trap's region (module documentation, # The trap's
     /// region). R2_RECOIL's tweezer: at 30 µK its level lies below the far value, the sublevel set whole; no temperature
-    /// holds a level half the trap's depth above it (`holding`), and raised there within the region (`inside_to`) the set
-    /// is the region's -- its box the trap beam's ellipsoid u ≤ 19, the focus held at rest and at the speed the level leaves
+    /// of the classical draw holds a level half the trap's depth above it (`holding`) -- a zero point's draw does
+    /// (`Degrees::level`) --, and a reach of that level, as one is made (`Model::reach`: none outside the region), is the
+    /// region's -- its box the trap beam's ellipsoid u ≤ 19, the focus held at rest and at the speed the level leaves
     /// there, a point on the axis at six Rayleigh ranges (|a|² = 1/37, outside the region) not held even at rest, though
-    /// bound, the level outside the region the temperature's. Holding that point's prepared energy outside the region too (`outside_to`) holds
-    /// it, and everything the reach held before; its box is larger.
+    /// bound. Holding that point's prepared energy outside the region too (`outside_to`) holds it, and everything the
+    /// reach held before; its box is larger.
     #[test]
     fn a_reach_above_the_far_value_is_held_within_the_trap_s_region() {
         let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
@@ -2402,11 +2550,16 @@ mod tests {
         assert!(cold.minimum + cold.energy < 0.0 && cold.outside == cold.energy && cold.cell.iter().all(|c| c[1].is_finite()), "{cold:?}");
         let level = -0.5 * trap.minimum;
         assert!(holding(&trap, level, share, 30.0).is_infinite(), "no temperature holds a level above the far value");
-        let hot = model.inside_to(&cold, level);
+        let hot = {
+            let energy = level - trap.minimum;
+            let mut hot = Reach { energy, outside: f64::NEG_INFINITY, speed: (2.0 * model.hbar_over_mass * energy).sqrt(), ..cold.clone() };
+            hot.cell = model.reach_box(&hot);
+            hot
+        };
         let beam = model.light.beams[model.light.frequencies[model.light.trap].beams[0]];
         let (w, z, n) = (beam.waist.unwrap(), beam.rayleigh().unwrap(), beam.direction);
         let region: [f64; 3] = std::array::from_fn(|a| (19.0 * (0.5 * w * w * (1.0 - n[a] * n[a]) + z * z * n[a] * n[a])).sqrt());
-        assert!(hot.outside == cold.outside && hot.temperature_uk == 30.0 && (0..3).all(|a| (hot.cell[a][1] - region[a]).abs() <= 1e-12 * region[a]), "{:?} against {region:?}", hot.cell);
+        assert!((0..3).all(|a| (hot.cell[a][1] - region[a]).abs() <= 1e-12 * region[a]), "{:?} against {region:?}", hot.cell);
         let kinetic = |r: [f64; 3]| model.room(&hot, r, &prepared);
         let focus = [0.0; 3];
         let at_rest = |r: [f64; 3]| [0.0; 3].map(|x: f64| x + 0.0 * r[0]);
