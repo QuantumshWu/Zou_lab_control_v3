@@ -781,7 +781,8 @@ impl Forms {
 /// clusters' force bounds (eliminate.rs) and the ground states' drives' gates (units.rs).
 pub(crate) struct Region {
     pub(crate) spans: Vec<Span>,
-    /// The cell's half-widths and its radius (0: a point).
+    /// The cell's centre, half-widths and radius (0: a point).
+    pub(crate) centre: [f64; 3],
     pub(crate) half: [f64; 3],
     pub(crate) rho: f64,
     /// The bound of the atoms' speed over it (µm/µs): the reach's at its least V_prep (module documentation, # The reach); a
@@ -805,6 +806,8 @@ pub(crate) struct Region {
     pub(crate) shifted: OnceLock<Vec<[Shift; GROUND]>>,
     /// Per cluster.
     pub(crate) forces: Vec<OnceLock<Own>>,
+    /// Per cluster, on a point, its photon classes' jump operators' sizes there (photon.rs `Model::coherence_gate`).
+    pub(crate) classes: Vec<OnceLock<Vec<[f64; 3]>>>,
     /// Per ground state its drives' sizes and distances (units.rs `Model::across`), the tails of their shares and the gates
     /// of the places asked in the tail rule's order (units.rs `Model::tails`, `Model::folds`).
     pub(crate) across: [OnceLock<Vec<super::units::Across>>; GROUND],
@@ -1088,8 +1091,8 @@ impl Cells<'_> {
 
     /// A node's regions from its cell's beams.
     fn over(&self, node: &Node, spans: Vec<Span>) -> Regions {
-        let at = node.at.map(|speed| Box::new(self.model.region(spans.iter().map(Span::point).collect(), speed)));
-        Regions { over: Box::new(self.model.region_paced(spans, node.over, node.pace)), at }
+        let at = node.at.map(|speed| Box::new(self.model.region(node.cell.centre, spans.iter().map(Span::point).collect(), speed)));
+        Regions { over: Box::new(self.model.region_paced(node.cell.centre, spans, node.over, node.pace)), at }
     }
 
     /// A node's regions, made again.
@@ -1645,16 +1648,18 @@ impl Model {
     fn along(&self, amplitudes: &[Amplitude], node: &Node, a: usize) -> Region {
         let mut side = Cell { centre: node.cell.centre, half: [0.0; 3] };
         side.half[a] = node.cell.half[a];
-        self.region(self.light.beams.iter().zip(amplitudes).map(|(beam, at)| Span::over(beam, at, &side)).collect(), node.over)
+        self.region(node.cell.centre, self.light.beams.iter().zip(amplitudes).map(|(beam, at)| Span::over(beam, at, &side)).collect(), node.over)
     }
 
-    /// A region of the beams `spans` at speeds up to `speed` (`Region`): its beam pairs made, the rest when asked.
-    pub(crate) fn region(&self, spans: Vec<Span>, speed: f64) -> Region {
-        self.region_paced(spans, speed, Own::constant(speed))
+    /// A region of the beams `spans` over the cell of centre `centre` at speeds up to `speed` (`Region`): its beam pairs
+    /// made, the rest when asked.
+    pub(crate) fn region(&self, centre: [f64; 3], spans: Vec<Span>, speed: f64) -> Region {
+        self.region_paced(centre, spans, speed, Own::constant(speed))
     }
 
-    /// A region of the beams `spans` at speeds up to `speed`, their own form `pace` (`Region`).
-    fn region_paced(&self, spans: Vec<Span>, speed: f64, pace: Own) -> Region {
+    /// A region of the beams `spans` over the cell of centre `centre` at speeds up to `speed`, their own form `pace`
+    /// (`Region`).
+    fn region_paced(&self, centre: [f64; 3], spans: Vec<Span>, speed: f64, pace: Own) -> Region {
         let pairs = self
             .light
             .frequencies
@@ -1663,6 +1668,7 @@ impl Model {
             .collect();
         Region {
             pairs,
+            centre,
             half: spans.first().map_or([0.0; 3], |s| s.half),
             rho: spans.first().map_or(0.0, |s| s.rho),
             speed,
@@ -1675,6 +1681,7 @@ impl Model {
             dressings: OnceLock::new(),
             shifted: OnceLock::new(),
             forces: (0..self.clusters.len()).map(|_| OnceLock::new()).collect(),
+            classes: (0..self.clusters.len()).map(|_| OnceLock::new()).collect(),
             across: std::array::from_fn(|_| OnceLock::new()),
             tails: std::array::from_fn(|_| OnceLock::new()),
             folds: std::array::from_fn(|_| Mutex::new(vec![])),
@@ -1687,9 +1694,16 @@ impl Model {
         }
     }
 
-    /// The region of a point alone at one speed (a sample's: the errors measured there).
+    /// The region of a point alone at the speeds up to `speed` in every direction (a sample's: the errors measured there;
+    /// an atom's start: the model's prior, solve.rs # The model).
     pub(crate) fn point_region(&self, r: [f64; 3], speed: f64) -> Region {
-        self.region(self.spans(&Cell { centre: r, half: [0.0; 3] }), speed)
+        self.region(r, self.spans(&Cell { centre: r, half: [0.0; 3] }), speed)
+    }
+
+    /// The whole space at the speeds up to `speed`, every beam at its peak (`Span::over` an unbounded cell): what is
+    /// bounded on it is bounded on any region at those speeds (units.rs `Model::failing`).
+    pub(crate) fn whole_region(&self, speed: f64) -> Region {
+        self.region([0.0; 3], self.spans(&Cell { centre: [0.0; 3], half: [f64::INFINITY; 3] }), speed)
     }
 
     /// The provable bounds over the reach of quantities given per region, each to `resolution`: each one's largest upper bound of
@@ -1932,7 +1946,7 @@ mod tests {
             Cell { centre: [2.0, -1.0, 7.0], half: [0.5, 1.0, 6.0] },
         ];
         for cell in cells {
-            let region = model.region(model.spans(&cell), 0.0);
+            let region = model.region(cell.centre, model.spans(&cell), 0.0);
             let couplings = model.couplings(&region);
             for r in points(&cell) {
                 let a = model.light.amplitudes(r);
@@ -1987,9 +2001,9 @@ mod tests {
                 }
             }
             // On the centre point, the values; on a cell a thousand times smaller, within that factor of them.
-            let point = model.region(region.spans.iter().map(Span::point).collect(), 0.0);
+            let point = model.region(cell.centre, region.spans.iter().map(Span::point).collect(), 0.0);
             let small = Cell { centre: cell.centre, half: cell.half.map(|h| h * 1e-3) };
-            let tiny = model.region(model.spans(&small), 0.0);
+            let tiny = model.region(small.centre, model.spans(&small), 0.0);
             let a = model.light.amplitudes(cell.centre);
             for (ci, cc) in model.carriers.iter().enumerate() {
                 for s in 0..GROUND {

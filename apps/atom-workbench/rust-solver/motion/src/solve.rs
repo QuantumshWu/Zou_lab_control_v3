@@ -1,8 +1,9 @@
 //! The pipeline: request, reach and model, pilot, decisions, batches, checkpoints, result (SPEC §3, §5, §9).
 //!
 //! # The pipeline
-//! 1. The request's checks; the light; the initial components; the model with the units kept so far -- none at first:
-//!    which folds hold is measured at the pilot's states (# The model) --; the reach (model/reach.rs); the trap the
+//! 1. The request's checks; the light; the initial components; the model with the units kept so far and those whose
+//!    folds do not exist where the atoms start (`closed`; # The model's prior) -- which folds hold beyond that is
+//!    measured at the pilot's states (# The model) --; the reach (model/reach.rs); the trap the
 //!    result reports, the outputs' plan, the initial ensemble and
 //!    what the reach leaves out of it; T(0) by quadrature; the near light's tables over the reach (SPEC §2.3). What of
 //!    these rests on the model alone is made once for a model and serves every attempt at it; what rests on the
@@ -215,47 +216,88 @@
 //! more up to each end that falls inside it, whatever the windows' overlap.
 //!
 //! # The model (SPEC §5.2)
-//! The units are the model's (model.rs), listed again in every model a keep closes. Which folds hold is measured, as an
-//! adaptive integrator's tolerance is (QuTiP's way): no fold is proven before a trajectory runs, the first model keeps
-//! nothing, and a fold that does not hold where the atoms are reads its error there -- its own small parameter at the
-//! state, of a size no look has room for. A keep is one comparison of the units' measured errors against what keeping them costs,
-//! over the whole set the reads give (`keep`), made once and never undone: the kept set only grows, and every keep is
-//! a new attempt, a new model and its own pilot.
-//! - The errors no number of trajectories fits beside: where the model's error and the step's part leave a look no
-//!   room for the statistics (`crowded`), the units are taken by their weight there (their errors on what is shown and
-//!   on T, weighed by the held share as the totals are, each over its target) for the work a µs of their kept model,
-//!   the most first, as far as every look has room at the far end of the error they leave; and of the sets so led
-//!   through, the one of the least expected work is kept, none of it to spare (`needed`): its model's work a µs over
-//!   its pilot and its product, and the chance that the next pilot still reads a look without room -- the doubt the
-//!   reads leave on the error, `Doubt::chance` -- times the work of keeping again. (Taken one at a time, a keep an
-//!   attempt, S3's probe kept fourteen bare drives over fourteen attempts, each a model, its gates and a scout; taken
-//!   by weight alone, it kept its carrier's dressing with them, three to four times dearer a step; taken until the
-//!   error read had room, e038 kept 6, 2, 1 and 1 units over four pilots; taken to the far end of the error, S3c's
-//!   pilot kept ten units where one gave room.) The product asks the same where a look the pilot left room has none at the product's
-//!   statistics (`product`): it ends with the set. A look the model leaves room whose need a run's
-//!   `MOST_TRAJECTORIES` do not meet is not chased (`Look::fits`) -- read again at every batch, as its need is. (Asked
-//!   where what the atoms outside the reach carry left a look no room, R3_DOPPLER's product kept two units for T's
-//!   looks over its last ten outputs, the error of its atoms heated past the reach -- the kept model's check took half
-//!   the step, 52 → 91 CPU-s --: that is the reach's to answer, at the product's end.)
-//! - Else the work: the run's predicted total work W = w·N, N the trajectories its looks need beside its errors and the
-//!   step's share (`Look::need` on the pilot's estimates) and w the counted work a trajectory spends per µs, at the
-//!   pilot's states (`Pricing::rates`): its steps' count through the model's generator (step.rs `Price`), its
-//!   middles' assembly and scattering, and its jumps' photons at the trajectory's own rate of jumps, all as the run
-//!   counts them with near tables -- the attempt's for the current model, the axes its tables would take for a kept one
-//!   (model.rs `Model::priced`, tabulate.rs `Model::priced_axes`) --, and the kept model's W counting the pilot its
-//!   attempt runs again. A kept model is priced by its work formula, of its structure alone: its clusters, its drives'
-//!   levels and its plans, the counts the run's are -- no table is made and nothing eliminated. (Rated with the tables
-//!   its attempt would make, S3's pilot made 38 kept models' tables and 2259 floors, a model and its elimination each,
-//!   263 CPU-s a pricing. Priced without tables, by the exact elimination, R4_LIN_2's current model read 138 times its
-//!   counted work, and a keep's coordinates -- its tables' axes, an interpolation's work going as four to their number
-//!   -- were unseen: S3's carrier's dressing priced as the bare drives, where with its tables it is twice them, and its
-//!   run's steps 2.4 times dearer.) A unit is a candidate where its keep alone saves beyond that saving's spread (decide.rs
-//!   `pays`; the jackknife over the pilot's groups, `Pricing`), and the set kept is, of the candidates taken by their
-//!   saving, the largest first, the one whose keep together saves the most beyond its spread: their errors leave the
-//!   looks together, and their kept model is rated once (`Pricing::joint`). A kept model is built and rated only for a
-//!   unit whose keep would pay were it to cost no more per µs than the fold (`Pricing::saving_at_all`: the trajectories
-//!   its error's removal saves, less the new pilot): a fold is made to cost less than what it folds, so a keep that
-//!   pays by its rate alone is not looked for -- where one exists the fold is at fault, not the choice.
+//! The units are the model's (model.rs), listed again in every model a keep closes. Every model the solve runs is
+//! closed first by its prior (# The model's prior): the folds that do not exist where the atoms start are kept before a
+//! trajectory runs. Which folds hold beyond that is measured, as an adaptive integrator's tolerance is (QuTiP's way): a
+//! fold that does not hold where the atoms went reads its error there -- its own small parameter at the state. A keep
+//! is one comparison of the units' measured errors against what keeping them costs, over the whole set the reads give
+//! (`keep`), made once and never undone: the kept set only grows, and every keep is a new attempt, a new model and its
+//! own pilot.
+//!
+//! ## The model's prior (SPEC §1.5)
+//! The old engine's first rung: every fold that exists is folded (Stewart, S = 2m² < ½, and the sweep a < ½), every
+//! other unit kept -- a drive taken up its levels (bare, at the atom, explicit) as far as the first whose fold exists
+//! (`closed`, model/units.rs `Model::failing`). Where a fold exists is read where the atoms start, at points, not proven
+//! over the reach: at the pilot's initial atoms, the run's own draws (the trajectories `MOST_TRAJECTORIES` on, the same
+//! seed), each at the speeds up to the reach's there in every direction, √(2 (ħ/m) A(r)) of the kinetic energy A(r)
+//! the reach holds at r (model/reach.rs `Model::room`), the atom's own where it lies beyond -- the Doppler shift q·v and
+//! the sweep v·∇ΔE at their worst direction. A gate bounded below ½ over the whole space at the points' largest speed,
+//! every beam at its peak, holds at every point and is not read again; the others are read at each point, a value
+//! there: the fold does not exist where it reaches ½ at one of them. The units that fail are kept, and the model they
+//! make read again, until none fails.
+//! - The points are no number of the prior's own: the thermal ensemble's positions in a conservative trap are where
+//!   the atoms are, and where they go once they heat is the reach's falsifier's (# The reach's atoms) and the measured
+//!   errors' to answer -- the reads confirm the prior, or keep beside it (# The model). Their count is the pilot's; the
+//!   prior costs a gate's evaluation a point and open unit (PGC3D, R4_LIN_2: 88 points, 0.07 s a closure; 63 and 29
+//!   units kept), and nothing is subdivided.
+//! - A gate at a point is its value there, of the levels there: a distance reads nothing only where two levels cross
+//!   there, never because a neighbourhood's steep gradient puts nothing in a cell's range. (Proven over cells, a
+//!   probe tilted 2° off a 1D PGC in a tweezer read infinite gates for its ground sublevels' couplings at beat zero --
+//!   the tweezer's 236 rad/µs a micrometre over cells that had to shrink to 0.01–0.05 µm, 340 000 of them, 208 s a
+//!   model --, where at the points S ≤ 2·10⁻⁴.) Nothing rests on an exact zero: a coupling a broken symmetry makes is
+//!   judged by its size at the points, and folds where it is small.
+//! - A photon coherence's gate is not read (model/units.rs `Read`): its fold leaves the generator as it is and tells
+//!   its classes' photons apart; its error is measured at the states.
+//! (The first model keeping nothing, as it was, ran the scout and the pilot on a wrong model and kept by their reads,
+//! an attempt each: PGC3D_1ms 3 attempts and 52.5 CPU-s where the prior's line, 717cb386, took one and 12.9; TET_1ms
+//! 4 and 120.6 against 16.6.)
+//!
+//! ## One rule for a keep: the run's total work
+//! A keep is chosen by the run's expected total work, wherever the looks are (`needed`): a set's kept model's work a µs
+//! times the trajectories it runs -- its pilot again and its product beside the error it leaves --, against keeping
+//! nothing, the current model's work a µs times its product's trajectories, where every look has room for the
+//! statistics; where some look has none, no number of trajectories fits beside the errors, and keeping nothing is no
+//! option. The trajectories follow from the room: a keep that removes error shortens the run. A set kept where nothing
+//! is an option saves beyond that saving's spread over the pilot's groups (decide.rs `pays`; `Pricing::share_of`).
+//! - The order: at the far end of the error the units taken so far leave, the outputs where the need binds -- those
+//!   without room, else those of the largest need (`binding`) --, and there the units by their weight (their errors on
+//!   what is shown and on T, weighed by the held share as the totals are, each over its target) for the work a µs of
+//!   their kept model, the most first; and of the sets so led through, the one of the least expected work, none of it
+//!   to spare (`least_expected`): its model's work a µs over its pilot and its product, and the chance that the next
+//!   pilot still reads a look without room -- the doubt the reads leave on the error, `Doubt::chance` -- times the work
+//!   of keeping again. The order ends where no unit weighs where the need binds, or where no larger set can be
+//!   expected to cost less than the least found. (Taken one at a time, a keep an attempt, S3's probe kept fourteen bare
+//!   drives over fourteen attempts, each a model and a scout; taken by weight alone, it kept its carrier's dressing with
+//!   them, three to four times dearer a step; taken until the error read had room, e038 kept 6, 2, 1 and 1 units over
+//!   four pilots; taken to the far end of the error, S3c's pilot kept ten units where one gave room.) The product asks
+//!   the same where a look the pilot left room has none at the product's statistics (`product`): it ends with the
+//!   set. A look the model leaves room whose need a run's `MOST_TRAJECTORIES` do not meet is not chased (`Look::fits`)
+//!   -- read again at every batch, as its need is. (Asked where what the atoms outside the reach carry left a look no
+//!   room, R3_DOPPLER's product kept two units for T's looks over its last ten outputs, the error of its atoms heated
+//!   past the reach -- the kept model's check took half the step, 52 → 91 CPU-s --: that is the reach's to answer, at
+//!   the product's end.)
+//! - Asked only where some look had no room, as it was, GMD1C's pilot read a model error of 0.047 against the room's
+//!   0.0498, and its units, priced one at a time (a candidate where its keep alone paid for the pilot again), kept
+//!   none: its 800 trajectories took 549 CPU-s, where its forty drives kept explicit together -- none of them pays
+//!   alone, the first one's model dearer a µs by its cluster's growth -- leave 0.0107 and 176 trajectories, 100 CPU-s.
+//! - The work: w the counted work a trajectory spends per µs, at the pilot's states (`Pricing::rates`): its steps'
+//!   count through the model's generator (step.rs `Price`), its middles' assembly and scattering, and its jumps'
+//!   photons at the trajectory's own rate of jumps, all as the run counts them with near tables -- the attempt's for
+//!   the current model, the axes its tables would take for a kept one (model.rs `Model::priced`, tabulate.rs
+//!   `Model::priced_axes`). A kept model is priced by its work formula, of its structure alone: its clusters, its
+//!   drives' levels and its plans, the counts the run's are -- no table is made and nothing eliminated. (Rated with the
+//!   tables its attempt would make, S3's pilot made 38 kept models' tables and 2259 floors, a model and its
+//!   elimination each, 263 CPU-s a pricing. Priced without tables, by the exact elimination, R4_LIN_2's current model
+//!   read 138 times its counted work, and a keep's coordinates -- its tables' axes, an interpolation's work going as
+//!   four to their number -- were unseen: S3's carrier's dressing priced as the bare drives, where with its tables it
+//!   is twice them, and its run's steps 2.4 times dearer.)
+//! - Pricing costs work of its own, so it is spent only where it could save: where every unit's error removed, at the
+//!   least work a µs any kept model has (`Pricing::least`), with its pilot run again, would cost less than keeping
+//!   nothing. The scout and the pilot price (`Reads::priced`); the product and carried states ask the room alone -- a
+//!   carried state's attempt runs its own pilot whatever it keeps, so any saving would pay there (every unit priced
+//!   at every attempt's start: R2_RECOIL 98 s, a kept model of 5.7 GB). A keep that pays by its rate alone is not
+//!   looked for: a fold is made to cost less than what it folds, and where one does not the fold is at fault, not the
+//!   choice -- the order takes the units that weigh.
 //! - On the scout, whose reads are eleven states an output, both are judged at the model's error they leave no doubt
 //!   of: every model's error less the jackknife interval of the current one's over the scout's groups, at the family
 //!   of the outputs' reads (`doubt`, `clear`); the pilot reads the same units on all its states. A unit's error is
@@ -304,7 +346,8 @@
 //! # The reach's atoms (SPEC §1.8)
 //! The reach -- the thermal ensemble at its temperature -- is what the run is made for: the first rung is admissible at
 //! its largest speed, the tables are refined over its ranges, and the pilot's atoms are its draws. Whether the model's
-//! folds hold there is measured, not proven (# The model). Where the atoms go is not proven before they go there either:
+//! folds hold there is read at the atoms' starts (# The model's prior) and measured where they went, not proven
+//! (# The model). Where the atoms go is not proven before they go there either:
 //! a step asks its domain two cheap things (`Domain`; step.rs, # The domain).
 //! - Whether a state scatters beyond every state of the atom: a fold far outside its validity, whose rate grows without
 //!   bound (the released runaway: a drive folded at the atom past its Doppler series' radius, 10⁵ jumps/µs against
@@ -404,7 +447,7 @@
 //! model's construction, the tables and their refinement, the units' reads at the states, the pricing
 //! of keeps, T(0)'s quadrature.
 use crate::adapt;
-use crate::decide::{assured, pays, Outcome, Read};
+use crate::decide::{pays, Outcome, Read};
 use crate::ensemble::{Ensemble, Quadrature, Start, Well, GROUP};
 use crate::estimate::{allowance, between, bound_motion, draws_for, half_window, occupation, semiclassical, spread, summarize, unseen, Between, Estimate, Fate, Group, Held, Scales, Spread};
 use crate::field::{Geometry, Light};
@@ -517,10 +560,10 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     // The reference state (SPEC §2.1): the initial component of the largest population, of equal ones the last.
     let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).expect("a validated request's initial state holds a ground state");
     let reference = alone(initial[chief].0);
-    // The units kept and the reach's temperature -- both only grow --, the model they make, and the states the last
-    // attempt's run level left (`Carried`).
+    // The units kept and the reach's temperature -- both only grow --, the model they make, closed by its prior (`closed`),
+    // and the states the last attempt's run level left (`Carried`).
     let (mut kept, mut reach) = (vec![], request.temperature_uk);
-    let mut model = Model::new(request, &light, &kept)?;
+    let mut model = closed(request, &light, &mut kept, reference, &initial, reach)?;
     let mut carried: Option<Carried> = None;
     let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
     loop {
@@ -545,9 +588,44 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
             }
         };
         kept.extend(more);
-        let next = Model::new(request, &light, &kept)?;
+        let next = closed(request, &light, &mut kept, reference, &initial, reach)?;
         carried = Some(left.into(&model, &next));
         model = next;
+    }
+}
+
+/// The model of the units `kept` and of every unit whose fold does not exist where the atoms start, added to `kept`
+/// (module documentation, # The model's prior): the model's gates read at the pilot's initial atoms -- the run's own
+/// draws, the trajectories `MOST_TRAJECTORIES` on (`attempt`) --, each at the speeds up to the reach's there in every
+/// direction, √(2 (ħ/m) A(r)), A(r) the kinetic energy the reach of the temperature `temperature` holds at r (model/
+/// reach.rs `Model::room`), and the atom's own where it lies beyond it (model/units.rs `Model::failing`); the units that
+/// fail kept, and the model they make read again, until none fails -- a drive up its levels as far as the first whose
+/// fold exists (model.rs `Level`).
+fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, reference: [f64; GROUND], initial: &[(usize, f64)], temperature: f64) -> Result<Model, String> {
+    let hm = hbar_over_mass(request.mass_kg);
+    let share = unseen(MOST_TRAJECTORIES as f64);
+    loop {
+        let model = Model::new(request, light, kept)?;
+        let units = model.units();
+        let prepared = model.prepared();
+        let trap = model.trap(&reference, &prepared)?;
+        let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, light, alone(s))).collect::<Result<_, _>>()?;
+        let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
+        let reach = model.reach(&trap, &reference, temperature, share);
+        let points: Vec<(V3, f64)> = (MOST_TRAJECTORIES..MOST_TRAJECTORIES + pilot_size())
+            .into_par_iter()
+            .map(|index| {
+                let start = ensemble.draw(SEED, index);
+                let own = hm * start.kappa.iter().map(|k| k * k).sum::<f64>().sqrt();
+                (start.r, (2. * hm * model.room(&reach, start.r, &prepared).max(0.)).sqrt().max(own))
+            })
+            .collect();
+        let fastest = points.iter().fold(reach.speed, |most, p| most.max(p.1));
+        let failing = model.failing(&units, &points, fastest);
+        if failing.is_empty() {
+            return Ok(model);
+        }
+        kept.extend(failing);
     }
 }
 
@@ -1274,16 +1352,18 @@ impl Reads {
 /// The folded units to keep, if any (SPEC §5.2; module documentation, # The model), from the units' errors `measured`
 /// at the states of the trajectories `parts` (their `estimates`; the units' mean errors over them `means`, per output
 /// and unit) and the errors `fixed` beside them, the step's part `step` as far as it is read (`standing`; its share
-/// before its reads are in): the units the looks need kept to have room for the statistics (`needed`); else, of the units whose error's
-/// removal alone would pay for the `again` trajectories its model runs before it stands where this one does, each
-/// rated with its kept model and paying beyond its spread, the leading ones by their saving whose keep together saves
-/// the most beyond its spread (`Pricing::joint`). On the scout, whose reads are few, both are judged at the model's
-/// error they leave no doubt of (`Doubt`, `clear`): the room, and the work the current model's error asks. The units
-/// the room needs are taken to the far end of the doubt (`needed`, `raised`): the next pilot's read of the error they
-/// leave has room. In the product (`Reads::Product`) the room alone is asked: a look the pilot left room that the
-/// units' error the pilot booked leaves none at the product's statistics is the room's, which a keep gives where one
-/// does, and the attempt ends with it (`product`) -- the pilot has priced the rest; and so on carried states, whose
-/// attempt's pilot prices the work (`Reads::priced`).
+/// before its reads are in), by one rule: of the sets the units' order leads through (`needed`), the one of the least
+/// expected total work -- a set's kept model's work a µs times the trajectories it runs, its pilot again (`again`) and
+/// its product beside the error it leaves --, against keeping nothing: the current model's work a µs times its
+/// product's trajectories, where its looks have room for the statistics; none where some look has none (no number of
+/// trajectories fits beside its errors). A set kept where nothing is an option saves beyond its saving's spread over
+/// the pilot's groups (decide.rs `pays`; `Pricing::share_of`). Keeps are priced (`Reads::priced`) on the scout and
+/// the pilot, and only where some keep could pay at all: every unit's error removed at the least work a µs a kept model
+/// can have (`Pricing::least`), its pilot run again (`Level::need_alone`), against keeping nothing. On the scout, whose
+/// reads are few, all of it is judged at the model's error they leave no doubt of (`Doubt`, `clear`): the room, and
+/// the work the current model's error asks; the units taken to the far end of the doubt (`raised`). In the product
+/// (`Reads::Product`) and on carried states the room alone is asked: the pilot has priced the rest, and the carried
+/// states' attempt runs its own pilot whatever it keeps (every keep's re-run nothing, any saving would pay).
 #[allow(clippy::too_many_arguments)]
 fn keep(
     kept: &[Unit],
@@ -1317,48 +1397,56 @@ fn keep(
     let scouted = reads.few().then(doubt);
     let near = scouted.as_ref().map_or_else(|| vec![[0.; 2]; fixed.model.len()], |d| d.interval(&[]));
     let mut pricing = Pricing::new(Formula::new(model, kept, units, reference, centre, tabled), measured, means, parts, estimates, fixed, step, scales, unsampled, again, &near);
-    // The units that weigh where the looks have no room, each with the work a µs of its kept model (`needed`; none where
-    // its model is refused, `Model::new`), the set they need taken to the far end of the error it leaves.
-    let room = clear(fixed, &near);
-    if !weighing(&counted, &room, step, means, &held, &read).is_empty() {
-        let spread = scouted.unwrap_or_else(doubt);
-        let far = |set: &[usize]| raised(&without(fixed, means, &read, set), &spread.interval(set));
-        // A kept set's work a µs (its mean rate, made once a set) and the bound below every set's (`Pricing::least`); the
-        // product's trajectories beside the error it leaves (`Level::need_without_all`), and the chance that the next
-        // pilot reads a look without room (`Doubt::chance`).
-        let rates: std::cell::RefCell<HashMap<Vec<usize>, Option<f64>>> = std::cell::RefCell::new(HashMap::new());
-        let rate = |set: &[usize]| -> Option<f64> {
-            let mut key = set.to_vec();
-            key.sort_unstable();
-            if let Some(&made) = rates.borrow().get(&key) {
-                return made;
-            }
-            let made = pricing.rates(&key).map(|r| pricing.mean(&r, None));
-            rates.borrow_mut().insert(key, made);
-            made
-        };
-        let price = |set: &[usize], beyond: &[usize]| -> [f64; 2] {
-            let point = without(fixed, means, &read, set);
-            [pricing.all.need_without_all(set), spread.chance(set, &point, &counted, step, &read, beyond)]
-        };
-        let needed = needed(&counted, step, means, &held, &read, pricing.least(), &rate, &|set| without(fixed, means, &read, set), &far, &price, pricing.again);
-        return (!needed.is_empty()).then_some(needed);
-    }
-    if !reads.priced() {
+    // Keeping nothing: no option where some look has no room for the statistics; else the current model's work a µs
+    // times its product's trajectories, where some keep could save at all.
+    let crowded = !weighing(&counted, &clear(fixed, &near), step, means, &held, &read).is_empty();
+    let none = if crowded {
+        None
+    } else {
+        if !reads.priced() {
+            return None;
+        }
+        pricing.own = pricing.own();
+        let spent = pricing.mean(&pricing.own, None) * pricing.all.need;
+        if !(pricing.least() * (pricing.again + pricing.all.need_alone()) < spent) {
+            return None;
+        }
+        Some(spent)
+    };
+    let doubts = scouted.unwrap_or_else(doubt);
+    let far = |set: &[usize]| raised(&without(fixed, means, &read, set), &doubts.interval(set));
+    // A kept set's work a µs (its mean rate, made once a set) and the bound below every set's (`Pricing::least`); the
+    // product's trajectories beside the error it leaves (`Level::need_without_all`), and the chance that the next
+    // pilot reads a look without room (`Doubt::chance`).
+    let rates: std::cell::RefCell<HashMap<Vec<usize>, Option<f64>>> = std::cell::RefCell::new(HashMap::new());
+    let rate = |set: &[usize]| -> Option<f64> {
+        let mut key = set.to_vec();
+        key.sort_unstable();
+        if let Some(&made) = rates.borrow().get(&key) {
+            return made;
+        }
+        let made = pricing.rates(&key).map(|r| pricing.mean(&r, None));
+        rates.borrow_mut().insert(key, made);
+        made
+    };
+    let price = |set: &[usize], beyond: &[usize]| -> [f64; 2] {
+        let point = without(fixed, means, &read, set);
+        [pricing.all.need_without_all(set), doubts.chance(set, &point, &counted, step, &read, beyond)]
+    };
+    let costs = Costs { least: pricing.least(), floor: pricing.all.need_alone(), again: pricing.again, none };
+    let set = needed(&counted, step, means, &held, &read, &costs, &rate, &|set| without(fixed, means, &read, set), &far, &price);
+    if set.is_empty() {
         return None;
     }
-    let saving = pricing.saving_at_all();
-    if saving.is_empty() {
-        return None;
+    if none.is_some() {
+        let with = pricing.rates(&set)?;
+        let others = pricing.leave_one_out();
+        let saving = Read { value: pricing.share_of(&pricing.all, pricing.all.need_without_all(&set), &with), spread: spread(others.iter().map(|l| pricing.share_of(l, l.need_without_all(&set), &with)), others.len() as f64) };
+        if !pays(0., saving) {
+            return None;
+        }
     }
-    pricing.own = pricing.own();
-    let pricing = &pricing;
-    let others = pricing.leave_one_out();
-    let screened: Vec<usize> = saving.into_par_iter().filter(|&u| pays(0., pricing.saving(&others, u, &pricing.own))).collect();
-    let mut ranked: Vec<Candidate> = screened.into_iter().filter_map(|u| pricing.priced(&others, u)).filter(|c| pays(0., c.saving)).collect();
-    ranked.sort_by(|a, b| assured(b.saving).total_cmp(&assured(a.saving)));
-    let ranked: Vec<usize> = ranked.into_iter().map(|c| c.unit).collect();
-    (!ranked.is_empty()).then(|| pricing.joint(&others, &ranked))
+    Some(set)
 }
 
 /// One attempt at the solve (module documentation, # The pipeline) with the model of the units `kept` as `setting` holds
@@ -2794,31 +2882,59 @@ fn remainder<'a>(error: [f64; 2], less: impl Iterator<Item = &'a [f64; 2]>) -> [
     [probability_error((error[0] - less[0]).max(0.)), (error[1] - less[1]).max(0.)]
 }
 
-/// The units the looks need kept (module documentation, # The model; `keep`). The order: while a look leaves the
-/// statistics no room at the far end of the model's error the units taken so far leave (`far`: the error and the doubt
-/// its reads leave on it, `Doubt`), the unit whose weight there is the most for the work a µs of its kept model
-/// (`cost`: its mean rate; none where its keep is refused, never taken) is taken next, until every such look has room
-/// or no unit weighs there: the error that leaves no room is removed where the run it leaves costs the least. (By
-/// weight alone, S3's probe took its carrier's dressing with thirteen bare drives on its scout -- the generator's
-/// assembly, the jumps and the photons three to four times dearer a step --, where the bare drives alone leave room.
-/// By the work a keep adds, the difference of two rates, PGC3D took 129 units whose keeps cost nothing at the step it
-/// stood at, their weights a trifle, before any that the room needed, and its model had no step left: a keep's work is
-/// the kept model's, at any step.)
+/// What a set's expected work is weighed with (`needed`): the least work a µs a kept model can have (`Pricing::least`),
+/// the trajectories the looks need with every unit's error removed (`Level::need_alone`), the trajectories a kept
+/// model runs again before it stands where this one does, and the expected work of keeping nothing (none where some
+/// look has no room for the statistics).
+struct Costs {
+    least: f64,
+    floor: f64,
+    again: f64,
+    none: Option<f64>,
+}
+
+/// The outputs whose looks set the run's need at the model's errors `fixed` (`needed`): of the looks at outputs read
+/// that the run's trajectories bring within their targets (`Look::fits`), those of the largest need.
+fn binding(estimates: &[Estimate], fixed: &Fixed, step: &[Bound], read: &[bool]) -> Vec<usize> {
+    let fitting: Vec<Look> = looks(estimates, fixed, step).into_iter().filter(|l| read[l.output] && l.fits()).collect();
+    let most = fitting.iter().map(Look::need).fold(0., f64::max);
+    let mut outputs: Vec<usize> = fitting.iter().filter(|l| l.need() >= most).map(|l| l.output).collect();
+    outputs.dedup();
+    outputs
+}
+
+/// The units to keep (module documentation, # The model; `keep`), by the run's expected total work. The order: at the
+/// far end of the model's error the units taken so far leave (`far`: the error and the doubt its reads leave on it,
+/// `Doubt`), the outputs where the need binds -- those whose looks leave the statistics no room, and where every look
+/// has room those of the largest need (`binding`) --, and there the unit whose weight is the most for the work a µs of
+/// its kept model (`work`: its mean rate; none where its keep is refused, never taken) is taken next: the error that
+/// sets the run's length is removed where the run it leaves costs the least. The order ends where no unit weighs where
+/// the need binds, or where no larger set can be expected to cost less than the least found: a set with room costs
+/// at least its own work a µs -- no larger set's is less, its clusters are no smaller (`Price::grown`) -- times its
+/// pilot again and the trajectories the looks need with every error removed (`Costs::floor`). (By weight alone, S3's
+/// probe took its carrier's dressing with thirteen bare drives on its scout -- the generator's assembly, the jumps and
+/// the photons three to four times dearer a step --, where the bare drives alone leave room. By the work a keep adds,
+/// the difference of two rates, PGC3D took 129 units whose keeps cost nothing at the step it stood at, their weights a
+/// trifle, before any that the room needed, and its model had no step left: a keep's work is the kept model's, at any
+/// step. Asked only where some look had no room, GMD1C's pilot read a model error of 0.047 against the room's 0.0498
+/// and kept none: its 800 trajectories took 549 CPU-s, where its forty drives kept explicit, their errors removed
+/// together -- none of them pays alone --, leave 0.0107 and 176 trajectories, 100 CPU-s.)
 ///
 /// The set: of the order's leading sets, the one of the least expected work (`price`: per set the work a µs of its
 /// kept model, the product's trajectories beside the error it leaves, and the chance that the next pilot reads a look
-/// without room, `Doubt::chance`), and of it none to spare. Kept, a set's model runs a pilot again (`again`) and its
-/// product; where the next pilot reads a look without room it keeps again, of the larger sets the one of the least
-/// expected work -- the largest, another pilot and its product at its own work. A cost against a cost: the error read
-/// and its far end are the two ends of it. (Taken until the error read had room, e038's pilots kept 6, 2, 1 and 1 units
-/// over four attempts, a pilot and its reads each, 440 CPU-s, the next pilot reading the outputs left with no room as
-/// often as not; taken to the far end of the error, R4_LIN_2's pilot kept six units where one did, and the next pilot
-/// three more.) Outputs that no set has room at -- every unit that weighs there kept -- are no set's to cover (the
-/// ledger flags them). A set that leaves a look no room at the error as read (`point`) is no candidate where a larger
-/// one leaves room there: its model decides first on these same states (module documentation, # An attempt's own),
-/// and their reads ask the rest of the room at once -- a round of a model, its tables and its reads for a set the
-/// reads already refuse. (Priced as the next pilot's chance alone, a keep on states that run nothing again, `again` =
-/// 0, costs a set short of room as much as the larger set it leads to, and S2Q kept its first 37 units in 37 rounds.)
+/// without room, `Doubt::chance`), and of it none to spare (`least_expected`); none where keeping nothing is expected
+/// to cost no more. Kept, a set's model runs a pilot again (`again`) and its product; where the next pilot reads a
+/// look without room it keeps again, of the larger sets the one of the least expected work -- the largest, another
+/// pilot and its product at its own work. A cost against a cost: the error read and its far end are the two ends of
+/// it. (Taken until the error read had room, e038's pilots kept 6, 2, 1 and 1 units over four attempts, a pilot and its
+/// reads each, 440 CPU-s, the next pilot reading the outputs left with no room as often as not; taken to the far end of
+/// the error, R4_LIN_2's pilot kept six units where one did, and the next pilot three more.) Outputs that no set has
+/// room at -- every unit that weighs there kept -- are no set's to cover (the ledger flags them). A set that leaves a
+/// look no room at the error as read (`point`) is no candidate where a larger one leaves room there: its model decides
+/// first on these same states (module documentation, # An attempt's own), and their reads ask the rest of the room at
+/// once -- a round of a model, its tables and its reads for a set the reads already refuse. (Priced as the next
+/// pilot's chance alone, a keep on states that run nothing again, `again` = 0, costs a set short of room as much as
+/// the larger set it leads to, and S2Q kept its first 37 units in 37 rounds.)
 ///
 /// A kept set's rate (`work`: its work formula, `Pricing::rates`) is a kept model's structure and its plans, made where a
 /// set asks for it, and once. `least` bounds every set's rate from below (`Pricing::least`), so a unit's weight over it
@@ -2827,15 +2943,29 @@ fn remainder<'a>(error: [f64; 2], less: impl Iterator<Item = &'a [f64; 2]>) -> [
 /// A set's expected work is its rate times what it runs, and a set that the bound leaves above the least found -- of
 /// the larger sets, or the set kept -- is never the least: its rate is not made.
 #[allow(clippy::too_many_arguments)]
-fn needed(estimates: &[Estimate], step: &[Bound], means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool], least: f64, work: &dyn Fn(&[usize]) -> Option<f64>, point: &dyn Fn(&[usize]) -> Fixed, far: &dyn Fn(&[usize]) -> Fixed, price: &dyn Fn(&[usize], &[usize]) -> [f64; 2], again: f64) -> Vec<usize> {
+fn needed(estimates: &[Estimate], step: &[Bound], means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool], costs: &Costs, work: &dyn Fn(&[usize]) -> Option<f64>, point: &dyn Fn(&[usize]) -> Fixed, far: &dyn Fn(&[usize]) -> Fixed, price: &dyn Fn(&[usize], &[usize]) -> [f64; 2]) -> Vec<usize> {
     let tight_at = |set: &[usize]| tight(estimates, &far(set), step, read);
     // The outputs no set has room at: those tight with every unit kept that weighs where the far end is tight.
     let every: Vec<usize> = weights(means, estimates, held, &tight_at(&[])).iter().enumerate().filter(|&(_, w)| *w > 0.).map(|(u, _)| u).collect();
     let beyond = tight_at(&every);
-    let open = |set: &[usize]| -> Vec<usize> { tight_at(set).into_iter().filter(|k| !beyond.contains(k)).collect() };
-    let mut taken: Vec<usize> = vec![];
+    let open = |set: &[usize]| -> Vec<usize> {
+        let fixed = far(set);
+        let short: Vec<usize> = tight(estimates, &fixed, step, read).into_iter().filter(|k| !beyond.contains(k)).collect();
+        if short.is_empty() { binding(estimates, &fixed, step, read) } else { short }
+    };
+    let short = |set: &[usize]| tight(estimates, &point(set), step, read).iter().any(|k| !beyond.contains(k));
+    let (mut taken, mut best): (Vec<usize>, f64) = (vec![], costs.none.unwrap_or(f64::INFINITY));
     let mut made: HashMap<usize, Option<f64>> = HashMap::new();
     loop {
+        // A set with room: what it is expected to cost as the last one kept, and whether a larger one could cost less.
+        if !taken.is_empty() && !short(&taken) {
+            let Some(w) = work(&taken) else { break };
+            let [n, p] = price(&taken, &beyond);
+            best = best.min(w * (costs.again * (1. + p) + n));
+            if w * (costs.again + costs.floor) >= best {
+                break;
+            }
+        }
         let outputs = open(&taken);
         if outputs.is_empty() {
             break;
@@ -2843,38 +2973,38 @@ fn needed(estimates: &[Estimate], step: &[Bound], means: &[Vec<[f64; 2]>], held:
         let weights = weights(means, estimates, held, &outputs);
         let weighing: Vec<usize> = (0..weights.len()).filter(|&u| weights[u] > 0. && !taken.contains(&u)).collect();
         // Error per work a µs (a model's rate is some work: every step costs some), bounded by the bound's.
-        let mut asked: Vec<(usize, f64)> = weighing.iter().map(|&u| (u, weights[u] / least)).collect();
+        let mut asked: Vec<(usize, f64)> = weighing.iter().map(|&u| (u, weights[u] / costs.least)).collect();
         asked.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.0.cmp(&a.0)));
-        let mut best: Option<(usize, f64)> = None;
+        let mut chosen: Option<(usize, f64)> = None;
         for (u, most) in asked {
-            if best.is_some_and(|(_, value)| value > most) {
+            if chosen.is_some_and(|(_, value)| value > most) {
                 break;
             }
             if let Some(c) = *made.entry(u).or_insert_with(|| work(&[u])) {
                 let value = weights[u] / c;
                 // Of equal values the last unit, as a scan of them all in their order takes it.
-                if best.is_none_or(|(b, v)| value > v || (value == v && u > b)) {
-                    best = Some((u, value));
+                if chosen.is_none_or(|(b, v)| value > v || (value == v && u > b)) {
+                    chosen = Some((u, value));
                 }
             }
         }
-        let Some((u, _)) = best else { break };
+        let Some((u, _)) = chosen else { break };
         taken.push(u);
     }
-    let short = |set: &[usize]| tight(estimates, &point(set), step, read).iter().any(|k| !beyond.contains(k));
-    least_expected(&taken, &|u| made[&u].unwrap_or(0.), least, work, &|set| price(set, &beyond), &short, again)
+    least_expected(&taken, &|u| made[&u].unwrap_or(0.), costs, work, &|set| price(set, &beyond), &short)
 }
 
 /// Of the sets the order `taken` leads through, the one of the least expected work, and of it none to spare (`needed`):
 /// a set kept, its model runs a pilot again and then its product, of the work a µs `w` of its kept model (`work`, none
-/// where its keep is refused; `least` below every set's), the trajectories `again` and `n` the looks need beside the
-/// error it leaves; and where the next pilot still reads a look without room (its chance `p`; `price` gives [n, p]),
+/// where its keep is refused; `Costs::least` below every set's), the trajectories `again` and `n` the looks need beside
+/// the error it leaves; and where the next pilot still reads a look without room (its chance `p`; `price` gives [n, p]),
 /// the next keep is chosen again among the larger sets, the least of theirs -- for the largest, another pilot and its
-/// product at its own work. E_j = w_j (again + (1 − p_j) n_j) + p_j min_{i > j} E_i. Then each unit is left out, the
-/// dearest first (`single`: its own kept model's work a µs), where the set without it is expected to cost less. Of
-/// the sets, those `short` of room at the error as read are none where another is not, nor is a set left so (`needed`).
-#[allow(clippy::too_many_arguments)]
-fn least_expected(taken: &[usize], single: &dyn Fn(usize) -> f64, least: f64, work: &dyn Fn(&[usize]) -> Option<f64>, price: &dyn Fn(&[usize]) -> [f64; 2], short: &dyn Fn(&[usize]) -> bool, again: f64) -> Vec<usize> {
+/// product at its own work. E_j = w_j (again + (1 − p_j) n_j) + p_j min_{i > j} E_i. None where keeping nothing is
+/// expected to cost no more (`Costs::none`). Then each unit is left out, the dearest first (`single`: its own kept
+/// model's work a µs), where the set without it is expected to cost less. Of the sets, those `short` of room at the
+/// error as read are none where another is not, nor is a set left so (`needed`).
+fn least_expected(taken: &[usize], single: &dyn Fn(usize) -> f64, costs: &Costs, work: &dyn Fn(&[usize]) -> Option<f64>, price: &dyn Fn(&[usize]) -> [f64; 2], short: &dyn Fn(&[usize]) -> bool) -> Vec<usize> {
+    let again = costs.again;
     // The first set with room at the error as read: the sets before it are no candidates.
     let from = (0..taken.len()).find(|&j| !short(&taken[..=j]));
     // E is w a + b: where the bound below w leaves it above `against`, the least of the sets it is weighed against, the
@@ -2885,7 +3015,7 @@ fn least_expected(taken: &[usize], single: &dyn Fn(usize) -> f64, least: f64, wo
             Some(next) => (again + (1. - p) * n, p * next),
             None => (again * (1. + p) + n, 0.),
         };
-        if least * a + b > against {
+        if costs.least * a + b > against {
             return None;
         }
         Some(work(set)? * a + b)
@@ -2893,12 +3023,15 @@ fn least_expected(taken: &[usize], single: &dyn Fn(usize) -> f64, least: f64, wo
     let mut expected = vec![f64::INFINITY; taken.len()];
     let mut after = f64::INFINITY;
     for j in (0..taken.len()).rev() {
-        if let Some(e) = expect(&taken[..=j], after.is_finite().then_some(after), after) {
+        if let Some(e) = expect(&taken[..=j], after.is_finite().then_some(after), after.min(costs.none.unwrap_or(f64::INFINITY))) {
             expected[j] = e;
         }
         after = after.min(expected[j]);
     }
     let Some(best) = (from.unwrap_or(0)..taken.len()).filter(|&j| expected[j].is_finite()).min_by(|&a, &b| expected[a].total_cmp(&expected[b])) else { return vec![] };
+    if costs.none.is_some_and(|none| none <= expected[best]) {
+        return vec![];
+    }
     let (mut chosen, mut least) = (taken[..=best].to_vec(), expected[best]);
     // The set is the room's together: a unit taken early for its value may be needed no more once those after it are
     // kept. Each unit is left out, the dearest first, where the set without it is expected to cost less -- its next
@@ -3085,24 +3218,17 @@ fn sums(means: &[Vec<[f64; 2]>], unsampled: [f64; 2]) -> Vec<[f64; 2]> {
     means.iter().map(|units| units.iter().fold(unsampled, |a, m| [a[0] + m[0], a[1] + m[1]])).collect()
 }
 
-/// The model's error at an output after t = 0 from the sum `whole` of its units' there (`sums`), less one unit's where
-/// `without` gives its error there and the units' number: a population's at most 1. A read error leaves the sum by
-/// subtraction -- one output's work, not every unit's again; at an output no state was read at, every read unit's
-/// error is its bound alike (`Measured::means`), and the others' bounds stand.
-fn model_error_at(whole: [f64; 2], without: Option<([f64; 2], usize)>, unsampled: [f64; 2]) -> [f64; 2] {
-    let less = |i: usize| match without {
-        None => whole[i],
-        Some((unit, _)) if unit[i].is_finite() => whole[i] - unit[i],
-        Some((_, units)) => if units > 1 { f64::INFINITY } else { unsampled[i] },
-    };
-    [probability_error(less(0)), less(1)]
+/// The model's error at an output after t = 0 from the sum `whole` of its units' there and what the reach leaves out
+/// (`sums`): a population's at most 1.
+fn model_error_at(whole: [f64; 2]) -> [f64; 2] {
+    [probability_error(whole[0]), whole[1]]
 }
 
 /// The model's error booked per output (SPEC §4; module documentation, # The model): the folded units' combined error
 /// measured at the states (`Measured::combined`) and what the reach leaves out of the initial ensemble (of the atoms, of
 /// their kinetic energy; model/reach.rs `Model::left_out`), a population's at most 1; none at t = 0, the request's state.
 fn model_error(combined: &[[f64; 2]], unsampled: [f64; 2]) -> Vec<[f64; 2]> {
-    combined.iter().enumerate().map(|(k, c)| if k == 0 { [0.; 2] } else { model_error_at([c[0] + unsampled[0], c[1] + unsampled[1]], None, unsampled) }).collect()
+    combined.iter().enumerate().map(|(k, c)| if k == 0 { [0.; 2] } else { model_error_at([c[0] + unsampled[0], c[1] + unsampled[1]]) }).collect()
 }
 
 /// The bandwidth of a model's cluster's generator by its levels (`Pricing::rated_by`, step.rs `Price::grown`): the largest
@@ -3178,12 +3304,6 @@ fn over_the_run(picks: &[Pick], values: impl Iterator<Item = f64>, left: Option<
     if weight > 0. { sum / weight } else { 0. }
 }
 
-/// A unit to keep (`Pricing::priced`) and its predicted saving.
-struct Candidate {
-    unit: usize,
-    saving: Read,
-}
-
 /// The pilot's groups but one (or all of them) as the pricing reads them (`Pricing`): the estimates and the units' mean
 /// errors over them (per output and unit), and the current model's W there; every model's error taken less the doubt
 /// the reads leave on it (`doubt`: the scout's; none on the pilot).
@@ -3244,13 +3364,10 @@ impl<'a> Level<'a> {
         most
     }
 
-    /// The trajectories the looks need beside the units' errors but unit `u`'s and the step's share.
-    fn need_without(&self, u: usize) -> f64 {
-        self.need_beside(&|k| model_error_at(self.whole[k], Some((self.means[k][u], self.means[k].len())), self.unsampled))
-    }
-
-    /// The trajectories the looks need beside the units' errors but those of the units `set` and the step's share: at an
-    /// output where some of them is unread, the bounds of the units read left there (`model_error_at`).
+    /// The trajectories the looks need beside the units' errors but those of the units `set` and the step's share: a read
+    /// error leaves the sum by subtraction (`sums`); at an output no state was read at every unit's error is its bound
+    /// alike (`Measured::means`), its population's leaves as a read one does, and on T the other units' bounds stand --
+    /// with every unit removed, what the reach leaves out.
     fn need_without_all(&self, set: &[usize]) -> f64 {
         self.need_beside(&|k| {
             let less = set.iter().fold([0.; 2], |a, &u| [a[0] + self.means[k][u][0], a[1] + self.means[k][u][1]]);
@@ -3261,7 +3378,7 @@ impl<'a> Level<'a> {
 
     /// The trajectories the looks need beside the step's share alone: every unit kept, what the reach leaves out left.
     fn need_alone(&self) -> f64 {
-        self.need_beside(&|_| model_error_at(self.unsampled, None, self.unsampled))
+        self.need_beside(&|_| model_error_at(self.unsampled))
     }
 }
 
@@ -3455,62 +3572,14 @@ impl<'a> Pricing<'a> {
         over_the_run(&self.rated, rates.iter().copied(), left)
     }
 
-    /// The share of the current model's W at a level that keeping unit `u` saves at the rates `rates` of its kept model:
-    /// a model's W (per µs of run) is its mean rate times its product's trajectories (`need`), the kept model's with the
-    /// pilot its new attempt runs.
-    fn share(&self, level: &Level, u: usize, rates: &[f64]) -> f64 {
-        self.share_of(level, level.need_without(u), rates)
-    }
-
     /// The share of the current model's W at a level that a kept model saves, which needs `need` trajectories at the
-    /// rates `rates` (`share`).
+    /// rates `rates`: a model's W (per µs of run) is its mean rate times its product's trajectories (`need`), the kept
+    /// model's with the pilot its new attempt runs.
     fn share_of(&self, level: &Level, need: f64, rates: &[f64]) -> f64 {
         let spent = self.mean(&self.own, level.left) * level.need;
         if spent > 0. { 1. - self.mean(rates, level.left) * (need + self.again) / spent } else { 0. }
     }
 
-    /// The units to keep of the candidates `ranked` (each paying by itself, by their saving, the largest first): of the
-    /// sets of their leading ones, the one whose keep together saves the most beyond its spread over the jackknife's
-    /// levels `others` -- its errors leave the looks together, and its kept model is rated once --; the leading one
-    /// where no larger set does better, or where a larger set's model is refused (`Model::new`): no candidate after it
-    /// is taken then.
-    fn joint(&self, others: &[Level], ranked: &[usize]) -> Vec<usize> {
-        let mut best: (usize, f64) = (1, f64::NEG_INFINITY);
-        for j in 1..=ranked.len() {
-            let set = &ranked[..j];
-            let Some(rates) = self.rates(set) else { break };
-            let saving = Read { value: self.share_of(&self.all, self.all.need_without_all(set), &rates), spread: spread(others.iter().map(|l| self.share_of(l, l.need_without_all(set), &rates)), others.len() as f64) };
-            if pays(0., saving) && assured(saving) > best.1 {
-                best = (j, assured(saving));
-            }
-        }
-        ranked[..best.0].to_vec()
-    }
-
-    /// The saving of keeping unit `u` at the rates `rates` of its kept model, spread over the jackknife's levels `others`.
-    fn saving(&self, others: &[Level], u: usize, rates: &[f64]) -> Read {
-        Read { value: self.share(&self.all, u, rates), spread: spread(others.iter().map(|l| self.share(l, u, rates)), others.len() as f64) }
-    }
-
-    /// The units whose keep would save at all were its model to cost no more per µs than the current one -- the
-    /// trajectories its error's removal saves, less the new pilot (module documentation, # The model). A saving that is
-    /// none before its spread pays at no confidence: only these are read on the jackknife's levels and priced.
-    fn saving_at_all(&self) -> Vec<usize> {
-        // No unit's removal saves more than the removal of them all (a look's need falls with the model's error):
-        // where even that does not pay for the new pilot, none is tried.
-        if self.all.need_alone() + self.again >= self.all.need {
-            return vec![];
-        }
-        (0..self.formula.units.len()).into_par_iter().filter(|&u| self.all.need_without(u) + self.again < self.all.need).collect()
-    }
-
-    /// Unit `u` with its kept model rated (`rates`; a keep costs less per µs than the fold it replaces or far more -- a
-    /// drive kept across a fine-structure splitting, its generator's norm ~10⁷ rad/µs), its saving spread over the
-    /// jackknife's levels `others`.
-    fn priced(&self, others: &[Level], u: usize) -> Option<Candidate> {
-        let rates = self.rates(&[u])?;
-        Some(Candidate { unit: u, saving: self.saving(others, u, &rates) })
-    }
 }
 
 /// Histograms of one coordinate of the held atoms at the listed outputs on one grid symmetric about 0 that holds them all
@@ -4119,11 +4188,11 @@ mod tests {
     /// share: T's look has room while the model's error on T is below √(1 − 1/5) of the target, 0.0894. The error read
     /// without a doubt on it: the far end is the error, and the next pilot reads it again -- its chance of a look
     /// without room one where the set leaves none, else none --; a set's work a µs the sum of its units', its product
-    /// nothing beside its pilot (the reads exact). Three units of errors 0.06, 0.05 and 0.04 on T beside 0.05 of the
-    /// rest (0.2), each adding the same work: the heaviest first, 0.14 and 0.09 still leave no room, 0.05 does -- all
-    /// three, together: a set that leaves no room costs its pilot and then a larger set's. With 0.02, 0.08 and 0.03
-    /// beside 0.02 (0.15): the second alone, 0.07. With room from the start, none; at an output not read, or where no
-    /// atom is held, none.
+    /// nothing beside its pilot (the reads exact), and keeping nothing no option where the look has no room, else
+    /// nothing to spend. Three units of errors 0.06, 0.05 and 0.04 on T beside 0.05 of the rest (0.2), each adding the
+    /// same work: the heaviest first, 0.14 and 0.09 still leave no room, 0.05 does -- all three, together: a set that
+    /// leaves no room costs its pilot and then a larger set's. With 0.02, 0.08 and 0.03 beside 0.02 (0.15): the second
+    /// alone, 0.07. With room from the start, none; at an output not read, or where no atom is held, none.
     #[test]
     fn the_units_the_looks_need_kept_are_taken_by_error_per_work_until_they_have_room() {
         let estimates = vec![estimate([10.; 3], 0., 88.), estimate([10.; 3], 0., 88.)];
@@ -4133,7 +4202,9 @@ mod tests {
                 let short = tight(estimates, &without(fixed, means, read, set), &vec![Bound::share(); means.len()], read).iter().any(|k| !beyond.contains(k));
                 [0., f64::from(u8::from(short))]
             };
-            needed(estimates, &vec![Bound::share(); means.len()], means, held, read, least, work, &|set| without(fixed, means, read, set), &|set| without(fixed, means, read, set), &price, 1.)
+            let step = vec![Bound::share(); means.len()];
+            let none = tight(estimates, fixed, &step, read).is_empty().then_some(0.);
+            needed(estimates, &step, means, held, read, &Costs { least, floor: 0., again: 1., none }, work, &|set| without(fixed, means, read, set), &|set| without(fixed, means, read, set), &price)
         };
         let summed = |rate: &dyn Fn(usize) -> Option<f64>, set: &[usize]| set.iter().map(|&u| rate(u)).sum::<Option<f64>>();
         let case = |errors: [f64; 3], rest: f64, held: f64, read: bool| {
@@ -4203,7 +4274,8 @@ mod tests {
         let pick = |more: [f64; 3]| {
             let price = |set: &[usize], _: &[usize]| -> [f64; 2] { [500., [1., 1., 0.05, 0.][set.len()]] };
             let work = |set: &[usize]| Some(1. + more[..set.len()].iter().sum::<f64>());
-            needed(&estimates, &[Bound::share(); 2], &means, &held, &read, 1., &work, &|_| Fixed { model: vec![[0.; 2]; 2], start: 0. }, &|set| without(&fixed, &means, &read, set), &price, 88.).len()
+            let costs = Costs { least: 1., floor: 500., again: 88., none: None };
+            needed(&estimates, &[Bound::share(); 2], &means, &held, &read, &costs, &work, &|_| Fixed { model: vec![[0.; 2]; 2], start: 0. }, &|set| without(&fixed, &means, &read, set), &price).len()
         };
         // E3 = w3 (88 + 500), E2 = w2 (88 + 0.95 · 500) + 0.05 E3, E1 = w1 · 88 + min(E2, E3).
         let least = |more: [f64; 3]| {
@@ -4215,6 +4287,40 @@ mod tests {
         };
         for (more, kept) in [([0.01; 3], 2), ([0.01, 0.01, 0.], 3), ([0.3; 3], 2)] {
             assert_eq!((least(more), pick(more)), (kept, kept), "{more:?}");
+        }
+    }
+
+    /// Keeps are judged by the run's total work wherever the looks have room (`needed`, `Costs::none`), not only where
+    /// they have none: GMD1C's class -- a model's error spread over many units, none of whose keeps pays alone, the
+    /// first one's dearer a µs by its cluster's growth and every further one's by little (drives into one excited state,
+    /// explicit once). One output, T read at 88 trajectories to a relative interval of 0.0937, the step at its share; the
+    /// model's error on T 0.085 -- forty units of 0.0015 and 0.025 of the rest --, room for the statistics of 0.0278: the
+    /// run needs about 1000 trajectories at the current work a µs, one. A set of k units: work a µs 1 + 0.5 + 0.001 k,
+    /// its pilot (88) again and its product beside the error it leaves. Every unit's keep alone costs more than keeping
+    /// nothing; the set kept costs less, and it is a large one. Where a keep's first unit multiplies the work a µs by
+    /// thirty, nothing is kept: no set is expected to cost less.
+    #[test]
+    fn units_that_pay_only_together_are_kept_by_the_run_s_total_work() {
+        let units = 40;
+        let estimates = vec![estimate([10.; 3], 0., 88.), estimate([10.; 3], 0.4685, 88.)];
+        let means = vec![vec![[0.; 2]; units], vec![[0., 0.0015]; units]];
+        let fixed = Fixed { model: vec![[0.; 2], [0., 0.06 + 0.025]], start: 0. };
+        let (held, read, step) = ([1., 1.], [false, true], [Bound::share(); 2]);
+        let need = |set: &[usize]| looks(&estimates, &without(&fixed, &means, &read, set), &step).iter().filter(|l| l.fits()).map(Look::need).fold(0., f64::max);
+        let price = |set: &[usize], _: &[usize]| -> [f64; 2] { [need(set), 0.] };
+        let (again, none) = (88., need(&[]));
+        assert!((none / 1000. - 1.).abs() < 0.05, "the current model's need {none}");
+        for growth in [0.5, 30.] {
+            let work = |set: &[usize]| Some(1. + if set.is_empty() { 0. } else { growth + 0.001 * set.len() as f64 });
+            let expected = |set: &[usize]| work(set).unwrap() * (again + need(set));
+            assert!((0..units).all(|u| expected(&[u]) > none), "growth {growth}: a unit's keep alone pays");
+            let costs = Costs { least: 1., floor: need(&(0..units).collect::<Vec<_>>()), again, none: Some(none) };
+            let kept = needed(&estimates, &step, &means, &held, &read, &costs, &work, &|set| without(&fixed, &means, &read, set), &|set| without(&fixed, &means, &read, set), &price);
+            if growth < 1. {
+                assert!(kept.len() > units / 2 && expected(&kept) < none, "growth {growth}: kept {} units, expected {} against {none}", kept.len(), expected(&kept));
+            } else {
+                assert!(kept.is_empty(), "growth {growth}: kept {kept:?}");
+            }
         }
     }
 
@@ -4271,7 +4377,7 @@ mod tests {
         };
         let kept = |by: usize| {
             let work = |set: &[usize]| Some(if by == 0 { row(set).3 } else { row(set).4 }).filter(|w| w.is_finite());
-            least_expected(&(0..16).collect::<Vec<_>>(), &|u| singles[u][by], 1509565.7, &work, &|set| [row(set).1, row(set).2], &|_| false, 88.)
+            least_expected(&(0..16).collect::<Vec<_>>(), &|u| singles[u][by], &Costs { least: 1509565.7, floor: 0., again: 88., none: None }, &work, &|set| [row(set).1, row(set).2], &|_| false)
         };
         assert_eq!((kept(0), kept(1)), ((0..16).collect(), (0..16).collect()));
     }
@@ -4736,12 +4842,10 @@ mod tests {
         assert!(turned.len() == 1 && (turned[0] / closes - 1.).abs() < 3e-3, "the set kept turns at {turned:?}, the room closes at {closes} µK");
     }
 
-    /// The units' errors per output (`Measured::means`), their sums and a unit's removal (`sums`, `model_error_at`).
-    /// Two units (a state's row: their errors); two groups, output 1 read in both, output 2 in the first alone, output 3
-    /// in neither. A unit's error is the mean over the states of the output, of the first group's with the second left
-    /// out, and its bound (1, none) where no state is read. The sums add what the reach leaves out; a unit leaves a sum by
-    /// subtraction; where it was not read, its population's bound leaves as a read error does, and on T the others'
-    /// bounds stand -- alone, what the reach leaves out.
+    /// The units' errors per output (`Measured::means`) and their sums (`sums`, `model_error`). Two units (a state's
+    /// row: their errors); two groups, output 1 read in both, output 2 in the first alone, output 3 in neither. A unit's
+    /// error is the mean over the states of the output, of the first group's with the second left out, and its bound
+    /// (1, none) where no state is read. The sums add what the reach leaves out, and are the combined error booked.
     #[test]
     fn the_states_errors_are_the_outputs_means_and_sums() {
         let errors = [[0.01, 0.02], [0.03, 0.04], [0.05, 0.06], [0.07, 0.08], [0.02, 0.04], [0.06, 0.08]].map(|error| Booking { error, ..Booking::NONE });
@@ -4760,9 +4864,6 @@ mod tests {
         let all = model_error(&measured.combined(4, None, &estimates), unsampled);
         assert!((0..2).all(|i| (all[1][i] - whole[1][i]).abs() <= 1e-15), "{all:?} against {whole:?}");
         assert_eq!((all[0], all[3]), ([0.; 2], [1., f64::INFINITY]));
-        assert_eq!(model_error_at(whole[1], Some((means[1][1], 2)), unsampled), [whole[1][0] - means[1][1][0], whole[1][1] - means[1][1][1]]);
-        assert_eq!(model_error_at(whole[3], Some((means[3][0], 2)), unsampled), [1., f64::INFINITY]);
-        assert_eq!(model_error_at(whole[3], Some((means[3][0], 1)), unsampled), [(whole[3][0] - 1.).min(1.), unsampled[1]]);
     }
 
     /// A flow's moved population booked against the output's populations (`destined`, `Booking::at`; model/units.rs,
@@ -4794,12 +4895,12 @@ mod tests {
         }
     }
 
-    /// The trajectories a level's looks need without a unit (`Level::need_without`) and with every unit kept
+    /// The trajectories a level's looks need without some units (`Level::need_without_all`) and with every unit kept
     /// (`Level::need_alone`) are the largest need of all the looks at that model's error, to the bit: the outputs not
     /// asked could not have raised it. Seven outputs whose total T is read to 1.5 to 3.6 %, three units whose errors
     /// on T differ from output to output, so that the neediest output changes with the unit removed.
     #[test]
-    fn a_level_s_need_without_a_unit_is_the_largest_of_all_its_looks() {
+    fn a_level_s_need_without_units_is_the_largest_of_all_its_looks() {
         let outputs = 8;
         let estimates: Vec<Estimate> = (0..outputs).map(|k| estimate([20., 10., 15.], 15. * (0.015 + 0.0035 * ((k * 5) % 7) as f64), 88.)).collect();
         let means: Vec<Vec<[f64; 2]>> = (0..outputs).map(|k| (0..3).map(|u| [0.001 * u as f64, 0.004 * (((k + 2 * u) * 3) % 5) as f64 + 0.03 * ((k + u) % 3 / 2) as f64]).collect()).collect();
@@ -4809,27 +4910,29 @@ mod tests {
             let fixed = Fixed { model: (0..outputs).map(|k| if k == 0 { [0.; 2] } else { model(k) }).collect(), start: 0. };
             looks(&estimates, &fixed, &vec![Bound::share(); outputs]).iter().map(Look::need).fold(0., f64::max)
         };
-        assert_eq!(level.need, direct(&|k| model_error_at(level.whole[k], None, unsampled)));
-        let needs: Vec<f64> = (0..3).map(|u| level.need_without(u)).collect();
+        // An output's error less unit u's (every error here is read: a sum leaves it by subtraction).
+        let less = |k: usize, u: usize| -> [f64; 2] { model_error_at([level.whole[k][0] - means[k][u][0], level.whole[k][1] - means[k][u][1]]) };
+        assert_eq!(level.need, direct(&|k| model_error_at(level.whole[k])));
+        let needs: Vec<f64> = (0..3).map(|u| level.need_without_all(&[u])).collect();
         for u in 0..3 {
-            assert_eq!(needs[u], direct(&|k| model_error_at(level.whole[k], Some((means[k][u], 3)), unsampled)), "unit {u}");
+            assert_eq!(needs[u], direct(&|k| less(k, u)), "unit {u}");
             assert!(needs[u] <= level.need, "unit {u}: {} of {}", needs[u], level.need);
         }
         assert!(needs.iter().any(|&n| n < level.need) && (needs[0] != needs[1] || needs[1] != needs[2]), "{needs:?} of {}", level.need);
-        assert_eq!(level.need_alone(), direct(&|_| model_error_at(unsampled, None, unsampled)));
+        assert_eq!(level.need_alone(), direct(&|_| model_error_at(unsampled)));
         assert!(level.need_alone() < needs.iter().copied().fold(f64::INFINITY, f64::min));
         // A level read less a doubt (the scout's, `doubt`) needs what its looks need at every model's error so lowered,
         // to the bit: half of the error on T left where the doubt is half of it; and where the doubt is the whole error,
         // nothing -- no unit's removal then saves a trajectory.
         let half: Vec<[f64; 2]> = level.whole.iter().map(|w| [0., 0.5 * w[1]]).collect();
         let doubted = Level::new(None, estimates.as_slice().into(), means.as_slice().into(), &fixed, &vec![Bound::share(); outputs], unsampled, &half);
-        assert_eq!(doubted.need, direct(&|k| [model_error_at(level.whole[k], None, unsampled)[0], 0.5 * level.whole[k][1]]));
+        assert_eq!(doubted.need, direct(&|k| [model_error_at(level.whole[k])[0], 0.5 * level.whole[k][1]]));
         for u in 0..3 {
-            assert_eq!(doubted.need_without(u), direct(&|k| { let m = model_error_at(level.whole[k], Some((means[k][u], 3)), unsampled); [m[0], (m[1] - 0.5 * level.whole[k][1]).max(0.)] }), "unit {u} at half the error's doubt");
+            assert_eq!(doubted.need_without_all(&[u]), direct(&|k| { let m = less(k, u); [m[0], (m[1] - 0.5 * level.whole[k][1]).max(0.)] }), "unit {u} at half the error's doubt");
         }
         let whole: Vec<[f64; 2]> = level.whole.clone();
         let doubted = Level::new(None, estimates.as_slice().into(), means.as_slice().into(), &fixed, &vec![Bound::share(); outputs], unsampled, &whole);
-        assert!((0..3).all(|u| doubted.need_without(u) == doubted.need) && doubted.need_alone() == doubted.need, "{}", doubted.need);
+        assert!((0..3).all(|u| doubted.need_without_all(&[u]) == doubted.need) && doubted.need_alone() == doubted.need, "{}", doubted.need);
     }
 
     /// A pilot's groups with their states kept: `groups` groups of `members` trajectories, numbered as the pilot's are,
@@ -5096,6 +5199,56 @@ mod tests {
         // Nothing was sent (there is no last result): the message stayed due, and was asked for again as the groups came
         // in, once a group at the most.
         assert!(messages.due().is_zero() && seen.len() > 1 && seen.len() <= numbers.len(), "{seen:?}");
+    }
+
+    /// The model's prior (`closed`; module documentation, # The model's prior) is a fixed point of the gates where the
+    /// atoms start: on R4_LIN_2 (lin⊥lin cooling, its folds failing at the atoms' speeds) and PGC3D (six beams' cooling
+    /// and a repump in a tweezer), closed from nothing kept, every unit the model folds has its gate below ½ at each of
+    /// the pilot's initial atoms at the reach's speeds there in every direction (`Model::failing` finds none) -- each
+    /// gate a value there, a number, whatever its neighbourhood does --, and the units kept are among those that failed
+    /// at one of them as their models were read. Printed: the units kept and the time the prior took.
+    #[test]
+    fn the_prior_s_model_folds_only_what_exists_at_every_atom_s_start() {
+        let scenes = [("scenes", "R4_LIN_2"), ("requests", "PGC3D_1ms")];
+        for (dir, name) in scenes {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join(dir).join(format!("{name}.json"));
+            let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+            let light = Light::new(&request);
+            let initial = components(&request);
+            let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).unwrap();
+            let reference = alone(initial[chief].0);
+            let started = Instant::now();
+            let mut kept = vec![];
+            let model = closed(&request, &light, &mut kept, reference, &initial, request.temperature_uk).unwrap();
+            let took = started.elapsed().as_secs_f64();
+            // The pilot's initial atoms again, as `closed` reads them.
+            let hm = hbar_over_mass(request.mass_kg);
+            let prepared = model.prepared();
+            let trap = model.trap(&reference, &prepared).unwrap();
+            let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, &light, alone(s)).unwrap()).collect();
+            let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm).unwrap();
+            let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
+            let points: Vec<(V3, f64)> = (MOST_TRAJECTORIES..MOST_TRAJECTORIES + pilot_size())
+                .map(|index| {
+                    let start = ensemble.draw(SEED, index);
+                    let own = hm * start.kappa.iter().map(|k| k * k).sum::<f64>().sqrt();
+                    (start.r, (2. * hm * model.room(&reach, start.r, &prepared).max(0.)).sqrt().max(own))
+                })
+                .collect();
+            let units = model.units();
+            assert!(model.failing(&units, &points, points.iter().fold(reach.speed, |m, p| m.max(p.1))).is_empty(), "{name}: the closed model folds a unit that fails at an atom's start");
+            // Every unit the model folds is read at every atom's start as a number below ½ (the whole space's bound
+            // stands for the point where it is below ½ already).
+            let reads = model.judged(&units);
+            for &(r, v) in &points {
+                let region = model.point_region(r, v);
+                for (u, read) in reads.iter().enumerate() {
+                    let gate = model.gate_of(read, &region);
+                    assert!(gate.saturation.is_finite() && gate.sweep.is_finite() && gate.exists(), "{name}: {:?} at {r:?}, speeds to {v}: {gate:?}", units[u]);
+                }
+            }
+            eprintln!("{name}: {} units kept by the prior, {} folded, {} atoms' starts, {took:.2} s", kept.len(), units.len(), points.len());
+        }
     }
 
     /// The work formula prices a model as its run counts it (`Formula`). R4_LIN_2's model with its cooling pair's drives into
@@ -5574,7 +5727,7 @@ mod tests {
             let work = |set: &[usize]| Some(1. + set.iter().map(|&u| rates[u]).sum::<f64>());
             let need = 100. + 400. * stream.uniform();
             let price = |set: &[usize]| [need, if short(set) { 1. } else { 0.1 * stream_free(trial, set.len()) }];
-            let chosen = least_expected(&taken, &|u| rates[u], 1., &work, &price, &short, 0.);
+            let chosen = least_expected(&taken, &|u| rates[u], &Costs { least: 1., floor: 0., again: 0., none: None }, &work, &price, &short);
             if room <= units {
                 assert!(!chosen.is_empty() && !short(&chosen), "trial {trial}: {chosen:?} short of room at {room}");
             }

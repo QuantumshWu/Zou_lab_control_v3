@@ -1223,10 +1223,10 @@ fn stepped<D: Dynamics>(model: &D, start: &Trajectory, tau: f64, end: f64) -> (T
 /// The jumps inside a step (step.rs, # Jumps; adapt.rs, # The jumps): a two-level atom about the antinode of a resonant
 /// standing wave along z, in a trap whose period the step does not resolve (ω τ = 3), jumping some times a step --
 /// the hazard follows the atom through the wave --, each jump with its photon's recoil. Step by step:
-/// - a jump is where the step's own propagation reaches the threshold: the same step from the same state with no
-///   threshold, read at the time of the step's first jump, has ‖ψ‖² at that threshold, within what the two
-///   quadratures of the hazard to that time -- the root's spans and the read's -- leave of it (`QUADRATURE` of the
-///   hazard's integral; measured 7·10⁻⁷ in its logarithm at the most);
+/// - a jump is made in a step where, and only where, the step's own survival reaches the threshold: the same step from
+///   the same state with no threshold ends at a survival at the threshold or below exactly where the step jumps -- the
+///   survival falls through the step, so it reaches θ inside the step where it is at θ or below at its end (the
+///   trajectory's own states probe it: a reading's norm is the propagation's, no survival);
 /// - the step's path, handed on through its jumps' kicks (`Segment::after`), ends at the step's end: the jumps' kicks
 ///   enter the reference's flow where they are made;
 /// - the steps are the grid's, one a nominal step whatever the jumps, some with several; and `advance` is these steps
@@ -1241,14 +1241,14 @@ fn a_jump_is_made_inside_its_step_where_the_step_s_own_propagation_reaches_the_t
     model.emission = K;
     let start = Trajectory::new(&model, 0, [0.0, 0.0, 0.05], [0.0, 0.0, 8.0], 3, 5);
     let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
-    let (mut twin, mut scratch, mut jumps, mut most) = (start.clone(), step::Scratch::default(), 0, 0);
+    let (mut twin, mut scratch, mut jumps, mut most, mut crossed, mut kept) = (start.clone(), step::Scratch::default(), 0, 0, 0, 0);
     for k in 1..=(end / tau) as usize {
         let taken = step::Midway::new(&model, &twin, tau).unwrap().attempt(&twin, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
-        if let Some(first) = taken.made.first() {
-            let (_, read) = step_read(&model, &twin, tau, &step::Brownian::STILL, &[first.state.time], &mut step::Scratch::default()).unwrap();
-            let off = (norm(&read[0].psi) / twin.threshold).ln();
-            let fall = (norm(&twin.psi) / twin.threshold).ln();
-            assert!(off.abs() < crate::units::QUADRATURE * fall, "step {k}: at its first jump's time {} the step's own ‖ψ‖² is {off:e} off the threshold in its logarithm", first.state.time);
+        let free = step_of(&model, &twin, tau, &mut step::Scratch::default()).unwrap();
+        let below = (norm(&free.end.psi) / twin.threshold).ln();
+        if below.abs() > 1e-9 {
+            assert_eq!(taken.made.is_empty(), below > 0.0, "step {k}: its own survival at its end is {below:e} from the threshold in its logarithm, and it made {} jumps", taken.made.len());
+            (crossed, kept) = (crossed + usize::from(below < 0.0), kept + usize::from(below > 0.0));
         }
         let mut piece = taken.segment.clone();
         for made in &taken.made {
@@ -1263,6 +1263,8 @@ fn a_jump_is_made_inside_its_step_where_the_step_s_own_propagation_reaches_the_t
     let (mut t, mut pieces) = (start.clone(), 0);
     adapt::advance(&model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut adapt::Path::new(3, 5, tau, 0), end, &[], &mut |_, _| {}, &mut |_, _| pieces += 1).unwrap();
     assert!(jumps > 100 && most > 1 && pieces as f64 == end / tau + jumps as f64, "{jumps} jumps, {most} in one step at the most, {pieces} pieces of {} steps", end / tau);
+    eprintln!("steps whose own survival ends below the threshold {crossed}, above it {kept}");
+    assert!(crossed > 0, "no step's own survival reaches its threshold");
     assert_eq!((twin.jumps, twin.r, twin.kappa, &twin.psi), (t.jumps, t.r, t.kappa, &t.psi), "the steps against the advance");
 }
 
@@ -3567,9 +3569,11 @@ impl Dynamics for Lindblad {
 /// 10⁻³ to 1 µm/µs, and steps whose fastest turn between two nodes, (|q| v + size) τ/2, is 0.01π to 20π -- far past the
 /// light's resolution (π) --; the jumps' size held to what the step's survival can tell from zero, a decay of at most
 /// 20/τ a state (a threshold of zero is the tests' none: a survival that rounds to zero would meet it); each from a
-/// random state, its threshold at zero, read at fifteen random times inside it. To `each`: the model, the start, the
-/// step, the states read, τ times the generator's size and n, and the fastest turn between two nodes (rad).
-fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad, &Trajectory, &step::Step, &[Trajectory], f64, f64)) {
+/// random state, its threshold at zero, and from the same state fifteen steps of random lengths below τ: the survival
+/// probed at the trajectory's own states, the steps' ends (a reading's norm is no survival, adapt.rs # The reads). To
+/// `each`: the model, the start, the steps with their lengths (τ's last), τ times the generator's size and n, and the
+/// fastest turn between two nodes (rad).
+fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad, &Trajectory, &[(f64, step::Step)], f64, f64)) {
     let mut scratch = step::Scratch::default();
     for case in 0..count {
         let mut s = crate::random::Stream::new(43, crate::random::Purpose::Initial, case, 0);
@@ -3588,10 +3592,14 @@ fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad
         let reach = s.uniform();
         let mut start = Trajectory::new(&model, 0, place.map(|x| x * reach), heading.map(|x| x * speed / RB), 7, case);
         start.psi = random_state(&mut s, n);
-        let mut reads: Vec<f64> = (0..15).map(|_| tau * s.uniform()).collect();
-        reads.sort_by(f64::total_cmp);
-        let (taken, read) = step_read(&model, &start, tau, &step::Brownian::STILL, &reads, &mut scratch).unwrap_or_else(|e| panic!("case {case}: n {n}, {waves} waves, size {size}, speed {speed}, turn {:.3}π, τ {tau}: {e:?}", turn / std::f64::consts::PI));
-        each(&model, &start, &taken, &read, tau * size * n as f64, turn);
+        let mut lengths: Vec<f64> = (0..15).map(|_| tau * s.uniform()).collect();
+        lengths.sort_by(f64::total_cmp);
+        lengths.push(tau);
+        let steps: Vec<(f64, step::Step)> = lengths
+            .into_iter()
+            .map(|length| (length, step_of(&model, &start, length, &mut scratch).unwrap_or_else(|e| panic!("case {case}: n {n}, {waves} waves, size {size}, speed {speed}, turn {:.3}π, a step of {length} of τ {tau}: {e:?}", turn / std::f64::consts::PI))))
+            .collect();
+        each(&model, &start, &steps, tau * size * n as f64, turn);
     }
 }
 
@@ -3645,51 +3653,47 @@ fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> f64 {
     crate::linalg::hermitian_eigen(&gram).values.iter().fold(0.0_f64, |m, v| m.max(*v)).sqrt()
 }
 
-/// The survivals of a step in their order: the start's, the times read and the end's (‖ψ‖² each).
-fn survivals(start: &Trajectory, taken: &step::Step, read: &[Trajectory]) -> Vec<f64> {
-    std::iter::once(&start.psi).chain(read.iter().map(|t| &t.psi)).chain(std::iter::once(&taken.end.psi)).map(|psi| crate::linalg::norm_sqr(psi)).collect()
-}
-
 /// The norm is the probability of no jump, and the exact dynamics only lowers it (step.rs, # Jumps): over 400 random
-/// steps (`random_steps`), decays of several plane waves and beats among them, the survival read at fifteen times inside
-/// each step and at its end is a positive number, and rises from one time to the next by no more than the step's own
-/// decay allows -- the negative part of the parabola of its decay through its three nodes (`negative_decay`), which a
-/// decay of plane waves that interfere away between the nodes can have -- and the sums' rounding: where that parabola
-/// is positive semidefinite, it never rises. The propagation's own map over the same steps (`map_growth`), which the
-/// survival does not take, grows on some of them.
+/// cases (`random_steps`), decays of several plane waves and beats among them, sixteen steps each from one state, the
+/// survival at each step's end is a positive number, and rises from the start by no more than that step's own decay
+/// allows -- the negative part of the parabola of its decay through its three nodes (`negative_decay`), which a decay
+/// of plane waves that interfere away between the nodes can have -- and the sums' rounding: where that parabola is
+/// positive semidefinite, it never rises. The propagation's own map over the cases' whole steps (`map_growth`), which
+/// the survival does not take, grows on some of them.
 #[test]
 fn the_survival_never_rises_whatever_the_generator_and_the_step() {
     let (mut most, mut grown, mut widest, mut negative) = (f64::NEG_INFINITY, 0, 0.0_f64, Vec::new());
-    random_steps(400, None, &mut |model, start, taken, read, _, turn| {
-        let norms = survivals(start, taken, read);
-        let tau = taken.end.time - start.time;
-        let (allowed, size) = negative_decay(model, start, tau);
-        if allowed > 0.0 {
-            negative.push((turn / std::f64::consts::PI, allowed / size));
+    random_steps(400, None, &mut |model, start, steps, _, turn| {
+        let first = crate::linalg::norm_sqr(&start.psi);
+        for (length, taken) in steps {
+            let (allowed, size) = negative_decay(model, start, *length);
+            if allowed > 0.0 {
+                negative.push((turn / std::f64::consts::PI, allowed / size));
+            }
+            let end = crate::linalg::norm_sqr(&taken.end.psi);
+            assert!(end.is_finite() && end > 0.0, "case {}, a step of {length}: {end}", start.index);
+            most = most.max((end / first).ln());
+            assert!((end / first).ln() <= allowed + 1e-12 * (1.0 + size), "the survival rose (case {}, turn {:.3}π, a step of {length}) by more than its decay's negative part {allowed:e}: {first} → {end}", start.index, turn / std::f64::consts::PI);
         }
-        for pair in norms.windows(2) {
-            assert!(pair[1].is_finite() && pair[1] > 0.0, "case {}: {norms:?}", start.index);
-            most = most.max((pair[1] / pair[0]).ln());
-            assert!((pair[1] / pair[0]).ln() <= allowed + 1e-12 * (1.0 + size), "the survival rose (case {}, turn {:.3}π) by more than its decay's negative part {allowed:e}: {norms:?}", start.index, turn / std::f64::consts::PI);
-        }
+        let tau = steps.last().expect("τ's step").0;
         let sigma = map_growth(model, start, tau);
         widest = widest.max(sigma);
         grown += usize::from(sigma > 1.0 + 1e-12);
     });
     negative.sort_by(|a, b| a.0.total_cmp(&b.0));
-    eprintln!("the survival's largest rise from one time to the next, ln: {most:e}; the steps whose decay's parabola goes negative (the turn between two nodes in π, its negative part over its size): {negative:.3?}");
+    eprintln!("the survival's largest rise over a step, ln: {most:e}; the steps whose decay's parabola goes negative (the turn between two nodes in π, its negative part over its size): {negative:.3?}");
     eprintln!("the propagation's own map: largest singular value {widest:.4}, above one on {grown} of 400 steps");
     assert!(grown > 0, "the random steps hold propagations whose map grows");
 }
 
-/// The Hermitian part generates unitary motion: without a decay the survival is one at every time read and at the
-/// step's end, whatever the propagation leaves of the state itself -- to the rounding of the generator's own Hermitian
+/// The Hermitian part generates unitary motion: without a decay the survival is one at the end of every step of every
+/// length, whatever the propagation leaves of the state itself -- to the rounding of the generator's own Hermitian
 /// parts (each entry a sum of parts, a part and its adjoint apart: a few units of the round-off of n·size, over τ).
 #[test]
 fn a_generator_without_a_decay_keeps_the_survival() {
     let mut most = 0.0_f64;
-    random_steps(200, Some(0), &mut |_, _, taken, read, scale, _| {
-        for psi in read.iter().map(|t| &t.psi).chain(std::iter::once(&taken.end.psi)) {
+    random_steps(200, Some(0), &mut |_, _, steps, scale, _| {
+        for psi in steps.iter().map(|(_, taken)| &taken.end.psi) {
             let off = (crate::linalg::norm_sqr(psi) - 1.0).abs();
             most = most.max(off / (1.0 + scale));
             assert!(off < 1e-12 * (1.0 + scale), "‖ψ‖² − 1 = {off:e} at τ size n {scale}");
@@ -3773,8 +3777,9 @@ fn the_hazard_is_the_generator_s_decay_and_a_sum_of_squares() {
 /// R4_LIN_2's steps no longer raise the survival (step.rs, # Jumps): its model as the solve closes it (`scene_clusters`:
 /// lin⊥lin cooling, explicit excited states and folds), sixteen atoms a cluster in random states -- at the scene's
 /// temperature and at two and four times its speeds, the reach's hot atoms --, one step each at the engine's τ of the
-/// measured runs (0.36 and 0.4335 µs) and at the companion's 2τ, read at seven times inside: the survival never rises
-/// from one time to the next beyond the sums' rounding, where the propagation's own map over the same steps
+/// measured runs (0.36 and 0.4335 µs) and at the companion's 2τ, and from the same state steps of seven eighths of it
+/// down to one: the survival at each step's end never rises from the start's beyond the sums' rounding (the trajectory's
+/// own states probe it; a reading's norm is no survival), where the propagation's own map over the same steps
 /// (`map_growth`) grows on some of them -- the line's survival, its norm, rose by as much (1.0095 at 0.36 µs:
 /// motion3d_status/rewrite/norm.status.md).
 #[test]
@@ -3787,12 +3792,11 @@ fn r4_lin_2_s_steps_never_raise_the_survival() {
                 let mut wide = 0.0_f64;
                 for start in starts {
                     let start = Trajectory { kappa: start.kappa.map(|k| faster * k), ..start.clone() };
-                    let reads: Vec<f64> = (1..=7).map(|k| start.time + tau * k as f64 / 8.0).collect();
-                    let (taken, read) = step_read(run, &start, tau, &step::Brownian::STILL, &reads, &mut scratch).unwrap();
-                    let norms = survivals(&start, &taken, &read);
-                    for pair in norms.windows(2) {
-                        most = most.max((pair[1] / pair[0]).ln());
-                        assert!(pair[1] <= pair[0] * (1.0 + 1e-12), "R4_LIN_2 cluster {cluster}, τ {tau}, speeds × {faster}: the survival rose: {norms:?}");
+                    let first = crate::linalg::norm_sqr(&start.psi);
+                    for length in (1..=8).map(|k| tau * k as f64 / 8.0) {
+                        let end = crate::linalg::norm_sqr(&step_of(run, &start, length, &mut scratch).unwrap().end.psi);
+                        most = most.max((end / first).ln());
+                        assert!(end <= first * (1.0 + 1e-12), "R4_LIN_2 cluster {cluster}, τ {tau}, speeds × {faster}, a step of {length}: the survival rose: {first} → {end}");
                     }
                     let sigma = map_growth(run, &start, tau);
                     wide = wide.max(sigma);
@@ -3804,7 +3808,7 @@ fn r4_lin_2_s_steps_never_raise_the_survival() {
             }
         });
     }
-    eprintln!("R4_LIN_2: the survival's largest change from one time to the next, ln: {most:e}; the propagation's own map: largest singular value {widest:.6}, above one on {grown} of {steps} steps");
+    eprintln!("R4_LIN_2: the survival's largest change over a step, ln: {most:e}; the propagation's own map: largest singular value {widest:.6}, above one on {grown} of {steps} steps");
     assert!(grown > 0, "R4_LIN_2's steps hold propagations whose map grows");
 }
 

@@ -28,12 +28,11 @@
 //! -- not its steps' ends, not its jumps' roots and the brackets and first tries they start from, not the nodes its
 //! steps take, not the numbers it draws, not where it is lost --, and a read is the same whatever else is read. So the
 //! step follows from what the scheme must resolve alone (solve.rs, # The step), a trajectory read at 100 times is the
-//! one read at 1000 to the bit, and outputs however dense cost each a state, its place and its survival's quadrature
-//! over its panel -- some half a step (pgc3d: 11 µs a read against 19 µs a step, measured) --, not a step.
+//! one read at 1000 to the bit, and outputs however dense cost each a state and its place, not a step.
 //! - A time read lies in one step: after its start, at its end at the latest. It is no stop of the step's propagation
 //!   (`step::Midway::attempt`): its state is taken from the propagation as it passes -- after the jumps before it,
-//!   before those after it --, from the latest stop at or before it, with the survival the step has at its panel's
-//!   two ends and the hazard's shape between them (step.rs `looked`, `Midway::stretch`); its place is the step's
+//!   before those after it --, from the latest stop at or before it (step.rs `looked`), its norm the propagation's
+//!   there: what is read of it is ρ/tr ρ, and the survival is the trajectory's own states'; its place is the step's
 //!   path's there with the draw of the time's own stream (`step::Segment::place`).
 //! - The loss is a first passage, tested where the trajectory's own states are made (SPEC §1.7): at every step's end
 //!   and after every jump, each on the trajectory's place there (`step::Segment`). A trajectory found lost at one of

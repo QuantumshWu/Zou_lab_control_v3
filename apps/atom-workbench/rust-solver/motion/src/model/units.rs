@@ -254,6 +254,7 @@ use crate::linalg::norm3;
 use crate::linalg::{Mat, C64};
 use crate::request::{GROUND, STATES};
 use crate::units::rounding;
+use rayon::prelude::*;
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -417,6 +418,18 @@ pub(crate) struct Fold {
     pub(crate) level: C64,
     pub(crate) terms: [f64; EXCITED],
     pub(crate) across: OnceCell<f64>,
+}
+
+/// What a unit's gate reads of a region (`Model::judged`, `Model::gate_of`): a drive folded (with the bare levels or at
+/// the atom) its ground state's place in the tail rule's order; a coupling of two states its form; a photon coherence
+/// its two classes' jump operators at a point (photon.rs `Model::coherence_gate`). No gate is read of a carrier's
+/// dressing, which folds nothing; of a fold's next order, which exists where the fold does; nor of a unit of nothing in
+/// this model.
+pub(crate) enum Read {
+    Fold { ground: usize, place: usize, bare: bool },
+    Term { form: Arc<TermForm>, a: usize, b: usize, beat: usize },
+    Coherence(Unit),
+    Nothing,
 }
 
 /// One drive of a ground state in the tail rule's order (module documentation, # The tail rule): its component and excited
@@ -1026,6 +1039,66 @@ impl Model {
     /// The model's beat a unit's coupling names, its place among `Model::beats`.
     fn beat_index(&self, beat: &Beat) -> Option<usize> {
         self.beats.iter().position(|b| b.0 == *beat)
+    }
+
+    /// What each unit's gate reads (`Read`), in the units' order: a drive its ground state, its place in the tail rule's
+    /// order and whether it is folded with the bare levels; a coupling of two states its form.
+    pub(crate) fn judged(&self, units: &[Unit]) -> Vec<Read> {
+        units
+            .iter()
+            .map(|u| match *u {
+                Unit::Bare { component, excited, ground } | Unit::Drive { component, excited, ground } => {
+                    let level = self.ranked[ground].iter().find(|d| d.component == component && d.excited == excited).map(|d| (d.group, self.level(component, excited, ground)));
+                    level.filter(|of| of.1 != Level::Explicit).map_or(Read::Nothing, |(place, level)| Read::Fold { ground, place, bare: level == Level::Bare })
+                }
+                Unit::Term { a, b, ref beat } => self.beat_index(beat).map_or(Read::Nothing, |index| Read::Term { form: self.forms.term(self, a, b, index), a, b, beat: index }),
+                Unit::Coherence { .. } => Read::Coherence(u.clone()),
+                Unit::Second { .. } | Unit::Dressing { .. } => Read::Nothing,
+            })
+            .collect()
+    }
+
+    /// A unit's gate over a region (module documentation, # One rule; `Read`), every kind through the one gate: a
+    /// drive's by its ground state's place in the tail rule's order (`folds`), a coupling's (`term_bound`) -- bounds
+    /// over a region, on a point the values there --, a photon coherence's on a point, its jump operators there
+    /// (photon.rs `Model::coherence_gate`; over a cell or the whole space no bound of them is made: not below ½);
+    /// nothing where no gate is read.
+    pub(crate) fn gate_of(&self, read: &Read, region: &Region) -> Gate {
+        match read {
+            Read::Fold { ground, place, bare } => {
+                let made = self.folds(*ground, *place, region);
+                if *bare { Gate { saturation: made[2], sweep: made[3] } } else { Gate { saturation: made[0], sweep: made[1] } }
+            }
+            Read::Term { form, a, b, beat } => {
+                let (saturation, sweep) = self.term_bound(form, *a, *b, *beat, region);
+                Gate { saturation, sweep }
+            }
+            Read::Coherence(unit) if region.rho == 0.0 => self.coherence_gate(unit, region),
+            Read::Coherence(_) => Gate { saturation: f64::INFINITY, sweep: f64::INFINITY },
+            Read::Nothing => Gate { saturation: 0.0, sweep: 0.0 },
+        }
+    }
+
+    /// The units of `units` whose folds do not exist where the atoms start (SPEC §1.5; solve.rs, # The model's prior):
+    /// each unit's gate (`gate_of`) over the whole space at the speeds up to `speed`, every beam at its peak -- a bound
+    /// over any place an atom can be at those speeds: a unit it leaves below ½ exists everywhere and is not read again --,
+    /// and the others' at each of the `points` (r, v), the speeds up to v in every direction (`Model::point_region`):
+    /// those whose gate reaches ½ at one of them at least. Each point's gates on the pool, by itself.
+    pub(crate) fn failing(&self, units: &[Unit], points: &[([f64; 3], f64)], speed: f64) -> Vec<Unit> {
+        let reads = self.judged(units);
+        let whole = self.whole_region(speed);
+        let open: Vec<usize> = (0..units.len()).filter(|&u| !self.gate_of(&reads[u], &whole).exists()).collect();
+        if open.is_empty() {
+            return vec![];
+        }
+        let failing = points
+            .par_iter()
+            .map(|&(r, v)| {
+                let region = self.point_region(r, v);
+                open.iter().map(|&u| !self.gate_of(&reads[u], &region).exists()).collect::<Vec<bool>>()
+            })
+            .reduce(|| vec![false; open.len()], |a, b| a.iter().zip(&b).map(|(x, y)| *x || *y).collect());
+        open.iter().zip(failing).filter(|of| of.1).map(|(&u, _)| units[u].clone()).collect()
     }
 
     /// The drives folded onto explicit excited states whose Raman pairs cannot be folded anywhere (model.rs
