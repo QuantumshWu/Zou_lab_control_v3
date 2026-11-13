@@ -322,6 +322,18 @@
 //! fixed r_h: a held state's force in a standing wave is constant over the step in the scheme) for a third of a step's
 //! work; a shortened step from the step's start as a side branch is of the third order and costs a whole step a read.
 //!
+//! # The step's momentum
+//! What a step does to the momentum has one decomposition (`Step::momentum`), read off the momenta the step makes in
+//! turn -- its start κ₀, the middle the first half flow reaches κ_h, the middle kicked without its jumps κ_k and with
+//! them κ_j, its end κ₁: the reference's flow (κ_h − κ₀) + (κ₁ − κ_j), which carries V_ref's force −∇V_ref; the kick
+//! κ_k − κ_h -- the propagation's impulse, the reference's +τ∇V_ref(r_h) (# The kick: the kick is the force less the
+//! reference's), the scattered light's force and the Brownian push --; and the jumps κ_j − κ_k, each jump's kick as it
+//! enters the flow at the middle (δκ cos ωu, # Jumps). The parts are differences of one chain of momenta, so they add up
+//! to the whole, κ₁ − κ₀, to rounding, and a reader that takes the whole first and the parts as they are can miss no
+//! term: the kick alone is not the force on the atom wherever the reference has a gradient (a held atom off a tweezer's
+//! centre read its kick and jumps alone 46 % short of the master equation's mean force, the trap's pull being in the
+//! flow; motion3d_status/rewrite/restforce.status.md).
+//!
 //! # The domain (SPEC §1.8)
 //! Everything a step asks of the model is asked at points of its straight path r_h + v_m u, |u| ≤ h, and at the one
 //! momentum κ_m: the generator, its forces and the scattered light at the middle, along the path by the plane waves'
@@ -1316,6 +1328,40 @@ pub struct Step {
     /// The step's counted work (real multiply-adds: its own and its nodes' generators and forces; its jumps' photons
     /// are counted on the states). The middles it went through are counted where they are made (`Midway`).
     pub work: f64,
+    /// The momenta the step makes in turn (1/µm, lab axes; module documentation, # The step's momentum): its start κ₀,
+    /// the middle the first half flow reaches κ_h, the middle kicked without its jumps κ_k and with them κ_j, its end κ₁.
+    momenta: [[f64; 3]; 5],
+    /// The position the first half flow reaches, r_h: where the kick is made.
+    reached: [f64; 3],
+}
+
+/// What a step does to the momentum (1/µm, lab axes; module documentation, # The step's momentum): the whole, end.κ −
+/// start.κ, and its one decomposition, each part a difference of the step's own momenta -- the reference's two half
+/// flows, the kick at the middle (the force less the reference's, # The kick) and the jumps' kicks as they enter the
+/// flow at the middle --, which add up to the whole to rounding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Momentum {
+    pub whole: [f64; 3],
+    pub flow: [f64; 3],
+    pub kick: [f64; 3],
+    pub jumps: [f64; 3],
+}
+
+impl Step {
+    /// The step's momentum change and its decomposition (`Momentum`).
+    pub fn momentum(&self) -> Momentum {
+        let [start, middle, kicked, jumped, end] = self.momenta;
+        Momentum {
+            whole: std::array::from_fn(|a| end[a] - start[a]),
+            flow: std::array::from_fn(|a| (middle[a] - start[a]) + (end[a] - jumped[a])),
+            kick: std::array::from_fn(|a| kicked[a] - middle[a]),
+            jumps: std::array::from_fn(|a| jumped[a] - kicked[a]),
+        }
+    }
+    /// The middle the first half flow reaches, (r_h, κ_h): the kick's place and the momentum it is made at.
+    pub fn middle(&self) -> ([f64; 3], [f64; 3]) {
+        (self.reached, self.momenta[1])
+    }
 }
 
 /// A state of the trajectory made inside a step: after a jump -- with the jump's kick (1/µm) -- or at a time read.
@@ -1478,6 +1524,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let kick = (shift.map(|x| -hm * x), std::array::from_fn(|a| impulse[a] + tau * (reference[a] + force[a]) + push[a]));
         // The jumps' kicks, each at its time u from the middle: in the reference's flow the kick δκ cos ωu and the
         // displacement −(ħ/m) δκ sin(ωu)/ω = −(ħ/m) δκ u c₁(ω²u²) at the middle, per principal axis.
+        let unjumped = kicked.1;
         for (jumped, u) in made.iter().filter_map(|m| m.kick.map(|kick| (kick, (m.state.time - from.time) - h))) {
             for (e, lambda) in flow.axes.iter().zip(&flow.curvatures) {
                 let ((c0, c1, _), along) = (stumpff(hm * lambda * u * u), linalg::dot3(*e, jumped));
@@ -1495,7 +1542,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         // A time read at the step's end is the end itself.
         made.extend(reads[read..].iter().map(|&time| Made { kick: None, state: Trajectory { time, ..end.clone() } }));
         let segment = Segment::new(from.time, tau, flow, (from.r, from.kappa), kick, spread);
-        Ok(Step { end, segment, made, work })
+        Ok(Step { end, segment, made, work, momenta: [from.kappa, kappa_h, unjumped, kicked.1, kappa1], reached: r_h })
     }
 
     /// The propagation of B on the step's path from where the march stands, in the cluster its state is in, as far as

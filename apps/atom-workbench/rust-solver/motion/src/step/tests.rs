@@ -3124,3 +3124,188 @@ fn a_scene_s_step_error_by_the_split() {
         }
     });
 }
+
+/// A number uniform in [lo, hi) from a stream.
+fn between(s: &mut crate::random::Stream, lo: f64, hi: f64) -> f64 {
+    lo + (hi - lo) * s.uniform()
+}
+
+/// Every step of a trajectory from `start`, `count` steps of random lengths in [shortest, longest) on its own Brownian
+/// path, each step halved where the scheme refuses it: to `each` the state before it and the step.
+fn walk<D: Dynamics>(model: &D, start: Trajectory, count: usize, (shortest, longest): (f64, f64), seed: u64, each: &mut dyn FnMut(&Trajectory, &step::Step)) {
+    let (mut t, mut scratch) = (start, step::Scratch::default());
+    let mut lengths = crate::random::Stream::new(seed, crate::random::Purpose::Initial, t.index, 1);
+    let mut noise = crate::random::Stream::brownian(seed, t.index, 0, 0);
+    for _ in 0..count {
+        let mut tau = between(&mut lengths, shortest, longest);
+        let step = loop {
+            let brownian = step::Brownian::over(tau, &[noise.normals(), noise.normals()]);
+            match step::Midway::new(model, &t, tau).and_then(|middle| middle.attempt(&t, &brownian, &[], &mut scratch, &Everywhere)) {
+                Ok(step) => break step,
+                Err(e) => {
+                    tau *= 0.5;
+                    assert!(tau > 1e-6 * shortest, "a step refused at every length: {e:?}");
+                }
+            }
+        };
+        each(&t, &step);
+        t = step.end;
+    }
+}
+
+/// The step's momentum, its whole and its parts (# The step's momentum), checked at one step from `start`: the whole is
+/// the trajectory's own change, and the reference's flow, the kick and the jumps add up to it within the rounding of the
+/// chain of momenta they are the differences of. The sizes of the jumps' part and of the flow's, for the caller's count.
+fn adds_up(start: &Trajectory, step: &step::Step, what: &str) -> (f64, f64) {
+    let m = step.momentum();
+    let (_, middle) = step.middle();
+    for a in 0..3 {
+        assert_eq!(m.whole[a], step.end.kappa[a] - start.kappa[a], "{what}, axis {a}: the whole is the trajectory's change");
+        let (kicked, jumped) = (middle[a] + m.kick[a], middle[a] + m.kick[a] + m.jumps[a]);
+        let chain = start.kappa[a].abs() + middle[a].abs() + kicked.abs() + jumped.abs() + step.end.kappa[a].abs();
+        let sum = m.flow[a] + m.kick[a] + m.jumps[a];
+        assert!(
+            (sum - m.whole[a]).abs() <= crate::units::rounding(8) * 2.0 * chain,
+            "{what}, axis {a}: flow {} + kick {} + jumps {} = {sum} against the whole {} (the chain's size {chain})",
+            m.flow[a],
+            m.kick[a],
+            m.jumps[a],
+            m.whole[a]
+        );
+    }
+    (crate::linalg::norm3(m.jumps), crate::linalg::norm3(m.flow))
+}
+
+/// The step's one momentum decomposition (# The step's momentum) over random scenes: a two-level atom in one to three
+/// plane waves of random directions, strengths and phases at a random detuning, its optical sector's noise on or off, or
+/// a ground state scattering one to three folded waves; the emitted photon's recoil; a Gaussian trap or a quadratic one
+/// with a gradient of its own. From random points off the trap's centre, random momenta and internal states, steps of
+/// random lengths with their jumps and their Brownian parts: at every step the reference's flow, the kick and the jumps
+/// add up to end.κ − start.κ to rounding, the whole being the trajectory's own change; and the scenes' steps hold jumps
+/// and a flow that moves the momentum (the trap's pull, which a reader of the kick and the jumps alone misses:
+/// motion3d_status/rewrite/restforce.status.md).
+#[test]
+fn a_step_s_momentum_parts_add_up_to_its_whole() {
+    let (mut steps, mut jumped, mut pulled) = (0, 0, 0);
+    for scene in 0..24_u64 {
+        let mut s = crate::random::Stream::new(97, crate::random::Purpose::Initial, scene, 0);
+        let trap = if scene % 2 == 0 {
+            Trap::Gaussian { depth: between(&mut s, 50.0, 400.0), waists: std::array::from_fn(|_| between(&mut s, 0.8, 3.0)) }
+        } else {
+            let mut hessian = [[0.0; 3]; 3];
+            for a in 0..3 {
+                hessian[a][a] = between(&mut s, 200.0, 600.0);
+                for b in 0..a {
+                    hessian[a][b] = between(&mut s, -50.0, 50.0);
+                    hessian[b][a] = hessian[a][b];
+                }
+            }
+            Trap::Quadratic { hessian, gradient: std::array::from_fn(|_| between(&mut s, -100.0, 100.0)) }
+        };
+        let waves = 1 + (scene / 3 % 3) as usize;
+        let mut model = if scene % 3 == 2 {
+            let mut model = Atom::new(RB, trap, vec![], 0.0, 0.0);
+            model.folded = (0..waves).map(|_| (C64::new(s.normal(), s.normal()) * between(&mut s, 0.5, 2.0), s.direction().map(|x| x * K))).collect();
+            model
+        } else {
+            let beams = (0..waves).map(|_| Beam { k: s.direction().map(|x| x * K), rabi: between(&mut s, 5.0, 40.0), phase: between(&mut s, 0.0, std::f64::consts::TAU) }).collect();
+            let mut model = Atom::new(RB, trap, beams, between(&mut s, -40.0, 40.0), GAMMA);
+            model.optical = scene % 4 == 1;
+            model
+        };
+        model.emission = K;
+        let (place, speed) = (between(&mut s, 0.1, 0.6), between(&mut s, 0.0, 150.0));
+        let (r, kappa) = (s.direction().map(|x| x * place), s.direction().map(|x| x * speed));
+        let mut start = Trajectory::new(&model, 0, r, kappa, 31, scene);
+        let psi: Vec<C64> = start.psi.iter().map(|_| C64::new(s.normal(), s.normal())).collect();
+        let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+        start.psi = psi.iter().map(|z| *z / norm).collect();
+        walk(&model, start, 40, (0.05, 0.5), 31, &mut |from, step| {
+            let (jumps, flow) = adds_up(from, step, &format!("scene {scene} at t = {}", from.time));
+            steps += 1;
+            jumped += (jumps > 0.0) as usize;
+            pulled += (flow > 0.0) as usize;
+        });
+    }
+    eprintln!("{steps} steps, {jumped} with jumps, {pulled} with the flow moving the momentum");
+    assert!(jumped > steps / 10 && pulled == steps, "the scenes' steps exercise the parts: {jumped} with jumps, {pulled} with a flow, of {steps}");
+}
+
+/// The same decomposition on reference scenes' own models (`scene_clusters`: the solve's closure with its near tables),
+/// optical pumping to a dark state (R5_PUMP: jumps that land in another cluster) and lin⊥lin Sisyphus cooling (R4_LIN_1:
+/// explicit excited states, the optical sector's noise), from thermal atoms off the trap's centre in random internal
+/// states with random thresholds: every step's parts add up to its whole, and the steps hold jumps.
+#[test]
+fn a_scene_s_step_momentum_parts_add_up_to_its_whole() {
+    for name in ["R5_PUMP", "R4_LIN_1"] {
+        let (mut steps, mut jumped) = (0, 0);
+        scene_clusters(name, &mut |_, _, cluster, run, starts| {
+            for (i, start) in starts.iter().enumerate() {
+                let mut t = start.clone();
+                t.threshold = crate::random::Stream::new(53, crate::random::Purpose::Initial, i as u64, cluster as u32).open_uniform();
+                walk(run, t, 6, (0.1, 0.4), 53, &mut |from, step| {
+                    let (jumps, _) = adds_up(from, step, &format!("{name} cluster {cluster} atom {i} at t = {}", from.time));
+                    steps += 1;
+                    jumped += (jumps > 0.0) as usize;
+                });
+            }
+        });
+        eprintln!("{name}: {steps} steps, {jumped} with jumps");
+        assert!(steps > 0 && jumped > 0, "{name}: {steps} steps, {jumped} with jumps");
+    }
+}
+
+/// The mean force read at rest is the master equation's, −Tr(ρ_ss ∇H) = −∇V + kΓρ_ee k̂, the trap's gradient with it:
+/// a two-level atom (the emitted photon's recoil on) held at points off a Gaussian tweezer's centre in a uniform running
+/// wave, ρ_ee its steady state's at rest, the momentum read as a reader reads a held atom -- every step's whole change
+/// (`Step::momentum`), its position and momentum put back before the next -- within three standard errors and the step's
+/// share: one percent of the force, where the held atom's own motion inside a step, (ħ/m)Fτ²∂∂V and the Doppler shift
+/// k(ħ/m)Fτ/2 against Γ, is 10⁻³ of it. The trap's pull, here larger than the light's, lies in the reference's flow:
+/// the kick and the jumps alone miss it by far more than the tolerance (motion3d_status/rewrite/restforce.status.md).
+#[test]
+fn a_held_atom_s_mean_force_is_the_master_equation_s_with_the_trap_s_pull() {
+    let trap = Trap::Gaussian { depth: 200.0, waists: [1.2, 1.2, 3.0] };
+    let (rabi, detuning, tau, burn, span, count) = (15.0, -12.0, 0.1, 2.0, 20.0, 48_u64);
+    let mut model = Atom::new(RB, trap, vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }], detuning, GAMMA);
+    model.emission = K;
+    let light = K * GAMMA * excited(rabi, detuning);
+    for r in [[0.25, -0.15, 0.2], [-0.1, 0.3, -0.5]] {
+        let pull = trap.expansion(r).gradient.map(|g| -g);
+        let exact = [pull[0], pull[1], pull[2] + light];
+        let (mut whole, mut without) = (vec![], vec![]);
+        for i in 0..count {
+            let (mut t, mut scratch) = (Trajectory::new(&model, 0, r, [0.0; 3], 13, i), step::Scratch::default());
+            let mut noise = crate::random::Stream::brownian(13, i, 0, 0);
+            let (mut sum, mut flow) = ([0.0; 3], [0.0; 3]);
+            while t.time < burn + span - 1e-9 {
+                (t.r, t.kappa) = (r, [0.0; 3]);
+                let brownian = step::Brownian::over(tau, &[noise.normals(), noise.normals()]);
+                let step = step::Midway::new(&model, &t, tau).unwrap().attempt(&t, &brownian, &[], &mut scratch, &Everywhere).unwrap();
+                if t.time >= burn - 1e-9 {
+                    let m = step.momentum();
+                    for a in 0..3 {
+                        sum[a] += m.whole[a];
+                        flow[a] += m.flow[a];
+                    }
+                }
+                t = step.end;
+            }
+            whole.push(sum.map(|x| x / span));
+            without.push(std::array::from_fn::<f64, 3, _>(|a| (sum[a] - flow[a]) / span));
+        }
+        let n = count as f64;
+        let mean = |v: &[[f64; 3]], a: usize| v.iter().map(|f| f[a]).sum::<f64>() / n;
+        let scale = exact.iter().map(|x| x.abs()).fold(0.0, f64::max);
+        for a in 0..3 {
+            let f = mean(&whole, a);
+            let error = (whole.iter().map(|x| (x[a] - f).powi(2)).sum::<f64>() / (n * (n - 1.0))).sqrt();
+            let tolerance = 3.0 * error + 0.01 * scale;
+            let short = mean(&without, a);
+            eprintln!("r {r:?}, axis {a}: F {f:.3} ± {error:.3} against {:.3} (−∇V {:.3}); the kick and the jumps alone {short:.3}", exact[a], pull[a]);
+            assert!((f - exact[a]).abs() <= tolerance, "r {r:?}, axis {a}: F {f} ± {error} against {}", exact[a]);
+            if pull[a].abs() > 10.0 * tolerance {
+                assert!((short - exact[a]).abs() > 5.0 * tolerance, "r {r:?}, axis {a}: the kick and the jumps alone, {short}, read the trap's pull too");
+            }
+        }
+    }
+}
