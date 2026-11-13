@@ -118,7 +118,7 @@ fn fetch(root: &Path, arguments: &[&str], shown: bool) -> Result<std::process::E
 mod tests {
     #[test]
     fn a_field_is_read_from_release_json_as_powershell_writes_it() {
-        let record = "{\r\n    \"version\":  \"2026.10.22.1\",\r\n    \"source\":  \"ab12\",\r\n    \"asset\":  {\r\n        \"name\":  \"zlc-engine-2026.10.22.1.zip\",\r\n        \"size\":  123\r\n    }\r\n}";
+        let record = "{\r\n    \"version\":  \"2026.10.22.1\",\r\n    \"source\":  \"ab12\",\r\n    \"asset\":  {\r\n        \"name\":  \"zlc-engine-2026.10.22.1.tar.xz\",\r\n        \"size\":  123\r\n    }\r\n}";
         assert_eq!(super::field(record, "source").as_deref(), Some("ab12"));
         assert_eq!(super::field(record, "version").as_deref(), Some("2026.10.22.1"));
         assert_eq!(super::field(record, "size").as_deref(), Some("123"));
