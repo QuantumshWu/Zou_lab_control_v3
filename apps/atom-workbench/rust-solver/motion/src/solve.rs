@@ -356,7 +356,8 @@
 //! after the gates over the reach went, GMD1C's scout read its 2130 units at 11 011 states, 14.5 of its 39 s, and the
 //! run took 1.6 times the line's CPU: its 927 couplings of two states, each bounded at 2·10⁻¹¹ or less over the whole
 //! space, 3·10⁻¹⁰ together, were 77 % of a state's reads. The line, 717cb386, booked them by their bounds over the
-//! reach.)
+//! reach. Booked at their bounds over the whole space, the scout reads 1203 units there in 0.8–1.1 s, and the run takes
+//! 0.75 times the line's CPU: its trajectories and its step the line's, its T within their errors.)
 //!
 //! ## Where the atoms went
 //! The model is judged where the atoms went, not only where the held ones are at the outputs (`sampled`). What is shown
