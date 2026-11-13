@@ -384,7 +384,7 @@ test('温度与 n̄: a line per axis and the total temperature apart from them; 
 });
 
 test('the examples: three scenes of the atom moving in its designated tweezer from |2,+2⟩ at 100 μK on D2; a retro-reflection is the app\'s mirror',()=>{
-  assert.deepEqual(EXAMPLES.map(e=>e.key),['pgc3d','probe','pgc1d']);assert.equal(STARTUP_EXAMPLE,'probe');
+  assert.deepEqual(EXAMPLES.map(e=>e.key),['pgc3d','probe','pgc1d']);assert.equal(STARTUP_EXAMPLE,'pgc3d');
   assert.throws(()=>exampleScene('three'),/没有示例/);
   const scenes=Object.fromEntries(EXAMPLES.map(e=>[e.key,roundtrip(exampleScene(e.key))]));
   for(const {key,label} of EXAMPLES){
@@ -396,7 +396,7 @@ test('the examples: three scenes of the atom moving in its designated tweezer fr
   const laser=(s,id)=>s.lasers.find(l=>l.id===id),round=x=>Math.round(x*1e9)/1e9+0;
   const weights=(s,id)=>{const p=polarization(laser(s,id),s.fields);return [p.minus,p.pi,p.plus].map(round);},vector=(s,id)=>directionVector(s.fields,laser(s,id).direction).map(round);
   const mirrors=s=>s.lasers.map(l=>[l.id,l.reflection?.of??null,l.reflection?.quarterWave??null]),D2=(Fg,Fe,offsetMHz)=>({base:{kind:'transition',line:'D2',Fg,Fe},offsetMHz});
-  // 3D PGC: B = 0 (its axis along x); the tweezer along z, π; σ+σ− cooling pairs along x, y and z, each a beam and its
+  // 3D PGC (the startup scene): B = 0 (its axis along x); the tweezer along z, π; σ+σ− cooling pairs along x, y and z, each a beam and its
   // reflection through the λ/4 plate (the handedness about its own k kept: σ+ and σ− about the pair's axis), the z pair
   // of the other helicity; a repump. Eight lasers.
   const pgc3d=scenes.pgc3d,gamma=RB87.D2.gammaHz/(2*Math.PI*1e6),trap=pgc3d.lasers[0];assert.equal(pgc3d.fields[0].magnitudeG,0);
@@ -407,7 +407,7 @@ test('the examples: three scenes of the atom moving in its designated tweezer fr
   assert.deepEqual(cooling.map(l=>vector(pgc3d,l.id)),[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]);
   assert.deepEqual(cooling.map(l=>l.ellipticityDeg),[45,45,45,45,-45,-45]);assert.deepEqual([weights(pgc3d,'cool-x'),weights(pgc3d,'cool-x-reflection')],[[0,0,1],[1,0,0]]);
   assert.deepEqual([laser(pgc3d,'repump').frequency,laser(pgc3d,'repump').intensityMWcm2],[D2(1,2,0),PGC3D.repumpMWcm2]);
-  // 光镊 + 探测光 + 回泵光 at zero field (the startup scene): the probe π, 1 mW in a 1 mm waist, 20 MHz red, across the
+  // 光镊 + 探测光 + 回泵光 at zero field: the probe π, 1 mW in a 1 mm waist, 20 MHz red, across the
   // tweezer; its reflection through the λ/4 plate at 45° comes back linear across the axis (lin⊥lin); the tweezer at 1.5 mK.
   const probe=scenes.probe,p=laser(probe,'probe');assert.equal(probe.fields[0].magnitudeG,0);
   assert.deepEqual(mirrors(probe),[['probe',null,null],['probe-reflection','probe',true],['tweezer',null,null],['repump',null,null]]);

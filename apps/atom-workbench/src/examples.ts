@@ -29,8 +29,8 @@ export const EXAMPLES:readonly {key:string;label:string}[]=[
   {key:'probe',label:'光镊 + 探测光 + 回泵光 · 零场'},
   {key:'pgc1d',label:`光镊 + 探测光 + 1D PGC · ${PGC1D.fieldG} G`},
 ];
-/** The scene the app starts with: the lab's probe in the tweezer at zero field. */
-export const STARTUP_EXAMPLE='probe';
+/** The scene the app starts with: the 3D PGC, the first example (its startup solve the lightest of the three). */
+export const STARTUP_EXAMPLE='pgc3d';
 /** Every example's initial motion temperature (μK), duration (μs, written in ms) and samples. */
 export const EXAMPLE_TEMPERATURE_UK=100,EXAMPLE_DURATION_US=1e3,EXAMPLE_SAMPLES=1001;
 

@@ -69,7 +69,7 @@ type Selection={kind:'field'|'laser'|'reference'|'level'|'none';id:string};
 type ObjectKind=Exclude<Selection['kind'],'none'>;
 const APP_TITLE='Rb87 实验工作台';
 const STORAGE='rb87-workbench-demo-v4',root=document.querySelector<HTMLDivElement>('#app')!;
-let scene=startupScene((()=>{try{return localStorage;}catch{return undefined;}})(),STORAGE),view:View='levels',resultView:ResultView='levels',spectral:SpectralLine='D2',selection:Selection={kind:'laser',id:'probe'};
+let scene=startupScene((()=>{try{return localStorage;}catch{return undefined;}})(),STORAGE),view:View='levels',resultView:ResultView='levels',spectral:SpectralLine='D2',selection:Selection=firstObject(scene);
 let populationMode:'mean'|'time'='mean',populationTimeIndex=-1,populationScale:'linear'|'log'='linear';let unbindPopulation:(()=>void)|undefined;
 /** 布居演化 with motion: what its chart shows, and the listed time (an index into the shown
  * distribution's samples) a distribution is compared at, if any. */
@@ -1480,9 +1480,11 @@ function replaceScene(next:Scene,text:string):void{
   unitDrafts.clear();fieldProblems.clear();solver.cancel();solverRevision++;clearTimeout(solverTimer);lastCheckpoint=undefined;requestedKey='';requestedKind=undefined;running=undefined;stoppedKey='';solverError='';solverBusy=false;solverQueued=false;controlsKey='';trajectories.clear();means.clear();
   disposeTrees($('levels-details'));$('levels-details').replaceChildren();$('selection-readout').dataset.selectionKey='';
   normalizeScene(next);scene=next;stateLabels=keepLabels(stateLabels,id=>!id.startsWith('reference-')||!!scene.references.some(r=>r.id===id));populationTimeIndex=-1;
-  selection=scene.lasers[0]?{kind:'laser',id:scene.lasers[0].id}:scene.fields[0]?{kind:'field',id:scene.fields[0].id}:{kind:'none',id:''};
+  selection=firstObject(scene);
   renderInitial();renderObjects();renderInspector();markBaseline();update();note(text);
 }
+/** What a scene opens with selected: its first laser, else its first field. */
+function firstObject(s:Scene):Selection{return s.lasers[0]?{kind:'laser',id:s.lasers[0].id}:s.fields[0]?{kind:'field',id:s.fields[0].id}:{kind:'none',id:''};}
 /** Replacing a scene that holds edits asks first; nothing else keeps them. */
 async function confirmReplace(action:string):Promise<boolean>{
   if(!sceneEdited())return true;
