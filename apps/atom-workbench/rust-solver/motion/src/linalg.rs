@@ -1122,6 +1122,120 @@ pub fn exp_apply(a: &mut Mat, t: C64, v: &mut [C64], work: &mut [C64]) -> Chebys
     }
     plan
 }
+
+/// The plan of e^X v by Taylor's series within a tolerance (`taylor_bound`, `taylor_series`): X taken in `parts` equal
+/// parts, each part's series summed through its term `terms`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Taylor {
+    pub parts: usize,
+    pub terms: usize,
+}
+
+impl Taylor {
+    /// The plan for X of the bound ‖X‖ ≤ x and the logarithmic norm μ(X) ≤ μ on n states, within `tolerance` relative
+    /// to ‖v‖: of the plans of q parts (y = x/q a part) the one of the fewest products q·m whose every part is within
+    /// its share tolerance/q over what the parts after it can grow it by, e^{μ⁺(q − 1)/q} (‖e^{X/q}‖ ≤ e^{μ/q}, μ⁺ its
+    /// positive part): its series' remainder past the term m, Σ_{k>m} y^k/k! ≤ y^{m+1}/(m+1)! (1 − y/(m + 2))⁻¹ for
+    /// y < m + 2, with the sum's rounding, γ((n + 2)(m + 1)) e^y -- a term is a product of n and two sums, and the terms
+    /// are at most e^y. A part too large for its rounding to be within its share takes no plan, unless it is of y ≤ 1
+    /// (its rounding then that of a few products: a tolerance below it is met as far as the arithmetic allows); the
+    /// parts are tried from one up while they are fewer than the best plan's products (a plan of q parts takes at
+    /// least q), and from x parts on every part is of y ≤ 1. Nothing to sum where x is within the unit round-off.
+    pub fn plan(x: f64, mu: f64, tolerance: f64, n: usize) -> Taylor {
+        // A series whose first term is within the unit round-off of the vector it acts on is the vector itself.
+        if x <= UNIT_ROUNDOFF {
+            return Taylor { parts: 1, terms: 0 };
+        }
+        assert!(x.is_finite() && tolerance > 0.0, "a Taylor plan of a bound {x} within {tolerance}");
+        let terms_of = |parts: usize| -> Option<usize> {
+            let y = x / parts as f64;
+            let share = tolerance / parts as f64 * (-mu.max(0.0) * (parts - 1) as f64 / parts as f64).exp();
+            // m and the bound y^{m+1}/(m+1)! of the first term past it, as long as the rounding leaves room.
+            let (mut m, mut next, largest) = (0usize, y, y.exp());
+            loop {
+                // Where the rounding alone is beyond the share, a part of y ≤ 1 still is no worse than the rounding of a
+                // product (γ e): there the truncation takes the share, elsewhere what the rounding leaves of it.
+                let rounded = rounding((n + 2) * (m + 1)) * largest;
+                let beyond = rounded >= share;
+                if beyond && y > 1.0 {
+                    return None;
+                }
+                let room = if beyond { share } else { share - rounded };
+                if y < (m + 2) as f64 && next / (1.0 - y / (m + 2) as f64) <= room {
+                    return Some(m);
+                }
+                m += 1;
+                next *= y / (m + 1) as f64;
+            }
+        };
+        let mut best: Option<Taylor> = None;
+        let mut parts = 1;
+        while best.is_none_or(|b| parts < b.parts * b.terms) {
+            if let Some(terms) = terms_of(parts) {
+                if best.is_none_or(|b| parts * terms < b.parts * b.terms) {
+                    best = Some(Taylor { parts, terms });
+                }
+            }
+            parts += 1;
+        }
+        best.expect("a plan")
+    }
+    /// Its complex multiply-adds on n states: a product of n² a term.
+    pub fn work(&self, n: usize) -> f64 {
+        (self.parts * self.terms * n * n) as f64
+    }
+}
+
+/// The bounds of X = t(A − z), z = tr A/n the scalar part of an n × n matrix (row by row): its norm, max(‖X‖₁, ‖X‖∞) ≥
+/// ‖X‖₂ -- its columns' and rows' sums of |re| + |im| --, and its logarithmic norm μ(X) = λ_max((X + X†)/2), bounded
+/// by Gershgorin's discs of that Hermitian part (‖e^{sX}‖ ≤ e^{sμ}); and z. What `taylor_series` takes out and is
+/// planned at (`Taylor::plan`).
+pub fn taylor_bound(a: &[C64], n: usize, t: C64) -> (C64, [f64; 2]) {
+    const MOST: usize = crate::request::STATES;
+    assert!(a.len() == n * n && n <= MOST, "the exponential of {} numbers on {n} states", a.len());
+    let scalar = (0..n).map(|i| a[i * n + i]).sum::<C64>() / n as f64;
+    let (mut rows, mut columns, mut discs) = ([0.0_f64; MOST], [0.0_f64; MOST], [0.0_f64; MOST]);
+    let entry = |i: usize, j: usize| (a[i * n + j] - if i == j { scalar } else { C64::ZERO }) * t;
+    for i in 0..n {
+        for j in 0..n {
+            let x = entry(i, j);
+            let size = x.re.abs() + x.im.abs();
+            rows[i] += size;
+            columns[j] += size;
+            discs[i] += if i == j { x.re } else { 0.5 * (x + entry(j, i).conj()).abs() };
+        }
+    }
+    let norm = rows[..n].iter().chain(&columns[..n]).fold(0.0_f64, |m, x| m.max(*x));
+    (scalar, [norm, discs[..n].iter().fold(f64::NEG_INFINITY, |m, x| m.max(*x))])
+}
+
+/// v ← T(t(A − z)) v, the plan's Taylor polynomials of e^{t(A − z)/q} applied q times (`Taylor`), z the scalar part
+/// `taylor_bound` took out -- its factor e^{tz} is the caller's: the strides of a step take the two of a stride's
+/// exponentials at once.
+pub fn taylor_series(a: &[C64], n: usize, scalar: C64, t: C64, v: &mut [C64], plan: Taylor) {
+    const MOST: usize = crate::request::STATES;
+    assert!(a.len() == n * n && v.len() == n && n <= MOST, "a series of {} numbers on {n} states", a.len());
+    let step = t / plan.parts as f64;
+    let (mut term, mut next) = ([C64::ZERO; MOST], [C64::ZERO; MOST]);
+    for _ in 0..plan.parts {
+        term[..n].copy_from_slice(v);
+        for k in 1..=plan.terms {
+            let scale = step / k as f64;
+            for i in 0..n {
+                let mut product = -scalar * term[i];
+                for (m, x) in a[i * n..(i + 1) * n].iter().zip(&term[..n]) {
+                    product += *m * *x;
+                }
+                next[i] = product * scale;
+            }
+            for i in 0..n {
+                term[i] = next[i];
+                v[i] += next[i];
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // 3 × 3 real helpers.
 
@@ -1517,6 +1631,37 @@ pub(crate) mod tests {
             for (route, x) in [("vector", &a), ("eigen", &b)] {
                 let error = x.iter().zip(&want).fold(0.0_f64, |m, (p, q)| m.max((*p - *q).abs()));
                 assert!(error <= bound, "τ {tau} {route}: {error:e} > {bound:e}");
+            }
+        }
+    }
+
+    /// e^{tA} v by Taylor's series within a tolerance (`taylor_bound`, `taylor_series`, `Taylor::plan`): on the same
+    /// Hermitian H with a known spectrum, shifted by a large scalar (a trap's light shift: the series sums the rest) and with
+    /// a decay added, from ‖X‖ = 0.03 to 30, at tolerances from 10⁻³ to 10⁻¹², the error against the matrix exponential
+    /// (exact to round-off, `the_exponential_is_exact_to_round_off`) is within the tolerance (printed with the plans).
+    #[test]
+    fn a_taylor_series_is_within_its_tolerance() {
+        let n = 8;
+        let u = unitary(n, 5);
+        let d: Vec<f64> = (0..n).map(|k| 10.0 * k as f64 - 33.0).collect();
+        let mut h = u.product(&Mat::diagonal(&d.iter().map(|&x| C64::real(x)).collect::<Vec<_>>())).product(&u.adjoint());
+        for i in 0..n {
+            h[(i, i)] += C64::new(500.0, -0.5 * (i + 1) as f64);
+        }
+        let v: Vec<C64> = sample(n, 1, 9).data;
+        let size = v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+        for tau in [0.03 / 40.0, 0.3 / 40.0, 3.0 / 40.0, 30.0 / 40.0] {
+            let t = C64::new(0.0, -tau);
+            let want = exp(&h, t).apply(&v);
+            for tolerance in [1e-3, 1e-6, 1e-12] {
+                let (scalar, [bound, mu]) = taylor_bound(&h.data, n, t);
+                let plan = Taylor::plan(bound, mu, tolerance, n);
+                let mut w = v.clone();
+                taylor_series(&h.data, n, scalar, t, &mut w, plan);
+                let phase = (t * scalar).exp();
+                let error = w.iter().zip(&want).map(|(x, y)| (*x * phase - *y).norm_sqr()).sum::<f64>().sqrt() / size;
+                eprintln!("τ {tau:.4} bound {bound:.3} within {tolerance:e}: {} parts of {} terms, error {error:.2e}", plan.parts, plan.terms);
+                assert!(error <= tolerance + rounding(4 * n * n) * (1.0 + bound), "τ {tau}, {tolerance:e}: {error:e}");
             }
         }
     }
