@@ -33,9 +33,10 @@
 //!    on 44 to 95.7, on 88 to 113.0, none refuted by the next pilot's 88; 957, 949 and 1128 CPU-s in all, the same
 //!    result.) What the pilot's work of an attempt so ended leaves the next is the reach's temperature and the step it
 //!    stood at, the next's first rung; nothing read on its trajectories (# An attempt's own).
-//! 3. The model's decisions (SPEC §5.2; # The model), at the scout's states and again at the pilot's, the step's error
-//!    taken at its share: units to keep end the attempt, and the next begins with their model at the step this one
-//!    stood at (# The model).
+//! 3. The model's decisions (SPEC §5.2; # The model), at the scout's states and again at the pilot's -- at its first rung
+//!    whose own read is in and not clearly beyond, before its check goes on (# Each decision as its evidence is in) --,
+//!    the step's error taken at its share: units to keep end the attempt, and the next begins with their model at the
+//!    step this one stood at (# The model).
 //! 4. The product: batches of whole groups at the settled step, one level, every trajectory run to the last output,
 //!    until every held quantity's total lies within its target (# Stopping) or the trajectories reach
 //!    `MOST_TRAJECTORIES`. Its atoms that leave the reach are read where they are, and what they carry is booked
@@ -60,6 +61,20 @@
 //! pilot kept units (S3 82 → 84, S3c over 10 ms 69 → 75) or lowered the first rung below the pilot's step
 //! (R3_DOPPLER); the others grew on the scout's paths not proven. No pilot carries over, so none is made to: a pilot
 //! on a refuted reach is not spent instead (# The pipeline: its own level alone, where the scout's atoms refute it).
+//!
+//! # Each decision as its evidence is in
+//! A decision that ends an attempt is taken where what it reads is in, not after the work it would make useless. The
+//! pilot's keep reads the units' errors and the tables' at the states of the pilot's run level, the optical sector's
+//! booking, the pilot's statistics, and the step at its share -- not the step's check: nothing of it changes with what
+//! the check does past the rung's own two levels, where it stands (the reads are the ones made: they are kept, and the
+//! keep is not asked again); where the check goes down a rung instead, its states are the same trajectories at half
+//! the step, read again, and the keep asked again on them. So the pilot runs as far as the first rung whose own read is
+//! in and not clearly beyond (`Settled::Pending`), the reach's falsifier and the keep are read there, and only an
+//! attempt they leave standing pays for the rest of its check -- the third level at 4τ, pairs, a rung below. (Read
+//! after the whole check, S3's probe kept sixteen units after its check had gone down to 0.187 µs -- the third level,
+//! the rung below, 127 CPU-s of a model that was then replaced --, and its next attempt began at 0.187 µs.) The check's
+//! levels stay on the tables they were run on; a table its reads refine is the product's (`PilotRead::refined`).
+//! What a keep or a growth leaves valid of the attempt is said in # An attempt's own.
 //!
 //! # The step (SPEC §2.2)
 //! One step τ for the run (adapt.rs), which follows from what the scheme must resolve and from nothing of the outputs:
@@ -1560,7 +1575,7 @@ fn attempt(
     // The scout (module documentation, # The pipeline): the first member of every pilot group at both levels, screened;
     // where a unit is to be kept at its states, the attempt ends here -- for the price of the scout, not of a pilot.
     // The pilot's read of the same below stands for the result.
-    match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &|pilot| grown(pilot).is_some(), None, messages) {
+    match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &|pilot| grown(pilot).is_some(), None, false, messages) {
         Settled::Unproven(asked) => return Ok(hold(asked, context.tau)),
         _ => {}
     }
@@ -1612,9 +1627,43 @@ fn attempt(
         read
     };
     // The pilot: its groups' other members at both levels, screened, and the step's check (module documentation,
-    // # The step). Whether it saw: a step that stands uncertified -- at the steps' cap, or unable to see -- is flagged.
-    let saw = match settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &|pilot| grown(pilot).is_some(), ran, messages) {
-        Settled::Unproven(asked) => return Ok(hold(asked, context.tau)),
+    // # The step) -- first as far as its own two levels: at the first rung whose own read is in and not clearly beyond,
+    // the decisions the pilot's reads hold are taken (# Each decision as its evidence is in), and the check goes on
+    // past them only where they leave the attempt standing. Whether it saw: a step that stands uncertified -- at the
+    // steps' cap, or unable to see -- is flagged.
+    let mut settled = settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &|pilot| grown(pilot).is_some(), ran, true, messages);
+    drop(run);
+    let mut scouted = Some(scouted);
+    // The pilot's reads, made at the rung they were made at; made again only where the check went on to another rung.
+    let mut made: Option<(f64, PilotRead)> = None;
+    let read = loop {
+        if let Settled::Unproven(asked) = settled {
+            return Ok(hold(asked, context.tau));
+        }
+        let tau = context.tau;
+        let pilot: Vec<&Part> = levels.fine.iter().collect();
+        if let Some(t) = grown(&pilot) {
+            return Ok(Attempt::Grow(t, f64::NEG_INFINITY, vec![], tau));
+        }
+        let read = match made.take() {
+            Some((at, read)) if at == tau => read,
+            _ => pilot_reads(model, &reading, &booking, &tables, &pilot, &levels.coarse, scouted.take(), ensemble, unsampled, outputs, most, &context.scales),
+        };
+        let fixed = Fixed { model: read.model.clone(), start: read.start.1 };
+        let measured = read.measured(&booking);
+        let means = measured.means(outputs, None, &read.estimates);
+        // Units to keep at the pilot's states (`keep`): their model then runs a pilot again.
+        if let Some(u) = keep(request, light, kept, model, reference, trap.centre, units, &measured, &means, &pilot, &read.estimates, &fixed, &scales, unsampled, (read.refined.as_ref().unwrap_or(&tables), judged, most), pilot_size() as f64, Reads::Pilot) {
+            return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), tau));
+        }
+        if !matches!(settled, Settled::Pending) {
+            break read;
+        }
+        made = Some((tau, read));
+        let run = Run::tabulated(model, &tables, reference);
+        settled = check(&run, ensemble, &domain, &mut context, &mut levels, &numbers, GROUP, &above, &|pilot| grown(pilot).is_some(), false, messages);
+    };
+    let saw = match settled {
         Settled::Capped => {
             context.ledger.flag(capped());
             false
@@ -1623,103 +1672,44 @@ fn attempt(
             context.ledger.flag(unseen_at_the_end());
             false
         }
-        Settled::Standing => true,
+        _ => true,
     };
+    let mut read = read;
+    if let Some(refined) = read.refined.take() {
+        tables = refined;
+    }
     let tau = context.tau;
-    // The pilot's groups with their states: the units are read there, and a keep's price, on the pilot and in the
-    // product (`keep`).
+    // The pilot's groups with their states: the units were read there, and a keep's price in the product (`keep`).
     let pilot: Vec<&Part> = levels.fine.iter().collect();
-    let (estimates, _, counts) = pooled(&pilot, &context.scales);
-    if let Some(t) = grown(&pilot) {
-        return Ok(Attempt::Grow(t, f64::NEG_INFINITY, vec![], tau));
-    }
-    // T(0) and n̄(0) by quadrature again (`Setting::start`), with as many evaluations of the potential as the pilot
-    // took steps: a step evaluates the potential's expansion at least once (its reference flow's, SPEC §2.1), so
-    // the quadrature costs no more than the pilot the solve has just run, in any trap; where that budget ends it
-    // before its levels agree, their difference is T(0)'s booked error (`Fixed::start`).
-    let steps = counts.steps + levels.coarse.iter().map(|p| p.counts.steps).sum::<u64>();
-    (context.momentum, context.fixed.start) = exact(ensemble, &ensemble.kinetic(steps));
-
-    // The model's errors at the pilot's states (SPEC §5.2): each folded unit's per output, the held atoms' mean over
-    // the first member of every group -- one a group keeps every group in the mean's spread, and a unit's error is a
-    // function of the state, read as well on eleven states an output as on eighty-eight.
-    let Sampled { at, from, errors, .. } = sampled(model, &reading, &tables, &pilot, Some(scouted));
-    let measured = Measured { errors: &errors, output: &at, group: &from, booked: &booking };
-    let means = measured.means(outputs, None, &estimates);
-    context.fixed.model = model_error(&sums(&means, unsampled), unsampled);
-    {
-        // The tables' errors (SPEC §5.4): each table's whole error against the elimination itself, its mean over the
-        // run's held states read at one state of every pilot trajectory (`one_each`, `over_the_run`) -- a state on another
-        // cluster reads none of it. A table
-        // beyond the tables' shares has the axis of its largest read halved and is read again, until it is within them,
-        // or it has no axis to halve (its coordinates all held at the focus: model/tabulate.rs, # Axes), or what is
-        // beyond is not its axes' interpolation -- the whole less every axis's own read still beyond the shares: a
-        // coordinate held at the focus, which no halving lowers --, or its worst axis's read on a grid it resolves fell
-        // by no more than an unresolved peak's (model/tabulate.rs, # Refinement: it is not converging); what it reads
-        // then is booked on every output, and flagged where it still lies beyond -- with which of these ended its
-        // refinement (`Stuck`).
-        let read_at = one_each(&pilot);
-        let (shown_share, temperature_share) = crate::model::tabulate::shares();
-        drop(run);
-        let mut stuck: Vec<Option<Stuck>> = vec![None; tables.tables.len()];
-        let mut before: Vec<Vec<Option<f64>>> = tables.tables.iter().map(|table| vec![None; table.axes()]).collect();
-        let booked = loop {
-            let reads: Vec<Vec<crate::model::tabulate::TableRead>> = read_at.par_iter().map(|pick| model.table_reads(&tables, std::slice::from_ref(&pick.state.sample))).collect();
-            let mean = |f: &dyn Fn(&crate::model::tabulate::TableRead) -> f64, t: usize| over_the_run(&read_at, reads.iter().map(|r| f(&r[t])), None);
-            let whole: Vec<[f64; 2]> = (0..tables.tables.len()).map(|t| [mean(&|r| r.whole[0].population, t), mean(&|r| r.whole[0].temperature, t)]).collect();
-            let beyond = (0..whole.len()).find(|&t| stuck[t].is_none() && (whole[t][0] > shown_share || whole[t][1] > temperature_share));
-            let Some(t) = beyond else { break whole };
-            // Each axis's read over the shares, on what is shown and on T.
-            let axes: Vec<[f64; 2]> = (0..tables.tables[t].axes()).map(|f| [mean(&|r| r.axes[f][0].population, t) / shown_share, mean(&|r| r.axes[f][0].temperature, t) / temperature_share]).collect();
-            let held = (0..2).any(|k| whole[t][k] / [shown_share, temperature_share][k] - axes.iter().map(|a| a[k]).sum::<f64>() > 1.);
-            let worst = (0..axes.len()).max_by(|&a, &b| (axes[a][0] + axes[a][1]).total_cmp(&(axes[b][0] + axes[b][1])));
-            stuck[t] = match worst {
-                None => Some(Stuck::Axes),
-                Some(_) if held => Some(Stuck::Held),
-                Some(f) => match model.halved_by(&tables.tables[t], f, axes[f][0].max(axes[f][1]), &mut before[t][f], most) {
-                    Some(finer) => {
-                        tables.tables[t].table = finer;
-                        None
-                    }
-                    None => Some(Stuck::Order),
-                },
-            };
-        };
-        for (t, table) in tables.tables.iter().enumerate() {
-            let label = format!(
-                "近共振光的插值表（{} 所在的子空间{}）",
-                model.state_label(model.clusters()[table.layout.cluster].states[0]),
-                if table.layout.lights == model.running() { "" } else { "，光镊关闭时" }
-            );
-            for k in 1..outputs {
-                context.fixed.model[k] = [probability_error(context.fixed.model[k][0] + booked[t][0]), context.fixed.model[k][1] + booked[t][1]];
-            }
-            context.ledger.item(&label, booked[t][0].max(booked[t][1]), TABLE_MEASURED);
-            match stuck[t] {
-                Some(Stuck::Order) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它在已分辨的网格上加密后误差下降不超过未分辨结构的两倍（不收敛），或再加密一次就超过节点数上限（{most} 个）：按实测的误差计入误差预算")),
-                Some(Stuck::Held) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而超出的部分来自取焦点处的值的坐标，不是插值的误差（加密网格不能降低它）：按实测的误差计入误差预算")),
-                Some(Stuck::Axes) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它没有可以加密的坐标（它依赖的量都取焦点处的值）：按实测的误差计入误差预算")),
-                None => {}
-            }
+    let (estimates, counts) = (&read.estimates, &read.counts);
+    (context.momentum, context.fixed.start) = read.start;
+    context.fixed.model = read.model.clone();
+    let measured = read.measured(&booking);
+    let means = measured.means(outputs, None, estimates);
+    for (t, table) in tables.tables.iter().enumerate() {
+        let label = format!(
+            "近共振光的插值表（{} 所在的子空间{}）",
+            model.state_label(model.clusters()[table.layout.cluster].states[0]),
+            if table.layout.lights == model.running() { "" } else { "，光镊关闭时" }
+        );
+        context.ledger.item(&label, read.tables[t][0].max(read.tables[t][1]), TABLE_MEASURED);
+        match read.stuck[t] {
+            Some(Stuck::Order) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它在已分辨的网格上加密后误差下降不超过未分辨结构的两倍（不收敛），或再加密一次就超过节点数上限（{most} 个）：按实测的误差计入误差预算")),
+            Some(Stuck::Held) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而超出的部分来自取焦点处的值的坐标，不是插值的误差（加密网格不能降低它）：按实测的误差计入误差预算")),
+            Some(Stuck::Axes) => context.ledger.flag(format!("{label}的误差超出误差预算中分给插值表的部分，而它没有可以加密的坐标（它依赖的量都取焦点处的值）：按实测的误差计入误差预算")),
+            None => {}
         }
-        // The step's check (module documentation, # The step): what the reads the rung stands by do not exclude into
-        // the accounts, their resolution into the result's words (`Levels::told`, `checked`).
-        let (own, third, step_of_third, pairs) = levels.told(tau, &context.scales);
-        let (step, resolution) = checked(&own, third.as_ref(), saw);
-        (context.step, context.checked) = (vec![step; outputs], Some(Checked { third: step_of_third, pairs, resolution, saw }));
     }
-    // The optical sector's noise (ledger.rs `optical`): its booking on T at every output -- a part of the model's error
-    // the pilot's keep reads as the product's does (`keeping`), which no unit kept takes away.
-    let optical = crate::ledger::optical(&mut context.ledger, counts.optical);
-    for k in 1..outputs {
-        context.fixed.model[k][1] += optical;
-    }
-    // Units to keep at the pilot's states (`keep`), read with the pilot's estimates or the product's: their model then
-    // runs a pilot again.
+    // The step's check (module documentation, # The step): what the reads the rung stands by do not exclude into the
+    // accounts, their resolution into the result's words (`Levels::told`, `checked`).
+    let (own, third, step_of_third, pairs) = levels.told(tau, &context.scales);
+    let (step, resolution) = checked(&own, third.as_ref(), saw);
+    (context.step, context.checked) = (vec![step; outputs], Some(Checked { third: step_of_third, pairs, resolution, saw }));
+    // The optical sector's noise (ledger.rs `optical`), its items; its booking on T is in the model's error the reads
+    // made (`pilot_reads`).
+    crate::ledger::optical(&mut context.ledger, counts.optical);
+    // Units to keep in the product (`keep`), read with the product's estimates.
     let keeping = |estimates: &[Estimate], fixed: &Fixed, reads: Reads| keep(request, light, kept, model, reference, trap.centre, units, &measured, &means, &pilot, estimates, fixed, &scales, unsampled, (&tables, judged, most), pilot_size() as f64, reads);
-    if let Some(u) = keeping(&estimates, &context.fixed, Reads::Pilot) {
-        return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), tau));
-    }
     {
         // The ledger's items: each folded unit's error on what is shown and on T (its largest over the outputs, weighed by
         // the pilot's held share as the totals are; an output where the pilot holds no atom weighs nothing: its units'
@@ -1771,6 +1761,95 @@ fn attempt(
         context.ledger.flag("初态的势在所取的阱底之外还有更深的地方：初始系综只取到该阱底的阱深为止".into());
     }
     Ok(Attempt::Done(assemble(&context, &e, &l, &c, parts.len() as u64 * GROUP)))
+}
+
+/// The pilot's reads at the rung it stands at (`attempt`, `pilot_reads`): its estimates and counts, T(0) and its
+/// quadrature's error (`exact`), the units' errors at its states (`Sampled`), the model's error per output -- the units',
+/// the tables' and the optical sector's booking on T --, each table's booked error and why its refinement ended where it
+/// is beyond its shares; and the tables refined, where a read refined one (the pilot's own stay as its levels ran on
+/// them: a check that goes on reads its further levels on the tables of the levels it compares them with).
+struct PilotRead {
+    estimates: Vec<Estimate>,
+    counts: Counts,
+    start: (V3, f64),
+    sampled: Sampled,
+    model: Vec<[f64; 2]>,
+    tables: Vec<[f64; 2]>,
+    stuck: Vec<Option<Stuck>>,
+    refined: Option<Tables>,
+}
+impl PilotRead {
+    /// The units' errors as the decisions read them (`Measured`), of the units booked so (`booking`).
+    fn measured<'a>(&'a self, booking: &'a [Booked]) -> Measured<'a> {
+        Measured { errors: &self.sampled.errors, output: &self.sampled.at, group: &self.sampled.from, booked: booking }
+    }
+}
+
+/// The pilot's reads (`PilotRead`) of its groups `pilot` and their companions `coarse`, the units `reading` read at its
+/// states (the scout's `known` kept), on the pilot's tables `tables`, refined where their reads ask -- a copy, made at
+/// the first refinement (`PilotRead::refined`).
+/// - T(0) and n̄(0) by quadrature again (`Setting::start`), with as many evaluations of the potential as the pilot took
+///   steps: a step evaluates the potential's expansion at least once (its reference flow's, SPEC §2.1), so the
+///   quadrature costs no more than the pilot the solve has just run, in any trap; where that budget ends it before its
+///   levels agree, their difference is T(0)'s booked error (`Fixed::start`).
+/// - The model's errors at the pilot's states (SPEC §5.2): each folded unit's per output, the held atoms' mean over the
+///   first member of every group -- one a group keeps every group in the mean's spread, and a unit's error is a function
+///   of the state, read as well on eleven states an output as on eighty-eight.
+/// - The tables' errors (SPEC §5.4): each table's whole error against the elimination itself, its mean over the run's
+///   held states read at one state of every pilot trajectory (`one_each`, `over_the_run`) -- a state on another cluster
+///   reads none of it. A table beyond the tables' shares has the axis of its largest read halved and is read again,
+///   until it is within them, or it has no axis to halve (its coordinates all held at the focus: model/tabulate.rs,
+///   # Axes), or what is beyond is not its axes' interpolation -- the whole less every axis's own read still beyond the
+///   shares: a coordinate held at the focus, which no halving lowers --, or its worst axis's read on a grid it resolves
+///   fell by no more than an unresolved peak's (model/tabulate.rs, # Refinement: it is not converging); what it reads
+///   then is booked on every output, and flagged where it still lies beyond -- with which of these ended its refinement
+///   (`Stuck`).
+/// - The optical sector's noise (ledger.rs `optical`): its booking on T at every output, a part of the model's error
+///   that no unit kept takes away.
+#[allow(clippy::too_many_arguments)]
+fn pilot_reads(model: &Model, reading: &[Unit], booking: &[Booked], tables: &Tables, pilot: &[&Part], coarse: &[Part], known: Option<Sampled>, ensemble: &Ensemble, unsampled: [f64; 2], outputs: usize, most: usize, scales: &Scales) -> PilotRead {
+    let (estimates, _, counts) = pooled(pilot, scales);
+    let steps = counts.steps + coarse.iter().map(|p| p.counts.steps).sum::<u64>();
+    let start = exact(ensemble, &ensemble.kinetic(steps));
+    let sampled = sampled(model, reading, tables, pilot, known);
+    let measured = Measured { errors: &sampled.errors, output: &sampled.at, group: &sampled.from, booked: booking };
+    let mut error = model_error(&sums(&measured.means(outputs, None, &estimates), unsampled), unsampled);
+    let read_at = one_each(pilot);
+    let (shown_share, temperature_share) = crate::model::tabulate::shares();
+    let mut stuck: Vec<Option<Stuck>> = vec![None; tables.tables.len()];
+    let mut before: Vec<Vec<Option<f64>>> = tables.tables.iter().map(|table| vec![None; table.axes()]).collect();
+    let mut refined: Option<Tables> = None;
+    let booked = loop {
+        let current = refined.as_ref().unwrap_or(tables);
+        let reads: Vec<Vec<crate::model::tabulate::TableRead>> = read_at.par_iter().map(|pick| model.table_reads(current, std::slice::from_ref(&pick.state.sample))).collect();
+        let mean = |f: &dyn Fn(&crate::model::tabulate::TableRead) -> f64, t: usize| over_the_run(&read_at, reads.iter().map(|r| f(&r[t])), None);
+        let whole: Vec<[f64; 2]> = (0..current.tables.len()).map(|t| [mean(&|r| r.whole[0].population, t), mean(&|r| r.whole[0].temperature, t)]).collect();
+        let beyond = (0..whole.len()).find(|&t| stuck[t].is_none() && (whole[t][0] > shown_share || whole[t][1] > temperature_share));
+        let Some(t) = beyond else { break whole };
+        // Each axis's read over the shares, on what is shown and on T.
+        let axes: Vec<[f64; 2]> = (0..current.tables[t].axes()).map(|f| [mean(&|r| r.axes[f][0].population, t) / shown_share, mean(&|r| r.axes[f][0].temperature, t) / temperature_share]).collect();
+        let held = (0..2).any(|k| whole[t][k] / [shown_share, temperature_share][k] - axes.iter().map(|a| a[k]).sum::<f64>() > 1.);
+        let worst = (0..axes.len()).max_by(|&a, &b| (axes[a][0] + axes[a][1]).total_cmp(&(axes[b][0] + axes[b][1])));
+        let finer = match worst {
+            None => Err(Stuck::Axes),
+            Some(_) if held => Err(Stuck::Held),
+            Some(f) => model.halved_by(&current.tables[t], f, axes[f][0].max(axes[f][1]), &mut before[t][f], most).ok_or(Stuck::Order),
+        };
+        match finer {
+            Ok(finer) => refined.get_or_insert_with(|| tables.clone()).tables[t].table = finer,
+            Err(why) => stuck[t] = Some(why),
+        }
+    };
+    for table in &booked {
+        for e in error.iter_mut().skip(1) {
+            *e = [probability_error(e[0] + table[0]), e[1] + table[1]];
+        }
+    }
+    let optical = crate::ledger::optical(&mut Ledger::default(), counts.optical);
+    for e in error.iter_mut().skip(1) {
+        e[1] += optical;
+    }
+    PilotRead { estimates, counts, start, sampled, model: error, tables: booked, stuck, refined }
 }
 
 /// Why a table beyond the tables' shares is refined no further (`attempt`): its worst axis's read on a grid it resolves
@@ -1922,6 +2001,9 @@ enum Settled {
     Capped,
     Unseen,
     Unproven(Asks),
+    /// On the pilot, asked to stop there (`until`): the rung's own read is in and not clearly beyond, and the check
+    /// would go on past its own two levels -- the decisions the pilot's reads hold come first (`attempt`).
+    Pending,
 }
 
 /// The members `members` of the pilot's groups `numbers` at both levels (`pair`), joined to those the levels hold, and the
@@ -1955,9 +2037,11 @@ enum Settled {
 /// `ran`: the finer level of the members already run, joined to the groups the levels hold, with what its paths not
 /// proven ask of a reach (`attempt`: the pilot's own level, run first where the scout's atoms refuted the reach and
 /// read before its companion) -- its companion alone is run then, and the check goes on as from a pair: a trajectory
-/// is a function of its number and step (`trajectory`), not of the hand-out it was run in.
+/// is a function of its number and step (`trajectory`), not of the hand-out it was run in. `until`: on the pilot, the
+/// check stops where the rung's own read is in, not clearly beyond, and it would go on past its two levels
+/// (`Settled::Pending`; `check` takes it up again).
 #[allow(clippy::too_many_arguments)]
-fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, ran: Option<(Vec<Part>, Option<Asks>)>, messages: &mut Messages) -> Settled {
+fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, ran: Option<(Vec<Part>, Option<Asks>)>, until: bool, messages: &mut Messages) -> Settled {
     // The finer level joined to the groups the levels hold, its companion, and what each level's paths not proven ask.
     let (joined, coarse, departed) = match ran {
         Some((joined, asked)) => {
@@ -1980,8 +2064,15 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
     levels.fine = joined;
     absorb(&mut levels.coarse, coarse);
     levels.depart(departed);
+    check(run, ensemble, domain, context, levels, numbers, members.end, above, outgrown, until, messages)
+}
+
+/// The step's check of the levels in hand (`settle`) on the members `..members` of the pilot's groups `numbers` (the
+/// pilot's where they are all its members); `until` as `settle` takes it.
+#[allow(clippy::too_many_arguments)]
+fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: u64, above: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, until: bool, messages: &mut Messages) -> Settled {
     // Whether the check is the pilot's: all the members of a group in.
-    let pilot = members.end == GROUP;
+    let pilot = members == GROUP;
     loop {
         // The rung's own read; none where its companion departed (a departed level is not run to its end).
         let departs = levels.departed[1].is_some();
@@ -1996,6 +2087,9 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
         let verdict = read.as_ref().map_or(Verdict::Left, |read| verdict(read, levels.above.as_ref(), pilot, upward));
         if verdict == Verdict::Stands {
             return Settled::Standing;
+        }
+        if until && pilot && read.as_ref().is_some_and(|read| !screen(read)) {
+            return Settled::Pending;
         }
         if verdict != Verdict::Left && outgrown(&levels.fine.iter().collect::<Vec<_>>()) {
             // The pilot's atoms end the attempt as they are: nothing further is spent on its step.
@@ -2050,7 +2144,7 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
         // too, the departure is the atoms', and the next attempt begins at this rung (`attempt`).
         let rung = context.tau;
         context.tau = below;
-        let finer = match level(run, ensemble, domain, &context.plan, below, numbers, 0..members.end, true, messages, &mut |prefix, messages| so_far(context, &[], prefix, messages)) {
+        let finer = match level(run, ensemble, domain, &context.plan, below, numbers, 0..members, true, messages, &mut |prefix, messages| so_far(context, &[], prefix, messages)) {
             Ok(finer) => finer,
             Err(asked) => {
                 if departs {
