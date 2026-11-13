@@ -215,28 +215,17 @@ pub fn axpy(c: C64, real: &[f64], imaginary: &[f64], re: &mut [f64], im: &mut [f
 }
 
 /// Σ_i x_i y_i (no conjugate) of two complex vectors given by their real parts and their imaginary parts apart, whole
-/// vectors of `LANES`: one partial sum a lane, so the lanes add side by side (`dots` of one).
+/// vectors of `LANES`: one partial sum a lane, so the lanes add side by side.
 pub fn dot(xr: &[f64], xi: &[f64], yr: &[f64], yi: &[f64]) -> C64 {
-    dots::<1>([(xr, xi)], yr, yi)[0]
-}
-
-/// `dot` of K vectors x with one y at once: each sum's lanes as `dot`'s, the K sums side by side -- their chains of
-/// fused multiply-adds independent, so that K of them take the time of one where one waits on its own.
-#[inline(always)]
-pub fn dots<const K: usize>(x: [(&[f64], &[f64]); K], yr: &[f64], yi: &[f64]) -> [C64; K] {
-    let n = yr.len();
-    debug_assert!(n % LANES == 0 && yi.len() == n && x.iter().all(|(r, i)| r.len() == n && i.len() == n));
-    let (mut re, mut im) = ([[0.0; LANES]; K], [[0.0; LANES]; K]);
-    for (at, (yr, yi)) in (0..n).step_by(LANES).zip(yr.chunks_exact(LANES).zip(yi.chunks_exact(LANES))) {
-        for (d, (xr, xi)) in x.iter().enumerate() {
-            let (xr, xi) = (&xr[at..at + LANES], &xi[at..at + LANES]);
-            for l in 0..LANES {
-                re[d][l] = xr[l].mul_add(yr[l], (-xi[l]).mul_add(yi[l], re[d][l]));
-                im[d][l] = xr[l].mul_add(yi[l], xi[l].mul_add(yr[l], im[d][l]));
-            }
+    debug_assert!(xr.len() % LANES == 0 && [xi.len(), yr.len(), yi.len()] == [xr.len(); 3]);
+    let (mut re, mut im) = ([0.0; LANES], [0.0; LANES]);
+    for (((xr, xi), yr), yi) in xr.chunks_exact(LANES).zip(xi.chunks_exact(LANES)).zip(yr.chunks_exact(LANES)).zip(yi.chunks_exact(LANES)) {
+        for l in 0..LANES {
+            re[l] = xr[l].mul_add(yr[l], (-xi[l]).mul_add(yi[l], re[l]));
+            im[l] = xr[l].mul_add(yi[l], xi[l].mul_add(yr[l], im[l]));
         }
     }
-    std::array::from_fn(|d| C64::new((re[d][0] + re[d][1]) + (re[d][2] + re[d][3]), (im[d][0] + im[d][1]) + (im[d][2] + im[d][3])))
+    C64::new((re[0] + re[1]) + (re[2] + re[3]), (im[0] + im[1]) + (im[2] + im[3]))
 }
 
 /// Sums of complex columns laid for the lanes: per vector of `LANES` rows each column's real parts and then its imaginary
@@ -1247,8 +1236,8 @@ pub(crate) mod tests {
         eprintln!("axpy {first:.3} ns, dot {second:.3} ns, combine {:.3} ns a complex multiply-add", started.elapsed().as_secs_f64() * 1e9 / (rounds * rows * count) as f64);
     }
 
-    /// The interleaved kernels (`mul_add`, `fused_product`, `rotate`, `turn`) and the side-by-side sums (`dots`) are
-    /// their scalar forms bit for bit, at every length from 0 to 17 (whole vectors and the odd number after them), on
+    /// The interleaved kernels (`mul_add`, `fused_product`, `rotate`, `turn`) and `hypot` are their scalar forms bit for
+    /// bit, at every length from 0 to 17 (whole vectors and the odd number after them), on
     /// numbers of many scales and signs, zeros among them.
     #[test]
     fn the_vector_kernels_are_their_scalar_forms_bit_for_bit() {
@@ -1309,25 +1298,6 @@ pub(crate) mod tests {
                     }
                 }
                 assert_eq!(bits(&kernel), bits(&scalar), "fused product {r} × {k} × {n}");
-            }
-            let width = 4 * n;
-            let mut reals = |count: usize| -> Vec<f64> { (0..count).map(|_| number().re).collect() };
-            let (yr, yi, x) = (reals(width), reals(width), reals(6 * width));
-            if width > 0 {
-                let pairs: Vec<(&[f64], &[f64])> = x.chunks_exact(2 * width).map(|p| p.split_at(width)).collect();
-                let together = dots::<3>([pairs[0], pairs[1], pairs[2]], &yr, &yi);
-                for (d, p) in pairs.iter().enumerate() {
-                    let (mut re, mut im) = ([0.0; LANES], [0.0; LANES]);
-                    for v in 0..n {
-                        for l in 0..LANES {
-                            let i = v * LANES + l;
-                            re[l] = p.0[i].mul_add(yr[i], (-p.1[i]).mul_add(yi[i], re[l]));
-                            im[l] = p.0[i].mul_add(yi[i], p.1[i].mul_add(yr[i], im[l]));
-                        }
-                    }
-                    let alone = C64::new((re[0] + re[1]) + (re[2] + re[3]), (im[0] + im[1]) + (im[2] + im[3]));
-                    assert_eq!(bits(&[together[d]]), bits(&[alone]), "dots of {width}, sum {d}");
-                }
             }
         }
     }
