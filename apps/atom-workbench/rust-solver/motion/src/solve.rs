@@ -827,17 +827,6 @@ fn carried(read: &Between, ratio: f64) -> Between {
     Between { loss: carry(&read.loss), shown: read.shown.each_ref().map(carry), temperature: read.temperature.as_ref().map(carry) }
 }
 
-/// Whether two reads of a rung's error, each carried to the rung's step, contradict the order between their levels
-/// clearly (module documentation, # The step): some look's near end lies above the other read's far end, in either
-/// direction, among the family's looks -- on the looks both hold: the loss and every row always, the total T where both
-/// read it.
-fn refuted(own: &Between, other: &Between) -> bool {
-    let both: Vec<(Read, Read)> =
-        std::iter::once((own.loss, other.loss)).chain(own.shown.iter().copied().zip(other.shown)).chain(own.temperature.zip(other.temperature)).collect();
-    let looks = both.len() as f64;
-    both.iter().any(|(a, b)| a.least(looks) > b.most(looks) || b.least(looks) > a.most(looks))
-}
-
 /// Whether a read's every look is within the step's share as it reads (module documentation, # The step): its
 /// estimate M̂ -- unbiased, the noise's floor taken out -- at most the square b of the share; a look that is no number
 /// is not. The convergence test as a refinement is checked by hand and as an adaptive integrator's local control takes
@@ -1667,7 +1656,7 @@ impl Levels {
     ///   mean square is the rung's 2^{2p} times: the read carried to half its step.
     /// Where the order holds across the three levels the two reads are one number. Neither is taken alone, nor the
     /// lesser of them: they are of one mean square only where the order holds, which they test against each other
-    /// (`refuted`), and the lesser of two noisy reads is biased low. Both are booked as one: what neither excludes
+    /// (`certifies`), and the lesser of two noisy reads is biased low. Both are booked as one: the larger
     /// (`worse`).
     fn told(&self, tau: f64, scales: &Scales) -> (Between, Option<Between>, Option<f64>, u64) {
         let (fine, coarse) = self.paired();
@@ -3556,9 +3545,9 @@ mod tests {
         assert_eq!((verdict(&own, None, false, false, false), verdict(&own, None, false, true, true), verdict(&own, None, false, true, false)), (Verdict::Stands, Verdict::Above, Verdict::Below));
         let third = carried(&at(Some(pilot(0.40 * b, 0.05 * b))), 2.);
         assert!((third.temperature.unwrap().value / b - 6.4).abs() < 1e-12);
-        assert!(!certifies(&own, Some(&third)) && refuted(&own, &third) && refuted(&third, &own));
+        assert!(!certifies(&own, Some(&third)));
         let coarser = carried(&at(Some(pilot(32. * b, b))), 0.5);
-        assert!(!certifies(&own, Some(&coarser)) && refuted(&own, &coarser) && screen(&coarser));
+        assert!(!certifies(&own, Some(&coarser)) && screen(&coarser));
         assert_eq!(verdict(&own, Some(&coarser), false, true, false), Verdict::Below);
         // Clearly beyond on its own read, or its companion's paths not proven: left, on the scout as on the pilot.
         let beyond = at(Some(pilot(4. * b, 0.1 * b)));
@@ -3581,7 +3570,7 @@ mod tests {
         let (mut own, mut above) = (at(None), at(None));
         (own.loss, above.loss) = (logged(1.952, 7.702, 11., bp), logged(32.045, 49.088, 11., bp));
         let above = carried(&above, 0.5);
-        assert!(!certifies(&own, Some(&above)) && !refuted(&own, &above) && !screen(&above));
+        assert!(!certifies(&own, Some(&above)) && !screen(&above));
         assert_eq!(verdict(&own, Some(&above), false, true, false), Verdict::Unseeing);
         assert!(blind(&own).is_some_and(|factor| (factor - 7.702).abs() < 1e-9), "{:?}", blind(&own));
         let ((open, _), (estimate, _)) = (checked(&own, Some(&above), false), checked(&own, Some(&above), true));
@@ -3592,14 +3581,12 @@ mod tests {
         assert!(!certifies(&pgc, Some(&lowered)) && verdict(&pgc, Some(&lowered), false, true, false) == Verdict::Below);
     }
 
-    /// A triple that certifies its rung, and what the rung books (`certifies`, `refuted`, `worse`, `checked`). The total
+    /// A triple that certifies its rung, and what the rung books (`certifies`, `worse`, `checked`). The total
     /// T read 0.2 ± 0.1 b at the rung and 0.15 ± 0.02 b from the coarser pair, lowered: both estimates within -- the
     /// rung stands, and books per look the larger estimate, here the own read's √0.2 b, its resolution √(2·0.1) b; a
-    /// check that ended unable to see books the far end, √(0.2 + 2·0.1) b. A third level that does not read T leaves T's order untested: not certified. The order is
-    /// tested look by look, both ways: an own row clearly above the third's -- an error that falls more slowly than the
-    /// order, a Raman transfer at 2.5 µs, 2.7e-4 ± 0.3e-4 against 4.8e-4 ± 1.7e-4 at 5 µs, lowered -- refutes it, and so
-    /// does one clearly below; intervals that reach each other do not. A row the third reads larger is booked by the
-    /// third's read. A read that is no number excludes nothing: the whole on what is shown.
+    /// check that ended unable to see books the far end, √(0.2 + 2·0.1) b. A third level that does not read T leaves
+    /// T's order untested: not certified. A row the third reads larger is booked by the third's read. A read that is no
+    /// number is unbounded: the whole on what is shown.
     #[test]
     fn a_certified_triple_stands_and_books_what_neither_read_excludes() {
         let b = step_bound()[1].powi(2);
@@ -3610,19 +3597,6 @@ mod tests {
         assert!((checked(&own, Some(&third), false).0.temperature - (0.4 * b).sqrt()).abs() < 1e-15);
         assert!((resolution[1] - (0.2 * b).sqrt()).abs() < 1e-15 && resolution[0] == 0., "{resolution:?}");
         assert!(!certifies(&own, Some(&at(None))) && certifies(&at(None), Some(&third)));
-        let mut slow = at(Some(read(0., 0.01)));
-        slow.shown[1] = pilot(2.7e-4, 0.3e-4);
-        let mut coarse = at(Some(read(0.016, 0.0032)));
-        coarse.shown[1] = pilot(4.8e-4, 1.7e-4);
-        let lowered = carried(&coarse, 0.5);
-        assert!((lowered.shown[1].value - 3e-5).abs() < 1e-18 && lowered.shown[1].spread.groups == 11.);
-        assert!(refuted(&slow, &lowered) && refuted(&lowered, &slow) && refuted(&Between { temperature: None, ..slow.clone() }, &lowered));
-        let mut fast = at(Some(read(0., 0.01)));
-        fast.shown[1] = pilot(1e-6, 1e-7);
-        coarse.shown[1] = pilot(4.8e-4, 0.3e-4);
-        assert!(refuted(&fast, &carried(&coarse, 0.5)));
-        slow.shown[1] = pilot(2.7e-4, 1.0e-4);
-        assert!(!refuted(&slow, &lowered) && !refuted(&at(None), &lowered));
         let mut wide = third.clone();
         wide.shown[4] = read(1e-4, 1e-4);
         let ((step, _), (open, _)) = (checked(&own, Some(&wide), true), checked(&own, Some(&wide), false));
