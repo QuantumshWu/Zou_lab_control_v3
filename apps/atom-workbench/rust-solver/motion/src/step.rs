@@ -1907,22 +1907,21 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 });
                 // The states kept stand as far as the root: the middle state; a time read, at its survival there. That is
                 // the step's own survival at the panel's two ends -- ln N at its start, and at its end or at the root (ln θ)
-                // -- and between them the hazard's own shape: ln N(t) = ln N(a) − (ln N(a) − ln N(far)) F(a, t)/F(a, far),
-                // F the hazard's integral to the round-off (`fallen`; none where the panel has no decay). One function of
-                // the time for every read, the reading's alone -- no node of the step's count, nothing of another read --,
-                // which meets the trajectory's own survival at its states and falls where the hazard is positive: a read's
-                // own quadrature within the share would stray from the step's by it (0.4 % of a stiff step's survival, and
-                // two reads' apart from each other: measured).
+                // -- and between them the hazard's own shape: ln N(t) = ln N(a) − (ln N(a) − ln N(far)) F(a, t)/(F(a, t) +
+                // F(t, far)), F the hazard's integral to the round-off (`fallen`; none where the panel has no decay), the
+                // panel's quadrature cut at the time read. One function of the time for every read, the reading's alone --
+                // no node of the step's count, nothing of another read --, which meets the trajectory's own survival at
+                // its states and falls where the hazard is positive: a read's own quadrature within the share would stray
+                // from the step's by it (0.4 % of a stiff step's survival, and two reads' apart from each other: measured).
                 let far = root.map_or((b, end), |r| (r, target));
-                let mut whole = None;
                 for &(kind, u, state) in met.iter().filter(|m| root.is_none_or(|r| ahead(m.1) < ahead(r))) {
                     match kind {
                         Stop::Middle => (middle, march.passed) = (Some(state), true),
                         Stop::Read => {
                             let work = picture.work;
-                            let mut integral = |to: f64| fallen(picture, still, h, (a, to), bandwidth, Within::RoundOff, decay, part, &mut [0.0; 3]).0;
-                            let total = *whole.get_or_insert_with(|| integral(far.0));
-                            let share = if total > 0.0 { integral(u) / total } else { 0.0 };
+                            let mut integral = |span: (f64, f64)| fallen(picture, still, h, span, bandwidth, Within::RoundOff, decay, part, &mut [0.0; 3]).0;
+                            let (before, after) = (integral((a, u)), integral((u, far.0)));
+                            let share = if before + after > 0.0 { before / (before + after) } else { 0.0 };
                             picture.work = work;
                             let state = Trajectory { psi: at(&state[..n], u, log - (log - far.1) * share), time: reads[march.read], ..march.state.clone() };
                             march.made.push(Made { kick: None, state });
