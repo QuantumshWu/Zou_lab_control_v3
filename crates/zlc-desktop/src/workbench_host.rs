@@ -838,7 +838,8 @@ impl Plugins for Builtin {
         let (type_id, excluded) = (type_id.to_owned(), excluded.to_vec());
         // The bench part of the scan: what other computers publish (v2's remote family).
         let bench = self.bench().filter(|_| type_id == zlc_fabric::REMOTE_TYPE);
-        // v2 _scan_families: one deadline from the scan's start, the process's start inside it. A family
+        // v2 _scan_families: one deadline from the family's ask (the scan's start, or, for a type asked
+        // after one of its resource kind, that one's answer), the process's start inside it. A family
         // that misses it is reported so, its answer when it comes is dropped, and until then it is still
         // scanning (Init, Apply and another scan wait for it).
         let until = std::time::Instant::now() + SCAN;
@@ -871,7 +872,7 @@ impl Plugins for Builtin {
             return;
         }
         let (type_id, parameters, excluded) = (type_id.to_owned(), parameters.clone(), excluded.to_vec());
-        // A resolve probes as a scan does, port by port with a bounded wait each, so it is held to a
+        // A resolve probes as a scan does, every free port at once with a bounded wait each, so it is held to a
         // family's scan deadline (the process's start inside it); Init waits for nothing longer.
         let started = self.spawn("resolve", move |host| Event::Answered { ticket,
             result: host.resolve(&type_id, parameters, &excluded, SCAN).map_err(|error| error.to_string()) });

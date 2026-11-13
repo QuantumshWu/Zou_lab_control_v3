@@ -88,8 +88,10 @@ journal/session.jsonl
                                        asked to end (`expected`; else it crashed), its instances, its last log
     workbench devices_apply            an Init, Apply, Close or shut down: rows to open (`retrying`: ones that
                                        had failed), to close, to close and open again as they now stand
-    workbench device_resolving /       a row whose port is left blank, found before it opens
-      device_resolved
+    workbench device_resolving /       a row whose port is left blank, looked for before it opens (every free
+      device_resolved                  port at once); `found`: whether the search found anything (only what
+                                       it found is written into the row; a miss leaves the row as it was),
+                                       `note`: what it tried and what it opens with
     workbench device_open              a row opened: instance, role, type_id, the parameters it opens with
                                        (its type's defaults filled in), the simulation for a simulated type,
                                        `attempt` (its how-many-th open in this process); `outcome: failed`

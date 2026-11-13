@@ -70,12 +70,20 @@ pub enum LiveState { Opening, Open, Closing, Failed }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Settling { Init, Apply, Close(String), Shutdown }
 
-/// A hardware scan in flight: who asked, the types still to answer, what came back, and the
-/// bound resources of a kind a scanned type binds, which it passed over (`COM3 (n100)`).
-pub struct Scan { request: u64, asked: Vec<String>, pending: Vec<String>, found: Vec<Entry>, reasons: Vec<(String, Vec<String>)>, passed: Vec<String> }
+/// A hardware scan in flight: who asked, the types still to answer (`queued`: of them, those not
+/// asked yet, waiting for a type of their resource kind), what came back, the bound resources every
+/// type is handed, and those of a kind a scanned type binds, which it passed over (`COM3 (n100)`).
+pub struct Scan { request: u64, asked: Vec<String>, pending: Vec<String>, queued: Vec<String>, found: Vec<Entry>, reasons: Vec<(String, Vec<String>)>,
+                  excluded: Vec<String>, passed: Vec<String> }
+
+/// What a row's resolve answer comes to (`pin`): the row it opens as (with what was found), the
+/// values it opens with over that row for this open only, whether anything was found, and its line.
+struct Pinned { row: Entry, this_open: Map<String, Value>, found: bool, line: Option<String> }
 
 /// One live instance: what it was opened with and what it reports.
 pub struct Live {
+    /// The row it opened as (an open after a resolve that found nothing may have used other values
+    /// for that open only: `resources` and `identity` are what it opened with).
     pub entry: Entry,
     pub state: LiveState,
     pub error: Option<String>,
@@ -361,9 +369,13 @@ impl Workbench {
         Ok(json!({"devices": self.apparatus.draft.iter().map(|entry| &entry.instance_id).collect::<Vec<_>>()}))
     }
 
-    /// Scan hardware (v2 DeviceManagerPresenter.discover): every type with a scan is
-    /// asked at once in its own plugin process; nothing found is opened or joins the
-    /// draft. The reply comes when every type has answered (or missed its deadline).
+    /// Scan hardware (v2 DeviceManagerPresenter.discover): every type with a scan is asked in
+    /// its plugin process, at once but for one rule -- types whose declared resources share a kind
+    /// (`serial` of `serial:{port}`, `visa`) are asked one after another, in the catalogue's
+    /// order, each once the one before it answered (or missed its deadline): each opens every free
+    /// resource of its kind at once, and two such scans would find each other's ports in use.
+    /// Types of other kinds, and types that bind nothing, scan beside them. Nothing found is
+    /// opened or joins the draft. The reply comes when every type has answered (or missed its deadline).
     pub(crate) fn discover_devices(&mut self, request: u64) -> Result<Option<Value>, String> {
         self.not_scanning()?;
         // v2 discover: a device change under way (opening what is on the bus) is not scanned over.
@@ -379,16 +391,38 @@ impl Workbench {
         // those of a kind a scanned type binds (a serial scan passed over COM3).
         let bound = self.bound_resources(None);
         let excluded: Vec<String> = bound.iter().map(|(resource, _)| resource.clone()).collect();
-        let kinds: BTreeSet<String> = types.iter().filter_map(|type_id| self.catalog.get(type_id)).flat_map(|item| &item.resources)
-            .filter_map(|template| template.split_once(':').map(|(kind, _)| kind.trim().to_lowercase())).collect();
+        let kinds: BTreeSet<String> = types.iter().flat_map(|type_id| self.resource_kinds(type_id)).collect();
         let passed = bound.iter().filter_map(|(resource, role)| resource.split_once(':').filter(|(kind, _)| kinds.contains(*kind))
             .map(|(_, value)| format!("{value} ({role})"))).collect();
-        for type_id in &types {
-            let ticket = self.ticket(Ticket::Discover { type_id: type_id.clone() });
-            self.plugins.discover(ticket, type_id, &excluded);
-        }
-        self.scan = Some(Scan { request, asked: types.clone(), pending: types, found: Vec::new(), reasons: Vec::new(), passed });
+        self.scan = Some(Scan { request, asked: types.clone(), pending: types.clone(), queued: types, found: Vec::new(), reasons: Vec::new(), excluded, passed });
+        self.ask_scans();
         Ok(None)
+    }
+
+    /// The kinds of resource a type binds (`serial` of `serial:{port}`), as its catalogue entry declares them.
+    fn resource_kinds(&self, type_id: &str) -> BTreeSet<String> {
+        self.catalog.get(type_id).into_iter().flat_map(|item| &item.resources)
+            .filter_map(|template| template.split_once(':').map(|(kind, _)| kind.trim().to_lowercase())).collect()
+    }
+
+    /// Ask every type of the scan still queued that shares no resource kind with a type asked and
+    /// not yet answered, nor with a queued type before it (so each kind's types go in the catalogue's order).
+    fn ask_scans(&mut self) {
+        let Some(scan) = self.scan.as_ref() else { return };
+        let mut taken: BTreeSet<String> = scan.pending.iter().filter(|type_id| !scan.queued.contains(type_id))
+            .flat_map(|type_id| self.resource_kinds(type_id)).collect();
+        let mut asking: Vec<String> = Vec::new();
+        for type_id in &scan.queued {
+            let kinds = self.resource_kinds(type_id);
+            if kinds.is_disjoint(&taken) { asking.push(type_id.clone()); }
+            taken.extend(kinds);
+        }
+        let excluded = scan.excluded.clone();
+        if let Some(scan) = self.scan.as_mut() { scan.queued.retain(|type_id| !asking.contains(type_id)); }
+        for type_id in asking {
+            let ticket = self.ticket(Ticket::Discover { type_id: type_id.clone() });
+            self.plugins.discover(ticket, &type_id, &excluded);
+        }
     }
 
     /// Every physical resource bound now, once each with the role that binds it: each draft row's,
@@ -447,7 +481,8 @@ impl Workbench {
                 None => scan.reasons.push((reason, vec![type_id.to_owned()])),
             }
         }
-        if !scan.pending.is_empty() { return; }
+        // Its resource kind is free again: the next type of that kind is asked.
+        if !scan.pending.is_empty() { self.ask_scans(); return; }
         let mut scan = self.scan.take().expect("scan");
         // The families that did not load could not be asked: each says why (no plugin environment, a missing vendor runtime).
         for (reason, families) in self.unavailable_families() {
@@ -714,10 +749,15 @@ impl Workbench {
             .map(|(role, _)| format!("RuntimeError: {resource} is already bound (to {role})")))
     }
 
-    fn open_entry(&mut self, entry: Entry) { self.open_with(entry, true) }
+    fn open_entry(&mut self, entry: Entry) { self.open_with(entry, None) }
 
-    /// Open a row; `resolve`: one with a resource still blank is found first (Init's resolve phase).
-    fn open_with(&mut self, entry: Entry, resolve: bool) {
+    /// Open a row. `this_open`: none, a row with a resource still blank is found first (Init's
+    /// resolve phase); else it was, and opens now with these values over its own for this open only
+    /// (what a resolve that found nothing opens with): the live device stays the row as it stands.
+    fn open_with(&mut self, row: Entry, this_open: Option<Map<String, Value>>) {
+        let resolve = this_open.is_none();
+        let mut entry = row.clone();
+        entry.parameters.extend(this_open.unwrap_or_default());
         let context = if self.simulated(&entry.type_id) { json!({"simulation": self.apparatus.simulation}) } else { json!({}) };
         let complete = self.catalog.get(&entry.type_id).map(|item| fields::project_values(&item.parameters, &entry.parameters, true));
         // What it is opened with: its settings as its type completes them (defaults filled in), else as written.
@@ -754,8 +794,8 @@ impl Workbench {
         }
         if failure.is_none() && !resolving { self.plugins.open(&id, &entry.type_id, &Value::Object(entry.parameters.clone()), &context); }
         if let Some(error) = &failure { self.log_device(&id, &format!("not opened: {error}")); }
-        let units = entry.units.clone();
-        self.devices.insert(id, Live { entry, state, error: failure, working_point: Value::Null, fields: None, fields_ticket: None, close_pending: false, close_failed: false, reopen: None,
+        let units = row.units.clone();
+        self.devices.insert(id, Live { entry: row, state, error: failure, working_point: Value::Null, fields: None, fields_ticket: None, close_pending: false, close_failed: false, reopen: None,
             risk: None, units, descriptor: None, published: false, identity, resources, resolving, resolved: !resolve, stale: None, asked: Some(std::time::Instant::now()) });
         if resolving { self.next_resolution(); }
     }
@@ -774,28 +814,31 @@ impl Workbench {
         self.plugins.resolve(ticket, &id, &entry.type_id, &Value::Object(entry.parameters), &excluded);
     }
 
-    /// A row's resolve answered `{parameters, note}`: what it found is pinned into the apparatus
-    /// (which then reads unsaved) and the row opens with it, through the checks any row meets;
-    /// what it could not find fails the row with its words -- after the open failure that sent it
-    /// to be looked for again, if one did. A row that stopped waiting meanwhile (shut down, closed,
-    /// taken out by Apply) is answered by nobody. Then the next is asked.
+    /// A row's resolve answered `{found, this_open, note}`: what it found is pinned into the
+    /// apparatus (which then reads unsaved) and the row opens with it, through the checks any row
+    /// meets, and with `this_open` over it for this open only (a search that found nothing never
+    /// erases what the row had); an error fails the row with its words -- after the open failure
+    /// that sent it to be looked for again, if one did. The row's log says which: `found: ...` or
+    /// `not found: ...`. A row that stopped waiting meanwhile (shut down, closed, taken out by
+    /// Apply) is answered by nobody. Then the next is asked.
     pub(crate) fn resolved(&mut self, ticket: u64, id: &str, result: Result<Value, String>) {
         if self.resolution.as_ref().map(|(asked, _)| *asked) != Some(ticket) { return; }
         let row = self.resolution.take().and_then(|(_, row)| row);
         if row.as_deref() == Some(id) && self.devices.get(id).is_some_and(|live| live.resolving) {
             let mut live = self.devices.remove(id).expect("waiting");
             match result.and_then(|answer| self.pin(&live.entry, &answer)) {
-                Ok((entry, line)) => {
+                Ok(Pinned { row, this_open, found, line }) => {
                     let line = match (&live.stale, line) {
-                        (Some(stale), line) => Some(format!("{}; looked again: {}", port_failure(stale), line.as_deref().unwrap_or("found"))),
+                        (Some(stale), line) => Some(format!("{}; looked again: {}", port_failure(stale),
+                                                            line.as_deref().unwrap_or(if found { "found" } else { "nothing found" }))),
                         (None, line) => line,
                     };
-                    say_device("device_resolved", &entry, json!({"ms": ms_since(live.asked), "note": line}));
+                    say_device("device_resolved", &row, json!({"ms": ms_since(live.asked), "found": found, "note": line}));
                     if let Some(line) = line {
-                        self.log_device(id, &format!("found: {line}"));
-                        self.found.push(format!("{}: {line}", entry.role));
+                        self.log_device(id, &format!("{}: {line}", if found { "found" } else { "not found" }));
+                        self.found.push(format!("{}: {line}", row.role));
                     }
-                    self.open_with(entry, false);
+                    self.open_with(row, Some(this_open));
                 }
                 Err(error) => {
                     let error = match &live.stale { Some(stale) => format!("{stale}; looked again: {error}"), None => error };
@@ -810,30 +853,51 @@ impl Workbench {
         self.settle();
     }
 
-    /// The entry a resolve's answer opens (the values it found over the row's) and what to say of
-    /// it. They are written into the draft row while that is still what was resolved: an edit the
-    /// operator made meanwhile is theirs and stays. Values the row already has change nothing.
-    fn pin(&mut self, entry: &Entry, answer: &Value) -> Result<(Entry, Option<String>), String> {
-        let found = answer["parameters"].as_object().cloned().unwrap_or_default();
+    /// What a resolve's answer comes to for `entry`, the row it was asked about. The values it
+    /// `found` are the row's from now on: written into the draft row while that is still what was
+    /// resolved (an edit the operator made meanwhile is theirs and stays); values the row already has
+    /// change nothing. Its `this_open` values are what this open uses over the row's and nothing
+    /// more: a search that found nothing leaves the row's values as they were, and says the ones
+    /// this open passes by.
+    fn pin(&mut self, entry: &Entry, answer: &Value) -> Result<Pinned, String> {
+        let found = answer["found"].as_object().cloned().unwrap_or_default();
+        let this_open = answer["this_open"].as_object().cloned().unwrap_or_default();
         let note = answer["note"].as_str().map(str::trim).filter(|note| !note.is_empty()).map(str::to_owned);
+        let passed_by: Vec<String> = this_open.iter().filter_map(|(name, value)| {
+            let had = found.get(name).or_else(|| entry.parameters.get(name)).filter(|had| *had != value)?;
+            let had = had.as_str().map_or_else(|| had.to_string(), |text| text.trim().to_owned());
+            (!had.is_empty()).then(|| format!("{} {had}", self.field_words(&entry.type_id, name)))
+        }).collect();
         let mut merged = entry.parameters.clone();
-        merged.extend(found);
-        if merged == entry.parameters { return Ok((entry.clone(), note)); }
-        let pinned = Entry { parameters: self.draft_parameters(&entry.type_id, &merged).map_err(|error| format!("ValueError: {error}"))?, ..entry.clone() };
-        let row = self.apparatus.draft.iter_mut().find(|row| **row == *entry);
-        let kept = if let Some(row) = row { row.parameters = pinned.parameters.clone(); "written into the apparatus -- Save to keep it" }
-                   else { "not written into the apparatus (its row was edited meanwhile)" };
-        Ok((pinned, Some(note.map_or_else(|| kept.to_owned(), |note| format!("{note}, {kept}")))))
+        merged.extend(found.clone());
+        let (row, written) = if merged == entry.parameters { (entry.clone(), None) } else {
+            let pinned = Entry { parameters: self.draft_parameters(&entry.type_id, &merged).map_err(|error| format!("ValueError: {error}"))?, ..entry.clone() };
+            let row = self.apparatus.draft.iter_mut().find(|row| **row == *entry);
+            let written = if let Some(row) = row { row.parameters = pinned.parameters.clone(); "written into the apparatus -- Save to keep it" }
+                          else { "not written into the apparatus (its row was edited meanwhile)" };
+            (pinned, Some(written.to_owned()))
+        };
+        let mut line = [note, written].into_iter().flatten().collect::<Vec<_>>().join(", ");
+        if !passed_by.is_empty() {
+            if !line.is_empty() { line.push_str("; "); }
+            line.push_str(&format!("the apparatus keeps {}", passed_by.join(", ")));
+        }
+        Ok(Pinned { row, this_open, found: !found.is_empty(), line: Some(line).filter(|line| !line.is_empty()) })
     }
 
     /// What a row waiting to be found leaves blank, in words: the field its first blank resource names.
     fn blank_field(&self, entry: &Entry) -> Option<String> {
         let item = self.catalog.get(&entry.type_id)?;
         let template = item.resources.iter().find(|template| resource(template, &entry.parameters).is_none())?;
-        let name = template.split_once('{')?.1.split_once('}')?.0;
-        let label = item.parameters.iter().find(|field| field.name == name).map_or(name, |field| field.label.split(" (").next().unwrap_or(&field.label));
+        Some(self.field_words(&entry.type_id, template.split_once('{')?.1.split_once('}')?.0))
+    }
+
+    /// A setting of a type in words, as a line says it mid-sentence: its label without its unit.
+    fn field_words(&self, type_id: &str, name: &str) -> String {
+        let field = self.catalog.get(type_id).and_then(|item| item.parameters.iter().find(|field| field.name == name));
+        let label = field.map_or(name, |field| field.label.split(" (").next().unwrap_or(&field.label));
         // "Serial port" reads "serial port" mid-line; "UART port" stays.
-        Some(if label.chars().nth(1).is_some_and(char::is_lowercase) { label.to_lowercase() } else { label.to_owned() })
+        if label.chars().nth(1).is_some_and(char::is_lowercase) { label.to_lowercase() } else { label.to_owned() }
     }
 
     /// The type a live instance is: the one it opened as, else its row's.

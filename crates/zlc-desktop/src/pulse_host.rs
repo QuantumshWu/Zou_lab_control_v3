@@ -1420,12 +1420,12 @@ pub const RESOLVE_WAIT: Duration = Duration::from_secs(60);
 /// `resolve` of the local board (`sequencer.local`) before it opens: its UART port, looked for on
 /// the free ports only (a bound one -- an IMU's COM3 -- is never opened) with the server's own
 /// handshake, against the deployed config its server loads. A JTAG or memory board has nothing to
-/// find; `auto` with no UART answering is left without a port, so it opens over JTAG (its open says
-/// so), and `uart` fails with what it tried.
+/// find; `auto` with no UART answering finds nothing and opens this once without a port, over JTAG
+/// (`this_open`: the row keeps the port it had), and `uart` fails with what it tried.
 pub fn resolve(type_id: &str, parameters: &Value, excluded: &[String], wait: Duration) -> Result<Value, String> {
     if type_id != "sequencer.local" { return Err(format!("{type_id} finds nothing before it opens")); }
     let backend = parameters["backend"].as_str().unwrap_or("auto").to_owned();
-    if matches!(backend.as_str(), "jtag-axi" | "memory") { return Ok(json!({"parameters": {}, "note": ""})); }
+    if matches!(backend.as_str(), "jtag-axi" | "memory") { return Ok(json!({"found": {}, "note": ""})); }
     let bound: Vec<String> = excluded.iter().filter_map(|resource| resource.strip_prefix("serial:")).map(str::to_owned).collect();
     let (sender, answer) = mpsc::channel();
     std::thread::Builder::new().name("zlc-pulse-probe".into()).spawn(move || {
@@ -1440,16 +1440,16 @@ pub fn resolve(type_id: &str, parameters: &Value, excluded: &[String], wait: Dur
         let _ = sender.send(probed.map(|(port, attempts)| (port, attempts, passed)).map_err(|error| error.message));
     }).map_err(|error| error.to_string())?;
     let (port, attempts, passed) = answer.recv_timeout(wait).unwrap_or_else(|_| Err(format!("its UART was not found within {} s", wait.as_secs())))?;
-    // What it tried (the one that answered aside) and what it passed over, as the line says them.
+    // What it tried (the one taken aside) and what it passed over, as the line says them.
     let mut said: Vec<String> = Vec::new();
-    let tried: Vec<String> = attempts[..attempts.len() - usize::from(port.is_some())].iter().map(ToString::to_string).collect();
+    let tried: Vec<String> = attempts.iter().filter(|attempt| Some(&attempt.port) != port.as_ref()).map(ToString::to_string).collect();
     if !tried.is_empty() { said.push(format!("tried {}", tried.join("; "))); }
     if !passed.is_empty() { said.push(format!("passed over {}: bound", passed.join(", "))); }
     let context = if said.is_empty() { String::new() } else { format!(" ({})", said.join("; ")) };
     match port {
-        Some(port) => Ok(json!({"parameters": {"uart_port": port}, "note": format!("board UART found on {port}{context}")})),
+        Some(port) => Ok(json!({"found": {"uart_port": port}, "note": format!("board UART found on {port}{context}")})),
         None if backend == "uart" => Err(format!("no board UART on the free ports{}", if context.is_empty() { " (no COM port is free)".to_owned() } else { context })),
-        None => Ok(json!({"parameters": {"uart_port": ""}, "note": format!("no board UART on the free ports{context}")})),
+        None => Ok(json!({"found": {}, "this_open": {"uart_port": ""}, "note": format!("no board UART on the free ports{context}; it opens over JTAG-to-AXI this time")})),
     }
 }
 
@@ -1760,7 +1760,7 @@ mod tests {
         assert_eq!((&local["resources"], &local["queries"]), (&json!(["serial:{uart_port}"]), &json!(["resolve"])));
         for backend in ["jtag-axi", "memory"] {
             let answer = resolve("sequencer.local", &json!({"backend": backend, "uart_port": ""}), &["serial:COM3".to_owned()], Duration::from_secs(1));
-            assert_eq!(answer.unwrap(), json!({"parameters": {}, "note": ""}), "{backend}");
+            assert_eq!(answer.unwrap(), json!({"found": {}, "note": ""}), "{backend}");
         }
         let line = |parameters: Value| server_arguments(&parameters).map(|(backend, arguments)| (backend.to_owned(), arguments.join(" ")));
         let (backend, arguments) = line(json!({"backend": "auto", "uart_port": " ", "port": 18861})).unwrap();

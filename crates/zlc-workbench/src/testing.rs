@@ -16,7 +16,9 @@ thread_local! {
 pub fn handed() -> (Vec<(u64, Lane, Work)>, Vec<Event>) { HANDED.with(|handed| std::mem::take(&mut *handed.borrow_mut())) }
 
 #[derive(Default)]
-pub struct Calls(pub Vec<String>, pub Vec<RunSpec>, pub Vec<(String, u64, Value)>, pub Vec<(String, u64, Result<Value, String>)>);
+/// What the fake plugin host was asked: calls in words, runs started, queries and calls with their
+/// arguments, acquisitions answered, and every open with the parameters it was handed.
+pub struct Calls(pub Vec<String>, pub Vec<RunSpec>, pub Vec<(String, u64, Value)>, pub Vec<(String, u64, Result<Value, String>)>, pub Vec<(String, Value)>);
 
 pub struct FakePlugins { pub calls: Rc<RefCell<Calls>>, pub catalog: Value }
 
@@ -44,7 +46,11 @@ impl Plugins for LatePlugins {
 
 impl Plugins for FakePlugins {
     fn catalog(&mut self) -> TypeCatalog { TypeCatalog::from_describe(&self.catalog).unwrap() }
-    fn open(&mut self, instance: &str, type_id: &str, _: &Value, _: &Value) { self.calls.borrow_mut().0.push(format!("open {instance} {type_id}")); }
+    fn open(&mut self, instance: &str, type_id: &str, parameters: &Value, _: &Value) {
+        let mut calls = self.calls.borrow_mut();
+        calls.0.push(format!("open {instance} {type_id}"));
+        calls.4.push((instance.to_owned(), parameters.clone()));
+    }
     fn close(&mut self, instance: &str) { self.calls.borrow_mut().0.push(format!("close {instance}")); }
     fn query(&mut self, instance: &str, ticket: u64, name: &str, args: &Value) {
         let mut calls = self.calls.borrow_mut();
@@ -1392,7 +1398,7 @@ mod tests {
         let state = wb.apparatus_state();
         assert_eq!((state["busy"].as_str(), state["dirty"].as_bool()), (Some("initializing devices · finding sequencer's UART port"), Some(false)));
         assert_eq!((wb.device_rows()[0]["state"].as_str(), wb.device_rows()[0]["resolving"].as_bool()), (Some("opening"), Some(true)));
-        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"parameters": {"uart_port": "COM5"},
+        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"found": {"uart_port": "COM5"},
             "note": "board UART found on COM5 (passed over COM3: bound)"})) }, &mut host);
         assert_eq!(count(&calls, "open sequencer sequencer.local"), 1, "opened with what was found");
         assert_eq!(wb.apparatus.draft[0].parameters["uart_port"], "COM5");
@@ -1449,6 +1455,45 @@ mod tests {
     const GONE: &str = "SerialPortUnusable: COM3 could not be opened: not present (os error 2: The system cannot find the file specified) \
                         -- serial ports on this PC: COM5 (USB-SERIAL CH340)";
 
+    /// Types whose resources share a kind scan one after another (each opens every free port of its
+    /// kind at once); a type of another kind and one that binds nothing scan beside them. A type that
+    /// misses its deadline frees its kind for the next, and the reply waits for every type, said in
+    /// the catalogue's order.
+    #[test]
+    fn a_scan_asks_types_of_one_resource_kind_one_after_another() {
+        let mut catalog = ports_catalog();
+        let types = catalog["types"].as_array_mut().unwrap();
+        types[0]["queries"] = json!(["discover"]);
+        types.push(json!({"type_id": "waveform.hwt", "kind": "device", "family": "waveform", "label": "Magnetometer", "resources": ["serial:{port}"],
+            "queries": ["discover"], "parameters": [{"name": "port", "type": "str", "label": "Serial port", "default": ""}]}));
+        types.push(json!({"type_id": "rf.scope", "kind": "device", "family": "rf", "label": "Scope", "resources": ["visa:{resource}"],
+            "queries": ["discover"], "parameters": [{"name": "resource", "type": "str", "label": "VISA resource", "default": ""}]}));
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut wb = Workbench::new(&scratch("scan-kinds"), Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        let asked = |calls: &Rc<RefCell<Calls>>| -> Vec<(u64, String)> { calls.borrow().0.iter().filter_map(|call| {
+            let mut parts = call.split(' ');
+            (parts.next()? == "discover").then_some(())?;
+            Some((parts.next()?.parse().ok()?, parts.next()?.to_owned()))
+        }).collect() };
+        let ticket = |calls: &Rc<RefCell<Calls>>, type_id: &str| asked(calls).iter().find(|(_, asked)| asked == type_id).unwrap().0;
+        let names = |calls: &Rc<RefCell<Calls>>| asked(calls).into_iter().map(|(_, type_id)| type_id).collect::<Vec<_>>();
+        wb.apply("discover_devices", &json!({}), &Origin::Operator, 7, &mut host);
+        assert_eq!(names(&calls), ["camera.virtual_mot", "waveform.n100", "rf.scope"], "the second serial type waits; the others scan beside");
+        event(&mut wb, Event::Answered { ticket: ticket(&calls, "rf.scope"), result: Ok(json!({"found": [], "notes": []})) }, &mut host);
+        event(&mut wb, Event::Answered { ticket: ticket(&calls, "camera.virtual_mot"), result: Ok(json!({"found": [], "notes": []})) }, &mut host);
+        assert_eq!(names(&calls).len(), 3, "the serial kind is still taken");
+        event(&mut wb, Event::Answered { ticket: ticket(&calls, "waveform.n100"), result: Ok(json!({"found": [{"instance_id": "n100_COM5", "parameters": {"port": "COM5"}}], "notes": []})) }, &mut host);
+        assert_eq!(names(&calls), ["camera.virtual_mot", "waveform.n100", "rf.scope", "waveform.hwt"], "asked once the one before it answered");
+        assert!(wb.take_replies().is_empty(), "the reply waits for every type");
+        assert_eq!(apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap_err(), "hardware scan still running: waveform.hwt");
+        event(&mut wb, Event::Answered { ticket: ticket(&calls, "waveform.hwt"), result: Err("no answer within 20s".into()) }, &mut host);
+        let (request, reply) = wb.take_replies().pop().unwrap();
+        assert_eq!((request, reply.unwrap()["message"].as_str().map(str::to_owned)),
+                   (7, Some("discovered 1 device; waveform.hwt: no answer within 20s; camera: No module named pypylon".to_owned())));
+        assert_eq!(wb.apparatus_state()["discovered"][0]["parameters"]["port"], "COM5");
+    }
+
     /// A filled-in port is a record of an earlier find: a row whose port cannot be used at all is
     /// looked for again with its type's resolve (without that port), found elsewhere, pinned and
     /// opened there, and the Init line and the row's own log say what happened.
@@ -1465,7 +1510,7 @@ mod tests {
         assert_eq!(wb.apparatus_state()["busy"], "initializing devices · finding n100's serial port");
         let log = wb.device_log("n100", 10);
         assert!(log[0].ends_with(&format!("] open failed: {GONE}")) && log[1].ends_with("] looking for it again on the serial ports there are"), "{log:?}");
-        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"parameters": {"port": "COM5"}, "note": "N100 streaming on COM5"})) }, &mut host);
+        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"found": {"port": "COM5"}, "note": "N100 streaming on COM5"})) }, &mut host);
         assert_eq!((count(&calls, "open n100 waveform.n100"), wb.apparatus.draft[0].parameters["port"].as_str()), (2, Some("COM5")));
         assert_eq!(wb.apparatus_state()["dirty"], true, "pinned into the apparatus, not saved");
         event(&mut wb, Event::Opened { instance: "n100".into(), working_point: json!({}) }, &mut host);
@@ -1493,7 +1538,7 @@ mod tests {
         let refused = "SerialPortUnusable: COM10 could not be opened: driver refused (os error 1: Incorrect function) -- this PC has no serial port";
         event(&mut wb, Event::Failed { instance: "board".into(), error: refused.into() }, &mut host);
         assert_eq!(resolves(&calls)[1].1["parameters"]["uart_port"], "");
-        event(&mut wb, Event::Answered { ticket: resolves(&calls)[1].0, result: Ok(json!({"parameters": {"uart_port": "COM4"}, "note": "board UART found on COM4"})) }, &mut host);
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[1].0, result: Ok(json!({"found": {"uart_port": "COM4"}, "note": "board UART found on COM4"})) }, &mut host);
         let again = refused.replace("COM10", "COM4");
         event(&mut wb, Event::Failed { instance: "board".into(), error: again.clone() }, &mut host);
         assert_eq!(resolves(&calls).len(), 2, "what a resolve found is not looked for again");
@@ -1507,18 +1552,57 @@ mod tests {
     }
 
     /// The local board on Auto that came up over JTAG says so on the Init line, from its open: after
-    /// Init found no UART for it, the row stays as it was (no port to pin), and the open's note follows.
+    /// Init found no UART for it, the row stays as it was (nothing found to pin), it opens without a
+    /// port this once, and its log says it was not found and what it opens with.
     #[test]
     fn an_open_says_its_note_on_the_init_line() {
         let (mut wb, calls, mut host) = ports_rig("open-note", &[("sequencer", "sequencer.local", json!({}))]);
         apply(&mut wb, &mut host, "save_apparatus", json!({"path": "apparatus.json"})).unwrap();
         apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
-        let tried = "no board UART on the free ports (tried COM4: opened, no board answered (timeout))";
-        event(&mut wb, Event::Answered { ticket: resolves(&calls)[0].0, result: Ok(json!({"parameters": {"uart_port": ""}, "note": tried})) }, &mut host);
+        let tried = "no board UART on the free ports (tried COM4: opened, no board answered (timeout)); it opens over JTAG-to-AXI this time";
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[0].0, result: Ok(json!({"found": {}, "this_open": {"uart_port": ""}, "note": tried})) }, &mut host);
         assert_eq!((count(&calls, "open sequencer sequencer.local"), wb.apparatus_state()["dirty"].as_bool()), (1, Some(false)), "nothing to write");
+        assert!(wb.device_log("sequencer", 10).last().unwrap().ends_with(&format!("] not found: {tried}")), "a blank row has no port to keep");
         event(&mut wb, Event::Opened { instance: "sequencer".into(), working_point: json!({"note": "opened over JTAG-to-AXI under Auto, not its UART"}) }, &mut host);
         assert_eq!(wb.apparatus_state()["report"]["text"],
                    format!("1 device initialized: sequencer · sequencer: {tried} · sequencer: opened over JTAG-to-AXI under Auto, not its UART"));
+    }
+
+    /// The lab's case: the board's COM10 refused by its driver is looked for again; nothing answers, so
+    /// it opens over JTAG this once -- and the row keeps COM10, for the next Init or Apply to open first.
+    /// A search that finds nothing never writes the row; the log says it was not found, what it opens
+    /// with and what the apparatus keeps, and nothing reads as changed.
+    #[test]
+    fn a_search_that_finds_nothing_keeps_the_rows_port() {
+        let (mut wb, calls, mut host) = ports_rig("keep-port", &[("board", "sequencer.local", json!({"uart_port": "COM10"}))]);
+        apply(&mut wb, &mut host, "save_apparatus", json!({"path": "apparatus.json"})).unwrap();
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        let refused = "SerialPortUnusable: COM10 could not be opened: driver refused (os error 1: Incorrect function) -- serial ports on this PC: COM10 (USB-SERIAL CH340)";
+        event(&mut wb, Event::Failed { instance: "board".into(), error: refused.into() }, &mut host);
+        assert_eq!(resolves(&calls)[0].1["parameters"]["uart_port"], "", "looked for without the port it named");
+        let tried = "no board UART on the free ports (tried COM13: opened, no board answered (timeout)); it opens over JTAG-to-AXI this time";
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[0].0, result: Ok(json!({"found": {}, "this_open": {"uart_port": ""}, "note": tried})) }, &mut host);
+        let opens: Vec<(String, Value)> = calls.borrow().4.clone();
+        assert_eq!(opens.iter().map(|(id, parameters)| (id.as_str(), parameters["uart_port"].as_str().unwrap())).collect::<Vec<_>>(),
+                   [("board", "COM10"), ("board", "")], "this open goes without a port (over JTAG)");
+        assert_eq!(wb.apparatus.draft[0].parameters["uart_port"], "COM10", "the row keeps its last-known port");
+        let row = &wb.device_rows()[0];
+        assert_eq!((wb.apparatus_state()["dirty"].as_bool(), &row["pending"]), (Some(false), &Value::Null), "nothing written, nothing to apply");
+        let line = format!("COM10 could not be opened: driver refused (os error 1: Incorrect function); looked again: {tried}; \
+                            the apparatus keeps UART port COM10");
+        assert!(wb.device_log("board", 10).last().unwrap().ends_with(&format!("] not found: {line}")), "{:?}", wb.device_log("board", 10));
+        event(&mut wb, Event::Opened { instance: "board".into(), working_point: json!({}) }, &mut host);
+        assert_eq!(wb.apparatus_state()["report"]["text"], format!("1 device initialized: board · board: {line}"));
+        // What was found is written, and its log says found.
+        apply(&mut wb, &mut host, "shut_down_devices", json!({})).unwrap();
+        event(&mut wb, Event::Closed { instance: "board".into(), error: None }, &mut host);
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        assert_eq!(calls.borrow().4.last().unwrap().1["uart_port"], "COM10", "the next Init opens the kept port first");
+        event(&mut wb, Event::Failed { instance: "board".into(), error: refused.into() }, &mut host);
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[1].0, result: Ok(json!({"found": {"uart_port": "COM13"}, "note": "board UART found on COM13"})) }, &mut host);
+        assert_eq!((wb.apparatus.draft[0].parameters["uart_port"].as_str(), calls.borrow().4.last().unwrap().1["uart_port"].as_str()), (Some("COM13"), Some("COM13")));
+        assert!(wb.device_log("board", 10).last().unwrap().ends_with("] found: COM10 could not be opened: driver refused (os error 1: Incorrect function); \
+                                                                 looked again: board UART found on COM13, written into the apparatus -- Save to keep it"));
     }
 
     /// Two rows to be found are found one after the other, the second passing over what the first found.
@@ -1528,10 +1612,10 @@ mod tests {
         apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
         let asked = resolves(&calls);
         assert_eq!((asked.len(), &asked[0].1["instance"], &asked[0].1["excluded"]), (1, &json!("board"), &json!([])));
-        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"parameters": {"uart_port": "COM5"}, "note": ""})) }, &mut host);
+        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"found": {"uart_port": "COM5"}, "note": ""})) }, &mut host);
         let asked = resolves(&calls);
         assert_eq!((asked.len(), &asked[1].1["instance"], &asked[1].1["excluded"]), (2, &json!("board2"), &json!(["serial:COM5"])));
-        event(&mut wb, Event::Answered { ticket: asked[1].0, result: Ok(json!({"parameters": {"uart_port": "COM6"}, "note": ""})) }, &mut host);
+        event(&mut wb, Event::Answered { ticket: asked[1].0, result: Ok(json!({"found": {"uart_port": "COM6"}, "note": ""})) }, &mut host);
         assert_eq!((count(&calls, "open board sequencer.local"), count(&calls, "open board2 sequencer.local")), (1, 1));
         let ports: Vec<&Value> = wb.apparatus.draft.iter().map(|entry| &entry.parameters["uart_port"]).collect();
         assert_eq!(ports, [&json!("COM5"), &json!("COM6")]);
@@ -1542,7 +1626,7 @@ mod tests {
     #[test]
     fn a_row_taken_out_while_it_is_found_opens_nothing() {
         let (mut wb, calls, mut host) = ports_rig("resolve-cancel", &[("board", "sequencer.local", json!({})), ("n100", "waveform.n100", json!({"port": "COM3"}))]);
-        let found = || Ok(json!({"parameters": {"uart_port": "COM5"}, "note": "board UART found on COM5"}));
+        let found = || Ok(json!({"found": {"uart_port": "COM5"}, "note": "board UART found on COM5"}));
         apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
         let first = resolves(&calls)[0].0;
         apply(&mut wb, &mut host, "shut_down_devices", json!({})).unwrap();

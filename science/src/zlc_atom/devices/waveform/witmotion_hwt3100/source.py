@@ -40,7 +40,7 @@ from uuid import uuid4
 import numpy as np
 
 from zlc_atom.authoring import AuthoringField, TunableField, TuneRefused
-from zlc_atom.devices import RecordQueue, SerialPortError, free_serial_ports, open_serial_port
+from zlc_atom.devices import RecordQueue, free_serial_ports, open_serial_port, search_serial_ports
 from zlc_atom.devices.vendor import installed_distribution
 from zlc_atom.devices.waveform.contract import (
     WaveformAcquisitionMode,
@@ -440,24 +440,16 @@ class Hwt3100WaveformSource:
 
 
 # ------------------------------------------------------------------ finding
-def probe_port(device: str, addresses: tuple[int, ...], *, opener=open_serial, timeout: float = REPLY_TIMEOUT_SECONDS,
-               unopened: list[str] | None = None):
+def probe_port(device: str, addresses: tuple[int, ...], *, opener=open_serial, timeout: float = REPLY_TIMEOUT_SECONDS):
     """``(address, baud)`` an HWT3100 answers a field read at on ``device``, or None.
 
     Discovery cannot listen for this sensor -- it speaks only when asked --
     so each candidate port gets one READ request (function 0x03) per
     address and supported baud.  Nothing is ever written to a register.
-    A port that cannot be opened is told to ``unopened`` with its class.
+    A port that cannot be opened raises (:class:`SerialPortError` with its class).
     """
 
-    try:
-        port = opener(device, SUPPORTED_BAUDS[0])
-    except SerialPortError as error:
-        if unopened is not None:
-            unopened.append(f"{device}: {error.short}")
-        return None
-    except Exception:  # noqa: BLE001 -- a stand-in opener's own failure
-        return None
+    port = opener(device, SUPPORTED_BAUDS[0])
     try:
         for baud in (DEFAULT_BAUD, *(b for b in SUPPORTED_BAUDS if b != DEFAULT_BAUD)):
             port.baudrate = baud
@@ -483,17 +475,13 @@ def discover_hwt3100(
     opener=open_serial,
     unopened: list[str] | None = None,
 ) -> tuple[tuple[str, int, int], ...]:
-    """``(port, address, baud)`` for every free serial port an HWT3100 answers on."""
+    """``(port, address, baud)`` for every free serial port an HWT3100 answers on, every port asked
+    at once (:func:`zlc_atom.devices.search_serial_ports`); ``first``: only the first listed that
+    answers; ``unopened``: told each port that could not be opened, with its class."""
 
-    found = []
-    for device in free_serial_ports(excluded)[0] if ports is None else ports:
-        hit = probe_port(device, addresses, opener=opener, unopened=unopened)
-        if hit is not None:
-            found.append((device, *hit))
-            if first:
-                break
-    return tuple(found)
-
+    listed = free_serial_ports(excluded)[0] if ports is None else ports
+    return tuple((device, *hit) for device, hit in search_serial_ports(
+        listed, lambda device: probe_port(device, addresses, opener=opener), first=first, unopened=unopened))
 
 __all__ = [
     "DEFAULT_BAUD",
