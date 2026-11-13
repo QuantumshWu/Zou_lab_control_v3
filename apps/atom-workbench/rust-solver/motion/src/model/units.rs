@@ -394,13 +394,13 @@ pub(crate) struct Measured<'a> {
     pub(crate) doppler: Vec<OnceCell<Vec<f64>>>,
     pub(crate) kept: OnceCell<Vec<C64>>,
     pub(crate) lifts: OnceCell<[f64; GROUND]>,
-    pub(crate) moved: OnceCell<(Option<usize>, Vec<(Flow, f64)>)>,
+    pub(crate) moved: OnceCell<(u32, Vec<(Flow, f64)>)>,
 }
 
 /// A source of a flow into the ground states at a sample whose rate a fold errs on (module documentation, # A rate's error on
 /// the populations), by the unit that books it: a drive e ← g folded with the bare levels, one at the atom (its line's
 /// order), and a folded drive e ← g onto an explicit state e (the kept lines through e, read through its self-energy).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Flow {
     Bare(Component, usize, usize),
     Atom(Component, usize, usize),
@@ -1086,9 +1086,8 @@ impl Model {
     /// (`Model::point_region`, `Measured`): those whose gate reaches ½ at one of them at least. Each point's gates on the
     /// pool, by itself.
     pub(crate) fn failing(&self, units: &[Unit], points: &[([f64; 3], f64)], speed: f64) -> Vec<Unit> {
-        let reads = self.judged(units);
-        let whole = self.whole_region(speed);
-        let open: Vec<usize> = (0..units.len()).filter(|&u| !self.gate_of(&reads[u], &whole).exists()).collect();
+        let (reads, whole) = self.whole_gates(units, speed);
+        let open: Vec<usize> = (0..units.len()).filter(|&u| !whole[u].exists()).collect();
         if open.is_empty() {
             return vec![];
         }
@@ -1100,6 +1099,43 @@ impl Model {
             })
             .reduce(|| vec![false; open.len()], |a, b| a.iter().zip(&b).map(|(x, y)| *x || *y).collect());
         open.iter().zip(failing).filter(|of| of.1).map(|(&u, _)| units[u].clone()).collect()
+    }
+
+    /// Each unit's gate (`gate_of`) over the whole space at the speeds up to `speed`, every beam at its peak and all in
+    /// phase (reach.rs `Model::whole_region`) -- a bound over any place an atom can be at those speeds --, with what it
+    /// reads (`judged`): the prior's screen (`failing`) and the units' bounds (`bounds`).
+    fn whole_gates(&self, units: &[Unit], speed: f64) -> (Vec<Read>, Vec<Gate>) {
+        let reads = self.judged(units);
+        let whole = self.whole_region(speed);
+        let gates = reads.iter().map(|read| self.gate_of(read, &whole)).collect();
+        (reads, gates)
+    }
+
+    /// Each unit's error at any state of an atom at the speeds up to `speed`, at most -- on the populations (absolute)
+    /// and on T (relative) alike --, where its gate over the whole space (`whole_gates`) bounds it; none where it does
+    /// not (solve.rs, # The model: the units booked at their bounds). The same leading order as the error read at a state
+    /// (`unit_error_alone`), at the gate's bound of its small parameter and the populations' largest weight:
+    /// - a coupling of two states a, b at a beat errs at a state by m²(p_a + p_b) on both, its mixing m² = S/2 at the
+    ///   state's point and speed (`term_bound` on the point's region). The gate over the whole space at the speeds up to
+    ///   `speed` bounds S at every such point -- its size every beam at its peak and in phase, its distance the least any
+    ///   place and speed leaves --, and a state's populations on its cluster add up to one (`state_populations`): p_a +
+    ///   p_b ≤ 1 for two states, 2p_a ≤ 2 for a level's own beat. So S/2 and S, ∞ where the gate is (a distance of
+    ///   nothing somewhere);
+    /// - a photon coherence's gate is made at a point alone (photon.rs `Model::coherence_gate`): over the whole space no
+    ///   bound of its jump operators is made, and the coherence is read;
+    /// - a drive's error carries what its gate does not bound -- a bare fold's denominator's first order ε, of the first
+    ///   order where the gate is of the second, and the flows its rate error moves; a fold at the atom's sweep and Doppler
+    ///   term's next order --, and so do a fold's next order and a carrier's dressing, which have no gate: read.
+    pub(crate) fn bounds(&self, units: &[Unit], speed: f64) -> Vec<Option<f64>> {
+        let (_, gates) = self.whole_gates(units, speed);
+        units
+            .iter()
+            .zip(gates)
+            .map(|(unit, gate)| match unit {
+                Unit::Term { a, b, .. } => Some(0.5 * gate.saturation * if a == b { 2.0 } else { 1.0 }),
+                Unit::Coherence { .. } | Unit::Bare { .. } | Unit::Drive { .. } | Unit::Second { .. } | Unit::Dressing { .. } => None,
+            })
+            .collect()
     }
 
     /// The drives folded onto explicit excited states whose Raman pairs cannot be folded anywhere (model.rs
@@ -1269,18 +1305,13 @@ impl Model {
     /// The part of the populations a flow's rate error moves at a sample (module documentation, # A rate's error on the
     /// populations; `moved_made`), every flow's made once for the sample; nothing for a flow the sample does not have.
     pub(crate) fn moved(&self, at: &Measured, flow: Flow) -> f64 {
-        at.moved.get_or_init(|| self.moved_made(at)).1.iter().find(|of| of.0 == flow).map_or(0.0, |of| of.1)
+        let parts = &at.moved.get_or_init(|| self.moved_made(at)).1;
+        parts.binary_search_by(|of| of.0.cmp(&flow)).map_or(0.0, |place| parts[place].1)
     }
 
-    /// The far side of the sample's flows (`UnitError::into`): the ground states of the hyperfine level of the state
-    /// they move population into (`moved_made`: the one whose inflow errs relatively the most), a bit each -- a flow
-    /// between two hyperfine levels moves the one's share against the other's, whichever of its states the sample's
-    /// flows reach the most, and one within a level moves its states' shares within the level's (a cluster is no
-    /// level: its states are those the kept couplings join, a ground state alone where none does); none where the
-    /// sample has no flow.
+    /// The far side of the sample's flows (`UnitError::into`; `moved_made`), made once for the sample with them.
     pub(crate) fn moved_into(&self, at: &Measured) -> u32 {
-        let level = |s: usize| crate::request::Level::parse(&self.labels[s]).map(|l| l.f).ok();
-        at.moved.get_or_init(|| self.moved_made(at)).0.map_or(0, |b| (0..GROUND).filter(|&s| level(s) == level(b)).fold(0, |side, s| side | 1 << s))
+        at.moved.get_or_init(|| self.moved_made(at)).0
     }
 
     /// The sample's flows into the ground states (`moved`): per source its rates W_b into each ground state b and its
@@ -1288,8 +1319,14 @@ impl Model {
     /// order c M^k (eliminate.rs `Folded`: M = S_b L_e/S_b, k = 2 where its cluster's fold is the fourth order's), the kept
     /// lines through an explicit state 2ε per folded drive onto it (eliminate.rs `Model::pair_reading`) --; the ground
     /// state b whose inflow errs relatively the most, Σ x W_b/Σ W_b; and each owner's part x W_b/Σ W_b of the cluster's
-    /// ground population there.
-    fn moved_made(&self, at: &Measured) -> (Option<usize>, Vec<(Flow, f64)>) {
+    /// ground population there, in the owners' order (one search a unit: every unit at a sample asks its own).
+    ///
+    /// With them their far side (`UnitError::into`): the ground states of the hyperfine level of b, a bit each -- a flow
+    /// between two hyperfine levels moves the one's share against the other's, whichever of its states the sample's
+    /// flows reach the most, and one within a level moves its states' shares within the level's (a cluster is no
+    /// level: its states are those the kept couplings join, a ground state alone where none does); none where the
+    /// sample has no flow. Both are the sample's, the same for every unit that books a flow there: made once.
+    fn moved_made(&self, at: &Measured) -> (u32, Vec<(Flow, f64)>) {
         let (cluster, p) = (at.sample.cluster, &at.populations);
         let c = &self.clusters[cluster];
         let land = |e: usize, b: usize| -> f64 { (0..3).map(|a| self.emission[a][(b, e)].norm_sqr()).sum() };
@@ -1325,9 +1362,12 @@ impl Model {
         }
         let total: [f64; GROUND] = std::array::from_fn(|b| sources.iter().map(|of| of.1[b]).sum());
         let erring: [f64; GROUND] = std::array::from_fn(|b| sources.iter().map(|of| of.0.iter().map(|o| o.1).sum::<f64>() * of.1[b]).sum());
-        let Some(b) = (0..GROUND).filter(|&b| total[b] > 0.0).max_by(|&x, &y| (erring[x] / total[x]).total_cmp(&(erring[y] / total[y]))) else { return (None, vec![]) };
+        let Some(b) = (0..GROUND).filter(|&b| total[b] > 0.0).max_by(|&x, &y| (erring[x] / total[x]).total_cmp(&(erring[y] / total[y]))) else { return (0, vec![]) };
         let held: f64 = p[..GROUND].iter().sum();
-        (Some(b), sources.into_iter().flat_map(|(owners, rates)| owners.into_iter().map(move |(flow, x)| (flow, x * rates[b] / total[b] * held))).collect())
+        let mut parts: Vec<(Flow, f64)> = sources.into_iter().flat_map(|(owners, rates)| owners.into_iter().map(move |(flow, x)| (flow, x * rates[b] / total[b] * held))).collect();
+        parts.sort_by_key(|of| of.0);
+        let level = |s: usize| crate::request::Level::parse(&self.labels[s]).map(|l| l.f).ok();
+        ((0..GROUND).filter(|&s| level(s) == level(b)).fold(0, |side, s| side | 1 << s), parts)
     }
 
     /// The error at a sample of the second order of a cluster's fold at the atom (`Unit::Second`; module documentation,
@@ -1947,6 +1987,55 @@ mod tests {
         }
         eprintln!("the largest shift {largest:.2} rad/µs, the steepest slope {steepest:.1} rad/µs/µm, the least bound over its shift {tightest:.2}");
         assert!(largest > 20.0 && steepest > 100.0, "the points read a light shift: {largest}, {steepest}");
+    }
+
+    /// A unit's bound (`Model::bounds`) holds at every state of an atom at the speeds up to it: on R6_RAMAN_CO's closed
+    /// model (couplings at a Raman pair's beats, a level's own beat) and R4_LIN_1's (a lin-perp-lin lattice's), 200 atoms
+    /// each at a place drawn in four times the reach's box about its centre -- the bound is the whole space's -- with a
+    /// speed up to the reach's largest in a random direction, and on every cluster a random state there and each of its
+    /// basis states (the populations' extremes). Every bounded unit's error read there (`errors_at`) on the populations
+    /// and on T is within its bound, to the rounding of the few operations that make both; and the bound is attained:
+    /// on both models some unit's error reads more than half of it (measured: all of it, 1.000).
+    #[test]
+    fn a_unit_s_bound_holds_at_every_state_at_its_speeds() {
+        for scene in ["R6_RAMAN_CO", "R4_LIN_1"] {
+            let request = request_of(scene);
+            let light = Light::new(&request);
+            let state = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
+            let (model, _, _, reach) = Model::closed_at(&request, &light, vec![], state, request.temperature_uk);
+            let units = model.units();
+            let bounds = model.bounds(&units, reach.speed);
+            let bounded = bounds.iter().flatten().filter(|b| b.is_finite()).count();
+            assert!(bounded > 0, "{scene}: no unit bounded");
+            let mut stream = crate::random::Stream::new(0, crate::random::Purpose::Initial, 0, 0);
+            let mut largest = 0.0_f64;
+            for _ in 0..200 {
+                let r: [f64; 3] = std::array::from_fn(|a| {
+                    let [lo, hi] = reach.cell[a];
+                    0.5 * (lo + hi) + 4.0 * (hi - lo) * (stream.uniform() - 0.5)
+                });
+                let (direction, speed) = (stream.normals(), reach.speed * stream.uniform());
+                let kappa = direction.map(|x| x / norm3(direction) * speed / model.hbar_over_mass);
+                for (cluster, c) in model.clusters.iter().enumerate() {
+                    let n = c.states.len();
+                    let random: Vec<C64> = (0..n).map(|_| C64::new(stream.normals()[0], stream.normals()[1])).collect();
+                    let basis = (0..n).map(|i| (0..n).map(|j| if i == j { C64::ONE } else { C64::ZERO }).collect::<Vec<C64>>());
+                    for psi in std::iter::once(random).chain(basis) {
+                        let sample = Sample { cluster, at: Point { r, kappa, t: 0.0 }, psi };
+                        for ((unit, error), bound) in units.iter().zip(model.errors_at(&units, &sample, None)).zip(&bounds) {
+                            let Some(bound) = bound else { continue };
+                            let most = error.population.max(error.temperature);
+                            assert!(most <= bound * (1.0 + rounding(8)), "{scene}: {unit:?} reads {most:e} beyond its bound {bound:e} at {r:?}, {kappa:?}");
+                            if *bound > 0.0 {
+                                largest = largest.max(most / bound);
+                            }
+                        }
+                    }
+                }
+            }
+            eprintln!("{scene}: {bounded} of {} units bounded; the largest error over its bound {largest:.3}", units.len());
+            assert!(largest > 0.5, "{scene}: the largest error over its bound {largest}");
+        }
     }
 
     /// A fold's error on a rate is booked by what the rate moves (module documentation, # A rate's error on the
