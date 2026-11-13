@@ -382,7 +382,8 @@ fn engine(name: &str, waist: f64, course: &str, tau: f64, count: u64, burn: f64,
         Some(tables) => Run::tabulated(&model, tables, p),
         None => Run::new(&model, p),
     };
-    let period = std::f64::consts::TAU / request.beams.iter().find(|b| b.id.starts_with("cool")).expect("a cooling beam").wave_number;
+    // The cooling beam's period, which a constant course's start is spread over (a held course needs none).
+    let period = || std::f64::consts::TAU / request.beams.iter().find(|b| b.id.starts_with("cool")).expect("a cooling beam").wave_number;
     let parts: Vec<&str> = course.split(':').collect();
     let number = |i: usize| -> f64 { parts[i].parse().unwrap() };
     let clock = std::time::Instant::now();
@@ -396,7 +397,7 @@ fn engine(name: &str, waist: f64, course: &str, tau: f64, count: u64, burn: f64,
             let u = grid.map_or(u, |n| (u * n).floor() / n);
             let course = match parts[0] {
                 "rest" => Course::Rest { z: number(1) },
-                "const" => Course::Constant { z: (u - 0.5) * period, v: number(1), period },
+                "const" => Course::Constant { z: (u - 0.5) * period(), v: number(1), period: period() },
                 "osc" => Course::Oscillation { centre: number(3), amplitude: number(1), omega: number(2), phase: std::f64::consts::TAU * u },
                 other => panic!("unknown course {other}"),
             };
