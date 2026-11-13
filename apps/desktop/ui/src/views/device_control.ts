@@ -109,6 +109,13 @@ export class DeviceControlView {
    * another node, its front panel).  A Desired not yet applied stays -- a re-read never replaces a draft. */
   reread(): void { if (this.device?.state === "open") this.read(); }
 
+  /** Whether the page holds its first whole state: its reading answered (read, or refused), and every row read
+   * in the unit it shows it in (the default units that reading chose are read too, or refused). */
+  complete(): boolean {
+    const pending = this.ctx.transport.pending;
+    return !pending.has(this.reading) && [...this.rows.values()].every(row => row.unitRequest === null || !pending.has(row.unitRequest));
+  }
+
   update(device: DeviceRow, request?: number, failed = false, result?: unknown): void {
     this.device = device;
     const completed = this.active?.request === request ? this.active : null;
@@ -116,7 +123,7 @@ export class DeviceControlView {
     // The owners by the names the console calls them; the policy's reason under them.
     const control = device.control;
     this.owner.textContent = `Owner: ${control?.owners.length ? control.owners.join(", ") : "none"}`;
-    this.reason.textContent = control?.reason ?? "Reading the device…";
+    this.sayReason();
     setChecked(this.risk, Boolean(device.risk_accepted));
     this.risk.disabled = !control?.risk_enabled;
     this.showActions(device.state === "open" ? device.commands ?? [] : []);
@@ -227,7 +234,15 @@ export class DeviceControlView {
     }));
   }
 
+  /** The policy's reason under the owners; a device whose reading was refused, with no fields to show, says why. */
+  private sayReason(): void {
+    const transport = this.ctx.transport;
+    const refused = !this.device?.fields && this.reading !== -1 && !transport.pending.has(this.reading) && transport.lastError;
+    this.reason.textContent = refused ? `The device was not read: ${transport.lastError}` : this.device?.control?.reason ?? "Reading the device…";
+  }
+
   status(): void {
+    this.sayReason();
     // v2's words: ready (or that it has nothing to tune) once read, what the last Apply did.
     const fields = this.device?.fields;
     const [text, word] = queueStatus(this.ctx.transport, [!fields ? "refreshing device settings" : this.note ?? (fields.length ? "ready" : "No runtime controls"), "idle"]);
@@ -381,18 +396,27 @@ export class DeviceLogView {
   private text = readoutText("No interactions recorded yet.");
   private timer = 0;
   private shown = "";
+  /** The read in flight, and whether one has been answered (read, or refused): the log the window shows is there. */
+  private asking = -1;
+  private answered = false;
 
   constructor(readonly id: string, private ctx: ViewContext) {
     this.text.classList.add("log-text");
     this.root.append(this.text);
-    this.timer = window.setInterval(() => { if (this.root.offsetParent) void this.poll(); }, 500);
-    void this.poll();
+    this.timer = window.setInterval(() => { if (this.root.offsetParent) this.poll(); }, 500);
+    this.poll();
   }
 
-  private async poll(): Promise<void> {
-    let result: unknown;
-    try { result = await this.ctx.transport.request({ action: "get_device_log", device: this.id, lines: 2000 }); }
-    catch { return; }
+  /** Whether the log it shows has been read once. */
+  read(): boolean { return this.answered; }
+
+  private poll(): void { this.asking = this.ctx.transport.send({ action: "get_device_log", device: this.id, lines: 2000 }); }
+
+  /** A state the window was sent: the answer to its newest read is shown (a refused one leaves the text as it is). */
+  accept(request: number | undefined, failed: boolean, result: unknown): void {
+    if (request === undefined || request !== this.asking) return;
+    this.answered = true;
+    if (failed) return;
     const lines = Array.isArray(result) ? result : Array.isArray((result as { lines?: unknown })?.lines) ? (result as { lines: unknown[] }).lines : typeof result === "string" ? result.split("\n") : [];
     const words = lines.length ? lines.map(String).join("\n") : "No interactions recorded yet.";
     if (words === this.shown) return;

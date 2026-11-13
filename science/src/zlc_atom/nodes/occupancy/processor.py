@@ -112,6 +112,8 @@ class OccupancyProcessor:
     (``post_selection.py``, while its switch is on): every result passes it, with the
     cycle's frame axis (None: one frame), before it is returned, and the
     run record keeps ``post_select_record(frame count)`` as ``post_selection``.
+    ``post_select_problem(frame count)`` says why a cycle cannot be
+    post-selected (it is then kept nowhere); the node says it once a run.
     """
 
     def __init__(
@@ -123,9 +125,11 @@ class OccupancyProcessor:
         model_kind: ReadoutModelKind | None = None,
         post_select: Callable[[OccupancyResult, AxisSpec | None], OccupancyResult] | None = None,
         post_select_record: Callable[[int], Mapping[str, object]] | None = None,
+        post_select_problem: Callable[[int], str] | None = None,
     ) -> None:
         self._post_select = post_select
         self._post_select_record = post_select_record
+        self._post_select_problem = post_select_problem
         readings = tuple(calibrations)
         self.parked: tuple[Path | None, ...] = tuple(
             None if path is None else Path(path).expanduser().resolve() for path in parked)
@@ -454,6 +458,16 @@ class OccupancyProcessor:
         result = OccupancyResult(artifacts)
         if self._post_select is None:
             return result
+        problem = self._post_select_problem(count)
+        if problem and problem not in self._cautions_said:
+            # Said once a run, never refused: the run goes on publishing,
+            # invalid, and keeps sites again once its source carries the frames.
+            self._cautions_said.append(problem)
+            journal.note("occupancy", "post_selection_unmet", reason=problem)
+            if self._context is not None:
+                self._context.report_progress(
+                    f"{problem[:1].upper()}{problem[1:]}: post-selection keeps nothing, so counts and "
+                    "occupied are published invalid until the source carries those frames")
         return self._post_select(result, self._frame_axis(frames.block.schema))
 
     @staticmethod

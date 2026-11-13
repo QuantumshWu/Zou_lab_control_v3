@@ -76,6 +76,8 @@ enum AppEvent { Command { window: Option<windows::Kind>, command: Value }, Compl
     ShareChanged,
     /// A window shown last turn becomes the active one (windows.rs `show`).
     Activate(windows::Kind),
+    /// A window's page has loaded (windows.rs `loaded`).
+    PageLoaded(windows::Kind),
     /// An SLM Editor's pictures drawn (slm_host's lane).
     Slm(slm_host::Drawn),
     /// A live panel's region changed: its producer is told (science.rs SelectionNote).
@@ -666,6 +668,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     // What the windows are yet to be told, and when (present.rs).
     let mut presentation = present::Presentation::default();
     let mut queue: VecDeque<Value> = VecDeque::new();
+    // show_window requests answered once their windows are on screen (windows.rs `showing`).
+    let mut shows: Vec<(windows::Kind, Value)> = Vec::new();
     let mut active = false;
     let mut closing = false;
     // Closing, in order and each off the window's turn, which goes on answering meanwhile: the document's
@@ -1032,12 +1036,12 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         match &kind {
                             // A review window is its run's request's: it opens with it, never on its own.
                             windows::Kind::Review(node) if windows.get(&kind).is_none() => return Err(format!("{node} has no open point review")),
-                            // A control opens on its device's reading (v2): made hidden, its page shows it once its fields are read.
                             windows::Kind::Control(device) | windows::Kind::Log(device) | windows::Kind::SlmEditor(device) if !live_device(&accepted, device) => {
                                 return Err(format!("No open device {device:?}"));
                             }
                             windows::Kind::FigureViewer(_) if !listed(&kind, &viewers) => return Err(format!("No Figure Viewer {} (open a Figure to make one)", kind.key())),
-                            windows::Kind::Control(_) if windows.get(&kind).is_none() => windows.make(&kind, target, false)?,
+                            // A window just made comes on screen once its page has drawn its first whole state
+                            // (a control: its device's fields read, in the units it shows them in).
                             _ => windows.show(&kind, target)?,
                         }
                         // TaskConsole's Monitor or Logic page (v2 view.monitor / view.logic): the page switches its tab.
@@ -1045,6 +1049,9 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             if kind != windows::Kind::TaskConsole || !matches!(page, "monitor" | "logic") { return Err("page is monitor or logic, of task-console".into()); }
                             windows.send_to(&kind, &json!({"type": "page", "page": page}))?;
                         }
+                        // A window just made is answered once it is on screen (its page has drawn its first whole state),
+                        // or once it is gone or hidden again first: the answer never says a window is shown that is not.
+                        if windows.showing(&kind) == windows::Showing::Drawing { shows.push((kind, command["id"].clone())); return Ok(()); }
                         let mut state = json!({"type":"state", "request": command["id"], "result": {"windows": listed_windows(&windows, &viewers)}});
                         state["error"] = Value::Null;
                         remote::settle(&state, &mut remote_pending);
@@ -1467,6 +1474,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             return Ok(());
                         }
                     }
+                    if action == "window_ready" {
+                        // Its page has drawn its first whole state (or failed first): on screen if it was asked for.
+                        if let Some(kind) = &from { windows.page_ready(kind); }
+                        return Ok(());
+                    }
                     if action == "fit_window" {
                         if let (Some(kind), Some(height)) = (&from, command["height"].as_f64().filter(|height| *height > 0.0)) { windows.fit(kind, command["width"].as_f64().unwrap_or(0.0), height); }
                         return Ok(());
@@ -1476,7 +1488,6 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         let kind = from.clone().ok_or("ready comes from a window")?;
                         trace::point("window.ready", || json!({"window": kind.key()}));
                         let ratio = command["dpr"].as_f64().filter(|dpr| *dpr > 0.0);
-                        if let Some(window) = windows.get_mut(&kind) { window.ready = true; }
                         match &kind {
                             windows::Kind::TaskConsole => { share.set_dpr(ratio.unwrap_or(1.0)); queue.push_back(json!({"id":0,"action":"ready","dpr":ratio})); }
                             windows::Kind::FigureViewer(number) => {
@@ -1489,7 +1500,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             // An SLM Editor draws its own document at its page's ratio.
                             windows::Kind::SlmEditor(device) => slm.ready(device, ratio.unwrap_or(1.0)),
                         }
-                        windows.page_loaded(&kind);
+                        windows.page_up(&kind)?;
                         // The live document at the end of this turn: the page holds nothing, and is told every section it reads.
                         presentation.now();
                         // Its title bar: the window's width and whether it is maximized.
@@ -1985,6 +1996,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 Event::UserEvent(AppEvent::Title { window, title }) => if let Some(shown) = windows.get(&window) { shown.window.set_title(&title); },
                 Event::UserEvent(AppEvent::Caption { window, message }) => { windows.send_to(&window, &message)?; }
                 Event::UserEvent(AppEvent::Activate(window)) => windows.activate(&window),
+                Event::UserEvent(AppEvent::PageLoaded(window)) => windows.loaded(&window),
                 Event::UserEvent(AppEvent::ShareChanged) => {
                     accepted["share"] = share.state();
                     presentation.mark(present::Owner::Live);
@@ -2324,6 +2336,17 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("{}", json!({"type":"desktop-error","error":error}));
             presentation.reply(Reply::to(&error_request.unwrap_or(Value::Null), Err(error)));
         }
+        // show_window's answers waiting for their windows: shown, or gone or hidden again before they were.
+        shows.retain(|(kind, request)| {
+            let answer = match windows.showing(kind) {
+                windows::Showing::Drawing => return true,
+                windows::Showing::Shown => Ok(json!({"windows": listed_windows(&windows, &viewers)})),
+                windows::Showing::Hidden => Err(format!("The {} window was hidden again before it was shown", kind.key())),
+                windows::Showing::Gone => Err(format!("The {} window closed before it was shown", kind.key())),
+            };
+            presentation.reply(Reply::to(request, answer));
+            false
+        });
         // What is due told (present.rs): a reply at the end of its turn; any other change at a beat, not while closing.
         let now = std::time::Instant::now();
         if presentation.due(now, beat_turn && !closing) {

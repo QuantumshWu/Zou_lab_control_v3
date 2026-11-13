@@ -131,7 +131,8 @@ LOGIC_NODE = NodeType(
         "and empty at B. The other mode's fields stay in the draft unused, as do all of them while "
         "post_selection is off. The condition is evaluated by the Derive engine; frame_judged stays "
         "the evidence frames (pixels have no site). With post_selection on, a cycle of fewer than two "
-        "frames, or a chosen middle frame the cycle does not have, is refused and the processor waits."
+        "frames, or a chosen middle frame the cycle does not have, keeps nothing: counts and occupied "
+        "are published with every value invalid, said once on the node, and the run keeps going."
     ),
     input_specs=(
         DatasetInput("frames", None, "exact"),

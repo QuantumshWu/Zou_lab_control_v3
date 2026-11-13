@@ -21,8 +21,9 @@ it is: its program row reads *Update*, and nothing is downloaded until the
 operator installs it there. When there is no engine at all (or one from before
 releases were downloaded), `installation.exe` asks first, then downloads this
 checkout's release in a console window of its own. Either way the download is
-`tools\fetch_engine.ps1`: the archive from the GitHub release, its size and
-sha256 checked, unpacked beside the live engine as `bin\engine.next` and renamed
+`tools\fetch_engine.ps1`: the archive (a `.tar.xz`) from the GitHub release, its size and
+sha256 checked, unpacked by `tools\tar_xz.cs` (Windows PowerShell compiles it: Windows 10's
+`tar.exe` has no xz) beside the live engine as `bin\engine.next` and renamed
 in. An engine still running is never replaced: the download waits in
 `bin\engine.next` and goes in when the programs next start.
 
@@ -47,7 +48,7 @@ in. An engine still running is never replaced: the download waits in
 | `build_and_program.bat [--build-only \| --program-only \| --flash \| --diagnose \| --force-build]` | Builds the pulse board's FPGA from `crates\zlc-pulse\fpga` and programs it (Vivado). |
 | `estimate_resources.bat` | Whether the configured FPGA part has the LUT/FF/DSP/BRAM for the configured geometry. |
 | `experiment.bat`, `figure_viewer.bat`, `pulse_editor.bat` | On a development machine: the three apps through `tools\desktop.ps1`, from a build current for the sources (below). |
-| `build_release.bat [--no-commit \| --publish [--dry-run]]` | On a development machine: builds the release into `bin\engine` and `bin\ai` and its archive (`target\engine-releases\zlc-engine-<version>.zip`), and commits `bin\release.json` with the four programs; `--publish`, once that commit is pushed, makes its GitHub release with the archive (`gh`). |
+| `build_release.bat [--no-commit \| --publish [--dry-run]]` | On a development machine: builds the release into `bin\engine` and `bin\ai` and its archive (`target\engine-releases\zlc-engine-<version>.tar.xz`, `tools\release_archive.py`: xz at preset 9e after the x86 filter, checked by unpacking it as a lab PC does), and commits `bin\release.json` with the four programs; `--publish`, once that commit is pushed, makes its GitHub release with the archive (`gh`). |
 | `dev_setup.bat [--dry-run]` | On a development machine: installs the toolchain into `.tools`. |
 | `build_ui.bat` | Compiles TypeScript into `apps\desktop\ui\dist`. Commit it with the sources; no Rust build or engine release. |
 

@@ -38,7 +38,7 @@ from zlc_atom.nodes.calibration import TrapCalibration
 from zlc_atom.nodes.calibration.calibration import (
     acquisition_cautions, reads_photoelectrons, refuse_other_count_scale,
     registration_order as _registration_order, tell_acquisition_cautions)
-from zlc_atom.nodes._framework.pulse import PULSE_CHANGED, STATUS_DONE, PulseBoard, check_cancelled, pulse_description
+from zlc_atom.nodes._framework.pulse import STATUS_DONE, PulseBoard, check_cancelled, pulse_description
 from zlc_atom.nodes.camera.measurement import (
     CameraMeasurementNode, CameraMeasurementRequest, frames_snapshot)
 from zlc_atom.nodes.slm import plain_json as _plain_json
@@ -1026,8 +1026,7 @@ class SlmRearrangementTask:
                     self._shot_reports.append(self._save(context, "completed"))
                     self._shot_saved = True
                 except Exception as error:
-                    # A changed pulse file fails every later shot alike: the batch ends.
-                    if self.shots == 1 or context.cancel_requested() or isinstance(error, InterruptedError) or PULSE_CHANGED in str(error):
+                    if self.shots == 1 or context.cancel_requested() or isinstance(error, InterruptedError):
                         raise
                     # One shot of a batch failed: make the board safe, keep what it
                     # recorded and fire the next one -- unless the board could not be

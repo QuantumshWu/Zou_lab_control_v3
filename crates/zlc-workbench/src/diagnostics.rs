@@ -67,7 +67,14 @@ journal/journal-<start us>.jsonl
                                        `cpu` (processors used since the last line: 1 is one whole processor) and
                                        its working and private memory -- `machine` (its processors' busy share,
                                        free memory) and `loop`: the event loop's turns in the period, their
-                                       time together and the longest with what it handled
+                                       time together and the longest with what it handled. When the machine's
+                                       busy time not the application's is more than the application's,
+                                       `others` says whose: `cpu` that time (processors, as above),
+                                       `in_processes` the part other processes hold (the rest is interrupts,
+                                       deferred procedure calls and processes that ended in the period) and
+                                       `processes`, from the busiest down, the fewest that together hold more
+                                       than half of it, each with `exe` (the program's file name only), `pid`,
+                                       `cpu` and `private_mib`
     and the lifecycle lines below, each in its place.
 
 journal/session.jsonl
