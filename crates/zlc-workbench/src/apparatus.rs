@@ -1484,6 +1484,8 @@ impl Workbench {
                 "published": live.is_some_and(|live| live.published),
                 "publishable": live.is_some_and(|live| live.state == LiveState::Open && live.descriptor.is_none()),
                 "remote": live.map(|live| live.working_point["remote"].clone()).unwrap_or(Value::Null),
+                // Who holds the board of this computer's own pulse server while another of its clients does (its `held_by` fact).
+                "held_by": live.map(|live| live.working_point["facts"]["held_by"].clone()).unwrap_or(Value::Null),
             })
         }).collect()
     }

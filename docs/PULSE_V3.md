@@ -86,6 +86,32 @@ this run"), so a run's record names the one pulse it played. A run that ends -- 
 node returned, failed or was stopped, or its plugin process died -- with a FIRE of
 its still unreported has the board made SAFE (v2's per-node `finally`).
 
+The board plugged into this computer (`sequencer.local`) is served by a
+`zlc-pulse-server` this application starts, and the board is that server's loopback
+client. The server lets one client own the board at a time; a newcomer takes it over
+once the old owner's outputs are SAFE (Remote on admits the bench's other computers).
+The server says each change of owner on its stdout, beside its ready line:
+`{"type":"pulse-owner","owner":"192.168.50.1:61656"}`, or `"owner":null` while nobody
+owns it. The pulse host compares the owner with its own client's end of the command
+lane (`Board::client_address`). While another client holds the board -- a bench peer,
+or another program on this computer -- this application's client sends the server
+nothing (a request would take the board over) and every board call, Stop and Stop
+all's SAFE included, is refused with who holds it: "the pulse board is held by
+192.168.50.1 (bench peer): its pulse server gave that client the board, so this
+application sends it nothing -- withdraw Remote to take it back here"
+(`Board::hold_elsewhere`). What this application played counts as stopped (the
+takeover SAFEd it), its unreported FIRE will not report, and its schedule watchers are
+told. The device log says `ZLC HELD BY 192.168.50.1 (bench peer): ...`, the Device
+Manager's row and line say "held by 192.168.50.1 (bench peer)" (the device's
+`held_by` fact), and a diagnostics archive carries `board-holder.txt` instead of
+asking the board what it holds. When that client leaves, its server makes the board
+SAFE and nobody holds it ("held by nobody"): this application does not take it back
+unasked, since the operator's publication still stands. Remote off takes it back
+(the client reconnects and claims the board; `ZLC HELD HERE`), as does opening the
+device again. Any remote client whose connection ended says why on each later call
+("remote PulseStreamer is not open: the connection to the pulse server ended; if
+another editor has connected since, that one now holds the board").
+
 ## Commands (bus catalogue, `crates/zlc-bus`)
 
 Editor commands edit the open document; device commands act on the board. UI and

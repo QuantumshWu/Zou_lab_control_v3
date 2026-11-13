@@ -2121,6 +2121,52 @@ mod tests {
         assert_eq!(count(&calls,"stop camera_measurement#1"),0);
         assert_eq!(wb.node_row(wb.node("camera_measurement").unwrap(),&[])["state"],"warning");
     }
+    /// Who holds a board while another client of its own pulse server does (its `held_by` fact) is the
+    /// Device Manager's line and its row's, and its return is said too.
+    #[test]
+    fn a_board_held_by_another_client_is_said_on_the_device_line_and_row() {
+        let (_root,mut wb,_calls,mut host)=rig("held-by",catalog());
+        let facts=|held_by:Value|json!({"trigger_lanes":[],"held_by":held_by});
+        event(&mut wb,Event::Facts{instance:"sequencer".into(),facts:facts(Value::Null)},&mut host);
+        let role=wb.device_role("sequencer").to_owned();
+        let row=|wb:&Workbench|wb.device_rows().into_iter().find(|row|row["instance_id"]=="sequencer").unwrap()["held_by"].clone();
+        assert_eq!(row(&wb),Value::Null);
+        event(&mut wb,Event::Facts{instance:"sequencer".into(),facts:facts(json!("192.168.50.1 (bench peer)"))},&mut host);
+        assert_eq!(wb.report,(format!("{role}: held by 192.168.50.1 (bench peer)"),"warning"));
+        assert_eq!(row(&wb),json!("192.168.50.1 (bench peer)"));
+        event(&mut wb,Event::Facts{instance:"sequencer".into(),facts:facts(Value::Null)},&mut host);
+        assert_eq!(wb.report,(format!("{role}: held here again"),"task"));
+    }
+    /// The console's line of a run follows it (lab 2026-11-12: after Stop and its run's end it still
+    /// said "camera_measurement started"): started, is stopping, then how it ended -- while it is
+    /// still the line shown; a later line of anything else stands.
+    #[test]
+    fn the_consoles_run_line_follows_the_run_to_its_end() {
+        let (_root,mut wb,_calls,mut host)=rig("run-line",catalog());
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        let start=|wb:&mut Workbench,host:&mut FakeHost| {
+            apply(wb,host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+            let run=wb.node("camera_measurement").unwrap().run.clone().unwrap();
+            event(wb,Event::RunStarted{run:run.clone()},host);
+            run
+        };
+        let run=start(&mut wb,&mut host);
+        assert_eq!(wb.console_report,("camera_measurement started".into(),"task"));
+        apply(&mut wb,&mut host,"stop_node",json!({"node":"camera_measurement"})).unwrap();
+        assert_eq!(wb.console_report,("camera_measurement is stopping".into(),"task"));
+        event(&mut wb,Event::RunFinished{run,outcome:"stopped".into(),error:None,generation:None},&mut host);
+        assert_eq!(wb.console_report,("camera_measurement stopped".into(),"task"));
+        let run=start(&mut wb,&mut host);
+        event(&mut wb,Event::RunFinished{run,outcome:"failed".into(),error:Some(json!({"message":"the camera was lost"})),generation:None},&mut host);
+        assert_eq!(wb.console_report,("camera_measurement failed: the camera was lost".into(),"error"));
+        let run=start(&mut wb,&mut host);
+        wb.console_note("layout saved to board.json".into());
+        event(&mut wb,Event::RunFinished{run,outcome:"completed".into(),error:None,generation:None},&mut host);
+        assert_eq!(wb.console_report,("layout saved to board.json".into(),"task"),"another line said since stands");
+        let run=start(&mut wb,&mut host);
+        event(&mut wb,Event::RunFinished{run,outcome:"completed".into(),error:None,generation:None},&mut host);
+        assert_eq!(wb.console_report,("camera_measurement completed".into(),"task"));
+    }
     #[test]
     fn a_panels_preparing_line_goes_once_it_has_drawn() {
         let (_root,mut wb,_calls,_host)=rig("panel-line",catalog());

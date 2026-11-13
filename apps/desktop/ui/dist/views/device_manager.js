@@ -368,14 +368,16 @@ export class DeviceManagerView {
      * and the Remote switch, all of them disabled while a device change runs (v2 _refresh_controls). */
     updateLoaded(devices, busy) {
         const loaded = devices.filter(device => LOADED.has(device.state) || device.close_failed);
-        const signature = JSON.stringify([loaded.map(device => [device.instance_id, device.role, device.type_id, device.state, device.close_failed, device.error, device.published, device.publishable]), busy]);
+        const signature = JSON.stringify([loaded.map(device => [device.instance_id, device.role, device.type_id, device.state, device.close_failed, device.error, device.published, device.publishable, device.held_by]), busy]);
         if (this.loadedList.dataset.signature === signature)
             return;
         this.loadedList.dataset.signature = signature;
         this.loadedList.replaceChildren(...loaded.map(device => {
             const line = element("div", "list-row");
             const identity = element("div", "list-identity");
-            identity.append(elided(device.role, "list-title"), element("span", "note list-detail", `${device.type_id}${device.close_failed ? " · Close failed" : ""}`));
+            // A board another client of its own pulse server holds says who (its `held_by`), as a warning.
+            const detail = element("span", `note list-detail${device.held_by ? " warning" : ""}`, `${device.type_id}${device.close_failed ? " · Close failed" : ""}${device.held_by ? ` · Held by ${device.held_by}` : ""}`);
+            identity.append(elided(device.role, "list-title"), detail);
             line.title = `Internal ID: ${device.instance_id}${device.error ? `\n${device.error}` : ""}`;
             const control = command("Control", () => this.openControl(device.instance_id));
             const log = command("Log", () => this.openLog(device.instance_id));

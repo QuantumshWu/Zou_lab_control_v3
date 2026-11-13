@@ -131,8 +131,10 @@ data/           the data of recent publications, as far back as the application'
 files/          the documents the board uses, as they were when this was exported: each node's
                 workspace resource (a pulse) from its collection's folder, the Subpulse files a pulse
                 names, each pulse document played on the board this session, the pulse the board
-                holds and the Config values it compiles against; files.json says, for each, every reason
-                it is there (`why`) and which file it is (`path`; none for one held in memory)
+                holds (board-holder.txt instead while another client of its pulse server holds it: who,
+                and what takes it back) and the Config values it compiles against; files.json says, for
+                each, every reason it is there (`why`) and which file it is (`path`; none for one held in
+                memory)
 ";
 
 /// A document the application holds or used, for the archive: why it is there (`why`), its contract

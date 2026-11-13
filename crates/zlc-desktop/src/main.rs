@@ -2126,6 +2126,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         pulse_host::PulseEvent::Log { instance, line } => {
                             let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Log { instance, line }));
                         }
+                        // Who holds the board changed: its `held_by` fact reaches the workbench now, as any device's facts do.
+                        pulse_host::PulseEvent::Owner { instance, owner } => {
+                            pulse.owner_changed(&instance, owner);
+                            if let Some((instance, facts)) = pulse.device_facts() { let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Facts { instance, facts })); }
+                        }
                         // Closing: the end of this turn reads it (PulseHost::shut_down).
                         pulse_host::PulseEvent::ShutDown => {}
                     }
