@@ -18,9 +18,10 @@
 //!    they pay (# The step) --, reads the reach's falsifier (`outgrown`: where its atoms have outgrown
 //!    the reach the attempt ends, and the next begins with the reach of the temperature read; on the pilot's atoms --
 //!    a reach is grown to a temperature, which the scout's eleven atoms tell to √(2/11), and the work goes as its
-//!    root), the model's units' errors at the states of the first held member of every group, and the tables' errors
-//!    at one state of every trajectory (SPEC §5.4; `one_each`). Its trajectories at the run's step stay in the
-//!    result: they are trajectories of the run's own model and step.
+//!    root), the model's units' errors at every state of its run level at the analysis times, and the tables' errors at
+//!    one state of every trajectory there (SPEC §5.4; `one_each`) -- every read and decision at the analysis times, not
+//!    at the outputs (# The analysis times). Its trajectories at the run's step stay in the result: they are
+//!    trajectories of the run's own model and step.
 //!    The falsifier reads the run's own level alone, so the pilot's own level is run before its companion and read as
 //!    it comes in (`own_level`): where its atoms refute the reach the attempt ends there, and the rest of the pilot --
 //!    its companion, the step's check at a model the next attempt judges anew over the grown reach -- is never run
@@ -40,8 +41,9 @@
 //!    whose own read is in and not clearly beyond, before its check goes on (# Each decision as its evidence is in) --,
 //!    the step's error as far as it is read (# The model: the step's part): units to keep end the attempt, and the next
 //!    begins with their model, deciding first on the states this one's run level left (# An attempt's own).
-//! 4. The product: batches of whole groups at the settled step, one level, every trajectory run to the last output,
-//!    until every held quantity's total lies within its target (# Stopping) or the trajectories reach
+//! 4. The product: batches of whole groups at the settled step, one level, every trajectory run to the run's end and
+//!    read at the pilot's analysis times beside the outputs, until every held quantity's total lies within its target
+//!    there (# Stopping) or the trajectories reach
 //!    `MOST_TRAJECTORIES`. Its atoms that leave the reach are read where they are, and what they carry is booked
 //!    (# The reach's atoms); where that leaves a look no room, the reach grows and the next attempt begins.
 //! 5. The result (contract §2.2, `assemble`).
@@ -118,11 +120,14 @@
 //!
 //! The step's convergence is checked on the pilot, as a refinement is checked by hand: the pilot's trajectories run at
 //! τ and, the same trajectory numbers -- the same initial atoms, the same jumps' draws by their number, the same
-//! Brownian path (adapt.rs) --, at 2τ (`Levels`), both read at the same outputs at the same instants. Of two levels at
-//! h and 2h a quantity's difference at an output is d(h) = Q(2h) − Q(h); a read (estimate.rs `between`) takes
-//! d/(2^p − 1) over the run -- its mean square M over the outputs, estimated without the noise's floor, with the
+//! Brownian path (adapt.rs) --, at 2τ (`Levels`), both read at the same instants: the analysis times' candidates, the
+//! companion's step ends (# The analysis times), where both levels' states are their steps' own ends. Of two levels at
+//! h and 2h a quantity's difference at a time is d(h) = Q(2h) − Q(h); a read (estimate.rs `between`) takes
+//! d/(2^p − 1) over the run -- its mean square M over the run, by the trapezoid over the two levels' own analysis times
+//! (`read_step`: each time weighed by half its neighbours' interval), estimated without the noise's floor, with the
 //! delete-one-group jackknife of that estimate --: one read for the loss, for each row as shown and for the total T,
-//! each carried to the outputs by the dynamics itself. An error that changes its sign in time counts by its size.
+//! each carried by the dynamics itself. An error that changes its sign in time counts by its size. (Over the outputs,
+//! as it was, the read changed with their number: a mean over 100 or over 1000 of them.)
 //!
 //! ## Two levels, three levels
 //! A difference is an error only by what is known of the coarser level. With e(h) = Q(h) − Q(0), d(h) = e(2h) − e(h),
@@ -193,7 +198,7 @@
 //!   first rung's double is admissible for the typical atom, and stable for every atom. The companion's atoms beyond
 //!   its light's limit weigh in the difference by their share (`Domain::companion`): no level leaves the comparison.
 //!
-//! What enters a quantity's account, at every output alike, is what the reads the rung stands by say (`checked`); it
+//! What enters a quantity's account, at every time alike, is what the reads the rung stands by say (`checked`); it
 //! is fixed after the pilot, and the product runs one level and reads no step. The check's resolution -- √(t·SE) of that
 //! read, the rms error the pairs cannot tell from none -- is said in the result's method line beside the steps compared
 //! and the number of pairs (`Checked`).
@@ -205,15 +210,20 @@
 //! on top of it; pooling it over the outputs books less than the truth where the error grows in time (SPEC §2.2).
 //!
 //! # Outputs and windows
-//! The outputs are the request's times, from 0 and evenly spaced. At an output a trajectory is read inside the step
-//! the output falls in (`run`; step.rs `Step::at`): its rows as shown, its (r, κ) for the listed distributions, the
-//! pilot's kept state, and its loss test there. T's window about an output (estimate.rs `half_window`: one period of the
+//! The outputs are the request's times, from 0 and evenly spaced: what is shown, and nothing the solve decides on
+//! (# The analysis times). At an output a trajectory is read inside the step the output falls in (`run`; step.rs
+//! `Step::at`): its rows as shown, its (r, κ) for the listed distributions, and its window's T sums -- cheap sums, no
+//! state kept and nothing read of the model. T's window about an output (estimate.rs `half_window`: one period of the
 //! axis, cut at t = 0) takes a trajectory's κ and κ² over the cuts of its steps' paths (step.rs `Segment::moments`: the
 //! path with the kick spread over the step, of the scheme's order at any cut); the first is the instant t = 0, and the
 //! run goes on through the last output's window (`Plan`). Outputs closer than a period have overlapping windows, so a
 //! window is not summed by itself: per lab axis the trajectory's running integrals of 1, κ and κ² from t = 0 are kept
 //! at every window's two ends, and a window is their difference (`run`) -- each step's path integrated once, and once
 //! more up to each end that falls inside it, whatever the windows' overlap.
+//!
+//! The times the decisions read (# The analysis times) are read the same way, their windows cut at the run's end as
+//! well, so that they stay centred (the trajectories run to the run's end and no further); a time that is an output
+//! too is read once.
 //!
 //! The output at t = 0 is read as every other one is: T, n̄ and the mean velocity there are the estimates of the
 //! trajectories' initial atoms (their instant κ: the window at t = 0 has no length) -- the same estimator on the same
@@ -227,6 +237,47 @@
 //! with the pilot's steps for its budget: another estimator, and a short run's budget leaves it unconverged -- the
 //! user's 200 µK tweezer of 7.5 k_BT, 0.1 µs: two levels of 2 and 4 nodes a coordinate 22.5 % apart, 179.5 µK against
 //! the converged 171.08 µK (2¹⁵ draws: 170.8 ± 0.5), and the run's 144 atoms read 164.5 µK 10⁻⁴ µs later.)
+//!
+//! # The analysis times
+//! Every read and decision of the solve stands on the analysis times T_a (analysis.rs; SPEC §3.1), whatever the
+//! outputs: the reads and their families are of a number that the readings' own change in time asks, not of the output
+//! grid (as it was: the reads at every output cost in proportion to their number -- the pgc3d example 5 s at 100
+//! outputs, 25 s at 1000; a run of 0.1 µs at 1000 outputs, one step, 69.9 s --, and a keep was the largest of eleven
+//! states' point estimates over as many outputs as there were, decided anew by their number: 0, 11 and 7 units kept at
+//! 100, 199 and 1000; r_samples.status.md).
+//! - The candidates are the companion's step ends at the attempt's first rung, m·2τ₀ to the run's end (`grid`): a
+//!   step end of every level the attempt runs -- its rungs and their companions; the third level at 4τ reads half of
+//!   them inside its steps (adapt.rs, # The reads). Every level of the pilot is read at every candidate (`Plan::reads`;
+//!   the run level keeps its states there), the product at the analysis times alone.
+//! - The analysis times of some levels are the halving's of their readings (`analysed`; analysis.rs, # The rule): from
+//!   the first round's ends, an interval is halved while a reading at its middle or its quarters lies off the line
+//!   through its ends beyond its own jackknife interval among the interval's looks and the line's rounding. The
+//!   readings are what the decisions read of the levels (estimate.rs `readings`): the run level's loss, rows as shown
+//!   and T per lab axis, and, where a read compares two levels, the step's error of each of them. The step's check
+//!   stands on its two levels' times (`read_step`); the reach's falsifier, the model's decisions and the product on the
+//!   run level's.
+//! - The first round's ends: the run's two ends -- the lights are switched on at t = 0 and stay so: the request has
+//!   no other switching time --, and as many more evenly between them as leave no interval longer than T's longest
+//!   window, one period of the slowest lab axis (`Plan::window`). T at a time is its window's mean (estimate.rs
+//!   `half_window`), so no change of it along that axis is narrower than the window, and the first round's reads, a
+//!   quarter of an interval apart at most, meet every such change wherever it lies -- none is invisible to them; an
+//!   axis of a period down to a quarter of the window's alike. A feature narrower than that, away from the lights'
+//!   switching, is not promised (a hypothesis: between the switches the readings follow the atoms' motion, of the
+//!   trap's periods; the internal state's own transients begin at a switch, an end). No number of the times is
+//!   chosen: the window is T's own. (PGC3D 1 ms, a 19.5 kHz axis: 21 ends, 26 analysis times as read.)
+//! - The units' errors are no reading: a state's read costs about a millisecond (PGC3D reads 1185 units), and the
+//!   halving reads three times as many times as it keeps. A unit's error at a state is a function of its place, speed
+//!   and internal state, whose ensemble the rows and T read (a hypothesis, not tested by itself: an error of the
+//!   model's narrower in time than those is stepped over).
+//! - What stands on them: the step's mean square (estimate.rs `between`, each time by its share of the run); every
+//!   state of the pilot's run level there, each group's every member held and every atom lost by then (`sampled`), the
+//!   model's error and its families -- the looks', `crowded`, `tight`, `needed`, `Doubt`'s (two looks a time), the
+//!   needs `Level` and `Pricing` read --; the reach's falsifier (`outgrown`: a T per lab axis and a count outside at
+//!   every analysis time) and the temperature it grows to; the product's looks, batches, keeps and atoms apart; the
+//!   tables' reads and the prices at one state of every trajectory among them (`one_each`). States carried to the next
+//!   attempt are at their own analysis times (`Carried`), and the next attempt decides there.
+//! - What the result shows at an output: its own estimates and statistics; the model's error and what the atoms apart
+//!   add on the line through their values at the analysis times (`interpolated`), the step's part one number.
 //!
 //! # The model (SPEC §5.2)
 //! The units are the model's (model.rs), listed again in every model a keep closes. Every model the solve runs is
@@ -278,7 +329,7 @@
 //! statistics; where some look has none, no number of trajectories fits beside the errors, and keeping nothing is no
 //! option. The trajectories follow from the room: a keep that removes error shortens the run. A set kept where nothing
 //! is an option saves beyond that saving's spread over the pilot's groups (decide.rs `pays`; `Pricing::share_of`).
-//! - The order: at the far end of the error the units taken so far leave, the outputs where the need binds -- those
+//! - The order: at the far end of the error the units taken so far leave, the analysis times where the need binds -- those
 //!   without room, else those of the largest need (`binding`) --, and there the units by their weight (their errors on
 //!   what is shown and on T, weighed by the held share as the totals are, each over its target) for the work a µs of
 //!   their kept model, the most first; and of the sets so led through, the one of the least expected work, none of it
@@ -321,9 +372,9 @@
 //!   at every attempt's start: R2_RECOIL 98 s, a kept model of 5.7 GB). A keep that pays by its rate alone is not
 //!   looked for: a fold is made to cost less than what it folds, and where one does not the fold is at fault, not the
 //!   choice -- the order takes the units that weigh.
-//! - On the scout, whose reads are eleven states an output, both are judged at the model's error they leave no doubt
+//! - On the scout, whose reads are eleven states a time, both are judged at the model's error they leave no doubt
 //!   of: every model's error less the jackknife interval of the current one's over the scout's groups, at the family
-//!   of the outputs' reads (`doubt`, `clear`); the pilot reads the same units on all its states. A unit's error is
+//!   of the analysis times' reads (`doubt`, `clear`); the pilot reads the same units on all its states. A unit's error is
 //!   heavy-tailed over the states, and the reads that put the room's error high put the work it asks high with them:
 //!   a need is the statistics' interval over the room, and where a point estimate all but fills the target the need
 //!   runs to any number, every one of the jackknife's levels with it -- the saving reads near one with no spread.
@@ -353,17 +404,17 @@
 //!
 //! ## The units booked at their bounds
 //! A unit is read at the states only where its error can matter. Its error at a state is its small parameter there
-//! mapped to the outputs by the leading order (model/units.rs, # The errors); where that parameter has a bound over
+//! mapped to what is shown by the leading order (model/units.rs, # The errors); where that parameter has a bound over
 //! the whole space -- the prior's screen (# The model's prior): every beam at its peak and all in phase, at the largest
 //! speed of the states read, so that the bound holds at each of them, an atom heated past the reach's speeds too --, the
 //! same map at that bound and at the populations' largest weight bounds the error at every one of those states, on what
 //! is shown and on T alike (model/units.rs `Model::bounds`: a coupling of two states, m²(p_a + p_b) ≤ S/2 for two states
-//! and S for a level's own beat). A unit so bounded is booked at that bound at every read output, unread, as long as
+//! and S for a level's own beat). A unit so bounded is booked at that bound at every analysis time read, unread, as long as
 //! such bounds, the smallest first, add up to no more than the share the most trajectories a solve runs leave unseen
 //! (`booked`; estimate.rs `unseen`, z²/(N + z²) = 2.44·10⁻⁴ at N = `MOST_TRAJECTORIES`): what is shown is never booked
 //! statistics below that share (`Estimate::shown_statistics`), so what the unread units' bounds overstate together lies
 //! below what any run resolves; on T, relative, it is a four-hundredth of the 10 % target. The others are read, once
-//! per state: a state's errors are kept as read and their means per output made once for every decision that asks
+//! per state: a state's errors are kept as read and their means per analysis time made once for every decision that asks
 //! (`Measured`). The ledger names each unit's booking (`FOLD_MEASURED`, `FOLD_BOUNDED`). (Every unit read, as it was
 //! after the gates over the reach went, GMD1C's scout read its 2130 units at 11 011 states, 14.5 of its 39 s, and the
 //! run took 1.6 times the line's CPU: its 927 couplings of two states, each bounded at 2·10⁻¹¹ or less over the whole
@@ -372,14 +423,14 @@
 //! 0.75 times the line's CPU: its trajectories and its step the line's, its T within their errors.)
 //!
 //! ## Where the atoms went
-//! The model is judged where the atoms went, not only where the held ones are at the outputs (`sampled`). What is shown
-//! at an output is every atom's fate there -- a held atom's rows, a lost one's loss --, so the model errs on it by the
+//! The model is judged where the atoms went, not only where the held ones are at the analysis times (`sampled`). What is
+//! shown at a time is every atom's fate there -- a held atom's rows, a lost one's loss --, so the model errs on it by the
 //! mean over the atoms of the error of each one's fate (`Measured::means`): the held atoms' at their states there, by
 //! the held share 1 − L, and the lost atoms' along their paths, by L. A lost atom's fate was decided along its path
 //! from t = 0 to its loss: a rate's relative error x along it moves its loss's time by x of it to the first order, and
 //! its fate's error is the path's mean of x, read at the two states the run holds of it -- at t = 0 and where it was
 //! found lost -- by the trapezoid (`Booking::path`). T is the held atoms' alone. A run's price is read where its atoms
-//! were too (`one_each`): a trajectory weighs by the time it holds its atom, and one lost before the first output by
+//! were too (`one_each`): a trajectory weighs by the time it holds its atom, and one lost before the first time read by
 //! its state at t = 0. (Read on the held atoms alone, S2Q's first model -- nothing kept, its resonant probe's drives
 //! folded by the bare levels -- lost every atom within 10 µs, read no state at any output and booked its error as
 //! none, and the solve stood on every atom lost by 50 µs, where half of them are held to 0.53 ms; priced at the held
@@ -391,7 +442,7 @@
 //! A < √(ε² − c²), c the step's error. Before the step's reads are in -- the scout, the carried states -- c is its
 //! share s·ε: the check leaves the step it stands at within its share (`verdict`). Once the pilot's rung has its own
 //! read, c is that read's estimate, at most the share (`standing`): the step's error the run is to book, which the
-//! check does not raise past the share. (PGC3D at 1000 outputs: the model's threshold on what is shown is 0.0447 at the
+//! check does not raise past the share. (717cb386, PGC3D at 1000 outputs: the model's threshold on what is shown is 0.0447 at the
 //! share, 0.0499 at its read step error, 0.0022; the pilot's keep stood on 39 outputs at 0.0450–0.0497, within the
 //! second -- the share's, not the run's: r_samples.)
 //!
@@ -416,24 +467,24 @@
 //! after such a step is no held atom's: as every model error's, it is in what the held atoms' errors are weighed by
 //! (the held share, `accounts`), and not booked apart.
 //!
-//! The atoms the run takes past the reach are booked as the old engine booked them (`beyond_reach`): where an output's
+//! The atoms the run takes past the reach are booked as the old engine booked them (`beyond_reach`): where a time's
 //! T along a lab axis is above the reach's T_r, the share of a thermal ensemble at that T past the reach's level beyond
 //! the share s the reach leaves out at its own temperature, s^(T_r/T) − s, on what is shown and on T alike -- their
 //! folds unread. It is in the looks: the run stops on totals that hold it. Where the product ends with a look that it
 //! leaves no room for the statistics and that has room without it, the reach grows to the bound atoms' temperature
 //! read where that is above it (`attempt`), and the next attempt begins; else the item stands booked and the ledger
 //! flags the output. The reach's falsifier reads the pilot's bound atoms (`outgrown`, estimate.rs `bound_motion`): a
-//! held atom whose prepared energy is at the far value or above at an output is leaving, no draw of the distribution
+//! held atom whose prepared energy is at the far value or above at a time is leaving, no draw of the distribution
 //! the reach is made for.
 //!
 //! # Stopping (SPEC §3)
-//! Every quantity held to a target -- at every output after t = 0 what is shown, and the total T -- has the total
+//! Every quantity held to a target -- at every analysis time after t = 0 what is shown, and the total T -- has the total
 //! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, from the units measured at the pilot's states -- its
 //! held atoms' and its lost atoms' paths (# The model: where the atoms went) -- and the tables' errors there, and c
 //! what the step's check leaves open (its rms over the run), both fixed by the pilot -- A with what
 //! the run's atoms outside the reach carry, read before each batch's looks (# The reach's atoms) --; S the
 //! statistics' interval. The run stops where every one of them lies
-//! within its target: the test the ledger flags an output by (`Look::met`). The stop reads the run's standard errors,
+//! within its target: the test the ledger flags an output by, at the outputs (`Look::met`). The stop reads the run's standard errors,
 //! its atoms outside the reach, and nothing else of its estimates. A look that no run's trajectories bring within its
 //! target -- its need beyond `MOST_TRAJECTORIES`, or A² + c² ≥ ε² (`Look::fits`): the model's decisions have kept
 //! what they could -- is not chased: the ledger flags it.
@@ -445,7 +496,7 @@
 //!
 //! # T's target is on the total temperature
 //! The user's target on T, 10 % relative at the confidence z, is on the total temperature: the mean of the three lab
-//! axes' T (`Motion::temperature_total`), its statistics the jackknife of that mean. It is held at every output after
+//! axes' T (`Motion::temperature_total`), its statistics the jackknife of that mean. It is held at every analysis time after
 //! t = 0 where it is read, as its allowance there (# T's allowance) -- its step's size checked against the step's share,
 //! what the check leaves open booked, its look met or chased (`looks`), the total flagged where it exceeds the allowance
 //! (ledger.rs). Each axis's T is shown with its own statistics and held to nothing: an axis that carries little of the
@@ -1303,15 +1354,17 @@ fn outside(groups: &[Group]) -> Vec<(f64, f64)> {
 /// ensemble -- the bound atoms' at its temperature, of which it leaves out the share `left` -- and the model is judged
 /// over it as holding them. The pilot reads the two things this says of its bound atoms (`motion`, estimate.rs
 /// `bound_motion`; module documentation, # The reach's atoms: a leaving atom is no draw of the distribution a reach is
-/// made for, and no reading of a temperature), as one family of looks (Šidák over all of them, each one-sided at the confidence z):
-/// - no lab axis's T at an output is above the largest kinetic temperature along an axis of that ensemble, `reach`
-///   (µK; model.rs `Reach::kinetic_uk`): refuted by a T read above it beyond its interval;
-/// - of the bound atoms held at a listed output, those outside the reach (`outside`: per listed output the count and
-///   the atoms) are a binomial's of the share `left` at the most: refuted by a count whose tail (estimate.rs
-///   `at_least`) is below the look's -- among the six hundred looks of two hundred outputs, three of the pilot's 88.
-///   This read estimates no spread. The T's interval is 6.4 standard errors there, each estimated on eleven groups: a
-///   T twice the reach's passes it wherever that estimate falls high, with a tenth of the atoms outside (measured,
-///   SPEC §1.8).
+/// made for, and no reading of a temperature), at the run level's analysis times (module documentation, # The analysis
+/// times), as one family of looks (Šidák over all of them, each one-sided at the confidence z):
+/// - no lab axis's T at a time after t = 0 is above the largest kinetic temperature along an axis of that ensemble,
+///   `reach` (µK; model.rs `Reach::kinetic_uk`): refuted by a T read above it beyond its interval;
+/// - of the bound atoms held at a time, those outside the reach (`outside`: per time the count and the atoms) are a
+///   binomial's of the share `left` at the most: refuted by a count whose tail (estimate.rs `at_least`) is below the
+///   look's -- among the 101 looks of 26 times, two of the pilot's 88. This read estimates no spread. (Read at every
+///   output for T and at the listed ones for the count, as it was, the family was the outputs' -- six hundred looks of
+///   two hundred --, and the counts were of other times at another number of outputs.) T's interval over six hundred
+///   looks was 6.4 standard errors, each estimated on eleven groups: a T twice the reach's passed it wherever that
+///   estimate fell high, with a tenth of the atoms outside (measured, SPEC §1.8).
 ///
 /// Either refutes; the reach's new temperature is then the largest T read. Where no T read is above `reach` the
 /// atoms outside are no hotter ensemble's (a cloud driven out carries its energy in its mean motion): the falsifier
@@ -1326,12 +1379,12 @@ fn outgrown(outside: &[(f64, f64)], left: f64, motion: &[Option<crate::estimate:
 }
 
 /// The temperature a reach grows to (SPEC §1.8): the largest T of the bound atoms (`bound_motion`) read along a lab
-/// axis at an output; no number where none is read.
+/// axis at a time; no number where none is read.
 fn hottest(motion: &[Option<crate::estimate::Motion>]) -> f64 {
     motion.iter().skip(1).flatten().flat_map(|m| m.temperature).fold(f64::NEG_INFINITY, f64::max)
 }
 
-/// What the run's unresolved atoms and its atoms past the reach add to the model's error at every output (SPEC §1.8,
+/// What the run's unresolved atoms and its atoms past the reach add to the model's error at every time (SPEC §1.8,
 /// §4; module documentation, # The reach's atoms), on what is shown (absolute: held atoms, by the held share 1 − L, as
 /// `Measured::means` books them) and on T (relative):
 /// - the unresolved atoms, whole: their share of the held atoms on what is shown, of the kinetic energy on T
@@ -1347,8 +1400,8 @@ fn apart(estimates: &[Estimate], reach: f64, share: f64, cap: f64) -> Vec<[f64; 
         .collect()
 }
 
-/// The share of an output's atoms past the reach (module documentation, # The reach's atoms): of a thermal ensemble at
-/// the output's largest T along a lab axis -- at most `cap` (µK), the trap's depth over ln(1/s), past which an atom is
+/// The share of a time's atoms past the reach (module documentation, # The reach's atoms): of a thermal ensemble at
+/// the time's largest T along a lab axis -- at most `cap` (µK), the trap's depth over ln(1/s), past which an atom is
 /// the loss's --, what lies past the reach's level beyond the share s (`share`) the reach leaves out at its own T_r
 /// (`reach`, µK: the largest kinetic temperature along an axis of the ensemble it is made for), s^(T_r/T) − s. Zero
 /// within the reach, or with no T read.
@@ -1366,7 +1419,7 @@ fn classical(temperature: f64, frequency: f64) -> bool {
 /// A state's model error as the run books it (`Measured::means`, `apart`): on the populations (absolute) and on T
 /// (relative) what its units book there, of which the part a flow's rate error moves to its far side
 /// (`UnitError::moved`, `into`; model/units.rs, # A rate's error on the populations) is the source side's as the
-/// state sees it, and is taken against the output's populations (model/units.rs `destined`).
+/// state sees it, and is taken against the time's populations (model/units.rs `destined`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Booking {
     error: [f64; 2],
@@ -1395,7 +1448,7 @@ impl Booking {
         Booking { error: std::array::from_fn(|i| 0.5 * (start.error[i] + end.error[i])), moved: 0., into: 0 }
     }
 
-    /// What is booked at an output of the held populations `p` (estimate.rs `Estimate::populations`).
+    /// What is booked at a time of the held populations `p` (estimate.rs `Estimate::populations`).
     fn at(&self, p: &[f64; STATES]) -> [f64; 2] {
         let less = self.moved * (1. - destined(self.into, p));
         [self.error[0] - less, self.error[1] - less]
@@ -1414,7 +1467,7 @@ enum Booked {
 /// of its (model/units.rs `Model::bounds`): the bounded units taken by their bounds, the smallest first (equal ones in
 /// the units' order), are booked at them while the bounds so booked add up to no more than the unseen share of
 /// `MOST_TRAJECTORIES` draws, z²/(N + z²) -- the least statistics a solve ever books on what is shown; every other unit
-/// is read. So the model's error at an output is at most that share above the one with every unit read, on what is
+/// is read. So the model's error at a time is at most that share above the one with every unit read, on what is
 /// shown (absolute) and on T (relative) alike. A bound that is no number is no bound: it and every larger one are read.
 fn booked(bounds: &[Option<f64>]) -> Vec<Booked> {
     let mut bounded: Vec<(f64, usize)> = bounds.iter().enumerate().filter_map(|(u, b)| b.map(|b| (b, u))).collect();
@@ -1549,7 +1602,7 @@ enum Reads {
     Carried { few: bool },
 }
 impl Reads {
-    /// Whether the reads are few, one state a group and output, judged at what they leave no doubt of (`Doubt`).
+    /// Whether the reads are few, one state a group and time, judged at what they leave no doubt of (`Doubt`).
     fn few(self) -> bool {
         matches!(self, Reads::Scout | Reads::Carried { few: true })
     }
@@ -1564,7 +1617,7 @@ impl Reads {
 }
 
 /// The folded units to keep, if any (SPEC §5.2; module documentation, # The model), from the units' errors `measured`
-/// at the states of the trajectories `parts` (their `estimates`; the units' mean errors over them `means`, per output
+/// at the states of the trajectories `parts` (their `estimates`; the units' mean errors over them `means`, per time
 /// and unit) and the errors `fixed` beside them, the step's part `step` as far as it is read (`standing`; its share
 /// before its reads are in), by one rule: of the sets the units' order leads through (`needed`), the one of the least
 /// expected total work -- a set's kept model's work a µs times the trajectories it runs, its pilot again (`again`) and
@@ -1600,7 +1653,7 @@ fn keep(
     reads: Reads,
 ) -> Option<Vec<usize>> {
     let held: Vec<f64> = estimates.iter().map(|e| 1. - e.loss).collect();
-    // A unit weighs where it was read: an output with no state read carries every unit's bound alike, and tells none
+    // A unit weighs where it was read: a time with no state read carries every unit's bound alike, and tells none
     // of them apart. And where the units' errors crowd it: the share of trajectories not counted (estimate.rs, # What is
     // counted) is no unit's, and no keep takes it away.
     let mut read = vec![false; fixed.model.len()];
@@ -1984,7 +2037,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
 }
 
 /// The pilot's reads at the rung it stands at (`attempt`, `pilot_reads`): its estimates and counts, the units' errors
-/// at its states (`Sampled`), the model's error per output -- the units',
+/// at its states (`Sampled`), the model's error per time -- the units',
 /// the tables' and the optical sector's booking on T --, each table's booked error and why its refinement ended where it
 /// is beyond its shares; and the tables refined, where a read refined one (the pilot's own stay as its levels ran on
 /// them: a check that goes on reads its further levels on the tables of the levels it compares them with).
@@ -2007,9 +2060,9 @@ impl PilotRead {
 /// The pilot's reads (`PilotRead`) of its groups `pilot`, the folded units `units` read at its states (the scout's
 /// `known` kept), on the pilot's tables `tables`, refined where their reads ask -- a copy, made at the first refinement
 /// (`PilotRead::refined`).
-/// - The model's errors at the pilot's states (SPEC §5.2): each folded unit's per output, the held atoms' mean over the
+/// - The model's errors at the pilot's states (SPEC §5.2): each folded unit's per time, the held atoms' mean over the
 ///   first member of every group -- one a group keeps every group in the mean's spread, and a unit's error is a function
-///   of the state, read as well on eleven states an output as on eighty-eight.
+///   of the state, read as well on eleven states a time as on eighty-eight.
 /// - The tables' errors (SPEC §5.4): each table's whole error against the elimination itself, its mean over the run's
 ///   held states read at one state of every pilot trajectory (`one_each`, `over_the_run`) -- a state on another cluster
 ///   reads none of it. A table beyond the tables' shares has the axis of its largest read halved and is read again,
@@ -2017,9 +2070,9 @@ impl PilotRead {
 ///   # Axes), or what is beyond is not its axes' interpolation -- the whole less every axis's own read still beyond the
 ///   shares: a coordinate held at the focus, which no halving lowers --, or its worst axis's read on a grid it resolves
 ///   fell by no more than an unresolved peak's (model/tabulate.rs, # Refinement: it is not converging); what it reads
-///   then is booked on every output, and flagged where it still lies beyond -- with which of these ended its refinement
+///   then is booked on every time, and flagged where it still lies beyond -- with which of these ended its refinement
 ///   (`Stuck`).
-/// - The optical sector's noise (ledger.rs `optical`): its booking on T at every output, a part of the model's error
+/// - The optical sector's noise (ledger.rs `optical`): its booking on T at every time, a part of the model's error
 ///   that no unit kept takes away.
 #[allow(clippy::too_many_arguments)]
 fn pilot_reads(model: &Model, units: &[Unit], tables: &Tables, pilot: &[&Part], known: Option<Sampled>, unsampled: [f64; 2], most: usize, scales: &Scales) -> PilotRead {
@@ -2995,7 +3048,7 @@ fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut
     parts.into_iter().map(|level| level.into_iter().map(|p| p.expect("a group's trajectories ended without their part")).collect()).collect()
 }
 
-/// What the pilot fixes for the run (module documentation, # Stopping), per output: the model's error on the held atoms
+/// What the pilot fixes for the run (module documentation, # Stopping), per time: the model's error on the held atoms
 /// (populations absolute, T relative; T's unbounded where no pilot atom reads it) -- to which the product adds what
 /// its atoms outside the reach carry (`Context::outside`) --; none at t = 0, where no model has acted (`model_error`).
 #[derive(Clone)]
@@ -3004,7 +3057,7 @@ struct Fixed {
 }
 
 /// The step's share of the targets (SPEC §2.2, §4): on what is shown s·ε, and on T s itself -- of T's allowance at each
-/// output, which T's reads and bounds are taken over (# T's allowance; estimate.rs `between`): what its error may take
+/// time, which T's reads and bounds are taken over (# T's allowance; estimate.rs `between`): what its error may take
 /// -- the pilot is screened against it, the model's decisions take it for the step's error, and a result is booked at
 /// it until its two levels are read.
 fn step_bound() -> [f64; 2] {
@@ -3025,7 +3078,7 @@ fn probability_error(error: f64) -> f64 {
     if error.is_nan() { 1. } else { error.min(1.) }
 }
 
-/// One quantity held to its target at one output (module documentation, # Stopping): what is shown, or the total T.
+/// One quantity held to its target at one time (module documentation, # Stopping): what is shown, or the total T.
 /// Its account (ledger.rs: the model's error A, what the step's check leaves open c, the statistics S, as the ledger
 /// books them) against its target ε; and what its need takes beside them: the statistics' jackknife interval and the
 /// trajectories it was read on, and on what is shown the unseen share, which the statistics are no less than.
@@ -3039,7 +3092,7 @@ struct Look {
     shown: bool,
 }
 impl Look {
-    /// Whether its total lies within its target: the ledger's own test of an output (ledger.rs `Ledger::close`).
+    /// Whether its total lies within its target: the ledger's own test of a time (ledger.rs `Ledger::close`).
     fn met(&self) -> bool {
         self.account.total() <= self.target
     }
@@ -3067,17 +3120,17 @@ impl Look {
 }
 
 /// The looks of a run (module documentation, # Stopping) by its estimates, the pilot's fixed errors and the step's
-/// part: at every output after t = 0 what is shown, and the total T (the mean over the three lab axes: what T's target
+/// part: at every time after t = 0 what is shown, and the total T (the mean over the three lab axes: what T's target
 /// is on). A T whose model's or step's part is unread is not met, and no number of trajectories meets it. Where it is
 /// its statistics that are unread (too few groups hold an atom), they are predicted from the normal theory of one
 /// axis's variance over the N h atoms held, the relative interval z √(2/(N h)) -- the total's is at most that (three
 /// axes' mean; equal where one axis holds all the energy) --, weighed by the held share as a read interval is: one
 /// number for whether the look is met and for the trajectories it needs (`Look::met`, `Look::need`). (Unread, it was
-/// booked unbounded for the one and predicted for the other: S2Q's outputs at 2.4--2.6 ms, about one atom held of
+/// booked unbounded for the one and predicted for the other: S2Q's times at 2.4--2.6 ms, about one atom held of
 /// three thousand, were never met and asked for one to three trajectories, and its product grew by a group a batch,
 /// 293 batches, from 568 trajectories to 2912.) Where no atom is held there is no T, and no look of it: N h = 0 would
-/// ask that interval of nothing. The outputs' looks are made on the pool, each output's by itself, and come in the
-/// outputs' order.
+/// ask that interval of nothing. The times' looks are made on the pool, each time's by itself, and come in the
+/// times' order.
 fn looks(estimates: &[Estimate], fixed: &Fixed, step: Bound) -> Vec<Look> {
     let (population, temperature) = accounts(estimates, fixed, step);
     estimates
@@ -3097,7 +3150,7 @@ fn looks(estimates: &[Estimate], fixed: &Fixed, step: Bound) -> Vec<Look> {
         .collect()
 }
 
-/// The outputs where some look's model error and step's share leave the statistics no room (SPEC §5.2): no number
+/// The times where some look's model error and step's share leave the statistics no room (SPEC §5.2): no number
 /// of trajectories fits beside them -- what the model's decisions answer (`keep`), on the errors booked, not on a
 /// statistics' read: a keep is never undone, and a need read off a few groups' interval is no certain thing (a look
 /// that a run cannot meet within `MOST_TRAJECTORIES` is not chased, `Look::fits`, and is read again at every batch).
@@ -3107,14 +3160,14 @@ fn crowded(looks: &[Look]) -> Vec<usize> {
     outputs
 }
 
-/// The outputs whose looks leave the statistics no room (`crowded`) at the model's errors `fixed` beside the step's
+/// The times whose looks leave the statistics no room (`crowded`) at the model's errors `fixed` beside the step's
 /// part `step`, at the `estimates` (every trajectory counted), among those `read`: where a unit can be told to weigh
-/// (`weights`) -- an output with no state read carries every unit's bound alike, and tells none of them apart.
+/// (`weights`) -- a time with no state read carries every unit's bound alike, and tells none of them apart.
 fn tight(estimates: &[Estimate], fixed: &Fixed, step: Bound, read: &[bool]) -> Vec<usize> {
     crowded(&looks(estimates, fixed, step)).into_iter().filter(|&k| read[k]).collect()
 }
 
-/// Of the units' errors `means` (per output and unit), per unit its weight at the `outputs` (`tight`): its errors on
+/// Of the units' errors `means` (per time and unit), per unit its weight at the `times` (`tight`): its errors on
 /// what is shown (the held and the lost atoms', `Measured::means`) and on T, weighed by the held share `held` as T's
 /// total is, each over its target there -- T's its allowance at the estimates' T (# T's allowance) --, added up. No T
 /// weighs where no atom is held.
@@ -3128,25 +3181,25 @@ fn weighing(estimates: &[Estimate], fixed: &Fixed, step: Bound, means: &[Vec<[f6
     weights(means, estimates, held, &tight(estimates, fixed, step, read)).iter().enumerate().filter(|(_, w)| **w > 0.).map(|(u, _)| u).collect()
 }
 
-/// The doubt the reads of a few groups leave on the model's error per output (`keep`), on what is shown and on T: the
+/// The doubt the reads of a few groups leave on the model's error per time (`keep`), on what is shown and on T: the
 /// model's error as every group but one gives it -- the units' as `measured` at their states and what the reach leaves
 /// out, `unsampled` (`model_error`), with the estimates of the others (their populations a state's booking is taken
 /// at, `Booking::at`) -- whose jackknife over the groups is the interval the reads leave on the error, at the family of
-/// the outputs' two reads (`interval`). Its near end is the error less it (`clear`): what the reads leave no doubt of,
+/// the times' two reads (`interval`). Its near end is the error less it (`clear`): what the reads leave no doubt of,
 /// as a rung is left only on that (# The step). Its far end is the error and it (`raised`): what the reads leave no
 /// doubt is not exceeded -- of the error a set of units leaves, the set's errors taken out of every group's
-/// (`interval` of the set). The scout reads eleven states an output, one a group, and a unit's error is heavy-tailed
+/// (`interval` of the set). The scout reads eleven states a time, one a group, and a unit's error is heavy-tailed
 /// over the states (it is largest at the atoms that are hottest): S3's scout read its carrier's dressing as filling the
 /// room on eleven states, where its pilot's eighty-eight booked it at 2.7 % beside 3.7 % in all.
 struct Doubt<'a> {
     measured: &'a Measured<'a>,
-    /// Per group left out, the others' estimates and their model's error per output.
+    /// Per group left out, the others' estimates and their model's error per time.
     left: Vec<(Vec<Estimate>, Vec<[f64; 2]>)>,
     outputs: usize,
 }
 impl<'a> Doubt<'a> {
     fn new(measured: &'a Measured<'a>, outputs: usize, parts: &[&Part], scales: &Scales, unsampled: [f64; 2]) -> Doubt<'a> {
-        // Group by group: a group's units' means are every output's every unit's, and they are summed at once.
+        // Group by group: a group's units' means are every time's every unit's, and they are summed at once.
         let left = (0..parts.len())
             .map(|g| {
                 let rest: Vec<&Part> = parts.iter().enumerate().filter(|(h, _)| *h != g).map(|(_, p)| *p).collect();
@@ -3158,7 +3211,7 @@ impl<'a> Doubt<'a> {
         Doubt { measured, left, outputs }
     }
 
-    /// Per output the jackknife interval over the groups, at the family of the outputs' two reads, of the model's error
+    /// Per time the jackknife interval over the groups, at the family of the times' two reads, of the model's error
     /// less the units `set`'s (none: of the whole error); none where no group reads it (a spread that is no number).
     fn interval(&self, set: &[usize]) -> Vec<[f64; 2]> {
         let rest = self.replicates(set);
@@ -3166,7 +3219,7 @@ impl<'a> Doubt<'a> {
         (0..self.outputs).map(|k| std::array::from_fn(|i| spread(rest.iter().map(|r| r[k][i]), self.left.len() as f64).interval_over(looks))).collect()
     }
 
-    /// Per group left out, per output the model's error less the units `set`'s (`remainder`): the jackknife's
+    /// Per group left out, per time the model's error less the units `set`'s (`remainder`): the jackknife's
     /// replicates.
     fn replicates(&self, set: &[usize]) -> Vec<Vec<[f64; 2]>> {
         self.left
@@ -3180,12 +3233,12 @@ impl<'a> Doubt<'a> {
     }
 
     /// The chance that the next pilot reads the model's error the units `set` leave, `point` (`without`), with some
-    /// look among the `estimates` (`tight`: where an atom is held and a state read) without room, but at the outputs
+    /// look among the `estimates` (`tight`: where an atom is held and a state read) without room, but at the times
     /// `beyond` (`needed`). The estimate's error and the next pilot's own are independent draws of the reads' spread,
-    /// whose jackknife gives its draws over all the outputs together: the deviations δ_g = √(G − 1)(r_g − r̄) of the
+    /// whose jackknife gives its draws over all the times together: the deviations δ_g = √(G − 1)(r_g − r̄) of the
     /// replicates, of mean square the jackknife's variance; so the next read is the point less one draw and plus
     /// another, Â − δ_g + δ_h, over the G² pairs, and the chance is the share of them that leave a look no room. An
-    /// output whose replicates are no number (no group's states read it) has no draw.
+    /// time whose replicates are no number (no group's states read it) has no draw.
     fn chance(&self, set: &[usize], point: &Fixed, estimates: &[Estimate], step: Bound, read: &[bool], beyond: &[usize]) -> f64 {
         let rest = self.replicates(set);
         let g = rest.len();
@@ -3213,21 +3266,21 @@ fn lowered(error: f64, doubt: f64) -> f64 {
     if near.is_nan() { error } else { near.max(0.) }
 }
 
-/// The model's errors `fixed` per output at their near ends (`Doubt`, `lowered`): what the reads leave no doubt of.
+/// The model's errors `fixed` per time at their near ends (`Doubt`, `lowered`): what the reads leave no doubt of.
 fn clear(fixed: &Fixed, doubt: &[[f64; 2]]) -> Fixed {
     Fixed { model: fixed.model.iter().zip(doubt).map(|(m, d)| [lowered(m[0], d[0]), lowered(m[1], d[1])]).collect() }
 }
 
-/// The model's errors `fixed` per output at their far ends (`Doubt`): each with the doubt its reads leave on it, a
+/// The model's errors `fixed` per time at their far ends (`Doubt`): each with the doubt its reads leave on it, a
 /// population's at most one; where the doubt is no number (no group reads it), as it is.
 fn raised(fixed: &Fixed, doubt: &[[f64; 2]]) -> Fixed {
     let far = |error: f64, doubt: f64| if doubt.is_nan() { error } else { error + doubt };
     Fixed { model: fixed.model.iter().zip(doubt).map(|(m, d)| [probability_error(far(m[0], d[0])), far(m[1], d[1])]).collect() }
 }
 
-/// An output's model's error `error` less the errors of some units there, `less`, no less than nothing, a population's
+/// A time's model's error `error` less the errors of some units there, `less`, no less than nothing, a population's
 /// at most one (`without`, `Doubt::interval`); no number where a unit's error there is unbounded -- the states do not
-/// read the output (`Measured::means`), and its error is its bound, which no unit's removal lowers.
+/// read the time (`Measured::means`), and its error is its bound, which no unit's removal lowers.
 fn remainder<'a>(error: [f64; 2], less: impl Iterator<Item = &'a [f64; 2]>) -> [f64; 2] {
     let less = less.fold([0.; 2], |a, m| [a[0] + m[0], a[1] + m[1]]);
     if less[1].is_infinite() {
@@ -3247,7 +3300,7 @@ struct Costs {
     none: Option<f64>,
 }
 
-/// The outputs whose looks set the run's need at the model's errors `fixed` (`needed`): of the looks at outputs read
+/// The times whose looks set the run's need at the model's errors `fixed` (`needed`): of the looks at times read
 /// that the run's trajectories bring within their targets (`Look::fits`), those of the largest need.
 fn binding(estimates: &[Estimate], fixed: &Fixed, step: Bound, read: &[bool]) -> Vec<usize> {
     let fitting: Vec<Look> = looks(estimates, fixed, step).into_iter().filter(|l| read[l.output] && l.fits()).collect();
@@ -3259,7 +3312,7 @@ fn binding(estimates: &[Estimate], fixed: &Fixed, step: Bound, read: &[bool]) ->
 
 /// The units to keep (module documentation, # The model; `keep`), by the run's expected total work. The order: at the
 /// far end of the model's error the units taken so far leave (`far`: the error and the doubt its reads leave on it,
-/// `Doubt`), the outputs where the need binds -- those whose looks leave the statistics no room, and where every look
+/// `Doubt`), the times where the need binds -- those whose looks leave the statistics no room, and where every look
 /// has room those of the largest need (`binding`) --, and there the unit whose weight is the most for the work a µs of
 /// its kept model (`work`: its mean rate; none where its keep is refused, never taken) is taken next: the error that
 /// sets the run's length is removed where the run it leaves costs the least. The order ends where no unit weighs where
@@ -3281,8 +3334,8 @@ fn binding(estimates: &[Estimate], fixed: &Fixed, step: Bound, read: &[bool]) ->
 /// look without room it keeps again, of the larger sets the one of the least expected work -- the largest, another
 /// pilot and its product at its own work. A cost against a cost: the error read and its far end are the two ends of
 /// it. (Taken until the error read had room, e038's pilots kept 6, 2, 1 and 1 units over four attempts, a pilot and its
-/// reads each, 440 CPU-s, the next pilot reading the outputs left with no room as often as not; taken to the far end of
-/// the error, R4_LIN_2's pilot kept six units where one did, and the next pilot three more.) Outputs that no set has
+/// reads each, 440 CPU-s, the next pilot reading the times left with no room as often as not; taken to the far end of
+/// the error, R4_LIN_2's pilot kept six units where one did, and the next pilot three more.) Times that no set has
 /// room at -- every unit that weighs there kept -- are no set's to cover (the ledger flags them). A set that leaves a
 /// look no room at the error as read (`point`) is no candidate where a larger one leaves room there: its model decides
 /// first on these same states (module documentation, # An attempt's own), and their reads ask the rest of the room at
@@ -3299,7 +3352,7 @@ fn binding(estimates: &[Estimate], fixed: &Fixed, step: Bound, read: &[bool]) ->
 #[allow(clippy::too_many_arguments)]
 fn needed(estimates: &[Estimate], step: Bound, means: &[Vec<[f64; 2]>], held: &[f64], read: &[bool], costs: &Costs, work: &dyn Fn(&[usize]) -> Option<[f64; 2]>, point: &dyn Fn(&[usize]) -> Fixed, far: &dyn Fn(&[usize]) -> Fixed, price: &dyn Fn(&[usize], &[usize]) -> [f64; 2]) -> Vec<usize> {
     let tight_at = |set: &[usize]| tight(estimates, &far(set), step, read);
-    // The outputs no set has room at: those tight with every unit kept that weighs where the far end is tight.
+    // The times no set has room at: those tight with every unit kept that weighs where the far end is tight.
     let every: Vec<usize> = weights(means, estimates, held, &tight_at(&[])).iter().enumerate().filter(|&(_, w)| *w > 0.).map(|(u, _)| u).collect();
     let beyond = tight_at(&every);
     let open = |set: &[usize]| -> Vec<usize> {
@@ -3405,7 +3458,7 @@ fn least_expected(taken: &[usize], single: &dyn Fn(usize) -> f64, costs: &Costs,
     chosen
 }
 
-/// The model's errors `fixed` less those of the units `set` (`means`) at the outputs read -- a read output's errors are
+/// The model's errors `fixed` less those of the units `set` (`means`) at the times read -- a read time's errors are
 /// numbers (`Measured::means`) --, no less than nothing (`needed`).
 fn without(fixed: &Fixed, means: &[Vec<[f64; 2]>], read: &[bool], set: &[usize]) -> Fixed {
     let model = fixed
@@ -3422,16 +3475,16 @@ fn without(fixed: &Fixed, means: &[Vec<[f64; 2]>], read: &[bool], set: &[usize])
     Fixed { model }
 }
 
-/// Each output's accounts of what is shown and of the total T (ledger.rs `Account`) by the run's estimates, the model's
-/// errors per output (`Fixed`: on what is shown every atom's, `Measured::means`; on T the held atoms') and the step's
+/// Each time's accounts of what is shown and of the total T (ledger.rs `Account`) by the run's estimates, the model's
+/// errors per time (`Fixed`: on what is shown every atom's, `Measured::means`; on T the held atoms') and the step's
 /// part, T's where read: the held share 1 − L weighs T's whole accounts (module documentation, # Stopping); at t = 0
 /// what is shown is the request's state, without error, and T the initial atoms' estimate (module documentation,
-/// # Outputs and windows): no step is taken and no model has acted there, so T's account is its statistics alone.
-/// The share of the output's trajectories not counted is booked whole on what is shown, in the model's part
+/// # Times and windows): no step is taken and no model has acted there, so T's account is its statistics alone.
+/// The share of the time's trajectories not counted is booked whole on what is shown, in the model's part
 /// (estimate.rs, # What is counted: what no number of trajectories takes away), and leaves T no account
 /// (`temperature_model`). The model's error on what is shown is at most 1, a probability's. T has an account where its
-/// statistics, the model's error and its step error are all read. The outputs' accounts are made on the pool, each
-/// output's by itself.
+/// statistics, the model's error and its step error are all read. The times' accounts are made on the pool, each
+/// time's by itself.
 fn accounts(estimates: &[Estimate], fixed: &Fixed, step: Bound) -> (Vec<Account>, Vec<Option<Account>>) {
     estimates
         .par_iter()
@@ -3449,7 +3502,7 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed, step: Bound) -> (Vec<Account>
         .unzip()
 }
 
-/// T's account at an output (`accounts`) from its estimate, the units' error on T there `units`, the step's part `bound`
+/// T's account at a time (`accounts`) from its estimate, the units' error on T there `units`, the step's part `bound`
 /// (a share of T's allowance) and the statistics' relative interval `interval`: the model's part (`temperature_model`)
 /// and the statistics' weighed by the held share, the step's read so already (estimate.rs `between`), times the
 /// allowance.
@@ -3458,7 +3511,7 @@ fn temperature_account(e: &Estimate, units: f64, bound: &Bound, interval: f64) -
     Account { model: weighed(h, temperature_model(e, units)), step: bound.temperature * e.temperature_target, statistics: weighed(h, interval) }
 }
 
-/// The model's part of T's account at an output whose units' error on T is `units` (relative): theirs where every
+/// The model's part of T's account at a time whose units' error on T is `units` (relative): theirs where every
 /// trajectory is counted; unbounded where some is not -- the part of T the held atoms of unknown fate make is bounded by
 /// nothing the run read (estimate.rs, # What is counted).
 fn temperature_model(e: &Estimate, units: f64) -> f64 {
@@ -3473,7 +3526,7 @@ fn weighed(h: f64, error: f64) -> f64 {
 
 /// What the pilot measured of the model's units (SPEC §5.2): the errors of the folded units read at the states
 /// (`Sampled`: the rows one after another, a row the read units' errors on the populations and on T in their order),
-/// each read's output, group and row, whether it reads a lost atom's fate, and how each folded unit is booked
+/// each read's time, group and row, whether it reads a lost atom's fate, and how each folded unit is booked
 /// (`booked`).
 struct Measured<'a> {
     errors: &'a [Booking],
@@ -3484,24 +3537,24 @@ struct Measured<'a> {
     booked: &'a [Booked],
 }
 impl Measured<'_> {
-    /// Per output and unit the unit's error on what is shown (absolute) and on the held atoms' T (relative), of the
+    /// Per time and unit the unit's error on what is shown (absolute) and on the held atoms' T (relative), of the
     /// reads of the pilot's groups but `left` (module documentation, # The model: where the atoms went). What is shown
-    /// at an output is every atom's fate there -- a held atom's rows, P_s = E[A ρ_s], and a lost one's loss, L = E[1 −
+    /// at a time is every atom's fate there -- a held atom's rows, P_s = E[A ρ_s], and a lost one's loss, L = E[1 −
     /// A] (estimate.rs, # The outputs are expectations) --, so the model errs on it by the mean over the atoms of the
     /// error of each one's fate: (1 − L) times the held atoms' mean, each at its state there, and L times the lost
-    /// atoms', each along its path (`Booking::path`). T is the held atoms' alone. Where no read stands for an output
+    /// atoms', each along its path (`Booking::path`). T is the held atoms' alone. Where no read stands for a time
     /// the error is its bound there, 1 on what is shown and none on T (the run's atoms there are at most the share the
     /// pilot left unseen, and T has no account without a pilot's T: its look fits no number of trajectories and is not
     /// chased).
     /// A held state's booking is taken at the populations `estimates` give there (`Booking::at`: those of the groups the
     /// mean is over), and so is the share L. A unit booked at its bound (`booked`) errs by it at every read, held or
-    /// lost, on what is shown and on T: it is booked as a read one whose every state reads its bound. The outputs are
-    /// made on the pool, each by itself: an output's sums take its reads in their order.
+    /// lost, on what is shown and on T: it is booked as a read one whose every state reads its bound. The times are
+    /// made on the pool, each by itself: a time's sums take its reads in their order.
     fn means(&self, outputs: usize, left: Option<usize>, estimates: &[Estimate]) -> Vec<Vec<[f64; 2]>> {
         self.means_of(outputs, left, estimates, &(0..self.booked.len()).collect::<Vec<_>>())
     }
 
-    /// Per output the folded units' combined error (`means`): at each read, the state's own error -- the model with every
+    /// Per time the folded units' combined error (`means`): at each read, the state's own error -- the model with every
     /// unit folded against the model with all of them kept, there: every folded unit's error at the state together, each
     /// booked as `means` books it --, and their means. The units' errors at a state are its fold's parts, which add up to
     /// the state's (model/units.rs, # The errors: their shares of the state's rates and shifts add up to one), not signed
@@ -3533,12 +3586,12 @@ impl Measured<'_> {
         })
     }
 
-    /// Per output `n` errors (`means`): each read gives them (`each`: its row of the read units, the output's held
+    /// Per time `n` errors (`means`): each read gives them (`each`: its row of the read units, the time's held
     /// populations, whether it reads a lost atom's fate, into its `n` pairs), and the held reads' means and the lost
     /// reads' make them, by the held share there.
     fn reduced(&self, outputs: usize, left: Option<usize>, estimates: &[Estimate], n: usize, each: &(dyn Fn(&[Booking], &[f64; STATES], bool, &mut [[f64; 2]]) + Sync)) -> Vec<Vec<[f64; 2]>> {
         let width = read_units(self.booked);
-        // Each output's reads, in their order.
+        // Each time's reads, in their order.
         let mut reads: Vec<Vec<usize>> = vec![vec![]; outputs];
         for (read, &k) in self.output.iter().enumerate() {
             reads[k].push(read);
@@ -3562,7 +3615,7 @@ impl Measured<'_> {
                 }
                 // Every held atom's group reads its first held one, every lost atom's its first lost one: a kind none
                 // reads is none of these groups' atoms, and weighs nothing -- no T where no atom is held. Read by
-                // neither, the output is unread.
+                // neither, the time is unread.
                 if holding == 0. && losing == 0. {
                     return vec![[1., f64::INFINITY]; n];
                 }
@@ -3574,21 +3627,21 @@ impl Measured<'_> {
     }
 }
 
-/// The units' errors (`Measured::means`) added up per output (populations, T; SPEC §4), every folded unit's and what the
+/// The units' errors (`Measured::means`) added up per time (populations, T; SPEC §4), every folded unit's and what the
 /// reach leaves out of the initial ensemble (of the atoms, of their kinetic energy; model/reach.rs `Model::left_out`): the
 /// whole a keep's pricing takes a unit's error out of (`Level`). The error booked is the combined one, measured
-/// (`model_error`); the two are one number where the states read every output alike.
+/// (`model_error`); the two are one number where the states read every time alike.
 fn sums(means: &[Vec<[f64; 2]>], unsampled: [f64; 2]) -> Vec<[f64; 2]> {
     means.iter().map(|units| units.iter().fold(unsampled, |a, m| [a[0] + m[0], a[1] + m[1]])).collect()
 }
 
-/// The model's error at an output after t = 0 from the sum `whole` of its units' there and what the reach leaves out
+/// The model's error at a time after t = 0 from the sum `whole` of its units' there and what the reach leaves out
 /// (`sums`): a population's at most 1.
 fn model_error_at(whole: [f64; 2]) -> [f64; 2] {
     [probability_error(whole[0]), whole[1]]
 }
 
-/// The model's error booked per output (SPEC §4; module documentation, # The model): the folded units' combined error
+/// The model's error booked per time (SPEC §4; module documentation, # The model): the folded units' combined error
 /// measured at the states (`Measured::combined`) and what the reach leaves out of the initial ensemble (of the atoms, of
 /// their kinetic energy; model/reach.rs `Model::left_out`), a population's at most 1; none at t = 0, the request's state.
 fn model_error(combined: &[[f64; 2]], unsampled: [f64; 2]) -> Vec<[f64; 2]> {
@@ -3610,7 +3663,7 @@ fn bandwidth(model: &Model, cluster: usize) -> f64 {
     levels.iter().flat_map(|a| levels.iter().map(move |b| (a.conj() - *b).abs())).fold(0., f64::max)
 }
 
-/// A state a mean over the run is read at (`one_each`): a pilot trajectory's at one output, with its group's place
+/// A state a mean over the run is read at (`one_each`): a pilot trajectory's at one time, with its group's place
 /// among the pilot's and its weight in the mean, the time its trajectory holds its atom (µs).
 struct Pick<'a> {
     state: &'a State,
@@ -3627,11 +3680,11 @@ struct Pick<'a> {
 /// Σ_i T_i, T_i the time trajectory i holds its atom -- to its loss (its last state, `Part::lost`), or through the run:
 /// a trajectory's work is its rate over the time it is held, and an error is booked on the atoms that are held. A
 /// trajectory is the ensemble's independent draw and its states along the run are not, so each trajectory gives one
-/// state, f at one output of H_i, the outputs after t = 0 it holds its atom at, for the whole of its time: f_i·T_i, the
-/// one-point rule, and the mean is Σ_i T_i f_i / Σ_i T_i (`over_the_run`). One that is lost before the first output
+/// state, f at one time of H_i, the times after t = 0 it holds its atom at, for the whole of its time: f_i·T_i, the
+/// one-point rule, and the mean is Σ_i T_i f_i / Σ_i T_i (`over_the_run`). One that is lost before the first time
 /// gives its state at t = 0, the start of the path its loss ends (module documentation, # The model: where the atoms
 /// went), for its own time: a run whose atoms are all lost so is priced at the states they were at, not at nothing.
-/// For the rule to read the whole run the points are spread evenly over it: trajectory i takes the output of H_i that
+/// For the rule to read the whole run the points are spread evenly over it: trajectory i takes the time of H_i that
 /// lies the fraction
 /// u_i = (ρ_i + ½)/n of the way through it, ρ_i its rank among the n trajectories -- the midpoints of n equal parts of
 /// the run. The rank of the member m of the group at the place g of G is ρ = m·G + g: a group's own members lie a
@@ -3639,7 +3692,7 @@ struct Pick<'a> {
 /// the whole run by itself -- leaving one out, as the pricing's jackknife does, leaves no stretch of the run unread
 /// and reads the run's own change in time as no spread --, and all of them together read it at n evenly spaced
 /// points. A function of the trajectory's number alone: its group's place and its own place in the group. A
-/// trajectory that ends with no outcome before the first output (estimate.rs, # What is counted) has no state to give,
+/// trajectory that ends with no outcome before the first time (estimate.rs, # What is counted) has no state to give,
 /// and weighs nothing.
 fn one_each<'a>(parts: &[&'a Part]) -> Vec<Pick<'a>> {
     let groups = parts.len();
@@ -3669,7 +3722,7 @@ fn over_the_run(picks: &[Pick], values: impl Iterator<Item = f64>, left: Option<
 }
 
 /// The pilot's groups but one (or all of them) as the pricing reads them (`Pricing`): the estimates and the units' mean
-/// errors over them (per output and unit), and the current model's W there; every model's error taken less the doubt
+/// errors over them (per time and unit), and the current model's W there; every model's error taken less the doubt
 /// the reads leave on it (`doubt`: the scout's; none on the pilot).
 struct Level<'a> {
     left: Option<usize>,
@@ -3677,7 +3730,7 @@ struct Level<'a> {
     means: std::borrow::Cow<'a, [Vec<[f64; 2]>]>,
     /// The units' mean errors added up (`sums`).
     whole: Vec<[f64; 2]>,
-    /// Per output the trajectories its looks need at the current model's error, and the outputs after t = 0 by that
+    /// Per time the trajectories its looks need at the current model's error, and the times after t = 0 by that
     /// need, the largest first.
     needs: Vec<f64>,
     order: Vec<usize>,
@@ -3686,12 +3739,12 @@ struct Level<'a> {
     /// What the reach leaves out (`sums`), as the looks take it, and the step's part (`keep`).
     unsampled: [f64; 2],
     step: Bound,
-    /// Per output the doubt on the model's error (`lowered`).
+    /// Per time the doubt on the model's error (`lowered`).
     doubt: Vec<[f64; 2]>,
 }
 impl<'a> Level<'a> {
     /// The level of the groups but `left` from their estimates and the units' mean errors over them, beside the step's
-    /// part `step`, the model's errors (the units' with what the reach leaves out) less the `doubt` per output.
+    /// part `step`, the model's errors (the units' with what the reach leaves out) less the `doubt` per time.
     fn new(left: Option<usize>, estimates: std::borrow::Cow<'a, [Estimate]>, means: std::borrow::Cow<'a, [Vec<[f64; 2]>]>, step: Bound, unsampled: [f64; 2], doubt: &[[f64; 2]]) -> Level<'a> {
         let whole = sums(&means, unsampled);
         let fixed = clear(&Fixed { model: model_error(&sums(&means, [0.; 2]), unsampled) }, doubt);
@@ -3707,11 +3760,11 @@ impl<'a> Level<'a> {
         Level { left, estimates, means, whole, needs, order, need, unsampled, step, doubt: doubt.to_vec() }
     }
 
-    /// The trajectories the looks need beside the step's part and a model's error `model` (per output, less the level's
+    /// The trajectories the looks need beside the step's part and a model's error `model` (per time, less the level's
     /// doubt) that is nowhere more than the level's own -- a unit's removed, every unit's. A look's need falls with the
-    /// model's error, so an output needs no more than it does at the level's own (`needs`): the outputs are asked by that
+    /// model's error, so a time needs no more than it does at the level's own (`needs`): the times are asked by that
     /// need, the largest first, and no further once the next one's is no more than what those before it need now. The
-    /// largest over every output, for one or two outputs' looks.
+    /// largest over every time, for one or two times' looks.
     fn need_beside(&self, model: &dyn Fn(usize) -> [f64; 2]) -> f64 {
         let mut most = 0.;
         for &k in &self.order {
@@ -3726,7 +3779,7 @@ impl<'a> Level<'a> {
     }
 
     /// The trajectories the looks need beside the units' errors but those of the units `set` and the step's share: a read
-    /// error leaves the sum by subtraction (`sums`); at an output no state was read at every unit's error is its bound
+    /// error leaves the sum by subtraction (`sums`); at a time no state was read at every unit's error is its bound
     /// alike (`Measured::means`), its population's leaves as a read one does, and on T the other units' bounds stand --
     /// with every unit removed, what the reach leaves out.
     fn need_without_all(&self, set: &[usize]) -> f64 {

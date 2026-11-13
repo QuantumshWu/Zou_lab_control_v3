@@ -1,6 +1,7 @@
 //! The analysis times: the times the solve's reads and decisions are to stand on, chosen by how fast what is read
 //! changes -- not by the outputs shown (motion3d_status/rewrite/r_samples.status.md: the output grid entered the
-//! decisions through the reads at every output). A pure function; the solve does not read it yet.
+//! decisions through the reads at every output). A pure function; the solve reads it (solve.rs, # The analysis times:
+//! the readings, the candidates' first round, what stands on the times).
 //!
 //! # The rule
 //! The candidates are the companion level's step ends, m·2τ (m = 0 … M, M·2τ the run's end): every time both levels of
@@ -35,7 +36,8 @@
 //! What it does not see: a feature narrower than the reads' spacing that none of them touches -- a peak of width w
 //! anywhere in [0, end] is seen at the first reads where it reaches one of them above its noise (within h/8 of a
 //! quarter or the middle, h the first interval). That is why the switching times, where a reading's sharp features
-//! begin, are cuts from the outset.
+//! begin, are cuts from the outset -- and, in the solve, as many more as leave no first interval longer than T's longest
+//! window (solve.rs `analysed`).
 //!
 //! Noise: an interval over which the reading is a line splits by chance with probability p = P(|N| > z) at most
 //! (Šidák, and Student's t at the groups for the jackknife's own spread); its halves are judged on reads of their own,

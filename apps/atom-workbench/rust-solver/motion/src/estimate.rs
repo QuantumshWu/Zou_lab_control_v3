@@ -67,23 +67,26 @@
 //! (measured, S2Q at 0.44 µs: T's read on 5 to 9 of its groups at far ends of 2 to 21 times the bound, from 88 to 5632
 //! pairs alike).
 //!
-//! What it reads of a quantity is the error's size over the run: its mean square over the K outputs after t = 0,
-//! M = (1/K) Σ_k e_k² -- the square of the mean error plus the error's variance over the outputs, so an error that
-//! changes its sign in time (an oscillating population's) counts by its size, where its signed mean reads nothing.
+//! What it reads of a quantity is the error's size over the run: its mean square over the run, M = (1/T)∫e² dt, at the
+//! times after t = 0 the two levels are read at (solve.rs: their analysis times, on whose line every reading and its
+//! step error lie within the noise) by the trapezoid, M = Σ_k w_k e_k² / Σ_k w_k with w_k half the interval between
+//! the time's neighbours (`trapezoid`) -- the square of the mean error plus the error's variance over the run, so an
+//! error that changes its sign in time (an oscillating population's) counts by its size, where its signed mean reads
+//! nothing.
 //! The square of an estimate holds the estimate's own variance, a floor that no error is needed for. The groups are
 //! independent, and a product of two different groups' values holds none: with x_ik group i's own value of e_k,
-//!   M̂ = (1/K) Σ_k [(Σ_i x_ik)² − Σ_i x_ik²]/(G(G − 1)),
-//! the mean over the outputs of the mean product of two different groups (per output the estimate's square less its
+//!   M̂ = Σ_k w_k [(Σ_i x_ik)² − Σ_i x_ik²]/(G(G − 1)) / Σ_k w_k,
+//! the mean over the run of the mean product of two different groups (per time the estimate's square less its
 //! squared standard error), is M in the mean whatever the noise, and lies on either side of zero where there is no
 //! error. A group's own value is the jackknife's, G times the whole ensemble's e_k less G − 1 times the e_k without the
 //! group: the group's own difference where the quantity is a mean over the trajectories (the loss, a row as shown),
 //! and for T, a ratio, its linear part about the pooled levels. The error of M̂ is its delete-one-group jackknife --
 //! without group i the same mean product over the other groups, [(S_k − x_ik)² − (Q_k − x_ik²)]/((G − 1)(G − 2)) from
-//! the outputs' sums S_k and Q_k of the values and of their squares --, each group left out of both levels and of
-//! every output at once, so that the outputs' correlations in time are in it: what the two levels share (the initial
+//! the times' sums S_k and Q_k of the values and of their squares, by the same weights --, each group left out of both
+//! levels and of every time at once, so that the times' correlations are in it: what the two levels share (the initial
 //! atoms, as long as the motion remembers them) cancels, and where they have decorrelated it is the two levels' own
-//! errors. Its variance has two parts, (4/G)⟨μ, Cμ⟩ + (2/(G(G − 1))) tr C² (μ the errors over the outputs, C their
-//! noise's covariance over one group, both in the outputs' mean product): the first is there with an error and falls
+//! errors. Its variance has two parts, (4/G)⟨μ, Cμ⟩ + (2/(G(G − 1))) tr C² (μ the errors over the times, C their
+//! noise's covariance over one group, both in the times' weighed mean product): the first is there with an error and falls
 //! as 1/G, the second is the floor's own scatter and falls as 1/G²; the jackknife counts the second twice
 //! (2(G − 1)/(G − 2) times: Efron and Stein), so it is high where there is no error, and never low.
 //!
