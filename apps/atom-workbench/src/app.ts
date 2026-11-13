@@ -29,7 +29,7 @@ import {CurrentResults} from './current-results.js';
 import {covers,delivers,horizonRecords,keptCheckpoint,plannedSolve,solveOptions,type SolveInputs,type SolveKind} from './solve-plan.js';
 import {STATIC_MIXING_LIMIT,displayMixing,modelScope,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
 import type {ScopeNote} from './spectroscopy.js';
-import {defaultScene,newLaser,MAXIMUM_LASERS,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
+import {newLaser,MAXIMUM_LASERS,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import {addReflection,detachReflection,reflectionOf,sourceOf} from './reflection.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionDevice,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
 import type {ApproximationLedger,Distributions,DynamicsResult,LedgerTotal} from './solver-types.js';
@@ -1489,13 +1489,13 @@ async function confirmReplace(action:string):Promise<boolean>{
   return confirm('替换当前场景',`当前场景「${scene.name}」有修改。${action}会替换整个场景，且无法撤销；需要保留时请先导出。`,{confirmText:'替换',cancelText:'取消',kind:'warning'});
 }
 function showExamples():void{
-  new Menu([...EXAMPLES.map(example=>({label:example.label,action:()=>void loadExample(example.key)})),'separator',{label:'默认场景',action:()=>void resetScene()}]).openBelow(examplesCommand.root);
+  new Menu(EXAMPLES.map(example=>({label:example.label,action:()=>void loadExample(example.key)}))).openBelow(examplesCommand.root);
 }
 async function loadExample(key:string):Promise<void>{
   if(!await confirmReplace('加载示例'))return;
-  const example=exampleScene(key);view=example.view;if(view==='levels'||view==='dynamics')resultView=view;spectral=example.line;replaceScene(example.scene,`已加载示例「${example.scene.name}」`);
+  // Every example is on D2 and opens on the dynamics page.
+  const example=exampleScene(key);view='dynamics';resultView='dynamics';spectral='D2';replaceScene(example,`已加载示例「${example.name}」`);
 }
-async function resetScene():Promise<void>{if(await confirmReplace('恢复默认场景'))replaceScene(defaultScene(),'已恢复默认场景');}
 function download(text:string,name:string):void{const url=URL.createObjectURL(new Blob([text],{type:'application/json'})),link=document.createElement('a');link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function exportScene():void{const name=`${scene.name.replace(/[\\/:*?"<>|]/g,'_').slice(0,100)||'rb87-scene'}.json`;download(JSON.stringify(scene,null,2),name);markBaseline();note(`已导出场景、标记与动力学设置：${name}`);}
 $<HTMLInputElement>('file-input').onchange=async event=>{
