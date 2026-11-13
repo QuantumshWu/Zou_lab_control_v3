@@ -47,6 +47,11 @@ const fn square_root(a: f64) -> f64 {
 // ---------------------------------------------------------------------------------------------------------------------
 // The contract's definitions and caps.
 
+/// The full quantum treatment's sub-Doppler minimum in recoil temperatures k_BT_rec = (ħk)²/m (solve.rs, # T's
+/// allowance): its momentum spread bottoms out at about 5–6 ħk rms per axis, (5.5 ħk)²/m = 30 k_BT_rec -- 11 µK for
+/// Rb87 on D2, 6 µK for Cs --, where the point particle, which has no lower bound on T, is off by O(1). The user's
+/// statement of the semiclassical method's floor, not a fitted number.
+pub const SUB_DOPPLER_RECOILS: f64 = 30.0;
 /// The validated regime's boundary (SPEC §0, §3): k_BT ≥ CLASSICAL·ħω, axis by axis, mirrored in the app (the result's
 /// `classical`: every axis's; the UI's grey band, src/model-notes.ts `SEMICLASSICAL_REGIME`). Reported per output and
 /// axis (solve.rs `classical`); it decides nothing in the solve. An empirical boundary, not a derived one.

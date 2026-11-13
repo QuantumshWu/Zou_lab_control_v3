@@ -635,6 +635,9 @@ pub struct Trajectory {
     pub threshold: f64,
     /// The jumps made: the next one draws from `Stream::jump(seed, index, jumps + 1)`.
     pub jumps: u32,
+    /// The photons its jumps emitted (a jump at its threshold on landing emits another) and their Σ k_φ² (1/µm²): the
+    /// recoil of the light it scatters, which sets T's semiclassical error scale (solve.rs, # T's allowance).
+    pub scattered: [f64; 2],
     /// The time the atom was lost (SPEC §1.7: checked at every step's end and after every jump); None while held.
     pub lost: Option<f64>,
     /// Whether a step of it did not resolve what it samples along its path at its speed (`Domain::proven`; module
@@ -676,6 +679,7 @@ impl Trajectory {
             time: 0.0,
             threshold,
             jumps: 0,
+            scattered: [0.0; 2],
             lost: None,
             unresolved: false,
             seed,
@@ -1992,6 +1996,7 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
         for a in 0..3 {
             trajectory.kappa[a] += -photon.wave_number * direction[a] + photon.kick[a];
         }
+        trajectory.scattered = [trajectory.scattered[0] + 1.0, trajectory.scattered[1] + photon.wave_number * photon.wave_number];
         let scale = 1.0 / w.sqrt();
         trajectory.psi = f.iter().map(|z| *z * scale).collect();
         trajectory.cluster = photon.landing;

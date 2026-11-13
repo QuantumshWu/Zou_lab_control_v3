@@ -16,9 +16,10 @@
 //!   `Estimate::shown_statistics`). The same function as A's share, another error: that one is the model's, at the most
 //!   trajectories; this one the sample's, at its own number.
 //! The populations' are absolute against `POPULATION_TARGET`, every row as shown and the loss; T's relative, of the total
-//! T (the mean over the three lab axes, the one T the target is on; no lab axis is held to it), against
-//! `TEMPERATURE_TARGET` at the outputs where it has an account, its three parts weighed by the held share 1 − L (SPEC §0,
-//! §4: the temperature describes the held atoms; solve.rs `accounts`).
+//! T (the mean over the three lab axes, the one T the target is on; no lab axis is held to it), against T's allowance
+//! at each output where it has an account -- `TEMPERATURE_TARGET` where T is high, the semiclassical error scale where
+//! it is not (solve.rs, # T's allowance) --, its three parts weighed by the held share 1 − L (SPEC §0, §4: the
+//! temperature describes the held atoms; solve.rs `accounts`).
 //!
 //! # The contract's shape (contract §2.2)
 //! `totals`: the populations' and T's a-priori part √(A² + b²) -- what the approximations leave, the statistics aside (the
@@ -105,22 +106,23 @@ impl Ledger {
     }
     /// The items from the largest estimate down, the totals and the flags of the outputs at `times` (µs): the populations'
     /// accounts at every output and the total T's (the mean over the lab axes: what T's target is on, SPEC §4) where it
-    /// has one.
-    pub fn close(&mut self, times: &[f64], population: &[Account], temperature: &[Option<Account>]) {
+    /// has one, against T's allowance at each output, `allowed` (relative; solve.rs, # T's allowance).
+    pub fn close(&mut self, times: &[f64], population: &[Account], temperature: &[Option<Account>], allowed: &[f64]) {
         self.items.sort_by(|a, b| b.estimate.total_cmp(&a.estimate));
         let populations: Vec<Option<Account>> = population.iter().map(|&a| Some(a)).collect();
-        self.totals = Totals { population: largest(&populations, POPULATION_TARGET), temperature: largest(temperature, TEMPERATURE_TARGET) };
-        for (accounts, target, what) in [(&populations[..], POPULATION_TARGET, "布居与丢失"), (temperature, TEMPERATURE_TARGET, "总温度")] {
-            // Not within the target: beyond it, or no number.
+        let fixed = vec![POPULATION_TARGET; times.len()];
+        self.totals = Totals { population: largest(&populations, &fixed), temperature: largest(temperature, allowed) };
+        for (accounts, targets, what) in [(&populations[..], &fixed[..], "布居与丢失"), (temperature, allowed, "总温度")] {
+            // Not within the target: beyond it, or no number. The worst: of the most of its target.
             let beyond: Vec<usize> =
-                (0..times.len()).filter(|&k| accounts[k].is_some_and(|a| !(a.total() <= target))).collect();
-            if let Some(&worst) = beyond.iter().max_by(|&&i, &&j| accounts[i].unwrap().total().total_cmp(&accounts[j].unwrap().total())) {
+                (0..times.len()).filter(|&k| accounts[k].is_some_and(|a| !(a.total() <= targets[k]))).collect();
+            if let Some(&worst) = beyond.iter().max_by(|&&i, &&j| (accounts[i].unwrap().total() / targets[i]).total_cmp(&(accounts[j].unwrap().total() / targets[j]))) {
                 let a = accounts[worst].unwrap();
                 self.flag(format!(
                     "{}：{what}的估计误差超出目标，最大 {}（目标 {}；模型近似 {}、时间步长 {}、统计 {}）",
                     span(&beyond, times),
                     percent(a.total()),
-                    percent(target),
+                    percent(targets[worst]),
                     percent(a.model),
                     percent(a.step),
                     percent(a.statistics)
@@ -156,11 +158,12 @@ pub fn optical(ledger: &mut Ledger, sums: [f64; 4]) -> f64 {
     locality + debt
 }
 
-/// The largest a-priori part among the accounts given (module documentation, # The contract's shape), and the target; none
-/// given, no error.
-fn largest(accounts: &[Option<Account>], target: f64) -> Total {
-    let error = accounts.iter().flatten().map(Account::a_priori).fold(0., f64::max);
-    Total { error, target }
+/// The a-priori part among the accounts given at the output where it takes most of its target there, `targets`
+/// (module documentation, # The contract's shape), and that target; none given, no error, and T's target where it is
+/// high (its allowance's limit).
+fn largest(accounts: &[Option<Account>], targets: &[f64]) -> Total {
+    let at = (0..accounts.len()).filter(|&k| accounts[k].is_some()).max_by(|&i, &j| (accounts[i].unwrap().a_priori() / targets[i]).total_cmp(&(accounts[j].unwrap().a_priori() / targets[j])));
+    at.map_or(Total { error: 0., target: TEMPERATURE_TARGET }, |k| Total { error: accounts[k].unwrap().a_priori(), target: targets[k] })
 }
 
 /// A share in percent to two significant digits, the digits the app writes an error to (src/accuracy.ts `errorPercent`:
@@ -235,7 +238,7 @@ mod tests {
         let within = vec![account(0.01, 0.0224, 0.03); 6];
         let read = vec![Some(account(0.01, 0.0447, 0.05)); 6];
         let mut quiet = Ledger::default();
-        quiet.close(&times, &within, &read);
+        quiet.close(&times, &within, &read, &[TEMPERATURE_TARGET; 6]);
         assert_eq!((quiet.flagged.as_ref(), quiet.note.as_ref()), (None, None));
         assert!((quiet.totals.population.error - within[0].a_priori()).abs() < 1e-16 && quiet.totals.population.target == POPULATION_TARGET);
 
@@ -247,7 +250,7 @@ mod tests {
         temperature[4] = Some(account(0.06, 0.0447, 0.02));
         temperature[5] = None;
         let mut l = Ledger::default();
-        l.close(&times, &population, &temperature);
+        l.close(&times, &population, &temperature, &[TEMPERATURE_TARGET; 6]);
         assert!((l.totals.population.error - population[3].a_priori()).abs() < 1e-16);
         assert_eq!(l.totals.temperature.error, temperature[4].unwrap().a_priori(), "the statistics take no part");
         let flagged = l.flagged.unwrap();
@@ -260,7 +263,7 @@ mod tests {
     fn items_are_the_approximations_that_count() {
         let mut l = Ledger::default();
         assert_eq!((l.item("small", 1e-3, ""), l.item("nothing", 1e-32, ""), l.item("step", 0.022, "")), (Some(0), None, Some(1)));
-        l.close(&[0., 1.], &[Account::default(); 2], &[None; 2]);
+        l.close(&[0., 1.], &[Account::default(); 2], &[None; 2], &[TEMPERATURE_TARGET; 2]);
         assert_eq!(l.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["step", "small"]);
     }
 
