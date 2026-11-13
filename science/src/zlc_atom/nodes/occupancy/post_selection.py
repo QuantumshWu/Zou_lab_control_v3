@@ -3,10 +3,13 @@
 While the switch is on, Occupancy's processor takes one step before it
 publishes (``post_select``): counts and occupied stay valid only where a
 condition on two frames of the cycle holds for that shot and site, on every
-frame.  The condition is Derive rows (:func:`_rows`) evaluated by Derive's
-engine, so the defaults are exactly Occupancy -> Derive ``same =
-occupied[frame first] == occupied[frame last]``, ``kept = occupied where
-same``.  frame_judged is Occupancy's evidence frames as they are: its cells
+frame.  A cycle that does not carry the frames the condition reads (fewer
+than two, or an absent middle frame) is data, not a fault: the condition
+holds nowhere, so nothing is kept -- counts and occupied are published with
+every value invalid and the node says why once a run.  The condition is
+Derive rows (:func:`_rows`) evaluated by Derive's engine, so the defaults
+are exactly Occupancy -> Derive ``same = occupied[frame first] ==
+occupied[frame last]``, ``kept = occupied where same``.  frame_judged is Occupancy's evidence frames as they are: its cells
 are pixels, and Derive refuses a site mask on them.
 """
 
@@ -15,6 +18,7 @@ from __future__ import annotations
 import functools
 from collections.abc import Mapping
 
+import numpy as np
 from zlc_data import owned_snapshot_from_arrays
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField
@@ -151,37 +155,42 @@ def _rows(axis: str, picks: tuple[str | None, str | None], mode: str, how) -> tu
 
 
 def _post_selected(result: OccupancyResult, axis, *, kept: Mapping[str, object]) -> OccupancyResult:
-    """Occupancy's ``result`` with counts and occupied valid only where ``kept`` holds."""
+    """Occupancy's ``result`` with counts and occupied valid only where ``kept`` holds:
+    nowhere, in a cycle without the frames it reads (:func:`source_problem`)."""
 
     count = 1 if axis is None else int(axis.size)
-    problem = source_problem(kept, count)
-    if problem:
-        raise ValueError(problem)
-    labels = axis.labels()
-    picks = tuple(None if frame is None else labels[frame] for frame in _read_frames(kept, count))
-    how = kept["relation"] if kept["mode"] == "relation" else kept["values"]
     snapshots = {member: result.artifacts[member].materialize() for member in _MASKED}
-    masked = evaluate(_rows(axis.name, picks, kept["mode"], how), {
-        member: Operand(snapshot.block.schema, snapshot.block.values, snapshot.expanded_validity())
-        for member, snapshot in snapshots.items()
-    })
+    if source_problem(kept, count):
+        valid = {member: np.zeros_like(snapshot.expanded_validity(), dtype=bool)
+                 for member, snapshot in snapshots.items()}
+    else:
+        labels = axis.labels()
+        picks = tuple(None if frame is None else labels[frame] for frame in _read_frames(kept, count))
+        how = kept["relation"] if kept["mode"] == "relation" else kept["values"]
+        masked = evaluate(_rows(axis.name, picks, kept["mode"], how), {
+            member: Operand(snapshot.block.schema, snapshot.block.values, snapshot.expanded_validity())
+            for member, snapshot in snapshots.items()
+        })
+        valid = {member: masked[f"{member}_kept"].valid for member in snapshots}
     return OccupancyResult({**result.artifacts, **{
         member: owned_snapshot_from_arrays(
             snapshot.block.schema, snapshot.block.values, snapshot.block.revision,
-            validity=masked[f"{member}_kept"].valid, stream_generation=snapshot.ref.stream_generation)
+            validity=valid[member], stream_generation=snapshot.ref.stream_generation)
         for member, snapshot in snapshots.items()
     }})
 
 
 def post_select_step(kept: Mapping[str, object] | None) -> dict[str, object]:
-    """The processor's ``post_select`` and ``post_select_record`` for what
-    :func:`condition` keeps; none while the switch is off."""
+    """The processor's ``post_select``, ``post_select_record`` and
+    ``post_select_problem`` for what :func:`condition` keeps; none while the
+    switch is off."""
 
     if kept is None:
         return {}
     # Recorded as Occupancy records its claims: what was asked beside what it came to.
     return {"post_select": functools.partial(_post_selected, kept=kept),
-            "post_select_record": lambda count: {**kept, "read_frames": _read_frames(kept, count)}}
+            "post_select_record": lambda count: {**kept, "read_frames": _read_frames(kept, count)},
+            "post_select_problem": functools.partial(source_problem, kept)}
 
 
 __all__ = ["ANY", "POST_SELECTION", "POST_SELECTION_FIELDS", "condition", "post_select_step", "source_problem"]
