@@ -126,20 +126,29 @@
 //! of n). The decomposition (`linalg::Eigen`), the factors of 1 + X and the hops' exponentials are not of that kind and
 //! stay as they are.
 //!
-//! # Towards a defective generator
-//! A state taken through the eigenvectors rounds by κ(R) u (1 + |τ| × the decay rates' spread) relative to its norm
-//! (`linalg::Eigen`), and κ(R) grows without bound towards an exceptional point. There the state is taken without the
-//! decomposition (`Picture::through` false): from stop to stop of the caller's (`Picture::advance`) by CF4 (Blanes & Moan
-//! 2006) of the same Ĥ₀ + uA + u²B, two exponentials on the vector to round-off (`linalg::exp_apply`), whose rounding
-//! does not know κ. It is exact where nothing moves; with D it is of fourth order in the stride's width, which is the
-//! caller's nodes' spacing -- a few radians of Ĥ₀'s bound at most --, so its error is a share of D's own effect, not an
-//! error of Ĥ₀'s frequencies. The rule is the rounding's, not a tuned number: the decomposition where a state through
-//! it rounds no more than through the exponential of Ĥ₀ over the step (`linalg::Chebyshev::rounding`), the exponential
-//! otherwise.
+//! # The strides: the state without the decomposition
+//! The state can also be taken without the decomposition (`Picture::through` false): from stop to stop of the caller's
+//! (`Picture::advance`) by CF4 (Blanes & Moan 2006) of the same Ĥ₀ + uA + u²B, two exponentials on the vector to
+//! round-off (`linalg::exp_apply`). It is exact where nothing moves; with D it is of fourth order in the stride's width,
+//! which is the caller's nodes' spacing -- a few radians of Ĥ₀'s bound at most --, so its error is a share of D's own
+//! effect, not an error of Ĥ₀'s frequencies (`Picture::stridden`: the Magnus expansion's first terms a fourth-order
+//! method leaves out, by the matrices' norms). A step takes the strides
+//! - where they cost less than the decomposition's route as it was last counted on this picture's states (its
+//!   preparation and its states at its stops: `Picture::counted`), each with the states a jump's root is expected to
+//!   read -- a stride each, against a state at a time through the decomposition (step.rs `pictured`) --, and their own
+//!   error over the step is within the kick's share (`units::QUADRATURE`, the share its quadrature's nodes are laid
+//!   at, step.rs): a small cluster on a few nodes that seldom jumps -- the decomposition's QR sweeps are its n³ whatever
+//!   the nodes, the strides n² a node --;
+//! - towards a defective generator: a state taken through the eigenvectors rounds by κ(R) u (1 + |τ| × the decay
+//!   rates' spread) relative to its norm (`linalg::Eigen`), and κ(R) grows without bound towards an exceptional point;
+//!   the strides' rounding does not know κ. The rule is the rounding's, not a tuned number: the decomposition where a
+//!   state through it rounds no more than through the exponential of Ĥ₀ over the step (`linalg::Chebyshev::rounding`),
+//!   the strides otherwise.
+//! Without the decomposition the forms' bandwidth is its bound 2(ρ + γ), and the strides' nodes are laid at it.
 
 use crate::linalg::{self, combine, C64, Mat, LANES};
 use crate::model::assemble::laid;
-use crate::units::UNIT_ROUNDOFF;
+use crate::units::{QUADRATURE, UNIT_ROUNDOFF};
 
 /// The reals of one vector of rows of one column laid for the lanes: its real parts and its imaginary parts.
 const PAIR: usize = 2 * LANES;
@@ -240,6 +249,10 @@ pub struct Picture {
     pub bandwidth: f64,
     /// The complex multiply-adds counted so far (`decide::Work` counts them four real ones each).
     pub work: f64,
+    /// The decomposition's route as it was last counted on this picture's states: its preparation and its price at the
+    /// stops of its quadrature, and its price of a state at a time (`prepare`); none before it is taken. What the
+    /// strides are weighed against.
+    counted: Option<[f64; 2]>,
 }
 
 impl Default for Picture {
@@ -287,6 +300,7 @@ impl Default for Picture {
             slopes: [0.0; 2],
             bandwidth: 0.0,
             work: 0.0,
+            counted: None,
         }
     }
 }
@@ -325,7 +339,7 @@ impl Picture {
     /// The picture for n states.
     pub fn fit(&mut self, n: usize) {
         if self.n != n {
-            self.n = n;
+            (self.n, self.counted) = (n, None);
             for m in [&mut self.base, &mut self.matrix, &mut self.slope].into_iter().chain(&mut self.ends) {
                 (m.rows, m.cols) = (n, n);
                 m.data.resize(n * n, C64::ZERO);
@@ -364,11 +378,19 @@ impl Picture {
         self.n
     }
 
+    /// Whether the state goes through the decomposition (module documentation, # The strides).
+    pub fn decomposed(&self) -> bool {
+        self.through
+    }
+
     /// Prepares the picture of a step of 2h from `base` and, unless the generator is `still` along the path (then they
-    /// are not read), `ends`: the slopes, Ĥ₀'s decomposition and the route of the state (module documentation, #
-    /// Towards a defective generator); through the decomposition the fast pairs' following and the slow pairs' slopes
-    /// (`follow`). `work` begins anew with what this counted.
-    pub fn prepare(&mut self, half: f64, still: bool) {
+    /// are not read), `ends`: the slopes, the route of the state (module documentation, # The strides) and on the
+    /// decomposition's route Ĥ₀'s decomposition, the fast pairs' following and the slow pairs' slopes (`follow`).
+    /// `stops` gives the stops a step takes at a bandwidth of its forms (its quadrature's nodes, its middle and its
+    /// end), `roots` the states a jump's root is expected to read besides (step.rs `pictured`): what each route is
+    /// priced at -- a stride per state, or a state at a time through the decomposition. `work` begins anew with what
+    /// this counted.
+    pub fn prepare(&mut self, half: f64, still: bool, stops: impl Fn(f64) -> usize, roots: f64) {
         let n = self.n;
         (self.work, self.width, self.moving) = (0.0, f64::NAN, false);
         (self.half, self.followed, self.spread, self.factored) = (half, false, 0.0, f64::NAN);
@@ -390,9 +412,16 @@ impl Picture {
         }
         let linalg::Bounds { rho, gamma, .. } = linalg::bounds(&self.matrix, &mut self.vectors);
         self.bounds = [rho, gamma];
+        // The strides' price at their nodes, where their error is within the share, against the decomposition's route
+        // as last counted (the slopes as given: the strides take them so).
+        self.slopes = self.norms();
+        let bound = 2.0 * (rho + gamma);
+        let strides = stops(bound);
+        let strided = self.strided(strides) * (1.0 + roots / strides as f64);
+        let cheaper = matches!((self.stridden(strides) <= QUADRATURE, self.counted), (true, Some([made, state])) if strided < made + roots * state);
         let tau = 2.0 * half.abs();
         let exponential = linalg::Chebyshev::plan(rho * tau, gamma * tau).rounding(n);
-        self.through = self.basis.decompose(&self.matrix) && {
+        self.through = !cheaper && self.basis.decompose(&self.matrix) && {
             let decay = |pick: fn(f64, f64) -> f64, from: f64| self.basis.values.iter().map(|l| l.im).fold(from, pick);
             self.basis.condition * UNIT_ROUNDOFF * (1.0 + tau * (decay(f64::max, f64::NEG_INFINITY) - decay(f64::min, f64::INFINITY))) <= exponential
         };
@@ -424,12 +453,40 @@ impl Picture {
                     self.work += (4 * n * n * n) as f64;
                 }
             }
-            false => self.bandwidth = 2.0 * (rho + gamma),
+            false => self.bandwidth = bound,
         }
-        if self.through && self.moving {
-            self.follow();
+        if self.through {
+            if self.moving {
+                self.follow();
+                self.slopes = self.norms();
+            }
+            let state = (if self.followed { 2 * n * n } else { n * n } + 4 * n) as f64;
+            self.counted = Some([self.work + self.price(stops(self.bandwidth)), state]);
         }
-        self.slopes = if self.moving { [0, 1].map(|i| self.ends[i].data.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()) } else { [0.0; 2] };
+    }
+
+    /// The slopes' Frobenius norms as `ends` holds them, none where nothing moves: what bounds a hop's exponent and a
+    /// stride's error, and what a hop is priced by.
+    fn norms(&self) -> [f64; 2] {
+        if self.moving { [0, 1].map(|i| self.ends[i].data.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()) } else { [0.0; 2] }
+    }
+
+    /// The strides' error over the step at `stops` stops of its mean spacing w, relative to the state's norm (module
+    /// documentation, # The strides): per stride the first terms the Magnus expansion of Ĥ(u_c + t) = H + tH′ + t²B
+    /// leaves out at the fourth order -- w⁵ ([H′, B]/240, [H, [H, B]]/360, [H′, [H, H′]]/240 and [H, [H, [H, H′]]]/720;
+    /// Blanes, Casas, Oteo & Ros 2009, the expansion's sixth-order truncation) --, by the norms (a commutator's at most
+    /// twice its factors') at the step's end, Ĥ₀'s bounds with D's there; summed over the strides. None where nothing
+    /// moves: the strides are then exact.
+    fn stridden(&self, stops: usize) -> f64 {
+        if !self.moving {
+            return 0.0;
+        }
+        let h = self.half.abs();
+        let w = 2.0 * h / stops as f64;
+        let [a, b] = self.slopes;
+        let (size, first) = (self.bounds[0] + self.bounds[1] + h * a + h * h * b, a + 2.0 * h * b);
+        let terms = first * b / 120.0 + size * size * b / 90.0 + first * first * size / 60.0 + size * size * size * first / 90.0;
+        stops as f64 * w.powi(5) * terms
     }
 
     /// The fast pairs (`followed`, at the sizes of the pairs' changes) and their following X (module documentation, #
@@ -832,10 +889,7 @@ impl Picture {
         let (n, h) = (self.n, self.half.abs());
         let size = (n * n) as f64;
         if !self.through {
-            let w = 2.0 * h / stops as f64;
-            let moved = self.moved(h - w, w);
-            let plan = linalg::Chebyshev::plan(0.5 * self.bounds[0] * w + moved, 0.5 * self.bounds[1] * w + moved);
-            return (stops * 2 * (3 + plan.parts * plan.terms)) as f64 * size;
+            return self.strided(stops);
         }
         let state = stops as f64 * ((if self.followed { 2.0 } else { 1.0 }) * size + 4.0 * n as f64);
         if !self.moving {
@@ -844,6 +898,15 @@ impl Picture {
         let moved = self.moved(0.0, h);
         let (plan, terms) = (linalg::Chebyshev::plan(moved, moved), series(self.spread * h, moved));
         (2 + 4 * terms + 2 * (6 + plan.parts * plan.terms) + 4) as f64 * size + state
+    }
+
+    /// The strides' price at `stops` stops: a stride per stop at Ĥ₀'s bounds over the stops' mean spacing.
+    fn strided(&self, stops: usize) -> f64 {
+        let (n, h) = (self.n, self.half.abs());
+        let w = 2.0 * h / stops as f64;
+        let moved = self.moved(h - w, w);
+        let plan = linalg::Chebyshev::plan(0.5 * self.bounds[0] * w + moved, 0.5 * self.bounds[1] * w + moved);
+        (stops * 2 * (3 + plan.parts * plan.terms) * n * n) as f64
     }
 }
 
@@ -911,7 +974,7 @@ pub(crate) mod tests {
         picture.fit(n);
         picture.base = base.clone();
         picture.ends = [-half, half].map(|u| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u)));
-        picture.prepare(half, !moving);
+        picture.prepare(half, !moving, |_| 2, 0.0);
         picture
     }
 

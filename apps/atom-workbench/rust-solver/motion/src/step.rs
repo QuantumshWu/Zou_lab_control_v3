@@ -42,8 +42,10 @@
 //!   turn exact, and a quintic between the nodes (spectral.rs). The propagation's work is the same whatever Ĥ₀'s
 //!   frequencies times the step are. The gradient's slow change is taken through the same three nodes (`propagate`).
 //! The step's time integral -- the kick -- is read on that state at the nodes of a
-//! Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: to
-//! round-off), piece by piece between the step's jumps (# Jumps), and the survival's with it. These nodes meet
+//! Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: within the
+//! kick's share `QUADRATURE` of each component's size times the step, the old engine's rule -- no credit taken for a
+//! fast component's cancelling over the step, as the nodes follow the state), piece by piece between the step's jumps
+//! (# Jumps), and the survival's with it. These nodes meet
 //! no model and no hop. Their number still follows the
 //! bandwidth: the kick is a quotient by the norm, whose sum of exponentials under the forms' has no closed form (below).
 //! What is left is of the slow change alone (spectral.rs), and neither part of it grows with the detuning times the
@@ -81,7 +83,7 @@
 //! model contracts without forming G (`Middle::force`). With ρ_m the middle state's, (s_k, w_k, ρ_k) the quadrature's
 //! times from the middle, weights and densities, and ℓ_j the Lagrange polynomials of the step's three nodes s_j, they are
 //! −Σ_m τ sinc(Ω_mτ/2) Re tr(G_m ρ_m) − Σ_j Re tr(Ĝ(s_j) Q_j), Q_j = Σ_k w_k ℓ_j(s_k)(ρ_k − ρ_m): the atom's own frequencies
-//! are in the Q_j, integrated to round-off, and the model's forms are three. Where Ĥ is still, Ĝ is one matrix and the
+//! are in the Q_j, integrated within the kick's share, and the model's forms are three. Where Ĥ is still, Ĝ is one matrix and the
 //! whole is its one form with ∫ρ = Σ_k w_k ρ_k. (With a decay the mean is a quotient by the norm, whose own ringing --
 //! of the size Γ/Δ times the excited share -- puts a part of the quotient at twice the forms' bandwidth, which the
 //! quadrature does not resolve: the kick errs by a part of that ringing, measured 2·10⁻⁷ of the dipole kick at twenty
@@ -419,7 +421,7 @@ use crate::model::optical::{Sector, Unmade};
 use crate::model::{Cluster, Point, Quadratic, Scattering, STATES};
 use crate::random::Stream;
 use crate::spectral::Picture;
-use crate::units::{rounding, UNIT_ROUNDOFF};
+use crate::units::{rounding, QUADRATURE, UNIT_ROUNDOFF};
 
 /// What one step needs from the model (SPEC §2.1, §1.6): defined here by its consumer, implemented by the model for its
 /// `Model` with the run's lights and the reference state. Each method is one model function; the integrator defines
@@ -903,46 +905,59 @@ fn middle<D: Dynamics>(model: &D, r: [f64; 3], kappa: [f64; 3], half: f64) -> Re
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Quadrature to round-off.
+// Quadrature within a tolerance.
 
-/// A Gauss–Legendre rule of m nodes on [−1, 1] (nodes, weights) and its panel phase x_m: the largest ν w at which its
+/// What a quadrature integrates its bandwidth to: the round-off (the path's moments, `Segment::moments`), or the kick's
+/// share (`QUADRATURE`: the kick's, the survival's and a time read's quadratures on the propagation's states).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Within {
+    RoundOff,
+    Share,
+}
+
+/// A Gauss–Legendre rule of m nodes on [−1, 1] (nodes, weights) and its panel phases x_m: the largest ν w at which its
 /// error on a component e^{iνs} over a panel of width w, w (νw)^{2m} (m!)⁴/((2m + 1)((2m)!)³) (Davis & Rabinowitz
-/// 2.7.12), is within the unit round-off times w -- the panel a rule integrates an entire function of that bandwidth on to
-/// round-off.
+/// 2.7.12), is within the tolerance times w -- the unit round-off, or the kick's share (`Within`): the panel a rule
+/// integrates an entire function of that bandwidth on to that tolerance of its size times the width.
 struct Rule {
     nodes: Vec<f64>,
     weights: Vec<f64>,
-    phase: f64,
+    phases: [f64; 2],
 }
 
 impl Rule {
     fn new(m: usize) -> Rule {
         let (nodes, weights) = crate::special::gauss_legendre(m).into_iter().unzip();
         let ln_factorial = |n: usize| (1..=n).map(|k| (k as f64).ln()).sum::<f64>();
-        let ln = UNIT_ROUNDOFF.ln() + ((2 * m + 1) as f64).ln() + 3.0 * ln_factorial(2 * m) - 4.0 * ln_factorial(m);
-        Rule { nodes, weights, phase: (ln / (2 * m) as f64).exp() }
+        let ln = ((2 * m + 1) as f64).ln() + 3.0 * ln_factorial(2 * m) - 4.0 * ln_factorial(m);
+        let phases = [UNIT_ROUNDOFF, QUADRATURE].map(|tolerance| ((tolerance.ln() + ln) / (2 * m) as f64).exp());
+        Rule { nodes, weights, phases }
+    }
+
+    fn phase(&self, within: Within) -> f64 {
+        self.phases[within as usize]
     }
 }
 
 /// The rules of 2 to 64 nodes. The least is the smallest rule there is (`FORMS`, `MOMENTS` ask for no fewer). The
 /// largest is not derived: a rule's panel phase over its nodes, x_m/m, rises with m towards 8/e (Stirling on the
-/// error's factorials), so no rule is the last that pays; 64 is at three quarters of that limit (u^{1/128}). Every
-/// rule integrates to round-off: the largest sets the nodes of a stiff step's quadrature, its cost alone.
+/// error's factorials), so no rule is the last that pays; 64 is at three quarters of that limit at the round-off
+/// (u^{1/128}). The largest sets the nodes of a stiff step's quadrature, its cost alone.
 fn rules() -> &'static [Rule] {
     static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
     RULES.get_or_init(|| (2..=64).map(Rule::new).collect())
 }
 
-/// The rule and the panels over a width of an entire integrand of bandwidth ν to round-off: the fewest nodes (the
-/// smaller rule of two that take as many), each panel of width w within its rule's phase, νw ≤ x_m, of the rules of
-/// `nodes` nodes and more -- a rule of m nodes is exact for the polynomials of degree 2m − 1, which is what is asked
-/// of it where the bandwidth vanishes. Its node count is the propagation's states and the kick's sums (`propagate`,
-/// `count::impulse`). The rules are looked at from the smallest up as far as the first that takes one panel: every
-/// larger rule has more nodes than that one.
-fn plan(width: f64, bandwidth: f64, nodes: usize) -> (&'static Rule, usize) {
+/// The rule and the panels over a width of an entire integrand of bandwidth ν within a tolerance (`Within`): the fewest
+/// nodes (the smaller rule of two that take as many), each panel of width w within its rule's phase, νw ≤ x_m, of the
+/// rules of `nodes` nodes and more -- a rule of m nodes is exact for the polynomials of degree 2m − 1, which is what is
+/// asked of it where the bandwidth vanishes. Its node count is the propagation's states and the kick's sums
+/// (`propagate`, `count::impulse`). The rules are looked at from the smallest up as far as the first that takes one
+/// panel: every larger rule has more nodes than that one.
+fn plan(width: f64, bandwidth: f64, nodes: usize, within: Within) -> (&'static Rule, usize) {
     let mut least: Option<(&'static Rule, usize)> = None;
     for rule in rules().iter().filter(|rule| rule.nodes.len() >= nodes) {
-        let panels = ((bandwidth * width / rule.phase).ceil() as usize).max(1);
+        let panels = ((bandwidth * width / rule.phase(within)).ceil() as usize).max(1);
         if least.map_or(true, |(best, most)| rule.nodes.len() * panels < best.nodes.len() * most) {
             least = Some((rule, panels));
         }
@@ -953,12 +968,12 @@ fn plan(width: f64, bandwidth: f64, nodes: usize) -> (&'static Rule, usize) {
     least.expect("a rule")
 }
 
-/// The panels over [a, b] of an entire integrand of bandwidth ν to round-off (`plan`, of the rules of `nodes` nodes and
-/// more), in their order from a to b: each panel's end (b itself for the last) and its nodes and weights in their order
-/// (the rule's nodes are held from the largest down), panel by panel as they are read: a stiff generator's millions of
-/// nodes are never held at once.
-fn panels(a: f64, b: f64, bandwidth: f64, nodes: usize) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
-    let (rule, panels) = plan((b - a).abs(), bandwidth, nodes);
+/// The panels over [a, b] of an entire integrand of bandwidth ν within a tolerance (`plan`, of the rules of `nodes`
+/// nodes and more), in their order from a to b: each panel's end (b itself for the last) and its nodes and weights in
+/// their order (the rule's nodes are held from the largest down), panel by panel as they are read: a stiff generator's
+/// millions of nodes are never held at once.
+fn panels(a: f64, b: f64, bandwidth: f64, nodes: usize, within: Within) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
+    let (rule, panels) = plan((b - a).abs(), bandwidth, nodes, within);
     let w = (b - a) / panels as f64;
     (0..panels).map(move |p| {
         let (centre, end) = (a + (p as f64 + 0.5) * w, if p + 1 == panels { b } else { a + (p + 1) as f64 * w });
@@ -966,9 +981,10 @@ fn panels(a: f64, b: f64, bandwidth: f64, nodes: usize) -> impl Iterator<Item = 
     })
 }
 
-/// The nodes and weights over [a, b] of an entire integrand of bandwidth ν to round-off, panel after panel (`panels`).
-fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize) -> impl Iterator<Item = (f64, f64)> {
-    panels(a, b, bandwidth, nodes).flat_map(|(_, nodes)| nodes)
+/// The nodes and weights over [a, b] of an entire integrand of bandwidth ν within a tolerance, panel after panel
+/// (`panels`).
+fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize, within: Within) -> impl Iterator<Item = (f64, f64)> {
+    panels(a, b, bandwidth, nodes, within).flat_map(|(_, nodes)| nodes)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1062,7 +1078,7 @@ impl Segment {
         if !(hi > lo) {
             return (one, two);
         }
-        for (t, w) in quadrature(lo, hi, 2.0 * self.flow.rate(), MOMENTS) {
+        for (t, w) in quadrature(lo, hi, 2.0 * self.flow.rate(), MOMENTS, Within::RoundOff) {
             let k = self.at(t).1;
             for x in 0..3 {
                 one[x] += sign * w * k[x];
@@ -1131,27 +1147,31 @@ const fn row(n: usize) -> usize {
 /// parts, each of `row(n)` reals. Row a takes x_a/⟨x|x⟩ times the state's conjugate from the vector of its own column
 /// on, lane by lane with fused multiply-adds (as the kernels of linalg.rs): two a real for the product, one a sum.
 fn accumulate(x: &[C64], weights: &[f64], sums: &mut [f64]) {
+    use std::arch::x86_64::{_mm256_fmadd_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_storeu_pd, _mm256_xor_pd};
     let (n, scale) = (x.len(), 1.0 / norm_sqr(x));
     let width = row(n);
+    assert!(n <= STATES && sums.len() >= weights.len() * 2 * n * width);
     let (mut re, mut im) = ([0.0; row(STATES)], [0.0; row(STATES)]);
     for (z, (re, im)) in x.iter().zip(re.iter_mut().zip(&mut im)) {
         (*re, *im) = (z.re, z.im);
     }
-    for (a, left) in x.iter().enumerate() {
-        let (left, from) = (*left * scale, a / LANES * LANES);
-        for (at, (re, im)) in re[from..width].chunks_exact(LANES).zip(im[from..width].chunks_exact(LANES)).enumerate() {
-            // x_a x_b*/⟨x|x⟩ on a vector of columns b.
-            let (mut real, mut imaginary) = ([0.0; LANES], [0.0; LANES]);
-            for l in 0..LANES {
-                real[l] = left.re.mul_add(re[l], left.im * im[l]);
-                imaginary[l] = left.im.mul_add(re[l], -(left.re * im[l]));
-            }
-            let place = 2 * a * width + from + at * LANES;
-            for (sum, w) in sums.chunks_exact_mut(2 * n * width).zip(weights) {
-                let (head, tail) = sum[place..place + width + LANES].split_at_mut(width);
-                for l in 0..LANES {
-                    head[l] = w.mul_add(real[l], head[l]);
-                    tail[l] = w.mul_add(imaginary[l], tail[l]);
+    // SAFETY: every vector read and written lies within the row's `width` reals of `re`, `im` and each sum (above); the
+    // build has AVX2 and FMA (linalg.rs).
+    unsafe {
+        let negative = _mm256_set1_pd(-0.0);
+        for (a, left) in x.iter().enumerate() {
+            let (left, from) = (*left * scale, a / LANES * LANES);
+            let (real_part, imaginary_part) = (_mm256_set1_pd(left.re), _mm256_set1_pd(left.im));
+            for column in (from..width).step_by(LANES) {
+                // x_a x_b*/⟨x|x⟩ on a vector of columns b: (left.re re + left.im im, left.im re − left.re im).
+                let (r, i) = (_mm256_loadu_pd(re.as_ptr().add(column)), _mm256_loadu_pd(im.as_ptr().add(column)));
+                let real = _mm256_fmadd_pd(real_part, r, _mm256_mul_pd(imaginary_part, i));
+                let imaginary = _mm256_fmadd_pd(imaginary_part, r, _mm256_xor_pd(_mm256_mul_pd(real_part, i), negative));
+                let place = 2 * a * width + column;
+                for (j, w) in weights.iter().enumerate() {
+                    let (w, head) = (_mm256_set1_pd(*w), sums.as_mut_ptr().add(j * 2 * n * width + place));
+                    _mm256_storeu_pd(head, _mm256_fmadd_pd(w, real, _mm256_loadu_pd(head)));
+                    _mm256_storeu_pd(head.add(width), _mm256_fmadd_pd(w, imaginary, _mm256_loadu_pd(head.add(width))));
                 }
             }
         }
@@ -1282,15 +1302,25 @@ mod count {
 
 /// The node count of a quadrature over τ at a bandwidth (`plan`).
 fn nodes(tau: f64, bandwidth: f64) -> usize {
-    let (rule, panels) = plan(tau.abs(), bandwidth, FORMS);
+    let (rule, panels) = plan(tau.abs(), bandwidth, FORMS, Within::Share);
     rule.nodes.len() * panels
 }
 
-/// The picture of the generator along a step's path (`spectral::Picture`), prepared: the model's generator at the
-/// step's middle and, unless it is still along every path, at the step's two ends. Their decay is laid into `decay`
-/// first, node by node in the order of the kick's sums (`laid_decay`; −h, 0, h, or the middle alone where Ĥ is still):
-/// the survival's hazard (# Jumps). Returns the largest sum of the decay's entries' moduli over the nodes.
-fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64, decay: &mut [f64]) -> f64 {
+/// The states a jump's root reads (`root`), as its rounds go: Newton's from below double the bits of ln N that are right
+/// each round, so that from the first to the mantissa's `ROUNDS` takes log₂ ROUNDS of them, each the hazard at the
+/// latest time below and a span of the fewest nodes (`FORMS`).
+fn root_states() -> f64 {
+    (1 + FORMS) as f64 * (ROUNDS as f64).log2()
+}
+
+/// The picture of the generator along a step's path (`spectral::Picture`), prepared -- each route priced at its
+/// quadrature's nodes, the middle and the end (`nodes`), and at the states a jump's root reads (`root_states`) times the
+/// chance of a jump in what is left of the step, 1 − e^{−h₀|h − u|} at the hazard h₀ of `start`, the frame's state at
+/// the time u it is launched from (none: no root priced) --: the model's generator at the step's middle and, unless it
+/// is still along every path, at the step's two ends. Their decay is laid into `decay` first, node by node in the order
+/// of the kick's sums (`laid_decay`; −h, 0, h, or the middle alone where Ĥ is still): the survival's hazard (# Jumps);
+/// `part` is a sum's scratch. Returns the largest sum of the decay's entries' moduli over the nodes.
+fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64, (decay, part): (&mut [f64], &mut [f64]), start: Option<(&[C64], f64)>) -> f64 {
     let (h, still) = (0.5 * tau, along.middle.still());
     along.middle.generator(&along.path, 0.0, &mut picture.base);
     if !still {
@@ -1298,9 +1328,14 @@ fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64, decay:
         along.middle.generator(&along.path, h, &mut picture.ends[1]);
     }
     decay.fill(0.0);
-    let nodes = if still { [Some(&picture.base), None, None] } else { [Some(&picture.ends[0]), Some(&picture.base), Some(&picture.ends[1])] };
-    let scale = nodes.into_iter().flatten().enumerate().map(|(j, generator)| laid_decay(generator, j, decay)).fold(0.0, f64::max);
-    picture.prepare(h, still);
+    let generators = if still { [Some(&picture.base), None, None] } else { [Some(&picture.ends[0]), Some(&picture.base), Some(&picture.ends[1])] };
+    let scale = generators.into_iter().flatten().enumerate().map(|(j, generator)| laid_decay(generator, j, decay)).fold(0.0, f64::max);
+    let roots = start.map_or(0.0, |(x, u)| {
+        part.fill(0.0);
+        gather(still, h, u, 1.0, x, &mut [0.0; 3], part);
+        -(-hazard(decay, part, x.len()).max(0.0) * (h - u).abs()).exp_m1() * root_states()
+    });
+    picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots);
     scale
 }
 
@@ -1347,7 +1382,7 @@ fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), ba
     let n = picture.states();
     part.fill(0.0);
     let (mut x, mut nodes) = ([C64::ZERO; STATES], 0);
-    for (u, w) in quadrature(from, to, bandwidth, FORMS) {
+    for (u, w) in quadrature(from, to, bandwidth, FORMS, Within::Share) {
         picture.between(u, &mut x[..n]);
         gather(still, h, u, w, &x[..n], weights, part);
         nodes += 1;
@@ -1710,7 +1745,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     ///   any time from there on);
     /// - the frame's state read at the stops in the path's order, panel by panel: the nodes of a quadrature that
     ///   resolves the generator's own frequencies -- Gauss–Legendre from the piece's start to the step's end at the
-    ///   bandwidth of the forms on a state it propagates (`panels`) --, each with its weight; the step's middle, the
+    ///   bandwidth of the forms on a state it propagates, within the kick's share (`panels`) --, each with its weight; the step's middle, the
     ///   times read and the step's end, where the state is kept -- a node within the time's round-off of one of them is
     ///   it --, standing once the panel's survival is known;
     /// - the survival at each panel's end, ln N at the piece's start (‖ψ‖² there) less ∫h over the sums' nodes since
@@ -1741,7 +1776,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         // The nodes' sums: one where Ĥ is still, the three nodes' on a beating path; the decay laid alike.
         let size = (if still { 1 } else { SUMS }) * 2 * n * row(n);
         let (sums, saved, part, decay) = (&mut sums[..size], &mut saved[..size], &mut part[..size], &mut decay[..size]);
-        let scale = pictured(&along, picture, tau, decay);
+        let launched = along.turned(&march.state.psi, march.u, true);
+        let scale = pictured(&along, picture, tau, (&mut *decay, &mut *part), Some((&launched[..n], march.u)));
         let bandwidth = picture.bandwidth;
         sums.fill(0.0);
         let ahead = |u: f64| (u + h) / tau;
@@ -1761,7 +1797,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             traces += 1;
             // The panel's start and ln N there; the stops met, the middle and the times read as far as they stand.
             let (mut a, mut log, mut passed, mut read, mut crossed) = (from, first, march.passed, march.read, None);
-            for (b, nodes) in panels(from, h, bandwidth, FORMS) {
+            for (b, nodes) in panels(from, h, bandwidth, FORMS, Within::Share) {
                 let mut nodes = nodes.peekable();
                 met.clear();
                 saved.copy_from_slice(sums);
@@ -1890,7 +1926,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let mut out = [0.0; 3];
             if let Some(middle) = &middle {
                 if !done {
-                    for (u, w) in quadrature(march.u, h, 0.0, FORMS) {
+                    for (u, w) in quadrature(march.u, h, 0.0, FORMS, Within::Share) {
                         let s = u / h;
                         for (sum, l) in march.weights.iter_mut().zip([0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)]) {
                             *sum += w * l;
@@ -2039,6 +2075,9 @@ pub struct Price {
     /// The picture's preparation, and its states at the nodes, the middle and the end (complex multiply-adds).
     pub made: f64,
     pub stops: f64,
+    /// The same of the decomposition's route (`spectral::Picture::prepare`), and its nodes: what a grown cluster is
+    /// priced from (`grown`), whichever route this one takes.
+    pub decomposition: [f64; 3],
     /// The optical sector's ground states and its Schur forms' count.
     pub sector: Option<(usize, f64)>,
 }
@@ -2046,17 +2085,21 @@ pub struct Price {
 impl Price {
     /// The price on the path through a middle at a momentum and a velocity: its own -- the caller's middle is a state's,
     /// or one of the cluster made once: the nodes' counts are the cluster's whatever the point (`Middle::work`), and the
-    /// point gives the generator's picture alone.
+    /// point gives the generator's picture alone. On the route a trajectory's steps take once the decomposition's is
+    /// counted (`spectral::Picture::prepare`): the picture is prepared twice, the first time on that route.
     pub fn of<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> Price {
         let (n, still) = (middle.states(), middle.still());
         let along = Along::new(middle, kappa, velocity);
         let mut scratch = Scratch::default();
         scratch.fit(n);
-        let Carved { picture, noise, decay, .. } = scratch.carve();
-        pictured(&along, picture, tau, decay);
-        let (nodes, panels) = (nodes(tau, picture.bandwidth), plan(tau.abs(), picture.bandwidth, FORMS).1);
+        let Carved { picture, noise, decay, part, .. } = scratch.carve();
+        pictured(&along, picture, tau, (&mut *decay, &mut *part), None);
+        let first = nodes(tau, picture.bandwidth);
+        let decomposition = [picture.work, picture.price(first + 2), first as f64];
+        pictured(&along, picture, tau, (&mut *decay, &mut *part), None);
+        let (nodes, panels) = (nodes(tau, picture.bandwidth), plan(tau.abs(), picture.bandwidth, FORMS, Within::Share).1);
         let sector = middle.optical(&along.path).and_then(|shape| noise.sector.schur(&picture.base, shape.ground).map(|schur| (shape.ground, schur)));
-        Price { states: n, still, tau, bandwidth: picture.bandwidth, nodes, panels, made: picture.work, stops: picture.price(nodes + 2), sector }
+        Price { states: n, still, tau, bandwidth: picture.bandwidth, nodes, panels, made: picture.work, stops: picture.price(nodes + 2), decomposition, sector }
     }
 
     /// The step's counted work with a model's counts at a node `costs` (`Middle::work`): what `Step::work` adds up --
@@ -2072,20 +2115,22 @@ impl Price {
     /// bandwidth `bandwidth` -- where a keep makes a drive explicit or joins two clusters: each part at its leading
     /// order in the states, from what this cluster's picture made -- the decomposition's QR sweeps and the following's
     /// products as n³ (the Schur forms' sweeps on the blocks with them, e³ + g³), a state at a node as n² --, the
-    /// nodes and panels those of the quadrature at the bandwidth.
+    /// nodes and panels those of the quadrature at the bandwidth; from the decomposition's route (`decomposition`).
     pub fn grown(&self, states: usize, ground: usize, bandwidth: f64) -> Price {
         let ratio = states as f64 / self.states as f64;
-        let (nodes, panels) = (nodes(self.tau, bandwidth), plan(self.tau.abs(), bandwidth, FORMS).1);
+        let (nodes, panels) = (nodes(self.tau, bandwidth), plan(self.tau.abs(), bandwidth, FORMS, Within::Share).1);
         let excited = states - ground;
         let cube = (excited.pow(3) + ground.pow(3)) as f64;
         let sector = (excited > 0).then(|| {
             let schur = match self.sector {
                 Some((g, schur)) => schur * cube / ((self.states - g).pow(3) + g.pow(3)) as f64,
-                None => self.made * cube / self.states.pow(3) as f64,
+                None => self.decomposition[0] * cube / self.states.pow(3) as f64,
             };
             (ground, schur)
         });
-        Price { states, still: self.still, tau: self.tau, bandwidth, nodes, panels, made: self.made * ratio.powi(3), stops: self.stops * ratio * ratio * (nodes + 2) as f64 / (self.nodes + 2) as f64, sector }
+        let [made, stops, before] = self.decomposition;
+        let (made, stops) = (made * ratio.powi(3), stops * ratio * ratio * (nodes + 2) as f64 / (before + 2.0));
+        Price { states, still: self.still, tau: self.tau, bandwidth, nodes, panels, made, stops, decomposition: [made, stops, nodes as f64], sector }
     }
 }
 

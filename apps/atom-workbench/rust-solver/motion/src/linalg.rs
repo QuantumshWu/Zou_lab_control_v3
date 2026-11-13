@@ -44,8 +44,10 @@ use std::ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, 
 // ---------------------------------------------------------------------------------------------------------------------
 // Complex numbers.
 
-/// A complex number.
+/// A complex number: its real part and then its imaginary part (`repr(C)`: a slice of them is the reals the
+/// interleaved kernels below take two at a time).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
 pub struct C64 {
     pub re: f64,
     pub im: f64,
@@ -68,9 +70,9 @@ impl C64 {
     pub fn norm_sqr(self) -> f64 {
         self.re * self.re + self.im * self.im
     }
-    /// |z|, without overflow or underflow of the square.
+    /// |z|, without overflow or underflow of the square (`hypot`).
     pub fn abs(self) -> f64 {
-        self.re.hypot(self.im)
+        hypot(self.re, self.im)
     }
     /// arg z in (−π, π].
     pub fn arg(self) -> f64 {
@@ -264,6 +266,96 @@ pub fn combine(onto: bool, c: &[C64], count: usize, columns: &[f64], sums: &mut 
     }
 }
 
+// The kernels on complex numbers as they lie, real and imaginary part side by side (`C64` slices): two numbers a vector
+// of four reals, the products' four real products and their two sums made as the scalar forms make them -- each
+// number's result is the scalar form's bit for bit (each operation rounds the same two numbers), so a caller's sums
+// are the same whichever it calls. A row's last odd number takes a vector of two reals.
+use std::arch::x86_64::{
+    __m128d, __m256d, _mm256_add_pd, _mm256_addsub_pd, _mm256_castpd256_pd128, _mm256_fmadd_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_permute_pd, _mm256_set1_pd, _mm256_setr_pd,
+    _mm256_setzero_pd, _mm256_storeu_pd, _mm256_sub_pd, _mm_add_pd, _mm_addsub_pd, _mm_fmadd_pd, _mm_loadu_pd, _mm_mul_pd, _mm_permute_pd, _mm_setzero_pd, _mm_storeu_pd, _mm_sub_pd,
+};
+
+/// f y of two numbers in a vector, as `C64`'s product makes it: (f.re y.re − f.im y.im, f.re y.im + f.im y.re).
+#[inline(always)]
+unsafe fn times(re: __m256d, im: __m256d, y: __m256d) -> __m256d {
+    _mm256_addsub_pd(_mm256_mul_pd(re, y), _mm256_mul_pd(im, _mm256_permute_pd::<0b0101>(y)))
+}
+/// The same of one number.
+#[inline(always)]
+unsafe fn times1(re: __m128d, im: __m128d, y: __m128d) -> __m128d {
+    _mm_addsub_pd(_mm_mul_pd(re, y), _mm_mul_pd(im, _mm_permute_pd::<0b01>(y)))
+}
+
+/// z_j ← z_j + f y_j (`subtract`: z_j − f y_j), each as `C64`'s operators make it: the product rounded, then the sum.
+#[inline]
+pub fn mul_add(subtract: bool, z: &mut [C64], f: C64, y: &[C64]) {
+    let n = z.len();
+    assert!(y.len() >= n);
+    // SAFETY: n numbers of each (above); C64 is two f64 (`repr(C)`); the build has AVX2 and FMA (above).
+    unsafe {
+        let (zp, yp) = (z.as_mut_ptr() as *mut f64, y.as_ptr() as *const f64);
+        let (re, im) = (_mm256_set1_pd(f.re), _mm256_set1_pd(f.im));
+        let mut j = 0;
+        while j + 2 <= n {
+            let (at, by) = (zp.add(2 * j), times(re, im, _mm256_loadu_pd(yp.add(2 * j))));
+            let x = _mm256_loadu_pd(at);
+            _mm256_storeu_pd(at, if subtract { _mm256_sub_pd(x, by) } else { _mm256_add_pd(x, by) });
+            j += 2;
+        }
+        if j < n {
+            let (at, by) = (zp.add(2 * j), times1(_mm256_castpd256_pd128(re), _mm256_castpd256_pd128(im), _mm_loadu_pd(yp.add(2 * j))));
+            let x = _mm_loadu_pd(at);
+            _mm_storeu_pd(at, if subtract { _mm_sub_pd(x, by) } else { _mm_add_pd(x, by) });
+        }
+    }
+}
+
+/// out (r × c) = a (r × k) b (k × c), all row by row: each entry from zero by k fused steps, b's rows in order,
+/// o.re ← x.re y.re + (−x.im y.im + o.re) and o.im ← x.re y.im + (x.im y.re + o.im) (x = a's entry, y = b's) -- two
+/// fused multiply-adds a real. Up to eight numbers of a row of out are held in registers through the k steps.
+pub fn fused_product(a: &[C64], b: &[C64], (r, k, c): (usize, usize, usize), out: &mut [C64]) {
+    assert!(a.len() >= r * k && b.len() >= k * c && out.len() >= r * c);
+    // SAFETY: the lengths above; C64 is two f64 (`repr(C)`); the build has AVX2 and FMA (above).
+    unsafe {
+        let (bp, op) = (b.as_ptr() as *const f64, out.as_mut_ptr() as *mut f64);
+        for (i, row) in a[..r * k].chunks_exact(k.max(1)).enumerate().take(r) {
+            let mut j = 0;
+            while j < c {
+                let w = (c - j).min(8);
+                let pairs = w / 2;
+                let (mut held, mut tail) = ([_mm256_setzero_pd(); 4], _mm_setzero_pd());
+                for (l, x) in row.iter().enumerate() {
+                    let at = bp.add(2 * (l * c + j));
+                    let (re, im) = (_mm256_set1_pd(x.re), _mm256_setr_pd(-x.im, x.im, -x.im, x.im));
+                    for (v, sum) in held.iter_mut().enumerate() {
+                        if v < pairs {
+                            let y = _mm256_loadu_pd(at.add(4 * v));
+                            *sum = _mm256_fmadd_pd(re, y, _mm256_fmadd_pd(im, _mm256_permute_pd::<0b0101>(y), *sum));
+                        }
+                    }
+                    if w % 2 == 1 {
+                        let y = _mm_loadu_pd(at.add(4 * pairs));
+                        tail = _mm_fmadd_pd(_mm256_castpd256_pd128(re), y, _mm_fmadd_pd(_mm256_castpd256_pd128(im), _mm_permute_pd::<0b01>(y), tail));
+                    }
+                }
+                let to = op.add(2 * (i * c + j));
+                for (v, sum) in held.iter().enumerate() {
+                    if v < pairs {
+                        _mm256_storeu_pd(to.add(4 * v), *sum);
+                    }
+                }
+                if w % 2 == 1 {
+                    _mm_storeu_pd(to.add(4 * pairs), tail);
+                }
+                j += w;
+            }
+        }
+        if k == 0 {
+            out[..r * c].fill(C64::ZERO);
+        }
+    }
+}
+
 /// ⟨a, b⟩ = Σ_i a_i* b_i.
 pub fn inner(a: &[C64], b: &[C64]) -> C64 {
     a.iter().zip(b).map(|(x, y)| x.conj() * *y).sum()
@@ -271,6 +363,21 @@ pub fn inner(a: &[C64], b: &[C64]) -> C64 {
 /// ‖v‖² = Σ_i |v_i|².
 pub fn norm_sqr(v: &[C64]) -> f64 {
     v.iter().map(|z| z.norm_sqr()).sum()
+}
+
+/// √(a² + b²) without overflow or underflow of the squares. Where neither square leaves the normal range -- both parts
+/// within 10^±150, or one of them zero -- it is the root of their sum, which is the C library's hypot there to the last
+/// bit (the library's own form: measured on 3·10⁸ pairs over 2^±450, every ratio of scales, equal parts and zeros, none
+/// apart), inlined and without the library's call; beyond, the library's.
+#[inline]
+pub fn hypot(a: f64, b: f64) -> f64 {
+    let (x, y) = (a.abs(), b.abs());
+    let (big, small) = if x >= y { (x, y) } else { (y, x) };
+    if big < 1e150 && big > 1e-150 && (small > 1e-150 || small == 0.0) {
+        (a * a + b * b).sqrt()
+    } else {
+        a.hypot(b)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -322,12 +429,9 @@ impl Mat {
     pub fn product(&self, b: &Mat) -> Mat {
         assert_eq!(self.cols, b.rows, "product of {}x{} and {}x{}", self.rows, self.cols, b.rows, b.cols);
         let mut out = Mat::zeros(self.rows, b.cols);
-        for i in 0..self.rows {
-            for k in 0..self.cols {
-                let x = self[(i, k)];
-                for j in 0..b.cols {
-                    out.data[i * b.cols + j] += x * b.data[k * b.cols + j];
-                }
+        for (row, x) in out.data.chunks_exact_mut(b.cols.max(1)).zip(self.data.chunks_exact(self.cols.max(1))) {
+            for (x, b) in x.iter().zip(b.data.chunks_exact(b.cols.max(1))) {
+                mul_add(false, row, *x, b);
             }
         }
         out
@@ -337,11 +441,8 @@ impl Mat {
         assert_eq!(self.rows, b.rows, "adjoint product of {}x{} and {}x{}", self.rows, self.cols, b.rows, b.cols);
         let mut out = Mat::zeros(self.cols, b.cols);
         for k in 0..self.rows {
-            for i in 0..self.cols {
-                let x = self[(k, i)].conj();
-                for j in 0..b.cols {
-                    out.data[i * b.cols + j] += x * b.data[k * b.cols + j];
-                }
+            for (i, row) in out.data.chunks_exact_mut(b.cols.max(1)).enumerate().take(self.cols) {
+                mul_add(false, row, self[(k, i)].conj(), &b.data[k * b.cols..(k + 1) * b.cols]);
             }
         }
         out
@@ -406,9 +507,7 @@ pub fn factor(f: &mut [C64], pivots: &mut [usize], n: usize) -> bool {
         for row in below.chunks_exact_mut(n) {
             let l = row[k] / pivot_row[k];
             row[k] = l;
-            for (z, upper) in row[k + 1..].iter_mut().zip(&pivot_row[k + 1..]) {
-                *z -= l * *upper;
-            }
+            mul_add(true, &mut row[k + 1..], l, &pivot_row[k + 1..]);
         }
     }
     regular
@@ -425,18 +524,14 @@ pub fn solve(f: &[C64], pivots: &[usize], n: usize, b: &mut [C64], columns: usiz
     for i in 0..n {
         let (above, row) = b.split_at_mut(i * columns);
         for (l, other) in f[i * n..i * n + i].iter().zip(above.chunks_exact(columns)) {
-            for (z, other) in row[..columns].iter_mut().zip(other) {
-                *z -= *l * *other;
-            }
+            mul_add(true, &mut row[..columns], *l, other);
         }
     }
     for i in (0..n).rev() {
         let (rest, below) = b.split_at_mut((i + 1) * columns);
         let row = &mut rest[i * columns..];
         for (upper, other) in f[i * n + i + 1..(i + 1) * n].iter().zip(below.chunks_exact(columns)) {
-            for (z, other) in row.iter_mut().zip(other) {
-                *z -= *upper * *other;
-            }
+            mul_add(true, &mut row[..columns], *upper, other);
         }
         let diagonal = f[i * n + i];
         for z in row.iter_mut() {
@@ -621,16 +716,48 @@ fn givens(x: C64, y: C64) -> (f64, C64) {
     if ax == 0.0 {
         return (0.0, y.conj() / ay);
     }
-    let norm = ax.hypot(ay);
+    let norm = hypot(ax, ay);
     (ax / norm, (x / ax) * y.conj() / norm)
 }
 
-/// (u, w) ← (c u + s w, c w − s* u) on two vectors, number by number.
+/// (u, w) ← (u c + w s, w c − u s*) on two vectors, number by number, as `C64`'s operators make it (the interleaved
+/// kernels' products).
 fn rotate(first: &mut [C64], second: &mut [C64], c: f64, s: C64) {
-    for (x, y) in first.iter_mut().zip(second.iter_mut()) {
-        let (u, w) = (*x, *y);
-        *x = u * c + w * s;
-        *y = w * c - u * s.conj();
+    let n = first.len().min(second.len());
+    // SAFETY: n numbers of each; C64 is two f64 (`repr(C)`); the build has AVX2 and FMA.
+    unsafe {
+        let (up, wp) = (first.as_mut_ptr() as *mut f64, second.as_mut_ptr() as *mut f64);
+        let (c4, re, im, conj) = (_mm256_set1_pd(c), _mm256_set1_pd(s.re), _mm256_set1_pd(s.im), _mm256_set1_pd(-s.im));
+        let mut j = 0;
+        while j + 2 <= n {
+            let (u, w) = (_mm256_loadu_pd(up.add(2 * j)), _mm256_loadu_pd(wp.add(2 * j)));
+            _mm256_storeu_pd(up.add(2 * j), _mm256_add_pd(_mm256_mul_pd(u, c4), times(re, im, w)));
+            _mm256_storeu_pd(wp.add(2 * j), _mm256_sub_pd(_mm256_mul_pd(w, c4), times(re, conj, u)));
+            j += 2;
+        }
+        if j < n {
+            let (c2, re, im, conj) = (_mm256_castpd256_pd128(c4), _mm256_castpd256_pd128(re), _mm256_castpd256_pd128(im), _mm256_castpd256_pd128(conj));
+            let (u, w) = (_mm_loadu_pd(up.add(2 * j)), _mm_loadu_pd(wp.add(2 * j)));
+            _mm_storeu_pd(up.add(2 * j), _mm_add_pd(_mm_mul_pd(u, c2), times1(re, im, w)));
+            _mm_storeu_pd(wp.add(2 * j), _mm_sub_pd(_mm_mul_pd(w, c2), times1(re, conj, u)));
+        }
+    }
+}
+
+/// (u, w) ← (u c + w s*, w c − u s) on the columns k and k + 1 of the first `rows` rows of the n × n matrix h (row by
+/// row), as `C64`'s operators make it: a row's two numbers in one vector.
+fn turn(h: &mut [C64], n: usize, k: usize, rows: usize, c: f64, s: C64) {
+    use std::arch::x86_64::{_mm256_blend_pd, _mm256_permute2f128_pd};
+    assert!(k + 1 < n && rows <= n && h.len() >= n * n);
+    // SAFETY: the two numbers at k of each of the rows lie in h (above); C64 is two f64 (`repr(C)`); AVX2 and FMA.
+    unsafe {
+        let (c4, re, im) = (_mm256_set1_pd(c), _mm256_set1_pd(s.re), _mm256_setr_pd(-s.im, -s.im, s.im, s.im));
+        for row in 0..rows {
+            let at = (h.as_mut_ptr() as *mut f64).add(2 * (row * n + k));
+            let pair = _mm256_loadu_pd(at);
+            let (scaled, crossed) = (_mm256_mul_pd(pair, c4), times(re, im, _mm256_permute2f128_pd::<1>(pair, pair)));
+            _mm256_storeu_pd(at, _mm256_blend_pd::<0b1100>(_mm256_add_pd(scaled, crossed), _mm256_sub_pd(scaled, crossed)));
+        }
     }
 }
 
@@ -703,9 +830,7 @@ impl Eigen {
         for (k, (r, y)) in r.chunks_exact_mut(n).zip(y.chunks_exact(n)).enumerate() {
             r.fill(C64::ZERO);
             for (y, q) in y[..=k].iter().zip(q.chunks_exact(n)) {
-                for (z, q) in r.iter_mut().zip(q) {
-                    *z += *q * *y;
-                }
+                mul_add(false, r, *y, q);
             }
             let norm = r.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
             if !(norm > 0.0 && norm.is_finite()) {
@@ -763,17 +888,13 @@ pub(crate) fn schur(h: &mut [C64], q: &mut [C64], v: &mut [C64], sums: &mut [C64
         // H ← H − v (β v†H): a column's sum over the rows below k, row after row.
         sums.fill(C64::ZERO);
         for (v, row) in v[k + 1..].iter().zip(h[(k + 1) * n..].chunks_exact(n)) {
-            for (s, z) in sums.iter_mut().zip(row) {
-                *s += v.conj() * *z;
-            }
+            mul_add(false, sums, v.conj(), row);
         }
         for s in sums.iter_mut() {
             *s = *s * beta;
         }
         for (v, row) in v[k + 1..].iter().zip(h[(k + 1) * n..].chunks_exact_mut(n)) {
-            for (z, s) in row.iter_mut().zip(sums.iter()) {
-                *z -= *v * *s;
-            }
+            mul_add(true, row, *v, sums);
         }
         // H ← H − (β H v) v†: a row's sum over the columns beyond k.
         for row in h.chunks_exact_mut(n) {
@@ -785,17 +906,13 @@ pub(crate) fn schur(h: &mut [C64], q: &mut [C64], v: &mut [C64], sums: &mut [C64
         // Q ← Q − (β Q v) v†: a row's sum over Q's columns beyond k, column after column.
         sums.fill(C64::ZERO);
         for (v, column) in v[k + 1..].iter().zip(q[(k + 1) * n..].chunks_exact(n)) {
-            for (s, z) in sums.iter_mut().zip(column) {
-                *s += *z * *v;
-            }
+            mul_add(false, sums, *v, column);
         }
         for s in sums.iter_mut() {
             *s = *s * beta;
         }
         for (v, column) in v[k + 1..].iter().zip(q[(k + 1) * n..].chunks_exact_mut(n)) {
-            for (z, s) in column.iter_mut().zip(sums.iter()) {
-                *z -= *s * v.conj();
-            }
+            mul_add(true, column, v.conj(), sums);
         }
         for i in k + 2..n {
             h[i * n + k] = C64::ZERO;
@@ -850,11 +967,7 @@ pub(crate) fn schur(h: &mut [C64], q: &mut [C64], v: &mut [C64], sums: &mut [C64
             work += 4 * ((n - from) + (k + 3).min(hi) + n);
             let (upper, lower) = h[k * n..(k + 2) * n].split_at_mut(n);
             rotate(&mut upper[from..], &mut lower[from..], c, sn);
-            for row in h.chunks_exact_mut(n).take((k + 3).min(hi)) {
-                let (u, w) = (row[k], row[k + 1]);
-                row[k] = u * c + w * sn.conj();
-                row[k + 1] = w * c - u * sn;
-            }
+            turn(h, n, k, (k + 3).min(hi), c, sn);
             let (first, second) = q[k * n..(k + 2) * n].split_at_mut(n);
             rotate(first, second, c, sn.conj());
             if k > lo {
@@ -1121,6 +1234,72 @@ pub(crate) mod tests {
         }
         std::hint::black_box((total, re, im, sums));
         eprintln!("axpy {first:.3} ns, dot {second:.3} ns, combine {:.3} ns a complex multiply-add", started.elapsed().as_secs_f64() * 1e9 / (rounds * rows * count) as f64);
+    }
+
+    /// The interleaved kernels (`mul_add`, `fused_product`, `rotate`, `turn`) and `hypot` are their scalar forms bit for
+    /// bit, at every length from 0 to 17 (whole vectors and the odd number after them), on
+    /// numbers of many scales and signs, zeros among them.
+    #[test]
+    fn the_vector_kernels_are_their_scalar_forms_bit_for_bit() {
+        let mut s = Stream::new(29, Purpose::Initial, 0, 0);
+        let mut number = || {
+            let scale = 2f64.powi((s.uniform() * 60.0) as i32 - 30);
+            let mut part = || if s.uniform() < 0.05 { 0.0 } else { (s.uniform() - 0.5) * scale };
+            C64::new(part(), part())
+        };
+        let bits = |z: &[C64]| z.iter().map(|z| (z.re.to_bits(), z.im.to_bits())).collect::<Vec<_>>();
+        // `hypot` against the library's, over 2^±600 and every ratio of the parts' scales, equal parts and zeros.
+        let mut t = Stream::new(37, Purpose::Initial, 0, 0);
+        for k in 0..2_000_000 {
+            let first = (t.uniform() * 1200.0) as i32 - 600;
+            let second = if k % 2 == 0 { first + (t.uniform() * 120.0) as i32 - 60 } else { (t.uniform() * 1200.0) as i32 - 600 };
+            let (a, b) = ((t.uniform() - 0.5) * 2f64.powi(first), (t.uniform() - 0.5) * 2f64.powi(second));
+            let b = [b, 0.0, a, -a, b][k % 5];
+            assert_eq!(hypot(a, b).to_bits(), a.hypot(b).to_bits(), "hypot({a:e}, {b:e})");
+        }
+        for n in 0..18 {
+            let (y, z, f): (Vec<C64>, Vec<C64>, C64) = ((0..n).map(|_| number()).collect(), (0..n).map(|_| number()).collect(), number());
+            for subtract in [false, true] {
+                let mut kernel = z.clone();
+                mul_add(subtract, &mut kernel, f, &y);
+                let scalar: Vec<C64> = z.iter().zip(&y).map(|(z, y)| if subtract { *z - f * *y } else { *z + f * *y }).collect();
+                assert_eq!(bits(&kernel), bits(&scalar), "mul_add of {n}, subtract {subtract}");
+            }
+            let c = number().re;
+            let (mut u, mut w) = (z.clone(), y.clone());
+            rotate(&mut u, &mut w, c, f);
+            let rotated: Vec<(C64, C64)> = z.iter().zip(&y).map(|(u, w)| (*u * c + *w * f, *w * c - *u * f.conj())).collect();
+            assert_eq!((bits(&u), bits(&w)), (bits(&rotated.iter().map(|p| p.0).collect::<Vec<_>>()), bits(&rotated.iter().map(|p| p.1).collect::<Vec<_>>())), "rotate of {n}");
+            if n >= 2 {
+                let h: Vec<C64> = (0..n * n).map(|_| number()).collect();
+                for k in 0..n - 1 {
+                    let mut kernel = h.clone();
+                    turn(&mut kernel, n, k, n, c, f);
+                    let mut scalar = h.clone();
+                    for row in scalar.chunks_exact_mut(n) {
+                        let (u, w) = (row[k], row[k + 1]);
+                        row[k] = u * c + w * f.conj();
+                        row[k + 1] = w * c - u * f;
+                    }
+                    assert_eq!(bits(&kernel), bits(&scalar), "turn of {n} at {k}");
+                }
+            }
+            for (r, k) in [(1, n), (3, n), (n, 5), (n, 8), (2, 0)] {
+                let (a, b): (Vec<C64>, Vec<C64>) = ((0..r * k).map(|_| number()).collect(), (0..k * n).map(|_| number()).collect());
+                let mut kernel = vec![C64::new(7.0, 7.0); r * n];
+                fused_product(&a, &b, (r, k, n), &mut kernel);
+                let mut scalar = vec![C64::ZERO; r * n];
+                for (o, a) in scalar.chunks_exact_mut(n.max(1)).zip(a.chunks_exact(k.max(1))).take(if k == 0 { 0 } else { r }) {
+                    for (x, b) in a.iter().zip(b.chunks_exact(n.max(1))) {
+                        for (o, y) in o.iter_mut().zip(b) {
+                            o.re = x.re.mul_add(y.re, (-x.im).mul_add(y.im, o.re));
+                            o.im = x.re.mul_add(y.im, x.im.mul_add(y.re, o.im));
+                        }
+                    }
+                }
+                assert_eq!(bits(&kernel), bits(&scalar), "fused product {r} × {k} × {n}");
+            }
+        }
     }
 
     /// A reproducible matrix of entries uniform in [−½, ½] + i[−½, ½].

@@ -94,7 +94,7 @@
 //! the make by it, and a price (step.rs `Price`) by the same formula with the two Schur forms alone made -- no
 //! solve.
 
-use crate::linalg::{Mat, C64};
+use crate::linalg::{fused_product, mul_add, Mat, C64};
 use crate::decide::COMPLEX;
 
 /// A real square matrix's LU factorization with partial pivoting, P T = L U, T row by row, in its place: L unit lower,
@@ -205,21 +205,6 @@ impl Lu {
     }
 }
 
-/// out (r × c) = a (r × k) b (k × c), all row by row: a row of b at a time onto the row of out, two fused multiply-adds a
-/// real.
-fn product(a: &[C64], b: &[C64], (r, k, c): (usize, usize, usize), out: &mut [C64]) {
-    let out = &mut out[..r * c];
-    out.fill(C64::ZERO);
-    for (o, a) in out.chunks_exact_mut(c).zip(a.chunks_exact(k)) {
-        for (x, b) in a.iter().zip(b.chunks_exact(c)) {
-            for (o, y) in o.iter_mut().zip(b) {
-                o.re = x.re.mul_add(y.re, (-x.im).mul_add(y.im, o.re));
-                o.im = x.re.mul_add(y.im, x.im.mul_add(y.re, o.im));
-            }
-        }
-    }
-}
-
 /// The r × c block of an n × n matrix (row by row) at its rows from `r0` and its columns from `c0`, into `out`.
 fn block(m: &[C64], n: usize, (r0, r): (usize, usize), (c0, c): (usize, usize), out: &mut [C64]) {
     for (o, row) in out[..r * c].chunks_exact_mut(c).zip(m[r0 * n..].chunks_exact(n)) {
@@ -246,10 +231,7 @@ fn substitute(t: &[C64], s: &[C64], inverse: &[C64], (e, g): (usize, usize), x: 
         let (above, row) = x.split_at_mut(k * g);
         let row = &mut row[..g];
         for (l, xl) in above.chunks_exact(g).enumerate() {
-            let f = t[l * e + k].conj();
-            for (z, y) in row.iter_mut().zip(xl) {
-                *z -= f * *y;
-            }
+            mul_add(true, row, t[l * e + k].conj(), xl);
         }
         right(&inverse[k * g..(k + 1) * g], s, g, row);
     }
@@ -348,11 +330,11 @@ impl Sector {
         // The rotated couplings C = U_e† H_eg U_g and B = U_g† H_ge U_e.
         let [one, two] = &mut self.tmp;
         block(&h.data, n, (g, e), (0, g), one);
-        product(&self.ue_h, one, (e, e, g), two);
-        product(two, &self.ug, (e, g, g), &mut self.c);
+        fused_product(&self.ue_h, one, (e, e, g), two);
+        fused_product(two, &self.ug, (e, g, g), &mut self.c);
         block(&h.data, n, (0, g), (g, e), one);
-        product(&self.ug_h, one, (g, g, e), two);
-        product(two, &self.ue, (g, e, e), &mut self.b);
+        fused_product(&self.ug_h, one, (g, g, e), two);
+        fused_product(two, &self.ue, (g, e, e), &mut self.b);
         // ℳ, and its factorization.
         self.system();
         if !self.lu.factor(e * e) {
@@ -526,26 +508,20 @@ impl Sector {
                 } else {
                     yk.fill(C64::ZERO);
                     for (l, yl) in (i..k).zip(done.chunks_exact(eg)) {
-                        let f = -self.t[l * e + k].conj();
-                        for (z, y) in yk.iter_mut().zip(yl) {
-                            *z += f * *y;
-                        }
+                        mul_add(false, yk, -self.t[l * e + k].conj(), yl);
                     }
                 }
                 for row in yk.chunks_exact_mut(g) {
                     right(&self.inverse[k * g..(k + 1) * g], &self.s, g, row);
                 }
-                product(yk, &self.b, (e, g, e), &mut self.vv[(i * e + k) * ee..(i * e + k + 1) * ee]);
+                fused_product(yk, &self.b, (e, g, e), &mut self.vv[(i * e + k) * ee..(i * e + k + 1) * ee]);
             }
         }
         // The columns: Z = L(P) of the basis matrix, then i(T†P − PT) + i(Z† − Z) on the coordinates.
         let (t, vv, z, lu) = (&self.t, &self.vv, &mut self.z[..ee], &mut self.lu.lu);
         let add = |z: &mut [C64], i: usize, j: usize, f: C64| {
             for k in i..e {
-                let v = &vv[(i * e + k) * ee + j * e..(i * e + k) * ee + (j + 1) * e];
-                for (z, v) in z[k * e..(k + 1) * e].iter_mut().zip(v) {
-                    *z += f * *v;
-                }
+                mul_add(false, &mut z[k * e..(k + 1) * e], f, &vv[(i * e + k) * ee + j * e..(i * e + k) * ee + (j + 1) * e]);
             }
         };
         // i(T†E_ab − E_ab T) at (r, c): conj(T_ar) where c = b, less T_bc where r = a (T upper triangular).
@@ -595,11 +571,11 @@ impl Sector {
         let (ee, eg) = (e * e, e * g);
         let [one, two] = &mut self.tmp;
         block(m, n, (g, e), (g, e), one);
-        product(&self.ue_h, one, (e, e, e), two);
-        product(two, &self.ue, (e, e, e), &mut self.sides[0][a * ee..(a + 1) * ee]);
+        fused_product(&self.ue_h, one, (e, e, e), two);
+        fused_product(two, &self.ue, (e, e, e), &mut self.sides[0][a * ee..(a + 1) * ee]);
         block(m, n, (g, e), (0, g), one);
-        product(&self.ue_h, one, (e, e, g), two);
-        product(two, &self.ug, (e, g, g), &mut self.sides[1][a * eg..(a + 1) * eg]);
+        fused_product(&self.ue_h, one, (e, e, g), two);
+        fused_product(two, &self.ug, (e, g, g), &mut self.sides[1][a * eg..(a + 1) * eg]);
         if sign != 1.0 {
             let [s0, s1] = &mut self.sides;
             for z in s0[a * ee..(a + 1) * ee].iter_mut().chain(&mut s1[a * eg..(a + 1) * eg]) {
@@ -624,8 +600,8 @@ impl Sector {
             ((0, g), &self.ug_h, (0, g), &self.ug),
         ]) {
             block(h1, n, rows, cols, one);
-            product(ru, one, (rows.1, rows.1, cols.1), two);
-            product(two, cu, (rows.1, cols.1, cols.1), out);
+            fused_product(ru, one, (rows.1, rows.1, cols.1), two);
+            fused_product(two, cu, (rows.1, cols.1, cols.1), out);
         }
     }
 
@@ -685,7 +661,7 @@ impl Sector {
                 *x = C64::new(r.im, -r.re);
             }
             substitute(t, s, inverse, (e, g), x0);
-            product(x0, b, (e, g, e), &mut self.z);
+            fused_product(x0, b, (e, g, e), &mut self.z);
             let r_ee = &self.sides[0][side * ee..(side + 1) * ee];
             let mut row = 0;
             for r in 0..e {
@@ -718,7 +694,7 @@ impl Sector {
                 }
             }
             let x = &mut solved_eg[side * eg..(side + 1) * eg];
-            product(p, c, (e, e, g), x);
+            fused_product(p, c, (e, e, g), x);
             substitute(t, s, inverse, (e, g), x);
             for (x, x0) in x.iter_mut().zip(&self.x0[side * eg..(side + 1) * eg]) {
                 *x += *x0;
@@ -755,13 +731,13 @@ impl Sector {
         for a in 0..3 {
             let k = &mut self.k[a][..n * n];
             k.fill(C64::ZERO);
-            product(&self.ue, &self.k_ee[a * ee..(a + 1) * ee], (e, e, e), one);
-            product(one, &self.ue_h, (e, e, e), two);
+            fused_product(&self.ue, &self.k_ee[a * ee..(a + 1) * ee], (e, e, e), one);
+            fused_product(one, &self.ue_h, (e, e, e), two);
             for (i, row) in two[..ee].chunks_exact(e).enumerate() {
                 k[(g + i) * n + g..(g + i) * n + n].copy_from_slice(row);
             }
-            product(&self.ue, &self.k_eg[a * eg..(a + 1) * eg], (e, e, g), one);
-            product(one, &self.ug_h, (e, g, g), two);
+            fused_product(&self.ue, &self.k_eg[a * eg..(a + 1) * eg], (e, e, g), one);
+            fused_product(one, &self.ug_h, (e, g, g), two);
             for (i, row) in two[..eg].chunks_exact(g).enumerate() {
                 for (j, z) in row.iter().enumerate() {
                     k[(g + i) * n + j] = *z;
