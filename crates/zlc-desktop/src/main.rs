@@ -698,7 +698,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
             viewers.insert(next_viewer, Viewer::new(next_viewer));
             windows.make(&windows::Kind::FigureViewer(next_viewer), &event_loop, true)?;
             // Its file is read while the page loads; only the drawing waits for the page.
-            if let Some(path) = path { queue.push_back(json!({"id":0,"action":"open","path":path,"document":next_viewer})); }
+            if let Some(path) = path { queue.push_back(json!({"id":0,"action":"open","path":path,"_document":next_viewer})); }
             next_viewer += 1;
         }
         Mode::PulseEditor(_) => windows.make(&windows::Kind::PulseEditor, &event_loop, true)?,
@@ -848,8 +848,8 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(viewer) = viewers.get_mut(&number) {
                                 viewer.closing = true;
                                 viewer.close_logic(number, &runtime);
-                                for panel in panel_ids(&viewer.state) { queue.push_back(json!({"id":0,"action":"close_panel","panel":panel,"document":number})); }
-                                queue.push_back(json!({"id":0,"action":"drop_document","document":number}));
+                                for panel in panel_ids(&viewer.state) { queue.push_back(json!({"id":0,"action":"close_panel","panel":panel,"_document":number})); }
+                                queue.push_back(json!({"id":0,"action":"drop_document","_document":number}));
                             }
                             // A standalone viewer's application ends with its last window, as v2's QApplication did.
                             if !standalone || windows.any_visible() { return Ok(()); }
@@ -1229,7 +1229,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if action == "open" { if let Some(object) = command.as_object_mut() { object.remove("window"); } }
                     let in_viewer = document != 0;
-                    if in_viewer { command["document"] = json!(document); }
+                    if in_viewer { command["_document"] = json!(document); }
                     if matches!(action.as_str(), "new_data" | "edit_data" | "data_editor" | "close_data_editor") {
                         // v2 FigureViewer's Edit data / New data: working copies of a Figure's
                         // datasets, edited in its own tabs, applied to preview panels, saved as Figures.
@@ -1294,7 +1294,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 return Ok(());
                             }
                         }
-                        for panel in close { queue.push_back(json!({"id": 0, "action": "close_panel", "panel": panel, "document": document})); }
+                        for panel in close { queue.push_back(json!({"id": 0, "action": "close_panel", "panel": panel, "_document": document})); }
                         viewer.drafts.list.retain(|draft| draft.open || draft.applied());
                         viewer.state["data"] = viewer.drafts.state();
                         viewer.state["data_focus"] = json!(focus);
@@ -1364,7 +1364,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                 viewer.targets.remove(panel);
                                 // A panel's Edit goes with it.
                                 let edit = panels::edit_of(panel);
-                                if viewer.bindings.remove(&edit) { queue.push_back(json!({"id": 0, "action": "close_panel", "panel": edit, "document": document})); }
+                                if viewer.bindings.remove(&edit) { queue.push_back(json!({"id": 0, "action": "close_panel", "panel": edit, "_document": document})); }
                             }
                             else {
                                 bindings.remove(panel); workbench.panel_closed(panel); pending_targets.remove(panel);
@@ -1391,7 +1391,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                                     if !open { viewer.targets.insert(edit.clone(), target); }
                                 }
                             }
-                            command = json!({"id": command["id"], "action": "sync_panels", "document": document});
+                            command = json!({"id": command["id"], "action": "sync_panels", "_document": document});
                         }
                         else {
                             if !bindings.has(&panel) { return Err(format!("No panel {panel} on the board")); }
@@ -1491,7 +1491,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         match &kind {
                             windows::Kind::TaskConsole => { share.set_dpr(ratio.unwrap_or(1.0)); queue.push_back(json!({"id":0,"action":"ready","dpr":ratio})); }
                             windows::Kind::FigureViewer(number) => {
-                                queue.push_back(json!({"id":0,"action":"ready","dpr":ratio,"document":number}));
+                                queue.push_back(json!({"id":0,"action":"ready","dpr":ratio,"_document":number}));
                                 if let Some(present) = viewers.get_mut(number).and_then(|viewer| viewer.waiting.take()) { queue.push_back(present); }
                             }
                             windows::Kind::PulseEditor => { pulse.dpr = ratio.unwrap_or(1.0); pulse.dispatch(); }
@@ -1541,7 +1541,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(path) = initial_path.take() {
                                 let number = take_viewer(&mut viewers, &mut next_viewer);
                                 windows.show(&windows::Kind::FigureViewer(number), target)?;
-                                queue.push_back(json!({"id":0,"action":"open","path":path,"document":number}));
+                                queue.push_back(json!({"id":0,"action":"open","path":path,"_document":number}));
                             }
                         }
                         return Ok(());
@@ -1549,7 +1549,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                     // An opened Figure is read in its own window: its viewer's, or a new one.
                     if action == "open" {
                         let number = if in_viewer { document } else { take_viewer(&mut viewers, &mut next_viewer) };
-                        command["document"] = json!(number);
+                        command["_document"] = json!(number);
                         let kind = windows::Kind::FigureViewer(number);
                         // A new window's file is read while its page loads (its drawing waits for the page).
                         windows.show(&kind, target)?;
@@ -1586,7 +1586,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         let candidate=panels::Panels::from_inputs(&runtime,&data.inputs(),&panels::viewer_prefix(document))?;
                         pending_archive=Some(PendingArchive{data,bindings:candidate,request:completion.request,document});
                         // A new window draws its Figure at its page's device ratio: the drawing waits for the page.
-                        let present = json!({"id":completion.request,"action":"present_archive","document":document});
+                        let present = json!({"id":completion.request,"action":"present_archive","_document":document});
                         if windows.get(&windows::Kind::FigureViewer(document)).is_some_and(|window| window.ready) { queue.push_front(present); }
                         else { viewer.waiting = Some(present); }
                     } else if in_viewer && !viewers.contains_key(&document) {
@@ -2241,11 +2241,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                 else if let Some(number) = viewers.iter_mut().filter(|_| !closing).find(|(_, viewer)| viewer.pending && !viewer.closing && !viewer.bindings.is_empty())
                     .map(|(number, viewer)| { viewer.pending = false; *number }) {
                     // A viewer panel's own output (an ROI of an archived image) moved on.
-                    Some(json!({"id":0,"action":"sync_panels","document":number}))
+                    Some(json!({"id":0,"action":"sync_panels","_document":number}))
                 } else { None };
                 if let Some(mut command) = command {
                     board_last = synced;
-                    let document = command.as_object_mut().and_then(|object| object.remove("document")).and_then(|document| document.as_u64()).unwrap_or(0) as u32;
+                    let document = command.as_object_mut().and_then(|object| object.remove("_document")).and_then(|document| document.as_u64()).unwrap_or(0) as u32;
                     let in_viewer = document != 0;
                     let (shown, set) = match viewers.get(&document) { Some(viewer) => (&viewer.state, &viewer.bindings), None => (&accepted, &bindings) };
                     let importing=if command["action"]=="present_archive" {
