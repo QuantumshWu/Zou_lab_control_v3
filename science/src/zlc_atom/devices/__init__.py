@@ -6,6 +6,8 @@ import re
 import threading
 import time
 
+from zlc_plugin.faults import serial_fault
+
 
 class RecordQueue:
     """Bounded FIFO of already-owned records, shared by device adapters.
@@ -335,7 +337,8 @@ _WINDOWS_ERROR = re.compile(r"\(\d+, (['\"])(?P<text>.*?)\1, None, (?P<code>\d+)
 
 
 def serial_open_failure(port: str, error: BaseException) -> SerialPortError:
-    """``error`` from opening ``port``, in the shared wording and typed by its class."""
+    """``error`` from opening ``port``, in the shared wording and typed by its class; the open or
+    search under way is told it (``zlc_plugin.faults.serial_fault``)."""
 
     code, text = getattr(error, "winerror", None), str(getattr(error, "strerror", "") or "")
     if not isinstance(code, int):
@@ -345,6 +348,8 @@ def serial_open_failure(port: str, error: BaseException) -> SerialPortError:
     fault = SERIAL_FAULTS.get(code, "refused") if code is not None else "refused"
     said = f"os error {code}: {text}" if code is not None else text
     kind = SerialPortBusy if fault == SERIAL_FAULTS[5] else SerialPortUnusable
+    # Told to the open or search under way, which carries it to the core (`serial_faults`).
+    serial_fault(serial_name(port), fault, code)
     return kind(f"{port} could not be opened: {fault} ({said}) -- {serial_ports_here()}", port=port, fault=fault, code=code)
 
 
@@ -360,5 +365,42 @@ def open_serial_port(port: str, baud: int, **settings):
         raise serial_open_failure(port, error) from error
 
 
+def search_serial_ports(ports, probe: Callable[[str], object], *, first: bool = False,
+                        unopened: list[str] | None = None) -> tuple[tuple[str, object], ...]:
+    """One search over ``ports``: ``probe(port)`` on every one at once, each on a thread of its own,
+    so the search takes about one port's probe however many there are (Rust's twin:
+    ``zlc_pulse::serial::search_ports``).
+
+    ``probe`` opens its port, asks or listens, releases the port, and answers what it found there
+    (falsy: nothing). Each port is probed once, and the search returns only once every probe has
+    returned, so no port is still held. A probe that could not open its port raises
+    :class:`SerialPortError`: told to ``unopened`` as ``COM4: could not open (in use by another
+    program)``; any other failure is a port with nothing on it. Answers ``(port, found)`` in
+    ``ports``' order, whichever answered sooner; ``first``: only the first of them.
+    """
+
+    ports = tuple(ports)
+    outcomes: list[tuple[object, SerialPortError | None]] = [(None, None)] * len(ports)
+
+    def probed(index: int, port: str) -> None:
+        try:
+            outcomes[index] = (probe(port), None)
+        except SerialPortError as error:
+            outcomes[index] = (None, error)
+        except Exception:  # noqa: BLE001 -- a port that fails its probe has nothing we can use on it
+            pass
+
+    threads = [threading.Thread(target=probed, args=(index, port), name=f"zlc-serial-search-{port}", daemon=True)
+               for index, port in enumerate(ports)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if unopened is not None:
+        unopened.extend(f"{port}: {error.short}" for port, (_, error) in zip(ports, outcomes) if error is not None)
+    found = tuple((port, hit) for port, (hit, _) in zip(ports, outcomes) if hit)
+    return found[:1] if first else found
+
+
 __all__ = ["RecordQueue", "SERIAL_FAULTS", "SerialPortBusy", "SerialPortError", "SerialPortUnusable", "discovered", "free_serial_ports",
-           "open_serial_port", "serial_name", "serial_open_failure", "serial_ports_here", "underscored"]
+           "open_serial_port", "search_serial_ports", "serial_name", "serial_open_failure", "serial_ports_here", "underscored"]

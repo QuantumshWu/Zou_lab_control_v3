@@ -559,6 +559,16 @@ pub struct TuneDevice {
 #[serde(deny_unknown_fields)]
 pub struct DeviceRisk { pub device: String, pub accepted: bool }
 
+/// A serial port a device's open or search found refused by its driver (get_state devices[].refused_ports).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DevicePort {
+    /// Device instance id from get_state devices.
+    pub device: String,
+    /// One of that device's refused_ports (COM10).
+    pub port: String,
+}
+
 /// Remote on or off for one open device (v2's Device Manager switch).
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1116,6 +1126,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Init/Apply: open the devices the draft adds or changes, close those it removes (stopping runs that hold them). apparatus.action says which."),
     command!("close_device", DeviceRef, control, false, "Close one open device (its runs stop first); apply_devices reopens it."),
     command!("shut_down_devices", Empty, control, false, "Stop every run and close every device. Never refused."),
+    command!("restart_serial_port", DevicePort, control, false,
+        "Restart the USB device behind a serial port this computer's device found refused by its driver (refused_ports; Windows asks to allow it), then open that device again."),
     command!("read_device", ReadDevice, read, false, "Read an open device's tunable fields: current readback, limits, whether a running node protects them; units reads fields in another spelling (MHz, mW)."),
     command!("tune_device", TuneDevice, control, false, "Apply one tunable field to an open device; the reply holds the readback."),
     command!("accept_device_risk", DeviceRisk, control, false,

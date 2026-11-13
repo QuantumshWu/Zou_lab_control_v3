@@ -26,6 +26,7 @@ mod frame;
 mod workbench_host;
 mod animation;
 mod pulse_host;
+mod port_restart;
 mod bench;
 mod share;
 mod slm_host;
@@ -2102,11 +2103,12 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             answered = Some((request, pulse_host::Handled::Now(result)));
                         }
                         pulse_host::PulseEvent::FilesChanged => pulse.files_changed(),
-                        pulse_host::PulseEvent::Opened { instance, result, took } => {
+                        pulse_host::PulseEvent::Opened { instance, result, took, faults } => {
                             let event = match pulse.device_opened(&instance, &workbench.device_label(&instance), result) {
-                                Ok(point) => zlc_workbench::Event::Opened { instance, working_point: zlc_workbench::with_open_time(point, took) },
-                                Err(error) => zlc_workbench::Event::Failed { instance, error },
+                                Ok(point) => zlc_workbench::Event::Opened { instance: instance.clone(), working_point: zlc_workbench::with_open_time(point, took) },
+                                Err(error) => zlc_workbench::Event::Failed { instance: instance.clone(), error },
                             };
+                            let event = zlc_workbench::Event::met_serial_faults(&instance, faults, event);
                             let _ = self_proxy.send_event(AppEvent::Workbench(event));
                         }
                         pulse_host::PulseEvent::Closed { instance, error } => {
@@ -2125,6 +2127,11 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         pulse_host::PulseEvent::PreviewSaved(result) => pulse.preview_saved(result),
                         pulse_host::PulseEvent::Log { instance, line } => {
                             let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Log { instance, line }));
+                        }
+                        // Who holds the board changed: its `held_by` fact reaches the workbench now, as any device's facts do.
+                        pulse_host::PulseEvent::Owner { instance, owner } => {
+                            pulse.owner_changed(&instance, owner);
+                            if let Some((instance, facts)) = pulse.device_facts() { let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Facts { instance, facts })); }
                         }
                         // Closing: the end of this turn reads it (PulseHost::shut_down).
                         pulse_host::PulseEvent::ShutDown => {}
@@ -2153,11 +2160,14 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Answered { ticket, result: Ok(answer) }));
                     }
                     // The local board's UART, found before it opens: off the turn (a port may take seconds to open), bounded.
-                    workbench_host::NativeRequest::Resolve { ticket, type_id, parameters, excluded } => {
+                    workbench_host::NativeRequest::Resolve { ticket, instance, type_id, parameters, excluded } => {
                         let proxy = self_proxy.clone();
                         let spawned = std::thread::Builder::new().name("zlc-pulse-resolve".into()).spawn(move || {
+                            // With each port its probe could not open (a refused one offers its USB device's restart).
+                            let watch = zlc_pulse::serial::FaultWatch::start();
                             let result = pulse_host::resolve(&type_id, &parameters, &excluded, pulse_host::RESOLVE_WAIT);
-                            let _ = proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Answered { ticket, result }));
+                            let event = zlc_workbench::Event::met_serial_faults(&instance, pulse_host::serial_faults(&watch), zlc_workbench::Event::Answered { ticket, result });
+                            let _ = proxy.send_event(AppEvent::Workbench(event));
                         });
                         if let Err(error) = spawned {
                             let _ = self_proxy.send_event(AppEvent::Workbench(zlc_workbench::Event::Answered { ticket, result: Err(error.to_string()) }));

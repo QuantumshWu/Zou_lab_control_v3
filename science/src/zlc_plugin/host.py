@@ -31,6 +31,7 @@ from . import capabilities, tunable
 from .blocks import Arena, Attachments
 from .declare import ADMIT, NODE_INSTANCE, QUERY_OPTIONAL, QUERY_PARAMETERS, DeviceType, NodeKind, NodeType, Opened, field_json
 from .describe import describe, find
+from .faults import watching_serial_faults
 from .wire import (PROTOCOL, Channel, Decoder, Encoder, PluginError, error_payload, plain, raise_remote)
 
 
@@ -286,9 +287,19 @@ class Process:
             declared = find(str(params["type_id"]), str(params["module"]))
             if not isinstance(declared, DeviceType) or declared.resolve is None:
                 raise PluginError("unknown_op", f"{params['type_id']} finds nothing before it opens")
-            answer = declared.resolve(declared.project(params.get("parameters")), frozenset(str(item) for item in params.get("excluded") or ()))
-            self.reply(identity, {"parameters": {str(name): value for name, value in dict(answer.get("parameters") or {}).items()},
-                                  "note": str(answer.get("note") or "")}, plain=True)
+            # The ports its search could not open ride on its answer or its error (`serial_faults`).
+            with watching_serial_faults() as met:
+                try:
+                    answer = declared.resolve(declared.project(params.get("parameters")), frozenset(str(item) for item in params.get("excluded") or ()))
+                except BaseException as error:
+                    _carry_serial_faults(error, met)
+                    raise
+            # What it found (written into the row) apart from what this open alone uses (never written).
+            found: dict[str, Any] = {key: {str(name): value for name, value in dict(answer.get(key) or {}).items()} for key in ("found", "this_open")}
+            found["note"] = str(answer.get("note") or "")
+            if met:
+                found["serial_faults"] = met
+            self.reply(identity, found, plain=True)
         except BaseException as error:  # noqa: BLE001 -- the row's own failure, said where it is
             self.reply(identity, error=error)
 
@@ -770,10 +781,15 @@ def _open(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
         # This open's simulation parameters (``simulation_parameters``), whatever else
         # the process opens beside it.
         _OPENING.simulation = dict(params.get("simulation") or {})
-        try:
-            opened = declared.factory(instance.name, values)
-        finally:
-            _OPENING.simulation = None
+        # The ports its open could not open ride on its answer or its error (`serial_faults`).
+        with watching_serial_faults() as met:
+            try:
+                opened = declared.factory(instance.name, values)
+            except BaseException as error:
+                _carry_serial_faults(error, met)
+                raise
+            finally:
+                _OPENING.simulation = None
         if isinstance(opened, Opened):
             instance.adapter, instance.closer, instance.admit_peers = opened.adapter, opened.close, opened.admit_peers
         else:
@@ -789,9 +805,18 @@ def _open(instance: Instance, params: dict[str, Any]) -> dict[str, Any]:
         info = device_info(instance.adapter)
         if info is not None:
             opened["device_info"] = info
+        if met:
+            opened["serial_faults"] = met
         return opened
     instance.values = dict(params.get("parameters") or {})
     return {"state": "open"}
+
+
+def _carry_serial_faults(error: BaseException, met: list[dict[str, Any]]) -> None:
+    """``error`` carries the serial ports that would not open on the way to it (its payload's ``serial_faults``)."""
+
+    if met:
+        error.serial_faults = list(met)
 
 
 def device_info(adapter: object) -> dict[str, str] | None:

@@ -327,6 +327,17 @@ impl Workbench {
         self.task_said = running.then_some(said);
     }
 
+    /// A run's console line (v2 _activate_candidate's "<node> started"): said when the run starts
+    /// (`say`: also a removal's "is stopping"), it then follows the run -- "<node> is stopping", then
+    /// "<node> completed", "stopped" or "failed: <why>" -- while it is still the line shown; a later
+    /// line of anything else (a Task's status, a note, another run's) stands.
+    pub(crate) fn follow_run_line(&mut self, run: &str, line: (String, &'static str), say: bool) {
+        let shown = self.run_said.as_ref().is_some_and(|(said, shown)| said == run && *shown == self.console_report);
+        if !say && !shown { return; }
+        self.console_report = line.clone();
+        self.run_said = Some((run.to_owned(), line));
+    }
+
     pub(crate) fn say_new_notes(&mut self) {
         if self.notes == self.notes_said { return; }
         let said = std::mem::replace(&mut self.notes_said, self.notes.clone());
@@ -594,11 +605,18 @@ impl Workbench {
     /// one, and every node with an editor, asks again under a new revision, so an answer given
     /// before the change -- a camera not yet open when a layout loaded -- cannot stand after it.
     /// An open device says what it now states of itself (`Event::Facts`): kept with its working point, and
-    /// every draft that names devices is asked again when it differs from what was known.
+    /// every draft that names devices is asked again when it differs from what was known. A change of
+    /// who holds it (`held_by`: another client of a board's own pulse server; null: this application)
+    /// is the Device Manager's line as well.
     pub(crate) fn device_facts(&mut self, instance: &str, facts: Value) {
         let Some(live) = self.devices.get_mut(instance) else { return };
         if !live.working_point.is_object() || live.working_point["facts"] == facts { return; }
+        let held_by = (live.working_point["facts"]["held_by"] != facts["held_by"]).then(|| facts["held_by"].as_str().map(str::to_owned));
         live.working_point["facts"] = facts;
+        if let Some(held_by) = held_by {
+            let role = live.entry.role.clone();
+            self.report = match held_by { Some(holder) => (format!("{role}: held by {holder}"), "warning"), None => (format!("{role}: held here again"), "task") };
+        }
         self.bench_changed();
     }
 
@@ -1377,7 +1395,8 @@ impl Workbench {
         if node.follow { node.follow_attempted = follow_generation; }
         // v2 _activate_candidate: said when a run starts, however it was asked for (Start, a
         // follow restart, a task's acquisition).
-        self.console_report = (format!("{} started", node.name), "task");
+        let started = (format!("{} started", node.name), "task");
+        self.follow_run_line(&spec.run, started, true);
         // The configuration this run plays, beside the id every later line names it by.
         zlc_core::journal::note_with("workbench", "launch", || json!({"run": spec.run, "node": id, "type": spec.type_id, "origin": spec.origin,
             "source_signal": spec.source_signal, "values": spec.values, "devices": spec.devices, "artifacts": spec.artifacts,
@@ -1409,6 +1428,7 @@ impl Workbench {
         // The operator's request it waits on is cancelled with it (v2: Stop wakes the wait).
         let request = run.request.take().and_then(|request| request["request"].as_str().map(str::to_owned));
         let (node, id) = (id, run.id.clone());
+        self.follow_run_line(&id, (format!("{name} is stopping"), "task"), false);
         self.sources_lost(node, &SourceLost { cause, by: by.map(str::to_owned) });
         self.cancel_bench(&id);
         // Every Stop is sent (v2 cancelled the host each time): one asked again is never a no-op.
@@ -1449,13 +1469,14 @@ impl Workbench {
     pub(crate) fn remove_node(&mut self, id: &str, host: &mut dyn Host) -> Result<Value, String> {
         self.task_gate("removing a node")?;
         self.stop_node(id, host)?;
-        let active = self.node(id).and_then(|node| self.active_run(node)).is_some();
-        if active {
+        let active = self.node(id).and_then(|node| self.active_run(node)).map(|run| run.id.clone());
+        if let Some(run) = &active {
             let node = self.node_mut(id)?;
             node.removing = true;
-            self.console_report = (format!("{} is stopping", node.name), "task");
+            let stopping = (format!("{} is stopping", node.name), "task");
+            self.follow_run_line(run, stopping, true);
         } else { self.retire_node(id); }
-        Ok(json!({"node": id, "removed": !active}))
+        Ok(json!({"node": id, "removed": active.is_none()}))
     }
 
     fn retire_node(&mut self, id: &str) {
@@ -1691,10 +1712,15 @@ impl Workbench {
         if let Some(passed) = lost.or_else(|| failed.then(|| SourceLost { cause: format!("{name} failed"), by: None })) { self.sources_lost(&node_id, &passed); }
         // On saved data what completed stands as the configuration it came from: an edit reads "edited" until it runs again.
         let stands = !self.follows_sources && outcome == "completed";
+        let failure = failed.then(|| {
+            let message = message.unwrap_or_else(|| "the run failed".into());
+            match cause { Some(cause) => format!("{message} ({cause})"), None => message }
+        });
+        // How it ended, in its line's place (a removed node's "removed" then follows).
+        let ended = match &failure { Some(failure) => (format!("{name} failed: {failure}"), "error"), None => (format!("{name} {outcome}"), "task") };
+        self.follow_run_line(id, ended, false);
         if let Ok(node) = self.node_mut(&node_id) {
-            if outcome == "failed" {
-                let message = message.unwrap_or_else(|| "the run failed".into());
-                let message = match cause { Some(cause) => format!("{message} ({cause})"), None => message };
+            if let Some(message) = failure {
                 node.error = Some(if node.follow { format!("failed; restarts with the source's next run: {message}") } else { message });
             }
             if !node.follow && node.pending.is_none() && !stands { node.running = None; node.frozen = None; }

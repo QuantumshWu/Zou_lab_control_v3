@@ -72,6 +72,8 @@ export type DeviceRow = {
   controls: WorkbenchControl[];
   state: "draft" | "opening" | "open" | "closing" | "failed";
   close_failed?: boolean;
+  /** Serial ports its open or search found refused by their driver: each offers its USB device's restart (restart_serial_port). */
+  refused_ports?: string[];
   pending: "add" | "change" | "remove" | null;
   error: string | null;
   claimed_by: { node_id: string; run: string; protected_fields: string[] }[];
@@ -90,6 +92,8 @@ export type DeviceRow = {
   publishable?: boolean;
   /** A device another bench computer publishes: where it is and what it is there. */
   remote?: { host: string; port: number; instance_id: string; publisher: string; role: string; type_id: string; label: string } | null;
+  /** Who holds this computer's pulse board while another client of its pulse server does ("192.168.50.1 (bench peer)"); null while it is this application's. */
+  held_by?: string | null;
 };
 
 /** Browser sharing (the `share` section): where browsers watch, and who asks or watches. */

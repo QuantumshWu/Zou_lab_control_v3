@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use zlc_core::control::Origin;
 use zlc_core::runtime::{Generation, GenerationId, Runtime};
 use zlc_plugin_host::{HostEvent, Lent, PluginHost, RunRequest};
-use zlc_workbench::{Event, Host, Lane, PanelContent, Plugins, RunSpec, SignalInfo, TypeCatalog, Work, Workbench};
+use zlc_workbench::{Event, Host, Lane, PanelContent, Plugins, RunSpec, SerialFault, SignalInfo, TypeCatalog, Work, Workbench};
 
 use crate::panels::Panels;
 
@@ -259,7 +259,7 @@ pub enum NativeRequest {
     /// Remote on/off for the pulse board (its own server admits the other computers).
     Publish { ticket: u64, instance: String, role: String, published: bool },
     /// What a native row leaves blank, found before it opens (the local board's UART), off the window's turn.
-    Resolve { ticket: u64, type_id: String, parameters: Value, excluded: Vec<String> },
+    Resolve { ticket: u64, instance: String, type_id: String, parameters: Value, excluded: Vec<String> },
 }
 
 #[derive(Clone)]
@@ -672,7 +672,13 @@ impl Plugins for Builtin {
             let endpoint = format!("{}:{}", parameters["host"].as_str().unwrap_or_default(), parameters["port"]);
             // The device's own open, timed around it alone (not its turn's wait).
             let began = std::time::Instant::now();
-            match match &bench { Some(bench) => bench.open(host, &name, &parameters), None => host.open(&name, &kind, parameters, group) } {
+            let instance_name = name.clone();
+            let opened = match &bench { Some(bench) => bench.open(host, &name, &parameters), None => host.open(&name, &kind, parameters, group) };
+            // The serial ports an open on this computer met that would not open (another computer's are its own).
+            let faults = if bench.is_some() { Vec::new() } else {
+                SerialFault::listed(match &opened { Ok(point) => point.get("serial_faults"), Err(error) => error.serial_faults.as_ref() })
+            };
+            let outcome = match opened {
                 Ok(point) => {
                     // A client of another computer's own server (the catalogue's announced types) says where it
                     // connected and what the server said it is, as a native board does.
@@ -683,7 +689,8 @@ impl Plugins for Builtin {
                     Event::Opened { instance: name, working_point: zlc_workbench::with_open_time(point, began.elapsed()) }
                 }
                 Err(error) => Event::Failed { instance: name, error: error.to_string() },
-            }
+            };
+            Event::met_serial_faults(&instance_name, faults, outcome)
         })));
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Failed { instance: instance.into(), error }); }
     }
@@ -838,7 +845,8 @@ impl Plugins for Builtin {
         let (type_id, excluded) = (type_id.to_owned(), excluded.to_vec());
         // The bench part of the scan: what other computers publish (v2's remote family).
         let bench = self.bench().filter(|_| type_id == zlc_fabric::REMOTE_TYPE);
-        // v2 _scan_families: one deadline from the scan's start, the process's start inside it. A family
+        // v2 _scan_families: one deadline from the family's ask (the scan's start, or, for a type asked
+        // after one of its resource kind, that one's answer), the process's start inside it. A family
         // that misses it is reported so, its answer when it comes is dropped, and until then it is still
         // scanning (Init, Apply and another scan wait for it).
         let until = std::time::Instant::now() + SCAN;
@@ -867,15 +875,25 @@ impl Plugins for Builtin {
     }
     fn resolve(&mut self, ticket: u64, instance: &str, type_id: &str, parameters: &Value, excluded: &[String]) {
         if let Some(handler) = self.native_handler(Some(type_id), instance) {
-            handler(NativeRequest::Resolve { ticket, type_id: type_id.to_owned(), parameters: parameters.clone(), excluded: excluded.to_vec() });
+            handler(NativeRequest::Resolve { ticket, instance: instance.to_owned(), type_id: type_id.to_owned(), parameters: parameters.clone(), excluded: excluded.to_vec() });
             return;
         }
-        let (type_id, parameters, excluded) = (type_id.to_owned(), parameters.clone(), excluded.to_vec());
-        // A resolve probes as a scan does, port by port with a bounded wait each, so it is held to a
+        let (instance, type_id, parameters, excluded) = (instance.to_owned(), type_id.to_owned(), parameters.clone(), excluded.to_vec());
+        // A resolve probes as a scan does, every free port at once with a bounded wait each, so it is held to a
         // family's scan deadline (the process's start inside it); Init waits for nothing longer.
-        let started = self.spawn("resolve", move |host| Event::Answered { ticket,
-            result: host.resolve(&type_id, parameters, &excluded, SCAN).map_err(|error| error.to_string()) });
+        let started = self.spawn("resolve", move |host| {
+            let result = host.resolve(&type_id, parameters, &excluded, SCAN);
+            let faults = SerialFault::listed(match &result { Ok(answer) => answer.get("serial_faults"), Err(error) => error.serial_faults.as_ref() });
+            Event::met_serial_faults(&instance, faults, Event::Answered { ticket, result: result.map_err(|error| error.to_string()) })
+        });
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error) }); }
+    }
+    fn restart_port(&mut self, ticket: u64, port: &str) {
+        let (reply, port) = (self.0.borrow().reply.clone(), port.to_owned());
+        // Windows' confirmation and pnputil wait on a thread of their own, never on the window's turn.
+        let started = std::thread::Builder::new().name("zlc-port-restart".into())
+            .spawn(move || reply(Event::Answered { ticket, result: serde_json::to_value(crate::port_restart::restart(&port)).map_err(|error| error.to_string()) }));
+        if let Err(error) = started { self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error.to_string()) }); }
     }
     fn scanning(&self) -> Vec<String> { self.0.borrow().scanning.lock().unwrap().iter().cloned().collect() }
     fn discovering(&self) -> bool { let stand = self.0.borrow(); stand.host.is_some() && !stand.catalog_ready }

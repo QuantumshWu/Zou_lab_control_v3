@@ -4,8 +4,11 @@ knows a port that cannot be used at all (`SerialPortUnusable`, looked for again 
 another program holds (`SerialPortBusy`). A stand-in `serial` module: no port is opened."""
 import pathlib
 import sys
+import threading
+import time
 import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'science' / 'src'))
 
@@ -45,13 +48,14 @@ list_ports.comports = lambda: list(LISTED)
 fake.tools, tools.list_ports = tools, list_ports
 sys.modules.update({'serial': fake, 'serial.tools': tools, 'serial.tools.list_ports': list_ports})
 
-from zlc_atom.devices import SerialPortBusy, SerialPortUnusable, open_serial_port, serial_ports_here  # noqa: E402
+from zlc_atom.devices import SerialPortBusy, SerialPortUnusable, open_serial_port, search_serial_ports, serial_ports_here  # noqa: E402
 from zlc_atom.devices.motion.newport_smc100 import Smc100Axis, Smc100Config  # noqa: E402
 from zlc_atom.devices.motion.newport_smc100.device_types import DEVICE_TYPES as SMC100_TYPES  # noqa: E402
 from zlc_atom.devices.waveform.wheeltec_n100.device_types import DEVICE_TYPES as N100_TYPES  # noqa: E402
-from zlc_atom.devices.waveform.wheeltec_n100.source import WheeltecN100Config, WheeltecN100WaveformSource  # noqa: E402
+from zlc_atom.devices.waveform.wheeltec_n100.source import WheeltecN100Config, WheeltecN100WaveformSource, discover_n100  # noqa: E402
 from zlc_atom.devices.waveform.witmotion_hwt3100.device_types import DEVICE_TYPES as HWT_TYPES  # noqa: E402
 from zlc_atom.devices.waveform.witmotion_hwt3100.source import Hwt3100Config, Hwt3100WaveformSource  # noqa: E402
+from zlc_plugin.faults import watching_serial_faults  # noqa: E402
 from zlc_plugin.wire import error_payload, raise_remote  # noqa: E402
 
 PORTS = 'serial ports on this PC: COM5 (USB-SERIAL CH340), COM7'
@@ -116,6 +120,108 @@ class SerialOpenWording(unittest.TestCase):
             with self.subTest(kind.type_id), self.assertRaises(RuntimeError) as raised:
                 kind.resolve(kind.parameters.project_values(values), frozenset())
             self.assertIn(f'({asked} COM5, COM7; {unopened})', str(raised.exception))
+
+    def test_a_resolve_answers_what_it_found(self):
+        devices = 'zlc_atom.devices'
+        cases = ((N100_TYPES, f'{devices}.waveform.wheeltec_n100.device_types.discover_n100', ('COM5',),
+                  {'port': '', 'baud': 921600, 'timeout_seconds': 2.0}),
+                 (HWT_TYPES, f'{devices}.waveform.witmotion_hwt3100.device_types.discover_hwt3100', (('COM5', 0, 115200),),
+                  {'port': '', 'address': 0}),
+                 (SMC100_TYPES, f'{devices}.motion.newport_smc100.device_types.discover_smc100', (('COM5', 1, 'SMC_CC v3', ''),),
+                  {'port': '', 'address': 1, 'unit': 'mm'}))
+        for types_, finder, found, values in cases:
+            kind = types_[0]
+            with self.subTest(kind.type_id), mock.patch(finder, return_value=found):
+                answer = kind.resolve(kind.parameters.project_values(values), frozenset())
+            self.assertEqual((answer['found'], 'this_open' in answer), ({'port': 'COM5'}, False), 'found is written; nothing for this open only')
+
+    def test_a_watch_hears_every_port_that_would_not_open_and_the_error_carries_them(self):
+        # What an open's or a resolve's answer carries to the core (`serial_faults`): every failed
+        # open while it ran, on any thread (a search's probes are), as {port, fault, code}; none after it.
+        BEHAVIOUR['COM5'] = "could not open port 'COM5': OSError(22, 'Incorrect function.', None, 1)"
+        BEHAVIOUR['COM7'] = "could not open port 'COM7': PermissionError(13, 'Access is denied.', None, 5)"
+        kind = N100_TYPES[0]
+        with watching_serial_faults() as met:
+            with self.assertRaises(RuntimeError):
+                kind.resolve(kind.parameters.project_values({'port': '', 'baud': 921600, 'timeout_seconds': 2.0}), frozenset())
+            probe = threading.Thread(target=lambda: self.assertRaises(SerialPortUnusable, open_serial_port, r'\\.\com12', 9600))
+            probe.start()
+            probe.join()
+        with self.assertRaises(SerialPortUnusable):
+            open_serial_port('COM3', 9600)
+        # The search probes its ports at once: in whichever order they failed.
+        self.assertEqual(sorted(met, key=lambda fact: fact['port']),
+                         [{'port': 'COM12', 'fault': 'not present', 'code': 2}, {'port': 'COM5', 'fault': 'driver refused', 'code': 1},
+                          {'port': 'COM7', 'fault': 'in use by another program', 'code': 5}])
+        failure = RuntimeError('no WHEELTEC N100 streams on the free serial ports')
+        failure.serial_faults = [{'port': 'COM5', 'fault': 'driver refused', 'code': 1}]
+        self.assertEqual(error_payload(failure)['serial_faults'], [{'port': 'COM5', 'fault': 'driver refused', 'code': 1}])
+        self.assertNotIn('serial_faults', error_payload(RuntimeError('nothing met')))
+
+    def test_a_device_open_carries_the_ports_that_would_not_open_in_its_error(self):
+        # The plugin host's open of a row: its error names the port its driver refused (`serial_faults`).
+        from zlc_plugin import host as plugin_host
+        BEHAVIOUR['COM5'] = "could not open port 'COM5': OSError(22, 'Incorrect function.', None, 1)"
+        kind = N100_TYPES[0]
+        instance = types.SimpleNamespace(close_device=lambda: None, name='n100')
+        with mock.patch.object(plugin_host, 'find', lambda type_id, module: kind), self.assertRaises(SerialPortUnusable) as raised:
+            plugin_host._open(instance, {'type_id': kind.type_id, 'module': 'n100', 'parameters': {'port': 'COM5'}})
+        self.assertEqual(error_payload(raised.exception)['serial_faults'], [{'port': 'COM5', 'fault': 'driver refused', 'code': 1}])
+
+
+class OneSearch(unittest.TestCase):
+    """One search probes its free ports at once: about one port's probe, not the sum."""
+
+    def setUp(self):
+        BEHAVIOUR.clear()
+        LISTED[:] = []
+
+    def test_ports_are_probed_at_once_and_said_in_the_listing_order(self):
+        listed = ('COM13', 'COM7', 'COM8', 'COM10', 'COM11', 'COM12')
+        timeout, asked, lock = 0.4, [], threading.Lock()
+
+        def probe(port):
+            with lock:
+                asked.append(port)
+            if port == 'COM7':
+                time.sleep(timeout)  # a slow refusal is still said in its place
+                raise SerialPortUnusable('COM7 could not be opened', port='COM7', fault='driver refused')
+            if port == 'COM11':
+                raise SerialPortBusy('COM11 could not be opened', port='COM11', fault='in use by another program')
+            if port == 'COM12':
+                return 'sooner'  # a later-listed one answering first does not win
+            time.sleep(timeout / 2 if port == 'COM10' else timeout)
+            return 'board' if port == 'COM10' else None
+
+        began = time.monotonic()
+        unopened = []
+        found = search_serial_ports(listed, probe, unopened=unopened)
+        took = time.monotonic() - began
+        self.assertTrue(timeout <= took < 2 * timeout, f'about one probe, not the sum: {took:.2f} s')
+        self.assertEqual(found, (('COM10', 'board'), ('COM12', 'sooner')))
+        self.assertEqual(unopened, ['COM7: could not open (driver refused)', 'COM11: could not open (in use by another program)'])
+        self.assertEqual(sorted(asked), sorted(listed), 'each port probed once')
+        self.assertEqual(search_serial_ports(listed, probe, first=True), (('COM10', 'board'),), 'the first listed that answers')
+
+    def test_an_n100_search_listens_on_every_port_at_once(self):
+        # Five ports that open and stay silent: one listening moment, not five.
+        LISTED[:] = [types.SimpleNamespace(device=f'COM{n}', description='n/a') for n in (3, 4, 5, 6, 7)]
+        BEHAVIOUR.update({f'COM{n}': None for n in (3, 4, 5, 6)})
+        opened = []
+        real = Serial.__init__
+
+        def counted(self, port, baud, **settings):
+            opened.append(port)
+            real(self, port, baud, **settings)
+        listen = 0.3
+        began = time.monotonic()
+        unopened = []
+        with mock.patch.object(Serial, '__init__', counted):
+            found = discover_n100(listen_seconds=listen, unopened=unopened)
+        took = time.monotonic() - began
+        self.assertEqual((found, unopened), ((), ['COM7: could not open (not present)']))
+        self.assertTrue(listen <= took < 2.5 * listen, f'one listening moment: {took:.2f} s')
+        self.assertEqual(sorted(opened), ['COM3', 'COM4', 'COM5', 'COM6', 'COM7'], 'each opened once')
 
 
 if __name__ == '__main__':

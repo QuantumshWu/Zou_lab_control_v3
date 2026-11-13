@@ -7,9 +7,10 @@
 //!
 //! Every serial open of the application words its failure one way ([`OpenFailure`], twinned in
 //! Python as `zlc_atom.devices.open_serial_port`): the OS's error class, its code and text, and
-//! the serial ports this PC does have.
+//! the serial ports this PC does have. Each failure is also told to the [`FaultWatch`]es held
+//! meanwhile: the open or search that holds one carries them to the core (`serial_faults`).
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
@@ -26,6 +27,7 @@ use windows_sys::Win32::System::Registry::{HKEY, HKEY_LOCAL_MACHINE, KEY_READ, R
 
 use crate::device::PulseStreamer;
 use crate::error::{Error, Kind, Result};
+use crate::json::Json;
 use crate::model::Target;
 use crate::transport::{Event, RegisterTransport, aborted};
 use crate::uart::{MAX_FRAME_WORDS, UartLink, UartRegisterTransport, extract_reply, reply_frame_len};
@@ -75,7 +77,15 @@ impl OpenFailure {
         let code = error.raw_os_error().unwrap_or(0) as u32;
         let text = error.to_string();
         let text = text.trim_end_matches(&format!(" (os error {code})")).trim_end_matches(['.', '\u{3002}', ' ']).to_owned();
-        OpenFailure { port: port.to_owned(), fault: PortFault::of(code), code, detail: if step.is_empty() { text } else { format!("{step}: {text}") } }
+        let failure = OpenFailure { port: port.to_owned(), fault: PortFault::of(code), code, detail: if step.is_empty() { text } else { format!("{step}: {text}") } };
+        noticed(&failure);
+        failure
+    }
+
+    /// What the core is told of it beside the answer of the open or search that met it
+    /// (`serial_faults`, PLUGIN_PROTOCOL §7): `{port, fault, code}`, as Python's `zlc_plugin.faults` says one.
+    pub fn fact(&self) -> Json {
+        Json::object(vec![("port", Json::str(com_name(&self.port))), ("fault", Json::str(self.fault.words())), ("code", Json::Int(self.code.into()))])
     }
 
     /// The class alone, as a probe lists it beside the other ports it tried.
@@ -92,6 +102,36 @@ impl fmt::Display for OpenFailure {
 }
 
 impl From<OpenFailure> for Error { fn from(failure: OpenFailure) -> Error { Error::new(Kind::Io, failure.to_string()) } }
+
+/// The watches held now, each told every serial open that fails in this process meanwhile.
+static WATCHES: Mutex<Vec<Weak<Mutex<Vec<OpenFailure>>>>> = Mutex::new(Vec::new());
+
+/// The serial opens that fail while it is held, on any thread (a search's probe thread too):
+/// held around one open or search, whose answer then carries them to the core (Python's twin:
+/// `zlc_plugin.faults.watching_serial_faults`).
+pub struct FaultWatch(Arc<Mutex<Vec<OpenFailure>>>);
+
+impl FaultWatch {
+    pub fn start() -> FaultWatch {
+        let met = Arc::new(Mutex::new(Vec::new()));
+        let mut watches = WATCHES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        watches.retain(|watch| watch.strong_count() > 0);
+        watches.push(Arc::downgrade(&met));
+        FaultWatch(met)
+    }
+
+    /// Each failed open met so far, in order.
+    pub fn met(&self) -> Vec<OpenFailure> { self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone() }
+}
+
+fn noticed(failure: &OpenFailure) {
+    let watches: Vec<_> = WATCHES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().filter_map(Weak::upgrade).collect();
+    for met in watches { met.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(failure.clone()); }
+}
+
+/// A failed open another process met for this one (the local pulse server's `serial_faults`):
+/// told to the watches held here as one met here is.
+pub fn told(port: &str, code: u32) { noticed(&OpenFailure { port: port.to_owned(), fault: PortFault::of(code), code, detail: String::new() }) }
 
 /// The serial ports this PC has, with their friendly names where Windows has them:
 /// `serial ports on this PC: COM3 (USB-SERIAL CH340), COM4`, or that it has none.
@@ -328,34 +368,42 @@ impl fmt::Display for Attempt {
     }
 }
 
-/// The board's UART among `ports`, found as v2's server found it: each port opened in turn with
-/// the board's handshake (open and the word-63 fingerprint, 0.5 s) and released again. The first
-/// that answers, and every port tried with what it came to.
+/// The board's UART among `ports`, found as v2's server found it: each port opened with the board's
+/// handshake (open and the word-63 fingerprint, 0.5 s) and released again, all of them at once
+/// ([`search_ports`]). The first in `ports`' order that answers, and every port tried with what it came to.
 pub fn find_board_uart(ports: &[String], baud: u64, geometry: StreamerParams, clock_hz: f64, target: &Arc<Target>) -> (Option<String>, Vec<Attempt>) {
-    let mut attempts = Vec::new();
-    for port in ports {
-        let probe = match ComPortLink::new(port, baud) {
-            Err(error) => Probe::Invalid(error.message),
-            Ok(mut link) => match link.open_port() {
-                Err(failure) => Probe::NotOpened(failure),
-                Ok(()) => {
-                    let transport: Arc<dyn RegisterTransport> = Arc::new(UartRegisterTransport::new(Box::new(link), Duration::from_millis(500)));
-                    let opened = PulseStreamer::new(transport.clone(), geometry, clock_hz, target.clone()).and_then(|streamer| streamer.open());
-                    let _ = transport.close();
-                    match opened {
-                        Ok(()) => Probe::Matched,
-                        Err(error) if error.message.contains("layout mismatch") => Probe::NoBoard("fingerprint mismatch".into()),
-                        Err(error) if error.kind == Kind::Timeout => Probe::NoBoard("timeout".into()),
-                        Err(error) => Probe::NoBoard(error.message),
-                    }
+    search_ports(ports, |port| match ComPortLink::new(port, baud) {
+        Err(error) => Probe::Invalid(error.message),
+        Ok(mut link) => match link.open_port() {
+            Err(failure) => Probe::NotOpened(failure),
+            Ok(()) => {
+                let transport: Arc<dyn RegisterTransport> = Arc::new(UartRegisterTransport::new(Box::new(link), Duration::from_millis(500)));
+                let opened = PulseStreamer::new(transport.clone(), geometry, clock_hz, target.clone()).and_then(|streamer| streamer.open());
+                let _ = transport.close();
+                match opened {
+                    Ok(()) => Probe::Matched,
+                    Err(error) if error.message.contains("layout mismatch") => Probe::NoBoard("fingerprint mismatch".into()),
+                    Err(error) if error.kind == Kind::Timeout => Probe::NoBoard("timeout".into()),
+                    Err(error) => Probe::NoBoard(error.message),
                 }
-            },
-        };
-        let matched = probe == Probe::Matched;
-        attempts.push(Attempt { port: port.clone(), probe });
-        if matched { return (Some(port.clone()), attempts); }
-    }
-    (None, attempts)
+            }
+        },
+    })
+}
+
+/// One search over `ports`: each probed once, all at once on threads of their own, so the search
+/// takes about one port's probe however many there are. It returns once every probe has released
+/// its port, with the attempts in `ports`' order and, of the ports that answered, the first in that order.
+pub fn search_ports(ports: &[String], probe: impl Fn(&str) -> Probe + Sync) -> (Option<String>, Vec<Attempt>) {
+    let probe = &probe;
+    let attempts: Vec<Attempt> = std::thread::scope(|scope| {
+        let probes: Vec<_> = ports.iter().map(|port| (port, scope.spawn(move || probe(port)))).collect();
+        probes.into_iter().map(|(port, probing)| Attempt {
+            port: port.clone(),
+            probe: probing.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        }).collect()
+    });
+    (attempts.iter().find(|attempt| attempt.probe == Probe::Matched).map(|attempt| attempt.port.clone()), attempts)
 }
 
 #[cfg(test)]
@@ -400,5 +448,56 @@ mod tests {
         assert_eq!(classes, [(2, "not present"), (3, "not present"), (433, "not present"), (1167, "not present"), (5, "in use by another program"),
                              (32, "in use by another program"), (1, "driver refused"), (31, "driver refused"), (87, "refused")]);
         assert_eq!((PortFault::Busy.error_type(), PortFault::Refused.error_type()), ("SerialPortBusy", "SerialPortUnusable"));
+    }
+
+    /// One search probes its ports at once: it takes about one port's probe, not their sum, tries
+    /// each port once, reports the attempts in the listing's order, and of two that answer takes the
+    /// first listed -- even when a later one answers sooner.
+    #[test]
+    fn a_search_probes_its_ports_at_once_and_reports_them_in_order() {
+        let listed: Vec<String> = ["COM13", "COM7", "COM8", "COM10", "COM11", "COM12"].map(str::to_owned).to_vec();
+        let timeout = Duration::from_millis(400);
+        let asked = std::sync::Mutex::new(Vec::new());
+        let began = Instant::now();
+        let (found, attempts) = search_ports(&listed, |port| {
+            asked.lock().unwrap().push(port.to_owned());
+            match port {
+                // The later-listed board answers at once; the earlier one only after a while.
+                "COM12" => Probe::Matched,
+                "COM10" => { std::thread::sleep(timeout / 2); Probe::Matched }
+                "COM7" => Probe::NotOpened(OpenFailure { port: port.into(), fault: PortFault::Refused, code: 1, detail: "Incorrect function".into() }),
+                _ => { std::thread::sleep(timeout); Probe::NoBoard("timeout".into()) }
+            }
+        });
+        let took = began.elapsed();
+        assert!(took >= timeout && took < timeout * 2, "about one port's timeout, not the sum: {took:?}");
+        assert_eq!(found.as_deref(), Some("COM10"), "the first listed of those that answer");
+        assert_eq!(attempts.iter().map(|attempt| attempt.port.as_str()).collect::<Vec<_>>(), listed, "in the listing's order");
+        assert_eq!(attempts.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                   ["COM13: opened, no board answered (timeout)", "COM7: could not open (driver refused)", "COM8: opened, no board answered (timeout)",
+                    "COM10: word63 fingerprint matched", "COM11: opened, no board answered (timeout)", "COM12: word63 fingerprint matched"]);
+        let mut asked = asked.into_inner().unwrap();
+        asked.sort();
+        let mut each = listed.clone();
+        each.sort();
+        assert_eq!(asked, each, "each port probed once");
+    }
+
+    /// A failed open is told to every watch held meanwhile, whichever thread met it, and to none
+    /// started after it; one another process met is told as one met here, classed by its code.
+    #[test]
+    fn a_watch_hears_every_failed_open_while_it_is_held() {
+        // Ports no other test opens: tests share the process, and a watch hears them all.
+        let ours = |watch: &FaultWatch| watch.met().iter().map(OpenFailure::fact).map(|fact| fact.compact_text())
+            .filter(|fact| fact.contains("COM251") || fact.contains("COM252")).collect::<Vec<_>>();
+        let watch = FaultWatch::start();
+        std::thread::spawn(|| ComPortLink::new("com251", 115_200).unwrap().open_port().unwrap_err()).join().unwrap();
+        let later = FaultWatch::start();
+        told("COM252", 31);
+        assert_eq!(ours(&watch), [r#"{"port":"COM251","fault":"not present","code":2}"#, r#"{"port":"COM252","fault":"driver refused","code":31}"#]);
+        assert_eq!(ours(&later), [r#"{"port":"COM252","fault":"driver refused","code":31}"#]);
+        drop(watch);
+        told("COM252", 1);
+        assert_eq!(ours(&later).len(), 2, "the watches still held hear on");
     }
 }

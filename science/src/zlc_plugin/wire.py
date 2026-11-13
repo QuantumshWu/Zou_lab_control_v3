@@ -271,8 +271,13 @@ def error_payload(error: BaseException, *, kind: str | None = None) -> dict[str,
             kind = "refused"
         else:
             kind = "failed"
-    return {"kind": kind, "type": _qualified(type(error)), "message": str(error),
-            "traceback": "".join(traceback.format_exception(error))}
+    payload = {"kind": kind, "type": _qualified(type(error)), "message": str(error),
+               "traceback": "".join(traceback.format_exception(error))}
+    # The serial ports that would not open on the way to it, as the call that watched them put them on it.
+    faults = getattr(error, "serial_faults", None)
+    if faults:
+        payload["serial_faults"] = [dict(fact) for fact in faults]
+    return payload
 
 
 _BUILTIN = {name: getattr(builtins, name) for name in ("TimeoutError", "ValueError", "TypeError", "RuntimeError", "KeyError", "LookupError",

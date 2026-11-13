@@ -187,6 +187,14 @@ without an instance: `discover` (its hardware scan; an SDK `discover` that takes
 `resolve(parameters, excluded)`): a row of such a type with a resource still blank is
 resolved before it opens, one row at a time in the operator's order while the other
 rows open, and what it finds is pinned into the apparatus (WORKBENCH_COMMANDS §4.2).
+A resolve answers what it **found** apart from what the row opens with **this time
+only**: only found values are written into the row, so a search that finds nothing
+never erases the row's last-known values (the board on Auto without a UART opens over
+JTAG with `this_open: {uart_port: ""}` while its row keeps `COM10`). One search probes
+its free ports at once, each opened at most once and all released before it answers
+(`zlc_atom.devices.search_serial_ports`, Rust `zlc_pulse::serial::search_ports`): it
+takes about one port's timeout, says its attempts in the listing's order and takes the
+first listed port that answers.
 
 **A filled-in serial port is a record of an earlier resolve.** Every serial open says
 its failure one way (SDK `zlc_atom.devices.open_serial_port`, Rust
@@ -199,8 +207,9 @@ another program holds it. An open of a row whose type resolves that fails with
 `SerialPortUnusable` is not the row's failure yet: the core runs the type's resolve once
 more with the row's serial ports blank, pins what it finds (the Init line says the port
 that failed and what was found) and opens that; nothing found fails the row with both
-reasons. A held port is not looked past, and an open of what a resolve found is not
-looked for again. Every device's open failure, resolve outcome and close failure is
+reasons, or opens it as the resolve says for this open only, the row's port kept. A
+held port is not looked past, and an open of what a resolve found is not looked for
+again. Every device's open failure, resolve outcome and close failure is
 also written into that device's own log (`[HH:MM:SS] open failed: ...`).
 
 Packages may export `configuration.APPARATUS_SCHEMAS`: a mapping from apparatus
@@ -236,7 +245,7 @@ spawned -> ready -> open -> (idle <-> running) -> closing -> closed
 | health | `ping` | answered by the reader thread (proves the interpreter and GIL are alive) | `{}` |
 | catalogue (process) | `describe {packages}` | imports every leaf module on a thread of its own | the descriptor document (section 2) |
 | hardware scan (process) | `discover {type_id, module, excluded}` (no instance; in the process its instances open in, so a vendor runtime that is a process singleton -- DCAM -- is the one its devices use; `excluded`: the bound resources, section 2) | the type's `discover(excluded=...)` (or `discover()`) on a thread of its own | `{found: [{instance_id, role, parameters}], notes}`; the core stops waiting at its deadline (20 s, v2) and drops a late answer |
-| resolve (process) | `resolve {type_id, module, parameters, excluded}` (no instance; Init, before the row opens; `excluded`: the bound resources but the row's own) | the type's `resolve(projected parameters, excluded)` on a thread of its own | `{parameters: {name: value}, note}`: the values found (none: open as authored), pinned into the row; an error fails the row and says what it tried and passed over. Deadline 20 s |
+| resolve (process) | `resolve {type_id, module, parameters, excluded}` (no instance; Init, before the row opens; `excluded`: the bound resources but the row's own) | the type's `resolve(projected parameters, excluded)` on a thread of its own | `{found: {name: value}, this_open?: {name: value}, note}`: `found`, the values found (none: open as authored), pinned into the row; `this_open`, values this open uses over the row's without writing them (what a search that found nothing opens with); an error fails the row and says what it tried and passed over. Deadline 20 s |
 | close | `close {instance}` | device: its closer (stop capture, release SDK); node: stop run | `{state}`; a process left with nothing to serve ends |
 | abandon | event `abandon {instance}` | stop accepting work for the instance; keep its name reserved until the overrunning call returns and cleanup succeeds | none |
 | exit (process) | `exit` | closes what is left | `{}`, then exits 0 |
@@ -821,6 +830,16 @@ processes on this computer that have one of the type's `sdk_modules` loaded
 time and whether it is this application's, in the error's message, as
 `error.holders` (`{processes, uninspected}`), in the session journal's
 `device_open` line and in the device's log.
+
+An `open` or `resolve` carries each serial port that would not open on its way,
+beside its answer or in its error, as `serial_faults: [{port, fault, code}]`
+(`fault` the shared class: `not present`, `in use by another program`,
+`driver refused`, `refused`). Every serial open goes through
+`zlc_atom.devices.open_serial_port`, which tells each failure to the calls
+watching (`zlc_plugin.faults.watching_serial_faults`, on any thread, a search's
+probes too); the native board's twin is `zlc_pulse::serial::FaultWatch`, and its
+server's ready or error line carries the same list. A port refused by its driver
+offers its USB device's restart (WORKBENCH_COMMANDS §4.2 `restart_serial_port`).
 
 Python exceptions round-trip: a plugin calling another plugin through `device`
 receives the original type when it is a builtin (`TimeoutError`, `ValueError`,

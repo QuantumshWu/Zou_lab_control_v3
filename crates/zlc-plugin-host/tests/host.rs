@@ -427,7 +427,7 @@ fn scans_and_resolves_are_handed_the_bound_resources() {
     let old = host.discover("test.scanned", &["serial:COM3".to_owned()], wait).unwrap();
     assert_eq!((old["found"][0]["instance_id"].as_str(), &old["notes"]), (Some("scanned"), &json!(["scanned as before"])));
     let pinned = host.resolve("test.wired", json!({"port": ""}), &["serial:COM3".to_owned(), "serial:COM4".to_owned()], wait).unwrap();
-    assert_eq!(pinned, json!({"parameters": {"port": "COM5"}, "note": "found on COM5 (given '')"}));
+    assert_eq!(pinned, json!({"found": {"port": "COM5"}, "this_open": {}, "note": "found on COM5 (given '')"}));
     let all: Vec<String> = ["COM3", "COM4", "COM5"].iter().map(|port| format!("serial:{port}")).collect();
     let refused = host.resolve("test.wired", json!({}), &all, wait).unwrap_err();
     assert_eq!(refused.to_string(), "RuntimeError: no free wire (tried none; passed over COM3, COM4, COM5: bound)");

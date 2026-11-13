@@ -563,23 +563,14 @@ class Smc100Axis:
 
 
 # ------------------------------------------------------------------ finding
-def probe_port(device: str, addresses: tuple[int, ...], *, opener=open_serial, unopened: list[str] | None = None) -> list[tuple[int, str, str]]:
+def probe_port(device: str, addresses: tuple[int, ...], *, opener=open_serial) -> list[tuple[int, str, str]]:
     """``(address, version, stage)`` of each controller that answers VE on ``device``.
 
     TE, VE and ID? only read; nothing is set. A port that cannot be opened (another
-    program holds it, or it is gone) is passed over, told to ``unopened`` with its class.
+    program holds it, or it is gone) raises (``SerialPortError`` with its class).
     """
 
-    from zlc_atom.devices import SerialPortError
-
-    try:
-        port = opener(device)
-    except SerialPortError as error:
-        if unopened is not None:
-            unopened.append(f"{device}: {error.short}")
-        return []
-    except Exception:  # noqa: BLE001 -- a stand-in opener's own failure
-        return []
+    port = opener(device)
     found = []
     try:
         for address in addresses:
@@ -614,18 +605,17 @@ def discover_smc100(
     opener=open_serial,
     unopened: list[str] | None = None,
 ) -> tuple[tuple[str, int, str, str], ...]:
-    """``(port, address, version, stage)`` for each controller answering on a free serial port."""
+    """``(port, address, version, stage)`` for each controller answering on a free serial port, every
+    port asked at once (``zlc_atom.devices.search_serial_ports``); ``first``: only the first
+    controller of the first listed port that answers; ``unopened``: told each port that could not be
+    opened, with its class."""
 
-    from zlc_atom.devices import free_serial_ports
+    from zlc_atom.devices import free_serial_ports, search_serial_ports
 
-    found: list[tuple[str, int, str, str]] = []
-    for device in free_serial_ports(excluded)[0] if ports is None else ports:
-        for hit in probe_port(device, addresses, opener=opener, unopened=unopened):
-            found.append((device, *hit))
-            if first:
-                return tuple(found)
-    return tuple(found)
-
+    listed = free_serial_ports(excluded)[0] if ports is None else ports
+    found = tuple((device, *hit) for device, hits in search_serial_ports(
+        listed, lambda device: probe_port(device, addresses, opener=opener), first=first, unopened=unopened) for hit in hits)
+    return found[:1] if first else found
 
 __all__ = [
     "CALL_BUDGET_SECONDS",

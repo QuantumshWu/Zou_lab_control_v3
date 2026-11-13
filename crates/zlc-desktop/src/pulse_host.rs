@@ -65,8 +65,9 @@ pub enum PulseEvent {
     Written(Box<Written>),
     /// A Subpulse file the open pulse resolves changed on the disk.
     FilesChanged,
-    /// A native sequencer device opened (or did not); `took`: its own open (its world's and its board's).
-    Opened { instance: String, result: Result<(Arc<Board>, Option<Served>), String>, took: Duration },
+    /// A native sequencer device opened (or did not); `took`: its own open (its world's and its board's);
+    /// `faults`: each serial port that would not open on its way (its server's).
+    Opened { instance: String, result: Result<(Arc<Board>, Option<Served>), String>, took: Duration, faults: Vec<zlc_workbench::SerialFault> },
     Closed { instance: String, error: Option<String> },
     /// A preview front, the words above it and its axes (what the page hit-tests).
     Preview { result: Result<(Front, String, Vec<Value>), String>, key: String },
@@ -75,6 +76,9 @@ pub enum PulseEvent {
     PreviewSaved(Result<PathBuf, String>),
     /// A line of a native sequencer's device log (the local pulse server's narration).
     Log { instance: String, line: String },
+    /// The local pulse server says who owns its board now (its `pulse-owner` line): a client's
+    /// address, or None while nobody does.
+    Owner { instance: String, owner: Option<String> },
     /// Closing the window: the board is SAFE and every connection let go (`PulseHost::shutdown`).
     ShutDown,
 }
@@ -184,7 +188,58 @@ fn accept_native_receipt(plugins: &PluginHost, run: &str, handle: &str, request:
 /// board the plugin instance of its world side (line D's simulation.board, simulation group).
 /// `published`: Remote on -- the board's own pulse server admits other computers,
 /// one of which now drives it; this application leaves it alone (Stop excepted).
-struct Given { instance: String, child: Option<Served>, world: Option<String>, published: bool }
+/// `holder`: who holds the board, as its local pulse server last said.
+struct Given { instance: String, child: Option<Served>, world: Option<String>, published: bool, holder: Holder }
+
+/// Who holds the board of the pulse server this application started, as the server says
+/// (`pulse-owner`): this application's own client (also until the server says otherwise), another
+/// client of the server (`Elsewhere`: a bench peer while Remote is on, or another program on this
+/// computer), or nobody since that other client let it go (`Released`). Held elsewhere or let go,
+/// this application's client sends the board nothing ([`Board::hold_elsewhere`]): a request would
+/// take the board over, and nothing here takes it over unasked. Remote off takes it back
+/// ([`PulseHost::admit_peers`]), as does opening the device again; a peer that leaves while Remote is
+/// on leaves the board SAFE and held by nobody, published as the operator left it.
+#[derive(Clone, Debug, PartialEq)]
+enum Holder { Here, Elsewhere(String), Released(String) }
+
+impl Holder {
+    /// Why this application's client sends the board nothing, and what takes it back (None: it is this application's).
+    fn refusal(&self, published: bool) -> Option<String> {
+        let back = if published { "withdraw Remote to take it back here" } else { "open the device again to take it back here" };
+        match self {
+            Holder::Here => None,
+            Holder::Elsewhere(who) => Some(format!("the pulse board is held by {who}: its pulse server gave that client the board, so this \
+                                                    application sends it nothing -- {back}")),
+            Holder::Released(who) => Some(format!("the pulse board is held by nobody: {who} held it and let it go (its pulse server made it SAFE), \
+                                                   and this application has not taken it back -- {back}")),
+        }
+    }
+
+    /// The device's `held_by` fact: who holds the board while it is not this application's.
+    fn held_by(&self) -> Option<String> {
+        match self { Holder::Here => None, Holder::Elsewhere(who) => Some(who.clone()), Holder::Released(who) => Some(format!("nobody ({who} let it go)")) }
+    }
+
+    /// The device log's line for a change to this holder.
+    fn line(&self, published: bool) -> String {
+        match self {
+            Holder::Here => "ZLC HELD HERE: this application's client holds the board again".into(),
+            Holder::Elsewhere(who) => format!("ZLC HELD BY {who}: this application's commands to the board are refused until it is this application's again"),
+            Holder::Released(who) => format!("ZLC HELD BY NOBODY: {who} let the board go (its pulse server made it SAFE); this application does not take \
+                                              it back by itself -- {}", if published { "withdraw Remote to take it back" } else { "open the device again to take it back" }),
+        }
+    }
+}
+
+/// Who `owner` (`ip:port`, as the pulse server names a client) is to the operator: a bench peer by
+/// its address, or another program on this computer.
+fn holder_name(owner: &str) -> String {
+    match owner.parse::<std::net::SocketAddr>() {
+        Ok(address) if address.ip().to_canonical().is_loopback() => format!("another program on this computer ({owner})"),
+        Ok(address) => format!("{} (bench peer)", address.ip().to_canonical()),
+        Err(_) => owner.to_owned(),
+    }
+}
 
 /// The pulse server this application started for `sequencer.local`: its
 /// process, its port, and the line it hears admission on (`admit` / `refuse`;
@@ -283,6 +338,10 @@ fn drives(action: &str) -> bool {
 }
 
 const PUBLISHED_BOARD: &str = "the pulse board is published on the bench fabric: another computer drives it -- withdraw Remote to use it here";
+
+/// Why a published board's drive command is refused here: who holds it, when another client
+/// does, else that it is published.
+fn published_refusal(board: Option<&Board>) -> String { board.and_then(Board::held_elsewhere).unwrap_or_else(|| PUBLISHED_BOARD.into()) }
 
 /// The board commands a plugin run gives that the desk answers.
 const RUN_COMMANDS: [&str; 6] = ["pulse_run", "pulse_wait_done", "pulse_stop", "pulse_estimate", "pulse_describe", "pulse_schedule"];
@@ -420,8 +479,9 @@ impl PulseDesk {
     fn judge(&self, asked: Asked, decided: bool) {
         let mut held = lock(&self.0.held);
         if drives(&asked.action) && held.device.as_ref().is_some_and(|device| device.published) {
+            let refusal = published_refusal(held.board.as_deref());
             drop(held);
-            return (asked.reply)(Err(PUBLISHED_BOARD.into()));
+            return (asked.reply)(Err(refusal));
         }
         // A run may drive only the sequencer it claims; a client may not while a run holds it (v2 device use).
         let verdict = match &asked.who {
@@ -569,12 +629,14 @@ impl PulseDesk {
             source: DocumentSource::Held { name: name.into(), bytes: text.into_bytes() } };
         let mut documents: Vec<NamedDocument> = lock(&self.0.played).iter().map(|path| file("played on the board", path.clone())).collect();
         let Some(board) = lock(&self.0.held).board.clone() else { return documents };
-        match board.applied() {
+        // Held by another client of its server, the board is not asked (a request would take it over): who holds it is said instead.
+        match board.held_elsewhere().map_or_else(|| board.applied().map_err(|error| ("the board did not say what it holds", "board-held-pulse-error.txt", error.message)),
+                                                 |holder| Err(("who holds the board: another client of its pulse server", "board-holder.txt", holder))) {
             Ok(Some(applied)) => if let Some(source) = applied.source {
                 documents.push(held("held by the board (as loaded, its Subpulses resolved)", "board-held-pulse.json", zlc_pulse::codec::sequence_to_tree(&source).readable()));
             },
             Ok(None) => {}
-            Err(error) => documents.push(held("the board did not say what it holds", "board-held-pulse-error.txt", error.message)),
+            Err((why, name, text)) => documents.push(held(why, name, text)),
         }
         let (values, _, path) = board.config().held();
         match path {
@@ -736,7 +798,7 @@ pub struct PulseHost {
     pub users: zlc_workbench::DeviceUsers,
     /// What the sequencer device last stated of itself, and the board and revision that was of.
     facts: Value,
-    facts_of: Option<(usize, u64)>,
+    facts_of: Option<(usize, u64, Option<String>)>,
     /// Something the window shows changed since its view was last made.
     dirty: bool,
     /// Editor commands whose files are being written: the view waits for them.
@@ -1002,7 +1064,7 @@ impl PulseHost {
         self.claimed_by(claimant.clone());
         if self.desk.client(action, command, request, claimant) { return Handled::Later; }
         // Published, the board is the other computer's: nothing here plays it (Stop still makes it safe).
-        if drives(action) && self.given.as_ref().is_some_and(|given| given.published) { return Handled::Now(Err(PUBLISHED_BOARD.into())); }
+        if drives(action) && self.given.as_ref().is_some_and(|given| given.published) { return Handled::Now(Err(published_refusal(self.editor.board().map(|board| &**board)))); }
         match action {
             // v2 save_preview_image: the drawing as it is, beside the pulse under a fresh name (no dialog).
             "pulse_preview" if command["save"].as_bool() == Some(true) => return Handled::Now(self.save_preview(command["path"].as_str().map(str::to_owned))),
@@ -1072,26 +1134,31 @@ impl PulseHost {
     pub fn open_device(&mut self, instance: &str, type_id: &str, parameters: &Value, context: &Value) {
         let post = self.post.clone();
         if let Some(given) = &self.given {
-            post(PulseEvent::Opened { instance: instance.to_owned(), result: Err(format!("the pulse board is already attached as {}", given.instance)), took: Duration::ZERO });
+            post(PulseEvent::Opened { instance: instance.to_owned(), result: Err(format!("the pulse board is already attached as {}", given.instance)), took: Duration::ZERO,
+                                      faults: Vec::new() });
             return;
         }
         let (instance, type_id, parameters) = (instance.to_owned(), type_id.to_owned(), parameters.clone());
         let world = (type_id == "sequencer.virtual").then(|| (self.desk.plugins(), world_instance(&instance), context["simulation"].clone()));
         self.desk.device_lane().run(move || {
             let began = std::time::Instant::now();
+            let watch = zlc_pulse::serial::FaultWatch::start();
             // The world opens first: a virtual board without one would play into nothing.
             if let Some((plugins, name, group)) = &world {
                 let opened = plugins.as_ref().ok_or_else(|| "the virtual sequencer needs the plugin host for its world".to_owned())
                     .and_then(|host| host.open(name, "simulation.board", json!({}), if group.is_object() { group.clone() } else { json!({}) })
                         .map_err(|error| format!("its world side: {error}")));
-                if let Err(error) = opened { post(PulseEvent::Opened { instance, result: Err(error), took: began.elapsed() }); return; }
+                if let Err(error) = opened { post(PulseEvent::Opened { instance, result: Err(error), took: began.elapsed(), faults: Vec::new() }); return; }
             }
-            let (logs, name) = (post.clone(), instance.clone());
-            let narrate = Box::new(move |line| logs(PulseEvent::Log { instance: name.clone(), line }));
-            let result = open_device(&type_id, &parameters, narrate).map(|(board, child)| (Arc::new(board), child));
+            let (told, name) = (post.clone(), instance.clone());
+            let heard = Box::new(move |said| told(match said {
+                Said::Narration(line) => PulseEvent::Log { instance: name.clone(), line },
+                Said::Owner(owner) => PulseEvent::Owner { instance: name.clone(), owner },
+            }));
+            let result = open_device(&type_id, &parameters, heard).map(|(board, child)| (Arc::new(board), child));
             if let Some(line) = result.as_ref().ok().and_then(|(board, _)| connected_line(board)) { post(PulseEvent::Log { instance: instance.clone(), line }); }
             if result.is_err() { if let Some((Some(host), name, _)) = &world { let _ = host.close(name); } }
-            post(PulseEvent::Opened { instance, result, took: began.elapsed() });
+            post(PulseEvent::Opened { instance, result, took: began.elapsed(), faults: serial_faults(&watch) });
         });
     }
 
@@ -1103,7 +1170,7 @@ impl PulseHost {
         let description = board.description().clone();
         let world = (board.is_virtual() && self.desk.plugins().is_some()).then(|| world_instance(instance));
         self.desk.set_device(Some(Device { instance: instance.to_owned(), world: world.clone(), published: false }));
-        self.given = Some(Given { instance: instance.to_owned(), child, published: false, world });
+        self.given = Some(Given { instance: instance.to_owned(), child, published: false, world, holder: Holder::Here });
         self.editor.attach_given(board, label);
         // The desk takes the board here; each watch is then told this one's schedule, then its changes.
         self.dispatch();
@@ -1127,19 +1194,22 @@ impl PulseHost {
     }
 
     /// What the apparatus' sequencer states of itself, when it differs from what was last said: its
-    /// trigger lanes -- `{trigger_lanes: [{lane, port, label, frames}]}`, `frames` how often the lane rises
-    /// in one shot of what the board holds, null while it holds nothing. Worked out when the board changes
-    /// what it holds, not at every turn; the workbench is told (`Event::Facts`) and asks its drafts again.
+    /// trigger lanes -- `{trigger_lanes: [{lane, port, label, frames}], held_by}`, `frames` how often the
+    /// lane rises in one shot of what the board holds, null while it holds nothing; `held_by` who holds
+    /// the board while it is not this application's ([`Holder`]), else null. Worked out when the board
+    /// changes what it holds or who holds it, not at every turn; the workbench is told (`Event::Facts`)
+    /// and asks its drafts again.
     pub fn device_facts(&mut self) -> Option<(String, Value)> {
-        let instance = self.given.as_ref()?.instance.clone();
+        let given = self.given.as_ref()?;
+        let (instance, held_by) = (given.instance.clone(), given.holder.held_by());
         let board = self.editor.board()?.clone();
-        let key = (std::sync::Arc::as_ptr(&board) as usize, board.revision());
-        if self.facts_of == Some(key) { return None; }
+        let key = (std::sync::Arc::as_ptr(&board) as usize, board.revision(), held_by.clone());
+        if self.facts_of.as_ref() == Some(&key) { return None; }
         self.facts_of = Some(key);
         let counts = board.trigger_counts().ok().and_then(|(_, counts)| counts);
         let lanes: Vec<Value> = board.trigger_lanes().into_iter().enumerate().map(|(at, (lane, port, label))| json!({
             "lane": lane, "port": port, "label": label, "frames": counts.as_ref().and_then(|counts| counts.get(at).copied())})).collect();
-        let facts = json!({"trigger_lanes": lanes});
+        let facts = json!({"trigger_lanes": lanes, "held_by": held_by});
         if self.facts == facts { return None; }
         self.facts = facts.clone();
         Some((instance, facts))
@@ -1240,6 +1310,12 @@ impl PulseHost {
         given.published = published;
         let port = served.port;
         self.desk.set_published(published);
+        // Remote off takes the board back (the rejoin below): it is this application's again from here, whoever held it.
+        if !published && given.holder != Holder::Here {
+            given.holder = Holder::Here;
+            if let Some(line) = narration(&format!("{} (Remote withdrawn)", Holder::Here.line(false))) { (self.post)(PulseEvent::Log { instance: instance.to_owned(), line }); }
+            self.dirty = true;
+        }
         if !published {
             if let Some(board) = self.editor.board().cloned() {
                 let (desk, post, instance) = (self.desk.clone(), self.post.clone(), instance.to_owned());
@@ -1252,6 +1328,30 @@ impl PulseHost {
             }
         }
         Ok(port)
+    }
+
+    /// The local pulse server says who owns its board now ([`Holder`]): this application's client
+    /// (its own end of the command lane), another client, or nobody. A change is applied to the
+    /// board's client (it sends nothing while the board is not this application's), said in the
+    /// device's log and stated as the device's `held_by` fact; the editor asks the board again.
+    pub fn owner_changed(&mut self, instance: &str, owner: Option<String>) {
+        let Some(board) = self.editor.board().cloned() else { return };
+        let Some(given) = self.given.as_mut().filter(|given| given.instance == instance) else { return };
+        let here = owner.as_deref().and_then(|owner| owner.parse::<std::net::SocketAddr>().ok()).is_some_and(|owner| Some(owner) == board.client_address());
+        let holder = match (&owner, &given.holder) {
+            (Some(_), _) if here => Holder::Here,
+            (Some(owner), _) => Holder::Elsewhere(holder_name(owner)),
+            // The other client let it go: nobody holds it, and nothing here takes it unasked.
+            (None, Holder::Elsewhere(who)) => Holder::Released(who.clone()),
+            // Nobody between this application's own connections (its rejoin), or still nobody.
+            (None, holder) => holder.clone(),
+        };
+        if holder == given.holder { return; }
+        board.hold_elsewhere(holder.refusal(given.published));
+        if let Some(line) = narration(&holder.line(given.published)) { (self.post)(PulseEvent::Log { instance: instance.to_owned(), line }); }
+        given.holder = holder;
+        self.dirty = true;
+        self.desk.notice();
     }
 }
 
@@ -1351,9 +1451,10 @@ fn run_scan_program(python: Option<&Path>, source: &str) -> Result<Option<ScanTa
 /// this machine (the server owns the hardware, as v2's local service did);
 /// the board is its loopback client. Other computers are admitted only while
 /// the operator has Remote on for it (v2 `admit_peers`), told on its stdin.
-/// `narrate` takes the server's lifecycle lines as v2's device log wrote them
-/// (its `zlc_pulse.remote` logger: `[HH:MM:SS] ZLC <event> ...`).
-fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Result<(Board, Served), String> {
+/// `heard` takes what the server says after how it came up ([`Said`]): its lifecycle lines as
+/// v2's device log wrote them (its `zlc_pulse.remote` logger: `[HH:MM:SS] ZLC <event> ...`), and
+/// each change of its board's owner.
+fn serve_locally(parameters: &Value, heard: Box<dyn Fn(Said) + Send>) -> Result<(Board, Served), String> {
     use std::io::BufRead;
     let server = std::env::current_exe().map_err(|error| error.to_string())?.with_file_name("zlc-pulse-server.exe");
     if !server.is_file() { return Err(format!("{} is not built", server.display())); }
@@ -1372,12 +1473,14 @@ fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Res
             // Its one line on how it came up (zlc-pulse-server): ready, with the transport it took, or why it could not.
             if line.starts_with("{\"type\":\"pulse-server\"") {
                 let ready: Value = serde_json::from_str(&line).unwrap_or_default();
+                // The ports it could not open are this open's, as if met here.
+                for fault in zlc_workbench::SerialFault::listed(ready.get("serial_faults")) { zlc_pulse::serial::told(&fault.port, fault.code.unwrap_or_default()); }
                 let _ = found.send(ready["error"].as_str().map_or(Ok(ready.clone()), |error| Err(error.to_owned())));
                 break;
             }
-            if let Some(line) = narration(&line) { narrate(line); }
+            if let Some(said) = server_said(&line) { heard(said); }
         }
-        for line in lines.map_while(Result::ok) { if let Some(line) = narration(&line) { narrate(line); } }
+        for line in lines.map_while(Result::ok) { if let Some(said) = server_said(&line) { heard(said); } }
     });
     // A JTAG board waits for Vivado to come up and open its target first.
     let startup = if matches!(backend, "uart" | "memory") { Duration::ZERO } else { zlc_pulse::axi::STARTUP_TIMEOUT };
@@ -1396,6 +1499,12 @@ fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Res
         Ok(board) => Ok((board, Served { child, port, control, backend: asked, ready, _job: job })),
         Err(error) => ended(child, error.message),
     }
+}
+
+/// Each serial port that would not open while `watch` was held, as the workbench is told them.
+pub fn serial_faults(watch: &zlc_pulse::serial::FaultWatch) -> Vec<zlc_workbench::SerialFault> {
+    watch.met().iter().map(|failure| zlc_workbench::SerialFault { port: zlc_pulse::serial::com_name(&failure.port), fault: failure.fault.words().to_owned(),
+                                                                  code: Some(failure.code) }).collect()
 }
 
 /// The local server's backend and command line for a row. It never probes a port: Init found
@@ -1420,12 +1529,12 @@ pub const RESOLVE_WAIT: Duration = Duration::from_secs(60);
 /// `resolve` of the local board (`sequencer.local`) before it opens: its UART port, looked for on
 /// the free ports only (a bound one -- an IMU's COM3 -- is never opened) with the server's own
 /// handshake, against the deployed config its server loads. A JTAG or memory board has nothing to
-/// find; `auto` with no UART answering is left without a port, so it opens over JTAG (its open says
-/// so), and `uart` fails with what it tried.
+/// find; `auto` with no UART answering finds nothing and opens this once without a port, over JTAG
+/// (`this_open`: the row keeps the port it had), and `uart` fails with what it tried.
 pub fn resolve(type_id: &str, parameters: &Value, excluded: &[String], wait: Duration) -> Result<Value, String> {
     if type_id != "sequencer.local" { return Err(format!("{type_id} finds nothing before it opens")); }
     let backend = parameters["backend"].as_str().unwrap_or("auto").to_owned();
-    if matches!(backend.as_str(), "jtag-axi" | "memory") { return Ok(json!({"parameters": {}, "note": ""})); }
+    if matches!(backend.as_str(), "jtag-axi" | "memory") { return Ok(json!({"found": {}, "note": ""})); }
     let bound: Vec<String> = excluded.iter().filter_map(|resource| resource.strip_prefix("serial:")).map(str::to_owned).collect();
     let (sender, answer) = mpsc::channel();
     std::thread::Builder::new().name("zlc-pulse-probe".into()).spawn(move || {
@@ -1440,17 +1549,30 @@ pub fn resolve(type_id: &str, parameters: &Value, excluded: &[String], wait: Dur
         let _ = sender.send(probed.map(|(port, attempts)| (port, attempts, passed)).map_err(|error| error.message));
     }).map_err(|error| error.to_string())?;
     let (port, attempts, passed) = answer.recv_timeout(wait).unwrap_or_else(|_| Err(format!("its UART was not found within {} s", wait.as_secs())))?;
-    // What it tried (the one that answered aside) and what it passed over, as the line says them.
+    // What it tried (the one taken aside) and what it passed over, as the line says them.
     let mut said: Vec<String> = Vec::new();
-    let tried: Vec<String> = attempts[..attempts.len() - usize::from(port.is_some())].iter().map(ToString::to_string).collect();
+    let tried: Vec<String> = attempts.iter().filter(|attempt| Some(&attempt.port) != port.as_ref()).map(ToString::to_string).collect();
     if !tried.is_empty() { said.push(format!("tried {}", tried.join("; "))); }
     if !passed.is_empty() { said.push(format!("passed over {}: bound", passed.join(", "))); }
     let context = if said.is_empty() { String::new() } else { format!(" ({})", said.join("; ")) };
     match port {
-        Some(port) => Ok(json!({"parameters": {"uart_port": port}, "note": format!("board UART found on {port}{context}")})),
+        Some(port) => Ok(json!({"found": {"uart_port": port}, "note": format!("board UART found on {port}{context}")})),
         None if backend == "uart" => Err(format!("no board UART on the free ports{}", if context.is_empty() { " (no COM port is free)".to_owned() } else { context })),
-        None => Ok(json!({"parameters": {"uart_port": ""}, "note": format!("no board UART on the free ports{context}")})),
+        None => Ok(json!({"found": {}, "this_open": {"uart_port": ""}, "note": format!("no board UART on the free ports{context}; it opens over JTAG-to-AXI this time")})),
     }
+}
+
+/// What the local pulse server says on its stdout besides how it came up.
+enum Said { Narration(String), Owner(Option<String>) }
+
+/// A server stdout line: a change of its board's owner (`{"type":"pulse-owner","owner":...}`),
+/// or its narration as a device log line; anything else neither.
+fn server_said(line: &str) -> Option<Said> {
+    if line.starts_with("{\"type\":\"pulse-owner\"") {
+        let owner: Value = serde_json::from_str(line).ok()?;
+        return Some(Said::Owner(owner["owner"].as_str().map(str::to_owned)));
+    }
+    narration(line).map(Said::Narration)
 }
 
 /// A server stdout line as a device log line: its `ZLC ...` narration, at this
@@ -1476,13 +1598,13 @@ fn connected_line(board: &Board) -> Option<String> {
         board.name(), zlc_pulse::wire::LAYOUT_STRUCT_VERSION, description.clock_hz, description.layout_fingerprint(), description.target.abi_fingerprint())))
 }
 
-fn open_device(type_id: &str, parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Result<(Board, Option<Served>), String> {
+fn open_device(type_id: &str, parameters: &Value, heard: Box<dyn Fn(Said) + Send>) -> Result<(Board, Option<Served>), String> {
     let (board, child) = match type_id {
         "sequencer.virtual" => (Board::virtual_board(None).map_err(|error| error.message)?, None),
         "sequencer.hardware" => (Board::remote(parameters["host"].as_str().unwrap_or("127.0.0.1"),
                                                parameters["port"].as_u64().unwrap_or(zlc_pulse::remote::DEFAULT_PORT.into()) as u16)
                                      .map_err(|error| error.message)?, None),
-        "sequencer.local" => { let (board, child) = serve_locally(parameters, narrate)?; (board, Some(child)) }
+        "sequencer.local" => { let (board, child) = serve_locally(parameters, heard)?; (board, Some(child)) }
         other => return Err(format!("{other} is not a native sequencer type")),
     };
     if let Some(path) = parameters["config_file"].as_str().filter(|path| !path.trim().is_empty()) {
@@ -1760,7 +1882,7 @@ mod tests {
         assert_eq!((&local["resources"], &local["queries"]), (&json!(["serial:{uart_port}"]), &json!(["resolve"])));
         for backend in ["jtag-axi", "memory"] {
             let answer = resolve("sequencer.local", &json!({"backend": backend, "uart_port": ""}), &["serial:COM3".to_owned()], Duration::from_secs(1));
-            assert_eq!(answer.unwrap(), json!({"parameters": {}, "note": ""}), "{backend}");
+            assert_eq!(answer.unwrap(), json!({"found": {}, "note": ""}), "{backend}");
         }
         let line = |parameters: Value| server_arguments(&parameters).map(|(backend, arguments)| (backend.to_owned(), arguments.join(" ")));
         let (backend, arguments) = line(json!({"backend": "auto", "uart_port": " ", "port": 18861})).unwrap();
@@ -1785,6 +1907,90 @@ mod tests {
         let sent = json!({"transport": "jtag-axi", "attempts": [], "reason": "explicit jtag-axi backend"});
         assert_eq!(transport_note("auto", &sent).unwrap(), "opened over JTAG-to-AXI under Auto, not its UART");
         assert_eq!(transport_note("jtag-axi", &sent), None, "chosen, not fallen back to");
+    }
+
+    /// The local pulse server says who owns its board; while another client holds it this
+    /// application's client sends nothing -- a run's play and Stop are refused with who holds it, the
+    /// archive says it, the device log and `held_by` fact name it -- and once that client lets it go
+    /// nothing here takes it back unasked; taken back, it is this application's again.
+    #[test]
+    fn a_board_held_by_another_client_of_its_server_is_said_and_never_taken_unasked() {
+        use zlc_pulse::remote::{PulseRemoteServer, RemotePulseStreamer};
+        // The board's own server, on the memory twin of the deployed board, telling its owner as its stdout line does.
+        let found = zlc_pulse::wire::load_streamer_config(None).unwrap();
+        let config = zlc_pulse::wire::require_streamer_config(found.source.as_ref().unwrap()).unwrap();
+        let target = zlc_pulse::manifest::target_from_config(&config, None, None).unwrap();
+        let memory = Arc::new(zlc_pulse::transport::MemoryRegisterTransport::new(&config.params, false, false).unwrap());
+        let streamer = zlc_pulse::device::PulseStreamer::new(memory, config.params, config.clock_hz, target).unwrap();
+        streamer.open().unwrap();
+        let mut server = PulseRemoteServer::bind("127.0.0.1:0", streamer, false).unwrap();
+        let (told, owners) = channel::<String>();
+        let told = Mutex::new(told);
+        server.on_owner(move |owner| { let _ = lock(&told).send(Json::object(vec![("type", Json::str("pulse-owner")), ("owner", Json::opt_str(owner))]).compact_text()); });
+        server.start().unwrap();
+        let port = server.address().port();
+        let folder = std::env::temp_dir().join(format!("zlc_pulse_host_{}_held", std::process::id()));
+        std::fs::create_dir_all(folder.join("pulses")).unwrap();
+        let (sender, events) = channel();
+        let sender = Mutex::new(sender);
+        let post: Post = Arc::new(move |event| { let _ = sender.lock().unwrap().send(event); });
+        let mut host = PulseHost::new(PulseDesk::new(post.clone()), post, SafeActions::new(), None, &folder.join("pulses"));
+        host.device_opened("sequencer", "sequencer", Ok((Arc::new(Board::remote("127.0.0.1", port).unwrap()), None))).unwrap();
+        let document = folder.join("pulses").join("shot.json");
+        std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../zlc-pulse/tests/pulses/imaging_template.json"), &document).unwrap();
+        // Each owner line as the stdout reader hears it, applied on the window's turn.
+        let hear = |host: &mut PulseHost| {
+            let line = owners.recv_timeout(Duration::from_secs(10)).expect("an owner line");
+            let Some(Said::Owner(owner)) = server_said(&line) else { panic!("{line} is an owner line") };
+            host.owner_changed("sequencer", owner.clone());
+            owner
+        };
+        let logged = |events: &Receiver<PulseEvent>, start: &str| loop {
+            if let PulseEvent::Log { line, .. } = events.recv_timeout(Duration::from_secs(10)).expect("a log line") { if line.contains(start) { return line; } }
+        };
+        // The device's `held_by` fact as it now states it (said to the workbench only when it changed).
+        let held_by = |host: &mut PulseHost| { host.device_facts(); host.facts["held_by"].clone() };
+        assert_eq!(hear(&mut host).and_then(|owner| owner.parse().ok()), board(&host).client_address(), "its own client owns it");
+        assert_eq!(held_by(&mut host), Value::Null);
+        claim(&host, &["scan#1"]);
+        let id = run_asks(&host, "scan#1", "pulse_run", played(&document, 0)).unwrap()["command_id"].as_u64().unwrap() as u32;
+        // Another program on this computer takes the board over: nobody while its takeover SAFE runs, then it.
+        let other = RemotePulseStreamer::new("127.0.0.1", port, None, Duration::from_secs(2)).unwrap();
+        other.open().unwrap();
+        let holder = format!("another program on this computer ({})", other.local_address().unwrap());
+        assert_eq!(hear(&mut host), None);
+        assert_eq!(hear(&mut host), Some(other.local_address().unwrap().to_string()));
+        let line = logged(&events, "ZLC HELD BY");
+        assert!(line.ends_with(&format!("ZLC HELD BY {holder}: this application's commands to the board are refused until it is this application's again")), "{line}");
+        let refusal = format!("the pulse board is held by {holder}: its pulse server gave that client the board, so this application sends it nothing -- \
+                               open the device again to take it back here");
+        assert_eq!(board(&host).last_fire(), Some((id, Fate::Safed)), "the takeover SAFEd what this application played");
+        let refused = run_asks(&host, "scan#1", "pulse_run", played(&document, 1)).unwrap_err();
+        assert!(refused.contains(&refusal) && !refused.contains("not open"), "not a connection error: {refused}");
+        assert_eq!(run_asks(&host, "scan#1", "pulse_stop", json!({})).unwrap_err(), format!("the board did not go SAFE: {refusal}"));
+        assert!(other.snapshot().is_ok(), "nothing here took it back");
+        let documents = host.desk.diagnostic_documents();
+        let named: Vec<(&str, Option<&[u8]>)> = documents.iter().map(|named| match &named.source {
+            DocumentSource::Held { name, bytes } => (name.as_str(), Some(bytes.as_slice())), DocumentSource::File(_) => ("file", None) }).collect();
+        assert!(named.contains(&("board-holder.txt", Some(refusal.as_bytes()))) && !named.iter().any(|(name, _)| name.starts_with("board-held-pulse")), "{named:?}");
+        assert_eq!(held_by(&mut host), json!(holder));
+        // It lets the board go: SAFE and held by nobody, and this application does not take it unasked.
+        other.disconnect();
+        assert_eq!(hear(&mut host), None);
+        assert!(logged(&events, "ZLC HELD BY NOBODY").contains(&format!("{holder} let the board go")));
+        assert_eq!(held_by(&mut host), json!(format!("nobody ({holder} let it go)")));
+        assert!(run_asks(&host, "scan#1", "pulse_run", played(&document, 1)).unwrap_err().starts_with("the pulse board is held by nobody: "));
+        // Taken back (what Remote off does): its own again.
+        board(&host).rejoin().unwrap();
+        assert_eq!(hear(&mut host).and_then(|owner| owner.parse().ok()), board(&host).client_address());
+        logged(&events, "ZLC HELD HERE");
+        assert_eq!(held_by(&mut host), Value::Null);
+        let id = run_asks(&host, "scan#1", "pulse_run", played(&document, 0)).unwrap()["command_id"].as_u64().unwrap();
+        assert!(id > 0);
+        run_asks(&host, "scan#1", "pulse_stop", json!({})).unwrap();
+        host.shutdown();
+        host.await_shutdown();
+        server.close();
     }
 
     /// v2 slm_rearrangement: the Pulse is loaded first and the FIRE is then the FIRE alone.
