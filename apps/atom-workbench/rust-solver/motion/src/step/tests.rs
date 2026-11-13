@@ -18,11 +18,15 @@ use crate::linalg::{dot3, C64, Mat};
 use crate::model::{Beat, Cluster, Photon, Point, Quadratic, Scattering, STATES};
 use crate::step::{self, Dynamics, Middle, Trajectory};
 
-/// The domain the tests' steps are taken in: every step proven -- a test model is the model, at every point it is asked.
+/// The domain the tests' steps are taken in: every step resolved, no state a runaway -- a test model is the model, at
+/// every point it is asked.
 struct Everywhere;
 impl step::Domain for Everywhere {
-    fn proven(&self, _: &step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> Result<bool, step::Unproven> {
-        Ok(true)
+    fn resolves(&self, _: &step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> bool {
+        true
+    }
+    fn runaway(&self, _: f64) -> bool {
+        false
     }
 }
 
@@ -2650,31 +2654,19 @@ fn thermal(trap: &crate::model::Trap, hm: f64, kt: f64, stream: &mut crate::rand
     (r, kappa)
 }
 
-/// A scene's model as the solve closes it (solve.rs `attempt`: every unit whose fold does not exist over the reach kept,
-/// until none fails) with its near tables (`Model::tabulate`), and what the ensemble's draw meets (the prepared well's
+/// A scene's model closed by its units' errors at its reference state (model.rs `Model::closed_at`) with its near tables (`Model::tabulate`), and what the ensemble's draw meets (the prepared well's
 /// depth at its bottom against its envelope's top), said; then per cluster sixteen atoms of the scene's temperature in
 /// the trap's harmonic approximation, each a random state of the cluster, held: to `each` the model, its prepared
 /// trap, the cluster's number, the run and the atoms.
 fn scene_clusters(name: &str, each: &mut dyn FnMut(&crate::model::Model, &crate::model::Trap, usize, &crate::model::Run, &[Trajectory])) {
-    use crate::model::{Model, Run, Unit, GROUND};
+    use crate::model::{Model, Run, GROUND};
     let request = scene(name);
     let light = crate::field::Light::new(&request);
     let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
     let mut p = [0.0; GROUND];
     p[state] = 1.0;
     let started = std::time::Instant::now();
-    let mut kept: Vec<Unit> = vec![];
-    let (model, trap, reach) = loop {
-        let model = Model::new(&request, &light, &kept).unwrap();
-        let trap = model.trap(&p, &model.prepared()).unwrap();
-        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
-        let units = model.units();
-        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-        if failing.is_empty() {
-            break (model, trap, reach);
-        }
-        kept.extend(failing);
-    };
+    let (model, kept, trap, reach) = Model::closed_at(&request, &light, vec![], state, request.temperature_uk);
     let closure = started.elapsed();
     let started = std::time::Instant::now();
     let tables = model.tabulate(&reach, 1 << 20);

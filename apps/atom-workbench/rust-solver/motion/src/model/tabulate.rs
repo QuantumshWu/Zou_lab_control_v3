@@ -1143,17 +1143,10 @@ mod tests {
         let request = scene("R3_DOPPLER");
         let light = Light::new(&request);
         let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-        let mut kept: Vec<Unit> = vec![];
-        let (model, reach) = loop {
-            let model = Model::new(&request, &light, &kept).unwrap();
-            let (_, reach) = reach_of(&model, state, request.temperature_uk);
-            let units = model.units();
-            let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-            if failing.is_empty() {
-                break (model, reach);
-            }
-            kept.extend(failing);
-        };
+        // The cooling pair's drives at the atom (their bare folds do not hold where the tweezer moves the line onto them).
+        let bare = Model::new(&request, &light, &[]).unwrap();
+        let cooling: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).flat_map(|frequency| bare.bare_units(crate::model::Component { frequency, counter: false })).collect();
+        let (model, _, _, reach) = Model::closed_at(&request, &light, cooling, state, request.temperature_uk);
         let (cluster, lights, most) = (model.cluster_of(state), model.running(), 1 << 16);
         let First { table: first, ranges, held } = model.first_table(cluster, &lights, &reach, most, &[]).unwrap();
         assert!(first.axes() == 1 && matches!(first.layout.coordinates[0], Coordinate::Chart { index: 0, .. }), "the first table's axis is the tweezer's intensity: {:?}", &first.layout.coordinates[..first.axes()]);

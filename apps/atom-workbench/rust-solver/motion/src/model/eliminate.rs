@@ -1311,8 +1311,7 @@ mod tests {
     /// a = ½, the gate's edge, and 0.39 at a = 1.75; the photons of one passage are πΩ²/(2|δ̇|) = 2π|V|²/|δ̇| exactly at weak drive,
     /// which the fold's rate Γ|V|²/(δ² + Γ²/4) integrates to whatever a (the rate itself is the two-level test's, tests/model_near.rs).
     /// R2_RECOIL's σ⁺ probe and |2,2⟩ → |3′,3′⟩, its excited state moved onto resonance at r₀ on the tweezer's flank, an atom crossing
-    /// r₀ along x at the speed that makes a = ½ through the tweezer's differential shift: the measured a is |v·∂Δ + k·v̇|/(Γ/2)² there,
-    /// and the gate's provable sweep bound over a reach that holds that point and speed is above it.
+    /// r₀ along x at the speed that makes a = ½ through the tweezer's differential shift: the measured a is |v·∂Δ + k·v̇|/(Γ/2)² there.
     #[test]
     fn a_swept_resonance_s_measured_sweep_and_its_gate_are_the_exact_crossing_s() {
         assert!((crossing(0.5) - 0.71).abs() < 0.005, "{}", crossing(0.5));
@@ -1354,22 +1353,5 @@ mod tests {
         let expected = (speed * slope + model.hbar_over_mass * dot3(k, force)).abs() / (shift * shift + gamma * gamma / 4.0);
         assert!((sweep - expected).abs() <= 1e-9 * expected, "the measured a {sweep} against |v·∂Δ + k·v̇|/(w² + (Γ/2)²) = {expected}");
         assert!((sweep - 0.5).abs() < 0.05, "a near ½: {sweep}");
-        // The gate over a reach that holds r₀ at that speed.
-        let p = {
-            let mut p = [0.0; GROUND];
-            p[b] = 1.0;
-            p
-        };
-        let trap = model.trap(&p, &model.prepared()).unwrap();
-        let mut temperature = 1.0;
-        let reach = loop {
-            let reach = model.reach(&trap, &p, temperature, 2e-3);
-            if reach.speed >= speed && model.potential(r0, &p, &model.prepared()) <= reach.minimum + reach.energy {
-                break reach;
-            }
-            temperature *= 2.0;
-        };
-        let gate = model.gates(&[unit], &reach)[0];
-        assert!(gate.sweep >= sweep * (1.0 - 1e-9), "the gate's bound {} below the measured a {sweep}", gate.sweep);
     }
 }

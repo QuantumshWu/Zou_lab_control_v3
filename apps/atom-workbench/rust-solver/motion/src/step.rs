@@ -383,25 +383,15 @@
 //! flow; motion3d_status/rewrite/restforce.status.md).
 //!
 //! # The domain (SPEC §1.8)
-//! Everything a step asks of the model is asked at points of its straight path r_h + v_m u, |u| ≤ h, and at the one
-//! momentum κ_m: the generator, its forces and the scattered light at the middle, along the path by the plane waves'
-//! phases; each jump's photons, kick and landing at its point on the path; the reads' rows at points of the path. A
-//! jump changes the state and the cluster, not the path or κ_m. So a step is proven where the model holds over the
-//! path at the speed |v_m| -- the path's box, the cell r_h ± |v_m,a| h, the region every bound of the model is a function
-//! of (model/reach.rs `Region`) -- and the step itself is stable there: one question a step, asked before its
-//! propagation (`Domain::proven`), with the middle the reference's fixed point gives and the path's momentum the
-//! prediction gives. What the step's own error control sees between its nodes is how the model's values change along
-//! the path -- the three nodes' parabola, checked against twice the step (solve.rs, # The step) --, not whether the
-//! model exists there: a fold that does not exist is no error of τ, and an atom that left the proven set and came back
-//! between two nodes, or between the middle and a jump, would be unseen by a test at points. The path's box holds every
-//! point the step reads the model at. A step the domain does not prove is not taken: the advance ends there (adapt.rs),
-//! and what its path would need is told (`Unproven`): a reach that holds its energy, or its own box at its energy
-//! (`Tube`).
-//!
-//! What the domain proves is what is wrong without bound where it fails, and nothing else: a fold that does not exist
-//! (its series diverges: a fold's rate went as the Doppler shift squared, SPEC §1.8), and a step beyond the edge of its
-//! reference's turn and its kick's curvature (the map about a minimum has an eigenvalue past −1: a step multiplies any
-//! error by e^μ, step/tests.rs). Whether the step resolves the generator's turn along its path at its speed -- each
+//! Whether the model's folds hold where the atoms go is measured, not proven: the units' errors are read at the
+//! pilot's states (solve.rs, # The model). A step asks its domain two cheap things (`Domain`), from what it has anyway.
+//! - The runaway (`Domain::runaway`): a fold far outside its validity is wrong without bound -- a drive folded at the
+//!   atom whose Doppler series diverges scatters as (kv/Δ)², the released runaway's 10⁵ jumps/µs against Γ/2. Every
+//!   stretch reads the hazard of its first state, x̂†Γx̂ at the decay laid for the step (`hazard`): the rate at which the
+//!   state scatters, explicit excited states and folds alike. No state of the atom scatters faster than its fastest
+//!   excited state does wholly excited, so a hazard above that is a fold beyond any state of the atom: the step is
+//!   refused (`Refused::Runaway`), the trajectory stops there and is booked whole from then on (solve.rs `run`).
+//! - Whether the step resolves the generator's turn along its path at its speed -- each
 //! entry's (|Ω| + |K| v) τ/2 below π, its three nodes no alias -- is its accuracy: beyond it the nodes read an alias,
 //! and the step takes the parabola through three samples of the entry, at most 5/4 of the entry anywhere (the three
 //! points' Lebesgue constant), Hermitian where the entry is: the state goes on under a wrong generator as bounded as the
@@ -1554,46 +1544,29 @@ pub struct Made {
 
 /// Why a step or a jump could not be made: the reference's fixed point is not a contraction at this step (`middle`); the
 /// state left the floating-point range; the norm reached its threshold with no photon to emit (`jump`: the model's
-/// decay and its photons contradict each other); the domain does not prove the step (`Domain`); or the middle state's
-/// cluster made no K of its optical sector (`Unmade`: # The optical sector's noise). The advance takes the step at its
-/// half at the first two (adapt.rs, # The step), and ends at the others.
+/// decay and its photons contradict each other); a state scatters faster than any state of the atom can
+/// (`Domain::runaway`: a fold far outside its validity); or the middle state's cluster made no K of its optical sector
+/// (`Unmade`: # The optical sector's noise). The advance takes the step at its half at the first two (adapt.rs, # The
+/// step), and ends at the others.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Refused {
     Reference,
     Overflow,
     Emission,
-    Unproven(Unproven),
+    Runaway,
     Optical(Unmade),
 }
 
-/// What the integrator asks before every step's propagation (SPEC §1.8; module documentation, # The domain): whether the
-/// model it takes, and the step itself, hold along the step's path.
+/// What the integrator asks of the model's domain at every step (SPEC §1.8; module documentation, # The domain).
 pub trait Domain {
     /// Whether the step of half-length `half` (µs) through its middle -- the reference's flow there (`Flow`) and the
-    /// middle point and path momentum (r_h, κ_m) -- is proven, and then whether it resolves what it samples along its
-    /// path at its speed (true: its accuracy is the run's; false: the trajectory is the model's no longer to the step's
-    /// accuracy, `Trajectory::unresolved`); else what is to be held for it (`Unproven`).
-    fn proven(&self, flow: &Flow, middle: ([f64; 3], [f64; 3]), half: f64) -> Result<bool, Unproven>;
-}
-
-/// What a step its domain does not prove asks of the proof set (`Domain`; model/reach.rs, # The trap's region, # Tubes):
-/// the prepared energy (rad/µs: the reference's potential with (ħ/m)κ_m²/2) a temperature's reach is to hold within the
-/// trap's region, and outside it (−∞: nothing there); or, where no temperature's reach holds that energy, the path's own
-/// tube.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Unproven {
-    pub region: f64,
-    pub outside: f64,
-    pub tube: Option<Tube>,
-}
-
-/// A step's path as a part of the proof set (model/reach.rs, # Tubes): its box -- centre and half-widths (µm), the cell
-/// r_h ± |v_m,a| h -- at its prepared energy (rad/µs).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Tube {
-    pub centre: [f64; 3],
-    pub half: [f64; 3],
-    pub level: f64,
+    /// middle point and path momentum (r_h, κ_m) -- resolves what it samples along its path at its speed (true: its
+    /// accuracy is the run's; false: the trajectory is the model's no longer to the step's accuracy,
+    /// `Trajectory::unresolved`).
+    fn resolves(&self, flow: &Flow, middle: ([f64; 3], [f64; 3]), half: f64) -> bool;
+    /// Whether a state scattering at the rate `hazard` (1/µs: x̂†Γx̂, explicit excited states and folds alike) is beyond
+    /// every state of the atom -- a fold far outside its validity (module documentation, # The domain).
+    fn runaway(&self, hazard: f64) -> bool;
 }
 
 /// The path's momentum of the step of τ through a middle from a state (module documentation, # The path's momentum),
@@ -1661,22 +1634,22 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// (`stretch`); the kick -- the propagation's impulse, the reference's τ∇V_ref(r_h), the scattered light's force
     /// and its diffusion's part of the Brownian path `brownian` (module documentation, # The absorbed light's
     /// momentum), and each jump's own where it is made -- and the second half flow. `scratch` is the trajectory's. A
-    /// jump the model gives no photon is refused (`jump`); so is a step its `domain` does not prove, before anything of
-    /// it is propagated (module documentation, # The domain).
+    /// jump the model gives no photon is refused (`jump`); so is a stretch whose first state scatters beyond every state
+    /// of the atom (`Domain::runaway`; module documentation, # The domain).
     pub fn attempt(&self, from: &Trajectory, brownian: &Brownian, reads: &[f64], scratch: &mut Scratch, domain: &dyn Domain) -> Result<Step, Refused> {
         let (tau, hm, n) = (self.tau, self.hbar_over_mass, from.psi.len());
         let h = 0.5 * tau;
         let (flow, (r_h, kappa_h), reference) = (self.flow, self.reached, self.reference);
         scratch.fit(n);
         let kappa_m = predicted(scratch, &self.generator, &from.psi, kappa_h, reference, tau);
-        let resolves = domain.proven(&flow, (r_h, kappa_m), h).map_err(Refused::Unproven)?;
+        let resolves = domain.resolves(&flow, (r_h, kappa_m), h);
         let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, weights: [0.0; 3], impulse: [0.0; 3], scattered: None, optical: None, work: count::shear(n, self.generator.work()), made: Vec::new() };
         // A step that does not resolve its path at its speed is taken, and the trajectory is unresolved from it on: its
         // states inside the step and after it.
         march.state.unresolved |= !resolves;
         // Cluster by cluster: the start's generator, then that of every cluster a jump lands in, at the same middle.
         let mut landed: Option<D::Middle<'a>> = None;
-        while !self.stretch(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time, reads, &mut march, scratch)? {
+        while !self.stretch(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time, reads, &mut march, scratch, domain)? {
             landed = Some(self.model.middle(march.state.cluster, r_h, from.time + h));
         }
         let March { state: mut end, read, impulse, scattered, optical, work, mut made, .. } = march;
@@ -1765,7 +1738,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// Of a state that does not change that difference is its rounding, and nothing where there is one state. Where
     /// Ĥ is still along every path Ĝ is one matrix, and the stretch's part its one form with ∫ρ(u)du. The middle's
     /// stretch reads the scattered light there and the optical sector's rate, on the middle state.
-    fn stretch(&self, generator: &D::Middle<'a>, kappa_m: [f64; 3], start: f64, reads: &[f64], march: &mut March, scratch: &mut Scratch) -> Result<bool, Refused> {
+    #[allow(clippy::too_many_arguments)]
+    fn stretch(&self, generator: &D::Middle<'a>, kappa_m: [f64; 3], start: f64, reads: &[f64], march: &mut March, scratch: &mut Scratch, domain: &dyn Domain) -> Result<bool, Refused> {
         let (tau, hm) = (self.tau, self.hbar_over_mass);
         let h = 0.5 * tau;
         let velocity = kappa_m.map(|k| hm * k);
@@ -1793,6 +1767,16 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let from = march.u;
             let launched = along.turned(&march.state.psi, from, true);
             picture.launch(from, &launched[..n]);
+            // The runaway's guard (module documentation, # The domain): the stretch's first state's hazard, x̂†Γx̂ of the
+            // launched state's direction at the decay laid for the step (`hazard_at`'s, on the state itself: nothing of
+            // the picture is moved or counted).
+            if traces == 0 {
+                part.fill(0.0);
+                gather(still, h, from, 1.0, &launched[..n], &mut [0.0; 3], part);
+                if domain.runaway(hazard(decay, part, n)) {
+                    return Err(Refused::Runaway);
+                }
+            }
             let (target, first, before) = (march.state.threshold.ln(), norm_sqr(&march.state.psi).ln(), hazard(decay, sums, n));
             traces += 1;
             // The panel's start and ln N there; the stops met, the middle and the times read as far as they stand.

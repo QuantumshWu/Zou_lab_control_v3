@@ -25,23 +25,12 @@ fn unseen() -> f64 {
     atom_motion::estimate::unseen(MOST_TRAJECTORIES as f64)
 }
 
-/// The scene's model as the solve closes it (solve.rs `attempt`): every unit whose fold does not exist over the reach at
-/// `temperature` kept, until none fails; with the units kept, the reference state, its trap and that reach.
+/// The scene's model closed by its units' errors at its reference state (tests/model_common `closed`), its reach at
+/// `temperature`; with the units kept, the reference state, its trap and that reach.
 fn closed(request: &Request, light: &Light, temperature: f64) -> (Model, Vec<Unit>, usize, Trap, Reach) {
     let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let p = alone(state);
-    let mut kept: Vec<Unit> = vec![];
-    loop {
-        let model = Model::new(request, light, &kept).unwrap();
-        let trap = model.trap(&p, &model.prepared()).unwrap();
-        let reach = model.reach(&trap, &p, temperature, unseen());
-        let units = model.units();
-        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-        if failing.is_empty() {
-            return (model, kept, state, trap, reach);
-        }
-        kept.extend(failing);
-    }
+    let (model, kept, trap, reach) = model_common::closed(request, light, vec![], state, temperature);
+    (model, kept, state, trap, reach)
 }
 
 /// The tables' shares of the targets (tabulate.rs, # Refinement): z/(2√N) on what is shown, z√(2/N) on T.

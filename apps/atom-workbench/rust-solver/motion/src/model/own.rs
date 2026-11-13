@@ -486,11 +486,6 @@ impl<T: Space> Form<T> {
         Form { value: T::ZERO, first: [T::ZERO; 3], rest: 0.0, moved: 0.0, most: 0.0 }
     }
 
-    /// A constant.
-    pub(crate) fn constant(value: T) -> Form<T> {
-        Form { value, first: [T::ZERO; 3], rest: 0.0, moved: 0.0, most: value.size() }
-    }
-
     /// A quantity over the whole space, known only to be at most `most`.
     pub(crate) fn whole(most: f64) -> Form<T> {
         Form { value: T::ZERO, first: [T::ZERO; 3], rest: f64::INFINITY, moved: f64::INFINITY, most }
@@ -533,11 +528,6 @@ impl Form<f64> {
 }
 
 impl Form<C64> {
-    /// z u of a complex constant z.
-    pub(crate) fn turned(self, z: C64) -> Form<C64> {
-        let size = z.abs();
-        Form { value: self.value * z, first: self.first.map(|x| x * z), rest: times(self.rest, size), moved: times(self.moved, size), most: times(self.most, size) }
-    }
 }
 
 impl Form<[f64; 3]> {
@@ -570,25 +560,7 @@ pub(crate) fn product<A: Space, B: Space, R: Space>(x: &Form<A>, y: &Form<B>, p:
     }
 }
 
-/// The norm of a vector of forms over the cell (`Form::norm`): its parts' remainders, widths, movements and sizes taken
-/// together as the Euclidean norm of theirs.
-pub(crate) fn norm_of<T: Space>(parts: &[Form<T>]) -> Own {
-    let euclid = |f: &dyn Fn(&Form<T>) -> f64| parts.iter().map(|x| f(x).powi(2)).sum::<f64>().sqrt();
-    let dots = std::array::from_fn(|a| parts.iter().map(|x| x.value.dot(x.first[a])).sum());
-    measured(euclid(&|x| x.value.size()), dots, euclid(&|x| x.rest), euclid(&|x| x.width()), euclid(&|x| x.most))
-}
-
 impl Own {
-    /// 1/(a − iγ), γ > 0 a constant, a complex quantity (`Form`): a drive's response per unit coupling at the detuning a.
-    /// With D = a − iγ and δ the operand's change, 1/(D + δ) = 1/D − δ/D² + δ²/(D²(D + δ)): its first order −first/D² and
-    /// its remainder R/|D|² + W²/(|D|² m), m = (min|a|² + γ²)^{1/2} the least |D| over the cell; it moves by W/(|D| m) and is
-    /// at most 1/m.
-    pub(crate) fn resolvent(self, gamma: f64) -> Form<C64> {
-        let d = C64::new(self.value, -gamma);
-        let (size, least, w) = (d.abs(), self.least_size().hypot(gamma), self.width());
-        let slope = -(d * d).recip();
-        Form { value: d.recip(), first: self.first.map(|x| slope * x), rest: self.rest / (size * size) + times(w * w, 1.0 / (size * size * least)), moved: times(w, 1.0 / (size * least)), most: 1.0 / least }
-    }
 }
 
 /// A real quantity known within a band about a smooth function of the place (module documentation, # Bands): mid ± rad, each
@@ -692,9 +664,9 @@ mod tests {
             // The forms of other spaces, of the two quantities' real forms: u = a + ib, its |u|² and |u|; v = (a, b, ab), |v|
             // and |(a − b) v|; and a band a ± b, its least modulus and its largest.
             let (ra, rb) = (fa.form(), fb.form());
-            let unit = |z: C64| Form::constant(z);
+            let unit = |z: C64| Form { value: z, first: [C64::ZERO; 3], rest: 0.0, moved: 0.0, most: z.abs() };
             let u = product(&ra, &unit(C64::ONE), |x: f64, z: C64| z * x).add(product(&rb, &unit(C64::I), |x: f64, z: C64| z * x));
-            let axis = |a: usize| Form::constant(std::array::from_fn::<f64, 3, _>(|b| if a == b { 1.0 } else { 0.0 }));
+            let axis = |a: usize| Form { value: std::array::from_fn::<f64, 3, _>(|b| if a == b { 1.0 } else { 0.0 }), first: [[0.0; 3]; 3], rest: 0.0, moved: 0.0, most: 1.0 };
             let v = product(&ra, &axis(0), |x: f64, e: [f64; 3]| e.map(|y| y * x)).add(product(&rb, &axis(1), |x: f64, e: [f64; 3]| e.map(|y| y * x))).add(product(&fa.mul(fb).form(), &axis(2), |x: f64, e: [f64; 3]| e.map(|y| y * x)));
             let band = Band { mid: fa, rad: fb };
             let vector = move |r: [f64; 3]| [a(r), b(r), a(r) * b(r)];
@@ -706,8 +678,6 @@ mod tests {
                 (v.by(&fa.sub(fb)).norm(), Box::new(move |r| (a(r) - b(r)).abs() * length(vector(r)))),
                 (band.apart(), Box::new(move |r| (a(r).abs() - b(r)).max(0.0))),
                 (band.most(), Box::new(move |r| a(r).abs() + b(r))),
-                (fa.sub(fb).scale(3.0).resolvent(0.3).norm(), Box::new(move |r| 1.0 / (3.0 * (a(r) - b(r))).hypot(0.3))),
-                (norm_of(&[u, fa.sub(fb).resolvent(0.2).turned(C64::new(0.3, -0.4))]), Box::new(move |r| (a(r).powi(2) + b(r).powi(2) + 0.25 / ((a(r) - b(r)).powi(2) + 0.04)).sqrt())),
             ];
             for (own, f) in &others {
                 for _ in 0..2000 {

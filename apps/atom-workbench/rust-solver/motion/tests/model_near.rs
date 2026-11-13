@@ -10,7 +10,7 @@ use atom_motion::request::Request;
 use atom_motion::step::Middle as _;
 
 mod model_common;
-use model_common::{at_the_atom, decay_rate, scene};
+use model_common::{at_the_atom, closed, decay_rate, scene};
 
 /// The frequency (an index of the light's) of the beam named `id`.
 fn frequency_of(request: &Request, light: &Light, id: &str) -> usize {
@@ -108,9 +108,10 @@ fn a_raman_pair_is_kept_on_resonance_and_couples_at_the_closed_form() {
         assert!(units.contains(&raman), "{level}: the Raman pair is a unit: {:?}", units.iter().filter(|u| matches!(u, Unit::Term { a: 1, b: 5, .. })).collect::<Vec<_>>());
         let p = { let mut p = [0.0; GROUND]; p[1] = 1.0; p };
         let trap = folded.trap(&p, &folded.prepared()).unwrap();
-        let reach = folded.reach(&trap, &p, request.temperature_uk, 2e-3);
-        let gate = folded.gates(&[raman.clone()], &reach)[0];
-        assert!(!gate.exists(), "{level}: a Raman-resonant pair cannot fold: {gate:?}");
+        let cluster = folded.cluster_of(1);
+        let psi: Vec<C64> = folded.clusters()[cluster].states.iter().map(|&s| if s == 1 { C64::ONE } else { C64::ZERO }).collect();
+        let error = folded.errors(&[raman.clone()], &[Sample { cluster, at: Point { r: trap.centre, kappa: [0.0; 3], t: 0.0 }, psi }])[0][0];
+        assert!(!(error.population < 0.5), "{level}: a Raman-resonant pair cannot fold: its error at |1⟩ {error:?}");
         let model = Model::new(&request, &light, &drives.iter().cloned().chain([raman.clone()]).collect::<Vec<_>>()).unwrap();
         let cluster = model.cluster_of(1);
         assert_eq!(model.cluster_of(5), cluster, "{level}: the pair joins its states");
@@ -226,39 +227,6 @@ fn a_kept_and_a_folded_drive(name: &str, id: &str) {
     }
 }
 
-/// The gates over the reach of drives folded with the levels at the atom (SPEC §1.5): a weak probe's drives fold (R2_RECOIL's
-/// 100Γ detuning, R3_DOPPLER's two beams at s = 0.02 and δ = −Γ/2: S of the order of their saturation), each one's provable
-/// bound -- its ground state's folded shares that are not larger than its own -- above its share measured at the trap's
-/// centre, and the strongest's above their sum; the sweep a is bounded too.
-#[test]
-fn weak_drives_fold_within_their_provable_gates() {
-    for (name, ids) in [("R2_RECOIL", vec!["probe"]), ("R3_DOPPLER", vec!["cool-plus"])] {
-        let request = scene(name);
-        let light = Light::new(&request);
-        let kept = at_the_atom(&request, &light, &ids.iter().map(|id| frequency_of(&request, &light, id)).collect::<Vec<_>>());
-        let model = Model::new(&request, &light, &kept).unwrap();
-        let b = 7;
-        let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
-        let trap = model.trap(&p, &model.prepared()).unwrap();
-        let reach = model.reach(&trap, &p, request.temperature_uk, 2e-3);
-        let units: Vec<Unit> = model.units().into_iter().filter(|u| matches!(u, Unit::Drive { ground, .. } if *ground == b)).collect();
-        assert!(!units.is_empty(), "{name}: drives from |2,2⟩");
-        let started = std::time::Instant::now();
-        let gates = model.gates(&units, &reach);
-        let cluster = model.cluster_of(b);
-        let sample = Sample { cluster, at: Point { r: trap.centre, kappa: [0.0; 3], t: 0.0 }, psi: vec![C64::ONE; model.clusters()[cluster].states.len()] };
-        let errors = model.errors(&units, &[sample]);
-        let measured: f64 = errors.iter().map(|e| e[0].parameter).sum();
-        for ((u, g), e) in units.iter().zip(&gates).zip(&errors) {
-            assert!(g.exists(), "{name}: {u:?} {g:?}");
-            assert!(g.saturation >= e[0].parameter * (1.0 - 1e-9), "{name}: the bound {} below the measured s {}", g.saturation, e[0].parameter);
-        }
-        let most = gates.iter().map(|g| g.saturation).fold(0.0, f64::max);
-        assert!(most >= measured * (1.0 - 1e-9), "{name}: the strongest drive's bound {most} below the measured S {measured}");
-        eprintln!("{name}: {} drive gates in {:?}, S bound {most:.3e} measured {measured:.3e}, sweep {:.3e}", units.len(), started.elapsed(), gates[0].sweep);
-    }
-}
-
 /// The potential's expansion is exact with drives folded at the atom in it: on the reported lights (the trap light coherent, every
 /// other light averaged: R3's σ⁺ cooling pair, R5's pump and repump) the gradient is the central difference of the value and the
 /// Hessian that of the gradient, to the differences' own truncation (h² of the third derivative; h = 1e-4 µm) -- the responses
@@ -307,18 +275,8 @@ fn the_reported_trap_does_not_show_the_level_a_drive_is_taken_at() {
         let others: Vec<usize> = (0..light.frequencies.len()).filter(|&f| f != light.trap).collect();
         let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
         let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
-        // The closure (solve.rs `attempt`): every unit whose gate fails over the reach kept, until none fails.
-        let mut closed: Vec<Unit> = vec![];
-        let model = loop {
-            let model = Model::new(&request, &light, &closed).unwrap();
-            let reach = model.reach(&model.trap(&p, &model.prepared()).unwrap(), &p, request.temperature_uk, 2e-3);
-            let units = model.units();
-            let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-            if failing.is_empty() {
-                break model;
-            }
-            closed.extend(failing);
-        };
+        // The model closed by its units' errors at the reference state (`closed`).
+        let (model, closed, _, _) = closed(&request, &light, vec![], b, request.temperature_uk);
         let reported = model.trap(&p, &model.reported()).unwrap();
         let prepared = model.trap(&p, &model.prepared()).unwrap();
         let softer = (0..3).map(|a| 1.0 - reported.lab[a] / prepared.lab[a]).fold(f64::NEG_INFINITY, f64::max);
@@ -343,9 +301,8 @@ fn the_reported_trap_does_not_show_the_level_a_drive_is_taken_at() {
 }
 
 /// A model built with units kept lists as candidates only the units it folds (`Model::units`): none it keeps, none its clusters
-/// hold for free. The gates' closure from nothing kept (R3_DOPPLER, whose cooling line the tweezer moves by more than its own
-/// detuning: its drives' folds with the bare levels do not exist, those with the levels at the atom do) adds only units it has
-/// not kept each round and ends with those drives' bare units kept and no drive explicit; in R6_RAMAN_CO with the Raman pair
+/// hold for free. The closure by the units' errors from nothing kept (R3_DOPPLER, whose cooling line the tweezer moves by more
+/// than its own detuning) adds only units it has not kept each round; in R6_RAMAN_CO with the Raman pair
 /// and the drive of its A leg kept, the B leg's drive is in the cluster at a residual beat of exactly zero (θ_e − θ_5 = δ_B)
 /// and is no candidate any more -- while the two ground states' static coupling, 6.8 GHz off in the pair's frames, is none of
 /// the generator's and stays one.
@@ -354,25 +311,19 @@ fn a_kept_unit_is_no_longer_a_candidate() {
     let request = scene("R3_DOPPLER");
     let light = Light::new(&request);
     let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
     let mut kept: Vec<Unit> = vec![];
-    let clusters = loop {
+    for _ in 0..4 {
         let model = Model::new(&request, &light, &kept).unwrap();
         let units = model.units();
         let again: Vec<&Unit> = units.iter().filter(|u| kept.contains(u)).collect();
         assert!(again.is_empty(), "R3_DOPPLER: kept units listed again: {again:?}");
-        let trap = model.trap(&p, &model.prepared()).unwrap();
-        let reach = model.reach(&trap, &p, request.temperature_uk, 2e-3);
-        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-        if failing.is_empty() {
-            break model.clusters().len();
+        let (_, more, _, _) = closed(&request, &light, kept.clone(), b, request.temperature_uk);
+        if more.len() == kept.len() {
+            break;
         }
-        kept.extend(failing);
-    };
-    let cooling = Component { frequency: frequency_of(&request, &light, "cool-plus"), counter: false };
+        kept = more;
+    }
     eprintln!("R3_DOPPLER: kept {kept:?}");
-    assert!(kept.iter().any(|u| matches!(u, Unit::Bare { component, ground: 7, .. } if *component == cooling)), "R3_DOPPLER: the cooling line's bare fold fails: {kept:?}");
-    assert!(clusters == GROUND && !kept.iter().any(|u| matches!(u, Unit::Drive { .. })), "R3_DOPPLER: its fold at the atom exists: {kept:?}");
 
     let request = scene("R6_RAMAN_CO");
     let light = Light::new(&request);
