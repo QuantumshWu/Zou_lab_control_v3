@@ -169,14 +169,21 @@ pub(crate) fn second_order(e: &[f64], read: &[f64], a: Fold, nu_a: f64, b: Fold,
         for g in GROUND..STATES {
             let mut z = C64::ZERO;
             for w in 0..GROUND {
-                // Each half holds one drive's own denominator: the emitted leg's g ← w, the absorbed leg's f ← w.
+                // Each half holds one drive's own denominator: the emitted leg's g ← w, the absorbed leg's f ← w. An
+                // explicit state, read at its cluster's ground energy (not its own), is never read at a Raman pair's
+                // two-photon distance of nothing: such a pair is joined (model.rs `Model::settled`, units.rs `Model::joined`).
+                let distance = |x: usize, nu: f64| -> f64 {
+                    let d = read[x - GROUND] - e[w] - nu;
+                    assert!(d != 0.0 || read[x - GROUND] == e[x], "a fold onto an explicit state at a two-photon distance of nothing (state {x}, ground {w}): the pair is joined, never folded");
+                    d
+                };
                 let emitted = b.coupled[(f, w)] * a.bare[(g, w)].conj();
                 if emitted != C64::ZERO {
-                    z += emitted * (0.5 / (read[g - GROUND] - e[w] - nu_a));
+                    z += emitted * (0.5 / distance(g, nu_a));
                 }
                 let absorbed = b.bare[(f, w)] * a.coupled[(g, w)].conj();
                 if absorbed != C64::ZERO {
-                    z += absorbed * (0.5 / (read[f - GROUND] - e[w] - nu_b));
+                    z += absorbed * (0.5 / distance(f, nu_b));
                 }
             }
             out[(f, g)] = z;

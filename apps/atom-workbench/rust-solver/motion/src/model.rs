@@ -61,6 +61,16 @@ pub struct Beat(pub Vec<i64>);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Component { pub frequency: usize, pub counter: bool }
 
+impl Component {
+    /// Whether the model can take a drive of this component more exactly than its fold with the bare levels (units.rs,
+    /// # Levels, # The model's domain): a co-rotating one, at the atom or explicit. A counter-rotating one is only ever
+    /// folded with the bare levels -- a keep of it is refused (`Model::new`), and a Raman pair's join takes none (units.rs
+    /// `Model::joined`).
+    pub fn keepable(&self) -> bool {
+        !self.counter
+    }
+}
+
 /// How one frequency's light is on (`Lights`): off; on as its coherent field; or on with its beams' relative phases averaged --
 /// each beam with its own intensity, no interference between beams: the smooth shift of a light whose fringes the atoms fly over
 /// (the reported trap's, SPEC §1.3).
@@ -511,7 +521,7 @@ impl Model {
             if !driven.contains(&(component, excited, ground)) {
                 continue;
             }
-            if component.counter {
+            if !component.keepable() {
                 return Err("反旋转项的驱动只能按裸能级绝热消去，不能显式跟踪（模型的适用范围）".into());
             }
             let at = &mut levels[2 * component.frequency][(excited - GROUND) * GROUND + ground];
@@ -579,9 +589,18 @@ impl Model {
             }
         }
         // Each frequency's drives folded at their levels (far.rs `Tone::folded`); the carriers, the components with a drive not
-        // bare.
+        // bare. A drive folded onto an explicit state is a Raman pair with each of that state's kept legs, read at the
+        // state's energy among its cluster's ground states (`read`; far.rs, # A fold onto an explicit state): where the one
+        // gate of its pairs does not hold with every beam at its peak (units.rs `Model::joined`), the pair is a resonant
+        // coherent coupling of its two ground states -- Zeeman sublevels at B = 0 lie at one energy, its fold's two-photon
+        // distance nothing (far.rs `second_order` divided by it) --, and its drive joins its ground state to the cluster as
+        // a kept drive does.
         let levels = model.levels.clone();
         let read = model.read_made();
+        let joined = model.joined(&read);
+        if !joined.is_empty() {
+            return model.rekept(&[kept, &joined[..]].concat());
+        }
         model.tones = model.tones.iter().enumerate().map(|(frequency, tone)| tone.folded(&|side, e, g| levels[2 * frequency + side][(e - GROUND) * GROUND + g], &read)).collect();
         model.strongest = model.strongest_made();
         model.carriers = eliminate::Carrier::all(&model);

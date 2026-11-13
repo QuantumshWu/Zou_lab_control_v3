@@ -1213,6 +1213,31 @@ impl Model {
         (out, Coverings { cell: reach.cell, of })
     }
 
+    /// The drives folded onto explicit excited states whose Raman pairs cannot be folded anywhere (model.rs
+    /// `Model::settled`): of each co-rotating drive e ← w folded (with the bare levels or at the atom) onto an explicit
+    /// state e, the one gate (`gate`) of its pairs with e's kept drives e ← a, every beam at its peak (the sum of its beams'
+    /// moduli, as `share_anywhere`), at the bare one-photon distances -- the two-photon coupling |U| |V_a| over the nearer
+    /// of the two --, across the two-photon distance its fold reads, |read_e − E_w − ν| (far.rs `second_order`: e read at
+    /// its cluster's ground energy, `read`), the pairs' saturations summed (`pair_gate`); those at ½ or above, kept as
+    /// drives (explicit). Where the two-photon distance is nothing the gate is infinite.
+    pub(crate) fn joined(&self, read: &[f64]) -> Vec<Unit> {
+        let peak = |c: Component, e: usize, g: usize| -> f64 { self.tones[c.frequency].couplings[c.counter as usize].iter().map(|x| x[(e, g)].abs()).sum() };
+        let explicit = |e: usize| self.clusters.iter().any(|c| c.states[c.ground..].contains(&e));
+        let kept: Vec<(Component, usize, usize)> = self.driven.iter().copied().filter(|&(c, e, g)| c.keepable() && self.level(c, e, g) == Level::Explicit).collect();
+        self.driven
+            .iter()
+            .copied()
+            .filter(|&(c, e, w)| c.keepable() && self.level(c, e, w) != Level::Explicit && explicit(e))
+            .filter(|&(c, e, w)| {
+                let apart = (read[e - GROUND] - self.energies[w] - self.tones[c.frequency].nu[0]).abs();
+                let (u, d_u) = (peak(c, e, w), self.bare_distance(c, e, w));
+                let saturation: f64 = kept.iter().filter(|leg| leg.1 == e).map(|&(ca, _, a)| gate(u * peak(ca, e, a) / d_u.min(self.bare_distance(ca, e, a)), apart, 0.0).saturation).sum();
+                !(saturation < EXISTS)
+            })
+            .map(|(component, excited, ground)| Unit::Drive { component, excited, ground })
+            .collect()
+    }
+
     /// Each candidate unit's errors at each sample (`Model::units`), [unit][sample]: its small parameter at the sample's point
     /// mapped to the outputs (module documentation, # The errors), the forms at the atom from the exact elimination at the
     /// point.
@@ -1520,6 +1545,125 @@ mod tests {
         }
     }
 
+    /// Every number of a model's forms is one, whatever it keeps -- over random scenes and random kept sets. A drive folded
+    /// onto an explicit state whose kept leg's ground state is exactly degenerate with its own (Zeeman sublevels at B = 0)
+    /// is a resonant coherent coupling: the model joins it (model.rs `Model::settled`, `Model::joined`), never folds it at a
+    /// two-photon distance of nothing (far.rs `second_order` asserts so; before, scene 19 left one so: a NaN row of its
+    /// constant form, which `Own::max` then dropped). The scenes are R4_LIN_2's atom and lights -- a tweezer 32 THz red of
+    /// D2, a lin⊥lin cooling pair, a repump, B = 0 --: first as the reproduction of the counter-rotating refusal kept it
+    /// (ground state 3's co-rotating drives folded at the atom), then drawn: every beam but the tweezer along a random lab
+    /// axis, every beam's polarization uniform over the transverse ones (its field and couplings the dipole operator's on
+    /// the unit fields x̂, ŷ of the cooling pair and ẑ of the tweezer -- the repump's per V/m the cooling's, checked), its
+    /// intensity log-uniform over 0.1 to 10 of the scene's (the tweezer's 0.5 to 2), the near light's detuning from the
+    /// atom within ±30 Γ, the repump's offset within ±30 Γ, the repump present or not, and a random kept set (the drawn
+    /// scene's units but the counter-rotating drives, each with a probability of 0.02 to 0.3, in one or two rounds).
+    #[test]
+    fn every_model_s_forms_are_numbers_whatever_it_keeps() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R4_LIN_2.json");
+        let base = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+        let id = |name: &str| base.beams.iter().position(|b| b.id == name).unwrap();
+        // A beam's field and couplings per V/m of its field along its own polarization (−ẑ: the tweezer's field is −ẑ).
+        let per_field = |l: usize, sign: f64| -> ([C64; 3], Mat, Mat) {
+            let b = &base.beams[l];
+            let size = sign * b.field.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+            let (mut x, mut r) = (Mat::zeros(STATES, STATES), Mat::zeros(STATES, STATES));
+            x.add_scaled(C64::real(1.0 / size), &b.coupling);
+            r.add_scaled(C64::real(1.0 / size), &b.counter_coupling);
+            (b.field.map(|z| z * (1.0 / size)), x, r)
+        };
+        let axes = [per_field(id("cool-plus"), 1.0), per_field(id("cool-minus"), 1.0), per_field(id("tweezer"), -1.0)];
+        for (i, a) in axes.iter().enumerate() {
+            for (j, b) in axes.iter().enumerate() {
+                let dot: C64 = a.0.iter().zip(&b.0).map(|(x, y)| x.conj() * *y).sum();
+                assert!((dot - C64::real(if i == j { 1.0 } else { 0.0 })).abs() < 1e-12, "the unit fields x̂, ŷ, ẑ: ⟨{i}|{j}⟩ = {dot:?}");
+            }
+        }
+        let repump = per_field(id("repump-plus"), 1.0);
+        let apart = |a: &Mat, b: &Mat| a.data.iter().zip(&b.data).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max);
+        assert!((0..3).all(|q| (repump.0[q] - axes[0].0[q]).abs() < 1e-12), "the repump is x-polarized");
+        assert!(apart(&repump.1, &axes[0].1) <= 1e-9 * axes[0].1.frobenius() && apart(&repump.2, &axes[0].2) <= 1e-9 * axes[0].2.frobenius(), "one dipole operator: the repump's couplings per V/m are the cooling's");
+        let gamma = {
+            let model = Model::new(&base, &Light::new(&base), &[]).unwrap();
+            (0..EXCITED).map(|x| model.decay[(x, x)].re).fold(0.0, f64::max)
+        };
+        let repump_index = base.beams[id("repump-plus")].frequency_index.clone();
+        let tweezer = base.beams[base.trap_beam].id.clone();
+        let counter = |u: &Unit| matches!(u, Unit::Bare { component, .. } | Unit::Drive { component, .. } if !component.keepable());
+        let mut stream = crate::random::Stream::new(7, crate::random::Purpose::Initial, 0, 0);
+        let state = (0..GROUND).max_by(|&a, &b| base.initial_density[(a, a)].re.total_cmp(&base.initial_density[(b, b)].re)).unwrap();
+        let reference: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
+        let (mut unmade, mut joined, mut kept_all) = (0, 0, 0);
+        for s in 0..49 {
+            let mut request = base.clone();
+            let mut kept: Vec<Unit> = vec![];
+            if s == 0 {
+                // The scene as the reproduction of the counter-rotating refusal kept it: ground state 3's co-rotating
+                // drives folded at the atom.
+                let model = Model::new(&request, &Light::new(&request), &[]).unwrap();
+                kept = model.units().into_iter().filter(|u| matches!(u, Unit::Bare { component, ground: 3, .. } if !component.counter)).collect();
+            } else {
+                let log_uniform = |lo: f64, hi: f64, u: f64| (lo.ln() + (hi / lo).ln() * u).exp();
+                for b in request.beams.iter_mut() {
+                    let trap = b.id == tweezer;
+                    let along = if trap { 0 } else { (3.0 * stream.uniform()) as usize % 3 };
+                    if !trap {
+                        let sign = if stream.uniform() < 0.5 { -1.0 } else { 1.0 };
+                        b.direction = std::array::from_fn(|i| if i == along { sign } else { 0.0 });
+                    }
+                    let (z1, z2) = (stream.normals(), stream.normals());
+                    let (first, second) = (C64::new(z1[0], z1[1]), C64::new(z1[2], z2[0]));
+                    let norm = (first.norm_sqr() + second.norm_sqr()).sqrt();
+                    let across: Vec<usize> = (0..3).filter(|&i| i != along).collect();
+                    let mut polarization = [C64::ZERO; 3];
+                    polarization[across[0]] = first / norm;
+                    polarization[across[1]] = second / norm;
+                    let (lo, hi) = if trap { (0.5, 2.0) } else { (0.1, 10.0) };
+                    let size = b.field.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt() * log_uniform(lo, hi, stream.uniform()).sqrt();
+                    b.field = std::array::from_fn(|q| (0..3).map(|c| polarization[c] * axes[c].0[q]).sum::<C64>() * size);
+                    b.coupling = Mat::zeros(STATES, STATES);
+                    b.counter_coupling = Mat::zeros(STATES, STATES);
+                    for c in 0..3 {
+                        b.coupling.add_scaled(polarization[c] * size, &axes[c].1);
+                        b.counter_coupling.add_scaled(polarization[c].conj() * size, &axes[c].2);
+                    }
+                }
+                let detuning = 30.0 * gamma * (2.0 * stream.uniform() - 1.0);
+                for e in GROUND..STATES {
+                    request.hamiltonian[(e, e)] -= C64::real(detuning);
+                }
+                request.frequencies_mhz[0] += 30.0 * gamma / (2.0 * std::f64::consts::PI) * (2.0 * stream.uniform() - 1.0);
+                if stream.uniform() < 0.5 {
+                    request.beams.retain(|b| b.frequency_index != repump_index);
+                    request.outside_forms.retain(|f| f.frequency_index != repump_index);
+                    request.trap_beam = request.beams.iter().position(|b| b.id == tweezer).unwrap();
+                }
+                // The reach's temperature, drawn as the scenes were first drawn (the stream's draws are the scenes').
+                let _temperature = 10.0 + 70.0 * stream.uniform();
+                let p = [0.02, 0.1, 0.3][(3.0 * stream.uniform()) as usize % 3];
+                let light = Light::new(&request);
+                for _ in 0..1 + usize::from(stream.uniform() < 0.5) {
+                    let model = Model::new(&request, &light, &kept).unwrap();
+                    let more: Vec<Unit> = model.units().into_iter().filter(|u| !counter(u)).filter(|_| stream.uniform() < p).collect();
+                    kept.extend(more);
+                }
+            }
+            let model = Model::new(&request, &Light::new(&request), &kept).unwrap();
+            if model.tones.iter().any(|t| t.pairs.iter().chain(&t.forms).any(|m| m.data.iter().any(|z| !(z.re.is_finite() && z.im.is_finite())))) {
+                unmade += 1;
+            }
+            joined += model.kept.iter().filter(|u| !kept.contains(u)).count();
+            kept_all += kept.len();
+            // Where the scene has a trap, the nine draws of the states first read about its centre: the next scene is
+            // the one first drawn.
+            if model.trap(&reference, &model.prepared()).is_ok() {
+                (0..9).for_each(|_| _ = stream.uniform());
+            }
+        }
+        println!("49 scenes, {kept_all} units kept: {joined} drives joined by their Raman pairs, {unmade} models with forms that are no number");
+        assert!(unmade == 0, "{unmade} models with forms that are no number");
+        assert!(joined > 0, "no drive joined: the draw reaches no degenerate Raman pair");
+    }
+
     /// The sweep is a relative error of the fold's own effect (module documentation, # One rule; `Gate::resolved`). The
     /// exact response of a linear sweep is the instantaneous fold times I(a) = ∫₀^∞ e^{−x + iax²/2} dx (internal.md
     /// 1B.1), of modulus at most one at any a -- so the fold is off by at most twice its own amplitude: |I(a) − 1| ≤ 2
@@ -1665,7 +1809,8 @@ mod tests {
     ///   read 82 % low;
     /// - it holds far from the resonance and fails around it (bare: from 1.5 Γ down, its own gate's too -- b's
     ///   undressed response is 19 % off at 2 Γ --; at the atom: from 1.2 Γ to 0.1 Γ): the fold is refused there, not
-    ///   evaluated.
+    ///   evaluated; at the Raman resonance itself (β = ε, the two-photon distance nothing) the model joins b to the kept
+    ///   cluster (`Model::joined`): the pair is a resonant coherent coupling, which no fold holds anywhere.
     /// And b's response through an e that a strong drive dresses (V = 2 Γ on resonance, β = 27.4 Γ): with the levels at
     /// the atom its rate is the exact one to 1e-3 (the undressed response's: −1.06 %, within its booked error).
     #[test]
@@ -1679,6 +1824,12 @@ mod tests {
             let bare = Unit::Bare { component: folded, excited: e, ground: b };
             let model = Model::new(&request, &light, &if atom { vec![explicit.clone(), bare.clone()] } else { vec![explicit.clone()] }).unwrap();
             let unit = if atom { Unit::Drive { component: folded, excited: e, ground: b } } else { bare };
+            if model.level(folded, e, b) == Level::Explicit {
+                // The pair cannot be folded anywhere: the model joins b to the kept cluster (`Model::joined`) -- refused,
+                // not evaluated, as where its gate fails at the point.
+                assert_eq!(model.membership[b], model.membership[g], "β = {beta}: a joined drive's ground state is the cluster's");
+                return (false, [0.0; 2], [0.0; 2]);
+            }
             assert_eq!(model.level(folded, e, b), if atom { Level::Atom } else { Level::Bare });
             let (cg, cb) = (model.membership[g], model.membership[b]);
             assert_eq!((model.clusters[cg].states.clone(), model.clusters[cb].states.clone()), (vec![g, e], vec![b]));
@@ -1730,6 +1881,9 @@ mod tests {
                 }
             }
             assert!([1.2, 1.0, 0.8].iter().all(|beta| refused.contains(beta)), "atom {atom}: around the Raman resonance the fold is refused: {refused:?}");
+            let (request, of, _) = three_levels(0.5, 1.0, 0.2, 1.0);
+            let joined = Model::new(&request, &Light::new(&request), &[Unit::Drive { component: Component { frequency: of[0], counter: false }, excited: e, ground: g }]).unwrap();
+            assert!(joined.level(Component { frequency: of[1], counter: false }, e, b) == Level::Explicit && joined.membership[b] == joined.membership[g], "at the Raman resonance the pair joins b to the kept cluster");
             let far: &[f64] = if atom { &[10.0, 6.0, 3.0, 2.0, 0.02] } else { &[10.0, 6.0, 3.0, 2.0] };
             assert!(far.iter().all(|beta| !refused.contains(beta)), "atom {atom}: far from the Raman resonance the fold exists: {refused:?}");
         }

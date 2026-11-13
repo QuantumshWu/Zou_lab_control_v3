@@ -43,6 +43,19 @@ pub(crate) struct Own {
     pub(crate) hi: f64,
 }
 
+/// The larger of two bounds, and the smaller (`least`): a bound that is no number makes the result none -- `f64::max` and
+/// `min` return the other operand, and a NaN Gershgorin radius read through them as a distance's band became nothing: a
+/// drive's distance fell to Γ/2 and a counter-rotating drive's share across 4.8e9 rad/µs read 1.33 (a random scene of R4_LIN_2's
+/// atom, the model's forms none on one excited state -- a degenerate Raman pair, now joined: units.rs
+/// `every_model_s_forms_are_numbers_whatever_it_keeps`). One principle for every bound and form: a number that is none
+/// stays none, and a statement read of it fails (units.rs `Gate::exists`: a gate that is none is not below ½).
+pub(crate) fn most(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) }
+}
+pub(crate) fn least(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() { f64::NAN } else { a.min(b) }
+}
+
 /// x y with 0 ∞ read as nothing: a part that is exactly nothing over the cell (its value and its width) makes its products
 /// nothing whatever the other's range -- and a gradient's component that is nothing, nothing along an unbounded side.
 fn times(x: f64, y: f64) -> f64 {
@@ -56,15 +69,27 @@ fn times(x: f64, y: f64) -> f64 {
 /// The range of a product of two ranges.
 fn ends(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
     let ends = [times(a[0], b[0]), times(a[0], b[1]), times(a[1], b[0]), times(a[1], b[1])];
-    [ends.iter().copied().fold(f64::INFINITY, f64::min), ends.iter().copied().fold(f64::NEG_INFINITY, f64::max)]
+    [ends.iter().copied().fold(f64::INFINITY, least), ends.iter().copied().fold(f64::NEG_INFINITY, most)]
 }
 
 impl Own {
-    /// The form of its parts, its range the given one within its own form's (`f64::max`/`min` pass a NaN end by: an
-    /// infinite value's form is its range).
+    /// A quantity that is no number: every own form made of it is none (`most`).
+    pub(crate) const NONE: Own = Own { value: f64::NAN, first: [f64::NAN; 3], rest: f64::NAN, lo: f64::NAN, hi: f64::NAN };
+
+    /// Whether any part of it is no number.
+    pub(crate) fn is_none(&self) -> bool {
+        self.value.is_nan() || self.rest.is_nan() || self.lo.is_nan() || self.hi.is_nan() || self.first.iter().any(|x| x.is_nan())
+    }
+
+    /// The form of its parts, its range the given one within its own form's -- an infinite value's form is its range (∞ −
+    /// ∞ is none of its ends) --; none where a part is none (`most`).
     fn made(value: f64, first: [f64; 3], rest: f64, lo: f64, hi: f64) -> Own {
+        if value.is_nan() || rest.is_nan() || lo.is_nan() || hi.is_nan() || first.iter().any(|x| x.is_nan()) {
+            return Own::NONE;
+        }
         let width = first[0].abs() + first[1].abs() + first[2].abs() + rest;
-        Own { value, first, rest, lo: lo.max(value - width), hi: hi.min(value + width) }
+        let (below, above) = if value.is_infinite() && width.is_infinite() { (lo, hi) } else { (most(lo, value - width), least(hi, value + width)) };
+        Own { value, first, rest, lo: below, hi: above }
     }
 
     /// A form of its own over a cell of half-widths `half`: value, gradient at the centre and remainder, no range beside it.
@@ -79,7 +104,12 @@ impl Own {
 
     /// A quantity known only to lie in [lo, hi] over the cell, its value at the centre `at`: no first order.
     pub(crate) fn range(at: f64, lo: f64, hi: f64) -> Own {
-        Own { value: at, first: [0.0; 3], rest: (hi - at).max(at - lo).max(0.0), lo, hi }
+        if at.is_nan() || lo.is_nan() || hi.is_nan() {
+            return Own::NONE;
+        }
+        // An infinite value's remainder is infinite (∞ − ∞ is no remainder).
+        let rest = if at.is_infinite() { f64::INFINITY } else { most(most(hi - at, at - lo), 0.0) };
+        Own { value: at, first: [0.0; 3], rest, lo, hi }
     }
 
     /// Σ_a h_a |∂_a f(c)|, its first-order width.
@@ -102,10 +132,16 @@ impl Own {
 
     /// The same quantity known also to lie in [lo, hi].
     pub(crate) fn within(self, lo: f64, hi: f64) -> Own {
-        Own { lo: self.lo.max(lo), hi: self.hi.min(hi), ..self }
+        if self.is_none() || lo.is_nan() || hi.is_nan() {
+            return Own::NONE;
+        }
+        Own { lo: most(self.lo, lo), hi: least(self.hi, hi), ..self }
     }
 
     pub(crate) fn add(self, o: Own) -> Own {
+        if self.is_none() || o.is_none() {
+            return Own::NONE;
+        }
         Own::made(self.value + o.value, std::array::from_fn(|a| self.first[a] + o.first[a]), self.rest + o.rest, self.lo + o.lo, self.hi + o.hi)
     }
 
@@ -114,32 +150,47 @@ impl Own {
     }
 
     pub(crate) fn plus(self, c: f64) -> Own {
+        if self.is_none() || c.is_nan() {
+            return Own::NONE;
+        }
         Own { value: self.value + c, lo: self.lo + c, hi: self.hi + c, ..self }
     }
 
     pub(crate) fn scale(self, c: f64) -> Own {
+        if self.is_none() || c.is_nan() {
+            return Own::NONE;
+        }
         let ends = [times(self.lo, c), times(self.hi, c)];
-        Own { value: self.value * c, first: self.first.map(|x| x * c), rest: times(self.rest, c.abs()), lo: ends[0].min(ends[1]), hi: ends[0].max(ends[1]) }
+        Own { value: times(self.value, c), first: self.first.map(|x| times(x, c)), rest: times(self.rest, c.abs()), lo: least(ends[0], ends[1]), hi: most(ends[0], ends[1]) }
     }
 
     /// a b: (a + δa)(b + δb) − ab − (a∇b + b∇a)·d = a R_b + b R_a + δa δb, |δ| at most the width; its range the product's.
     pub(crate) fn mul(self, o: Own) -> Own {
+        if self.is_none() || o.is_none() {
+            return Own::NONE;
+        }
         let [lo, hi] = ends([self.lo, self.hi], [o.lo, o.hi]);
-        let first = std::array::from_fn(|a| self.value * o.first[a] + o.value * self.first[a]);
+        let first = std::array::from_fn(|a| times(self.value, o.first[a]) + times(o.value, self.first[a]));
         Own::made(self.value * o.value, first, times(self.value.abs(), o.rest) + times(o.value.abs(), self.rest) + times(self.width(), o.width()), lo, hi)
     }
 
     pub(crate) fn square(self) -> Own {
+        if self.is_none() {
+            return Own::NONE;
+        }
         let (l, h) = (self.lo, self.hi);
         let (lo, hi) = if l >= 0.0 { (l * l, h * h) } else if h <= 0.0 { (h * h, l * l) } else { (0.0, (l * l).max(h * h)) };
         let w = self.width();
-        Own::made(self.value * self.value, self.first.map(|x| 2.0 * self.value * x), 2.0 * times(self.value.abs(), self.rest) + w * w, lo, hi)
+        Own::made(self.value * self.value, self.first.map(|x| 2.0 * times(self.value, x)), 2.0 * times(self.value.abs(), self.rest) + w * w, lo, hi)
     }
 
     /// 1/a, where a's range holds no zero: 1/(a + δ) = 1/a − δ/a² + δ²/(a²(a + δ)), so the remainder is at most R_a/a² +
     /// W_a²/(a² m), m = min |a| over the cell; its range [1/max, 1/min]. Where its range holds zero, everything beyond the
     /// nearer end: at least 1/max for a quantity that is not negative.
     pub(crate) fn recip(self) -> Own {
+        if self.is_none() {
+            return Own::NONE;
+        }
         let (lo, hi, a) = (self.lo, self.hi, self.value);
         if lo > 0.0 || hi < 0.0 {
             let m = lo.abs().min(hi.abs());
@@ -160,6 +211,9 @@ impl Own {
     /// most R_a/(2t) + W_a²/(2t(√m + t)²), m the least of a over the cell; its range [√min, √max]. Where a's range reaches
     /// nothing, the range alone.
     pub(crate) fn sqrt(self) -> Own {
+        if self.is_none() {
+            return Own::NONE;
+        }
         let (lo, hi, a) = (self.lo, self.hi, self.value);
         if lo > 0.0 && a > 0.0 {
             let (t, w) = (a.sqrt(), self.width());
@@ -172,7 +226,9 @@ impl Own {
 
     /// |a|: itself or its negative where its range keeps one sign, else the range [0, max |end|].
     pub(crate) fn abs(self) -> Own {
-        if self.lo >= 0.0 {
+        if self.is_none() {
+            Own::NONE
+        } else if self.lo >= 0.0 {
             self
         } else if self.hi <= 0.0 {
             self.scale(-1.0)
@@ -187,7 +243,9 @@ impl Own {
     /// had no first order where two close quantities cross over a cell, and a rate read through it -- the larger of two
     /// clusters' forces -- exceeded its value by the range's whole width at every scale.)
     pub(crate) fn max(self, o: Own) -> Own {
-        if self.lo >= o.hi {
+        if self.is_none() || o.is_none() {
+            Own::NONE
+        } else if self.lo >= o.hi {
             self
         } else if o.lo >= self.hi {
             o
@@ -201,7 +259,9 @@ impl Own {
     /// min(a, b): the one whose range lies below the other's; else (a + b)/2 − |a − b|/2 of its own form (`max`), within
     /// the range of the minimum.
     pub(crate) fn min(self, o: Own) -> Own {
-        if self.hi <= o.lo {
+        if self.is_none() || o.is_none() {
+            Own::NONE
+        } else if self.hi <= o.lo {
             self
         } else if o.hi <= self.lo {
             o
@@ -217,7 +277,7 @@ impl Own {
     /// the operand's and its remainder |f'(a)| R_a + ½ `curved` W_a² --; its range [lo, hi], f's over the operand's.
     fn through(self, value: f64, slope: f64, curved: f64, lo: f64, hi: f64) -> Own {
         let w = self.width();
-        Own::made(value, self.first.map(|x| slope * x), times(slope.abs(), self.rest) + 0.5 * times(curved, w * w), lo, hi)
+        Own::made(value, self.first.map(|x| times(slope, x)), times(slope.abs(), self.rest) + 0.5 * times(curved, w * w), lo, hi)
     }
 
     /// The least modulus of its values over the cell (its centre value's with its range).
@@ -233,6 +293,9 @@ impl Own {
     /// A drive far from its line, |a| ≫ γ, curves as 2/|a|³ there, not as the line's own 1.457/γ³. Its range is the shape's
     /// over the operand's: monotone on each side of ±γ, its extremes ±1/(2γ) there.
     pub(crate) fn dispersion(self, gamma: f64) -> Own {
+        if self.is_none() {
+            return Own::NONE;
+        }
         let f = |x: f64| if x.is_infinite() { 0.0 } else { x / (x * x + gamma * gamma) };
         let a = self.value;
         let slope = (gamma * gamma - a * a) / (a * a + gamma * gamma).powi(2);
@@ -257,6 +320,9 @@ impl Own {
     /// of its own, no interval in a remainder. Where the interval holds the peak at some places of the cell and not at
     /// others, the range of the two.
     pub(crate) fn dispersion_ends(self, moved: Own, gamma: f64) -> [Own; 2] {
+        if self.is_none() || moved.is_none() {
+            return [Own::NONE; 2];
+        }
         let (a, b) = (self.sub(moved), self.add(moved));
         let (fa, fb) = (a.dispersion(gamma), b.dispersion(gamma));
         let top = 0.5 / gamma;
@@ -279,6 +345,9 @@ impl Own {
     /// −1/(8γ²) at |x| = √3 γ and rises from there towards 0 -- over the operand's moduli [m, M] the larger of its ends'
     /// values, the least −1/(8γ²) where √3 γ is among them, else the smaller end's.
     pub(crate) fn dispersion_slope(self, gamma: f64) -> Own {
+        if self.is_none() {
+            return Own::NONE;
+        }
         let g2 = gamma * gamma;
         let f = |x: f64| if x.is_infinite() { 0.0 } else { (g2 - x * x) / (x * x + g2).powi(2) };
         let a = self.value;
@@ -293,7 +362,10 @@ impl Own {
     /// The same quantity as a real form (`Form`): how far it moves, the farther of its range's ends from its value; how large,
     /// the larger end's modulus.
     pub(crate) fn form(&self) -> Form<f64> {
-        Form { value: self.value, first: self.first, rest: self.rest, moved: (self.hi - self.value).max(self.value - self.lo).max(0.0), most: self.lo.abs().max(self.hi.abs()) }
+        if self.is_none() {
+            return Form { value: f64::NAN, first: [f64::NAN; 3], rest: f64::NAN, moved: f64::NAN, most: f64::NAN };
+        }
+        Form { value: self.value, first: self.first, rest: self.rest, moved: most(most(self.hi - self.value, self.value - self.lo), 0.0), most: most(self.lo.abs(), self.hi.abs()) }
     }
 
     /// (a² + c²)^{1/2}, c a constant: the modulus of a + ic.
@@ -334,7 +406,7 @@ fn measured(n: f64, dots: [f64; 3], rest: f64, w: f64, most: f64) -> Own {
     } else {
         Own::range(n, 0.0, w)
     };
-    own.within((n - w).max(0.0), (n + w).min(most))
+    own.within(self::most(n - w, 0.0), least(n + w, most))
 }
 
 /// A vector space a quantity over a cell takes its values in (`Form`): the reals, the complex numbers, real and complex
@@ -426,7 +498,7 @@ impl<T: Space> Form<T> {
 
     /// How far it lies from its centre value over the cell, at most: its own form's width, within how far it moves.
     pub(crate) fn width(&self) -> f64 {
-        (self.first.iter().map(|x| x.size()).sum::<f64>() + self.rest).min(self.moved)
+        least(self.first.iter().map(|x| x.size()).sum::<f64>() + self.rest, self.moved)
     }
 
     pub(crate) fn add(self, o: Form<T>) -> Form<T> {
@@ -662,5 +734,50 @@ mod tests {
                 assert!(v <= own.upper() + 1e-12 && v >= own.lower() - 1e-12, "|u| {v} outside [{}, {}]", own.lower(), own.upper());
             }
         }
+    }
+
+    /// A number that is none stays none (`most`): fed into any combinator of the own forms -- as an operand's value, an
+    /// end of its range, its remainder or a first order, or as a constant -- the result is none, and its bounds are no
+    /// numbers: a statement read of it is not below any threshold. And ∞ is not none: an infinite value's form is its
+    /// range.
+    #[test]
+    fn a_number_that_is_none_surfaces_through_every_combinator() {
+        let fine = Own::new(2.0, [0.3, -0.1, 0.2], 0.05, [1.0, 1.0, 1.0]);
+        let nan = f64::NAN;
+        let poisoned = [
+            Own { value: nan, ..fine },
+            Own { lo: nan, ..fine },
+            Own { hi: nan, ..fine },
+            Own { rest: nan, ..fine },
+            Own { first: [0.3, nan, 0.2], ..fine },
+            Own::range(nan, 0.0, 1.0),
+            Own::range(1.0, nan, 2.0),
+            Own::constant(nan),
+        ];
+        let none = |o: Own, what: &str| assert!(o.is_none() && o.upper().is_nan() && o.lower().is_nan() && !(o.upper() < 0.5), "{what}: {o:?}");
+        for (k, p) in poisoned.iter().enumerate() {
+            assert!(p.is_none(), "{k}: {p:?}");
+            for (name, o) in [
+                ("add", p.add(fine)), ("add'", fine.add(*p)), ("sub", p.sub(fine)), ("sub'", fine.sub(*p)), ("mul", p.mul(fine)), ("mul'", fine.mul(*p)),
+                ("div", p.div(fine)), ("div'", fine.div(*p)), ("max", p.max(fine)), ("max'", fine.max(*p)), ("min", p.min(fine)), ("min'", fine.min(*p)),
+                ("square", p.square()), ("recip", p.recip()), ("sqrt", p.sqrt()), ("abs", p.abs()), ("scale", p.scale(2.0)), ("plus", p.plus(1.0)),
+                ("within", p.within(0.0, 1.0)), ("hypot", p.hypot(1.0)), ("dispersion", p.dispersion(1.0)), ("dispersion slope", p.dispersion_slope(1.0)),
+                ("dispersion ends", p.dispersion_ends(fine, 1.0)[1]), ("dispersion ends'", fine.dispersion_ends(*p, 1.0)[0]),
+            ] {
+                none(o, &format!("{k} {name}"));
+            }
+            assert!(p.form().moved.is_nan() || p.form().most.is_nan(), "{k} form: {:?}", p.form());
+        }
+        for (name, o) in [("scale", fine.scale(nan)), ("plus", fine.plus(nan)), ("within", fine.within(nan, 1.0)), ("within'", fine.within(0.0, nan))] {
+            none(o, name);
+        }
+        // The band of the case found: a radius none, its distance read through max(|Δ| − moved, 0) and Γ/2 -- none.
+        let distance = Own::constant(4.8e9).abs().sub(Own::range(nan, 2.27, nan)).max(Own::constant(0.0)).hypot(19.06);
+        none(distance, "the distance of a band that is none");
+        assert!(most(nan, 1.0).is_nan() && most(1.0, nan).is_nan() && least(nan, 1.0).is_nan() && least(1.0, nan).is_nan() && most(1.0, 2.0) == 2.0 && least(1.0, 2.0) == 1.0);
+        // ∞ is a number: an infinite value's form is its range.
+        let infinite = Own::range(f64::INFINITY, 0.0, f64::INFINITY);
+        assert!(!infinite.is_none() && infinite.upper() == f64::INFINITY && infinite.lower() == 0.0, "{infinite:?}");
+        assert!(!infinite.add(fine).is_none() && !fine.div(Own::range(0.0, 0.0, 1.0)).is_none(), "infinite forms stay numbers");
     }
 }
