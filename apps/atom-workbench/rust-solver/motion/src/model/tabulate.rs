@@ -124,29 +124,32 @@
 //!
 //! How far: the function's structure and the shares, never the run. A pole a distance ρ = 1/λ from the real axis of the
 //! coordinate (λ its rate, # Axes: the line moves a half-width in 1/λ) is unresolved while the spacing h is above ρ, and the
-//! read is the peak the grid misses, falling as h: by 2 a halving. Once h ≤ ρ it falls at the interpolant's order -- inside
-//! an interval the middle errs by 7h⁴f⁗/384 (the slopes' (h²/6)f‴ and the cubic's own fourth order), 16 a halving; at a
-//! bounded axis's end intervals by h³f‴/16 (the one-sided slope), 8 a halving: at least 2^VALUE_ORDER (crate::table). (1/(x +
-//! i) on a uniform grid, the read's fall a halving at h/ρ = 8, 2, 1, 1/2, 1/4, 1/8: 2.0, 2.4, 3.4, 6.1, 10.5, 14.0; S3's
-//! tweezer intensity, its lines moved 17.4 half-widths a unit: 2.2, 3.2, 5.0, 6.8 from h = 1/6 to 1/48.) So a read r (over
-//! the shares) of the grid of j halvings, at spacing h_j, predicts the grid within the shares at j + ⌈log₂ λh_j⌉⁺ +
-//! ⌈log₂ r / VALUE_ORDER⌉⁺ halvings: those that resolve the pole, then those the order asks (`predicted`). An axis is halved
-//! while its read is beyond the shares and the grid the halving would read is within the least prediction of its reads so
-//! far. An error that falls at the order keeps its prediction and reaches the shares there; one that falls slower -- a
-//! kink, a pole nearer than the rate says, an unread node, which asks no halving the order can give -- raises it, and the
-//! least prediction ends the axis within a few halvings of where it was resolved -- at once where the read of a grid after
-//! a resolved one does not fall at all (an unread node, or a read of no order) --; what it leaves stands as `table_reads`
-//! reads it at the atoms. The nodes are fixed by the lines' rates, the reads and the shares alone. The solve's work bound
-//! decides which coordinates are axes (their first grid, `first_table`) and nothing of how far they are refined. (Refined
-//! until the next grid passed the work bound -- the pilot's middles, pilot_size (end/τ + end/2τ) --, a table's nodes grew
-//! with the run's length over its step: S3 with its cooling dressing coherent reached that bound through the solve's reads,
+//! read is the peak the grid misses: it falls as h, by 2 a halving, or by less or not at all as the pole's place among the
+//! nodes turns. From h ≈ ρ on the read falls faster, 3 to 6 a halving across the transition, and then at the interpolant's
+//! order -- inside an interval the middle errs by 7h⁴f⁗/384 (the slopes' (h²/6)f‴ and the cubic's own fourth order), 16 a
+//! halving; at a bounded axis's end intervals by h³f‴/16 (the one-sided slope), 8. (1/(x + i) on a uniform grid, the read's
+//! fall a halving at h/ρ = 8, 2, 1, 1/2, 1/4, 1/8: 2.0, 2.4, 3.4, 6.1, 10.5, 14.0; S3's tweezer intensity, its lines moved
+//! 17.4 half-widths a unit by its rate: 2.2, 3.2, 5.0, 6.8 from h = 1/6 to 1/48; R4_LIN_2's, 10.8 a unit: 2.7, 4.0, 5.8 --
+//! the rate, of the static forms alone, puts the pole about twice too far.) So an axis is halved while its read is beyond
+//! the shares and either its grid is unresolved by its rate (λh > 1) or the read fell by more than the factor 2 of a peak
+//! the grid misses (`halving_on`): an error being resolved goes on, at whatever pace the transition takes; one that falls
+//! by 2 or less on a resolved grid -- a kink, an unread node, a read of no order -- ends the axis there, and what it leaves
+//! stands as `table_reads` reads it at the atoms. Past its rate's resolution every halving at least halves the read, so an
+//! axis takes at most ⌈log₂ λh₀⌉⁺ halvings and then ⌈log₂ r⌉ (r its read there over the shares): the nodes are fixed by
+//! the lines' rates, the reads and the shares alone -- the work bound (solve.rs: the pilot's middles) is only a ceiling no
+//! grid passes, met where a table of many axes needs a verifying halving of each (every one doubles the grid: R4_LIN_4
+//! with both carriers' dressings coherent asks 193 x 13 x 13 x 16 nodes of 1760 reals, 7 GB, of one table; at the ceiling
+//! its error is read at the atoms and booked). (The order's own factor, 2^VALUE_ORDER a halving, holds only past the
+//! transition: asked of every halving, or of the halvings a read's order predicts, it ended R4_LIN_2's tweezer axis at
+//! 97 nodes with its read 1.44 times its share, where 193 read it within.) The solve's work bound decides which
+//! coordinates are axes (their first grid, `first_table`); of how far they are refined it is the ceiling alone. (Refined until the
+//! next grid passed the work bound -- the pilot's middles, pilot_size (end/τ + end/2τ) --, a table's nodes grew with the
+//! run's length over its step: S3 with its cooling dressing coherent reached that bound through the solve's reads,
 //! 1.7 million nodes at τ 0.079 µs, 8.9 GB; S3c at 100 ms would have reached 22 million.)
 //!
-//! The solve's reads at the atoms (solve.rs) refine by the same rule (`Model::halved_by`): an axis's read there is of the
-//! table's own grid, its prediction the same, and the axis is halved while that read is beyond the shares and the grid it
-//! makes is within the least prediction of those reads -- and only while the axes' reads can explain what is beyond: the
-//! table's whole error less every axis's own read beyond the shares is a coordinate held at the focus, which no halving
-//! lowers.
+//! The solve's reads at the atoms (solve.rs) refine by the same rule (`Model::halved_by`), each read there of the table's
+//! own grid against the read of the grid before -- and only while the axes' reads can explain what is beyond: the table's
+//! whole error less every axis's own read beyond the shares is a coordinate held at the focus, which no halving lowers.
 //!
 //! The tables' shares of the targets are the resolution of the largest ensemble the solve runs (SPEC §3, N = 2¹⁴ trajectories at
 //! the confidence z): an absolute z/(2√N) on what is shown (a share p's standard error is at most 1/(2√N)), a relative z√(2/N) on
@@ -233,15 +236,12 @@ pub(crate) fn shares() -> (f64, f64) {
     (z / (2.0 * n.sqrt()), z * (2.0 / n).sqrt())
 }
 
-/// The grid an axis's read predicts within the tables' shares (module documentation, # Refinement), in halvings of its first
-/// grid: from the grid of `halvings` halvings at spacing h and its read `over` (its error over the shares), the halvings
-/// that resolve its lines' poles -- to a spacing of at most a pole's distance 1/λ, λ the coordinate's rate --, then those the
-/// interpolant's order asks, a factor 2^VALUE_ORDER each: halvings + ⌈log₂ λh⌉⁺ + ⌈log₂(over)/VALUE_ORDER⌉⁺. An error
-/// within the shares asks none, and an unread one (+∞) none the order can be shown to give.
-pub(crate) fn predicted(halvings: usize, spacing: f64, rate: f64, over: f64) -> usize {
-    let resolve = (rate * spacing).log2().ceil().max(0.0);
-    let order = if over.is_finite() && over > 1.0 { (over.log2() / crate::table::VALUE_ORDER as f64).ceil() } else { 0.0 };
-    halvings + resolve as usize + order as usize
+/// Whether an axis is halved again (module documentation, # Refinement): its read `over` (its error over the shares) of a
+/// grid at spacing h is beyond the shares, and the grid does not yet resolve its lines' poles (λh > 1, λ the coordinate's
+/// rate) or the read fell by more than an unresolved peak's factor 2 from the read of the grid before, `before` (none
+/// before the axis's first). An unread error (+∞) falls by nothing.
+pub(crate) fn halving_on(over: f64, spacing: f64, rate: f64, before: Option<f64>) -> bool {
+    over > 1.0 && (rate * spacing > 1.0 || before.is_none_or(|read| read > 2.0 * over))
 }
 
 /// A table's error reads at samples (`Model::table_reads`): per axis the read of its interpolation error, and the table's whole
@@ -416,8 +416,12 @@ impl Model {
 
     /// A near table's grid with axis f's spacing halved (crate::table `Axis::halved`), its nodes reused: the refinement's one step.
     pub fn halved(&self, table: &NearTable, f: usize) -> Table {
-        let grid: Vec<Axis> = table.table.axes().iter().enumerate().map(|(g, a)| a.halved(if g == f { 1 } else { 0 })).collect();
-        table.table.refine(grid, &|s: &[f64], out: &mut [f64]| self.node_at(&table.layout, s, out))
+        table.table.refine(Model::finer(table, f), &|s: &[f64], out: &mut [f64]| self.node_at(&table.layout, s, out))
+    }
+
+    /// A table's axes with axis f's spacing halved.
+    fn finer(table: &NearTable, f: usize) -> Vec<Axis> {
+        table.table.axes().iter().enumerate().map(|(g, a)| a.halved(if g == f { 1 } else { 0 })).collect()
     }
 
     /// The node at the axes' values s, the other coordinates at their focus values.
@@ -427,19 +431,14 @@ impl Model {
         self.node(layout, &x, out);
     }
 
-    /// The halvings an axis of a table has of its first grid.
-    fn halvings(table: &NearTable, f: usize) -> usize {
-        first_axis(table.layout.coordinates[f]).halvings_to(&table.table.axes()[f]).expect("an axis is a refinement of its first grid") as usize
-    }
-
     /// Axis f of a table halved by the read at the atoms (solve.rs; module documentation, # Refinement): where `over`, its
-    /// interpolation error along f over the tables' shares as the caller reads it on the table's grid, is beyond them and
-    /// the grid it would read next is within the least prediction of its reads so far, `predicted` (the caller's, usize::MAX
-    /// before its first read; this read's own prediction taken in). None where it is not: the axis is refined no further.
-    pub fn halved_by(&self, table: &NearTable, f: usize, over: f64, predicted: &mut usize) -> Option<Table> {
-        let (axis, halvings) = (table.table.axes()[f], Model::halvings(table, f));
-        *predicted = (*predicted).min(self::predicted(halvings, axis.spacing(), table.layout.rates[f], over));
-        (over > 1.0 && halvings < *predicted).then(|| self.halved(table, f))
+    /// interpolation error along f over the tables' shares as the caller reads it on the table's grid, asks it
+    /// (`halving_on`) against the caller's read of the grid before, `before` (None before the first), which takes this
+    /// read, and the halved grid within the work bound `most`. None where not: the axis is refined no further.
+    pub fn halved_by(&self, table: &NearTable, f: usize, over: f64, before: &mut Option<f64>, most: usize) -> Option<Table> {
+        let on = halving_on(over, table.table.axes()[f].spacing(), table.layout.rates[f], *before);
+        *before = Some(over);
+        (on && Table::nodes(&Model::finer(table, f)) <= most).then(|| self.halved(table, f))
     }
 
     /// The near tables for the atoms' reach (module documentation, # Axes, # Refinement): per cluster the running lights'
@@ -448,9 +447,9 @@ impl Model {
     /// looked at once more on the refined one (module documentation, # Axes), and the table is made again with one that it
     /// needs after all. A coordinate the axes' rules refuse (`first_table`: the cost of an interpolation, the work bound
     /// `most` on the first grid, `table::MOST_AXES`) is held at its focus value like the light ones, whatever its weight:
-    /// the table's whole error at the atoms reads it (`table_reads`). `most` decides which coordinates are axes, never how
-    /// far an axis is refined. A table asks nothing of another: they are made side by side on the pool, and kept in the
-    /// order of their clusters and light sets.
+    /// the table's whole error at the atoms reads it (`table_reads`). `most` decides which coordinates are axes, and is the
+    /// ceiling of a refinement its function's structure stops (# Refinement). A table asks nothing of another: they are made
+    /// side by side on the pool, and kept in the order of their clusters and light sets.
     pub fn tabulate(&self, reach: &Reach, most: usize) -> Tables {
         let running = self.running();
         let mut untrapped = running.clone();
@@ -464,7 +463,7 @@ impl Model {
             .map(|&(cluster, lights)| {
                 let mut needed = vec![];
                 while let Some(First { table, ranges, held }) = self.first_table(cluster, lights, reach, most, &needed) {
-                    let table = self.refined(table, &ranges, reach);
+                    let table = self.refined(table, &ranges, reach, most);
                     match held.iter().find(|(coordinate, worst)| self.look(&table, &ranges, *coordinate, &[*worst], reach).0 > 1.0) {
                         Some((coordinate, _)) => needed.push(*coordinate),
                         None => return Some(table),
@@ -511,25 +510,20 @@ impl Model {
     }
 
     /// A table refined over the atoms' reach, its axes' ranges there given (module documentation, # Refinement): each axis in
-    /// turn halved, each halving reading the grid before it at the new nodes, until that read is within the shares, or the
-    /// grid it would read next is beyond the least prediction of the axis's reads (`predicted`), or the read of a grid
-    /// after a resolved one does not fall.
-    fn refined(&self, mut table: NearTable, ranges: &[(f64, f64)], reach: &Reach) -> NearTable {
+    /// turn halved, each halving reading the grid before it at the new nodes, while that read asks it (`halving_on`) and the
+    /// halved grid is within the work bound `most`.
+    fn refined(&self, mut table: NearTable, ranges: &[(f64, f64)], reach: &Reach, most: usize) -> NearTable {
         let d = table.axes();
-        let (mut ended, mut least, mut before) = (vec![false; d], vec![usize::MAX; d], vec![None; d]);
+        let (mut ended, mut before) = (vec![false; d], vec![None; d]);
         while let Some(f) = ended.iter().position(|e| !e) {
-            let (axis, halvings, rate) = (table.table.axes()[f], Model::halvings(&table, f), table.layout.rates[f]);
-            if halvings > least[f] {
+            if Table::nodes(&Model::finer(&table, f)) > most {
                 ended[f] = true;
                 continue;
             }
             let finer = self.halved(&table, f);
             let over = self.over(self.halving_error(&table.layout, &table.table, &finer, f, ranges, reach), reach);
-            least[f] = least[f].min(predicted(halvings, axis.spacing(), rate, over));
-            // The read of a grid after a resolved one that does not fall: no order to follow.
-            let stalled = before[f].is_some_and(|(spacing, read): (f64, f64)| rate * spacing <= 1.0 && over >= read);
-            ended[f] = over <= 1.0 || stalled;
-            before[f] = Some((axis.spacing(), over));
+            ended[f] = !halving_on(over, table.table.axes()[f].spacing(), table.layout.rates[f], before[f]);
+            before[f] = Some(over);
             table.table = finer;
         }
         table
@@ -1093,7 +1087,7 @@ mod tests {
         let (axis, grid) = (first_axis(unit), Table::nodes(first.table.axes()));
         let values: Vec<f64> = (0..axis.nodes).map(|i| axis.node(i)).collect();
         let early = model.look(&first, &ranges, unit, &values, &reach).0;
-        let refined = model.refined(first, &ranges, &reach);
+        let refined = model.refined(first, &ranges, &reach, most);
         let last = model.look(&refined, &ranges, unit, &[worst], &reach).0;
         eprintln!("R3_DOPPLER: the pair's unit over the tweezer's {grid} first nodes reads {early:.1e} of the shares; at its worst value {worst} over the refined table's {} nodes, {last:.1e}", Table::nodes(refined.table.axes()));
         assert!(early <= 1.0 && last <= 1.0, "the table does not need the unit: {early:e}, {last:e} of the shares");
@@ -1150,28 +1144,25 @@ mod tests {
     }
 
     /// The refinement's rule on one axis (module documentation, # Refinement), with the table's own interpolant and its read
-    /// at the new nodes against a share of 1e-3 relative. A line's pole 1/(λ(s − s₀) + i) on [0, 1], λ half-widths a unit
-    /// (17.4, S3's tweezer, and 300): read within the share at the grid its rate and reads predict. A kink |s − s₀| + 1,
-    /// whose rate (one) calls it smooth: its read falls 2 a halving, never at the order, and the axis ends within a few
-    /// halvings of its first, beyond the share -- where a bound of the run's had let it halve on.
+    /// at the new nodes against a share of 1e-3 relative. A line's pole 1/(λ(s − s₀) + i) on [0, 1], λ half-widths a unit:
+    /// at its rate (17.4, S3's tweezer, and 300, unresolved for six halvings), and at a rate twice too small (the static
+    /// forms' rate of R4_LIN_2's tweezer): read within the share. A kink |s − s₀| + 1, whose rate (one) calls it smooth:
+    /// its read does not fall by more than 2 at a halving, and the axis ends within a few halvings, beyond the share --
+    /// where a bound of the run's had let it halve on.
     #[test]
-    fn an_axis_is_refined_while_its_reads_fall_at_the_interpolant_s_order() {
+    fn an_axis_is_refined_while_its_reads_fall_faster_than_an_unresolved_peak_s() {
         let first = Axis::first(0.0, 1.0, false);
-        // The halvings, the last read over the share, and whether it ended within it.
-        let refine = |f: &(dyn Fn(f64) -> C64 + Sync), rate: f64| -> (usize, f64) {
+        // The halvings and the last read over the share.
+        let refine = |f: &(dyn Fn(f64) -> C64 + Sync), rate: f64| -> (u32, f64) {
             let share = 1e-3;
             let value = |s: &[f64], out: &mut [f64]| {
                 let z = f(s[0]);
                 out.copy_from_slice(&[z.re, z.im]);
             };
             let mut table = Table::build(vec![first], 2, usize::MAX, &value).unwrap();
-            let (mut least, mut over) = (usize::MAX, f64::INFINITY);
+            let mut before = None;
             loop {
                 let axis = table.axes()[0];
-                let halvings = first.halvings_to(&axis).unwrap() as usize;
-                if over <= 1.0 || halvings > least {
-                    return (halvings, over);
-                }
                 let read = (0..axis.nodes - 1)
                     .map(|i| {
                         let s = 0.5 * (axis.node(i) + axis.node(i + 1));
@@ -1180,33 +1171,36 @@ mod tests {
                         (C64::new(v[0], v[1]) - f(s)).abs() / f(s).abs()
                     })
                     .fold(0.0, f64::max);
-                over = read / share;
-                least = least.min(predicted(halvings, axis.spacing(), rate, over));
+                let over = read / share;
                 table = table.refine(vec![axis.halved(1)], &value);
+                if !halving_on(over, axis.spacing(), rate, before) {
+                    return (first.halvings_to(&table.axes()[0]).unwrap(), over);
+                }
+                before = Some(over);
             }
         };
-        for rate in [17.4, 300.0] {
-            let (halvings, over) = refine(&|s: f64| C64::ONE / C64::new(rate * (s - 0.37), 1.0), rate);
-            eprintln!("a pole of rate {rate}: {halvings} halvings, read {over:.2} of the share");
-            assert!(over <= 1.0, "the pole of rate {rate} read within the share: {over}");
+        for (pole, rate) in [(17.4, 17.4), (300.0, 300.0), (34.8, 17.4)] {
+            let (halvings, over) = refine(&|s: f64| C64::ONE / C64::new(pole * (s - 0.37), 1.0), rate);
+            eprintln!("a pole of rate {pole} taken at {rate}: {halvings} halvings, read {over:.2} of the share");
+            assert!(over <= 1.0, "the pole of rate {pole} at {rate} read within the share: {over}");
         }
         let (halvings, over) = refine(&|s: f64| C64::real((s - 0.37).abs() + 1.0), 1.0);
         eprintln!("a kink: {halvings} halvings, read {over:.2} of the share");
-        assert!(over > 1.0 && halvings <= 4, "the kink ends within a few halvings, beyond the share: {halvings}, {over}");
+        assert!(over > 1.0 && halvings <= 3, "the kink ends within a few halvings, beyond the share: {halvings}, {over}");
     }
 
     /// A table's nodes are its function's, not the run's (module documentation, # Refinement). The nearly magic probe of the
     /// test above with its line moved 30 half-widths over the tweezer's whole intensity, over a reach of 120 µK: the line
-    /// crosses resonance on the intensity's axis, and the refinement takes the grid its reads predict. Tabulated under the
-    /// work bound of a run and of one twice as long -- the bound of the pilot's middles, here 2^7 and 2^8 nodes, both above
-    /// the first grid -- the tables are the same, node for node and value for value, beyond the shorter run's bound, and
-    /// the table's error at the atoms across the reach is within its shares.
+    /// crosses resonance on the intensity's axis, and the refinement goes on to a grid whose read is within the shares (1537
+    /// nodes). Tabulated under the work bound of a run and of one twice as long -- the bound of the pilot's middles, here 2^12
+    /// and 2^13 nodes -- the tables are the same, node for node and value for value, and the table's error at the atoms
+    /// across the reach is within its shares; the ceiling of a run eight times as short, 2^9 nodes, ends the axis below it.
     #[test]
     fn a_table_s_nodes_do_not_grow_with_the_run() {
         let (request, light, kept, b) = nearly_magic(30.0);
         let model = Model::new(&request, &light, &kept).unwrap();
         let (trap, reach) = reach_of(&model, b, 4.0 * request.temperature_uk);
-        let (short, long) = (model.tabulate(&reach, 1 << 7), model.tabulate(&reach, 1 << 8));
+        let (short, long) = (model.tabulate(&reach, 1 << 12), model.tabulate(&reach, 1 << 13));
         assert_eq!(short.tables.len(), long.tables.len());
         for (a, z) in short.tables.iter().zip(&long.tables) {
             assert_eq!((a.layout.coordinates.clone(), a.table.axes()), (z.layout.coordinates.clone(), z.table.axes()), "the same axes and grids");
@@ -1219,7 +1213,8 @@ mod tests {
         let largest = model.table_reads(&short, &samples)[index].whole.iter().map(|r| r.population.max(r.temperature)).fold(0.0, f64::max);
         let (shown, temperature) = shares();
         eprintln!("the line moved 30 half-widths: {nodes} nodes under either bound; the table's largest read across the reach {largest:.2e}");
-        assert!(nodes > 1 << 7, "the refined grid is beyond the shorter run's bound: {nodes}");
+        let ceiling = model.tabulate(&reach, 1 << 9);
+        assert!(nodes > 1 << 9 && Table::nodes(ceiling.tables[index].table.axes()) <= 1 << 9, "the refined grid {nodes} beyond the ceiling 2^9, which ends it below");
         assert!(largest <= shown.min(temperature), "the table's read {largest:.3e} across the reach within its share {:.3e}", shown.min(temperature));
     }
 }
