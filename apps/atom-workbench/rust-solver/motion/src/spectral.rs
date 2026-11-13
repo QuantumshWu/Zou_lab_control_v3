@@ -174,6 +174,10 @@ pub struct Picture {
     /// Ĥ(−h) and Ĥ(+h), the caller's; after `prepare` the slopes the hops take: A and B of D₂ on the slow pairs in
     /// the eigenbasis, or of D as it is given where there is no decomposition.
     pub ends: [Mat; 2],
+    /// After `prepare` on a beating path, the generator's slope at the middle through the step's ends, (Ĥ(h) − Ĥ(−h))/2h,
+    /// as the caller's matrices are laid out: the first order of the parabola the hops take (the optical sector's along
+    /// the path, step.rs).
+    pub slope: Mat,
     /// A hop's exponent.
     matrix: Mat,
     /// Ĥ₀'s decomposition of its traceless part, and whether the state goes through it.
@@ -217,15 +221,14 @@ pub struct Picture {
     pivots: Vec<usize>,
     factored: f64,
     /// The path: m and ṁ at its three stops (6n) -- the launch's time `origin`, `centre` = origin + `spacing` and the
-    /// step's end, centre + spacing --, and the rounding of the hops' exponentials relative to the state's norm.
+    /// step's end, centre + spacing.
     path: Vec<C64>,
     origin: f64,
     centre: f64,
     spacing: f64,
-    bound: f64,
-    /// Without the decomposition: the frame's state at the last two stops (2n) and their times.
+    /// Without the decomposition: the frame's state at the launch and at the last two stops (3n) and their times.
     stops: Vec<C64>,
-    times: [f64; 2],
+    times: [f64; 3],
     /// max|λ_a − λ_b| over the slow pairs (rad/µs): what a hop's series is summed against.
     spread: f64,
     /// The bounds of Ĥ₀ less its scalar part (`linalg::bounds`), and the slopes' Frobenius norms as the hops take them:
@@ -235,9 +238,6 @@ pub struct Picture {
     /// max|λ_a* − λ_b| (rad/µs): the bandwidth of the forms ⟨x|·|x⟩ on a state propagated by Ĥ₀ -- their frequencies and
     /// decay rates; without the decomposition its bound 2(ρ + γ).
     pub bandwidth: f64,
-    /// The rounding of a state taken through the decomposition, relative to its norm (none without it: the
-    /// exponentials' are the strides').
-    pub rounding: f64,
     /// The complex multiply-adds counted so far (`decide::Work` counts them four real ones each).
     pub work: f64,
 }
@@ -249,6 +249,7 @@ impl Default for Picture {
             n: 0,
             base: none(),
             ends: [none(), none()],
+            slope: none(),
             matrix: none(),
             basis: linalg::Eigen::default(),
             through: false,
@@ -279,14 +280,12 @@ impl Default for Picture {
             origin: 0.0,
             centre: 0.0,
             spacing: 0.0,
-            bound: 0.0,
             stops: Vec::new(),
-            times: [0.0; 2],
+            times: [0.0; 3],
             spread: 0.0,
             bounds: [0.0; 2],
             slopes: [0.0; 2],
             bandwidth: 0.0,
-            rounding: 0.0,
             work: 0.0,
         }
     }
@@ -327,7 +326,7 @@ impl Picture {
     pub fn fit(&mut self, n: usize) {
         if self.n != n {
             self.n = n;
-            for m in [&mut self.base, &mut self.matrix].into_iter().chain(&mut self.ends) {
+            for m in [&mut self.base, &mut self.matrix, &mut self.slope].into_iter().chain(&mut self.ends) {
                 (m.rows, m.cols) = (n, n);
                 m.data.resize(n * n, C64::ZERO);
             }
@@ -343,7 +342,7 @@ impl Picture {
                 (&mut self.moments, 3 * size),
                 (&mut self.factors, size),
                 (&mut self.path, 6 * n),
-                (&mut self.stops, 2 * n),
+                (&mut self.stops, 3 * n),
             ] {
                 v.resize(length, C64::ZERO);
             }
@@ -381,6 +380,7 @@ impl Picture {
                 (*m, *p) = (a, b);
                 self.moving |= a != C64::ZERO || b != C64::ZERO;
             }
+            self.slope.data.copy_from_slice(&minus.data);
             self.work += (2 * n * n) as f64;
         }
         self.matrix.data.copy_from_slice(&self.base.data);
@@ -392,11 +392,9 @@ impl Picture {
         self.bounds = [rho, gamma];
         let tau = 2.0 * half.abs();
         let exponential = linalg::Chebyshev::plan(rho * tau, gamma * tau).rounding(n);
-        let mut rounding = 0.0;
         self.through = self.basis.decompose(&self.matrix) && {
             let decay = |pick: fn(f64, f64) -> f64, from: f64| self.basis.values.iter().map(|l| l.im).fold(from, pick);
-            rounding = self.basis.condition * UNIT_ROUNDOFF * (1.0 + tau * (decay(f64::max, f64::NEG_INFINITY) - decay(f64::min, f64::INFINITY)));
-            rounding <= exponential
+            self.basis.condition * UNIT_ROUNDOFF * (1.0 + tau * (decay(f64::max, f64::NEG_INFINITY) - decay(f64::min, f64::INFINITY))) <= exponential
         };
         let e = &self.basis;
         match self.through {
@@ -406,7 +404,6 @@ impl Picture {
                 }
                 // |λ_a* − λ_b| is the pair's whichever way round.
                 self.bandwidth = self.lambda.iter().enumerate().flat_map(|(a, first)| self.lambda[a..].iter().map(move |second| (first.conj() - *second).abs())).fold(0.0, f64::max);
-                self.rounding = rounding;
                 self.work += e.work;
                 lay(&e.vectors.data, n, &mut self.right);
                 lay(&e.inverse.data, n, &mut self.left);
@@ -427,7 +424,7 @@ impl Picture {
                     self.work += (4 * n * n * n) as f64;
                 }
             }
-            false => (self.bandwidth, self.rounding) = (2.0 * (rho + gamma), 0.0),
+            false => self.bandwidth = 2.0 * (rho + gamma),
         }
         if self.through && self.moving {
             self.follow();
@@ -650,15 +647,13 @@ impl Picture {
         self.work += (2 * n * n) as f64;
     }
 
-    /// One hop of m from the time u over the width w, either sign (module documentation): m ← e^{−iJ} m. Returns the
-    /// rounding of its exponential relative to the state's norm (`linalg::Chebyshev::rounding`).
-    fn hop(&mut self, m: &mut [C64], u: f64, w: f64) -> f64 {
+    /// One hop of m from the time u over the width w, either sign (module documentation): m ← e^{−iJ} m.
+    fn hop(&mut self, m: &mut [C64], u: f64, w: f64) {
         let n = self.n;
         self.exponent(u, w);
         self.turn(u - self.origin);
         let plan = linalg::exp_apply(&mut self.matrix, C64::new(0.0, -1.0), m, &mut self.vectors);
         self.work += (plan.parts * plan.terms * n * n) as f64;
-        plan.rounding(n)
     }
 
     /// ṁ = −i D̃₂(u) m at the time u, into `rate`.
@@ -676,10 +671,9 @@ impl Picture {
     }
 
     /// One stride of the frame's state without the decomposition, from the time u over the width w, either sign: CF4
-    /// of Ĥ₀ + uA + u²B (module documentation, # Towards a defective generator). Returns its exponentials' rounding.
-    fn stride(&mut self, state: &mut [C64], u: f64, w: f64) -> f64 {
+    /// of Ĥ₀ + uA + u²B (module documentation, # Towards a defective generator).
+    fn stride(&mut self, state: &mut [C64], u: f64, w: f64) {
         let n = self.n;
-        let mut bound = 0.0;
         // Ĥ at the stride's two Gauss nodes c = ½ ∓ √3/6, the weights ¼ ± √3/6.
         let r = 3.0_f64.sqrt() / 6.0;
         let (u1, u2) = (u + (0.5 - r) * w, u + (0.5 + r) * w);
@@ -692,22 +686,24 @@ impl Picture {
                 }
             }
             let plan = linalg::exp_apply(&mut self.matrix, C64::new(0.0, -w), state, &mut self.vectors);
-            bound += plan.rounding(n);
             self.work += ((3 + plan.parts * plan.terms) * n * n) as f64;
         }
-        bound
     }
 
     /// Launches the picture from the frame's state x at the time `from` of the step (from the middle; the step's
     /// start −h, or a later time the state changes at). Through the decomposition: m there, (1 + X(from))⁻¹R⁻¹x, and
     /// where the generator moves m's two hops -- to the middle of what is left of the step and to the step's end --
     /// with its rates at the three stops: the state is then known at every time from the launch on (`at`). The middle
-    /// stop's rate is none where it is the step's middle (D₂ is zero there). Without the decomposition: the first stop.
+    /// stop's rate is none where it is the step's middle (D₂ is zero there). Without the decomposition: the launch's
+    /// state, kept, and the first stop.
     pub fn launch(&mut self, from: f64, x: &[C64]) {
         let (n, h) = (self.n, self.half);
-        (self.origin, self.bound) = (from, 0.0);
+        self.origin = from;
         if !self.through {
-            self.again(x);
+            for stop in self.stops.chunks_exact_mut(n) {
+                stop.copy_from_slice(x);
+            }
+            self.times = [from; 3];
             return;
         }
         let mut path = std::mem::take(&mut self.path);
@@ -744,7 +740,7 @@ impl Picture {
             self.rate(from, start, rate);
             let (middle, rest) = rest.split_at_mut(n);
             middle.copy_from_slice(start);
-            self.bound += self.hop(middle, from, spacing);
+            self.hop(middle, from, spacing);
             let (rate, rest) = rest.split_at_mut(n);
             if centre == 0.0 {
                 rate.fill(C64::ZERO);
@@ -753,22 +749,10 @@ impl Picture {
             }
             let (end, rest) = rest.split_at_mut(n);
             end.copy_from_slice(middle);
-            self.bound += self.hop(end, centre, spacing);
+            self.hop(end, centre, spacing);
             self.rate(h, end, &mut rest[..n]);
         }
         self.path = path;
-    }
-
-    /// The path from its launch again, from the launch's state x: nothing through the decomposition (the state is
-    /// known at any time from the launch on), the first stop again without it -- the strides go from stop to stop,
-    /// ahead only.
-    pub fn again(&mut self, x: &[C64]) {
-        if !self.through {
-            let n = self.n;
-            self.stops[..n].copy_from_slice(x);
-            self.stops[n..].copy_from_slice(x);
-            self.times = [self.origin; 2];
-        }
     }
 
     /// The frame's state at the time u (from the middle; from the launch on) through the decomposition (module
@@ -810,33 +794,33 @@ impl Picture {
 
     /// The frame's state at the next stop, the time u from the middle, ahead of the last one on the path. Through
     /// the decomposition it is the state at that time (`at`); without it the stride from the last stop, which stays
-    /// kept for `between`. Returns the rounding of the exponentials behind it relative to the state's norm.
-    pub fn advance(&mut self, u: f64, x: &mut [C64]) -> f64 {
+    /// kept for `between`.
+    pub fn advance(&mut self, u: f64, x: &mut [C64]) {
         let n = self.n;
         if self.through {
-            self.at(u, x);
-            return self.bound;
+            return self.at(u, x);
         }
         let mut stops = std::mem::take(&mut self.stops);
-        let (before, now) = stops.split_at_mut(n);
+        let (before, now) = stops[n..].split_at_mut(n);
         before.copy_from_slice(now);
-        let from = self.times[1];
-        let bound = self.stride(now, from, u - from);
+        let from = self.times[2];
+        self.stride(now, from, u - from);
         x.copy_from_slice(now);
         self.stops = stops;
-        self.times = [from, u];
-        bound
+        self.times = [self.origin, from, u];
     }
 
-    /// The frame's state at a time u between the last two stops: the state there through the decomposition, the
-    /// stride from the earlier stop without it.
+    /// The frame's state at a time u after the launch: the state there through the decomposition; without it the
+    /// stride ahead from the latest state kept at or before u -- the last stop, the one before it, or the launch's
+    /// (a stride ahead, as the flow goes: back from a later stop it would raise a decay's rounding by the decay).
     pub fn between(&mut self, u: f64, x: &mut [C64]) {
         let n = self.n;
         if self.through {
             return self.at(u, x);
         }
-        x.copy_from_slice(&self.stops[..n]);
-        let from = self.times[0];
+        let kept = (0..3).rev().find(|&k| (u - self.times[k]) * self.half >= 0.0).unwrap_or(0);
+        x.copy_from_slice(&self.stops[kept * n..(kept + 1) * n]);
+        let from = self.times[kept];
         self.stride(x, from, u - from);
     }
 

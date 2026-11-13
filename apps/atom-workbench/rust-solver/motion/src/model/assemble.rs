@@ -337,17 +337,15 @@ impl Laid {
     }
 }
 
-/// One member of a photon class at a point (photon.rs): its source, its field component (None: 1), whether its jumps take the
+/// One member of a photon class at a point (photon.rs): its field component (None: 1), whether its jumps take the
 /// Doppler partner, its relative beat's value in a merged class (rad/µs), and its entries (axis a, landing place, source place,
 /// where its jump and its partner's lie among a point's values and constants). And the same jumps as one matrix (module
 /// documentation, # The jumps' matrices): the source places that hold an entry (`columns`) and where its columns lie
 /// (`at`) -- among a point's jumps where any of them is a near form (`near`; its partner's matrix after its own), else
 /// among the plan's: a carrier's member whose jumps are all its bare drives' is a constant one, its partner nothing. An
-/// explicit state's member is not `folded`, and `decay` is its rate into the class over its population, Σ |C_a[b, e]|²
-/// of its entries.
+/// explicit state's member is not `folded`.
 #[derive(Clone, Debug)]
 pub(crate) struct MemberPlan {
-    pub(crate) source: usize,
     pub(crate) scalar: Option<usize>,
     pub(crate) doppler: bool,
     pub(crate) phase: f64,
@@ -356,7 +354,6 @@ pub(crate) struct MemberPlan {
     pub(crate) near: bool,
     pub(crate) columns: Vec<usize>,
     pub(crate) at: usize,
-    pub(crate) decay: f64,
 }
 
 /// One photon class of the cluster under the plan's lights (photon.rs `Class`): its landing cluster, its wave number, the
@@ -1150,7 +1147,6 @@ impl<'a> Builder<'a> {
                         let at = values.len();
                         values.resize(at + if varies { 2 * matrix } else { matrix }, 0.0);
                         let folded = !matches!(model.sources[source].origin, Origin::Explicit { .. });
-                        let mut decay = 0.0;
                         for &(a, bp, sp, first, second) in &entries {
                             let column = columns.iter().position(|&x| x == sp).expect("an entry's column");
                             let own = at + laid(a * states + bp, column, columns.len());
@@ -1166,11 +1162,8 @@ impl<'a> Builder<'a> {
                                 values[slot] += constant.re;
                                 values[slot + LANES] += constant.im;
                             }
-                            if !folded {
-                                decay += constants[first - len].norm_sqr();
-                            }
                         }
-                        MemberPlan { source, scalar, doppler, phase, entries, folded, near: varies, columns, at, decay }
+                        MemberPlan { scalar, doppler, phase, entries, folded, near: varies, columns, at }
                     })
                     .collect();
                 ClassPlan { landing, wave_number, absorbed, members, states, rows }
@@ -1225,6 +1218,66 @@ impl Plan {
         let mut plan = b.finish();
         plan.fourth = fourth.and_then(|frequency| Fourth::new(model, &plan, frequency));
         plan
+    }
+    /// The counts at a node (`Middle::work`): of the generator, and of the force's form with its values' slopes along
+    /// `directions` directions (a table's axes), twice; the fourth order's matrix and its gradient's forms with them.
+    pub(crate) fn costs(&self, directions: usize) -> [f64; 3] {
+        let (matrix, gradient) = self.fourth.as_ref().map_or((0.0, 0.0), |fourth| ((fourth.n * fourth.n) as f64, (3 * fourth.n * fourth.n) as f64));
+        let form = self.node[1] + directions as f64 * self.node[2] + gradient;
+        [self.node[0] + matrix, form, form]
+    }
+    /// The counted complex multiply-adds of a point's near forms from a table on `axes` axes (tabulate.rs
+    /// `Model::near_point`), the coordinates' apart: the Hermitian forms to first order, the jumps to order 0.
+    pub(crate) fn near_read(&self, axes: usize) -> f64 {
+        super::tabulate::read_work(axes, 1, 2 * self.near.hermitian().len()) + super::tabulate::read_work(axes, 0, 2 * self.near.jumping().len())
+    }
+    /// The counted complex multiply-adds of a middle at a point, its near forms from a table on `axes` axes whose
+    /// coordinates' values there count `place` (`Model::middle`): the forms' interpolation, the values made of them, and
+    /// the fourth order's part with its matrices made at the point already (`Model::quartic`: a step's scattering reads
+    /// the same matrices, and `Run`'s middle at the focus finds them made by its scattering).
+    pub(crate) fn middle_work(&self, axes: usize, place: f64) -> f64 {
+        let near = if self.near.len() == 0 { 0.0 } else { place + self.near_read(axes) + self.values };
+        near + self.fourth.as_ref().map_or(0.0, |fourth| self.site_work(fourth))
+    }
+    /// The counted complex multiply-adds of the fourth order's matrices at a point (`Model::quartic_made`) beside their
+    /// forms' reads, on `directions` directions: the frequency's shift forms with their slopes and gradients summed by
+    /// the components (a constant part's subtracted), X's (and L's) pair forms by their fields, and the twelve matrices
+    /// to the lab axes.
+    pub(crate) fn quartic_work(&self, fourth: &Fourth, directions: usize) -> f64 {
+        let own = |s: Option<usize>| s.is_some_and(|s| self.scalars[s].frequency == fourth.frequency);
+        let summed: usize = self
+            .form
+            .iter()
+            .filter(|term| term.near && self.tones[term.tone] == 0.0 && own(self.blocks[term.block].left) && own(self.blocks[term.block].right))
+            .map(|term| term.len * (4 + directions + if term.flag == PLAIN { 4 } else { 0 }))
+            .sum();
+        let size = fourth.n * fourth.n;
+        (summed + fourth.entries.len() * self.near.fourth * (4 + directions) + 12 * size * (1 + directions)) as f64
+    }
+    /// The counted complex multiply-adds of the fourth order's matrices made on a site of their own placed on a table of
+    /// `axes` axes, whose coordinates there count `place` (`Model::quartic_made`, not laid): the point's near forms
+    /// read and their values laid, the X (and L) forms' read with their slopes, and the matrices (`quartic_work`).
+    pub(crate) fn quartic_made_work(&self, fourth: &Fourth, axes: usize, place: f64) -> f64 {
+        place + self.near_read(axes) + self.values + self.quartic_read(axes) + self.quartic_work(fourth, axes)
+    }
+    /// The counted complex multiply-adds of the fourth order's X (and L) forms read from a table on `axes` axes with their
+    /// slopes (`Model::quartic_made`).
+    pub(crate) fn quartic_read(&self, axes: usize) -> f64 {
+        super::tabulate::read_work(axes, 1, 2 * self.near.fourth * self.near.pairs.len())
+    }
+    /// The counted complex multiply-adds of the fourth order's part of a middle (`Model::fourth_site`) beside its
+    /// matrices: the products of H⁽⁴⁾ and its gradient (one where the folded states share one linewidth, two else, the
+    /// gradient's twice) and of the decay's change, the generator's terms at rest summed, and the decays and B.
+    pub(crate) fn site_work(&self, fourth: &Fourth) -> f64 {
+        let (n, size) = (fourth.n, fourth.n * fourth.n);
+        let products = if fourth.uniform.is_some() { 7 } else { 14 };
+        let summed: usize = self.generator.iter().filter(|term| self.tones[term.tone] == 0.0).map(|term| term.len).sum();
+        ((products + 6) * n * size + summed + 8 * size) as f64
+    }
+    /// The counted complex multiply-adds of the plan's field components from their beams to an order (photon.rs `sited`),
+    /// plain and Doppler-weighted.
+    pub(crate) fn fields_work(&self, order: usize) -> f64 {
+        self.scalars.iter().map(|s| (2 * jet::parts(order) * s.beams.len()) as f64).sum()
     }
     /// The constant part of a near form at `place` among a point's values: a jump entry's (`Plan::offsets`), zero of any
     /// other form.
@@ -1291,17 +1344,15 @@ impl Plan {
     /// is not a constant: none of it is here.
     pub(crate) fn fringes(&self, model: &Model, most: &[f64]) -> Vec<f64> {
         let (n, ground) = (self.states, model.clusters[self.cluster].ground);
-        let mut rows = vec![0.0; n];
+        // A component's beams: per beam its place among the plan's and whether it is conjugated, and c_l; of no component, 1.
+        let side = |component: Option<usize>| -> Vec<(Option<(usize, bool)>, C64)> {
+            component.map_or(vec![(None, C64::ONE)], |s| self.scalars[s].beams.iter().map(|&(at, c)| (Some((at, self.scalars[s].conjugate)), c)).collect())
+        };
+        // Per entry (x, y), tone and pair of beams: the coefficient of the pair's plane waves, every term's at that entry and
+        // tone summed -- the blocks of one frequency's basis components are one field's, whose sum the basis does not change.
+        let mut pairs: std::collections::BTreeMap<(usize, usize, usize, Option<(usize, bool)>, Option<(usize, bool)>), C64> = std::collections::BTreeMap::new();
         for term in self.form.iter().filter(|term| term.flag == PLAIN) {
             let block = &self.blocks[term.block];
-            // A component's beams: |c_l| max|a_l| and the wave vector it turns at.
-            let side = |component: Option<usize>| -> Vec<(f64, [f64; 3])> {
-                component.map_or(vec![(1.0, [0.0; 3])], |s| {
-                    let scalar = &self.scalars[s];
-                    let sign = if scalar.conjugate { -1.0 } else { 1.0 };
-                    scalar.beams.iter().map(|&(at, c)| (c.abs() * most[self.beams[at]], model.light.beams[self.beams[at]].wave_vector().map(|k| sign * k))).collect()
-                })
-            };
             let (left, right) = (side(block.left), side(block.right));
             let trap = [block.left, block.right].iter().all(|s| s.is_some_and(|s| self.scalars[s].frequency == model.light.trap));
             let (re, im) = self.values(term, &self.form_start);
@@ -1310,17 +1361,24 @@ impl Plan {
                 if (trap && x == y) || (x < ground) != (y < ground) {
                     continue;
                 }
-                let mut turned = 0.0;
-                for (a, k) in &left {
-                    for (b, q) in &right {
-                        let wave: [f64; 3] = std::array::from_fn(|j| k[j] + q[j] - (self.waves[x][j] - self.waves[y][j]));
-                        turned += a * b * dot3(wave, wave);
+                let value = C64::new(*re, *im) * term.weight;
+                for &(l, a) in &left {
+                    for &(r, b) in &right {
+                        *pairs.entry((x, y, term.tone, l, r)).or_insert(C64::ZERO) += value * a * b;
                     }
                 }
-                let half = 0.5 * term.weight * re.hypot(*im) * turned;
-                rows[x] += half;
-                rows[y] += half;
             }
+        }
+        // A beam's wave vector as its product takes it, and its largest modulus.
+        let wave = |beam: Option<(usize, bool)>| beam.map_or([0.0; 3], |(at, conjugate)| model.light.beams[self.beams[at]].wave_vector().map(|k| if conjugate { -k } else { k }));
+        let modulus = |beam: Option<(usize, bool)>| beam.map_or(1.0, |(at, _)| most[self.beams[at]]);
+        let mut rows = vec![0.0; n];
+        for ((x, y, _, l, r), c) in pairs {
+            let (k, q) = (wave(l), wave(r));
+            let turned: [f64; 3] = std::array::from_fn(|j| k[j] + q[j] - (self.waves[x][j] - self.waves[y][j]));
+            let half = 0.5 * c.abs() * modulus(l) * modulus(r) * dot3(turned, turned);
+            rows[x] += half;
+            rows[y] += half;
         }
         rows
     }
@@ -1428,13 +1486,6 @@ pub(crate) struct Site {
     /// plan's classes and their rates.
     pub(crate) emitting: Vec<usize>,
     pub(crate) rates: Vec<f64>,
-    /// What an explicit state's part of the photons reads (eliminate.rs `Model::explicit_response`): the carriers'
-    /// dressings and the levels' energies at the point to first order (eliminate.rs `Model::far_energies`); and the
-    /// explicit sources' responses of the state whose photons are in the making, each made once (photon.rs
-    /// `Model::classes_on`).
-    pub(crate) dressing: Vec<bool>,
-    pub(crate) energies: Vec<Vec<f64>>,
-    pub(crate) answers: Vec<(usize, super::eliminate::Answer)>,
     /// What the readout reads (readout.rs `Model::readout_of`): a table's responses at the point (tabulate.rs
     /// `Model::near_responses`), the carriers' field components (eliminate.rs `Model::responses_each`), and its channels'
     /// responses, one after another, each row-major on the excited states and the cluster's ground places.
@@ -1811,7 +1862,6 @@ impl Model {
         lanes.clear();
         lanes.resize(4 * parts * 2 * padded, 0.0);
         let width = point.forms.len();
-        let mut summed = 0;
         for term in plan.form.iter().filter(|term| term.near && plan.tones[term.tone] == 0.0) {
             let block = &plan.blocks[term.block];
             if !own(block.left) || !own(block.right) {
@@ -1845,7 +1895,6 @@ impl Model {
                 let (real, imaginary) = point.slopes[f * width + term.at..f * width + term.at + 2 * term.len].split_at(term.len);
                 add(1 + f, c[0], real, imaginary);
             }
-            summed += term.len * (4 + dn + if start.is_some() { 4 } else { 0 });
         }
         // X, and L where it is not Γ X: Σ e_k'* e_k of the pairs' forms, as the shifts' sums are parted.
         let forms = plan.near.fourth;
@@ -1855,7 +1904,7 @@ impl Model {
         match (table, exact) {
             (Some(table), _) => {
                 table.table.read(&point.place.expect("a site placed on its table").0, 2 * first, None, values, Some(slopes));
-                *work += (4usize.pow(dn as u32) * (1 + dn) * 2 * count) as f64 / crate::decide::COMPLEX;
+                *work += plan.quartic_read(dn);
             }
             (None, Some(near)) => {
                 for e in 0..count {
@@ -1930,7 +1979,7 @@ impl Model {
                 }
             }
         }
-        *work += (summed + fourth.entries.len() * forms * parts + 12 * size * (1 + dn)) as f64;
+        *work += plan.quartic_work(fourth, dn);
     }
 
     /// The fourth order's part of a middle (module documentation, # The fourth order) into the point's `quartic`, from
@@ -1963,21 +2012,16 @@ impl Model {
             for (i, to) in left.iter_mut().enumerate() {
                 *to = x[i] * half - y[i];
             }
-            let mut products = 0;
             for p in 0..4 {
                 let out = &mut raw[part(near, p)];
                 product_onto(out, &left[part(near, p)], &near[..size], n, C64::ONE);
-                products += 1;
                 if p > 0 {
                     product_onto(out, &left[..size], &near[part(near, p)], n, C64::ONE);
-                    products += 1;
                 }
                 if fourth.uniform.is_none() {
                     product_onto(out, &near[part(near, p)], &x[..size], n, C64::real(-0.5));
-                    products += 1;
                     if p > 0 {
                         product_onto(out, &near[..size], &x[part(near, p)], n, C64::real(-0.5));
-                        products += 1;
                     }
                 }
                 for a in 0..n {
@@ -1997,7 +2041,6 @@ impl Model {
             }
             assert!(plan.scalars.len() <= scalars.len(), "a plan's field components");
             let side = |scalar: Option<usize>| scalar.map_or(C64::ONE, |s| scalars[s]);
-            let mut summed = 0;
             for term in plan.generator.iter().filter(|term| plan.tones[term.tone] == 0.0) {
                 let block = &plan.blocks[term.block];
                 let to = match term.flag {
@@ -2012,7 +2055,6 @@ impl Model {
                 for (k, place) in (term.first..(term.first + term.len).min(size)).enumerate() {
                     sums[to * size + place] += c * C64::new(real[k], imaginary[k]);
                 }
-                summed += term.len;
             }
             let (bend, rest) = rest.split_at_mut(size);
             let (decays, turned) = rest.split_at_mut(3 * size);
@@ -2052,7 +2094,7 @@ impl Model {
             for at in 0..size {
                 quartic[at] -= (changed[at] - decays[at]) * C64::new(0.0, 0.5);
             }
-            matrices + ((products + 6) * n * size + summed + 8 * size) as f64
+            matrices + plan.site_work(fourth)
         })
     }
 
@@ -2183,6 +2225,11 @@ struct Scratch {
     turned: Vec<[C64; 4]>,
     plain: Vec<[C64; 4]>,
     doppler: Vec<[C64; 4]>,
+    /// The scalars' derivatives along the path, where they are asked (`along`).
+    plain_slope: Vec<[C64; 4]>,
+    doppler_slope: Vec<[C64; 4]>,
+    /// The gradient's sums, per axis its real and its imaginary parts, then their slopes' (`gradient`).
+    gradients: Vec<f64>,
     phases: Vec<C64>,
     turns: Vec<C64>,
     weights: Vec<f64>,
@@ -2223,7 +2270,7 @@ impl crate::step::Middle for Middle<'_> {
     fn generator(&self, path: &Path, s: f64, h: &mut Mat) {
         let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
         let mut scratch = point.scratch.borrow_mut();
-        self.along(&point.amplitudes, path, Some(s), 1, &mut scratch);
+        self.along(&point.amplitudes, path, Some(s), 1, false, &mut scratch);
         let Scratch { plain, doppler, phases, turns, sum, .. } = &mut *scratch;
         sum.clear();
         sum.resize(2 * plan.padded, 0.0);
@@ -2272,22 +2319,142 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     /// photon.rs `Model::scattering_on` this middle's own site, at the path's momentum and the middle's time.
-    fn scattering(&self, path: &Path, psi: &[C64], populations: &[f64]) -> Scattering {
-        self.model.scattering_on(&self.plan, self.table, self.r, path.kappa, self.t, psi, Some(populations), &mut self.point.borrow_mut(), true).0
+    fn scattering(&self, path: &Path, psi: &[C64]) -> Scattering {
+        self.model.scattering_on(&self.plan, self.table, self.r, path.kappa, self.t, psi, &mut self.point.borrow_mut(), true).0
+    }
+
+    /// Ĝ_a(s) as matrices: the forms' own terms (`contract`), each where it lies -- a flag's values times the gradient
+    /// of its components' product, and its slopes along the point's directions times the product, at its tone's phase
+    /// and in its states' Doppler frames --, then the Hermitian part of their weighted sum (of a block and its adjoint the
+    /// form takes one twice: its Hermitian part is the pair's), and the fourth order's gradient. A term onto the three
+    /// axes' sums at once, their real and imaginary parts apart (`linalg::axpy`). Its slope along the path, where asked,
+    /// in the same pass: along the path every factor of a term is a plane wave's or a tone's phase e^{iωs} or a sum of
+    /// them, whose derivative is iω times each (`along`), a block's product by the product rule, the frames' turns
+    /// e^{−iK_x·v s} theirs; the fourth order is held along the path.
+    fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) {
+        let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
+        let mut scratch = point.scratch.borrow_mut();
+        let sloped = slope.is_some();
+        self.along(&point.amplitudes, path, Some(s), 4, sloped, &mut scratch);
+        let Scratch { plain, doppler, plain_slope, doppler_slope, gradients, phases, turns, .. } = &mut *scratch;
+        let padded = plan.padded;
+        gradients.clear();
+        gradients.resize(if sloped { 12 } else { 6 } * padded, 0.0);
+        let (sums, slopes) = gradients.split_at_mut(6 * padded);
+        let width = point.forms.len();
+        // A block's products of its two components with their gradients per Hermitian flag, and their slopes: made once
+        // for its terms.
+        let product = |l: &[C64; 4], r: &[C64; 4]| -> [C64; 4] { std::array::from_fn(|part| if part == 0 { l[0] * r[0] } else { l[part] * r[0] + l[0] * r[part] }) };
+        let none = [C64::ZERO; 4];
+        let mut of = (usize::MAX, [[C64::ZERO; 4]; 3], [[C64::ZERO; 4]; 3]);
+        for term in &plan.form {
+            if of.0 != term.block {
+                let block = &plan.blocks[term.block];
+                let (l, lw, r, rw) = (side(plain, block.left), side(doppler, block.left), side(plain, block.right), side(doppler, block.right));
+                let mut turning = [[C64::ZERO; 4]; 3];
+                if sloped {
+                    let along = |fields: &[[C64; 4]], scalar: Option<usize>| scalar.map_or(none, |s| fields[s]);
+                    let (l1, lw1, r1, rw1) = (along(plain_slope, block.left), along(doppler_slope, block.left), along(plain_slope, block.right), along(doppler_slope, block.right));
+                    let rule = |l: &[C64; 4], l1: &[C64; 4], r: &[C64; 4], r1: &[C64; 4]| -> [C64; 4] {
+                        let (a, b) = (product(l1, r), product(l, r1));
+                        std::array::from_fn(|part| a[part] + b[part])
+                    };
+                    turning = [rule(&l, &l1, &r, &r1), rule(&l, &l1, &rw, &rw1), rule(&lw, &lw1, &r, &r1)];
+                }
+                of = (term.block, [product(&l, &r), product(&l, &rw), product(&lw, &r)], turning);
+            }
+            let (real, imaginary) = plan.values(term, &point.forms);
+            let (c, phase) = (of.1[term.flag], phases[term.tone] * term.weight);
+            let span = term.first..term.first + term.len;
+            let onto = |sums: &mut [f64], a: usize, z: C64, real: &[f64], imaginary: &[f64]| {
+                let (re, im) = sums[2 * a * padded..(2 * a + 2) * padded].split_at_mut(padded);
+                axpy(z, real, imaginary, &mut re[span.clone()], &mut im[span.clone()]);
+            };
+            // d/ds of the tone's phase e^{iΩ(t + s)}: iΩ times it.
+            let turned = phase * C64::new(0.0, plan.tones[term.tone]);
+            for a in 0..3 {
+                onto(sums, a, c[1 + a] * phase, real, imaginary);
+                if sloped {
+                    onto(slopes, a, of.2[term.flag][1 + a] * phase + c[1 + a] * turned, real, imaginary);
+                }
+            }
+            for (f, direction) in point.directions.iter().enumerate().filter(|_| term.near) {
+                let (real, imaginary) = point.slopes[f * width + term.at..f * width + term.at + 2 * term.len].split_at(term.len);
+                let (value, along) = (c[0] * phase, of.2[term.flag][0] * phase + c[0] * turned);
+                for a in (0..3).filter(|&a| direction[a] != 0.0) {
+                    onto(sums, a, value * direction[a], real, imaginary);
+                    if sloped {
+                        onto(slopes, a, along * direction[a], real, imaginary);
+                    }
+                }
+            }
+        }
+        // The entry x ← y in the frames: `contract` turns ρ[y, x] by turns[x] turns[y]*, whose slope is i(K_y − K_x)·v
+        // times it.
+        let gauge = &path.rates.gauge;
+        let matrix = |sums: &[f64], a: usize, m: &mut Vec<C64>| {
+            m.clear();
+            m.extend((0..n * n).map(|place| C64::new(sums[2 * a * padded + place], sums[(2 * a + 1) * padded + place]) * turns[place / n] * turns[place % n].conj()));
+        };
+        for (a, m) in g.iter_mut().enumerate() {
+            matrix(sums, a, m);
+        }
+        if let Some(slope) = slope {
+            for (a, m) in slope.iter_mut().enumerate() {
+                matrix(slopes, a, m);
+                if path.turning {
+                    for (place, z) in m.iter_mut().enumerate() {
+                        *z += C64::new(0.0, gauge[place % n] - gauge[place / n]) * g[a][place];
+                    }
+                }
+                hermitian(m, n);
+            }
+        }
+        for (a, m) in g.iter_mut().enumerate() {
+            if plan.fourth.is_some() && point.quartic.len() >= 4 * n * n {
+                for (z, more) in m.iter_mut().zip(&point.quartic[(1 + a) * n * n..(2 + a) * n * n]) {
+                    *z += *more;
+                }
+            }
+            hermitian(m, n);
+        }
+    }
+
+    /// The cluster's optical sector on the path (optical.rs; step.rs, # The optical sector's noise): its ground states,
+    /// the least of its excited states' decay over two, and where it beats on the path the light pattern's fastest beat
+    /// there, the largest (k_l − k_m)·v over the plan's beams. None for a cluster without excited states.
+    fn optical(&self, path: &Path) -> Option<crate::step::Optical> {
+        let (model, plan) = (self.model, &*self.plan);
+        let c = &model.clusters[plan.cluster];
+        if c.ground == plan.states {
+            return None;
+        }
+        let rates = &path.rates.path;
+        let (most, least) = rates.iter().fold((f64::NEG_INFINITY, f64::INFINITY), |(most, least), x| (most.max(*x), least.min(*x)));
+        let beat = if !plan.still && most >= least { most - least } else { 0.0 };
+        let decay = c.states[c.ground..].iter().map(|&e| 0.5 * model.decay[(e - GROUND, e - GROUND)].re).fold(f64::INFINITY, f64::min);
+        Some(crate::step::Optical { ground: c.ground, decay, beat })
     }
 
     fn work(&self) -> [f64; 3] {
-        let node = self.plan.node;
-        // The fourth order's: its matrix at a node, its gradient's three forms.
-        let (matrix, gradient) = self.plan.fourth.as_ref().map_or((0.0, 0.0), |fourth| ((fourth.n * fourth.n) as f64, (3 * fourth.n * fourth.n) as f64));
-        let form = node[1] + self.point.borrow().directions.len() as f64 * node[2] + gradient;
-        [node[0] + matrix, form, form]
+        self.plan.costs(self.point.borrow().directions.len())
     }
 }
 
 /// A block's field component on one side (1 where it has none).
 fn side(fields: &[[C64; 4]], scalar: Option<usize>) -> [C64; 4] {
     scalar.map_or([C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO], |s| fields[s])
+}
+
+/// An n × n matrix (row by row) replaced by its Hermitian part.
+fn hermitian(m: &mut [C64], n: usize) {
+    for x in 0..n {
+        for y in x..n {
+            let z = (m[x * n + y] + m[y * n + x].conj()) * 0.5;
+            m[x * n + y] = z;
+            m[y * n + x] = z.conj();
+        }
+    }
 }
 
 impl Middle<'_> {
@@ -2312,7 +2479,7 @@ impl Middle<'_> {
     /// time s from the middle along a path (`on`) each beam's amplitude and gradient at the middle times its plane wave's
     /// phase over the path, e^{i k_l·v s}, with the tones' phases at that time and the Doppler frames' turns; at the fixed
     /// middle point (None) the middle's own, at its time.
-    fn along(&self, amplitudes: &[[C64; 4]], path: &Path, on: Option<f64>, parts: usize, scratch: &mut Scratch) {
+    fn along(&self, amplitudes: &[[C64; 4]], path: &Path, on: Option<f64>, parts: usize, sloped: bool, scratch: &mut Scratch) {
         let plan = &*self.plan;
         let s = on.unwrap_or(0.0);
         scratch.turned.clear();
@@ -2322,17 +2489,29 @@ impl Middle<'_> {
         }));
         scratch.plain.clear();
         scratch.doppler.clear();
+        scratch.plain_slope.clear();
+        scratch.doppler_slope.clear();
         for scalar in &plan.scalars {
-            let (mut plain, mut doppler) = ([C64::ZERO; 4], [C64::ZERO; 4]);
+            let (mut plain, mut doppler, mut plain_slope, mut doppler_slope) = ([C64::ZERO; 4], [C64::ZERO; 4], [C64::ZERO; 4], [C64::ZERO; 4]);
             for &(at, c) in &scalar.beams {
+                // Along the path a beam turns at its rate, e^{i rate s}, its conjugate the other way.
+                let turn = C64::new(0.0, if scalar.conjugate { -path.rates.path[at] } else { path.rates.path[at] });
                 for part in 0..parts {
                     let z = (if scalar.conjugate { scratch.turned[at][part].conj() } else { scratch.turned[at][part] }) * c;
                     plain[part] += z;
                     doppler[part] += z * path.rates.shifts[at];
+                    if sloped {
+                        plain_slope[part] += z * turn;
+                        doppler_slope[part] += z * turn * path.rates.shifts[at];
+                    }
                 }
             }
             scratch.plain.push(plain);
             scratch.doppler.push(doppler);
+            if sloped {
+                scratch.plain_slope.push(plain_slope);
+                scratch.doppler_slope.push(doppler_slope);
+            }
         }
         scratch.phases.clear();
         scratch.phases.extend(plan.tones.iter().map(|&omega| if omega == 0.0 { C64::ONE } else { C64::cis(omega * (self.t + s)) }));
@@ -2348,7 +2527,7 @@ impl Middle<'_> {
     fn contract(&self, path: &Path, on: Option<f64>, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
         let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
         let mut scratch = point.scratch.borrow_mut();
-        self.along(&point.amplitudes, path, on, 4, &mut scratch);
+        self.along(&point.amplitudes, path, on, 4, false, &mut scratch);
         let Scratch { plain, doppler, phases, turns, weights, sums, .. } = &mut *scratch;
         // ρ[y, x] in the Doppler frames along the path, laid out as the entries x ← y are.
         weights.clear();

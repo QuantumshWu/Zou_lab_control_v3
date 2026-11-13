@@ -208,7 +208,7 @@ fn a_table_is_the_elimination_to_its_interpolation_s_orders() {
     };
     let mut levels = vec![errors(&tables)];
     for _ in 0..2 {
-        tables.tables[index].table = model.halved(&tables.tables[index], 0, usize::MAX).unwrap();
+        tables.tables[index].table = model.halved(&tables.tables[index], 0);
         levels.push(errors(&tables));
     }
     eprintln!("value and force errors at three spacings: {levels:?}");

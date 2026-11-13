@@ -190,20 +190,10 @@ fn optical_pumping_lands_by_the_clebsch_gordan_weights() {
 }
 
 /// With carriers, kept drives and explicit states, the model's identities hold: ⟨ψ|i(H − H†)|ψ⟩ = Σ_φ Σ_a ‖J_{a,φ}ψ‖² (to the
-/// rounding of the parts' sum), the readout sums to one; and a transition kept and folded gives its photon the same absorption
-/// second moment (SPEC §1.6, one rule; the class's second moment's rate over its rate, `Photon::moments`, the kept state's
-/// population within its response's): the folded photon's Re⟨∇f|∇f⟩/‖f‖² is the explicit one's Re[∇ln σ*⊗∇ln σ], σ the
-/// response of the carrier's whole field at the atom either way -- a running wave's (R2_RECOIL's probe: ∇ln σ = ik − ∇δ/(δ −
-/// iΓ/2), M_zz = k²) and a standing wave's (R3_DOPPLER's two beams, a_+ = −a_−: ∇ln σ = k cot(kz) ẑ − ∇δ/(δ − iΓ/2), where the
-/// beams taken one by one would give k² whatever z).
-/// - Folded against kept at a momentum: they differ by the Doppler shift's second order, which the fold drops (its T2 is the
-///   first), (w/|δ − iΓ/2|)² of each beam's term over the field's least modulus (the standing wave's |sin kz|).
-/// - Kept against the response read from the kept model's own generator at rest: σ ∝ V/d, V = h[e,b] the whole field's
-///   coupling and d = h[e,e] − h[b,b] the line's complex detuning at the atom, its log-gradient by central differences
-///   (step h: truncation (kh)²/6 of k, rounding u/(kh)). The photon's denominator also holds the recoil shift w = ħk²/2m,
-///   which the generator's d does not: 2w/|d| of the level's part of the moment, the whole of it across the wave.
+/// rounding of the parts' sum), and the readout sums to one -- a transition folded and the same transition kept (an explicit
+/// state's absorbed momentum beside its mean is the optical sector's noise, model/optical.rs, and its fold gate is tested there).
 #[test]
-fn near_and_explicit_states_keep_the_identities_and_one_recoil_rule() {
+fn near_and_explicit_states_keep_the_identities() {
     for (name, id) in [("R2_RECOIL", "probe"), ("R3_DOPPLER", "cool-plus")] {
         a_kept_and_a_folded_drive(name, id);
     }
@@ -221,25 +211,6 @@ fn a_kept_and_a_folded_drive(name: &str, id: &str) {
     let kept = Model::new(&request, &light, &lifted.iter().cloned().chain([drive]).collect::<Vec<_>>()).unwrap();
     let cluster = kept.cluster_of(b);
     assert_eq!(kept.clusters()[cluster].states, vec![b, e], "the drive makes its excited state explicit");
-    let beams = &light.frequencies[probe].beams;
-    let k = request.beams[beams[0]].wave_number;
-    let half_width = width(&request, e) / 2.0;
-    // The probe's photons that leave the atom in |2,2⟩ at a point, per photon of the folded drive's rate there: the folded
-    // model's strongest class by far, its second moment's rate over its rate; and the kept model's class of the explicit
-    // state, the state's part of the second moment's rate -- its population beyond its drives' response's, so that the rate
-    // counts the response's own -- over the same rate.
-    let moments = |at: &Point| -> [[[f64; 3]; 3]; 2] {
-        let class = |model: &Model, psi: &[C64], by: &dyn Fn(&atom_motion::model::Photon) -> f64| {
-            let c = model.cluster_of(b);
-            let ph = model.photons(c, at, psi).into_iter().max_by(|x, y| by(x).total_cmp(&by(y))).unwrap();
-            assert_eq!((ph.landing, ph.explicit != [[0.0; 3]; 3]), (c, model.clusters()[c].states.len() > 1), "the probe's photon back into |2,2⟩");
-            ph
-        };
-        let own = class(&folded, &[C64::ONE], &|ph| ph.weight()).moments();
-        let explicit = class(&kept, &[C64::ONE, C64::new(0.0, 0.8)], &|ph| ph.explicit[0][0] + ph.explicit[1][1] + ph.explicit[2][2]).explicit;
-        [own.second, explicit].map(|second| second.map(|row| row.map(|x| x / own.weight)))
-    };
-    let apart = |x: &[[f64; 3]; 3], y: &[[f64; 3]; 3]| (0..9).map(|i| (x[i / 3][i % 3] - y[i / 3][i % 3]).abs() / x[i / 3][i / 3].abs().max(x[i % 3][i % 3].abs())).fold(0.0, f64::max);
     for r in [[0.1, 0.2, -0.3], [-0.4, 0.05, 0.25]] {
         let at = Point { r, kappa: [0.3, -0.2, 1.1], t: 0.37 };
         for (model, psi) in [(&folded, vec![C64::ONE]), (&kept, vec![C64::new(0.9, 0.1), C64::new(-0.2, 0.35)])] {
@@ -248,38 +219,9 @@ fn a_kept_and_a_folded_drive(name: &str, id: &str) {
             let rate = decay_rate(&h, &psi);
             let photons: f64 = model.photons(c, &at, &psi).iter().map(|ph| ph.amplitudes.iter().map(|u| u.iter().map(|z| z.norm_sqr()).sum::<f64>()).sum::<f64>()).sum::<f64>()
                 / psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
-            assert!((rate - photons).abs() <= 64.0 * f64::EPSILON * h.max_abs(), "hazard {rate} against the photons' {photons}");
+            assert!((rate - photons).abs() <= 64.0 * f64::EPSILON * h.max_abs(), "{name}: hazard {rate} against the photons' {photons}");
             let sum: f64 = model.readout(c, &at, &psi).iter().sum();
-            assert!((sum - 1.0).abs() <= 1e-12, "the populations sum to {sum}");
-        }
-        let least = if beams.len() == 1 { 1.0 } else { (k * r[2]).sin().abs() };
-        // Folded against kept.
-        let [m_folded, m_kept] = moments(&at);
-        let w = kept.hbar_over_mass() * (k * at.kappa.iter().map(|x| x * x).sum::<f64>().sqrt() + 0.5 * k * k);
-        let within = 4.0 * (w / half_width).powi(2) / least;
-        eprintln!("{name} at {r:?}: the two models' second moments {:.1e} apart (within {within:.1e}); M_zz/k² = {:.6}", apart(&m_folded, &m_kept), m_kept[2][2] / (k * k));
-        assert!(apart(&m_folded, &m_kept) <= within, "{name}: folded {m_folded:?} kept {m_kept:?}");
-        // Kept against its generator's response at rest.
-        let rest = Point { r, kappa: [0.0; 3], t: at.t };
-        let sigma = |r: [f64; 3]| {
-            let h = total(&kept, cluster, &Point { r, ..rest }, &kept.running());
-            h[(1, 0)] / (h[(1, 1)] - h[(0, 0)])
-        };
-        let step = 1e-5;
-        let g: [C64; 3] = std::array::from_fn(|i| {
-            let (mut up, mut down) = (r, r);
-            up[i] += step;
-            down[i] -= step;
-            (sigma(up) - sigma(down)) / sigma(r) * (0.5 / step)
-        });
-        let read: [[f64; 3]; 3] = std::array::from_fn(|i| std::array::from_fn(|j| (g[i].conj() * g[j]).re));
-        let m_rest = moments(&rest)[1];
-        let recoil = kept.hbar_over_mass() * 0.5 * k * k / half_width;
-        let within = (k * step).powi(2) + f64::EPSILON / (k * step) / least + 2.0 * recoil;
-        eprintln!("{name} at {r:?}: the kept photon's second moment {:.1e} from its generator's response (within {within:.1e})", apart(&read, &m_rest));
-        assert!(apart(&read, &m_rest) <= within, "{name}: the generator's {read:?} the photon's {m_rest:?}");
-        if beams.len() == 2 {
-            assert!((m_rest[2][2] / (k * k) - 1.0).abs() > 0.1, "{name}: a standing wave's M_zz is not its beams' k²: {}", m_rest[2][2] / (k * k));
+            assert!((sum - 1.0).abs() <= 1e-12, "{name}: the populations sum to {sum}");
         }
     }
 }

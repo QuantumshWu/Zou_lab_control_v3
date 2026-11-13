@@ -115,9 +115,9 @@ for j in range(N):
 print(f'A = {A}: {count} trajectories × {periods} periods; states {int(sums[1][3])}')
 for k, name in ((1, 'velocity quadrature'), (2, 'position quadrature')):
     eng, xe, xj, n = sums[k]
-    print('%s: exact R %.3f = local %.3f + slow %.3f | engine measured R %.3f ± %.3f (Brownian %.3f + Var %.3f)' % (name, exact[k]['rate'], exact[k]['local'], exact[k]['slow'], e[k]['var'] + e[k]['brownian'], e[k]['var_se'], e[k]['brownian'], e[k]['var']))
+    print('%s: exact R %.3f = local %.3f + slow %.3f | engine measured R %.3f ± %.3f' % (name, exact[k]['rate'], exact[k]['local'], exact[k]['slow'], e[k]['var'], e[k]['var_se']))
     print("   from the engine's states: E[r·X_E] = %+.3f; E[r·X_J] = %+.3f" % (xe / n, xj / n))
-    print('   exact − engine measured %+.3f against E[r·X_E] + E[r·X_J] = %+.3f' % (exact[k]['rate'] - e[k]['var'] - e[k]['brownian'], (xe + xj) / n))
+    print('   exact − engine measured %+.3f against E[r·X_E] + E[r·X_J] = %+.3f' % (exact[k]['rate'] - e[k]['var'], (xe + xj) / n))
 
 # the engine's mean state per phase against the master equation's (the unravelling's own check)
 print("largest |mean state − ρ| over the phases: %.4f (the states' sampling)" % max(x[1] for x in diag))

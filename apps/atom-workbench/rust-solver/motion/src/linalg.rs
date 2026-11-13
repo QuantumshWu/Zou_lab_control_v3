@@ -674,128 +674,9 @@ impl Eigen {
         let [q, y, r] = &mut self.columns;
         let [v, sums] = &mut self.reflection;
         h.copy_from_slice(&a.data);
-        let mut work = 0;
-        for (k, column) in q.chunks_exact_mut(n).enumerate() {
-            column.fill(C64::ZERO);
-            column[k] = C64::ONE;
-        }
-        // Householder reduction: H ← P H P, Q ← Q P, P = I − β v v† zeroing column k below its subdiagonal.
-        for k in 0..n.saturating_sub(2) {
-            let alpha = (k + 1..n).map(|i| h[i * n + k].norm_sqr()).sum::<f64>().sqrt();
-            if alpha == 0.0 {
-                continue;
-            }
-            let x0 = h[(k + 1) * n + k];
-            let phase = if x0 == C64::ZERO { C64::ONE } else { x0 / x0.abs() };
-            for i in 0..n {
-                v[i] = if i > k { h[i * n + k] } else { C64::ZERO };
-            }
-            v[k + 1] += phase * alpha;
-            let beta = 2.0 / (k + 1..n).map(|i| v[i].norm_sqr()).sum::<f64>();
-            // The two norms, the reflection on H's rows, and on H's and Q's columns: of n − k − 1 terms each.
-            work += (2 + 6 * n) * (n - k - 1);
-            // H ← H − v (β v†H): a column's sum over the rows below k, row after row.
-            sums.fill(C64::ZERO);
-            for (v, row) in v[k + 1..].iter().zip(h[(k + 1) * n..].chunks_exact(n)) {
-                for (s, z) in sums.iter_mut().zip(row) {
-                    *s += v.conj() * *z;
-                }
-            }
-            for s in sums.iter_mut() {
-                *s = *s * beta;
-            }
-            for (v, row) in v[k + 1..].iter().zip(h[(k + 1) * n..].chunks_exact_mut(n)) {
-                for (z, s) in row.iter_mut().zip(sums.iter()) {
-                    *z -= *v * *s;
-                }
-            }
-            // H ← H − (β H v) v†: a row's sum over the columns beyond k.
-            for row in h.chunks_exact_mut(n) {
-                let s = row[k + 1..].iter().zip(&v[k + 1..]).map(|(z, v)| *z * *v).sum::<C64>() * beta;
-                for (z, v) in row[k + 1..].iter_mut().zip(&v[k + 1..]) {
-                    *z -= s * v.conj();
-                }
-            }
-            // Q ← Q − (β Q v) v†: a row's sum over Q's columns beyond k, column after column.
-            sums.fill(C64::ZERO);
-            for (v, column) in v[k + 1..].iter().zip(q[(k + 1) * n..].chunks_exact(n)) {
-                for (s, z) in sums.iter_mut().zip(column) {
-                    *s += *z * *v;
-                }
-            }
-            for s in sums.iter_mut() {
-                *s = *s * beta;
-            }
-            for (v, column) in v[k + 1..].iter().zip(q[(k + 1) * n..].chunks_exact_mut(n)) {
-                for (z, s) in column.iter_mut().zip(sums.iter()) {
-                    *z -= *s * v.conj();
-                }
-            }
-            for i in k + 2..n {
-                h[i * n + k] = C64::ZERO;
-            }
-        }
-        // The QR iteration on the active block [lo, hi), the rotations accumulated into Q.
-        let scale = h.iter().map(|z| z.abs1()).fold(0.0, f64::max).max(f64::MIN_POSITIVE);
-        let most = 30 * n.max(10);
-        let (mut hi, mut iterations) = (n, 0);
-        while hi > 1 {
-            let mut lo = hi - 1;
-            while lo > 0 {
-                let s = h[(lo - 1) * n + lo - 1].abs1() + h[lo * n + lo].abs1();
-                if h[lo * n + lo - 1].abs1() <= f64::EPSILON * if s > 0.0 { s } else { scale } {
-                    h[lo * n + lo - 1] = C64::ZERO;
-                    break;
-                }
-                lo -= 1;
-            }
-            if lo == hi - 1 {
-                hi -= 1;
-                iterations = 0;
-                continue;
-            }
-            iterations += 1;
-            if iterations > most {
-                return false;
-            }
-            // The Wilkinson shift: the eigenvalue of the trailing 2 × 2 block nearer its corner.
-            let (p, pq, qp, s) = (h[(hi - 2) * n + hi - 2], h[(hi - 2) * n + hi - 1], h[(hi - 1) * n + hi - 2], h[(hi - 1) * n + hi - 1]);
-            let mut mu = if iterations % 10 == 0 {
-                s + C64::real(qp.abs1())
-            } else {
-                let half = (p - s) * 0.5;
-                let d = (half * half + pq * qp).sqrt();
-                let (m1, m2) = (s + half - d, s + half + d);
-                if (m1 - s).abs1() <= (m2 - s).abs1() {
-                    m1
-                } else {
-                    m2
-                }
-            };
-            if !mu.is_finite() {
-                mu = s;
-            }
-            // The bulge chased down the block: rows by G, columns by G†.
-            for k in lo..hi - 1 {
-                let from = if k == lo { lo } else { k - 1 };
-                let (x, y) = if k == lo { (h[k * n + k] - mu, h[(k + 1) * n + k]) } else { (h[k * n + k - 1], h[(k + 1) * n + k - 1]) };
-                let (c, sn) = givens(x, y);
-                // Two products an entry of each rotated pair: H's rows from the bulge on, H's columns above it, Q's columns.
-                work += 4 * ((n - from) + (k + 3).min(hi) + n);
-                let (upper, lower) = h[k * n..(k + 2) * n].split_at_mut(n);
-                rotate(&mut upper[from..], &mut lower[from..], c, sn);
-                for row in h.chunks_exact_mut(n).take((k + 3).min(hi)) {
-                    let (u, w) = (row[k], row[k + 1]);
-                    row[k] = u * c + w * sn.conj();
-                    row[k + 1] = w * c - u * sn;
-                }
-                let (first, second) = q[k * n..(k + 2) * n].split_at_mut(n);
-                rotate(first, second, c, sn.conj());
-                if k > lo {
-                    h[(k + 1) * n + k - 1] = C64::ZERO;
-                }
-            }
-        }
+        let Some((mut work, scale)) = schur(h, q, v, sums, n) else {
+            return false;
+        };
         // T's eigenvectors: y_kk = 1, upwards by back substitution.
         for (i, value) in self.values.iter_mut().enumerate() {
             *value = h[i * n + i];
@@ -851,6 +732,137 @@ impl Eigen {
         self.work = work as f64;
         self.condition.is_finite()
     }
+}
+
+/// The complex Schur form of the n × n matrix in `h` (row by row), in its place: Householder reduction to Hessenberg
+/// form and the single-shift implicit QR iteration (`Eigen::decompose`), T = Q†AQ upper triangular in `h` and Q in `q`
+/// column by column (a column's numbers side by side); `v` and `sums` are n numbers of scratch. Its complex multiply-adds
+/// and the Hessenberg form's largest entry (the deflation's scale); None where the QR iteration does not converge within
+/// LAPACK zlahqr's 30·max(10, n) iterations per eigenvalue.
+pub(crate) fn schur(h: &mut [C64], q: &mut [C64], v: &mut [C64], sums: &mut [C64], n: usize) -> Option<(usize, f64)> {
+    let mut work = 0;
+    for (k, column) in q.chunks_exact_mut(n).enumerate() {
+        column.fill(C64::ZERO);
+        column[k] = C64::ONE;
+    }
+    // Householder reduction: H ← P H P, Q ← Q P, P = I − β v v† zeroing column k below its subdiagonal.
+    for k in 0..n.saturating_sub(2) {
+        let alpha = (k + 1..n).map(|i| h[i * n + k].norm_sqr()).sum::<f64>().sqrt();
+        if alpha == 0.0 {
+            continue;
+        }
+        let x0 = h[(k + 1) * n + k];
+        let phase = if x0 == C64::ZERO { C64::ONE } else { x0 / x0.abs() };
+        for i in 0..n {
+            v[i] = if i > k { h[i * n + k] } else { C64::ZERO };
+        }
+        v[k + 1] += phase * alpha;
+        let beta = 2.0 / (k + 1..n).map(|i| v[i].norm_sqr()).sum::<f64>();
+        // The two norms, the reflection on H's rows, and on H's and Q's columns: of n − k − 1 terms each.
+        work += (2 + 6 * n) * (n - k - 1);
+        // H ← H − v (β v†H): a column's sum over the rows below k, row after row.
+        sums.fill(C64::ZERO);
+        for (v, row) in v[k + 1..].iter().zip(h[(k + 1) * n..].chunks_exact(n)) {
+            for (s, z) in sums.iter_mut().zip(row) {
+                *s += v.conj() * *z;
+            }
+        }
+        for s in sums.iter_mut() {
+            *s = *s * beta;
+        }
+        for (v, row) in v[k + 1..].iter().zip(h[(k + 1) * n..].chunks_exact_mut(n)) {
+            for (z, s) in row.iter_mut().zip(sums.iter()) {
+                *z -= *v * *s;
+            }
+        }
+        // H ← H − (β H v) v†: a row's sum over the columns beyond k.
+        for row in h.chunks_exact_mut(n) {
+            let s = row[k + 1..].iter().zip(&v[k + 1..]).map(|(z, v)| *z * *v).sum::<C64>() * beta;
+            for (z, v) in row[k + 1..].iter_mut().zip(&v[k + 1..]) {
+                *z -= s * v.conj();
+            }
+        }
+        // Q ← Q − (β Q v) v†: a row's sum over Q's columns beyond k, column after column.
+        sums.fill(C64::ZERO);
+        for (v, column) in v[k + 1..].iter().zip(q[(k + 1) * n..].chunks_exact(n)) {
+            for (s, z) in sums.iter_mut().zip(column) {
+                *s += *z * *v;
+            }
+        }
+        for s in sums.iter_mut() {
+            *s = *s * beta;
+        }
+        for (v, column) in v[k + 1..].iter().zip(q[(k + 1) * n..].chunks_exact_mut(n)) {
+            for (z, s) in column.iter_mut().zip(sums.iter()) {
+                *z -= *s * v.conj();
+            }
+        }
+        for i in k + 2..n {
+            h[i * n + k] = C64::ZERO;
+        }
+    }
+    // The QR iteration on the active block [lo, hi), the rotations accumulated into Q.
+    let scale = h.iter().map(|z| z.abs1()).fold(0.0, f64::max).max(f64::MIN_POSITIVE);
+    let most = 30 * n.max(10);
+    let (mut hi, mut iterations) = (n, 0);
+    while hi > 1 {
+        let mut lo = hi - 1;
+        while lo > 0 {
+            let s = h[(lo - 1) * n + lo - 1].abs1() + h[lo * n + lo].abs1();
+            if h[lo * n + lo - 1].abs1() <= f64::EPSILON * if s > 0.0 { s } else { scale } {
+                h[lo * n + lo - 1] = C64::ZERO;
+                break;
+            }
+            lo -= 1;
+        }
+        if lo == hi - 1 {
+            hi -= 1;
+            iterations = 0;
+            continue;
+        }
+        iterations += 1;
+        if iterations > most {
+            return None;
+        }
+        // The Wilkinson shift: the eigenvalue of the trailing 2 × 2 block nearer its corner.
+        let (p, pq, qp, s) = (h[(hi - 2) * n + hi - 2], h[(hi - 2) * n + hi - 1], h[(hi - 1) * n + hi - 2], h[(hi - 1) * n + hi - 1]);
+        let mut mu = if iterations % 10 == 0 {
+            s + C64::real(qp.abs1())
+        } else {
+            let half = (p - s) * 0.5;
+            let d = (half * half + pq * qp).sqrt();
+            let (m1, m2) = (s + half - d, s + half + d);
+            if (m1 - s).abs1() <= (m2 - s).abs1() {
+                m1
+            } else {
+                m2
+            }
+        };
+        if !mu.is_finite() {
+            mu = s;
+        }
+        // The bulge chased down the block: rows by G, columns by G†.
+        for k in lo..hi - 1 {
+            let from = if k == lo { lo } else { k - 1 };
+            let (x, y) = if k == lo { (h[k * n + k] - mu, h[(k + 1) * n + k]) } else { (h[k * n + k - 1], h[(k + 1) * n + k - 1]) };
+            let (c, sn) = givens(x, y);
+            // Two products an entry of each rotated pair: H's rows from the bulge on, H's columns above it, Q's columns.
+            work += 4 * ((n - from) + (k + 3).min(hi) + n);
+            let (upper, lower) = h[k * n..(k + 2) * n].split_at_mut(n);
+            rotate(&mut upper[from..], &mut lower[from..], c, sn);
+            for row in h.chunks_exact_mut(n).take((k + 3).min(hi)) {
+                let (u, w) = (row[k], row[k + 1]);
+                row[k] = u * c + w * sn.conj();
+                row[k + 1] = w * c - u * sn;
+            }
+            let (first, second) = q[k * n..(k + 2) * n].split_at_mut(n);
+            rotate(first, second, c, sn.conj());
+            if k > lo {
+                h[(k + 1) * n + k - 1] = C64::ZERO;
+            }
+        }
+    }
+    Some((work, scale))
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

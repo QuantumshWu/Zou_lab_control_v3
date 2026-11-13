@@ -17,13 +17,16 @@ import {meanInputsKey,trajectoryInputsKey} from '../dist/js/atom-workbench/src/d
 import {plannedSolve} from '../dist/js/atom-workbench/src/solve-plan.js';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
-import {ledgerRows} from '../dist/js/atom-workbench/src/accuracy.js';
+import {exceedsNote,ledgerRows,outsideRuns,partialSentence,resultTolerance} from '../dist/js/atom-workbench/src/accuracy.js';
+import {definitionNotes,modelNotes} from '../dist/js/atom-workbench/src/model-notes.js';
+import {POPULATION_TOLERANCE} from '../dist/js/atom-workbench/src/types.js';
+import {SEMICLASSICAL_POPULATION_TARGET} from '../dist/js/atom-workbench/src/solver-types.js';
 import {typedDigits} from '../dist/js/atom-workbench/src/unit-input.js';
 import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-workbench/src/solver-protocol.js';
 import {prepareNativeSolve} from '../scripts/native-protocol.mjs';
 import {populationChart,populationColor} from '../dist/js/atom-workbench/src/population-chart.js';
 import {LOSS_CURVE,recommendedCurves,withPopulationGroups} from '../dist/js/atom-workbench/src/population-selection.js';
-import {TOTAL_INK,TOTAL_WIDTH,lineReading,motionSeries,seriesChart} from '../dist/js/atom-workbench/src/motion-chart.js';
+import {TEMPERATURE_WINDOW,TOTAL_INK,TOTAL_WIDTH,lineReading,motionSeries,seriesChart} from '../dist/js/atom-workbench/src/motion-chart.js';
 import {MOTION_DIAGNOSTICS,motionBlock,motionResult} from './native-result.mjs';
 import {spherical} from './directions.mjs';
 import {readFileSync,readdirSync} from 'node:fs';
@@ -276,6 +279,72 @@ test('a motion result is read strictly: the 3D block with the total temperature,
   const scene=pgc(),states=buildFullMasterModel(scene,scene.dynamics).states;
   const unasked=motionResult({states,initialIndex:states.findIndex(s=>s.id===scene.dynamics.initialStateId),timesUs:[0,1,2]});unasked.populationAccuracy.requestedTolerance=.01;
   assert.throws(()=>normalizeDynamicsResult(unasked,scene),/运动结果/);
+});
+
+test('a motion trajectory is tested against its own target, 5 %, and every sentence about its samples names that target',()=>{
+  // A result's sample errors with the status the adapter writes for them (motion_adapter.rs).
+  const errors=values=>d=>{const a=d.populationAccuracy,worst=Math.max(...values),partial=worst>a.requestedTolerance;
+    Object.assign(a,{sampleErrors:values,estimatedMaximumError:worst,status:partial?'estimated-partial':'estimated-converged'});if(partial)a.reason='test budget';else delete a.reason;};
+  const initial=pgc().dynamics.initialStateId,chart=r=>populationChart(r,[initial],{[initial]:'初态'},{showTotalExcited:false});
+  // 3 %: beyond the population core's ε, within the motion's own target -- nothing marked, nothing said.
+  const within=readMotion(errors([0,.03,.01])),tolerance=resultTolerance(within);
+  assert.equal(tolerance,SEMICLASSICAL_POPULATION_TARGET);assert.notEqual(tolerance,POPULATION_TOLERANCE);
+  assert.deepEqual(outsideRuns(within.populationAccuracy.sampleErrors,tolerance),[]);
+  assert.equal(partialSentence(within.timesUs,within.populationAccuracy.sampleErrors,'ms',tolerance),'');
+  assert.doesNotMatch(chart(within),/accuracy-band|超过/);
+  // 6.2 %: marked, and the words name the 5 % it was tested against, never ε.
+  const over=readMotion(errors([0,.062,.01])),limit=resultTolerance(over);
+  assert.equal(partialSentence(over.timesUs,over.populationAccuracy.sampleErrors,'ms',limit),'t ≤ 5 ms 估计误差最大 6.2%（超过 5%），其余时刻 ≤ 5%');
+  assert.equal(exceedsNote(.062,limit),'（估计误差 6.2%，超过 5%）');assert.equal(exceedsNote(null,limit),'（估计误差 未知，超过 5%）');
+  assert.match(chart(over),/超过 5%/);assert.doesNotMatch(chart(over),/超过 1%/);
+  // A trajectory of the population core is tested against ε.
+  assert.equal(resultTolerance({populationAccuracy:{requestedTolerance:POPULATION_TOLERANCE}}),POPULATION_TOLERANCE);
+  // The app's own sentences (app.ts: the status line, a checkpoint's words, the levels chart's notes) take a trajectory's
+  // tolerance from the result: ε is written only in what is said of p̄(T), the population core's mean.
+  const app=readFileSync(new URL('../src/app.ts',import.meta.url),'utf8');
+  const naming=app.split('\n').filter(line=>/(errorPercent|small)\(POPULATION_TOLERANCE\)/.test(line));
+  assert.ok(naming.length>0&&naming.every(line=>/mean/.test(line)),naming.join('\n'));
+});
+
+test('the notes and the chart titles say what the engine computes: the loss, the trap light, T\'s window, n̄, the initial ensemble, the statistics, the target on T',()=>{
+  const notes=definitionNotes()+modelNotes(),solver=new URL('../rust-solver/motion/src/',import.meta.url),source=path=>readFileSync(new URL(path,solver),'utf8');
+  // The loss (model.rs `Model::lost`): first outside the trap light's region AND its loss energy above the far value; an
+  // atom outside the region but bound there is held. The region's words are the engine's (units.rs REGION_INTENSITY).
+  assert.match(source('model.rs'),/self\.light\.outside\(at\.r\)\s*&&\s*self\.energy_with\([^)]*\)\s*>\s*self\.asymptote\(/);
+  assert.match(source('units.rs'),/pub const REGION_INTENSITY: f64 = 1\.0 \/ 20\.0;/);
+  const region=/model-notes\.ts: "([^"]+)"/.exec(source('units.rs'))?.[1];
+  assert.ok(region&&region.includes('1/20')&&notes.includes(region),region);
+  assert.match(notes,/1\/20）[^。]*能量[^。]*高于远处的值[^。]*区域之外仍被束缚的原子不算丢失/);
+  // The trap light is the whole field of the tweezer's frequency (field.rs `Light::outside`, SPEC §1.3).
+  assert.match(source('field.rs'),/self\.frequencies\[self\.trap\]\.beams\.iter\(\)\.all/);
+  assert.match(notes,/“设为光镊”的那一束光，连同与它同频的各束光/);
+  // T and n̄ over one trap period about t, cut at t = 0 and kept centred (estimate.rs `half_window`): from 0 to 2t at first.
+  assert.match(source('estimate.rs'),/pub fn half_window\(frequency: f64, t: f64\) -> f64 \{\s*\(0\.5 \* TAU \/ frequency\)\.min\(t\)/);
+  const [temperature,occupation]=motionSeries(readMotion().motion);
+  assert.ok(temperature.title.includes(TEMPERATURE_WINDOW)&&TEMPERATURE_WINDOW.includes('一个阱周期')&&TEMPERATURE_WINDOW.includes('0 到 2t'),temperature.title);
+  assert.match(notes,/一个阱周期内的平均（t 不到半个周期时窗口截到 t = 0、仍以 t 为中心，即 0 到 2t/);
+  // n̄ of the held atoms' mean κ², the mean velocity in it (estimate.rs `summarize`): k_BT/ħω − ½ only for atoms at rest as a whole.
+  assert.match(source('estimate.rs'),/occupation: std::array::from_fn\(\|a\| occupation\(hm \* all\.kappa2\[a\], n, scales\.frequencies\[a\]\)\)/);
+  assert.match(occupation.title,/n̄ = m⟨v²⟩\/ħω − ½/);assert.match(notes,/⟨v²⟩ 含原子整体的平均速度：没有平均速度时它就是 k<sub>B<\/sub>T\/ħω − ½/);
+  // The initial ensemble: the lowered isothermal of the bound atoms (ensemble.rs), not a Boltzmann factor cut at the escape.
+  assert.match(source('ensemble.rs'),/f\(r, κ\) ∝ e\^\{−E\/k_BT\} − 1 for E < 0/);
+  assert.ok(notes.includes('降低的等温分布')&&notes.includes('e<sup>−E/k<sub>B</sub>T</sup> − 1'));
+  // The statistics: Student's t at the normal's tail beyond z (estimate.rs `Spread::interval_over`), wider than two standard
+  // errors over few groups.
+  assert.match(source('estimate.rs'),/quantile\(tail_among\(looks\), freedom\) \* self\.error/);
+  assert.match(notes,/区间按组数取 Student t，组少时比两倍标准误差宽/);
+  // The total T's target: its three parts weighed by the held share (solve.rs `accounts`; SPEC §0).
+  assert.match(source('solve.rs'),/Account \{ model: h \* model, step: h \* bound, statistics: h \* relative \}/);
+  assert.match(notes,/按仍在光阱中的份额 1 − L 计权后与 10% 比较/);
+  // A motion trajectory's sample errors are its total estimates against its own target.
+  assert.match(notes,/按运动自己的目标 5% 判断与标出/);
+  // The mirror's λ/4 plate: the field mirrored about the fast axis (reflection.ts).
+  assert.match(notes,/ψ′ = ψ − 2θ、χ′ = χ[^。]*θ = ψ 时不变，θ = ψ ± 45° 时转 90°/);
+  // A motion solve's assumptions are the motion's: no word of the master equation's unfolded drives or micromotion.
+  const scene=pgc(),moving=buildFullMasterModel(scene,scene.dynamics,request(scene)).assumptions,still=buildFullMasterModel(scene,scene.dynamics).assumptions;
+  assert.ok(still.some(t=>t.includes('不作 RWA'))&&still.some(t=>t.includes('光频微运动，幅度')));
+  assert.ok(!moving.some(t=>t.includes('不作 RWA')||t.includes('光频微运动，幅度')),moving.join('\n'));
+  assert.ok(moving.some(t=>t.includes('反向旋转项按裸能级二阶绝热消去'))&&moving.some(t=>t.includes('不含光频微运动')));
 });
 
 test('the populations of a motion result are the held atom\'s times 1 − L: with 丢失 they add up to one',()=>{

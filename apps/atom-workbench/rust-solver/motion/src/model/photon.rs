@@ -57,18 +57,18 @@
 //! Cauchy–Schwarz. A plane wave's jump carries its k and leaves nothing; a standing wave's carries nothing and leaves
 //! k² R₀ sin² kz, the dipole force's fluctuations.
 //!
-//! An explicit state's absorption mean is the Ehrenfest force's (its kept drives' stimulated force), and its jumps are
-//! constants: its second moment's rate is that of the response its kept drives would make folded at the atom -- per
-//! carrier c the response σ_c of the carrier's whole field on the cluster's ground amplitudes, summed coherently as a
-//! folded jump sums it, never beam by beam --, Σ_c Re[∇σ_c*⊗∇σ_c]/Σ_c |σ_c|² a photon, at the state's own rate as far as
-//! the response's (eliminate.rs `Model::explicit_response`, `Answer::moment`).
+//! An explicit state's jumps are constants and its absorption's mean is the Ehrenfest force's (its kept drives'
+//! stimulated force): what its absorbed light gives the momentum beside that mean is the force's own correlation through
+//! the optical sector, the trajectory's per-state noise (optical.rs; step.rs, # The optical sector's noise), not a
+//! photon's moment here.
 
-use super::assemble::{laid, sized, ClassPlan, Held, Plan, Site};
+use super::assemble::{laid, sized, ClassPlan, Held, MemberPlan, Plan, Site};
 use super::far::EXCITED;
+use super::own::{norm_of, product, Form, Own};
 use super::reach::Region;
 use super::tabulate::NearTable;
 use super::units::{gate, Measured};
-use super::{jet, Beat, Lights, Model, Moments, Photon, Point, Scattering, Unit, UnitError};
+use super::{Beat, Lights, Model, Moments, Photon, Point, Scattering, Unit, UnitError};
 use crate::step::Emitted;
 use std::sync::Arc;
 
@@ -105,11 +105,10 @@ pub(crate) struct Member {
     pub(crate) phase: Beat,
 }
 
-/// Which classes' gradients a state's photons are made with (`Model::photons_of`): every class's, with the explicit
-/// states' part of the second moment's rate (a step's scattering, the one reader of the second moment); one class's,
-/// that class the only photon made, for its mean (a jump's: the class drawn and the kick it carries,
-/// `Model::emission_of` -- the explicit states' part is not made); or none's, every class's amplitudes alone (what the
-/// draw of a class reads: their rates).
+/// Which classes' gradients a state's photons are made with (`Model::photons_of`): every class's (a step's scattering,
+/// the one reader of the second moment); one class's, that class the only photon made, for its mean (a jump's: the class
+/// drawn and the kick it carries, `Model::emission_of`); or none's, every class's amplitudes alone (what the draw of a
+/// class reads: their rates).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Gradients {
     All,
@@ -186,34 +185,43 @@ impl Model {
         at_the_atom || (0..3).any(|a| self.constant_jump(source, a, b, s) != C64::ZERO)
     }
 
-    /// A bound over a region of a source's jump b ← s on axis a per unit of its field component: its constant part's entry,
-    /// and of a carrier's part at the atom Σ_e |C_a[b, e]| |U_k[e, s]|/σ_es, σ_es the drive's denominator's bound there
-    /// (units.rs `Model::denominator_over`) -- each drive at its own distance.
-    fn jump_bound(&self, source: &Source, a: usize, b: usize, s: usize, region: &Region) -> f64 {
-        let at_the_atom = match source.origin {
-            Origin::Near { carrier, component } if s < GROUND => {
+    /// A source's jump b ← s on axis a per unit of its field component over a region, complex (own.rs `Form`): its constant
+    /// part's entry, and of a carrier's part at the atom Σ_e C_a[b, e] U_k[e, s]/(Δ_es − iΓ_e/2), Δ_es the drive's detuning of
+    /// the levels the eliminations take (eliminate.rs `Gap`; own.rs `Own::resolvent`) -- the sum's own form, the excited
+    /// states' paths with their phases: far from the lines, where 1/(Δ − iΓ/2) is nearly one number for every excited
+    /// state, their sum is the couplings' own sum over the manifold, which may be nothing where each path is not. Beside it,
+    /// how far the excited states' far couplings move it (own.rs `Band`): per path |w_e| r_e/(|Δ_es − iΓ_e/2| σ_es), r_e the
+    /// excited state's Gershgorin radius and σ_es the denominator's bound (units.rs `Model::denominator_own`).
+    fn jump_form(&self, source: &Source, a: usize, b: usize, s: usize, region: &Region) -> (Form<C64>, Own) {
+        let mut jump = Form::constant(self.constant_jump(source, a, b, s));
+        let mut spread = Own::constant(0.0);
+        if let Origin::Near { carrier, component } = source.origin {
+            if s < GROUND {
                 let cc = &self.carriers[carrier];
-                (GROUND..STATES)
-                    .map(|e| {
-                        let size = (self.emission[a][(b, e)] * cc.basis[component][(e, s)]).abs();
-                        if size > 0.0 { size / self.denominator_over(region, e, s, cc.detuning) } else { 0.0 }
-                    })
-                    .sum()
+                let radii = self.radii(region);
+                for e in GROUND..STATES {
+                    let w = self.emission[a][(b, e)] * cc.basis[component][(e, s)];
+                    if w == C64::ZERO {
+                        continue;
+                    }
+                    let gamma = 0.5 * self.decay[(e - GROUND, e - GROUND)].re;
+                    let detuning = self.gap(e, s, region, cc.detuning).taken;
+                    jump = jump.add(detuning.resolvent(gamma).turned(w));
+                    spread = spread.add(radii[e].div(detuning.hypot(gamma).mul(self.denominator_own(region, e, s, cc.detuning))).scale(w.abs()));
+                }
             }
-            _ => 0.0,
-        };
-        at_the_atom + self.constant_jump(source, a, b, s).abs()
+        }
+        (jump, spread)
     }
 
-    /// A source's field component's coherent bound over a region, |Σ_l a_l γ_lk| (reach.rs `Region::coherent`; 1 for an
-    /// explicit state's).
-    fn source_bound(&self, source: &Source, region: &Region) -> f64 {
+    /// A source's field component over a region, Σ_l a_l γ_lk (reach.rs `Region::field`; 1 for an explicit state's).
+    fn source_field(&self, source: &Source, region: &Region) -> Form<C64> {
         match (self.source_frequency(source), source.origin) {
             (Some(f), Origin::Far { component, .. } | Origin::Near { component, .. }) => {
                 let f = &self.light.frequencies[f];
-                region.coherent(&f.beams.iter().zip(&f.coefficients).map(|(&l, c)| (l, c[component], c[component].abs())).collect::<Vec<_>>())
+                region.field(f.beams.iter().zip(&f.coefficients).map(|(&l, c)| (l, c[component], c[component].abs()))).0
             }
-            _ => 1.0,
+            _ => Form::constant(C64::ONE),
         }
     }
 
@@ -277,7 +285,7 @@ impl Model {
     }
 
     /// The photon classes of a cluster's state ψ (its frame amplitudes) at a point, every light on (SPEC §1.6; module
-    /// documentation): per class u_a on the landing cluster's states, the folded part's gradients, the explicit sources.
+    /// documentation): per class u_a on the landing cluster's states and the folded part's gradients.
     pub fn photons(&self, cluster: usize, at: &Point, psi: &[C64]) -> Vec<Photon> {
         self.photons_counted(cluster, at, psi, None).0
     }
@@ -293,23 +301,17 @@ impl Model {
     /// with every class's gradients, one class alone with its gradients, or every class's amplitudes without any (a class's
     /// gradients are then empty) --, and the complex multiply-adds that made them: the near jumps at the point (with their
     /// gradients where any class takes them; from their table where one is given), the field components, each entry's
-    /// amplitude and its gradient, the explicit sources' shares. What a jump shares across its classes is in a thread's
-    /// spare (assemble.rs `Held`): beyond the photons' own vectors the heap is asked for nothing.
+    /// amplitude and its gradient. What a jump shares across its classes is in a thread's spare (assemble.rs `Held`):
+    /// beyond the photons' own vectors the heap is asked for nothing.
     pub(crate) fn photons_of(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], gradients: Gradients) -> (Vec<Photon>, f64) {
-        self.photons_at(plan, table, at, psi, None, gradients)
-    }
-
-    /// `photons_of`, an explicit state's part of the second moment's rate taken at the populations `populations` of unit
-    /// sum on the cluster's states in the stead of the state's own (a step's: its mean over the step, step.rs).
-    fn photons_at(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], populations: Option<&[f64]>, gradients: Gradients) -> (Vec<Photon>, f64) {
         let mut out = Vec::with_capacity(plan.classes.len());
-        let work = self.classes_at(plan, table, at, psi, populations, gradients, &mut |place, class, sums, with, explicit| {
+        let work = self.classes_at(plan, table, at, psi, gradients, &mut |place, class, sums, with| {
             let n = class.states;
             let entry = |column: usize, row: usize| C64::new(sums[laid(row, column, 4)], sums[laid(row, column, 4) + LANES]);
             let vector = |column: usize, a: usize| -> Vec<C64> { (0..n).map(|b| entry(column, a * n + b)).collect() };
             let amplitudes = std::array::from_fn(|a| vector(0, a));
             let gradients = std::array::from_fn(|i| std::array::from_fn(|a| if with { vector(1 + i, a) } else { vec![] }));
-            out.push(Photon { class: place, landing: class.landing, wave_number: class.wave_number, absorbed: class.absorbed, amplitudes, gradients, explicit: *explicit });
+            out.push(Photon { class: place, landing: class.landing, wave_number: class.wave_number, absorbed: class.absorbed, amplitudes, gradients });
         });
         (out, work)
     }
@@ -330,7 +332,7 @@ impl Model {
         let (mut emitting, mut rates) = (std::mem::take(&mut site.emitting), std::mem::take(&mut site.rates));
         emitting.clear();
         rates.clear();
-        self.classes_on(plan, at.kappa, at.t, psi, None, Gradients::None, &mut site, made, &mut |place, class, sums, _, _| {
+        self.classes_on(plan, at.t, psi, Gradients::None, &mut site, made, &mut |place, class, sums, _| {
             let n = class.states;
             emitting.push(place);
             rates.push((0..3).map(|a| (0..n).map(|b| amplitude(sums, a * n + b).norm_sqr()).sum::<f64>()).sum());
@@ -338,10 +340,10 @@ impl Model {
         let drawn = draw(&rates).map(|pick| emitting[pick]);
         (site.emitting, site.rates) = (emitting, rates);
         let mut emitted = None;
-        self.classes_on(plan, at.kappa, at.t, psi, None, Gradients::Of(drawn?), &mut site, made, &mut |_, class, sums, with, explicit| {
+        self.classes_on(plan, at.t, psi, Gradients::Of(drawn?), &mut site, made, &mut |_, class, sums, with| {
             let n = class.states;
             let amplitudes = std::array::from_fn(|a| (0..n).map(|b| amplitude(sums, a * n + b)).collect());
-            emitted = Some(Emitted { landing: class.landing, wave_number: class.wave_number, amplitudes, kick: moments(sums, with, explicit, class.absorbed).kick });
+            emitted = Some(Emitted { landing: class.landing, wave_number: class.wave_number, amplitudes, kick: moments(sums, with, class.absorbed).kick });
         });
         Some(emitted.expect("the drawn class at the state it was drawn at"))
     }
@@ -356,20 +358,19 @@ impl Model {
         let mut site = Held::<Site>::take();
         self.pointed(&plan, table, at.r, &mut site);
         let made = self.sited(&plan, table, Some(at.r), at.kappa, 1, &mut site, false);
-        let rates = self.classes_on(&plan, at.kappa, at.t, psi, None, Gradients::None, &mut site, made, &mut |_, _, _, _, _| {});
-        let drawn = (0..plan.classes.len()).map(|place| self.classes_on(&plan, at.kappa, at.t, psi, None, Gradients::Of(place), &mut site, 0.0, &mut |_, _, _, _, _| {})).fold(0.0, f64::max);
+        let rates = self.classes_on(&plan, at.t, psi, Gradients::None, &mut site, made, &mut |_, _, _, _| {});
+        let drawn = (0..plan.classes.len()).map(|place| self.classes_on(&plan, at.t, psi, Gradients::Of(place), &mut site, 0.0, &mut |_, _, _, _| {})).fold(0.0, f64::max);
         rates + drawn
     }
 
-    /// What `photons_at` makes, class by class to `each` as it is made (`classes_on`), on the point's own site
+    /// What `photons_of` makes, class by class to `each` as it is made (`classes_on`), on the point's own site
     /// (`Model::pointed`) made to the order the gradients ask (`sited`); and the complex multiply-adds, counted as the
     /// definition's entries (assemble.rs, # Work).
-    #[allow(clippy::too_many_arguments)]
-    fn classes_at(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], populations: Option<&[f64]>, gradients: Gradients, each: &mut dyn FnMut(usize, &ClassPlan, &[f64], bool, &[[f64; 3]; 3])) -> f64 {
+    fn classes_at(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], gradients: Gradients, each: &mut dyn FnMut(usize, &ClassPlan, &[f64], bool)) -> f64 {
         let mut site = Held::<Site>::take();
         self.pointed(plan, table, at.r, &mut site);
         let made = self.sited(plan, table, Some(at.r), at.kappa, if gradients == Gradients::None { 0 } else { 1 }, &mut site, false);
-        self.classes_on(plan, at.kappa, at.t, psi, populations, gradients, &mut site, made, each)
+        self.classes_on(plan, at.t, psi, gradients, &mut site, made, each)
     }
 
     /// What the photons of a plan's states at a point read of the point's site (assemble.rs `Site`; module
@@ -398,21 +399,19 @@ impl Model {
         };
         let Site { beams, fields, .. } = site;
         self.fields_into(plan, beams, kappa, order, fields);
-        near + fourth + plan.scalars.iter().map(|s| (2 * jet::parts(order) * s.beams.len()) as f64).sum::<f64>()
+        near + fourth + plan.fields_work(order)
     }
 
-    /// The classes of a state's photons at the momentum κ and the time t on a point's site (`sited`: its work `made`),
+    /// The classes of a state's photons at the time t on a point's site (`sited`: its work `made`),
     /// class by class to `each` as each is made -- the class's place and plan, its sums (four columns laid for the lanes on the class's rows a n + b',
-    /// assemble.rs `laid`: u, then per lab axis i ∇_i u, which hold nothing where the class takes no gradients), whether
-    /// it took gradients, and the explicit states' part --, a class the state gives nothing left out; and the complex
-    /// multiply-adds with the site's, counted as the definition's entries (assemble.rs, # Work). A class made with its
-    /// gradients asks them of the site: it is made to first order. Module documentation, # A state's photons at a
-    /// point: the sums are the site's, a thread's spare's (`Held`), as are the levels' energies an explicit state's part
-    /// reads, and a step's scattering (`scattering_of`) and a jump's photon (`emission_of`) read them where they are
-    /// made and ask the heap for nothing.
+    /// assemble.rs `laid`: u, then per lab axis i ∇_i u, which hold nothing where the class takes no gradients), and
+    /// whether it took gradients --, a class the state gives nothing left out; and the complex multiply-adds with the
+    /// site's, counted as the definition's entries (assemble.rs, # Work). A class made with its gradients asks them of
+    /// the site: it is made to first order. Module documentation, # A state's photons at a point: the sums are the site's,
+    /// a thread's spare's (`Held`), and a step's scattering (`scattering_of`) and a jump's photon (`emission_of`) read
+    /// them where they are made and ask the heap for nothing.
     #[allow(clippy::too_many_arguments)]
-    fn classes_on(&self, plan: &Arc<Plan>, kappa: [f64; 3], t: f64, psi: &[C64], populations: Option<&[f64]>, gradients: Gradients, site: &mut Site, made: f64, each: &mut dyn FnMut(usize, &ClassPlan, &[f64], bool, &[[f64; 3]; 3])) -> f64 {
-        let cluster = plan.cluster;
+    fn classes_on(&self, plan: &Arc<Plan>, t: f64, psi: &[C64], gradients: Gradients, site: &mut Site, made: f64, each: &mut dyn FnMut(usize, &ClassPlan, &[f64], bool)) -> f64 {
         let order = if gradients == Gradients::None { 0 } else { 1 };
         let mut work = made;
         // The fourth order's states (assemble.rs, # The fourth order): (1 − ½X)ψ and Nψ, and with the gradients the
@@ -447,8 +446,7 @@ impl Model {
             }
         }
         let live = &axes[..count];
-        let Site { beams: amplitudes, directions, jumps, jump_slopes, fields, member: vectors, class: sums, dressing, energies, answers, .. } = site;
-        answers.clear();
+        let Site { directions, jumps, jump_slopes, fields, member: vectors, class: sums, .. } = site;
         // A member's vectors: its matrix on the state, a point's with its partner's and each direction's two slopes.
         // The most a member makes (below: `base + more` of a near member with the fourth order and the gradients), s
         // the directions' slopes, a table's axes or the three lab axes: 2(1 + s) its jumps' and its partner's with their
@@ -459,8 +457,6 @@ impl Model {
         sized(vectors, MOST * 2 * most);
         sized(sums, 8 * most);
         let one = [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO];
-        // Whether the levels' energies at the point are made: the first explicit member makes them.
-        let mut levelled = false;
         let (mut x, mut weights) = ([C64::ZERO; STATES], [C64::ZERO; 4 * MOST]);
         for (place, class) in plan.classes.iter().enumerate() {
             let with = match gradients {
@@ -473,7 +469,6 @@ impl Model {
             let sums = &mut sums[..8 * rows];
             // Whether u, and ∇u, hold nothing yet: a class's first member writes them, the others add to them.
             let (mut first, mut flat) = (true, true);
-            let mut explicit = [[0.0; 3]; 3];
             for m in class.members.iter().filter(|m| !m.columns.is_empty()) {
                 let (c, cw): (&[C64], &[C64]) = m.scalar.map_or((&one, &one), |s| (fields.plain(s), fields.doppler(s)));
                 // The state on the member's columns, at the member's relative phase in a merged class.
@@ -591,39 +586,7 @@ impl Model {
                     }
                 }
                 (first, flat) = (false, flat && !taken);
-                let partner = if m.doppler { 1.0 } else { 0.0 };
-                work += m.entries.len() as f64 * (2.0 + partner + if taken { 3.0 * (3.0 + 2.0 * partner) } else { 0.0 });
-                // The fourth order's vectors: each a matrix on a state more, and its weights.
-                work += (more * (m.entries.len() + 4 * rows)) as f64;
-                // An explicit state's part of the second moment's rate, where every class's is asked: its decay rate into
-                // the class over its population, `MemberPlan::decay`, on its source's response (eliminate.rs
-                // `Answer::moment`) -- the source's whichever class it lands in: made with the first class that takes
-                // it, and counted with each as the definition has it.
-                if !m.folded && gradients == Gradients::All {
-                    if !levelled {
-                        dressing.clear();
-                        dressing.extend((0..self.carriers.len()).map(|d| self.dressed_coherently(d)));
-                        self.far_energies(amplitudes, &plan.lights, 1, dressing, energies);
-                        levelled = true;
-                    }
-                    let norm = crate::linalg::norm_sqr(psi);
-                    let population = m.entries.first().map_or(0.0, |&(_, _, sp, _, _)| populations.map_or(psi[sp].norm_sqr(), |p| p[sp] * norm));
-                    let mut w = 0.0;
-                    if m.decay > 0.0 && population > 0.0 {
-                        let at = answers.iter().position(|(source, _)| *source == m.source).unwrap_or_else(|| {
-                            answers.push((m.source, self.explicit_response(cluster, amplitudes, energies, kappa, m.source, psi)));
-                            answers.len() - 1
-                        });
-                        let (answer, moment) = (&answers[at].1, answers[at].1.moment(m.decay, population));
-                        for i in 0..3 {
-                            for j in 0..3 {
-                                explicit[i][j] += moment[i][j];
-                            }
-                        }
-                        w = answer.work;
-                    }
-                    work += w + m.entries.len() as f64;
-                }
+                work += member_work(m, taken, more, rows);
             }
             // A class the state gives nothing: no amplitude, and no gradient either -- at a node of its light a class has
             // no photon and still its gradients' second moment. Gradients no member made are nothing.
@@ -636,7 +599,7 @@ impl Model {
             if sums.chunks_exact(8 * LANES).all(|vector| vector[..if with { 8 * LANES } else { 2 * LANES }].iter().all(|x| *x == 0.0)) {
                 continue;
             }
-            each(place, class, sums, with, &explicit);
+            each(place, class, sums, with);
         }
         work
     }
@@ -689,31 +652,52 @@ impl Model {
         out
     }
 
-    /// A bound over a region of a class's jump operators' sizes per axis: Σ_members F ‖L_a‖_F, F the member's field
-    /// component's bound there (`source_bound`) and L_a its entries' (`jump_bound`).
-    fn class_bound(&self, cluster: usize, class: &Class, region: &Region) -> [f64; 3] {
+    /// A class's jump operators' sizes over a region per axis, ‖u_a‖_F of u_a = Σ_members F L_a on the class's entries: per
+    /// member at one relative phase the members' sum, each its field component (`source_field`) times its jump
+    /// (`jump_form`), in one own form -- a carrier's components on its field's basis are one field's, whose sum the basis
+    /// does not change --, the members at different relative phases (a kept coherence's) apart, their norms added; with
+    /// the bands' radii, the field's bound times each jump's.
+    fn class_bound(&self, cluster: usize, class: &Class, region: &Region) -> [Own; 3] {
         let (from, landing) = (&self.clusters[cluster], &self.clusters[class.landing]);
-        let mut out = [0.0; 3];
-        for m in &class.members {
-            let source = &self.sources[m.source];
-            let field = self.source_bound(source, region);
-            for a in 0..3 {
-                out[a] += field * m.entries.iter().map(|&(bp, sp)| self.jump_bound(source, a, landing.states[bp], from.states[sp], region).powi(2)).sum::<f64>().sqrt();
+        let fields: Vec<Form<C64>> = class.members.iter().map(|m| self.source_field(&self.sources[m.source], region)).collect();
+        std::array::from_fn(|a| {
+            let mut size = Own::constant(0.0);
+            let mut phases: Vec<&Beat> = class.members.iter().map(|m| &m.phase).collect();
+            phases.sort();
+            phases.dedup();
+            for phase in phases {
+                // Per entry of the class (landing place, source place) at this phase: the members' sum and its radius.
+                let mut entries: Vec<((usize, usize), Form<C64>, Own)> = vec![];
+                for (m, field) in class.members.iter().zip(&fields).filter(|of| of.0.phase == *phase) {
+                    let source = &self.sources[m.source];
+                    for &(bp, sp) in &m.entries {
+                        let (jump, spread) = self.jump_form(source, a, landing.states[bp], from.states[sp], region);
+                        let (term, spread) = (product(field, &jump, |f: C64, l: C64| f * l), spread.mul(field.norm()));
+                        match entries.iter_mut().find(|x| x.0 == (bp, sp)) {
+                            Some(x) => (x.1, x.2) = (x.1.add(term), x.2.add(spread)),
+                            None => entries.push(((bp, sp), term, spread)),
+                        }
+                    }
+                }
+                let forms: Vec<Form<C64>> = entries.iter().map(|x| x.1).collect();
+                let spread = entries.iter().fold(Own::constant(0.0), |sum, x| sum.add(x.2.square())).sqrt();
+                size = size.add(norm_of(&forms).add(spread));
             }
-        }
-        out
+            size
+        })
     }
 
     /// A coherence's size over a region (the gates', units.rs `Model::gates`): Σ_a ‖L_a‖ ‖L'_a‖ of its two classes' jump
-    /// operators, each bounded there (`class_bound`), the largest over the source clusters it names.
-    pub(crate) fn coherence_bound(&self, unit: &Unit, region: &Region) -> f64 {
-        let mut size = 0.0_f64;
+    /// operators, each in its own form there (`class_bound`), the largest over the source clusters it names.
+    pub(crate) fn coherence_bound(&self, unit: &Unit, region: &Region) -> Own {
+        let mut size: Option<Own> = None;
         for (cluster, i, j) in self.coherence_classes(unit) {
             let classes = &self.classes[cluster];
             let (a, b) = (self.class_bound(cluster, &classes[i], region), self.class_bound(cluster, &classes[j], region));
-            size = size.max((0..3).map(|x| a[x] * b[x]).sum());
+            let here = (0..3).fold(Own::constant(0.0), |sum, x| sum.add(a[x].mul(b[x])));
+            size = Some(size.map_or(here, |size| size.max(here)));
         }
-        size
+        size.unwrap_or(Own::constant(0.0))
     }
 
     /// Per class of a sample's cluster and axis, ‖L_a‖_F of its jump operators at the sample's point (units.rs `Measured`):
@@ -746,7 +730,7 @@ impl Model {
     /// and the Doppler shift of two photons at the sample's speed (the one gate, units.rs `gate`); p the populations of the
     /// two classes' source states (SPEC §1.5). Zero where the sample's cluster emits no such pair.
     pub(crate) fn coherence_error(&self, unit: &Unit, at: &Measured) -> UnitError {
-        let nothing = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0 };
+        let nothing = UnitError::NONE;
         let Unit::Coherence { first, second, .. } = unit else { return nothing };
         let Some(&(cluster, i, j)) = self.coherence_classes(unit).iter().find(|of| of.0 == at.sample.cluster) else { return nothing };
         let sizes = at.classes.get_or_init(|| self.class_sizes(at));
@@ -758,18 +742,18 @@ impl Model {
         let classes = &self.classes[cluster];
         let source_weight = |class: &Class| -> f64 { class.members.iter().flat_map(|m| m.entries.iter().map(|&(_, sp)| self.clusters[cluster].states[sp])).map(|s| p[s]).fold(0.0, f64::max) };
         let weight = (source_weight(&classes[i]) * source_weight(&classes[j])).sqrt();
-        UnitError { parameter: m2, population: m2 * weight, temperature: m2 * weight }
+        UnitError { parameter: m2, population: m2 * weight, temperature: m2 * weight, ..UnitError::NONE }
     }
 }
 
 impl Model {
     /// The scattering of a state under a plan's lights at a point, per unit time (`Scattering::of` its photons made with
-    /// their gradients, `photons_at`: an explicit state's decay at the given populations), and the complex multiply-adds
-    /// that made the photons: `scattering_on` the point's own site.
-    pub(crate) fn scattering_of(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], populations: Option<&[f64]>) -> (Scattering, f64) {
+    /// their gradients, `photons_of`), and the complex multiply-adds that made the photons: `scattering_on` the point's
+    /// own site.
+    pub(crate) fn scattering_of(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64]) -> (Scattering, f64) {
         let mut site = Held::<Site>::take();
         self.pointed(plan, table, at.r, &mut site);
-        self.scattering_on(plan, table, Some(at.r), at.kappa, at.t, psi, populations, &mut site, false)
+        self.scattering_on(plan, table, Some(at.r), at.kappa, at.t, psi, &mut site, false)
     }
 
     /// `scattering_of` at the momentum κ and the time t on a site that holds the point (assemble.rs `Model::pointed`):
@@ -777,16 +761,65 @@ impl Model {
     /// are the step's already -- what the photons read beside them is made on it (`sited`), and nothing of the point
     /// twice in a step. The photons' moments are read where the classes are made.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn scattering_on(&self, plan: &Arc<Plan>, table: Option<&NearTable>, r: Option<[f64; 3]>, kappa: [f64; 3], t: f64, psi: &[C64], populations: Option<&[f64]>, site: &mut Site, laid: bool) -> (Scattering, f64) {
+    pub(crate) fn scattering_on(&self, plan: &Arc<Plan>, table: Option<&NearTable>, r: Option<[f64; 3]>, kappa: [f64; 3], t: f64, psi: &[C64], site: &mut Site, laid: bool) -> (Scattering, f64) {
         let made = self.sited(plan, table, r, kappa, 1, site, laid);
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let (mut out, mut sizes) = (Scattering::NONE, [0.0; 3]);
-        let work = self.classes_on(plan, kappa, t, psi, populations, Gradients::All, site, made, &mut |_, class, sums, with, explicit| {
-            out.add(&mut sizes, &moments(sums, with, explicit, class.absorbed), class.states);
+        let work = self.classes_on(plan, t, psi, Gradients::All, site, made, &mut |_, class, sums, with| {
+            out.add(&mut sizes, &moments(sums, with, class.absorbed), class.states);
         });
         (out.over(sizes, norm), work)
     }
 
+}
+
+/// The counted complex multiply-adds of a member's part of its class's sums (`Model::classes_on`): its entries' amplitudes
+/// -- and their Doppler partners' where it takes them, and where the gradients are `taken` theirs, 3(3 + 2 partner) more
+/// each --, and the fourth order's `more` vectors, each a matrix on a state and its weights over the class's `rows`.
+fn member_work(m: &MemberPlan, taken: bool, more: usize, rows: usize) -> f64 {
+    let partner = if m.doppler { 1.0 } else { 0.0 };
+    m.entries.len() as f64 * (2.0 + partner + if taken { 3.0 * (3.0 + 2.0 * partner) } else { 0.0 }) + (more * (m.entries.len() + 4 * rows)) as f64
+}
+
+impl Plan {
+    /// The counted complex multiply-adds of a state's photons' site at a point (`Model::sited`) to `order`, priced without
+    /// making it (solve.rs `Pricing`): the near jumps read from a table on `axes` axes whose coordinates there count
+    /// `place`; the fourth order's matrices made there where `quartic` -- laid there by the site itself, its forms read
+    /// whole (`Plan::quartic_made_work`) -- and none where they are the point's already; the field components.
+    pub(crate) fn sited_work(&self, axes: usize, place: f64, order: usize, quartic: bool) -> f64 {
+        let near = if self.near.len() == 0 { 0.0 } else { place + super::tabulate::read_work(axes, order, 2 * self.near.jumping().len()) };
+        let fourth = self.fourth.as_ref().filter(|_| quartic).map_or(0.0, |fourth| self.quartic_made_work(fourth, axes, place));
+        near + fourth + self.fields_work(order)
+    }
+
+    /// The counted complex multiply-adds of a state's photons' classes on a site whose jumps have `axes` slopes
+    /// (`Model::classes_on`), priced without making them: the fourth order's bent states, and every lit member's part
+    /// (`member_work`) of the classes the gradients ask; `live` the lab axes along which the fourth order's matrices
+    /// change, which `classes_on` reads off the matrices at the point.
+    pub(crate) fn classes_work(&self, axes: usize, gradients: Gradients, live: usize) -> f64 {
+        let order = if gradients == Gradients::None { 0 } else { 1 };
+        let bent = self.fourth.as_ref().map_or(0.0, |fourth| (2 * fourth.n * fourth.n * if order >= 1 { 4 } else { 1 }) as f64);
+        let mut work = bent;
+        for (place, class) in self.classes.iter().enumerate() {
+            let with = match gradients {
+                Gradients::All => true,
+                Gradients::Of(only) if only == place => true,
+                Gradients::Of(_) => continue,
+                Gradients::None => false,
+            };
+            for m in class.members.iter().filter(|m| !m.columns.is_empty()) {
+                let taken = m.folded && with;
+                let slopes = if taken && m.near { axes } else { 0 };
+                let more = match (&self.fourth, m.near) {
+                    (None, _) => 0,
+                    (Some(_), true) => 1 + slopes + if taken { 2 * live } else { 0 },
+                    (Some(_), false) => if taken { live } else { 0 },
+                };
+                work += member_work(m, taken, more, class.rows);
+            }
+        }
+        work
+    }
 }
 
 /// Σ_rows (a b ± c d) of four parts A, B, C, D of a class's four columns laid for the lanes (`Model::classes_at`: each
@@ -804,14 +837,14 @@ fn lanes<const A: usize, const B: usize, const C: usize, const D: usize>(sums: &
 
 /// The absorbed light's moments of a class per unit time (module documentation, # The absorbed light's momentum) from its
 /// sums (`Model::classes_at`: four columns laid for the lanes, u and per lab axis i ∇_i u -- the latter read only `with`
-/// gradients), its explicit states' part and its absorbed light's wave number k_c: W, the folded part's
-/// Σ_a Im⟨u_a|∇u_a⟩, the second moment's rate Σ_a Re⟨∇u_a|⊗|∇u_a⟩ with the explicit part, and the mean a jump of the class
-/// carries. Each of the ten sums is one pass over the rows, a partial sum a lane.
-fn moments(sums: &[f64], with: bool, explicit: &[[f64; 3]; 3], absorbed: f64) -> Moments {
+/// gradients) and its absorbed light's wave number k_c: W, the folded part's Σ_a Im⟨u_a|∇u_a⟩, the second moment's rate
+/// Σ_a Re⟨∇u_a|⊗|∇u_a⟩, and the mean a jump of the class carries. Each of the ten sums is one pass over the rows, a
+/// partial sum a lane.
+fn moments(sums: &[f64], with: bool, absorbed: f64) -> Moments {
     debug_assert!(sums.len() % (8 * LANES) == 0);
     // The columns' parts: 0 and 1 u's real and imaginary parts, 2 + 2i and 3 + 2i those of ∇_i u.
     let weight = lanes::<0, 0, 1, 1>(sums, 1.0);
-    let (mut mean, mut second) = ([0.0; 3], *explicit);
+    let (mut mean, mut second) = ([0.0; 3], [[0.0; 3]; 3]);
     if with {
         mean = [lanes::<0, 3, 1, 2>(sums, -1.0), lanes::<0, 5, 1, 4>(sums, -1.0), lanes::<0, 7, 1, 6>(sums, -1.0)];
         let [xx, xy, xz] = [lanes::<2, 2, 3, 3>(sums, 1.0), lanes::<2, 4, 3, 5>(sums, 1.0), lanes::<2, 6, 3, 7>(sums, 1.0)];
@@ -841,8 +874,8 @@ impl Scattering {
     /// The scattering per unit time of a state of the norm ‖ψ‖² = `norm` from its classes' photons made with their
     /// gradients (module documentation, # The absorbed light's momentum): the force and the second moment's rate their
     /// jumps do not carry, over ‖ψ‖². An entry of 2D is summed from each class's 3n products of its gradients (n its
-    /// landing cluster's states), its explicit part and the carried mean's product over the weight's own 3n: `links`
-    /// counts them, `size` their moduli on the diagonal.
+    /// landing cluster's states) and the carried mean's product over the weight's own 3n: `links` counts them, `size`
+    /// their moduli on the diagonal.
     pub fn of(photons: &[Photon], norm: f64) -> Scattering {
         let (mut out, mut sizes) = (Scattering::NONE, [0.0; 3]);
         for photon in photons {
@@ -881,7 +914,7 @@ impl Photon {
 
     /// The absorbed light's moments of the class per unit time (module documentation, # The absorbed light's momentum),
     /// of a photon made with its gradients: W, the folded part's Σ_a Im⟨u_a|∇u_a⟩, the second moment's rate Σ_a
-    /// Re⟨∇u_a|⊗|∇u_a⟩ with the explicit states' part, and the mean a jump of the class carries.
+    /// Re⟨∇u_a|⊗|∇u_a⟩, and the mean a jump of the class carries.
     pub fn moments(&self) -> Moments {
         // Its vectors as the sums they were made from (`Model::classes_at`): the same rows, the same moments.
         let n = self.amplitudes[0].len();
@@ -900,7 +933,7 @@ impl Photon {
             }
         }
         let with = self.gradients.iter().flatten().any(|g| !g.is_empty());
-        moments(&sums[..8 * rows], with, &self.explicit, self.absorbed)
+        moments(&sums[..8 * rows], with, self.absorbed)
     }
 
     /// The mean a jump of the class carries (`Moments::kick`): at most one absorbed photon's momentum k_c.

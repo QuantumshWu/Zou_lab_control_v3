@@ -146,7 +146,7 @@ impl Model {
             let region = model.point_region(centre, 0.0);
             let fails = |&&(c, e, g): &&(Component, usize, usize)| {
                 let place = model.ranked[g].iter().find(|d| d.component == c && d.excited == e).expect("a drive is in its ground state's order").group;
-                let fold = model.folds(g, place, &region, usize::MAX);
+                let fold = model.folds(g, place, &region);
                 model.level(c, e, g) == Level::Atom && !(Gate { saturation: fold[0], sweep: fold[1] }).exists()
             };
             let failing: Vec<Unit> = drives.iter().filter(fails).map(|&(component, excited, ground)| Unit::Drive { component, excited, ground }).collect();
@@ -402,8 +402,9 @@ impl Model {
         let tone = &self.tones[self.light.trap];
         let n = f.beams.len();
         let near = self.near_envelope(p);
-        let weights = (0..n * n).map(|x| contract(&tone.pairs[x], p).abs() + near[x]).collect();
-        Envelope { beams: f.beams.clone(), weights }
+        let form: Vec<C64> = (0..n * n).map(|x| contract(&tone.pairs[x], p)).collect();
+        let weights = (0..n * n).map(|x| form[x].abs() + near[x]).collect();
+        Envelope { beams: f.beams.clone(), weights, form, near }
     }
 }
 

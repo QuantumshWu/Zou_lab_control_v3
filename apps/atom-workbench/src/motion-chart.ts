@@ -52,12 +52,16 @@ export interface Line {name:string;values:readonly number[];ink:string;width?:nu
  * of its ticks. */
 export interface Series {id:string;name:string;title:string;lines:Line[];unit:Unit}
 const along=(axis:MotionAxis)=>`（${axis} 轴）`;
+/** What a T is an average over (rust-solver/motion estimate.rs `half_window`, SPEC §1.7): the window about the output's
+ * time t, one trap period of the axis, cut at t = 0 and kept centred there -- from 0 to 2t while t is under half a
+ * period; t = 0 itself is that instant. */
+export const TEMPERATURE_WINDOW='各轴一个阱周期内的平均；t 不到半个周期时取 0 到 2t';
 /** The two panels of a motion result's time chart: T on each axis with the total temperature, above
  * n̄ on each axis (relative to the trap frequency the engine used along that axis). */
 export function motionSeries(motion:MotionResult):[Series,Series]{
   const temperature:Line[]=[...MOTION_AXES.map((axis,k)=>({name:`T${along(axis)}`,values:motion.temperatureUK[k]!,ink:AXIS_INKS[axis],error:motion.temperatureErrorUK[k]!})),
     {name:'总温度',values:motion.temperatureTotalUK,ink:TOTAL_INK,width:TOTAL_WIDTH,error:motion.temperatureTotalErrorUK}];
-  return [{id:'temperature',name:'温度 T',title:'温度 T / μK（各轴一个阱周期内的平均）',lines:temperature,unit:{name:'μK',factor:1}},
+  return [{id:'temperature',name:'温度 T',title:`温度 T / μK（${TEMPERATURE_WINDOW}）`,lines:temperature,unit:{name:'μK',factor:1}},
     {id:'occupation',name:'n̄',title:`平均振动量子数 n̄ = m⟨v²⟩/ħω − ½（各轴阱底处的阱频 ω/2π：${MOTION_AXES.map((axis,k)=>`${axis} ${digits(motion.trapFrequencyKHz[k]!)}`).join('、')} kHz）`,
       lines:MOTION_AXES.map((axis,k)=>({name:`n̄${along(axis)}`,values:motion.meanOccupation[k]!,ink:AXIS_INKS[axis]})),unit:{name:'',factor:1}}];
 }

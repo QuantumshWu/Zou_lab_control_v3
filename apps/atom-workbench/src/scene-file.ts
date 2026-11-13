@@ -3,7 +3,7 @@
 // earlier version is refused with the reason -- nothing is migrated.
 import type {AxisName,Direction,DynamicsSettings,FrequencyDisplayUnit,FrequencyExpr,InitialStateSpec,Laser,LaserFrequencyAnchor,LaserIntensityAnchor,
   LaserReflection,MagneticField,MotionSettings,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Scene} from './types.js';
-import {MAXIMUM_DURATION_US,MAXIMUM_LASERS,MAXIMUM_SAMPLES,MEAN_HORIZONS_US,SCENE_VERSION,defaultScene} from './types.js';
+import {DEFAULT_PLATE_ANGLE_DEG,MAXIMUM_DURATION_US,MAXIMUM_LASERS,MAXIMUM_SAMPLES,MEAN_HORIZONS_US,SCENE_VERSION,defaultScene} from './types.js';
 import {DERIVED_CURVE_IDS} from './population-selection.js';
 import {DURATION_UNITS} from './duration.js';
 import {analyze,resolveSceneFrequencies} from './physics.js';
@@ -81,8 +81,10 @@ const LASER_REQUIRED=['id','name','enabled','line','frequency','frequencyUnit','
 const LASER_OPTIONAL=['referenceStateId','referenceProcess','frequencyAnchor','intensityAnchor','powerMW','waistUm','numericalAperture','reflection'];
 /** A reflection's mirror (reflection.ts); that it reflects a laser of the scene is checked once every laser is known. */
 function mirror(value:unknown,path:string):LaserReflection{
-  const m=Reader.of(value,path,['of','reflectivity','phaseDeg','quarterWave']);
-  return {of:m.text('of'),reflectivity:m.number('reflectivity',0,1),phaseDeg:m.number('phaseDeg',-180,180),quarterWave:m.boolean('quarterWave')};
+  const m=Reader.of(value,path,['of','reflectivity','phaseDeg','quarterWave'],['plateAngleDeg']);
+  return {of:m.text('of'),reflectivity:m.number('reflectivity',0,1),phaseDeg:m.number('phaseDeg',-180,180),quarterWave:m.boolean('quarterWave'),
+    // A file written before the plate had an angle names none: the default's.
+    plateAngleDeg:m.has('plateAngleDeg')?m.number('plateAngleDeg',-90,90):DEFAULT_PLATE_ANGLE_DEG};
 }
 function laser(value:unknown,path:string,id:(r:Reader)=>string):Laser{
   const l=Reader.of(value,path,LASER_REQUIRED,LASER_OPTIONAL),mode=l.choice('intensityMode',INTENSITY_MODES);

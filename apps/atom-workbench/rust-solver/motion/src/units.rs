@@ -47,13 +47,19 @@ const fn square_root(a: f64) -> f64 {
 // ---------------------------------------------------------------------------------------------------------------------
 // The contract's definitions and caps.
 
+/// The full quantum treatment's sub-Doppler minimum in recoil temperatures k_BT_rec = (ħk)²/m (solve.rs, # T's
+/// allowance): its momentum spread bottoms out at about 5–6 ħk rms per axis, (5.5 ħk)²/m = 30 k_BT_rec -- 11 µK for
+/// Rb87 on D2, 6 µK for Cs --, where the point particle, which has no lower bound on T, is off by O(1). The user's
+/// statement of the semiclassical method's floor, not a fitted number.
+pub const SUB_DOPPLER_RECOILS: f64 = 30.0;
 /// The validated regime's boundary (SPEC §0, §3): k_BT ≥ CLASSICAL·ħω, axis by axis, mirrored in the app (the result's
 /// `classical`: every axis's; the UI's grey band, src/model-notes.ts `SEMICLASSICAL_REGIME`). Reported per output and
 /// axis (solve.rs `classical`); it decides nothing in the solve. An empirical boundary, not a derived one.
 pub const CLASSICAL: f64 = 4.0;
-/// The trap's region (SPEC §1.3, §1.7): an atom is outside it where every focused beam's intensity at the atom is
-/// below this share of its value at the focus -- the contract's definition of a lost atom, the UI's text word for word
-/// (src/model-notes.ts: "每束聚焦光在原子处的强度都低于焦点处的 1/20").
+/// The trap's region (SPEC §1.3, §1.7): an atom is outside it where every beam of the trap light (the tweezer's
+/// frequency) is at the atom below this share of its value at the focus -- the contract's region, the UI's text word for
+/// word (src/model-notes.ts: "与光镊同频的各束光在原子处的强度都低于各自焦点处的 1/20"). A lost atom is one first outside it
+/// with its loss energy above the far value (model.rs `Model::lost`), as the same sentence of the UI goes on.
 pub const REGION_INTENSITY: f64 = 1.0 / 20.0;
 /// The most trajectories a solve runs (SPEC §3; contract §2.3, whose reason text names 16384): reached, the solve
 /// returns as usual, partial. A cap of the contract, not derived; beside the work it sets the least statistics a

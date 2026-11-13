@@ -39,7 +39,9 @@ pub mod assemble;
 pub mod readout;
 pub mod photon;
 pub mod tabulate;
+pub(crate) mod optical;
 pub(crate) mod jet;
+pub(crate) mod own;
 
 use crate::field::Light;
 use crate::linalg::{C64, Mat};
@@ -58,6 +60,16 @@ pub struct Beat(pub Vec<i64>);
 /// (`counter` false: V_ω e^{−iνt}, ν = δ_ω) or its counter-rotating one (W_ω e^{−iνt}, ν = −(δ_ω + 2ν_frame)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Component { pub frequency: usize, pub counter: bool }
+
+impl Component {
+    /// Whether the model can take a drive of this component more exactly than its fold with the bare levels (units.rs,
+    /// # Levels, # The model's domain): a co-rotating one, at the atom or explicit. A counter-rotating one is only ever
+    /// folded with the bare levels -- a keep of it is refused (`Model::new`), and a Raman pair's join takes none (units.rs
+    /// `Model::joined`).
+    pub fn keepable(&self) -> bool {
+        !self.counter
+    }
+}
 
 /// How one frequency's light is on (`Lights`): off; on as its coherent field; or on with its beams' relative phases averaged --
 /// each beam with its own intensity, no interference between beams: the smooth shift of a light whose fringes the atoms fly over
@@ -131,12 +143,19 @@ pub struct Envelope {
     pub beams: Vec<usize>,
     /// |Q_l'l| (rad/µs), row-major over `beams`.
     pub weights: Vec<f64>,
+    /// The far static form's own Q_l'l = [P_l'l]_p (rad/µs), row-major over `beams`, and the near light shift's bound per
+    /// pair beside it (eliminate.rs `Model::near_envelope`): how far V_prep moves over a cell is read of the far part's own
+    /// form (reach.rs `prepared_own`).
+    pub(crate) form: Vec<crate::linalg::C64>,
+    pub(crate) near: Vec<f64>,
 }
 
 /// The atoms' reach (SPEC §1.8): the sublevel set {(r, κ) : V_prep(r) + (ħ/m)κ²/2 − V_min ≤ L k_B T_r} of the prepared
-/// energy, L the level a thermal ensemble's share s lies above (reach.rs, # The reach's level). Its extrema are provable
-/// bounds over its cells, made side by side (reach.rs, # A cell's sides); what it leaves out of the initial ensemble
-/// beyond that is counted on the ensemble (reach.rs `Model::left_out`).
+/// energy, L the level a thermal ensemble's share s lies above (reach.rs, # The reach's level) -- within the trap's region
+/// where that level is at or above the potential's far value, and outside the region the sublevel set of a level below
+/// it (reach.rs, # The trap's region). Its extrema are provable bounds over its cells, made side by side (reach.rs, # A
+/// cell's sides); what it leaves out of the initial ensemble beyond that is counted on the ensemble (reach.rs
+/// `Model::left_out`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reach {
     /// T_r (µK): the temperature the atoms reach (never lowered; the solve's trials read it).
@@ -151,9 +170,13 @@ pub struct Reach {
     /// (SPEC §3; reach.rs, # The reach's level: classically Q(3, L) = s, L = 12.89, where the trap holds along three
     /// axes).
     pub energy: f64,
+    /// The energy above V_min it holds outside the trap's region (rad/µs; field.rs, # The region): `energy` itself where
+    /// the level is below the far value -- the sublevel set whole --, else that of a level below the far value, or none
+    /// (−∞): an atom outside the region above the far value is lost (SPEC §1.7), and one below it is bound.
+    pub outside: f64,
     /// V_min (rad/µs).
     pub minimum: f64,
-    /// A box (µm, [low, high] per lab axis) that provably holds the sublevel set: where the subdivisions start.
+    /// A box (µm, [low, high] per lab axis) that provably holds the reach: where the subdivisions start.
     pub cell: [[f64; 2]; 3],
     /// The largest speed |v| (µm/µs) in the reach: √(2 (ħ/m) energy).
     pub speed: f64,
@@ -229,6 +252,16 @@ pub struct UnitError {
     /// twice its level's own second-order term over the drive's distance (eliminate.rs `Model::drive_error`) --; a;
     /// (w/σ)².
     pub temperature: f64,
+    /// The part of both that a flow's rate error moves (units.rs, # A rate's error on the populations): x times the
+    /// sample's cluster's ground population, the flow's source side as the sample sees it; and the flow's far side, the
+    /// ground states of the hyperfine level it moves population into, a bit each (none: 0). The sample sees its own side alone:
+    /// the run takes this part against the output's populations of both sides (units.rs `destined`).
+    pub moved: f64,
+    pub into: u32,
+}
+impl UnitError {
+    /// No error.
+    pub const NONE: UnitError = UnitError { parameter: 0.0, population: 0.0, temperature: 0.0, moved: 0.0, into: 0 };
 }
 
 /// A trajectory state the units' errors are measured at (the solve's trial states).
@@ -275,10 +308,6 @@ pub struct Photon {
     pub amplitudes: [Vec<C64>; 3],
     /// ∇u_a of the folded part (`Photon::moments`): gradients[i][a], i the lab axis; empty where none were asked.
     pub gradients: [[Vec<C64>; 3]; 3],
-    /// The explicit states' part of the second moment's rate, in the amplitudes' norm (1/µm² times ‖u‖²'s unit; eliminate.rs
-    /// `Answer::moment`): their absorption's mean is the Ehrenfest force's. Zero where it is not made: without
-    /// gradients, and of a class made alone (photon.rs `Gradients`).
-    pub explicit: [[f64; 3]; 3],
 }
 
 /// What the light a class's photons absorb does to the momentum per unit time, at the state the photons were made of and
@@ -290,7 +319,7 @@ pub struct Moments {
     pub weight: f64,
     /// Σ_a Im⟨u_a|∇u_a⟩ (1/µm): the folded part's scattering force.
     pub mean: [f64; 3],
-    /// Σ_a Re⟨∇u_a|⊗|∇u_a⟩ and the explicit states' part (1/µm²): the second moment's rate.
+    /// Σ_a Re⟨∇u_a|⊗|∇u_a⟩ (1/µm²): the second moment's rate.
     pub second: [[f64; 3]; 3],
     /// s b (1/µm): what a jump of the class carries of its conditional mean b = mean/W -- all of it up to one absorbed
     /// photon's momentum, s = min(1, k_c/|b|).
@@ -492,7 +521,7 @@ impl Model {
             if !driven.contains(&(component, excited, ground)) {
                 continue;
             }
-            if component.counter {
+            if !component.keepable() {
                 return Err("反旋转项的驱动只能按裸能级绝热消去，不能显式跟踪（模型的适用范围）".into());
             }
             let at = &mut levels[2 * component.frequency][(excited - GROUND) * GROUND + ground];
@@ -560,9 +589,18 @@ impl Model {
             }
         }
         // Each frequency's drives folded at their levels (far.rs `Tone::folded`); the carriers, the components with a drive not
-        // bare.
+        // bare. A drive folded onto an explicit state is a Raman pair with each of that state's kept legs, read at the
+        // state's energy among its cluster's ground states (`read`; far.rs, # A fold onto an explicit state): where the one
+        // gate of its pairs does not hold with every beam at its peak (units.rs `Model::joined`), the pair is a resonant
+        // coherent coupling of its two ground states -- Zeeman sublevels at B = 0 lie at one energy, its fold's two-photon
+        // distance nothing (far.rs `second_order` divided by it) --, and its drive joins its ground state to the cluster as
+        // a kept drive does.
         let levels = model.levels.clone();
         let read = model.read_made();
+        let joined = model.joined(&read);
+        if !joined.is_empty() {
+            return model.rekept(&[kept, &joined[..]].concat());
+        }
         model.tones = model.tones.iter().enumerate().map(|(frequency, tone)| tone.folded(&|side, e, g| levels[2 * frequency + side][(e - GROUND) * GROUND + g], &read)).collect();
         model.strongest = model.strongest_made();
         model.carriers = eliminate::Carrier::all(&model);
@@ -810,11 +848,10 @@ impl<'a> Run<'a> {
         let (plan, table) = &self.plans[cluster];
         self.model.photons_of(plan, *table, at, psi, photon::Gradients::None).0
     }
-    /// The scattering of a cluster's state at a point per unit time, an explicit state's decay at the populations
-    /// `populations` of unit sum (None: the state's own; photon.rs `Model::scattering_of`).
-    pub fn scattering_at(&self, cluster: usize, at: &Point, psi: &[C64], populations: Option<&[f64]>) -> Scattering {
+    /// The scattering of a cluster's state at a point per unit time (photon.rs `Model::scattering_of`).
+    pub fn scattering_at(&self, cluster: usize, at: &Point, psi: &[C64]) -> Scattering {
         let (plan, table) = &self.plans[cluster];
-        self.model.scattering_of(plan, *table, at, psi, populations).0
+        self.model.scattering_of(plan, *table, at, psi).0
     }
     /// Where a jump's bare state `f` lands in a cluster at a point (assemble.rs, # The fourth order; `Model::landed`): the
     /// slow state it continues in, with its norm.
@@ -832,6 +869,36 @@ impl<'a> Run<'a> {
     pub fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Middle<'a> {
         let (plan, table) = &self.plans[cluster];
         self.model.middle(plan, r, t, *table)
+    }
+}
+
+/// What a run of a model counts (`Run::with`) priced from its plans alone, each cluster's near forms read from a table on
+/// given axes (`Model::priced`; solve.rs `Pricing`): no table is made and nothing eliminated -- a count is the
+/// definition's, whatever the numbers. Per cluster its counts at a node (`Middle::work`); a middle with a step's
+/// scattering beside it, and a jump's photons, the largest over the clusters (real multiply-adds).
+pub(crate) struct Priced {
+    pub(crate) costs: Vec<[f64; 3]>,
+    pub(crate) assembly: f64,
+    pub(crate) photons: f64,
+}
+
+impl Model {
+    /// `Priced` with cluster c's near forms from a table on `axes[c].0` axes whose coordinates' values at a point count
+    /// `axes[c].1` (tabulate.rs `Model::table_axes`, `Model::priced_axes`), counted as `Run::with` counts at the focus:
+    /// the scattering makes the fourth order's matrices there, and the middle and a jump's photon at the same point find
+    /// them made (assemble.rs `Model::quartic`); the matrices change along the lab axes the plan's beams change along
+    /// there.
+    pub(crate) fn priced(&self, axes: &[(usize, f64)]) -> Priced {
+        use photon::Gradients;
+        let running = self.running();
+        let plans: Vec<Arc<assemble::Plan>> = (0..self.clusters.len()).map(|c| self.plan(c, &running)).collect();
+        let focus = self.light.amplitudes([0.0; 3]);
+        let live = |p: &assemble::Plan| (0..3).filter(|&a| p.beams.iter().any(|&l| focus[l].gradient[a] != C64::ZERO)).count();
+        let largest = |count: &dyn Fn(&assemble::Plan, usize, f64) -> f64| plans.iter().zip(axes).map(|(p, &(d, place))| count(p, d, place)).fold(0.0, f64::max) * crate::decide::COMPLEX;
+        let scattering = largest(&|p, d, place| p.sited_work(d, place, 1, true) + p.classes_work(d, Gradients::All, live(p)));
+        let photons = largest(&|p, d, place| p.sited_work(d, place, 1, false) + p.classes_work(d, Gradients::None, live(p)) + (0..p.classes.len()).map(|class| p.classes_work(d, Gradients::Of(class), live(p))).fold(0.0, f64::max));
+        let assembly = largest(&|p, d, place| p.middle_work(d, place)) + scattering;
+        Priced { costs: plans.iter().zip(axes).map(|(p, &(d, _))| p.costs(d)).collect(), assembly, photons }
     }
 }
 

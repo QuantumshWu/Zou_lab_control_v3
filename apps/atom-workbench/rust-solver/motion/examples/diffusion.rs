@@ -15,12 +15,24 @@
 //!   change of an axis's kinetic energy booked to the part of the engine that made it (`account`).
 //!
 //! `waist` (µm; 0: the scene's own) replaces the trap beam's waist: the same light at the focus, uniform over the path.
+//! `AXIS=x,y,z` (default 0,0,1) is the direction ê of `engine`'s path and of the momentum it reads, `ORIGIN=x,y,z` (µm,
+//! default 0) its point s = 0: the path is ORIGIN + s ê; `dump` takes its points and its gradient along the same ê (as
+//! claude/motion-v2-diffusion2's 58acfb30).
 
 use atom_motion::field::Light;
 use atom_motion::linalg::{C64, Mat};
 use atom_motion::model::{Model, Point, Run, Unit, GROUND};
 use atom_motion::request::Request;
-use atom_motion::step::{stumpff, Brownian, Dynamics, Middle, Midway, Scratch, Step, Trajectory};
+use atom_motion::step::{Brownian, Dynamics, Middle, Midway, Scratch, Step, Trajectory};
+
+/// The domain the tool's steps are taken in: every step proven -- its courses and models are its own to choose (a run's
+/// are held to the reach its model was judged over, atom_motion's solve.rs `Domain`).
+struct Everywhere;
+impl atom_motion::step::Domain for Everywhere {
+    fn proven(&self, _: &atom_motion::step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> Result<bool, atom_motion::step::Unproven> {
+        Ok(true)
+    }
+}
 
 /// The distance (µm) over which a jump operator's gradient is read as a central difference: the operators change over
 /// 1/k ≈ 0.12 µm, so the difference errs by (kε)²/6 ≈ 10⁻⁷ of the gradient.
@@ -35,6 +47,25 @@ fn scene(name: &str, waist: f64) -> Request {
         request.beams[trap].waist = Some(waist);
     }
     request
+}
+
+/// The path's direction ê (`AXIS`, normalized) and its origin (`ORIGIN`).
+fn axis() -> ([f64; 3], [f64; 3]) {
+    let read = |name: &str, default: [f64; 3]| -> [f64; 3] {
+        std::env::var(name).map_or(default, |s| {
+            let v: Vec<f64> = s.split(',').map(|x| x.parse().unwrap()).collect();
+            [v[0], v[1], v[2]]
+        })
+    };
+    let e = read("AXIS", [0.0, 0.0, 1.0]);
+    let size = (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt();
+    (e.map(|x| x / size), read("ORIGIN", [0.0; 3]))
+}
+
+/// A vector's component along the path's direction.
+fn on_axis(v: [f64; 3]) -> f64 {
+    let e = axis().0;
+    (0..3).map(|a| e[a] * v[a]).sum()
 }
 
 fn reference(request: &Request) -> (usize, [f64; GROUND]) {
@@ -146,15 +177,15 @@ fn generator_at(run: &Run, cluster: usize, at: &Point) -> (Mat, Vec<C64>) {
             rho.fill(C64::ZERO);
             if i == j {
                 rho[i * n + i] = C64::ONE;
-                g[i * n + i] = C64::real(middle.force(&path, 0.0, &rho)[2]);
+                g[i * n + i] = C64::real(on_axis(middle.force(&path, 0.0, &rho)));
                 continue;
             }
             rho[i * n + j] = C64::ONE;
             rho[j * n + i] = C64::ONE;
-            let re = 0.5 * middle.force(&path, 0.0, &rho)[2];
+            let re = 0.5 * on_axis(middle.force(&path, 0.0, &rho));
             rho[i * n + j] = C64::new(0.0, 1.0);
             rho[j * n + i] = C64::new(0.0, -1.0);
-            let im = 0.5 * middle.force(&path, 0.0, &rho)[2];
+            let im = 0.5 * on_axis(middle.force(&path, 0.0, &rho));
             g[j * n + i] = C64::new(re, -im);
             g[i * n + j] = C64::new(re, im);
         }
@@ -194,7 +225,7 @@ fn dump(name: &str, waist: f64, kind: &str, points: &str, out: &str) {
     let points: Vec<serde_json::Value> = list
         .iter()
         .map(|&[z, kappa]| {
-            let at = |dz: f64| Point { r: [0.0, 0.0, z + dz], kappa: [0.0, 0.0, kappa], t: 0.0 };
+            let at = |dz: f64| { let (e, o) = axis(); Point { r: std::array::from_fn(|a| o[a] + (z + dz) * e[a]), kappa: e.map(|x| x * kappa), t: 0.0 } };
             let clusters: Vec<serde_json::Value> = (0..model.clusters().len())
                 .map(|c| {
                     let (h, g) = generator_at(&run, c, &at(0.0));
@@ -205,7 +236,7 @@ fn dump(name: &str, waist: f64, kind: &str, points: &str, out: &str) {
         })
         .collect();
     let clusters: Vec<serde_json::Value> = model.clusters().iter().map(|c| serde_json::json!({"states": c.states, "ground": c.ground, "names": c.states.iter().map(|&s| request.states[s].clone()).collect::<Vec<_>>()})).collect();
-    std::fs::write(out, serde_json::to_string(&serde_json::json!({"scene": name, "waist": waist, "kind": kind, "epsilon": EPSILON, "hbar_over_mass": model.hbar_over_mass(), "clusters": clusters, "points": points})).unwrap()).unwrap();
+    std::fs::write(out, serde_json::to_string(&serde_json::json!({"scene": name, "waist": waist, "kind": kind, "epsilon": EPSILON, "axis": axis().0, "origin": axis().1, "hbar_over_mass": model.hbar_over_mass(), "clusters": clusters, "points": points})).unwrap()).unwrap();
 }
 
 /// A prescribed path along z (x = y = 0): at rest, at a constant velocity (the position wrapped by the light's period, on
@@ -248,7 +279,7 @@ const WIDTH: usize = 11;
 fn stepped(run: &Run, t: &Trajectory, mut length: f64, brownian: &mut dyn FnMut(f64) -> Brownian, scratch: &mut Scratch) -> (Step, Brownian, f64) {
     loop {
         let part = brownian(length);
-        match Midway::new(run, t, length).and_then(|through| through.attempt(t, &part, &[], scratch)) {
+        match Midway::new(run, t, length).and_then(|through| through.attempt(t, &part, &[], scratch, &Everywhere)) {
             Ok(step) => return (step, part, length),
             Err(e) => {
                 length *= 0.5;
@@ -258,42 +289,25 @@ fn stepped(run: &Run, t: &Trajectory, mut length: f64, brownian: &mut dyn FnMut(
     }
 }
 
-/// What a step gave the momentum at its middle (step.rs: the reference's half flow, the kick, the half flow): the
-/// point (r_h, κ_h) its first half flow reaches; the whole kick there, the momentum its second half flow starts from
-/// less κ_h; and the jumps' part of it -- a jump's kick δκ, made at the time u from the middle, enters the flow as
-/// δκ cos ωu along each principal axis (step.rs, # Jumps).
-fn kicks(step: &Step) -> ([f64; 3], [f64; 3], [f64; 3], [f64; 3]) {
-    let g = &step.segment;
-    let (start, tau) = g.step;
-    let (r_h, k_h) = g.flow.advance(g.from, 0.5 * tau);
-    let after = g.flow.advance((step.end.r, step.end.kappa), -0.5 * tau).1;
-    let mut jumps = [0.0; 3];
-    for (kick, u) in step.made.iter().filter_map(|made| made.kick.map(|kick| (kick, (made.state.time - start) - 0.5 * tau))) {
-        for (e, lambda) in g.flow.axes.iter().zip(&g.flow.curvatures) {
-            let along = (0..3).map(|a| e[a] * kick[a]).sum::<f64>() * stumpff(g.flow.hbar_over_mass * lambda * u * u).0;
-            for a in 0..3 {
-                jumps[a] += along * e[a];
-            }
-        }
-    }
-    (r_h, k_h, std::array::from_fn(|a| after[a] - k_h[a]), jumps)
-}
-
-/// One trajectory of the engine held on a course: the model's steps as the solve takes them (`stepped`, on a Brownian
-/// path that does not move), their jumps made inside them on the step's own path, the position and the momentum put
-/// back on the course before every step. What the engine gives the momentum along z is accumulated apart, from the
-/// time `burn` on, and sampled every `every` µs: with the weights w = 1, w₁, w₂ (`Course::weights`, at a step's middle;
-/// a jump's at its own time) in turn [Σ w Δκ of the steps (the Ehrenfest impulse and the scattered light's force: the
-/// kick at the step's middle less its jumps' part, `kicks`), Σ w Δκ of the jumps (the emitted recoil and the absorbed
-/// mean, each jump's own kick), ∫ w² 2D_zz dt of the Brownian part (the model's 2D of the step's start state at the
-/// step's middle point)], then the jumps' count and the population outside the start's hyperfine level. Beside them
-/// the normalized internal state (its cluster and amplitudes) at every sample.
+/// One trajectory of the engine held on a course: the model's steps as the solve takes them (`stepped`, each on a part
+/// of the trajectory's own Brownian path, drawn from a stream of its own), their jumps made inside them on the step's
+/// own path, the position and the momentum put back on the course before every step (the internal state and the
+/// optical sector's pending covariance go on). What the engine gives the momentum along the axis is accumulated apart,
+/// from the time `burn` on, and sampled every `every` µs: with the weights w = 1, w₁, w₂ (`Course::weights`, at the
+/// step's middle, where the splitting makes the kick and where the jumps' kicks enter the flow) in turn the step's own
+/// decomposition (step.rs `Step::momentum`, # The step's momentum) [Σ w Δκ of the whole steps, Σ w Δκ of their jumps'
+/// part (the emitted recoil and the absorbed mean, as each enters the flow at the middle), Σ w Δκ of the reference's
+/// flow (V_ref's force)] -- the kick's part, the whole less the two, is what the steps propagate and draw: the Ehrenfest
+/// impulse less the reference's, the scattered light's force and the drawn noise of the scattered light and the
+/// optical sector --, then the jumps' count and the population outside the start's hyperfine level. Beside them the
+/// normalized internal state (its cluster and amplitudes) at every sample.
 fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64, every: f64, seed: u64, index: u64) -> (Vec<[f64; WIDTH]>, Vec<(usize, Vec<C64>)>) {
     let hm = run.hbar_over_mass();
     let place = |course: &Course, t: &mut Trajectory| {
         let (z, v) = course.at(t.time);
-        t.r = [0.0, 0.0, z];
-        t.kappa = [0.0, 0.0, v / hm];
+        let (e, o) = axis();
+        t.r = std::array::from_fn(|a| o[a] + z * e[a]);
+        t.kappa = e.map(|x| x * v / hm);
     };
     let mut t = Trajectory::new(run, start, [0.0; 3], [0.0; 3], seed, index);
     let mut scratch = Scratch::default();
@@ -301,6 +315,7 @@ fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64,
     // before every step, from a stream of the trajectory's own): the same amplitude, a path that loses its phase.
     let wander: f64 = std::env::var("DPHI").map_or(0.0, |x| x.parse().unwrap());
     let mut walk = atom_motion::random::Stream::new(67, atom_motion::random::Purpose::Initial, index, 0);
+    let mut noise = atom_motion::random::Stream::new(seed + 1, atom_motion::random::Purpose::Initial, index, 0);
     let mut course = course;
     let (mut sums, mut out, mut states) = ([0.0; WIDTH], vec![], vec![]);
     let mut next = burn;
@@ -312,22 +327,16 @@ fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64,
             *phase += (wander * length).sqrt() * walk.normals()[0];
         }
         place(&course, &mut t);
-        let (step, _, taken) = stepped(run, &t, length, &mut |_| Brownian::STILL, &mut scratch);
+        let (step, _, taken) = stepped(run, &t, length, &mut |length| Brownian::over(length, &[noise.normals(), noise.normals()]), &mut scratch);
         if t.time >= burn {
-            let (r_h, k_h, whole, jumped) = kicks(&step);
-            let spread = taken * run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi, None).diffusion[2][2];
+            let m = step.momentum();
             let w = course.weights(t.time + 0.5 * taken);
             for (i, w) in [1.0, w[0], w[1]].into_iter().enumerate() {
-                sums[3 * i] += w * (whole[2] - jumped[2]);
-                sums[3 * i + 2] += w * w * spread;
+                sums[3 * i] += w * on_axis(m.whole);
+                sums[3 * i + 1] += w * on_axis(m.jumps);
+                sums[3 * i + 2] += w * on_axis(m.flow);
             }
-            for (kick, time) in step.made.iter().filter_map(|made| made.kick.map(|kick| (kick, made.state.time))) {
-                let w = course.weights(time);
-                for (i, w) in [1.0, w[0], w[1]].into_iter().enumerate() {
-                    sums[3 * i + 1] += w * kick[2];
-                }
-                sums[9] += 1.0;
-            }
+            sums[9] += step.made.iter().filter(|made| made.kick.is_some()).count() as f64;
         }
         // The step's end on the samples' clock where it spans the rest to the next one.
         t = Trajectory { time: if taken == rest { next } else { step.end.time }, lost: None, ..step.end };
@@ -372,12 +381,14 @@ fn engine(name: &str, waist: f64, course: &str, tau: f64, count: u64, burn: f64,
         Some(tables) => Run::tabulated(&model, tables, p),
         None => Run::new(&model, p),
     };
-    let period = std::f64::consts::TAU / request.beams.iter().find(|b| b.id.starts_with("cool")).expect("a cooling beam").wave_number;
+    // The cooling beam's period, which a constant course's start is spread over (a held course needs none).
+    let period = || std::f64::consts::TAU / request.beams.iter().find(|b| b.id.starts_with("cool")).expect("a cooling beam").wave_number;
     let parts: Vec<&str> = course.split(':').collect();
     let number = |i: usize| -> f64 { parts[i].parse().unwrap() };
     let clock = std::time::Instant::now();
     // `PHASES=<n>`: the start phases on a grid of n over the period (the states' samples then sit on the reference's own
-    // points of the path); `STATES=<file>`: every sample's internal state, [trajectory's phase/2π, cluster, re, im, ...].
+    // points of the path); `STATES=<file>`: every sample's internal state, [trajectory's phase/2π, cluster, re, im, ...];
+    // `BOOKED=<file>`: the units' errors the model books at a course's point at rest (below).
     let grid: Option<f64> = std::env::var("PHASES").ok().map(|n| n.parse().unwrap());
     let both: Vec<(Vec<[f64; WIDTH]>, Vec<(usize, Vec<C64>)>, f64)> = (0..count)
         .into_par_iter()
@@ -386,7 +397,7 @@ fn engine(name: &str, waist: f64, course: &str, tau: f64, count: u64, burn: f64,
             let u = grid.map_or(u, |n| (u * n).floor() / n);
             let course = match parts[0] {
                 "rest" => Course::Rest { z: number(1) },
-                "const" => Course::Constant { z: (u - 0.5) * period, v: number(1), period },
+                "const" => Course::Constant { z: (u - 0.5) * period(), v: number(1), period: period() },
                 "osc" => Course::Oscillation { centre: number(3), amplitude: number(1), omega: number(2), phase: std::f64::consts::TAU * u },
                 other => panic!("unknown course {other}"),
             };
@@ -402,11 +413,30 @@ fn engine(name: &str, waist: f64, course: &str, tau: f64, count: u64, burn: f64,
         let rows: Vec<serde_json::Value> = both.iter().map(|(_, states, u)| serde_json::json!({"phase": u, "states": states.iter().map(|(c, psi)| serde_json::json!([c, psi.iter().flat_map(|z| [z.re, z.im]).collect::<Vec<f64>>()])).collect::<Vec<_>>()})).collect();
         std::fs::write(file, serde_json::to_string(&rows).unwrap()).unwrap();
     }
+    // `BOOKED=<file>` (a course at rest): what the model books of its units' errors where the course holds the atom -- every
+    // unit's error (`Model::errors_at`, as the solve reads it) at every sampled state, its mean over the states, and the
+    // means' sum (the solve's model error, solve.rs `sums`), on the populations (absolute) and on T (relative).
+    if let Ok(file) = std::env::var("BOOKED") {
+        assert_eq!(parts[0], "rest", "BOOKED reads a course at rest");
+        let units = model.units();
+        let (e, o) = axis();
+        let z = number(1);
+        let r: [f64; 3] = std::array::from_fn(|a| o[a] + z * e[a]);
+        let samples: Vec<atom_motion::model::Sample> = both.iter().flat_map(|(_, states, _)| states.iter().map(|(c, psi)| atom_motion::model::Sample { cluster: *c, at: Point { r, kappa: [0.0; 3], t: 0.0 }, psi: psi.clone() })).collect();
+        let rows: Vec<Vec<[f64; 2]>> = samples.par_iter().map(|s| model.errors_at(&units, s, tables.as_ref()).iter().map(|x| [x.population, x.temperature]).collect()).collect();
+        let n = rows.len() as f64;
+        let means: Vec<[f64; 2]> = (0..units.len()).map(|u| [rows.iter().map(|r| r[u][0]).sum::<f64>() / n, rows.iter().map(|r| r[u][1]).sum::<f64>() / n]).collect();
+        let sum = [means.iter().map(|m| m[0]).sum::<f64>(), means.iter().map(|m| m[1]).sum::<f64>()];
+        let mut largest: Vec<usize> = (0..units.len()).collect();
+        largest.sort_by(|&a, &b| means[b][0].total_cmp(&means[a][0]));
+        let units_json: Vec<serde_json::Value> = largest.iter().take(12).map(|&u| serde_json::json!({"unit": format!("{:?}", units[u]), "population": means[u][0], "temperature": means[u][1]})).collect();
+        std::fs::write(file, serde_json::to_string(&serde_json::json!({"s": z, "states": samples.len(), "units": units.len(), "population": sum[0], "temperature": sum[1], "largest": units_json})).unwrap()).unwrap();
+    }
     // `ENDS=1`: the first and the last sample alone (the rates over the whole span need no more).
     let ends = std::env::var("ENDS").as_deref() == Ok("1");
     let all: Vec<Vec<[f64; WIDTH]>> = both.into_iter().map(|(samples, _, _)| if ends { vec![samples[0], samples[samples.len() - 1]] } else { samples }).collect();
     let flat: Vec<f64> = all.iter().flat_map(|t| t.iter().flat_map(|s| s.iter().copied())).collect();
-    std::fs::write(out, serde_json::to_string(&serde_json::json!({"scene": name, "waist": waist, "course": course, "tau": tau, "count": count, "burn": burn, "span": span, "every": every, "samples": all[0].len(), "width": WIDTH, "hbar_over_mass": model.hbar_over_mass(), "data": flat})).unwrap()).unwrap();
+    std::fs::write(out, serde_json::to_string(&serde_json::json!({"scene": name, "waist": waist, "course": course, "tau": tau, "count": count, "burn": burn, "span": span, "every": every, "samples": all[0].len(), "width": WIDTH, "columns": ["whole", "jumps", "flow"], "hbar_over_mass": model.hbar_over_mass(), "data": flat})).unwrap()).unwrap();
 }
 
 /// `free`: the engine's own dynamics (`adapt::advance` at the constant step τ, its Brownian path with it) of atoms that
@@ -472,7 +502,7 @@ fn free(name: &str, dimension: &str, temperature: f64, tau: f64, count: u64, spa
                 let mut sums = [0.0; 7];
                 for s in 0..per {
                     let to = (w * per + s + 1) as f64 * tau;
-                    atom_motion::adapt::advance(&run, tau, &mut t, &mut scratch, &mut path, to, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
+                    atom_motion::adapt::advance(&run, &Everywhere, tau, &mut t, &mut scratch, &mut path, to, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
                     for &axis in &held {
                         // Held at its offset; or, `SWING=1`, on the trap's own oscillation of that amplitude along the
                         // axis, each atom at its own phase: the axis moves as a trapped atom's does and takes nothing
@@ -511,7 +541,7 @@ const PARTS: usize = 5;
 /// `account`: `free`'s atoms on the same dynamics, stepped here (`stepped`: the engine's step with its jumps inside it;
 /// each step's part of a Brownian path of its own, independent increments) so that every change of an axis's kinetic
 /// energy (ħ/m)κ_a²/2 is booked to the part of the engine that made it. A kick Δκ at the middle momentum κ_h changes
-/// it by (ħ/m)(κ_h + Δκ/2)·Δκ, shared between the kick's parts in proportion (`kicks`): the Brownian part (the kick
+/// it by (ħ/m)(κ_h + Δκ/2)·Δκ, shared between the kick's parts in proportion (step.rs `Step::momentum`): the Brownian part (the kick
 /// less the same step's on a path that does not move: the propagation and the jumps do not know the path), the
 /// scattered light's force τF_s (of the state at the step's start), the jumps' kicks as they enter the flow at the
 /// middle, and the rest, the Ehrenfest impulse less the reference's force; the reference's two half flows by the
@@ -572,16 +602,19 @@ fn account(name: &str, dimension: &str, temperature: f64, tau: f64, count: u64, 
                         let rest = to - t.time;
                         let (step, _, taken) = stepped(&run, &t, rest, &mut |length| Brownian::over(length, &[noise.normals(), noise.normals()]), &mut scratch);
                         let quiet = stepped(&run, &t, taken, &mut |_| Brownian::STILL, &mut scratch).0;
-                        let ((r_h, k_h, whole, jumped), still) = (kicks(&step), kicks(&quiet).2);
-                        let scattering = run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi, None);
+                        // The step's one decomposition (step.rs `Step::momentum`): the kick at the middle with its
+                        // jumps' part, κ_j − κ_h, the reference's flow the rest of the whole.
+                        let (m, still, (r_h, k_h)) = (step.momentum(), quiet.momentum(), step.middle());
+                        let scattering = run.scattering_at(t.cluster, &Point { r: r_h, kappa: k_h, t: t.time + 0.5 * taken }, &t.psi);
                         for a in 0..3 {
-                            let (random, force) = (whole[a] - still[a], taken * scattering.force[a]);
-                            let middle = hm * (k_h[a] + 0.5 * whole[a]);
-                            work[a][0] += middle * (whole[a] - jumped[a] - random - force);
+                            let kicked = m.kick[a] + m.jumps[a];
+                            let (random, force) = (kicked - (still.kick[a] + still.jumps[a]), taken * scattering.force[a]);
+                            let middle = hm * (k_h[a] + 0.5 * kicked);
+                            work[a][0] += middle * (m.kick[a] - random - force);
                             work[a][1] += middle * force;
                             work[a][2] += middle * random;
-                            work[a][3] += middle * jumped[a];
-                            work[a][4] += 0.5 * hm * (step.end.kappa[a].powi(2) - (k_h[a] + whole[a]).powi(2) + k_h[a].powi(2) - step.segment.from.1[a].powi(2));
+                            work[a][3] += middle * m.jumps[a];
+                            work[a][4] += 0.5 * hm * (step.end.kappa[a].powi(2) - (k_h[a] + kicked).powi(2) + k_h[a].powi(2) - t.kappa[a].powi(2));
                         }
                         for (m, (a, b)) in [(1, 1), (2, 2), (1, 2)].into_iter().enumerate() {
                             moments[3 + m] += taken * scattering.diffusion[a][b];
