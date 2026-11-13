@@ -27,7 +27,8 @@ param(
 # (version, tag, the source stamp and commit it was built from, the asset's name, size and
 # sha256), and this script puts that release in place. It downloads the asset from the GitHub
 # release (ZLC_RELEASES names another server with the same paths), checks its size and sha256,
-# extracts it beside the live engine (bin\engine.next, renamed in only once whole) and swaps it in
+# unpacks the .tar.xz (tools\tar_xz.cs: Windows' own tar.exe and .NET have no xz decoder on every
+# lab PC) beside the live engine (bin\engine.next, renamed in only once whole) and swaps it in
 # by renaming: the live folder aside, the new one in. A folder a program runs from is never
 # replaced; the download waits in bin\engine.next until the four programs next start.
 $ErrorActionPreference = 'Stop'
@@ -308,32 +309,33 @@ if ($download) {
     $local = if ($env:ZLC_V3_LOCAL) { $env:ZLC_V3_LOCAL } else { Join-Path $root '.local' }
     $downloads = Join-Path $local 'downloads'
     New-Item -ItemType Directory -Force -Path $downloads | Out-Null
-    $zip = Join-Path $downloads $asset.name
-    if (-not (Test-ZlcArchive $zip $asset)) {
+    $archive = Join-Path $downloads $asset.name
+    if (-not (Test-ZlcArchive $archive $asset)) {
     Write-Host (Protect-ZlcNetworkText "Downloading $url ($([math]::Round($asset.size / 1MB, 1)) MB) ...")
     $policy = Get-ZlcProxyPolicy $url (Find-Git)
     Write-Host "Network route: $($policy.Source) ($(if ($policy.Address) { 'proxy' } else { 'direct' }))."
     if ($policy.Address -match '^socks') {
-        try { Invoke-ZlcSocksHttp $url $policy -Destination "$zip.part" -Seconds 300 }
-        catch { Remove-Item -LiteralPath "$zip.part" -Force -ErrorAction SilentlyContinue; throw }
-        $done = (Get-Item -LiteralPath "$zip.part").Length
+        try { Invoke-ZlcSocksHttp $url $policy -Destination "$archive.part" -Seconds 300 }
+        catch { Remove-Item -LiteralPath "$archive.part" -Force -ErrorAction SilentlyContinue; throw }
+        $done = (Get-Item -LiteralPath "$archive.part").Length
     } else {
     $request = New-ZlcWebRequest $url 30000 $policy
-    $done = Save-ZlcResponse ($request.GetResponse()) "$zip.part" $asset.size
+    $done = Save-ZlcResponse ($request.GetResponse()) "$archive.part" $asset.size
     }
-    $sha = (Get-FileHash -LiteralPath "$zip.part" -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sha = (Get-FileHash -LiteralPath "$archive.part" -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($done -ne $asset.size -or $sha -ne $asset.sha256) {
-        Remove-Item -LiteralPath "$zip.part"
+        Remove-Item -LiteralPath "$archive.part"
         throw "The download is not the release: $done bytes, sha256 $sha (wanted $($asset.size) bytes, $($asset.sha256))."
     }
-    Move-Item -LiteralPath "$zip.part" -Destination $zip -Force
+    Move-Item -LiteralPath "$archive.part" -Destination $archive -Force
     Write-Host 'Checked: the size and sha256 are the release''s.'
     } else { Write-Host 'Using the already verified release archive.' }
-    # Extracted beside, checked, then renamed to bin\engine.next whole.
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    # Unpacked beside, checked, then renamed to bin\engine.next whole.
+    Write-Host 'Unpacking ...'
+    if (-not ('ZlcTarXz' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'tar_xz.cs') }
     $partial = "$next.partial"
     Remove-Folder $partial
-    [IO.Compression.ZipFile]::ExtractToDirectory($zip, $partial)
+    [ZlcTarXz]::Extract($archive, $partial)
     $unpacked = Join-Path $partial 'engine'
     if (-not ((Test-ZlcProducts $unpacked) -and (& $current (Read-Source (Join-Path $unpacked 'SOURCE'))))) {
         Remove-Folder $partial
@@ -342,7 +344,7 @@ if ($download) {
     Copy-Item -LiteralPath (Join-Path $unpacked 'SOURCE') -Destination (Join-Path $partial 'SOURCE')
     Remove-Folder $next
     [IO.Directory]::Move($partial, $next)
-    Remove-Item -LiteralPath $zip
+    Remove-Item -LiteralPath $archive
     $staged = Read-Source (Join-Path $next 'SOURCE')
 }
 if (Invoke-Swap 0) { Write-Host "In place: v$($expected.version)." }
