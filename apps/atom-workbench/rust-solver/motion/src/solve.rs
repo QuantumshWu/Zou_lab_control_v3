@@ -93,10 +93,16 @@
 //! and d(h)/(2^p − 1) is e(h) where the order holds between the two levels, e(2h) = 2^p e(h). Nothing in d tests that:
 //! - two levels that are both too coarse agree. Measured: e038 (S3-like, 0.38 mW, 3 G) at 0.589 µs read within the
 //!   share against 1.178 µs -- the companion under-heats with it --, and its T(1 ms) is 79.1 ± 2.8 µK against the
-//!   converged 89.2 ± 2.6 (τ 0.0895 and 0.179 agree): −11.3 %, outside the target;
+//!   converged 89.2 ± 2.6 (τ 0.0895 and 0.179 agree): −11.3 %, outside the target. A two-level atom in a resonant
+//!   standing wave at Ω₀ = 10Γ (mass ×100, held at an antinode; the reach grown to 309 µK) was taken at 1.30 µs, a
+//!   seventeenth of the beat period π/(kv) at the reach's rms speed, and its T(200 µs) is 29.8 against the 23.2 µK of
+//!   0.162 µs (+28 %);
 //! - a read of other levels is no verdict for these. Measured: m20 (S3 at −20 MHz) at 0.392 µs read its loss against
 //!   0.784 µs at an estimate of 1.95 times the share's square (far end 7.7), stood on the rung above's read lowered by
-//!   the order, booked its clear part, none, and its loss at 600 µs is 0.587 against the converged 0.724 (−5.2σ).
+//!   the order, booked its clear part, none, and its loss at 600 µs is 0.587 against the converged 0.724 (−5.2σ). Its
+//!   own read alone does not catch it: on 352 pairs it reads 0.69 b, within -- the two levels agree well enough --,
+//!   where the rung above's read, lowered to it, is 2.0 b: the order is not shown, and the check goes down (to
+//!   0.098 µs, the loss at 600 µs 0.717).
 //! The order is a property of three levels: e ∝ h^p across them makes the successive differences shrink by 2^p at
 //! every output, d(2h) = 2^p d(h). It is the observed-order test that grid-convergence studies hold Richardson's
 //! extrapolation to (Roache's grid convergence index takes a level's error from two grids only with a safety factor
