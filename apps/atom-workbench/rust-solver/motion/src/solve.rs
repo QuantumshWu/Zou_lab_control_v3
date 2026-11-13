@@ -250,21 +250,25 @@
 //!   them inside its steps (adapt.rs, # The reads). Every level of the pilot is read at every candidate (`Plan::reads`;
 //!   the run level keeps its states there), the product at the analysis times alone.
 //! - The analysis times of some levels are the halving's of their readings (`analysed`; analysis.rs, # The rule): from
-//!   the first round's ends, an interval is halved while a reading at its middle or its quarters lies off the line
-//!   through its ends beyond its own jackknife interval among the interval's looks and the line's rounding. The
+//!   the run's two ends, an interval is halved while a reading at its middle, its quarters -- and, where it is long, the
+//!   nested middles below them (next) -- lies off the line through its ends beyond its own jackknife interval among the
+//!   interval's looks and the line's rounding. The
 //!   readings are what the decisions read of the levels (estimate.rs `readings`): the run level's loss, rows as shown
 //!   and T per lab axis, and, where a read compares two levels, the step's error of each of them. The step's check
 //!   stands on its two levels' times (`read_step`); the reach's falsifier, the model's decisions and the product on the
 //!   run level's.
-//! - The first round's ends: the run's two ends -- the lights are switched on at t = 0 and stay so: the request has
-//!   no other switching time --, and as many more evenly between them as leave no interval longer than T's longest
-//!   window, one period of the slowest lab axis (`Plan::window`). T at a time is its window's mean (estimate.rs
-//!   `half_window`), so no change of it along that axis is narrower than the window, and the first round's reads, a
-//!   quarter of an interval apart at most, meet every such change wherever it lies -- none is invisible to them; an
-//!   axis of a period down to a quarter of the window's alike. A feature narrower than that, away from the lights'
-//!   switching, is not promised (a hypothesis: between the switches the readings follow the atoms' motion, of the
-//!   trap's periods; the internal state's own transients begin at a switch, an end). No number of the times is
-//!   chosen: the window is T's own. (PGC3D 1 ms, a 19.5 kHz axis: 21 ends, 26 analysis times as read.)
+//! - The physical scale bounds the reads' spacing, not the intervals: the ends are the run's two ends alone -- the
+//!   lights are switched on at t = 0 and stay so: the request has no other switching time --, and an interval is read
+//!   at points no farther apart than a quarter of T's shortest window, one period of the fastest lab axis
+//!   (`Plan::window`), its nested middles (analysis.rs: a half's reads its parent's, a feature found stays found). T at
+//!   a time is its windows' mean (estimate.rs `half_window`), so no change of it is narrower than the shortest window,
+//!   and reads a quarter of it apart meet every such change wherever it lies -- none is invisible to them. A feature
+//!   narrower than that, away from the lights' switching, is not promised (a hypothesis: between the switches the
+//!   readings follow the atoms' motion, the trap's periods its scale and the fastest axis's the shortest; the internal
+//!   state's own transients begin at a switch, an end). No number of the times is chosen: the window is T's own, and a
+//!   read is no end -- an interval whose reads lie on its line stands whole and adds no time. (First built with the
+//!   intervals bounded instead, by the slowest axis's window, every end a time: PGC3D 1 ms read at 26 analysis times,
+//!   2200 rows of the units, and took 1.23 times 717cb386's CPU over three alternating pairs.)
 //! - The units' errors are no reading: a state's read costs about a millisecond (PGC3D reads 1185 units), and the
 //!   halving reads three times as many times as it keeps. A unit's error at a state is a function of its place, speed
 //!   and internal state, whose ensemble the rows and T read (a hypothesis, not tested by itself: an error of the
@@ -1328,14 +1332,11 @@ fn grid(end: f64, rung: f64) -> Vec<f64> {
 
 /// The analysis times (module documentation, # The analysis times; analysis.rs `analysis_times`) of some groups'
 /// sums `fine` at the candidates `times`, with their companion's `coarse` where the read compares two levels (else
-/// empty): the places of the times that stand, from the first round's ends -- the run's two ends, where the lights are
-/// switched on, and as many more evenly between them as leave no interval longer than T's longest window `window`
-/// (`Plan::window`).
+/// empty): the places of the times that stand, from the run's two ends -- the lights are switched on at t = 0, and the
+/// request switches them nowhere else --, every interval read no farther apart than a quarter of T's shortest window
+/// `window` (`Plan::window`).
 fn analysed(times: &[f64], window: f64, fine: &[&Group], coarse: &[&Group], scales: &Scales) -> Vec<usize> {
-    let last = times.len() - 1;
-    let parts = (times[last] / window).ceil().max(1.) as usize;
-    let ends: Vec<usize> = (0..=parts).map(|i| ((i * last) as f64 / parts as f64).round() as usize).collect();
-    analysis_times(times, &ends, &mut |k| readings(fine, coarse, k, scales))
+    analysis_times(times, &[], window, &mut |k| readings(fine, coarse, k, scales))
 }
 
 /// The step's read between two levels of the same groups (`between`) at their analysis times (`analysed`, the two
@@ -2518,8 +2519,8 @@ struct Plan {
     /// axis T's window's half width there, cut at both ends of the run (`Plan::read_at`).
     reads: Vec<f64>,
     read_halves: Vec<V3>,
-    /// T's longest window (µs): one period of the slowest lab axis, the analysis times' first round's longest interval
-    /// (`analysed`).
+    /// T's shortest window (µs): one period of the fastest lab axis, four times the farthest the analysis times' reads
+    /// lie apart (`analysed`).
     window: f64,
     frequencies: V3,
 }
@@ -2533,7 +2534,7 @@ impl Plan {
         let mut listed: Vec<usize> = (0..count).map(|i| ((i * last) as f64 / (count - 1) as f64).round() as usize).collect();
         listed.dedup();
         let end = times[last] + halves[last].iter().fold(0., |a: f64, &b| a.max(b));
-        let window = TAU / frequencies.iter().copied().fold(f64::INFINITY, f64::min);
+        let window = TAU / frequencies.iter().copied().fold(0., f64::max);
         let mut plan = Plan { end, times: times.to_vec(), halves, listed, cell: end, reads: vec![], read_halves: vec![], window, frequencies };
         plan.read_at(vec![0., end]);
         plan
@@ -6116,13 +6117,13 @@ mod tests {
         assert!(shared > 0);
     }
 
-    /// The analysis times' candidates and their first round (module documentation, # The analysis times; `grid`,
-    /// `analysed`): the companion's step ends m·2τ to the run's end; readings that are the same in every group (no noise,
-    /// no change) split no interval, and the analysis times are the first round's ends -- the run's two ends and as many
-    /// more evenly between as leave no interval longer than T's longest window (one period of the slowest axis): 39 µs
-    /// of a 1000 µs run at 2τ = 1 µs, 26 intervals of 38 or 39 µs; a window longer than the run, the run's two ends.
+    /// The analysis times' candidates and their reads (module documentation, # The analysis times; `grid`, `analysed`):
+    /// the companion's step ends m·2τ to the run's end. Readings the same in every group (no noise) that do not change
+    /// split nothing: the run's two ends stand, whatever the window. Where the run's rows change for 5 µs at 313 µs, the
+    /// reads a quarter of T's shortest window apart at most find it -- a 40 µs window, reads 7.8 µs apart: times about
+    /// it --, and with a window longer than the run, the middle and the quarters alone, it is unseen.
     #[test]
-    fn the_first_round_s_intervals_are_no_longer_than_t_s_longest_window() {
+    fn the_reads_are_no_farther_apart_than_a_quarter_of_t_s_shortest_window() {
         let candidates = grid(1000., 0.5);
         assert!(candidates.len() == 1001 && candidates[1000] == 1000. && candidates.windows(2).all(|w| (w[1] - w[0] - 1.).abs() < 1e-12));
         let held = Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [0.; 3], kappa2: [1.; 3], outside: false, unresolved: false, leaving: false });
@@ -6135,9 +6136,18 @@ mod tests {
             .collect();
         let refs: Vec<&Group> = groups.iter().collect();
         let scales = Scales { hbar_over_mass: 1., frequencies: [1.; 3] };
-        let at = analysed(&candidates, 39., &refs, &refs, &scales);
-        let gaps: Vec<f64> = at.windows(2).map(|w| candidates[w[1]] - candidates[w[0]]).collect();
-        assert!(at.len() == 27 && at[0] == 0 && at[26] == 1000 && gaps.iter().all(|&g| g == 38. || g == 39.), "{at:?}");
+        assert_eq!((analysed(&candidates, 40., &refs, &refs, &scales), analysed(&candidates, 2000., &refs, &[], &scales)), (vec![0, 1000], vec![0, 1000]));
+        let other = Fate::Held(Held { rows: std::array::from_fn(|s| if s == 1 { 1. } else { 0. }), ..match &held { Fate::Held(h) => h.clone(), _ => unreachable!() } });
+        let changed: Vec<Group> = (0..11)
+            .map(|_| {
+                let mut g = Group::new(candidates.len());
+                (0..GROUP).for_each(|_| g.add(&(0..candidates.len()).map(|k| if (311..=315).contains(&k) { other.clone() } else { held.clone() }).collect::<Vec<_>>()));
+                g
+            })
+            .collect();
+        let refs: Vec<&Group> = changed.iter().collect();
+        let seen = analysed(&candidates, 40., &refs, &[], &scales);
+        assert!(seen.iter().any(|&k| (305..=321).contains(&k)) && seen.len() > 2, "{seen:?}");
         assert_eq!(analysed(&candidates, 2000., &refs, &[], &scales), [0, 1000]);
     }
 

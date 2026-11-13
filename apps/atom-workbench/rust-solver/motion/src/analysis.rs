@@ -8,7 +8,9 @@
 //! the pilot have a state of their own, the finest grid a read of the step's error can stand on. The times start as
 //! the run's two ends and the lights' switching times, the cuts: a reading may turn there at once, and a turn at a
 //! known time is no read's to find. An interval [a, b] with candidates inside is read at its middle and its two
-//! quarters (the candidates there, by index); each reading's deviation from the line through the ends' readings,
+//! quarters (the candidates there, by index) -- and where it is longer than a span `window` the caller gives, at the
+//! middles of its halves' halves on, as far as leaves its reads no farther apart than a quarter of that span (# What it
+//! does not see) --; each reading's deviation from the line through the ends' readings,
 //!   d(t) = y(t) − [y(a)(b − t) + y(b)(t − a)]/(b − a),
 //! is compared with its own noise: d's delete-one-group jackknife (estimate.rs, # Errors) -- the ends and the point are
 //! read on the same trajectories, so their correlation is in it --, its interval at the confidence z among the
@@ -36,13 +38,20 @@
 //! What it does not see: a feature narrower than the reads' spacing that none of them touches -- a peak of width w
 //! anywhere in [0, end] is seen at the first reads where it reaches one of them above its noise (within h/8 of a
 //! quarter or the middle, h the first interval). That is why the switching times, where a reading's sharp features
-//! begin, are cuts from the outset -- and, in the solve, as many more as leave no first interval longer than T's longest
-//! window (solve.rs `analysed`).
+//! begin, are cuts from the outset, and why an interval longer than the caller's span is read at points a quarter of
+//! the span apart at most (the solve's span is T's shortest window, the trap's fastest period: solve.rs `analysed`):
+//! a feature of that width anywhere is then read. The reads are the nested middles of the interval's halves -- the
+//! middle, the quarters, the eighths, ... --, so that each half's reads are among its parent's and the reads that split
+//! an interval are its halves' own: a feature found is not lost a halving later. They are reads, not ends: an interval
+//! whose reads all lie on its line stands whole, however long, and adds no time.
 //!
 //! Noise: an interval over which the reading is a line splits by chance with probability p = P(|N| > z) at most
-//! (Šidák, and Student's t at the groups for the jackknife's own spread); its halves are judged on reads of their own,
-//! so the splits of a flat reading are a branching process of mean 2p children an interval: 1/(1 − 2p) intervals from
-//! each cut's (1.10 at z = 2), whatever the number of candidates.
+//! (Šidák, and Student's t at the groups for the jackknife's own spread); read at its middle and quarters alone, its
+//! halves are judged on reads of their own, so the splits of a flat reading are a branching process of mean 2p
+//! children an interval: 1/(1 − 2p) intervals from each cut's (1.10 at z = 2), whatever the number of candidates. Read
+//! at nested middles, a half's reads are its parent's, and the outlier that split the parent by chance splits the half
+//! that holds it again, as a feature would be followed -- what makes a feature found stay found: a chance split costs
+//! as many more as the halvings down to the candidates at the most, log₂ of their number.
 
 use crate::estimate::{spread, Spread};
 use crate::units::rounding;
@@ -57,9 +66,10 @@ pub struct Reading {
 
 /// The analysis times (module documentation): of the candidates `times` (increasing; the companion's step ends), the
 /// indices of the ends of the intervals that stand, from the cuts `cuts` (indices into `times`; the first candidate and
-/// the last are cuts whatever is given). `read(k)` reads the quantities at the candidate k, the same quantities in the
-/// same order at every candidate; each candidate is read once.
-pub fn analysis_times(times: &[f64], cuts: &[usize], read: &mut dyn FnMut(usize) -> Vec<Reading>) -> Vec<usize> {
+/// the last are cuts whatever is given), each interval read at points no farther apart than a quarter of `window`
+/// (the same units as `times`; unbounded: its middle and quarters alone). `read(k)` reads the quantities at the
+/// candidate k, the same quantities in the same order at every candidate; each candidate is read once.
+pub fn analysis_times(times: &[f64], cuts: &[usize], window: f64, read: &mut dyn FnMut(usize) -> Vec<Reading>) -> Vec<usize> {
     let last = times.len() - 1;
     let mut ends: Vec<usize> = cuts.iter().copied().chain([0, last]).filter(|&k| k <= last).collect();
     ends.sort_unstable();
@@ -69,7 +79,11 @@ pub fn analysis_times(times: &[f64], cuts: &[usize], read: &mut dyn FnMut(usize)
     let mut open: Vec<(usize, usize)> = ends.windows(2).map(|w| (w[0], w[1])).collect();
     while let Some((a, b)) = open.pop() {
         let middle = (a + b) / 2;
-        let mut points = vec![(a + middle) / 2, middle, (middle + b) / 2];
+        // The nested middles to the depth that leaves a quarter of the window at most between them: the middle and the
+        // quarters at two, for an interval no longer than the window.
+        let depth = 2 + ((times[b] - times[a]) / window).log2().ceil().max(0.) as u32;
+        let mut points = vec![];
+        middles(a, b, depth, &mut points);
         points.dedup();
         points.retain(|&k| a < k && k < b);
         if points.is_empty() {
@@ -94,6 +108,18 @@ pub fn analysis_times(times: &[f64], cuts: &[usize], read: &mut dyn FnMut(usize)
     }
     ends.sort_unstable();
     ends
+}
+
+/// The nested middles of the candidates' indices a < b to `depth` (`analysis_times`): the middle and, below it, its
+/// halves' own, in order.
+fn middles(a: usize, b: usize, depth: u32, out: &mut Vec<usize>) {
+    if depth == 0 || b <= a + 1 {
+        return;
+    }
+    let m = (a + b) / 2;
+    middles(a, m, depth - 1, out);
+    out.push(m);
+    middles(m, b, depth - 1, out);
 }
 
 #[cfg(test)]
@@ -126,9 +152,14 @@ mod tests {
 
     /// The analysis times of the readings `at` over the candidates with the cuts `cuts`, and the candidates read.
     fn analysed(cuts: &[usize], at: &mut dyn FnMut(usize, f64) -> Vec<Reading>) -> (Vec<usize>, usize) {
+        within(cuts, f64::INFINITY, at)
+    }
+
+    /// `analysed` with the reads of an interval no farther apart than a quarter of `window` (µs).
+    fn within(cuts: &[usize], window: f64, at: &mut dyn FnMut(usize, f64) -> Vec<Reading>) -> (Vec<usize>, usize) {
         let times = candidates();
         let mut count = 0;
-        let ends = analysis_times(&times, cuts, &mut |k| {
+        let ends = analysis_times(&times, cuts, window, &mut |k| {
             count += 1;
             at(k, times[k])
         });
@@ -186,6 +217,33 @@ mod tests {
         eprintln!("{} analysis times ({count} read): {across} within 3 widths of the peak, {away} more than 100 µs away; the line misses it by {off:.4} (the mean's noise 0.005)", ends.len());
         assert!(off <= 6.0 * 0.005, "the line misses the peak by {off}: {ends:?}");
         assert!(across >= 6 && away <= 8, "{across} times across the peak, {away} away from it: {ends:?}");
+    }
+
+    /// A peak narrower than the first reads' spacing (module documentation, # What it does not see): height 0.3 and width
+    /// 3 µs at 313 µs, 63 µs from the first reads at the quarters of [0, 1000], read on 16 groups at a group's noise of
+    /// 0.02 -- unseen there: no time comes within three widths of it, and the line misses it by its height. Read no farther
+    /// apart than a quarter of a 40 µs window (the nested middles to 7.8 µs), it is found and halved to its width, the
+    /// line within six of the mean's noise of it; and flat noise read so, on 100 cases, splits no more than the
+    /// branching process's mean times the halvings down to the candidates (module documentation, # Noise: a chance
+    /// outlier is followed down), no case beyond twice those halvings: the reads add no time where nothing changes but
+    /// what chance gives.
+    #[test]
+    fn a_peak_between_the_first_reads_is_read_where_they_are_a_quarter_window_apart() {
+        let peak = |t: f64| 0.2 + 0.3 * (-0.5 * ((t - 313.) / 3.).powi(2)).exp();
+        let (blind, _) = within(&[], f64::INFINITY, &mut noisy(&[&peak], 16, 0.02, 3));
+        let times = candidates();
+        assert!(blind.iter().all(|&k| (times[k] - 313.).abs() > 9.) && missed(&blind, &peak) > 0.3 - 6. * 0.005, "{blind:?}");
+        let (seen, count) = within(&[], 40., &mut noisy(&[&peak], 16, 0.02, 3));
+        let off = missed(&seen, &peak);
+        eprintln!("{} analysis times ({count} read); the line misses the peak by {off:.4}", seen.len());
+        assert!(off <= 6. * 0.005, "the line misses the peak by {off}: {seen:?}");
+        let flat: [&dyn Fn(f64) -> f64; 2] = [&|_| 0.3, &|_| 12.0];
+        let splits: Vec<f64> = (0..100u64).map(|case| (within(&[], 40., &mut noisy(&flat, 8, 0.05, 700 + case)).0.len() - 2) as f64).collect();
+        let n = splits.len() as f64;
+        let mean = splits.iter().sum::<f64>() / n;
+        let deviation = (splits.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / (n - 1.0) / n).sqrt();
+        let (p, levels) = (crate::estimate::tail_among(1.0), (candidates().len() as f64 - 1.).log2());
+        assert!(mean <= levels * (1. / (1. - 2. * p) - 1.) + crate::units::CONFIDENCE * deviation && splits.iter().all(|&x| x <= 2. * levels), "{mean} ± {deviation} splits a case: {splits:?}");
     }
 
     /// Flat noise is not chased (module documentation, # Noise): three quantities constant in time, read on 8 groups at
