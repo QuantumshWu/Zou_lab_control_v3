@@ -80,9 +80,13 @@ On Pulse / Hold / Step / Stop and any other client's `pulse_run` / `pulse_wait_d
 operator stops the node, whose own Stop makes the board safe. A run's `pulse_stop`
 answers with the SAFE's outcome, before the run goes on.
 
-A run's documents are pinned: the first `pulse_run` of a document reads it, and a
-later one of the same run that finds the file changed is refused ("changed during
-this run"), so a run's record names the one pulse it played. A run that ends -- its
+A run plays the pulse it began with: its first `pulse_run` of a document reads it,
+Subpulse files resolved, and every later stage of the run (each segment a seamless
+scan loads) plays that pulse and never reads the file again, so editing or saving the
+file mid-run does not touch the run, and its record names the one pulse it played.
+The change applies at the next Start; the sequencer's log says it once for the run:
+"ZLC PULSE KEPT for <run>: <file> changed during this run; the run keeps playing the
+pulse it began with, and the change applies at the next Start". A run that ends -- its
 node returned, failed or was stopped, or its plugin process died -- with a FIRE of
 its still unreported has the board made SAFE (v2's per-node `finally`).
 

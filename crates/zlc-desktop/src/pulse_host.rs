@@ -122,7 +122,9 @@ impl World for PluginWorld {
 
 /// One `pulse_run` stage of a run (or a client): `load` (LOAD only, v2
 /// `arm_sequencer`), `fire` (FIRE what that LOAD put on the board) or both.
-fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Sequence>, loaded: Option<&Value>, values: &[(String, (f64, String))],
+/// `pinned`: the pulse the run began with, its Subpulses resolved -- played as it is, the file
+/// not read again (a run plays the pulse it began with, whatever the file holds meanwhile).
+fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Arc<Sequence>>, loaded: Option<&Value>, values: &[(String, (f64, String))],
         scan: Option<&ScanRows>, native: Option<&ScanPlanRequest>, runs: u64, sweeps: u64) -> (Result<Value, String>, Option<(PathBuf, Arc<Sequence>)>, Option<u32>, Option<Arc<Value>>) {
     let fired = |receipt: &Json| receipt.get("command_id").and_then(Json::as_int).map(|id| id as u32);
     if stage == "fire" {
@@ -146,12 +148,10 @@ fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Sequence>, 
             Err(error) => (Err(error.message), None, None, None),
         };
     }
-    let (path, sequence) = match read_document(document) { Ok(read) => read, Err(error) => return (Err(error.message), None, None, None) };
-    if pinned.is_some_and(|pinned| *pinned != sequence) {
-        let name = path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
-        return (Err(format!("the pulse {name} {PULSE_CHANGED}: the run's record names the pulse it began with, so the changed file is not played; \
-                             start the run again to play it")), None, None, None);
-    }
+    let (path, sequence) = match pinned {
+        Some(pinned) => (zlc_pulse::codec::absolute(document), pinned.clone()),
+        None => match read_document(document) { Ok((path, sequence)) => (path, Arc::new(sequence)), Err(error) => return (Err(error.message), None, None, None) },
+    };
     let played = if let Some(native)=native {
         prepare_application(&sequence,native,values,&board.description().geometry)
             .and_then(|plan|apply_run_plan(board,&plan,(stage!="load").then_some((runs,sweeps))))
@@ -161,7 +161,7 @@ fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Sequence>, 
         Ok(receipt) => {
             let loaded = (stage == "load").then(|| Arc::new(to_value(&receipt)));
             let id = fired(&receipt);
-            (Ok(to_value(&receipt)), Some((path, Arc::new(sequence))), id, loaded)
+            (Ok(to_value(&receipt)), Some((path, sequence)), id, loaded)
         }
     }
 }
@@ -291,15 +291,13 @@ fn world_instance(instance: &str) -> String { format!("{instance}_world") }
 
 
 // ---------------------------------------------------------------- the desk
-/// A plugin run's use of the board: its name, each pulse document as its first fire read it (a
-/// later fire of a changed file is refused: a run's record names one pulse), the FIRE it sent
-/// last, the program its `load` stage put on the board, its `pulse_run`s still on the lane, and
-/// whether it has ended.
+/// A plugin run's use of the board: its name, each pulse document as its first play read it (every
+/// later stage plays that pulse, never the file again: a run plays the pulse it began with), each
+/// of those whose file it has said changed meanwhile (said once), the FIRE it sent last, the
+/// program its `load` stage put on the board, its `pulse_run`s still on the lane, and whether it has ended.
 #[derive(Default)]
-struct RunUse { name: String, pinned: BTreeMap<PathBuf, Arc<Sequence>>, fire: Option<u32>, loaded: Option<Arc<Value>>, in_flight: usize, ended: bool }
-
-/// The words a refused fire of a changed pulse file says (a node ends its batch on them).
-pub const PULSE_CHANGED: &str = "changed during this run";
+struct RunUse { name: String, pinned: BTreeMap<PathBuf, Arc<Sequence>>, told: BTreeSet<PathBuf>, fire: Option<u32>, loaded: Option<Arc<Value>>,
+                in_flight: usize, ended: bool }
 
 /// What the window last stated of the workbench's runs, by their node's plugin instance: each
 /// active run's name and the devices it claims (a run's board commands are held to them).
@@ -591,12 +589,13 @@ impl PulseDesk {
                 return reply(Err("pulse repeats differ from the armed native scan plan".into()));
             }
         }
-        let (pinned, loaded) = hosted.as_ref().map_or((None, None), |hosted| {
+        let absolute = zlc_pulse::codec::absolute(&document);
+        let (pinned, told, loaded) = hosted.as_ref().map_or((None, false, None), |hosted| {
             let mut runs = lock(&self.0.runs);
             let used = runs.entry(hosted.clone()).or_default();
             used.name = name.clone().unwrap_or_default();
             used.in_flight += 1;
-            (used.pinned.get(&zlc_pulse::codec::absolute(&document)).cloned(), used.loaded.clone())
+            (used.pinned.get(&absolute).cloned(), used.told.contains(&absolute), used.loaded.clone())
         });
         let desk = self.clone();
         self.0.device.run(move || {
@@ -605,8 +604,12 @@ impl PulseDesk {
             let (mut result, pin, fired, mut loaded) = if mismatch {
                 (Err("stage fire must use the native scan handle and outer point accepted by stage load".into()), None, None, None)
             } else {
-                play(&board, &stage, &document, pinned.as_deref(), loaded.as_deref(), &values, scan.as_ref(), native.as_ref().map(|(request, _)| request), runs, sweeps)
+                play(&board, &stage, &document, pinned.as_ref(), loaded.as_deref(), &values, scan.as_ref(), native.as_ref().map(|(request, _)| request), runs, sweeps)
             };
+            // The file is looked at only to say, once, that it no longer holds the pulse the run plays.
+            let changed = stage != "fire" && !told
+                && pinned.as_ref().is_some_and(|pinned| !matches!(read_document(&document), Ok((_, read)) if read == **pinned));
+            if let (true, Some(hosted)) = (changed, &hosted) { desk.kept(hosted, &absolute); }
             if let (Some((native, handle)), Some(hosted)) = (&native, &hosted) {
                 if let Some(value) = &mut loaded { Arc::make_mut(value)["native_scan"] = descriptor.clone().unwrap_or_default(); }
                 if let (Ok(receipt), Some(plugins)) = (&mut result, &plugins) {
@@ -663,6 +666,22 @@ impl PulseDesk {
             used.ended && used.in_flight == 0
         };
         if settle { self.settle(hosted); }
+    }
+
+    /// A run's pulse file changed during the run: the sequencer's log says so once for that run, and
+    /// that the run keeps playing the pulse it began with.
+    fn kept(&self, hosted: &str, path: &Path) {
+        let run = {
+            let mut runs = lock(&self.0.runs);
+            let Some(used) = runs.get_mut(hosted) else { return };
+            if !used.told.insert(path.to_owned()) { return; }
+            used.name.clone()
+        };
+        let file = path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
+        let line = format!("ZLC PULSE KEPT for {run}: {file} changed during this run; the run keeps playing the pulse it began with, \
+                            and the change applies at the next Start");
+        let instance = lock(&self.0.held).device.as_ref().map(|device| device.instance.clone());
+        if let Some((instance, line)) = instance.zip(narration(&line)) { (self.0.post)(PulseEvent::Log { instance, line }); }
     }
 
     /// `pulse_wait_done`: FIRE `command_id`'s report, taken by whoever waits for it (taking it frees the
@@ -1795,24 +1814,54 @@ mod tests {
         run_asks(&host, "early#1", "pulse_wait_done", json!({"command_id": id, "timeout_seconds": 30})).unwrap();
     }
 
-    /// A run's record names one pulse: a later fire of its file changed meanwhile is refused;
-    /// another run plays the new one.
+    /// One play of `document` by `run` that reports: the digest of the program the board played.
+    fn played_digest(host: &PulseHost, run: &str, document: &Path) -> String {
+        let receipt = run_asks(host, run, "pulse_run", played(document, 1)).unwrap();
+        let done = run_asks(host, run, "pulse_wait_done", json!({"command_id": receipt["command_id"], "timeout_seconds": 30})).unwrap();
+        assert_eq!(done["status"], "done");
+        receipt["timing"]["digest"].as_str().unwrap().to_owned()
+    }
+
+    /// `file`, its JSON changed by `change`.
+    fn rewrite(file: &Path, change: impl FnOnce(&mut Value)) {
+        let mut tree: Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+        change(&mut tree);
+        std::fs::write(file, tree.to_string()).unwrap();
+    }
+
+    /// A run whose pulse `changed` (its document or a Subpulse file it resolves) between two plays
+    /// keeps playing the pulse it began with and says so once; a new run plays the changed file.
+    fn a_run_keeps_its_pulse(host: &PulseHost, events: &Receiver<PulseEvent>, document: &Path, changed: impl FnOnce()) {
+        claim(host, &["scan#1", "scan#2"]);
+        let began = played_digest(host, "scan#1", document);
+        let kept = || events.try_iter().filter(|event| matches!(event, PulseEvent::Log { line, .. } if line.contains("ZLC PULSE KEPT for scan#1"))).count();
+        assert_eq!(kept(), 0, "nothing changed yet");
+        changed();
+        for _ in 0..2 { assert_eq!(played_digest(host, "scan#1", document), began, "the run plays the pulse it began with"); }
+        assert_eq!(kept(), 1, "the change is said once for the run");
+        assert_ne!(played_digest(host, "scan#2", document), began, "a new run plays the changed file");
+        assert_eq!(kept(), 0, "the new run began with the changed file: nothing to say");
+    }
+
     #[test]
     fn a_run_plays_the_pulse_it_began_with() {
-        let (host, _events, document) = host("pinned");
-        claim(&host, &["scan#1", "scan#2"]);
-        let receipt = run_asks(&host, "scan#1", "pulse_run", played(&document, 1)).unwrap();
-        let id = receipt["command_id"].as_u64().unwrap();
-        let done = run_asks(&host, "scan#1", "pulse_wait_done", json!({"command_id": id, "timeout_seconds": 30})).unwrap();
-        assert_eq!(done["status"], "done");
-        let mut tree: Value = serde_json::from_str(&std::fs::read_to_string(&document).unwrap()).unwrap();
-        tree["periods"][1]["duration"] = json!(0.03);
-        std::fs::write(&document, tree.to_string()).unwrap();
-        let refused = run_asks(&host, "scan#1", "pulse_run", played(&document, 1)).unwrap_err();
-        assert!(refused.contains(PULSE_CHANGED), "{refused}");
-        let other = run_asks(&host, "scan#2", "pulse_run", played(&document, 0)).unwrap();
-        assert!(other["command_id"].is_u64());
-        run_asks(&host, "scan#2", "pulse_stop", json!({})).unwrap();
+        let (host, events, document) = host("pinned");
+        a_run_keeps_its_pulse(&host, &events, &document, || rewrite(&document, |tree| tree["periods"][1]["duration"] = json!(0.03)));
+    }
+
+    /// The pulse a run began with includes its Subpulse files as they were then.
+    #[test]
+    fn a_run_plays_the_subpulses_it_began_with() {
+        let (host, events, document) = host("pinned_subpulse");
+        let (sequence, _) = zlc_pulse::codec::read_pulse_document(&document).unwrap();
+        let period = sequence.periods[1].period_id.clone();
+        let grouped = zlc_pulse::components::group_component(&sequence, &[period], "part", Some("part"), &[]).unwrap();
+        let subpulse = document.with_file_name("part.json");
+        std::fs::write(&subpulse, zlc_pulse::codec::subpulse_to_tree(&zlc_pulse::components::extract_subpulse(&grouped, "part").unwrap()).readable()).unwrap();
+        let sourced = zlc_pulse::components::set_subpulse_source(&grouped, "part", "config", Some("part.json")).unwrap()
+            .with(|parts| parts.config_enabled = true).unwrap();
+        std::fs::write(&document, zlc_pulse::codec::sequence_to_tree(&sourced).readable()).unwrap();
+        a_run_keeps_its_pulse(&host, &events, &document, || rewrite(&subpulse, |tree| tree["periods"][0]["duration"] = json!(0.03)));
     }
 
     /// v2 device use: while a run holds the board, no other client plays on it, takes its
