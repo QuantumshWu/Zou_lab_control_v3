@@ -29,7 +29,7 @@ import {CurrentResults} from './current-results.js';
 import {covers,delivers,horizonRecords,keptCheckpoint,plannedSolve,solveOptions,type SolveInputs,type SolveKind} from './solve-plan.js';
 import {STATIC_MIXING_LIMIT,displayMixing,modelScope,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
 import type {ScopeNote} from './spectroscopy.js';
-import {defaultScene,newLaser,MAXIMUM_LASERS,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
+import {newLaser,MAXIMUM_LASERS,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import {addReflection,detachReflection,reflectionOf,sourceOf} from './reflection.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionDevice,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
 import type {ApproximationLedger,Distributions,DynamicsResult,LedgerTotal} from './solver-types.js';
@@ -69,7 +69,7 @@ type Selection={kind:'field'|'laser'|'reference'|'level'|'none';id:string};
 type ObjectKind=Exclude<Selection['kind'],'none'>;
 const APP_TITLE='Rb87 实验工作台';
 const STORAGE='rb87-workbench-demo-v4',root=document.querySelector<HTMLDivElement>('#app')!;
-let scene=startupScene((()=>{try{return localStorage;}catch{return undefined;}})(),STORAGE),view:View='levels',resultView:ResultView='levels',spectral:SpectralLine='D2',selection:Selection={kind:'laser',id:'probe'};
+let scene=startupScene((()=>{try{return localStorage;}catch{return undefined;}})(),STORAGE),view:View='levels',resultView:ResultView='levels',spectral:SpectralLine='D2',selection:Selection=firstObject(scene);
 let populationMode:'mean'|'time'='mean',populationTimeIndex=-1,populationScale:'linear'|'log'='linear';let unbindPopulation:(()=>void)|undefined;
 /** 布居演化 with motion: what its chart shows, and the listed time (an index into the shown
  * distribution's samples) a distribution is compared at, if any. */
@@ -1480,22 +1480,24 @@ function replaceScene(next:Scene,text:string):void{
   unitDrafts.clear();fieldProblems.clear();solver.cancel();solverRevision++;clearTimeout(solverTimer);lastCheckpoint=undefined;requestedKey='';requestedKind=undefined;running=undefined;stoppedKey='';solverError='';solverBusy=false;solverQueued=false;controlsKey='';trajectories.clear();means.clear();
   disposeTrees($('levels-details'));$('levels-details').replaceChildren();$('selection-readout').dataset.selectionKey='';
   normalizeScene(next);scene=next;stateLabels=keepLabels(stateLabels,id=>!id.startsWith('reference-')||!!scene.references.some(r=>r.id===id));populationTimeIndex=-1;
-  selection=scene.lasers[0]?{kind:'laser',id:scene.lasers[0].id}:scene.fields[0]?{kind:'field',id:scene.fields[0].id}:{kind:'none',id:''};
+  selection=firstObject(scene);
   renderInitial();renderObjects();renderInspector();markBaseline();update();note(text);
 }
+/** What a scene opens with selected: its first laser, else its first field. */
+function firstObject(s:Scene):Selection{return s.lasers[0]?{kind:'laser',id:s.lasers[0].id}:s.fields[0]?{kind:'field',id:s.fields[0].id}:{kind:'none',id:''};}
 /** Replacing a scene that holds edits asks first; nothing else keeps them. */
 async function confirmReplace(action:string):Promise<boolean>{
   if(!sceneEdited())return true;
   return confirm('替换当前场景',`当前场景「${scene.name}」有修改。${action}会替换整个场景，且无法撤销；需要保留时请先导出。`,{confirmText:'替换',cancelText:'取消',kind:'warning'});
 }
 function showExamples():void{
-  new Menu([...EXAMPLES.map(example=>({label:example.label,action:()=>void loadExample(example.key)})),'separator',{label:'默认场景',action:()=>void resetScene()}]).openBelow(examplesCommand.root);
+  new Menu(EXAMPLES.map(example=>({label:example.label,action:()=>void loadExample(example.key)}))).openBelow(examplesCommand.root);
 }
 async function loadExample(key:string):Promise<void>{
   if(!await confirmReplace('加载示例'))return;
-  const example=exampleScene(key);view=example.view;if(view==='levels'||view==='dynamics')resultView=view;spectral=example.line;replaceScene(example.scene,`已加载示例「${example.scene.name}」`);
+  // Every example is on D2 and opens on the dynamics page.
+  const example=exampleScene(key);view='dynamics';resultView='dynamics';spectral='D2';replaceScene(example,`已加载示例「${example.name}」`);
 }
-async function resetScene():Promise<void>{if(await confirmReplace('恢复默认场景'))replaceScene(defaultScene(),'已恢复默认场景');}
 function download(text:string,name:string):void{const url=URL.createObjectURL(new Blob([text],{type:'application/json'})),link=document.createElement('a');link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function exportScene():void{const name=`${scene.name.replace(/[\\/:*?"<>|]/g,'_').slice(0,100)||'rb87-scene'}.json`;download(JSON.stringify(scene,null,2),name);markBaseline();note(`已导出场景、标记与动力学设置：${name}`);}
 $<HTMLInputElement>('file-input').onchange=async event=>{
