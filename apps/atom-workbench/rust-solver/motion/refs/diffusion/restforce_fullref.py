@@ -1,6 +1,5 @@
-# DIAGNOSTIC (restforce, 2026-11-12; motion3d_status/rewrite/restforce.status.md): not part of any acceptance.
 """The exact mean force on an Rb87 atom held at rest, from the request's full 32-state master equation alone (no engine
-code, no closure, no fold): restforce.status.md, task 1.
+code, no closure, no fold; motion3d_status/rewrite/restforce.status.md).
 
 The request (contract: request.rs header) gives, at the position r (µm from the focus) in the states' frames (rad/µs),
   H(r, t) = H0 + Σ_ω Σ_i (x_{ω,i}(r) − x_{ω,i}(0)) O_{ω,i} + Σ_l [a_l(r) X_l e^{−iΔ_l t} + a_l(r)* R_l e^{+i(Δ_l + 2ν)t} + h.c.]
@@ -11,7 +10,7 @@ and the emission Σ_a D[C_a]. Here every term is built from the request's number
     Hamiltonian with each pair's own energy denominator (D1 sits 7 THz below the D2 frame: not negligible against 32 THz);
     the error is of the order (Ω_t/Δ_t)² ≈ 4e-6 of the trap's shift, the scattering they add ≈ 3e-5 /µs.
 Force along ê: F = −Σ_n Tr(ρ_n ∂_ê H_{−n}) (the time average of −Tr ρ(t) ∂H(t)), ∂ by central differences (ε = 1e-4 µm).
-  python fullref.py <request.json> <s,s,...> [N=2] [axis x,y,z] [out.json]
+  python restforce_fullref.py <request.json> <s,s,...> [N=2] [axis x,y,z] [out.json]
 """
 import sys, json
 import numpy as np

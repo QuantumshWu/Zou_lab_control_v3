@@ -61,15 +61,18 @@ def engine(course, waist, tau, count, burn, span, every, tag, env=None):
     return np.array(d['data']).reshape(d['count'], d['samples'], d['width']), d
 
 def engine_rates(a, d, which=0):
-    """From the engine's samples: the drift and the variance's rate of the increments weighted by weight `which`
-    (0: 1; 1, 2: the course's), with their standard errors: (drift, se, steps' part, jumps' part, variance rate of steps +
-    jumps over the whole span, its se, Brownian part, jumps per µs)."""
+    """From the engine's samples (`diffusion engine`, each step's own decomposition, step.rs `Step::momentum`): the drift
+    and the variance's rate of the increments weighted by weight `which` (0: 1; 1, 2: the course's), with their standard
+    errors: (drift, se, the steps' part -- the kick at the middle with the reference's flow --, the jumps' part, the flow's
+    part, variance rate of the whole steps over the span, its se, the steps' and the jumps' variances and their
+    covariance, jumps per µs)."""
+    assert d.get('columns') == ['whole', 'jumps', 'flow'], 'a worker before the whole-step columns: rebuild the diffusion example'
     T = d['span']
     inc = a[:, -1, :] - a[:, 0, :]
-    det, jmp, brown = inc[:, 3 * which], inc[:, 3 * which + 1], inc[:, 3 * which + 2]
-    tot = det + jmp
+    tot, jmp, flow = inc[:, 3 * which], inc[:, 3 * which + 1], inc[:, 3 * which + 2]
+    det = tot - jmp
     n = len(tot)
     var = tot.var(ddof=1)
-    return {'drift': tot.mean() / T, 'drift_se': tot.std(ddof=1) / np.sqrt(n) / T, 'steps': det.mean() / T, 'jumps': jmp.mean() / T,
+    return {'drift': tot.mean() / T, 'drift_se': tot.std(ddof=1) / np.sqrt(n) / T, 'steps': det.mean() / T, 'jumps': jmp.mean() / T, 'flow': flow.mean() / T,
             'var': var / T, 'var_se': var * np.sqrt(2 / (n - 1)) / T, 'var_steps': det.var(ddof=1) / T, 'var_jumps': jmp.var(ddof=1) / T,
-            'cov': 2 * np.cov(det, jmp)[0, 1] / T, 'brownian': brown.mean() / T, 'jump_rate': inc[:, 9].mean() / T, 'other': a[:, :, 10].mean()}
+            'cov': 2 * np.cov(det, jmp)[0, 1] / T, 'jump_rate': inc[:, 9].mean() / T, 'other': a[:, :, 10].mean()}

@@ -1,9 +1,8 @@
-# DIAGNOSTIC (restforce, 2026-11-12; motion3d_status/rewrite/restforce.status.md): not part of any acceptance.
 """The engine's time-averaged internal state at rest (diffusion engine with STATES=, every 10 µs after the burn) against
 the closed model's exact steady state (ref.py on the closed dump): populations of the clusters and the ground coherences.
-python pops.py <exe> <request> <closed dump> <point index in the dump> <count> <burn> <span> <tau>"""
+python restforce_pops.py <exe> <request> <closed dump> <point index in the dump> <count> <burn> <span> <tau>"""
 import sys, json, os, subprocess, numpy as np
-sys.path.insert(0, 'C:/Users/eadri/WorkCode/zlc_v3_rw_force/apps/atom-workbench/rust-solver/motion/refs/diffusion')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ref
 exe, req, dumpf, i, count, burn, span, tau = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]), float(sys.argv[6]), float(sys.argv[7]), float(sys.argv[8])
 m = ref.Model(dumpf)

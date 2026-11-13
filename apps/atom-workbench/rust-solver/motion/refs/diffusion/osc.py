@@ -7,7 +7,7 @@ count, periods, tau = int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
 waist = float(sys.argv[5]) if len(sys.argv) > 5 else 0
 T = 2 * np.pi / OMEGA
 rows = []
-print('A | exact: drift power, heating = local + slow, net | engine: drift power ± se (steps, jumps), heating ± se = Brownian + Var, net | R1, R2 exact; engine | F=1 exact; engine | jumps/µs')
+print('A | exact: drift power, heating = local + slow, net | engine: drift power ± se (steps, jumps), heating ± se = Var, net | R1, R2 exact; engine | F=1 exact; engine | jumps/µs')
 for A in amps:
     t0 = time.time()
     m, p, w1, w2 = oscillation('closed', waist, A)
@@ -17,11 +17,11 @@ for A in amps:
     a, d = engine(f'osc:{A}:{OMEGA}:0', waist, tau, count, 15 * T, periods * T, periods * T, f'o{A}_w{waist}')
     e1, e2 = engine_rates(a, d, 1), engine_rates(a, d, 2)
     en = {'power': A * OMEGA * e1['drift'], 'power_se': A * OMEGA * e1['drift_se'], 'steps': A * OMEGA * e1['steps'], 'jumps': A * OMEGA * e1['jumps'],
-          'brownian': HM / 2 * (e1['brownian'] + e2['brownian']), 'var': HM / 2 * (e1['var'] + e2['var']), 'var_se': HM / 2 * np.hypot(e1['var_se'], e2['var_se']),
-          'R1': e1['var'] + e1['brownian'], 'R2': e2['var'] + e2['brownian'], 'f1': e1['other'], 'rate': e1['jump_rate']}
+          'var': HM / 2 * (e1['var'] + e2['var']), 'var_se': HM / 2 * np.hypot(e1['var_se'], e2['var_se']),
+          'R1': e1['var'], 'R2': e2['var'], 'f1': e1['other'], 'rate': e1['jump_rate']}
     rows.append({'exact': ex, 'engine': en})
-    exh, enh = ex['local'] + ex['slow'], en['brownian'] + en['var']
-    print('%.3f | %9.6f  %8.6f = %8.6f + %9.6f  net %9.6f | %9.6f ± %.6f (%9.6f %9.6f)  %8.6f ± %.6f = %8.6f + %8.6f  net %9.6f | %7.3f %7.3f; %7.3f %7.3f | %.4f; %.4f | %.4f  (band %d, tail %.0e, %.0fs)' % (
-        A, ex['power'], exh, ex['local'], ex['slow'], ex['power'] + exh, en['power'], en['power_se'], en['steps'], en['jumps'], enh, en['var_se'], en['brownian'], en['var'], en['power'] + enh,
+    exh, enh = ex['local'] + ex['slow'], en['var']
+    print('%.3f | %9.6f  %8.6f = %8.6f + %9.6f  net %9.6f | %9.6f ± %.6f (%9.6f %9.6f)  %8.6f ± %.6f  net %9.6f | %7.3f %7.3f; %7.3f %7.3f | %.4f; %.4f | %.4f  (band %d, tail %.0e, %.0fs)' % (
+        A, ex['power'], exh, ex['local'], ex['slow'], ex['power'] + exh, en['power'], en['power_se'], en['steps'], en['jumps'], enh, en['var_se'], en['power'] + enh,
         ex['R1'], ex['R2'], en['R1'], en['R2'], ex['f1'], en['f1'], en['rate'], ex['band'], ex['tail'], time.time() - t0), flush=True)
 json.dump(rows, open(sys.argv[6] if len(sys.argv) > 6 else 'osc_rows.json', 'w'))
