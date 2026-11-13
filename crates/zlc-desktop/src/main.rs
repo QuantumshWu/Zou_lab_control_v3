@@ -1488,7 +1488,6 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                         let kind = from.clone().ok_or("ready comes from a window")?;
                         trace::point("window.ready", || json!({"window": kind.key()}));
                         let ratio = command["dpr"].as_f64().filter(|dpr| *dpr > 0.0);
-                        if let Some(window) = windows.get_mut(&kind) { window.ready = true; }
                         match &kind {
                             windows::Kind::TaskConsole => { share.set_dpr(ratio.unwrap_or(1.0)); queue.push_back(json!({"id":0,"action":"ready","dpr":ratio})); }
                             windows::Kind::FigureViewer(number) => {
@@ -1501,7 +1500,7 @@ fn run(log: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
                             // An SLM Editor draws its own document at its page's ratio.
                             windows::Kind::SlmEditor(device) => slm.ready(device, ratio.unwrap_or(1.0)),
                         }
-                        windows.page_loaded(&kind);
+                        windows.page_up(&kind)?;
                         // The live document at the end of this turn: the page holds nothing, and is told every section it reads.
                         presentation.now();
                         // Its title bar: the window's width and whether it is maximized.

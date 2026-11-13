@@ -71,13 +71,18 @@ class DeviceLogWindow {
     windowTitle;
     root = element("div", "device-window");
     named = "";
+    view;
     constructor(ctx, device) {
         this.ctx = ctx;
         this.device = device;
         this.windowTitle = `${device} log@Zou lab`;
-        this.root.append(new DeviceLogView(device, ctx).root);
+        this.view = new DeviceLogView(device, ctx);
+        this.root.append(this.view.root);
     }
-    update(_state) {
+    /** Shown with its log read: the text it exists to show is there. */
+    ready() { return this.view.read(); }
+    update(state) {
+        this.view.accept(state.request, Boolean(state.error), state.result);
         const device = row(this.ctx, this.device);
         const title = `${device?.role ?? this.device} log@Zou lab`;
         if (title !== this.named) {

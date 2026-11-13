@@ -424,23 +424,28 @@ export class DeviceLogView {
     text = readoutText("No interactions recorded yet.");
     timer = 0;
     shown = "";
+    /** The read in flight, and whether one has been answered (read, or refused): the log the window shows is there. */
+    asking = -1;
+    answered = false;
     constructor(id, ctx) {
         this.id = id;
         this.ctx = ctx;
         this.text.classList.add("log-text");
         this.root.append(this.text);
         this.timer = window.setInterval(() => { if (this.root.offsetParent)
-            void this.poll(); }, 500);
-        void this.poll();
+            this.poll(); }, 500);
+        this.poll();
     }
-    async poll() {
-        let result;
-        try {
-            result = await this.ctx.transport.request({ action: "get_device_log", device: this.id, lines: 2000 });
-        }
-        catch {
+    /** Whether the log it shows has been read once. */
+    read() { return this.answered; }
+    poll() { this.asking = this.ctx.transport.send({ action: "get_device_log", device: this.id, lines: 2000 }); }
+    /** A state the window was sent: the answer to its newest read is shown (a refused one leaves the text as it is). */
+    accept(request, failed, result) {
+        if (request === undefined || request !== this.asking)
             return;
-        }
+        this.answered = true;
+        if (failed)
+            return;
         const lines = Array.isArray(result) ? result : Array.isArray(result?.lines) ? result.lines : typeof result === "string" ? result.split("\n") : [];
         const words = lines.length ? lines.map(String).join("\n") : "No interactions recorded yet.";
         if (words === this.shown)

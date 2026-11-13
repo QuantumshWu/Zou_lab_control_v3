@@ -90,11 +90,29 @@ try {
     page.transport.pending.delete(2); page.transport.lastError = 'superseded'; page.shell.status(); await wait(200);
     equal(page.posted('window_ready').length, 1, 'shown');
   });
-  await check('a view without ready() is shown on its first state (a device log)', async () => {
-    const page = open({ factory: deviceLog('rf') });
+  const plain = () => ({ key: 'x', title: 'x', windowTitle: 'x', root: document.createElement('div'), update() {}, status() {} });
+  await check('a view without ready() is shown on its first state', async () => {
+    const page = open({ factory: plain });
     await wait(); equal(page.posted('window_ready').length, 0, 'shown before any state');
-    page.say({ type: 'state', devices: [page.row(false)] }); await wait(200);
+    page.say({ type: 'state' }); await wait(200);
     equal(page.sent.filter(c => c.id === 0).map(c => c.action), ['window_ready'], 'shown once, unmeasured');
+  });
+  await check('a device log is shown once its log is read, with its text', async () => {
+    const page = open({ factory: deviceLog('rf') });
+    const asked = page.posted('get_device_log');
+    equal(asked.length, 1, 'the log is read at once');
+    page.say({ type: 'state', devices: [page.row(false)] }); await wait(200);
+    equal(page.posted('window_ready').length, 0, 'shown before its log was read');
+    page.say({ type: 'state', request: asked[0].id, error: null, result: { lines: ['12:00:01 open rf', '12:00:02 fields 91 ms'] } }); await wait(200);
+    equal(page.posted('window_ready').length, 1, 'not shown once its log was read');
+    equal(page.shell.host.querySelector('.log-text').textContent, ['12:00:01 open rf', '12:00:02 fields 91 ms'].join('\n'), 'its text');
+  });
+  await check('a device log whose read is refused is shown as it stands', async () => {
+    const page = open({ factory: deviceLog('rf') });
+    page.say({ type: 'state', devices: [page.row(false)] });
+    page.say({ type: 'state', request: page.posted('get_device_log')[0].id, error: 'rf has no log' }); await wait(200);
+    equal(page.posted('window_ready').length, 1, 'a refused read left it hidden');
+    equal(page.shell.host.querySelector('.log-text').textContent, 'No interactions recorded yet.', 'its text');
   });
   await check('a view that throws on its first state is shown as it stands', async () => {
     const page = open({ factory: () => ({ key: 'x', title: 'x', windowTitle: 'x', root: document.createElement('div'), update() { throw Error('broken view'); }, status() {}, ready: () => false }) });
@@ -113,8 +131,8 @@ try {
     equal(page.posted('window_ready').length, 1, 'said twice');
   });
   await check('a shared browser view tells the host nothing', async () => {
-    const page = open({ factory: deviceLog('rf'), shared: true });
-    page.say({ type: 'state', devices: [page.row(false)] }); await wait(200);
+    const page = open({ factory: plain, shared: true });
+    page.say({ type: 'state' }); await wait(200);
     equal(page.posted('window_ready').length + page.posted('fit_window').length, 0, 'a shared view sized or showed a window');
     assert(page.shell.host.style.visibility === '', 'the shared view stayed hidden');
   });

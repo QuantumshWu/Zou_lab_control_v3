@@ -106,8 +106,12 @@ pub fn owner(panel: &str) -> Kind {
 /// Fields drop in order: the page's mappings, the page, then its window.
 /// A window is made hidden and comes on screen once its page has drawn its first whole state (`painted`,
 /// the page's `window_ready`) and someone asked to see it (`wanted`): never empty, never half laid out.
+/// What is addressed to a window before its page is up (`waiting`) is given to it when it is (`page_up`).
 pub struct AppWindow { pub kind: Kind, pub pixels: Pixels, _webview: WebView, pub window: Window, pub ready: bool, first_request: u64,
-                       painted: bool, wanted: bool }
+                       painted: bool, wanted: bool, waiting: std::cell::RefCell<Vec<Waiting>> }
+
+/// A message for a page not yet up: one for it alone (`send_to`), or a state answering one of its requests (`send`).
+enum Waiting { Whole(Value), Reply(Value) }
 
 impl AppWindow {
     fn owns_request(&self, request: u64) -> bool { (self.first_request..self.first_request + REQUESTS).contains(&request) }
@@ -187,7 +191,8 @@ impl Windows {
         frame::raise(&window);
         let mut pixels = Pixels::new(&webview)?;
         if let Some(share) = self.share.as_ref().filter(|_| *kind == Kind::TaskConsole) { pixels.set_share(share.clone()); }
-        self.open.push(AppWindow { kind: kind.clone(), pixels, _webview: webview, window, ready: false, first_request, painted: false, wanted: visible });
+        self.open.push(AppWindow { kind: kind.clone(), pixels, _webview: webview, window, ready: false, first_request, painted: false, wanted: visible,
+                                   waiting: Default::default() });
         Ok(())
     }
 
@@ -287,7 +292,12 @@ impl Windows {
         if let Some(share) = self.share.as_ref().filter(|_| state["type"] == "state") { share.publish_state(state); }
         let mut changed = std::collections::BTreeSet::new();
         let mut sent = Ok(());
-        for window in self.open.iter().filter(|window| window.ready) {
+        for window in &self.open {
+            // A page not yet up holds nothing to be told; only an answer to its own request (sent before its `ready`) waits for it.
+            if !window.ready {
+                if state["request"].as_u64().is_some_and(|request| window.owns_request(request)) { window.waiting.borrow_mut().push(Waiting::Reply(state.clone())); }
+                continue;
+            }
             let told = window.pixels.send_state(state, |section| window.kind.reads(section),
                 |request| request.as_u64().is_some_and(|request| window.owns_request(request)), |section| { changed.insert(section.to_owned()); });
             if sent.is_ok() { sent = told; }
@@ -302,11 +312,35 @@ impl Windows {
     /// A message for one page whole (its document, a reply only it asked for): always sent.
     pub fn send_to(&self, kind: &Kind, value: &Value) -> Result<(), String> {
         if let Some(share) = self.share.as_ref().filter(|_| *kind == Kind::TaskConsole && value["type"] == "state") { share.publish_state(value); }
-        match self.get(kind).filter(|window| window.ready) { Some(window) => window.pixels.send_state(value, |_| true, |_| true, |_| {}), None => Ok(()) }
+        match self.get(kind) {
+            Some(window) if window.ready => window.pixels.send_state(value, |_| true, |_| true, |_| {}),
+            // Its page is not up yet: it is given this when it is (`page_up`), in order -- but a state that answers
+            // nothing, which the whole state its page is given when up already holds.
+            Some(window) => {
+                if value["type"] != "state" || value["request"].as_u64().is_some_and(|request| request != 0) { window.waiting.borrow_mut().push(Waiting::Whole(value.clone())); }
+                Ok(())
+            }
+            None => Ok(()),
+        }
     }
 
-    /// `kind`'s page was (re)loaded: it holds no state and no pixel mapping yet.
-    pub fn page_loaded(&mut self, kind: &Kind) { if let Some(window) = self.get_mut(kind) { window.pixels.page_loaded(); } }
+    /// `kind`'s page is (again) up -- its `ready`: it holds no state and no pixel mapping yet, and is given,
+    /// in order, what was addressed to it meanwhile (a page asked for, an answer to a request it sent first).
+    pub fn page_up(&mut self, kind: &Kind) -> Result<(), String> {
+        let Some(window) = self.get_mut(kind) else { return Ok(()) };
+        window.ready = true;
+        window.pixels.page_loaded();
+        let mut sent = Ok(());
+        for message in window.waiting.take() {
+            let told = match &message {
+                Waiting::Whole(value) => window.pixels.send_state(value, |_| true, |_| true, |_| {}),
+                Waiting::Reply(state) => window.pixels.send_state(state, |section| window.kind.reads(section),
+                    |request| request.as_u64().is_some_and(|request| window.owns_request(request)), |_| {}),
+            };
+            if sent.is_ok() { sent = told; }
+        }
+        sent
+    }
 
     /// A panel's front goes to the window that shows the panel.
     pub fn submit(&mut self, panel: String, sequence: u64, front: Front) -> Result<(), String> {

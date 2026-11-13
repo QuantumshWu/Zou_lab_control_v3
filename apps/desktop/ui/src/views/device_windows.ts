@@ -69,13 +69,19 @@ class DeviceLogWindow implements View {
   readonly windowTitle: string;
   readonly root = element("div", "device-window");
   private named = "";
+  private view: DeviceLogView;
 
   constructor(private ctx: ViewContext, private device: string) {
     this.windowTitle = `${device} log@Zou lab`;
-    this.root.append(new DeviceLogView(device, ctx).root);
+    this.view = new DeviceLogView(device, ctx);
+    this.root.append(this.view.root);
   }
 
-  update(_state: State): void {
+  /** Shown with its log read: the text it exists to show is there. */
+  ready(): boolean { return this.view.read(); }
+
+  update(state: State): void {
+    this.view.accept(state.request, Boolean(state.error), state.result);
     const device = row(this.ctx, this.device);
     const title = `${device?.role ?? this.device} log@Zou lab`;
     if (title !== this.named) { this.named = title; document.title = title; }
