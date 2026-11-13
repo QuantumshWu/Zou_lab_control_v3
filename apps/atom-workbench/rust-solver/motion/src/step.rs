@@ -166,9 +166,10 @@
 //!   is made there, at the root u* of ln N(u) = ln θ to ln N's rounding, ln N inside the panel its start less ∫h over
 //!   spans of it by their own quadratures on the propagation's states (`Picture::between`), stepped from below at the
 //!   hazard's rate (`root`): the spans below the root are the kick's part of the panel as far as the root, so that the
-//!   root costs the panel's nodes before it and a few more, as laying them again did. The stops met inside that panel
-//!   -- the middle, a time read -- stand where they lie before the root (a time read takes its survival the same way);
-//!   the others are met again after the jump.
+//!   root costs the panel's nodes before it and a few more, as laying them again did. The states kept inside that
+//!   panel -- the middle, a time read -- stand where they lie before the root (a time read takes its survival from the
+//!   panel's start and the root by the hazard's shape between them: `Midway::stretch`); the others are met again after
+//!   the jump.
 //! - Where to look is the propagation's norm's to tell: it is the survival to the propagation's accuracy and costs n a
 //!   stop. Once it is at θ at a stop, the panel's nodes past it are not taken and the root is sought from the panel's
 //!   start with that stop's time as its first try -- the step does not finish a panel it jumps in, nor lay its nodes
@@ -341,9 +342,13 @@
 //! A trajectory is read at times that are no step's end (an output, a cut of T's window: adapt.rs, # The reads), and
 //! the read is of the scheme's order there too. What a step knows between its ends:
 //! - The internal state at any time: its propagation has x(u), u the time from the middle, on the straight path through
-//!   the middle (spectral.rs), and ψ_s = e^{iK_s·v_m u} x_s. The times read are stops of the propagation, as its
-//!   quadrature's nodes are (`Midway::attempt`): each takes the state as the propagation passes it, whichever jumps
-//!   lie before it. That path lies ½au² + ½a_B h² from the atom's (a its
+//!   the middle (spectral.rs), and ψ_s = e^{iK_s·v_m u} x_s. A time read is no stop of the propagation: the step's
+//!   stops and nodes, its jumps' roots and its count are what the step resolves alone, and a read takes the state
+//!   from the propagation as it passes -- from the latest stop at or before the time (`Picture::between`), after the
+//!   jumps before it and before those after it -- at the survival the step has at its panel's two ends, the hazard's
+//!   shape between them (`looked`, `Midway::stretch`). So a trajectory is the same to the bit whatever times it is
+//!   read at, and a read is the same whatever else is read (adapt.rs, # The reads). That path lies ½au² + ½a_B h²
+//!   from the atom's (a its
 //!   acceleration, a_B the kick's part of it, h = τ/2) and has the velocity v_m for v_m + au: the state at u errs by
 //!   ∫(∇H·d)du = O(τ³) and, where the generator depends on the momentum it is taken at (κ_m), by ∂_κH·a(u² − h²)/2 =
 //!   O(τ²), zero at the ends.
@@ -907,8 +912,9 @@ fn middle<D: Dynamics>(model: &D, r: [f64; 3], kappa: [f64; 3], half: f64) -> Re
 // ---------------------------------------------------------------------------------------------------------------------
 // Quadrature within a tolerance.
 
-/// What a quadrature integrates its bandwidth to: the round-off (the path's moments, `Segment::moments`), or the kick's
-/// share (`QUADRATURE`: the kick's, the survival's and a time read's quadratures on the propagation's states).
+/// What a quadrature integrates its bandwidth to: the round-off (the path's moments, `Segment::moments`; a time read's
+/// survival, `Midway::stretch`), or the kick's share (`QUADRATURE`: the kick's and the survival's quadratures on the
+/// propagation's states).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Within {
     RoundOff,
@@ -1224,9 +1230,9 @@ fn shear<M: Middle>(along: &Along<M>, rho: &mut [C64], psi: &[C64], tau: f64) ->
 /// its following, the state's path), one array carved (`Scratch::carve`) into the middle state's density and a
 /// Hermitian sum the model takes, and four laid as `accumulate` holds its sums: the nodes' weighted sums of the states'
 /// densities, the sums as they stood where the panel being propagated began (`Midway::stretch`), a span's own inside a
-/// panel (`fallen`), and the generator's decay at the step's nodes (`laid_decay`); and the stops a panel met, kept until
-/// its survival is known (`Midway::stretch`). Every use writes what it reads: nothing a step left in it is read by
-/// another.
+/// panel (`fallen`), and the generator's decay at the step's nodes (`laid_decay`); and the states a panel keeps -- its
+/// stops and its readings -- until its survival is known (`Midway::stretch`). Every use writes what it reads: nothing a
+/// step left in it is read by another.
 #[derive(Default)]
 pub struct Scratch {
     picture: Picture,
@@ -1375,14 +1381,15 @@ fn hazard(decay: &[f64], sums: &[f64], n: usize) -> f64 {
 }
 
 /// ∫h over [from, to] (# Jumps) on the propagation's states at the nodes of the span's own quadrature at the step's
-/// bandwidth (`Picture::between`: any time after the launch), their densities summed into `part` as the kick's sums
-/// are, the weights' sums into `weights` (`gather`): the survival inside a panel, where a jump's root or a time read
-/// lies -- and, a span before a jump's root, the kick's part of it. Returns it and the nodes taken.
-fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), bandwidth: f64, decay: &[f64], part: &mut [f64], weights: &mut [f64; 3]) -> (f64, usize) {
+/// bandwidth within a tolerance (`Picture::between`: any time after the launch), their densities summed into `part` as
+/// the kick's sums are, the weights' sums into `weights` (`gather`): the survival inside a panel, where a jump's root
+/// lies (within the kick's share) or a time read (to the round-off: `Midway::stretch`) -- and, a span before a jump's
+/// root, the kick's part of it. Returns it and the nodes taken.
+fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), bandwidth: f64, within: Within, decay: &[f64], part: &mut [f64], weights: &mut [f64; 3]) -> (f64, usize) {
     let n = picture.states();
     part.fill(0.0);
     let (mut x, mut nodes) = ([C64::ZERO; STATES], 0);
-    for (u, w) in quadrature(from, to, bandwidth, FORMS, Within::Share) {
+    for (u, w) in quadrature(from, to, bandwidth, FORMS, within) {
         picture.between(u, &mut x[..n]);
         gather(still, h, u, w, &x[..n], weights, part);
         nodes += 1;
@@ -1424,6 +1431,27 @@ fn hazard_at(picture: &mut Picture, still: bool, h: f64, u: f64, decay: &[f64], 
     picture.between(u, &mut x[..n]);
     gather(still, h, u, 1.0, &x[..n], &mut [0.0; 3], part);
     hazard(decay, part, n)
+}
+
+/// The times read of `reads` (lab times; from the `read`-th on) that the propagation has passed at the time u (from the
+/// middle of the step of 2h that starts at `start`), before the step's end -- a time read at the end is the end's own
+/// (`Midway::attempt`) --, each the frame's state there (`Picture::between`: from the latest stop the propagation made at
+/// or before it), kept in `met` with its time until the panel's survival is known (`Midway::stretch`). A read is no stop
+/// of the propagation and nothing of it is taken up by the step (# The path between a step's ends): the stops and the
+/// nodes are the step's alone, and so is the picture's count of its work, which the reads leave as they found it.
+/// Returns the next time to read.
+fn looked(picture: &mut Picture, reads: &[f64], mut read: usize, (start, h): (f64, f64), u: f64, met: &mut Vec<(Stop, f64, [C64; STATES])>) -> usize {
+    let n = picture.states();
+    let ahead = |v: f64| (v + h) / (2.0 * h);
+    let work = picture.work;
+    while let Some(t) = reads.get(read).map(|&time| (time - start) - h).filter(|&t| ahead(t) <= ahead(u) && ahead(t) < 1.0) {
+        let mut x = [C64::ZERO; STATES];
+        picture.between(t, &mut x[..n]);
+        met.push((Stop::Read, t, x));
+        read += 1;
+    }
+    picture.work = work;
+    read
 }
 
 /// The root in the panel [a, b] of ln N(u) = ln θ (`target`; # Jumps) from the panel's start, ln N(a) = `log`, and
@@ -1473,7 +1501,7 @@ fn root(picture: &mut Picture, (still, h, bandwidth): (bool, f64, f64), (decay, 
             break;
         }
         let mut spanned = [0.0; 3];
-        let (fell, taken_nodes) = fallen(picture, still, h, (below.0, u), bandwidth, decay, part, &mut spanned);
+        let (fell, taken_nodes) = fallen(picture, still, h, (below.0, u), bandwidth, Within::Share, decay, part, &mut spanned);
         (nodes, traces) = (nodes + taken_nodes, traces + 1);
         // A span that ends within ln N's rounding past the root ends at it: a step aimed at the root lands there within
         // that rounding either way, and is taken.
@@ -1501,8 +1529,8 @@ pub struct Step {
     pub end: Trajectory,
     /// The step's path from its start: as far as the step's first jump, and from each jump on the path `after` it.
     pub segment: Segment,
-    /// The trajectory's states made inside the step, in the order of their times: after each of its jumps, and at the
-    /// times read.
+    /// The states made inside the step, in the order of their times: the trajectory's after each of its jumps, and the
+    /// readings at the times read, which are no part of it (adapt.rs, # The reads).
     pub made: Vec<Made>,
     /// The step's counted work (real multiply-adds: its own and its nodes' generators and forces; its jumps' photons
     /// are counted on the states). The middles it went through are counted where they are made (`Midway`).
@@ -1543,9 +1571,9 @@ impl Step {
     }
 }
 
-/// A state of the trajectory made inside a step: after a jump -- with the jump's kick (1/µm) -- or at a time read.
-/// The internal state, the cluster, the time and the trajectory's counters are the propagation's there; the position
-/// and the momentum are the caller's to set on the step's path (`Segment::after`, `Segment::place`).
+/// A state made inside a step: the trajectory's after a jump -- with the jump's kick (1/µm) --, or a reading at a time
+/// read. The internal state, the cluster, the time and the trajectory's counters are the propagation's there; the
+/// position and the momentum are the caller's to set on the step's path (`Segment::after`, `Segment::place`).
 #[derive(Clone, Debug)]
 pub struct Made {
     pub kick: Option<[f64; 3]>,
@@ -1617,7 +1645,9 @@ pub struct Midway<'a, D: Dynamics + 'a> {
     generator: D::Middle<'a>,
 }
 
-/// The stops of a step's propagation beside its quadrature's nodes: the step's middle, a time read, the step's end.
+/// The states a panel keeps until its survival is known (`Midway::stretch`): the stops of a step's propagation beside its
+/// quadrature's nodes -- the step's middle and its end --, and the states at the times read, which are no stops of it
+/// (`looked`).
 #[derive(Clone, Copy)]
 enum Stop {
     Middle,
@@ -1655,14 +1685,14 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     }
 
     /// The step through this middle of a state at its start -- the middle's own position, momentum, cluster and time,
-    /// any internal state of the cluster --, with its jumps (module documentation, # Jumps) and the states at the
-    /// times `reads` (increasing, after the step's start and no later than its end): the path's momentum predicted
-    /// from the state (`predicted`); the propagation at it and on its path, cluster by cluster as the jumps land
-    /// (`stretch`); the kick -- the propagation's impulse, the reference's τ∇V_ref(r_h), the scattered light's force
-    /// and its diffusion's part of the Brownian path `brownian` (module documentation, # The absorbed light's
-    /// momentum), and each jump's own where it is made -- and the second half flow. `scratch` is the trajectory's. A
-    /// jump the model gives no photon is refused (`jump`); so is a step its `domain` does not prove, before anything of
-    /// it is propagated (module documentation, # The domain).
+    /// any internal state of the cluster --, with its jumps (module documentation, # Jumps) and the readings at the
+    /// times `reads` (increasing, after the step's start and no later than its end; no part of the step, `looked`):
+    /// the path's momentum predicted from the state (`predicted`); the propagation at it and on its path, cluster by
+    /// cluster as the jumps land (`stretch`); the kick -- the propagation's impulse, the reference's τ∇V_ref(r_h), the
+    /// scattered light's force and its diffusion's part of the Brownian path `brownian` (module documentation, # The
+    /// absorbed light's momentum), and each jump's own where it is made -- and the second half flow. `scratch` is the
+    /// trajectory's. A jump the model gives no photon is refused (`jump`); so is a step its `domain` does not prove,
+    /// before anything of it is propagated (module documentation, # The domain).
     pub fn attempt(&self, from: &Trajectory, brownian: &Brownian, reads: &[f64], scratch: &mut Scratch, domain: &dyn Domain) -> Result<Step, Refused> {
         let (tau, hm, n) = (self.tau, self.hbar_over_mass, from.psi.len());
         let h = 0.5 * tau;
@@ -1745,9 +1775,11 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     ///   any time from there on);
     /// - the frame's state read at the stops in the path's order, panel by panel: the nodes of a quadrature that
     ///   resolves the generator's own frequencies -- Gauss–Legendre from the piece's start to the step's end at the
-    ///   bandwidth of the forms on a state it propagates, within the kick's share (`panels`) --, each with its weight; the step's middle, the
-    ///   times read and the step's end, where the state is kept -- a node within the time's round-off of one of them is
-    ///   it --, standing once the panel's survival is known;
+    ///   bandwidth of the forms on a state it propagates, within the kick's share (`panels`) --, each with its weight; the
+    ///   step's middle and its end, where the state is kept -- a node within the time's round-off of one of them is
+    ///   it --, standing once the panel's survival is known. The times read are no stops: each is the state there from
+    ///   the latest stop at or before it (`looked`), kept beside the stops, and at its survival between the panel's
+    ///   two ends once they stand -- so the step is the same whatever is read of it;
     /// - the survival at each panel's end, ln N at the piece's start (‖ψ‖² there) less ∫h over the sums' nodes since
     ///   (`hazard`; module documentation, # Jumps). Where it is at the threshold or below -- or where the propagation's
     ///   norm is at the threshold at a stop, from which on the panel's nodes are not taken --: the sums as they stood at
@@ -1808,14 +1840,10 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 // stops still are.
                 let (mut last, mut predicted) = (a, None);
                 loop {
-                    // The next stop of the panel: a node, a kept stop within it -- the earlier of the next fixed one and
-                    // the next time read, a time read at the step's end being the end's own -- or both at once.
+                    // The next stop of the panel: a node, the next kept stop within it -- the middle, then the end -- or
+                    // both at once. A time read is no stop (`looked`).
                     let fixed = if passed { (h, Stop::End) } else { (0.0, Stop::Middle) };
-                    let kept = match reads.get(read).map(|&time| (time - start) - h).filter(|&u| ahead(u) < 1.0) {
-                        Some(u) if ahead(u) < ahead(fixed.0) => (u, Stop::Read),
-                        _ => fixed,
-                    };
-                    let kept = Some(kept).filter(|&(u, _)| ahead(u) <= ahead(b));
+                    let kept = Some(fixed).filter(|&(u, _)| ahead(u) <= ahead(b));
                     let node = if predicted.is_none() { nodes.peek().copied() } else { None };
                     let (u, weight, keep) = match (node, kept) {
                         (Some((u, w)), Some((stop, kind))) if (u - stop).abs() <= f64::EPSILON * h.abs() => {
@@ -1834,6 +1862,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         (None, None) => break,
                     };
                     picture.advance(u, &mut x[..n]);
+                    read = looked(picture, reads, read, (start, h), u, met);
                     if predicted.is_none() && norm_sqr(&x[..n]) <= march.state.threshold {
                         predicted = Some(last);
                     }
@@ -1845,12 +1874,12 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     if let Some(kind) = keep {
                         met.push((kind, u, x));
                         match kind {
-                            Stop::Middle => passed = true,
-                            Stop::Read => read += 1,
                             Stop::End => break,
+                            _ => passed = true,
                         }
                     }
                 }
+                read = looked(picture, reads, read, (start, h), b, met);
                 // The panel's end: where the norm predicted a crossing, the root from the panel's start (`root`); else ln N
                 // there by the sums, and where it is at the threshold the root inside the panel. The kick's part of the
                 // panel as far as the root comes with it; a predicted crossing the survival does not reach in the panel
@@ -1876,15 +1905,26 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     }
                     crossed
                 });
-                // The stops met stand as far as the root: the middle state; a time read, at its survival there.
-                let mut below = (a, 0.0);
+                // The states kept stand as far as the root: the middle state; a time read, at its survival there. That is
+                // the step's own survival at the panel's two ends -- ln N at its start, and at its end or at the root (ln θ)
+                // -- and between them the hazard's own shape: ln N(t) = ln N(a) − (ln N(a) − ln N(far)) F(a, t)/F(a, far),
+                // F the hazard's integral to the round-off (`fallen`; none where the panel has no decay). One function of
+                // the time for every read, the reading's alone -- no node of the step's count, nothing of another read --,
+                // which meets the trajectory's own survival at its states and falls where the hazard is positive: a read's
+                // own quadrature within the share would stray from the step's by it (0.4 % of a stiff step's survival, and
+                // two reads' apart from each other: measured).
+                let far = root.map_or((b, end), |r| (r, target));
+                let mut whole = None;
                 for &(kind, u, state) in met.iter().filter(|m| root.is_none_or(|r| ahead(m.1) < ahead(r))) {
                     match kind {
                         Stop::Middle => (middle, march.passed) = (Some(state), true),
                         Stop::Read => {
-                            let (fell, nodes) = fallen(picture, still, h, (below.0, u), bandwidth, decay, part, &mut [0.0; 3]);
-                            (counted, traces, below) = (counted + nodes, traces + 1, (u, below.1 + fell));
-                            let state = Trajectory { psi: at(&state[..n], u, log - below.1), time: reads[march.read], ..march.state.clone() };
+                            let work = picture.work;
+                            let mut integral = |to: f64| fallen(picture, still, h, (a, to), bandwidth, Within::RoundOff, decay, part, &mut [0.0; 3]).0;
+                            let total = *whole.get_or_insert_with(|| integral(far.0));
+                            let share = if total > 0.0 { integral(u) / total } else { 0.0 };
+                            picture.work = work;
+                            let state = Trajectory { psi: at(&state[..n], u, log - (log - far.1) * share), time: reads[march.read], ..march.state.clone() };
                             march.made.push(Made { kick: None, state });
                             march.read += 1;
                         }
@@ -2286,8 +2326,9 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
     Ok(())
 }
 
-/// The loss test at a trajectory's state (SPEC §1.7: at every step's end, after every jump and at every time read),
-/// the one definition: its time once the model finds it lost (`Dynamics::lost`).
+/// The loss test at a trajectory's state (SPEC §1.7: at every step's end and after every jump -- the trajectory's own
+/// states; a reading is none of them, adapt.rs # The reads), the one definition: its time once the model finds it
+/// lost (`Dynamics::lost`).
 pub fn test_loss<D: Dynamics>(model: &D, trajectory: &mut Trajectory) {
     if trajectory.lost.is_none() && model.lost(trajectory.cluster, &trajectory.point(), &trajectory.psi) {
         trajectory.lost = Some(trajectory.time);
