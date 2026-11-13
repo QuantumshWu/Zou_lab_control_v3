@@ -16,7 +16,8 @@
 //!
 //! `waist` (µm; 0: the scene's own) replaces the trap beam's waist: the same light at the focus, uniform over the path.
 //! `AXIS=x,y,z` (default 0,0,1) is the direction ê of `engine`'s path and of the momentum it reads, `ORIGIN=x,y,z` (µm,
-//! default 0) its point s = 0: the path is ORIGIN + s ê (as claude/motion-v2-diffusion2's 58acfb30 has it for `dump` too).
+//! default 0) its point s = 0: the path is ORIGIN + s ê; `dump` reads its points and its gradient along the same ê
+//! (DIAGNOSTIC restforce: ported from claude/motion-v2-diffusion2's 58acfb30).
 
 use atom_motion::field::Light;
 use atom_motion::linalg::{C64, Mat};
@@ -139,8 +140,16 @@ fn info(name: &str, waist: f64) {
 fn explicit(name: &str, request: &Request, light: &Light) -> Model {
     let mut kept = closure(name);
     let carriers: Vec<(usize, bool)> = kept.iter().filter_map(|u| if let Unit::Bare { component, ground, .. } = u { Some((component.frequency, *ground < 3)) } else { None }).collect();
-    let near = |component: &atom_motion::model::Component, excited: usize, ground: usize| !component.counter && excited >= 16 && carriers.contains(&(component.frequency, ground < 3));
-    for round in 0..2 {
+    // DIAGNOSTIC (restforce): `EXPL_SIDE=1|2` makes explicit only the drives from F = 1 (the repump's) or from F = 2 (the
+    // probe's); `EXPL_EXCITED=i,j,...` only those onto the excited states named; `EXPL_ROUNDS=1` takes them to the atom's
+    // level alone (folded at the atom, not explicit).
+    let side: Option<bool> = std::env::var("EXPL_SIDE").ok().map(|s| s == "1");
+    let only: Option<Vec<usize>> = std::env::var("EXPL_EXCITED").ok().map(|s| s.split(',').map(|x| x.parse().unwrap()).collect());
+    let rounds: usize = std::env::var("EXPL_ROUNDS").map_or(2, |s| s.parse().unwrap());
+    let near = |component: &atom_motion::model::Component, excited: usize, ground: usize| {
+        !component.counter && excited >= 16 && carriers.contains(&(component.frequency, ground < 3)) && side.map_or(true, |one| one == (ground < 3)) && only.as_ref().map_or(true, |o| o.contains(&excited))
+    };
+    for round in 0..rounds {
         let model = Model::new(request, light, &kept).unwrap();
         let more: Vec<Unit> = model
             .units()
@@ -176,15 +185,15 @@ fn generator_at(run: &Run, cluster: usize, at: &Point) -> (Mat, Vec<C64>) {
             rho.fill(C64::ZERO);
             if i == j {
                 rho[i * n + i] = C64::ONE;
-                g[i * n + i] = C64::real(middle.force(&path, 0.0, &rho)[2]);
+                g[i * n + i] = C64::real(on_axis(middle.force(&path, 0.0, &rho)));
                 continue;
             }
             rho[i * n + j] = C64::ONE;
             rho[j * n + i] = C64::ONE;
-            let re = 0.5 * middle.force(&path, 0.0, &rho)[2];
+            let re = 0.5 * on_axis(middle.force(&path, 0.0, &rho));
             rho[i * n + j] = C64::new(0.0, 1.0);
             rho[j * n + i] = C64::new(0.0, -1.0);
-            let im = 0.5 * middle.force(&path, 0.0, &rho)[2];
+            let im = 0.5 * on_axis(middle.force(&path, 0.0, &rho));
             g[j * n + i] = C64::new(re, -im);
             g[i * n + j] = C64::new(re, im);
         }
@@ -224,7 +233,7 @@ fn dump(name: &str, waist: f64, kind: &str, points: &str, out: &str) {
     let points: Vec<serde_json::Value> = list
         .iter()
         .map(|&[z, kappa]| {
-            let at = |dz: f64| Point { r: [0.0, 0.0, z + dz], kappa: [0.0, 0.0, kappa], t: 0.0 };
+            let at = |dz: f64| { let (e, o) = axis(); Point { r: std::array::from_fn(|a| o[a] + (z + dz) * e[a]), kappa: e.map(|x| x * kappa), t: 0.0 } };
             let clusters: Vec<serde_json::Value> = (0..model.clusters().len())
                 .map(|c| {
                     let (h, g) = generator_at(&run, c, &at(0.0));
@@ -235,7 +244,7 @@ fn dump(name: &str, waist: f64, kind: &str, points: &str, out: &str) {
         })
         .collect();
     let clusters: Vec<serde_json::Value> = model.clusters().iter().map(|c| serde_json::json!({"states": c.states, "ground": c.ground, "names": c.states.iter().map(|&s| request.states[s].clone()).collect::<Vec<_>>()})).collect();
-    std::fs::write(out, serde_json::to_string(&serde_json::json!({"scene": name, "waist": waist, "kind": kind, "epsilon": EPSILON, "hbar_over_mass": model.hbar_over_mass(), "clusters": clusters, "points": points})).unwrap()).unwrap();
+    std::fs::write(out, serde_json::to_string(&serde_json::json!({"scene": name, "waist": waist, "kind": kind, "epsilon": EPSILON, "axis": axis().0, "origin": axis().1, "hbar_over_mass": model.hbar_over_mass(), "clusters": clusters, "points": points})).unwrap()).unwrap();
 }
 
 /// A prescribed path along z (x = y = 0): at rest, at a constant velocity (the position wrapped by the light's period, on
@@ -360,6 +369,12 @@ fn held(run: &Run, start: usize, course: Course, tau: f64, burn: f64, span: f64,
                 }
                 sums[9] += 1.0;
             }
+            // DIAGNOSTIC (restforce): the step's whole momentum change along the axis -- the reference's two half flows
+            // with the kick and the jumps -- in column 5, and the reference flow's part alone (the whole less the kick
+            // at the middle) in column 8: the columns 0 and 1 hold the kick alone, without the flow's −τ∇V_ref.
+            let total: [f64; 3] = std::array::from_fn(|a| step.end.kappa[a] - t.kappa[a]);
+            sums[5] += on_axis(total);
+            sums[8] += on_axis(std::array::from_fn(|a| total[a] - whole[a]));
         }
         // The step's end on the samples' clock where it spans the rest to the next one.
         t = Trajectory { time: if taken == rest { next } else { step.end.time }, lost: None, ..step.end };
@@ -434,6 +449,26 @@ fn engine(name: &str, waist: f64, course: &str, tau: f64, count: u64, burn: f64,
     if let Ok(file) = std::env::var("STATES") {
         let rows: Vec<serde_json::Value> = both.iter().map(|(_, states, u)| serde_json::json!({"phase": u, "states": states.iter().map(|(c, psi)| serde_json::json!([c, psi.iter().flat_map(|z| [z.re, z.im]).collect::<Vec<f64>>()])).collect::<Vec<_>>()})).collect();
         std::fs::write(file, serde_json::to_string(&rows).unwrap()).unwrap();
+    }
+    // DIAGNOSTIC (restforce): `BOOKED=1` on a held course: the model's units' errors (`Model::errors_at`, as the solve
+    // books them) at every sampled state at the course's point, their means over the states -- per unit and summed -- on
+    // the populations (absolute) and on T (relative).
+    if std::env::var("BOOKED").as_deref() == Ok("1") {
+        let units = model.units();
+        let (e, o) = axis();
+        let z = parts[1].parse::<f64>().unwrap_or(0.0);
+        let r: [f64; 3] = std::array::from_fn(|a| o[a] + z * e[a]);
+        let samples: Vec<atom_motion::model::Sample> = both.iter().flat_map(|(_, states, _)| states.iter().map(|(c, psi)| atom_motion::model::Sample { cluster: *c, at: Point { r, kappa: [0.0; 3], t: 0.0 }, psi: psi.clone() })).collect();
+        let rows: Vec<Vec<[f64; 2]>> = samples.par_iter().map(|s| model.errors_at(&units, s, tables.as_ref()).iter().map(|x| [x.population, x.temperature]).collect()).collect();
+        let n = rows.len() as f64;
+        let mut means: Vec<(usize, [f64; 2])> = (0..units.len()).map(|u| (u, [rows.iter().map(|r| r[u][0]).sum::<f64>() / n, rows.iter().map(|r| r[u][1]).sum::<f64>() / n])).collect();
+        let total = [means.iter().map(|m| m.1[0]).sum::<f64>(), means.iter().map(|m| m.1[1]).sum::<f64>()];
+        let quadrature = [means.iter().map(|m| m.1[0] * m.1[0]).sum::<f64>().sqrt(), means.iter().map(|m| m.1[1] * m.1[1]).sum::<f64>().sqrt()];
+        eprintln!("BOOKED at s = {z}: {} states, {} units: populations sum {:.5} (quadrature {:.5}), T sum {:.5} (quadrature {:.5})", samples.len(), units.len(), total[0], quadrature[0], total[1], quadrature[1]);
+        means.sort_by(|a, b| b.1[0].total_cmp(&a.1[0]));
+        for (u, m) in means.iter().take(12) {
+            eprintln!("  {:.5} {:.5} {:?}", m[0], m[1], units[*u]);
+        }
     }
     // `ENDS=1`: the first and the last sample alone (the rates over the whole span need no more).
     let ends = std::env::var("ENDS").as_deref() == Ok("1");
