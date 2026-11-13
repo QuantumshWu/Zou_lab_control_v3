@@ -159,8 +159,11 @@
 //!     could bring it within at the best (`remedy`), the product's next groups at both levels, read again after every
 //!     batch. A rung below is no remedy for the noise: it reads its own pair's, and where the pairs part early that is
 //!     the two ensembles' own, the same at every step (estimate.rs, # The step's error; measured, R4_LIN_2: rows at far
-//!     ends of 1.5 to 2.5 b at 0.43, 0.22, 0.11 and 0.054 µs alike). Where pairs cannot see it either, the check ends
-//!     unable to see (SPEC §5.1): the step stands, flagged, and books what its reads do not exclude, their far ends.
+//!     ends of 1.5 to 2.5 b at 0.43, 0.22, 0.11 and 0.054 µs alike). Where pairs cannot see it either, its estimate as
+//!     it reads is beyond the share, and the rung is left, as an adaptive integrator leaves a step whose error estimate
+//!     is beyond its tolerance. (Stood unable to see at TET's ladder top, 1.40 µs, a row's far end booked 3.8 % of the
+//!     5 % and left the statistics a room of 0.9 %: 4272 trajectories, 211 CPU-s against 39.) At the ladder's bottom
+//!     the check ends unable to see (SPEC §5.1): the step stands, flagged, and books what its reads do not exclude.
 //! - A read is never carried from one rung to another as a verdict: a rung's third level is a read of levels it holds
 //!   itself, of the same model at the same steps -- the scout's, where the pilot has none of its own and the ladder
 //!   no rung above --, and it certifies nothing alone. An attempt that begins at the step the attempt before stood at
@@ -1000,7 +1003,8 @@ enum Verdict {
     /// On the pilot, its own read within and no third level on the pilot's pairs, where the ladder has the rung above
     /// and that rung's paths stay in the model's domain: the pilot's trajectories at 4τ, a quarter of a trajectory each.
     Above,
-    /// Its own read's estimate beyond the share, but not clearly: the noise hides the difference (`remedy`).
+    /// Its own read's estimate beyond the share, but not clearly: the noise hides the difference -- the pairs that
+    /// could see through it (`remedy`), else the rung is left.
     Unseeing,
 }
 
@@ -2029,10 +2033,10 @@ enum Settled {
 ///     are its third level; where they leave the domain or read no number (`readable`), the rung above is unread;
 ///   - its own estimate within and no third level to be had: it stands on its own two levels;
 ///   - its own estimate beyond the share and not clearly (`Verdict::Unseeing`): the pairs of `remedy` -- the product's
-///     next groups at both levels, read again after every batch --; where they cannot see it, the check ends unable to
-///     see (`Settled::Unseen`).
+///     next groups at both levels, read again after every batch --; where they cannot see it, it is left: its estimate
+///     as it reads is beyond the share.
 /// A rung below at which a trajectory would take more than `MOST_STEPS` steps does not exist: a check that is clearly
-/// beyond there leaves the step capped.
+/// beyond there leaves the step capped, one whose noise no pairs see through ends unable to see (`Settled::Unseen`).
 ///
 /// `ran`: the finer level of the members already run, joined to the groups the levels hold, with what its paths not
 /// proven ask of a reach (`attempt`: the pilot's own level, run first where the scout's atoms refuted the reach and
@@ -2113,13 +2117,14 @@ fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context,
             }
             continue;
         }
-        if verdict == Verdict::Unseeing {
-            // The own read's estimate beyond the share, and not clearly: the noise hides the difference. Its sight is
-            // the pairs' to buy, where they could bring it within at the best (`blind`, `remedy`): a rung below reads
-            // its own pair's noise, and where the pairs part early that is the two ensembles' own. Where pairs cannot
-            // see it either, the check ends unable to see.
-            let have = levels.paired().0.len() as u64 * GROUP;
-            let Some(pairs) = read.as_ref().and_then(blind).and_then(|factor| remedy(factor, have)) else { return Settled::Unseen };
+        let have = levels.paired().0.len() as u64 * GROUP;
+        let pairs = if verdict == Verdict::Unseeing { read.as_ref().and_then(blind).and_then(|factor| remedy(factor, have)) } else { None };
+        if let Some(pairs) = pairs {
+            // The own read's estimate beyond the share, and not clearly: the noise hides the difference, and the pairs
+            // could bring it within at the best (`blind`, `remedy`) -- a rung below reads its own pair's noise, and where
+            // the pairs part early that is the two ensembles' own. Where pairs cannot, the estimate as it reads is beyond
+            // the share: the rung is left, as an adaptive integrator leaves a step whose error estimate is beyond its
+            // tolerance.
             let next: Vec<u64> = (have / GROUP..pairs / GROUP).collect();
             let (more, departed) = pair(run, ensemble, domain, &context.plan, context.tau, &next, 0..GROUP, false, messages, &mut |prefix, messages| {
                 so_far(context, &levels.fine, &levels.further[0].iter().chain(prefix.iter().copied()).collect::<Vec<_>>(), messages)
@@ -2132,11 +2137,12 @@ fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context,
             continue;
         }
         // The rung in hand is left. At the ladder's bottom the paths of the rung's own level that left the model's
-        // domain are the finest there are: the reach is to hold them.
+        // domain are the finest there are: the reach is to hold them; a read clearly beyond leaves the step capped, one
+        // that only could not be seen through, unable to see.
         if let (true, Some(asked)) = (lowest, levels.departed[0].take()) {
             return Settled::Unproven(asked);
         } else if lowest {
-            return Settled::Capped;
+            return if verdict == Verdict::Unseeing { Settled::Unseen } else { Settled::Capped };
         }
         // The rung below's third level above: this rung's own read, lowered -- none where its companion departed.
         let inherits = read.as_ref().map(|read| carried(read, 0.5));
