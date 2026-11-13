@@ -2137,9 +2137,12 @@ fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context,
         // The rung in hand is left. At the ladder's bottom the paths of the rung's own level that left the model's
         // domain are the finest there are: the reach is to hold them; a read clearly beyond leaves the step capped, one
         // that only could not be seen through, unable to see.
-        if let (true, Some(asked)) = (lowest, levels.departed[0].take()) {
-            return Settled::Unproven(asked);
-        } else if lowest {
+        // Above the bottom the rung's own named units go down with it (`levels.departed` below): they are taken here
+        // only at the bottom.
+        if lowest {
+            if let Some(asked) = levels.departed[0].take() {
+                return Settled::Unproven(asked);
+            }
             return if verdict == Verdict::Unseeing { Settled::Unseen } else { Settled::Capped };
         }
         // The rung below's third level above: this rung's own read, lowered -- none where its companion departed.
