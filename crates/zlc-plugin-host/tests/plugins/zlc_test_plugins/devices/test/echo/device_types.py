@@ -162,7 +162,7 @@ def _pin_wire(values, excluded):
     free = [port for port in WIRES if f"serial:{port}" not in excluded]
     if not free:
         raise RuntimeError(f"no free wire (tried none; passed over {', '.join(WIRES)}: bound)")
-    return {"parameters": {"port": free[0]}, "note": f"found on {free[0]} (given {values['port']!r})"}
+    return {"found": {"port": free[0]}, "note": f"found on {free[0]} (given {values['port']!r})"}
 
 
 def _served(key, values):

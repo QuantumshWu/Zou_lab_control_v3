@@ -871,7 +871,7 @@ impl Plugins for Builtin {
             return;
         }
         let (type_id, parameters, excluded) = (type_id.to_owned(), parameters.clone(), excluded.to_vec());
-        // A resolve probes as a scan does, port by port with a bounded wait each, so it is held to a
+        // A resolve probes as a scan does, every free port at once with a bounded wait each, so it is held to a
         // family's scan deadline (the process's start inside it); Init waits for nothing longer.
         let started = self.spawn("resolve", move |host| Event::Answered { ticket,
             result: host.resolve(&type_id, parameters, &excluded, SCAN).map_err(|error| error.to_string()) });

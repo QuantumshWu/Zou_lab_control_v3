@@ -84,7 +84,7 @@ def _resolve(values: Mapping[str, Any], excluded: frozenset[str]) -> dict[str, A
         )
     port, _address, baud = found[0]
     return {
-        "parameters": {"port": port},
+        "found": {"port": port},
         "note": f"HWT3100 answering on {port} at {baud} baud" + "".join(f" ({said})" for said in bound),
     }
 

@@ -287,8 +287,9 @@ class Process:
             if not isinstance(declared, DeviceType) or declared.resolve is None:
                 raise PluginError("unknown_op", f"{params['type_id']} finds nothing before it opens")
             answer = declared.resolve(declared.project(params.get("parameters")), frozenset(str(item) for item in params.get("excluded") or ()))
-            self.reply(identity, {"parameters": {str(name): value for name, value in dict(answer.get("parameters") or {}).items()},
-                                  "note": str(answer.get("note") or "")}, plain=True)
+            # What it found (written into the row) apart from what this open alone uses (never written).
+            self.reply(identity, {key: {str(name): value for name, value in dict(answer.get(key) or {}).items()} for key in ("found", "this_open")}
+                       | {"note": str(answer.get("note") or "")}, plain=True)
         except BaseException as error:  # noqa: BLE001 -- the row's own failure, said where it is
             self.reply(identity, error=error)
 

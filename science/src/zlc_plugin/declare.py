@@ -222,9 +222,11 @@ class DeviceType:
     #: ``resolve`` the bound ones as ``excluded``: they touch none. A blank value binds nothing yet.
     resources: tuple[str, ...] = ()
     #: What a row leaves blank, found before it opens (Init, one row at a time):
-    #: ``resolve(parameters, excluded)`` answers ``{"parameters": {name: value}, "note": "..."}``,
+    #: ``resolve(parameters, excluded)`` answers ``{"found": {name: value}, "note": "..."}``,
     #: the values the core pins into the apparatus and opens the row with (none: as authored),
-    #: or raises with what it tried and what it passed over.
+    #: and, when what it opens with this time is not something it found, ``"this_open": {name:
+    #: value}``, used for that open only and never written (a search that finds nothing never erases
+    #: the row's values); or raises with what it tried and what it passed over.
     resolve: Callable[[Mapping[str, Any], frozenset[str]], Mapping[str, Any]] | None = None
     #: The file names of the vendor transport library a process that can hold this device
     #: has loaded (``("Pylon*", "GCBase*Basler*")``; ``*`` any run, ``?`` one character, case

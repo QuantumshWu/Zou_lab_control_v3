@@ -328,34 +328,42 @@ impl fmt::Display for Attempt {
     }
 }
 
-/// The board's UART among `ports`, found as v2's server found it: each port opened in turn with
-/// the board's handshake (open and the word-63 fingerprint, 0.5 s) and released again. The first
-/// that answers, and every port tried with what it came to.
+/// The board's UART among `ports`, found as v2's server found it: each port opened with the board's
+/// handshake (open and the word-63 fingerprint, 0.5 s) and released again, all of them at once
+/// ([`search_ports`]). The first in `ports`' order that answers, and every port tried with what it came to.
 pub fn find_board_uart(ports: &[String], baud: u64, geometry: StreamerParams, clock_hz: f64, target: &Arc<Target>) -> (Option<String>, Vec<Attempt>) {
-    let mut attempts = Vec::new();
-    for port in ports {
-        let probe = match ComPortLink::new(port, baud) {
-            Err(error) => Probe::Invalid(error.message),
-            Ok(mut link) => match link.open_port() {
-                Err(failure) => Probe::NotOpened(failure),
-                Ok(()) => {
-                    let transport: Arc<dyn RegisterTransport> = Arc::new(UartRegisterTransport::new(Box::new(link), Duration::from_millis(500)));
-                    let opened = PulseStreamer::new(transport.clone(), geometry, clock_hz, target.clone()).and_then(|streamer| streamer.open());
-                    let _ = transport.close();
-                    match opened {
-                        Ok(()) => Probe::Matched,
-                        Err(error) if error.message.contains("layout mismatch") => Probe::NoBoard("fingerprint mismatch".into()),
-                        Err(error) if error.kind == Kind::Timeout => Probe::NoBoard("timeout".into()),
-                        Err(error) => Probe::NoBoard(error.message),
-                    }
+    search_ports(ports, |port| match ComPortLink::new(port, baud) {
+        Err(error) => Probe::Invalid(error.message),
+        Ok(mut link) => match link.open_port() {
+            Err(failure) => Probe::NotOpened(failure),
+            Ok(()) => {
+                let transport: Arc<dyn RegisterTransport> = Arc::new(UartRegisterTransport::new(Box::new(link), Duration::from_millis(500)));
+                let opened = PulseStreamer::new(transport.clone(), geometry, clock_hz, target.clone()).and_then(|streamer| streamer.open());
+                let _ = transport.close();
+                match opened {
+                    Ok(()) => Probe::Matched,
+                    Err(error) if error.message.contains("layout mismatch") => Probe::NoBoard("fingerprint mismatch".into()),
+                    Err(error) if error.kind == Kind::Timeout => Probe::NoBoard("timeout".into()),
+                    Err(error) => Probe::NoBoard(error.message),
                 }
-            },
-        };
-        let matched = probe == Probe::Matched;
-        attempts.push(Attempt { port: port.clone(), probe });
-        if matched { return (Some(port.clone()), attempts); }
-    }
-    (None, attempts)
+            }
+        },
+    })
+}
+
+/// One search over `ports`: each probed once, all at once on threads of their own, so the search
+/// takes about one port's probe however many there are. It returns once every probe has released
+/// its port, with the attempts in `ports`' order and, of the ports that answered, the first in that order.
+pub fn search_ports(ports: &[String], probe: impl Fn(&str) -> Probe + Sync) -> (Option<String>, Vec<Attempt>) {
+    let probe = &probe;
+    let attempts: Vec<Attempt> = std::thread::scope(|scope| {
+        let probes: Vec<_> = ports.iter().map(|port| (port, scope.spawn(move || probe(port)))).collect();
+        probes.into_iter().map(|(port, probing)| Attempt {
+            port: port.clone(),
+            probe: probing.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        }).collect()
+    });
+    (attempts.iter().find(|attempt| attempt.probe == Probe::Matched).map(|attempt| attempt.port.clone()), attempts)
 }
 
 #[cfg(test)]
@@ -400,5 +408,38 @@ mod tests {
         assert_eq!(classes, [(2, "not present"), (3, "not present"), (433, "not present"), (1167, "not present"), (5, "in use by another program"),
                              (32, "in use by another program"), (1, "driver refused"), (31, "driver refused"), (87, "refused")]);
         assert_eq!((PortFault::Busy.error_type(), PortFault::Refused.error_type()), ("SerialPortBusy", "SerialPortUnusable"));
+    }
+
+    /// One search probes its ports at once: it takes about one port's probe, not their sum, tries
+    /// each port once, reports the attempts in the listing's order, and of two that answer takes the
+    /// first listed -- even when a later one answers sooner.
+    #[test]
+    fn a_search_probes_its_ports_at_once_and_reports_them_in_order() {
+        let listed: Vec<String> = ["COM13", "COM7", "COM8", "COM10", "COM11", "COM12"].map(str::to_owned).to_vec();
+        let timeout = Duration::from_millis(400);
+        let asked = std::sync::Mutex::new(Vec::new());
+        let began = Instant::now();
+        let (found, attempts) = search_ports(&listed, |port| {
+            asked.lock().unwrap().push(port.to_owned());
+            match port {
+                // The later-listed board answers at once; the earlier one only after a while.
+                "COM12" => Probe::Matched,
+                "COM10" => { std::thread::sleep(timeout / 2); Probe::Matched }
+                "COM7" => Probe::NotOpened(OpenFailure { port: port.into(), fault: PortFault::Refused, code: 1, detail: "Incorrect function".into() }),
+                _ => { std::thread::sleep(timeout); Probe::NoBoard("timeout".into()) }
+            }
+        });
+        let took = began.elapsed();
+        assert!(took >= timeout && took < timeout * 2, "about one port's timeout, not the sum: {took:?}");
+        assert_eq!(found.as_deref(), Some("COM10"), "the first listed of those that answer");
+        assert_eq!(attempts.iter().map(|attempt| attempt.port.as_str()).collect::<Vec<_>>(), listed, "in the listing's order");
+        assert_eq!(attempts.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                   ["COM13: opened, no board answered (timeout)", "COM7: could not open (driver refused)", "COM8: opened, no board answered (timeout)",
+                    "COM10: word63 fingerprint matched", "COM11: opened, no board answered (timeout)", "COM12: word63 fingerprint matched"]);
+        let mut asked = asked.into_inner().unwrap();
+        asked.sort();
+        let mut each = listed.clone();
+        each.sort();
+        assert_eq!(asked, each, "each port probed once");
     }
 }

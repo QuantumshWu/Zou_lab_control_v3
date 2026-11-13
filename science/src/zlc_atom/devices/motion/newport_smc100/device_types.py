@@ -63,7 +63,7 @@ def _resolve(values: Mapping[str, Any], excluded: frozenset[str]) -> dict[str, A
         )
     port, _address, version, stage = found[0]
     return {
-        "parameters": {"port": port},
+        "found": {"port": port},
         "note": f"SMC100 at address {address} on {port} ({version}{f', stage {stage}' if stage else ''})"
         + "".join(f" ({said})" for said in bound),
     }
