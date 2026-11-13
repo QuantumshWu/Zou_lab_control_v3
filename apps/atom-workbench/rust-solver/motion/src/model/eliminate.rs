@@ -1029,6 +1029,13 @@ impl Model {
         region.gradient(region.forms.entry(self, x, y).iter().map(|&(frequency, pair, w, size)| (region.pairs[frequency][pair], w, size)))
     }
 
+    /// The largest wave number of the carriers' beams, k_max (1/µm): the light's pattern an atom crosses -- the recoil of
+    /// the scattering's photons at most (`force_over`), and the phase a step advances along it (solve.rs `prior`). None
+    /// carried, zero.
+    pub(crate) fn carrier_wave_number(&self) -> f64 {
+        self.carriers.iter().flat_map(|c| c.beams.iter().map(|&l| self.light.beams[l].wave_number)).fold(0.0, f64::max)
+    }
+
     /// The bound of the force on a cluster's state over a region (rad/µs/µm), made once per region and cluster, in its own form:
     /// −⟨ψ|∇H_h|ψ⟩ at most the gradient's norm, at most the largest over its states of their rows' sums -- a state's own level
     /// with its shift by its drives folded at the atom, one gradient (units.rs `Model::near_level`), and the far light's
@@ -1037,7 +1044,7 @@ impl Model {
     pub(crate) fn force_over(&self, cluster: usize, region: &Region) -> Own {
         *region.forces[cluster].get_or_init(|| {
             let states = &self.clusters[cluster].states;
-            let k_max = self.carriers.iter().flat_map(|c| c.beams.iter().map(|&l| self.light.beams[l].wave_number)).fold(0.0, f64::max);
+            let k_max = self.carrier_wave_number();
             let mut most: Option<Own> = None;
             for &x in states {
                 let own = Shift::of(Own::constant(0.0), self.entry_slope(x, x, region).re()).add(&self.near_level(x, region)).steepness();

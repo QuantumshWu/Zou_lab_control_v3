@@ -31,6 +31,15 @@ pub const CONFIDENCE: f64 = 2.0;
 /// given accuracy gives the step b/E = √(1/(1 + 2p)) of the target.
 pub const STEP_SHARE: f64 = square_root(1.0 / (1.0 + 2.0 * ORDER as f64));
 
+/// The kick's quadrature share (SPEC §2.2; step.rs, # The kick), the old engine's `QUADRATURE`: a step's quadrature errs
+/// on each component of its integrand by at most this share of the component's size times the step.
+///
+/// Derivation: the numerical tolerances inside a step take the square of the step's share of the square, (1/(1 + 2p))²
+/// = s⁴, of their target -- their work grows with the logarithm of the tolerance (a Gauss rule's nodes) or as a small
+/// root of it (a fourth-order stride), so their least work beside the step's lies at a few per cent of it -- and the
+/// impulse's target is T's, relative: s⁴ × `TEMPERATURE_TARGET`, 4·10⁻³ at p = 2.
+pub const QUADRATURE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * TEMPERATURE_TARGET;
+
 /// √a for a ≥ 0 in a constant (f64::sqrt is not const): Heron's iteration x ← (x + a/x)/2 from max(a, 1) ≥ √a, which
 /// decreases monotonically to √a and is stopped by the floating-point format, where a step no longer decreases x.
 const fn square_root(a: f64) -> f64 {
@@ -122,11 +131,12 @@ pub fn rounding(n: usize) -> f64 {
 mod tests {
     use super::*;
 
-    /// The derived values: s = √(1/(1 + 2p)) = √(1/5) to round-off; k_B/ħ = 0.130920… rad/µs per µK; ħ/m of Rb87 (1.4432e-25 kg)
+    /// The derived values: s = √(1/(1 + 2p)) = √(1/5) to round-off, the quadrature's share s⁴ × 0.1 = 4·10⁻³; k_B/ħ = 0.130920… rad/µs per µK; ħ/m of Rb87 (1.4432e-25 kg)
     /// 7.3072e-4 µm²/µs; the D2 line's wave number 2π·384230.484 GHz/c = 8.0528 rad/µm; γ_n against n u.
     #[test]
     fn the_derived_values_are_their_formulas() {
         assert!((STEP_SHARE - 0.2_f64.sqrt()).abs() <= f64::EPSILON * STEP_SHARE, "{STEP_SHARE}");
+        assert!((QUADRATURE - 4e-3).abs() <= 1e-15, "{QUADRATURE}");
         assert!((KT_PER_UK - 0.130_920_3).abs() <= 1e-7, "{KT_PER_UK}");
         assert!((hbar_over_mass(1.4432e-25) - 7.307_2e-4).abs() <= 1e-8);
         assert!((wave_number(384_230_484.468_5) - 8.052_8).abs() <= 1e-4);

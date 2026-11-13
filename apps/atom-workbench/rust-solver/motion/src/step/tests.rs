@@ -521,8 +521,8 @@ fn evolve(h: &Mat, psi: &[C64], tau: f64) -> Vec<C64> {
 /// detuning less k·v, v the step's path velocity -- predicted from the start state, which is the atom's own velocity
 /// here: the bare ground state in a flat trap is held by no force. One step of the moving atom's internal state against
 /// e^{−iH′τ} at rest: the populations, gauge-invariant, to round-off; and the norm, the survival, to what the
-/// quadrature leaves of its hazard's quotient by the norm (step.rs, # The kick, # Jumps: 3·10⁻¹⁰ of it here, the
-/// excited state ringing at Γτ = 11 from the bare ground state), within 10⁻⁸.
+/// quadrature leaves of its hazard (step.rs, # The kick, # Jumps: its share `QUADRATURE` of the hazard's integral -- ln
+/// of the norm --, the excited state ringing at Γτ = 11 from the bare ground state; measured 2.3·10⁻⁴ of it).
 #[test]
 fn a_moving_atom_is_an_atom_at_rest_at_the_shifted_detuning() {
     let hm = 1e-9;
@@ -544,7 +544,7 @@ fn a_moving_atom_is_an_atom_at_rest_at_the_shifted_detuning() {
         let (norm, exact) = (crate::linalg::norm_sqr(&s.end.psi), crate::linalg::norm_sqr(&reference));
         let moving: Vec<f64> = s.end.psi.iter().map(|z| z.norm_sqr() / norm).collect();
         let at_rest: Vec<f64> = reference.iter().map(|z| z.norm_sqr() / exact).collect();
-        assert!(relative(&moving, &at_rest) < 1e-12 && (norm / exact - 1.0).abs() < 1e-8, "v {v:?}: {moving:?} vs {at_rest:?}, the norm {norm} vs {exact}");
+        assert!(relative(&moving, &at_rest) < 1e-12 && (norm / exact).ln().abs() < crate::units::QUADRATURE * exact.ln().abs(), "v {v:?}: {moving:?} vs {at_rest:?}, the norm {norm} vs {exact}");
     }
 }
 
@@ -674,13 +674,11 @@ fn step_errors(beams: &[Beam], detuning: f64, gamma: f64, z0: f64, v: f64, tau: 
 /// kick; spectral.rs): a two-level atom in a standing wave whose light shift turns its dressed state by 3 rad a step,
 /// from the bare ground state -- the state after a jump, whose excited amplitude rings at the detuning --, with and
 /// without the decay, at Δτ = 1, 10, 50, 200.
-/// - At rest the generator is one matrix over the step: the state is the sub-stepped reference's to its rounding, and
-///   so is the kick without the decay. With it the kick is a quotient by the norm, whose own ringing -- Γ/|Δ| times
-///   the excited share, the bare state's 4U/|Δ| at most -- is beyond the bandwidth the quadrature resolves to round-off
-///   (step.rs, # The kick): the kick errs by a part of that ringing, 10⁻⁵ of the dipole kick at the most here (at Δτ =
-///   200) and 2·10⁻⁷ at Δτ = 50; held to the ringing itself and to 10⁻⁴. So does the state's norm, the survival, whose
-///   hazard is the same quotient (step.rs, # Jumps): the state's error at rest is its norm's, 1.2·10⁻⁸, 1.7·10⁻⁸ and
-///   1.8·10⁻⁷ at Δτ = 10, 50, 200, held to the same.
+/// - At rest the generator is one matrix over the step: without the decay the state is the sub-stepped reference's to
+///   its rounding. The kick is the quadrature's, within its share of each component (step.rs, # The kick:
+///   `QUADRATURE`, 4·10⁻³; measured 1.1·10⁻³ of the dipole kick at the most, at Δτ = 10), and so is the state's norm
+///   with the decay -- the survival, whose hazard the same quadrature integrates (step.rs, # Jumps): the state's error
+///   at rest is its norm's, 2.3·10⁻⁴ at the most (Δτ = 10); each held to the share.
 /// - Moving, the light changes along the path by k·v τ: the errors are of the scheme's order, the second in that
 ///   change, and at one light shift they do not grow with Δτ. The state's is what a hop leaves out (spectral.rs: the
 ///   second Magnus term), the light shift of the change itself over a hop, at most half of (k v τ)²/12 of the light
@@ -701,8 +699,8 @@ fn a_step_integrates_its_internal_frequencies_whatever_the_detuning() {
             let speeds = [0.4, 0.2, 0.1];
             let moving: Vec<[f64; 2]> = speeds.iter().map(|&v| step_errors(&beams, detuning, gamma, 0.11, v, tau)).collect();
             eprintln!("Γ {gamma:6.3}, Δτ {turns:5}: at rest ψ {:.2e}, kick {:.2e}; moving at 0.4, 0.2, 0.1 µm/µs ψ {:.2e} {:.2e} {:.2e}, kick {:.2e} {:.2e} {:.2e}", rest[0], rest[1], moving[0][0], moving[1][0], moving[2][0], moving[0][1], moving[1][1], moving[2][1]);
-            let ringing = (gamma / detuning.abs() * 4.0 * shift / tau / detuning.abs()).min(1e-4);
-            if !(rest.iter().all(|e| *e < if gamma == 0.0 { 1e-11 } else { ringing })) {
+            let share = crate::units::QUADRATURE;
+            if !(rest[0] < if gamma == 0.0 { 1e-11 } else { share } && rest[1] < share) {
                 failures.push(format!("Γ {gamma}, Δτ {turns}: at rest {rest:?}"));
             }
             for q in 0..2 {
@@ -720,8 +718,9 @@ fn a_step_integrates_its_internal_frequencies_whatever_the_detuning() {
 /// The step's order in what the path changes (step.rs, # The kick; spectral.rs): the same atom from the bare ground
 /// state at 0.4 µm/µs (k·v = 3.2 rad/µs), over 0.0625 µs in one, two, four and eight steps, with and without the decay,
 /// at detunings that turn 1, 10, 50 and 200 rad over that span (the light shift 3 rad over it at each). A mass the kick
-/// does not move: the steps' paths are the reference's, and a step is its propagation. The state against the path's
-/// sub-stepped reference, and the kick against the reference of the step's own decomposition (`decomposed`): what
+/// does not move: the steps' paths are the reference's, and a step is its propagation. The state's direction against
+/// the path's sub-stepped reference's (its norm is the survival's, which the kick's quadrature integrates within its
+/// share: `a_step_s_norm_reaches_a_threshold…`), and the kick against the reference of the step's own decomposition (`decomposed`): what
 /// the propagation leaves of the path's change, without the splitting. Which of the two the pair is taken by is the
 /// propagation's own choice at each step (spectral.rs, # The split: the pair's turn between two nodes against the size
 /// of its change over a half step), read from the step's picture.
@@ -762,7 +761,9 @@ fn a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the
                         t = step_of(&model, &t, tau, &mut scratch).unwrap().end;
                         hopped &= !crate::spectral::tests::follows(&scratch.picture);
                     }
-                    let state = (0..2).map(|a| (t.psi[a] - exact[a]).abs()).fold(0.0, f64::max);
+                    let length = |x: [C64; 2]| (x[0].norm_sqr() + x[1].norm_sqr()).sqrt();
+                    let (mine, theirs) = (length([t.psi[0], t.psi[1]]), length(exact));
+                    let state = (0..2).map(|a| (t.psi[a] / mine - exact[a] / theirs).abs()).fold(0.0, f64::max);
                     ([state, (t.kappa[2] - start.kappa[2] - kick).abs() / kick.abs().max(size)], hopped)
                 })
                 .unzip();
@@ -793,12 +794,11 @@ fn a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the
 /// of the step -- between the step's nodes, where the state is the nodes' quintic and the following. The step
 /// (`Midway::attempt`) makes its jump at that time, where its survival reaches the threshold (step.rs, # Jumps): its
 /// error, as the norm's logarithm there (the time's error times the norm's rate), is at rest -- the state is exact at
-/// any time of the step -- what the quadrature leaves of the hazard's quotient by the norm, which rings beyond the
-/// forms' bandwidth as the kick's does (step.rs, # The kick) and as the step's end does (3.5·10⁻⁷ at Δτ = 200,
-/// `a_step_integrates_its_internal_frequencies…`), by the spans the root takes it on: measured −6·10⁻¹⁵, 7·10⁻¹³,
-/// 5·10⁻¹¹ and 3.4·10⁻⁸ at Δτ = 1, 10, 50, 200 (the line's norm was exact there), asked within 10⁻⁷; and within the
-/// square of the following where the atom moves (`a_step_is_of_the_fourth_order…`), as the state is. And without the
-/// decay the norm stays one within the same.
+/// any time of the step -- what the quadrature leaves of the hazard by the spans the root takes it on, within its share
+/// of the hazard's integral to the threshold (`QUADRATURE`; measured 2.5·10⁻⁷, 2.1·10⁻⁵, 1.3·10⁻⁵ and 1.5·10⁻⁷ at
+/// Δτ = 1, 10, 50, 200: 3·10⁻⁴ of it at the most); and within that and the square of the following where the atom
+/// moves (`a_step_is_of_the_fourth_order…`), as the state is. And without the decay the norm stays one within the
+/// same.
 #[test]
 fn a_step_s_norm_reaches_a_threshold_where_the_path_s_does_whatever_the_detuning() {
     let (tau, shift, hm, z0) = (0.0625, 3.0, 1e-9, 0.11);
@@ -826,7 +826,7 @@ fn a_step_s_norm_reaches_a_threshold_where_the_path_s_does_whatever_the_detuning
             let free = Atom::new(hm, flat, beams.to_vec(), detuning, 0.0);
             let kept = norm(&step_of(&free, &held(&free, [0.0, 0.0, z0], [0.0, 0.0, v / hm]), tau, &mut step::Scratch::default()).unwrap().end.psi) - 1.0;
             eprintln!("Δτ {turns:5}, v {v}: the threshold {theta:.6} is reached at {length:.9} µs against {at:.9} (ln‖ψ‖² off by {error:+.2e}, its rate {rate:.3}/µs); without the decay ‖ψ‖² − 1 = {kept:+.2e}");
-            let within = if v == 0.0 { 1e-7 } else { following * following };
+            let within = crate::units::QUADRATURE * theta.ln().abs() + following * following;
             if !(error.abs() < within && kept.abs() < within) {
                 failures.push(format!("Δτ {turns}, v {v}: ln‖ψ‖² off by {error:e}, ‖ψ‖² − 1 = {kept:e} (within {within:e})"));
             }
@@ -835,14 +835,12 @@ fn a_step_s_norm_reaches_a_threshold_where_the_path_s_does_whatever_the_detuning
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// The step's doubling reads what the step leaves (adapt.rs, # The read): the same atom moving at 0.2 µm/µs, the decay
-/// on, at Δτ = 50 and 200 -- the detuning unresolved by the step and by its halves alike. The step's error of the
-/// state's fall of ln‖ψ‖² (the hazard, which times the jumps) against the sub-stepped reference: at Δτ = 50 the
-/// doubling's estimate of it, 4/3 of the step less its two halves, within a half of itself -- an error of 5·10⁻⁷ of the
-/// hazard's integral, a thousand times the sub-stepped reference's own (10⁻⁹ is asked of it). At Δτ = 200 what the
-/// quadrature leaves of the hazard's quotient by the norm (step.rs, # The kick: it rings beyond the forms' bandwidth)
-/// is the larger, and it does not fall with the step: the doubling reads 2·10⁻⁸ of an error of 4·10⁻⁷, 1.6·10⁻⁵ of the
-/// hazard's integral (the line's norm erred 5·10⁻⁸ there, which the doubling read); asked within 10⁻⁴ of it.
+/// The step's doubling reads what the step leaves (adapt.rs, # The read) but its quadrature's share: the same atom
+/// moving at 0.2 µm/µs, the decay on, at Δτ = 50 and 200 -- the detuning unresolved by the step and by its halves
+/// alike. The step's error of the state's fall of ln‖ψ‖² (the hazard, which times the jumps) against the sub-stepped
+/// reference less the doubling's estimate of it, 4/3 of the step less its two halves, is what the quadrature leaves of
+/// the hazard (step.rs, # The kick, # Jumps), which does not fall with the step: within its share of the hazard's
+/// integral (`QUADRATURE`; measured: at Δτ = 50 an error of 1.5·10⁻⁵ of 0.092, the doubling reading −8·10⁻⁶).
 #[test]
 fn the_doubling_reads_what_a_step_leaves_of_the_path_s_change() {
     let (hm, tau, shift, v, z0) = (1e-9, 0.0625, 3.0, 0.2, 0.11);
@@ -859,11 +857,7 @@ fn the_doubling_reads_what_a_step_leaves_of_the_path_s_change() {
         let fall = |psi: &[C64]| -psi.iter().map(|z| z.norm_sqr()).sum::<f64>().ln();
         let (error, read) = (fall(&whole.psi) - fall(&exact), 4.0 / 3.0 * (fall(&whole.psi) - fall(&halves.psi)));
         eprintln!("Δτ {turns}: the hazard's integral {:.5}, the step's error of it {error:+.3e}, the doubling reads {read:+.3e}", fall(&exact));
-        if turns == 50.0 {
-            assert!((read - error).abs() < 0.5 * error.abs() && error.abs() > 1e-9, "Δτ {turns}: error {error:e}, read {read:e}");
-        } else {
-            assert!(error.abs() < 1e-4 * fall(&exact), "Δτ {turns}: error {error:e} of {}", fall(&exact));
-        }
+        assert!((read - error).abs() < crate::units::QUADRATURE * fall(&exact), "Δτ {turns}: error {error:e}, read {read:e} of {}", fall(&exact));
     }
 }
 
@@ -1226,7 +1220,9 @@ fn stepped<D: Dynamics>(model: &D, start: &Trajectory, tau: f64, end: f64) -> (T
 /// standing wave along z, in a trap whose period the step does not resolve (ω τ = 3), jumping some times a step --
 /// the hazard follows the atom through the wave --, each jump with its photon's recoil. Step by step:
 /// - a jump is where the step's own propagation reaches the threshold: the same step from the same state with no
-///   threshold, read at the time of the step's first jump, has ‖ψ‖² at that threshold, to the root's rounding;
+///   threshold, read at the time of the step's first jump, has ‖ψ‖² at that threshold, within what the two
+///   quadratures of the hazard to that time -- the root's spans and the read's -- leave of it (`QUADRATURE` of the
+///   hazard's integral; measured 7·10⁻⁷ in its logarithm at the most);
 /// - the step's path, handed on through its jumps' kicks (`Segment::after`), ends at the step's end: the jumps' kicks
 ///   enter the reference's flow where they are made;
 /// - the steps are the grid's, one a nominal step whatever the jumps, some with several; and `advance` is these steps
@@ -1247,7 +1243,8 @@ fn a_jump_is_made_inside_its_step_where_the_step_s_own_propagation_reaches_the_t
         if let Some(first) = taken.made.first() {
             let (_, read) = step_read(&model, &twin, tau, &step::Brownian::STILL, &[first.state.time], &mut step::Scratch::default()).unwrap();
             let off = (norm(&read[0].psi) / twin.threshold).ln();
-            assert!(off.abs() < 1e-9, "step {k}: at its first jump's time {} the step's own ‖ψ‖² is {off:e} off the threshold in its logarithm", first.state.time);
+            let fall = (norm(&twin.psi) / twin.threshold).ln();
+            assert!(off.abs() < crate::units::QUADRATURE * fall, "step {k}: at its first jump's time {} the step's own ‖ψ‖² is {off:e} off the threshold in its logarithm", first.state.time);
         }
         let mut piece = taken.segment.clone();
         for made in &taken.made {
@@ -1519,15 +1516,24 @@ fn the_stumpff_functions_are_their_series() {
     }
 }
 
-/// Gauss–Legendre at its derived panel phase integrates e^{iνs} over [0, T] to round-off (`quadrature`), from a phase of
-/// 10⁻³ to 10³ and with a decay, against (e^{iνT} − 1)/(iν).
+/// Gauss–Legendre at its derived panel phases integrates e^{iνs} over [0, T] (`quadrature`), from a phase of 10⁻³ to
+/// 10³ and with a decay, against (e^{iνT} − 1)/(iν): to round-off, and within the kick's share of T (`QUADRATURE`, the
+/// component's size one) on the nodes the kick takes (`nodes`) -- fewer, the more the bandwidth is resolved.
 #[test]
-fn the_quadrature_integrates_a_bandwidth_to_round_off() {
+fn the_quadrature_integrates_a_bandwidth_within_its_tolerance() {
+    use super::Within;
     for (omega, decay, tau) in [(1.0, 0.0, 1e-3), (3.0, 0.0, 1.0), (40.0, 0.0, 0.7), (900.0, 0.0, 1.1), (60.0, 19.0, 0.3)] {
         let w = C64::new(omega, decay);
-        let sum: C64 = super::quadrature(0.0, tau, w.abs(), super::FORMS).map(|(s, weight)| (C64::I * w * s).exp() * weight).sum();
         let exact = ((C64::I * w * tau).exp() - C64::ONE) / (C64::I * w);
-        assert!((sum - exact).abs() <= 1e-14 * tau, "ω {omega}, γ {decay}, τ {tau}: {sum:?} against {exact:?} on {} nodes", super::nodes(tau, w.abs()));
+        let mut counts = Vec::new();
+        for (within, tolerance) in [(Within::RoundOff, 1e-14), (Within::Share, crate::units::QUADRATURE)] {
+            let nodes: Vec<(f64, f64)> = super::quadrature(0.0, tau, w.abs(), super::FORMS, within).collect();
+            let sum: C64 = nodes.iter().map(|(s, weight)| (C64::I * w * *s).exp() * *weight).sum();
+            assert!((sum - exact).abs() <= tolerance * tau, "ω {omega}, γ {decay}, τ {tau}: {sum:?} against {exact:?} on {} nodes", nodes.len());
+            counts.push(nodes.len());
+        }
+        assert!(counts[1] <= counts[0] && counts[1] == super::nodes(tau, w.abs()), "ω {omega}, γ {decay}, τ {tau}: {counts:?} nodes");
+        eprintln!("ω {omega}, γ {decay}, τ {tau}: {} nodes to round-off, {} within the share", counts[0], counts[1]);
     }
 }
 
@@ -2507,8 +2513,8 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
         .iter()
         .map(|along| {
             let mut scratch = fitted(n);
-            let super::Carved { picture, decay, .. } = scratch.carve();
-            super::pictured(along, picture, tau, decay);
+            let super::Carved { picture, decay, part, .. } = scratch.carve();
+            super::pictured(along, picture, tau, (decay, part), None);
             scratch
         })
         .collect();
@@ -2558,16 +2564,19 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let own = whole - calls[0] * reference - calls[1] * point - nodes;
     let fixed = middle - calls[0] * reference;
     let work = steps.iter().map(|s| s.work).sum::<f64>() / count as f64;
-    // What the propagations took: the quadrature's nodes at the picture's bandwidth, the starts' means.
-    let [nodes, turned] = pieces.iter().zip(starts).fold([0.0; 2], |sums, (p, s)| {
+    // What the propagations took: the quadrature's nodes at the picture's bandwidth, and the share of the strides'
+    // route (a step after the decomposition's was counted: the second), the starts' means.
+    let [nodes, turned, strided] = pieces.iter().zip(starts).fold([0.0; 3], |sums, (p, s)| {
         let mut scratch = fitted(s.psi.len());
-        let _ = p.through.attempt(&Trajectory { threshold: 0.0, ..s.clone() }, &step::Brownian::STILL, &[], &mut scratch, &Everywhere);
+        for _ in 0..2 {
+            let _ = p.through.attempt(&Trajectory { threshold: 0.0, ..s.clone() }, &step::Brownian::STILL, &[], &mut scratch, &Everywhere);
+        }
         let picture = &scratch.picture;
-        let found = [super::nodes(tau, picture.bandwidth) as f64, picture.bandwidth * tau];
+        let found = [super::nodes(tau, picture.bandwidth) as f64, picture.bandwidth * tau, if picture.decomposed() { 0.0 } else { 1.0 }];
         std::array::from_fn(|i| sums[i] + found[i] / count as f64)
     });
     eprintln!(
-        "{name:<22} n {n} τ {tau:<6} | step {whole:8.2} = model {:8.2} (reference {reference:5.2} × {:4.1} + middle {point:7.2} × {:.0} + generator {generator:6.2} × {:4.1} + force {force:6.2} × {:4.1} + tones {tones:6.2} × {:3.1}) + own {own:8.2} (scattering {scattering:6.2}) | a readout {readout:6.2} | fixed point {fixed:6.2}  through the middle {propagated:8.2}  (with a jump {root:8.2}, {crossings}/{count}; {nodes:.1} nodes at the bandwidth × τ {turned:.2}) | counted {work:9.0} | pace {:.3} ns",
+        "{name:<22} n {n} τ {tau:<6} | step {whole:8.2} = model {:8.2} (reference {reference:5.2} × {:4.1} + middle {point:7.2} × {:.0} + generator {generator:6.2} × {:4.1} + force {force:6.2} × {:4.1} + tones {tones:6.2} × {:3.1}) + own {own:8.2} (scattering {scattering:6.2}) | a readout {readout:6.2} | fixed point {fixed:6.2}  through the middle {propagated:8.2}  (with a jump {root:8.2}, {crossings}/{count}; {nodes:.1} nodes at the bandwidth × τ {turned:.2}, strides {strided:.2}) | counted {work:9.0} | pace {:.3} ns",
         whole - own,
         calls[0],
         calls[1],
@@ -3204,7 +3213,7 @@ fn a_scene_s_step_error_by_the_split() {
                         along.middle.generator(&along.path, middle - 0.5 * t, &mut picture.ends[0]);
                         along.middle.generator(&along.path, middle + 0.5 * t, &mut picture.ends[1]);
                     }
-                    picture.prepare(0.5 * t, still);
+                    picture.prepare(0.5 * t, still, |bandwidth| super::nodes(t, bandwidth) + 2, 0.0);
                     if i == 0 {
                         for [turn, slope, curvature] in crate::spectral::tests::pairs(&picture) {
                             let bin = [0.5, 1.0, 2.0, 4.0].iter().filter(|edge| turn >= **edge).count();
@@ -3630,8 +3639,8 @@ fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> f64 {
     let through = step::Midway::new(model, start, tau).unwrap();
     let along = super::Along::new(&through.generator, start.kappa, start.kappa.map(|k| model.hbar_over_mass() * k));
     let mut scratch = fitted(n);
-    let super::Carved { picture, decay, .. } = scratch.carve();
-    super::pictured(&along, picture, tau, decay);
+    let super::Carved { picture, decay, part, .. } = scratch.carve();
+    super::pictured(&along, picture, tau, (decay, part), None);
     let mut map = Mat::zeros(n, n);
     for a in 0..n {
         let (mut x, mut y) = (vec![C64::ZERO; n], vec![C64::ZERO; n]);
