@@ -285,7 +285,9 @@ fn student_tail(q: f64, nu: u64) -> f64 {
 /// An atom held at an output: its readout's populations (SPEC §1.7) and per lab axis its means of κ and κ² over the
 /// output's window (1/µm, 1/µm²); and what it is against what the model was judged for (SPEC §1.8): `unresolved` -- a
 /// step of its trajectory, at the output or before it, did not resolve its path at its speed (step.rs
-/// `Trajectory::unresolved`) --, else whether at the output's instant it lies `outside` the reach.
+/// `Trajectory::unresolved`) --, else whether at the output's instant it lies `outside` the reach; and whether it is
+/// `leaving`: its prepared energy at the output's instant at the potential's far value or above -- held in the trap's
+/// region, bound no more, no draw of the bound atoms' distribution a reach is made for (solve.rs, # The reach's atoms).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Held {
     pub rows: [f64; STATES],
@@ -293,6 +295,7 @@ pub struct Held {
     pub kappa2: [f64; 3],
     pub outside: bool,
     pub unresolved: bool,
+    pub leaving: bool,
 }
 
 /// One trajectory at one output, what became of it by then: its atom is held; it was lost (SPEC §1.7); or it ended
@@ -307,8 +310,9 @@ pub enum Fate {
 }
 
 /// One output's sums over a group's trajectories: the number counted and of the others (`Fate::Failed`), the atoms held, and over the held
-/// atoms Σρ_s, Σ⟨κ⟩, Σ⟨κ⟩² (for the U-statistic, module documentation) and Σ⟨κ²⟩ per lab axis; and of the held atoms
-/// those outside the reach and those unresolved (`Held`), each kind's number and its Σ_a ⟨κ_a²⟩ over the three axes.
+/// atoms Σρ_s, Σ⟨κ⟩, Σ⟨κ⟩² (for the U-statistic, module documentation) and Σ⟨κ²⟩ per lab axis; of the held atoms
+/// those outside the reach and those unresolved (`Held`), each kind's number and its Σ_a ⟨κ_a²⟩ over the three axes; and
+/// the leaving atoms' part of the held atoms' motion (`Leaving`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sums {
     pub trajectories: f64,
@@ -320,9 +324,21 @@ pub struct Sums {
     pub kappa2: [f64; 3],
     pub outside: [f64; 2],
     pub unresolved: [f64; 2],
+    pub leaving: Leaving,
 }
+
+/// Of a set of sums' held atoms the leaving ones (`Held::leaving`): their number and their Σ⟨κ⟩, Σ⟨κ⟩² and Σ⟨κ²⟩ per lab
+/// axis -- the bound atoms' motion is the held atoms' less this (`bound_motion`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Leaving {
+    pub held: f64,
+    pub kappa: [f64; 3],
+    pub kappa_squared: [f64; 3],
+    pub kappa2: [f64; 3],
+}
+
 impl Sums {
-    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], outside: [0.; 2], unresolved: [0.; 2] };
+    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], outside: [0.; 2], unresolved: [0.; 2], leaving: Leaving { held: 0., kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3] } };
     /// One trajectory at the output.
     pub fn add(&mut self, fate: &Fate) {
         if *fate == Fate::Failed {
@@ -345,6 +361,15 @@ impl Sums {
                 sum[0] += 1.;
                 sum[1] += kinetic;
             }
+            if h.leaving {
+                let l = &mut self.leaving;
+                l.held += 1.;
+                for a in 0..3 {
+                    l.kappa[a] += h.kappa[a];
+                    l.kappa_squared[a] += h.kappa[a] * h.kappa[a];
+                    l.kappa2[a] += h.kappa2[a];
+                }
+            }
         }
     }
     /// Another's sums added in with the sign (−1: left out).
@@ -363,6 +388,26 @@ impl Sums {
         for i in 0..2 {
             self.outside[i] += sign * o.outside[i];
             self.unresolved[i] += sign * o.unresolved[i];
+        }
+        let (l, m) = (&mut self.leaving, &o.leaving);
+        l.held += sign * m.held;
+        for a in 0..3 {
+            l.kappa[a] += sign * m.kappa[a];
+            l.kappa_squared[a] += sign * m.kappa_squared[a];
+            l.kappa2[a] += sign * m.kappa2[a];
+        }
+    }
+    /// The bound atoms' motion (`bound_motion`): the held atoms less the leaving ones, in the number held and in the
+    /// motion's sums -- all T reads of a set of sums.
+    fn bound(&self) -> Sums {
+        let l = &self.leaving;
+        Sums {
+            held: self.held - l.held,
+            kappa: std::array::from_fn(|a| self.kappa[a] - l.kappa[a]),
+            kappa_squared: std::array::from_fn(|a| self.kappa_squared[a] - l.kappa_squared[a]),
+            kappa2: std::array::from_fn(|a| self.kappa2[a] - l.kappa2[a]),
+            leaving: Sums::ZERO.leaving,
+            ..self.clone()
         }
     }
 }
@@ -558,6 +603,27 @@ fn shown(m: &Moments, s: usize) -> f64 {
     m.shown.expect("moments that count a trajectory").1[s]
 }
 
+/// The held atoms' motion of one output's jackknife (`summarize`), where at least two are held.
+fn motion(j: &Jackknife, scales: &Scales) -> Option<Motion> {
+    let (all, hm) = (&j.all[0], scales.hbar_over_mass);
+    j.full[0].temperature.map(|t| Motion {
+        temperature: t,
+        temperature_errors: std::array::from_fn(|a| j.held(|x| x[0][a])),
+        temperature_total: t.iter().sum::<f64>() / 3.,
+        temperature_total_error: j.held(|x| x[0].iter().sum::<f64>() / 3.),
+        occupation: std::array::from_fn(|a| occupation(hm * all.kappa2[a], all.held, scales.frequencies[a])),
+        mean_velocity: std::array::from_fn(|a| hm * all.kappa[a] / all.held),
+    })
+}
+
+/// The bound atoms' motion at every output (`Held::leaving`; solve.rs, # The reach's atoms): as `summarize` reads the
+/// held atoms', of the held atoms less the leaving ones -- what a reach's temperature is read against.
+pub fn bound_motion<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<Option<Motion>> {
+    let bound: Vec<Group> = groups.iter().map(|g| Group { sums: g.borrow().sums.iter().map(Sums::bound).collect() }).collect();
+    let outputs = bound.first().map_or(0, |g| g.sums.len());
+    (0..outputs).into_par_iter().map(|k| motion(&jackknife(&[&bound[..]], k, scales.hbar_over_mass), scales)).collect()
+}
+
 /// The estimates at every output from the groups' sums (module documentation): where no trajectory is counted, the
 /// loss of the output before (# What is counted) -- at t = 0 every trajectory is held.
 pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<Estimate> {
@@ -569,14 +635,7 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
             let j = jackknife(&[groups], k, hm);
             let (all, full) = (&j.all[0], &j.full[0]);
             let n = all.held;
-            let motion = full.temperature.map(|t| Motion {
-                temperature: t,
-                temperature_errors: std::array::from_fn(|a| j.held(|x| x[0][a])),
-                temperature_total: t.iter().sum::<f64>() / 3.,
-                temperature_total_error: j.held(|x| x[0].iter().sum::<f64>() / 3.),
-                occupation: std::array::from_fn(|a| occupation(hm * all.kappa2[a], n, scales.frequencies[a])),
-                mean_velocity: std::array::from_fn(|a| hm * all.kappa[a] / n),
-            });
+            let motion = motion(&j, scales);
             let kinetic: f64 = all.kappa2.iter().sum();
             let shares = |kind: &[f64; 2]| [if n > 0. { kind[0] / n } else { 0. }, if kinetic > 0. { kind[1] / kinetic } else { 0. }];
             let estimate = Estimate {
@@ -1041,7 +1100,7 @@ mod tests {
     fn atom(state: usize, x: f64, y: f64) -> Held {
         let mut rows = [0.; STATES];
         rows[state] = 1.;
-        Held { rows, kappa: [x; 3], kappa2: [y; 3], outside: false, unresolved: false }
+        Held { rows, kappa: [x; 3], kappa2: [y; 3], outside: false, unresolved: false, leaving: false }
     }
     fn group(atoms: Vec<Option<Held>>) -> Group {
         let mut g = Group::new(1);
@@ -1052,6 +1111,33 @@ mod tests {
     }
     /// ħ/m in KT_PER_UK's unit, so that T reads ⟨κ²⟩ − ⟨κ⟩² itself.
     const UNIT: Scales = Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] };
+
+    /// The bound atoms' motion (`bound_motion`) is the held atoms' less the leaving ones' (`Held::leaving`): five groups
+    /// of four atoms, of ⟨κ⟩ and ⟨κ²⟩ set apart by their group and place, a leaving atom in three of them a hundred
+    /// times hotter -- T and its jackknife per axis read as `summarize` reads the same groups without the leaving
+    /// atoms, to the rounding of the sums they are taken out of, where the leaving atoms make the held atoms' T ten times
+    /// higher; where every atom is bound, the held atoms' own to the bit.
+    #[test]
+    fn the_bound_atoms_motion_is_the_held_atoms_less_the_leaving_ones() {
+        let atoms = |g: usize, leaving: bool| -> Vec<Option<Held>> {
+            (0..4)
+                .map(|m| {
+                    let x = 0.1 * (g + 2 * m) as f64;
+                    let hot = leaving && m == g % 4 && g % 2 == 0;
+                    Some(Held { leaving: hot, ..atom(0, if hot { 10. * x } else { x }, if hot { 100. * (x * x + 1.) } else { x * x + 0.3 * (1 + g) as f64 }) })
+                })
+                .collect()
+        };
+        let with: Vec<Group> = (0..5).map(|g| group(atoms(g, true))).collect();
+        let without: Vec<Group> = (0..5).map(|g| group(atoms(g, true).into_iter().filter(|a| !a.as_ref().is_some_and(|a| a.leaving)).collect())).collect();
+        let (bound, own) = (bound_motion(&with, &UNIT)[0].unwrap(), summarize(&without, &UNIT)[0].motion.unwrap());
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs().max(1.);
+        assert!((0..3).all(|a| close(bound.temperature[a], own.temperature[a]) && close(bound.temperature_errors[a].error, own.temperature_errors[a].error)), "{bound:?} against {own:?}");
+        let all = summarize(&with, &UNIT)[0].motion.unwrap();
+        assert!(all.temperature[0] > 10. * own.temperature[0], "the leaving atoms make the held atoms' T {} against {}", all.temperature[0], own.temperature[0]);
+        let cold: Vec<Group> = (0..5).map(|g| group(atoms(g, false))).collect();
+        assert_eq!(bound_motion(&cold, &UNIT)[0].unwrap().temperature, summarize(&cold, &UNIT)[0].motion.unwrap().temperature);
+    }
 
     /// The jackknife of a mean over groups of one is the standard error of the mean, √(Σ(x − x̄)²/(g(g − 1))): five
     /// groups showing state 0 as 0 0 0 0 1, 0.2; the loss and the rows as shown read on every group, the held atoms'
