@@ -636,12 +636,12 @@ enum Attempt {
 }
 
 /// What an attempt's end hands the next (module documentation, # An attempt's own): the groups of its run level with
-/// their states -- the scout's, a pilot's own level as far as it ran, or the pilot's --, and whose reads they are
-/// (`Reads`: the scout's few, one a group, are judged at what they leave no doubt of). Nothing of the step: the next
-/// attempt's ladder begins at its own first rung, and goes down only on its own reads (# The step).
+/// their states -- the scout's, a pilot's own level as far as it ran, or the pilot's --, and whether they are few, the
+/// scout's (`Reads::Carried`: judged at what they leave no doubt of). Nothing of the step: the next attempt's ladder
+/// begins at its own first rung, and goes down only on its own reads (# The step).
 struct Carried {
     parts: Vec<Part>,
-    reads: Reads,
+    few: bool,
 }
 impl Carried {
     /// The states as the model `to` holds them, where they are the model `from`'s (`Model::carried`: the next model
@@ -1247,13 +1247,28 @@ fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Table
     Sampled { of: rows.iter().map(|&(index, k, tau, _, _)| (index, k, tau)).collect(), errors, at, from, row, lost }
 }
 
-/// Whose reads a keep is judged on (`keep`): the scout's few, the pilot's, or the product's statistics beside the
-/// pilot's reads of the units.
+/// Whose reads a keep is judged on (`keep`): the scout's few, the pilot's, the product's statistics beside the pilot's
+/// reads of the units, or the states an attempt before left (# An attempt's own), few where they are a scout's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Reads {
     Scout,
     Pilot,
     Product,
+    Carried { few: bool },
+}
+impl Reads {
+    /// Whether the reads are few, one state a group and output, judged at what they leave no doubt of (`Doubt`).
+    fn few(self) -> bool {
+        matches!(self, Reads::Scout | Reads::Carried { few: true })
+    }
+    /// Whether the work a keep saves is asked of them, beside the room (`keep`): on the scout and the pilot, whose keep
+    /// runs again what its attempt ran. Not in the product -- the pilot priced the rest --, nor on carried states: their
+    /// attempt runs its own pilot whatever it keeps, so every keep's re-run is nothing (`again` = 0) and any unit's
+    /// smallest saving pays, every unit priced at every attempt's start (R2_RECOIL: 98 s of pricing, and one unit's
+    /// kept model asked 5.7 GB); the work is the pilot's to price on the run's own reads.
+    fn priced(self) -> bool {
+        matches!(self, Reads::Scout | Reads::Pilot)
+    }
 }
 
 /// The folded units to keep, if any (SPEC §5.2; module documentation, # The model), from the units' errors `measured`
@@ -1267,7 +1282,8 @@ enum Reads {
 /// the room needs are taken to the far end of the doubt (`needed`, `raised`): the next pilot's read of the error they
 /// leave has room. In the product (`Reads::Product`) the room alone is asked: a look the pilot left room that the
 /// units' error the pilot booked leaves none at the product's statistics is the room's, which a keep gives where one
-/// does, and the attempt ends with it (`product`) -- the pilot has priced the rest.
+/// does, and the attempt ends with it (`product`) -- the pilot has priced the rest; and so on carried states, whose
+/// attempt's pilot prices the work (`Reads::priced`).
 #[allow(clippy::too_many_arguments)]
 fn keep(
     kept: &[Unit],
@@ -1298,7 +1314,7 @@ fn keep(
     // pricing alike -- a keep is never undone, and the reads that put the room's error high put the work the current
     // model asks high with them; the pilot reads the same units on all its states.
     let doubt = || Doubt::new(measured, fixed.model.len(), parts, scales, unsampled);
-    let scouted = (reads == Reads::Scout).then(doubt);
+    let scouted = reads.few().then(doubt);
     let near = scouted.as_ref().map_or_else(|| vec![[0.; 2]; fixed.model.len()], |d| d.interval(&[]));
     let mut pricing = Pricing::new(Formula::new(model, kept, units, reference, centre, tabled), measured, means, parts, estimates, fixed, step, scales, unsampled, again, &near);
     // The units that weigh where the looks have no room, each with the work a µs of its kept model (`needed`; none where
@@ -1328,7 +1344,7 @@ fn keep(
         let needed = needed(&counted, step, means, &held, &read, pricing.least(), &rate, &|set| without(fixed, means, &read, set), &far, &price, pricing.again);
         return (!needed.is_empty()).then_some(needed);
     }
-    if reads == Reads::Product {
+    if !reads.priced() {
         return None;
     }
     let saving = pricing.saving_at_all();
@@ -1446,13 +1462,14 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
         let keeps = keep(kept, model, reference, trap.centre, units, &measured, &means, parts, &estimates, &fixed, &shares, &scales, unsampled, (&tables, judged), again, reads);
         (keeps.map(|u| u.iter().map(|&u| units[u].clone()).collect()), read)
     };
-    // The states the attempt before left (# An attempt's own): decided on before a trajectory runs. A keep they ask ends
-    // the attempt there, handing the same states on, so that a model is settled on them, keep after keep, before its
-    // own atoms run; none asked stands for the scout's keep.
+    // The states the attempt before left (# An attempt's own): decided on before a trajectory runs, for the room (the
+    // work is this attempt's pilot's to price, `Reads::priced`). A keep they ask ends the attempt there, handing the same
+    // states on, so that a model is settled on them, keep after keep, before its own atoms run; none asked stands for
+    // the scout's keep.
     let decided_before = match carried {
         Some(carried) => {
             let parts: Vec<&Part> = carried.parts.iter().collect();
-            let (asked, _) = decided(&parts, 0., carried.reads);
+            let (asked, _) = decided(&parts, 0., Reads::Carried { few: carried.few });
             drop(parts);
             if let Some(units) = asked {
                 return Ok(Attempt::Keep(units, carried));
@@ -1476,7 +1493,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
         let (asked, read) = decided(&scout, scout.len() as f64, Reads::Scout);
         drop(scout);
         if let Some(units) = asked {
-            return Ok(Attempt::Keep(units, Carried { parts: std::mem::take(&mut levels.fine), reads: Reads::Scout }));
+            return Ok(Attempt::Keep(units, Carried { parts: std::mem::take(&mut levels.fine), few: true }));
         }
         Some(read)
     };
@@ -1488,7 +1505,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     let doubling = grown(&levels.fine.iter().collect::<Vec<_>>()).is_some();
     let ran = match own_level(&run, ensemble, &domain, &context, &levels.fine, &numbers, doubling, &grown, messages) {
         Ok(own) => own,
-        Err((t, states)) => return Ok(Attempt::Grow(t, Carried { parts: states, reads: Reads::Pilot })),
+        Err((t, states)) => return Ok(Attempt::Grow(t, Carried { parts: states, few: false })),
     };
     // The pilot: its groups' other members at both levels, screened, and the step's check (module documentation,
     // # The step) -- first as far as its own two levels: at the first rung whose own read is in and not clearly beyond,
@@ -1504,7 +1521,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
         let tau = context.tau;
         let outgrew = grown(&levels.fine.iter().collect::<Vec<_>>());
         if let Some(t) = outgrew {
-            return Ok(Attempt::Grow(t, Carried { parts: std::mem::take(&mut levels.fine), reads: Reads::Pilot }));
+            return Ok(Attempt::Grow(t, Carried { parts: std::mem::take(&mut levels.fine), few: false }));
         }
         let pilot: Vec<&Part> = levels.fine.iter().collect();
         let read = match made.take() {
@@ -1523,7 +1540,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
         let asked = keep(kept, model, reference, trap.centre, units, &measured, &means, &pilot, &read.estimates, &fixed, &step, &scales, unsampled, (read.refined.as_ref().unwrap_or(&tables), judged), pilot_size() as f64, Reads::Pilot);
         drop(pilot);
         if let Some(u) = asked {
-            return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), Carried { parts: std::mem::take(&mut levels.fine), reads: Reads::Pilot }));
+            return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), Carried { parts: std::mem::take(&mut levels.fine), few: false }));
         }
         if !matches!(settled, Settled::Pending) {
             break read;
@@ -1606,14 +1623,14 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     let booked = context.fixed.clone();
     let (e, l, c) = match product(&run, ensemble, &domain, &mut context, &mut parts, &numbers, &beyond, &keeping, messages) {
         Ok(product) => product,
-        Err(u) => return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), Carried { parts: std::mem::take(&mut levels.fine), reads: Reads::Pilot })),
+        Err(u) => return Ok(Attempt::Keep(u.iter().map(|&u| units[u].clone()).collect(), Carried { parts: std::mem::take(&mut levels.fine), few: false })),
     };
     // The reach outgrown as far as the product reads (# The reach's atoms): some look has no room for the statistics
     // with what the atoms past the reach add, and has room without it. The reach grows to the temperature read where
     // that is above it, and the next attempt begins; else the account stands as booked, flagged.
     if looks(&e, &context.fixed, &context.step).iter().zip(&looks(&e, &booked, &context.step)).any(|(with, without)| !with.fits() && without.fits()) {
         if let Some(t) = Some(hottest(&bound_motion(&parts.iter().collect::<Vec<&Part>>(), &context.scales))).filter(|t| *t > held) {
-            return Ok(Attempt::Grow(t, Carried { parts: std::mem::take(&mut levels.fine), reads: Reads::Pilot }));
+            return Ok(Attempt::Grow(t, Carried { parts: std::mem::take(&mut levels.fine), few: false }));
         }
     }
     // A point of the prepared potential below the bottom the ensemble was drawn about (ensemble.rs, # Its draw).
