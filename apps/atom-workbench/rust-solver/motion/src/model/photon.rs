@@ -342,7 +342,10 @@ impl Model {
     /// (and gradient) from its beams, plain and Doppler-weighted.
     #[allow(clippy::too_many_arguments)]
     fn sited(&self, plan: &Arc<Plan>, table: Option<&NearTable>, r: Option<[f64; 3]>, kappa: [f64; 3], order: usize, site: &mut Site, laid: bool) -> f64 {
-        let fourth = plan.fourth.as_ref().map_or(0.0, |fourth| self.quartic(plan, fourth, table, r, site, laid));
+        // A site of its own is a jump's (or a reading's): its landing follows at the same point (model.rs `Model::landed`),
+        // and is made with the photons' matrices; a middle's scattering asks none -- and nothing where S⁻¹ and the
+        // landing are the identity (assemble.rs `Fourth::bends`).
+        let fourth = plan.fourth.as_ref().filter(|fourth| fourth.bends()).map_or(0.0, |fourth| self.quartic(plan, fourth, table, r, site, laid, !laid));
         let near = match table {
             _ if plan.near.len() == 0 => {
                 site.jumped(plan, None);
@@ -374,7 +377,7 @@ impl Model {
         let mut work = made;
         // The normalized generator's states (assemble.rs, # The normalized generator): S⁻¹ψ and M ψ = E S⁻¹ψ, and with
         // the gradients the three lab axes' ∂S⁻¹ ψ and ∂M ψ.
-        let bent: Option<[[C64; STATES]; 8]> = plan.fourth.as_ref().map(|fourth| {
+        let bent: Option<[[C64; STATES]; 8]> = plan.fourth.as_ref().filter(|fourth| fourth.bends()).map(|fourth| {
             let (n, size) = (fourth.n, fourth.n * fourth.n);
             crate::model::Model::quartic_read(|q| {
                 let mut out = [[C64::ZERO; STATES]; 8];
@@ -396,10 +399,12 @@ impl Model {
                 out
             })
         });
-        // The lab axes along which the normalized generator's matrices change at all (a light along one axis: that one).
+        // The lab axes along which the normalized generator's matrices change: those the plan's beams change along at the
+        // point (a light along one axis: that one) -- the definition's, whatever the numbers there (assemble.rs, # Work;
+        // `Plan::classes_work` prices them so).
         let (mut axes, mut count) = ([0; 3], 0);
         for a in 0..3 {
-            if bent.as_ref().is_some_and(|b| b[2 + a].iter().chain(&b[5 + a]).any(|z| *z != C64::ZERO)) {
+            if bent.is_some() && plan.beams.iter().any(|&l| site.beams[l].gradient[a] != C64::ZERO) {
                 (axes[count], count) = (a, count + 1);
             }
         }
@@ -443,7 +448,8 @@ impl Model {
                 let slopes = if taken && m.near { directions.len() } else { 0 };
                 let base = if m.near { 2 * (1 + slopes) } else { 1 };
                 // The normalized generator's vectors after them: a point's partner on E S⁻¹ψ with its slopes, and with the gradients
-                // the jumps on ∂S⁻¹ψ and the partner on ∂(E S⁻¹)ψ along each lab axis; a constant member's jumps on ∂S⁻¹ψ.
+                // along each lab axis the jumps on ∂S⁻¹ψ and the partner on c ∂(E S⁻¹)ψ − c_w ∂S⁻¹ψ (the photon's operator
+                // (c J − c_w J2 + c J2 E) S⁻¹, assemble.rs # The normalized generator); a constant member's jumps on ∂S⁻¹ψ.
                 let more = match (&bent, m.near) {
                     (None, _) => 0,
                     (Some(_), true) => 1 + slopes + if taken { 2 * live.len() } else { 0 },
@@ -458,16 +464,16 @@ impl Model {
                     out.iter_mut().zip(&m.columns).for_each(|(z, &sp)| *z = of[sp] * phase);
                     out
                 };
-                // The jumps act on the state, or on the normalized generator's S⁻¹ψ.
+                // The jumps and their partners act on the state, or on the normalized generator's S⁻¹ψ.
                 let bend = bent.as_ref().map(|b| gathered(&b[0]));
                 let on: &[C64] = bend.as_ref().map_or(x, |b| &b[..count]);
                 if m.near {
                     combine(false, on, count, &jumps[m.at..m.at + matrix], vectors, made, 0);
-                    combine(false, x, count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, 1);
+                    combine(false, on, count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, 1);
                     for f in 0..slopes {
                         let slope = &jump_slopes[f * width + m.at..][..2 * matrix];
                         combine(false, on, count, &slope[..matrix], vectors, made, 2 + 2 * f);
-                        combine(false, x, count, &slope[matrix..], vectors, made, 3 + 2 * f);
+                        combine(false, on, count, &slope[matrix..], vectors, made, 3 + 2 * f);
                     }
                     if let Some(b) = &bent {
                         let shift = gathered(&b[1]);
@@ -477,8 +483,9 @@ impl Model {
                         }
                         for (i, &a) in live.iter().enumerate().filter(|_| taken) {
                             let (bend, shift) = (gathered(&b[2 + a]), gathered(&b[5 + a]));
+                            let partner: [C64; STATES] = std::array::from_fn(|k| shift[k] * c[0] - bend[k] * cw[0]);
                             combine(false, &bend[..count], count, &jumps[m.at..m.at + matrix], vectors, made, base + 1 + slopes + 2 * i);
-                            combine(false, &shift[..count], count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, base + 2 + slopes + 2 * i);
+                            combine(false, &partner[..count], count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, base + 2 + slopes + 2 * i);
                         }
                     }
                 } else {
@@ -523,7 +530,7 @@ impl Model {
                                     of[base + 1 + f] = c[0] * direction[i];
                                 }
                                 if let Some(at) = live.iter().position(|&a| a == i) {
-                                    (of[base + 1 + slopes + 2 * at], of[base + 2 + slopes + 2 * at]) = (c[0], c[0]);
+                                    (of[base + 1 + slopes + 2 * at], of[base + 2 + slopes + 2 * at]) = (c[0], C64::ONE);
                                 }
                             }
                             (true, false) => {
@@ -704,21 +711,24 @@ fn member_work(m: &MemberPlan, taken: bool, more: usize, rows: usize) -> f64 {
 impl Plan {
     /// The counted complex multiply-adds of a state's photons' site at a point (`Model::sited`) to `order`, priced without
     /// making it (solve.rs `Pricing`): the near jumps read from a table on `axes` axes whose coordinates there count
-    /// `place`; the fourth order's matrices made there where `quartic` -- laid there by the site itself, its forms read
-    /// whole (`Plan::quartic_made_work`) -- and none where they are the point's already; the field components.
-    pub(crate) fn sited_work(&self, axes: usize, place: f64, order: usize, quartic: bool) -> f64 {
+    /// `place`; the normalized generator's matrices where they bend anything (assemble.rs `Fourth::bends`) -- on a
+    /// middle's site (`laid`: its forms read with the middle) the matrices alone with their gradients, which the step's
+    /// middle node makes and its scattering counts (`Plan::quartic_work`); on a site of its own, a jump's, its forms read
+    /// and the matrices with the landing that follows there (`Plan::quartic_made_work`) --; the field components.
+    pub(crate) fn sited_work(&self, axes: usize, place: f64, order: usize, laid: bool) -> f64 {
         let near = if self.near.len() == 0 { 0.0 } else { place + super::tabulate::read_work(axes, order, 2 * self.near.jumping().len()) };
-        let fourth = self.fourth.as_ref().filter(|_| quartic).map_or(0.0, |fourth| self.quartic_made_work(fourth, axes, place));
+        let fourth = self.fourth.as_ref().filter(|fourth| fourth.bends()).map_or(0.0, |fourth| if laid { self.quartic_work(fourth, Some(axes), false) } else { self.quartic_made_work(fourth, axes, place) });
         near + fourth + self.fields_work(order)
     }
 
     /// The counted complex multiply-adds of a state's photons' classes on a site whose jumps have `axes` slopes
     /// (`Model::classes_on`), priced without making them: the fourth order's bent states, and every lit member's part
     /// (`member_work`) of the classes the gradients ask; `live` the lab axes along which the fourth order's matrices
-    /// change, which `classes_on` reads off the matrices at the point.
+    /// change, those the plan's beams change along at the point (`classes_on`).
     pub(crate) fn classes_work(&self, axes: usize, gradients: Gradients, live: usize) -> f64 {
         let order = if gradients == Gradients::None { 0 } else { 1 };
-        let bent = self.fourth.as_ref().map_or(0.0, |fourth| (2 * fourth.n * fourth.n * if order >= 1 { 4 } else { 1 }) as f64);
+        let fourth = self.fourth.as_ref().filter(|fourth| fourth.bends());
+        let bent = fourth.map_or(0.0, |fourth| (2 * fourth.n * fourth.n * if order >= 1 { 4 } else { 1 }) as f64);
         let mut work = bent;
         for (place, class) in self.classes.iter().enumerate() {
             let with = match gradients {
@@ -730,7 +740,7 @@ impl Plan {
             for m in class.members.iter().filter(|m| !m.columns.is_empty()) {
                 let taken = m.folded && with;
                 let slopes = if taken && m.near { axes } else { 0 };
-                let more = match (&self.fourth, m.near) {
+                let more = match (fourth, m.near) {
                     (None, _) => 0,
                     (Some(_), true) => 1 + slopes + if taken { 2 * live } else { 0 },
                     (Some(_), false) => if taken { live } else { 0 },

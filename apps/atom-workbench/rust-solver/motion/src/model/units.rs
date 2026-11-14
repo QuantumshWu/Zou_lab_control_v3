@@ -1188,7 +1188,7 @@ impl Model {
                 UnitError { parameter: m2, population: error, temperature: error, ..UnitError::NONE }
             }
             Unit::Dressing { carrier } => self.dressing_error(*carrier, at),
-            Unit::Block { .. } => UnitError::NONE,
+            Unit::Block { .. } | Unit::Series | Unit::Normalization { .. } => UnitError::NONE,
             Unit::Coherence { .. } => self.coherence_error(unit, at),
         }
     }

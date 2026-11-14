@@ -87,32 +87,48 @@
 //! loss L = (R₀W)†D(R₀W) (`NearLayout::fourth`; one where the folded excited states share one linewidth, L = Γ X), and
 //! z₀ itself -- all linear in the products e_k'* e_k with coefficients of the far light alone, tabulated as S is. On the
 //! slow invariant subspace Ψ = (x, T x) of the no-jump generator, T_f = Σ_j (−1)^j R₀^{j+1} W (H − z₀)^j and H the
-//! fixed point of H = A + Σ_j (−1)^j N_j (H − z₀)^j, to the series' order K (model.rs `Model::series`; the order whose
-//! remainder q^{K+1}/(1 − q) is within the model's share). In the orthonormal coordinates y = S x, S = (1 + X)^{1/2},
-//! the generator is S H S⁻¹ and the jumps L_a = C_a T S⁻¹ -- whose own product is the decay, −(i/2)Σ L†L =
-//! anti-Hermitian part of S H S⁻¹ where Ψ is invariant. The matrices on the cluster at the point (`Quartic`, `normalized`;
-//! a thread's last point is kept, so a step's middle and its scattering share one), with H_h the static Hermitian
-//! generator the forms lay, Y = N₁:
+//! fixed point of H = A + Σ_j (−1)^j N_j (H − z₀)^j, to the series' order K (model.rs `Model::series`: K = 1 where
+//! `Unit::Series` is kept, its error measured at the run's states against the next order, elim.rs `Fold::order_error`;
+//! the series' ratio q < 1 only says it converges). In the orthonormal coordinates y = S x, S = (1 + X)^{1/2} -- the Schrieffer–Wolff
+//! coordinates, the unitary block-diagonalization's nearest the bare basis (ELIMINATION v6, v7) -- the generator is the
+//! des Cloizeaux one, S H S⁻¹, and the jumps L_a = C_a T S⁻¹, whose own product is its decay. Evaluated by the
+//! Schrieffer–Wolff series, products of the forms alone (`normal`): S^{±1} = Σ_{j≤J} binom(±½, j) X^j to the
+//! normalization's order J (`Unit::Normalization`), the Hermitian part the series' own (elim.rs `Series`), with H_h the
+//! static Hermitian generator the forms lay and Y = N₁:
 //!
 //! ```text
 //! H₀ = H_h − (i/2) L     H = H₀ (K = 0), (1 + Y)⁻¹ (H₀ + z₀ Y) (K = 1)     E = H − z₀
-//! held = Herm(S H S⁻¹) − H_h        L_a = (J_a + J2_a E) S⁻¹ (J2 none at K = 0)        landing S (1 + Y)⁻¹
+//! held = Herm H − H_h (nothing at K = 0)     decay S⁻¹ (Λ + Λ_R E + E†Λ_R† + E†Λ_B E) S⁻¹
+//! L_a = (J_a(κ) + J2_a E) S⁻¹ (J2 E none at K = 0)     landing S (1 + Y)⁻¹
 //! ```
 //!
-//! - the middle's held part and its gradient (S's in X's eigenbasis, S ∇S + ∇S S = ∇X), and the decay's change: with the
-//!   generator's own decay at the point by its flags -- Λ = Σ J†J, Λ_R = Σ J†J2, Λ_B = Σ J2†J2, read off its dense
-//!   terms' values --, Σ L†L − Λ = S⁻¹(Λ + Λ_R E + E†Λ_R† + E†Λ_B E)S⁻¹ − Λ. With the first-order Doppler the response
-//!   is R − w R2 and the jumps J − w J2, so the terms whose absorbed component takes the shift w sum to
+//! The normalized part varies along a step's path as the light's pattern does: it is made at each node of the step of
+//! the node's own forms -- the middle's near forms with the node's field components, its plane waves turned
+//! (`Model::node_normal`) --, as every other term's value is. (Held at the middle, it was the midpoint rule of a
+//! quantity that turns at the pattern's K v: a step error of (Kvτ)²/24 of it, which a step's companion at 2τ reads
+//! four times over -- PGC3D's pilot read its third state's population at 1.44 of the step's share squared against
+//! the released engine's 0.65, and ran 528 trajectories more to see through it.)
+//! - a node's generator (`Middle::generator`): the decay Λ = i(Ĥ − Ĥ†) of the node's terms -- Σ J(κ)†J(κ), every jump's
+//!   product at the path's momentum, J(κ) = c J − c_w J2 with its Doppler partner -- taken to Σ L†L of the photons'
+//!   operators L = (J(κ) + c J2 E) S⁻¹: S⁻¹(Λ + Λ_R E + E†Λ_R† + E†Λ_B E)S⁻¹ with Λ_R = Σ J(κ)† c J2 and Λ_B = Σ |c|² J2†J2,
+//!   read off its dense terms' values by their flags in the generator's own pass. (With the first-order Doppler the
+//!   response is R − w R2 and the jumps J − w J2, so the terms whose absorbed component takes the shift w sum to
 //!   G_R = ½ V^f†R2 + (i/2) Σ J†J2 and those whose emitted one does to G_L = ½ R2†V^f + (i/2) Σ J2†J: the Hermitian
-//!   coupling's partner ½ V^f†R2 is in both, G_L† = ½ V^f†R2 − (i/2) Λ_R, and Λ_R = −i (G_R − G_L†) whatever V^f holds
-//!   -- as Λ = i (P − P†). Both are held along a step's path as the point's forms are, in the cluster's Doppler frames
-//!   (`Site::quartic`): a node adds n² numbers, a force n² a lab axis;
-//! - a state's photons: the jumps' matrices on S⁻¹ψ and their partners' on E S⁻¹ψ (photon.rs), every jump of the
-//!   cluster on the bent state; the readout's responses on S⁻¹ψ (readout.rs); a jump's landing (model.rs
-//!   `Model::landed`): S(1 + Σ S_f T_f)⁻¹ f, the left and right wave operators' overlap to the series' leading order Y.
+//!   coupling's partner ½ V^f†R2 is in both, G_L† = ½ V^f†R2 − (i/2) Σ J†J2, so Σ c*c J†J2 = −i (G_R − G_L†) whatever
+//!   V^f holds; the both-sided terms G_B = −(i/2) Σ J2†J2 give Λ_B = 2i G_B of their plain products and the Doppler
+//!   part of Λ_R, −Σ c_w* c J2†J2 = −2i G_D, of their products with the emitted component's shift.) The decay is the
+//!   photons' rate on every state to the rounding of its sums: one definition. And the held part, in the entries' own
+//!   coordinates before the frames turn them as every entry is;
+//! - a node's force (`Middle::gradient`, `Middle::contract`): the held part's gradient there, where it is anything;
+//! - a state's photons: L ψ -- the jumps' and their Doppler partners' matrices on S⁻¹ψ and the partners' on E S⁻¹ψ
+//!   (photon.rs) --, every jump of the
+//!   cluster on the bent state, of the point's own matrices (`Quartic`; a thread's last point is kept, so a step's
+//!   middle and its scattering share one); a jump's landing (model.rs `Model::landed`): S(1 + Σ S_f T_f)⁻¹ f, the left
+//!   and right wave operators' overlap to the series' leading order Y; the readout of the slow state x = S⁻¹ψ itself
+//!   (readout.rs).
 //! So the force is still the gradient of the generator's Hermitian part and the decay still the jumps' own product.
-//! The Doppler partner's terms keep the order-0 coordinates (their normalization is of the order w X, beside the
-//! series' remainder); terms that beat in the cluster's frames are laid as the forms give them.
+//! Terms that beat in the cluster's frames are laid as the forms give them, and enter none of X and H: a replica's own
+//! norm is its static part (criterion two averages the cross terms).
 //!
 //! # Work
 //! The complex multiply-adds are counted where they are made (`Middle::work`, `Plan::node`): at a point the near forms (the
@@ -125,6 +141,7 @@ use super::eliminate::{half, jump, shift, Leg, Responses};
 use super::far::EXCITED;
 use super::photon::{Origin, Source};
 use super::tabulate::NearTable;
+use super::elim::{binomial, Orders};
 use super::{jet, Beat, Component, Level, Lights, Lit, Model, Scattering, Wave};
 use crate::field::Amplitude;
 use crate::linalg::{axpy, dot, dot3, Mat, C64, LANES};
@@ -376,14 +393,15 @@ pub(crate) struct ClassPlan {
     pub(crate) rows: usize,
 }
 
-/// A Hermitian near form's place in the generator: the block, flag and entry (x, y) it is the value of, the form's place,
-/// whether it enters conjugated, and where it lies among a point's values of the generator and of the forms with a
+/// A Hermitian near form's place in the generator: the block, flag and entry (x, y) it is the value of, its tone, the form's
+/// place, whether it enters conjugated, and where it lies among a point's values of the generator and of the forms with a
 /// Hermitian ρ (its real and its imaginary part; none where its term is left to its adjoint, `Term::weight`).
 #[derive(Clone, Debug)]
 pub(crate) struct Link {
     pub(crate) block: usize,
     pub(crate) flag: usize,
     pub(crate) place: (usize, usize),
+    pub(crate) tone: usize,
     pub(crate) operand: usize,
     pub(crate) conjugate: bool,
     generator: [usize; 2],
@@ -391,16 +409,19 @@ pub(crate) struct Link {
 }
 
 /// What the normalized generator of a cluster's fold reads of its plan (module documentation, # The normalized
-/// generator): the cluster's n places; per Hermitian near link of a pair form (flag `PLAIN`) the pair, the block's two
-/// field components and the entry x n + y -- X = Σ e*e X_k'k and L the same sums of the pairs' normalization forms --;
-/// the folded excited states' one linewidth where they share one (`Fourth::uniform`); and the series' order K
-/// (model.rs `Model::series`).
+/// generator): the cluster's n places; per Hermitian near link of a pair form (flag `PLAIN`) at a static tone the pair
+/// and the entry x n + y, block by block -- per block its two field components and the end of its entries (`groups`):
+/// X = Σ e*e X_k'k and L the same sums of the pairs' normalization forms (the replicas' own norms: a pair of two
+/// frequencies beats, its cross term averaged by criterion two), the block's product of components once for its
+/// entries --; the folded excited states' one linewidth where they share one (`Fourth::uniform`); and the evaluation's
+/// orders (model.rs `Model::series`, elim.rs `Series::orders`).
 #[derive(Clone, Debug)]
 pub(crate) struct Fourth {
     pub(crate) n: usize,
-    entries: Vec<(usize, Option<usize>, Option<usize>, usize)>,
+    groups: Vec<(Option<usize>, Option<usize>, usize)>,
+    entries: Vec<(usize, usize)>,
     uniform: Option<f64>,
-    order: usize,
+    pub(crate) orders: Orders,
 }
 
 impl Fourth {
@@ -434,11 +455,45 @@ impl Fourth {
             return None;
         }
         let (n, p) = (plan.states, plan.near.pairs.len());
-        let entries = plan.links.iter().filter(|l| l.flag == PLAIN && !l.conjugate && l.operand < p).map(|l| (l.operand, plan.blocks[l.block].left, plan.blocks[l.block].right, l.place.0 * n + l.place.1)).collect();
+        let mut linked: Vec<(usize, usize, usize)> = plan.links.iter().filter(|l| l.flag == PLAIN && !l.conjugate && l.operand < p && plan.tones[l.tone] == 0.0).map(|l| (l.block, l.operand, l.place.0 * n + l.place.1)).collect();
+        linked.sort_by_key(|link| link.0);
+        let (mut groups, mut entries) = (Vec::<(Option<usize>, Option<usize>, usize)>::new(), Vec::with_capacity(linked.len()));
+        for (k, &(block, operand, xy)) in linked.iter().enumerate() {
+            if k == 0 || linked[k - 1].0 != block {
+                groups.push((plan.blocks[block].left, plan.blocks[block].right, 0));
+            }
+            entries.push((operand, xy));
+            groups.last_mut().expect("a block's group").2 = entries.len();
+        }
         let lit: Vec<usize> = model.carriers.iter().filter(|cc| plan.lights.on(cc.frequency)).map(|cc| cc.frequency).collect();
-        Some(Fourth { n, entries, uniform: (plan.near.fourth == 1).then(|| Fourth::uniform(model, plan.cluster, &lit)).flatten(), order: model.series.order })
+        Some(Fourth { n, groups, entries, uniform: (plan.near.fourth == 1).then(|| Fourth::uniform(model, plan.cluster, &lit)).flatten(), orders: model.series.orders() })
+    }
+
+    /// Whether the held part is anything (`normal`): the series' first order -- at order 0 the generator's Hermitian part
+    /// is H_h, exactly (the Hermitian part is the series' own).
+    pub(crate) fn held(&self) -> bool {
+        self.orders.series >= 1
+    }
+
+    /// Whether the normalized generator moves anything (`normal`): the held part, or S^{±1} at an order J ≥ 1 -- at J = 0
+    /// S⁻¹ = 1 and the landing map 1, the decay the generator's own, a state's photons on ψ itself, and E none (K = 0).
+    pub(crate) fn bends(&self) -> bool {
+        self.held() || self.orders.normalization >= 1
+    }
+
+    /// The pair entries block by block: the block's two field components and its entries (the pair, the entry x n + y).
+    fn groups(&self) -> impl Iterator<Item = (Option<usize>, Option<usize>, &[(usize, usize)])> {
+        let mut start = 0;
+        self.groups.iter().map(move |&(left, right, end)| {
+            let group = &self.entries[start..end];
+            start = end;
+            (left, right, group)
+        })
     }
 }
+
+/// The most directions a site's forms change along (a table's axes, or the three lab axes).
+const DIRECTIONS: usize = if crate::table::MOST_AXES > 3 { crate::table::MOST_AXES } else { 3 };
 
 /// The normalized generator's matrices of a cluster at a point (module documentation, # The normalized generator), each
 /// n × n row by row, of four parts -- its value and its gradient along the three lab axes --: S⁻¹, M = E S⁻¹ (E = H − z₀;
@@ -449,12 +504,18 @@ impl Fourth {
 #[derive(Default)]
 pub(crate) struct Quartic {
     key: Option<(u64, u64, [u64; 3])>,
+    /// Whether the landing map is made (`Model::quartic`'s `landing`): it alone reads Y where the held part is nothing.
+    landing: bool,
     pub(crate) data: Vec<C64>,
     pub(crate) work: f64,
-    values: Vec<f64>,
-    slopes: Vec<f64>,
+    /// Whether `work` is counted: matrices a step's middle node made (`Model::node_normal`) are counted by the step's
+    /// scattering, which reads them next (`Model::quartic`).
+    counted: bool,
     sums: Vec<C64>,
     laid: Vec<f64>,
+    /// The matrices `normal` is made of, and its scratch.
+    arena: Vec<C64>,
+    scratch: Vec<C64>,
 }
 
 /// The places of `Quartic::data`: S⁻¹, M, the held part (four parts each), the landing map, E.
@@ -1067,6 +1128,7 @@ impl<'a> Builder<'a> {
                         block: b,
                         flag,
                         place: d.entries[e],
+                        tone: entry_tones[b][e],
                         operand: near.at(*operand),
                         conjugate: *conjugate,
                         generator: generator.place(key, place).expect("a near form's term"),
@@ -1235,12 +1297,46 @@ impl Plan {
         plan.fourth = Fourth::new(model, &plan);
         plan
     }
-    /// The counts at a node (`Middle::work`): of the generator, and of the force's form with its values' slopes along
-    /// `directions` directions (a table's axes), twice; the held part and its gradient's forms with them.
+    /// The counts at a node (`Middle::work`): of the generator with the normalized part of the node's own forms
+    /// (`Plan::node_normal_work`), of the force's form with its values' slopes along `directions` directions (a table's
+    /// axes) and the held part's, and of the tones'. Per node of a step's (step.rs `count`: one on a still path, else
+    /// three, the middle among them): the middle's normalized part is the point's own -- the scattering's matrices with
+    /// their gradients, counted there (`Model::node_normal`) -- and its held part's force its gradient's trace; the others
+    /// make their matrices, and their held part's force is its form (`Plan::held_force_work`). The tones are the middle's.
     pub(crate) fn costs(&self, directions: usize) -> [f64; 3] {
-        let (matrix, gradient) = self.fourth.as_ref().map_or((0.0, 0.0), |fourth| ((fourth.n * fourth.n) as f64, (3 * fourth.n * fourth.n) as f64));
-        let form = self.node[1] + directions as f64 * self.node[2] + gradient;
-        [self.node[0] + matrix, form, form]
+        let base = self.node[1] + directions as f64 * self.node[2];
+        let Some(fourth) = &self.fourth else { return [self.node[0], base, base] };
+        let (nodes, off_middle) = if self.still { (1.0, 0.0) } else { (3.0, 2.0) };
+        let share = off_middle / nodes;
+        let [made, products] = self.node_normal_work(fourth);
+        let trace = if fourth.held() { (3 * fourth.n * fourth.n) as f64 } else { 0.0 };
+        let held = if fourth.held() { share * self.held_force_work(fourth, directions) + (1.0 - share) * trace } else { 0.0 };
+        [self.node[0] + share * made + products, base + held, base + trace]
+    }
+    /// The counted complex multiply-adds of the normalized part at a node (`Model::node_normal`, `Middle::generator`):
+    /// the node's matrices, of their values alone -- X of the node's components block by block and S⁻¹ by Horner's rule
+    /// (J − 1 products of n × n matrices), or where the held part is anything `quartic_work`'s --, made off the middle
+    /// where the part is the point's (`Plan::costs`); and the generator's at every node -- its decays at rest where the
+    /// held part is anything, the decay's two products and at the series' order 1 its three more.
+    pub(crate) fn node_normal_work(&self, fourth: &Fourth) -> [f64; 2] {
+        let (n, size) = (fourth.n, fourth.n * fourth.n);
+        let made = if fourth.held() {
+            self.quartic_work(fourth, None, false)
+        } else {
+            (fourth.entries.len() + fourth.groups.len() + fourth.orders.normalization.saturating_sub(1) * n * size) as f64
+        };
+        // The decays: each static flagged term's plain product, a both-sided one's with its emitted component's shift too.
+        let decays = if fourth.held() { self.generator.iter().filter(|term| self.tones[term.tone] == 0.0 && term.flag != PLAIN).map(|term| term.len * if term.flag == BOTH { 2 } else { 1 }).sum::<usize>() } else { 0 };
+        [made, (decays + (2 + if fourth.orders.series >= 1 { 3 } else { 0 }) * n * size + 3 * size) as f64]
+    }
+    /// The counted complex multiply-adds of the held part's force form at a node (`Middle::held_force`) with the forms'
+    /// slopes along `directions` directions: ρ's two products, the static Hermitian terms' and partners' values with
+    /// their slopes, and the loss's pair entries -- each entry's value and slopes on the density, each block's
+    /// components and their gradients once.
+    pub(crate) fn held_force_work(&self, fourth: &Fourth, directions: usize) -> f64 {
+        let (n, size) = (fourth.n, fourth.n * fourth.n);
+        let summed: usize = self.form.iter().filter(|term| self.tones[term.tone] == 0.0).map(|term| term.len * (1 + if term.near { directions } else { 0 })).sum();
+        (2 * n * size + summed + fourth.entries.len() * (1 + directions) + fourth.groups.len() * (13 + 3 * directions)) as f64
     }
     /// The counted complex multiply-adds of a point's near forms from a table on `axes` axes (tabulate.rs
     /// `Model::near_point`), the coordinates' apart: the Hermitian forms to first order, the jumps to order 0.
@@ -1248,42 +1344,36 @@ impl Plan {
         super::tabulate::read_work(axes, 1, 2 * self.near.hermitian().len()) + super::tabulate::read_work(axes, 0, 2 * self.near.jumping().len())
     }
     /// The counted complex multiply-adds of a middle at a point, its near forms from a table on `axes` axes whose
-    /// coordinates' values there count `place` (`Model::middle`): the forms' interpolation, the values made of them, and
-    /// the normalized generator's part with its matrices made at the point already (`Model::quartic`: a step's scattering reads
-    /// the same matrices, and `Run`'s middle at the focus finds them made by its scattering).
+    /// coordinates' values there count `place` (`Model::middle`): the forms' interpolation -- the normalized generator's
+    /// among them (`Model::normal_read`), its part the nodes' (`Plan::costs`) -- and the values made of them.
     pub(crate) fn middle_work(&self, axes: usize, place: f64) -> f64 {
-        let near = if self.near.len() == 0 { 0.0 } else { place + self.near_read(axes) + self.values };
-        near + self.fourth.as_ref().map_or(0.0, |fourth| self.site_work(fourth))
+        if self.near.len() == 0 { 0.0 } else { place + self.near_read(axes) + self.values }
     }
-    /// The counted complex multiply-adds of the normalized generator's matrices at a point (`Model::quartic_made`)
-    /// beside their forms' reads, on `directions` directions: the static Hermitian terms and the partners with their
-    /// slopes and gradients summed by the components, X's (and L's) pair forms by their fields, the matrices to the lab
-    /// axes, and `normalized`: X's eigenbasis (ten n³), and some forty-five products of n × n matrices (the value's and
-    /// the three gradients').
-    pub(crate) fn quartic_work(&self, fourth: &Fourth, directions: usize) -> f64 {
-        let summed: usize = self.form.iter().filter(|term| self.tones[term.tone] == 0.0).map(|term| term.len * (4 + if term.near { directions } else { 0 })).sum();
-        let (n, size) = (fourth.n, fourth.n * fourth.n);
-        (summed + fourth.entries.len() * self.near.fourth * (4 + directions) + 12 * size * (1 + directions) + 55 * n * size) as f64
+    /// The counted complex multiply-adds of the normalized generator's matrices (`Model::normal_at`) beside their forms'
+    /// reads: a point's on `directions` directions (Some) with their gradients, or a node's values alone (None): the
+    /// static Hermitian terms and the partners (with their slopes and gradients) summed by the components where the held
+    /// part or the landing reads them, X's (and L's) pair forms by their blocks' components, the matrices to the lab
+    /// axes, and `normal`'s products of n × n matrices -- each with its three gradients' two at a point: the series'
+    /// order 1, S⁻¹ by Horner's rule (J − 1: its first step is none), at a point M; and the landing (S, J − 1, and
+    /// (1 + Y)⁻¹, J, and their product).
+    pub(crate) fn quartic_work(&self, fourth: &Fourth, directions: Option<usize>, landing: bool) -> f64 {
+        let (n, size, o) = (fourth.n, fourth.n * fourth.n, fourth.orders);
+        let forms = usize::from(fourth.held() || landing);
+        let (k, j) = (o.series, o.normalization);
+        let statics = self.form.iter().filter(|term| self.tones[term.tone] == 0.0);
+        let (summed, entries, matrices, g) = match directions {
+            Some(d) => (statics.map(|term| term.len * (4 + if term.near { d } else { 0 })).sum::<usize>(), fourth.entries.len() * self.near.fourth * (4 + d) + 7 * fourth.groups.len(), 12 * size * (1 + d), 7),
+            None => (statics.map(|term| term.len).sum::<usize>(), fourth.entries.len() * self.near.fourth + fourth.groups.len(), 2 * size, 1),
+        };
+        let products = g * (usize::from(k >= 1) + j.saturating_sub(1)) + if directions.is_some() && k >= 1 { g } else { 0 } + if landing { 2 * j } else { 0 };
+        (forms * summed + entries + matrices + products * n * size) as f64
     }
     /// The counted complex multiply-adds of the normalized generator's matrices made on a site of their own placed on a table of
-    /// `axes` axes, whose coordinates there count `place` (`Model::quartic_made`, not laid): the point's near forms
-    /// read and their values laid, the X (and L) forms' read with their slopes, and the matrices (`quartic_work`).
+    /// `axes` axes, whose coordinates there count `place` (`Model::quartic_made`, not laid: a jump's): the point's near
+    /// forms read -- X's (and L's) among the Hermitian ones (`Plan::near_read`) -- and their values laid, and the
+    /// matrices with their gradients and the landing that follows there (`quartic_work`).
     pub(crate) fn quartic_made_work(&self, fourth: &Fourth, axes: usize, place: f64) -> f64 {
-        place + self.near_read(axes) + self.values + self.quartic_read(axes) + self.quartic_work(fourth, axes)
-    }
-    /// The counted complex multiply-adds of the normalized generator's X (and L) forms read from a table on `axes` axes with their
-    /// slopes (`Model::quartic_made`).
-    pub(crate) fn quartic_read(&self, axes: usize) -> f64 {
-        super::tabulate::read_work(axes, 1, 2 * self.near.fourth * self.near.pairs.len())
-    }
-    /// The counted complex multiply-adds of the normalized generator's part of a middle (`Model::fourth_site`) beside
-    /// its matrices: the generator's terms at rest summed, the decays, and the products of the decay's change (six at
-    /// the series' order 1, two at order 0).
-    pub(crate) fn site_work(&self, fourth: &Fourth) -> f64 {
-        let (n, size) = (fourth.n, fourth.n * fourth.n);
-        let products = if fourth.order >= 1 { 6 } else { 2 };
-        let summed: usize = self.generator.iter().filter(|term| self.tones[term.tone] == 0.0).map(|term| term.len).sum();
-        (products * n * size + summed + 8 * size) as f64
+        place + self.near_read(axes) + self.values + self.quartic_work(fourth, Some(axes), true)
     }
     /// The counted complex multiply-adds of the plan's field components from their beams to an order (photon.rs `sited`),
     /// plain and Doppler-weighted.
@@ -1506,10 +1596,11 @@ pub(crate) struct Site {
     /// Per channel and ground place its excited amplitudes, and per class of co-resonant places, at its first place,
     /// their sum (readout.rs, # The readout).
     pub(crate) excited: Vec<C64>,
-    /// The normalized generator's (module documentation, # The normalized generator): the held part less (i/2) the
-    /// decay's change on the cluster's places, then the held part's gradient along the three lab axes; and its scratch.
-    pub(crate) quartic: Vec<C64>,
-    made: Vec<C64>,
+    /// The normalized generator's forms at the point (module documentation, # The normalized generator): X's (and L's)
+    /// pair forms and z₀, real and imaginary parts, with their slopes along `directions` (`normal_slopes[(f count + e)
+    /// 2]`), read once a point (`Model::normal_read`).
+    pub(crate) normal: Vec<f64>,
+    pub(crate) normal_slopes: Vec<f64>,
     /// Its nodes' scratch, one for all its paths: a node's call fills what it reads.
     scratch: RefCell<Scratch>,
 }
@@ -1815,18 +1906,31 @@ impl Model {
     /// same position `at` they are the same numbers, so a step's middle and its scattering make them once (None: made,
     /// and kept for no other). `point` holds the point's beams; `laid`: and its forms with their slopes (a middle's:
     /// `Site::formed`, tabulate.rs `Model::near_point`), which are read here and else laid here.
-    pub(crate) fn quartic(&self, plan: &Plan, fourth: &Fourth, table: Option<&NearTable>, at: Option<[f64; 3]>, point: &mut Site, laid: bool) -> f64 {
+    pub(crate) fn quartic(&self, plan: &Plan, fourth: &Fourth, table: Option<&NearTable>, at: Option<[f64; 3]>, point: &mut Site, laid: bool, landing: bool) -> f64 {
         QUARTIC.with(|kept| {
             let mut q = kept.borrow_mut();
-            let grid = table.map_or(0, |t| t.table.axes().iter().fold(1 + crate::table::Table::nodes(t.table.axes()) as u64, |h, a| h.rotate_left(13) ^ a.spacing().to_bits() ^ a.node(0).to_bits().rotate_left(29)));
-            let key = at.map(|r| (plan.id, grid, r.map(f64::to_bits)));
-            if key.is_some() && q.key == key {
-                return 0.0;
+            let key = at.map(|r| quartic_key(plan, table, r));
+            if key.is_some() && q.key == key && (q.landing || !landing) {
+                // Made for the step's middle node (`Model::node_normal`): counted here, once.
+                return if std::mem::replace(&mut q.counted, true) { 0.0 } else { q.work };
             }
+            q.landing = landing;
             self.quartic_made(plan, fourth, table, None, point, laid, &mut q);
-            q.key = key;
+            (q.key, q.counted) = (key, true);
             q.work
         })
+    }
+
+    /// The thread's matrices (`quartic`) of a middle's point at `r` -- its site laid, its forms read (`Model::middle`) --,
+    /// made unless they are its already; their work left for the step's scattering to count.
+    fn quartic_kept(&self, plan: &Plan, fourth: &Fourth, table: Option<&NearTable>, r: [f64; 3], point: &Site, q: &mut Quartic) {
+        let key = Some(quartic_key(plan, table, r));
+        if q.key == key {
+            return;
+        }
+        q.landing = false;
+        q.work = self.quartic_matrices(plan, fourth, point, q);
+        (q.key, q.counted) = (key, false);
     }
 
     /// The thread's fourth-order matrices (`quartic`), read.
@@ -1834,25 +1938,22 @@ impl Model {
         QUARTIC.with(|kept| read(&kept.borrow()))
     }
 
-    /// `quartic`'s matrices (module documentation, # The normalized generator). The static Hermitian generator H_h and
-    /// the order-1 forms Y are the point's own laid forms summed with the plan's field components by the nodes' kernel
-    /// (module documentation, # Dense terms) -- of the forms' terms, which hold one of a term and its adjoint
-    /// (`Term::weight`), every static one's and, where the other is left out, its adjoint; the Doppler partners' where
-    /// the absorbed component takes the shifts, and the adjoints of those where the emitted one does --, each with its
-    /// slopes along the point's directions and the components' gradients. X (and L where it is not Γ X) are their pair
-    /// forms' sums, and z₀ the reference form: a table's interpolant with its slopes, the forms `given` (those the
-    /// point's were laid from), or the exact elimination's. From them `normalized`.
+    /// The thread's matrices forgotten: the next site makes its own (a count of what a site makes, model.rs `Run::with`).
+    pub(crate) fn forget_quartic() {
+        QUARTIC.with(|kept| kept.borrow_mut().key = None);
+    }
+
+    /// `quartic`'s matrices (module documentation, # The normalized generator): on a site of its own the point's forms
+    /// laid and its normalization forms read (`normal_read`) -- a middle's site (`laid`) holds both --, then the matrices
+    /// of the point's own field components (`normal_at`).
     fn quartic_made(&self, plan: &Plan, fourth: &Fourth, table: Option<&NearTable>, given: Option<&NearValues>, point: &mut Site, laid: bool, q: &mut Quartic) {
-        let (n, pairs) = (fourth.n, plan.near.pairs.len());
-        let (size, padded) = (n * n, plan.padded);
-        let Quartic { data, work, values, slopes, sums, laid: lanes, .. } = q;
-        *work = 0.0;
-        // The exact elimination's forms where no table holds them and none are given.
-        let made = (table.is_none() && given.is_none()).then(|| self.near_exact(plan, &point.beams, 1, &self.coherent_dressing()));
-        let exact = given.or(made.as_ref());
+        q.work = 0.0;
         if !laid {
+            // The exact elimination's forms where no table holds them and none are given.
+            let made = (table.is_none() && given.is_none()).then(|| self.near_exact(plan, &point.beams, 1, &self.coherent_dressing()));
+            let exact = given.or(made.as_ref());
             point.select(plan);
-            *work += match (table, exact) {
+            q.work += match (table, exact) {
                 (Some(table), _) => self.near_point(table, point) + plan.values,
                 (None, Some(near)) => {
                     point.formed(plan, Some(near));
@@ -1860,9 +1961,14 @@ impl Model {
                 }
                 (None, None) => unreachable!("the exact elimination's forms are made where no table is"),
             };
+            q.work += self.normal_read(plan, table, exact, point);
         }
-        let dn = point.directions.len();
-        let parts = 4 + dn;
+        q.work += self.quartic_matrices(plan, fourth, point, q);
+    }
+
+    /// The matrices of a site whose forms are laid and read (`normal_at` at the point's own field components, with
+    /// their gradients, the jumps' partner and, where asked, the landing map), and their counted work.
+    fn quartic_matrices(&self, plan: &Plan, fourth: &Fourth, point: &Site, q: &mut Quartic) -> f64 {
         // The plan's plain components at the point with their gradients.
         let mut scalars = [[C64::ZERO; 4]; 64];
         assert!(plan.scalars.len() <= scalars.len(), "a plan's field components");
@@ -1873,13 +1979,69 @@ impl Model {
                 }
             }
         }
+        self.normal_at(plan, fourth, point, &scalars[..plan.scalars.len()], true, true, q)
+    }
+
+    /// The normalized generator's forms at a site's point into the site (`Site::normal`; module documentation, # The
+    /// normalized generator): X's (and L's) pair forms and z₀ with their slopes along the site's directions -- the table's
+    /// interpolant, or the exact elimination's `exact`. Read once a point: a middle's nodes take them (`Model::node_normal`).
+    /// Their counted work: none of their own -- they are the point's Hermitian forms, counted with them (`Plan::near_read`,
+    /// tabulate.rs `Model::near_point`; the forms given, the elimination's or the table's own count).
+    pub(crate) fn normal_read(&self, plan: &Plan, table: Option<&NearTable>, exact: Option<&NearValues>, point: &mut Site) -> f64 {
+        let pairs = plan.near.pairs.len();
+        let (first, count) = (2 * pairs, plan.near.fourth * pairs + plan.near.reference);
+        let dn = point.directions.len();
+        let Site { normal, normal_slopes, place, .. } = point;
+        sized(normal, 2 * count);
+        sized(normal_slopes, dn * 2 * count);
+        match (table, exact) {
+            (Some(table), _) => {
+                table.table.read(&place.expect("a site placed on its table").0, 2 * first, None, normal, Some(normal_slopes));
+                0.0
+            }
+            (None, Some(near)) => {
+                for e in 0..count {
+                    (normal[2 * e], normal[2 * e + 1]) = (near.data[first + e].re, near.data[first + e].im);
+                    for f in 0..dn {
+                        let z = near.data[(1 + f) * near.len + first + e];
+                        (normal_slopes[(f * count + e) * 2], normal_slopes[(f * count + e) * 2 + 1]) = (z.re, z.im);
+                    }
+                }
+                0.0
+            }
+            (None, None) => unreachable!("the exact elimination's forms are made where no table is"),
+        }
+    }
+
+    /// The normalized generator's matrices (`Quartic::data`; module documentation, # The normalized generator) of a site's
+    /// point at the plan's field components `scalars` (each its value and its gradient along the lab axes): the point's
+    /// own, or a node's along a step's path through it -- its components the point's beams turned by their plane waves
+    /// (`Middle::along`), its forms the point's. The static Hermitian generator H_h and the order-1 forms Y = N₁ are the
+    /// point's laid forms summed with the components by the nodes' kernel (module documentation, # Dense terms) -- of the
+    /// forms' terms, which hold one of a term and its adjoint (`Term::weight`), every static one's and, where the other is
+    /// left out, its adjoint; the Doppler partners' where the absorbed component takes the shifts, and the adjoints of
+    /// those where the emitted one does --, each with its slopes along the point's directions and the components'
+    /// gradients. X (and L where it is not Γ X) are their static pair forms' sums, z₀ the reference form (`Site::normal`).
+    /// From them `normal`: at a point (`point`) with the jumps' partner M and the landing map where `Quartic::landing`
+    /// asks; at a node without them, and without `gradients` the values alone. Returns the counted work.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn normal_at(&self, plan: &Plan, fourth: &Fourth, point: &Site, scalars: &[[C64; 4]], gradients: bool, at_point: bool, q: &mut Quartic) -> f64 {
+        let (n, pairs) = (fourth.n, plan.near.pairs.len());
+        let (size, padded) = (n * n, plan.padded);
+        let Quartic { data, sums, laid: lanes, landing, arena, scratch, .. } = q;
+        let landing = at_point && *landing;
+        let dn = if gradients { point.directions.len() } else { 0 };
+        let (parts, made) = (4 + dn, if gradients { 4 } else { 1 });
+        // H_h and Y enter the held part, E and the landing map alone: none of them where the held part is nothing and no
+        // landing is asked (a state's photons read S⁻¹ alone).
+        let forms_needed = fourth.held() || landing;
         // Four sums, each its value, its slopes' along each direction and the components' gradients' on it, real parts
         // and imaginary parts on the cluster's places: the static Hermitian terms whose adjoints the forms hold not, and
         // hold; the partners of an absorbed component's shifts, and of an emitted one's.
         lanes.clear();
         lanes.resize(4 * parts * 2 * padded, 0.0);
         let width = point.forms.len();
-        for term in plan.form.iter().filter(|term| plan.tones[term.tone] == 0.0) {
+        for term in plan.form.iter().filter(|term| forms_needed && plan.tones[term.tone] == 0.0) {
             let block = &plan.blocks[term.block];
             let to = match term.flag {
                 PLAIN => if term.weight == 2.0 { 1 } else { 0 },
@@ -1888,8 +2050,8 @@ impl Model {
                     if shifted.is_some_and(|s| plan.scalars[s].conjugate) { 3 } else { 2 }
                 }
             };
-            let (l, r) = (side(&scalars, block.left), side(&scalars, block.right));
-            let c: [C64; 4] = std::array::from_fn(|part| if part == 0 { l[0] * r[0] } else { l[part] * r[0] + l[0] * r[part] });
+            let (l, r) = (side(scalars, block.left), side(scalars, block.right));
+            let c: [C64; 4] = std::array::from_fn(|part| if part == 0 { l[0] * r[0] } else if gradients { l[part] * r[0] + l[0] * r[part] } else { C64::ZERO });
             let span = term.first..term.first + term.len;
             let lane = |part: usize| (to * parts + part) * 2 * padded;
             let (real, imaginary) = plan.values(term, &point.forms);
@@ -1897,10 +2059,10 @@ impl Model {
                 let (re, im) = lanes[lane(part)..lane(part) + 2 * padded].split_at_mut(padded);
                 axpy(c, real, imaginary, &mut re[span.clone()], &mut im[span.clone()]);
             };
-            for (part, c) in [(0, c[0]), (1 + dn, c[1]), (2 + dn, c[2]), (3 + dn, c[3])] {
+            for (part, c) in [(0, c[0]), (1 + dn, c[1]), (2 + dn, c[2]), (3 + dn, c[3])].into_iter().take(made) {
                 add(part, c, real, imaginary);
             }
-            if term.near {
+            if term.near && gradients {
                 for f in 0..dn {
                     let (real, imaginary) = point.slopes[f * width + term.at..f * width + term.at + 2 * term.len].split_at(term.len);
                     add(1 + f, c[0], real, imaginary);
@@ -1909,41 +2071,28 @@ impl Model {
         }
         // X, and L where it is not Γ X: Σ e_k'* e_k of the pairs' forms, as the shifts' sums are parted; and z₀.
         let forms = plan.near.fourth;
-        let (first, count) = (2 * pairs, forms * pairs + plan.near.reference);
-        sized(values, 2 * count);
-        sized(slopes, dn * 2 * count);
-        match (table, exact) {
-            (Some(table), _) => {
-                table.table.read(&point.place.expect("a site placed on its table").0, 2 * first, None, values, Some(slopes));
-                *work += plan.quartic_read(dn);
-            }
-            (None, Some(near)) => {
-                for e in 0..count {
-                    (values[2 * e], values[2 * e + 1]) = (near.data[first + e].re, near.data[first + e].im);
-                    for f in 0..dn {
-                        let z = near.data[(1 + f) * near.len + first + e];
-                        (slopes[(f * count + e) * 2], slopes[(f * count + e) * 2 + 1]) = (z.re, z.im);
-                    }
-                }
-            }
-            (None, None) => unreachable!("the exact elimination's forms are made where no table is"),
-        }
+        let count = forms * pairs + plan.near.reference;
+        let (values, slopes) = (&point.normal, &point.normal_slopes);
         let value = |e: usize| C64::new(values[2 * e], values[2 * e + 1]);
         let slope = |f: usize, e: usize| C64::new(slopes[(f * count + e) * 2], slopes[(f * count + e) * 2 + 1]);
         sums.clear();
         sums.resize(2 * parts * size, C64::ZERO);
-        for &(i, left, right, xy) in &fourth.entries {
-            let (l, r) = (side(&scalars, left), side(&scalars, right));
-            let c: [C64; 4] = std::array::from_fn(|part| if part == 0 { l[0] * r[0] } else { l[part] * r[0] + l[0] * r[part] });
-            for form in 0..forms {
-                let (e, to) = (form * pairs + i, form * parts * size + xy);
-                let v = value(e);
-                sums[to] += c[0] * v;
-                for f in 0..dn {
-                    sums[to + (1 + f) * size] += c[0] * slope(f, e);
-                }
-                for a in 0..3 {
-                    sums[to + (1 + dn + a) * size] += c[1 + a] * v;
+        for (left, right, group) in fourth.groups() {
+            let (l, r) = (side(scalars, left), side(scalars, right));
+            let c: [C64; 4] = std::array::from_fn(|part| if part == 0 { l[0] * r[0] } else if gradients { l[part] * r[0] + l[0] * r[part] } else { C64::ZERO });
+            for &(i, xy) in group {
+                for form in 0..forms {
+                    let (e, to) = (form * pairs + i, form * parts * size + xy);
+                    let v = value(e);
+                    sums[to] += c[0] * v;
+                    if gradients {
+                        for f in 0..dn {
+                            sums[to + (1 + f) * size] += c[0] * slope(f, e);
+                        }
+                        for a in 0..3 {
+                            sums[to + (1 + dn + a) * size] += c[1 + a] * v;
+                        }
+                    }
                 }
             }
         }
@@ -1965,91 +2114,75 @@ impl Model {
             0 => value(reference).re,
             _ => (0..dn).map(|f| slope(f, reference).re * directions[f][part - 1]).sum(),
         });
-        let matrix = |of: &dyn Fn(usize, usize, usize) -> C64| -> [Mat; 4] { std::array::from_fn(|part| Mat::from_fn(n, n, |x, y| of(part, x * n + y, y * n + x))) };
-        let hermitian = matrix(&|part, xy, yx| turned(&|p| lane(0, p, xy) + lane(1, p, xy) + lane(1, p, yx).conj(), part));
-        let partner = matrix(&|part, xy, yx| turned(&|p| lane(2, p, xy) + lane(3, p, yx).conj(), part) * 2.0);
-        let metric = matrix(&|part, xy, _| turned(&|p| sums[p * size + xy], part));
-        let loss = match fourth.uniform {
-            Some(rate) => std::array::from_fn(|part| metric[part].scaled(C64::real(rate))),
-            None => matrix(&|part, xy, _| turned(&|p| sums[(parts + p) * size + xy], part)),
-        };
+        // H_h, Y, X and L, four parts each, n × n row by row.
+        sized(arena, 16 * size);
+        let (hermitian, rest) = arena.split_at_mut(4 * size);
+        let (partner, rest) = rest.split_at_mut(4 * size);
+        let (metric, loss) = rest.split_at_mut(4 * size);
+        for part in 0..made {
+            for xy in 0..size {
+                let (at, yx) = (part * size + xy, (xy % n) * n + xy / n);
+                if forms_needed {
+                    hermitian[at] = turned(&|p| lane(0, p, xy) + lane(1, p, xy) + lane(1, p, yx).conj(), part);
+                    partner[at] = turned(&|p| lane(2, p, xy) + lane(3, p, yx).conj(), part) * 2.0;
+                } else {
+                    (hermitian[at], partner[at]) = (C64::ZERO, C64::ZERO);
+                }
+                metric[at] = turned(&|p| sums[p * size + xy], part);
+                loss[at] = match fourth.uniform {
+                    Some(rate) => metric[at] * rate,
+                    None => turned(&|p| sums[(parts + p) * size + xy], part),
+                };
+            }
+        }
         sized(data, 14 * size);
-        normalized(&hermitian, &partner, &metric, &loss, z0, fourth.order, data);
-        *work += plan.quartic_work(fourth, dn);
+        normal(hermitian, partner, metric, loss, n, z0, fourth.orders, gradients, at_point, landing, data, scratch);
+        plan.quartic_work(fourth, gradients.then_some(dn), landing)
     }
 
-    /// The normalized generator's part of a middle (module documentation, # The normalized generator) into the point's
-    /// `quartic`, from the point's matrices (`quartic`) and its generator's values: the held part with its gradient, and
-    /// the decay's change. With the complex multiply-adds that made it (the matrices' where this point made them). The
-    /// matrices are the position `at`'s with the table's forms or the exact elimination's (`quartic`), or made of the
-    /// forms `given`, the ones the point's were laid from.
-    fn fourth_site(&self, plan: &Plan, fourth: &Fourth, table: Option<&NearTable>, given: Option<&NearValues>, at: Option<[f64; 3]>, point: &mut Site) -> f64 {
-        let (n, size) = (fourth.n, fourth.n * fourth.n);
-        let matrices = match given {
-            None => self.quartic(plan, fourth, table, at, point, true),
-            Some(_) => QUARTIC.with(|kept| {
+    /// The normalized generator's part at a node of a step's path through a middle (`Node::normal`; module documentation,
+    /// # The normalized generator), of the node's own field components and the middle's forms (`Site::normal`): where
+    /// the held part is nothing, S⁻¹ = Σ_{j≤J} b_j X^j of the node's X alone -- per block of the static pair entries the
+    /// two components' product times its entries' forms of X --; else the node's matrices (`normal_at`, its values
+    /// alone or with their gradients) -- S⁻¹, E, the held part with its gradient, Y and E₀ (`node_of`).
+    /// At the middle (`centre`: the middle's table and position) the node's components are the point's on every path
+    /// through it: the part is the point's own, the step's scattering's matrices with their gradients (`Model::quartic`),
+    /// made once a point. Made once a node.
+    #[allow(clippy::too_many_arguments)]
+    fn node_normal(&self, plan: &Plan, fourth: &Fourth, point: &Site, node: &mut Node, quartic: &mut Quartic, centre: Option<(Option<&NearTable>, [f64; 3])>, gradients: bool) {
+        if node.normal_made && (node.normal_gradients || !gradients) {
+            return;
+        }
+        if let Some((table, r)) = centre {
+            QUARTIC.with(|kept| {
                 let mut q = kept.borrow_mut();
-                self.quartic_made(plan, fourth, None, given, point, true, &mut q);
-                q.key = None;
-                q.work
-            }),
-        };
-        let Site { amplitudes, generator, quartic, made, .. } = point;
-        sized(quartic, 4 * size);
-        made.clear();
-        made.resize(4 * size, C64::ZERO);
-        Model::quartic_read(|q| {
-            let at = |m: usize| &q.data[m * size..(m + 1) * size];
-            let (bent, offset) = (at(BENT), at(OFFSET));
-            for part in 0..4 {
-                quartic[part * size..(part + 1) * size].copy_from_slice(at(HELD + part));
-            }
-            // The generator's decay at the point by its flags, read off its dense terms at rest: Λ = i(P − P†) of the
-            // plain terms' sum P; Λ_R = −i(G_R − G_L†) of the sums of the terms whose absorbed component takes the Doppler
-            // shifts, G_R, and whose emitted one does, G_L (module documentation, # The normalized generator); Λ_B from the
-            // terms of both, −(i/2)Λ_B. A term that beats in the frames is left out.
-            let sums = &mut made[..4 * size];
-            let mut scalars = [C64::ZERO; 64];
-            for (z, scalar) in scalars.iter_mut().zip(&plan.scalars) {
-                *z = scalar.beams.iter().map(|&(at, c)| (if scalar.conjugate { amplitudes[at][0].conj() } else { amplitudes[at][0] }) * c).sum();
-            }
-            assert!(plan.scalars.len() <= scalars.len(), "a plan's field components");
-            let side = |scalar: Option<usize>| scalar.map_or(C64::ONE, |s| scalars[s]);
-            for term in plan.generator.iter().filter(|term| plan.tones[term.tone] == 0.0) {
-                let block = &plan.blocks[term.block];
-                let to = match term.flag {
-                    PLAIN => 0,
-                    BOTH => 2,
-                    flag => {
-                        let shifted = if flag == RIGHT { block.right } else { block.left };
-                        if shifted.is_some_and(|s| plan.scalars[s].conjugate) { 3 } else { 1 }
-                    }
-                };
-                let (c, (real, imaginary)) = (side(block.left) * side(block.right), plan.values(term, generator));
-                for (k, place) in (term.first..(term.first + term.len).min(size)).enumerate() {
-                    sums[to * size + place] += c * C64::new(real[k], imaginary[k]);
+                self.quartic_kept(plan, fourth, table, r, point, &mut q);
+                node_of(fourth, point, node, &q);
+            });
+            (node.normal_made, node.normal_gradients) = (true, true);
+            return;
+        }
+        let (n, size) = (fourth.n, fourth.n * fourth.n);
+        if fourth.held() {
+            quartic.landing = false;
+            self.normal_at(plan, fourth, point, &node.plain, gradients, false, quartic);
+            node_of(fourth, point, node, quartic);
+        } else {
+            sized(&mut node.normal, size);
+            let Quartic { sums, .. } = quartic;
+            sized(sums, 2 * size);
+            let (x, t) = sums.split_at_mut(size);
+            x.fill(C64::ZERO);
+            let values = &point.normal;
+            for (left, right, group) in fourth.groups() {
+                let c = side(&node.plain, left)[0] * side(&node.plain, right)[0];
+                for &(i, xy) in group {
+                    x[xy] += c * C64::new(values[2 * i], values[2 * i + 1]);
                 }
             }
-            let entry = |m: usize, a: usize, b: usize| sums[m * size + a * n + b];
-            let decay = Mat::from_fn(n, n, |a, b| (entry(0, a, b) - entry(0, b, a).conj()) * C64::I);
-            let right = Mat::from_fn(n, n, |a, b| (entry(1, a, b) - entry(3, b, a).conj()) * C64::new(0.0, -1.0));
-            let both = Mat::from_fn(n, n, |a, b| entry(2, a, b) * C64::new(0.0, 2.0));
-            let (s, e) = (Mat { rows: n, cols: n, data: bent.to_vec() }, Mat { rows: n, cols: n, data: offset.to_vec() });
-            // Σ L†L = S⁻¹ (Λ + Λ_R E + E†Λ_R† + E†Λ_B E) S⁻¹ (E none at the series' order 0).
-            let mut inner = decay.clone();
-            if fourth.order >= 1 {
-                let re = right.product(&e);
-                inner.add_scaled(C64::ONE, &re);
-                inner.add_scaled(C64::ONE, &re.adjoint());
-                inner.add_scaled(C64::ONE, &e.adjoint_product(&both.product(&e)));
-            }
-            let mut changed = s.product(&inner).product(&s);
-            changed.add_scaled(-C64::ONE, &decay);
-            for (z, d) in quartic[..size].iter_mut().zip(&changed.data) {
-                *z -= *d * C64::new(0.0, 0.5);
-            }
-            matrices + plan.site_work(fourth)
-        })
+            powers(-0.5, fourth.orders.normalization, x, t, &mut node.normal, n);
+        }
+        (node.normal_made, node.normal_gradients) = (true, gradients);
     }
 
     /// A plan's field components at a point, jets to `order`, plain and weighted by their beams' Doppler shifts at a momentum.
@@ -2109,19 +2242,22 @@ impl Model {
         let mut point = Held::<Site>::take();
         let table = self.pointed(plan, table, r, &mut point);
         point.select(plan);
-        let work = match table {
+        let exact = (table.is_none() && plan.near.len() > 0).then(|| self.near_exact(plan, &point.beams, 1, &self.coherent_dressing()));
+        let work = match (table, &exact) {
             _ if plan.near.len() == 0 => {
                 point.formed(plan, None);
                 0.0
             }
-            Some(table) => self.near_point(table, &mut point) + plan.values,
-            None => {
-                let near = self.near_exact(plan, &point.beams, 1, &self.coherent_dressing());
-                point.formed(plan, Some(&near));
+            (Some(table), _) => self.near_point(table, &mut point) + plan.values,
+            (None, Some(near)) => {
+                point.formed(plan, Some(near));
                 near.work + plan.values
             }
+            (None, None) => unreachable!("the exact elimination's forms are made where no table is"),
         };
-        let work = work + plan.fourth.as_ref().map_or(0.0, |fourth| self.fourth_site(plan, fourth, table, None, Some(r), &mut point));
+        // The normalized generator's forms, which the step's nodes take (`Model::node_normal`).
+        point.normal.clear();
+        let work = work + plan.fourth.as_ref().map_or(0.0, |_| self.normal_read(plan, table, exact.as_ref(), &mut point));
         Middle { model: self, plan: plan.clone(), r: Some(r), t, table, point: RefCell::new(point), work }
     }
 
@@ -2136,11 +2272,11 @@ impl Model {
         point.beams.extend_from_slice(amplitudes);
         point.select(plan);
         point.formed(plan, near);
-        // A thread's spare point holds its last middle's: the normalized generator's part is this point's, or none.
-        point.quartic.clear();
+        // A thread's spare point holds its last middle's: the normalized generator's forms are this point's, or none.
+        point.normal.clear();
         let mut work = near.map_or(0.0, |n| n.work + plan.values);
-        if let (Some(fourth), Some(_)) = (plan.fourth.as_ref(), near) {
-            work += self.fourth_site(plan, fourth, None, near, None, &mut point);
+        if let (Some(_), Some(near)) = (plan.fourth.as_ref(), near) {
+            work += self.normal_read(plan, None, Some(near), &mut point);
         }
         Middle { model: self, plan: plan.clone(), r: None, t, table: None, point: RefCell::new(point), work }
     }
@@ -2188,6 +2324,11 @@ struct Node {
     doppler_slope: Vec<[C64; 4]>,
     phases: Vec<C64>,
     turns: Vec<C64>,
+    /// The normalized generator's part at the node (`Model::node_normal`), made once its generator or force asks: S⁻¹
+    /// there, and where the held part is anything E, the held part with its gradient, Y and E₀.
+    normal: Vec<C64>,
+    normal_made: bool,
+    normal_gradients: bool,
 }
 
 /// The nodes a site keeps (`Scratch::nodes`): a step's path's three -- its middle, where the fixed point's tones are read
@@ -2202,6 +2343,12 @@ const NODES: usize = 4;
 struct Scratch {
     nodes: [Node; NODES],
     next: usize,
+    /// The normalized generator's matrices at a node where its held part is anything (`Model::node_normal`), and a
+    /// node's normalized part in the making (`Middle::generator`).
+    quartic: Quartic,
+    temporary: Vec<C64>,
+    /// The generator's static flagged terms' sums at rest (`Middle::generator`): G_R, the both-sided ones', G_L.
+    flagged: Vec<f64>,
     /// The gradient's sums, per axis its real and its imaginary parts, then their slopes' (`gradient`).
     gradients: Vec<f64>,
     weights: Vec<f64>,
@@ -2243,11 +2390,22 @@ impl crate::step::Middle for Middle<'_> {
         let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
         let mut scratch = point.scratch.borrow_mut();
         let at = self.along(&point.amplitudes, path, s, false, &mut scratch);
-        let Scratch { nodes, sum, .. } = &mut *scratch;
-        let Node { plain, doppler, phases, turns, .. } = &nodes[at];
+        let normalized = plan.fourth.as_ref().filter(|fourth| fourth.bends() && !point.normal.is_empty());
+        let Scratch { nodes, sum, quartic, temporary, flagged, .. } = &mut *scratch;
+        if let Some(fourth) = normalized {
+            self.model.node_normal(plan, fourth, &point, &mut nodes[at], quartic, self.centre(s), false);
+        }
+        let Node { plain, doppler, phases, turns, normal, .. } = &nodes[at];
+        let padded = plan.padded;
         sum.clear();
-        sum.resize(2 * plan.padded, 0.0);
-        let (re, im) = sum.split_at_mut(plan.padded);
+        sum.resize(2 * padded, 0.0);
+        let (re, im) = sum.split_at_mut(padded);
+        // The decays where the series' first order reads them: the static flagged terms' sums of the plain products,
+        // G_R of the terms whose absorbed component takes the Doppler shifts, G_B of those of both, and G_L of those whose
+        // emitted one does; and G_D of the both-sided terms with the emitted component's shift alone.
+        let decays = normalized.is_some_and(|fourth| fourth.held());
+        flagged.clear();
+        flagged.resize(if decays { 8 * padded } else { 0 }, 0.0);
         // A block's products of its two components, per flag: made once for its terms.
         let mut of = (usize::MAX, [C64::ZERO; 4]);
         for term in &plan.generator {
@@ -2258,10 +2416,89 @@ impl crate::step::Middle for Middle<'_> {
             }
             let (real, imaginary) = plan.values(term, &point.generator);
             let span = term.first..term.first + term.len;
-            axpy(of.1[term.flag] * phases[term.tone], real, imaginary, &mut re[span.clone()], &mut im[span]);
+            axpy(of.1[term.flag] * phases[term.tone], real, imaginary, &mut re[span.clone()], &mut im[span.clone()]);
+            if decays && term.flag != PLAIN && plan.tones[term.tone] == 0.0 {
+                let to = match term.flag {
+                    BOTH => 1,
+                    flag => {
+                        let block = &plan.blocks[term.block];
+                        let shifted = if flag == RIGHT { block.right } else { block.left };
+                        if shifted.is_some_and(|s| plan.scalars[s].conjugate) { 2 } else { 0 }
+                    }
+                };
+                let (fr, fi) = flagged[2 * to * padded..2 * (to + 1) * padded].split_at_mut(padded);
+                axpy(of.1[PLAIN], real, imaginary, &mut fr[span.clone()], &mut fi[span.clone()]);
+                // A both-sided term's product with its emitted (conjugated) component's shift alone: the Doppler part
+                // of Λ_R, G_D.
+                if term.flag == BOTH {
+                    let block = &plan.blocks[term.block];
+                    let product = if block.left.is_some_and(|s| plan.scalars[s].conjugate) { of.1[LEFT] } else { of.1[RIGHT] };
+                    let (fr, fi) = flagged[6 * padded..8 * padded].split_at_mut(padded);
+                    axpy(product, real, imaginary, &mut fr[span.clone()], &mut fi[span]);
+                }
+            }
         }
         for (z, (re, im)) in h.data.iter_mut().zip(re.iter().zip(im.iter())) {
             *z = C64::new(*re, *im);
+        }
+        // The normalized generator's part at the node, of the node's own forms (module documentation, # The normalized
+        // generator), in the entries' own coordinates before the frames turn them: the decay Λ = i(Ĥ − Ĥ†) of the node's
+        // terms -- every jump's product at the path's momentum -- taken to S⁻¹ (Λ + Λ_R E + E†Λ_R† + E†Λ_B E) S⁻¹, the
+        // jumps' own product on S⁻¹ψ and E S⁻¹ψ (E none at the series' order 0), and the held part beside it.
+        if let Some(fourth) = normalized {
+            let size = n * n;
+            sized(temporary, 7 * size);
+            let (lambda, rest) = temporary.split_at_mut(size);
+            let (inner, rest) = rest.split_at_mut(size);
+            let (left, rest) = rest.split_at_mut(size);
+            let (right, rest) = rest.split_at_mut(size);
+            let (adjoint, rest) = rest.split_at_mut(size);
+            let (lambda_r, lambda_b) = rest.split_at_mut(size);
+            for x in 0..n {
+                for y in 0..n {
+                    lambda[x * n + y] = (h.data[x * n + y] - h.data[y * n + x].conj()) * C64::I;
+                }
+            }
+            inner.copy_from_slice(lambda);
+            if decays {
+                // Λ_R = −i(G_R − G_L†) − 2i G_D at the path's momentum, Λ_B = 2i G_B (the both-sided terms' part −(i/2)Λ_B).
+                let at = |to: usize, place: usize| C64::new(flagged[2 * to * padded + place], flagged[(2 * to + 1) * padded + place]);
+                for a in 0..n {
+                    for b in 0..n {
+                        lambda_r[a * n + b] = (at(0, a * n + b) - at(2, b * n + a).conj()) * C64::new(0.0, -1.0) - at(3, a * n + b) * C64::new(0.0, 2.0);
+                        lambda_b[a * n + b] = at(1, a * n + b) * C64::new(0.0, 2.0);
+                    }
+                }
+                let e = &normal[size..2 * size];
+                // Λ_R E + E†Λ_R† and E†Λ_B E.
+                product(lambda_r, e, left, n);
+                for x in 0..n {
+                    for y in 0..n {
+                        inner[x * n + y] += left[x * n + y] + left[y * n + x].conj();
+                    }
+                }
+                product(lambda_b, e, left, n);
+                for x in 0..n {
+                    for y in 0..n {
+                        adjoint[x * n + y] = e[y * n + x].conj();
+                    }
+                }
+                product(adjoint, left, right, n);
+                for (z, more) in inner.iter_mut().zip(right.iter()) {
+                    *z += *more;
+                }
+            }
+            let bent = &normal[..size];
+            product(bent, inner, left, n);
+            product(left, bent, right, n);
+            for (place, z) in h.data.iter_mut().enumerate() {
+                *z -= (right[place] - lambda[place]) * C64::new(0.0, 0.5);
+            }
+            if fourth.held() {
+                for (z, more) in h.data.iter_mut().zip(&normal[2 * size..3 * size]) {
+                    *z += *more;
+                }
+            }
         }
         if path.turning {
             for x in 0..n {
@@ -2271,12 +2508,6 @@ impl crate::step::Middle for Middle<'_> {
                     h.data[y * n + x] *= turn.conj();
                 }
                 h.data[x * n + x] += C64::real(path.rates.gauge[x]);
-            }
-        }
-        // The normalized generator's, held along the path in the cluster's Doppler frames.
-        if plan.fourth.is_some() && point.quartic.len() >= n * n {
-            for (z, more) in h.data.iter_mut().zip(&point.quartic[..n * n]) {
-                *z += *more;
             }
         }
     }
@@ -2316,8 +2547,12 @@ impl crate::step::Middle for Middle<'_> {
         let mut scratch = point.scratch.borrow_mut();
         let sloped = slope.is_some();
         let at = self.along(&point.amplitudes, path, s, sloped, &mut scratch);
-        let Scratch { nodes, gradients, .. } = &mut *scratch;
-        let Node { plain, doppler, plain_slope, doppler_slope, phases, turns, .. } = &nodes[at];
+        let held = plan.fourth.as_ref().filter(|fourth| fourth.held() && !point.normal.is_empty());
+        let Scratch { nodes, gradients, quartic, .. } = &mut *scratch;
+        if let Some(fourth) = held {
+            self.model.node_normal(plan, fourth, &point, &mut nodes[at], quartic, self.centre(s), true);
+        }
+        let Node { plain, doppler, plain_slope, doppler_slope, phases, turns, normal, .. } = &nodes[at];
         let padded = plan.padded;
         gradients.clear();
         gradients.resize(if sloped { 12 } else { 6 } * padded, 0.0);
@@ -2391,10 +2626,11 @@ impl crate::step::Middle for Middle<'_> {
                 hermitian(m, n);
             }
         }
+        // The held part's gradient at the node, of its own forms, in the frames as the terms' entries.
         for (a, m) in g.iter_mut().enumerate() {
-            if plan.fourth.is_some() && point.quartic.len() >= 4 * n * n {
-                for (z, more) in m.iter_mut().zip(&point.quartic[(1 + a) * n * n..(2 + a) * n * n]) {
-                    *z += *more;
+            if held.is_some() {
+                for (place, z) in m.iter_mut().enumerate() {
+                    *z += normal[(3 + a) * n * n + place] * turns[place / n] * turns[place % n].conj();
                 }
             }
             hermitian(m, n);
@@ -2422,115 +2658,222 @@ impl crate::step::Middle for Middle<'_> {
     }
 }
 
-/// A block's field component on one side (1 where it has none).
-/// The normalized generator's matrices (`Quartic`; module documentation, # The normalized generator) from the point's
-/// static Hermitian generator H_h, the order-1 forms Y = N₁, the metric X and the loss L (four parts each: the value and
-/// the gradient along the three lab axes) and the reference z₀, at the series' order K:
-/// - the fold's generator H: H₀ = H_h − (i/2) L at order 0; at order 1 the fixed point H = H₀ − Y (H − z₀), that is
-///   H = (1 + Y)⁻¹ (H₀ + z₀ Y), its gradient (1 + Y)⁻¹ (∇H₀ − ∇Y (H − z₀) + ∇z₀ Y); E = H − z₀;
-/// - the normalization S = (1 + X)^{1/2} in X's eigenbasis (S ∇S + ∇S S = ∇X: (V†∇S V)_ij = (V†∇X V)_ij/(s_i + s_j)),
-///   S⁻¹ and ∇S⁻¹ = −S⁻¹ ∇S S⁻¹;
-/// - the held part Herm(S H S⁻¹) − H_h and its gradient Herm(∇S H S⁻¹ + S ∇H S⁻¹ + S H ∇S⁻¹) − ∇H_h;
-/// - M = E S⁻¹ (the jumps' partner's state, none at order 0), the landing map S (1 + Y)⁻¹, and E.
-pub(crate) fn normalized(hermitian: &[Mat; 4], partner: &[Mat; 4], metric: &[Mat; 4], loss: &[Mat; 4], z0: [f64; 4], order: usize, data: &mut [C64]) {
-    let n = hermitian[0].rows;
+/// The normalized generator's matrices (`Quartic`; module documentation, # The normalized generator) from a point's (or a
+/// node's) static Hermitian generator H_h, the order-1 forms Y = N₁, the metric X and the loss L (four parts each, n × n
+/// row by row: the value and the gradient along the three lab axes) and the reference z₀, at the orders `orders`
+/// (elim.rs `Orders`) -- the Schrieffer–Wolff series, products of the forms alone (ELIMINATION v7):
+/// - the fold's generator: H₀ = H_h − (i/2) L at the series' order 0; at order 1 its first order's term H = H₀ − Y E₀,
+///   E₀ = H₀ − z₀ (the fixed point H = H₀ − Y(H − z₀) to its own first order, Y²E apart: in the order's error measured
+///   against the next, elim.rs `Fold::order_error`), with its gradient ∇H₀ − ∇Y E₀ − Y ∇E₀; E = H − z₀. (The forms hold
+///   N₀ and N₁: order 1 is `Unit::Series` kept, a higher one the nearest block's keep, `Unit::Block`.)
+/// - S⁻¹ = Σ_{j≤J} binom(−½, j) X^j and S = Σ_{j≤J} binom(½, j) X^j at the normalization's order J, by Horner's rule
+///   with the gradient's product rule (`series`) -- no eigendecomposition --;
+/// - the held part Herm H − H_h (nothing at the series' order 0) and its gradient: the Hermitian part is the series'
+///   own -- what the normalization would do to it is measured where the atoms went and booked (elim.rs
+///   `Fold::hermitian_error`);
+/// - M = E S⁻¹ (the jumps' partner's state, none at order 0), the landing map S (1 + Y)⁻¹ with (1 + Y)⁻¹ = Σ_{j≤J} (−Y)^j
+///   (its next order's part measured with the normalization's, `Fold::normalization_error`), and E.
+/// Without `gradients` the values alone (the gradients' parts zero), of forms given so; M only at a point (`point`: a
+/// node's generator and force read none), the landing map only where asked (`landing`), else zero. `scratch` holds
+/// what it makes on the way; nothing is asked of the heap once it has its size.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn normal(hermitian: &[C64], partner: &[C64], metric: &[C64], loss: &[C64], n: usize, z0: [f64; 4], orders: Orders, gradients: bool, point: bool, landing: bool, data: &mut [C64], scratch: &mut Vec<C64>) {
     let size = n * n;
-    let identity = Mat::identity(n);
-    let shifted = |m: &Mat, z: f64| {
-        let mut out = m.clone();
-        for i in 0..n {
-            out[(i, i)] -= C64::real(z);
-        }
-        out
-    };
-    let h0: Vec<Mat> = (0..4)
-        .map(|part| {
-            let mut h = hermitian[part].clone();
-            h.add_scaled(C64::new(0.0, -0.5), &loss[part]);
-            h
-        })
-        .collect();
-    let mut one_y = identity.clone();
-    one_y.add_scaled(C64::ONE, &partner[0]);
-    let lu = crate::linalg::Lu::new(&one_y).expect("1 + Y is regular where the series converges");
-    let solve = |m: &Mat| {
-        let mut out = m.clone();
-        for j in 0..n {
-            let mut column: Vec<C64> = (0..n).map(|i| m[(i, j)]).collect();
-            lu.solve(&mut column);
+    let parts = if gradients { 4 } else { 1 };
+    let order = orders.series;
+    assert!(order <= 1, "the near forms hold N₀ and N₁: the series' order 1 is `Unit::Series`, a higher one the nearest block's keep");
+    sized(scratch, 20 * size);
+    let (h, rest) = scratch.split_at_mut(4 * size);
+    let (e, rest) = rest.split_at_mut(4 * size);
+    let (inverse, rest) = rest.split_at_mut(4 * size);
+    let (outer, rest) = rest.split_at_mut(4 * size);
+    let (t, rest) = rest.split_at_mut(size);
+    let (u, rest) = rest.split_at_mut(size);
+    let (w, rest) = rest.split_at_mut(size);
+    let v = &mut rest[..size];
+    let offset = |h: &[C64], e: &mut [C64]| {
+        e[..parts * size].copy_from_slice(&h[..parts * size]);
+        for part in 0..parts {
             for i in 0..n {
-                out[(i, j)] = column[i];
+                e[part * size + i * n + i] -= C64::real(z0[part]);
             }
         }
-        out
     };
-    let (h, gradient): (Mat, Vec<Mat>) = if order == 0 {
-        (h0[0].clone(), h0[1..].to_vec())
-    } else {
-        let mut right = h0[0].clone();
-        right.add_scaled(C64::real(z0[0]), &partner[0]);
-        let h = solve(&right);
-        let e = shifted(&h, z0[0]);
-        let gradient = (1..4)
-            .map(|part| {
-                let mut g = h0[part].clone();
-                g.add_scaled(-C64::ONE, &partner[part].product(&e));
-                g.add_scaled(C64::real(z0[part]), &partner[0]);
-                solve(&g)
-            })
-            .collect();
-        (h, gradient)
-    };
-    let e = shifted(&h, z0[0]);
-    // S = (1 + X)^{1/2}, S⁻¹, and their gradients.
-    let eigen = crate::linalg::hermitian_eigen(&metric[0]);
-    let roots: Vec<f64> = eigen.values.iter().map(|&x| (1.0 + x.max(0.0)).sqrt()).collect();
-    let v = &eigen.vectors;
-    let of = |d: &dyn Fn(usize, usize) -> C64| {
-        let inner = Mat::from_fn(n, n, d);
-        v.product(&inner).product(&v.adjoint())
-    };
-    let s = of(&|i, j| if i == j { C64::real(roots[i]) } else { C64::ZERO });
-    let inverse = of(&|i, j| if i == j { C64::real(1.0 / roots[i]) } else { C64::ZERO });
-    let ds: Vec<Mat> = (1..4)
-        .map(|part| {
-            let turned = v.adjoint().product(&metric[part]).product(v);
-            of(&|i, j| turned[(i, j)] / (roots[i] + roots[j]))
-        })
-        .collect();
-    let dinverse: Vec<Mat> = ds.iter().map(|d| inverse.product(d).product(&inverse).scaled(-C64::ONE)).collect();
-    let g = s.product(&h).product(&inverse);
-    let put = |data: &mut [C64], m: usize, value: &Mat| data[m * size..(m + 1) * size].copy_from_slice(&value.data);
-    let mut held = g.hermitian_part();
-    held.add_scaled(-C64::ONE, &hermitian[0]);
-    put(data, HELD, &held);
-    put(data, BENT, &inverse);
-    for a in 0..3 {
-        let mut dg = ds[a].product(&h).product(&inverse);
-        dg.add_scaled(C64::ONE, &s.product(&gradient[a]).product(&inverse));
-        dg.add_scaled(C64::ONE, &s.product(&h).product(&dinverse[a]));
-        let mut d = dg.hermitian_part();
-        d.add_scaled(-C64::ONE, &hermitian[1 + a]);
-        put(data, HELD + 1 + a, &d);
-        put(data, BENT + 1 + a, &dinverse[a]);
-        let partner = if order == 0 {
-            Mat::zeros(n, n)
-        } else {
-            let mut de = gradient[a].clone();
-            for i in 0..n {
-                de[(i, i)] -= C64::real(z0[1 + a]);
-            }
-            let mut m = de.product(&inverse);
-            m.add_scaled(C64::ONE, &e.product(&dinverse[a]));
-            m
-        };
-        put(data, PARTNER + 1 + a, &partner);
+    // H₀ = H_h − (i/2) L; E₀ = H₀ − z₀.
+    for i in 0..parts * size {
+        h[i] = hermitian[i] - loss[i] * C64::new(0.0, 0.5);
     }
-    put(data, PARTNER, &if order == 0 { Mat::zeros(n, n) } else { e.product(&inverse) });
-    put(data, LANDING, &s.product(&solve(&identity)));
-    put(data, OFFSET, &e);
+    offset(h, e);
+    // The series' first order: H = H₀ − Y E₀, ∇H = ∇H₀ − ∇Y E₀ − Y ∇E₀; then E = H − z₀.
+    if order >= 1 {
+        product(&partner[..size], &e[..size], t, n);
+        for a in 1..parts {
+            product(&partner[a * size..(a + 1) * size], &e[..size], u, n);
+            product(&partner[..size], &e[a * size..(a + 1) * size], v, n);
+            for i in 0..size {
+                h[a * size + i] -= u[i] + v[i];
+            }
+        }
+        for i in 0..size {
+            h[i] -= t[i];
+        }
+        offset(h, e);
+    }
+    series(-0.5, orders.normalization, metric, inverse, t, n, gradients);
+    // The held part Herm H − H_h and its gradient: the Hermitian part is the series' own (what the normalization would do
+    // to it is measured and booked, elim.rs `Fold::hermitian_error`).
+    data.fill(C64::ZERO);
+    for part in 0..parts {
+        let (of, own) = (&h[part * size..(part + 1) * size], &hermitian[part * size..(part + 1) * size]);
+        let held = &mut data[(HELD + part) * size..(HELD + part + 1) * size];
+        for x in 0..n {
+            for y in 0..n {
+                held[x * n + y] = (of[x * n + y] + of[y * n + x].conj()) * 0.5 - own[x * n + y];
+            }
+        }
+    }
+    data[BENT * size..(BENT + 4) * size].copy_from_slice(inverse);
+    // M = E S⁻¹ and its gradient ∇E S⁻¹ + E ∇S⁻¹ (a point's; none at the series' order 0).
+    if point && order >= 1 {
+        product(&e[..size], &inverse[..size], &mut data[PARTNER * size..(PARTNER + 1) * size], n);
+        for a in 1..parts {
+            product(&e[a * size..(a + 1) * size], &inverse[..size], t, n);
+            product(&e[..size], &inverse[a * size..(a + 1) * size], u, n);
+            for (i, z) in data[(PARTNER + a) * size..(PARTNER + a + 1) * size].iter_mut().enumerate() {
+                *z = t[i] + u[i];
+            }
+        }
+    }
+    // The landing map S Σ_{j≤J} (−Y)^j, by Horner's rule w ← 1 − w Y.
+    if landing {
+        series(0.5, orders.normalization, metric, outer, t, n, false);
+        w.fill(C64::ZERO);
+        for i in 0..n {
+            w[i * n + i] = C64::ONE;
+        }
+        for _ in 0..orders.normalization {
+            product(w, &partner[..size], t, n);
+            for (z, y) in w.iter_mut().zip(t.iter()) {
+                *z = -*y;
+            }
+            for i in 0..n {
+                w[i * n + i] += C64::ONE;
+            }
+        }
+        product(&outer[..size], w, &mut data[LANDING * size..(LANDING + 1) * size], n);
+    }
+    data[OFFSET * size..(OFFSET + 1) * size].copy_from_slice(&e[..size]);
 }
 
+/// (1 + X)^α to order J by Horner's rule, p ← p X + binom(α, j) from j = J down -- its first step b_J X + b_{J−1}
+/// without a product --, into `out` (four parts: the value and, where `gradients`, ∇p ← ∇p X + p ∇X along the three
+/// lab axes, else nothing); `t` its scratch.
+fn series(alpha: f64, order: usize, x: &[C64], out: &mut [C64], t: &mut [C64], n: usize, gradients: bool) {
+    let size = n * n;
+    out.fill(C64::ZERO);
+    let parts = if gradients { 4 } else { 1 };
+    if order >= 1 {
+        let top = binomial(alpha, order);
+        for (z, y) in out[..parts * size].iter_mut().zip(&x[..parts * size]) {
+            *z = *y * top;
+        }
+    }
+    for i in 0..n {
+        out[i * n + i] += C64::real(binomial(alpha, order.saturating_sub(1)));
+    }
+    for j in (0..order.saturating_sub(1)).rev() {
+        if gradients {
+            for a in 1..4 {
+                let (value, rest) = out.split_at_mut(size);
+                let d = &mut rest[(a - 1) * size..a * size];
+                product(d, &x[..size], t, n);
+                d.copy_from_slice(t);
+                product(value, &x[a * size..(a + 1) * size], t, n);
+                for (z, y) in d.iter_mut().zip(t.iter()) {
+                    *z += *y;
+                }
+            }
+        }
+        product(&out[..size], &x[..size], t, n);
+        out[..size].copy_from_slice(t);
+        for i in 0..n {
+            out[i * n + i] += C64::real(binomial(alpha, j));
+        }
+    }
+}
+
+/// Σ_{j≤J} binom(α, j) X^j of an n × n matrix X (row by row) into `out`, by Horner's rule p ← p X + c_j from j = J down
+/// (`t` its scratch; its first step c_J X + c_{J−1} without a product): the normalization's series at a node
+/// (`Model::node_normal`) and on a readout's classes (readout.rs).
+pub(crate) fn powers(alpha: f64, order: usize, x: &[C64], t: &mut [C64], out: &mut [C64], n: usize) {
+    let size = n * n;
+    out[..size].fill(C64::ZERO);
+    if order >= 1 {
+        let top = binomial(alpha, order);
+        for (z, y) in out[..size].iter_mut().zip(&x[..size]) {
+            *z = *y * top;
+        }
+    }
+    for i in 0..n {
+        out[i * n + i] += C64::real(binomial(alpha, order.saturating_sub(1)));
+    }
+    for j in (0..order.saturating_sub(1)).rev() {
+        product(&out[..size], x, t, n);
+        out[..size].copy_from_slice(&t[..size]);
+        for i in 0..n {
+            out[i * n + i] += C64::real(binomial(alpha, j));
+        }
+    }
+}
+
+/// c = a b of n × n matrices row by row.
+fn product(a: &[C64], b: &[C64], c: &mut [C64], n: usize) {
+    for i in 0..n {
+        let row = &mut c[i * n..(i + 1) * n];
+        row.fill(C64::ZERO);
+        for k in 0..n {
+            let x = a[i * n + k];
+            if x == C64::ZERO {
+                continue;
+            }
+            for (z, y) in row.iter_mut().zip(&b[k * n..(k + 1) * n]) {
+                *z += x * *y;
+            }
+        }
+    }
+}
+
+/// A node's normalized part (`Node::normal`) of the matrices `q` made of its components (`Model::node_normal`): S⁻¹
+/// where the held part is nothing; else S⁻¹, E, the held part with its gradient, and Y and E₀ = H_h − (i/2)L − z₀, the
+/// forms `normal` was made of (`Middle::held_force`).
+fn node_of(fourth: &Fourth, point: &Site, node: &mut Node, q: &Quartic) {
+    let (n, size) = (fourth.n, fourth.n * fourth.n);
+    let data = &q.data;
+    if !fourth.held() {
+        sized(&mut node.normal, size);
+        node.normal.copy_from_slice(&data[BENT * size..(BENT + 1) * size]);
+        return;
+    }
+    let arena = &q.arena;
+    sized(&mut node.normal, 8 * size);
+    let normal = &mut node.normal;
+    normal[..size].copy_from_slice(&data[BENT * size..(BENT + 1) * size]);
+    normal[size..2 * size].copy_from_slice(&data[OFFSET * size..(OFFSET + 1) * size]);
+    normal[2 * size..6 * size].copy_from_slice(&data[HELD * size..(HELD + 4) * size]);
+    normal[6 * size..7 * size].copy_from_slice(&arena[4 * size..5 * size]);
+    let reference = C64::new(point.normal[point.normal.len() - 2], 0.0);
+    for i in 0..size {
+        normal[7 * size + i] = arena[i] - arena[12 * size + i] * C64::new(0.0, 0.5) - if i % (n + 1) == 0 { reference } else { C64::ZERO };
+    }
+}
+
+/// The key of a point's matrices (`Model::quartic`): the plan, the table's grid and the position.
+fn quartic_key(plan: &Plan, table: Option<&NearTable>, r: [f64; 3]) -> (u64, u64, [u64; 3]) {
+    let grid = table.map_or(0, |t| t.table.axes().iter().fold(1 + crate::table::Table::nodes(t.table.axes()) as u64, |h, a| h.rotate_left(13) ^ a.spacing().to_bits() ^ a.node(0).to_bits().rotate_left(29)));
+    (plan.id, grid, r.map(f64::to_bits))
+}
+
+/// A block's field component on one side (1 where it has none).
 fn side(fields: &[[C64; 4]], scalar: Option<usize>) -> [C64; 4] {
     scalar.map_or([C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO], |s| fields[s])
 }
@@ -2559,8 +2902,123 @@ impl Middle<'_> {
         point.forms.clone_from(&from.forms);
         point.slopes.clone_from(&from.slopes);
         point.directions.clone_from(&from.directions);
-        point.quartic.clone_from(&from.quartic);
+        point.normal.clone_from(&from.normal);
+        point.normal_slopes.clone_from(&from.normal_slopes);
         Middle { model: self.model, plan: self.plan.clone(), r: self.r, t: self.t, table: self.table, point: RefCell::new(point), work: self.work }
+    }
+
+    /// The counted complex multiply-adds of a state's scattering at the middle at the momentum κ (photon.rs
+    /// `Model::scattering_on` on the middle's own site, its forms laid: what a step's scattering makes there, the
+    /// normalized generator's matrices among it where the thread holds none of the point's).
+    pub(crate) fn scattering_counted(&self, kappa: [f64; 3], psi: &[C64]) -> f64 {
+        self.model.scattering_on(&self.plan, self.table, self.r, kappa, self.t, psi, &mut self.point.borrow_mut(), true).1
+    }
+
+    /// The middle's table and position where the node at the time s is the middle (`Model::node_normal`).
+    fn centre(&self, s: f64) -> Option<(Option<&NearTable>, [f64; 3])> {
+        self.r.filter(|_| s == 0.0).map(|r| (self.table, r))
+    }
+
+    /// The held part's force form at a node (module documentation, # The normalized generator): Re tr(∇_a held ρ) on the
+    /// density `laid` as the terms' entries are (`contract`: ρ_t[y, x] the laid entry x ← y), of the node's own forms. At
+    /// the series' order 1 the held part is −Herm(Y E₀), E₀ = H_h − (i/2)L − z₀ (`normal`), so with ρ_t Hermitian
+    ///   Re tr(∇held ρ_t) = −Re tr(∇Y A) − Re tr(∇H_h Herm B) + Re tr((i/2)∇L B) + ∇z₀ Re tr B,   A = E₀ρ_t, B = ρ_t Y:
+    /// the forms' gradients contracted with these matrices term by term, as the force's own form is (`contract`) --
+    /// the static Hermitian terms with Herm B by their weights, the partners (Y = 2 Σ of the absorbed component's terms
+    /// and the emitted one's adjoints, `normal_at`) with A and A† twice, the loss's pair entries with (i/2)B, the
+    /// reference's slope with tr B --: no gradient of a matrix is made.
+    #[allow(clippy::too_many_arguments)]
+    fn held_force(&self, fourth: &Fourth, point: &Site, plain: &[[C64; 4]], normal: &[C64], laid: &[f64], temporary: &mut Vec<C64>, lays: &mut Vec<f64>) -> [f64; 3] {
+        let (plan, n) = (&*self.plan, fourth.n);
+        let (size, padded) = (n * n, plan.padded);
+        let (y, e0) = (&normal[6 * size..7 * size], &normal[7 * size..8 * size]);
+        sized(temporary, 4 * size);
+        let (rho, rest) = temporary.split_at_mut(size);
+        let (a, b) = rest.split_at_mut(size);
+        let b = &mut b[..size];
+        for x in 0..n {
+            for z in 0..n {
+                rho[z * n + x] = C64::new(laid[x * n + z], laid[padded + x * n + z]);
+            }
+        }
+        product(e0, rho, a, n);
+        product(rho, y, b, n);
+        // The three matrices laid as ρ is (entry x ← y holds M[y, x]), real parts and then imaginary parts: Herm B, A, A†.
+        sized(lays, 6 * padded);
+        for x in 0..n {
+            for z in 0..n {
+                let (at, h) = (x * n + z, (b[z * n + x] + b[x * n + z].conj()) * 0.5);
+                (lays[at], lays[padded + at]) = (h.re, h.im);
+                (lays[2 * padded + at], lays[3 * padded + at]) = (a[z * n + x].re, a[z * n + x].im);
+                let adjoint = a[x * n + z].conj();
+                (lays[4 * padded + at], lays[5 * padded + at]) = (adjoint.re, adjoint.im);
+            }
+        }
+        let width = point.forms.len();
+        let mut out = [0.0; 3];
+        for term in plan.form.iter().filter(|term| plan.tones[term.tone] == 0.0) {
+            let block = &plan.blocks[term.block];
+            let (which, factor) = match term.flag {
+                PLAIN => (0, -term.weight),
+                flag => {
+                    let shifted = if flag == RIGHT { block.right } else { block.left };
+                    (if shifted.is_some_and(|s| plan.scalars[s].conjugate) { 2 } else { 1 }, -2.0)
+                }
+            };
+            let (re, im) = lays[2 * which * padded..2 * (which + 1) * padded].split_at(padded);
+            let span = term.first..term.first + term.len;
+            let (real, imaginary) = plan.values(term, &point.forms);
+            let value = dot(real, imaginary, &re[span.clone()], &im[span.clone()]);
+            let (l, r) = (side(plain, block.left), side(plain, block.right));
+            let c: [C64; 4] = std::array::from_fn(|part| if part == 0 { l[0] * r[0] } else { l[part] * r[0] + l[0] * r[part] });
+            let mut gradient = [C64::ZERO; 3];
+            for (f, direction) in point.directions.iter().enumerate().filter(|_| term.near) {
+                let (real, imaginary) = point.slopes[f * width + term.at..f * width + term.at + 2 * term.len].split_at(term.len);
+                let slope = dot(real, imaginary, &re[span.clone()], &im[span.clone()]);
+                for i in 0..3 {
+                    gradient[i] += slope * direction[i];
+                }
+            }
+            for i in 0..3 {
+                out[i] += factor * (c[1 + i] * value + c[0] * gradient[i]).re;
+            }
+        }
+        // The loss's pair entries: L = Γ X where the folded states share one width, else its own forms; and z₀'s slope.
+        let pairs = plan.near.pairs.len();
+        let count = plan.near.fourth * pairs + plan.near.reference;
+        let (values, slopes) = (&point.normal, &point.normal_slopes);
+        let (form, rate) = match fourth.uniform {
+            Some(rate) => (0, rate),
+            None => (1, 1.0),
+        };
+        // Block by block: Σ_e v_e B[y, x] and per direction Σ_e ∂_f v_e B[y, x] of its entries, then its components'
+        // product and gradients once.
+        let dn = point.directions.len();
+        assert!(dn <= DIRECTIONS, "a site's directions");
+        for (left, right, group) in fourth.groups() {
+            let (mut value, mut along) = (C64::ZERO, [C64::ZERO; DIRECTIONS]);
+            for &(i, xy) in group {
+                let (e, weight) = (form * pairs + i, b[(xy % n) * n + xy / n]);
+                value += C64::new(values[2 * e], values[2 * e + 1]) * weight;
+                for (f, sum) in along.iter_mut().enumerate().take(dn) {
+                    *sum += C64::new(slopes[(f * count + e) * 2], slopes[(f * count + e) * 2 + 1]) * weight;
+                }
+            }
+            let (l, r) = (side(plain, left), side(plain, right));
+            let c0 = l[0] * r[0] * C64::new(0.0, 0.5 * rate);
+            for k in 0..3 {
+                let gradient = (l[1 + k] * r[0] + l[0] * r[1 + k]) * C64::new(0.0, 0.5 * rate);
+                let slope = point.directions.iter().zip(&along).fold(C64::ZERO, |sum, (d, a)| sum + *a * d[k]);
+                out[k] += (gradient * value + c0 * slope).re;
+            }
+        }
+        let trace: f64 = (0..n).map(|i| b[i * n + i].re).sum();
+        for k in 0..3 {
+            let reference = count - 1;
+            let slope: f64 = point.directions.iter().enumerate().map(|(f, d)| slopes[(f * count + reference) * 2] * d[k]).sum();
+            out[k] += slope * trace;
+        }
+        out
     }
 
     /// A node's fields (`Node`) at the time s from the middle along a path, made into the site's scratch unless it keeps
@@ -2578,6 +3036,7 @@ impl Middle<'_> {
         scratch.next = (at + 1) % NODES;
         let node = &mut scratch.nodes[at];
         node.key = Some((key.0, key.1, sloped));
+        node.normal_made = false;
         node.turned.clear();
         node.turned.extend(amplitudes.iter().zip(&path.rates.path).map(|(a, rate)| {
             let phase = if s == 0.0 { C64::ONE } else { C64::cis(rate * s) };
@@ -2629,8 +3088,12 @@ impl Middle<'_> {
         let s = on.unwrap_or(0.0);
         assert!(held.is_none() || s == 0.0, "the fixed point's tones with the forms at the middle alone");
         let at = self.along(&point.amplitudes, path, s, false, &mut scratch);
-        let Scratch { nodes, weights, sums, .. } = &mut *scratch;
-        let Node { plain, doppler, phases, turns, .. } = &nodes[at];
+        let normalized = plan.fourth.as_ref().filter(|fourth| fourth.held() && !point.normal.is_empty());
+        let Scratch { nodes, weights, sums, quartic, temporary, sum: lays, .. } = &mut *scratch;
+        if let Some(fourth) = normalized {
+            self.model.node_normal(plan, fourth, &point, &mut nodes[at], quartic, self.centre(s), false);
+        }
+        let Node { plain, doppler, phases, turns, normal, normal_gradients, .. } = &nodes[at];
         // ρ[y, x] in the Doppler frames along the path, laid out as the entries x ← y are: one, or one a tone with σ.
         let laid = if held.is_some() { plan.tones.len() } else { 1 };
         weights.clear();
@@ -2678,17 +3141,19 @@ impl Middle<'_> {
                 sum[a] += term.weight * (c[1 + a] * value + c[0] * gradient[a]).re;
             }
         }
-        // The normalized generator's gradient, a static term's (its one tone, the first).
-        if plan.fourth.is_some() && point.quartic.len() >= 4 * n * n {
-            let more = held.map(|(sigma, w)| (sigma, w(plan.tones[0])));
+        // The held part's gradient at the node, of its own forms, a static term's (its one tone, the first), on the
+        // density laid in the frames as the terms' entries are: its matrices' trace where the node holds them (the
+        // middle's, the point's own: `Model::node_normal`), else its force form (`held_force`).
+        if let Some(fourth) = normalized {
+            let laid = &weights[..2 * plan.padded];
+            let force = if *normal_gradients {
+                let (re, im) = laid.split_at(plan.padded);
+                std::array::from_fn(|a| (0..n * n).map(|place| (normal[(3 + a) * n * n + place] * C64::new(re[place], im[place])).re).sum())
+            } else {
+                self.held_force(fourth, &point, plain, normal, laid, temporary, lays)
+            };
             for a in 0..3 {
-                let gradient = &point.quartic[(1 + a) * n * n..(2 + a) * n * n];
-                sums[0][a] += (0..n * n)
-                    .map(|place| {
-                        let at = (place % n) * n + place / n;
-                        (gradient[place] * more.map_or(rho[at], |(sigma, w)| rho[at] + sigma[at] * w)).re
-                    })
-                    .sum::<f64>();
+                sums[0][a] += force[a];
             }
         }
         for (m, sum) in sums.iter().enumerate() {

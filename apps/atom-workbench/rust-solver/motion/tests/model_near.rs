@@ -434,7 +434,9 @@ fn the_assembly_s_price_counts_the_elimination_at_the_atom() {
 /// cluster's fold at the fourth order: the generator's decay ⟨ψ|i(H − H†)|ψ⟩ on a state of both is the photons'
 /// Σ‖u_a‖² at rest and moving, whichever leg is at the atom (with the fold's own Y subtracted in its stead the other
 /// frequency's bare leg's Hermitian Doppler partner was read as decay: +6.07e-3 and −6.08e-3 of the rate). The same
-/// with no pair kept and each state's fold at the fourth order, one frequency's terms alone, as before.
+/// with no pair kept and each state's fold at the fourth order, one frequency's terms alone, as before. The fourth
+/// order's evaluation takes the series' first order and the normalization's (`Unit::Series`, `Unit::Normalization`:
+/// the keep rule's orders), kept with it here: without them its decay is the second order's.
 #[test]
 fn the_fourth_order_s_decay_is_its_photons_rate_with_a_kept_pair_of_two_frequencies() {
     let request = scene("R6_RAMAN_CO");
@@ -452,10 +454,11 @@ fn the_fourth_order_s_decay_is_its_photons_rate_with_a_kept_pair_of_two_frequenc
     for lifted in [fb, fa] {
         let drives = at_the_atom(&request, &light, &[lifted]);
         let second = Model::new(&request, &light, &[drives.clone(), vec![raman.clone()]].concat()).unwrap();
-        let fourth = Model::new(&request, &light, &[drives.clone(), vec![raman.clone(), Unit::Second { ground: 1 }]].concat()).unwrap();
+        let orders = vec![Unit::Series, Unit::Normalization { order: 1 }];
+        let fourth = Model::new(&request, &light, &[drives.clone(), vec![raman.clone(), Unit::Second { ground: 1 }], orders.clone()].concat()).unwrap();
         assert_eq!(fourth.clusters()[fourth.cluster_of(1)].states, vec![1, 5], "the kept pair's cluster");
         assert!(second.units().contains(&Unit::Second { ground: 1 }) && !fourth.units().contains(&Unit::Second { ground: 1 }), "the cluster's fold has a fourth order, and takes it");
-        let alone = Model::new(&request, &light, &[drives, vec![Unit::Second { ground: 1 }, Unit::Second { ground: 5 }]].concat()).unwrap();
+        let alone = Model::new(&request, &light, &[drives, vec![Unit::Second { ground: 1 }, Unit::Second { ground: 5 }], orders].concat()).unwrap();
         for kappa in [[0.0; 3], [3.0, -2.0, 5.0]] {
             let (generator, photons) = rates(&fourth, 1, kappa);
             assert!((generator - rates(&second, 1, kappa).0).abs() > 1e-7 * generator, "the fourth order changes the rate");
