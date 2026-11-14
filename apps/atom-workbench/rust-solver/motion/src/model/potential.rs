@@ -285,7 +285,7 @@ impl Model {
                 let (n, size) = (fourth.n, fourth.n * fourth.n);
                 Model::quartic_read(|q| {
                     let held = &q.data[super::assemble::HELD * size..];
-                    for (b, &state) in c.states[..n].iter().enumerate().filter(|of| p[*of.1] != 0.0) {
+                    for (b, &state) in c.states[..c.ground].iter().enumerate().filter(|of| p[*of.1] != 0.0) {
                         let (quadratic, w) = (&mut out.quadratic, sign * p[state]);
                         let value = held[b * n + b].re;
                         quadratic.value += w * value;
