@@ -10,6 +10,14 @@ use crate::request::Request;
 use crate::step::Middle as _;
 use crate::units::rounding;
 
+/// δ of a near generator against another on a sample's state (tabulate.rs `Model::form_error`): with N the near light's part
+/// of the generator, `far` the one without it, ‖(N′ − N)ψ‖/‖Nψ‖ -- `second` N′, `first` N, each on the state.
+fn delta(far: &[C64], first: &[C64], second: &[C64]) -> f64 {
+    let moved: f64 = second.iter().zip(first).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>().sqrt();
+    let size: f64 = first.iter().zip(far).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>().sqrt();
+    if size == 0.0 { 0.0 } else { moved / size }
+}
+
 fn scene(name: &str) -> Request {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
     let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
@@ -23,7 +31,7 @@ fn model(name: &str, at_the_atom: &dyn Fn(&Light, &Unit) -> bool, keep: &dyn Fn(
     let light = Light::new(&request);
     let bare = Model::new(&request, &light, &[]).unwrap();
     let lifted: Vec<Unit> = (0..light.frequencies.len()).flat_map(|frequency| bare.bare_units(Component { frequency, counter: false })).filter(|u| at_the_atom(&light, u)).collect();
-    let units = Model::new(&request, &light, &lifted).unwrap().units();
+    let units = Model::new(&request, &light, &lifted).unwrap().candidates();
     let kept: Vec<Unit> = lifted.into_iter().chain(units.into_iter().filter(keep)).collect();
     Model::new(&request, &light, &kept).unwrap()
 }
@@ -188,8 +196,8 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
     }
     // The elimination at the middle with its gradient: a frequency's coupling on its field (its every folded drive's, those
     // folded at the atom alone, or as it is) and its response on the path.
-    let far = model.far_hamiltonian(&amplitudes, &lights, 1, &model.coherent_dressing());
-    let responses = model.eliminate(cluster, &far, &amplitudes, &lights, 1, &model.coherent_dressing(), &|_| true);
+    let far = model.far_hamiltonian(&amplitudes, &lights, 1);
+    let responses = model.eliminate(cluster, &far, &lights, 1);
     let coupling = |frequency: usize, basis: &[Mat], e: usize, b: usize| -> Jet { (0..basis.len()).fold(NONE, |sum, k| plus(sum, scaled(field(frequency, k, false), leaf(basis[k][(e, b)])))) };
     let folded = |frequency: usize, e: usize, b: usize| coupling(frequency, &model.tones[frequency].coupled[0], e, b);
     let response = |frequency: usize, e: usize, y: usize| -> Jet {
@@ -516,11 +524,11 @@ fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation
                 let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
                 let sample = crate::model::Sample { cluster, at: crate::model::Point { r, kappa, t }, psi };
                 let far = model.action(&sample, &model.middle_of(&plan, t, &amplitudes, None));
-                let exact = model.action(&sample, &model.middle_of(&plan, t, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1, &model.coherent_dressing()))));
+                let exact = model.action(&sample, &model.middle_of(&plan, t, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1))));
                 // The generator reads the forms' values alone: of the forms to order 0 it is the same, bit for bit.
-                assert_eq!(exact, model.action(&sample, &model.middle_of(&plan, t, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 0, &model.coherent_dressing())))), "{name}, cluster {cluster}: the generator of the forms' values alone");
+                assert_eq!(exact, model.action(&sample, &model.middle_of(&plan, t, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 0)))), "{name}, cluster {cluster}: the generator of the forms' values alone");
                 let (a, b) = (model.action(&sample, &ours), model.action(&sample, &theirs));
-                let error = |first: &[C64], second: &[C64]| model.form_error(&sample, &far, first, second, tables.thermal).parameter;
+                let error = |first: &[C64], second: &[C64]| delta(&far, first, second);
                 coarse += error(&b, &a);
                 read += error(&exact, &a) + error(&exact, &b);
                 if let Some(finer) = &finer {
@@ -577,11 +585,11 @@ fn the_decay_s_mismatch_on_a_scene() {
             let far = action(&model.middle_of(&plan, 0.0, &amplitudes, None));
             let ours = action(&model.middle(&plan, r, 0.0, Some(table)));
             let theirs = action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_values(&plan, &amplitudes, &sections, Some(table)))));
-            let exact = action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1, &model.coherent_dressing()))));
+            let exact = action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1))));
             let (mismatch, whole) = (model.form_error(&sample, &far, &theirs, &ours, tables.thermal), model.form_error(&sample, &far, &exact, &ours, tables.thermal));
             let rate = |action: &[C64]| -2.0 * crate::linalg::inner(&sample.psi, action).im;
             let rates = [(rate(&ours) - rate(&theirs)).abs() / rate(&theirs), (rate(&ours) - rate(&exact)).abs() / rate(&exact)];
-            for (read, x) in reads.iter_mut().zip([mismatch.parameter, mismatch.population, mismatch.temperature, whole.parameter, whole.population, whole.temperature, rates[0], rates[1]]) {
+            for (read, x) in reads.iter_mut().zip([delta(&far, &theirs, &ours), mismatch.population, mismatch.temperature, delta(&far, &exact, &ours), whole.population, whole.temperature, rates[0], rates[1]]) {
                 *read = [read[0] + x / atoms as f64, read[1].max(x)];
             }
         }
@@ -796,7 +804,7 @@ fn a_state_s_photons_are_their_entries_summed() {
                 let near = match table {
                     _ if len == 0 => None,
                     Some(table) => model.near_tabulated(table, &amplitudes, &[(plan.near.jumping(), 1)]),
-                    None => Some(model.near_exact(&plan, &amplitudes, 1, &model.coherent_dressing())),
+                    None => Some(model.near_exact(&plan, &amplitudes, 1)),
                 };
                 near_met += near.is_some() as usize;
                 let bound = |place: usize| match (table, &near) {
@@ -908,8 +916,8 @@ fn the_scattering_s_table_error_on_a_scene() {
             let amplitudes = model.light.amplitudes(r);
             let action = |middle: &Middle| model.action(&sample, middle);
             let far = action(&model.middle_of(&plan, 0.0, &amplitudes, None));
-            let whole = model.form_error(&sample, &far, &action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1, &model.coherent_dressing())))), &action(&model.middle(&plan, r, 0.0, Some(table))), tables.thermal);
-            for (read, x) in reads.iter_mut().zip([force, diffusion, whole.parameter]) {
+            let whole = delta(&far, &action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1)))), &action(&model.middle(&plan, r, 0.0, Some(table))));
+            for (read, x) in reads.iter_mut().zip([force, diffusion, whole]) {
                 *read = [read[0] + x / atoms as f64, read[1].max(x)];
             }
         }
@@ -1010,7 +1018,7 @@ fn the_held_part_s_force_form_is_its_gradient_s() {
     let (r, v) = ([0.05, -0.1, 0.0], [0.09, 0.05, 0.07]);
     let points = [(r, v), ([0.0; 3], [0.0; 3])];
     // The prior's units at the points (its resonant Δm = 2 links: the F = 2 sublevels one cluster).
-    let prior = Model::new(&request, &light, &kept).unwrap().prior(&request, &points);
+    let prior = Model::new(&request, &light, &kept).unwrap().prior(&points);
     // The series at its first order kept (`Unit::Series`): the held part is anything.
     let mut model = Model::new(&request, &light, &[kept, prior, vec![Unit::Series]].concat()).unwrap();
     model.referenced(&points);
@@ -1058,7 +1066,7 @@ fn the_decay_is_the_photons_rate_with_the_normalized_generator() {
         let kept: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).flat_map(|frequency| bare.bare_units(Component { frequency, counter: false })).collect();
         let (r, v) = ([0.05, -0.1, 0.03], [speed, 0.5 * speed, 0.7 * speed]);
         let points = [(r, v), ([0.0; 3], [0.0; 3])];
-        let prior = Model::new(&request, &light, &kept).unwrap().prior(&request, &points);
+        let prior = Model::new(&request, &light, &kept).unwrap().prior(&points);
         // The series' first order and the normalization's kept: every part of the normalized generator.
         let mut model = Model::new(&request, &light, &[kept, prior, vec![Unit::Series, Unit::Normalization { order: 1 }]].concat()).unwrap();
         model.referenced(&points);

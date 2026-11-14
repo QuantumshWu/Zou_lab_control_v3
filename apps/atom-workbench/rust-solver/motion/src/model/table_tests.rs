@@ -2,18 +2,17 @@
 //! resonance (R3_DOPPLER's cooling pair in its tweezer), to the interpolation's orders (R2_RECOIL's probe), their error reads; and,
 //! run by name alone, the report of a scene's tables against its exact elimination over its reach and the timing of the model's
 //! calls (`SCENE`: a reference scene's name or a request file's path).
-use atom_motion::field::Light;
-use atom_motion::linalg::{norm_sqr, C64};
-use atom_motion::model::tabulate::{Coordinate, Tables};
-use atom_motion::model::{Lights, Lit, Model, Photon, Point, Reach, Run, Sample, Trap, Unit, UnitError, GROUND};
-use atom_motion::random::{Purpose, Stream};
-use atom_motion::request::Request;
-use atom_motion::step::{Dynamics, Middle};
-use atom_motion::units::{CONFIDENCE, KT_PER_UK, MOST_TRAJECTORIES};
+use crate::field::Light;
+use crate::linalg::{norm_sqr, C64};
+use crate::model::tabulate::{Coordinate, Tables};
+use crate::model::{Lights, Lit, Model, Photon, Point, Reach, Run, Sample, Trap, Unit, UnitError, GROUND};
+use crate::random::{Purpose, Stream};
+use crate::request::Request;
+use crate::step::{Dynamics, Middle};
+use crate::units::{CONFIDENCE, KT_PER_UK, MOST_TRAJECTORIES};
 use std::time::Instant;
 
-mod model_common;
-use model_common::{normal, scene};
+use super::testing::{normal, scene};
 
 /// The populations of a ground state alone.
 fn alone(state: usize) -> [f64; GROUND] {
@@ -22,14 +21,14 @@ fn alone(state: usize) -> [f64; GROUND] {
 
 /// The share the largest ensemble leaves unseen (estimate.rs `unseen`): the reach's.
 fn unseen() -> f64 {
-    atom_motion::estimate::unseen(MOST_TRAJECTORIES as f64)
+    crate::estimate::unseen(MOST_TRAJECTORIES as f64)
 }
 
-/// The scene's model closed by its units' errors at its reference state (tests/model_common `closed`), its reach at
+/// The scene's model closed as the solve closes it at its reference state (`Model::closed_at`), its reach at
 /// `temperature`; with the units kept, the reference state, its trap and that reach.
 fn closed(request: &Request, light: &Light, temperature: f64) -> (Model, Vec<Unit>, usize, Trap, Reach) {
     let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let (model, kept, trap, reach) = model_common::closed(request, light, vec![], state, temperature);
+    let (model, kept, trap, reach) = Model::closed_at(request, light, vec![], state, temperature);
     (model, kept, state, trap, reach)
 }
 
@@ -51,7 +50,7 @@ fn nodes(model: &Model, middle: &impl Middle, at: &Point, psi: &[C64]) -> (Vec<C
     let path = middle.path(at.kappa, at.kappa.map(|k| model.hbar_over_mass() * k));
     let rho: Vec<C64> = (0..n * n).map(|i| psi[i / n] * psi[i % n].conj() / norm_sqr(psi)).collect();
     let (mut matrices, mut forms) = (vec![], vec![]);
-    let mut h = atom_motion::linalg::Mat::zeros(n, n);
+    let mut h = crate::linalg::Mat::zeros(n, n);
     for s in [-0.2, 0.0, 0.3] {
         middle.generator(&path, s, &mut h);
         matrices.extend_from_slice(&h.data);
@@ -67,7 +66,9 @@ fn distance(a: &(Vec<C64>, Vec<f64>), b: &(Vec<C64>, Vec<f64>)) -> (f64, f64) {
 
 /// R3_DOPPLER's tweezer carries its cooling line through resonance within reach of atoms that have heated to 100 µK (the line
 /// is 3 half-widths red at the bottom and on resonance 381 µK up the trap's wall: a pole of the responses in the tweezer's
-/// intensity, the tables' axis). Across the tweezer from its axis to the reach's edge, at 240 places between the nodes, the
+/// intensity, the tables' axis), on the model with its cooling pair's drives folded at the atom and nothing else kept --
+/// the tables' subject: the solve's prior at 100 µK keeps the cycling line explicit instead (its cluster |2,2⟩, |3′,3′⟩),
+/// where no table follows the pole. Across the tweezer from its axis to the reach's edge, at 240 places between the nodes, the
 /// tabulated model is the exact one within the tables' shares (tabulate.rs, # Refinement): the photon rate of an atom moving
 /// along the cooling pair, the error of its generator as the ledger reads it (`Model::table_reads`: δ on what is shown, on T
 /// with the potential's), and the generator on the atom's path and its force there to the same size -- the matrices' error of
@@ -78,15 +79,20 @@ fn distance(a: &(Vec<C64>, Vec<f64>), b: &(Vec<C64>, Vec<f64>)) -> (f64, f64) {
 fn a_table_follows_a_line_through_resonance_across_its_axis() {
     let request = scene("R3_DOPPLER");
     let light = Light::new(&request);
-    let (model, kept, state, trap, reach) = closed(&request, &light, 100.0);
+    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let cooling: Vec<usize> = (0..light.frequencies.len()).filter(|&f| f != light.trap).collect();
+    let kept = crate::model::testing::at_the_atom(&request, &light, &cooling);
+    let model = Model::new(&request, &light, &kept).unwrap();
     let p = alone(state);
+    let trap = model.trap(&p, &model.prepared()).unwrap();
+    let reach = model.reach(&trap, &p, 100.0, unseen());
     let tables = model.tabulate(&reach, 1 << 20);
     let (exact, fast) = (Run::new(&model, p), Run::tabulated(&model, &tables, p));
     let cluster = model.cluster_of(state);
     let index = tables.tables.iter().position(|t| t.layout.cluster == cluster && t.layout.lights == model.running()).expect("a table for the running lights");
     let table = &tables.tables[index];
     assert_eq!(table.axes(), 1, "{:?}", table.layout.coordinates);
-    assert!(matches!(table.layout.coordinates[0], Coordinate::Chart { index: 0, .. }), "the tweezer's intensity: {:?}", table.layout.coordinates[0]);
+    assert!(table.layout.coordinates[0].index == 0, "the tweezer's intensity: {:?}", table.layout.coordinates[0]);
     // The light with a drive folded at the atom off: what the exact generator is compared with for that light's own size.
     let dark = Lights(model.running().0.iter().enumerate().map(|(f, l)| if kept.iter().any(|u| matches!(u, Unit::Bare { component, .. } if component.frequency == f)) { Lit::Off } else { *l }).collect());
     let prepared = model.prepared();
@@ -120,8 +126,7 @@ fn a_table_follows_a_line_through_resonance_across_its_axis() {
 }
 
 /// Light whose intensity is the same everywhere is no axis, on whatever cells its reach is cut (tabulate.rs, # Axes): the
-/// lin-perp-lin scene's lights of two counter-propagating plane waves of orthogonal polarizations, their dressings kept --
-/// each on its chart, as the solve's pilot keeps the cooling light's at four times the base intensity --, over a reach grown
+/// lin-perp-lin scene's lights of two counter-propagating plane waves of orthogonal polarizations over a reach grown
 /// to 75 µK (its level, 12.89 k_B T, still below the trap's far value: a bounded reach). Each chart's intensity is the same at every point, its weight nothing on the reach's first cell: the tables
 /// are made, and no axis of theirs is an intensity but the tweezer's. (Bounded by the field's modulus along the two waves'
 /// phases, that weight's proof cut 8 million cells in 43 s and did not end.)
@@ -129,19 +134,14 @@ fn a_table_follows_a_line_through_resonance_across_its_axis() {
 fn a_light_of_one_intensity_everywhere_is_no_axis() {
     let request = scene("R4_LIN_4");
     let light = Light::new(&request);
-    let (folded, mut kept, state, ..) = closed(&request, &light, request.temperature_uk);
-    let dressings: Vec<Unit> = folded.units().into_iter().filter(|u| matches!(u, Unit::Dressing { .. })).collect();
-    assert!(!dressings.is_empty(), "the scene's carriers have dressings to keep");
-    kept.extend(dressings);
-    let model = Model::new(&request, &light, &kept).unwrap();
+    let (model, _, state, ..) = closed(&request, &light, request.temperature_uk);
     let p = alone(state);
     let trap = model.trap(&p, &model.prepared()).unwrap();
     let reach = model.reach(&trap, &p, 75.0, unseen());
     let tables = model.tabulate(&reach, 1 << 16);
     let axes: Vec<Coordinate> = tables.tables.iter().flat_map(|t| t.layout.coordinates[..t.axes()].iter().copied()).collect();
-    assert!(axes.iter().any(|c| matches!(c, Coordinate::Chart { index, .. } if *index > 0)), "a kept dressing's light is on its chart: {axes:?}");
     for c in &axes {
-        assert!(!matches!(c, Coordinate::Chart { frequency, index: 0 } if *frequency != light.trap) && !matches!(c, Coordinate::Unit { .. }), "an intensity that is not the tweezer's is an axis: {c:?}");
+        assert!(!(c.index == 0 && c.frequency != light.trap), "an intensity that is not the tweezer's is an axis: {c:?}");
     }
 }
 
@@ -151,7 +151,7 @@ fn r2() -> (Model, [f64; GROUND], Tables) {
     let light = Light::new(&request);
     let beam = request.beams.iter().position(|b| b.id == "probe").unwrap();
     let probe = light.frequencies.iter().position(|f| f.beams.contains(&beam)).unwrap();
-    let model = Model::new(&request, &light, &model_common::at_the_atom(&request, &light, &[probe])).unwrap();
+    let model = Model::new(&request, &light, &super::testing::at_the_atom(&request, &light, &[probe])).unwrap();
     let p = alone(7);
     let trap = model.trap(&p, &model.prepared()).unwrap();
     let reach = model.reach(&trap, &p, request.temperature_uk, 2e-3);
@@ -181,7 +181,7 @@ fn a_table_is_the_elimination_to_its_interpolation_s_orders() {
     let index = tables.tables.iter().position(|t| t.layout.cluster == cluster && t.layout.lights == model.running()).expect("a table for the running lights");
     let t = &tables.tables[index];
     assert_eq!(t.axes(), 1, "{:?}", t.layout.coordinates);
-    assert!(matches!(t.layout.coordinates[0], Coordinate::Chart { index: 0, .. }), "the tweezer's intensity: {:?}", t.layout.coordinates[0]);
+    assert!(t.layout.coordinates[0].index == 0, "the tweezer's intensity: {:?}", t.layout.coordinates[0]);
     let exact = Run::new(&model, p);
     let errors = |tables: &Tables| -> (f64, f64) {
         let fast = Run::tabulated(&model, tables, p);
@@ -232,7 +232,8 @@ fn a_table_s_axis_read_is_its_whole_error_s_size() {
         .collect();
     let reads = model.table_reads(&tables, &samples);
     let read = &reads[index];
-    let mean = |v: &[UnitError]| v.iter().map(|e| e.parameter).sum::<f64>() / v.len() as f64;
+    // δ on what is shown: the atom's whole population is its ground state's.
+    let mean = |v: &[UnitError]| v.iter().map(|e| e.population).sum::<f64>() / v.len() as f64;
     let (axis_read, whole) = (mean(&read.axes[0]), mean(&read.whole));
     eprintln!("{} nodes: mean read {axis_read:.3e}, mean whole error {whole:.3e}", axis.nodes);
     assert!(whole > 0.0 && axis_read >= 0.75 * whole && axis_read <= 4.0 * whole, "read {axis_read} against the whole error {whole}");
@@ -257,7 +258,7 @@ fn samples(model: &Model, trap: &Trap, reach: &Reach, temperature: f64, count: u
     out
 }
 
-/// REPORT (run by name: `SCENE=<name or path> cargo test ... --test model_tables a_scene_s_tables_against_its_exact_elimination --
+/// REPORT (run by name: `SCENE=<name or path> cargo test ... --lib model::table_tests::a_scene_s_tables_against_its_exact_elimination --
 /// --ignored --nocapture`): a scene's tables against its exact elimination at samples over its reach -- the generator on the
 /// sample's path (of the near light's own share there) and its forces (of the near light's largest over the samples), the photons (their classes,
 /// rates and amplitudes; the absorption's two moments of a fixed polarization summed over the classes by their rates, of k and
@@ -327,10 +328,11 @@ fn a_scene_s_tables_against_its_exact_elimination() {
             worst[10] = worst[10].max(read.whole[k].temperature);
         }
     }
-    // The candidate units' errors at the samples, from the tables against the exact elimination's: the largest difference of a
-    // unit's error on T.
-    let units = model.units();
-    let (slow, quick) = (model.errors(&units, &samples), model.errors_with(&units, &samples, Some(&tables)));
+    // The candidate units' errors at the samples (elim.rs `Model::readings`), with the tables against without: the largest
+    // difference of a unit's error on T.
+    let units = model.candidates();
+    let slow: Vec<Vec<UnitError>> = samples.iter().map(|s| model.readings(&units, s, None).0).collect();
+    let quick: Vec<Vec<UnitError>> = samples.iter().map(|s| model.readings(&units, s, Some(&tables)).0).collect();
     let apart = slow.iter().zip(&quick).flat_map(|(a, b)| a.iter().zip(b).map(|(x, y)| (x.temperature - y.temperature).abs())).fold(0.0, f64::max);
     let largest = slow.iter().flat_map(|a| a.iter().map(|x| x.temperature)).fold(0.0, f64::max);
     eprintln!("{name}: {} candidate units' errors at the samples: the largest on T {largest:.2e}; tabulated against exact, the largest difference {apart:.1e}", units.len());
@@ -339,113 +341,4 @@ fn a_scene_s_tables_against_its_exact_elimination() {
         "{name}: {} samples; largest differences, tabulated against exact: generator {:.1e}, forces {:.1e} (of the near light's); photon rate {:.1e}, class weights {:.1e}, amplitudes {:.1e}, absorption's mean {:.1e} k, second moment {:.1e} k²; loss energy {:.1e} µK; readout {:.1e}; ledger reads: shown {:.1e} (share {shown:.1e}), T {:.1e} (share {temperature:.1e})",
         samples.len(), worst[0], if force[1] > 0.0 { force[0] / force[1] } else { 0.0 }, worst[2], worst[3], worst[4], worst[5], worst[6], worst[7], worst[8], worst[9], worst[10]
     );
-}
-
-/// TIMING (run by name: `SCENE=<name or path> cargo test --release ... --test model_tables the_model_s_calls_timed -- --ignored
-/// --nocapture`): per cluster the model's calls on one thread at the scene's samples, the least of eight batches (µs a call),
-/// with the exact elimination and with the tables.
-#[test]
-#[ignore]
-fn the_model_s_calls_timed() {
-    let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
-    let request = scene(&name);
-    let light = Light::new(&request);
-    let (model, _, state, trap, reach) = closed(&request, &light, request.temperature_uk);
-    let p = alone(state);
-    let started = Instant::now();
-    let tables = model.tabulate(&reach, 1 << 20);
-    eprintln!("{name}: tabulate {:.2?}, {} tables, nodes {:?}", started.elapsed(), tables.tables.len(), tables.tables.iter().map(|t| t.table.axes().iter().map(|a| a.nodes).collect::<Vec<_>>()).collect::<Vec<_>>());
-    let (exact, fast) = (Run::new(&model, p), Run::tabulated(&model, &tables, p));
-    let all = samples(&model, &trap, &reach, request.temperature_uk, 16);
-    for cluster in 0..model.clusters().len() {
-        let own: Vec<&Sample> = all.iter().filter(|s| s.cluster == cluster).collect();
-        let time = |call: &dyn Fn(&Sample), rounds: usize| {
-            (0..8)
-                .map(|_| {
-                    let started = Instant::now();
-                    for k in 0..rounds {
-                        call(own[k % own.len()]);
-                    }
-                    started.elapsed().as_secs_f64() * 1e6 / rounds as f64
-                })
-                .fold(f64::INFINITY, f64::min)
-        };
-        let both = |call: &dyn Fn(&Run, &Sample)| (time(&|s| call(&exact, s), 1), time(&|s| call(&fast, s), 256));
-        let middle = both(&|run, s| drop(std::hint::black_box(run.middle(cluster, s.at.r, s.at.t))));
-        // A node's calls on the tabulated middles: the path, the generator, the force's form, the tones.
-        let n = model.clusters()[cluster].states.len();
-        let middles: Vec<_> = own.iter().map(|s| fast.middle(cluster, s.at.r, s.at.t)).collect();
-        let velocity = |s: &Sample| s.at.kappa.map(|k| model.hbar_over_mass() * k);
-        let paths: Vec<_> = own.iter().zip(&middles).map(|(s, m)| m.path(s.at.kappa, velocity(s))).collect();
-        let rhos: Vec<Vec<C64>> = own.iter().map(|s| (0..n * n).map(|i| s.psi[i / n] * s.psi[i % n].conj() / norm_sqr(&s.psi)).collect()).collect();
-        let each = |call: &mut dyn FnMut(usize)| {
-            (0..8)
-                .map(|_| {
-                    let started = Instant::now();
-                    for k in 0..1024 {
-                        call(k % own.len());
-                    }
-                    started.elapsed().as_secs_f64() * 1e6 / 1024.0
-                })
-                .fold(f64::INFINITY, f64::min)
-        };
-        let mut h = atom_motion::linalg::Mat::zeros(n, n);
-        let path = each(&mut |k| drop(std::hint::black_box(middles[k].path(own[k].at.kappa, velocity(own[k])))));
-        let generator = each(&mut |k| middles[k].generator(&paths[k], 0.1, std::hint::black_box(&mut h)));
-        let force = each(&mut |k| {
-            std::hint::black_box(middles[k].force(&paths[k], 0.1, &rhos[k]));
-        });
-        let tones = each(&mut |k| middles[k].tones(&paths[k], &rhos[k], &mut |omega, f| {
-            std::hint::black_box((omega, f));
-        }));
-        let photons = both(&|run, s| drop(std::hint::black_box(run.photon_amplitudes(cluster, &s.at, &s.psi))));
-        let readout = both(&|run, s| {
-            std::hint::black_box(run.readout(cluster, &s.at, &s.psi));
-        });
-        let energy = both(&|run, s| {
-            std::hint::black_box(run.energy(cluster, &s.at, &s.psi));
-        });
-        let reference = time(&|s| {
-            std::hint::black_box(exact.reference(s.at.r));
-        }, 256);
-        eprintln!(
-            "{name} cluster {cluster} (n {n}, {}): middle {:.0} / {:.2} µs (exact / tabulated); a path {path:.3}, a node's generator {generator:.3}, force {force:.3}, the tones {tones:.3} µs; photons {:.0} / {:.2}, readout {:.0} / {:.2}, energy {:.0} / {:.2} (exact / tabulated); reference {reference:.2} µs",
-            if middles[0].still() { "still" } else { "beating" },
-            middle.0, middle.1, photons.0, photons.1, readout.0, readout.1, energy.0, energy.1
-        );
-    }
-    // The units' errors at a state (units.rs `Model::errors_with`): every candidate unit's, with the exact elimination and with
-    // the tables.
-    let units = model.units();
-    let few = &all[..all.len().min(4)];
-    let started = Instant::now();
-    std::hint::black_box(model.errors(&units, few));
-    let slow = started.elapsed().as_secs_f64() * 1e3 / few.len() as f64;
-    let tabulated = |of: &[Unit]| {
-        (0..4)
-            .map(|_| {
-                let started = Instant::now();
-                std::hint::black_box(model.errors_with(of, &all, Some(&tables)));
-                started.elapsed().as_secs_f64() * 1e3 / all.len() as f64
-            })
-            .fold(f64::INFINITY, f64::min)
-    };
-    eprintln!("{name}: the {} candidate units' errors a state: {slow:.2} ms exact, {:.3} ms tabulated", units.len(), tabulated(&units));
-    // What a state's cost is made of: what its units share (no unit asked), and each kind's units beyond that.
-    let shared = tabulated(&[]);
-    let kinds: [(&str, &dyn Fn(&Unit) -> bool); 5] = [
-        ("bare folds", &|u| matches!(u, Unit::Bare { .. })),
-        ("folds at the atom", &|u| matches!(u, Unit::Drive { .. })),
-        ("couplings", &|u| matches!(u, Unit::Term { .. })),
-        ("dressings", &|u| matches!(u, Unit::Dressing { .. })),
-        ("coherences", &|u| matches!(u, Unit::Coherence { .. })),
-    ];
-    let parts: Vec<String> = kinds
-        .iter()
-        .map(|(kind, pick)| {
-            let of: Vec<Unit> = units.iter().filter(|u| pick(u)).cloned().collect();
-            format!("{} {kind} {:.3} ms", of.len(), tabulated(&of) - shared)
-        })
-        .collect();
-    eprintln!("{name}: of a state's errors, tabulated: shared {shared:.3} ms; {}", parts.join(", "));
 }

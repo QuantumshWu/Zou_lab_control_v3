@@ -88,7 +88,8 @@
 //! z₀ itself -- all linear in the products e_k'* e_k with coefficients of the far light alone, tabulated as S is. On the
 //! slow invariant subspace Ψ = (x, T x) of the no-jump generator, T_f = Σ_j (−1)^j R₀^{j+1} W (H − z₀)^j and H the
 //! fixed point of H = A + Σ_j (−1)^j N_j (H − z₀)^j, to the series' order K (model.rs `Model::series`: K = 1 where
-//! `Unit::Series` is kept, its error measured at the run's states against the next order, elim.rs `Fold::order_error`;
+//! `Unit::Series` is kept, the evaluation's error measured at the run's states against the definition, elim.rs
+//! `Model::readings`;
 //! the series' ratio q < 1 only says it converges). In the orthonormal coordinates y = S x, S = (1 + X)^{1/2} -- the Schrieffer–Wolff
 //! coordinates, the unitary block-diagonalization's nearest the bare basis (ELIMINATION v6, v7) -- the generator is the
 //! des Cloizeaux one, S H S⁻¹, and the jumps L_a = C_a T S⁻¹, whose own product is its decay. Evaluated by the
@@ -1957,34 +1958,25 @@ impl Model {
         (energies.len() * ((3 * pairs + 2 * jumps) * EXCITED + 2 * GROUND * near.shifts.len())) as f64 + fourth as f64 * 3.0 * jet::product_work(energies.len())
     }
 
-    /// A plan's near forms at a point from the exact elimination there, jets to `order`, each carrier's dressing coherent or not as
-    /// `coherent` says (eliminate.rs).
-    pub(crate) fn near_exact(&self, plan: &Plan, amplitudes: &[Amplitude], order: usize, coherent: &[bool]) -> NearValues {
-        self.near_exact_on(plan, amplitudes, order, coherent, &|_| true)
+    /// A plan's near forms at a point from the exact elimination there, jets to `order` (eliminate.rs).
+    pub(crate) fn near_exact(&self, plan: &Plan, amplitudes: &[Amplitude], order: usize) -> NearValues {
+        self.near_exact_on(plan, amplitudes, order, &|_| true)
     }
 
     /// `near_exact` of the cluster's ground places `places` takes: the responses from those places alone and the forms
     /// that read no other's (zero elsewhere) -- what a reader of a few places' forms asks for (the potential: the
     /// populated states' own shifts). A form made is the same number whichever places are taken with it.
-    pub(crate) fn near_exact_on(&self, plan: &Plan, amplitudes: &[Amplitude], order: usize, coherent: &[bool], places: &dyn Fn(usize) -> bool) -> NearValues {
+    pub(crate) fn near_exact_on(&self, plan: &Plan, amplitudes: &[Amplitude], order: usize, places: &dyn Fn(usize) -> bool) -> NearValues {
         let len = plan.near.len();
         let mut data = vec![C64::ZERO; jet::parts(order) * len];
         if len == 0 {
             return NearValues { len, order, data, directions: None, work: 0.0 };
         }
-        let h = self.far_hamiltonian(amplitudes, &plan.lights, order, coherent);
-        let responses = self.eliminate(plan.cluster, &h, amplitudes, &plan.lights, order, coherent, places);
+        let h = self.far_hamiltonian(amplitudes, &plan.lights, order);
+        let responses = self.eliminate(plan.cluster, &h, &plan.lights, order);
         let energies: Vec<Vec<f64>> = h.iter().map(|m| (0..STATES).map(|s| m[(s, s)].re).collect()).collect();
         let work = self.forms(plan, &responses, &energies, &mut data, places);
-        NearValues { len, order, data, directions: None, work: responses.work + self.far_work(&plan.lights, order, coherent) + work }
-    }
-
-    /// A plan's near forms at a point, the sections asked each to its order (0 or 1): from its table where one is given
-    /// (tabulate.rs), else the exact elimination's to the largest order.
-    pub(crate) fn near_values(&self, plan: &Plan, amplitudes: &[Amplitude], sections: &[(Range<usize>, usize)], table: Option<&NearTable>) -> NearValues {
-        table
-            .and_then(|table| self.near_tabulated(table, amplitudes, sections))
-            .unwrap_or_else(|| self.near_exact(plan, amplitudes, sections.iter().map(|s| s.1).max().unwrap_or(0), &self.coherent_dressing()))
+        NearValues { len, order, data, directions: None, work: responses.work + self.far_work(&plan.lights, order) + work }
     }
 
     /// The normalized generator's matrices of a plan's cluster at a point (`Quartic`) into the thread's, and the counted work
@@ -2036,7 +2028,7 @@ impl Model {
         q.work = 0.0;
         if !laid {
             // The exact elimination's forms where no table holds them and none are given.
-            let made = (table.is_none() && given.is_none()).then(|| self.near_exact(plan, &point.beams, 1, &self.coherent_dressing()));
+            let made = (table.is_none() && given.is_none()).then(|| self.near_exact(plan, &point.beams, 1));
             let exact = given.or(made.as_ref());
             point.select(plan);
             q.work += match (table, exact) {
@@ -2328,7 +2320,7 @@ impl Model {
         let mut point = Held::<Site>::take();
         let table = self.pointed(plan, table, r, &mut point);
         point.select(plan);
-        let exact = (table.is_none() && plan.near.len() > 0).then(|| self.near_exact(plan, &point.beams, 1, &self.coherent_dressing()));
+        let exact = (table.is_none() && plan.near.len() > 0).then(|| self.near_exact(plan, &point.beams, 1));
         let work = match (table, &exact) {
             _ if plan.near.len() == 0 => {
                 point.formed(plan, None);
@@ -2811,16 +2803,16 @@ fn factor(plan: &Plan, node: &Node, path: &Path, block: usize, flag: usize, piec
 /// row by row: the value and the gradient along the three lab axes) and the reference z₀, at the orders `orders`
 /// (elim.rs `Orders`) -- the Schrieffer–Wolff series, products of the forms alone (ELIMINATION v7):
 /// - the fold's generator: H₀ = H_h − (i/2) L at the series' order 0; at order 1 its first order's term H = H₀ − Y E₀,
-///   E₀ = H₀ − z₀ (the fixed point H = H₀ − Y(H − z₀) to its own first order, Y²E apart: in the order's error measured
-///   against the next, elim.rs `Fold::order_error`), with its gradient ∇H₀ − ∇Y E₀ − Y ∇E₀; E = H − z₀. (The forms hold
+///   E₀ = H₀ − z₀ (the fixed point H = H₀ − Y(H − z₀) to its own first order, Y²E apart: in the evaluation's error
+///   against the definition, elim.rs `Fold::evaluation_error`), with its gradient ∇H₀ − ∇Y E₀ − Y ∇E₀; E = H − z₀. (The forms hold
 ///   N₀ and N₁: order 1 is `Unit::Series` kept, a higher one the nearest block's keep, `Unit::Block`.)
 /// - S⁻¹ = Σ_{j≤J} binom(−½, j) X^j and S = Σ_{j≤J} binom(½, j) X^j at the normalization's order J, by Horner's rule
 ///   with the gradient's product rule (`series`) -- no eigendecomposition --;
 /// - the held part Herm H − H_h (nothing at the series' order 0) and its gradient: the Hermitian part is the series'
-///   own -- what the normalization would do to it is measured where the atoms went and booked (elim.rs
-///   `Fold::hermitian_error`);
+///   own -- what the normalization would do to it is in the evaluation's error against the definition, measured where
+///   the atoms went and booked (elim.rs `Model::readings`);
 /// - M = E S⁻¹ (the jumps' partner's state, none at order 0), the landing map S (1 + Y)⁻¹ with (1 + Y)⁻¹ = Σ_{j≤J} (−Y)^j
-///   (its next order's part measured with the normalization's, `Fold::normalization_error`), and E.
+///   (to the normalization's order J, as the generator's), and E.
 /// Without `gradients` the values alone (the gradients' parts zero), of forms given so; M only at a point (`point`: a
 /// node's generator and force read none), the landing map only where asked (`landing`), else zero. `scratch` holds
 /// what it makes on the way; nothing is asked of the heap once it has its size.
@@ -2869,7 +2861,7 @@ pub(crate) fn normal(hermitian: &[C64], partner: &[C64], metric: &[C64], loss: &
     }
     series(-0.5, orders.normalization, metric, inverse, t, n, gradients);
     // The held part Herm H − H_h and its gradient: the Hermitian part is the series' own (what the normalization would do
-    // to it is measured and booked, elim.rs `Fold::hermitian_error`).
+    // to it is in the evaluation's error against the definition, elim.rs `Model::readings`).
     data.fill(C64::ZERO);
     for part in 0..parts {
         let (of, own) = (&h[part * size..(part + 1) * size], &hermitian[part * size..(part + 1) * size]);
