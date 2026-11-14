@@ -220,8 +220,11 @@
 //! # What follows the generator's own frequencies, and what does not
 //! The propagation's own work -- the decomposition, the following, two hops -- is the same whatever Ĥ₀'s frequencies
 //! times the step are. The step's forms are read on the state at times of a quadrature (step.rs `propagate`), and
-//! their number still follows the forms' bandwidth -- max|λ_a* − λ_b|, and where a beating class is followed the beats'
-//! spread with it, the following moving the state's frequencies by its beat: the kick is a quotient by the state's
+//! their number still follows the forms' bandwidth -- max|λ_a* − λ_b|; of a tone's forms, summed at its beat
+//! (step.rs `Sums`), the combined frequencies max|λ_a* − λ_b ± ν| -- a tone far from every pair's frequency asks the
+//! quadrature its combined frequency, not its beat: tilt2's loop's weak edge beats at 26 rad/µs and its pairs at
+//! 0.4–1.2 --; and where a beating class is followed the beats' spread with it, the following moving the state's
+//! frequencies by its beat: the kick is a quotient by the state's
 //! norm, which with a decay is a sum of the pairs' exponentials of its own -- ringing wherever the state holds a fast
 //! pair's two states --, and a quotient of two such sums has no closed form. (The forms on the unnormalized state have
 //! one, pair by pair: the moments above. They would serve where the norm is one, which is no cluster that scatters.) A
@@ -954,9 +957,12 @@ impl Picture {
             if self.moving {
                 self.slopes = self.hopping();
                 // A followed class moves the state's frequencies by its beat: the forms' bandwidth with the beats' spread;
-                // and a tone's forms are summed at its beat (step.rs `Sums`): with its beat besides.
+                // and a tone's forms are summed at its beat (step.rs `Sums`), e^{±iνu} on the state's pairs: their combined
+                // frequencies, |λ_a* − λ_b ± ν|.
                 let (low, high) = self.classes.iter().filter(|class| class.followed).fold((0.0_f64, 0.0_f64), |(low, high), class| (low.min(class.beat), high.max(class.beat)));
-                self.bandwidth += high - low + self.beats.iter().map(|tone| tone.beat.abs()).fold(0.0, f64::max);
+                let lambda = &self.lambda;
+                let combined = self.beats.iter().flat_map(|tone| [tone.beat, -tone.beat]).flat_map(|beat| lambda.iter().enumerate().flat_map(move |(a, first)| lambda[a..].iter().map(move |second| (first.conj() - *second + C64::real(beat)).abs()))).fold(self.bandwidth, f64::max);
+                self.bandwidth = combined + high - low;
             }
             self.counted[n] = Some([self.work + self.price(stops(self.bandwidth)), self.state_price()]);
         }
