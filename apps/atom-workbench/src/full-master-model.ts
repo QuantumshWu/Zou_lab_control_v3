@@ -50,7 +50,11 @@ interface MasterDrive {omega:number;cos:MasterMatrix;sin:MasterMatrix;laserIds:s
  *   of the quantization axis, polarization and initial phase in it: the field X and R are of.
  * - `outsideForms`, per frequency (`frequencyIndex`) the outside shift as a form in the summed field
  *   E of its beams (spectroscopy.ts `outsideFieldForm`, rad/us/(V/m)²): beams of one frequency
- *   interfere there too, which their `outsideShift`s leave out.
+ *   interfere there too, which their `outsideShift`s leave out; and its `transitions`, per transition
+ *   of a 32-state manifold to a level outside the model (`name`, e.g. 5P3/2→5D5/2) the error of that
+ *   second-order term, (coupling/detuning)², as a form in the same field and coordinates
+ *   (1/(V/m)²): `mixing`, nine arrays of one number per model state, each state's population in the
+ *   level (the diagonal of the form's matrix in the model basis).
  * - `emission`: the lowering dipole operator's Cartesian components (1/sqrt(us)) on the motion
  *   frame's axes: Σ_a D[C_a] is the model's spontaneous emission, and the photon of C_a has the
  *   angular pattern of a dipole along a, so its recoil follows from that pattern.
@@ -64,7 +68,8 @@ export interface MotionModelBeam {
   id:string;name:string;direction:Vec3;waveNumberPerUm:number;waistUm?:number;intensityMWcm2:number;frequencyIndex:number[];coupling:MasterMatrix;counterCoupling:MasterMatrix;
   outsideShift:MasterMatrix;electricField:[ComplexAmplitude,ComplexAmplitude,ComplexAmplitude];
 }
-export interface MotionOutsideForm {frequencyIndex:number[];matrices:MasterMatrix[]}
+export interface MotionOutsideForm {frequencyIndex:number[];matrices:MasterMatrix[];transitions:MotionOutsideTransition[]}
+export interface MotionOutsideTransition {name:string;mixing:number[][]}
 const N=32,TAU=2*Math.PI,HBAR=1.0545718176461565e-34,H_PLANCK=6.62607015e-34,EPS=8.8541878128e-12,C=299792458,zeros=()=>Array(N*N).fill(0),matrix=():MasterMatrix=>({real:zeros(),imag:zeros()});
 /** h * 1 MHz / k_B, in kelvin. */
 const MHZ_KELVIN=6.62607015e-34*1e6/1.380649e-23;
@@ -283,7 +288,8 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
    direction:MOTION_FRAME.map(n=>n[0]*k[0]+n[1]*k[1]+n[2]*k[2]) as Vec3,waveNumberPerUm:TAU*laserFrequencyMHz(laser)/C,
    ...(laser.intensityMode==='intensity'?{}:{waistUm:laserWaistUm(laser)}),intensityMWcm2:laserIntensityMWcm2(laser),frequencyIndex:beat,coupling:A,counterCoupling:R,
    outsideShift:scaled(transformOperator(laserModelCorrection(scene,laser),u),TAU),electricField:field};}),
-  outsideForms:couplings.filter((c,i)=>couplings.findIndex(x=>x.beat.join()===c.beat.join())===i).map(({laser,beat})=>({frequencyIndex:beat,matrices:outsideFieldForm(a,laser).map(m=>scaled(transformOperator(m,u),TAU))})),
+  outsideForms:couplings.filter((c,i)=>couplings.findIndex(x=>x.beat.join()===c.beat.join())===i).map(({laser,beat})=>{const form=outsideFieldForm(a,laser);return {frequencyIndex:beat,matrices:form.matrices.map(m=>scaled(transformOperator(m,u),TAU)),
+   transitions:form.transitions.map(t=>({name:t.name,mixing:t.matrices.map(m=>{const x=transformOperator(m,u);return Array.from({length:N},(_,k)=>x.real[k*N+k]!);})}))};}),
   emission:MOTION_FRAME.map(n=>cartesianEmission(n,composeMagneticField(scene.fields).frame,spherical)) as MotionModel['emission']} satisfies MotionModel}:{}),
  // A motion solve is not the 32-state master equation: what is said of that equation's drives and returned populations is
  // said of the motion's own in motionText.
