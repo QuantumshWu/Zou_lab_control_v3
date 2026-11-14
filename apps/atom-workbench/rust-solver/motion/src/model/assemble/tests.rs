@@ -203,8 +203,8 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
     for (wj, emitted) in model.tones.iter().enumerate() {
         for (wi, absorbed) in model.tones.iter().enumerate() {
             let beat = emitted.beat.plus(-1, &absorbed.beat);
-            for x in 0..g {
-                for y in 0..g {
+            for x in 0..n {
+                for y in 0..n {
                     if !model.term_included(cluster, x, y, &beat) {
                         continue;
                     }
@@ -218,31 +218,20 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
             }
         }
     }
+    // The normalized generator's held part (eliminate.rs `Responses::held`), static in the frames.
+    if !responses.held.is_empty() && model.carriers.iter().any(|cc| lights.on(cc.frequency)) {
+        for x in 0..n {
+            for y in 0..n {
+                let value: Jet = std::array::from_fn(|part| leaf(responses.held[part][(x, y)]));
+                add(x, y, scaled(value, phase(&c.frames[y].plus(-1, &c.frames[x]), x, y)));
+            }
+        }
+    }
     for cc in &model.carriers {
         let (w, component) = (cc.frequency, Component { frequency: cc.frequency, counter: false });
         let at_the_atom = |e: usize, b: usize| coupling(w, &cc.basis, e, b);
+        let _ = &at_the_atom;
         for x in g..n {
-            for y in g..n {
-                let (e, f) = (c.states[x], c.states[y]);
-                let sum = (0..GROUND).fold(NONE, |sum, b| {
-                    // An explicit state is read by its cluster's ground states (far.rs, # A fold onto an explicit state): at
-                    // its frame θ and their mean energy in theirs, z = θ + ⟨E_a − θ_a⟩_a -- the two-photon distance from b.
-                    let half = |place: usize| -> Jet {
-                        let frame = |p: usize| model.omega(&c.frames[p]);
-                        let mut gap: Vec<f64> = far.iter().map(|part| (0..g).map(|a| part[(c.states[a], c.states[a])].re).sum::<f64>() / g as f64 - part[(b, b)].re).collect();
-                        gap[0] += frame(place) - (0..g).map(frame).sum::<f64>() / g as f64 - cc.detuning;
-                        let reciprocal = jet::reciprocal(&gap);
-                        std::array::from_fn(|part| real(0.5 * reciprocal[part]))
-                    };
-                    // A half whose couplings are nothing is no term (a kept drive's own ground state is at no distance
-                    // from itself, and it is not folded).
-                    let term = |couplings: Jet, place: usize| if couplings == NONE { NONE } else { times(couplings, half(place)) };
-                    let right = term(times(at_the_atom(e, b), conjugate(folded(w, f, b))), x);
-                    let left = term(times(folded(w, e, b), conjugate(at_the_atom(f, b))), y);
-                    plus(sum, plus(right, left))
-                });
-                add(x, y, scaled(sum, phase(&zero, x, y)));
-            }
             for q in 0..g {
                 if model.level(component, c.states[x], c.states[q]) == Level::Explicit {
                     let drive = coupling(w, &model.tones[w].basis[0], c.states[x], c.states[q]);

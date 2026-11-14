@@ -733,8 +733,8 @@ fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, initial: &[(us
 /// The atoms a model's prior reads its gates at (module documentation, # The model's prior): the draws of the reach's
 /// own ensemble -- the initial components in their wells, the lowered isothermal at the reach's temperature
 /// `temperature` (µK; ensemble.rs) -- of the pilot's trajectories, `MOST_TRAJECTORIES` on, the run's seed: at the
-/// request's temperature the pilot's own initial atoms. Each its place and its speed |v| = (ħ/m)|κ|.
-fn atoms(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<Vec<(V3, f64)>, String> {
+/// request's temperature the pilot's own initial atoms. Each its place and its velocity v = (ħ/m)κ.
+fn atoms(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<Vec<(V3, V3)>, String> {
     let hm = hbar_over_mass(request.mass_kg);
     let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(model, light, alone(s))).collect::<Result<_, _>>()?;
     let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), temperature, hm)?;
@@ -742,19 +742,18 @@ fn atoms(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64
         .into_par_iter()
         .map(|index| {
             let start = ensemble.draw(SEED, index);
-            (start.r, hm * start.kappa.iter().map(|k| k * k).sum::<f64>().sqrt())
+            (start.r, start.kappa.map(|k| hm * k))
         })
         .collect())
 }
 
-/// The model's units whose folds do not exist where the reach of the temperature `temperature` (µK) has its atoms
-/// (module documentation, # The model's prior): the gates (model/units.rs `Model::failing`) at its atoms (`atoms`),
-/// each at its place and its speed -- a state's errors are read so (model/units.rs `Measured`) --, bounded first over
-/// the whole space at the fastest of them.
+/// What the model's prior keeps beyond what the model keeps already, at the atoms of the reach of the temperature
+/// `temperature` (µK; module documentation, # The model's prior): each atom's closure (model/elim.rs `Model::prior`:
+/// criterion one's remainder, criterion two's components, the frames), at its place and its velocity (`atoms`).
 fn failing(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<Vec<Unit>, String> {
     let points = atoms(model, request, light, initial, temperature)?;
-    let fastest = points.iter().fold(0., |most: f64, p| most.max(p.1));
-    Ok(model.failing(&model.units(), &points, fastest))
+    let kept = &model.kept;
+    Ok(model.prior(request, &points).into_iter().filter(|u| !kept.contains(u)).collect())
 }
 
 /// What an attempt takes of its model alone (`solve`): nothing of it rests on the reach the model is judged over or
@@ -5764,7 +5763,7 @@ mod tests {
     /// units kept are among those that failed at one of them as their models were read. Printed: the units kept and the
     /// time the prior took.
     #[test]
-    fn the_prior_s_model_folds_only_what_exists_at_every_atom_s_start() {
+    fn the_prior_s_model_keeps_nothing_more_at_its_atoms_starts() {
         let scenes = [("scenes", "R4_LIN_2"), ("requests", "PGC3D_1ms")];
         for (dir, name) in scenes {
             let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join(dir).join(format!("{name}.json"));
@@ -5777,19 +5776,10 @@ mod tests {
             let took = started.elapsed().as_secs_f64();
             // The pilot's initial atoms again, as `closed` reads them.
             let points = atoms(&model, &request, &light, &initial, request.temperature_uk).unwrap();
-            let fastest = points.iter().fold(0., |most: f64, p| most.max(p.1));
             let units = model.units();
-            assert!(model.failing(&units, &points, fastest).is_empty(), "{name}: the closed model folds a unit that fails at an atom's start");
-            // Every unit the model folds is read at every atom's start as a number below ½ (the whole space's bound
-            // stands for the point where it is below ½ already).
-            let reads = model.judged(&units);
-            for &(r, v) in &points {
-                let region = model.point_region(r, v);
-                for (u, read) in reads.iter().enumerate() {
-                    let gate = model.gate_of(read, &region);
-                    assert!(gate.saturation.is_finite() && gate.sweep.is_finite() && gate.exists(), "{name}: {:?} at {r:?}, speeds to {v}: {gate:?}", units[u]);
-                }
-            }
+            // The closed model's prior at the same atoms keeps nothing more (elim.rs `Model::prior`: each atom's closure
+            // from what the model keeps).
+            assert!(model.prior(&request, &points).iter().all(|u| model.kept.contains(u)), "{name}: the closed model's prior keeps more at its atoms");
             eprintln!("{name}: {} units kept by the prior, {} folded, {} atoms' starts, {took:.2} s", kept.len(), units.len(), points.len());
         }
     }

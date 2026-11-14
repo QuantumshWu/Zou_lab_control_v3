@@ -149,6 +149,8 @@ pub(crate) enum Operand {
     Doppler(usize),
     /// An explicit pair's van Vleck shift.
     Shift(usize),
+    /// An entry of the normalized generator's held part (eliminate.rs `Responses::held`).
+    Held(usize),
     /// X and L of a pair entry (the fourth order's, `NearLayout::fourth`).
     Metric(usize),
     Loss(usize),
@@ -171,6 +173,10 @@ pub(crate) struct NearLayout {
     pub(crate) jumps: Vec<[usize; 5]>,
     /// (carrier, k, excited state e, place y): T_k[e, y].
     pub(crate) responses: Vec<[usize; 4]>,
+    /// The held part's entries x ← y (eliminate.rs `Responses::held`), and the landing map's size n (its n² entries
+    /// after the responses, row by row): none where the cluster has no carrier lit.
+    pub(crate) held: Vec<[usize; 2]>,
+    pub(crate) landing: usize,
     /// The fourth order's forms of each pair entry, after its S and D (module documentation, # The fourth order): none;
     /// the metric X = T_k'†T_k on x ← y; or X and the loss L = T_k'†D T_k -- one where the folded excited states share
     /// one linewidth Γ, L = Γ X.
@@ -180,7 +186,7 @@ pub(crate) struct NearLayout {
 impl NearLayout {
     /// The complex numbers of a point.
     pub(crate) fn len(&self) -> usize {
-        self.forms() * self.pairs.len() + self.shifts.len() + 2 * self.jumps.len() + 2 * self.responses.len()
+        self.forms() * self.pairs.len() + self.shifts.len() + self.held.len() + 2 * self.jumps.len() + 2 * self.responses.len() + self.landing * self.landing
     }
     /// The forms a pair entry holds.
     fn forms(&self) -> usize {
@@ -188,27 +194,32 @@ impl NearLayout {
     }
     /// Where an operand lies among a point's values and, after them, the plan's constants.
     fn at(&self, o: Operand) -> usize {
-        let (p, v, j) = (self.pairs.len(), self.shifts.len(), self.jumps.len());
+        let (p, v, h, j) = (self.pairs.len(), self.shifts.len(), self.held.len(), self.jumps.len());
         match o {
             Operand::Pair(i) => i,
             Operand::Doppler(i) => p + i,
             Operand::Metric(i) => 2 * p + i,
             Operand::Loss(i) => 3 * p + i,
             Operand::Shift(i) => self.forms() * p + i,
-            Operand::Jump(i) => self.forms() * p + v + i,
-            Operand::Jump2(i) => self.forms() * p + v + j + i,
+            Operand::Held(i) => self.forms() * p + v + i,
+            Operand::Jump(i) => self.forms() * p + v + h + i,
+            Operand::Jump2(i) => self.forms() * p + v + h + j + i,
             Operand::Constant(i) => self.len() + i,
         }
     }
     /// The Hermitian forms (S, D, the shifts), the jumps with their partners, the responses with theirs.
     pub(crate) fn hermitian(&self) -> Range<usize> {
-        0..self.forms() * self.pairs.len() + self.shifts.len()
+        0..self.forms() * self.pairs.len() + self.shifts.len() + self.held.len()
     }
     pub(crate) fn jumping(&self) -> Range<usize> {
         self.hermitian().end..self.hermitian().end + 2 * self.jumps.len()
     }
     pub(crate) fn responding(&self) -> Range<usize> {
-        self.jumping().end..self.len()
+        self.jumping().end..self.jumping().end + 2 * self.responses.len()
+    }
+    /// The landing map's entries (eliminate.rs `Responses::landing`), row by row.
+    pub(crate) fn landed(&self) -> Range<usize> {
+        self.responding().end..self.len()
     }
 }
 
@@ -682,9 +693,21 @@ impl<'a> Builder<'a> {
     /// states from x among those the right response reaches from y (none where the right frequency is no carrier).
     fn touches(&self, left: (usize, usize), right: (usize, usize), x: usize, y: usize) -> bool {
         let Some(carrier) = self.model.carrier_of(right.0) else { return false };
-        let reach = self.model.reached(self.cluster, carrier, right.1, self.states()[y]);
+        let reach = self.reach(carrier, right.1, y);
         let u = &self.model.tones[left.0].coupled[0][left.1];
         (0..EXCITED).any(|e| reach[e] && u[(GROUND + e, self.states()[x])] != C64::ZERO)
+    }
+    /// The excited states the response of a carrier's basis coupling k reaches from a place: from a ground place its
+    /// own (`Model::reached`); from an explicit one what any ground place of the cluster reaches -- the fold's
+    /// eigenstates mix the cluster's places, so the response to an explicit place's amplitude is the ground places'.
+    fn reach(&self, carrier: usize, k: usize, y: usize) -> [bool; EXCITED] {
+        let places: Vec<usize> = if y < self.ground() { vec![y] } else { (0..self.ground()).collect() };
+        let mut out = [false; EXCITED];
+        for p in places {
+            let r = self.model.reached(self.cluster, carrier, k, self.states()[p]);
+            out.iter_mut().zip(r).for_each(|(o, x)| *o |= x);
+        }
+        out
     }
     /// The pair entry of S and D on x ← y, found or made with its adjoint's (the same forms' y ← x of the pair exchanged); None
     /// where neither can differ from zero.
@@ -803,8 +826,8 @@ impl<'a> Builder<'a> {
                 let beat = emitted.beat.plus(-1, &absorbed.beat);
                 for kl in 0..emitted.basis[0].len() {
                     for kr in 0..absorbed.basis[0].len() {
-                        for x in 0..g {
-                            for y in 0..g {
+                        for x in 0..n {
+                            for y in 0..n {
                                 if !model.term_included(self.cluster, x, y, &beat) {
                                     continue;
                                 }
@@ -823,34 +846,26 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        for (ci, cc) in model.carriers.iter().enumerate() {
+        // The normalized generator's held part (eliminate.rs `Responses::held`): every entry of the cluster's, no field of
+        // its own, static in the cluster's frames -- made there, it turns at no beat: its block's base beat is the
+        // entry's frame difference θ_y − θ_x --; and the landing map's n² entries.
+        if model.carriers.iter().any(|cc| self.lights.on(cc.frequency)) {
+            let frames = &model.clusters[self.cluster].frames;
+            for x in 0..n {
+                for y in 0..n {
+                    self.near.held.push([x, y]);
+                    let at = self.near.held.len() - 1;
+                    let block = self.block(None, None, &frames[y].plus(-1, &frames[x]));
+                    self.hermitian(block, PLAIN, x, y, C64::ZERO, Some((Operand::Held(at), false)));
+                }
+            }
+            self.near.landing = n;
+        }
+        for cc in model.carriers.iter() {
             if !self.lights.on(cc.frequency) {
                 continue;
             }
             let (component, tone) = (Component { frequency: cc.frequency, counter: false }, &model.tones[cc.frequency]);
-            let folded = &tone.coupled[0];
-            for kl in 0..cc.basis.len() {
-                for kr in 0..cc.basis.len() {
-                    for x in g..n {
-                        for y in g..n {
-                            // The entry e ← f's halves that can differ from zero: a drive folded at the atom of one leg against
-                            // a folded one of the other, from one ground state (`Model::forms`).
-                            let (e, f) = (states[x], states[y]);
-                            let through = |b: usize| (cc.basis[kr][(e, b)] != C64::ZERO && folded[kl][(f, b)] != C64::ZERO) || (folded[kr][(e, b)] != C64::ZERO && cc.basis[kl][(f, b)] != C64::ZERO);
-                            if !(0..GROUND).any(through) {
-                                continue;
-                            }
-                            self.near.shifts.push([ci, kl, kr, x, y]);
-                            let at = self.near.shifts.len() - 1;
-                            for group in self.groups(cc.frequency) {
-                                let (Some(left), Some(right)) = (self.scalar(cc.frequency, group, kl, true), self.scalar(cc.frequency, group, kr, false)) else { continue };
-                                let block = self.block(Some(left), Some(right), &zero);
-                                self.hermitian(block, PLAIN, x, y, C64::ZERO, Some((Operand::Shift(at), false)));
-                            }
-                        }
-                    }
-                }
-            }
             for (k, u) in tone.basis[0].iter().enumerate() {
                 let explicit: Vec<(usize, usize, C64)> = (g..n)
                     .flat_map(|p| (0..g).map(move |q| (p, q)))
@@ -1243,14 +1258,11 @@ impl Plan {
 
     fn new(model: &Model, cluster: usize, lights: &Lights) -> Plan {
         // The frequency whose fold on the cluster is the fourth order's under the lights: the model's, its light coherent.
-        let fourth = model.fourth[cluster].filter(|&frequency| lights.0[frequency] == Lit::Coherent);
-        let mut b = Builder { model, cluster, lights, near: NearLayout { fourth: fourth.map_or(0, |frequency| if Fourth::uniform(model, cluster, frequency).is_some() { 1 } else { 2 }), ..NearLayout::default() }, pair_index: HashMap::new(), jump_index: HashMap::new(), constants: vec![], offsets: vec![], beams: vec![], scalars: vec![], drafts: vec![] };
+        let mut b = Builder { model, cluster, lights, near: NearLayout::default(), pair_index: HashMap::new(), jump_index: HashMap::new(), constants: vec![], offsets: vec![], beams: vec![], scalars: vec![], drafts: vec![] };
         b.constants();
         b.near();
         b.decays();
-        let mut plan = b.finish();
-        plan.fourth = fourth.and_then(|frequency| Fourth::new(model, &plan, frequency));
-        plan
+        b.finish()
     }
     /// The counts at a node (`Middle::work`): of the generator, and of the force's form with its values' slopes along
     /// `directions` directions (a table's axes), twice; the fourth order's matrix and its gradient's forms with them.
@@ -1730,6 +1742,15 @@ impl Model {
             for (i, &[c, k, e, y]) in near.responses.iter().enumerate().filter(|(_, response)| places(response[3])) {
                 out[responding + i] = first(c, k)[(e, y)];
                 out[responding + near.responses.len() + i] = second(c, k)[(e, y)];
+            }
+            for (i, &[x, y]) in near.held.iter().enumerate() {
+                out[near.at(Operand::Held(i))] = responses.held[part][(x, y)];
+            }
+            let landed = near.landed().start;
+            for x in 0..near.landing {
+                for y in 0..near.landing {
+                    out[landed + x * near.landing + y] = responses.landing[part][(x, y)];
+                }
             }
         }
         // The fourth order's forms of a pair (module documentation, # The fourth order): X = T_k'†T_k and L = T_k'†D T_k on

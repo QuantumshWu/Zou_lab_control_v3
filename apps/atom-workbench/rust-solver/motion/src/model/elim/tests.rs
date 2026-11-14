@@ -320,7 +320,7 @@ fn a_tilt_leaves_the_partition_and_the_step_s_requirement_and_moves_the_numbers_
             .iter()
             .map(|req| {
                 let light = crate::field::Light::new(req);
-                let (lv, cl) = system(req, &light, r);
+                let (lv, cl, _) = system(req, &light, r);
                 closure(&lv, &cl, &blocks(req), v, &Kept::default())
             })
             .collect();

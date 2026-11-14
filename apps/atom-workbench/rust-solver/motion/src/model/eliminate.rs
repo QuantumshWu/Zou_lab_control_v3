@@ -157,14 +157,46 @@ impl Carrier {
     }
 }
 
-/// The elimination's responses at one constant Hamiltonian and the carriers' amplitudes (`Model::eliminate`): per carrier (empty where unlit), basis
-/// vector k of its field and jet part, T_k = (K + Σ − z)⁻¹ U^f_k and T2_k = (K + Σ − z)⁻¹ T_k on the cluster's ground places
-/// (EXCITED × n_g) -- a beam's are T_l = Σ_k γ_lk T_k, the responses being linear in the coupling --; and the complex multiply-adds
-/// that made them.
+/// The elimination's responses on a cluster at a point (`Model::eliminate`, the one elimination: elim.rs `fold`), jets in
+/// the position, in the normalized coordinates of the cluster's states (elim.rs `Fold::normalization`): per carrier
+/// (empty where unlit), basis vector k of its field and jet part, R_k = −T_k S⁻¹ and R2_k = T2_k S⁻¹ on every place of
+/// the cluster (EXCITED × n) -- the responses linear in the coupling, a beam's Σ_k γ_lk of them; the sign the
+/// contraction's (`shift`) --; per jet part the normalized generator's held part (n × n, Hermitian, elim.rs
+/// `Fold::held`) and the landing map (n × n, `Fold::landing`); and the complex multiply-adds that made them.
 pub(crate) struct Responses {
     pub(crate) first: Vec<Vec<Vec<Mat>>>,
     pub(crate) second: Vec<Vec<Vec<Mat>>>,
+    pub(crate) held: Vec<Mat>,
+    pub(crate) landing: Vec<Mat>,
     pub(crate) work: f64,
+}
+
+/// The responses at one set of the elimination's inputs (`Model::respond`).
+struct Responded {
+    first: Vec<Vec<Mat>>,
+    second: Vec<Vec<Mat>>,
+    held: Mat,
+    landing: Mat,
+}
+
+impl Responded {
+    /// Σ_i c_i x_i over a few sets of the same shape.
+    fn combined(sets: &[(&Responded, f64)]) -> Responded {
+        let scale = |pick: &dyn Fn(&Responded) -> &Mat| {
+            let mut out = Mat::zeros(pick(sets[0].0).rows, pick(sets[0].0).cols);
+            for (x, c) in sets {
+                out.add_scaled(C64::real(*c), pick(x));
+            }
+            out
+        };
+        let base = sets[0].0;
+        Responded {
+            first: (0..base.first.len()).map(|c| (0..base.first[c].len()).map(|k| scale(&|x: &Responded| &x.first[c][k])).collect()).collect(),
+            second: (0..base.second.len()).map(|c| (0..base.second[c].len()).map(|k| scale(&|x: &Responded| &x.second[c][k])).collect()).collect(),
+            held: scale(&|x: &Responded| &x.held),
+            landing: scale(&|x: &Responded| &x.landing),
+        }
+    }
 }
 
 impl Model {
@@ -236,8 +268,8 @@ impl Model {
 
     /// Whether one carrier's dressing takes its coherent field (`coherent_dressing`, carrier by carrier: what a caller
     /// that keeps its vector fills it from).
-    pub(crate) fn dressed_coherently(&self, carrier: usize) -> bool {
-        self.kept.contains(&Unit::Dressing { carrier: Component { frequency: self.carriers[carrier].frequency, counter: false } })
+    pub(crate) fn dressed_coherently(&self, _carrier: usize) -> bool {
+        true
     }
 
     /// A carrier's beam groups whose interference its dressing keeps: its units (beams of parallel fields), all its beams where its
@@ -256,173 +288,162 @@ impl Model {
         units.iter().map(|&u| (0..n).filter(|&l| carrier.units[l] == u).collect()).collect()
     }
 
-    /// The near light's elimination at a far Hamiltonian `h` (its jet) and the near beams' amplitudes (module documentation): per
-    /// lit carrier, basis vector of its field and cluster ground place its responses T_k and T2_k (`Responses`) -- every carrier's
-    /// dressing of the ground states, the self-energy of the folded channels to the other clusters' ground states, one factorization
-    /// per ground place. Of the ground places `places` takes: a place's responses are its own factorization's, whatever
-    /// the others' (one not taken is left zero).
+    /// The near light's elimination on a cluster at a far Hamiltonian `h` (its jet: the constant forms' H at the point) and the
+    /// beams' amplitudes (their jets), jets to `order`: the one elimination (elim.rs `fold`) at the point -- P the
+    /// cluster's states in its frames, every lit carrier a class whose beams are coherent at the point, the carriers'
+    /// drives folded at their replicas or explicit where the frames make them static --, its responses on the carriers'
+    /// field bases, normalized (`Responses`). Its derivatives in the position are central differences of the same
+    /// function along the inputs' own Taylor path (h + δ·∂h + ½δ²·∂∂h, the amplitudes' likewise): a first derivative is the
+    /// function's derivative along the inputs' first derivatives, exact but for the difference's O(δ²) and its rounding
+    /// O(u/δ); at δ = u^{1/3} ℓ the two balance at u^{2/3} ≈ 4·10⁻¹¹ relative, ℓ = 1/k_max the light's shortest length,
+    /// the scale its inputs change on (the second derivatives at u^{1/4} ℓ, u^{1/2}). `coherent` and `places` are the
+    /// callers' (every carrier coherent; every place made).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn eliminate(&self, cluster: usize, h: &[Mat], amplitudes: &[Amplitude], lights: &Lights, order: usize, coherent: &[bool], places: &dyn Fn(usize) -> bool) -> Responses {
+    pub(crate) fn eliminate(&self, cluster: usize, h: &[Mat], amplitudes: &[Amplitude], lights: &Lights, order: usize, _coherent: &[bool], _places: &dyn Fn(usize) -> bool) -> Responses {
         let np = jet::parts(order);
-        let c = &self.clusters[cluster];
-        let g = c.ground;
-        let mut work = 0.0;
-        let excited: Vec<usize> = (GROUND..STATES).collect();
-        let k: Vec<Mat> = h
-            .iter()
-            .enumerate()
-            .map(|(p, m)| {
-                let mut x = m.block(&excited, &excited);
-                if p == 0 {
-                    x.add_scaled(C64::new(0.0, -0.5), &self.decay);
+        let shortest = 1.0 / self.light.beams.iter().map(|b| b.wave_number).fold(f64::MIN_POSITIVE, f64::max);
+        let jets: Vec<[C64; jet::WHOLE]> = amplitudes.iter().map(jet::whole).collect();
+        let inputs = |d: [f64; 3]| -> (Mat, Vec<C64>) {
+            let mut m = h[0].clone();
+            for i in 0..3 {
+                if h.len() >= 4 && d[i] != 0.0 {
+                    m.add_scaled(C64::real(d[i]), &h[1 + i]);
                 }
-                x
-            })
-            .collect();
-        let energy = |b: usize| -> Vec<f64> { h.iter().map(|m| m[(b, b)].re).collect() };
-        // A matrix jet less a real jet on its diagonal.
-        let shifted = |m: &[Mat], z: &[f64]| -> Vec<Mat> {
-            m.iter()
-                .zip(z)
-                .map(|(x, &d)| {
-                    let mut y = x.clone();
-                    for e in 0..EXCITED {
-                        y[(e, e)] -= C64::real(d);
+            }
+            if h.len() >= 10 {
+                for (k, &(i, j)) in jet::PAIRS.iter().enumerate() {
+                    let w = if i == j { 0.5 * d[i] * d[i] } else { d[i] * d[j] };
+                    if w != 0.0 {
+                        m.add_scaled(C64::real(w), &h[4 + k]);
                     }
-                    y
+                }
+            }
+            let a = jets
+                .iter()
+                .map(|z| {
+                    let mut v = z[0];
+                    for i in 0..3 {
+                        v += z[1 + i] * d[i];
+                    }
+                    if np >= 10 {
+                        for (k, &(i, j)) in jet::PAIRS.iter().enumerate() {
+                            v += z[4 + k] * if i == j { 0.5 * d[i] * d[i] } else { d[i] * d[j] };
+                        }
+                    }
+                    v
                 })
-                .collect()
+                .collect();
+            (m, a)
         };
-        let constant = |v: Vec<C64>| -> Vec<Vec<C64>> { (0..np).map(|p| if p == 0 { v.clone() } else { vec![C64::ZERO; v.len()] }).collect() };
-        let column = |m: &Mat, b: usize| -> Vec<C64> { (0..EXCITED).map(|x| m[(GROUND + x, b)]).collect() };
-        let lit: Vec<bool> = self.carriers.iter().map(|x| lights.on(x.frequency)).collect();
-        let coefficient = |l: usize| jet::of(&amplitudes[l], order);
-        // The dressing ΔE_b^d of every ground state by every lit carrier, its jet.
-        let mut shift = vec![vec![vec![0.0_f64; np]; GROUND]; self.carriers.len()];
-        for (d, carrier) in self.carriers.iter().enumerate() {
-            if !lit[d] {
-                continue;
+        let mut work = 0.0;
+        let mut at = |d: [f64; 3]| -> Responded {
+            let (m, a) = inputs(d);
+            let (r, w) = self.respond(cluster, &m, &a, lights);
+            work += w;
+            r
+        };
+        let centre = at([0.0; 3]);
+        let mut parts: Vec<Responded> = vec![];
+        if np >= 4 {
+            let delta = crate::units::UNIT_ROUNDOFF.cbrt() * shortest;
+            for i in 0..3 {
+                let e = |s: f64| std::array::from_fn(|j| if j == i { s * delta } else { 0.0 });
+                let (plus, minus) = (at(e(1.0)), at(e(-1.0)));
+                parts.push(Responded::combined(&[(&plus, 0.5 / delta), (&minus, -0.5 / delta)]));
             }
-            let groups = self.dressing_groups(carrier, lights, coherent[d]);
-            for b in 0..GROUND {
-                let mut z = energy(b);
-                z[0] += carrier.detuning;
-                let m = shifted(&k, &z);
-                let lu = Lu::new(&m[0]).expect("K − z regular: the decay keeps K's spectrum off the real axis");
-                let ys: Vec<Vec<Vec<C64>>> = (0..carrier.beams.len()).map(|l| jet::solve(&lu, &m, &constant(column(&carrier.folded[l], b)))).collect();
-                work += jet::factor_work(EXCITED) + carrier.beams.len() as f64 * jet::solve_work(EXCITED, np);
-                for group in &groups {
-                    for &j in group {
-                        for &i in group {
-                            work += (EXCITED * np) as f64 + 2.0 * jet::product_work(np);
-                            let pair = jet::of(&super::far::pair(&amplitudes[carrier.beams[j]], &amplitudes[carrier.beams[i]]), order);
-                            let xj = column(&carrier.folded[j], b);
-                            let form: Vec<C64> = ys[i].iter().map(|y| crate::linalg::inner(&xj, y)).collect();
-                            for (s, x) in shift[d][b].iter_mut().zip(jet::product(&pair, &form)) {
-                                *s -= x.re;
-                            }
-                        }
+        }
+        if np >= 10 {
+            let delta = crate::units::UNIT_ROUNDOFF.sqrt().sqrt() * shortest;
+            for &(i, j) in jet::PAIRS.iter() {
+                let e = |si: f64, sj: f64| -> [f64; 3] {
+                    let mut d = [0.0; 3];
+                    d[i] += si * delta;
+                    d[j] += sj * delta;
+                    d
+                };
+                if i == j {
+                    let (plus, minus) = (at(e(0.5, 0.5)), at(e(-0.5, -0.5)));
+                    parts.push(Responded::combined(&[(&plus, 1.0 / (delta * delta)), (&centre, -2.0 / (delta * delta)), (&minus, 1.0 / (delta * delta))]));
+                } else {
+                    let (pp, pm, mp, mm) = (at(e(1.0, 1.0)), at(e(1.0, -1.0)), at(e(-1.0, 1.0)), at(e(-1.0, -1.0)));
+                    let c = 0.25 / (delta * delta);
+                    parts.push(Responded::combined(&[(&pp, c), (&pm, -c), (&mp, -c), (&mm, c)]));
+                }
+            }
+        }
+        let all: Vec<&Responded> = std::iter::once(&centre).chain(parts.iter()).collect();
+        let carriers = centre.first.len();
+        Responses {
+            first: (0..carriers).map(|c| (0..centre.first[c].len()).map(|k| all.iter().map(|r| r.first[c][k].clone()).collect()).collect()).collect(),
+            second: (0..carriers).map(|c| (0..centre.second[c].len()).map(|k| all.iter().map(|r| r.second[c][k].clone()).collect()).collect()).collect(),
+            held: all.iter().map(|r| r.held.clone()).collect(),
+            landing: all.iter().map(|r| r.landing.clone()).collect(),
+            work,
+        }
+    }
+
+    /// The one elimination on a cluster at one set of inputs -- the far Hamiltonian's value `h`, the beams' amplitudes `a`
+    /// -- and the work it took (`eliminate`): the fold (elim.rs `fold`), every lit carrier's responses on its basis
+    /// (`Fold::respond`) normalized, the held part and the landing map; its complex multiply-adds as the fold counts
+    /// them (`Fold::work`).
+    fn respond(&self, cluster: usize, h: &Mat, a: &[C64], lights: &Lights) -> (Responded, f64) {
+        use super::elim;
+        let c = &self.clusters[cluster];
+        let (n, g) = (c.states.len(), c.ground);
+        let grounds: Vec<usize> = c.states[..g].to_vec();
+        let excited: Vec<usize> = (GROUND..STATES).collect();
+        let levels = elim::Levels {
+            ground: h.block(&grounds, &grounds),
+            excited: h.block(&excited, &excited),
+            decay: self.decay.clone(),
+            emission: std::array::from_fn(|x| self.emission[x].block(&grounds, &excited)),
+        };
+        let lit: Vec<usize> = (0..self.carriers.len()).filter(|&ci| lights.on(self.carriers[ci].frequency)).collect();
+        // Per lit carrier its classes: its beams one coherent field, or under an averaged light each beam its own.
+        let mut classes: Vec<elim::Class> = vec![];
+        let mut of: Vec<Vec<usize>> = vec![];
+        for &ci in &lit {
+            let cc = &self.carriers[ci];
+            let beam = |l: usize| {
+                let mut m = cc.folded[l].clone();
+                m.add_scaled(C64::ONE, &cc.explicit[l]);
+                elim::Beam { coupling: m.block(&excited, &grounds).scaled(a[cc.beams[l]]), wave: self.light.beams[cc.beams[l]].wave_vector() }
+            };
+            let groups: Vec<Vec<usize>> = if lights.0[cc.frequency] == super::Lit::Averaged { (0..cc.beams.len()).map(|l| vec![l]).collect() } else { vec![(0..cc.beams.len()).collect()] };
+            of.push((classes.len()..classes.len() + groups.len()).collect());
+            for group in groups {
+                classes.push(elim::Class { nu: cc.detuning, beams: group.into_iter().map(beam).collect() });
+            }
+        }
+        let slow = elim::Slow { explicit: c.states[g..].iter().map(|&s| s - GROUND).collect(), frames: c.frames.iter().map(|f| self.omega(f)).collect() };
+        // The replicas: a coherent class's by its frequency (`Replicas::of`), an averaged beam's its own.
+        let mut replicas = elim::Replicas::of(&classes, &slow, g);
+        for (k, &ci) in lit.iter().enumerate() {
+            if of[k].len() > 1 {
+                for &class in &of[k] {
+                    for y in 0..g {
+                        replicas.frequencies.push(self.carriers[ci].detuning + slow.frames[y]);
+                        replicas.driven[class][y] = replicas.frequencies.len() - 1;
                     }
                 }
             }
         }
-        let dressed = |a: usize, except: Option<usize>| -> Vec<f64> {
-            let mut e = energy(a);
-            for (d, s) in shift.iter().enumerate() {
-                if Some(d) != except {
-                    for (x, y) in e.iter_mut().zip(&s[a]) {
-                        *x += y;
-                    }
-                }
+        let fold = elim::fold(&levels, &classes, &slow, &replicas);
+        let (s, s_inverse) = fold.normalization();
+        let (mut first, mut second) = (vec![vec![]; self.carriers.len()], vec![vec![]; self.carriers.len()]);
+        for (k, &ci) in lit.iter().enumerate() {
+            for u in &self.carriers[ci].basis {
+                let coupling = u.block(&excited, &grounds);
+                // Every class of the carrier has the same replicas' Q, K and frequencies: one's response is the basis's.
+                let (t, t2) = fold.respond(of[k][0], &coupling);
+                first[ci].push(t.product(&s_inverse).scaled(-C64::ONE));
+                second[ci].push(t2.product(&s_inverse));
             }
-            e
-        };
-        let (mut first, mut second) = (vec![], vec![]);
-        for (ci, carrier) in self.carriers.iter().enumerate() {
-            let n = carrier.basis.len();
-            if !lit[ci] {
-                first.push(vec![]);
-                second.push(vec![]);
-                continue;
-            }
-            let zeros = || -> Vec<Vec<Mat>> { (0..n).map(|_| (0..np).map(|_| Mat::zeros(EXCITED, g)).collect()).collect() };
-            let (mut out, mut out2) = (zeros(), zeros());
-            for (pb, &b) in c.states[..g].iter().enumerate().filter(|of| places(of.0)) {
-                let mut z = dressed(b, Some(ci));
-                z[0] += carrier.detuning;
-                let mut m = shifted(&k, &z);
-                // The self-energy of the folded channels to the other clusters' ground states, and of the kept ones that are
-                // another Floquet state than this response's (module documentation, # The response).
-                for (d, other) in self.carriers.iter().enumerate() {
-                    if !lit[d] {
-                        continue;
-                    }
-                    for a in 0..GROUND {
-                        let (folded, explicit) = (self.membership[a] != cluster, other.kept[a] && self.apart(b, &carrier.beat, a, &other.beat));
-                        if !folded && !explicit {
-                            continue;
-                        }
-                        let mut den: Vec<f64> = z.iter().zip(dressed(a, None)).map(|(x, y)| x - y).collect();
-                        den[0] -= other.detuning;
-                        let inverse = jet::reciprocal(&den);
-                        for group in self.dressing_groups(other, lights, coherent[d]) {
-                            let mut v: Vec<Vec<C64>> = vec![vec![C64::ZERO; EXCITED]; np];
-                            work += (group.len() * EXCITED * np) as f64;
-                            for &l in &group {
-                                let a_l = coefficient(other.beams[l]);
-                                for x in 0..EXCITED {
-                                    let xv = if folded { other.folded[l][(GROUND + x, a)] } else { C64::ZERO } + if explicit { other.explicit[l][(GROUND + x, a)] } else { C64::ZERO };
-                                    if xv != C64::ZERO {
-                                        for p in 0..np {
-                                            v[p][x] += a_l[p] * xv;
-                                        }
-                                    }
-                                }
-                            }
-                            if v[0].iter().all(|z| *z == C64::ZERO) {
-                                continue;
-                            }
-                            work += (EXCITED * EXCITED) as f64 * (2.0 * jet::product_work(np) + np as f64);
-                            // The excited states the channel reaches: the others' rows and columns of v v† are zero.
-                            let reached: Vec<usize> = (0..EXCITED).filter(|&x| v.iter().any(|part| part[x] != C64::ZERO)).collect();
-                            let weight: [C64; jet::WHOLE] = std::array::from_fn(|p| inverse.get(p).map_or(C64::ZERO, |&r| C64::real(r)));
-                            let of = |x: usize, conjugate: bool| -> [C64; jet::WHOLE] { std::array::from_fn(|p| v.get(p).map_or(C64::ZERO, |part| if conjugate { part[x].conj() } else { part[x] })) };
-                            for &x in &reached {
-                                let vx = of(x, false);
-                                for &y in &reached {
-                                    let (mut outer, mut term) = ([C64::ZERO; jet::WHOLE], [C64::ZERO; jet::WHOLE]);
-                                    jet::multiply(&vx[..np], &of(y, true)[..np], &mut outer[..np]);
-                                    jet::multiply(&outer[..np], &weight[..np], &mut term[..np]);
-                                    for p in 0..np {
-                                        m[p][(x, y)] += term[p];
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                let lu = Lu::new(&m[0]).expect("K + Σ − z regular: the decay keeps it off the real axis");
-                work += jet::factor_work(EXCITED);
-                for l in 0..n {
-                    let x = column(&carrier.basis[l], b);
-                    if x.iter().all(|v| *v == C64::ZERO) {
-                        continue;
-                    }
-                    work += 2.0 * jet::solve_work(EXCITED, np);
-                    let t = jet::solve(&lu, &m, &constant(x));
-                    let t2 = jet::solve(&lu, &m, &t);
-                    for p in 0..np {
-                        for e in 0..EXCITED {
-                            out[l][p][(e, pb)] = t[p][e];
-                            out2[l][p][(e, pb)] = t2[p][e];
-                        }
-                    }
-                }
-            }
-            first.push(out);
-            second.push(out2);
         }
-        Responses { first, second, work }
+        let held = fold.held(&s, &s_inverse);
+        let landing = fold.landing(&s).unwrap_or_else(|| s.clone());
+        let work = fold.work() + lit.iter().map(|&ci| self.carriers[ci].basis.len()).sum::<usize>() as f64 * fold.response_work();
+        (Responded { first, second, held, landing }, work)
     }
 
     /// Whether the channel of a component at the exact frequency `to` into ground state a is another Floquet state than

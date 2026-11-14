@@ -617,9 +617,7 @@ impl Model {
             }
         }
         model.fold = (0..model.clusters.len()).map(|c| model.fold_frequency_made(c)).collect();
-        model.fourth = (0..model.clusters.len())
-            .map(|c| model.fold_frequency(c).filter(|_| kept.iter().any(|u| matches!(u, Unit::Second { ground } if *ground < GROUND && model.membership[*ground] == c))))
-            .collect();
+        model.fourth = vec![None; model.clusters.len()];
         model.mixing = (0..model.clusters.len()).map(|c| model.mix(c)).collect();
         model.sources = model.all_sources();
         model.classes = (0..model.clusters.len()).map(|c| model.classes(c)).collect();
@@ -672,30 +670,20 @@ impl Model {
         of.all(|frequency| frequency == first).then_some(first)
     }
 
-    /// Where a jump's bare ground state f lands in a plan's cluster at a point (assemble.rs, # The fourth order): the
-    /// slow state Π f, Π = 1 + ½X − Y in the fold's coordinates, with its norm. A bare state is the slow state and a
-    /// fast part that is gone within 1/Γ, and the norm of what it becomes is ‖e^{−iHt} f‖² → ‖Π f‖² e^{−γt} beyond that
-    /// time, γ the slow state's rate: ‖Π f‖²/‖f‖² = 1 − p is the bare state's survival extrapolated back to the jump.
-    /// On one line p = 2 Re Y − X = (s/2)(Δ² − 3Γ²/4)/(Δ² + Γ²/4) + O(s²), of either sign. Far from the line p > 0, s/2:
-    /// the fast part emits one more photon at once (the ringing). Within 0.866 Γ of it p < 0, −3s/2 on resonance: after
-    /// a photon the atom is in the ground state and its excited amplitude takes 1/Γ to build up -- the next photon is
-    /// late (antibunching). Both are the one statement that the trajectory goes on in Π f as it is, not normalized,
-    /// against the next jump's threshold (step.rs `jump`): the waiting time's law is P(T > t) = min(1, (1 − p) e^{−γt})
-    /// -- a norm below one is at the threshold already with the probability p, a norm above one reaches it ln(1 − p)/γ
-    /// later. The mean interval is (1 − p)/γ for p ≥ 0 and (1 + ln(1 − p))/γ = (1 − p − p²/2 + …)/γ for p < 0, the exact
-    /// one's 1/γ_exact to the fourth order either way (two levels: units.rs `ORDER_RATES`). Clamped at zero, p < 0 left
-    /// the rate too high by −p, 1.52 s on resonance, more than the second order's s. Where the cluster's fold is the
-    /// second order's the slow state is f: there the fast part is within the fold's own order.
+    /// Where a jump's bare state f lands in a plan's cluster at a point (eliminate.rs `Responses::landing`; elim.rs
+    /// `Fold::landed`): the slow part of (f, 0) in the normalized coordinates, Π f -- not normalized, its norm N against
+    /// the next jump's threshold (step.rs `jump`): N < 1, the fast part takes the rest away at once (a photon more); N > 1,
+    /// the next photon is late (antibunching). The same map is the light's switching on (ELIMINATION v3 4). Where the
+    /// cluster has no fold the state is f.
     pub(crate) fn landed(&self, plan: &assemble::Plan, table: Option<&tabulate::NearTable>, at: &Point, f: &[C64]) -> crate::step::Internal {
-        let Some(fourth) = &plan.fourth else { return f.iter().copied().collect() };
-        let (n, size) = (fourth.n, fourth.n * fourth.n);
-        let mut site = assemble::Held::<assemble::Site>::take();
-        let table = self.pointed(plan, table, at.r, &mut site);
-        self.quartic(plan, fourth, table, Some(at.r), &mut site, false);
-        Model::quartic_read(|q| {
-            let (partner, metric) = (&q.data[4 * size..5 * size], &q.data[8 * size..9 * size]);
-            (0..n).map(|x| (0..n).fold(f[x], |z, y| z + (metric[x * n + y] * 0.5 - partner[x * n + y]) * f[y])).collect()
-        })
+        let n = plan.near.landing;
+        if n == 0 {
+            return f.iter().copied().collect();
+        }
+        let amplitudes = self.light.amplitudes(at.r);
+        let near = self.near_values(plan, &amplitudes, &[(plan.near.landed(), 0)], table);
+        let start = plan.near.landed().start;
+        (0..n).map(|x| (0..n).fold(C64::ZERO, |z, y| z + near.data[start + x * n + y] * f[y])).collect()
     }
 
     /// A component's exact frequency ν: the co-rotating δ_ω, the counter-rotating −(δ_ω + 2ν_frame).

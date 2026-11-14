@@ -123,7 +123,7 @@ impl Replicas {
 
 /// What drives one replica: a class's beam from the ground states (`class` Some), or the excited block's static
 /// couplings from the explicit states of its frame (`class` None, its wave vector zero); its coupling W (Q_f ← P), the
-/// coupling back W' (P ← Q_f), and its response T (the Sylvester solution of W alone: the responses are linear in W).
+/// coupling back W' (P ← Q_f), and its coupling back from every excited state.
 #[derive(Clone, Debug)]
 pub(crate) struct Feed {
     pub class: Option<usize>,
@@ -134,10 +134,9 @@ pub(crate) struct Feed {
     /// The coupling back from every excited state (P ← E): what the feed's light does to an excited amplitude at another
     /// replica (a P-layer component's emitted leg).
     pub emitted: Mat,
-    pub t: Mat,
 }
 
-/// One replica folded: its frequency, Q_f, the sum of its feeds' W, W', T, and T2 (module documentation).
+/// One replica folded: its frequency, Q_f, the sum of its feeds' W and W', its response T (module documentation).
 #[derive(Clone, Debug)]
 pub(crate) struct Folded {
     pub frequency: f64,
@@ -146,7 +145,6 @@ pub(crate) struct Folded {
     pub w: Mat,
     pub back: Mat,
     pub t: Mat,
-    pub t2: Mat,
     /// K_f = (H_E − (i/2)D) on Q_f and its Schur form.
     kq: Mat,
     k: Schur,
@@ -170,60 +168,174 @@ pub(crate) struct Fold {
     pub iterations: usize,
     /// The direct entries of P that turn in the frames: (row, column, residual beat Ω, value), the entry ∝ e^{−iΩt}.
     pub turning: Vec<(usize, usize, f64, C64)>,
+    /// Per class and ground state the replica (an index into `replicas`) its drive feeds; the generator's Schur form.
+    driven: Vec<Vec<Option<usize>>>,
+    schur: Schur,
 }
 
-/// A Schur form A = Q S Q† (S upper triangular row by row, Q column by column: linalg.rs `schur`).
+/// A Schur form A = Q S Q†, block by block (`Schur::of`): per block of the states A's entries join, its states, its
+/// place in the form's order and its own S (upper triangular, row by row) and Q (column by column, on its states); the
+/// whole S row by row in the form's order (block-diagonal).
 #[derive(Clone, Debug)]
 struct Schur {
     n: usize,
+    blocks: Vec<SchurBlock>,
+    s: Vec<C64>,
+}
+
+#[derive(Clone, Debug)]
+struct SchurBlock {
+    states: Vec<usize>,
+    start: usize,
     s: Vec<C64>,
     q: Vec<C64>,
 }
 
 impl Schur {
+    /// The Schur form of a square matrix, block by block: the states its entries join (the connected components of its
+    /// pattern, a ↔ b where either entry is not zero) are decomposed apart (linalg.rs `schur`) and laid one after another
+    /// -- block-diagonal and each block upper triangular is upper triangular, Q block-diagonal on the blocks' states is
+    /// unitary --: exactly the whole one's form, its work the blocks' (the excited block's hyperfine and magnetic
+    /// sublevels that nothing couples), and so every product with it.
     fn of(a: &Mat) -> Option<Schur> {
         let n = a.rows;
-        let (mut s, mut q) = (a.data.clone(), vec![C64::ZERO; n * n]);
-        let (mut v, mut sums) = (vec![C64::ZERO; n], vec![C64::ZERO; n]);
-        if n > 0 {
-            schur(&mut s, &mut q, &mut v, &mut sums, n)?;
+        let mut block: Vec<usize> = (0..n).collect();
+        for i in 0..n {
+            for j in 0..n {
+                if a[(i, j)] != C64::ZERO {
+                    let (x, y) = (block[i], block[j]);
+                    if x != y {
+                        block.iter_mut().filter(|z| **z == y).for_each(|z| *z = x);
+                    }
+                }
+            }
         }
-        Some(Schur { n, s, q })
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&i| (block[i], i));
+        let (mut blocks, mut dense) = (vec![], vec![C64::ZERO; n * n]);
+        let mut at = 0;
+        while at < n {
+            let end = (at..n).find(|&k| block[order[k]] != block[order[at]]).unwrap_or(n);
+            let states = order[at..end].to_vec();
+            let m = states.len();
+            let mut h: Vec<C64> = (0..m * m).map(|x| a[(states[x / m], states[x % m])]).collect();
+            let (mut q, mut v, mut sums) = (vec![C64::ZERO; m * m], vec![C64::ZERO; m], vec![C64::ZERO; m]);
+            schur(&mut h, &mut q, &mut v, &mut sums, m)?;
+            for x in 0..m {
+                for y in 0..m {
+                    dense[(at + x) * n + at + y] = h[x * m + y];
+                }
+            }
+            blocks.push(SchurBlock { states, start: at, s: h, q });
+            at = end;
+        }
+        Some(Schur { n, blocks, s: dense })
     }
-    fn q(&self, i: usize, k: usize) -> C64 {
-        self.q[k * self.n + i]
+    /// The Schur form of the adjoint from this one: A† = Q S† Q†, S† lower triangular, so with each block's columns of Q
+    /// in reversed order it is upper triangular -- no decomposition.
+    fn adjoint(&self) -> Schur {
+        let n = self.n;
+        let mut dense = vec![C64::ZERO; n * n];
+        let blocks = self
+            .blocks
+            .iter()
+            .map(|b| {
+                let m = b.states.len();
+                let s: Vec<C64> = (0..m * m).map(|x| b.s[(m - 1 - x % m) * m + (m - 1 - x / m)].conj()).collect();
+                let q: Vec<C64> = (0..m * m).map(|x| b.q[(m - 1 - x / m) * m + x % m]).collect();
+                for x in 0..m {
+                    for y in 0..m {
+                        dense[(b.start + x) * n + b.start + y] = s[x * m + y];
+                    }
+                }
+                SchurBlock { states: b.states.clone(), start: b.start, s, q }
+            })
+            .collect();
+        Schur { n, blocks, s: dense }
     }
-    /// Q† x (x with n rows).
+    /// Q† x (x with n rows), into the form's order.
     fn left_in(&self, x: &Mat) -> Mat {
-        Mat::from_fn(self.n, x.cols, |k, j| (0..self.n).map(|i| self.q(i, k).conj() * x[(i, j)]).sum())
+        let mut out = Mat::zeros(self.n, x.cols);
+        for b in &self.blocks {
+            let m = b.states.len();
+            for k in 0..m {
+                for (i, &state) in b.states.iter().enumerate() {
+                    let c = b.q[k * m + i].conj();
+                    if c != C64::ZERO {
+                        for j in 0..x.cols {
+                            let v = x.data[state * x.cols + j];
+                            out.data[(b.start + k) * x.cols + j] += c * v;
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
     /// Q y.
     fn left_out(&self, y: &Mat) -> Mat {
-        Mat::from_fn(self.n, y.cols, |i, j| (0..self.n).map(|k| self.q(i, k) * y[(k, j)]).sum())
+        let mut out = Mat::zeros(self.n, y.cols);
+        for b in &self.blocks {
+            let m = b.states.len();
+            for (i, &state) in b.states.iter().enumerate() {
+                for k in 0..m {
+                    let c = b.q[k * m + i];
+                    if c != C64::ZERO {
+                        for j in 0..y.cols {
+                            let v = y.data[(b.start + k) * y.cols + j];
+                            out.data[state * y.cols + j] += c * v;
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
-    /// x Q (x with n columns).
+    /// x Q (x with n columns), into the form's order.
     fn right_in(&self, x: &Mat) -> Mat {
-        Mat::from_fn(x.rows, self.n, |i, k| (0..self.n).map(|j| x[(i, j)] * self.q(j, k)).sum())
+        let mut out = Mat::zeros(x.rows, self.n);
+        for b in &self.blocks {
+            let m = b.states.len();
+            for r in 0..x.rows {
+                for k in 0..m {
+                    out.data[r * self.n + b.start + k] = b.states.iter().enumerate().map(|(i, &state)| x.data[r * x.cols + state] * b.q[k * m + i]).sum();
+                }
+            }
+        }
+        out
     }
     /// y Q†.
     fn right_out(&self, y: &Mat) -> Mat {
-        Mat::from_fn(y.rows, self.n, |i, j| (0..self.n).map(|k| y[(i, k)] * self.q(j, k).conj()).sum())
-    }
-    /// (σ − S)⁻¹ y in place (back substitution).
-    fn shifted_solve(&self, sigma: C64, y: &mut [C64]) {
-        for m in (0..self.n).rev() {
-            let mut acc = y[m];
-            for k in m + 1..self.n {
-                acc += self.s[m * self.n + k] * y[k];
+        let mut out = Mat::zeros(y.rows, self.n);
+        for b in &self.blocks {
+            let m = b.states.len();
+            for r in 0..y.rows {
+                for (i, &state) in b.states.iter().enumerate() {
+                    out.data[r * self.n + state] = (0..m).map(|k| y.data[r * y.cols + b.start + k] * b.q[k * m + i].conj()).sum();
+                }
             }
-            y[m] = acc / (sigma - self.s[m * self.n + m]);
+        }
+        out
+    }
+    /// (σ − S)⁻¹ y in place (back substitution, block by block).
+    fn shifted_solve(&self, sigma: C64, y: &mut [C64]) {
+        for b in &self.blocks {
+            let m = b.states.len();
+            for row in (0..m).rev() {
+                let mut acc = y[b.start + row];
+                for k in row + 1..m {
+                    acc += b.s[row * m + k] * y[b.start + k];
+                }
+                y[b.start + row] = acc / (sigma - b.s[row * m + row]);
+            }
         }
     }
     /// (σ − A)⁻¹ v.
     fn resolvent(&self, sigma: C64, v: &[C64]) -> Vec<C64> {
-        let mut y: Vec<C64> = (0..self.n).map(|k| (0..self.n).map(|i| self.q(i, k).conj() * v[i]).sum()).collect();
+        let column = Mat { rows: self.n, cols: 1, data: v.to_vec() };
+        let mut y = self.left_in(&column).data;
         self.shifted_solve(sigma, &mut y);
-        (0..self.n).map(|i| (0..self.n).map(|k| self.q(i, k) * y[k]).sum()).collect()
+        self.left_out(&Mat { rows: self.n, cols: 1, data: y }).data
     }
 }
 
@@ -240,11 +352,18 @@ fn solve_sylvester(left: &Schur, l: C64, right: &Schur, r: C64, w: &Mat) -> Mat 
     let mut column = vec![C64::ZERO; left.n];
     for j in 0..n {
         for m in 0..left.n {
-            column[m] = fq[(m, j)] - (0..j).map(|i| right.s[i * n + j] * y[(m, i)]).sum::<C64>();
+            let mut acc = fq.data[m * n + j];
+            for i in 0..j {
+                let c = right.s[i * n + j];
+                if c != C64::ZERO {
+                    acc -= c * y.data[m * n + i];
+                }
+            }
+            column[m] = acc;
         }
         left.shifted_solve(right.s[j * n + j] + r - l, &mut column);
         for m in 0..left.n {
-            y[(m, j)] = column[m];
+            y.data[m * n + j] = column[m];
         }
     }
     left.left_out(&right.right_out(&y))
@@ -358,7 +477,7 @@ pub(crate) fn fold(levels: &Levels, classes: &[Class], slow: &Slow, replicas: &R
                 forms.push((q.clone(), kq, k));
             }
             let (_, kq, k) = forms.iter().find(|x| x.0 == q).expect("its form");
-            Folded { frequency: f, q, feeds: vec![], w: Mat::zeros(0, 0), back: Mat::zeros(0, 0), t: Mat::zeros(0, 0), t2: Mat::zeros(0, 0), kq: kq.clone(), k: k.clone() }
+            Folded { frequency: f, q, feeds: vec![], w: Mat::zeros(0, 0), back: Mat::zeros(0, 0), t: Mat::zeros(0, 0), kq: kq.clone(), k: k.clone() }
         })
         .collect();
     for (c, class) in classes.iter().enumerate() {
@@ -374,7 +493,7 @@ pub(crate) fn fold(levels: &Levels, classes: &[Class], slow: &Slow, replicas: &R
                 }
                 let back = w.adjoint();
                 let emitted = Mat::from_fn(n, excited, |s, e| if columns.contains(&s) { beam.coupling[(e, s)].conj() } else { C64::ZERO });
-                rep.feeds.push(Feed { class: Some(c), beam: l, wave: beam.wave, w, back, emitted, t: Mat::zeros(0, 0) });
+                rep.feeds.push(Feed { class: Some(c), beam: l, wave: beam.wave, w, back, emitted });
             }
         }
     }
@@ -389,9 +508,11 @@ pub(crate) fn fold(levels: &Levels, classes: &[Class], slow: &Slow, replicas: &R
             continue;
         }
         let emitted = Mat::from_fn(n, excited, |s, e| if s >= ground && columns.contains(&(s - ground)) { k_full[(slow.explicit[s - ground], e)] } else { C64::ZERO });
-        rep.feeds.push(Feed { class: None, beam: 0, wave: [0.0; 3], w, back, emitted, t: Mat::zeros(0, 0) });
+        rep.feeds.push(Feed { class: None, beam: 0, wave: [0.0; 3], w, back, emitted });
     }
+    let kept: Vec<usize> = (0..folded.len()).filter(|&r| !folded[r].feeds.is_empty()).collect();
     folded.retain(|rep| !rep.feeds.is_empty());
+    let driven: Vec<Vec<Option<usize>>> = replicas.driven.iter().map(|row| row.iter().map(|&r| kept.iter().position(|&k| k == r)).collect()).collect();
     for rep in folded.iter_mut() {
         let (mut w, mut back) = (Mat::zeros(rep.q.len(), n), Mat::zeros(n, rep.q.len()));
         for feed in &rep.feeds {
@@ -421,14 +542,10 @@ pub(crate) fn fold(levels: &Levels, classes: &[Class], slow: &Slow, replicas: &R
     let sh = Schur::of(&h).expect("the Schur form of P's generator");
     for rep in folded.iter_mut() {
         rep.t = sylvester(&rep.k, &sh, rep.frequency, &rep.w);
-        rep.t2 = sylvester(&rep.k, &sh, rep.frequency, &rep.t);
-        for feed in rep.feeds.iter_mut() {
-            feed.t = sylvester(&rep.k, &sh, rep.frequency, &feed.w);
-        }
     }
     let mut eigen = Eigen::default();
     eigen.decompose(&h);
-    Fold { ground, explicit: slow.explicit.clone(), frames: slow.frames.clone(), direct: a, generator: h, replicas: folded, eigen, exists, iterations, turning }
+    Fold { ground, explicit: slow.explicit.clone(), frames: slow.frames.clone(), direct: a, generator: h, replicas: folded, eigen, exists, iterations, turning, driven, schur: sh }
 }
 
 /// One P-layer component's reading (criterion two): its size a in H's eigenbasis, its distance δ = Ω + λ_p − λ_p',
@@ -529,15 +646,16 @@ impl Fold {
                     continue;
                 }
                 for feed in &rep.feeds {
+                    let response = sylvester(&rep.k, &self.schur, rep.frequency, &feed.w);
                     for back in &other.feeds {
                         // The other replica's light emitted from this one's excited amplitude: its coupling back from Q_f.
-                        let m = Mat::from_fn(n, n, |r, c| rep.q.iter().enumerate().map(|(y, &e)| back.emitted[(r, e)] * feed.t[(y, c)]).sum());
+                        let m = Mat::from_fn(n, n, |r, c| rep.q.iter().enumerate().map(|(y, &e)| back.emitted[(r, e)] * response[(y, c)]).sum());
                         if m.max_abs() == 0.0 {
                             continue;
                         }
                         let beat = rep.frequency - other.frequency - (doppler(feed.wave) - doppler(back.wave));
                         let e = eigenbasis(&m);
-                        let floor = rounding(n + rep.q.len()) * back.emitted.frobenius() * feed.t.frobenius();
+                        let floor = rounding(n + rep.q.len()) * back.emitted.frobenius() * response.frobenius();
                         for p in 0..n {
                             for q in 0..n {
                                 let size = e[(q, p)].abs();
@@ -616,6 +734,91 @@ impl Fold {
         out
     }
 
+    /// The response of class c's coupling `coupling` (E × P's ground states: a basis vector of its field, the
+    /// responses being linear in the coupling) at the fold's generator, and its frequency partner: per replica the class
+    /// drives, the Sylvester solutions T and T2 (module documentation) of the coupling's columns that feed it, on every
+    /// excited state (zero off Q_f) and every P state (E × P).
+    pub(crate) fn respond(&self, class: usize, coupling: &Mat) -> (Mat, Mat) {
+        let (n, excited) = (self.size(), coupling.rows);
+        let (mut t, mut t2) = (Mat::zeros(excited, n), Mat::zeros(excited, n));
+        for (r, rep) in self.replicas.iter().enumerate() {
+            let columns: Vec<usize> = (0..self.ground).filter(|&g| self.driven[class][g] == Some(r)).collect();
+            if columns.is_empty() {
+                continue;
+            }
+            let w = Mat::from_fn(rep.q.len(), n, |i, s| if columns.contains(&s) { coupling[(rep.q[i], s)] } else { C64::ZERO });
+            if w.max_abs() == 0.0 {
+                continue;
+            }
+            let first = sylvester(&rep.k, &self.schur, rep.frequency, &w);
+            let second = sylvester(&rep.k, &self.schur, rep.frequency, &first);
+            for (i, &e) in rep.q.iter().enumerate() {
+                for s in 0..n {
+                    t[(e, s)] += first[(i, s)];
+                    t2[(e, s)] += second[(i, s)];
+                }
+            }
+        }
+        (t, t2)
+    }
+
+    /// The normalization of P's coordinates (ELIMINATION.md §2: the first order's renormalization, here whole): the
+    /// slow state (x, T x) has the norm x†(1 + X)x, so its normalized coordinates are y = S x, S = (1 + X)^{1/2}; returns
+    /// S and S⁻¹ (X Hermitian and positive: its eigenbasis).
+    pub(crate) fn normalization(&self) -> (Mat, Mat) {
+        let x = crate::linalg::hermitian_eigen(&self.metric());
+        let n = self.size();
+        let make = |f: &dyn Fn(f64) -> f64| Mat::from_fn(n, n, |i, j| (0..n).map(|k| x.vectors[(i, k)] * f(x.values[k].max(0.0)) * x.vectors[(j, k)].conj()).sum());
+        (make(&|v| (1.0 + v).sqrt()), make(&|v| 1.0 / (1.0 + v).sqrt()))
+    }
+
+    /// What the generator in the normalized coordinates, S H S⁻¹, holds beyond its direct entries and the fold's terms
+    /// as the assembly takes them (the static ones, W'_f T_f S⁻¹, field by field): Herm(S H S⁻¹) − Herm(A) −
+    /// Herm(Σ_f W'_f T_f S⁻¹) -- the normalization's own part, of the order of the excited share X times the levels;
+    /// held at its point's value along a step's path (assemble.rs).
+    pub(crate) fn held(&self, s: &Mat, s_inverse: &Mat) -> Mat {
+        let mut out = s.product(&self.generator).product(s_inverse).hermitian_part();
+        out.add_scaled(-C64::ONE, &self.direct.hermitian_part());
+        for rep in &self.replicas {
+            out.add_scaled(-C64::ONE, &rep.back.product(&rep.t).product(s_inverse).hermitian_part());
+        }
+        out
+    }
+
+    /// The landing map in the normalized coordinates: a bare P state f lands at y = S x, x = (1 + Σ_f S_f T_f)⁻¹ f
+    /// (`landed`): the matrix S (1 + Σ S_f T_f)⁻¹. None where the left iteration does not settle.
+    pub(crate) fn landing(&self, s: &Mat) -> Option<Mat> {
+        let left = self.left_operators()?;
+        let n = self.size();
+        let mut out = Mat::zeros(n, n);
+        for j in 0..n {
+            let f: Vec<C64> = (0..n).map(|i| if i == j { C64::ONE } else { C64::ZERO }).collect();
+            let x = self.landed_with(&left, &f)?;
+            let y = s.apply(&x);
+            for i in 0..n {
+                out[(i, j)] = y[i];
+            }
+        }
+        Some(out)
+    }
+
+    /// The complex multiply-adds the fold took, counted by its algorithm (decide.rs, SPEC §5.1): a Schur form per
+    /// replica's Q (the QR iteration's ten sweeps of q³) and per iteration the generator's (ten of n³) and each replica's
+    /// Sylvester solve (the two changes of basis, q² n + q n², and the back substitutions, q² n / 2 + q n²); the
+    /// eigendecomposition and the normalization (ten and two of n³).
+    pub(crate) fn work(&self) -> f64 {
+        let n = self.size() as f64;
+        let schur: f64 = self.replicas.iter().map(|r| 10.0 * (r.q.len() as f64).powi(3)).sum();
+        let solves: f64 = self.replicas.iter().map(|r| { let q = r.q.len() as f64; 1.5 * q * q * n + 2.0 * q * n * n }).sum();
+        schur + self.iterations as f64 * (10.0 * n * n * n + solves) + 12.0 * n * n * n
+    }
+
+    /// The complex multiply-adds of one basis coupling's response and its partner (`respond`) with its normalization.
+    pub(crate) fn response_work(&self) -> f64 {
+        let n = self.size() as f64;
+        self.replicas.iter().map(|r| { let q = r.q.len() as f64; 2.0 * (1.5 * q * q * n + 2.0 * q * n * n) + 2.0 * q * n * n }).sum()
+    }
+
     /// The excited share X = Σ_f T_f†T_f (the metric of P's coordinates: the slow state (x, T x) has the norm
     /// x†(1 + X)x).
     pub(crate) fn metric(&self) -> Mat {
@@ -633,11 +836,13 @@ impl Fold {
     /// With them the fast invariant subspace is (−S y, y), y on Q. None where the left iteration does not settle.
     pub(crate) fn left_operators(&self) -> Option<Vec<Mat>> {
         let n = self.size();
-        let adjoints: Vec<Schur> = self.replicas.iter().map(|rep| Schur::of(&rep.kq.adjoint()).expect("the Schur form of the excited block")).collect();
+        let adjoints: Vec<Schur> = self.replicas.iter().map(|rep| rep.k.adjoint()).collect();
         let mut s: Vec<Mat> = self.replicas.iter().map(|rep| Mat::zeros(n, rep.q.len())).collect();
         let excited = self.replicas.iter().map(|rep| rep.q.len()).max().unwrap_or(1);
+        // From the right generator, which the left one is similar to, M = (1 + ST) H (1 + ST)⁻¹: within the excited share
+        // X of it.
         let (_, _, settled) = settle(
-            &self.direct,
+            &self.generator,
             |m| {
                 let sm = Schur::of(&m.adjoint()).expect("the Schur form of P's left generator");
                 let (mut next, mut scale) = (self.direct.clone(), self.direct.frobenius());
@@ -694,7 +899,7 @@ impl Fold {
                 continue;
             }
             let k = &rep.k;
-            let kh = Schur::of(&rep.kq.adjoint())?;
+            let kh = k.adjoint();
             let identity = Mat::from_fn(nq, nq, |i, j| if i == j { C64::new(0.0, -1.0) } else { C64::ZERO });
             let lyapunov = solve_sylvester(&kh, C64::ZERO, k, C64::ZERO, &identity);
             let mut b = rep.t.clone();
@@ -773,7 +978,7 @@ pub(crate) fn share() -> f64 {
 /// (request.rs `OutsideForm`, its value at the focus taken out of H0), the decay and the emission, and the classes --
 /// per frequency of the light its co-rotating part at δ_ω and its counter-rotating part at −(δ_ω + 2ν_frame), each
 /// beam's coupling at its amplitude there (the counter-rotating one at its conjugate, its wave vector −k).
-pub(crate) fn system(request: &crate::request::Request, light: &crate::field::Light, r: [f64; 3]) -> (Levels, Vec<Class>) {
+pub(crate) fn system(request: &crate::request::Request, light: &crate::field::Light, r: [f64; 3]) -> (Levels, Vec<Class>, Vec<(usize, bool)>) {
     use crate::request::{GROUND, STATES};
     let amplitudes = light.amplitudes(r);
     let focus = light.amplitudes([0.0; 3]);
@@ -799,8 +1004,8 @@ pub(crate) fn system(request: &crate::request::Request, light: &crate::field::Li
     let levels = Levels { ground: h.block(&ground, &ground), excited: h.block(&excited, &excited), decay, emission };
     let omega = |index: &[i32]| std::f64::consts::TAU * index.iter().zip(&request.frequencies_mhz).map(|(&n, f)| n as f64 * f).sum::<f64>();
     let frame = std::f64::consts::TAU * request.frame_frequencies_mhz[GROUND];
-    let mut classes = vec![];
-    for f in &light.frequencies {
+    let (mut classes, mut sources) = (vec![], vec![]);
+    for (w, f) in light.frequencies.iter().enumerate() {
         let delta = omega(&f.index);
         for counter in [false, true] {
             let beams = f
@@ -816,10 +1021,123 @@ pub(crate) fn system(request: &crate::request::Request, light: &crate::field::Li
                 .collect::<Vec<_>>();
             if !beams.is_empty() {
                 classes.push(Class { nu: if counter { -(delta + 2.0 * frame) } else { delta }, beams });
+                sources.push((w, counter));
             }
         }
     }
-    (levels, classes)
+    (levels, classes, sources)
+}
+
+/// Per class the remainder of its fold taken at the bare levels instead of the point's (ELIMINATION.md §2: the bare
+/// levels' fold is this function at a coarser point): of each ground-like eigenstate p, its dominant ground state g at
+/// its bare energy E_g (H0's, `bare`, in the frames), ‖[R(E_g + f) − R(λ_p + f)] W_c r_p‖ / ‖R(λ_p + f) W_c r_p‖ over
+/// the class's replicas, the largest -- where it is within what no output resolves the class's fold is its bare
+/// levels' constant (far.rs), at no cost of its own; else at the point.
+pub(crate) fn bare_remainders(fold: &Fold, classes: usize, bare: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0_f64; classes];
+    for p in (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5) {
+        let r = fold.right(p);
+        let g = fold.dominant(p);
+        if g >= fold.ground {
+            continue;
+        }
+        let lambda = fold.eigen.values[p];
+        let level = C64::real(bare[g] - fold.frames[g]);
+        for (c, row) in fold.driven.iter().enumerate() {
+            let (mut num, mut den) = (0.0, 0.0);
+            for (j, rep) in fold.replicas.iter().enumerate() {
+                let columns: Vec<usize> = (0..fold.ground).filter(|&s| row[s] == Some(j)).collect();
+                if columns.is_empty() {
+                    continue;
+                }
+                let feeds: Vec<&Feed> = rep.feeds.iter().filter(|f| f.class == Some(c)).collect();
+                let mut wr = vec![C64::ZERO; rep.q.len()];
+                for f in feeds {
+                    let v = f.w.apply(&r);
+                    wr.iter_mut().zip(&v).for_each(|(a, b)| *a += *b);
+                }
+                let f = C64::real(rep.frequency);
+                let (at, bared) = (rep.k.resolvent(lambda + f, &wr), rep.k.resolvent(level + f, &wr));
+                num += at.iter().zip(&bared).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>();
+                den += at.iter().map(|a| a.norm_sqr()).sum::<f64>();
+            }
+            if den > 0.0 {
+                out[c] = out[c].max((num / den).sqrt());
+            }
+        }
+    }
+    out
+}
+
+impl super::Model {
+    /// The model's prior (ELIMINATION.md §3–§4, the brief's "先验"): at the reach's own atoms `points` (position,
+    /// velocity) the point's closure (`closure`) from what is kept already, the atoms together until no atom adds
+    /// anything; and per class its fold's route, at the point or at its bare levels (`bare_remainders`, within the share
+    /// no output resolves at every atom: `estimate::unseen`). What it keeps, as the model's units: every drive of a
+    /// class folded at the point (`Unit::Bare`: its fold taken at the levels there), the explicit drives into the
+    /// blocks (`Unit::Drive`), the P-layer links of two ground states (`Unit::Term`, their lab beat exactly).
+    pub(crate) fn prior(&self, request: &crate::request::Request, points: &[([f64; 3], [f64; 3])]) -> Vec<super::Unit> {
+        use rayon::prelude::*;
+        let blocks = blocks(request);
+        let bare = super::far::energies(request);
+        let unseen = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
+        let mut kept = Kept::default();
+        let mut routes: Vec<f64> = vec![];
+        let mut sources: Vec<(usize, bool)> = vec![];
+        loop {
+            let read: Vec<(Kept, Vec<f64>, Vec<(usize, bool)>)> = points
+                .par_iter()
+                .map(|&(r, v)| {
+                    let (levels, classes, sources) = system(request, &self.light, r);
+                    let closed = closure(&levels, &classes, &blocks, v, &kept);
+                    let routes = bare_remainders(&closed.fold, classes.len(), &bare);
+                    (closed.kept, routes, sources)
+                })
+                .collect();
+            let before = (kept.blocks.len(), kept.links.len());
+            for (k, r, s) in read {
+                for b in k.blocks {
+                    if !kept.blocks.contains(&b) {
+                        kept.blocks.push(b);
+                    }
+                }
+                for l in k.links {
+                    if !kept.links.contains(&l) {
+                        kept.links.push(l);
+                    }
+                }
+                if routes.len() < r.len() {
+                    routes.resize(r.len(), 0.0);
+                }
+                routes.iter_mut().zip(&r).for_each(|(a, b)| *a = a.max(*b));
+                sources = s;
+            }
+            if (kept.blocks.len(), kept.links.len()) == before {
+                break;
+            }
+        }
+        let mut units = vec![];
+        let component = |c: usize| super::Component { frequency: sources[c].0, counter: sources[c].1 };
+        for (c, &rho) in routes.iter().enumerate() {
+            if sources[c].1 || rho <= unseen {
+                continue;
+            }
+            for &(comp, e, g) in self.driven.iter().filter(|d| d.0 == component(c)) {
+                units.push(super::Unit::Bare { component: comp, excited: e, ground: g });
+            }
+        }
+        for l in &kept.links {
+            match l.classes {
+                (None, Some(c)) if l.a >= crate::request::GROUND => units.push(super::Unit::Drive { component: component(c), excited: l.a, ground: l.b }),
+                (emitted, absorbed) if l.a < crate::request::GROUND && l.b < crate::request::GROUND => {
+                    let beat = |c: Option<usize>| c.map_or(self.axes.zero(), |c| self.frequency(component(c)));
+                    units.push(super::Unit::Term { a: l.a, b: l.b, beat: beat(emitted).plus(-1, &beat(absorbed)) });
+                }
+                _ => {}
+            }
+        }
+        units
+    }
 }
 
 /// A request's excited hyperfine blocks F' (indices into E): the states of one manifold and F, the unit a partition
@@ -1030,6 +1348,32 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
                 }
             } else {
                 mixing = mixing.max(m);
+            }
+        }
+        // The static couplings of two P states of one frame (H's entries, exact in the fold): a component at the lab beat
+        // zero, its distance the two states' eigenvalues apart -- of the eigenstates that hold most of each (one eigenstate:
+        // no distance) --, explicit where it mixes them beyond √share: the states are one cluster's.
+        let hermitian = fold.generator.hermitian_part();
+        let held_most = |x: usize| (0..n).max_by(|&p, &q| fold.eigen.vectors[(x, p)].norm_sqr().total_cmp(&fold.eigen.vectors[(x, q)].norm_sqr())).unwrap_or(0);
+        let state = |x: usize| if x < ground { x } else { ground + fold.explicit[x - ground] };
+        let floor = rounding(n + excited) * hermitian.max_abs();
+        for x in 0..n {
+            for y in 0..n {
+                let a = hermitian[(x, y)].abs();
+                if x == y || a <= floor || !same(fold.frames[x], fold.frames[y]) {
+                    continue;
+                }
+                let (px, py) = (held_most(x), held_most(y));
+                let distance = if px == py { 0.0 } else { (fold.eigen.values[px].re - fold.eigen.values[py].re).abs() };
+                let link = Link { a: state(x), b: state(y), classes: (None, None) };
+                if !(a <= share.sqrt() * distance) {
+                    if !kept.links.contains(&link) {
+                        kept.links.push(link);
+                        grew = true;
+                    }
+                } else {
+                    mixing = mixing.max(a / distance);
+                }
             }
         }
         for x in fold.photons(levels) {
