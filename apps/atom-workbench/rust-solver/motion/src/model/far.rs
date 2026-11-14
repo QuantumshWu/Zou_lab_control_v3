@@ -48,8 +48,10 @@
 //! rate with |U|²/β is 14 % low at β = 0.5, 38 % at 0.1, 82 % at 0.02, with a pole at β = 0 where nothing is resonant;
 //! with the complex one-photon |U|²/(β − iΓ/2) -- the reading of the transient, z = E_e − iΓ/2, which lives 1/Γ -- 16 to
 //! 18 % low; with |U|²/d_R within 0.1 to 3.8 %, the pair's own next order. The pole of 1/d_R is the Raman resonance, where
-//! the pair is no fold: the drive is a P-layer link, which criterion two takes explicit where 2(a/d_R)² is beyond the
-//! share (model.rs `Model::settled`; elim.rs `errors` reads its error on the actual spectrum where it is folded). Where
+//! the pair is no fold: where the bare fold's ratio 2a/|d_R| is not below one it is not taken and the drive goes up to
+//! its fold at the atom (model.rs `Model::settled`); where it is, its next order 2(a/d_R)² is read at the states, at their
+//! own amplitude and distance (elim.rs `Model::bare_mixing`), and the keep rule takes it to the atom where that leaves
+//! more than the share. Where
 //! |β| ≫ |ε| the two distances are one.
 //!
 //! # The static form of a frequency, per pair of beams
@@ -163,11 +165,12 @@ pub(crate) fn second_order(e: &[f64], read: &[f64], a: Fold, nu_a: f64, b: Fold,
             let mut z = C64::ZERO;
             for w in 0..GROUND {
                 // Each half holds one drive's own denominator: the emitted leg's g ← w, the absorbed leg's f ← w. An
-                // explicit state, read at its cluster's ground energy (not its own), is read only where criterion two
-                // folds the drive's link to it, 2(a/d)² within the share (model.rs `Model::settled`): never at d = 0.
+                // explicit state, read at its cluster's ground energy (not its own), is read only where the bare fold
+                // exists over the light, 2a/|d| < 1 (model.rs `Model::settled`; else the drive is folded at the atom):
+                // never at d = 0.
                 let distance = |x: usize, nu: f64| -> f64 {
                     let d = read[x - GROUND] - e[w] - nu;
-                    assert!(d != 0.0 || read[x - GROUND] == e[x], "a fold onto an explicit state at a two-photon distance of nothing (state {x}, ground {w}): such a drive is explicit, never folded");
+                    assert!(d != 0.0 || read[x - GROUND] == e[x], "a fold onto an explicit state at a two-photon distance of nothing (state {x}, ground {w}): such a drive is folded at the atom, never with the bare levels");
                     d
                 };
                 let emitted = b.coupled[(f, w)] * a.bare[(g, w)].conj();

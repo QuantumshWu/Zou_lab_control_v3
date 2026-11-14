@@ -1179,3 +1179,58 @@ fn the_beating_groups_are_the_generator_s_along_a_path() {
     eprintln!("{groups} candidate tone pairs on {clusters} clusters");
     assert!(groups > 0);
 }
+
+/// The readout inverts the generator's own S (readout.rs `Model::readout_of`; `Model::bent_at`): the 1D PGC at 3 G
+/// (PGC1D_TILT_0) with every near light at the atom, the prior's units, and the series' first order and the
+/// normalization's kept, so that S bends the state. At two points the readout's S⁻¹ -- Σ_{j≤J} b_j X^j of the one
+/// metric's forms' values there and the plan's field components -- is the matrix the photons and the landing take
+/// (`Model::quartic`, with its gradients), to rounding; and the ground populations the readout reads of a state ψ are
+/// those of x = S⁻¹ψ, in ratio (the readout divides them by the sum with the folded excited populations).
+#[test]
+fn the_readout_inverts_the_generator_s_own_normalization() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC1D_TILT_0.json");
+    let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let request = Request::from_native(&line).unwrap();
+    let light = Light::new(&request);
+    let bare = Model::new(&request, &light, &[]).unwrap();
+    let kept: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).flat_map(|frequency| bare.bare_units(Component { frequency, counter: false })).collect();
+    let points = [([0.05, -0.1, 0.03], [0.09, 0.045, 0.063]), ([0.0; 3], [0.0; 3])];
+    let prior = Model::new(&request, &light, &kept).unwrap().prior(&points);
+    let mut model = Model::new(&request, &light, &[kept, prior, vec![Unit::Series, Unit::Normalization { order: 1 }]].concat()).unwrap();
+    model.referenced(&points);
+    let cluster = model.cluster_of(GROUND - 1);
+    let plan = model.plan(cluster, &model.running());
+    let fourth = plan.fourth.as_ref().filter(|f| f.bends()).expect("S bends the state");
+    let (n, size) = (fourth.n, fourth.n * fourth.n);
+    assert!(n > 1, "a cluster of several states");
+    let mut stream = Stream::new(11, Purpose::Initial, 0, 0);
+    for r in [[0.05, -0.1, 0.03], [-0.21, 0.13, 0.4]] {
+        // The generator's at the point, as the photons and the landing take it.
+        let mut site = Held::<Site>::take();
+        let table = model.pointed(&plan, None, r, &mut site);
+        model.quartic(&plan, fourth, table, Some(r), &mut site, false, false);
+        let generator: Vec<C64> = Model::quartic_read(|q| q.data[BENT * size..(BENT + 1) * size].to_vec());
+        // The readout's.
+        let mut point = Held::<Site>::take();
+        model.light.amplitudes_into(r, 0, |_| true, &mut point.beams);
+        let exact = model.near_exact(&plan, &point.beams, 0);
+        model.normal_read(&plan, None, Some(&exact), &mut point, false);
+        let (mut scratch, mut bent) = (vec![C64::ZERO; 2 * size], vec![C64::ZERO; size]);
+        model.bent_at(&plan, fourth, &point.beams, &point.normal, &mut scratch, &mut bent);
+        let scale = generator.iter().fold(0.0_f64, |m, z| m.max(z.abs()));
+        let apart = generator.iter().zip(&bent).fold(0.0_f64, |m, (a, b)| m.max((*a - *b).abs()));
+        let identity = generator.iter().enumerate().fold(0.0_f64, |m, (i, z)| m.max((*z - if i % (n + 1) == 0 { C64::ONE } else { C64::ZERO }).abs()));
+        println!("r {r:?}: the readout's S⁻¹ against the generator's {apart:.2e} (S⁻¹ − 1 of size {identity:.2e})");
+        assert!(identity > 0.0 && apart <= rounding(4 * size) * scale, "the readout's S⁻¹ {apart:e} from the generator's");
+        // The populations of ψ are x's, x = S⁻¹ψ.
+        let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
+        let x: Vec<C64> = (0..n).map(|i| (0..n).map(|j| generator[i * n + j] * psi[j]).sum()).collect();
+        let read = model.readout(cluster, &crate::model::Point { r, kappa: [0.0; 3], t: 0.0 }, &psi);
+        let c = &model.clusters()[cluster];
+        let (first, rest) = (c.states[0], &c.states[1..c.ground]);
+        for (p, &s) in rest.iter().enumerate() {
+            let (shown, own) = (read[s] / read[first], x[p + 1].norm_sqr() / x[0].norm_sqr());
+            assert!((shown - own).abs() <= 1e-12 * own.max(1.0), "ground state {s}: read {shown} against x's {own}");
+        }
+    }
+}

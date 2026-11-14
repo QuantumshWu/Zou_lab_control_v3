@@ -32,6 +32,39 @@ pub(crate) fn decay_rate(h: &Mat, psi: &[C64]) -> f64 {
     inner(psi, &decay.apply(psi)).re / norm_sqr(psi)
 }
 
+/// The steps of the difference quotients (`converged`): 0.1 µm halved seven times, down to 8·10⁻⁴ µm.
+pub(crate) fn steps() -> Vec<f64> {
+    (0..8).map(|k| 0.1 / f64::powi(2.0, k)).collect()
+}
+
+/// A derivative of order `order` (1 or 2) from its difference quotients at the steps h₀/2^k (`steps`), the step chosen by
+/// their convergence: the truncation falls as h², the values' rounding ε grows as ε/h^order, and what the values hold
+/// besides (their rounding is not smooth) jitters the quotients at any step. Each quotient's error is the largest
+/// difference from the quotients within two steps of it, and no less than ε/h^order at its step, ε read off the finest
+/// two quotients (rounding's alone there); the estimate is the quotient of the least error, with that error. (Two
+/// neighbours alone agree by chance.)
+pub(crate) fn converged(quotients: &[f64], order: i32) -> (f64, f64) {
+    let hs = steps();
+    let n = quotients.len();
+    let rounding = (quotients[n - 1] - quotients[n - 2]).abs() * hs[n - 1].powi(order);
+    (2..n - 2)
+        .map(|k| (quotients[k], (k - 2..=k + 2).map(|j| (quotients[j] - quotients[k]).abs()).fold(rounding / hs[k].powi(order), f64::max)))
+        .fold((quotients[0], f64::INFINITY), |best, x| if x.1 < best.1 { x } else { best })
+}
+
+/// Whether a derivative `jet` is its values' difference (`converged`: estimate and error) on its own scale `scale`: within
+/// four times the difference's error and 10⁻⁸ of that scale -- a gradient's part its own size, a Hessian's diagonal entry
+/// its own, an off-diagonal one the geometric mean of its two axes' (`own`).
+pub(crate) fn agrees(jet: f64, (estimate, error): (f64, f64), scale: f64) -> bool {
+    (jet - estimate).abs() <= 4.0 * error + 1e-8 * scale.max(estimate.abs()).max(jet.abs())
+}
+
+/// The own scale of a Hessian's entry (a, c) (`agrees`): its own size, and for a ≠ c the geometric mean of the two axes'
+/// curvatures -- the scale a symmetric form's off-diagonal entry is a part of.
+pub(crate) fn own(hessian: &dyn Fn(usize, usize) -> f64, a: usize, c: usize) -> f64 {
+    hessian(a, c).abs().max((hessian(a, a) * hessian(c, c)).abs().sqrt())
+}
+
 /// A standard normal deviate from two uniform ones (Box–Muller).
 pub(crate) fn normal(stream: &mut Stream) -> f64 {
     let (u, v) = (stream.uniform(), stream.uniform());

@@ -9,7 +9,7 @@ use crate::model::{Beat, Component, Lights, Model, Point, Sample, Unit, GROUND, 
 use crate::request::Request;
 use crate::step::Middle as _;
 
-use super::testing::{at_the_atom, decay_rate, scene};
+use super::testing::{agrees, at_the_atom, converged, decay_rate, own, scene, steps};
 
 /// The frequency (an index of the light's) of the beam named `id`.
 fn frequency_of(request: &Request, light: &Light, id: &str) -> usize {
@@ -252,12 +252,15 @@ fn a_kept_and_a_folded_drive(name: &str, id: &str) {
 }
 
 /// The potential's expansion is exact with drives folded at the atom in it: on the reported lights (the trap light coherent, every
-/// other light averaged: R3's σ⁺ cooling pair, R5's pump and repump) the gradient is the central difference of the value and the
-/// Hessian that of the gradient, to the differences' own truncation (h² of the third derivative; h = 1e-4 µm) -- the responses
-/// at the atom differentiated twice through their resolvents (jet.rs), not left out.
+/// other light averaged: R3's σ⁺ cooling pair, R5's pump and repump, R4_LIN_1's lin⊥lin cooling and repump on a cluster of
+/// three ground states) each part of the gradient is the difference of the value and each entry of the Hessian that of the
+/// gradient, each on its own scale (`agrees`: the weak axis's curvature on its own, not the tight axis's), the step chosen
+/// by the differences' convergence -- the responses at the atom differentiated twice through their resolvents
+/// (elim.rs `Reference::respond`), not differenced. (Differenced at u^{1/4} ℓ, R4_LIN_1's curvature along the tweezer's
+/// axis read +0.166 rad/µs/µm² of the near light where it is −3.5·10⁻⁴.)
 #[test]
 fn the_expansion_s_derivatives_are_exact_with_drives_at_the_atom() {
-    for (name, ids) in [("R3_DOPPLER", vec!["cool-plus"]), ("R5_PUMP", vec!["pump", "repump"])] {
+    for (name, ids) in [("R3_DOPPLER", vec!["cool-plus"]), ("R5_PUMP", vec!["pump", "repump"]), ("R4_LIN_1", vec!["cool-plus", "repump-plus"])] {
         let request = scene(name);
         let light = Light::new(&request);
         let kept = at_the_atom(&request, &light, &ids.iter().map(|id| frequency_of(&request, &light, id)).collect::<Vec<_>>());
@@ -265,21 +268,198 @@ fn the_expansion_s_derivatives_are_exact_with_drives_at_the_atom() {
         let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
         let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
         let lights = model.reported();
-        let h = 1e-4;
         for r in [[0.11, -0.07, 0.23], [-0.3, 0.2, -0.15]] {
             let q = model.expansion(r, &p, &lights);
             let shifted = |a: usize, s: f64| { let mut x = r; x[a] += s; x };
             for a in 0..3 {
-                let value = (model.potential(shifted(a, h), &p, &lights) - model.potential(shifted(a, -h), &p, &lights)) / (2.0 * h);
-                assert!((value - q.gradient[a]).abs() <= 1e-6 * q.gradient.iter().map(|x| x.abs()).fold(1e-12, f64::max), "{name}: ∂_{a}V {} against its difference {value}", q.gradient[a]);
-                let (up, down) = (model.expansion(shifted(a, h), &p, &lights), model.expansion(shifted(a, -h), &p, &lights));
-                let scale = q.hessian.iter().flatten().map(|x| x.abs()).fold(1e-12, f64::max);
+                let value = converged(&steps().into_iter().map(|h| (model.potential(shifted(a, h), &p, &lights) - model.potential(shifted(a, -h), &p, &lights)) / (2.0 * h)).collect::<Vec<_>>(), 1);
+                assert!(agrees(q.gradient[a], value, q.gradient[a].abs()), "{name} at {r:?}: ∂_{a}V {} against its difference {value:?}", q.gradient[a]);
                 for c in 0..3 {
-                    let second = (up.gradient[c] - down.gradient[c]) / (2.0 * h);
-                    assert!((second - q.hessian[a][c]).abs() <= 1e-6 * scale, "{name}: ∂_{a}∂_{c}V {} against its difference {second}", q.hessian[a][c]);
+                    let second = converged(&steps().into_iter().map(|h| (model.expansion(shifted(a, h), &p, &lights).gradient[c] - model.expansion(shifted(a, -h), &p, &lights).gradient[c]) / (2.0 * h)).collect::<Vec<_>>(), 1);
+                    assert!(agrees(q.hessian[a][c], second, own(&|x, y| q.hessian[x][y], a, c)), "{name} at {r:?}: ∂_{a}∂_{c}V {} against its difference {second:?}", q.hessian[a][c]);
                 }
             }
         }
+    }
+}
+
+/// The near light's derivatives are its values' (the class of the reported trap's defect: the elimination's jets by
+/// differences read the forms' rounding times 1/δ², and the potential multiplied it by the field's coefficients): on the
+/// scenes whose clusters hold several ground states -- R4_LIN_1's and R4_TW1's lin⊥lin cooling and repump, R6_RAMAN_CO's
+/// Raman pair -- each model as the solve closes it with its averaged lights' drives at the atom, at three random
+/// points about the trap's centre, with every light coherent and with the reported lights: every near form of every
+/// cluster (assemble.rs `Model::near_exact`) and the near potential of each ground state of such a cluster (potential.rs
+/// `Model::near_potential`) -- the force, each part of its gradient, against the differences of its values, and each
+/// entry of its Hessian against the differences of the gradient (the chain value → gradient → Hessian, each link a first
+/// difference: a second difference of the values would read their rounding times 1/h², as the defect did) --, each on its
+/// own scale (`agrees`; a form's beside the rounding of the forms of its kind, which no derivative of it resolves), the
+/// step chosen by the differences' convergence (`converged`).
+#[test]
+fn every_near_form_s_and_the_potential_s_jets_are_the_derivatives_of_their_values() {
+    use crate::model::{jet, Lit};
+    use crate::random::{Purpose, Stream};
+    let mut checked = (0, 0);
+    for name in ["R4_LIN_1", "R4_TW1", "R6_RAMAN_CO"] {
+        let request = scene(name);
+        let light = Light::new(&request);
+        let chief = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+        let (closed, kept, trap, _) = Model::closed_at(&request, &light, vec![], chief, request.temperature_uk);
+        assert!(closed.clusters().iter().any(|c| c.ground > 1), "{name}: a cluster of several ground states");
+        let mut stream = Stream::new(7, Purpose::Initial, 0, 0);
+        for lights in [closed.running(), closed.reported()] {
+            let averaged = |c: Component| !c.counter && lights.0[c.frequency] == Lit::Averaged;
+            let at: Vec<Unit> = closed.driven.iter().filter(|d| averaged(d.0)).map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }).collect();
+            let model = closed.rekept(&[kept.iter().filter(|u| !matches!(u, Unit::Bare { component, .. } | Unit::Drive { component, .. } if averaged(*component))).cloned().collect::<Vec<_>>(), at].concat()).unwrap();
+            let shortest = 1.0 / model.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
+            // The resolvent's condition on the excited block, κ = ‖K‖‖R₀‖ ≤ max |E_e| over the least half-width: the levels in
+            // the frame (the far line's 7 THz beside the near line's) against the line's width.
+            let condition = (crate::request::GROUND..STATES).map(|s| model.energies[s].abs()).fold(0.0, f64::max) / (0..crate::model::far::EXCITED).map(|e| 0.5 * model.decay[(e, e)].re).filter(|w| *w > 0.0).fold(f64::INFINITY, f64::min);
+            for _ in 0..3 {
+                let r: [f64; 3] = std::array::from_fn(|a| trap.centre[a] + [1.0, 0.3, 0.3][a] * (stream.uniform() - 0.5));
+                // The displacements the differences read: ±h along each axis, step by step.
+                let hs = steps();
+                let shifts: Vec<[f64; 3]> = hs.iter().flat_map(|&h| (0..3).flat_map(move |a| [h, -h].map(|s| std::array::from_fn(|b| if a == b { r[b] + s } else { r[b] })))).collect();
+                // [derivative: the gradient's three from a jet's values, then the Hessian's six of jet::PAIRS from its
+                // gradients along the second axis][step], of the jets `at` gives at the displacements.
+                let quotients = |at: &dyn Fn(usize, usize) -> f64| -> Vec<Vec<f64>> {
+                    let mut out = vec![vec![0.0; hs.len()]; 9];
+                    for (k, &h) in hs.iter().enumerate() {
+                        let along = |a: usize, part: usize| (at(6 * k + 2 * a, part) - at(6 * k + 2 * a + 1, part)) / (2.0 * h);
+                        for a in 0..3 {
+                            out[a][k] = along(a, 0);
+                        }
+                        for (m, &(a, c)) in jet::PAIRS.iter().enumerate() {
+                            out[3 + m][k] = along(c, 1 + a);
+                        }
+                    }
+                    out
+                };
+                // Every form of every cluster with near forms.
+                for cluster in 0..model.clusters().len() {
+                    let plan = model.plan(cluster, &lights);
+                    if plan.near.len() == 0 {
+                        continue;
+                    }
+                    let jets = model.near_exact(&plan, &model.light.amplitudes(r), 2);
+                    let near = &plan.near;
+                    let displaced: Vec<crate::model::assemble::NearValues> = shifts.iter().map(|&x| model.near_exact(&plan, &model.light.amplitudes(x), 1)).collect();
+                    let jet_at = |i: usize, e: usize| -> [C64; 4] {
+                        let mut j = [C64::ZERO; 4];
+                        displaced[i].jet(e, &mut j);
+                        j
+                    };
+                    // Each form is exact to the rounding of the matrix it is an entry of (linalg.rs: a modest multiple of u
+                    // on its data): the forms of one kind -- S, D, X, L of the pair entries, the reference, the shifts, the
+                    // jumps and their partners, the responses and theirs -- one matrix, its rounding γ_{E²} (a solve on
+                    // Q) times its largest entry, over ℓ^order, ℓ the light's shortest length; and each derivative to that
+                    // rounding times the resolvent's condition κ of itself: the floors beside each form's own scale.
+                    let (p, v, j, m) = (near.pairs.len(), near.shifts.len(), near.jumps.len(), near.responses.len());
+                    let kinds = if p == 0 { 0 } else { (near.hermitian().end - near.reference - v) / p };
+                    let mut bounds: Vec<usize> = (0..=kinds).map(|k| k * p).collect();
+                    for size in [near.reference, v, j, j, m, m] {
+                        bounds.push(bounds.last().unwrap() + size);
+                    }
+                    let mut value = [C64::ZERO; jet::WHOLE];
+                    let values: Vec<C64> = (0..near.len()).map(|e| { jets.jet(e, &mut value); value[0] }).collect();
+                    let largest: Vec<f64> = (0..near.len())
+                        .map(|e| {
+                            let k = bounds.windows(2).position(|w| w[0] <= e && e < w[1]).expect("a kind of form");
+                            (bounds[k]..bounds[k + 1]).map(|i| values[i].abs()).fold(0.0, f64::max)
+                        })
+                        .collect();
+                    for e in 0..near.len() {
+                        let mut jet = [C64::ZERO; jet::WHOLE];
+                        jets.jet(e, &mut jet);
+                        for part in [false, true] {
+                            let of = |z: C64| if part { z.im } else { z.re };
+                            let hessian = |x: usize, y: usize| of(jet[jet::second(x, y)]);
+                            for (d, q) in quotients(&|i, part| of(jet_at(i, e)[part])).iter().enumerate() {
+                                let order = if d < 3 { 1 } else { 2 };
+                                let (estimate, error) = converged(q, 1);
+                                let solve = crate::units::rounding(crate::model::far::EXCITED * crate::model::far::EXCITED);
+                                let floor = solve * (largest[e] / shortest.powi(order) + condition * of(jet[1 + d]).abs());
+                                let scale = if d < 3 { of(jet[1 + d]).abs() } else { own(&hessian, jet::PAIRS[d - 3].0, jet::PAIRS[d - 3].1) };
+                                assert!(agrees(of(jet[1 + d]), (estimate, error + floor), scale), "{name} cluster {cluster} form {e} at {r:?}: derivative {d} {} against ({estimate:e}, {error:e}); value {:e}, quotients {q:?}", of(jet[1 + d]), of(values[e]));
+                            }
+                        }
+                        checked.0 += 1;
+                    }
+                }
+                // The near potential of every ground state of a cluster of several: its force and its Hessian.
+                for g in (0..GROUND).filter(|&g| model.clusters()[model.cluster_of(g)].ground > 1) {
+                    let p: [f64; GROUND] = std::array::from_fn(|b| if b == g { 1.0 } else { 0.0 });
+                    let q = model.near_potential(&model.light.amplitudes(r), &p, &lights, 2, None).quadratic;
+                    let displaced: Vec<crate::model::Quadratic> = shifts.iter().map(|&x| model.near_potential(&model.light.amplitudes(x), &p, &lights, 1, None).quadratic).collect();
+                    let estimates: Vec<(f64, f64)> = quotients(&|i, part| if part == 0 { displaced[i].value } else { displaced[i].gradient[part - 1] }).iter().map(|q| converged(q, 1)).collect();
+                    for a in 0..3 {
+                        assert!(agrees(q.gradient[a], estimates[a], q.gradient[a].abs()), "{name} ground {g} at {r:?}: the force ∂_{a}V {} against {:?}", q.gradient[a], estimates[a]);
+                    }
+                    for (m, &(a, c)) in jet::PAIRS.iter().enumerate() {
+                        assert!(agrees(q.hessian[a][c], estimates[3 + m], own(&|x, y| q.hessian[x][y], a, c)), "{name} ground {g} at {r:?}: ∂_{a}∂_{c}V {} against {:?}", q.hessian[a][c], estimates[3 + m]);
+                    }
+                    checked.1 += 1;
+                }
+            }
+        }
+    }
+    eprintln!("{} forms and {} potentials checked", checked.0, checked.1);
+}
+
+/// The light switched on lands the bare state as a jump does (step.rs `Trajectory::new`; model.rs `Model::landed`), and
+/// that landing is measured against the definition's and booked (elim.rs `Fold::landing_error`, `Model::readings`): on
+/// R2_RECOIL's probe and R4_LIN_1's lin⊥lin cooling and repump folded at the atom (a cluster of one ground state, and of
+/// three), with the evaluation's orders as they come (K = 0, J = 0) and with the normalization's and the series' kept, a
+/// trajectory started where its threshold lets it land holds the run's landing of its bare state to the bit; that is the
+/// evaluation's map the readings measure (`Fold::landing_evaluated`, within 10⁻⁹); the trajectory's state against the
+/// definition's S(1 + Σ S_f T_f)⁻¹ e_b (`Fold::landing_defined`, the self-consistent fold's) errs by what the readings
+/// measure (2r + r²), the readings book at least that on the candidates, and the normalization's first order lands
+/// nearer the definition than the identity of J = 0.
+#[test]
+fn a_trajectory_s_start_lands_as_the_definition_within_what_the_readings_book() {
+    use crate::model::elim::Fold;
+    use crate::step::Trajectory;
+    for (name, ids) in [("R2_RECOIL", vec!["probe"]), ("R4_LIN_1", vec!["cool-plus", "repump-plus"])] {
+        let request = scene(name);
+        let light = Light::new(&request);
+        let lifted = at_the_atom(&request, &light, &ids.iter().map(|id| frequency_of(&request, &light, id)).collect::<Vec<_>>());
+        let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+        let reference: [f64; GROUND] = std::array::from_fn(|s| if s == b { 1.0 } else { 0.0 });
+        let mut errors = vec![];
+        for orders in [vec![], vec![Unit::Normalization { order: 1 }], vec![Unit::Series, Unit::Normalization { order: 1 }]] {
+            let model = Model::new(&request, &light, &[lifted.clone(), orders.clone()].concat()).unwrap();
+            let trap = model.trap(&reference, &model.prepared()).unwrap();
+            let r = [trap.centre[0] + 0.13, trap.centre[1] - 0.07, trap.centre[2] + 0.05];
+            let run = crate::model::Run::new(&model, reference);
+            let cluster = model.cluster_of(b);
+            let c = &model.clusters()[cluster];
+            let place = c.states.iter().position(|&s| s == b).unwrap();
+            let bare: Vec<C64> = (0..c.states.len()).map(|i| if i == place { C64::ONE } else { C64::ZERO }).collect();
+            let at = Point { r, kappa: [0.0; 3], t: 0.0 };
+            let landed: Vec<C64> = run.landed(cluster, &at, &bare).to_vec();
+            let index = (0..256).find(|&i| Trajectory::new(&run, b, r, [0.0; 3], 11, i).threshold < crate::linalg::norm_sqr(&landed)).expect("a threshold the landing's norm passes");
+            let trajectory = Trajectory::new(&run, b, r, [0.0; 3], 11, index);
+            assert_eq!(trajectory.psi.to_vec(), landed, "{name} {orders:?}: the trajectory holds the run's landing");
+            // The evaluation's map the readings measure, and the definition's.
+            let amplitudes = model.light.amplitudes(r);
+            let (fold, _, far, _) = model.cluster_fold(cluster, &amplitudes, true).expect("the cluster's fold");
+            let z0 = C64::real(far + model.series.centre[cluster]);
+            let evaluated = fold.landing_evaluated(z0, model.series.orders());
+            let (definition, _) = model.definition_fold(cluster, &amplitudes).expect("the definition's fold");
+            let defined = definition.landing_defined().expect("the definition's landing");
+            let column = |m: &Mat| -> Vec<C64> { (0..m.rows).map(|i| m[(i, place)]).collect() };
+            let norm = |v: &[C64]| v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+            let apart = |a: &[C64], d: &[C64]| norm(&a.iter().zip(d).map(|(x, y)| *x - *y).collect::<Vec<_>>());
+            assert!(apart(&landed, &column(&evaluated)) <= 1e-9 * norm(&column(&evaluated)), "{name} {orders:?}: the run's landing {landed:?} against the evaluation's map {:?}", column(&evaluated));
+            let measured = Fold::landing_error(&evaluated, &defined, c.ground, &bare);
+            let rel = apart(&trajectory.psi, &column(&defined)) / norm(&column(&defined));
+            assert!((2.0 * rel + rel * rel - measured).abs() <= 1e-6 * measured.max(1e-12), "{name} {orders:?}: the trajectory's error {} against the measured {measured}", 2.0 * rel + rel * rel);
+            let (read, _) = model.readings(&model.candidates(), &Sample { cluster, at, psi: bare.clone() }, None);
+            let booked: f64 = read.iter().map(|x| x.population).sum();
+            eprintln!("{name} {orders:?}: the landing {rel:.3e} off the definition's (a rate's {measured:.3e}); booked {booked:.3e}");
+            assert!(booked >= measured * (1.0 - 1e-9), "{name} {orders:?}: booked {booked} below the landing's {measured}");
+            errors.push(measured);
+        }
+        assert!(errors[1] < errors[0], "{name}: the normalization's first order lands nearer the definition: {errors:?}");
     }
 }
 
@@ -447,4 +627,98 @@ fn the_normalized_generator_s_decay_is_its_photons_rate_with_a_kept_pair_of_two_
             }
         }
     }
+}
+
+/// A bare fold onto an explicit state is read where the atoms are (elim.rs `Model::bare_mixing`, `Model::readings`,
+/// `Model::prior`; model.rs `Model::settled`): R6_RAMAN_CO with its A leg |1,0⟩ → e kept explicit (e the excited state of
+/// the pair's largest product of couplings) and its B leg |2,0⟩ → e folded with the bare levels across the pair's
+/// two-photon distance d -- |2,0⟩'s level moved off the pair's resonance so that the fold's mixing a/|d| at the trap's
+/// centre is a quarter: within 0.15 < a/d < 0.5, so the fold exists (2a/|d| < 1: bare it stays) and its next order
+/// 2(a/d)² = 1/8 is beyond the share. There
+/// - the levels d is read on (`Model::levels_at`) are the run's own: its generator's static diagonal at rest, with the
+///   frames, on both states' clusters;
+/// - the readings book on its `Unit::Bare` 2(a/d)² of the populations of its two states, a = |Σ_l a_l(r) X_l[e, w]| at
+///   the beams' amplitudes there and d = z_e − E_w − ν on those levels, z_e the mean of e's cluster's ground levels with
+///   e's frame (model.rs `Model::read`);
+/// - the prior at the centre keeps it, and the model that keeps it folds the drive at the atom.
+#[test]
+fn a_bare_fold_onto_an_explicit_state_is_read_at_the_state_and_kept_beyond_the_share() {
+    use crate::model::Level;
+    let mut request = scene("R6_RAMAN_CO");
+    let (g, w) = (1, 5);
+    let light = Light::new(&request);
+    let (fa, fb) = (frequency_of(&request, &light, "ramanA"), frequency_of(&request, &light, "ramanB"));
+    let (beam_a, beam_b) = (&request.beams[light.frequencies[fa].beams[0]], &request.beams[light.frequencies[fb].beams[0]]);
+    let e = (GROUND..STATES).max_by(|&x, &y| (beam_a.coupling[(x, g)] * beam_b.coupling[(x, w)]).abs().total_cmp(&(beam_a.coupling[(y, g)] * beam_b.coupling[(y, w)]).abs())).unwrap();
+    let kept = vec![Unit::Drive { component: Component { frequency: fa, counter: false }, excited: e, ground: g }];
+    let link = (Component { frequency: fb, counter: false }, e, w);
+    let unit = Unit::Bare { component: link.0, excited: e, ground: w };
+    let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let centre = |light: &Light, model: &Model| {
+        let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
+        let r = model.trap(&p, &model.prepared()).unwrap().centre;
+        let amplitudes = light.amplitudes(r);
+        (r, amplitudes.clone(), model.levels_at(&amplitudes))
+    };
+    // The fold's coupling at the beams' amplitudes there.
+    let coupling = |model: &Model, light: &Light, amplitudes: &[crate::field::Amplitude]| {
+        let (f, tone) = (&light.frequencies[link.0.frequency], &model.tones[link.0.frequency]);
+        f.beams.iter().zip(&tone.couplings[0]).map(|(&l, x)| amplitudes[l].value * x[(e, w)]).sum::<C64>().abs()
+    };
+    // |2,0⟩ moved so that |d| = 4a at the centre (the pair's own light shifts, a few rad/µs, ride on d as it is read).
+    let model = Model::new(&request, &light, &kept).unwrap();
+    let (_, amplitudes, levels) = centre(&light, &model);
+    let a = coupling(&model, &light, &amplitudes);
+    let d = {
+        let c = model.clusters().iter().find(|c| c.states.contains(&e)).unwrap();
+        let place = c.states.iter().position(|&s| s == e).unwrap();
+        model.read(c, place, &levels, true) - levels[w] - model.tones[link.0.frequency].nu[0]
+    };
+    // E_w less `off` moves d by +off, to 4a on its side.
+    let off = 4.0 * a * if d >= 0.0 { 1.0 } else { -1.0 } - d;
+    request.hamiltonian[(w, w)] -= C64::real(off);
+    let light = Light::new(&request);
+    let model = Model::new(&request, &light, &kept).unwrap();
+    assert!(model.bare_links().contains(&link), "the B leg's bare fold exists (2a/|d| < 1, every beam at its peak)");
+    let (r, amplitudes, levels) = centre(&light, &model);
+    let mixing = model.bare_mixing(link, &amplitudes, &levels);
+    eprintln!("R6_RAMAN_CO: a {a:.4e} rad/µs, d {d:.4e} moved by {off:.4e}: the mixing {mixing:.4}");
+    assert!(mixing > 0.15 && mixing < 0.5, "the mixing {mixing} within 0.15 < a/d < 0.5");
+    // The levels against the run's generator: its static diagonal at rest, with each state's frame.
+    let at = Point { r, kappa: [0.0; 3], t: 0.0 };
+    let level = |s: usize| {
+        let cluster = model.clusters().iter().position(|c| c.states.contains(&s)).unwrap();
+        let c = &model.clusters()[cluster];
+        let place = c.states.iter().position(|&x| x == s).unwrap();
+        let h = total(&model, cluster, &at, &model.running());
+        h[(place, place)].re + model.omega(&c.frames[place])
+    };
+    let cluster = model.cluster_of(g);
+    let c = &model.clusters()[cluster];
+    assert!(c.states.contains(&e) && !c.states.contains(&w), "e explicit with |1,0⟩, |2,0⟩ apart: {:?}", c.states);
+    for &s in c.states[..c.ground].iter().chain([&w]) {
+        assert!((levels[s] - level(s)).abs() <= 1e-9 * level(s).abs().max(1.0), "state {s}: level {} against the generator's {}", levels[s], level(s));
+    }
+    // The fold's mixing from its definition on the generator's levels.
+    let a = coupling(&model, &light, &amplitudes);
+    let place = c.states.iter().position(|&s| s == e).unwrap();
+    let z = model.omega(&c.frames[place]) + (0..c.ground).map(|p| level(c.states[p]) - model.omega(&c.frames[p])).sum::<f64>() / c.ground as f64;
+    let analytic = a / (z - level(w) - model.tones[link.0.frequency].nu[0]).abs();
+    assert!((mixing - analytic).abs() <= 1e-9 * analytic, "the mixing {mixing} against a/|d| {analytic}");
+    // The readings at a state of e's cluster: 2(a/d)² of e's population (|2,0⟩ is no state of this cluster).
+    let psi: Vec<C64> = c.states.iter().map(|&s| if s == g { C64::real(0.8) } else if s == e { C64::new(0.0, 0.6) } else { C64::ZERO }).collect();
+    let pe = 0.36 / psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
+    let sample = Sample { cluster, at, psi };
+    let units = model.candidates();
+    let (errors, _) = model.readings(&units, &sample, None);
+    let booked = errors[units.iter().position(|u| *u == unit).expect("the bare fold is a candidate")];
+    let expected = 2.0 * analytic * analytic * pe;
+    eprintln!("R6_RAMAN_CO: booked {booked:?} against 2(a/d)² p_e = {expected:.6e}");
+    assert!((booked.population - expected).abs() <= 1e-9 * expected && booked.temperature == booked.population, "booked {booked:?} against {expected}");
+    // Beyond the share at the centre: the prior keeps it, and kept the drive is folded at the atom.
+    assert!(2.0 * mixing * mixing > super::elim::share());
+    let prior = model.prior(&[(r, [0.0; 3])]);
+    assert!(prior.contains(&unit), "the prior keeps the bare fold beyond the share: {prior:?}");
+    let lifted = Model::new(&request, &light, &[kept, vec![unit]].concat()).unwrap();
+    assert!(lifted.level(link.0, e, w) == Level::Atom, "kept, the drive is folded at the atom");
 }

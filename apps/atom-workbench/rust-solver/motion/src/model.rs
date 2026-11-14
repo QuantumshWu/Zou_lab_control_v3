@@ -644,15 +644,17 @@ impl Model {
         // Each frequency's drives folded at their levels (far.rs `Tone::folded`); the carriers, the components with a drive not
         // bare. A drive folded with the bare levels onto an explicit state is read at the state's energy among its cluster's
         // ground states (`read`; far.rs, # A fold onto an explicit state): a direct coupling of two P states, its bare
-        // fold's distance d the two-photon one of the pair it makes with the state's kept drives. Such a link is judged as
-        // criterion two judges every P-layer component (ELIMINATION §4, v5: its averaged error 2(a/d)² against the share,
-        // elim.rs `closure`), here on what the fold itself takes: a the drive's coupling with every beam at its peak (|a_l|
-        // ≤ 1, in phase), d its bare fold's distance (far.rs `second_order`). Beyond the share the drive is explicit and its
-        // ground state joins the state's cluster -- at d = 0 (Zeeman sublevels at B = 0) as at any d small beside a: the
-        // fold is never taken where it is not small, its pole never read.
+        // fold's distance d the two-photon one of the pair it makes with the state's kept drives (far.rs `second_order`).
+        // That fold is the resolvent's series in the drive's coupling a across d, and a constant taken wherever the light
+        // is: it exists where its ratio, Stewart's 2m = 2a/|d| with a every beam at its peak (|a_l| ≤ 1, in phase), is
+        // below one (`elim::converges`) -- decided here, as the model is made. Where it is not -- at d = 0 (Zeeman
+        // sublevels at B = 0) as at any d not large beside a -- the drive goes up one level, to its fold at the atom
+        // (`Unit::Bare`); a counter-rotating drive has no level above (its keep is refused: the model's domain). The bare
+        // fold's pole is never read. How well a fold that exists does is read where the atoms are, as every fold's: its next
+        // order 2(a/d)² at the state's own amplitude and two-photon distance (elim.rs `Model::bare_mixing`), at the prior's
+        // atoms (`Model::prior`) and the run's states (`Model::readings`), on its `Unit::Bare`.
         let levels = model.levels.clone();
         let read = model.read_made();
-        let share = elim::share();
         let linked: Vec<Unit> = model
             .driven
             .iter()
@@ -661,9 +663,9 @@ impl Model {
                 let (tone, side) = (&model.tones[c.frequency], c.counter as usize);
                 let a: f64 = tone.couplings[side].iter().map(|x| x[(e, w)].abs()).sum();
                 let d = read[e - GROUND] - model.energies[w] - tone.nu[side];
-                2.0 * (a / d).powi(2) > share
+                !elim::converges(2.0 * a / d.abs())
             })
-            .map(|&(component, excited, ground)| Unit::Drive { component, excited, ground })
+            .map(|&(component, excited, ground)| Unit::Bare { component, excited, ground })
             .collect();
         if !linked.is_empty() {
             return model.rekept(&[kept, &linked[..]].concat());
@@ -676,7 +678,10 @@ impl Model {
         // invariant subspace exists and the second order converges where m = ‖W‖/sep < ½ (Stewart; ELIMINATION §3), W
         // the couplings and sep the distance: per drive e ← g its coupling at most Σ_l |W_l[e, g]| (every beam at its
         // peak, |a_l| ≤ 1, and in phase) across its bare denominator |E_e − E_g − ν − iΓ_e/2| (ν ≈ −2ω: no light shift
-        // moves it), m_e the ratio, and g's drives together S = Σ_e 2 m_e² < 2 (½)² = ½.
+        // moves it), m_e the ratio, and g's drives together S = Σ_e 2 m_e² < 2 (½)² = ½: the ratio 2m_F = √(2S), m_F
+        // = (Σ_e m_e²)^{1/2}, below one (`elim::converges`). It is read over the whole light, as the fold is a constant
+        // taken everywhere; where it is not below one there is no level above the bare one -- an explicit
+        // counter-rotating drive would resolve the optical frequency --, and the request is outside the model's domain.
         for g in 0..GROUND {
             let s: f64 = model
                 .driven
@@ -689,7 +694,7 @@ impl Model {
                     2.0 * (size / distance).powi(2)
                 })
                 .sum();
-            if !(s < 0.5) {
+            if !elim::converges((2.0 * s).sqrt()) {
                 return Err(format!("反旋转项不能绝热消去：同一个基态的各个反旋转项驱动的饱和参数之和 S = {:.2}（各束光取峰值强度、同相叠加）不小于 0.5，光强超出模型的适用范围", s));
             }
         }
@@ -746,8 +751,9 @@ impl Model {
     /// normalized, its norm N against the next jump's threshold (step.rs `jump`): N < 1, the fast part takes the rest
     /// away at once (a photon more); N > 1, the next photon is late (antibunching). The same map is the light's switching
     /// on (ELIMINATION v3 4). Both factors to the normalization's order J (assemble.rs `normal`): at J = 0 the map is
-    /// the identity. (What the next order would change in the map is not measured on its own: the readings measure the
-    /// generator, elim.rs `Model::readings`.) Where the cluster has no fold the state is f.
+    /// the identity. Its error is measured against the definition's map with the generator's, and each order's part booked
+    /// on the unit that takes it away (elim.rs `Fold::landing_error`, `Model::readings`). Where the cluster has no fold the
+    /// state is f.
     pub(crate) fn landed(&self, plan: &assemble::Plan, table: Option<&tabulate::NearTable>, at: &Point, f: &[C64]) -> crate::step::Internal {
         let Some(fourth) = plan.fourth.as_ref().filter(|fourth| fourth.bends()) else { return f.iter().copied().collect() };
         let (n, size) = (fourth.n, fourth.n * fourth.n);
