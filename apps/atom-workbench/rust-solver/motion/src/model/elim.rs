@@ -843,21 +843,36 @@ impl Fold {
     pub(crate) fn series(&self, z0: C64, orders: usize) -> Vec<Mat> {
         let n = self.size();
         let mut out = vec![Mat::zeros(n, n); orders + 1];
-        for rep in &self.replicas {
-            let sigma = z0 + C64::real(rep.frequency);
-            let mut x = rep.w.clone();
-            for form in out.iter_mut() {
-                for &j in &self.members[rep.group] {
-                    let column: Vec<C64> = (0..x.rows).map(|i| x[(i, j)]).collect();
-                    let solved = rep.k.resolvent(sigma, &column);
-                    for i in 0..x.rows {
-                        x[(i, j)] = solved[i];
-                    }
-                }
-                form.add_scaled(C64::ONE, &rep.back.product(&x));
+        for (rep, responses) in self.replicas.iter().zip(self.responses_about(z0, orders)) {
+            for (form, x) in out.iter_mut().zip(&responses) {
+                form.add_scaled(C64::ONE, &rep.back.product(x));
             }
         }
         out
+    }
+
+    /// The replicas' responses about z₀ to order K (`series`): per replica R₀^{k+1}W, k ≤ K, R₀ = (z₀ + f − K)⁻¹ on its
+    /// group's places.
+    pub(crate) fn responses_about(&self, z0: C64, orders: usize) -> Vec<Vec<Mat>> {
+        self.replicas
+            .iter()
+            .map(|rep| {
+                let sigma = z0 + C64::real(rep.frequency);
+                let mut x = rep.w.clone();
+                (0..=orders)
+                    .map(|_| {
+                        for &j in &self.members[rep.group] {
+                            let column: Vec<C64> = (0..x.rows).map(|i| x[(i, j)]).collect();
+                            let solved = rep.k.resolvent(sigma, &column);
+                            for i in 0..x.rows {
+                                x[(i, j)] = solved[i];
+                            }
+                        }
+                        x.clone()
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     /// The generator of the series to order K (`series`): the fixed point of H ← A + Σ_k (−1)^k N_k (H − z₀)^k from A
@@ -1047,62 +1062,83 @@ impl Fold {
         crate::linalg::hermitian_eigen(&self.metric()).values.iter().fold(0.0_f64, |m, &v| m.max(v))
     }
 
-    /// The engine's generator of the series to order K (assemble.rs `normal`) of its forms `forms` (N₀, N₁, …: `series`)
-    /// about z₀: H₀ = A + N₀, and at K = 1 its first order's term H₀ − N₁(H₀ − z₀).
-    pub(crate) fn explicit_generator(&self, forms: &[Mat], z0: C64, order: usize) -> Mat {
-        let mut h = self.direct.clone();
-        h.add_scaled(C64::ONE, &forms[0]);
-        if order >= 1 {
+    /// The evaluation's normalized generator at the orders `orders` (assemble.rs `normal`; ELIMINATION v7) of this fold's
+    /// series about z₀ -- the reference's forms, what the tables hold --: H₀ = Herm(A + N₀) − (i/2)L, L = Σ (R₀W)†D(R₀W),
+    /// at K = 1 H = H₀ − N₁(H₀ − z₀); its Hermitian part Herm H and its decay S_J⁻¹ (Σ T†D T) S_J⁻¹ of the jumps' wave
+    /// operator T = R₀W (− R₀²W E at K = 1, E = H − z₀) and S_J⁻¹ = Σ_{j≤J} b_j X^j, X = Σ (R₀W)†(R₀W): Herm H −
+    /// (i/2) decay.
+    pub(crate) fn evaluated(&self, levels: &Levels, z0: C64, orders: Orders) -> Mat {
+        let n = self.size();
+        let responses = self.responses_about(z0, orders.series);
+        let forms = |k: usize| {
+            let mut m = Mat::zeros(n, n);
+            for (rep, r) in self.replicas.iter().zip(&responses) {
+                m.add_scaled(C64::ONE, &rep.back.product(&r[k]));
+            }
+            m
+        };
+        let (mut metric, mut loss) = (Mat::zeros(n, n), Mat::zeros(n, n));
+        for (rep, r) in self.replicas.iter().zip(&responses) {
+            metric.add_scaled(C64::ONE, &r[0].adjoint_product(&r[0]));
+            loss.add_scaled(C64::ONE, &r[0].adjoint_product(&levels.decay.block(&rep.q, &rep.q).product(&r[0])));
+        }
+        let mut whole = self.direct.clone();
+        whole.add_scaled(C64::ONE, &forms(0));
+        let mut h = whole.hermitian_part();
+        h.add_scaled(C64::new(0.0, -0.5), &loss);
+        let offset = |h: &Mat| {
             let mut e = h.clone();
-            for i in 0..self.size() {
+            for i in 0..n {
                 e[(i, i)] -= z0;
             }
-            h.add_scaled(-C64::ONE, &forms[1].product(&e));
+            e
+        };
+        if orders.series >= 1 {
+            let next = forms(1).product(&offset(&h));
+            h.add_scaled(-C64::ONE, &next);
         }
-        h
+        let e = offset(&h);
+        let mut inner = Mat::zeros(n, n);
+        for (rep, r) in self.replicas.iter().zip(&responses) {
+            let mut wave = r[0].clone();
+            if orders.series >= 1 {
+                wave.add_scaled(-C64::ONE, &r[1].product(&e));
+            }
+            inner.add_scaled(C64::ONE, &wave.adjoint_product(&levels.decay.block(&rep.q, &rep.q).product(&wave)));
+        }
+        let mut bent = Mat::identity(n);
+        let mut power = Mat::identity(n);
+        for j in 1..=orders.normalization {
+            power = power.product(&metric);
+            bent.add_scaled(C64::real(binomial(-0.5, j)), &power);
+        }
+        let mut out = h.hermitian_part();
+        out.add_scaled(C64::new(0.0, -0.5), &bent.product(&inner).product(&bent));
+        out
     }
 
-    /// The series' order K's error on a state ψ, measured (ELIMINATION v7): the engine's generator at K
-    /// (`explicit_generator`) against the series to K + 1 solved (`series_generator`, the forms to K + 1) on ψ,
-    /// r = ‖(H_K − H_{K+1})ψ‖ / ‖(H_{K+1} − z₀)ψ‖, a rate's relative error 2r + r² (of T†T); all of it where the series
-    /// to K + 1 does not settle. A point's number, not a bound: the ratio q only says the series converges.
-    pub(crate) fn order_error(&self, forms: &[Mat], z0: C64, order: usize, psi: &[C64]) -> f64 {
-        let Some(next) = self.series_generator(&forms[..order + 2], z0) else { return 1.0 };
-        let (own, next) = (self.explicit_generator(forms, z0, order).apply(psi), next.apply(psi));
-        let apart = norm_of(own.iter().zip(&next).map(|(a, b)| *a - *b));
-        rate_error(apart, norm_of(next.iter().zip(psi).map(|(h, p)| *h - z0 * *p)))
-    }
-
-    /// The normalization's order J's error on a state ψ, measured: S⁻¹ = Σ_{j≤J} b_j X^j (X the metric) against its next
-    /// order, ε = |b_{J+1}| ‖X^{J+1}ψ‖ / ‖S⁻¹_{J+1}ψ‖, a rate's 2ε + ε² (of ψ†S⁻¹ΛS⁻¹ψ); and the landing map's
-    /// (1 + Y)⁻¹ = Σ_{j≤J} (−Y)^j against its next, ‖Y^{J+1}ψ‖/‖ψ‖ (`y` = N₁): the larger.
-    pub(crate) fn normalization_error(&self, y: &Mat, order: usize, psi: &[C64]) -> f64 {
-        let x = self.metric();
-        let (mut power, mut bent) = (psi.to_vec(), psi.to_vec());
-        for j in 1..=order + 1 {
-            power = x.apply(&power);
-            let b = C64::real(binomial(-0.5, j));
-            bent.iter_mut().zip(&power).for_each(|(s, p)| *s += *p * b);
-        }
-        let (size, bent) = (norm_of(power.iter().copied()), norm_of(bent.iter().copied()));
-        let rate = rate_error(binomial(-0.5, order + 1).abs() * size, bent);
-        let mut landing = psi.to_vec();
-        for _ in 0..=order {
-            landing = y.apply(&landing);
-        }
-        let norm = norm_of(psi.iter().copied());
-        rate.max(if norm > 0.0 { (norm_of(landing.iter().copied()) / norm).min(1.0) } else { 0.0 })
-    }
-
-    /// What the normalization would do to the Hermitian generator on a state ψ, measured -- the evaluation takes the
-    /// series' own Hermitian part (assemble.rs `normal`) --: ‖(Herm(S H S⁻¹) − Herm H)ψ‖ against ‖(H − z₀)ψ‖, S =
-    /// (1 + X)^{1/2} (`normalization`), H the fold's generator; a rate's 2r + r².
-    pub(crate) fn hermitian_error(&self, z0: C64, psi: &[C64]) -> f64 {
+    /// The definition's normalized generator (ELIMINATION v6, v7): of this fold -- the self-consistent one, its excited
+    /// block whole (`Model::definition_fold`) -- the des Cloizeaux generator's Hermitian part Herm(S H S⁻¹) and its decay
+    /// S⁻¹(Σ_f T_f†D T_f)S⁻¹, S = (1 + X)^{1/2} of its own metric (`normalization`): Herm(S H S⁻¹) − (i/2) decay.
+    pub(crate) fn defined(&self, levels: &Levels) -> Mat {
+        let n = self.size();
         let (s, s_inverse) = self.normalization();
-        let mut moved = s.product(&self.generator).product(&s_inverse).hermitian_part();
-        moved.add_scaled(-C64::ONE, &self.generator.hermitian_part());
-        let h = self.generator.apply(psi);
-        rate_error(norm_of(moved.apply(psi).into_iter()), norm_of(h.iter().zip(psi).map(|(h, p)| *h - z0 * *p)))
+        let mut loss = Mat::zeros(n, n);
+        for rep in &self.replicas {
+            loss.add_scaled(C64::ONE, &rep.t.adjoint_product(&levels.decay.block(&rep.q, &rep.q).product(&rep.t)));
+        }
+        let mut out = s.product(&self.generator).product(&s_inverse).hermitian_part();
+        out.add_scaled(C64::new(0.0, -0.5), &s_inverse.product(&loss).product(&s_inverse));
+        out
+    }
+
+    /// The evaluation's error on a state ψ against the definition, measured (ELIMINATION v7; a unit's error where the atoms
+    /// went): r = ‖(G_e − G_d)ψ‖ / ‖(G_d − z₀)ψ‖ of the two normalized generators (`evaluated`, `defined`), a rate's
+    /// relative error 2r + r². Every truncation of the evaluation -- the series' order, the normalization's, the
+    /// excited block the reference leaves out (δK), the Hermitian part's normalization -- in the one comparison.
+    pub(crate) fn evaluation_error(evaluated: &Mat, defined: &Mat, z0: C64, psi: &[C64]) -> f64 {
+        let (e, d) = (evaluated.apply(psi), defined.apply(psi));
+        rate_error(norm_of(e.iter().zip(&d).map(|(a, b)| *a - *b)), norm_of(d.iter().zip(psi).map(|(d, p)| *d - z0 * *p)))
     }
 
     /// The left wave operators S_f (P ← Q_f): the rows (y, y S) span the slow left invariant subspace,
@@ -1480,6 +1516,20 @@ impl super::Model {
     /// frames and the norm of what the far levels leave out of the excited block -- the carriers' own static forms there,
     /// bilinear in the near field (eliminate.rs `level_pair`) -- in the Frobenius norm, a bound of the spectral one.
     pub(crate) fn cluster_fold(&self, cluster: usize, amplitudes: &[crate::field::Amplitude], about: bool) -> Option<(Fold, Levels, f64, f64)> {
+        let (fold, levels, far, left) = self.cluster_fold_with(cluster, amplitudes, about, false)?;
+        Some((fold, levels, far, left.frobenius()))
+    }
+
+    /// The definition at a point (ELIMINATION v6, v7): the cluster's self-consistent fold with its excited block whole --
+    /// the far levels and the carriers' own static forms on it (δK, which the series' reference leaves out) --, and its
+    /// levels: what every truncation of the evaluation is measured against (`Fold::evaluation_error`).
+    pub(crate) fn definition_fold(&self, cluster: usize, amplitudes: &[crate::field::Amplitude]) -> Option<(Fold, Levels)> {
+        self.cluster_fold_with(cluster, amplitudes, false, true).map(|(fold, levels, _, _)| (fold, levels))
+    }
+
+    /// `cluster_fold`, about the reference or self-consistent, its excited block the far levels' or, `whole`, with the
+    /// carriers' own static forms on it; the fold, its levels, the far levels' mean and those forms.
+    fn cluster_fold_with(&self, cluster: usize, amplitudes: &[crate::field::Amplitude], about: bool, whole: bool) -> Option<(Fold, Levels, f64, Mat)> {
         use crate::request::{GROUND, STATES};
         let running = self.running();
         let h = &self.far_hamiltonian(amplitudes, &running, 0, &[])[0];
@@ -1503,16 +1553,6 @@ impl super::Model {
         if classes.iter().all(|class| class.beams[0].coupling.max_abs() == 0.0) {
             return None;
         }
-        let levels = Levels {
-            ground: h.block(&grounds, &grounds),
-            excited: h.block(&excited, &excited),
-            decay: self.decay.clone(),
-        };
-        let frames: Vec<f64> = c.frames.iter().map(|f| self.omega(f)).collect();
-        let far = (0..g).map(|y| h[(grounds[y], grounds[y])].re - frames[y]).sum::<f64>() / g as f64;
-        let slow = Slow::single(c.states[g..].iter().map(|&s| s - GROUND).collect(), frames);
-        let replicas = Replicas::of(&classes, &slow, g);
-        let fold = fold_about(&levels, &classes, &slow, &replicas, about.then(|| far + self.series.centre[cluster]));
         // The carriers' static forms on the excited block.
         let mut left = Mat::zeros(excited.len(), excited.len());
         for cc in &self.carriers {
@@ -1525,7 +1565,17 @@ impl super::Model {
                 }
             }
         }
-        Some((fold, levels, far, left.frobenius()))
+        let mut block = h.block(&excited, &excited);
+        if whole {
+            block.add_scaled(C64::ONE, &left);
+        }
+        let levels = Levels { ground: h.block(&grounds, &grounds), excited: block, decay: self.decay.clone() };
+        let frames: Vec<f64> = c.frames.iter().map(|f| self.omega(f)).collect();
+        let far = (0..g).map(|y| h[(grounds[y], grounds[y])].re - frames[y]).sum::<f64>() / g as f64;
+        let slow = Slow::single(c.states[g..].iter().map(|&s| s - GROUND).collect(), frames);
+        let replicas = Replicas::of(&classes, &slow, g);
+        let fold = fold_about(&levels, &classes, &slow, &replicas, about.then(|| far + self.series.centre[cluster]));
+        Some((fold, levels, far, left))
     }
 
     /// The model's series constants at the atoms `points` (`Series`): per cluster the centre of the near light's scalar
@@ -1737,17 +1787,26 @@ impl super::Model {
                     }
                 }
             };
+            // The evaluation against the definition (ELIMINATION v7; `Fold::evaluation_error`): one comparison at the
+            // run's orders, and at each next order the part it takes away -- the series' first (`Unit::Series`) where the
+            // run takes order 0, the normalization's next (`Unit::Normalization`) --; the rest (δK, the orders beyond, the
+            // Hermitian part's normalization) on the block nearest the reference (`Fold::nearest`), which criterion one
+            // makes explicit.
             let z0 = C64::real(far + self.series.centre[sample.cluster]);
-            let (order, normalization) = (self.series.order, self.series.normalization);
-            let forms = fold.series(z0, order + 1);
-            let series = fold.order_error(&forms, z0, order, &sample.psi);
-            if order == 0 {
-                book(&Unit::Series, series, &mut out);
-            } else {
-                on_block(fold.nearest(z0), series, &mut out);
+            if let Some((definition, whole)) = self.definition_fold(sample.cluster, &amplitudes).filter(|d| d.0.exists) {
+                let defined = definition.defined(&whole);
+                let psi = &sample.psi;
+                let error = |orders: Orders| Fold::evaluation_error(&fold.evaluated(&levels, z0, orders), &defined, z0, psi);
+                let own = self.series.orders();
+                let at = error(own);
+                let series = if own.series == 0 { (at - error(Orders { series: 1, ..own })).max(0.0) } else { 0.0 };
+                let normalization = (at - error(Orders { normalization: own.normalization + 1, ..own })).max(0.0);
+                if own.series == 0 {
+                    book(&Unit::Series, series, &mut out);
+                }
+                book(&Unit::Normalization { order: own.normalization + 1 }, normalization, &mut out);
+                on_block(fold.nearest(z0), (at - series - normalization).max(0.0), &mut out);
             }
-            book(&Unit::Normalization { order: normalization + 1 }, fold.normalization_error(&forms[1], normalization, &sample.psi), &mut out);
-            on_block(fold.most_excited(), fold.hermitian_error(z0, &sample.psi), &mut out);
         }
         // The photons' cross terms.
         let lights = self.running();
