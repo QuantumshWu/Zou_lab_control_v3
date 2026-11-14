@@ -199,7 +199,8 @@
 //!       below's foreseen read, within on N_{τ/2} of its own pairs (`foreseen`). (Assumed the same at every step, p10d5's
 //!       0.25 µs, on its pilot's 88 pairs at F ≈ 8 b and L = 0, asked 700 pairs at either rung and took the pairs:
 //!       704 of them, 4.9 s of an 11.9 s run, before L showed and the rung below stood on the pilot's own 88 pairs --
-//!       its pairs, 5 µs long, never part.)
+//!       its pairs, 5 µs long, never part. Measured so, the scout's pairs read its T's noise at τ/2 0.24 times τ's:
+//!       N_{τ/2} = 170 against N_τ = 700, the rung below at once, and the run took 6.0 s.)
 //!     The rung takes the one the run is expected to spend less on from here, at a trajectory's work a µs at each step
 //!     as a keep prices its models (`Prices`: at the pilot's states, every step at its own τ and setup; # One rule for a
 //!     keep) and the product's trajectories N_p the pilot's looks ask (# Stopping): the pairs' companions at 2τ and
