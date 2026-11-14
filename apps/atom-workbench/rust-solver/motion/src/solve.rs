@@ -181,15 +181,30 @@
 //!   - its own estimate within: where it has no third level on the pilot's pairs and the ladder has the rung above, the
 //!     third level above; it stands where that one's estimate is within, and is left where it is beyond; with no third
 //!     level to be had, it stands on its own two;
-//!   - its own estimate beyond the share and not clearly -- the noise hides the difference --: more pairs, where they
-//!     could bring it within at the best (`remedy`), the product's next groups at both levels, read again after every
-//!     batch. A rung below is no remedy for the noise: it reads its own pair's, and where the pairs part early that is
-//!     the two ensembles' own, the same at every step (estimate.rs, # The step's error; measured, R4_LIN_2: rows at far
-//!     ends of 1.5 to 2.5 b at 0.43, 0.22, 0.11 and 0.054 µs alike). Where pairs cannot see it either, its estimate as
-//!     it reads is beyond the share, and the rung is left, as an adaptive integrator leaves a step whose error estimate
-//!     is beyond its tolerance. (Stood unable to see at TET's ladder top, 1.40 µs, a row's far end booked 3.8 % of the
-//!     5 % and left the statistics a room of 0.9 %: 4272 trajectories, 211 CPU-s against 39.) At the ladder's bottom
-//!     the check ends unable to see (SPEC §5.1): the step stands, flagged, and books what its reads do not exclude.
+//!   - its own estimate beyond the share and not clearly: the noise hides the difference, or the error itself lies
+//!     near the share -- two causes, two answers, each priced from the same read (`blind`, `remedy`). With F and L a
+//!     look's far and near ends at one look (L from zero), b the share's square and N₀ the pairs read: at the best the
+//!     error's mean square is L, and what the read holds above it is the pairs' noise, falling as 1/N --
+//!     - more pairs at the rung, the product's next groups at both levels, read again after every batch: the far end
+//!       within b on N_τ = N₀ (F − L)/(b − L) pairs, on no number where L is at b;
+//!     - the rung below: there the error's mean square is L/2^{2p} where the order holds, and the noise the same -- a
+//!       rung below reads its own pair's, and where the pairs part early that is the two ensembles' own, the same at
+//!       every step (estimate.rs, # The step's error; measured, R4_LIN_2: rows at far ends of 1.5 to 2.5 b at 0.43,
+//!       0.22, 0.11 and 0.054 µs alike) --: within on N_{τ/2} = N₀ (F − L)/(b − L/2^{2p}) pairs.
+//!     The rung takes the one the run is expected to spend less on from here, at a trajectory's work a µs at each step
+//!     as a keep prices its models (`Prices`: at the pilot's states, every step at its own τ and setup; # One rule for a
+//!     keep) and the product's trajectories N_p the pilot's looks ask (# Stopping): the pairs' companions at 2τ and
+//!     the run level at τ to the more of N_τ and N_p -- the further pairs' run level is the product's -- (and the
+//!     pilot at 4τ where the rung is still to read its third level), against the run level at τ/2 to the most of N_p,
+//!     N_{τ/2} and the pilot's, and the further pairs' companions at τ beyond the pilot's (its level at τ is the rung
+//!     below's companion). No rung below is so taken for the noise: where L ≪ b, N_{τ/2} ≈ N_τ, and the rung below
+//!     costs its run level at τ/2 beside the same pairs; it is taken as L nears b, where N_τ grows without bound and
+//!     N_{τ/2} stays at the noise's own count. Where pairs cannot see it -- beyond a run's trajectories, or on no
+//!     number --, its estimate as it reads is beyond the share, and the rung is left, as an adaptive integrator leaves
+//!     a step whose error estimate is beyond its tolerance. (Stood unable to see at TET's ladder top, 1.40 µs, a row's
+//!     far end booked 3.8 % of the 5 % and left the statistics a room of 0.9 %: 4272 trajectories, 211 CPU-s against
+//!     39.) At the ladder's bottom, with no rung below, the pairs are taken where they can be, and else the check ends
+//!     unable to see (SPEC §5.1): the step stands, flagged, and books what its reads do not exclude.
 //! - A read is never carried from one rung to another as a verdict: a rung's third level is a read of levels it holds
 //!   itself, of the same model at the same steps -- the scout's, where the pilot has none of its own and the ladder
 //!   no rung above --, and it certifies nothing alone. Nor from one attempt to the next: every attempt's ladder is its
@@ -1147,7 +1162,8 @@ enum Verdict {
     /// and that rung's paths stay in the model's domain: the pilot's trajectories at 4τ, a quarter of a trajectory each.
     Above,
     /// Its own read's estimate beyond the share, but not clearly: the noise hides the difference -- the pairs that
-    /// could see through it (`remedy`), else the rung is left.
+    /// could see through it where they are expected to cost the run less than the rung below (`remedy`), else the
+    /// rung is left.
     Unseeing,
 }
 
@@ -1196,15 +1212,20 @@ fn readable(read: &Between) -> bool {
 }
 
 /// What a read asks for where it does not read within the step's share (module documentation, # The step): the pairs
-/// on which it could, as a factor on the pairs it was read on; none where it reads within. A look
+/// on which it could, as a factor on the pairs it was read on, at the rung `ratio` times its step -- the rung itself
+/// (1) or the rung below (½); none where it reads within. A look
 /// reads within where its far end F = max(M̂, 0) + t·SE at one look is at most the square b of the step's share
 /// (decide.rs `Read::outcome`). Where it does not, the pairs are asked for what they could do at the best: were the
 /// look's error the least its read allows -- its near end L at one look, from zero: its own interval, as at its far
 /// end --, what the read holds above L, value and interval, is the pairs' noise, and falls as the floor does, as 1/N.
 /// The far end on N pairs is then L + (F − L)·N₀/N: within b from N = N₀ (F − L)/(b − L) on, on no number where L
-/// itself is at b or above. The largest factor over the looks. (A value taken as it reads -- the rule before -- makes
-/// a read that the noise has put above b ask for no pairs, and the rung below was taken on it: measured, SPEC §2.2.)
-fn blind(own: &Between) -> Option<f64> {
+/// itself is at b or above. At the rung r times the step the error's mean square is L r^{2p} where the order holds
+/// (`carried`), and the noise the same -- the two ensembles' own, at every step (estimate.rs, # The step's error) --:
+/// N = N₀ (F − L)/(b − L r^{2p}). The largest factor over the looks. (A value taken as it reads -- the rule before --
+/// makes a read that the noise has put above b ask for no pairs, and the rung below was taken on it: measured, SPEC
+/// §2.2.)
+fn blind(own: &Between, ratio: f64) -> Option<f64> {
+    let lowered = ratio.powi(2 * ORDER);
     judged(own)
         .into_iter()
         .filter(|(read, bound)| read.outcome(*bound, 1.) != Outcome::Within)
@@ -1214,21 +1235,56 @@ fn blind(own: &Between) -> Option<f64> {
                 return f64::INFINITY;
             }
             let least = read.least(1.).max(0.);
-            if least < bound { (read.most(1.) - least) / (bound - least) } else { f64::INFINITY }
+            if lowered * least < bound { (read.most(1.) - least) / (bound - lowered * least) } else { f64::INFINITY }
         })
         .reduce(f64::max)
 }
 
+/// What the step's check weighs where the noise hides a rung's difference (`remedy`; module documentation, ## The
+/// ladder), as a keep weighs its sets (# One rule for a keep: the run's total work): `work`, the current model's work a
+/// µs of a trajectory with every step taken at the step given, each priced at its own step and setup
+/// (`Formula::at_step`, at the pilot's states, `one_each`); and `product`, the trajectories the product is to end
+/// on as the pilot's statistics predict them (`most_needed`: the looks' need, # Stopping).
+struct Prices<'a> {
+    work: &'a dyn Fn(f64) -> f64,
+    product: f64,
+}
+
 /// The pairs a rung's own read asks for where its estimate lies beyond the step's share but not clearly -- the noise
-/// hides the difference (module documentation, # The step; `Verdict::Unseeing`): `factor`, the pairs it could come
-/// within on at the best over the `have` it was read on (`blind`), wherever a run's trajectories can take them, a batch
-/// at a time (`batch`: at most twice the pairs the read rests on) and read again; none where they cannot -- the rung
-/// below is then read instead, or the check ends unable to see (SPEC §5.1). A rung below is no remedy for the noise:
-/// it reads its own pair's, and where the pairs part early that is the two ensembles' own, the same at every step
-/// (measured, R4_LIN_2: rows at far ends of 1.5 to 2.5 b at 0.43, 0.22, 0.11 and 0.054 µs alike).
-fn remedy(factor: f64, have: u64) -> Option<u64> {
-    let pairs = factor * have as f64;
-    (pairs <= MOST_TRAJECTORIES as f64 && have < MOST_TRAJECTORIES).then(|| batch(pairs, have))
+/// hides the difference (module documentation, ## The ladder; `Verdict::Unseeing`) --, a batch of them at a time
+/// (`batch`: at most twice the `have` pairs the read rests on) and read again; or none: the rung at τ is left for the
+/// rung below, or, at the ladder's bottom (`lowest`), the check ends unable to see (SPEC §5.1).
+///
+/// The read answers both ways from the same far and near ends (`blind`): more pairs at the rung, N_τ = N₀ (F − L)/(b −
+/// L), wherever a run's trajectories can take them; or the rung below, whose error's mean square is L/2^{2p} beside
+/// the same noise, N_{τ/2} = N₀ (F − L)/(b − L/2^{2p}). Each is priced at the run's expected work from here (`prices`:
+/// a trajectory's work a µs at each step, the product's trajectories N_p), the pilot's `pilot` pairs the ones a rung
+/// below keeps -- its level at τ becomes the companion of its own at τ/2, and the further pairs are freed:
+/// - at the rung: the further pairs' companions at 2τ, its run level at τ beyond the `have` in hand -- the pairs' or
+///   the product's, whichever are more: the further pairs' run level is the product's --, and where it reads its
+///   third level above on the pilot (`third`: it has none, and the ladder has the rung above), the pilot at 4τ;
+/// - below: the run level at τ/2 -- the pilot's, the pairs' or the product's, whichever are more -- and the further
+///   pairs' companions at τ beyond the pilot's.
+/// The rung below is taken where it is expected to cost less; else the pairs, as where no rung below is. Where no
+/// pairs can be had within the run's trajectories -- or no number of them sees: L at b or above, a look unread --, none:
+/// the rung below, as before. A rung below is no remedy for the noise, and the choice does not take it for one (module
+/// documentation, ## The ladder): where L ≪ b the two ask the same pairs and the rung below costs its run level at τ/2
+/// beside them.
+fn remedy(own: &Between, have: u64, pilot: u64, prices: &Prices, tau: f64, third: bool, lowest: bool) -> Option<u64> {
+    let (n, pilot) = (have as f64, pilot as f64);
+    let at = blind(own, 1.)? * n;
+    if !(at <= MOST_TRAJECTORIES as f64 && have < MOST_TRAJECTORIES) {
+        return None;
+    }
+    let pairs = batch(at, have);
+    if lowest {
+        return Some(pairs);
+    }
+    let (work, product) = (prices.work, prices.product);
+    let below = blind(own, 0.5).map_or(f64::INFINITY, |factor| factor * n);
+    let stay = (at - n) * work(2. * tau) + (at.max(product) - n) * work(tau) + if third { pilot * work(4. * tau) } else { 0. };
+    let down = product.max(below).max(pilot) * work(0.5 * tau) + (below - pilot).max(0.) * work(tau);
+    (stay <= down).then_some(pairs)
 }
 
 /// The step's part of an output's accounts (module documentation, # The step): on what is shown -- the largest of the
@@ -1859,7 +1915,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     // The scout (module documentation, # The pipeline): the first member of every pilot group at both levels, screened;
     // where a unit is to be kept at its states, the attempt ends here -- for the price of the scout, not of a pilot.
     // The pilot's read of the same below stands for the result.
-    settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &|pilot| grown(pilot).is_some(), None, false, messages);
+    settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, &|pilot| grown(pilot).is_some(), None, messages);
     // The scout's keep first, at the scout's analysis times: a model whose units' errors measured at the scout's states
     // leave a look no room is no model of those atoms, and what they read of the reach is that model's (with nothing
     // kept, PGC3D's and TET's scouts heated their atoms to 153 and 198 µK, and the reach grown for them stayed: 1.7 and
@@ -1891,7 +1947,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     // the decisions the pilot's reads hold are taken (# Each decision as its evidence is in), and the check goes on
     // past them only where they leave the attempt standing. Whether it saw: a step that stands uncertified -- at the
     // steps' cap, or unable to see -- is flagged.
-    let mut settled = settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &|pilot| grown(pilot).is_some(), Some(ran), true, messages);
+    let mut settled = settle(&run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, &|pilot| grown(pilot).is_some(), Some(ran), messages);
     drop(run);
     let mut scouted = scouted;
     // The pilot's reads at its run level's analysis times, made at the rung they were made at; made again only where
@@ -1932,9 +1988,16 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
         if !matches!(settled, Settled::Pending) {
             break (at, pilot, read);
         }
-        made = Some((tau, at, pilot, read));
+        // The check goes on priced (`Prices`): where the noise hides its rung's difference it weighs more pairs against
+        // the rung below by the run's expected work -- a trajectory's work a µs at each step, as a keep prices the
+        // current model at the pilot's states (`Formula::at_step`), and the product's trajectories its looks ask.
+        let product = most_needed(&looks(&read.estimates, &fixed, step));
+        let (_, _, pilot, read) = &*made.insert((tau, at, pilot, read));
+        let formula = Formula::new(model, kept, units, reference, trap.centre, read.refined.as_ref().unwrap_or(&tables), ladder, setup());
+        let (rated, own, potential) = (one_each(&pilot.iter().collect::<Vec<_>>()), formula.own(), formula.potential(model));
+        let work = |tau: f64| formula.at_step(&rated, &own, potential, tau);
         let run = Run::tabulated(model, &tables, reference);
-        settled = check(&run, ensemble, &domain, &mut context, &mut levels, &numbers, GROUP, &above, &|pilot| grown(pilot).is_some(), false, messages);
+        settled = check(&run, ensemble, &domain, &mut context, &mut levels, &numbers, GROUP, &above, &|pilot| grown(pilot).is_some(), Some(&Prices { work: &work, product }), messages);
     };
     let saw = match settled {
         Settled::Capped => {
@@ -2269,8 +2332,8 @@ enum Settled {
     Standing,
     Capped,
     Unseen,
-    /// On the pilot, asked to stop there (`until`): the rung's own read is in and not clearly beyond, and the check
-    /// would go on past its own two levels -- the decisions the pilot's reads hold come first (`attempt`).
+    /// On the pilot, asked to stop there (`check` with no `Prices`): the rung's own read is in and not clearly beyond,
+    /// and the check would go on past its own two levels -- the decisions the pilot's reads hold come first (`attempt`).
     Pending,
 }
 
@@ -2289,8 +2352,8 @@ enum Settled {
 ///     read no number (`readable`), the rung above is unread;
 ///   - its own estimate within and no third level to be had: it stands on its own two levels;
 ///   - its own estimate beyond the share and not clearly (`Verdict::Unseeing`): the pairs of `remedy` -- the product's
-///     next groups at both levels, read again after every batch --; where they cannot see it, it is left: its estimate
-///     as it reads is beyond the share.
+///     next groups at both levels, read again after every batch -- where they are expected to cost the run less than
+///     the rung below; else, or where they cannot see it, it is left: its estimate as it reads is beyond the share.
 /// A rung below at which a trajectory would take more than `MOST_STEPS` steps does not exist: a check that is clearly
 /// beyond there leaves the step capped, one whose noise no pairs see through ends unable to see (`Settled::Unseen`).
 /// On the pilot a rung below's own level, once in, is read by the reach's falsifier first (`outgrown`, `own_level`):
@@ -2300,11 +2363,11 @@ enum Settled {
 /// `ran`: the finer level of the members already run, joined to the groups the levels hold (`attempt`: the pilot's own
 /// level, run first and read by the reach's falsifier before its companion, `own_level`) -- its companion alone is
 /// run then, and the check goes on as from a pair: a trajectory
-/// is a function of its number and step (`trajectory`), not of the hand-out it was run in. `until`: on the pilot, the
-/// check stops where the rung's own read is in, not clearly beyond, and it would go on past its two levels
-/// (`Settled::Pending`; `check` takes it up again).
+/// is a function of its number and step (`trajectory`), not of the hand-out it was run in. On the pilot the check stops
+/// where the rung's own read is in, not clearly beyond, and it would go on past its two levels (`Settled::Pending`:
+/// `check` takes it up again, priced, once the decisions the pilot's reads hold are taken).
 #[allow(clippy::too_many_arguments)]
-fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, ran: Option<Vec<Part>>, until: bool, messages: &mut Messages) -> Settled {
+fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, ran: Option<Vec<Part>>, messages: &mut Messages) -> Settled {
     // The finer level joined to the groups the levels hold, and its companion.
     let (joined, coarse) = match ran {
         Some(joined) => {
@@ -2323,13 +2386,16 @@ fn settle(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context
     };
     levels.fine = joined;
     absorb(&mut levels.coarse, coarse);
-    check(run, ensemble, domain, context, levels, numbers, members.end, above, outgrown, until, messages)
+    check(run, ensemble, domain, context, levels, numbers, members.end, above, outgrown, None, messages)
 }
 
 /// The step's check of the levels in hand (`settle`) on the members `..members` of the pilot's groups `numbers` (the
-/// pilot's where they are all its members); `until` as `settle` takes it.
+/// pilot's where they are all its members). `prices`: what the check's choice between more pairs and the rung below
+/// weighs where the noise hides a rung's difference (`remedy`) -- the pilot's reads, made once the check has its own
+/// rung's read (`attempt`); none before them, where the pilot's check stops at that read (`Settled::Pending`, as
+/// `settle` takes it). The scout's check reads no rung it cannot see: it stands where it is not clearly beyond.
 #[allow(clippy::too_many_arguments)]
-fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: u64, above: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, until: bool, messages: &mut Messages) -> Settled {
+fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: u64, above: &dyn Fn(f64) -> bool, outgrown: &dyn Fn(&[&Part]) -> bool, prices: Option<&Prices>, messages: &mut Messages) -> Settled {
     // Whether the check is the pilot's: all the members of a group in.
     let pilot = members == GROUP;
     loop {
@@ -2347,7 +2413,7 @@ fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context,
         if verdict == Verdict::Stands {
             return Settled::Standing;
         }
-        if until && pilot && !screen(&read) {
+        if prices.is_none() && pilot && !screen(&read) {
             return Settled::Pending;
         }
         if verdict == Verdict::Above {
@@ -2363,14 +2429,17 @@ fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context,
             }
             continue;
         }
+        // The own read's estimate beyond the share, and not clearly (`Verdict::Unseeing`, the pilot's alone: its check
+        // has its prices here): the noise hides the difference, or the error lies near the share. The pairs that could
+        // bring it within at the best, where they are expected to cost the run less than the rung below, whose error is
+        // the order's less beside the same noise (`blind`, `remedy`). Where the rung below is cheaper, or pairs cannot
+        // see, the rung is left, as an adaptive integrator leaves a step whose error estimate is beyond its tolerance.
         let have = levels.paired().0.len() as u64 * GROUP;
-        let pairs = if verdict == Verdict::Unseeing { blind(&read).and_then(|factor| remedy(factor, have)) } else { None };
+        let pairs = match (verdict, prices) {
+            (Verdict::Unseeing, Some(prices)) => remedy(&read, have, numbers.len() as u64 * members, prices, context.tau, upward && levels.above.is_none(), lowest),
+            _ => None,
+        };
         if let Some(pairs) = pairs {
-            // The own read's estimate beyond the share, and not clearly: the noise hides the difference, and the pairs
-            // could bring it within at the best (`blind`, `remedy`) -- a rung below reads its own pair's noise, and where
-            // the pairs part early that is the two ensembles' own. Where pairs cannot, the estimate as it reads is beyond
-            // the share: the rung is left, as an adaptive integrator leaves a step whose error estimate is beyond its
-            // tolerance.
             let next: Vec<u64> = (have / GROUP..pairs / GROUP).collect();
             let more = pair(run, ensemble, domain, &context.plan, context.tau, &next, 0..GROUP, false, messages, &mut |prefix, messages| {
                 so_far(context, &levels.fine, &levels.further[0].iter().chain(prefix.iter().copied()).collect::<Vec<_>>(), messages)
@@ -2472,7 +2541,7 @@ fn product(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Contex
             let (shown, l, c) = pooled(&all, &context.scales);
             return Ok((shown, l, c, e));
         }
-        let want = batch(chased.iter().map(Look::need).fold(0., f64::max), n);
+        let want = batch(most_needed(&chased), n);
         messages.result(all.len(), n, left(n, want), || {
             let (shown, l, c) = pooled(&all, &context.scales);
             assemble(context, &shown, &e, &l, &c, n)
@@ -3277,6 +3346,12 @@ fn looks(estimates: &[Estimate], fixed: &Fixed, step: Bound) -> Vec<Look> {
         .collect()
 }
 
+/// The trajectories the looks a run's trajectories can meet need (`Look::fits`, `Look::need`), the most of them: what
+/// the product's next batch is made for (`batch`), and the product the step's check weighs its choice by (`Prices`).
+fn most_needed(looks: &[Look]) -> f64 {
+    looks.iter().filter(|l| l.fits()).map(Look::need).fold(0., f64::max)
+}
+
 /// The times where some look's model error and step's share leave the statistics no room (SPEC §5.2): no number
 /// of trajectories fits beside them -- what the model's decisions answer (`keep`), on the errors booked, not on a
 /// statistics' read: a keep is never undone, and a need read off a few groups' interval is no certain thing (a look
@@ -3998,6 +4073,14 @@ impl<'a> Formula<'a> {
             .collect()
     }
 
+    /// The current model's work a µs over the run (`over_the_run`) at the states `rated` (`one_each`) with every step
+    /// taken at τ, each step priced at it (`prices`, `rate`): the model's price `own` (`own`) and its potential's work an
+    /// evaluation `potential` (`potential`) -- what a level of the step's check costs a trajectory (`Prices`).
+    fn at_step(&self, rated: &[Pick], own: &Priced, potential: f64, tau: f64) -> f64 {
+        let prices = self.prices(&rated.iter().map(|pick| (pick.state.sample.cluster, pick.state.sample.at, tau)).collect::<Vec<_>>());
+        over_the_run(rated, rated.iter().zip(&prices).map(|(pick, price)| self.rate(self.model, own, pick.state.sample.cluster, price, tau, pick.jumps, potential)), None)
+    }
+
     /// The current model priced on its tables' axes (`Model::priced`).
     fn own(&self) -> Priced {
         self.model.priced(&self.axes.iter().map(|a| a.as_ref().map_or((0, 0.), |a| a.2)).collect::<Vec<_>>())
@@ -4713,7 +4796,7 @@ mod tests {
     #[test]
     fn a_rung_of_untested_order_asks_for_the_pairs_that_could_bring_it_within() {
         let b = step_bound()[1].powi(2);
-        let asks = |t: Read| blind(&at(Some(t)));
+        let asks = |t: Read| blind(&at(Some(t)), 1.);
         assert_eq!(asks(read(0., 0.25 * b)), None);
         let close = |asked: Option<f64>, factor: f64| asked.is_some_and(|f| (f - factor).abs() < 1e-12);
         assert!(close(asks(read(0., b)), 2.) && close(asks(read(-1.5 * b, b)), 2.) && close(asks(read(0.5 * b, b)), 2.5) && close(asks(read(1.5 * b, 0.5 * b)), 4.));
@@ -4721,21 +4804,75 @@ mod tests {
         let bp = step_bound()[0].powi(2);
         let mut row = at(Some(read(0., b)));
         row.shown[1] = read(0.5 * bp, bp);
-        assert!(close(blind(&row), 2.5) && readable(&row));
+        assert!(close(blind(&row, 1.), 2.5) && readable(&row));
         row.shown[1] = Read { value: 0.3, spread: Spread::UNREAD };
-        assert!(blind(&row) == Some(f64::INFINITY) && !readable(&row));
+        assert!(blind(&row, 1.) == Some(f64::INFINITY) && !readable(&row));
         row.shown[1] = read(f64::NAN, 0.);
-        assert!(blind(&row) == Some(f64::INFINITY) && !readable(&row) && readable(&at(None)));
+        assert!(blind(&row, 1.) == Some(f64::INFINITY) && !readable(&row) && readable(&at(None)));
     }
 
-    /// The pairs a rung's own read asks for where the noise hides its difference (`remedy`): the factor `blind` gives,
-    /// in whole groups, at most twice the pairs it has a batch -- 1.05 times 88 is 96, 7.1 times 88 a first batch of 176
-    /// --, wherever a run can take them; none past the most trajectories a solve runs, nor for a read that excludes
-    /// nothing.
+    /// The run's work a step's check weighs its choice by (`Prices`) in the tests: a trajectory's work a µs as its steps'
+    /// count, 1/h, and the product's trajectories.
+    fn steps(product: f64) -> (Box<dyn Fn(f64) -> f64>, f64) {
+        (Box::new(|h: f64| 1. / h), product)
+    }
+
+    /// Where no rung below is (the ladder's bottom), or no pairs see (`remedy`), the rung asks as it did before the
+    /// rung below was priced: the factor `blind` gives, in whole groups, at most twice the pairs it has a batch, wherever
+    /// a run can take them -- 1.05 times 88 is 96, 7.1 times 88 a first batch of 176 --; none past the most trajectories
+    /// a solve runs, nor for a read whose near end is at the share or that excludes nothing -- the rung is then left,
+    /// or at the bottom the check ends unable to see. On the total T against b = s² (unlimited groups, t = 2): a read
+    /// of 1.5 b ± 0.5 b asks (2.5 − 0.5)/(1 − 0.5) = 4 times its pairs at the rung, and (2.5 − 0.5)/(1 − 0.5/16) at the
+    /// rung below, whose error's mean square is the order's 2^{2p} less beside the same noise.
     #[test]
-    fn the_pairs_a_rung_asks_for_are_those_it_could_see_on_at_the_best() {
-        assert_eq!((remedy(1.05, 88), remedy(7.1, 88), remedy(200., 88), remedy(f64::INFINITY, 88)), (Some(96), Some(176), None, None));
-        assert_eq!(remedy(1.01, MOST_TRAJECTORIES), None);
+    fn where_no_rung_below_is_or_no_pairs_see_the_rung_asks_as_before() {
+        let b = step_bound()[1].powi(2);
+        let (work, product) = steps(300.);
+        let prices = Prices { work: &*work, product };
+        let close = |asked: Option<f64>, factor: f64| asked.is_some_and(|f| (f - factor).abs() < 1e-12);
+        let wide = at(Some(read(1.5 * b, 0.5 * b)));
+        assert!(close(blind(&wide, 1.), 4.) && close(blind(&wide, 0.5), 2. / (1. - 0.5 / 16.)));
+        // The factor's batch at the bottom: 1.05 × 88 = 92.4 → 96, 7.1 × 88 → 176 (twice the 88), 4 × 352 → 704. A read
+        // of none whose far end is f b asks f times its pairs.
+        let factor = |f: f64| at(Some(read(0., 0.5 * f * b)));
+        assert!(close(blind(&factor(1.05), 1.), 1.05) && close(blind(&factor(7.1), 1.), 7.1));
+        let bottom = |r: &Between, have: u64| remedy(r, have, 88, &prices, 0.25, true, true);
+        assert_eq!((bottom(&factor(1.05), 88), bottom(&factor(7.1), 88), bottom(&wide, 352)), (Some(96), Some(176), Some(704)));
+        // Past the most trajectories, a near end at the share, a read that is no number: no pairs, at the bottom or not.
+        let near = at(Some(read(3. * b, 0.5 * b)));
+        let none = at(Some(read(f64::NAN, 0.)));
+        for lowest in [true, false] {
+            let asks = |r: &Between, have: u64| remedy(r, have, 88, &prices, 0.25, true, lowest);
+            assert_eq!((asks(&factor(200.), 88), asks(&near, 88), asks(&none, 88), asks(&factor(1.01), MOST_TRAJECTORIES)), (None, None, None, None));
+        }
+    }
+
+    /// Two causes of a read that cannot see, two answers (`remedy`; module documentation, ## The ladder), priced at the
+    /// steps' count (1/h a µs) with a product of 300 trajectories, the pilot's 88 pairs in hand at τ = 0.25 µs (the
+    /// third level at 4τ to run where it stands):
+    /// - the noise: 1.2 b ± 0.6 b, its near end at none, far end 2.4 b -- 2.4 times the pairs at either rung, the
+    ///   rung below no less: 123 pairs' companions at 2τ and the product's 212 more at τ, against the product's 300 at
+    ///   τ/2 and 123 companions at τ: the pairs, 176 a first batch;
+    /// - the error near the share: 1.04 b ± 0.025 b, near end 0.99 b, far end 1.09 b -- ten times the pairs at the
+    ///   rung, 792 more at both levels, where at the rung below its error's mean square is 0.062 b and the pilot's 88
+    ///   pairs see it: the product at τ/2, 300 trajectories, against 792 at 2τ and τ: the rung below.
+    /// And the choice is no step in the read: between the two -- an estimate of 1.05 b, its interval from 2.1 b down to
+    /// 0.12 b, the near end from none up to 0.99 b -- it moves once, from the pairs to the rung below, and never back.
+    #[test]
+    fn a_rung_that_cannot_see_takes_pairs_for_noise_and_the_rung_below_for_an_error_near_its_share() {
+        let b = step_bound()[1].powi(2);
+        let (work, product) = steps(300.);
+        let prices = Prices { work: &*work, product };
+        let asks = |r: &Between| remedy(r, 88, 88, &prices, 0.25, true, false);
+        let noise = at(Some(read(1.2 * b, 0.6 * b)));
+        let near = at(Some(read(1.04 * b, 0.025 * b)));
+        for r in [&noise, &near] {
+            assert!(verdict(r, None, true, true) == Verdict::Unseeing && !screen(r));
+        }
+        assert_eq!((asks(&noise), asks(&near)), (Some(176), None));
+        let choices: Vec<bool> = (0..=99).map(|k| asks(&at(Some(read(1.05 * b, (0.525 - 0.005 * k as f64) * b)))).is_some()).collect();
+        let flips = choices.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(choices[0] && !choices[99] && flips == 1, "{choices:?}");
     }
 
     /// A read as a run logged it: its value and its far end at one look, each over the bound b of its look, on `groups`
@@ -4758,7 +4895,7 @@ mod tests {
     fn a_rung_reads_its_cheap_third_level_and_else_stands_on_its_two() {
         let b = step_bound()[1].powi(2);
         let own = at(Some(logged(-0.055, 0.83, 11., b)));
-        assert!(blind(&own).is_none() && !screen(&own) && within(&own));
+        assert!(blind(&own, 1.).is_none() && !screen(&own) && within(&own));
         assert_eq!((verdict(&own, None, false, false), verdict(&own, None, true, true), verdict(&own, None, true, false)), (Verdict::Stands, Verdict::Above, Verdict::Stands));
         let coarser = carried(&at(Some(pilot(32. * b, b))), 0.5);
         assert!(screen(&coarser) && verdict(&own, Some(&coarser), true, false) == Verdict::Left);
@@ -4785,7 +4922,7 @@ mod tests {
         (own.loss, above.loss) = (logged(1.952, 7.702, 11., bp), logged(32.045, 49.088, 11., bp));
         let above = carried(&above, 0.5);
         assert!(!screen(&above) && verdict(&own, Some(&above), true, false) == Verdict::Unseeing);
-        assert!(blind(&own).is_some_and(|factor| (factor - 7.702).abs() < 1e-9), "{:?}", blind(&own));
+        assert!(blind(&own, 1.).is_some_and(|factor| (factor - 7.702).abs() < 1e-9), "{:?}", blind(&own, 1.));
         let ((open, _), (estimate, _)) = (checked(&own, Some(&above), false), checked(&own, Some(&above), true));
         assert!((open.shown - (7.702 * bp).sqrt()).abs() < 1e-12 && open.shown > sp, "{open:?}");
         assert!((estimate.shown - (32.045 / 16. * bp).sqrt()).abs() < 1e-12, "{estimate:?}");
@@ -5360,7 +5497,7 @@ mod tests {
             assert!(number(b.shown) && b.shown <= 1. && number_or_unbounded(b.temperature), "{b:?}");
         }
         assert_eq!(checked(&none, None, true).0.shown, 1., "a read that is no number excludes nothing: the whole");
-        assert!(blind(&none).is_some_and(|f| f == f64::INFINITY));
+        assert!(blind(&none, 1.).is_some_and(|f| f == f64::INFINITY));
         assert_eq!(batch(f64::NAN, 88), 176);
         assert_eq!((probability_error(f64::NAN), probability_error(2.), probability_error(0.3)), (1., 1., 0.3));
     }
