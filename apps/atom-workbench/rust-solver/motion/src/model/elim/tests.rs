@@ -349,3 +349,78 @@ fn a_tilt_leaves_the_partition_and_the_step_s_requirement_and_moves_the_numbers_
         assert!((closed[1].remainder - base.remainder).abs() <= 10.0 * theta * base.remainder.max(1e-6), "ρ at 0.1°: {} against {}", closed[1].remainder, base.remainder);
     }
 }
+
+/// The fold's series about a reference (the evaluation route the engine takes; the self-consistent fold is the definition),
+/// on PGC3D's F = 2 states at the point near the focus where its cooling light's coherent field is strongest: the reference
+/// z₀ the mean of the states' levels without the near light (H0 and the outside forms there), the ratio q = ‖H − z₀‖/d of the
+/// Neumann series. The generator of the series to order K (`Fold::series_generator`) is the fold's within its remainder's
+/// bound q^{K+1}/(1 − q) (relatively, against the fold's own part H − A), and the difference falls with K as q's powers.
+/// Measured: about the far levels q = 0.548 there and the difference 9.8e-3 at order 0, falling 0.51–0.54 an order;
+/// about the levels with the near light's scalar shift q = 0.0054, 7.5e-5 at order 0 and 3.7e-7 at order 1 -- the scalar
+/// shift is most of ‖H − z₀‖, and it is the near light's intensity's alone.
+#[test]
+fn the_fold_s_series_about_a_reference_is_the_fold_within_its_remainder_and_falls_as_its_ratio_s_powers() {
+    let req = request("PGC3D_1ms");
+    let light = crate::field::Light::new(&req);
+    let ground: Vec<usize> = (0..crate::request::GROUND).filter(|&g| crate::request::Level::parse(&req.states[g]).unwrap().f == 2).collect();
+    // The cooling light: the co-rotating class of the most beams; its coherent field's peak over a grid near the focus.
+    let strength = |r: [f64; 3]| {
+        let (_, classes, sources) = system(&req, &light, r);
+        let cooling = (0..classes.len()).filter(|&c| !sources[c].1).max_by_key(|&c| classes[c].beams.len()).unwrap();
+        let mut sum = Mat::zeros(classes[cooling].beams[0].coupling.rows, classes[cooling].beams[0].coupling.cols);
+        for b in &classes[cooling].beams {
+            sum.add_scaled(C64::ONE, &b.coupling);
+        }
+        sum.frobenius()
+    };
+    let grid: Vec<[f64; 3]> = (0..7_usize.pow(3)).map(|i| [(i % 7) as f64 * 0.05 - 0.15, (i / 7 % 7) as f64 * 0.05 - 0.15, (i / 49) as f64 * 0.05 - 0.15]).collect();
+    let peak = grid.iter().copied().max_by(|a, b| strength(*a).total_cmp(&strength(*b))).unwrap();
+    let (levels, classes, _) = system(&req, &light, peak);
+    let excited: Vec<usize> = (0..levels.excited.rows).collect();
+    let lv = Levels { ground: levels.ground.block(&ground, &ground), excited: levels.excited.clone(), decay: levels.decay.clone(), emission: std::array::from_fn(|a| levels.emission[a].block(&ground, &excited)) };
+    let cl: Vec<Class> = classes.iter().map(|c| Class { nu: c.nu, beams: c.beams.iter().map(|b| Beam { coupling: b.coupling.block(&excited, &ground), wave: b.wave }).collect() }).collect();
+    let fold = folded(&lv, &cl, &at_rest(ground.len()));
+    assert!(fold.exists);
+    let n = ground.len();
+    let mut own = fold.generator.clone();
+    own.add_scaled(-C64::ONE, &fold.direct);
+    // Two references: the states' mean level without the near light, and with its scalar shift (the mean of the fold's
+    // eigenvalues: what the near light's intensity alone sets, the polarization's vector and tensor parts traceless).
+    let far = C64::real((0..n).map(|i| fold.direct[(i, i)].re).sum::<f64>() / n as f64);
+    let shifted = C64::real(fold.eigen.values.iter().map(|z| z.re).sum::<f64>() / n as f64);
+    // The coordinator's choice: the far levels and one constant c for the whole light, the middle of the near light's
+    // scalar shift's range over the grid's points -- no field in it, the tables' dimensions those of the far light.
+    let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &r in &grid {
+        let (levels, classes, _) = system(&req, &light, r);
+        let lv = Levels { ground: levels.ground.block(&ground, &ground), excited: levels.excited.clone(), decay: levels.decay.clone(), emission: std::array::from_fn(|a| levels.emission[a].block(&ground, &excited)) };
+        let cl: Vec<Class> = classes.iter().map(|c| Class { nu: c.nu, beams: c.beams.iter().map(|b| Beam { coupling: b.coupling.block(&excited, &ground), wave: b.wave }).collect() }).collect();
+        let f = folded(&lv, &cl, &at_rest(ground.len()));
+        let shift = (f.eigen.values.iter().map(|z| z.re).sum::<f64>() - (0..ground.len()).map(|i| f.direct[(i, i)].re).sum::<f64>()) / ground.len() as f64;
+        low = low.min(shift);
+        high = high.max(shift);
+    }
+    let centred = far + C64::real(0.5 * (low + high));
+    println!("the near light's scalar shift over the grid: {low:.3} to {high:.3} rad/us");
+    for (name, z0) in [("far levels", far), ("far levels and the range's centre", centred), ("levels with the point's scalar shift", shifted)] {
+        let q = fold.series_ratio(z0);
+        println!("PGC3D F=2 at {peak:?}, z0 at the {name}: the series' ratio q = {q:.4}");
+        assert!(q < 1.0, "the series converges here: q = {q}");
+        let mut last = f64::INFINITY;
+        for order in 0..=6 {
+            let forms = fold.series(z0, order);
+            let h = fold.series_generator(&forms, z0).expect("the series' generator settles");
+            let mut apart = h.clone();
+            apart.add_scaled(-C64::ONE, &fold.generator);
+            let relative = apart.frobenius() / own.frobenius();
+            // The remainder's bound, and the rounding of the series' sums (n² products an order) beside it.
+            let bound = q.powi(order as i32 + 1) / (1.0 - q) + crate::units::rounding(n * n * (order + 2));
+            println!("  order {order}: {relative:.3e} of the fold apart, bound {bound:.3e}, against the order before {:.3}", relative / last);
+            assert!(relative <= bound, "order {order}: {relative} beyond the bound {bound}");
+            if order > 0 && relative > 1e3 * crate::units::UNIT_ROUNDOFF {
+                assert!(relative <= 2.0 * q * last, "order {order}: falls by {} where q = {q}", relative / last);
+            }
+            last = relative;
+        }
+    }
+}

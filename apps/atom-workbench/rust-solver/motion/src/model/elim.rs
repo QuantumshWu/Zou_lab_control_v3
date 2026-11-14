@@ -31,6 +31,20 @@
 //! saturation, where the fold exists (the iteration contracts). The bare levels' fold and the fold at the atom's levels
 //! are this one function taken at a coarser point; there is no other form.
 //!
+//! # The definition and the route it is evaluated on (`Fold::series`)
+//! The self-consistent fold above is the definition, and the reference the criteria and the errors are read against. A
+//! run evaluates the same function by its series about a reference z₀: the resolvent's Neumann series
+//! R(z) = Σ_k (z₀ − z)^k R₀^{k+1}, R₀ = (z₀ + f − K)⁻¹, with z the P generator H as a right factor, gives
+//! T_f = Σ_k (−1)^k R₀^{k+1} W_f (H − z₀)^k and H = A + Σ_k (−1)^k N_k (H − z₀)^k, N_k = Σ_f W′_f R₀^{k+1} W_f -- one
+//! function, not a second form. Its radius is the distance d of z₀ + f from the excited block's spectrum; its remainder
+//! after order K is within q^{K+1}/(1 − q), q = ‖H − z₀‖₂/d (`Fold::series_ratio`), and the order is the least whose
+//! remainder is within the share (criterion one's ρ books it). The reference is the P levels with the far light alone
+//! and one constant c of the whole run, the middle of the near light's scalar shift over the prior's atoms: no field in
+//! it, the N_k are bilinear in the near fields with coefficients of the far light's coordinates alone -- a table's
+//! dimensions are the far light's. (PGC3D's F = 2 at its cooling light's coherent peak: about the far levels alone
+//! q = 0.548; with the centre c, q = 0.0056, the series' order 0 within 7.9e-5 of the fold, order 1 within 4.0e-7.)
+//! Where no order reaches the share (q near one) the block is made explicit by criterion one.
+//!
 //! # First order in the frequency offsets
 //! A P amplitude whose frequency is λ_p + Δ -- the Doppler shift of a beam, k·v, an explicit beat -- drives
 //! (λ_p + Δ + f − K)⁻¹ W r_p = T r_p − Δ T2 r_p + Δ² R² R(λ + Δ) W r_p, T2 the solution of T2 H − (K − f) T2 = T
@@ -817,6 +831,77 @@ impl Fold {
     pub(crate) fn response_work(&self) -> f64 {
         let n = self.size() as f64;
         self.replicas.iter().map(|r| { let q = r.q.len() as f64; 2.0 * (1.5 * q * q * n + 2.0 * q * n * n) + 2.0 * q * n * n }).sum()
+    }
+
+    /// The fold's series about a reference z₀ (the engine's evaluation route; the self-consistent fold is the
+    /// definition): the resolvent's Neumann series R(z) = Σ_k (z₀ − z)^k R₀^{k+1}, R₀ = (z₀ + f − K)⁻¹, with z the P
+    /// generator H itself (a right factor, as in the Sylvester equation) gives the wave operator
+    /// T_f = Σ_k (−1)^k R₀^{k+1} W_f (H − z₀)^k and the generator H = A + Σ_k (−1)^k N_k (H − z₀)^k,
+    /// N_k = Σ_f W′_f R₀^{k+1} W_f. The N_k (and the jumps' C R₀^{k+1} W) are bilinear in the fields with coefficients
+    /// of the reference levels alone: what a table holds without the near light's coordinates. Returns N_0..N_K.
+    pub(crate) fn series(&self, z0: C64, orders: usize) -> Vec<Mat> {
+        let n = self.size();
+        let mut out = vec![Mat::zeros(n, n); orders + 1];
+        for rep in &self.replicas {
+            let sigma = z0 + C64::real(rep.frequency);
+            let mut x = rep.w.clone();
+            for form in out.iter_mut() {
+                for j in 0..n {
+                    let column: Vec<C64> = (0..x.rows).map(|i| x[(i, j)]).collect();
+                    let solved = rep.k.resolvent(sigma, &column);
+                    for i in 0..x.rows {
+                        x[(i, j)] = solved[i];
+                    }
+                }
+                form.add_scaled(C64::ONE, &rep.back.product(&x));
+            }
+        }
+        out
+    }
+
+    /// The generator of the series to order K (`series`): the fixed point of H ← A + Σ_k (−1)^k N_k (H − z₀)^k from A
+    /// (`settle`, on n × n matrices alone); None where it does not settle.
+    pub(crate) fn series_generator(&self, forms: &[Mat], z0: C64) -> Option<Mat> {
+        let n = self.size();
+        let (h, _, exists) = settle(
+            &self.direct,
+            |h| {
+                let mut e = h.clone();
+                for i in 0..n {
+                    e[(i, i)] -= z0;
+                }
+                let (mut next, mut power, mut scale) = (self.direct.clone(), Mat::identity(n), self.direct.frobenius());
+                for (k, form) in forms.iter().enumerate() {
+                    let term = form.product(&power);
+                    scale += term.frobenius();
+                    next.add_scaled(C64::real(if k % 2 == 0 { 1.0 } else { -1.0 }), &term);
+                    power = power.product(&e);
+                }
+                (next, scale)
+            },
+            n * n * forms.len(),
+        );
+        exists.then_some(h)
+    }
+
+    /// The series' ratio q = ‖H − z₀‖₂ / d (the spectral norm, the largest singular value; d the least distance of
+    /// z₀ + f from the excited block's spectrum over the replicas, 1/‖R₀‖ where the excited block is normal): its
+    /// remainder after order K is within q^{K+1}/(1 − q) of the fold, relatively, where q < 1 (the Neumann series'
+    /// radius) -- the order an evaluation takes is the least whose remainder is within the share (criterion one's ρ
+    /// books it).
+    pub(crate) fn series_ratio(&self, z0: C64) -> f64 {
+        let n = self.size();
+        let mut e = self.generator.clone();
+        for i in 0..n {
+            e[(i, i)] -= z0;
+        }
+        let distance = self
+            .replicas
+            .iter()
+            .flat_map(|rep| (0..rep.k.n).map(move |i| (z0 + C64::real(rep.frequency) - rep.k.s[i * rep.k.n + i]).abs()))
+            .fold(f64::INFINITY, f64::min);
+        let gram = crate::linalg::hermitian_eigen(&e.adjoint_product(&e));
+        gram.values.iter().fold(0.0_f64, |m, &x| m.max(x)).sqrt() / distance
     }
 
     /// The excited share X = Σ_f T_f†T_f (the metric of P's coordinates: the slow state (x, T x) has the norm
