@@ -376,7 +376,6 @@ impl Model {
             ground: h.block(&grounds, &grounds),
             excited: h.block(&excited, &excited),
             decay: self.decay.clone(),
-            emission: std::array::from_fn(|x| self.emission[x].block(&grounds, &excited)),
         };
         let frames: Vec<f64> = c.frames.iter().map(|f| self.omega(f)).collect();
         let reference = (0..g).map(|y| h[(grounds[y], grounds[y])].re - frames[y]).sum::<f64>() / g as f64 + self.series.centre[cluster];

@@ -1,19 +1,20 @@
-//! The readout (SPEC §1.7): the 32 populations of a cluster's state, ρ − ½{Y, ρ} on its states plus the folded excited
-//! populations; and the model in words.
+//! The readout (SPEC §1.7): the 32 populations of a cluster's state, those of its slow state x = S⁻¹ψ on its states plus the
+//! folded excited populations; and the model in words.
 //!
 //! # The readout
 //! A component's folded drives' excited amplitude from ground state b is −R[:,b] x_b -- its bare drives' and those folded at
-//! the atom, each a channel (far.rs, eliminate.rs) --, its channel's excited frequency θ_b + ν (frames). Two channels at one frequency are co-resonant; the others beat and average out. With ρ = xx†/‖x‖²,
-//! the folded excited populations are Σ (R ρ R†)_ii over co-resonant pairs of channels, and the ground states keep ρ − ½{Y, ρ},
-//! Y = Σ R'†R over the same pairs (the metric 1 + Y's first order): the populations sum to one exactly, Re tr(Yρ) =
-//! Σ_i (RρR†)_ii. An explicit state's population is its own ρ_ee.
+//! the atom, each a channel (far.rs, eliminate.rs) --, its channel's excited frequency θ_b + ν (frames). Two channels at
+//! one frequency are co-resonant; the others beat and average out (criterion two). Co-resonance is an equivalence of the
+//! places (channel p, ground place b) -- one excited frequency θ_b + ν_p a class --: a class's response is
+//! C_k = Σ_{(p, b) ∈ k} R_p[:, b] e_bᵀ, its excited amplitude A_k = C_k x, and the slow state's norm x†(1 + Y)x with
+//! Y = Σ_k C_k†C_k on the ground places.
 //!
-//! Co-resonance is an equivalence of the places (channel p, ground place b) -- one excited frequency θ_b + ν_p a class
-//! --, so the pairs' sums are the classes' amplitudes': with a_pb = R_p[:, b] x_b the place's excited amplitude and
-//! A_k = Σ_{(p, b) ∈ k} a_pb the class's, Σ over the ordered pairs of a class of a_pb1* a_qb2 is |A_k|², and of the pairs
-//! of one place a_pb1* A_k. The excited populations are Σ_k |A_k[i]|²/‖x‖² and a ground place gives up
-//! Σ_p Re⟨a_pb, A_k(p, b)⟩/‖x‖²: every place's amplitude is made once and enters two sums, whatever the pairs' number
-//! (their number is the classes' sizes squared: 264 pairs of 48 places on GMD1C's 8 + 5, 281 of 40 on PGC3D's F = 2).
+//! The state the dynamics carries is the normalized ψ = S x (assemble.rs, # The normalized generator; ELIMINATION v7):
+//! the ground places' amplitudes are x = S⁻¹ψ, S⁻¹ = (1 + Y)^{−1/2} by its series to the model's normalization order J
+//! (elim.rs `Series`) -- Y here every co-resonant channel's, the far light's bare ones with the near light's --, an
+//! explicit state's its own. The populations are x's |x_b|², the excited states' Σ_k |A_k[i]|² and the explicit states',
+//! over their sum (‖ψ‖² to the series' remainder): what is read is the slow state itself, exact to the order the run's
+//! normalization takes, no first-order metric left out.
 
 use super::assemble::{Held, Plan, Site};
 use super::far::EXCITED;
@@ -84,67 +85,76 @@ impl Model {
     /// written whole here before it is read --, so a readout from a table asks the heap for nothing.
     pub(crate) fn readout_of(&self, plan: &Plan, table: Option<&NearTable>, at: &Point, psi: &[C64]) -> [f64; STATES] {
         let c = &self.clusters[plan.cluster];
-        let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
-        let mut out = [0.0; STATES];
-        for (z, &s) in psi.iter().zip(&c.states) {
-            out[s] = z.norm_sqr() / norm;
-        }
+        let g = c.ground;
         let mut site = Held::<Site>::take();
-        // The responses act on the normalized coordinates ψ = S x as on the slow state's x (assemble.rs, # The normalized
-        // generator): the excited amplitudes T ψ, and what the ground places give up, Σ Re⟨a, A⟩ = ‖T ψ‖², leaves them
-        // ψ†(1 − X)ψ -- the slow state's populations ψ†(1 + X)⁻¹ψ to the first order in the excited share X, its second
-        // order X² apart, in all of norm ‖ψ‖².
         let count = self.channels_at(plan, table, at, &mut site);
         let Site { channels, excited, .. } = &mut *site;
-        let size = EXCITED * c.ground;
+        let size = EXCITED * g;
         // The co-resonant channels and places (p, b1) and (q, b2), θ_b1 + ν_p = θ_b2 + ν_q, and with them a place's class:
         // the first of the places co-resonant with it (itself among them). The cluster's own under the running lights,
         // exact, found once.
-        let places = count * c.ground;
+        let places = count * g;
         let first = self.resonances[plan.cluster].get_or_init(|| {
-            let sums: Vec<Vec<Beat>> = self.channel_beats(plan).iter().map(|nu| c.frames[..c.ground].iter().map(|theta| theta.plus(1, nu)).collect()).collect();
+            let sums: Vec<Vec<Beat>> = self.channel_beats(plan).iter().map(|nu| c.frames[..g].iter().map(|theta| theta.plus(1, nu)).collect()).collect();
             let mut first = vec![usize::MAX; places];
             for (p, left) in sums.iter().enumerate() {
                 for (q, right) in sums.iter().enumerate() {
                     for (b1, one) in left.iter().enumerate() {
                         for (b2, _) in right.iter().enumerate().filter(|(_, two)| one == *two) {
-                            let at = &mut first[p * c.ground + b1];
-                            *at = (*at).min(q * c.ground + b2);
+                            let at = &mut first[p * g + b1];
+                            *at = (*at).min(q * g + b2);
                         }
                     }
                 }
             }
             first
         });
-        // The classes' amplitudes A_k = Σ R_p[:, b] x_b, held at the class's first place: place by place the amplitudes
-        // a_pb, and after them the classes' sums.
+        // Each class's response C_k = Σ_{(p, b) ∈ k} R_p[:, b] e_bᵀ (EXCITED × the ground places, at the class's first
+        // place): its excited amplitude A_k = C_k x, and the slow state's metric on its ground places Y = Σ_k C_k†C_k.
         excited.clear();
-        excited.resize(2 * places * EXCITED, C64::ZERO);
-        let (own, sums) = excited.split_at_mut(places * EXCITED);
+        excited.resize(places * size + 3 * g * g, C64::ZERO);
+        let (classes, rest) = excited.split_at_mut(places * size);
+        let (metric, rest) = rest.split_at_mut(g * g);
+        let (bent, scratch) = rest.split_at_mut(g * g);
         for (p, response) in channels.chunks_exact(size).enumerate() {
-            for (i, row) in response.chunks_exact(c.ground).enumerate() {
-                for (b, r) in row.iter().enumerate() {
-                    own[(p * c.ground + b) * EXCITED + i] = *r * psi[b];
+            for b in 0..g {
+                let class = &mut classes[first[p * g + b] * size..][..size];
+                for i in 0..EXCITED {
+                    class[i * g + b] += response[i * g + b];
                 }
             }
         }
-        for (&class, a) in first.iter().zip(own.chunks_exact(EXCITED)) {
-            for (sum, a) in sums[class * EXCITED..(class + 1) * EXCITED].iter_mut().zip(a) {
-                *sum += *a;
-            }
-        }
-        // The excited populations |A_k|², a class once (at its first place); and what each ground place gives up,
-        // Re⟨a_pb, A_k⟩.
-        for ((place, &class), a) in first.iter().enumerate().zip(own.chunks_exact(EXCITED)) {
-            let of = &sums[class * EXCITED..(class + 1) * EXCITED];
-            if class == place {
-                for (i, sum) in of.iter().enumerate() {
-                    out[GROUND + i] += sum.norm_sqr() / norm;
+        let held: Vec<usize> = (0..places).filter(|&k| first[k] == k).collect();
+        for &k in &held {
+            let class = &classes[k * size..(k + 1) * size];
+            for x in 0..g {
+                for y in 0..g {
+                    metric[x * g + y] += (0..EXCITED).map(|i| class[i * g + x].conj() * class[i * g + y]).sum::<C64>();
                 }
             }
-            let given: f64 = a.iter().zip(of).map(|(a, sum)| (a.conj() * *sum).re).sum();
-            out[c.states[place % c.ground]] -= given / norm;
         }
+        // The slow state of the normalized coordinates ψ = S x (assemble.rs, # The normalized generator): its ground
+        // places' x = S⁻¹ψ, S⁻¹ = Σ_{j≤J} b_j Y^j at the model's normalization order (elim.rs `Series`), its explicit
+        // states their own; every population of it -- the ground places' |x_b|², the excited states' Σ_k |A_k|², the
+        // explicit states' -- over their sum, x†(1 + Y)x = ‖ψ‖² to the series' remainder.
+        super::assemble::powers(-0.5, self.series.normalization, metric, scratch, bent, g);
+        let mut x = [C64::ZERO; STATES];
+        for b in 0..g {
+            x[b] = (0..g).map(|y| bent[b * g + y] * psi[y]).sum();
+        }
+        x[g..psi.len()].copy_from_slice(&psi[g..]);
+        let mut out = [0.0; STATES];
+        for (z, &s) in x.iter().zip(&c.states).take(psi.len()) {
+            out[s] = z.norm_sqr();
+        }
+        for &k in &held {
+            let class = &classes[k * size..(k + 1) * size];
+            for i in 0..EXCITED {
+                out[GROUND + i] += (0..g).map(|b| class[i * g + b] * x[b]).sum::<C64>().norm_sqr();
+            }
+        }
+        let norm: f64 = out.iter().sum();
+        out.iter_mut().for_each(|p| *p /= norm);
         out
     }
 

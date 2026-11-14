@@ -713,16 +713,22 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
 
 /// The model of the units `kept` and of every unit whose fold does not exist where the reach's atoms are, added to
 /// `kept` (module documentation, # The model's prior; `failing`): the units that fail kept, and the model they make
-/// read again, until none fails -- a drive up its levels as far as the first whose fold exists (model.rs `Level`).
+/// read again, until none fails -- a drive up its levels as far as the first whose fold exists (model.rs `Level`). And
+/// the fold's series constants at the same atoms (model/elim.rs `Series`): where they ask an order of the series the
+/// near forms do not hold, the excited block nearest the reference is made explicit (criterion one; elim.rs
+/// `Model::series_block`) and the model read again -- no order is cut short.
 fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, initial: &[(usize, f64)], temperature: f64) -> Result<Model, String> {
     loop {
         let mut model = Model::new(request, light, kept)?;
         let points = atoms(&model, request, light, initial, temperature)?;
         let more: Vec<Unit> = model.prior(request, &points).into_iter().filter(|u| !kept.contains(u)).collect();
         if more.is_empty() {
-            // The fold's series constants at the same atoms (model/elim.rs `Series`).
             model.referenced(&points);
-            return Ok(model);
+            match model.series_block().filter(|unit| !kept.contains(unit)) {
+                Some(unit) => kept.push(unit),
+                None => return Ok(model),
+            }
+            continue;
         }
         kept.extend(more);
     }
@@ -751,8 +757,9 @@ fn atoms(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64
 fn failing(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<(Vec<Unit>, bool), String> {
     let points = atoms(model, request, light, initial, temperature)?;
     let kept = &model.kept;
-    // Whether the series' order the model's evaluations take still holds at these atoms (model/elim.rs `Series`).
-    let holds = model.series_at(&points).order <= model.series.order;
+    // Whether the orders the model's evaluations take still hold at these atoms (model/elim.rs `Series`).
+    let (at, own) = (model.series_at(&points).orders(), model.series.orders());
+    let holds = at.series <= own.series && at.normalization <= own.normalization && at.hermitian <= own.hermitian;
     Ok((model.prior(request, &points).into_iter().filter(|u| !kept.contains(u)).collect(), holds))
 }
 

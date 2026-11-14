@@ -920,3 +920,66 @@ fn the_scattering_s_table_error_on_a_scene() {
     let (shown, temperature) = crate::model::tabulate::shares();
     eprintln!("{name}: the tables' shares {shown:.2e} on what is shown, {temperature:.2e} on T");
 }
+
+/// The normalized generator's part along a step's path (ELIMINATION v7; module documentation, # The normalized
+/// generator): each node's is its own forms' (`Model::node_normal`), so the step's quadrature of it through its three
+/// nodes -- Simpson's -- is the path's integral within O(τ⁵), relatively (Kvτ)⁴, where the part held at the middle,
+/// τ δ(0), was within O(τ³), (Kvτ)². On PGC3D's F = 2 states at its cooling light's coherent peak near the focus --
+/// six beams: an intensity pattern, X turns along a path (the 1D PGC's σ⁺σ⁻ has none) -- with the normalization at order
+/// 1 (its excited share 0.01 asks none of the share: taken here to see the part), at a speed of its 30 µK reach
+/// (0.05 µm/µs: Kvτ ≈ 0.8 for the pattern's 2k at the run's 0.95 µs) and steps of 0.95 µs and its halves: the decay's
+/// normalized part δ(s) = D(s) − Λ(s), D the node's generator's decay i(Ĥ − Ĥ†) and Λ that of the same terms without it
+/// (the plan without its normalized generator), against its integral by Simpson's rule on 512 panels.
+#[test]
+fn the_normalized_part_along_a_path_is_its_nodes_and_its_quadrature_falls_as_the_fourth_power() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json");
+    let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let request = Request::from_native(&line).unwrap();
+    let light = Light::new(&request);
+    let bare = Model::new(&request, &light, &[]).unwrap();
+    let kept: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).flat_map(|frequency| bare.bare_units(Component { frequency, counter: false })).collect();
+    let mut model = Model::new(&request, &light, &kept).unwrap();
+    let (r, v) = ([0.15, 0.0, 0.15], [0.04, 0.02, 0.025]);
+    model.referenced(&[(r, v), ([0.0; 3], [0.0; 3])]);
+    model.series.normalization = model.series.normalization.max(1);
+    let cluster = model.cluster_of(GROUND - 1);
+    let plan = model.plan(cluster, &model.running());
+    let fourth = plan.fourth.as_ref().expect("the cluster's fold has its normalized generator");
+    assert!(fourth.orders.normalization >= 1, "the normalization takes an order here: {:?}", fourth.orders);
+    let without = Arc::new(Plan { fourth: None, ..(*plan).clone() });
+    let n = plan.states;
+    let kappa = v.map(|x| x / model.hbar_over_mass);
+    let (with, bare_middle) = (model.middle(&plan, r, 0.0, None), model.middle(&without, r, 0.0, None));
+    let (on, off) = (with.path(kappa, v), bare_middle.path(kappa, v));
+    let decay = |m: &Middle, p: &Path, s: f64| -> Vec<C64> {
+        let mut h = Mat::zeros(n, n);
+        m.generator(p, s, &mut h);
+        (0..n * n).map(|i| (h.data[i] - h.data[(i % n) * n + i / n].conj()) * C64::I).collect()
+    };
+    let part = |s: f64| -> Vec<C64> { decay(&with, &on, s).iter().zip(decay(&bare_middle, &off, s)).map(|(a, b)| *a - b).collect() };
+    let norm = |x: &[C64]| x.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+    let mut last: Option<(f64, f64)> = None;
+    for tau in [0.95, 0.475, 0.2375] {
+        let h = 0.5 * tau;
+        let panels = 512;
+        let mut exact = vec![C64::ZERO; n * n];
+        for k in 0..=2 * panels {
+            let s = -h + tau * k as f64 / (2 * panels) as f64;
+            let w = if k == 0 || k == 2 * panels { 1.0 } else if k % 2 == 1 { 4.0 } else { 2.0 } * tau / (6 * panels) as f64;
+            exact.iter_mut().zip(part(s)).for_each(|(z, x)| *z += x * w);
+        }
+        let (a, m, b) = (part(-h), part(0.0), part(h));
+        let nodes: Vec<C64> = (0..n * n).map(|i| (a[i] + m[i] * 4.0 + b[i]) * (h / 3.0)).collect();
+        let held: Vec<C64> = m.iter().map(|z| *z * tau).collect();
+        let size = norm(&exact);
+        let (node_error, held_error) = (norm(&nodes.iter().zip(&exact).map(|(x, y)| *x - *y).collect::<Vec<_>>()) / size, norm(&held.iter().zip(&exact).map(|(x, y)| *x - *y).collect::<Vec<_>>()) / size);
+        println!("tau {tau}: the normalized part's integral {size:.3e}; through the nodes {node_error:.3e} apart, held at the middle {held_error:.3e} apart");
+        assert!(node_error < held_error, "the nodes' quadrature is the better");
+        if let Some((nodes_before, held_before)) = last {
+            println!("    falls {:.2} (nodes), {:.2} (held) a halving", nodes_before / node_error, held_before / held_error);
+            assert!(nodes_before / node_error > 10.0, "the nodes' error falls as τ⁴: {}", nodes_before / node_error);
+            assert!((3.0..6.0).contains(&(held_before / held_error)), "the held part's error falls as τ²: {}", held_before / held_error);
+        }
+        last = Some((node_error, held_error));
+    }
+}

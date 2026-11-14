@@ -576,7 +576,7 @@ impl Model {
             labels,
             names,
             smooth: Mutex::new(vec![]),
-            series: elim::Series { centre: vec![], ratio: 0.0, order: 0 },
+            series: elim::Series::none(0),
         };
         model.ranked = model.ranked_made();
         model.beats = model.beats_made();
@@ -635,7 +635,7 @@ impl Model {
         model.mixing = (0..model.clusters.len()).map(|c| model.mix(c)).collect();
         model.sources = model.all_sources();
         model.classes = (0..model.clusters.len()).map(|c| model.classes(c)).collect();
-        model.series = elim::Series { centre: vec![0.0; model.clusters.len()], ratio: 0.0, order: 0 };
+        model.series = elim::Series::none(model.clusters.len());
         model.series = model.series_at(&[([0.0; 3], [0.0; 3])]);
         Ok(model)
     }
@@ -706,7 +706,7 @@ impl Model {
         let (n, size) = (fourth.n, fourth.n * fourth.n);
         let mut site = assemble::Held::<assemble::Site>::take();
         let table = self.pointed(plan, table, at.r, &mut site);
-        self.quartic(plan, fourth, table, Some(at.r), &mut site, false);
+        self.quartic(plan, fourth, table, Some(at.r), &mut site, false, true);
         Model::quartic_read(|q| {
             let landing = &q.data[assemble::LANDING * size..(assemble::LANDING + 1) * size];
             (0..n).map(|x| (0..n).fold(C64::ZERO, |z, y| z + landing[x * n + y] * f[y])).collect()

@@ -342,7 +342,7 @@ impl Model {
     /// (and gradient) from its beams, plain and Doppler-weighted.
     #[allow(clippy::too_many_arguments)]
     fn sited(&self, plan: &Arc<Plan>, table: Option<&NearTable>, r: Option<[f64; 3]>, kappa: [f64; 3], order: usize, site: &mut Site, laid: bool) -> f64 {
-        let fourth = plan.fourth.as_ref().map_or(0.0, |fourth| self.quartic(plan, fourth, table, r, site, laid));
+        let fourth = plan.fourth.as_ref().map_or(0.0, |fourth| self.quartic(plan, fourth, table, r, site, laid, false));
         let near = match table {
             _ if plan.near.len() == 0 => {
                 site.jumped(plan, None);
