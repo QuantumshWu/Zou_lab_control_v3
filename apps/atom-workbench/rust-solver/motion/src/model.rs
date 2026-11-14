@@ -756,8 +756,9 @@ impl Model {
     /// normalized, its norm N against the next jump's threshold (step.rs `jump`): N < 1, the fast part takes the rest
     /// away at once (a photon more); N > 1, the next photon is late (antibunching). The same map is the light's switching
     /// on (ELIMINATION v3 4). Both factors to the normalization's order J (assemble.rs `normal`): at J = 0 the map is
-    /// the identity. (What the next order would change in the map is not measured on its own: the readings measure the
-    /// generator, elim.rs `Model::readings`.) Where the cluster has no fold the state is f.
+    /// the identity. Its error is measured against the definition's map with the generator's, and each order's part booked
+    /// on the unit that takes it away (elim.rs `Fold::landing_error`, `Model::readings`). Where the cluster has no fold the
+    /// state is f.
     pub(crate) fn landed(&self, plan: &assemble::Plan, table: Option<&tabulate::NearTable>, at: &Point, f: &[C64]) -> crate::step::Internal {
         let Some(fourth) = plan.fourth.as_ref().filter(|fourth| fourth.bends()) else { return f.iter().copied().collect() };
         let (n, size) = (fourth.n, fourth.n * fourth.n);

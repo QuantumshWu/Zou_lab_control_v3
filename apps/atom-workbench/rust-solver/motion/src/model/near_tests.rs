@@ -408,6 +408,64 @@ fn every_near_form_s_and_the_potential_s_jets_are_the_derivatives_of_their_value
     eprintln!("{} forms and {} potentials checked", checked.0, checked.1);
 }
 
+/// The light switched on lands the bare state as a jump does (step.rs `Trajectory::new`; model.rs `Model::landed`), and
+/// that landing is measured against the definition's and booked (elim.rs `Fold::landing_error`, `Model::readings`): on
+/// R2_RECOIL's probe and R4_LIN_1's lin⊥lin cooling and repump folded at the atom (a cluster of one ground state, and of
+/// three), with the evaluation's orders as they come (K = 0, J = 0) and with the normalization's and the series' kept, a
+/// trajectory started where its threshold lets it land holds the run's landing of its bare state to the bit; that is the
+/// evaluation's map the readings measure (`Fold::landing_evaluated`, within 10⁻⁹); the trajectory's state against the
+/// definition's S(1 + Σ S_f T_f)⁻¹ e_b (`Fold::landing_defined`, the self-consistent fold's) errs by what the readings
+/// measure (2r + r²), the readings book at least that on the candidates, and the normalization's first order lands
+/// nearer the definition than the identity of J = 0.
+#[test]
+fn a_trajectory_s_start_lands_as_the_definition_within_what_the_readings_book() {
+    use crate::model::elim::Fold;
+    use crate::step::Trajectory;
+    for (name, ids) in [("R2_RECOIL", vec!["probe"]), ("R4_LIN_1", vec!["cool-plus", "repump-plus"])] {
+        let request = scene(name);
+        let light = Light::new(&request);
+        let lifted = at_the_atom(&request, &light, &ids.iter().map(|id| frequency_of(&request, &light, id)).collect::<Vec<_>>());
+        let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+        let reference: [f64; GROUND] = std::array::from_fn(|s| if s == b { 1.0 } else { 0.0 });
+        let mut errors = vec![];
+        for orders in [vec![], vec![Unit::Normalization { order: 1 }], vec![Unit::Series, Unit::Normalization { order: 1 }]] {
+            let model = Model::new(&request, &light, &[lifted.clone(), orders.clone()].concat()).unwrap();
+            let trap = model.trap(&reference, &model.prepared()).unwrap();
+            let r = [trap.centre[0] + 0.13, trap.centre[1] - 0.07, trap.centre[2] + 0.05];
+            let run = crate::model::Run::new(&model, reference);
+            let cluster = model.cluster_of(b);
+            let c = &model.clusters()[cluster];
+            let place = c.states.iter().position(|&s| s == b).unwrap();
+            let bare: Vec<C64> = (0..c.states.len()).map(|i| if i == place { C64::ONE } else { C64::ZERO }).collect();
+            let at = Point { r, kappa: [0.0; 3], t: 0.0 };
+            let landed: Vec<C64> = run.landed(cluster, &at, &bare).to_vec();
+            let index = (0..256).find(|&i| Trajectory::new(&run, b, r, [0.0; 3], 11, i).threshold < crate::linalg::norm_sqr(&landed)).expect("a threshold the landing's norm passes");
+            let trajectory = Trajectory::new(&run, b, r, [0.0; 3], 11, index);
+            assert_eq!(trajectory.psi.to_vec(), landed, "{name} {orders:?}: the trajectory holds the run's landing");
+            // The evaluation's map the readings measure, and the definition's.
+            let amplitudes = model.light.amplitudes(r);
+            let (fold, _, far, _) = model.cluster_fold(cluster, &amplitudes, true).expect("the cluster's fold");
+            let z0 = C64::real(far + model.series.centre[cluster]);
+            let evaluated = fold.landing_evaluated(z0, model.series.orders());
+            let (definition, _) = model.definition_fold(cluster, &amplitudes).expect("the definition's fold");
+            let defined = definition.landing_defined().expect("the definition's landing");
+            let column = |m: &Mat| -> Vec<C64> { (0..m.rows).map(|i| m[(i, place)]).collect() };
+            let norm = |v: &[C64]| v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+            let apart = |a: &[C64], d: &[C64]| norm(&a.iter().zip(d).map(|(x, y)| *x - *y).collect::<Vec<_>>());
+            assert!(apart(&landed, &column(&evaluated)) <= 1e-9 * norm(&column(&evaluated)), "{name} {orders:?}: the run's landing {landed:?} against the evaluation's map {:?}", column(&evaluated));
+            let measured = Fold::landing_error(&evaluated, &defined, c.ground, &bare);
+            let rel = apart(&trajectory.psi, &column(&defined)) / norm(&column(&defined));
+            assert!((2.0 * rel + rel * rel - measured).abs() <= 1e-6 * measured.max(1e-12), "{name} {orders:?}: the trajectory's error {} against the measured {measured}", 2.0 * rel + rel * rel);
+            let (read, _) = model.readings(&model.candidates(), &Sample { cluster, at, psi: bare.clone() }, None);
+            let booked: f64 = read.iter().map(|x| x.population).sum();
+            eprintln!("{name} {orders:?}: the landing {rel:.3e} off the definition's (a rate's {measured:.3e}); booked {booked:.3e}");
+            assert!(booked >= measured * (1.0 - 1e-9), "{name} {orders:?}: booked {booked} below the landing's {measured}");
+            errors.push(measured);
+        }
+        assert!(errors[1] < errors[0], "{name}: the normalization's first order lands nearer the definition: {errors:?}");
+    }
+}
+
 /// The reported trap is the scene's, not the solve's (SPEC §1.3; potential.rs, # An averaged light): the other lights' smooth
 /// shifts are in it as their drives' folds with the levels at the atom wherever those folds exist at the trap's centre,
 /// whatever level the model takes the drives at. On the solve's own closure of R3_DOPPLER (a cooling pair in a tweezer),
