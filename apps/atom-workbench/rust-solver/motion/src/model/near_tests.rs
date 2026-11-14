@@ -131,14 +131,14 @@ fn a_raman_pair_is_kept_on_resonance_and_couples_at_the_closed_form() {
     }
 }
 
-/// The frames of a cluster whose kept couplings close a cycle off resonance (cluster.rs, # Frames; ELIMINATION v4): the
+/// The frames of a cluster whose kept couplings close a cycle off resonance (cluster.rs, # Frames; ELIMINATION v8): the
 /// pair of R6_RAMAN_CO kept at both its beats -- |1,0⟩ and |2,0⟩ coupled at the two lights' Raman beat β and statically
-/// -- is a ring of two that misses by β. Its frames leave each coupling turning at β/2, Karp's least largest residual
-/// (the ring's mean detuning), the frames' difference exactly half the beat on the axes' integers; and the step's
-/// requirement at rest -- the largest residual beat the plan's nodes sample (solve.rs `first_rung`) -- is that value,
-/// where frames along a spanning tree left one of the two at the whole β.
+/// -- is a ring of two that misses by β. Its frames hold one of the two couplings static, exactly -- the frames'
+/// difference zero or −β on the axes' integers, the stronger coupling's (the strength tree) --, and the other turns at
+/// the ring's whole miss β, which the propagation integrates at its combined frequencies (spectral.rs, # Tones). (Karp's
+/// frames left each at β/2 before.)
 #[test]
-fn a_kept_ring_s_frames_ask_the_step_for_its_mean_detuning() {
+fn a_kept_ring_s_frames_hold_one_coupling_static_and_the_other_at_the_whole_miss() {
     let request = scene("R6_RAMAN_CO");
     let light = Light::new(&request);
     let (fa, fb) = (frequency_of(&request, &light, "ramanA"), frequency_of(&request, &light, "ramanB"));
@@ -150,13 +150,10 @@ fn a_kept_ring_s_frames_ask_the_step_for_its_mean_detuning() {
     let c = &model.clusters()[cluster];
     let place = |s: usize| c.states.iter().position(|&x| x == s).unwrap();
     let Unit::Term { beat, .. } = &raman else { unreachable!("the Raman unit is a coupling") };
-    // The Raman coupling a ← b at β is static where θ_a − θ_b = −β, the static one where it is zero: halfway between.
-    assert_eq!(c.frames[place(1)].plus(-1, &c.frames[place(5)]), beat.negated().over(2), "the frames halfway, exactly");
-    let half = 0.5 * model.omega(beat).abs();
-    let sampled = model.sampled(&model.running());
-    let largest = sampled.iter().map(|t| t[0]).fold(0.0, f64::max);
-    eprintln!("Raman beat {:.6e} rad/us; the plan's residual beats {:?}", 2.0 * half, sampled.iter().map(|t| t[0]).collect::<Vec<_>>());
-    assert!((largest - half).abs() <= 1e-12 * half, "the step's requirement {largest} against the ring's mean detuning {half}");
+    // The Raman coupling a ← b at β is static where θ_a − θ_b = −β, the static one where it is zero.
+    let apart = c.frames[place(1)].plus(-1, &c.frames[place(5)]);
+    eprintln!("the frames' difference {:?}: the {} coupling static", apart, if apart.is_zero() { "static" } else { "Raman" });
+    assert!(apart.is_zero() || apart == beat.negated(), "the frames hold one coupling static, exactly: {apart:?} against 0 or {:?}", beat.negated());
 }
 
 /// Optical pumping's branching (R5_PUMP: D1 σ⁺ F = 2 → F′ = 2 and its repump): from |2,m⟩ the resonant pump reaches |2′,m+1⟩,

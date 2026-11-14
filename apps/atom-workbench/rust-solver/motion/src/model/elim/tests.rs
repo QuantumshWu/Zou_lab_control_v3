@@ -118,7 +118,7 @@ fn a_two_level_atom_s_slow_mode_is_exact_and_its_scattering_rate_is_the_steady_s
             // The transient's closed form (`Fold::transients`) against the exact one, and the error the accounts book
             // (`errors`: at rest the transient's alone, all of it on the one block) against the exact rate's error: to
             // the leading order in the fold, its relative O(X), X = s/2.
-            let booked: f64 = errors(&fold, &lv, &[vec![0]], &|_| false, &[C64::ONE], [0.0; 3], 0.0, &[]).parts.iter().map(|p| p.1).sum();
+            let booked: f64 = errors(&fold, &[vec![0]], &|_| false, &[C64::ONE], [0.0; 3], 0.0, &[]).parts.iter().map(|p| p.1).sum();
             println!("    the transient {transient:+.5e} µs, closed form {tau:+.5e} µs; the rate's error {error:+.4e}, booked {booked:.4e}");
             assert!((tau - transient).abs() <= 2.0 * s * transient.abs(), "the closed form {tau} against {transient}");
             assert!((booked - error.abs()).abs() <= 2.0 * s * error.abs(), "booked {booked} against the rate's error {error}");
@@ -238,9 +238,9 @@ fn an_averaged_component_s_shift_and_micromotion_are_the_exact_floquet_ones() {
 
 /// A Raman resonance across a Zeeman splitting (the coordinator's test): two ground states 2ω_L apart, coupled by two
 /// classes 2ω_L + δ apart through a far excited state. The lab beat is 26.37 rad/µs; the component's distance on the
-/// actual spectrum is δ (and the light shifts' difference); in the optimal frames it is static, the step's
-/// requirement its residual, zero -- and the fold in those frames is the exact static problem's (its slow eigenvalues
-/// against the exact three-state generator's).
+/// actual spectrum is δ (and the light shifts' difference); in the frames (cluster.rs `frames`: a chain, every link on
+/// the strength tree) it is static, its residual exactly zero -- and the fold in those frames is the exact static
+/// problem's (its slow eigenvalues against the exact three-state generator's).
 #[test]
 fn a_raman_resonance_across_a_zeeman_splitting_asks_the_step_for_its_detuning_not_its_beat() {
     let (gamma, delta, zeeman, detuning) = (38.1, -1536.0, 26.375, 0.375);
@@ -256,9 +256,9 @@ fn a_raman_resonance_across_a_zeeman_splitting_asks_the_step_for_its_detuning_no
         assert!((beat(x).abs() - (zeeman + detuning)).abs() <= 1e-9, "its lab beat");
         assert!(x.distance.abs() < 0.2 * zeeman, "its distance on the actual spectrum {:?}", x.distance);
     }
-    let links: Vec<(usize, usize, f64)> = explicit.iter().map(|x| (rest.dominant(x.row), rest.dominant(x.column), beat(x))).collect();
-    let (theta, residual) = crate::model::cluster::frames(2, &links, &|x| *x, &0.0);
-    assert_eq!(residual, 0.0, "a chain: static in its frames");
+    let links: Vec<(usize, usize, f64, f64)> = explicit.iter().map(|x| (rest.dominant(x.row), rest.dominant(x.column), beat(x), x.size)).collect();
+    let theta = crate::model::cluster::frames(2, &links, &0.0);
+    assert!(links.iter().all(|l| l.2 - (theta[l.0] - theta[l.1]) == 0.0), "a chain: static in its frames");
     let fold = folded(&lv, &classes, &Slow::single(vec![], theta.clone()));
     assert_eq!(fold.replicas.len(), 1);
     let h = Mat::from_fn(3, 3, |i, j| match (i, j) {
@@ -289,17 +289,20 @@ fn prior_atoms(req: &crate::request::Request) -> Vec<([f64; 3], [f64; 3])> {
     crate::solve::atoms(&model, req, &light, &crate::solve::components(req), req.temperature_uk).expect("the prior's atoms")
 }
 
-/// A closure's measures at its end (`closure`, its last round): its frames' least largest residual (`slow_of`), the
-/// worst remainder ρ over its fold's ground-like eigenstates at that residual and the motion's beat, and the largest
-/// mixing of a component criterion two leaves averaged.
-fn measures(closed: &Closed, levels: &Levels, classes: &[Class], blocks: &[Vec<usize>], velocity: [f64; 3]) -> (f64, f64, f64) {
-    let (_, residual) = slow_of(blocks, &closed.kept, classes, levels.ground.rows);
+/// A closure's measures at its end (`closure`, its last round): the worst remainder ρ over its fold's ground-like
+/// eigenstates at the offsets each spans (`Fold::offsets`: the motion's pattern and the components' combined
+/// frequencies at their shares), and the largest mixing of a component criterion two leaves averaged.
+fn measures(closed: &Closed, classes: &[Class], velocity: [f64; 3]) -> (f64, f64) {
     let fastest = classes.iter().flat_map(|c| c.beams.iter()).map(|b| crate::linalg::norm3(b.wave)).fold(0.0, f64::max);
-    let delta = residual + 2.0 * fastest * crate::linalg::norm3(velocity);
+    let pattern = 2.0 * fastest * crate::linalg::norm3(velocity);
     let fold = &closed.fold;
-    let remainder = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).flat_map(|p| [delta, -delta].map(|shift| fold.block_parts(blocks, p, Some(shift)).0)).fold(0.0, f64::max);
-    let mixing = fold.components(velocity).iter().map(|x| x.mixing()).filter(|m| 2.0 * m * m <= share()).fold(0.0, f64::max);
-    (residual, remainder, mixing)
+    let components = fold.components(velocity);
+    let remainder = (0..fold.size())
+        .filter(|&p| fold.ground_weight(p) >= 0.5)
+        .map(|p| fold.block_parts(&[], p, Some(&fold.offsets(p, pattern, &components, 1.0, &|_| 1.0))).0)
+        .fold(0.0, f64::max);
+    let mixing = components.iter().map(|x| x.mixing()).filter(|m| 2.0 * m * m <= share()).fold(0.0, f64::max);
+    (remainder, mixing)
 }
 
 /// The tilt's property (the brief's test 5, on the prior's own atoms): the 1D PGC at 3 G with its π probe tilted by
@@ -319,19 +322,19 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
     let theta = 0.1_f64.to_radians();
     let (mut added, mut most) = (0, 0.0_f64);
     for &(r, v) in &points {
-        let (closed, measured): (Vec<Closed>, Vec<(f64, f64, f64)>) = requests
+        let (closed, measured): (Vec<Closed>, Vec<(f64, f64)>) = requests
             .iter()
             .map(|req| {
                 let light = crate::field::Light::new(req);
                 let (lv, cl, _) = system(req, &light, r);
                 let blocks = excited_blocks(&req.states);
                 let closed = closure(&lv, &cl, &blocks, v, &Kept::default());
-                let measured = measures(&closed, &lv, &cl, &blocks, v);
+                let measured = measures(&closed, &cl, v);
                 (closed, measured)
             })
             .unzip();
         for ((name, c), m) in names.iter().zip(&closed).zip(&measured) {
-            println!("{name} r {r:?} v {v:?}: blocks {:?}, links {}, residual {:.3e}, rho {:.4e}, averaged mixing {:.4e}", c.kept.blocks, c.kept.links.len(), m.0, m.1, m.2);
+            println!("{name} r {r:?} v {v:?}: blocks {:?}, links {}, rho {:.4e}, averaged mixing {:.4e}", c.kept.blocks, c.kept.links.len(), m.0, m.1);
         }
         let base = &closed[0];
         for c in &closed[1..] {
@@ -342,10 +345,9 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
         }
         assert_eq!(closed[1].kept.links.len(), base.kept.links.len(), "the links at 0.1° at {r:?} {v:?}");
         let (at0, at01) = (measured[0], measured[1]);
-        assert!((at01.0 - at0.0).abs() <= 1e-9 * (1.0 + at0.0), "the frames' residual at 0.1°");
-        assert!((at01.1 - at0.1).abs() <= 10.0 * theta * at0.1.max(1e-6), "ρ at 0.1°: {} against {}", at01.1, at0.1);
+        assert!((at01.0 - at0.0).abs() <= 10.0 * theta * at0.0.max(1e-6), "ρ at 0.1°: {} against {}", at01.0, at0.0);
         added += closed[2].kept.links.len() - base.kept.links.len();
-        most = most.max(measured[2].2);
+        most = most.max(measured[2].1);
     }
     println!("2°: {added} links added over the 88 atoms; the largest averaged mixing {most:.3e}");
     assert!(2.0 * most * most <= super::share(), "an averaged component beyond the share");
@@ -370,18 +372,19 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
     for &(r, v) in points.iter().step_by(11) {
         let (lv, cl, _) = system(&req, &light, r);
         let closed = closure(&lv, &cl, &blocks, v, &Kept::default());
-        let (slow, residual) = slow_of(&blocks, &closed.kept, &cl, ground);
+        let slow = slow_of(&blocks, &closed.kept, &cl, &lv);
         let fastest = cl.iter().flat_map(|c| c.beams.iter()).map(|b| crate::linalg::norm3(b.wave)).fold(0.0, f64::max);
-        let range = residual + 2.0 * fastest * crate::linalg::norm3(v);
+        let pattern = 2.0 * fastest * crate::linalg::norm3(v);
         let read = |slow: &Slow| {
             let fold = folded(&lv, &cl, slow);
             let label = |p: usize| fold.dominant(p);
             let mut components: Vec<(usize, usize, (Option<usize>, Option<usize>), f64)> = fold.components(v).iter().filter(|x| x.mixing() > 1e-6).map(|x| (label(x.row), label(x.column), x.classes, x.mixing())).collect();
             components.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)).then(a.3.total_cmp(&b.3)));
-            let mut rho: Vec<f64> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).map(|p| fold.remainder(p, range, lv.excited.rows).0).collect();
+            let all = fold.components(v);
+            let mut rho: Vec<f64> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).map(|p| fold.block_parts(&blocks, p, Some(&fold.offsets(p, pattern, &all, 1.0, &|_| 1.0))).0).collect();
             rho.sort_by(f64::total_cmp);
             let psi: Vec<C64> = (0..fold.size()).map(|s| if s < ground { C64::real(1.0) } else { C64::ZERO }).collect();
-            let errors = errors(&fold, &lv, &blocks, &|_| false, &psi, v, range, &[]);
+            let errors = errors(&fold, &blocks, &|_| false, &psi, v, pattern, &[]);
             let error = errors.parts.iter().map(|p| p.1).sum::<f64>() + errors.outside.iter().sum::<f64>();
             (components, rho, error, errors.parts)
         };
@@ -426,7 +429,7 @@ fn a_block_is_kept_for_the_class_of_its_larger_part_and_turns_in_that_class_s_fr
         let classes: Vec<Class> = (0..2).map(|k| class(nus[k], 1, 1, &[(0, 0, C64::real(size(k)))])).collect();
         let fold = folded(&lv, &classes, &at_rest(1));
         let psi = vec![C64::ONE];
-        let found = errors(&fold, &lv, &blocks, &|_| false, &psi, [0.0; 3], 5.0, &[]);
+        let found = errors(&fold, &blocks, &|_| false, &psi, [0.0; 3], 5.0, &[]);
         let part = |k: usize| found.parts.iter().find(|o| o.0 == Object::Block(0, Some(k))).map_or(0.0, |o| o.1);
         // The responses' shares: |g|²/|ν − iΓ/2|² of each class.
         let response = |k: usize| size(k).powi(2) / (nus[k].powi(2) + 0.25 * gamma * gamma);
@@ -434,8 +437,7 @@ fn a_block_is_kept_for_the_class_of_its_larger_part_and_turns_in_that_class_s_fr
         assert!(part(larger) > part(smaller), "the class of the larger response holds the larger part: {} against {}", part(larger), part(smaller));
         // Kept for that class: the drive's link, the frames from it.
         let kept = Kept { blocks: vec![0], links: vec![Link { a: ground, b: 0, classes: (None, Some(larger)) }], ..Kept::default() };
-        let (slow, residual) = slow_of(&blocks, &kept, &classes, ground);
-        assert_eq!(residual, 0.0, "a chain: static in its frames");
+        let slow = slow_of(&blocks, &kept, &classes, &lv);
         assert!(same(classes[larger].nu + slow.frames[0], slow.frames[ground]), "the explicit state turns in its class's frame");
         let fold = folded(&lv, &classes, &slow);
         assert!(fold.direct[(1, 0)].abs() > 0.0, "the kept class's drive is the static generator's");

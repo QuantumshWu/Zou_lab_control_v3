@@ -18,13 +18,10 @@ use crate::linalg::{dot3, C64, Mat};
 use crate::model::{Beat, Cluster, Photon, Point, Quadratic, Scattering, STATES};
 use crate::step::{self, Dynamics, Middle, Trajectory};
 
-/// The domain the tests' steps are taken in: every step resolved, no state a runaway -- a test model is the model, at
-/// every point it is asked.
+/// The domain the tests' steps are taken in: no state a runaway -- a test model is the model, at every point it is
+/// asked.
 struct Everywhere;
 impl step::Domain for Everywhere {
-    fn resolves(&self, _: &step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> bool {
-        true
-    }
     fn runaway(&self, _: f64) -> bool {
         false
     }
@@ -74,6 +71,23 @@ impl Parts {
         let n = self.waves.len();
         (0..n * n).map(|i| g.data[i] * rho[(i % n) * n + i / n]).sum()
     }
+    /// The candidate tones (`step::Middle::beats`): each beat and wave vector (Ω, q) the parts hold but the static one,
+    /// with its adjoint's (−Ω, −q) a pair whose first is the greater of the two (or the one where its adjoint is none).
+    fn pairs(&self) -> Vec<(f64, [f64; 3])> {
+        let mut keys: Vec<(f64, [f64; 3])> = vec![];
+        for p in &self.parts {
+            let (key, adjoint) = ((p.omega, p.wave), (-p.omega, p.wave.map(|x| -x)));
+            let paired = self.parts.iter().any(|q| (q.omega, q.wave) == adjoint);
+            if key != (0.0, [0.0; 3]) && !keys.contains(&key) && (!paired || key > adjoint) {
+                keys.push(key);
+            }
+        }
+        keys
+    }
+    /// The parts of a beat and wave vector.
+    fn of(&self, key: (f64, [f64; 3])) -> impl Iterator<Item = &Part> {
+        self.parts.iter().filter(move |p| (p.omega, p.wave) == key)
+    }
 }
 
 impl Middle for Parts {
@@ -122,6 +136,38 @@ impl Middle for Parts {
     fn work(&self) -> [f64; 3] {
         let size = (self.parts.len() * self.waves.len() * self.waves.len()) as f64;
         [size, 3.0 * size, 3.0 * size]
+    }
+    fn beats(&self, velocity: &[f64; 3], beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
+        let pairs = self.pairs();
+        beats.extend(pairs.iter().map(|(omega, wave)| omega + dot3(*wave, *velocity)));
+        // Each pair its own label: no two of their products share a class but where they are one pair's.
+        keys.extend((0..pairs.len()).map(|m| (0..pairs.len()).map(|j| i64::from(j == m)).collect()));
+    }
+    fn envelopes(&self, _: &[f64; 3], m: usize, plus: &mut Mat, minus: &mut Mat) {
+        let (omega, wave) = self.pairs()[m];
+        for (out, key) in [(plus, (omega, wave)), (minus, (-omega, wave.map(|x| -x)))] {
+            out.data.fill(C64::ZERO);
+            for p in self.of(key) {
+                out.add_scaled(C64::ONE, &p.generator);
+            }
+        }
+    }
+    fn tone_force(&self, _: &[f64; 3], m: usize, re: &[C64], im: &[C64]) -> [f64; 3] {
+        let (omega, wave) = self.pairs()[m];
+        let mut out = [0.0; 3];
+        for (key, sign) in [((omega, wave), 1.0), ((-omega, wave.map(|x| -x)), -1.0)] {
+            let sigma: Vec<C64> = re.iter().zip(im).map(|(r, i)| *r + *i * C64::new(0.0, sign)).collect();
+            for p in self.of(key) {
+                for a in 0..3 {
+                    out[a] += self.trace(&p.force[a], &sigma).re;
+                }
+            }
+        }
+        out
+    }
+    fn tone_work(&self, _: usize) -> [f64; 2] {
+        let size = (self.waves.len() * self.waves.len()) as f64;
+        [2.0 * size, 6.0 * size]
     }
     /// Ĝ_a(s) = the Hermitian part of Σ_p e^{iΩ_p s} G_p,a (what `force` contracts), Ω_p the part's beat on the path,
     /// and its slope, the same of iΩ_p e^{iΩ_p s} G_p,a.
@@ -2339,6 +2385,18 @@ impl<M: Middle> Middle for Probe<'_, M> {
     fn optical(&self, path: &M::Path) -> Option<step::Optical> {
         self.middle.optical(path)
     }
+    fn beats(&self, path: &M::Path, beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
+        self.middle.beats(path, beats, keys)
+    }
+    fn envelopes(&self, path: &M::Path, m: usize, plus: &mut Mat, minus: &mut Mat) {
+        self.middle.envelopes(path, m, plus, minus)
+    }
+    fn tone_force(&self, path: &M::Path, m: usize, re: &[C64], im: &[C64]) -> [f64; 3] {
+        self.middle.tone_force(path, m, re, im)
+    }
+    fn tone_work(&self, m: usize) -> [f64; 2] {
+        self.middle.tone_work(m)
+    }
 }
 
 impl<D: Dynamics> Dynamics for Counted<'_, D> {
@@ -2472,7 +2530,7 @@ fn yardstick() -> f64 {
 /// A scratch fitted to n states (the harness takes the step's parts apart).
 fn fitted(n: usize) -> super::Scratch {
     let mut scratch = super::Scratch::default();
-    scratch.fit(n);
+    scratch.fit(n, super::SUMS);
     scratch
 }
 
@@ -2538,8 +2596,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
         .iter()
         .map(|along| {
             let mut scratch = fitted(n);
-            let super::Carved { picture, decay, part, .. } = scratch.carve();
-            super::pictured(along, picture, tau, (decay, part), None);
+            super::pictured(along, &mut scratch, tau, None).unwrap();
             scratch
         })
         .collect();
@@ -3705,8 +3762,8 @@ fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> f64 {
     let through = step::Midway::new(model, start, tau).unwrap();
     let along = super::Along::new(&through.generator, start.kappa, start.kappa.map(|k| model.hbar_over_mass() * k));
     let mut scratch = fitted(n);
-    let super::Carved { picture, decay, part, .. } = scratch.carve();
-    super::pictured(&along, picture, tau, (decay, part), None);
+    super::pictured(&along, &mut scratch, tau, None).unwrap();
+    let picture = &mut scratch.picture;
     let mut map = Mat::zeros(n, n);
     for a in 0..n {
         let (mut x, mut y) = (vec![C64::ZERO; n], vec![C64::ZERO; n]);
@@ -3783,7 +3840,7 @@ fn the_hazard_is_the_generator_s_decay_and_a_sum_of_squares() {
         let n = psi.len();
         let size = 2 * n * n.div_ceil(LANES) * LANES;
         let (mut decay, mut sums) = (vec![0.0; size], vec![0.0; size]);
-        let scale = super::laid_decay(h, 0, &mut decay) + 2.0 * h.data.iter().map(|z| z.abs()).sum::<f64>();
+        let scale = super::laid(|a, b| C64::I * (h.data[a * n + b] - h.data[b * n + a].conj()), n, 0, &mut decay) + 2.0 * h.data.iter().map(|z| z.abs()).sum::<f64>();
         super::accumulate(psi, &[1.0], &mut sums);
         let norm = crate::linalg::norm_sqr(psi);
         let form: C64 = (0..n).map(|a| psi[a].conj() * (0..n).map(|b| h[(a, b)] * psi[b]).sum::<C64>()).sum();
@@ -4019,3 +4076,114 @@ fn a_random_output_grid_leaves_a_random_trajectory_as_it_is() {
     eprintln!("96 random trajectories: {jumps} jumps, {inside} times read inside steps; the last step strided on {}, through the decomposition on {}", routes[0], routes[1]);
     assert!(routes[0] > 0 && routes[1] > 0 && jumps > 500 && inside > 2000, "routes {routes:?}, {jumps} jumps, {inside} times read inside steps");
 }
+
+/// A model of two groups of two states (`a_frame_on_a_group_of_states_leaves_the_engine_s_step_as_it_is`): each group
+/// coupled strongly within itself, the second group's diagonal at about 30 rad/µs and its own decay, and two tones
+/// between the groups at the beats ν ≈ 30 rad/µs, each two entries with their gradients -- all in the frame that turns the
+/// second group at θ: its diagonal moved by θ, the tones' beats by θ.
+struct Grouped {
+    theta: f64,
+    cluster: Cluster,
+}
+
+impl Grouped {
+    fn new(theta: f64) -> Grouped {
+        let cluster = Cluster { states: (0..4).collect(), ground: 4, frames: vec![crate::model::Beat::whole(vec![0]); 4], waves: vec![[0.0; 3]; 4], waves_exact: vec![crate::model::Beat::whole(vec![]); 4] };
+        Grouped { theta, cluster }
+    }
+}
+
+impl Dynamics for Grouped {
+    type Middle<'a> = Parts;
+    fn hbar_over_mass(&self) -> f64 {
+        RB
+    }
+    fn reference(&self, _: [f64; 3]) -> Quadratic {
+        Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] }
+    }
+    fn cluster(&self, _: usize) -> &Cluster {
+        &self.cluster
+    }
+    fn cluster_of(&self, _: usize) -> usize {
+        0
+    }
+    fn middle(&self, _: usize, _: [f64; 3], _: f64) -> Parts {
+        let n = 4;
+        let matrix = |entries: &[(usize, usize, C64)]| Mat::from_fn(n, n, |a, b| entries.iter().filter(|e| (e.0, e.1) == (a, b)).map(|e| e.2).sum());
+        let hermitian = |entries: &[(usize, usize, C64)]| {
+            let m = matrix(entries);
+            Mat::from_fn(n, n, |a, b| (m[(a, b)] + m[(b, a)].conj()) * 0.5)
+        };
+        let theta = C64::real(self.theta);
+        let still = hermitian(&[(0, 0, C64::ZERO), (1, 1, C64::new(1.5, -0.2)), (2, 2, C64::new(30.0, -0.1) + theta), (3, 3, C64::real(32.5) + theta), (0, 1, C64::real(4.0)), (2, 3, C64::cis(0.4) * 3.6)]);
+        let decay = matrix(&[(1, 1, C64::new(0.0, -0.1)), (2, 2, C64::new(0.0, -0.05))]);
+        let still = Mat::from_fn(n, n, |a, b| still[(a, b)] + decay[(a, b)]);
+        let gradient = |scale: f64| -> [Mat; 3] { std::array::from_fn(|i| hermitian(&[(0, 1, C64::real(scale * (1.0 + i as f64))), (2, 3, C64::new(0.0, scale)), (1, 1, C64::real(scale))])) };
+        let mut parts = vec![Part { omega: 0.0, wave: [0.0; 3], generator: still, force: gradient(2.0) }];
+        for (beat, entries) in [(30.3, [(0, 2, C64::real(0.8)), (1, 3, C64::cis(0.2) * 0.6)]), (31.0, [(0, 3, C64::new(0.0, 0.5)), (1, 2, C64::real(0.4))])] {
+            let up = matrix(&entries);
+            let forces: [Mat; 3] = std::array::from_fn(|i| up.scaled(C64::new(0.7 + 0.2 * i as f64, 0.3)));
+            parts.push(Part { omega: beat + self.theta, wave: [0.0; 3], generator: up.clone(), force: forces.clone() });
+            parts.push(Part { omega: -(beat + self.theta), wave: [0.0; 3], generator: up.adjoint(), force: forces.map(|f| f.adjoint()) });
+        }
+        Parts { waves: vec![[0.0; 3]; n], parts, folded: None, optical: false }
+    }
+    fn emit(&self, _: usize, _: &Point, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+        None
+    }
+    fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
+        0.5 * RB * at.kappa.iter().map(|k| k * k).sum::<f64>()
+    }
+    fn lost(&self, _: usize, _: &Point, _: &[C64]) -> bool {
+        false
+    }
+    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
+        let mut rows = [0.0; STATES];
+        for (s, z) in psi.iter().enumerate() {
+            rows[s] = z.norm_sqr();
+        }
+        rows
+    }
+    fn assembly_work(&self) -> f64 {
+        0.0
+    }
+    fn photon_work(&self) -> f64 {
+        0.0
+    }
+}
+
+/// A frame on a group of states leaves the engine's step as it is (spectral.rs, # Tones; step.rs, # The kick): the
+/// model of two groups (`Grouped`) over a step of 0.2 µs -- the tones' beats turn 6 rad over it, beyond the nodes'
+/// π, their combined frequencies are of one radian or less --, from one state with no jump (its threshold none), in the
+/// frame of every θ of four from −61 to 87 rad/µs (θτ up to 17, no tone's beat below √5/h in any): the same two tones
+/// are taken (`spectral::Picture::separate`), the state at the step's end, taken back to the first frame, is the first
+/// frame's to rounding, and the kick -- the tones' parts integrated at their beats on the quadrature's densities -- is
+/// within the quadrature's share of its size (the forms' bandwidth is the frame's, max|λ_a* − λ_b| with the tones'
+/// beats: the nodes differ from frame to frame).
+#[test]
+fn a_frame_on_a_group_of_states_leaves_the_engine_s_step_as_it_is() {
+    let (tau, h) = (0.2, 0.1);
+    let start: Vec<C64> = [C64::real(0.5), C64::new(0.1, 0.4), C64::new(-0.3, 0.2), C64::new(0.0, -0.6)].to_vec();
+    let step = |theta: f64| {
+        let model = Grouped::new(theta);
+        let mut from = Trajectory::new(&model, 0, [0.0; 3], [3.0, -1.0, 2.0], 7, 0);
+        from.psi = start.iter().enumerate().map(|(s, z)| if s >= 2 { *z * C64::cis(theta * h) } else { *z }).collect();
+        from.threshold = 0.0;
+        let mut scratch = step::Scratch::default();
+        let taken = step::Midway::new(&model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+        let psi: Vec<C64> = taken.end.psi.iter().enumerate().map(|(s, z)| if s >= 2 { *z * C64::cis(theta * h) } else { *z }).collect();
+        let kick: [f64; 3] = std::array::from_fn(|a| taken.end.kappa[a] - from.kappa[a]);
+        (psi, kick, scratch.picture.beats.len())
+    };
+    let (psi, kick, tones) = step(0.0);
+    assert_eq!(tones, 2, "the two tones taken");
+    let size = kick.iter().map(|k| k.abs()).fold(0.0, f64::max);
+    for theta in [-61.0, 13.9, 42.0, 87.0] {
+        let (other, pushed, taken) = step(theta);
+        let apart = other.iter().zip(&psi).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max);
+        let off = pushed.iter().zip(&kick).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+        eprintln!("θ {theta:6.1} rad/µs (θτ {:5.1}): {taken} tones, the state {apart:.2e} off the first frame's, the kick {off:.2e} of {size:.2e}", theta * tau);
+        assert!(taken == tones && apart < 1e-12 && off <= crate::units::QUADRATURE * size, "θ {theta}: {taken} tones, the state {apart:e} off, the kick {off:e} of {size:e}");
+    }
+}
+

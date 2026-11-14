@@ -1098,6 +1098,88 @@ fn the_decay_is_the_photons_rate_with_the_normalized_generator() {
     }
 }
 
+/// The beating groups (assemble.rs, # Exact tones) are the generator's along a path: on every test model's clusters whose
+/// generator has no normalized part (whose forms' products are in no group), Ĥ(s) less every candidate pair's
+/// e^{iνs}G⁺ + e^{−iνs}G⁻ (`Middle::beats`, `Middle::envelopes`) is the same at every time along the path -- what is left
+/// is the static pieces and the frames' rates --, and so is the force's form with a Hermitian ρ less every pair's
+/// `Middle::tone_force` on ρ at its phase (σ = e^{iνs}ρ), to the rounding of the sums: the entries' own bound (`chain`)
+/// on their moduli and the envelopes', and their phases' arguments ν s.
+#[test]
+fn the_beating_groups_are_the_generator_s_along_a_path() {
+    let (mut groups, mut clusters) = (0, 0);
+    for (index, (name, model)) in models().into_iter().enumerate() {
+        let mut stream = Stream::new(1, Purpose::Initial, index as u64, 0);
+        let lights = model.running();
+        for cluster in 0..model.clusters.len() {
+            let n = model.clusters[cluster].states.len();
+            let plan = model.plan(cluster, &lights);
+            let (r, t, kappa, velocity, times) = drawn(&model, &mut stream);
+            let rho = hermitian(n, &mut stream);
+            if plan.fourth.as_ref().is_some_and(|fourth| fourth.bends() || fourth.held()) {
+                continue;
+            }
+            let middle = model.assemble(cluster, r, t, &lights);
+            let path = middle.path(kappa, velocity);
+            let (mut beats, mut keys) = (vec![], vec![]);
+            middle.beats(&path, &mut beats, &mut keys);
+            // A label is the beat exactly: two pairs of one label are one beat, and the pairs' labels are distinct.
+            assert_eq!(keys.len(), beats.len());
+            for (a, ka) in keys.iter().enumerate() {
+                assert!(keys[..a].iter().all(|kb| kb != ka), "two pairs of one label");
+            }
+            let envelopes: Vec<(Mat, Mat)> = (0..beats.len())
+                .map(|m| {
+                    let (mut plus, mut minus) = (Mat::zeros(n, n), Mat::zeros(n, n));
+                    middle.envelopes(&path, m, &mut plus, &mut minus);
+                    (plus, minus)
+                })
+                .collect();
+            let rest = |s: f64| -> Mat {
+                let mut h = Mat::zeros(n, n);
+                middle.generator(&path, s, &mut h);
+                for (beat, (plus, minus)) in beats.iter().zip(&envelopes) {
+                    for i in 0..n * n {
+                        h.data[i] -= C64::cis(beat * s) * plus.data[i] + C64::cis(-beat * s) * minus.data[i];
+                    }
+                }
+                h
+            };
+            let form = |s: f64| -> [f64; 3] {
+                let mut f = middle.force(&path, s, &rho);
+                for (m, beat) in beats.iter().enumerate() {
+                    let (sin, cos) = (beat * s).sin_cos();
+                    let (re, im): (Vec<C64>, Vec<C64>) = rho.iter().map(|z| (*z * cos, *z * sin)).unzip();
+                    let tone = middle.tone_force(&path, m, &re, &im);
+                    (0..3).for_each(|a| f[a] -= tone[a]);
+                }
+                f
+            };
+            let links = chain(&model, &plan, written_out(&model, cluster, r, t, kappa, velocity, 0.0, false).terms);
+            let (h0, f0) = (rest(0.0), form(0.0));
+            for s in times {
+                let (h, f, sizes) = (rest(s), form(s), written_out(&model, cluster, r, t, kappa, velocity, s, true));
+                let size0 = written_out(&model, cluster, r, t, kappa, velocity, 0.0, true);
+                // A phase's argument, a tone's Ω(t + s) and a pair's ν s, rounded with its sum and its product.
+                let fastest = plan.tones.iter().fold(0.0_f64, |m, omega| m.max(omega.abs())) * (t.abs() + s.abs()) + beats.iter().fold(0.0_f64, |m, b| m.max((b * s).abs()));
+                for i in 0..n * n {
+                    let tones: f64 = envelopes.iter().map(|(p, q)| p.data[i].abs() + q.data[i].abs()).sum();
+                    let size = sizes.hermitian[i][0].re + sizes.decay[i].re + size0.hermitian[i][0].re + size0.decay[i].re + 2.0 * tones;
+                    let (apart, bound) = ((h.data[i] - h0.data[i]).abs(), rounding(links + 4) * size + 4.0 * crate::units::UNIT_ROUNDOFF * fastest * tones);
+                    assert!(apart <= bound, "{name}, cluster {cluster}, s {s}, entry ({}, {}): what the groups leave moved by {apart:e} (bound {bound:e})", i / n, i % n);
+                }
+                for a in 0..3 {
+                    let size = form_size(&sizes, a, &rho, n) + form_size(&size0, a, &rho, n);
+                    let (apart, bound) = ((f[a] - f0[a]).abs(), 4.0 * (rounding(2 * links + n * n + 8) + crate::units::UNIT_ROUNDOFF * fastest) * size);
+                    assert!(apart <= bound, "{name}, cluster {cluster}, s {s}, axis {a}: what the groups leave of the force's form moved by {apart:e} (bound {bound:e})");
+                }
+            }
+            (groups, clusters) = (groups + beats.len(), clusters + 1);
+        }
+    }
+    eprintln!("{groups} candidate tone pairs on {clusters} clusters");
+    assert!(groups > 0);
+}
+
 /// The readout inverts the generator's own S (readout.rs `Model::readout_of`; `Model::bent_at`): the 1D PGC at 3 G
 /// (PGC1D_TILT_0) with every near light at the atom, the prior's units, and the series' first order and the
 /// normalization's kept, so that S bends the state. At two points the readout's S⁻¹ -- Σ_{j≤J} b_j X^j of the one

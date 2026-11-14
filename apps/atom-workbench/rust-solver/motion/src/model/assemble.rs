@@ -131,6 +131,28 @@
 //! Terms that beat in the cluster's frames are laid as the forms give them, and enter none of X and H: a replica's own
 //! norm is its static part (criterion two averages the cross terms).
 //!
+//! # Exact tones
+//! Along a path every piece of a dense term -- an entry and a pair of its block's two components' beams -- turns at one
+//! beat: its tone's residual beat Ω and its two plane waves' residual wave vector in the cluster's Doppler frames Q,
+//! e^{i(Ω + Q·v)s} at the time s from the middle, its value and the beams' amplitudes the middle's. The plan groups the
+//! pieces by (Ω, Q) exactly (`Group`: Q the field's wave vectors less the tree's frames, an exact lattice vector); the
+//! static pieces, of no beat in time or along the path, are in none. A group and its adjoint's, (−Ω, −Q), are a tone
+//! pair, its first standing for it (`Plan::firsts`): on a path its beat ν = Ω + Q·v (`Middle::beats`), its members'
+//! envelopes the groups' pieces at the middle (`Middle::envelopes`: constant along the path), the generator's part of
+//! the pair at the time s e^{iνs}G⁺ + e^{−iνs}G⁻ exactly. Which of them the propagation integrates at their beats and
+//! which it takes through the step's nodes with the rest of the generator is the propagation's own choice (spectral.rs,
+//! # Which beats are tones). The force's form by the same groups (`Middle::tone_force`): of a pair at the beat ν, on
+//! σ = Σ_k w_k e^{iνs_k} ρ_k, the part of Σ_k w_k Re tr(Ĝ(s_k) ρ_k) its pieces make -- the first's on σ, its partner's on
+//! σ† --, by the form's own weights (`Term::weight`), so that the pair's part of the step's impulse is integrated at its
+//! beat as its part of the state is. The normalized generator's part (# The normalized generator) is in no group: its
+//! beats are its forms' products, a part X of the beats' own size, taken with the static group. It is a correction of
+//! the second order: the forms are the fold's responses and their metric, of the order (g/Δ)² against the generator
+//! (g a coupling, Δ its detuning from the folded state), and the series' terms beyond the leading one products of them.
+//! What taking its beats through the three nodes leaves -- of a tone the hops' second Magnus term goes as the square of
+//! the tone's amplitude (spectral.rs, # Which beats are tones), its alias beyond νh = π its own size -- is therefore
+//! (g/Δ)² of what the same beat leaves in the leading part, a small share of the step's error, which the check reads;
+//! splitting it into groups would cost the series' products per group at every node for that share.
+//!
 //! # Work
 //! The complex multiply-adds are counted where they are made (`Middle::work`, `Plan::node`): at a point the near forms (the
 //! table's interpolation or the elimination) and the jumps' products (a product's adjoint, the same jumps exchanged, is its
@@ -325,6 +347,35 @@ struct Term {
     /// exchanged -- make conjugate forms: of a block and its adjoint the first is taken twice and the other left out, and of a
     /// block that is its own adjoint the flag `RIGHT` twice for `LEFT`.
     weight: f64,
+}
+
+/// A beating group of the generator's terms (module documentation, # Exact tones): the pieces of the dense terms -- an
+/// entry and a pair of its block's two components' beams -- of one tone whose plane waves' residual wave vector in the
+/// cluster's Doppler frames is one Q (1/µm): on a path of the velocity v all of them turn at the one beat Ω + Q·v. Its
+/// partner is the group of the adjoint pieces (−Ω, −Q), none where there is none; of the two the first stands for the
+/// pair.
+#[derive(Clone, Debug)]
+pub(crate) struct Group {
+    tone: usize,
+    wave: [f64; 3],
+    /// Its exact label (step.rs `Middle::beats`): its tone's beat's and its residual wave vector's integers over the
+    /// plan's common denominator.
+    key: Vec<i64>,
+    partner: Option<usize>,
+    first: bool,
+    generator: Vec<Piece>,
+    form: Vec<Piece>,
+}
+
+/// A piece of a dense term (`Group`): the term (its index among the generator's or the form's), the entry's offset in its
+/// span, and the beams of the block's left and right components it takes (their places among the components' beams;
+/// none of an absent component).
+#[derive(Clone, Copy, Debug)]
+struct Piece {
+    term: usize,
+    offset: usize,
+    left: Option<usize>,
+    right: Option<usize>,
 }
 
 /// The dense terms of the generator, or of a form with a Hermitian ρ, as they are laid (`Builder::finish`): the terms, the
@@ -579,10 +630,6 @@ pub(crate) struct Plan {
     /// Whether the generator is the same at every time along every path: no entry beats in the frames, in time or along a path
     /// (every residual beat and wave vector exactly zero).
     still: bool,
-    /// What a step's nodes sample of the generator along a path: per tone its rate |Ω| (rad/µs) and the largest residual
-    /// wave vector |K| (1/µm) of its entries in the cluster's frames -- an entry of the tone turns at Ω + K·v on a path
-    /// of the velocity v.
-    pub(crate) sampled: Vec<[f64; 2]>,
     /// The complex multiply-adds at a node (module documentation, # Work): of the generator; of the force's form without its
     /// values' slopes; and of those per direction of them.
     node: [f64; 3],
@@ -599,6 +646,9 @@ pub(crate) struct Plan {
     /// where no carrier is lit under these lights. And the plan's own number among the plans made.
     pub(crate) fourth: Option<Fourth>,
     pub(crate) id: u64,
+    /// The generator's beating groups and the first of each tone pair among them (module documentation, # Exact tones).
+    groups: Vec<Group>,
+    firsts: Vec<usize>,
 }
 
 /// A block under construction: its factors, base beat and entries, per flag each entry's constant and near form (Hermitian) or
@@ -1043,18 +1093,10 @@ impl<'a> Builder<'a> {
         }
         held.sort();
         held.dedup();
-        // The Doppler frames (cluster.rs, # Doppler frames): the tree's with the least squares' correction of what it leaves;
-        // whether anything beats -- a residual beat in time, or along a path a residual wave vector --; and per tone the
-        // largest residual wave vector of its entries (`Plan::sampled`).
-        let correction = super::cluster::correction(n, held.iter().map(|h| (h.0, h.1, &h.3)), &model.no_wave(), |w| model.wave_value(w));
-        let waves: Vec<[f64; 3]> = cluster.waves.iter().zip(&correction).map(|(k, more)| std::array::from_fn(|i| k[i] + more[i])).collect();
+        // The Doppler frames (cluster.rs, # Doppler frames): the tree's; and whether anything beats -- a residual beat in
+        // time, or along a path a residual wave vector.
+        let waves = cluster.waves.clone();
         let still = held.iter().all(|h| h.2 == 0 && h.3.is_zero());
-        let mut waves_sampled = vec![0.0_f64; tones.len()];
-        for (x, y, tone, residual) in &held {
-            let (q, k) = (model.wave_value(residual), [correction[*x], correction[*y]]);
-            let left: [f64; 3] = std::array::from_fn(|i| q[i] - (k[0][i] - k[1][i]));
-            waves_sampled[*tone] = waves_sampled[*tone].max(dot3(left, left).sqrt());
-        }
         // The Hermitian blocks' adjoints (`Term::weight`): the block of the two components' conjugates at the negated beat.
         let conjugate = |s: Option<usize>| match s {
             None => Some(None),
@@ -1218,6 +1260,66 @@ impl<'a> Builder<'a> {
             })
             .collect();
         let values = (products.len() + sums.len() + merged) as f64;
+        // The generator's beating groups (module documentation, # Exact tones): each piece of a dense term -- the generator's,
+        // the form's -- by its tone and its two beams' plane waves' residual wave vector in the cluster's Doppler frames,
+        // exactly. The static pieces, of no beat in time or along a path, in none.
+        let mut beats_of = vec![model.axes.zero(); tones.len()];
+        for (beat, &t) in &tone_index {
+            beats_of[t] = beat.clone();
+        }
+        let (mut found, mut groups, mut keys): (HashMap<(Beat, Wave), usize>, Vec<Group>, Vec<(Beat, Wave)>) = Default::default();
+        for (formed, terms) in [(false, &generator.terms), (true, &form.terms)] {
+            for (index, term) in terms.iter().enumerate() {
+                let d = &self.drafts[term.block];
+                let sides = |s: Option<usize>| -> Vec<(Option<usize>, Wave)> {
+                    s.map_or(vec![(None, model.no_wave())], |i| {
+                        let scalar = &self.scalars[i];
+                        scalar.beams.iter().enumerate().map(|(j, &(at, _))| (Some(j), model.no_wave().plus(if scalar.conjugate { -1 } else { 1 }, &model.beam_wave(self.beams[at])))).collect()
+                    })
+                };
+                let (left, right) = (sides(d.left), sides(d.right));
+                for (_, &(x, y)) in d.entries.iter().enumerate().filter(|&(e, _)| entry_tones[term.block][e] == term.tone) {
+                    let (offset, frames) = (x * n + y - term.first, cluster.waves_exact[x].plus(-1, &cluster.waves_exact[y]));
+                    for (l, lw) in &left {
+                        for (r, rw) in &right {
+                            let wave = lw.plus(1, rw).plus(-1, &frames);
+                            if beats_of[term.tone].is_zero() && wave.is_zero() {
+                                continue;
+                            }
+                            let key = (beats_of[term.tone].clone(), wave);
+                            let g = match found.get(&key) {
+                                Some(&g) => g,
+                                None => {
+                                    let value = model.wave_value(&key.1);
+                                    groups.push(Group { tone: term.tone, wave: value, key: vec![], partner: None, first: true, generator: vec![], form: vec![] });
+                                    (found.insert(key.clone(), groups.len() - 1), keys.push(key));
+                                    groups.len() - 1
+                                }
+                            };
+                            let piece = Piece { term: index, offset, left: *l, right: *r };
+                            if formed { groups[g].form.push(piece) } else { groups[g].generator.push(piece) }
+                        }
+                    }
+                }
+            }
+        }
+        // The groups' labels: their beats' and wave vectors' integers over one denominator, so that sums are exact.
+        let gcd = |mut a: i64, mut b: i64| {
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            a.abs()
+        };
+        let common = keys.iter().flat_map(|(beat, wave)| [beat.d, wave.d]).fold(1, |l, d| l / gcd(l, d) * d);
+        for (group, (beat, wave)) in groups.iter_mut().zip(&keys) {
+            group.key = beat.n.iter().map(|x| x * (common / beat.d)).chain(wave.n.iter().map(|x| x * (common / wave.d))).collect();
+        }
+        for (g, (beat, wave)) in keys.iter().enumerate() {
+            let adjoint = (beat.negated(), wave.negated());
+            groups[g].partner = found.get(&adjoint).copied();
+            groups[g].first = groups[g].partner.is_none() || keys[g] > adjoint;
+        }
+        let firsts = (0..groups.len()).filter(|&g| groups[g].first).collect();
         Plan {
             raws,
             cluster: self.cluster,
@@ -1241,7 +1343,6 @@ impl<'a> Builder<'a> {
             products,
             waves,
             still,
-            sampled: tones.iter().zip(&waves_sampled).map(|(omega, wave)| [omega.abs(), *wave]).collect(),
             node,
             tones,
             classes,
@@ -1251,6 +1352,8 @@ impl<'a> Builder<'a> {
             values,
             fourth: None,
             id: PLANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            groups,
+            firsts,
         }
     }
 }
@@ -1696,12 +1799,6 @@ pub struct Middle<'a> {
 }
 
 impl Model {
-    /// What a step's nodes sample of the clusters' generators along a path under a light set (`Plan::sampled`): per
-    /// residual beat its rate |Ω| (rad/µs) and the largest wave vector |K| (1/µm) that turns with it.
-    pub fn sampled(&self, lights: &Lights) -> Vec<[f64; 2]> {
-        (0..self.clusters.len()).flat_map(|c| self.plan(c, lights).sampled.clone()).collect()
-    }
-
     /// A cluster's plan under a light set, made once: the plans' lock is held to find its place or to give it one, and
     /// the plan is made in that place alone -- whoever asks for the same plan meanwhile waits for it, and two plans
     /// asked side by side are made side by side.
@@ -2297,6 +2394,7 @@ impl Model {
 /// turns.
 pub struct Path {
     kappa: [f64; 3],
+    velocity: [f64; 3],
     rates: Held<Rates>,
     turning: bool,
     /// The path's own number among the paths made: what a node's fields along it are kept by (`Scratch::nodes`).
@@ -2381,7 +2479,7 @@ impl crate::step::Middle for Middle<'_> {
         path.extend(plan.beams.iter().map(|&l| dot3(model.light.beams[l].wave_vector(), velocity)));
         gauge.clear();
         gauge.extend(plan.waves.iter().map(|k| dot3(*k, velocity)));
-        Path { kappa, turning: gauge.iter().any(|rate| *rate != 0.0), rates, id: PATHS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+        Path { kappa, velocity, turning: gauge.iter().any(|rate| *rate != 0.0), rates, id: PATHS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
     }
 
     fn gauge(&self, path: &Path, rates: &mut [f64]) {
@@ -2659,6 +2757,68 @@ impl crate::step::Middle for Middle<'_> {
     fn work(&self) -> [f64; 3] {
         self.plan.costs(self.point.borrow().directions.len())
     }
+
+    /// Module documentation, # Exact tones: each tone pair's beat Ω + Q·v on the path.
+    fn beats(&self, path: &Path, beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
+        let plan = &*self.plan;
+        beats.extend(plan.firsts.iter().map(|&g| plan.tones[plan.groups[g].tone] + dot3(plan.groups[g].wave, path.velocity)));
+        keys.extend(plan.firsts.iter().map(|&g| plan.groups[g].key.clone()));
+    }
+
+    /// The pair's first group's envelope and its partner's (`envelope`), constant along the path.
+    fn envelopes(&self, path: &Path, m: usize, plus: &mut Mat, minus: &mut Mat) {
+        let plan = &*self.plan;
+        let group = &plan.groups[plan.firsts[m]];
+        self.envelope(path, group, plus);
+        match group.partner {
+            Some(p) => self.envelope(path, &plan.groups[p], minus),
+            None => minus.data.fill(C64::ZERO),
+        }
+    }
+
+    /// The pair's part of the force's forms: its first group's pieces on σ = re + i im, its partner's on σ† = re − i im
+    /// (`group_force`).
+    fn tone_force(&self, path: &Path, m: usize, re: &[C64], im: &[C64]) -> [f64; 3] {
+        let plan = &*self.plan;
+        let group = &plan.groups[plan.firsts[m]];
+        let mut out = self.group_force(path, group, re, im, 1.0);
+        if let Some(p) = group.partner {
+            let more = self.group_force(path, &plan.groups[p], re, im, -1.0);
+            (0..3).for_each(|a| out[a] += more[a]);
+        }
+        out
+    }
+
+    /// Per piece of the pair's two groups: of an envelope its value, its two beams' product and the phase (four complex
+    /// multiply-adds); of the force its value and slopes on σ and the product's four parts (eight, and two a direction).
+    fn tone_work(&self, m: usize) -> [f64; 2] {
+        let plan = &*self.plan;
+        let group = &plan.groups[plan.firsts[m]];
+        let pair = [Some(group), group.partner.map(|p| &plan.groups[p])];
+        let count = |pieces: fn(&Group) -> &Vec<Piece>| pair.iter().flatten().map(|g| pieces(g).len()).sum::<usize>() as f64;
+        let directions = self.point.borrow().directions.len() as f64;
+        [4.0 * count(|g| &g.generator), (8.0 + 2.0 * directions) * count(|g| &g.form)]
+    }
+}
+
+/// A piece's factor (module documentation, # Exact tones): its two beams' parts of the block's components at a node --
+/// each beam's amplitude turned there, its weight, conjugated with its component --, plain or Doppler-weighted as the
+/// flag says, and their product with its gradient (parts 1–3: the gradient of each times the other).
+fn factor(plan: &Plan, node: &Node, path: &Path, block: usize, flag: usize, piece: &Piece) -> [C64; 4] {
+    let side = |scalar: Option<usize>, beam: Option<usize>, doppler: bool| -> [C64; 4] {
+        match scalar.zip(beam) {
+            Some((s, j)) => {
+                let scalar = &plan.scalars[s];
+                let (at, c) = scalar.beams[j];
+                let w = if doppler { path.rates.shifts[at] } else { 1.0 };
+                std::array::from_fn(|part| (if scalar.conjugate { node.turned[at][part].conj() } else { node.turned[at][part] }) * c * w)
+            }
+            None => [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO],
+        }
+    };
+    let b = &plan.blocks[block];
+    let (l, r) = (side(b.left, piece.left, flag == LEFT || flag == BOTH), side(b.right, piece.right, flag == RIGHT || flag == BOTH));
+    std::array::from_fn(|part| if part == 0 { l[0] * r[0] } else { l[part] * r[0] + l[0] * r[part] })
 }
 
 /// The normalized generator's matrices (`Quartic`; module documentation, # The normalized generator) from a point's (or a
@@ -3045,6 +3205,57 @@ impl Middle<'_> {
     /// the path, e^{i k_l·v s}, the field components of those -- and where `sloped`, their derivatives along the path --,
     /// with the tones' phases at that time and the Doppler frames' turns. At s = 0 they are the fixed middle point's own,
     /// at its time (every phase over the path is one there): the fixed point's tones read them too.
+    /// A beating group's envelope (module documentation, # Exact tones): over its pieces the term's value at the entry
+    /// times its two beams' product (`factor`) and the tone's phase, at the middle -- the plane waves and the frames' turns
+    /// at s = 0 --, into `out` (n × n): on the path the group's part of Ĥ at the time s is this times e^{iνs}.
+    fn envelope(&self, path: &Path, group: &Group, out: &mut Mat) {
+        let (plan, point) = (&*self.plan, self.point.borrow());
+        let mut scratch = point.scratch.borrow_mut();
+        let at = self.along(&point.amplitudes, path, 0.0, false, &mut scratch);
+        let node = &scratch.nodes[at];
+        out.data.fill(C64::ZERO);
+        for piece in &group.generator {
+            let term = &plan.generator[piece.term];
+            let (real, imaginary) = plan.values(term, &point.generator);
+            let value = C64::new(real[piece.offset], imaginary[piece.offset]);
+            out.data[term.first + piece.offset] += value * factor(plan, node, path, term.block, term.flag, piece)[0] * node.phases[term.tone];
+        }
+    }
+
+    /// A beating group's part of the force's form on a density σ = re + i sign im (n × n row by row each, re and im
+    /// Hermitian), per lab axis: as `contract` takes a term at the middle -- each piece's value and its slopes on σ[y, x]
+    /// at its tone's phase, times its two beams' product and its gradient (`factor`), Re of their sum by the term's
+    /// weight.
+    fn group_force(&self, path: &Path, group: &Group, re: &[C64], im: &[C64], sign: f64) -> [f64; 3] {
+        let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
+        let mut scratch = point.scratch.borrow_mut();
+        let at = self.along(&point.amplitudes, path, 0.0, false, &mut scratch);
+        let node = &scratch.nodes[at];
+        let width = point.forms.len();
+        let mut out = [0.0; 3];
+        for piece in &group.form {
+            let term = &plan.form[piece.term];
+            let place = term.first + piece.offset;
+            let (x, y) = (place / n, place % n);
+            let sigma = (re[y * n + x] + im[y * n + x] * C64::new(0.0, sign)) * node.phases[term.tone];
+            let (real, imaginary) = plan.values(term, &point.forms);
+            let value = C64::new(real[piece.offset], imaginary[piece.offset]) * sigma;
+            let mut gradient = [C64::ZERO; 3];
+            for (f, direction) in point.directions.iter().enumerate().filter(|_| term.near) {
+                let slopes = &point.slopes[f * width + term.at..f * width + term.at + 2 * term.len];
+                let slope = C64::new(slopes[piece.offset], slopes[term.len + piece.offset]) * sigma;
+                for a in 0..3 {
+                    gradient[a] += slope * direction[a];
+                }
+            }
+            let c = factor(plan, node, path, term.block, term.flag, piece);
+            for a in 0..3 {
+                out[a] += term.weight * (c[1 + a] * value + c[0] * gradient[a]).re;
+            }
+        }
+        out
+    }
+
     fn along(&self, amplitudes: &[[C64; 4]], path: &Path, s: f64, sloped: bool, scratch: &mut Scratch) -> usize {
         let plan = &*self.plan;
         let key = (path.id, s.to_bits());

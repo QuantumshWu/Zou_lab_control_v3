@@ -103,10 +103,6 @@ impl Beat {
         }
         Beat::reduced(self.n.iter().zip(&other.n).map(|(&a, &b)| a * other.d + s * b * self.d).collect(), self.d * other.d)
     }
-    /// self/k, k ≠ 0.
-    pub fn over(&self, k: i64) -> Beat {
-        Beat::reduced(self.n.clone(), self.d * k)
-    }
     pub fn negated(&self) -> Beat {
         Beat { n: self.n.iter().map(|&a| -a).collect(), d: self.d }
     }
@@ -127,12 +123,6 @@ impl Beat {
 impl cluster::Exact for Beat {
     fn plus(&self, s: i64, other: &Beat) -> Beat {
         Beat::plus(self, s, other)
-    }
-    fn over(&self, k: i64) -> Beat {
-        Beat::over(self, k)
-    }
-    fn is_zero(&self) -> bool {
-        Beat::is_zero(self)
     }
 }
 
@@ -632,7 +622,7 @@ impl Model {
         // a coupling's strength its entry's with every drive bare.
         let bare: Vec<far::Tone> = if kept.iter().any(|u| matches!(u, Unit::Term { .. })) { model.tones.iter().map(|t| t.folded(&|_, _, _| Level::Bare, &model.energies[GROUND..])).collect() } else { vec![] };
         let edges = model.edges(&bare);
-        let (mut clusters, membership) = cluster::clusters(STATES, &edges, &model.axes.zero(), &model.no_wave(), &|beat| model.axes.omega(beat));
+        let (mut clusters, membership) = cluster::clusters(STATES, &edges, &model.axes.zero(), &model.no_wave());
         for c in clusters.iter_mut() {
             c.waves = c.waves_exact.iter().map(|w| model.wave_value(w)).collect();
         }
