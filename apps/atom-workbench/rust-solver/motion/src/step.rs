@@ -26,21 +26,26 @@
 //! time; per momentum the beams' Doppler weights and path rates (`Middle::path`); and at a time s from the middle Ĥ(s)
 //! itself, each beam's plane wave turned by e^{ik_l·v s} (`Middle::generator`).
 //!
-//! One propagation, whatever the generator (`propagate`; spectral.rs). Ĥ(s) = Ĥ₀ + D(s): Ĥ₀ = Ĥ(0), the generator at
-//! the step's middle, holds the atom's own frequencies -- detunings, light shifts, decay rates --, which may turn any
-//! number of times over the step (an explicit excited state twenty linewidths off its light turns 48 rad in 0.0625 µs,
-//! and rings at that for 2/Γ after every jump); D(s) is what the motion along the path and the lights' beats change,
-//! slow by the step's own choice. The two are integrated apart:
+//! One propagation, whatever the generator (`propagate`; spectral.rs). Ĥ(s) = Ĥ₀ + D(s): Ĥ₀ = G₀(0), the static group
+//! of the generator at the step's middle (`Middle::generator`), holds the atom's own frequencies -- detunings, light
+//! shifts, decay rates --, which may turn any number of times over the step (an explicit excited state twenty
+//! linewidths off its light turns 48 rad in 0.0625 µs, and rings at that for 2/Γ after every jump); D(s) is what the
+//! motion along the path and the lights' beats change: the static group's change, slow by the step's own choice, and the
+//! model's exact tones (`Middle::beats`), each at its beat. The two are integrated apart:
 //! - Ĥ₀ exactly: in its eigenbasis its phases and decays are factors over any width (the interaction picture,
 //!   `spectral::Picture`), so the state is known at any time of the step for n exponentials and two products of n²;
 //! - D through the step's three nodes alone, its middle and its two ends (two more generators of the model; none where
-//!   Ĥ is the same at every time, `Middle::still`: every pair of states holds one wave vector): D(s) = sA + s²B. A pair
-//!   of Ĥ₀'s states that turns far between two nodes for what changes -- where its following leaves no more than its
-//!   hops would (`spectral::followed`; spectral.rs, # The split) -- follows the change (a polynomial in the time, to
-//!   the second order: the generator's own eigenvectors along the path); the slower pairs, with the change's own light
-//!   shift, are two hops of the interaction picture a step, the first Magnus term with its integral over the pair's
+//!   Ĥ is the same at every time, `Middle::still`: every pair of states holds one wave vector): the static group's
+//!   change sA + s²B, a tone's envelope C + sA + s²B at its exact phase e^{iνs}. An entry of Ĥ₀'s states that turns far
+//!   between two nodes at its combined frequency ω_ab + ν for what changes -- where its following leaves no more than
+//!   its hops would (`spectral::followed`; spectral.rs, # The split) -- follows the change (a polynomial in the time, to
+//!   the second order: the generator's own eigenvectors along the path); the slower entries, with the change's own light
+//!   shift, are two hops of the interaction picture a step, the first Magnus term with its integral over the entry's
 //!   turn exact, and a quintic between the nodes (spectral.rs). The propagation's work is the same whatever Ĥ₀'s
-//!   frequencies times the step are. The gradient's slow change is taken through the same three nodes (`propagate`).
+//!   frequencies or the tones' beats times the step are. The gradient's slow change is taken through the same three
+//!   nodes (`propagate`), and the survival's decay too (`laid_decay`): both read the generator's static group alone,
+//!   which is all of it while the model gives no tones (`Middle::beats`); their tones' parts are still to be taken at
+//!   their beats as the propagation takes them (ELIMINATION.md v8).
 //! The step's time integral -- the kick -- is read on that state at the nodes of a
 //! Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: within the
 //! kick's share `QUADRATURE` of each component's size times the step, the old engine's rule -- no credit taken for a
@@ -499,8 +504,21 @@ pub trait Middle {
     /// The Doppler frames' rates K_s·v on a path, per state (rad/µs).
     fn gauge(&self, path: &Self::Path, rates: &mut [f64]);
 
-    /// Ĥ(s) at the time s from the middle along the path, into `h` (n × n; rad/µs), the frames' diag(K_s·v) with it.
+    /// The static group of Ĥ(s) at the time s from the middle along the path, into `h` (n × n; rad/µs), the frames'
+    /// diag(K_s·v) with it: Ĥ less its exact tones (`beats`) -- all of Ĥ where the model gives none. The propagation takes
+    /// it through the step's three nodes, its change for a parabola (spectral.rs, # The generator).
     fn generator(&self, path: &Self::Path, s: f64, h: &mut Mat);
+
+    /// The exact tones of Ĥ along the path (spectral.rs, # The generator): Ĥ(s) = G₀(s) + Σ_m (e^{iν_m s} G_m⁺(s) +
+    /// e^{−iν_m s} G_m⁻(s)), G₀ the static group (`generator`), each tone's beat ν_m exact and its members' envelopes
+    /// G_m^± slow (`envelopes`): into `beats` each ν_m (rad/µs). None here: the generator is its static group, every beat
+    /// of it taken through the three nodes with the rest of its change. A model gives a beat as a tone where that leaves
+    /// less than its change's parabola would (spectral.rs, # Which beats are tones); none on a path it is still along.
+    fn beats(&self, _path: &Self::Path, _beats: &mut Vec<f64>) {}
+
+    /// The members' envelopes of the m-th exact tone (`beats`) at the time s from the middle along the path, into `plus`
+    /// (G_m⁺, at e^{iν_m s}) and `minus` (G_m⁻, at e^{−iν_m s}; n × n each, rad/µs). Asked only of the tones `beats` gives.
+    fn envelopes(&self, _path: &Self::Path, _m: usize, _s: f64, _plus: &mut Mat, _minus: &mut Mat) {}
 
     /// Re tr(Ĝ_a(s) ρ) per lab axis a (rad/µs/µm): the gradient of Ĥ's Hermitian part at the time s from the middle along
     /// the path, contracted with a Hermitian ρ on the states (n × n, row by row).
@@ -1357,7 +1375,8 @@ fn root_states() -> f64 {
 /// chance of a jump in what is left of the step, 1 − e^{−h₀|h − u|} at the hazard h₀ of `start`, the frame's state at
 /// the time u it is launched from (none: no root priced); the strides' share at what that state forgets, h₀
 /// (`Picture::prepare`) --: the model's generator at the step's middle and, unless it
-/// is still along every path, at the step's two ends. Their decay is laid into `decay` first, node by node in the order
+/// is still along every path, at the step's two ends -- its static group, and its exact tones' envelopes at the three
+/// nodes (`Middle::beats`). The static group's decay is laid into `decay` first, node by node in the order
 /// of the kick's sums (`laid_decay`; −h, 0, h, or the middle alone where Ĥ is still): the survival's hazard (# Jumps);
 /// `part` is a sum's scratch. Returns the largest sum of the decay's entries' moduli over the nodes; a generator at a
 /// node that is no number refuses the step (`Refused::Overflow`: nothing of it can be propagated).
@@ -1368,8 +1387,20 @@ fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64, (decay
         along.middle.generator(&along.path, -h, &mut picture.ends[0]);
         along.middle.generator(&along.path, h, &mut picture.ends[1]);
     }
+    picture.beating(|beats| {
+        if !still {
+            along.middle.beats(&along.path, beats);
+        }
+    });
+    for (m, tone) in picture.beats.iter_mut().enumerate() {
+        let [plus, minus] = &mut tone.members;
+        for (j, s) in [-h, 0.0, h].into_iter().enumerate() {
+            along.middle.envelopes(&along.path, m, s, &mut plus[j], &mut minus[j]);
+        }
+    }
     let numbers = |m: &Mat| m.data.iter().all(|z| z.re.is_finite() && z.im.is_finite());
-    if !(numbers(&picture.base) && (still || picture.ends.iter().all(numbers))) {
+    let tones = picture.beats.iter().flat_map(|tone| tone.members.iter().flatten());
+    if !(numbers(&picture.base) && (still || picture.ends.iter().chain(tones).all(numbers))) {
         return Err(Refused::Overflow);
     }
     decay.fill(0.0);
