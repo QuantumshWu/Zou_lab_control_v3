@@ -77,13 +77,13 @@ fn a_two_level_fold_is_the_linear_response_and_its_error_the_saturation() {
 fn detuning(light: &Light, frequency: usize) -> Beat {
     let mut n: Vec<i64> = light.frequencies[frequency].index.iter().map(|&i| i as i64).collect();
     n.push(0);
-    Beat(n)
+    Beat::whole(n)
 }
 
 /// The coupling of |1,0⟩ ← |2,0⟩ at the beat of two frequencies, emitting `to`'s and absorbing `from`'s: δ_to − δ_from.
 fn raman_unit(light: &Light, to: usize, from: usize) -> Unit {
     let (to, from) = (detuning(light, to), detuning(light, from));
-    Unit::Term { a: 1, b: 5, beat: Beat(to.0.iter().zip(&from.0).map(|(x, y)| x - y).collect()) }
+    Unit::Term { a: 1, b: 5, beat: to.plus(-1, &from) }
 }
 
 /// The Λ scheme's Raman coupling (R6_RAMAN_CO: D1 σ⁺σ⁺, A from F = 1, B from F = 2, Raman-resonant between |1,0⟩ and |2,0⟩,
@@ -130,6 +130,34 @@ fn a_raman_pair_is_kept_on_resonance_and_couples_at_the_closed_form() {
         eprintln!("{level}: Raman {} against the closed form {} ({:.1e} apart)", coupling.abs(), closed.abs(), (coupling.abs() - closed.abs()).abs() / closed.abs());
         assert!((coupling.abs() - closed.abs()).abs() <= within * closed.abs(), "{level}: Raman {} against the closed form {}", coupling.abs(), closed.abs());
     }
+}
+
+/// The frames of a cluster whose kept couplings close a cycle off resonance (cluster.rs, # Frames; ELIMINATION v4): the
+/// pair of R6_RAMAN_CO kept at both its beats -- |1,0⟩ and |2,0⟩ coupled at the two lights' Raman beat β and statically
+/// -- is a ring of two that misses by β. Its frames leave each coupling turning at β/2, Karp's least largest residual
+/// (the ring's mean detuning), the frames' difference exactly half the beat on the axes' integers; and the step's
+/// requirement at rest -- the largest residual beat the plan's nodes sample (solve.rs `first_rung`) -- is that value,
+/// where frames along a spanning tree left one of the two at the whole β.
+#[test]
+fn a_kept_ring_s_frames_ask_the_step_for_its_mean_detuning() {
+    let request = scene("R6_RAMAN_CO");
+    let light = Light::new(&request);
+    let (fa, fb) = (frequency_of(&request, &light, "ramanA"), frequency_of(&request, &light, "ramanB"));
+    let raman = raman_unit(&light, fa, fb);
+    let static_coupling = Unit::Term { a: 1, b: 5, beat: detuning(&light, fa).plus(-1, &detuning(&light, fa)) };
+    let model = Model::new(&request, &light, &[raman.clone(), static_coupling]).unwrap();
+    let cluster = model.cluster_of(1);
+    assert_eq!(model.cluster_of(5), cluster, "the ring joins its states");
+    let c = &model.clusters()[cluster];
+    let place = |s: usize| c.states.iter().position(|&x| x == s).unwrap();
+    let Unit::Term { beat, .. } = &raman else { unreachable!("the Raman unit is a coupling") };
+    // The Raman coupling a ← b at β is static where θ_a − θ_b = −β, the static one where it is zero: halfway between.
+    assert_eq!(c.frames[place(1)].plus(-1, &c.frames[place(5)]), beat.negated().over(2), "the frames halfway, exactly");
+    let half = 0.5 * model.omega(beat).abs();
+    let sampled = model.sampled(&model.running());
+    let largest = sampled.iter().map(|t| t[0]).fold(0.0, f64::max);
+    eprintln!("Raman beat {:.6e} rad/us; the plan's residual beats {:?}", 2.0 * half, sampled.iter().map(|t| t[0]).collect::<Vec<_>>());
+    assert!((largest - half).abs() <= 1e-12 * half, "the step's requirement {largest} against the ring's mean detuning {half}");
 }
 
 /// Optical pumping's branching (R5_PUMP: D1 σ⁺ F = 2 → F′ = 2 and its repump): from |2,m⟩ the resonant pump reaches |2′,m+1⟩,
@@ -333,7 +361,7 @@ fn a_kept_unit_is_no_longer_a_candidate() {
     let e = (GROUND..STATES).max_by(|&x, &y| (beam_a.coupling[(x, 1)] * beam_b.coupling[(x, 5)]).abs().total_cmp(&(beam_a.coupling[(y, 1)] * beam_b.coupling[(y, 5)]).abs())).unwrap();
     let raman = raman_unit(&light, fa, fb);
     let (leg_a, leg_b) = (Unit::Drive { component: ca, excited: e, ground: 1 }, Unit::Drive { component: cb, excited: e, ground: 5 });
-    let static_coupling = Unit::Term { a: 1, b: 5, beat: Beat(vec![0; detuning(&light, fa).0.len()]) };
+    let static_coupling = Unit::Term { a: 1, b: 5, beat: detuning(&light, fa).plus(-1, &detuning(&light, fa)) };
     let lifted = at_the_atom(&request, &light, &[fa, fb]);
     let folded = Model::new(&request, &light, &lifted).unwrap().units();
     for u in [&raman, &leg_a, &leg_b, &static_coupling] {
@@ -412,8 +440,8 @@ fn the_fourth_order_s_decay_is_its_photons_rate_with_a_kept_pair_of_two_frequenc
     let request = scene("R6_RAMAN_CO");
     let light = Light::new(&request);
     let (fa, fb) = (frequency_of(&request, &light, "ramanA"), frequency_of(&request, &light, "ramanB"));
-    let exact = |f: usize| -> Vec<i64> { light.frequencies[f].index.iter().map(|&i| i as i64).chain([0]).collect() };
-    let raman = Unit::Term { a: 1, b: 5, beat: Beat(exact(fa).iter().zip(exact(fb)).map(|(x, y)| x - y).collect()) };
+    let exact = |f: usize| Beat::whole(light.frequencies[f].index.iter().map(|&i| i as i64).chain([0]).collect());
+    let raman = Unit::Term { a: 1, b: 5, beat: exact(fa).plus(-1, &exact(fb)) };
     let rates = |model: &Model, g: usize, kappa: [f64; 3]| -> (f64, f64) {
         let c = model.cluster_of(g);
         let psi: Vec<C64> = (0..model.clusters()[c].states.len()).map(|x| C64::cis(0.7 * x as f64) * (0.6 + 0.3 * x as f64)).collect();

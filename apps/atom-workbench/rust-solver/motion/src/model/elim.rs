@@ -138,7 +138,7 @@ pub(crate) struct Replicas {
 }
 
 /// Whether two frequencies are one: equal within the rounding of the sums that make them -- a class's frequency and a
-/// frame, itself a sum of at most a component per state along the frames' paths (`frames`): γ_STATES of their sizes.
+/// frame, itself a sum of at most a component per state along the frames' paths (cluster.rs `frames`): γ_STATES of their sizes.
 /// Two physically different frequencies differ by a beat of the request's frequency axes, many orders more.
 pub(crate) fn same(a: f64, b: f64) -> bool {
     (a - b).abs() <= rounding(crate::request::STATES) * (a.abs() + b.abs())
@@ -1169,57 +1169,6 @@ impl Reference {
     }
 }
 
-/// The frames that make the explicit components turn least (v3 2; the coordinator's 2026-11-13 rule): every component
-/// a ← b at lab beat Ω (∝ e^{−iΩt}) turns at Ω + θ_b − θ_a in the frames; the frames θ minimize max |Ω + θ_b − θ_a| over
-/// the components. By linear-programming duality that least largest residual t* is the largest |Σ_{e∈C} ±Ω_e|/|C| over
-/// the cycles C of the components' graph, the minimum mean cycle of the directed graph with an arc b → a of weight Ω
-/// and a → b of −Ω per component (Karp 1978); the frames are then the shortest paths from a source joined to every state
-/// at no cost, the arcs at weight + t* (no negative cycle there): θ_a ≤ θ_b + Ω + t* and θ_b ≤ θ_a − Ω + t*. Without a
-/// cycle t* = 0 and every component is static. Returns the frames (states that no component touches: 0) and t*.
-pub(crate) fn frames(states: usize, components: &[(usize, usize, f64)]) -> (Vec<f64>, f64) {
-    let arcs: Vec<(usize, usize, f64)> = components.iter().flat_map(|&(a, b, omega)| [(b, a, omega), (a, b, -omega)]).collect();
-    // Karp: D_k(v) the least weight of a walk of k arcs from the source (the source's arcs counted as the first).
-    let n = states;
-    let mut d = vec![vec![f64::INFINITY; n]; n + 1];
-    d[0].iter_mut().for_each(|x| *x = 0.0);
-    for k in 1..=n {
-        for &(from, to, w) in &arcs {
-            if d[k - 1][from].is_finite() {
-                let x = d[k - 1][from] + w;
-                if x < d[k][to] {
-                    d[k][to] = x;
-                }
-            }
-        }
-    }
-    let mut least = f64::INFINITY;
-    for v in 0..n {
-        if !d[n][v].is_finite() {
-            continue;
-        }
-        let worst = (0..n).filter(|&k| d[k][v].is_finite()).map(|k| (d[n][v] - d[k][v]) / (n - k) as f64).fold(f64::NEG_INFINITY, f64::max);
-        least = least.min(worst);
-    }
-    // The least mean cycle's weight is −t* (every cycle holds both ways round, so its mean is ≤ 0).
-    let residual = if least.is_finite() { (-least).max(0.0) } else { 0.0 };
-    // Bellman–Ford at weight + t*.
-    let mut theta = vec![0.0; n];
-    for _ in 0..n {
-        let mut moved = false;
-        for &(from, to, w) in &arcs {
-            let x = theta[from] + w + residual;
-            if x < theta[to] {
-                theta[to] = x;
-                moved = true;
-            }
-        }
-        if !moved {
-            break;
-        }
-    }
-    (theta, residual)
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // The system at a point, and the point's closure (criteria one and two, the frames).
 
@@ -1507,8 +1456,10 @@ impl super::Model {
     /// photons' cross terms on the run's photon classes, which land in every cluster: of each pair landing in one, the
     /// rate of their interference at the state γ = |Σ_a ⟨u_a|u′_a⟩| over the state's norm, against their beat Ω -- γ/|Ω|
     /// (v3 1: the secular approximation's first order), on `Unit::Coherence`. A relative rate error x moves the
-    /// populations by at most x (absolute) and T by x (relative).
-    pub(crate) fn readings(&self, units: &[super::Unit], sample: &super::Sample, tables: Option<&super::tabulate::Tables>) -> Vec<super::UnitError> {
+    /// populations by at most x (absolute) and T by x (relative). And beside the units, per transition to a level
+    /// outside the model (`Model::outside`), its error at the state (`errors`; `outside_errors` where no carrier folds:
+    /// the P states' populations alone), booked so too.
+    pub(crate) fn readings(&self, units: &[super::Unit], sample: &super::Sample, tables: Option<&super::tabulate::Tables>) -> (Vec<super::UnitError>, Vec<super::UnitError>) {
         use crate::request::GROUND;
         use super::{Unit, UnitError};
         let mut out = vec![UnitError::NONE; units.len()];
@@ -1523,6 +1474,12 @@ impl super::Model {
         let amplitudes = self.light.amplitudes(sample.at.r);
         let velocity = sample.at.kappa.map(|k| k * self.hbar_over_mass);
         let speed = crate::linalg::norm3(velocity);
+        let outside: Vec<Outside> = self
+            .outside_at(&amplitudes)
+            .iter()
+            .map(|(m, o)| Outside { slow: c.states.iter().map(|&s| m[s]).collect(), excited: (GROUND..crate::request::STATES).map(|s| m[s] * o[s]).collect() })
+            .collect();
+        let mut beyond = None;
         if let Some((fold, levels, _, _)) = self.cluster_fold(sample.cluster, &amplitudes, true) {
             let plan = self.plan(sample.cluster, &self.running());
             let fastest = self.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
@@ -1535,7 +1492,8 @@ impl super::Model {
                 self.in_generator(a, b, &beat)
             };
             let blocks = self.blocks();
-            let errors = errors(&fold, &levels, &blocks, &linked, None, &sample.psi, velocity, range);
+            let errors = errors(&fold, &levels, &blocks, &linked, None, &sample.psi, velocity, range, &outside);
+            beyond = Some(errors.outside.clone());
             for (object, x) in &errors.parts {
                 match object {
                     Object::Block(b, Some(k)) => book(&Unit::Block { block: *b, component: super::Component { frequency: self.carriers[*k].frequency, counter: false }, grounds: ground_set(&c.states[..g]) }, *x, &mut out),
@@ -1562,7 +1520,22 @@ impl super::Model {
                 book(unit, gamma / self.omega(&second.plus(-1, first)).abs(), &mut out);
             }
         }
-        out
+        let beyond = beyond.unwrap_or_else(|| outside_errors(None, &sample.psi, &outside));
+        (out, beyond.iter().map(|&x| UnitError { parameter: x, population: x, temperature: x, moved: 0.0, into: 0 }).collect())
+    }
+
+    /// The transitions to the levels outside the model (`Model::outside`).
+    pub(crate) fn outside_count(&self) -> usize {
+        self.outside.len()
+    }
+
+    /// Per transition to a level outside the model (`Model::outside`) its mixing and its shift at a point of the beams'
+    /// amplitudes `amplitudes`, per model state: m_s = Σ_i x_i(E) mixing_i[s] and o_s = Σ_i x_i(E) shift_i[s], E its
+    /// frequency's coherent field there (request.rs `coordinates`).
+    pub(crate) fn outside_at(&self, amplitudes: &[crate::field::Amplitude]) -> Vec<(Vec<f64>, Vec<f64>)> {
+        let x: Vec<[f64; 9]> = self.light.frequencies.iter().map(|f| crate::request::coordinates(&f.field(amplitudes).value)).collect();
+        let at = |w: usize, form: &[Vec<f64>; 9]| (0..crate::request::STATES).map(|s| (0..9).map(|i| x[w][i] * form[i][s]).sum()).collect::<Vec<f64>>();
+        self.outside.iter().map(|(w, t)| (at(*w, &t.mixing), at(*w, &t.shift))).collect()
     }
 
     /// The model's prior (ELIMINATION.md §3–§4, the brief's "先验"): at the reach's own atoms `points` (position,
@@ -1702,7 +1675,7 @@ pub(crate) struct Kept {
 pub(crate) struct Closed {
     pub kept: Kept,
     pub frames: Vec<f64>,
-    /// The frames' least largest residual t* (`frames`), and the step's requirement t* + |K| v (rad/µs).
+    /// The frames' least largest residual t* (cluster.rs `frames`), and the step's requirement t* + |K| v (rad/µs).
     pub residual: f64,
     pub requirement: f64,
     pub fold: Fold,
@@ -1711,15 +1684,15 @@ pub(crate) struct Closed {
     pub mixing: f64,
 }
 
-/// The P states (labels as in `Link`) of a kept set, the frames from its links (`frames`) and its groups (`components`
-/// of the links, each explicit block's states one group with them: a block is moved whole, its sublevels coupled by
-/// the Zeeman and tensor shifts): the ground states, then the kept blocks' states.
+/// The P states (labels as in `Link`) of a kept set, the frames from its links (cluster.rs `frames`) and its groups
+/// (`components` of the links, each explicit block's states one group with them: a block is moved whole, its sublevels
+/// coupled by the Zeeman and tensor shifts): the ground states, then the kept blocks' states.
 fn slow_of(blocks: &[Vec<usize>], kept: &Kept, classes: &[Class], ground: usize) -> (Slow, f64) {
     let explicit: Vec<usize> = kept.blocks.iter().flat_map(|&b| blocks[b].iter().copied()).collect();
     let place = |s: usize| if s < ground { Some(s) } else { explicit.iter().position(|&e| e == s - ground).map(|i| ground + i) };
     let edges: Vec<(usize, usize, f64)> = kept.links.iter().filter_map(|l| Some((place(l.a)?, place(l.b)?, l.beat(classes)))).collect();
     let n = ground + explicit.len();
-    let (frames, residual) = frames(n, &edges);
+    let (frames, residual) = super::cluster::frames(n, &edges, &|x| *x, &0.0);
     let within = kept.blocks.iter().flat_map(|&b| blocks[b].windows(2).filter_map(|w| Some((place(ground + w[0])?, place(ground + w[1])?))));
     let groups = components(n, edges.iter().map(|e| (e.0, e.1)).chain(within));
     (Slow { explicit, frames, groups }, residual)
@@ -1973,6 +1946,54 @@ pub(crate) struct Errors {
     pub averaged: f64,
     pub photons: f64,
     pub parts: Vec<(Object, f64)>,
+    /// Per transition to a level outside the model its error (`outside_errors`): no object's part, nothing keeps it.
+    pub outside: Vec<f64>,
+}
+
+/// One transition to a level outside the model at a state's point (request.rs `Transition`, `Model::outside_at`): its
+/// mixing m_s -- the population a state s holds in the level, (coupling/detuning)² summed over its sublevels -- per P
+/// state; and per excited state the error of the level that transition's second-order shift o_e puts it at, m_e o_e
+/// (rad/µs: the term wrong by its own small parameter, relative).
+pub(crate) struct Outside {
+    pub slow: Vec<f64>,
+    pub excited: Vec<f64>,
+}
+
+/// The errors of the transitions to the levels outside the model at a state ψ (P amplitudes; `errors`), per transition,
+/// each as criterion one reads what the model holds:
+/// - a P state s leaks its population into the level: |ψ_s|²/‖ψ‖² m_s;
+/// - the excited states the fold eliminates hold their levels wrong by δK = diag(m_e o_e), which acts on the slow
+///   dynamics through the fold's response, as any error of the excited block does: of each eigenstate p of the fold
+///   (`fold`, with its share w_p of ψ) ρ_p = ‖R(λ_p) δK T r_p‖/‖T r_p‖ over the replicas in squares -- `Fold::remainder`'s
+///   ratio, this error in its stead --, a rate's relative error 2ρ_p, Σ_p w_p 2ρ_p. Not by the excited states' populations:
+///   a transition that moves a level away from the light lowers its population and raises the error it makes.
+/// The response T r_p of each eigenstate and replica is made once, then a resolvent per transition that is not zero there.
+pub(crate) fn outside_errors(fold: Option<(&Fold, &[f64])>, psi: &[C64], outside: &[Outside]) -> Vec<f64> {
+    let norm = crate::linalg::norm_sqr(psi);
+    let mut out: Vec<f64> = outside.iter().map(|o| if norm > 0.0 { psi.iter().zip(&o.slow).map(|(z, m)| z.norm_sqr() * m).sum::<f64>() / norm } else { 0.0 }).collect();
+    let Some((fold, weight)) = fold else { return out };
+    for p in (0..fold.size()).filter(|&p| weight[p] > 0.0) {
+        let (r, lambda) = (fold.right(p), fold.eigen.values[p]);
+        let responses: Vec<(C64, Vec<C64>)> = fold.replicas.iter().map(|rep| {
+            let sigma = lambda + C64::real(rep.frequency);
+            (sigma, rep.k.resolvent(sigma, &rep.w.apply(&r)))
+        }).collect();
+        let held: f64 = responses.iter().map(|(_, x)| crate::linalg::norm_sqr(x)).sum();
+        if !(held > 0.0) {
+            continue;
+        }
+        for (o, error) in outside.iter().zip(out.iter_mut()) {
+            let mut moved = 0.0;
+            for (rep, (sigma, x)) in fold.replicas.iter().zip(&responses) {
+                let y: Vec<C64> = rep.q.iter().zip(x).map(|(&e, z)| *z * o.excited[e]).collect();
+                if y.iter().any(|z| *z != C64::ZERO) {
+                    moved += crate::linalg::norm_sqr(&rep.k.resolvent(*sigma, &y));
+                }
+            }
+            *error += weight[p] * 2.0 * (moved / held).sqrt();
+        }
+    }
+    out
 }
 
 /// The model's error at a state ψ (P amplitudes in the frames) of an atom at the velocity v (µm/µs), the frequency range
@@ -1988,14 +2009,18 @@ pub(crate) struct Errors {
 ///   their share of the landing's excited amplitude T x₀: making a block explicit takes its fast part into the dynamics.
 /// - The averaged components (criterion two): 2(a/δ)² of each one not kept (v5), on its two eigenstates' shares.
 /// - The photons' cross terms not kept: γ/|Ω| of each, on its source eigenstate's share.
+/// - The levels outside the model (request.rs `Transition`, `outside`): each transition's second-order term errs by its
+///   own small parameter m = (coupling/detuning)²: on a P state the population it leaks into the level, on an excited
+///   state the fold eliminates the level error m o it makes, through the fold's response as criterion one reads one
+///   (`outside_errors`). Irreducible: those levels are not in the model, and no object's part.
 /// A relative rate error x moves the populations by at most x (absolute) and T, which the light sets through its rates
-/// and shifts, by x relative: the four terms add on both.
+/// and shifts, by x relative: the five terms add on both.
 #[allow(clippy::too_many_arguments)]
 /// `linked`: whether a P-layer link is the model's (kept, or static in its frames: in its generator as it is);
 /// `photons`: whether a pair of photon frequencies' cross term is kept -- None where the caller books the photons'
 /// cross terms itself (the run's photon classes, which land in every cluster: model.rs `Model::readings`).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked: &dyn Fn(&Link) -> bool, photons: Option<&dyn Fn((Option<usize>, Option<usize>)) -> bool>, psi: &[C64], velocity: [f64; 3], range: f64) -> Errors {
+pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked: &dyn Fn(&Link) -> bool, photons: Option<&dyn Fn((Option<usize>, Option<usize>)) -> bool>, psi: &[C64], velocity: [f64; 3], range: f64, outside: &[Outside]) -> Errors {
     let n = fold.size();
     let ground = fold.ground;
     let excited = levels.excited.rows;
@@ -2116,8 +2141,9 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
             add(Object::Photons(x.classes.0, x.classes.1), e, &mut parts);
         }
     }
-    let sum = remainder + transient + averaged + cross;
-    Errors { population: sum, temperature: sum, remainder, transient, averaged, photons: cross, parts }
+    let outside = outside_errors(Some((fold, &weight)), psi, outside);
+    let sum = remainder + transient + averaged + cross + outside.iter().sum::<f64>();
+    Errors { population: sum, temperature: sum, remainder, transient, averaged, photons: cross, parts, outside }
 }
 
 #[cfg(test)]

@@ -24,8 +24,9 @@
 //!
 //! with a_l(r) the beam's amplitude relative to its focus value (field.rs), X_l and R_l its co- and counter-rotating
 //! couplings at the focus, linear in its field E_l and E_l*, x_{ω,i} the coherence coordinates of the frequency's summed
-//! field (field.rs) and O_{ω,i} its outside form: the shift through the states outside the model and the Rb⁺ core, of
-//! which H0 already holds the focus value. Δ_l = 2π Σ_k frequency_index_l[k] frequencies_mhz[k] is the beam's
+//! field (`coordinates`) and O_{ω,i} its outside form: the shift through the states outside the model and the Rb⁺ core,
+//! of which H0 already holds the focus value -- the second order of those states, whose own error, per transition to
+//! each of their levels, comes with the form (`Transition`; the model books it, model/elim.rs `errors`). Δ_l = 2π Σ_k frequency_index_l[k] frequencies_mhz[k] is the beam's
 //! detuning from the excited states' frame. Spontaneous emission is Σ_a D[C_a] over the lowering dipole's lab-axis
 //! components (`emission`).
 
@@ -120,11 +121,40 @@ pub struct Beam {
 
 /// The outside shift of the beams of one frequency as a form in their summed field E (rad/µs/(V/m)²; src/spectroscopy.ts
 /// `outsideFieldForm`): O(E) = Σ_i x_i(E) O_i with x = (|E_q|² for q = −1, 0, +1, then per pair p < q in the order
-/// (−1, 0), (−1, +1), (0, +1) Re(E_p* E_q), Im(E_p* E_q)) -- field.rs `Coherence`. Each O_i is Hermitian.
+/// (−1, 0), (−1, +1), (0, +1) Re(E_p* E_q), Im(E_p* E_q)) -- `coordinates`. Each O_i is Hermitian. And its transitions to
+/// the levels outside the model the shift is made through (`Transition`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutsideForm {
     pub frequency_index: Vec<i32>,
     pub matrices: [Mat; 9],
+    pub transitions: Vec<Transition>,
+}
+
+/// One transition of a 32-state manifold to a level outside the model (its `name`, e.g. 5P3/2→5D5/2) of an outside
+/// form's frequency (src/spectroscopy.ts `outsideFieldForm`, src/full-master-model.ts): the error of its second-order
+/// term, its own small parameter (coupling/detuning)² -- the population a model state holds in the level, Σ_v |V_vs/Δ_vs|²
+/// over the level's sublevels and both rotations --, and the term itself, its part of the outside form's diagonal, each
+/// as a form in the same field: m_s(E) = Σ_i x_i(E) mixing[i][s] (1/(V/m)²) and o_s(E) = Σ_i x_i(E) shift[i][s]
+/// (rad/µs/(V/m)², `coordinates`), per model state s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Transition {
+    pub name: String,
+    pub mixing: [Vec<f64>; 9],
+    pub shift: [Vec<f64>; 9],
+}
+
+/// The coordinates x_i(E) of a field's outside forms (`OutsideForm`): |E_q|² for q = −1, 0, +1, then per pair p < q in
+/// the order (−1, 0), (−1, +1), (0, +1) Re(E_p* E_q) and Im(E_p* E_q).
+pub(crate) fn coordinates(e: &[C64; 3]) -> [f64; 9] {
+    let mut x = [0.0; 9];
+    for q in 0..3 {
+        x[q] = e[q].norm_sqr();
+    }
+    for (i, (p, q)) in [(0, 1), (0, 2), (1, 2)].into_iter().enumerate() {
+        let z = e[p].conj() * e[q];
+        (x[3 + 2 * i], x[4 + 2 * i]) = (z.re, z.im);
+    }
+    x
 }
 
 /// A motion solve: the model, the initial state and the output times.
@@ -176,7 +206,8 @@ const BEAM_FIELDS: [&str; 11] = [
     "outsideShift",
     "electricField",
 ];
-const FORM_FIELDS: [&str; 2] = ["frequencyIndex", "matrices"];
+const FORM_FIELDS: [&str; 3] = ["frequencyIndex", "matrices", "transitions"];
+const TRANSITION_FIELDS: [&str; 3] = ["name", "mixing", "shift"];
 const AMPLITUDE_FIELDS: [&str; 2] = ["re", "im"];
 
 fn invalid(why: impl std::fmt::Display) -> String {
@@ -337,7 +368,19 @@ impl Request {
                     .iter()
                     .map(|m| operator(m, "An outside form's matrix"))
                     .collect::<Result<Vec<Mat>, String>>()?;
-                Ok(OutsideForm { frequency_index, matrices: matrices.try_into().map_err(|_| "An outside form has nine matrices".to_string())? })
+                let transitions = array(get(o, "transitions", "an outside form")?, "an outside form's transitions")?
+                    .iter()
+                    .map(|t| {
+                        let t = object(t, "an outside transition", Some(&TRANSITION_FIELDS))?;
+                        let form = |key: &str| -> Result<[Vec<f64>; 9], String> {
+                            let what = format!("an outside transition's {key}");
+                            let rows = array(get(t, key, "an outside transition")?, &what)?.iter().map(|m| numbers(m, &what)).collect::<Result<Vec<Vec<f64>>, String>>()?;
+                            rows.try_into().map_err(|_| format!("An outside transition's {key} has nine coordinates"))
+                        };
+                        Ok(Transition { name: text(get(t, "name", "an outside transition")?, "an outside transition's name")?.to_string(), mixing: form("mixing")?, shift: form("shift")? })
+                    })
+                    .collect::<Result<Vec<Transition>, String>>()?;
+                Ok(OutsideForm { frequency_index, matrices: matrices.try_into().map_err(|_| "An outside form has nine matrices".to_string())?, transitions })
             })
             .collect::<Result<Vec<OutsideForm>, String>>()?;
         let trap_id = text(field("trapBeamId")?, "motion.trapBeamId")?;
@@ -428,6 +471,9 @@ impl Request {
             }
             for m in &f.matrices {
                 square(m, "An outside form's matrix")?;
+            }
+            if f.transitions.iter().any(|t| t.mixing.iter().chain(&t.shift).any(|m| m.len() != STATES || m.iter().any(|x| !x.is_finite()))) {
+                return Err(format!("An outside transition's mixing and shift have {STATES} finite numbers a coordinate, one per state"));
             }
             if !self.beams.iter().any(|b| b.frequency_index == f.frequency_index) {
                 return Err("An outside form's frequency has no beam".into());
@@ -538,7 +584,7 @@ pub(crate) mod tests {
             counter_coupling: coupling(0.001),
             field,
         };
-        let form = |index: i32| OutsideForm { frequency_index: vec![index], matrices: std::array::from_fn(|_| zero()) };
+        let form = |index: i32| OutsideForm { frequency_index: vec![index], matrices: std::array::from_fn(|_| zero()), transitions: vec![] };
         let mut density = zero();
         let start = states.iter().position(|s| s == "ground-2-0").unwrap();
         density[(start, start)] = C64::ONE;
@@ -576,7 +622,8 @@ pub(crate) mod tests {
             })
             .collect();
         let forms: Vec<Value> =
-            r.outside_forms.iter().map(|f| json!({"frequencyIndex": f.frequency_index, "matrices": f.matrices.iter().map(operator).collect::<Vec<_>>()})).collect();
+            r.outside_forms.iter().map(|f| json!({"frequencyIndex": f.frequency_index, "matrices": f.matrices.iter().map(operator).collect::<Vec<_>>(),
+                "transitions": f.transitions.iter().map(|t| json!({"name": t.name, "mixing": t.mixing, "shift": t.shift})).collect::<Vec<_>>()})).collect();
         let samples = r.times_us.len();
         json!({"id": 7, "modelSchema": "rb87-full/2", "progress": true,
             "options": {"durationUs": r.times_us[samples - 1], "samples": samples, "populationTolerance": 0.01, "includeMean": false,

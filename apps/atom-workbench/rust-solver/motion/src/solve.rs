@@ -592,6 +592,23 @@ const CHECKPOINT: Duration = Duration::from_secs(60);
 /// What the engine did with a folded unit (the ledger's `action`, shown by the app): its booked error is read at the
 /// pilot's states (SPEC §5.2).
 const FOLD_MEASURED: &str = "绝热消去，误差沿先导轨迹在原子到过的状态上实测";
+/// What the engine does with a transition to a level outside the model (`Model::outside`), as the ledger says it.
+const OUTSIDE_MEASURED: &str = "按二阶静态光移进入 H0（这一能级不在模型内，不能显式）；误差 (耦合/失谐)² 沿先导轨迹在原子到过的状态上实测（显式态按漏出的布居，消去的激发态按能级误差经折叠的响应），计入模型误差";
+
+/// The ledger's items of the transitions to the levels outside the model (their `labels`; `Measured::outside_means`
+/// per time `outside`), as a folded unit's: each one's error on what is shown and on T, its largest over the times
+/// after t = 0 where the pilot holds atoms (their share `held`). One beyond the model's share (model/elim.rs `share`)
+/// is said by name: it is no unit, and nothing the solve keeps takes it away.
+fn book_outside(ledger: &mut Ledger, labels: &[String], outside: &[Vec<[f64; 2]>], held: &[f64]) {
+    let share = crate::model::elim::share();
+    for (t, label) in labels.iter().enumerate() {
+        let most = (1..outside.len()).filter(|&k| held[k] > 0.).map(|k| outside[k][t][0].max(held[k] * outside[k][t][1])).fold(0., f64::max);
+        ledger.item(label, most, OUTSIDE_MEASURED);
+        if !(most <= share) {
+            ledger.flag(format!("{label}的误差 {} 超出模型误差的份额 {}：32 态以外的这一能级只按二阶静态光移进入模型，这里耦合与失谐之比已不够小，超出模型的适用范围", percent(most), percent(share)));
+        }
+    }
+}
 /// What the engine did with a folded unit it did not read (`booked`): its gate's bound over the whole space at the
 /// speeds of the states read is its error.
 /// What the engine did with a near table's error (SPEC §5.4): refined over the reach when it was built, and read
@@ -1491,8 +1508,10 @@ enum Booked {
 struct Sampled {
     /// Each row's trajectory, its time's bits (`PATH` for a lost atom's path) and its step.
     of: Vec<(u64, u64, f64)>,
-    /// How each unit is booked (`booked`), in the units' order.
+    /// How each unit is booked (`booked`), in the units' order; and the transitions to the levels outside the model read
+    /// beside them, after the units in every row (model/elim.rs `Model::readings`: no unit, nothing keeps them).
     booked: Vec<Booked>,
+    outside: usize,
     errors: Vec<Booking>,
     /// Each read's analysis time (its place among them), its group, its row, and whether it reads a lost atom's fate.
     at: Vec<usize>,
@@ -1503,12 +1522,12 @@ struct Sampled {
 impl Sampled {
     /// The errors of the model's folded units as the decisions read them (`Measured`).
     fn measured(&self) -> Measured<'_> {
-        Measured { errors: &self.errors, output: &self.at, group: &self.from, row: &self.row, lost: &self.lost, booked: &self.booked }
+        Measured { errors: &self.errors, output: &self.at, group: &self.from, row: &self.row, lost: &self.lost, booked: &self.booked, outside: self.outside }
     }
 
-    /// A row's length: the units read.
+    /// A row's length: the units read and the transitions outside the model.
     fn width(&self) -> usize {
-        read_units(&self.booked)
+        read_units(&self.booked) + self.outside
     }
 }
 
@@ -1549,21 +1568,26 @@ fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Table
     let places: Option<Vec<usize>> = known.as_ref().and_then(|k| booked.iter().zip(&k.booked).filter(|of| matches!(of.0, Booked::Read(_))).map(|of| { let Booked::Read(q) = *of.1; Some(q) }).collect());
     let key = |index: u64, at: u64, tau: f64| (index, at, tau.to_bits());
     let read: HashMap<(u64, u64, u64), usize> = known.iter().filter(|_| places.is_some()).flat_map(|k| k.of.iter().enumerate().map(|(j, &(index, at, tau))| (key(index, at, tau), j))).collect();
-    let width = reading.len();
+    let outside = model.outside_count();
+    let width = reading.len() + outside;
     let mut errors = vec![Booking::NONE; rows.len() * width];
-    let errors_at = |state: &State| model.readings(&reading, &state.sample, Some(tables)).iter().map(Booking::of).collect::<Vec<_>>();
-    // A row (the table is empty where no unit is read).
+    let errors_at = |state: &State| {
+        let (units, beyond) = model.readings(&reading, &state.sample, Some(tables));
+        units.iter().chain(&beyond).map(Booking::of).collect::<Vec<_>>()
+    };
+    // A row (the table is empty where nothing is read).
     errors.par_chunks_mut(width.max(1)).zip(&rows).for_each(|(out, &(index, time, tau, state, last))| match (&known, &places, read.get(&key(index, time, tau))) {
         (Some(known), Some(places), Some(&j)) => {
             let row = &known.errors[j * known.width()..][..known.width()];
             out.iter_mut().zip(places).for_each(|(out, &q)| *out = row[q]);
+            out[places.len()..].copy_from_slice(&row[known.width() - outside..]);
         }
         _ => match last {
             None => out.copy_from_slice(&errors_at(state)),
             Some(last) => out.iter_mut().zip(errors_at(state)).zip(errors_at(last)).for_each(|((out, a), b)| *out = Booking::path(&a, &b)),
         },
     });
-    Sampled { of: rows.iter().map(|&(index, time, tau, _, _)| (index, time, tau)).collect(), booked, errors, at, from, row, lost }
+    Sampled { of: rows.iter().map(|&(index, time, tau, _, _)| (index, time, tau)).collect(), booked, outside, errors, at, from, row, lost }
 }
 
 /// Whose reads a keep is judged on (`keep`): the scout's few, the pilot's, the product's statistics beside the pilot's
@@ -1983,6 +2007,8 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
             let Booked::Read(_) = how;
             context.ledger.item(&model.label(unit), most, FOLD_MEASURED);
         }
+        let labels: Vec<String> = (0..measured.outside).map(|t| model.outside_label(t)).collect();
+        book_outside(&mut context.ledger, &labels, &measured.outside_means(n, estimates), &held);
         context.ledger.item("初始时就在估计的活动范围之外的原子所占的比例", unsampled[0], "对初始分布数值积分得到（含积分最后两级之差），计入布居的模型误差");
         context.ledger.item("初始时就在估计的活动范围之外的原子占初始动能的比例", unsampled[1], "对初始分布数值积分得到（含积分最后两级之差），计入温度的模型误差");
     }
@@ -3630,6 +3656,8 @@ struct Measured<'a> {
     row: &'a [usize],
     lost: &'a [bool],
     booked: &'a [Booked],
+    /// The transitions to the levels outside the model read after the units in every row (`Sampled`).
+    outside: usize,
 }
 impl Measured<'_> {
     /// Per time and unit the unit's error on what is shown (absolute) and on the held atoms' T (relative), of the
@@ -3667,6 +3695,17 @@ impl Measured<'_> {
         .collect()
     }
 
+    /// Per time the errors of the transitions to the levels outside the model (`Sampled`), as `means` takes a unit's:
+    /// beside the units in every row, in the model's error (`combined` adds the whole row), and no keep's to take away.
+    fn outside_means(&self, outputs: usize, estimates: &[Estimate]) -> Vec<Vec<[f64; 2]>> {
+        let units = read_units(self.booked);
+        self.reduced(outputs, None, estimates, self.outside, &|row, p, lost, out| {
+            for (i, out) in out.iter_mut().enumerate() {
+                *out = if lost { row[units + i].error } else { row[units + i].at(p) };
+            }
+        })
+    }
+
     /// `means` of the units `units` alone, in their order.
     fn means_of(&self, outputs: usize, left: Option<usize>, estimates: &[Estimate], units: &[usize]) -> Vec<Vec<[f64; 2]>> {
         self.reduced(outputs, left, estimates, units.len(), &|row, p, lost, out| {
@@ -3683,7 +3722,7 @@ impl Measured<'_> {
     /// populations, whether it reads a lost atom's fate, into its `n` pairs), and the held reads' means and the lost
     /// reads' make them, by the held share there.
     fn reduced(&self, outputs: usize, left: Option<usize>, estimates: &[Estimate], n: usize, each: &(dyn Fn(&[Booking], &[f64; STATES], bool, &mut [[f64; 2]]) + Sync)) -> Vec<Vec<[f64; 2]>> {
-        let width = read_units(self.booked);
+        let width = read_units(self.booked) + self.outside;
         // Each time's reads, in their order.
         let mut reads: Vec<Vec<usize>> = vec![vec![]; outputs];
         for (read, &k) in self.output.iter().enumerate() {
@@ -4470,6 +4509,25 @@ mod tests {
     /// - The first rung is a rung of the ladder down to `MOST_STEPS` steps: there is none for a run of 10⁹ µs in the
     ///   74.65 kHz trap (3.35 µs at the most: 3·10⁸ steps), nor at a frequency or a speed that is no number or
     ///   unbounded -- and the count ends.
+    /// The transitions to the levels outside the model in the ledger (`book_outside`): each one an item at its largest
+    /// error over the times after t = 0 where atoms are held (the held share weighing T's part, a time without held atoms
+    /// weighing nothing), and the one beyond the model's share flagged by its name -- the other, within it, not.
+    #[test]
+    fn a_transition_outside_the_model_beyond_the_share_is_flagged_by_name() {
+        let share = crate::model::elim::share();
+        let labels = ["「探测光」经 32 态以外的跃迁 5P3/2→5D5/2 的二阶静态光移".to_string(), "「光镊」经 32 态以外的跃迁 5S1/2→6P3/2 的二阶静态光移".to_string()];
+        // Per time [transition][population, T]; t = 0 reads nothing, the last time holds no atom.
+        let outside = vec![vec![[0.; 2]; 2], vec![[0.2 * share, 0.3 * share], [1e-9, 1e-9]], vec![[1.5 * share, 0.5 * share], [2e-9, 4e-9]], vec![[9.; 2], [9.; 2]]];
+        let held = [1., 1., 0.8, 0.];
+        let mut ledger = Ledger::default();
+        book_outside(&mut ledger, &labels, &outside, &held);
+        assert_eq!(ledger.items.len(), 2);
+        assert_eq!((ledger.items[0].label.as_str(), ledger.items[0].estimate), (labels[0].as_str(), 1.5 * share));
+        assert_eq!((ledger.items[1].label.as_str(), ledger.items[1].estimate), (labels[1].as_str(), 0.8 * 4e-9));
+        let flagged = ledger.flagged.expect("the transition beyond the share is flagged");
+        assert!(flagged.starts_with(&labels[0]) && flagged.contains("5P3/2→5D5/2") && !flagged.contains("6P3/2"), "{flagged}");
+    }
+
     #[test]
     fn the_first_rung_is_admissible_and_its_double_is_for_the_typical_atom() {
         let khz = |f: f64| std::f64::consts::TAU * f * 1e-3;
@@ -5039,13 +5097,13 @@ mod tests {
         for trial in 0..pilots as u64 {
             let (errors, at, from) = draw(2 * trial);
             let (row, lost) = rows(at.len());
-            let measured = Measured { errors: &errors, output: &at, group: &from, row: &row, lost: &lost, booked: &all_read(units) };
+            let measured = Measured { errors: &errors, output: &at, group: &from, row: &row, lost: &lost, booked: &all_read(units), outside: 0 };
             let means = measured.means(outputs, None, &estimates);
             let fixed = Fixed { model: model_error(&measured.combined(outputs, None, &estimates), [0.; 2]) };
             let doubt = Doubt::new(&measured, outputs, &parts, &scales, [0.; 2]);
             let (errors, at, from) = draw(2 * trial + 1);
             let (row, lost) = rows(at.len());
-            let next = Measured { errors: &errors, output: &at, group: &from, row: &row, lost: &lost, booked: &all_read(units) }.means(outputs, None, &estimates);
+            let next = Measured { errors: &errors, output: &at, group: &from, row: &row, lost: &lost, booked: &all_read(units), outside: 0 }.means(outputs, None, &estimates);
             for j in 0..=units {
                 let set = &order[..j];
                 predicted[j] += doubt.chance(set, &without(&fixed, &means, &read, set), &estimates, step, &read, &[]);
@@ -5457,7 +5515,7 @@ mod tests {
     fn the_states_errors_are_the_outputs_means_and_sums() {
         let errors = [[0.01, 0.02], [0.03, 0.04], [0.05, 0.06], [0.07, 0.08], [0.02, 0.04], [0.06, 0.08]].map(|error| Booking { error, ..Booking::NONE });
         let (row, lost) = rows(3);
-        let measured = Measured { errors: &errors, output: &[1, 2, 1], group: &[0, 0, 1], row: &row, lost: &lost, booked: &all_read(2) };
+        let measured = Measured { errors: &errors, output: &[1, 2, 1], group: &[0, 0, 1], row: &row, lost: &lost, booked: &all_read(2), outside: 0 };
         let estimates: Vec<Estimate> = (0..4).map(|_| estimate([10.; 3], 0., 8.)).collect();
         let means = measured.means(4, None, &estimates);
         assert_eq!(means[1], [[(0.01 + 0.02) / 2., (0.02 + 0.04) / 2.], [(0.03 + 0.06) / 2., (0.04 + 0.08) / 2.]]);
@@ -6356,7 +6414,7 @@ mod tests {
                 }
             }
             let (row, lost) = rows(output.len());
-            let measured = Measured { errors: &errors, output: &output, group: &group, row: &row, lost: &lost, booked: &all_read(units) };
+            let measured = Measured { errors: &errors, output: &output, group: &group, row: &row, lost: &lost, booked: &all_read(units), outside: 0 };
             let estimates: Vec<Estimate> = (0..outputs)
                 .map(|_| {
                     let mut e = estimate([10.; 3], 0., 88.);
@@ -6410,7 +6468,7 @@ mod tests {
                 }
             }
         }
-        let measured = Measured { errors: &errors, output: &at, group: &from, row: &row, lost: &lost, booked: &all_read(units) };
+        let measured = Measured { errors: &errors, output: &at, group: &from, row: &row, lost: &lost, booked: &all_read(units), outside: 0 };
         let estimates: Vec<Estimate> = (0..outputs).map(|k| Estimate { loss: lost_share[k], ..estimate([10.; 3], 0., 88.) }).collect();
         for left in std::iter::once(None).chain((0..groups).map(Some)) {
             let means = measured.means(outputs, left, &estimates);
@@ -6431,7 +6489,7 @@ mod tests {
         // Every atom lost by output 4: what is shown is the lost paths' mean, read; a unit of fate error 0.4 there
         // leaves the look no room, and it alone weighs.
         let (errors, at, from, row, lost) = (vec![Booking { error: [0.4, 0.], ..Booking::NONE }, Booking::NONE], vec![4; groups], (0..groups).collect::<Vec<_>>(), vec![0; groups], vec![true; groups]);
-        let measured = Measured { errors: &errors, output: &at, group: &from, row: &row, lost: &lost, booked: &all_read(2) };
+        let measured = Measured { errors: &errors, output: &at, group: &from, row: &row, lost: &lost, booked: &all_read(2), outside: 0 };
         let means = measured.means(outputs, None, &estimates);
         assert!((means[4][0][0] - 0.4).abs() < 1e-15 && means[4][0][1] == 0. && means[4][1] == [0., 0.], "{:?}", means[4]);
         let fixed = Fixed { model: model_error(&measured.combined(outputs, None, &estimates), [0.; 2]) };

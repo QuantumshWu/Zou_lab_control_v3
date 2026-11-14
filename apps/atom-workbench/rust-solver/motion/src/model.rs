@@ -51,11 +51,81 @@ use std::sync::{Arc, Mutex};
 pub use assemble::Middle;
 pub use crate::request::{GROUND, STATES};
 
-/// A frequency, exactly: integer coordinates on the request's frequency axes, then on the excited states' frame frequency ν_frame;
-/// its value is 2π Σ_k n_k f_k (rad/µs, `Model::omega`). Equal frequencies have equal coordinates: a frame or a beat that is zero
-/// in exact arithmetic is zero here (SPEC §1.4 frames), whatever the floating point makes of its value.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub struct Beat(pub Vec<i64>);
+/// A frequency, exactly: rational coordinates on the request's frequency axes, then on the excited states' frame frequency
+/// ν_frame -- integer numerators n_k over one positive denominator d, in lowest terms --; its value is 2π Σ_k n_k f_k / d
+/// (rad/µs, `Model::omega`). Equal frequencies have equal coordinates: a frame or a beat that is zero in exact arithmetic is
+/// zero here (SPEC §1.4 frames), whatever the floating point makes of its value. The light's frequencies and their beats are
+/// whole (d = 1); a frame is a fraction where the couplings it is taken from close a cycle off resonance, the cycle's
+/// detuning shared by its |C| couplings (cluster.rs, # Frames): d divides a product of cycle lengths.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Beat {
+    n: Vec<i64>,
+    d: i64,
+}
+
+impl Beat {
+    /// The frequency of the integer coordinates `n`.
+    pub fn whole(n: Vec<i64>) -> Beat {
+        Beat { n, d: 1 }
+    }
+    /// n/d in lowest terms, d positive (d ≠ 0).
+    fn reduced(mut n: Vec<i64>, mut d: i64) -> Beat {
+        let gcd = |mut a: i64, mut b: i64| {
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            a.abs()
+        };
+        let g = n.iter().fold(d, |g, &x| gcd(g, x));
+        if g > 1 {
+            n.iter_mut().for_each(|x| *x /= g);
+            d /= g;
+        }
+        if d < 0 {
+            n.iter_mut().for_each(|x| *x = -*x);
+            d = -d;
+        }
+        Beat { n, d }
+    }
+    /// self + s·other.
+    pub fn plus(&self, s: i64, other: &Beat) -> Beat {
+        if self.d == other.d {
+            return Beat::reduced(self.n.iter().zip(&other.n).map(|(&a, &b)| a + s * b).collect(), self.d);
+        }
+        Beat::reduced(self.n.iter().zip(&other.n).map(|(&a, &b)| a * other.d + s * b * self.d).collect(), self.d * other.d)
+    }
+    /// self/k, k ≠ 0.
+    pub fn over(&self, k: i64) -> Beat {
+        Beat::reduced(self.n.clone(), self.d * k)
+    }
+    pub fn negated(&self) -> Beat {
+        Beat { n: self.n.iter().map(|&a| -a).collect(), d: self.d }
+    }
+    pub fn is_zero(&self) -> bool {
+        self.n.iter().all(|&a| a == 0)
+    }
+    /// The sign of its first coordinate that is not zero (zero for the zero frequency): a beat's orientation.
+    pub fn sign(&self) -> i64 {
+        self.n.iter().find(|&&x| x != 0).map_or(0, |x| x.signum())
+    }
+    /// Its value on the coordinates' values `axes`: Σ_k n_k a_k / d, from the integer numerators (never a difference of
+    /// two values).
+    pub fn value(&self, axes: &[f64]) -> f64 {
+        self.n.iter().zip(axes).map(|(&n, &a)| n as f64 * a).sum::<f64>() / self.d as f64
+    }
+}
+
+impl cluster::Exact for Beat {
+    fn plus(&self, s: i64, other: &Beat) -> Beat {
+        Beat::plus(self, s, other)
+    }
+    fn over(&self, k: i64) -> Beat {
+        Beat::over(self, k)
+    }
+    fn is_zero(&self) -> bool {
+        Beat::is_zero(self)
+    }
+}
 
 /// One component of the light: frequency `frequency` (an index into the field's frequencies), its co-rotating coupling
 /// (`counter` false: V_ω e^{−iνt}, ν = δ_ω) or its counter-rotating one (W_ω e^{−iνt}, ν = −(δ_ω + 2ν_frame)).
@@ -420,6 +490,10 @@ pub struct Model {
     /// The constants of the fold's series every evaluation takes (elim.rs `Series`): read at the focus where the model
     /// is made, and at the atoms of its run where the run reads them (`Model::referenced`).
     pub(crate) series: elim::Series,
+    /// The transitions to the levels outside the model of the light's frequencies, each with its frequency (an index of
+    /// the light's; request.rs `Transition`): the errors of their second-order terms, read at the states (elim.rs
+    /// `errors`) -- no unit: those levels are not in the model, and nothing of them can be kept.
+    pub(crate) outside: Arc<Vec<(usize, crate::request::Transition)>>,
 }
 
 /// What a request gives a model whatever units are kept (`Model::new`, `Model::rekept`): the light, the exact frequencies and
@@ -439,6 +513,7 @@ struct Given {
     driven: Vec<(Component, usize, usize)>,
     labels: Vec<String>,
     names: Vec<String>,
+    outside: Arc<Vec<(usize, crate::request::Transition)>>,
 }
 
 /// An exact wave vector: integer coordinates on the light's distinct wave vectors (`Model::waves`), with a `Beat`'s integer
@@ -497,6 +572,7 @@ impl Model {
             driven,
             labels: request.states.clone(),
             names: request.beams.iter().map(|b| b.name.clone()).collect(),
+            outside: Arc::new(light.frequencies.iter().enumerate().flat_map(|(w, f)| request.outside_forms[f.form].transitions.iter().map(move |t| (w, t.clone()))).collect()),
         };
         Model::settled(given, kept)
     }
@@ -517,6 +593,7 @@ impl Model {
             driven: self.driven.clone(),
             labels: self.labels.clone(),
             names: self.names.clone(),
+            outside: self.outside.clone(),
         };
         Model::settled(given, kept)
     }
@@ -529,7 +606,7 @@ impl Model {
             _ => vec![u.clone()],
         }).collect();
         let kept = &kept[..];
-        let Given { light, axes, waves, beam_wave, hbar_over_mass, energies, base, emission, decay, tones, driven, labels, names } = given;
+        let Given { light, axes, waves, beam_wave, hbar_over_mass, energies, base, emission, decay, tones, driven, labels, names, outside } = given;
         let mut levels: Vec<Vec<Level>> = (0..2 * tones.len()).map(|_| vec![Level::Bare; far::EXCITED * GROUND]).collect();
         for unit in kept {
             let (component, excited, ground, level) = match *unit {
@@ -582,6 +659,7 @@ impl Model {
             names,
             smooth: Mutex::new(vec![]),
             series: elim::Series { centre: vec![], ratio: 0.0, order: 0 },
+            outside,
         };
         model.ranked = model.ranked_made();
         model.beats = model.beats_made();
@@ -589,7 +667,7 @@ impl Model {
         // a coupling's strength its entry's with every drive bare.
         let bare: Vec<far::Tone> = if kept.iter().any(|u| matches!(u, Unit::Term { .. })) { model.tones.iter().map(|t| t.folded(&|_, _, _| Level::Bare, &model.energies[GROUND..])).collect() } else { vec![] };
         let edges = model.edges(&bare);
-        let (mut clusters, membership) = cluster::clusters(STATES, &edges, &model.axes.zero(), &model.no_wave());
+        let (mut clusters, membership) = cluster::clusters(STATES, &edges, &model.axes.zero(), &model.no_wave(), &|beat| model.axes.omega(beat));
         for c in clusters.iter_mut() {
             c.waves = c.waves_exact.iter().map(|w| model.wave_value(w)).collect();
         }
@@ -752,15 +830,19 @@ impl Model {
     pub fn omega(&self, f: &Beat) -> f64 {
         self.axes.omega(f)
     }
-    /// An exact wave vector's value (1/µm), summed from its coordinates in their order.
+    /// An exact wave vector's value (1/µm), summed from its numerators in their order (a wave vector is whole: the
+    /// light's own and their integer sums, `Wave`).
     pub(crate) fn wave_value(&self, w: &Wave) -> [f64; 3] {
         let mut out = [0.0; 3];
-        for (&n, k) in w.0.iter().zip(&self.waves) {
+        for (&n, k) in w.n.iter().zip(&self.waves) {
             if n != 0 {
                 for i in 0..3 {
                     out[i] += n as f64 * k[i];
                 }
             }
+        }
+        if w.d != 1 {
+            out.iter_mut().for_each(|x| *x /= w.d as f64);
         }
         out
     }
@@ -768,11 +850,11 @@ impl Model {
     pub(crate) fn beam_wave(&self, beam: usize) -> Wave {
         let mut w = vec![0; self.waves.len()];
         w[self.beam_wave[beam].0] = self.beam_wave[beam].1;
-        Beat(w)
+        Beat::whole(w)
     }
     /// The zero wave vector.
     pub(crate) fn no_wave(&self) -> Wave {
-        Beat(vec![0; self.waves.len()])
+        Beat::whole(vec![0; self.waves.len()])
     }
     /// The loss energy E_s = (ħ/m)κ²/2 + V_run(r; p(ψ)) (rad/µs).
     pub fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
