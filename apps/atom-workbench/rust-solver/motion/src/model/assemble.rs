@@ -129,7 +129,7 @@
 //!   (readout.rs).
 //! So the force is still the gradient of the generator's Hermitian part and the decay still the jumps' own product.
 //! Terms that beat in the cluster's frames are laid as the forms give them, and enter none of X and H: a replica's own
-//! norm is its static part (criterion two averages the cross terms).
+//! norm is its static part (the cross terms are the sectors', folded at their time mean: elim.rs # Sectors).
 //!
 //! # Exact tones
 //! Along a path every piece of a dense term -- an entry and a pair of its block's two components' beams -- turns at one
@@ -467,7 +467,7 @@ pub(crate) struct Link {
 /// generator): the cluster's n places; per Hermitian near link of a pair form (flag `PLAIN`) at a static tone the pair
 /// and the entry x n + y, block by block -- per block its two field components and the end of its entries (`groups`):
 /// X = Σ e*e X_k'k and L the same sums of the pairs' normalization forms (the replicas' own norms: a pair of two
-/// frequencies beats, its cross term averaged by criterion two), the block's product of components once for its
+/// frequencies beats, its cross term a sector's, folded at its time mean), the block's product of components once for its
 /// entries --; the folded excited states' one linewidth where they share one (`Fourth::uniform`); and the evaluation's
 /// orders (model.rs `Model::series`, elim.rs `Series::orders`).
 #[derive(Clone, Debug)]

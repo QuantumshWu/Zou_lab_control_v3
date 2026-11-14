@@ -130,7 +130,7 @@ mod tests {
 
     /// Every number of a model's forms is one, whatever it keeps -- over random scenes and random kept sets. A drive folded
     /// with the bare levels onto an explicit state whose kept leg's ground state is exactly degenerate with its own (Zeeman
-    /// sublevels at B = 0) is criterion two's link at δ = 0: the model takes it explicit (model.rs `Model::settled`), never
+    /// sublevels at B = 0) is a sector's link at δ = 0, where its fold does not exist (elim.rs # Sectors): the model takes it explicit (model.rs `Model::settled`), never
     /// folds it at a two-photon distance of nothing (far.rs `second_order` asserts so). The scenes are R4_LIN_2's atom and lights -- a tweezer 32 THz red of
     /// D2, a lin⊥lin cooling pair, a repump, B = 0 --: first as the reproduction of the counter-rotating refusal kept it
     /// (ground state 3's co-rotating drives folded at the atom), then drawn: every beam but the tweezer along a random lab

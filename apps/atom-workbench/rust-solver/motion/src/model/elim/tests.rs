@@ -31,9 +31,16 @@ fn class(nu: f64, g: usize, e: usize, entries: &[(usize, usize, C64)]) -> Class 
     Class { nu, beams: vec![Beam { coupling, wave: [0.0; 3] }] }
 }
 
+/// The static fold: no sector (its turning couplings neither folded nor carried).
 fn folded(levels: &Levels, classes: &[Class], slow: &Slow) -> Fold {
     let replicas = Replicas::of(classes, slow, levels.ground.rows);
-    fold(levels, classes, slow, &replicas)
+    fold(levels, classes, slow, &replicas, None)
+}
+
+/// The fold with its sectors (# Sectors): every turning coupling folded, or (`carried`) every one carried.
+fn sectored(levels: &Levels, classes: &[Class], slow: &Slow, carried: bool) -> Fold {
+    let replicas = Replicas::of(classes, slow, levels.ground.rows);
+    fold(levels, classes, slow, &replicas, Some(&|_: &Link| carried))
 }
 
 fn at_rest(n: usize) -> Slow {
@@ -118,7 +125,7 @@ fn a_two_level_atom_s_slow_mode_is_exact_and_its_scattering_rate_is_the_steady_s
             // The transient's closed form (`Fold::transients`) against the exact one, and the error the accounts book
             // (`errors`: at rest the transient's alone, all of it on the one block) against the exact rate's error: to
             // the leading order in the fold, its relative O(X), X = s/2.
-            let booked: f64 = errors(&fold, &[vec![0]], &|_| false, &[C64::ONE], [0.0; 3], 0.0, &[]).parts.iter().map(|p| p.1).sum();
+            let booked: f64 = errors(&fold, &[vec![0]], &[C64::ONE], 0.0, &[]).parts.iter().map(|p| p.1).sum();
             println!("    the transient {transient:+.5e} µs, closed form {tau:+.5e} µs; the rate's error {error:+.4e}, booked {booked:.4e}");
             assert!((tau - transient).abs() <= 2.0 * s * transient.abs(), "the closed form {tau} against {transient}");
             assert!((booked - error.abs()).abs() <= 2.0 * s * error.abs(), "booked {booked} against the rate's error {error}");
@@ -130,7 +137,7 @@ fn a_two_level_atom_s_slow_mode_is_exact_and_its_scattering_rate_is_the_steady_s
 /// ν1 (from g1) and ν2 (from g2). In the frames θ_g2 = ν1 − ν2 the two drives feed one replica: the static three-level
 /// problem, whose two slow eigenvalues the fold reproduces to round-off; at two-photon resonance one of them is the dark
 /// state, exactly zero (no light shift, no decay). In the frames at rest the two are two replicas, and their Raman
-/// coupling is a P-layer component of size |g1 g2|/|Δ| (to the order (g/Δ)²) at the beat ν1 − ν2.
+/// coupling is a sector's (# Sectors) of size |g1 g2|/|Δ| (to the order (g/Δ)²) at the beat ν1 − ν2.
 #[test]
 fn a_lambda_system_s_raman_coupling_and_dark_state_are_the_analytic_ones() {
     let (gamma, delta) = (38.1, -2048.0);
@@ -166,9 +173,9 @@ fn a_lambda_system_s_raman_coupling_and_dark_state_are_the_analytic_ones() {
             assert!(dark <= 1e-12 * (g1 * g1 / delta.abs()), "the dark state's eigenvalue {dark}");
         }
         // At rest: two replicas, the Raman component.
-        let rest = folded(&lv, &classes, &at_rest(2));
+        let rest = sectored(&lv, &classes, &at_rest(2), true);
         assert_eq!(rest.replicas.len(), 2);
-        let raman = rest.components([0.0; 3]).into_iter().filter(|x| rest.dominant(x.row) != rest.dominant(x.column)).fold(0.0, |m: f64, x| m.max(x.size));
+        let raman = rest.carried.iter().flat_map(|s| s.links.iter()).filter(|l| l.1 != l.2).fold(0.0, |m: f64, l| m.max(l.3.abs()));
         let analytic = g1 * g2 / delta.abs();
         assert!((raman / analytic - 1.0).abs() <= 4.0 * (g2 / delta).powi(2), "Raman {raman} against g1 g2/|Δ| {analytic}");
     }
@@ -209,58 +216,197 @@ fn a_far_detuned_light_s_scalar_and_tensor_shifts_are_second_order_perturbation_
     assert!(pt[(0, 1)].abs() > 1e-3 * scale, "the tensor part is there to check");
 }
 
-/// A component averaged (the brief's test 4): two ground states a (0) and b (δ₀) coupled by a Raman component of two
-/// classes at the beat Ω through a far excited state. The exact quasienergies: in the frames θ_b = ν1 − ν2 the problem
-/// is static and the fold is exact. The averaged model keeps the frames at rest: its components' reading (a, δ) gives
-/// the static shift −|a|²/δ of a (δ = Ω + λ_b − λ_a) to the relative order (a/δ)², and the exact slow state's admixture
-/// of b is (a/δ)² to the same order -- the population the averaging leaves out.
+/// A sector's self-consistent fold where its ladder closes is the exact problem (# Sectors; the brief's first analytic
+/// test): two ground states of one group in frames θ = (0, 26.5) rad/µs, no light, a lab-static coupling a between them
+/// (H_g = [[0, a], [a, d₀]]) that turns at −θ₂ in the frames. g₁(0) couples to g₂ at the sector −θ₂ alone, which couples
+/// back to g₁(0) alone: the fold's eigenvalues are the lab's, λ₁ and λ₂ − θ₂, its sector's population on the first the
+/// exact eigenvector's |x₂/x₁|², to the rounding (1e-10). The static fold has none of the shift.
 #[test]
-fn an_averaged_component_s_shift_and_micromotion_are_the_exact_floquet_ones() {
-    let (gamma, delta) = (38.1, -3072.0);
-    for &(g1, g2, offset) in &[(60.0, 50.0, 8.0), (60.0, 50.0, 3.0), (90.0, 80.0, 6.0)] {
+fn a_sector_s_self_consistent_fold_where_its_ladder_closes_is_the_exact_problem() {
+    for &(a, d0) in &[(1.0, 8.0), (1.0, 3.0), (2.0, 5.0)] {
+        let theta = 26.5;
+        let lv = Levels { ground: Mat::from_fn(2, 2, |i, j| match (i, j) { (0, 1) | (1, 0) => C64::real(a), (1, 1) => C64::real(d0), _ => C64::ZERO }), excited: Mat::zeros(0, 0), decay: Mat::zeros(0, 0) };
+        let slow = Slow::single(vec![], vec![0.0, theta]);
+        let fold = sectored(&lv, &[], &slow, false);
+        assert!(fold.exists, "a = {a}, d₀ = {d0}: the fold exists");
+        let exact = eigen(&lv.ground).unwrap();
+        let (low, high) = if exact.values[0].re < exact.values[1].re { (0, 1) } else { (1, 0) };
+        let p = (0..2).find(|&p| fold.dominant(p) == 0).unwrap();
+        let q = 1 - p;
+        assert!((fold.eigen.values[p] - exact.values[low]).abs() <= 1e-10 * d0, "g₁: {:?} against {:?}", fold.eigen.values[p], exact.values[low]);
+        assert!((fold.eigen.values[q] - (exact.values[high] - C64::real(theta))).abs() <= 1e-10 * d0, "g₂: {:?} against {:?}", fold.eigen.values[q], exact.values[high] - C64::real(theta));
+        let ratio = (exact.vectors[(1, low)] / exact.vectors[(0, low)]).norm_sqr();
+        let held = fold.sectors.iter().map(|s| crate::linalg::norm_sqr(&fold.sector_apply(s, &fold.right(p)))).sum::<f64>() / fold.right(p)[0].norm_sqr();
+        assert!((held - ratio).abs() <= 1e-10 * ratio, "the sector's population {held} against |x₂/x₁|² {ratio}");
+        let none = folded(&lv, &[], &slow);
+        println!("a {a}, d₀ {d0}: λ₁ {:.6e} (exact {:.6e}; the static fold {:.1e}); |x₂/x₁|² {held:.6e}", fold.eigen.values[p].re, exact.values[low].re, none.eigen.values[(0..2).find(|&p| none.dominant(p) == 0).unwrap()].re);
+    }
+}
+
+/// The Λ scheme of unify 4.7 (the brief's second analytic test): g₁ (0) and g₂ (δ₀) to one excited state e, beam 1 on g₁
+/// alone, beam 2 on g₂ alone, their beat Ω = 26.5 rad/µs; in the frames following the beams the problem is static and the
+/// fold its exact three-level one. In the frames at rest the Raman coupling a = g₁g₂/Δ turns at Ω, across
+/// δ = Ω + λ₁ − λ₂ on the actual spectrum. The table's light shifts and coupling (U₁ = −1.172, a = −0.977 rad/µs at the
+/// first point) at Δ = −3072 rad/µs (Γ = 38.1), and with the same U and a at 1000 times the detuning (g ∝ √Δ), where
+/// the excited response does not change over δ -- 4.7's numbers, which took U and a as constants:
+/// - folded as its sector (# Sectors), g₁'s eigenvalue is the exact one within the sector's own excited response, taken
+///   at λ + Ω by the fold's left factor H_s and its V_{−Ω} at the source's frequency: relatively δ/Δ of the shift at
+///   Δ = −3072 (criterion one's offset of the sector), far within (a/δ)² of it at 1000 times; its population
+///   ‖T′r‖²/(1 + ‖T′r‖²) the exact eigenvector's;
+/// - the second order −a²/δ (T′ ≈ R′V) errs on the exact shift by (a/δ)² relatively (1.35 % at 1.36 % at 1000 times);
+/// - the fold without it -- what the averaged model was -- leaves out the shift, 9.6 % of g₁'s light shift at
+///   a/δ = 0.117, where 2(a/δ)² = 2.7 % was booked; the readings' measure of it (`Fold::evaluation_error`, the
+///   definition with its sector against the one without, z₀ at g₁'s bare level) is the shift over λ₁ − z₀, beyond 2(a/δ)²;
+/// - and the closure keeps the link at all three points (at the first the averaged rule's 2(a/δ)² left it out).
+#[test]
+fn the_lambda_scheme_s_sector_holds_the_static_shift_the_averaged_model_left_out() {
+    let gamma = 38.1;
+    for (scale, &(g1, g2, offset, missing)) in [1.0_f64, 1000.0].into_iter().flat_map(|x| [(60.0, 50.0, 8.0, 0.096), (60.0, 50.0, 3.0, 0.22), (90.0, 80.0, 6.0, 0.29)].iter().map(move |p| (x, p))) {
+        let (delta, g1, g2) = (-3072.0 * scale, g1 * scale.sqrt(), g2 * scale.sqrt());
         let (nu1, nu2) = (delta, delta - 26.5);
         let d0 = (nu1 - nu2) + offset;
         let lv = levels(&[0.0, d0], &[0.0], gamma, &[0]);
         let classes = vec![class(nu1, 2, 1, &[(0, 0, C64::real(g1))]), class(nu2, 2, 1, &[(0, 1, C64::real(g2))])];
-        let rest = folded(&lv, &classes, &at_rest(2));
+        let (rest, sector) = (folded(&lv, &classes, &at_rest(2)), sectored(&lv, &classes, &at_rest(2), false));
         let exact = folded(&lv, &classes, &Slow::single(vec![], vec![0.0, nu1 - nu2]));
-        let pa = (0..2).find(|&p| rest.dominant(p) == 0).unwrap();
-        let qa = (0..2).find(|&p| exact.dominant(p) == 0).unwrap();
-        let component = rest.components([0.0; 3]).into_iter().filter(|x| x.column == (1 - pa) && x.row == pa).fold(None::<Component>, |m, x| if m.map_or(true, |m| x.size > m.size) { Some(x) } else { m }).unwrap();
-        let mixing = component.mixing();
-        let predicted = -component.size * component.size / component.distance.re;
-        let shift = exact.eigen.values[qa].re - rest.eigen.values[pa].re;
-        assert!((shift / predicted - 1.0).abs() <= 3.0 * mixing * mixing, "shift {shift} against −|a|²/δ {predicted} (mixing {mixing})");
-        let admixture = exact.eigen.vectors[(1, qa)].norm_sqr() / exact.eigen.vectors[(0, qa)].norm_sqr();
-        assert!((admixture / (mixing * mixing) - 1.0).abs() <= 3.0 * mixing * mixing, "admixture {admixture} against (a/δ)² {}", mixing * mixing);
+        assert!(sector.exists && exact.exists);
+        let of = |f: &Fold| (0..2).find(|&p| f.dominant(p) == 0).unwrap();
+        let (pr, ps, pe) = (of(&rest), of(&sector), of(&exact));
+        let (lr, ls, le) = (rest.eigen.values[pr], sector.eigen.values[ps], exact.eigen.values[pe]);
+        let shift = le - lr;
+        // The sector's coupling and distance on the actual spectrum.
+        let s = sector.sectors.iter().find(|s| s.links.iter().any(|l| (l.1, l.2) == (1, 0))).expect("g₂ ← g₁'s sector");
+        let a = s.v[(1, 0)];
+        let distance = C64::real(s.frequency) + lr - rest.eigen.values[1 - pr];
+        let mixing = a.abs() / distance.abs();
+        let second = -(a * s.back[(0, 1)]) / -distance;
+        let light = lr - C64::real(lv.ground[(0, 0)].re);
+        println!(
+            "Δ {delta}, g ({g1:.1}, {g2:.1}), δ₀ − Ω {offset}: a/δ {mixing:.4}, 2(a/δ)² {:.4}; shift {:.5} (of U₁ {:.2} %), the sector {:.3e} apart, the second order {:.3} % apart",
+            2.0 * mixing * mixing,
+            shift.re,
+            100.0 * shift.abs() / light.abs(),
+            (ls - le).abs() / shift.abs(),
+            100.0 * ((second - shift).abs() / shift.abs())
+        );
+        assert!((shift.abs() / light.abs() - missing).abs() <= 0.01, "the shift the averaged model leaves out: {} of U₁", shift.abs() / light.abs());
+        let offset_part = 2.0 * distance.abs() / delta.abs();
+        assert!((ls - le).abs() <= (offset_part + 0.1 * mixing * mixing) * shift.abs(), "the sector's eigenvalue {ls:?} against the exact {le:?}");
+        let relative = (second - shift).abs() / shift.abs();
+        assert!(relative >= 0.8 * mixing * mixing - offset_part && relative <= 1.1 * mixing * mixing + offset_part, "the second order {relative} against (a/δ)² {}", mixing * mixing);
+        // The micromotion's time mean: the sector's population against the exact eigenvector's g₂ part.
+        let t = sector.sector_apply(s, &sector.right(ps));
+        let held = crate::linalg::norm_sqr(&t) / sector.right(ps)[0].norm_sqr();
+        let population = held / (1.0 + held);
+        let v = exact.right(pe);
+        let true_population = v[1].norm_sqr() / (v[0].norm_sqr() + v[1].norm_sqr());
+        println!("    the micromotion's population: the sector {population:.6}, exact {true_population:.6}, (a/δ)² {:.6}", mixing * mixing);
+        assert!((population - true_population).abs() <= (0.05 + offset_part) * true_population, "the sector's population {population} against {true_population}");
+        // The readings' measure of what the run without the sector leaves out (z₀ at g₁'s bare level).
+        let psi = sector.right(ps);
+        let reading = Fold::evaluation_error(&rest.definitions(&lv).0, &sector.definitions(&lv).0, C64::ZERO, &psi);
+        let r = (1.0 + reading).sqrt() - 1.0;
+        let expected = shift.abs() / ls.abs();
+        println!("    the reading {reading:.4e} (r {r:.4e}) against the shift over λ₁ − z₀ {expected:.4e}; 2(a/δ)² {:.4e}", 2.0 * mixing * mixing);
+        assert!(reading > 2.0 * mixing * mixing, "the reading {reading} within the averaged rule's 2(a/δ)²");
+        assert!((r - expected).abs() <= 0.1 * expected, "the reading's ratio {r} against the shift's {expected}");
+        // The closure keeps the coupling (criterion one on its sector).
+        let closed = closure(&lv, &classes, &[vec![0]], [0.0; 3], &Kept::default());
+        assert!(closed.kept.links.iter().any(|l| l.a < 2 && l.b < 2 && l.a != l.b), "the closure keeps the Raman coupling: {:?}", closed.kept);
+    }
+}
+
+/// A sector's fold against the truncated Sambe problem where no frame stills the coupling (the brief's numerical
+/// test): both ground states driven by both beams, so that two P states are coupled statically through each beam and at
+/// the beat Ω = ν₁ − ν₂ through the two -- the ladder g(0) → g(Ω) → g(2Ω) … does not close. The exact quasienergies: in
+/// the frame of e at ν₁, H(t) = H₀ + V₊e^{iΩt} + V₋e^{−iΩt} (V₊ = W₂ on e ← g, V₋ = W₂† on g ← e), its Sambe matrix
+/// (H₀ − mΩ on the diagonal, V₊ from sector m + 1 and V₋ from m − 1) truncated at |m| ≤ M until converged. The first
+/// harmonic's fold holds each state's quasienergy within (a/δ)² of its sector's shift (the second harmonic and the
+/// sector's excited response at λ + Ω); the static fold misses the shift whole.
+#[test]
+fn a_sector_s_fold_is_the_truncated_sambe_problem_s_within_its_second_harmonic() {
+    let (gamma, delta, omega) = (38.1, -3072.0, 26.5);
+    let d0 = omega + 8.0;
+    let (nu1, nu2) = (delta, delta - omega);
+    let lv = levels(&[0.0, d0], &[0.0], gamma, &[0]);
+    let (w1, w2) = ([60.0, 30.0], [25.0, 50.0]);
+    let classes = vec![class(nu1, 2, 1, &[(0, 0, C64::real(w1[0])), (0, 1, C64::real(w1[1]))]), class(nu2, 2, 1, &[(0, 0, C64::real(w2[0])), (0, 1, C64::real(w2[1]))])];
+    let (rest, sector) = (folded(&lv, &classes, &at_rest(2)), sectored(&lv, &classes, &at_rest(2), false));
+    assert!(sector.exists);
+    let sambe = |m_max: i64| -> Eigen {
+        let sectors = (2 * m_max + 1) as usize;
+        let n = 3 * sectors;
+        let mut q = Mat::zeros(n, n);
+        for (k, m) in (-m_max..=m_max).enumerate() {
+            let at = 3 * k;
+            q[(at + 1, at + 1)] = C64::real(d0);
+            q[(at + 2, at + 2)] = C64::new(-nu1, -0.5 * gamma);
+            for g in 0..2 {
+                q[(at + 2, at + g)] = C64::real(w1[g]);
+                q[(at + g, at + 2)] = C64::real(w1[g]);
+            }
+            for i in 0..3 {
+                q[(at + i, at + i)] -= C64::real(m as f64 * omega);
+            }
+            if k + 1 < sectors {
+                for g in 0..2 {
+                    q[(at + 2, at + 3 + g)] = C64::real(w2[g]);
+                    q[(at + 3 + g, at + 2)] = C64::real(w2[g]);
+                }
+            }
+        }
+        eigen(&q).unwrap()
+    };
+    // The quasienergy whose eigenvector lies most on (g, sector 0).
+    let near = |e: &Eigen, m_max: i64, g: usize| -> C64 {
+        let at = 3 * m_max as usize + g;
+        let k = (0..e.values.len()).max_by(|&x, &y| {
+            let weight = |k: usize| e.vectors[(at, k)].norm_sqr() / (0..e.values.len()).map(|i| e.vectors[(i, k)].norm_sqr()).sum::<f64>();
+            weight(x).total_cmp(&weight(y))
+        }).unwrap();
+        e.values[k]
+    };
+    let (coarse, fine) = (sambe(6), sambe(8));
+    for g in 0..2 {
+        let (p, r) = ((0..2).find(|&p| sector.dominant(p) == g).unwrap(), (0..2).find(|&p| rest.dominant(p) == g).unwrap());
+        let (exact, converged) = (near(&fine, 8, g), near(&coarse, 6, g));
+        let (ls, lr) = (sector.eigen.values[p], rest.eigen.values[r]);
+        let s = sector.sectors.iter().filter(|s| s.from == sector.groups[p]).map(|s| {
+            let t = sector.sector_apply(s, &sector.right(p));
+            crate::linalg::norm_sqr(&t)
+        }).sum::<f64>();
+        let mixing2 = s / sector.right(p)[g].norm_sqr();
+        println!("g{}: exact {:.8e} (M 6 against 8: {:.1e}); the sector's fold {:.3e} apart, the static fold {:.3e}; (a/δ)² {mixing2:.3e}", g + 1, exact.re, (exact - converged).abs(), (ls - exact).abs(), (lr - exact).abs());
+        assert!((exact - converged).abs() <= 1e-3 * (lr - exact).abs(), "the Sambe truncation converged");
+        assert!((ls - exact).abs() <= mixing2 * (lr - exact).abs(), "g{}: the sector's fold {ls:?} against {exact:?}, beyond (a/δ)² of the shift", g + 1);
     }
 }
 
 /// A Raman resonance across a Zeeman splitting (the coordinator's test): two ground states 2ω_L apart, coupled by two
-/// classes 2ω_L + δ apart through a far excited state. The lab beat is 26.37 rad/µs; the component's distance on the
-/// actual spectrum is δ (and the light shifts' difference); in the frames (cluster.rs `frames`: a chain, every link on
-/// the strength tree) it is static, its residual exactly zero -- and the fold in those frames is the exact static
-/// problem's (its slow eigenvalues against the exact three-state generator's).
+/// classes 2ω_L + δ apart through a far excited state. The lab beat is 26.37 rad/µs; the coupling's distance on the
+/// actual spectrum is δ (and the light shifts' difference): its sector's fold does not exist there, and the closure keeps
+/// the link (the existence rule's level up, not a block). In its frames (cluster.rs `frames`: a chain, every link on the
+/// strength tree) it is static, its residual exactly zero -- and the fold in those frames is the exact static problem's
+/// (its slow eigenvalues against the exact three-state generator's).
 #[test]
-fn a_raman_resonance_across_a_zeeman_splitting_asks_the_step_for_its_detuning_not_its_beat() {
+fn a_raman_resonance_across_a_zeeman_splitting_is_kept_and_static_in_its_frames() {
     let (gamma, delta, zeeman, detuning) = (38.1, -1536.0, 26.375, 0.375);
     let (nu1, nu2) = (delta, delta - zeeman - detuning);
     let lv = levels(&[0.0, zeeman], &[0.0], gamma, &[0]);
     let classes = vec![class(nu1, 2, 1, &[(0, 0, C64::real(40.0))]), class(nu2, 2, 1, &[(0, 1, C64::real(40.0))])];
-    let rest = folded(&lv, &classes, &at_rest(2));
-    let share = crate::units::POPULATION_TARGET * (1.0 - crate::units::STEP_SHARE * crate::units::STEP_SHARE).sqrt();
-    let explicit: Vec<Component> = rest.components([0.0; 3]).into_iter().filter(|x| x.row != x.column && x.mixing() > share.sqrt()).collect();
-    assert!(!explicit.is_empty(), "the resonant Raman component is explicit");
-    let beat = |x: &Component| Link { a: x.row, b: x.column, classes: x.classes }.beat(&classes);
-    for x in &explicit {
-        assert!((beat(x).abs() - (zeeman + detuning)).abs() <= 1e-9, "its lab beat");
-        assert!(x.distance.abs() < 0.2 * zeeman, "its distance on the actual spectrum {:?}", x.distance);
+    assert!(!sectored(&lv, &classes, &at_rest(2), false).exists, "the resonant sector's fold does not exist");
+    let closed = closure(&lv, &classes, &[vec![0]], [0.0; 3], &Kept::default());
+    assert!(closed.kept.blocks.is_empty(), "no block is made explicit for it");
+    let raman: Vec<&Link> = closed.kept.links.iter().filter(|l| l.a < 2 && l.b < 2 && l.a != l.b).collect();
+    assert!(!raman.is_empty(), "the resonant Raman coupling is kept");
+    let slow = slow_of(&[vec![0]], &closed.kept, &classes, &lv);
+    for l in &raman {
+        assert!((l.beat(&classes).abs() - (zeeman + detuning)).abs() <= 1e-9, "its lab beat");
+        assert!(l.beat(&classes) - (slow.frames[l.a] - slow.frames[l.b]) == 0.0, "a chain: static in its frames");
     }
-    let links: Vec<(usize, usize, f64, f64)> = explicit.iter().map(|x| (rest.dominant(x.row), rest.dominant(x.column), beat(x), x.size)).collect();
-    let theta = crate::model::cluster::frames(2, &links, &0.0);
-    assert!(links.iter().all(|l| l.2 - (theta[l.0] - theta[l.1]) == 0.0), "a chain: static in its frames");
-    let fold = folded(&lv, &classes, &Slow::single(vec![], theta.clone()));
+    let fold = &closed.fold;
     assert_eq!(fold.replicas.len(), 1);
+    let theta = &slow.frames;
     let h = Mat::from_fn(3, 3, |i, j| match (i, j) {
         (0, 0) => C64::real(-theta[0]),
         (1, 1) => C64::real(zeeman - theta[1]),
@@ -290,29 +436,29 @@ fn prior_atoms(req: &crate::request::Request) -> Vec<([f64; 3], [f64; 3])> {
 }
 
 /// A closure's measures at its end (`closure`, its last round): the worst remainder ρ over its fold's ground-like
-/// eigenstates at the offsets each spans (`Fold::offsets`: the motion's pattern and the components' combined
-/// frequencies at their shares), and the largest mixing of a component criterion two leaves averaged.
+/// eigenstates at the offsets each spans (`Fold::offsets`: the motion's pattern and the carried sectors' sidebands at
+/// their shares), and the worst part of the sectors it folds (`Fold::sector_parts`, the square root of an eigenstate's
+/// sum).
 fn measures(closed: &Closed, classes: &[Class], velocity: [f64; 3]) -> (f64, f64) {
     let fastest = classes.iter().flat_map(|c| c.beams.iter()).map(|b| crate::linalg::norm3(b.wave)).fold(0.0, f64::max);
     let pattern = 2.0 * fastest * crate::linalg::norm3(velocity);
     let fold = &closed.fold;
-    let components = fold.components(velocity);
-    let remainder = (0..fold.size())
-        .filter(|&p| fold.ground_weight(p) >= 0.5)
-        .map(|p| fold.block_parts(&[], p, Some(&fold.offsets(p, pattern, &components, 1.0, &|_| 1.0))).0)
-        .fold(0.0, f64::max);
-    let mixing = components.iter().map(|x| x.mixing()).filter(|m| 2.0 * m * m <= share()).fold(0.0, f64::max);
-    (remainder, mixing)
+    let like: Vec<usize> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
+    let remainder = like.iter().map(|&p| fold.block_parts(&[], p, Some(&fold.offsets(p, pattern, 1.0, &|_| 1.0))).0).fold(0.0, f64::max);
+    let sectors = like.iter().map(|&p| fold.sector_parts(p, pattern).iter().map(|x| x.1).sum::<f64>().sqrt()).fold(0.0, f64::max);
+    (remainder, sectors)
 }
 
 /// The tilt's property (the brief's test 5, on the prior's own atoms): the 1D PGC at 3 G with its π probe tilted by
 /// θ = 0, 0.1°, 2° (the user's failure #4 is 2°; refs/requests/PGC1D_TILT_*, made by the app's own request builder),
 /// each closure at the 88 atoms the prior reads (`prior_atoms`, the θ = 0 request's). The tilt adds couplings ∝ sin θ:
 /// - the partition (criterion one's blocks) is the same at every atom and θ;
-/// - at 0.1° the kept links are the untilted ones and ρ moves by O(θ): no coupling counts as "existing" or not;
-/// - at 2° the untilted links stay, and what is added are the tilt's components that are near resonance on the actual
-///   spectrum at that atom (the Raman-dressed F = 2 levels: |δ| ≈ 0.4–1.2 rad/µs at a ≈ 0.08–0.3, 2m² up to 0.29 --
-///   physics the rule keeps, measured 2026-11-14); at the five hand-picked points of before, none.
+/// - at 0.1° the untilted links stay and ρ moves by O(θ): no coupling counts as "existing" or not; what 0.1° adds is
+///   what 2° keeps -- a tilt coupling's sector near a two-photon resonance, whose first-order part (the light's
+///   interference through it, # Sectors) grows as θ;
+/// - at 2° the untilted links stay, and what is added are the tilt's couplings that are near resonance on the actual
+///   spectrum at that atom (the Raman-dressed F = 2 levels: |δ| ≈ 0.4–1.2 rad/µs at a ≈ 0.08–0.3 -- physics the rule
+///   keeps, measured 2026-11-14); what is left folded is within the share (criterion one on the sectors).
 #[test]
 fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_resonant() {
     let names = ["PGC1D_TILT_0", "PGC1D_TILT_01", "PGC1D_TILT_2"];
@@ -334,7 +480,7 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
             })
             .unzip();
         for ((name, c), m) in names.iter().zip(&closed).zip(&measured) {
-            println!("{name} r {r:?} v {v:?}: blocks {:?}, links {}, rho {:.4e}, averaged mixing {:.4e}", c.kept.blocks, c.kept.links.len(), m.0, m.1);
+            println!("{name} r {r:?} v {v:?}: blocks {:?}, links {}, rho {:.4e}, folded sectors {:.4e}", c.kept.blocks, c.kept.links.len(), m.0, m.1);
         }
         let base = &closed[0];
         for c in &closed[1..] {
@@ -343,20 +489,22 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
                 assert!(c.kept.links.contains(l), "the untilted link {l:?} at {r:?} {v:?}");
             }
         }
-        assert_eq!(closed[1].kept.links.len(), base.kept.links.len(), "the links at 0.1° at {r:?} {v:?}");
+        for l in closed[1].kept.links.iter().filter(|l| !base.kept.links.contains(l)) {
+            assert!(closed[2].kept.links.contains(l) || closed[2].kept.links.contains(&l.reversed()), "a link at 0.1° that 2° does not keep, {l:?}, at {r:?} {v:?}");
+        }
         let (at0, at01) = (measured[0], measured[1]);
         assert!((at01.0 - at0.0).abs() <= 10.0 * theta * at0.0.max(1e-6), "ρ at 0.1°: {} against {}", at01.0, at0.0);
         added += closed[2].kept.links.len() - base.kept.links.len();
         most = most.max(measured[2].1);
     }
-    println!("2°: {added} links added over the 88 atoms; the largest averaged mixing {most:.3e}");
-    assert!(2.0 * most * most <= super::share(), "an averaged component beyond the share");
+    println!("2°: {added} links added over the 88 atoms; the largest folded sectors' part {most:.3e}");
+    assert!(most <= super::share(), "a folded sector beyond the share");
 }
 
 /// The frames are a gauge (module documentation, # Groups): at the prior's atoms of the tilted 1D PGC (a few of them),
 /// on the closure's kept set, a constant added to the frames of every state of each group -- random, of the size of the
-/// Zeeman splittings and beyond -- leaves every decision and every error the same: criterion two's components (labels,
-/// classes, mixing), criterion one's remainders, and the error at a state with its parts.
+/// Zeeman splittings and beyond -- leaves every decision and every error the same: the sectors' parts by link (criterion
+/// one on what the run leaves out), the blocks' remainders, and the error at a state with its parts.
 #[test]
 fn every_decision_and_error_is_the_same_in_every_gauge() {
     let req = request("PGC1D_TILT_2");
@@ -376,17 +524,24 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
         let fastest = cl.iter().flat_map(|c| c.beams.iter()).map(|b| crate::linalg::norm3(b.wave)).fold(0.0, f64::max);
         let pattern = 2.0 * fastest * crate::linalg::norm3(v);
         let read = |slow: &Slow| {
-            let fold = folded(&lv, &cl, slow);
-            let label = |p: usize| fold.dominant(p);
-            let mut components: Vec<(usize, usize, (Option<usize>, Option<usize>), f64)> = fold.components(v).iter().filter(|x| x.mixing() > 1e-6).map(|x| (label(x.row), label(x.column), x.classes, x.mixing())).collect();
-            components.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)).then(a.3.total_cmp(&b.3)));
-            let all = fold.components(v);
-            let mut rho: Vec<f64> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).map(|p| fold.block_parts(&blocks, p, Some(&fold.offsets(p, pattern, &all, 1.0, &|_| 1.0))).0).collect();
+            let fold = fold(&lv, &cl, slow, &Replicas::of(&cl, slow, lv.ground.rows), Some(&|l: &Link| closed.kept.links.contains(l)));
+            let like: Vec<usize> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
+            let mut sectors: Vec<(usize, usize, (Option<usize>, Option<usize>), f64)> = vec![];
+            for &p in &like {
+                for (l, x) in fold.sector_parts(p, pattern) {
+                    match sectors.iter_mut().find(|s| (s.0, s.1, s.2) == (l.a, l.b, l.classes)) {
+                        Some(s) => s.3 += x,
+                        None => sectors.push((l.a, l.b, l.classes, x)),
+                    }
+                }
+            }
+            sectors.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+            let mut rho: Vec<f64> = like.iter().map(|&p| fold.block_parts(&blocks, p, Some(&fold.offsets(p, pattern, 1.0, &|_| 1.0))).0).collect();
             rho.sort_by(f64::total_cmp);
             let psi: Vec<C64> = (0..fold.size()).map(|s| if s < ground { C64::real(1.0) } else { C64::ZERO }).collect();
-            let errors = errors(&fold, &blocks, &|_| false, &psi, v, pattern, &[]);
+            let errors = errors(&fold, &blocks, &psi, pattern, &[]);
             let error = errors.parts.iter().map(|p| p.1).sum::<f64>() + errors.outside.iter().sum::<f64>();
-            (components, rho, error, errors.parts)
+            (sectors, rho, error, errors.parts)
         };
         let base = read(&slow);
         for _ in 0..3 {
@@ -396,10 +551,14 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
                 *f += shifts[*g];
             }
             let other = read(&shifted);
-            assert_eq!(base.0.len(), other.0.len(), "criterion two's components at {r:?}");
-            for (a, b) in base.0.iter().zip(&other.0) {
-                assert_eq!((a.0, a.1, a.2), (b.0, b.1, b.2), "a component's labels and classes");
-                assert!((a.3 - b.3).abs() <= 1e-8 * a.3.max(1e-3), "a component's mixing {} against {}", a.3, b.3);
+            // Every link's part the same, either way round: a link of a structural zero (its part a rounding's) is
+            // there or not as the rounding falls.
+            let largest = base.0.iter().chain(&other.0).fold(0.0_f64, |m, s| m.max(s.3));
+            for (a, b) in [(&base.0, &other.0), (&other.0, &base.0)] {
+                for x in a.iter() {
+                    let y = b.iter().find(|y| (y.0, y.1, y.2) == (x.0, x.1, x.2)).map_or(0.0, |y| y.3);
+                    assert!((x.3 - y).abs() <= 1e-8 * x.3 + 1e-10 * largest, "the part of the link {:?}: {} against {}", (x.0, x.1, x.2), x.3, y);
+                }
             }
             for (a, b) in base.1.iter().zip(&other.1) {
                 assert!((a - b).abs() <= 1e-8 * a.max(1e-6), "a remainder {a} against {b}");
@@ -429,8 +588,8 @@ fn a_block_is_kept_for_the_class_of_its_larger_part_and_turns_in_that_class_s_fr
         let classes: Vec<Class> = (0..2).map(|k| class(nus[k], 1, 1, &[(0, 0, C64::real(size(k)))])).collect();
         let fold = folded(&lv, &classes, &at_rest(1));
         let psi = vec![C64::ONE];
-        let found = errors(&fold, &blocks, &|_| false, &psi, [0.0; 3], 5.0, &[]);
-        let part = |k: usize| found.parts.iter().find(|o| o.0 == Object::Block(0, Some(k))).map_or(0.0, |o| o.1);
+        let found = errors(&fold, &blocks, &psi, 5.0, &[]);
+        let part = |k: usize| found.parts.iter().find(|o| o.0 == (0, Some(k))).map_or(0.0, |o| o.1);
         // The responses' shares: |g|²/|ν − iΓ/2|² of each class.
         let response = |k: usize| size(k).powi(2) / (nus[k].powi(2) + 0.25 * gamma * gamma);
         let (larger, smaller) = if response(0) > response(1) { (0, 1) } else { (1, 0) };
@@ -1094,7 +1253,7 @@ fn the_resolvent_s_bounds_are_continuous_in_the_folded_block_s_departure_from_no
         let classes = vec![class(0.0, 1, 2, &[(0, 0, C64::real(5.0)), (1, 0, C64::real(3.0))])];
         let f = folded(&levels, &classes, &at_rest(1));
         assert!(f.exists);
-        let rho: f64 = f.offsets(0, 10.0, &[], 1.0, &|_| 1.0).iter().map(|x| x * x).sum::<f64>().sqrt();
+        let rho: f64 = f.offsets(0, 10.0, 1.0, &|_| 1.0).iter().map(|x| x * x).sum::<f64>().sqrt();
         (rho, f.series_ratio(C64::real(f.eigen.values[0].re)))
     };
     let (rho0, q0) = read(0.0);
@@ -1173,7 +1332,7 @@ fn a_raman_resonant_photon_coherence_is_kept_and_a_far_one_dropped_as_the_master
         // The fold, and its cross terms at the start.
         let classes = vec![class(delta, 2, 1, &[(0, 0, C64::real(a))]), class(delta - e2 + dx, 2, 1, &[(0, 1, C64::real(b))])];
         let slow = Slow { explicit: vec![], frames: vec![0.0, beta], groups: vec![0, 0] };
-        let f = fold(&levels, &classes, &slow, &Replicas::of(&classes, &slow, 2));
+        let f = fold(&levels, &classes, &slow, &Replicas::of(&classes, &slow, 2), None);
         assert!(f.exists, "{name}: the fold exists");
         let pairs = start_cross_terms(&f, &emission);
         let raman = |pair: &[(Option<usize>, usize, usize); 2]| pair.contains(&(Some(0), 0, 0)) && pair.contains(&(Some(1), 1, 0));
@@ -1360,5 +1519,36 @@ fn the_coherences_old_and_combined_frequencies_at_the_prior_s_atoms() {
         for e in &examples {
             println!("  differs: {e}");
         }
+    }
+}
+
+/// The kept units by kind on the scenes the brief runs (a measurement): PGC1D_TILT_0, PGC1D_TILT_2 and PGC3D_1ms, each
+/// closed as the solve closes it at its reference state (`Model::closed_at`), with the closure's wall time -- the links
+/// kept (`Unit::Term`: static in the clusters' frames, or turning as tones), the drives at the atom (`Unit::Bare`), the
+/// explicit drives and blocks, the coherences, the evaluation's orders.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn the_kept_units_by_kind_on_the_brief_s_scenes() {
+    use super::super::Unit;
+    for name in ["PGC1D_TILT_0", "PGC1D_TILT_2", "PGC3D_1ms"] {
+        let req = request(name);
+        let light = crate::field::Light::new(&req);
+        let chief = (0..crate::request::GROUND).max_by(|&a, &b| req.initial_density[(a, a)].re.total_cmp(&req.initial_density[(b, b)].re)).unwrap();
+        let started = std::time::Instant::now();
+        let (model, kept, _, _) = super::super::Model::closed_at(&req, &light, vec![], chief, req.temperature_uk);
+        let wall = started.elapsed().as_secs_f64();
+        let count = |f: &dyn Fn(&Unit) -> bool| kept.iter().filter(|u| f(u)).count();
+        let terms: Vec<&Unit> = kept.iter().filter(|u| matches!(u, Unit::Term { .. })).collect();
+        let turning = terms.iter().filter(|u| if let Unit::Term { a, b, beat } = u {
+            let k = model.cluster_of(*a);
+            let c = &model.clusters()[k];
+            let place = |s: usize| c.states.iter().position(|&x| x == s);
+            match (place(*a), place(*b)) { (Some(x), Some(y)) => !beat.plus(1, &c.frames[x]).plus(-1, &c.frames[y]).is_zero(), _ => false }
+        } else { false }).count();
+        println!(
+            "{name}: closed in {wall:.2} s; kept {}: Term {} ({turning} turning in the frames), Bare {}, Drive {}, Block {}, Coherence {}, Series {}, Normalization {}; clusters {:?}",
+            kept.len(), terms.len(), count(&|u| matches!(u, Unit::Bare { .. })), count(&|u| matches!(u, Unit::Drive { .. })), count(&|u| matches!(u, Unit::Block { .. })), count(&|u| matches!(u, Unit::Coherence { .. })), count(&|u| matches!(u, Unit::Series)), count(&|u| matches!(u, Unit::Normalization { .. })),
+            model.clusters().iter().map(|c| c.states.len()).collect::<Vec<_>>()
+        );
     }
 }

@@ -90,8 +90,8 @@ fn raman_unit(light: &Light, to: usize, from: usize) -> Unit {
 
 /// The Λ scheme's Raman coupling (R6_RAMAN_CO: D1 σ⁺σ⁺, A from F = 1, B from F = 2, Raman-resonant between |1,0⟩ and |2,0⟩,
 /// Δ ≈ −20 GHz): the coupling of the two states at the two frequencies' beat is kept by the prior whatever the level of
-/// the light's drives (elim.rs `Model::prior`, criterion two at the atom: its distance is the two-photon detuning, its
-/// averaged error 2(a/δ)² beyond any share on resonance), and kept, the two states form one cluster whose static coupling is the Raman term
+/// the light's drives (elim.rs `Model::prior`, its sector at the atom: its distance is the two-photon detuning, and on
+/// resonance its fold does not exist -- the link goes up, # Sectors), and kept, the two states form one cluster whose static coupling is the Raman term
 /// −½(V_A†R_B + R_A†V_B) = Ω_R/2, to the closed form Σ_e V_A[e,1]* V_B[e,5] · ½(1/(E_5 + δ_B − E_e) + 1/(E_1 + δ_A − E_e))
 /// (contract §6 R6, bare energies). With every drive folded with the bare levels -- no light is near here -- what the
 /// closed form leaves out is the widths, (Γ/2Δ)² ≈ 2e-8, and the counter-rotating legs, Δ/(2ω) ≈ 3e-5 of each leg and of

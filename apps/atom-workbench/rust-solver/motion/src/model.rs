@@ -14,7 +14,7 @@
 //! # What is exact and what is folded
 //! Every coupling is kept (it enters the cluster's generator as it is and the propagator resolves it) or folded at second order;
 //! which is decided per unit (`Unit`, SPEC §5.2) by `solve`: the prior's closure at the reach's atoms (elim.rs `Model::prior`,
-//! criteria one and two) and the units' errors read at the run's states (elim.rs `Model::readings`), the model's domain
+//! criterion one, on the excited blocks and the sectors) and the units' errors read at the run's states (elim.rs `Model::readings`), the model's domain
 //! checked here (`Model::settled`). No light is far or near: each drive -- one component's coupling of one ground state to
 //! one excited state -- is folded with the bare levels, folded with the levels at the atom, or explicit (`Level`). A drive
 //! folded with the bare levels enters through its second-order shift and its Reiter–Sørensen jumps (`far`), linear in
@@ -264,7 +264,7 @@ pub enum Unit {
     /// The same drive folded with the levels at the atom (eliminate.rs: the dressed response, tabulated). Kept: the excited
     /// state is explicit and the drive enters the generator as it is. Folded onto a state another kept drive makes explicit, it
     /// is one leg of a Raman pair through that state, read across the two-photon distance d (far.rs, # A fold onto an
-    /// explicit state): a P-layer link, explicit where criterion two's 2(a/d)² is beyond the share (`Model::settled`).
+    /// explicit state): a P-layer link, its fold's existence and its sector's 2⟨X′⟩ = 2(a/d)² read at the states (`Model::settled`, elim.rs `bare_error`).
     Drive { component: Component, excited: usize, ground: usize },
     /// Every second-order coupling `a` ← `b` at one exact beat (∝ e^{i beat t}): of two ground states through the excited states
     /// -- one component's own (beat zero: the light's static couplings, the request's outside forms with them) or two
@@ -719,7 +719,7 @@ impl Model {
     /// # A fold onto an explicit state): in the cluster's frames its ground states are slow at E_a − θ_a and its explicit
     /// excited states follow them, so the excited amplitude at `place` turns at θ_place + (E_a − θ_a) -- the mean over the
     /// cluster's ground states, which its kept couplings hold near one another (what one of them lies off the mean is in
-    /// the pair's two-photon distance as criterion two reads it, `Model::settled`). `value`: the levels are energies (with
+    /// the pair's two-photon distance as its sector reads it, `Model::settled`). `value`: the levels are energies (with
     /// the frames); else a
     /// derivative's part of their jet (the frames are constants).
     pub(crate) fn read(&self, cluster: &Cluster, place: usize, levels: &[f64], value: bool) -> f64 {
