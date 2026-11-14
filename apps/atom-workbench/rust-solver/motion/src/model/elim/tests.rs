@@ -71,7 +71,7 @@ fn a_two_level_atom_s_slow_mode_is_exact_and_its_scattering_rate_is_the_steady_s
                 a
             };
             if !fold.exists {
-                println!("Δ {detuning} Γ, s {s}: no fold (iterations {})", fold.iterations);
+                println!("Δ {detuning} Γ, s {s}: no fold");
                 assert!(s >= 0.5, "the fold exists at s = {s}, Δ = {detuning} Γ");
                 continue;
             }
@@ -90,7 +90,8 @@ fn a_two_level_atom_s_slow_mode_is_exact_and_its_scattering_rate_is_the_steady_s
             let along = |k: usize| e.inverse[(k, 0)];
             let vector = |k: usize| [e.vectors[(0, k)], e.vectors[(1, k)]];
             let norm = |k: usize, z: C64| (vector(k)[0].norm_sqr() + vector(k)[1].norm_sqr()) * z.norm_sqr();
-            let x = fold.landed(&[C64::ONE]).unwrap();
+            let left = fold.left_operators().unwrap();
+            let (x, tau) = fold.transients(&left, &[vec![C64::ONE]]).unwrap().remove(0);
             let metric = fold.metric()[(0, 0)].re;
             let model_norm = x[0].norm_sqr() * (1.0 + metric);
             assert!((model_norm - norm(slow, along(slow))).abs() <= 1e-12, "N {model_norm} against {}", norm(slow, along(slow)));
@@ -114,11 +115,10 @@ fn a_two_level_atom_s_slow_mode_is_exact_and_its_scattering_rate_is_the_steady_s
             if s <= 0.12 {
                 assert!(error.abs() <= 9.0 / 8.0 * s * s, "the rate's error {error} beyond 9/8 s² at s = {s}, Δ = {detuning} Γ");
             }
-            // The transient's closed form (`Fold::transient`) against the exact one, and the error accounts' term
-            // (`errors`) against the exact rate's error: to the leading order in the fold, its relative O(X), X = s/2.
-            let left = fold.left_operators().unwrap();
-            let (_, tau) = fold.transient(&left, &[C64::ONE]).unwrap();
-            let booked = errors(&fold, &lv, &[vec![0]], &|_| false, &[C64::ONE], [0.0; 3], 0.0, &[]).transient;
+            // The transient's closed form (`Fold::transients`) against the exact one, and the error the accounts book
+            // (`errors`: at rest the transient's alone, all of it on the one block) against the exact rate's error: to
+            // the leading order in the fold, its relative O(X), X = s/2.
+            let booked: f64 = errors(&fold, &lv, &[vec![0]], &|_| false, &[C64::ONE], [0.0; 3], 0.0, &[]).parts.iter().map(|p| p.1).sum();
             println!("    the transient {transient:+.5e} µs, closed form {tau:+.5e} µs; the rate's error {error:+.4e}, booked {booked:.4e}");
             assert!((tau - transient).abs() <= 2.0 * s * transient.abs(), "the closed form {tau} against {transient}");
             assert!((booked - error.abs()).abs() <= 2.0 * s * error.abs(), "booked {booked} against the rate's error {error}");
@@ -251,11 +251,12 @@ fn a_raman_resonance_across_a_zeeman_splitting_asks_the_step_for_its_detuning_no
     let share = crate::units::POPULATION_TARGET * (1.0 - crate::units::STEP_SHARE * crate::units::STEP_SHARE).sqrt();
     let explicit: Vec<Component> = rest.components([0.0; 3]).into_iter().filter(|x| x.row != x.column && x.mixing() > share.sqrt()).collect();
     assert!(!explicit.is_empty(), "the resonant Raman component is explicit");
+    let beat = |x: &Component| Link { a: x.row, b: x.column, classes: x.classes }.beat(&classes);
     for x in &explicit {
-        assert!((x.beat.abs() - (zeeman + detuning)).abs() <= 1e-9, "its lab beat");
+        assert!((beat(x).abs() - (zeeman + detuning)).abs() <= 1e-9, "its lab beat");
         assert!(x.distance.abs() < 0.2 * zeeman, "its distance on the actual spectrum {:?}", x.distance);
     }
-    let links: Vec<(usize, usize, f64)> = explicit.iter().map(|x| (rest.dominant(x.row), rest.dominant(x.column), x.beat)).collect();
+    let links: Vec<(usize, usize, f64)> = explicit.iter().map(|x| (rest.dominant(x.row), rest.dominant(x.column), beat(x))).collect();
     let (theta, residual) = crate::model::cluster::frames(2, &links, &|x| *x, &0.0);
     assert_eq!(residual, 0.0, "a chain: static in its frames");
     let fold = folded(&lv, &classes, &Slow::single(vec![], theta.clone()));
@@ -288,6 +289,19 @@ fn prior_atoms(req: &crate::request::Request) -> Vec<([f64; 3], [f64; 3])> {
     crate::solve::atoms(&model, req, &light, &crate::solve::components(req), req.temperature_uk).expect("the prior's atoms")
 }
 
+/// A closure's measures at its end (`closure`, its last round): its frames' least largest residual (`slow_of`), the
+/// worst remainder ρ over its fold's ground-like eigenstates at that residual and the motion's beat, and the largest
+/// mixing of a component criterion two leaves averaged.
+fn measures(closed: &Closed, levels: &Levels, classes: &[Class], blocks: &[Vec<usize>], velocity: [f64; 3]) -> (f64, f64, f64) {
+    let (_, residual) = slow_of(blocks, &closed.kept, classes, levels.ground.rows);
+    let fastest = classes.iter().flat_map(|c| c.beams.iter()).map(|b| crate::linalg::norm3(b.wave)).fold(0.0, f64::max);
+    let delta = residual + 2.0 * fastest * crate::linalg::norm3(velocity);
+    let fold = &closed.fold;
+    let remainder = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).flat_map(|p| [delta, -delta].map(|shift| fold.block_parts(blocks, p, Some(shift)).0)).fold(0.0, f64::max);
+    let mixing = fold.components(velocity).iter().map(|x| x.mixing()).filter(|m| 2.0 * m * m <= share()).fold(0.0, f64::max);
+    (residual, remainder, mixing)
+}
+
 /// The tilt's property (the brief's test 5, on the prior's own atoms): the 1D PGC at 3 G with its π probe tilted by
 /// θ = 0, 0.1°, 2° (the user's failure #4 is 2°; refs/requests/PGC1D_TILT_*, made by the app's own request builder),
 /// each closure at the 88 atoms the prior reads (`prior_atoms`, the θ = 0 request's). The tilt adds couplings ∝ sin θ:
@@ -305,25 +319,19 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
     let theta = 0.1_f64.to_radians();
     let (mut added, mut most) = (0, 0.0_f64);
     for &(r, v) in &points {
-        let closed: Vec<Closed> = requests
+        let (closed, measured): (Vec<Closed>, Vec<(f64, f64, f64)>) = requests
             .iter()
             .map(|req| {
                 let light = crate::field::Light::new(req);
                 let (lv, cl, _) = system(req, &light, r);
-                closure(&lv, &cl, &blocks(req), v, &Kept::default())
+                let blocks = excited_blocks(&req.states);
+                let closed = closure(&lv, &cl, &blocks, v, &Kept::default());
+                let measured = measures(&closed, &lv, &cl, &blocks, v);
+                (closed, measured)
             })
-            .collect();
-        for (name, c) in names.iter().zip(&closed) {
-            println!(
-                "{name} r {r:?} v {v:?}: blocks {:?}, links {}, residual {:.3e}, requirement {:.4} rad/us, rho {:.4e}, averaged mixing {:.4e}, fold iterations {}",
-                c.kept.blocks,
-                c.kept.links.len(),
-                c.residual,
-                c.requirement,
-                c.remainder,
-                c.mixing,
-                c.fold.iterations
-            );
+            .unzip();
+        for ((name, c), m) in names.iter().zip(&closed).zip(&measured) {
+            println!("{name} r {r:?} v {v:?}: blocks {:?}, links {}, residual {:.3e}, rho {:.4e}, averaged mixing {:.4e}", c.kept.blocks, c.kept.links.len(), m.0, m.1, m.2);
         }
         let base = &closed[0];
         for c in &closed[1..] {
@@ -333,10 +341,11 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
             }
         }
         assert_eq!(closed[1].kept.links.len(), base.kept.links.len(), "the links at 0.1° at {r:?} {v:?}");
-        assert!((closed[1].residual - base.residual).abs() <= 1e-9 * (1.0 + base.residual), "the frames' residual at 0.1°");
-        assert!((closed[1].remainder - base.remainder).abs() <= 10.0 * theta * base.remainder.max(1e-6), "ρ at 0.1°: {} against {}", closed[1].remainder, base.remainder);
+        let (at0, at01) = (measured[0], measured[1]);
+        assert!((at01.0 - at0.0).abs() <= 1e-9 * (1.0 + at0.0), "the frames' residual at 0.1°");
+        assert!((at01.1 - at0.1).abs() <= 10.0 * theta * at0.1.max(1e-6), "ρ at 0.1°: {} against {}", at01.1, at0.1);
         added += closed[2].kept.links.len() - base.kept.links.len();
-        most = most.max(closed[2].mixing);
+        most = most.max(measured[2].2);
     }
     println!("2°: {added} links added over the 88 atoms; the largest averaged mixing {most:.3e}");
     assert!(2.0 * most * most <= super::share(), "an averaged component beyond the share");
@@ -350,7 +359,7 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
 fn every_decision_and_error_is_the_same_in_every_gauge() {
     let req = request("PGC1D_TILT_2");
     let light = crate::field::Light::new(&req);
-    let blocks = blocks(&req);
+    let blocks = excited_blocks(&req.states);
     let ground = crate::request::GROUND;
     let points = prior_atoms(&req);
     let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
@@ -373,7 +382,8 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
             rho.sort_by(f64::total_cmp);
             let psi: Vec<C64> = (0..fold.size()).map(|s| if s < ground { C64::real(1.0) } else { C64::ZERO }).collect();
             let errors = errors(&fold, &lv, &blocks, &|_| false, &psi, v, range, &[]);
-            (components, rho, errors.population, errors.parts)
+            let error = errors.parts.iter().map(|p| p.1).sum::<f64>() + errors.outside.iter().sum::<f64>();
+            (components, rho, error, errors.parts)
         };
         let base = read(&slow);
         for _ in 0..3 {
@@ -524,9 +534,9 @@ fn the_fold_s_series_about_a_reference_is_the_fold_within_its_remainder_and_fall
 ///   X: S⁻¹ L S⁻¹ Hermitian to the rounding); at each order J from 0 on, within that order's bound -- the difference
 ///   falls with J as x's powers, down to the series' own;
 /// - the landing map S(1 + Y)⁻¹ against the fold's S(1 + Σ S_f T_f)⁻¹;
-/// - and the errors the run books, measured on states (`Fold::order_error`, `Fold::normalization_error`): on random
-///   slow states each within its order's bound, the series' falling from order 0 to order 1. The bounds are this
-///   test's: the run books the measured numbers.
+/// - and the error the run books, the evaluation against the definition measured on states (`Fold::evaluated`,
+///   `Fold::defined`, `Fold::evaluation_error`): on random slow states, falling from the series' order 0 to order 1 and
+///   with the normalization's order. The bounds are this test's: the run books the measured numbers.
 #[test]
 fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_remainders_and_hermitian_by_construction() {
   for name in ["PGC3D_1ms", "PGC1D_TILT_2"] {
@@ -648,7 +658,12 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
             (apart.frobenius() / decay.frobenius(), skew.frobenius() / route.frobenius())
         };
         let landing = matrix(&data, crate::model::assemble::LANDING);
-        let exact = fold.landing(&s).expect("the left operators settle");
+        let exact = {
+            let left = fold.left_operators().expect("the left operators settle");
+            let bares: Vec<Vec<C64>> = (0..n).map(|j| (0..n).map(|i| if i == j { C64::ONE } else { C64::ZERO }).collect()).collect();
+            let landed = fold.transients(&left, &bares).expect("the landing's overlap");
+            s.product(&Mat::from_fn(n, n, |i, j| landed[j].0[i]))
+        };
         let mut landing_apart = landing.clone();
         landing_apart.add_scaled(-C64::ONE, &exact);
         println!(
@@ -863,7 +878,7 @@ impl Fold {
     /// (`settle`, on n × n matrices alone); None where it does not settle.
     fn series_generator(&self, forms: &[Mat], z0: C64) -> Option<Mat> {
         let n = self.size();
-        let (h, _, exists) = settle(
+        let (h, exists) = settle(
             &self.direct,
             |h| {
                 let mut e = h.clone();
@@ -893,11 +908,12 @@ impl Fold {
     }
 }
 
-/// A drive folded with the bare levels onto an explicit state at a two-photon distance of exactly nothing is criterion
-/// two's link at δ = 0, explicit (model.rs `Model::settled`; ELIMINATION §4): R4_LIN_1 at B = 0, its lin⊥lin light
-/// driving an excited sublevel from two degenerate ground sublevels -- one drive kept, the other's Raman pair with it is
-/// at one energy. The model is made (the bare fold, far.rs `second_order`, is never read at its pole), the other ground
-/// state joins the kept drive's cluster and its drive is explicit, for every such pair the light makes.
+/// A drive folded with the bare levels onto an explicit state is judged by criterion two, 2(a/d)² against the share
+/// (model.rs `Model::settled`; ELIMINATION §4), and at a two-photon distance d of nothing that is beyond any share:
+/// R4_LIN_1 at B = 0, its lin⊥lin light driving an excited sublevel from two degenerate ground sublevels -- one drive
+/// kept, the other's Raman pair with it is at one energy. The model is made (the bare fold, far.rs `second_order`, is
+/// never read at its pole), the other ground state joins the kept drive's cluster and its drive is explicit, for every
+/// such pair the light makes.
 #[test]
 fn a_drive_onto_an_explicit_state_at_no_two_photon_distance_is_explicit() {
     use crate::request::GROUND;
@@ -915,4 +931,41 @@ fn a_drive_onto_an_explicit_state_at_no_two_photon_distance_is_explicit() {
         }
     }
     assert!(pairs > 0, "R4_LIN_1 drives an excited sublevel from two degenerate ground sublevels");
+}
+
+/// The same comparison where the distance is small but not nothing (model.rs `Model::settled`): R4_LIN_1's first pair of
+/// degenerate ground sublevels a, w driven to one excited sublevel e, w lifted by ε as a small field splits the pair,
+/// the drive e ← a kept. The fold of e ← w onto the explicit e is at two-photon distance d = −ε (e is read at a's
+/// energy, its frame's beat the photon's): where 2(a/ε)² is far beyond the share the drive is explicit in the first
+/// model, its ground state in the kept drive's cluster; where it is well within, the drive stays folded with the bare
+/// levels and w keeps its own cluster.
+#[test]
+fn a_drive_onto_an_explicit_state_at_a_small_two_photon_distance_is_explicit_and_at_a_large_one_folded() {
+    use super::super::{Level, Model, Unit};
+    use crate::request::GROUND;
+    let path = format!("{}/refs/scenes/R4_LIN_1.json", env!("CARGO_MANIFEST_DIR"));
+    let request = crate::request::Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+    let light = crate::field::Light::new(&request);
+    let bare = Model::new(&request, &light, &[]).unwrap();
+    let (c, e, a, w) = bare
+        .driven
+        .iter()
+        .filter(|d| !d.0.counter)
+        .find_map(|&(c, e, a)| bare.driven.iter().find(|d| d.0 == c && d.1 == e && d.2 > a && d.2 < GROUND && bare.energies[d.2] == bare.energies[a]).map(|d| (c, e, a, d.2)))
+        .expect("R4_LIN_1 drives an excited sublevel from two degenerate ground sublevels");
+    let size: f64 = bare.tones[c.frequency].couplings[0].iter().map(|x| x[(e, w)].abs()).sum();
+    let share = super::share();
+    for (epsilon, explicit) in [(1e-3 * size, true), (30.0 * size, false)] {
+        let ratio = 2.0 * (size / epsilon).powi(2);
+        assert_eq!(ratio > share, explicit, "the premise: 2(a/ε)² = {ratio:.3e} against the share {share:.3e}");
+        let mut split = request.clone();
+        split.hamiltonian[(w, w)] += C64::new(epsilon, 0.0);
+        let model = Model::new(&split, &light, &[Unit::Drive { component: c, excited: e, ground: a }]).unwrap();
+        let joined = model.cluster_of(w) == model.cluster_of(a);
+        let level = model.level(c, e, w);
+        assert_eq!((joined, level == Level::Explicit), (explicit, explicit), "{a} → {e} kept, ε = {epsilon:.3e}, 2(a/ε)² = {ratio:.3e}: the drive from {w} at level {level:?}, its ground state joined {joined}");
+        if !explicit {
+            assert_eq!(level, Level::Bare, "the drive from {w} is folded with the bare levels");
+        }
+    }
 }

@@ -854,8 +854,8 @@ impl Fold {
     /// The excited state that sets the series' distance (`series_distance`): of the excited block's Schur forms over the
     /// replicas -- each block of the states K's entries join, where the drive reaches one of them --, the diagonal entry
     /// nearest z₀ + f, the state its Schur vector holds most of (E's index): the block criterion one makes explicit where
-    /// the series asks an order the forms do not hold (`SERIES_MOST`), and on which a run's state books the series'
-    /// remainder (`Model::readings`).
+    /// the series does not converge (`Series::moved`), and on which a run's state books what the evaluation's orders
+    /// leave of its error against the definition (`Model::readings`).
     pub(crate) fn nearest(&self, z0: C64) -> Option<usize> {
         let mut best: Option<(f64, usize)> = None;
         for rep in &self.replicas {
@@ -1108,7 +1108,18 @@ impl Fold {
         settled.then_some(s)
     }
 
-    /// `transient` of several bare states: each replica's 𝓛 and 𝒳 and the landing's overlap made once.
+    /// The transient of bare states f (ELIMINATION v3 3 and 4, one term): what the waiting time for the next photon from
+    /// f holds beyond its slow part's, E_exact − ∫‖slow‖² dt. The bare state is its slow part (x₀, T x₀) and its fast
+    /// part (−S y₀, y₀), y₀ = −T x₀, x₀ = (1 + Σ_f S_f T_f)⁻¹ f its landing; the fast part is the homogeneous solution of
+    /// the excited block, e^{−i(K − f)t} -- it decays at the excited states' Γ/2 within 1/Γ, and it is the same term
+    /// whether the bare state is a jump's landing or the light being switched on. Its survival adds ∫‖fast‖² +
+    /// 2 Re∫⟨fast|slow⟩; to the leading order in the fold, per replica,
+    ///   τ = (T x₀)† 𝓛 (T x₀) − 2 Re (T x₀)† 𝒳 x₀,
+    /// 𝓛 = ∫ e^{iK†t} e^{−iKt} dt (𝓛 K − K† 𝓛 = −i; 𝓛 = 1/Γ on a line of one width) and 𝒳 = ∫ e^{i(K−f)†t} (T − S†)
+    /// e^{−iHt} dt (𝒳 H − (K† − f) 𝒳 = −i(T − S†)): the norm the fast part holds over its life, and its interference
+    /// with the slow part's excited and ground amplitudes. Without decay S† = T and only the first term is left. On one
+    /// line it is the whole difference between the mean scattering rate after a jump and the optical Bloch steady state
+    /// beside the threshold's clamp (tests). Per f (x₀, τ), each replica's 𝓛 and 𝒳 and the landing's overlap made once.
     pub(crate) fn transients(&self, s: &[Mat], fs: &[Vec<C64>]) -> Option<Vec<(Vec<C64>, f64)>> {
         let mut overlap = Mat::identity(self.size());
         for (si, rep) in s.iter().zip(&self.replicas) {
@@ -1332,17 +1343,16 @@ pub(crate) fn bare_remainders(fold: &Fold, classes: usize, bare: &[f64]) -> Vec<
 /// v7): per cluster the centre c of its near light's scalar shift over the atoms read (the reference z₀ is the cluster's
 /// far levels' mean and c), the series' largest ratio q over them and the largest excited share x (X's largest
 /// eigenvalue) -- each series' existence, q < 1 and x < 1 (the Neumann series of the resolvent and of (1 + X)^{−1/2}
-/// converge: criterion one's condition, `Series::exists`), nothing booked of them --, and the excited state that sets the
-/// distance where the ratio is largest (`Fold::nearest`), and the one that holds the most of the excited share where x
-/// is largest (`Fold::most_excited`); and the orders every evaluation takes, the kept units' (`Series::kept_orders`):
+/// converge: criterion one's condition, `Series::exists`), nothing booked of them --, and where one does not, the block
+/// move on the excited state that stops it -- the one that sets the distance where the ratio is largest
+/// (`Fold::nearest`), or that holds the most of the excited share where x is largest (`Fold::most_excited`) --; and the
+/// orders every evaluation takes, the kept units' (`Series::kept_orders`):
 /// their errors are measured where the atoms went (`Model::readings`).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Series {
     pub centre: Vec<f64>,
     pub ratio: f64,
     pub order: usize,
-    pub nearest: Option<usize>,
-    pub densest: Option<usize>,
     pub excited: f64,
     pub normalization: usize,
     /// Where a series does not converge: the block move (`Fold::block_move`) -- the block, the class (a carrier), the
@@ -1353,7 +1363,7 @@ pub(crate) struct Series {
 impl Series {
     /// The series of no light: every order 0 (a model's own before its atoms are read, `Model::referenced`).
     pub(crate) fn none(clusters: usize) -> Series {
-        Series { centre: vec![0.0; clusters], ratio: 0.0, order: 0, nearest: None, densest: None, excited: 0.0, normalization: 0, moved: None }
+        Series { centre: vec![0.0; clusters], ratio: 0.0, order: 0, excited: 0.0, normalization: 0, moved: None }
     }
 
     /// Whether both series converge at the atoms read: q < 1 and x < 1 (`Series`; where one does not, criterion one makes
@@ -1377,8 +1387,8 @@ impl Series {
 
 /// The orders of the normalized generator's evaluation (ELIMINATION v7; `Series`): the series' K (0, or 1 where
 /// `Unit::Series` is kept: the near forms hold N₀ and N₁), the normalization's J. The Hermitian part is the series' own:
-/// what the normalization would do to it is measured where the atoms went and booked on the block that holds the most
-/// of the excited share (`Fold::hermitian_error`).
+/// what the normalization would do to it is in the evaluation's error against the definition (`Fold::evaluation_error`),
+/// booked on the block nearest the reference (`Model::readings`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Orders {
     pub series: usize,
@@ -1477,11 +1487,11 @@ impl super::Model {
     /// The model's series constants at the atoms `points` (`Series`): per cluster the centre of the near light's scalar
     /// shift -- the mean of the fold's ground-like eigenvalues less the far levels' mean, over the atoms its range's
     /// middle --, then at each atom the ratio of the series about z₀ = far mean + c, q = (‖H − z₀‖₂ + ‖δK‖)/d (the
-    /// Neumann series of the resolvent in both its arguments: `Fold::series_ratio`, and the excited block the reference
+    /// Neumann series of the resolvent in both its arguments: `Fold::series_norm` over `Fold::series_distance`, and the excited block the reference
     /// leaves out), the largest; and the order it asks for. An atom where a fold does not exist (criterion one's: its
-    /// closure makes a block explicit) is read as the series' end: q = ∞. And at each atom the fold's normalization
-    /// (`Fold::normalized_sizes`): the largest excited share x, and the size β of what it does to the Hermitian
-    /// generator, the largest of each and the orders they ask for (`Series::normalization_of`, `hermitian_of`).
+    /// closure makes a block explicit) is read as the series' end: q = ∞. And at each atom the fold's excited share x
+    /// (`Fold::excited_share`), the largest. Where either series does not converge, the closure's block move on the state
+    /// that stops it (`Series::moved`).
     pub(crate) fn series_at(&self, points: &[([f64; 3], [f64; 3])]) -> Series {
         use rayon::prelude::*;
         let clusters = self.clusters.len();
@@ -1537,10 +1547,8 @@ impl super::Model {
         } else {
             None
         };
-        let nearest = nearest.and_then(|(_, fold, z0)| fold.nearest(z0));
-        let densest = densest.and_then(|(_, fold)| fold.most_excited());
         let (order, normalization) = Series::kept_orders(&self.kept);
-        Series { centre, ratio, order, nearest, densest, excited, normalization, moved }
+        Series { centre, ratio, order, excited, normalization, moved }
     }
 
     /// The excited hyperfine blocks F′ of the model's states (`blocks`), from its labels.
@@ -1667,13 +1675,6 @@ impl super::Model {
                     Object::Link(l) => book(&term(l), *x, &mut out),
                 }
             }
-            // The evaluation's orders, measured at the state (ELIMINATION v7; a unit's error where the atoms went), each a
-            // rate's relative error on the unit whose keep takes it away: the series' at the run's order K against its next
-            // (`Fold::order_error`) -- on its first order (`Unit::Series`) at K = 0, else on the block nearest the
-            // reference (`Fold::nearest`: criterion one moves the distance away) --; the normalization's at its order J
-            // against its next (`Fold::normalization_error`) on its next order (`Unit::Normalization`); and what the
-            // normalization would do to the Hermitian part, which is the series' own (`Fold::hermitian_error`), on the
-            // block that holds the most of the excited share (`Fold::most_excited`).
             // A part on a block, split among its classes as `errors` splits a block's (`Fold::state_block_parts`).
             let on_block = |e: Option<usize>, x: f64, out: &mut Vec<UnitError>| {
                 let Some(b) = e.and_then(|e| blocks.iter().position(|b| b.contains(&e))) else { return };
@@ -2125,7 +2126,7 @@ pub(crate) fn outside_errors(fold: Option<(&Fold, &[f64])>, psi: &[C64], outside
 /// turn) and for the readings (a trajectory's state).
 /// - The remainder (criterion one): a rate's relative error is 2ρ_p(Δ) of the eigenstate the state holds, weighted by
 ///   its share w_p of the state; each excited block's part of ρ² is its part.
-/// - The transient (`Fold::transient`): after the next jump the atom lands in a bare ground state -- at the state's
+/// - The transient (`Fold::transients`): after the next jump the atom lands in a bare ground state -- at the state's
 ///   own ground populations p_g --, whose waiting time the model takes from its slow part alone with the threshold law
 ///   P(T > t) = min(1, ‖y(t)‖²) (step.rs `jump`). The exact one is longer by τ and the law's clamp leaves out
 ///   (N − 1 − ln N)/γ where the slow part's norm N = ‖(x₀, T x₀)‖² is above one (γ its decay there): the rate's relative

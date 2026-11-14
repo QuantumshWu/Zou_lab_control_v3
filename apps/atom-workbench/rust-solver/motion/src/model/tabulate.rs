@@ -6,12 +6,10 @@
 //!
 //! # Coordinates
 //! The elimination at a point depends on the point through the levels' H (eliminate.rs `Model::far_hamiltonian`) and through
-//! the carriers' dressings and self-energies. A frequency that is no carrier enters H by its coherence T_ω, a function of its
-//! chart (field.rs # The chart: intensity, polarization angles, relative phases). A carrier enters both by its dressing: with
-//! its units' T̄ (eliminate.rs) on each polarization unit's intensity I_u = |f_u|²/N_u, f_u = Σ_{l∈u} a_l κ_l the unit's field
-//! along its polarization ε_u (E_l = κ_l ε_u), N_u = (Σ_{l∈u} |κ_l|)² so that I_u ∈ [0, 1] (|a_l| ≤ 1: a computed I_u above 1 is
-//! its rounding, and is 1) -- its frequency's static form in H too, Σ_u I_u N_u F(ε_u) --; with its coherent dressing
-//! (`Unit::Dressing` kept) on its chart. A table's axis lies on its coordinate's range over the atoms' reach (# Axes), and
+//! the near light's own fields. A frequency that is no carrier enters H by its coherence T_ω, a function of its chart
+//! (field.rs # The chart: intensity, polarization angles, relative phases): its chart's numbers are the coordinates. A
+//! carrier's field is none: the near forms are bilinear in it, their coefficients the far light's alone (ELIMINATION v5;
+//! assemble.rs, # The normalized generator). A table's axis lies on its coordinate's range over the atoms' reach (# Axes), and
 //! the table is the elimination's cheaper route there and nowhere else: a point whose coordinates it does not hold -- an
 //! atom beyond the reach -- reads the exact elimination (`Model::near_tabulated`, `Model::placed`: none there), the same
 //! function, and a table is never asked off its axes (crate::table refuses it).
@@ -19,8 +17,7 @@
 //! # A node
 //! At coordinates s the elimination is the one in a light whose fields have them: each lit frequency's field from its chart
 //! (field.rs `Frequency::chart_field`), its beams' amplitudes the least-norm ones that give it, a_l = Σ_k γ_lk* e_k/σ_k² (the
-//! static forms depend on the field alone, far.rs); each unit's field on its first beam, a = √(I_u N_u)/κ₁. The coordinates that
-//! are no axes take their values at the focus.
+//! static forms depend on the field alone, far.rs). The coordinates that are no axes take their values at the focus.
 //!
 //! # A node's reals
 //! The near forms, their real and imaginary parts in the layout's order: what the photons, the readout, the potential and the
@@ -1058,12 +1055,11 @@ mod tests {
     /// the population target had it, the read was 2.1e-2 at the edge and 8.2e-3 on average: beyond the share 7.8e-3 of a
     /// table that had no axis to halve.)
     ///
-    /// A coordinate that is not. R3_DOPPLER's cooling pair is one polarization unit, its intensity a standing wave's
-    /// from none to all over the reach, and its dressing at full intensity is 0.045 half-widths: by its weight a
-    /// coordinate to ask. The pair is the model's one carrier and its line the cycling one, so its dressing is in no
-    /// denominator of its own response: the first look, the unit at its seven first nodes on the tweezer's intensity's
-    /// first nodes, reads 6e-7 of the shares and holds it; the last, at every node of the refined table (49), 7e-7; and
-    /// the scene's table is the one of the tweezer's intensity alone. Named needed, the unit is an axis unasked.
+    /// A coordinate that is not. R3_DOPPLER with its cooling pair's drives at the atom: the tweezer's intensity moves over
+    /// the reach (0.70 to 1 of its peak), an axis of the clusters whose line its light shifts move, and on the first
+    /// cluster whose first table holds it a coordinate the table does not need -- the first look, at the range's ends and
+    /// its first nodes between them, reads 0.72 of the shares; the last, at its worst value over the refined table, the
+    /// same --; the scene's table of that cluster has no axis. Named needed, the intensity is an axis unasked.
     #[test]
     fn a_coordinate_is_an_axis_where_the_table_without_it_is_beyond_its_shares() {
         let (request, light, kept, b) = nearly_magic(0.04);
@@ -1073,14 +1069,14 @@ mod tests {
         let cluster = model.cluster_of(b);
         let index = tables.tables.iter().position(|t| t.layout.cluster == cluster && t.layout.lights == model.running()).unwrap();
         let table = &tables.tables[index];
-        assert!(table.axes() == 1 && table.layout.coordinates[0] == (Coordinate::Chart { frequency: light.trap, index: 0 }), "the tweezer's intensity is the axis: {:?}", &table.layout.coordinates[..table.axes()]);
+        assert!(table.axes() == 1 && table.layout.coordinates[0] == (Coordinate { frequency: light.trap, index: 0 }), "the tweezer's intensity is the axis: {:?}", &table.layout.coordinates[..table.axes()]);
         let reads = &model.table_reads(&tables, &along(&model, &trap, &reach, b, cluster))[index];
         let largest = reads.whole.iter().map(|r| r.population.max(r.temperature)).fold(0.0, f64::max);
         let (shown, temperature) = shares();
         eprintln!("the probe in the nearly magic tweezer: {} nodes; across the reach the table's largest read {largest:.2e}", Table::nodes(table.table.axes()));
         assert!(largest <= shown.min(temperature), "the table's read {largest:.3e} over the reach beyond its share {shown:.3e}");
 
-        // The cooling pair's own unit: an axis by its weight, one the table does not need.
+        // The tweezer's intensity held at the focus where it moves the near forms too little: one the table does not need.
         let request = scene("R3_DOPPLER");
         let light = Light::new(&request);
         let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
@@ -1088,23 +1084,30 @@ mod tests {
         let bare = Model::new(&request, &light, &[]).unwrap();
         let cooling: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).flat_map(|frequency| bare.bare_units(crate::model::Component { frequency, counter: false })).collect();
         let (model, _, _, reach) = Model::closed_at(&request, &light, cooling, state, request.temperature_uk);
-        let (cluster, lights, most) = (model.cluster_of(state), model.running(), 1 << 16);
-        let First { table: first, ranges, held } = model.first_table(cluster, &lights, &reach, most, &[]).unwrap();
-        assert!(first.axes() == 1 && matches!(first.layout.coordinates[0], Coordinate::Chart { index: 0, .. }), "the first table's axis is the tweezer's intensity: {:?}", &first.layout.coordinates[..first.axes()]);
-        assert!(held.len() == 1 && matches!(held[0].0, Coordinate::Unit { .. }), "the pair's unit is asked and held: {held:?}");
-        let (unit, worst) = held[0];
-        let (axis, grid) = (first_axis(unit), Table::nodes(first.table.axes()));
-        let values: Vec<f64> = (0..axis.nodes).map(|i| axis.node(i)).collect();
-        let early = model.look(&first, &ranges, unit, &values, &reach).0;
+        let (lights, most) = (model.running(), 1 << 16);
+        let (cluster, First { table: first, ranges, held }) = (0..model.clusters.len())
+            .find_map(|c| model.first_table(c, &lights, &reach, most, &[]).filter(|f| !f.held.is_empty()).map(|f| (c, f)))
+            .expect("a cluster whose first table holds a coordinate");
+        let intensity = Coordinate { frequency: light.trap, index: 0 };
+        assert!(first.axes() == 0 && held.len() == 1 && held[0].0 == intensity, "cluster {cluster}: the tweezer's intensity asked and held, no axis: {:?}, held {held:?}", &first.layout.coordinates[..first.axes()]);
+        let worst = held[0].1;
+        // Where the atoms take it, as the first look reads it (`first_table`): its range over the reach's ends and its
+        // first nodes between them.
+        let mut focus = [0.0];
+        model.coordinates_at(&[intensity], &model.light.amplitudes([0.0; 3]), &mut focus, &mut [[0.0; 3]]);
+        let range = model.reach_ranges(&[intensity], &focus, &reach)[0];
+        let axis = reach_axis(intensity, range);
+        let values: Vec<f64> = [range.0, range.1].into_iter().chain((0..axis.nodes).map(|i| axis.node(i)).filter(|v| range.0 < *v && *v < range.1)).collect();
+        let early = model.look(&first, &ranges, intensity, &values, &reach).0;
         let refined = model.refined(first, &ranges, &reach, most);
-        let last = model.look(&refined, &ranges, unit, &[worst], &reach).0;
-        eprintln!("R3_DOPPLER: the pair's unit over the tweezer's {grid} first nodes reads {early:.1e} of the shares; at its worst value {worst} over the refined table's {} nodes, {last:.1e}", Table::nodes(refined.table.axes()));
-        assert!(early <= 1.0 && last <= 1.0, "the table does not need the unit: {early:e}, {last:e} of the shares");
+        let last = model.look(&refined, &ranges, intensity, &[worst], &reach).0;
+        eprintln!("R3_DOPPLER cluster {cluster}: the tweezer's intensity over the reach's {range:?} at {} values reads {early:.1e} of the shares; at its worst value {worst} over the refined table's {} nodes, {last:.1e}", values.len(), Table::nodes(refined.table.axes()));
+        assert!(early <= 1.0 && last <= 1.0, "the table does not need the intensity: {early:e}, {last:e} of the shares");
         let tables = model.tabulate(&reach, most);
         let table = tables.tables.iter().find(|t| t.layout.cluster == cluster && t.layout.lights == lights).unwrap();
-        assert!(table.axes() == 1 && table.layout.coordinates[0] == refined.layout.coordinates[0] && table.table.axes()[0].nodes == refined.table.axes()[0].nodes, "the table kept is the tweezer's intensity's: {:?}", &table.layout.coordinates[..table.axes()]);
+        assert_eq!(table.axes(), 0, "the table kept has no axis: {:?}", &table.layout.coordinates[..table.axes()]);
         // A coordinate a last look finds needed is taken unasked.
-        assert_eq!(model.first_table(cluster, &lights, &reach, most, &[unit]).unwrap().table.axes(), 2, "the unit, needed, is the first table's second axis");
+        assert_eq!(model.first_table(cluster, &lights, &reach, most, &[intensity]).unwrap().table.axes(), 1, "the intensity, needed, is the first table's axis");
     }
 
     /// R2_RECOIL with its σ⁺ probe on |2,2⟩ → |3′,3′⟩ folded at the atom and on resonance at the focus, in a tweezer whose shift
@@ -1120,11 +1123,11 @@ mod tests {
         // The line's detuning at the focus, what the tweezer's light moves it by there, and its width.
         let line = |request: &Request| -> (f64, f64, f64) {
             let model = Model::new(request, &light, &kept).unwrap();
-            let (coherent, amplitudes) = (model.coherent_dressing(), model.light.amplitudes([0.0; 3]));
+            let amplitudes = model.light.amplitudes([0.0; 3]);
             let (lit, mut unlit) = (model.running(), model.running());
             unlit.0[model.light.trap] = Lit::Off;
             let of = |lights: &Lights| {
-                let h = &model.far_hamiltonian(&amplitudes, lights, 0, &coherent)[0];
+                let h = &model.far_hamiltonian(&amplitudes, lights, 0)[0];
                 h[(e, e)].re - h[(b, b)].re
             };
             (of(&lit) - model.carriers[model.carrier_of(probe).unwrap()].detuning, of(&lit) - of(&unlit), model.decay[(e - GROUND, e - GROUND)].re)
@@ -1252,7 +1255,7 @@ mod tests {
         for i in 0..40 {
             let r = [trap.centre[0] + 3.0 * edge * (i as f64 + 0.5) / 40.0, trap.centre[1], trap.centre[2]];
             let amplitudes = model.light.amplitudes(r);
-            let exact = model.near_exact(plan, &amplitudes, 0, &model.coherent_dressing());
+            let exact = model.near_exact(plan, &amplitudes, 0);
             let read = model.near_values(plan, &amplitudes, &sections, Some(table));
             let range = plan.near.responding();
             let (size, apart) = range.clone().fold((0.0, 0.0), |(s, a), e| (s + exact.data[e].norm_sqr(), a + (read.data[e] - exact.data[e]).norm_sqr()));

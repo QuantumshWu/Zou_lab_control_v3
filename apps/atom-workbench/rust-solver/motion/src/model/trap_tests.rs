@@ -1,15 +1,14 @@
 //! The reported trap (SPEC §1.3) of every reference scene against its expectation, without a solve: the trap is a
-//! number of the model alone -- the request, its closure by the units' errors, the descent --, so the references' `trapFrequency`
+//! number of the model alone -- the request, its closure, the descent --, so the references' `trapFrequency`
 //! series (refs/lib/phys.mjs `runningTrap`, `preparedTrap`) are judged here as refs/check.mjs judges them in a
 //! result: |engine − reference| ≤ 2u, u the reference's own stated uncertainty (a quantity without a user's target has
 //! no other tolerance; check.mjs, rule 0 for one deterministic output).
-use atom_motion::field::Light;
-use atom_motion::model::{Trap, GROUND};
-use atom_motion::request::Request;
+use crate::field::Light;
+use crate::model::{Model, Trap, GROUND};
+use crate::request::Request;
 use serde_json::Value;
 use std::path::PathBuf;
 
-mod model_common;
 
 fn refs() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs")
@@ -19,14 +18,14 @@ fn json(path: PathBuf) -> Value {
     serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))).unwrap()
 }
 
-/// The prepared and the reported trap of a request: the reference state, the model closed by its units' errors there
-/// (tests/model_common `closed`).
+/// The prepared and the reported trap of a request: the reference state, the model closed there as the solve closes it
+/// (`Model::closed_at`).
 fn traps(request: &Request) -> (Trap, Trap) {
     let light = Light::new(request);
     let chief = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
     let mut reference = [0.0; GROUND];
     reference[chief] = 1.0;
-    let (model, _, trap, _) = model_common::closed(request, &light, vec![], chief, request.temperature_uk);
+    let (model, _, trap, _) = Model::closed_at(request, &light, vec![], chief, request.temperature_uk);
     let reported = model.trap(&reference, &model.reported()).unwrap();
     (trap, reported)
 }

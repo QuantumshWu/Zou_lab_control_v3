@@ -88,7 +88,8 @@
 //! z₀ itself -- all linear in the products e_k'* e_k with coefficients of the far light alone, tabulated as S is. On the
 //! slow invariant subspace Ψ = (x, T x) of the no-jump generator, T_f = Σ_j (−1)^j R₀^{j+1} W (H − z₀)^j and H the
 //! fixed point of H = A + Σ_j (−1)^j N_j (H − z₀)^j, to the series' order K (model.rs `Model::series`: K = 1 where
-//! `Unit::Series` is kept, its error measured at the run's states against the next order, elim.rs `Fold::order_error`;
+//! `Unit::Series` is kept, the evaluation's error measured at the run's states against the definition, elim.rs
+//! `Model::readings`;
 //! the series' ratio q < 1 only says it converges). In the orthonormal coordinates y = S x, S = (1 + X)^{1/2} -- the Schrieffer–Wolff
 //! coordinates, the unitary block-diagonalization's nearest the bare basis (ELIMINATION v6, v7) -- the generator is the
 //! des Cloizeaux one, S H S⁻¹, and the jumps L_a = C_a T S⁻¹, whose own product is its decay. Evaluated by the
@@ -2654,16 +2655,16 @@ impl crate::step::Middle for Middle<'_> {
 /// row by row: the value and the gradient along the three lab axes) and the reference z₀, at the orders `orders`
 /// (elim.rs `Orders`) -- the Schrieffer–Wolff series, products of the forms alone (ELIMINATION v7):
 /// - the fold's generator: H₀ = H_h − (i/2) L at the series' order 0; at order 1 its first order's term H = H₀ − Y E₀,
-///   E₀ = H₀ − z₀ (the fixed point H = H₀ − Y(H − z₀) to its own first order, Y²E apart: in the order's error measured
-///   against the next, elim.rs `Fold::order_error`), with its gradient ∇H₀ − ∇Y E₀ − Y ∇E₀; E = H − z₀. (The forms hold
+///   E₀ = H₀ − z₀ (the fixed point H = H₀ − Y(H − z₀) to its own first order, Y²E apart: in the evaluation's error
+///   against the definition, elim.rs `Fold::evaluation_error`), with its gradient ∇H₀ − ∇Y E₀ − Y ∇E₀; E = H − z₀. (The forms hold
 ///   N₀ and N₁: order 1 is `Unit::Series` kept, a higher one the nearest block's keep, `Unit::Block`.)
 /// - S⁻¹ = Σ_{j≤J} binom(−½, j) X^j and S = Σ_{j≤J} binom(½, j) X^j at the normalization's order J, by Horner's rule
 ///   with the gradient's product rule (`series`) -- no eigendecomposition --;
 /// - the held part Herm H − H_h (nothing at the series' order 0) and its gradient: the Hermitian part is the series'
-///   own -- what the normalization would do to it is measured where the atoms went and booked (elim.rs
-///   `Fold::hermitian_error`);
+///   own -- what the normalization would do to it is in the evaluation's error against the definition, measured where
+///   the atoms went and booked (elim.rs `Model::readings`);
 /// - M = E S⁻¹ (the jumps' partner's state, none at order 0), the landing map S (1 + Y)⁻¹ with (1 + Y)⁻¹ = Σ_{j≤J} (−Y)^j
-///   (its next order's part measured with the normalization's, `Fold::normalization_error`), and E.
+///   (to the normalization's order J, as the generator's), and E.
 /// Without `gradients` the values alone (the gradients' parts zero), of forms given so; M only at a point (`point`: a
 /// node's generator and force read none), the landing map only where asked (`landing`), else zero. `scratch` holds
 /// what it makes on the way; nothing is asked of the heap once it has its size.
@@ -2712,7 +2713,7 @@ pub(crate) fn normal(hermitian: &[C64], partner: &[C64], metric: &[C64], loss: &
     }
     series(-0.5, orders.normalization, metric, inverse, t, n, gradients);
     // The held part Herm H − H_h and its gradient: the Hermitian part is the series' own (what the normalization would do
-    // to it is measured and booked, elim.rs `Fold::hermitian_error`).
+    // to it is in the evaluation's error against the definition, elim.rs `Model::readings`).
     data.fill(C64::ZERO);
     for part in 0..parts {
         let (of, own) = (&h[part * size..(part + 1) * size], &hermitian[part * size..(part + 1) * size]);

@@ -196,11 +196,11 @@ impl Model {
     ///   frequency θ_b + ν_p, so x'_e = −Σ_{p,b} R_p[e, b] e^{i(θ'_e − θ_b − ν_p) t} x_b over the channels p whose drive
     ///   e ← b `into` holds explicit -- the kept drive's channel, static in the frames that keep it, as it is; a drive
     ///   `into` still folds keeps its own excitation folded there, the readout's apart. Its population is then the
-    ///   readout's folded one of those channels, and the rates and shifts its units' errors are shares of (units.rs,
-    ///   # The errors) are the same in both;
+    ///   readout's folded one of those channels, and the rates and shifts its units' errors are shares of (elim.rs
+    ///   `Model::readings`) are the same in both;
     /// - the other ground states of that cluster hold nothing: between two jumps the atom is in one cluster.
     ///
-    /// The sample is read at its point, its own path's middle (Doppler frames at zero: units.rs `Model::measured`).
+    /// The sample is read at its point, its own path's middle (Doppler frames at zero).
     pub(crate) fn carried(&self, sample: &Sample, into: &Model) -> Sample {
         let (from, t) = (&self.clusters[sample.cluster], sample.at.t);
         let cluster = into.cluster_of(from.states[0]);
@@ -272,7 +272,7 @@ impl Model {
     }
 
     /// A beat as the ledger writes it (`frequency_reading`), to the digits that tell the model's beats apart
-    /// (`telling_apart`): `Model::beats` holds every beat a unit can carry (units.rs `Model::units`). So no two of a
+    /// (`telling_apart`): `Model::beats` holds every beat a unit can carry (elim.rs `Model::candidates`). So no two of a
     /// run's items share a name; and to no fewer than the ledger's readings have (`ledger::READING`), so that a lone
     /// beat still reads as its value (32.4 THz, not 30 THz).
     fn beat_label(&self, beat: &Beat) -> String {

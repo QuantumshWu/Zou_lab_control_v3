@@ -75,9 +75,9 @@
 //! their forms, made through the far outside states, by that beat over those states' detunings), the co-rotating
 //! C(U^ω_k, U^ω'_k') and the counter-rotating C(Ũ^ω'_k', Ũ^ω_k). A frequency's own (ω' = ω, beat zero) is its static form
 //! above. Each entry a ← b of it is the generator's where its residual beat in the frames is exactly zero or its unit is
-//! kept (`Unit::Term`: the coupling of a and b at that beat, units.rs); folded, it is dropped, its error the unit's.
+//! kept (`Unit::Term`: the coupling of a and b at that beat, criterion two's link); folded, it is dropped, its error the unit's.
 //! A co-rotating leg against a counter-rotating one beats at twice an optical frequency and is no term of the model, as
-//! the request's outside forms hold none: where both folds exist (units.rs, # The model's domain) its mixing is the
+//! the request's outside forms hold none: where both folds exist (the model's domain, model.rs `Model::settled`) its mixing is the
 //! product of theirs, a fourth order.
 
 use super::eliminate::{jump, shift, Leg};

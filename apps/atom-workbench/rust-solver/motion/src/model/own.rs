@@ -120,12 +120,8 @@ mod tests {
     use super::*;
 
     /// Each operation's form bounds its function over a cell: on random cells about random centres, the quantities
-    /// a = 1.3 + 0.4 sin(x + 2y) z, b = 0.7 + 0.2 cos(3z − y) x² and their sums, products, quotients, square roots,
-    /// absolute values of their difference, maxima, minima, b's modulus with a constant, a dispersive shape of their
-    /// difference through its resonance and its slope, a phase-turning modulus |2 + e^{3ix}|, and of the forms of other
-    /// spaces (`Form`, `product`) the complex u = a + ib's |u|² and |u|, the vector (a, b, ab)'s norm and its product with a −
-    /// b, a band about a with b its radius, a resolvent's modulus 1/|3(a − b) − 0.3i| and the norm of (u, z/((a − b) − 0.2i)),
-    /// built from the operands' values, gradients and Lagrange remainders, each hold at 2000 points of the cell.
+    /// a = 1.3 + 0.4 sin(x + 2y) z, b = 0.7 + 0.2 cos(3z − y) x², their sum and a constant added, built from the operands'
+    /// values, gradients and Lagrange remainders, each hold at 2000 points of the cell.
     #[test]
     fn an_own_form_bounds_its_function_over_the_cell() {
         let mut stream = crate::random::Stream::new(3, crate::random::Purpose::Initial, 0, 0);
@@ -146,58 +142,15 @@ mod tests {
             let (fa, fb) = (form(&a, c, h), form(&b, c, h));
             let cases: Vec<(Own, Box<dyn Fn([f64; 3]) -> f64>)> = vec![
                 (fa.add(fb), Box::new(move |r| a(r) + b(r))),
-                (fa.mul(fb), Box::new(move |r| a(r) * b(r))),
-                (fa.div(fb), Box::new(move |r| a(r) / b(r))),
-                (fa.sqrt(), Box::new(move |r| a(r).sqrt())),
-                (fa.sub(fb).abs(), Box::new(move |r| (a(r) - b(r)).abs())),
-                (fa.max(fb), Box::new(move |r| a(r).max(b(r)))),
-                (fa.min(fb), Box::new(move |r| a(r).min(b(r)))),
-                (fb.hypot(0.5), Box::new(move |r| (b(r) * b(r) + 0.25).sqrt())),
-                (fa.sub(fb).scale(3.0).dispersion(0.3), Box::new(move |r| { let x = 3.0 * (a(r) - b(r)); x / (x * x + 0.09) })),
-                (fa.sub(fb).square(), Box::new(move |r| (a(r) - b(r)).powi(2))),
-                (fa.sub(fb).scale(3.0).dispersion_slope(0.3), Box::new(move |r| { let x = 3.0 * (a(r) - b(r)); (0.09 - x * x) / (x * x + 0.09).powi(2) })),
+                (fa.plus(0.7), Box::new(move |r| a(r) + 0.7)),
+                (fa.add(fb).within(0.0, f64::INFINITY), Box::new(move |r| a(r) + b(r))),
             ];
-            // The forms of other spaces, of the two quantities' real forms: u = a + ib, its |u|² and |u|; v = (a, b, ab), |v|
-            // and |(a − b) v|; and a band a ± b, its least modulus and its largest.
-            let (ra, rb) = (fa.form(), fb.form());
-            let unit = |z: C64| Form { value: z, first: [C64::ZERO; 3], rest: 0.0, moved: 0.0, most: z.abs() };
-            let u = product(&ra, &unit(C64::ONE), |x: f64, z: C64| z * x).add(product(&rb, &unit(C64::I), |x: f64, z: C64| z * x));
-            let axis = |a: usize| Form { value: std::array::from_fn::<f64, 3, _>(|b| if a == b { 1.0 } else { 0.0 }), first: [[0.0; 3]; 3], rest: 0.0, moved: 0.0, most: 1.0 };
-            let v = product(&ra, &axis(0), |x: f64, e: [f64; 3]| e.map(|y| y * x)).add(product(&rb, &axis(1), |x: f64, e: [f64; 3]| e.map(|y| y * x))).add(product(&fa.mul(fb).form(), &axis(2), |x: f64, e: [f64; 3]| e.map(|y| y * x)));
-            let band = Band { mid: fa, rad: fb };
-            let vector = move |r: [f64; 3]| [a(r), b(r), a(r) * b(r)];
-            let length = |v: [f64; 3]| v.iter().map(|x| x * x).sum::<f64>().sqrt();
-            let others: Vec<(Own, Box<dyn Fn([f64; 3]) -> f64>)> = vec![
-                (product(&u, &u, |x: C64, y: C64| (x.conj() * y).re).own(), Box::new(move |r| a(r) * a(r) + b(r) * b(r))),
-                (u.norm(), Box::new(move |r| a(r).hypot(b(r)))),
-                (v.norm(), Box::new(move |r| length(vector(r)))),
-                (v.by(&fa.sub(fb)).norm(), Box::new(move |r| (a(r) - b(r)).abs() * length(vector(r)))),
-                (band.apart(), Box::new(move |r| (a(r).abs() - b(r)).max(0.0))),
-                (band.most(), Box::new(move |r| a(r).abs() + b(r))),
-            ];
-            for (own, f) in &others {
-                for _ in 0..2000 {
-                    let r: [f64; 3] = std::array::from_fn(|x| c[x] + h[x] * (2.0 * stream.uniform() - 1.0));
-                    let v = f(r);
-                    assert!(v <= own.upper() + 1e-9 && v >= own.lower() - 1e-9, "a form of another space: {v} outside [{}, {}] at {r:?} about {c:?}", own.lower(), own.upper());
-                }
-            }
             for (own, f) in &cases {
                 for _ in 0..2000 {
                     let r: [f64; 3] = std::array::from_fn(|x| c[x] + h[x] * (2.0 * stream.uniform() - 1.0));
                     let v = f(r);
                     assert!(v <= own.upper() + 1e-9 && v >= own.lower() - 1e-9, "{v} outside [{}, {}] at {r:?} about {c:?}", own.lower(), own.upper());
                 }
-            }
-            // A phase-turning modulus: u = 2 + e^{3ix}, its own norm form.
-            let u = |r: [f64; 3]| C64::real(2.0) + C64::cis(3.0 * r[0]);
-            let value = [u(c)];
-            let slopes = [vec![C64::cis(3.0 * c[0]) * C64::new(0.0, 3.0)], vec![C64::ZERO], vec![C64::ZERO]];
-            let own = Own::norm(&value, [&slopes[0], &slopes[1], &slopes[2]], 0.5 * 9.0 * h[0] * h[0], 3.0 * h[0], 3.0, h);
-            for _ in 0..2000 {
-                let r: [f64; 3] = std::array::from_fn(|x| c[x] + h[x] * (2.0 * stream.uniform() - 1.0));
-                let v = u(r).abs();
-                assert!(v <= own.upper() + 1e-12 && v >= own.lower() - 1e-12, "|u| {v} outside [{}, {}]", own.lower(), own.upper());
             }
         }
     }
@@ -218,32 +171,21 @@ mod tests {
             Own { first: [0.3, nan, 0.2], ..fine },
             Own::range(nan, 0.0, 1.0),
             Own::range(1.0, nan, 2.0),
-            Own::constant(nan),
         ];
         let none = |o: Own, what: &str| assert!(o.is_none() && o.upper().is_nan() && o.lower().is_nan() && !(o.upper() < 0.5), "{what}: {o:?}");
         for (k, p) in poisoned.iter().enumerate() {
             assert!(p.is_none(), "{k}: {p:?}");
-            for (name, o) in [
-                ("add", p.add(fine)), ("add'", fine.add(*p)), ("sub", p.sub(fine)), ("sub'", fine.sub(*p)), ("mul", p.mul(fine)), ("mul'", fine.mul(*p)),
-                ("div", p.div(fine)), ("div'", fine.div(*p)), ("max", p.max(fine)), ("max'", fine.max(*p)), ("min", p.min(fine)), ("min'", fine.min(*p)),
-                ("square", p.square()), ("recip", p.recip()), ("sqrt", p.sqrt()), ("abs", p.abs()), ("scale", p.scale(2.0)), ("plus", p.plus(1.0)),
-                ("within", p.within(0.0, 1.0)), ("hypot", p.hypot(1.0)), ("dispersion", p.dispersion(1.0)), ("dispersion slope", p.dispersion_slope(1.0)),
-                ("dispersion ends", p.dispersion_ends(fine, 1.0)[1]), ("dispersion ends'", fine.dispersion_ends(*p, 1.0)[0]),
-            ] {
+            for (name, o) in [("add", p.add(fine)), ("add'", fine.add(*p)), ("plus", p.plus(1.0)), ("within", p.within(0.0, 1.0))] {
                 none(o, &format!("{k} {name}"));
             }
-            assert!(p.form().moved.is_nan() || p.form().most.is_nan(), "{k} form: {:?}", p.form());
         }
-        for (name, o) in [("scale", fine.scale(nan)), ("plus", fine.plus(nan)), ("within", fine.within(nan, 1.0)), ("within'", fine.within(0.0, nan))] {
+        for (name, o) in [("plus", fine.plus(nan)), ("within", fine.within(nan, 1.0)), ("within'", fine.within(0.0, nan))] {
             none(o, name);
         }
-        // The band of the case found: a radius none, its distance read through max(|Δ| − moved, 0) and Γ/2 -- none.
-        let distance = Own::constant(4.8e9).abs().sub(Own::range(nan, 2.27, nan)).max(Own::constant(0.0)).hypot(19.06);
-        none(distance, "the distance of a band that is none");
         assert!(most(nan, 1.0).is_nan() && most(1.0, nan).is_nan() && least(nan, 1.0).is_nan() && least(1.0, nan).is_nan() && most(1.0, 2.0) == 2.0 && least(1.0, 2.0) == 1.0);
         // ∞ is a number: an infinite value's form is its range.
         let infinite = Own::range(f64::INFINITY, 0.0, f64::INFINITY);
         assert!(!infinite.is_none() && infinite.upper() == f64::INFINITY && infinite.lower() == 0.0, "{infinite:?}");
-        assert!(!infinite.add(fine).is_none() && !fine.div(Own::range(0.0, 0.0, 1.0)).is_none(), "infinite forms stay numbers");
+        assert!(!infinite.add(fine).is_none(), "infinite forms stay numbers");
     }
 }

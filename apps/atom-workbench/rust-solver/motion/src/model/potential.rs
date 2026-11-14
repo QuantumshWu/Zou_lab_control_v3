@@ -18,7 +18,7 @@
 //! δΔ of its drives' denominators at the atom. That shift is the drive's fold with the levels at the atom, and it is there
 //! wherever that fold exists, whatever the dynamics make of the drive:
 //! - folded with the bare levels, the model holds none of it -- a bare fold's shift is a constant (far.rs), the first term
-//!   of the series in δΔ/(Δ₀ − iΓ/2) whose whole the fold at the atom is (units.rs, # Levels), and constants cancel in
+//!   of the series in δΔ/(Δ₀ − iΓ/2) whose whole the fold at the atom is (model.rs `Level`), and constants cancel in
 //!   h_L − h_{L∖trap}; the dynamics take that first term and book its error;
 //! - explicit, the model holds it as the cluster's dynamics, no potential of a ground state -- kept because its fold does
 //!   not exist, or because the solve bought its accuracy (SPEC §5.2).

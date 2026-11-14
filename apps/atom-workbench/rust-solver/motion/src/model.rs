@@ -1,6 +1,6 @@
 //! The atom's internal model at a point of its motion (SPEC §1.2–§1.8): the far light H_far, the one potential V_L, the trap and
-//! its analytic Hessian, the reach; the units and their existence gates; the clusters and their frames; the elimination
-//! (Reiter–Sørensen with Brillouin–Wigner dressing, first-order Doppler); the one generator assembly (H, G = ∇H_h, jump operators);
+//! its analytic Hessian, the reach; the units the solve keeps or folds; the clusters and their frames; the elimination (the
+//! one fold, elim.rs, and its normalized series; first-order Doppler); the one generator assembly (H, G = ∇H_h, jump operators);
 //! the readout, the hazard, the photons and their recoil.
 //!
 //! # Notation (SPEC §0 units)
@@ -13,9 +13,10 @@
 //!
 //! # What is exact and what is folded
 //! Every coupling is kept (it enters the cluster's generator as it is and the propagator resolves it) or folded at second order;
-//! which is decided per unit (`Unit`, SPEC §5.2) by `solve`, within the existence gates (`Gate`, SPEC §1.5) this module evaluates.
-//! No light is far or near: each drive -- one component's coupling of one ground state to one excited state -- is folded with
-//! the bare levels, folded with the levels at the atom, or explicit (`Level`), as its own denominator needs (`units`). A drive
+//! which is decided per unit (`Unit`, SPEC §5.2) by `solve`: the prior's closure at the reach's atoms (elim.rs `Model::prior`,
+//! criteria one and two) and the units' errors read at the run's states (elim.rs `Model::readings`), the model's domain
+//! checked here (`Model::settled`). No light is far or near: each drive -- one component's coupling of one ground state to
+//! one excited state -- is folded with the bare levels, folded with the levels at the atom, or explicit (`Level`). A drive
 //! folded with the bare levels enters through its second-order shift and its Reiter–Sørensen jumps (`far`), linear in
 //! T_ω = E_ω E_ω† and exact at the atom; one folded with the levels at the atom through its dressed response (`eliminate`), a
 //! nonlinear function of the constant forms and the other carriers at the atom. That elimination is evaluated at every point
@@ -43,6 +44,14 @@ pub mod tabulate;
 pub(crate) mod optical;
 pub(crate) mod jet;
 pub(crate) mod own;
+#[cfg(test)]
+pub(crate) mod testing;
+#[cfg(test)]
+mod near_tests;
+#[cfg(test)]
+mod table_tests;
+#[cfg(test)]
+mod trap_tests;
 
 use crate::field::Light;
 use crate::linalg::{C64, Mat};
@@ -133,8 +142,8 @@ impl cluster::Exact for Beat {
 pub struct Component { pub frequency: usize, pub counter: bool }
 
 impl Component {
-    /// Whether the model can take a drive of this component more exactly than its fold with the bare levels (units.rs,
-    /// # The model's domain): a co-rotating one, at the atom or explicit. A counter-rotating one is only ever folded with
+    /// Whether the model can take a drive of this component more exactly than its fold with the bare levels (the model's
+    /// domain, `Model::settled`): a co-rotating one, at the atom or explicit. A counter-rotating one is only ever folded with
     /// the bare levels -- a keep of it is refused (`Model::new`).
     pub fn keepable(&self) -> bool {
         !self.counter
@@ -255,17 +264,17 @@ pub struct Reach {
 }
 
 /// A unit (SPEC §5.2): one coupling the solve keeps or folds. The more exact level of every fold is keeping it. No unit names a
-/// kind of light: every drive and every coupling of two states is its own unit, judged at its own distance (units.rs).
+/// kind of light: every drive and every coupling of two states is its own unit, judged at its own distance (elim.rs: criteria
+/// one and two).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Unit {
     /// The drive of one component of the light from ground state `ground` into excited state `excited`, folded with the bare
-    /// levels: its shift and its jumps are constants (far.rs). Kept: its fold takes the levels at the atom (`Unit::Drive`).
+    /// levels: its shift and its jumps are constants (far.rs). Kept: its fold takes the levels at the atom (`Level::Atom`).
     Bare { component: Component, excited: usize, ground: usize },
     /// The same drive folded with the levels at the atom (eliminate.rs: the dressed response, tabulated). Kept: the excited
     /// state is explicit and the drive enters the generator as it is. Folded onto a state another kept drive makes explicit, it
-    /// is one leg of a Raman pair through that state: its value, its gate and its error are that pair's, across the
-    /// two-photon distance (far.rs, # A fold onto an explicit state; units.rs `Model::pair_gate`; eliminate.rs
-    /// `Model::pair_error`) -- at either level, the bare fold's too.
+    /// is one leg of a Raman pair through that state, read across the two-photon distance d (far.rs, # A fold onto an
+    /// explicit state): a P-layer link, explicit where criterion two's 2(a/d)² is beyond the share (`Model::settled`).
     Drive { component: Component, excited: usize, ground: usize },
     /// Every second-order coupling `a` ← `b` at one exact beat (∝ e^{i beat t}): of two ground states through the excited states
     /// -- one component's own (beat zero: the light's static couplings, the request's outside forms with them) or two
@@ -285,12 +294,13 @@ pub enum Unit {
     /// any other.
     Block { block: usize, component: Component, grounds: u32 },
     /// The fold's series about its reference at its first order (assemble.rs, # The normalized generator: H₀ − N₁E₀):
-    /// folded, the evaluation takes order 0; kept, order 1. Its error is measured at the run's states, order 0 against
-    /// order 1 (elim.rs `Fold::order_error`); a higher order is the nearest block's keep (`Unit::Block`).
+    /// folded, the evaluation takes order 0; kept, order 1. Its error is what order 1 takes away of the evaluation's error
+    /// against the definition, measured at the run's states (elim.rs `Model::readings`); a higher order is the nearest
+    /// block's keep (`Unit::Block`).
     Series,
     /// The normalization's series S⁻¹ = Σ_{j≤J} b_j X^j at the order `order` (assemble.rs `normal`): kept, the
-    /// evaluation takes J = `order`; its error is measured at the run's states, J − 1 against J (elim.rs
-    /// `Fold::normalization_error`).
+    /// evaluation takes J = `order`; its error is what order J takes away of the evaluation's error against the
+    /// definition, measured at the run's states (elim.rs `Model::readings`).
     Normalization { order: usize },
 }
 
@@ -504,7 +514,7 @@ impl Model {
             })
             .collect();
         // The drives, and their levels as the kept units give them: one level a drive, the highest of its kept units
-        // (units.rs, # Levels). A unit that names no drive of this request is none of the model's.
+        // (`Level`). A unit that names no drive of this request is none of the model's.
         let mut tones = vec![];
         for frequency in 0..light.frequencies.len() {
             tones.push(far::Tone::new(request, light, &axes, frequency)?);
@@ -714,7 +724,8 @@ impl Model {
     /// # A fold onto an explicit state): in the cluster's frames its ground states are slow at E_a − θ_a and its explicit
     /// excited states follow them, so the excited amplitude at `place` turns at θ_place + (E_a − θ_a) -- the mean over the
     /// cluster's ground states, which its kept couplings hold near one another (what one of them lies off the mean is in
-    /// the pair's error, eliminate.rs `Model::pair_error`). `value`: the levels are energies (with the frames); else a
+    /// the pair's two-photon distance as criterion two reads it, `Model::settled`). `value`: the levels are energies (with
+    /// the frames); else a
     /// derivative's part of their jet (the frames are constants).
     pub(crate) fn read(&self, cluster: &Cluster, place: usize, levels: &[f64], value: bool) -> f64 {
         let frame = |p: usize| if value { self.axes.omega(&cluster.frames[p]) } else { 0.0 };
@@ -739,14 +750,14 @@ impl Model {
         self.levels[2 * component.frequency + component.counter as usize][(excited - GROUND) * GROUND + ground]
     }
 
-    /// Where a jump's bare state f lands in a plan's cluster at a point (elim.rs `Fold::landed`; assemble.rs, # The
+    /// Where a jump's bare state f lands in a plan's cluster at a point (elim.rs `Fold::transients`; assemble.rs, # The
     /// normalized generator): the slow part of (f, 0) in the normalized coordinates, S (1 + Σ_f S_f T_f)⁻¹ f, the left
     /// and the right wave operators' overlap Σ_f S_f T_f to the series' leading order Σ_f W′ R₀² W = Y -- not
     /// normalized, its norm N against the next jump's threshold (step.rs `jump`): N < 1, the fast part takes the rest
     /// away at once (a photon more); N > 1, the next photon is late (antibunching). The same map is the light's switching
     /// on (ELIMINATION v3 4). Both factors to the normalization's order J (assemble.rs `normal`): at J = 0 the map is
-    /// the identity, its remainder booked with the normalization's (elim.rs `Series::normalization_remainder`). Where
-    /// the cluster has no fold the state is f.
+    /// the identity. (What the next order would change in the map is not measured on its own: the readings measure the
+    /// generator, elim.rs `Model::readings`.) Where the cluster has no fold the state is f.
     pub(crate) fn landed(&self, plan: &assemble::Plan, table: Option<&tabulate::NearTable>, at: &Point, f: &[C64]) -> crate::step::Internal {
         let Some(fourth) = plan.fourth.as_ref().filter(|fourth| fourth.bends()) else { return f.iter().copied().collect() };
         let (n, size) = (fourth.n, fourth.n * fourth.n);
@@ -944,7 +955,7 @@ impl<'a> Run<'a> {
         let (plan, table) = &self.plans[cluster];
         self.model.scattering_of(plan, *table, at, psi).0
     }
-    /// Where a jump's bare state `f` lands in a cluster at a point (assemble.rs, # The fourth order; `Model::landed`): the
+    /// Where a jump's bare state `f` lands in a cluster at a point (assemble.rs, # The normalized generator; `Model::landed`): the
     /// slow state it continues in, with its norm.
     pub fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> crate::step::Internal {
         let (plan, table) = &self.plans[cluster];
@@ -1034,41 +1045,5 @@ impl crate::step::Dynamics for Run<'_> {
     }
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
         Run::readout(self, cluster, at, psi)
-    }
-}
-
-#[cfg(test)]
-impl Model {
-    /// One round of a test's closure (the solve keeps by the units' errors measured at its pilot's states, solve.rs, # The
-    /// model): this model's trap and reach at `temperature_uk` for the ground state `state` alone, and its folded units
-    /// whose error measured at that state at the trap's centre -- at rest, and at the reach's largest speed along each lab
-    /// axis -- is ½ or more on its states' populations or on T, or whose small parameter there is (`units::EXISTS`: no fold
-    /// of that error holds there, no series of that parameter converges), the counter-rotating drives, which are only ever
-    /// folded, left out.
-    pub(crate) fn failing_at(&self, state: usize, temperature_uk: f64) -> (Trap, Reach, Vec<Unit>) {
-        let reference: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
-        let trap = self.trap(&reference, &self.prepared()).unwrap();
-        let reach = self.reach(&trap, &reference, temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
-        let cluster = self.membership[state];
-        let psi: Vec<C64> = self.clusters[cluster].states.iter().map(|&s| if s == state { C64::ONE } else { C64::ZERO }).collect();
-        let speed = reach.speed / self.hbar_over_mass;
-        let samples: Vec<Sample> = (0..4).map(|a| Sample { cluster, at: Point { r: trap.centre, kappa: std::array::from_fn(|b| if a == b + 1 { speed } else { 0.0 }), t: 0.0 }, psi: psi.clone() }).collect();
-        let units: Vec<Unit> = self.units().into_iter().filter(|u| !matches!(u, Unit::Bare { component, .. } if component.counter)).collect();
-        let errors = self.errors(&units, &samples);
-        let failing = units.iter().zip(&errors).filter(|(_, e)| e.iter().any(|e| !(e.population < units::EXISTS && e.temperature < units::EXISTS && e.parameter < units::EXISTS))).map(|(u, _)| u.clone()).collect();
-        (trap, reach, failing)
-    }
-
-    /// A test's closed model (`failing_at`, round after round from the units `kept`): the model, the units it keeps, its
-    /// trap and its reach.
-    pub(crate) fn closed_at(request: &Request, light: &Light, mut kept: Vec<Unit>, state: usize, temperature_uk: f64) -> (Model, Vec<Unit>, Trap, Reach) {
-        loop {
-            let model = Model::new(request, light, &kept).unwrap();
-            let (trap, reach, failing) = model.failing_at(state, temperature_uk);
-            if failing.is_empty() {
-                return (model, kept, trap, reach);
-            }
-            kept.extend(failing);
-        }
     }
 }

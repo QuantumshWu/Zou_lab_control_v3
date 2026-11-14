@@ -1,4 +1,4 @@
-//! The elimination with the levels at the atom (SPEC §1.4): second-order Reiter–Sørensen with Brillouin–Wigner dressing and
+//! The elimination with the levels at the atom (SPEC §1.4): the one fold (elim.rs `fold`; ELIMINATION §2–§3) with
 //! first-order Doppler, for the drives folded at that level (model.rs `Level::Atom`), evaluated exactly at a point with its
 //! first derivatives -- the definition the tables interpolate (SPEC §2.3).
 //!
@@ -6,34 +6,19 @@
 //! A carrier c (`Carrier`: a co-rotating component with a drive not bare) drives V_c(r) = Σ_l a_l(r) X_l e^{−iδ_c t}; V^f here
 //! is the part of it folded with the levels at the atom -- its bare drives' part is a constant (far.rs), its explicit drives
 //! are the generator's. The excited amplitude it drives from a ground state b of the cluster follows adiabatically,
-//! −R[:,b] x_b, with (internal.md 1.2)
-//!
-//! ```text
-//! R_c[:,b] = (K + Σ_b(z) − z)⁻¹ V_c^f[:,b]      z = E_b + δ_c + Σ_{d≠c} ΔE_b^d      K = H_ee − (i/2) D
-//! ΔE_b^d = −Re[V_d^f[:,b]† (K − E_b − δ_d)⁻¹ V_d^f[:,b]]          Σ_b(z) = Σ_{d, a∉C} V_d^f[:,a] V_d^f[:,a]† / (z − Ẽ_a − δ_d)
-//! ```
-//!
-//! H the constant forms' Hamiltonian at the point (far.rs: the base and every lit frequency's static form; a carrier's own
-//! frequency's with the interference its dressing keeps, below: `Model::far_hamiltonian`), E_b its ground diagonal,
-//! Ẽ_a = E_a + Σ_d ΔE_a^d. The other carriers dress b's energy (Brillouin–Wigner: in the denominator, to all orders); the folded
-//! channels to the ground states of other clusters (a ∉ C) are the self-energy of the excited states (a strong beam's Autler–Townes
-//! dressing of a probe through a folded Raman pair); the channels to the cluster's own states are its dynamics', none of Σ.
-//! A kept drive's channel is in Σ as a folded one's is, with its explicit coupling for V_d^f: an excited state another
-//! drive V makes explicit is dressed by it wherever b's channel is another Floquet state than that drive's own
-//! (`Model::apart`: a in another cluster, or the two a residual beat apart in one cluster's frames) -- b's response through
-//! it is U/(β̃ − |V|²/d_R), d_R = z − Ẽ_a − δ_d the two-photon distance of the Raman pair (far.rs, # A fold onto an
-//! explicit state). Without it the folded channel's shift is wrong by |V|²/(β d_R) and its rate by twice that (three
-//! levels, V = 2Γ, β = 27.4Γ, on resonance: −0.53 % and −1.06 %; with it 1.6e-4), without a bound at d_R → 0.
-//! Within a carrier the dressing takes T̄_d, the beams' coherence kept within a polarization unit (beams of parallel fields:
-//! a standing wave's intensity pattern) and averaged between units (SPEC §1.4): V_d V_d† → Σ_u v_u v_u†, v_u = Σ_{l∈u} a_l X^f_l,
-//! and of its frequency's constant form in H the beam pairs of one unit alone -- everything its light does to the
-//! denominators, its bare drives' shifts of the levels too, is one dressing; the units' interference is the dressing's
-//! error, measured at the atom. Per beam the response is T_l, R_c = Σ_l a_l T_l.
+//! −R[:,b] x_b, R the wave operator of the cluster's fold at the point (`Model::eliminate`): P the cluster's states in its
+//! frames, every lit carrier a class whose beams are one coherent field at the atom (ELIMINATION v2 2), the levels the far
+//! light's H(r) (`Model::far_hamiltonian`: the base and every lit frequency's static form), and the response
+//! self-consistent at its replica -- the other carriers' shifts of the levels and the folded channels' self-energy are in
+//! it to all orders (ELIMINATION §2–§3). An excited state a kept drive makes explicit is one of P's: a drive folded onto it
+//! is a Raman pair's leg, read across the two-photon distance (far.rs, # A fold onto an explicit state; model.rs
+//! `Model::settled`). Per beam the response is T_l, R_c = Σ_l a_l T_l.
 //!
 //! # First-order Doppler
 //! Absorbing beam l raises the excited state's energy by w_l = (ħ/m)(k_l·κ + |k_l|²/2); to first order T_l → T_l − w_l T2_l,
-//! T2 = (K + Σ − z)⁻¹ T (internal.md 1.4): in the generator and the photons alike. Its error is the second order,
-//! (w_l ‖T2_l‖/‖T_l‖)² measured at the atom (units.rs); no clamp, no switch (SPEC §1.4).
+//! T2 the response's next order in the excited levels' energy (internal.md 1.4): in the generator and the photons alike.
+//! Its error, the second order, is in criterion one's remainder over the frequency range the moving atom spans (elim.rs
+//! `errors`, Δ = max|Ω| + 2 k_max v); no clamp, no switch (SPEC §1.4).
 //!
 //! # The fold's terms: one contraction
 //! A folded drive leaves the ground states two things, both made of its response (`shift`, `jump`): with an emitted leg
@@ -54,9 +39,8 @@
 //! against the other's folded coupling V. The explicit drives enter as they are: a_l X_l[e,b] e^{−iδ_c t} and its adjoint.
 //!
 //! # Derivatives
-//! Everything above is a resolvent of the constant forms' H(r) and the fields: ∂_i T = −(K + Σ − z)⁻¹ ∂_i(K + Σ − z) T, with ∂_i K, ∂_i E_b
-//! from the constant forms' exact derivatives (far.rs), ∂_i ΔE from the dressing's own resolvent, ∂_i Σ from the fields' and the
-//! energies' -- the force's exact definition at the point.
+//! The elimination's derivatives in the position are central differences of the same function along its inputs' own Taylor
+//! path (`Model::eliminate`): exact but for the difference's O(δ²) and its rounding -- the force's definition at the point.
 
 use super::assemble::Plan;
 use super::{Beat, Component, Level, Lights, Model, Unit};
@@ -251,8 +235,7 @@ impl Model {
     /// function along the inputs' own Taylor path (h + δ·∂h + ½δ²·∂∂h, the amplitudes' likewise): a first derivative is the
     /// function's derivative along the inputs' first derivatives, exact but for the difference's O(δ²) and its rounding
     /// O(u/δ); at δ = u^{1/3} ℓ the two balance at u^{2/3} ≈ 4·10⁻¹¹ relative, ℓ = 1/k_max the light's shortest length,
-    /// the scale its inputs change on (the second derivatives at u^{1/4} ℓ, u^{1/2}). `coherent` and `places` are the
-    /// callers' (every carrier coherent; every place made).
+    /// the scale its inputs change on (the second derivatives at u^{1/4} ℓ, u^{1/2}).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn eliminate(&self, cluster: usize, h: &[Mat], lights: &Lights, order: usize) -> Responses {
         let np = jet::parts(order);
@@ -395,7 +378,7 @@ impl Model {
             .collect()
     }
 
-    /// The terms of the carriers' folded responses (`carrier_responses`), one a response of the plan's near forms, each to
+    /// The terms of the carriers' folded responses, one a response of the plan's near forms, each to
     /// `add` as it is made -- its carrier, its excited state (less GROUND), its ground place and its value
     /// e_k T_k − e^w_k T2_k --, from the forms' responding section `near` (its entry i: the T's, then the T2's). `fields` is
     /// its caller's vector, kept from one point to the next and written whole here before it is read: per carrier and
@@ -424,7 +407,7 @@ impl Model {
 impl Model {
 
     /// The largest wave number of the carriers' beams, k_max (1/µm): the light's pattern an atom crosses -- the recoil of
-    /// the scattering's photons at most (`force_over`), and the phase a step advances along it (solve.rs `prior`). None
+    /// the scattering's photons at most, and the phase a step advances along it (solve.rs `prior`). None
     /// carried, zero.
     pub(crate) fn carrier_wave_number(&self) -> f64 {
         self.carriers.iter().flat_map(|c| c.beams.iter().map(|&l| self.light.beams[l].wave_number)).fold(0.0, f64::max)
