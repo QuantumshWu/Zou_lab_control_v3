@@ -3416,7 +3416,9 @@ impl Hand<'_> {
 /// stays due, and is asked for again when the next group is in. A message is made on this thread by loops that run on
 /// the pool (`pooled`, `accounts`), whose threads are all in their trajectories: between two trajectories a thread
 /// takes what waits for the pool, so a message waits for the next trajectory to end on any thread and not for the
-/// list's end.
+/// list's end. A trajectory's panic -- the engine's defect -- ends the hand-out: no trajectory more is handed out, and
+/// once the threads' trajectories in hand end it unwinds to the caller (the worker answers the request with it, main.rs
+/// # Defects).
 fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Vec<Part>> {
     // Where each level's trajectories begin in the list, and the list's length.
     let starts: Vec<u64> = levels.iter().scan(0, |next, level| Some(std::mem::replace(next, *next + level.count()))).collect();
@@ -3443,7 +3445,15 @@ fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut
                     break;
                 }
                 let (level, k) = place(k);
-                let record = (levels[level].record)(levels[level].number(k));
+                // A trajectory's panic is the engine's defect: no trajectory more is handed out, and the panic unwinds
+                // to the hand-out's caller once the threads' trajectories in hand end (rayon's scope hands it on).
+                let record = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (levels[level].record)(levels[level].number(k)))) {
+                    Ok(record) => record,
+                    Err(payload) => {
+                        next.store(stop, Ordering::Relaxed);
+                        std::panic::resume_unwind(payload)
+                    }
+                };
                 if sender.send((level, k, record)).is_err() {
                     break;
                 }
@@ -6474,6 +6484,35 @@ mod tests {
                 assert_eq!(part.counts.steps, one.counts.steps);
             }
         }
+    }
+
+    /// A trajectory that panics ends its hand-out with its own panic, at once (`run_groups`): 37 groups of eight
+    /// trajectories of 40 ms each, the fourth of the first group panicking with its message -- the hand-out's caller
+    /// unwinds with that panic before half the time the other trajectories would take on the pool (no trajectory more
+    /// is handed out: before, all of them ran first, a product's batch minutes, and the app waited on a worker that
+    /// said nothing), and the pool serves the next hand-out.
+    #[test]
+    fn a_trajectory_s_panic_ends_its_hand_out_with_it() {
+        let shape = Shape { outputs: 2, reads: 2, listed: 1, keep: false };
+        let numbers: Vec<u64> = (2048..2053).chain(5..37).collect();
+        let each = Duration::from_millis(40);
+        let record = |i: u64| {
+            assert!(i != 2048 * GROUP + 3, "a trajectory's defect at {i}");
+            std::thread::sleep(each);
+            Record { reads: vec![Fate::Lost; 2], outputs: vec![Fate::Lost; 2], listed: vec![None], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2] }
+        };
+        let mut silent = |_: &Solution, _: Option<f64>| {};
+        let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0 };
+        let started = Instant::now();
+        let hands = [Hand { groups: &numbers, members: 0..GROUP, shape, record: &record }];
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_groups(&hands, &mut messages, &mut |_, _| {})));
+        let took = started.elapsed();
+        let message = outcome.err().and_then(|payload| payload.downcast_ref::<String>().cloned()).unwrap_or_default();
+        eprintln!("the hand-out ended after {took:?}: {message}");
+        let whole = each * (numbers.len() as u32 * GROUP as u32).div_ceil(rayon::current_num_threads() as u32);
+        assert!(message.contains("a trajectory's defect at 16387") && took < whole / 2, "{took:?} against {whole:?}: {message}");
+        let again = run_groups(&[Hand { groups: &numbers[1..2], members: 0..GROUP, shape, record: &record }], &mut messages, &mut |_, _| {});
+        assert_eq!(again[0].len(), 1);
     }
 
     /// What the reach leaves out of a tweezer's ensemble by quadrature (model/reach.rs `Model::left_out`, ensemble.rs
