@@ -459,6 +459,12 @@ impl Fourth {
     pub(crate) fn held(&self) -> bool {
         self.orders.series >= 1 || self.orders.hermitian >= 1
     }
+
+    /// Whether the normalized generator moves anything but the landing (`normal`): the held part, or S⁻¹ at an order
+    /// J ≥ 1 -- at J = 0 S⁻¹ = 1, the decay the generator's own and a state's photons on ψ itself, and E none (K = 0).
+    pub(crate) fn bends(&self) -> bool {
+        self.held() || self.orders.normalization >= 1
+    }
 }
 
 /// The normalized generator's matrices of a cluster at a point (module documentation, # The normalized generator), each
@@ -2294,7 +2300,7 @@ impl crate::step::Middle for Middle<'_> {
         let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
         let mut scratch = point.scratch.borrow_mut();
         let at = self.along(&point.amplitudes, path, s, false, &mut scratch);
-        let normalized = plan.fourth.as_ref().filter(|_| !point.normal.is_empty());
+        let normalized = plan.fourth.as_ref().filter(|fourth| fourth.bends() && !point.normal.is_empty());
         let Scratch { nodes, sum, quartic, temporary, .. } = &mut *scratch;
         if let Some(fourth) = normalized {
             self.model.node_normal(plan, fourth, &point, &mut nodes[at], quartic);

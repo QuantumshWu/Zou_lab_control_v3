@@ -342,7 +342,10 @@ impl Model {
     /// (and gradient) from its beams, plain and Doppler-weighted.
     #[allow(clippy::too_many_arguments)]
     fn sited(&self, plan: &Arc<Plan>, table: Option<&NearTable>, r: Option<[f64; 3]>, kappa: [f64; 3], order: usize, site: &mut Site, laid: bool) -> f64 {
-        let fourth = plan.fourth.as_ref().map_or(0.0, |fourth| self.quartic(plan, fourth, table, r, site, laid, false));
+        // A site of its own is a jump's (or a reading's): its landing follows at the same point (model.rs `Model::landed`),
+        // and is made with the photons' matrices; a middle's scattering asks none -- and nothing where S⁻¹ is the
+        // identity (assemble.rs `Fourth::bends`).
+        let fourth = plan.fourth.as_ref().filter(|fourth| fourth.bends() || !laid).map_or(0.0, |fourth| self.quartic(plan, fourth, table, r, site, laid, !laid));
         let near = match table {
             _ if plan.near.len() == 0 => {
                 site.jumped(plan, None);
@@ -374,7 +377,7 @@ impl Model {
         let mut work = made;
         // The normalized generator's states (assemble.rs, # The normalized generator): S⁻¹ψ and M ψ = E S⁻¹ψ, and with
         // the gradients the three lab axes' ∂S⁻¹ ψ and ∂M ψ.
-        let bent: Option<[[C64; STATES]; 8]> = plan.fourth.as_ref().map(|fourth| {
+        let bent: Option<[[C64; STATES]; 8]> = plan.fourth.as_ref().filter(|fourth| fourth.bends()).map(|fourth| {
             let (n, size) = (fourth.n, fourth.n * fourth.n);
             crate::model::Model::quartic_read(|q| {
                 let mut out = [[C64::ZERO; STATES]; 8];
