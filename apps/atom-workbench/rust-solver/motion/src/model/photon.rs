@@ -597,7 +597,7 @@ impl Model {
     }
 
     /// The two classes a coherence unit names, per source cluster: (cluster, class of `first`, class of `second`).
-    fn coherence_classes(&self, unit: &Unit) -> Vec<(usize, usize, usize)> {
+    pub(crate) fn coherence_classes(&self, unit: &Unit) -> Vec<(usize, usize, usize)> {
         let Unit::Coherence { landing, first, second } = unit else { return vec![] };
         let mut out = vec![];
         for cluster in 0..self.clusters.len() {

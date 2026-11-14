@@ -700,8 +700,10 @@ pub struct Trajectory {
 }
 
 impl Trajectory {
-    /// A trajectory at a basis state (a ground state of the model basis) at (r, κ) and time 0: ψ the unit vector of that
-    /// state on its cluster, the first threshold from jump 0's stream (SPEC §2.4).
+    /// A trajectory at a basis state (a ground state of the model basis) at (r, κ) and time 0, the light switched on there
+    /// (SPEC §2.4; ELIMINATION v3 4): the bare state -- the unit vector of that state on its cluster -- is a jump's
+    /// landing, the same map (model.rs `Model::landed`): its slow part, against the first threshold from jump 0's stream;
+    /// at the threshold already, the fast part's photon at once, as after a jump (`jump`).
     pub fn new<D: Dynamics>(model: &D, state: usize, r: [f64; 3], kappa: [f64; 3], seed: u64, index: u64) -> Trajectory {
         let cluster = model.cluster_of(state);
         let states = &model.cluster(cluster).states;
@@ -709,7 +711,12 @@ impl Trajectory {
         let mut psi = Internal::zeros(states.len());
         psi[at] = C64::ONE;
         let threshold = Stream::jump(seed, index, 0).open_uniform();
-        Trajectory {
+        let landed = model.landed(cluster, &Point { r, kappa, t: 0.0 }, &psi);
+        let on = norm_sqr(&landed) > threshold;
+        if on {
+            psi = landed;
+        }
+        let mut trajectory = Trajectory {
             r,
             kappa,
             psi,
@@ -725,7 +732,12 @@ impl Trajectory {
             work: 0.0,
             pending: [[0.0; 3]; 3],
             booked: [0.0; 3],
+        };
+        if !on {
+            // A bare state with no photon to emit goes on as it is.
+            let _ = jump(model, &mut trajectory);
         }
+        trajectory
     }
     /// The trajectory's point.
     pub fn point(&self) -> Point {

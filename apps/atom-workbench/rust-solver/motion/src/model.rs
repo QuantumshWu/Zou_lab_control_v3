@@ -214,6 +214,10 @@ pub enum Unit {
     /// The coherence of the photons landing in ground state `landing` at two frame frequencies `first` and `second` (in the
     /// landing cluster's frames). Kept: one class, their interference with its beat; folded: two classes.
     Coherence { landing: usize, first: Beat, second: Beat },
+    /// An excited hyperfine block F′ (elim.rs `Object::Block`, `Model::blocks`): kept, its states are explicit -- every
+    /// drive into them of the co-rotating component that drives the block most at the focus (`Model::block_drives`)
+    /// is kept as it is (`Unit::Drive`).
+    Block { block: usize },
 }
 
 /// How a drive is taken (SPEC §1.4): folded with the bare levels, folded with the levels at the atom, or explicit. A drive has
@@ -514,6 +518,12 @@ impl Model {
 
     /// What a request gives with the units `kept` (`Model::new`).
     fn settled(given: Given, kept: &[Unit]) -> Result<Model, String> {
+        // A kept block is its drives (`Unit::Block`).
+        let kept: Vec<Unit> = kept.iter().flat_map(|u| match u {
+            Unit::Block { block } => block_drives(&given, *block),
+            _ => vec![u.clone()],
+        }).collect();
+        let kept = &kept[..];
         let Given { light, axes, waves, beam_wave, hbar_over_mass, energies, base, emission, decay, tones, driven, labels, names } = given;
         let mut levels: Vec<Vec<Level>> = (0..2 * tones.len()).map(|_| vec![Level::Bare; far::EXCITED * GROUND]).collect();
         for unit in kept {
@@ -797,6 +807,23 @@ impl Model {
         }
         p
     }
+}
+
+/// The drives a kept excited block is (`Unit::Block`): of the co-rotating component whose couplings into the block's
+/// states are strongest at the focus -- Σ |Σ_l a_l X_l[e, g]|² over the block's states and every ground state, the
+/// coherent field there --, every drive into the block's states (`Unit::Drive`): its excitation the block holds the
+/// most of, the frame the explicit block turns in (ELIMINATION v2 5).
+fn block_drives(given: &Given, block: usize) -> Vec<Unit> {
+    let blocks = elim::excited_blocks(&given.labels);
+    let Some(states) = blocks.get(block) else { return vec![] };
+    let focus = given.light.amplitudes([0.0; 3]);
+    let strength = |frequency: usize| -> f64 {
+        let f = &given.light.frequencies[frequency];
+        states.iter().flat_map(|&e| (0..GROUND).map(move |g| (e, g))).map(|(e, g)| f.beams.iter().zip(&given.tones[frequency].couplings[0]).map(|(&l, x)| focus[l].value * x[(GROUND + e, g)]).sum::<C64>().norm_sqr()).sum()
+    };
+    let Some(frequency) = (0..given.tones.len()).filter(|&w| strength(w) > 0.0).max_by(|&a, &b| strength(a).total_cmp(&strength(b))) else { return vec![] };
+    let component = Component { frequency, counter: false };
+    given.driven.iter().filter(|d| d.0 == component && states.contains(&(d.1 - GROUND))).map(|&(component, excited, ground)| Unit::Drive { component, excited, ground }).collect()
 }
 
 /// Whether two beams' wave vectors are one up to the sign `sign` (k = sign·w): every component within the rounding of the

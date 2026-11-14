@@ -180,6 +180,9 @@ pub(crate) struct Fold {
     pub eigen: Eigen,
     pub exists: bool,
     pub iterations: usize,
+    /// The reference z₀ where the fold is its series' order 0 about it (`fold`'s `reference`), none where it is the
+    /// self-consistent fold.
+    pub reference: Option<f64>,
     /// The direct entries of P that turn in the frames: (row, column, residual beat Ω, value), the entry ∝ e^{−iΩt}.
     pub turning: Vec<(usize, usize, f64, C64)>,
     /// Per class and ground state the replica (an index into `replicas`) its drive feeds; the generator's Schur form.
@@ -425,8 +428,15 @@ fn settle(start: &Mat, mut step: impl FnMut(&Mat) -> (Mat, f64), terms: usize) -
 
 /// The fold at a point (module documentation, # The fold): the replicas' couplings, then the self-consistent
 /// iteration H ← A + Σ_f W'_f T_f(H) from H = A (`settle`: `Fold::exists` false where it does not contract within the
-/// fold's existence bound).
+/// fold's existence bound) -- or, about a `reference` z₀, its series' order 0: one step from H = z₀, T_f = R₀ W_f and
+/// H = A + Σ_f W'_f R₀ W_f (module documentation, # The definition and the route it is evaluated on; the run's own
+/// evaluation, what its states are read on).
 pub(crate) fn fold(levels: &Levels, classes: &[Class], slow: &Slow, replicas: &Replicas) -> Fold {
+    fold_about(levels, classes, slow, replicas, None)
+}
+
+/// `fold`, about a reference where one is given.
+pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replicas: &Replicas, reference: Option<f64>) -> Fold {
     let ground = levels.ground.rows;
     let nx = slow.explicit.len();
     let n = ground + nx;
@@ -538,28 +548,30 @@ pub(crate) fn fold(levels: &Levels, classes: &[Class], slow: &Slow, replicas: &R
     }
     // The self-consistent iteration: H ← A + Σ_f W'_f T_f(H), to the rounding of a Sylvester solution's entries (sums of
     // n_P n_Q products) times the terms' scale; the fold exists where it gets there, contracting.
-    let (h, iterations, exists) = settle(
-        &a,
-        |h| {
-            let sh = Schur::of(h).expect("the Schur form of P's generator");
-            let (mut next, mut scale) = (a.clone(), a.frobenius());
-            for rep in folded.iter_mut() {
-                rep.t = sylvester(&rep.k, &sh, rep.frequency, &rep.w);
-                next.add_scaled(C64::ONE, &rep.back.product(&rep.t));
-                scale += rep.back.frobenius() * rep.t.frobenius();
-            }
-            (next, scale)
-        },
-        (n + excited) * (n + excited),
-    );
-    // The responses at the generator they made it of, and their frequency partners and the feeds' own, at its final form.
+    let mut step = |h: &Mat| {
+        let sh = Schur::of(h).expect("the Schur form of P's generator");
+        let (mut next, mut scale) = (a.clone(), a.frobenius());
+        for rep in folded.iter_mut() {
+            rep.t = sylvester(&rep.k, &sh, rep.frequency, &rep.w);
+            next.add_scaled(C64::ONE, &rep.back.product(&rep.t));
+            scale += rep.back.frobenius() * rep.t.frobenius();
+        }
+        (next, scale)
+    };
+    let (h, iterations, exists) = match reference {
+        None => settle(&a, step, (n + excited) * (n + excited)),
+        Some(z0) => (step(&Mat::from_fn(n, n, |i, j| if i == j { C64::real(z0) } else { C64::ZERO })).0, 1, true),
+    };
+    // The responses at the generator they made it of, at its final form (about a reference: R₀ W, as made).
     let sh = Schur::of(&h).expect("the Schur form of P's generator");
-    for rep in folded.iter_mut() {
-        rep.t = sylvester(&rep.k, &sh, rep.frequency, &rep.w);
+    if reference.is_none() {
+        for rep in folded.iter_mut() {
+            rep.t = sylvester(&rep.k, &sh, rep.frequency, &rep.w);
+        }
     }
     let mut eigen = Eigen::default();
     eigen.decompose(&h);
-    Fold { ground, explicit: slow.explicit.clone(), frames: slow.frames.clone(), direct: a, generator: h, replicas: folded, eigen, exists, iterations, turning, driven, schur: sh }
+    Fold { ground, explicit: slow.explicit.clone(), frames: slow.frames.clone(), direct: a, generator: h, replicas: folded, eigen, exists, iterations, reference, turning, driven, schur: sh }
 }
 
 /// One P-layer component's reading (criterion two): its size a in H's eigenbasis, its distance δ = Ω + λ_p − λ_p',
@@ -655,12 +667,12 @@ impl Fold {
         let doppler = |k: [f64; 3]| k[0] * velocity[0] + k[1] * velocity[1] + k[2] * velocity[2];
         let eigenbasis = |m: &Mat| self.eigen.inverse.product(&m.product(&self.eigen.vectors));
         for (i, rep) in self.replicas.iter().enumerate() {
-            for (j, other) in self.replicas.iter().enumerate() {
-                if i == j {
-                    continue;
-                }
-                for feed in &rep.feeds {
-                    let response = sylvester(&rep.k, &self.schur, rep.frequency, &feed.w);
+            for feed in &rep.feeds {
+                let response = sylvester(&rep.k, &self.schur, rep.frequency, &feed.w);
+                for (j, other) in self.replicas.iter().enumerate() {
+                    if i == j {
+                        continue;
+                    }
                     for back in &other.feeds {
                         // The other replica's light emitted from this one's excited amplitude: its coupling back from Q_f.
                         let m = Mat::from_fn(n, n, |r, c| rep.q.iter().enumerate().map(|(y, &e)| back.emitted[(r, e)] * response[(y, c)]).sum());
@@ -925,6 +937,14 @@ impl Fold {
         let adjoints: Vec<Schur> = self.replicas.iter().map(|rep| rep.k.adjoint()).collect();
         let mut s: Vec<Mat> = self.replicas.iter().map(|rep| Mat::zeros(n, rep.q.len())).collect();
         let excited = self.replicas.iter().map(|rep| rep.q.len()).max().unwrap_or(1);
+        // About a reference, the series' order 0: S_f = W′_f R₀, one step from M = z₀.
+        if let Some(z0) = self.reference {
+            let sm = Schur::of(&Mat::from_fn(n, n, |i, j| if i == j { C64::real(z0) } else { C64::ZERO })).expect("a scalar's Schur form");
+            for ((rep, k), si) in self.replicas.iter().zip(&adjoints).zip(s.iter_mut()) {
+                *si = sylvester(k, &sm, rep.frequency, &rep.back.adjoint()).adjoint();
+            }
+            return Some(s);
+        }
         // From the right generator, which the left one is similar to, M = (1 + ST) H (1 + ST)⁻¹: within the excited share
         // X of it.
         let (_, _, settled) = settle(
@@ -976,27 +996,51 @@ impl Fold {
     /// line it is the whole difference between the mean scattering rate after a jump and the optical Bloch steady state
     /// beside the threshold's clamp (tests). Returns (x₀, τ).
     pub(crate) fn transient(&self, s: &[Mat], f: &[C64]) -> Option<(Vec<C64>, f64)> {
-        let x0 = self.landed_with(s, f)?;
-        let h = Schur::of(&self.generator)?;
-        let mut tau = 0.0;
-        for (rep, si) in self.replicas.iter().zip(s) {
-            let nq = rep.q.len();
-            if nq == 0 {
-                continue;
-            }
-            let k = &rep.k;
-            let kh = k.adjoint();
-            let identity = Mat::from_fn(nq, nq, |i, j| if i == j { C64::new(0.0, -1.0) } else { C64::ZERO });
-            let lyapunov = solve_sylvester(&kh, C64::ZERO, k, C64::ZERO, &identity);
-            let mut b = rep.t.clone();
-            b.add_scaled(-C64::ONE, &si.adjoint());
-            let cross = solve_sylvester(&kh, C64::real(-rep.frequency), &h, C64::ZERO, &b.scaled(C64::new(0.0, -1.0)));
-            let y = rep.t.apply(&x0);
-            let ly = lyapunov.apply(&y);
-            let cx = cross.apply(&x0);
-            tau += crate::linalg::inner(&y, &ly).re - 2.0 * crate::linalg::inner(&y, &cx).re;
+        self.transients(s, &[f.to_vec()])?.pop()
+    }
+
+    /// `transient` of several bare states: each replica's 𝓛 and 𝒳 and the landing's overlap made once.
+    pub(crate) fn transients(&self, s: &[Mat], fs: &[Vec<C64>]) -> Option<Vec<(Vec<C64>, f64)>> {
+        let mut overlap = Mat::identity(self.size());
+        for (si, rep) in s.iter().zip(&self.replicas) {
+            overlap.add_scaled(C64::ONE, &si.product(&rep.t));
         }
-        Some((x0, tau))
+        let lu = crate::linalg::Lu::new(&overlap)?;
+        let h = Schur::of(&self.generator)?;
+        let solved: Vec<Option<(Mat, Mat)>> = self
+            .replicas
+            .iter()
+            .zip(s)
+            .map(|(rep, si)| {
+                let nq = rep.q.len();
+                if nq == 0 {
+                    return None;
+                }
+                let k = &rep.k;
+                let kh = k.adjoint();
+                let identity = Mat::from_fn(nq, nq, |i, j| if i == j { C64::new(0.0, -1.0) } else { C64::ZERO });
+                let lyapunov = solve_sylvester(&kh, C64::ZERO, k, C64::ZERO, &identity);
+                let mut b = rep.t.clone();
+                b.add_scaled(-C64::ONE, &si.adjoint());
+                let cross = solve_sylvester(&kh, C64::real(-rep.frequency), &h, C64::ZERO, &b.scaled(C64::new(0.0, -1.0)));
+                Some((lyapunov, cross))
+            })
+            .collect();
+        Some(
+            fs.iter()
+                .map(|f| {
+                    let mut x0 = f.clone();
+                    lu.solve(&mut x0);
+                    let mut tau = 0.0;
+                    for (rep, made) in self.replicas.iter().zip(&solved) {
+                        let Some((lyapunov, cross)) = made else { continue };
+                        let y = rep.t.apply(&x0);
+                        tau += crate::linalg::inner(&y, &lyapunov.apply(&y)).re - 2.0 * crate::linalg::inner(&y, &cross.apply(&x0)).re;
+                    }
+                    (x0, tau)
+                })
+                .collect(),
+        )
     }
 }
 
@@ -1254,7 +1298,7 @@ impl super::Model {
     /// folded at the atom and explicit, the cluster's explicit states and frames; with the far levels' mean in the
     /// frames and the norm of what the far levels leave out of the excited block -- the carriers' own static forms there,
     /// bilinear in the near field (eliminate.rs `level_pair`) -- in the Frobenius norm, a bound of the spectral one.
-    fn cluster_fold(&self, cluster: usize, amplitudes: &[crate::field::Amplitude]) -> Option<(Fold, f64, f64)> {
+    pub(crate) fn cluster_fold(&self, cluster: usize, amplitudes: &[crate::field::Amplitude], about: bool) -> Option<(Fold, Levels, f64, f64)> {
         use crate::request::{GROUND, STATES};
         let running = self.running();
         let h = &self.far_hamiltonian(amplitudes, &running, 0, &[])[0];
@@ -1274,9 +1318,8 @@ impl super::Model {
                 }
                 Class { nu: cc.detuning, beams: vec![Beam { coupling, wave: [0.0; 3] }] }
             })
-            .filter(|class| class.beams[0].coupling.max_abs() > 0.0)
             .collect();
-        if classes.is_empty() {
+        if classes.iter().all(|class| class.beams[0].coupling.max_abs() == 0.0) {
             return None;
         }
         let levels = Levels {
@@ -1289,7 +1332,7 @@ impl super::Model {
         let far = (0..g).map(|y| h[(grounds[y], grounds[y])].re - frames[y]).sum::<f64>() / g as f64;
         let slow = Slow { explicit: c.states[g..].iter().map(|&s| s - GROUND).collect(), frames };
         let replicas = Replicas::of(&classes, &slow, g);
-        let fold = fold(&levels, &classes, &slow, &replicas);
+        let fold = fold_about(&levels, &classes, &slow, &replicas, about.then(|| far + self.series.centre[cluster]));
         // The carriers' static forms on the excited block.
         let mut left = Mat::zeros(excited.len(), excited.len());
         for cc in &self.carriers {
@@ -1302,7 +1345,7 @@ impl super::Model {
                 }
             }
         }
-        Some((fold, far, left.frobenius()))
+        Some((fold, levels, far, left.frobenius()))
     }
 
     /// The model's series constants at the atoms `points` (`Series`): per cluster the centre of the near light's scalar
@@ -1320,7 +1363,7 @@ impl super::Model {
                 let amplitudes = self.light.amplitudes(r);
                 (0..clusters)
                     .map(|cluster| {
-                        let (fold, far, left) = self.cluster_fold(cluster, &amplitudes)?;
+                        let (fold, _, far, left) = self.cluster_fold(cluster, &amplitudes, false)?;
                         let like: Vec<usize> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
                         let shift = like.iter().map(|&p| fold.eigen.values[p].re).sum::<f64>() / like.len().max(1) as f64 - far;
                         Some((shift, fold, far, left))
@@ -1347,6 +1390,119 @@ impl super::Model {
             })
             .fold(0.0, f64::max);
         Series { centre, ratio, order: Series::order_of(ratio).unwrap_or(usize::MAX) }
+    }
+
+    /// The excited hyperfine blocks F′ of the model's states (`blocks`), from its labels.
+    pub(crate) fn blocks(&self) -> Vec<Vec<usize>> {
+        excited_blocks(&self.labels)
+    }
+
+    /// The keep rule's objects of this model (ELIMINATION.md §6: its two kinds, and the photons' cross terms) as the
+    /// model's units: every excited block a carrier drives that is not explicit (`Unit::Block`); every P-layer link of
+    /// two states of the model's clusters at a beat of two classes (a carrier's co-rotating component or none: lab
+    /// beats ν_d − ν_c, ±ν_c and zero) that its generator does not hold as it is (`Unit::Term`); every pair of photon
+    /// classes landing in one cluster (`Unit::Coherence`, photon.rs `Model::coherence_units`). The kept ones left out.
+    pub(crate) fn candidates(&self) -> Vec<super::Unit> {
+        use crate::request::GROUND;
+        let mut out: Vec<super::Unit> = vec![];
+        for (b, block) in self.blocks().iter().enumerate() {
+            let driven = self.carriers.iter().any(|cc| cc.folded.iter().any(|m| block.iter().any(|&e| (0..GROUND).any(|g| m[(GROUND + e, g)] != C64::ZERO))));
+            if driven && !block.iter().any(|&e| self.explicit(GROUND + e)) {
+                out.push(super::Unit::Block { block: b });
+            }
+        }
+        let classes: Vec<super::Beat> = std::iter::once(self.axes.zero()).chain(self.carriers.iter().map(|cc| cc.beat.clone())).collect();
+        let mut beats: Vec<super::Beat> = vec![];
+        for x in &classes {
+            for y in &classes {
+                let beat = x.plus(-1, y);
+                if !beats.contains(&beat) {
+                    beats.push(beat);
+                }
+            }
+        }
+        let states: Vec<usize> = self.clusters.iter().flat_map(|c| c.states.iter().copied()).collect();
+        for beat in &beats {
+            for &a in &states {
+                for &b in &states {
+                    if (a == b && beat.is_zero()) || (a >= GROUND && b >= GROUND) {
+                        continue;
+                    }
+                    let unit = super::eliminate::term_unit(a, b, beat);
+                    if !out.contains(&unit) && !self.in_generator(a, b, beat) {
+                        out.push(unit);
+                    }
+                }
+            }
+        }
+        out.extend(self.coherence_units());
+        out.retain(|u| !self.kept.contains(u));
+        out
+    }
+
+    /// The candidates' errors at a trajectory state (`candidates`; ELIMINATION.md §6: the prior's function at a run's
+    /// state): the fold of the sample's cluster at its point (`cluster_fold`, the definition the run's series stands for)
+    /// read by `errors` at the state, the atom's velocity and the frequency range its amplitude spans -- the cluster's
+    /// residual beats and the pattern its moving atom sees, Δ = max|Ω| + 2 k_max v (`closure`) --, each part on its
+    /// object's unit: a block's on `Unit::Block`, a link's on the `Unit::Term` of its two states at its lab beat. The
+    /// photons' cross terms on the run's photon classes, which land in every cluster: of each pair landing in one, the
+    /// rate of their interference at the state γ = |Σ_a ⟨u_a|u′_a⟩| over the state's norm, against their beat Ω -- γ/|Ω|
+    /// (v3 1: the secular approximation's first order), on `Unit::Coherence`. A relative rate error x moves the
+    /// populations by at most x (absolute) and T by x (relative).
+    pub(crate) fn readings(&self, units: &[super::Unit], sample: &super::Sample, tables: Option<&super::tabulate::Tables>) -> Vec<super::UnitError> {
+        use crate::request::GROUND;
+        use super::{Unit, UnitError};
+        let mut out = vec![UnitError::NONE; units.len()];
+        let mut book = |unit: &Unit, x: f64, out: &mut Vec<UnitError>| {
+            if let Some(i) = units.iter().position(|u| u == unit) {
+                let e = &mut out[i];
+                (e.parameter, e.population, e.temperature) = (e.parameter.max(x), e.population + x, e.temperature + x);
+            }
+        };
+        let c = &self.clusters[sample.cluster];
+        let g = c.ground;
+        let amplitudes = self.light.amplitudes(sample.at.r);
+        let velocity = sample.at.kappa.map(|k| k * self.hbar_over_mass);
+        let speed = crate::linalg::norm3(velocity);
+        if let Some((fold, levels, _, _)) = self.cluster_fold(sample.cluster, &amplitudes, true) {
+            let plan = self.plan(sample.cluster, &self.running());
+            let fastest = self.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
+            let range = plan.sampled.iter().map(|t| t[0]).fold(0.0, f64::max) + 2.0 * fastest * speed;
+            let state = |label: usize| if label < g { c.states[label] } else { GROUND + label - g };
+            let class = |k: Option<usize>| k.map_or(self.axes.zero(), |k| self.carriers[k].beat.clone());
+            let term = |l: &Link| super::eliminate::term_unit(state(l.a), state(l.b), &class(l.classes.0).plus(-1, &class(l.classes.1)));
+            let linked = |l: &Link| {
+                let Unit::Term { a, b, beat } = term(l) else { unreachable!("a link's unit is a term") };
+                self.in_generator(a, b, &beat)
+            };
+            let blocks = self.blocks();
+            let errors = errors(&fold, &levels, &blocks, &linked, None, &sample.psi, velocity, range);
+            for (object, x) in &errors.parts {
+                match object {
+                    Object::Block(b) => book(&Unit::Block { block: *b }, *x, &mut out),
+                    Object::Link(l) => book(&term(l), *x, &mut out),
+                    Object::Photons(..) => {}
+                }
+            }
+        }
+        // The photons' cross terms.
+        let lights = self.running();
+        let plan = self.plan(sample.cluster, &lights);
+        let table = tables.and_then(|t| t.of(sample.cluster, &lights));
+        let (photons, _) = self.photons_of(&plan, table, &sample.at, &sample.psi, super::photon::Gradients::None);
+        let norm = crate::linalg::norm_sqr(&sample.psi);
+        for unit in units.iter().filter(|u| matches!(u, Unit::Coherence { .. })) {
+            let Unit::Coherence { first, second, .. } = unit else { continue };
+            for (cluster, i, j) in self.coherence_classes(unit) {
+                if cluster != sample.cluster {
+                    continue;
+                }
+                let (Some(u), Some(v)) = (photons.iter().find(|p| p.class == i), photons.iter().find(|p| p.class == j)) else { continue };
+                let gamma = (0..3).map(|a| crate::linalg::inner(&u.amplitudes[a], &v.amplitudes[a])).sum::<C64>().abs() / norm;
+                book(unit, gamma / self.omega(&second.plus(-1, first)).abs(), &mut out);
+            }
+        }
+        out
     }
 
     /// The model's prior (ELIMINATION.md §3–§4, the brief's "先验"): at the reach's own atoms `points` (position,
@@ -1423,9 +1579,14 @@ impl super::Model {
 /// moves -- the Zeeman shifts and the light's tensor shifts couple a block's sublevels, so splitting one breaks the
 /// block structure (ELIMINATION.md §3).
 pub(crate) fn blocks(request: &crate::request::Request) -> Vec<Vec<usize>> {
+    excited_blocks(&request.states)
+}
+
+/// The excited blocks of the states' labels (`blocks`).
+pub(crate) fn excited_blocks(states: &[String]) -> Vec<Vec<usize>> {
     use crate::request::{Level, GROUND};
     let mut out: Vec<(String, Vec<usize>)> = vec![];
-    for (e, label) in request.states[GROUND..].iter().enumerate() {
+    for (e, label) in states[GROUND..].iter().enumerate() {
         let l = Level::parse(label).expect("a request's state label");
         let name = format!("{:?}{}", l.manifold, l.f);
         match out.iter_mut().find(|b| b.0 == name) {
@@ -1716,7 +1877,11 @@ pub(crate) struct Errors {
 /// A relative rate error x moves the populations by at most x (absolute) and T, which the light sets through its rates
 /// and shifts, by x relative: the four terms add on both.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], kept: &Kept, psi: &[C64], velocity: [f64; 3], range: f64) -> Errors {
+/// `linked`: whether a P-layer link is the model's (kept, or static in its frames: in its generator as it is);
+/// `photons`: whether a pair of photon frequencies' cross term is kept -- None where the caller books the photons'
+/// cross terms itself (the run's photon classes, which land in every cluster: model.rs `Model::readings`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked: &dyn Fn(&Link) -> bool, photons: Option<&dyn Fn((Option<usize>, Option<usize>)) -> bool>, psi: &[C64], velocity: [f64; 3], range: f64) -> Errors {
     let n = fold.size();
     let ground = fold.ground;
     let excited = levels.excited.rows;
@@ -1757,10 +1922,10 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], kept: 
     if let Some(left) = fold.left_operators() {
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let metric = fold.metric();
-        for g in (0..ground).filter(|&g| psi[g].norm_sqr() > 0.0) {
+        let landings: Vec<usize> = (0..ground).filter(|&g| psi[g].norm_sqr() > 0.0).collect();
+        let bares: Vec<Vec<C64>> = landings.iter().map(|&g| (0..n).map(|i| if i == g { C64::ONE } else { C64::ZERO }).collect()).collect();
+        for (&g, (x0, tau)) in landings.iter().zip(fold.transients(&left, &bares).unwrap_or_default()) {
             let population = psi[g].norm_sqr() / norm;
-            let bare: Vec<C64> = (0..n).map(|i| if i == g { C64::ONE } else { C64::ZERO }).collect();
-            let Some((x0, tau)) = fold.transient(&left, &bare) else { continue };
             let held = crate::linalg::inner(&x0, &metric.apply(&x0)).re;
             let big = crate::linalg::norm_sqr(&x0) + held;
             let mx: Vec<C64> = {
@@ -1803,24 +1968,26 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], kept: 
     let mut averaged = 0.0;
     for x in fold.components(velocity) {
         let link = Link { a: label(x.row), b: label(x.column), classes: x.classes };
-        if kept.links.contains(&link) || (weight[x.row] == 0.0 && weight[x.column] == 0.0) {
+        if linked(&link) || (weight[x.row] == 0.0 && weight[x.column] == 0.0) {
             continue;
         }
         let e = x.mixing() * x.mixing() * (weight[x.row] + weight[x.column]);
         averaged += e;
         add(Object::Link(link), e, &mut parts);
     }
-    let mut photons = 0.0;
-    for x in fold.photons(levels) {
-        if kept.photons.contains(&x.classes) || weight[x.from] == 0.0 {
-            continue;
+    let mut cross = 0.0;
+    if let Some(kept) = photons {
+        for x in fold.photons(levels) {
+            if kept(x.classes) || weight[x.from] == 0.0 {
+                continue;
+            }
+            let e = x.size / x.beat.abs() * weight[x.from];
+            cross += e;
+            add(Object::Photons(x.classes.0, x.classes.1), e, &mut parts);
         }
-        let e = x.size / x.beat.abs() * weight[x.from];
-        photons += e;
-        add(Object::Photons(x.classes.0, x.classes.1), e, &mut parts);
     }
-    let sum = remainder + transient + averaged + photons;
-    Errors { population: sum, temperature: sum, remainder, transient, averaged, photons, parts }
+    let sum = remainder + transient + averaged + cross;
+    Errors { population: sum, temperature: sum, remainder, transient, averaged, photons: cross, parts }
 }
 
 #[cfg(test)]

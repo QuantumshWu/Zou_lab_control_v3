@@ -694,7 +694,7 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
         // The units the next model keeps, and the states this model's last attempt left (an attempt's keep).
         let (more, left) = {
             // A model's units ask nothing of its trap: the two are made side by side on the pool.
-            let (trap, units) = rayon::join(|| model.trap(&reference, &model.prepared()), || model.units());
+            let (trap, units) = rayon::join(|| model.trap(&reference, &model.prepared()), || model.candidates());
             let trap = trap?;
             // The reported trap and the entries the first rung reads ask nothing of one another: side by side on the pool.
             let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&model, &light, alone(s))).collect::<Result<_, _>>()?;
@@ -1589,9 +1589,9 @@ fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Table
             }
         }
     }
-    // The units read and those booked at their bounds, at the largest speed of the states read.
-    let speed = rows.iter().flat_map(|&(_, _, _, state, last)| std::iter::once(state).chain(last)).map(|s| norm3(s.sample.at.kappa)).fold(0., f64::max) * model.hbar_over_mass();
-    let booked = booked(&model.bounds(units, speed));
+    // Every unit is read at the states (ELIMINATION.md §6: the errors are measured where the atoms went, no bound over
+    // the whole space).
+    let booked: Vec<Booked> = (0..units.len()).map(Booked::Read).collect();
     let reading: Vec<Unit> = units.iter().zip(&booked).filter(|of| matches!(of.1, Booked::Read(_))).map(|of| of.0.clone()).collect();
     // The place in a row of `known` of each unit read here, where it read them all.
     let places: Option<Vec<usize>> = known.as_ref().and_then(|k| booked.iter().zip(&k.booked).filter(|of| matches!(of.0, Booked::Read(_))).map(|of| if let Booked::Read(q) = *of.1 { Some(q) } else { None }).collect());
@@ -1599,7 +1599,7 @@ fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Table
     let read: HashMap<(u64, u64, u64), usize> = known.iter().filter(|_| places.is_some()).flat_map(|k| k.of.iter().enumerate().map(|(j, &(index, at, tau))| (key(index, at, tau), j))).collect();
     let width = reading.len();
     let mut errors = vec![Booking::NONE; rows.len() * width];
-    let errors_at = |state: &State| model.errors_at(&reading, &state.sample, Some(tables)).iter().map(Booking::of).collect::<Vec<_>>();
+    let errors_at = |state: &State| model.readings(&reading, &state.sample, Some(tables)).iter().map(Booking::of).collect::<Vec<_>>();
     // A row (the table is empty where no unit is read).
     errors.par_chunks_mut(width.max(1)).zip(&rows).for_each(|(out, &(index, time, tau, state, last))| match (&known, &places, read.get(&key(index, time, tau))) {
         (Some(known), Some(places), Some(&j)) => {

@@ -90,21 +90,10 @@ impl Model {
             out[s] = z.norm_sqr() / norm;
         }
         let mut site = Held::<Site>::take();
-        // The responses act on the slow state's coordinates x = S⁻¹ψ (assemble.rs, # The normalized generator): the
-        // excited amplitudes T x, and what the ground places give up, Σ Re⟨a, A⟩ = ‖T x‖², leaves them ψ†(1 + X)⁻¹ψ = ‖x‖²
-        // in all -- the populations of the slow state, whose norm is ψ's.
-        let bent: Vec<C64> = match &plan.fourth {
-            Some(fourth) => {
-                let (n, size) = (fourth.n, fourth.n * fourth.n);
-                let on = self.pointed(plan, table, at.r, &mut site);
-                self.quartic(plan, fourth, on, Some(at.r), &mut site, false);
-                Model::quartic_read(|q| {
-                    let inverse = &q.data[super::assemble::BENT * size..(super::assemble::BENT + 1) * size];
-                    (0..n).map(|x| (0..n).fold(C64::ZERO, |z, y| z + inverse[x * n + y] * psi[y])).collect()
-                })
-            }
-            None => psi.to_vec(),
-        };
+        // The responses act on the normalized coordinates ψ = S x as on the slow state's x (assemble.rs, # The normalized
+        // generator): the excited amplitudes T ψ, and what the ground places give up, Σ Re⟨a, A⟩ = ‖T ψ‖², leaves them
+        // ψ†(1 − X)ψ -- the slow state's populations ψ†(1 + X)⁻¹ψ to the first order in the excited share X, its second
+        // order X² apart, in all of norm ‖ψ‖².
         let count = self.channels_at(plan, table, at, &mut site);
         let Site { channels, excited, .. } = &mut *site;
         let size = EXCITED * c.ground;
@@ -135,7 +124,7 @@ impl Model {
         for (p, response) in channels.chunks_exact(size).enumerate() {
             for (i, row) in response.chunks_exact(c.ground).enumerate() {
                 for (b, r) in row.iter().enumerate() {
-                    own[(p * c.ground + b) * EXCITED + i] = *r * bent[b];
+                    own[(p * c.ground + b) * EXCITED + i] = *r * psi[b];
                 }
             }
         }
@@ -319,6 +308,7 @@ impl Model {
                 format!("落到 {} 所在子空间的两组光子（频率相差 {}）的相干", self.state_label(*landing), self.beat_label(&second.plus(-1, first)).trim_start_matches('−'))
             }
             Unit::Dressing { carrier } => format!("{} 引起的能级移动（进入绝热消去的失谐）：偏振不同的光束之间的干涉取平均", self.component_label(*carrier)),
+            Unit::Block { block } => format!("激发态 {} 所在的超精细能级块：绝热消去", self.blocks().get(*block).and_then(|b| b.first()).map_or(String::new(), |&e| self.state_label(GROUND + e))),
         }
     }
 

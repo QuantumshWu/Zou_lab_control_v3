@@ -660,7 +660,7 @@ impl Model {
 
     /// Whether the coupling a ← b at a beat is in this model's generators as it is (SPEC §1.4), nothing of it folded: the
     /// two states in one cluster, at a residual beat of exactly zero or as a kept unit (eliminate.rs `Model::term_included`).
-    fn in_generator(&self, a: usize, b: usize, beat: &Beat) -> bool {
+    pub(crate) fn in_generator(&self, a: usize, b: usize, beat: &Beat) -> bool {
         self.clusters.iter().enumerate().any(|(k, c)| {
             let place = |s: usize| c.states.iter().position(|&x| x == s);
             matches!((place(a), place(b)), (Some(x), Some(y)) if self.term_included(k, x, y, beat))
@@ -1053,7 +1053,7 @@ impl Model {
                 }
                 Unit::Term { a, b, ref beat } => self.beat_index(beat).map_or(Read::Nothing, |index| Read::Term { form: self.forms.term(self, a, b, index), a, b, beat: index }),
                 Unit::Coherence { .. } => Read::Coherence(u.clone()),
-                Unit::Second { .. } | Unit::Dressing { .. } => Read::Nothing,
+                Unit::Second { .. } | Unit::Dressing { .. } | Unit::Block { .. } => Read::Nothing,
             })
             .collect()
     }
@@ -1133,7 +1133,7 @@ impl Model {
             .zip(gates)
             .map(|(unit, gate)| match unit {
                 Unit::Term { a, b, .. } => Some(0.5 * gate.saturation * if a == b { 2.0 } else { 1.0 }),
-                Unit::Coherence { .. } | Unit::Bare { .. } | Unit::Drive { .. } | Unit::Second { .. } | Unit::Dressing { .. } => None,
+                Unit::Coherence { .. } | Unit::Bare { .. } | Unit::Drive { .. } | Unit::Second { .. } | Unit::Dressing { .. } | Unit::Block { .. } => None,
             })
             .collect()
     }
@@ -1298,6 +1298,7 @@ impl Model {
                 UnitError { parameter: m2, population: error, temperature: error, ..UnitError::NONE }
             }
             Unit::Dressing { carrier } => self.dressing_error(*carrier, at),
+            Unit::Block { .. } => UnitError::NONE,
             Unit::Coherence { .. } => self.coherence_error(unit, at),
         }
     }

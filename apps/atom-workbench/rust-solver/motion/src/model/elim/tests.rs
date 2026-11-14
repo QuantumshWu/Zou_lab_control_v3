@@ -118,7 +118,7 @@ fn a_two_level_atom_s_slow_mode_is_exact_and_its_scattering_rate_is_the_steady_s
             // (`errors`) against the exact rate's error: to the leading order in the fold, its relative O(X), X = s/2.
             let left = fold.left_operators().unwrap();
             let (_, tau) = fold.transient(&left, &[C64::ONE]).unwrap();
-            let booked = errors(&fold, &lv, &[vec![0]], &Kept::default(), &[C64::ONE], [0.0; 3], 0.0).transient;
+            let booked = errors(&fold, &lv, &[vec![0]], &|_| false, Some(&|_| false), &[C64::ONE], [0.0; 3], 0.0).transient;
             println!("    the transient {transient:+.5e} µs, closed form {tau:+.5e} µs; the rate's error {error:+.4e}, booked {booked:.4e}");
             assert!((tau - transient).abs() <= 2.0 * s * transient.abs(), "the closed form {tau} against {transient}");
             assert!((booked - error.abs()).abs() <= 2.0 * s * error.abs(), "booked {booked} against the rate's error {error}");
