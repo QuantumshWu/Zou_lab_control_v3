@@ -537,7 +537,7 @@ fn the_fold_s_series_about_a_reference_is_the_fold_within_its_remainder_and_fall
 ///   falls with J as x's powers, down to the series' own;
 /// - the landing map S(1 + Y)⁻¹ against the fold's S(1 + Σ S_f T_f)⁻¹;
 /// - and the error the run books, the evaluation against the definition measured on states (`Fold::evaluated`,
-///   `Fold::defined`, `Fold::evaluation_error`): on random slow states, falling from the series' order 0 to order 1 and
+///   `Fold::definitions`, `Fold::evaluation_error`): on random slow states, falling from the series' order 0 to order 1 and
 ///   with the normalization's order. The bounds are this test's: the run books the measured numbers.
 #[test]
 fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_remainders_and_hermitian_by_construction() {
@@ -686,10 +686,10 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         }
         assert!(landing_apart.frobenius() <= (q + x_size * q + rate(normalization)).max(1e-9) * exact.frobenius(), "the landing map {}", landing_apart.frobenius() / exact.frobenius());
         // The errors the run books, measured on random slow states against the definition (`Fold::evaluated` against
-        // `Fold::defined`, a point's numbers, not bounds): the evaluation's normalized generator at its orders is this
+        // `Fold::definitions`, a point's numbers, not bounds): the evaluation's normalized generator at its orders is this
         // test's route (the same Hermitian part, the same decay), and the error falls from the series' order 0 to 1 and
         // with the normalization's order.
-        let defined = fold.defined(&lv);
+        let defined = fold.definitions(&lv).0;
         let at = |orders: Orders| fold.evaluated(&lv, C64::real(z0), orders);
         let mut apart = at(orders);
         let mut route_whole = route.hermitian_part();
@@ -906,7 +906,75 @@ impl Fold {
     /// radius) -- the order an evaluation takes is the least whose remainder is within the share (criterion one's ρ
     /// books it).
     fn series_ratio(&self, z0: C64) -> f64 {
-        self.series_norm(z0) / self.series_distance(z0)
+        self.series_norm(z0) / self.series_distance(z0, None)
+    }
+}
+
+/// A series' radius is read on the blocks its terms hold (`Folded::held_blocks`, `Fold::series_distance`): R₀ = (z₀ + f −
+/// K_f)⁻¹ is block-diagonal on K_f's blocks, so a block that neither W nor δK reaches is in no term of the series. S2Q's
+/// probe with its F′ = 3 block kept explicit for the three F = 2 states it drives (the first attempt's keep): its σ± light
+/// joins |2, m⟩ to |3′, m ± 1⟩ alone, so the kept edges split the block by the parity of m into two clusters, each with
+/// the other's half in its Q, nearer z₀ + f than ‖H − z₀‖, in no term of its series. Read on every block, that half's
+/// distance gave q ≥ 1 (2.9), and the closure made the hyperfine blocks below explicit one after another -- growing
+/// ‖H − z₀‖, never the distance -- until the repump's block move joined a ground driven by both carriers into one block,
+/// a 6.57 GHz loop in the frames no step resolves. On the held blocks the series converges and the closure keeps nothing
+/// more; and the series' generator to each order K is within q^{K+1}/(1 − q) of the self-consistent fold at q of the held
+/// blocks, where an unheld block's distance would bound nothing.
+#[test]
+fn a_series_radius_is_read_on_the_blocks_its_terms_hold() {
+    use super::super::{Component, Model, Unit};
+    use crate::request::GROUND;
+    let req = request("S2Q");
+    let light = crate::field::Light::new(&req);
+    let chief = (0..GROUND).max_by(|&a, &b| req.initial_density[(a, a)].re.total_cmp(&req.initial_density[(b, b)].re)).unwrap();
+    let (base, mut kept, _, _) = Model::closed_at(&req, &light, vec![], chief, req.temperature_uk);
+    let state = |label: &str| req.states.iter().position(|s| s == label).expect("a state of the request");
+    let block = base.blocks().iter().position(|b| b.contains(&(state("D2-3-0") - GROUND))).expect("the F′ = 3 block");
+    let probe = (0..light.frequencies.len()).find(|&f| light.frequencies[f].beams.iter().any(|&l| req.beams[l].id == "laser-probe")).expect("the probe's carrier");
+    let component = Component { frequency: probe, counter: false };
+    for m in ["-2", "-1", "0"] {
+        kept.push(Unit::Block { block, component, grounds: ground_set(&[state(&format!("ground-2-{m}"))]) });
+    }
+    kept.push(Unit::Normalization { order: 1 });
+    let mut model = Model::new(&req, &light, &kept).expect("the model");
+    let points = crate::solve::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
+    model.referenced(&points);
+    // The scene holds the class: a cluster whose Q has a block in no term of its series nearer z₀ + f than ‖H − z₀‖.
+    let mut worst: Option<(f64, Fold, C64)> = None;
+    let mut unheld = 0;
+    for k in 0..model.clusters().len() {
+        for &(r, _) in &points {
+            let amplitudes = light.amplitudes(r);
+            let Some((fold, _, far, _)) = model.cluster_fold(k, &amplitudes, false) else { continue };
+            let z0 = C64::real(far + model.series.centre[k]);
+            let every = fold.replicas.iter().flat_map(|rep| (0..rep.k.n).map(move |i| (z0 + C64::real(rep.frequency) - rep.k.s[i * rep.k.n + i]).abs())).fold(f64::INFINITY, f64::min);
+            let norm = fold.series_norm(z0);
+            if every < norm && fold.series_distance(z0, None) > norm {
+                unheld += 1;
+            }
+            let q = fold.series_ratio(z0);
+            if worst.as_ref().is_none_or(|w| q > w.0) {
+                worst = Some((q, fold, z0));
+            }
+        }
+    }
+    println!("S2Q, the probe's F′ = 3 block kept for F = 2 m = −2, −1, 0: {} clusters; {unheld} cluster folds with a block in no term nearer than ‖H − z₀‖; series q = {:.3e}, x = {:.3e}", model.clusters().len(), model.series.ratio, model.series.excited);
+    assert!(unheld > 0, "the scene holds a block the series does not hold within ‖H − z₀‖ of z₀ + f");
+    assert!(model.series.exists(), "the series converge on the blocks they hold: q = {}, x = {}", model.series.ratio, model.series.excited);
+    assert_eq!(model.series_block(), None, "the closure makes no block explicit");
+    // The series' orders at its largest ratio converge as that ratio bounds them.
+    let (q, fold, z0) = worst.expect("a cluster with a fold");
+    let n = fold.size();
+    let own = fold.generator.clone();
+    for order in 0..=3 {
+        let forms = fold.series(z0, order);
+        let h = fold.series_generator(&forms, z0).expect("the series' generator settles");
+        let mut apart = h.clone();
+        apart.add_scaled(-C64::ONE, &fold.generator);
+        let relative = apart.frobenius() / own.frobenius();
+        let bound = q.powi(order as i32 + 1) / (1.0 - q) + crate::units::rounding(n * n * (order + 2));
+        println!("  order {order}: {relative:.3e} of the fold apart, bound {bound:.3e} (q = {q:.3e})");
+        assert!(relative <= bound, "order {order}: {relative} beyond the bound {bound}");
     }
 }
 
@@ -964,5 +1032,333 @@ fn a_drive_onto_an_explicit_state_at_a_small_two_photon_distance_is_folded_at_th
         let level = model.level(c, e, w);
         assert_eq!(level, if exists { Level::Bare } else { Level::Atom }, "{a} → {e} kept, ε = {epsilon:.3e}, 2a/ε = {ratio:.3e}: the drive from {w} at level {level:?}");
         assert_ne!(model.cluster_of(w), model.cluster_of(a), "the drive from {w} joins no cluster");
+    }
+}
+
+/// A drive goes to the atom by its own part of its class's route (`bare_routes`; the prior, `Model::prior`): the 1D PGC
+/// at 3 G (PGC1D_TILT_0) and with its probe tilted 2° (PGC1D_TILT_2). Tilted, every beam's coupling holds parts of
+/// ≤ 1.7·10⁻⁸ of its largest at every Δm -- the probe's light shift through the levels outside the model mixing the
+/// excited sublevels, physical and of no consequence (its rates' part ~10⁻¹⁶) -- beside the probe's π (1.59 of 83.2) and
+/// σ⁻ (2.5·10⁻²). Read by its class's whole route, every drive of a class went to the atom (576 against 106) and the near
+/// forms were dense. By each drive's own part, the rest within what no output resolves: untilted 56 of the 106 (the
+/// other 50 carry together at most 2.4·10⁻⁴ of their class's response, the largest 1.8·10⁻⁴); tilted, no drive of a
+/// part below 10⁻⁶ of its beam's largest coupling at the atom, the probe's π drives among them, and at most the 72
+/// physical ones more than untilted.
+#[test]
+fn a_drive_goes_to_the_atom_by_its_own_part_of_the_route() {
+    use crate::request::{Level as Label, GROUND};
+    let mut counts = vec![];
+    for name in ["PGC1D_TILT_0", "PGC1D_TILT_2"] {
+        let req = request(name);
+        let light = crate::field::Light::new(&req);
+        let chief = (0..GROUND).max_by(|&a, &b| req.initial_density[(a, a)].re.total_cmp(&req.initial_density[(b, b)].re)).unwrap();
+        let (_, kept, _, _) = super::super::Model::closed_at(&req, &light, vec![], chief, req.temperature_uk);
+        let id = |frequency: usize| light.frequencies[frequency].beams.iter().map(|&l| req.beams[l].id.clone()).collect::<Vec<_>>().join("+");
+        let label = |s: usize| Label::parse(&req.states[s]).unwrap();
+        // A drive's coupling relative to its beams' largest.
+        let relative = |frequency: usize, e: usize, g: usize| {
+            light.frequencies[frequency].beams.iter().map(|&l| {
+                let c = &req.beams[l].coupling;
+                c[(e, g)].abs() / c.max_abs()
+            }).fold(0.0, f64::max)
+        };
+        let bare: Vec<(usize, usize, usize)> = kept.iter().filter_map(|u| if let super::super::Unit::Bare { component, excited, ground } = u { (!component.counter).then_some((component.frequency, *excited, *ground)) } else { None }).collect();
+        let smallest = bare.iter().map(|&(f, e, g)| relative(f, e, g)).fold(f64::INFINITY, f64::min);
+        let probe = (0..light.frequencies.len()).find(|&f| id(f) == "probe").expect("the probe");
+        let pi: Vec<(usize, usize)> = (GROUND..req.states.len()).flat_map(|e| (0..GROUND).map(move |g| (e, g))).filter(|&(e, g)| label(e).m == label(g).m && relative(probe, e, g) > 1e-3).collect();
+        let pi_at_atom = pi.iter().filter(|&&(e, g)| bare.contains(&(probe, e, g))).count();
+        println!("{name}: {} drives at the atom, the smallest relative coupling among them {smallest:.3e}; the probe's π drives {} of {} at the atom", bare.len(), pi_at_atom, pi.len());
+        counts.push((bare.len(), smallest, pi_at_atom, pi.len()));
+    }
+    let ((untilted, _, _, _), (tilted, smallest, pi_at_atom, pi)) = (counts[0], counts[1]);
+    assert!(untilted > 0 && untilted <= 106, "untilted, at most the class routes' 106 drives at the atom: {untilted}");
+    assert!(smallest > 1e-6, "tilted, no drive of a part in 10⁸ at the atom: {smallest}");
+    assert!(pi > 0 && pi_at_atom > 0, "tilted, the probe's π drives at the atom: {pi_at_atom} of {pi}");
+    assert!(tilted <= untilted + 72, "tilted, at most the 72 physical drives more: {tilted}");
+}
+
+/// The resolvent's bounds are continuous in K's departure from normality (`SchurBlock::henrici`; module documentation,
+/// # First order in the frequency offsets): a ground state driven into two excited states at 50 and 80 rad/µs of decay
+/// 38 and 6 rad/µs, joined by a coupling ε -- K = H_E − (i/2)D not normal where ε is not zero, its departure of the
+/// order of ε. Criterion one's remainder at the offsets the moving atom spans (`Fold::offsets`, ±10 rad/µs) and the
+/// series' ratio q (`Fold::series_distance`) at ε = 10⁻¹², 10⁻⁹, 10⁻⁶ rad/µs are within 10 ε/30 rad/µs (relative)
+/// of theirs at ε = 0 -- as the eigenvectors move --, where a judgement of K normal or not collapsed the distance to a
+/// rectangle's at a rounding's ε.
+#[test]
+fn the_resolvent_s_bounds_are_continuous_in_the_folded_block_s_departure_from_normality() {
+    let read = |epsilon: f64| -> (f64, f64) {
+        let mut excited = Mat::diagonal(&[C64::real(50.0), C64::real(80.0)]);
+        excited[(0, 1)] = C64::real(epsilon);
+        excited[(1, 0)] = C64::real(epsilon);
+        let levels = Levels { ground: Mat::zeros(1, 1), excited, decay: Mat::diagonal(&[C64::real(38.0), C64::real(6.0)]) };
+        let classes = vec![class(0.0, 1, 2, &[(0, 0, C64::real(5.0)), (1, 0, C64::real(3.0))])];
+        let f = folded(&levels, &classes, &at_rest(1));
+        assert!(f.exists);
+        let rho: f64 = f.offsets(0, 10.0, &[], 1.0, &|_| 1.0).iter().map(|x| x * x).sum::<f64>().sqrt();
+        (rho, f.series_ratio(C64::real(f.eigen.values[0].re)))
+    };
+    let (rho0, q0) = read(0.0);
+    println!("ε 0: ρ {rho0:.6e}, q {q0:.6e}");
+    for epsilon in [1e-12, 1e-9, 1e-6] {
+        let (rho, q) = read(epsilon);
+        let bound = 10.0 * epsilon / 30.0 + 1e-13;
+        println!("ε {epsilon:e}: ρ moved {:.3e}, q moved {:.3e} (relative; bound {bound:.3e})", (rho / rho0 - 1.0).abs(), (q / q0 - 1.0).abs());
+        assert!((rho / rho0 - 1.0).abs() <= bound, "ε {epsilon}: the remainder moved from {rho0} to {rho}");
+        assert!((q / q0 - 1.0).abs() <= bound, "ε {epsilon}: the series' ratio moved from {q0} to {q}");
+    }
+}
+
+/// Criterion three against the exact master equation (unify part 2): a Λ of |1⟩ at 0 and |2⟩ at 100 rad/µs, an excited
+/// state decaying at Γ = 38 rad/µs, three quarters to |1⟩ and a quarter to |2⟩ (on two axes), laser A on |1⟩
+/// (3 rad/µs) and B on |2⟩ (1.5 rad/µs), both on resonance -- where the jumps' coherence, not a coherent Raman coupling,
+/// makes the dark state (coherent population trapping), and criterion three reads it before criterion two would --,
+/// and the fold's frames 0 and 37: the two ground states in one group, the frames following neither the lasers'
+/// difference nor the levels. Its photons landing in |1⟩ are two classes, A's from |1⟩ and B's from |2⟩, their
+/// frequencies' difference Ω = 63 − δ; their own photons' difference is the Raman detuning δ.
+/// - At the Raman resonance, the dark state b|1⟩ − a|2⟩: `start_cross_terms` keeps the pair, where γ/|Ω| -- the
+///   readings' old number -- is within the share; and the effective master equation of the two ground states with each
+///   class's jumps apart (the class split, its decay too) is beyond the share of the exact three-level one at 30 µs
+///   (the dark state's |1⟩ 0.2 against the rate equations' 0.43), as with both classes in one jump it is within the
+///   elimination's (a/|Δ + iΓ/2|)².
+/// - 20 rad/µs off it: the pair is not kept, and the split is within the share of the exact one.
+#[test]
+fn a_raman_resonant_photon_coherence_is_kept_and_a_far_one_dropped_as_the_master_equation_says() {
+    let (e2, gamma, delta, a, b, beta) = (100.0, 38.0, 0.0, 3.0, 1.5, 37.0);
+    let (to1, to2) = (0.75 * gamma, 0.25 * gamma);
+    let levels = Levels { ground: Mat::diagonal(&[C64::ZERO, C64::real(e2)]), excited: Mat::zeros(1, 1), decay: Mat::diagonal(&[C64::real(gamma)]) };
+    let mut emission: [Mat; 3] = std::array::from_fn(|_| Mat::zeros(3, 3));
+    emission[0][(0, 2)] = C64::real(to1.sqrt());
+    emission[1][(1, 2)] = C64::real(to2.sqrt());
+    let denominator = C64::new(delta, 0.5 * gamma);
+    let shift = |x: f64| x * x * delta / denominator.norm_sqr();
+    // The Lindblad generator's action on ρ, and ρ at T from |1⟩⟨1| (RK4).
+    let lindblad = |h: &Mat, jumps: &[Mat], rho: &Mat| -> Mat {
+        let mut out = h.product(rho);
+        out.add_scaled(-C64::ONE, &rho.product(h));
+        let mut out = out.scaled(C64::new(0.0, -1.0));
+        for j in jumps {
+            out.add_scaled(C64::ONE, &j.product(rho).product(&j.adjoint()));
+            let jj = j.adjoint_product(j);
+            out.add_scaled(C64::real(-0.5), &jj.product(rho));
+            out.add_scaled(C64::real(-0.5), &rho.product(&jj));
+        }
+        out
+    };
+    let evolve = |h: &Mat, jumps: &[Mat], time: f64, dt: f64| -> Mat {
+        let n = h.rows;
+        let mut rho = Mat::zeros(n, n);
+        rho[(0, 0)] = C64::ONE;
+        let steps = (time / dt).round() as usize;
+        for _ in 0..steps {
+            let k1 = lindblad(h, jumps, &rho);
+            let mut x = rho.clone();
+            x.add_scaled(C64::real(0.5 * dt), &k1);
+            let k2 = lindblad(h, jumps, &x);
+            let mut x = rho.clone();
+            x.add_scaled(C64::real(0.5 * dt), &k2);
+            let k3 = lindblad(h, jumps, &x);
+            let mut x = rho.clone();
+            x.add_scaled(C64::real(dt), &k3);
+            let k4 = lindblad(h, jumps, &x);
+            for (k, w) in [(&k1, 1.0), (&k2, 2.0), (&k3, 2.0), (&k4, 1.0)] {
+                rho.add_scaled(C64::real(dt * w / 6.0), k);
+            }
+        }
+        rho
+    };
+    let share = share();
+    for (name, detuning) in [("resonant", 0.0), ("20 rad/us off", 20.0)] {
+        // B's two-photon detuning dx, so that the light-shifted Raman detuning is `detuning` (on resonance no shift).
+        let dx = detuning + shift(a) - shift(b);
+        // The fold, and its cross terms at the start.
+        let classes = vec![class(delta, 2, 1, &[(0, 0, C64::real(a))]), class(delta - e2 + dx, 2, 1, &[(0, 1, C64::real(b))])];
+        let slow = Slow { explicit: vec![], frames: vec![0.0, beta], groups: vec![0, 0] };
+        let f = fold(&levels, &classes, &slow, &Replicas::of(&classes, &slow, 2));
+        assert!(f.exists, "{name}: the fold exists");
+        let pairs = start_cross_terms(&f, &emission);
+        let raman = |pair: &[(Option<usize>, usize, usize); 2]| pair.contains(&(Some(0), 0, 0)) && pair.contains(&(Some(1), 1, 0));
+        let kept = pairs.iter().any(raman);
+        // The old number at the equal superposition: the two classes' interference rate over Ω.
+        let like: Vec<usize> = (0..f.size()).collect();
+        let (images, origins) = f.photons(&emission, &like);
+        let find = |o: (PhotonSource, usize)| origins.iter().position(|x| *x == o).expect("the class");
+        let (ia, ib) = (find((PhotonSource::Class(0, 0), 0)), find((PhotonSource::Class(1, 1), 0)));
+        let psi: Vec<C64> = (0..2).map(|k| f.eigen.vectors[(k, 0)] + f.eigen.vectors[(k, 1)]).collect();
+        let norm = crate::linalg::norm_sqr(&psi);
+        let sum = |i: usize, x: usize| -> Vec<C64> { (0..2).map(|k| images[i].images[0][x][k] + images[i].images[1][x][k]).collect() };
+        let gamma_old = (0..3).map(|x| crate::linalg::inner(&sum(ia, x), &sum(ib, x))).sum::<C64>().abs() / norm;
+        let omega = images[ia].frequency - images[ib].frequency;
+        let old = gamma_old / omega.abs();
+        let landings = vec![Landing::of(&f, &[0, 1])];
+        let read = cross_terms(&images, &landings, &f.eigen.values, &[C64::ONE, C64::ONE], norm).into_iter().find(|t| (t.0, t.1) == (ia.min(ib), ia.max(ib))).map_or(0.0, |t| t.2);
+        // The exact three-level master equation in the lasers' frame, and the two ground states' with both classes in
+        // one jump (the elimination's) and with each class apart (the split's).
+        let h3 = Mat::from_fn(3, 3, |i, j| match (i, j) {
+            (1, 1) => C64::real(dx),
+            (2, 2) => C64::real(-delta),
+            (2, 0) | (0, 2) => C64::real(a),
+            (2, 1) | (1, 2) => C64::real(b),
+            _ => C64::ZERO,
+        });
+        let c3 = [Mat::from_fn(3, 3, |i, j| if (i, j) == (0, 2) { C64::real(to1.sqrt()) } else { C64::ZERO }), Mat::from_fn(3, 3, |i, j| if (i, j) == (1, 2) { C64::real(to2.sqrt()) } else { C64::ZERO })];
+        let exact = evolve(&h3, &c3, 30.0, 2e-4);
+        // The excited amplitude each ground state drives at its own frequency, r_j = w_j/(Δ_j + iΓ/2) (Δ_2 = Δ + dx); the
+        // second order's Hermitian part (M + M†)/2, M_ij = w_i r_j; the jumps √Γ_k |k⟩⟨r|, split by the ground state
+        // each class drives.
+        let w = [C64::real(a), C64::real(b)];
+        let r = [w[0] / denominator, w[1] / (denominator + C64::real(dx))];
+        let mut h2 = Mat::from_fn(2, 2, |i, j| if (i, j) == (1, 1) { C64::real(dx) } else { C64::ZERO });
+        h2.add_scaled(C64::ONE, &Mat::from_fn(2, 2, |i, j| (w[i] * r[j] + (w[j] * r[i]).conj()) * C64::real(0.5)));
+        let rate = [to1, to2];
+        let jump = |to: usize, from: Option<usize>| Mat::from_fn(2, 2, |i, j| if i == to && from.is_none_or(|f| f == j) { C64::real(rate[to].sqrt()) * r[j] } else { C64::ZERO });
+        let joined = evolve(&h2, &[jump(0, None), jump(1, None)], 30.0, 1e-3);
+        let split = evolve(&h2, &[jump(0, Some(0)), jump(0, Some(1)), jump(1, Some(0)), jump(1, Some(1))], 30.0, 1e-3);
+        let (pe, pj, ps) = (exact[(0, 0)].re / (exact[(0, 0)].re + exact[(1, 1)].re), joined[(0, 0)].re, split[(0, 0)].re);
+        println!("{name}: |Ω| {:.3}, γ/|Ω| {old:.3e}, the cross term's reading {read:.3e} (kept: {kept}); |1>'s population at 30 us: exact {pe:.4}, one jump {pj:.4}, split {ps:.4}", omega.abs());
+        assert!((pj - pe).abs() <= 4.0 * (a / denominator.abs()).powi(2), "{name}: the elimination is the exact one's within (a/|Δ + iΓ/2|)²: {pj} against {pe}");
+        if detuning == 0.0 {
+            assert!(kept, "{name}: the Raman-resonant cross term is kept");
+            assert!(old < share, "{name}: where the old number would drop it ({old})");
+            assert!((ps - pe).abs() > share, "{name}: the split is beyond the share of the exact: {ps} against {pe}");
+        } else {
+            assert!(!kept, "{name}: the far cross term is not kept ({read})");
+            assert!((ps - pe).abs() < share, "{name}: the split is within the share of the exact: {ps} against {pe}");
+        }
+    }
+}
+
+/// Criterion three's frequency at the prior's atoms (unify part 2; a measurement): on R6_RAMAN_CO, R6_RAMAN_COUNTER,
+/// GMD1C (its request at the path in the environment variable GMD1C), the zero-field probe (S2), PGC1D_TILT_0 and
+/// PGC1D_TILT_2, the closed model's coherence units not kept, read at every prior atom on the states of every source
+/// cluster's spectrum (`Model::cluster_spectrum`, as the readings read them): each ground-like eigenstate r_p, and each
+/// pair's superposition r_p + r_p′. The old number, the two classes' interference rate γ = |Σ_a ⟨u_a|u′_a⟩|/‖ψ‖² over
+/// their frequencies' difference Ω, against `cross_terms` -- the dropped term's parts on the landing's and the source's
+/// eigenstates, each over its combined frequency ω_c -- and the same parts over Ω (the frequency's change apart from
+/// the size's). A unit is kept where its reading exceeds the share; the counts of reads kept by each and where the old
+/// and the new differ.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn the_coherences_old_and_combined_frequencies_at_the_prior_s_atoms() {
+    use super::super::{Model, Point, Unit};
+    use crate::linalg::norm_sqr;
+    use crate::request::GROUND;
+    let base = env!("CARGO_MANIFEST_DIR");
+    let mut scenes: Vec<(String, String)> = vec![
+        ("R6_RAMAN_CO".into(), format!("{base}/refs/scenes/R6_RAMAN_CO.json")),
+        ("R6_RAMAN_COUNTER".into(), format!("{base}/refs/scenes/R6_RAMAN_COUNTER.json")),
+        ("S2 (zero-field probe)".into(), format!("{base}/refs/requests/S2.json")),
+        ("PGC1D_TILT_0".into(), format!("{base}/refs/requests/PGC1D_TILT_0.json")),
+        ("PGC1D_TILT_2".into(), format!("{base}/refs/requests/PGC1D_TILT_2.json")),
+    ];
+    if let Ok(path) = std::env::var("GMD1C") {
+        scenes.insert(2, ("GMD1C".into(), path));
+    }
+    let share = share();
+    let dot = |a: &[C64], b: &[C64]| a.iter().zip(b).map(|(x, y)| x.conj() * *y).sum::<C64>();
+    for (name, path) in scenes {
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("the request file")).expect("JSON");
+        let req = crate::request::Request::from_native(&line).expect("a request");
+        let light = crate::field::Light::new(&req);
+        let chief = (0..GROUND).max_by(|&a, &b| req.initial_density[(a, a)].re.total_cmp(&req.initial_density[(b, b)].re)).unwrap();
+        let (model, kept, _, _) = Model::closed_at(&req, &light, vec![], chief, req.temperature_uk);
+        let points = crate::solve::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
+        let hm = crate::units::hbar_over_mass(req.mass_kg);
+        let running = model.running();
+        let coherence = |classes: &[crate::model::photon::Class], a: usize, b: usize| {
+            let (x, y) = (&classes[a].beats[0], &classes[b].beats[0]);
+            let (lo, hi) = if x < y { (x.clone(), y.clone()) } else { (y.clone(), x.clone()) };
+            Unit::Coherence { landing: model.clusters[classes[a].landing].states[0], first: lo, second: hi }
+        };
+        // reads; kept by the old, by the parts at Ω, by the new; old ≠ new, of them on a pair's superposition; the
+        // largest of each reading; the least |ω_c|/|Ω| is not read here (`cross_terms` sums over it).
+        let (mut reads, mut old_kept, mut parts_kept, mut new_kept, mut differ, mut differ_pairs) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+        let (mut most_old, mut most_parts, mut most_new) = (0.0_f64, 0.0_f64, 0.0_f64);
+        let mut examples: Vec<String> = vec![];
+        let mut units_kept: Vec<Unit> = vec![];
+        for &(r, v) in &points {
+            let amplitudes = light.amplitudes(r);
+            let at = Point { r, kappa: v.map(|x| x / hm), t: 0.0 };
+            for s in 0..model.clusters.len() {
+                let classes = &model.classes[s];
+                if classes.len() < 2 {
+                    continue;
+                }
+                let source = model.cluster_spectrum(s, &amplitudes);
+                let plan = model.plan(s, &running);
+                let n = source.size();
+                let like: Vec<usize> = (0..n).filter(|&p| source.ground_weight(p) >= 0.5).collect();
+                let mut landed: Vec<usize> = vec![];
+                for class in classes {
+                    if !landed.contains(&class.landing) {
+                        landed.push(class.landing);
+                    }
+                }
+                let landings: Vec<Landing> = landed
+                    .iter()
+                    .map(|&l| {
+                        let fold = if l == s { source.clone() } else { model.cluster_spectrum(l, &amplitudes) };
+                        Landing::of(&fold, &(0..fold.size()).collect::<Vec<_>>())
+                    })
+                    .collect();
+                let mut images: Vec<Images> = classes
+                    .iter()
+                    .map(|class| {
+                        let m = model.clusters[class.landing].states.len();
+                        Images { frequency: -model.omega(&class.beats[0]), landing: landed.iter().position(|&l| l == class.landing).unwrap(), images: vec![std::array::from_fn(|_| vec![C64::ZERO; m]); n] }
+                    })
+                    .collect();
+                for &p in &like {
+                    let (photons, _) = model.photons_of(&plan, None, &at, &source.right(p), super::super::photon::Gradients::None);
+                    for photon in photons {
+                        images[photon.class].images[p] = photon.amplitudes;
+                    }
+                }
+                let mut states: Vec<Vec<usize>> = like.iter().map(|&p| vec![p]).collect();
+                for (i, &p) in like.iter().enumerate() {
+                    for &p2 in &like[i + 1..] {
+                        states.push(vec![p, p2]);
+                    }
+                }
+                for state in &states {
+                    let mut coefficients = vec![C64::ZERO; n];
+                    state.iter().for_each(|&p| coefficients[p] = C64::ONE);
+                    let psi: Vec<C64> = (0..n).map(|k| state.iter().map(|&p| source.eigen.vectors[(k, p)]).sum()).collect();
+                    let norm = norm_sqr(&psi);
+                    // The same parts over Ω: every eigenvalue at zero.
+                    let flat: Vec<Landing> = landings.iter().map(|l| Landing { values: vec![C64::ZERO; l.values.len()], left: l.left.clone() }).collect();
+                    let at_omega = cross_terms(&images, &flat, &vec![C64::ZERO; n], &coefficients, norm);
+                    for (a, b, x) in cross_terms(&images, &landings, &source.eigen.values, &coefficients, norm) {
+                        let unit = coherence(classes, a, b);
+                        if kept.contains(&unit) {
+                            continue;
+                        }
+                        let summed = |i: usize, axis: usize| -> Vec<C64> { (0..images[i].images[0][axis].len()).map(|k| state.iter().map(|&p| images[i].images[p][axis][k]).sum()).collect() };
+                        let omega = images[a].frequency - images[b].frequency;
+                        let old = (0..3).map(|axis| dot(&summed(a, axis), &summed(b, axis))).sum::<C64>().abs() / norm / omega.abs();
+                        let parts = at_omega.iter().find(|t| (t.0, t.1) == (a, b)).map_or(0.0, |t| t.2);
+                        reads += 1;
+                        old_kept += usize::from(old > share);
+                        parts_kept += usize::from(parts > share);
+                        new_kept += usize::from(x > share);
+                        (most_old, most_parts, most_new) = (most_old.max(old), most_parts.max(parts), most_new.max(x));
+                        if x > share && !units_kept.contains(&unit) {
+                            units_kept.push(unit.clone());
+                        }
+                        if (old > share) != (x > share) {
+                            differ += 1;
+                            differ_pairs += usize::from(state.len() == 2);
+                            if examples.len() < 4 {
+                                examples.push(format!("{unit:?} at {r:?}, eigenstates {state:?}: γ/|Ω| {old:.3e}, ΣM/|Ω| {parts:.3e}, ΣM/|ω_c| {x:.3e}, |Ω| {:.4e}", omega.abs()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("{name}: {} coherence units kept by the prior; {reads} reads at the share {share:.4}: kept old (γ/|Ω|) {old_kept}, parts at Ω {parts_kept}, new (ΣM/|ω_c|) {new_kept}; old ≠ new {differ} ({differ_pairs} on a pair's superposition); {} units the new keeps", kept.iter().filter(|u| matches!(u, Unit::Coherence { .. })).count(), units_kept.len());
+        println!("  largest: γ/|Ω| {most_old:.3e}, ΣM/|Ω| {most_parts:.3e}, ΣM/|ω_c| {most_new:.3e}");
+        for e in &examples {
+            println!("  differs: {e}");
+        }
     }
 }

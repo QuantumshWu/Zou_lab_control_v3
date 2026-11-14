@@ -411,7 +411,7 @@ fn every_near_form_s_and_the_potential_s_jets_are_the_derivatives_of_their_value
 /// three), with the evaluation's orders as they come (K = 0, J = 0) and with the normalization's and the series' kept, a
 /// trajectory started where its threshold lets it land holds the run's landing of its bare state to the bit; that is the
 /// evaluation's map the readings measure (`Fold::landing_evaluated`, within 10⁻⁹); the trajectory's state against the
-/// definition's S(1 + Σ S_f T_f)⁻¹ e_b (`Fold::landing_defined`, the self-consistent fold's) errs by what the readings
+/// definition's S(1 + Σ S_f T_f)⁻¹ e_b (`Fold::definitions`, the self-consistent fold's) errs by what the readings
 /// measure (2r + r²), the readings book at least that on the candidates, and the normalization's first order lands
 /// nearer the definition than the identity of J = 0.
 #[test]
@@ -444,8 +444,8 @@ fn a_trajectory_s_start_lands_as_the_definition_within_what_the_readings_book() 
             let (fold, _, far, _) = model.cluster_fold(cluster, &amplitudes, true).expect("the cluster's fold");
             let z0 = C64::real(far + model.series.centre[cluster]);
             let evaluated = fold.landing_evaluated(z0, model.series.orders());
-            let (definition, _) = model.definition_fold(cluster, &amplitudes).expect("the definition's fold");
-            let defined = definition.landing_defined().expect("the definition's landing");
+            let (definition, levels) = model.definition_fold(cluster, &amplitudes).expect("the definition's fold");
+            let defined = definition.definitions(&levels).1.expect("the definition's landing");
             let column = |m: &Mat| -> Vec<C64> { (0..m.rows).map(|i| m[(i, place)]).collect() };
             let norm = |v: &[C64]| v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
             let apart = |a: &[C64], d: &[C64]| norm(&a.iter().zip(d).map(|(x, y)| *x - *y).collect::<Vec<_>>());

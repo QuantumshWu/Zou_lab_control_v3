@@ -813,8 +813,9 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
 /// read again, until none fails -- a drive up its levels as far as the first whose fold exists (model.rs `Level`). And
 /// the fold's series constants at the same atoms (model/elim.rs `Series`): where a series does not converge there
 /// (q ≥ 1 or x ≥ 1), the excited block that stops it is made explicit (criterion one; elim.rs `Model::series_block`)
-/// and the model read again. The orders the evaluation takes are the keep rule's (`Unit::Series`,
-/// `Unit::Normalization`), their errors measured at the run's states.
+/// and the model read again; where no block is left to make explicit, the evaluation does not exist and nothing is
+/// above it: the request is refused (elim.rs `converges`, one failure for every expansion). The orders the evaluation
+/// takes are the keep rule's (`Unit::Series`, `Unit::Normalization`), their errors measured at the run's states.
 pub(crate) fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, initial: &[(usize, f64)], temperature: f64) -> Result<Model, String> {
     loop {
         let mut model = Model::new(request, light, kept)?;
@@ -822,9 +823,15 @@ pub(crate) fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, ini
         let more: Vec<Unit> = model.prior(&points).into_iter().filter(|u| !kept.contains(u)).collect();
         if more.is_empty() {
             model.referenced(&points);
+            if model.series.exists() {
+                return Ok(model);
+            }
             match model.series_block().filter(|unit| !kept.contains(unit)) {
                 Some(unit) => kept.push(unit),
-                None => return Ok(model),
+                None => {
+                    let s = &model.series;
+                    return Err(format!("模型无法闭合：在先验的原子处，消去激发态所用的级数不收敛（预解式级数比 q = {:.3e}，激发占比 x = {:.3e}，都须小于 1），而已没有能再显式处理的激发能级块", s.ratio, s.excited));
+                }
             }
             continue;
         }
