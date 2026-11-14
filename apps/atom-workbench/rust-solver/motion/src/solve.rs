@@ -196,7 +196,14 @@
 //!       -- the first member of every pilot group -- run at τ/2 and again at τ and 2τ: their reads (τ/2, τ) and (τ, 2τ)
 //!       on the same pairs give the noise's ratio between the two rungs, by the jackknife over the same groups
 //!       (`foresee`), and the rung's own read, its error lowered by the order and its noise by that ratio, is the rung
-//!       below's foreseen read, within on N_{τ/2} of its own pairs (`foreseen`). (Assumed the same at every step, p10d5's
+//!       below's foreseen read, within on N_{τ/2} of its own pairs (`foreseen`). The ratio's expectation lies within
+//!       [2^{−2p}, 1]: halving the step, a pair that stays together lowers its noise by the order's factor, one that has
+//!       parted keeps it, and no pair's noise grows -- the noise of a mean of squared differences goes as the squares,
+//!       τ^{2p} for the first kind and the ensembles' own for the second, and a run's pairs are a mixture of the two. So
+//!       the ratio read is taken within that range: the scout's eleven pairs read it with their own noise, beyond one
+//!       where the noise is mostly two ensembles' (measured: PGC3D 16.6, the 1D PGC tilted 2° 3.2), and a ratio taken
+//!       above one foresees more pairs at the rung below than its pairs can need (the tilt: about 21 s of further pairs,
+//!       measured by the check); below 2^{−2p}, it foresees fewer than they can do with. (Assumed the same at every step, p10d5's
 //!       0.25 µs, on its pilot's 88 pairs at F ≈ 8 b and L = 0, asked 700 pairs at either rung and took the pairs:
 //!       704 of them, 4.9 s of an 11.9 s run, before L showed and the rung below stood on the pilot's own 88 pairs --
 //!       its pairs, 5 µs long, never part. Measured so, the scout's pairs read its T's noise at τ/2 0.24 times τ's:
@@ -1270,8 +1277,9 @@ fn seeing(own: &Between, have: u64) -> Option<f64> {
 /// (`rung`), each standard error the jackknife over the same groups (`foresee`): [L/2^{2p} + r (F − L), L/2^{2p}].
 /// Pairs that stay together differ by the step's own error along each atom's path, of the order τ^p, and their noise
 /// falls with the error (r = 2^{−2p}); pairs that have parted carry the two ensembles' own, the same at every step
-/// (r = 1). The ratio is read, not assumed. A look with no noise at the rung has none below; one whose ratio the
-/// scout's pairs do not read (no T where the rung reads one) asks for no number of pairs.
+/// (r = 1). The ratio is read, not assumed, and taken within [2^{−2p}, 1], where its expectation lies (module
+/// documentation, ## The ladder): it prices the work alone, never the step. A look with no noise at the rung has none
+/// below; one whose ratio the scout's pairs do not read (no T where the rung reads one) asks for no number of pairs.
 fn foreseen(own: &Between, half: &Between, rung: &Between) -> Option<f64> {
     let lowered = 0.5_f64.powi(2 * ORDER);
     let look = |read: &Read, ratio: f64, bound: f64| -> Option<f64> {
@@ -1279,7 +1287,7 @@ fn foreseen(own: &Between, half: &Between, rung: &Between) -> Option<f64> {
         let below = [lowered * near + if far > near { ratio * (far - near) } else { 0. }, lowered * near];
         (!(below[0] <= bound)).then(|| asks(below, bound))
     };
-    let ratio = |h: &Read, at: &Read| h.spread.error / at.spread.error;
+    let ratio = |h: &Read, at: &Read| (h.spread.error / at.spread.error).clamp(lowered, 1.);
     let [sp, st] = step_bound();
     let mut looks = vec![look(&own.loss, ratio(&half.loss, &rung.loss), sp * sp)];
     looks.extend((0..STATES).map(|s| look(&own.shown[s], ratio(&half.shown[s], &rung.shown[s]), sp * sp)));
@@ -4916,6 +4924,26 @@ mod tests {
         assert!(foreseen(&own, &parted, &rung).is_some_and(|f| (f - 7.95).abs() < 1e-12));
         assert_eq!((foreseen(&near, &together, &rung), foreseen(&near, &parted, &rung)), (None, None));
         assert_eq!(foreseen(&own, &at(None), &rung), Some(f64::INFINITY));
+    }
+
+    /// The noise ratio the scout's pairs read is taken within [2^{−2p}, 1], where its expectation lies (`foreseen`; module
+    /// documentation, ## The ladder): halving the step, pairs that stay together lower their noise by the order's factor,
+    /// pairs that have parted keep it, and no pair's noise grows. Read at 16.6 (PGC3D's scout) the rung below is foreseen
+    /// as on pairs that have parted, r = 1: the same 7.95 times the pairs as the rung for the read of 3.975 b ± 1.9875 b;
+    /// read at a quarter of 2^{−2p}, as on pairs that stay together, r = 2^{−2p}: for a read whose far end is 32 b, twice
+    /// the pairs in hand, where the ratio as read would have foreseen it within on them.
+    #[test]
+    fn the_noise_ratio_the_scout_s_pairs_read_is_taken_within_its_range() {
+        let b = step_bound()[1].powi(2);
+        let rung = at(Some(pilot(2. * b, 3. * b)));
+        let noise = |ratio: f64| at(Some(Read { value: 2. * b / 16., ..pilot(0., ratio * 3. * b) }));
+        let own = at(Some(read(3.975 * b, 1.9875 * b)));
+        assert_eq!(foreseen(&own, &noise(16.6), &rung), foreseen(&own, &noise(1.), &rung));
+        assert!(foreseen(&own, &noise(1.), &rung).is_some_and(|f| (f - 7.95).abs() < 1e-12));
+        let wide = at(Some(read(16. * b, 8. * b)));
+        let lowered = 0.5_f64.powi(2 * ORDER);
+        assert_eq!(foreseen(&wide, &noise(0.25 * lowered), &rung), foreseen(&wide, &noise(lowered), &rung));
+        assert!(foreseen(&wide, &noise(lowered), &rung).is_some_and(|f| (f - 2.).abs() < 1e-9));
     }
 
     /// Two causes of a read that cannot see, two answers (`remedy`; module documentation, ## The ladder), priced at the
