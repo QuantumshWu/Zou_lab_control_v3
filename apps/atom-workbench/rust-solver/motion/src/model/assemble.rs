@@ -2630,9 +2630,11 @@ impl crate::step::Middle for Middle<'_> {
         out
     }
 
-    /// photon.rs `Model::scattering_on` this middle's own site, at the path's momentum and the middle's time.
-    fn scattering(&self, path: &Path, psi: &[C64]) -> Scattering {
-        self.model.scattering_on(&self.plan, self.table, self.r, path.kappa, self.t, psi, &mut self.point.borrow_mut(), true).0
+    /// photon.rs `Model::scattering_on` this middle's own site, at the path's momentum and the middle's time, with the
+    /// real multiply-adds it counted.
+    fn scattering(&self, path: &Path, psi: &[C64]) -> (Scattering, f64) {
+        let (scattering, work) = self.model.scattering_on(&self.plan, self.table, self.r, path.kappa, self.t, psi, &mut self.point.borrow_mut(), true);
+        (scattering, work * crate::decide::COMPLEX)
     }
 
     /// Ĝ_a(s) as matrices: the forms' own terms (`contract`), each where it lies -- a flag's values times the gradient
@@ -2756,6 +2758,11 @@ impl crate::step::Middle for Middle<'_> {
 
     fn work(&self) -> [f64; 3] {
         self.plan.costs(self.point.borrow().directions.len())
+    }
+
+    /// The complex multiply-adds that made it (`Middle::work`), real.
+    fn made(&self) -> f64 {
+        self.work * crate::decide::COMPLEX
     }
 
     /// Module documentation, # Exact tones: each tone pair's beat Ω + Q·v on the path.
@@ -3084,13 +3091,6 @@ impl Middle<'_> {
         point.normal.clone_from(&from.normal);
         point.normal_slopes.clone_from(&from.normal_slopes);
         Middle { model: self.model, plan: self.plan.clone(), r: self.r, t: self.t, table: self.table, point: RefCell::new(point), work: self.work }
-    }
-
-    /// The counted complex multiply-adds of a state's scattering at the middle at the momentum κ (photon.rs
-    /// `Model::scattering_on` on the middle's own site, its forms laid: what a step's scattering makes there, the
-    /// normalized generator's matrices among it where the thread holds none of the point's).
-    pub(crate) fn scattering_counted(&self, kappa: [f64; 3], psi: &[C64]) -> f64 {
-        self.model.scattering_on(&self.plan, self.table, self.r, kappa, self.t, psi, &mut self.point.borrow_mut(), true).1
     }
 
     /// The middle's table and position where the node at the time s is the middle (`Model::node_normal`).

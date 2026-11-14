@@ -130,8 +130,11 @@ impl Middle for Parts {
             each(p.omega, std::array::from_fn(|a| self.trace(&p.force[a], rho).re));
         }
     }
-    fn scattering(&self, _: &[f64; 3], psi: &[C64]) -> Scattering {
-        self.folded.map_or(Scattering::NONE, |folded| Scattering::of(&folded.made(psi), psi.iter().map(|z| z.norm_sqr()).sum()))
+    fn scattering(&self, _: &[f64; 3], psi: &[C64]) -> (Scattering, f64) {
+        (self.folded.map_or(Scattering::NONE, |folded| Scattering::of(&folded.made(psi), psi.iter().map(|z| z.norm_sqr()).sum())), 0.0)
+    }
+    fn made(&self) -> f64 {
+        self.waves.len().pow(2) as f64
     }
     fn work(&self) -> [f64; 3] {
         let size = (self.parts.len() * self.waves.len() * self.waves.len()) as f64;
@@ -409,9 +412,6 @@ impl Dynamics for Atom {
             rows[state] = psi[s].norm_sqr() / norm;
         }
         rows
-    }
-    fn assembly_work(&self) -> f64 {
-        (self.n() * self.n()) as f64
     }
     fn photon_work(&self) -> f64 {
         self.n() as f64
@@ -1742,9 +1742,6 @@ impl Dynamics for Wells {
         }
         rows
     }
-    fn assembly_work(&self) -> f64 {
-        0.0
-    }
     fn photon_work(&self) -> f64 {
         0.0
     }
@@ -2318,9 +2315,6 @@ impl Dynamics for Synthetic {
         }
         rows
     }
-    fn assembly_work(&self) -> f64 {
-        0.0
-    }
     fn photon_work(&self) -> f64 {
         0.0
     }
@@ -2373,11 +2367,14 @@ impl<M: Middle> Middle for Probe<'_, M> {
         self.count(4);
         self.middle.tones(path, rho, each)
     }
-    fn scattering(&self, path: &M::Path, psi: &[C64]) -> Scattering {
+    fn scattering(&self, path: &M::Path, psi: &[C64]) -> (Scattering, f64) {
         self.middle.scattering(path, psi)
     }
     fn work(&self) -> [f64; 3] {
         self.middle.work()
+    }
+    fn made(&self) -> f64 {
+        self.middle.made()
     }
     fn gradient(&self, path: &M::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) {
         self.middle.gradient(path, s, g, slope)
@@ -2436,9 +2433,6 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
     }
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
         self.model.readout(cluster, at, psi)
-    }
-    fn assembly_work(&self) -> f64 {
-        self.model.assembly_work()
     }
     fn photon_work(&self) -> f64 {
         self.model.photon_work()
@@ -2619,7 +2613,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || starts.iter().map(|s| super::middle(model, s.r, s.kappa, half).unwrap().1 .0[0]).sum::<f64>(),
             &mut || propagation(false),
             &mut || propagation(true),
-            &mut || pieces.iter().zip(&paths).zip(starts).map(|((p, path), s)| p.through.generator.scattering(path, &s.psi).force[0]).sum::<f64>(),
+            &mut || pieces.iter().zip(&paths).zip(starts).map(|((p, path), s)| p.through.generator.scattering(path, &s.psi).0.force[0]).sum::<f64>(),
             &mut || pieces.iter().zip(starts).map(|(p, s)| model.readout(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi)[0]).sum::<f64>(),
             &mut || {
                 pieces.iter().zip(&paths).for_each(|(p, path)| p.through.generator.gradient(path, 0.2 * tau, &mut g, None));
@@ -2628,7 +2622,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || {
                 let mut sum = 0.0;
                 for (p, (along, scratch)) in pieces.iter().zip(alongs.iter().zip(scratches.iter_mut())) {
-                    if let Some((epsilon, _)) = super::optical(along, &scratch.picture, p.through.generator.still(), &mut scratch.noise).expect("a sector made") {
+                    if let Some((epsilon, _, _)) = super::optical(along, &scratch.picture, p.through.generator.still(), &mut scratch.noise).expect("a sector made") {
                         sum += epsilon + super::within(scratch.noise.sector.operators().unwrap(), &scratch.noise.gradient, &p.crossed.psi)[0][0];
                     }
                 }
@@ -3118,7 +3112,7 @@ fn a_jump_s_kick_is_one_photon_s_at_most() {
         assert!((kick[2] - expected).abs() <= 1e-9 * k && kick[0] == 0.0 && kick[1] == 0.0, "kz = {phase}: the jump carries {kick:?} of b = {b}");
         carried_whole += (b <= k) as usize;
         let middle = model.middle(0, at.r, at.t);
-        let scattered = middle.scattering(&middle.path(at.kappa, [0.0; 3]), &psi);
+        let (scattered, _) = middle.scattering(&middle.path(at.kappa, [0.0; 3]), &psi);
         let (mean, second) = (scattered.force[2] + weight * kick[2], scattered.diffusion[2][2] + weight * kick[2] * kick[2]);
         let closed = (k * c * c * epsilon, k * k * c * c * (phase.sin().powi(2) + (epsilon * phase.cos()).powi(2)));
         assert!((mean - closed.0).abs() <= 1e-9 * closed.0, "kz = {phase}: the mean per unit time {mean} against {}", closed.0);
@@ -3679,9 +3673,6 @@ impl Dynamics for Lindblad {
         }
         rows
     }
-    fn assembly_work(&self) -> f64 {
-        0.0
-    }
     fn photon_work(&self) -> f64 {
         0.0
     }
@@ -4144,9 +4135,6 @@ impl Dynamics for Grouped {
         }
         rows
     }
-    fn assembly_work(&self) -> f64 {
-        0.0
-    }
     fn photon_work(&self) -> f64 {
         0.0
     }
@@ -4187,3 +4175,81 @@ fn a_frame_on_a_group_of_states_leaves_the_engine_s_step_as_it_is() {
     }
 }
 
+
+/// The two groups with two exact tones of `Grouped`, their decay emitting a photon along x into the first state of each
+/// decaying one's amplitude (`a_step_s_price_is_its_count_item_by_item`), a jump's photons counted at a constant.
+struct Emitting(Grouped);
+
+impl Dynamics for Emitting {
+    type Middle<'a> = Parts;
+    fn hbar_over_mass(&self) -> f64 {
+        self.0.hbar_over_mass()
+    }
+    fn reference(&self, r: [f64; 3]) -> Quadratic {
+        self.0.reference(r)
+    }
+    fn cluster(&self, c: usize) -> &Cluster {
+        self.0.cluster(c)
+    }
+    fn cluster_of(&self, ground: usize) -> usize {
+        self.0.cluster_of(ground)
+    }
+    fn middle(&self, c: usize, r: [f64; 3], t: f64) -> Parts {
+        self.0.middle(c, r, t)
+    }
+    fn emit(&self, _: usize, _: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+        draw(&[psi[1].norm_sqr() + psi[2].norm_sqr()])?;
+        let mut amplitudes: [step::Internal; 3] = std::array::from_fn(|_| step::Internal::zeros(psi.len()));
+        (amplitudes[0][0], amplitudes[1][0]) = (psi[1], psi[2]);
+        Some(step::Emitted { landing: 0, wave_number: 8.0, amplitudes, kick: [0.0; 3] })
+    }
+    fn energy(&self, c: usize, at: &Point, psi: &[C64]) -> f64 {
+        self.0.energy(c, at, psi)
+    }
+    fn lost(&self, c: usize, at: &Point, psi: &[C64]) -> bool {
+        self.0.lost(c, at, psi)
+    }
+    fn readout(&self, c: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
+        self.0.readout(c, at, psi)
+    }
+    fn photon_work(&self) -> f64 {
+        7.0
+    }
+}
+
+/// A step's price is its count, item by item as the step did it (step.rs `Price`, `priced`): a step of 0.2 µs on the two
+/// groups with two exact tones (`Emitting`), from a state whose threshold its own propagation reaches halfway down its
+/// fall of the norm -- one jump inside the step, the picture launched again from there, on one cluster: one stretch. The
+/// step's count is its stretch's price; the price's calls of the model are the calls the step made, counted by a probe
+/// (`Counted`) -- the generator at the three nodes, the kick's three forms and the fixed point's tones twice, at the
+/// middle's form and in the start state's shear --, read off the price's count at unit counts of each; it holds the two
+/// tones and their envelopes; the trajectory's photons are the one constant, one a jump; and the price a step taken from
+/// the state reads (`priced`) is this step's own on the scratch its first step primed.
+#[test]
+fn a_step_s_price_is_its_count_item_by_item() {
+    use crate::decide::COMPLEX;
+    let (model, tau) = (Emitting(Grouped::new(0.0)), 0.2);
+    let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
+    let mut from = Trajectory::new(&model, 0, [0.0; 3], [3.0, -1.0, 2.0], 7, 0);
+    from.psi = [C64::real(0.5), C64::new(0.1, 0.4), C64::new(-0.3, 0.2), C64::new(0.0, -0.6)].into_iter().collect();
+    from.threshold = 0.0;
+    let free = step::Midway::new(&model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
+    from.threshold = (norm(&from.psi) * norm(&free.end.psi)).sqrt();
+    let counted = Counted { model: &model, calls: std::cell::Cell::new([0; 5]) };
+    let (through, mut scratch) = (step::Midway::new(&counted, &from, tau).unwrap(), step::Scratch::default());
+    through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+    counted.calls.set([0; 5]);
+    let taken = through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+    let calls = counted.calls.get();
+    let jumps = taken.made.iter().filter(|m| m.kick.is_some()).count();
+    assert_eq!((jumps, taken.prices.len()), (1, 1), "one jump inside the step, one stretch");
+    let (_, price) = taken.prices[0];
+    let costs = model.middle(0, [0.0; 3], 0.0).work();
+    assert_eq!(taken.work, price.work(costs), "the step's count is its stretch's price");
+    let unit = |which: usize| (price.stepped(std::array::from_fn(|i| if i == which { 1.0 } else { 0.0 })) - price.stepped([0.0; 3])) / COMPLEX;
+    eprintln!("calls {calls:?}; the price's calls of the generator, the force and the tones {:?}; {} tones", [unit(0), unit(1), unit(2)], price.tones);
+    assert_eq!([unit(0), unit(1), unit(2)], [calls[2] as f64, calls[3] as f64, calls[4] as f64], "the price's calls of the model are the step's");
+    assert!(price.tones == 2 && price.toned[0] > (6 * 2 * 4 * 4) as f64 && price.centred && price.sheared, "{price:?}");
+    assert_eq!(taken.end.work - from.work, model.photon_work() * jumps as f64, "a jump's photons");
+    assert_eq!(step::priced(&model, &from, tau, &Everywhere).unwrap(), taken.prices, "a step taken from the state");
+}

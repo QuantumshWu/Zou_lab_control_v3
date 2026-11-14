@@ -893,14 +893,11 @@ pub struct Run<'a> {
     pub reference: [f64; GROUND],
     prepared: Lights,
     plans: Vec<(Arc<assemble::Plan>, Option<&'a tabulate::NearTable>)>,
-    /// The counted real multiply-adds of one middle (`decide::COMPLEX` per complex one, assemble.rs # Work) with its state's
-    /// scattering on the middle's site (assemble.rs `Middle::scattering_counted`: every class's photons with their
-    /// gradients, once a step, the normalized generator's matrices of the point among them), and of one jump's photon on a
-    /// site of its own (photon.rs `Model::emission_of`: the site once with its matrices and the landing that follows,
-    /// every class's rate, the class drawn alone with its gradients: `Model::emission_counted`): each the largest over the
-    /// clusters at the focus, every light on, made once, a thread's matrices forgotten before each (a step's and a
-    /// jump's points are their own).
-    assembly: f64,
+    /// The counted real multiply-adds of one jump's photon on a site of its own (`decide::COMPLEX` per complex one,
+    /// assemble.rs # Work; photon.rs `Model::emission_of`: the site once with its matrices and the landing that follows,
+    /// every class's rate, the class drawn alone with its gradients: `Model::emission_counted`): the largest over the
+    /// clusters at the focus, every light on, made once, a thread's matrices forgotten before it (a jump's point is its
+    /// own). A step's middle and its scattering count themselves where they are made (step.rs `Price`).
     photons: f64,
 }
 
@@ -926,18 +923,14 @@ impl<'a> Run<'a> {
         let plans = (0..model.clusters.len()).map(|c| (model.plan(c, &running), tables.and_then(|t| t.of(c, &running)))).collect();
         let plans: Vec<(Arc<assemble::Plan>, Option<&tabulate::NearTable>)> = plans;
         let first = |c: usize| -> Vec<C64> { (0..model.clusters[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect() };
-        let largest = |count: &dyn Fn(usize) -> f64| (0..model.clusters.len()).map(count).fold(0.0, f64::max) * crate::decide::COMPLEX;
-        let scattering = largest(&|c| {
-            let (plan, table) = &plans[c];
-            Model::forget_quartic();
-            model.middle(plan, at.r, at.t, *table).scattering_counted(at.kappa, &first(c))
-        });
-        let photons = largest(&|c| {
-            Model::forget_quartic();
-            model.emission_counted(c, &at, &first(c), tables)
-        });
-        let assembly = plans.iter().map(|(plan, table)| model.middle(plan, at.r, at.t, *table).work).fold(0.0, f64::max) * crate::decide::COMPLEX + scattering;
-        Run { model, tables, reference, prepared: model.prepared(), plans, assembly, photons }
+        let photons = (0..model.clusters.len())
+            .map(|c| {
+                Model::forget_quartic();
+                model.emission_counted(c, &at, &first(c), tables)
+            })
+            .fold(0.0, f64::max)
+            * crate::decide::COMPLEX;
+        Run { model, tables, reference, prepared: model.prepared(), plans, photons }
     }
     /// The photon classes of a cluster's state at a point with their amplitudes alone (photon.rs `Gradients::None`): the
     /// classes a jump draws among, by their rates (`Photon::weight`; a jump makes the rates and the drawn class's photon
@@ -1007,9 +1000,6 @@ impl crate::step::Dynamics for Run<'_> {
         Self: 'a;
     fn hbar_over_mass(&self) -> f64 {
         self.model.hbar_over_mass
-    }
-    fn assembly_work(&self) -> f64 {
-        self.assembly
     }
     fn photon_work(&self) -> f64 {
         self.photons

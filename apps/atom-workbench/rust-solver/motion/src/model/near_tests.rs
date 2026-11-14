@@ -570,12 +570,14 @@ fn a_unit_books_no_error_where_its_states_are_empty() {
     assert!(empty > 0, "a candidate coupling of two empty states");
 }
 
-/// The assembly's price counts the elimination at the atom (assemble.rs # Work): R2_RECOIL with its probe's drives folded there
-/// prices a generator at no less than the factorizations its elimination makes, one per ground state for the probe's dressing
-/// and one for the response of the cluster's ground state -- (n³ − n)/3 complex multiply-adds each on the n excited states.
+/// A step's middle counts the elimination at the atom (assemble.rs # Work; step.rs `Middle::made`, `Middle::scattering`, where
+/// a step counts them): R2_RECOIL with its probe's drives folded there counts its middle at the focus with its state's
+/// scattering, at a point of its own (the thread's matrices forgotten), at no less than the factorizations its elimination
+/// makes, one per ground state for the probe's dressing and one for the response of the cluster's ground state --
+/// (n³ − n)/3 complex multiply-adds each on the n excited states.
 #[test]
 fn the_assembly_s_price_counts_the_elimination_at_the_atom() {
-    use crate::step::Dynamics;
+    use crate::step::Middle;
     let request = scene("R2_RECOIL");
     let light = Light::new(&request);
     let probe = Component { frequency: frequency_of(&request, &light, "probe"), counter: false };
@@ -585,7 +587,15 @@ fn the_assembly_s_price_counts_the_elimination_at_the_atom() {
     let run = crate::model::Run::new(&model, p);
     let n = STATES - GROUND;
     let factorizations = (GROUND + 1) as f64 * ((n * n * n - n) / 3) as f64 * crate::decide::COMPLEX;
-    assert!(run.assembly_work() >= factorizations, "an assembly priced {} below its factorizations' {factorizations}", run.assembly_work());
+    let made = (0..model.clusters().len())
+        .map(|c| {
+            Model::forget_quartic();
+            let middle = run.middle(c, [0.0; 3], 0.0);
+            let first: Vec<C64> = (0..model.clusters()[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
+            middle.made() + middle.scattering(&middle.path([0.0; 3], [0.0; 3]), &first).1
+        })
+        .fold(0.0, f64::max);
+    assert!(made >= factorizations, "a middle and its scattering counted {made} below its factorizations' {factorizations}");
 }
 
 /// The normalized generator's decay is its photons' rate with a kept pair of two frequencies (assemble.rs, # The normalized

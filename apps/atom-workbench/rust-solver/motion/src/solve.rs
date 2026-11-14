@@ -185,8 +185,9 @@
 //! - The run's work. Of the rungs a check's reads let stand, the run takes the one it is expected to spend least on
 //!   from here -- the product and the check together --, as a keep takes its set (# One rule for a keep: the run's
 //!   total work), not the largest. A trajectory's work a µs w(h) with every step at h, each step priced at its own
-//!   step (`Formula::at_step`: the step's counted work through the model's generator, step.rs `Price`, its middle and
-//!   its photons -- the keep's pricing), at the states in hand (`one_each`: the scout's, then the pilot's); and the
+//!   step (`Formula::at_step`: the step's counted work as a step taken from each state counts it, step.rs `priced`,
+//!   `Price`, and its photons -- the keep's pricing), at the states in hand (`one_each`: the scout's, then the
+//!   pilot's); and the
 //!   product's trajectories N its looks ask (`most_needed`, # Stopping: the pilot's statistics, before them the
 //!   scout's, or the carried states' where the attempt decided on those) -- one N for every rung, the need beside the
 //!   step's part as read: a rung below's smaller step error, which leaves the statistics more room, is not counted, and
@@ -450,11 +451,15 @@
 //!   none: its 800 trajectories took 549 CPU-s, where its forty drives kept explicit together -- none of them pays
 //!   alone, the first one's model dearer a µs by its cluster's growth -- leave 0.0107 and 176 trajectories, 100 CPU-s.
 //! - The work: w the counted work a trajectory spends per µs, at the pilot's states (`Pricing::rates`): its steps'
-//!   count through the model's generator (step.rs `Price`), its middles' assembly and scattering, and its jumps'
-//!   photons at the trajectory's own rate of jumps, all as the run counts them with near tables -- the attempt's for
-//!   the current model, the axes its tables would take for a kept one (model.rs `Model::priced`, tabulate.rs
-//!   `Model::priced_axes`). A kept model is priced by its work formula, of its structure alone: its clusters, its
-//!   drives' levels and its plans, the counts the run's are -- no table is made and nothing eliminated. (Rated with the
+//!   count as a step taken from each state counts it (step.rs `priced`, `Price`: the propagation through the model's
+//!   generator, its jumps and the launches after them, its middle's making and the light scattered there, item by item
+//!   where it was done), and its jumps' photons at the trajectory's own rate of jumps -- the one count priced once a run
+//!   (`Dynamics::photon_work`: the photon is the model's to make, and its count is not handed on) --, all as the run
+//!   counts them with near tables -- the attempt's for the current model, the axes its tables would take for a kept one
+//!   (model.rs `Model::priced`, tabulate.rs `Model::priced_axes`). A kept model is priced by its work formula, of its
+//!   structure alone: its clusters, its drives' levels and its plans, the counts the run's are -- no table is made and
+//!   nothing eliminated --, its steps the current model's as counted, grown where its clusters are larger
+//!   (`Price::grown`), its middle and its scattering in the ratio of the two models' by structure. (Rated with the
 //!   tables its attempt would make, S3's pilot made 38 kept models' tables and 2259 floors, a model and its
 //!   elimination each, 263 CPU-s a pricing. Priced without tables, by the exact elimination, R4_LIN_2's current model
 //!   read 138 times its counted work, and a keep's coordinates -- its tables' axes, an interpolation's work going as
@@ -1063,6 +1068,10 @@ struct Ladder {
     frequency: f64,
     kick: f64,
 }
+/// A step's price at a state (`Formula::prices`): its stretches' prices, each with its cluster, as the step taken from the
+/// state counted them (step.rs `priced`); none where no step of it can be taken.
+type Taken = Option<Vec<(usize, Price)>>;
+
 /// What an attempt's model costs in evaluations of its prepared potential beside its steps' own work (`Formula::rate`,
 /// `Formula::kept`), counted on the current attempt: per trajectory's initial draw the proposals it reads
 /// (`Ensemble::evaluations`), and per attempt its setup's -- the prior's atoms, the pilot's number of draws
@@ -1089,12 +1098,28 @@ impl Ladder {
 
 /// What a level's steps ask of the model's domain (SPEC §1.8; module documentation, # The reach's atoms; step.rs, # The
 /// domain): the model and the reach -- where an atom lies against it (`placed`) --, and the fastest decay of the
-/// model's excited states, `widest` (1/µs): no state of the atom scatters faster than that, wholly excited (`runaway`).
+/// model's excited states, `widest` (`Widest`: the runaway's rule, `runaway`).
 #[derive(Clone, Copy)]
 struct Domain<'a> {
     model: &'a Model,
     reach: &'a crate::model::Reach,
-    widest: f64,
+    widest: Widest,
+}
+
+/// The fastest decay of a model's excited states (1/µs): no state of the atom scatters faster than that, wholly excited
+/// -- a state's hazard above it is a fold far outside its validity (step.rs, # The domain): the runaway's rule, of the
+/// run's steps (`Domain`) and of those a price takes (`Formula::prices`).
+#[derive(Clone, Copy)]
+struct Widest(f64);
+impl Widest {
+    fn of(model: &Model) -> Widest {
+        Widest((0..model.decay.rows).map(|x| model.decay[(x, x)].re).fold(0., f64::max))
+    }
+}
+impl crate::step::Domain for Widest {
+    fn runaway(&self, hazard: f64) -> bool {
+        hazard > self.0
+    }
 }
 impl Domain<'_> {
     /// Whether an atom at r with the momentum κ lies outside the reach, and whether it is leaving (`Model::situated`).
@@ -1104,10 +1129,9 @@ impl Domain<'_> {
     }
 }
 impl crate::step::Domain for Domain<'_> {
-    /// A hazard above the fastest excited state's decay, wholly excited: a fold far outside its validity (step.rs, # The
-    /// domain).
+    /// A hazard above the fastest excited state's decay, wholly excited (`Widest`).
     fn runaway(&self, hazard: f64) -> bool {
-        hazard > self.widest
+        self.widest.runaway(hazard)
     }
 }
 
@@ -1950,8 +1974,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     let above = |tau: f64| 4. * tau <= end && stable(2. * tau, frequency, kick) && stable(4. * tau, frequency, kick);
     // What the attempt's steps ask of the model's domain (`Domain`): the fastest decay of the model's excited states, no
     // state of the atom's faster.
-    let widest = (0..model.decay.rows).map(|x| model.decay[(x, x)].re).fold(0., f64::max);
-    let domain = Domain { model, reach: judged, widest };
+    let domain = Domain { model, reach: judged, widest: Widest::of(model) };
     // The analysis times' candidates (# The analysis times): every level of the attempt is read there while the pilot
     // runs.
     let (candidates, window) = (grid(end, first_rung), plan.window);
@@ -2868,19 +2891,43 @@ impl Stopped {
 }
 
 /// A pilot trajectory's state at a time read (model.rs `Sample`) with the run's step and the trajectory's number: where
-/// the units' errors are measured and a model is priced (`Pricing::rates`).
+/// the units' errors are measured and a model is priced (`Pricing::rates`, `Formula::prices`).
 #[derive(Clone)]
 struct State {
     sample: Sample,
     tau: f64,
     index: u64,
-    /// The trajectory's jumps up to the state.
+    /// The trajectory's jumps up to the state, and the threshold of its next one.
     jumps: u32,
+    threshold: f64,
 }
 impl State {
     /// A trajectory's state as it stands, at the step τ.
     fn of(t: &Trajectory, tau: f64) -> State {
-        State { sample: Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() }, tau, index: t.index, jumps: t.jumps }
+        State { sample: Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() }, tau, index: t.index, jumps: t.jumps, threshold: t.threshold }
+    }
+
+    /// The trajectory at the state, as far as a step from it reads it (`step::priced`): its place, momentum, internal
+    /// state and time, its next jump's threshold and its streams.
+    fn trajectory(&self) -> Trajectory {
+        let Sample { cluster, at, psi } = &self.sample;
+        Trajectory {
+            r: at.r,
+            kappa: at.kappa,
+            psi: psi.iter().copied().collect(),
+            cluster: *cluster,
+            time: at.t,
+            threshold: self.threshold,
+            jumps: self.jumps,
+            scattered: [0.; 2],
+            lost: None,
+            unresolved: false,
+            seed: SEED,
+            index: self.index,
+            work: 0.,
+            pending: [[0.; 3]; 3],
+            booked: [0.; 3],
+        }
     }
 }
 
@@ -4196,12 +4243,15 @@ impl<'a> Level<'a> {
 }
 
 /// The work formula (module documentation, # The model): the counted work a trajectory spends per µs at a state under a
-/// model, and under the models that keep more units, as the run counts it -- the step's own count through its cluster's
-/// generator (step.rs `Price`) with the model's counts at a node of the cluster, a middle with a step's scattering over
-/// τ, and the jumps' photons at the trajectory's own rate of jumps (model.rs `Model::priced`) --, with near tables: the
-/// current model's own (the attempt's), and for a kept model the axes its tables would take (tabulate.rs
-/// `Model::priced_axes`). A kept model is priced of its structure alone -- its clusters, its drives' levels and its
-/// plans (`Model::rekept`): no table is made and nothing eliminated.
+/// model, and under the models that keep more units, as the run counts it -- the step's own count as a step taken from
+/// the state counts it (step.rs `priced`, `Price`: its stretches' pictures, nodes, jumps and their launches, its middle
+/// and the light scattered there) with the model's counts at a node of the cluster, over τ, and the jumps' photons at
+/// the trajectory's own rate of jumps (model.rs `Model::priced`: the one count of a run's step priced once a run, the
+/// photon being the model's to make, model.rs) --, with near tables: the current model's own (the attempt's), and for a
+/// kept model the axes its tables would take (tabulate.rs `Model::priced_axes`). A kept model is priced of its
+/// structure alone -- its clusters, its drives' levels and its plans (`Model::rekept`): no table is made and nothing
+/// eliminated; its steps are the current model's as they were counted, grown where its clusters are larger
+/// (`Price::grown`), its middle and its scattering in the ratio of the two models' by structure (`assembly`).
 struct Formula<'a> {
     model: &'a Model,
     kept: &'a [Unit],
@@ -4219,14 +4269,19 @@ struct Formula<'a> {
     /// The attempt's ladder: a model's first rung (`rung`); and its setup's counts (`potential`).
     ladder: Ladder,
     setup: Setup,
+    /// The current model's middle and its scattering by structure (`Model::priced`): what a kept model's are taken in
+    /// ratio to (`rate`).
+    assembly: f64,
 }
 
 impl<'a> Formula<'a> {
     #[allow(clippy::too_many_arguments)]
     fn new(model: &'a Model, kept: &'a [Unit], units: &'a [Unit], reference: [f64; GROUND], centre: V3, tables: &'a Tables, ladder: Ladder, setup: Setup) -> Formula<'a> {
         let running = model.running();
-        let axes = (0..model.clusters().len()).map(|c| tables.of(c, &running).map(|t| model.table_axes(t))).collect();
-        Formula { model, kept, units, reference, centre, tables, axes, points: vec![], moving: Mutex::new(HashMap::new()), ladder, setup }
+        let axes: Vec<_> = (0..model.clusters().len()).map(|c| tables.of(c, &running).map(|t| model.table_axes(t))).collect();
+        let mut formula = Formula { model, kept, units, reference, centre, tables, axes, points: vec![], moving: Mutex::new(HashMap::new()), ladder, setup, assembly: 0. };
+        formula.assembly = formula.own().assembly;
+        formula
     }
 
     /// A model's first rung on the attempt's ladder (`Ladder::first`); none where no rung within `MOST_STEPS` is below
@@ -4243,28 +4298,21 @@ impl<'a> Formula<'a> {
         model.expand(self.centre, &self.reference, &model.prepared(), 2, None).work
     }
 
-    /// The step's price (step.rs `Price`) at states of the current model, each its cluster, its point and its τ: on the
-    /// middle of its cluster at the trap's centre with the tables -- a price needs the generator's sizes and its
-    /// spectrum, not the state's own point: one middle a cluster serves every state --, on the path of the state's own
-    /// momentum and velocity.
-    fn prices(&self, states: &[(usize, crate::model::Point, f64)]) -> Vec<Price> {
-        let run = Run::tabulated(self.model, self.tables, self.reference);
-        let mut middles: Vec<Option<crate::model::Middle>> = (0..self.model.clusters().len()).map(|_| None).collect();
-        states
-            .iter()
-            .map(|&(cluster, at, tau)| {
-                let middle = middles[cluster].get_or_insert_with(|| run.middle(cluster, self.centre, 0.));
-                Price::of(middle, at.kappa, at.kappa.map(|k| run.hbar_over_mass() * k), tau)
-            })
-            .collect()
+    /// The step's price at trajectories' states of the current model, each with its step τ (step.rs `priced`): a step of
+    /// τ taken from the state on the current model with its tables, its stretches' counts as they were made -- the
+    /// state's own place, momentum, internal state and next jump --, each state's on the pool by itself; none where the
+    /// step is refused (no step of it can be taken: priced past any work). The runaway's rule is the run's (`Widest`).
+    fn prices(&self, states: &[(Trajectory, f64)]) -> Vec<Taken> {
+        let (run, widest) = (Run::tabulated(self.model, self.tables, self.reference), Widest::of(self.model));
+        states.par_iter().map(|(from, tau)| crate::step::priced(&run, from, *tau, &widest).ok()).collect()
     }
 
     /// The current model's work a µs over the run (`over_the_run`) at the states `rated` (`one_each`) with every step
     /// taken at τ, each step priced at it (`prices`, `rate`): the model's price `own` (`own`) and its potential's work an
     /// evaluation `potential` (`potential`) -- what a level of the step's check costs a trajectory (`Prices`).
     fn at_step(&self, rated: &[Pick], own: &Priced, potential: f64, tau: f64) -> f64 {
-        let prices = self.prices(&rated.iter().map(|pick| (pick.state.sample.cluster, pick.state.sample.at, tau)).collect::<Vec<_>>());
-        over_the_run(rated, rated.iter().zip(&prices).map(|(pick, price)| self.rate(self.model, own, pick.state.sample.cluster, price, tau, pick.jumps, potential)), None)
+        let prices = self.prices(&rated.iter().map(|pick| (pick.state.trajectory(), tau)).collect::<Vec<_>>());
+        over_the_run(rated, rated.iter().zip(&prices).map(|(pick, taken)| self.rate(self.model, own, taken, tau, pick.jumps, potential)), None)
     }
 
     /// The current model priced on its tables' axes (`Model::priced`).
@@ -4308,20 +4356,28 @@ impl<'a> Formula<'a> {
         Some((with, priced, rung, potential))
     }
 
-    /// The rate at a state of the current model's cluster `cluster` -- the step's price there `price` (`prices`), its τ
-    /// and its trajectory's jumps a µs -- under a model priced `priced`: the price grown where the model's cluster that
-    /// holds the state's is larger (`Price::grown`, its bandwidth at least its levels' own, `bandwidth`), with that
-    /// cluster's counts at a node, the middle with a step's scattering over τ, and the photons.
+    /// The rate at a state of the current model -- the step's price there `taken` (`prices`), its τ and its trajectory's
+    /// jumps a µs -- under a model priced `priced`: each stretch's price on the model's cluster that holds the stretch's
+    /// (`Price::grown` where that one is larger, its bandwidth at least its levels' own, `bandwidth`), with that
+    /// cluster's counts at a node, the model's own part -- the middle's making and its scattering -- in the ratio of the
+    /// model's to the current one's by structure (`assembly`: one for the current model), over τ; and the photons.
     ///
     /// Beside the step, the model's prepared potential (`potential`: its work an evaluation): a step's reference, and the
     /// trajectory's initial draw over the run (`Setup::per_draw` evaluations).
-    #[allow(clippy::too_many_arguments)]
-    fn rate(&self, model: &Model, priced: &Priced, cluster: usize, price: &Price, tau: f64, jumps: f64, potential: f64) -> f64 {
-        let states = &self.model.clusters()[cluster].states;
-        let c = model.cluster_of(states[0]);
-        let held = &model.clusters()[c];
-        let price = if held.states == *states { *price } else { price.grown(held.states.len(), held.ground, price.bandwidth.max(bandwidth(model, c))) };
-        (price.work(priced.costs[c]) + priced.assembly) / tau + jumps * priced.photons + potential * (1. / tau + self.setup.per_draw / self.ladder.run)
+    fn rate(&self, model: &Model, priced: &Priced, taken: &Taken, tau: f64, jumps: f64, potential: f64) -> f64 {
+        let Some(stretches) = taken else { return f64::INFINITY };
+        let ratio = priced.assembly / self.assembly;
+        let step: f64 = stretches
+            .iter()
+            .map(|(cluster, price)| {
+                let states = &self.model.clusters()[*cluster].states;
+                let c = model.cluster_of(states[0]);
+                let held = &model.clusters()[c];
+                let price = if held.states == *states { *price } else { price.grown(held.states.len(), held.ground, price.bandwidth.max(bandwidth(model, c))) };
+                price.stepped(priced.costs[c]) + ratio * price.modelled()
+            })
+            .sum();
+        step / tau + jumps * priced.photons + potential * (1. / tau + self.setup.per_draw / self.ladder.run)
     }
 
     /// A model's setup a µs of the run (the rate's unit: the expected total work's, `least_expected`): its potential's
@@ -4350,7 +4406,7 @@ struct Pricing<'a> {
     /// The states the rates are read at, the step's price at each by the current model (`Formula::prices`, made once
     /// asked), and the current model's rates there.
     rated: Vec<Pick<'a>>,
-    prices: OnceLock<Vec<Price>>,
+    prices: OnceLock<Vec<Taken>>,
     own: Vec<f64>,
     /// The trajectories a kept model's attempt runs again before it stands where this one does.
     again: f64,
@@ -4380,16 +4436,16 @@ impl<'a> Pricing<'a> {
         Pricing { formula, measured, pilot, fixed, scales, unsampled, rated, prices: OnceLock::new(), own: vec![], again, all }
     }
 
-    /// The step's price at each rated state by the current model (`Formula::prices`).
-    fn prices(&self) -> &[Price] {
-        self.prices.get_or_init(|| self.formula.prices(&self.rated.iter().map(|pick| (pick.state.sample.cluster, pick.state.sample.at, pick.state.tau)).collect::<Vec<_>>()))
+    /// The step's price at each rated state by the current model, at the step its trajectory ran at (`Formula::prices`).
+    fn prices(&self) -> &[Taken] {
+        self.prices.get_or_init(|| self.formula.prices(&self.rated.iter().map(|pick| (pick.state.trajectory(), pick.state.tau)).collect::<Vec<_>>()))
     }
 
     /// A model's rates at the rated states (`Formula::rate`), each at the step the model would run at there: the state's
     /// τ, or the model's first rung `rung` where that is shorter -- the step the beats a keep brings in ask before any
     /// check reads it (`Formula::kept`). The current model's rung is at least the τ its states ran at.
     fn rated_by(&self, model: &Model, priced: &Priced, rung: f64, potential: f64) -> Vec<f64> {
-        self.rated.iter().zip(self.prices()).map(|(pick, price)| self.formula.rate(model, priced, pick.state.sample.cluster, price, pick.state.tau.min(rung), pick.jumps, potential)).collect()
+        self.rated.iter().zip(self.prices()).map(|(pick, taken)| self.formula.rate(model, priced, taken, pick.state.tau.min(rung), pick.jumps, potential)).collect()
     }
 
     /// The current model's rates (`Formula::own`).
@@ -4406,9 +4462,11 @@ impl<'a> Pricing<'a> {
     }
 
     /// A bound below every kept set's mean rate (`needed`): the step's price at each rated state with no count at a
-    /// node, no middle and no photon -- what no keep takes away: a keep's clusters are at least as large (`Price::grown`).
+    /// node, no middle, no scattering and no photon -- what no keep takes away: a keep's clusters are at least as large
+    /// (`Price::grown`).
     fn least(&self) -> f64 {
-        let rates: Vec<f64> = self.rated.iter().zip(self.prices()).map(|(pick, price)| price.work([0.; 3]) / pick.state.tau).collect();
+        let step = |taken: &Taken| taken.as_ref().map_or(f64::INFINITY, |stretches| stretches.iter().map(|(_, price)| price.stepped([0.; 3])).sum());
+        let rates: Vec<f64> = self.rated.iter().zip(self.prices()).map(|(pick, taken)| step(taken) / pick.state.tau).collect();
         self.mean(&rates, None)
     }
 
@@ -6007,6 +6065,7 @@ mod tests {
                     index: MOST_TRAJECTORIES + (g as u64) * GROUP + m as u64,
                     // Three jumps a unit of time.
                     jumps: 3 * k as u32,
+                    threshold: 0.5,
                 };
                 let samples = (0..=outputs).map(|k| (0..members).filter(|&m| k <= held(g, m)).map(|m| state(m, k)).collect()).collect();
                 Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), listed: vec![], samples, trails: vec![], lost: vec![], counts: Counts::default() }
@@ -6310,11 +6369,12 @@ mod tests {
     /// The work formula prices a model as its run counts it (`Formula`). R4_LIN_2's model with its cooling pair's drives into
     /// F′=3 at the atom, over its 30 µK reach,
     /// with its tables: the current model priced from its plans on its tables' axes (`Model::priced`) is its run's own
-    /// count, cluster by cluster at a node, and the middle with its scattering and a jump's photons at the focus, to the
-    /// bit. A kept model -- a bare drive taken to the atom -- priced of its structure alone is its run's with its own
-    /// tables made, at states of every cluster at rest and at the reach's speed along each lab axis, the coordinates new
-    /// to a kept model read over the trap's centre and halfway to the reach's box along each axis: within 1 % (measured:
-    /// to the bit).
+    /// count, cluster by cluster at a node, and a jump's photons at the focus, to the bit; its rate at a state is its
+    /// step's own count there (`Step::work`) over τ, and a jump's photons a µs. A kept model -- a bare drive taken to the
+    /// atom -- priced of its structure alone (the current model's steps as counted, its middle and its scattering in the
+    /// ratio of the two models' by structure) is its run's with its own tables made, at states of every cluster at rest
+    /// and at the reach's speed along each lab axis, held (no jump), the coordinates new to a kept model read over the
+    /// trap's centre and halfway to the reach's box along each axis: within 1 %.
     #[test]
     fn the_work_formula_prices_a_kept_model_as_its_run_counts_it() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R4_LIN_2.json");
@@ -6347,30 +6407,36 @@ mod tests {
         for c in 0..model.clusters().len() {
             assert_eq!(own.costs[c], crate::step::Middle::work(&run.middle(c, trap.centre, 0.)), "cluster {c}'s counts at a node");
         }
-        assert_eq!((own.assembly, own.photons), (run.assembly_work(), run.photon_work()), "a middle with its scattering, and a jump's photons");
-        // States of every cluster, at rest and at the reach's speed along each lab axis.
+        assert_eq!(own.photons, run.photon_work(), "a jump's photons");
+        // States of every cluster's first ground state, at rest and at the reach's speed along each lab axis, held.
         let speed = reach.speed / model.hbar_over_mass();
-        let states: Vec<(usize, crate::model::Point, f64)> = (0..model.clusters().len())
-            .filter(|&c| model.clusters()[c].ground > 0)
-            .flat_map(|c| (0..4).map(move |a| (c, crate::model::Point { r: trap.centre, kappa: std::array::from_fn(|b| if a == b + 1 { speed } else { 0. }), t: 0. }, tau)))
+        let clusters = model.clusters();
+        let starts: Vec<(usize, V3)> = (0..clusters.len())
+            .filter(|&c| clusters[c].ground > 0)
+            .flat_map(|c| (0..4).map(move |a| (clusters[c].states[0], std::array::from_fn(|b| if a == b + 1 { speed } else { 0. }))))
             .collect();
-        let prices = formula.prices(&states);
+        let held = |run: &Run, (state, kappa): (usize, V3), i: usize| Trajectory { threshold: f64::MIN_POSITIVE, ..Trajectory::new(run, state, trap.centre, kappa, SEED, i as u64) };
+        // A step's own count, its scratch primed as a run's (`step::priced`).
+        let counted = |run: &Run, from: &Trajectory| {
+            let (through, mut scratch, everywhere) = (crate::step::Midway::new(run, from, tau).unwrap(), crate::step::Scratch::default(), Widest(f64::INFINITY));
+            through.attempt(from, &crate::step::Brownian::STILL, &[], &mut scratch, &everywhere).unwrap();
+            through.attempt(from, &crate::step::Brownian::STILL, &[], &mut scratch, &everywhere).unwrap().work
+        };
+        let trajectories: Vec<(Trajectory, f64)> = starts.iter().enumerate().map(|(i, &start)| (held(&run, start, i), tau)).collect();
+        let prices = formula.prices(&trajectories);
         let mean = |rates: &[f64]| rates.iter().sum::<f64>() / rates.len() as f64;
+        for ((from, _), taken) in trajectories.iter().zip(&prices) {
+            let rate = formula.rate(&model, &own, taken, tau, 1., 0.);
+            assert!((rate - (counted(&run, from) / tau + run.photon_work())).abs() <= 1e-12 * rate, "a state's rate is its step's count");
+        }
         // A kept set's mean rate over the states by the formula, and by its run with its own tables; a jump a µs.
         let rates = |set: &[usize]| -> [f64; 2] {
             let (with, priced, _, potential) = formula.kept(set).unwrap();
-            let priced: Vec<f64> = states.iter().zip(&prices).map(|(&(c, _, tau), price)| formula.rate(&with, &priced, c, price, tau, 1., potential)).collect();
+            let priced: Vec<f64> = prices.iter().map(|taken| formula.rate(&with, &priced, taken, tau, 1., potential)).collect();
             let with = Model::new(&request, &light, &[&kept[..], &set.iter().map(|&u| units[u].clone()).collect::<Vec<_>>()].concat()).unwrap();
             let tables = with.tabulate(reach, most);
             let run = Run::tabulated(&with, &tables, reference);
-            let made: Vec<f64> = states
-                .iter()
-                .map(|&(c, at, tau)| {
-                    let middle = run.middle(run.cluster_of(model.clusters()[c].states[0]), trap.centre, 0.);
-                    let price = Price::of(&middle, at.kappa, at.kappa.map(|k| run.hbar_over_mass() * k), tau);
-                    (price.work(crate::step::Middle::work(&middle)) + run.assembly_work()) / tau + run.photon_work()
-                })
-                .collect();
+            let made: Vec<f64> = starts.iter().enumerate().map(|(i, &start)| counted(&run, &held(&run, start, i)) / tau + run.photon_work()).collect();
             [mean(&priced), mean(&made)]
         };
         let first = |kind: &dyn Fn(&Unit) -> bool| units.iter().position(kind).expect("a unit of the kind");
@@ -6533,7 +6599,7 @@ mod tests {
         let reference = alone(b);
         let trap = model.trap(&reference, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
-        let widest = (0..model.decay.rows).map(|x| model.decay[(x, x)].re).fold(0., f64::max);
+        let widest = Widest::of(&model);
         let domain = Domain { model: &model, reach: &reach, widest };
         let plan = Plan::new(&[0., 0.2, 0.4, 0.6, 0.8], trap.lab);
         let run = Run::new(&model, reference);
@@ -6548,7 +6614,7 @@ mod tests {
                     let m = run.middle(cluster, middle, 0.);
                     let mut h = crate::linalg::Mat::zeros(psi.len(), psi.len());
                     crate::step::Middle::generator(&m, &crate::step::Middle::path(&m, kappa, [0.; 3]), 0., &mut h);
-                    crate::model::testing::decay_rate(&h, &psi) / widest
+                    crate::model::testing::decay_rate(&h, &psi) / widest.0
                 };
                 let record = run_trajectory(&run, &domain, Start { state: b, r: trap.centre, kappa }, (3 * i + a) as u64, TAU_GUARD, &plan);
                 if excitation > 2. {
@@ -6587,7 +6653,7 @@ mod tests {
         let reference = alone(b);
         let trap = model.trap(&reference, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
-        let widest = (0..model.decay.rows).map(|x| model.decay[(x, x)].re).fold(0., f64::max);
+        let widest = Widest::of(&model);
         let domain = Domain { model: &model, reach: &reach, widest };
         let run = Run::new(&model, reference);
         let end = Plan::new(&[0., 2.], trap.lab).end;
@@ -6658,8 +6724,7 @@ mod tests {
                 let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
                 (model, trap, reach)
             };
-            let widest = (0..model.decay.rows).map(|x| model.decay[(x, x)].re).fold(0., f64::max);
-            let domain = Domain { model: &model, reach: &reach, widest };
+            let domain = Domain { model: &model, reach: &reach, widest: Widest::of(&model) };
             let tables = closed.then(|| model.tabulate(&reach, 1 << 20));
             let run = tables.as_ref().map_or_else(|| Run::new(&model, reference), |tables| Run::tabulated(&model, tables, reference));
             let mut plan = Plan::new(&[0., 0.5 * last, last], trap.lab);
@@ -6896,7 +6961,7 @@ mod tests {
         let (groups, members, outputs) = (11_usize, GROUP as usize, 4_usize);
         let parts: Vec<Part> = (0..groups)
             .map(|g| {
-                let state = |m: usize, t: f64, jumps: u32| State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, tau: 0.5, index: MOST_TRAJECTORIES + (g * members + m) as u64, jumps };
+                let state = |m: usize, t: f64, jumps: u32| State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, tau: 0.5, index: MOST_TRAJECTORIES + (g * members + m) as u64, jumps, threshold: 0.5 };
                 let loss = |m: usize| 0.1 + 0.8 * ((g * members + m) % 9) as f64 / 8.;
                 let mut samples = vec![vec![]; outputs + 1];
                 samples[0] = (0..members).map(|m| state(m, 0., 0)).collect();
@@ -7163,10 +7228,10 @@ mod tests {
         assert!(potential > 100. * own, "{potential} against the bare fold's {own}");
         let tau = rung.min(0.25);
         let state = reference.iter().position(|&p| p == 1.).unwrap();
-        let c = model.cluster_of(state);
         let run = Run::tabulated(&model, &tables, reference);
-        let price = Price::of(&run.middle(c, trap.centre, 0.), [0.; 3], [0.; 3], tau);
-        let (with_potential, without) = (formula.rate(&with, &priced, c, &price, tau, 0., potential), formula.rate(&with, &priced, c, &price, tau, 0., 0.));
+        let at_rest = Trajectory { threshold: f64::MIN_POSITIVE, ..Trajectory::new(&run, state, trap.centre, [0.; 3], SEED, 0) };
+        let taken = formula.prices(&[(at_rest, tau)]).pop().unwrap();
+        let (with_potential, without) = (formula.rate(&with, &priced, &taken, tau, 0., potential), formula.rate(&with, &priced, &taken, tau, 0., 0.));
         eprintln!("rate {without} -> {with_potential}");
         assert!(with_potential > 2. * without, "{with_potential} against {without} without the potential");
         assert!((formula.setup(potential) - potential * setup.evaluations / ladder.run).abs() <= 1e-12 * formula.setup(potential));

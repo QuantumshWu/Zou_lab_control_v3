@@ -336,7 +336,7 @@
 //! propagation made (`Picture::slope`); the gradient's matrices and, where the cluster beats, their slope along the path
 //! in one pass of the model's forms (`Middle::gradient`); the blocks' Schur forms, ℳ made at once and factored, and the
 //! sides' solves (model/optical.rs, # The solve; S3: 36 reals where the whole sector is 96); and twelve forms
-//! (`Sector::forms`) -- which `Price` prices, making the same. It is made anew at every middle: a factorization
+//! (`Sector::forms`) -- which the stretch's `Price` counts as made. It is made anew at every middle: a factorization
 //! reused along the path as an iterative refinement's preconditioner contracts the error by the light pattern's change
 //! over a step -- S3's standing wave turns 0.26 rad a step at 30 µK -- for an iteration that applies the operator and
 //! solves, a third of the whole sector's factorization (measured on its 96 reals): more than the factorization to its
@@ -470,12 +470,10 @@ pub trait Dynamics {
     /// The displayed rows of the cluster's state at a point (`Model::readout`).
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES];
 
-    /// The counted work of one middle (`decide::Work`, real multiply-adds), made once per run: the price of a step's
-    /// middle beside its own work and its nodes' (`Price`).
-    fn assembly_work(&self) -> f64;
-
     /// The counted real multiply-adds of one jump's photons (`Dynamics::emit`), made once per run: `jump` adds it to the
-    /// trajectory's work.
+    /// trajectory's work. The one count of a step's run that is not counted where it is made (`Price`): the model makes
+    /// the photon (model.rs `Run::emit`) and does not hand its count on; so it is priced at the dearest class's of every
+    /// cluster at the focus, once a run.
     fn photon_work(&self) -> f64;
 }
 
@@ -553,12 +551,16 @@ pub trait Middle {
 
     /// What the light a state scatters at the point gives the momentum per unit time beside the Ehrenfest force and the
     /// jumps' kicks (`Model::scattering_on`): the force and the second moment's rate the jumps do not carry, of the
-    /// state ψ at the middle's time and the path's momentum. Asked of the middle, which holds the point: the model makes
-    /// nothing there a second time.
-    fn scattering(&self, path: &Self::Path, psi: &[C64]) -> Scattering;
+    /// state ψ at the middle's time and the path's momentum; and the counted real multiply-adds that made it. Asked of
+    /// the middle, which holds the point: the model makes nothing there a second time.
+    fn scattering(&self, path: &Self::Path, psi: &[C64]) -> (Scattering, f64);
 
     /// The counted complex multiply-adds of one `generator`, one `force` and one `tones`.
     fn work(&self) -> [f64; 3];
+
+    /// The counted real multiply-adds that made the middle (`Dynamics::middle`): what of the generator the point holds,
+    /// whatever a step asks of it.
+    fn made(&self) -> f64;
 
     /// Ĝ_a(s) as matrices at the time s from the middle along the path (n × n each, row by row, Hermitian): what
     /// `force` contracts; and where `slope` is asked, their derivative along the path at s, dĜ_a/ds.
@@ -594,14 +596,15 @@ struct Noise {
 /// The optical sector's operators at a step's middle along its path (# The optical sector's noise), made in the
 /// workspace `noise`: the gradient there and, where the cluster beats, its slope along the path (`Middle::gradient`);
 /// K of the picture's generator at the middle, to the first order along the path with the picture's slope through the
-/// step's ends (`Picture::slope`). Its locality ε_Q = (ν/γ_Q)² and the counted work (`optical_work`); None where the
-/// cluster has no optical sector; the step refused where its sector made no K (`Refused::Optical`).
-fn optical<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, noise: &mut Noise) -> Result<Option<(f64, f64)>, Refused> {
+/// step's ends (`Picture::slope`). Its locality ε_Q = (ν/γ_Q)², its ground states and its make's counted work (the
+/// stretch's `Price`, with the gradient and the forms: `optical_work`); None where the cluster has no optical sector; the
+/// step refused where its sector made no K (`Refused::Optical`).
+fn optical<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, noise: &mut Noise) -> Result<Option<(f64, usize, f64)>, Refused> {
     let Some(shape) = along.middle.optical(&along.path) else { return Ok(None) };
     let Noise { sector, gradient, slope } = noise;
     along.middle.gradient(&along.path, 0.0, gradient, (!still).then_some(&mut *slope));
     sector.make(&picture.base, gradient, shape.ground, (!still).then_some((&picture.slope, &*slope))).map_err(Refused::Optical)?;
-    Ok(Some(((shape.beat / shape.decay).powi(2), optical_work(along.n, along.middle.work()[1], still, sector.work))))
+    Ok(Some(((shape.beat / shape.decay).powi(2), shape.ground, sector.work)))
 }
 
 /// The counted work of the optical sector at a middle (`optical`) beside its sector's make (`Sector::cost`, `work`): the
@@ -1354,7 +1357,7 @@ impl Scratch {
 
 /// The counted work (`decide::Work`, real multiply-adds) of the integrator's operations on n states, one formula each,
 /// the model's own counts of its generator, its force and its tones at a node with them (`Middle::work`): what a
-/// step adds up and what `Price::work` prices a step by.
+/// stretch adds up (`Price::work`): its count and its price at once.
 mod count {
     use super::COMPLEX;
     /// The propagation: the model's generator at the step's nodes -- three, or the one of a path it is still along --
@@ -1365,12 +1368,13 @@ mod count {
     }
     /// The kick's part of the state through `nodes` nodes: per node its density's upper triangle into the weighted
     /// sums (one on a still path, three on a beating one); then the model's one form of the sum, or on a beating path
-    /// the middle state's density, laid with the middle node's sum, and the three nodes' forms (the middle's with the
-    /// tones on it, `Middle::centre`). Of the exact tones (`tones` of them, their forms' counted work `forces`): per node
-    /// and tone a density again and its two sums; their two matrices with the nodes' sums at their phases, and their
-    /// forms.
-    pub fn impulse(n: usize, model: [f64; 3], nodes: usize, still: bool, tones: usize, forces: f64) -> f64 {
-        let (sums, forms) = if still { (1, model[1]) } else { (3, (2 * n * n) as f64 + 3.0 * model[1]) };
+    /// the middle state's density, laid with the middle node's sum, and the three nodes' forms -- where the stretch
+    /// holds the step's middle (`centred`), the middle's with the fixed point's tones on the middle state
+    /// (`Middle::centre`: a form and a `tones`). Of the exact tones (`tones` of them, their forms' counted work
+    /// `forces`): per node and tone a density again and its two sums; their two matrices with the nodes' sums at their
+    /// phases, and their forms.
+    pub fn impulse(n: usize, model: [f64; 3], nodes: usize, still: bool, centred: bool, tones: usize, forces: f64) -> f64 {
+        let (sums, forms) = if still { (1, model[1]) } else { (3, (2 * n * n) as f64 + 3.0 * model[1] + if centred { model[2] } else { 0.0 }) };
         COMPLEX * ((nodes * ((1 + sums) * n * (n + 1) / 2 + 3 * tones * n * (n + 1) / 2)) as f64 + forms + (8 * tones * n * n) as f64 + forces)
     }
     /// The shear of the start state, the prediction of the path's momentum: its density and its tones.
@@ -1667,9 +1671,12 @@ pub struct Step {
     /// The states made inside the step, in the order of their times: the trajectory's after each of its jumps, and the
     /// readings at the times read, which are no part of it (adapt.rs, # The reads).
     pub made: Vec<Made>,
-    /// The step's counted work (real multiply-adds: its own and its nodes' generators and forces; its jumps' photons
-    /// are counted on the states). The middles it went through are counted where they are made (`Midway`).
+    /// The step's counted work (real multiply-adds), its stretches' prices added up: its own, its nodes' generators,
+    /// forces and tones, its middles' making and the scattered light at the middle (`Price`); its jumps' photons are
+    /// counted on the states (`jump`).
     pub work: f64,
+    /// Its stretches' prices, each with its cluster, in their order: what the step did, item by item (`Price`).
+    pub prices: Vec<(usize, Price)>,
     /// The momenta the step makes in turn (1/µm, lab axes; module documentation, # The step's momentum): its start κ₀,
     /// the middle the first half flow reaches κ_h, the middle kicked without its jumps κ_k and with them κ_j, its end κ₁.
     momenta: [[f64; 3]; 5],
@@ -1773,7 +1780,8 @@ enum Stop {
 /// path's at its last jump --; the next of the times to read; whether the middle is behind; the sums of the quadrature's
 /// weights times the three nodes' Lagrange polynomials over what is behind; the kick's part of the state so far; the
 /// scattered light at the middle, once it is passed, and the optical sector's rate of the middle state with its
-/// locality ε_Q where its cluster has one (# The optical sector's noise); the counted work; and the states made.
+/// locality ε_Q where its cluster has one (# The optical sector's noise); the counted work and its stretches' prices,
+/// each with its cluster (`Price`); and the states made.
 struct March {
     u: f64,
     state: Trajectory,
@@ -1783,6 +1791,7 @@ struct March {
     scattered: Option<Scattering>,
     optical: Option<([[f64; 3]; 3], f64)>,
     work: f64,
+    prices: Vec<(usize, Price)>,
     made: Vec<Made>,
 }
 
@@ -1811,7 +1820,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let (flow, (r_h, kappa_h), reference) = (self.flow, self.reached, self.reference);
         scratch.fit(n, SUMS);
         let kappa_m = predicted(scratch, &self.generator, &from.psi, kappa_h, reference, tau);
-        let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, impulse: [0.0; 3], scattered: None, optical: None, work: count::shear(n, self.generator.work()), made: Vec::new() };
+        let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, impulse: [0.0; 3], scattered: None, optical: None, work: 0.0, prices: Vec::new(), made: Vec::new() };
         // The three nodes' weights' sums over the step, its stretches' together.
         scratch.weights.fill(0.0);
         // Cluster by cluster: the start's generator, then that of every cluster a jump lands in, at the same middle.
@@ -1819,7 +1828,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         while !self.stretch(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time, reads, &mut march, scratch, domain)? {
             landed = Some(self.model.middle(march.state.cluster, r_h, from.time + h));
         }
-        let March { state: mut end, read, impulse, scattered, optical, work, mut made, .. } = march;
+        let March { state: mut end, read, impulse, scattered, optical, work, prices, mut made, .. } = march;
         // The scattered light at the middle, on the state there: its force over the step; and its diffusion with the
         // optical sector's drawn covariance -- the middle state's rate over the step with what was pending (# The
         // optical sector's noise) --, their factor on the Brownian path's increment (the momentum) and on its first
@@ -1874,7 +1883,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         // A time read at the step's end is the end itself.
         made.extend(reads[read..].iter().map(|&time| Made { kick: None, state: Trajectory { time, ..end.clone() } }));
         let segment = Segment::new(from.time, tau, flow, (from.r, from.kappa), kick, spread);
-        Ok(Step { end, segment, made, work, momenta: [from.kappa, kappa_h, unjumped, kicked.1, kappa1], reached: r_h })
+        Ok(Step { end, segment, made, work, prices, momenta: [from.kappa, kappa_h, unjumped, kicked.1, kappa1], reached: r_h })
     }
 
     /// The propagation of B on the step's path from where the march stands, in the cluster its state is in, as far as
@@ -1919,7 +1928,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         // decay laid alike.
         let scale = pictured(&along, scratch, tau, Some((&launched[..n], march.u)))?;
         let Carved { picture, noise, held, sum, tones, sums, saved, part, decay, met, weights, kept } = scratch.carve();
-        let (bandwidth, size) = (picture.bandwidth, sums.len());
+        // What the picture's preparation counted (`Price::made`); what it counts on from here is its states'.
+        let (bandwidth, size, prepared) = (picture.bandwidth, sums.len(), picture.work);
         sums.fill(0.0);
         // The tones' weights' sums, this stretch's; and where it begins.
         weights[SUMS..].fill(0.0);
@@ -2145,20 +2155,41 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         for a in 0..3 {
             march.impulse[a] += part[a];
         }
+        let (mut scattering, mut sector) = (0.0, None);
         if let Some(middle) = &middle {
-            march.scattered = Some(along.middle.scattering(&along.path, &middle[..n]));
-            if let Some((epsilon, work)) = optical(&along, picture, still, noise)? {
+            let (scattered, made) = along.middle.scattering(&along.path, &middle[..n]);
+            (march.scattered, scattering) = (Some(scattered), made);
+            if let Some((epsilon, ground, made)) = optical(&along, picture, still, noise)? {
                 let k = noise.sector.operators().expect("a sector made");
                 march.optical = Some((within(k, &noise.gradient, &middle[..n]), epsilon));
-                march.work += work;
+                sector = Some((ground, made));
             }
         }
+        // The stretch's count, item by item as it was done (`Price`), the step's own and its price at once.
         let [envelopes, forces] = picture.beats.iter().fold([0.0; 2], |sum, tone| {
             let work = generator.tone_work(tone.candidate);
             [sum[0] + work[0], sum[1] + work[1]]
         });
         let count = picture.beats.len();
-        march.work += count::propagation(costs, still, picture.work, envelopes + (6 * count * n * n) as f64) + count::impulse(n, costs, counted, still, count, forces) + count::hazard(n, traces, still);
+        let price = Price {
+            states: n,
+            still,
+            tau,
+            bandwidth,
+            nodes: counted,
+            traces,
+            made: prepared,
+            stops: picture.work - prepared,
+            sector,
+            tones: count,
+            toned: [envelopes + (6 * count * n * n) as f64, forces],
+            centred: middle.is_some(),
+            sheared: march.prices.is_empty(),
+            middle: generator.made(),
+            scattering,
+        };
+        march.work += price.work(costs);
+        march.prices.push((cluster, price));
         Ok(done)
     }
 }
@@ -2252,15 +2283,22 @@ impl Brownian {
     }
 }
 
-/// The counted work of one step of τ on the path through a middle at a momentum and a velocity, priced without taking
-/// the step -- the solve's price of a model it has not run, at its pilot's states and steps (solve.rs `Pricing`) --,
-/// apart from the model's counts at a node (`Middle::work`), which `Price::work` takes: what `Step::work` counts of the
-/// generator's picture along the path -- its decomposition, its slopes and its following as the step makes them
-/// (`pictured`), its bandwidth and the quadrature's nodes there, the launch with a state at each node, at the middle
-/// and at the end (`spectral::Picture::price`), the survival's hazard at the piece's start and at each panel's end --
-/// and of the optical sector its shape and its blocks' Schur forms (`Sector::cost`; none where the cluster has no
-/// explicit excited state, or where a Schur form is not made: the step there is refused before its noise). The middle
-/// itself is the model's (`Dynamics::assembly_work`, one a step).
+/// The counted work of a stretch of a step (`Midway::stretch`; real multiply-adds) item by item as the stretch did it --
+/// the one count a step adds up (`Step::work`, `Step::prices`) and the one a model's step is priced by (`priced`; solve.rs
+/// `Formula`): a step's price is the work its run does, counted where it is done, not a model of it. Apart from the
+/// model's counts at a node (`Middle::work`), which `work` takes -- a kept model's are its own --: the generator's
+/// picture along the path, its preparation (`made`: its decomposition, its slopes, its tones and their products, its
+/// following, as `pictured` made them) and the states it made after (`stops`: the launches -- the stretch's first and
+/// one after each of its jumps --, the states at the kick's nodes, at the middle and at the end, and those its jumps'
+/// roots read: `spectral::Picture::launch`, `advance`, `between`); the kick's nodes and the tones their states were
+/// summed with (`nodes`, `tones`); the survival's traces (`traces`); where the stretch holds the step's middle
+/// (`centred`) the middle's form there and the optical sector's make (`sector`: its ground states and the make's count);
+/// the start state's shear on a step's first stretch (`sheared`); and the model's own: the middle's making (`Middle::made`) and the light scattered at the middle
+/// (`Middle::scattering`). A stretch after a jump to another cluster is that cluster's (`Step::prices`). (Priced without
+/// taking the step instead -- the picture prepared on the middle at the trap's centre, its stops at the quadrature's
+/// nodes, no jump --, PGC3D's steps of 0.95, 1.9 and 3.8 µs were priced at 0.81, 1.52 and 0.38 times what its run's
+/// steps counted, and the middle with its scattering at a constant five to nine times their cost at 0.95 µs: the
+/// rungs' steps were weighed against one another wrong by a factor of four.)
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Price {
     pub states: usize,
@@ -2268,81 +2306,89 @@ pub struct Price {
     pub tau: f64,
     pub bandwidth: f64,
     pub nodes: usize,
-    /// The quadrature's panels: the survival's hazard is read at each one's end (`count::hazard`).
-    pub panels: usize,
-    /// The picture's preparation, and its states at the nodes, the middle and the end (complex multiply-adds).
+    pub traces: usize,
+    /// The picture's preparation, and its states after it (complex multiply-adds).
     pub made: f64,
     pub stops: f64,
-    /// The same of the decomposition's route (`spectral::Picture::prepare`), and its nodes: what a grown cluster is
-    /// priced from (`grown`), whichever route this one takes.
-    pub decomposition: [f64; 3],
-    /// The optical sector's ground states and its Schur forms' count.
     pub sector: Option<(usize, f64)>,
     /// The exact tones (spectral.rs, # Which beats are tones), and their envelopes' and forms' counted work with their
     /// separation from the generator at the nodes (`Middle::tone_work`).
     pub tones: usize,
     pub toned: [f64; 2],
+    /// Whether the stretch holds the step's middle (its form and its scattering there), and whether it is the step's
+    /// first (the start state's shear).
+    pub centred: bool,
+    pub sheared: bool,
+    /// The middle's making and the scattered light's (real multiply-adds).
+    pub middle: f64,
+    pub scattering: f64,
 }
 
 impl Price {
-    /// The price on the path through a middle at a momentum and a velocity: its own -- the caller's middle is a state's,
-    /// or one of the cluster made once: the nodes' counts are the cluster's whatever the point (`Middle::work`), and the
-    /// point gives the generator's picture alone. On the route a trajectory's steps take once the decomposition's is
-    /// counted (`spectral::Picture::prepare`): the picture is prepared twice, the first time on that route. A generator
-    /// there that is no number prices the step past any work (no step of it can be taken, `pictured`).
-    pub fn of<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> Price {
-        let (n, still) = (middle.states(), middle.still());
-        let along = Along::new(middle, kappa, velocity);
-        let mut scratch = Scratch::default();
-        let none = Price { states: n, still, tau, bandwidth: f64::INFINITY, nodes: 0, panels: 0, made: f64::INFINITY, stops: f64::INFINITY, decomposition: [f64::INFINITY; 3], sector: None, tones: 0, toned: [0.0; 2] };
-        if pictured(&along, &mut scratch, tau, None).is_err() {
-            return none;
-        }
-        let first = nodes(tau, scratch.picture.bandwidth);
-        let decomposition = [scratch.picture.work, scratch.picture.price(first + 2), first as f64];
-        if pictured(&along, &mut scratch, tau, None).is_err() {
-            return none;
-        }
-        let Carved { picture, noise, .. } = scratch.carve();
-        let (nodes, panels) = (nodes(tau, picture.bandwidth), plan(tau.abs(), picture.bandwidth, FORMS, Within::Share).1);
-        let sector = middle.optical(&along.path).and_then(|shape| noise.sector.schur(&picture.base, shape.ground).map(|schur| (shape.ground, schur)));
-        let toned = picture.beats.iter().fold([(6 * picture.beats.len() * n * n) as f64, 0.0], |sum, tone| {
-            let work = middle.tone_work(tone.candidate);
-            [sum[0] + work[0], sum[1] + work[1]]
-        });
-        Price { states: n, still, tau, bandwidth: picture.bandwidth, nodes, panels, made: picture.work, stops: picture.price(nodes + 2), decomposition, sector, tones: picture.beats.len(), toned }
-    }
-
-    /// The step's counted work with a model's counts at a node `costs` (`Middle::work`): what `Step::work` adds up --
-    /// the propagation, the kick's sums and forms, the survival's hazard, the shear, and the optical sector (`optical`:
-    /// its shape's formula with the Schur forms' count, the gradient's matrices and one `within`'s forms).
+    /// The stretch's counted work with a model's counts at a node `costs` (`Middle::work`): what the stretch adds to
+    /// `Step::work`, its integrator's part (`stepped`) and the model's own there (`modelled`).
     pub fn work(&self, costs: [f64; 3]) -> f64 {
-        let (n, still) = (self.states, self.still);
-        let optical = self.sector.map_or(0.0, |(ground, schur)| optical_work(n, costs[1], still, Sector::cost(n - ground, ground, !still, schur)));
-        count::propagation(costs, still, self.made + self.stops, self.toned[0]) + count::impulse(n, costs, self.nodes, still, self.tones, self.toned[1]) + count::hazard(n, 1 + self.panels, still) + count::shear(n, costs) + optical
+        self.stepped(costs) + self.modelled()
     }
 
-    /// The price on the cluster this one's grows into -- `states` states, `ground` of them ground, its generator's
-    /// bandwidth `bandwidth` -- where a keep makes a drive explicit or joins two clusters: each part at its leading
-    /// order in the states, from what this cluster's picture made -- the decomposition's QR sweeps and the following's
-    /// products as n³ (the Schur forms' sweeps on the blocks with them, e³ + g³), a state at a node as n² --, the
-    /// nodes and panels those of the quadrature at the bandwidth; from the decomposition's route (`decomposition`).
+    /// The integrator's part with the model's calls at the nodes: the propagation, the kick's sums and forms, the
+    /// survival's hazard, the optical sector (`optical_work`: its make, the gradient's matrices and one `within`'s
+    /// forms), and on a step's first stretch the start state's shear.
+    pub fn stepped(&self, costs: [f64; 3]) -> f64 {
+        let (n, still) = (self.states, self.still);
+        let optical = self.sector.map_or(0.0, |(_, make)| optical_work(n, costs[1], still, make));
+        let shear = if self.sheared { count::shear(n, costs) } else { 0.0 };
+        count::propagation(costs, still, self.made + self.stops, self.toned[0]) + count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]) + count::hazard(n, self.traces, still) + optical + shear
+    }
+
+    /// The model's own there: the middle's making and the light scattered at the middle.
+    pub fn modelled(&self) -> f64 {
+        self.middle + self.scattering
+    }
+
+    /// The price on the cluster this stretch's grows into -- `states` states, `ground` of them ground, its generator's
+    /// bandwidth `bandwidth` -- where a keep makes a drive explicit or joins two clusters: each part at its leading order
+    /// in the states, from what this stretch made -- the preparation's QR sweeps and products as n³ (the Schur forms'
+    /// sweeps on the blocks with them, e³ + g³; of a sector the cluster makes anew, the preparation's own), a state as
+    /// n² --, the states, the nodes and the traces in proportion to the quadrature's nodes and panels at the bandwidth.
+    /// The model's own part is the kept model's to scale (solve.rs `Formula::rate`).
     pub fn grown(&self, states: usize, ground: usize, bandwidth: f64) -> Price {
         let ratio = states as f64 / self.states as f64;
-        let (nodes, panels) = (nodes(self.tau, bandwidth), plan(self.tau.abs(), bandwidth, FORMS, Within::Share).1);
+        let quadrature = |bandwidth: f64| (nodes(self.tau, bandwidth), plan(self.tau.abs(), bandwidth, FORMS, Within::Share).1);
+        let ((before, panels_before), (after, panels_after)) = (quadrature(self.bandwidth), quadrature(bandwidth));
+        let (stopped, traced) = ((after + 2) as f64 / (before + 2) as f64, (1 + panels_after) as f64 / (1 + panels_before) as f64);
         let excited = states - ground;
         let cube = (excited.pow(3) + ground.pow(3)) as f64;
         let sector = (excited > 0).then(|| {
-            let schur = match self.sector {
-                Some((g, schur)) => schur * cube / ((self.states - g).pow(3) + g.pow(3)) as f64,
-                None => self.decomposition[0] * cube / self.states.pow(3) as f64,
+            let made = match self.sector {
+                Some((g, made)) => made * cube / ((self.states - g).pow(3) + g.pow(3)) as f64,
+                None => self.made * cube / self.states.pow(3) as f64,
             };
-            (ground, schur)
+            (ground, made)
         });
-        let [made, stops, before] = self.decomposition;
-        let (made, stops) = (made * ratio.powi(3), stops * ratio * ratio * (nodes + 2) as f64 / (before + 2.0));
-        Price { states, still: self.still, tau: self.tau, bandwidth, nodes, panels, made, stops, decomposition: [made, stops, nodes as f64], sector, tones: self.tones, toned: self.toned }
+        Price {
+            states,
+            bandwidth,
+            nodes: (self.nodes as f64 * stopped).round() as usize,
+            traces: (self.traces as f64 * traced).round() as usize,
+            made: self.made * ratio.powi(3),
+            stops: self.stops * ratio * ratio * stopped,
+            sector,
+            ..*self
+        }
     }
+}
+
+/// The step of τ from a trajectory's state as its run takes it, for its count: its stretches' prices, each with its
+/// cluster (`Step::prices`) -- a model's step priced where its run's states are (solve.rs `Formula::prices`). On the
+/// route a trajectory's steps take once the decomposition's is counted (`spectral::Picture::prepare`: a step's route is
+/// chosen against the counts its scratch carries): the step is taken twice on one scratch, the second counted. Its
+/// jumps are the state's own -- its threshold, its streams --, the Brownian path none (no work is of it), no time
+/// read. Refused as the run's step would be (`Midway::attempt`).
+pub fn priced<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, domain: &dyn Domain) -> Result<Vec<(usize, Price)>, Refused> {
+    let (through, mut scratch) = (Midway::new(model, from, tau)?, Scratch::default());
+    through.attempt(from, &Brownian::STILL, &[], &mut scratch, domain)?;
+    Ok(through.attempt(from, &Brownian::STILL, &[], &mut scratch, domain)?.prices)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
