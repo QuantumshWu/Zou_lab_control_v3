@@ -631,8 +631,12 @@ fn a_state_s_photons_in_parts_are_its_photons() {
             let (r, t, kappa, _, _) = drawn(model, stream);
             let at = crate::model::Point { r, kappa, t };
             let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
+            // Each count made afresh: a thread keeps its last point's normalized matrices (`Model::quartic`).
+            Model::forget_quartic();
             let (whole, work) = model.photons_of(&plan, table, &at, &psi, Gradients::All);
-            assert_eq!((&whole, work), (&model.photons_counted(cluster, &at, &psi, tables).0, model.photons_counted(cluster, &at, &psi, tables).1), "{name}, cluster {cluster}: the photons by the cluster's own plan and table");
+            Model::forget_quartic();
+            let counted = model.photons_counted(cluster, &at, &psi, tables);
+            assert_eq!((&whole, work), (&counted.0, counted.1), "{name}, cluster {cluster}: the photons by the cluster's own plan and table");
             // A step's scattering reads the same photons where they are made: the same sums in the same order.
             let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
             assert_eq!(model.scattering_of(&plan, table, &at, &psi).0, crate::model::Scattering::of(&whole, norm), "{name}, cluster {cluster}: the scattering");
@@ -658,6 +662,12 @@ fn a_state_s_photons_in_parts_are_its_photons() {
     for (index, (name, model)) in models().into_iter().enumerate() {
         let mut stream = Stream::new(4, Purpose::Initial, index as u64, 0);
         check(name, &model, &Run::new(&model, [1.0 / GROUND as f64; GROUND]), None, &mut stream);
+        // With the normalized generator's every part (the series' first order and the normalization kept): the photons
+        // of L = (J(κ) + c J2 E) S⁻¹ with their gradients, in parts and whole.
+        let bent = model.rekept(&[model.kept.clone(), vec![Unit::Series, Unit::Normalization { order: 1 }]].concat()).unwrap();
+        if (0..bent.clusters.len()).any(|c| bent.plan(c, &bent.running()).fourth.as_ref().is_some_and(|f| f.bends())) {
+            check(&format!("{name}, normalized"), &bent, &Run::new(&bent, [1.0 / GROUND as f64; GROUND]), None, &mut stream);
+        }
     }
     let (name, request, model) = ("R4_TW1 tabulated", scene("R4_TW1"), model("R4_TW1", &others, &|_| false));
     let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
