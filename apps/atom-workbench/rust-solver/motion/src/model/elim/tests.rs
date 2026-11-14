@@ -537,7 +537,7 @@ fn the_fold_s_series_about_a_reference_is_the_fold_within_its_remainder_and_fall
 ///   falls with J as x's powers, down to the series' own;
 /// - the landing map S(1 + Y)⁻¹ against the fold's S(1 + Σ S_f T_f)⁻¹;
 /// - and the error the run books, the evaluation against the definition measured on states (`Fold::evaluated`,
-///   `Fold::defined`, `Fold::evaluation_error`): on random slow states, falling from the series' order 0 to order 1 and
+///   `Fold::definitions`, `Fold::evaluation_error`): on random slow states, falling from the series' order 0 to order 1 and
 ///   with the normalization's order. The bounds are this test's: the run books the measured numbers.
 #[test]
 fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_remainders_and_hermitian_by_construction() {
@@ -686,10 +686,10 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         }
         assert!(landing_apart.frobenius() <= (q + x_size * q + rate(normalization)).max(1e-9) * exact.frobenius(), "the landing map {}", landing_apart.frobenius() / exact.frobenius());
         // The errors the run books, measured on random slow states against the definition (`Fold::evaluated` against
-        // `Fold::defined`, a point's numbers, not bounds): the evaluation's normalized generator at its orders is this
+        // `Fold::definitions`, a point's numbers, not bounds): the evaluation's normalized generator at its orders is this
         // test's route (the same Hermitian part, the same decay), and the error falls from the series' order 0 to 1 and
         // with the normalization's order.
-        let defined = fold.defined(&lv);
+        let defined = fold.definitions(&lv).0;
         let at = |orders: Orders| fold.evaluated(&lv, C64::real(z0), orders);
         let mut apart = at(orders);
         let mut route_whole = route.hermitian_part();

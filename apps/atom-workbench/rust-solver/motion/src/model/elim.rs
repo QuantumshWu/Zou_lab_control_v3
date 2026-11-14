@@ -1196,19 +1196,28 @@ impl Fold {
         out
     }
 
-    /// The definition's normalized generator (ELIMINATION v6, v7): of this fold -- the self-consistent one, its excited
-    /// block whole (`Model::definition_fold`) -- the des Cloizeaux generator's Hermitian part Herm(S H S⁻¹) and its decay
-    /// S⁻¹(Σ_f T_f†D T_f)S⁻¹, S = (1 + X)^{1/2} of its own metric (`normalization`): Herm(S H S⁻¹) − (i/2) decay.
-    pub(crate) fn defined(&self, levels: &Levels) -> Mat {
+    /// The definition (ELIMINATION v3 4, v6, v7): of this fold -- the self-consistent one, its excited block whole
+    /// (`Model::definition_fold`) -- with one normalization S = (1 + X)^{1/2} of its own metric (`normalization`), the
+    /// normalized generator, the des Cloizeaux generator's Hermitian part Herm(S H S⁻¹) and its decay
+    /// S⁻¹(Σ_f T_f†D T_f)S⁻¹: Herm(S H S⁻¹) − (i/2) decay; and the landing map S (1 + Σ_f S_f T_f)⁻¹, S_f its left wave
+    /// operators (`left_operators`, the landing's overlap of `transients`): where a bare state lands, in the normalized
+    /// coordinates -- None where the left operators do not settle: the landing does not exist there, and the readings
+    /// book it whole (`Model::readings`, `converges`).
+    pub(crate) fn definitions(&self, levels: &Levels) -> (Mat, Option<Mat>) {
         let n = self.size();
         let (s, s_inverse) = self.normalization();
         let mut loss = Mat::zeros(n, n);
         for rep in &self.replicas {
             loss.add_scaled(C64::ONE, &rep.t.adjoint_product(&levels.decay.block(&rep.q, &rep.q).product(&rep.t)));
         }
-        let mut out = s.product(&self.generator).product(&s_inverse).hermitian_part();
-        out.add_scaled(C64::new(0.0, -0.5), &s_inverse.product(&loss).product(&s_inverse));
-        out
+        let mut generator = s.product(&self.generator).product(&s_inverse).hermitian_part();
+        generator.add_scaled(C64::new(0.0, -0.5), &s_inverse.product(&loss).product(&s_inverse));
+        let landing = self.left_operators().and_then(|left| {
+            let bares: Vec<Vec<C64>> = (0..n).map(|j| (0..n).map(|i| if i == j { C64::ONE } else { C64::ZERO }).collect()).collect();
+            let landed = self.transients(&left, &bares)?;
+            Some(s.product(&Mat::from_fn(n, n, |i, j| landed[j].0[i])))
+        });
+        (generator, landing)
     }
 
     /// The evaluation's landing map at the orders `orders` (assemble.rs `normal`, model.rs `Model::landed`) of this fold's
@@ -1233,21 +1242,7 @@ impl Fold {
         s.product(&sum)
     }
 
-    /// The definition's landing map (ELIMINATION v3 4, v7): of this fold -- the self-consistent one, its excited block
-    /// whole (`Model::definition_fold`) -- S (1 + Σ_f S_f T_f)⁻¹, S = (1 + X)^{1/2} of its own metric (`normalization`),
-    /// S_f its left wave operators (`left_operators`, the landing's overlap of `transients`): where a bare state lands, in
-    /// the normalized coordinates. None where the left operators do not settle: the landing does not exist there, and
-    /// the readings book it whole (`Model::readings`, `converges`).
-    pub(crate) fn landing_defined(&self) -> Option<Mat> {
-        let n = self.size();
-        let left = self.left_operators()?;
-        let bares: Vec<Vec<C64>> = (0..n).map(|j| (0..n).map(|i| if i == j { C64::ONE } else { C64::ZERO }).collect()).collect();
-        let landed = self.transients(&left, &bares)?;
-        let (s, _) = self.normalization();
-        Some(s.product(&Mat::from_fn(n, n, |i, j| landed[j].0[i])))
-    }
-
-    /// The evaluation's landing error on a state ψ against the definition (`landing_evaluated`, `landing_defined`): after
+    /// The evaluation's landing error on a state ψ against the definition (`landing_evaluated`, `definitions`): after
     /// the next jump the atom lands in a bare ground state at the state's own ground populations p_g (as `errors` reads
     /// the transient), and a landing off by r_g = ‖(L_e − L_d) e_g‖/‖L_d e_g‖ is off on the landed state -- its norm, the
     /// next wait's threshold law, and its populations -- by a rate's relative error 2r_g + r_g²: Σ_g p_g (2r_g + r_g²)
@@ -2023,7 +2018,7 @@ impl super::Model {
             match self.definition_fold(sample.cluster, &amplitudes) {
                 Some((definition, _)) if !definition.exists => on_blocks(None, 1.0, &mut out),
                 Some((definition, whole)) => {
-                    let (defined, landing) = (definition.defined(&whole), definition.landing_defined());
+                    let (defined, landing) = definition.definitions(&whole);
                     let psi = &sample.psi;
                     // Where the definition's landing does not exist (its left wave operators do not settle, `converges`),
                     // every landing is wrong by all of itself: the state's ground populations whole, at every order.
