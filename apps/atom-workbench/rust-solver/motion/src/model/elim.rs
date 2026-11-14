@@ -65,6 +65,17 @@
 //! (−∂T/∂f). The first two terms are the model's; the third is the remainder whose relative size ρ(Δ) is the first
 //! criterion (`Fold::remainder`).
 //!
+//! The offsets a P amplitude spans (`Fold::spans`; ELIMINATION v8): the pattern a moving atom sees, ±2 k_max v (the
+//! beams' Doppler shifts, at most k_max v, and their pattern's turn, |k_l − k_l'| v ≤ 2 k_max v), with the amplitude
+//! whole; and every component into its eigenstate (# The criteria's numbers: a turning direct entry, or two replicas'
+//! coupling) at its combined frequency δ = Ω + λ_p − λ_q -- the same in every gauge, of the actual spectrum -- as a
+//! sideband of the first-order amplitude a/|δ|, its share of the population min(1, a/|δ|)². Criterion one reads each
+//! offset's remainder at its share and the largest of them (`closure`), the error at a state their sum over the state's
+//! eigenstates at their populations (`errors`). A loop's weak closing edge whose frame beat is B is a sideband of
+//! a/B on its eigenstates: its remainder is that share's. (The frames' residual -- Karp's least largest, a bound of every
+//! residual whatever its size -- was read before, the whole amplitude at it: it depended on the frames, and the frames
+//! now hold the strongest couplings static, cluster.rs `frames`, the weakest turning at a loop's whole miss.)
+//!
 //! # The criteria's numbers (`Fold::components`; the photons' on the run's photon classes, `Model::readings`)
 //! - The remainder ρ_p(Δ) = ‖Δ² R(λ_p)² R(λ_p + Δ) W r_p‖ / ‖R(λ_p) W r_p‖ of each P eigenstate, the replicas added in
 //!   squares (different frequencies), with each excited state's part of it: the excited block that leaves the most is
@@ -699,6 +710,13 @@ impl Fold {
     /// The P state an eigenstate holds most of.
     pub(crate) fn dominant(&self, p: usize) -> usize {
         (0..self.size()).max_by(|&a, &b| self.eigen.vectors[(a, p)].norm_sqr().total_cmp(&self.eigen.vectors[(b, p)].norm_sqr())).unwrap_or(0)
+    }
+
+    /// The offsets eigenstate p's amplitude spans (module documentation, # First order in the frequency offsets), each
+    /// with its share of the amplitude's population: ±`pattern` (2 k_max v) whole, and each component into p of
+    /// `components` (`components`, at the atom's velocity) at its combined frequency δ's real part, min(1, a/|δ|)².
+    pub(crate) fn spans(p: usize, pattern: f64, components: &[Component]) -> impl Iterator<Item = (f64, f64)> + '_ {
+        [(pattern, 1.0), (-pattern, 1.0)].into_iter().chain(components.iter().filter(move |x| x.row == p && x.size > 0.0).map(|x| (x.distance.re, x.mixing().min(1.0).powi(2))))
     }
 
     /// The remainder of the first-order expansion of eigenstate p's response across a shift Δ of its frequency
@@ -1720,8 +1738,8 @@ impl super::Model {
 
     /// The candidates' errors at a trajectory state (`candidates`; ELIMINATION.md §6: the prior's function at a run's
     /// state): the fold of the sample's cluster at its point (`cluster_fold`, the definition the run's series stands for)
-    /// read by `errors` at the state, the atom's velocity and the frequency range its amplitude spans -- the cluster's
-    /// residual beats and the pattern its moving atom sees, Δ = max|Ω| + 2 k_max v (`closure`) --, each part on its
+    /// read by `errors` at the state, the atom's velocity and the offsets its amplitude spans -- the pattern its moving
+    /// atom sees, 2 k_max v, and the components' combined frequencies (`Fold::spans`) --, each part on its
     /// object's unit: a block's on `Unit::Block`, a link's on the `Unit::Term` of its two states at its lab beat. The
     /// photons' cross terms on the run's photon classes, which land in every cluster: of each pair landing in one, the
     /// rate of their interference at the state γ = |Σ_a ⟨u_a|u′_a⟩| over the state's norm, against their beat Ω -- γ/|Ω|
@@ -1751,9 +1769,7 @@ impl super::Model {
             .collect();
         let mut beyond = None;
         if let Some((fold, levels, far, _)) = self.cluster_fold(sample.cluster, &amplitudes, true) {
-            let plan = self.plan(sample.cluster, &self.running());
             let fastest = self.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
-            let range = plan.sampled.iter().map(|t| t[0]).fold(0.0, f64::max) + 2.0 * fastest * speed;
             let state = |label: usize| if label < g { c.states[label] } else { GROUND + label - g };
             let class = |k: Option<usize>| k.map_or(self.axes.zero(), |k| self.carriers[k].beat.clone());
             let term = |l: &Link| super::eliminate::term_unit(state(l.a), state(l.b), &class(l.classes.0).plus(-1, &class(l.classes.1)));
@@ -1762,7 +1778,7 @@ impl super::Model {
                 self.in_generator(a, b, &beat)
             };
             let blocks = self.blocks();
-            let errors = errors(&fold, &levels, &blocks, &linked, &sample.psi, velocity, range, &outside);
+            let errors = errors(&fold, &levels, &blocks, &linked, &sample.psi, velocity, 2.0 * fastest * speed, &outside);
             beyond = Some(errors.outside.clone());
             for (object, x) in &errors.parts {
                 match object {
@@ -1962,6 +1978,28 @@ impl Link {
     pub(crate) fn beat(&self, classes: &[Class]) -> f64 {
         self.classes.1.map_or(0.0, |c| classes[c].nu) - self.classes.0.map_or(0.0, |c| classes[c].nu)
     }
+
+    /// Its strength at the point (rad/µs; the frames' order, cluster.rs `frames`): an explicit drive's coupling, the
+    /// class's beams summed, |C_c(e, g)|; a coupling of two P states through two classes its second-order entry through
+    /// the excited states the partition folds (all but `explicit`), |Σ_e C₀(e, a)* C₁(e, b) / (ν₁ + E_b − E_e + (i/2)Γ_e)|
+    /// on the levels' diagonals -- the entry the fold makes, to its leading order --; none of a P state with itself.
+    pub(crate) fn strength(&self, classes: &[Class], levels: &Levels, explicit: &[usize]) -> f64 {
+        let ground = levels.ground.rows;
+        let coupling = |c: usize, e: usize, g: usize| classes[c].beams.iter().map(|b| b.coupling[(e, g)]).sum::<C64>();
+        match self.classes {
+            (None, Some(c)) if self.a >= ground && self.b < ground => coupling(c, self.a - ground, self.b).abs(),
+            (Some(c), None) if self.b >= ground && self.a < ground => coupling(c, self.b - ground, self.a).abs(),
+            (Some(emitted), Some(absorbed)) if self.a < ground && self.b < ground => (0..levels.excited.rows)
+                .filter(|e| !explicit.contains(e))
+                .map(|e| {
+                    let distance = C64::new(classes[absorbed].nu + levels.ground[(self.b, self.b)].re - levels.excited[(e, e)].re, 0.5 * levels.decay[(e, e)].re);
+                    coupling(emitted, e, self.a).conj() * coupling(absorbed, e, self.b) / distance
+                })
+                .sum::<C64>()
+                .abs(),
+            _ => 0.0,
+        }
+    }
 }
 
 /// What a model keeps explicit (ELIMINATION.md §6: the keep rule's two kinds of objects): excited blocks, and P-layer
@@ -1978,36 +2016,35 @@ pub(crate) struct Kept {
 pub(crate) struct Closed {
     pub kept: Kept,
     pub frames: Vec<f64>,
-    /// The frames' least largest residual t* (cluster.rs `frames`), and the step's requirement t* + |K| v (rad/µs).
-    pub residual: f64,
-    pub requirement: f64,
     pub fold: Fold,
     /// The worst remainder ρ over the ground-like eigenstates, and the largest mixing of an averaged component.
     pub remainder: f64,
     pub mixing: f64,
 }
 
-/// The P states (labels as in `Link`) of a kept set, the frames from its links (cluster.rs `frames`) and its groups
-/// (`components` of the links, each explicit block's states one group with them: a block is moved whole, its sublevels
-/// coupled by the Zeeman and tensor shifts): the ground states, then the kept blocks' states.
-fn slow_of(blocks: &[Vec<usize>], kept: &Kept, classes: &[Class], ground: usize) -> (Slow, f64) {
+/// The P states (labels as in `Link`) of a kept set, the frames from its links at their strengths (cluster.rs `frames`:
+/// the strongest static; `Link::strength`) and its groups (`components` of the links, each explicit block's states one
+/// group with them: a block is moved whole, its sublevels coupled by the Zeeman and tensor shifts): the ground states,
+/// then the kept blocks' states.
+fn slow_of(blocks: &[Vec<usize>], kept: &Kept, classes: &[Class], levels: &Levels) -> Slow {
+    let ground = levels.ground.rows;
     let explicit: Vec<usize> = kept.blocks.iter().flat_map(|&b| blocks[b].iter().copied()).collect();
     let place = |s: usize| if s < ground { Some(s) } else { explicit.iter().position(|&e| e == s - ground).map(|i| ground + i) };
-    let edges: Vec<(usize, usize, f64)> = kept.links.iter().filter_map(|l| Some((place(l.a)?, place(l.b)?, l.beat(classes)))).collect();
+    let edges: Vec<(usize, usize, f64, f64)> = kept.links.iter().filter_map(|l| Some((place(l.a)?, place(l.b)?, l.beat(classes), l.strength(classes, levels, &explicit)))).collect();
     let n = ground + explicit.len();
-    let (frames, residual) = super::cluster::frames(n, &edges, &|x| *x, &0.0);
+    let frames = super::cluster::frames(n, &edges, &0.0);
     let within = kept.blocks.iter().flat_map(|&b| blocks[b].windows(2).filter_map(|w| Some((place(ground + w[0])?, place(ground + w[1])?))));
     let groups = components(n, edges.iter().map(|e| (e.0, e.1)).chain(within));
-    (Slow { explicit, frames, groups }, residual)
+    Slow { explicit, frames, groups }
 }
 
 /// The closure at one point (`Closed`): from `start`, at the atom's velocity v (µm/µs) --
 /// 1. the fold in the frames of the kept links; where it does not exist (`settle`), the excited block with the largest
 ///    part of the ground-like eigenstates' excited share -- over all of them -- is made explicit;
-/// 2. criterion one: every ground-like eigenstate's remainder ρ(±Δ), Δ = t* + 2 k_max v the frequency range its
-///    amplitude spans (the frames' residual, and the Doppler shifts and the pattern a moving atom sees: at most
-///    k_max v and |k_l − k_l'| v ≤ 2 k_max v), within the share; beyond it the blocks with the largest parts are made
-///    explicit until the rest is within it;
+/// 2. criterion one: every ground-like eigenstate's remainder at the offsets its amplitude spans, each at its share
+///    (`Fold::spans`: the pattern a moving atom sees, ±2 k_max v, whole, and each component into it at its combined
+///    frequency), the largest within the share; beyond it the blocks with the largest parts are made explicit until the
+///    rest is within it;
 /// - a block made explicit for an eigenstate is explicit at the replica that holds its part and in the P component the
 ///   eigenstate holds (`components`): the drives into it at that replica from that component's ground states are kept
 ///   (its frame). A drive from another component -- the other ground hyperfine level, 6.8 GHz away -- turns at that
@@ -2021,9 +2058,10 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
     let share = share();
     let speed = (velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2]).sqrt();
     let fastest = classes.iter().flat_map(|c| c.beams.iter()).map(|b| (b.wave[0] * b.wave[0] + b.wave[1] * b.wave[1] + b.wave[2] * b.wave[2]).sqrt()).fold(0.0, f64::max);
+    let pattern = 2.0 * fastest * speed;
     let mut kept = start.clone();
     loop {
-        let (slow, residual) = slow_of(blocks, &kept, classes, ground);
+        let slow = slow_of(blocks, &kept, classes, levels);
         // An explicit block's drives at its frame from every ground state of its group, as the group grows: they are
         // static in the frames (A's), and the run's cluster holds them as it is.
         let grown: Vec<Link> = slow
@@ -2043,6 +2081,7 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
         let fold = fold(levels, classes, &slow, &replicas);
         let n = fold.size();
         let ground_like: Vec<usize> = (0..n).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
+        let components = fold.components(velocity);
         // The parts of a ground-like eigenstate's response (or remainder) per block and replica, each split among the
         // replica's classes (`Fold::block_parts`): (block, replica, class, part).
         let parts_of = |p: usize, shift: Option<f64>| fold.block_parts(blocks, p, shift);
@@ -2078,13 +2117,14 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
             }
             moves.extend(largest.map(|(b, j, c, p, _)| (b, j, c, p)));
         } else {
-            let delta = residual + 2.0 * fastest * speed;
+            // Each offset the eigenstate spans at its share (`Fold::spans`), its parts with it.
             for &p in &ground_like {
                 let mut worst = (0.0, vec![]);
-                for shift in [delta, -delta] {
-                    let (rho, parts) = parts_of(p, Some(shift));
-                    if rho >= worst.0 {
-                        worst = (rho, parts);
+                for (shift, share) in Fold::spans(p, pattern, &components) {
+                    let (rho, mut parts) = parts_of(p, Some(shift));
+                    if share * rho >= worst.0 {
+                        parts.iter_mut().for_each(|x| x.3 *= share * share);
+                        worst = (share * rho, parts);
                     }
                 }
                 remainder = remainder.max(worst.0);
@@ -2122,7 +2162,7 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
             if s < ground { s } else { ground + fold.explicit[s - ground] }
         };
         let mut mixing: f64 = 0.0;
-        for x in fold.components(velocity) {
+        for x in components {
             let m = x.mixing();
             let link = Link { a: label(x.row), b: label(x.column), classes: x.classes };
             if 2.0 * m * m > share {
@@ -2137,15 +2177,7 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
         if grew {
             continue;
         }
-        // |K|: the largest wave vector an entry of the generator holds -- a class's beams against each other (its
-        // pattern), and the classes of a kept link against each other.
-        let pairs: Vec<(usize, usize)> = (0..classes.len()).map(|c| (c, c)).chain(kept.links.iter().filter_map(|l| Some((l.classes.0?, l.classes.1?)))).collect();
-        let pattern = pairs
-            .iter()
-            .flat_map(|&(c, d)| classes[c].beams.iter().flat_map(move |b| classes[d].beams.iter().map(move |b2| [b.wave[0] - b2.wave[0], b.wave[1] - b2.wave[1], b.wave[2] - b2.wave[2]])))
-            .map(|k| (k[0] * k[0] + k[1] * k[1] + k[2] * k[2]).sqrt())
-            .fold(0.0, f64::max);
-        return Closed { requirement: residual + pattern * speed, kept, frames: slow.frames.clone(), residual, fold, remainder, mixing };
+        return Closed { kept, frames: slow.frames.clone(), fold, remainder, mixing };
     }
 }
 
@@ -2277,7 +2309,7 @@ pub(crate) fn outside_errors(fold: Option<(&Fold, &[f64])>, psi: &[C64], outside
 /// through its rates and shifts, by x relative: the terms add on both.
 /// `linked`: whether a P-layer link is the model's (kept, or static in its frames: in its generator as it is).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked: &dyn Fn(&Link) -> bool, psi: &[C64], velocity: [f64; 3], range: f64, outside: &[Outside]) -> Errors {
+pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked: &dyn Fn(&Link) -> bool, psi: &[C64], velocity: [f64; 3], pattern: f64, outside: &[Outside]) -> Errors {
     let n = fold.size();
     let ground = fold.ground;
     let excited = levels.excited.rows;
@@ -2294,19 +2326,29 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
             }
         }
     };
-    // The remainder.
+    // The remainder at the offsets each eigenstate spans (`Fold::spans`), at the populations there: the pattern's at the
+    // eigenstate's own (the larger of its two signs), each component's sideband at its source's times its share.
+    let components = fold.components(velocity);
     let mut remainder = 0.0;
-    for p in (0..n).filter(|&p| weight[p] > 0.0) {
-        let (mut rho, mut each) = (0.0, vec![]);
-        for shift in [range, -range] {
-            let (r, e) = fold.remainder(p, shift, excited);
-            if r >= rho {
-                (rho, each) = (r, e);
+    for p in 0..n {
+        let mut read: Vec<(f64, f64, Vec<Vec<f64>>)> = vec![];
+        if weight[p] > 0.0 {
+            let (mut rho, mut each) = (0.0, vec![]);
+            for shift in [pattern, -pattern] {
+                let (r, e) = fold.remainder(p, shift, excited);
+                if r >= rho {
+                    (rho, each) = (r, e);
+                }
             }
+            read.push((weight[p], rho, each));
         }
-        remainder += weight[p] * 2.0 * rho;
-        if rho > 0.0 {
-            let unit: Vec<C64> = (0..n).map(|q| if q == p { C64::ONE } else { C64::ZERO }).collect();
+        for x in components.iter().filter(|x| x.row == p && x.size > 0.0 && weight[x.column] > 0.0) {
+            let (rho, each) = fold.remainder(p, x.distance.re, excited);
+            read.push((weight[x.column] * x.mixing().min(1.0).powi(2), rho, each));
+        }
+        let unit: Vec<C64> = (0..n).map(|q| if q == p { C64::ONE } else { C64::ZERO }).collect();
+        for (population, rho, each) in read.into_iter().filter(|r| r.1 > 0.0) {
+            remainder += population * 2.0 * rho;
             for (j, row) in each.iter().enumerate() {
                 let mut responses = None;
                 for (b, block) in blocks.iter().enumerate() {
@@ -2314,7 +2356,7 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
                     if x > 0.0 {
                         let responses = responses.get_or_insert_with(|| fold.feed_responses(j, &unit));
                         for (class, share) in class_shares(responses, &fold.replicas[j].q, block) {
-                            add(Object::Block(b, class), weight[p] * 2.0 * rho * x * share / (rho * rho), &mut parts);
+                            add(Object::Block(b, class), population * 2.0 * rho * x * share / (rho * rho), &mut parts);
                         }
                     }
                 }
@@ -2378,7 +2420,7 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
         if s < ground { s } else { ground + fold.explicit[s - ground] }
     };
     let mut averaged = 0.0;
-    for x in fold.components(velocity) {
+    for x in components {
         let link = Link { a: label(x.row), b: label(x.column), classes: x.classes };
         if linked(&link) || (weight[x.row] == 0.0 && weight[x.column] == 0.0) {
             continue;

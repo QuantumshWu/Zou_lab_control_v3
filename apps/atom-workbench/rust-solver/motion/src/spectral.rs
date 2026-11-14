@@ -123,7 +123,15 @@
 //!
 //! # The split
 //! An entry is followed where its following leaves no more than its hops would (`followed`):
-//!   (2/3)(S_A/x)³ + (4/15) S_B²/x + 2 S_C³ min(x, 1)/x³ ≤ x (S_C²/3 + S_A²/15 + S_B²/42).
+//!   [(2/3)(S_A/x)³ + 2 S_C³ min(x, 1)/x³]/(1 − r) + (4/15) S_B²/x ≤ x (S_C²/3 + S_A²/15 + S_B²/42),
+//! r = |X| at the step's ends by the polynomial's recursion on the sizes, (S_C + (S_A + 2S_B/x)/x)/x + (S_A + 2S_B/x)/x
+//! + S_B/x: the following's third order leads a series in r, its orders' sum the leading term over 1 − r, and where r ≥ 1
+//! there is no sum -- 1 + X is no near identity, D₂'s fast entries left out are not of a higher order -- and the entry is
+//! hopped. (Without it a tone of a coupling stronger than its combined frequency, |C| > |Ω|, was followed at a step of
+//! |Ω||h| beyond a few radians, where the rule's leading terms favour the following: the state through it grew by
+//! 10⁶ over a step of 10 µs and overflowed at 90 µs, tests, `the_survival_never_rises_whatever_the_generator_and_the_step`;
+//! a static group's slope is followed at r ≪ 1 at the scenes' steps, where nothing changed, tests,
+//! `the_static_group_alone_is_propagated_as_before_to_the_bit`.)
 //! The left side falls with x and the right side rises: the entries are split at one turn, and an entry that crosses it
 //! with the step changes its treatment where the two leave the same. For a slope alone that turn is x⁴ = 10 S_A -- a
 //! radian between two nodes where the change over a half step is a tenth, 0.56 rad where it is a hundredth --, for a
@@ -278,13 +286,14 @@ fn entry(matrix: &[f64], place: usize) -> C64 {
     C64::new(matrix[place], matrix[place + LANES])
 }
 
-/// An exact tone of the generator along a step's path (module documentation, # The generator), the caller's: its beat
-/// ν (rad/µs) and its two members' envelopes at the step's three nodes, −h, 0 and h -- G⁺, at e^{iνu}, and G⁻, at
-/// e^{−iνu} (n × n each). After `prepare` each member's envelope as its nodes' parabola C + uA + u²B, as given: C, A and
-/// B in the places of the nodes.
+/// An exact tone of the generator along a step's path (module documentation, # The generator; `Picture::separate`): its
+/// beat ν (rad/µs), its place among the caller's candidates, and its two members' envelopes at the step's three nodes,
+/// −h, 0 and h -- G⁺, at e^{iνu}, and G⁻, at e^{−iνu} (n × n each). After `prepare` each member's envelope as its nodes'
+/// parabola C + uA + u²B, as given: C, A and B in the places of the nodes.
 #[derive(Debug)]
 pub struct Beat {
     pub beat: f64,
+    pub candidate: usize,
     pub members: [[Mat; 3]; 2],
 }
 
@@ -493,11 +502,17 @@ impl Default for Picture {
 
 /// Whether a term that turns x = |Ω| |h| between two of the step's nodes is followed (module documentation, # The
 /// split), the changes over a half step being of the sizes `slope` = S_A, `curvature` = S_B and `constant` = S_C: where
-/// what its following leaves, (2/3)(S_A/x)³ + (4/15) S_B²/x + 2 S_C³ min(x, 1)/x³, is no more than what its hops would,
-/// x (S_C²/3 + S_A²/15 + S_B²/42) -- the two times x³; a term that does not turn is hopped.
+/// what its following leaves, (2/3)(S_A/x)³ + 2 S_C³ min(x, 1)/x³ -- the leading term of the following's orders, a
+/// series in its size r, so over 1 − r: none where r ≥ 1, the following's 1 + X no near identity and its series no
+/// sum -- and (4/15) S_B²/x, is no more than what its hops would, x (S_C²/3 + S_A²/15 + S_B²/42) -- the two times x³;
+/// a term that does not turn is hopped. r is the following's size at the step's ends, |Y₀| + |h Y₁| + |h² Y₂| by the
+/// polynomial's recursion (`following`) on the sizes: S_B/x, (S_A + 2 S_B/x)/x, (S_C + (S_A + 2 S_B/x)/x)/x.
 fn followed(x: f64, [slope, curvature, constant]: [f64; 3]) -> bool {
     let (first, second, zeroth) = (slope * slope, curvature * curvature, constant * constant);
-    x > 0.0 && 2.0 / 3.0 * first * slope + 4.0 / 15.0 * second * (x * x) + 2.0 * zeroth * constant * x.min(1.0) <= x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0)
+    let two = curvature / x;
+    let one = (slope + 2.0 * two) / x;
+    let r = two + one + (constant + one) / x;
+    x > 0.0 && r < 1.0 && (2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * x.min(1.0)) / (1.0 - r) + 4.0 / 15.0 * second * (x * x) <= x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0)
 }
 
 /// The terms of ∫₀¹ t^p e^{zt} dt's series Σ_j z^j/(j!(j + p + 1)) at |z| ≤ x for an integral of the size `size` at
@@ -642,22 +657,59 @@ impl Picture {
         }
     }
 
-    /// The step's exact tones (module documentation, # The generator): `fill` gives their beats (rad/µs), and each tone
-    /// is made for its members' envelopes at the three nodes, which the caller writes (`beats`) before `prepare`. None
-    /// where `fill` gives none: the generator is its static group.
-    pub fn beating(&mut self, fill: impl FnOnce(&mut Vec<f64>)) {
+    /// The step's exact tones out of the generator (module documentation, # Which beats are tones), the generator at the
+    /// nodes given (`base`, `ends`): `candidates` gives the beats ν (rad/µs) of the caller's candidate tone pairs, each
+    /// of members constant along the path; a candidate is a tone of the step of 2h where |ν| |h| > √5 -- its hops leave
+    /// less than its change through the nodes would --, its members asked of `envelopes` (the candidate's place, G⁺ at
+    /// e^{iνu}, G⁻ at e^{−iνu}), and its Hermitian part e^{iνu}P + e^{−iνu}P†, P = (G⁺ + G⁻†)/2, taken out of the
+    /// generator at each node: what is left is the static group (`beats`: the tones). None where no candidate is so fast.
+    /// The decay's beats stay with the static group: a hop's exponent is the first Magnus term, and a beating decay's
+    /// part alone is no decay -- its sign turns with its beat --, so that over a hop it would grow the interaction
+    /// picture's state by e^{|Γ_ν| w} where the static decay's factors hold the state (an overflow of m, not of x); a
+    /// Hermitian tone's hops are unitary.
+    pub fn separate(&mut self, half: f64, candidates: impl FnOnce(&mut Vec<f64>), mut envelopes: impl FnMut(usize, &mut Mat, &mut Mat)) {
         let n = self.n;
         self.beating.clear();
-        fill(&mut self.beating);
-        self.beats.truncate(self.beating.len());
-        while self.beats.len() < self.beating.len() {
-            self.beats.push(Beat { beat: 0.0, members: std::array::from_fn(|_| std::array::from_fn(|_| Mat::zeros(n, n))) });
+        candidates(&mut self.beating);
+        let edge = 5.0_f64.sqrt() / half.abs();
+        let count = self.beating.iter().filter(|beat| beat.abs() > edge).count();
+        self.beats.truncate(count);
+        while self.beats.len() < count {
+            self.beats.push(Beat { beat: 0.0, candidate: 0, members: std::array::from_fn(|_| std::array::from_fn(|_| Mat::zeros(n, n))) });
         }
-        for (tone, beat) in self.beats.iter_mut().zip(&self.beating) {
-            tone.beat = *beat;
+        let chosen = self.beating.iter().copied().enumerate().filter(|(_, beat)| beat.abs() > edge);
+        for (tone, (candidate, beat)) in self.beats.iter_mut().zip(chosen) {
+            (tone.beat, tone.candidate) = (beat, candidate);
             for m in tone.members.iter_mut().flatten() {
                 (m.rows, m.cols) = (n, n);
                 m.data.resize(n * n, C64::ZERO);
+            }
+            let [plus, minus] = &mut tone.members;
+            envelopes(candidate, &mut plus[1], &mut minus[1]);
+            // Its Hermitian part: P = (G⁺ + G⁻†)/2 at e^{iνu}, P† at e^{−iνu}.
+            let [given, middle, _] = &mut *plus;
+            given.data.copy_from_slice(&middle.data);
+            for a in 0..n {
+                for b in 0..n {
+                    middle.data[a * n + b] = (given.data[a * n + b] + minus[1].data[b * n + a].conj()) * 0.5;
+                }
+            }
+            for a in 0..n {
+                for b in 0..n {
+                    minus[1].data[a * n + b] = plus[1].data[b * n + a].conj();
+                }
+            }
+            for member in [&mut *plus, &mut *minus] {
+                let [first, middle, last] = member;
+                first.data.copy_from_slice(&middle.data);
+                last.data.copy_from_slice(&middle.data);
+            }
+            let [start, end] = &mut self.ends;
+            for (node, u) in [start, &mut self.base, end].into_iter().zip([-half, 0.0, half]) {
+                let (p, q) = (C64::cis(beat * u), C64::cis(-beat * u));
+                for ((z, g), h) in node.data.iter_mut().zip(&plus[1].data).zip(&minus[1].data) {
+                    *z -= p * *g + q * *h;
+                }
             }
         }
     }
@@ -838,9 +890,10 @@ impl Picture {
             if self.moving {
                 self.follow();
                 self.slopes = self.hopping();
-                // A followed class moves the state's frequencies by its beat: the forms' bandwidth with the beats' spread.
+                // A followed class moves the state's frequencies by its beat: the forms' bandwidth with the beats' spread;
+                // and a tone's forms are summed at its beat (step.rs `Sums`): with its beat besides.
                 let (low, high) = self.classes.iter().filter(|class| class.followed).fold((0.0_f64, 0.0_f64), |(low, high), class| (low.min(class.beat), high.max(class.beat)));
-                self.bandwidth += high - low;
+                self.bandwidth += high - low + self.beats.iter().map(|tone| tone.beat.abs()).fold(0.0, f64::max);
             }
             self.counted[n] = Some([self.work + self.price(stops(self.bandwidth)), self.state_price()]);
         }
@@ -2172,37 +2225,30 @@ pub(crate) mod tests {
         assert_eq!(found, before);
     }
 
-    /// An exact tone of a test: its beat ν and its members' envelopes G⁺ (at e^{iνu}) and G⁻ (at e^{−iνu}), each a
-    /// constant and a slope, C + uA.
+    /// A candidate tone of a test: its beat ν and its members' envelopes G⁺ (at e^{iνu}) and G⁻ (at e^{−iνu}).
     struct Tone {
         beat: f64,
-        plus: [Mat; 2],
-        minus: [Mat; 2],
+        plus: Mat,
+        minus: Mat,
     }
 
-    /// The generator of a static group G₀ + uA₀ and tones at the time u: G₀ + uA₀ + Σ_m (e^{iν_m u} G_m⁺(u) +
-    /// e^{−iν_m u} G_m⁻(u)).
+    /// The generator of a static group G₀ + uA₀ and candidate tones at the time u: G₀ + uA₀ + Σ_m (e^{iν_m u} G_m⁺ +
+    /// e^{−iν_m u} G_m⁻).
     fn toned(group: &[Mat; 2], tones: &[Tone], u: f64) -> Mat {
         let n = group[0].rows;
-        let envelope = |m: &[Mat; 2], i: usize, j: usize| m[0][(i, j)] + m[1][(i, j)] * u;
-        Mat::from_fn(n, n, |i, j| envelope(group, i, j) + tones.iter().map(|t| C64::cis(t.beat * u) * envelope(&t.plus, i, j) + C64::cis(-t.beat * u) * envelope(&t.minus, i, j)).sum::<C64>())
+        Mat::from_fn(n, n, |i, j| group[0][(i, j)] + group[1][(i, j)] * u + tones.iter().map(|t| C64::cis(t.beat * u) * t.plus[(i, j)] + C64::cis(-t.beat * u) * t.minus[(i, j)]).sum::<C64>())
     }
 
-    /// A picture of a static group and exact tones over a step of 2h, prepared on the decomposition's route (a fresh
-    /// picture has counted no other), each at its three nodes.
+    /// A picture of the whole generator at its three nodes and its candidate tones over a step of 2h (`separate`: those
+    /// of |ν| h > √5 its tones), prepared on the decomposition's route (a fresh picture has counted no other).
     fn with_tones(group: &[Mat; 2], tones: &[Tone], half: f64) -> Picture {
         let n = group[0].rows;
-        let at = |m: &[Mat; 2], u: f64| Mat::from_fn(n, n, |i, j| m[0][(i, j)] + m[1][(i, j)] * u);
         let mut picture = Picture::default();
         picture.fit(n);
-        picture.base = at(group, 0.0);
-        picture.ends = [-half, half].map(|u| at(group, u));
-        picture.beating(|beats| beats.extend(tones.iter().map(|t| t.beat)));
-        for (tone, given) in picture.beats.iter_mut().zip(tones) {
-            for (j, u) in [-half, 0.0, half].into_iter().enumerate() {
-                (tone.members[0][j], tone.members[1][j]) = (at(&given.plus, u), at(&given.minus, u));
-            }
-        }
+        picture.base = toned(group, tones, 0.0);
+        picture.ends = [-half, half].map(|u| toned(group, tones, u));
+        picture.separate(half, |beats| beats.extend(tones.iter().map(|t| t.beat)), |m, plus, minus| (*plus, *minus) = (tones[m].plus.clone(), tones[m].minus.clone()));
+        assert_eq!(picture.beats.len(), tones.len(), "every candidate a tone");
         picture.prepare(half, false, |_| 2, 0.0, 0.0);
         picture
     }
@@ -2293,7 +2339,7 @@ pub(crate) mod tests {
         let group = [static_group, Mat::zeros(n, n)];
         let edge = C64::cis(0.7) * 0.3;
         let only = |i: usize, j: usize, z: C64| Mat::from_fn(n, n, |a, b| if (a, b) == (i, j) { z } else { C64::ZERO });
-        let tones = [Tone { beat, plus: [only(0, 2, edge), only(0, 2, edge * 0.1)], minus: [only(2, 0, edge.conj()), only(2, 0, edge.conj() * 0.1)] }];
+        let tones = [Tone { beat, plus: only(0, 2, edge), minus: only(2, 0, edge.conj()) }];
         let generator = |u: f64| toned(&group, &tones, u);
         let starts = [[C64::ONE, C64::ZERO, C64::ZERO], [C64::ZERO, C64::ZERO, C64::ONE], [C64::real(0.6), C64::new(0.0, 0.48), C64::real(0.64)]];
         let times = [-0.5 * half, 0.4 * half, half];
@@ -2326,8 +2372,8 @@ pub(crate) mod tests {
         let static_group = Mat::from_fn(n, n, |i, j| match (i, j) {
             (0, 0) => C64::ZERO,
             (1, 1) => C64::new(1.5, -0.1),
-            (2, 2) => C64::new(20.0, -0.05),
-            (3, 3) => C64::real(22.5),
+            (2, 2) => C64::new(30.0, -0.05),
+            (3, 3) => C64::real(32.5),
             (0, 1) | (1, 0) => C64::real(2.0),
             (2, 3) => C64::cis(0.4) * 1.8,
             (3, 2) => C64::cis(-0.4) * 1.8,
@@ -2338,7 +2384,7 @@ pub(crate) mod tests {
         let first = [(0, 2, C64::real(0.4)), (1, 3, C64::cis(0.2) * 0.3)];
         let second = [(0, 3, C64::new(0.0, 0.25)), (1, 2, C64::real(0.2))];
         let tones = |theta: f64| {
-            [(20.3, &first[..]), (21.0, &second[..])].map(|(beat, entries)| Tone { beat: beat + theta, plus: [cross(entries, false, 1.0), cross(entries, false, 0.2)], minus: [cross(entries, true, 1.0), cross(entries, true, 0.2)] })
+            [(30.3, &first[..]), (31.0, &second[..])].map(|(beat, entries)| Tone { beat: beat + theta, plus: cross(entries, false, 1.0), minus: cross(entries, true, 1.0) })
         };
         let framed = |theta: f64| [Mat::from_fn(n, n, |i, j| static_group[(i, j)] + if i == j && i >= 2 { C64::real(theta) } else { C64::ZERO }), slope.clone()];
         let start = [C64::real(0.5), C64::new(0.1, 0.4), C64::new(-0.3, 0.2), C64::new(0.0, -0.6)];
@@ -2384,9 +2430,9 @@ pub(crate) mod tests {
         let static_group = Mat::from_fn(n, n, |i, j| if (i, j) == (1, 1) { C64::new(detuning, -0.5 * gamma) } else { C64::ZERO });
         let group = [static_group, Mat::zeros(n, n)];
         let only = |i: usize, j: usize, z: C64| Mat::from_fn(n, n, |a, b| if (a, b) == (i, j) { z } else { C64::ZERO });
-        let beam = |beat: f64, c: C64| Tone { beat, plus: [only(1, 0, c), Mat::zeros(n, n)], minus: [only(0, 1, c.conj()), Mat::zeros(n, n)] };
+        let beam = |beat: f64, c: C64| Tone { beat, plus: only(1, 0, c), minus: only(0, 1, c.conj()) };
         let (c1, c2) = (C64::real(4.0), C64::cis(0.4) * 3.0);
-        let tones = [beam(3.1, c1), beam(-4.7, c2)];
+        let tones = [beam(5.1, c1), beam(-4.7, c2)];
         let generator = |u: f64| toned(&group, &tones, u);
         let start = [C64::ONE, C64::ZERO];
         let times = [-0.5 * half, 0.2 * half, half];
@@ -2395,7 +2441,7 @@ pub(crate) mod tests {
         assert!(picture.through && picture.followed);
         let steps = 400_000;
         let (tone, nodes) = (beating_errors(&mut picture, &generator, &start, &times, steps), beating_errors(&mut before, &generator, &start, &times, steps));
-        let (couplings, beat) = (c1.abs() + c2.abs(), 3.1_f64 + 4.7);
+        let (couplings, beat) = (c1.abs() + c2.abs(), 5.1_f64 + 4.7);
         let second = 2.0 * c1.abs() * c2.abs() / (detuning.abs() * beat);
         let within = beating_remainders(&picture, tones.len()) + 2.0 * couplings * second / detuning.abs() + couplings.powi(4) / detuning.abs().powi(3) * 2.0 * half;
         eprintln!("as exact tones the state errs by {tone:.2e} (within {within:.2e}); through the three nodes by {nodes:.2e}");

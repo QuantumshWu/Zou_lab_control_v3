@@ -238,9 +238,9 @@ fn an_averaged_component_s_shift_and_micromotion_are_the_exact_floquet_ones() {
 
 /// A Raman resonance across a Zeeman splitting (the coordinator's test): two ground states 2ω_L apart, coupled by two
 /// classes 2ω_L + δ apart through a far excited state. The lab beat is 26.37 rad/µs; the component's distance on the
-/// actual spectrum is δ (and the light shifts' difference); in the optimal frames it is static, the step's
-/// requirement its residual, zero -- and the fold in those frames is the exact static problem's (its slow eigenvalues
-/// against the exact three-state generator's).
+/// actual spectrum is δ (and the light shifts' difference); in the frames (cluster.rs `frames`: a chain, every link on
+/// the strength tree) it is static, its residual exactly zero -- and the fold in those frames is the exact static
+/// problem's (its slow eigenvalues against the exact three-state generator's).
 #[test]
 fn a_raman_resonance_across_a_zeeman_splitting_asks_the_step_for_its_detuning_not_its_beat() {
     let (gamma, delta, zeeman, detuning) = (38.1, -1536.0, 26.375, 0.375);
@@ -255,9 +255,9 @@ fn a_raman_resonance_across_a_zeeman_splitting_asks_the_step_for_its_detuning_no
         assert!((x.beat.abs() - (zeeman + detuning)).abs() <= 1e-9, "its lab beat");
         assert!(x.distance.abs() < 0.2 * zeeman, "its distance on the actual spectrum {:?}", x.distance);
     }
-    let links: Vec<(usize, usize, f64)> = explicit.iter().map(|x| (rest.dominant(x.row), rest.dominant(x.column), x.beat)).collect();
-    let (theta, residual) = crate::model::cluster::frames(2, &links, &|x| *x, &0.0);
-    assert_eq!(residual, 0.0, "a chain: static in its frames");
+    let links: Vec<(usize, usize, f64, f64)> = explicit.iter().map(|x| (rest.dominant(x.row), rest.dominant(x.column), x.beat, x.size)).collect();
+    let theta = crate::model::cluster::frames(2, &links, &0.0);
+    assert!(links.iter().all(|l| l.2 - (theta[l.0] - theta[l.1]) == 0.0), "a chain: static in its frames");
     let fold = folded(&lv, &classes, &Slow::single(vec![], theta.clone()));
     assert_eq!(fold.replicas.len(), 1);
     let h = Mat::from_fn(3, 3, |i, j| match (i, j) {
@@ -315,11 +315,9 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
             .collect();
         for (name, c) in names.iter().zip(&closed) {
             println!(
-                "{name} r {r:?} v {v:?}: blocks {:?}, links {}, residual {:.3e}, requirement {:.4} rad/us, rho {:.4e}, averaged mixing {:.4e}, fold iterations {}",
+                "{name} r {r:?} v {v:?}: blocks {:?}, links {}, rho {:.4e}, averaged mixing {:.4e}, fold iterations {}",
                 c.kept.blocks,
                 c.kept.links.len(),
-                c.residual,
-                c.requirement,
                 c.remainder,
                 c.mixing,
                 c.fold.iterations
@@ -333,7 +331,6 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
             }
         }
         assert_eq!(closed[1].kept.links.len(), base.kept.links.len(), "the links at 0.1° at {r:?} {v:?}");
-        assert!((closed[1].residual - base.residual).abs() <= 1e-9 * (1.0 + base.residual), "the frames' residual at 0.1°");
         assert!((closed[1].remainder - base.remainder).abs() <= 10.0 * theta * base.remainder.max(1e-6), "ρ at 0.1°: {} against {}", closed[1].remainder, base.remainder);
         added += closed[2].kept.links.len() - base.kept.links.len();
         most = most.max(closed[2].mixing);
@@ -361,18 +358,19 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
     for &(r, v) in points.iter().step_by(11) {
         let (lv, cl, _) = system(&req, &light, r);
         let closed = closure(&lv, &cl, &blocks, v, &Kept::default());
-        let (slow, residual) = slow_of(&blocks, &closed.kept, &cl, ground);
+        let slow = slow_of(&blocks, &closed.kept, &cl, &lv);
         let fastest = cl.iter().flat_map(|c| c.beams.iter()).map(|b| crate::linalg::norm3(b.wave)).fold(0.0, f64::max);
-        let range = residual + 2.0 * fastest * crate::linalg::norm3(v);
+        let pattern = 2.0 * fastest * crate::linalg::norm3(v);
         let read = |slow: &Slow| {
             let fold = folded(&lv, &cl, slow);
             let label = |p: usize| fold.dominant(p);
             let mut components: Vec<(usize, usize, (Option<usize>, Option<usize>), f64)> = fold.components(v).iter().filter(|x| x.mixing() > 1e-6).map(|x| (label(x.row), label(x.column), x.classes, x.mixing())).collect();
             components.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)).then(a.3.total_cmp(&b.3)));
-            let mut rho: Vec<f64> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).map(|p| fold.remainder(p, range, lv.excited.rows).0).collect();
+            let all = fold.components(v);
+            let mut rho: Vec<f64> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).map(|p| Fold::spans(p, pattern, &all).map(|(shift, share)| share * fold.remainder(p, shift, lv.excited.rows).0).fold(0.0, f64::max)).collect();
             rho.sort_by(f64::total_cmp);
             let psi: Vec<C64> = (0..fold.size()).map(|s| if s < ground { C64::real(1.0) } else { C64::ZERO }).collect();
-            let errors = errors(&fold, &lv, &blocks, &|_| false, &psi, v, range, &[]);
+            let errors = errors(&fold, &lv, &blocks, &|_| false, &psi, v, pattern, &[]);
             (components, rho, errors.population, errors.parts)
         };
         let base = read(&slow);
@@ -424,8 +422,7 @@ fn a_block_is_kept_for_the_class_of_its_larger_part_and_turns_in_that_class_s_fr
         assert!(part(larger) > part(smaller), "the class of the larger response holds the larger part: {} against {}", part(larger), part(smaller));
         // Kept for that class: the drive's link, the frames from it.
         let kept = Kept { blocks: vec![0], links: vec![Link { a: ground, b: 0, classes: (None, Some(larger)) }], ..Kept::default() };
-        let (slow, residual) = slow_of(&blocks, &kept, &classes, ground);
-        assert_eq!(residual, 0.0, "a chain: static in its frames");
+        let slow = slow_of(&blocks, &kept, &classes, &lv);
         assert!(same(classes[larger].nu + slow.frames[0], slow.frames[ground]), "the explicit state turns in its class's frame");
         let fold = folded(&lv, &classes, &slow);
         assert!(fold.direct[(1, 0)].abs() > 0.0, "the kept class's drive is the static generator's");
