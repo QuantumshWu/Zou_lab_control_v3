@@ -197,8 +197,9 @@ impl Path {
 /// stop is no step's end of its own: the steps are those of the run to `to`, and the trajectory with its path and
 /// scratch where it stopped is advanced on by the next call -- its time tells the reads that are done, its path where it
 /// stands --, to the bit as without the stop; so is a copy of the trajectory and its path advanced on with a scratch
-/// resumed from what its own carried there (step.rs `Scratch::carry`, `Scratch::resumed`). `each` takes every piece of every step's path -- from the step's start or a jump of the step -- with
-/// the time the trajectory is on it to: the next jump or the step's end. A trajectory lost on the way stops at its
+/// resumed from what its own carried there (step.rs `Scratch::carry`, `Scratch::resumed`). `each` takes every piece of
+/// every step's path -- from the step's start or a jump of the step -- with the time the trajectory is on it to: the
+/// next jump or the step's end. A trajectory lost on the way stops at its
 /// loss time. Where the scheme refuses a step at every length down to the time's round-off, the advance ends
 /// there with the refusal; so it does where the model gives a jump no photon (`step::jump`), where a state scatters
 /// beyond every state of the atom (step.rs, # The domain: a shorter step is no answer to that), and where the middle's optical
