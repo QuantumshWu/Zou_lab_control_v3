@@ -178,8 +178,9 @@ type OutsideReach={laserIds:string[];names:string;ratio:number;ratioState:string
 /** One transition of a 32-state manifold to a level outside the model: its name (e.g. 5P3/2→5D5/2) and, in the
  * magnetic eigenbasis, M = Σ_v r_v† r_v over the level's sublevels v and both rotations, r_v,k = V_vk/Δ_vk the
  * coupling over the detuning of each state k of the manifold: M_kk is k's population in the level, the second-order
- * term's own small parameter (coupling/detuning)². */
-type OutsideMixing={name:string;matrix:Matrix};
+ * term's own small parameter (coupling/detuning)²; and `shift`, the transition's own part of the correction (MHz,
+ * `addVirtual`): the term whose error M_kk is, relative. */
+type OutsideMixing={name:string;matrix:Matrix;shift:Matrix};
 type ModelCorrection={matrix:Matrix;maximumMixingRatio:number;carriers:OutsideReach[];mixing:OutsideMixing[]};
 /** The 32-state manifolds' names in a transition's. */
 const MANIFOLD_LEVEL:Record<Manifold,string>={ground:'5S1/2',D1:'5P1/2',D2:'5P3/2'};
@@ -192,7 +193,7 @@ function modelCorrection(analysis:Analysis,beams:Group[]):ModelCorrection{
   const key=JSON.stringify([analysis.fieldMagnitudeG,beams.map(g=>[laserCarrierOffsetMHz(g.beams[0]!,'D1'),laserCarrierOffsetMHz(g.beams[0]!,'D2'),g.field])]);
   const cached=modelCorrectionCache.get(key);if(cached)return cached;
   const states=cachedAtom(analysis.fieldMagnitudeG).states,outside=outsideStates(states,analysis.fieldMagnitudeG),matrix=zero(N);let maximumMixingRatio=0;
-  const carriers:OutsideReach[]=[],mixing=new Map<string,Matrix>();
+  const carriers:OutsideReach[]=[],mixing=new Map<string,{matrix:Matrix;shift:Matrix}>();
   for(const group of beams){
     const reverse=reversedField(group.field),frequency=laserFrequencyMHz(group.beams[0]!),names=group.beams.map(b=>b.name).join(' + ');
     const reach:OutsideReach={laserIds:group.beams.map(b=>b.id),names,ratio:0,ratioState:'',gapMHz:Infinity,gapState:''};
@@ -201,9 +202,10 @@ function modelCorrection(analysis:Analysis,beams:Group[]):ModelCorrection{
         const values=indices.map((_,k)=>amplitude([state.dipoles[k*3]!,state.dipoles[k*3+1]!,state.dipoles[k*3+2]!],counter?reverse:group.field));
         const delta=indices.map(i=>centroid(states[i]!.manifold)+states[i]!.energyMHz-state.energyMHz+(counter?-frequency:frequency));
         const {ratio,gap}=addVirtual(matrix,indices,values,delta,`${state.name} 高态 / ${names}`);
-        const transition=`${MANIFOLD_LEVEL[manifold]}→${state.name}`,m=mixing.get(transition)??zero(N);mixing.set(transition,m);
+        const transition=`${MANIFOLD_LEVEL[manifold]}→${state.name}`,own=mixing.get(transition)??{matrix:zero(N),shift:zero(N)};mixing.set(transition,own);
+        addVirtual(own.shift,indices,values,delta,`${state.name} 高态 / ${names}`);
         const r=values.map((v,k)=>({re:v.re/delta[k]!,im:v.im/delta[k]!})),active=r.flatMap((z,k)=>z.re!==0||z.im!==0?[k]:[]);
-        for(const a of active)for(const b of active){const z=mul(conj(r[a]!),r[b]!),k=indices[a]!*N+indices[b]!;m.real[k]!+=z.re;m.imag[k]!+=z.im;}
+        for(const a of active)for(const b of active){const z=mul(conj(r[a]!),r[b]!),k=indices[a]!*N+indices[b]!;own.matrix.real[k]!+=z.re;own.matrix.imag[k]!+=z.im;}
         maximumMixingRatio=Math.max(maximumMixingRatio,ratio);
         if(ratio>reach.ratio){reach.ratio=ratio;reach.ratioState=state.name;}
         if(gap<reach.gapMHz){reach.gapMHz=gap;reach.gapState=state.name;}
@@ -213,7 +215,7 @@ function modelCorrection(analysis:Analysis,beams:Group[]):ModelCorrection{
     const squared=accurateSum(group.field.flatMap(q=>[q.re*q.re,q.im*q.im]));
     states.forEach((state,i)=>{matrix.real[i*N+i]!+=-CORE_POLARIZABILITY_AU[state.manifold]*POLARIZABILITY_AU*squared/(4*H*1e6);});
   }
-  const result={matrix,maximumMixingRatio,carriers,mixing:[...mixing].map(([name,matrix])=>({name,matrix}))};modelCorrectionCache.set(key,result);if(modelCorrectionCache.size>12)modelCorrectionCache.delete(modelCorrectionCache.keys().next().value!);return result;
+  const result={matrix,maximumMixingRatio,carriers,mixing:[...mixing].map(([name,own])=>({name,...own}))};modelCorrectionCache.set(key,result);if(modelCorrectionCache.size>12)modelCorrectionCache.delete(modelCorrectionCache.keys().next().value!);return result;
 }
 /** Cyclic complex-Hermitian Jacobi. No amplitude pruning; a rotation is skipped only when
  * its off-diagonal entry is exactly zero. The residual is checked against the input. */
@@ -261,17 +263,18 @@ export function laserModelCorrection(scene:Scene,laser:Laser):Matrix{
  * correction itself: A_qq = O(e_q), and A_pq + A_qp, i(A_pq − A_qp) from O(e_p + e_q), O(e_p + i e_q)
  * less O(e_p) + O(e_q). The beams of one frequency summed into one field then shift the states
  * with their interference, which per-beam corrections leave out (motion, full-master-model.ts).
- * And per transition to a level outside the model its mixing as a form in the same coordinates
- * (1/(V/m)², `OutsideMixing`: Hermitian and quadratic in E alike): the second-order term's error,
- * (coupling/detuning)², which the motion engine books (motion, full-master-model.ts). */
-export function outsideFieldForm(analysis:Analysis,laser:Laser):{matrices:Matrix[];transitions:{name:string;matrices:Matrix[]}[]}{
+ * And per transition to a level outside the model its mixing and its own shift as forms in the same
+ * coordinates (1/(V/m)² and MHz/(V/m)², `OutsideMixing`: Hermitian and quadratic in E alike): the
+ * second-order term's error, (coupling/detuning)² of that term, which the motion engine books (motion,
+ * full-master-model.ts). */
+export function outsideFieldForm(analysis:Analysis,laser:Laser):{matrices:Matrix[];transitions:{name:string;matrices:Matrix[];shift:Matrix[]}[]}{
   const at=(field:Z[])=>modelCorrection(analysis,[{beams:[laser],field}]),unit=(q:number,z:Z={re:1,im:0}):Z[]=>[0,1,2].map(k=>k===q?z:{re:0,im:0});
   const diagonal=[0,1,2].map(q=>at(unit(q))),pairs:ModelCorrection[]=[];
   for(let p=0;p<3;p++)for(let q=p+1;q<3;q++)for(const z of [{re:1,im:0},{re:0,im:1}])pairs.push(at(unit(p).map((x,k)=>k===q?z:x)));
   const less=(both:Matrix,a:Matrix,b:Matrix):Matrix=>({real:both.real.map((x,k)=>x-a.real[k]!-b.real[k]!),imag:both.imag.map((x,k)=>x-a.imag[k]!-b.imag[k]!)});
   const ends=[[0,1],[0,1],[0,2],[0,2],[1,2],[1,2]] as const;
   const forms=(of:(c:ModelCorrection)=>Matrix)=>[...diagonal.map(of),...pairs.map((c,i)=>less(of(c),of(diagonal[ends[i]![0]]!),of(diagonal[ends[i]![1]]!)))];
-  return {matrices:forms(c=>c.matrix),transitions:diagonal[0]!.mixing.map(({name},t)=>({name,matrices:forms(c=>c.mixing[t]!.matrix)}))};
+  return {matrices:forms(c=>c.matrix),transitions:diagonal[0]!.mixing.map(({name},t)=>({name,matrices:forms(c=>c.mixing[t]!.matrix),shift:forms(c=>c.mixing[t]!.shift)}))};
 }
 /** The static part of the master-model H0 and its eigenbasis (the model basis): each
  * fine-structure manifold's bare energies plus the static correction, diagonalized, each

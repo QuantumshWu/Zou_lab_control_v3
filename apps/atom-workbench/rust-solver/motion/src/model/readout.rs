@@ -312,6 +312,13 @@ impl Model {
         }
     }
 
+    /// A transition to a level outside the model's label for the ledger (Chinese; `Model::outside`): its light's beams
+    /// and its name.
+    pub(crate) fn outside_label(&self, t: usize) -> String {
+        let (frequency, transition) = &self.outside[t];
+        format!("{} 经 32 态以外的跃迁 {} 的二阶静态光移", self.component_label(Component { frequency: *frequency, counter: false }), transition.name)
+    }
+
     /// The model in words (Chinese, the result's method text): its subspaces -- those of one make-up said once, with
     /// their number, in the order they first come --, their explicit excited states, and how many drives are taken at
     /// each level.

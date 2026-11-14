@@ -485,6 +485,10 @@ pub struct Model {
     /// The constants of the fold's series every evaluation takes (elim.rs `Series`): read at the focus where the model
     /// is made, and at the atoms of its run where the run reads them (`Model::referenced`).
     pub(crate) series: elim::Series,
+    /// The transitions to the levels outside the model of the light's frequencies, each with its frequency (an index of
+    /// the light's; request.rs `Transition`): the errors of their second-order terms, read at the states (elim.rs
+    /// `errors`) -- no unit: those levels are not in the model, and nothing of them can be kept.
+    pub(crate) outside: Arc<Vec<(usize, crate::request::Transition)>>,
 }
 
 /// What a request gives a model whatever units are kept (`Model::new`, `Model::rekept`): the light, the exact frequencies and
@@ -504,6 +508,7 @@ struct Given {
     driven: Vec<(Component, usize, usize)>,
     labels: Vec<String>,
     names: Vec<String>,
+    outside: Arc<Vec<(usize, crate::request::Transition)>>,
 }
 
 /// An exact wave vector: integer coordinates on the light's distinct wave vectors (`Model::waves`), with a `Beat`'s integer
@@ -562,6 +567,7 @@ impl Model {
             driven,
             labels: request.states.clone(),
             names: request.beams.iter().map(|b| b.name.clone()).collect(),
+            outside: Arc::new(light.frequencies.iter().enumerate().flat_map(|(w, f)| request.outside_forms[f.form].transitions.iter().map(move |t| (w, t.clone()))).collect()),
         };
         Model::settled(given, kept)
     }
@@ -582,6 +588,7 @@ impl Model {
             driven: self.driven.clone(),
             labels: self.labels.clone(),
             names: self.names.clone(),
+            outside: self.outside.clone(),
         };
         Model::settled(given, kept)
     }
@@ -594,7 +601,7 @@ impl Model {
             _ => vec![u.clone()],
         }).collect();
         let kept = &kept[..];
-        let Given { light, axes, waves, beam_wave, hbar_over_mass, energies, base, emission, decay, tones, driven, labels, names } = given;
+        let Given { light, axes, waves, beam_wave, hbar_over_mass, energies, base, emission, decay, tones, driven, labels, names, outside } = given;
         let mut levels: Vec<Vec<Level>> = (0..2 * tones.len()).map(|_| vec![Level::Bare; far::EXCITED * GROUND]).collect();
         for unit in kept {
             let (component, excited, ground, level) = match *unit {
@@ -647,6 +654,7 @@ impl Model {
             names,
             smooth: Mutex::new(vec![]),
             series: elim::Series { centre: vec![], ratio: 0.0, order: 0 },
+            outside,
         };
         model.ranked = model.ranked_made();
         model.beats = model.beats_made();

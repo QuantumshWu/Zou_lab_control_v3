@@ -54,7 +54,8 @@ interface MasterDrive {omega:number;cos:MasterMatrix;sin:MasterMatrix;laserIds:s
  *   of a 32-state manifold to a level outside the model (`name`, e.g. 5P3/2→5D5/2) the error of that
  *   second-order term, (coupling/detuning)², as a form in the same field and coordinates
  *   (1/(V/m)²): `mixing`, nine arrays of one number per model state, each state's population in the
- *   level (the diagonal of the form's matrix in the model basis).
+ *   level (the diagonal of the form's matrix in the model basis); and `shift`, the term itself
+ *   (rad/us/(V/m)², the diagonal of its own part of the outside form), the shift that error is of.
  * - `emission`: the lowering dipole operator's Cartesian components (1/sqrt(us)) on the motion
  *   frame's axes: Σ_a D[C_a] is the model's spontaneous emission, and the photon of C_a has the
  *   angular pattern of a dipole along a, so its recoil follows from that pattern.
@@ -69,7 +70,7 @@ export interface MotionModelBeam {
   outsideShift:MasterMatrix;electricField:[ComplexAmplitude,ComplexAmplitude,ComplexAmplitude];
 }
 export interface MotionOutsideForm {frequencyIndex:number[];matrices:MasterMatrix[];transitions:MotionOutsideTransition[]}
-export interface MotionOutsideTransition {name:string;mixing:number[][]}
+export interface MotionOutsideTransition {name:string;mixing:number[][];shift:number[][]}
 const N=32,TAU=2*Math.PI,HBAR=1.0545718176461565e-34,H_PLANCK=6.62607015e-34,EPS=8.8541878128e-12,C=299792458,zeros=()=>Array(N*N).fill(0),matrix=():MasterMatrix=>({real:zeros(),imag:zeros()});
 /** h * 1 MHz / k_B, in kelvin. */
 const MHZ_KELVIN=6.62607015e-34*1e6/1.380649e-23;
@@ -146,6 +147,8 @@ function transformOperator(a:MasterMatrix,u:MasterMatrix):MasterMatrix {
  for(let i=0;i<N;i++)for(let k=0;k<N;k++){const ar=a.real[i*N+k]!,ai=a.imag[i*N+k]!;if(ar===0&&ai===0)continue;for(let j=0;j<N;j++){const br=u.real[k*N+j]!,bi=u.imag[k*N+j]!;tmp.real[i*N+j]+=ar*br-ai*bi;tmp.imag[i*N+j]+=ar*bi+ai*br;}}
  for(let i=0;i<N;i++)for(let k=0;k<N;k++){const ar=u.real[k*N+i]!,ai=-u.imag[k*N+i]!;if(ar===0&&ai===0)continue;for(let j=0;j<N;j++){const br=tmp.real[k*N+j]!,bi=tmp.imag[k*N+j]!;out.real[i*N+j]+=ar*br-ai*bi;out.imag[i*N+j]+=ar*bi+ai*br;}}return out;
 }
+/** The diagonal of U† A U times `factor` (a Hermitian A: real). */
+const diagonalIn=(a:MasterMatrix,u:MasterMatrix,factor:number):number[]=>{const x=transformOperator(a,u);return Array.from({length:N},(_,k)=>factor*x.real[k*N+k]!);};
 const fieldAmplitude=(l:Laser)=>Math.sqrt(2*laserIntensityMWcm2(l)*10/(EPS*C));
 /** Largest Rabi/(|detuning| + linewidth) over a laser's allowed D-line
  * couplings. The optical reference is the laser with the largest value: the
@@ -289,7 +292,7 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
    ...(laser.intensityMode==='intensity'?{}:{waistUm:laserWaistUm(laser)}),intensityMWcm2:laserIntensityMWcm2(laser),frequencyIndex:beat,coupling:A,counterCoupling:R,
    outsideShift:scaled(transformOperator(laserModelCorrection(scene,laser),u),TAU),electricField:field};}),
   outsideForms:couplings.filter((c,i)=>couplings.findIndex(x=>x.beat.join()===c.beat.join())===i).map(({laser,beat})=>{const form=outsideFieldForm(a,laser);return {frequencyIndex:beat,matrices:form.matrices.map(m=>scaled(transformOperator(m,u),TAU)),
-   transitions:form.transitions.map(t=>({name:t.name,mixing:t.matrices.map(m=>{const x=transformOperator(m,u);return Array.from({length:N},(_,k)=>x.real[k*N+k]!);})}))};}),
+   transitions:form.transitions.map(t=>({name:t.name,mixing:t.matrices.map(m=>diagonalIn(m,u,1)),shift:t.shift.map(m=>diagonalIn(m,u,TAU))}))};}),
   emission:MOTION_FRAME.map(n=>cartesianEmission(n,composeMagneticField(scene.fields).frame,spherical)) as MotionModel['emission']} satisfies MotionModel}:{}),
  // A motion solve is not the 32-state master equation: what is said of that equation's drives and returned populations is
  // said of the motion's own in motionText.

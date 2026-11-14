@@ -118,7 +118,7 @@ fn a_two_level_atom_s_slow_mode_is_exact_and_its_scattering_rate_is_the_steady_s
             // (`errors`) against the exact rate's error: to the leading order in the fold, its relative O(X), X = s/2.
             let left = fold.left_operators().unwrap();
             let (_, tau) = fold.transient(&left, &[C64::ONE]).unwrap();
-            let booked = errors(&fold, &lv, &[vec![0]], &|_| false, Some(&|_| false), &[C64::ONE], [0.0; 3], 0.0).transient;
+            let booked = errors(&fold, &lv, &[vec![0]], &|_| false, Some(&|_| false), &[C64::ONE], [0.0; 3], 0.0, &[]).transient;
             println!("    the transient {transient:+.5e} µs, closed form {tau:+.5e} µs; the rate's error {error:+.4e}, booked {booked:.4e}");
             assert!((tau - transient).abs() <= 2.0 * s * transient.abs(), "the closed form {tau} against {transient}");
             assert!((booked - error.abs()).abs() <= 2.0 * s * error.abs(), "booked {booked} against the rate's error {error}");
@@ -479,4 +479,111 @@ fn the_run_s_normalized_generator_is_the_fold_s_within_the_series_remainder() {
         assert!(landing_apart.frobenius() <= (q + x_size * q).max(1e-9) * exact.frobenius(), "the landing map");
     }
   }
+}
+
+/// The test requests of the levels outside the model (refs/requests/OUTSIDE_776_*, made by the app from R2_RECOIL's scene,
+/// the rest worktree's ladder.mjs): R2's σ⁺ probe on |2,2⟩ → |3′,3′⟩ and a 776 nm plane wave of 1 kW/cm² along it, σ⁺,
+/// Δ red of |3′,3′⟩ → 5D5/2 (m_J = 5/2, m_I = 3/2). Its coupling there V = ⟨5D5/2‖d‖5P3/2⟩ E₀/(√6 · 2h): 1.76 ea₀ (the
+/// app's table), E₀ = √(2I/ε₀c), the stretched pair's 3j symbol 1/√6 -- 399.0 MHz.
+const LADDER_V_MHZ: f64 = 399.018;
+
+/// A frequency of a request by one of its beams' ids.
+fn frequency_of(request: &crate::request::Request, id: &str) -> usize {
+    let light = crate::field::Light::new(request);
+    light.frequencies.iter().position(|f| f.beams.iter().any(|&l| request.beams[l].id == id)).unwrap()
+}
+
+/// The model of a request with its probe's drives at the atom (`Unit::Bare`) and the units `kept`, and the place among its
+/// outside transitions of the ladder beam's 5P3/2→5D5/2 (none without that beam).
+fn ladder(request: &crate::request::Request, kept: &[crate::model::Unit]) -> (crate::model::Model, Option<usize>) {
+    let light = crate::field::Light::new(request);
+    let bare = crate::model::Model::new(request, &light, &[]).unwrap();
+    let mut units = bare.bare_units(crate::model::Component { frequency: frequency_of(request, "probe"), counter: false });
+    units.extend_from_slice(kept);
+    let model = crate::model::Model::new(request, &light, &units).unwrap();
+    let beam = request.beams.iter().any(|b| b.id == "ladder").then(|| frequency_of(request, "ladder"));
+    let t = beam.and_then(|w| model.outside.iter().position(|(f, t)| *f == w && t.name == "5P3/2→5D5/2"));
+    (model, t)
+}
+
+/// The transitions' mixing as the engine reads it (request.rs `Transition`, `Model::outside_at`) is the app's (V/Δ)² of the
+/// stretched pair, the one sublevel its σ⁺ reaches, and its shift V²/Δ: (399.0/500)² = 0.637 and (399.0/30)² = 176.9 at
+/// |3′,3′⟩ -- the field's coordinates, the units and the forms' polarization identity end to end (the counter-rotating
+/// term, (V/2ν)² ~ 3e-13, and the forms' rounding apart).
+#[test]
+fn the_outside_mixing_is_the_stretched_pair_s_coupling_over_its_detuning() {
+    for (name, delta) in [("OUTSIDE_776_500", 500.0), ("OUTSIDE_776_30", 30.0)] {
+        let request = request(name);
+        let (model, t) = ladder(&request, &[]);
+        let t = t.expect("the ladder's transition");
+        let s = request.states.iter().position(|x| x == "D2-3-3").unwrap();
+        let (m, o) = &model.outside_at(&model.light.amplitudes([0.0; 3]))[t];
+        let (expected, shift) = ((LADDER_V_MHZ / delta).powi(2), LADDER_V_MHZ * LADDER_V_MHZ / delta);
+        let mhz = o[s] / crate::units::RAD_PER_US_PER_MHZ;
+        eprintln!("{name}: m {:.6} against (V/Δ)² {expected:.6}; its shift {mhz:.4} MHz against V²/Δ {shift:.4}", m[s]);
+        assert!((m[s] / expected - 1.0).abs() <= 1e-5, "{name}: m {} against {expected}", m[s]);
+        assert!((mhz.abs() / shift - 1.0).abs() <= 1e-5, "{name}: the shift {mhz} against {shift}");
+        assert!((0..crate::request::GROUND).all(|g| m[g] == 0.0), "{name}: no ground state reaches 5D");
+    }
+}
+
+/// An excited state explicit in the model (the probe's drive |2,2⟩ → |3′,3′⟩ kept) leaks its population into the level:
+/// the state √0.7 |2,2⟩ + √0.3 |3′,3′⟩ books at least 0.3 m(3′,3′) for 5P3/2→5D5/2 -- 0.19 at Δ = 500 MHz, beyond the
+/// model's share --, and far from the level (Δ = 100 GHz, m = 1.6e-5) every transition a thousandth of the share at most.
+#[test]
+fn an_explicit_excited_state_leaks_its_population_into_the_outside_level() {
+    use crate::model::{Component, Point, Sample, Unit};
+    let share = super::share();
+    let (b, e) = (7, 31);
+    for (name, delta) in [("OUTSIDE_776_FAR", 1e5), ("OUTSIDE_776_500", 500.0)] {
+        let request = request(name);
+        let drive = Unit::Drive { component: Component { frequency: frequency_of(&request, "probe"), counter: false }, excited: e, ground: b };
+        let (model, t) = ladder(&request, &[drive]);
+        let t = t.expect("the ladder's transition");
+        let cluster = model.cluster_of(b);
+        let c = &model.clusters()[cluster];
+        assert!(c.states.contains(&e), "{name}: |3′,3′⟩ explicit");
+        let psi: Vec<C64> = c.states.iter().map(|&s| C64::real(if s == b { 0.7_f64.sqrt() } else if s == e { 0.3_f64.sqrt() } else { 0.0 })).collect();
+        let (_, outside) = model.readings(&[], &Sample { cluster, at: Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 }, psi }, None);
+        let leaked = 0.3 * (LADDER_V_MHZ / delta).powi(2);
+        let largest = outside.iter().map(|x| x.population).fold(0.0, f64::max);
+        eprintln!("{name}: booked {:.4e} for {} (0.3 m = {leaked:.4e}; the largest transition {largest:.4e}; the share {share:.4})", outside[t].population, model.outside_label(t));
+        assert!(outside[t].population >= leaked * (1.0 - 1e-5), "{name}: {} below the leak {leaked}", outside[t].population);
+        if delta < 1e3 {
+            assert!(outside[t].population > share);
+        } else {
+            assert!(largest <= 1e-3 * share, "{name}: far, {largest}");
+        }
+    }
+}
+
+/// The eliminated excited states' level error acts through the fold (`outside_errors`; the coordinator's 2026-11-13
+/// example): R2_RECOIL with the 776 nm beam, the atom in |2,2⟩ at the trap's centre and the probe folded at the atom.
+/// The beam moves |3′,3′⟩ by V²/Δ (318 MHz at Δ = 500 MHz, 5.3 GHz at 30) with an error m of that, and the probe's
+/// response feels it across its distance to the line: booked beyond the share at 500 MHz, more at 30 MHz -- where
+/// |3′,3′⟩'s population, the line moved away, is smaller still. Far from the level (100 GHz) and without the beam
+/// (R2_RECOIL itself), every transition's error is a thousandth of the share at most.
+#[test]
+fn a_shifted_excited_level_s_error_is_booked_through_the_fold() {
+    use crate::model::{Point, Sample};
+    let share = super::share();
+    let b = 7;
+    let r2 = format!("{}/refs/scenes/R2_RECOIL.json", env!("CARGO_MANIFEST_DIR"));
+    let mut booked = vec![];
+    for name in [r2.as_str(), "OUTSIDE_776_FAR", "OUTSIDE_776_500", "OUTSIDE_776_30"] {
+        let request = if name.ends_with(".json") { crate::request::Request::from_native(&serde_json::from_str(&std::fs::read_to_string(name).unwrap()).unwrap()).unwrap() } else { request(name) };
+        let (model, t) = ladder(&request, &[]);
+        let p: [f64; crate::request::GROUND] = std::array::from_fn(|s| if s == b { 1.0 } else { 0.0 });
+        let centre = model.trap(&p, &model.prepared()).unwrap().centre;
+        let cluster = model.cluster_of(b);
+        let psi: Vec<C64> = model.clusters()[cluster].states.iter().map(|&s| if s == b { C64::ONE } else { C64::ZERO }).collect();
+        let (_, outside) = model.readings(&[], &Sample { cluster, at: Point { r: centre, kappa: [0.0; 3], t: 0.0 }, psi }, None);
+        let largest = outside.iter().map(|x| x.population).fold(0.0, f64::max);
+        let own = t.map_or(0.0, |t| outside[t].population);
+        eprintln!("{}: 5P3/2→5D5/2 booked {own:.4e}, the largest transition {largest:.4e} (share {share:.4})", name.rsplit('/').next().unwrap());
+        booked.push((own, largest));
+    }
+    assert!(booked[0].1 <= 1e-3 * share && booked[1].1 <= 1e-3 * share, "without the beam, or far from the level: {booked:?}");
+    assert!(booked[2].0 > share, "Δ = 500 MHz: {:?}", booked[2]);
+    assert!(booked[3].0 > booked[2].0, "Δ = 30 MHz books more: {booked:?}");
 }
