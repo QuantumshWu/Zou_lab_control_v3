@@ -63,15 +63,19 @@
 //! A P amplitude whose frequency is λ_p + Δ -- the Doppler shift of a beam, k·v, an explicit beat -- drives
 //! (λ_p + Δ + f − K)⁻¹ W r_p = T r_p − Δ T2 r_p + Δ² R² R(λ + Δ) W r_p, T2 the solution of T2 H − (K − f) T2 = T
 //! (−∂T/∂f). The first two terms are the model's; the third is the remainder whose relative size ρ(Δ) is the first
-//! criterion (`Fold::remainder`).
+//! criterion (`Fold::remainders`).
 //!
 //! The offsets a P amplitude spans (`Fold::spans`; ELIMINATION v8): the pattern a moving atom sees, ±2 k_max v (the
 //! beams' Doppler shifts, at most k_max v, and their pattern's turn, |k_l − k_l'| v ≤ 2 k_max v), with the amplitude
 //! whole; and every component into its eigenstate (# The criteria's numbers: a turning direct entry, or two replicas'
 //! coupling) at its combined frequency δ = Ω + λ_p − λ_q -- the same in every gauge, of the actual spectrum -- as a
-//! sideband of the first-order amplitude a/|δ|, its share of the population min(1, a/|δ|)². Criterion one reads each
-//! offset's remainder at its share and the largest of them (`closure`), the error at a state their sum over the state's
-//! eigenstates at their populations (`errors`). A loop's weak closing edge whose frame beat is B is a sideband of
+//! sideband of the first-order amplitude a/|δ|, its share of the population min(1, a/|δ|)². The share is that
+//! frequency's spectral weight in the state: an entry a e^{−iΩt} from q′ into q drives, to the first order,
+//! x_q ⊃ (a/δ) x_q′ e^{−i(λ_q′ + Ω)t}, a component of the amplitude at λ_q + δ whose part of the norm is (a/|δ|)² of
+//! the source's -- the part of the response the fold reads at the shifted frequency, and so the part of its remainder
+//! there that is the state's (a rate's relative error ρ on a population share w is w ρ); at |δ| ≤ a the mixing is whole
+//! and the share one. Criterion one reads each offset's remainder at its share and the largest of them (`closure`), the
+//! error at a state their sum over the state's eigenstates at their populations (`errors`). A loop's weak closing edge whose frame beat is B is a sideband of
 //! a/B on its eigenstates: its remainder is that share's. (The frames' residual -- Karp's least largest, a bound of every
 //! residual whatever its size -- was read before, the whole amplitude at it: it depended on the frames, and the frames
 //! now hold the strongest couplings static, cluster.rs `frames`, the weakest turning at a loop's whole miss.)
@@ -719,32 +723,39 @@ impl Fold {
         [(pattern, 1.0), (-pattern, 1.0)].into_iter().chain(components.iter().filter(move |x| x.row == p && x.size > 0.0).map(|x| (x.distance.re, x.mixing().min(1.0).powi(2))))
     }
 
-    /// The remainder of the first-order expansion of eigenstate p's response across a shift Δ of its frequency
-    /// (module documentation, # First order): ρ_p(Δ), and per replica and excited state (E's index) its part of the
-    /// remainder's square over the response's square -- the parts sum to ρ_p².
-    pub(crate) fn remainder(&self, p: usize, shift: f64, excited: usize) -> (f64, Vec<Vec<f64>>) {
+    /// The remainders of the first-order expansion of eigenstate p's response across shifts Δ of its frequency
+    /// (module documentation, # First order), one for each of `shifts`: ρ_p(Δ), and per replica and excited state (E's
+    /// index) its part of the remainder's square over the response's square -- the parts sum to ρ_p². The response
+    /// and its first order are made once for all the shifts, a shifted resolvent for each.
+    pub(crate) fn remainders(&self, p: usize, shifts: &[f64], excited: usize) -> Vec<(f64, Vec<Vec<f64>>)> {
         let r = self.right(p);
         let lambda = self.eigen.values[p];
-        let mut parts = vec![vec![0.0; excited]; self.replicas.len()];
-        let (mut num, mut den) = (0.0, 0.0);
+        let mut out: Vec<(f64, Vec<Vec<f64>>)> = shifts.iter().map(|_| (0.0, vec![vec![0.0; excited]; self.replicas.len()])).collect();
+        let mut den = 0.0;
         for (j, rep) in self.replicas.iter().enumerate().filter(|(_, rep)| rep.group == self.groups[p]) {
             let wr = rep.w.apply(&r);
             let sigma = lambda + C64::real(rep.frequency);
             let x0 = rep.k.resolvent(sigma, &wr);
-            let shifted = rep.k.resolvent(sigma + C64::real(shift), &wr);
             let second = rep.k.resolvent(sigma, &x0);
-            for (i, &e) in rep.q.iter().enumerate() {
-                let d = shifted[i] - x0[i] + second[i] * shift;
-                parts[j][e] += d.norm_sqr();
-                num += d.norm_sqr();
-                den += x0[i].norm_sqr();
+            den += x0.iter().map(|z| z.norm_sqr()).sum::<f64>();
+            for (&shift, (num, parts)) in shifts.iter().zip(out.iter_mut()) {
+                let shifted = rep.k.resolvent(sigma + C64::real(shift), &wr);
+                for (i, &e) in rep.q.iter().enumerate() {
+                    let d = (shifted[i] - x0[i] + second[i] * shift).norm_sqr();
+                    parts[j][e] += d;
+                    *num += d;
+                }
             }
         }
-        if den == 0.0 {
-            return (0.0, vec![vec![0.0; excited]; self.replicas.len()]);
+        for (num, parts) in out.iter_mut() {
+            if den == 0.0 {
+                (*num, *parts) = (0.0, vec![vec![0.0; excited]; self.replicas.len()]);
+            } else {
+                parts.iter_mut().flatten().for_each(|x| *x /= den);
+                *num = (*num / den).sqrt();
+            }
         }
-        parts.iter_mut().flatten().for_each(|x| *x /= den);
-        ((num / den).sqrt(), parts)
+        out
     }
 
     /// Replica j's response to a P state of the eigen-coefficients `coefficients` (each eigenstate at its own eigenvalue,
@@ -2117,19 +2128,21 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
             }
             moves.extend(largest.map(|(b, j, c, p, _)| (b, j, c, p)));
         } else {
-            // Each offset the eigenstate spans at its share (`Fold::spans`), its parts with it.
+            // Each offset the eigenstate spans at its share (`Fold::spans`), the largest; the blocks' parts at that one.
             for &p in &ground_like {
-                let mut worst = (0.0, vec![]);
-                for (shift, share) in Fold::spans(p, pattern, &components) {
-                    let (rho, mut parts) = parts_of(p, Some(shift));
-                    if share * rho >= worst.0 {
-                        parts.iter_mut().for_each(|x| x.3 *= share * share);
-                        worst = (share * rho, parts);
+                let spans: Vec<(f64, f64)> = Fold::spans(p, pattern, &components).collect();
+                let shifts: Vec<f64> = spans.iter().map(|s| s.0).collect();
+                let (mut worst, mut at) = (0.0, None);
+                for ((rho, _), &(shift, weight)) in fold.remainders(p, &shifts, levels.excited.rows).iter().zip(&spans) {
+                    if weight * rho >= worst {
+                        (worst, at) = (weight * rho, Some((shift, weight)));
                     }
                 }
-                remainder = remainder.max(worst.0);
-                if worst.0 > share {
-                    pick(p, worst.1, worst.0 * worst.0, share * share, &mut moves);
+                remainder = remainder.max(worst);
+                if let Some((shift, weight)) = at.filter(|_| worst > share) {
+                    let (_, mut parts) = parts_of(p, Some(shift));
+                    parts.iter_mut().for_each(|x| x.3 *= weight * weight);
+                    pick(p, parts, worst * worst, share * share, &mut moves);
                 }
             }
         }
@@ -2331,30 +2344,30 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
     let components = fold.components(velocity);
     let mut remainder = 0.0;
     for p in 0..n {
+        let sidebands: Vec<&Component> = components.iter().filter(|x| x.row == p && x.size > 0.0 && weight[x.column] > 0.0).collect();
+        if weight[p] == 0.0 && sidebands.is_empty() {
+            continue;
+        }
+        let shifts: Vec<f64> = [pattern, -pattern].into_iter().chain(sidebands.iter().map(|x| x.distance.re)).collect();
+        let mut found = fold.remainders(p, &shifts, excited).into_iter();
         let mut read: Vec<(f64, f64, Vec<Vec<f64>>)> = vec![];
+        let (plus, minus) = (found.next().expect("the pattern's"), found.next().expect("the pattern's"));
         if weight[p] > 0.0 {
-            let (mut rho, mut each) = (0.0, vec![]);
-            for shift in [pattern, -pattern] {
-                let (r, e) = fold.remainder(p, shift, excited);
-                if r >= rho {
-                    (rho, each) = (r, e);
-                }
-            }
+            let (rho, each) = if minus.0 > plus.0 { minus } else { plus };
             read.push((weight[p], rho, each));
         }
-        for x in components.iter().filter(|x| x.row == p && x.size > 0.0 && weight[x.column] > 0.0) {
-            let (rho, each) = fold.remainder(p, x.distance.re, excited);
+        for (x, (rho, each)) in sidebands.iter().zip(found) {
             read.push((weight[x.column] * x.mixing().min(1.0).powi(2), rho, each));
         }
         let unit: Vec<C64> = (0..n).map(|q| if q == p { C64::ONE } else { C64::ZERO }).collect();
+        let mut responses: Vec<Option<Vec<(Option<usize>, Vec<C64>)>>> = vec![None; fold.replicas.len()];
         for (population, rho, each) in read.into_iter().filter(|r| r.1 > 0.0) {
             remainder += population * 2.0 * rho;
             for (j, row) in each.iter().enumerate() {
-                let mut responses = None;
                 for (b, block) in blocks.iter().enumerate() {
                     let x: f64 = block.iter().map(|&e| row[e]).sum();
                     if x > 0.0 {
-                        let responses = responses.get_or_insert_with(|| fold.feed_responses(j, &unit));
+                        let responses = responses[j].get_or_insert_with(|| fold.feed_responses(j, &unit));
                         for (class, share) in class_shares(responses, &fold.replicas[j].q, block) {
                             add(Object::Block(b, class), population * 2.0 * rho * x * share / (rho * rho), &mut parts);
                         }

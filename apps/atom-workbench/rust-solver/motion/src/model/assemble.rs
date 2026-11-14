@@ -144,7 +144,13 @@
 //! σ = Σ_k w_k e^{iνs_k} ρ_k, the part of Σ_k w_k Re tr(Ĝ(s_k) ρ_k) its pieces make -- the first's on σ, its partner's on
 //! σ† --, by the form's own weights (`Term::weight`), so that the pair's part of the step's impulse is integrated at its
 //! beat as its part of the state is. The normalized generator's part (# The normalized generator) is in no group: its
-//! beats are its forms' products, a part X of the beats' own size, taken with the static group.
+//! beats are its forms' products, a part X of the beats' own size, taken with the static group. It is a correction of
+//! the second order: the forms are the fold's responses and their metric, of the order (g/Δ)² against the generator
+//! (g a coupling, Δ its detuning from the folded state), and the series' terms beyond the leading one products of them.
+//! What taking its beats through the three nodes leaves -- of a tone the hops' second Magnus term goes as the square of
+//! the tone's amplitude (spectral.rs, # Which beats are tones), its alias beyond νh = π its own size -- is therefore
+//! (g/Δ)² of what the same beat leaves in the leading part, a small share of the step's error, which the check reads;
+//! splitting it into groups would cost the series' products per group at every node for that share.
 //!
 //! # Work
 //! The complex multiply-adds are counted where they are made (`Middle::work`, `Plan::node`): at a point the near forms (the

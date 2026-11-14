@@ -48,6 +48,18 @@
 //! fast beat --; where the two are equal they swap, so nothing jumps there (as with the split, # The split). The
 //! static group's change is also read through the nodes, which alias a beat beyond νh = π: a tone has no such edge.
 //!
+//! A tone is its Hermitian part, P = (G⁺ + G⁻†)/2 and P†; the decay's beats stay in the static group (`Picture::separate`).
+//! The hop's exponent is the first Magnus term −i∫D̃ (# The state at any time of the step), and it keeps the flow's
+//! dissipative structure only where its anti-Hermitian part is a decay: of D = H − (i/2)Γ it is −(1/2)∫Γ̃, negative
+//! semidefinite where Γ̃ is at the times it is integrated over. A beating decay's part alone,
+//! −(i/2)(e^{iνu}Γ_ν + e^{−iνu}Γ_ν†), is no decay: Γ_ν is not positive -- the interference term of two plane waves'
+//! scattering --, its sign turns with its beat, and its integral over a hop is of either sign, so that as a tone it
+//! raises m's norm by up to e^{|Γ_ν| w} over a hop of the width w, where only its sum with the static decay is positive
+//! (measured: a random Lindblad's step, the survival test's case 68, overflowed). With the static group it is that sum,
+//! as the nodes give it; the static group's parabola of it is the step's decay (step.rs, # Jumps), whose negative part
+//! between the nodes is what the survival may rise by (step/tests.rs `negative_decay`), and its alias beyond νh = π the
+//! decay rate's error, the check's to read, as before the tones. A Hermitian tone's hops are unitary.
+//!
 //! # The state at any time of the step
 //! With Ĥ₀ = c + RΛR⁻¹ (its scalar part c apart, `linalg::Eigen`) and x = R d, i ḋ = (Λ + Dᵉ(u)) d, Dᵉ = R⁻¹DR, each
 //! class's envelopes taken to the eigenbasis (two products of n³ each). What D does to an entry of a class depends on how

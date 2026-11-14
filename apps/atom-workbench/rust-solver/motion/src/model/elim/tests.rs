@@ -367,7 +367,12 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
             let mut components: Vec<(usize, usize, (Option<usize>, Option<usize>), f64)> = fold.components(v).iter().filter(|x| x.mixing() > 1e-6).map(|x| (label(x.row), label(x.column), x.classes, x.mixing())).collect();
             components.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)).then(a.3.total_cmp(&b.3)));
             let all = fold.components(v);
-            let mut rho: Vec<f64> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).map(|p| Fold::spans(p, pattern, &all).map(|(shift, share)| share * fold.remainder(p, shift, lv.excited.rows).0).fold(0.0, f64::max)).collect();
+            let mut rho: Vec<f64> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).map(|p| {
+                    let spans: Vec<(f64, f64)> = Fold::spans(p, pattern, &all).collect();
+                    let shifts: Vec<f64> = spans.iter().map(|s| s.0).collect();
+                    fold.remainders(p, &shifts, lv.excited.rows).iter().zip(&spans).map(|((rho, _), (_, share))| share * rho).fold(0.0, f64::max)
+                })
+                .collect();
             rho.sort_by(f64::total_cmp);
             let psi: Vec<C64> = (0..fold.size()).map(|s| if s < ground { C64::real(1.0) } else { C64::ZERO }).collect();
             let errors = errors(&fold, &lv, &blocks, &|_| false, &psi, v, pattern, &[]);
