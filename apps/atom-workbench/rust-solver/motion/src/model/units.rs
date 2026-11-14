@@ -1,7 +1,7 @@
 //! What a model's clusters and terms are made of beside the elimination (elim.rs): its beats and its frequencies'
 //! constant forms (far.rs `constant`), the kept couplings' edges (cluster.rs), whether a coupling is in a generator as it
-//! is; and the one gate's statement (`gate`: S = 2m², m = size/distance, below ½) that `Model::new` still reads, of the
-//! Raman pairs onto an explicit state (`Model::joined`) and of the model's domain.
+//! is; and the one gate's statement (`gate`: S = 2m², m = size/distance, below ½) that `Model::new` still reads of the
+//! model's domain.
 //!
 //! # The model's domain
 //! A counter-rotating drive is only ever folded with the bare levels: one kept is refused, and so is a request whose
@@ -10,7 +10,7 @@
 
 use super::cluster::Edge;
 use super::own::Own;
-use super::{Beat, Component, Gate, Level, Model, Unit, Wave};
+use super::{Beat, Component, Gate, Model, Unit, Wave};
 use crate::linalg::{Mat, C64};
 use crate::request::GROUND;
 use std::collections::HashMap;
@@ -186,31 +186,6 @@ impl Model {
             }
         }
         out
-    }
-
-    /// The drives folded onto explicit excited states whose Raman pairs cannot be folded anywhere (model.rs
-    /// `Model::settled`): of each co-rotating drive e ← w folded (with the bare levels or at the atom) onto an explicit
-    /// state e, the one gate (`gate`) of its pairs with e's kept drives e ← a, every beam at its peak (the sum of its beams'
-    /// moduli, as `share_anywhere`), at the bare one-photon distances -- the two-photon coupling |U| |V_a| over the nearer
-    /// of the two --, across the two-photon distance its fold reads, |read_e − E_w − ν| (far.rs `second_order`: e read at
-    /// its cluster's ground energy, `read`), the pairs' saturations summed (`pair_gate`); those at ½ or above, kept as
-    /// drives (explicit). Where the two-photon distance is nothing the gate is infinite.
-    pub(crate) fn joined(&self, read: &[f64]) -> Vec<Unit> {
-        let peak = |c: Component, e: usize, g: usize| -> f64 { self.tones[c.frequency].couplings[c.counter as usize].iter().map(|x| x[(e, g)].abs()).sum() };
-        let explicit = |e: usize| self.clusters.iter().any(|c| c.states[c.ground..].contains(&e));
-        let kept: Vec<(Component, usize, usize)> = self.driven.iter().copied().filter(|&(c, e, g)| c.keepable() && self.level(c, e, g) == Level::Explicit).collect();
-        self.driven
-            .iter()
-            .copied()
-            .filter(|&(c, e, w)| c.keepable() && self.level(c, e, w) != Level::Explicit && explicit(e))
-            .filter(|&(c, e, w)| {
-                let apart = (read[e - GROUND] - self.energies[w] - self.tones[c.frequency].nu[0]).abs();
-                let (u, d_u) = (peak(c, e, w), self.bare_distance(c, e, w));
-                let saturation: f64 = kept.iter().filter(|leg| leg.1 == e).map(|&(ca, _, a)| gate(u * peak(ca, e, a) / d_u.min(self.bare_distance(ca, e, a)), apart, 0.0).saturation).sum();
-                !(saturation < EXISTS)
-            })
-            .map(|(component, excited, ground)| Unit::Drive { component, excited, ground })
-            .collect()
     }
 
     /// The exact wave vector of a beam pair's term, absorbing `absorbed` and emitting `emitted`: k_absorbed − k_emitted.

@@ -134,9 +134,8 @@ pub struct Component { pub frequency: usize, pub counter: bool }
 
 impl Component {
     /// Whether the model can take a drive of this component more exactly than its fold with the bare levels (units.rs,
-    /// # Levels, # The model's domain): a co-rotating one, at the atom or explicit. A counter-rotating one is only ever
-    /// folded with the bare levels -- a keep of it is refused (`Model::new`), and a Raman pair's join takes none (units.rs
-    /// `Model::joined`).
+    /// # The model's domain): a co-rotating one, at the atom or explicit. A counter-rotating one is only ever folded with
+    /// the bare levels -- a keep of it is refused (`Model::new`).
     pub fn keepable(&self) -> bool {
         !self.counter
     }
@@ -655,17 +654,23 @@ impl Model {
             }
         }
         // Each frequency's drives folded at their levels (far.rs `Tone::folded`); the carriers, the components with a drive not
-        // bare. A drive folded onto an explicit state is a Raman pair with each of that state's kept legs, read at the
-        // state's energy among its cluster's ground states (`read`; far.rs, # A fold onto an explicit state): where the one
-        // gate of its pairs does not hold with every beam at its peak (units.rs `Model::joined`), the pair is a resonant
-        // coherent coupling of its two ground states -- Zeeman sublevels at B = 0 lie at one energy, its fold's two-photon
-        // distance nothing (far.rs `second_order` divided by it) --, and its drive joins its ground state to the cluster as
-        // a kept drive does.
+        // bare. A drive folded with the bare levels onto an explicit state is read at the state's energy among its cluster's
+        // ground states (`read`; far.rs, # A fold onto an explicit state): a direct coupling of two P states, its bare
+        // fold's distance the two-photon one of the pair it makes with the state's kept drives. Where that distance is
+        // exactly nothing -- Zeeman sublevels at B = 0 lie at one energy -- the coupling is a P-layer link at δ = 0, which
+        // criterion two keeps whatever its size (ELIMINATION §4: its mixing a/δ has no bound; the fold, far.rs
+        // `second_order`, has no value there): the drive is explicit, its ground state joins the state's cluster. Every
+        // other distance is criterion two's, read on the actual spectrum at the states the run reads (elim.rs `errors`).
         let levels = model.levels.clone();
         let read = model.read_made();
-        let joined = model.joined(&read);
-        if !joined.is_empty() {
-            return model.rekept(&[kept, &joined[..]].concat());
+        let resonant: Vec<Unit> = model
+            .driven
+            .iter()
+            .filter(|&&(c, e, w)| !c.counter && model.level(c, e, w) == Level::Bare && model.explicit(e) && read[e - GROUND] - model.energies[w] - model.tones[c.frequency].nu[0] == 0.0)
+            .map(|&(component, excited, ground)| Unit::Drive { component, excited, ground })
+            .collect();
+        if !resonant.is_empty() {
+            return model.rekept(&[kept, &resonant[..]].concat());
         }
         model.tones = model.tones.iter().enumerate().map(|(frequency, tone)| tone.folded(&|side, e, g| levels[2 * frequency + side][(e - GROUND) * GROUND + g], &read)).collect();
         model.carriers = eliminate::Carrier::all(&model);

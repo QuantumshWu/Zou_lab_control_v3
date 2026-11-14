@@ -892,3 +892,27 @@ impl Fold {
         self.series_norm(z0) / self.series_distance(z0)
     }
 }
+
+/// A drive folded with the bare levels onto an explicit state at a two-photon distance of exactly nothing is criterion
+/// two's link at δ = 0, explicit (model.rs `Model::settled`; ELIMINATION §4): R4_LIN_1 at B = 0, its lin⊥lin light
+/// driving an excited sublevel from two degenerate ground sublevels -- one drive kept, the other's Raman pair with it is
+/// at one energy. The model is made (the bare fold, far.rs `second_order`, is never read at its pole), the other ground
+/// state joins the kept drive's cluster and its drive is explicit, for every such pair the light makes.
+#[test]
+fn a_drive_onto_an_explicit_state_at_no_two_photon_distance_is_explicit() {
+    use crate::request::GROUND;
+    let path = format!("{}/refs/scenes/R4_LIN_1.json", env!("CARGO_MANIFEST_DIR"));
+    let request = crate::request::Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+    let light = crate::field::Light::new(&request);
+    let bare = super::super::Model::new(&request, &light, &[]).unwrap();
+    let mut pairs = 0;
+    for &(c, e, a) in bare.driven.iter().filter(|d| !d.0.counter) {
+        for &(_, _, w) in bare.driven.iter().filter(|d| d.0 == c && d.1 == e && d.2 > a && d.2 < GROUND && bare.energies[d.2] == bare.energies[a]) {
+            let kept = super::super::Model::new(&request, &light, &[super::super::Unit::Drive { component: c, excited: e, ground: a }]).unwrap();
+            assert_eq!(kept.cluster_of(w), kept.cluster_of(a), "{} → {}: the degenerate ground state {w} joins the kept drive's cluster", a, e);
+            assert_eq!(kept.level(c, e, w), super::super::Level::Explicit, "{} → {}: the drive from {w} is explicit", a, e);
+            pairs += 1;
+        }
+    }
+    assert!(pairs > 0, "R4_LIN_1 drives an excited sublevel from two degenerate ground sublevels");
+}
