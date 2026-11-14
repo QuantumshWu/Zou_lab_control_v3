@@ -2530,6 +2530,8 @@ impl Plan {
 #[derive(Clone, Copy, Debug, Default)]
 struct Counts {
     steps: u64,
+    /// The trajectories ended by their steps (`Fate::Refused`), by a jump that gives no photon, by the optical sector.
+    refused: Stopped,
     failed: Stopped,
     unmade: [Stopped; 3],
     runaway: Stopped,
@@ -2539,6 +2541,7 @@ struct Counts {
 impl Counts {
     fn add(&mut self, o: &Counts) {
         self.steps += o.steps;
+        self.refused.add(&o.refused);
         self.failed.add(&o.failed);
         for (stopped, other) in self.unmade.iter_mut().zip(&o.unmade) {
             stopped.add(other);
@@ -2801,7 +2804,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     // advance it, and whether it stopped where a state scattered beyond every state of the atom.
     let mut reached = [1, 1];
     let mut unmade = None;
-    let (failed, runaway) = {
+    let (failed, runaway, refused) = {
         let mut read = |i: usize, t: &Trajectory| {
             record(at[i].1, t);
             for (reached, place) in reached.iter_mut().zip(at[i].1) {
@@ -2831,14 +2834,16 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
             let stop = ((t.time / every).floor() + 1.) * every;
             advanced = adapt::advance(model, domain, tau, &mut t, &mut scratch, &mut path, plan.end, stop, &times, &mut read, &mut each);
         }
+        // Of what ends a trajectory with no outcome, its step's own failures (`Fate::Refused`) apart from the model's.
         match advanced {
-            Ok(()) => (false, false),
-            Err(Refused::Runaway) => (false, true),
+            Ok(()) => (false, false, false),
+            Err(Refused::Runaway) => (false, true, false),
             Err(Refused::Optical(why)) => {
                 unmade = Some(why);
-                (true, false)
+                (true, false, false)
             }
-            Err(_) => (true, false),
+            Err(Refused::Overflow | Refused::Reference) => (true, false, true),
+            Err(Refused::Emission) => (true, false, false),
         }
     };
     // A runaway stops where it stood: unresolved, held so at every time it did not reach.
@@ -2857,7 +2862,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     let mut lost = None;
     let mut windows = windows.into_inner();
     for ((w, &reached), &size) in windows.iter_mut().zip(&reached).zip(&sizes) {
-        w.fates[reached.min(size)..].fill(if failed { Fate::Failed } else { Fate::Lost });
+        w.fates[reached.min(size)..].fill(if refused { Fate::Refused } else if failed { Fate::Failed } else { Fate::Lost });
     }
     if reached[1] < sizes[1] && keep && !failed {
         lost = Some((reached[1], State::of(&t, tau)));
@@ -2867,7 +2872,8 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     let optical = [t.booked[0], t.booked[1], t.booked[2], -(t.pending[0][0] + t.pending[1][1] + t.pending[2][2])];
     let counts = Counts {
         steps,
-        failed: stopped(failed && unmade.is_none()),
+        refused: stopped(refused),
+        failed: stopped(failed && !refused && unmade.is_none()),
         unmade: [Unmade::Schur, Unmade::Singular, Unmade::Unfinite].map(|why| stopped(unmade == Some(why))),
         runaway: stopped(runaway),
         optical,
@@ -4378,7 +4384,8 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     // counted).
     let unmade = "在某一步上，光学扇区的噪声算子 K 做不出";
     for (stopped, why) in [
-        (&counts.failed, "的状态在数值上无法再推进".to_string()),
+        (&counts.refused, "的一步在所取步长下算出的数不是有限数（状态或参考流），在时间的舍入以内减半步长也推进不了".to_string()),
+        (&counts.failed, "的跳跃给不出光子（模型在该状态上失败，缩短步长无济于事）".to_string()),
         (&counts.unmade[0], format!("{unmade}（激发态块或基态块的 Schur 形式不收敛；这不应发生，是引擎的缺陷）")),
         (&counts.unmade[1], format!("{unmade}（ℳ 奇异：按构造 Q 扇区以约 Γ/2 或更快弛豫，ℳ 应当可逆；这不应发生，是引擎的缺陷）")),
         (&counts.unmade[2], format!("{unmade}（算出的数不是有限数；这不应发生，是引擎的缺陷）")),
@@ -5142,12 +5149,12 @@ mod tests {
             method: String::new(),
         };
         let unmade = [Stopped::default(), Stopped { count: 2, since: Some(14.) }, Stopped::default()];
-        let counts = Counts { steps: 0, failed: Stopped { count: 3, since: Some(12.5) }, unmade, runaway: Stopped { count: 5, since: Some(15.) }, optical: [0.0; 4] };
+        let counts = Counts { steps: 0, refused: Stopped { count: 4, since: Some(11.) }, failed: Stopped { count: 3, since: Some(12.5) }, unmade, runaway: Stopped { count: 5, since: Some(15.) }, optical: [0.0; 4] };
         let s = assemble(&context, &estimates, &estimates, &listed, &counts, 8);
         assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| x.is_finite()), "{s:?}");
         assert!(s.loss_probability[3] == s.loss_probability[2] && s.populations[3] == s.populations[2] && s.estimated_errors[3] >= 1., "{s:?}");
         let flagged = s.approximations.flagged.expect("flagged");
-        for said in ["3 条轨迹的状态在数值上无法再推进（最早在 12.5 μs）：此后它们不计入估计", "2 条轨迹在某一步上，光学扇区的噪声算子 K 做不出（ℳ 奇异", "5 条轨迹的散射率超过了原子任何状态可能的上限（某个绝热消去远离它的适用范围，最早在 15 μs）：它们在那里停下", "20 μs：有轨迹不计入估计，温度的误差无法估计", "30 μs 起：没有一条轨迹计入估计"] {
+        for said in ["4 条轨迹的一步在所取步长下算出的数不是有限数（状态或参考流），在时间的舍入以内减半步长也推进不了（最早在 11 μs）：此后它们不计入估计", "3 条轨迹的跳跃给不出光子（模型在该状态上失败，缩短步长无济于事）（最早在 12.5 μs）：此后它们不计入估计", "2 条轨迹在某一步上，光学扇区的噪声算子 K 做不出（ℳ 奇异", "5 条轨迹的散射率超过了原子任何状态可能的上限（某个绝热消去远离它的适用范围，最早在 15 μs）：它们在那里停下", "20 μs：有轨迹不计入估计，温度的误差无法估计", "30 μs 起：没有一条轨迹计入估计"] {
             assert!(flagged.contains(said), "{said} in {flagged}");
         }
         assert!(!flagged.contains("已无原子留在光阱中"), "{flagged}");
