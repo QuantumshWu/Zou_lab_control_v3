@@ -308,7 +308,12 @@ impl Model {
                 format!("落到 {} 所在子空间的两组光子（频率相差 {}）的相干", self.state_label(*landing), self.beat_label(&second.plus(-1, first)).trim_start_matches('−'))
             }
             Unit::Dressing { carrier } => format!("{} 引起的能级移动（进入绝热消去的失谐）：偏振不同的光束之间的干涉取平均", self.component_label(*carrier)),
-            Unit::Block { block } => format!("激发态 {} 所在的超精细能级块：绝热消去", self.blocks().get(*block).and_then(|b| b.first()).map_or(String::new(), |&e| self.state_label(GROUND + e))),
+            Unit::Block { block, component, grounds } => format!(
+                "激发态 {} 所在的超精细能级块（{}，从 {} 所在的子空间）：绝热消去",
+                self.blocks().get(*block).and_then(|b| b.first()).map_or(String::new(), |&e| self.state_label(GROUND + e)),
+                self.component_label(*component),
+                self.state_label(grounds.trailing_zeros() as usize)
+            ),
         }
     }
 

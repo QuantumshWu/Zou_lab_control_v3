@@ -732,7 +732,7 @@ fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, initial: &[(us
 /// own ensemble -- the initial components in their wells, the lowered isothermal at the reach's temperature
 /// `temperature` (µK; ensemble.rs) -- of the pilot's trajectories, `MOST_TRAJECTORIES` on, the run's seed: at the
 /// request's temperature the pilot's own initial atoms. Each its place and its velocity v = (ħ/m)κ.
-fn atoms(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<Vec<(V3, V3)>, String> {
+pub(crate) fn atoms(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<Vec<(V3, V3)>, String> {
     let hm = hbar_over_mass(request.mass_kg);
     let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(model, light, alone(s))).collect::<Result<_, _>>()?;
     let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), temperature, hm)?;
@@ -855,7 +855,7 @@ impl Carried {
 /// The initial components (SPEC §2.5): the ground states the request's initial density holds and their populations
 /// normalized over them -- one at least: a validated request's density is diagonal and on the ground states
 /// (request.rs `Request::validate`).
-fn components(request: &Request) -> Vec<(usize, f64)> {
+pub(crate) fn components(request: &Request) -> Vec<(usize, f64)> {
     let diagonal: Vec<f64> = (0..GROUND).map(|s| request.initial_density[(s, s)].re).collect();
     let total: f64 = diagonal.iter().sum();
     (0..GROUND).filter(|&s| diagonal[s] > 0.).map(|s| (s, diagonal[s] / total)).collect()

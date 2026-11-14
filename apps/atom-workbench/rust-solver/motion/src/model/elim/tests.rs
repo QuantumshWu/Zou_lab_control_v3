@@ -37,7 +37,7 @@ fn folded(levels: &Levels, classes: &[Class], slow: &Slow) -> Fold {
 }
 
 fn at_rest(n: usize) -> Slow {
-    Slow { explicit: vec![], frames: vec![0.0; n] }
+    Slow::single(vec![], vec![0.0; n])
 }
 
 /// The two-level atom's saturation (v3 3). The slow eigenvalue of the static Floquet generator [[0, g*], [g, −ν − iΓ/2]]
@@ -141,7 +141,7 @@ fn a_lambda_system_s_raman_coupling_and_dark_state_are_the_analytic_ones() {
         let d2 = (nu1 - nu2) + two_photon;
         let lv = levels(&[0.0, d2], &[0.0], gamma, &[0]);
         let classes = vec![class(nu1, 2, 1, &[(0, 0, C64::real(g1))]), class(nu2, 2, 1, &[(0, 1, C64::real(g2))])];
-        let slow = Slow { explicit: vec![], frames: vec![0.0, nu1 - nu2] };
+        let slow = Slow::single(vec![], vec![0.0, nu1 - nu2]);
         let fold = folded(&lv, &classes, &slow);
         assert!(fold.exists);
         assert_eq!(fold.replicas.len(), 1, "the two drives feed one replica in these frames");
@@ -223,7 +223,7 @@ fn an_averaged_component_s_shift_and_micromotion_are_the_exact_floquet_ones() {
         let lv = levels(&[0.0, d0], &[0.0], gamma, &[0]);
         let classes = vec![class(nu1, 2, 1, &[(0, 0, C64::real(g1))]), class(nu2, 2, 1, &[(0, 1, C64::real(g2))])];
         let rest = folded(&lv, &classes, &at_rest(2));
-        let exact = folded(&lv, &classes, &Slow { explicit: vec![], frames: vec![0.0, nu1 - nu2] });
+        let exact = folded(&lv, &classes, &Slow::single(vec![], vec![0.0, nu1 - nu2]));
         let pa = (0..2).find(|&p| rest.dominant(p) == 0).unwrap();
         let qa = (0..2).find(|&p| exact.dominant(p) == 0).unwrap();
         let component = rest.components([0.0; 3]).into_iter().filter(|x| x.column == (1 - pa) && x.row == pa).fold(None::<Component>, |m, x| if m.map_or(true, |m| x.size > m.size) { Some(x) } else { m }).unwrap();
@@ -281,7 +281,7 @@ fn a_raman_resonance_across_a_zeeman_splitting_asks_the_step_for_its_detuning_no
     let links: Vec<(usize, usize, f64)> = explicit.iter().map(|x| (rest.dominant(x.row), rest.dominant(x.column), x.beat)).collect();
     let (theta, residual) = frames(2, &links);
     assert_eq!(residual, 0.0, "a chain: static in its frames");
-    let fold = folded(&lv, &classes, &Slow { explicit: vec![], frames: theta.clone() });
+    let fold = folded(&lv, &classes, &Slow::single(vec![], theta.clone()));
     assert_eq!(fold.replicas.len(), 1);
     let h = Mat::from_fn(3, 3, |i, j| match (i, j) {
         (0, 0) => C64::real(-theta[0]),
@@ -303,19 +303,31 @@ fn request(name: &str) -> crate::request::Request {
     crate::request::Request::from_native(&line).expect("a request")
 }
 
-/// The brief's test 5, the tilt's property: the 1D PGC at 3 G with its π probe tilted by θ = 0, 0.1°, 2° (the user's
-/// failure #4 is 2°; refs/requests/PGC1D_TILT_*, made by the app's own request builder). The tilt adds couplings
-/// ∝ sin θ: the remainder ρ and the components' mixings move by O(θ) at most, continuously, and the partition, the
-/// kept links and the frames' residual -- what the step's requirement is made of -- are the same at every θ; the
-/// requirement itself moves only by the probe's wave vector's turn, O(θ²) of |K| v. No count of a coupling that
-/// "exists" or not: a tilt's small couplings are averaged like any other.
+/// The prior's 88 atoms of a request (solve.rs `atoms`: the reach's own ensemble at the request's temperature, the
+/// pilot's initial atoms), on its model with nothing kept.
+fn prior_atoms(req: &crate::request::Request) -> Vec<([f64; 3], [f64; 3])> {
+    let light = crate::field::Light::new(req);
+    let model = super::super::Model::new(req, &light, &[]).expect("the model");
+    crate::solve::atoms(&model, req, &light, &crate::solve::components(req), req.temperature_uk).expect("the prior's atoms")
+}
+
+/// The tilt's property (the brief's test 5, on the prior's own atoms): the 1D PGC at 3 G with its π probe tilted by
+/// θ = 0, 0.1°, 2° (the user's failure #4 is 2°; refs/requests/PGC1D_TILT_*, made by the app's own request builder),
+/// each closure at the 88 atoms the prior reads (`prior_atoms`, the θ = 0 request's). The tilt adds couplings ∝ sin θ:
+/// - the partition (criterion one's blocks) is the same at every atom and θ;
+/// - at 0.1° the kept links are the untilted ones and ρ moves by O(θ): no coupling counts as "existing" or not;
+/// - at 2° the untilted links stay, and what is added are the tilt's components that are near resonance on the actual
+///   spectrum at that atom (the Raman-dressed F = 2 levels: |δ| ≈ 0.4–1.2 rad/µs at a ≈ 0.08–0.3, 2m² up to 0.29 --
+///   physics the rule keeps, measured 2026-11-14); at the five hand-picked points of before, none.
 #[test]
-fn a_tilt_leaves_the_partition_and_the_step_s_requirement_and_moves_the_numbers_continuously() {
+fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_resonant() {
     let names = ["PGC1D_TILT_0", "PGC1D_TILT_01", "PGC1D_TILT_2"];
     let requests: Vec<crate::request::Request> = names.iter().map(|n| request(n)).collect();
-    let speed = 0.17;
-    let points: Vec<([f64; 3], [f64; 3])> = vec![([0.0; 3], [0.0; 3]), ([0.0; 3], [speed, 0.0, 0.0]), ([0.0; 3], [0.0, speed, 0.0]), ([0.0; 3], [0.0, 0.0, speed]), ([0.05, 0.1, 0.0], [0.0, 0.0, -speed])];
-    for (r, v) in points {
+    let points = prior_atoms(&requests[0]);
+    assert_eq!(points.len(), 88);
+    let theta = 0.1_f64.to_radians();
+    let (mut added, mut most) = (0, 0.0_f64);
+    for &(r, v) in &points {
         let closed: Vec<Closed> = requests
             .iter()
             .map(|req| {
@@ -324,29 +336,112 @@ fn a_tilt_leaves_the_partition_and_the_step_s_requirement_and_moves_the_numbers_
                 closure(&lv, &cl, &blocks(req), v, &Kept::default())
             })
             .collect();
-        for (name, c) in names.iter().zip(&closed) {
-            println!(
-                "{name} r {r:?} v {v:?}: blocks {:?}, links {}, photons {}, residual {:.3e}, requirement {:.4} rad/us, rho {:.4e}, averaged mixing {:.4e}, fold iterations {}",
-                c.kept.blocks,
-                c.kept.links.len(),
-                c.kept.photons.len(),
-                c.residual,
-                c.requirement,
-                c.remainder,
-                c.mixing,
-                c.fold.iterations
-            );
-        }
         let base = &closed[0];
         for c in &closed[1..] {
             assert_eq!(c.kept.blocks, base.kept.blocks, "the partition at {r:?} {v:?}");
-            assert_eq!(c.kept.links.len(), base.kept.links.len(), "the kept links at {r:?} {v:?}");
-            assert!((c.residual - base.residual).abs() <= 1e-9 * (1.0 + base.residual), "the frames' residual");
-            assert!((c.requirement - base.requirement).abs() <= 1e-2 * base.requirement.max(1.0), "the step's requirement {} against {}", c.requirement, base.requirement);
+            for l in &base.kept.links {
+                assert!(c.kept.links.contains(l), "the untilted link {l:?} at {r:?} {v:?}");
+            }
         }
-        // Continuity: at 0.1° the numbers are the untilted ones to O(θ).
-        let theta = 0.1_f64.to_radians();
+        assert_eq!(closed[1].kept.links.len(), base.kept.links.len(), "the links at 0.1° at {r:?} {v:?}");
+        assert!((closed[1].residual - base.residual).abs() <= 1e-9 * (1.0 + base.residual), "the frames' residual at 0.1°");
         assert!((closed[1].remainder - base.remainder).abs() <= 10.0 * theta * base.remainder.max(1e-6), "ρ at 0.1°: {} against {}", closed[1].remainder, base.remainder);
+        added += closed[2].kept.links.len() - base.kept.links.len();
+        most = most.max(closed[2].mixing);
+    }
+    println!("2°: {added} links added over the 88 atoms; the largest averaged mixing {most:.3e}");
+    assert!(2.0 * most * most <= super::share(), "an averaged component beyond the share");
+}
+
+/// The frames are a gauge (module documentation, # Groups): at the prior's atoms of the tilted 1D PGC (a few of them),
+/// on the closure's kept set, a constant added to the frames of every state of each group -- random, of the size of the
+/// Zeeman splittings and beyond -- leaves every decision and every error the same: criterion two's components (labels,
+/// classes, mixing), criterion one's remainders, and the error at a state with its parts.
+#[test]
+fn every_decision_and_error_is_the_same_in_every_gauge() {
+    let req = request("PGC1D_TILT_2");
+    let light = crate::field::Light::new(&req);
+    let blocks = blocks(&req);
+    let ground = crate::request::GROUND;
+    let points = prior_atoms(&req);
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut uniform = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    for &(r, v) in points.iter().step_by(11) {
+        let (lv, cl, _) = system(&req, &light, r);
+        let closed = closure(&lv, &cl, &blocks, v, &Kept::default());
+        let (slow, residual) = slow_of(&blocks, &closed.kept, &cl, ground);
+        let fastest = cl.iter().flat_map(|c| c.beams.iter()).map(|b| crate::linalg::norm3(b.wave)).fold(0.0, f64::max);
+        let range = residual + 2.0 * fastest * crate::linalg::norm3(v);
+        let read = |slow: &Slow| {
+            let fold = folded(&lv, &cl, slow);
+            let label = |p: usize| fold.dominant(p);
+            let mut components: Vec<(usize, usize, (Option<usize>, Option<usize>), f64)> = fold.components(v).iter().filter(|x| x.mixing() > 1e-6).map(|x| (label(x.row), label(x.column), x.classes, x.mixing())).collect();
+            components.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)).then(a.3.total_cmp(&b.3)));
+            let mut rho: Vec<f64> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).map(|p| fold.remainder(p, range, lv.excited.rows).0).collect();
+            rho.sort_by(f64::total_cmp);
+            let psi: Vec<C64> = (0..fold.size()).map(|s| if s < ground { C64::real(1.0) } else { C64::ZERO }).collect();
+            let errors = errors(&fold, &lv, &blocks, &|_| false, None, &psi, v, range);
+            (components, rho, errors.population, errors.parts)
+        };
+        let base = read(&slow);
+        for _ in 0..3 {
+            let mut shifted = slow.clone();
+            let shifts: Vec<f64> = (0..shifted.frames.len()).map(|_| 200.0 * (uniform() - 0.5)).collect();
+            for (f, g) in shifted.frames.iter_mut().zip(&slow.groups) {
+                *f += shifts[*g];
+            }
+            let other = read(&shifted);
+            assert_eq!(base.0.len(), other.0.len(), "criterion two's components at {r:?}");
+            for (a, b) in base.0.iter().zip(&other.0) {
+                assert_eq!((a.0, a.1, a.2), (b.0, b.1, b.2), "a component's labels and classes");
+                assert!((a.3 - b.3).abs() <= 1e-8 * a.3.max(1e-3), "a component's mixing {} against {}", a.3, b.3);
+            }
+            for (a, b) in base.1.iter().zip(&other.1) {
+                assert!((a - b).abs() <= 1e-8 * a.max(1e-6), "a remainder {a} against {b}");
+            }
+            assert!((base.2 - other.2).abs() <= 1e-8 * base.2.max(1e-6), "the error {} against {}", base.2, other.2);
+            for (object, x) in &base.3 {
+                let y = other.3.iter().find(|o| o.0 == *object).map_or(0.0, |o| o.1);
+                assert!((x - y).abs() <= 1e-8 * x.max(1e-6), "the part of {object:?}: {x} against {y}");
+            }
+        }
+    }
+}
+
+/// A block of two classes (the coordinator's test): one ground state driven into one excited state by two classes of
+/// different frequencies. The block's part of the error at the ground state goes to the classes by their responses'
+/// shares (`class_shares`); with the two couplings swapped the larger share swaps with them. Kept for the class of the
+/// larger part, the block is explicit at that class's replica: its drive static in the frames (residual zero, A's), the
+/// other class's coupling folded at its own replica, where the explicit state is Q.
+#[test]
+fn a_block_is_kept_for_the_class_of_its_larger_part_and_turns_in_that_class_s_frame() {
+    let (gamma, ground) = (38.1, 1);
+    let lv = levels(&[0.0], &[0.0], gamma, &[0]);
+    let blocks = vec![vec![0]];
+    for strong in [0, 1] {
+        let nus = [-30.0, -400.0];
+        let size = |k: usize| if k == strong { 60.0 } else { 20.0 };
+        let classes: Vec<Class> = (0..2).map(|k| class(nus[k], 1, 1, &[(0, 0, C64::real(size(k)))])).collect();
+        let fold = folded(&lv, &classes, &at_rest(1));
+        let psi = vec![C64::ONE];
+        let found = errors(&fold, &lv, &blocks, &|_| false, None, &psi, [0.0; 3], 5.0);
+        let part = |k: usize| found.parts.iter().find(|o| o.0 == Object::Block(0, Some(k))).map_or(0.0, |o| o.1);
+        // The responses' shares: |g|²/|ν − iΓ/2|² of each class.
+        let response = |k: usize| size(k).powi(2) / (nus[k].powi(2) + 0.25 * gamma * gamma);
+        let (larger, smaller) = if response(0) > response(1) { (0, 1) } else { (1, 0) };
+        assert!(part(larger) > part(smaller), "the class of the larger response holds the larger part: {} against {}", part(larger), part(smaller));
+        // Kept for that class: the drive's link, the frames from it.
+        let kept = Kept { blocks: vec![0], links: vec![Link { a: ground, b: 0, classes: (None, Some(larger)) }], ..Kept::default() };
+        let (slow, residual) = slow_of(&blocks, &kept, &classes, ground);
+        assert_eq!(residual, 0.0, "a chain: static in its frames");
+        assert!(same(classes[larger].nu + slow.frames[0], slow.frames[ground]), "the explicit state turns in its class's frame");
+        let fold = folded(&lv, &classes, &slow);
+        assert!(fold.direct[(1, 0)].abs() > 0.0, "the kept class's drive is the static generator's");
+        let other = fold.replicas.iter().find(|rep| rep.feeds.iter().any(|f| f.class == Some(smaller))).expect("the other class's replica");
+        assert!(other.q.contains(&0), "the explicit state is Q at the other class's replica");
     }
 }
 
@@ -502,4 +597,32 @@ fn the_run_s_normalized_generator_is_the_fold_s_within_the_series_remainder() {
         assert!(landing_apart.frobenius() <= (q + x_size * q).max(1e-9) * exact.frobenius(), "the landing map");
     }
   }
+}
+
+/// A group's replica is solved on its own places (module documentation, # Groups; the coordinator's test): two groups,
+/// ground state g0 holding the excited state e explicit (uncoupled to it, so that its eigenvalue is e's own level
+/// exactly) and ground state g1 driven into e by a class whose replica sits at e's frame -- where e is Q for g1's group,
+/// at the shift that puts g0's group's excited eigenvalue exactly on K's spectrum. The fold is finite, and it is the
+/// two groups' folds made apart: their eigenvalues together and g1's response, to round-off.
+#[test]
+fn a_group_s_replica_is_solved_on_its_own_places_whatever_another_group_holds_on_its_q() {
+    let (gamma, nu, g) = (38.1, -120.0, 30.0);
+    let lv = levels(&[0.0, 5.0], &[0.0], gamma, &[0]);
+    let classes = vec![class(nu, 2, 1, &[(0, 1, C64::real(g))])];
+    let slow = Slow { explicit: vec![0], frames: vec![0.0, 0.0, nu], groups: vec![0, 1, 0] };
+    let whole = folded(&lv, &classes, &slow);
+    assert!(whole.generator.data.iter().all(|z| z.re.is_finite() && z.im.is_finite()), "a finite fold");
+    let first = folded(&levels(&[0.0], &[0.0], gamma, &[0]), &[class(nu, 1, 1, &[])], &Slow::single(vec![0], vec![0.0, nu]));
+    let second = folded(&levels(&[5.0], &[0.0], gamma, &[0]), &[class(nu, 1, 1, &[(0, 0, C64::real(g))])], &Slow::single(vec![], vec![0.0]));
+    let mut apart: Vec<C64> = first.eigen.values.iter().chain(&second.eigen.values).copied().collect();
+    let mut together = whole.eigen.values.clone();
+    for v in [&mut apart, &mut together] {
+        v.sort_by(|a, b| a.re.total_cmp(&b.re).then(a.im.total_cmp(&b.im)));
+    }
+    for (a, b) in together.iter().zip(&apart) {
+        assert!((*a - *b).abs() <= 1e-12 * b.abs().max(1.0), "an eigenvalue {a:?} against {b:?}");
+    }
+    let response = |fold: &Fold, place: usize| fold.replicas.iter().find(|rep| rep.feeds.iter().any(|f| f.class == Some(0))).map(|rep| rep.t[(0, place)]).expect("the drive's replica");
+    let (a, b) = (response(&whole, 1), response(&second, 0));
+    assert!((a - b).abs() <= 1e-12 * b.abs(), "g1's response {a:?} against {b:?}");
 }

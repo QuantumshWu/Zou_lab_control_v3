@@ -382,7 +382,7 @@ impl Model {
         let reference = (0..g).map(|y| h[(grounds[y], grounds[y])].re - frames[y]).sum::<f64>() / g as f64 + self.series.centre[cluster];
         let lit: Vec<usize> = (0..self.carriers.len()).filter(|&ci| lights.on(self.carriers[ci].frequency)).collect();
         let nus: Vec<f64> = lit.iter().map(|&ci| self.carriers[ci].detuning).collect();
-        let slow = elim::Slow { explicit: c.states[g..].iter().map(|&s| s - GROUND).collect(), frames };
+        let slow = elim::Slow::single(c.states[g..].iter().map(|&s| s - GROUND).collect(), frames);
         let series = elim::Reference::new(&levels, &nus, &slow, reference);
         let (mut first, mut second) = (vec![vec![]; self.carriers.len()], vec![vec![]; self.carriers.len()]);
         let mut work = 0.0;
