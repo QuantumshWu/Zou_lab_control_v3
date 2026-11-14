@@ -507,9 +507,12 @@ pub trait Middle {
 
     /// The candidate tones of Ĥ along the path (spectral.rs, # Which beats are tones): Ĥ(s) holds
     /// Σ_m (e^{iν_m s} G_m⁺ + e^{−iν_m s} G_m⁻) of terms whose beats ν_m are exact and whose envelopes G_m^± are constant
-    /// along the path (`envelopes`); into `beats` each ν_m (rad/µs). The propagation takes as tones those it resolves
-    /// better so and the rest with the generator's static group. None here; none on a path Ĥ is still along.
-    fn beats(&self, _path: &Self::Path, _beats: &mut Vec<f64>) {}
+    /// along the path (`envelopes`); into `beats` each ν_m (rad/µs), and into `keys` each one's exact label: integers,
+    /// one length for all, whose sums are the beats' sums exactly -- equal sums the same beat, the propagation's
+    /// products of members of equal key sums one class (spectral.rs, # The second order by tones). The propagation
+    /// takes as tones those it resolves better so and the rest with the generator's static group. None here; none on a
+    /// path Ĥ is still along.
+    fn beats(&self, _path: &Self::Path, _beats: &mut Vec<f64>, _keys: &mut Vec<Vec<i64>>) {}
 
     /// The m-th candidate's members' envelopes (`beats`) into `plus` (G_m⁺, at e^{iν_m s}) and `minus` (G_m⁻, at
     /// e^{−iν_m s}; n × n each, rad/µs): its part of `generator`'s at the time s is e^{iν_m s} G_m⁺ + e^{−iν_m s} G_m⁻.
@@ -1420,9 +1423,9 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
     }
     picture.separate(
         h,
-        |beats| {
+        |beats, keys| {
             if !still {
-                along.middle.beats(&along.path, beats);
+                along.middle.beats(&along.path, beats, keys);
             }
         },
         |m, plus, minus| along.middle.envelopes(&along.path, m, plus, minus),

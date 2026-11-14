@@ -358,6 +358,9 @@ struct Term {
 pub(crate) struct Group {
     tone: usize,
     wave: [f64; 3],
+    /// Its exact label (step.rs `Middle::beats`): its tone's beat's and its residual wave vector's integers over the
+    /// plan's common denominator.
+    key: Vec<i64>,
     partner: Option<usize>,
     first: bool,
     generator: Vec<Piece>,
@@ -1288,7 +1291,7 @@ impl<'a> Builder<'a> {
                                 Some(&g) => g,
                                 None => {
                                     let value = model.wave_value(&key.1);
-                                    groups.push(Group { tone: term.tone, wave: value, partner: None, first: true, generator: vec![], form: vec![] });
+                                    groups.push(Group { tone: term.tone, wave: value, key: vec![], partner: None, first: true, generator: vec![], form: vec![] });
                                     (found.insert(key.clone(), groups.len() - 1), keys.push(key));
                                     groups.len() - 1
                                 }
@@ -1299,6 +1302,17 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
+        }
+        // The groups' labels: their beats' and wave vectors' integers over one denominator, so that sums are exact.
+        let gcd = |mut a: i64, mut b: i64| {
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            a.abs()
+        };
+        let common = keys.iter().flat_map(|(beat, wave)| [beat.d, wave.d]).fold(1, |l, d| l / gcd(l, d) * d);
+        for (group, (beat, wave)) in groups.iter_mut().zip(&keys) {
+            group.key = beat.n.iter().map(|x| x * (common / beat.d)).chain(wave.n.iter().map(|x| x * (common / wave.d))).collect();
         }
         for (g, (beat, wave)) in keys.iter().enumerate() {
             let adjoint = (beat.negated(), wave.negated());
@@ -2734,9 +2748,10 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     /// Module documentation, # Exact tones: each tone pair's beat Ω + Q·v on the path.
-    fn beats(&self, path: &Path, beats: &mut Vec<f64>) {
+    fn beats(&self, path: &Path, beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
         let plan = &*self.plan;
         beats.extend(plan.firsts.iter().map(|&g| plan.tones[plan.groups[g].tone] + dot3(plan.groups[g].wave, path.velocity)));
+        keys.extend(plan.firsts.iter().map(|&g| plan.groups[g].key.clone()));
     }
 
     /// The pair's first group's envelope and its partner's (`envelope`), constant along the path.

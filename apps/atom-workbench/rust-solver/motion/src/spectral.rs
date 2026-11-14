@@ -197,8 +197,14 @@
 //! The second order D X − X D_s is a sum of products of a first-order class's change and another's following, and the
 //! beat of each is the sum of the two classes' beats: of the static group with itself the static group's; of a member
 //! with the static group that member's; of a tone's two members the static group's (their beats cancel: a beam's own
-//! light shift); of two members otherwise their sum's or their difference's, a class of its own -- the light shift's
-//! beat between two beams that drive one far state, its lattice along the path. Each product is made at the nodes on
+//! light shift); of two members otherwise their sum's or their difference's -- the light shift's beat between two beams
+//! that drive one far state, its lattice along the path. The class of a product is its beat's, exactly: each tone comes
+//! with an exact label (step.rs `Middle::beats`: the field's integers, its residual beat's and wave vector's), and two
+//! products of one label sum are one class -- the static group where the sum is zero, a first-order class where it is
+//! that class's label, else a pair of their own (`Picture::classify`). Their count is the field's: the distinct sums of
+//! two of its components' labels, not the pairs of tones (GMD1C's 92 tones of a step, split by the frames' least squares
+//! before, made 17 000 classes; a picture holds (1 + 2T + 2P) classes of n² each, T the tones and P the distinct sums).
+//! Each product is made at the nodes on
 //! the classes' envelopes, its phase apart (two products of n³ a node: the static group's with itself at the two ends,
 //! as before the tones, every other at the three), and its fast part F is followed at its class's combined frequency.
 //! D₂ is made at the nodes whole, by the factors of 1 + X there, as before: the static group's all orders exact. Of it
@@ -327,6 +333,8 @@ fn entry(matrix: &[f64], place: usize) -> C64 {
 #[derive(Debug)]
 pub struct Beat {
     pub beat: f64,
+    /// Its exact label (step.rs `Middle::beats`): its products' class is their labels' sum's.
+    pub key: Vec<i64>,
     pub candidate: usize,
     pub members: [[Mat; 3]; 2],
 }
@@ -408,6 +416,7 @@ pub struct Picture {
     /// The exact tones, the caller's (`beating`).
     pub beats: Vec<Beat>,
     beating: Vec<f64>,
+    keys: Vec<Vec<i64>>,
     /// After `prepare` on a beating path, the static group's slope at the middle through the step's ends,
     /// (G₀(h) − G₀(−h))/2h, as the caller's matrices are laid out: the first order of the parabola it is taken for (the
     /// optical sector's along the path, step.rs).
@@ -495,6 +504,7 @@ impl Default for Picture {
             ends: [none(), none()],
             beats: Vec::new(),
             beating: Vec::new(),
+            keys: Vec::new(),
             slope: none(),
             matrix: none(),
             basis: linalg::Eigen::default(),
@@ -727,19 +737,21 @@ impl Picture {
     /// part alone is no decay -- its sign turns with its beat --, so that over a hop it would grow the interaction
     /// picture's state by e^{|Γ_ν| w} where the static decay's factors hold the state (an overflow of m, not of x); a
     /// Hermitian tone's hops are unitary.
-    pub fn separate(&mut self, half: f64, candidates: impl FnOnce(&mut Vec<f64>), mut envelopes: impl FnMut(usize, &mut Mat, &mut Mat)) {
+    pub fn separate(&mut self, half: f64, candidates: impl FnOnce(&mut Vec<f64>, &mut Vec<Vec<i64>>), mut envelopes: impl FnMut(usize, &mut Mat, &mut Mat)) {
         let n = self.n;
         self.beating.clear();
-        candidates(&mut self.beating);
+        self.keys.clear();
+        candidates(&mut self.beating, &mut self.keys);
         let edge = 5.0_f64.sqrt() / half.abs();
         let count = self.beating.iter().filter(|beat| beat.abs() > edge).count();
         self.beats.truncate(count);
         while self.beats.len() < count {
-            self.beats.push(Beat { beat: 0.0, candidate: 0, members: std::array::from_fn(|_| std::array::from_fn(|_| Mat::zeros(n, n))) });
+            self.beats.push(Beat { beat: 0.0, key: vec![], candidate: 0, members: std::array::from_fn(|_| std::array::from_fn(|_| Mat::zeros(n, n))) });
         }
         let chosen = self.beating.iter().copied().enumerate().filter(|(_, beat)| beat.abs() > edge);
         for (tone, (candidate, beat)) in self.beats.iter_mut().zip(chosen) {
             (tone.beat, tone.candidate) = (beat, candidate);
+            tone.key.clone_from(&self.keys[candidate]);
             for m in tone.members.iter_mut().flatten() {
                 (m.rows, m.cols) = (n, n);
                 m.data.resize(n * n, C64::ZERO);
@@ -806,44 +818,51 @@ impl Picture {
     fn classify(&mut self) {
         let (n, tones) = (self.n, self.beats.len());
         let order = 1 + 2 * tones;
-        self.classes.resize_with(order + 2 * tones * tones, Class::default);
+        // Each first-order class's label and beat: the static group's none, a tone's members ±its key.
+        let length = self.beats.first().map_or(0, |tone| tone.key.len());
+        let member = |m: usize, sign: usize| 1 + 2 * m + sign;
+        let label = |c: usize| -> (Vec<i64>, f64) {
+            if c == 0 {
+                return (vec![0; length], 0.0);
+            }
+            let (tone, sign) = (&self.beats[(c - 1) / 2], if (c - 1) % 2 == 0 { 1 } else { -1 });
+            (tone.key.iter().map(|k| sign * k).collect(), sign as f64 * tone.beat)
+        };
+        // Every product of two first-order classes into the class of its labels' sum: a first-order class where the sum
+        // is one's label, else a pair of its own (the sum and its negation), made once -- their count the distinct sums.
+        let mut index: std::collections::HashMap<Vec<i64>, usize> = (0..order).map(|c| (label(c).0, c)).collect();
+        let mut beats: Vec<f64> = vec![];
+        self.combined.clear();
+        self.combined.resize(order * order, 0);
+        for x in 0..order {
+            let (kx, bx) = label(x);
+            for y in 0..order {
+                let (ky, by) = label(y);
+                let sum: Vec<i64> = kx.iter().zip(&ky).map(|(a, b)| a + b).collect();
+                let class = match index.get(&sum) {
+                    Some(&c) => c,
+                    None => {
+                        let c = order + 2 * beats.len();
+                        index.insert(sum.iter().map(|k| -k).collect(), c + 1);
+                        index.insert(sum, c);
+                        beats.push(bx + by);
+                        c
+                    }
+                };
+                self.combined[x * order + y] = class;
+            }
+        }
+        self.classes.resize_with(order + 2 * beats.len(), Class::default);
         for class in self.classes.iter_mut().filter(|class| !class.fits(n)) {
             class.fit(n);
         }
-        let (classes, combined) = (&mut self.classes, &mut self.combined);
-        combined.clear();
-        combined.resize(order * order, 0);
+        let classes = &mut self.classes;
         (classes[0].beat, classes[0].partner) = (0.0, 0);
-        let member = |m: usize, sign: usize| 1 + 2 * m + sign;
         for (m, tone) in self.beats.iter().enumerate() {
             paired(classes, member(m, 0), tone.beat);
-            for t in [member(m, 0), member(m, 1)] {
-                (combined[t], combined[t * order]) = (t, t);
-            }
         }
-        let mut next = order;
-        for lo in 0..tones {
-            for hi in lo..tones {
-                let (a, b) = (self.beats[lo].beat, self.beats[hi].beat);
-                paired(classes, next, a + b);
-                for sign in 0..2 {
-                    for (x, y) in [(member(lo, sign), member(hi, sign)), (member(hi, sign), member(lo, sign))] {
-                        combined[x * order + y] = next + sign;
-                    }
-                }
-                next += 2;
-                if lo < hi {
-                    paired(classes, next, a - b);
-                }
-                for sign in 0..2 {
-                    let (x, y) = (member(lo, sign), member(hi, 1 - sign));
-                    let class = if lo == hi { 0 } else { next + sign };
-                    (combined[x * order + y], combined[y * order + x]) = (class, class);
-                }
-                if lo < hi {
-                    next += 2;
-                }
-            }
+        for (k, &beat) in beats.iter().enumerate() {
+            paired(classes, order + 2 * k, beat);
         }
     }
 
@@ -2338,7 +2357,14 @@ pub(crate) mod tests {
         picture.fit(n);
         picture.base = toned(group, tones, 0.0);
         picture.ends = [-half, half].map(|u| toned(group, tones, u));
-        picture.separate(half, |beats| beats.extend(tones.iter().map(|t| t.beat)), |m, plus, minus| (*plus, *minus) = (tones[m].plus.clone(), tones[m].minus.clone()));
+        picture.separate(
+            half,
+            |beats, keys| {
+                beats.extend(tones.iter().map(|t| t.beat));
+                keys.extend((0..tones.len()).map(|m| (0..tones.len()).map(|j| i64::from(j == m)).collect()));
+            },
+            |m, plus, minus| (*plus, *minus) = (tones[m].plus.clone(), tones[m].minus.clone()),
+        );
         assert_eq!(picture.beats.len(), tones.len(), "every candidate a tone");
         picture.prepare(half, false, |_| 2, 0.0, 0.0);
         picture

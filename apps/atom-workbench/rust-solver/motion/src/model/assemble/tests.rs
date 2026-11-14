@@ -1120,8 +1120,13 @@ fn the_beating_groups_are_the_generator_s_along_a_path() {
             }
             let middle = model.assemble(cluster, r, t, &lights);
             let path = middle.path(kappa, velocity);
-            let mut beats = vec![];
-            middle.beats(&path, &mut beats);
+            let (mut beats, mut keys) = (vec![], vec![]);
+            middle.beats(&path, &mut beats, &mut keys);
+            // A label is the beat exactly: two pairs of one label are one beat, and the pairs' labels are distinct.
+            assert_eq!(keys.len(), beats.len());
+            for (a, ka) in keys.iter().enumerate() {
+                assert!(keys[..a].iter().all(|kb| kb != ka), "two pairs of one label");
+            }
             let envelopes: Vec<(Mat, Mat)> = (0..beats.len())
                 .map(|m| {
                     let (mut plus, mut minus) = (Mat::zeros(n, n), Mat::zeros(n, n));

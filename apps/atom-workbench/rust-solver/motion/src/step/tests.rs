@@ -137,8 +137,11 @@ impl Middle for Parts {
         let size = (self.parts.len() * self.waves.len() * self.waves.len()) as f64;
         [size, 3.0 * size, 3.0 * size]
     }
-    fn beats(&self, velocity: &[f64; 3], beats: &mut Vec<f64>) {
-        beats.extend(self.pairs().into_iter().map(|(omega, wave)| omega + dot3(wave, *velocity)));
+    fn beats(&self, velocity: &[f64; 3], beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
+        let pairs = self.pairs();
+        beats.extend(pairs.iter().map(|(omega, wave)| omega + dot3(*wave, *velocity)));
+        // Each pair its own label: no two of their products share a class but where they are one pair's.
+        keys.extend((0..pairs.len()).map(|m| (0..pairs.len()).map(|j| i64::from(j == m)).collect()));
     }
     fn envelopes(&self, _: &[f64; 3], m: usize, plus: &mut Mat, minus: &mut Mat) {
         let (omega, wave) = self.pairs()[m];
@@ -2382,8 +2385,8 @@ impl<M: Middle> Middle for Probe<'_, M> {
     fn optical(&self, path: &M::Path) -> Option<step::Optical> {
         self.middle.optical(path)
     }
-    fn beats(&self, path: &M::Path, beats: &mut Vec<f64>) {
-        self.middle.beats(path, beats)
+    fn beats(&self, path: &M::Path, beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
+        self.middle.beats(path, beats, keys)
     }
     fn envelopes(&self, path: &M::Path, m: usize, plus: &mut Mat, minus: &mut Mat) {
         self.middle.envelopes(path, m, plus, minus)
