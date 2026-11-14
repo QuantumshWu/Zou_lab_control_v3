@@ -192,6 +192,69 @@ pub(crate) struct Feed {
     pub emitted: Mat,
 }
 
+/// An eigenstate's response at its replicas (`Fold::responses`).
+struct Responses {
+    replicas: Vec<Response>,
+    response: f64,
+}
+
+/// At one replica (`Fold::responses`): its place j, σ, W r_p, x₀, R(σ) x₀ and its squared norm, and the numerical range
+/// of its K.
+struct Response {
+    j: usize,
+    sigma: C64,
+    wr: Vec<C64>,
+    x0: Vec<C64>,
+    second: Vec<C64>,
+    size: f64,
+    range: [f64; 4],
+}
+
+impl Responses {
+    /// ρ_p(Δ) at the shift Δ (module documentation, # First order) and, where `excited` is given (E's size), per replica
+    /// and excited state its part of ρ_p² (the parts sum to ρ_p²).
+    fn remainder(&self, fold: &Fold, shift: f64, excited: Option<usize>) -> (f64, Vec<Vec<f64>>) {
+        let mut parts = excited.map_or_else(Vec::new, |e| vec![vec![0.0; e]; fold.replicas.len()]);
+        if self.response == 0.0 {
+            return (0.0, parts);
+        }
+        let mut num = 0.0;
+        for at in &self.replicas {
+            let rep = &fold.replicas[at.j];
+            let shifted = rep.k.resolvent(at.sigma + C64::real(shift), &at.wr);
+            for (i, &e) in rep.q.iter().enumerate() {
+                let d = (shifted[i] - at.x0[i] + at.second[i] * shift).norm_sqr();
+                if excited.is_some() {
+                    parts[at.j][e] += d / self.response;
+                }
+                num += d;
+            }
+        }
+        ((num / self.response).sqrt(), parts)
+    }
+
+    /// A bound of ρ_p(Δ): the remainder is Δ² R(σ + Δ) R(σ)² W r_p exactly, and ‖R(σ + Δ)‖ ≤ 1/dist(σ + Δ, W(K)), W(K)
+    /// within its rectangle (`Schur::range`): ρ_p(Δ)² ≤ Δ⁴ Σ_f ‖R(σ_f)² W r_p‖²/dist_f² over Σ_f ‖x₀‖² -- none (∞)
+    /// where σ + Δ lies in a rectangle.
+    fn bound(&self, shift: f64) -> f64 {
+        if self.response == 0.0 {
+            return 0.0;
+        }
+        let mut num = 0.0;
+        for at in &self.replicas {
+            let z = at.sigma + C64::real(shift);
+            let [a, b, c, d] = at.range;
+            let (x, y) = ((a - z.re).max(z.re - b).max(0.0), (c - z.im).max(z.im - d).max(0.0));
+            let distance = x.hypot(y);
+            if distance == 0.0 {
+                return f64::INFINITY;
+            }
+            num += shift.powi(4) * at.size / (distance * distance);
+        }
+        (num / self.response).sqrt()
+    }
+}
+
 /// One replica folded: its frequency, Q_f, the sum of its feeds' W and W', its response T (module documentation).
 #[derive(Clone, Debug)]
 pub(crate) struct Folded {
@@ -254,6 +317,24 @@ struct SchurBlock {
 }
 
 impl Schur {
+    /// A rectangle that holds the numerical range of the matrix (re_min, re_max, im_min, im_max): the Gershgorin
+    /// intervals of the Hermitian parts (S + S†)/2 and (S − S†)/2i of its Schur form S, unitarily similar to it -- so a
+    /// point z outside it has ‖(z − A)⁻¹‖ ≤ 1/dist(z, rectangle) (the numerical range's resolvent bound).
+    fn range(&self) -> [f64; 4] {
+        let n = self.n;
+        let mut out = [f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY];
+        for i in 0..n {
+            let (mut re, mut im) = (0.0, 0.0);
+            for j in (0..n).filter(|&j| j != i) {
+                let (a, b) = (self.s[i * n + j], self.s[j * n + i].conj());
+                (re, im) = (re + 0.5 * (a + b).abs(), im + 0.5 * (a - b).abs());
+            }
+            let d = self.s[i * n + i];
+            out = [out[0].min(d.re - re), out[1].max(d.re + re), out[2].min(d.im - im), out[3].max(d.im + im)];
+        }
+        out
+    }
+
     /// The Schur form of a square matrix, block by block: the states its entries join (the connected components of its
     /// pattern, a ↔ b where either entry is not zero) are decomposed apart (linalg.rs `schur`) and laid one after another
     /// -- block-diagonal and each block upper triangular is upper triangular, Q block-diagonal on the blocks' states is
@@ -726,32 +807,46 @@ impl Fold {
     /// index) its part of the remainder's square over the response's square -- the parts sum to ρ_p². The response
     /// and its first order are made once for all the shifts, a shifted resolvent for each.
     pub(crate) fn remainders(&self, p: usize, shifts: &[f64], excited: usize) -> Vec<(f64, Vec<Vec<f64>>)> {
+        let at = self.responses(p);
+        shifts.iter().map(|&shift| at.remainder(self, shift, Some(excited))).collect()
+    }
+
+    /// The largest of eigenstate p's remainders at the offsets `spans` (shift, share), each at its share, and the
+    /// offset's place in `spans`: the offsets taken by their bounds at their shares (`Responses::bound`) from the
+    /// largest, and none past the first whose bound is below the largest found -- exactly the largest, without the
+    /// remainders the bounds put below it.
+    pub(crate) fn worst_remainder(&self, p: usize, spans: &[(f64, f64)]) -> (f64, Option<usize>) {
+        let at = self.responses(p);
+        let mut order: Vec<(f64, usize)> = spans.iter().enumerate().map(|(i, &(shift, share))| (share * at.bound(shift), i)).collect();
+        order.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut worst = (0.0, None);
+        for (bound, i) in order {
+            if bound <= worst.0 && worst.1.is_some() {
+                break;
+            }
+            let (shift, share) = spans[i];
+            let rho = share * at.remainder(self, shift, None).0;
+            if worst.1.is_none() || rho > worst.0 {
+                worst = (rho, Some(i));
+            }
+        }
+        worst
+    }
+
+    /// Eigenstate p's response at the replicas of its group (module documentation, # First order): per replica its
+    /// place, σ = λ_p + f, W r_p, x₀ = R(σ) W r_p and R(σ) x₀, with the numerical range of its K (`Schur::range`); and
+    /// Σ‖x₀‖², what a remainder is relative to.
+    fn responses(&self, p: usize) -> Responses {
         let r = self.right(p);
         let lambda = self.eigen.values[p];
-        let mut out: Vec<(f64, Vec<Vec<f64>>)> = shifts.iter().map(|_| (0.0, vec![vec![0.0; excited]; self.replicas.len()])).collect();
-        let mut den = 0.0;
+        let mut out = Responses { replicas: vec![], response: 0.0 };
         for (j, rep) in self.replicas.iter().enumerate().filter(|(_, rep)| rep.group == self.groups[p]) {
             let wr = rep.w.apply(&r);
             let sigma = lambda + C64::real(rep.frequency);
             let x0 = rep.k.resolvent(sigma, &wr);
             let second = rep.k.resolvent(sigma, &x0);
-            den += x0.iter().map(|z| z.norm_sqr()).sum::<f64>();
-            for (&shift, (num, parts)) in shifts.iter().zip(out.iter_mut()) {
-                let shifted = rep.k.resolvent(sigma + C64::real(shift), &wr);
-                for (i, &e) in rep.q.iter().enumerate() {
-                    let d = (shifted[i] - x0[i] + second[i] * shift).norm_sqr();
-                    parts[j][e] += d;
-                    *num += d;
-                }
-            }
-        }
-        for (num, parts) in out.iter_mut() {
-            if den == 0.0 {
-                (*num, *parts) = (0.0, vec![vec![0.0; excited]; self.replicas.len()]);
-            } else {
-                parts.iter_mut().flatten().for_each(|x| *x /= den);
-                *num = (*num / den).sqrt();
-            }
+            out.response += x0.iter().map(|z| z.norm_sqr()).sum::<f64>();
+            out.replicas.push(Response { j, sigma, size: second.iter().map(|z| z.norm_sqr()).sum::<f64>(), wr, x0, second, range: rep.k.range() });
         }
         out
     }
@@ -2016,14 +2111,8 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
             // Each offset the eigenstate spans at its share (`Fold::spans`), the largest; the blocks' parts at that one.
             for &p in &ground_like {
                 let spans: Vec<(f64, f64)> = Fold::spans(p, pattern, &components).collect();
-                let shifts: Vec<f64> = spans.iter().map(|s| s.0).collect();
-                let (mut worst, mut at) = (0.0, None);
-                for ((rho, _), &(shift, weight)) in fold.remainders(p, &shifts, levels.excited.rows).iter().zip(&spans) {
-                    if weight * rho >= worst {
-                        (worst, at) = (weight * rho, Some((shift, weight)));
-                    }
-                }
-                if let Some((shift, weight)) = at.filter(|_| worst > share) {
+                let (worst, at) = fold.worst_remainder(p, &spans);
+                if let Some((shift, weight)) = at.map(|i| spans[i]).filter(|_| worst > share) {
                     let (_, mut parts) = parts_of(p, Some(shift));
                     parts.iter_mut().for_each(|x| x.3 *= weight * weight);
                     pick(p, parts, worst * worst, share * share, &mut moves);
@@ -2223,16 +2312,30 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
         if weight[p] == 0.0 && sidebands.is_empty() {
             continue;
         }
-        let shifts: Vec<f64> = [pattern, -pattern].into_iter().chain(sidebands.iter().map(|x| x.distance.re)).collect();
-        let mut found = fold.remainders(p, &shifts, excited).into_iter();
+        let at = fold.responses(p);
         let mut read: Vec<(f64, f64, Vec<Vec<f64>>)> = vec![];
-        let (plus, minus) = (found.next().expect("the pattern's"), found.next().expect("the pattern's"));
         if weight[p] > 0.0 {
+            let (plus, minus) = (at.remainder(fold, pattern, Some(excited)), at.remainder(fold, -pattern, Some(excited)));
             let (rho, each) = if minus.0 > plus.0 { minus } else { plus };
             read.push((weight[p], rho, each));
         }
-        for (x, (rho, each)) in sidebands.iter().zip(found) {
-            read.push((weight[x.column] * x.mixing().min(1.0).powi(2), rho, each));
+        // The sidebands by their bounds at their populations (`Responses::bound`), from the largest, until what the rest
+        // can add is within the rounding of what is read.
+        let mut order: Vec<(f64, f64, f64)> = sidebands.iter().map(|x| {
+            let population = weight[x.column] * x.mixing().min(1.0).powi(2);
+            (population * at.bound(x.distance.re), population, x.distance.re)
+        }).collect();
+        order.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut rest: f64 = order.iter().map(|o| o.0).sum();
+        let mut sum: f64 = read.iter().map(|r| r.0 * r.1).sum();
+        for (bound, population, shift) in order {
+            if rest <= crate::units::UNIT_ROUNDOFF * sum {
+                break;
+            }
+            rest -= bound;
+            let (rho, each) = at.remainder(fold, shift, Some(excited));
+            sum += population * rho;
+            read.push((population, rho, each));
         }
         let unit: Vec<C64> = (0..n).map(|q| if q == p { C64::ONE } else { C64::ZERO }).collect();
         let mut responses: Vec<Option<Vec<(Option<usize>, Vec<C64>)>>> = vec![None; fold.replicas.len()];
