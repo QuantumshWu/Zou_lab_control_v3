@@ -904,7 +904,75 @@ impl Fold {
     /// radius) -- the order an evaluation takes is the least whose remainder is within the share (criterion one's ρ
     /// books it).
     fn series_ratio(&self, z0: C64) -> f64 {
-        self.series_norm(z0) / self.series_distance(z0)
+        self.series_norm(z0) / self.series_distance(z0, None)
+    }
+}
+
+/// A series' radius is read on the blocks its terms hold (`Folded::held_blocks`, `Fold::series_distance`): R₀ = (z₀ + f −
+/// K_f)⁻¹ is block-diagonal on K_f's blocks, so a block that neither W nor δK reaches is in no term of the series. S2Q's
+/// probe with its F′ = 3 block kept explicit for the three F = 2 states it drives (the first attempt's keep): its σ± light
+/// joins |2, m⟩ to |3′, m ± 1⟩ alone, so the kept edges split the block by the parity of m into two clusters, each with
+/// the other's half in its Q, nearer z₀ + f than ‖H − z₀‖, in no term of its series. Read on every block, that half's
+/// distance gave q ≥ 1 (2.9), and the closure made the hyperfine blocks below explicit one after another -- growing
+/// ‖H − z₀‖, never the distance -- until the repump's block move joined a ground driven by both carriers into one block,
+/// a 6.57 GHz loop in the frames no step resolves. On the held blocks the series converges and the closure keeps nothing
+/// more; and the series' generator to each order K is within q^{K+1}/(1 − q) of the self-consistent fold at q of the held
+/// blocks, where an unheld block's distance would bound nothing.
+#[test]
+fn a_series_radius_is_read_on_the_blocks_its_terms_hold() {
+    use super::super::{Component, Model, Unit};
+    use crate::request::GROUND;
+    let req = request("S2Q");
+    let light = crate::field::Light::new(&req);
+    let chief = (0..GROUND).max_by(|&a, &b| req.initial_density[(a, a)].re.total_cmp(&req.initial_density[(b, b)].re)).unwrap();
+    let (base, mut kept, _, _) = Model::closed_at(&req, &light, vec![], chief, req.temperature_uk);
+    let state = |label: &str| req.states.iter().position(|s| s == label).expect("a state of the request");
+    let block = base.blocks().iter().position(|b| b.contains(&(state("D2-3-0") - GROUND))).expect("the F′ = 3 block");
+    let probe = (0..light.frequencies.len()).find(|&f| light.frequencies[f].beams.iter().any(|&l| req.beams[l].id == "laser-probe")).expect("the probe's carrier");
+    let component = Component { frequency: probe, counter: false };
+    for m in ["-2", "-1", "0"] {
+        kept.push(Unit::Block { block, component, grounds: ground_set(&[state(&format!("ground-2-{m}"))]) });
+    }
+    kept.push(Unit::Normalization { order: 1 });
+    let mut model = Model::new(&req, &light, &kept).expect("the model");
+    let points = crate::solve::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
+    model.referenced(&points);
+    // The scene holds the class: a cluster whose Q has a block in no term of its series nearer z₀ + f than ‖H − z₀‖.
+    let mut worst: Option<(f64, Fold, C64)> = None;
+    let mut unheld = 0;
+    for k in 0..model.clusters().len() {
+        for &(r, _) in &points {
+            let amplitudes = light.amplitudes(r);
+            let Some((fold, _, far, _)) = model.cluster_fold(k, &amplitudes, false) else { continue };
+            let z0 = C64::real(far + model.series.centre[k]);
+            let every = fold.replicas.iter().flat_map(|rep| (0..rep.k.n).map(move |i| (z0 + C64::real(rep.frequency) - rep.k.s[i * rep.k.n + i]).abs())).fold(f64::INFINITY, f64::min);
+            let norm = fold.series_norm(z0);
+            if every < norm && fold.series_distance(z0, None) > norm {
+                unheld += 1;
+            }
+            let q = fold.series_ratio(z0);
+            if worst.as_ref().is_none_or(|w| q > w.0) {
+                worst = Some((q, fold, z0));
+            }
+        }
+    }
+    println!("S2Q, the probe's F′ = 3 block kept for F = 2 m = −2, −1, 0: {} clusters; {unheld} cluster folds with a block in no term nearer than ‖H − z₀‖; series q = {:.3e}, x = {:.3e}", model.clusters().len(), model.series.ratio, model.series.excited);
+    assert!(unheld > 0, "the scene holds a block the series does not hold within ‖H − z₀‖ of z₀ + f");
+    assert!(model.series.exists(), "the series converge on the blocks they hold: q = {}, x = {}", model.series.ratio, model.series.excited);
+    assert_eq!(model.series_block(), None, "the closure makes no block explicit");
+    // The series' orders at its largest ratio converge as that ratio bounds them.
+    let (q, fold, z0) = worst.expect("a cluster with a fold");
+    let n = fold.size();
+    let own = fold.generator.clone();
+    for order in 0..=3 {
+        let forms = fold.series(z0, order);
+        let h = fold.series_generator(&forms, z0).expect("the series' generator settles");
+        let mut apart = h.clone();
+        apart.add_scaled(-C64::ONE, &fold.generator);
+        let relative = apart.frobenius() / own.frobenius();
+        let bound = q.powi(order as i32 + 1) / (1.0 - q) + crate::units::rounding(n * n * (order + 2));
+        println!("  order {order}: {relative:.3e} of the fold apart, bound {bound:.3e} (q = {q:.3e})");
+        assert!(relative <= bound, "order {order}: {relative} beyond the bound {bound}");
     }
 }
 

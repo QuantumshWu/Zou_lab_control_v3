@@ -192,6 +192,34 @@ pub(crate) struct Folded {
     k: Schur,
 }
 
+impl Folded {
+    /// Which blocks of K_f's Schur form the replica's series holds (`Fold::series_distance`, `Fold::nearest`), in the
+    /// form's order: every block of a state its coupling W drives, and every block the forms `joins` (on E, E's indices:
+    /// the excited block's part the reference leaves out, δK; none, K_f's blocks alone) join to one held, until none
+    /// more. R₀ = (z₀ + f − K_f)⁻¹ is block-diagonal on K_f's blocks, so each term R₀((z − z₀) + δK)R₀ ⋯ R₀W of the
+    /// series of (z − K_f − δK)⁻¹W is zero on every other block: its spectrum is in no term, and no part of the
+    /// series' radius.
+    fn held_blocks(&self, joins: Option<&Mat>) -> Vec<bool> {
+        let blocks = &self.k.blocks;
+        let mut of = vec![0; self.q.len()];
+        for (x, b) in blocks.iter().enumerate() {
+            for &s in &b.states {
+                of[s] = x;
+            }
+        }
+        let mut held: Vec<bool> = blocks.iter().map(|b| b.states.iter().any(|&s| (0..self.w.cols).any(|c| self.w[(s, c)] != C64::ZERO))).collect();
+        if let Some(j) = joins {
+            let n = self.q.len();
+            let pairs: Vec<(usize, usize)> = (0..n).flat_map(|a| (0..n).map(move |b| (a, b))).filter(|&(a, b)| of[a] != of[b] && (j[(self.q[a], self.q[b])] != C64::ZERO || j[(self.q[b], self.q[a])] != C64::ZERO)).collect();
+            while let Some(&(a, b)) = pairs.iter().find(|&&(a, b)| held[of[a]] != held[of[b]]) {
+                held[of[a]] = true;
+                held[of[b]] = true;
+            }
+        }
+        held
+    }
+}
+
 /// The fold at a point (module documentation): P's static generator H in the frames, the replicas, and H's
 /// eigendecomposition (the eigenvalues λ_p, the right eigenvectors r_p as unit columns, the left ones as the inverse's
 /// rows). `exists` is whether the self-consistent iteration contracted to its rounding: where it does not, the fold does
@@ -876,20 +904,25 @@ impl Fold {
         }
         crate::linalg::hermitian_eigen(&e.adjoint_product(&e)).values.iter().fold(0.0_f64, |m, &x| m.max(x)).sqrt()
     }
-    /// The least distance of z₀ + f from the excited block's spectrum over the replicas (`series_ratio`).
-    pub(crate) fn series_distance(&self, z0: C64) -> f64 {
-        self.replicas.iter().flat_map(|rep| (0..rep.k.n).map(move |i| (z0 + C64::real(rep.frequency) - rep.k.s[i * rep.k.n + i]).abs())).fold(f64::INFINITY, f64::min)
+    /// The series' distance d (`series_ratio`): the least distance of z₀ + f from the spectrum of the excited block the
+    /// series holds, over the replicas (`Fold::nearest_held`; `joins` as there).
+    pub(crate) fn series_distance(&self, z0: C64, joins: Option<&Mat>) -> f64 {
+        self.nearest_held(z0, joins).map_or(f64::INFINITY, |x| x.0)
     }
-    /// The excited state that sets the series' distance (`series_distance`): of the excited block's Schur forms over the
-    /// replicas -- each block of the states K's entries join, where the drive reaches one of them --, the diagonal entry
-    /// nearest z₀ + f, the state its Schur vector holds most of (E's index): the block criterion one makes explicit where
-    /// the series does not converge (`Series::moved`), and on which a run's state books what the evaluation's orders
-    /// leave of its error against the definition (`Model::readings`).
-    pub(crate) fn nearest(&self, z0: C64) -> Option<usize> {
+    /// The excited state that sets the series' distance (`series_distance`; E's index): the block criterion one makes
+    /// explicit where the series does not converge (`Series::moved`), and on which a run's state books what the
+    /// evaluation's orders leave of its error against the definition (`Model::readings`).
+    pub(crate) fn nearest(&self, z0: C64, joins: Option<&Mat>) -> Option<usize> {
+        self.nearest_held(z0, joins).map(|x| x.1)
+    }
+    /// Of the blocks the series holds (`Folded::held_blocks`) over the replicas, the diagonal entry of their Schur forms
+    /// nearest z₀ + f: its distance, and the state its Schur vector holds most of (E's index); none where the series holds
+    /// no block. A block it does not hold is in no term of the series, so its distance is no part of the series' radius.
+    fn nearest_held(&self, z0: C64, joins: Option<&Mat>) -> Option<(f64, usize)> {
         let mut best: Option<(f64, usize)> = None;
         for rep in &self.replicas {
-            let driven = |state: usize| (0..rep.w.cols).any(|s| rep.w[(state, s)] != C64::ZERO);
-            for b in rep.k.blocks.iter().filter(|b| b.states.iter().any(|&state| driven(state))) {
+            let held = rep.held_blocks(joins);
+            for b in rep.k.blocks.iter().zip(&held).filter(|x| *x.1).map(|x| x.0) {
                 let m = b.states.len();
                 for k in 0..m {
                     let distance = (z0 + C64::real(rep.frequency) - b.s[k * m + k]).abs();
@@ -900,7 +933,7 @@ impl Fold {
                 }
             }
         }
-        best.map(|b| b.1)
+        best
     }
     /// The excited share the run's normalization is a series in (`Series`; assemble.rs `normal`, readout.rs): X = Σ_f
     /// (R₀W_f)†(R₀W_f) of the series' order-0 responses about z₀ -- the slow state's one metric, of which the
@@ -1543,11 +1576,10 @@ impl super::Model {
     /// The fold of a model's cluster at a point, as the run's series stands for it (`Series`): the levels with the far
     /// light alone (eliminate.rs `Model::far_hamiltonian`), every carrier a class of its coherent field's couplings
     /// folded at the atom and explicit, the cluster's explicit states and frames; with the far levels' mean in the
-    /// frames and the norm of what the far levels leave out of the excited block -- the carriers' own static forms there,
-    /// bilinear in the near field (eliminate.rs `level_pair`) -- in the Frobenius norm, a bound of the spectral one.
-    pub(crate) fn cluster_fold(&self, cluster: usize, amplitudes: &[crate::field::Amplitude], about: bool) -> Option<(Fold, Levels, f64, f64)> {
-        let (fold, levels, far, left) = self.cluster_fold_with(cluster, amplitudes, about, false)?;
-        Some((fold, levels, far, left.frobenius()))
+    /// frames and what the far levels leave out of the excited block -- the carriers' own static forms there, bilinear
+    /// in the near field (eliminate.rs `level_pair`): δK on E.
+    pub(crate) fn cluster_fold(&self, cluster: usize, amplitudes: &[crate::field::Amplitude], about: bool) -> Option<(Fold, Levels, f64, Mat)> {
+        self.cluster_fold_with(cluster, amplitudes, about, false)
     }
 
     /// The definition at a point (ELIMINATION v6, v7): the cluster's self-consistent fold with its excited block whole --
@@ -1611,8 +1643,9 @@ impl super::Model {
     /// The model's series constants at the atoms `points` (`Series`): per cluster the centre of the near light's scalar
     /// shift -- the mean of the fold's ground-like eigenvalues less the far levels' mean, over the atoms its range's
     /// middle --, then at each atom the ratio of the series about z₀ = far mean + c, q = (‖H − z₀‖₂ + ‖δK‖)/d (the
-    /// Neumann series of the resolvent in both its arguments: `Fold::series_norm` over `Fold::series_distance`, and the excited block the reference
-    /// leaves out), the largest; and the order it asks for. An atom where a fold does not exist (criterion one's: its
+    /// Neumann series of the resolvent in both its arguments: `Fold::series_norm` and ‖δK‖ of the excited block the
+    /// reference leaves out, in the Frobenius norm, a bound of the spectral one, over `Fold::series_distance` on the
+    /// blocks the series holds through W and δK), the largest; and the order it asks for. An atom where a fold does not exist (criterion one's: its
     /// closure makes a block explicit) is read as the series' end: q = ∞, as is a ratio that is no number (`converges`).
     /// And at each atom the ratio of the normalization's series, the evaluation's own excited share x about the same z₀
     /// (`Fold::evaluated_share`: the one metric the generator and the readout take), the largest. Where either series
@@ -1620,7 +1653,7 @@ impl super::Model {
     pub(crate) fn series_at(&self, points: &[([f64; 3], [f64; 3])]) -> Series {
         use rayon::prelude::*;
         let clusters = self.clusters.len();
-        let read: Vec<Vec<Option<(f64, Fold, f64, f64)>>> = points
+        let read: Vec<Vec<Option<(f64, Fold, f64, Mat)>>> = points
             .par_iter()
             .map(|&(r, _)| {
                 let amplitudes = self.light.amplitudes(r);
@@ -1641,19 +1674,20 @@ impl super::Model {
             })
             .collect();
         // Per atom and cluster the two ratios about z₀, and the excited state that holds the most of the share.
-        let ratios: Vec<(f64, f64, usize, &Fold, C64, Option<usize>)> = read
+        type Read<'a> = (f64, f64, usize, &'a Fold, C64, Option<usize>, &'a Mat);
+        let ratios: Vec<Read> = read
             .iter()
             .flat_map(|at| at.iter().enumerate())
             .filter_map(|(cluster, x)| x.as_ref().map(|x| (cluster, x)))
             .map(|(cluster, (_, fold, far, left))| {
                 let z0 = C64::real(far + centre[cluster]);
-                let q = if fold.exists { (fold.series_norm(z0) + left) / fold.series_distance(z0) } else { f64::INFINITY };
+                let q = if fold.exists { (fold.series_norm(z0) + left.frobenius()) / fold.series_distance(z0, Some(left)) } else { f64::INFINITY };
                 let (x, most) = fold.evaluated_share(z0);
                 let number = |r: f64| if r.is_nan() { f64::INFINITY } else { r };
-                (number(q), number(x), cluster, fold, z0, most)
+                (number(q), number(x), cluster, fold, z0, most, left)
             })
             .collect();
-        let largest = |pick: fn(&(f64, f64, usize, &Fold, C64, Option<usize>)) -> f64| ratios.iter().fold((0.0_f64, None), |(m, at), r| if pick(r) > m || at.is_none() { (pick(r).max(m), Some(r)) } else { (m, at) });
+        let largest = |pick: fn(&Read) -> f64| ratios.iter().fold((0.0_f64, None), |(m, at), r| if pick(r) > m || at.is_none() { (pick(r).max(m), Some(r)) } else { (m, at) });
         let ((ratio, nearest), (excited, densest)) = (largest(|r| r.0), largest(|r| r.1));
         // Where a series does not converge, the closure's move on the block that stops it (criterion one).
         let blocks = self.blocks();
@@ -1663,9 +1697,9 @@ impl super::Model {
             Some((b, class, places.iter().map(|&place| self.clusters[cluster].states[place]).collect()))
         };
         let moved = if !converges(ratio) {
-            nearest.and_then(|&(_, _, cluster, fold, z0, _)| move_on(cluster, fold, fold.nearest(z0)))
+            nearest.and_then(|&(_, _, cluster, fold, z0, _, left)| move_on(cluster, fold, fold.nearest(z0, Some(left))))
         } else if !converges(excited) {
-            densest.and_then(|&(_, _, cluster, fold, _, most)| move_on(cluster, fold, most))
+            densest.and_then(|&(_, _, cluster, fold, _, most, _)| move_on(cluster, fold, most))
         } else {
             None
         };
@@ -1831,7 +1865,7 @@ impl super::Model {
             .map(|(m, o)| Outside { slow: c.states.iter().map(|&s| m[s]).collect(), excited: (GROUND..crate::request::STATES).map(|s| m[s] * o[s]).collect() })
             .collect();
         let mut beyond = None;
-        if let Some((fold, levels, far, _)) = self.cluster_fold(sample.cluster, &amplitudes, true) {
+        if let Some((fold, levels, far, left)) = self.cluster_fold(sample.cluster, &amplitudes, true) {
             let plan = self.plan(sample.cluster, &self.running());
             let fastest = self.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
             let range = plan.sampled.iter().map(|t| t[0]).fold(0.0, f64::max) + 2.0 * fastest * speed;
@@ -1891,7 +1925,7 @@ impl super::Model {
                         book(&Unit::Series, series, &mut out);
                     }
                     book(&Unit::Normalization { order: own.normalization + 1 }, normalization, &mut out);
-                    let nearest = fold.nearest(z0).and_then(|e| blocks.iter().position(|b| b.contains(&e)));
+                    let nearest = fold.nearest(z0, Some(&left)).and_then(|e| blocks.iter().position(|b| b.contains(&e)));
                     if nearest.is_some() {
                         on_blocks(nearest, (at - series - normalization).max(0.0), &mut out);
                     }
