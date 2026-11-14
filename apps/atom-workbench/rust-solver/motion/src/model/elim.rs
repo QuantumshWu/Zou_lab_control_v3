@@ -67,11 +67,14 @@
 //! commute, so the remainder is Δ² R(z + Δ) v, v = R² W r_p; and K = H_E − (i/2)D on Q is normal where D is each line's
 //! excited states' common rate times one (D = Σ C†C: the line's total decay, the same from every excited state of it)
 //! and H_E holds no coupling across lines -- every scene's --, so that ‖R(z + Δ) v‖² = Σ_k |⟨e_k|v⟩|²/|z + Δ − κ_k|²
-//! exactly, κ_k and e_k K's eigenvalues and eigenvectors, its Schur form's diagonal and columns (`Schur::weights`): one
-//! change of v's basis a replica, n_Q numbers an offset. (Where K is not normal, the numerical range's bound
-//! ‖R(z + Δ)‖ ≤ 1/dist(z + Δ, W(K)), W(K) within the Gershgorin rectangle of the Hermitian parts, `Schur::distance`.
-//! The bound ‖R(z + Δ)‖ ‖v‖ at every offset overstated a sideband near an excited level v does not hold: R3_DOPPLER's
-//! cooling pair had eleven blocks made explicit at its prior atoms.) Over the
+//! exactly, κ_k and e_k K's eigenvalues and eigenvectors, its Schur form's diagonal and columns: one change of v's
+//! basis a replica, n_Q numbers an offset. Of a Schur block S = Λ + N, N strictly upper, (z − S)⁻¹ =
+//! Σ_{k<m} ((z − Λ)⁻¹N)^k (z − Λ)⁻¹ (nilpotent), so ‖(z − S)⁻¹y‖ ≤ (1 + h) ‖(z − Λ)⁻¹y‖ and ‖(z − S)⁻¹‖ ≤ (1 + h)/δ,
+//! 1 + h = Σ_{k<m} (‖N‖/δ)^k, δ the least distance of z from Λ (Henrici's departure from normality; `Schur::resolvent_norm`,
+//! `Schur::distance`): the normal case's exact numbers at N = 0, continuous in N -- a block of K is never judged normal
+//! or not, its rounding's N a part in 10¹⁶ of 1 + h. (The bound ‖R(z + Δ)‖ ‖v‖ at every offset overstated a sideband
+//! near an excited level v does not hold: R3_DOPPLER's cooling pair had eleven blocks made explicit at its prior
+//! atoms.) Over the
 //! frequencies a P amplitude spans, each component c at its offset δ_c with its share w_c of the amplitude's population,
 //! the remainders add as the shares weigh them: the first criterion's relative size is
 //!   ρ_p = Σ_c w_c δ_c² ‖R(λ_p + f + δ_c) R² W r_p‖ / ‖R W r_p‖,
@@ -292,44 +295,14 @@ pub(crate) struct Fold {
 }
 
 /// A Schur form A = Q S Q†, block by block (`Schur::of`): per block of the states A's entries join, its states, its
-/// place in the form's order and its own S (upper triangular, row by row) and Q (column by column, on its states); the
-/// whole S row by row in the form's order (block-diagonal).
+/// place in the form's order, its own S (upper triangular, row by row) and Q (column by column, on its states), and its
+/// departure from normality ‖N‖_F, N its S's strictly upper part (`SchurBlock::henrici`); the whole S row by row in
+/// the form's order (block-diagonal).
 #[derive(Clone, Debug)]
 struct Schur {
     n: usize,
     blocks: Vec<SchurBlock>,
     s: Vec<C64>,
-    /// What bounds its resolvent's norm (`distance`), made once with the form.
-    spectrum: Spectrum,
-}
-
-/// A matrix's spectrum as its resolvent's norm reads it (`Schur::distance`): a normal one's eigenvalues -- its Schur form
-/// diagonal to the rounding of its entries --, or the Gershgorin rectangle of its Schur form's Hermitian parts
-/// (S + S†)/2 and (S − S†)/2i, which holds its numerical range (re_min, re_max, im_min, im_max).
-#[derive(Clone, Debug)]
-enum Spectrum {
-    Normal(Vec<C64>),
-    Range([f64; 4]),
-}
-
-impl Spectrum {
-    fn of(n: usize, s: &[C64]) -> Spectrum {
-        let scale = s.iter().map(|x| x.abs()).fold(0.0, f64::max);
-        if (0..n).all(|i| (i + 1..n).all(|j| s[i * n + j].abs() <= rounding(n) * scale)) {
-            return Spectrum::Normal((0..n).map(|i| s[i * n + i]).collect());
-        }
-        let mut range = [f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY];
-        for i in 0..n {
-            let (mut re, mut im) = (0.0, 0.0);
-            for j in (0..n).filter(|&j| j != i) {
-                let (a, b) = (s[i * n + j], s[j * n + i].conj());
-                (re, im) = (re + 0.5 * (a + b).abs(), im + 0.5 * (a - b).abs());
-            }
-            let d = s[i * n + i];
-            range = [range[0].min(d.re - re), range[1].max(d.re + re), range[2].min(d.im - im), range[3].max(d.im + im)];
-        }
-        Spectrum::Range(range)
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -338,6 +311,25 @@ struct SchurBlock {
     start: usize,
     s: Vec<C64>,
     q: Vec<C64>,
+    departure: f64,
+}
+
+impl SchurBlock {
+    fn of(states: Vec<usize>, start: usize, s: Vec<C64>, q: Vec<C64>) -> SchurBlock {
+        let m = states.len();
+        let departure = (0..m).flat_map(|i| (i + 1..m).map(move |j| (i, j))).map(|(i, j)| s[i * m + j].norm_sqr()).sum::<f64>().sqrt();
+        SchurBlock { states, start, s, q, departure }
+    }
+    /// At z, the least distance δ of z from its diagonal Λ and Henrici's factor 1 + h = Σ_{k<m} (ν/δ)^k of its departure
+    /// from normality ν (module documentation, # First order in the frequency offsets): ‖(z − S)⁻¹‖ ≤ (1 + h)/δ and
+    /// ‖(z − S)⁻¹y‖ ≤ (1 + h)‖(z − Λ)⁻¹y‖, the Neumann series of (z − Λ)⁻¹N, nilpotent -- 1 where N = 0, continuously in N.
+    fn henrici(&self, z: C64) -> (f64, f64) {
+        let m = self.states.len();
+        let delta = (0..m).map(|i| (z - self.s[i * m + i]).abs()).fold(f64::INFINITY, f64::min);
+        let x = self.departure / delta;
+        let factor = (0..m).fold((0.0, 1.0), |(sum, power), _| (sum + power, power * x)).0;
+        (delta, factor)
+    }
 }
 
 impl Schur {
@@ -375,11 +367,10 @@ impl Schur {
                     dense[(at + x) * n + at + y] = h[x * m + y];
                 }
             }
-            blocks.push(SchurBlock { states, start: at, s: h, q });
+            blocks.push(SchurBlock::of(states, at, h, q));
             at = end;
         }
-        let spectrum = Spectrum::of(n, &dense);
-        Some(Schur { n, blocks, s: dense, spectrum })
+        Some(Schur { n, blocks, s: dense })
     }
     /// The Schur form of the adjoint from this one: A† = Q S† Q†, S† lower triangular, so with each block's columns of Q
     /// in reversed order it is upper triangular -- no decomposition.
@@ -398,11 +389,10 @@ impl Schur {
                         dense[(b.start + x) * n + b.start + y] = s[x * m + y];
                     }
                 }
-                SchurBlock { states: b.states.clone(), start: b.start, s, q }
+                SchurBlock::of(b.states.clone(), b.start, s, q)
             })
             .collect();
-        let spectrum = Spectrum::of(n, &dense);
-        Schur { n, blocks, s: dense, spectrum }
+        Schur { n, blocks, s: dense }
     }
     /// Q† x (x with n rows), into the form's order.
     fn left_in(&self, x: &Mat) -> Mat {
@@ -481,21 +471,20 @@ impl Schur {
             }
         }
     }
-    /// Where A is normal, a vector's weights on its eigenvectors, (κ_k, |⟨e_k|v⟩|²): ‖(z − A)⁻¹ v‖² = Σ_k |⟨e_k|v⟩|²/|z − κ_k|²
-    /// exactly (module documentation, # First order in the frequency offsets); none where A is not normal.
-    fn weights(&self, v: &[C64]) -> Option<Vec<(C64, f64)>> {
-        let Spectrum::Normal(values) = &self.spectrum else { return None };
-        let y = self.left_in(&Mat { rows: self.n, cols: 1, data: v.to_vec() }).data;
-        Some(values.iter().zip(&y).map(|(k, c)| (*k, c.norm_sqr())).collect())
-    }
-    /// 1/‖(z − A)⁻¹‖ (module documentation, # First order in the frequency offsets): where A is normal exactly the
-    /// distance of z from A's nearest eigenvalue; otherwise a bound of it from below, z's distance from the rectangle that
-    /// holds A's numerical range W(A) (‖(z − A)⁻¹‖ ≤ 1/dist(z, W(A))), zero where z lies in it (`Spectrum`).
-    fn distance(&self, z: C64) -> f64 {
-        match &self.spectrum {
-            Spectrum::Normal(values) => values.iter().map(|k| (z - *k).abs()).fold(f64::INFINITY, f64::min),
-            Spectrum::Range([a, b, c, d]) => ((a - z.re).max(z.re - b).max(0.0)).hypot((c - z.im).max(z.im - d).max(0.0)),
-        }
+    /// A bound of ‖(z − A)⁻¹ v‖ from above, `y` = Q†v in the form's order (`left_in`): per block (1 + h)‖(z − Λ)⁻¹y‖ on
+    /// it (`SchurBlock::henrici`), in squares -- where A is normal exactly ‖(z − A)⁻¹ v‖ = (Σ_k |⟨e_k|v⟩|²/|z − κ_k|²)^{1/2}
+    /// (module documentation, # First order in the frequency offsets), continuously in its blocks' departures.
+    fn resolvent_norm(&self, z: C64, y: &[C64]) -> f64 {
+        self.blocks
+            .iter()
+            .map(|b| {
+                let m = b.states.len();
+                let (_, factor) = b.henrici(z);
+                let normal: f64 = (0..m).map(|i| y[b.start + i].norm_sqr() / (z - b.s[i * m + i]).norm_sqr()).sum();
+                factor * factor * normal
+            })
+            .sum::<f64>()
+            .sqrt()
     }
     /// (σ − A)⁻¹ v.
     fn resolvent(&self, sigma: C64, v: &[C64]) -> Vec<C64> {
@@ -849,8 +838,8 @@ impl Fold {
     }
 
     /// The offsets eigenstate p's amplitude spans, per replica (module documentation, # First order in the frequency
-    /// offsets): Σ_c w_c δ_c² ‖R(λ_p + f + δ_c) v‖/‖v‖, v = R² W r_p, at each replica of p's group (`Schur::weights`;
-    /// none at the others)
+    /// offsets): Σ_c w_c δ_c² ‖R(λ_p + f + δ_c) v‖/‖v‖, v = R² W r_p, at each replica of p's group
+    /// (`Schur::resolvent_norm`; none at the others)
     /// -- `pattern` (2 k_max v) at the share `main`, the larger of its two signs, and each component into p of
     /// `components` (`components`, at the atom's velocity) at its combined frequency δ's real part, at its source's share
     /// `source(p′)` times its own, min(1, a/|δ|)².
@@ -863,18 +852,15 @@ impl Fold {
                 if rep.group != self.groups[p] {
                     return 0.0;
                 }
-                // The remainder's vector R(z)² W r_p and, where K is normal, its weights on K's eigenvectors.
+                // The remainder's vector v = R(z)² W r_p, in the Schur form's basis (`Schur::resolvent_norm`).
                 let z = lambda + C64::real(rep.frequency);
                 let v = rep.k.resolvent(z, &rep.k.resolvent(z, &rep.w.apply(&self.right(p))));
-                let size = v.iter().map(|x| x.norm_sqr()).sum::<f64>();
+                let size = v.iter().map(|x| x.norm_sqr()).sum::<f64>().sqrt();
                 if size == 0.0 {
                     return 0.0;
                 }
-                let weights = rep.k.weights(&v);
-                let term = |delta: f64| {
-                    let at = z + C64::real(delta);
-                    delta * delta * weights.as_ref().map_or_else(|| 1.0 / rep.k.distance(at), |w| (w.iter().map(|(k, w)| w / (at - *k).norm_sqr()).sum::<f64>() / size).sqrt())
-                };
+                let y = rep.k.left_in(&Mat { rows: rep.k.n, cols: 1, data: v }).data;
+                let term = |delta: f64| delta * delta * rep.k.resolvent_norm(z + C64::real(delta), &y) / size;
                 let main = if main > 0.0 { main * term(pattern).max(term(-pattern)) } else { 0.0 };
                 main + into.iter().map(|&(share, delta)| share * term(delta)).sum::<f64>()
             })
@@ -1012,21 +998,24 @@ impl Fold {
     pub(crate) fn nearest(&self, z0: C64, joins: Option<&Mat>) -> Option<usize> {
         self.nearest_held(z0, joins).map(|x| x.1)
     }
-    /// Of the blocks the series holds (`Folded::held_blocks`) over the replicas, the diagonal entry of their Schur forms
-    /// nearest z₀ + f: its distance, and the state its Schur vector holds most of (E's index); none where the series holds
-    /// no block. A block it does not hold is in no term of the series, so its distance is no part of the series' radius.
+    /// Of the blocks the series holds (`Folded::held_blocks`) over the replicas, the one nearest z₀ + f as its resolvent's
+    /// norm bounds it (`SchurBlock::henrici`: 1/‖(z₀ + f − K_b)⁻¹‖ ≥ δ/(1 + h), the distance of z₀ + f from its spectrum
+    /// where it is normal): that distance, and of its Schur form's diagonal entry nearest z₀ + f the state its Schur
+    /// vector holds most of (E's index); none where the series holds no block. A block it does not hold is in no term of
+    /// the series, so its distance is no part of the series' radius.
     fn nearest_held(&self, z0: C64, joins: Option<&Mat>) -> Option<(f64, usize)> {
         let mut best: Option<(f64, usize)> = None;
         for rep in &self.replicas {
+            let sigma = z0 + C64::real(rep.frequency);
             let held = rep.held_blocks(joins);
             for b in rep.k.blocks.iter().zip(&held).filter(|x| *x.1).map(|x| x.0) {
-                let m = b.states.len();
-                for k in 0..m {
-                    let distance = (z0 + C64::real(rep.frequency) - b.s[k * m + k]).abs();
-                    if best.is_none_or(|x| distance < x.0) {
-                        let most = (0..m).max_by(|&x, &y| b.q[k * m + x].norm_sqr().total_cmp(&b.q[k * m + y].norm_sqr())).expect("a block's state");
-                        best = Some((distance, rep.q[b.states[most]]));
-                    }
+                let (delta, factor) = b.henrici(sigma);
+                let distance = delta / factor;
+                if best.is_none_or(|x| distance < x.0) {
+                    let m = b.states.len();
+                    let k = (0..m).min_by(|&x, &y| (sigma - b.s[x * m + x]).abs().total_cmp(&(sigma - b.s[y * m + y]).abs())).expect("a block's state");
+                    let most = (0..m).max_by(|&x, &y| b.q[k * m + x].norm_sqr().total_cmp(&b.q[k * m + y].norm_sqr())).expect("a block's state");
+                    best = Some((distance, rep.q[b.states[most]]));
                 }
             }
         }

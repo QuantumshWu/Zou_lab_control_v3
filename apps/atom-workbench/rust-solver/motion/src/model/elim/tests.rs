@@ -1121,6 +1121,37 @@ fn the_tilted_pgc_s_kept_units_by_class_and_the_route_readings() {
     }
 }
 
+/// The resolvent's bounds are continuous in K's departure from normality (`SchurBlock::henrici`; module documentation,
+/// # First order in the frequency offsets): a ground state driven into two excited states at 50 and 80 rad/µs of decay
+/// 38 and 6 rad/µs, joined by a coupling ε -- K = H_E − (i/2)D not normal where ε is not zero, its departure of the
+/// order of ε. Criterion one's remainder at the offsets the moving atom spans (`Fold::offsets`, ±10 rad/µs) and the
+/// series' ratio q (`Fold::series_distance`) at ε = 10⁻¹², 10⁻⁹, 10⁻⁶ rad/µs are within 10 ε/30 rad/µs (relative)
+/// of theirs at ε = 0 -- as the eigenvectors move --, where a judgement of K normal or not collapsed the distance to a
+/// rectangle's at a rounding's ε.
+#[test]
+fn the_resolvent_s_bounds_are_continuous_in_the_folded_block_s_departure_from_normality() {
+    let read = |epsilon: f64| -> (f64, f64) {
+        let mut excited = Mat::diagonal(&[C64::real(50.0), C64::real(80.0)]);
+        excited[(0, 1)] = C64::real(epsilon);
+        excited[(1, 0)] = C64::real(epsilon);
+        let levels = Levels { ground: Mat::zeros(1, 1), excited, decay: Mat::diagonal(&[C64::real(38.0), C64::real(6.0)]) };
+        let classes = vec![class(0.0, 1, 2, &[(0, 0, C64::real(5.0)), (1, 0, C64::real(3.0))])];
+        let f = folded(&levels, &classes, &at_rest(1));
+        assert!(f.exists);
+        let rho: f64 = f.offsets(0, 10.0, &[], 1.0, &|_| 1.0).iter().map(|x| x * x).sum::<f64>().sqrt();
+        (rho, f.series_ratio(C64::real(f.eigen.values[0].re)))
+    };
+    let (rho0, q0) = read(0.0);
+    println!("ε 0: ρ {rho0:.6e}, q {q0:.6e}");
+    for epsilon in [1e-12, 1e-9, 1e-6] {
+        let (rho, q) = read(epsilon);
+        let bound = 10.0 * epsilon / 30.0 + 1e-13;
+        println!("ε {epsilon:e}: ρ moved {:.3e}, q moved {:.3e} (relative; bound {bound:.3e})", (rho / rho0 - 1.0).abs(), (q / q0 - 1.0).abs());
+        assert!((rho / rho0 - 1.0).abs() <= bound, "ε {epsilon}: the remainder moved from {rho0} to {rho}");
+        assert!((q / q0 - 1.0).abs() <= bound, "ε {epsilon}: the series' ratio moved from {q0} to {q}");
+    }
+}
+
 /// Criterion three against the exact master equation (unify part 2): a Λ of |1⟩ at 0 and |2⟩ at 100 rad/µs, an excited
 /// state decaying at Γ = 38 rad/µs, three quarters to |1⟩ and a quarter to |2⟩ (on two axes), laser A on |1⟩
 /// (3 rad/µs) and B on |2⟩ (1.5 rad/µs), both on resonance -- where the jumps' coherence, not a coherent Raman coupling,
