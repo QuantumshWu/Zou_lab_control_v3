@@ -260,7 +260,7 @@ pub struct Picture {
     pub work: f64,
     /// The decomposition's route as it was last counted on this picture, per count of states: its preparation and its
     /// price at the stops of its quadrature, and its price of a state at a time (`prepare`); none before it is taken.
-    /// What the strides are weighed against.
+    /// What the strides are weighed against -- the one thing a picture carries from one step to the next (`counts`).
     counted: Vec<Option<[f64; 2]>>,
 }
 
@@ -384,6 +384,18 @@ impl Picture {
                 v.resize(columns * column, 0.0);
             }
         }
+    }
+
+    /// The decomposition's route as this picture last counted it, per count of states (`counted`): what it carries from
+    /// one step to the next, the next step's route weighed against it (`prepare`).
+    pub fn counts(&self) -> &[Option<[f64; 2]>] {
+        &self.counted
+    }
+
+    /// A picture that has counted the decomposition's route so (`counts`), and holds nothing else: the next step's route
+    /// is chosen as on the picture that counted it.
+    pub fn counting(counted: &[Option<[f64; 2]>]) -> Picture {
+        Picture { counted: counted.to_vec(), ..Picture::default() }
     }
 
     /// The states.

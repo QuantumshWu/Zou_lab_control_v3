@@ -1232,8 +1232,12 @@ fn shear<M: Middle>(along: &Along<M>, rho: &mut [C64], psi: &[C64], tau: f64) ->
 /// Hermitian sum the model takes, and four laid as `accumulate` holds its sums: the nodes' weighted sums of the states'
 /// densities, the sums as they stood where the panel being propagated began (`Midway::stretch`), a span's own inside a
 /// panel (`fallen`), and the generator's decay at the step's nodes (`laid_decay`); and the states a panel keeps -- its
-/// stops and its readings -- until its root is known (`Midway::stretch`). Every use writes what it reads: nothing a
-/// step left in it is read by another.
+/// stops and its readings -- until its root is known (`Midway::stretch`). Every use writes what it reads but one: the
+/// picture's counts of the decomposition's route (spectral.rs `Picture::counts`), which the next step's route is weighed
+/// against -- a step takes the strides where they cost less than the decomposition as it was last counted. That is what
+/// the scratch carries from one step to the next (`Carry`): a step's route follows from it, and the routes' states agree
+/// to their accuracy, not to the bit, so a trajectory taken up again with a fresh scratch goes on along other bits (and
+/// then other jumps); taken up with its carry, it goes on as itself (`Scratch::resumed`; adapt.rs `advance`'s stops).
 #[derive(Default)]
 pub struct Scratch {
     picture: Picture,
@@ -1255,7 +1259,22 @@ struct Carved<'a> {
     met: &'a mut Vec<(Stop, f64, [C64; STATES])>,
 }
 
+/// What a trajectory's scratch carries from one step to the next (`Scratch`): its picture's counts of the decomposition's
+/// route (spectral.rs `Picture::counts`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Carry(Vec<Option<[f64; 2]>>);
+
 impl Scratch {
+    /// What the scratch carries to the trajectory's next step (`Carry`).
+    pub fn carry(&self) -> Carry {
+        Carry(self.picture.counts().to_vec())
+    }
+
+    /// The scratch of a trajectory taken up again where its own carried `carry`: its next steps the same to the bit.
+    pub fn resumed(carry: &Carry) -> Scratch {
+        Scratch { picture: Picture::counting(&carry.0), ..Scratch::default() }
+    }
+
     /// The scratch for a cluster of n states.
     fn fit(&mut self, n: usize) {
         self.picture.fit(n);

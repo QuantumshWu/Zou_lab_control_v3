@@ -251,8 +251,9 @@
 //!   the run level keeps its trajectories' checkpoints, next), the product at the analysis times alone.
 //! - The run level's states are not kept at the candidates -- its trajectories times the candidates, in proportion to
 //!   the run's length: PGC3D's 10 ms, 88 × 15 400 states, 345 MB --, but its trajectories' checkpoints (`Checkpoint`:
-//!   the trajectory and its Brownian path at a step's end, adapt.rs `advance`'s stops), at t = 0 and at the first step's
-//!   end at or past every multiple of T's shortest window (`Plan::window`); a state at an analysis time is made again from
+//!   the trajectory, its Brownian path and what its scratch carries, step.rs `Carry`, at a step's end: adapt.rs
+//!   `advance`'s stops), at t = 0 and at the first step's end at or past every multiple of T's shortest window
+//!   (`Plan::window`); a state at an analysis time is made again from
 //!   the last checkpoint before it once the times are known (`replay`, `parts_at`), the trajectory's own to the bit
 //!   (adapt.rs, # The reads: a read is an onlooker, a stop no step's end). The window is the scale the reads are spaced
 //!   by already (a quarter of it, next): the checkpoints are a quarter of the first round's reads in number, about 1 kB
@@ -579,7 +580,7 @@ use crate::model::units::destined;
 use crate::model::tabulate::{Key, Tables};
 use crate::model::{Envelope, Lights, Model, Priced, Run, Sample, Trap, Unit, UnitError, GROUND};
 use crate::request::STATES;
-use crate::step::{stumpff, Dynamics, Price, Refused, Scratch, Segment, Trajectory};
+use crate::step::{stumpff, Carry, Dynamics, Price, Refused, Scratch, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE};
 use rayon::prelude::*;
 use std::collections::{HashMap, VecDeque};
@@ -2628,12 +2629,13 @@ impl State {
 }
 
 /// A kept trajectory's whole state at a step's end (module documentation, # The analysis times; adapt.rs `advance`'s
-/// stops): the trajectory and its Brownian path -- its scratch carries nothing from one step to the next (step.rs
-/// `Scratch`) --, from which it is advanced again to the bit (`replay`).
+/// stops): the trajectory, its Brownian path and what its scratch carries to the next step (step.rs `Carry`: the next
+/// step's route is weighed against it), from which it is advanced again to the bit (`replay`).
 #[derive(Clone)]
 struct Checkpoint {
     trajectory: Trajectory,
     path: adapt::Path,
+    carry: Carry,
 }
 
 /// What one trajectory leaves: what became of it by every output (estimate.rs `Fate`), its (r, κ) at the listed outputs
@@ -2865,7 +2867,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         let mut advanced = Ok(());
         while advanced.is_ok() && t.lost.is_none() && t.time < plan.end {
             if keep {
-                trail.push(Checkpoint { trajectory: t.clone(), path: path.clone() });
+                trail.push(Checkpoint { trajectory: t.clone(), path: path.clone(), carry: scratch.carry() });
             }
             let stop = ((t.time / every).floor() + 1.) * every;
             advanced = adapt::advance(model, domain, tau, &mut t, &mut scratch, &mut path, plan.end, stop, &times, &mut read, &mut each);
@@ -2923,19 +2925,18 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
 fn replay<D: Dynamics>(model: &D, domain: &Domain, tau: f64, end: f64, trail: &[Checkpoint], times: &[f64]) -> Vec<Option<State>> {
     let mut states: Vec<Option<State>> = vec![None; times.len()];
     states[0] = Some(State::of(&trail[0].trajectory, tau));
-    let mut scratch = Scratch::default();
-    // The first time not read, and the trajectory as far as it is advanced again.
-    let (mut reached, mut going): (usize, Option<Checkpoint>) = (1, None);
+    // The first time not read, and the trajectory as far as it is advanced again, with its path and scratch.
+    let (mut reached, mut going): (usize, Option<(Trajectory, adapt::Path, Scratch)>) = (1, None);
     while reached < times.len() {
         let next = times[reached];
         let from = &trail[trail.partition_point(|c| c.trajectory.time < next) - 1];
-        let Checkpoint { mut trajectory, mut path } = match going.take() {
-            Some(going) if going.trajectory.time >= from.trajectory.time => going,
-            _ => from.clone(),
+        let (mut trajectory, mut path, mut scratch) = match going.take() {
+            Some(going) if going.0.time >= from.trajectory.time => going,
+            _ => (from.trajectory.clone(), from.path.clone(), Scratch::resumed(&from.carry)),
         };
         let advanced = adapt::advance(model, domain, tau, &mut trajectory, &mut scratch, &mut path, end, next, times, &mut |k, s| (states[k], reached) = (Some(State::of(s, tau)), k + 1), &mut |_, _| {});
         match advanced {
-            Ok(()) if trajectory.lost.is_none() => going = Some(Checkpoint { trajectory, path }),
+            Ok(()) if trajectory.lost.is_none() => going = Some((trajectory, path, scratch)),
             Err(Refused::Runaway) => {
                 states[reached..].fill(Some(State::of(&trajectory, tau)));
                 break;
@@ -6264,10 +6265,12 @@ mod tests {
 
     /// A kept trajectory's states are its own, made again from its checkpoints (module documentation, # The analysis
     /// times; `run`, `replay`; adapt.rs `advance`: a stop is no step's end), on its class: R2_RECOIL's atoms in |2,2⟩ at
-    /// the trap's centre at 0.4 to 30 times the reach's largest speed along each lab axis through 2 µs at 800 steps, and
-    /// the resonant probe's folded drives (`resonant_probe`) at 1 to 300 times through 0.8 µs at 0.005 µs -- atoms held to
-    /// the end, lost, and stopped where they scatter beyond any state --, read at the candidates m·2τ, the checkpoints
-    /// a fifth of the run less a little apart (off the step's grid). Kept, a trajectory's fates, listed atoms and counts
+    /// the trap's centre at 0.4 to 30 times the reach's largest speed along each lab axis through 2 µs at 800 steps, the
+    /// resonant probe's folded drives (`resonant_probe`) at 1 to 300 times through 0.8 µs at 0.005 µs, and PGC3D_1ms's
+    /// model as the solve closes it, with its near tables, at 0.3 to 3 times through 200 µs (tens of jumps an atom, the
+    /// steps' routes chosen by what the scratch carries, step.rs `Carry`) -- atoms held to the end, lost, and stopped
+    /// where they scatter beyond any state --, read at the candidates m·2τ, the checkpoints a fifth of the run less a
+    /// little apart (off the step's grid). Kept, a trajectory's fates, listed atoms and counts
     /// are those of the same trajectory advanced through at once; and its states replayed at every candidate, and at a
     /// few of them, are to the bit those that one advance through the run reads there -- none after its loss, and after
     /// a runaway the state it stopped in.
@@ -6278,16 +6281,28 @@ mod tests {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R2_RECOIL.json");
         let plain = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
         let (probe, probe_light, kept, b) = resonant_probe();
-        let cases = [(plain.clone(), Light::new(&plain), vec![], 2., [0.4, 3., 30.]), (probe, probe_light, kept, 0.8, [1., 30., 300.])];
-        for (request, light, kept, last, factors) in cases {
-            let model = Model::new(&request, &light, &kept).unwrap();
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json");
+        let pgc3d = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+        let first = (0..GROUND).max_by(|&x, &y| pgc3d.initial_density[(x, x)].re.total_cmp(&pgc3d.initial_density[(y, y)].re)).unwrap();
+        // Each case: its request and light, the units kept, its atoms' state, its run's length (µs), the atoms' speeds over
+        // the reach's largest, and whether its model is the solve's closure with its near tables (else the model as given).
+        let cases = [(plain.clone(), Light::new(&plain), vec![], b, 2., [0.4, 3., 30.], false), (probe, probe_light, kept, b, 0.8, [1., 30., 300.], false), (pgc3d.clone(), Light::new(&pgc3d), vec![], first, 200., [0.3, 1., 3.], true)];
+        for (request, light, kept, b, last, factors, closed) in cases {
             let reference = alone(b);
-            let trap = model.trap(&reference, &model.prepared()).unwrap();
-            let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
+            let (model, trap, reach) = if closed {
+                let (model, _, trap, reach) = Model::closed_at(&request, &light, kept, b, request.temperature_uk);
+                (model, trap, reach)
+            } else {
+                let model = Model::new(&request, &light, &kept).unwrap();
+                let trap = model.trap(&reference, &model.prepared()).unwrap();
+                let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
+                (model, trap, reach)
+            };
             let entries = model.sampled(&model.running());
             let widest = (0..model.decay.rows).map(|x| model.decay[(x, x)].re).fold(0., f64::max);
             let domain = Domain { model: &model, reach: &reach, hbar_over_mass: model.hbar_over_mass(), sampled: &entries, widest, result: true };
-            let run = Run::new(&model, reference);
+            let tables = closed.then(|| model.tabulate(&reach, 1 << 20));
+            let run = tables.as_ref().map_or_else(|| Run::new(&model, reference), |tables| Run::tabulated(&model, tables, reference));
             let mut plan = Plan::new(&[0., 0.5 * last, last], trap.lab);
             let tau = plan.end / 800.;
             plan.cell = 2. * tau;

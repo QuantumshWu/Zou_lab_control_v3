@@ -2660,6 +2660,52 @@ fn thermal(trap: &crate::model::Trap, hm: f64, kt: f64, stream: &mut crate::rand
     (r, kappa)
 }
 
+/// A trajectory stopped at step ends and taken up again with what its scratch carries is the trajectory run through
+/// (adapt.rs `advance`'s stops; `Scratch::carry`, `Scratch::resumed`), on its class: PGC3D_1ms's model as the solve
+/// closes it, with its near tables (`scene_clusters`), six atoms of each cluster through 600 steps of 0.326 µs on their
+/// own jump thresholds -- tens of jumps each --, each run through at once and run again stopped at twelve random times,
+/// at every stop the trajectory and its path copied and its scratch resumed from its carry: every piece of every
+/// step's path (its jumps') and the end state the same to the bit. A fresh scratch at the stops instead goes on along
+/// other bits for some atom (the picture's counts choose the steps' routes): the carry is what a stop needs.
+#[test]
+fn a_trajectory_stopped_and_taken_up_with_its_carry_is_the_one_run_through() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/refs/requests/PGC3D_1ms.json");
+    let (mut atoms, mut differ) = (0, 0);
+    scene_clusters(path, &mut |_, _, cluster, run, starts| {
+        let (tau, steps) = (0.326, 600);
+        let end = steps as f64 * tau;
+        for (i, start) in starts.iter().enumerate().take(6) {
+            let mut start = start.clone();
+            start.threshold = crate::random::Stream::jump(17, i as u64, 0).open_uniform();
+            let mut stream = crate::random::Stream::new(29, crate::random::Purpose::Initial, i as u64, cluster as u32);
+            let mut stops: Vec<f64> = (0..12).map(|_| stream.uniform() * end).collect();
+            stops.sort_by(f64::total_cmp);
+            stops.push(end);
+            // The end state and every piece of the path, stopped at `stops`, each stop taken up again by `resume`.
+            let advanced = |stops: &[f64], resume: Option<&dyn Fn(&step::Scratch) -> step::Scratch>| -> String {
+                let (mut t, mut scratch, mut path) = (start.clone(), step::Scratch::default(), adapt::Path::new(17, i as u64, 4.0 * tau, 2));
+                let mut pieces = vec![];
+                for &stop in stops {
+                    let advanced = adapt::advance(run, &Everywhere, tau, &mut t, &mut scratch, &mut path, end, stop, &[], &mut |_, _| {}, &mut |s, until| pieces.push(format!("{s:?} to {until:?}")));
+                    if advanced.is_err() || t.lost.is_some() {
+                        break;
+                    }
+                    if let Some(resume) = resume {
+                        (t, path, scratch) = (t.clone(), path.clone(), resume(&scratch));
+                    }
+                }
+                format!("{t:?} {}", pieces.join(" "))
+            };
+            let through = advanced(&[end], None);
+            assert_eq!(advanced(&stops, Some(&|s| step::Scratch::resumed(&s.carry()))), through, "cluster {cluster}, atom {i}: stopped at {stops:?}");
+            differ += usize::from(advanced(&stops, Some(&|_| step::Scratch::default())) != through);
+            atoms += 1;
+        }
+    });
+    eprintln!("{atoms} atoms stopped and taken up with their carry as run through; with a fresh scratch {differ} of them go on along other bits");
+    assert!(atoms > 0 && differ > 0, "{atoms} atoms, {differ} differ with a fresh scratch");
+}
+
 /// A scene's model closed by its units' errors at its reference state (model.rs `Model::closed_at`) with its near tables (`Model::tabulate`), and what the ensemble's draw meets (the prepared well's
 /// depth at its bottom against its envelope's top), said; then per cluster sixteen atoms of the scene's temperature in
 /// the trap's harmonic approximation, each a random state of the cluster, held: to `each` the model, its prepared
