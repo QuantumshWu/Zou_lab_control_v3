@@ -779,7 +779,13 @@ impl Picture {
             }
             *bound = linalg::taylor_bound(matrix, n, t);
         }
-        let plan = linalg::Taylor::plan(bounds[0].1[0].max(bounds[1].1[0]), bounds[0].1[1].max(bounds[1].1[1]), tolerance, n);
+        // An exponent of no finite bound makes no state: the stride's state is no number, and the step that took it is
+        // refused at its end (step.rs `Refused::Overflow`; its generators are numbers, `pictured`, so only an
+        // overflow gets here).
+        let Some(plan) = linalg::Taylor::plan(bounds[0].1[0].max(bounds[1].1[0]), bounds[0].1[1].max(bounds[1].1[1]), tolerance, n) else {
+            state.fill(C64::new(f64::NAN, f64::NAN));
+            return;
+        };
         for (matrix, (scalar, _)) in matrices.chunks_exact(size).zip(bounds) {
             linalg::taylor_series(matrix, n, scalar, t, state, plan);
         }
@@ -959,8 +965,8 @@ impl Picture {
         let (n, h) = (self.n, self.half.abs());
         let w = 2.0 * h / stops as f64;
         let bound = 0.5 * (self.bounds[0] + self.bounds[1]) * w + self.moved(h - w, w);
-        let plan = linalg::Taylor::plan(bound, 0.5 * self.bounds[1] * w, self.tolerance(w), n);
-        stops as f64 * 2.0 * ((4 * n * n) as f64 + plan.work(n))
+        // A bound that is no number prices no route.
+        linalg::Taylor::plan(bound, 0.5 * self.bounds[1] * w, self.tolerance(w), n).map_or(f64::INFINITY, |plan| stops as f64 * 2.0 * ((4 * n * n) as f64 + plan.work(n)))
     }
 }
 

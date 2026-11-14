@@ -766,30 +766,37 @@ impl Fold {
     /// eigenbasis (module documentation, # The criteria's numbers), and the turning direct entries; the entries no
     /// larger than the rounding of their sums left out.
     pub(crate) fn components(&self, velocity: [f64; 3]) -> Vec<Component> {
-        let n = self.size();
-        let mut out = vec![];
         let lambda = &self.eigen.values;
         let doppler = |k: [f64; 3]| k[0] * velocity[0] + k[1] * velocity[1] + k[2] * velocity[2];
-        let eigenbasis = |m: &Mat| self.eigen.inverse.product(&m.product(&self.eigen.vectors));
+        // Per group its eigenstates (# Groups: each is one group's), and the left and right eigenvectors on its places:
+        // an entry block of the places of group `to` ← group `from` is, in H's eigenbasis, l_to · m · r_from.
+        let groups = self.members.len();
+        let states: Vec<Vec<usize>> = (0..groups).map(|g| (0..self.size()).filter(|&p| self.groups[p] == g).collect()).collect();
+        let lefts: Vec<Mat> = (0..groups).map(|g| Mat::from_fn(states[g].len(), self.members[g].len(), |a, x| self.eigen.inverse[(states[g][a], self.members[g][x])])).collect();
+        let rights: Vec<Mat> = (0..groups).map(|g| Mat::from_fn(self.members[g].len(), states[g].len(), |x, b| self.eigen.vectors[(self.members[g][x], states[g][b])])).collect();
+        let mut out = vec![];
         for (i, rep) in self.replicas.iter().enumerate() {
+            let columns = &self.members[rep.group];
             for feed in &rep.feeds {
-                let response = sylvester_in(&rep.k, &self.schurs[rep.group], rep.frequency, &feed.w, &self.members[rep.group]);
+                let response = sylvester_in(&rep.k, &self.schurs[rep.group], rep.frequency, &feed.w, columns);
                 for (j, other) in self.replicas.iter().enumerate() {
                     if i == j {
                         continue;
                     }
+                    let rows = &self.members[other.group];
                     for back in &other.feeds {
-                        // The other replica's light emitted from this one's excited amplitude: its coupling back from Q_f.
-                        let m = Mat::from_fn(n, n, |r, c| rep.q.iter().enumerate().map(|(y, &e)| back.emitted[(r, e)] * response[(y, c)]).sum());
+                        // The other replica's light emitted from this one's excited amplitude: its coupling back from Q_f,
+                        // on the other replica's group's places ← this one's.
+                        let m = Mat::from_fn(rows.len(), columns.len(), |r, c| rep.q.iter().enumerate().map(|(y, &e)| back.emitted[(rows[r], e)] * response[(y, columns[c])]).sum());
                         if m.max_abs() == 0.0 {
                             continue;
                         }
                         let beat = rep.frequency - other.frequency - (doppler(feed.wave) - doppler(back.wave));
-                        let e = eigenbasis(&m);
-                        let floor = rounding(n + rep.q.len()) * back.emitted.frobenius() * response.frobenius();
-                        for p in 0..n {
-                            for q in 0..n {
-                                let size = e[(q, p)].abs();
+                        let e = lefts[other.group].product(&m.product(&rights[rep.group]));
+                        let floor = rounding(self.size() + rep.q.len()) * back.emitted.frobenius() * response.frobenius();
+                        for (b, &p) in states[rep.group].iter().enumerate() {
+                            for (a, &q) in states[other.group].iter().enumerate() {
+                                let size = e[(a, b)].abs();
                                 if size <= floor {
                                     continue;
                                 }
@@ -800,12 +807,12 @@ impl Fold {
                 }
             }
         }
+        // A turning direct entry row ← column: of the eigenstates of their two groups, l_q[row] value r_p[column].
+        let group_of = |x: usize| self.members.iter().position(|m| m.contains(&x)).expect("a place's group");
         for &(row, column, beat, value) in &self.turning {
-            let m = Mat::from_fn(n, n, |r, c| if r == row && c == column { value } else { C64::ZERO });
-            let e = eigenbasis(&m);
-            for p in 0..n {
-                for q in 0..n {
-                    let size = e[(q, p)].abs();
+            for &p in &states[group_of(column)] {
+                for &q in &states[group_of(row)] {
+                    let size = (self.eigen.inverse[(q, row)] * value * self.eigen.vectors[(column, p)]).abs();
                     if size > 0.0 {
                         out.push(Component { row: q, column: p, size, distance: C64::real(beat) + lambda[p] - lambda[q], beat, classes: (None, None) });
                     }
@@ -1890,14 +1897,6 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
                 }
             } else {
                 mixing = mixing.max(m);
-            }
-        }
-        for x in fold.photons(levels) {
-            if x.size > share * x.beat.abs() {
-                let pair = x.classes;
-                if !kept.photons.contains(&pair) {
-                    kept.photons.push(pair);
-                }
             }
         }
         if grew {

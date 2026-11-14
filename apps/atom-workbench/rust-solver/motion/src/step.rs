@@ -1359,13 +1359,18 @@ fn root_states() -> f64 {
 /// (`Picture::prepare`) --: the model's generator at the step's middle and, unless it
 /// is still along every path, at the step's two ends. Their decay is laid into `decay` first, node by node in the order
 /// of the kick's sums (`laid_decay`; −h, 0, h, or the middle alone where Ĥ is still): the survival's hazard (# Jumps);
-/// `part` is a sum's scratch. Returns the largest sum of the decay's entries' moduli over the nodes.
-fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64, (decay, part): (&mut [f64], &mut [f64]), start: Option<(&[C64], f64)>) -> f64 {
+/// `part` is a sum's scratch. Returns the largest sum of the decay's entries' moduli over the nodes; a generator at a
+/// node that is no number refuses the step (`Refused::Overflow`: nothing of it can be propagated).
+fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64, (decay, part): (&mut [f64], &mut [f64]), start: Option<(&[C64], f64)>) -> Result<f64, Refused> {
     let (h, still) = (0.5 * tau, along.middle.still());
     along.middle.generator(&along.path, 0.0, &mut picture.base);
     if !still {
         along.middle.generator(&along.path, -h, &mut picture.ends[0]);
         along.middle.generator(&along.path, h, &mut picture.ends[1]);
+    }
+    let numbers = |m: &Mat| m.data.iter().all(|z| z.re.is_finite() && z.im.is_finite());
+    if !(numbers(&picture.base) && (still || picture.ends.iter().all(numbers))) {
+        return Err(Refused::Overflow);
     }
     decay.fill(0.0);
     let generators = if still { [Some(&picture.base), None, None] } else { [Some(&picture.ends[0]), Some(&picture.base), Some(&picture.ends[1])] };
@@ -1377,7 +1382,7 @@ fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64, (decay
     });
     let roots = -(-rate * (h - start.map_or(h, |(_, u)| u)).abs()).exp_m1() * root_states();
     picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots, rate);
-    scale
+    Ok(scale)
 }
 
 /// A generator's decay Γ = i(Ĥ − Ĥ†) (Hermitian; Γ_aa = −2 Im Ĥ_aa) laid as the sum j of those `accumulate` holds: on each
@@ -1827,7 +1832,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let size = (if still { 1 } else { SUMS }) * 2 * n * row(n);
         let (sums, saved, part, decay) = (&mut sums[..size], &mut saved[..size], &mut part[..size], &mut decay[..size]);
         let launched = along.turned(&march.state.psi, march.u, true);
-        let scale = pictured(&along, picture, tau, (&mut *decay, &mut *part), Some((&launched[..n], march.u)));
+        let scale = pictured(&along, picture, tau, (&mut *decay, &mut *part), Some((&launched[..n], march.u)))?;
         let bandwidth = picture.bandwidth;
         sums.fill(0.0);
         let ahead = |u: f64| (u + h) / tau;
@@ -2147,17 +2152,23 @@ impl Price {
     /// The price on the path through a middle at a momentum and a velocity: its own -- the caller's middle is a state's,
     /// or one of the cluster made once: the nodes' counts are the cluster's whatever the point (`Middle::work`), and the
     /// point gives the generator's picture alone. On the route a trajectory's steps take once the decomposition's is
-    /// counted (`spectral::Picture::prepare`): the picture is prepared twice, the first time on that route.
+    /// counted (`spectral::Picture::prepare`): the picture is prepared twice, the first time on that route. A generator
+    /// there that is no number prices the step past any work (no step of it can be taken, `pictured`).
     pub fn of<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> Price {
         let (n, still) = (middle.states(), middle.still());
         let along = Along::new(middle, kappa, velocity);
         let mut scratch = Scratch::default();
         scratch.fit(n);
         let Carved { picture, noise, decay, part, .. } = scratch.carve();
-        pictured(&along, picture, tau, (&mut *decay, &mut *part), None);
+        let none = Price { states: n, still, tau, bandwidth: f64::INFINITY, nodes: 0, panels: 0, made: f64::INFINITY, stops: f64::INFINITY, decomposition: [f64::INFINITY; 3], sector: None };
+        if pictured(&along, picture, tau, (&mut *decay, &mut *part), None).is_err() {
+            return none;
+        }
         let first = nodes(tau, picture.bandwidth);
         let decomposition = [picture.work, picture.price(first + 2), first as f64];
-        pictured(&along, picture, tau, (&mut *decay, &mut *part), None);
+        if pictured(&along, picture, tau, (&mut *decay, &mut *part), None).is_err() {
+            return none;
+        }
         let (nodes, panels) = (nodes(tau, picture.bandwidth), plan(tau.abs(), picture.bandwidth, FORMS, Within::Share).1);
         let sector = middle.optical(&along.path).and_then(|shape| noise.sector.schur(&picture.base, shape.ground).map(|schur| (shape.ground, schur)));
         Price { states: n, still, tau, bandwidth: picture.bandwidth, nodes, panels, made: picture.work, stops: picture.price(nodes + 2), decomposition, sector }

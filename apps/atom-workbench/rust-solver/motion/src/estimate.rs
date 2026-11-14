@@ -781,6 +781,15 @@ pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scale
             spread: if groups >= 3 { spread(without.iter().map(|w| w / (weight * (g - 1.) * (g - 2.))), read) } else { Spread::UNREAD },
         })
     };
+    // A trajectory of either level that failed by a time -- its step refused at every length, its state no number
+    // (step.rs `Refused`; module documentation, # What is counted) -- is an unbounded difference between the levels:
+    // every quantity's step error reads beyond any bound, clearly (the rung is left, as an adaptive integrator leaves a
+    // step it could not take). A failure no shorter step cures halves the check to its cap, which says so (solve.rs
+    // `Settled::Capped`).
+    if each.iter().any(|(_, j)| j.all.iter().any(|s| s.failed > 0.)) {
+        let unbounded = Read { value: f64::INFINITY, spread: Spread { error: 0., groups: g } };
+        return Between { loss: unbounded, shown: [unbounded; STATES], temperature: Some(unbounded) };
+    }
     let unread = Read { value: f64::NAN, spread: Spread::UNREAD };
     let total = |m: &Moments| m.temperature.map_or(f64::NAN, |t| t.iter().sum::<f64>());
     // T's error is relative to the finer level's T and weighed by its held share, as T's account is, over T's allowance
@@ -1246,10 +1255,10 @@ mod tests {
     /// of each group after the first output, the second after the second. At the first output all eight count; at the
     /// second four of eight, u = ½, and the estimates are the four's -- nothing lost, state 0 whole, T read on the four
     /// groups --; at the third none: u = 1, the loss the second's, nothing read, no atom held, no T, and what is shown
-    /// errs by its statistics at most one. The step's size between two such levels reads the outputs that count a
-    /// trajectory at both levels with every group left out: none of the identical levels' differences, zero read with
-    /// a spread; where no output counts one, no number. And atoms lost before the others end: the loss is the counted
-    /// ones', the share of the others apart.
+    /// errs by its statistics at most one. The step's size between two levels of such trajectories -- refused, no
+    /// number -- is unbounded on every quantity, clearly beyond any bound (`between`: the rung is left); of the same
+    /// trajectories with none refused, the identical levels differ by nothing, read with a spread. And atoms lost
+    /// before the others end: the loss is the counted ones', the share of the others apart.
     #[test]
     fn an_output_no_trajectory_counts_at_estimates_nothing_and_its_share_is_known() {
         let made = || -> Vec<Group> {
@@ -1270,10 +1279,11 @@ mod tests {
         assert!((e[3].trajectories, e[3].held, e[3].failed) == (0., 0., 8.) && e[3].motion.is_none() && !e[3].loss_error.read() && e[3].shown_errors.iter().all(|s| !s.read()));
         assert_eq!((e[3].shown_interval(), e[3].shown_statistics()), (f64::INFINITY, 1.));
         let read = between(&groups, &made(), &UNIT, &[0., 1., 2., 3.]);
-        assert!(read.loss.value == 0. && read.shown[0].value == 0. && read.loss.spread.read() && read.temperature.is_some_and(|t| t.value == 0.), "{read:?}");
-        let late: Vec<Group> = groups.iter().map(|g| Group { sums: vec![g.sums[0].clone(), g.sums[3].clone()], scattered: g.scattered }).collect();
-        let none = between(&late, &late, &UNIT, &[0., 3.]);
-        assert!(none.loss.value.is_nan() && !none.loss.spread.read() && none.temperature.is_none(), "{none:?}");
+        let beyond = |r: &Read| r.outcome(1e300, 1e6) == crate::decide::Outcome::Beyond;
+        assert!(beyond(&read.loss) && read.shown.iter().all(beyond) && read.temperature.as_ref().is_some_and(beyond), "{read:?}");
+        let early: Vec<Group> = groups.iter().map(|g| Group { sums: g.sums[..2].to_vec(), scattered: g.scattered }).collect();
+        let none = between(&early, &early, &UNIT, &[0., 1.]);
+        assert!(none.loss.value == 0. && none.shown[0].value == 0. && none.loss.spread.read() && none.temperature.is_some_and(|t| t.value == 0.), "{none:?}");
         let lost: Vec<Group> = (0..4)
             .map(|_| {
                 let mut g = Group::new(3);

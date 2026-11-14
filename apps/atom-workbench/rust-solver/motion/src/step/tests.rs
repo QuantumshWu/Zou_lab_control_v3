@@ -415,6 +415,21 @@ fn step_of<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, scratch: &mut st
     step_on(model, from, tau, &step::Brownian::STILL, scratch)
 }
 
+/// A generator that is no number refuses the step (step.rs `pictured`, `Refused::Overflow`) -- where it is no number
+/// throughout, at every length -- and nothing panics: the trajectory fails, and the check reads it as an unbounded
+/// difference (estimate.rs `between`).
+#[test]
+fn a_generator_that_is_no_number_refuses_the_step_and_panics_nowhere() {
+    let hm = 7.3e-4;
+    let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
+    let beams = vec![Beam { k: [0.0, 0.0, 8.0], rabi: 10.0, phase: 0.0 }];
+    let model = Atom::new(hm, flat, beams, f64::NAN, 38.1);
+    let start = held(&model, [0.0; 3], [0.0; 3]);
+    for tau in [0.5, 1e-3] {
+        assert!(matches!(step_of(&model, &start, tau, &mut step::Scratch::default()), Err(step::Refused::Overflow)), "τ {tau}");
+    }
+}
+
 /// A trajectory at the ground state at (r, κ) whose threshold no step reaches (a jump-free propagation).
 fn held(model: &Atom, r: [f64; 3], kappa: [f64; 3]) -> Trajectory {
     let mut t = Trajectory::new(model, 0, r, kappa, 7, 0);

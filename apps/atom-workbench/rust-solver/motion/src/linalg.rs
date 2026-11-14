@@ -1140,13 +1140,17 @@ impl Taylor {
     /// are at most e^y. A part too large for its rounding to be within its share takes no plan, unless it is of y ≤ 1
     /// (its rounding then that of a few products: a tolerance below it is met as far as the arithmetic allows); the
     /// parts are tried from one up while they are fewer than the best plan's products (a plan of q parts takes at
-    /// least q), and from x parts on every part is of y ≤ 1. Nothing to sum where x is within the unit round-off.
-    pub fn plan(x: f64, mu: f64, tolerance: f64, n: usize) -> Taylor {
+    /// least q), and from x parts on every part is of y ≤ 1. Nothing to sum where x is within the unit round-off. None
+    /// where the bound, the logarithmic norm or the tolerance is no number: an exponent that is none has no series (the
+    /// caller refuses what it was to make, step.rs `Refused::Overflow`).
+    pub fn plan(x: f64, mu: f64, tolerance: f64, n: usize) -> Option<Taylor> {
+        if !(x.is_finite() && mu.is_finite() && tolerance > 0.0) {
+            return None;
+        }
         // A series whose first term is within the unit round-off of the vector it acts on is the vector itself.
         if x <= UNIT_ROUNDOFF {
-            return Taylor { parts: 1, terms: 0 };
+            return Some(Taylor { parts: 1, terms: 0 });
         }
-        assert!(x.is_finite() && tolerance > 0.0, "a Taylor plan of a bound {x} within {tolerance}");
         let terms_of = |parts: usize| -> Option<usize> {
             let y = x / parts as f64;
             let share = tolerance / parts as f64 * (-mu.max(0.0) * (parts - 1) as f64 / parts as f64).exp();
@@ -1178,7 +1182,7 @@ impl Taylor {
             }
             parts += 1;
         }
-        best.expect("a plan")
+        best
     }
     /// Its complex multiply-adds on n states: a product of n² a term.
     pub fn work(&self, n: usize) -> f64 {
@@ -1655,7 +1659,7 @@ pub(crate) mod tests {
             let want = exp(&h, t).apply(&v);
             for tolerance in [1e-3, 1e-6, 1e-12] {
                 let (scalar, [bound, mu]) = taylor_bound(&h.data, n, t);
-                let plan = Taylor::plan(bound, mu, tolerance, n);
+                let plan = Taylor::plan(bound, mu, tolerance, n).expect("a finite bound's plan");
                 let mut w = v.clone();
                 taylor_series(&h.data, n, scalar, t, &mut w, plan);
                 let phase = (t * scalar).exp();
