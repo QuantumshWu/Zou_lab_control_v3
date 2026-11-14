@@ -476,9 +476,9 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         let far = (0..n).map(|i| fold.direct[(i, i)].re).sum::<f64>() / n as f64;
         let z0 = fold.eigen.values.iter().map(|z| z.re).sum::<f64>() / n as f64;
         let q = fold.series_ratio(C64::real(z0));
-        let order = Series::order_of(q).expect("the series converges here");
-        assert!(order <= SERIES_MOST, "{name}: the forms hold the order {order}");
         let [x_size, beta] = fold.normalized_sizes(&lv);
+        let order = Series::order_of(q, x_size).expect("the series converges here");
+        assert!(order <= SERIES_MOST, "{name}: the forms hold the order {order}");
         let normalization = Series::normalization_of(x_size).expect("the normalization's series converges here");
         let hermitian_order = Series::hermitian_of(beta, normalization);
         // The forms (every class, every replica, as the engine's per carrier and basis), from the reference's responses.
@@ -501,10 +501,10 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         let mut whole = fold.direct.clone();
         whole.add_scaled(C64::ONE, &n0);
         let hermitian = whole.hermitian_part();
-        let four = |m: Mat| -> [Mat; 4] { [m, Mat::zeros(n, n), Mat::zeros(n, n), Mat::zeros(n, n)] };
+        let four = |m: &Mat| -> Vec<C64> { m.data.iter().copied().chain(std::iter::repeat_n(C64::ZERO, 3 * n * n)).collect() };
         let made = |orders: Orders| -> Vec<C64> {
             let mut data = vec![C64::ZERO; 14 * n * n];
-            crate::model::assemble::normal(&four(hermitian.clone()), &four(n1.clone()), &four(x.clone()), &four(l.clone()), [z0, 0.0, 0.0, 0.0], orders, &mut data);
+            crate::model::assemble::normal(&four(&hermitian), &four(&n1), &four(&x), &four(&l), n, [z0, 0.0, 0.0, 0.0], orders, true, true, true, &mut data, &mut vec![]);
             data
         };
         let matrix = |data: &[C64], m: usize| Mat { rows: n, cols: n, data: data[m * n * n..(m + 1) * n * n].to_vec() };
@@ -521,12 +521,9 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         let mut skew = route.clone();
         skew.add_scaled(-C64::ONE, &route.adjoint_product(&Mat::identity(n)));
         // The decay at each order J of the normalization: within its bound.
-        let generator_bound = q.powi(order as i32 + 1) / (1.0 - q) + crate::units::rounding(n * n * (order + 2));
-        let series_bound = Series::remainder(q, order) + crate::units::rounding(n * n * (order + 2));
-        let rate = |j: usize| {
-            let e = binomial(-0.5, j + 1).abs() * x_size.powi(j as i32 + 1) / (1.0 - x_size) * (1.0 + x_size).sqrt();
-            2.0 * e + e * e
-        };
+        let generator_bound = q.powi(order as i32 + 1) / (1.0 - q) + if order >= 1 { x_size * q } else { 0.0 } + crate::units::rounding(n * n * (order + 2));
+        let series_bound = Series::remainder(q, x_size, order) + crate::units::rounding(n * n * (order + 2));
+        let rate = |j: usize| Series::normalization_remainder(x_size, j);
         // The jumps' product on the slow state, of the wave operator to the series' order: T = R₀W − R₀²W E (E = H − z₀),
         // Σ over the classes of T†D T on S⁻¹.
         let decay_apart = |j: usize| -> (f64, f64) {
@@ -567,7 +564,7 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
             assert!(apart <= bound, "{name} at {r:?}, J {j}: the decay {apart} beyond its bound {bound}");
             assert!(skew <= crate::units::rounding(4 * n * n * (j + 1)), "the decay is Hermitian: {skew}");
         }
-        assert!(landing_apart.frobenius() <= (q + x_size * q + rate(normalization)).max(1e-9) * exact.frobenius(), "the landing map");
+        assert!(landing_apart.frobenius() <= (q + x_size * q + rate(normalization)).max(1e-9) * exact.frobenius(), "the landing map {}", landing_apart.frobenius() / exact.frobenius());
     }
   }
 }

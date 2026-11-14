@@ -602,12 +602,9 @@ impl Fold {
     pub(crate) fn size(&self) -> usize {
         self.generator.rows
     }
-    /// The right eigenvector r_p (unit) and the left one l_p (l_p† r_q = δ_pq) of H.
+    /// The right eigenvector r_p (unit) of H.
     pub(crate) fn right(&self, p: usize) -> Vec<C64> {
         (0..self.size()).map(|i| self.eigen.vectors[(i, p)]).collect()
-    }
-    pub(crate) fn left(&self, p: usize) -> Vec<C64> {
-        (0..self.size()).map(|i| self.eigen.inverse[(p, i)].conj()).collect()
     }
     /// Its ground weight ‖P_G r_p‖².
     pub(crate) fn ground_weight(&self, p: usize) -> f64 {
@@ -1222,13 +1219,15 @@ pub(crate) fn bare_remainders(fold: &Fold, classes: usize, bare: &[f64]) -> Vec<
 /// whose remainder q^{K+1}/(1 − q) is within the model's share (`share`); the largest excited share x (X's largest
 /// eigenvalue) and the normalization's order J its series takes (`Series::normalization_of`); the largest relative
 /// size β of what the normalization does to the Hermitian generator, and the order J_h that part takes (`hermitian_of`);
-/// and the excited state that sets the distance where the ratio is largest (`Fold::nearest`).
+/// and the excited state that sets the distance where the ratio is largest (`Fold::nearest`), and the one that holds the
+/// most of the excited share where β is largest (`Fold::most_excited`).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Series {
     pub centre: Vec<f64>,
     pub ratio: f64,
     pub order: usize,
     pub nearest: Option<usize>,
+    pub densest: Option<usize>,
     pub excited: f64,
     pub normalization: usize,
     pub commuted: f64,
@@ -1238,42 +1237,52 @@ pub(crate) struct Series {
 impl Series {
     /// The series of no light: every order 0 (a model's own before its atoms are read, `Model::referenced`).
     pub(crate) fn none(clusters: usize) -> Series {
-        Series { centre: vec![0.0; clusters], ratio: 0.0, order: 0, nearest: None, excited: 0.0, normalization: 0, commuted: 0.0, hermitian: 0 }
+        Series { centre: vec![0.0; clusters], ratio: 0.0, order: 0, nearest: None, densest: None, excited: 0.0, normalization: 0, commuted: 0.0, hermitian: 0 }
     }
 
-    /// The least order whose remainder at the ratio q is within the share; None where the series does not converge
-    /// (q ≥ 1: the fold's existence is criterion one's to restore, a block made explicit). The remainder of the wave
-    /// operator T after order K is r = q^{K+1}/(1 − q) of it (`remainder`), so a rate, of T†T, is within 2r + r².
-    pub(crate) fn order_of(q: f64) -> Option<usize> {
+    /// The least order whose remainder at the ratio q and the excited share x is within the share; None where the series
+    /// does not converge (q ≥ 1: the fold's existence is criterion one's to restore, a block made explicit).
+    pub(crate) fn order_of(q: f64, x: f64) -> Option<usize> {
         if !(q < 1.0) {
             return None;
         }
-        (0..).find(|&k| Series::remainder(q, k) <= share())
+        (0..).find(|&k| Series::remainder(q, x, k) <= share())
     }
 
-    /// A rate's relative remainder at the series' ratio q after order K: 2r + r², r = q^{K+1}/(1 − q) (`order_of`); all of
-    /// it where the series does not converge.
-    pub(crate) fn remainder(q: f64, order: usize) -> f64 {
+    /// A rate's relative remainder of the series after order K (`order_of`): the wave operator T after order K is
+    /// within r = q^{K+1}/(1 − q) of it, and at K ≥ 1 its first order taken as the term Y E₀ (assemble.rs `normal`, the
+    /// fixed point's Y²E apart) a further x q -- ‖Y‖ ≤ x, ‖E‖ ≤ q d against the fold's part of about x d --, so a rate, of
+    /// T†T, is within 2r + r²; all of it where the series does not converge.
+    pub(crate) fn remainder(q: f64, x: f64, order: usize) -> f64 {
         if !(q < 1.0) {
             return 1.0;
         }
-        let r = q.powi(order as i32 + 1) / (1.0 - q);
+        let r = q.powi(order as i32 + 1) / (1.0 - q) + if order >= 1 { x * q } else { 0.0 };
         (2.0 * r + r * r).min(1.0)
     }
 
     /// The normalization's order J at the excited share x (ELIMINATION v7): S⁻¹ = (1 + X)^{−1/2} is Σ_j b_j X^j,
     /// b_j = binom(−1/2, j), whose terms' moduli fall (|b_j| = (2j − 1)!!/(2j)!!), so the series to order J is S⁻¹
     /// within ρ_J = |b_{J+1}| x^{J+1}/(1 − x), and relatively, against ‖S⁻¹‖ ≥ (1 + x)^{−1/2}, within ε = ρ_J √(1 + x); a
-    /// rate ψ†S⁻¹ΛS⁻¹ψ within 2ε + ε². The least J whose rate is within the share; None where it does not converge
-    /// (x ≥ 1). (The landing's S = (1 + X)^{1/2} takes the same J: |binom(1/2, j)| ≤ |b_j|.)
+    /// rate ψ†S⁻¹ΛS⁻¹ψ within 2ε + ε²; the landing's S = (1 + X)^{1/2} takes the same J (|binom(1/2, j)| ≤ |b_j|) and its
+    /// (1 + Y)⁻¹ the same order (`normalization_remainder`). The least J whose remainder is within the share; None where
+    /// it does not converge (x ≥ 1).
     pub(crate) fn normalization_of(x: f64) -> Option<usize> {
         if !(x < 1.0) {
             return None;
         }
-        (0..).find(|&j| {
-            let e = binomial(-0.5, j + 1).abs() * x.powi(j as i32 + 1) / (1.0 - x) * (1.0 + x).sqrt();
-            2.0 * e + e * e <= share()
-        })
+        (0..).find(|&j| Series::normalization_remainder(x, j) <= share())
+    }
+
+    /// The normalization's remainder at the excited share x after order J (`normalization_of`): a rate's 2ε + ε²,
+    /// ε = |b_{J+1}| x^{J+1}/(1 − x) √(1 + x), and the landing map's (1 + Y)⁻¹ = Σ_{j≤J} (−Y)^j, ‖Y‖ ≤ x, within
+    /// x^{J+1}/(1 − x) -- the larger; all of it where the series does not converge.
+    pub(crate) fn normalization_remainder(x: f64, order: usize) -> f64 {
+        if !(x < 1.0) {
+            return 1.0;
+        }
+        let e = binomial(-0.5, order + 1).abs() * x.powi(order as i32 + 1) / (1.0 - x) * (1.0 + x).sqrt();
+        (2.0 * e + e * e).max(x.powi(order as i32 + 1) / (1.0 - x)).min(1.0)
     }
 
     /// The Hermitian part's order J_h (ELIMINATION v7): the normalization moves the Hermitian generator by
@@ -1294,6 +1303,11 @@ impl Series {
 /// and R₀²W). A model whose atoms ask a higher one has the excited block nearest its reference made explicit
 /// (criterion one: solve.rs `closed`, `Series::nearest`), which moves the series' distance away.
 pub(crate) const SERIES_MOST: usize = 1;
+
+/// The highest order of the normalization's effect on the Hermitian generator the evaluation takes: none, the Hermitian
+/// part the series' own (assemble.rs `normal`). Where the share asks more (`Series::hermitian_of`) the block of the most
+/// excited share is made explicit (criterion one, `Series::densest`), which takes its admixture out of X.
+pub(crate) const HERMITIAN_MOST: usize = 0;
 
 /// The orders of the normalized generator's evaluation (ELIMINATION v7; `Series`): the series' K (at most
 /// `SERIES_MOST`), the normalization's J, the Hermitian part's J_h.
@@ -1407,9 +1421,10 @@ impl super::Model {
             })
             .fold((0.0, None), |(most, at), (ratio, fold, z0)| if ratio > most { (ratio, Some((fold, z0))) } else { (most, at) });
         let nearest = nearest.and_then(|(fold, z0)| fold.nearest(z0));
+        let densest = read.iter().flatten().flatten().fold((f64::NEG_INFINITY, None), |(most, at), x| if x.4[1] > most { (x.4[1], Some(&x.1)) } else { (most, at) }).1.and_then(|fold| fold.most_excited());
         let sizes = read.iter().flatten().flatten().fold([0.0_f64; 2], |m, x| [m[0].max(x.4[0]), m[1].max(x.4[1])]);
         let normalization = Series::normalization_of(sizes[0]).unwrap_or(usize::MAX);
-        Series { centre, ratio, order: Series::order_of(ratio).unwrap_or(usize::MAX), nearest, excited: sizes[0], normalization, commuted: sizes[1], hermitian: Series::hermitian_of(sizes[1], normalization) }
+        Series { centre, ratio, order: Series::order_of(ratio, sizes[0]).unwrap_or(usize::MAX), nearest, densest, excited: sizes[0], normalization, commuted: sizes[1], hermitian: Series::hermitian_of(sizes[1], normalization) }
     }
 
     /// The excited hyperfine blocks F′ of the model's states (`blocks`), from its labels.
@@ -1417,11 +1432,14 @@ impl super::Model {
         excited_blocks(&self.labels)
     }
 
-    /// Where the model's series asks an order its near forms do not hold (`SERIES_MOST`): the excited block of the state
-    /// that sets the series' distance where its ratio is largest (`Series::nearest`), to be made explicit -- criterion
-    /// one, which moves the distance away; none where the order is held.
+    /// Where the model's series asks an order its evaluation does not take (`SERIES_MOST`, `HERMITIAN_MOST`): the excited
+    /// block to be made explicit -- criterion one --, of the state that sets the series' distance where its ratio is
+    /// largest (`Series::nearest`: it moves the distance away), or of the state that holds the most of the excited share
+    /// where the normalization's effect on the Hermitian part is largest (`Series::densest`: it takes its admixture out of
+    /// X); none where the orders are held.
     pub(crate) fn series_block(&self) -> Option<super::Unit> {
-        let e = self.series.nearest.filter(|_| self.series.order > SERIES_MOST)?;
+        let s = &self.series;
+        let e = if s.order > SERIES_MOST { s.nearest } else if s.hermitian > HERMITIAN_MOST { s.densest } else { None }?;
         self.blocks().iter().position(|b| b.contains(&e)).map(|block| super::Unit::Block { block })
     }
 
@@ -1520,14 +1538,12 @@ impl super::Model {
             let z0 = C64::real(far + self.series.centre[sample.cluster]);
             let q = (fold.series_norm(z0) + left) / fold.series_distance(z0);
             let order = self.series.order.min(SERIES_MOST);
-            let series = Series::remainder(q, order);
+            let [x, beta] = fold.normalized_sizes(&levels);
+            let series = Series::remainder(q, x, order);
             if let Some(unit) = block_of(fold.nearest(z0)) {
                 book(&unit, series, &mut out);
             }
-            let [x, beta] = fold.normalized_sizes(&levels);
-            let j = self.series.normalization;
-            let e = if x < 1.0 { binomial(-0.5, j + 1).abs() * x.powi(j as i32 + 1) / (1.0 - x) * (1.0 + x).sqrt() } else { 1.0 };
-            let normalization = (2.0 * e + e * e).min(1.0) + if self.series.hermitian == 0 { beta } else { 0.0 };
+            let normalization = Series::normalization_remainder(x, self.series.normalization) + if self.series.hermitian == 0 { beta } else { 0.0 };
             if let Some(unit) = block_of(fold.most_excited()) {
                 book(&unit, normalization, &mut out);
             }

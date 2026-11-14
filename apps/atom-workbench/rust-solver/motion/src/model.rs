@@ -700,9 +700,11 @@ impl Model {
     /// and the right wave operators' overlap Σ_f S_f T_f to the series' leading order Σ_f W′ R₀² W = Y -- not
     /// normalized, its norm N against the next jump's threshold (step.rs `jump`): N < 1, the fast part takes the rest
     /// away at once (a photon more); N > 1, the next photon is late (antibunching). The same map is the light's switching
-    /// on (ELIMINATION v3 4). Where the cluster has no fold the state is f.
+    /// on (ELIMINATION v3 4). Both factors to the normalization's order J (assemble.rs `normal`): at J = 0 the map is
+    /// the identity, its remainder booked with the normalization's (elim.rs `Series::normalization_remainder`). Where
+    /// the cluster has no fold the state is f.
     pub(crate) fn landed(&self, plan: &assemble::Plan, table: Option<&tabulate::NearTable>, at: &Point, f: &[C64]) -> crate::step::Internal {
-        let Some(fourth) = &plan.fourth else { return f.iter().copied().collect() };
+        let Some(fourth) = plan.fourth.as_ref().filter(|fourth| fourth.bends()) else { return f.iter().copied().collect() };
         let (n, size) = (fourth.n, fourth.n * fourth.n);
         let mut site = assemble::Held::<assemble::Site>::take();
         let table = self.pointed(plan, table, at.r, &mut site);

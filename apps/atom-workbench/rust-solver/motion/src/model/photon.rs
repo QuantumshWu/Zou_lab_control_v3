@@ -343,9 +343,9 @@ impl Model {
     #[allow(clippy::too_many_arguments)]
     fn sited(&self, plan: &Arc<Plan>, table: Option<&NearTable>, r: Option<[f64; 3]>, kappa: [f64; 3], order: usize, site: &mut Site, laid: bool) -> f64 {
         // A site of its own is a jump's (or a reading's): its landing follows at the same point (model.rs `Model::landed`),
-        // and is made with the photons' matrices; a middle's scattering asks none -- and nothing where S⁻¹ is the
-        // identity (assemble.rs `Fourth::bends`).
-        let fourth = plan.fourth.as_ref().filter(|fourth| fourth.bends() || !laid).map_or(0.0, |fourth| self.quartic(plan, fourth, table, r, site, laid, !laid));
+        // and is made with the photons' matrices; a middle's scattering asks none -- and nothing where S⁻¹ and the
+        // landing are the identity (assemble.rs `Fourth::bends`).
+        let fourth = plan.fourth.as_ref().filter(|fourth| fourth.bends()).map_or(0.0, |fourth| self.quartic(plan, fourth, table, r, site, laid, !laid));
         let near = match table {
             _ if plan.near.len() == 0 => {
                 site.jumped(plan, None);

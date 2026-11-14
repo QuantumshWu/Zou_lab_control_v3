@@ -983,3 +983,48 @@ fn the_normalized_part_along_a_path_is_its_nodes_and_its_quadrature_falls_as_the
         last = Some((node_error, held_error));
     }
 }
+
+/// The held part's force form (`Middle::held_force`) is the form of its gradient's matrices: at the series' order 1
+/// (the 1D PGC at 3 G, refs/requests/PGC1D_TILT_0: q ≈ 0.1) the held part −Herm(Y E₀) at a node, its force form on a
+/// Hermitian ρ by the forms' terms contracted with E₀ρ and ρY (no gradient matrix made) against Σ_xy ∇held[x, y] ρ[y, x]
+/// of the node's whole matrices (`Middle::gradient`, the node's gradients made): at the three nodes of a step along a
+/// path, on random states, to the rounding of the sums.
+#[test]
+fn the_held_part_s_force_form_is_its_gradient_s() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC1D_TILT_0.json");
+    let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let request = Request::from_native(&line).unwrap();
+    let light = Light::new(&request);
+    let bare = Model::new(&request, &light, &[]).unwrap();
+    let kept: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).flat_map(|frequency| bare.bare_units(Component { frequency, counter: false })).collect();
+    let (r, v) = ([0.05, -0.1, 0.0], [0.09, 0.05, 0.07]);
+    let points = [(r, v), ([0.0; 3], [0.0; 3])];
+    // The prior's units at the points (its resonant Δm = 2 links: the F = 2 sublevels one cluster).
+    let prior = Model::new(&request, &light, &kept).unwrap().prior(&request, &points);
+    let mut model = Model::new(&request, &light, &[kept, prior].concat()).unwrap();
+    model.referenced(&points);
+    let cluster = model.cluster_of(GROUND - 1);
+    let plan = model.plan(cluster, &model.running());
+    let fourth = plan.fourth.as_ref().expect("the cluster's fold has its normalized generator");
+    assert!(fourth.held(), "the series at order 1: {:?}", fourth.orders);
+    let n = plan.states;
+    let kappa = v.map(|x| x / model.hbar_over_mass);
+    let mut stream = Stream::new(7, Purpose::Initial, 0, 0);
+    for s in [-0.165, 0.0, 0.165] {
+        for _ in 0..3 {
+            let rho = hermitian(n, &mut stream);
+            // A fresh middle for each: the force's form first (the node's values alone), then the gradient's matrices.
+            let middle = model.middle(&plan, r, 0.0, None);
+            let path = middle.path(kappa, v);
+            let force = middle.force(&path, s, &rho);
+            let mut g: [Vec<C64>; 3] = Default::default();
+            middle.gradient(&path, s, &mut g, None);
+            let form: [f64; 3] = std::array::from_fn(|a| (0..n * n).map(|i| (g[a][i] * rho[(i % n) * n + i / n]).re).sum());
+            let size: f64 = (0..3).map(|a| (0..n * n).map(|i| (g[a][i] * rho[(i % n) * n + i / n]).abs()).sum::<f64>()).fold(0.0, f64::max);
+            println!("s {s}: the force's form {force:?}, the gradient's {form:?} (of {size:.3e})");
+            for a in 0..3 {
+                assert!((force[a] - form[a]).abs() <= 1e-10 * size.max(1e-30), "axis {a} at s {s}: {} against {}", force[a], form[a]);
+            }
+        }
+    }
+}
