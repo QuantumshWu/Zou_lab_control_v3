@@ -227,26 +227,32 @@ impl Schur {
     }
 }
 
-/// T H − (K − f) T = W, K = Q_K S_K Q_K† and H = Q_H S_H Q_H† (Bartels–Stewart): Y = Q_K† T Q_H solves
-/// Y S_H − (S_K − f) Y = Q_K† W Q_H column by column, ((S_H)_jj + f − S_K) Y_j = F_j − Σ_{i<j} (S_H)_ij Y_i.
-fn sylvester(k: &Schur, h: &Schur, f: f64, w: &Mat) -> Mat {
-    if k.n == 0 {
+/// T (H + r) − (L + l) T = W for the Schur forms L = Q_L S_L Q_L† and H = Q_H S_H Q_H† and scalars l, r
+/// (Bartels–Stewart): Y = Q_L† T Q_H solves Y (S_H + r) − (S_L + l) Y = Q_L† W Q_H column by column,
+/// ((S_H)_jj + r − l − S_L) Y_j = F_j − Σ_{i<j} (S_H)_ij Y_i.
+fn solve_sylvester(left: &Schur, l: C64, right: &Schur, r: C64, w: &Mat) -> Mat {
+    if left.n == 0 {
         return Mat::zeros(0, w.cols);
     }
-    let fq = h.right_in(&k.left_in(w));
-    let n = h.n;
-    let mut y = Mat::zeros(k.n, n);
-    let mut column = vec![C64::ZERO; k.n];
+    let fq = right.right_in(&left.left_in(w));
+    let n = right.n;
+    let mut y = Mat::zeros(left.n, n);
+    let mut column = vec![C64::ZERO; left.n];
     for j in 0..n {
-        for m in 0..k.n {
-            column[m] = fq[(m, j)] - (0..j).map(|i| h.s[i * n + j] * y[(m, i)]).sum::<C64>();
+        for m in 0..left.n {
+            column[m] = fq[(m, j)] - (0..j).map(|i| right.s[i * n + j] * y[(m, i)]).sum::<C64>();
         }
-        k.shifted_solve(h.s[j * n + j] + C64::real(f), &mut column);
-        for m in 0..k.n {
+        left.shifted_solve(right.s[j * n + j] + r - l, &mut column);
+        for m in 0..left.n {
             y[(m, j)] = column[m];
         }
     }
-    k.left_out(&h.right_out(&y))
+    left.left_out(&right.right_out(&y))
+}
+
+/// The fold's Sylvester equation T H − (K − f) T = W (module documentation, # The fold).
+fn sylvester(k: &Schur, h: &Schur, f: f64, w: &Mat) -> Mat {
+    solve_sylvester(k, C64::real(-f), h, C64::ZERO, w)
 }
 
 fn difference(a: &Mat, b: &Mat) -> f64 {
@@ -456,7 +462,7 @@ pub(crate) struct Cross {
     pub landing: (usize, usize),
     pub size: f64,
     pub beat: f64,
-    pub replicas: (usize, usize),
+    pub classes: (Option<usize>, Option<usize>),
 }
 
 impl Fold {
@@ -562,20 +568,20 @@ impl Fold {
 
     /// The photons of eigenstate p per replica (and of the explicit states' own decay, at their frames): per photon
     /// frequency the vectors u_a = C_a T_f r_p on the ground states.
-    pub(crate) fn photon_vectors(&self, levels: &Levels, p: usize) -> Vec<(f64, [Vec<C64>; 3])> {
+    pub(crate) fn photon_vectors(&self, levels: &Levels, p: usize) -> Vec<(f64, Option<usize>, [Vec<C64>; 3])> {
         let r = self.right(p);
-        let mut out: Vec<(f64, [Vec<C64>; 3])> = vec![];
+        let mut out: Vec<(f64, Option<usize>, [Vec<C64>; 3])> = vec![];
         for rep in &self.replicas {
             let x = rep.t.apply(&r);
             let u: [Vec<C64>; 3] = std::array::from_fn(|a| (0..self.ground).map(|g| rep.q.iter().enumerate().map(|(i, &e)| levels.emission[a][(g, e)] * x[i]).sum()).collect());
-            out.push((rep.frequency, u));
+            out.push((rep.frequency, rep.feeds.iter().find_map(|f| f.class), u));
         }
         for (i, &e) in self.explicit.iter().enumerate() {
             let f = self.frames[self.ground + i];
             let u: [Vec<C64>; 3] = std::array::from_fn(|a| (0..self.ground).map(|g| levels.emission[a][(g, e)] * r[self.ground + i]).collect());
             match out.iter_mut().find(|x| same(x.0, f)) {
-                Some(x) => (0..3).for_each(|a| x.1[a].iter_mut().zip(&u[a]).for_each(|(s, v)| *s += *v)),
-                None => out.push((f, u)),
+                Some(x) => (0..3).for_each(|a| x.2[a].iter_mut().zip(&u[a]).for_each(|(s, v)| *s += *v)),
+                None => out.push((f, None, u)),
             }
         }
         out
@@ -589,8 +595,8 @@ impl Fold {
         let landing: Vec<Vec<C64>> = (0..n).map(|q| self.left(q)[..self.ground].to_vec()).collect();
         for p in 0..n {
             let vectors = self.photon_vectors(levels, p);
-            for (i, (f, u)) in vectors.iter().enumerate() {
-                for (j, (g, v)) in vectors.iter().enumerate() {
+            for (i, (f, first, u)) in vectors.iter().enumerate() {
+                for (j, (g, second, v)) in vectors.iter().enumerate() {
                     if i == j {
                         continue;
                     }
@@ -601,7 +607,7 @@ impl Fold {
                                 continue;
                             }
                             let beat = f - g - (self.eigen.values[a].re - self.eigen.values[b].re);
-                            out.push(Cross { from: p, landing: (a, b), size: s.abs(), beat, replicas: (i, j) });
+                            out.push(Cross { from: p, landing: (a, b), size: s.abs(), beat, classes: (*first, *second) });
                         }
                     }
                 }
@@ -621,13 +627,11 @@ impl Fold {
         x
     }
 
-    /// The slow part of a bare P state f (its Q amplitudes zero: a jump's landing, the state when the light is switched
-    /// on): the spectral projection of (f, 0) on the slow invariant subspace (x, T x) along the fast one,
-    /// x = (1 + Σ_f S_f T_f)⁻¹ f. S_f (P ← Q_f) is the left wave operator: the rows (y, y S) span the slow left invariant
-    /// subspace, (y, yS)[[A, W'], [W, K − f]] = λ(y, yS) gives M S_f − S_f (K_f − f) = W'_f with M = A + Σ_f S_f W_f -- the
-    /// right one's Sylvester for the adjoint (S† M† − (K† − f) S† = W'†), settled the same way. (Π = (1; T)(1 + ST)⁻¹(1, S)
-    /// is the projector: Π² = Π.) Without decay S = T†. None where the left iteration does not settle.
-    pub(crate) fn landed(&self, f: &[C64]) -> Option<Vec<C64>> {
+    /// The left wave operators S_f (P ← Q_f): the rows (y, y S) span the slow left invariant subspace,
+    /// (y, yS)[[A, W'], [W, K − f]] = λ(y, yS) gives M S_f − S_f (K_f − f) = W'_f with M = A + Σ_f S_f W_f -- the right
+    /// one's Sylvester for the adjoint (S† M† − (K† − f) S† = W'†), settled the same way (`settle`). Without decay S = T†.
+    /// With them the fast invariant subspace is (−S y, y), y on Q. None where the left iteration does not settle.
+    pub(crate) fn left_operators(&self) -> Option<Vec<Mat>> {
         let n = self.size();
         let adjoints: Vec<Schur> = self.replicas.iter().map(|rep| Schur::of(&rep.kq.adjoint()).expect("the Schur form of the excited block")).collect();
         let mut s: Vec<Mat> = self.replicas.iter().map(|rep| Mat::zeros(n, rep.q.len())).collect();
@@ -646,10 +650,18 @@ impl Fold {
             },
             (n + excited) * (n + excited),
         );
-        if !settled {
-            return None;
-        }
-        let mut overlap = Mat::identity(n);
+        settled.then_some(s)
+    }
+
+    /// The slow part of a bare P state f (its Q amplitudes zero: a jump's landing, the state when the light is switched
+    /// on): the spectral projection of (f, 0) on the slow invariant subspace (x, T x) along the fast one (−S y, y):
+    /// x − S y = f, y = −T x, so x = (1 + Σ_f S_f T_f)⁻¹ f (Π = (1; T)(1 + ST)⁻¹(1, S) is the projector, Π² = Π).
+    pub(crate) fn landed(&self, f: &[C64]) -> Option<Vec<C64>> {
+        let s = self.left_operators()?;
+        self.landed_with(&s, f)
+    }
+    fn landed_with(&self, s: &[Mat], f: &[C64]) -> Option<Vec<C64>> {
+        let mut overlap = Mat::identity(self.size());
         for (si, rep) in s.iter().zip(&self.replicas) {
             overlap.add_scaled(C64::ONE, &si.product(&rep.t));
         }
@@ -657,6 +669,43 @@ impl Fold {
         let mut x = f.to_vec();
         lu.solve(&mut x);
         Some(x)
+    }
+
+    /// The transient of a bare state f (ELIMINATION v3 3 and 4, one term): what the waiting time for the next photon
+    /// from f holds beyond its slow part's, E_exact − ∫‖slow‖² dt. The bare state is its slow part (x₀, T x₀) and its
+    /// fast part (−S y₀, y₀), y₀ = −T x₀ (`landed`), the fast part the homogeneous solution of the excited block,
+    /// e^{−i(K − f)t} -- it decays at the excited states' Γ/2 within 1/Γ, and it is the same term whether the bare state
+    /// is a jump's landing or the light being switched on. Its survival adds ∫‖fast‖² + 2 Re∫⟨fast|slow⟩; to the
+    /// leading order in the fold (the fast generator K − f and the fast part's P amplitude −S y₀ against the slow
+    /// one's), per replica,
+    ///   τ = (T x₀)† 𝓛 (T x₀) − 2 Re (T x₀)† 𝒳 x₀,
+    /// 𝓛 = ∫ e^{iK†t} e^{−iKt} dt (𝓛 K − K† 𝓛 = −i; 𝓛 = 1/Γ on a line of one width) and 𝒳 = ∫ e^{i(K−f)†t} (T − S†)
+    /// e^{−iHt} dt (𝒳 H − (K† − f) 𝒳 = −i(T − S†)): the norm the fast part holds over its life, and its interference
+    /// with the slow part's excited and ground amplitudes. Without decay S† = T and only the first term is left. On one
+    /// line it is the whole difference between the mean scattering rate after a jump and the optical Bloch steady state
+    /// beside the threshold's clamp (tests). Returns (x₀, τ).
+    pub(crate) fn transient(&self, s: &[Mat], f: &[C64]) -> Option<(Vec<C64>, f64)> {
+        let x0 = self.landed_with(s, f)?;
+        let h = Schur::of(&self.generator)?;
+        let mut tau = 0.0;
+        for (rep, si) in self.replicas.iter().zip(s) {
+            let nq = rep.q.len();
+            if nq == 0 {
+                continue;
+            }
+            let k = &rep.k;
+            let kh = Schur::of(&rep.kq.adjoint())?;
+            let identity = Mat::from_fn(nq, nq, |i, j| if i == j { C64::new(0.0, -1.0) } else { C64::ZERO });
+            let lyapunov = solve_sylvester(&kh, C64::ZERO, k, C64::ZERO, &identity);
+            let mut b = rep.t.clone();
+            b.add_scaled(-C64::ONE, &si.adjoint());
+            let cross = solve_sylvester(&kh, C64::real(-rep.frequency), &h, C64::ZERO, &b.scaled(C64::new(0.0, -1.0)));
+            let y = rep.t.apply(&x0);
+            let ly = lyapunov.apply(&y);
+            let cx = cross.apply(&x0);
+            tau += crate::linalg::inner(&y, &ly).re - 2.0 * crate::linalg::inner(&y, &cx).re;
+        }
+        Some((x0, tau))
     }
 }
 
@@ -985,7 +1034,7 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
         }
         for x in fold.photons(levels) {
             if x.size > share * x.beat.abs() {
-                let pair = (Some(x.replicas.0), Some(x.replicas.1));
+                let pair = x.classes;
                 if !kept.photons.contains(&pair) {
                     kept.photons.push(pair);
                 }
@@ -1004,6 +1053,151 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
             .fold(0.0, f64::max);
         return Closed { requirement: residual + pattern * speed, kept, frames: slow.frames.clone(), residual, fold, remainder, mixing };
     }
+}
+
+/// What a model keeps or folds, the keep rule's objects (ELIMINATION.md §6): an excited block, a P-layer link, a pair of
+/// photon frequencies' cross term.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Object {
+    Block(usize),
+    Link(Link),
+    Photons(Option<usize>, Option<usize>),
+}
+
+/// A model's error at a state (ELIMINATION.md §6, v2, v3): the populations' (absolute) and T's (relative), its four
+/// terms, and per object the part its keep would take away.
+#[derive(Clone, Debug)]
+pub(crate) struct Errors {
+    pub population: f64,
+    pub temperature: f64,
+    pub remainder: f64,
+    pub transient: f64,
+    pub averaged: f64,
+    pub photons: f64,
+    pub parts: Vec<(Object, f64)>,
+}
+
+/// The model's error at a state ψ (P amplitudes in the frames) of an atom at the velocity v (µm/µs), the frequency range
+/// its amplitude spans Δ (rad/µs; `closure`): one function for the prior (a start, each ground-like eigenstate full in
+/// turn) and for the readings (a trajectory's state).
+/// - The remainder (criterion one): a rate's relative error is 2ρ_p(Δ) of the eigenstate the state holds, weighted by
+///   its share w_p of the state; each excited block's part of ρ² is its part.
+/// - The transient (`Fold::transient`): after the next jump the atom lands in a bare ground state -- at the state's
+///   own ground populations p_g --, whose waiting time the model takes from its slow part alone with the threshold law
+///   P(T > t) = min(1, ‖y(t)‖²) (step.rs `jump`). The exact one is longer by τ and the law's clamp leaves out
+///   (N − 1 − ln N)/γ where the slow part's norm N = ‖(x₀, T x₀)‖² is above one (γ its decay there): the rate's relative
+///   error is |τ + clamp| over the model's mean wait, N/γ or (1 + ln N)/γ. Its part goes to the blocks in proportion to
+///   their share of the landing's excited amplitude T x₀: making a block explicit takes its fast part into the dynamics.
+/// - The averaged components (criterion two): (a/δ)² of each one not kept, on its two eigenstates' shares.
+/// - The photons' cross terms not kept: γ/|Ω| of each, on its source eigenstate's share.
+/// A relative rate error x moves the populations by at most x (absolute) and T, which the light sets through its rates
+/// and shifts, by x relative: the four terms add on both.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], kept: &Kept, psi: &[C64], velocity: [f64; 3], range: f64) -> Errors {
+    let n = fold.size();
+    let ground = fold.ground;
+    let excited = levels.excited.rows;
+    let coefficients: Vec<C64> = (0..n).map(|p| (0..n).map(|i| fold.eigen.inverse[(p, i)] * psi[i]).sum()).collect();
+    let total: f64 = coefficients.iter().map(|z| z.norm_sqr()).sum();
+    let weight: Vec<f64> = coefficients.iter().map(|z| if total > 0.0 { z.norm_sqr() / total } else { 0.0 }).collect();
+    let block_of = |e: usize| blocks.iter().position(|b| b.contains(&e));
+    let mut parts: Vec<(Object, f64)> = vec![];
+    let mut add = |object: Object, x: f64, parts: &mut Vec<(Object, f64)>| {
+        if x > 0.0 {
+            match parts.iter_mut().find(|p| p.0 == object) {
+                Some(p) => p.1 += x,
+                None => parts.push((object, x)),
+            }
+        }
+    };
+    // The remainder.
+    let mut remainder = 0.0;
+    for p in (0..n).filter(|&p| weight[p] > 0.0) {
+        let (mut rho, mut each) = (0.0, vec![0.0; excited]);
+        for shift in [range, -range] {
+            let (r, e) = fold.remainder(p, shift, excited);
+            if r >= rho {
+                (rho, each) = (r, e);
+            }
+        }
+        remainder += weight[p] * 2.0 * rho;
+        if rho > 0.0 {
+            for (e, x) in each.iter().enumerate() {
+                if let Some(b) = block_of(e) {
+                    add(Object::Block(b), weight[p] * 2.0 * rho * x / (rho * rho), &mut parts);
+                }
+            }
+        }
+    }
+    // The transient after the next jump, from the state's own ground populations.
+    let mut transient = 0.0;
+    if let Some(left) = fold.left_operators() {
+        let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
+        let metric = fold.metric();
+        for g in (0..ground).filter(|&g| psi[g].norm_sqr() > 0.0) {
+            let population = psi[g].norm_sqr() / norm;
+            let bare: Vec<C64> = (0..n).map(|i| if i == g { C64::ONE } else { C64::ZERO }).collect();
+            let Some((x0, tau)) = fold.transient(&left, &bare) else { continue };
+            let held = crate::linalg::inner(&x0, &metric.apply(&x0)).re;
+            let big = crate::linalg::norm_sqr(&x0) + held;
+            let mx: Vec<C64> = {
+                let hx = fold.generator.apply(&x0);
+                let mut v = hx.clone();
+                let m = metric.apply(&hx);
+                v.iter_mut().zip(&m).for_each(|(a, b)| *a += *b);
+                v
+            };
+            let gamma = -2.0 * crate::linalg::inner(&x0, &mx).im / big;
+            if !(gamma > 0.0) {
+                continue;
+            }
+            let (wait, clamp) = if big <= 1.0 { (big / gamma, 0.0) } else { ((1.0 + big.ln()) / gamma, (big - 1.0 - big.ln()) / gamma) };
+            let x = population * (tau + clamp).abs() / wait;
+            transient += x;
+            // Its parts by the blocks' shares of the landing's excited amplitude.
+            let mut shares = vec![0.0; blocks.len()];
+            for rep in &fold.replicas {
+                let y = rep.t.apply(&x0);
+                for (i, &e) in rep.q.iter().enumerate() {
+                    if let Some(b) = block_of(e) {
+                        shares[b] += y[i].norm_sqr();
+                    }
+                }
+            }
+            let sum: f64 = shares.iter().sum();
+            if sum > 0.0 {
+                for (b, share) in shares.iter().enumerate() {
+                    add(Object::Block(b), x * share / sum, &mut parts);
+                }
+            }
+        }
+    }
+    // The averaged components and the photons' cross terms not kept.
+    let label = |p: usize| {
+        let s = fold.dominant(p);
+        if s < ground { s } else { ground + fold.explicit[s - ground] }
+    };
+    let mut averaged = 0.0;
+    for x in fold.components(velocity) {
+        let link = Link { a: label(x.row), b: label(x.column), classes: x.classes };
+        if kept.links.contains(&link) || (weight[x.row] == 0.0 && weight[x.column] == 0.0) {
+            continue;
+        }
+        let e = x.mixing() * x.mixing() * (weight[x.row] + weight[x.column]);
+        averaged += e;
+        add(Object::Link(link), e, &mut parts);
+    }
+    let mut photons = 0.0;
+    for x in fold.photons(levels) {
+        if kept.photons.contains(&x.classes) || weight[x.from] == 0.0 {
+            continue;
+        }
+        let e = x.size / x.beat.abs() * weight[x.from];
+        photons += e;
+        add(Object::Photons(x.classes.0, x.classes.1), e, &mut parts);
+    }
+    let sum = remainder + transient + averaged + photons;
+    Errors { population: sum, temperature: sum, remainder, transient, averaged, photons, parts }
 }
 
 #[cfg(test)]
