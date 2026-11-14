@@ -644,21 +644,29 @@ impl Model {
         // Each frequency's drives folded at their levels (far.rs `Tone::folded`); the carriers, the components with a drive not
         // bare. A drive folded with the bare levels onto an explicit state is read at the state's energy among its cluster's
         // ground states (`read`; far.rs, # A fold onto an explicit state): a direct coupling of two P states, its bare
-        // fold's distance the two-photon one of the pair it makes with the state's kept drives. Where that distance is
-        // exactly nothing -- Zeeman sublevels at B = 0 lie at one energy -- the coupling is a P-layer link at δ = 0, which
-        // criterion two keeps whatever its size (ELIMINATION §4: its mixing a/δ has no bound; the fold, far.rs
-        // `second_order`, has no value there): the drive is explicit, its ground state joins the state's cluster. Every
-        // other distance is criterion two's, read on the actual spectrum at the states the run reads (elim.rs `errors`).
+        // fold's distance d the two-photon one of the pair it makes with the state's kept drives. Such a link is judged as
+        // criterion two judges every P-layer component (ELIMINATION §4, v5: its averaged error 2(a/d)² against the share,
+        // elim.rs `closure`), here on what the fold itself takes: a the drive's coupling with every beam at its peak (|a_l|
+        // ≤ 1, in phase), d its bare fold's distance (far.rs `second_order`). Beyond the share the drive is explicit and its
+        // ground state joins the state's cluster -- at d = 0 (Zeeman sublevels at B = 0) as at any d small beside a: the
+        // fold is never taken where it is not small, its pole never read.
         let levels = model.levels.clone();
         let read = model.read_made();
-        let resonant: Vec<Unit> = model
+        let share = elim::share();
+        let linked: Vec<Unit> = model
             .driven
             .iter()
-            .filter(|&&(c, e, w)| !c.counter && model.level(c, e, w) == Level::Bare && model.explicit(e) && read[e - GROUND] - model.energies[w] - model.tones[c.frequency].nu[0] == 0.0)
+            .filter(|&&(c, e, w)| model.level(c, e, w) == Level::Bare && model.explicit(e))
+            .filter(|&&(c, e, w)| {
+                let (tone, side) = (&model.tones[c.frequency], c.counter as usize);
+                let a: f64 = tone.couplings[side].iter().map(|x| x[(e, w)].abs()).sum();
+                let d = read[e - GROUND] - model.energies[w] - tone.nu[side];
+                2.0 * (a / d).powi(2) > share
+            })
             .map(|&(component, excited, ground)| Unit::Drive { component, excited, ground })
             .collect();
-        if !resonant.is_empty() {
-            return model.rekept(&[kept, &resonant[..]].concat());
+        if !linked.is_empty() {
+            return model.rekept(&[kept, &linked[..]].concat());
         }
         model.tones = model.tones.iter().enumerate().map(|(frequency, tone)| tone.folded(&|side, e, g| levels[2 * frequency + side][(e - GROUND) * GROUND + g], &read)).collect();
         model.carriers = eliminate::Carrier::all(&model);

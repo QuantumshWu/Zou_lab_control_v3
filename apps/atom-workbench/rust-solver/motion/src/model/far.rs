@@ -48,9 +48,9 @@
 //! rate with |U|²/β is 14 % low at β = 0.5, 38 % at 0.1, 82 % at 0.02, with a pole at β = 0 where nothing is resonant;
 //! with the complex one-photon |U|²/(β − iΓ/2) -- the reading of the transient, z = E_e − iΓ/2, which lives 1/Γ -- 16 to
 //! 18 % low; with |U|²/d_R within 0.1 to 3.8 %, the pair's own next order. The pole of 1/d_R is the Raman resonance, where
-//! the pair is no fold: a P-layer link of the two ground states, criterion two's (elim.rs `errors`: its mixing on the
-//! actual spectrum at the states the run reads), explicit where its distance is exactly nothing (model.rs
-//! `Model::settled`). Where |β| ≫ |ε| the two distances are one.
+//! the pair is no fold: the drive is a P-layer link, which criterion two takes explicit where 2(a/d_R)² is beyond the
+//! share (model.rs `Model::settled`; elim.rs `errors` reads its error on the actual spectrum where it is folded). Where
+//! |β| ≫ |ε| the two distances are one.
 //!
 //! # The static form of a frequency, per pair of beams
 //! The outside form O(E) = Σ_pq E_p* E_q O_pq (the request's nine matrices as a Hermitian form in the spherical components:
@@ -163,8 +163,8 @@ pub(crate) fn second_order(e: &[f64], read: &[f64], a: Fold, nu_a: f64, b: Fold,
             let mut z = C64::ZERO;
             for w in 0..GROUND {
                 // Each half holds one drive's own denominator: the emitted leg's g ← w, the absorbed leg's f ← w. An
-                // explicit state, read at its cluster's ground energy (not its own), is never read at a two-photon
-                // distance of nothing: such a drive is criterion two's link at δ = 0, explicit (model.rs `Model::settled`).
+                // explicit state, read at its cluster's ground energy (not its own), is read only where criterion two
+                // folds the drive's link to it, 2(a/d)² within the share (model.rs `Model::settled`): never at d = 0.
                 let distance = |x: usize, nu: f64| -> f64 {
                     let d = read[x - GROUND] - e[w] - nu;
                     assert!(d != 0.0 || read[x - GROUND] == e[x], "a fold onto an explicit state at a two-photon distance of nothing (state {x}, ground {w}): such a drive is explicit, never folded");
