@@ -605,7 +605,7 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
             for b in &class.beams {
                 w.add_scaled(C64::ONE, &b.coupling);
             }
-            let t = reference.respond(c, &w, n, 1);
+            let t: Vec<Mat> = reference.respond(c, &w, n, 1, &[]).into_iter().map(|mut parts| parts.remove(0)).collect();
             n0.add_scaled(C64::ONE, &w.adjoint_product(&t[0]));
             n1.add_scaled(C64::ONE, &w.adjoint_product(&t[1]));
             x.add_scaled(C64::ONE, &t[0].adjoint_product(&t[0]));
@@ -908,14 +908,14 @@ impl Fold {
     }
 }
 
-/// A drive folded with the bare levels onto an explicit state is judged by criterion two, 2(a/d)² against the share
-/// (model.rs `Model::settled`; ELIMINATION §4), and at a two-photon distance d of nothing that is beyond any share:
-/// R4_LIN_1 at B = 0, its lin⊥lin light driving an excited sublevel from two degenerate ground sublevels -- one drive
-/// kept, the other's Raman pair with it is at one energy. The model is made (the bare fold, far.rs `second_order`, is
-/// never read at its pole), the other ground state joins the kept drive's cluster and its drive is explicit, for every
-/// such pair the light makes.
+/// A drive folded with the bare levels onto an explicit state exists where its ratio 2a/|d| is below one (model.rs
+/// `Model::settled`, `converges`), and at a two-photon distance d of nothing it is not: R4_LIN_1 at B = 0, its lin⊥lin
+/// light driving an excited sublevel from two degenerate ground sublevels -- one drive kept, the other's Raman pair with it
+/// is at one energy. The model is made (the bare fold, far.rs `second_order`, is never read at its pole), and the drive
+/// goes up one level, to its fold at the atom (`Level::Atom`) -- where the closure reads the pair on the actual spectrum --,
+/// for every such pair the light makes.
 #[test]
-fn a_drive_onto_an_explicit_state_at_no_two_photon_distance_is_explicit() {
+fn a_drive_onto_an_explicit_state_at_no_two_photon_distance_is_folded_at_the_atom() {
     use crate::request::GROUND;
     let path = format!("{}/refs/scenes/R4_LIN_1.json", env!("CARGO_MANIFEST_DIR"));
     let request = crate::request::Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
@@ -925,22 +925,21 @@ fn a_drive_onto_an_explicit_state_at_no_two_photon_distance_is_explicit() {
     for &(c, e, a) in bare.driven.iter().filter(|d| !d.0.counter) {
         for &(_, _, w) in bare.driven.iter().filter(|d| d.0 == c && d.1 == e && d.2 > a && d.2 < GROUND && bare.energies[d.2] == bare.energies[a]) {
             let kept = super::super::Model::new(&request, &light, &[super::super::Unit::Drive { component: c, excited: e, ground: a }]).unwrap();
-            assert_eq!(kept.cluster_of(w), kept.cluster_of(a), "{} → {}: the degenerate ground state {w} joins the kept drive's cluster", a, e);
-            assert_eq!(kept.level(c, e, w), super::super::Level::Explicit, "{} → {}: the drive from {w} is explicit", a, e);
+            assert_eq!(kept.level(c, e, w), super::super::Level::Atom, "{} → {}: the drive from {w} is folded at the atom", a, e);
             pairs += 1;
         }
     }
     assert!(pairs > 0, "R4_LIN_1 drives an excited sublevel from two degenerate ground sublevels");
 }
 
-/// The same comparison where the distance is small but not nothing (model.rs `Model::settled`): R4_LIN_1's first pair of
+/// The same statement where the distance is small but not nothing (model.rs `Model::settled`): R4_LIN_1's first pair of
 /// degenerate ground sublevels a, w driven to one excited sublevel e, w lifted by ε as a small field splits the pair,
 /// the drive e ← a kept. The fold of e ← w onto the explicit e is at two-photon distance d = −ε (e is read at a's
-/// energy, its frame's beat the photon's): where 2(a/ε)² is far beyond the share the drive is explicit in the first
-/// model, its ground state in the kept drive's cluster; where it is well within, the drive stays folded with the bare
-/// levels and w keeps its own cluster.
+/// energy, its frame's beat the photon's): where its ratio 2a/ε is far beyond one the drive goes up to its fold at the
+/// atom; where it is well below, the drive stays folded with the bare levels and w keeps its own cluster (how well that
+/// fold does is read at the states, `Model::bare_mixing`).
 #[test]
-fn a_drive_onto_an_explicit_state_at_a_small_two_photon_distance_is_explicit_and_at_a_large_one_folded() {
+fn a_drive_onto_an_explicit_state_at_a_small_two_photon_distance_is_folded_at_the_atom_and_at_a_large_one_bare() {
     use super::super::{Level, Model, Unit};
     use crate::request::GROUND;
     let path = format!("{}/refs/scenes/R4_LIN_1.json", env!("CARGO_MANIFEST_DIR"));
@@ -954,18 +953,14 @@ fn a_drive_onto_an_explicit_state_at_a_small_two_photon_distance_is_explicit_and
         .find_map(|&(c, e, a)| bare.driven.iter().find(|d| d.0 == c && d.1 == e && d.2 > a && d.2 < GROUND && bare.energies[d.2] == bare.energies[a]).map(|d| (c, e, a, d.2)))
         .expect("R4_LIN_1 drives an excited sublevel from two degenerate ground sublevels");
     let size: f64 = bare.tones[c.frequency].couplings[0].iter().map(|x| x[(e, w)].abs()).sum();
-    let share = super::share();
-    for (epsilon, explicit) in [(1e-3 * size, true), (30.0 * size, false)] {
-        let ratio = 2.0 * (size / epsilon).powi(2);
-        assert_eq!(ratio > share, explicit, "the premise: 2(a/ε)² = {ratio:.3e} against the share {share:.3e}");
+    for (epsilon, exists) in [(1e-3 * size, false), (30.0 * size, true)] {
+        let ratio = 2.0 * size / epsilon;
+        assert_eq!(super::converges(ratio), exists, "the premise: 2a/ε = {ratio:.3e}");
         let mut split = request.clone();
         split.hamiltonian[(w, w)] += C64::new(epsilon, 0.0);
         let model = Model::new(&split, &light, &[Unit::Drive { component: c, excited: e, ground: a }]).unwrap();
-        let joined = model.cluster_of(w) == model.cluster_of(a);
         let level = model.level(c, e, w);
-        assert_eq!((joined, level == Level::Explicit), (explicit, explicit), "{a} → {e} kept, ε = {epsilon:.3e}, 2(a/ε)² = {ratio:.3e}: the drive from {w} at level {level:?}, its ground state joined {joined}");
-        if !explicit {
-            assert_eq!(level, Level::Bare, "the drive from {w} is folded with the bare levels");
-        }
+        assert_eq!(level, if exists { Level::Bare } else { Level::Atom }, "{a} → {e} kept, ε = {epsilon:.3e}, 2a/ε = {ratio:.3e}: the drive from {w} at level {level:?}");
+        assert_ne!(model.cluster_of(w), model.cluster_of(a), "the drive from {w} joins no cluster");
     }
 }

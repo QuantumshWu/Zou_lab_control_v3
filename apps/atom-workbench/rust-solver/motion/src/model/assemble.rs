@@ -2675,7 +2675,8 @@ impl crate::step::Middle for Middle<'_> {
 ///   own -- what the normalization would do to it is in the evaluation's error against the definition, measured where
 ///   the atoms went and booked (elim.rs `Model::readings`);
 /// - M = E S⁻¹ (the jumps' partner's state, none at order 0), the landing map S (1 + Y)⁻¹ with (1 + Y)⁻¹ = Σ_{j≤J} (−Y)^j
-///   (to the normalization's order J, as the generator's), and E.
+///   (to the normalization's order J, as the generator's; its error against the definition's map measured where the atoms
+///   went, elim.rs `Fold::landing_error`), and E.
 /// Without `gradients` the values alone (the gradients' parts zero), of forms given so; M only at a point (`point`: a
 /// node's generator and force read none), the landing map only where asked (`landing`), else zero. `scratch` holds
 /// what it makes on the way; nothing is asked of the heap once it has its size.

@@ -910,10 +910,10 @@ impl Fold {
     /// not below one (`Series::moved`).
     pub(crate) fn evaluated_share(&self, z0: C64) -> (f64, Option<usize>) {
         let n = self.size();
-        let mut metric = Mat::zeros(n, n);
+        let responses = self.responses_about(z0, 0);
+        let metric = metric_about(&responses, n);
         let mut weight: Vec<(usize, f64)> = vec![];
-        for (rep, r) in self.replicas.iter().zip(self.responses_about(z0, 0)) {
-            metric.add_scaled(C64::ONE, &r[0].adjoint_product(&r[0]));
+        for (rep, r) in self.replicas.iter().zip(&responses) {
             for (i, &e) in rep.q.iter().enumerate() {
                 let w: f64 = (0..n).map(|s| r[0][(i, s)].norm_sqr()).sum();
                 match weight.iter_mut().find(|x| x.0 == e) {
@@ -1039,9 +1039,9 @@ impl Fold {
             }
             m
         };
-        let (mut metric, mut loss) = (Mat::zeros(n, n), Mat::zeros(n, n));
+        let metric = metric_about(&responses, n);
+        let mut loss = Mat::zeros(n, n);
         for (rep, r) in self.replicas.iter().zip(&responses) {
-            metric.add_scaled(C64::ONE, &r[0].adjoint_product(&r[0]));
             loss.add_scaled(C64::ONE, &r[0].adjoint_product(&levels.decay.block(&rep.q, &rep.q).product(&r[0])));
         }
         let mut whole = self.direct.clone();
@@ -1092,6 +1092,55 @@ impl Fold {
         let mut out = s.product(&self.generator).product(&s_inverse).hermitian_part();
         out.add_scaled(C64::new(0.0, -0.5), &s_inverse.product(&loss).product(&s_inverse));
         out
+    }
+
+    /// The evaluation's landing map at the orders `orders` (assemble.rs `normal`, model.rs `Model::landed`) of this fold's
+    /// series about z₀ -- the reference's forms, what the tables hold --: S_J Σ_{j≤J} (−Y)^j, Y = N₁ = Σ_f W′_f R₀² W_f
+    /// the left and the right wave operators' overlap to the series' leading order, S_J = Σ_{j≤J} binom(½, j) X^j,
+    /// X = Σ (R₀W)†(R₀W): the identity at J = 0.
+    pub(crate) fn landing_evaluated(&self, z0: C64, orders: Orders) -> Mat {
+        let n = self.size();
+        let responses = self.responses_about(z0, 1);
+        let metric = metric_about(&responses, n);
+        let mut partner = Mat::zeros(n, n);
+        for (rep, r) in self.replicas.iter().zip(&responses) {
+            partner.add_scaled(C64::ONE, &rep.back.product(&r[1]));
+        }
+        let (mut s, mut power, mut sum, mut term) = (Mat::identity(n), Mat::identity(n), Mat::identity(n), Mat::identity(n));
+        for j in 1..=orders.normalization {
+            power = power.product(&metric);
+            s.add_scaled(C64::real(binomial(0.5, j)), &power);
+            term = term.product(&partner).scaled(-C64::ONE);
+            sum.add_scaled(C64::ONE, &term);
+        }
+        s.product(&sum)
+    }
+
+    /// The definition's landing map (ELIMINATION v3 4, v7): of this fold -- the self-consistent one, its excited block
+    /// whole (`Model::definition_fold`) -- S (1 + Σ_f S_f T_f)⁻¹, S = (1 + X)^{1/2} of its own metric (`normalization`),
+    /// S_f its left wave operators (`left_operators`, the landing's overlap of `transients`): where a bare state lands, in
+    /// the normalized coordinates. None where the left operators do not settle: the landing does not exist there, and
+    /// the readings book it whole (`Model::readings`, `converges`).
+    pub(crate) fn landing_defined(&self) -> Option<Mat> {
+        let n = self.size();
+        let left = self.left_operators()?;
+        let bares: Vec<Vec<C64>> = (0..n).map(|j| (0..n).map(|i| if i == j { C64::ONE } else { C64::ZERO }).collect()).collect();
+        let landed = self.transients(&left, &bares)?;
+        let (s, _) = self.normalization();
+        Some(s.product(&Mat::from_fn(n, n, |i, j| landed[j].0[i])))
+    }
+
+    /// The evaluation's landing error on a state ψ against the definition (`landing_evaluated`, `landing_defined`): after
+    /// the next jump the atom lands in a bare ground state at the state's own ground populations p_g (as `errors` reads
+    /// the transient), and a landing off by r_g = ‖(L_e − L_d) e_g‖/‖L_d e_g‖ is off on the landed state -- its norm, the
+    /// next wait's threshold law, and its populations -- by a rate's relative error 2r_g + r_g²: Σ_g p_g (2r_g + r_g²)
+    /// over the `ground` places.
+    pub(crate) fn landing_error(evaluated: &Mat, defined: &Mat, ground: usize, psi: &[C64]) -> f64 {
+        let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
+        (0..ground)
+            .filter(|&g| psi[g] != C64::ZERO)
+            .map(|g| psi[g].norm_sqr() / norm * rate_error(norm_of((0..defined.rows).map(|i| evaluated[(i, g)] - defined[(i, g)])), norm_of((0..defined.rows).map(|i| defined[(i, g)]))))
+            .sum()
     }
 
     /// The evaluation's error on a state ψ against the definition, measured (ELIMINATION v7; a unit's error where the atoms
@@ -1234,35 +1283,66 @@ impl Reference {
         Reference { replicas: out, driven: replicas.driven, ground, excited, z0 }
     }
 
-    /// The responses of class c's coupling (E × the ground states) to the orders 0..=`orders`: R₀^{j+1} W on every
-    /// excited state (zero off each replica's Q) and every slow state (E × n, n the slow states: the explicit states'
-    /// columns are zero, a class couples E ← G alone), R₀ = (z₀ + f − K_f)⁻¹ of the replica each ground state's
-    /// amplitude drives.
-    pub(crate) fn respond(&self, class: usize, coupling: &Mat, n: usize, orders: usize) -> Vec<Mat> {
-        let mut out = vec![Mat::zeros(self.excited, n); orders + 1];
-        for (r, (f, q, k)) in self.replicas.iter().enumerate() {
+    /// The responses of class c's coupling (E × the ground states) to the orders 0..=`orders`, R₀^{j+1} W on every excited
+    /// state (zero off each replica's Q) and every slow state (E × n, n the slow states: the explicit states' columns are
+    /// zero, a class couples E ← G alone), R₀ = (z₀ + f − K_f)⁻¹ of the replica each ground state's amplitude drives; and
+    /// their jets along the position, per order its parts (jet.rs: the value, the gradient's three, the Hessian's six of
+    /// `jet::PAIRS`), exact by the resolvent's identity -- not differences.
+    /// With A = z₀ + f − K_f on each replica's Q and x_j = R₀ x_{j−1}, x_{−1} = W (the coupling, the same everywhere: the
+    /// near field is the forms' coefficient), A x_j = x_{j−1} differentiated gives
+    ///   ∂_i x_j = R₀ (∂_i x_{j−1} − ∂_i A x_j),
+    ///   ∂_i∂_k x_j = R₀ (∂_i∂_k x_{j−1} − ∂_i A ∂_k x_j − ∂_k A ∂_i x_j − ∂_i∂_k A x_j),
+    /// ∂A = ∂z₀ − ∂K (f is a frame's), `slopes` the derivatives (∂z₀, ∂K) of z₀ and of the excited block K (its decay
+    /// constant) from the far light's Hamiltonian, part by part after the value (none: the values alone). Each part a
+    /// resolvent per order and driven column, at the rounding of the solves themselves. Returns [order][part].
+    pub(crate) fn respond(&self, class: usize, coupling: &Mat, n: usize, orders: usize, slopes: &[(f64, Mat)]) -> Vec<Vec<Mat>> {
+        let parts = 1 + slopes.len();
+        let mut out = vec![vec![Mat::zeros(self.excited, n); parts]; orders + 1];
+        for (r, (f, q, schur)) in self.replicas.iter().enumerate() {
             let sigma = C64::real(self.z0 + f);
+            // ∂A on Q applied to a vector: ∂z₀ x − ∂K x, of part p.
+            let slope = |p: usize, x: &[C64]| -> Vec<C64> {
+                let (z, k) = &slopes[p - 1];
+                q.iter().enumerate().map(|(a, &e)| x[a] * *z - q.iter().enumerate().map(|(b, &e2)| k[(e, e2)] * x[b]).sum::<C64>()).collect()
+            };
             for g in (0..self.ground).filter(|&g| self.driven[class][g] == r) {
-                let mut x: Vec<C64> = q.iter().map(|&e| coupling[(e, g)]).collect();
-                if x.iter().all(|z| *z == C64::ZERO) {
+                let column: Vec<C64> = q.iter().map(|&e| coupling[(e, g)]).collect();
+                if column.iter().all(|z| *z == C64::ZERO) {
                     continue;
                 }
+                // The previous order's jet, x_{−1} = W: its value the coupling, its derivatives none.
+                let mut before: Vec<Vec<C64>> = (0..parts).map(|p| if p == 0 { column.clone() } else { vec![C64::ZERO; q.len()] }).collect();
                 for order in out.iter_mut() {
-                    x = k.resolvent(sigma, &x);
-                    for (i, &e) in q.iter().enumerate() {
-                        order[(e, g)] = x[i];
+                    let mut x: Vec<Vec<C64>> = vec![schur.resolvent(sigma, &before[0])];
+                    for p in 1..parts.min(4) {
+                        let a = slope(p, &x[0]);
+                        x.push(schur.resolvent(sigma, &before[p].iter().zip(&a).map(|(b, a)| *b - *a).collect::<Vec<C64>>()));
                     }
+                    for (m, &(i, j)) in super::jet::PAIRS.iter().enumerate().take(parts.saturating_sub(4)) {
+                        let p = 4 + m;
+                        let (ai, aj, aij) = (slope(1 + i, &x[1 + j]), slope(1 + j, &x[1 + i]), slope(p, &x[0]));
+                        let rhs: Vec<C64> = (0..q.len()).map(|a| before[p][a] - ai[a] - aj[a] - aij[a]).collect();
+                        x.push(schur.resolvent(sigma, &rhs));
+                    }
+                    for (p, part) in order.iter_mut().enumerate() {
+                        for (a, &e) in q.iter().enumerate() {
+                            part[(e, g)] = x[p][a];
+                        }
+                    }
+                    before = x;
                 }
             }
         }
         out
     }
 
-    /// The complex multiply-adds of one coupling's responses to `orders` (`respond`): per driven column and order a
-    /// resolvent's two changes of basis and its back substitution on Q.
-    pub(crate) fn work(&self, orders: usize) -> f64 {
+    /// The complex multiply-adds of one coupling's responses to `orders` with their jets of `parts` (`respond`): per
+    /// driven column, order and part a resolvent's two changes of basis and its back substitution on Q, and per
+    /// derivative its products by ∂A -- one a gradient's part, three a Hessian's.
+    pub(crate) fn work(&self, orders: usize, parts: usize) -> f64 {
         let q = self.replicas.iter().map(|r| r.1.len()).max().unwrap_or(0) as f64;
-        (self.ground * (orders + 1)) as f64 * 2.5 * q * q
+        let products = parts.min(4).saturating_sub(1) + 3 * parts.saturating_sub(4);
+        (self.ground * (orders + 1)) as f64 * (2.5 * parts as f64 + products as f64) * q * q
     }
 }
 
@@ -1441,6 +1521,17 @@ fn rate_error(apart: f64, scale: f64) -> f64 {
     }
     let r = apart / scale;
     if r.is_finite() { (2.0 * r + r * r).min(1.0) } else { 1.0 }
+}
+
+/// The slow state's one metric as the run evaluates it (assemble.rs `bent`, `Model::bent_at`): X = Σ_f (R₀W_f)†(R₀W_f)
+/// of the series' order-0 responses about z₀ (`Fold::responses_about`) -- the generator's normalization's
+/// (`Fold::evaluated`), the landing map's (`Fold::landing_evaluated`) and its series' ratio's (`Fold::evaluated_share`).
+fn metric_about(responses: &[Vec<Mat>], n: usize) -> Mat {
+    let mut metric = Mat::zeros(n, n);
+    for r in responses {
+        metric.add_scaled(C64::ONE, &r[0].adjoint_product(&r[0]));
+    }
+    metric
 }
 
 /// The binomial coefficient binom(α, j) = α(α − 1)…(α − j + 1)/j!: the power series' j-th coefficient of (1 + x)^α.
@@ -1770,20 +1861,28 @@ impl super::Model {
                     }
                 }
             };
-            // The evaluation against the definition (ELIMINATION v7; `Fold::evaluation_error`): one comparison at the
-            // run's orders, and at each next order the part it takes away -- the series' first (`Unit::Series`) where the
-            // run takes order 0, the normalization's next (`Unit::Normalization`) --; the rest (δK, the orders beyond, the
-            // Hermitian part's normalization) on the block nearest the reference (`Fold::nearest`), which criterion one
-            // makes explicit. Where the definition does not exist at the state (`settle`, `converges`), the evaluation
-            // is wrong by all of itself: its whole, a rate's relative error one, on the blocks the state's excited share
-            // lies on -- as the closure moves the block of the largest part where a fold does not exist.
+            // The evaluation against the definition (ELIMINATION v7; `Fold::evaluation_error`, `Fold::landing_error`): one
+            // comparison at the run's orders -- the normalized generator, and the landing map a jump and the light's
+            // switching on put the atom through (model.rs `Model::landed`) --, and at each next order the part it takes
+            // away -- the series' first (`Unit::Series`) where the run takes order 0, the normalization's next
+            // (`Unit::Normalization`) --; the rest (δK, the orders beyond, the Hermitian part's normalization) on the block
+            // nearest the reference (`Fold::nearest`), which criterion one makes explicit. Where the definition does not
+            // exist at the state (`settle`, `converges`), the evaluation is wrong by all of itself: its whole, a rate's
+            // relative error one, on the blocks the state's excited share lies on -- as the closure moves the block of the
+            // largest part where a fold does not exist.
             let z0 = C64::real(far + self.series.centre[sample.cluster]);
             match self.definition_fold(sample.cluster, &amplitudes) {
                 Some((definition, _)) if !definition.exists => on_blocks(None, 1.0, &mut out),
                 Some((definition, whole)) => {
-                    let defined = definition.defined(&whole);
+                    let (defined, landing) = (definition.defined(&whole), definition.landing_defined());
                     let psi = &sample.psi;
-                    let error = |orders: Orders| Fold::evaluation_error(&fold.evaluated(&levels, z0, orders), &defined, z0, psi);
+                    // Where the definition's landing does not exist (its left wave operators do not settle, `converges`),
+                    // every landing is wrong by all of itself: the state's ground populations whole, at every order.
+                    let unlanded = (0..g).map(|x| psi[x].norm_sqr()).sum::<f64>() / crate::linalg::norm_sqr(psi);
+                    let error = |orders: Orders| {
+                        let landed = landing.as_ref().map_or(unlanded, |landing| Fold::landing_error(&fold.landing_evaluated(z0, orders), landing, g, psi));
+                        Fold::evaluation_error(&fold.evaluated(&levels, z0, orders), &defined, z0, psi) + landed
+                    };
                     let own = self.series.orders();
                     let at = error(own);
                     let series = if own.series == 0 { (at - error(Orders { series: 1, ..own })).max(0.0) } else { 0.0 };
