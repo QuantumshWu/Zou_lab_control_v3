@@ -448,7 +448,8 @@ impl Model {
                 let slopes = if taken && m.near { directions.len() } else { 0 };
                 let base = if m.near { 2 * (1 + slopes) } else { 1 };
                 // The normalized generator's vectors after them: a point's partner on E S⁻¹ψ with its slopes, and with the gradients
-                // the jumps on ∂S⁻¹ψ and the partner on ∂(E S⁻¹)ψ along each lab axis; a constant member's jumps on ∂S⁻¹ψ.
+                // along each lab axis the jumps on ∂S⁻¹ψ and the partner on c ∂(E S⁻¹)ψ − c_w ∂S⁻¹ψ (the photon's operator
+                // (c J − c_w J2 + c J2 E) S⁻¹, assemble.rs # The normalized generator); a constant member's jumps on ∂S⁻¹ψ.
                 let more = match (&bent, m.near) {
                     (None, _) => 0,
                     (Some(_), true) => 1 + slopes + if taken { 2 * live.len() } else { 0 },
@@ -463,16 +464,16 @@ impl Model {
                     out.iter_mut().zip(&m.columns).for_each(|(z, &sp)| *z = of[sp] * phase);
                     out
                 };
-                // The jumps act on the state, or on the normalized generator's S⁻¹ψ.
+                // The jumps and their partners act on the state, or on the normalized generator's S⁻¹ψ.
                 let bend = bent.as_ref().map(|b| gathered(&b[0]));
                 let on: &[C64] = bend.as_ref().map_or(x, |b| &b[..count]);
                 if m.near {
                     combine(false, on, count, &jumps[m.at..m.at + matrix], vectors, made, 0);
-                    combine(false, x, count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, 1);
+                    combine(false, on, count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, 1);
                     for f in 0..slopes {
                         let slope = &jump_slopes[f * width + m.at..][..2 * matrix];
                         combine(false, on, count, &slope[..matrix], vectors, made, 2 + 2 * f);
-                        combine(false, x, count, &slope[matrix..], vectors, made, 3 + 2 * f);
+                        combine(false, on, count, &slope[matrix..], vectors, made, 3 + 2 * f);
                     }
                     if let Some(b) = &bent {
                         let shift = gathered(&b[1]);
@@ -482,8 +483,9 @@ impl Model {
                         }
                         for (i, &a) in live.iter().enumerate().filter(|_| taken) {
                             let (bend, shift) = (gathered(&b[2 + a]), gathered(&b[5 + a]));
+                            let partner: [C64; STATES] = std::array::from_fn(|k| shift[k] * c[0] - bend[k] * cw[0]);
                             combine(false, &bend[..count], count, &jumps[m.at..m.at + matrix], vectors, made, base + 1 + slopes + 2 * i);
-                            combine(false, &shift[..count], count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, base + 2 + slopes + 2 * i);
+                            combine(false, &partner[..count], count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, base + 2 + slopes + 2 * i);
                         }
                     }
                 } else {
@@ -528,7 +530,7 @@ impl Model {
                                     of[base + 1 + f] = c[0] * direction[i];
                                 }
                                 if let Some(at) = live.iter().position(|&a| a == i) {
-                                    (of[base + 1 + slopes + 2 * at], of[base + 2 + slopes + 2 * at]) = (c[0], c[0]);
+                                    (of[base + 1 + slopes + 2 * at], of[base + 2 + slopes + 2 * at]) = (c[0], C64::ONE);
                                 }
                             }
                             (true, false) => {

@@ -99,7 +99,7 @@
 //! ```text
 //! H₀ = H_h − (i/2) L     H = H₀ (K = 0), (1 + Y)⁻¹ (H₀ + z₀ Y) (K = 1)     E = H − z₀
 //! held = Herm(S_h H S_h⁻¹) − H_h (Herm H − H_h at J_h = 0: nothing at K = 0)     decay S⁻¹ (Λ + Λ_R E + E†Λ_R† + E†Λ_B E) S⁻¹
-//! L_a = (J_a + J2_a E) S⁻¹ (J2 none at K = 0)        landing S (1 + Y)⁻¹
+//! L_a = (J_a(κ) + J2_a E) S⁻¹ (J2 E none at K = 0)     landing S (1 + Y)⁻¹
 //! ```
 //!
 //! The normalized part varies along a step's path as the light's pattern does: it is made at each node of the step of
@@ -108,16 +108,20 @@
 //! quantity that turns at the pattern's K v: a step error of (Kvτ)²/24 of it, which a step's companion at 2τ reads
 //! four times over -- PGC3D's pilot read its third state's population at 1.44 of the step's share squared against
 //! the released engine's 0.65, and ran 528 trajectories more to see through it.)
-//! - a node's generator (`Middle::generator`): the decay Λ = i(Ĥ − Ĥ†) of the node's terms -- every jump's product at
-//!   the path's momentum, its Doppler partners in it -- taken to S⁻¹(Λ + Λ_R E + E†Λ_R† + E†Λ_B E)S⁻¹, the jumps' own
-//!   product on S⁻¹ψ and E S⁻¹ψ; with the generator's decays at rest by their flags -- Λ_R = Σ J†J2, Λ_B = Σ J2†J2, read
-//!   off its dense terms' values. (With the first-order Doppler the response is R − w R2 and the jumps J − w J2, so the
-//!   terms whose absorbed component takes the shift w sum to G_R = ½ V^f†R2 + (i/2) Σ J†J2 and those whose emitted one
-//!   does to G_L = ½ R2†V^f + (i/2) Σ J2†J: the Hermitian coupling's partner ½ V^f†R2 is in both,
-//!   G_L† = ½ V^f†R2 − (i/2) Λ_R, and Λ_R = −i (G_R − G_L†) whatever V^f holds.) And the held part, in the entries'
-//!   own coordinates before the frames turn them as every entry is;
+//! - a node's generator (`Middle::generator`): the decay Λ = i(Ĥ − Ĥ†) of the node's terms -- Σ J(κ)†J(κ), every jump's
+//!   product at the path's momentum, J(κ) = c J − c_w J2 with its Doppler partner -- taken to Σ L†L of the photons'
+//!   operators L = (J(κ) + c J2 E) S⁻¹: S⁻¹(Λ + Λ_R E + E†Λ_R† + E†Λ_B E)S⁻¹ with Λ_R = Σ J(κ)† c J2 and Λ_B = Σ |c|² J2†J2,
+//!   read off its dense terms' values by their flags in the generator's own pass. (With the first-order Doppler the
+//!   response is R − w R2 and the jumps J − w J2, so the terms whose absorbed component takes the shift w sum to
+//!   G_R = ½ V^f†R2 + (i/2) Σ J†J2 and those whose emitted one does to G_L = ½ R2†V^f + (i/2) Σ J2†J: the Hermitian
+//!   coupling's partner ½ V^f†R2 is in both, G_L† = ½ V^f†R2 − (i/2) Σ J†J2, so Σ c*c J†J2 = −i (G_R − G_L†) whatever
+//!   V^f holds; the both-sided terms G_B = −(i/2) Σ J2†J2 give Λ_B = 2i G_B of their plain products and the Doppler
+//!   part of Λ_R, −Σ c_w* c J2†J2 = −2i G_D, of their products with the emitted component's shift.) The decay is the
+//!   photons' rate on every state to the rounding of its sums: one definition. And the held part, in the entries' own
+//!   coordinates before the frames turn them as every entry is;
 //! - a node's force (`Middle::gradient`, `Middle::contract`): the held part's gradient there, where it is anything;
-//! - a state's photons: the jumps' matrices on S⁻¹ψ and their partners' on E S⁻¹ψ (photon.rs), every jump of the
+//! - a state's photons: L ψ -- the jumps' and their Doppler partners' matrices on S⁻¹ψ and the partners' on E S⁻¹ψ
+//!   (photon.rs) --, every jump of the
 //!   cluster on the bent state, of the point's own matrices (`Quartic`; a thread's last point is kept, so a step's
 //!   middle and its scattering share one); a jump's landing (model.rs `Model::landed`): S(1 + Σ S_f T_f)⁻¹ f, the left
 //!   and right wave operators' overlap to the series' leading order Y; the readout of the slow state x = S⁻¹ψ itself
@@ -1321,7 +1325,8 @@ impl Plan {
         } else {
             (fourth.entries.len() + fourth.groups.len() + fourth.orders.normalization.saturating_sub(1) * n * size) as f64
         };
-        let decays = if fourth.held() { self.generator.iter().filter(|term| self.tones[term.tone] == 0.0 && term.flag != PLAIN).map(|term| term.len).sum::<usize>() } else { 0 };
+        // The decays: each static flagged term's plain product, a both-sided one's with its emitted component's shift too.
+        let decays = if fourth.held() { self.generator.iter().filter(|term| self.tones[term.tone] == 0.0 && term.flag != PLAIN).map(|term| term.len * if term.flag == BOTH { 2 } else { 1 }).sum::<usize>() } else { 0 };
         [made, (decays + (2 + if fourth.orders.series >= 1 { 3 } else { 0 }) * n * size + 3 * size) as f64]
     }
     /// The counted complex multiply-adds of the held part's force form at a node (`Middle::held_force`) with the forms'
@@ -2395,12 +2400,12 @@ impl crate::step::Middle for Middle<'_> {
         sum.clear();
         sum.resize(2 * padded, 0.0);
         let (re, im) = sum.split_at_mut(padded);
-        // The decays at rest where the series' first order reads them: the static flagged terms' sums of the plain
-        // products, G_R of the terms whose absorbed component takes the Doppler shifts, those of both, and G_L of those
-        // whose emitted one does.
+        // The decays where the series' first order reads them: the static flagged terms' sums of the plain products,
+        // G_R of the terms whose absorbed component takes the Doppler shifts, G_B of those of both, and G_L of those whose
+        // emitted one does; and G_D of the both-sided terms with the emitted component's shift alone.
         let decays = normalized.is_some_and(|fourth| fourth.held());
         flagged.clear();
-        flagged.resize(if decays { 6 * padded } else { 0 }, 0.0);
+        flagged.resize(if decays { 8 * padded } else { 0 }, 0.0);
         // A block's products of its two components, per flag: made once for its terms.
         let mut of = (usize::MAX, [C64::ZERO; 4]);
         for term in &plan.generator {
@@ -2422,7 +2427,15 @@ impl crate::step::Middle for Middle<'_> {
                     }
                 };
                 let (fr, fi) = flagged[2 * to * padded..2 * (to + 1) * padded].split_at_mut(padded);
-                axpy(of.1[PLAIN], real, imaginary, &mut fr[span.clone()], &mut fi[span]);
+                axpy(of.1[PLAIN], real, imaginary, &mut fr[span.clone()], &mut fi[span.clone()]);
+                // A both-sided term's product with its emitted (conjugated) component's shift alone: the Doppler part
+                // of Λ_R, G_D.
+                if term.flag == BOTH {
+                    let block = &plan.blocks[term.block];
+                    let product = if block.left.is_some_and(|s| plan.scalars[s].conjugate) { of.1[LEFT] } else { of.1[RIGHT] };
+                    let (fr, fi) = flagged[6 * padded..8 * padded].split_at_mut(padded);
+                    axpy(product, real, imaginary, &mut fr[span.clone()], &mut fi[span]);
+                }
             }
         }
         for (z, (re, im)) in h.data.iter_mut().zip(re.iter().zip(im.iter())) {
@@ -2448,11 +2461,11 @@ impl crate::step::Middle for Middle<'_> {
             }
             inner.copy_from_slice(lambda);
             if decays {
-                // Λ_R = −i(G_R − G_L†), Λ_B = 2i of the both-sided terms' sum (their part −(i/2)Λ_B).
+                // Λ_R = −i(G_R − G_L†) − 2i G_D at the path's momentum, Λ_B = 2i G_B (the both-sided terms' part −(i/2)Λ_B).
                 let at = |to: usize, place: usize| C64::new(flagged[2 * to * padded + place], flagged[(2 * to + 1) * padded + place]);
                 for a in 0..n {
                     for b in 0..n {
-                        lambda_r[a * n + b] = (at(0, a * n + b) - at(2, b * n + a).conj()) * C64::new(0.0, -1.0);
+                        lambda_r[a * n + b] = (at(0, a * n + b) - at(2, b * n + a).conj()) * C64::new(0.0, -1.0) - at(3, a * n + b) * C64::new(0.0, 2.0);
                         lambda_b[a * n + b] = at(1, a * n + b) * C64::new(0.0, 2.0);
                     }
                 }

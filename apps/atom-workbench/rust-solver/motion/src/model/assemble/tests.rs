@@ -1028,3 +1028,53 @@ fn the_held_part_s_force_form_is_its_gradient_s() {
         }
     }
 }
+
+/// The decay is the photons' rate, one definition (module documentation, # The normalized generator): a path's decay at
+/// its middle on a state, ψ†i(H − H†)ψ with the normalized generator's part S⁻¹(Λ + Λ_R E + E†Λ_R† + E†Λ_B E)S⁻¹, is
+/// Σ_classes ‖L ψ‖² of the photons' operators L = (J(κ) + c J2 E) S⁻¹ (photon.rs) at the same point and momentum -- the
+/// survival a step's hazard reads is the jumps' own -- to the rounding of the sums: at the series' order 1 (the 1D PGC at
+/// 3 G, refs/requests/PGC1D_TILT_0, q ≈ 0.03) and at order 0 with the normalization at order 1 (PGC3D, its order taken
+/// up to see the part), each against the plan without its normalized generator, moving at its reach's speeds.
+#[test]
+fn the_decay_is_the_photons_rate_with_the_normalized_generator() {
+    use crate::model::photon::Gradients;
+    for (file, speed) in [("PGC1D_TILT_0.json", 0.09), ("PGC3D_1ms.json", 0.04)] {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join(file);
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let request = Request::from_native(&line).unwrap();
+        let light = Light::new(&request);
+        let bare = Model::new(&request, &light, &[]).unwrap();
+        let kept: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).flat_map(|frequency| bare.bare_units(Component { frequency, counter: false })).collect();
+        let (r, v) = ([0.05, -0.1, 0.03], [speed, 0.5 * speed, 0.7 * speed]);
+        let points = [(r, v), ([0.0; 3], [0.0; 3])];
+        let prior = Model::new(&request, &light, &kept).unwrap().prior(&request, &points);
+        let mut model = Model::new(&request, &light, &[kept, prior].concat()).unwrap();
+        model.referenced(&points);
+        model.series.normalization = model.series.normalization.max(1);
+        let cluster = model.cluster_of(GROUND - 1);
+        let plan = model.plan(cluster, &model.running());
+        let n = plan.states;
+        assert!(plan.fourth.as_ref().is_some_and(|f| f.bends()), "{file}: the normalized generator bends the decay: {:?}", plan.fourth.as_ref().map(|f| f.orders));
+        let without = Arc::new(Plan { fourth: None, ..(*plan).clone() });
+        let kappa = v.map(|x| x / model.hbar_over_mass);
+        let mut stream = Stream::new(9, Purpose::Initial, 0, 0);
+        for (label, p) in [("with", plan.clone()), ("without", without)] {
+            for _ in 0..3 {
+                let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
+                let middle = model.middle(&p, r, 0.0, None);
+                let on = middle.path(kappa, v);
+                let mut h = Mat::zeros(n, n);
+                middle.generator(&on, 0.0, &mut h);
+                let mut rate = 0.0;
+                for x in 0..n {
+                    for y in 0..n {
+                        rate += (psi[x].conj() * (h.data[x * n + y] - h.data[y * n + x].conj()) * C64::I * psi[y]).re;
+                    }
+                }
+                let photons: f64 = model.photons_of(&p, None, &crate::model::Point { r, kappa, t: 0.0 }, &psi, Gradients::None).0.iter().map(|ph| ph.weight()).sum();
+                println!("{file} {label}: decay {rate:.6e}, photons {:.3e} apart", (rate - photons) / rate);
+                assert!((rate - photons).abs() <= rounding(4 * n * n) * rate, "{file} {label}: the decay {rate} against the photons' {photons}");
+            }
+        }
+    }
+}
