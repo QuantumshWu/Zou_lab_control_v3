@@ -18,7 +18,7 @@
 use super::assemble::{Held, Plan, Site};
 use super::far::EXCITED;
 use super::tabulate::NearTable;
-use super::{Beat, Cluster, Component, Level, Lights, Model, Point, Unit, GROUND, STATES};
+use super::{Beat, Cluster, Component, Level, Lights, Model, Point, Sample, Unit, GROUND, STATES};
 use crate::field::Amplitude;
 use crate::linalg::{Mat, C64};
 use std::collections::HashSet;
@@ -90,37 +90,15 @@ impl Model {
             out[s] = z.norm_sqr() / norm;
         }
         let mut site = Held::<Site>::take();
-        self.light.amplitudes_into(at.r, 0, |_| true, &mut site.beams);
-        // The responses of the drives folded at the atom: their table's at the point, or the exact elimination's.
-        let folded = self.folded_carriers(plan).count();
-        let exact = match table {
-            Some(table) if folded > 0 => {
-                self.placed(table, &mut site);
-                self.near_responses(table, &mut site);
-                None
-            }
-            _ => (folded > 0).then(|| self.near_exact(plan, &site.beams, 0, &self.coherent_dressing())),
-        };
-        let Site { beams: amplitudes, responses, weights, channels, excited, .. } = &mut *site;
-        let (far, size) = (self.bare_components(&plan.lights).count(), EXCITED * c.ground);
-        channels.clear();
-        channels.resize((far + folded) * size, C64::ZERO);
-        for (p, (frequency, side)) in self.bare_components(&plan.lights).enumerate() {
-            self.bare_response(c, amplitudes, frequency, side, &mut channels[p * size..(p + 1) * size]);
-        }
-        if folded > 0 {
-            let start = plan.near.responding().start;
-            let near = |i: usize| exact.as_ref().map_or_else(|| C64::new(responses[2 * i], responses[2 * i + 1]), |values| values.data[start + i]);
-            let place = |carrier: usize| far + self.folded_carriers(plan).take_while(|&d| d < carrier).count();
-            self.responses_each(plan, near, amplitudes, at.kappa, weights, |carrier, e, y, z| channels[place(carrier) * size + e * c.ground + y] += z);
-        }
+        let count = self.channels_at(plan, table, at, &mut site);
+        let Site { channels, excited, .. } = &mut *site;
+        let size = EXCITED * c.ground;
         // The co-resonant channels and places (p, b1) and (q, b2), θ_b1 + ν_p = θ_b2 + ν_q, and with them a place's class:
         // the first of the places co-resonant with it (itself among them). The cluster's own under the running lights,
         // exact, found once.
-        let places = (far + folded) * c.ground;
+        let places = count * c.ground;
         let first = self.resonances[plan.cluster].get_or_init(|| {
-            let bare = self.bare_components(&plan.lights).map(|(frequency, side)| self.frequency(Component { frequency, counter: side == 1 }));
-            let sums: Vec<Vec<Beat>> = bare.chain(self.folded_carriers(plan).map(|d| self.carriers[d].beat.clone())).map(|nu| c.frames[..c.ground].iter().map(|theta| theta.plus(1, &nu)).collect()).collect();
+            let sums: Vec<Vec<Beat>> = self.channel_beats(plan).iter().map(|nu| c.frames[..c.ground].iter().map(|theta| theta.plus(1, nu)).collect()).collect();
             let mut first = vec![usize::MAX; places];
             for (p, left) in sums.iter().enumerate() {
                 for (q, right) in sums.iter().enumerate() {
@@ -164,6 +142,97 @@ impl Model {
             out[c.states[place % c.ground]] -= given / norm;
         }
         out
+    }
+
+    /// The channels of a plan's cluster at a point (module documentation, # The readout), into `site.channels` -- each a
+    /// response R, row-major, EXCITED × the cluster's ground places, one after another: the bare drives' per component
+    /// (`bare_response`), then those folded at the atom per carrier, from their table where one is given, else from the
+    /// exact elimination --, the beams' amplitudes at the point into `site.beams`; and the channels' number. Their
+    /// excited frequencies' ν, in their order: `channel_beats`.
+    fn channels_at(&self, plan: &Plan, table: Option<&NearTable>, at: &Point, site: &mut Site) -> usize {
+        let c = &self.clusters[plan.cluster];
+        self.light.amplitudes_into(at.r, 0, |_| true, &mut site.beams);
+        // The responses of the drives folded at the atom: their table's at the point, or the exact elimination's.
+        let folded = self.folded_carriers(plan).count();
+        let exact = match table {
+            Some(table) if folded > 0 && self.placed(table, site) => {
+                self.near_responses(table, site);
+                None
+            }
+            _ => (folded > 0).then(|| self.near_exact(plan, &site.beams, 0, &self.coherent_dressing())),
+        };
+        let Site { beams: amplitudes, responses, weights, channels, .. } = site;
+        let (far, size) = (self.bare_components(&plan.lights).count(), EXCITED * c.ground);
+        channels.clear();
+        channels.resize((far + folded) * size, C64::ZERO);
+        for (p, (frequency, side)) in self.bare_components(&plan.lights).enumerate() {
+            self.bare_response(c, amplitudes, frequency, side, &mut channels[p * size..(p + 1) * size]);
+        }
+        if folded > 0 {
+            let start = plan.near.responding().start;
+            let near = |i: usize| exact.as_ref().map_or_else(|| C64::new(responses[2 * i], responses[2 * i + 1]), |values| values.data[start + i]);
+            let place = |carrier: usize| far + self.folded_carriers(plan).take_while(|&d| d < carrier).count();
+            self.responses_each(plan, near, amplitudes, at.kappa, weights, |carrier, e, y, z| channels[place(carrier) * size + e * c.ground + y] += z);
+        }
+        far + folded
+    }
+
+    /// The frequency ν of every channel of a plan's cluster (`channels_at`), in their order: a bare component's own, a
+    /// carrier's beat.
+    fn channel_beats(&self, plan: &Plan) -> Vec<Beat> {
+        let bare = self.bare_components(&plan.lights).map(|(frequency, side)| self.frequency(Component { frequency, counter: side == 1 }));
+        bare.chain(self.folded_carriers(plan).map(|d| self.carriers[d].beat.clone())).collect()
+    }
+
+    /// The component of every channel of a plan's cluster (`channels_at`), in their order: a bare one's, a carrier's
+    /// co-rotating one.
+    fn channel_components(&self, plan: &Plan) -> Vec<Component> {
+        let bare = self.bare_components(&plan.lights).map(|(frequency, side)| Component { frequency, counter: side == 1 });
+        bare.chain(self.folded_carriers(plan).map(|d| Component { frequency: self.carriers[d].frequency, counter: false })).collect()
+    }
+
+    /// The state a sample of this model's has in the model `into`, which keeps this one's units and more (solve.rs,
+    /// # An attempt's own: a keep's model decides first on the states its attempt left). A unit kept only joins states
+    /// and makes excited states explicit (cluster.rs, # Clusters), so the sample's cluster lies in one of `into`'s, and
+    /// the state there is the same atom's:
+    /// - a state this cluster holds keeps its amplitude, ψ_s = e^{−iθ_s t} x_s in either model's frames (cluster.rs,
+    ///   # Frames): x'_s = e^{i(θ'_s − θ_s) t} x_s at the sample's time;
+    /// - an excited state explicit there and folded here holds what the fold makes of it through the drives that are
+    ///   explicit there (module documentation, # The readout): their channels' −R_p[e, b] x_b, each at its excited
+    ///   frequency θ_b + ν_p, so x'_e = −Σ_{p,b} R_p[e, b] e^{i(θ'_e − θ_b − ν_p) t} x_b over the channels p whose drive
+    ///   e ← b `into` holds explicit -- the kept drive's channel, static in the frames that keep it, as it is; a drive
+    ///   `into` still folds keeps its own excitation folded there, the readout's apart. Its population is then the
+    ///   readout's folded one of those channels, and the rates and shifts its units' errors are shares of (units.rs,
+    ///   # The errors) are the same in both;
+    /// - the other ground states of that cluster hold nothing: between two jumps the atom is in one cluster.
+    ///
+    /// The sample is read at its point, its own path's middle (Doppler frames at zero: units.rs `Model::measured`).
+    pub(crate) fn carried(&self, sample: &Sample, into: &Model) -> Sample {
+        let (from, t) = (&self.clusters[sample.cluster], sample.at.t);
+        let cluster = into.cluster_of(from.states[0]);
+        let to = &into.clusters[cluster];
+        let mut psi = vec![C64::ZERO; to.states.len()];
+        for (x, (&s, theta)) in sample.psi.iter().zip(from.states.iter().zip(&from.frames)) {
+            if let Some(j) = to.states.iter().position(|&r| r == s) {
+                psi[j] = *x * C64::cis(self.omega(&to.frames[j].plus(-1, theta)) * t);
+            }
+        }
+        let folded: Vec<usize> = (to.ground..to.states.len()).filter(|&j| !from.states.contains(&to.states[j])).collect();
+        if !folded.is_empty() {
+            let plan = self.plan(sample.cluster, &self.running());
+            let mut site = Held::<Site>::take();
+            let count = self.channels_at(&plan, None, &sample.at, &mut site);
+            let (beats, components, size) = (self.channel_beats(&plan), self.channel_components(&plan), EXCITED * from.ground);
+            for j in folded {
+                let e = to.states[j] - GROUND;
+                let explicit = |p: usize, b: usize| into.level(components[p], to.states[j], from.states[b]) == Level::Explicit;
+                psi[j] = (0..count).flat_map(|p| (0..from.ground).map(move |b| (p, b))).filter(|&(p, b)| explicit(p, b)).fold(C64::ZERO, |z, (p, b)| {
+                    let phase = self.omega(&to.frames[j].plus(-1, &from.frames[b]).plus(-1, &beats[p])) * t;
+                    z - site.channels[p * size + e * from.ground + b] * sample.psi[b] * C64::cis(phase)
+                });
+            }
+        }
+        Sample { cluster, at: sample.at, psi }
     }
 
     /// V_L(r; p) far from the trap (SPEC §1.7): every focused beam's amplitude zero, the plane waves' terms of one wave vector

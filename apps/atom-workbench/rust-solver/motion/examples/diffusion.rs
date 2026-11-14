@@ -25,12 +25,15 @@ use atom_motion::model::{Model, Point, Run, Unit, GROUND};
 use atom_motion::request::Request;
 use atom_motion::step::{Brownian, Dynamics, Middle, Midway, Scratch, Step, Trajectory};
 
-/// The domain the tool's steps are taken in: every step proven -- its courses and models are its own to choose (a run's
-/// are held to the reach its model was judged over, atom_motion's solve.rs `Domain`).
+/// The domain the tool's steps are taken in: every step resolved, no state a runaway -- its courses and models are its
+/// own to choose (a run's guard is atom_motion's solve.rs `Domain`).
 struct Everywhere;
 impl atom_motion::step::Domain for Everywhere {
-    fn proven(&self, _: &atom_motion::step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> Result<bool, atom_motion::step::Unproven> {
-        Ok(true)
+    fn resolves(&self, _: &atom_motion::step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> bool {
+        true
+    }
+    fn runaway(&self, _: f64) -> bool {
+        false
     }
 }
 
@@ -75,18 +78,26 @@ fn reference(request: &Request) -> (usize, [f64; GROUND]) {
     (state, p)
 }
 
-/// The units the gates keep over the scene's own reach (the solve's closure without its pilot's keeps).
+/// The units the scene's units' errors keep at its reference state at the trap's centre (the solve keeps by the errors
+/// measured at its pilot's states): every folded unit -- the counter-rotating drives, only ever folded, left out -- whose
+/// error there, at rest and at the reach's largest speed along each lab axis, is ½ or more on its states' populations or on
+/// T, or whose small parameter there is, until none is.
 fn closure(name: &str) -> Vec<Unit> {
     let request = scene(name, 0.0);
     let light = Light::new(&request);
-    let (_, p) = reference(&request);
+    let (state, p) = reference(&request);
     let mut kept: Vec<Unit> = vec![];
     loop {
         let model = Model::new(&request, &light, &kept).unwrap();
         let trap = model.trap(&p, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &p, request.temperature_uk, atom_motion::estimate::unseen(atom_motion::units::MOST_TRAJECTORIES as f64));
-        let units = model.units();
-        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
+        let cluster = model.cluster_of(state);
+        let psi: Vec<C64> = model.clusters()[cluster].states.iter().map(|&s| if s == state { C64::ONE } else { C64::ZERO }).collect();
+        let speed = reach.speed / model.hbar_over_mass();
+        let samples: Vec<atom_motion::model::Sample> = (0..4).map(|a| atom_motion::model::Sample { cluster, at: Point { r: trap.centre, kappa: std::array::from_fn(|b| if a == b + 1 { speed } else { 0.0 }), t: 0.0 }, psi: psi.clone() }).collect();
+        let units: Vec<Unit> = model.units().into_iter().filter(|u| !matches!(u, Unit::Bare { component, .. } if component.counter)).collect();
+        let errors = model.errors(&units, &samples);
+        let failing: Vec<Unit> = units.iter().zip(&errors).filter(|(_, e)| e.iter().any(|e| !(e.population < 0.5 && e.temperature < 0.5 && e.parameter < 0.5))).map(|(u, _)| u.clone()).collect();
         if failing.is_empty() {
             return kept;
         }

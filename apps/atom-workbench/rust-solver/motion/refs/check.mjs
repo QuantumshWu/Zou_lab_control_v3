@@ -4,29 +4,41 @@
 // prints a compact table. A relation (kind "relation": one statement about several scenes' results, `relation` below)
 // reads its members' results (out/results/<member>.json, or --results in the members' order).
 //
-// Per output (a series' value at an output index): d = solver − reference, σ = √(SE² + u²) with u the reference's
-// standard uncertainty and SE the solver's statistical standard error:
+// Per output (a series' value at an output index): d = solver − reference, u the reference's standard uncertainty, SE
+// the solver's statistical standard error, and the band at the confidence z the two intervals combined,
+// √((q·SE)² + (zu)²), q the quantile of SE's own law at the two-sided tail 2Φ(−z) -- z itself for a standard error of
+// known variance, Student's t at the jackknife's degrees of freedom for T's (`quantile`):
 //   T            one axis: temperatureErrorUK; `total`: temperatureTotalUK with temperatureTotalErrorUK, the result's
 //                own total (T_x + T_y + T_z)/3 and its jackknife; `axes`: their mean, its SE bounded by the mean of
-//                theirs (fully correlated); null: no estimate, the output is not judged;
+//                theirs (fully correlated); null: no estimate, the output is not judged. Each is the delete-one-group
+//                jackknife over the groups that hold an atom (estimate.rs, # Errors), whose interval at the confidence
+//                z the result states as Student's t at one degree of freedom fewer than those groups times SE (Tukey's
+//                jackknife t; estimate.rs `Spread::interval`; the app's text: "区间按组数取 Student t，组少时比两倍
+//                标准误差宽"): q = t_{g−1}, g the groups -- the result's trajectories come in groups of the size its
+//                method states ("每 G 条一组"), an output's held atoms lie in at most min(N/G, N_held) of them, and that
+//                most is read, so that the band is never wider than the result's own interval. z·SE in its place
+//                understated the claim by t_{g−1}/z (14 % at the pilot's eleven groups, 2.2 times at three) and
+//                rejected what the result had not claimed (R1_CROSSED at 717cb386: T_y 2.12 SE off on eleven groups,
+//                inside the result's t₁₀ = 2.28, beyond z = 2). A result that states no grouping is read at z;
 //   loss         √(L(1 − L)/N), N = motion.trajectories (a Bernoulli mean);
 //   population   √(p(1 − p)/N_held), N_held = N(1 − L): the variance of a [0, 1]-valued mean is at most p(1 − p), so
 //   and group    this bounds SE from above -- it can only make the first rule more lenient, by at most 1/√N_held;
 //   meanVelocity √(k_B T_a/m)/√N_held; meanPosition(Average) the distribution's own spread over √N_held;
 //   trapFrequency 0 (deterministic).
 // Every constant below is z = 2, the confidence of the solver's own statistics (SPEC §0), or follows from it: the
-// share of outputs a Gaussian error leaves beyond zσ, 2Φ(−z) = 4.55 %; the level a test rejects at, Φ(−z) = 2.28 %.
+// share of outputs a Gaussian error leaves beyond zσ, 2Φ(−z) = 4.55 %; the level a test rejects at, Φ(−z) = 2.28 %;
+// either taken over a scene's family of tests by Šidák (rule 3).
 //
 // A series with a user's target (SPEC §0: populations, groups and loss 0.05 absolute; T 10 % of the reference -- on the
 // total temperature, solve.rs "# T's target is on the total temperature") is judged by two rules.
-// Rule 1 (accuracy): an output fails where |d| − zσ > target, the target unrelaxed. An output is resolved where
-//   zσ ≤ target: an error as large as the target is then told from none at the confidence z. Where zσ > target and the
-//   output does not fail, the band target + zσ is more noise than target: the output is not judged (column `unres`).
+// Rule 1 (accuracy): an output fails where |d| − band > target, the target unrelaxed. An output is resolved where
+//   band ≤ target: an error as large as the target is then told from none at the confidence z. Where band > target and
+//   the output does not fail, target + band is more noise than target: the output is not judged (column `unres`).
 // Rule 2 (coverage, SPEC §6: the reported error covers the deviation). The result's error E of an output is its bound
 //   at the confidence z (ledger.rs: E² = A² + b² + S², A and b the model's and the step's parts, S the statistics'
 //   interval at z): populations, groups and loss: the result's sampleErrors (the total; of it S is taken as z·SE of
-//   the Bernoulli bound above, no more than the total, the rest systematic); T: S = z·SE, A ⊕ b = the ledger's
-//   totals.temperature.error × T. With the reference's own u the claim is |d| ≤ B, B² = E² + (zu)². Two tests:
+//   the Bernoulli bound above, no more than the total, the rest systematic); T: S = t_{g−1}·SE (above), A ⊕ b = the
+//   ledger's totals.temperature.error × T. With the reference's own u the claim is |d| ≤ B, B² = E² + (zu)². Two tests:
 //   (a) the count K of outputs with |d| > B against effectively independent outputs. The null: the standardized
 //       residuals r_i = z d_i/B_i (in standard deviations of the claim: beyond is |r_i| > z), in time order, are a
 //       stationary Gaussian series of mean zero, a variance of no more than one, and an autocorrelation ρ_k that the
@@ -88,8 +100,26 @@
 //       remainder of 0.02 to 0.8 of the variance: (a) alone 0.13 % at most, where the rule before had 2 to 15 %).
 // A series without a user's target (`target: null`: trap frequencies, a mean position or velocity, one axis's T --
 //   each axis's T is shown with its statistics and held to nothing by the solver) is judged against the reference's own
-//   uncertainty and the result's statistics alone, by the same two tests with B = zσ (no systematic part of the
-//   solver's: A ⊕ b = 0, S = z·SE): rule 0 (consistency). A single deterministic output (a trap frequency): |d| ≤ zu.
+//   uncertainty and the result's statistics alone, by the same two tests with B = the band (no systematic part of the
+//   solver's: A ⊕ b = 0, S = q·SE): rule 0 (consistency). A single deterministic output (a trap frequency): |d| ≤ zu.
+// Rule 3 (the family): a scene fails where any of its series' tests rejects, so an honest result fails by the sum of
+//   its tests' chances. Each test of rules 0 and 2 is at its own level, and (b) rejects a series that is one draw for
+//   the whole run (a conservative trap's sample energy, R1: every axis's T and the total T) with the probability
+//   2Φ(−z) whatever the trajectories -- more of them shrink the bound and the draw alike --: a scene of m such series
+//   failed an honest result 1 − (1 − 2Φ(−z))^m of the time, 50 to 66 % over the landing gate's fifteen one-axis T
+//   series of R1 at eleven to twenty-four groups (R1_CROSSED: v23 passed and 717cb386 failed on the same 88 pilot
+//   atoms, T_y 25.23 ± 2.27 µK in both; v23 had gone on to 192). The family's tests are taken at Šidák's tails,
+//   1 − (1 − p)^{1/m} for each test's own p (the count's Φ(−z), the mean's 2Φ(−z)), which keeps the chance that some
+//   test of the scene rejects an honest result at p -- exactly for independent series, at most p for the correlated
+//   ones of one run (its outputs and axes share their trajectories: Šidák's inequality for the centred multivariate
+//   normal) --, the rule the solver takes for a decision over many reads (estimate.rs, # Many looks). m counts the
+//   series judged whose claims hold a statistical part (S > 0 or u > 0 at some output): a claim of a systematic part
+//   alone is not met by chance, and its rejection is evidence by itself. At the mean's tail the bound M takes each
+//   part at its own quantile there -- S by its law (Student's t for T, its interval at z rescaled), u by the
+//   normal's --, A ⊕ b as it is (a bound, not a spread); the count's bound B and its null rate 2Φ(−z) stay the
+//   claim's at z, its level is Šidák's. What it costs: a series is told at the family's confidence -- a one-draw
+//   series among R1's fifteen at 2.96 standard errors of known variance, t₁₀ = 3.85 on eleven groups, instead of 2 --,
+//   the least a single run can tell without failing honest results by more than 2Φ(−z) a scene.
 // T series of regime "classical" are compared only where the result's `classical` is true; outputs an expectation
 // marks unjudged are reported, not judged. Kinds "characterization" and "regression-consistency" are reported, never
 // failed. A series marked `reported` (another engine's old numeric result, an axis whose share a symmetry leaves open)
@@ -124,7 +154,22 @@ export const binomialTail=(k,n,p)=>k<=0?1:k>n?0:betai(k,n-k+1,p);
 function upperTail(z){const x=z/Math.SQRT2;let term=x,sum=x;for(let n=1;n<200;n++){term*=-x*x/n;const add=term/(2*n+1);sum+=add;if(Math.abs(add)<1e-17)break;}return 0.5*(1-2/Math.sqrt(Math.PI)*sum);}
 /** Φ(−z), the level of a one-sided test at the confidence z; 2Φ(−z), the share of outputs a Gaussian error leaves
  * beyond zσ. */
-const ALPHA=upperTail(Z),BEYOND=2*ALPHA;
+export const ALPHA=upperTail(Z),BEYOND=2*ALPHA;
+/** The two-sided quantile at the tail p of Student's t at `freedom` degrees of freedom, the normal's at Infinity: the q
+ * with P(|t| > q) = p -- I_{ν/(ν + q²)}(ν/2, ½) for Student's (Abramowitz–Stegun 26.7.1 with 26.5.27), 2Φ(−q) for the
+ * normal's -- by bisection on the tail to the last bit, kept per (p, freedom). A standard error's interval at the tail
+ * p (the header): z at 2Φ(−z) for the normal's, t_{g−1} for a jackknife over g groups (estimate.rs `quantile`, the same
+ * definition). */
+const kept=new Map();
+export function quantile(p,freedom=Infinity){
+  const key=`${p} ${freedom}`;if(kept.has(key))return kept.get(key);
+  const tail=q=>Number.isFinite(freedom)?betai(freedom/2,0.5,freedom/(freedom+q*q)):2*upperTail(q);
+  let lo=0,hi=1;while(tail(hi)>p){lo=hi;hi*=2;}
+  for(;;){const m=0.5*(lo+hi);if(!(m>lo&&m<hi))break;if(tail(m)>p)lo=m;else hi=m;}
+  kept.set(key,hi);return hi;
+}
+/** Šidák's tail of one of `looks` tests that keeps the family's chance of a rejection at p (rule 3). */
+export const sidak=(p,looks)=>-Math.expm1(Math.log1p(-p)/looks);
 /** κ(ρ), the correlation of the indicators 1{|X| > z}, 1{|Y| > z} of two standard normal variables of correlation
  * ρ in [0, 1] (the header's (a)): (1/π)∫_0^{asin ρ} [e^{−z²/(1 + sin θ)} − e^{−z²/(1 − sin θ)}] dθ over q(1 − q), by
  * Simpson's rule on 32 panels (the integrand is smooth to the end: within 1e-7 of the integral for every ρ). */
@@ -142,16 +187,19 @@ export function effectiveCount(r){
   return n/(1+2*s);
 }
 /** The two tests of a series against the errors claimed for it (the header's rule 2; rule 0 with no systematic part of
- * the solver's): per output the deviation d, the systematic part of its bound at the confidence z (`fixed`: A ⊕ b), the
- * statistics' (`random`: S) and the reference's standard uncertainty u. Returns the count of outputs beyond their
- * bound, the count test's n_eff and tail probability p, the mean deviation and its bound M, and whether either
- * rejects. */
-export function consistency(outputs){
+ * the solver's), as one of a family of `looks` series (rule 3; one by default): per output the deviation d, the
+ * systematic part of its bound at the confidence z (`fixed`: A ⊕ b), the statistics' interval at z (`random`: S) and
+ * the degrees of freedom of its law (`freedom`, the normal's where absent), and the reference's standard uncertainty u.
+ * Returns the count of outputs beyond their bound, the count test's n_eff and tail probability p, the mean deviation
+ * and its bound M at the family's tail, and whether either rejects. */
+export function consistency(outputs,looks=1){
   const n=outputs.length,B=outputs.map(o=>Math.hypot(o.fixed,o.random,Z*o.u)),r=outputs.map((o,i)=>B[i]>0?Z*o.d/B[i]:o.d?Math.sign(o.d)*Infinity:0);
   const beyond=outputs.filter((o,i)=>Math.abs(o.d)>B[i]).length,mean=f=>outputs.reduce((t,o)=>t+f(o),0)/n;
   const neff=r.every(Number.isFinite)?effectiveCount(r):1,p=binomialTail(neff*(beyond/n),neff,BEYOND);
-  const dbar=mean(o=>o.d),M=Math.hypot(mean(o=>o.fixed),Z*mean(o=>o.u),mean(o=>o.random));
-  return {n,beyond,neff,p,dbar,M,count:p<ALPHA,common:Math.abs(dbar)>M,reject:p<ALPHA||Math.abs(dbar)>M};
+  // Each part of M at the family's tail: S by its own law (its interval at z rescaled), u by the normal's, A ⊕ b as it is.
+  const tail=sidak(BEYOND,looks),at=o=>o.random&&o.random*quantile(tail,o.freedom)/quantile(BEYOND,o.freedom);
+  const dbar=mean(o=>o.d),M=Math.hypot(mean(o=>o.fixed),quantile(tail)*mean(o=>o.u),mean(at)),level=sidak(ALPHA,looks);
+  return {n,beyond,neff,p,dbar,M,looks,count:p<level,common:Math.abs(dbar)>M,reject:p<level||Math.abs(dbar)>M};
 }
 
 /** One expectation against one result: rows per series, totals, the verdict. */
@@ -159,6 +207,8 @@ export function check(e,result,request){
   const r=result,m=r.motion??{},N=m.trajectories??NaN,loss=m.lossProbability??[],errors=r.populationAccuracy?.sampleErrors??[];
   const tLedger=r.diagnostics?.approximations?.totals?.temperature?.error??0,mass=request?.model?.motion?.massKg;
   const k=s=>r.states.indexOf(s),held=i=>N*(1-(loss[i]??0));
+  // The degrees of freedom of T's jackknife at an output (the header): the most groups its held atoms lie in, less one.
+  const G=Number(/每 (\d+) 条一组/.exec(r.diagnostics?.method??'')?.[1]),freedom=i=>G>0?Math.max(1,Math.min(N/G,held(i))-1):Infinity;
   const temperature=(s,i)=>{
     if(s.total){const se=m.temperatureTotalErrorUK?.[i];return {x:m.temperatureTotalUK?.[i],se:se==null?Infinity:se};}
     const axes=s.axes??[s.axis],se=axes.map(a=>m.temperatureErrorUK[a][i]);
@@ -170,16 +220,16 @@ export function check(e,result,request){
   for(const s of e.series){
     const name=(s.reported?'* ':'')+s.quantity+(s.total?' total':'')+(s.axis?` ${s.axis}`:'')+(s.axes?` ${s.axes.join('+')}`:'')+(s.state?` ${s.state}`:'')+(s.label?` ${s.label}`:''),count=!s.reported;
     const outputs=s.indices?s.indices.map((i,j)=>({i,ref:s.values[j],u:s.u[j],judge:s.judged?s.judged[j]:true})):[{i:null,ref:s.value,u:s.u,judge:true}];
-    const row={name,own:!s.target,n:0,maxD:0,worst:-Infinity,worstAt:null,fail:0,unresolved:0,skipped:0,claims:[],test:null};
+    const row={name,own:!s.target,counted:count,n:0,maxD:0,worst:-Infinity,worstAt:null,fail:0,unresolved:0,skipped:0,claims:[],test:null};
     for(const o of outputs){
-      let x,se,claim=null;const i=o.i;
+      let x,se,claim=null,nu=Infinity;const i=o.i;
       switch(s.quantity){
         case 'population':x=r.populations[i][k(s.state)];se=Math.sqrt(x*(1-x)/held(i));claim=split(errors[i],se);break;
         case 'group':x=s.states.reduce((t,st)=>t+r.populations[i][k(st)],0);se=Math.sqrt(Math.max(0,x*(1-x))/held(i));claim=split(errors[i],se);break;
         case 'loss':x=loss[i];se=Math.sqrt(x*(1-x)/N);claim=split(errors[i],se);break;
-        case 'T':{({x,se}=temperature(s,i));claim={fixed:tLedger*x,random:Z*se};
+        case 'T':{({x,se}=temperature(s,i));nu=freedom(i);claim={fixed:tLedger*x,random:quantile(BEYOND,nu)*se,freedom:nu};
           if(s.regime==='classical'&&!m.classical[i])o.judge=false;break;}
-        case 'Tincrease':{({x,se}=temperature(s,i));x-=temperature(s,0).x;break;}
+        case 'Tincrease':{({x,se}=temperature(s,i));x-=temperature(s,0).x;nu=freedom(i);break;}
         case 'trapFrequency':x=m.trapFrequencyKHz[s.axis];se=0;break;
         case 'meanVelocity':x=m.meanVelocityMps[s.axis][i];se=Math.sqrt(KB*m.temperatureUK[s.axis][i]*1e-6/mass)/Math.sqrt(held(i));break;
         case 'meanPosition':{const p=m.position?.[s.axis],j=p?.samples.indexOf(i);if(!p||j<0){x=undefined;break;}
@@ -193,23 +243,28 @@ export function check(e,result,request){
       }
       if(x===undefined)continue;
       if(!o.judge||!Number.isFinite(se)){row.skipped++;if(count)skipped++;continue;}
-      const d=x-o.ref,sigma=Math.hypot(se,o.u);
+      const d=x-o.ref,band=Math.hypot(quantile(BEYOND,nu)*se,Z*o.u);
       row.n++;row.maxD=Math.max(row.maxD,Math.abs(d));if(!count)shown++;
-      // Rule 0: against its own errors (the tests below); the score is |d| over zσ. Rules 1 and 2: the target, then the claim.
-      const target=row.own?null:s.target.absolute??(s.target.relative*Math.abs(o.ref)),score=row.own?(Z*sigma>0?Math.abs(d)/(Z*sigma):d?Infinity:0):(Math.abs(d)-Z*sigma)/target;
+      // Rule 0: against its own errors (the tests below); the score is |d| over the band. Rules 1 and 2: the target, then the claim.
+      const target=row.own?null:s.target.absolute??(s.target.relative*Math.abs(o.ref)),score=row.own?(band>0?Math.abs(d)/band:d?Infinity:0):(Math.abs(d)-band)/target;
       if(score>row.worst){row.worst=score;row.worstAt={i,t:r.timesUs[i??0],x,ref:o.ref,se,u:o.u};}
-      if(row.own){row.claims.push({d,u:o.u,fixed:0,random:Z*se});if(count)judged++;continue;}
+      if(row.own){row.claims.push({d,u:o.u,fixed:0,random:quantile(BEYOND,nu)*se,freedom:nu});if(count)judged++;continue;}
       if(claim)row.claims.push({d,u:o.u,...claim});
       if(score>1){row.fail++;if(count){failed++;judged++;}}
-      else if(Z*sigma>target){row.unresolved++;if(count)unresolved++;}
+      else if(band>target){row.unresolved++;if(count)unresolved++;}
       else if(count)judged++;
     }
-    if(row.claims.length){row.test=consistency(row.claims);if(row.test.reject&&count)rejected++;}
-    delete row.claims;rows.push(row);
+    rows.push(row);
+  }
+  // Rule 3: the family -- the series judged whose claims hold a statistical part -- and each one's tests at its tails.
+  const chance=row=>row.counted&&row.claims.some(c=>c.random>0||c.u>0),family=rows.filter(chance).length;
+  for(const row of rows){
+    if(row.claims.length){row.test=consistency(row.claims,chance(row)?family:1);if(row.test.reject&&row.counted)rejected++;}
+    delete row.claims;
   }
   const judgedKind=!['characterization','regression-consistency'].includes(e.kind);
   const verdict=!judged?'NOT JUDGED':!judgedKind?'REPORT':failed||rejected?'FAIL':'PASS';
-  return {rows,judged,failed,rejected,unresolved,skipped,shown,verdict};
+  return {rows,judged,failed,rejected,unresolved,skipped,shown,family,verdict};
 }
 
 /** A relation between the steady states of several results (kind "relation": R4's scaling law, expect.mjs
@@ -267,14 +322,14 @@ function printRelation(e,c){
 function print(e,c,run){
   const head=`${e.id} [${e.reference}, ${e.kind}] ${e.title}`;
   if(c.error){console.log(`${head}\n  ${c.error}\n`);return;}
-  console.log(`${head}\n  ${c.verdict}: ${c.judged} outputs judged; rule 1 (beyond target): ${c.failed}; rules 0 and 2 (inconsistent with the errors): ${c.rejected} series; ${c.unresolved} unresolved (zσ > target); ${c.skipped} not judged${c.shown?`; ${c.shown} reported (*)`:''}`+
+  console.log(`${head}\n  ${c.verdict}: ${c.judged} outputs judged; rule 1 (beyond target): ${c.failed}; rules 0 and 2 (inconsistent with the errors): ${c.rejected} series of a family of ${c.family}; ${c.unresolved} unresolved (band > target); ${c.skipped} not judged${c.shown?`; ${c.shown} reported (*)`:''}`+
     (run?` | run ${run.wallS.toFixed(1)} s${run.aborted?' ABORTED':''}, first checkpoint ${run.firstCheckpointS?.toFixed(1)??'-'} s, ${run.final?.result?.motion?.trajectories??'-'} trajectories`:''));
   console.log('  '+['series'.padEnd(30),'n'.padStart(4),'max|d|'.padStart(10),'score'.padStart(8),'fail'.padStart(5),'unres'.padStart(6),'out'.padStart(5),'n_eff'.padStart(7),'p'.padStart(9),'|d̄|/M'.padStart(8),'  worst output (t: solver vs ref ± se, u)'].join(''));
   for(const r of c.rows){const w=r.worstAt,t=r.test;
     console.log('  '+[r.name.slice(0,30).padEnd(30),String(r.n).padStart(4),r.maxD.toPrecision(3).padStart(10),(Number.isFinite(r.worst)?r.worst.toFixed(2)+(r.own?'°':' '):'-').padStart(8),(r.own?'-':String(r.fail)).padStart(5),(r.own?'-':String(r.unresolved)).padStart(6),
       (t?String(t.beyond):'-').padStart(5),(t?t.neff.toFixed(1):'-').padStart(7),(t?t.p.toPrecision(2)+(t.count?'!':' '):'-').padStart(9),(t?(t.M>0?(Math.abs(t.dbar)/t.M).toFixed(2):t.dbar?'inf':'0.00')+(t.common?'!':' '):'-').padStart(8),
       w?`  t=${w.t.toPrecision(4)}: ${w.x.toPrecision(5)} vs ${w.ref.toPrecision(5)} ± ${w.se.toPrecision(2)}, ${w.u.toPrecision(2)}`:''].join(''));}
-  console.log('  score: (|d| − 2σ)/target, beyond 1 fails; ° no user\'s target: |d|/2σ, judged by the two tests (out, n_eff, p: the count beyond the bound against n_eff independent outputs, n_eff from the residual\'s autocorrelation about zero -- an offset the whole run shares is one draw; |d̄|/M: the mean deviation over its bound; ! rejects)\n');
+  console.log('  score: (|d| − band)/target, beyond 1 fails, the band q·SE ⊕ 2u (q: 2, or Student\'s t at the groups less one for T); ° no user\'s target: |d|/band, judged by the two tests at the family\'s Šidák tails (out, n_eff, p: the count beyond the bound against n_eff independent outputs, n_eff from the residual\'s autocorrelation about zero -- an offset the whole run shares is one draw; |d̄|/M: the mean deviation over its bound; ! rejects)\n');
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

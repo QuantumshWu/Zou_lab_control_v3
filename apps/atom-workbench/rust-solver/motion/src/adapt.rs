@@ -10,10 +10,10 @@
 //! through its own three nodes, its middle and its ends, whatever its length (step.rs, # The kick): what that leaves
 //! is an error of the step's length like the splitting's, and the pilot's companion at twice the step checks both at
 //! the outputs (solve.rs, # The step). The generator's own frequencies are no matter of the step's length: they are
-//! integrated exactly. A step is taken only where its domain proves it (step.rs, # The domain): the model the run takes
-//! holds over its path, and the step is stable there. One that is not proven ends the advance with what its path needs
-//! (`step::Unproven`): the run's model is no model of that step, and no length of a step makes it one. A step that does
-//! not resolve its path at its speed is taken, the trajectory unresolved from it on (`step::Trajectory::unresolved`).
+//! integrated exactly. A step whose state scatters beyond every state of the atom -- a fold far outside its validity
+//! (step.rs, # The domain) -- ends the advance (`step::Refused::Runaway`): no length of a step makes the fold hold. A step
+//! that does not resolve its path at its speed is taken, the trajectory unresolved from it on
+//! (`step::Trajectory::unresolved`).
 //!
 //! τ is one for the run because the splitting is symplectic in its conservative part and its own inverse: at a constant
 //! step the energy of a trap's motion errs by a bounded amount (measured on the reference traps R1: no drift over 10³
@@ -22,19 +22,28 @@
 //!
 //! # The reads
 //! A trajectory is read at the caller's times (the outputs) where they fall, inside a step, from what the step knows
-//! between its ends (step.rs, # The path between a step's ends; `step::Step::at`): the internal state its propagation
-//! has there, the position and the momentum on its path with the kick spread over it -- second order in τ like the
-//! step's ends, a time at a step's end the end itself. A read is no part of the trajectory: nothing of it enters the
-//! next step. So the step follows from what the scheme must resolve alone (solve.rs, # The step), and outputs however
-//! dense cost a state at a time each, not a step.
-//! - A time read lies in one step: after its start, at its end at the latest. The times read are stops of the step's
-//!   propagation (`step::Midway::attempt`), each the state as the propagation passes it: after the jumps before it,
-//!   before those after it.
-//! - The loss is a first passage, tested wherever a state of the trajectory is made (SPEC §1.7): at every step's end,
-//!   after every jump, and at every read -- else the loss at a time read inside a step would be the last step's end's,
-//!   late by the step in the first order. Inside a step those states are tested in the order of their times, each on
-//!   the trajectory's own place there, the step's path (`step::Segment`). A trajectory found lost at one of them is
-//!   lost at that time: that is its last state, and its step counts up to there.
+//! between its ends (step.rs, # The path between a step's ends): the internal state its propagation has there, the
+//! position and the momentum on its path with the kick spread over it -- second order in τ like the step's ends, a time
+//! at a step's end the end itself. A read is an onlooker: nothing of the trajectory depends on the times it is read at
+//! -- not its steps' ends, not its jumps' roots and the brackets and first tries they start from, not the nodes its
+//! steps take, not the numbers it draws, not where it is lost --, and a read is the same whatever else is read. So the
+//! step follows from what the scheme must resolve alone (solve.rs, # The step), a trajectory read at 100 times is the
+//! one read at 1000 to the bit, and outputs however dense cost each a state and its place, not a step.
+//! - A time read lies in one step: after its start, at its end at the latest. It is no stop of the step's propagation
+//!   (`step::Midway::attempt`): its state is taken from the propagation as it passes -- after the jumps before it,
+//!   before those after it --, from the latest stop at or before it (step.rs `looked`), its norm the propagation's
+//!   there: what is read of it is ρ/tr ρ, and the survival is the trajectory's own states'; its place is the step's
+//!   path's there with the draw of the time's own stream (`step::Segment::place`).
+//! - The loss is a first passage, tested where the trajectory's own states are made (SPEC §1.7): at every step's end
+//!   and after every jump, each on the trajectory's place there (`step::Segment`). A trajectory found lost at one of
+//!   them is lost at that time: that is its last state, and its step counts up to there. A read is none of them, and a
+//!   time read inside a step before the trajectory's loss reads it held. The passage is the first of the trajectory's
+//!   own states beyond the trap's region above the far value -- an atom there runs away --: late against the passage
+//!   along its path by less than a step, as on the companion at 2τ by less than its own step. That is an error of the
+//!   first order in τ of the size of the loss's rate times τ (a loss of one half over a millisecond at τ = 1 µs:
+//!   5·10⁻⁴, a hundredth of the loss's target), which the companion reads with the step's other errors (solve.rs,
+//!   # The step). Tested at the reads as well, the loss would move with the outputs: a trajectory found lost at a read
+//!   would end there instead of running on to its step's end.
 //! - Two levels of a trajectory (solve.rs, # The step) are read at the same times, each on its own steps: their
 //!   readings agree as τ → 0, and differ by the scheme's accumulated error, smooth in the time, and by the two reads'
 //!   own terms, of the second order with a factor that depends on the time's place in its step ((h² − u²)/2: its
@@ -181,14 +190,14 @@ impl Path {
 }
 
 /// Advances a held trajectory to the time `to` (the run's end) by steps of τ, with its jumps and its loss test (module
-/// documentation, # The step, # The jumps; the loss is tested at every step's end, after every jump and at every
-/// read, SPEC §1.7), and reads it at the times `at` (increasing) that lie after its time and no later than `to`, each
-/// inside the step it falls in (# The reads): `read` takes a time's place in `at` and the state there. `each` takes
-/// every piece of every step's path -- from the step's start or a jump of the step -- with the time the trajectory is
-/// on it to: the next jump, the step's end, or the read it is found lost at. A trajectory lost on the way stops at
-/// its loss time. Where the scheme refuses a step at every length down to the time's round-off, the advance ends
-/// there with the refusal; so it does where the model gives a jump no photon (`step::jump`), where `domain` does
-/// not prove the step (step.rs, # The domain: a shorter step is no answer to that), and where the middle's optical
+/// documentation, # The step, # The jumps; the loss is tested at every step's end and after every jump, SPEC §1.7),
+/// and reads it at the times `at` (increasing) that lie after its time and no later than `to`, each inside the step it
+/// falls in and the trajectory the same whatever is read (# The reads): `read` takes a time's place in `at` and the
+/// reading there. `each` takes every piece of every step's path -- from the step's start or a jump of the step -- with
+/// the time the trajectory is on it to: the next jump or the step's end. A trajectory lost on the way stops at its
+/// loss time. Where the scheme refuses a step at every length down to the time's round-off, the advance ends
+/// there with the refusal; so it does where the model gives a jump no photon (`step::jump`), where a state scatters
+/// beyond every state of the atom (step.rs, # The domain: a shorter step is no answer to that), and where the middle's optical
 /// sector makes no K (step.rs, # The optical sector's noise: a shorter step would only step past it). `scratch` is the trajectory's
 /// (`step::Scratch`): its steps' memory, made once with it; `path` its Brownian path, which it goes along as it is
 /// advanced (`Path`).
@@ -222,7 +231,7 @@ pub fn advance<D: Dynamics>(
             let reads = &at[next..next + at[next..].partition_point(|&time| time <= end)];
             match Midway::new(model, trajectory, length).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch, domain)) {
                 Ok(step) => break (step, end, beyond),
-                Err(refusal @ (Refused::Emission | Refused::Unproven(_) | Refused::Optical(_))) => return Err(refusal),
+                Err(refusal @ (Refused::Emission | Refused::Runaway | Refused::Optical(_))) => return Err(refusal),
                 Err(refusal) => {
                     length *= 0.5;
                     if !(trajectory.time + length > trajectory.time) {
@@ -231,10 +240,12 @@ pub fn advance<D: Dynamics>(
                 }
             }
         };
-        // The states made inside the step in the order of their times, each on the step's path with its loss test
-        // (module documentation, # The reads): after a jump on the path that goes on from it, at a time read on the
-        // path it lies on.
+        // The states made inside the step in the order of their times, each on the step's path (module documentation,
+        // # The reads): after a jump the trajectory's, on the path that goes on from it, with its loss test; at a time
+        // read a reading on the path it lies on, which the trajectory does not take up -- held at its time where the
+        // trajectory's own states up to that time are: a time read at the step's end is read once the end is tested.
         let mut piece = step.segment;
+        let mut ending = Vec::new();
         for mut made in step.made {
             let time = made.state.time;
             match made.kick {
@@ -242,21 +253,22 @@ pub fn advance<D: Dynamics>(
                     each(&piece, time);
                     piece = piece.after(time, kick);
                     (made.state.r, made.state.kappa) = piece.from;
+                    test_loss(model, &mut made.state);
+                    if made.state.lost.is_some() {
+                        *trajectory = made.state;
+                        trajectory.work += step.work;
+                        return Ok(());
+                    }
                 }
-                None => piece.place(&mut made.state),
-            }
-            test_loss(model, &mut made.state);
-            if made.state.lost.is_some() {
-                if made.kick.is_none() {
-                    each(&piece, time);
+                None => {
+                    piece.place(&mut made.state);
+                    if time < end {
+                        read(next, &made.state);
+                        next += 1;
+                    } else {
+                        ending.push(made.state);
+                    }
                 }
-                *trajectory = made.state;
-                trajectory.work += step.work;
-                return Ok(());
-            }
-            if made.kick.is_none() {
-                read(next, &made.state);
-                next += 1;
             }
         }
         each(&piece, end);
@@ -265,6 +277,12 @@ pub fn advance<D: Dynamics>(
         trajectory.work += step.work;
         trajectory.time = end;
         test_loss(model, trajectory);
+        if trajectory.lost.is_none() {
+            for state in &ending {
+                read(next, state);
+                next += 1;
+            }
+        }
     }
     Ok(())
 }

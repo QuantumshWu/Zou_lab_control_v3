@@ -1208,6 +1208,39 @@ impl<'a> Builder<'a> {
 }
 
 impl Plan {
+    /// What a node and a point of the plan are made of (the step's cost harness, step/tests.rs): its states, beams, field
+    /// components, blocks and tones; the generator's and the force's dense terms with their reals; a point's near forms
+    /// and the reals of its values, forms and jumps; the classes with their members and rows; the fourth order.
+    #[cfg(test)]
+    pub(crate) fn described(&self) -> String {
+        let reals = |terms: &[Term]| terms.iter().map(|t| 2 * t.len).sum::<usize>();
+        let near = |terms: &[Term]| terms.iter().filter(|t| t.near).count();
+        let members: usize = self.classes.iter().map(|c| c.members.len()).sum();
+        let rows: usize = self.classes.iter().map(|c| c.rows).sum();
+        format!(
+            "n {} beams {} components {} blocks {} tones {} | generator terms {} ({} near, {} reals) form terms {} ({} near, {} reals) | point: near forms {} values {} forms {} jumps {} | classes {} members {} rows {} | fourth {}",
+            self.states,
+            self.beams.len(),
+            self.scalars.len(),
+            self.blocks.len(),
+            self.tones.len(),
+            self.generator.len(),
+            near(&self.generator),
+            reals(&self.generator),
+            self.form.len(),
+            near(&self.form),
+            reals(&self.form),
+            self.near.len(),
+            self.generator_start.len(),
+            self.form_start.len(),
+            self.jumps_start.len(),
+            self.classes.len(),
+            members,
+            rows,
+            self.fourth.is_some()
+        )
+    }
+
     fn new(model: &Model, cluster: usize, lights: &Lights) -> Plan {
         // The frequency whose fold on the cluster is the fourth order's under the lights: the model's, its light coherent.
         let fourth = model.fourth[cluster].filter(|&frequency| lights.0[frequency] == Lit::Coherent);
@@ -1506,6 +1539,10 @@ pub(crate) struct Site {
 impl Site {
     /// The plan's beams' amplitudes with their gradients, from every beam's (`beams`).
     fn select(&mut self, plan: &Plan) {
+        // A node's fields are of the beams' amplitudes: none kept from another point's.
+        for node in &mut self.scratch.get_mut().nodes {
+            node.key = None;
+        }
         self.amplitudes.clear();
         self.amplitudes.extend(plan.beams.iter().map(|&l| &self.beams[l]).map(|a| [a.value, a.gradient[0], a.gradient[1], a.gradient[2]]));
     }
@@ -1787,10 +1824,9 @@ impl Model {
     /// A plan's near forms at a point, the sections asked each to its order (0 or 1): from its table where one is given
     /// (tabulate.rs), else the exact elimination's to the largest order.
     pub(crate) fn near_values(&self, plan: &Plan, amplitudes: &[Amplitude], sections: &[(Range<usize>, usize)], table: Option<&NearTable>) -> NearValues {
-        match table {
-            Some(table) => self.near_tabulated(table, amplitudes, sections),
-            None => self.near_exact(plan, amplitudes, sections.iter().map(|s| s.1).max().unwrap_or(0), &self.coherent_dressing()),
-        }
+        table
+            .and_then(|table| self.near_tabulated(table, amplitudes, sections))
+            .unwrap_or_else(|| self.near_exact(plan, amplitudes, sections.iter().map(|s| s.1).max().unwrap_or(0), &self.coherent_dressing()))
     }
 
     /// The fourth order's matrices of a plan's cluster at a point (`Quartic`) into the thread's, and the counted work
@@ -2142,18 +2178,18 @@ impl Model {
 
     /// A site's point (`Site`): every beam's amplitude at r with its gradient -- no part of a middle or of a state's
     /// photons reads a second derivative -- and, where a plan's near forms are a table's, the point's place on it
-    /// (tabulate.rs `Model::placed`). What is read of the model at the point is read on a site that holds it.
-    pub(crate) fn pointed(&self, plan: &Plan, table: Option<&NearTable>, r: [f64; 3], site: &mut Site) {
+    /// (tabulate.rs `Model::placed`). What is read of the model at the point is read on a site that holds it. Returns the
+    /// table the point's forms are read from: the plan's where it holds the point, else none -- the exact elimination's
+    /// there (tabulate.rs, # Axes).
+    pub(crate) fn pointed<'t>(&self, plan: &Plan, table: Option<&'t NearTable>, r: [f64; 3], site: &mut Site) -> Option<&'t NearTable> {
         self.light.amplitudes_into(r, 1, |_| true, &mut site.beams);
-        if let Some(table) = table.filter(|_| plan.near.len() > 0) {
-            self.placed(table, site);
-        }
+        table.filter(|table| plan.near.len() > 0 && self.placed(table, site))
     }
 
     /// A cluster's generator at a position and time under a plan (`Middle`), the near forms from a table where one is given.
     pub(crate) fn middle<'a>(&'a self, plan: &Arc<Plan>, r: [f64; 3], t: f64, table: Option<&'a NearTable>) -> Middle<'a> {
         let mut point = Held::<Site>::take();
-        self.pointed(plan, table, r, &mut point);
+        let table = self.pointed(plan, table, r, &mut point);
         point.select(plan);
         let work = match table {
             _ if plan.near.len() == 0 => {
@@ -2206,7 +2242,12 @@ pub struct Path {
     kappa: [f64; 3],
     rates: Held<Rates>,
     turning: bool,
+    /// The path's own number among the paths made: what a node's fields along it are kept by (`Scratch::nodes`).
+    id: u64,
 }
+
+/// The paths made so far: each one's own number (`Path::id`).
+static PATHS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// A path's numbers (`Path`; a thread's spare, `Held`).
 #[derive(Default)]
@@ -2216,22 +2257,35 @@ pub(crate) struct Rates {
     gauge: Vec<f64>,
 }
 
-/// A node's scratch (`Site::scratch`): the beams' amplitudes turned along the path, the plan's field components there (each
-/// with its gradient, plain and weighted by its beams' Doppler shifts), the tones' phases, the Doppler frames' turns; a ρ laid
-/// out as the entries are and a generator's sum -- each the real parts on the cluster's places (`Plan::padded`) and then the
-/// imaginary parts --; and per tone its three sums.
+/// A node's fields along a path (`Middle::along`): the beams' amplitudes turned along the path, the plan's field components
+/// there (each with its gradient, plain and weighted by its beams' Doppler shifts) and, where asked, their derivatives along
+/// the path; the tones' phases, the Doppler frames' turns. Kept by the path and the node's time (`key`).
 #[derive(Default)]
-struct Scratch {
+struct Node {
+    key: Option<(u64, u64, bool)>,
     turned: Vec<[C64; 4]>,
     plain: Vec<[C64; 4]>,
     doppler: Vec<[C64; 4]>,
-    /// The scalars' derivatives along the path, where they are asked (`along`).
     plain_slope: Vec<[C64; 4]>,
     doppler_slope: Vec<[C64; 4]>,
-    /// The gradient's sums, per axis its real and its imaginary parts, then their slopes' (`gradient`).
-    gradients: Vec<f64>,
     phases: Vec<C64>,
     turns: Vec<C64>,
+}
+
+/// The nodes a site keeps (`Scratch::nodes`): a step's path's three -- its middle, where the fixed point's tones are read
+/// too, and its two ends -- and the one of the path its momentum is predicted on.
+const NODES: usize = 4;
+
+/// A site's scratch (`Site::scratch`): the nodes' fields along the paths through it, kept so that a step's generators and
+/// forms at one node make them once (`next`: the place the next node takes, the oldest's); a ρ laid out as the entries are
+/// and a generator's sum -- each the real parts on the cluster's places (`Plan::padded`) and then the imaginary parts --;
+/// and per tone its three sums.
+#[derive(Default)]
+struct Scratch {
+    nodes: [Node; NODES],
+    next: usize,
+    /// The gradient's sums, per axis its real and its imaginary parts, then their slopes' (`gradient`).
+    gradients: Vec<f64>,
     weights: Vec<f64>,
     sum: Vec<f64>,
     sums: Vec<[f64; 3]>,
@@ -2259,7 +2313,7 @@ impl crate::step::Middle for Middle<'_> {
         path.extend(plan.beams.iter().map(|&l| dot3(model.light.beams[l].wave_vector(), velocity)));
         gauge.clear();
         gauge.extend(plan.waves.iter().map(|k| dot3(*k, velocity)));
-        Path { kappa, turning: gauge.iter().any(|rate| *rate != 0.0), rates }
+        Path { kappa, turning: gauge.iter().any(|rate| *rate != 0.0), rates, id: PATHS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
     }
 
     fn gauge(&self, path: &Path, rates: &mut [f64]) {
@@ -2270,8 +2324,9 @@ impl crate::step::Middle for Middle<'_> {
     fn generator(&self, path: &Path, s: f64, h: &mut Mat) {
         let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
         let mut scratch = point.scratch.borrow_mut();
-        self.along(&point.amplitudes, path, Some(s), 1, false, &mut scratch);
-        let Scratch { plain, doppler, phases, turns, sum, .. } = &mut *scratch;
+        let at = self.along(&point.amplitudes, path, s, false, &mut scratch);
+        let Scratch { nodes, sum, .. } = &mut *scratch;
+        let Node { plain, doppler, phases, turns, .. } = &nodes[at];
         sum.clear();
         sum.resize(2 * plan.padded, 0.0);
         let (re, im) = sum.split_at_mut(plan.padded);
@@ -2310,12 +2365,19 @@ impl crate::step::Middle for Middle<'_> {
 
     fn force(&self, path: &Path, s: f64, rho: &[C64]) -> [f64; 3] {
         let mut out = [0.0; 3];
-        self.contract(path, Some(s), rho, &mut |_, f| out = f);
+        self.contract(path, Some(s), rho, None, &mut |_, f| out = f);
         out
     }
 
     fn tones(&self, path: &Path, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
-        self.contract(path, None, rho, each)
+        self.contract(path, None, rho, None, each)
+    }
+
+    /// `contract` at the middle with the fixed point's tones on `held` (`step::Middle::centre`).
+    fn centre(&self, path: &Path, held: &[C64], weight: &dyn Fn(f64) -> f64, rho: &[C64]) -> [f64; 3] {
+        let mut out = [0.0; 3];
+        self.contract(path, Some(0.0), rho, Some((held, weight)), &mut |_, f| out = f);
+        out
     }
 
     /// photon.rs `Model::scattering_on` this middle's own site, at the path's momentum and the middle's time.
@@ -2335,8 +2397,9 @@ impl crate::step::Middle for Middle<'_> {
         let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
         let mut scratch = point.scratch.borrow_mut();
         let sloped = slope.is_some();
-        self.along(&point.amplitudes, path, Some(s), 4, sloped, &mut scratch);
-        let Scratch { plain, doppler, plain_slope, doppler_slope, gradients, phases, turns, .. } = &mut *scratch;
+        let at = self.along(&point.amplitudes, path, s, sloped, &mut scratch);
+        let Scratch { nodes, gradients, .. } = &mut *scratch;
+        let Node { plain, doppler, plain_slope, doppler_slope, phases, turns, .. } = &nodes[at];
         let padded = plan.padded;
         gradients.clear();
         gradients.resize(if sloped { 12 } else { 6 } * padded, 0.0);
@@ -2474,30 +2537,37 @@ impl Middle<'_> {
         Middle { model: self.model, plan: self.plan.clone(), r: self.r, t: self.t, table: self.table, point: RefCell::new(point), work: self.work }
     }
 
-    /// A node's field components into its scratch, their first `parts` parts (the value; with the gradient, four),
-    /// from the plan's beams' amplitudes and gradients at the middle (`Site::amplitudes`): at the
-    /// time s from the middle along a path (`on`) each beam's amplitude and gradient at the middle times its plane wave's
-    /// phase over the path, e^{i k_l·v s}, with the tones' phases at that time and the Doppler frames' turns; at the fixed
-    /// middle point (None) the middle's own, at its time.
-    fn along(&self, amplitudes: &[[C64; 4]], path: &Path, on: Option<f64>, parts: usize, sloped: bool, scratch: &mut Scratch) {
+    /// A node's fields (`Node`) at the time s from the middle along a path, made into the site's scratch unless it keeps
+    /// them, and their place there: each beam's amplitude and gradient at the middle times its plane wave's phase over
+    /// the path, e^{i k_l·v s}, the field components of those -- and where `sloped`, their derivatives along the path --,
+    /// with the tones' phases at that time and the Doppler frames' turns. At s = 0 they are the fixed middle point's own,
+    /// at its time (every phase over the path is one there): the fixed point's tones read them too.
+    fn along(&self, amplitudes: &[[C64; 4]], path: &Path, s: f64, sloped: bool, scratch: &mut Scratch) -> usize {
         let plan = &*self.plan;
-        let s = on.unwrap_or(0.0);
-        scratch.turned.clear();
-        scratch.turned.extend(amplitudes.iter().zip(&path.rates.path).map(|(a, rate)| {
-            let phase = if on.is_some() { C64::cis(rate * s) } else { C64::ONE };
-            std::array::from_fn(|part| if part < parts { a[part] * phase } else { C64::ZERO })
+        let key = (path.id, s.to_bits());
+        if let Some(at) = scratch.nodes.iter().position(|node| node.key.is_some_and(|(id, time, slopes)| (id, time) == key && (slopes || !sloped))) {
+            return at;
+        }
+        let at = scratch.next;
+        scratch.next = (at + 1) % NODES;
+        let node = &mut scratch.nodes[at];
+        node.key = Some((key.0, key.1, sloped));
+        node.turned.clear();
+        node.turned.extend(amplitudes.iter().zip(&path.rates.path).map(|(a, rate)| {
+            let phase = if s == 0.0 { C64::ONE } else { C64::cis(rate * s) };
+            a.map(|part| part * phase)
         }));
-        scratch.plain.clear();
-        scratch.doppler.clear();
-        scratch.plain_slope.clear();
-        scratch.doppler_slope.clear();
+        node.plain.clear();
+        node.doppler.clear();
+        node.plain_slope.clear();
+        node.doppler_slope.clear();
         for scalar in &plan.scalars {
             let (mut plain, mut doppler, mut plain_slope, mut doppler_slope) = ([C64::ZERO; 4], [C64::ZERO; 4], [C64::ZERO; 4], [C64::ZERO; 4]);
             for &(at, c) in &scalar.beams {
                 // Along the path a beam turns at its rate, e^{i rate s}, its conjugate the other way.
                 let turn = C64::new(0.0, if scalar.conjugate { -path.rates.path[at] } else { path.rates.path[at] });
-                for part in 0..parts {
-                    let z = (if scalar.conjugate { scratch.turned[at][part].conj() } else { scratch.turned[at][part] }) * c;
+                for part in 0..4 {
+                    let z = (if scalar.conjugate { node.turned[at][part].conj() } else { node.turned[at][part] }) * c;
                     plain[part] += z;
                     doppler[part] += z * path.rates.shifts[at];
                     if sloped {
@@ -2506,17 +2576,18 @@ impl Middle<'_> {
                     }
                 }
             }
-            scratch.plain.push(plain);
-            scratch.doppler.push(doppler);
+            node.plain.push(plain);
+            node.doppler.push(doppler);
             if sloped {
-                scratch.plain_slope.push(plain_slope);
-                scratch.doppler_slope.push(doppler_slope);
+                node.plain_slope.push(plain_slope);
+                node.doppler_slope.push(doppler_slope);
             }
         }
-        scratch.phases.clear();
-        scratch.phases.extend(plan.tones.iter().map(|&omega| if omega == 0.0 { C64::ONE } else { C64::cis(omega * (self.t + s)) }));
-        scratch.turns.clear();
-        scratch.turns.extend(path.rates.gauge.iter().map(|rate| if on.is_some() && path.turning { C64::cis(-rate * s) } else { C64::ONE }));
+        node.phases.clear();
+        node.phases.extend(plan.tones.iter().map(|&omega| if omega == 0.0 { C64::ONE } else { C64::cis(omega * (self.t + s)) }));
+        node.turns.clear();
+        node.turns.extend(path.rates.gauge.iter().map(|rate| if s != 0.0 && path.turning { C64::cis(-rate * s) } else { C64::ONE }));
+        at
     }
 
     /// Re tr(Ĝ_a(s) ρ) per lab axis a: the gradient of the generator's Hermitian part along a path at the time s from the
@@ -2524,19 +2595,30 @@ impl Middle<'_> {
     /// phase at the middle's time), contracted with a Hermitian ρ on the cluster's states (n × n, row by row) without forming
     /// it: per dense term Σ_entries V[x, y] ρ[y, x] and the same of its slopes, times the fields' product and its gradient
     /// -- of a flag's values and their adjoints, whose forms with a Hermitian ρ are conjugates, one, twice (`Term::weight`).
-    fn contract(&self, path: &Path, on: Option<f64>, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
+    /// With `held` = (σ, w) the middle's tones on σ as well, each tone m's entries contracted with ρ + w(Ω_m) σ: at s = 0
+    /// the fixed point's tones are the path's own forms there (`along`), so the two are one pass of the terms.
+    fn contract(&self, path: &Path, on: Option<f64>, rho: &[C64], held: Option<(&[C64], &dyn Fn(f64) -> f64)>, each: &mut dyn FnMut(f64, [f64; 3])) {
         let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
         let mut scratch = point.scratch.borrow_mut();
-        self.along(&point.amplitudes, path, on, 4, false, &mut scratch);
-        let Scratch { plain, doppler, phases, turns, weights, sums, .. } = &mut *scratch;
-        // ρ[y, x] in the Doppler frames along the path, laid out as the entries x ← y are.
+        let s = on.unwrap_or(0.0);
+        assert!(held.is_none() || s == 0.0, "the fixed point's tones with the forms at the middle alone");
+        let at = self.along(&point.amplitudes, path, s, false, &mut scratch);
+        let Scratch { nodes, weights, sums, .. } = &mut *scratch;
+        let Node { plain, doppler, phases, turns, .. } = &nodes[at];
+        // ρ[y, x] in the Doppler frames along the path, laid out as the entries x ← y are: one, or one a tone with σ.
+        let laid = if held.is_some() { plan.tones.len() } else { 1 };
         weights.clear();
-        weights.resize(2 * plan.padded, 0.0);
-        let (re, im) = weights.split_at_mut(plan.padded);
-        for (x, (re, im)) in re[..n * n].chunks_exact_mut(n).zip(im[..n * n].chunks_exact_mut(n)).enumerate() {
-            for (y, (re, im)) in re.iter_mut().zip(im.iter_mut()).enumerate() {
-                let w = rho[y * n + x] * turns[x] * turns[y].conj();
-                (*re, *im) = (w.re, w.im);
+        weights.resize(laid * 2 * plan.padded, 0.0);
+        for (m, laid) in weights.chunks_exact_mut(2 * plan.padded).enumerate() {
+            let (re, im) = laid.split_at_mut(plan.padded);
+            let more = held.map(|(sigma, w)| (sigma, w(plan.tones[m])));
+            for (x, (re, im)) in re[..n * n].chunks_exact_mut(n).zip(im[..n * n].chunks_exact_mut(n)).enumerate() {
+                for (y, (re, im)) in re.iter_mut().zip(im.iter_mut()).enumerate() {
+                    let at = y * n + x;
+                    let density = more.map_or(rho[at], |(sigma, w)| rho[at] + sigma[at] * w);
+                    let w = density * turns[x] * turns[y].conj();
+                    (*re, *im) = (w.re, w.im);
+                }
             }
         }
         sums.clear();
@@ -2552,6 +2634,8 @@ impl Middle<'_> {
                 of = (term.block, [product(&l, &r), product(&l, &rw), product(&lw, &r)]);
             }
             let span = term.first..term.first + term.len;
+            let laid = &weights[if held.is_some() { term.tone } else { 0 } * 2 * plan.padded..][..2 * plan.padded];
+            let (re, im) = laid.split_at(plan.padded);
             let (real, imaginary) = plan.values(term, &point.forms);
             let value = dot(real, imaginary, &re[span.clone()], &im[span.clone()]) * phases[term.tone];
             // The value's gradient by its slopes: a constant term has none.
@@ -2568,11 +2652,17 @@ impl Middle<'_> {
                 sum[a] += term.weight * (c[1 + a] * value + c[0] * gradient[a]).re;
             }
         }
-        // The fourth order's gradient, a static term's.
+        // The fourth order's gradient, a static term's (its one tone, the first).
         if plan.fourth.is_some() && point.quartic.len() >= 4 * n * n {
+            let more = held.map(|(sigma, w)| (sigma, w(plan.tones[0])));
             for a in 0..3 {
                 let gradient = &point.quartic[(1 + a) * n * n..(2 + a) * n * n];
-                sums[0][a] += (0..n * n).map(|place| (gradient[place] * rho[(place % n) * n + place / n]).re).sum::<f64>();
+                sums[0][a] += (0..n * n)
+                    .map(|place| {
+                        let at = (place % n) * n + place / n;
+                        (gradient[place] * more.map_or(rho[at], |(sigma, w)| rho[at] + sigma[at] * w)).re
+                    })
+                    .sum::<f64>();
             }
         }
         for (m, sum) in sums.iter().enumerate() {

@@ -11,8 +11,10 @@
 //! its units' T̄ (eliminate.rs) on each polarization unit's intensity I_u = |f_u|²/N_u, f_u = Σ_{l∈u} a_l κ_l the unit's field
 //! along its polarization ε_u (E_l = κ_l ε_u), N_u = (Σ_{l∈u} |κ_l|)² so that I_u ∈ [0, 1] (|a_l| ≤ 1: a computed I_u above 1 is
 //! its rounding, and is 1) -- its frequency's static form in H too, Σ_u I_u N_u F(ε_u) --; with its coherent dressing
-//! (`Unit::Dressing` kept) on its chart. Every coordinate on its whole range: every value is some field's, no atom meets an
-//! edge, and a table is never asked off its axes (crate::table refuses it).
+//! (`Unit::Dressing` kept) on its chart. A table's axis lies on its coordinate's range over the atoms' reach (# Axes), and
+//! the table is the elimination's cheaper route there and nowhere else: a point whose coordinates it does not hold -- an
+//! atom beyond the reach -- reads the exact elimination (`Model::near_tabulated`, `Model::placed`: none there), the same
+//! function, and a table is never asked off its axes (crate::table refuses it).
 //!
 //! # A node
 //! At coordinates s the elimination is the one in a light whose fields have them: each lit frequency's field from its chart
@@ -42,7 +44,12 @@
 //! value at every atom: it is no axis, and leaves nothing out. (An angle's or a phase's range was its whole range: S3's
 //! cooling pair -- two plane waves of equal amplitudes and orthogonal fields -- has its polarization angle at π/4 at every
 //! atom, and with its dressing coherent the angle was an axis by its weight over [0, π/2] while it moved nothing: the forms
-//! 4.0 → 11.9 µs a point, for 1e-18 of the responses.)
+//! 4.0 → 11.9 µs a point, for 1e-18 of the responses.) An axis's first grid lies on that range (`reach_axis`: a phase's on
+//! its period where the range is the period), so that its refinement's spacing, its function's, takes the nodes of the
+//! part the atoms cover and none beyond: laid on the coordinate's whole range, S2Q's probe table, its reach a
+//! two-hundredth of the probe's intensity, refined 99.5 % of its 529 592 nodes where no atom is, 9.15 GB; R3_DOPPLER's
+//! tweezer axis takes 49 nodes where it took 193. The reach grows, and its tables are made again over it, with the
+//! attempt that grows it.
 //!
 //! A coordinate's rate is how many pole half-widths a unit of it moves the cluster's lines: the largest change of E_e − E_b
 //! (e ← b a carrier's coupling from the cluster's ground states, Γ_e/2 its half-width) over its first grid's nodes, the other
@@ -136,10 +143,10 @@
 //! by 2 or less on a resolved grid -- a kink, an unread node, a read of no order -- ends the axis there, and what it leaves
 //! stands as `table_reads` reads it at the atoms. Past its rate's resolution every halving at least halves the read, so an
 //! axis takes at most ⌈log₂ λh₀⌉⁺ halvings and then ⌈log₂ r⌉ (r its read there over the shares): the nodes are fixed by
-//! the lines' rates, the reads and the shares alone -- the work bound (solve.rs: the pilot's middles) is only a ceiling no
-//! grid passes, met where a table of many axes needs a verifying halving of each (every one doubles the grid: R4_LIN_4
-//! with both carriers' dressings coherent asks 193 x 13 x 13 x 16 nodes of 1760 reals, 7 GB, of one table; at the ceiling
-//! its error is read at the atoms and booked). (The order's own factor, 2^VALUE_ORDER a halving, holds only past the
+//! the lines' rates, the reads and the shares alone -- what the run's points let a table cost (# Work) is only a ceiling
+//! no grid passes, met where a table of many axes needs a verifying halving of each (every one doubles the grid: R4_LIN_4
+//! with both carriers' dressings coherent asks 193 x 13 x 13 x 16 nodes of 1760 reals, 7 GB, of one table); a table that
+//! meets it with a read beyond the shares is not made (# Work). (The order's own factor, 2^VALUE_ORDER a halving, holds only past the
 //! transition: asked of every halving, or of the halvings a read's order predicts, it ended R4_LIN_2's tweezer axis at
 //! 97 nodes with its read 1.44 times its share, where 193 read it within.) The solve's work bound decides which
 //! coordinates are axes (their first grid, `first_table`); of how far they are refined it is the ceiling alone. (Refined until the
@@ -157,8 +164,18 @@
 //!
 //! # Work
 //! A point costs the table's interpolation of the reals asked, 4^D (1 + D) each on D axes (4^D for a value alone), and the
-//! coordinates (each frequency's field and chart from its beams); the chain rule's 3 D a real is not counted. A node's own
-//! cost -- its elimination and its forms -- is counted nowhere: the tables are made once a model.
+//! coordinates (each frequency's field and chart from its beams); the chain rule's 3 D a real is not counted. A table is
+//! the elimination's cheaper route, not another function: a node costs one elimination E (its counted work, at the
+//! focus), as a point evaluated directly does. So a grid of N nodes on D axes of w reals is made only where it costs
+//! less than the direct evaluation at the P points it serves (P the work bound, the pilot's middles), N E + P 4^D (1 +
+//! D) w < P E (`Layout::pays`): the first grid, every axis taken, every halving -- each counted before the grid is
+//! made, so that no grid is made, and none of its memory taken, that the direct evaluation would better. A cluster
+//! whose first grid does not pay has no table, its forms the exact elimination's at every point. A refinement whose
+//! next halving does not pay ends there, below its shares or not: the table it has costs less than the direct
+//! evaluation, and its error is read at the atoms and booked (`table_reads`). (Dropped instead, as the direct
+//! evaluation would be exact, R4_LIN_2's model with its cooling pair's dressing kept took 5.47 M multiply-adds a µs
+//! against its table's 0.54 M: an error within the targets bought for ten times the work.) A table's memory is its
+//! nodes' over the part of its axes the reach covers (# Axes).
 
 use super::assemble::{sized, Middle, NearValues, Plan, Site};
 use super::reach::Region;
@@ -200,6 +217,9 @@ pub struct Layout {
     rates: Vec<f64>,
     polarizations: Vec<Vec<Polarization>>,
     plan: Arc<Plan>,
+    /// The elimination's counted work at a point (real multiply-adds, at the focus): a point's direct evaluation, and a
+    /// node's (# Work).
+    exact: f64,
 }
 
 /// A near table: its layout and the table of its nodes' reals (module documentation, # A node's reals).
@@ -220,6 +240,16 @@ impl Layout {
     /// A node's reals (module documentation, # A node's reals).
     fn width(&self) -> usize {
         2 * self.plan.near.len() + self.plan.generator_start.len() + self.plan.form_start.len() + self.plan.jumps_start.len()
+    }
+
+    /// Whether a table of this layout on the grid `axes` costs less than the direct evaluation it stands for at `most`
+    /// points (module documentation, # Work): its nodes' eliminations and the points' interpolations, N E + P 4^D (1 + D)
+    /// w, against P E -- counted before the grid is made, so that no grid is made, and none of its memory taken, that
+    /// the direct evaluation would better.
+    fn pays(&self, axes: &[Axis], most: usize) -> bool {
+        let d = axes.len();
+        let interpolation = (4usize.pow(d as u32) * (1 + d) * self.width()) as f64;
+        (Table::nodes(axes) as f64) * self.exact + most as f64 * interpolation < most as f64 * self.exact
     }
 }
 
@@ -343,13 +373,15 @@ impl Model {
     /// making it (solve.rs `Pricing`): their number and the counted work of their coordinates at a point. Of the
     /// coordinates the cluster's elimination depends on, those of the tables a run has that took them as axes (`axes`,
     /// where they are coordinates still), and those new to the cluster -- that no such table looked at (`known`) --
-    /// whose weight there (`first_table`: its rate, `rates`, times the range it moves across over the reach, `moves` by
-    /// its key, `reach_ranges` on the coordinate's own, cached by the caller) is beyond the tables' shares: a coordinate
-    /// that moves the cluster's lines by less than the shares of a half-width over the reach moves the responses by
-    /// less than a look reads beyond (`over`: twice the responses' error within the shares). The rate is the levels'
-    /// alone (# Axes: a coherent dressing's part of the lines is in the look, which eliminates). At most `MOST_AXES`;
-    /// none where the cluster has no near form.
-    pub(crate) fn priced_axes(&self, cluster: usize, reach: &Reach, axes: &[Key], known: &[Key], moves: &dyn Fn(Key, &dyn Fn() -> f64) -> f64) -> (usize, f64) {
+    /// whose weight there (`first_table`: its rate, `rates`, times the range it moves across where the atoms were, the
+    /// pricing's `points` -- `moves` by its key, `moved_over`, cached by the caller) is beyond the tables' shares: a
+    /// coordinate that moves the cluster's lines by less than the shares of a half-width moves the responses by less
+    /// than a look reads beyond (`over`: twice the responses' error within the shares). A pricing reads where the atoms
+    /// were, as it reads every rate (solve.rs `one_each`), not a proof over the reach: a kept model's table is its own
+    /// attempt's to make. (Proven over the reach, the range of a new coordinate of R2_RECOIL's tweezer, kept to the atom
+    /// on its scout's pricing, took 80 s and 5.7 GB.) The rate is the levels' alone (# Axes: a coherent dressing's part
+    /// of the lines is in the look, which eliminates). At most `MOST_AXES`; none where the cluster has no near form.
+    pub(crate) fn priced_axes(&self, cluster: usize, points: &[[f64; 3]], axes: &[Key], known: &[Key], moves: &dyn Fn(Key, &dyn Fn() -> f64) -> f64) -> (usize, f64) {
         let lights = self.running();
         if self.plan(cluster, &lights).near.len() == 0 {
             return (0, 0.0);
@@ -366,10 +398,7 @@ impl Model {
                 let key = self.key(all[i]);
                 axes.contains(&key)
                     || (!known.contains(&key) && {
-                        let range = moves(key, &|| {
-                            let range = self.reach_ranges(&all[i..=i], &polarizations, &focus[i..=i], reach)[0];
-                            range.1 - range.0
-                        });
+                        let range = moves(key, &|| self.moved_over(all[i], &polarizations, points));
                         range > 0.0 && 2.0 * rates.get_or_init(|| self.rates(cluster, &lights, &all, &polarizations, &focus))[i] * range > shown.min(temperature)
                     })
             })
@@ -377,6 +406,17 @@ impl Model {
             .take(crate::table::MOST_AXES)
             .collect();
         (taken.len(), self.coordinates_work(&taken, &polarizations))
+    }
+
+    /// The range a coordinate moves across over `points` (`priced_axes`): its largest value there less its least.
+    fn moved_over(&self, coordinate: Coordinate, polarizations: &[Vec<Polarization>], points: &[[f64; 3]]) -> f64 {
+        let (mut least, mut most) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &r in points {
+            let mut value = [0.0];
+            self.coordinates_at(&[coordinate], polarizations, &self.light.amplitudes(r), &mut value, &mut [[0.0; 3]]);
+            (least, most) = (least.min(value[0]), most.max(value[0]));
+        }
+        (most - least).max(0.0)
     }
 
     /// Coordinates' values at a point and their gradients (module documentation, # At a point) into `values` and `gradients`,
@@ -516,7 +556,7 @@ impl Model {
     pub fn halved_by(&self, table: &NearTable, f: usize, over: f64, before: &mut Option<f64>, most: usize) -> Option<Table> {
         let on = halving_on(over, table.table.axes()[f].spacing(), table.layout.rates[f], *before);
         *before = Some(over);
-        (on && Table::nodes(&Model::finer(table, f)) <= most).then(|| self.halved(table, f))
+        (on && table.layout.pays(&Model::finer(table, f), most)).then(|| self.halved(table, f))
     }
 
     /// The near tables for the atoms' reach (module documentation, # Axes, # Refinement): per cluster the running lights'
@@ -589,12 +629,12 @@ impl Model {
 
     /// A table refined over the atoms' reach, its axes' ranges there given (module documentation, # Refinement): each axis in
     /// turn halved, each halving reading the grid before it at the new nodes, while that read asks it (`halving_on`) and the
-    /// halved grid is within the work bound `most`.
+    /// halved grid costs less than the direct evaluation at the work bound's `most` points (`Layout::pays`; # Work).
     fn refined(&self, mut table: NearTable, ranges: &[(f64, f64)], reach: &Reach, most: usize) -> NearTable {
         let d = table.axes();
         let (mut ended, mut before) = (vec![false; d], vec![None; d]);
         while let Some(f) = ended.iter().position(|e| !e) {
-            if Table::nodes(&Model::finer(&table, f)) > most {
+            if !table.layout.pays(&Model::finer(&table, f), most) {
                 ended[f] = true;
                 continue;
             }
@@ -722,7 +762,6 @@ impl Model {
         let mut order: Vec<usize> = (0..all.len()).collect();
         order.sort_by(|&a, &b| weights[b].total_cmp(&weights[a]));
         // The table of given axes, each on its first grid, the other coordinates at the focus.
-        let width = 2 * plan.near.len();
         let exact = self.near_exact(&plan, &focus_amplitudes, 1, &coherent).work * crate::decide::COMPLEX;
         let made = |axes: &[usize]| -> Option<NearTable> {
             let picked: Vec<usize> = axes.iter().copied().chain(order.iter().copied().filter(|c| !axes.contains(c))).collect();
@@ -734,8 +773,9 @@ impl Model {
                 rates: picked.iter().map(|&c| rates[c]).collect(),
                 polarizations: polarizations.clone(),
                 plan: plan.clone(),
+                exact,
             };
-            let grid = axes.iter().map(|&c| first_axis(all[c])).collect();
+            let grid = axes.iter().map(|&c| reach_axis(all[c], over_reach[c])).collect();
             let table = Table::build(grid, layout.width(), most, &|s: &[f64], out: &mut [f64]| self.node_at(&layout, s, out)).ok()?;
             Some(NearTable { layout, table })
         };
@@ -750,8 +790,8 @@ impl Model {
                 continue;
             }
             let d = axes.len() + 1;
-            let first: Vec<Axis> = axes.iter().chain(std::iter::once(&c)).map(|&a| first_axis(all[a])).collect();
-            if d > crate::table::MOST_AXES || (4usize.pow(d as u32) * (1 + d) * width) as f64 >= exact || Table::nodes(&first) > most {
+            let first: Vec<Axis> = axes.iter().chain(std::iter::once(&c)).map(|&a| reach_axis(all[a], over_reach[a])).collect();
+            if d > crate::table::MOST_AXES || !table.layout.pays(&first, most) {
                 break;
             }
             let axis = first[d - 1];
@@ -927,11 +967,15 @@ impl Model {
     }
 
     /// The near forms at a point from a table (module documentation, # At a point), the sections asked each to its order (0 or
-    /// 1): their values and, to first order, their slopes along the axes with the coordinates' gradients.
-    pub(crate) fn near_tabulated(&self, table: &NearTable, amplitudes: &[Amplitude], sections: &[(Range<usize>, usize)]) -> NearValues {
+    /// 1): their values and, to first order, their slopes along the axes with the coordinates' gradients. None where the
+    /// table does not hold the point (# Axes: beyond the reach's ranges): there the forms are the exact elimination's.
+    pub(crate) fn near_tabulated(&self, table: &NearTable, amplitudes: &[Amplitude], sections: &[(Range<usize>, usize)]) -> Option<NearValues> {
         let d = table.axes();
         let (mut x, mut gradients) = (vec![0.0; d], vec![[0.0; 3]; d]);
         let mut work = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, amplitudes, &mut x, &mut gradients);
+        if !table.table.holds(&x) {
+            return None;
+        }
         let len = sections.iter().map(|s| s.0.end).max().unwrap_or(0);
         let order = sections.iter().map(|s| s.1).max().unwrap_or(0);
         let mut data = vec![C64::ZERO; (1 + if order >= 1 { d } else { 0 }) * len];
@@ -951,20 +995,23 @@ impl Model {
             // The interpolation (4^D nodes: the value and, to first order, D slopes of each real), in complex multiply-adds.
             work += read_work(d, *order, w);
         }
-        NearValues { len, order, data, directions: Some(gradients), work }
+        Some(NearValues { len, order, data, directions: Some(gradients), work })
     }
 
     /// A site's point on a table (module documentation, # At a point), from the site's beams' amplitudes: the axes'
     /// coordinates there, their gradients -- the directions the forms' and the jumps' slopes are along --, and the
     /// point's place on the table's grid with the coordinates' counted work (`Site::place`). Every read of the table
     /// at the point takes that place (`near_point`, `near_jumps`, `near_responses`; assemble.rs `Model::quartic`): a
-    /// site is placed once, after its beams and before its first read, whatever is read of the table there.
-    pub(crate) fn placed(&self, table: &NearTable, point: &mut Site) {
+    /// site is placed once, after its beams and before its first read, whatever is read of the table there. Whether the
+    /// table holds the point (# Axes): where it does not, the site has no place, and its forms are the exact
+    /// elimination's.
+    pub(crate) fn placed(&self, table: &NearTable, point: &mut Site) -> bool {
         let d = table.axes();
         sized(&mut point.coordinates, d);
         sized(&mut point.directions, d);
         let work = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &point.beams, &mut point.coordinates, &mut point.directions);
-        point.place = Some((table.table.place(&point.coordinates), work));
+        point.place = table.table.holds(&point.coordinates).then(|| (table.table.place(&point.coordinates), work));
+        point.place.is_some()
     }
 
     /// A point's jumps' matrices from a table (assemble.rs, # The jumps' matrices), to an order (0 or 1), into the
@@ -1030,6 +1077,10 @@ impl Model {
                     let amplitudes = self.light.amplitudes(sample.at.r);
                     let mut x = vec![0.0; d];
                     self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &amplitudes, &mut x, &mut vec![[0.0; 3]; d]);
+                    // Beyond the table's ranges the forms are the exact elimination's: no error of the table.
+                    if !table.table.holds(&x) {
+                        continue;
+                    }
                     // The generator the steps take from the table, on the sample's state; and with no near light.
                     let tabulated = self.middle(plan, sample.at.r, sample.at.t, Some(table));
                     let (far, ours) = (self.action(sample, &self.middle_of(plan, sample.at.t, &amplitudes, None)), self.action(sample, &tabulated));
@@ -1073,6 +1124,13 @@ impl Model {
         let shown = if weight == 0.0 { 0.0 } else { delta * weight };
         UnitError { parameter: delta, population: shown, temperature: shown.max(potential / thermal), ..UnitError::NONE }
     }
+}
+
+/// A table's first grid of a coordinate (crate::table `Axis::first`) on its range over the atoms' reach `range` (module
+/// documentation, # Axes): a bounded axis on it, the period where the range is the whole period.
+fn reach_axis(c: Coordinate, range: (f64, f64)) -> Axis {
+    let whole = first_axis(c);
+    if whole.periodic && range == (whole.lo, whole.hi) { whole } else { Axis::first(range.0, range.1, false) }
 }
 
 /// A coordinate's first grid (crate::table `Axis::first`) on its whole range (field.rs `range`; a unit's intensity [0, 1]).
@@ -1121,7 +1179,7 @@ mod tests {
     /// from none to all over the reach, and its dressing at full intensity is 0.045 half-widths: by its weight a
     /// coordinate to ask. The pair is the model's one carrier and its line the cycling one, so its dressing is in no
     /// denominator of its own response: the first look, the unit at its seven first nodes on the tweezer's intensity's
-    /// first nodes, reads 6e-7 of the shares and holds it; the last, at every node of the refined table (193), 7e-7; and
+    /// first nodes, reads 6e-7 of the shares and holds it; the last, at every node of the refined table (49), 7e-7; and
     /// the scene's table is the one of the tweezer's intensity alone. Named needed, the unit is an axis unasked.
     #[test]
     fn a_coordinate_is_an_axis_where_the_table_without_it_is_beyond_its_shares() {
@@ -1143,17 +1201,10 @@ mod tests {
         let request = scene("R3_DOPPLER");
         let light = Light::new(&request);
         let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-        let mut kept: Vec<Unit> = vec![];
-        let (model, reach) = loop {
-            let model = Model::new(&request, &light, &kept).unwrap();
-            let (_, reach) = reach_of(&model, state, request.temperature_uk);
-            let units = model.units();
-            let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-            if failing.is_empty() {
-                break (model, reach);
-            }
-            kept.extend(failing);
-        };
+        // The cooling pair's drives at the atom (their bare folds do not hold where the tweezer moves the line onto them).
+        let bare = Model::new(&request, &light, &[]).unwrap();
+        let cooling: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).flat_map(|frequency| bare.bare_units(crate::model::Component { frequency, counter: false })).collect();
+        let (model, _, _, reach) = Model::closed_at(&request, &light, cooling, state, request.temperature_uk);
         let (cluster, lights, most) = (model.cluster_of(state), model.running(), 1 << 16);
         let First { table: first, ranges, held } = model.first_table(cluster, &lights, &reach, most, &[]).unwrap();
         assert!(first.axes() == 1 && matches!(first.layout.coordinates[0], Coordinate::Chart { index: 0, .. }), "the first table's axis is the tweezer's intensity: {:?}", &first.layout.coordinates[..first.axes()]);
@@ -1224,35 +1275,43 @@ mod tests {
     /// forms' rate of R4_LIN_2's tweezer): read within the share. A kink |s − s₀| + 1, whose rate (one) calls it smooth:
     /// its read does not fall by more than 2 at a halving, and the axis ends within a few halvings, beyond the share --
     /// where a bound of the run's had let it halve on.
+    /// One axis refined by the refinement's rule (`halving_on`) from its first grid `first`, with the table's own
+    /// interpolant and its read at the new nodes against a share of 1e-3 relative, of a function `f` whose rate is `rate`:
+    /// the halvings, the last read over the share, and the axis refined.
+    fn refine(first: Axis, f: &(dyn Fn(f64) -> C64 + Sync), rate: f64) -> (u32, f64, Axis) {
+        let share = 1e-3;
+        let value = |s: &[f64], out: &mut [f64]| {
+            let z = f(s[0]);
+            out.copy_from_slice(&[z.re, z.im]);
+        };
+        let mut table = Table::build(vec![first], 2, usize::MAX, &value).unwrap();
+        let mut before = None;
+        loop {
+            let axis = table.axes()[0];
+            let read = (0..axis.nodes - 1)
+                .map(|i| {
+                    let s = 0.5 * (axis.node(i) + axis.node(i + 1));
+                    let mut v = [0.0; 2];
+                    table.eval(&[s], &mut v, None);
+                    (C64::new(v[0], v[1]) - f(s)).abs() / f(s).abs()
+                })
+                .fold(0.0, f64::max);
+            let over = read / share;
+            table = table.refine(vec![axis.halved(1)], &value);
+            if !halving_on(over, axis.spacing(), rate, before) {
+                return (first.halvings_to(&table.axes()[0]).unwrap(), over, table.axes()[0]);
+            }
+            before = Some(over);
+        }
+    }
+
     #[test]
     fn an_axis_is_refined_while_its_reads_fall_faster_than_an_unresolved_peak_s() {
         let first = Axis::first(0.0, 1.0, false);
         // The halvings and the last read over the share.
         let refine = |f: &(dyn Fn(f64) -> C64 + Sync), rate: f64| -> (u32, f64) {
-            let share = 1e-3;
-            let value = |s: &[f64], out: &mut [f64]| {
-                let z = f(s[0]);
-                out.copy_from_slice(&[z.re, z.im]);
-            };
-            let mut table = Table::build(vec![first], 2, usize::MAX, &value).unwrap();
-            let mut before = None;
-            loop {
-                let axis = table.axes()[0];
-                let read = (0..axis.nodes - 1)
-                    .map(|i| {
-                        let s = 0.5 * (axis.node(i) + axis.node(i + 1));
-                        let mut v = [0.0; 2];
-                        table.eval(&[s], &mut v, None);
-                        (C64::new(v[0], v[1]) - f(s)).abs() / f(s).abs()
-                    })
-                    .fold(0.0, f64::max);
-                let over = read / share;
-                table = table.refine(vec![axis.halved(1)], &value);
-                if !halving_on(over, axis.spacing(), rate, before) {
-                    return (first.halvings_to(&table.axes()[0]).unwrap(), over);
-                }
-                before = Some(over);
-            }
+            let (halvings, over, _) = refine(first, f, rate);
+            (halvings, over)
         };
         for (pole, rate) in [(17.4, 17.4), (300.0, 300.0), (34.8, 17.4)] {
             let (halvings, over) = refine(&|s: f64| C64::ONE / C64::new(pole * (s - 0.37), 1.0), rate);
@@ -1264,12 +1323,79 @@ mod tests {
         assert!(over > 1.0 && halvings <= 3, "the kink ends within a few halvings, beyond the share: {halvings}, {over}");
     }
 
+    /// A table's axis lies on the part of its coordinate's range the reach covers (module documentation, # Axes), so its
+    /// nodes go with that part: the refinement's spacing is its function's -- a pole's width --, and a part of the axis
+    /// holds that part of the nodes. A line's pole 1/(λ(s − s₀) + i) at the rate λ = 300 (unresolved for six halvings):
+    /// refined over the whole [0, 1] and over parts of it about the pole an eighth and a sixty-fourth as wide, each to the
+    /// spacing its read asks -- within a factor two of the whole axis's, a nested grid's step --, the nodes are those parts
+    /// of the whole axis's, within that factor. (Laid on the whole range, S2Q's probe table, its reach a two-hundredth of
+    /// the probe's intensity, refined 99.5 % of its 529 592 nodes where no atom is: 9.15 GB.)
+    #[test]
+    fn a_table_s_nodes_go_with_the_part_of_its_axis_the_reach_covers() {
+        let (pole, rate) = (0.37, 300.0);
+        let f = |s: f64| C64::ONE / C64::new(rate * (s - pole), 1.0);
+        let (_, whole_read, whole) = refine(Axis::first(0.0, 1.0, false), &f, rate);
+        assert!(whole_read <= 1.0, "the whole axis read within the share: {whole_read}");
+        for part in [1.0 / 8.0, 1.0 / 64.0] {
+            let (_, read, axis) = refine(Axis::first(pole - 0.5 * part, pole + 0.5 * part, false), &f, rate);
+            let ratio = (axis.nodes - 1) as f64 / ((whole.nodes - 1) as f64 * part);
+            eprintln!("a part {part} of the axis: {} nodes against the whole's {} ({ratio:.2} of its share), spacing {:.2e} against {:.2e}, read {read:.2}", axis.nodes, whole.nodes, axis.spacing(), whole.spacing());
+            assert!(read <= 1.0, "the part {part} read within the share: {read}");
+            assert!((0.5..=2.0).contains(&ratio), "the part {part}'s nodes go with it: {} against the whole's {}", axis.nodes, whole.nodes);
+        }
+    }
+
+    /// The table is the elimination's route over the reach and nothing beyond it (module documentation, # Axes): the
+    /// nearly magic probe with its line moved 30 half-widths over the tweezer's whole intensity, tabulated over a reach of
+    /// 120 µK -- its intensity axis on the reach's range, a part of [0, 1] --, read at forty points at rest along x from
+    /// the trap's centre to three times the reach's edge. Where the table holds the point, the near forms read from it
+    /// are the exact elimination's within the tables' shares (the responses' relative error, `node_error`); beyond its
+    /// range they are the exact elimination's, to the bit (`Model::near_values`, `near_tabulated` none there).
+    #[test]
+    fn a_point_beyond_a_table_s_range_reads_the_exact_elimination() {
+        let (request, light, kept, b) = nearly_magic(30.0);
+        let model = Model::new(&request, &light, &kept).unwrap();
+        let (trap, reach) = reach_of(&model, b, 4.0 * request.temperature_uk);
+        let tables = model.tabulate(&reach, 1 << 12);
+        let (cluster, running) = (model.cluster_of(b), model.running());
+        let table = tables.of(cluster, &running).expect("the probe's table");
+        let axis = table.table.axes()[0];
+        assert!(table.axes() == 1 && axis.lo > 0.0 && !axis.periodic, "the tweezer's intensity on the reach's part of [0, 1]: {axis:?}");
+        let plan = &table.layout.plan;
+        let sections = [(plan.near.responding(), 0)];
+        let (shown, temperature) = shares();
+        let edge = along(&model, &trap, &reach, b, cluster).last().unwrap().at.r[0] - trap.centre[0];
+        let (mut held, mut beyond, mut worst) = (0, 0, 0.0_f64);
+        for i in 0..40 {
+            let r = [trap.centre[0] + 3.0 * edge * (i as f64 + 0.5) / 40.0, trap.centre[1], trap.centre[2]];
+            let amplitudes = model.light.amplitudes(r);
+            let exact = model.near_exact(plan, &amplitudes, 0, &model.coherent_dressing());
+            let read = model.near_values(plan, &amplitudes, &sections, Some(table));
+            let range = plan.near.responding();
+            let (size, apart) = range.clone().fold((0.0, 0.0), |(s, a), e| (s + exact.data[e].norm_sqr(), a + (read.data[e] - exact.data[e]).norm_sqr()));
+            match model.near_tabulated(table, &amplitudes, &sections) {
+                Some(_) => {
+                    held += 1;
+                    worst = worst.max((apart / size).sqrt());
+                }
+                None => {
+                    beyond += 1;
+                    assert!(range.clone().all(|e| read.data[e] == exact.data[e]), "beyond the table at {r:?} the exact elimination's forms");
+                }
+            }
+        }
+        eprintln!("{held} points the table holds (responses within {worst:.2e} of the exact ones), {beyond} beyond it");
+        assert!(held > 0 && beyond > 0, "points on both sides of the table's range: {held}, {beyond}");
+        assert!(worst <= shown.min(temperature), "the table's responses within its share {:.2e}: {worst:.2e}", shown.min(temperature));
+    }
+
     /// A table's nodes are its function's, not the run's (module documentation, # Refinement). The nearly magic probe of the
     /// test above with its line moved 30 half-widths over the tweezer's whole intensity, over a reach of 120 µK: the line
-    /// crosses resonance on the intensity's axis, and the refinement goes on to a grid whose read is within the shares (1537
-    /// nodes). Tabulated under the work bound of a run and of one twice as long -- the bound of the pilot's middles, here 2^12
-    /// and 2^13 nodes -- the tables are the same, node for node and value for value, and the table's error at the atoms
-    /// across the reach is within its shares; the ceiling of a run eight times as short, 2^9 nodes, ends the axis below it.
+    /// crosses resonance on the intensity's axis, and the refinement goes on to a grid whose read is within the shares (769
+    /// nodes on the reach's part of the intensity). Tabulated for a run whose pilot takes 2^12 middles and for one twice as long, the tables are the same, node
+    /// for node and value for value, and the table's error at the atoms across the reach is within its shares. For a run
+    /// eight times as short, 2^9 middles, the grid its read asks costs more than evaluating the forms at those points
+    /// (`Layout::pays`): the refinement ends below it, at a grid that costs less (# Work).
     #[test]
     fn a_table_s_nodes_do_not_grow_with_the_run() {
         let (request, light, kept, b) = nearly_magic(30.0);
@@ -1288,8 +1414,9 @@ mod tests {
         let largest = model.table_reads(&short, &samples)[index].whole.iter().map(|r| r.population.max(r.temperature)).fold(0.0, f64::max);
         let (shown, temperature) = shares();
         eprintln!("the line moved 30 half-widths: {nodes} nodes under either bound; the table's largest read across the reach {largest:.2e}");
-        let ceiling = model.tabulate(&reach, 1 << 9);
-        assert!(nodes > 1 << 9 && Table::nodes(ceiling.tables[index].table.axes()) <= 1 << 9, "the refined grid {nodes} beyond the ceiling 2^9, which ends it below");
+        let short_run = model.tabulate(&reach, 1 << 9);
+        let ended = short_run.of(cluster, &model.running()).expect("the short run's table");
+        assert!(nodes > 1 << 9 && ended.layout.pays(ended.table.axes(), 1 << 9), "the refined grid {nodes} beyond a short run's points 2^9, the grid it ends at within what they cost: {} nodes", Table::nodes(ended.table.axes()));
         assert!(largest <= shown.min(temperature), "the table's read {largest:.3e} across the reach within its share {:.3e}", shown.min(temperature));
     }
 }

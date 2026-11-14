@@ -18,11 +18,15 @@ use crate::linalg::{dot3, C64, Mat};
 use crate::model::{Beat, Cluster, Photon, Point, Quadratic, Scattering, STATES};
 use crate::step::{self, Dynamics, Middle, Trajectory};
 
-/// The domain the tests' steps are taken in: every step proven -- a test model is the model, at every point it is asked.
+/// The domain the tests' steps are taken in: every step resolved, no state a runaway -- a test model is the model, at
+/// every point it is asked.
 struct Everywhere;
 impl step::Domain for Everywhere {
-    fn proven(&self, _: &step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> Result<bool, step::Unproven> {
-        Ok(true)
+    fn resolves(&self, _: &step::Flow, _: ([f64; 3], [f64; 3]), _: f64) -> bool {
+        true
+    }
+    fn runaway(&self, _: f64) -> bool {
+        false
     }
 }
 
@@ -726,7 +730,10 @@ fn a_step_integrates_its_internal_frequencies_whatever_the_detuning() {
 /// of its change over a half step), read from the step's picture.
 /// - Where the step's nodes resolve the pair for what changes (Δτ = 1 in four and in eight steps; with the decay in
 ///   two as well) the state is hopped, and both fall as the fourth order, sixteen a halving: a hop's second Magnus term
-///   is of the fifth order in the step, and so is the three nodes' representation of the change (Simpson's rule's).
+///   is of the fifth order in the step, and so is the three nodes' representation of the change (Simpson's rule's) --
+///   down to the strides' truncation where the step takes them: their exponentials are within the kick's share of what
+///   the state forgets (spectral.rs `Picture::tolerance`), over the span at most QUADRATURE Γ span with the decay Γ
+///   (none without one: round-off).
 /// - Where they do not (Δτ = 1 in one step, Δτ = 10 and more in any) the state follows the change, by the following
 ///   X = D/ω and its rate's corrections, to the second order. Its error is within the square of the following at the
 ///   step's end, (k·v h V/ω)² with V the light's largest coupling and ω the dressed pair's frequency -- held to that
@@ -779,7 +786,8 @@ fn a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the
             let following = |steps: usize| K * v * 0.5 * span / steps as f64 * coupling / omega;
             // The fourth order between two levels that both hop the pair -- the slowest pair's last two levels at
             // the least --, and the following's square at a level that follows it.
-            let hopped = (0..3).all(|i| !(hops[i] && hops[i + 1]) || (0..2).all(|q| falls[i][q] > 12.0)) && (turns != 1.0 || (hops[2] && hops[3]));
+            let truncated = crate::units::QUADRATURE * gamma * span;
+            let hopped = (0..3).all(|i| !(hops[i] && hops[i + 1]) || (0..2).all(|q| falls[i][q] > 12.0 || errors[i + 1][q] <= truncated)) && (turns != 1.0 || (hops[2] && hops[3]));
             let followed = (0..4).all(|i| hops[i] || errors[i][0] < following(1 << i).powi(2));
             if !(hopped && followed) {
                 failures.push(format!("Γ {gamma}, Δτ {turns}: {errors:?}"));
@@ -1219,10 +1227,10 @@ fn stepped<D: Dynamics>(model: &D, start: &Trajectory, tau: f64, end: f64) -> (T
 /// The jumps inside a step (step.rs, # Jumps; adapt.rs, # The jumps): a two-level atom about the antinode of a resonant
 /// standing wave along z, in a trap whose period the step does not resolve (ω τ = 3), jumping some times a step --
 /// the hazard follows the atom through the wave --, each jump with its photon's recoil. Step by step:
-/// - a jump is where the step's own propagation reaches the threshold: the same step from the same state with no
-///   threshold, read at the time of the step's first jump, has ‖ψ‖² at that threshold, within what the two
-///   quadratures of the hazard to that time -- the root's spans and the read's -- leave of it (`QUADRATURE` of the
-///   hazard's integral; measured 7·10⁻⁷ in its logarithm at the most);
+/// - a jump is made in a step where, and only where, the step's own survival reaches the threshold: the same step from
+///   the same state with no threshold ends at a survival at the threshold or below exactly where the step jumps -- the
+///   survival falls through the step, so it reaches θ inside the step where it is at θ or below at its end (the
+///   trajectory's own states probe it: a reading's norm is the propagation's, no survival);
 /// - the step's path, handed on through its jumps' kicks (`Segment::after`), ends at the step's end: the jumps' kicks
 ///   enter the reference's flow where they are made;
 /// - the steps are the grid's, one a nominal step whatever the jumps, some with several; and `advance` is these steps
@@ -1237,14 +1245,14 @@ fn a_jump_is_made_inside_its_step_where_the_step_s_own_propagation_reaches_the_t
     model.emission = K;
     let start = Trajectory::new(&model, 0, [0.0, 0.0, 0.05], [0.0, 0.0, 8.0], 3, 5);
     let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
-    let (mut twin, mut scratch, mut jumps, mut most) = (start.clone(), step::Scratch::default(), 0, 0);
+    let (mut twin, mut scratch, mut jumps, mut most, mut crossed, mut kept) = (start.clone(), step::Scratch::default(), 0, 0, 0, 0);
     for k in 1..=(end / tau) as usize {
         let taken = step::Midway::new(&model, &twin, tau).unwrap().attempt(&twin, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
-        if let Some(first) = taken.made.first() {
-            let (_, read) = step_read(&model, &twin, tau, &step::Brownian::STILL, &[first.state.time], &mut step::Scratch::default()).unwrap();
-            let off = (norm(&read[0].psi) / twin.threshold).ln();
-            let fall = (norm(&twin.psi) / twin.threshold).ln();
-            assert!(off.abs() < crate::units::QUADRATURE * fall, "step {k}: at its first jump's time {} the step's own ‖ψ‖² is {off:e} off the threshold in its logarithm", first.state.time);
+        let free = step_of(&model, &twin, tau, &mut step::Scratch::default()).unwrap();
+        let below = (norm(&free.end.psi) / twin.threshold).ln();
+        if below.abs() > 1e-9 {
+            assert_eq!(taken.made.is_empty(), below > 0.0, "step {k}: its own survival at its end is {below:e} from the threshold in its logarithm, and it made {} jumps", taken.made.len());
+            (crossed, kept) = (crossed + usize::from(below < 0.0), kept + usize::from(below > 0.0));
         }
         let mut piece = taken.segment.clone();
         for made in &taken.made {
@@ -1259,6 +1267,8 @@ fn a_jump_is_made_inside_its_step_where_the_step_s_own_propagation_reaches_the_t
     let (mut t, mut pieces) = (start.clone(), 0);
     adapt::advance(&model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut adapt::Path::new(3, 5, tau, 0), end, &[], &mut |_, _| {}, &mut |_, _| pieces += 1).unwrap();
     assert!(jumps > 100 && most > 1 && pieces as f64 == end / tau + jumps as f64, "{jumps} jumps, {most} in one step at the most, {pieces} pieces of {} steps", end / tau);
+    eprintln!("steps whose own survival ends below the threshold {crossed}, above it {kept}");
+    assert!(crossed > 0, "no step's own survival reaches its threshold");
     assert_eq!((twin.jumps, twin.r, twin.kappa, &twin.psi), (t.jumps, t.r, t.kappa, &t.psi), "the steps against the advance");
 }
 
@@ -2650,31 +2660,19 @@ fn thermal(trap: &crate::model::Trap, hm: f64, kt: f64, stream: &mut crate::rand
     (r, kappa)
 }
 
-/// A scene's model as the solve closes it (solve.rs `attempt`: every unit whose fold does not exist over the reach kept,
-/// until none fails) with its near tables (`Model::tabulate`), and what the ensemble's draw meets (the prepared well's
+/// A scene's model closed by its units' errors at its reference state (model.rs `Model::closed_at`) with its near tables (`Model::tabulate`), and what the ensemble's draw meets (the prepared well's
 /// depth at its bottom against its envelope's top), said; then per cluster sixteen atoms of the scene's temperature in
 /// the trap's harmonic approximation, each a random state of the cluster, held: to `each` the model, its prepared
 /// trap, the cluster's number, the run and the atoms.
 fn scene_clusters(name: &str, each: &mut dyn FnMut(&crate::model::Model, &crate::model::Trap, usize, &crate::model::Run, &[Trajectory])) {
-    use crate::model::{Model, Run, Unit, GROUND};
+    use crate::model::{Model, Run, GROUND};
     let request = scene(name);
     let light = crate::field::Light::new(&request);
     let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
     let mut p = [0.0; GROUND];
     p[state] = 1.0;
     let started = std::time::Instant::now();
-    let mut kept: Vec<Unit> = vec![];
-    let (model, trap, reach) = loop {
-        let model = Model::new(&request, &light, &kept).unwrap();
-        let trap = model.trap(&p, &model.prepared()).unwrap();
-        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
-        let units = model.units();
-        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-        if failing.is_empty() {
-            break (model, trap, reach);
-        }
-        kept.extend(failing);
-    };
+    let (model, kept, trap, reach) = Model::closed_at(&request, &light, vec![], state, request.temperature_uk);
     let closure = started.elapsed();
     let started = std::time::Instant::now();
     let tables = model.tabulate(&reach, 1 << 20);
@@ -2739,6 +2737,7 @@ fn a_scene_s_step_cost() {
             let crate::linalg::Bounds { rho, gamma, .. } = crate::linalg::bounds(&h, &mut vec![C64::ZERO; n]);
             eprintln!("{name} cluster {cluster}: its generator's bounds ρ {rho:.3e}, γ {gamma:.3e} rad/µs, times τ {:.3e}, {:.3e}", rho * tau, gamma * tau);
         }
+        eprintln!("{name} cluster {cluster}: {}", run.described(cluster));
         cost(&format!("{}+{} of {}", c.ground, c.states.len() - c.ground, std::path::Path::new(&name).file_stem().unwrap().to_string_lossy()), run, starts, tau);
     });
 }
@@ -3213,7 +3212,7 @@ fn a_scene_s_step_error_by_the_split() {
                         along.middle.generator(&along.path, middle - 0.5 * t, &mut picture.ends[0]);
                         along.middle.generator(&along.path, middle + 0.5 * t, &mut picture.ends[1]);
                     }
-                    picture.prepare(0.5 * t, still, |bandwidth| super::nodes(t, bandwidth) + 2, 0.0);
+                    picture.prepare(0.5 * t, still, |bandwidth| super::nodes(t, bandwidth) + 2, 0.0, 0.0);
                     if i == 0 {
                         for [turn, slope, curvature] in crate::spectral::tests::pairs(&picture) {
                             let bin = [0.5, 1.0, 2.0, 4.0].iter().filter(|edge| turn >= **edge).count();
@@ -3575,9 +3574,11 @@ impl Dynamics for Lindblad {
 /// 10⁻³ to 1 µm/µs, and steps whose fastest turn between two nodes, (|q| v + size) τ/2, is 0.01π to 20π -- far past the
 /// light's resolution (π) --; the jumps' size held to what the step's survival can tell from zero, a decay of at most
 /// 20/τ a state (a threshold of zero is the tests' none: a survival that rounds to zero would meet it); each from a
-/// random state, its threshold at zero, read at fifteen random times inside it. To `each`: the model, the start, the
-/// step, the states read, τ times the generator's size and n, and the fastest turn between two nodes (rad).
-fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad, &Trajectory, &step::Step, &[Trajectory], f64, f64)) {
+/// random state, its threshold at zero, and from the same state fifteen steps of random lengths below τ: the survival
+/// probed at the trajectory's own states, the steps' ends (a reading's norm is no survival, adapt.rs # The reads). To
+/// `each`: the model, the start, the steps with their lengths (τ's last), τ times the generator's size and n, and the
+/// fastest turn between two nodes (rad).
+fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad, &Trajectory, &[(f64, step::Step)], f64, f64)) {
     let mut scratch = step::Scratch::default();
     for case in 0..count {
         let mut s = crate::random::Stream::new(43, crate::random::Purpose::Initial, case, 0);
@@ -3596,10 +3597,14 @@ fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad
         let reach = s.uniform();
         let mut start = Trajectory::new(&model, 0, place.map(|x| x * reach), heading.map(|x| x * speed / RB), 7, case);
         start.psi = random_state(&mut s, n);
-        let mut reads: Vec<f64> = (0..15).map(|_| tau * s.uniform()).collect();
-        reads.sort_by(f64::total_cmp);
-        let (taken, read) = step_read(&model, &start, tau, &step::Brownian::STILL, &reads, &mut scratch).unwrap_or_else(|e| panic!("case {case}: n {n}, {waves} waves, size {size}, speed {speed}, turn {:.3}π, τ {tau}: {e:?}", turn / std::f64::consts::PI));
-        each(&model, &start, &taken, &read, tau * size * n as f64, turn);
+        let mut lengths: Vec<f64> = (0..15).map(|_| tau * s.uniform()).collect();
+        lengths.sort_by(f64::total_cmp);
+        lengths.push(tau);
+        let steps: Vec<(f64, step::Step)> = lengths
+            .into_iter()
+            .map(|length| (length, step_of(&model, &start, length, &mut scratch).unwrap_or_else(|e| panic!("case {case}: n {n}, {waves} waves, size {size}, speed {speed}, turn {:.3}π, a step of {length} of τ {tau}: {e:?}", turn / std::f64::consts::PI))))
+            .collect();
+        each(&model, &start, &steps, tau * size * n as f64, turn);
     }
 }
 
@@ -3653,51 +3658,47 @@ fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> f64 {
     crate::linalg::hermitian_eigen(&gram).values.iter().fold(0.0_f64, |m, v| m.max(*v)).sqrt()
 }
 
-/// The survivals of a step in their order: the start's, the times read and the end's (‖ψ‖² each).
-fn survivals(start: &Trajectory, taken: &step::Step, read: &[Trajectory]) -> Vec<f64> {
-    std::iter::once(&start.psi).chain(read.iter().map(|t| &t.psi)).chain(std::iter::once(&taken.end.psi)).map(|psi| crate::linalg::norm_sqr(psi)).collect()
-}
-
 /// The norm is the probability of no jump, and the exact dynamics only lowers it (step.rs, # Jumps): over 400 random
-/// steps (`random_steps`), decays of several plane waves and beats among them, the survival read at fifteen times inside
-/// each step and at its end is a positive number, and rises from one time to the next by no more than the step's own
-/// decay allows -- the negative part of the parabola of its decay through its three nodes (`negative_decay`), which a
-/// decay of plane waves that interfere away between the nodes can have -- and the sums' rounding: where that parabola
-/// is positive semidefinite, it never rises. The propagation's own map over the same steps (`map_growth`), which the
-/// survival does not take, grows on some of them.
+/// cases (`random_steps`), decays of several plane waves and beats among them, sixteen steps each from one state, the
+/// survival at each step's end is a positive number, and rises from the start by no more than that step's own decay
+/// allows -- the negative part of the parabola of its decay through its three nodes (`negative_decay`), which a decay
+/// of plane waves that interfere away between the nodes can have -- and the sums' rounding: where that parabola is
+/// positive semidefinite, it never rises. The propagation's own map over the cases' whole steps (`map_growth`), which
+/// the survival does not take, grows on some of them.
 #[test]
 fn the_survival_never_rises_whatever_the_generator_and_the_step() {
     let (mut most, mut grown, mut widest, mut negative) = (f64::NEG_INFINITY, 0, 0.0_f64, Vec::new());
-    random_steps(400, None, &mut |model, start, taken, read, _, turn| {
-        let norms = survivals(start, taken, read);
-        let tau = taken.end.time - start.time;
-        let (allowed, size) = negative_decay(model, start, tau);
-        if allowed > 0.0 {
-            negative.push((turn / std::f64::consts::PI, allowed / size));
+    random_steps(400, None, &mut |model, start, steps, _, turn| {
+        let first = crate::linalg::norm_sqr(&start.psi);
+        for (length, taken) in steps {
+            let (allowed, size) = negative_decay(model, start, *length);
+            if allowed > 0.0 {
+                negative.push((turn / std::f64::consts::PI, allowed / size));
+            }
+            let end = crate::linalg::norm_sqr(&taken.end.psi);
+            assert!(end.is_finite() && end > 0.0, "case {}, a step of {length}: {end}", start.index);
+            most = most.max((end / first).ln());
+            assert!((end / first).ln() <= allowed + 1e-12 * (1.0 + size), "the survival rose (case {}, turn {:.3}π, a step of {length}) by more than its decay's negative part {allowed:e}: {first} → {end}", start.index, turn / std::f64::consts::PI);
         }
-        for pair in norms.windows(2) {
-            assert!(pair[1].is_finite() && pair[1] > 0.0, "case {}: {norms:?}", start.index);
-            most = most.max((pair[1] / pair[0]).ln());
-            assert!((pair[1] / pair[0]).ln() <= allowed + 1e-12 * (1.0 + size), "the survival rose (case {}, turn {:.3}π) by more than its decay's negative part {allowed:e}: {norms:?}", start.index, turn / std::f64::consts::PI);
-        }
+        let tau = steps.last().expect("τ's step").0;
         let sigma = map_growth(model, start, tau);
         widest = widest.max(sigma);
         grown += usize::from(sigma > 1.0 + 1e-12);
     });
     negative.sort_by(|a, b| a.0.total_cmp(&b.0));
-    eprintln!("the survival's largest rise from one time to the next, ln: {most:e}; the steps whose decay's parabola goes negative (the turn between two nodes in π, its negative part over its size): {negative:.3?}");
+    eprintln!("the survival's largest rise over a step, ln: {most:e}; the steps whose decay's parabola goes negative (the turn between two nodes in π, its negative part over its size): {negative:.3?}");
     eprintln!("the propagation's own map: largest singular value {widest:.4}, above one on {grown} of 400 steps");
     assert!(grown > 0, "the random steps hold propagations whose map grows");
 }
 
-/// The Hermitian part generates unitary motion: without a decay the survival is one at every time read and at the
-/// step's end, whatever the propagation leaves of the state itself -- to the rounding of the generator's own Hermitian
+/// The Hermitian part generates unitary motion: without a decay the survival is one at the end of every step of every
+/// length, whatever the propagation leaves of the state itself -- to the rounding of the generator's own Hermitian
 /// parts (each entry a sum of parts, a part and its adjoint apart: a few units of the round-off of n·size, over τ).
 #[test]
 fn a_generator_without_a_decay_keeps_the_survival() {
     let mut most = 0.0_f64;
-    random_steps(200, Some(0), &mut |_, _, taken, read, scale, _| {
-        for psi in read.iter().map(|t| &t.psi).chain(std::iter::once(&taken.end.psi)) {
+    random_steps(200, Some(0), &mut |_, _, steps, scale, _| {
+        for psi in steps.iter().map(|(_, taken)| &taken.end.psi) {
             let off = (crate::linalg::norm_sqr(psi) - 1.0).abs();
             most = most.max(off / (1.0 + scale));
             assert!(off < 1e-12 * (1.0 + scale), "‖ψ‖² − 1 = {off:e} at τ size n {scale}");
@@ -3781,8 +3782,9 @@ fn the_hazard_is_the_generator_s_decay_and_a_sum_of_squares() {
 /// R4_LIN_2's steps no longer raise the survival (step.rs, # Jumps): its model as the solve closes it (`scene_clusters`:
 /// lin⊥lin cooling, explicit excited states and folds), sixteen atoms a cluster in random states -- at the scene's
 /// temperature and at two and four times its speeds, the reach's hot atoms --, one step each at the engine's τ of the
-/// measured runs (0.36 and 0.4335 µs) and at the companion's 2τ, read at seven times inside: the survival never rises
-/// from one time to the next beyond the sums' rounding, where the propagation's own map over the same steps
+/// measured runs (0.36 and 0.4335 µs) and at the companion's 2τ, and from the same state steps of seven eighths of it
+/// down to one: the survival at each step's end never rises from the start's beyond the sums' rounding (the trajectory's
+/// own states probe it; a reading's norm is no survival), where the propagation's own map over the same steps
 /// (`map_growth`) grows on some of them -- the line's survival, its norm, rose by as much (1.0095 at 0.36 µs:
 /// motion3d_status/rewrite/norm.status.md).
 #[test]
@@ -3795,12 +3797,11 @@ fn r4_lin_2_s_steps_never_raise_the_survival() {
                 let mut wide = 0.0_f64;
                 for start in starts {
                     let start = Trajectory { kappa: start.kappa.map(|k| faster * k), ..start.clone() };
-                    let reads: Vec<f64> = (1..=7).map(|k| start.time + tau * k as f64 / 8.0).collect();
-                    let (taken, read) = step_read(run, &start, tau, &step::Brownian::STILL, &reads, &mut scratch).unwrap();
-                    let norms = survivals(&start, &taken, &read);
-                    for pair in norms.windows(2) {
-                        most = most.max((pair[1] / pair[0]).ln());
-                        assert!(pair[1] <= pair[0] * (1.0 + 1e-12), "R4_LIN_2 cluster {cluster}, τ {tau}, speeds × {faster}: the survival rose: {norms:?}");
+                    let first = crate::linalg::norm_sqr(&start.psi);
+                    for length in (1..=8).map(|k| tau * k as f64 / 8.0) {
+                        let end = crate::linalg::norm_sqr(&step_of(run, &start, length, &mut scratch).unwrap().end.psi);
+                        most = most.max((end / first).ln());
+                        assert!(end <= first * (1.0 + 1e-12), "R4_LIN_2 cluster {cluster}, τ {tau}, speeds × {faster}, a step of {length}: the survival rose: {first} → {end}");
                     }
                     let sigma = map_growth(run, &start, tau);
                     wide = wide.max(sigma);
@@ -3812,6 +3813,148 @@ fn r4_lin_2_s_steps_never_raise_the_survival() {
             }
         });
     }
-    eprintln!("R4_LIN_2: the survival's largest change from one time to the next, ln: {most:e}; the propagation's own map: largest singular value {widest:.6}, above one on {grown} of {steps} steps");
+    eprintln!("R4_LIN_2: the survival's largest change over a step, ln: {most:e}; the propagation's own map: largest singular value {widest:.6}, above one on {grown} of {steps} steps");
     assert!(grown > 0, "R4_LIN_2's steps hold propagations whose map grows");
+}
+
+/// What `advance` makes of a trajectory from `start` to the time `run` at the step τ (the Brownian path's grid the
+/// multiples of τ in one cell of the run), read at the times `reads`: its last state, every piece of its path with its
+/// start and the time it is on it to (`Segment`: from a step's start, or from a jump with its place and kick -- the
+/// jumps' sequence), the readings with their places in `reads`, each printed whole (`{:?}`, the numbers' shortest round
+/// trip: equal prints are equal bits), and whether its last step went through the decomposition
+/// (`spectral::Picture::decomposed`).
+struct Advanced {
+    last: Trajectory,
+    printed: String,
+    pieces: Vec<(f64, String)>,
+    readings: Vec<(usize, String)>,
+    decomposed: bool,
+}
+fn advanced<D: Dynamics>(model: &D, start: &Trajectory, tau: f64, run: f64, reads: &[f64]) -> Advanced {
+    let (mut t, mut scratch) = (start.clone(), step::Scratch::default());
+    let mut path = adapt::Path::new(start.seed, start.index, run, (run / tau).log2().round() as u32);
+    let (mut pieces, mut readings) = (vec![], vec![]);
+    adapt::advance(model, &Everywhere, tau, &mut t, &mut scratch, &mut path, run, reads, &mut |k, s| readings.push((k, format!("{s:?}"))), &mut |s, until| pieces.push((s.start, format!("{s:?} to {until:?}")))).unwrap();
+    Advanced { printed: format!("{t:?}"), last: t, pieces, readings, decomposed: scratch.picture.decomposed() }
+}
+
+/// A trajectory against itself read at `reads` and at none: the same last state and the same pieces of its path to the
+/// bit; the readings one a time read, in its order, up to the trajectory's loss; and each reading the same to the bit as
+/// at the times `fewer` (a part of `reads`) read alone. Returns the trajectory read at none, and the readings inside
+/// steps of τ (at no multiple of it).
+fn read_apart<D: Dynamics>(model: &D, start: &Trajectory, tau: f64, run: f64, reads: &[f64], fewer: &[f64], case: &str) -> (Advanced, usize) {
+    let plain = advanced(model, start, tau, run, &[]);
+    let all = advanced(model, start, tau, run, reads);
+    let some = advanced(model, start, tau, run, fewer);
+    assert!(plain.readings.is_empty(), "{case}: nothing read");
+    assert_eq!(plain.printed, all.printed, "{case}: the trajectory read at {} times against itself read at none", reads.len());
+    assert_eq!(plain.pieces, all.pieces, "{case}: the pieces of its path read at {} times against read at none", reads.len());
+    assert_eq!(plain.printed, some.printed, "{case}: the trajectory read at {} times against itself read at none", fewer.len());
+    let held = |t: &f64| plain.last.lost.is_none_or(|lost| *t < lost);
+    assert!(all.readings.iter().map(|(k, _)| *k).eq(0..reads.iter().filter(|t| held(t)).count()), "{case}: {} readings of {} times", all.readings.len(), reads.len());
+    for (k, reading) in &some.readings {
+        let at = reads.iter().position(|&t| t == fewer[*k]).expect("a time of the part is read");
+        assert_eq!(reading, &all.readings[at].1, "{case}: the reading at {} read with {} other times against with {}", fewer[*k], fewer.len() - 1, reads.len() - 1);
+    }
+    let ends: std::collections::HashSet<u64> = (0..=(run / tau).round() as usize).map(|k| (k as f64 * tau).to_bits()).collect();
+    let inside = reads[..all.readings.len()].iter().filter(|t| !ends.contains(&t.to_bits())).count();
+    (plain, inside)
+}
+
+/// A trajectory is the same to the bit whatever times it is read at, and a reading the same whatever else is read
+/// (adapt.rs, # The reads; step.rs `looked`): the times read are no stops of a step's propagation, take nothing of its
+/// roots, nodes and count, draw nothing from its streams, and are no place of its loss test. Two atoms in a Gaussian
+/// trap for some trap periods, four trajectories each, read at 2000 random times, at every step's end and middle and at
+/// the unread run's jumps -- against read at none, and a random half of those times read alone:
+/// - a two-level atom in a resonant standing wave with its photons' recoil, which jumps some times a step and boils out
+///   of the trap: lost where its own states (a step's end, a jump) are first beyond the region above the trap's far
+///   value;
+/// - an atom of the ground state alone scattering folded light, whose diffusion moves it along its Brownian path, and
+///   whose readings draw the bridge's rest from the stream of their times (`Segment::place`).
+#[test]
+fn a_trajectory_is_the_same_to_the_bit_whatever_times_it_is_read_at() {
+    let trap = Trap::Gaussian { depth: 6.0, waists: [1.0, 1.0, 3.0] };
+    let wave = |k: f64| Beam { k: [0.0, 0.0, k], rabi: 20.0, phase: 0.0 };
+    let mut explicit = Atom::new(RB, trap, vec![wave(K), wave(-K)], 0.0, GAMMA);
+    (explicit.emission, explicit.region) = (K, 1.5);
+    let mut folded = Atom::new(RB, trap, vec![], 0.0, 0.0);
+    folded.folded = vec![(C64::real(0.4), [0.0, 0.0, K]), (C64::real(0.25), [0.0, 0.0, -K])];
+    (folded.emission, folded.region) = (K, 1.5);
+    let (tau, run) = (0.5, 256.0);
+    let steps = (run / tau) as usize;
+    let (mut jumps, mut inside, mut lost, mut diffused) = (0, 0, 0, 0);
+    for (name, model) in [("the two-level atom", &explicit), ("the folded light's atom", &folded)] {
+        for index in 0..4 {
+            let start = Trajectory::new(model, 0, [0.3, -0.2, 0.8], [20.0, 15.0, -10.0], 11, index);
+            let unread = advanced(model, &start, tau, run, &[]);
+            let mut s = crate::random::Stream::new(13, crate::random::Purpose::Initial, index, 0);
+            let mut reads: Vec<f64> = (0..2000).map(|_| run * s.uniform()).collect();
+            reads.extend((1..=steps).flat_map(|k| [k as f64 * tau, (k as f64 - 0.5) * tau]));
+            reads.extend(unread.pieces.iter().map(|p| p.0));
+            reads.retain(|&t| t > 0.0 && t <= run);
+            reads.sort_by(f64::total_cmp);
+            reads.dedup();
+            let fewer: Vec<f64> = reads.iter().copied().filter(|_| s.uniform() < 0.5).collect();
+            let (plain, i) = read_apart(model, &start, tau, run, &reads, &fewer, &format!("{name}, trajectory {index}"));
+            (jumps, inside) = (jumps + plain.last.jumps, inside + i);
+            lost += usize::from(plain.last.lost.is_some());
+            diffused += usize::from(plain.last.booked[2] > 0.0);
+            eprintln!("{name}, trajectory {index}: {} jumps, {i} times read inside steps, lost at {:?}", plain.last.jumps, plain.last.lost);
+        }
+    }
+    assert!(jumps > 100 && inside > 4000 && lost > 0 && diffused > 0, "{jumps} jumps, {inside} times read inside steps, {lost} trajectories lost, {diffused} diffused");
+}
+
+/// Random trajectories read at random output grids (`read_apart`): random clusters (`Lindblad`, as `random_steps` makes
+/// them: 1 to 5 states, beat pairs, plane waves of the jumps, sizes 0.3 to 30 rad/µs, speeds of 10⁻³ to 1 µm/µs, steps
+/// whose fastest turn between two nodes is 0.01π to 20π) jumping at their thresholds, the jumps' decay up to 20/τ a
+/// state, over 8 to 64 steps; each read at 1 to 300 times -- uniform, at steps' ends and middles, within a few
+/// roundings of a step's end, or packed into one step -- against read at none and at a random part of its times. Both
+/// routes of the state are taken (`spectral::Picture::decomposed`: the decomposition, and the strides that take every
+/// stop from the last).
+#[test]
+fn a_random_output_grid_leaves_a_random_trajectory_as_it_is() {
+    let (mut routes, mut jumps, mut inside) = ([0, 0], 0, 0);
+    for case in 0..96 {
+        let mut s = crate::random::Stream::new(47, crate::random::Purpose::Initial, case, 0);
+        let n = 1 + (5.0 * s.uniform()) as usize;
+        let beats = (3.0 * s.uniform()) as usize;
+        let waves = 1 + (3.0 * s.uniform()) as usize;
+        let size = 0.3 * 100.0_f64.powf(s.uniform());
+        let mut model = Lindblad::new(&mut s, n, beats, waves, size);
+        let speed = 10.0_f64.powf(-3.0 + 3.0 * s.uniform());
+        let fastest = model.beats.iter().chain(&model.jumps).map(|(q, _)| crate::linalg::norm3(*q)).fold(0.0, f64::max) * 2.0;
+        let turn = std::f64::consts::PI * 10.0_f64.powf(-2.0 + 3.3 * s.uniform());
+        let tau = 2.0 * turn / (fastest * speed + size);
+        let held = (size.min(20.0 / tau) / (size * (n * waves) as f64)).sqrt();
+        model.jumps.iter_mut().for_each(|(_, m)| *m = m.scaled(C64::real(held)));
+        let steps = 1usize << (3 + (4.0 * s.uniform()) as usize);
+        let run = tau * steps as f64;
+        let (place, heading) = (s.direction(), s.direction());
+        let mut start = Trajectory::new(&model, 0, place, heading.map(|x| x * speed / RB), 47, case);
+        start.psi = random_state(&mut s, n);
+        let count = 1 + (300.0 * s.uniform()) as usize;
+        let packed = (steps as f64 * s.uniform()).floor();
+        let mut reads: Vec<f64> = (0..count)
+            .map(|_| {
+                let k = (steps as f64 * s.uniform()).floor();
+                match (4.0 * s.uniform()) as usize {
+                    0 => run * s.uniform(),
+                    1 => tau * (k + if s.uniform() < 0.5 { 0.5 } else { 1.0 }),
+                    2 => tau * (k + 1.0) * (1.0 + f64::EPSILON * (8.0 * s.uniform() - 4.0).round()),
+                    _ => tau * (packed + s.uniform()),
+                }
+            })
+            .filter(|&t| t > 0.0 && t <= run)
+            .collect();
+        reads.sort_by(f64::total_cmp);
+        reads.dedup();
+        let fewer: Vec<f64> = reads.iter().copied().filter(|_| s.uniform() < 0.5).collect();
+        let case = format!("case {case}: n {n}, {waves} waves, size {size:.3}, τ {tau:.4}, {steps} steps, {} times", reads.len());
+        let (plain, i) = read_apart(&model, &start, tau, run, &reads, &fewer, &case);
+        routes[usize::from(plain.decomposed)] += 1;
+        (jumps, inside) = (jumps + plain.last.jumps, inside + i);
+    }
+    eprintln!("96 random trajectories: {jumps} jumps, {inside} times read inside steps; the last step strided on {}, through the decomposition on {}", routes[0], routes[1]);
+    assert!(routes[0] > 0 && routes[1] > 0 && jumps > 500 && inside > 2000, "routes {routes:?}, {jumps} jumps, {inside} times read inside steps");
 }

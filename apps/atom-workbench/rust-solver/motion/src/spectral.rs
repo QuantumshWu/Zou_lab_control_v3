@@ -128,17 +128,23 @@
 //!
 //! # The strides: the state without the decomposition
 //! The state can also be taken without the decomposition (`Picture::through` false): from stop to stop of the caller's
-//! (`Picture::advance`) by CF4 (Blanes & Moan 2006) of the same Ĥ₀ + uA + u²B, two exponentials on the vector to
-//! round-off (`linalg::exp_apply`). It is exact where nothing moves; with D it is of fourth order in the stride's width,
-//! which is the caller's nodes' spacing -- a few radians of Ĥ₀'s bound at most --, so its error is a share of D's own
-//! effect, not an error of Ĥ₀'s frequencies (`Picture::stridden`: the Magnus expansion's first terms a fourth-order
-//! method leaves out, by the matrices' norms). A step takes the strides
-//! - where they cost less than the decomposition's route as it was last counted on this picture's states (its
-//!   preparation and its states at its stops: `Picture::counted`), each with the states a jump's root is expected to
-//!   read -- a stride each, against a state at a time through the decomposition (step.rs `pictured`) --, and their own
-//!   error over the step is within the kick's share (`units::QUADRATURE`, the share its quadrature's nodes are laid
-//!   at, step.rs): a small cluster on a few nodes that seldom jumps -- the decomposition's QR sweeps are its n³ whatever
-//!   the nodes, the strides n² a node --;
+//! (`Picture::advance`) by CF4 (Blanes & Moan 2006) of the same Ĥ₀ + uA + u²B, two exponentials on the vector by
+//! Taylor's series (`linalg::taylor_series`, the old engine's way: its terms through the first whose bound is within the
+//! share, not to round-off). It is exact where nothing moves but for the series' truncation; with D it is of fourth
+//! order in the stride's width, which is the caller's nodes' spacing -- a few radians of Ĥ₀'s bound at most --, so its
+//! error is a share of D's own effect, not an error of Ĥ₀'s frequencies (`Picture::stridden`: the Magnus expansion's
+//! first terms a fourth-order method leaves out, by the matrices' norms). Each exponential's series is truncated where
+//! its remainder is within the kick's share (`units::QUADRATURE`, the share the step's quadrature lays its nodes at,
+//! step.rs) of what the state forgets over its width: the state keeps an error for 1/γ, γ the decay it is launched
+//! with -- a jump renews it --, so the exponentials' errors over that time add up to the share whatever the step, as
+//! the old engine's truncation per waiting time did (NUMERICAL_SHARE x target x dt/waiting); a state that forgets
+//! nothing is taken to round-off (`Picture::tolerance`). A step takes the strides
+//! - where they cost less than the decomposition's route as it was last counted on this picture for as many states
+//!   (its preparation and its states at its stops: `Picture::counted`), each with the states a jump's root is expected
+//!   to read -- a stride each, against a state at a time through the decomposition (step.rs `pictured`) --, and the
+//!   Magnus part of their error over the step is within the share: a small cluster -- a folded one, whose own
+//!   frequencies over a step are a few radians -- on a few nodes -- the decomposition's QR sweeps are its n³ whatever
+//!   the nodes, the strides a few n² a node --;
 //! - towards a defective generator: a state taken through the eigenvectors rounds by κ(R) u (1 + |τ| × the decay
 //!   rates' spread) relative to its norm (`linalg::Eigen`), and κ(R) grows without bound towards an exceptional point;
 //!   the strides' rounding does not know κ. The rule is the rounding's, not a tuned number: the decomposition where a
@@ -219,6 +225,9 @@ pub struct Picture {
     /// Whether D is anything at all, and the step's half h.
     moving: bool,
     half: f64,
+    /// The rate at which the state forgets its own errors (rad/µs): the decay it is launched with, at which a jump
+    /// renews it (`prepare`; the strides' share, `tolerance`).
+    forgets: f64,
     /// The fast pairs (n²) and their 1/ω, their following X₀, X₁, X₂ (3n², each column by column), whether any pair
     /// is followed at all, and 1 + X factored (LU with partial pivoting, n² and its pivots) at the time `factored`:
     /// a launched state's way into g -- the following leaves the step's start's, a launch elsewhere makes its own.
@@ -249,10 +258,10 @@ pub struct Picture {
     pub bandwidth: f64,
     /// The complex multiply-adds counted so far (`decide::Work` counts them four real ones each).
     pub work: f64,
-    /// The decomposition's route as it was last counted on this picture's states: its preparation and its price at the
-    /// stops of its quadrature, and its price of a state at a time (`prepare`); none before it is taken. What the
-    /// strides are weighed against.
-    counted: Option<[f64; 2]>,
+    /// The decomposition's route as it was last counted on this picture, per count of states: its preparation and its
+    /// price at the stops of its quadrature, and its price of a state at a time (`prepare`); none before it is taken.
+    /// What the strides are weighed against.
+    counted: Vec<Option<[f64; 2]>>,
 }
 
 impl Default for Picture {
@@ -282,6 +291,7 @@ impl Default for Picture {
             lanes: Vec::new(),
             moving: false,
             half: 0.0,
+            forgets: 0.0,
             fast: Vec::new(),
             inverses: Vec::new(),
             follow: Vec::new(),
@@ -300,7 +310,7 @@ impl Default for Picture {
             slopes: [0.0; 2],
             bandwidth: 0.0,
             work: 0.0,
-            counted: None,
+            counted: Vec::new(),
         }
     }
 }
@@ -339,7 +349,10 @@ impl Picture {
     /// The picture for n states.
     pub fn fit(&mut self, n: usize) {
         if self.n != n {
-            (self.n, self.counted) = (n, None);
+            self.n = n;
+            if self.counted.len() <= n {
+                self.counted.resize(n + 1, None);
+            }
             for m in [&mut self.base, &mut self.matrix, &mut self.slope].into_iter().chain(&mut self.ends) {
                 (m.rows, m.cols) = (n, n);
                 m.data.resize(n * n, C64::ZERO);
@@ -388,11 +401,12 @@ impl Picture {
     /// decomposition's route Ĥ₀'s decomposition, the fast pairs' following and the slow pairs' slopes (`follow`).
     /// `stops` gives the stops a step takes at a bandwidth of its forms (its quadrature's nodes, its middle and its
     /// end), `roots` the states a jump's root is expected to read besides (step.rs `pictured`): what each route is
-    /// priced at -- a stride per state, or a state at a time through the decomposition. `work` begins anew with what
-    /// this counted.
-    pub fn prepare(&mut self, half: f64, still: bool, stops: impl Fn(f64) -> usize, roots: f64) {
+    /// priced at -- a stride per state, or a state at a time through the decomposition; `forgets` the decay of the
+    /// state the step is launched with (rad/µs; the strides' share, `tolerance`). `work` begins anew with what this
+    /// counted.
+    pub fn prepare(&mut self, half: f64, still: bool, stops: impl Fn(f64) -> usize, roots: f64, forgets: f64) {
         let n = self.n;
-        (self.work, self.width, self.moving) = (0.0, f64::NAN, false);
+        (self.work, self.width, self.moving, self.forgets) = (0.0, f64::NAN, false, forgets.max(0.0));
         (self.half, self.followed, self.spread, self.factored) = (half, false, 0.0, f64::NAN);
         if !still {
             let [minus, plus] = &mut self.ends;
@@ -418,7 +432,7 @@ impl Picture {
         let bound = 2.0 * (rho + gamma);
         let strides = stops(bound);
         let strided = self.strided(strides) * (1.0 + roots / strides as f64);
-        let cheaper = matches!((self.stridden(strides) <= QUADRATURE, self.counted), (true, Some([made, state])) if strided < made + roots * state);
+        let cheaper = matches!((self.stridden(strides) <= QUADRATURE, self.counted[n]), (true, Some([made, state])) if strided < made + roots * state);
         let tau = 2.0 * half.abs();
         let exponential = linalg::Chebyshev::plan(rho * tau, gamma * tau).rounding(n);
         self.through = !cheaper && self.basis.decompose(&self.matrix) && {
@@ -461,7 +475,7 @@ impl Picture {
                 self.slopes = self.norms();
             }
             let state = (if self.followed { 2 * n * n } else { n * n } + 4 * n) as f64;
-            self.counted = Some([self.work + self.price(stops(self.bandwidth)), state]);
+            self.counted[n] = Some([self.work + self.price(stops(self.bandwidth)), state]);
         }
     }
 
@@ -728,23 +742,49 @@ impl Picture {
     }
 
     /// One stride of the frame's state without the decomposition, from the time u over the width w, either sign: CF4
-    /// of Ĥ₀ + uA + u²B (module documentation, # Towards a defective generator).
+    /// of Ĥ₀ + uA + u²B (module documentation, # The strides), each of its two exponentials on the vector by Taylor's
+    /// series within its tolerance (`tolerance`) -- the two planned at once, at the larger of their bounds, and their
+    /// scalar parts' factor taken once.
     fn stride(&mut self, state: &mut [C64], u: f64, w: f64) {
         let n = self.n;
-        // Ĥ at the stride's two Gauss nodes c = ½ ∓ √3/6, the weights ¼ ± √3/6.
+        let size = n * n;
+        // Ĥ at the stride's two Gauss nodes c = ½ ∓ √3/6, the weights ¼ ± √3/6: the two exponents' matrices.
         let r = 3.0_f64.sqrt() / 6.0;
         let (u1, u2) = (u + (0.5 - r) * w, u + (0.5 + r) * w);
-        for [w1, w2] in [[0.25 + r, 0.25 - r], [0.25 - r, 0.25 + r]] {
-            let (first, second) = if self.moving { (w1 * u1 + w2 * u2, w1 * u1 * u1 + w2 * u2 * u2) } else { (0.0, 0.0) };
-            for (((z, c), a), b) in self.matrix.data.iter_mut().zip(&self.base.data).zip(&self.ends[0].data).zip(&self.ends[1].data) {
-                *z = *c * (w1 + w2);
-                if self.moving {
-                    *z += *a * first + *b * second;
+        let (t, tolerance) = (C64::new(0.0, -w), self.tolerance(w));
+        let (matrices, _) = self.product.split_at_mut(2 * size);
+        let mut bounds = [(C64::ZERO, [0.0; 2]); 2];
+        for (([w1, w2], matrix), bound) in [[0.25 + r, 0.25 - r], [0.25 - r, 0.25 + r]].into_iter().zip(matrices.chunks_exact_mut(size)).zip(&mut bounds) {
+            if self.moving {
+                let (first, second) = (w1 * u1 + w2 * u2, w1 * u1 * u1 + w2 * u2 * u2);
+                for (((z, c), a), b) in matrix.iter_mut().zip(&self.base.data).zip(&self.ends[0].data).zip(&self.ends[1].data) {
+                    *z = *c * (w1 + w2) + *a * first + *b * second;
+                }
+            } else {
+                for (z, c) in matrix.iter_mut().zip(&self.base.data) {
+                    *z = *c * (w1 + w2);
                 }
             }
-            let plan = linalg::exp_apply(&mut self.matrix, C64::new(0.0, -w), state, &mut self.vectors);
-            self.work += ((3 + plan.parts * plan.terms) * n * n) as f64;
+            *bound = linalg::taylor_bound(matrix, n, t);
         }
+        let plan = linalg::Taylor::plan(bounds[0].1[0].max(bounds[1].1[0]), bounds[0].1[1].max(bounds[1].1[1]), tolerance, n);
+        for (matrix, (scalar, _)) in matrices.chunks_exact(size).zip(bounds) {
+            linalg::taylor_series(matrix, n, scalar, t, state, plan);
+        }
+        let phase = (t * (bounds[0].0 + bounds[1].0)).exp();
+        for x in state.iter_mut() {
+            *x *= phase;
+        }
+        self.work += 2.0 * ((4 * size) as f64 + plan.work(n));
+    }
+
+    /// The tolerance of one of a stride's two exponentials over the width w, relative to the state's norm (module
+    /// documentation, # The strides): the kick's share `QUADRATURE` of what the state forgets over it, the decay it is
+    /// launched with over w/2 -- over the time the state keeps an error, 1/decay, the exponentials add up to the share
+    /// whatever the step, as the old engine's truncation per waiting time did --; the unit round-off where the state
+    /// forgets nothing (no decay: a unitary flow keeps every error).
+    fn tolerance(&self, w: f64) -> f64 {
+        (QUADRATURE * self.forgets * 0.5 * w.abs()).max(UNIT_ROUNDOFF)
     }
 
     /// Launches the picture from the frame's state x at the time `from` of the step (from the middle; the step's
@@ -900,13 +940,15 @@ impl Picture {
         (2 + 4 * terms + 2 * (6 + plan.parts * plan.terms) + 4) as f64 * size + state
     }
 
-    /// The strides' price at `stops` stops: a stride per stop at Ĥ₀'s bounds over the stops' mean spacing.
+    /// The strides' price at `stops` stops: a stride per stop over the stops' mean spacing w, each exponential's series
+    /// (`linalg::Taylor`) at the bound of its exponent, half of Ĥ₀'s bounds and D's farthest over w, within its tolerance
+    /// (`tolerance`); and per exponential its matrix (three numbers an entry) and its bound's pass.
     fn strided(&self, stops: usize) -> f64 {
         let (n, h) = (self.n, self.half.abs());
         let w = 2.0 * h / stops as f64;
-        let moved = self.moved(h - w, w);
-        let plan = linalg::Chebyshev::plan(0.5 * self.bounds[0] * w + moved, 0.5 * self.bounds[1] * w + moved);
-        (stops * 2 * (3 + plan.parts * plan.terms) * n * n) as f64
+        let bound = 0.5 * (self.bounds[0] + self.bounds[1]) * w + self.moved(h - w, w);
+        let plan = linalg::Taylor::plan(bound, 0.5 * self.bounds[1] * w, self.tolerance(w), n);
+        stops as f64 * 2.0 * ((4 * n * n) as f64 + plan.work(n))
     }
 }
 
@@ -974,7 +1016,7 @@ pub(crate) mod tests {
         picture.fit(n);
         picture.base = base.clone();
         picture.ends = [-half, half].map(|u| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u)));
-        picture.prepare(half, !moving, |_| 2, 0.0);
+        picture.prepare(half, !moving, |_| 2, 0.0, 0.0);
         picture
     }
 
@@ -993,6 +1035,50 @@ pub(crate) mod tests {
             worst = worst.max(x.iter().zip(&exact).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max));
         }
         worst
+    }
+
+    /// The strides on a folded cluster's generator (module documentation, # The strides): five states, Ĥ₀ a random
+    /// Hermitian of PGC3D's size about a large common light shift (its traceless part's bound 0.33 rad/µs, the trap's
+    /// shift 50 rad/µs) with the Doppler frames' rates on its diagonal (±2.5 rad/µs) and the decay of a folded light
+    /// (0.01 rad/µs), and slopes of a light pattern crossed at its speed (A, B of 0.3 and 0.6 rad/µs per µs, µs²); a
+    /// random state, the strides' stops at a quadrature's spacing over steps of 0.5 and 1 µs, launched with the decay of
+    /// a folded light's ground state (`DECAY`). At every stop the state is the parabola's flow within the kick's share
+    /// `QUADRATURE` of its norm (the Magnus expansion's part, `stridden`) and of what it forgets over the time (the
+    /// exponentials' truncation, `Picture::tolerance`); the error is printed beside the share.
+    #[test]
+    fn a_folded_cluster_s_strides_are_its_flow_within_the_share() {
+        const DECAY: f64 = 0.3;
+        let n = 5;
+        let mut s = crate::random::Stream::new(41, crate::random::Purpose::Initial, 0, 0);
+        let mut hermitian = |size: f64| {
+            let m = Mat::from_fn(n, n, |_, _| C64::new(s.normal(), s.normal()));
+            let h = Mat::from_fn(n, n, |i, j| (m[(i, j)] + m[(j, i)].conj()) * 0.5);
+            let norm = h.data.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+            Mat::from_fn(n, n, |i, j| h[(i, j)] * (size / norm))
+        };
+        let (light, a, b) = (hermitian(0.33), hermitian(0.3), hermitian(0.6));
+        let base = Mat::from_fn(n, n, |i, j| light[(i, j)] + if i == j { C64::new(50.0 + 2.5 * (i as f64 - 2.0), -0.01) } else { C64::ZERO });
+        let start: Vec<C64> = (0..n).map(|k| C64::new(1.0 / (1.0 + k as f64), 0.3 * k as f64 - 0.5)).collect();
+        let norm = start.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+        for half in [0.25, 0.5] {
+            let mut picture = Picture::default();
+            picture.fit(n);
+            // The decomposition's route priced beyond the strides', so that they are taken where their Magnus part is
+            // within its share.
+            picture.counted[n] = Some([f64::MAX, 0.0]);
+            picture.base = base.clone();
+            picture.ends = [-half, half].map(|u| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u)));
+            let stops = |bandwidth: f64| ((bandwidth * 2.0 * half).ceil() as usize).max(2) + 2;
+            picture.prepare(half, false, stops, 0.0, DECAY);
+            assert!(!picture.through, "half {half}: the strides taken");
+            let count = stops(picture.bandwidth);
+            picture.launch(-half, &start);
+            let at: Vec<f64> = (1..=count).map(|k| -half + 2.0 * half * k as f64 / count as f64).collect();
+            let error = errors(&mut picture, &base, &a, &b, half, &start, &at, 20_000) / norm;
+            let share = QUADRATURE * (1.0 + DECAY * 2.0 * half);
+            eprintln!("half {half}: {count} stops, the state's largest error {error:.2e} of its norm (the share {share:.2e})");
+            assert!(error <= share, "half {half}: {error:e}");
+        }
     }
 
     /// Towards a defective generator the state leaves the decomposition (module documentation): a resonant two-level
@@ -1021,10 +1107,13 @@ pub(crate) mod tests {
                     picture.advance(if k == stops { half } else { -half + k as f64 * w }, &mut x);
                 }
                 let error = x.iter().zip(&exact).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max);
-                // What the slopes move between two stops at the step's end: (h‖A‖ + h²‖B‖) w, its square the second order.
+                // What the slopes move between two stops at the step's end: (h‖A‖ + h²‖B‖) w, its square the second order;
+                // and the strides' exponentials' share of the kick's, relative to the state's norm (`Picture::exponential`).
                 let moved = (half * 2.0 + half * half * 30.0) * 2.0_f64.sqrt() * w;
+                // Launched with no decay (`pictured`), the exponentials are taken to round-off (`Picture::tolerance`).
+                let (norm, share) = (start.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt(), 0.0);
                 eprintln!("{off} off the exceptional point, moving {moving}: the state's error {error:e} (the slopes move {moved:e} between stops)");
-                assert!(error < if moving { moved * moved } else { 1e-12 }, "{off} off the exceptional point, moving {moving}: {error:e}");
+                assert!(error < if moving { moved * moved } else { 1e-12 } + share * norm, "{off} off the exceptional point, moving {moving}: {error:e}");
             }
         }
     }

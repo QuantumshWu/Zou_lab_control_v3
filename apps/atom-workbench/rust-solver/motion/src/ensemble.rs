@@ -50,7 +50,11 @@
 //! K⁻¹∇V(r) with K the Hessian at c -- r − c itself in a harmonic well, the displacement from its own site in a standing
 //! wave whose sites are as stiff, no site to find. The draw is that map of an exact classical draw; nothing is drawn again.
 //!
-//! # The exact moments at t = 0
+//! # The exact moments
+//! The draws' second moments up to one integral: the tests' reference for the draws (`Ensemble::kinetic`, built for
+//! the tests alone -- the run's T at t = 0 is the draws' own estimate, solve.rs # Outputs and windows), and the nodes
+//! what a level leaves out is integrated on (`summed`, below).
+//!
 //! Before the map the momenta at each r are isotropic, so the map's ⟨κκᵀ⟩ = S² ⟨κ²⟩/3 with S = Σ_i s_i e_i e_iᵀ, and
 //! (ħ/m)⟨κ²⟩/3 = η k_BT, η = ∫ kept(5/2, y(r)) d³r / ∫ kept(3/2, y(r)) d³r the classical ensemble's kinetic temperature
 //! relative to T (K's mean is (3/2) kept(5/2)/kept(3/2) at each r). η by quadrature (`Ensemble::kinetic`), its nodes where
@@ -331,7 +335,8 @@ pub struct Start {
     pub kappa: V3,
 }
 
-/// A component's quadrature at t = 0 (`Ensemble::kinetic`): η and its difference between the last two levels.
+/// A component's quadrature of η (`Ensemble::kinetic`): η and its difference between the last two levels.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Quadrature {
     pub eta: f64,
@@ -353,6 +358,19 @@ pub struct Ensemble<'a> {
     hbar_over_mass: f64,
     /// The proposals that read deeper than their well's bottom (`deeper`).
     over: std::sync::atomic::AtomicU64,
+    /// The draws made, the potential's evaluations they read (one a proposal), and the quadratures' (`evaluations`).
+    drawn: std::sync::atomic::AtomicU64,
+    proposed: std::sync::atomic::AtomicU64,
+    integrated: std::sync::atomic::AtomicU64,
+}
+
+/// What an ensemble's draws and quadratures cost its model so far, in evaluations of the prepared potential
+/// (`Ensemble::evaluations`): per draw the proposals it read -- one at the least, where none was drawn yet --, and the
+/// quadratures' evaluations in all (`summed`) -- what a model's potential costs it beside its steps (solve.rs `Formula`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Evaluations {
+    pub per_draw: f64,
+    pub integrated: f64,
 }
 
 impl<'a> Ensemble<'a> {
@@ -388,7 +406,8 @@ impl<'a> Ensemble<'a> {
                 Ok(component)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        Ok(Ensemble { components, kt, hbar_over_mass, over: std::sync::atomic::AtomicU64::new(0) })
+        let zero = || std::sync::atomic::AtomicU64::new(0);
+        Ok(Ensemble { components, kt, hbar_over_mass, over: zero(), drawn: zero(), proposed: zero(), integrated: zero() })
     }
 
     /// The initial state of trajectory `index` of the run `seed`: its group the `GROUP` trajectories from index − index mod
@@ -409,8 +428,10 @@ impl<'a> Ensemble<'a> {
         let c = self.components.iter().position(|c| { let inside = pick < c.weight; pick -= c.weight; inside }).unwrap_or(self.components.len() - 1);
         let c = &self.components[c];
         let mut proposal = [deviates[1], deviates[2], deviates[3], deviates[4]];
+        self.drawn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (r, y, gradient) = loop {
             let r = c.propose(proposal[0], proposal[1], proposal[2], proposal[3]);
+            self.proposed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (v, gradient) = c.well.potential(r);
             let y = -v / self.kt;
             if y > c.ceiling + rounding(self.components.len()) * c.top {
@@ -428,9 +449,10 @@ impl<'a> Ensemble<'a> {
         Start { state: c.state, r, kappa }
     }
 
-    /// Each component's quadrature at t = 0 (module documentation, # The exact moments): every
+    /// Each component's quadrature of η (module documentation, # The exact moments: the draws' reference): every
     /// node count doubled until η's integrals at two levels agree within their sums' rounding, or the next level would take
     /// more than `most` evaluations of the potential (two levels at least).
+    #[cfg(test)]
     pub fn kinetic(&self, most: u64) -> Vec<Quadrature> {
         self.components
             .iter()
@@ -452,6 +474,7 @@ impl<'a> Ensemble<'a> {
             .collect()
     }
     /// ∫ kept(3/2, y) d³r and ∫ kept(5/2, y) d³r (at shift c), with n nodes per coordinate per beam, and the evaluations.
+    #[cfg(test)]
     fn integrals(&self, c: &Component, n: usize) -> ([f64; 2], usize) {
         self.summed(c, n, &|_, y, _| [kept(1.5, y, y, c.ceiling), kept(2.5, y, y, c.ceiling)])
     }
@@ -487,6 +510,7 @@ impl<'a> Ensemble<'a> {
             })
             .collect();
         // The rows summed in their order: the result does not depend on the threads.
+        self.integrated.fetch_add((n * n * n) as u64, std::sync::atomic::Ordering::Relaxed);
         (rows.iter().fold([0.; K], |s, x| std::array::from_fn(|i| s[i] + x[i])), n * n * n)
     }
 
@@ -555,7 +579,8 @@ impl<'a> Ensemble<'a> {
     }
 
     /// (ħ/m)⟨κ_a²⟩ per lab axis (rad/µs) of the ensemble with the components' η (`kinetic`): Σ_b p_b η_b k_BT (S_b²)_aa (module
-    /// documentation, # The exact moments); T_a(0) is it over k_B, n̄_a(0) it over ħω_a less ½.
+    /// documentation, # The exact moments): the draws' (ħ/m)⟨κ_a²⟩ in expectation.
+    #[cfg(test)]
     pub fn momentum(&self, kinetic: &[f64]) -> V3 {
         let mut out = [0.; 3];
         for (c, eta) in self.components.iter().zip(kinetic) {
@@ -566,6 +591,12 @@ impl<'a> Ensemble<'a> {
             }
         }
         out
+    }
+
+    /// The prepared potential's evaluations so far (`Evaluations`): per draw, and the quadratures'.
+    pub fn evaluations(&self) -> Evaluations {
+        let (drawn, proposed) = (self.drawn.load(std::sync::atomic::Ordering::Relaxed), self.proposed.load(std::sync::atomic::Ordering::Relaxed));
+        Evaluations { per_draw: if drawn > 0 { proposed as f64 / drawn as f64 } else { 1. }, integrated: self.integrated.load(std::sync::atomic::Ordering::Relaxed) as f64 }
     }
 
     /// The proposals so far that read deeper than their well's bottom (module documentation, # Its draw): none where the

@@ -689,7 +689,7 @@ impl Model {
         let Some(fourth) = &plan.fourth else { return f.iter().copied().collect() };
         let (n, size) = (fourth.n, fourth.n * fourth.n);
         let mut site = assemble::Held::<assemble::Site>::take();
-        self.pointed(plan, table, at.r, &mut site);
+        let table = self.pointed(plan, table, at.r, &mut site);
         self.quartic(plan, fourth, table, Some(at.r), &mut site, false);
         Model::quartic_read(|q| {
             let (partner, metric) = (&q.data[4 * size..5 * size], &q.data[8 * size..9 * size]);
@@ -821,6 +821,13 @@ pub struct Run<'a> {
 }
 
 impl<'a> Run<'a> {
+    /// A cluster's plan and its table's axes and nodes, described (the step's cost harness, step/tests.rs).
+    #[cfg(test)]
+    pub(crate) fn described(&self, cluster: usize) -> String {
+        let (plan, table) = &self.plans[cluster];
+        let grid = table.map_or("no table".to_string(), |t| format!("table axes {} nodes {} width {}", t.axes(), crate::table::Table::nodes(t.table.axes()), t.table.width()));
+        format!("{} | {grid}", plan.described())
+    }
     /// The run of a model with the exact elimination at every point.
     pub fn new(model: &'a Model, reference: [f64; GROUND]) -> Run<'a> {
         Run::with(model, None, reference)
@@ -943,5 +950,41 @@ impl crate::step::Dynamics for Run<'_> {
     }
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
         Run::readout(self, cluster, at, psi)
+    }
+}
+
+#[cfg(test)]
+impl Model {
+    /// One round of a test's closure (the solve keeps by the units' errors measured at its pilot's states, solve.rs, # The
+    /// model): this model's trap and reach at `temperature_uk` for the ground state `state` alone, and its folded units
+    /// whose error measured at that state at the trap's centre -- at rest, and at the reach's largest speed along each lab
+    /// axis -- is ½ or more on its states' populations or on T, or whose small parameter there is (`units::EXISTS`: no fold
+    /// of that error holds there, no series of that parameter converges), the counter-rotating drives, which are only ever
+    /// folded, left out.
+    pub(crate) fn failing_at(&self, state: usize, temperature_uk: f64) -> (Trap, Reach, Vec<Unit>) {
+        let reference: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
+        let trap = self.trap(&reference, &self.prepared()).unwrap();
+        let reach = self.reach(&trap, &reference, temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+        let cluster = self.membership[state];
+        let psi: Vec<C64> = self.clusters[cluster].states.iter().map(|&s| if s == state { C64::ONE } else { C64::ZERO }).collect();
+        let speed = reach.speed / self.hbar_over_mass;
+        let samples: Vec<Sample> = (0..4).map(|a| Sample { cluster, at: Point { r: trap.centre, kappa: std::array::from_fn(|b| if a == b + 1 { speed } else { 0.0 }), t: 0.0 }, psi: psi.clone() }).collect();
+        let units: Vec<Unit> = self.units().into_iter().filter(|u| !matches!(u, Unit::Bare { component, .. } if component.counter)).collect();
+        let errors = self.errors(&units, &samples);
+        let failing = units.iter().zip(&errors).filter(|(_, e)| e.iter().any(|e| !(e.population < units::EXISTS && e.temperature < units::EXISTS && e.parameter < units::EXISTS))).map(|(u, _)| u.clone()).collect();
+        (trap, reach, failing)
+    }
+
+    /// A test's closed model (`failing_at`, round after round from the units `kept`): the model, the units it keeps, its
+    /// trap and its reach.
+    pub(crate) fn closed_at(request: &Request, light: &Light, mut kept: Vec<Unit>, state: usize, temperature_uk: f64) -> (Model, Vec<Unit>, Trap, Reach) {
+        loop {
+            let model = Model::new(request, light, &kept).unwrap();
+            let (trap, reach, failing) = model.failing_at(state, temperature_uk);
+            if failing.is_empty() {
+                return (model, kept, trap, reach);
+            }
+            kept.extend(failing);
+        }
     }
 }

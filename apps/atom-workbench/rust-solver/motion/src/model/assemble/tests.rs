@@ -510,7 +510,7 @@ fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation
                 let (r, t, kappa, velocity, times) = drawn(&model, &mut stream);
                 let rho = hermitian(n, &mut stream);
                 let amplitudes = model.light.amplitudes(r);
-                let near = model.near_tabulated(table, &amplitudes, &sections);
+                let near = model.near_values(&plan, &amplitudes, &sections, Some(table));
                 let (ours, theirs) = (model.middle(&plan, r, t, Some(table)), model.middle_of(&plan, t, &amplitudes, Some(&near)));
                 assert_eq!(ours.work, theirs.work, "{name}, cluster {cluster}: the counted work");
                 let (path, other) = (ours.path(kappa, velocity), theirs.path(kappa, velocity));
@@ -544,7 +544,7 @@ fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation
                 coarse += error(&b, &a);
                 read += error(&exact, &a) + error(&exact, &b);
                 if let Some(finer) = &finer {
-                    let forms = model.near_tabulated(finer, &amplitudes, &sections);
+                    let forms = model.near_values(&plan, &amplitudes, &sections, Some(finer));
                     let (ours, theirs) = (model.middle(&plan, r, t, Some(finer)), model.middle_of(&plan, t, &amplitudes, Some(&forms)));
                     fine += error(&model.action(&sample, &theirs), &model.action(&sample, &ours));
                 }
@@ -575,19 +575,7 @@ fn the_decay_s_mismatch_on_a_scene() {
     let request = if name.ends_with(".json") { Request::from_native(&serde_json::from_str(&std::fs::read_to_string(&name).unwrap()).unwrap()).unwrap() } else { scene(&name) };
     let light = Light::new(&request);
     let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let p: [f64; GROUND] = std::array::from_fn(|b| if b == state { 1.0 } else { 0.0 });
-    let mut kept: Vec<Unit> = vec![];
-    let (model, trap, reach) = loop {
-        let model = Model::new(&request, &light, &kept).unwrap();
-        let trap = model.trap(&p, &model.prepared()).unwrap();
-        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
-        let units = model.units();
-        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-        if failing.is_empty() {
-            break (model, trap, reach);
-        }
-        kept.extend(failing);
-    };
+    let (model, _, trap, reach) = Model::closed_at(&request, &light, vec![], state, request.temperature_uk);
     let tables = model.tabulate(&reach, 1 << 20);
     let (lights, kt) = (model.running(), crate::units::KT_PER_UK * request.temperature_uk);
     let mut stream = Stream::new(3, Purpose::Initial, 0, 0);
@@ -608,7 +596,7 @@ fn the_decay_s_mismatch_on_a_scene() {
             let action = |middle: &Middle| model.action(&sample, middle);
             let far = action(&model.middle_of(&plan, 0.0, &amplitudes, None));
             let ours = action(&model.middle(&plan, r, 0.0, Some(table)));
-            let theirs = action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_tabulated(table, &amplitudes, &sections))));
+            let theirs = action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_values(&plan, &amplitudes, &sections, Some(table)))));
             let exact = action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1, &model.coherent_dressing()))));
             let (mismatch, whole) = (model.form_error(&sample, &far, &theirs, &ours, tables.thermal), model.form_error(&sample, &far, &exact, &ours, tables.thermal));
             let rate = |action: &[C64]| -2.0 * crate::linalg::inner(&sample.psi, action).im;
@@ -813,9 +801,11 @@ fn a_state_s_photons_are_their_entries_summed() {
                 let at = crate::model::Point { r, kappa, t };
                 let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
                 let amplitudes = model.light.amplitudes(r);
+                // The table's where it holds the point, else the exact elimination's (tabulate.rs, # Axes).
+                let table = table.filter(|t| model.near_tabulated(t, &amplitudes, &[(plan.near.jumping(), 1)]).is_some());
                 let near = match table {
                     _ if len == 0 => None,
-                    Some(table) => Some(model.near_tabulated(table, &amplitudes, &[(plan.near.jumping(), 1)])),
+                    Some(table) => model.near_tabulated(table, &amplitudes, &[(plan.near.jumping(), 1)]),
                     None => Some(model.near_exact(&plan, &amplitudes, 1, &model.coherent_dressing())),
                 };
                 near_met += near.is_some() as usize;
@@ -903,19 +893,7 @@ fn the_scattering_s_table_error_on_a_scene() {
     let request = if name.ends_with(".json") { Request::from_native(&serde_json::from_str(&std::fs::read_to_string(&name).unwrap()).unwrap()).unwrap() } else { scene(&name) };
     let light = Light::new(&request);
     let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let p: [f64; GROUND] = std::array::from_fn(|b| if b == state { 1.0 } else { 0.0 });
-    let mut kept: Vec<Unit> = vec![];
-    let (model, trap, reach) = loop {
-        let model = Model::new(&request, &light, &kept).unwrap();
-        let trap = model.trap(&p, &model.prepared()).unwrap();
-        let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
-        let units = model.units();
-        let failing: Vec<Unit> = units.iter().zip(model.gates(&units, &reach)).filter(|(_, g)| !g.exists()).map(|(u, _)| u.clone()).collect();
-        if failing.is_empty() {
-            break (model, trap, reach);
-        }
-        kept.extend(failing);
-    };
+    let (model, _, trap, reach) = Model::closed_at(&request, &light, vec![], state, request.temperature_uk);
     let tables = model.tabulate(&reach, 1 << 20);
     let (lights, kt) = (model.running(), crate::units::KT_PER_UK * request.temperature_uk);
     let mut stream = Stream::new(3, Purpose::Initial, 0, 0);
