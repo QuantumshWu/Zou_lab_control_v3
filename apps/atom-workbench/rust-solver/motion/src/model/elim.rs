@@ -261,6 +261,37 @@ struct Schur {
     n: usize,
     blocks: Vec<SchurBlock>,
     s: Vec<C64>,
+    /// What bounds its resolvent's norm (`distance`), made once with the form.
+    spectrum: Spectrum,
+}
+
+/// A matrix's spectrum as its resolvent's norm reads it (`Schur::distance`): a normal one's eigenvalues -- its Schur form
+/// diagonal to the rounding of its entries --, or the Gershgorin rectangle of its Schur form's Hermitian parts
+/// (S + S†)/2 and (S − S†)/2i, which holds its numerical range (re_min, re_max, im_min, im_max).
+#[derive(Clone, Debug)]
+enum Spectrum {
+    Normal(Vec<C64>),
+    Range([f64; 4]),
+}
+
+impl Spectrum {
+    fn of(n: usize, s: &[C64]) -> Spectrum {
+        let scale = s.iter().map(|x| x.abs()).fold(0.0, f64::max);
+        if (0..n).all(|i| (i + 1..n).all(|j| s[i * n + j].abs() <= rounding(n) * scale)) {
+            return Spectrum::Normal((0..n).map(|i| s[i * n + i]).collect());
+        }
+        let mut range = [f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY];
+        for i in 0..n {
+            let (mut re, mut im) = (0.0, 0.0);
+            for j in (0..n).filter(|&j| j != i) {
+                let (a, b) = (s[i * n + j], s[j * n + i].conj());
+                (re, im) = (re + 0.5 * (a + b).abs(), im + 0.5 * (a - b).abs());
+            }
+            let d = s[i * n + i];
+            range = [range[0].min(d.re - re), range[1].max(d.re + re), range[2].min(d.im - im), range[3].max(d.im + im)];
+        }
+        Spectrum::Range(range)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -309,7 +340,8 @@ impl Schur {
             blocks.push(SchurBlock { states, start: at, s: h, q });
             at = end;
         }
-        Some(Schur { n, blocks, s: dense })
+        let spectrum = Spectrum::of(n, &dense);
+        Some(Schur { n, blocks, s: dense, spectrum })
     }
     /// The Schur form of the adjoint from this one: A† = Q S† Q†, S† lower triangular, so with each block's columns of Q
     /// in reversed order it is upper triangular -- no decomposition.
@@ -331,7 +363,8 @@ impl Schur {
                 SchurBlock { states: b.states.clone(), start: b.start, s, q }
             })
             .collect();
-        Schur { n, blocks, s: dense }
+        let spectrum = Spectrum::of(n, &dense);
+        Schur { n, blocks, s: dense, spectrum }
     }
     /// Q† x (x with n rows), into the form's order.
     fn left_in(&self, x: &Mat) -> Mat {
@@ -410,29 +443,14 @@ impl Schur {
             }
         }
     }
-    /// 1/‖(z − A)⁻¹‖ (module documentation, # First order in the frequency offsets): where A is normal -- its Schur form
-    /// diagonal to the rounding of its entries -- exactly the distance of z from A's nearest eigenvalue; otherwise a bound
-    /// of it from below, z's distance from the Gershgorin rectangle of the Hermitian parts (S + S†)/2 and (S − S†)/2i,
-    /// which holds A's numerical range W(A) (‖(z − A)⁻¹‖ ≤ 1/dist(z, W(A))); zero where z lies in it.
+    /// 1/‖(z − A)⁻¹‖ (module documentation, # First order in the frequency offsets): where A is normal exactly the
+    /// distance of z from A's nearest eigenvalue; otherwise a bound of it from below, z's distance from the rectangle that
+    /// holds A's numerical range W(A) (‖(z − A)⁻¹‖ ≤ 1/dist(z, W(A))), zero where z lies in it (`Spectrum`).
     fn distance(&self, z: C64) -> f64 {
-        let n = self.n;
-        let scale = self.s.iter().map(|x| x.abs()).fold(0.0, f64::max);
-        let normal = (0..n).all(|i| (i + 1..n).all(|j| self.s[i * n + j].abs() <= rounding(n) * scale));
-        if normal {
-            return (0..n).map(|i| (z - self.s[i * n + i]).abs()).fold(f64::INFINITY, f64::min);
+        match &self.spectrum {
+            Spectrum::Normal(values) => values.iter().map(|k| (z - *k).abs()).fold(f64::INFINITY, f64::min),
+            Spectrum::Range([a, b, c, d]) => ((a - z.re).max(z.re - b).max(0.0)).hypot((c - z.im).max(z.im - d).max(0.0)),
         }
-        let mut range = [f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY];
-        for i in 0..n {
-            let (mut re, mut im) = (0.0, 0.0);
-            for j in (0..n).filter(|&j| j != i) {
-                let (a, b) = (self.s[i * n + j], self.s[j * n + i].conj());
-                (re, im) = (re + 0.5 * (a + b).abs(), im + 0.5 * (a - b).abs());
-            }
-            let d = self.s[i * n + i];
-            range = [range[0].min(d.re - re), range[1].max(d.re + re), range[2].min(d.im - im), range[3].max(d.im + im)];
-        }
-        let (x, y) = ((range[0] - z.re).max(z.re - range[1]).max(0.0), (range[2] - z.im).max(z.im - range[3]).max(0.0));
-        x.hypot(y)
     }
     /// (σ − A)⁻¹ v.
     fn resolvent(&self, sigma: C64, v: &[C64]) -> Vec<C64> {
