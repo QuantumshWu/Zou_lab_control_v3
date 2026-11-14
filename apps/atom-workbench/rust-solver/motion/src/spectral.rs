@@ -134,17 +134,33 @@
 //! (step/tests.rs, `a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the_generator`.)
 //!
 //! # The split
-//! An entry is followed where its following leaves no more than its hops would (`followed`):
-//!   [(2/3)(S_A/x)³ + 2 S_C³ min(x, 1)/x³]/(1 − r) + (4/15) S_B²/x ≤ x (S_C²/3 + S_A²/15 + S_B²/42),
-//! r = |X| at the step's ends by the polynomial's recursion on the sizes, (S_C + (S_A + 2S_B/x)/x)/x + (S_A + 2S_B/x)/x
-//! + S_B/x: the following's third order leads a series in r, its orders' sum the leading term over 1 − r, and where r ≥ 1
-//! there is no sum -- 1 + X is no near identity, D₂'s fast entries left out are not of a higher order -- and the entry is
-//! hopped. (Without it a tone of a coupling stronger than its combined frequency, |C| > |Ω|, was followed at a step of
-//! |Ω||h| beyond a few radians, where the rule's leading terms favour the following: the state through it grew by
-//! 10⁶ over a step of 10 µs and overflowed at 90 µs, tests, `the_survival_never_rises_whatever_the_generator_and_the_step`;
-//! a static group's slope is followed at r ≪ 1 at the scenes' steps, where nothing changed, tests,
-//! `the_static_group_alone_is_propagated_as_before_to_the_bit`.)
-//! The left side falls with x and the right side rises: the entries are split at one turn, and an entry that crosses it
+//! Each entry takes one of three routes (`followed`), by what each leaves at the step's end. With the leading remainders
+//!   F = (2/3)(S_A/x)³ + 2 S_C³ min(x, 1)/x³    (the following's third order),
+//!   L = (4/15) S_B²/x                            (the parabola's miss of the change's own light shift),
+//!   J = x (S_C²/3 + S_A²/15 + S_B²/42)           (the hops' second Magnus term),
+//! and r the following's size on the entry, |Y| at the step's ends of what is followed there -- a first-order class's
+//! change, a product's (# The second order by tones) own second order --, the larger of its two ways round: the
+//! following's orders a series in r, their sum F/(1 − r). (An entry nothing changes on has r = 0: its following is
+//! none, whatever the sizes the rule reads.)
+//! - **followed** where the following converges, r < 1, and leaves no more than the hops: F/(1 − r) + L ≤ J;
+//! - **hopped** where the hops leave less: J < F/(1 − r) + L with r < 1, or J < F + L with r ≥ 1 -- the hops hold
+//!   where the entry turns little between the nodes, which is where J is the less --, and an entry that does not turn
+//!   (x = 0);
+//! - **neither**, the step by the strides (# The strides), where the following has no sum, r ≥ 1 -- 1 + X is no near
+//!   identity and D₂'s fast entries left out are not of a higher order --, and the hops leave more than even its
+//!   leading term, J ≥ F + L: such an entry turns far between the nodes, and hopped it turns by its decay rates'
+//!   difference too, e^{|Im Ω| 2h} over the step, the hops' exponent without bound (a standing wave's two-level atom
+//!   at a step of 2 µs, its pair 27 rad/µs apart and Γ/2 in decay: the hops' Chebyshev series of 10¹⁶ parts). The
+//!   strides take the generator's exponentials at their nodes, bounded at any step: inaccurate, as every route is at
+//!   such a step, and the check reads it.
+//! Each choice is the route that leaves the least of those that exist: where r < 1 the two compared are both sums, and
+//! where r ≥ 1 the hops are compared with the following's least -- its leading term -- so that the hops are taken
+//! only where they leave less than any following could. (Without the convergence a tone of a coupling stronger than
+//! its combined frequency, |C| > |Ω|, was followed at a step of |Ω||h| beyond a few radians, where F < J: the state
+//! through it grew by 10⁶ over a step of 10 µs and overflowed at 90 µs, tests,
+//! `the_survival_never_rises_whatever_the_generator_and_the_step`; a static group's slope is followed at r ≪ 1 at the
+//! scenes' steps, where nothing changed, tests, `the_static_group_alone_is_propagated_as_before_to_the_bit`.)
+//! F and L fall with x and J rises: the entries are split at one turn, and an entry that crosses it
 //! with the step changes its treatment where the two leave the same. For a slope alone that turn is x⁴ = 10 S_A -- a
 //! radian between two nodes where the change over a half step is a tenth, 0.56 rad where it is a hundredth --, for a
 //! constant alone x³ = 6 S_C (x ≤ 1, S_C ≤ 1/6), x⁴ = 6 S_C beyond: no number. S_C, S_A and S_B are the sizes of all
@@ -246,7 +262,10 @@
 //!   rates' spread) relative to its norm (`linalg::Eigen`), and κ(R) grows without bound towards an exceptional point;
 //!   the strides' rounding does not know κ. The rule is the rounding's, not a tuned number: the decomposition where a
 //!   state through it rounds no more than through the exponential of Ĥ₀ over the step (`linalg::Chebyshev::rounding`),
-//!   the strides otherwise.
+//!   the strides otherwise;
+//! - where the split takes an entry by no route of the decomposition (# The split: its following has no sum and its
+//!   hops leave more than the following would): a step far too long for the change it holds, which the strides take
+//!   bounded -- inaccurate, as any route is there; the check reads it.
 //! Without the decomposition the forms' bandwidth is its bound 2(ρ + γ), a tone's members mixing the states'
 //! frequencies by twice its beat besides, and the strides' nodes are laid at it.
 
@@ -395,6 +414,8 @@ pub struct Picture {
     /// Ĥ₀'s decomposition of its traceless part, and whether the state goes through it.
     basis: linalg::Eigen,
     through: bool,
+    /// Whether the split took every entry by a route of the decomposition (`followed`): the step by the strides where not.
+    routed: bool,
     /// Ĥ₀'s eigenvalues, the scalar part with them.
     lambda: Vec<C64>,
     /// The classes (module documentation, # Tones): the static group; each exact tone's two members, ⁺ and then ⁻; the
@@ -475,6 +496,7 @@ impl Default for Picture {
             matrix: none(),
             basis: linalg::Eigen::default(),
             through: false,
+            routed: true,
             lambda: Vec::new(),
             classes: vec![Class::default()],
             combined: vec![0],
@@ -512,19 +534,27 @@ impl Default for Picture {
     }
 }
 
-/// Whether a term that turns x = |Ω| |h| between two of the step's nodes is followed (module documentation, # The
-/// split), the changes over a half step being of the sizes `slope` = S_A, `curvature` = S_B and `constant` = S_C: where
-/// what its following leaves, (2/3)(S_A/x)³ + 2 S_C³ min(x, 1)/x³ -- the leading term of the following's orders, a
-/// series in its size r, so over 1 − r: none where r ≥ 1, the following's 1 + X no near identity and its series no
-/// sum -- and (4/15) S_B²/x, is no more than what its hops would, x (S_C²/3 + S_A²/15 + S_B²/42) -- the two times x³;
-/// a term that does not turn is hopped. r is the following's size at the step's ends, |Y₀| + |h Y₁| + |h² Y₂| by the
-/// polynomial's recursion (`following`) on the sizes: S_B/x, (S_A + 2 S_B/x)/x, (S_C + (S_A + 2 S_B/x)/x)/x.
-fn followed(x: f64, [slope, curvature, constant]: [f64; 3]) -> bool {
+/// How a term that turns x = |Ω| |h| between two of the step's nodes is taken (module documentation, # The split), the
+/// changes over a half step being of the sizes `slope` = S_A, `curvature` = S_B and `constant` = S_C: followed (true)
+/// where what its following leaves, (2/3)(S_A/x)³ + 2 S_C³ min(x, 1)/x³ -- the leading term of the following's orders,
+/// a series in its size r, so over 1 − r -- and (4/15) S_B²/x, is no more than what its hops would,
+/// x (S_C²/3 + S_A²/15 + S_B²/42) -- the two times x³ --, hopped (false) where it is more; a term that does not turn is
+/// hopped. Where r ≥ 1 the following's series has no sum -- 1 + X no near identity --: the term is hopped where the
+/// hops leave less than the following's leading term would, and taken by no route of the decomposition (None) where
+/// they leave more -- the hops' own series is no better there: a pair that turns far between two nodes, hopped, turns
+/// by its decay rates' difference too, e^{|Im Ω| 2h} over the step, its exponent without bound (`Picture::prepare`
+/// takes the step by the strides then). r is the following's size on the entry, |Y| at the step's ends (`flag`).
+fn followed(x: f64, [slope, curvature, constant]: [f64; 3], r: f64) -> Option<bool> {
+    if !(x > 0.0) {
+        return Some(false);
+    }
     let (first, second, zeroth) = (slope * slope, curvature * curvature, constant * constant);
-    let two = curvature / x;
-    let one = (slope + 2.0 * two) / x;
-    let r = two + one + (constant + one) / x;
-    x > 0.0 && r < 1.0 && (2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * x.min(1.0)) / (1.0 - r) + 4.0 / 15.0 * second * (x * x) <= x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0)
+    let (leading, light, hops) = (2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * x.min(1.0), 4.0 / 15.0 * second * (x * x), x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0));
+    if r < 1.0 {
+        Some(leading / (1.0 - r) + light <= hops)
+    } else {
+        (leading + light > hops).then_some(false)
+    }
 }
 
 /// The terms of ∫₀¹ t^p e^{zt} dt's series Σ_j z^j/(j!(j + p + 1)) at |z| ≤ x for an integral of the size `size` at
@@ -604,8 +634,18 @@ fn take(class: &mut Class, k: usize, t: usize, omega: C64, fast: bool, size: usi
 
 /// The entries of the classes in `range` that are hopped at all, each with its partner's -- the entry (a, b) at
 /// Ω = λ_a − λ_b + ν and its partner's (b, a) at −Ω (module documentation, # Tones) --, taken (`take`) by the split at
-/// their turn |Ω| |h| and the changes' `sizes` (`followed`); the largest |Ω| hopped into `spread`.
-fn flag(classes: &mut [Class], range: std::ops::Range<usize>, lambda: &[C64], sizes: [f64; 3], h: f64, spread: &mut f64) {
+/// their turn |Ω| |h| and the changes' `sizes` (`followed`), each the following's convergence on its own -- r, the
+/// larger of its two ways' |Y| at the step's ends, Y its following of the class's `envelope` on the entry (C, A, B:
+/// a first-order class's change, a product's second order through the nodes) --; the largest |Ω| hopped into
+/// `spread`. False where an entry is taken by no route of the decomposition (the rest is flagged as it would be, and
+/// not used).
+fn flag(classes: &mut [Class], range: std::ops::Range<usize>, lambda: &[C64], sizes: [f64; 3], envelope: &dyn Fn(&Class, usize) -> [C64; 3], h: f64, spread: &mut f64) -> bool {
+    let size = |class: &Class, k: usize, omega: C64| {
+        let [c, a, b] = envelope(class, k);
+        let y = following(omega.recip(), c, a, b);
+        [-h, h].into_iter().map(|u| (y[0] + y[1] * u + y[2] * (u * u)).abs()).fold(0.0, f64::max)
+    };
+    let mut routed = true;
     let n = lambda.len();
     for c in range {
         let (beat, partner) = (classes[c].beat, classes[c].partner);
@@ -617,7 +657,11 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, lambda: &[C64], si
                 let between = lambda[row] - lambda[column];
                 let omega = if c == 0 { between } else { C64::new(between.re + beat, between.im) };
                 let turn = omega.abs();
-                let fast = followed(turn * h.abs(), sizes);
+                let (k, t) = (row * n + column, column * n + row);
+                let r = if turn > 0.0 { size(&classes[c], k, omega).max(size(&classes[partner], t, -omega)) } else { 0.0 };
+                let split = followed(turn * h.abs(), sizes, r);
+                routed &= split.is_some();
+                let fast = split.unwrap_or(false);
                 if !fast {
                     *spread = spread.max(turn);
                 }
@@ -627,6 +671,7 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, lambda: &[C64], si
             }
         }
     }
+    routed
 }
 
 /// A hop's integral ∫₀ʷ e^{iΩt} E(u + t) dt of one entry over the width w from the time u (module documentation), the
@@ -811,7 +856,7 @@ impl Picture {
         assert!(!still || self.beats.is_empty(), "exact tones on a still path");
         let n = self.n;
         (self.work, self.width, self.moving, self.forgets) = (0.0, f64::NAN, false, forgets.max(0.0));
-        (self.half, self.followed, self.spread, self.factored) = (half, false, 0.0, f64::NAN);
+        (self.half, self.followed, self.spread, self.factored, self.routed) = (half, false, 0.0, f64::NAN, true);
         self.classify();
         if !still {
             let [minus, plus] = &mut self.ends;
@@ -898,9 +943,15 @@ impl Picture {
             }
             false => self.bandwidth = bound,
         }
+        if self.through && self.moving {
+            self.follow();
+            // An entry no route of the decomposition takes (`followed`): the step by the strides, at their bandwidth.
+            if !self.routed {
+                (self.through, self.bandwidth) = (false, bound);
+            }
+        }
         if self.through {
             if self.moving {
-                self.follow();
                 self.slopes = self.hopping();
                 // A followed class moves the state's frequencies by its beat: the forms' bandwidth with the beats' spread;
                 // and a tone's forms are summed at its beat (step.rs `Sums`): with its beat besides.
@@ -1008,7 +1059,10 @@ impl Picture {
         let size_of = |sum: f64| (0.5 * sum).sqrt();
         let sizes = [size_of(sums[1]) * (h * h), size_of(sums[2]) * (h * h * h).abs(), size_of(sums[0]) * h.abs()];
         let mut spread = self.spread;
-        flag(&mut classes, 0..order, &self.lambda, sizes, h, &mut spread);
+        if !flag(&mut classes, 0..order, &self.lambda, sizes, &|class, k| [0, 1, 2].map(|j| class.change[j][k]), h, &mut spread) {
+            self.routed = false;
+            return self.finish(classes, spread);
+        }
         // Per entry the sizes' squares and the following: one and three of the static group's, three and four of a
         // member's.
         self.work += ((4 + 7 * (order - 1)) * size) as f64;
@@ -1097,7 +1151,17 @@ impl Picture {
         // F, each class's fast part of its second order through the three nodes, followed -- a product's entries taken
         // first at its own combined frequency, its following none before.
         let all = classes.len();
-        flag(&mut classes, order..all, &self.lambda, sizes, h, &mut spread);
+        // A product's envelope on an entry: its second order's constant, slope and curvature through the nodes.
+        let product = |class: &Class, k: usize| {
+            let place = laid(k / n, k % n, n);
+            let (minus, plus) = (entry(&class.second, place), entry(&class.second, block + place));
+            let middle = if tones > 0 { entry(&class.second, 2 * block + place) } else { C64::ZERO };
+            [middle, (plus - minus) * first, (plus + minus - middle * 2.0) * second]
+        };
+        if !flag(&mut classes, order..all, &self.lambda, sizes, &product, h, &mut spread) {
+            self.routed = false;
+            return self.finish(classes, spread);
+        }
         for class in classes.iter_mut().filter(|class| class.hops) {
             for row in 0..n {
                 for column in 0..n {
@@ -2015,7 +2079,16 @@ pub(crate) mod tests {
         let half = 1.0;
         let starts = [[C64::ONE, C64::ZERO], [C64::real(0.5_f64.sqrt()); 2], [C64::real(0.6), C64::new(0.0, 0.8)]];
         let own = [parts[0] * size, parts[1] * size];
-        let beside = |fast: bool| (0..=40).map(|k| 10_f64.powf(-3.0 + k as f64 / 8.0)).find(|other| followed(x, [own[0].hypot(*other), own[1], 0.0]) == fast);
+        // The following's size on a pair of the turn x between two nodes (half = 1) and the change C + uA + u²B (`flag`).
+        let across = |x: f64, a: C64, b: C64| {
+            let y = super::following(C64::real(x).recip(), C64::ZERO, a, b);
+            [-1.0, 1.0].into_iter().map(|u| (y[0] + y[1] * u + y[2] * (u * u)).abs()).fold(0.0, f64::max)
+        };
+        // A second pair's slope that takes the first to a route, and the second pair (3 rad between two nodes) to one.
+        let beside = |fast: bool| (0..=40).map(|k| 10_f64.powf(-3.0 + k as f64 / 8.0)).find(|other| {
+            let sizes = [own[0].hypot(*other), own[1], 0.0];
+            followed(x, sizes, across(x, C64::cis(0.7) * own[0], C64::cis(-0.4) * own[1])) == Some(fast) && followed(3.0, sizes, across(3.0, C64::real(*other), C64::ZERO)).is_some()
+        });
         let mut found = [None; 3];
         for (treatment, wanted) in [Some(false), Some(true), None].into_iter().enumerate() {
             let (n, other) = match wanted.map(beside) {
