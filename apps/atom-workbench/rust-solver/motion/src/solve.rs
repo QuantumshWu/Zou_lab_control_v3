@@ -590,8 +590,7 @@ use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::V3;
 use crate::model::optical::Unmade;
-use crate::model::units::destined;
-use crate::model::tabulate::{Key, Tables};
+use crate::model::tabulate::{Coordinate, Tables};
 use crate::model::{Envelope, Lights, Model, Priced, Run, Sample, Trap, Unit, UnitError, GROUND};
 use crate::request::STATES;
 use crate::step::{stumpff, Carry, Dynamics, Price, Refused, Scratch, Segment, Trajectory};
@@ -638,8 +637,6 @@ fn book_outside(ledger: &mut Ledger, labels: &[String], outside: &[Vec<[f64; 2]>
         }
     }
 }
-/// What the engine did with a folded unit it did not read (`booked`): its gate's bound over the whole space at the
-/// speeds of the states read is its error.
 /// What the engine did with a near table's error (SPEC §5.4): refined over the reach when it was built, and read
 /// against the elimination itself at the pilot's states.
 const TABLE_MEASURED: &str = "在原子的活动范围上加密的插值表，误差在先导轨迹的状态上与直接计算对照实测";
@@ -1549,49 +1546,31 @@ fn classical(temperature: f64, frequency: f64) -> bool {
 }
 
 /// A state's model error as the run books it (`Measured::means`, `apart`): on the populations (absolute) and on T
-/// (relative) what its units book there, of which the part a flow's rate error moves to its far side
-/// (`UnitError::moved`, `into`; model/units.rs, # A rate's error on the populations) is the source side's as the
-/// state sees it, and is taken against the time's populations (model/units.rs `destined`).
+/// (relative) what its units book there.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Booking {
     error: [f64; 2],
-    moved: f64,
-    into: u32,
 }
 impl Booking {
-    const NONE: Booking = Booking { error: [0.; 2], moved: 0., into: 0 };
+    const NONE: Booking = Booking { error: [0.; 2] };
 
     /// A unit's error at a state. One without bound or that is no number -- a fold read where it does not exist: a
     /// coupling across a distance of nothing, a drive at a state far outside its validity, the runaway's (# The reach's
     /// atoms) -- is the state's whole, as an unresolved atom is booked: every row of the atom (a probability's range) and
-    /// its whole part of T, none of it a flow's.
+    /// its whole part of T.
     fn of(e: &UnitError) -> Booking {
-        if [e.population, e.temperature, e.moved].iter().any(|x| !x.is_finite()) {
-            return Booking { error: [1.; 2], moved: 0., into: 0 };
+        if [e.population, e.temperature].iter().any(|x| !x.is_finite()) {
+            return Booking { error: [1.; 2] };
         }
-        Booking { error: [e.population, e.temperature], moved: e.moved, into: e.into }
+        Booking { error: [e.population, e.temperature] }
     }
 
     /// The error of a lost atom's fate (module documentation, # The model): a unit's error along its path, of which the
     /// run holds two states -- at t = 0 (`start`) and at its loss (`end`) --, their mean: the path's mean by the
-    /// trapezoid on those two. Whole, none of it a flow's: what a flow moves between ground states is the held atoms'
-    /// (`at`), and an atom lost errs by its fate.
+    /// trapezoid on those two: an atom lost errs by its fate.
     fn path(start: &Booking, end: &Booking) -> Booking {
-        Booking { error: std::array::from_fn(|i| 0.5 * (start.error[i] + end.error[i])), moved: 0., into: 0 }
+        Booking { error: std::array::from_fn(|i| 0.5 * (start.error[i] + end.error[i])) }
     }
-
-    /// What is booked at a time of the held populations `p` (estimate.rs `Estimate::populations`).
-    fn at(&self, p: &[f64; STATES]) -> [f64; 2] {
-        let less = self.moved * (1. - destined(self.into, p));
-        [self.error[0] - less, self.error[1] - less]
-    }
-}
-
-/// How a folded unit's error is booked: read at the states, its place among the units read (every unit is: ELIMINATION.md
-/// §6, measured where the atoms went).
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Booked {
-    Read(usize),
 }
 
 /// The states the model is read at and the errors there of the units read of `units` (SPEC §5.2; module documentation,
@@ -1606,9 +1585,7 @@ enum Booked {
 /// the same step: the scout's inside the pilot -- keeps the errors read there, where it read every unit read here: a
 /// unit's error is a function of the state.
 ///
-/// Which units are read (`booked`) is decided on the states' own bounds: each unit's (model/units.rs `Model::bounds`)
-/// at the largest speed of the states read -- every state's speed is within it, so a bound holds at each, as an atom's
-/// that heated past the reach's speeds too.
+/// Every unit is read (ELIMINATION.md §6: the errors are measured where the atoms went, no bound over the whole space).
 ///
 /// The errors are one table (`Measured::errors`): the rows one after another, a row the units' read errors on the
 /// populations and on T as each books them there (`Booking`), each row written on the pool where it is read. One block
@@ -1617,9 +1594,9 @@ enum Booked {
 struct Sampled {
     /// Each row's trajectory, its time's bits (`PATH` for a lost atom's path) and its step.
     of: Vec<(u64, u64, f64)>,
-    /// How each unit is booked (`booked`), in the units' order; and the transitions to the levels outside the model read
-    /// beside them, after the units in every row (model/elim.rs `Model::readings`: no unit, nothing keeps them).
-    booked: Vec<Booked>,
+    /// The units read, and the transitions to the levels outside the model read beside them, after the units in every
+    /// row (model/elim.rs `Model::readings`: no unit, nothing keeps them).
+    units: usize,
     outside: usize,
     errors: Vec<Booking>,
     /// Each read's analysis time (its place among them), its group, its row, and whether it reads a lost atom's fate.
@@ -1631,19 +1608,15 @@ struct Sampled {
 impl Sampled {
     /// The errors of the model's folded units as the decisions read them (`Measured`).
     fn measured(&self) -> Measured<'_> {
-        Measured { errors: &self.errors, output: &self.at, group: &self.from, row: &self.row, lost: &self.lost, booked: &self.booked, outside: self.outside }
+        Measured { errors: &self.errors, output: &self.at, group: &self.from, row: &self.row, lost: &self.lost, units: self.units, outside: self.outside }
     }
 
     /// A row's length: the units read and the transitions outside the model.
     fn width(&self) -> usize {
-        read_units(&self.booked) + self.outside
+        self.units + self.outside
     }
 }
 
-/// The units read among those booked so (`booked`).
-fn read_units(booked: &[Booked]) -> usize {
-    booked.iter().filter(|b| matches!(b, Booked::Read(_))).count()
-}
 /// The time a lost atom's path's row stands at (`Sampled::of`): none of the run's.
 const PATH: u64 = u64::MAX;
 fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Tables, parts: &[&Part], known: Option<Sampled>) -> Sampled {
@@ -1669,19 +1642,15 @@ fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Table
             }
         }
     }
-    // Every unit is read at the states (ELIMINATION.md §6: the errors are measured where the atoms went, no bound over
-    // the whole space).
-    let booked: Vec<Booked> = (0..units.len()).map(Booked::Read).collect();
-    let reading: Vec<Unit> = units.iter().zip(&booked).filter(|of| matches!(of.1, Booked::Read(_))).map(|of| of.0.clone()).collect();
-    // The place in a row of `known` of each unit read here, where it read them all.
-    let places: Option<Vec<usize>> = known.as_ref().and_then(|k| booked.iter().zip(&k.booked).filter(|of| matches!(of.0, Booked::Read(_))).map(|of| { let Booked::Read(q) = *of.1; Some(q) }).collect());
+    // The place in a row of `known` of each unit read here: the same unit's.
+    let places: Option<Vec<usize>> = known.as_ref().map(|k| (0..units.len().min(k.units)).collect());
     let key = |index: u64, at: u64, tau: f64| (index, at, tau.to_bits());
     let read: HashMap<(u64, u64, u64), usize> = known.iter().filter(|_| places.is_some()).flat_map(|k| k.of.iter().enumerate().map(|(j, &(index, at, tau))| (key(index, at, tau), j))).collect();
     let outside = model.outside_count();
-    let width = reading.len() + outside;
+    let width = units.len() + outside;
     let mut errors = vec![Booking::NONE; rows.len() * width];
     let errors_at = |state: &State| {
-        let (units, beyond) = model.readings(&reading, &state.sample, Some(tables));
+        let (units, beyond) = model.readings(units, &state.sample, Some(tables));
         units.iter().chain(&beyond).map(Booking::of).collect::<Vec<_>>()
     };
     // A row (the table is empty where nothing is read).
@@ -1696,7 +1665,7 @@ fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Table
             Some(last) => out.iter_mut().zip(errors_at(state)).zip(errors_at(last)).for_each(|((out, a), b)| *out = Booking::path(&a, &b)),
         },
     });
-    Sampled { of: rows.iter().map(|&(index, time, tau, _, _)| (index, time, tau)).collect(), booked, outside, errors, at, from, row, lost }
+    Sampled { of: rows.iter().map(|&(index, time, tau, _, _)| (index, time, tau)).collect(), units: units.len(), outside, errors, at, from, row, lost }
 }
 
 /// Whose reads a keep is judged on (`keep`): the scout's few, the pilot's, the product's statistics beside the pilot's
@@ -2111,7 +2080,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     {
         // The ledger's items: each folded unit's error on what is shown and on T (its largest over the analysis times,
         // weighed by the pilot's held share as the totals are; a time where the pilot holds no atom weighs nothing: its
-        // units' errors are their bounds, `Measured::means`) with how it was booked (`booked`), and the unsampled share.
+        // units' errors are their bounds, `Measured::means`), and the unsampled share.
         let held: Vec<f64> = estimates.iter().map(|e| 1. - e.loss).collect();
         let mut largest = vec![0.0_f64; units.len()];
         for k in (1..n).filter(|&k| held[k] > 0.) {
@@ -2119,8 +2088,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
                 *most = most.max(m[0].max(held[k] * m[1]));
             }
         }
-        for ((unit, most), how) in units.iter().zip(largest).zip(measured.booked) {
-            let Booked::Read(_) = how;
+        for (unit, most) in units.iter().zip(largest) {
             context.ledger.item(&model.label(unit), most, FOLD_MEASURED);
         }
         let labels: Vec<String> = (0..measured.outside).map(|t| model.outside_label(t)).collect();
@@ -3486,8 +3454,7 @@ fn weighing(estimates: &[Estimate], fixed: &Fixed, step: Bound, means: &[Vec<[f6
 
 /// The doubt the reads of a few groups leave on the model's error per time (`keep`), on what is shown and on T: the
 /// model's error as every group but one gives it -- the units' as `measured` at their states and what the reach leaves
-/// out, `unsampled` (`model_error`), with the estimates of the others (their populations a state's booking is taken
-/// at, `Booking::at`) -- whose jackknife over the groups is the interval the reads leave on the error, at the family of
+/// out, `unsampled` (`model_error`), with the estimates of the others -- whose jackknife over the groups is the interval the reads leave on the error, at the family of
 /// the times' two reads (`interval`). Its near end is the error less it (`clear`): what the reads leave no doubt of,
 /// as a rung is left only on that (# The step). Its far end is the error and it (`raised`): what the reads leave no
 /// doubt is not exceeded -- of the error a set of units leaves, the set's errors taken out of every group's
@@ -3829,15 +3796,14 @@ fn weighed(h: f64, error: f64) -> f64 {
 
 /// What the pilot measured of the model's units (SPEC §5.2): the errors of the folded units read at the states
 /// (`Sampled`: the rows one after another, a row the read units' errors on the populations and on T in their order),
-/// each read's time, group and row, whether it reads a lost atom's fate, and how each folded unit is booked
-/// (`booked`).
+/// each read's time, group and row, whether it reads a lost atom's fate, and the number of units read.
 struct Measured<'a> {
     errors: &'a [Booking],
     output: &'a [usize],
     group: &'a [usize],
     row: &'a [usize],
     lost: &'a [bool],
-    booked: &'a [Booked],
+    units: usize,
     /// The transitions to the levels outside the model read after the units in every row (`Sampled`).
     outside: usize,
 }
@@ -3851,26 +3817,20 @@ impl Measured<'_> {
     /// the error is its bound there, 1 on what is shown and none on T (the run's atoms there are at most the share the
     /// pilot left unseen, and T has no account without a pilot's T: its look fits no number of trajectories and is not
     /// chased).
-    /// A held state's booking is taken at the populations `estimates` give there (`Booking::at`: those of the groups the
-    /// mean is over), and so is the share L. A unit booked at its bound (`booked`) errs by it at every read, held or
-    /// lost, on what is shown and on T: it is booked as a read one whose every state reads its bound. The times are
-    /// made on the pool, each by itself: a time's sums take its reads in their order.
+    /// The share L is the one `estimates` give there (those of the groups the mean is over). The times are made on the
+    /// pool, each by itself: a time's sums take its reads in their order.
     fn means(&self, outputs: usize, left: Option<usize>, estimates: &[Estimate]) -> Vec<Vec<[f64; 2]>> {
-        self.means_of(outputs, left, estimates, &(0..self.booked.len()).collect::<Vec<_>>())
+        self.means_of(outputs, left, estimates, &(0..self.units).collect::<Vec<_>>())
     }
 
     /// Per time the folded units' combined error (`means`): at each read, the state's own error -- the model with every
     /// unit folded against the model with all of them kept, there: every folded unit's error at the state together, each
     /// booked as `means` books it --, and their means. The units' errors at a state are its fold's parts, which add up to
     /// the state's (model/units.rs, # The errors: their shares of the state's rates and shifts add up to one), not signed
-    /// differences; so the combined error is the units' means added, read in one pass -- the bounded units' bounds
-    /// (`booked`) at every read beside the read ones'.
+    /// differences; so the combined error is the units' means added, read in one pass.
     fn combined(&self, outputs: usize, left: Option<usize>, estimates: &[Estimate]) -> Vec<[f64; 2]> {
-        self.reduced(outputs, left, estimates, 1, &|row, p, lost, out| {
-            out[0] = row.iter().fold([0.; 2], |a, e| {
-                let e = if lost { e.error } else { e.at(p) };
-                [a[0] + e[0], a[1] + e[1]]
-            });
+        self.reduced(outputs, left, estimates, 1, &|row, out| {
+            out[0] = row.iter().fold([0.; 2], |a, e| [a[0] + e.error[0], a[1] + e.error[1]]);
         })
         .into_iter()
         .map(|o| o[0])
@@ -3880,31 +3840,27 @@ impl Measured<'_> {
     /// Per time the errors of the transitions to the levels outside the model (`Sampled`), as `means` takes a unit's:
     /// beside the units in every row, in the model's error (`combined` adds the whole row), and no keep's to take away.
     fn outside_means(&self, outputs: usize, estimates: &[Estimate]) -> Vec<Vec<[f64; 2]>> {
-        let units = read_units(self.booked);
-        self.reduced(outputs, None, estimates, self.outside, &|row, p, lost, out| {
+        let units = self.units;
+        self.reduced(outputs, None, estimates, self.outside, &|row, out| {
             for (i, out) in out.iter_mut().enumerate() {
-                *out = if lost { row[units + i].error } else { row[units + i].at(p) };
+                *out = row[units + i].error;
             }
         })
     }
 
     /// `means` of the units `units` alone, in their order.
     fn means_of(&self, outputs: usize, left: Option<usize>, estimates: &[Estimate], units: &[usize]) -> Vec<Vec<[f64; 2]>> {
-        self.reduced(outputs, left, estimates, units.len(), &|row, p, lost, out| {
+        self.reduced(outputs, left, estimates, units.len(), &|row, out| {
             for (out, &u) in out.iter_mut().zip(units) {
-                *out = match self.booked[u] {
-                    Booked::Read(place) if lost => row[place].error,
-                    Booked::Read(place) => row[place].at(p),
-                };
+                *out = row[u].error;
             }
         })
     }
 
-    /// Per time `n` errors (`means`): each read gives them (`each`: its row of the read units, the time's held
-    /// populations, whether it reads a lost atom's fate, into its `n` pairs), and the held reads' means and the lost
-    /// reads' make them, by the held share there.
-    fn reduced(&self, outputs: usize, left: Option<usize>, estimates: &[Estimate], n: usize, each: &(dyn Fn(&[Booking], &[f64; STATES], bool, &mut [[f64; 2]]) + Sync)) -> Vec<Vec<[f64; 2]>> {
-        let width = read_units(self.booked) + self.outside;
+    /// Per time `n` errors (`means`): each read gives them (`each`: its row of the read units into its `n` pairs), and
+    /// the held reads' means and the lost reads' make them, by the held share there.
+    fn reduced(&self, outputs: usize, left: Option<usize>, estimates: &[Estimate], n: usize, each: &(dyn Fn(&[Booking], &mut [[f64; 2]]) + Sync)) -> Vec<Vec<[f64; 2]>> {
+        let width = self.units + self.outside;
         // Each time's reads, in their order.
         let mut reads: Vec<Vec<usize>> = vec![vec![]; outputs];
         for (read, &k) in self.output.iter().enumerate() {
@@ -3914,11 +3870,10 @@ impl Measured<'_> {
             .par_iter()
             .enumerate()
             .map(|(k, reads)| {
-                let p = &estimates[k].populations;
                 let (mut held, mut lost, mut one) = (vec![[0.; 2]; n], vec![0.; n], vec![[0.; 2]; n]);
                 let (mut holding, mut losing) = (0., 0.);
                 for &read in reads.iter().filter(|&&read| Some(self.group[read]) != left) {
-                    each(&self.errors[self.row[read] * width..][..width], p, self.lost[read], &mut one);
+                    each(&self.errors[self.row[read] * width..][..width], &mut one);
                     if self.lost[read] {
                         lost.iter_mut().zip(&one).for_each(|(sum, e)| *sum += e[0]);
                         losing += 1.;
@@ -4126,11 +4081,11 @@ struct Formula<'a> {
     /// The current model's near tables; per cluster its table's axes and every coordinate it was made over, the axes'
     /// number and their coordinates' count at a point (`Model::table_axes`; none where it has no table).
     tables: &'a Tables,
-    axes: Vec<Option<(Vec<Key>, Vec<Key>, (usize, f64))>>,
+    axes: Vec<Option<(Vec<Coordinate>, Vec<Coordinate>, (usize, f64))>>,
     /// Where the atoms were (the rated states' places, set by `Pricing::new`), and the range each coordinate moves across
     /// over them, as a kept model's axes ask it (`Model::priced_axes`).
     points: Vec<V3>,
-    moving: Mutex<HashMap<Key, f64>>,
+    moving: Mutex<HashMap<Coordinate, f64>>,
     /// The attempt's ladder: a model's first rung (`rung`); and its setup's counts (`potential`).
     ladder: Ladder,
     setup: Setup,
@@ -4198,7 +4153,7 @@ impl<'a> Formula<'a> {
     fn kept(&self, set: &[usize]) -> Option<(Model, Priced, f64, f64)> {
         let with = self.model.rekept(&[self.kept, &set.iter().map(|&u| self.units[u].clone()).collect::<Vec<_>>()].concat()).ok()?;
         let rung = self.rung(&with)?;
-        let moves = |key: Key, moved: &dyn Fn() -> f64| -> f64 {
+        let moves = |key: Coordinate, moved: &dyn Fn() -> f64| -> f64 {
             if let Some(&known) = self.moving.lock().expect("the coordinates' moves").get(&key) {
                 return known;
             }

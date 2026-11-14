@@ -65,8 +65,7 @@
 use super::assemble::{laid, sized, ClassPlan, Held, MemberPlan, Plan, Site};
 use super::far::EXCITED;
 use super::tabulate::NearTable;
-use super::units::{gate, Measured};
-use super::{Beat, Gate, Lights, Model, Moments, Photon, Point, Scattering, Unit, UnitError};
+use super::{Beat, Lights, Model, Moments, Photon, Point, Scattering, Unit};
 use crate::step::Emitted;
 use std::sync::Arc;
 
@@ -353,7 +352,7 @@ impl Model {
             }
             Some(table) => self.near_jumps(table, order, site),
             None => {
-                let near = self.near_exact(plan, &site.beams, order, &self.coherent_dressing());
+                let near = self.near_exact(plan, &site.beams, order);
                 site.jumped(plan, Some(&near));
                 near.work
             }
@@ -615,62 +614,6 @@ impl Model {
         out
     }
 
-    /// Per class of a sample's cluster and axis, ‖L_a‖_F of its jump operators at the sample's point (units.rs `Measured`;
-    /// `class_sizes_on`).
-    pub(crate) fn class_sizes(&self, at: &Measured) -> Vec<[f64; 3]> {
-        self.class_sizes_on(&at.plan, &at.amplitudes, at.sample.at.kappa, &at.near)
-    }
-
-    /// Per class of a plan's cluster and axis, ‖L_a‖_F of its jump operators at a point of the beams' amplitudes
-    /// `amplitudes`, at the momentum κ, with the near forms there `near` (their jumps): its lit members' entries summed as
-    /// the photons sum them (`photons_counted`) -- each its field component there times its jump, a carrier's with its
-    /// Doppler partner.
-    fn class_sizes_on(&self, plan: &Plan, amplitudes: &[crate::field::Amplitude], kappa: [f64; 3], near: &super::assemble::NearValues) -> Vec<[f64; 3]> {
-        let fields = self.fields(plan, amplitudes, kappa, 0);
-        let len = plan.near.len();
-        let jump = |place: usize| if place < len { near.first_order(place)[0] + plan.bare(place) } else { plan.constants[place - len] };
-        let from = self.clusters[plan.cluster].states.len();
-        plan.classes
-            .iter()
-            .map(|class| {
-                let to = self.clusters[class.landing].states.len();
-                let mut entries = vec![C64::ZERO; 3 * to * from];
-                for m in &class.members {
-                    let (c, cw) = m.scalar.map_or((C64::ONE, C64::ONE), |s| (fields.plain(s)[0], fields.doppler(s)[0]));
-                    for &(a, bp, sp, first, second) in &m.entries {
-                        entries[(a * to + bp) * from + sp] += if m.doppler { c * jump(first) - cw * jump(second) } else { c * jump(first) };
-                    }
-                }
-                std::array::from_fn(|a| entries[a * to * from..(a + 1) * to * from].iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt())
-            })
-            .collect()
-    }
-
-    /// A coherence's gate of its classes `i` and `j` of their sizes `sizes` (per class and axis, `class_sizes_on`) at the
-    /// speeds up to `speed` (the one gate, units.rs `gate`): its size Σ_a ‖L_a‖ ‖L'_a‖ over its distance, the two
-    /// frequencies' beat less the spread and the Doppler shift of two photons at that speed.
-    fn coherence_of(&self, unit: &Unit, (i, j): (usize, usize), sizes: &[[f64; 3]], speed: f64) -> Gate {
-        let Unit::Coherence { first, second, .. } = unit else { return Gate { saturation: 0.0, sweep: 0.0 } };
-        let size: f64 = (0..3).map(|a| sizes[i][a] * sizes[j][a]).sum();
-        let wave = 2.0 * self.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
-        gate(size, self.omega(&first.plus(-1, second)).abs() - self.spread() - wave * speed, 0.0)
-    }
-
-    /// A coherence's error at a sample (units.rs `Measured`): m² √(p_i p_j), m its size at the point -- Σ_a ‖L_a‖ ‖L'_a‖ of
-    /// its two classes' jump operators there (`class_sizes`) -- over its distance, the two frequencies' beat less the spread
-    /// and the Doppler shift of two photons at the sample's speed (`coherence_of`); p the populations of the two classes'
-    /// source states (SPEC §1.5). Zero where the sample's cluster emits no such pair.
-    pub(crate) fn coherence_error(&self, unit: &Unit, at: &Measured) -> UnitError {
-        let nothing = UnitError::NONE;
-        let Some(&(cluster, i, j)) = self.coherence_classes(unit).iter().find(|of| of.0 == at.sample.cluster) else { return nothing };
-        let sizes = at.classes.get_or_init(|| self.class_sizes(at));
-        let m2 = 0.5 * self.coherence_of(unit, (i, j), sizes, at.region.speed).saturation;
-        let p = &at.populations;
-        let classes = &self.classes[cluster];
-        let source_weight = |class: &Class| -> f64 { class.members.iter().flat_map(|m| m.entries.iter().map(|&(_, sp)| self.clusters[cluster].states[sp])).map(|s| p[s]).fold(0.0, f64::max) };
-        let weight = (source_weight(&classes[i]) * source_weight(&classes[j])).sqrt();
-        UnitError { parameter: m2, population: m2 * weight, temperature: m2 * weight, ..UnitError::NONE }
-    }
 }
 
 impl Model {

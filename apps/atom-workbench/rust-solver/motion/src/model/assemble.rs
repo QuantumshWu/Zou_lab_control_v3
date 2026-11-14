@@ -1871,34 +1871,25 @@ impl Model {
         (energies.len() * ((3 * pairs + 2 * jumps) * EXCITED + 2 * GROUND * near.shifts.len())) as f64 + fourth as f64 * 3.0 * jet::product_work(energies.len())
     }
 
-    /// A plan's near forms at a point from the exact elimination there, jets to `order`, each carrier's dressing coherent or not as
-    /// `coherent` says (eliminate.rs).
-    pub(crate) fn near_exact(&self, plan: &Plan, amplitudes: &[Amplitude], order: usize, coherent: &[bool]) -> NearValues {
-        self.near_exact_on(plan, amplitudes, order, coherent, &|_| true)
+    /// A plan's near forms at a point from the exact elimination there, jets to `order` (eliminate.rs).
+    pub(crate) fn near_exact(&self, plan: &Plan, amplitudes: &[Amplitude], order: usize) -> NearValues {
+        self.near_exact_on(plan, amplitudes, order, &|_| true)
     }
 
     /// `near_exact` of the cluster's ground places `places` takes: the responses from those places alone and the forms
     /// that read no other's (zero elsewhere) -- what a reader of a few places' forms asks for (the potential: the
     /// populated states' own shifts). A form made is the same number whichever places are taken with it.
-    pub(crate) fn near_exact_on(&self, plan: &Plan, amplitudes: &[Amplitude], order: usize, coherent: &[bool], places: &dyn Fn(usize) -> bool) -> NearValues {
+    pub(crate) fn near_exact_on(&self, plan: &Plan, amplitudes: &[Amplitude], order: usize, places: &dyn Fn(usize) -> bool) -> NearValues {
         let len = plan.near.len();
         let mut data = vec![C64::ZERO; jet::parts(order) * len];
         if len == 0 {
             return NearValues { len, order, data, directions: None, work: 0.0 };
         }
-        let h = self.far_hamiltonian(amplitudes, &plan.lights, order, coherent);
-        let responses = self.eliminate(plan.cluster, &h, amplitudes, &plan.lights, order, coherent, places);
+        let h = self.far_hamiltonian(amplitudes, &plan.lights, order);
+        let responses = self.eliminate(plan.cluster, &h, &plan.lights, order);
         let energies: Vec<Vec<f64>> = h.iter().map(|m| (0..STATES).map(|s| m[(s, s)].re).collect()).collect();
         let work = self.forms(plan, &responses, &energies, &mut data, places);
-        NearValues { len, order, data, directions: None, work: responses.work + self.far_work(&plan.lights, order, coherent) + work }
-    }
-
-    /// A plan's near forms at a point, the sections asked each to its order (0 or 1): from its table where one is given
-    /// (tabulate.rs), else the exact elimination's to the largest order.
-    pub(crate) fn near_values(&self, plan: &Plan, amplitudes: &[Amplitude], sections: &[(Range<usize>, usize)], table: Option<&NearTable>) -> NearValues {
-        table
-            .and_then(|table| self.near_tabulated(table, amplitudes, sections))
-            .unwrap_or_else(|| self.near_exact(plan, amplitudes, sections.iter().map(|s| s.1).max().unwrap_or(0), &self.coherent_dressing()))
+        NearValues { len, order, data, directions: None, work: responses.work + self.far_work(&plan.lights, order) + work }
     }
 
     /// The normalized generator's matrices of a plan's cluster at a point (`Quartic`) into the thread's, and the counted work
@@ -1950,7 +1941,7 @@ impl Model {
         q.work = 0.0;
         if !laid {
             // The exact elimination's forms where no table holds them and none are given.
-            let made = (table.is_none() && given.is_none()).then(|| self.near_exact(plan, &point.beams, 1, &self.coherent_dressing()));
+            let made = (table.is_none() && given.is_none()).then(|| self.near_exact(plan, &point.beams, 1));
             let exact = given.or(made.as_ref());
             point.select(plan);
             q.work += match (table, exact) {
@@ -2242,7 +2233,7 @@ impl Model {
         let mut point = Held::<Site>::take();
         let table = self.pointed(plan, table, r, &mut point);
         point.select(plan);
-        let exact = (table.is_none() && plan.near.len() > 0).then(|| self.near_exact(plan, &point.beams, 1, &self.coherent_dressing()));
+        let exact = (table.is_none() && plan.near.len() > 0).then(|| self.near_exact(plan, &point.beams, 1));
         let work = match (table, &exact) {
             _ if plan.near.len() == 0 => {
                 point.formed(plan, None);

@@ -229,7 +229,7 @@ impl Model {
             let plan = self.plan(cluster, lights);
             let near = (!plan.links.is_empty()).then(|| {
                 let table = tables.and_then(|t| t.of(cluster, lights)).filter(|_| order <= 1);
-                table.and_then(|table| self.near_tabulated(table, amplitudes, &[(plan.near.hermitian(), order)])).unwrap_or_else(|| self.near_exact_on(&plan, amplitudes, order, &self.coherent_dressing(), &|place| place < c.ground && p[c.states[place]] != 0.0))
+                table.and_then(|table| self.near_tabulated(table, amplitudes, &[(plan.near.hermitian(), order)])).unwrap_or_else(|| self.near_exact_on(&plan, amplitudes, order, &|place| place < c.ground && p[c.states[place]] != 0.0))
             });
             (plan, near)
         };

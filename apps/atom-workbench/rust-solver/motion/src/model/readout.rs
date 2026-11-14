@@ -21,15 +21,8 @@ use super::far::EXCITED;
 use super::tabulate::NearTable;
 use super::{Beat, Cluster, Component, Level, Lights, Model, Point, Sample, Unit, GROUND, STATES};
 use crate::field::Amplitude;
-use crate::linalg::{Mat, C64};
+use crate::linalg::C64;
 use std::collections::HashSet;
-
-/// A component's bare drives' channels on a cluster at a point: the component and its response R (EXCITED × the cluster's
-/// ground places).
-pub(crate) struct Channels {
-    pub(crate) component: Component,
-    pub(crate) response: Mat,
-}
 
 impl Model {
     /// The components with bare drives under a light set, in the frequencies' order: (frequency, side), side 0 the
@@ -51,19 +44,6 @@ impl Model {
                 }
             }
         }
-    }
-
-    /// The bare drives' responses on a cluster at a point, per component that has one (`bare_response`), every light in
-    /// `lights`.
-    pub(crate) fn far_channels(&self, cluster: usize, amplitudes: &[Amplitude], lights: &Lights) -> Vec<Channels> {
-        let c = &self.clusters[cluster];
-        self.bare_components(lights)
-            .map(|(frequency, side)| {
-                let mut response = Mat::zeros(EXCITED, c.ground);
-                self.bare_response(c, amplitudes, frequency, side, &mut response.data);
-                Channels { component: Component { frequency, counter: side == 1 }, response }
-            })
-            .collect()
     }
 
     /// The carriers whose drives folded at the atom make a channel on a plan's cluster: the lit ones, where the plan
@@ -173,7 +153,7 @@ impl Model {
                 self.near_responses(table, site);
                 None
             }
-            _ => (folded > 0).then(|| self.near_exact(plan, &site.beams, 0, &self.coherent_dressing())),
+            _ => (folded > 0).then(|| self.near_exact(plan, &site.beams, 0)),
         };
         let Site { beams: amplitudes, responses, weights, channels, .. } = site;
         let (far, size) = (self.bare_components(&plan.lights).count(), EXCITED * c.ground);
@@ -310,14 +290,12 @@ impl Model {
             Unit::Drive { component, excited, ground } => {
                 format!("{} → {} 的驱动：按原子所在处的能级（含光移）绝热消去（{}）", self.state_label(*ground), self.state_label(*excited), self.component_label(*component))
             }
-            Unit::Second { ground } => format!("{} 所在子空间按原子所在处能级的绝热消去只取到二阶", self.state_label(*ground)),
             Unit::Term { a, b, beat } if beat.is_zero() => format!("{} 与 {} 的静态耦合", self.state_label(*a), self.state_label(*b)),
             Unit::Term { a, b, beat } if a == b => format!("{} 上拍频 {} 的能级拍动", self.state_label(*a), self.beat_label(beat)),
             Unit::Term { a, b, beat } => format!("{} 与 {} 在拍频 {} 上的耦合", self.state_label(*a), self.state_label(*b), self.beat_label(beat)),
             Unit::Coherence { landing, first, second } => {
                 format!("落到 {} 所在子空间的两组光子（频率相差 {}）的相干", self.state_label(*landing), self.beat_label(&second.plus(-1, first)).trim_start_matches('−'))
             }
-            Unit::Dressing { carrier } => format!("{} 引起的能级移动（进入绝热消去的失谐）：偏振不同的光束之间的干涉取平均", self.component_label(*carrier)),
             Unit::Block { block, component, grounds } => format!(
                 "激发态 {} 所在的超精细能级块（{}，从 {} 所在的子空间）：绝热消去",
                 self.blocks().get(*block).and_then(|b| b.first()).map_or(String::new(), |&e| self.state_label(GROUND + e)),

@@ -188,22 +188,13 @@ use rayon::prelude::*;
 use std::ops::Range;
 use std::sync::Arc;
 
-/// A coordinate a cluster's near elimination depends on (module documentation, # Coordinates).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Coordinate {
-    /// A lit frequency's chart coordinate (field.rs # The chart): its intensity, a polarization angle or a relative phase.
-    Chart { frequency: usize, index: usize },
-    /// A near carrier's polarization unit's intensity I_u (its dressing's T̄).
-    Unit { carrier: usize, unit: usize },
-}
-
-/// A near carrier's polarization unit (module documentation, # Coordinates): its beams (positions among the carrier's), their
-/// κ_l along its polarization, and N_u.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Polarization {
-    beams: Vec<usize>,
-    kappa: Vec<C64>,
-    norm: f64,
+/// A coordinate a cluster's near elimination depends on (module documentation, # Coordinates): a lit frequency's chart
+/// coordinate (field.rs # The chart) -- its intensity, a polarization angle or a relative phase --, the same in every
+/// model of a request (solve.rs `Pricing` keys the tables' axes by it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Coordinate {
+    pub frequency: usize,
+    pub index: usize,
 }
 
 /// What one cluster's near table for one light set tabulates (module documentation): its coordinates, the axes first, their
@@ -215,7 +206,6 @@ pub struct Layout {
     pub coordinates: Vec<Coordinate>,
     focus: Vec<f64>,
     rates: Vec<f64>,
-    polarizations: Vec<Vec<Polarization>>,
     plan: Arc<Plan>,
     /// The elimination's counted work at a point (real multiply-adds, at the focus): a point's direct evaluation, and a
     /// node's (# Work).
@@ -276,7 +266,7 @@ pub(crate) fn halving_on(over: f64, spacing: f64, rate: f64, before: Option<f64>
 
 /// A table's error reads at samples (`Model::table_reads`): per axis the read of its interpolation error, and the table's whole
 /// error against the exact elimination (its coordinates held at the focus moving, its interpolation), each as the error it
-/// makes on the outputs through the sample's generator (module documentation, # The table's error: δ in `parameter`, δ P_g on
+/// makes on the outputs through the sample's generator (module documentation, # The table's error: δ P_g on
 /// the populations, the larger of δ P_g and |ΔV|/k_BT_r on T); zero on the samples of other clusters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableRead {
@@ -299,10 +289,6 @@ pub(crate) fn read_work(axes: usize, order: usize, reals: usize) -> f64 {
     (4usize.pow(axes as u32) * (1 + if order >= 1 { axes } else { 0 }) * reals) as f64 / crate::decide::COMPLEX
 }
 
-/// A coordinate by what it is of, the same in every model of a request: its frequency, whether it is a carrier's
-/// polarization unit, and its index (a chart's, or the unit's).
-pub(crate) type Key = (usize, bool, usize);
-
 /// The zero amplitude.
 fn dark() -> Amplitude {
     Amplitude { value: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3] }
@@ -316,53 +302,25 @@ impl Tables {
 }
 
 impl Model {
-    /// A near carrier's polarization units (module documentation, # Coordinates).
-    fn polarizations(&self, carrier: usize) -> Vec<Polarization> {
-        let cc = &self.carriers[carrier];
-        let f = &self.light.frequencies[cc.frequency];
-        let mut units = cc.units.clone();
-        units.sort();
-        units.dedup();
-        units
-            .iter()
-            .map(|&u| {
-                let beams: Vec<usize> = (0..cc.beams.len()).filter(|&l| cc.units[l] == u).collect();
-                let first = &f.fields[beams[0]];
-                let size = first.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
-                let kappa: Vec<C64> = beams.iter().map(|&l| (0..3).map(|q| first[q].conj() * f.fields[l][q]).sum::<C64>() / size).collect();
-                let norm = kappa.iter().map(|k| k.abs()).sum::<f64>().powi(2);
-                Polarization { beams, kappa, norm }
-            })
-            .collect()
-    }
 
     /// Every coordinate an elimination under a light set depends on (module documentation, # Coordinates): the chart of every
     /// lit frequency of the far light -- no carrier: the near forms are the fold's series about the far levels, whose
     /// coefficients hold no near field (eliminate.rs `Model::eliminate`).
-    fn coordinates(&self, lights: &Lights, _polarizations: &[Vec<Polarization>]) -> Vec<Coordinate> {
+    fn coordinates(&self, lights: &Lights) -> Vec<Coordinate> {
         let mut out = vec![];
         for (frequency, f) in self.light.frequencies.iter().enumerate() {
             if lights.on(frequency) && self.carrier_of(frequency).is_none() {
-                out.extend((0..f.chart_dimension()).map(|index| Coordinate::Chart { frequency, index }));
+                out.extend((0..f.chart_dimension()).map(|index| Coordinate { frequency, index }));
             }
         }
         out
     }
 
-    /// A coordinate's key (`Key`).
-    fn key(&self, coordinate: Coordinate) -> Key {
-        match coordinate {
-            Coordinate::Chart { frequency, index } => (frequency, false, index),
-            Coordinate::Unit { carrier, unit } => (self.carriers[carrier].frequency, true, unit),
-        }
-    }
-
     /// A table's axes and every coordinate it was made over (their keys), its axes' number, and the counted work of their
     /// coordinates at a point (`coordinates_work`): what a pricing reads of the tables a run has (solve.rs `Pricing`).
-    pub(crate) fn table_axes(&self, table: &NearTable) -> (Vec<Key>, Vec<Key>, (usize, f64)) {
+    pub(crate) fn table_axes(&self, table: &NearTable) -> (Vec<Coordinate>, Vec<Coordinate>, (usize, f64)) {
         let (d, layout) = (table.axes(), &table.layout);
-        let keys = |c: &[Coordinate]| c.iter().map(|&c| self.key(c)).collect::<Vec<_>>();
-        (keys(&layout.coordinates[..d]), keys(&layout.coordinates), (d, self.coordinates_work(&layout.coordinates[..d], &layout.polarizations)))
+        (layout.coordinates[..d].to_vec(), layout.coordinates.clone(), (d, self.coordinates_work(&layout.coordinates[..d])))
     }
 
     /// The axes a cluster's table under the running lights would take (module documentation, # Axes), priced without
@@ -377,39 +335,37 @@ impl Model {
     /// attempt's to make. (Proven over the reach, the range of a new coordinate of R2_RECOIL's tweezer, kept to the atom
     /// on its scout's pricing, took 80 s and 5.7 GB.) The rate is the levels' alone (# Axes: a coherent dressing's part
     /// of the lines is in the look, which eliminates). At most `MOST_AXES`; none where the cluster has no near form.
-    pub(crate) fn priced_axes(&self, cluster: usize, points: &[[f64; 3]], axes: &[Key], known: &[Key], moves: &dyn Fn(Key, &dyn Fn() -> f64) -> f64) -> (usize, f64) {
+    pub(crate) fn priced_axes(&self, cluster: usize, points: &[[f64; 3]], axes: &[Coordinate], known: &[Coordinate], moves: &dyn Fn(Coordinate, &dyn Fn() -> f64) -> f64) -> (usize, f64) {
         let lights = self.running();
         if self.plan(cluster, &lights).near.len() == 0 {
             return (0, 0.0);
         }
-        let coherent = self.coherent_dressing();
-        let polarizations: Vec<Vec<Polarization>> = (0..self.carriers.len()).map(|d| if coherent[d] { vec![] } else { self.polarizations(d) }).collect();
-        let all = self.coordinates(&lights, &polarizations);
+        let all = self.coordinates(&lights);
         let mut focus = vec![0.0; all.len()];
-        self.coordinates_at(&all, &polarizations, &self.light.amplitudes([0.0; 3]), &mut focus, &mut vec![[0.0; 3]; all.len()]);
+        self.coordinates_at(&all, &self.light.amplitudes([0.0; 3]), &mut focus, &mut vec![[0.0; 3]; all.len()]);
         let rates = std::cell::OnceCell::new();
         let (shown, temperature) = shares();
         let taken: Vec<Coordinate> = (0..all.len())
             .filter(|&i| {
-                let key = self.key(all[i]);
+                let key = all[i];
                 axes.contains(&key)
                     || (!known.contains(&key) && {
-                        let range = moves(key, &|| self.moved_over(all[i], &polarizations, points));
-                        range > 0.0 && 2.0 * rates.get_or_init(|| self.rates(cluster, &lights, &all, &polarizations, &focus))[i] * range > shown.min(temperature)
+                        let range = moves(key, &|| self.moved_over(all[i], points));
+                        range > 0.0 && 2.0 * rates.get_or_init(|| self.rates(cluster, &lights, &all, &focus))[i] * range > shown.min(temperature)
                     })
             })
             .map(|i| all[i])
             .take(crate::table::MOST_AXES)
             .collect();
-        (taken.len(), self.coordinates_work(&taken, &polarizations))
+        (taken.len(), self.coordinates_work(&taken))
     }
 
     /// The range a coordinate moves across over `points` (`priced_axes`): its largest value there less its least.
-    fn moved_over(&self, coordinate: Coordinate, polarizations: &[Vec<Polarization>], points: &[[f64; 3]]) -> f64 {
+    fn moved_over(&self, coordinate: Coordinate, points: &[[f64; 3]]) -> f64 {
         let (mut least, mut most) = (f64::INFINITY, f64::NEG_INFINITY);
         for &r in points {
             let mut value = [0.0];
-            self.coordinates_at(&[coordinate], polarizations, &self.light.amplitudes(r), &mut value, &mut [[0.0; 3]]);
+            self.coordinates_at(&[coordinate], &self.light.amplitudes(r), &mut value, &mut [[0.0; 3]]);
             (least, most) = (least.min(value[0]), most.max(value[0]));
         }
         (most - least).max(0.0)
@@ -417,89 +373,56 @@ impl Model {
 
     /// Coordinates' values at a point and their gradients (module documentation, # At a point) into `values` and `gradients`,
     /// and the complex multiply-adds.
-    fn coordinates_at(&self, coordinates: &[Coordinate], polarizations: &[Vec<Polarization>], amplitudes: &[Amplitude], values: &mut [f64], gradients: &mut [[f64; 3]]) -> f64 {
+    fn coordinates_at(&self, coordinates: &[Coordinate], amplitudes: &[Amplitude], values: &mut [f64], gradients: &mut [[f64; 3]]) -> f64 {
         // The chart of the frequency last read: a frequency's coordinates take one chart.
         let mut held: Option<(usize, Chart)> = None;
-        for (i, c) in coordinates.iter().enumerate() {
-            match *c {
-                Coordinate::Chart { frequency, index } => {
-                    let chart = match held {
-                        Some((of, chart)) if of == frequency => chart,
-                        _ => {
-                            let f = &self.light.frequencies[frequency];
-                            f.chart(&f.field(amplitudes))
-                        }
-                    };
-                    held = Some((frequency, chart));
-                    values[i] = chart.value[index];
-                    gradients[i] = chart.gradient[index];
+        for (i, &Coordinate { frequency, index }) in coordinates.iter().enumerate() {
+            let chart = match held {
+                Some((of, chart)) if of == frequency => chart,
+                _ => {
+                    let f = &self.light.frequencies[frequency];
+                    f.chart(&f.field(amplitudes))
                 }
-                Coordinate::Unit { carrier, unit } => {
-                    let p = &polarizations[carrier][unit];
-                    let cc = &self.carriers[carrier];
-                    let (mut f, mut df) = (C64::ZERO, [C64::ZERO; 3]);
-                    for (&l, &k) in p.beams.iter().zip(&p.kappa) {
-                        let a = &amplitudes[cc.beams[l]];
-                        f += a.value * k;
-                        for i in 0..3 {
-                            df[i] += a.gradient[i] * k;
-                        }
-                    }
-                    values[i] = (f.norm_sqr() / p.norm).min(1.0);
-                    gradients[i] = std::array::from_fn(|a| 2.0 * (f.conj() * df[a]).re / p.norm);
-                }
-            }
+            };
+            held = Some((frequency, chart));
+            values[i] = chart.value[index];
+            gradients[i] = chart.gradient[index];
         }
-        self.coordinates_work(coordinates, polarizations)
+        self.coordinates_work(coordinates)
     }
 
     /// The counted complex multiply-adds of coordinates' values at a point (`coordinates_at`): a chart's field and its
-    /// derivatives from each beam (13 parts of 3 components) and the chart from the components, once a frequency; a
-    /// unit's field from its beams with its gradient, and its intensity.
-    fn coordinates_work(&self, coordinates: &[Coordinate], polarizations: &[Vec<Polarization>]) -> f64 {
+    /// derivatives from each beam (13 parts of 3 components) and the chart from the components, once a frequency.
+    fn coordinates_work(&self, coordinates: &[Coordinate]) -> f64 {
         let mut charts = vec![];
         coordinates
             .iter()
-            .map(|c| match *c {
-                Coordinate::Chart { frequency, .. } if !charts.contains(&frequency) => {
-                    charts.push(frequency);
-                    let f = &self.light.frequencies[frequency];
-                    (f.beams.len() * 39 + 6 * f.rank() * f.rank()) as f64
+            .map(|&Coordinate { frequency, .. }| {
+                if charts.contains(&frequency) {
+                    return 0.0;
                 }
-                Coordinate::Chart { .. } => 0.0,
-                Coordinate::Unit { carrier, unit } => (4 * polarizations[carrier][unit].beams.len() + 4) as f64,
+                charts.push(frequency);
+                let f = &self.light.frequencies[frequency];
+                (f.beams.len() * 39 + 6 * f.rank() * f.rank()) as f64
             })
             .sum()
     }
 
-    /// The light at coordinate values x (module documentation, # A node): each lit frequency's beams' amplitudes from its chart,
-    /// a carrier's from its units' intensities (a carrier with a coherent dressing: from its chart).
-    fn light_at(&self, lights: &Lights, coordinates: &[Coordinate], polarizations: &[Vec<Polarization>], x: &[f64]) -> Vec<Amplitude> {
+    /// The light at coordinate values x (module documentation, # A node): each lit frequency's beams' amplitudes from its
+    /// chart -- a carrier's, none of whose coordinates is a table's, dark.
+    fn light_at(&self, lights: &Lights, coordinates: &[Coordinate], x: &[f64]) -> Vec<Amplitude> {
         let mut near = vec![dark(); self.light.beams.len()];
         for (w, f) in self.light.frequencies.iter().enumerate() {
             if !lights.on(w) {
                 continue;
             }
             let s: Vec<f64> = (0..f.chart_dimension())
-                .map(|index| coordinates.iter().position(|c| *c == Coordinate::Chart { frequency: w, index }).map_or(0.0, |at| x[at]))
+                .map(|index| coordinates.iter().position(|c| *c == Coordinate { frequency: w, index }).map_or(0.0, |at| x[at]))
                 .collect();
             let e = f.chart_field(&s);
             let components: Vec<C64> = f.basis.iter().map(|u| (0..3).map(|q| u[q].conj() * e[q]).sum()).collect();
             for (j, &l) in f.beams.iter().enumerate() {
                 near[l].value = components.iter().enumerate().map(|(k, &e)| f.dual(j, k) * e).sum();
-            }
-        }
-        for (d, cc) in self.carriers.iter().enumerate() {
-            if !lights.on(cc.frequency) || polarizations[d].is_empty() {
-                continue;
-            }
-            for &l in &cc.beams {
-                near[l] = dark();
-            }
-            for (u, p) in polarizations[d].iter().enumerate() {
-                if let Some(at) = coordinates.iter().position(|c| *c == Coordinate::Unit { carrier: d, unit: u }) {
-                    near[cc.beams[p.beams[0]]].value = C64::real((x[at].max(0.0) * p.norm).sqrt()) / p.kappa[0];
-                }
             }
         }
         near
@@ -508,10 +431,9 @@ impl Model {
     /// The near forms at coordinate values x into a node's reals (module documentation, # A node's reals).
     fn node(&self, layout: &Layout, x: &[f64], out: &mut [f64]) {
         let (lights, plan) = (&layout.lights, &layout.plan);
-        let near = self.light_at(lights, &layout.coordinates, &layout.polarizations, x);
-        let coherent = self.coherent_dressing();
-        let h = self.far_hamiltonian(&near, lights, 0, &coherent);
-        let r = self.eliminate(layout.cluster, &h, &near, lights, 0, &coherent, &|_| true);
+        let near = self.light_at(lights, &layout.coordinates, x);
+        let h = self.far_hamiltonian(&near, lights, 0);
+        let r = self.eliminate(layout.cluster, &h, lights, 0);
         let energies = vec![(0..STATES).map(|s| h[0][(s, s)].re).collect::<Vec<f64>>()];
         let mut values = vec![C64::ZERO; plan.near.len()];
         self.forms(plan, &r, &energies, &mut values, &|_| true);
@@ -592,11 +514,11 @@ impl Model {
     /// The ranges of coordinates over the atoms' reach (module documentation, # Axes): each its focus value ± the proven bound
     /// of its distance from it (`coordinate_moved`), to the least of their first spacings, on its axis's range -- a phase's on its whole
     /// period where that interval would cross the period's seam.
-    fn reach_ranges(&self, coordinates: &[Coordinate], polarizations: &[Vec<Polarization>], focus: &[f64], reach: &Reach) -> Vec<(f64, f64)> {
+    fn reach_ranges(&self, coordinates: &[Coordinate], focus: &[f64], reach: &Reach) -> Vec<(f64, f64)> {
         if coordinates.is_empty() {
             return vec![];
         }
-        let quantities: Vec<Box<dyn Fn(&Region) -> f64 + Sync + '_>> = coordinates.iter().zip(focus).map(|(&c, &at)| Box::new(move |r: &Region| self.coordinate_moved(c, polarizations, at, r)) as Box<dyn Fn(&Region) -> f64 + Sync + '_>).collect();
+        let quantities: Vec<Box<dyn Fn(&Region) -> f64 + Sync + '_>> = coordinates.iter().zip(focus).map(|(&c, &at)| Box::new(move |r: &Region| self.coordinate_moved(c, at, r)) as Box<dyn Fn(&Region) -> f64 + Sync + '_>).collect();
         let refs: Vec<&(dyn Fn(&Region) -> f64 + Sync)> = quantities.iter().map(|q| q.as_ref()).collect();
         let resolution = coordinates.iter().map(|&c| first_axis(c).spacing()).fold(f64::INFINITY, f64::min);
         let moved = self.extents_over(reach, resolution, &refs);
@@ -745,20 +667,18 @@ impl Model {
         if plan.near.len() == 0 {
             return None;
         }
-        let coherent = self.coherent_dressing();
-        let polarizations: Vec<Vec<Polarization>> = (0..self.carriers.len()).map(|d| if coherent[d] { vec![] } else { self.polarizations(d) }).collect();
-        let all = self.coordinates(lights, &polarizations);
+        let all = self.coordinates(lights);
         let focus_amplitudes = self.light.amplitudes([0.0; 3]);
         let mut focus = vec![0.0; all.len()];
-        self.coordinates_at(&all, &polarizations, &focus_amplitudes, &mut focus, &mut vec![[0.0; 3]; all.len()]);
-        let rates = self.rates(cluster, lights, &all, &polarizations, &focus);
+        self.coordinates_at(&all, &focus_amplitudes, &mut focus, &mut vec![[0.0; 3]; all.len()]);
+        let rates = self.rates(cluster, lights, &all, &focus);
         // Every coordinate's range over the reach, and its weight there: its rate times the range it moves across.
-        let over_reach = self.reach_ranges(&all, &polarizations, &focus, reach);
+        let over_reach = self.reach_ranges(&all, &focus, reach);
         let weights: Vec<f64> = rates.iter().zip(&over_reach).map(|(rate, (lo, hi))| rate * (hi - lo)).collect();
         let mut order: Vec<usize> = (0..all.len()).collect();
         order.sort_by(|&a, &b| weights[b].total_cmp(&weights[a]));
         // The table of given axes, each on its first grid, the other coordinates at the focus.
-        let exact = self.near_exact(&plan, &focus_amplitudes, 1, &coherent).work * crate::decide::COMPLEX;
+        let exact = self.near_exact(&plan, &focus_amplitudes, 1).work * crate::decide::COMPLEX;
         let made = |axes: &[usize]| -> Option<NearTable> {
             let picked: Vec<usize> = axes.iter().copied().chain(order.iter().copied().filter(|c| !axes.contains(c))).collect();
             let layout = Layout {
@@ -767,7 +687,6 @@ impl Model {
                 coordinates: picked.iter().map(|&c| all[c]).collect(),
                 focus: picked.iter().map(|&c| focus[c]).collect(),
                 rates: picked.iter().map(|&c| rates[c]).collect(),
-                polarizations: polarizations.clone(),
                 plan: plan.clone(),
                 exact,
             };
@@ -811,7 +730,7 @@ impl Model {
 
     /// The coordinates' rates for a cluster under a light set (module documentation, # Axes): how many half-widths a unit of
     /// each moves the cluster's lines.
-    fn rates(&self, cluster: usize, lights: &Lights, coordinates: &[Coordinate], polarizations: &[Vec<Polarization>], focus: &[f64]) -> Vec<f64> {
+    fn rates(&self, cluster: usize, lights: &Lights, coordinates: &[Coordinate], focus: &[f64]) -> Vec<f64> {
         let c = &self.clusters[cluster];
         // The cluster's lines e ← b and their half-widths.
         let lines: Vec<(usize, usize, f64)> = c.states[..c.ground]
@@ -822,53 +741,35 @@ impl Model {
                     .map(move |e| (e, b, self.decay[(e - GROUND, e - GROUND)].re / 2.0))
             })
             .collect();
-        let coherent = self.coherent_dressing();
         let energies = |x: &[f64]| -> Vec<f64> {
-            let near = self.light_at(lights, coordinates, polarizations, x);
+            let near = self.light_at(lights, coordinates, x);
             let mut energies = vec![];
-            self.far_energies(&near, lights, 0, &coherent, &mut energies);
+            self.far_energies(&near, lights, 0, &mut energies);
             energies.swap_remove(0)
         };
         let at_focus = energies(focus);
         // The largest change of a line's E_e − E_b from the focus, in its half-widths.
         let moved = |e: &[f64]| lines.iter().map(|&(a, b, half)| ((e[a] - e[b]) - (at_focus[a] - at_focus[b])).abs() / half).fold(0.0, f64::max);
-        let region = self.point_region([0.0; 3], 0.0);
         coordinates
             .iter()
             .enumerate()
-            .map(|(i, coordinate)| match *coordinate {
-                Coordinate::Chart { index, .. } => {
-                    // The largest change over the nodes: an intensity's per unit intensity (its shift linear in it); an angle's
-                    // or a phase's the amplitude of a trigonometric polynomial of degree two or one in it, whose slope is at
-                    // most its degree times that (Bernstein).
-                    let axis = first_axis(*coordinate);
-                    let (mut most, mut span) = (0.0_f64, 0.0_f64);
-                    for n in 0..axis.nodes {
-                        let mut x = focus.to_vec();
-                        x[i] = axis.node(n);
-                        span = span.max((x[i] - focus[i]).abs());
-                        most = most.max(moved(&energies(&x)));
-                    }
-                    match index {
-                        0 if span > 0.0 => most / span,
-                        0 => 0.0,
-                        _ if index % 2 == 1 => 2.0 * most,
-                        _ => most,
-                    }
+            .map(|(i, &coordinate)| {
+                // The largest change over the nodes: an intensity's per unit intensity (its shift linear in it); an angle's
+                // or a phase's the amplitude of a trigonometric polynomial of degree two or one in it, whose slope is at
+                // most its degree times that (Bernstein).
+                let axis = first_axis(coordinate);
+                let (mut most, mut span) = (0.0_f64, 0.0_f64);
+                for n in 0..axis.nodes {
+                    let mut x = focus.to_vec();
+                    x[i] = axis.node(n);
+                    span = span.max((x[i] - focus[i]).abs());
+                    most = most.max(moved(&energies(&x)));
                 }
-                Coordinate::Unit { carrier, unit } => {
-                    let p = &polarizations[carrier][unit];
-                    let x = &self.carriers[carrier].folded[p.beams[0]];
-                    let k = p.kappa[0].norm_sqr();
-                    let dressing = (0..GROUND)
-                        .map(|b| p.norm * (GROUND..STATES).map(|e| x[(e, b)].norm_sqr()).sum::<f64>() / k * self.resolvent(carrier, b, &region))
-                        .fold(0.0, f64::max)
-                        / (self.least_decay() / 2.0);
-                    // Its static form's part, linear in its intensity: from none to all of it.
-                    let (mut dark, mut full) = (focus.to_vec(), focus.to_vec());
-                    (dark[i], full[i]) = (0.0, 1.0);
-                    let (none, all) = (energies(&dark), energies(&full));
-                    dressing + lines.iter().map(|&(a, b, half)| ((all[a] - all[b]) - (none[a] - none[b])).abs() / half).fold(0.0, f64::max)
+                match coordinate.index {
+                    0 if span > 0.0 => most / span,
+                    0 => 0.0,
+                    index if index % 2 == 1 => 2.0 * most,
+                    _ => most,
                 }
             })
             .collect()
@@ -882,11 +783,11 @@ impl Model {
     /// the arguments of its product's box (the bounds of its real and imaginary parts) where the box holds no zero, and
     /// is any phase where it does. Two beams of fixed amplitudes and orthogonal fields keep their angle everywhere -- it
     /// weighs nothing, on any cell --, and their relative phase turns through the period over half a wavelength.
-    fn coordinate_moved(&self, c: Coordinate, polarizations: &[Vec<Polarization>], at: f64, region: &Region) -> f64 {
+    fn coordinate_moved(&self, c: Coordinate, at: f64, region: &Region) -> f64 {
         use std::f64::consts::PI;
-        let Coordinate::Chart { frequency, index } = c else { return self.intensity_moved(c, polarizations, at, region) };
+        let Coordinate { frequency, index } = c;
         if index == 0 {
-            return self.intensity_moved(c, polarizations, at, region);
+            return self.intensity_moved(frequency, at, region);
         }
         let f = &self.light.frequencies[frequency];
         let (n, o, gamma) = (f.beams.len(), &f.order, &f.coefficients);
@@ -935,19 +836,10 @@ impl Model {
     /// (|k_l − k₀| max|b_l| + max|∇b_l|) of its centre value, the intensity of two counter-propagating plane waves of
     /// orthogonal polarizations -- a constant -- was taken to move by 2kρ: with the lin-perp-lin scene's cooling light on its
     /// chart no cell of the reach was small enough, the proof had cut 8 million cells in 43 s and went on.)
-    fn intensity_moved(&self, c: Coordinate, polarizations: &[Vec<Polarization>], at: f64, region: &Region) -> f64 {
-        // The coordinate's field: its frequency, its beams' places among the frequency's with their c_l, and N.
-        let (frequency, beams, norm): (usize, Vec<(usize, [C64; 3])>, f64) = match c {
-            Coordinate::Chart { frequency, .. } => {
-                let f = &self.light.frequencies[frequency];
-                (frequency, f.fields.iter().copied().enumerate().collect(), f.norm)
-            }
-            Coordinate::Unit { carrier, unit } => {
-                let p = &polarizations[carrier][unit];
-                (self.carriers[carrier].frequency, p.beams.iter().zip(&p.kappa).map(|(&l, &k)| (l, [k, C64::ZERO, C64::ZERO])).collect(), p.norm)
-            }
-        };
+    fn intensity_moved(&self, frequency: usize, at: f64, region: &Region) -> f64 {
+        // The coordinate's field: its beams' places among the frequency's with their c_l, and N.
         let f = &self.light.frequencies[frequency];
+        let (beams, norm): (Vec<(usize, [C64; 3])>, f64) = (f.fields.iter().copied().enumerate().collect(), f.norm);
         let size = |c: &[C64; 3]| c.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
         let blind: f64 = beams.iter().map(|(l, c)| region.spans[f.beams[*l]].most * size(c)).sum();
         let intensity = region.combined(
@@ -968,7 +860,7 @@ impl Model {
     pub(crate) fn near_tabulated(&self, table: &NearTable, amplitudes: &[Amplitude], sections: &[(Range<usize>, usize)]) -> Option<NearValues> {
         let d = table.axes();
         let (mut x, mut gradients) = (vec![0.0; d], vec![[0.0; 3]; d]);
-        let mut work = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, amplitudes, &mut x, &mut gradients);
+        let mut work = self.coordinates_at(&table.layout.coordinates[..d], amplitudes, &mut x, &mut gradients);
         if !table.table.holds(&x) {
             return None;
         }
@@ -1005,7 +897,7 @@ impl Model {
         let d = table.axes();
         sized(&mut point.coordinates, d);
         sized(&mut point.directions, d);
-        let work = self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &point.beams, &mut point.coordinates, &mut point.directions);
+        let work = self.coordinates_at(&table.layout.coordinates[..d], &point.beams, &mut point.coordinates, &mut point.directions);
         point.place = table.table.holds(&point.coordinates).then(|| (table.table.place(&point.coordinates), work));
         point.place.is_some()
     }
@@ -1072,7 +964,7 @@ impl Model {
                     }
                     let amplitudes = self.light.amplitudes(sample.at.r);
                     let mut x = vec![0.0; d];
-                    self.coordinates_at(&table.layout.coordinates[..d], &table.layout.polarizations, &amplitudes, &mut x, &mut vec![[0.0; 3]; d]);
+                    self.coordinates_at(&table.layout.coordinates[..d], &amplitudes, &mut x, &mut vec![[0.0; 3]; d]);
                     // Beyond the table's ranges the forms are the exact elimination's: no error of the table.
                     if !table.table.holds(&x) {
                         continue;
@@ -1087,7 +979,7 @@ impl Model {
                         read[k] = self.form_error(sample, &far, &ours, &self.action(sample, &tabulated.moved(&dv[generator.clone()])), tables.thermal);
                     }
                     // The exact elimination's forms to order 0: the generator on a state reads their values alone.
-                    let exact = self.middle_of(plan, sample.at.t, &amplitudes, Some(&self.near_exact(plan, &amplitudes, 0, &self.coherent_dressing())));
+                    let exact = self.middle_of(plan, sample.at.t, &amplitudes, Some(&self.near_exact(plan, &amplitudes, 0)));
                     whole[k] = self.form_error(sample, &far, &self.action(sample, &exact), &ours, tables.thermal);
                 }
                 TableRead { axes, whole }
@@ -1118,7 +1010,7 @@ impl Model {
         let g = self.clusters[sample.cluster].ground;
         let weight = crate::linalg::norm_sqr(&sample.psi[..g]) / norm;
         let shown = if weight == 0.0 { 0.0 } else { delta * weight };
-        UnitError { parameter: delta, population: shown, temperature: shown.max(potential / thermal), ..UnitError::NONE }
+        UnitError { population: shown, temperature: shown.max(potential / thermal) }
     }
 }
 
@@ -1129,15 +1021,10 @@ fn reach_axis(c: Coordinate, range: (f64, f64)) -> Axis {
     if whole.periodic && range == (whole.lo, whole.hi) { whole } else { Axis::first(range.0, range.1, false) }
 }
 
-/// A coordinate's first grid (crate::table `Axis::first`) on its whole range (field.rs `range`; a unit's intensity [0, 1]).
+/// A coordinate's first grid (crate::table `Axis::first`) on its whole range (field.rs `range`).
 fn first_axis(c: Coordinate) -> Axis {
-    match c {
-        Coordinate::Chart { index, .. } => {
-            let (lo, hi, periodic) = range(index);
-            Axis::first(lo, hi, periodic)
-        }
-        Coordinate::Unit { .. } => Axis::first(0.0, 1.0, false),
-    }
+    let (lo, hi, periodic) = range(c.index);
+    Axis::first(lo, hi, periodic)
 }
 
 #[cfg(test)]

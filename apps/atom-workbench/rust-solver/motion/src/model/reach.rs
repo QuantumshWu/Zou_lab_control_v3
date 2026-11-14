@@ -207,7 +207,7 @@
 use super::eliminate::{Couplings, Diagonal, Gap, Shift};
 use super::own::{least, most, Form, Own};
 use super::far::EXCITED;
-use super::{Component, Envelope, Level, Lights, Model, Reach, Trap};
+use super::{Envelope, Level, Lights, Model, Reach, Trap};
 use crate::field::{Amplitude, Geometry};
 use crate::linalg::{dot3, norm3, Mat, C64};
 use crate::request::{GROUND, STATES};
@@ -525,103 +525,6 @@ pub(crate) struct DriveForm {
     pub(crate) gamma: f64,
 }
 
-/// One excited state through which two frequencies' drives couple two ground states at the atom (`TermForm::legs`): the
-/// emitted frequency's drive e ← a and the absorbed one's e ← b, each by its beams' entries (the request's beam, X_l and its
-/// modulus) and, where it is folded with the levels at the atom, its frequency's detuning δ.
-pub(crate) struct TermLeg {
-    pub(crate) excited: usize,
-    pub(crate) to: Vec<(usize, C64, f64)>,
-    pub(crate) from: Vec<(usize, C64, f64)>,
-    pub(crate) to_atom: Option<f64>,
-    pub(crate) from_atom: Option<f64>,
-}
-
-/// A coupling of two states a ← b at one of the model's beats (`Unit::Term`) as its bound reads it (units.rs
-/// `Model::term_bound`).
-pub(crate) struct TermForm {
-    /// Its constant part: at the zero beat the two states' own coupling with every light off (`Model::base`); and per pair
-    /// of beams whose entry of the frequencies' constant form (far.rs `constant`) is not zero, the emitted beam and the
-    /// absorbed one (the request's), C_ji[a, b] and its modulus.
-    pub(crate) base: C64,
-    pub(crate) pairs: Vec<(usize, usize, C64, f64)>,
-    /// Its part at the atom, of two ground states: per excited state a drive folded there reaches from one of them and a
-    /// folded drive of the other frequency from the other.
-    pub(crate) legs: Vec<TermLeg>,
-    /// The largest |k_i − k_j| of its beam pairs (1/µm).
-    pub(crate) wave: f64,
-}
-
-impl TermForm {
-    /// Whether nothing couples the two states at the beat.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.base == C64::ZERO && self.pairs.is_empty() && self.legs.is_empty()
-    }
-
-    /// An entry of two frequencies' constant form within the rounding of the form's own sums is that rounding, not a
-    /// coupling (units.rs `rounding`: a quantity within γ_N of its operands' scale) -- a field's component that is zero comes
-    /// as the last bits of its vector's, and so does every product with it: per pair of basis vectors two coefficients times
-    /// an entry, itself the outside forms' nine terms and two folds' sums over the excited states, of the forms' largest
-    /// entry. The same for every entry of a form: made once with it (units.rs `Model::constants`).
-    pub(crate) fn rounding_of(model: &Model, to: usize, from: usize, pairs: &[Mat]) -> f64 {
-        let terms = model.tones[to].basis[0].len() * model.tones[from].basis[0].len() * (2 * EXCITED + 11);
-        rounding(terms) * pairs.iter().map(|m| m.max_abs()).fold(0.0, f64::max)
-    }
-
-    fn new(model: &Model, a: usize, b: usize, beat: usize) -> TermForm {
-        let mut out = TermForm { base: C64::ZERO, pairs: vec![], legs: vec![], wave: 0.0 };
-        let between = |lj: usize, li: usize| norm3(model.wave_value(&model.pair_wave(lj, li)));
-        // The states' own coupling with every light off is H0, diagonal, less the outside forms at the focus: theirs.
-        let own = model.base[(a, b)];
-        if model.beats[beat].0.is_zero() && own.abs() > (0..model.tones.len()).map(|f| model.constants(f, f).rounding).fold(0.0, f64::max) {
-            out.base = own;
-        }
-        for &(to, from) in &model.beats[beat].1 {
-            let (bt, bf) = (&model.light.frequencies[to].beams, &model.light.frequencies[from].beams);
-            let constants = model.constants(to, from);
-            let least = constants.rounding;
-            for (x, m) in constants.pairs.iter().enumerate() {
-                let v = m[(a, b)];
-                if v.abs() > least {
-                    let (lj, li) = (bt[x / bf.len()], bf[x % bf.len()]);
-                    out.pairs.push((lj, li, v, v.abs()));
-                    out.wave = out.wave.max(between(lj, li));
-                }
-            }
-            if a >= GROUND || b >= GROUND || (a == b && to == from) {
-                continue;
-            }
-            let (ct, cf) = (Component { frequency: to, counter: false }, Component { frequency: from, counter: false });
-            let entries = |c: Component, e: usize, s: usize| -> Vec<(usize, C64, f64)> {
-                let beams = &model.light.frequencies[c.frequency].beams;
-                beams.iter().zip(&model.tones[c.frequency].couplings[0]).map(|(&l, x)| (l, x[(e, s)], x[(e, s)].abs())).filter(|entry| entry.2 != 0.0).collect()
-            };
-            for e in GROUND..STATES {
-                let (lt, lf) = (model.level(ct, e, a), model.level(cf, e, b));
-                if lt == Level::Explicit || lf == Level::Explicit || (lt == Level::Bare && lf == Level::Bare) {
-                    continue;
-                }
-                if !model.tones[to].drives(false, e, a) || !model.tones[from].drives(false, e, b) {
-                    continue;
-                }
-                let (to_beams, from_beams) = (entries(ct, e, a), entries(cf, e, b));
-                for &(lj, ..) in &to_beams {
-                    for &(li, ..) in &from_beams {
-                        out.wave = out.wave.max(between(lj, li));
-                    }
-                }
-                out.legs.push(TermLeg {
-                    excited: e - GROUND,
-                    to: to_beams,
-                    from: from_beams,
-                    to_atom: (lt == Level::Atom).then(|| model.tones[to].detuning),
-                    from_atom: (lf == Level::Atom).then(|| model.tones[from].detuning),
-                });
-            }
-        }
-        out
-    }
-}
-
 /// What the regions' bounds read of the model's forms -- the constant forms P_l'l of each frequency (far.rs), the base, the
 /// carriers' couplings folded at the atom (eliminate.rs), the ground states' drives and the couplings of two states (units.rs)
 /// --, each as its bound sums it: the entries that are not zero, with their moduli. The same for every region of a model, it
@@ -639,8 +542,6 @@ pub(crate) struct Forms {
     folded: OnceLock<Vec<Folded>>,
     /// Per ground state its drives in the tail rule's order (units.rs `Model::ranked`).
     drives: OnceLock<Vec<Vec<DriveForm>>>,
-    /// Per coupling asked.
-    terms: Mutex<HashMap<Coupling, Arc<TermForm>>>,
     /// Γ_min (eliminate.rs `Model::least_decay`).
     decay: OnceLock<f64>,
     /// [frequency][pair]: whether the levels the eliminations take hold the pair (eliminate.rs `Model::level_pairs`, every
@@ -651,7 +552,7 @@ pub(crate) struct Forms {
 impl Forms {
     pub(crate) fn new() -> Forms {
         let cells = || (0..STATES * STATES).map(|_| OnceLock::new()).collect();
-        Forms { mixed: OnceLock::new(), entries: cells(), diagonals: OnceLock::new(), folded: OnceLock::new(), drives: OnceLock::new(), terms: Mutex::new(HashMap::new()), decay: OnceLock::new(), taken: OnceLock::new() }
+        Forms { mixed: OnceLock::new(), entries: cells(), diagonals: OnceLock::new(), folded: OnceLock::new(), drives: OnceLock::new(), decay: OnceLock::new(), taken: OnceLock::new() }
     }
 
     /// A weighting of the model's far static forms (`Weights`).
@@ -754,15 +655,6 @@ impl Forms {
         })
     }
 
-    /// What the bound of the coupling a ← b at the model's beat `beat` reads (`TermForm`), made once.
-    pub(crate) fn term(&self, model: &Model, a: usize, b: usize, beat: usize) -> Arc<TermForm> {
-        if let Some(made) = self.terms.lock().expect("the couplings' forms' lock").get(&(a, b, beat)) {
-            return made.clone();
-        }
-        let made = Arc::new(TermForm::new(model, a, b, beat));
-        self.terms.lock().expect("the couplings' forms' lock").entry((a, b, beat)).or_insert(made).clone()
-    }
-
     /// The least decay rate of the excited states, Γ_min.
     pub(crate) fn least_decay(&self, model: &Model) -> f64 {
         *self.decay.get_or_init(|| model.least_decay())
@@ -770,7 +662,7 @@ impl Forms {
 
     /// Per frequency and beam pair whether the levels the eliminations take hold it, every light on.
     pub(crate) fn taken(&self, model: &Model) -> &[Vec<bool>] {
-        self.taken.get_or_init(|| model.level_pairs(&model.running(), &model.coherent_dressing()))
+        self.taken.get_or_init(|| model.level_pairs(&model.running()))
     }
 
 }
@@ -781,14 +673,12 @@ impl Forms {
 /// clusters' force bounds (eliminate.rs) and the ground states' drives' gates (units.rs).
 pub(crate) struct Region {
     pub(crate) spans: Vec<Span>,
-    /// The cell's centre, half-widths and radius (0: a point).
-    pub(crate) centre: [f64; 3],
+    /// The cell's half-widths and radius (0: a point).
     pub(crate) half: [f64; 3],
     pub(crate) rho: f64,
-    /// The bound of the atoms' speed over it (µm/µs): the reach's at its least V_prep (module documentation, # The reach); a
-    /// sample's own on its point. And the speed's own form (own.rs): (2 (ħ/m)(level − V_prep))^{1/2} of V_prep's own form,
-    /// within the reach's -- a constant on a point, on a path's box and on the whole space.
-    pub(crate) speed: f64,
+    /// The bound of the atoms' speed over it (µm/µs) in its own form (own.rs): (2 (ħ/m)(level − V_prep))^{1/2} of V_prep's
+    /// own form, within the reach's at its least V_prep (module documentation, # The reach) -- a constant on a point (a
+    /// sample's own speed), on a path's box and on the whole space.
     pub(crate) pace: Own,
     /// Per frequency, its beam pairs (j, i) row-major (`PairSpan`).
     pub(crate) pairs: Vec<Vec<PairSpan>>,
@@ -818,14 +708,9 @@ pub(crate) struct Region {
     pub(crate) diagonal: OnceLock<Diagonal>,
     pub(crate) gaps: Mutex<HashMap<(usize, usize), Gap>>,
     pub(crate) slopes: Mutex<HashMap<(usize, usize), [Form<[f64; 3]>; 2]>>,
-    /// Per coupling of two states asked its saturation and sweep (units.rs `Model::term_bound`).
-    pub(crate) terms: Mutex<HashMap<Coupling, (f64, f64)>>,
     /// The model's kept drives (units.rs `Model::kept_over`).
     pub(crate) kept: OnceLock<Vec<super::units::Kept>>,
 }
-
-/// A coupling of two states a ← b at a beat, its place among the model's beats (`Unit::Term`'s identity in a model).
-pub(crate) type Coupling = (usize, usize, usize);
 
 impl Region {
     /// The bound over the region of how far a sum f = Σ_p w_p c_p of beam pairs' coefficients (`PairSpan`, each with its
@@ -865,17 +750,6 @@ impl Region {
             return Form::whole(steep);
         }
         Form { value, first: std::array::from_fn(|a| hessian[a].map(|z| z * self.half[a])), rest, moved: veer, most: steep }
-    }
-
-    /// A coupling's saturation and sweep over the region, made once for both of its gates' bounds.
-    pub(crate) fn term(&self, coupling: Coupling, make: impl FnOnce() -> (f64, f64)) -> (f64, f64) {
-        let terms = || self.terms.lock().expect("the couplings' lock");
-        if let Some(made) = terms().get(&coupling) {
-            return *made;
-        }
-        let made = make();
-        terms().insert(coupling, made);
-        made
     }
 
     /// |u|² = |Σ_l a_l x_l|² over the region of a frequency's beams (the request's beam, x_l, |x_l|), and its gradient, each in
@@ -1089,8 +963,8 @@ impl Cells<'_> {
 
     /// A node's regions from its cell's beams.
     fn over(&self, node: &Node, spans: Vec<Span>) -> Regions {
-        let at = node.at.map(|speed| Box::new(self.model.region(node.cell.centre, spans.iter().map(Span::point).collect(), speed)));
-        Regions { over: Box::new(self.model.region_paced(node.cell.centre, spans, node.over, node.pace)), at }
+        let at = node.at.map(|speed| Box::new(self.model.region(spans.iter().map(Span::point).collect(), speed)));
+        Regions { over: Box::new(self.model.region_paced(spans, node.pace)), at }
     }
 
     /// A node's regions, made again.
@@ -1646,18 +1520,18 @@ impl Model {
     fn along(&self, amplitudes: &[Amplitude], node: &Node, a: usize) -> Region {
         let mut side = Cell { centre: node.cell.centre, half: [0.0; 3] };
         side.half[a] = node.cell.half[a];
-        self.region(node.cell.centre, self.light.beams.iter().zip(amplitudes).map(|(beam, at)| Span::over(beam, at, &side)).collect(), node.over)
+        self.region(self.light.beams.iter().zip(amplitudes).map(|(beam, at)| Span::over(beam, at, &side)).collect(), node.over)
     }
 
-    /// A region of the beams `spans` over the cell of centre `centre` at speeds up to `speed` (`Region`): its beam pairs
+    /// A region of the beams `spans` over their cell at speeds up to `speed` (`Region`): its beam pairs
     /// made, the rest when asked.
-    pub(crate) fn region(&self, centre: [f64; 3], spans: Vec<Span>, speed: f64) -> Region {
-        self.region_paced(centre, spans, speed, Own::constant(speed))
+    pub(crate) fn region(&self, spans: Vec<Span>, speed: f64) -> Region {
+        self.region_paced(spans, Own::constant(speed))
     }
 
-    /// A region of the beams `spans` over the cell of centre `centre` at speeds up to `speed`, their own form `pace`
+    /// A region of the beams `spans` over their cell at speeds up to `speed`, their own form `pace`
     /// (`Region`).
-    fn region_paced(&self, centre: [f64; 3], spans: Vec<Span>, speed: f64, pace: Own) -> Region {
+    fn region_paced(&self, spans: Vec<Span>, pace: Own) -> Region {
         let pairs = self
             .light
             .frequencies
@@ -1666,10 +1540,8 @@ impl Model {
             .collect();
         Region {
             pairs,
-            centre,
             half: spans.first().map_or([0.0; 3], |s| s.half),
             rho: spans.first().map_or(0.0, |s| s.rho),
-            speed,
             pace,
             spans,
             forms: self.forms.clone(),
@@ -1686,7 +1558,6 @@ impl Model {
             diagonal: OnceLock::new(),
             gaps: Mutex::new(HashMap::new()),
             slopes: Mutex::new(HashMap::new()),
-            terms: Mutex::new(HashMap::new()),
             kept: OnceLock::new(),
         }
     }
@@ -1694,7 +1565,7 @@ impl Model {
     /// The region of a point alone at the speeds up to `speed` in every direction (a sample's: the errors measured there;
     /// an atom's start: the model's prior, solve.rs # The model).
     pub(crate) fn point_region(&self, r: [f64; 3], speed: f64) -> Region {
-        self.region(r, self.spans(&Cell { centre: r, half: [0.0; 3] }), speed)
+        self.region(self.spans(&Cell { centre: r, half: [0.0; 3] }), speed)
     }
 
     /// The provable bounds over the reach of quantities given per region, each to `resolution`: each one's largest upper bound of
@@ -1937,7 +1808,7 @@ mod tests {
             Cell { centre: [2.0, -1.0, 7.0], half: [0.5, 1.0, 6.0] },
         ];
         for cell in cells {
-            let region = model.region(cell.centre, model.spans(&cell), 0.0);
+            let region = model.region(model.spans(&cell), 0.0);
             let couplings = model.couplings(&region);
             for r in points(&cell) {
                 let a = model.light.amplitudes(r);
@@ -1992,9 +1863,9 @@ mod tests {
                 }
             }
             // On the centre point, the values; on a cell a thousand times smaller, within that factor of them.
-            let point = model.region(cell.centre, region.spans.iter().map(Span::point).collect(), 0.0);
+            let point = model.region(region.spans.iter().map(Span::point).collect(), 0.0);
             let small = Cell { centre: cell.centre, half: cell.half.map(|h| h * 1e-3) };
-            let tiny = model.region(small.centre, model.spans(&small), 0.0);
+            let tiny = model.region(model.spans(&small), 0.0);
             let a = model.light.amplitudes(cell.centre);
             for (ci, cc) in model.carriers.iter().enumerate() {
                 for s in 0..GROUND {

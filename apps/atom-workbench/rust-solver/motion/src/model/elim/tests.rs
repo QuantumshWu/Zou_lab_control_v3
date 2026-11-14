@@ -839,3 +839,56 @@ fn a_shifted_excited_level_s_error_is_booked_through_the_fold() {
     assert!(booked[2].0 > share, "Δ = 500 MHz: {:?}", booked[2]);
     assert!(booked[3].0 > booked[2].0, "Δ = 30 MHz books more: {booked:?}");
 }
+
+/// The series about a reference evaluated as the definition takes it (module documentation of elim.rs, # The definition
+/// and the route it is evaluated on): the tests' reference for the engine's route (`Reference`, `Fold::evaluated`).
+impl Fold {
+    /// The fold's series about a reference z₀ (the engine's evaluation route; the self-consistent fold is the
+    /// definition): the resolvent's Neumann series R(z) = Σ_k (z₀ − z)^k R₀^{k+1}, R₀ = (z₀ + f − K)⁻¹, with z the P
+    /// generator H itself (a right factor, as in the Sylvester equation) gives the wave operator
+    /// T_f = Σ_k (−1)^k R₀^{k+1} W_f (H − z₀)^k and the generator H = A + Σ_k (−1)^k N_k (H − z₀)^k,
+    /// N_k = Σ_f W′_f R₀^{k+1} W_f. The N_k (and the jumps' C R₀^{k+1} W) are bilinear in the fields with coefficients
+    /// of the reference levels alone: what a table holds without the near light's coordinates. Returns N_0..N_K.
+    fn series(&self, z0: C64, orders: usize) -> Vec<Mat> {
+        let n = self.size();
+        let mut out = vec![Mat::zeros(n, n); orders + 1];
+        for (rep, responses) in self.replicas.iter().zip(self.responses_about(z0, orders)) {
+            for (form, x) in out.iter_mut().zip(&responses) {
+                form.add_scaled(C64::ONE, &rep.back.product(x));
+            }
+        }
+        out
+    }
+    /// The generator of the series to order K (`series`): the fixed point of H ← A + Σ_k (−1)^k N_k (H − z₀)^k from A
+    /// (`settle`, on n × n matrices alone); None where it does not settle.
+    fn series_generator(&self, forms: &[Mat], z0: C64) -> Option<Mat> {
+        let n = self.size();
+        let (h, _, exists) = settle(
+            &self.direct,
+            |h| {
+                let mut e = h.clone();
+                for i in 0..n {
+                    e[(i, i)] -= z0;
+                }
+                let (mut next, mut power, mut scale) = (self.direct.clone(), Mat::identity(n), self.direct.frobenius());
+                for (k, form) in forms.iter().enumerate() {
+                    let term = form.product(&power);
+                    scale += term.frobenius();
+                    next.add_scaled(C64::real(if k % 2 == 0 { 1.0 } else { -1.0 }), &term);
+                    power = power.product(&e);
+                }
+                (next, scale)
+            },
+            n * n * forms.len(),
+        );
+        exists.then_some(h)
+    }
+    /// The series' ratio q = ‖H − z₀‖₂ / d (the spectral norm, the largest singular value; d the least distance of
+    /// z₀ + f from the excited block's spectrum over the replicas, 1/‖R₀‖ where the excited block is normal): its
+    /// remainder after order K is within q^{K+1}/(1 − q) of the fold, relatively, where q < 1 (the Neumann series'
+    /// radius) -- the order an evaluation takes is the least whose remainder is within the share (criterion one's ρ
+    /// books it).
+    fn series_ratio(&self, z0: C64) -> f64 {
+        self.series_norm(z0) / self.series_distance(z0)
+    }
+}

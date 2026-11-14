@@ -126,57 +126,6 @@
 //! band about its smooth part (own.rs, # Bands), never a remainder of its form. A kept drive's lift of its ground level has
 //! the sign of its push away from the excited level (`pair_gate`).
 //!
-//! # The fold's order
-//! The second-order fold leaves out one term of the next order, the fourth-order light shift: a state's potentials are
-//! too deep by s/2 and the force on it too large by s, s = 2 × its excited share; its photons come too fast by s
-//! (exactly, on one line: the force (1 − s + 3/2 s²) and the rate 1/(1 + s) of the second order's). T follows the
-//! potentials' modulation, 0.8 to 0.9 s on a Sisyphus pattern -- the diffusion +0.6 s, the friction −0.2 s, both of the
-//! one term, not two errors to add --: the force's s bounds it, and that is booked, s p_g on T and on the populations.
-//! Where the fold has a fourth order (assemble.rs, # The fourth order; model.rs `Model::fold_frequency`) that part is
-//! its own unit, the cluster's (`Unit::Second`): kept, the fold is the fourth order's, the force's error 3/2 s² p_g and
-//! the levels' spread over the drive's distance times s (W3's one denominator a column), and the rates' s² p_g
-//! with the photon a jump's landing in the bare state draws (model.rs `Model::landed`, step.rs `jump`). A drive's own
-//! unit then carries what only keeping it explicit removes: that residue, and at either order its motion's part, the
-//! sweep a and the Doppler term's next order. Elsewhere a drive's unit carries all of it.
-//!
-//! These are one line's. A ground state's drives of one carrier are one fold, not several: with D_e = E_e − E_b − δ_c −
-//! iΓ_e/2 a drive's denominator and a_k = Σ_e |V_e|²/D_e^k, the state's slow eigenvalue is λ = −a₁(1 − a₂ + a₂² + a₁a₃ −
-//! …) -- the second order N = −a₁, the fourth a₁a₂ (assemble.rs: N, Y = a₂ and X = Σ_e |R_e|² are these sums) --, and
-//! every term the fourth order leaves, of λ, of the jumps' rate Σ_e Γ_e |R_e|² |1 + λ/D_e + …|²/(1 + X + …) and of the
-//! landing's norm, is a product of two numbers of two kinds: the state's excited share, a₂ or X, at most S_b/2 = Σ_e
-//! |R[e, b]|²; and its level's own second-order term over a drive's distance, a₁/D_e (the response's denominator moved
-//! by the fold itself: a₁a₃ = Σ_e (V_e/D_e)² a₁/D_e), in modulus L_e/2 = |N_bb|/|D_e|. At one distance both are S_b/2 --
-//! the excited states are one bright state, a two-level atom of the share S_b = Σ_e s_e, its rate the second order's
-//! over 1 + S_b exactly -- and the one line's remainders stand with S_b for s: c S_b², not c Σ_e s_e². At different
-//! distances a near line reads the far ones' light shift across its own distance, L_e ≤ Σ_f s_f |D_f/D_e|, which no
-//! share bounds. So a drive's line errs at the fourth order by c max(S_b, L_e)², c the one line's (`ORDER_RATES`,
-//! `ORDER_FORCE`), and its unit carries that on its part s_e/S_b of the state's excitation, c s_e max(S_b, L_e)²/S_b p_b
-//! (eliminate.rs `Model::drive_error`); the potential's own remainder |a₂² + a₁a₃| ≤ Σ_e s_e (S_b + L_e)/4 is within
-//! it. Against the exact waiting time of one ground state with one to three excited states (the test below): equal
-//! shares at one detuning leave +0.87 to +1.07 (Σs)² on resonance and −0.98 (Σs)² at 6 Γ, two and three times Σs²;
-//! shares of 0.04 at 3 Γ and at 30 Γ leave −7.2 (Σs)², 0.42 of what is booked. (An emulation of the same formulas on
-//! 16 000 random sets of one to four lines from 0.01 Γ to 100 Γ on either side of the light, max(S_b, L_e) up to 0.2:
-//! the rate's remainder is at most 1.09 Σ_e s_e max(S_b, L_e)²/S_b, the one resonant line's;
-//! motion3d_status/rewrite/booking.status.md.)
-//!
-//! The second order's own error is made of the same two numbers, once each. A line's rate is |R_e|² |1 + λ/D_e + …|²/(1 +
-//! X + …), and the second order takes |R_e|² alone: it errs by 2 Re(a₁/D_e), the level's own term over the line's
-//! distance -- far from every line the rate is high by ⟨L_e⟩ exactly --, and by the shares X and a₂, which on one line
-//! make up the same s. So the second order's s p_b is s_e max(S_b, L_e)/S_b p_b of a drive (`Folded::order`): Σ_e s_e p_b
-//! where the drives are at one distance, more where a near line reads a far one's shift -- a far line that is folded at
-//! the atom too: one folded with the bare levels moves the near one's denominator by its static form, which the levels
-//! at the atom hold. Measured (the same test): at one detuning the rate is high by 1.000 Σs; shares of 0.04 at 3 Γ and at
-//! 30 Γ, by 2.72 Σs (booked 3.21 Σs); 0.01 at 1 Γ with 0.05 at 40 Γ, by 3.10 Σs (5.83); 0.06, 0.006, 0.002 at 20, 64 and
-//! 90 Γ, by 1.19 Σs (1.26). The force's error -- twice the potential's -- stays within Σs at any distances (0.94 Σs at
-//! most there), within what T is booked. (The same emulation: the rate at most 1.000 Σ_e s_e max(S_b, L_e)/S_b, the one
-//! line's, where Σs is exceeded 24 times.)
-//!
-//! L_e/S_b is taken as a ratio of distances, (|N_bb|/|D_e|)/Σ_f (|V_f R_f|/|D_f|) (eliminate.rs `Model::drive_parameters`):
-//! 2|N_bb|/|D_e| over S_b where the responses are V/D, at most one at one distance, and one on a lone line whatever its
-//! response holds beside. (With 2|N_bb|/|D_e| against S_b itself the response's first-order Doppler term, R = (V/D)(1 −
-//! w/D) where the distance is |D + w|, made a lone line read L/S = 1/|1 − (w/D)²| -- 1.35 on R3_DOPPLER's fastest atoms:
-//! the Doppler term's own next order, which its unit books, counted again.)
-//!
 //! # A coupling of two states (`Unit::Term`)
 //! Everything the folds leave between two states a ← b at one exact beat β (∝ e^{iβt}) is one unit: the constant forms'
 //! entry (far.rs `constant`: one frequency's static form at β = 0, with the two states' own coupling when every light is
@@ -202,108 +151,27 @@
 //! A counter-rotating drive is only ever folded with the bare levels: one kept is refused, and so is a request whose
 //! counter-rotating folds do not exist by the one gate, every beam at its peak (`Model::new`). A co-rotating leg against a
 //! counter-rotating one is no term of the model (far.rs, # Two frequencies' constant form).
-//!
-//! # The errors (SPEC §1.5), measured at a trajectory state
-//! What the units' errors at one state have in common is made once for all of them (`Measured`): the beams' amplitudes and
-//! the point's region, the cluster's forms at the atom there -- one elimination, or its table's interpolant where the run
-//! has tables -- with the carriers' responses and the bare drives', the constant forms' energies and their slopes, the
-//! force on the state. Each unit's error is then a few numbers' arithmetic, nothing built per unit; only a carrier's
-//! dressing takes an elimination of its own (the one with its coherent field). A unit's small parameter at the state's
-//! point and momentum is mapped to the outputs by its leading order, the populations and T by the same weight -- the
-//! populations of the states it couples, so that a unit whose states are empty books nothing: a drive's fold its own
-//! share s p_g on the populations and (s + a) p_g on T (# The fold's order); a bare one also 2ε times its share of the state's rates, on
-//! both, and ε times its share of the state's light shifts on T (the relative errors it makes of them, as a dressing's;
-//! the shares of a state's drives, folded and kept, add up to one: beside an explicit line a distant one's rate is a
-//! small part of what moves the populations); a coupling of two states m²(p_a + p_b); a carrier's dressing its relative rate error on the state's rates (eliminate.rs); a photon
-//! coherence m²√(p_i p_j) (photon.rs).
-//!
-//! # A rate's error on the populations
-//! A fold that errs on a rate -- a bare drive's denominator's first order, its response off by ε and its rate by 2ε; a
-//! fold's next order, its line's rate off by c M^k (# The fold's order); a kept line read through a folded drive's
-//! self-energy, off by 2ε (eliminate.rs `Model::pair_error`) -- errs on the populations by what that rate moves, not by its
-//! share of the photons. A jump that lands where it began moves nothing; one that lands in another ground state b moves
-//! population into it. With W_b the rates of the sample's flows into b (each source's: a folded drive e ← g, |R[e, g]|²
-//! p_g Σ_a |C_a[b, e]|², b ≠ g; an explicit excited state, p_e Σ_a |C_a[b, e]|²) and x their rates' relative errors, b's
-//! inflow errs relatively by Σ x W_b/Σ W_b. What that does to the populations, to first order: between the states the
-//! flow joins and those it comes back from, of rates R one way and R' the other, the share s = R/(R + R') on the far side
-//! moves by ∂s/∂ln R = s(1 − s), at most the population on the flow's own side. So a sample books, of its cluster's
-//! ground population P, the inflow most in error: P max_b Σ x W_b/Σ W_b, each source its part x W_b/Σ W_b P of it, on the
-//! populations and on T (`Model::moved`) -- the flows into one state from the sample's sources are its fold's, those
-//! within a hyperfine level and those between two; a flow that a hyperfine level gets from no other source is all its
-//! inflow, whatever the photons of the cycling lines beside it. That is the flow's own side as the sample sees it --
-//! over the ensemble x(1 − s) for b's population s, where the first order is x s(1 − s), 1/s times less on a sparse
-//! side --: the sample sees no other side, so it tells its part and b (`UnitError::moved`, `into`), and the run takes
-//! that part against the output's populations, min(1, s/(1 − s)) of it, the lesser of the two sides (solve.rs
-//! `destined`). (The rate agent's e3 -- S3's tweezer, a σ+σ− probe pair
-//! at 1 mW 20 MHz red of the free F=2 → F'=3 line, the atom at rest: the probe's drives F=2 → F'=2, F'=1, folded with the
-//! bare levels at 247 MHz where the trap puts them at 200, pump F=2 → F=1 35 % too slowly -- F=1 0.33 where it is 0.40,
-//! the populations 7 % off --, and booked by their share of the photons, about a percent of them, they read 1.5 %.) A
-//! drive's rate errs on T by its share of the photons beside that (their recoils' heating): `Measured::rates`.
 
-use super::assemble::{NearValues, Plan};
 use super::cluster::Edge;
-use super::eliminate::{term_unit, Shift};
+use super::eliminate::Shift;
 use super::far::EXCITED;
 use super::own::{Band, Form, Own};
-use super::reach::{pair_span, Region, TermForm};
-use super::readout::Channels;
-use super::tabulate::Tables;
-use super::{Beat, Cluster, Component, Gate, Level, Model, Sample, Unit, UnitError, Wave};
-use crate::field::Amplitude;
+use super::reach::Region;
+use super::{Beat, Cluster, Component, Gate, Level, Model, Unit, Wave};
 use crate::linalg::norm3;
 use crate::linalg::{Mat, C64};
-use crate::request::{GROUND, STATES};
+use crate::request::GROUND;
 use crate::units::rounding;
-use std::cell::OnceCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
-
-/// The share of a flow's moved population that is booked at an output (module documentation, # A rate's error on the
-/// populations; solve.rs `Booking`). A state books x times its cluster's ground population, the flow's source side as it
-/// sees it -- over the ensemble x(1 − s), s the population of the flow's far side `into` (`UnitError::into`) --, where
-/// the first order is x s(1 − s), at most x times the lesser side, x min(s, 1 − s): the lesser side over the source
-/// side, min(1, s/(1 − s)), s the held population `p` of the far side at the output; all of it where no side is named.
-pub(crate) fn destined(into: u32, p: &[f64; STATES]) -> f64 {
-    let s: f64 = (0..GROUND).filter(|&b| into & 1 << b != 0).map(|b| p[b]).sum();
-    if into != 0 && s < 1.0 - s { s / (1.0 - s) } else { 1.0 }
-}
 
 /// Where a fold exists (module documentation): S = 2m² < ½ and a < ½.
 pub(crate) const EXISTS: f64 = 0.5;
-
-/// The fourth order's leading errors in one line's share s (module documentation, # The fold's order, where a ground
-/// state's several drives take the line's place; derivation: fourth.status.md), each the next order's: on the force
-/// 3/2 s², the next term of the one line's (1 − s + 3/2 s²); on the rates 9/8 s², the most that the slow state's
-/// jumps with the landing's norm against the threshold (model.rs
-/// `Model::landed`) leave of the exact 1/(1 + s) at any detuning. Far from the line −s² (the jumps and their prompt
-/// photons, 1/(1 − p) a jump: −0.99 s² measured). On resonance the jumps with the exact mean interval (1 − p)/γ are
-/// right to this order (+0.00 s²), and the landing's norm 1 − p = 1 + 3s/2 held against the threshold waits
-/// ln(1 − p)/γ where that mean has −p/γ: the rate is high by p²/2 = (3/2)²/2 s² (two levels: +1.07 s² at s = 0.03,
-/// between the two at the detunings between, the test below).
-pub(crate) const ORDER_FORCE: f64 = 3.0 / 2.0;
-pub(crate) const ORDER_RATES: f64 = {
-    // −p/s on resonance, p = (s/2)(Δ² − 3Γ²/4)/(Δ² + Γ²/4) at Δ = 0; then p²/2.
-    let landing = 3.0 / 2.0;
-    landing * landing / 2.0
-};
-
-/// The leading error of a Raman pair's fold in its mixing m² (eliminate.rs `Model::pair_error`): the kept line reads
-/// the folded leg's self-energy |U|²/(d_R + λ) at λ = 0, and its response's next term makes its rate m² (3ε² − Γ²/4)/(ε² +
-/// Γ²/4) and its shift m² (ε² − 3Γ²/4)/(ε² + Γ²/4) of themselves -- at any detuning ε of the kept line at most 3 m².
-pub(crate) const PAIR: f64 = 3.0;
 
 impl Gate {
     /// Whether the fold exists where the gate was read: both values below ½.
     pub fn exists(&self) -> bool {
         self.saturation < EXISTS && self.sweep < EXISTS
-    }
-
-    /// The gate with its sweep as far as an output can see it (module documentation, # One rule): the sweep read against
-    /// the larger of the fold's largest error from any motion, (2m)² = 2S of its states' population, and the least share
-    /// any output resolves, unseen(2¹⁴) -- a · min(1, 2S/unseen), continuous and monotone in both, so that a bound over a
-    /// cell tends to its point value.
-    pub(crate) fn resolved(self) -> Gate {
-        OwnGate { saturation: Own::constant(self.saturation), sweep: Own::constant(self.sweep) }.resolved().upper()
     }
 
 }
@@ -361,62 +229,6 @@ pub(crate) fn gate_own(size: Own, distance: Own, rate: Own) -> OwnGate {
     };
     let m = over(size, distance);
     OwnGate { saturation: m.square().scale(2.0), sweep: over(rate, distance.square()) }
-}
-
-/// What the units' errors at one trajectory state share (module documentation, # The errors): the state; the beams'
-/// amplitudes; the point's region at the state's speed; the cluster's plan under the running lights and its forms at the
-/// atom at the point (the Hermitian ones to first order), with each carrier's folded response there; the bare drives'
-/// responses there per component (readout.rs `Model::far_channels`); the state's excitation drive by drive -- Σ |R[e, g]|²
-/// p_g over its folded drives, bare ones and those at the atom, with its explicit states' populations: its rates' measure;
-/// and Σ |V[e, g] R[e, g]| p_g with its kept drives' |V[e, g]| |ψ_e| |ψ_g|: its light shifts' --; per carrier and ground
-/// place of the cluster what that carrier's fold at the atom makes of the state (`Fold`);
-/// the levels' energies at the atom to first order ([part][state], eliminate.rs `Model::far_energies`); the force on the
-/// state (rad/µs/µm); its populations; and, made when asked, its cluster's photon classes' jump operators' sizes at the
-/// point (photon.rs `Model::class_sizes`), per carrier the first-order Doppler term's size per ground place, and the
-/// kept drives' couplings at the point with the ground levels' lifts by them (eliminate.rs `Model::kept_at`,
-/// `Model::lifts_at`: what every drive folded onto an explicit state asks of the point, its pairs' legs).
-pub(crate) struct Measured<'a> {
-    pub(crate) sample: &'a Sample,
-    pub(crate) amplitudes: Vec<Amplitude>,
-    pub(crate) region: Region,
-    pub(crate) plan: Arc<Plan>,
-    pub(crate) near: NearValues,
-    pub(crate) responses: Vec<Option<Mat>>,
-    pub(crate) bare: Vec<Channels>,
-    pub(crate) rates: f64,
-    pub(crate) shifts: f64,
-    pub(crate) folds: Vec<Vec<Fold>>,
-    pub(crate) energies: Vec<Vec<f64>>,
-    pub(crate) force: [f64; 3],
-    pub(crate) populations: [f64; STATES],
-    pub(crate) classes: OnceCell<Vec<[f64; 3]>>,
-    pub(crate) doppler: Vec<OnceCell<Vec<f64>>>,
-    pub(crate) kept: OnceCell<Vec<C64>>,
-    pub(crate) lifts: OnceCell<[f64; GROUND]>,
-    pub(crate) moved: OnceCell<(u32, Vec<(Flow, f64)>)>,
-}
-
-/// A source of a flow into the ground states at a sample whose rate a fold errs on (module documentation, # A rate's error on
-/// the populations), by the unit that books it: a drive e ← g folded with the bare levels, one at the atom (its line's
-/// order), and a folded drive e ← g onto an explicit state e (the kept lines through e, read through its self-energy).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Flow {
-    Bare(Component, usize, usize),
-    Atom(Component, usize, usize),
-    Kept(Component, usize, usize),
-}
-
-/// What a carrier's fold at the atom makes of a ground state g of a sample's cluster (`Measured::folds`; the numbers the
-/// fold's orders' errors are made of, module documentation, # The fold's order): its excited share S_g = 2 Σ_e |R[e, g]|²;
-/// its level's own second-order term N_gg = Σ_e V[e, g]* R[e, g], its light shift and half its rate; each drive's size
-/// in that, |V[e, g] R[e, g]| (by excited state less GROUND); and, made when a drive asks, the sum of those sizes each
-/// across its drive's distance (eliminate.rs `Model::drive_parameters`).
-#[derive(Clone)]
-pub(crate) struct Fold {
-    pub(crate) share: f64,
-    pub(crate) level: C64,
-    pub(crate) terms: [f64; EXCITED],
-    pub(crate) across: OnceCell<f64>,
 }
 
 /// One drive of a ground state in the tail rule's order (module documentation, # The tail rule): its component and excited
@@ -478,12 +290,9 @@ pub(crate) struct Kept {
     pub(crate) distance: Own,
 }
 
-/// Two frequencies' constant form (far.rs `constant`): on their fields' bases and per pair of their beams, with the
-/// rounding of an entry's own sums (reach.rs `TermForm::rounding_of`) -- the form's, whichever entry is read.
+/// Two frequencies' constant form (far.rs `constant`) on their fields' bases.
 pub(crate) struct Cross {
     pub(crate) forms: Vec<Mat>,
-    pub(crate) pairs: Vec<Mat>,
-    pub(crate) rounding: f64,
 }
 
 impl Model {
@@ -570,8 +379,7 @@ impl Model {
             .or_insert_with(|| {
                 let (t, f) = (&self.tones[to], &self.tones[from]);
                 let forms = if to == from { t.forms.clone() } else { super::far::constant(t, f) };
-                let pairs = if to == from { t.pairs.clone() } else { super::far::per_pair(t, f, &forms) };
-                Arc::new(Cross { rounding: TermForm::rounding_of(self, to, from, &pairs), pairs, forms })
+                Arc::new(Cross { forms })
             })
             .clone()
     }
@@ -591,58 +399,6 @@ impl Model {
     /// kept, each of them is folded with the levels at the atom.
     pub fn bare_units(&self, component: Component) -> Vec<Unit> {
         self.driven.iter().filter(|d| d.0 == component).map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }).collect()
-    }
-
-    /// The candidate units of this model (model.rs `Unit`), those it folds: each folded drive at its level; the second
-    /// order of each cluster's fold at the atom that has a fourth (model.rs `Model::fold_frequency`); the couplings
-    /// of two ground states, and of an explicit excited state with another excited one, at each of the model's beats
-    /// (module documentation, # A coupling of two states) that no cluster holds as they are; the carriers' dressings and the
-    /// photon coherences (eliminate.rs, photon.rs).
-    pub fn units(&self) -> Vec<Unit> {
-        let mut out = vec![];
-        for &(component, excited, ground) in &self.driven {
-            match self.level(component, excited, ground) {
-                Level::Bare => out.push(Unit::Bare { component, excited, ground }),
-                Level::Atom => out.push(Unit::Drive { component, excited, ground }),
-                Level::Explicit => {}
-            }
-        }
-        // The second order of a cluster's fold at the atom, where the fold has a next order and is not taken to it.
-        for (c, cluster) in self.clusters.iter().enumerate() {
-            if self.fourth[c].is_none() && self.fold_frequency(c).is_some() {
-                out.push(Unit::Second { ground: cluster.states[0] });
-            }
-        }
-        let mut listed: HashSet<Unit> = HashSet::new();
-        for (index, (beat, _)) in self.beats.iter().enumerate() {
-            for a in 0..STATES {
-                for b in 0..STATES {
-                    if !(if a < GROUND { b < GROUND } else { b >= GROUND && (self.explicit(a) || self.explicit(b)) }) {
-                        continue;
-                    }
-                    let unit = term_unit(a, b, beat);
-                    if !listed.contains(&unit) && !self.forms.term(self, a, b, index).is_empty() && !self.in_generator(a, b, beat) {
-                        listed.insert(unit.clone());
-                        out.push(unit);
-                    }
-                }
-            }
-        }
-        // A carrier's dressing: where its T̄ averages an interference (several polarization units) and an elimination takes
-        // it -- some carrier has a drive folded at the atom, whose denominators hold its static form and its light shifts
-        // (eliminate.rs, # The response).
-        let eliminated = self.carriers.iter().any(|cc| cc.folded.iter().any(|x| x.data.iter().any(|z| *z != C64::ZERO)));
-        for cc in self.carriers.iter().filter(|_| eliminated) {
-            let mut units = cc.units.clone();
-            units.sort();
-            units.dedup();
-            if units.len() > 1 {
-                out.push(Unit::Dressing { carrier: Component { frequency: cc.frequency, counter: false } });
-            }
-        }
-        out.extend(self.coherence_units());
-        out.retain(|u| !self.kept.contains(u));
-        out
     }
 
     /// Whether the coupling a ← b at a beat is in this model's generators as it is (SPEC §1.4), nothing of it folded: the
@@ -968,66 +724,6 @@ impl Model {
         most
     }
 
-    /// The bound over a region of the denominator of a drive e ← s folded at the atom at the detuning δ: its two levels'
-    /// distance there, |E_e − E_s − δ| at the centre less the spread of the difference of the levels the eliminations take
-    /// (eliminate.rs `Gap`) and the excited state's Gershgorin radius (`Model::radii`), across Γ_e/2, in its own form (own.rs).
-    pub(crate) fn denominator_own(&self, region: &Region, e: usize, s: usize, detuning: f64) -> Own {
-        let apart = self.gap(e, s, region, detuning).taken.abs().sub(self.radii(region)[e]);
-        apart.max(Own::constant(0.0)).hypot(0.5 * self.decay[(e - GROUND, e - GROUND)].re)
-    }
-
-    /// A coupling's (`Unit::Term`: a ← b at the model's beat `beat`) saturation and sweep over a region (module documentation,
-    /// # A coupling of two states), made once per region. Its size: the constant part's value |H_ab + Σ_ji c_ji C_ji[a, b]| at
-    /// the centre (H_ab the two states' own coupling with every light off, a static one's), its modulus over the region of
-    /// its own form (reach.rs `Region::modulus`), at most every beam at its largest amplitude and in phase; and the part at the atom, per excited state ½ |u'_a[e]| |u_b[e]| (1/σ_eb + 1/σ'_ea), u the two
-    /// frequencies' folded couplings' coherent bounds and σ the denominator's bound of each drive folded at the atom (the
-    /// bare drives' halves are the constants'). Its distance: |β + E_a + δ_a − E_b − δ_b| over the region, of the dressed
-    /// levels -- the two levels' difference (eliminate.rs `Gap`) and their shifts by their drives folded at the atom with
-    /// their signs (`near_level`), one band --, less the Doppler shift of its beam pairs' largest wave vector q at the
-    /// region's speeds; between two excited states across their coherence's decay rate γ = (Γ_a + Γ_b)/2, its size by
-    /// √(γ/min(Γ_a, Γ_b)) (module documentation, # A coupling of two states); its rate v |∇(E_a + δ_a − E_b − δ_b)| + q a_max,
-    /// the gradient of the dressed levels' difference (one state's beat moves with neither), the acceleration in their
-    /// clusters. On a point, its measured values there.
-    pub(crate) fn term_bound(&self, form: &TermForm, a: usize, b: usize, beat: usize, region: &Region) -> (f64, f64) {
-        region.term((a, b, beat), || {
-            let (size, distance, rate) = self.term_parts(form, a, b, beat, region);
-            let made = gate_own(size, distance, rate).resolved().upper();
-            (made.saturation, made.sweep)
-        })
-    }
-
-    /// A coupling's size, distance and rate over a region (`term_bound`), its distance not read where its size is
-    /// nothing (∞).
-    pub(crate) fn term_parts(&self, form: &TermForm, a: usize, b: usize, beat: usize, region: &Region) -> (Own, Own, Own) {
-        let none = Own::constant(0.0);
-        let mut size = region.modulus(form.pairs.iter().map(|&(lj, li, v, size)| (pair_span(&region.spans, lj, li), v, size)), form.base);
-        for leg in &form.legs {
-            let e = GROUND + leg.excited;
-            let half = |detuning: Option<f64>, s: usize| detuning.map_or(none, |detuning| self.denominator_own(region, e, s, detuning).recip());
-            size = size.add(region.coherent_own(&leg.to).mul(region.coherent_own(&leg.from)).mul(half(leg.from_atom, b).add(half(leg.to_atom, a))).scale(0.5));
-        }
-        if size.upper() == 0.0 {
-            return (none, Own::constant(f64::INFINITY), none);
-        }
-        let gap = self.gap(a, b, region, -self.omega(&self.beats[beat].0));
-        let dressed = if a == b { Shift::of(gap.all, Form::zero()) } else { Shift::of(gap.all, self.gap_slope(a, b, region, false)).add(&self.near_level(a, region)).sub(&self.near_level(b, region)) };
-        let acceleration = self.acceleration(region, &|c| c.states.contains(&a) || c.states.contains(&b));
-        let rate = region.pace.mul(dressed.steepness()).add(acceleration.scale(form.wave));
-        let apart = dressed.band.apart().sub(region.pace.scale(form.wave));
-        // Two decaying states' coherence: its width, and the mixing it leaves the state that decays the slower.
-        let width = |s: usize| if s >= GROUND { self.decay[(s - GROUND, s - GROUND)].re } else { 0.0 };
-        let (gamma, least) = (0.5 * (width(a) + width(b)), width(a).min(width(b)));
-        if a != b && least > 0.0 {
-            return (size.scale((gamma / least).sqrt()), apart.max(none).hypot(gamma), rate);
-        }
-        (size, apart, rate)
-    }
-
-    /// The model's beat a unit's coupling names, its place among `Model::beats`.
-    fn beat_index(&self, beat: &Beat) -> Option<usize> {
-        self.beats.iter().position(|b| b.0 == *beat)
-    }
-
     /// The drives folded onto explicit excited states whose Raman pairs cannot be folded anywhere (model.rs
     /// `Model::settled`): of each co-rotating drive e ← w folded (with the bare levels or at the atom) onto an explicit
     /// state e, the one gate (`gate`) of its pairs with e's kept drives e ← a, every beam at its peak (the sum of its beams'
@@ -1051,286 +747,6 @@ impl Model {
             })
             .map(|(component, excited, ground)| Unit::Drive { component, excited, ground })
             .collect()
-    }
-
-    /// Each candidate unit's errors at each sample (`Model::units`), [unit][sample]: its small parameter at the sample's point
-    /// mapped to the outputs (module documentation, # The errors), the forms at the atom from the exact elimination at the
-    /// point.
-    pub fn errors(&self, units: &[Unit], samples: &[Sample]) -> Vec<Vec<UnitError>> {
-        self.errors_with(units, samples, None)
-    }
-
-    /// The units' errors at the samples (`errors`), the forms at the atom from their tables where they serve (tabulate.rs): a
-    /// state then costs an interpolation and the units' arithmetic, and one elimination more per dressing unit.
-    pub fn errors_with(&self, units: &[Unit], samples: &[Sample], tables: Option<&Tables>) -> Vec<Vec<UnitError>> {
-        let mut out: Vec<Vec<UnitError>> = units.iter().map(|_| Vec::with_capacity(samples.len())).collect();
-        for sample in samples {
-            for (errors, error) in out.iter_mut().zip(self.errors_at(units, sample, tables)) {
-                errors.push(error);
-            }
-        }
-        out
-    }
-
-    /// The units' errors at one sample (`errors_with`), in the units' order: what the sample's units share made once
-    /// (`Measured`), then each unit's arithmetic.
-    pub fn errors_at(&self, units: &[Unit], sample: &Sample, tables: Option<&Tables>) -> Vec<UnitError> {
-        let at = self.measured(sample, tables);
-        units.iter().map(|unit| self.unit_error(unit, &at)).collect()
-    }
-
-    /// What the units' errors at a sample share (`Measured`).
-    pub(crate) fn measured<'a>(&self, sample: &'a Sample, tables: Option<&Tables>) -> Measured<'a> {
-        let lights = self.running();
-        let amplitudes = self.light.amplitudes(sample.at.r);
-        let plan = self.plan(sample.cluster, &lights);
-        let sections = [(plan.near.hermitian(), 1), (plan.near.jumping(), 0), (plan.near.responding(), 0)];
-        let near = self.near_values(&plan, &amplitudes, &sections, tables.and_then(|t| t.of(sample.cluster, &lights)));
-        let responses = self.carrier_responses(&plan, &near, &amplitudes, sample.at.kappa);
-        // The force on the state at the point: −tr(G ρ) of its density (step.rs `Middle::force`, at rest on the middle).
-        let middle = self.middle_of(&plan, sample.at.t, &amplitudes, Some(&near));
-        let (n, norm) = (sample.psi.len(), crate::linalg::norm_sqr(&sample.psi));
-        let rho: Vec<C64> = (0..n * n).map(|i| sample.psi[i / n] * sample.psi[i % n].conj() / norm).collect();
-        let force = crate::step::Middle::force(&middle, &crate::step::Middle::path(&middle, sample.at.kappa, [0.0; 3]), 0.0, &rho).map(|f| -f);
-        // The state's folded excitation drive by drive: a bare one's coupling is its response times its bare denominator, one
-        // at the atom's is its beams' at the point.
-        let bare = self.far_channels(sample.cluster, &amplitudes, &lights);
-        let populations = self.state_populations(sample);
-        let c = &self.clusters[sample.cluster];
-        let (mut rates, mut shifts) = (0.0, 0.0);
-        let mut folds = vec![vec![Fold { share: 0.0, level: C64::ZERO, terms: [0.0; EXCITED], across: OnceCell::new() }; c.ground]; self.carriers.len()];
-        for (y, &g) in c.states[..c.ground].iter().enumerate() {
-            for x in 0..EXCITED {
-                for channel in &bare {
-                    let size = channel.response[(x, y)].norm_sqr();
-                    if size > 0.0 {
-                        rates += size * populations[g];
-                        shifts += size * self.bare_distance(channel.component, GROUND + x, g) * populations[g];
-                    }
-                }
-                for ((cc, response), fold) in self.carriers.iter().zip(&responses).zip(&mut folds) {
-                    let response = response.as_ref().map_or(C64::ZERO, |r| r[(x, y)]);
-                    let size = response.abs();
-                    if size > 0.0 {
-                        let coupling: C64 = cc.beams.iter().zip(&cc.folded).map(|(&l, m)| amplitudes[l].value * m[(GROUND + x, g)]).sum();
-                        rates += size * size * populations[g];
-                        shifts += size * coupling.abs() * populations[g];
-                        // (A drive's size the modulus of its own term: one drive's is the level's, to the bit.)
-                        let term = coupling.conj() * response;
-                        fold[y].share += 2.0 * size * size;
-                        fold[y].level += term;
-                        fold[y].terms[x] = term.abs();
-                    }
-                }
-            }
-        }
-        // The kept drives' part of both: an explicit state's population is its excitation as it is, and its coupling's
-        // energy |V[e, g]| |ψ_e| |ψ_g| what a fold's |V R| p_g is of ψ_e = −R ψ_g.
-        for &e in &c.states[c.ground..] {
-            rates += populations[e];
-            for &g in &c.states[..c.ground] {
-                let coupling: C64 = self
-                    .carriers
-                    .iter()
-                    .filter(|cc| self.level(Component { frequency: cc.frequency, counter: false }, e, g) == Level::Explicit)
-                    .flat_map(|cc| cc.beams.iter().zip(&cc.couplings).map(|(&l, m)| amplitudes[l].value * m[(e, g)]))
-                    .sum();
-                shifts += coupling.abs() * (populations[e] * populations[g]).sqrt();
-            }
-        }
-        Measured {
-            sample,
-            region: self.point_region(sample.at.r, self.hbar_over_mass * norm3(sample.at.kappa)),
-            near,
-            responses,
-            bare,
-            rates,
-            shifts,
-            folds,
-            energies: {
-                let mut energies = vec![];
-                self.far_energies(&amplitudes, &lights, 1, &self.coherent_dressing(), &mut energies);
-                energies
-            },
-            force,
-            populations,
-            classes: OnceCell::new(),
-            doppler: self.carriers.iter().map(|_| OnceCell::new()).collect(),
-            kept: OnceCell::new(),
-            lifts: OnceCell::new(),
-            moved: OnceCell::new(),
-            amplitudes,
-            plan,
-        }
-    }
-
-    /// A unit's error at a sample from what the sample's units share.
-    fn unit_error(&self, unit: &Unit, at: &Measured) -> UnitError {
-        let error = self.unit_error_alone(unit, at);
-        UnitError { into: if error.moved > 0.0 { self.moved_into(at) } else { 0 }, ..error }
-    }
-
-    /// A unit's error at a sample (`unit_error`), its flow's destination not yet told.
-    fn unit_error_alone(&self, unit: &Unit, at: &Measured) -> UnitError {
-        match unit {
-            Unit::Bare { component, excited, ground } | Unit::Drive { component, excited, ground } => {
-                let (own, response) = if matches!(unit, Unit::Bare { .. }) { self.bare_error(unit, at) } else { self.drive_error(unit, at) };
-                let pair = self.pair_error(*component, *excited, *ground, response, at);
-                UnitError { parameter: own.parameter.max(pair.parameter), population: own.population + pair.population, temperature: own.temperature + pair.temperature, moved: own.moved + pair.moved, into: 0 }
-            }
-            Unit::Second { ground } => self.order_error(*ground, at),
-            Unit::Term { a, b, beat } => {
-                let m2 = self.beat_index(beat).map_or(0.0, |index| 0.5 * self.term_bound(&self.forms.term(self, *a, *b, index), *a, *b, index, &at.region).0);
-                // Its states' populations weigh it: where they are empty it books nothing, whatever its mixing (an
-                // infinite one, across a distance of nothing, too).
-                let weight = at.populations[*a] + at.populations[*b];
-                let error = if weight > 0.0 { m2 * weight } else { 0.0 };
-                UnitError { parameter: m2, population: error, temperature: error, ..UnitError::NONE }
-            }
-            Unit::Dressing { carrier } => self.dressing_error(*carrier, at),
-            Unit::Block { .. } | Unit::Series | Unit::Normalization { .. } => UnitError::NONE,
-            Unit::Coherence { .. } => self.coherence_error(unit, at),
-        }
-    }
-
-    /// The part of the populations a flow's rate error moves at a sample (module documentation, # A rate's error on the
-    /// populations; `moved_made`), every flow's made once for the sample; nothing for a flow the sample does not have.
-    pub(crate) fn moved(&self, at: &Measured, flow: Flow) -> f64 {
-        let parts = &at.moved.get_or_init(|| self.moved_made(at)).1;
-        parts.binary_search_by(|of| of.0.cmp(&flow)).map_or(0.0, |place| parts[place].1)
-    }
-
-    /// The far side of the sample's flows (`UnitError::into`; `moved_made`), made once for the sample with them.
-    pub(crate) fn moved_into(&self, at: &Measured) -> u32 {
-        at.moved.get_or_init(|| self.moved_made(at)).0
-    }
-
-    /// The sample's flows into the ground states (`moved`): per source its rates W_b into each ground state b and its
-    /// rate's relative error x, by the units that own it -- a bare drive's 2ε (`bare_error`), a drive at the atom's line
-    /// order c M^k (eliminate.rs `Folded`: M = S_b L_e/S_b, k = 2 where its cluster's fold is the fourth order's), the kept
-    /// lines through an explicit state 2ε per folded drive onto it (eliminate.rs `Model::pair_reading`) --; the ground
-    /// state b whose inflow errs relatively the most, Σ x W_b/Σ W_b; and each owner's part x W_b/Σ W_b of the cluster's
-    /// ground population there, in the owners' order (one search a unit: every unit at a sample asks its own).
-    ///
-    /// With them their far side (`UnitError::into`): the ground states of the hyperfine level of b, a bit each -- a flow
-    /// between two hyperfine levels moves the one's share against the other's, whichever of its states the sample's
-    /// flows reach the most, and one within a level moves its states' shares within the level's (a cluster is no
-    /// level: its states are those the kept couplings join, a ground state alone where none does); none where the
-    /// sample has no flow. Both are the sample's, the same for every unit that books a flow there: made once.
-    fn moved_made(&self, at: &Measured) -> (u32, Vec<(Flow, f64)>) {
-        let (cluster, p) = (at.sample.cluster, &at.populations);
-        let c = &self.clusters[cluster];
-        let land = |e: usize, b: usize| -> f64 { (0..3).map(|a| self.emission[a][(b, e)].norm_sqr()).sum() };
-        let into = |e: usize, from: Option<usize>, weight: f64| -> [f64; GROUND] { std::array::from_fn(|b| if Some(b) == from { 0.0 } else { weight * land(e, b) }) };
-        let mut sources: Vec<(Vec<(Flow, f64)>, [f64; GROUND])> = vec![];
-        for (y, &g) in c.states[..c.ground].iter().enumerate() {
-            for x in 0..EXCITED {
-                let e = GROUND + x;
-                for channel in &at.bare {
-                    let size = channel.response[(x, y)].norm_sqr();
-                    if size > 0.0 {
-                        let epsilon = self.drive_motion(channel.component, e, g, at).0.abs() / self.bare_distance(channel.component, e, g);
-                        sources.push((vec![(Flow::Bare(channel.component, e, g), 2.0 * epsilon)], into(e, Some(g), size * p[g])));
-                    }
-                }
-                for (cc, response) in self.carriers.iter().zip(&at.responses) {
-                    let component = Component { frequency: cc.frequency, counter: false };
-                    let size = response.as_ref().map_or(0.0, |r| r[(x, y)].norm_sqr());
-                    if size > 0.0 && self.level(component, e, g) == Level::Atom {
-                        let line = self.drive_parameters(&Unit::Drive { component, excited: e, ground: g }, at).map_or(0.0, |d| {
-                            let m = d.total * d.reads;
-                            if self.fourth[cluster].is_some() { ORDER_RATES * m * m } else { m }
-                        });
-                        sources.push((vec![(Flow::Atom(component, e, g), line)], into(e, Some(g), size * p[g])));
-                    }
-                }
-            }
-        }
-        for &e in &c.states[c.ground..] {
-            let owners = self.driven.iter().filter(|d| d.1 == e && self.level(d.0, d.1, d.2) != Level::Explicit && !self.pair_legs(d.0, d.1, d.2).is_empty());
-            let owners = owners.filter_map(|&(component, _, g)| self.pair_reading(component, e, g, at).map(|read| (Flow::Kept(component, e, g), 2.0 * read.1))).collect();
-            sources.push((owners, into(e, None, p[e])));
-        }
-        let total: [f64; GROUND] = std::array::from_fn(|b| sources.iter().map(|of| of.1[b]).sum());
-        let erring: [f64; GROUND] = std::array::from_fn(|b| sources.iter().map(|of| of.0.iter().map(|o| o.1).sum::<f64>() * of.1[b]).sum());
-        let Some(b) = (0..GROUND).filter(|&b| total[b] > 0.0).max_by(|&x, &y| (erring[x] / total[x]).total_cmp(&(erring[y] / total[y]))) else { return (0, vec![]) };
-        let held: f64 = p[..GROUND].iter().sum();
-        let mut parts: Vec<(Flow, f64)> = sources.into_iter().flat_map(|(owners, rates)| owners.into_iter().map(move |(flow, x)| (flow, x * rates[b] / total[b] * held))).collect();
-        parts.sort_by_key(|of| of.0);
-        let level = |s: usize| crate::request::Level::parse(&self.labels[s]).map(|l| l.f).ok();
-        ((0..GROUND).filter(|&s| level(s) == level(b)).fold(0, |side, s| side | 1 << s), parts)
-    }
-
-    /// The error at a sample of the second order of a cluster's fold at the atom (`Unit::Second`; module documentation,
-    /// # The errors, # The fold's order): of each drive folded at the atom from the sample's ground states -- s = 2|R[e, g]|²
-    /// its share, M the larger of its ground state's share S_g and of that level's own term across the drive's distance
-    /// (eliminate.rs `Folded::order`), its line's rate off by M -- what its flows move (`moved`, # A rate's error on the
-    /// populations) and its folded excited population s/2 p_g off by M, on the populations; on T s M/S_g p_g, the rates'
-    /// share, which bounds the force's (Σ s p_g at any distances), and the flows' part. Zero off the cluster, and where its
-    /// fold is the fourth order's.
-    fn order_error(&self, ground: usize, at: &Measured) -> UnitError {
-        let cluster = self.membership[ground];
-        let Some(frequency) = self.fold_frequency(cluster).filter(|_| at.sample.cluster == cluster && self.fourth[cluster].is_none()) else {
-            return UnitError::NONE;
-        };
-        let component = Component { frequency, counter: false };
-        let c = &self.clusters[cluster];
-        let (mut rates, mut moved, mut flows, mut held) = (0.0, 0.0, 0.0, 0.0);
-        if self.carrier_of(frequency).is_some_and(|ci| at.responses[ci].is_some()) {
-            for &g in &c.states {
-                held += at.populations[g];
-                for e in (GROUND..STATES).filter(|&e| self.level(component, e, g) == Level::Atom) {
-                    if let Some(drive) = self.drive_parameters(&Unit::Drive { component, excited: e, ground: g }, at) {
-                        rates += drive.order(1) * drive.population;
-                        let flow = self.moved(at, Flow::Atom(component, e, g));
-                        flows += flow;
-                        moved += flow + 0.5 * drive.share * drive.total * drive.reads * drive.population;
-                    }
-                }
-            }
-        }
-        UnitError { parameter: if held > 0.0 { rates / held } else { 0.0 }, population: moved, temperature: rates + moved, moved: flows, into: 0 }
-    }
-
-    /// The error at a sample of a drive folded with the bare levels (module documentation, # Levels, # The errors): its own
-    /// share s = 2|R⁰[e, g]|² of its ground state, as every fold's -- s p_g on the populations, (s + a) p_g on T, a its
-    /// sweep across its denominator at the atom --; and the first order of its denominator, ε = |δΔ|/|Δ₀ − iΓ_e/2|
-    /// (eliminate.rs `Model::drive_motion`), the relative error of its response: of its rate 2ε, which moves the
-    /// populations by what its flows move (`moved`, # A rate's error on the populations), on the populations and on T;
-    /// and on T the state's rates' and light shifts' relative errors, 2ε times its share |R⁰[e, g]|² p_g of the rates and ε
-    /// times its share |V R⁰| p_g of the light shifts (`Measured::rates`, `Measured::shifts`: shares that add up to one
-    /// over the state's drives, folded and kept, so that the units' errors add up to the state's), booked on the state's
-    /// ground population as a dressing's relative rate error is. Zero where the sample's cluster does not
-    /// hold its ground state. With the drive's response there, where the cluster holds it (the Raman pairs' error reads
-    /// it, eliminate.rs `Model::pair_error`).
-    fn bare_error(&self, unit: &Unit, at: &Measured) -> (UnitError, Option<C64>) {
-        let nothing = (UnitError::NONE, None);
-        let Unit::Bare { component, excited, ground } = *unit else { return nothing };
-        let c = &self.clusters[at.sample.cluster];
-        let (Some(y), Some(channel)) = (c.states[..c.ground].iter().position(|&s| s == ground), at.bare.iter().find(|channel| channel.component == component)) else { return nothing };
-        let response = channel.response[(excited - GROUND, y)];
-        let s = 2.0 * response.norm_sqr();
-        let (moved, rate) = self.drive_motion(component, excited, ground, at);
-        let own = self.bare_distance(component, excited, ground);
-        let gamma = self.decay[(excited - GROUND, excited - GROUND)].re;
-        let nu = self.tones[component.frequency].nu[component.counter as usize];
-        let sweep = gate(0.0, C64::new(self.energies[excited] - self.energies[ground] - nu + moved, 0.5 * gamma).abs(), rate).sweep;
-        let (epsilon, p, held) = (moved.abs() / own, at.populations[ground], at.populations[..GROUND].iter().sum::<f64>());
-        let share = |of: f64, all: f64| if all > 0.0 { of * p / all } else { 0.0 };
-        let (rates, shifts) = (2.0 * epsilon * share(response.norm_sqr(), at.rates) * held, epsilon * share(response.norm_sqr() * own, at.shifts) * held);
-        let moved = self.moved(at, Flow::Bare(component, excited, ground));
-        (UnitError { parameter: epsilon, population: s * p + moved, temperature: (s + sweep) * p + rates + shifts + moved, moved, into: 0 }, Some(response))
-    }
-
-    /// A sample's populations of the model basis' states on its cluster (|ψ_s|²/‖ψ‖²; zero off its cluster).
-    pub(crate) fn state_populations(&self, s: &Sample) -> [f64; STATES] {
-        let c = &self.clusters[s.cluster];
-        let total: f64 = s.psi.iter().map(|z| z.norm_sqr()).sum();
-        let mut p = [0.0; STATES];
-        for (i, &x) in c.states.iter().enumerate() {
-            p[x] = s.psi[i].norm_sqr() / total;
-        }
-        p
     }
 
     /// The exact wave vector of a beam pair's term, absorbing `absorbed` and emitting `emitted`: k_absorbed − k_emitted.

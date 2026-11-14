@@ -207,7 +207,6 @@ pub(crate) struct Fold {
     pub replicas: Vec<Folded>,
     pub eigen: Eigen,
     pub exists: bool,
-    pub iterations: usize,
     /// The reference z₀ where the fold is its series' order 0 about it (`fold`'s `reference`), none where it is the
     /// self-consistent fold.
     pub reference: Option<f64>,
@@ -456,8 +455,8 @@ fn difference(a: &Mat, b: &Mat) -> f64 {
 /// Beyond it (false) the fold is not this point's -- a slow and a fast mode come together (a two-level atom on
 /// resonance at s = ½, its exceptional point, starts at exactly a quarter) -- and the partition makes the excited
 /// block explicit. Where it exists the iteration goes on to its floor: until a change is within the rounding of a
-/// step's operations (`terms`) times the scale, or no longer falls. Its iterations with it.
-fn settle(start: &Mat, mut step: impl FnMut(&Mat) -> (Mat, f64), terms: usize) -> (Mat, usize, bool) {
+/// step's operations (`terms`) times the scale, or no longer falls.
+fn settle(start: &Mat, mut step: impl FnMut(&Mat) -> (Mat, f64), terms: usize) -> (Mat, bool) {
     let (mut x, mut last, mut iterations, mut first) = (start.clone(), f64::INFINITY, 0, None);
     loop {
         iterations += 1;
@@ -465,15 +464,15 @@ fn settle(start: &Mat, mut step: impl FnMut(&Mat) -> (Mat, f64), terms: usize) -
         let change = difference(&next, &x);
         x = next;
         if change <= rounding(terms) * scale {
-            return (x, iterations, true);
+            return (x, true);
         }
         match first {
             None => first = Some(change),
-            Some(f) if iterations == 2 && change > 0.25 * f => return (x, iterations, false),
+            Some(f) if iterations == 2 && change > 0.25 * f => return (x, false),
             _ => {}
         }
         if !(change < last) {
-            return (x, iterations, true);
+            return (x, true);
         }
         last = change;
     }
@@ -621,9 +620,9 @@ pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replic
         }
         (next, scale)
     };
-    let (h, iterations, exists) = match reference {
+    let (h, exists) = match reference {
         None => settle(&a, step, (n + excited) * (n + excited)),
-        Some(z0) => (step(&Mat::from_fn(n, n, |i, j| if i == j { C64::real(z0) } else { C64::ZERO })).0, 1, true),
+        Some(z0) => (step(&Mat::from_fn(n, n, |i, j| if i == j { C64::real(z0) } else { C64::ZERO })).0, true),
     };
     // The responses at the generator they made it of, at its final form (about a reference: R₀ W, as made).
     let sh = schurs_of(&h, &members).expect("the Schur form of P's generator");
@@ -657,7 +656,7 @@ pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replic
         }
         (eigen.values, eigen.vectors, eigen.inverse, eigen.condition, eigen.work) = (values, vectors, inverse, condition, work);
     }
-    Fold { ground, explicit: slow.explicit.clone(), frames: slow.frames.clone(), direct: a, generator: h, replicas: folded, eigen, exists, iterations, reference, turning, driven, members, groups, schurs: sh }
+    Fold { ground, explicit: slow.explicit.clone(), frames: slow.frames.clone(), direct: a, generator: h, replicas: folded, eigen, exists, reference, turning, driven, members, groups, schurs: sh }
 }
 
 /// One P-layer component's reading (criterion two): its size a in H's eigenbasis, its distance δ = Ω + λ_p − λ_p',
@@ -668,7 +667,6 @@ pub(crate) struct Component {
     pub column: usize,
     pub size: f64,
     pub distance: C64,
-    pub beat: f64,
     pub classes: (Option<usize>, Option<usize>),
 }
 
@@ -785,7 +783,7 @@ impl Fold {
                                 if size <= floor {
                                     continue;
                                 }
-                                out.push(Component { row: q, column: p, size, distance: C64::real(beat) + lambda[p] - lambda[q], beat, classes: (back.class, feed.class) });
+                                out.push(Component { row: q, column: p, size, distance: C64::real(beat) + lambda[p] - lambda[q], classes: (back.class, feed.class) });
                             }
                         }
                     }
@@ -799,7 +797,7 @@ impl Fold {
                 for &q in &states[group_of(row)] {
                     let size = (self.eigen.inverse[(q, row)] * value * self.eigen.vectors[(column, p)]).abs();
                     if size > 0.0 {
-                        out.push(Component { row: q, column: p, size, distance: C64::real(beat) + lambda[p] - lambda[q], beat, classes: (None, None) });
+                        out.push(Component { row: q, column: p, size, distance: C64::real(beat) + lambda[p] - lambda[q], classes: (None, None) });
                     }
                 }
             }
@@ -815,40 +813,6 @@ impl Fold {
         let n = self.size();
         let make = |f: &dyn Fn(f64) -> f64| Mat::from_fn(n, n, |i, j| (0..n).map(|k| x.vectors[(i, k)] * f(x.values[k].max(0.0)) * x.vectors[(j, k)].conj()).sum());
         (make(&|v| (1.0 + v).sqrt()), make(&|v| 1.0 / (1.0 + v).sqrt()))
-    }
-
-    /// The landing map in the normalized coordinates: a bare P state f lands at y = S x, x = (1 + Σ_f S_f T_f)⁻¹ f
-    /// (`landed`): the matrix S (1 + Σ S_f T_f)⁻¹. None where the left iteration does not settle.
-    pub(crate) fn landing(&self, s: &Mat) -> Option<Mat> {
-        let left = self.left_operators()?;
-        let n = self.size();
-        let mut out = Mat::zeros(n, n);
-        for j in 0..n {
-            let f: Vec<C64> = (0..n).map(|i| if i == j { C64::ONE } else { C64::ZERO }).collect();
-            let x = self.landed_with(&left, &f)?;
-            let y = s.apply(&x);
-            for i in 0..n {
-                out[(i, j)] = y[i];
-            }
-        }
-        Some(out)
-    }
-
-    /// The fold's series about a reference z₀ (the engine's evaluation route; the self-consistent fold is the
-    /// definition): the resolvent's Neumann series R(z) = Σ_k (z₀ − z)^k R₀^{k+1}, R₀ = (z₀ + f − K)⁻¹, with z the P
-    /// generator H itself (a right factor, as in the Sylvester equation) gives the wave operator
-    /// T_f = Σ_k (−1)^k R₀^{k+1} W_f (H − z₀)^k and the generator H = A + Σ_k (−1)^k N_k (H − z₀)^k,
-    /// N_k = Σ_f W′_f R₀^{k+1} W_f. The N_k (and the jumps' C R₀^{k+1} W) are bilinear in the fields with coefficients
-    /// of the reference levels alone: what a table holds without the near light's coordinates. Returns N_0..N_K.
-    pub(crate) fn series(&self, z0: C64, orders: usize) -> Vec<Mat> {
-        let n = self.size();
-        let mut out = vec![Mat::zeros(n, n); orders + 1];
-        for (rep, responses) in self.replicas.iter().zip(self.responses_about(z0, orders)) {
-            for (form, x) in out.iter_mut().zip(&responses) {
-                form.add_scaled(C64::ONE, &rep.back.product(x));
-            }
-        }
-        out
     }
 
     /// The replicas' responses about z₀ to order K (`series`): per replica R₀^{k+1}W, k ≤ K, R₀ = (z₀ + f − K)⁻¹ on its
@@ -875,39 +839,6 @@ impl Fold {
             .collect()
     }
 
-    /// The generator of the series to order K (`series`): the fixed point of H ← A + Σ_k (−1)^k N_k (H − z₀)^k from A
-    /// (`settle`, on n × n matrices alone); None where it does not settle.
-    pub(crate) fn series_generator(&self, forms: &[Mat], z0: C64) -> Option<Mat> {
-        let n = self.size();
-        let (h, _, exists) = settle(
-            &self.direct,
-            |h| {
-                let mut e = h.clone();
-                for i in 0..n {
-                    e[(i, i)] -= z0;
-                }
-                let (mut next, mut power, mut scale) = (self.direct.clone(), Mat::identity(n), self.direct.frobenius());
-                for (k, form) in forms.iter().enumerate() {
-                    let term = form.product(&power);
-                    scale += term.frobenius();
-                    next.add_scaled(C64::real(if k % 2 == 0 { 1.0 } else { -1.0 }), &term);
-                    power = power.product(&e);
-                }
-                (next, scale)
-            },
-            n * n * forms.len(),
-        );
-        exists.then_some(h)
-    }
-
-    /// The series' ratio q = ‖H − z₀‖₂ / d (the spectral norm, the largest singular value; d the least distance of
-    /// z₀ + f from the excited block's spectrum over the replicas, 1/‖R₀‖ where the excited block is normal): its
-    /// remainder after order K is within q^{K+1}/(1 − q) of the fold, relatively, where q < 1 (the Neumann series'
-    /// radius) -- the order an evaluation takes is the least whose remainder is within the share (criterion one's ρ
-    /// books it).
-    pub(crate) fn series_ratio(&self, z0: C64) -> f64 {
-        self.series_norm(z0) / self.series_distance(z0)
-    }
     /// ‖H − z₀‖₂ (`series_ratio`).
     pub(crate) fn series_norm(&self, z0: C64) -> f64 {
         let mut e = self.generator.clone();
@@ -1160,7 +1091,7 @@ impl Fold {
         }
         // From the right generator, which the left one is similar to, M = (1 + ST) H (1 + ST)⁻¹: within the excited share
         // X of it.
-        let (_, _, settled) = settle(
+        let (_, settled) = settle(
             &self.generator,
             |m| {
                 let sm = schurs_of(&m.adjoint(), &self.members).expect("the Schur form of P's left generator");
@@ -1175,41 +1106,6 @@ impl Fold {
             (n + excited) * (n + excited),
         );
         settled.then_some(s)
-    }
-
-    /// The slow part of a bare P state f (its Q amplitudes zero: a jump's landing, the state when the light is switched
-    /// on): the spectral projection of (f, 0) on the slow invariant subspace (x, T x) along the fast one (−S y, y):
-    /// x − S y = f, y = −T x, so x = (1 + Σ_f S_f T_f)⁻¹ f (Π = (1; T)(1 + ST)⁻¹(1, S) is the projector, Π² = Π).
-    pub(crate) fn landed(&self, f: &[C64]) -> Option<Vec<C64>> {
-        let s = self.left_operators()?;
-        self.landed_with(&s, f)
-    }
-    fn landed_with(&self, s: &[Mat], f: &[C64]) -> Option<Vec<C64>> {
-        let mut overlap = Mat::identity(self.size());
-        for (si, rep) in s.iter().zip(&self.replicas) {
-            overlap.add_scaled(C64::ONE, &si.product(&rep.t));
-        }
-        let lu = crate::linalg::Lu::new(&overlap)?;
-        let mut x = f.to_vec();
-        lu.solve(&mut x);
-        Some(x)
-    }
-
-    /// The transient of a bare state f (ELIMINATION v3 3 and 4, one term): what the waiting time for the next photon
-    /// from f holds beyond its slow part's, E_exact − ∫‖slow‖² dt. The bare state is its slow part (x₀, T x₀) and its
-    /// fast part (−S y₀, y₀), y₀ = −T x₀ (`landed`), the fast part the homogeneous solution of the excited block,
-    /// e^{−i(K − f)t} -- it decays at the excited states' Γ/2 within 1/Γ, and it is the same term whether the bare state
-    /// is a jump's landing or the light being switched on. Its survival adds ∫‖fast‖² + 2 Re∫⟨fast|slow⟩; to the
-    /// leading order in the fold (the fast generator K − f and the fast part's P amplitude −S y₀ against the slow
-    /// one's), per replica,
-    ///   τ = (T x₀)† 𝓛 (T x₀) − 2 Re (T x₀)† 𝒳 x₀,
-    /// 𝓛 = ∫ e^{iK†t} e^{−iKt} dt (𝓛 K − K† 𝓛 = −i; 𝓛 = 1/Γ on a line of one width) and 𝒳 = ∫ e^{i(K−f)†t} (T − S†)
-    /// e^{−iHt} dt (𝒳 H − (K† − f) 𝒳 = −i(T − S†)): the norm the fast part holds over its life, and its interference
-    /// with the slow part's excited and ground amplitudes. Without decay S† = T and only the first term is left. On one
-    /// line it is the whole difference between the mean scattering rate after a jump and the optical Bloch steady state
-    /// beside the threshold's clamp (tests). Returns (x₀, τ).
-    pub(crate) fn transient(&self, s: &[Mat], f: &[C64]) -> Option<(Vec<C64>, f64)> {
-        self.transients(s, &[f.to_vec()])?.pop()
     }
 
     /// `transient` of several bare states: each replica's 𝓛 and 𝒳 and the landing's overlap made once.
@@ -1532,7 +1428,7 @@ impl super::Model {
     fn cluster_fold_with(&self, cluster: usize, amplitudes: &[crate::field::Amplitude], about: bool, whole: bool) -> Option<(Fold, Levels, f64, Mat)> {
         use crate::request::{GROUND, STATES};
         let running = self.running();
-        let h = &self.far_hamiltonian(amplitudes, &running, 0, &[])[0];
+        let h = &self.far_hamiltonian(amplitudes, &running, 0)[0];
         let c = &self.clusters[cluster];
         let g = c.ground;
         let grounds: Vec<usize> = c.states[..g].to_vec();
@@ -1736,7 +1632,7 @@ impl super::Model {
         let book = |unit: &Unit, x: f64, out: &mut Vec<UnitError>| {
             if let Some(i) = units.iter().position(|u| u == unit) {
                 let e = &mut out[i];
-                (e.parameter, e.population, e.temperature) = (e.parameter.max(x), e.population + x, e.temperature + x);
+                (e.population, e.temperature) = (e.population + x, e.temperature + x);
             }
         };
         let c = &self.clusters[sample.cluster];
@@ -1826,7 +1722,7 @@ impl super::Model {
             }
         }
         let beyond = beyond.unwrap_or_else(|| outside_errors(None, &sample.psi, &outside));
-        (out, beyond.iter().map(|&x| UnitError { parameter: x, population: x, temperature: x, moved: 0.0, into: 0 }).collect())
+        (out, beyond.iter().map(|&x| UnitError { population: x, temperature: x }).collect())
     }
 
     /// The transitions to the levels outside the model (`Model::outside`).
@@ -1973,18 +1869,11 @@ pub(crate) struct Kept {
 }
 
 /// A point's closure (criteria one and two at one atom, ELIMINATION.md §3–§4 with v2 and v3): the kept set from
-/// `start` on, made larger until the point needs nothing more, with its frames and fold.
+/// `start` on, made larger until the point needs nothing more, with its fold.
 #[derive(Clone, Debug)]
 pub(crate) struct Closed {
     pub kept: Kept,
-    pub frames: Vec<f64>,
-    /// The frames' least largest residual t* (cluster.rs `frames`), and the step's requirement t* + |K| v (rad/µs).
-    pub residual: f64,
-    pub requirement: f64,
     pub fold: Fold,
-    /// The worst remainder ρ over the ground-like eigenstates, and the largest mixing of an averaged component.
-    pub remainder: f64,
-    pub mixing: f64,
 }
 
 /// The P states (labels as in `Link`) of a kept set, the frames from its links (cluster.rs `frames`) and its groups
@@ -2049,7 +1938,6 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
         // Moves: (block, replica, class, the eigenstate whose part it is), largest part first per state, until the rest
         // is within `limit`; one replica a block and class.
         let mut moves: Vec<(usize, usize, usize, usize)> = vec![];
-        let mut remainder: f64 = 0.0;
         let pick = |p: usize, mut order: Vec<(usize, usize, Option<usize>, f64)>, total: f64, limit: f64, moves: &mut Vec<(usize, usize, usize, usize)>| {
             order.sort_by(|x, y| y.3.total_cmp(&x.3));
             let mut rest = total;
@@ -2087,7 +1975,6 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
                         worst = (rho, parts);
                     }
                 }
-                remainder = remainder.max(worst.0);
                 if worst.0 > share {
                     pick(p, worst.1, worst.0 * worst.0, share * share, &mut moves);
                 }
@@ -2121,7 +2008,6 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
             let s = fold.dominant(p);
             if s < ground { s } else { ground + fold.explicit[s - ground] }
         };
-        let mut mixing: f64 = 0.0;
         for x in fold.components(velocity) {
             let m = x.mixing();
             let link = Link { a: label(x.row), b: label(x.column), classes: x.classes };
@@ -2130,22 +2016,12 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
                     kept.links.push(link);
                     grew = true;
                 }
-            } else {
-                mixing = mixing.max(m);
             }
         }
         if grew {
             continue;
         }
-        // |K|: the largest wave vector an entry of the generator holds -- a class's beams against each other (its
-        // pattern), and the classes of a kept link against each other.
-        let pairs: Vec<(usize, usize)> = (0..classes.len()).map(|c| (c, c)).chain(kept.links.iter().filter_map(|l| Some((l.classes.0?, l.classes.1?)))).collect();
-        let pattern = pairs
-            .iter()
-            .flat_map(|&(c, d)| classes[c].beams.iter().flat_map(move |b| classes[d].beams.iter().map(move |b2| [b.wave[0] - b2.wave[0], b.wave[1] - b2.wave[1], b.wave[2] - b2.wave[2]])))
-            .map(|k| (k[0] * k[0] + k[1] * k[1] + k[2] * k[2]).sqrt())
-            .fold(0.0, f64::max);
-        return Closed { requirement: residual + pattern * speed, kept, frames: slow.frames.clone(), residual, fold, remainder, mixing };
+        return Closed { kept, fold };
     }
 }
 
@@ -2196,15 +2072,10 @@ pub(crate) enum Object {
     Link(Link),
 }
 
-/// A model's error at a state (ELIMINATION.md §6, v2, v3): the populations' (absolute) and T's (relative), its three
-/// terms of the fold, and per object the part its keep would take away.
+/// A model's error at a state (ELIMINATION.md §6, v2, v3): per object the part its keep would take away (the fold's three
+/// terms, each split among the objects that take it away).
 #[derive(Clone, Debug)]
 pub(crate) struct Errors {
-    pub population: f64,
-    pub temperature: f64,
-    pub remainder: f64,
-    pub transient: f64,
-    pub averaged: f64,
     pub parts: Vec<(Object, f64)>,
     /// Per transition to a level outside the model its error (`outside_errors`): no object's part, nothing keeps it.
     pub outside: Vec<f64>,
@@ -2295,7 +2166,6 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
         }
     };
     // The remainder.
-    let mut remainder = 0.0;
     for p in (0..n).filter(|&p| weight[p] > 0.0) {
         let (mut rho, mut each) = (0.0, vec![]);
         for shift in [range, -range] {
@@ -2304,7 +2174,6 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
                 (rho, each) = (r, e);
             }
         }
-        remainder += weight[p] * 2.0 * rho;
         if rho > 0.0 {
             let unit: Vec<C64> = (0..n).map(|q| if q == p { C64::ONE } else { C64::ZERO }).collect();
             for (j, row) in each.iter().enumerate() {
@@ -2322,7 +2191,6 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
         }
     }
     // The transient after the next jump, from the state's own ground populations.
-    let mut transient = 0.0;
     if let Some(left) = fold.left_operators() {
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let metric = fold.metric();
@@ -2345,7 +2213,6 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
             }
             let (wait, clamp) = if big <= 1.0 { (big / gamma, 0.0) } else { ((1.0 + big.ln()) / gamma, (big - 1.0 - big.ln()) / gamma) };
             let x = population * (tau + clamp).abs() / wait;
-            transient += x;
             // Its parts by the blocks' shares of the landing's excited amplitude, replica by replica, each split among its
             // classes (`class_shares`).
             let mut shares = vec![vec![0.0; blocks.len()]; fold.replicas.len()];
@@ -2377,19 +2244,16 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
         let s = fold.dominant(p);
         if s < ground { s } else { ground + fold.explicit[s - ground] }
     };
-    let mut averaged = 0.0;
     for x in fold.components(velocity) {
         let link = Link { a: label(x.row), b: label(x.column), classes: x.classes };
         if linked(&link) || (weight[x.row] == 0.0 && weight[x.column] == 0.0) {
             continue;
         }
         let e = 2.0 * x.mixing() * x.mixing() * (weight[x.row] + weight[x.column]);
-        averaged += e;
         add(Object::Link(link), e, &mut parts);
     }
     let outside = outside_errors(Some((fold, &weight)), psi, outside);
-    let sum = remainder + transient + averaged + outside.iter().sum::<f64>();
-    Errors { population: sum, temperature: sum, remainder, transient, averaged, parts, outside }
+    Errors { parts, outside }
 }
 
 #[cfg(test)]
