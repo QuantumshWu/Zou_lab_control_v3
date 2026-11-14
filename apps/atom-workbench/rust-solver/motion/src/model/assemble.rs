@@ -135,7 +135,7 @@
 //! Along a path every piece of a dense term -- an entry and a pair of its block's two components' beams -- turns at one
 //! beat: its tone's residual beat Ω and its two plane waves' residual wave vector in the cluster's Doppler frames Q,
 //! e^{i(Ω + Q·v)s} at the time s from the middle, its value and the beams' amplitudes the middle's. The plan groups the
-//! pieces by (Ω, Q) exactly (`Group`: the tree's frames' part of Q and the least squares' correction's difference); the
+//! pieces by (Ω, Q) exactly (`Group`: Q the field's wave vectors less the tree's frames, an exact lattice vector); the
 //! static pieces, of no beat in time or along the path, are in none. A group and its adjoint's, (−Ω, −Q), are a tone
 //! pair, its first standing for it (`Plan::firsts`): on a path its beat ν = Ω + Q·v (`Middle::beats`), its members'
 //! envelopes the groups' pieces at the middle (`Middle::envelopes`: constant along the path), the generator's part of
@@ -1090,10 +1090,9 @@ impl<'a> Builder<'a> {
         }
         held.sort();
         held.dedup();
-        // The Doppler frames (cluster.rs, # Doppler frames): the tree's with the least squares' correction of what it leaves;
-        // and whether anything beats -- a residual beat in time, or along a path a residual wave vector.
-        let correction = super::cluster::correction(n, held.iter().map(|h| (h.0, h.1, &h.3)), &model.no_wave(), |w| model.wave_value(w));
-        let waves: Vec<[f64; 3]> = cluster.waves.iter().zip(&correction).map(|(k, more)| std::array::from_fn(|i| k[i] + more[i])).collect();
+        // The Doppler frames (cluster.rs, # Doppler frames): the tree's; and whether anything beats -- a residual beat in
+        // time, or along a path a residual wave vector.
+        let waves = cluster.waves.clone();
         let still = held.iter().all(|h| h.2 == 0 && h.3.is_zero());
         // The Hermitian blocks' adjoints (`Term::weight`): the block of the two components' conjugates at the negated beat.
         let conjugate = |s: Option<usize>| match s {
@@ -1260,13 +1259,12 @@ impl<'a> Builder<'a> {
         let values = (products.len() + sums.len() + merged) as f64;
         // The generator's beating groups (module documentation, # Exact tones): each piece of a dense term -- the generator's,
         // the form's -- by its tone and its two beams' plane waves' residual wave vector in the cluster's Doppler frames,
-        // exactly: the tree's frames' part, and the least squares' correction's difference. The static pieces, of no beat
-        // in time or along a path, in none.
+        // exactly. The static pieces, of no beat in time or along a path, in none.
         let mut beats_of = vec![model.axes.zero(); tones.len()];
         for (beat, &t) in &tone_index {
             beats_of[t] = beat.clone();
         }
-        let (mut found, mut groups, mut keys): (HashMap<(Beat, Wave, [u64; 3]), usize>, Vec<Group>, Vec<(Beat, Wave, [u64; 3])>) = Default::default();
+        let (mut found, mut groups, mut keys): (HashMap<(Beat, Wave), usize>, Vec<Group>, Vec<(Beat, Wave)>) = Default::default();
         for (formed, terms) in [(false, &generator.terms), (true, &form.terms)] {
             for (index, term) in terms.iter().enumerate() {
                 let d = &self.drafts[term.block];
@@ -1279,19 +1277,18 @@ impl<'a> Builder<'a> {
                 let (left, right) = (sides(d.left), sides(d.right));
                 for (_, &(x, y)) in d.entries.iter().enumerate().filter(|&(e, _)| entry_tones[term.block][e] == term.tone) {
                     let (offset, frames) = (x * n + y - term.first, cluster.waves_exact[x].plus(-1, &cluster.waves_exact[y]));
-                    let shift: [f64; 3] = std::array::from_fn(|i| correction[x][i] - correction[y][i]);
                     for (l, lw) in &left {
                         for (r, rw) in &right {
                             let wave = lw.plus(1, rw).plus(-1, &frames);
-                            if beats_of[term.tone].is_zero() && wave.is_zero() && shift == [0.0; 3] {
+                            if beats_of[term.tone].is_zero() && wave.is_zero() {
                                 continue;
                             }
-                            let key = (beats_of[term.tone].clone(), wave, shift.map(|s| (s + 0.0).to_bits()));
+                            let key = (beats_of[term.tone].clone(), wave);
                             let g = match found.get(&key) {
                                 Some(&g) => g,
                                 None => {
                                     let value = model.wave_value(&key.1);
-                                    groups.push(Group { tone: term.tone, wave: std::array::from_fn(|i| value[i] - shift[i]), partner: None, first: true, generator: vec![], form: vec![] });
+                                    groups.push(Group { tone: term.tone, wave: value, partner: None, first: true, generator: vec![], form: vec![] });
                                     (found.insert(key.clone(), groups.len() - 1), keys.push(key));
                                     groups.len() - 1
                                 }
@@ -1303,8 +1300,8 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        for (g, (beat, wave, shift)) in keys.iter().enumerate() {
-            let adjoint = (beat.negated(), wave.negated(), shift.map(|s| (-f64::from_bits(s) + 0.0).to_bits()));
+        for (g, (beat, wave)) in keys.iter().enumerate() {
+            let adjoint = (beat.negated(), wave.negated());
             groups[g].partner = found.get(&adjoint).copied();
             groups[g].first = groups[g].partner.is_none() || keys[g] > adjoint;
         }
