@@ -964,3 +964,89 @@ fn a_drive_onto_an_explicit_state_at_a_small_two_photon_distance_is_folded_at_th
         assert_ne!(model.cluster_of(w), model.cluster_of(a), "the drive from {w} joins no cluster");
     }
 }
+
+/// A measurement, not a check (run by name): the units the solve's closure keeps on the tilted 1D PGC (solve.rs `closed`,
+/// the prior at the reach's atoms), the drives it folds at the atom (`Unit::Bare`) by class -- each light's co- or
+/// counter-rotating component -- and by transition (Δm, the excited line and F′), and per class the prior's route reading
+/// (`bare_remainders`: the largest relative change of the class's response between the bare levels and the atom's, over
+/// the atoms, against `estimate::unseen`), with the eigenstate it is largest at: its dominant ground state, the
+/// eigenvalue's distance from that state's bare level in the frames, and its ground weight.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn the_tilted_pgc_s_kept_units_by_class_and_the_route_readings() {
+    use crate::request::{Level as Label, GROUND};
+    for name in ["PGC1D_TILT_0", "PGC1D_TILT_2"] {
+        let req = request(name);
+        let light = crate::field::Light::new(&req);
+        let chief = (0..GROUND).max_by(|&a, &b| req.initial_density[(a, a)].re.total_cmp(&req.initial_density[(b, b)].re)).unwrap();
+        let (model, kept, _, _) = super::super::Model::closed_at(&req, &light, vec![], chief, req.temperature_uk);
+        let id = |frequency: usize| light.frequencies[frequency].beams.iter().map(|&l| req.beams[l].id.clone()).collect::<Vec<_>>().join("+");
+        let label = |s: usize| Label::parse(&req.states[s]).unwrap();
+        let mut bare: Vec<(String, i8, String, usize)> = vec![];
+        let mut other: Vec<(String, usize)> = vec![];
+        for unit in &kept {
+            match unit {
+                super::super::Unit::Bare { component, excited, ground } => {
+                    let (e, g) = (label(*excited), label(*ground));
+                    let key = (format!("{} {}", id(component.frequency), if component.counter { "counter" } else { "co" }), e.m - g.m, format!("F{}→{:?} F′{}", g.f, e.manifold, e.f));
+                    match bare.iter_mut().find(|b| (b.0.as_str(), b.1, b.2.as_str()) == (key.0.as_str(), key.1, key.2.as_str())) {
+                        Some(b) => b.3 += 1,
+                        None => bare.push((key.0, key.1, key.2, 1)),
+                    }
+                }
+                u => {
+                    let kind = format!("{:?}", u).split_whitespace().next().unwrap_or("").to_string();
+                    match other.iter_mut().find(|o| o.0 == kind) {
+                        Some(o) => o.1 += 1,
+                        None => other.push((kind, 1)),
+                    }
+                }
+            }
+        }
+        bare.sort();
+        println!("{name}: {} kept, {} Bare; others {other:?}", kept.len(), bare.iter().map(|b| b.3).sum::<usize>());
+        for (class, dm, line, count) in &bare {
+            println!("  Bare {class:<24} Δm {dm:+} {line:<16} {count}");
+        }
+        // The prior's route readings on the closed model's own atoms and kept set.
+        let points = crate::solve::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).unwrap();
+        let blocks = model.blocks();
+        let unseen = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
+        let mut worst: Vec<(f64, usize)> = vec![];
+        let mut names: Vec<(usize, bool)> = vec![];
+        for (k, &(r, v)) in points.iter().enumerate() {
+            let (levels, classes, sources) = system(&req, &light, r);
+            let closed = closure(&levels, &classes, &blocks, v, &Kept::default());
+            let routes = bare_remainders(&closed.fold, classes.len(), &model.energies);
+            if worst.len() < routes.len() {
+                worst.resize(routes.len(), (0.0, 0));
+                names = sources.clone();
+            }
+            for (c, &rho) in routes.iter().enumerate() {
+                if rho > worst[c].0 {
+                    worst[c] = (rho, k);
+                }
+            }
+        }
+        println!("  routes (unseen {unseen:.3e}):");
+        for (c, &(rho, k)) in worst.iter().enumerate() {
+            let (frequency, counter) = names[c];
+            // At the atom where it is largest: the class's largest eigenstate, its dominant state and its distance from its bare level.
+            let (r, v) = points[k];
+            let (levels, classes, _) = system(&req, &light, r);
+            let fold = closure(&levels, &classes, &blocks, v, &Kept::default()).fold;
+            let mut at = (0.0_f64, 0, C64::ZERO, 0.0);
+            for p in (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5) {
+                let g = fold.dominant(p);
+                if g >= fold.ground {
+                    continue;
+                }
+                let gap = fold.eigen.values[p] - C64::real(model.energies[g] - fold.frames[g]);
+                if gap.abs() > at.2.abs() {
+                    at = (rho, g, gap, fold.ground_weight(p));
+                }
+            }
+            println!("    {:<24} {:<7} ρ {rho:.3e} {} at atom {k}; the largest eigenvalue gap there: state {} by {:.3e}{:+.3e}i rad/µs (ground weight {:.3})", id(frequency), if counter { "counter" } else { "co" }, if rho > unseen { "AT THE ATOM" } else { "bare" }, at.1, at.2.re, at.2.im, at.3);
+        }
+    }
+}
