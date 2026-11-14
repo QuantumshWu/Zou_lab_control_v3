@@ -1453,13 +1453,14 @@ impl Bound {
 
 /// The step's check as the result tells it (module documentation, # The step), of the reads the rung stands by
 /// (`Levels::told`): the third level's step (µs) -- four times the run's; none where the rung stood on its own two
-/// levels --, the pairs of the rung's own two levels, and the check's resolution -- the rms error over the run
+/// levels -- and the pairs it was read on (the scout's eleven where the scout went down a rung, the pilot's at 4τ), the
+/// pairs of the rung's own two levels, and the check's resolution -- the rms error over the run
 /// that the read booked cannot tell from none, √(t·SE) of its mean square, the largest on what is shown (absolute) and
 /// on T (a share of its allowance; unbounded where it is not read); and whether the check saw (the rung stands on its
 /// estimates) or ended unable to see, capped or not.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Checked {
-    third: Option<f64>,
+    third: Option<(f64, u64)>,
     pairs: u64,
     resolution: [f64; 2],
     saw: bool,
@@ -2344,7 +2345,8 @@ fn unseen_at_the_end() -> String {
 /// order, at 2τ; the further pairs a check took (`settle`), at the two levels: the groups the product runs next, by
 /// their place in its list. The rung's third level above, `above`: the read between 2τ and 4τ carried to τ -- the
 /// rung left above it, read on the pilot's pairs where the check came down from it there (`above_pilot`), on the
-/// scout's where the scout did, or the pilot's trajectories at 4τ (`settle`); and whether the rung above the rung in
+/// scout's where the scout did, or the pilot's trajectories at 4τ (`settle`) --, and the pairs it was read on
+/// (`above_pairs`: the scout's, the pilot's, or with the further pairs); and whether the rung above the rung in
 /// hand was read and is unread (`above_unread`: its read excludes nothing on some look).
 ///
 /// And where the rung in hand could not see and the rung below was weighed against more pairs (`foresee`), the scout's
@@ -2357,6 +2359,7 @@ struct Levels {
     further: [Vec<Part>; 2],
     above: Option<Between>,
     above_pilot: bool,
+    above_pairs: u64,
     above_unread: bool,
     half: Option<(Vec<Part>, Between, Between)>,
 }
@@ -2368,7 +2371,7 @@ impl Levels {
 
     /// The reads the check of the rung in hand, at the step `tau`, is told and booked by (`checked`, `Checked`): its
     /// own, between τ and 2τ on all its pairs; its third level's carried to τ (`carried`), the level above's -- none
-    /// where it has none --; the third level's step, and the own read's pairs.
+    /// where it has none --; the third level's step and the pairs it was read on, and the own read's pairs.
     ///
     /// Two levels give a difference, and an error only by what is known of the other level. With e(τ) = Q(τ) − Q(0)
     /// a quantity's error at an output:
@@ -2382,10 +2385,10 @@ impl Levels {
     /// lesser of them: they are of one mean square only where the order holds, which they test against each other
     /// (`verdict`), and the lesser of two noisy reads is biased low. Both are booked as one: the larger (`worse`).
     /// The own read stands on its two levels' analysis times among the candidates `times` (`read_step`).
-    fn told(&self, times: &[f64], window: f64, tau: f64, scales: &Scales) -> (Between, Option<Between>, Option<f64>, u64) {
+    fn told(&self, times: &[f64], window: f64, tau: f64, scales: &Scales) -> (Between, Option<Between>, Option<(f64, u64)>, u64) {
         let (fine, coarse) = self.paired();
         let (own, pairs) = (read_step(times, window, &fine, &coarse, scales), fine.len() as u64 * GROUP);
-        (own, self.above.clone(), self.above.as_ref().map(|_| 4. * tau), pairs)
+        (own, self.above.clone(), self.above.as_ref().map(|_| (4. * tau, self.above_pairs)), pairs)
     }
 }
 
@@ -2570,7 +2573,7 @@ fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context,
                     let coarser = level(run, ensemble, domain, &context.plan, 4. * context.tau, numbers, 0..GROUP, false, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
                     let read = read_step(&context.plan.reads, context.plan.window, &levels.coarse.iter().collect::<Vec<_>>(), &coarser.iter().collect::<Vec<_>>(), &context.scales);
                     if readable(&read) {
-                        (levels.above, levels.above_pilot) = (Some(carried(&read, 0.5)), true);
+                        (levels.above, levels.above_pilot, levels.above_pairs) = (Some(carried(&read, 0.5)), true, groups * GROUP);
                     } else {
                         levels.above_unread = true;
                     }
@@ -2629,7 +2632,7 @@ fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context,
             None => level(run, ensemble, domain, &context.plan, below, numbers, 0..members, true, messages, &mut |prefix, messages| so_far(context, &[], prefix, messages)),
         };
         levels.coarse = std::mem::replace(&mut levels.fine, finer);
-        (levels.above, levels.above_pilot, levels.above_unread) = (inherits, pilot, false);
+        (levels.above, levels.above_pilot, levels.above_pairs, levels.above_unread) = (inherits, pilot, have, false);
         // The pilot's own level at the rung taken is in: the reach's falsifier reads it before anything more is spent
         // on the step (`own_level`). Where its atoms refute the reach the check ends there, and the attempt with it.
         if pilot && outgrown(&levels.fine.iter().collect::<Vec<_>>()) {
@@ -4587,8 +4590,14 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     let mut step = String::new();
     if let Some(check) = &c.checked {
         let largest = (1..outputs).flat_map(|k| temperature[k].iter().map(|a| a.step).chain([population[k].step])).fold(0., f64::max);
-        let (doubled, third) = (step_reading(c.plan.end, 2. * c.tau), check.third.map(|s| ("4τ", step_reading(c.plan.end, s))));
-        let levels = third.as_ref().map_or(format!("τ 与 2τ（{doubled} μs）"), |(name, at)| format!("τ、2τ（{doubled} μs）与 {name}（{at} μs）"));
+        let (doubled, third) = (step_reading(c.plan.end, 2. * c.tau), check.third.map(|(s, pairs)| (step_reading(c.plan.end, s), pairs)));
+        let levels = third.as_ref().map_or(format!("τ 与 2τ（{doubled} μs）"), |(at, _)| format!("τ、2τ（{doubled} μs）与 4τ（{at} μs）"));
+        // The pairs at each level: the third level's may be fewer than the rung's own (the scout's, or the pilot's
+        // beside the further pairs).
+        let paired = match &third {
+            Some((at, pairs)) if *pairs < check.pairs => format!("{} 对先导轨迹用 τ 与 2τ（{doubled} μs）各算一遍、其中 {pairs} 对又用 4τ（{at} μs）算一遍", check.pairs),
+            _ => format!("{} 对先导轨迹用 {levels} 各算一遍", check.pairs),
+        };
         let how = if check.saw {
             "相邻两级之差按步长误差与步长的二次方成正比各自换算成 τ 的误差，两个估计都在误差预算分给步长的部分之内才用这个步长；计入的是两者中较大的估计"
         } else {
@@ -4596,7 +4605,7 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
         };
         ledger.item(&format!("时间步长 τ = {} μs（全程不变）", step_reading(c.plan.end, c.tau)), largest, &format!("步长收敛检查：先导轨迹用 {levels} 各算一遍、逐条比较，取差在各输出时刻上的方均根（已扣除统计噪声）；{how}"));
         let relative = if check.resolution[1].is_finite() { format!("、在温度上低于其允许误差的 {} 时检查分辨不出", percent(check.resolution[1])) } else { " 时检查分辨不出，在温度上无法估计".into() };
-        step = format!("（步长收敛检查：{} 对先导轨迹用 {levels} 各算一遍（同一初始原子、同一组随机数），相邻两级之差在各输出时刻上的方均根（已扣除统计噪声）按二阶换算成本步长的误差；{how}；步长误差的方均根在布居上低于 {}{relative}）", check.pairs, percent(check.resolution[0]));
+        step = format!("（步长收敛检查：{paired}（同一初始原子、同一组随机数），相邻两级之差在各输出时刻上的方均根（已扣除统计噪声）按二阶换算成本步长的误差；{how}；步长误差的方均根在布居上低于 {}{relative}）", percent(check.resolution[0]));
     }
     // What the unresolved atoms and those past the reach add (`apart`): its largest over the analysis times, weighed by
     // the held share.
@@ -5215,7 +5224,8 @@ mod tests {
 
     /// The reads a rung is told and booked by (`Levels::told`): its own on all its pairs -- the pilot's and the further
     /// pairs', 360 --, and its third level's carried to its step: the level above's as it is held (already lowered),
-    /// the third level's step four times the rung's. A rung without has no third level to tell.
+    /// the third level's step four times the rung's and the pairs it was read on (the scout's eleven, where the scout
+    /// went down a rung). A rung without has no third level to tell.
     #[test]
     fn a_rung_is_told_by_its_own_read_and_its_third_level_s() {
         let (b, tau, scales) = (step_bound()[1].powi(2), 1.4585, Scales { hbar_over_mass: 1., frequencies: [1.; 3] });
@@ -5225,9 +5235,9 @@ mod tests {
         let (_, third, step, pairs) = levels.told(&times, f64::INFINITY, tau, &scales);
         assert_eq!((third.is_none(), step, pairs), (true, None, 360));
         let lowered = carried(&at(Some(pilot(0.8 * b, 0.1 * b))), 0.5);
-        levels.above = Some(lowered.clone());
+        (levels.above, levels.above_pairs) = (Some(lowered.clone()), 11);
         let (_, third, step, _) = levels.told(&times, f64::INFINITY, tau, &scales);
-        assert_eq!((third.unwrap().temperature, step), (lowered.temperature, Some(4. * tau)));
+        assert_eq!((third.unwrap().temperature, step), (lowered.temperature, Some((4. * tau, 11))));
     }
 
     /// A look on T at 800 trajectories: the model's error, what the step's check leaves open, the statistics' interval (each
