@@ -709,8 +709,8 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
                     // among them is kept as an attempt's keep is (# The model's prior).
                     Attempt::Grow(t, left) => {
                         reach = t;
-                        let more = failing(&model, request, &light, &initial, reach)?;
-                        if !more.is_empty() {
+                        let (more, holds) = failing(&model, request, &light, &initial, reach)?;
+                        if !more.is_empty() || !holds {
                             break (more, left);
                         }
                         carried = Some(left);
@@ -732,9 +732,12 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
 /// read again, until none fails -- a drive up its levels as far as the first whose fold exists (model.rs `Level`).
 fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, initial: &[(usize, f64)], temperature: f64) -> Result<Model, String> {
     loop {
-        let model = Model::new(request, light, kept)?;
-        let more = failing(&model, request, light, initial, temperature)?;
+        let mut model = Model::new(request, light, kept)?;
+        let points = atoms(&model, request, light, initial, temperature)?;
+        let more: Vec<Unit> = model.prior(request, &points).into_iter().filter(|u| !kept.contains(u)).collect();
         if more.is_empty() {
+            // The fold's series constants at the same atoms (model/elim.rs `Series`).
+            model.referenced(&points);
             return Ok(model);
         }
         kept.extend(more);
@@ -761,10 +764,12 @@ fn atoms(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64
 /// What the model's prior keeps beyond what the model keeps already, at the atoms of the reach of the temperature
 /// `temperature` (µK; module documentation, # The model's prior): each atom's closure (model/elim.rs `Model::prior`:
 /// criterion one's remainder, criterion two's components, the frames), at its place and its velocity (`atoms`).
-fn failing(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<Vec<Unit>, String> {
+fn failing(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<(Vec<Unit>, bool), String> {
     let points = atoms(model, request, light, initial, temperature)?;
     let kept = &model.kept;
-    Ok(model.prior(request, &points).into_iter().filter(|u| !kept.contains(u)).collect())
+    // Whether the series' order the model's evaluations take still holds at these atoms (model/elim.rs `Series`).
+    let holds = model.series_at(&points).order <= model.series.order;
+    Ok((model.prior(request, &points).into_iter().filter(|u| !kept.contains(u)).collect(), holds))
 }
 
 /// What an attempt takes of its model alone (`solve`): nothing of it rests on the reach the model is judged over or

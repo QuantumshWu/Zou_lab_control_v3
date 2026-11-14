@@ -90,6 +90,21 @@ impl Model {
             out[s] = z.norm_sqr() / norm;
         }
         let mut site = Held::<Site>::take();
+        // The responses act on the slow state's coordinates x = S⁻¹ψ (assemble.rs, # The normalized generator): the
+        // excited amplitudes T x, and what the ground places give up, Σ Re⟨a, A⟩ = ‖T x‖², leaves them ψ†(1 + X)⁻¹ψ = ‖x‖²
+        // in all -- the populations of the slow state, whose norm is ψ's.
+        let bent: Vec<C64> = match &plan.fourth {
+            Some(fourth) => {
+                let (n, size) = (fourth.n, fourth.n * fourth.n);
+                let on = self.pointed(plan, table, at.r, &mut site);
+                self.quartic(plan, fourth, on, Some(at.r), &mut site, false);
+                Model::quartic_read(|q| {
+                    let inverse = &q.data[super::assemble::BENT * size..(super::assemble::BENT + 1) * size];
+                    (0..n).map(|x| (0..n).fold(C64::ZERO, |z, y| z + inverse[x * n + y] * psi[y])).collect()
+                })
+            }
+            None => psi.to_vec(),
+        };
         let count = self.channels_at(plan, table, at, &mut site);
         let Site { channels, excited, .. } = &mut *site;
         let size = EXCITED * c.ground;
@@ -120,7 +135,7 @@ impl Model {
         for (p, response) in channels.chunks_exact(size).enumerate() {
             for (i, row) in response.chunks_exact(c.ground).enumerate() {
                 for (b, r) in row.iter().enumerate() {
-                    own[(p * c.ground + b) * EXCITED + i] = *r * psi[b];
+                    own[(p * c.ground + b) * EXCITED + i] = *r * bent[b];
                 }
             }
         }

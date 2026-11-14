@@ -424,3 +424,82 @@ fn the_fold_s_series_about_a_reference_is_the_fold_within_its_remainder_and_fall
         }
     }
 }
+
+/// The run's route against the definition (ELIMINATION v5; assemble.rs, # The normalized generator): on PGC3D's F = 2
+/// states at the cooling light's coherent peak near the focus, the normalized generator the engine makes of the series'
+/// forms about z₀ -- N₀ = Σ W′R₀W and N₁ = Σ W′R₀²W, the metric X = Σ (R₀W)†(R₀W), the loss L = Σ (R₀W)†D(R₀W), at the
+/// order the ratio asks (`Series::order_of`), through `assemble::normalized` -- against the self-consistent fold's
+/// S H S⁻¹, S = (1 + X)^{1/2} (`Fold::normalization`): its Hermitian part within the series' remainder and the
+/// normalization's own next order, and the landing map S(1 + Y)⁻¹ against the fold's S(1 + Σ S_f T_f)⁻¹. Measured
+/// below; the bound is the remainder q^{K+1}/(1 − q) of the forms' part of the generator, beside the loss form's
+/// difference from the anti-Hermitian part of W′R₀W (zero where the excited block is normal with one linewidth).
+#[test]
+fn the_run_s_normalized_generator_is_the_fold_s_within_the_series_remainder() {
+  for name in ["PGC3D_1ms", "PGC1D_TILT_2"] {
+    let req = request(name);
+    let light = crate::field::Light::new(&req);
+    let ground: Vec<usize> = (0..crate::request::GROUND).filter(|&g| crate::request::Level::parse(&req.states[g]).unwrap().f == 2).collect();
+    let n = ground.len();
+    for r in [[0.15, 0.0, 0.15], [0.05, -0.1, 0.0], [0.0; 3]] {
+        let (levels, classes, _) = system(&req, &light, r);
+        let excited: Vec<usize> = (0..levels.excited.rows).collect();
+        let lv = Levels { ground: levels.ground.block(&ground, &ground), excited: levels.excited.clone(), decay: levels.decay.clone(), emission: std::array::from_fn(|a| levels.emission[a].block(&ground, &excited)) };
+        let cl: Vec<Class> = classes.iter().map(|c| Class { nu: c.nu, beams: c.beams.iter().map(|b| Beam { coupling: b.coupling.block(&excited, &ground), wave: b.wave }).collect() }).collect();
+        let fold = folded(&lv, &cl, &at_rest(n));
+        assert!(fold.exists);
+        let (s, s_inverse) = fold.normalization();
+        let definition = s.product(&fold.generator).product(&s_inverse);
+        // The reference: the far levels' mean and the point's scalar shift's centre (here the point's own).
+        let far = (0..n).map(|i| fold.direct[(i, i)].re).sum::<f64>() / n as f64;
+        let z0 = fold.eigen.values.iter().map(|z| z.re).sum::<f64>() / n as f64;
+        let q = fold.series_ratio(C64::real(z0));
+        let order = Series::order_of(q).expect("the series converges here");
+        // The forms (every class, every replica, as the engine's per carrier and basis), from the reference's responses.
+        let nus: Vec<f64> = cl.iter().map(|c| c.nu).collect();
+        let reference = Reference::new(&lv, &nus, &at_rest(n), z0);
+        let (mut n0, mut n1, mut x, mut l) = (Mat::zeros(n, n), Mat::zeros(n, n), Mat::zeros(n, n), Mat::zeros(n, n));
+        for (c, class) in cl.iter().enumerate() {
+            let mut w = Mat::zeros(excited.len(), n);
+            for b in &class.beams {
+                w.add_scaled(C64::ONE, &b.coupling);
+            }
+            let t = reference.respond(c, &w, n, 1);
+            n0.add_scaled(C64::ONE, &w.adjoint_product(&t[0]));
+            n1.add_scaled(C64::ONE, &w.adjoint_product(&t[1]));
+            x.add_scaled(C64::ONE, &t[0].adjoint_product(&t[0]));
+            l.add_scaled(C64::ONE, &t[0].adjoint_product(&lv.decay.product(&t[0])));
+        }
+        let mut whole = fold.direct.clone();
+        whole.add_scaled(C64::ONE, &n0);
+        let hermitian = whole.hermitian_part();
+        let four = |m: Mat| -> [Mat; 4] { [m, Mat::zeros(n, n), Mat::zeros(n, n), Mat::zeros(n, n)] };
+        let mut data = vec![C64::ZERO; 14 * n * n];
+        crate::model::assemble::normalized(&four(hermitian.clone()), &four(n1.clone()), &four(x.clone()), &four(l.clone()), [z0, 0.0, 0.0, 0.0], order, &mut data);
+        let held = Mat { rows: n, cols: n, data: data[crate::model::assemble::HELD * n * n..(crate::model::assemble::HELD + 1) * n * n].to_vec() };
+        let mut route = hermitian.clone();
+        route.add_scaled(C64::ONE, &held);
+        let mut apart = route.clone();
+        apart.add_scaled(-C64::ONE, &definition.hermitian_part());
+        let mut own = definition.hermitian_part();
+        own.add_scaled(-C64::ONE, &fold.direct.hermitian_part());
+        let relative = apart.frobenius() / own.frobenius();
+        // The normalization's own size against the fold's part, and the landing maps.
+        let mut normalization = definition.hermitian_part();
+        normalization.add_scaled(-C64::ONE, &fold.generator.hermitian_part());
+        let landing = Mat { rows: n, cols: n, data: data[crate::model::assemble::LANDING * n * n..(crate::model::assemble::LANDING + 1) * n * n].to_vec() };
+        let exact = fold.landing(&s).expect("the left operators settle");
+        let mut landing_apart = landing.clone();
+        landing_apart.add_scaled(-C64::ONE, &exact);
+        let x_size = crate::linalg::hermitian_eigen(&x).values.iter().fold(0.0_f64, |m, &v| m.max(v));
+        println!(
+            "{name} F=2 at {r:?}: z0 - far {:.3} rad/us, q {q:.4}, order {order}, largest excited share {x_size:.4}; the normalization moves the fold's generator by {:.3e} of its part; the route's Hermitian generator {relative:.3e} of it apart; landing {:.3e} apart",
+            z0 - far,
+            normalization.frobenius() / own.frobenius(),
+            landing_apart.frobenius() / exact.frobenius()
+        );
+        let bound = q.powi(order as i32 + 1) / (1.0 - q);
+        assert!(relative <= bound.max(1e-9), "the route's generator {relative} apart, beyond the series' remainder {bound}");
+        assert!(landing_apart.frobenius() <= (q + x_size * q).max(1e-9) * exact.frobenius(), "the landing map");
+    }
+  }
+}

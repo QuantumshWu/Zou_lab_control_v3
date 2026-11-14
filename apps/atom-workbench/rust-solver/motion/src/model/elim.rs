@@ -890,18 +890,19 @@ impl Fold {
     /// radius) -- the order an evaluation takes is the least whose remainder is within the share (criterion one's ρ
     /// books it).
     pub(crate) fn series_ratio(&self, z0: C64) -> f64 {
-        let n = self.size();
+        self.series_norm(z0) / self.series_distance(z0)
+    }
+    /// ‖H − z₀‖₂ (`series_ratio`).
+    pub(crate) fn series_norm(&self, z0: C64) -> f64 {
         let mut e = self.generator.clone();
-        for i in 0..n {
+        for i in 0..self.size() {
             e[(i, i)] -= z0;
         }
-        let distance = self
-            .replicas
-            .iter()
-            .flat_map(|rep| (0..rep.k.n).map(move |i| (z0 + C64::real(rep.frequency) - rep.k.s[i * rep.k.n + i]).abs()))
-            .fold(f64::INFINITY, f64::min);
-        let gram = crate::linalg::hermitian_eigen(&e.adjoint_product(&e));
-        gram.values.iter().fold(0.0_f64, |m, &x| m.max(x)).sqrt() / distance
+        crate::linalg::hermitian_eigen(&e.adjoint_product(&e)).values.iter().fold(0.0_f64, |m, &x| m.max(x)).sqrt()
+    }
+    /// The least distance of z₀ + f from the excited block's spectrum over the replicas (`series_ratio`).
+    pub(crate) fn series_distance(&self, z0: C64) -> f64 {
+        self.replicas.iter().flat_map(|rep| (0..rep.k.n).map(move |i| (z0 + C64::real(rep.frequency) - rep.k.s[i * rep.k.n + i]).abs())).fold(f64::INFINITY, f64::min)
     }
 
     /// The excited share X = Σ_f T_f†T_f (the metric of P's coordinates: the slow state (x, T x) has the norm
@@ -996,6 +997,77 @@ impl Fold {
             tau += crate::linalg::inner(&y, &ly).re - 2.0 * crate::linalg::inner(&y, &cx).re;
         }
         Some((x0, tau))
+    }
+}
+
+/// The fold's series about a reference as the run evaluates it (module documentation, # The definition and the route it
+/// is evaluated on): per replica its frequency f, Q_f and the Schur form of K_f there -- K the excited block of the
+/// levels the reference is taken at (the far light's) --, which replica each class drives each ground state's amplitude
+/// into, and the reference z₀. The responses R₀^{j+1} W (`respond`) are linear in a class's coupling W with
+/// coefficients of these levels alone: what a table holds without the near light's coordinates.
+pub(crate) struct Reference {
+    replicas: Vec<(f64, Vec<usize>, Schur)>,
+    driven: Vec<Vec<usize>>,
+    ground: usize,
+    excited: usize,
+    z0: f64,
+}
+
+impl Reference {
+    /// The reference of the levels `levels` (their excited block and decay; the ground block is the caller's, in z₀),
+    /// the classes' frequencies `nus`, the slow states and their frames, at z₀ (rad/µs, in the frames).
+    pub(crate) fn new(levels: &Levels, nus: &[f64], slow: &Slow, z0: f64) -> Reference {
+        let ground = levels.ground.rows;
+        let excited = levels.excited.rows;
+        let classes: Vec<Class> = nus.iter().map(|&nu| Class { nu, beams: vec![] }).collect();
+        let replicas = Replicas::of(&classes, slow, ground);
+        let mut k = levels.excited.clone();
+        k.add_scaled(C64::new(0.0, -0.5), &levels.decay);
+        let mut forms: Vec<(Vec<usize>, Schur)> = vec![];
+        let out = replicas
+            .frequencies
+            .iter()
+            .map(|&f| {
+                let q: Vec<usize> = (0..excited).filter(|&e| !slow.explicit.iter().enumerate().any(|(i, &x)| x == e && same(slow.frames[ground + i], f))).collect();
+                if !forms.iter().any(|x| x.0 == q) {
+                    forms.push((q.clone(), Schur::of(&k.block(&q, &q)).expect("the Schur form of the excited block")));
+                }
+                let schur = forms.iter().find(|x| x.0 == q).expect("its form").1.clone();
+                (f, q, schur)
+            })
+            .collect();
+        Reference { replicas: out, driven: replicas.driven, ground, excited, z0 }
+    }
+
+    /// The responses of class c's coupling (E × the ground states) to the orders 0..=`orders`: R₀^{j+1} W on every
+    /// excited state (zero off each replica's Q) and every slow state (E × n, n the slow states: the explicit states'
+    /// columns are zero, a class couples E ← G alone), R₀ = (z₀ + f − K_f)⁻¹ of the replica each ground state's
+    /// amplitude drives.
+    pub(crate) fn respond(&self, class: usize, coupling: &Mat, n: usize, orders: usize) -> Vec<Mat> {
+        let mut out = vec![Mat::zeros(self.excited, n); orders + 1];
+        for (r, (f, q, k)) in self.replicas.iter().enumerate() {
+            let sigma = C64::real(self.z0 + f);
+            for g in (0..self.ground).filter(|&g| self.driven[class][g] == r) {
+                let mut x: Vec<C64> = q.iter().map(|&e| coupling[(e, g)]).collect();
+                if x.iter().all(|z| *z == C64::ZERO) {
+                    continue;
+                }
+                for order in out.iter_mut() {
+                    x = k.resolvent(sigma, &x);
+                    for (i, &e) in q.iter().enumerate() {
+                        order[(e, g)] = x[i];
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The complex multiply-adds of one coupling's responses to `orders` (`respond`): per driven column and order a
+    /// resolvent's two changes of basis and its back substitution on Q.
+    pub(crate) fn work(&self, orders: usize) -> f64 {
+        let q = self.replicas.iter().map(|r| r.1.len()).max().unwrap_or(0) as f64;
+        (self.ground * (orders + 1)) as f64 * 2.5 * q * q
     }
 }
 
@@ -1154,7 +1226,129 @@ pub(crate) fn bare_remainders(fold: &Fold, classes: usize, bare: &[f64]) -> Vec<
     out
 }
 
+/// A model's series constants (module documentation, # The definition and the route it is evaluated on; ELIMINATION v5):
+/// per cluster the centre c of its near light's scalar shift over the atoms read (the reference z₀ is the cluster's far
+/// levels' mean and c), the series' largest ratio q over them, and the order K every evaluation takes -- the least
+/// whose remainder q^{K+1}/(1 − q) is within the model's share (`share`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Series {
+    pub centre: Vec<f64>,
+    pub ratio: f64,
+    pub order: usize,
+}
+
+impl Series {
+    /// The least order whose remainder at the ratio q is within the share; None where the series does not converge
+    /// (q ≥ 1: the fold's existence is criterion one's to restore, a block made explicit).
+    pub(crate) fn order_of(q: f64) -> Option<usize> {
+        if !(q < 1.0) {
+            return None;
+        }
+        (0..).find(|&k| q.powi(k as i32 + 1) / (1.0 - q) <= share())
+    }
+}
+
 impl super::Model {
+    /// The fold of a model's cluster at a point, as the run's series stands for it (`Series`): the levels with the far
+    /// light alone (eliminate.rs `Model::far_hamiltonian`), every carrier a class of its coherent field's couplings
+    /// folded at the atom and explicit, the cluster's explicit states and frames; with the far levels' mean in the
+    /// frames and the norm of what the far levels leave out of the excited block -- the carriers' own static forms there,
+    /// bilinear in the near field (eliminate.rs `level_pair`) -- in the Frobenius norm, a bound of the spectral one.
+    fn cluster_fold(&self, cluster: usize, amplitudes: &[crate::field::Amplitude]) -> Option<(Fold, f64, f64)> {
+        use crate::request::{GROUND, STATES};
+        let running = self.running();
+        let h = &self.far_hamiltonian(amplitudes, &running, 0, &[])[0];
+        let c = &self.clusters[cluster];
+        let g = c.ground;
+        let grounds: Vec<usize> = c.states[..g].to_vec();
+        let excited: Vec<usize> = (GROUND..STATES).collect();
+        let classes: Vec<Class> = self
+            .carriers
+            .iter()
+            .map(|cc| {
+                let mut coupling = Mat::zeros(excited.len(), g);
+                for (l, (folded, explicit)) in cc.folded.iter().zip(&cc.explicit).enumerate() {
+                    let a = amplitudes[cc.beams[l]].value;
+                    coupling.add_scaled(a, &folded.block(&excited, &grounds));
+                    coupling.add_scaled(a, &explicit.block(&excited, &grounds));
+                }
+                Class { nu: cc.detuning, beams: vec![Beam { coupling, wave: [0.0; 3] }] }
+            })
+            .filter(|class| class.beams[0].coupling.max_abs() > 0.0)
+            .collect();
+        if classes.is_empty() {
+            return None;
+        }
+        let levels = Levels {
+            ground: h.block(&grounds, &grounds),
+            excited: h.block(&excited, &excited),
+            decay: self.decay.clone(),
+            emission: std::array::from_fn(|x| self.emission[x].block(&grounds, &excited)),
+        };
+        let frames: Vec<f64> = c.frames.iter().map(|f| self.omega(f)).collect();
+        let far = (0..g).map(|y| h[(grounds[y], grounds[y])].re - frames[y]).sum::<f64>() / g as f64;
+        let slow = Slow { explicit: c.states[g..].iter().map(|&s| s - GROUND).collect(), frames };
+        let replicas = Replicas::of(&classes, &slow, g);
+        let fold = fold(&levels, &classes, &slow, &replicas);
+        // The carriers' static forms on the excited block.
+        let mut left = Mat::zeros(excited.len(), excited.len());
+        for cc in &self.carriers {
+            let f = &self.light.frequencies[cc.frequency];
+            let n = f.beams.len();
+            for (x, form) in self.tones[cc.frequency].pairs.iter().enumerate() {
+                let z = super::far::pair(&amplitudes[f.beams[x / n]], &amplitudes[f.beams[x % n]]).value;
+                if z != C64::ZERO {
+                    left.add_scaled(z, &form.block(&excited, &excited));
+                }
+            }
+        }
+        Some((fold, far, left.frobenius()))
+    }
+
+    /// The model's series constants at the atoms `points` (`Series`): per cluster the centre of the near light's scalar
+    /// shift -- the mean of the fold's ground-like eigenvalues less the far levels' mean, over the atoms its range's
+    /// middle --, then at each atom the ratio of the series about z₀ = far mean + c, q = (‖H − z₀‖₂ + ‖δK‖)/d (the
+    /// Neumann series of the resolvent in both its arguments: `Fold::series_ratio`, and the excited block the reference
+    /// leaves out), the largest; and the order it asks for. An atom where a fold does not exist (criterion one's: its
+    /// closure makes a block explicit) is read as the series' end: q = ∞.
+    pub(crate) fn series_at(&self, points: &[([f64; 3], [f64; 3])]) -> Series {
+        use rayon::prelude::*;
+        let clusters = self.clusters.len();
+        let read: Vec<Vec<Option<(f64, Fold, f64, f64)>>> = points
+            .par_iter()
+            .map(|&(r, _)| {
+                let amplitudes = self.light.amplitudes(r);
+                (0..clusters)
+                    .map(|cluster| {
+                        let (fold, far, left) = self.cluster_fold(cluster, &amplitudes)?;
+                        let like: Vec<usize> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
+                        let shift = like.iter().map(|&p| fold.eigen.values[p].re).sum::<f64>() / like.len().max(1) as f64 - far;
+                        Some((shift, fold, far, left))
+                    })
+                    .collect()
+            })
+            .collect();
+        let centre: Vec<f64> = (0..clusters)
+            .map(|cluster| {
+                let (low, high) = read.iter().filter_map(|at| at[cluster].as_ref()).fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), x| (l.min(x.0), h.max(x.0)));
+                if low.is_finite() { 0.5 * (low + high) } else { 0.0 }
+            })
+            .collect();
+        let ratio = read
+            .iter()
+            .flat_map(|at| at.iter().enumerate())
+            .filter_map(|(cluster, x)| x.as_ref().map(|x| (cluster, x)))
+            .map(|(cluster, (_, fold, far, left))| {
+                if !fold.exists {
+                    return f64::INFINITY;
+                }
+                let z0 = C64::real(far + centre[cluster]);
+                (fold.series_norm(z0) + left) / fold.series_distance(z0)
+            })
+            .fold(0.0, f64::max);
+        Series { centre, ratio, order: Series::order_of(ratio).unwrap_or(usize::MAX) }
+    }
+
     /// The model's prior (ELIMINATION.md §3–§4, the brief's "先验"): at the reach's own atoms `points` (position,
     /// velocity) the point's closure (`closure`) from what is kept already, the atoms together until no atom adds
     /// anything; and per class its fold's route, at the point or at its bare levels (`bare_remainders`, within the share

@@ -334,11 +334,11 @@ impl Model {
     /// What the photons of a plan's states at a point read of the point's site (assemble.rs `Site`; module
     /// documentation, # A state's photons at a point), whatever the state, made on a site that holds the point
     /// (assemble.rs `Model::pointed`: every beam's amplitude with its gradient, its place on the table) -- a site of
-    /// its own, or a middle's, whose forms are `laid` there already: the fourth order's matrices (assemble.rs
+    /// its own, or a middle's, whose forms are `laid` there already: the normalized generator's matrices (assemble.rs
     /// `Model::quartic`, the position `r` their key: the step's middle's where the thread still holds them); the
     /// jumps' matrices to `order` -- 0, or 1 with their slopes: a table's, or the exact elimination's --; and the plan's
     /// field components to that order at the momentum κ. What lies within an order is the same numbers at every order.
-    /// Returns the site's counted work: the jumps' matrices', the fourth order's, and each field component's value
+    /// Returns the site's counted work: the jumps' matrices', the normalized generator's, and each field component's value
     /// (and gradient) from its beams, plain and Doppler-weighted.
     #[allow(clippy::too_many_arguments)]
     fn sited(&self, plan: &Arc<Plan>, table: Option<&NearTable>, r: Option<[f64; 3]>, kappa: [f64; 3], order: usize, site: &mut Site, laid: bool) -> f64 {
@@ -372,23 +372,23 @@ impl Model {
     fn classes_on(&self, plan: &Arc<Plan>, t: f64, psi: &[C64], gradients: Gradients, site: &mut Site, made: f64, each: &mut dyn FnMut(usize, &ClassPlan, &[f64], bool)) -> f64 {
         let order = if gradients == Gradients::None { 0 } else { 1 };
         let mut work = made;
-        // The fourth order's states (assemble.rs, # The fourth order): (1 − ½X)ψ and Nψ, and with the gradients the
-        // three lab axes' −½∂X ψ and ∂N ψ.
+        // The normalized generator's states (assemble.rs, # The normalized generator): S⁻¹ψ and M ψ = E S⁻¹ψ, and with
+        // the gradients the three lab axes' ∂S⁻¹ ψ and ∂M ψ.
         let bent: Option<[[C64; STATES]; 8]> = plan.fourth.as_ref().map(|fourth| {
             let (n, size) = (fourth.n, fourth.n * fourth.n);
             crate::model::Model::quartic_read(|q| {
                 let mut out = [[C64::ZERO; STATES]; 8];
-                let (near, metric) = (&q.data[..4 * size], &q.data[8 * size..]);
+                let (inverse, partner) = (&q.data[super::assemble::BENT * size..], &q.data[super::assemble::PARTNER * size..]);
                 for part in 0..if order >= 1 { 4 } else { 1 } {
                     for x in 0..n {
                         let (mut bend, mut shift) = (C64::ZERO, C64::ZERO);
                         for (y, z) in psi.iter().enumerate().take(n) {
-                            bend += metric[part * size + x * n + y] * *z;
-                            shift += near[part * size + x * n + y] * *z;
+                            bend += inverse[part * size + x * n + y] * *z;
+                            shift += partner[part * size + x * n + y] * *z;
                         }
                         match part {
-                            0 => (out[0][x], out[1][x]) = (psi[x] - bend * 0.5, shift),
-                            _ => (out[1 + part][x], out[4 + part][x]) = (bend * -0.5, shift),
+                            0 => (out[0][x], out[1][x]) = (bend, shift),
+                            _ => (out[1 + part][x], out[4 + part][x]) = (bend, shift),
                         }
                     }
                 }
@@ -396,7 +396,7 @@ impl Model {
                 out
             })
         });
-        // The lab axes along which the fourth order's matrices change at all (a light along one axis: that one).
+        // The lab axes along which the normalized generator's matrices change at all (a light along one axis: that one).
         let (mut axes, mut count) = ([0; 3], 0);
         for a in 0..3 {
             if bent.as_ref().is_some_and(|b| b[2 + a].iter().chain(&b[5 + a]).any(|z| *z != C64::ZERO)) {
@@ -406,10 +406,10 @@ impl Model {
         let live = &axes[..count];
         let Site { directions, jumps, jump_slopes, fields, member: vectors, class: sums, .. } = site;
         // A member's vectors: its matrix on the state, a point's with its partner's and each direction's two slopes.
-        // The most a member makes (below: `base + more` of a near member with the fourth order and the gradients), s
+        // The most a member makes (below: `base + more` of a near member with the normalized generator and the gradients), s
         // the directions' slopes, a table's axes or the three lab axes: 2(1 + s) its jumps' and its partner's with their
-        // slopes, 1 + s the fourth order's partner on Nψ with its slopes, and along each of the three lab axes the jumps
-        // on −½∂Xψ and the partner on ∂Nψ: 3(1 + s) + 6.
+        // slopes, 1 + s the partner on E S⁻¹ψ with its slopes, and along each of the three lab axes the jumps
+        // on ∂S⁻¹ψ and the partner on ∂(E S⁻¹)ψ: 3(1 + s) + 6.
         const MOST: usize = 3 * (1 + if MOST_AXES > 3 { MOST_AXES } else { 3 }) + 6;
         let (width, most) = (jumps.len(), plan.classes.iter().map(|class| class.rows).max().unwrap_or(0));
         sized(vectors, MOST * 2 * most);
@@ -442,8 +442,8 @@ impl Model {
                 let taken = m.folded && with;
                 let slopes = if taken && m.near { directions.len() } else { 0 };
                 let base = if m.near { 2 * (1 + slopes) } else { 1 };
-                // The fourth order's vectors after them: a point's partner on Nψ with its slopes, and with the gradients
-                // the jumps on −½∂X ψ and the partner on ∂N ψ along each lab axis; a constant member's jumps on −½∂X ψ.
+                // The normalized generator's vectors after them: a point's partner on E S⁻¹ψ with its slopes, and with the gradients
+                // the jumps on ∂S⁻¹ψ and the partner on ∂(E S⁻¹)ψ along each lab axis; a constant member's jumps on ∂S⁻¹ψ.
                 let more = match (&bent, m.near) {
                     (None, _) => 0,
                     (Some(_), true) => 1 + slopes + if taken { 2 * live.len() } else { 0 },
@@ -458,7 +458,7 @@ impl Model {
                     out.iter_mut().zip(&m.columns).for_each(|(z, &sp)| *z = of[sp] * phase);
                     out
                 };
-                // The jumps act on the state, or on the fourth order's (1 − ½X)ψ.
+                // The jumps act on the state, or on the normalized generator's S⁻¹ψ.
                 let bend = bent.as_ref().map(|b| gathered(&b[0]));
                 let on: &[C64] = bend.as_ref().map_or(x, |b| &b[..count]);
                 if m.near {
@@ -515,7 +515,7 @@ impl Model {
                         for (f, direction) in directions.iter().enumerate().take(slopes) {
                             (of[2 + 2 * f], of[3 + 2 * f]) = (c[0] * direction[i], -cw[0] * direction[i]);
                         }
-                        // The fourth order's: the partner on Nψ as the jumps on the state, and this axis' bent states.
+                        // The normalized generator's: the partner on E S⁻¹ψ as the jumps on the state, and this axis' bent states.
                         match (bent.is_some(), m.near) {
                             (true, true) => {
                                 of[base] = c[1 + i];

@@ -218,15 +218,6 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
             }
         }
     }
-    // The normalized generator's held part (eliminate.rs `Responses::held`), static in the frames.
-    if !responses.held.is_empty() && model.carriers.iter().any(|cc| lights.on(cc.frequency)) {
-        for x in 0..n {
-            for y in 0..n {
-                let value: Jet = std::array::from_fn(|part| leaf(responses.held[part][(x, y)]));
-                add(x, y, scaled(value, phase(&c.frames[y].plus(-1, &c.frames[x]), x, y)));
-            }
-        }
-    }
     for cc in &model.carriers {
         let (w, component) = (cc.frequency, Component { frequency: cc.frequency, counter: false });
         let at_the_atom = |e: usize, b: usize| coupling(w, &cc.basis, e, b);

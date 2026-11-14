@@ -157,17 +157,15 @@ impl Carrier {
     }
 }
 
-/// The elimination's responses on a cluster at a point (`Model::eliminate`, the one elimination: elim.rs `fold`), jets in
-/// the position, in the normalized coordinates of the cluster's states (elim.rs `Fold::normalization`): per carrier
-/// (empty where unlit), basis vector k of its field and jet part, R_k = −T_k S⁻¹ and R2_k = T2_k S⁻¹ on every place of
-/// the cluster (EXCITED × n) -- the responses linear in the coupling, a beam's Σ_k γ_lk of them; the sign the
-/// contraction's (`shift`) --; per jet part the normalized generator's held part (n × n, Hermitian, elim.rs
-/// `Fold::held`) and the landing map (n × n, `Fold::landing`); and the complex multiply-adds that made them.
+/// The elimination's responses on a cluster at a point (`Model::eliminate`: the one elimination's series about the
+/// reference, elim.rs `Reference`), jets in the position: per carrier (empty where unlit), basis vector k of its field
+/// and jet part, R_k = −R₀ U_k and R2_k = R₀² U_k on every place of the cluster (EXCITED × n) -- the order-0 response
+/// and the order-1 one, which is the first-order Doppler partner too; a beam's Σ_k γ_lk of them; the sign the
+/// contraction's (`shift`) --; per jet part the reference z₀ itself; and the complex multiply-adds that made them.
 pub(crate) struct Responses {
     pub(crate) first: Vec<Vec<Vec<Mat>>>,
     pub(crate) second: Vec<Vec<Vec<Mat>>>,
-    pub(crate) held: Vec<Mat>,
-    pub(crate) landing: Vec<Mat>,
+    pub(crate) reference: Vec<f64>,
     pub(crate) work: f64,
 }
 
@@ -175,8 +173,7 @@ pub(crate) struct Responses {
 struct Responded {
     first: Vec<Vec<Mat>>,
     second: Vec<Vec<Mat>>,
-    held: Mat,
-    landing: Mat,
+    reference: f64,
 }
 
 impl Responded {
@@ -193,8 +190,7 @@ impl Responded {
         Responded {
             first: (0..base.first.len()).map(|c| (0..base.first[c].len()).map(|k| scale(&|x: &Responded| &x.first[c][k])).collect()).collect(),
             second: (0..base.second.len()).map(|c| (0..base.second[c].len()).map(|k| scale(&|x: &Responded| &x.second[c][k])).collect()).collect(),
-            held: scale(&|x: &Responded| &x.held),
-            landing: scale(&|x: &Responded| &x.landing),
+            reference: sets.iter().map(|(x, c)| x.reference * c).sum(),
         }
     }
 }
@@ -207,11 +203,14 @@ impl Model {
         (0..self.light.frequencies.len()).map(|w| (0..self.light.frequencies[w].beams.len().pow(2)).map(|x| self.level_pair(lights, coherent, w, x)).collect()).collect()
     }
 
-    /// Whether pair x of frequency w's beams (row-major) enters the levels (`level_pairs`).
-    fn level_pair(&self, lights: &Lights, coherent: &[bool], w: usize, x: usize) -> bool {
+    /// Whether pair x of frequency w's beams (row-major) enters the levels the elimination's reference is taken at
+    /// (`level_pairs`): a pair the lights hold of the far light -- a frequency that is no carrier. A carrier's own static
+    /// form (its bare drives' shifts and its outside form) is bilinear in the near field: the generator's constant
+    /// (assemble.rs), and on the excited block what the reference leaves out, booked in the series' ratio (elim.rs
+    /// `Model::series_at`).
+    fn level_pair(&self, lights: &Lights, _coherent: &[bool], w: usize, x: usize) -> bool {
         let n = self.light.frequencies[w].beams.len();
-        let carrier = self.carrier_of(w).filter(|&d| !coherent[d]).map(|d| &self.carriers[d]);
-        lights.pair(w, x / n, x % n) && carrier.is_none_or(|cc| cc.units[x / n] == cc.units[x % n])
+        lights.pair(w, x / n, x % n) && self.carrier_of(w).is_none()
     }
 
     /// The levels at the atom as the eliminations take them: H(r) on all the states, its jet to `order` -- the base and every
@@ -337,8 +336,8 @@ impl Model {
         };
         let mut work = 0.0;
         let mut at = |d: [f64; 3]| -> Responded {
-            let (m, a) = inputs(d);
-            let (r, w) = self.respond(cluster, &m, &a, lights);
+            let (m, _) = inputs(d);
+            let (r, w) = self.respond(cluster, &m, lights);
             work += w;
             r
         };
@@ -376,17 +375,17 @@ impl Model {
         Responses {
             first: (0..carriers).map(|c| (0..centre.first[c].len()).map(|k| all.iter().map(|r| r.first[c][k].clone()).collect()).collect()).collect(),
             second: (0..carriers).map(|c| (0..centre.second[c].len()).map(|k| all.iter().map(|r| r.second[c][k].clone()).collect()).collect()).collect(),
-            held: all.iter().map(|r| r.held.clone()).collect(),
-            landing: all.iter().map(|r| r.landing.clone()).collect(),
+            reference: all.iter().map(|r| r.reference).collect(),
             work,
         }
     }
 
-    /// The one elimination on a cluster at one set of inputs -- the far Hamiltonian's value `h`, the beams' amplitudes `a`
-    /// -- and the work it took (`eliminate`): the fold (elim.rs `fold`), every lit carrier's responses on its basis
-    /// (`Fold::respond`) normalized, the held part and the landing map; its complex multiply-adds as the fold counts
-    /// them (`Fold::work`).
-    fn respond(&self, cluster: usize, h: &Mat, a: &[C64], lights: &Lights) -> (Responded, f64) {
+    /// The one elimination on a cluster at one set of inputs -- the far Hamiltonian's value `h` -- and the work it took
+    /// (`eliminate`): the fold's series about the reference (elim.rs `Reference`; module documentation of elim.rs, # The
+    /// definition and the route it is evaluated on), every lit carrier's responses on its basis to orders 0 and 1. The
+    /// reference z₀ is the mean of the cluster's ground levels in its frames with the far light alone (`h`'s diagonal,
+    /// no near field in it) and the cluster's constant centre c of the near light's scalar shift (`Model::series`).
+    fn respond(&self, cluster: usize, h: &Mat, lights: &Lights) -> (Responded, f64) {
         use super::elim;
         let c = &self.clusters[cluster];
         let (n, g) = (c.states.len(), c.ground);
@@ -398,52 +397,23 @@ impl Model {
             decay: self.decay.clone(),
             emission: std::array::from_fn(|x| self.emission[x].block(&grounds, &excited)),
         };
+        let frames: Vec<f64> = c.frames.iter().map(|f| self.omega(f)).collect();
+        let reference = (0..g).map(|y| h[(grounds[y], grounds[y])].re - frames[y]).sum::<f64>() / g as f64 + self.series.centre[cluster];
         let lit: Vec<usize> = (0..self.carriers.len()).filter(|&ci| lights.on(self.carriers[ci].frequency)).collect();
-        // Per lit carrier its classes: its beams one coherent field, or under an averaged light each beam its own.
-        let mut classes: Vec<elim::Class> = vec![];
-        let mut of: Vec<Vec<usize>> = vec![];
-        for &ci in &lit {
-            let cc = &self.carriers[ci];
-            let beam = |l: usize| {
-                let mut m = cc.folded[l].clone();
-                m.add_scaled(C64::ONE, &cc.explicit[l]);
-                elim::Beam { coupling: m.block(&excited, &grounds).scaled(a[cc.beams[l]]), wave: self.light.beams[cc.beams[l]].wave_vector() }
-            };
-            let groups: Vec<Vec<usize>> = if lights.0[cc.frequency] == super::Lit::Averaged { (0..cc.beams.len()).map(|l| vec![l]).collect() } else { vec![(0..cc.beams.len()).collect()] };
-            of.push((classes.len()..classes.len() + groups.len()).collect());
-            for group in groups {
-                classes.push(elim::Class { nu: cc.detuning, beams: group.into_iter().map(beam).collect() });
-            }
-        }
-        let slow = elim::Slow { explicit: c.states[g..].iter().map(|&s| s - GROUND).collect(), frames: c.frames.iter().map(|f| self.omega(f)).collect() };
-        // The replicas: a coherent class's by its frequency (`Replicas::of`), an averaged beam's its own.
-        let mut replicas = elim::Replicas::of(&classes, &slow, g);
-        for (k, &ci) in lit.iter().enumerate() {
-            if of[k].len() > 1 {
-                for &class in &of[k] {
-                    for y in 0..g {
-                        replicas.frequencies.push(self.carriers[ci].detuning + slow.frames[y]);
-                        replicas.driven[class][y] = replicas.frequencies.len() - 1;
-                    }
-                }
-            }
-        }
-        let fold = elim::fold(&levels, &classes, &slow, &replicas);
-        let (s, s_inverse) = fold.normalization();
+        let nus: Vec<f64> = lit.iter().map(|&ci| self.carriers[ci].detuning).collect();
+        let slow = elim::Slow { explicit: c.states[g..].iter().map(|&s| s - GROUND).collect(), frames };
+        let series = elim::Reference::new(&levels, &nus, &slow, reference);
         let (mut first, mut second) = (vec![vec![]; self.carriers.len()], vec![vec![]; self.carriers.len()]);
+        let mut work = 0.0;
         for (k, &ci) in lit.iter().enumerate() {
             for u in &self.carriers[ci].basis {
-                let coupling = u.block(&excited, &grounds);
-                // Every class of the carrier has the same replicas' Q, K and frequencies: one's response is the basis's.
-                let (t, t2) = fold.respond(of[k][0], &coupling);
-                first[ci].push(t.product(&s_inverse).scaled(-C64::ONE));
-                second[ci].push(t2.product(&s_inverse));
+                let mut orders = series.respond(k, &u.block(&excited, &grounds), n, 1).into_iter();
+                first[ci].push(orders.next().expect("order 0").scaled(-C64::ONE));
+                second[ci].push(orders.next().expect("order 1"));
+                work += series.work(1);
             }
         }
-        let held = fold.held(&s, &s_inverse);
-        let landing = fold.landing(&s).unwrap_or_else(|| s.clone());
-        let work = fold.work() + lit.iter().map(|&ci| self.carriers[ci].basis.len()).sum::<usize>() as f64 * fold.response_work();
-        (Responded { first, second, held, landing }, work)
+        (Responded { first, second, reference }, work)
     }
 
     /// Whether the channel of a component at the exact frequency `to` into ground state a is another Floquet state than

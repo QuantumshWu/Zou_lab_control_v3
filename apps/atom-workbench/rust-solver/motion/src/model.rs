@@ -408,6 +408,9 @@ pub struct Model {
     /// Per light set with an averaged light and ground populations asked so far, the model its potential is read on
     /// (potential.rs `Model::smooth`).
     pub(crate) smooth: Mutex<Vec<(Lights, [f64; GROUND], Arc<Model>)>>,
+    /// The constants of the fold's series every evaluation takes (elim.rs `Series`): read at the focus where the model
+    /// is made, and at the atoms of its run where the run reads them (`Model::referenced`).
+    pub(crate) series: elim::Series,
 }
 
 /// What a request gives a model whatever units are kept (`Model::new`, `Model::rekept`): the light, the exact frequencies and
@@ -563,6 +566,7 @@ impl Model {
             labels,
             names,
             smooth: Mutex::new(vec![]),
+            series: elim::Series { centre: vec![], ratio: 0.0, order: 0 },
         };
         model.ranked = model.ranked_made();
         model.beats = model.beats_made();
@@ -621,7 +625,18 @@ impl Model {
         model.mixing = (0..model.clusters.len()).map(|c| model.mix(c)).collect();
         model.sources = model.all_sources();
         model.classes = (0..model.clusters.len()).map(|c| model.classes(c)).collect();
+        model.series = elim::Series { centre: vec![0.0; model.clusters.len()], ratio: 0.0, order: 0 };
+        model.series = model.series_at(&[([0.0; 3], [0.0; 3])]);
         Ok(model)
+    }
+
+    /// The model with its series constants read at the atoms `points` (position, velocity; elim.rs `Model::series_at`):
+    /// what the run evaluates its folds with. Nothing made of the constants before is kept (the plans, the averaged
+    /// lights' models).
+    pub(crate) fn referenced(&mut self, points: &[([f64; 3], [f64; 3])]) {
+        self.series = self.series_at(points);
+        self.plans = Mutex::new(vec![]);
+        self.smooth = Mutex::new(vec![]);
     }
 
     /// The energy at which a cluster's ground states read its state at `place`, from the states' levels `levels` (far.rs,
@@ -670,20 +685,22 @@ impl Model {
         of.all(|frequency| frequency == first).then_some(first)
     }
 
-    /// Where a jump's bare state f lands in a plan's cluster at a point (eliminate.rs `Responses::landing`; elim.rs
-    /// `Fold::landed`): the slow part of (f, 0) in the normalized coordinates, Π f -- not normalized, its norm N against
-    /// the next jump's threshold (step.rs `jump`): N < 1, the fast part takes the rest away at once (a photon more); N > 1,
-    /// the next photon is late (antibunching). The same map is the light's switching on (ELIMINATION v3 4). Where the
-    /// cluster has no fold the state is f.
+    /// Where a jump's bare state f lands in a plan's cluster at a point (elim.rs `Fold::landed`; assemble.rs, # The
+    /// normalized generator): the slow part of (f, 0) in the normalized coordinates, S (1 + Σ_f S_f T_f)⁻¹ f, the left
+    /// and the right wave operators' overlap Σ_f S_f T_f to the series' leading order Σ_f W′ R₀² W = Y -- not
+    /// normalized, its norm N against the next jump's threshold (step.rs `jump`): N < 1, the fast part takes the rest
+    /// away at once (a photon more); N > 1, the next photon is late (antibunching). The same map is the light's switching
+    /// on (ELIMINATION v3 4). Where the cluster has no fold the state is f.
     pub(crate) fn landed(&self, plan: &assemble::Plan, table: Option<&tabulate::NearTable>, at: &Point, f: &[C64]) -> crate::step::Internal {
-        let n = plan.near.landing;
-        if n == 0 {
-            return f.iter().copied().collect();
-        }
-        let amplitudes = self.light.amplitudes(at.r);
-        let near = self.near_values(plan, &amplitudes, &[(plan.near.landed(), 0)], table);
-        let start = plan.near.landed().start;
-        (0..n).map(|x| (0..n).fold(C64::ZERO, |z, y| z + near.data[start + x * n + y] * f[y])).collect()
+        let Some(fourth) = &plan.fourth else { return f.iter().copied().collect() };
+        let (n, size) = (fourth.n, fourth.n * fourth.n);
+        let mut site = assemble::Held::<assemble::Site>::take();
+        let table = self.pointed(plan, table, at.r, &mut site);
+        self.quartic(plan, fourth, table, Some(at.r), &mut site, false);
+        Model::quartic_read(|q| {
+            let landing = &q.data[assemble::LANDING * size..(assemble::LANDING + 1) * size];
+            (0..n).map(|x| (0..n).fold(C64::ZERO, |z, y| z + landing[x * n + y] * f[y])).collect()
+        })
     }
 
     /// A component's exact frequency ν: the co-rotating δ_ω, the counter-rotating −(δ_ω + 2ν_frame).

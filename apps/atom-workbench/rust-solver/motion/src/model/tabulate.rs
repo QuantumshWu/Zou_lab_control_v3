@@ -337,17 +337,13 @@ impl Model {
     }
 
     /// Every coordinate an elimination under a light set depends on (module documentation, # Coordinates): the chart of every
-    /// lit frequency that enters by its coherent field, and the units of each lit carrier whose dressing takes its units' T̄.
-    fn coordinates(&self, lights: &Lights, polarizations: &[Vec<Polarization>]) -> Vec<Coordinate> {
+    /// lit frequency of the far light -- no carrier: the near forms are the fold's series about the far levels, whose
+    /// coefficients hold no near field (eliminate.rs `Model::eliminate`).
+    fn coordinates(&self, lights: &Lights, _polarizations: &[Vec<Polarization>]) -> Vec<Coordinate> {
         let mut out = vec![];
         for (frequency, f) in self.light.frequencies.iter().enumerate() {
-            if lights.on(frequency) && self.carrier_of(frequency).is_none_or(|d| polarizations[d].is_empty()) {
+            if lights.on(frequency) && self.carrier_of(frequency).is_none() {
                 out.extend((0..f.chart_dimension()).map(|index| Coordinate::Chart { frequency, index }));
-            }
-        }
-        for (carrier, cc) in self.carriers.iter().enumerate() {
-            if lights.on(cc.frequency) {
-                out.extend((0..polarizations[carrier].len()).map(|unit| Coordinate::Unit { carrier, unit }));
             }
         }
         out

@@ -273,9 +273,9 @@ impl Model {
                 out.terms += 1;
                 out.work += 2.0 * jet::product_work(parts);
             }
-            // The fourth order's shift (assemble.rs, # The fourth order): the diagonal of H⁽⁴⁾ = Herm[−Y N + ½[X, N]]
-            // at the point, and its gradient -- the generator's whose gradient the force is. Its second derivatives
-            // are not made: a potential asked to that order (a trap's Hessian) is the second order's.
+            // The normalized generator's held part (assemble.rs, # The normalized generator): its diagonal at the point,
+            // and its gradient -- the generator's whose gradient the force is. Its second derivatives are not made: a
+            // potential asked to that order (a trap's Hessian) is the forms'.
             if let (Some(fourth), true) = (&plan.fourth, order <= 1) {
                 let mut site = super::assemble::Held::<super::assemble::Site>::take();
                 site.beams.clear();
@@ -284,26 +284,16 @@ impl Model {
                 out.work += self.quartic(plan, fourth, table, None, &mut site, false);
                 let (n, size) = (fourth.n, fourth.n * fourth.n);
                 Model::quartic_read(|q| {
-                    let (near, partner, metric) = (&q.data[..4 * size], &q.data[4 * size..8 * size], &q.data[8 * size..]);
-                    // Re Σ_c (−Y + ½X)[b, c] N[c, b] − ½ N[b, c] X[c, b], the factors' parts as given.
-                    let diagonal = |b: usize, first: usize, second: usize| -> f64 {
-                        (0..n)
-                            .map(|k| {
-                                let (bk, kb) = (b * n + k, k * n + b);
-                                ((metric[first * size + bk] * 0.5 - partner[first * size + bk]) * near[second * size + kb] - near[first * size + bk] * metric[second * size + kb] * 0.5).re
-                            })
-                            .sum()
-                    };
+                    let held = &q.data[super::assemble::HELD * size..];
                     for (b, &state) in c.states[..n].iter().enumerate().filter(|of| p[*of.1] != 0.0) {
                         let (quadratic, w) = (&mut out.quadratic, sign * p[state]);
-                        let value = diagonal(b, 0, 0);
+                        let value = held[b * n + b].re;
                         quadratic.value += w * value;
                         for i in 0..3 * order {
-                            quadratic.gradient[i] += w * (diagonal(b, 1 + i, 0) + diagonal(b, 0, 1 + i));
+                            quadratic.gradient[i] += w * held[(1 + i) * size + b * n + b].re;
                         }
                         out.scale += value.abs() * p[state];
                         out.terms += 1;
-                        out.work += (2 * n * (1 + 6 * order)) as f64;
                     }
                 });
             }
