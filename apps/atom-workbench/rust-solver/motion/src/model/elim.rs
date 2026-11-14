@@ -51,7 +51,7 @@
 //! (−∂T/∂f). The first two terms are the model's; the third is the remainder whose relative size ρ(Δ) is the first
 //! criterion (`Fold::remainder`).
 //!
-//! # The criteria's numbers (`Fold::components`, `Fold::photons`)
+//! # The criteria's numbers (`Fold::components`; the photons' on the run's photon classes, `Model::readings`)
 //! - The remainder ρ_p(Δ) = ‖Δ² R(λ_p)² R(λ_p + Δ) W r_p‖ / ‖R(λ_p) W r_p‖ of each P eigenstate, the replicas added in
 //!   squares (different frequencies), with each excited state's part of it: the excited block that leaves the most is
 //!   the one a partition makes explicit (criterion one).
@@ -62,7 +62,9 @@
 //!   |a|²/δ).
 //! - The photons' cross terms: the jumps C_a T_f of two replicas land in the same ground states at two photon
 //!   frequencies; their interference turns at the difference, and of a rate γ it moves the populations by γ/Ω (the
-//!   secular approximation, first order: kept above the share).
+//!   secular approximation, first order: kept above the share). Read where the photons are the run's own -- its photon
+//!   classes, which land in every cluster (`Model::readings`) --, not in the prior's closure: no keep the prior makes
+//!   reads them.
 use crate::linalg::{schur, Eigen, Mat, C64};
 use crate::units::rounding;
 
@@ -598,17 +600,6 @@ impl Component {
     }
 }
 
-/// A cross term of two photon frequencies (criterion two for the jumps): from eigenstate `from`, landing in eigenstates
-/// `landing` (a, b), its size γ, the beat Ω between the two photons, and the two replicas.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Cross {
-    pub from: usize,
-    pub landing: (usize, usize),
-    pub size: f64,
-    pub beat: f64,
-    pub classes: (Option<usize>, Option<usize>),
-}
-
 impl Fold {
     /// P's size.
     pub(crate) fn size(&self) -> usize {
@@ -704,56 +695,6 @@ impl Fold {
                     let size = e[(q, p)].abs();
                     if size > 0.0 {
                         out.push(Component { row: q, column: p, size, distance: C64::real(beat) + lambda[p] - lambda[q], beat, classes: (None, None) });
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    /// The photons of eigenstate p per replica (and of the explicit states' own decay, at their frames): per photon
-    /// frequency the vectors u_a = C_a T_f r_p on the ground states.
-    pub(crate) fn photon_vectors(&self, levels: &Levels, p: usize) -> Vec<(f64, Option<usize>, [Vec<C64>; 3])> {
-        let r = self.right(p);
-        let mut out: Vec<(f64, Option<usize>, [Vec<C64>; 3])> = vec![];
-        for rep in &self.replicas {
-            let x = rep.t.apply(&r);
-            let u: [Vec<C64>; 3] = std::array::from_fn(|a| (0..self.ground).map(|g| rep.q.iter().enumerate().map(|(i, &e)| levels.emission[a][(g, e)] * x[i]).sum()).collect());
-            out.push((rep.frequency, rep.feeds.iter().find_map(|f| f.class), u));
-        }
-        for (i, &e) in self.explicit.iter().enumerate() {
-            let f = self.frames[self.ground + i];
-            let u: [Vec<C64>; 3] = std::array::from_fn(|a| (0..self.ground).map(|g| levels.emission[a][(g, e)] * r[self.ground + i]).collect());
-            match out.iter_mut().find(|x| same(x.0, f)) {
-                Some(x) => (0..3).for_each(|a| x.2[a].iter_mut().zip(&u[a]).for_each(|(s, v)| *s += *v)),
-                None => out.push((f, None, u)),
-            }
-        }
-        out
-    }
-
-    /// The cross terms of two photon frequencies from every eigenstate (module documentation): landing in eigenstates
-    /// a and b (their left vectors' ground parts), γ = |Σ_a ⟨l_a|u_{f,a}⟩ ⟨l_b|u_{f',a}⟩*|, Ω = f − f' − (λ_a − λ_b).
-    pub(crate) fn photons(&self, levels: &Levels) -> Vec<Cross> {
-        let n = self.size();
-        let mut out = vec![];
-        let landing: Vec<Vec<C64>> = (0..n).map(|q| self.left(q)[..self.ground].to_vec()).collect();
-        for p in 0..n {
-            let vectors = self.photon_vectors(levels, p);
-            for (i, (f, first, u)) in vectors.iter().enumerate() {
-                for (j, (g, second, v)) in vectors.iter().enumerate() {
-                    if i == j {
-                        continue;
-                    }
-                    for a in 0..n {
-                        for b in 0..n {
-                            let s: C64 = (0..3).map(|k| crate::linalg::inner(&landing[a], &u[k]) * crate::linalg::inner(&landing[b], &v[k]).conj()).sum();
-                            if s == C64::ZERO {
-                                continue;
-                            }
-                            let beat = f - g - (self.eigen.values[a].re - self.eigen.values[b].re);
-                            out.push(Cross { from: p, landing: (a, b), size: s.abs(), beat, classes: (*first, *second) });
-                        }
                     }
                 }
             }
@@ -1419,12 +1360,11 @@ impl super::Model {
                 self.in_generator(a, b, &beat)
             };
             let blocks = self.blocks();
-            let errors = errors(&fold, &levels, &blocks, &linked, None, &sample.psi, velocity, range);
+            let errors = errors(&fold, &levels, &blocks, &linked, &sample.psi, velocity, range);
             for (object, x) in &errors.parts {
                 match object {
                     Object::Block(b) => book(&Unit::Block { block: *b }, *x, &mut out),
                     Object::Link(l) => book(&term(l), *x, &mut out),
-                    Object::Photons(..) => {}
                 }
             }
         }
@@ -1558,13 +1498,11 @@ impl Link {
 }
 
 /// What a model keeps explicit (ELIMINATION.md §6: the keep rule's two kinds of objects): excited blocks, and P-layer
-/// links -- the explicit components, the explicit drives into the blocks with them -- and the photons' cross terms kept
-/// (pairs of photon frequencies, by the classes that make them; None the explicit states' own).
+/// links -- the explicit components, the explicit drives into the blocks with them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Kept {
     pub blocks: Vec<usize>,
     pub links: Vec<Link>,
-    pub photons: Vec<(Option<usize>, Option<usize>)>,
 }
 
 /// A point's closure (criteria one and two at one atom, ELIMINATION.md §3–§4 with v2 and v3): the kept set from
@@ -1601,9 +1539,8 @@ fn slow_of(blocks: &[Vec<usize>], kept: &Kept, classes: &[Class], ground: usize)
 ///    explicit until the rest is within it -- a block already explicit at another replica keeps that drive instead;
 ///    a new block takes the drive whose replica holds its largest part (its frame);
 /// 3. criterion two: every component of two replicas whose averaged error 2(a/δ)² is beyond the share (v5: the
-///    population's time mean after a sudden switch-on) is kept (a link of its two dominant states and classes), and every photon cross term whose γ/|Ω| is
-///    above the share;
-/// until nothing more is kept. Each round only adds.
+///    population's time mean after a sudden switch-on) is kept (a link of its two dominant states and classes);
+/// until nothing more is kept. Each round only adds. (The photons' cross terms are the run's to read, `Model::readings`.)
 pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>], velocity: [f64; 3], start: &Kept) -> Closed {
     let ground = levels.ground.rows;
     let share = share();
@@ -1759,14 +1696,6 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
                 }
             }
         }
-        for x in fold.photons(levels) {
-            if x.size > share * x.beat.abs() {
-                let pair = x.classes;
-                if !kept.photons.contains(&pair) {
-                    kept.photons.push(pair);
-                }
-            }
-        }
         if grew {
             continue;
         }
@@ -1782,17 +1711,16 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
     }
 }
 
-/// What a model keeps or folds, the keep rule's objects (ELIMINATION.md §6): an excited block, a P-layer link, a pair of
-/// photon frequencies' cross term.
+/// What a model keeps or folds at a point, the keep rule's objects (ELIMINATION.md §6): an excited block, a P-layer link.
+/// (The photons' cross terms are read on the run's photon classes, `Model::readings`.)
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Object {
     Block(usize),
     Link(Link),
-    Photons(Option<usize>, Option<usize>),
 }
 
-/// A model's error at a state (ELIMINATION.md §6, v2, v3): the populations' (absolute) and T's (relative), its four
-/// terms, and per object the part its keep would take away.
+/// A model's error at a state (ELIMINATION.md §6, v2, v3): the populations' (absolute) and T's (relative), its three
+/// terms of the fold, and per object the part its keep would take away.
 #[derive(Clone, Debug)]
 pub(crate) struct Errors {
     pub population: f64,
@@ -1800,7 +1728,6 @@ pub(crate) struct Errors {
     pub remainder: f64,
     pub transient: f64,
     pub averaged: f64,
-    pub photons: f64,
     pub parts: Vec<(Object, f64)>,
 }
 
@@ -1816,15 +1743,11 @@ pub(crate) struct Errors {
 ///   error is |τ + clamp| over the model's mean wait, N/γ or (1 + ln N)/γ. Its part goes to the blocks in proportion to
 ///   their share of the landing's excited amplitude T x₀: making a block explicit takes its fast part into the dynamics.
 /// - The averaged components (criterion two): 2(a/δ)² of each one not kept (v5), on its two eigenstates' shares.
-/// - The photons' cross terms not kept: γ/|Ω| of each, on its source eigenstate's share.
-/// A relative rate error x moves the populations by at most x (absolute) and T, which the light sets through its rates
-/// and shifts, by x relative: the four terms add on both.
-#[allow(clippy::too_many_arguments)]
-/// `linked`: whether a P-layer link is the model's (kept, or static in its frames: in its generator as it is);
-/// `photons`: whether a pair of photon frequencies' cross term is kept -- None where the caller books the photons'
-/// cross terms itself (the run's photon classes, which land in every cluster: model.rs `Model::readings`).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked: &dyn Fn(&Link) -> bool, photons: Option<&dyn Fn((Option<usize>, Option<usize>)) -> bool>, psi: &[C64], velocity: [f64; 3], range: f64) -> Errors {
+/// The photons' cross terms are the caller's (the run's photon classes, which land in every cluster: model.rs
+/// `Model::readings`). A relative rate error x moves the populations by at most x (absolute) and T, which the light sets
+/// through its rates and shifts, by x relative: the terms add on both.
+/// `linked`: whether a P-layer link is the model's (kept, or static in its frames: in its generator as it is).
+pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked: &dyn Fn(&Link) -> bool, psi: &[C64], velocity: [f64; 3], range: f64) -> Errors {
     let n = fold.size();
     let ground = fold.ground;
     let excited = levels.excited.rows;
@@ -1903,7 +1826,7 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
             }
         }
     }
-    // The averaged components and the photons' cross terms not kept.
+    // The averaged components not kept.
     let label = |p: usize| {
         let s = fold.dominant(p);
         if s < ground { s } else { ground + fold.explicit[s - ground] }
@@ -1918,19 +1841,8 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
         averaged += e;
         add(Object::Link(link), e, &mut parts);
     }
-    let mut cross = 0.0;
-    if let Some(kept) = photons {
-        for x in fold.photons(levels) {
-            if kept(x.classes) || weight[x.from] == 0.0 {
-                continue;
-            }
-            let e = x.size / x.beat.abs() * weight[x.from];
-            cross += e;
-            add(Object::Photons(x.classes.0, x.classes.1), e, &mut parts);
-        }
-    }
-    let sum = remainder + transient + averaged + cross;
-    Errors { population: sum, temperature: sum, remainder, transient, averaged, photons: cross, parts }
+    let sum = remainder + transient + averaged;
+    Errors { population: sum, temperature: sum, remainder, transient, averaged, parts }
 }
 
 #[cfg(test)]
