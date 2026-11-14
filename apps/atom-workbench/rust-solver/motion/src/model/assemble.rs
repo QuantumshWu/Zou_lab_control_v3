@@ -342,6 +342,8 @@ struct Term {
     len: usize,
     at: usize,
     near: bool,
+    /// The places of the entries it holds (n × n row by row), within its span: its pieces' entries (`Group`).
+    held: Vec<usize>,
     /// In a form with a Hermitian ρ (`Middle::contract`), its weight. A flag's values and their adjoints -- the two
     /// components conjugated, the base beat negated, the entries transposed and conjugated, the Doppler-weighted side
     /// exchanged -- make conjugate forms: of a block and its adjoint the first is taken twice and the other left out, and of a
@@ -399,12 +401,13 @@ impl Laid {
         let values = if near { &mut self.start } else { constant };
         let at = values.len();
         values.resize(at + 2 * len, 0.0);
-        for e in held {
+        for e in &held {
             values[at + e.0 - first] += e.1.re;
             values[at + len + e.0 - first] += e.1.im;
         }
         self.index.insert(key, self.terms.len());
-        self.terms.push(Term { block: key.0, flag: key.1, tone: key.2, first, len, at, near, weight });
+        let held = held.iter().map(|e| e.0).collect();
+        self.terms.push(Term { block: key.0, flag: key.1, tone: key.2, first, len, at, near, held, weight });
     }
     /// Where the entry at `place` of a near term's values lies among a point's: its real part and its imaginary part.
     fn place(&self, key: (usize, usize, usize), place: usize) -> Option<[usize; 2]> {
@@ -1278,8 +1281,10 @@ impl<'a> Builder<'a> {
                     })
                 };
                 let (left, right) = (sides(d.left), sides(d.right));
-                for (_, &(x, y)) in d.entries.iter().enumerate().filter(|&(e, _)| entry_tones[term.block][e] == term.tone) {
-                    let (offset, frames) = (x * n + y - term.first, cluster.waves_exact[x].plus(-1, &cluster.waves_exact[y]));
+                // The term's own entries: of its block's at its tone, those its flag holds (`Laid::push`).
+                for &place in &term.held {
+                    let (x, y) = (place / n, place % n);
+                    let (offset, frames) = (place - term.first, cluster.waves_exact[x].plus(-1, &cluster.waves_exact[y]));
                     for (l, lw) in &left {
                         for (r, rw) in &right {
                             let wave = lw.plus(1, rw).plus(-1, &frames);

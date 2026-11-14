@@ -1108,16 +1108,62 @@ fn the_decay_is_the_photons_rate_with_the_normalized_generator() {
 fn the_beating_groups_are_the_generator_s_along_a_path() {
     let (mut groups, mut clusters) = (0, 0);
     for (index, (name, model)) in models().into_iter().enumerate() {
-        let mut stream = Stream::new(1, Purpose::Initial, index as u64, 0);
+        let (g, c) = groups_along_a_path(name, index as u64, &model);
+        (groups, clusters) = (groups + g, clusters + c);
+    }
+    eprintln!("{groups} candidate tone pairs on {clusters} clusters");
+    assert!(groups > 0);
+}
+
+/// A beating group's pieces are its terms' own entries (assemble.rs `Term::held`): a dense term is a block's entries at
+/// one tone that one flag holds, laid on their span, and a block's flags hold different entries -- the decay's flag
+/// where a Hermitian one holds none, a near form's flag beside a constant one. A group that took every entry of the
+/// block at the tone into each flag's term read past the values of a flag that holds fewer: S2Q's first model and its
+/// first attempt's keep (the probe's F′ = 3 block for F = 2 m = −2, −1, 0 and the normalization's first order) panicked
+/// in a step's envelopes (the run at index 6 to 94 of a term's 4 values; this test at 15 of 8). On both, every
+/// cluster's every candidate pair's envelopes and
+/// tone forces are made, and where the generator has no normalized part the groups are the generator's along a path
+/// (`groups_along_a_path`).
+#[test]
+fn a_beating_group_s_pieces_are_its_terms_own_entries() {
+    use crate::model::Component;
+    use crate::request::GROUND;
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("S2Q.json");
+    let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let req = Request::from_native(&line).unwrap();
+    let light = Light::new(&req);
+    let chief = (0..GROUND).max_by(|&a, &b| req.initial_density[(a, a)].re.total_cmp(&req.initial_density[(b, b)].re)).unwrap();
+    let (first, mut kept, _, _) = Model::closed_at(&req, &light, vec![], chief, req.temperature_uk);
+    let state = |label: &str| req.states.iter().position(|s| s == label).expect("a state of the request");
+    let block = first.blocks().iter().position(|b| b.contains(&(state("D2-3-0") - GROUND))).expect("the F′ = 3 block");
+    let probe = (0..light.frequencies.len()).find(|&f| light.frequencies[f].beams.iter().any(|&l| req.beams[l].id == "laser-probe")).expect("the probe's carrier");
+    for m in ["-2", "-1", "0"] {
+        kept.push(Unit::Block { block, component: Component { frequency: probe, counter: false }, grounds: crate::model::elim::ground_set(&[state(&format!("ground-2-{m}"))]) });
+    }
+    kept.push(Unit::Normalization { order: 1 });
+    let (keep, _, _, _) = Model::closed_at(&req, &light, kept, chief, req.temperature_uk);
+    let (mut groups, mut clusters) = (0, 0);
+    for (index, (name, model)) in [("S2Q's first model", first), ("S2Q's first attempt's keep", keep)].into_iter().enumerate() {
+        let (g, c) = groups_along_a_path(name, index as u64, &model);
+        (groups, clusters) = (groups + g, clusters + c);
+    }
+    eprintln!("S2Q: {groups} candidate tone pairs on {clusters} clusters");
+    assert!(groups > 0);
+}
+
+/// `the_beating_groups_are_the_generator_s_along_a_path` on one model, its stream's index `index`: every cluster's
+/// candidate pairs' envelopes made, and where its generator has no normalized part the property checked; the pairs and
+/// the clusters checked.
+fn groups_along_a_path(name: &str, index: u64, model: &Model) -> (usize, usize) {
+    let (mut groups, mut clusters) = (0, 0);
+    {
+        let mut stream = Stream::new(1, Purpose::Initial, index, 0);
         let lights = model.running();
         for cluster in 0..model.clusters.len() {
             let n = model.clusters[cluster].states.len();
             let plan = model.plan(cluster, &lights);
-            let (r, t, kappa, velocity, times) = drawn(&model, &mut stream);
+            let (r, t, kappa, velocity, times) = drawn(model, &mut stream);
             let rho = hermitian(n, &mut stream);
-            if plan.fourth.as_ref().is_some_and(|fourth| fourth.bends() || fourth.held()) {
-                continue;
-            }
             let middle = model.assemble(cluster, r, t, &lights);
             let path = middle.path(kappa, velocity);
             let (mut beats, mut keys) = (vec![], vec![]);
@@ -1134,6 +1180,15 @@ fn the_beating_groups_are_the_generator_s_along_a_path() {
                     (plus, minus)
                 })
                 .collect();
+            if plan.fourth.as_ref().is_some_and(|fourth| fourth.bends() || fourth.held()) {
+                let (re, im): (Vec<C64>, Vec<C64>) = rho.iter().map(|z| (*z, C64::ZERO)).unzip();
+                for m in 0..beats.len() {
+                    let tone = middle.tone_force(&path, m, &re, &im);
+                    assert!(tone.iter().all(|x| x.is_finite()), "{name}, cluster {cluster}: a pair's tone force is a number");
+                }
+                assert!(envelopes.iter().all(|(p, q)| p.data.iter().chain(&q.data).all(|z| z.re.is_finite() && z.im.is_finite())), "{name}, cluster {cluster}: the envelopes are numbers");
+                continue;
+            }
             let rest = |s: f64| -> Mat {
                 let mut h = Mat::zeros(n, n);
                 middle.generator(&path, s, &mut h);
@@ -1176,8 +1231,7 @@ fn the_beating_groups_are_the_generator_s_along_a_path() {
             (groups, clusters) = (groups + beats.len(), clusters + 1);
         }
     }
-    eprintln!("{groups} candidate tone pairs on {clusters} clusters");
-    assert!(groups > 0);
+    (groups, clusters)
 }
 
 /// The readout inverts the generator's own S (readout.rs `Model::readout_of`; `Model::bent_at`): the 1D PGC at 3 G
