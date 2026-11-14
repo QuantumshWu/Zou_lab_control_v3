@@ -142,7 +142,10 @@
 //! change, a product's (# The second order by tones) own second order --, the larger of its two ways round: the
 //! following's orders a series in r, their sum F/(1 − r). (An entry nothing changes on has r = 0: its following is
 //! none, whatever the sizes the rule reads.)
-//! - **followed** where the following converges, r < 1, and leaves no more than the hops: F/(1 − r) + L ≤ J;
+//! - **followed** where the following converges, r < 1, and leaves no more than the hops: F/(1 − r) + L ≤ J -- of a
+//!   product (# The second order by tones) F with the third order its following X⁽²⁾ leaves on the entries the first
+//!   order's couplings carry it to, c X⁽²⁾, at most 2 S r over the step (S the couplings' size over a half step:
+//!   measured where it was left out, 3.3·10⁻² of a share of 4.5·10⁻² on PGC3D's steps, up to 39 at a few);
 //! - **hopped** where the hops leave less: J < F/(1 − r) + L with r < 1, or J < F + L with r ≥ 1 -- the hops hold
 //!   where the entry turns little between the nodes, which is where J is the less --, and an entry that does not turn
 //!   (x = 0);
@@ -556,13 +559,17 @@ impl Default for Picture {
 /// hops leave less than the following's leading term would, and taken by no route of the decomposition (None) where
 /// they leave more -- the hops' own series is no better there: a pair that turns far between two nodes, hopped, turns
 /// by its decay rates' difference too, e^{|Im Ω| 2h} over the step, its exponent without bound (`Picture::prepare`
-/// takes the step by the strides then). r is the following's size on the entry, |Y| at the step's ends (`flag`).
-fn followed(x: f64, [slope, curvature, constant]: [f64; 3], r: f64) -> Option<bool> {
+/// takes the step by the strides then). r is the following's size on the entry, |Y| at the step's ends (`flag`). A
+/// product's following X⁽²⁾ (# The second order by tones) leaves besides the third order c X⁽²⁾ on the entries the
+/// first order's couplings carry it to, `coupled` the couplings' size over a half step, S_C + S_A + S_B: at most 2 S r
+/// over the step (the left-out term's turn there, min(x′, 1)/x′, at most one) -- the following's leading term with it.
+fn followed(x: f64, [slope, curvature, constant]: [f64; 3], r: f64, coupled: f64) -> Option<bool> {
     if !(x > 0.0) {
         return Some(false);
     }
     let (first, second, zeroth) = (slope * slope, curvature * curvature, constant * constant);
-    let (leading, light, hops) = (2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * x.min(1.0), 4.0 / 15.0 * second * (x * x), x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0));
+    let leading = 2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * x.min(1.0) + 2.0 * coupled * r * x.powi(3);
+    let (light, hops) = (4.0 / 15.0 * second * (x * x), x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0));
     if r < 1.0 {
         Some(leading / (1.0 - r) + light <= hops)
     } else {
@@ -652,7 +659,7 @@ fn take(class: &mut Class, k: usize, t: usize, omega: C64, fast: bool, size: usi
 /// a first-order class's change, a product's second order through the nodes) --; the largest |Ω| hopped into
 /// `spread`. False where an entry is taken by no route of the decomposition (the rest is flagged as it would be, and
 /// not used).
-fn flag(classes: &mut [Class], range: std::ops::Range<usize>, lambda: &[C64], sizes: [f64; 3], envelope: &dyn Fn(&Class, usize) -> [C64; 3], h: f64, spread: &mut f64) -> bool {
+fn flag(classes: &mut [Class], range: std::ops::Range<usize>, lambda: &[C64], sizes: [f64; 3], envelope: &dyn Fn(&Class, usize) -> [C64; 3], coupled: f64, h: f64, spread: &mut f64) -> bool {
     let size = |class: &Class, k: usize, omega: C64| {
         let [c, a, b] = envelope(class, k);
         let y = following(omega.recip(), c, a, b);
@@ -672,7 +679,7 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, lambda: &[C64], si
                 let turn = omega.abs();
                 let (k, t) = (row * n + column, column * n + row);
                 let r = if turn > 0.0 { size(&classes[c], k, omega).max(size(&classes[partner], t, -omega)) } else { 0.0 };
-                let split = followed(turn * h.abs(), sizes, r);
+                let split = followed(turn * h.abs(), sizes, r, coupled);
                 routed &= split.is_some();
                 let fast = split.unwrap_or(false);
                 if !fast {
@@ -1084,7 +1091,7 @@ impl Picture {
         let size_of = |sum: f64| (0.5 * sum).sqrt();
         let sizes = [size_of(sums[1]) * (h * h), size_of(sums[2]) * (h * h * h).abs(), size_of(sums[0]) * h.abs()];
         let mut spread = self.spread;
-        if !flag(&mut classes, 0..order, &self.lambda, sizes, &|class, k| [0, 1, 2].map(|j| class.change[j][k]), h, &mut spread) {
+        if !flag(&mut classes, 0..order, &self.lambda, sizes, &|class, k| [0, 1, 2].map(|j| class.change[j][k]), 0.0, h, &mut spread) {
             self.routed = false;
             return self.finish(classes, spread);
         }
@@ -1183,7 +1190,7 @@ impl Picture {
             let middle = if tones > 0 { entry(&class.second, 2 * block + place) } else { C64::ZERO };
             [middle, (plus - minus) * first, (plus + minus - middle * 2.0) * second]
         };
-        if !flag(&mut classes, order..all, &self.lambda, sizes, &product, h, &mut spread) {
+        if !flag(&mut classes, order..all, &self.lambda, sizes, &product, sizes.iter().sum(), h, &mut spread) {
             self.routed = false;
             return self.finish(classes, spread);
         }
@@ -2112,7 +2119,7 @@ pub(crate) mod tests {
         // A second pair's slope that takes the first to a route, and the second pair (3 rad between two nodes) to one.
         let beside = |fast: bool| (0..=40).map(|k| 10_f64.powf(-3.0 + k as f64 / 8.0)).find(|other| {
             let sizes = [own[0].hypot(*other), own[1], 0.0];
-            followed(x, sizes, across(x, C64::cis(0.7) * own[0], C64::cis(-0.4) * own[1])) == Some(fast) && followed(3.0, sizes, across(3.0, C64::real(*other), C64::ZERO)).is_some()
+            followed(x, sizes, across(x, C64::cis(0.7) * own[0], C64::cis(-0.4) * own[1]), 0.0) == Some(fast) && followed(3.0, sizes, across(3.0, C64::real(*other), C64::ZERO), 0.0).is_some()
         });
         let mut found = [None; 3];
         for (treatment, wanted) in [Some(false), Some(true), None].into_iter().enumerate() {
