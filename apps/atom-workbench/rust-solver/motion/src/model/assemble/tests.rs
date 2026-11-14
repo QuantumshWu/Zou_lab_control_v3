@@ -1001,7 +1001,8 @@ fn the_held_part_s_force_form_is_its_gradient_s() {
     let points = [(r, v), ([0.0; 3], [0.0; 3])];
     // The prior's units at the points (its resonant Δm = 2 links: the F = 2 sublevels one cluster).
     let prior = Model::new(&request, &light, &kept).unwrap().prior(&request, &points);
-    let mut model = Model::new(&request, &light, &[kept, prior].concat()).unwrap();
+    // The series at its first order kept (`Unit::Series`): the held part is anything.
+    let mut model = Model::new(&request, &light, &[kept, prior, vec![Unit::Series]].concat()).unwrap();
     model.referenced(&points);
     let cluster = model.cluster_of(GROUND - 1);
     let plan = model.plan(cluster, &model.running());
@@ -1033,8 +1034,8 @@ fn the_held_part_s_force_form_is_its_gradient_s() {
 /// its middle on a state, ψ†i(H − H†)ψ with the normalized generator's part S⁻¹(Λ + Λ_R E + E†Λ_R† + E†Λ_B E)S⁻¹, is
 /// Σ_classes ‖L ψ‖² of the photons' operators L = (J(κ) + c J2 E) S⁻¹ (photon.rs) at the same point and momentum -- the
 /// survival a step's hazard reads is the jumps' own -- to the rounding of the sums: at the series' order 1 (the 1D PGC at
-/// 3 G, refs/requests/PGC1D_TILT_0, q ≈ 0.03) and at order 0 with the normalization at order 1 (PGC3D, its order taken
-/// up to see the part), each against the plan without its normalized generator, moving at its reach's speeds.
+/// 3 G, refs/requests/PGC1D_TILT_0, q ≈ 0.03) and on PGC3D, the series' first order and the normalization's kept
+/// (`Unit::Series`, `Unit::Normalization`), each against the plan without its normalized generator, moving at its reach's speeds.
 #[test]
 fn the_decay_is_the_photons_rate_with_the_normalized_generator() {
     use crate::model::photon::Gradients;
@@ -1048,9 +1049,9 @@ fn the_decay_is_the_photons_rate_with_the_normalized_generator() {
         let (r, v) = ([0.05, -0.1, 0.03], [speed, 0.5 * speed, 0.7 * speed]);
         let points = [(r, v), ([0.0; 3], [0.0; 3])];
         let prior = Model::new(&request, &light, &kept).unwrap().prior(&request, &points);
-        let mut model = Model::new(&request, &light, &[kept, prior].concat()).unwrap();
+        // The series' first order and the normalization's kept: every part of the normalized generator.
+        let mut model = Model::new(&request, &light, &[kept, prior, vec![Unit::Series, Unit::Normalization { order: 1 }]].concat()).unwrap();
         model.referenced(&points);
-        model.series.normalization = model.series.normalization.max(1);
         let cluster = model.cluster_of(GROUND - 1);
         let plan = model.plan(cluster, &model.running());
         let n = plan.states;

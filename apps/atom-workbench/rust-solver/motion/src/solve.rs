@@ -714,9 +714,10 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
 /// The model of the units `kept` and of every unit whose fold does not exist where the reach's atoms are, added to
 /// `kept` (module documentation, # The model's prior; `failing`): the units that fail kept, and the model they make
 /// read again, until none fails -- a drive up its levels as far as the first whose fold exists (model.rs `Level`). And
-/// the fold's series constants at the same atoms (model/elim.rs `Series`): where they ask an order of the series the
-/// near forms do not hold, the excited block nearest the reference is made explicit (criterion one; elim.rs
-/// `Model::series_block`) and the model read again -- no order is cut short.
+/// the fold's series constants at the same atoms (model/elim.rs `Series`): where a series does not converge there
+/// (q ≥ 1 or x ≥ 1), the excited block that stops it is made explicit (criterion one; elim.rs `Model::series_block`)
+/// and the model read again. The orders the evaluation takes are the keep rule's (`Unit::Series`,
+/// `Unit::Normalization`), their errors measured at the run's states.
 fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, initial: &[(usize, f64)], temperature: f64) -> Result<Model, String> {
     loop {
         let mut model = Model::new(request, light, kept)?;
@@ -757,9 +758,8 @@ fn atoms(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64
 fn failing(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<(Vec<Unit>, bool), String> {
     let points = atoms(model, request, light, initial, temperature)?;
     let kept = &model.kept;
-    // Whether the orders the model's evaluations take still hold at these atoms (model/elim.rs `Series`).
-    let (at, own) = (model.series_at(&points).orders(), model.series.orders());
-    let holds = at.series <= own.series && at.normalization <= own.normalization && at.hermitian <= own.hermitian;
+    // Whether the model's series still converge at these atoms (model/elim.rs `Series::exists`).
+    let holds = model.series_at(&points).exists();
     Ok((model.prior(request, &points).into_iter().filter(|u| !kept.contains(u)).collect(), holds))
 }
 

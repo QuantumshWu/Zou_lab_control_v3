@@ -319,6 +319,8 @@ impl Model {
             }
             Unit::Dressing { carrier } => format!("{} 引起的能级移动（进入绝热消去的失谐）：偏振不同的光束之间的干涉取平均", self.component_label(*carrier)),
             Unit::Block { block } => format!("激发态 {} 所在的超精细能级块：绝热消去", self.blocks().get(*block).and_then(|b| b.first()).map_or(String::new(), |&e| self.state_label(GROUND + e))),
+            Unit::Series => "绝热消去关于参考能量的级数只取零阶（不取一阶 N₁ 项）".to_string(),
+            Unit::Normalization { order } => format!("P 坐标的归一化级数只取到 {} 阶（不取 X^{order} 项）", order - 1),
         }
     }
 

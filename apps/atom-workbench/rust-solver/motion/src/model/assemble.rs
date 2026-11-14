@@ -87,18 +87,18 @@
 //! loss L = (R₀W)†D(R₀W) (`NearLayout::fourth`; one where the folded excited states share one linewidth, L = Γ X), and
 //! z₀ itself -- all linear in the products e_k'* e_k with coefficients of the far light alone, tabulated as S is. On the
 //! slow invariant subspace Ψ = (x, T x) of the no-jump generator, T_f = Σ_j (−1)^j R₀^{j+1} W (H − z₀)^j and H the
-//! fixed point of H = A + Σ_j (−1)^j N_j (H − z₀)^j, to the series' order K (model.rs `Model::series`; elim.rs
-//! `Series::order_of`: a rate's remainder 2r + r², r = q^{K+1}/(1 − q), within the model's share; the forms hold
-//! K ≤ 1, `SERIES_MOST`). In the orthonormal coordinates y = S x, S = (1 + X)^{1/2} -- the Schrieffer–Wolff
+//! fixed point of H = A + Σ_j (−1)^j N_j (H − z₀)^j, to the series' order K (model.rs `Model::series`: K = 1 where
+//! `Unit::Series` is kept, its error measured at the run's states against the next order, elim.rs `Fold::order_error`;
+//! the series' ratio q < 1 only says it converges). In the orthonormal coordinates y = S x, S = (1 + X)^{1/2} -- the Schrieffer–Wolff
 //! coordinates, the unitary block-diagonalization's nearest the bare basis (ELIMINATION v6, v7) -- the generator is the
 //! des Cloizeaux one, S H S⁻¹, and the jumps L_a = C_a T S⁻¹, whose own product is its decay. Evaluated by the
 //! Schrieffer–Wolff series, products of the forms alone (`normal`): S^{±1} = Σ_{j≤J} binom(±½, j) X^j to the
-//! normalization's order J, the Hermitian part to its own J_h (elim.rs `Series`), with H_h the static Hermitian generator
-//! the forms lay and Y = N₁:
+//! normalization's order J (`Unit::Normalization`), the Hermitian part the series' own (elim.rs `Series`), with H_h the
+//! static Hermitian generator the forms lay and Y = N₁:
 //!
 //! ```text
 //! H₀ = H_h − (i/2) L     H = H₀ (K = 0), (1 + Y)⁻¹ (H₀ + z₀ Y) (K = 1)     E = H − z₀
-//! held = Herm(S_h H S_h⁻¹) − H_h (Herm H − H_h at J_h = 0: nothing at K = 0)     decay S⁻¹ (Λ + Λ_R E + E†Λ_R† + E†Λ_B E) S⁻¹
+//! held = Herm H − H_h (nothing at K = 0)     decay S⁻¹ (Λ + Λ_R E + E†Λ_R† + E†Λ_B E) S⁻¹
 //! L_a = (J_a(κ) + J2_a E) S⁻¹ (J2 E none at K = 0)     landing S (1 + Y)⁻¹
 //! ```
 //!
@@ -141,7 +141,7 @@ use super::eliminate::{half, jump, shift, Leg, Responses};
 use super::far::EXCITED;
 use super::photon::{Origin, Source};
 use super::tabulate::NearTable;
-use super::elim::{binomial, Orders, HERMITIAN_MOST, SERIES_MOST};
+use super::elim::{binomial, Orders};
 use super::{jet, Beat, Component, Level, Lights, Lit, Model, Scattering, Wave};
 use crate::field::Amplitude;
 use crate::linalg::{axpy, dot, dot3, Mat, C64, LANES};
@@ -470,7 +470,7 @@ impl Fourth {
     }
 
     /// Whether the held part is anything (`normal`): the series' first order -- at order 0 the generator's Hermitian part
-    /// is H_h, exactly (the Hermitian part is the series' own, `HERMITIAN_MOST`).
+    /// is H_h, exactly (the Hermitian part is the series' own).
     pub(crate) fn held(&self) -> bool {
         self.orders.series >= 1
     }
@@ -1359,7 +1359,7 @@ impl Plan {
     pub(crate) fn quartic_work(&self, fourth: &Fourth, directions: Option<usize>, landing: bool) -> f64 {
         let (n, size, o) = (fourth.n, fourth.n * fourth.n, fourth.orders);
         let forms = usize::from(fourth.held() || landing);
-        let (k, j) = (o.series.min(SERIES_MOST), o.normalization);
+        let (k, j) = (o.series, o.normalization);
         let statics = self.form.iter().filter(|term| self.tones[term.tone] == 0.0);
         let (summed, entries, matrices, g) = match directions {
             Some(d) => (statics.map(|term| term.len * (4 + if term.near { d } else { 0 })).sum::<usize>(), fourth.entries.len() * self.near.fourth * (4 + d) + 7 * fourth.groups.len(), 12 * size * (1 + d), 7),
@@ -2663,18 +2663,16 @@ impl crate::step::Middle for Middle<'_> {
 /// row by row: the value and the gradient along the three lab axes) and the reference z₀, at the orders `orders`
 /// (elim.rs `Orders`) -- the Schrieffer–Wolff series, products of the forms alone (ELIMINATION v7):
 /// - the fold's generator: H₀ = H_h − (i/2) L at the series' order 0; at order 1 its first order's term H = H₀ − Y E₀,
-///   E₀ = H₀ − z₀ (the fixed point H = H₀ − Y(H − z₀) to its own first order, Y²E apart: x q of the fold's part, booked
-///   with the series' remainder, elim.rs `Series::remainder`), with its gradient ∇H₀ − ∇Y E₀ − Y ∇E₀; E = H − z₀. (The
-///   forms hold N₀ and N₁ alone, `SERIES_MOST`: a run's model never asks more -- solve.rs `closed` makes the block
-///   nearest the reference explicit --, and a model before its atoms are read, whose focus may, takes order 1 for the
-///   atoms it draws.)
+///   E₀ = H₀ − z₀ (the fixed point H = H₀ − Y(H − z₀) to its own first order, Y²E apart: in the order's error measured
+///   against the next, elim.rs `Fold::order_error`), with its gradient ∇H₀ − ∇Y E₀ − Y ∇E₀; E = H − z₀. (The forms hold
+///   N₀ and N₁: order 1 is `Unit::Series` kept, a higher one the nearest block's keep, `Unit::Block`.)
 /// - S⁻¹ = Σ_{j≤J} binom(−½, j) X^j and S = Σ_{j≤J} binom(½, j) X^j at the normalization's order J, by Horner's rule
 ///   with the gradient's product rule (`series`) -- no eigendecomposition --;
 /// - the held part Herm H − H_h (nothing at the series' order 0) and its gradient: the Hermitian part is the series'
-///   own -- the normalization's effect on it, β, within the share (elim.rs `Series::hermitian_of`; beyond it criterion
-///   one makes the block of the most excited share explicit, `HERMITIAN_MOST`);
+///   own -- what the normalization would do to it is measured where the atoms went and booked (elim.rs
+///   `Fold::hermitian_error`);
 /// - M = E S⁻¹ (the jumps' partner's state, none at order 0), the landing map S (1 + Y)⁻¹ with (1 + Y)⁻¹ = Σ_{j≤J} (−Y)^j
-///   (‖Y‖ ≤ x: within x^{J+1}/(1 − x), `Series::normalization_remainder`), and E.
+///   (its next order's part measured with the normalization's, `Fold::normalization_error`), and E.
 /// Without `gradients` the values alone (the gradients' parts zero), of forms given so; M only at a point (`point`: a
 /// node's generator and force read none), the landing map only where asked (`landing`), else zero. `scratch` holds
 /// what it makes on the way; nothing is asked of the heap once it has its size.
@@ -2682,7 +2680,8 @@ impl crate::step::Middle for Middle<'_> {
 pub(crate) fn normal(hermitian: &[C64], partner: &[C64], metric: &[C64], loss: &[C64], n: usize, z0: [f64; 4], orders: Orders, gradients: bool, point: bool, landing: bool, data: &mut [C64], scratch: &mut Vec<C64>) {
     let size = n * n;
     let parts = if gradients { 4 } else { 1 };
-    let order = orders.series.min(SERIES_MOST);
+    let order = orders.series;
+    assert!(order <= 1, "the near forms hold N₀ and N₁: the series' order 1 is `Unit::Series`, a higher one the nearest block's keep");
     sized(scratch, 20 * size);
     let (h, rest) = scratch.split_at_mut(4 * size);
     let (e, rest) = rest.split_at_mut(4 * size);
@@ -2721,8 +2720,8 @@ pub(crate) fn normal(hermitian: &[C64], partner: &[C64], metric: &[C64], loss: &
         offset(h, e);
     }
     series(-0.5, orders.normalization, metric, inverse, t, n, gradients);
-    // The held part Herm H − H_h and its gradient: the Hermitian part is the series' own (J_h = 0, `HERMITIAN_MOST`).
-    assert!(orders.hermitian <= HERMITIAN_MOST, "the Hermitian part's normalization is criterion one's (solve.rs `closed`)");
+    // The held part Herm H − H_h and its gradient: the Hermitian part is the series' own (what the normalization would do
+    // to it is measured and booked, elim.rs `Fold::hermitian_error`).
     data.fill(C64::ZERO);
     for part in 0..parts {
         let (of, own) = (&h[part * size..(part + 1) * size], &hermitian[part * size..(part + 1) * size]);

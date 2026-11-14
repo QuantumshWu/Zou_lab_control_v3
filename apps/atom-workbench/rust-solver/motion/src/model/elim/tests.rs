@@ -427,18 +427,21 @@ fn the_fold_s_series_about_a_reference_is_the_fold_within_its_remainder_and_fall
 /// The run's route against the definition (ELIMINATION v5, v7; assemble.rs, # The normalized generator): on PGC3D's and the
 /// tilted 1D PGC's F = 2 states at three points and at PGC3D's cooling light's coherent peak, the normalized generator
 /// the engine makes of the series' forms about z₀ -- N₀ = Σ W′R₀W and N₁ = Σ W′R₀²W, the metric X = Σ (R₀W)†(R₀W), the
-/// loss L = Σ (R₀W)†D(R₀W) -- through `assemble::normal`, the Schrieffer–Wolff series: the series' order K from its ratio
-/// (`Series::order_of`), the normalization's J from the excited share x (`Series::normalization_of`), the Hermitian
-/// part's J_h from its size β (`Fold::normalized_sizes`, `Series::hermitian_of`). Against the self-consistent fold's
-/// des Cloizeaux generator S H S⁻¹, S = (1 + X)^{1/2} by X's eigenbasis (`Fold::normalization`), and its decay
-/// S⁻¹(Σ_f T_f†D T_f)S⁻¹ -- the jumps' product on the slow state, Σ_a ‖C_a T S⁻¹ψ‖²:
-/// - the Hermitian part within the series' remainder q^{K+1}/(1 − q) and, at J_h = 0, β (relatively, of the fold's own
-///   part), and Hermitian by construction (Herm of the route, exactly);
-/// - the decay within the series' remainder on a rate (`Series::remainder`, of T†T) and the normalization's 2ε + ε²
-///   (relatively), and Hermitian by
-///   construction (S⁻¹ a polynomial of the Hermitian X: S⁻¹ L S⁻¹ Hermitian to the rounding); at each order J from 0 on,
-///   within that order's bound -- the difference falls with J as x's powers, down to the series' own remainder;
-/// - the landing map S(1 + Y)⁻¹ against the fold's S(1 + Σ S_f T_f)⁻¹.
+/// loss L = Σ (R₀W)†D(R₀W) -- through `assemble::normal`, the Schrieffer–Wolff series, at the least orders K (of the
+/// series' ratio q) and J (of the excited share x) whose proven bounds below lie within the share. Against the
+/// self-consistent fold's des Cloizeaux generator S H S⁻¹, S = (1 + X)^{1/2} by X's eigenbasis (`Fold::normalization`),
+/// and its decay S⁻¹(Σ_f T_f†D T_f)S⁻¹ -- the jumps' product on the slow state, Σ_a ‖C_a T S⁻¹ψ‖²:
+/// - the Hermitian part within the series' bound q^{K+1}/(1 − q) (+ x q at K = 1, the fixed point's Y²E) and what the
+///   normalization does to it, β = ‖Herm(S H S⁻¹) − Herm H‖ of the fold's own part, and Hermitian by construction (Herm
+///   of the route, exactly);
+/// - the decay within the series' bound on a rate (2r + r², of T†T) and the normalization's 2ε + ε², ε =
+///   |b_{J+1}| x^{J+1}/(1 − x) √(1 + x) (relatively), and Hermitian by construction (S⁻¹ a polynomial of the Hermitian
+///   X: S⁻¹ L S⁻¹ Hermitian to the rounding); at each order J from 0 on, within that order's bound -- the difference
+///   falls with J as x's powers, down to the series' own;
+/// - the landing map S(1 + Y)⁻¹ against the fold's S(1 + Σ S_f T_f)⁻¹;
+/// - and the errors the run books, measured on states (`Fold::order_error`, `Fold::normalization_error`): on random
+///   slow states each within its order's bound, the series' falling from order 0 to order 1. The bounds are this
+///   test's: the run books the measured numbers.
 #[test]
 fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_remainders_and_hermitian_by_construction() {
   for name in ["PGC3D_1ms", "PGC1D_TILT_2"] {
@@ -476,11 +479,27 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         let far = (0..n).map(|i| fold.direct[(i, i)].re).sum::<f64>() / n as f64;
         let z0 = fold.eigen.values.iter().map(|z| z.re).sum::<f64>() / n as f64;
         let q = fold.series_ratio(C64::real(z0));
-        let [x_size, beta] = fold.normalized_sizes(&lv);
-        let order = Series::order_of(q, x_size).expect("the series converges here");
-        assert!(order <= SERIES_MOST, "{name}: the forms hold the order {order}");
-        let normalization = Series::normalization_of(x_size).expect("the normalization's series converges here");
-        let hermitian_order = Series::hermitian_of(beta, normalization);
+        let x_size = fold.excited_share();
+        assert!(q < 1.0 && x_size < 1.0, "{name}: the series converge here");
+        // The proven bounds (this test's; the run books what it measures).
+        let remainder = |k: usize| {
+            let r = q.powi(k as i32 + 1) / (1.0 - q) + if k >= 1 { x_size * q } else { 0.0 };
+            (2.0 * r + r * r).min(1.0)
+        };
+        let rate = |j: usize| {
+            let e = binomial(-0.5, j + 1).abs() * x_size.powi(j as i32 + 1) / (1.0 - x_size) * (1.0 + x_size).sqrt();
+            (2.0 * e + e * e).max(x_size.powi(j as i32 + 1) / (1.0 - x_size)).min(1.0)
+        };
+        let order = (0..).find(|&k| remainder(k) <= share()).unwrap();
+        assert!(order <= 1, "{name}: the forms hold the order {order}");
+        let normalization = (0..).find(|&j| rate(j) <= share()).unwrap();
+        let beta = {
+            let mut moved = definition.hermitian_part();
+            moved.add_scaled(-C64::ONE, &fold.generator.hermitian_part());
+            let mut own = fold.generator.hermitian_part();
+            own.add_scaled(-C64::ONE, &fold.direct.hermitian_part());
+            moved.frobenius() / own.frobenius()
+        };
         // The forms (every class, every replica, as the engine's per carrier and basis), from the reference's responses.
         let nus: Vec<f64> = cl.iter().map(|c| c.nu).collect();
         let reference = Reference::new(&lv, &nus, &at_rest(n), z0);
@@ -508,7 +527,7 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
             data
         };
         let matrix = |data: &[C64], m: usize| Mat { rows: n, cols: n, data: data[m * n * n..(m + 1) * n * n].to_vec() };
-        let orders = Orders { series: order, normalization, hermitian: hermitian_order };
+        let orders = Orders { series: order, normalization };
         let data = made(orders);
         let held = matrix(&data, crate::model::assemble::HELD);
         let mut route = hermitian.clone();
@@ -522,8 +541,7 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         skew.add_scaled(-C64::ONE, &route.adjoint_product(&Mat::identity(n)));
         // The decay at each order J of the normalization: within its bound.
         let generator_bound = q.powi(order as i32 + 1) / (1.0 - q) + if order >= 1 { x_size * q } else { 0.0 } + crate::units::rounding(n * n * (order + 2));
-        let series_bound = Series::remainder(q, x_size, order) + crate::units::rounding(n * n * (order + 2));
-        let rate = |j: usize| Series::normalization_remainder(x_size, j);
+        let series_bound = remainder(order) + crate::units::rounding(n * n * (order + 2));
         // The jumps' product on the slow state, of the wave operator to the series' order: T = R₀W − R₀²W E (E = H − z₀),
         // Σ over the classes of T†D T on S⁻¹.
         let decay_apart = |j: usize| -> (f64, f64) {
@@ -549,12 +567,12 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         let mut landing_apart = landing.clone();
         landing_apart.add_scaled(-C64::ONE, &exact);
         println!(
-            "{name} F=2 at {r:?}: z0 - far {:.3} rad/us, q {q:.4}, K {order}; x {x_size:.4}, J {normalization}; beta {beta:.3e}, J_h {hermitian_order}; the Hermitian route {relative:.3e} of the fold's part apart (skew {:.1e}); landing {:.3e} apart",
+            "{name} F=2 at {r:?}: z0 - far {:.3} rad/us, q {q:.4}, K {order}; x {x_size:.4}, J {normalization}; beta {beta:.3e}; the Hermitian route {relative:.3e} of the fold's part apart (skew {:.1e}); landing {:.3e} apart",
             z0 - far,
             skew.frobenius(),
             landing_apart.frobenius() / exact.frobenius()
         );
-        let hermitian_bound = generator_bound + if hermitian_order == 0 { beta } else { 0.0 };
+        let hermitian_bound = generator_bound + beta;
         assert!(relative <= hermitian_bound.max(1e-9), "the route's Hermitian generator {relative} apart, beyond {hermitian_bound}");
         assert_eq!(skew.frobenius(), 0.0, "the route's Hermitian part is Hermitian");
         for j in 0..=normalization + 2 {
@@ -565,6 +583,19 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
             assert!(skew <= crate::units::rounding(4 * n * n * (j + 1)), "the decay is Hermitian: {skew}");
         }
         assert!(landing_apart.frobenius() <= (q + x_size * q + rate(normalization)).max(1e-9) * exact.frobenius(), "the landing map {}", landing_apart.frobenius() / exact.frobenius());
+        // The errors the run books, measured on random slow states (a point's numbers, not bounds: the operator's bound
+        // r_K ‖H − z₀‖₂ is not one of a state's relative error, which a state the fold's part moves little reads larger):
+        // each order's falls to the next's, the series' by about its ratio, the normalization's by about x.
+        let forms = fold.series(C64::real(z0), 2);
+        let mut stream = crate::random::Stream::new(3, crate::random::Purpose::Initial, 0, 0);
+        for _ in 0..4 {
+            let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
+            let (first, second) = (fold.order_error(&forms, C64::real(z0), 0, &psi), fold.order_error(&forms, C64::real(z0), 1, &psi));
+            let normalization: Vec<f64> = (0..3).map(|j| fold.normalization_error(&forms[1], j, &psi)).collect();
+            println!("    measured: the series' order 0 {first:.3e}, order 1 {second:.3e} (q {q:.1e}); the normalization's J 0..2 {normalization:?} (x {x_size:.1e})");
+            assert!(first > 0.0 && second < first, "{name}: the series' measured errors {first}, {second}");
+            assert!(normalization.windows(2).all(|w| w[1] < w[0]), "{name}: the normalization's measured errors {normalization:?}");
+        }
     }
   }
 }

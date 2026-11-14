@@ -218,6 +218,14 @@ pub enum Unit {
     /// drive into them of the co-rotating component that drives the block most at the focus (`Model::block_drives`)
     /// is kept as it is (`Unit::Drive`).
     Block { block: usize },
+    /// The fold's series about its reference at its first order (assemble.rs, # The normalized generator: H₀ − N₁E₀):
+    /// folded, the evaluation takes order 0; kept, order 1. Its error is measured at the run's states, order 0 against
+    /// order 1 (elim.rs `Fold::order_error`); a higher order is the nearest block's keep (`Unit::Block`).
+    Series,
+    /// The normalization's series S⁻¹ = Σ_{j≤J} b_j X^j at the order `order` (assemble.rs `normal`): kept, the
+    /// evaluation takes J = `order`; its error is measured at the run's states, J − 1 against J (elim.rs
+    /// `Fold::normalization_error`).
+    Normalization { order: usize },
 }
 
 /// How a drive is taken (SPEC §1.4): folded with the bare levels, folded with the levels at the atom, or explicit. A drive has
