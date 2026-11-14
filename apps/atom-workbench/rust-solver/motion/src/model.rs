@@ -35,6 +35,7 @@ pub mod reach;
 pub mod units;
 pub mod cluster;
 pub mod eliminate;
+pub(crate) mod elim;
 pub mod assemble;
 pub mod readout;
 pub mod photon;
