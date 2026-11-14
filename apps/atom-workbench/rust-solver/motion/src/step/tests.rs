@@ -882,9 +882,9 @@ fn mean_force(model: &Atom, r: [f64; 3], v: [f64; 3], trajectories: u64, from: f
     for i in 0..trajectories {
         let mut t = Trajectory::new(model, 0, r, v.map(|x| x / model.hm), 11, i);
         let mut path = adapt::Path::new(t.seed, t.index, tau, 0);
-        adapt::advance(model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut path, from, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
+        adapt::advance(model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut path, from, from, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
         let start = t.kappa;
-        adapt::advance(model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut path, to, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
+        adapt::advance(model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut path, to, to, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
         forces.push(std::array::from_fn::<f64, 3, _>(|a| (t.kappa[a] - start[a]) / (to - from)));
     }
     let n = forces.len() as f64;
@@ -1186,7 +1186,7 @@ fn the_jumps_are_at_the_roots_of_the_norm() {
     let model = Atom::new(RB, flat, vec![], 0.0, gamma);
     let mut t = Trajectory::new(&model, 0, [0.0; 3], [0.0; 3], 3, 5);
     let end = 2000.0;
-    adapt::advance(&model, &Everywhere, 10.0, &mut t, &mut step::Scratch::default(), &mut adapt::Path::new(3, 5, 10.0, 0), end, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
+    adapt::advance(&model, &Everywhere, 10.0, &mut t, &mut step::Scratch::default(), &mut adapt::Path::new(3, 5, 10.0, 0), end, end, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
     // The jumps the thresholds put before `end`, and the last one's time.
     let threshold = |j: u32| crate::random::Stream::jump(3, 5, j).open_uniform();
     let (mut last, mut j, mut waits) = (0.0, 0, Vec::new());
@@ -1265,7 +1265,7 @@ fn a_jump_is_made_inside_its_step_where_the_step_s_own_propagation_reaches_the_t
         twin.time = k as f64 * tau;
     }
     let (mut t, mut pieces) = (start.clone(), 0);
-    adapt::advance(&model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut adapt::Path::new(3, 5, tau, 0), end, &[], &mut |_, _| {}, &mut |_, _| pieces += 1).unwrap();
+    adapt::advance(&model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut adapt::Path::new(3, 5, tau, 0), end, end, &[], &mut |_, _| {}, &mut |_, _| pieces += 1).unwrap();
     assert!(jumps > 100 && most > 1 && pieces as f64 == end / tau + jumps as f64, "{jumps} jumps, {most} in one step at the most, {pieces} pieces of {} steps", end / tau);
     eprintln!("steps whose own survival ends below the threshold {crossed}, above it {kept}");
     assert!(crossed > 0, "no step's own survival reaches its threshold");
@@ -1386,7 +1386,7 @@ fn the_jumps_kicks_are_read_where_the_hazard_is() {
         let (z, k) = (stream.normal() * (kt * hm).sqrt() / omega, stream.normal() * (kt / hm).sqrt());
         let mut t = Trajectory::new(&model, 0, [0.0, 0.0, z], [0.0, 0.0, k], 3, i);
         let e0 = energy(&t);
-        adapt::advance(&model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut adapt::Path::new(3, i, tau, 0), end, &[], &mut |_, _| {}, &mut |_, _| pieces += 1.0).unwrap();
+        adapt::advance(&model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut adapt::Path::new(3, i, tau, 0), end, end, &[], &mut |_, _| {}, &mut |_, _| pieces += 1.0).unwrap();
         gains.push(energy(&t) - e0);
         jumps += t.jumps as f64 / atoms as f64;
     }
@@ -1417,7 +1417,7 @@ fn a_conservative_trap_keeps_its_energy() {
     let mut path = adapt::Path::new(t.seed, t.index, tau, 0);
     for k in 1..=outputs {
         let to = run * k as f64 / outputs as f64;
-        adapt::advance(&model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut path, to, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
+        adapt::advance(&model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut path, to, to, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
         // Every advance lands on its output time exactly: an ulp short, the rest is an interval of the time's round-off.
         assert_eq!(t.time, to, "advanced to {} for the output at {to}", t.time);
         errors.push(model.energy(0, &t.point(), &t.psi) - e0);
@@ -1745,7 +1745,7 @@ fn a_read_inside_a_step_is_of_the_second_order_and_the_step_s_end_at_its_end() {
         let tau = coarsest / (1 << halvings) as f64;
         let (mut t, mut path) = (start(), adapt::Path::new(7, 0, coarsest, halvings));
         let (mut states, mut taken) = (vec![], 0);
-        adapt::advance(&model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut path, run, &reads, &mut |k, state| states.push((k, state.clone())), &mut |_, _| taken += 1).unwrap();
+        adapt::advance(&model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut path, run, run, &reads, &mut |k, state| states.push((k, state.clone())), &mut |_, _| taken += 1).unwrap();
         assert!(states.iter().map(|(k, _)| *k).eq(0..reads.len()) && t.time == run && taken as f64 == run / tau, "τ {tau}: {} reads, {taken} steps to {}", states.len(), t.time);
         for (k, state) in &states {
             assert_eq!(state.time, reads[*k]);
@@ -2105,7 +2105,7 @@ fn conservative_trap(name: &str) {
         let mut e0 = run.energy(t.cluster, &t.point(), &t.psi);
         for (k, &time) in request.times_us.iter().enumerate().skip(1) {
             let before = t.jumps;
-            adapt::advance(&run, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut path, time, &[], &mut |_, _| {}, &mut |_, _| steps += 1).unwrap();
+            adapt::advance(&run, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut path, time, time, &[], &mut |_, _| {}, &mut |_, _| steps += 1).unwrap();
             assert!(t.lost.is_none(), "{name}: atom {i} lost at {:?}", t.lost);
             let e = run.energy(t.cluster, &t.point(), &t.psi);
             if t.jumps == before {
@@ -2660,6 +2660,52 @@ fn thermal(trap: &crate::model::Trap, hm: f64, kt: f64, stream: &mut crate::rand
     (r, kappa)
 }
 
+/// A trajectory stopped at step ends and taken up again with what its scratch carries is the trajectory run through
+/// (adapt.rs `advance`'s stops; `Scratch::carry`, `Scratch::resumed`), on its class: PGC3D_1ms's model as the solve
+/// closes it, with its near tables (`scene_clusters`), six atoms of each cluster through 600 steps of 0.326 µs on their
+/// own jump thresholds -- tens of jumps each --, each run through at once and run again stopped at twelve random times,
+/// at every stop the trajectory and its path copied and its scratch resumed from its carry: every piece of every
+/// step's path (its jumps') and the end state the same to the bit. A fresh scratch at the stops instead goes on along
+/// other bits for some atom (the picture's counts choose the steps' routes): the carry is what a stop needs.
+#[test]
+fn a_trajectory_stopped_and_taken_up_with_its_carry_is_the_one_run_through() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/refs/requests/PGC3D_1ms.json");
+    let (mut atoms, mut differ) = (0, 0);
+    scene_clusters(path, &mut |_, _, cluster, run, starts| {
+        let (tau, steps) = (0.326, 600);
+        let end = steps as f64 * tau;
+        for (i, start) in starts.iter().enumerate().take(6) {
+            let mut start = start.clone();
+            start.threshold = crate::random::Stream::jump(17, i as u64, 0).open_uniform();
+            let mut stream = crate::random::Stream::new(29, crate::random::Purpose::Initial, i as u64, cluster as u32);
+            let mut stops: Vec<f64> = (0..12).map(|_| stream.uniform() * end).collect();
+            stops.sort_by(f64::total_cmp);
+            stops.push(end);
+            // The end state and every piece of the path, stopped at `stops`, each stop taken up again by `resume`.
+            let advanced = |stops: &[f64], resume: Option<&dyn Fn(&step::Scratch) -> step::Scratch>| -> String {
+                let (mut t, mut scratch, mut path) = (start.clone(), step::Scratch::default(), adapt::Path::new(17, i as u64, 4.0 * tau, 2));
+                let mut pieces = vec![];
+                for &stop in stops {
+                    let advanced = adapt::advance(run, &Everywhere, tau, &mut t, &mut scratch, &mut path, end, stop, &[], &mut |_, _| {}, &mut |s, until| pieces.push(format!("{s:?} to {until:?}")));
+                    if advanced.is_err() || t.lost.is_some() {
+                        break;
+                    }
+                    if let Some(resume) = resume {
+                        (t, path, scratch) = (t.clone(), path.clone(), resume(&scratch));
+                    }
+                }
+                format!("{t:?} {}", pieces.join(" "))
+            };
+            let through = advanced(&[end], None);
+            assert_eq!(advanced(&stops, Some(&|s| step::Scratch::resumed(&s.carry()))), through, "cluster {cluster}, atom {i}: stopped at {stops:?}");
+            differ += usize::from(advanced(&stops, Some(&|_| step::Scratch::default())) != through);
+            atoms += 1;
+        }
+    });
+    eprintln!("{atoms} atoms stopped and taken up with their carry as run through; with a fresh scratch {differ} of them go on along other bits");
+    assert!(atoms > 0 && differ > 0, "{atoms} atoms, {differ} differ with a fresh scratch");
+}
+
 /// A scene's model closed by its units' errors at its reference state (model.rs `Model::closed_at`) with its near tables (`Model::tabulate`), and what the ensemble's draw meets (the prepared well's
 /// depth at its bottom against its envelope's top), said; then per cluster sixteen atoms of the scene's temperature in
 /// the trap's harmonic approximation, each a random state of the cluster, held: to `each` the model, its prepared
@@ -2922,7 +2968,7 @@ fn a_travelling_wave_s_jumps_carry_its_photons_and_its_steps_nothing() {
         let mut t = Trajectory::new(&model, 0, [0.1, 0.2, 0.3], start, 17, index);
         let mut path = adapt::Path::new(t.seed, t.index, 1.0, 0);
         let mut taken = 0;
-        adapt::advance(&model, &Everywhere, 1.0, &mut t, &mut step::Scratch::default(), &mut path, end, &[], &mut |_, _| {}, &mut |_, _| taken += 1).unwrap();
+        adapt::advance(&model, &Everywhere, 1.0, &mut t, &mut step::Scratch::default(), &mut path, end, end, &[], &mut |_, _| {}, &mut |_, _| taken += 1).unwrap();
         assert!(t.jumps > 0 && taken > 0, "trajectory {index}: {} jumps over {taken} steps", t.jumps);
         for a in 0..3 {
             let carried = t.jumps as f64 * k[a];
@@ -2951,7 +2997,7 @@ fn a_standing_wave_s_light_diffuses_the_momentum_at_its_closed_form() {
         let (mut scratch, mut path) = (step::Scratch::default(), adapt::Path::new(23, 5, 1.0, 0));
         let (mut sums, mut last) = ([0.0; 4], t.kappa);
         for i in 0..n {
-            adapt::advance(&model, &Everywhere, 1.0, &mut t, &mut scratch, &mut path, (i + 1) as f64, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
+            adapt::advance(&model, &Everywhere, 1.0, &mut t, &mut scratch, &mut path, (i + 1) as f64, (i + 1) as f64, &[], &mut |_, _| {}, &mut |_, _| {}).unwrap();
             let d = t.kappa[2] - last[2];
             assert_eq!((t.kappa[0], t.kappa[1]), (0.0, 0.0), "{name}: the momentum across the wave");
             for (p, sum) in sums.iter_mut().enumerate() {
@@ -3100,7 +3146,7 @@ fn a_diffusion_s_energy_input_does_not_know_the_trap() {
         let mut t = Trajectory::new(&model, 0, [0.0, 0.0, node], [0.0; 3], 41, index);
         let mut path = adapt::Path::new(t.seed, t.index, tau, 0);
         let mut taken = 0;
-        adapt::advance(&model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut path, tau * steps as f64, &[], &mut |_, _| {}, &mut |_, _| taken += 1).unwrap();
+        adapt::advance(&model, &Everywhere, tau, &mut t, &mut step::Scratch::default(), &mut path, tau * steps as f64, tau * steps as f64, &[], &mut |_, _| {}, &mut |_, _| taken += 1).unwrap();
         assert_eq!((t.jumps, taken), (0, steps), "trajectory {index}: a node scatters nothing, and every step is whole");
         assert!((k * (t.r[2] - node)).abs() < 1e-3, "trajectory {index} stays at the node: {}", t.r[2] - node);
         mean += energy(&t) / runs as f64;
@@ -3834,7 +3880,7 @@ fn advanced<D: Dynamics>(model: &D, start: &Trajectory, tau: f64, run: f64, read
     let (mut t, mut scratch) = (start.clone(), step::Scratch::default());
     let mut path = adapt::Path::new(start.seed, start.index, run, (run / tau).log2().round() as u32);
     let (mut pieces, mut readings) = (vec![], vec![]);
-    adapt::advance(model, &Everywhere, tau, &mut t, &mut scratch, &mut path, run, reads, &mut |k, s| readings.push((k, format!("{s:?}"))), &mut |s, until| pieces.push((s.start, format!("{s:?} to {until:?}")))).unwrap();
+    adapt::advance(model, &Everywhere, tau, &mut t, &mut scratch, &mut path, run, run, reads, &mut |k, s| readings.push((k, format!("{s:?}"))), &mut |s, until| pieces.push((s.start, format!("{s:?} to {until:?}")))).unwrap();
     Advanced { printed: format!("{t:?}"), last: t, pieces, readings, decomposed: scratch.picture.decomposed() }
 }
 
