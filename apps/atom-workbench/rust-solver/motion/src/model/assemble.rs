@@ -415,9 +415,10 @@ impl Laid {
     }
 }
 
-/// One member of a photon class at a point (photon.rs): its field component (None: 1), whether its jumps take the
-/// Doppler partner, its relative beat's value in a merged class (rad/µs), and its entries (axis a, landing place, source place,
-/// where its jump and its partner's lie among a point's values and constants). And the same jumps as one matrix (module
+/// One member of a photon class at a point (photon.rs): its field component (None: 1), its relative beat's value in a
+/// merged class (rad/µs); and, for the tests' sums from the definition, whether its jumps take the Doppler partner and its
+/// entries (axis a, landing place, source place, where its jump and its partner's lie among a point's values and
+/// constants) -- the solve reads neither, it sums the same jumps as one matrix. That matrix (module
 /// documentation, # The jumps' matrices): the source places that hold an entry (`columns`) and where its columns lie
 /// (`at`) -- among a point's jumps where any of them is a near form (`near`; its partner's matrix after its own), else
 /// among the plan's: a carrier's member whose jumps are all its bare drives' is a constant one, its partner nothing. An
@@ -425,8 +426,10 @@ impl Laid {
 #[derive(Clone, Debug)]
 pub(crate) struct MemberPlan {
     pub(crate) scalar: Option<usize>,
+    #[cfg(test)]
     pub(crate) doppler: bool,
     pub(crate) phase: f64,
+    #[cfg(test)]
     pub(crate) entries: Vec<(usize, usize, usize, usize, usize)>,
     pub(crate) folded: bool,
     pub(crate) near: bool,
@@ -1260,7 +1263,18 @@ impl<'a> Builder<'a> {
                                 values[slot + LANES] += constant.im;
                             }
                         }
-                        MemberPlan { scalar, doppler, phase, entries, folded, near: varies, columns, at }
+                        MemberPlan {
+                            scalar,
+                            #[cfg(test)]
+                            doppler,
+                            phase,
+                            #[cfg(test)]
+                            entries,
+                            folded,
+                            near: varies,
+                            columns,
+                            at,
+                        }
                     })
                     .collect();
                 ClassPlan { landing, wave_number, absorbed, members, states, rows }
