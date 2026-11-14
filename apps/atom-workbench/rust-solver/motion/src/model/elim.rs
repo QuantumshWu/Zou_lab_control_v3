@@ -1745,10 +1745,10 @@ impl super::Model {
     /// no output resolves at every atom: `estimate::unseen`). What it keeps, as the model's units: every drive of a
     /// class folded at the point (`Unit::Bare`: its fold taken at the levels there), the explicit drives into the
     /// blocks (`Unit::Drive`), the P-layer links of two ground states (`Unit::Term`, their lab beat exactly).
-    pub(crate) fn prior(&self, request: &crate::request::Request, points: &[([f64; 3], [f64; 3])]) -> Vec<super::Unit> {
+    pub(crate) fn prior(&self, points: &[([f64; 3], [f64; 3])]) -> Vec<super::Unit> {
         use rayon::prelude::*;
-        let blocks = blocks(request);
-        let bare = super::far::energies(request);
+        let blocks = self.blocks();
+        let bare = &self.energies;
         let unseen = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
         let mut kept = Kept::default();
         let mut routes: Vec<f64> = vec![];
@@ -1757,9 +1757,9 @@ impl super::Model {
             let read: Vec<(Kept, Vec<f64>, Vec<(usize, bool)>)> = points
                 .par_iter()
                 .map(|&(r, v)| {
-                    let (levels, classes, sources) = system(request, &self.light, r);
+                    let (levels, classes, sources) = system(&self.request, &self.light, r);
                     let closed = closure(&levels, &classes, &blocks, v, &kept);
-                    let routes = bare_remainders(&closed.fold, classes.len(), &bare);
+                    let routes = bare_remainders(&closed.fold, classes.len(), bare);
                     (closed.kept, routes, sources)
                 })
                 .collect();
@@ -1819,13 +1819,6 @@ impl super::Model {
 /// A set of ground states as `Unit::Block` holds it: bit g for ground state g.
 pub(crate) fn ground_set(grounds: &[usize]) -> u32 {
     grounds.iter().fold(0, |set, &g| set | 1 << g)
-}
-
-/// A request's excited hyperfine blocks F' (indices into E): the states of one manifold and F, the unit a partition
-/// moves -- the Zeeman shifts and the light's tensor shifts couple a block's sublevels, so splitting one breaks the
-/// block structure (ELIMINATION.md §3).
-pub(crate) fn blocks(request: &crate::request::Request) -> Vec<Vec<usize>> {
-    excited_blocks(&request.states)
 }
 
 /// The excited blocks of the states' labels (`blocks`).

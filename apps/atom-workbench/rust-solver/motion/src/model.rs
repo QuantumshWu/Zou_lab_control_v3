@@ -428,10 +428,8 @@ pub struct Model {
     pub(crate) clusters: Vec<Cluster>,
     /// Per ground state its cluster.
     pub(crate) membership: [usize; GROUND],
-    /// The carriers: the co-rotating components with a drive not bare (eliminate.rs); per excited state (less GROUND)
-    /// its kept drives (eliminate.rs `Model::legs_made`).
+    /// The carriers: the co-rotating components with a drive not bare (eliminate.rs).
     pub(crate) carriers: Vec<eliminate::Carrier>,
-    pub(crate) legs: Vec<Vec<(usize, usize)>>,
     /// Per cluster the blocks of the excited states its eliminations can mix (assemble.rs `Model::mix`).
     pub(crate) mixing: Vec<Vec<usize>>,
     /// The photons' sources (photon.rs) and per cluster its classes.
@@ -448,11 +446,8 @@ pub struct Model {
     /// the couplings that are not zero: (component, excited, ground).
     pub(crate) levels: Vec<Vec<Level>>,
     pub(crate) driven: Vec<(Component, usize, usize)>,
-    /// Per ground state its drives in the tail rule's order (units.rs `Model::ranked_made`); the model's beats, each with its
-    /// pairs of frequencies (units.rs `Model::beats_made`); and what the regions' bounds read of the model's forms (reach.rs).
-    pub(crate) ranked: Vec<Vec<units::Ranked>>,
+    /// The model's beats, each with its pairs of frequencies (units.rs `Model::beats_made`).
     pub(crate) beats: Vec<(Beat, Vec<(usize, usize)>)>,
-    pub(crate) forms: Arc<reach::Forms>,
     /// Per cluster the classes of its readout's places under the running lights -- per channel and ground place the first
     /// of the places co-resonant with it --, found at its first readout (readout.rs `Model::readout_of`).
     pub(crate) resonances: Vec<std::sync::OnceLock<Vec<usize>>>,
@@ -469,6 +464,8 @@ pub struct Model {
     /// the light's; request.rs `Transition`): the errors of their second-order terms, read at the states (elim.rs
     /// `errors`) -- no unit: those levels are not in the model, and nothing of them can be kept.
     pub(crate) outside: Arc<Vec<(usize, crate::request::Transition)>>,
+    /// The request itself: what the prior's closure reads at a point (elim.rs `system`, `Model::prior`).
+    pub(crate) request: Arc<Request>,
 }
 
 /// What a request gives a model whatever units are kept (`Model::new`, `Model::rekept`): the light, the exact frequencies and
@@ -489,6 +486,7 @@ struct Given {
     labels: Vec<String>,
     names: Vec<String>,
     outside: Arc<Vec<(usize, crate::request::Transition)>>,
+    request: Arc<Request>,
 }
 
 /// An exact wave vector: integer coordinates on the light's distinct wave vectors (`Model::waves`), with a `Beat`'s integer
@@ -548,6 +546,7 @@ impl Model {
             labels: request.states.clone(),
             names: request.beams.iter().map(|b| b.name.clone()).collect(),
             outside: Arc::new(light.frequencies.iter().enumerate().flat_map(|(w, f)| request.outside_forms[f.form].transitions.iter().map(move |t| (w, t.clone()))).collect()),
+            request: Arc::new(request.clone()),
         };
         Model::settled(given, kept)
     }
@@ -569,6 +568,7 @@ impl Model {
             labels: self.labels.clone(),
             names: self.names.clone(),
             outside: self.outside.clone(),
+            request: self.request.clone(),
         };
         Model::settled(given, kept)
     }
@@ -581,7 +581,7 @@ impl Model {
             _ => vec![u.clone()],
         }).collect();
         let kept = &kept[..];
-        let Given { light, axes, waves, beam_wave, hbar_over_mass, energies, base, emission, decay, tones, driven, labels, names, outside } = given;
+        let Given { light, axes, waves, beam_wave, hbar_over_mass, energies, base, emission, decay, tones, driven, labels, names, outside, request } = given;
         let mut levels: Vec<Vec<Level>> = (0..2 * tones.len()).map(|_| vec![Level::Bare; far::EXCITED * GROUND]).collect();
         for unit in kept {
             let (component, excited, ground, level) = match *unit {
@@ -613,7 +613,6 @@ impl Model {
             clusters: vec![],
             membership: [0; GROUND],
             carriers: vec![],
-            legs: vec![],
             mixing: vec![],
             sources: vec![],
             classes: vec![],
@@ -622,17 +621,15 @@ impl Model {
             crosses: Mutex::new(Default::default()),
             levels,
             driven,
-            ranked: vec![],
             beats: vec![],
-            forms: Arc::new(reach::Forms::new()),
             resonances: vec![],
             labels,
             names,
             smooth: Mutex::new(vec![]),
             series: elim::Series::none(0),
             outside,
+            request,
         };
-        model.ranked = model.ranked_made();
         model.beats = model.beats_made();
         // The clusters of the kept edges: the explicit drives and the kept couplings of two states (units.rs `Model::edges`),
         // a coupling's strength its entry's with every drive bare.
@@ -672,7 +669,6 @@ impl Model {
         }
         model.tones = model.tones.iter().enumerate().map(|(frequency, tone)| tone.folded(&|side, e, g| levels[2 * frequency + side][(e - GROUND) * GROUND + g], &read)).collect();
         model.carriers = eliminate::Carrier::all(&model);
-        model.legs = model.legs_made();
         model.spread = model.spread_made();
         // The model's domain: a counter-rotating drive is only ever folded with the bare levels, so that fold must exist --
         // the one gate (units.rs `gate`), every beam at its peak, a ground state's drives together.

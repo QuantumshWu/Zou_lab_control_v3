@@ -25,15 +25,13 @@
 //! A reported quantity is the scene's, not the solve's: the level a drive was left at must not show in it. And the reported
 //! trap is a local thing, a minimum and its Hessian: what it asks of a fold is that it exists there. So the potential of a
 //! light set with an averaged light is read on the same request's model with that light's co-rotating drives all folded at
-//! the atom, but those whose fold does not exist at the prepared trap's centre, at rest -- the one gate on that point
-//! (units.rs `Model::folds`: a ground state's drives by the tail rule), closed as the solve closes its model: the failing
-//! drives explicit, until none fails. A drive on resonance there has no light shift to give (its weak-field formula would
-//! be the largest term of the potential, and wrong); it stays dynamics. The couplings of two ground states stay as this
-//! model keeps them: they make the clusters the shift is read in, and their folds were judged on this model's own levels
-//! over the reach (a model not closed there -- a degenerate partner's coupling still folded -- has no shift to read: every
-//! drive's distance holds that partner's channel). Those of two excited states follow the explicit states. The
-//! counter-rotating drives are only ever bare (their δΔ against twice the optical frequency). The model is made once per
-//! light set and populations.
+//! the atom, but those criterion one makes explicit at the prepared trap's centre, at rest -- the prior's closure on that
+//! point (elim.rs `Model::prior`, ELIMINATION.md §3: where the fold does not exist or its remainder is beyond the share,
+//! the excited block that holds the most of it, with its drives from the eigenstate's group): the same rule, on the same
+//! system, as the run's model is closed by. A drive on resonance there has no light shift to give (its weak-field formula
+//! would be the largest term of the potential, and wrong); it stays dynamics. The couplings of two ground states stay as
+//! this model keeps them: they make the clusters the shift is read in. The counter-rotating drives are only ever bare
+//! (their δΔ against twice the optical frequency). The model is made once per light set and populations.
 //!
 //! # The trap (`Model::trap`)
 //! The descent from the focus to the local minimum of V_L(r; p) -- the prepared lights' for the initial wells, the running ones'
@@ -47,7 +45,7 @@
 
 use super::assemble::{Held, Site, LEFT, RIGHT};
 use super::tabulate::Tables;
-use super::{jet, Component, Envelope, Gate, Level, Lights, Lit, Model, Quadratic, Trap, Unit};
+use super::{jet, Component, Envelope, Lights, Lit, Model, Quadratic, Trap, Unit};
 use crate::linalg::C64;
 use crate::field::Amplitude;
 use crate::linalg::{dot3, symmetric3_eigen};
@@ -114,9 +112,10 @@ impl Model {
     }
 
     /// The model a light set's potential is read on where a light of it is averaged (module documentation, # An averaged
-    /// light): the same request's model with the averaged lights' co-rotating drives folded with the levels at the atom, those
-    /// explicit whose fold does not exist at the prepared trap's centre at rest; made once per light set and populations.
-    /// None where no light is averaged, an averaged one drives nothing, or no prepared trap holds the atom: this model.
+    /// light): the same request's model with the averaged lights' co-rotating drives folded with the levels at the atom,
+    /// those explicit that the prior's closure at the prepared trap's centre at rest makes explicit; made once per light
+    /// set and populations. None where no light is averaged, an averaged one drives nothing, or no prepared trap holds the
+    /// atom: this model.
     fn smooth(&self, p: &[f64; GROUND], lights: &Lights) -> Option<Arc<Model>> {
         if !lights.0.contains(&Lit::Averaged) {
             return None;
@@ -131,36 +130,19 @@ impl Model {
             return Some(found.2.clone());
         }
         let centre = self.trap(p, &self.prepared()).ok()?.centre;
-        // What this model keeps beside the averaged lights' drives and the couplings of two excited states, with those
-        // drives' bare units: each folded at the atom.
-        let among_excited = |u: &Unit| matches!(u, Unit::Term { a, .. } if *a >= GROUND);
-        let own: Vec<Unit> = self
+        // What this model keeps beside the averaged lights' drives, with those drives' bare units: each folded at the
+        // atom; and of them explicit those the closure at the centre makes explicit (the prior's closure reads the
+        // request's system at the point, whatever this model keeps).
+        let explicit: Vec<Unit> = self.prior(&[(centre, [0.0; 3])]).into_iter().filter(|u| matches!(u, Unit::Drive { component, .. } if averaged(*component))).collect();
+        let kept: Vec<Unit> = self
             .kept
             .iter()
-            .filter(|u| !among_excited(u) && !matches!(u, Unit::Bare { component, .. } | Unit::Drive { component, .. } if averaged(*component)))
+            .filter(|u| !matches!(u, Unit::Bare { component, .. } | Unit::Drive { component, .. } if averaged(*component)))
             .cloned()
             .chain(drives.iter().map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }))
+            .chain(explicit)
             .collect();
-        // The averaged lights' drives whose fold does not exist at the centre: explicit, with this model's couplings of
-        // an excited state they hold to another.
-        let mut explicit: Vec<Unit> = vec![];
-        let model = loop {
-            let held = |s: usize| own.iter().chain(&explicit).any(|u| matches!(u, Unit::Drive { excited, .. } if *excited == s));
-            let terms = self.kept.iter().filter(|u| matches!(u, Unit::Term { a, b, .. } if *a >= GROUND && (held(*a) || held(*b))));
-            let kept: Vec<Unit> = own.iter().chain(&explicit).chain(terms).cloned().collect();
-            let model = self.rekept(&kept).expect("a co-rotating drive may be folded at the atom or explicit");
-            let region = model.point_region(centre, 0.0);
-            let fails = |&&(c, e, g): &&(Component, usize, usize)| {
-                let place = model.ranked[g].iter().find(|d| d.component == c && d.excited == e).expect("a drive is in its ground state's order").group;
-                let fold = model.folds(g, place, &region);
-                model.level(c, e, g) == Level::Atom && !(Gate { saturation: fold[0], sweep: fold[1] }).exists()
-            };
-            let failing: Vec<Unit> = drives.iter().filter(fails).map(|&(component, excited, ground)| Unit::Drive { component, excited, ground }).collect();
-            if failing.is_empty() {
-                break Arc::new(model);
-            }
-            explicit.extend(failing);
-        };
+        let model = Arc::new(self.rekept(&kept).expect("a co-rotating drive may be folded at the atom or explicit"));
         made.push((lights.clone(), *p, model.clone()));
         Some(model)
     }

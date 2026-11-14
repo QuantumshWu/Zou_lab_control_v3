@@ -765,7 +765,7 @@ fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, initial: &[(us
     loop {
         let mut model = Model::new(request, light, kept)?;
         let points = atoms(&model, request, light, initial, temperature)?;
-        let more: Vec<Unit> = model.prior(request, &points).into_iter().filter(|u| !kept.contains(u)).collect();
+        let more: Vec<Unit> = model.prior(&points).into_iter().filter(|u| !kept.contains(u)).collect();
         if more.is_empty() {
             model.referenced(&points);
             match model.series_block().filter(|unit| !kept.contains(unit)) {
@@ -803,7 +803,7 @@ fn failing(model: &Model, request: &Request, light: &Light, initial: &[(usize, f
     let kept = &model.kept;
     // Whether the model's series still converge at these atoms (model/elim.rs `Series::exists`).
     let holds = model.series_at(&points).exists();
-    Ok((model.prior(request, &points).into_iter().filter(|u| !kept.contains(u)).collect(), holds))
+    Ok((model.prior(&points).into_iter().filter(|u| !kept.contains(u)).collect(), holds))
 }
 
 /// What an attempt takes of its model alone (`solve`): nothing of it rests on the reach the model is judged over or
@@ -6133,7 +6133,7 @@ mod tests {
             let units = model.units();
             // The closed model's prior at the same atoms keeps nothing more (elim.rs `Model::prior`: each atom's closure
             // from what the model keeps).
-            assert!(model.prior(&request, &points).iter().all(|u| model.kept.contains(u)), "{name}: the closed model's prior keeps more at its atoms");
+            assert!(model.prior(&points).iter().all(|u| model.kept.contains(u)), "{name}: the closed model's prior keeps more at its atoms");
             eprintln!("{name}: {} units kept by the prior, {} folded, {} atoms' starts, {took:.2} s", kept.len(), units.len(), points.len());
         }
     }
