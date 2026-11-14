@@ -1902,7 +1902,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     // never run. Where the scout's atoms already refute it, its members double a hand-out; else they are one hand-out.
     // The pilot's check goes on from that level, its companion run then (`settle`, `ran`).
     let doubling = grown(&levels.fine.iter().collect::<Vec<_>>()).is_some();
-    let ran = match own_level(&run, ensemble, &domain, &context, &levels.fine, &numbers, doubling, &grown, messages) {
+    let ran = match own_level(&run, ensemble, &domain, &context, std::mem::take(&mut levels.fine), &numbers, doubling, &grown, messages) {
         Ok(own) => own,
         Err((t, states)) => return Ok(Attempt::Grow(t, Carried { parts: states, few: false })),
     };
@@ -2230,8 +2230,9 @@ fn pair(run: &Run, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, 
 }
 
 /// The pilot's own level (module documentation, # The pipeline): the other members of the pilot's groups `numbers` at
-/// the attempt's step, joined to the scout's `scout`, run before their companion, the reach's falsifier reading them
-/// as they come in (`grown`, `outgrown`): it reads the run's own level alone -- the bound atoms' T and their count
+/// the attempt's step, joined to the scout's `scout` (handed over, not copied: two of a level's sums at every
+/// candidate, PGC3D's 10 ms 80 MB a level), run before their companion, the reach's falsifier reading them as they come
+/// in (`grown`, `outgrown`): it reads the run's own level alone -- the bound atoms' T and their count
 /// outside the reach, on whole groups --, never a companion nor the step's check, so its read here is the one the whole
 /// pilot makes. Where the scout's atoms already refuted the reach (`doubling`) the members double a hand-out (`batch`)
 /// and the reach is read after each -- the scout's refutation is the read that selected the attempt for ending, and
@@ -2241,9 +2242,9 @@ fn pair(run: &Run, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, 
 /// and a look more at each prefix.) The level; or, where the atoms in hand refute the reach, the temperature it grows
 /// to and those atoms' groups, their states the next attempt's to decide on (`Attempt::Grow`).
 #[allow(clippy::too_many_arguments)]
-fn own_level(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &Context, scout: &[Part], numbers: &[u64], doubling: bool, grown: &dyn Fn(&[&Part]) -> Option<(f64, Vec<usize>)>, messages: &mut Messages) -> Result<Vec<Part>, (f64, Vec<Part>)> {
+fn own_level(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &Context, scout: Vec<Part>, numbers: &[u64], doubling: bool, grown: &dyn Fn(&[&Part]) -> Option<(f64, Vec<usize>)>, messages: &mut Messages) -> Result<Vec<Part>, (f64, Vec<Part>)> {
     let (tau, plan) = (context.tau, &context.plan);
-    let mut joined = scout.to_vec();
+    let mut joined = scout;
     let mut members = 1;
     loop {
         let more = if doubling { (2 * members).min(GROUP) } else { GROUP };
@@ -2402,11 +2403,12 @@ fn check(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &mut Context,
         // The rung below's third level above: this rung's own read, lowered.
         let inherits = Some(carried(&read, 0.5));
         context.tau = below;
-        let finer = level(run, ensemble, domain, &context.plan, below, numbers, 0..members, true, messages, &mut |prefix, messages| so_far(context, &[], prefix, messages));
-        // The level at the step is the companion from here on: its states are read no more.
+        // The level at the step is the companion from here on: its states are read no more; its own companion and the
+        // further pairs are no level of the rung below's -- all freed before its level runs, which holds as much again.
         forget(&mut levels.fine);
+        (levels.coarse, levels.further) = Default::default();
+        let finer = level(run, ensemble, domain, &context.plan, below, numbers, 0..members, true, messages, &mut |prefix, messages| so_far(context, &[], prefix, messages));
         levels.coarse = std::mem::replace(&mut levels.fine, finer);
-        levels.further = Default::default();
         (levels.above, levels.above_pilot, levels.above_unread) = (inherits, pilot, false);
         // The pilot's own level at the rung taken is in: the reach's falsifier reads it before anything more is spent
         // on the step (`own_level`). Where its atoms refute the reach the check ends there, and the attempt with it.
