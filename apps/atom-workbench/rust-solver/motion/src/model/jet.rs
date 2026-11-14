@@ -6,7 +6,7 @@
 //! x_i = M₀⁻¹(b_i − M_i x), x_ij = M₀⁻¹(b_ij − M_i x_j − M_j x_i − M_ij x) -- the derivatives of M x = b, exact.
 
 use crate::field::Amplitude;
-use crate::linalg::{Lu, Mat, C64};
+use crate::linalg::{Mat, C64};
 
 /// The parts of a jet of an order (0, 1 or 2).
 pub(crate) const fn parts(order: usize) -> usize {
@@ -15,19 +15,6 @@ pub(crate) const fn parts(order: usize) -> usize {
 
 /// The parts of a whole jet, the second order's.
 pub(crate) const WHOLE: usize = parts(2);
-
-/// The complex multiply-adds of an n × n LU factorization (linalg.rs `Lu::new`): at column k, n − k − 1 multipliers and
-/// (n − k − 1)² updates, Σ = (n³ − n)/3.
-pub(crate) fn factor_work(n: usize) -> f64 {
-    ((n * n * n - n) / 3) as f64
-}
-
-/// The complex multiply-adds of `solve` on n unknowns with `parts` parts: n² per substitution (linalg.rs `Lu::solve`), a matrix
-/// product M_i x (n²) and a substitution per first derivative, three products and a substitution per second.
-pub(crate) fn solve_work(n: usize, parts: usize) -> f64 {
-    let n2 = (n * n) as f64;
-    n2 * (1.0 + if parts >= 4 { 6.0 } else { 0.0 } + if parts >= 10 { 24.0 } else { 0.0 })
-}
 
 /// The complex multiply-adds of `product` of two jets of `parts` parts: one, two per first derivative, four per second.
 pub(crate) fn product_work(parts: usize) -> f64 {
@@ -76,13 +63,6 @@ pub(crate) fn multiply(a: &[C64], b: &[C64], out: &mut [C64]) {
     }
 }
 
-/// The product jet of two scalar jets.
-pub(crate) fn product(a: &[C64], b: &[C64]) -> Vec<C64> {
-    let mut out = vec![C64::ZERO; a.len()];
-    multiply(a, b, &mut out);
-    out
-}
-
 /// The jet of 1/d for a real jet d.
 pub(crate) fn reciprocal(d: &[f64]) -> Vec<f64> {
     let n = d.len();
@@ -96,31 +76,6 @@ pub(crate) fn reciprocal(d: &[f64]) -> Vec<f64> {
     if n >= 10 {
         for (k, &(i, j)) in PAIRS.iter().enumerate() {
             out.push(2.0 * d[1 + i] * d[1 + j] * g * g * g - d[4 + k] * g * g);
-        }
-    }
-    out
-}
-
-/// The jet of M⁻¹ b for a matrix jet M (its value factored as `lu`) and a vector jet b (module documentation).
-pub(crate) fn solve(lu: &Lu, m: &[Mat], b: &[Vec<C64>]) -> Vec<Vec<C64>> {
-    let n = b.len();
-    let mut x0 = b[0].clone();
-    lu.solve(&mut x0);
-    let mut out = vec![x0];
-    if n >= 4 {
-        for i in 0..3 {
-            let mi = m[1 + i].apply(&out[0]);
-            let mut y: Vec<C64> = b[1 + i].iter().zip(&mi).map(|(p, q)| *p - *q).collect();
-            lu.solve(&mut y);
-            out.push(y);
-        }
-    }
-    if n >= 10 {
-        for (k, &(i, j)) in PAIRS.iter().enumerate() {
-            let (a, c, d) = (m[1 + i].apply(&out[1 + j]), m[1 + j].apply(&out[1 + i]), m[4 + k].apply(&out[0]));
-            let mut y: Vec<C64> = (0..b[4 + k].len()).map(|x| b[4 + k][x] - a[x] - c[x] - d[x]).collect();
-            lu.solve(&mut y);
-            out.push(y);
         }
     }
     out

@@ -806,8 +806,6 @@ pub(crate) struct Region {
     pub(crate) shifted: OnceLock<Vec<[Shift; GROUND]>>,
     /// Per cluster.
     pub(crate) forces: Vec<OnceLock<Own>>,
-    /// Per cluster, on a point, its photon classes' jump operators' sizes there (photon.rs `Model::coherence_gate`).
-    pub(crate) classes: Vec<OnceLock<Vec<[f64; 3]>>>,
     /// Per ground state its drives' sizes and distances (units.rs `Model::across`), the tails of their shares and the gates
     /// of the places asked in the tail rule's order (units.rs `Model::tails`, `Model::folds`).
     pub(crate) across: [OnceLock<Vec<super::units::Across>>; GROUND],
@@ -1681,7 +1679,6 @@ impl Model {
             dressings: OnceLock::new(),
             shifted: OnceLock::new(),
             forces: (0..self.clusters.len()).map(|_| OnceLock::new()).collect(),
-            classes: (0..self.clusters.len()).map(|_| OnceLock::new()).collect(),
             across: std::array::from_fn(|_| OnceLock::new()),
             tails: std::array::from_fn(|_| OnceLock::new()),
             folds: std::array::from_fn(|_| Mutex::new(vec![])),
@@ -1698,12 +1695,6 @@ impl Model {
     /// an atom's start: the model's prior, solve.rs # The model).
     pub(crate) fn point_region(&self, r: [f64; 3], speed: f64) -> Region {
         self.region(r, self.spans(&Cell { centre: r, half: [0.0; 3] }), speed)
-    }
-
-    /// The whole space at the speeds up to `speed`, every beam at its peak (`Span::over` an unbounded cell): what is
-    /// bounded on it is bounded on any region at those speeds (units.rs `Model::failing`).
-    pub(crate) fn whole_region(&self, speed: f64) -> Region {
-        self.region([0.0; 3], self.spans(&Cell { centre: [0.0; 3], half: [f64::INFINITY; 3] }), speed)
     }
 
     /// The provable bounds over the reach of quantities given per region, each to `resolution`: each one's largest upper bound of

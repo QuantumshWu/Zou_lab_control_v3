@@ -254,7 +254,6 @@ use crate::linalg::norm3;
 use crate::linalg::{Mat, C64};
 use crate::request::{GROUND, STATES};
 use crate::units::rounding;
-use rayon::prelude::*;
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -418,18 +417,6 @@ pub(crate) struct Fold {
     pub(crate) level: C64,
     pub(crate) terms: [f64; EXCITED],
     pub(crate) across: OnceCell<f64>,
-}
-
-/// What a unit's gate reads of a region (`Model::judged`, `Model::gate_of`): a drive folded (with the bare levels or at
-/// the atom) its ground state's place in the tail rule's order; a coupling of two states its form; a photon coherence
-/// its two classes' jump operators at a point (photon.rs `Model::coherence_gate`). No gate is read of a carrier's
-/// dressing, which folds nothing; of a fold's next order, which exists where the fold does; nor of a unit of nothing in
-/// this model.
-pub(crate) enum Read {
-    Fold { ground: usize, place: usize, bare: bool },
-    Term { form: Arc<TermForm>, a: usize, b: usize, beat: usize },
-    Coherence(Unit),
-    Nothing,
 }
 
 /// One drive of a ground state in the tail rule's order (module documentation, # The tail rule): its component and excited
@@ -1039,103 +1026,6 @@ impl Model {
     /// The model's beat a unit's coupling names, its place among `Model::beats`.
     fn beat_index(&self, beat: &Beat) -> Option<usize> {
         self.beats.iter().position(|b| b.0 == *beat)
-    }
-
-    /// What each unit's gate reads (`Read`), in the units' order: a drive its ground state, its place in the tail rule's
-    /// order and whether it is folded with the bare levels; a coupling of two states its form.
-    pub(crate) fn judged(&self, units: &[Unit]) -> Vec<Read> {
-        units
-            .iter()
-            .map(|u| match *u {
-                Unit::Bare { component, excited, ground } | Unit::Drive { component, excited, ground } => {
-                    let level = self.ranked[ground].iter().find(|d| d.component == component && d.excited == excited).map(|d| (d.group, self.level(component, excited, ground)));
-                    level.filter(|of| of.1 != Level::Explicit).map_or(Read::Nothing, |(place, level)| Read::Fold { ground, place, bare: level == Level::Bare })
-                }
-                Unit::Term { a, b, ref beat } => self.beat_index(beat).map_or(Read::Nothing, |index| Read::Term { form: self.forms.term(self, a, b, index), a, b, beat: index }),
-                Unit::Coherence { .. } => Read::Coherence(u.clone()),
-                Unit::Second { .. } | Unit::Dressing { .. } | Unit::Block { .. } => Read::Nothing,
-            })
-            .collect()
-    }
-
-    /// A unit's gate over a region (module documentation, # One rule; `Read`), every kind through the one gate: a
-    /// drive's by its ground state's place in the tail rule's order (`folds`), a coupling's (`term_bound`) -- bounds
-    /// over a region, on a point the values there --, a photon coherence's on a point, its jump operators there
-    /// (photon.rs `Model::coherence_gate`; over a cell or the whole space no bound of them is made: not below ½);
-    /// nothing where no gate is read.
-    pub(crate) fn gate_of(&self, read: &Read, region: &Region) -> Gate {
-        match read {
-            Read::Fold { ground, place, bare } => {
-                let made = self.folds(*ground, *place, region);
-                if *bare { Gate { saturation: made[2], sweep: made[3] } } else { Gate { saturation: made[0], sweep: made[1] } }
-            }
-            Read::Term { form, a, b, beat } => {
-                let (saturation, sweep) = self.term_bound(form, *a, *b, *beat, region);
-                Gate { saturation, sweep }
-            }
-            Read::Coherence(unit) if region.rho == 0.0 => self.coherence_gate(unit, region),
-            Read::Coherence(_) => Gate { saturation: f64::INFINITY, sweep: f64::INFINITY },
-            Read::Nothing => Gate { saturation: 0.0, sweep: 0.0 },
-        }
-    }
-
-    /// The units of `units` whose folds do not exist where the atoms are (SPEC §1.5; solve.rs, # The model's prior):
-    /// each unit's gate (`gate_of`) over the whole space at the speeds up to `speed`, every beam at its peak -- a bound
-    /// over any place an atom can be at those speeds: a unit it leaves below ½ exists everywhere and is not read again --,
-    /// and the others' at each of the atoms `points` (r, |v|), at its place and speed as a state's errors are read
-    /// (`Model::point_region`, `Measured`): those whose gate reaches ½ at one of them at least. Each point's gates on the
-    /// pool, by itself.
-    pub(crate) fn failing(&self, units: &[Unit], points: &[([f64; 3], f64)], speed: f64) -> Vec<Unit> {
-        let (reads, whole) = self.whole_gates(units, speed);
-        let open: Vec<usize> = (0..units.len()).filter(|&u| !whole[u].exists()).collect();
-        if open.is_empty() {
-            return vec![];
-        }
-        let failing = points
-            .par_iter()
-            .map(|&(r, v)| {
-                let region = self.point_region(r, v);
-                open.iter().map(|&u| !self.gate_of(&reads[u], &region).exists()).collect::<Vec<bool>>()
-            })
-            .reduce(|| vec![false; open.len()], |a, b| a.iter().zip(&b).map(|(x, y)| *x || *y).collect());
-        open.iter().zip(failing).filter(|of| of.1).map(|(&u, _)| units[u].clone()).collect()
-    }
-
-    /// Each unit's gate (`gate_of`) over the whole space at the speeds up to `speed`, every beam at its peak and all in
-    /// phase (reach.rs `Model::whole_region`) -- a bound over any place an atom can be at those speeds --, with what it
-    /// reads (`judged`): the prior's screen (`failing`) and the units' bounds (`bounds`).
-    fn whole_gates(&self, units: &[Unit], speed: f64) -> (Vec<Read>, Vec<Gate>) {
-        let reads = self.judged(units);
-        let whole = self.whole_region(speed);
-        let gates = reads.iter().map(|read| self.gate_of(read, &whole)).collect();
-        (reads, gates)
-    }
-
-    /// Each unit's error at any state of an atom at the speeds up to `speed`, at most -- on the populations (absolute)
-    /// and on T (relative) alike --, where its gate over the whole space (`whole_gates`) bounds it; none where it does
-    /// not (solve.rs, # The model: the units booked at their bounds). The same leading order as the error read at a state
-    /// (`unit_error_alone`), at the gate's bound of its small parameter and the populations' largest weight:
-    /// - a coupling of two states a, b at a beat errs at a state by m²(p_a + p_b) on both, its mixing m² = S/2 at the
-    ///   state's point and speed (`term_bound` on the point's region). The gate over the whole space at the speeds up to
-    ///   `speed` bounds S at every such point -- its size every beam at its peak and in phase, its distance the least any
-    ///   place and speed leaves --, and a state's populations on its cluster add up to one (`state_populations`): p_a +
-    ///   p_b ≤ 1 for two states, 2p_a ≤ 2 for a level's own beat. So S/2 and S, ∞ where the gate is (a distance of
-    ///   nothing somewhere);
-    /// - a photon coherence's gate is made at a point alone (photon.rs `Model::coherence_gate`): over the whole space no
-    ///   bound of its jump operators is made, and the coherence is read;
-    /// - a drive's error carries what its gate does not bound -- a bare fold's denominator's first order ε, of the first
-    ///   order where the gate is of the second, and the flows its rate error moves; a fold at the atom's sweep and Doppler
-    ///   term's next order --, and so do a fold's next order and a carrier's dressing, which have no gate: read.
-    pub(crate) fn bounds(&self, units: &[Unit], speed: f64) -> Vec<Option<f64>> {
-        let (_, gates) = self.whole_gates(units, speed);
-        units
-            .iter()
-            .zip(gates)
-            .map(|(unit, gate)| match unit {
-                Unit::Term { a, b, .. } => Some(0.5 * gate.saturation * if a == b { 2.0 } else { 1.0 }),
-                Unit::Coherence { .. } | Unit::Bare { .. } | Unit::Drive { .. } | Unit::Second { .. } | Unit::Dressing { .. } | Unit::Block { .. } => None,
-            })
-            .collect()
     }
 
     /// The drives folded onto explicit excited states whose Raman pairs cannot be folded anywhere (model.rs
@@ -1988,55 +1878,6 @@ mod tests {
         }
         eprintln!("the largest shift {largest:.2} rad/µs, the steepest slope {steepest:.1} rad/µs/µm, the least bound over its shift {tightest:.2}");
         assert!(largest > 20.0 && steepest > 100.0, "the points read a light shift: {largest}, {steepest}");
-    }
-
-    /// A unit's bound (`Model::bounds`) holds at every state of an atom at the speeds up to it: on R6_RAMAN_CO's closed
-    /// model (couplings at a Raman pair's beats, a level's own beat) and R4_LIN_1's (a lin-perp-lin lattice's), 200 atoms
-    /// each at a place drawn in four times the reach's box about its centre -- the bound is the whole space's -- with a
-    /// speed up to the reach's largest in a random direction, and on every cluster a random state there and each of its
-    /// basis states (the populations' extremes). Every bounded unit's error read there (`errors_at`) on the populations
-    /// and on T is within its bound, to the rounding of the few operations that make both; and the bound is attained:
-    /// on both models some unit's error reads more than half of it (measured: all of it, 1.000).
-    #[test]
-    fn a_unit_s_bound_holds_at_every_state_at_its_speeds() {
-        for scene in ["R6_RAMAN_CO", "R4_LIN_1"] {
-            let request = request_of(scene);
-            let light = Light::new(&request);
-            let state = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
-            let (model, _, _, reach) = Model::closed_at(&request, &light, vec![], state, request.temperature_uk);
-            let units = model.units();
-            let bounds = model.bounds(&units, reach.speed);
-            let bounded = bounds.iter().flatten().filter(|b| b.is_finite()).count();
-            assert!(bounded > 0, "{scene}: no unit bounded");
-            let mut stream = crate::random::Stream::new(0, crate::random::Purpose::Initial, 0, 0);
-            let mut largest = 0.0_f64;
-            for _ in 0..200 {
-                let r: [f64; 3] = std::array::from_fn(|a| {
-                    let [lo, hi] = reach.cell[a];
-                    0.5 * (lo + hi) + 4.0 * (hi - lo) * (stream.uniform() - 0.5)
-                });
-                let (direction, speed) = (stream.normals(), reach.speed * stream.uniform());
-                let kappa = direction.map(|x| x / norm3(direction) * speed / model.hbar_over_mass);
-                for (cluster, c) in model.clusters.iter().enumerate() {
-                    let n = c.states.len();
-                    let random: Vec<C64> = (0..n).map(|_| C64::new(stream.normals()[0], stream.normals()[1])).collect();
-                    let basis = (0..n).map(|i| (0..n).map(|j| if i == j { C64::ONE } else { C64::ZERO }).collect::<Vec<C64>>());
-                    for psi in std::iter::once(random).chain(basis) {
-                        let sample = Sample { cluster, at: Point { r, kappa, t: 0.0 }, psi };
-                        for ((unit, error), bound) in units.iter().zip(model.errors_at(&units, &sample, None)).zip(&bounds) {
-                            let Some(bound) = bound else { continue };
-                            let most = error.population.max(error.temperature);
-                            assert!(most <= bound * (1.0 + rounding(8)), "{scene}: {unit:?} reads {most:e} beyond its bound {bound:e} at {r:?}, {kappa:?}");
-                            if *bound > 0.0 {
-                                largest = largest.max(most / bound);
-                            }
-                        }
-                    }
-                }
-            }
-            eprintln!("{scene}: {bounded} of {} units bounded; the largest error over its bound {largest:.3}", units.len());
-            assert!(largest > 0.5, "{scene}: the largest error over its bound {largest}");
-        }
     }
 
     /// A fold's error on a rate is booked by what the rate moves (module documentation, # A rate's error on the

@@ -651,24 +651,6 @@ impl Model {
         gate(size, self.omega(&first.plus(-1, second)).abs() - self.spread() - wave * speed, 0.0)
     }
 
-    /// A coherence's gate on a point region at its speeds (the model's prior, units.rs `Model::gate_of`): its one gate
-    /// (`coherence_of`) of its classes' jump operators there in each source cluster of the pair, the exact elimination's
-    /// (to the first order in the position, as `NearValues::first_order` reads them) at an atom at rest (the jumps'
-    /// Doppler partners are their first order in the speed), made once a cluster and point (`Region::classes`) -- the
-    /// largest.
-    pub(crate) fn coherence_gate(&self, unit: &Unit, region: &super::reach::Region) -> Gate {
-        let lights = self.running();
-        self.coherence_classes(unit).into_iter().fold(Gate { saturation: 0.0, sweep: 0.0 }, |most, (cluster, i, j)| {
-            let sizes = region.classes[cluster].get_or_init(|| {
-                let (plan, amplitudes) = (self.plan(cluster, &lights), self.light.amplitudes(region.centre));
-                let near = self.near_values(&plan, &amplitudes, &[(plan.near.jumping(), 1)], None);
-                self.class_sizes_on(&plan, &amplitudes, [0.0; 3], &near)
-            });
-            let made = self.coherence_of(unit, (i, j), sizes, region.speed);
-            Gate { saturation: most.saturation.max(made.saturation), sweep: most.sweep.max(made.sweep) }
-        })
-    }
-
     /// A coherence's error at a sample (units.rs `Measured`): m² √(p_i p_j), m its size at the point -- Σ_a ‖L_a‖ ‖L'_a‖ of
     /// its two classes' jump operators there (`class_sizes`) -- over its distance, the two frequencies' beat less the spread
     /// and the Doppler shift of two photons at the sample's speed (`coherence_of`); p the populations of the two classes'

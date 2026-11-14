@@ -57,8 +57,9 @@
 //!   the one a partition makes explicit (criterion one).
 //! - The P-layer components: two replicas f ≠ f' make the entries W'_{f'} T_f of P, turning at f − f' less the
 //!   two beams' Doppler beat (k_l − k_l')·v; in H's eigenbasis an entry of size a across the distance
-//!   δ = Ω + λ_p − λ_p' mixes a/|δ| (criterion two: explicit where it is above √share, else averaged into its static
-//!   shift |a|²/δ, its error (a/δ)²).
+//!   δ = Ω + λ_p − λ_p' mixes a/|δ| (criterion two, v5: its error averaged is 2(a/δ)² -- the population's time mean after the light
+//!   is switched on, 4(a/δ)² sin²(δt/2) --, explicit where that is above the share, else averaged into its static shift
+//!   |a|²/δ).
 //! - The photons' cross terms: the jumps C_a T_f of two replicas land in the same ground states at two photon
 //!   frequencies; their interference turns at the difference, and of a rate γ it moves the populations by γ/Ω (the
 //!   secular approximation, first order: kept above the share).
@@ -760,34 +761,6 @@ impl Fold {
         out
     }
 
-    /// The response of class c's coupling `coupling` (E × P's ground states: a basis vector of its field, the
-    /// responses being linear in the coupling) at the fold's generator, and its frequency partner: per replica the class
-    /// drives, the Sylvester solutions T and T2 (module documentation) of the coupling's columns that feed it, on every
-    /// excited state (zero off Q_f) and every P state (E × P).
-    pub(crate) fn respond(&self, class: usize, coupling: &Mat) -> (Mat, Mat) {
-        let (n, excited) = (self.size(), coupling.rows);
-        let (mut t, mut t2) = (Mat::zeros(excited, n), Mat::zeros(excited, n));
-        for (r, rep) in self.replicas.iter().enumerate() {
-            let columns: Vec<usize> = (0..self.ground).filter(|&g| self.driven[class][g] == Some(r)).collect();
-            if columns.is_empty() {
-                continue;
-            }
-            let w = Mat::from_fn(rep.q.len(), n, |i, s| if columns.contains(&s) { coupling[(rep.q[i], s)] } else { C64::ZERO });
-            if w.max_abs() == 0.0 {
-                continue;
-            }
-            let first = sylvester(&rep.k, &self.schur, rep.frequency, &w);
-            let second = sylvester(&rep.k, &self.schur, rep.frequency, &first);
-            for (i, &e) in rep.q.iter().enumerate() {
-                for s in 0..n {
-                    t[(e, s)] += first[(i, s)];
-                    t2[(e, s)] += second[(i, s)];
-                }
-            }
-        }
-        (t, t2)
-    }
-
     /// The normalization of P's coordinates (ELIMINATION.md §2: the first order's renormalization, here whole): the
     /// slow state (x, T x) has the norm x†(1 + X)x, so its normalized coordinates are y = S x, S = (1 + X)^{1/2}; returns
     /// S and S⁻¹ (X Hermitian and positive: its eigenbasis).
@@ -796,19 +769,6 @@ impl Fold {
         let n = self.size();
         let make = |f: &dyn Fn(f64) -> f64| Mat::from_fn(n, n, |i, j| (0..n).map(|k| x.vectors[(i, k)] * f(x.values[k].max(0.0)) * x.vectors[(j, k)].conj()).sum());
         (make(&|v| (1.0 + v).sqrt()), make(&|v| 1.0 / (1.0 + v).sqrt()))
-    }
-
-    /// What the generator in the normalized coordinates, S H S⁻¹, holds beyond its direct entries and the fold's terms
-    /// as the assembly takes them (the static ones, W'_f T_f S⁻¹, field by field): Herm(S H S⁻¹) − Herm(A) −
-    /// Herm(Σ_f W'_f T_f S⁻¹) -- the normalization's own part, of the order of the excited share X times the levels;
-    /// held at its point's value along a step's path (assemble.rs).
-    pub(crate) fn held(&self, s: &Mat, s_inverse: &Mat) -> Mat {
-        let mut out = s.product(&self.generator).product(s_inverse).hermitian_part();
-        out.add_scaled(-C64::ONE, &self.direct.hermitian_part());
-        for rep in &self.replicas {
-            out.add_scaled(-C64::ONE, &rep.back.product(&rep.t).product(s_inverse).hermitian_part());
-        }
-        out
     }
 
     /// The landing map in the normalized coordinates: a bare P state f lands at y = S x, x = (1 + Σ_f S_f T_f)⁻¹ f
@@ -826,23 +786,6 @@ impl Fold {
             }
         }
         Some(out)
-    }
-
-    /// The complex multiply-adds the fold took, counted by its algorithm (decide.rs, SPEC §5.1): a Schur form per
-    /// replica's Q (the QR iteration's ten sweeps of q³) and per iteration the generator's (ten of n³) and each replica's
-    /// Sylvester solve (the two changes of basis, q² n + q n², and the back substitutions, q² n / 2 + q n²); the
-    /// eigendecomposition and the normalization (ten and two of n³).
-    pub(crate) fn work(&self) -> f64 {
-        let n = self.size() as f64;
-        let schur: f64 = self.replicas.iter().map(|r| 10.0 * (r.q.len() as f64).powi(3)).sum();
-        let solves: f64 = self.replicas.iter().map(|r| { let q = r.q.len() as f64; 1.5 * q * q * n + 2.0 * q * n * n }).sum();
-        schur + self.iterations as f64 * (10.0 * n * n * n + solves) + 12.0 * n * n * n
-    }
-
-    /// The complex multiply-adds of one basis coupling's response and its partner (`respond`) with its normalization.
-    pub(crate) fn response_work(&self) -> f64 {
-        let n = self.size() as f64;
-        self.replicas.iter().map(|r| { let q = r.q.len() as f64; 2.0 * (1.5 * q * q * n + 2.0 * q * n * n) + 2.0 * q * n * n }).sum()
     }
 
     /// The fold's series about a reference z₀ (the engine's evaluation route; the self-consistent fold is the
@@ -1453,7 +1396,7 @@ impl super::Model {
         use crate::request::GROUND;
         use super::{Unit, UnitError};
         let mut out = vec![UnitError::NONE; units.len()];
-        let mut book = |unit: &Unit, x: f64, out: &mut Vec<UnitError>| {
+        let book = |unit: &Unit, x: f64, out: &mut Vec<UnitError>| {
             if let Some(i) = units.iter().position(|u| u == unit) {
                 let e = &mut out[i];
                 (e.parameter, e.population, e.temperature) = (e.parameter.max(x), e.population + x, e.temperature + x);
@@ -1657,8 +1600,8 @@ fn slow_of(blocks: &[Vec<usize>], kept: &Kept, classes: &[Class], ground: usize)
 ///    k_max v and |k_l − k_l'| v ≤ 2 k_max v), within the share; beyond it the blocks with the largest parts are made
 ///    explicit until the rest is within it -- a block already explicit at another replica keeps that drive instead;
 ///    a new block takes the drive whose replica holds its largest part (its frame);
-/// 3. criterion two: every component of two replicas whose mixing a/|δ| is above √share, its error (a/δ)² beyond the
-///    share, is kept (a link of its two dominant states and classes), and every photon cross term whose γ/|Ω| is
+/// 3. criterion two: every component of two replicas whose averaged error 2(a/δ)² is beyond the share (v5: the
+///    population's time mean after a sudden switch-on) is kept (a link of its two dominant states and classes), and every photon cross term whose γ/|Ω| is
 ///    above the share;
 /// until nothing more is kept. Each round only adds.
 pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>], velocity: [f64; 3], start: &Kept) -> Closed {
@@ -1710,7 +1653,7 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
         // Moves: (block, replica) with its part, largest first per state, until the rest is within `limit`.
         let mut moves: Vec<(usize, usize)> = vec![];
         let mut remainder: f64 = 0.0;
-        let mut pick = |parts: &[Vec<f64>], total: f64, limit: f64, moves: &mut Vec<(usize, usize)>| {
+        let pick = |parts: &[Vec<f64>], total: f64, limit: f64, moves: &mut Vec<(usize, usize)>| {
             let mut order: Vec<(usize, usize, f64)> = parts.iter().enumerate().flat_map(|(b, row)| row.iter().enumerate().map(move |(j, &x)| (b, j, x))).filter(|x| x.2 > 0.0).collect();
             order.sort_by(|x, y| y.2.total_cmp(&x.2));
             let mut rest = total;
@@ -1781,7 +1724,7 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
         for x in fold.components(velocity) {
             let m = x.mixing();
             let link = Link { a: label(x.row), b: label(x.column), classes: x.classes };
-            if m > share.sqrt() {
+            if 2.0 * m * m > share {
                 if link.a != link.b && !kept.links.contains(&link) {
                     kept.links.push(link);
                     grew = true;
@@ -1792,7 +1735,7 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
         }
         // The static couplings of two P states of one frame (H's entries, exact in the fold): a component at the lab beat
         // zero, its distance the two states' eigenvalues apart -- of the eigenstates that hold most of each (one eigenstate:
-        // no distance) --, explicit where it mixes them beyond √share: the states are one cluster's.
+        // no distance) --, explicit where its averaged error 2(a/δ)² is beyond the share: the states are one cluster's.
         let hermitian = fold.generator.hermitian_part();
         let held_most = |x: usize| (0..n).max_by(|&p, &q| fold.eigen.vectors[(x, p)].norm_sqr().total_cmp(&fold.eigen.vectors[(x, q)].norm_sqr())).unwrap_or(0);
         let state = |x: usize| if x < ground { x } else { ground + fold.explicit[x - ground] };
@@ -1806,7 +1749,7 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
                 let (px, py) = (held_most(x), held_most(y));
                 let distance = if px == py { 0.0 } else { (fold.eigen.values[px].re - fold.eigen.values[py].re).abs() };
                 let link = Link { a: state(x), b: state(y), classes: (None, None) };
-                if !(a <= share.sqrt() * distance) {
+                if !(2.0 * a * a <= share * distance * distance) {
                     if !kept.links.contains(&link) {
                         kept.links.push(link);
                         grew = true;
@@ -1872,7 +1815,7 @@ pub(crate) struct Errors {
 ///   (N − 1 − ln N)/γ where the slow part's norm N = ‖(x₀, T x₀)‖² is above one (γ its decay there): the rate's relative
 ///   error is |τ + clamp| over the model's mean wait, N/γ or (1 + ln N)/γ. Its part goes to the blocks in proportion to
 ///   their share of the landing's excited amplitude T x₀: making a block explicit takes its fast part into the dynamics.
-/// - The averaged components (criterion two): (a/δ)² of each one not kept, on its two eigenstates' shares.
+/// - The averaged components (criterion two): 2(a/δ)² of each one not kept (v5), on its two eigenstates' shares.
 /// - The photons' cross terms not kept: γ/|Ω| of each, on its source eigenstate's share.
 /// A relative rate error x moves the populations by at most x (absolute) and T, which the light sets through its rates
 /// and shifts, by x relative: the four terms add on both.
@@ -1890,7 +1833,7 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
     let weight: Vec<f64> = coefficients.iter().map(|z| if total > 0.0 { z.norm_sqr() / total } else { 0.0 }).collect();
     let block_of = |e: usize| blocks.iter().position(|b| b.contains(&e));
     let mut parts: Vec<(Object, f64)> = vec![];
-    let mut add = |object: Object, x: f64, parts: &mut Vec<(Object, f64)>| {
+    let add = |object: Object, x: f64, parts: &mut Vec<(Object, f64)>| {
         if x > 0.0 {
             match parts.iter_mut().find(|p| p.0 == object) {
                 Some(p) => p.1 += x,
@@ -1971,7 +1914,7 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
         if linked(&link) || (weight[x.row] == 0.0 && weight[x.column] == 0.0) {
             continue;
         }
-        let e = x.mixing() * x.mixing() * (weight[x.row] + weight[x.column]);
+        let e = 2.0 * x.mixing() * x.mixing() * (weight[x.row] + weight[x.column]);
         averaged += e;
         add(Object::Link(link), e, &mut parts);
     }

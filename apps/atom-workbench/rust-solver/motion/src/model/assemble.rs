@@ -471,20 +471,6 @@ thread_local! {
 /// The plans made so far: each one's own number (`Plan::id`).
 static PLANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// out ← out + scale a b on n × n matrices, row by row.
-fn product_onto(out: &mut [C64], a: &[C64], b: &[C64], n: usize, scale: C64) {
-    for x in 0..n {
-        for c in 0..n {
-            let z = a[x * n + c] * scale;
-            if z != C64::ZERO {
-                for y in 0..n {
-                    out[x * n + y] += z * b[c * n + y];
-                }
-            }
-        }
-    }
-}
-
 /// A cluster's assembly under a light set, worked out once (module documentation): the near forms, the field components and
 /// their beams, the blocks of terms, the tones, the photon classes.
 #[derive(Clone, Debug)]
@@ -809,7 +795,6 @@ impl<'a> Builder<'a> {
     fn near(&mut self) {
         let model = self.model;
         let (states, n, g) = (self.states(), self.states().len(), self.ground());
-        let zero = model.axes.zero();
         for (wj, emitted) in model.tones.iter().enumerate() {
             for (wi, absorbed) in model.tones.iter().enumerate() {
                 let groups: Vec<(Option<usize>, Option<usize>)> = if wi == wj { self.groups(wi).into_iter().map(|x| (x, x)).collect() } else if self.lights.cross(wj, wi) { vec![(None, None)] } else { vec![] };

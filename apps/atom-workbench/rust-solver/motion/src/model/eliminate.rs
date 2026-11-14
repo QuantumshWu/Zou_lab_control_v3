@@ -63,7 +63,7 @@ use super::reach::{Frame, Region};
 use super::units::{gate, Flow, Measured};
 use super::{Beat, Component, Gate, Level, Lights, Model, Unit, UnitError};
 use crate::field::Amplitude;
-use crate::linalg::{dot3, Lu, Mat, C64};
+use crate::linalg::{dot3, Mat, C64};
 use crate::request::{GROUND, STATES};
 use super::far::EXCITED;
 use super::jet;
@@ -115,10 +115,8 @@ pub(crate) struct Carrier {
     /// The same on its field's basis (field.rs), U^f_k (STATES × STATES): X^f_l = Σ_k γ_lk U^f_k, the responses' sources.
     pub(crate) basis: Vec<Mat>,
     pub(crate) units: Vec<usize>,
-    /// Its explicit drives' couplings per beam (STATES × STATES), and per ground state whether it has one from it: the
-    /// kept channels of the excited states' self-energy (module documentation, # The response).
+    /// Its explicit drives' couplings per beam (STATES × STATES).
     pub(crate) explicit: Vec<Mat>,
-    pub(crate) kept: [bool; GROUND],
 }
 
 impl Carrier {
@@ -149,7 +147,6 @@ impl Carrier {
                 folded: tone.couplings[0].iter().map(at_the_atom).collect(),
                 basis: tone.basis[0].iter().map(at_the_atom).collect(),
                 units,
-                kept: std::array::from_fn(|g| explicit.iter().any(|m| (GROUND..STATES).any(|e| m[(e, g)] != C64::ZERO))),
                 explicit,
             });
         }
@@ -269,22 +266,6 @@ impl Model {
     /// that keeps its vector fills it from).
     pub(crate) fn dressed_coherently(&self, _carrier: usize) -> bool {
         true
-    }
-
-    /// A carrier's beam groups whose interference its dressing keeps: its units (beams of parallel fields), all its beams where its
-    /// dressing is coherent, each beam alone where its light is averaged.
-    fn dressing_groups(&self, carrier: &Carrier, lights: &Lights, coherent: bool) -> Vec<Vec<usize>> {
-        let n = carrier.beams.len();
-        if lights.0[carrier.frequency] == super::Lit::Averaged {
-            return (0..n).map(|l| vec![l]).collect();
-        }
-        if coherent {
-            return vec![(0..n).collect()];
-        }
-        let mut units = carrier.units.clone();
-        units.sort();
-        units.dedup();
-        units.iter().map(|&u| (0..n).filter(|&l| carrier.units[l] == u).collect()).collect()
     }
 
     /// The near light's elimination on a cluster at a far Hamiltonian `h` (its jet: the constant forms' H at the point) and the
