@@ -1526,13 +1526,17 @@ pub(crate) fn system(request: &crate::request::Request, light: &crate::field::Li
     (levels, classes, sources)
 }
 
-/// Per class the remainder of its fold taken at the bare levels instead of the point's (ELIMINATION.md §2: the bare
-/// levels' fold is this function at a coarser point): of each ground-like eigenstate p, its dominant ground state g at
-/// its bare energy E_g (H0's, `bare`, in the frames), ‖[R(E_g + f) − R(λ_p + f)] W_c r_p‖ / ‖R(λ_p + f) W_c r_p‖ over
-/// the class's replicas, the largest -- where it is within what no output resolves the class's fold is its bare
-/// levels' constant (far.rs), at no cost of its own; else at the point.
-pub(crate) fn bare_remainders(fold: &Fold, classes: usize, bare: &[f64]) -> Vec<f64> {
-    let mut out = vec![0.0_f64; classes];
+/// The drives a fold takes at the point rather than at its bare levels (ELIMINATION.md §2: the bare levels' fold is
+/// this function at a coarser point), each by its own part of the route's error: of each ground-like eigenstate p, its
+/// dominant ground state g at its bare energy E_g (H0's, `bare`, in the frames), and of each class c the relative change
+/// of its response ‖[R(E_g + f) − R(λ_p + f)] W_c r_p‖ / ‖R(λ_p + f) W_c r_p‖ over its replicas, split by its drives e ← s:
+/// a drive's part |W_c[e, s] r_p[s]| ‖[R(E_g + f) − R(λ_p + f)] e_e‖ over the same norm -- the parts bound the class's
+/// whole. The drives moved to the point are the largest parts until what the rest leaves is within `limit` (what no
+/// output resolves): a class's drives of a part in 10⁸ of its coupling -- a tilted field's mixing through the levels
+/// outside the model (PGC1D_TILT_2) -- stay at the bare levels' constant, at no cost of their own, however much the
+/// class's main drives' route asks for the point. Returns (class, excited state's E index, ground place).
+pub(crate) fn bare_routes(fold: &Fold, bare: &[f64], limit: f64) -> Vec<(usize, usize, usize)> {
+    let mut out: Vec<(usize, usize, usize)> = vec![];
     for p in (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5) {
         let r = fold.right(p);
         let g = fold.dominant(p);
@@ -1542,25 +1546,45 @@ pub(crate) fn bare_remainders(fold: &Fold, classes: usize, bare: &[f64]) -> Vec<
         let lambda = fold.eigen.values[p];
         let level = C64::real(bare[g] - fold.frames[g]);
         for (c, row) in fold.driven.iter().enumerate() {
-            let (mut num, mut den) = (0.0, 0.0);
+            // (excited, ground, part²) over the class's replicas, and the response's norm².
+            let (mut parts, mut den): (Vec<(usize, usize, f64)>, f64) = (vec![], 0.0);
             for (j, rep) in fold.replicas.iter().enumerate().filter(|(_, rep)| rep.group == fold.groups[p]) {
                 let columns: Vec<usize> = (0..fold.ground).filter(|&s| row[s] == Some(j)).collect();
                 if columns.is_empty() {
                     continue;
                 }
-                let feeds: Vec<&Feed> = rep.feeds.iter().filter(|f| f.class == Some(c)).collect();
-                let mut wr = vec![C64::ZERO; rep.q.len()];
-                for f in feeds {
-                    let v = f.w.apply(&r);
-                    wr.iter_mut().zip(&v).for_each(|(a, b)| *a += *b);
+                let m = rep.q.len();
+                let mut w = Mat::zeros(m, fold.size());
+                for f in rep.feeds.iter().filter(|f| f.class == Some(c)) {
+                    w.add_scaled(C64::ONE, &f.w);
                 }
                 let f = C64::real(rep.frequency);
-                let (at, bared) = (rep.k.resolvent(lambda + f, &wr), rep.k.resolvent(level + f, &wr));
-                num += at.iter().zip(&bared).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>();
-                den += at.iter().map(|a| a.norm_sqr()).sum::<f64>();
+                den += rep.k.resolvent(lambda + f, &w.apply(&r)).iter().map(|a| a.norm_sqr()).sum::<f64>();
+                for i in 0..m {
+                    let drives: Vec<(usize, C64)> = columns.iter().map(|&s| (s, w[(i, s)] * r[s])).filter(|x| x.1 != C64::ZERO).collect();
+                    if drives.is_empty() {
+                        continue;
+                    }
+                    let unit: Vec<C64> = (0..m).map(|k| if k == i { C64::ONE } else { C64::ZERO }).collect();
+                    let (at, bared) = (rep.k.resolvent(lambda + f, &unit), rep.k.resolvent(level + f, &unit));
+                    let change = at.iter().zip(&bared).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>();
+                    parts.extend(drives.into_iter().map(|(s, x)| (rep.q[i], s, x.norm_sqr() * change)));
+                }
             }
-            if den > 0.0 {
-                out[c] = out[c].max((num / den).sqrt());
+            if den == 0.0 {
+                continue;
+            }
+            let mut sizes: Vec<(usize, usize, f64)> = parts.into_iter().map(|(e, s, x)| (e, s, (x / den).sqrt())).collect();
+            sizes.sort_by(|a, b| b.2.total_cmp(&a.2));
+            let mut rest: f64 = sizes.iter().map(|x| x.2).sum();
+            for (e, s, x) in sizes {
+                if rest <= limit {
+                    break;
+                }
+                rest -= x;
+                if !out.contains(&(c, e, s)) {
+                    out.push((c, e, s));
+                }
             }
         }
     }
@@ -2101,9 +2125,9 @@ impl super::Model {
 
     /// The model's prior (ELIMINATION.md §3–§4, the brief's "先验"): at the reach's own atoms `points` (position,
     /// velocity) the point's closure (`closure`) from what is kept already, the atoms together until no atom adds
-    /// anything; and per class its fold's route, at the point or at its bare levels (`bare_remainders`, within the share
-    /// no output resolves at every atom: `estimate::unseen`). What it keeps, as the model's units: every drive of a
-    /// class folded at the point (`Unit::Bare`: its fold taken at the levels there), the explicit drives into the
+    /// anything; and per drive its fold's route, at the point or at its bare levels (`bare_routes`: its own part, the
+    /// rest within the share no output resolves at every atom, `estimate::unseen`). What it keeps, as the model's units:
+    /// every drive folded at the point (`Unit::Bare`: its fold taken at the levels there), the explicit drives into the
     /// blocks (`Unit::Drive`), the P-layer links of two ground states (`Unit::Term`, their lab beat exactly), and every bare
     /// fold onto an explicit state whose error at an atom is beyond the share (`Unit::Bare`, `bare_mixing`).
     pub(crate) fn prior(&self, points: &[([f64; 3], [f64; 3])]) -> Vec<super::Unit> {
@@ -2112,17 +2136,18 @@ impl super::Model {
         let bare = &self.energies;
         let unseen = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
         let mut kept = Kept::default();
-        let mut routes: Vec<f64> = vec![];
+        // The drives moved to the point, by their light's (frequency, counter-rotating) at the atom they were read at.
+        let mut routes: Vec<((usize, bool), usize, usize)> = vec![];
         let mut sources: Vec<(usize, bool)> = vec![];
         // The photons' cross terms at the closure's fixed point (`start_cross_terms`): its last round's.
         let mut coherent: Vec<[(Option<usize>, usize, usize); 2]> = vec![];
         loop {
-            let read: Vec<(Kept, Vec<f64>, Vec<(usize, bool)>, Vec<[(Option<usize>, usize, usize); 2]>)> = points
+            let read: Vec<(Kept, Vec<((usize, bool), usize, usize)>, Vec<(usize, bool)>, Vec<[(Option<usize>, usize, usize); 2]>)> = points
                 .par_iter()
                 .map(|&(r, v)| {
                     let (levels, classes, sources) = system(&self.request, &self.light, r);
                     let closed = closure(&levels, &classes, &blocks, v, &kept);
-                    let routes = bare_remainders(&closed.fold, classes.len(), bare);
+                    let routes: Vec<((usize, bool), usize, usize)> = bare_routes(&closed.fold, bare, unseen).into_iter().map(|(c, e, g)| (sources[c], e, g)).collect();
                     let coherent = start_cross_terms(&closed.fold, &self.emission);
                     (closed.kept, routes, sources, coherent)
                 })
@@ -2145,10 +2170,11 @@ impl super::Model {
                         kept.links.push(l);
                     }
                 }
-                if routes.len() < r.len() {
-                    routes.resize(r.len(), 0.0);
+                for d in r {
+                    if !routes.contains(&d) {
+                        routes.push(d);
+                    }
                 }
-                routes.iter_mut().zip(&r).for_each(|(a, b)| *a = a.max(*b));
                 sources = s;
             }
             if (kept.blocks.len(), kept.links.len()) == before {
@@ -2157,12 +2183,10 @@ impl super::Model {
         }
         let mut units = vec![];
         let component = |c: usize| super::Component { frequency: sources[c].0, counter: sources[c].1 };
-        for (c, &rho) in routes.iter().enumerate() {
-            if sources[c].1 || rho <= unseen {
-                continue;
-            }
-            for &(comp, e, g) in self.driven.iter().filter(|d| d.0 == component(c)) {
-                units.push(super::Unit::Bare { component: comp, excited: e, ground: g });
+        for &((frequency, counter), e, g) in &routes {
+            let drive = (super::Component { frequency, counter }, crate::request::GROUND + e, g);
+            if !counter && self.driven.contains(&drive) {
+                units.push(super::Unit::Bare { component: drive.0, excited: drive.1, ground: drive.2 });
             }
         }
         // A cross term's unit (`Unit::Coherence`): its two classes' exact beats in the model's frames -- the light's
