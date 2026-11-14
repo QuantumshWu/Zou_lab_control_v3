@@ -847,10 +847,12 @@ pub struct Run<'a> {
     prepared: Lights,
     plans: Vec<(Arc<assemble::Plan>, Option<&'a tabulate::NearTable>)>,
     /// The counted real multiply-adds of one middle (`decide::COMPLEX` per complex one, assemble.rs # Work) with its state's
-    /// scattering (photon.rs `Model::scattering_of`: every class's photons with their gradients, once a step:
-    /// `Model::photons_counted`), and of one jump's photon (photon.rs `Model::emission_of`: the site once, every class's
-    /// rate, the class drawn alone with its gradients: `Model::emission_counted`): each the largest over the clusters at
-    /// the focus, every light on, made once.
+    /// scattering on the middle's site (assemble.rs `Middle::scattering_counted`: every class's photons with their
+    /// gradients, once a step, the normalized generator's matrices of the point among them), and of one jump's photon on a
+    /// site of its own (photon.rs `Model::emission_of`: the site once with its matrices and the landing that follows,
+    /// every class's rate, the class drawn alone with its gradients: `Model::emission_counted`): each the largest over the
+    /// clusters at the focus, every light on, made once, a thread's matrices forgotten before each (a step's and a
+    /// jump's points are their own).
     assembly: f64,
     photons: f64,
 }
@@ -878,8 +880,15 @@ impl<'a> Run<'a> {
         let plans: Vec<(Arc<assemble::Plan>, Option<&tabulate::NearTable>)> = plans;
         let first = |c: usize| -> Vec<C64> { (0..model.clusters[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect() };
         let largest = |count: &dyn Fn(usize) -> f64| (0..model.clusters.len()).map(count).fold(0.0, f64::max) * crate::decide::COMPLEX;
-        let scattering = largest(&|c| model.photons_counted(c, &at, &first(c), tables).1);
-        let photons = largest(&|c| model.emission_counted(c, &at, &first(c), tables));
+        let scattering = largest(&|c| {
+            let (plan, table) = &plans[c];
+            Model::forget_quartic();
+            model.middle(plan, at.r, at.t, *table).scattering_counted(at.kappa, &first(c))
+        });
+        let photons = largest(&|c| {
+            Model::forget_quartic();
+            model.emission_counted(c, &at, &first(c), tables)
+        });
         let assembly = plans.iter().map(|(plan, table)| model.middle(plan, at.r, at.t, *table).work).fold(0.0, f64::max) * crate::decide::COMPLEX + scattering;
         Run { model, tables, reference, prepared: model.prepared(), plans, assembly, photons }
     }
@@ -927,9 +936,9 @@ pub(crate) struct Priced {
 impl Model {
     /// `Priced` with cluster c's near forms from a table on `axes[c].0` axes whose coordinates' values at a point count
     /// `axes[c].1` (tabulate.rs `Model::table_axes`, `Model::priced_axes`), counted as `Run::with` counts at the focus:
-    /// the scattering makes the fourth order's matrices there, and the middle and a jump's photon at the same point find
-    /// them made (assemble.rs `Model::quartic`); the matrices change along the lab axes the plan's beams change along
-    /// there.
+    /// the scattering on the middle's site with the normalized generator's matrices made of its laid forms, and a jump's
+    /// photon on a site of its own with its own matrices and the landing that follows (photon.rs `Plan::sited_work`); the
+    /// matrices change along the lab axes the plan's beams change along there.
     pub(crate) fn priced(&self, axes: &[(usize, f64)]) -> Priced {
         use photon::Gradients;
         let running = self.running();

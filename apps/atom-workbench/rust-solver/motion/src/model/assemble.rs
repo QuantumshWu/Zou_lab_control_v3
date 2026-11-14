@@ -1364,11 +1364,11 @@ impl Plan {
         (forms * summed + entries + matrices + products * n * size) as f64
     }
     /// The counted complex multiply-adds of the normalized generator's matrices made on a site of their own placed on a table of
-    /// `axes` axes, whose coordinates there count `place` (`Model::quartic_made`, not laid): the point's near forms
-    /// read -- X's (and L's) among the Hermitian ones (`Plan::near_read`) -- and their values laid, and the matrices
-    /// with their gradients (`quartic_work`), the scattering's: no landing.
+    /// `axes` axes, whose coordinates there count `place` (`Model::quartic_made`, not laid: a jump's): the point's near
+    /// forms read -- X's (and L's) among the Hermitian ones (`Plan::near_read`) -- and their values laid, and the
+    /// matrices with their gradients and the landing that follows there (`quartic_work`).
     pub(crate) fn quartic_made_work(&self, fourth: &Fourth, axes: usize, place: f64) -> f64 {
-        place + self.near_read(axes) + self.values + self.quartic_work(fourth, Some(axes), false)
+        place + self.near_read(axes) + self.values + self.quartic_work(fourth, Some(axes), true)
     }
     /// The counted complex multiply-adds of the plan's field components from their beams to an order (photon.rs `sited`),
     /// plain and Doppler-weighted.
@@ -1931,6 +1931,11 @@ impl Model {
     /// The thread's fourth-order matrices (`quartic`), read.
     pub(crate) fn quartic_read<R>(read: impl FnOnce(&Quartic) -> R) -> R {
         QUARTIC.with(|kept| read(&kept.borrow()))
+    }
+
+    /// The thread's matrices forgotten: the next site makes its own (a count of what a site makes, model.rs `Run::with`).
+    pub(crate) fn forget_quartic() {
+        QUARTIC.with(|kept| kept.borrow_mut().key = None);
     }
 
     /// `quartic`'s matrices (module documentation, # The normalized generator): on a site of its own the point's forms
@@ -2888,6 +2893,13 @@ impl Middle<'_> {
         point.normal.clone_from(&from.normal);
         point.normal_slopes.clone_from(&from.normal_slopes);
         Middle { model: self.model, plan: self.plan.clone(), r: self.r, t: self.t, table: self.table, point: RefCell::new(point), work: self.work }
+    }
+
+    /// The counted complex multiply-adds of a state's scattering at the middle at the momentum κ (photon.rs
+    /// `Model::scattering_on` on the middle's own site, its forms laid: what a step's scattering makes there, the
+    /// normalized generator's matrices among it where the thread holds none of the point's).
+    pub(crate) fn scattering_counted(&self, kappa: [f64; 3], psi: &[C64]) -> f64 {
+        self.model.scattering_on(&self.plan, self.table, self.r, kappa, self.t, psi, &mut self.point.borrow_mut(), true).1
     }
 
     /// The middle's table and position where the node at the time s is the middle (`Model::node_normal`).
