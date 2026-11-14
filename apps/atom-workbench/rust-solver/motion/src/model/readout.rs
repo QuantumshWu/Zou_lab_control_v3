@@ -4,7 +4,7 @@
 //! # The readout
 //! A component's folded drives' excited amplitude from ground state b is −R[:,b] x_b -- its bare drives' and those folded at
 //! the atom, each a channel (far.rs, eliminate.rs) --, its channel's excited frequency θ_b + ν (frames). Two channels at
-//! one frequency are co-resonant; the others beat and average out (criterion two). Co-resonance is an equivalence of the
+//! one frequency are co-resonant; the others beat, their sectors folded at their time mean (elim.rs # Sectors). Co-resonance is an equivalence of the
 //! places (channel p, ground place b) -- one excited frequency θ_b + ν_p a class --: a class's response is
 //! C_k = Σ_{(p, b) ∈ k} R_p[:, b] e_bᵀ and its excited amplitude A_k = C_k x.
 //!
