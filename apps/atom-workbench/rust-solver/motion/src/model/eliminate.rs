@@ -1252,7 +1252,7 @@ impl Model {
 /// A coupling of two states at a beat in canonical form (`Unit::Term`): a ← b at the beat and its adjoint, b ← a at the
 /// opposite beat, are one unit, named a < b, or for a = b by the beat whose first coordinate that is not zero is positive.
 pub(crate) fn term_unit(a: usize, b: usize, beat: &Beat) -> Unit {
-    if a < b || (a == b && beat.0.iter().find(|n| **n != 0).is_none_or(|n| *n > 0)) {
+    if a < b || (a == b && beat.sign() >= 0) {
         Unit::Term { a, b, beat: beat.clone() }
     } else {
         Unit::Term { a: b, b: a, beat: beat.negated() }

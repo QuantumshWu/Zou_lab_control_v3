@@ -113,7 +113,7 @@ pub(crate) struct Replicas {
 }
 
 /// Whether two frequencies are one: equal within the rounding of the sums that make them -- a class's frequency and a
-/// frame, itself a sum of at most a component per state along the frames' paths (`frames`): γ_STATES of their sizes.
+/// frame, itself a sum of at most a component per state along the frames' paths (cluster.rs `frames`): γ_STATES of their sizes.
 /// Two physically different frequencies differ by a beat of the request's frequency axes, many orders more.
 pub(crate) fn same(a: f64, b: f64) -> bool {
     (a - b).abs() <= rounding(crate::request::STATES) * (a.abs() + b.abs())
@@ -1058,57 +1058,6 @@ impl Reference {
     }
 }
 
-/// The frames that make the explicit components turn least (v3 2; the coordinator's 2026-11-13 rule): every component
-/// a ← b at lab beat Ω (∝ e^{−iΩt}) turns at Ω + θ_b − θ_a in the frames; the frames θ minimize max |Ω + θ_b − θ_a| over
-/// the components. By linear-programming duality that least largest residual t* is the largest |Σ_{e∈C} ±Ω_e|/|C| over
-/// the cycles C of the components' graph, the minimum mean cycle of the directed graph with an arc b → a of weight Ω
-/// and a → b of −Ω per component (Karp 1978); the frames are then the shortest paths from a source joined to every state
-/// at no cost, the arcs at weight + t* (no negative cycle there): θ_a ≤ θ_b + Ω + t* and θ_b ≤ θ_a − Ω + t*. Without a
-/// cycle t* = 0 and every component is static. Returns the frames (states that no component touches: 0) and t*.
-pub(crate) fn frames(states: usize, components: &[(usize, usize, f64)]) -> (Vec<f64>, f64) {
-    let arcs: Vec<(usize, usize, f64)> = components.iter().flat_map(|&(a, b, omega)| [(b, a, omega), (a, b, -omega)]).collect();
-    // Karp: D_k(v) the least weight of a walk of k arcs from the source (the source's arcs counted as the first).
-    let n = states;
-    let mut d = vec![vec![f64::INFINITY; n]; n + 1];
-    d[0].iter_mut().for_each(|x| *x = 0.0);
-    for k in 1..=n {
-        for &(from, to, w) in &arcs {
-            if d[k - 1][from].is_finite() {
-                let x = d[k - 1][from] + w;
-                if x < d[k][to] {
-                    d[k][to] = x;
-                }
-            }
-        }
-    }
-    let mut least = f64::INFINITY;
-    for v in 0..n {
-        if !d[n][v].is_finite() {
-            continue;
-        }
-        let worst = (0..n).filter(|&k| d[k][v].is_finite()).map(|k| (d[n][v] - d[k][v]) / (n - k) as f64).fold(f64::NEG_INFINITY, f64::max);
-        least = least.min(worst);
-    }
-    // The least mean cycle's weight is −t* (every cycle holds both ways round, so its mean is ≤ 0).
-    let residual = if least.is_finite() { (-least).max(0.0) } else { 0.0 };
-    // Bellman–Ford at weight + t*.
-    let mut theta = vec![0.0; n];
-    for _ in 0..n {
-        let mut moved = false;
-        for &(from, to, w) in &arcs {
-            let x = theta[from] + w + residual;
-            if x < theta[to] {
-                theta[to] = x;
-                moved = true;
-            }
-        }
-        if !moved {
-            break;
-        }
-    }
-    (theta, residual)
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // The system at a point, and the point's closure (criteria one and two, the frames).
 
@@ -1573,7 +1522,7 @@ pub(crate) struct Kept {
 pub(crate) struct Closed {
     pub kept: Kept,
     pub frames: Vec<f64>,
-    /// The frames' least largest residual t* (`frames`), and the step's requirement t* + |K| v (rad/µs).
+    /// The frames' least largest residual t* (cluster.rs `frames`), and the step's requirement t* + |K| v (rad/µs).
     pub residual: f64,
     pub requirement: f64,
     pub fold: Fold,
@@ -1582,13 +1531,13 @@ pub(crate) struct Closed {
     pub mixing: f64,
 }
 
-/// The P states (labels as in `Link`) of a kept set and the frames from its links (`frames`): the ground states, then
+/// The P states (labels as in `Link`) of a kept set and the frames from its links (cluster.rs `frames`): the ground states, then
 /// the kept blocks' states.
 fn slow_of(blocks: &[Vec<usize>], kept: &Kept, classes: &[Class], ground: usize) -> (Slow, f64) {
     let explicit: Vec<usize> = kept.blocks.iter().flat_map(|&b| blocks[b].iter().copied()).collect();
     let place = |s: usize| if s < ground { Some(s) } else { explicit.iter().position(|&e| e == s - ground).map(|i| ground + i) };
     let edges: Vec<(usize, usize, f64)> = kept.links.iter().filter_map(|l| Some((place(l.a)?, place(l.b)?, l.beat(classes)))).collect();
-    let (frames, residual) = frames(ground + explicit.len(), &edges);
+    let (frames, residual) = super::cluster::frames(ground + explicit.len(), &edges, &|x| *x, &0.0);
     (Slow { explicit, frames }, residual)
 }
 

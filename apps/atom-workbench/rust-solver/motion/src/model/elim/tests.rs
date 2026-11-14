@@ -236,29 +236,6 @@ fn an_averaged_component_s_shift_and_micromotion_are_the_exact_floquet_ones() {
     }
 }
 
-/// The frames (the coordinator's 2026-11-13 rule): a chain of components is static in its optimal frames (residual zero
-/// on every link), and a three-state ring is left its cycle's detuning over three on every link -- the linear
-/// program's optimum, which no frames beat (each link's residual is the ring's mean).
-#[test]
-fn the_frames_leave_a_chain_static_and_a_ring_its_mean_cycle_detuning() {
-    let chain = [(1, 0, 26.37), (2, 1, 26.41), (3, 2, -3.2)];
-    let (theta, residual) = frames(5, &chain);
-    assert_eq!(residual, 0.0);
-    for &(a, b, omega) in &chain {
-        assert!((omega + theta[b] - theta[a]).abs() <= 1e-12, "link {a} ← {b}");
-    }
-    let ring = [(1, 0, 10.0), (2, 1, 4.0), (0, 2, -11.0)];
-    let (theta, residual) = frames(3, &ring);
-    let mean: f64 = (10.0 + 4.0 - 11.0) / 3.0;
-    assert!((residual - mean.abs()).abs() <= 1e-12, "residual {residual} against {mean}");
-    for &(a, b, omega) in &ring {
-        assert!(((omega + theta[b] - theta[a]).abs() - mean.abs()).abs() <= 1e-12, "link {a} ← {b}: {}", omega + theta[b] - theta[a]);
-    }
-    // Two links of one pair at two beats: a two-cycle, half their difference.
-    let (_, residual) = frames(2, &[(1, 0, 0.0), (1, 0, 26.37)]);
-    assert!((residual - 13.185).abs() <= 1e-12);
-}
-
 /// A Raman resonance across a Zeeman splitting (the coordinator's test): two ground states 2ω_L apart, coupled by two
 /// classes 2ω_L + δ apart through a far excited state. The lab beat is 26.37 rad/µs; the component's distance on the
 /// actual spectrum is δ (and the light shifts' difference); in the optimal frames it is static, the step's
@@ -279,7 +256,7 @@ fn a_raman_resonance_across_a_zeeman_splitting_asks_the_step_for_its_detuning_no
         assert!(x.distance.abs() < 0.2 * zeeman, "its distance on the actual spectrum {:?}", x.distance);
     }
     let links: Vec<(usize, usize, f64)> = explicit.iter().map(|x| (rest.dominant(x.row), rest.dominant(x.column), x.beat)).collect();
-    let (theta, residual) = frames(2, &links);
+    let (theta, residual) = crate::model::cluster::frames(2, &links, &|x| *x, &0.0);
     assert_eq!(residual, 0.0, "a chain: static in its frames");
     let fold = folded(&lv, &classes, &Slow { explicit: vec![], frames: theta.clone() });
     assert_eq!(fold.replicas.len(), 1);
