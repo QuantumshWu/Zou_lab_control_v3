@@ -1953,7 +1953,7 @@ impl Model {
                 }
                 (None, None) => unreachable!("the exact elimination's forms are made where no table is"),
             };
-            q.work += self.normal_read(plan, table, exact, point);
+            q.work += self.normal_read(plan, table, exact, point, true);
         }
         q.work += self.quartic_matrices(plan, fourth, point, q);
     }
@@ -1978,17 +1978,18 @@ impl Model {
     /// normalized generator): X's (and L's) pair forms and z₀ with their slopes along the site's directions -- the table's
     /// interpolant, or the exact elimination's `exact`. Read once a point: a middle's nodes take them (`Model::node_normal`).
     /// Their counted work: none of their own -- they are the point's Hermitian forms, counted with them (`Plan::near_read`,
-    /// tabulate.rs `Model::near_point`; the forms given, the elimination's or the table's own count).
-    pub(crate) fn normal_read(&self, plan: &Plan, table: Option<&NearTable>, exact: Option<&NearValues>, point: &mut Site) -> f64 {
+    /// tabulate.rs `Model::near_point`; the forms given, the elimination's or the table's own count). Without `slopes`
+    /// their values alone (a readout's, `Model::bent_at`: the given elimination's of order 0 suffices).
+    pub(crate) fn normal_read(&self, plan: &Plan, table: Option<&NearTable>, exact: Option<&NearValues>, point: &mut Site, slopes: bool) -> f64 {
         let pairs = plan.near.pairs.len();
         let (first, count) = (2 * pairs, plan.near.fourth * pairs + plan.near.reference);
-        let dn = point.directions.len();
+        let dn = if slopes { point.directions.len() } else { 0 };
         let Site { normal, normal_slopes, place, .. } = point;
         sized(normal, 2 * count);
         sized(normal_slopes, dn * 2 * count);
         match (table, exact) {
             (Some(table), _) => {
-                table.table.read(&place.expect("a site placed on its table").0, 2 * first, None, normal, Some(normal_slopes));
+                table.table.read(&place.expect("a site placed on its table").0, 2 * first, None, normal, slopes.then_some(&mut normal_slopes[..]));
                 0.0
             }
             (None, Some(near)) => {
@@ -2154,7 +2155,7 @@ impl Model {
             (node.normal_made, node.normal_gradients) = (true, true);
             return;
         }
-        let (n, size) = (fourth.n, fourth.n * fourth.n);
+        let size = fourth.n * fourth.n;
         if fourth.held() {
             quartic.landing = false;
             self.normal_at(plan, fourth, point, &node.plain, gradients, false, quartic);
@@ -2164,17 +2165,27 @@ impl Model {
             let Quartic { sums, .. } = quartic;
             sized(sums, 2 * size);
             let (x, t) = sums.split_at_mut(size);
-            x.fill(C64::ZERO);
-            let values = &point.normal;
-            for (left, right, group) in fourth.groups() {
-                let c = side(&node.plain, left)[0] * side(&node.plain, right)[0];
-                for &(i, xy) in group {
-                    x[xy] += c * C64::new(values[2 * i], values[2 * i + 1]);
-                }
-            }
-            powers(-0.5, fourth.orders.normalization, x, t, &mut node.normal, n);
+            bent(fourth, &node.plain, &point.normal, x, t, &mut node.normal);
         }
         (node.normal_made, node.normal_gradients) = (true, gradients);
+    }
+
+    /// The generator's S⁻¹ at a point (`bent`), into `out` (n × n): of the beams' amplitudes there (`beams`, every beam
+    /// of the light) and the one metric's forms read there (`normal`: `normal_read`, their values alone), the plan's plain
+    /// field components from the beams; `scratch` at least 2 n². The readout's (readout.rs `Model::readout_of`):
+    /// x = S⁻¹ψ, the generator's own coordinates inverted.
+    pub(crate) fn bent_at(&self, plan: &Plan, fourth: &Fourth, beams: &[Amplitude], normal: &[f64], scratch: &mut [C64], out: &mut [C64]) {
+        let size = fourth.n * fourth.n;
+        let mut plain = [[C64::ZERO; 4]; 64];
+        assert!(plan.scalars.len() <= plain.len(), "a plan's field components");
+        for (z, scalar) in plain.iter_mut().zip(&plan.scalars) {
+            for &(at, c) in &scalar.beams {
+                let a = beams[plan.beams[at]].value;
+                z[0] += (if scalar.conjugate { a.conj() } else { a }) * c;
+            }
+        }
+        let (x, t) = scratch[..2 * size].split_at_mut(size);
+        bent(fourth, &plain[..plan.scalars.len()], normal, x, t, out);
     }
 
     /// A plan's field components at a point, jets to `order`, plain and weighted by their beams' Doppler shifts at a momentum.
@@ -2249,7 +2260,7 @@ impl Model {
         };
         // The normalized generator's forms, which the step's nodes take (`Model::node_normal`).
         point.normal.clear();
-        let work = work + plan.fourth.as_ref().map_or(0.0, |_| self.normal_read(plan, table, exact.as_ref(), &mut point));
+        let work = work + plan.fourth.as_ref().map_or(0.0, |_| self.normal_read(plan, table, exact.as_ref(), &mut point, true));
         Middle { model: self, plan: plan.clone(), r: Some(r), t, table, point: RefCell::new(point), work }
     }
 
@@ -2268,7 +2279,7 @@ impl Model {
         point.normal.clear();
         let mut work = near.map_or(0.0, |n| n.work + plan.values);
         if let (Some(_), Some(near)) = (plan.fourth.as_ref(), near) {
-            work += self.normal_read(plan, None, Some(near), &mut point);
+            work += self.normal_read(plan, None, Some(near), &mut point, true);
         }
         Middle { model: self, plan: plan.clone(), r: None, t, table: None, point: RefCell::new(point), work }
     }
@@ -2794,10 +2805,25 @@ fn series(alpha: f64, order: usize, x: &[C64], out: &mut [C64], t: &mut [C64], n
     }
 }
 
+/// S⁻¹ = Σ_{j≤J} b_j X^j of the slow state's one metric X (module documentation, # The normalized generator; elim.rs
+/// `Fold::evaluated_share`, whose largest eigenvalue is the series' ratio): X the static pair entries' forms `values`
+/// (real and imaginary parts, `Site::normal`) times their blocks' two field components `plain` (each its value first),
+/// summed into `x`; the series (`powers`) into `out` (n × n), `t` its scratch. A node's where the held part is nothing
+/// (`Model::node_normal`) and a readout's (`Model::bent_at`): one matrix.
+fn bent(fourth: &Fourth, plain: &[[C64; 4]], values: &[f64], x: &mut [C64], t: &mut [C64], out: &mut [C64]) {
+    x.fill(C64::ZERO);
+    for (left, right, group) in fourth.groups() {
+        let c = side(plain, left)[0] * side(plain, right)[0];
+        for &(i, xy) in group {
+            x[xy] += c * C64::new(values[2 * i], values[2 * i + 1]);
+        }
+    }
+    powers(-0.5, fourth.orders.normalization, x, t, out, fourth.n);
+}
+
 /// Σ_{j≤J} binom(α, j) X^j of an n × n matrix X (row by row) into `out`, by Horner's rule p ← p X + c_j from j = J down
-/// (`t` its scratch; its first step c_J X + c_{J−1} without a product): the normalization's series at a node
-/// (`Model::node_normal`) and on a readout's classes (readout.rs).
-pub(crate) fn powers(alpha: f64, order: usize, x: &[C64], t: &mut [C64], out: &mut [C64], n: usize) {
+/// (`t` its scratch; its first step c_J X + c_{J−1} without a product): the normalization's series (`bent`).
+fn powers(alpha: f64, order: usize, x: &[C64], t: &mut [C64], out: &mut [C64], n: usize) {
     let size = n * n;
     out[..size].fill(C64::ZERO);
     if order >= 1 {

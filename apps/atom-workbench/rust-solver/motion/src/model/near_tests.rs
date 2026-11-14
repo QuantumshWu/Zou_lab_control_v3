@@ -451,3 +451,97 @@ fn the_normalized_generator_s_decay_is_its_photons_rate_with_a_kept_pair_of_two_
         }
     }
 }
+
+/// A bare fold onto an explicit state is read where the atoms are (elim.rs `Model::bare_mixing`, `Model::readings`,
+/// `Model::prior`; model.rs `Model::settled`): R6_RAMAN_CO with its A leg |1,0⟩ → e kept explicit (e the excited state of
+/// the pair's largest product of couplings) and its B leg |2,0⟩ → e folded with the bare levels across the pair's
+/// two-photon distance d -- |2,0⟩'s level moved off the pair's resonance so that the fold's mixing a/|d| at the trap's
+/// centre is a quarter: within 0.15 < a/d < 0.5, so the fold exists (2a/|d| < 1: bare it stays) and its next order
+/// 2(a/d)² = 1/8 is beyond the share. There
+/// - the levels d is read on (`Model::levels_at`) are the run's own: its generator's static diagonal at rest, with the
+///   frames, on both states' clusters;
+/// - the readings book on its `Unit::Bare` 2(a/d)² of the populations of its two states, a = |Σ_l a_l(r) X_l[e, w]| at
+///   the beams' amplitudes there and d = z_e − E_w − ν on those levels, z_e the mean of e's cluster's ground levels with
+///   e's frame (model.rs `Model::read`);
+/// - the prior at the centre keeps it, and the model that keeps it folds the drive at the atom.
+#[test]
+fn a_bare_fold_onto_an_explicit_state_is_read_at_the_state_and_kept_beyond_the_share() {
+    use crate::model::Level;
+    let mut request = scene("R6_RAMAN_CO");
+    let (g, w) = (1, 5);
+    let light = Light::new(&request);
+    let (fa, fb) = (frequency_of(&request, &light, "ramanA"), frequency_of(&request, &light, "ramanB"));
+    let (beam_a, beam_b) = (&request.beams[light.frequencies[fa].beams[0]], &request.beams[light.frequencies[fb].beams[0]]);
+    let e = (GROUND..STATES).max_by(|&x, &y| (beam_a.coupling[(x, g)] * beam_b.coupling[(x, w)]).abs().total_cmp(&(beam_a.coupling[(y, g)] * beam_b.coupling[(y, w)]).abs())).unwrap();
+    let kept = vec![Unit::Drive { component: Component { frequency: fa, counter: false }, excited: e, ground: g }];
+    let link = (Component { frequency: fb, counter: false }, e, w);
+    let unit = Unit::Bare { component: link.0, excited: e, ground: w };
+    let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let centre = |light: &Light, model: &Model| {
+        let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
+        let r = model.trap(&p, &model.prepared()).unwrap().centre;
+        let amplitudes = light.amplitudes(r);
+        (r, amplitudes.clone(), model.levels_at(&amplitudes))
+    };
+    // The fold's coupling at the beams' amplitudes there.
+    let coupling = |model: &Model, light: &Light, amplitudes: &[crate::field::Amplitude]| {
+        let (f, tone) = (&light.frequencies[link.0.frequency], &model.tones[link.0.frequency]);
+        f.beams.iter().zip(&tone.couplings[0]).map(|(&l, x)| amplitudes[l].value * x[(e, w)]).sum::<C64>().abs()
+    };
+    // |2,0⟩ moved so that |d| = 4a at the centre (the pair's own light shifts, a few rad/µs, ride on d as it is read).
+    let model = Model::new(&request, &light, &kept).unwrap();
+    let (_, amplitudes, levels) = centre(&light, &model);
+    let a = coupling(&model, &light, &amplitudes);
+    let d = {
+        let c = model.clusters().iter().find(|c| c.states.contains(&e)).unwrap();
+        let place = c.states.iter().position(|&s| s == e).unwrap();
+        model.read(c, place, &levels, true) - levels[w] - model.tones[link.0.frequency].nu[0]
+    };
+    // E_w less `off` moves d by +off, to 4a on its side.
+    let off = 4.0 * a * if d >= 0.0 { 1.0 } else { -1.0 } - d;
+    request.hamiltonian[(w, w)] -= C64::real(off);
+    let light = Light::new(&request);
+    let model = Model::new(&request, &light, &kept).unwrap();
+    assert!(model.bare_links().contains(&link), "the B leg's bare fold exists (2a/|d| < 1, every beam at its peak)");
+    let (r, amplitudes, levels) = centre(&light, &model);
+    let mixing = model.bare_mixing(link, &amplitudes, &levels);
+    eprintln!("R6_RAMAN_CO: a {a:.4e} rad/µs, d {d:.4e} moved by {off:.4e}: the mixing {mixing:.4}");
+    assert!(mixing > 0.15 && mixing < 0.5, "the mixing {mixing} within 0.15 < a/d < 0.5");
+    // The levels against the run's generator: its static diagonal at rest, with each state's frame.
+    let at = Point { r, kappa: [0.0; 3], t: 0.0 };
+    let level = |s: usize| {
+        let cluster = model.clusters().iter().position(|c| c.states.contains(&s)).unwrap();
+        let c = &model.clusters()[cluster];
+        let place = c.states.iter().position(|&x| x == s).unwrap();
+        let h = total(&model, cluster, &at, &model.running());
+        h[(place, place)].re + model.omega(&c.frames[place])
+    };
+    let cluster = model.cluster_of(g);
+    let c = &model.clusters()[cluster];
+    assert!(c.states.contains(&e) && !c.states.contains(&w), "e explicit with |1,0⟩, |2,0⟩ apart: {:?}", c.states);
+    for &s in c.states[..c.ground].iter().chain([&w]) {
+        assert!((levels[s] - level(s)).abs() <= 1e-9 * level(s).abs().max(1.0), "state {s}: level {} against the generator's {}", levels[s], level(s));
+    }
+    // The fold's mixing from its definition on the generator's levels.
+    let a = coupling(&model, &light, &amplitudes);
+    let place = c.states.iter().position(|&s| s == e).unwrap();
+    let z = model.omega(&c.frames[place]) + (0..c.ground).map(|p| level(c.states[p]) - model.omega(&c.frames[p])).sum::<f64>() / c.ground as f64;
+    let analytic = a / (z - level(w) - model.tones[link.0.frequency].nu[0]).abs();
+    assert!((mixing - analytic).abs() <= 1e-9 * analytic, "the mixing {mixing} against a/|d| {analytic}");
+    // The readings at a state of e's cluster: 2(a/d)² of e's population (|2,0⟩ is no state of this cluster).
+    let psi: Vec<C64> = c.states.iter().map(|&s| if s == g { C64::real(0.8) } else if s == e { C64::new(0.0, 0.6) } else { C64::ZERO }).collect();
+    let pe = 0.36 / psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
+    let sample = Sample { cluster, at, psi };
+    let units = model.candidates();
+    let (errors, _) = model.readings(&units, &sample, None);
+    let booked = errors[units.iter().position(|u| *u == unit).expect("the bare fold is a candidate")];
+    let expected = 2.0 * analytic * analytic * pe;
+    eprintln!("R6_RAMAN_CO: booked {booked:?} against 2(a/d)² p_e = {expected:.6e}");
+    assert!((booked.population - expected).abs() <= 1e-9 * expected && booked.temperature == booked.population, "booked {booked:?} against {expected}");
+    // Beyond the share at the centre: the prior keeps it, and kept the drive is folded at the atom.
+    assert!(2.0 * mixing * mixing > super::elim::share());
+    let prior = model.prior(&[(r, [0.0; 3])]);
+    assert!(prior.contains(&unit), "the prior keeps the bare fold beyond the share: {prior:?}");
+    let lifted = Model::new(&request, &light, &[kept, vec![unit]].concat()).unwrap();
+    assert!(lifted.level(link.0, e, w) == Level::Atom, "kept, the drive is folded at the atom");
+}

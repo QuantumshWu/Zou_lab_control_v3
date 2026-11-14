@@ -6,15 +6,16 @@
 //! the atom, each a channel (far.rs, eliminate.rs) --, its channel's excited frequency θ_b + ν (frames). Two channels at
 //! one frequency are co-resonant; the others beat and average out (criterion two). Co-resonance is an equivalence of the
 //! places (channel p, ground place b) -- one excited frequency θ_b + ν_p a class --: a class's response is
-//! C_k = Σ_{(p, b) ∈ k} R_p[:, b] e_bᵀ, its excited amplitude A_k = C_k x, and the slow state's norm x†(1 + Y)x with
-//! Y = Σ_k C_k†C_k on the ground places.
+//! C_k = Σ_{(p, b) ∈ k} R_p[:, b] e_bᵀ and its excited amplitude A_k = C_k x.
 //!
-//! The state the dynamics carries is the normalized ψ = S x (assemble.rs, # The normalized generator; ELIMINATION v7):
-//! the ground places' amplitudes are x = S⁻¹ψ, S⁻¹ = (1 + Y)^{−1/2} by its series to the model's normalization order J
-//! (elim.rs `Series`) -- Y here every co-resonant channel's, the far light's bare ones with the near light's --, an
-//! explicit state's its own. The populations are x's |x_b|², the excited states' Σ_k |A_k[i]|² and the explicit states',
-//! over their sum (‖ψ‖² to the series' remainder): what is read is the slow state itself, exact to the order the run's
-//! normalization takes, no first-order metric left out.
+//! The state the dynamics carries is the normalized ψ = S x (assemble.rs, # The normalized generator; ELIMINATION v7),
+//! and the readout inverts the generator's own S: x = S⁻¹ψ, S⁻¹ = Σ_{j≤J} b_j X^j of the slow state's one metric X --
+//! the near light's static pair forms at the point, the same matrix a node's is (assemble.rs `Model::bent_at`), whose
+//! largest eigenvalue is the series' ratio (elim.rs `Fold::evaluated_share`, `Series`) -- to the model's normalization
+//! order J; an explicit state's amplitude its own. (It read before a metric of its own, Y = Σ_k C_k†C_k of every
+//! channel with its Doppler partner: a second definition of the metric, which does not invert the generator's S.) The
+//! populations are x's |x_b|², the excited states' Σ_k |A_k[i]|² over every channel and the explicit states', over their
+//! sum: what is read is the slow state itself in the coordinates the dynamics holds.
 
 use super::assemble::{Held, Plan, Site};
 use super::far::EXCITED;
@@ -68,7 +69,7 @@ impl Model {
         let g = c.ground;
         let mut site = Held::<Site>::take();
         let count = self.channels_at(plan, table, at, &mut site);
-        let Site { channels, excited, .. } = &mut *site;
+        let Site { channels, excited, beams, normal, .. } = &mut *site;
         let size = EXCITED * g;
         // The co-resonant channels and places (p, b1) and (q, b2), θ_b1 + ν_p = θ_b2 + ν_q, and with them a place's class:
         // the first of the places co-resonant with it (itself among them). The cluster's own under the running lights,
@@ -90,12 +91,12 @@ impl Model {
             first
         });
         // Each class's response C_k = Σ_{(p, b) ∈ k} R_p[:, b] e_bᵀ (EXCITED × the ground places, at the class's first
-        // place): its excited amplitude A_k = C_k x, and the slow state's metric on its ground places Y = Σ_k C_k†C_k.
+        // place): its excited amplitude A_k = C_k x.
+        let n = psi.len();
         excited.clear();
-        excited.resize(places * size + 3 * g * g, C64::ZERO);
+        excited.resize(places * size + 3 * n * n, C64::ZERO);
         let (classes, rest) = excited.split_at_mut(places * size);
-        let (metric, rest) = rest.split_at_mut(g * g);
-        let (bent, scratch) = rest.split_at_mut(g * g);
+        let (bent, scratch) = rest.split_at_mut(n * n);
         for (p, response) in channels.chunks_exact(size).enumerate() {
             for b in 0..g {
                 let class = &mut classes[first[p * g + b] * size..][..size];
@@ -105,24 +106,20 @@ impl Model {
             }
         }
         let held: Vec<usize> = (0..places).filter(|&k| first[k] == k).collect();
-        for &k in &held {
-            let class = &classes[k * size..(k + 1) * size];
-            for x in 0..g {
-                for y in 0..g {
-                    metric[x * g + y] += (0..EXCITED).map(|i| class[i * g + x].conj() * class[i * g + y]).sum::<C64>();
-                }
+        // The slow state of the normalized coordinates ψ = S x (assemble.rs, # The normalized generator): x = S⁻¹ψ with
+        // the generator's own S⁻¹ = Σ_{j≤J} b_j X^j of the one metric X at the point (`Model::bent_at`; its series'
+        // ratio, X's largest eigenvalue, read by elim.rs `Series`), the identity where it bends nothing; every population
+        // of it -- the ground places' |x_b|², the excited states' Σ_k |A_k|² over every channel, the explicit states' --
+        // over their sum: the slow state's norm to the series' remainder, and the bare drives' excited populations, whose
+        // folds are constants the generator's metric does not hold.
+        let mut x = [C64::ZERO; STATES];
+        x[..n].copy_from_slice(psi);
+        if let Some(fourth) = plan.fourth.as_ref().filter(|fourth| fourth.bends()) {
+            self.bent_at(plan, fourth, beams, normal, scratch, bent);
+            for (b, z) in x.iter_mut().enumerate().take(n) {
+                *z = (0..n).map(|y| bent[b * n + y] * psi[y]).sum();
             }
         }
-        // The slow state of the normalized coordinates ψ = S x (assemble.rs, # The normalized generator): its ground
-        // places' x = S⁻¹ψ, S⁻¹ = Σ_{j≤J} b_j Y^j at the model's normalization order (elim.rs `Series`), its explicit
-        // states their own; every population of it -- the ground places' |x_b|², the excited states' Σ_k |A_k|², the
-        // explicit states' -- over their sum, x†(1 + Y)x = ‖ψ‖² to the series' remainder.
-        super::assemble::powers(-0.5, self.series.normalization, metric, scratch, bent, g);
-        let mut x = [C64::ZERO; STATES];
-        for b in 0..g {
-            x[b] = (0..g).map(|y| bent[b * g + y] * psi[y]).sum();
-        }
-        x[g..psi.len()].copy_from_slice(&psi[g..]);
         let mut out = [0.0; STATES];
         for (z, &s) in x.iter().zip(&c.states).take(psi.len()) {
             out[s] = z.norm_sqr();
@@ -155,6 +152,11 @@ impl Model {
             }
             _ => (folded > 0).then(|| self.near_exact(plan, &site.beams, 0)),
         };
+        // The slow state's one metric's forms, their values, where the generator's S bends anything: the readout
+        // inverts the generator's own S (`Model::bent_at`).
+        if plan.fourth.as_ref().is_some_and(|fourth| fourth.bends()) {
+            self.normal_read(plan, if exact.is_none() { table } else { None }, exact.as_ref(), site, false);
+        }
         let Site { beams: amplitudes, responses, weights, channels, .. } = site;
         let (far, size) = (self.bare_components(&plan.lights).count(), EXCITED * c.ground);
         channels.clear();

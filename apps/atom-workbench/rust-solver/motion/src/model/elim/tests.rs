@@ -574,7 +574,7 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         let far = (0..n).map(|i| fold.direct[(i, i)].re).sum::<f64>() / n as f64;
         let z0 = fold.eigen.values.iter().map(|z| z.re).sum::<f64>() / n as f64;
         let q = fold.series_ratio(C64::real(z0));
-        let x_size = fold.excited_share();
+        let x_size = fold.evaluated_share(C64::real(z0)).0;
         assert!(q < 1.0 && x_size < 1.0, "{name}: the series converge here");
         // The proven bounds (this test's; the run books what it measures).
         let remainder = |k: usize| {
