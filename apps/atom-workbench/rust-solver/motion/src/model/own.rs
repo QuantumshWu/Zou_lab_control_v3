@@ -30,7 +30,7 @@ pub(crate) struct Own {
 /// drive's distance fell to Γ/2 and a counter-rotating drive's share across 4.8e9 rad/µs read 1.33 (a random scene of R4_LIN_2's
 /// atom, the model's forms none on one excited state -- a degenerate Raman pair, now joined: units.rs
 /// `every_model_s_forms_are_numbers_whatever_it_keeps`). One principle for every bound and form: a number that is none
-/// stays none, and a statement read of it fails (units.rs `Gate::exists`: a gate that is none is not below ½).
+/// stays none, and a statement read of it fails (a bound that is none is below nothing).
 pub(crate) fn most(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) }
 }
@@ -46,12 +46,6 @@ fn times(x: f64, y: f64) -> f64 {
     } else {
         x * y
     }
-}
-
-/// The range of a product of two ranges.
-fn ends(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
-    let ends = [times(a[0], b[0]), times(a[0], b[1]), times(a[1], b[0]), times(a[1], b[1])];
-    [ends.iter().copied().fold(f64::INFINITY, least), ends.iter().copied().fold(f64::NEG_INFINITY, most)]
 }
 
 impl Own {
@@ -79,11 +73,6 @@ impl Own {
         Own::made(value, std::array::from_fn(|a| times(gradient[a], half[a])), rest, f64::NEG_INFINITY, f64::INFINITY)
     }
 
-    /// A constant.
-    pub(crate) fn constant(value: f64) -> Own {
-        Own { value, first: [0.0; 3], rest: 0.0, lo: value, hi: value }
-    }
-
     /// A quantity known only to lie in [lo, hi] over the cell, its value at the centre `at`: no first order.
     pub(crate) fn range(at: f64, lo: f64, hi: f64) -> Own {
         if at.is_nan() || lo.is_nan() || hi.is_nan() {
@@ -92,16 +81,6 @@ impl Own {
         // An infinite value's remainder is infinite (∞ − ∞ is no remainder).
         let rest = if at.is_infinite() { f64::INFINITY } else { most(most(hi - at, at - lo), 0.0) };
         Own { value: at, first: [0.0; 3], rest, lo, hi }
-    }
-
-    /// Σ_a h_a |∂_a f(c)|, its first-order width.
-    pub(crate) fn lean(&self) -> f64 {
-        self.first.iter().map(|x| x.abs()).sum()
-    }
-
-    /// How far its own form lies from its centre value over the cell, at most.
-    pub(crate) fn width(&self) -> f64 {
-        self.lean() + self.rest
     }
 
     pub(crate) fn upper(&self) -> f64 {
@@ -132,57 +111,6 @@ impl Own {
             return Own::NONE;
         }
         Own { value: self.value + c, lo: self.lo + c, hi: self.hi + c, ..self }
-    }
-
-    pub(crate) fn scale(self, c: f64) -> Own {
-        if self.is_none() || c.is_nan() {
-            return Own::NONE;
-        }
-        let ends = [times(self.lo, c), times(self.hi, c)];
-        Own { value: times(self.value, c), first: self.first.map(|x| times(x, c)), rest: times(self.rest, c.abs()), lo: least(ends[0], ends[1]), hi: most(ends[0], ends[1]) }
-    }
-
-    /// a b: (a + δa)(b + δb) − ab − (a∇b + b∇a)·d = a R_b + b R_a + δa δb, |δ| at most the width; its range the product's.
-    pub(crate) fn mul(self, o: Own) -> Own {
-        if self.is_none() || o.is_none() {
-            return Own::NONE;
-        }
-        let [lo, hi] = ends([self.lo, self.hi], [o.lo, o.hi]);
-        let first = std::array::from_fn(|a| times(self.value, o.first[a]) + times(o.value, self.first[a]));
-        Own::made(self.value * o.value, first, times(self.value.abs(), o.rest) + times(o.value.abs(), self.rest) + times(self.width(), o.width()), lo, hi)
-    }
-
-    pub(crate) fn square(self) -> Own {
-        if self.is_none() {
-            return Own::NONE;
-        }
-        let (l, h) = (self.lo, self.hi);
-        let (lo, hi) = if l >= 0.0 { (l * l, h * h) } else if h <= 0.0 { (h * h, l * l) } else { (0.0, (l * l).max(h * h)) };
-        let w = self.width();
-        Own::made(self.value * self.value, self.first.map(|x| 2.0 * times(self.value, x)), 2.0 * times(self.value.abs(), self.rest) + w * w, lo, hi)
-    }
-
-    /// 1/a, where a's range holds no zero: 1/(a + δ) = 1/a − δ/a² + δ²/(a²(a + δ)), so the remainder is at most R_a/a² +
-    /// W_a²/(a² m), m = min |a| over the cell; its range [1/max, 1/min]. Where its range holds zero, everything beyond the
-    /// nearer end: at least 1/max for a quantity that is not negative.
-    pub(crate) fn recip(self) -> Own {
-        if self.is_none() {
-            return Own::NONE;
-        }
-        let (lo, hi, a) = (self.lo, self.hi, self.value);
-        if lo > 0.0 || hi < 0.0 {
-            let m = lo.abs().min(hi.abs());
-            let w = self.width();
-            let rest = self.rest / (a * a) + times(w * w, 1.0 / (a * a * m));
-            Own::made(1.0 / a, self.first.map(|x| -x / (a * a)), rest, 1.0 / hi, 1.0 / lo)
-        } else {
-            let value = if a != 0.0 { 1.0 / a } else { f64::INFINITY };
-            Own::range(value, if lo >= 0.0 { 1.0 / hi } else { f64::NEG_INFINITY }, f64::INFINITY)
-        }
-    }
-
-    pub(crate) fn div(self, o: Own) -> Own {
-        self.mul(o.recip())
     }
 
 }

@@ -303,18 +303,6 @@ pub(crate) enum Level {
     Explicit,
 }
 
-/// A unit's existence gate over the reach (SPEC §1.5): provable upper bounds over the reach in phase space. The fold exists only
-/// where both are below ½ (`Gate::exists`); else the unit is kept. Every fold has both, by one statement (units.rs `gate`); a
-/// dressing (`Unit::Dressing`), which folds nothing, has neither.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Gate {
-    /// The static Stewart bound: the coherent peak's upper bound of S = 2m² (a drive's: of its ground state's folded drives
-    /// that are not larger than it, units.rs # The tail rule).
-    pub saturation: f64,
-    /// The motional bound: the upper bound of a = |dΔE/dt|/|ΔE|², the sweep v·∇ΔE + q·v̇ of the fold's levels and wave vector.
-    pub sweep: f64,
-}
-
 /// A folded unit's errors on the outputs at one trajectory state (SPEC §1.5 → §5.2): the part its keep would take away of
 /// the model's error measured there (elim.rs `Model::readings`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -675,12 +663,26 @@ impl Model {
         model.tones = model.tones.iter().enumerate().map(|(frequency, tone)| tone.folded(&|side, e, g| levels[2 * frequency + side][(e - GROUND) * GROUND + g], &read)).collect();
         model.carriers = eliminate::Carrier::all(&model);
         model.spread = model.spread_made();
-        // The model's domain: a counter-rotating drive is only ever folded with the bare levels, so that fold must exist --
-        // the one gate (units.rs `gate`), every beam at its peak, a ground state's drives together.
+        // The model's domain: a counter-rotating drive is only ever folded with the bare levels, so that fold must exist
+        // wherever the light is. Of a ground state g against the excited states its counter-rotating drives reach, the
+        // invariant subspace exists and the second order converges where m = ‖W‖/sep < ½ (Stewart; ELIMINATION §3), W
+        // the couplings and sep the distance: per drive e ← g its coupling at most Σ_l |W_l[e, g]| (every beam at its
+        // peak, |a_l| ≤ 1, and in phase) across its bare denominator |E_e − E_g − ν − iΓ_e/2| (ν ≈ −2ω: no light shift
+        // moves it), m_e the ratio, and g's drives together S = Σ_e 2 m_e² < 2 (½)² = ½.
         for g in 0..GROUND {
-            let saturation: f64 = model.driven.iter().filter(|d| d.0.counter && d.2 == g).map(|&(c, e, _)| model.share_anywhere(c, e, g)).sum();
-            if !(saturation < units::EXISTS) {
-                return Err(format!("反旋转项不能绝热消去：同一个基态的各个反旋转项驱动的饱和参数之和 S = {:.2}（各束光取峰值强度、同相叠加）不小于 {}，光强超出模型的适用范围", saturation, units::EXISTS));
+            let s: f64 = model
+                .driven
+                .iter()
+                .filter(|d| d.0.counter && d.2 == g)
+                .map(|&(c, e, _)| {
+                    let tone = &model.tones[c.frequency];
+                    let size: f64 = tone.couplings[1].iter().map(|x| x[(e, g)].abs()).sum();
+                    let distance = C64::new(model.energies[e] - model.energies[g] - tone.nu[1], 0.5 * model.decay[(e - GROUND, e - GROUND)].re).abs();
+                    2.0 * (size / distance).powi(2)
+                })
+                .sum();
+            if !(s < 0.5) {
+                return Err(format!("反旋转项不能绝热消去：同一个基态的各个反旋转项驱动的饱和参数之和 S = {:.2}（各束光取峰值强度、同相叠加）不小于 0.5，光强超出模型的适用范围", s));
             }
         }
         model.mixing = (0..model.clusters.len()).map(|c| model.mix(c)).collect();

@@ -1,71 +1,15 @@
 //! What a model's clusters and terms are made of beside the elimination (elim.rs): its beats and its frequencies'
 //! constant forms (far.rs `constant`), the kept couplings' edges (cluster.rs), whether a coupling is in a generator as it
-//! is; and the one gate's statement (`gate`: S = 2m², m = size/distance, below ½) that `Model::new` still reads of the
-//! model's domain.
-//!
-//! # The model's domain
-//! A counter-rotating drive is only ever folded with the bare levels: one kept is refused, and so is a request whose
-//! counter-rotating folds do not exist by the one gate, every beam at its peak (`Model::new`). A co-rotating leg against a
-//! counter-rotating one is no term of the model (far.rs, # Two frequencies' constant form).
+//! is. A counter-rotating drive is only ever folded with the bare levels (model.rs `Model::new`: a keep of one is refused,
+//! and so is a request where that fold does not exist, the model's domain); a co-rotating leg against a counter-rotating
+//! one is no term of the model (far.rs, # Two frequencies' constant form).
 
 use super::cluster::Edge;
-use super::own::Own;
-use super::{Beat, Component, Gate, Model, Unit, Wave};
-use crate::linalg::{Mat, C64};
+use super::{Beat, Component, Model, Unit, Wave};
+use crate::linalg::Mat;
 use crate::request::GROUND;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-/// Where a fold exists (module documentation): S = 2m² < ½ and a < ½.
-pub(crate) const EXISTS: f64 = 0.5;
-
-impl Gate {
-    /// Whether the fold exists where the gate was read: both values below ½.
-    pub fn exists(&self) -> bool {
-        self.saturation < EXISTS && self.sweep < EXISTS
-    }
-
-}
-
-/// The one gate (module documentation, # One rule) at a point (`gate_own`).
-pub(crate) fn gate(size: f64, distance: f64, rate: f64) -> Gate {
-    let at = |x: f64| Own::constant(x);
-    gate_own(at(size), at(distance), at(rate)).upper()
-}
-
-/// A gate's two statements over a region, each in its own form (own.rs).
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct OwnGate {
-    pub(crate) saturation: Own,
-    pub(crate) sweep: Own,
-}
-
-impl OwnGate {
-
-    /// Its bounds over the region.
-    pub(crate) fn upper(&self) -> Gate {
-        Gate { saturation: self.saturation.upper(), sweep: self.sweep.upper() }
-    }
-
-}
-
-/// The one gate (module documentation, # One rule) over a region, in own forms: of a fold of a coupling of size `size` across
-/// a distance `distance` that moves at `rate`, S = 2m², m = size/distance, and a = rate/distance² -- nothing where there is
-/// nothing to fold or nothing moves, infinite where the distance's range reaches nothing (the value where the centre's
-/// distance is above it).
-pub(crate) fn gate_own(size: Own, distance: Own, rate: Own) -> OwnGate {
-    let over = |x: Own, d: Own| -> Own {
-        if x.upper() == 0.0 {
-            Own::constant(0.0)
-        } else if d.lower() > 0.0 {
-            x.div(d).within(0.0, f64::INFINITY)
-        } else {
-            Own::range(if d.value > 0.0 { x.value / d.value } else { f64::INFINITY }, 0.0, f64::INFINITY)
-        }
-    };
-    let m = over(size, distance);
-    OwnGate { saturation: m.square().scale(2.0), sweep: over(rate, distance.square()) }
-}
 
 /// Two frequencies' constant form (far.rs `constant`) on their fields' bases.
 pub(crate) struct Cross {
@@ -82,19 +26,6 @@ impl Model {
         let constant: f64 = self.tones.iter().map(|t| t.pairs.iter().map(|m| m.frobenius()).sum::<f64>()).sum();
         let carriers: f64 = self.carriers.iter().map(|c| self.tones[c.frequency].couplings[0].iter().map(|m| m.frobenius()).sum::<f64>()).sum();
         constant + carriers
-    }
-
-    /// A drive's denominator with the bare levels, its modulus |E_e − E_g − ν − iΓ_e/2| (rad/µs).
-    pub(crate) fn bare_distance(&self, c: Component, excited: usize, ground: usize) -> f64 {
-        let detuning = self.energies[excited] - self.energies[ground] - self.tones[c.frequency].nu[c.counter as usize];
-        C64::new(detuning, 0.5 * self.decay[(excited - GROUND, excited - GROUND)].re).abs()
-    }
-
-    /// A drive's share anywhere: the one gate's S with every beam at its peak and in phase, |a_l| ≤ 1, across its bare
-    /// distance.
-    pub(crate) fn share_anywhere(&self, c: Component, excited: usize, ground: usize) -> f64 {
-        let size: f64 = self.tones[c.frequency].couplings[c.counter as usize].iter().map(|x| x[(excited, ground)].abs()).sum();
-        gate(size, self.bare_distance(c, excited, ground), 0.0).saturation
     }
 
     /// The model's beats: the distinct δ_ω − δ_ω' of its frequencies, each with its pairs (ω, ω') -- the first is zero,
