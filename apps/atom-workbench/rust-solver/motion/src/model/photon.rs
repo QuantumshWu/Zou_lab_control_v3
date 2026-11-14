@@ -564,9 +564,7 @@ impl Model {
 
     /// The wave number |k_φ| (1/µm) of the photons of a cluster's class (module documentation, # A class's photon).
     pub(crate) fn class_wave_number(&self, cluster: usize, class: &Class) -> f64 {
-        let mut frame = self.axes.zero();
-        *frame.0.last_mut().expect("the frame's coordinate") = 1;
-        let omega = self.omega(&frame.plus(-1, &class.beats[0])) + self.energies[self.clusters[cluster].states[0]] - self.energies[self.clusters[class.landing].states[0]];
+        let omega = self.omega(&self.axes.frame().plus(-1, &class.beats[0])) + self.energies[self.clusters[cluster].states[0]] - self.energies[self.clusters[class.landing].states[0]];
         wave_number((omega / RAD_PER_US_PER_MHZ).abs())
     }
 

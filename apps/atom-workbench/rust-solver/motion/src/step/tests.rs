@@ -225,9 +225,9 @@ impl Atom {
         let cluster = Cluster {
             states: if explicit { vec![0, 8] } else { vec![0] },
             ground: 1,
-            frames: if explicit { vec![Beat(vec![0]), Beat(vec![1])] } else { vec![Beat(vec![0])] },
+            frames: if explicit { vec![Beat::whole(vec![0]), Beat::whole(vec![1])] } else { vec![Beat::whole(vec![0])] },
             waves: if explicit { vec![[0.0; 3], beams[0].k] } else { vec![[0.0; 3]] },
-            waves_exact: if explicit { vec![Beat(vec![]), Beat(vec![1])] } else { vec![Beat(vec![])] },
+            waves_exact: if explicit { vec![Beat::whole(vec![]), Beat::whole(vec![1])] } else { vec![Beat::whole(vec![])] },
         };
         Atom { hm, trap, beams, detuning, gamma, emission: 0.0, region: f64::INFINITY, folded: vec![], optical: false, cluster }
     }
@@ -1635,7 +1635,7 @@ struct Wells {
 
 impl Wells {
     fn new(hm: f64, reference: [f64; 3], own: [[f64; 3]; 2]) -> Wells {
-        let cluster = Cluster { states: vec![0, 1], ground: 2, frames: vec![Beat(vec![0]); 2], waves: vec![[0.0; 3]; 2], waves_exact: vec![Beat(vec![]); 2] };
+        let cluster = Cluster { states: vec![0, 1], ground: 2, frames: vec![Beat::whole(vec![0]); 2], waves: vec![[0.0; 3]; 2], waves_exact: vec![Beat::whole(vec![]); 2] };
         Wells { hm, reference, own, cluster }
     }
     /// (r, κ) and the states' relative phase arg(ψ₁ψ₀*) at the time t from (r, κ) at t = 0 with the populations p.
@@ -2191,9 +2191,9 @@ impl Synthetic {
         let cluster = Cluster {
             states: (0..n).collect(),
             ground: n,
-            frames: vec![Beat(vec![0]); n],
+            frames: vec![Beat::whole(vec![0]); n],
             waves: (0..n).map(|x| frame.map(|k| (x as f64 - 0.5 * (n - 1) as f64) * k)).collect(),
-            waves_exact: vec![Beat(vec![]); n],
+            waves_exact: vec![Beat::whole(vec![]); n],
         };
         Synthetic { hm: RB, trap: Trap::Gaussian { depth, waists: [1.0, 1.0, 3.0] }, cluster, still, decay, beats }
     }
@@ -3550,7 +3550,7 @@ impl Lindblad {
         };
         let beats = (0..beats).map(|_| (wave(s), Mat::from_fn(n, n, |_, _| drawn(s, size)))).collect();
         let jumps = (0..waves).map(|_| (wave(s), Mat::from_fn(n, n, |_, _| drawn(s, size.sqrt())))).collect();
-        let cluster = Cluster { states: (0..n).collect(), ground: n, frames: vec![Beat(vec![0]); n], waves: vec![[0.0; 3]; n], waves_exact: vec![Beat(vec![]); n] };
+        let cluster = Cluster { states: (0..n).collect(), ground: n, frames: vec![Beat::whole(vec![0]); n], waves: vec![[0.0; 3]; n], waves_exact: vec![Beat::whole(vec![]); n] };
         Lindblad { cluster, still, beats, jumps }
     }
     /// J(r) = Σ_l J_l e^{iq_l·r}.

@@ -109,11 +109,17 @@ impl Axes {
     }
     /// The zero beat.
     pub(crate) fn zero(&self) -> Beat {
-        Beat(vec![0; self.0.len()])
+        Beat::whole(vec![0; self.0.len()])
     }
-    /// A beat's value (rad/µs): 2π Σ_k n_k f_k, from its integer coordinates alone (never a difference of two values).
+    /// ν_frame, the excited states' frame frequency: the last axis.
+    pub(crate) fn frame(&self) -> Beat {
+        let mut n = vec![0; self.0.len()];
+        n[self.0.len() - 1] = 1;
+        Beat::whole(n)
+    }
+    /// A beat's value (rad/µs): 2π Σ_k n_k f_k / d, from its integer numerators alone (never a difference of two values).
     pub(crate) fn omega(&self, beat: &Beat) -> f64 {
-        RAD_PER_US_PER_MHZ * beat.0.iter().zip(&self.0).map(|(&n, &f)| n as f64 * f).sum::<f64>()
+        RAD_PER_US_PER_MHZ * beat.value(&self.0)
     }
     /// A component's frequency ν exactly: the co-rotating δ_ω (the frequency's index), the counter-rotating −(δ_ω + 2ν_frame).
     pub(crate) fn component(&self, light: &Light, c: Component) -> Beat {
@@ -124,20 +130,7 @@ impl Axes {
             n[last] = 2;
             n.iter_mut().for_each(|x| *x = -*x);
         }
-        Beat(n)
-    }
-}
-
-impl Beat {
-    /// self + s·other.
-    pub(crate) fn plus(&self, s: i64, other: &Beat) -> Beat {
-        Beat(self.0.iter().zip(&other.0).map(|(&a, &b)| a + s * b).collect())
-    }
-    pub(crate) fn negated(&self) -> Beat {
-        Beat(self.0.iter().map(|&a| -a).collect())
-    }
-    pub(crate) fn is_zero(&self) -> bool {
-        self.0.iter().all(|&a| a == 0)
+        Beat::whole(n)
     }
 }
 
