@@ -113,11 +113,15 @@
 //!   δ = Ω + λ_p − λ_p' mixes a/|δ| (criterion two, v5: its error averaged is 2(a/δ)² -- the population's time mean after the light
 //!   is switched on, 4(a/δ)² sin²(δt/2) --, explicit where that is above the share, else averaged into its static shift
 //!   |a|²/δ).
-//! - The photons' cross terms: the jumps C_a T_f of two replicas land in the same ground states at two photon
-//!   frequencies; their interference turns at the difference, and of a rate γ it moves the populations by γ/Ω (the
-//!   secular approximation, first order: kept above the share). Read where the photons are the run's own -- its photon
-//!   classes, which land in every cluster (`Model::readings`) --, not in the prior's closure: no keep the prior makes
-//!   reads them.
+//! - The photons' cross terms (criterion three, `cross_terms`): two classes of photons land in one cluster at two
+//!   frequencies, and a split into classes drops J_a ρ J_b†. After a jump at t_j its part |r_q⟩⟨r_q′| on the landing's
+//!   eigenstates, from the source eigenstates p and p′, turns in t_j at the combined frequency
+//!   ω_c = Ω − (λ_q − λ_q′*) + (λ_p − λ_p′*) -- Ω the two classes' frequencies' difference, ω_c the two photons' own,
+//!   the same in every gauge --, and of its size M it moves the rates by M/|ω_c| (the secular approximation, first order:
+//!   kept above the share). Ω alone is the photons' difference only where the frames join the states: two ground states
+//!   the frames do not join, their Raman resonance at ω_c → 0 however far apart Ω puts their classes (PGC1D_TILT_2's
+//!   prior atoms: |Ω| 26.4 rad/µs, |ω_c| down to 0.11). Read at the start on the closure's fold (`start_cross_terms`,
+//!   `Model::prior`) and at the run's states on its photon classes (`Model::readings`), by one function.
 use crate::linalg::{schur, Eigen, Mat, C64};
 use crate::units::rounding;
 
@@ -1670,19 +1674,27 @@ impl super::Model {
     /// frames and what the far levels leave out of the excited block -- the carriers' own static forms there, bilinear
     /// in the near field (eliminate.rs `level_pair`): δK on E.
     pub(crate) fn cluster_fold(&self, cluster: usize, amplitudes: &[crate::field::Amplitude], about: bool) -> Option<(Fold, Levels, f64, Mat)> {
-        self.cluster_fold_with(cluster, amplitudes, about, false)
+        self.cluster_fold_with(cluster, amplitudes, about, false, false)
+    }
+
+    /// A cluster's spectrum at a point, as the run's series stands for it (criterion three, `cross_terms`): its fold
+    /// about the reference (`cluster_fold`), also where no carrier couples it there -- then its own levels and its
+    /// explicit states' couplings alone.
+    pub(crate) fn cluster_spectrum(&self, cluster: usize, amplitudes: &[crate::field::Amplitude]) -> Fold {
+        self.cluster_fold_with(cluster, amplitudes, true, false, true).expect("a cluster's fold").0
     }
 
     /// The definition at a point (ELIMINATION v6, v7): the cluster's self-consistent fold with its excited block whole --
     /// the far levels and the carriers' own static forms on it (δK, which the series' reference leaves out) --, and its
     /// levels: what every truncation of the evaluation is measured against (`Fold::evaluation_error`).
     pub(crate) fn definition_fold(&self, cluster: usize, amplitudes: &[crate::field::Amplitude]) -> Option<(Fold, Levels)> {
-        self.cluster_fold_with(cluster, amplitudes, false, true).map(|(fold, levels, _, _)| (fold, levels))
+        self.cluster_fold_with(cluster, amplitudes, false, true, false).map(|(fold, levels, _, _)| (fold, levels))
     }
 
     /// `cluster_fold`, about the reference or self-consistent, its excited block the far levels' or, `whole`, with the
-    /// carriers' own static forms on it; the fold, its levels, the far levels' mean and those forms.
-    fn cluster_fold_with(&self, cluster: usize, amplitudes: &[crate::field::Amplitude], about: bool, whole: bool) -> Option<(Fold, Levels, f64, Mat)> {
+    /// carriers' own static forms on it; the fold, its levels, the far levels' mean and those forms. None where no
+    /// carrier couples the cluster at the point, unless `any`.
+    fn cluster_fold_with(&self, cluster: usize, amplitudes: &[crate::field::Amplitude], about: bool, whole: bool, any: bool) -> Option<(Fold, Levels, f64, Mat)> {
         use crate::request::{GROUND, STATES};
         let running = self.running();
         let h = &self.far_hamiltonian(amplitudes, &running, 0)[0];
@@ -1703,7 +1715,7 @@ impl super::Model {
                 Class { nu: cc.detuning, beams: vec![Beam { coupling, wave: [0.0; 3] }] }
             })
             .collect();
-        if classes.iter().all(|class| class.beams[0].coupling.max_abs() == 0.0) {
+        if !any && classes.iter().all(|class| class.beams[0].coupling.max_abs() == 0.0) {
             return None;
         }
         // The carriers' static forms on the excited block.
@@ -1928,9 +1940,9 @@ impl super::Model {
     /// atom sees, 2 k_max v, and the components' combined frequencies over their distances from K's spectrum
     /// (`Fold::offsets`) --, each part on its
     /// object's unit: a block's on `Unit::Block`, a link's on the `Unit::Term` of its two states at its lab beat. The
-    /// photons' cross terms on the run's photon classes, which land in every cluster: of each pair landing in one, the
-    /// rate of their interference at the state γ = |Σ_a ⟨u_a|u′_a⟩| over the state's norm, against their beat Ω -- γ/|Ω|
-    /// (v3 1: the secular approximation's first order), on `Unit::Coherence`. A relative rate error x moves the
+    /// photons' cross terms on the run's photon classes, which land in every cluster (`cross_terms`: of each pair landing
+    /// in one, the dropped term's parts on the landing cluster's eigenstates and the state's, each over its combined
+    /// frequency; v3 1, the secular approximation's first order), on `Unit::Coherence`. A relative rate error x moves the
     /// populations by at most x (absolute) and T by x (relative). Each bare fold onto an explicit state of the cluster
     /// (`bare_links`) at the state's point, its next order there or its whole where it does not exist there (`bare_error`
     /// of `bare_mixing`), on the populations of its two states, on `Unit::Bare`. And beside the units, per transition to a level
@@ -2023,21 +2035,48 @@ impl super::Model {
                 None => {}
             }
         }
-        // The photons' cross terms.
-        let lights = self.running();
-        let plan = self.plan(sample.cluster, &lights);
-        let table = tables.and_then(|t| t.of(sample.cluster, &lights));
-        let (photons, _) = self.photons_of(&plan, table, &sample.at, &sample.psi, super::photon::Gradients::None);
+        // The photons' cross terms (criterion three, `cross_terms`): the run's photon classes of the cluster, each landing
+        // cluster's spectrum its fold's at the point, at the state's coefficients on the cluster's fold's eigenstates and
+        // each one's photons (linear in the state), on the classes' `Unit::Coherence`.
         let norm = crate::linalg::norm_sqr(&sample.psi);
-        for unit in units.iter().filter(|u| matches!(u, Unit::Coherence { .. })) {
-            let Unit::Coherence { first, second, .. } = unit else { continue };
-            for (cluster, i, j) in self.coherence_classes(unit) {
-                if cluster != sample.cluster {
-                    continue;
+        if norm > 0.0 && units.iter().any(|u| matches!(u, Unit::Coherence { .. })) {
+            let lights = self.running();
+            let plan = self.plan(sample.cluster, &lights);
+            let table = tables.and_then(|t| t.of(sample.cluster, &lights));
+            let source = self.cluster_spectrum(sample.cluster, &amplitudes);
+            let n = source.size();
+            let coefficients: Vec<C64> = (0..n).map(|p| (0..n).map(|i| source.eigen.inverse[(p, i)] * sample.psi[i]).sum()).collect();
+            let classes = &self.classes[sample.cluster];
+            let mut landed: Vec<usize> = vec![];
+            for class in classes {
+                if !landed.contains(&class.landing) {
+                    landed.push(class.landing);
                 }
-                let (Some(u), Some(v)) = (photons.iter().find(|p| p.class == i), photons.iter().find(|p| p.class == j)) else { continue };
-                let gamma = (0..3).map(|a| crate::linalg::inner(&u.amplitudes[a], &v.amplitudes[a])).sum::<C64>().abs() / norm;
-                book(unit, gamma / self.omega(&second.plus(-1, first)).abs(), &mut out);
+            }
+            let landings: Vec<Landing> = landed
+                .iter()
+                .map(|&l| {
+                    let fold = if l == sample.cluster { source.clone() } else { self.cluster_spectrum(l, &amplitudes) };
+                    Landing::of(&fold, &(0..fold.size()).collect::<Vec<_>>())
+                })
+                .collect();
+            let mut images: Vec<Images> = classes
+                .iter()
+                .map(|class| {
+                    let m = self.clusters[class.landing].states.len();
+                    Images { frequency: -self.omega(&class.beats[0]), landing: landed.iter().position(|&l| l == class.landing).expect("its landing"), images: vec![std::array::from_fn(|_| vec![C64::ZERO; m]); n] }
+                })
+                .collect();
+            for p in (0..n).filter(|&p| coefficients[p] != C64::ZERO) {
+                let (photons, _) = self.photons_of(&plan, table, &sample.at, &source.right(p), super::photon::Gradients::None);
+                for photon in photons {
+                    images[photon.class].images[p] = photon.amplitudes;
+                }
+            }
+            for (a, b, x) in cross_terms(&images, &landings, &source.eigen.values, &coefficients, norm) {
+                let (first, second) = (&classes[a].beats[0], &classes[b].beats[0]);
+                let (lo, hi) = if first < second { (first.clone(), second.clone()) } else { (second.clone(), first.clone()) };
+                book(&Unit::Coherence { landing: self.clusters[classes[a].landing].states[0], first: lo, second: hi }, x, &mut out);
             }
         }
         // The bare folds onto this cluster's explicit states (`bare_links`): each at the state's point, its error there
@@ -2086,18 +2125,27 @@ impl super::Model {
         let mut kept = Kept::default();
         let mut routes: Vec<f64> = vec![];
         let mut sources: Vec<(usize, bool)> = vec![];
+        // The photons' cross terms at the closure's fixed point (`start_cross_terms`): its last round's.
+        let mut coherent: Vec<[(Option<usize>, usize, usize); 2]> = vec![];
         loop {
-            let read: Vec<(Kept, Vec<f64>, Vec<(usize, bool)>)> = points
+            let read: Vec<(Kept, Vec<f64>, Vec<(usize, bool)>, Vec<[(Option<usize>, usize, usize); 2]>)> = points
                 .par_iter()
                 .map(|&(r, v)| {
                     let (levels, classes, sources) = system(&self.request, &self.light, r);
                     let closed = closure(&levels, &classes, &blocks, v, &kept);
                     let routes = bare_remainders(&closed.fold, classes.len(), bare);
-                    (closed.kept, routes, sources)
+                    let coherent = start_cross_terms(&closed.fold, &self.emission);
+                    (closed.kept, routes, sources, coherent)
                 })
                 .collect();
             let before = (kept.blocks.len(), kept.links.len());
-            for (k, r, s) in read {
+            coherent.clear();
+            for (k, r, s, c) in read {
+                for pair in c {
+                    if !coherent.contains(&pair) {
+                        coherent.push(pair);
+                    }
+                }
                 for b in k.blocks {
                     if !kept.blocks.contains(&b) {
                         kept.blocks.push(b);
@@ -2127,6 +2175,22 @@ impl super::Model {
             for &(comp, e, g) in self.driven.iter().filter(|d| d.0 == component(c)) {
                 units.push(super::Unit::Bare { component: comp, excited: e, ground: g });
             }
+        }
+        // A cross term's unit (`Unit::Coherence`): its two classes' exact beats in the model's frames -- the light's
+        // −ν (none of an explicit state's own decay) and the landing state's frame less the source's, as photon.rs makes a
+        // class's --, landing in one cluster.
+        let frame = |state: usize| self.clusters.iter().find_map(|c| c.states.iter().position(|&x| x == state).map(|i| c.frames[i].clone()));
+        let beat = |(class, from, to): (Option<usize>, usize, usize)| -> Option<super::Beat> {
+            let light = class.map_or(self.axes.zero(), |c| self.frequency(component(c)).negated());
+            Some(light.plus(1, &frame(to)?).plus(-1, &frame(from)?))
+        };
+        for [x, y] in &coherent {
+            let (Some(a), Some(b)) = (beat(*x), beat(*y)) else { continue };
+            if a == b || self.membership[x.2] != self.membership[y.2] {
+                continue;
+            }
+            let (first, second) = if a < b { (a, b) } else { (b, a) };
+            units.push(super::Unit::Coherence { landing: self.clusters[self.membership[x.2]].states[0], first, second });
         }
         for l in &kept.links {
             match l.classes {
@@ -2274,7 +2338,8 @@ fn slow_of(blocks: &[Vec<usize>], kept: &Kept, classes: &[Class], levels: &Level
 ///   explicit in one component is joined by another's drives only where that component's own part asks for it;
 /// 3. criterion two: every component of two replicas whose averaged error 2(a/δ)² is beyond the share (v5: the
 ///    population's time mean after a sudden switch-on) is kept (a link of its two dominant states and classes);
-/// until nothing more is kept. Each round only adds. (The photons' cross terms are the run's to read, `Model::readings`.)
+/// until nothing more is kept. Each round only adds. (The photons' cross terms keep no block or link: the prior reads them
+/// on the fold this ends with, `start_cross_terms`.)
 pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>], velocity: [f64; 3], start: &Kept) -> Closed {
     let ground = levels.ground.rows;
     let share = share();
@@ -2439,7 +2504,7 @@ fn components(n: usize, joined: impl Iterator<Item = (usize, usize)>) -> Vec<usi
 }
 
 /// What a model keeps or folds at a point, the keep rule's objects (ELIMINATION.md §6): an excited block, a P-layer link.
-/// (The photons' cross terms are read on the run's photon classes, `Model::readings`.)
+/// (The photons' cross terms are read apart, by `cross_terms`.)
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Object {
     /// An excited block for one class of the light (None: the explicit states' own couplings into it).
@@ -2519,8 +2584,8 @@ pub(crate) fn outside_errors(fold: Option<(&Fold, &[f64])>, psi: &[C64], outside
 ///   own small parameter m = (coupling/detuning)²: on a P state the population it leaks into the level, on an excited
 ///   state the fold eliminates the level error m o it makes, through the fold's response as criterion one reads one
 ///   (`outside_errors`). Irreducible: those levels are not in the model, and no object's part.
-/// The photons' cross terms are the caller's (the run's photon classes, which land in every cluster: model.rs
-/// `Model::readings`). A relative rate error x moves the populations by at most x (absolute) and T, which the light sets
+/// The photons' cross terms are `cross_terms`' (at the start `start_cross_terms`, at a run's state on its photon
+/// classes, `Model::readings`). A relative rate error x moves the populations by at most x (absolute) and T, which the light sets
 /// through its rates and shifts, by x relative: the terms add on both.
 /// `linked`: whether a P-layer link is the model's (kept, or static in its frames: in its generator as it is).
 #[allow(clippy::too_many_arguments)]
@@ -2632,6 +2697,191 @@ pub(crate) fn errors(fold: &Fold, blocks: &[Vec<usize>], linked: &dyn Fn(&Link) 
     }
     let outside = outside_errors(Some((fold, &weight)), psi, outside);
     Errors { parts, outside }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Criterion three: the photons' cross terms.
+
+/// A landing's spectrum (criterion three, `cross_terms`): the eigenvalues λ_q of the fold its jumps land in, in its
+/// frames, and its left eigenvectors l_q (the eigenvectors' inverse's rows) on the places the photons' vectors are on.
+#[derive(Clone, Debug)]
+pub(crate) struct Landing {
+    pub values: Vec<C64>,
+    pub left: Mat,
+}
+
+impl Landing {
+    /// The spectrum of the eigenstates `states` of a fold (all of its own where its jumps land in one cluster, a group's
+    /// where the fold is the whole atom's), on all of its places.
+    pub(crate) fn of(fold: &Fold, states: &[usize]) -> Landing {
+        let n = fold.size();
+        Landing { values: states.iter().map(|&q| fold.eigen.values[q]).collect(), left: Mat::from_fn(states.len(), n, |a, x| fold.eigen.inverse[(states[a], x)]) }
+    }
+}
+
+/// One class of photons (criterion three; photon.rs, # Sources and classes): its frequency κ = −ω̃ -- ω̃ the frame
+/// frequency its entries turn at, e^{+iω̃t}, so that the photon's lab frequency is κ less the landing state's frame,
+/// up to the class's common phase --, the landing it lands in (an index into the landings), and per source eigenstate
+/// p its photon u_a = J_a r_p (a = x, y, z) on the landing's places.
+#[derive(Clone, Debug)]
+pub(crate) struct Images {
+    pub frequency: f64,
+    pub landing: usize,
+    pub images: Vec<[Vec<C64>; 3]>,
+}
+
+/// The photons' cross terms a split into classes drops (criterion three; module documentation, # The criteria's numbers),
+/// at a state of source eigen-coefficients `coefficients` c_p (of eigenvalues `values` λ_p, the source fold's) and norm
+/// ‖ψ‖² `norm`: per pair of classes a < b landing in one landing of frequencies apart (`same`), the relative rate error
+/// of leaving out J_a ρ J_b† and its adjoint,
+///   Σ_{p,p′,q,q′} |c_p c_p′* Σ_x ⟨l_q|u^a_{x,p}⟩ ⟨l_q′|u^b_{x,p′}⟩*| / ‖ψ‖² / |ω_c|,
+///   ω_c = (κ_a − κ_b) − (λ_q − λ_q′*) + (λ_p − λ_p′*):
+/// after a jump at t_j the landing density's part |r_q⟩⟨r_q′| of the two classes turns in t_j at ω_c -- the difference
+/// of the two photons' frequencies, ν_a + λ_p − λ_q less ν_b + λ_p′ − λ_q′, the same in every gauge --, and a class split
+/// averages it over the jumps' times: what it leaves out is its part over |ω_c| (the secular approximation's first
+/// order, v3 1). Its size is the dropped operator's in the landing's eigenbasis, of which the rate's interference
+/// |Σ_x ⟨u^a_x|u^b_x⟩| is the trace alone; and every pair of source eigenstates, a state's coherence between two of them
+/// a cross term at their eigenvalues' difference -- two ground states the frames do not join, their Raman resonance
+/// at ω_c → 0 however far apart their classes' frequencies (Ω = κ_a − κ_b). Returns (a, b, error) of the pairs read.
+pub(crate) fn cross_terms(classes: &[Images], landings: &[Landing], values: &[C64], coefficients: &[C64], norm: f64) -> Vec<(usize, usize, f64)> {
+    let held: Vec<usize> = (0..coefficients.len()).filter(|&p| coefficients[p] != C64::ZERO).collect();
+    // Per class, per axis, its coefficients on the landing's eigenstates, [p][axis][q] for the held p.
+    let on: Vec<Vec<[Vec<C64>; 3]>> = classes
+        .iter()
+        .map(|class| {
+            let landing = &landings[class.landing];
+            held.iter().map(|&p| std::array::from_fn(|x| landing.left.apply(&class.images[p][x]))).collect()
+        })
+        .collect();
+    let mut out = vec![];
+    for a in 0..classes.len() {
+        for b in a + 1..classes.len() {
+            let (ca, cb) = (&classes[a], &classes[b]);
+            if ca.landing != cb.landing || same(ca.frequency, cb.frequency) {
+                continue;
+            }
+            let lambda = &landings[ca.landing].values;
+            let omega = ca.frequency - cb.frequency;
+            let mut error = 0.0;
+            for (i, &p) in held.iter().enumerate() {
+                for (k, &p2) in held.iter().enumerate() {
+                    let weight = (coefficients[p] * coefficients[p2].conj()).abs() / norm;
+                    let source = values[p] - values[p2].conj();
+                    for q in 0..lambda.len() {
+                        for q2 in 0..lambda.len() {
+                            let size = (0..3).map(|x| on[a][i][x][q] * on[b][k][x][q2].conj()).sum::<C64>().abs();
+                            if size == 0.0 {
+                                continue;
+                            }
+                            error += weight * size / (C64::real(omega) - (lambda[q] - lambda[q2].conj()) + source).abs();
+                        }
+                    }
+                }
+            }
+            if error > 0.0 {
+                out.push((a, b, error));
+            }
+        }
+    }
+    out
+}
+
+/// Criterion three at an atom's start (the prior's, `Model::prior`; `cross_terms`): the closure's fold's photons
+/// (`Fold::photons`) at each ground-like eigenstate full, and at each two of one group in equal parts -- the largest
+/// coherence a state holds between them --; every pair of classes beyond the share at one of those states, each class
+/// as (its light's class, none for an explicit state's own decay; the state it comes from; the ground state it lands
+/// in) -- states as the fold's: its ground places, and an explicit excited state its E index after them.
+pub(crate) fn start_cross_terms(fold: &Fold, emission: &[Mat; 3]) -> Vec<[(Option<usize>, usize, usize); 2]> {
+    let (n, ground) = (fold.size(), fold.ground);
+    let like: Vec<usize> = (0..n).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
+    let (images, origins) = fold.photons(emission, &like);
+    let landings: Vec<Landing> = (0..fold.members.len()).map(|g| Landing::of(fold, &(0..n).filter(|&q| fold.groups[q] == g).collect::<Vec<_>>())).collect();
+    let class = |(origin, at): (PhotonSource, usize)| match origin {
+        PhotonSource::Class(c, g) => (Some(c), g, at),
+        PhotonSource::Explicit(place) => (None, ground + fold.explicit[place - ground], at),
+    };
+    let mut states: Vec<Vec<usize>> = like.iter().map(|&p| vec![p]).collect();
+    for (i, &p) in like.iter().enumerate() {
+        for &p2 in &like[i + 1..] {
+            if fold.groups[p] == fold.groups[p2] {
+                states.push(vec![p, p2]);
+            }
+        }
+    }
+    let mut out: Vec<[(Option<usize>, usize, usize); 2]> = vec![];
+    for state in &states {
+        let mut coefficients = vec![C64::ZERO; n];
+        state.iter().for_each(|&p| coefficients[p] = C64::ONE);
+        let psi: Vec<C64> = (0..n).map(|k| state.iter().map(|&p| fold.eigen.vectors[(k, p)]).sum()).collect();
+        for (a, b, x) in cross_terms(&images, &landings, &fold.eigen.values, &coefficients, crate::linalg::norm_sqr(&psi)) {
+            let pair = [class(origins[a]), class(origins[b])];
+            if x > share() && !out.contains(&pair) {
+                out.push(pair);
+            }
+        }
+    }
+    out
+}
+
+/// Where one of a fold's photon classes (`Fold::photons`) comes from, for its unit's exact beat (`Model::prior`): a
+/// class's folded jumps from a ground place it drives into the replica, or an explicit place's own decay.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum PhotonSource {
+    Class(usize, usize),
+    Explicit(usize),
+}
+
+impl Fold {
+    /// The fold's photons by class (criterion three, `cross_terms`), with the emission `emission` (C_a on the fold's
+    /// states, ground ← ground + excited), of the source eigenstates `states` (the others' images empty): each replica's
+    /// excited amplitude T_j r_p and each explicit place's own, emitted into every ground place, a class per frequency
+    /// κ = f_j − θ_g (an explicit place's own frame for f) and landing -- the group of the ground place, an index into
+    /// `Landing`s made by the caller in the order of `self.members` --; each with the place it comes from (`PhotonSource`) and
+    /// the ground place it lands in, for its beat. A folded photon and an explicit one at one κ are one class, as the
+    /// run's (photon.rs): their beats are one.
+    pub(crate) fn photons(&self, emission: &[Mat; 3], states: &[usize]) -> (Vec<Images>, Vec<(PhotonSource, usize)>) {
+        let (n, ground) = (self.size(), self.ground);
+        let group_of = |x: usize| self.members.iter().position(|m| m.contains(&x)).expect("a place's group");
+        let mut out: Vec<(Images, PhotonSource, usize)> = vec![];
+        let add = |frequency: f64, landing: usize, origin: PhotonSource, at: usize, p: usize, axis: usize, value: C64, out: &mut Vec<(Images, PhotonSource, usize)>| {
+            if value == C64::ZERO {
+                return;
+            }
+            let k = match out.iter().position(|c| c.0.landing == landing && same(c.0.frequency, frequency)) {
+                Some(k) => k,
+                None => {
+                    out.push((Images { frequency, landing, images: vec![std::array::from_fn(|_| vec![C64::ZERO; n]); n] }, origin, at));
+                    out.len() - 1
+                }
+            };
+            out[k].0.images[p][axis][at] += value;
+        };
+        for &p in states {
+            let r = self.right(p);
+            for (j, rep) in self.replicas.iter().enumerate() {
+                let y = rep.t.apply(&r);
+                let origin = (0..self.driven.len()).find_map(|c| (0..ground).find(|&g| self.driven[c][g] == Some(j)).map(|g| PhotonSource::Class(c, g)));
+                let origin = origin.or_else(|| (0..self.explicit.len()).find(|&i| same(self.frames[ground + i], rep.frequency)).map(|i| PhotonSource::Explicit(ground + i)));
+                let Some(origin) = origin else { continue };
+                for g in 0..ground {
+                    let frequency = rep.frequency - self.frames[g];
+                    for axis in 0..3 {
+                        let value: C64 = rep.q.iter().zip(&y).map(|(&e, z)| emission[axis][(g, ground + e)] * *z).sum();
+                        add(frequency, group_of(g), origin, g, p, axis, value, &mut out);
+                    }
+                }
+            }
+            for (i, &e) in self.explicit.iter().enumerate() {
+                for g in 0..ground {
+                    let frequency = self.frames[ground + i] - self.frames[g];
+                    for axis in 0..3 {
+                        add(frequency, group_of(g), PhotonSource::Explicit(ground + i), g, p, axis, emission[axis][(g, ground + e)] * r[ground + i], &mut out);
+                    }
+                }
+            }
+        }
+        out.into_iter().map(|(images, origin, at)| (images, (origin, at))).unzip()
+    }
 }
 
 #[cfg(test)]
