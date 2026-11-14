@@ -248,7 +248,17 @@
 //! - The candidates are the companion's step ends at the attempt's first rung, m·2τ₀ to the run's end (`grid`): a
 //!   step end of every level the attempt runs -- its rungs and their companions; the third level at 4τ reads half of
 //!   them inside its steps (adapt.rs, # The reads). Every level of the pilot is read at every candidate (`Plan::reads`;
-//!   the run level keeps its states there), the product at the analysis times alone.
+//!   the run level keeps its trajectories' checkpoints, next), the product at the analysis times alone.
+//! - The run level's states are not kept at the candidates -- its trajectories times the candidates, in proportion to
+//!   the run's length: PGC3D's 10 ms, 88 × 15 400 states, 345 MB --, but its trajectories' checkpoints (`Checkpoint`:
+//!   the trajectory and its Brownian path at a step's end, adapt.rs `advance`'s stops), at t = 0 and at the first step's
+//!   end at or past every multiple of T's shortest window (`Plan::window`); a state at an analysis time is made again from
+//!   the last checkpoint before it once the times are known (`replay`, `parts_at`), the trajectory's own to the bit
+//!   (adapt.rs, # The reads: a read is an onlooker, a stop no step's end). The window is the scale the reads are spaced
+//!   by already (a quarter of it, next): the checkpoints are a quarter of the first round's reads in number, about 1 kB
+//!   each against a state's 0.26 kB at each of the window/(2τ₀) candidates between two of them (15 for PGC3D); and a
+//!   state costs a window's steps at the most again -- |T_a| windows a trajectory against the run's end/window (PGC3D
+//!   1 ms: 13 of 100).
 //! - The analysis times of some levels are the halving's of their readings (`analysed`; analysis.rs, # The rule): from
 //!   the run's two ends, an interval is halved while a reading at its middle, its quarters -- and, where it is long, the
 //!   nested middles below them (next) -- lies off the line through its ends beyond its own jackknife interval among the
@@ -572,7 +582,7 @@ use crate::request::STATES;
 use crate::step::{stumpff, Dynamics, Price, Refused, Scratch, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::f64::consts::{PI, TAU};
@@ -1877,7 +1887,7 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
         None
     } else {
         let scout: Vec<&Part> = levels.fine.iter().collect();
-        let here = parts_at(&scout, &analysed_alone(&scout));
+        let here = parts_at(&run, &domain, context.tau, &context.plan, &scout, &analysed_alone(&scout));
         let (asked, read) = decided(&here.iter().collect::<Vec<_>>(), scout.len() as f64, Reads::Scout);
         drop(scout);
         if let Some(units) = asked {
@@ -1913,10 +1923,12 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
             _ => {
                 let level: Vec<&Part> = levels.fine.iter().collect();
                 let at = analysed_alone(&level);
+                // The level's states there, made again on the model it ran on.
+                let states = |at: &[usize]| parts_at(&Run::tabulated(model, &tables, reference), &domain, tau, &context.plan, &level, at);
                 if let Some(t) = outgrown_at(&level, &at) {
-                    return Ok(Attempt::Grow(t, Carried { parts: parts_at(&level, &at), few: false }));
+                    return Ok(Attempt::Grow(t, Carried { parts: states(&at), few: false }));
                 }
-                let pilot = parts_at(&level, &at);
+                let pilot = states(&at);
                 let read = pilot_reads(model, units, &tables, &pilot.iter().collect::<Vec<_>>(), scouted.take(), unsampled, most, &scales);
                 (at, pilot, read)
             }
@@ -1965,8 +1977,8 @@ fn attempt(request: &Request, setting: &Setting, kept: &[Unit], reach: f64, carr
     let (step, resolution) = checked(&own, third.as_ref(), saw);
     (context.step, context.checked) = (step, Some(Checked { third: step_of_third, pairs, resolution, saw }));
     // The decisions stand on the pilot's analysis times from here on: the product reads its trajectories there, and
-    // the run's model error is the pilot's there (# The analysis times). The levels' states at the candidates are
-    // read no more; the further pairs' groups are the product's, at the same times.
+    // the run's model error is the pilot's there (# The analysis times). The levels' checkpoints are read no more;
+    // the further pairs' groups are the product's, at the same times.
     let times: Vec<f64> = at.iter().map(|&k| candidates[k]).collect();
     let further: Vec<Part> = levels.further[0].iter().map(|p| p.at(&at)).collect();
     drop(levels);
@@ -2240,7 +2252,7 @@ fn own_level(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &Context,
         members = more;
         let level: Vec<&Part> = joined.iter().collect();
         if let Some((t, at)) = grown(&level) {
-            return Err((t, parts_at(&level, &at)));
+            return Err((t, parts_at(run, domain, tau, plan, &level, &at)));
         }
         if members == GROUP {
             return Ok(joined);
@@ -2248,10 +2260,11 @@ fn own_level(run: &Run, ensemble: &Ensemble, domain: &Domain, context: &Context,
     }
 }
 
-/// The states kept in some groups' parts freed, on the pool, a group's by itself: a state is a block of memory of its
-/// own, and a pilot keeps one for every trajectory at every output, and one more for every atom it lost.
+/// The states and checkpoints kept in some groups' parts freed, on the pool, a group's by itself: each is a block of
+/// memory of its own -- a pilot's states one for every trajectory at every analysis time, and one more for every atom it
+/// lost; its checkpoints one for every trajectory and window of the run.
 fn forget(parts: &mut [Part]) {
-    parts.par_iter_mut().for_each(|part| (part.samples, part.lost) = (vec![], vec![]));
+    parts.par_iter_mut().for_each(|part| (part.samples, part.trails, part.lost) = (vec![], vec![], vec![]));
 }
 
 /// Some groups' further members joined to those a level holds of them (all of them where it holds none).
@@ -2280,8 +2293,8 @@ enum Settled {
 /// step's check (module documentation, # The step), read again at every rung and after every batch of pairs:
 /// - a rung whose own read lies clearly beyond the square of the step's share among all the looks (`screen`) is left:
 ///   the step is halved -- the level at τ becomes the companion, and the members so far run anew at τ/2 alone, its
-///   third level above the rung left's own read (`carried`). The finer level keeps its states (the model is read at
-///   them);
+///   third level above the rung left's own read (`carried`). The finer level keeps its checkpoints (the model is read at
+///   its states, `parts_at`);
 /// - else, on the scout (which has the pilot to come), the rung stands. On the pilot (all the members of a group in:
 ///   the last word on the step), every estimate as it reads (`verdict`):
 ///   - its own estimate within and its third level's too: it stands; its third level's beyond (the order is not shown
@@ -2607,49 +2620,86 @@ struct State {
     /// The trajectory's jumps up to the state.
     jumps: u32,
 }
+impl State {
+    /// A trajectory's state as it stands, at the step τ.
+    fn of(t: &Trajectory, tau: f64) -> State {
+        State { sample: Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() }, tau, index: t.index, jumps: t.jumps }
+    }
+}
+
+/// A kept trajectory's whole state at a step's end (module documentation, # The analysis times; adapt.rs `advance`'s
+/// stops): the trajectory and its Brownian path -- its scratch carries nothing from one step to the next (step.rs
+/// `Scratch`) --, from which it is advanced again to the bit (`replay`).
+#[derive(Clone)]
+struct Checkpoint {
+    trajectory: Trajectory,
+    path: adapt::Path,
+}
 
 /// What one trajectory leaves: what became of it by every output (estimate.rs `Fate`), its (r, κ) at the listed outputs
-/// where held; what became of it by every time the decisions read (`Plan::reads`), its states there where held and,
-/// where it was lost, the first of those times it is lost at and its last state, where it was found lost (`keep`: the
-/// pilot's, for the model's errors and prices; module documentation, # The model: where the atoms went); its counts.
+/// where held; what became of it by every time the decisions read (`Plan::reads`); where its states are kept (`keep`:
+/// the pilot's run level, for the model's errors and prices; module documentation, # The model: where the atoms went),
+/// its checkpoints (`trail`, module documentation, # The analysis times) and, where it was lost, the first of those
+/// times it is lost at and its last state, where it was found lost; its counts.
 struct Record {
     outputs: Vec<Fate>,
     listed: Vec<Option<(V3, V3)>>,
     reads: Vec<Fate>,
-    samples: Vec<Option<State>>,
+    trail: Vec<Checkpoint>,
     lost: Option<(usize, State)>,
     counts: Counts,
     /// Its photons and their Σ k_φ² (step.rs `Trajectory::scattered`).
     scattered: [f64; 2],
 }
 
-/// One trajectory's T windows (module documentation, # Outputs and windows) about some times: per lab axis the running
-/// integrals from t = 0 of the time held, κ and κ² (µs, 1/µm·µs, 1/µm²·µs), and per time and axis their values at its
-/// window's two ends -- the window's time held, ∫κ dt and ∫κ² dt are the differences. An axis's windows' lower ends come
-/// in the times' order, and so do their upper ends (a window is cut at t = 0, and at the run's end alike): per axis and
-/// side, the next time whose end is to come. Time 0 is the instant t = 0 and has none.
+/// One trajectory's T windows (module documentation, # Outputs and windows) about some times, and what became of it by
+/// each time: per lab axis the running integrals from t = 0 of the time held, κ and κ² (µs, 1/µm·µs, 1/µm²·µs), and
+/// per time and axis their values at its window's two ends -- the window's time held, ∫κ dt and ∫κ² dt are the
+/// differences. An axis's windows' lower ends come in the times' order, and so do their upper ends (a window is cut at
+/// t = 0, and at the run's end alike): per axis and side, the next time whose end is to come. Time 0 is the instant
+/// t = 0 and has none. A time's ends are kept only while its window or its atom is not in (`open`): its atom takes its
+/// window's mean as soon as both are (`settle`) -- a trajectory keeps the windows that are open, a period of the slowest
+/// axis's times, not one a time read (a pilot's 15 400 for PGC3D's 10 ms).
 struct Windows<'a> {
     times: &'a [f64],
     halves: &'a [V3],
     running: [[f64; 3]; 3],
-    ends: Vec<[[[f64; 3]; 2]; 3]>,
+    fates: Vec<Fate>,
+    /// From the time `first` on: per time its ends' values as far as they are read, and whether its atom is in.
+    open: VecDeque<([[[f64; 3]; 2]; 3], bool)>,
+    first: usize,
     next: [[usize; 2]; 3],
 }
 impl<'a> Windows<'a> {
     fn new(times: &'a [f64], halves: &'a [V3]) -> Windows<'a> {
-        Windows { times, halves, running: [[0.; 3]; 3], ends: vec![[[[0.; 3]; 2]; 3]; times.len()], next: [[1; 2]; 3] }
+        Windows { times, halves, running: [[0.; 3]; 3], fates: vec![Fate::Lost; times.len()], open: VecDeque::new(), first: 1, next: [[1; 2]; 3] }
     }
     /// The lower (side 0) or upper (1) end of time k's window on axis a.
     fn end(&self, k: usize, a: usize, side: usize) -> f64 {
         let (t, h) = (self.times[k], self.halves[k][a]);
         if side == 0 { t - h } else { t + h }
     }
+    /// Time k's place among the open ones (k ≥ `first`), opened as far as it.
+    fn slot(&mut self, k: usize) -> &mut ([[[f64; 3]; 2]; 3], bool) {
+        while self.open.len() <= k - self.first {
+            self.open.push_back(([[[0.; 3]; 2]; 3], false));
+        }
+        &mut self.open[k - self.first]
+    }
+    /// The atom at time k as it is read there (time 0's the instant's).
+    fn record(&mut self, k: usize, fate: Fate) {
+        self.fates[k] = fate;
+        if k > 0 {
+            self.slot(k).1 = true;
+            self.settle();
+        }
+    }
     /// The path's piece from `from` to `to` (the next piece starts where this one ends), with its integrals of κ and κ²
     /// per lab axis between two of its times (step.rs `Segment::moments`): each end inside it reads the integrals up to
     /// it -- once for the ends that coincide, the axes of one frequency and the windows cut at t = 0 --, and the running
     /// integrals take the whole piece.
     fn add(&mut self, from: f64, to: f64, moments: &dyn Fn(f64, f64) -> (V3, V3)) {
-        let outputs = self.ends.len();
+        let outputs = self.times.len();
         let mut made: Vec<(f64, (V3, V3))> = vec![];
         for a in 0..3 {
             for side in 0..2 {
@@ -2665,7 +2715,7 @@ impl<'a> Windows<'a> {
                         }
                     };
                     let r = self.running[a];
-                    self.ends[k][a][side] = [r[0] + (at - from), r[1] + m1[a], r[2] + m2[a]];
+                    self.slot(k).0[a][side] = [r[0] + (at - from), r[1] + m1[a], r[2] + m2[a]];
                     self.next[a][side] += 1;
                 }
             }
@@ -2675,35 +2725,48 @@ impl<'a> Windows<'a> {
             let r = self.running[a];
             self.running[a] = [r[0] + (to - from), r[1] + m1[a], r[2] + m2[a]];
         }
+        self.settle();
     }
-    /// The trajectory has ended (run through, lost, or stopped): the ends it did not reach -- within a window, or past
-    /// its last piece by the rounding -- take the running integrals where it ended, the window over its held part.
-    fn close(&mut self) {
-        for a in 0..3 {
-            for side in 0..2 {
-                for e in &mut self.ends[self.next[a][side]..] {
-                    e[a][side] = self.running[a];
-                }
-                self.next[a][side] = self.ends.len();
+    /// The open times whose windows and atoms are in, from the first: each atom takes its window's mean (`mean`), and
+    /// the time is open no more. A window is in where its upper ends are on every axis (a lower end comes before its
+    /// upper one).
+    fn settle(&mut self) {
+        while let Some(&(ends, true)) = self.open.front() {
+            if self.next.iter().any(|n| n[1] <= self.first) {
+                break;
             }
+            mean(&mut self.fates[self.first], &ends);
+            self.open.pop_front();
+            self.first += 1;
         }
     }
-    /// Time k's window (k ≥ 1) per lab axis: its time held, ∫κ dt and ∫κ² dt.
-    fn window(&self, k: usize) -> [[f64; 3]; 3] {
-        let e = &self.ends[k];
-        std::array::from_fn(|a| std::array::from_fn(|i| e[a][1][i] - e[a][0][i]))
-    }
-    /// The atoms held at the times `fates` (time 0 the instant t = 0) as the windows read them: from the first time on
-    /// an atom's κ and κ² are its window's means -- over its held part, which is no empty stretch after t = 0
-    /// (estimate.rs `half_window`); a window of no length is the instant's own κ and κ².
-    fn mean(&self, fates: &mut [Fate]) {
-        for (k, o) in fates.iter_mut().enumerate().skip(1) {
-            if let Fate::Held(h) = o {
-                let w = self.window(k);
-                for a in (0..3).filter(|&a| w[a][0] > 0.) {
-                    (h.kappa[a], h.kappa2[a]) = (w[a][1] / w[a][0], w[a][2] / w[a][0]);
+    /// The trajectory has ended (run through, lost, or stopped), what became of it by every time in: the ends it did
+    /// not reach -- within a window, or past its last piece by the rounding -- take the running integrals where it
+    /// ended, the window over its held part, and every open time's atom takes its window's mean. A time none of whose
+    /// ends was read has a window of no length (and no atom read: `Fate::Lost` or `Fate::Failed`).
+    fn close(mut self) -> Vec<Fate> {
+        for a in 0..3 {
+            for side in 0..2 {
+                for e in self.open.iter_mut().skip(self.next[a][side] - self.first) {
+                    e.0[a][side] = self.running[a];
                 }
             }
+        }
+        for (k, (ends, _)) in (self.first..).zip(&self.open) {
+            mean(&mut self.fates[k], ends);
+        }
+        self.fates
+    }
+}
+
+/// An atom held at a time after t = 0 as its window reads it, its window's two ends per lab axis `ends`: its κ and κ²
+/// are the window's means -- over its held part, which is no empty stretch after t = 0 (estimate.rs `half_window`); a
+/// window of no length is the instant's own κ and κ².
+fn mean(fate: &mut Fate, ends: &[[[f64; 3]; 2]; 3]) {
+    if let Fate::Held(h) = fate {
+        let w: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|i| ends[a][1][i] - ends[a][0][i]));
+        for a in (0..3).filter(|&a| w[a][0] > 0.) {
+            (h.kappa[a], h.kappa2[a]) = (w[a][1] / w[a][0], w[a][2] / w[a][0]);
         }
     }
 }
@@ -2733,7 +2796,11 @@ fn merged(first: &[f64], second: &[f64]) -> Vec<(f64, [Option<usize>; 2])> {
 /// read (`Plan::reads`) where it falls (adapt.rs, # The reads) -- a time of both read once. A trajectory the scheme
 /// cannot advance (adapt.rs) fails from the first time it does not reach. One whose state scatters beyond every state
 /// of the atom (`Domain::runaway`: a fold far outside its validity) stops there: it is unresolved from then on, held at
-/// every later time as it stood (module documentation, # The reach's atoms).
+/// every later time as it stood (module documentation, # The reach's atoms). Where its states are kept (`keep`), it is
+/// advanced from checkpoint to checkpoint (`Checkpoint`: at t = 0 and at the first step's end at or past every multiple
+/// of T's shortest window, module documentation, # The analysis times) -- the same trajectory to the bit (adapt.rs
+/// `advance`: a stop is no step's end) --, and its states are made again from them (`replay`); else it is advanced
+/// through at once.
 fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f64, plan: &Plan, keep: bool) -> Record {
     let sizes = [plan.times.len(), plan.reads.len()];
     let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
@@ -2741,42 +2808,41 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     // The trajectory's Brownian path in the plan's cells, its grid the multiples of τ (a cell over a power of two):
     // the same path at every rung and at its companion.
     let mut path = adapt::Path::new(SEED, index, plan.cell, (plan.cell / tau).log2().round() as u32);
-    let mut windows = [Windows::new(&plan.times, &plan.halves), Windows::new(&plan.reads, &plan.read_halves)];
-    let mut fates = sizes.map(|n| vec![Fate::Lost; n]);
+    // The outputs' windows and the decisions' (the trajectory's fates with them), taken up by its reads and its path's
+    // pieces alike.
+    let windows = std::cell::RefCell::new([Windows::new(&plan.times, &plan.halves), Windows::new(&plan.reads, &plan.read_halves)]);
     let mut listed = vec![None; plan.listed.len()];
-    let mut samples: Vec<Option<State>> = vec![None; sizes[1]];
+    let mut trail: Vec<Checkpoint> = vec![];
     // The times read after t = 0, the outputs' and the decisions', with their places among each.
     let at = merged(&plan.times, &plan.reads);
     let times: Vec<f64> = at.iter().map(|a| a.0).collect();
     // The steps taken, and the start of the last one counted.
     let (mut steps, mut counted) = (0, None);
-    let mut record = |places: [Option<usize>; 2], t: &Trajectory, fates: &mut [Vec<Fate>; 2]| {
-        // The atom at the time's instant; from the first time on its κ and κ² are its window's means (`Windows::mean`).
+    let mut record = |places: [Option<usize>; 2], t: &Trajectory| {
+        // The atom at the time's instant; from the first time on its κ and κ² are its window's means (`mean`).
         // An unresolved one is booked whole (`apart`). Leaving or bound, at the instant.
         let [beyond, leaving] = domain.placed(t.r, t.kappa);
         let outside = !t.unresolved && beyond;
         let held = Fate::Held(Held { rows: model.readout(t.cluster, &t.point(), &t.psi), kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), outside, unresolved: t.unresolved, leaving });
+        let mut windows = windows.borrow_mut();
         if let Some(k) = places[0] {
-            fates[0][k] = held.clone();
+            windows[0].record(k, held.clone());
             if let Ok(j) = plan.listed.binary_search(&k) {
                 listed[j] = Some((t.r, t.kappa));
             }
         }
         if let Some(k) = places[1] {
-            fates[1][k] = held;
-            if keep {
-                samples[k] = Some(State { sample: Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() }, tau, index, jumps: t.jumps });
-            }
+            windows[1].record(k, held);
         }
     };
-    record([Some(0), Some(0)], &t, &mut fates);
+    record([Some(0), Some(0)], &t);
     // The first output and the first time read the trajectory does not reach held; whether the scheme could not
     // advance it, and whether it stopped where a state scattered beyond every state of the atom.
     let mut reached = [1, 1];
     let mut unmade = None;
     let (failed, runaway) = {
         let mut read = |i: usize, t: &Trajectory| {
-            record(at[i].1, t, &mut fates);
+            record(at[i].1, t);
             for (reached, place) in reached.iter_mut().zip(at[i].1) {
                 if let Some(k) = place {
                     *reached = k + 1;
@@ -2789,12 +2855,22 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
             if counted != Some(s.step.0) {
                 (steps, counted) = (steps + 1, Some(s.step.0));
             }
-            for w in &mut windows {
+            for w in windows.borrow_mut().iter_mut() {
                 w.add(s.start, until, &|from, to| s.moments(from, to));
             }
         };
-        // Through the last output's window; a failure there leaves every output read.
-        match adapt::advance(model, domain, tau, &mut t, &mut scratch, &mut path, plan.end, &times, &mut read, &mut each) {
+        // Through the last output's window -- a failure there leaves every output read --, from checkpoint to checkpoint
+        // where the states are kept: stopped at the first step's end at or past each multiple of the window.
+        let every = if keep { plan.window } else { plan.end };
+        let mut advanced = Ok(());
+        while advanced.is_ok() && t.lost.is_none() && t.time < plan.end {
+            if keep {
+                trail.push(Checkpoint { trajectory: t.clone(), path: path.clone() });
+            }
+            let stop = ((t.time / every).floor() + 1.) * every;
+            advanced = adapt::advance(model, domain, tau, &mut t, &mut scratch, &mut path, plan.end, stop, &times, &mut read, &mut each);
+        }
+        match advanced {
             Ok(()) => (false, false),
             Err(Refused::Runaway) => (false, true),
             Err(Refused::Optical(why)) => {
@@ -2808,26 +2884,24 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     if runaway {
         t.unresolved = true;
         for k in reached[0]..sizes[0] {
-            record([Some(k), None], &t, &mut fates);
+            record([Some(k), None], &t);
         }
         for k in reached[1]..sizes[1] {
-            record([None, Some(k)], &t, &mut fates);
+            record([None, Some(k)], &t);
         }
         reached = sizes;
     }
     // From the time it does not reach: failed, or lost -- a lost atom's last state kept where states are, its fate's
     // to read (`sampled`).
     let mut lost = None;
-    for ((fates, &reached), &size) in fates.iter_mut().zip(&reached).zip(&sizes) {
-        fates[reached.min(size)..].fill(if failed { Fate::Failed } else { Fate::Lost });
+    let mut windows = windows.into_inner();
+    for ((w, &reached), &size) in windows.iter_mut().zip(&reached).zip(&sizes) {
+        w.fates[reached.min(size)..].fill(if failed { Fate::Failed } else { Fate::Lost });
     }
     if reached[1] < sizes[1] && keep && !failed {
-        lost = Some((reached[1], State { sample: Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() }, tau, index, jumps: t.jumps }));
+        lost = Some((reached[1], State::of(&t, tau)));
     }
-    for (w, fates) in windows.iter_mut().zip(&mut fates) {
-        w.close();
-        w.mean(fates);
-    }
+    let [outputs, reads] = windows.map(Windows::close);
     let stopped = |why: bool| if why { Stopped::at(t.time) } else { Stopped::default() };
     let optical = [t.booked[0], t.booked[1], t.booked[2], -(t.pending[0][0] + t.pending[1][1] + t.pending[2][2])];
     let counts = Counts {
@@ -2837,19 +2911,53 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         runaway: stopped(runaway),
         optical,
     };
-    let [outputs, reads] = fates;
-    Record { outputs, listed, reads, samples, lost, counts, scattered: t.scattered }
+    Record { outputs, listed, reads, trail, lost, counts, scattered: t.scattered }
+}
+
+/// A kept trajectory's states at the times `times` (increasing, from t = 0; µs) made again from its checkpoints `trail`
+/// (`run`, module documentation, # The analysis times) at the step τ, toward the run's end `end`, in the `domain` it ran
+/// in: each time from the last checkpoint before it -- or from where the trajectory stands, advanced again so far,
+/// where that is later --, stopped at the first step's end at or past it (adapt.rs `advance`). The states `run` reads
+/// there to the bit (adapt.rs, # The reads: a read is an onlooker, a stop no step's end): none after the trajectory's
+/// loss or failure, and after a runaway the state it stopped in at every time it did not reach (`run`).
+fn replay<D: Dynamics>(model: &D, domain: &Domain, tau: f64, end: f64, trail: &[Checkpoint], times: &[f64]) -> Vec<Option<State>> {
+    let mut states: Vec<Option<State>> = vec![None; times.len()];
+    states[0] = Some(State::of(&trail[0].trajectory, tau));
+    let mut scratch = Scratch::default();
+    // The first time not read, and the trajectory as far as it is advanced again.
+    let (mut reached, mut going): (usize, Option<Checkpoint>) = (1, None);
+    while reached < times.len() {
+        let next = times[reached];
+        let from = &trail[trail.partition_point(|c| c.trajectory.time < next) - 1];
+        let Checkpoint { mut trajectory, mut path } = match going.take() {
+            Some(going) if going.trajectory.time >= from.trajectory.time => going,
+            _ => from.clone(),
+        };
+        let advanced = adapt::advance(model, domain, tau, &mut trajectory, &mut scratch, &mut path, end, next, times, &mut |k, s| (states[k], reached) = (Some(State::of(s, tau)), k + 1), &mut |_, _| {});
+        match advanced {
+            Ok(()) if trajectory.lost.is_none() => going = Some(Checkpoint { trajectory, path }),
+            Err(Refused::Runaway) => {
+                states[reached..].fill(Some(State::of(&trajectory, tau)));
+                break;
+            }
+            _ => break,
+        }
+    }
+    states
 }
 
 /// What a group of trajectories leaves: its sums at the outputs and at the times the decisions read (estimate.rs
-/// `Group`), its held atoms' (r, κ) at the listed outputs, its states at the times read and its lost atoms' last states
-/// with the first of those times each is lost at (the pilot's: every member's), its counts.
+/// `Group`), its held atoms' (r, κ) at the listed outputs; where its states are kept (the pilot's run level: every
+/// member's), its trajectories' checkpoints in its members' order (`Record::trail`) and, at the analysis times
+/// (`parts_at`), its states there; its lost atoms' last states with the first of the times read each is lost at; its
+/// counts.
 #[derive(Clone)]
 struct Part {
     sums: Group,
     reads: Group,
     listed: Vec<Vec<(V3, V3)>>,
     samples: Vec<Vec<State>>,
+    trails: Vec<Vec<Checkpoint>>,
     lost: Vec<(usize, State)>,
     counts: Counts,
 }
@@ -2864,28 +2972,43 @@ impl Part {
         for (s, x) in self.samples.iter_mut().zip(other.samples) {
             s.extend(x);
         }
+        self.trails.extend(other.trails);
         self.lost.extend(other.lost);
         self.counts.add(&other.counts);
     }
 
     /// The part at the places `at` of its times read alone (increasing, the first and the last among them: analysis
-    /// times, # The analysis times): its sums and states there, a lost atom's first place the first of them at or
-    /// after its own; its outputs as they are.
+    /// times, # The analysis times): its sums there, no state yet (`parts_at` makes them), a lost atom's first place
+    /// the first of them at or after its own; its outputs as they are.
     fn at(&self, at: &[usize]) -> Part {
         Part {
             sums: self.sums.clone(),
             reads: self.reads.at(at),
             listed: self.listed.clone(),
-            samples: at.iter().map(|&k| self.samples[k].clone()).collect(),
+            samples: vec![vec![]; at.len()],
+            trails: vec![],
             lost: self.lost.iter().map(|(first, state)| (at.partition_point(|&k| k < *first), state.clone())).collect(),
             counts: self.counts,
         }
     }
 }
 
-/// Some parts at the places `at` of their times read (`Part::at`).
-fn parts_at(parts: &[&Part], at: &[usize]) -> Vec<Part> {
-    parts.par_iter().map(|p| p.at(at)).collect()
+/// Some groups of a level whose states are kept at the places `at` of their times read (`Part::at`), each with its
+/// trajectories' states there made again from their checkpoints (`replay`), in its members' order -- on the pool,
+/// trajectory by trajectory --: the level's model `run`, its `domain` and step `tau`, and the plan it ran through.
+fn parts_at(run: &Run, domain: &Domain, tau: f64, plan: &Plan, parts: &[&Part], at: &[usize]) -> Vec<Part> {
+    let times: Vec<f64> = at.iter().map(|&k| plan.reads[k]).collect();
+    parts
+        .par_iter()
+        .map(|p| {
+            let mut part = p.at(at);
+            let mut made: Vec<Vec<Option<State>>> = p.trails.par_iter().map(|trail| replay(run, domain, tau, plan.end, trail, &times)).collect();
+            for (j, states) in part.samples.iter_mut().enumerate() {
+                states.extend(made.iter_mut().filter_map(|m| m[j].take()));
+            }
+            part
+        })
+        .collect()
 }
 
 /// The groups' sums at the outputs: what is shown.
@@ -2911,33 +3034,32 @@ impl Shape {
     fn of(plan: &Plan, keep: bool) -> Shape {
         Shape { outputs: plan.times.len(), reads: plan.reads.len(), listed: plan.listed.len(), keep }
     }
-    /// A group's records added in their order.
-    fn fold(&self, records: impl Iterator<Item = Record>) -> Part {
-        let mut part = Part {
+    /// A group's part before its first record.
+    fn empty(&self) -> Part {
+        Part {
             sums: Group::new(self.outputs),
             reads: Group::new(self.reads),
             listed: vec![vec![]; self.listed],
-            samples: vec![vec![]; self.reads],
+            samples: vec![],
+            trails: vec![],
             lost: vec![],
             counts: Counts::default(),
-        };
-        for r in records {
-            part.sums.add(&r.outputs);
-            part.sums.scatter(r.scattered);
-            part.reads.add(&r.reads);
-            part.reads.scatter(r.scattered);
-            for (l, x) in part.listed.iter_mut().zip(r.listed) {
-                l.extend(x);
-            }
-            if self.keep {
-                for (s, x) in part.samples.iter_mut().zip(r.samples) {
-                    s.extend(x);
-                }
-                part.lost.extend(r.lost);
-            }
-            part.counts.add(&r.counts);
         }
-        part
+    }
+    /// A group's next record added to its part (the records in their members' order).
+    fn add(&self, part: &mut Part, r: Record) {
+        part.sums.add(&r.outputs);
+        part.sums.scatter(r.scattered);
+        part.reads.add(&r.reads);
+        part.reads.scatter(r.scattered);
+        for (l, x) in part.listed.iter_mut().zip(r.listed) {
+            l.extend(x);
+        }
+        if self.keep {
+            part.trails.push(r.trail);
+            part.lost.extend(r.lost);
+        }
+        part.counts.add(&r.counts);
     }
 }
 
@@ -2979,7 +3101,9 @@ impl Hand<'_> {
 /// trajectory's time. The threads have no trajectory left only at the list's end: what is known to be run together is
 /// handed out together (`pair`), the level of the longer trajectories first, so that the threads that wait for the
 /// list's last trajectories wait for its shortest. Each group's records are added in its members' order on this thread
-/// (`Shape::fold`, nothing depends on the threads), each level's groups returned in their order; whenever the solve's
+/// as soon as those before it are in -- a record waits only for its group's members before it, never for the whole
+/// group (a record holds its trajectory's fates at every time read) -- (`Shape::add`, nothing depends on the threads),
+/// each level's groups returned in their order; whenever the solve's
 /// next message is due (`Messages::due`), `progress` takes the first level's groups finished so far in order and sends
 /// the result of what is in with them (module documentation, # Checkpoints); where it has nothing to send the message
 /// stays due, and is asked for again when the next group is in. A message is made on this thread by loops that run on
@@ -2997,8 +3121,9 @@ fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut
     };
     let next = AtomicU64::new(0);
     let threads = rayon::current_num_threads().min(stop as usize);
-    // Per level and group the members' records as they come in, and how many are in (a member not run counts in).
-    let mut waiting: Vec<Vec<(Vec<Option<Record>>, u64)>> = levels.iter().map(|level| (0..level.groups.len()).map(|_| ((0..level.size()).map(|_| None).collect(), 0)).collect()).collect();
+    // Per level and group its part as far as its records are added, the members' records that came in before their
+    // turn, and the next member to add.
+    let mut waiting: Vec<Vec<(Option<Part>, Vec<Option<Record>>, u64)>> = levels.iter().map(|level| (0..level.groups.len()).map(|_| (None, (0..level.size()).map(|_| None).collect(), 0)).collect()).collect();
     let mut parts: Vec<Vec<Option<Part>>> = levels.iter().map(|level| (0..level.groups.len()).map(|_| None).collect()).collect();
     // This thread stays here for the records and the messages; the pool's threads run the trajectories.
     rayon::in_place_scope(|scope| {
@@ -3036,13 +3161,16 @@ fn run_groups(levels: &[Hand], messages: &mut Messages, progress: &mut dyn FnMut
             let received = if due.is_zero() { receiver.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected) } else { receiver.recv_timeout(due) };
             match received {
                 Ok((level, k, r)) => {
-                    let size = levels[level].size();
+                    let (size, shape) = (levels[level].size(), &levels[level].shape);
                     let (g, m) = ((k / size) as usize, (k % size) as usize);
-                    let (members, count) = &mut waiting[level][g];
-                    members[m] = Some(r);
-                    *count += 1;
-                    if *count == size {
-                        parts[level][g] = Some(levels[level].shape.fold(members.iter_mut().map(|r| r.take().expect("a member's record"))));
+                    let (part, early, next) = &mut waiting[level][g];
+                    early[m] = Some(r);
+                    while let Some(r) = early.get_mut(*next as usize).and_then(Option::take) {
+                        shape.add(part.get_or_insert_with(|| shape.empty()), r);
+                        *next += 1;
+                    }
+                    if *next == size {
+                        parts[level][g] = part.take();
                         left -= 1;
                         asked = false;
                     }
@@ -4973,7 +5101,7 @@ mod tests {
             let mut sums = Group::new(outputs);
             let held = Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [1.; 3], outside: false, unresolved: false, leaving: false });
             (0..members).for_each(|_| sums.add(&vec![held.clone(); outputs]));
-            Part { reads: sums.clone(), sums, listed: vec![], samples: vec![vec![]; outputs], lost: vec![], counts: Counts::default() }
+            Part { reads: sums.clone(), sums, listed: vec![], samples: vec![vec![]; outputs], trails: vec![], lost: vec![], counts: Counts::default() }
         };
         let parts: Vec<Part> = (0..groups).map(|_| part()).collect();
         let parts: Vec<&Part> = parts.iter().collect();
@@ -5504,7 +5632,7 @@ mod tests {
                     jumps: 3 * k as u32,
                 };
                 let samples = (0..=outputs).map(|k| (0..members).filter(|&m| k <= held(g, m)).map(|m| state(m, k)).collect()).collect();
-                Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), listed: vec![], samples, lost: vec![], counts: Counts::default() }
+                Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), listed: vec![], samples, trails: vec![], lost: vec![], counts: Counts::default() }
             })
             .collect()
     }
@@ -5597,8 +5725,10 @@ mod tests {
     /// T's windows by the running integrals at their ends (`Windows`) against the closed forms of a path
     /// κ_a = A_a cos(ω_a t + φ_a): outputs 1 µs apart, periods of 0.7, 2.3 and 23 µs on the three axes (windows shorter
     /// and longer than the interval, overlapping, cut at t = 0), the path in pieces of a step of 0.37 µs and a jump inside
-    /// every third step. Run through to the plan's end, every window's time, ∫κ and ∫κ² within 1e-12 of its own scale;
-    /// an atom lost at 17.6 µs, the windows that reach past it over their held part.
+    /// every third step. An atom read at every time, its κ and κ² zero at the instant, takes its window's means whether it
+    /// is read before the piece its time lies in is added or after it. Run through to the plan's end, every window's
+    /// mean κ and κ² within 1e-12 of its own scale; an atom lost at 17.6 µs, the windows that reach past it over their
+    /// held part, no atom after it. The times kept open are never more than a window's span of them and two.
     #[test]
     fn the_windows_are_their_ends_differences() {
         let w = [TAU / 0.7, TAU / 2.3, TAU / 23.];
@@ -5626,22 +5756,37 @@ mod tests {
                 break;
             }
         }
+        let atom = Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], outside: false, unresolved: false, leaving: false });
+        let span = 2. * plan.halves.iter().flatten().copied().fold(0., f64::max);
         for stop in [plan.end, 17.6] {
             let mut windows = Windows::new(&plan.times, &plan.halves);
+            windows.record(0, atom.clone());
+            let (mut next, mut most) = (1, 0);
             for piece in cuts.windows(2).filter(|p| p[0] < stop) {
-                windows.add(piece[0], piece[1].min(stop), &moments);
+                let to = piece[1].min(stop);
+                // The times in the piece read before it is added (the odd ones) and after it (the even ones).
+                let inside: Vec<usize> = (next..times.len()).take_while(|&k| times[k] <= to).collect();
+                inside.iter().filter(|&&k| k % 2 == 1).for_each(|&k| windows.record(k, atom.clone()));
+                windows.add(piece[0], to, &moments);
+                inside.iter().filter(|&&k| k % 2 == 0).for_each(|&k| windows.record(k, atom.clone()));
+                next += inside.len();
+                most = most.max(windows.open.len());
             }
-            windows.close();
-            for k in 1..times.len() {
+            let fates = windows.close();
+            for (k, fate) in fates.iter().enumerate().skip(1) {
+                let Fate::Held(h) = fate else {
+                    assert!(times[k] > stop && *fate == Fate::Lost, "stop {stop}, output {k}: {fate:?}");
+                    continue;
+                };
+                assert!(times[k] <= stop, "stop {stop}, output {k} held after the loss");
                 for a in 0..3 {
                     let (lo, hi) = (times[k] - plan.halves[k][a], (times[k] + plan.halves[k][a]).min(stop));
-                    let exact: [f64; 3] = if hi > lo { let (p, q) = (antiderivative(a, lo), antiderivative(a, hi)); std::array::from_fn(|i| q[i] - p[i]) } else { [0.; 3] };
-                    let got = windows.window(k)[a];
-                    for i in 0..3 {
-                        assert!((got[i] - exact[i]).abs() <= 1e-12 * stop * amp[a].max(1.).powi(2), "stop {stop}, output {k}, axis {a}, moment {i}: {} against {}", got[i], exact[i]);
-                    }
+                    let exact: [f64; 3] = { let (p, q) = (antiderivative(a, lo), antiderivative(a, hi)); std::array::from_fn(|i| q[i] - p[i]) };
+                    let scale = 1e-12 * stop * amp[a].max(1.).powi(2) / exact[0];
+                    assert!((h.kappa[a] - exact[1] / exact[0]).abs() <= scale && (h.kappa2[a] - exact[2] / exact[0]).abs() <= scale, "stop {stop}, output {k}, axis {a}: {} and {} against {} and {}", h.kappa[a], h.kappa2[a], exact[1] / exact[0], exact[2] / exact[0]);
                 }
             }
+            assert!(most as f64 <= span + 2., "{most} times open against a span of {span} µs");
         }
     }
 
@@ -5705,10 +5850,10 @@ mod tests {
         let shape = Shape::of(&context.plan, false);
         let record = |i: u64| {
             let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], outside: false, unresolved: false, leaving: false };
-            Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held.clone())], reads: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], samples: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2] }
+            Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held.clone())], reads: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2] }
         };
-        let whole = [shape.fold((0..GROUP).map(record)), shape.fold((GROUP..2 * GROUP).map(record))];
-        let scout: Vec<Part> = (0..3).map(|i| shape.fold(std::iter::once(record(i)))).collect();
+        let whole = [folded(&shape, (0..GROUP).map(record)), folded(&shape, (GROUP..2 * GROUP).map(record))];
+        let scout: Vec<Part> = (0..3).map(|i| folded(&shape, std::iter::once(record(i)))).collect();
         let mut sent = vec![];
         let mut send = |s: &Solution, _: Option<f64>| sent.push(s.trajectories);
         let mut messages = Messages { send: &mut send, clock: Instant::now() - CHECKPOINT, last: None, least: 0 };
@@ -5739,7 +5884,7 @@ mod tests {
         let record = |_: u64| {
             std::thread::sleep(Duration::from_millis(3));
             over.fetch_add(1, Ordering::Relaxed);
-            Record { outputs: vec![Fate::Lost], reads: vec![Fate::Lost], listed: vec![], samples: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2] }
+            Record { outputs: vec![Fate::Lost], reads: vec![Fate::Lost], listed: vec![], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2] }
         };
         let mut silent = |_: &Solution, _: Option<f64>| {};
         let mut messages = Messages { send: &mut silent, clock: Instant::now() - CHECKPOINT, last: None, least: 0 };
@@ -5888,7 +6033,7 @@ mod tests {
             rows[(i % STATES as u64) as usize] = 1.;
             let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], outside: false, unresolved: false, leaving: false };
             let outputs = vec![Fate::Held(held.clone()), if i % 3 > 0 { Fate::Held(held) } else { Fate::Lost }];
-            Record { reads: outputs.clone(), outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], samples: vec![], lost: None, counts: Counts { steps: i, ..Counts::default() }, scattered: [0.; 2] }
+            Record { reads: outputs.clone(), outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], trail: vec![], lost: None, counts: Counts { steps: i, ..Counts::default() }, scattered: [0.; 2] }
         };
         let mut silent = |_: &Solution, _: Option<f64>| {};
         let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0 };
@@ -5900,7 +6045,7 @@ mod tests {
         for (parts, members) in levels.iter().zip(members) {
             assert_eq!(parts.len(), 37);
             for (part, number) in parts.iter().zip(&numbers) {
-                let one = shape.fold(members.clone().map(|m| record(number * GROUP + m)));
+                let one = folded(&shape, members.clone().map(|m| record(number * GROUP + m)));
                 assert_eq!((&part.sums, &part.reads), (&one.sums, &one.reads));
                 assert_eq!(part.listed, one.listed);
                 assert_eq!(part.counts.steps, one.counts.steps);
@@ -6108,13 +6253,80 @@ mod tests {
                     }
                 }
                 let kept: Vec<Record> = plans.iter().map(|plan| super::run(&run, &domain, Start { state: b, r: trap.centre, kappa }, (a + 3) as u64, tau, plan, true)).collect();
-                let states = |r: &Record| r.samples.iter().map(|s| s.as_ref().map(|s| (s.sample.clone(), s.tau.to_bits(), s.index, s.jumps))).collect::<Vec<_>>();
-                assert!(kept.iter().all(|r| states(r) == states(&kept[0]) && r.lost.as_ref().map(|l| l.0) == kept[0].lost.as_ref().map(|l| l.0)));
+                let states = |r: &Record, plan: &Plan| replay(&run, &domain, tau, plan.end, &r.trail, &plan.reads).iter().map(|s| s.as_ref().map(|s| (s.sample.clone(), s.tau.to_bits(), s.index, s.jumps))).collect::<Vec<_>>();
+                assert!(kept.iter().zip(&plans).all(|(r, plan)| states(r, plan) == states(&kept[0], &plans[0]) && r.lost.as_ref().map(|l| l.0) == kept[0].lost.as_ref().map(|l| l.0)));
                 atoms += 1;
             }
         }
         eprintln!("{atoms} atoms through three output grids; {shared} outputs at a candidate's time");
         assert!(shared > 0);
+    }
+
+    /// A kept trajectory's states are its own, made again from its checkpoints (module documentation, # The analysis
+    /// times; `run`, `replay`; adapt.rs `advance`: a stop is no step's end), on its class: R2_RECOIL's atoms in |2,2⟩ at
+    /// the trap's centre at 0.4 to 30 times the reach's largest speed along each lab axis through 2 µs at 800 steps, and
+    /// the resonant probe's folded drives (`resonant_probe`) at 1 to 300 times through 0.8 µs at 0.005 µs -- atoms held to
+    /// the end, lost, and stopped where they scatter beyond any state --, read at the candidates m·2τ, the checkpoints
+    /// a fifth of the run less a little apart (off the step's grid). Kept, a trajectory's fates, listed atoms and counts
+    /// are those of the same trajectory advanced through at once; and its states replayed at every candidate, and at a
+    /// few of them, are to the bit those that one advance through the run reads there -- none after its loss, and after
+    /// a runaway the state it stopped in.
+    #[test]
+    fn a_kept_trajectory_s_states_are_made_again_from_its_checkpoints_to_the_bit() {
+        let key = |s: &Option<State>| s.as_ref().map(|s| format!("{:?} {} {} {}", s.sample, s.tau.to_bits(), s.index, s.jumps));
+        let (mut ends, mut lost, mut stopped, mut most) = (0, 0, 0, 0);
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R2_RECOIL.json");
+        let plain = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+        let (probe, probe_light, kept, b) = resonant_probe();
+        let cases = [(plain.clone(), Light::new(&plain), vec![], 2., [0.4, 3., 30.]), (probe, probe_light, kept, 0.8, [1., 30., 300.])];
+        for (request, light, kept, last, factors) in cases {
+            let model = Model::new(&request, &light, &kept).unwrap();
+            let reference = alone(b);
+            let trap = model.trap(&reference, &model.prepared()).unwrap();
+            let reach = model.reach(&trap, &reference, request.temperature_uk, unseen(MOST_TRAJECTORIES as f64));
+            let entries = model.sampled(&model.running());
+            let widest = (0..model.decay.rows).map(|x| model.decay[(x, x)].re).fold(0., f64::max);
+            let domain = Domain { model: &model, reach: &reach, hbar_over_mass: model.hbar_over_mass(), sampled: &entries, widest, result: true };
+            let run = Run::new(&model, reference);
+            let mut plan = Plan::new(&[0., 0.5 * last, last], trap.lab);
+            let tau = plan.end / 800.;
+            plan.cell = 2. * tau;
+            plan.read_at(grid(plan.end, tau));
+            plan.window = plan.end / 5.3;
+            for factor in factors {
+                for a in 0..3 {
+                    let kappa: V3 = std::array::from_fn(|x| if x == a { factor * reach.speed / model.hbar_over_mass() } else { 0. });
+                    let (start, index) = (Start { state: b, r: trap.centre, kappa }, (a + 7) as u64);
+                    let [through, record] = [false, true].map(|keep| super::run(&run, &domain, start, index, tau, &plan, keep));
+                    assert_eq!((&record.outputs, &record.reads, &record.listed, format!("{:?}", record.counts)), (&through.outputs, &through.reads, &through.listed, format!("{:?}", through.counts)), "kept against through at {factor} × along {a}");
+                    assert!(record.trail[0].trajectory.time == 0. && record.trail.windows(2).all(|w| w[0].trajectory.time < w[1].trajectory.time));
+                    most = most.max(record.trail.len());
+                    // The states one advance through the run reads at the candidates; held as it stood after a runaway.
+                    let mut t = Trajectory::new(&run, b, start.r, start.kappa, SEED, index);
+                    let mut path = adapt::Path::new(SEED, index, plan.cell, (plan.cell / tau).log2().round() as u32);
+                    let mut direct: Vec<Option<State>> = vec![None; plan.reads.len()];
+                    direct[0] = Some(State::of(&t, tau));
+                    let mut reached = 1;
+                    let advanced = adapt::advance(&run, &domain, tau, &mut t, &mut Scratch::default(), &mut path, plan.end, plan.end, &plan.reads, &mut |k, s| (direct[k], reached) = (Some(State::of(s, tau)), k + 1), &mut |_, _| {});
+                    match advanced {
+                        Err(Refused::Runaway) => {
+                            direct[reached..].fill(Some(State::of(&t, tau)));
+                            stopped += 1;
+                        }
+                        _ if t.lost.is_some() => lost += 1,
+                        _ => ends += 1,
+                    }
+                    let few: Vec<usize> = (0..plan.reads.len()).filter(|k| k % 97 == 0 || k + 1 == plan.reads.len()).collect();
+                    let times: Vec<f64> = few.iter().map(|&k| plan.reads[k]).collect();
+                    let again = replay(&run, &domain, tau, plan.end, &record.trail, &plan.reads);
+                    let sparse = replay(&run, &domain, tau, plan.end, &record.trail, &times);
+                    assert!(again.iter().zip(&direct).all(|(x, y)| key(x) == key(y)), "every candidate at {factor} × along {a}");
+                    assert!(sparse.iter().zip(&few).all(|(x, &k)| key(x) == key(&direct[k])), "a few candidates at {factor} × along {a}");
+                }
+            }
+        }
+        eprintln!("{ends} atoms held to the end, {lost} lost, {stopped} stopped; {most} checkpoints at the most");
+        assert!(ends > 0 && lost > 0 && stopped > 0 && most >= 5, "{ends} held, {lost} lost, {stopped} stopped; {most} checkpoints");
     }
 
     /// The analysis times' candidates and their reads (module documentation, # The analysis times; `grid`, `analysed`):
@@ -6172,6 +6384,14 @@ mod tests {
 
     /// The guard's class test's step (µs).
     const TAU_GUARD: f64 = 0.005;
+
+    /// A group's records added in their order (`Shape::add`).
+    fn folded(shape: &Shape, records: impl Iterator<Item = Record>) -> Part {
+        records.fold(shape.empty(), |mut part, r| {
+            shape.add(&mut part, r);
+            part
+        })
+    }
 
     /// One trajectory through the plan (`run`) with its states not kept.
     fn run_trajectory(run: &Run, domain: &Domain, start: Start, index: u64, tau: f64, plan: &Plan) -> Record {
@@ -6309,7 +6529,7 @@ mod tests {
                 let mut samples = vec![vec![]; outputs + 1];
                 samples[0] = (0..members).map(|m| state(m, 0., 0)).collect();
                 let lost = (0..members).map(|m| (1, state(m, loss(m), 6))).collect();
-                Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), listed: vec![], samples, lost, counts: Counts::default() }
+                Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), listed: vec![], samples, trails: vec![], lost, counts: Counts::default() }
             })
             .collect();
         let all: Vec<&Part> = parts.iter().collect();

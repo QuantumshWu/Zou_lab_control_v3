@@ -189,11 +189,15 @@ impl Path {
     }
 }
 
-/// Advances a held trajectory to the time `to` (the run's end) by steps of τ, with its jumps and its loss test (module
+/// Advances a held trajectory toward the time `to` (the run's end) by steps of τ, with its jumps and its loss test (module
 /// documentation, # The step, # The jumps; the loss is tested at every step's end and after every jump, SPEC §1.7),
-/// and reads it at the times `at` (increasing) that lie after its time and no later than `to`, each inside the step it
-/// falls in and the trajectory the same whatever is read (# The reads): `read` takes a time's place in `at` and the
-/// reading there. `each` takes every piece of every step's path -- from the step's start or a jump of the step -- with
+/// as far as the first step's end at or past `stop` (`to` for the whole run), and reads it at the times `at`
+/// (increasing) that lie after its time and no later than where it stops, each inside the step it falls in and the
+/// trajectory the same whatever is read (# The reads): `read` takes a time's place in `at` and the reading there. A
+/// stop is no step's end of its own: the steps are those of the run to `to`, and the trajectory with its path and
+/// scratch where it stopped is advanced on by the next call -- its time tells the reads that are done, its path where it
+/// stands --, to the bit as without the stop (a trajectory stopped and advanced on from a copy of itself and its path
+/// alike: the scratch carries nothing from one step to the next, step.rs `Scratch`). `each` takes every piece of every step's path -- from the step's start or a jump of the step -- with
 /// the time the trajectory is on it to: the next jump or the step's end. A trajectory lost on the way stops at its
 /// loss time. Where the scheme refuses a step at every length down to the time's round-off, the advance ends
 /// there with the refusal; so it does where the model gives a jump no photon (`step::jump`), where a state scatters
@@ -210,12 +214,13 @@ pub fn advance<D: Dynamics>(
     scratch: &mut Scratch,
     path: &mut Path,
     to: f64,
+    stop: f64,
     at: &[f64],
     read: &mut dyn FnMut(usize, &Trajectory),
     each: &mut dyn FnMut(&Segment, f64),
 ) -> Result<(), Refused> {
     let mut next = at.partition_point(|&time| time <= trajectory.time);
-    while trajectory.lost.is_none() && trajectory.time < to {
+    while trajectory.lost.is_none() && trajectory.time < to && trajectory.time < stop {
         let rest = to - trajectory.time;
         // The step taken from here: τ or the run's rest -- the rest too where a step of τ would end within the grid's
         // rounding of the run's end, which is then no step of its own --; half the length where the scheme refuses a
