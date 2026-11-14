@@ -668,18 +668,38 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
             assert!(skew <= crate::units::rounding(4 * n * n * (j + 1)), "the decay is Hermitian: {skew}");
         }
         assert!(landing_apart.frobenius() <= (q + x_size * q + rate(normalization)).max(1e-9) * exact.frobenius(), "the landing map {}", landing_apart.frobenius() / exact.frobenius());
-        // The errors the run books, measured on random slow states (a point's numbers, not bounds: the operator's bound
-        // r_K ‖H − z₀‖₂ is not one of a state's relative error, which a state the fold's part moves little reads larger):
-        // each order's falls to the next's, the series' by about its ratio, the normalization's by about x.
-        let forms = fold.series(C64::real(z0), 2);
+        // The errors the run books, measured on random slow states against the definition (`Fold::evaluated` against
+        // `Fold::defined`, a point's numbers, not bounds): the evaluation's normalized generator at its orders is this
+        // test's route (the same Hermitian part, the same decay), and the error falls from the series' order 0 to 1 and
+        // with the normalization's order.
+        let defined = fold.defined(&lv);
+        let at = |orders: Orders| fold.evaluated(&lv, C64::real(z0), orders);
+        let mut apart = at(orders);
+        let mut route_whole = route.hermitian_part();
+        route_whole.add_scaled(C64::new(0.0, -0.5), &{
+            let data = made(orders);
+            let (bent, e) = (matrix(&data, crate::model::assemble::BENT), matrix(&data, crate::model::assemble::OFFSET));
+            let mut inner = Mat::zeros(n, n);
+            for t in &responses {
+                let mut wave = t[0].clone();
+                if order >= 1 {
+                    wave.add_scaled(-C64::ONE, &t[1].product(&e));
+                }
+                inner.add_scaled(C64::ONE, &wave.adjoint_product(&lv.decay.product(&wave)));
+            }
+            bent.product(&inner).product(&bent)
+        });
+        apart.add_scaled(-C64::ONE, &route_whole);
+        assert!(apart.frobenius() <= 1e-9 * route_whole.frobenius(), "{name}: the evaluated generator is the route's, {} apart", apart.frobenius() / route_whole.frobenius());
         let mut stream = crate::random::Stream::new(3, crate::random::Purpose::Initial, 0, 0);
         for _ in 0..4 {
             let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
-            let (first, second) = (fold.order_error(&forms, C64::real(z0), 0, &psi), fold.order_error(&forms, C64::real(z0), 1, &psi));
-            let normalization: Vec<f64> = (0..3).map(|j| fold.normalization_error(&forms[1], j, &psi)).collect();
-            println!("    measured: the series' order 0 {first:.3e}, order 1 {second:.3e} (q {q:.1e}); the normalization's J 0..2 {normalization:?} (x {x_size:.1e})");
+            let error = |series: usize, normalization: usize| Fold::evaluation_error(&at(Orders { series, normalization }), &defined, C64::real(z0), &psi);
+            let (first, second) = (error(0, normalization), error(1, normalization));
+            let by_j: Vec<f64> = (0..3).map(|j| error(1, j)).collect();
+            println!("    measured against the definition: the series' order 0 {first:.3e}, order 1 {second:.3e} (q {q:.1e}); at order 1 the normalization's J 0..2 {by_j:?} (x {x_size:.1e})");
             assert!(first > 0.0 && second < first, "{name}: the series' measured errors {first}, {second}");
-            assert!(normalization.windows(2).all(|w| w[1] < w[0]), "{name}: the normalization's measured errors {normalization:?}");
+            assert!(by_j[1] < by_j[0], "{name}: the normalization's measured errors {by_j:?}");
         }
     }
   }
