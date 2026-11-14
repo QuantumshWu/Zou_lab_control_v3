@@ -64,14 +64,17 @@
 //! (λ_p + Δ + f − K)⁻¹ W r_p = T r_p − Δ T2 r_p + Δ² R² R(λ + Δ) W r_p, T2 the solution of T2 H − (K − f) T2 = T
 //! (−∂T/∂f). The first two terms are the model's; the third is the remainder, by the resolvent's identity
 //! R(z + Δ) = R − Δ R² + Δ² R² R(z + Δ), z = λ_p + f, exact at any Δ -- no series, no radius. The resolvents of one K
-//! commute, so ‖Δ² R² R(z + Δ) W r_p‖ = Δ² ‖R(z + Δ) R² W r_p‖ ≤ Δ² ‖R(z + Δ)‖ ‖R² W r_p‖, and K = H_E − (i/2)D on Q is
-//! normal where D is each line's excited states' common rate times one (D = Σ C†C: the line's total decay, the same from
-//! every excited state of it) and H_E holds no coupling across lines -- every scene's --, so that ‖R(z + Δ)‖ is exactly
-//! 1/min_k |z + Δ − κ_k|, κ_k K's eigenvalues, its Schur form's diagonal (`Schur::distance`; where K is not normal the
-//! numerical range's bound 1/dist(z + Δ, W(K)), W(K) within the Gershgorin rectangle of the Hermitian parts). Over the
+//! commute, so the remainder is Δ² R(z + Δ) v, v = R² W r_p; and K = H_E − (i/2)D on Q is normal where D is each line's
+//! excited states' common rate times one (D = Σ C†C: the line's total decay, the same from every excited state of it)
+//! and H_E holds no coupling across lines -- every scene's --, so that ‖R(z + Δ) v‖² = Σ_k |⟨e_k|v⟩|²/|z + Δ − κ_k|²
+//! exactly, κ_k and e_k K's eigenvalues and eigenvectors, its Schur form's diagonal and columns (`Schur::weights`): one
+//! change of v's basis a replica, n_Q numbers an offset. (Where K is not normal, the numerical range's bound
+//! ‖R(z + Δ)‖ ≤ 1/dist(z + Δ, W(K)), W(K) within the Gershgorin rectangle of the Hermitian parts, `Schur::distance`.
+//! The bound ‖R(z + Δ)‖ ‖v‖ at every offset overstated a sideband near an excited level v does not hold: R3_DOPPLER's
+//! cooling pair had eleven blocks made explicit at its prior atoms.) Over the
 //! frequencies a P amplitude spans, each component c at its offset δ_c with its share w_c of the amplitude's population,
 //! the remainders add as the shares weigh them: the first criterion's relative size is
-//!   ρ_p = ‖R² W r_p‖/‖R W r_p‖ · Σ_c w_c δ_c² / min_k |λ_p + f + δ_c − κ_k|,
+//!   ρ_p = Σ_c w_c δ_c² ‖R(λ_p + f + δ_c) R² W r_p‖ / ‖R W r_p‖,
 //! the replicas added in squares, each with its own sum (`Fold::offsets`, `Fold::block_parts`): one product of the
 //! resolvent with the response and, per component, its share and its distance from K's spectrum. At small δ it is the
 //! second moment of the amplitude's spectrum over the distance; near a resonance of the folded block it grows without
@@ -81,8 +84,11 @@
 //!
 //! The offsets a P amplitude spans (`Fold::offsets`; ELIMINATION v8): the pattern a moving atom sees, ±2 k_max v (the
 //! beams' Doppler shifts, at most k_max v, and their pattern's turn, |k_l − k_l'| v ≤ 2 k_max v), with the amplitude
-//! whole; and every component into its eigenstate (# The criteria's numbers: a turning direct entry, or two replicas'
-//! coupling) at its combined frequency δ = Ω + λ_p − λ_q -- the same in every gauge, of the actual spectrum -- as a
+//! whole; and every component the model carries as it turns into its eigenstate (# The criteria's numbers: a turning
+//! direct entry, or two replicas' coupling kept as a link -- an averaged one is in the static shift, not in the
+//! amplitude's spectrum, its error criterion two's 2(a/δ)²; read as a sideband, R3_DOPPLER's ground hyperfine beat of
+//! 42 943 rad/µs at a mixing of 5.9·10⁻⁴ made blocks explicit, the first-order offset's extrapolation applied where the
+//! model applies none) at its combined frequency δ = Ω + λ_p − λ_q -- the same in every gauge, of the actual spectrum -- as a
 //! sideband of the first-order amplitude a/|δ|, its share of the population min(1, a/|δ|)². The share is that
 //! frequency's spectral weight in the state: an entry a e^{−iΩt} from q′ into q drives, to the first order,
 //! x_q ⊃ (a/δ) x_q′ e^{−i(λ_q′ + Ω)t}, a component of the amplitude at λ_q + δ whose part of the norm is (a/|δ|)² of
@@ -442,6 +448,13 @@ impl Schur {
                 y[b.start + row] = acc / (sigma - b.s[row * m + row]);
             }
         }
+    }
+    /// Where A is normal, a vector's weights on its eigenvectors, (κ_k, |⟨e_k|v⟩|²): ‖(z − A)⁻¹ v‖² = Σ_k |⟨e_k|v⟩|²/|z − κ_k|²
+    /// exactly (module documentation, # First order in the frequency offsets); none where A is not normal.
+    fn weights(&self, v: &[C64]) -> Option<Vec<(C64, f64)>> {
+        let Spectrum::Normal(values) = &self.spectrum else { return None };
+        let y = self.left_in(&Mat { rows: self.n, cols: 1, data: v.to_vec() }).data;
+        Some(values.iter().zip(&y).map(|(k, c)| (*k, c.norm_sqr())).collect())
     }
     /// 1/‖(z − A)⁻¹‖ (module documentation, # First order in the frequency offsets): where A is normal exactly the
     /// distance of z from A's nearest eigenvalue; otherwise a bound of it from below, z's distance from the rectangle that
@@ -804,7 +817,8 @@ impl Fold {
     }
 
     /// The offsets eigenstate p's amplitude spans, per replica (module documentation, # First order in the frequency
-    /// offsets): Σ_c w_c δ_c² / ‖R(λ_p + f + δ_c)‖⁻¹ at each replica of p's group (`Schur::distance`; none at the others)
+    /// offsets): Σ_c w_c δ_c² ‖R(λ_p + f + δ_c) v‖/‖v‖, v = R² W r_p, at each replica of p's group (`Schur::weights`;
+    /// none at the others)
     /// -- `pattern` (2 k_max v) at the share `main`, the larger of its two signs, and each component into p of
     /// `components` (`components`, at the atom's velocity) at its combined frequency δ's real part, at its source's share
     /// `source(p′)` times its own, min(1, a/|δ|)².
@@ -817,8 +831,18 @@ impl Fold {
                 if rep.group != self.groups[p] {
                     return 0.0;
                 }
+                // The remainder's vector R(z)² W r_p and, where K is normal, its weights on K's eigenvectors.
                 let z = lambda + C64::real(rep.frequency);
-                let term = |delta: f64| delta * delta / rep.k.distance(z + C64::real(delta));
+                let v = rep.k.resolvent(z, &rep.k.resolvent(z, &rep.w.apply(&self.right(p))));
+                let size = v.iter().map(|x| x.norm_sqr()).sum::<f64>();
+                if size == 0.0 {
+                    return 0.0;
+                }
+                let weights = rep.k.weights(&v);
+                let term = |delta: f64| {
+                    let at = z + C64::real(delta);
+                    delta * delta * weights.as_ref().map_or_else(|| 1.0 / rep.k.distance(at), |w| (w.iter().map(|(k, w)| w / (at - *k).norm_sqr()).sum::<f64>() / size).sqrt())
+                };
                 let main = if main > 0.0 { main * term(pattern).max(term(-pattern)) } else { 0.0 };
                 main + into.iter().map(|&(share, delta)| share * term(delta)).sum::<f64>()
             })
@@ -2246,6 +2270,13 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
         let n = fold.size();
         let ground_like: Vec<usize> = (0..n).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
         let components = fold.components(velocity);
+        // The components the model carries as they turn -- the turning direct entries and the kept links --: the offsets
+        // its amplitudes span; an averaged one is in the static shift, not in the spectrum (criterion two books it).
+        let state = |p: usize| {
+            let s = fold.dominant(p);
+            if s < ground { s } else { ground + fold.explicit[s - ground] }
+        };
+        let carried: Vec<Component> = components.iter().filter(|x| x.classes == (None, None) || kept.links.contains(&Link { a: state(x.row), b: state(x.column), classes: x.classes })).copied().collect();
         // The parts of a ground-like eigenstate's response (or remainder) per block and replica, each split among the
         // replica's classes (`Fold::block_parts`): (block, replica, class, part).
         let parts_of = |p: usize, offsets: Option<&[f64]>| fold.block_parts(blocks, p, offsets);
@@ -2283,7 +2314,7 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
             // Each eigenstate's remainder at the offsets it spans (`Fold::offsets`), each component at its share, the
             // source's whole, its blocks' parts with it.
             for &p in &ground_like {
-                let offsets = fold.offsets(p, pattern, &components, 1.0, &|_| 1.0);
+                let offsets = fold.offsets(p, pattern, &carried, 1.0, &|_| 1.0);
                 let (rho, parts) = parts_of(p, Some(&offsets));
                 if rho > share {
                     pick(p, parts, rho * rho, share * share, &mut moves);
@@ -2479,8 +2510,13 @@ pub(crate) fn errors(fold: &Fold, blocks: &[Vec<usize>], linked: &dyn Fn(&Link) 
     // eigenstate's own, each component's sideband at its source's times its share; booked as 2ρ on the blocks by their
     // parts of it.
     let components = fold.components(velocity);
+    let state = |p: usize| {
+        let s = fold.dominant(p);
+        if s < ground { s } else { ground + fold.explicit[s - ground] }
+    };
+    let carried: Vec<Component> = components.iter().filter(|x| x.classes == (None, None) || linked(&Link { a: state(x.row), b: state(x.column), classes: x.classes })).copied().collect();
     for p in 0..n {
-        let offsets = fold.offsets(p, pattern, &components, weight[p], &|q| weight[q]);
+        let offsets = fold.offsets(p, pattern, &carried, weight[p], &|q| weight[q]);
         if offsets.iter().all(|x| *x == 0.0) {
             continue;
         }
