@@ -276,12 +276,12 @@ impl Model {
             // The normalized generator's held part (assemble.rs, # The normalized generator): its diagonal at the point,
             // and its gradient -- the generator's whose gradient the force is. Its second derivatives are not made: a
             // potential asked to that order (a trap's Hessian) is the forms'.
-            if let (Some(fourth), true) = (&plan.fourth, order <= 1) {
+            if let (Some(fourth), true) = (&plan.fourth.as_ref().filter(|fourth| fourth.held()), order <= 1) {
                 let mut site = super::assemble::Held::<super::assemble::Site>::take();
                 site.beams.clear();
                 site.beams.extend_from_slice(amplitudes);
                 let table = tables.and_then(|t| t.of(cluster, lights)).filter(|table| self.placed(table, &mut site));
-                out.work += self.quartic(plan, fourth, table, None, &mut site, false);
+                out.work += self.quartic(plan, fourth, table, None, &mut site, false, false);
                 let (n, size) = (fourth.n, fourth.n * fourth.n);
                 Model::quartic_read(|q| {
                     let held = &q.data[super::assemble::HELD * size..];

@@ -65,7 +65,7 @@
 //! (−∂T/∂f). The first two terms are the model's; the third is the remainder whose relative size ρ(Δ) is the first
 //! criterion (`Fold::remainder`).
 //!
-//! # The criteria's numbers (`Fold::components`, `Fold::photons`)
+//! # The criteria's numbers (`Fold::components`; the photons' on the run's photon classes, `Model::readings`)
 //! - The remainder ρ_p(Δ) = ‖Δ² R(λ_p)² R(λ_p + Δ) W r_p‖ / ‖R(λ_p) W r_p‖ of each P eigenstate, the replicas added in
 //!   squares (different frequencies), with each excited state's part of it: the excited block that leaves the most is
 //!   the one a partition makes explicit (criterion one).
@@ -76,18 +76,19 @@
 //!   |a|²/δ).
 //! - The photons' cross terms: the jumps C_a T_f of two replicas land in the same ground states at two photon
 //!   frequencies; their interference turns at the difference, and of a rate γ it moves the populations by γ/Ω (the
-//!   secular approximation, first order: kept above the share).
+//!   secular approximation, first order: kept above the share). Read where the photons are the run's own -- its photon
+//!   classes, which land in every cluster (`Model::readings`) --, not in the prior's closure: no keep the prior makes
+//!   reads them.
 use crate::linalg::{schur, Eigen, Mat, C64};
 use crate::units::rounding;
 
-/// The atom's levels at a point (rad/µs, 1/√µs): the ground block in the lab frame, the excited block in the excited
-/// states' frame, the decay D = Σ_a C_a†C_a on the excited states, and the emission C_a (ground ← excited).
+/// The atom's levels at a point (rad/µs): the ground block in the lab frame, the excited block in the excited states' frame,
+/// and the decay D = Σ_a C_a†C_a on the excited states (C_a the emission, ground ← excited).
 #[derive(Clone, Debug)]
 pub(crate) struct Levels {
     pub ground: Mat,
     pub excited: Mat,
     pub decay: Mat,
-    pub emission: [Mat; 3],
 }
 
 /// One beam of a class at the point: its coupling (excited ← ground, its amplitude there in it) and its wave vector
@@ -187,8 +188,7 @@ pub(crate) struct Folded {
     pub w: Mat,
     pub back: Mat,
     pub t: Mat,
-    /// K_f = (H_E − (i/2)D) on Q_f and its Schur form.
-    kq: Mat,
+    /// The Schur form of K_f = (H_E − (i/2)D) on Q_f.
     k: Schur,
 }
 
@@ -552,7 +552,7 @@ pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replic
         }
     }
     // The replicas: Q_f and the feeds; one Schur form per distinct Q (K_f is K on Q_f, whatever f).
-    let mut forms: Vec<(Vec<usize>, Mat, Schur)> = vec![];
+    let mut forms: Vec<(Vec<usize>, Schur)> = vec![];
     let mut folded: Vec<Folded> = replicas
         .frequencies
         .iter()
@@ -560,12 +560,11 @@ pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replic
         .map(|(&f, &group)| {
             let q: Vec<usize> = (0..excited).filter(|&e| !slow.explicit.iter().enumerate().any(|(i, &x)| x == e && slow.groups[ground + i] == group && same(frame(ground + i), f))).collect();
             if !forms.iter().any(|x| x.0 == q) {
-                let kq = k_full.block(&q, &q);
-                let k = Schur::of(&kq).expect("the Schur form of the excited block");
-                forms.push((q.clone(), kq, k));
+                let k = Schur::of(&k_full.block(&q, &q)).expect("the Schur form of the excited block");
+                forms.push((q.clone(), k));
             }
-            let (_, kq, k) = forms.iter().find(|x| x.0 == q).expect("its form");
-            Folded { frequency: f, group: group_of(group), q, feeds: vec![], w: Mat::zeros(0, 0), back: Mat::zeros(0, 0), t: Mat::zeros(0, 0), kq: kq.clone(), k: k.clone() }
+            let (_, k) = forms.iter().find(|x| x.0 == q).expect("its form");
+            Folded { frequency: f, group: group_of(group), q, feeds: vec![], w: Mat::zeros(0, 0), back: Mat::zeros(0, 0), t: Mat::zeros(0, 0), k: k.clone() }
         })
         .collect();
     for (c, class) in classes.iter().enumerate() {
@@ -684,28 +683,14 @@ impl Component {
     }
 }
 
-/// A cross term of two photon frequencies (criterion two for the jumps): from eigenstate `from`, landing in eigenstates
-/// `landing` (a, b), its size γ, the beat Ω between the two photons, and the two replicas.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Cross {
-    pub from: usize,
-    pub landing: (usize, usize),
-    pub size: f64,
-    pub beat: f64,
-    pub classes: (Option<usize>, Option<usize>),
-}
-
 impl Fold {
     /// P's size.
     pub(crate) fn size(&self) -> usize {
         self.generator.rows
     }
-    /// The right eigenvector r_p (unit) and the left one l_p (l_p† r_q = δ_pq) of H.
+    /// The right eigenvector r_p (unit) of H.
     pub(crate) fn right(&self, p: usize) -> Vec<C64> {
         (0..self.size()).map(|i| self.eigen.vectors[(i, p)]).collect()
-    }
-    pub(crate) fn left(&self, p: usize) -> Vec<C64> {
-        (0..self.size()).map(|i| self.eigen.inverse[(p, i)].conj()).collect()
     }
     /// Its ground weight ‖P_G r_p‖².
     pub(crate) fn ground_weight(&self, p: usize) -> f64 {
@@ -822,56 +807,6 @@ impl Fold {
         out
     }
 
-    /// The photons of eigenstate p per replica (and of the explicit states' own decay, at their frames): per photon
-    /// frequency the vectors u_a = C_a T_f r_p on the ground states.
-    pub(crate) fn photon_vectors(&self, levels: &Levels, p: usize) -> Vec<(f64, Option<usize>, [Vec<C64>; 3])> {
-        let r = self.right(p);
-        let mut out: Vec<(f64, Option<usize>, [Vec<C64>; 3])> = vec![];
-        for rep in &self.replicas {
-            let x = rep.t.apply(&r);
-            let u: [Vec<C64>; 3] = std::array::from_fn(|a| (0..self.ground).map(|g| rep.q.iter().enumerate().map(|(i, &e)| levels.emission[a][(g, e)] * x[i]).sum()).collect());
-            out.push((rep.frequency, rep.feeds.iter().find_map(|f| f.class), u));
-        }
-        for (i, &e) in self.explicit.iter().enumerate() {
-            let f = self.frames[self.ground + i];
-            let u: [Vec<C64>; 3] = std::array::from_fn(|a| (0..self.ground).map(|g| levels.emission[a][(g, e)] * r[self.ground + i]).collect());
-            match out.iter_mut().find(|x| same(x.0, f)) {
-                Some(x) => (0..3).for_each(|a| x.2[a].iter_mut().zip(&u[a]).for_each(|(s, v)| *s += *v)),
-                None => out.push((f, None, u)),
-            }
-        }
-        out
-    }
-
-    /// The cross terms of two photon frequencies from every eigenstate (module documentation): landing in eigenstates
-    /// a and b (their left vectors' ground parts), γ = |Σ_a ⟨l_a|u_{f,a}⟩ ⟨l_b|u_{f',a}⟩*|, Ω = f − f' − (λ_a − λ_b).
-    pub(crate) fn photons(&self, levels: &Levels) -> Vec<Cross> {
-        let n = self.size();
-        let mut out = vec![];
-        let landing: Vec<Vec<C64>> = (0..n).map(|q| self.left(q)[..self.ground].to_vec()).collect();
-        for p in 0..n {
-            let vectors = self.photon_vectors(levels, p);
-            for (i, (f, first, u)) in vectors.iter().enumerate() {
-                for (j, (g, second, v)) in vectors.iter().enumerate() {
-                    if i == j {
-                        continue;
-                    }
-                    for a in 0..n {
-                        for b in 0..n {
-                            let s: C64 = (0..3).map(|k| crate::linalg::inner(&landing[a], &u[k]) * crate::linalg::inner(&landing[b], &v[k]).conj()).sum();
-                            if s == C64::ZERO {
-                                continue;
-                            }
-                            let beat = f - g - (self.eigen.values[a].re - self.eigen.values[b].re);
-                            out.push(Cross { from: p, landing: (a, b), size: s.abs(), beat, classes: (*first, *second) });
-                        }
-                    }
-                }
-            }
-        }
-        out
-    }
-
     /// The normalization of P's coordinates (ELIMINATION.md §2: the first order's renormalization, here whole): the
     /// slow state (x, T x) has the norm x†(1 + X)x, so its normalized coordinates are y = S x, S = (1 + X)^{1/2}; returns
     /// S and S⁻¹ (X Hermitian and positive: its eigenbasis).
@@ -970,6 +905,43 @@ impl Fold {
     pub(crate) fn series_distance(&self, z0: C64) -> f64 {
         self.replicas.iter().flat_map(|rep| (0..rep.k.n).map(move |i| (z0 + C64::real(rep.frequency) - rep.k.s[i * rep.k.n + i]).abs())).fold(f64::INFINITY, f64::min)
     }
+    /// The excited state that sets the series' distance (`series_distance`): of the excited block's Schur forms over the
+    /// replicas -- each block of the states K's entries join, where the drive reaches one of them --, the diagonal entry
+    /// nearest z₀ + f, the state its Schur vector holds most of (E's index): the block criterion one makes explicit where
+    /// the series asks an order the forms do not hold (`SERIES_MOST`), and on which a run's state books the series'
+    /// remainder (`Model::readings`).
+    pub(crate) fn nearest(&self, z0: C64) -> Option<usize> {
+        let mut best: Option<(f64, usize)> = None;
+        for rep in &self.replicas {
+            let driven = |state: usize| (0..rep.w.cols).any(|s| rep.w[(state, s)] != C64::ZERO);
+            for b in rep.k.blocks.iter().filter(|b| b.states.iter().any(|&state| driven(state))) {
+                let m = b.states.len();
+                for k in 0..m {
+                    let distance = (z0 + C64::real(rep.frequency) - b.s[k * m + k]).abs();
+                    if best.is_none_or(|x| distance < x.0) {
+                        let most = (0..m).max_by(|&x, &y| b.q[k * m + x].norm_sqr().total_cmp(&b.q[k * m + y].norm_sqr())).expect("a block's state");
+                        best = Some((distance, rep.q[b.states[most]]));
+                    }
+                }
+            }
+        }
+        best.map(|b| b.1)
+    }
+    /// The excited state that holds the most of the excited share X = Σ_f T_f†T_f: of the responses' rows, the largest
+    /// Σ_s |T[e, s]|² over the replicas (E's index).
+    pub(crate) fn most_excited(&self) -> Option<usize> {
+        let mut weight: Vec<(usize, f64)> = vec![];
+        for rep in &self.replicas {
+            for (i, &e) in rep.q.iter().enumerate() {
+                let w: f64 = (0..rep.t.cols).map(|s| rep.t[(i, s)].norm_sqr()).sum();
+                match weight.iter_mut().find(|x| x.0 == e) {
+                    Some(x) => x.1 += w,
+                    None => weight.push((e, w)),
+                }
+            }
+        }
+        weight.into_iter().filter(|x| x.1 > 0.0).max_by(|a, b| a.1.total_cmp(&b.1)).map(|x| x.0)
+    }
 
     /// The excited share X = Σ_f T_f†T_f (the metric of P's coordinates: the slow state (x, T x) has the norm
     /// x†(1 + X)x).
@@ -980,6 +952,157 @@ impl Fold {
             x.add_scaled(C64::ONE, &rep.t.adjoint_product(&rep.t));
         }
         x
+    }
+
+    /// The parts of an eigenstate p's response (or, with a `shift`, of its remainder there) per excited block and
+    /// replica, each split among the replica's classes (`class_shares`): (block, replica, class, part) -- of the replicas
+    /// of p's own group; and the response's (or remainder's) size. What the closure moves a block by (`closure`), and
+    /// what a state's error on a block is split by (`Fold::state_block_parts`).
+    pub(crate) fn block_parts(&self, blocks: &[Vec<usize>], p: usize, shift: Option<f64>) -> (f64, Vec<(usize, usize, Option<usize>, f64)>) {
+        let block_of = |e: usize| blocks.iter().position(|b| b.contains(&e));
+            let (n, r) = (self.size(), self.right(p));
+            let lambda = self.eigen.values[p];
+            let unit: Vec<C64> = (0..n).map(|q| if q == p { C64::ONE } else { C64::ZERO }).collect();
+            let mut parts = vec![];
+            let (mut num, mut den) = (0.0, 0.0);
+            for (j, rep) in self.replicas.iter().enumerate().filter(|(_, rep)| rep.group == self.groups[p]) {
+                let wr = rep.w.apply(&r);
+                let sigma = lambda + C64::real(rep.frequency);
+                let x0 = rep.k.resolvent(sigma, &wr);
+                let d: Vec<C64> = match shift {
+                    None => x0.clone(),
+                    Some(delta) => {
+                        let shifted = rep.k.resolvent(sigma + C64::real(delta), &wr);
+                        let second = rep.k.resolvent(sigma, &x0);
+                        (0..x0.len()).map(|i| shifted[i] - x0[i] + second[i] * delta).collect()
+                    }
+                };
+                let mut on = vec![0.0; blocks.len()];
+                for (i, &e) in rep.q.iter().enumerate() {
+                    if let Some(b) = block_of(e) {
+                        on[b] += d[i].norm_sqr();
+                    }
+                    num += d[i].norm_sqr();
+                    den += x0[i].norm_sqr();
+                }
+                let mut responses = None;
+                for (b, &x) in on.iter().enumerate().filter(|(_, x)| **x > 0.0) {
+                    let responses = responses.get_or_insert_with(|| self.feed_responses(j, &unit));
+                    for (class, share) in class_shares(responses, &rep.q, &blocks[b]) {
+                        parts.push((b, j, class, x * share));
+                    }
+                }
+            }
+            let scale = if shift.is_some() { den } else { 1.0 };
+            if scale > 0.0 {
+                parts.iter_mut().for_each(|x| x.3 /= scale);
+            }
+            (if shift.is_some() { if den > 0.0 { (num / den).sqrt() } else { 0.0 } } else { num.sqrt() }, parts)
+            }
+
+    /// A state ψ's error `x` on the excited block b, split as an eigenstate's part is (`block_parts`): over the state's
+    /// eigenstates by their weights |⟨l_p|ψ⟩|², each by its replicas' and classes' parts on the block; the classes' shares
+    /// of x (none where nothing of the state reaches the block).
+    pub(crate) fn state_block_parts(&self, blocks: &[Vec<usize>], b: usize, psi: &[C64], x: f64) -> Vec<(Option<usize>, f64)> {
+        let n = self.size();
+        let coefficients: Vec<C64> = (0..n).map(|p| (0..n).map(|i| self.eigen.inverse[(p, i)] * psi[i]).sum()).collect();
+        let total: f64 = coefficients.iter().map(|z| z.norm_sqr()).sum();
+        let mut shares: Vec<(Option<usize>, f64)> = vec![];
+        for p in (0..n).filter(|&p| total > 0.0 && coefficients[p].norm_sqr() > 0.0) {
+            let weight = coefficients[p].norm_sqr() / total;
+            for (_, _, class, part) in self.block_parts(blocks, p, None).1.into_iter().filter(|part| part.0 == b) {
+                match shares.iter_mut().find(|s| s.0 == class) {
+                    Some(s) => s.1 += weight * part,
+                    None => shares.push((class, weight * part)),
+                }
+            }
+        }
+        let sum: f64 = shares.iter().map(|s| s.1).sum();
+        if !(sum > 0.0) {
+            return vec![];
+        }
+        shares.into_iter().map(|(class, s)| (class, x * s / sum)).collect()
+    }
+
+    /// The block move where a series does not converge on the excited block b (criterion one's existence, as the closure
+    /// moves where a fold does not exist, `closure`): of the ground-like eigenstates' parts on b, the largest of a class
+    /// -- its replica's, its eigenstate's group's ground places --; none where no class reaches b.
+    pub(crate) fn block_move(&self, blocks: &[Vec<usize>], b: usize) -> Option<(usize, Vec<usize>)> {
+        let mut largest: Option<(usize, usize, f64)> = None;
+        for p in (0..self.size()).filter(|&p| self.ground_weight(p) >= 0.5) {
+            for (_, _, class, x) in self.block_parts(blocks, p, None).1.into_iter().filter(|part| part.0 == b) {
+                if let Some(c) = class.filter(|_| x > largest.map_or(0.0, |m| m.2)) {
+                    largest = Some((c, p, x));
+                }
+            }
+        }
+        let (class, p, _) = largest?;
+        let group = self.groups[self.dominant(p)];
+        Some((class, self.members[group].iter().copied().filter(|&place| place < self.ground).collect()))
+    }
+
+    /// The fold's largest excited share x, X's largest eigenvalue (`metric`; `Series`): the normalization's series
+    /// S⁻¹ = Σ_j b_j X^j converges where x < 1.
+    pub(crate) fn excited_share(&self) -> f64 {
+        crate::linalg::hermitian_eigen(&self.metric()).values.iter().fold(0.0_f64, |m, &v| m.max(v))
+    }
+
+    /// The engine's generator of the series to order K (assemble.rs `normal`) of its forms `forms` (N₀, N₁, …: `series`)
+    /// about z₀: H₀ = A + N₀, and at K = 1 its first order's term H₀ − N₁(H₀ − z₀).
+    pub(crate) fn explicit_generator(&self, forms: &[Mat], z0: C64, order: usize) -> Mat {
+        let mut h = self.direct.clone();
+        h.add_scaled(C64::ONE, &forms[0]);
+        if order >= 1 {
+            let mut e = h.clone();
+            for i in 0..self.size() {
+                e[(i, i)] -= z0;
+            }
+            h.add_scaled(-C64::ONE, &forms[1].product(&e));
+        }
+        h
+    }
+
+    /// The series' order K's error on a state ψ, measured (ELIMINATION v7): the engine's generator at K
+    /// (`explicit_generator`) against the series to K + 1 solved (`series_generator`, the forms to K + 1) on ψ,
+    /// r = ‖(H_K − H_{K+1})ψ‖ / ‖(H_{K+1} − z₀)ψ‖, a rate's relative error 2r + r² (of T†T); all of it where the series
+    /// to K + 1 does not settle. A point's number, not a bound: the ratio q only says the series converges.
+    pub(crate) fn order_error(&self, forms: &[Mat], z0: C64, order: usize, psi: &[C64]) -> f64 {
+        let Some(next) = self.series_generator(&forms[..order + 2], z0) else { return 1.0 };
+        let (own, next) = (self.explicit_generator(forms, z0, order).apply(psi), next.apply(psi));
+        let apart = norm_of(own.iter().zip(&next).map(|(a, b)| *a - *b));
+        rate_error(apart, norm_of(next.iter().zip(psi).map(|(h, p)| *h - z0 * *p)))
+    }
+
+    /// The normalization's order J's error on a state ψ, measured: S⁻¹ = Σ_{j≤J} b_j X^j (X the metric) against its next
+    /// order, ε = |b_{J+1}| ‖X^{J+1}ψ‖ / ‖S⁻¹_{J+1}ψ‖, a rate's 2ε + ε² (of ψ†S⁻¹ΛS⁻¹ψ); and the landing map's
+    /// (1 + Y)⁻¹ = Σ_{j≤J} (−Y)^j against its next, ‖Y^{J+1}ψ‖/‖ψ‖ (`y` = N₁): the larger.
+    pub(crate) fn normalization_error(&self, y: &Mat, order: usize, psi: &[C64]) -> f64 {
+        let x = self.metric();
+        let (mut power, mut bent) = (psi.to_vec(), psi.to_vec());
+        for j in 1..=order + 1 {
+            power = x.apply(&power);
+            let b = C64::real(binomial(-0.5, j));
+            bent.iter_mut().zip(&power).for_each(|(s, p)| *s += *p * b);
+        }
+        let (size, bent) = (norm_of(power.iter().copied()), norm_of(bent.iter().copied()));
+        let rate = rate_error(binomial(-0.5, order + 1).abs() * size, bent);
+        let mut landing = psi.to_vec();
+        for _ in 0..=order {
+            landing = y.apply(&landing);
+        }
+        let norm = norm_of(psi.iter().copied());
+        rate.max(if norm > 0.0 { (norm_of(landing.iter().copied()) / norm).min(1.0) } else { 0.0 })
+    }
+
+    /// What the normalization would do to the Hermitian generator on a state ψ, measured -- the evaluation takes the
+    /// series' own Hermitian part (assemble.rs `normal`) --: ‖(Herm(S H S⁻¹) − Herm H)ψ‖ against ‖(H − z₀)ψ‖, S =
+    /// (1 + X)^{1/2} (`normalization`), H the fold's generator; a rate's 2r + r².
+    pub(crate) fn hermitian_error(&self, z0: C64, psi: &[C64]) -> f64 {
+        let (s, s_inverse) = self.normalization();
+        let mut moved = s.product(&self.generator).product(&s_inverse).hermitian_part();
+        moved.add_scaled(-C64::ONE, &self.generator.hermitian_part());
+        let h = self.generator.apply(psi);
+        rate_error(norm_of(moved.apply(psi).into_iter()), norm_of(h.iter().zip(psi).map(|(h, p)| *h - z0 * *p)))
     }
 
     /// The left wave operators S_f (P ← Q_f): the rows (y, y S) span the slow left invariant subspace,
@@ -1205,7 +1328,7 @@ pub(crate) fn system(request: &crate::request::Request, light: &crate::field::Li
     for c in &emission {
         decay.add_scaled(C64::ONE, &c.adjoint_product(c));
     }
-    let levels = Levels { ground: h.block(&ground, &ground), excited: h.block(&excited, &excited), decay, emission };
+    let levels = Levels { ground: h.block(&ground, &ground), excited: h.block(&excited, &excited), decay };
     let omega = |index: &[i32]| std::f64::consts::TAU * index.iter().zip(&request.frequencies_mhz).map(|(&n, f)| n as f64 * f).sum::<f64>();
     let frame = std::f64::consts::TAU * request.frame_frequencies_mhz[GROUND];
     let (mut classes, mut sources) = (vec![], vec![]);
@@ -1273,26 +1396,81 @@ pub(crate) fn bare_remainders(fold: &Fold, classes: usize, bare: &[f64]) -> Vec<
     out
 }
 
-/// A model's series constants (module documentation, # The definition and the route it is evaluated on; ELIMINATION v5):
-/// per cluster the centre c of its near light's scalar shift over the atoms read (the reference z₀ is the cluster's far
-/// levels' mean and c), the series' largest ratio q over them, and the order K every evaluation takes -- the least
-/// whose remainder q^{K+1}/(1 − q) is within the model's share (`share`).
+/// A model's series constants (module documentation, # The definition and the route it is evaluated on; ELIMINATION v5,
+/// v7): per cluster the centre c of its near light's scalar shift over the atoms read (the reference z₀ is the cluster's
+/// far levels' mean and c), the series' largest ratio q over them and the largest excited share x (X's largest
+/// eigenvalue) -- each series' existence, q < 1 and x < 1 (the Neumann series of the resolvent and of (1 + X)^{−1/2}
+/// converge: criterion one's condition, `Series::exists`), nothing booked of them --, and the excited state that sets the
+/// distance where the ratio is largest (`Fold::nearest`), and the one that holds the most of the excited share where x
+/// is largest (`Fold::most_excited`); and the orders every evaluation takes, the kept units' (`Series::kept_orders`):
+/// their errors are measured where the atoms went (`Model::readings`).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Series {
     pub centre: Vec<f64>,
     pub ratio: f64,
     pub order: usize,
+    pub nearest: Option<usize>,
+    pub densest: Option<usize>,
+    pub excited: f64,
+    pub normalization: usize,
+    /// Where a series does not converge: the block move (`Fold::block_move`) -- the block, the class (a carrier), the
+    /// cluster's ground states of the eigenstate's group.
+    pub moved: Option<(usize, usize, Vec<usize>)>,
 }
 
 impl Series {
-    /// The least order whose remainder at the ratio q is within the share; None where the series does not converge
-    /// (q ≥ 1: the fold's existence is criterion one's to restore, a block made explicit).
-    pub(crate) fn order_of(q: f64) -> Option<usize> {
-        if !(q < 1.0) {
-            return None;
-        }
-        (0..).find(|&k| q.powi(k as i32 + 1) / (1.0 - q) <= share())
+    /// The series of no light: every order 0 (a model's own before its atoms are read, `Model::referenced`).
+    pub(crate) fn none(clusters: usize) -> Series {
+        Series { centre: vec![0.0; clusters], ratio: 0.0, order: 0, nearest: None, densest: None, excited: 0.0, normalization: 0, moved: None }
     }
+
+    /// Whether both series converge at the atoms read: q < 1 and x < 1 (`Series`; where one does not, criterion one makes
+    /// a block explicit, `Model::series_block`).
+    pub(crate) fn exists(&self) -> bool {
+        self.ratio < 1.0 && self.excited < 1.0
+    }
+
+    /// The orders the kept units ask (`Unit::Series`, `Unit::Normalization`): the series' first where it is kept, else
+    /// order 0; the normalization's highest kept order, else 0.
+    pub(crate) fn kept_orders(kept: &[super::Unit]) -> (usize, usize) {
+        let normalization = kept.iter().filter_map(|u| if let super::Unit::Normalization { order } = u { Some(*order) } else { None }).max().unwrap_or(0);
+        (usize::from(kept.contains(&super::Unit::Series)), normalization)
+    }
+
+    /// The orders an evaluation takes.
+    pub(crate) fn orders(&self) -> Orders {
+        Orders { series: self.order, normalization: self.normalization }
+    }
+}
+
+/// The orders of the normalized generator's evaluation (ELIMINATION v7; `Series`): the series' K (0, or 1 where
+/// `Unit::Series` is kept: the near forms hold N₀ and N₁), the normalization's J. The Hermitian part is the series' own:
+/// what the normalization would do to it is measured where the atoms went and booked on the block that holds the most
+/// of the excited share (`Fold::hermitian_error`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Orders {
+    pub series: usize,
+    pub normalization: usize,
+}
+
+/// A vector's 2-norm.
+fn norm_of(v: impl Iterator<Item = C64>) -> f64 {
+    v.map(|z| z.norm_sqr()).sum::<f64>().sqrt()
+}
+
+/// A rate's relative error 2r + r² of an amplitude's r = `apart`/`scale` (of T†T): nothing where nothing is apart, all
+/// of it where the scale is nothing and something is.
+fn rate_error(apart: f64, scale: f64) -> f64 {
+    if apart == 0.0 {
+        return 0.0;
+    }
+    let r = apart / scale;
+    if r.is_finite() { (2.0 * r + r * r).min(1.0) } else { 1.0 }
+}
+
+/// The binomial coefficient binom(α, j) = α(α − 1)…(α − j + 1)/j!: the power series' j-th coefficient of (1 + x)^α.
+pub(crate) fn binomial(alpha: f64, j: usize) -> f64 {
+    (0..j).fold(1.0, |c, i| c * (alpha - i as f64) / (i + 1) as f64)
 }
 
 impl super::Model {
@@ -1329,7 +1507,6 @@ impl super::Model {
             ground: h.block(&grounds, &grounds),
             excited: h.block(&excited, &excited),
             decay: self.decay.clone(),
-            emission: std::array::from_fn(|x| self.emission[x].block(&grounds, &excited)),
         };
         let frames: Vec<f64> = c.frames.iter().map(|f| self.omega(f)).collect();
         let far = (0..g).map(|y| h[(grounds[y], grounds[y])].re - frames[y]).sum::<f64>() / g as f64;
@@ -1356,11 +1533,13 @@ impl super::Model {
     /// middle --, then at each atom the ratio of the series about z₀ = far mean + c, q = (‖H − z₀‖₂ + ‖δK‖)/d (the
     /// Neumann series of the resolvent in both its arguments: `Fold::series_ratio`, and the excited block the reference
     /// leaves out), the largest; and the order it asks for. An atom where a fold does not exist (criterion one's: its
-    /// closure makes a block explicit) is read as the series' end: q = ∞.
+    /// closure makes a block explicit) is read as the series' end: q = ∞. And at each atom the fold's normalization
+    /// (`Fold::normalized_sizes`): the largest excited share x, and the size β of what it does to the Hermitian
+    /// generator, the largest of each and the orders they ask for (`Series::normalization_of`, `hermitian_of`).
     pub(crate) fn series_at(&self, points: &[([f64; 3], [f64; 3])]) -> Series {
         use rayon::prelude::*;
         let clusters = self.clusters.len();
-        let read: Vec<Vec<Option<(f64, Fold, f64, f64)>>> = points
+        let read: Vec<Vec<Option<(f64, Fold, f64, f64, f64)>>> = points
             .par_iter()
             .map(|&(r, _)| {
                 let amplitudes = self.light.amplitudes(r);
@@ -1369,7 +1548,8 @@ impl super::Model {
                         let (fold, _, far, left) = self.cluster_fold(cluster, &amplitudes, false)?;
                         let like: Vec<usize> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
                         let shift = like.iter().map(|&p| fold.eigen.values[p].re).sum::<f64>() / like.len().max(1) as f64 - far;
-                        Some((shift, fold, far, left))
+                        let share = fold.excited_share();
+                        Some((shift, fold, far, left, share))
                     })
                     .collect()
             })
@@ -1380,24 +1560,56 @@ impl super::Model {
                 if low.is_finite() { 0.5 * (low + high) } else { 0.0 }
             })
             .collect();
-        let ratio = read
+        let (ratio, nearest) = read
             .iter()
             .flat_map(|at| at.iter().enumerate())
             .filter_map(|(cluster, x)| x.as_ref().map(|x| (cluster, x)))
-            .map(|(cluster, (_, fold, far, left))| {
-                if !fold.exists {
-                    return f64::INFINITY;
-                }
+            .map(|(cluster, (_, fold, far, left, _))| {
                 let z0 = C64::real(far + centre[cluster]);
-                (fold.series_norm(z0) + left) / fold.series_distance(z0)
+                let ratio = if fold.exists { (fold.series_norm(z0) + left) / fold.series_distance(z0) } else { f64::INFINITY };
+                (ratio, (cluster, fold, z0))
             })
-            .fold(0.0, f64::max);
-        Series { centre, ratio, order: Series::order_of(ratio).unwrap_or(usize::MAX) }
+            .fold((0.0, None), |(most, at), (ratio, of)| if ratio > most { (ratio, Some(of)) } else { (most, at) });
+        let densest = read
+            .iter()
+            .flat_map(|at| at.iter().enumerate())
+            .filter_map(|(cluster, x)| x.as_ref().map(|x| (cluster, x)))
+            .fold((f64::NEG_INFINITY, None), |(most, at), (cluster, x)| if x.4 > most { (x.4, Some((cluster, &x.1))) } else { (most, at) })
+            .1;
+        let excited = read.iter().flatten().flatten().fold(0.0_f64, |m, x| m.max(x.4));
+        // Where a series does not converge, the closure's move on the block that stops it (criterion one).
+        let blocks = self.blocks();
+        let move_on = |cluster: usize, fold: &Fold, e: Option<usize>| -> Option<(usize, usize, Vec<usize>)> {
+            let b = e.and_then(|e| blocks.iter().position(|b| b.contains(&e)))?;
+            let (class, places) = fold.block_move(&blocks, b)?;
+            Some((b, class, places.iter().map(|&place| self.clusters[cluster].states[place]).collect()))
+        };
+        let moved = if !(ratio < 1.0) {
+            nearest.and_then(|(cluster, fold, z0)| move_on(cluster, fold, fold.nearest(z0)))
+        } else if !(excited < 1.0) {
+            densest.and_then(|(cluster, fold)| move_on(cluster, fold, fold.most_excited()))
+        } else {
+            None
+        };
+        let nearest = nearest.and_then(|(_, fold, z0)| fold.nearest(z0));
+        let densest = densest.and_then(|(_, fold)| fold.most_excited());
+        let (order, normalization) = Series::kept_orders(&self.kept);
+        Series { centre, ratio, order, nearest, densest, excited, normalization, moved }
     }
 
     /// The excited hyperfine blocks F′ of the model's states (`blocks`), from its labels.
     pub(crate) fn blocks(&self) -> Vec<Vec<usize>> {
         excited_blocks(&self.labels)
+    }
+
+    /// Where a series does not converge at the model's atoms (`Series::exists`: criterion one's condition, of the same
+    /// kind as a fold that does not exist): the block the closure moves there (`Series::moved`, `Fold::block_move`) --
+    /// the block of the state that sets the series' distance where its ratio is largest (q ≥ 1), or of the state that
+    /// holds the most of the excited share (x ≥ 1); its class and its eigenstate's group's ground states --; none where
+    /// both converge.
+    pub(crate) fn series_block(&self) -> Option<super::Unit> {
+        let (block, class, grounds) = self.series.moved.as_ref()?;
+        Some(super::Unit::Block { block: *block, component: super::Component { frequency: self.carriers[*class].frequency, counter: false }, grounds: ground_set(grounds) })
     }
 
     /// The keep rule's objects of this model (ELIMINATION.md §6: its two kinds, and the photons' cross terms) as the
@@ -1444,6 +1656,14 @@ impl super::Model {
             }
         }
         out.extend(self.coherence_units());
+        // The evaluation's next orders where a fold has the normalized generator (`Unit::Series`, `Unit::Normalization`).
+        let running = self.running();
+        if (0..self.clusters.len()).any(|c| self.plan(c, &running).fourth.is_some()) {
+            if self.series.order == 0 {
+                out.push(super::Unit::Series);
+            }
+            out.push(super::Unit::Normalization { order: self.series.normalization + 1 });
+        }
         out.retain(|u| !self.kept.contains(u));
         out
     }
@@ -1480,7 +1700,7 @@ impl super::Model {
             .map(|(m, o)| Outside { slow: c.states.iter().map(|&s| m[s]).collect(), excited: (GROUND..crate::request::STATES).map(|s| m[s] * o[s]).collect() })
             .collect();
         let mut beyond = None;
-        if let Some((fold, levels, _, _)) = self.cluster_fold(sample.cluster, &amplitudes, true) {
+        if let Some((fold, levels, far, _)) = self.cluster_fold(sample.cluster, &amplitudes, true) {
             let plan = self.plan(sample.cluster, &self.running());
             let fastest = self.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
             let range = plan.sampled.iter().map(|t| t[0]).fold(0.0, f64::max) + 2.0 * fastest * speed;
@@ -1492,16 +1712,42 @@ impl super::Model {
                 self.in_generator(a, b, &beat)
             };
             let blocks = self.blocks();
-            let errors = errors(&fold, &levels, &blocks, &linked, None, &sample.psi, velocity, range, &outside);
+            let errors = errors(&fold, &levels, &blocks, &linked, &sample.psi, velocity, range, &outside);
             beyond = Some(errors.outside.clone());
             for (object, x) in &errors.parts {
                 match object {
                     Object::Block(b, Some(k)) => book(&Unit::Block { block: *b, component: super::Component { frequency: self.carriers[*k].frequency, counter: false }, grounds: ground_set(&c.states[..g]) }, *x, &mut out),
                     Object::Block(_, None) => {}
                     Object::Link(l) => book(&term(l), *x, &mut out),
-                    Object::Photons(..) => {}
                 }
             }
+            // The evaluation's orders, measured at the state (ELIMINATION v7; a unit's error where the atoms went), each a
+            // rate's relative error on the unit whose keep takes it away: the series' at the run's order K against its next
+            // (`Fold::order_error`) -- on its first order (`Unit::Series`) at K = 0, else on the block nearest the
+            // reference (`Fold::nearest`: criterion one moves the distance away) --; the normalization's at its order J
+            // against its next (`Fold::normalization_error`) on its next order (`Unit::Normalization`); and what the
+            // normalization would do to the Hermitian part, which is the series' own (`Fold::hermitian_error`), on the
+            // block that holds the most of the excited share (`Fold::most_excited`).
+            // A part on a block, split among its classes as `errors` splits a block's (`Fold::state_block_parts`).
+            let on_block = |e: Option<usize>, x: f64, out: &mut Vec<UnitError>| {
+                let Some(b) = e.and_then(|e| blocks.iter().position(|b| b.contains(&e))) else { return };
+                for (class, part) in fold.state_block_parts(&blocks, b, &sample.psi, x) {
+                    if let Some(k) = class {
+                        book(&Unit::Block { block: b, component: super::Component { frequency: self.carriers[k].frequency, counter: false }, grounds: ground_set(&c.states[..g]) }, part, out);
+                    }
+                }
+            };
+            let z0 = C64::real(far + self.series.centre[sample.cluster]);
+            let (order, normalization) = (self.series.order, self.series.normalization);
+            let forms = fold.series(z0, order + 1);
+            let series = fold.order_error(&forms, z0, order, &sample.psi);
+            if order == 0 {
+                book(&Unit::Series, series, &mut out);
+            } else {
+                on_block(fold.nearest(z0), series, &mut out);
+            }
+            book(&Unit::Normalization { order: normalization + 1 }, fold.normalization_error(&forms[1], normalization, &sample.psi), &mut out);
+            on_block(fold.most_excited(), fold.hermitian_error(z0, &sample.psi), &mut out);
         }
         // The photons' cross terms.
         let lights = self.running();
@@ -1660,13 +1906,11 @@ impl Link {
 }
 
 /// What a model keeps explicit (ELIMINATION.md §6: the keep rule's two kinds of objects): excited blocks, and P-layer
-/// links -- the explicit components, the explicit drives into the blocks with them -- and the photons' cross terms kept
-/// (pairs of photon frequencies, by the classes that make them; None the explicit states' own).
+/// links -- the explicit components, the explicit drives into the blocks with them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Kept {
     pub blocks: Vec<usize>,
     pub links: Vec<Link>,
-    pub photons: Vec<(Option<usize>, Option<usize>)>,
 }
 
 /// A point's closure (criteria one and two at one atom, ELIMINATION.md §3–§4 with v2 and v3): the kept set from
@@ -1711,15 +1955,13 @@ fn slow_of(blocks: &[Vec<usize>], kept: &Kept, classes: &[Class], ground: usize)
 ///   component's own frequency, where the block is a Q state folded like any other (ELIMINATION §2–§3, v2 5); a block
 ///   explicit in one component is joined by another's drives only where that component's own part asks for it;
 /// 3. criterion two: every component of two replicas whose averaged error 2(a/δ)² is beyond the share (v5: the
-///    population's time mean after a sudden switch-on) is kept (a link of its two dominant states and classes), and every photon cross term whose γ/|Ω| is
-///    above the share;
-/// until nothing more is kept. Each round only adds.
+///    population's time mean after a sudden switch-on) is kept (a link of its two dominant states and classes);
+/// until nothing more is kept. Each round only adds. (The photons' cross terms are the run's to read, `Model::readings`.)
 pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>], velocity: [f64; 3], start: &Kept) -> Closed {
     let ground = levels.ground.rows;
     let share = share();
     let speed = (velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2]).sqrt();
     let fastest = classes.iter().flat_map(|c| c.beams.iter()).map(|b| (b.wave[0] * b.wave[0] + b.wave[1] * b.wave[1] + b.wave[2] * b.wave[2]).sqrt()).fold(0.0, f64::max);
-    let block_of = |e: usize| blocks.iter().position(|b| b.contains(&e));
     let mut kept = start.clone();
     loop {
         let (slow, residual) = slow_of(blocks, &kept, classes, ground);
@@ -1743,47 +1985,8 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
         let n = fold.size();
         let ground_like: Vec<usize> = (0..n).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
         // The parts of a ground-like eigenstate's response (or remainder) per block and replica, each split among the
-        // replica's classes (`class_shares`): (block, replica, class, part).
-        let parts_of = |p: usize, shift: Option<f64>| -> (f64, Vec<(usize, usize, Option<usize>, f64)>) {
-            let r = fold.right(p);
-            let lambda = fold.eigen.values[p];
-            let unit: Vec<C64> = (0..n).map(|q| if q == p { C64::ONE } else { C64::ZERO }).collect();
-            let mut parts = vec![];
-            let (mut num, mut den) = (0.0, 0.0);
-            for (j, rep) in fold.replicas.iter().enumerate().filter(|(_, rep)| rep.group == fold.groups[p]) {
-                let wr = rep.w.apply(&r);
-                let sigma = lambda + C64::real(rep.frequency);
-                let x0 = rep.k.resolvent(sigma, &wr);
-                let d: Vec<C64> = match shift {
-                    None => x0.clone(),
-                    Some(delta) => {
-                        let shifted = rep.k.resolvent(sigma + C64::real(delta), &wr);
-                        let second = rep.k.resolvent(sigma, &x0);
-                        (0..x0.len()).map(|i| shifted[i] - x0[i] + second[i] * delta).collect()
-                    }
-                };
-                let mut on = vec![0.0; blocks.len()];
-                for (i, &e) in rep.q.iter().enumerate() {
-                    if let Some(b) = block_of(e) {
-                        on[b] += d[i].norm_sqr();
-                    }
-                    num += d[i].norm_sqr();
-                    den += x0[i].norm_sqr();
-                }
-                let mut responses = None;
-                for (b, &x) in on.iter().enumerate().filter(|(_, x)| **x > 0.0) {
-                    let responses = responses.get_or_insert_with(|| fold.feed_responses(j, &unit));
-                    for (class, share) in class_shares(responses, &rep.q, &blocks[b]) {
-                        parts.push((b, j, class, x * share));
-                    }
-                }
-            }
-            let scale = if shift.is_some() { den } else { 1.0 };
-            if scale > 0.0 {
-                parts.iter_mut().for_each(|x| x.3 /= scale);
-            }
-            (if shift.is_some() { if den > 0.0 { (num / den).sqrt() } else { 0.0 } } else { num.sqrt() }, parts)
-        };
+        // replica's classes (`Fold::block_parts`): (block, replica, class, part).
+        let parts_of = |p: usize, shift: Option<f64>| fold.block_parts(blocks, p, shift);
         // Moves: (block, replica, class, the eigenstate whose part it is), largest part first per state, until the rest
         // is within `limit`; one replica a block and class.
         let mut moves: Vec<(usize, usize, usize, usize)> = vec![];
@@ -1925,18 +2128,17 @@ fn components(n: usize, joined: impl Iterator<Item = (usize, usize)>) -> Vec<usi
     (0..n).map(|x| root(&mut parent, x)).collect()
 }
 
-/// What a model keeps or folds, the keep rule's objects (ELIMINATION.md §6): an excited block, a P-layer link, a pair of
-/// photon frequencies' cross term.
+/// What a model keeps or folds at a point, the keep rule's objects (ELIMINATION.md §6): an excited block, a P-layer link.
+/// (The photons' cross terms are read on the run's photon classes, `Model::readings`.)
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Object {
     /// An excited block for one class of the light (None: the explicit states' own couplings into it).
     Block(usize, Option<usize>),
     Link(Link),
-    Photons(Option<usize>, Option<usize>),
 }
 
-/// A model's error at a state (ELIMINATION.md §6, v2, v3): the populations' (absolute) and T's (relative), its four
-/// terms, and per object the part its keep would take away.
+/// A model's error at a state (ELIMINATION.md §6, v2, v3): the populations' (absolute) and T's (relative), its three
+/// terms of the fold, and per object the part its keep would take away.
 #[derive(Clone, Debug)]
 pub(crate) struct Errors {
     pub population: f64,
@@ -1944,7 +2146,6 @@ pub(crate) struct Errors {
     pub remainder: f64,
     pub transient: f64,
     pub averaged: f64,
-    pub photons: f64,
     pub parts: Vec<(Object, f64)>,
     /// Per transition to a level outside the model its error (`outside_errors`): no object's part, nothing keeps it.
     pub outside: Vec<f64>,
@@ -2008,19 +2209,16 @@ pub(crate) fn outside_errors(fold: Option<(&Fold, &[f64])>, psi: &[C64], outside
 ///   error is |τ + clamp| over the model's mean wait, N/γ or (1 + ln N)/γ. Its part goes to the blocks in proportion to
 ///   their share of the landing's excited amplitude T x₀: making a block explicit takes its fast part into the dynamics.
 /// - The averaged components (criterion two): 2(a/δ)² of each one not kept (v5), on its two eigenstates' shares.
-/// - The photons' cross terms not kept: γ/|Ω| of each, on its source eigenstate's share.
 /// - The levels outside the model (request.rs `Transition`, `outside`): each transition's second-order term errs by its
 ///   own small parameter m = (coupling/detuning)²: on a P state the population it leaks into the level, on an excited
 ///   state the fold eliminates the level error m o it makes, through the fold's response as criterion one reads one
 ///   (`outside_errors`). Irreducible: those levels are not in the model, and no object's part.
-/// A relative rate error x moves the populations by at most x (absolute) and T, which the light sets through its rates
-/// and shifts, by x relative: the five terms add on both.
+/// The photons' cross terms are the caller's (the run's photon classes, which land in every cluster: model.rs
+/// `Model::readings`). A relative rate error x moves the populations by at most x (absolute) and T, which the light sets
+/// through its rates and shifts, by x relative: the terms add on both.
+/// `linked`: whether a P-layer link is the model's (kept, or static in its frames: in its generator as it is).
 #[allow(clippy::too_many_arguments)]
-/// `linked`: whether a P-layer link is the model's (kept, or static in its frames: in its generator as it is);
-/// `photons`: whether a pair of photon frequencies' cross term is kept -- None where the caller books the photons'
-/// cross terms itself (the run's photon classes, which land in every cluster: model.rs `Model::readings`).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked: &dyn Fn(&Link) -> bool, photons: Option<&dyn Fn((Option<usize>, Option<usize>)) -> bool>, psi: &[C64], velocity: [f64; 3], range: f64, outside: &[Outside]) -> Errors {
+pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked: &dyn Fn(&Link) -> bool, psi: &[C64], velocity: [f64; 3], range: f64, outside: &[Outside]) -> Errors {
     let n = fold.size();
     let ground = fold.ground;
     let excited = levels.excited.rows;
@@ -2115,7 +2313,7 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
             }
         }
     }
-    // The averaged components and the photons' cross terms not kept.
+    // The averaged components not kept.
     let label = |p: usize| {
         let s = fold.dominant(p);
         if s < ground { s } else { ground + fold.explicit[s - ground] }
@@ -2130,20 +2328,9 @@ pub(crate) fn errors(fold: &Fold, levels: &Levels, blocks: &[Vec<usize>], linked
         averaged += e;
         add(Object::Link(link), e, &mut parts);
     }
-    let mut cross = 0.0;
-    if let Some(kept) = photons {
-        for x in fold.photons(levels) {
-            if kept(x.classes) || weight[x.from] == 0.0 {
-                continue;
-            }
-            let e = x.size / x.beat.abs() * weight[x.from];
-            cross += e;
-            add(Object::Photons(x.classes.0, x.classes.1), e, &mut parts);
-        }
-    }
     let outside = outside_errors(Some((fold, &weight)), psi, outside);
-    let sum = remainder + transient + averaged + cross + outside.iter().sum::<f64>();
-    Errors { population: sum, temperature: sum, remainder, transient, averaged, photons: cross, parts, outside }
+    let sum = remainder + transient + averaged + outside.iter().sum::<f64>();
+    Errors { population: sum, temperature: sum, remainder, transient, averaged, parts, outside }
 }
 
 #[cfg(test)]
