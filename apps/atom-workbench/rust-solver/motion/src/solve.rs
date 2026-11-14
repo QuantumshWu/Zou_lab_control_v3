@@ -191,7 +191,8 @@
 //!   product's trajectories N its looks ask (`most_needed`, # Stopping: the pilot's statistics, before them the
 //!   scout's, or the carried states' where the attempt decided on those) -- one N for every rung, the need beside the
 //!   step's part as read: a rung below's smaller step error, which leaves the statistics more room, is not counted, and
-//!   the choice errs toward the larger step. With P the pilot's trajectories, P_m those of them run at both of the
+//!   the choice errs toward the larger step; so does it where a long step's caches make it dearer than its count (a
+//!   count is the operations done, no cache's effect: step.rs `Price`). With P the pilot's trajectories, P_m those of them run at both of the
 //!   rung's levels (the scout's one a group, or all), n the pairs at the rung and r the rung below's level run (the
 //!   scout's pairs at τ/2, `foresee`):
 //!   - staying: the pilot's companions still to run and the run level to the most of N, P and n, (P − P_m) w(2τ) +

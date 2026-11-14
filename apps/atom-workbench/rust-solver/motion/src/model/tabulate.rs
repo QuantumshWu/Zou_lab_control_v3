@@ -902,16 +902,17 @@ impl Model {
     /// A point's jumps' matrices from a table (assemble.rs, # The jumps' matrices), to an order (0 or 1), into the
     /// vectors of a site placed there (`placed`), and their counted work: the matrices -- the table's interpolant of
     /// them onto their constant part -- and to first order their slopes per axis, in one pass over the stencil's rows.
-    /// Counted with the coordinates as the jumps' own interpolation is, each jump once (assemble.rs, # Work).
+    /// Counted as the reals it reads (assemble.rs, # Work): the laid matrices, to first order with their slopes; the
+    /// place's coordinates are its site's (photon.rs `sited`).
     pub(crate) fn near_jumps(&self, table: &NearTable, order: usize, point: &mut Site) -> f64 {
         let (d, plan) = (table.axes(), &table.layout.plan);
         let slopes = if order >= 1 { d } else { 0 };
-        let (place, work) = point.place.expect("a site placed on its table");
+        let (place, _) = point.place.expect("a site placed on its table");
         let (first, width) = (2 * plan.near.len() + plan.generator_start.len() + plan.form_start.len(), plan.jumps_start.len());
         sized(&mut point.jumps, width);
         sized(&mut point.jump_slopes, slopes * width);
         table.table.read(&place, first, Some(&plan.jumps_start), &mut point.jumps, (order >= 1).then_some(&mut point.jump_slopes[..]));
-        work + read_work(d, order, 2 * plan.near.jumping().len())
+        read_work(d, order, width)
     }
 
     /// A point's responses from a table (the near forms' responding section, to order 0: what the readout reads,

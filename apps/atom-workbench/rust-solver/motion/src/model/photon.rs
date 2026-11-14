@@ -350,7 +350,8 @@ impl Model {
                 site.jumped(plan, None);
                 0.0
             }
-            Some(table) => self.near_jumps(table, order, site),
+            // A site of its own counts its place's coordinates here; a middle's counted them with its near terms.
+            Some(table) => self.near_jumps(table, order, site) + if laid { 0.0 } else { site.place.map_or(0.0, |(_, work)| work) },
             None => {
                 let near = self.near_exact(plan, &site.beams, order);
                 site.jumped(plan, Some(&near));
@@ -455,6 +456,7 @@ impl Model {
                     (Some(_), false) => if taken { live.len() } else { 0 },
                 };
                 let made = base + more;
+                let gathers = gathered_states(m, taken, bent.is_some(), live.len());
                 let vectors = &mut vectors[..made * 2 * rows];
                 // A state of the cluster on the member's columns, at its phase.
                 let gathered = |of: &[C64; STATES]| -> [C64; STATES] {
@@ -550,7 +552,7 @@ impl Model {
                     }
                 }
                 (first, flat) = (false, flat && !taken);
-                work += member_work(m, taken, more, rows);
+                work += member_work(m, taken, made, gathers, rows);
             }
             // A class the state gives nothing: no amplitude, and no gradient either -- at a node of its light a class has
             // no photon and still its gradients' second moment. Gradients no member made are nothing.
@@ -635,20 +637,44 @@ impl Model {
         let made = self.sited(plan, table, r, kappa, 1, site, laid);
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let (mut out, mut sizes) = (Scattering::NONE, [0.0; 3]);
+        let mut read = 0.0;
         let work = self.classes_on(plan, t, psi, Gradients::All, site, made, &mut |_, class, sums, with| {
             out.add(&mut sizes, &moments(sums, with, class.absorbed), class.states);
+            read += moments_work(class.rows, with);
         });
-        (out.over(sizes, norm), work)
+        (out.over(sizes, norm), work + read)
     }
 
 }
 
-/// The counted complex multiply-adds of a member's part of its class's sums (`Model::classes_on`): its entries' amplitudes
-/// -- and their Doppler partners' where it takes them, and where the gradients are `taken` theirs, 3(3 + 2 partner) more
-/// each --, and the fourth order's `more` vectors, each a matrix on a state and its weights over the class's `rows`.
-fn member_work(m: &MemberPlan, taken: bool, more: usize, rows: usize) -> f64 {
-    let partner = if m.doppler { 1.0 } else { 0.0 };
-    m.entries.len() as f64 * (2.0 + partner + if taken { 3.0 * (3.0 + 2.0 * partner) } else { 0.0 }) + (more * (m.entries.len() + 4 * rows)) as f64
+/// The counted complex multiply-adds of a member's part of its class's sums (`Model::classes_on`), as it makes them: its
+/// `made` vectors, each its laid matrix on a state of its columns over the class's `rows` (the lanes' rows, as they are
+/// summed: `linalg::combine`); the vectors' weights into the class's sums -- the amplitude's, and where the gradients
+/// are `taken` the three lab axes' too --; and its `gathered` states, each a phase or a combination on its columns
+/// (`gathered_states`). (Counted as the definition's entries instead -- an amplitude, a partner and 3(3 + 2 partner)
+/// gradients' terms an entry --, PGC3D's and GMD1C's scattering read 1.8 to 3 times what the classes summed.)
+fn member_work(m: &MemberPlan, taken: bool, made: usize, gathered: usize, rows: usize) -> f64 {
+    let columns = m.columns.len();
+    (made * rows * columns + if taken { 4 } else { 1 } * made * rows + gathered * columns) as f64
+}
+
+/// The states a member gathers on its columns (`Model::classes_on`): the state at its phase where that turns; with the
+/// normalized generator (`bent`) S⁻¹ψ, of a near member E S⁻¹ψ too, and where its gradients are `taken` along each of the
+/// `live` lab axes ∂S⁻¹ψ -- of a near member with ∂(E S⁻¹)ψ and the partner's combination of the two.
+fn gathered_states(m: &MemberPlan, taken: bool, bent: bool, live: usize) -> usize {
+    let along = if taken { live } else { 0 };
+    usize::from(m.phase != 0.0)
+        + match (bent, m.near) {
+            (false, _) => 0,
+            (true, true) => 2 + 3 * along,
+            (true, false) => 1 + along,
+        }
+}
+
+/// The counted complex multiply-adds of a class's moments from its sums over its `rows` (`moments`): the rate, and with
+/// the gradients the mean's three and the second moment's six -- each a sum over the rows of two parts' products.
+fn moments_work(rows: usize, with: bool) -> f64 {
+    ((1 + if with { 9 } else { 0 }) * 2 * rows) as f64 / crate::decide::COMPLEX
 }
 
 impl Plan {
@@ -659,15 +685,16 @@ impl Plan {
     /// middle node makes and its scattering counts (`Plan::quartic_work`); on a site of its own, a jump's, its forms read
     /// and the matrices with the landing that follows there (`Plan::quartic_made_work`) --; the field components.
     pub(crate) fn sited_work(&self, axes: usize, place: f64, order: usize, laid: bool) -> f64 {
-        let near = if self.near.len() == 0 { 0.0 } else { place + super::tabulate::read_work(axes, order, 2 * self.near.jumping().len()) };
+        let near = if self.near.len() == 0 { 0.0 } else { (if laid { 0.0 } else { place }) + super::tabulate::read_work(axes, order, self.jumps_start.len()) };
         let fourth = self.fourth.as_ref().filter(|fourth| fourth.bends()).map_or(0.0, |fourth| if laid { self.quartic_work(fourth, Some(axes), false) } else { self.quartic_made_work(fourth, axes, place) });
         near + fourth + self.fields_work(order)
     }
 
     /// The counted complex multiply-adds of a state's photons' classes on a site whose jumps have `axes` slopes
     /// (`Model::classes_on`), priced without making them: the fourth order's bent states, and every lit member's part
-    /// (`member_work`) of the classes the gradients ask; `live` the lab axes along which the fourth order's matrices
-    /// change, those the plan's beams change along at the point (`classes_on`).
+    /// (`member_work`) of the classes the gradients ask -- with all of them, a scattering's, each class's moments
+    /// (`Model::scattering_on`) --; `live` the lab axes along which the fourth order's matrices change, those the plan's
+    /// beams change along at the point (`classes_on`).
     pub(crate) fn classes_work(&self, axes: usize, gradients: Gradients, live: usize) -> f64 {
         let order = if gradients == Gradients::None { 0 } else { 1 };
         let fourth = self.fourth.as_ref().filter(|fourth| fourth.bends());
@@ -688,7 +715,12 @@ impl Plan {
                     (Some(_), true) => 1 + slopes + if taken { 2 * live } else { 0 },
                     (Some(_), false) => if taken { live } else { 0 },
                 };
-                work += member_work(m, taken, more, class.rows);
+                let base = if m.near { 2 * (1 + slopes) } else { 1 };
+                work += member_work(m, taken, base + more, gathered_states(m, taken, fourth.is_some(), live), class.rows);
+            }
+            // A scattering's moments of the class (`Model::scattering_on`).
+            if gradients == Gradients::All {
+                work += moments_work(class.rows, with);
             }
         }
         work

@@ -467,7 +467,9 @@ fn the_tones_are_the_held_force_s_even_part() {
 /// place) against the middle of the table's forms at the point (`Model::near_tabulated`, laid by `Site::formed`). Their
 /// Hermitian values are the same reals under the same weights, the one summed onto its constant in the interpolation's own
 /// fused sum and the other added to it afterwards: the force's forms agree to the rounding of their sums (the bound of
-/// the definitions' own test), and the counted work is the same number. Their decays are the interpolant of the jumps' product and the product of the
+/// the definitions' own test), and each counts what it makes: the table's middle its reads of the laid values (`Plan::near_read`,
+/// the normalized forms' `Plan::normal_read_work`, its place's coordinates), the forms' middle the forms' reads and their laying
+/// (`Plan::formed_work`). Their decays are the interpolant of the jumps' product and the product of the
 /// interpolated jumps: the generators differ by an anti-Hermitian part alone (the Hermitian part of their difference
 /// within the rounding of the entries' sums), and that mismatch is an interpolation error -- of the third order in the
 /// spacing: with every axis halved (`Model::halved`) its sum over a scene's points and clusters falls by more than 2²,
@@ -500,7 +502,10 @@ fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation
                 let amplitudes = model.light.amplitudes(r);
                 let near = model.near_values(&plan, &amplitudes, &sections, Some(table));
                 let (ours, theirs) = (model.middle(&plan, r, t, Some(table)), model.middle_of(&plan, t, &amplitudes, Some(&near)));
-                assert_eq!(ours.work, theirs.work, "{name}, cluster {cluster}: the counted work");
+                let place = ours.point.borrow().place.as_ref().map_or(0.0, |p| p.1);
+                let normal = if plan.fourth.is_some() { plan.normal_read_work(table.axes(), true) } else { 0.0 };
+                assert_eq!(ours.work, place + plan.near_read(table.axes()) + normal, "{name}, cluster {cluster}: the table's middle counts its reads");
+                assert_eq!(theirs.work, near.work + plan.formed_work(theirs.point.borrow().directions.len()), "{name}, cluster {cluster}: the forms' middle their reads and their laying");
                 let (path, other) = (ours.path(kappa, velocity), theirs.path(kappa, velocity));
                 let sizes = written_out(&model, cluster, r, t, kappa, velocity, 0.0, true);
                 let links = chain(&model, &plan, sizes.terms);

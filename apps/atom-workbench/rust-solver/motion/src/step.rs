@@ -2299,6 +2299,13 @@ impl Brownian {
 /// nodes, no jump --, PGC3D's steps of 0.95, 1.9 and 3.8 µs were priced at 0.81, 1.52 and 0.38 times what its run's
 /// steps counted, and the middle with its scattering at a constant five to nine times their cost at 0.95 µs: the
 /// rungs' steps were weighed against one another wrong by a factor of four.)
+///
+/// A count is the operations done, deterministic -- a request's decisions the same on any machine and under any load,
+/// and a run compared with another to the bit --, not their time: it holds no cache's effect. Where a long step's picture
+/// leaves the model's numbers out of the caches the step takes longer than its count says (PGC3D at 3.8 µs: a jump's
+/// photon and the middle 30 and 15 times their time at 0.95 µs, their counts the same), and a choice made by the counts
+/// leans there toward the longer step. Timed instead, the rung a request takes would change with the machine and its
+/// load.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Price {
     pub states: usize,

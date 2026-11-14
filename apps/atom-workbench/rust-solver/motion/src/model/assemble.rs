@@ -154,11 +154,14 @@
 //! splitting it into groups would cost the series' products per group at every node for that share.
 //!
 //! # Work
-//! The complex multiply-adds are counted where they are made (`Middle::work`, `Plan::node`): at a point the near forms (the
-//! table's interpolation or the elimination) and the jumps' products (a product's adjoint, the same jumps exchanged, is its
-//! conjugate and is not made again); at a node the components from their beams and, per block and flag, its entries. A node's
-//! counts are the plan's: no generator is made to know them. They count the definition's operations -- the forms a point
-//! takes, an entry per block and flag --, whatever layout the sums are made in.
+//! The complex multiply-adds are counted where they are made (`Middle::work`, `Plan::node`), the operations done: at a
+//! point the near terms -- a table's reals as it reads them (`Plan::near_read`: the laid values, which the table holds as
+//! its nodes do, no value made of them), or the exact elimination and the values laid of its forms with the jumps'
+//! products (`Plan::formed_work`; a product's adjoint, the same jumps exchanged, is its conjugate and is not made
+//! again) --; at a node the components from their beams and, per block and flag, its entries; a site's photons as their
+//! laid matrices and sums make them (photon.rs `member_work`). A node's counts are the plan's: no generator is made to
+//! know them. (A table's point once counted the values the exact forms make beside its read, and a site's classes the
+//! definition's terms an entry: PGC3D's and GMD1C's middle and scattering read 2.4 and 1.5 times what they made.)
 
 use super::eliminate::{half, jump, shift, Leg, Responses};
 use super::far::EXCITED;
@@ -640,8 +643,12 @@ pub(crate) struct Plan {
     pub(crate) emitted: Vec<f64>,
     pub(crate) jumps_start: Vec<f64>,
     jump_links: Vec<([usize; 2], usize)>,
-    /// The complex multiply-adds of a point's values from its near forms: the jumps' products and their sums, the merged values.
+    /// The complex multiply-adds of a point's values from its exact near forms (`Site::formed`, `formed_work`): each near
+    /// form laid onto the generator's values and, where it weighs in the form, onto the form's; the jumps' products and
+    /// their sums with their factors. And of the form's along each direction of the forms' slopes: the near forms that
+    /// weigh in it. A table holds the values as its nodes do: a point read from one makes none (`Plan::near_read`).
     values: f64,
+    sloped: f64,
     /// What the normalized generator of the cluster's fold reads (module documentation, # The normalized generator); none
     /// where no carrier is lit under these lights. And the plan's own number among the plans made.
     pub(crate) fourth: Option<Fourth>,
@@ -1259,7 +1266,8 @@ impl<'a> Builder<'a> {
                 ClassPlan { landing, wave_number, absorbed, members, states, rows }
             })
             .collect();
-        let values = (products.len() + sums.len() + merged) as f64;
+        let sloped = links.iter().filter(|link| link.form.is_some()).count();
+        let values = (links.len() + sloped + products.len() + sums.len()) as f64;
         // The generator's beating groups (module documentation, # Exact tones): each piece of a dense term -- the generator's,
         // the form's -- by its tone and its two beams' plane waves' residual wave vector in the cluster's Doppler frames,
         // exactly. The static pieces, of no beat in time or along a path, in none.
@@ -1350,6 +1358,7 @@ impl<'a> Builder<'a> {
             jumps_start,
             jump_links,
             values,
+            sloped: sloped as f64,
             fourth: None,
             id: PLANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             groups,
@@ -1442,16 +1451,28 @@ impl Plan {
         let summed: usize = self.form.iter().filter(|term| self.tones[term.tone] == 0.0).map(|term| term.len * (1 + if term.near { directions } else { 0 })).sum();
         (2 * n * size + summed + fourth.entries.len() * (1 + directions) + fourth.groups.len() * (13 + 3 * directions)) as f64
     }
-    /// The counted complex multiply-adds of a point's near forms from a table on `axes` axes (tabulate.rs
-    /// `Model::near_point`), the coordinates' apart: the Hermitian forms to first order, the jumps to order 0.
+    /// The counted complex multiply-adds of a point's near terms from a table on `axes` axes (tabulate.rs
+    /// `Model::near_point`), the coordinates' apart: the reals it reads -- the generator's values to order 0 (the
+    /// Hermitian forms with the decay's sums of the jumps' products, as the nodes hold them), the form's to first order.
     pub(crate) fn near_read(&self, axes: usize) -> f64 {
-        super::tabulate::read_work(axes, 1, 2 * self.near.hermitian().len()) + super::tabulate::read_work(axes, 0, 2 * self.near.jumping().len())
+        super::tabulate::read_work(axes, 0, self.generator_start.len()) + super::tabulate::read_work(axes, 1, self.form_start.len())
     }
-    /// The counted complex multiply-adds of a middle at a point, its near forms from a table on `axes` axes whose
-    /// coordinates' values there count `place` (`Model::middle`): the forms' interpolation -- the normalized generator's
-    /// among them (`Model::normal_read`), its part the nodes' (`Plan::costs`) -- and the values made of them.
+    /// The complex multiply-adds of a point's values from its exact near forms with their slopes along `directions`
+    /// directions (`Site::formed`, `values`).
+    pub(crate) fn formed_work(&self, directions: usize) -> f64 {
+        self.values + directions as f64 * self.sloped
+    }
+    /// The counted complex multiply-adds of the normalized generator's forms read from a table on `axes` axes
+    /// (`Model::normal_read`): X's (and L's) pair forms and z₀, to first order where their `slopes` are read.
+    pub(crate) fn normal_read_work(&self, axes: usize, slopes: bool) -> f64 {
+        super::tabulate::read_work(axes, usize::from(slopes), 2 * (self.near.fourth * self.near.pairs.len() + self.near.reference))
+    }
+    /// The counted complex multiply-adds of a middle at a point, its near terms from a table on `axes` axes whose
+    /// coordinates' values there count `place` (`Model::middle`): their interpolation -- the normalized generator's forms
+    /// among them (`Model::normal_read`), its part the nodes' (`Plan::costs`); the values are the table's.
     pub(crate) fn middle_work(&self, axes: usize, place: f64) -> f64 {
-        if self.near.len() == 0 { 0.0 } else { place + self.near_read(axes) + self.values }
+        let normal = if self.fourth.is_some() { self.normal_read_work(axes, true) } else { 0.0 };
+        if self.near.len() == 0 { 0.0 } else { place + self.near_read(axes) + normal }
     }
     /// The counted complex multiply-adds of the normalized generator's matrices (`Model::normal_at`) beside their forms'
     /// reads: a point's on `directions` directions (Some) with their gradients, or a node's values alone (None): the
@@ -1474,10 +1495,10 @@ impl Plan {
     }
     /// The counted complex multiply-adds of the normalized generator's matrices made on a site of their own placed on a table of
     /// `axes` axes, whose coordinates there count `place` (`Model::quartic_made`, not laid: a jump's): the point's near
-    /// forms read -- X's (and L's) among the Hermitian ones (`Plan::near_read`) -- and their values laid, and the
-    /// matrices with their gradients and the landing that follows there (`quartic_work`).
+    /// terms read -- X's (and L's) among the Hermitian forms (`Plan::near_read`) --, and the matrices with their
+    /// gradients and the landing that follows there (`quartic_work`).
     pub(crate) fn quartic_made_work(&self, fourth: &Fourth, axes: usize, place: f64) -> f64 {
-        place + self.near_read(axes) + self.values + self.quartic_work(fourth, Some(axes), true)
+        place + self.near_read(axes) + self.normal_read_work(axes, true) + self.quartic_work(fourth, Some(axes), true)
     }
     /// The counted complex multiply-adds of the plan's field components from their beams to an order (photon.rs `sited`),
     /// plain and Doppler-weighted.
@@ -2043,10 +2064,10 @@ impl Model {
             let exact = given.or(made.as_ref());
             point.select(plan);
             q.work += match (table, exact) {
-                (Some(table), _) => self.near_point(table, point) + plan.values,
+                (Some(table), _) => self.near_point(table, point),
                 (None, Some(near)) => {
                     point.formed(plan, Some(near));
-                    near.work + plan.values
+                    near.work + plan.formed_work(point.directions.len())
                 }
                 (None, None) => unreachable!("the exact elimination's forms are made where no table is"),
             };
@@ -2074,9 +2095,9 @@ impl Model {
     /// The normalized generator's forms at a site's point into the site (`Site::normal`; module documentation, # The
     /// normalized generator): X's (and L's) pair forms and z₀ with their slopes along the site's directions -- the table's
     /// interpolant, or the exact elimination's `exact`. Read once a point: a middle's nodes take them (`Model::node_normal`).
-    /// Their counted work: none of their own -- they are the point's Hermitian forms, counted with them (`Plan::near_read`,
-    /// tabulate.rs `Model::near_point`; the forms given, the elimination's or the table's own count). Without `slopes`
-    /// their values alone (a readout's, `Model::bent_at`: the given elimination's of order 0 suffices).
+    /// Their counted work: the table's read of them (`Plan::normal_read_work`); the exact elimination's are copied, its
+    /// own count theirs. Without `slopes` their values alone (a readout's, `Model::bent_at`: the given elimination's of
+    /// order 0 suffices).
     pub(crate) fn normal_read(&self, plan: &Plan, table: Option<&NearTable>, exact: Option<&NearValues>, point: &mut Site, slopes: bool) -> f64 {
         let pairs = plan.near.pairs.len();
         let (first, count) = (2 * pairs, plan.near.fourth * pairs + plan.near.reference);
@@ -2087,7 +2108,7 @@ impl Model {
         match (table, exact) {
             (Some(table), _) => {
                 table.table.read(&place.expect("a site placed on its table").0, 2 * first, None, normal, slopes.then_some(&mut normal_slopes[..]));
-                0.0
+                plan.normal_read_work(table.axes(), slopes)
             }
             (None, Some(near)) => {
                 for e in 0..count {
@@ -2348,10 +2369,10 @@ impl Model {
                 point.formed(plan, None);
                 0.0
             }
-            (Some(table), _) => self.near_point(table, &mut point) + plan.values,
+            (Some(table), _) => self.near_point(table, &mut point),
             (None, Some(near)) => {
                 point.formed(plan, Some(near));
-                near.work + plan.values
+                near.work + plan.formed_work(point.directions.len())
             }
             (None, None) => unreachable!("the exact elimination's forms are made where no table is"),
         };
@@ -2374,7 +2395,7 @@ impl Model {
         point.formed(plan, near);
         // A thread's spare point holds its last middle's: the normalized generator's forms are this point's, or none.
         point.normal.clear();
-        let mut work = near.map_or(0.0, |n| n.work + plan.values);
+        let mut work = near.map_or(0.0, |n| n.work + plan.formed_work(point.directions.len()));
         if let (Some(_), Some(near)) = (plan.fourth.as_ref(), near) {
             work += self.normal_read(plan, None, Some(near), &mut point, true);
         }
