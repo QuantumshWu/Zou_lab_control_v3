@@ -118,7 +118,7 @@ fn a_two_level_atom_s_slow_mode_is_exact_and_its_scattering_rate_is_the_steady_s
             // The transient's closed form (`Fold::transients`) against the exact one, and the error the accounts book
             // (`errors`: at rest the transient's alone, all of it on the one block) against the exact rate's error: to
             // the leading order in the fold, its relative O(X), X = s/2.
-            let booked: f64 = errors(&fold, &lv, &[vec![0]], &|_| false, &[C64::ONE], [0.0; 3], 0.0, &[]).parts.iter().map(|p| p.1).sum();
+            let booked: f64 = errors(&fold, &[vec![0]], &|_| false, &[C64::ONE], [0.0; 3], 0.0, &[]).parts.iter().map(|p| p.1).sum();
             println!("    the transient {transient:+.5e} µs, closed form {tau:+.5e} µs; the rate's error {error:+.4e}, booked {booked:.4e}");
             assert!((tau - transient).abs() <= 2.0 * s * transient.abs(), "the closed form {tau} against {transient}");
             assert!((booked - error.abs()).abs() <= 2.0 * s * error.abs(), "booked {booked} against the rate's error {error}");
@@ -290,20 +290,16 @@ fn prior_atoms(req: &crate::request::Request) -> Vec<([f64; 3], [f64; 3])> {
 }
 
 /// A closure's measures at its end (`closure`, its last round): the worst remainder ρ over its fold's ground-like
-/// eigenstates at the offsets each spans, each at its share (`Fold::spans`: the motion's pattern and the components'
-/// combined frequencies), and the largest mixing of a component criterion two leaves averaged.
-fn measures(closed: &Closed, levels: &Levels, classes: &[Class], velocity: [f64; 3]) -> (f64, f64) {
+/// eigenstates at the offsets each spans (`Fold::offsets`: the motion's pattern and the components' combined
+/// frequencies at their shares), and the largest mixing of a component criterion two leaves averaged.
+fn measures(closed: &Closed, classes: &[Class], velocity: [f64; 3]) -> (f64, f64) {
     let fastest = classes.iter().flat_map(|c| c.beams.iter()).map(|b| crate::linalg::norm3(b.wave)).fold(0.0, f64::max);
     let pattern = 2.0 * fastest * crate::linalg::norm3(velocity);
     let fold = &closed.fold;
     let components = fold.components(velocity);
     let remainder = (0..fold.size())
         .filter(|&p| fold.ground_weight(p) >= 0.5)
-        .flat_map(|p| {
-            let spans: Vec<(f64, f64)> = Fold::spans(p, pattern, &components).collect();
-            let shifts: Vec<f64> = spans.iter().map(|s| s.0).collect();
-            fold.remainders(p, &shifts, levels.excited.rows).into_iter().zip(spans).map(|((rho, _), (_, share))| share * rho).collect::<Vec<_>>()
-        })
+        .map(|p| fold.block_parts(&[], p, Some(&fold.offsets(p, pattern, &components, 1.0, &|_| 1.0))).0)
         .fold(0.0, f64::max);
     let mixing = components.iter().map(|x| x.mixing()).filter(|m| 2.0 * m * m <= share()).fold(0.0, f64::max);
     (remainder, mixing)
@@ -333,7 +329,7 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
                 let (lv, cl, _) = system(req, &light, r);
                 let blocks = excited_blocks(&req.states);
                 let closed = closure(&lv, &cl, &blocks, v, &Kept::default());
-                let measured = measures(&closed, &lv, &cl, v);
+                let measured = measures(&closed, &cl, v);
                 (closed, measured)
             })
             .unzip();
@@ -385,15 +381,10 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
             let mut components: Vec<(usize, usize, (Option<usize>, Option<usize>), f64)> = fold.components(v).iter().filter(|x| x.mixing() > 1e-6).map(|x| (label(x.row), label(x.column), x.classes, x.mixing())).collect();
             components.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)).then(a.3.total_cmp(&b.3)));
             let all = fold.components(v);
-            let mut rho: Vec<f64> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).map(|p| {
-                    let spans: Vec<(f64, f64)> = Fold::spans(p, pattern, &all).collect();
-                    let shifts: Vec<f64> = spans.iter().map(|s| s.0).collect();
-                    fold.remainders(p, &shifts, lv.excited.rows).iter().zip(&spans).map(|((rho, _), (_, share))| share * rho).fold(0.0, f64::max)
-                })
-                .collect();
+            let mut rho: Vec<f64> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).map(|p| fold.block_parts(&blocks, p, Some(&fold.offsets(p, pattern, &all, 1.0, &|_| 1.0))).0).collect();
             rho.sort_by(f64::total_cmp);
             let psi: Vec<C64> = (0..fold.size()).map(|s| if s < ground { C64::real(1.0) } else { C64::ZERO }).collect();
-            let errors = errors(&fold, &lv, &blocks, &|_| false, &psi, v, pattern, &[]);
+            let errors = errors(&fold, &blocks, &|_| false, &psi, v, pattern, &[]);
             let error = errors.parts.iter().map(|p| p.1).sum::<f64>() + errors.outside.iter().sum::<f64>();
             (components, rho, error, errors.parts)
         };
@@ -438,7 +429,7 @@ fn a_block_is_kept_for_the_class_of_its_larger_part_and_turns_in_that_class_s_fr
         let classes: Vec<Class> = (0..2).map(|k| class(nus[k], 1, 1, &[(0, 0, C64::real(size(k)))])).collect();
         let fold = folded(&lv, &classes, &at_rest(1));
         let psi = vec![C64::ONE];
-        let found = errors(&fold, &lv, &blocks, &|_| false, &psi, [0.0; 3], 5.0, &[]);
+        let found = errors(&fold, &blocks, &|_| false, &psi, [0.0; 3], 5.0, &[]);
         let part = |k: usize| found.parts.iter().find(|o| o.0 == Object::Block(0, Some(k))).map_or(0.0, |o| o.1);
         // The responses' shares: |g|²/|ν − iΓ/2|² of each class.
         let response = |k: usize| size(k).powi(2) / (nus[k].powi(2) + 0.25 * gamma * gamma);
