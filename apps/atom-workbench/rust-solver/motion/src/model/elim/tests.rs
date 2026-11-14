@@ -605,7 +605,7 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
             for b in &class.beams {
                 w.add_scaled(C64::ONE, &b.coupling);
             }
-            let t = reference.respond(c, &w, n, 1);
+            let t: Vec<Mat> = reference.respond(c, &w, n, 1, &[]).into_iter().map(|mut parts| parts.remove(0)).collect();
             n0.add_scaled(C64::ONE, &w.adjoint_product(&t[0]));
             n1.add_scaled(C64::ONE, &w.adjoint_product(&t[1]));
             x.add_scaled(C64::ONE, &t[0].adjoint_product(&t[0]));

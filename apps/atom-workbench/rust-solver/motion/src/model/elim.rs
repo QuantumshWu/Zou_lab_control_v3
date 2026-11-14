@@ -1203,35 +1203,66 @@ impl Reference {
         Reference { replicas: out, driven: replicas.driven, ground, excited, z0 }
     }
 
-    /// The responses of class c's coupling (E × the ground states) to the orders 0..=`orders`: R₀^{j+1} W on every
-    /// excited state (zero off each replica's Q) and every slow state (E × n, n the slow states: the explicit states'
-    /// columns are zero, a class couples E ← G alone), R₀ = (z₀ + f − K_f)⁻¹ of the replica each ground state's
-    /// amplitude drives.
-    pub(crate) fn respond(&self, class: usize, coupling: &Mat, n: usize, orders: usize) -> Vec<Mat> {
-        let mut out = vec![Mat::zeros(self.excited, n); orders + 1];
-        for (r, (f, q, k)) in self.replicas.iter().enumerate() {
+    /// The responses of class c's coupling (E × the ground states) to the orders 0..=`orders`, R₀^{j+1} W on every excited
+    /// state (zero off each replica's Q) and every slow state (E × n, n the slow states: the explicit states' columns are
+    /// zero, a class couples E ← G alone), R₀ = (z₀ + f − K_f)⁻¹ of the replica each ground state's amplitude drives; and
+    /// their jets along the position, per order its parts (jet.rs: the value, the gradient's three, the Hessian's six of
+    /// `jet::PAIRS`), exact by the resolvent's identity -- not differences.
+    /// With A = z₀ + f − K_f on each replica's Q and x_j = R₀ x_{j−1}, x_{−1} = W (the coupling, the same everywhere: the
+    /// near field is the forms' coefficient), A x_j = x_{j−1} differentiated gives
+    ///   ∂_i x_j = R₀ (∂_i x_{j−1} − ∂_i A x_j),
+    ///   ∂_i∂_k x_j = R₀ (∂_i∂_k x_{j−1} − ∂_i A ∂_k x_j − ∂_k A ∂_i x_j − ∂_i∂_k A x_j),
+    /// ∂A = ∂z₀ − ∂K (f is a frame's), `slopes` the derivatives (∂z₀, ∂K) of z₀ and of the excited block K (its decay
+    /// constant) from the far light's Hamiltonian, part by part after the value (none: the values alone). Each part a
+    /// resolvent per order and driven column, at the rounding of the solves themselves. Returns [order][part].
+    pub(crate) fn respond(&self, class: usize, coupling: &Mat, n: usize, orders: usize, slopes: &[(f64, Mat)]) -> Vec<Vec<Mat>> {
+        let parts = 1 + slopes.len();
+        let mut out = vec![vec![Mat::zeros(self.excited, n); parts]; orders + 1];
+        for (r, (f, q, schur)) in self.replicas.iter().enumerate() {
             let sigma = C64::real(self.z0 + f);
+            // ∂A on Q applied to a vector: ∂z₀ x − ∂K x, of part p.
+            let slope = |p: usize, x: &[C64]| -> Vec<C64> {
+                let (z, k) = &slopes[p - 1];
+                q.iter().enumerate().map(|(a, &e)| x[a] * *z - q.iter().enumerate().map(|(b, &e2)| k[(e, e2)] * x[b]).sum::<C64>()).collect()
+            };
             for g in (0..self.ground).filter(|&g| self.driven[class][g] == r) {
-                let mut x: Vec<C64> = q.iter().map(|&e| coupling[(e, g)]).collect();
-                if x.iter().all(|z| *z == C64::ZERO) {
+                let column: Vec<C64> = q.iter().map(|&e| coupling[(e, g)]).collect();
+                if column.iter().all(|z| *z == C64::ZERO) {
                     continue;
                 }
+                // The previous order's jet, x_{−1} = W: its value the coupling, its derivatives none.
+                let mut before: Vec<Vec<C64>> = (0..parts).map(|p| if p == 0 { column.clone() } else { vec![C64::ZERO; q.len()] }).collect();
                 for order in out.iter_mut() {
-                    x = k.resolvent(sigma, &x);
-                    for (i, &e) in q.iter().enumerate() {
-                        order[(e, g)] = x[i];
+                    let mut x: Vec<Vec<C64>> = vec![schur.resolvent(sigma, &before[0])];
+                    for p in 1..parts.min(4) {
+                        let a = slope(p, &x[0]);
+                        x.push(schur.resolvent(sigma, &before[p].iter().zip(&a).map(|(b, a)| *b - *a).collect::<Vec<C64>>()));
                     }
+                    for (m, &(i, j)) in super::jet::PAIRS.iter().enumerate().take(parts.saturating_sub(4)) {
+                        let p = 4 + m;
+                        let (ai, aj, aij) = (slope(1 + i, &x[1 + j]), slope(1 + j, &x[1 + i]), slope(p, &x[0]));
+                        let rhs: Vec<C64> = (0..q.len()).map(|a| before[p][a] - ai[a] - aj[a] - aij[a]).collect();
+                        x.push(schur.resolvent(sigma, &rhs));
+                    }
+                    for (p, part) in order.iter_mut().enumerate() {
+                        for (a, &e) in q.iter().enumerate() {
+                            part[(e, g)] = x[p][a];
+                        }
+                    }
+                    before = x;
                 }
             }
         }
         out
     }
 
-    /// The complex multiply-adds of one coupling's responses to `orders` (`respond`): per driven column and order a
-    /// resolvent's two changes of basis and its back substitution on Q.
-    pub(crate) fn work(&self, orders: usize) -> f64 {
+    /// The complex multiply-adds of one coupling's responses to `orders` with their jets of `parts` (`respond`): per
+    /// driven column, order and part a resolvent's two changes of basis and its back substitution on Q, and per
+    /// derivative its products by ∂A -- one a gradient's part, three a Hessian's.
+    pub(crate) fn work(&self, orders: usize, parts: usize) -> f64 {
         let q = self.replicas.iter().map(|r| r.1.len()).max().unwrap_or(0) as f64;
-        (self.ground * (orders + 1)) as f64 * 2.5 * q * q
+        let products = parts.min(4).saturating_sub(1) + 3 * parts.saturating_sub(4);
+        (self.ground * (orders + 1)) as f64 * (2.5 * parts as f64 + products as f64) * q * q
     }
 }
 

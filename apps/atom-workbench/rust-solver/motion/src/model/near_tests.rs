@@ -9,7 +9,7 @@ use crate::model::{Beat, Component, Lights, Model, Point, Sample, Unit, GROUND, 
 use crate::request::Request;
 use crate::step::Middle as _;
 
-use super::testing::{at_the_atom, decay_rate, scene};
+use super::testing::{agrees, at_the_atom, converged, decay_rate, own, scene, steps};
 
 /// The frequency (an index of the light's) of the beam named `id`.
 fn frequency_of(request: &Request, light: &Light, id: &str) -> usize {
@@ -255,12 +255,15 @@ fn a_kept_and_a_folded_drive(name: &str, id: &str) {
 }
 
 /// The potential's expansion is exact with drives folded at the atom in it: on the reported lights (the trap light coherent, every
-/// other light averaged: R3's σ⁺ cooling pair, R5's pump and repump) the gradient is the central difference of the value and the
-/// Hessian that of the gradient, to the differences' own truncation (h² of the third derivative; h = 1e-4 µm) -- the responses
-/// at the atom differentiated twice through their resolvents (jet.rs), not left out.
+/// other light averaged: R3's σ⁺ cooling pair, R5's pump and repump, R4_LIN_1's lin⊥lin cooling and repump on a cluster of
+/// three ground states) each part of the gradient is the difference of the value and each entry of the Hessian that of the
+/// gradient, each on its own scale (`agrees`: the weak axis's curvature on its own, not the tight axis's), the step chosen
+/// by the differences' convergence -- the responses at the atom differentiated twice through their resolvents
+/// (elim.rs `Reference::respond`), not differenced. (Differenced at u^{1/4} ℓ, R4_LIN_1's curvature along the tweezer's
+/// axis read +0.166 rad/µs/µm² of the near light where it is −3.5·10⁻⁴.)
 #[test]
 fn the_expansion_s_derivatives_are_exact_with_drives_at_the_atom() {
-    for (name, ids) in [("R3_DOPPLER", vec!["cool-plus"]), ("R5_PUMP", vec!["pump", "repump"])] {
+    for (name, ids) in [("R3_DOPPLER", vec!["cool-plus"]), ("R5_PUMP", vec!["pump", "repump"]), ("R4_LIN_1", vec!["cool-plus", "repump-plus"])] {
         let request = scene(name);
         let light = Light::new(&request);
         let kept = at_the_atom(&request, &light, &ids.iter().map(|id| frequency_of(&request, &light, id)).collect::<Vec<_>>());
@@ -268,22 +271,141 @@ fn the_expansion_s_derivatives_are_exact_with_drives_at_the_atom() {
         let b = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
         let p = { let mut p = [0.0; GROUND]; p[b] = 1.0; p };
         let lights = model.reported();
-        let h = 1e-4;
         for r in [[0.11, -0.07, 0.23], [-0.3, 0.2, -0.15]] {
             let q = model.expansion(r, &p, &lights);
             let shifted = |a: usize, s: f64| { let mut x = r; x[a] += s; x };
             for a in 0..3 {
-                let value = (model.potential(shifted(a, h), &p, &lights) - model.potential(shifted(a, -h), &p, &lights)) / (2.0 * h);
-                assert!((value - q.gradient[a]).abs() <= 1e-6 * q.gradient.iter().map(|x| x.abs()).fold(1e-12, f64::max), "{name}: ∂_{a}V {} against its difference {value}", q.gradient[a]);
-                let (up, down) = (model.expansion(shifted(a, h), &p, &lights), model.expansion(shifted(a, -h), &p, &lights));
-                let scale = q.hessian.iter().flatten().map(|x| x.abs()).fold(1e-12, f64::max);
+                let value = converged(&steps().into_iter().map(|h| (model.potential(shifted(a, h), &p, &lights) - model.potential(shifted(a, -h), &p, &lights)) / (2.0 * h)).collect::<Vec<_>>(), 1);
+                assert!(agrees(q.gradient[a], value, q.gradient[a].abs()), "{name} at {r:?}: ∂_{a}V {} against its difference {value:?}", q.gradient[a]);
                 for c in 0..3 {
-                    let second = (up.gradient[c] - down.gradient[c]) / (2.0 * h);
-                    assert!((second - q.hessian[a][c]).abs() <= 1e-6 * scale, "{name}: ∂_{a}∂_{c}V {} against its difference {second}", q.hessian[a][c]);
+                    let second = converged(&steps().into_iter().map(|h| (model.expansion(shifted(a, h), &p, &lights).gradient[c] - model.expansion(shifted(a, -h), &p, &lights).gradient[c]) / (2.0 * h)).collect::<Vec<_>>(), 1);
+                    assert!(agrees(q.hessian[a][c], second, own(&|x, y| q.hessian[x][y], a, c)), "{name} at {r:?}: ∂_{a}∂_{c}V {} against its difference {second:?}", q.hessian[a][c]);
                 }
             }
         }
     }
+}
+
+/// The near light's derivatives are its values' (the class of the reported trap's defect: the elimination's jets by
+/// differences read the forms' rounding times 1/δ², and the potential multiplied it by the field's coefficients): on the
+/// scenes whose clusters hold several ground states -- R4_LIN_1's and R4_TW1's lin⊥lin cooling and repump, R6_RAMAN_CO's
+/// Raman pair -- each model as the solve closes it with its averaged lights' drives at the atom, at three random
+/// points about the trap's centre, with every light coherent and with the reported lights: every near form of every
+/// cluster (assemble.rs `Model::near_exact`) and the near potential of each ground state of such a cluster (potential.rs
+/// `Model::near_potential`) -- the force, each part of its gradient, against the differences of its values, and each
+/// entry of its Hessian against the differences of the gradient (the chain value → gradient → Hessian, each link a first
+/// difference: a second difference of the values would read their rounding times 1/h², as the defect did) --, each on its
+/// own scale (`agrees`; a form's beside the rounding of the forms of its kind, which no derivative of it resolves), the
+/// step chosen by the differences' convergence (`converged`).
+#[test]
+fn every_near_form_s_and_the_potential_s_jets_are_the_derivatives_of_their_values() {
+    use crate::model::{jet, Lit};
+    use crate::random::{Purpose, Stream};
+    let mut checked = (0, 0);
+    for name in ["R4_LIN_1", "R4_TW1", "R6_RAMAN_CO"] {
+        let request = scene(name);
+        let light = Light::new(&request);
+        let chief = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+        let (closed, kept, trap, _) = Model::closed_at(&request, &light, vec![], chief, request.temperature_uk);
+        assert!(closed.clusters().iter().any(|c| c.ground > 1), "{name}: a cluster of several ground states");
+        let mut stream = Stream::new(7, Purpose::Initial, 0, 0);
+        for lights in [closed.running(), closed.reported()] {
+            let averaged = |c: Component| !c.counter && lights.0[c.frequency] == Lit::Averaged;
+            let at: Vec<Unit> = closed.driven.iter().filter(|d| averaged(d.0)).map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }).collect();
+            let model = closed.rekept(&[kept.iter().filter(|u| !matches!(u, Unit::Bare { component, .. } | Unit::Drive { component, .. } if averaged(*component))).cloned().collect::<Vec<_>>(), at].concat()).unwrap();
+            let shortest = 1.0 / model.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
+            // The resolvent's condition on the excited block, κ = ‖K‖‖R₀‖ ≤ max |E_e| over the least half-width: the levels in
+            // the frame (the far line's 7 THz beside the near line's) against the line's width.
+            let condition = (crate::request::GROUND..STATES).map(|s| model.energies[s].abs()).fold(0.0, f64::max) / (0..crate::model::far::EXCITED).map(|e| 0.5 * model.decay[(e, e)].re).filter(|w| *w > 0.0).fold(f64::INFINITY, f64::min);
+            for _ in 0..3 {
+                let r: [f64; 3] = std::array::from_fn(|a| trap.centre[a] + [1.0, 0.3, 0.3][a] * (stream.uniform() - 0.5));
+                // The displacements the differences read: ±h along each axis, step by step.
+                let hs = steps();
+                let shifts: Vec<[f64; 3]> = hs.iter().flat_map(|&h| (0..3).flat_map(move |a| [h, -h].map(|s| std::array::from_fn(|b| if a == b { r[b] + s } else { r[b] })))).collect();
+                // [derivative: the gradient's three from a jet's values, then the Hessian's six of jet::PAIRS from its
+                // gradients along the second axis][step], of the jets `at` gives at the displacements.
+                let quotients = |at: &dyn Fn(usize, usize) -> f64| -> Vec<Vec<f64>> {
+                    let mut out = vec![vec![0.0; hs.len()]; 9];
+                    for (k, &h) in hs.iter().enumerate() {
+                        let along = |a: usize, part: usize| (at(6 * k + 2 * a, part) - at(6 * k + 2 * a + 1, part)) / (2.0 * h);
+                        for a in 0..3 {
+                            out[a][k] = along(a, 0);
+                        }
+                        for (m, &(a, c)) in jet::PAIRS.iter().enumerate() {
+                            out[3 + m][k] = along(c, 1 + a);
+                        }
+                    }
+                    out
+                };
+                // Every form of every cluster with near forms.
+                for cluster in 0..model.clusters().len() {
+                    let plan = model.plan(cluster, &lights);
+                    if plan.near.len() == 0 {
+                        continue;
+                    }
+                    let jets = model.near_exact(&plan, &model.light.amplitudes(r), 2);
+                    let near = &plan.near;
+                    let displaced: Vec<crate::model::assemble::NearValues> = shifts.iter().map(|&x| model.near_exact(&plan, &model.light.amplitudes(x), 1)).collect();
+                    let jet_at = |i: usize, e: usize| -> [C64; 4] {
+                        let mut j = [C64::ZERO; 4];
+                        displaced[i].jet(e, &mut j);
+                        j
+                    };
+                    // Each form is exact to the rounding of the matrix it is an entry of (linalg.rs: a modest multiple of u
+                    // on its data): the forms of one kind -- S, D, X, L of the pair entries, the reference, the shifts, the
+                    // jumps and their partners, the responses and theirs -- one matrix, its rounding γ_{E²} (a solve on
+                    // Q) times its largest entry, over ℓ^order, ℓ the light's shortest length; and each derivative to that
+                    // rounding times the resolvent's condition κ of itself: the floors beside each form's own scale.
+                    let (p, v, j, m) = (near.pairs.len(), near.shifts.len(), near.jumps.len(), near.responses.len());
+                    let kinds = if p == 0 { 0 } else { (near.hermitian().end - near.reference - v) / p };
+                    let mut bounds: Vec<usize> = (0..=kinds).map(|k| k * p).collect();
+                    for size in [near.reference, v, j, j, m, m] {
+                        bounds.push(bounds.last().unwrap() + size);
+                    }
+                    let mut value = [C64::ZERO; jet::WHOLE];
+                    let values: Vec<C64> = (0..near.len()).map(|e| { jets.jet(e, &mut value); value[0] }).collect();
+                    let largest: Vec<f64> = (0..near.len())
+                        .map(|e| {
+                            let k = bounds.windows(2).position(|w| w[0] <= e && e < w[1]).expect("a kind of form");
+                            (bounds[k]..bounds[k + 1]).map(|i| values[i].abs()).fold(0.0, f64::max)
+                        })
+                        .collect();
+                    for e in 0..near.len() {
+                        let mut jet = [C64::ZERO; jet::WHOLE];
+                        jets.jet(e, &mut jet);
+                        for part in [false, true] {
+                            let of = |z: C64| if part { z.im } else { z.re };
+                            let hessian = |x: usize, y: usize| of(jet[jet::second(x, y)]);
+                            for (d, q) in quotients(&|i, part| of(jet_at(i, e)[part])).iter().enumerate() {
+                                let order = if d < 3 { 1 } else { 2 };
+                                let (estimate, error) = converged(q, 1);
+                                let solve = crate::units::rounding(crate::model::far::EXCITED * crate::model::far::EXCITED);
+                                let floor = solve * (largest[e] / shortest.powi(order) + condition * of(jet[1 + d]).abs());
+                                let scale = if d < 3 { of(jet[1 + d]).abs() } else { own(&hessian, jet::PAIRS[d - 3].0, jet::PAIRS[d - 3].1) };
+                                assert!(agrees(of(jet[1 + d]), (estimate, error + floor), scale), "{name} cluster {cluster} form {e} at {r:?}: derivative {d} {} against ({estimate:e}, {error:e}); value {:e}, quotients {q:?}", of(jet[1 + d]), of(values[e]));
+                            }
+                        }
+                        checked.0 += 1;
+                    }
+                }
+                // The near potential of every ground state of a cluster of several: its force and its Hessian.
+                for g in (0..GROUND).filter(|&g| model.clusters()[model.cluster_of(g)].ground > 1) {
+                    let p: [f64; GROUND] = std::array::from_fn(|b| if b == g { 1.0 } else { 0.0 });
+                    let q = model.near_potential(&model.light.amplitudes(r), &p, &lights, 2, None).quadratic;
+                    let displaced: Vec<crate::model::Quadratic> = shifts.iter().map(|&x| model.near_potential(&model.light.amplitudes(x), &p, &lights, 1, None).quadratic).collect();
+                    let estimates: Vec<(f64, f64)> = quotients(&|i, part| if part == 0 { displaced[i].value } else { displaced[i].gradient[part - 1] }).iter().map(|q| converged(q, 1)).collect();
+                    for a in 0..3 {
+                        assert!(agrees(q.gradient[a], estimates[a], q.gradient[a].abs()), "{name} ground {g} at {r:?}: the force ∂_{a}V {} against {:?}", q.gradient[a], estimates[a]);
+                    }
+                    for (m, &(a, c)) in jet::PAIRS.iter().enumerate() {
+                        assert!(agrees(q.hessian[a][c], estimates[3 + m], own(&|x, y| q.hessian[x][y], a, c)), "{name} ground {g} at {r:?}: ∂_{a}∂_{c}V {} against {:?}", q.hessian[a][c], estimates[3 + m]);
+                    }
+                    checked.1 += 1;
+                }
+            }
+        }
+    }
+    eprintln!("{} forms and {} potentials checked", checked.0, checked.1);
 }
 
 /// The reported trap is the scene's, not the solve's (SPEC §1.3; potential.rs, # An averaged light): the other lights' smooth

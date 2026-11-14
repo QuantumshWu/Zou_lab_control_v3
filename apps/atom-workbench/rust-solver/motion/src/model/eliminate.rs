@@ -136,32 +136,6 @@ pub(crate) struct Responses {
     pub(crate) work: f64,
 }
 
-/// The responses at one set of the elimination's inputs (`Model::respond`).
-struct Responded {
-    first: Vec<Vec<Mat>>,
-    second: Vec<Vec<Mat>>,
-    reference: f64,
-}
-
-impl Responded {
-    /// Σ_i c_i x_i over a few sets of the same shape.
-    fn combined(sets: &[(&Responded, f64)]) -> Responded {
-        let scale = |pick: &dyn Fn(&Responded) -> &Mat| {
-            let mut out = Mat::zeros(pick(sets[0].0).rows, pick(sets[0].0).cols);
-            for (x, c) in sets {
-                out.add_scaled(C64::real(*c), pick(x));
-            }
-            out
-        };
-        let base = sets[0].0;
-        Responded {
-            first: (0..base.first.len()).map(|c| (0..base.first[c].len()).map(|k| scale(&|x: &Responded| &x.first[c][k])).collect()).collect(),
-            second: (0..base.second.len()).map(|c| (0..base.second[c].len()).map(|k| scale(&|x: &Responded| &x.second[c][k])).collect()).collect(),
-            reference: sets.iter().map(|(x, c)| x.reference * c).sum(),
-        }
-    }
-}
-
 impl Model {
     /// Per frequency, row-major over its beams, whether a pair of them enters the levels the eliminations take (module
     /// documentation, # The response): a pair the lights hold (model.rs `Lights::pair`), and of a carrier's frequency one
@@ -231,111 +205,50 @@ impl Model {
     /// beams' amplitudes (their jets), jets to `order`: the one elimination (elim.rs `fold`) at the point -- P the
     /// cluster's states in its frames, every lit carrier a class whose beams are coherent at the point, the carriers'
     /// drives folded at their replicas or explicit where the frames make them static --, its responses on the carriers'
-    /// field bases, normalized (`Responses`). Its derivatives in the position are central differences of the same
-    /// function along the inputs' own Taylor path (h + δ·∂h + ½δ²·∂∂h, the amplitudes' likewise): a first derivative is the
-    /// function's derivative along the inputs' first derivatives, exact but for the difference's O(δ²) and its rounding
-    /// O(u/δ); at δ = u^{1/3} ℓ the two balance at u^{2/3} ≈ 4·10⁻¹¹ relative, ℓ = 1/k_max the light's shortest length,
-    /// the scale its inputs change on (the second derivatives at u^{1/4} ℓ, u^{1/2}).
+    /// field bases, normalized (`Responses`). Its derivatives in the position, to `order`, are the exact ones by the
+    /// resolvent's identity (elim.rs `Reference::respond`) from the far Hamiltonian's jet `h`: the reference z₀'s and
+    /// the excited block's. (Central differences of the same function, as they were, read the forms' rounding -- that of
+    /// their terms, not of their small value -- times 1/δ²: on R4_LIN_1's cluster of three ground states the potential's
+    /// curvature along the tweezer's axis +0.166 rad/µs/µm² where it is −3.5·10⁻⁴, its weak axis's own 0.033.)
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn eliminate(&self, cluster: usize, h: &[Mat], lights: &Lights, order: usize) -> Responses {
-        let np = jet::parts(order);
-        let shortest = 1.0 / self.light.beams.iter().map(|b| b.wave_number).fold(f64::MIN_POSITIVE, f64::max);
-        let inputs = |d: [f64; 3]| -> Mat {
-            let mut m = h[0].clone();
-            for i in 0..3 {
-                if h.len() >= 4 && d[i] != 0.0 {
-                    m.add_scaled(C64::real(d[i]), &h[1 + i]);
-                }
-            }
-            if h.len() >= 10 {
-                for (k, &(i, j)) in jet::PAIRS.iter().enumerate() {
-                    let w = if i == j { 0.5 * d[i] * d[i] } else { d[i] * d[j] };
-                    if w != 0.0 {
-                        m.add_scaled(C64::real(w), &h[4 + k]);
-                    }
-                }
-            }
-            m
-        };
-        let mut work = 0.0;
-        let mut at = |d: [f64; 3]| -> Responded {
-            let m = inputs(d);
-            let (r, w) = self.respond(cluster, &m, lights);
-            work += w;
-            r
-        };
-        let centre = at([0.0; 3]);
-        let mut parts: Vec<Responded> = vec![];
-        if np >= 4 {
-            let delta = crate::units::UNIT_ROUNDOFF.cbrt() * shortest;
-            for i in 0..3 {
-                let e = |s: f64| std::array::from_fn(|j| if j == i { s * delta } else { 0.0 });
-                let (plus, minus) = (at(e(1.0)), at(e(-1.0)));
-                parts.push(Responded::combined(&[(&plus, 0.5 / delta), (&minus, -0.5 / delta)]));
-            }
-        }
-        if np >= 10 {
-            let delta = crate::units::UNIT_ROUNDOFF.sqrt().sqrt() * shortest;
-            for &(i, j) in jet::PAIRS.iter() {
-                let e = |si: f64, sj: f64| -> [f64; 3] {
-                    let mut d = [0.0; 3];
-                    d[i] += si * delta;
-                    d[j] += sj * delta;
-                    d
-                };
-                if i == j {
-                    let (plus, minus) = (at(e(0.5, 0.5)), at(e(-0.5, -0.5)));
-                    parts.push(Responded::combined(&[(&plus, 1.0 / (delta * delta)), (&centre, -2.0 / (delta * delta)), (&minus, 1.0 / (delta * delta))]));
-                } else {
-                    let (pp, pm, mp, mm) = (at(e(1.0, 1.0)), at(e(1.0, -1.0)), at(e(-1.0, 1.0)), at(e(-1.0, -1.0)));
-                    let c = 0.25 / (delta * delta);
-                    parts.push(Responded::combined(&[(&pp, c), (&pm, -c), (&mp, -c), (&mm, c)]));
-                }
-            }
-        }
-        let all: Vec<&Responded> = std::iter::once(&centre).chain(parts.iter()).collect();
-        let carriers = centre.first.len();
-        Responses {
-            first: (0..carriers).map(|c| (0..centre.first[c].len()).map(|k| all.iter().map(|r| r.first[c][k].clone()).collect()).collect()).collect(),
-            second: (0..carriers).map(|c| (0..centre.second[c].len()).map(|k| all.iter().map(|r| r.second[c][k].clone()).collect()).collect()).collect(),
-            reference: all.iter().map(|r| r.reference).collect(),
-            work,
-        }
-    }
-
-    /// The one elimination on a cluster at one set of inputs -- the far Hamiltonian's value `h` -- and the work it took
-    /// (`eliminate`): the fold's series about the reference (elim.rs `Reference`; module documentation of elim.rs, # The
-    /// definition and the route it is evaluated on), every lit carrier's responses on its basis to orders 0 and 1. The
-    /// reference z₀ is the mean of the cluster's ground levels in its frames with the far light alone (`h`'s diagonal,
-    /// no near field in it) and the cluster's constant centre c of the near light's scalar shift (`Model::series`).
-    fn respond(&self, cluster: usize, h: &Mat, lights: &Lights) -> (Responded, f64) {
         use super::elim;
+        let parts = jet::parts(order);
         let c = &self.clusters[cluster];
         let (n, g) = (c.states.len(), c.ground);
         let grounds: Vec<usize> = c.states[..g].to_vec();
         let excited: Vec<usize> = (GROUND..STATES).collect();
         let levels = elim::Levels {
-            ground: h.block(&grounds, &grounds),
-            excited: h.block(&excited, &excited),
+            ground: h[0].block(&grounds, &grounds),
+            excited: h[0].block(&excited, &excited),
             decay: self.decay.clone(),
         };
+        // The reference z₀: the mean of the cluster's ground levels in its frames with the far light alone (`h`'s
+        // diagonal, no near field in it) and the cluster's constant centre c of the near light's scalar shift
+        // (`Model::series`); its jet the far levels' (the frames and c are constants).
         let frames: Vec<f64> = c.frames.iter().map(|f| self.omega(f)).collect();
-        let reference = (0..g).map(|y| h[(grounds[y], grounds[y])].re - frames[y]).sum::<f64>() / g as f64 + self.series.centre[cluster];
+        let reference: Vec<f64> = (0..parts)
+            .map(|p| {
+                let mean = (0..g).map(|y| h[p][(grounds[y], grounds[y])].re - if p == 0 { frames[y] } else { 0.0 }).sum::<f64>() / g as f64;
+                if p == 0 { mean + self.series.centre[cluster] } else { mean }
+            })
+            .collect();
+        let slopes: Vec<(f64, Mat)> = (1..parts).map(|p| (reference[p], h[p].block(&excited, &excited))).collect();
         let lit: Vec<usize> = (0..self.carriers.len()).filter(|&ci| lights.on(self.carriers[ci].frequency)).collect();
         let nus: Vec<f64> = lit.iter().map(|&ci| self.carriers[ci].detuning).collect();
         let slow = elim::Slow::single(c.states[g..].iter().map(|&s| s - GROUND).collect(), frames);
-        let series = elim::Reference::new(&levels, &nus, &slow, reference);
+        let series = elim::Reference::new(&levels, &nus, &slow, reference[0]);
         let (mut first, mut second) = (vec![vec![]; self.carriers.len()], vec![vec![]; self.carriers.len()]);
         let mut work = 0.0;
-        for (k, &ci) in lit.iter().enumerate() {
+        for (j, &ci) in lit.iter().enumerate() {
             for u in &self.carriers[ci].basis {
-                let mut orders = series.respond(k, &u.block(&excited, &grounds), n, 1).into_iter();
-                first[ci].push(orders.next().expect("order 0").scaled(-C64::ONE));
+                let mut orders = series.respond(j, &u.block(&excited, &grounds), n, 1, &slopes).into_iter();
+                first[ci].push(orders.next().expect("order 0").into_iter().map(|m| m.scaled(-C64::ONE)).collect());
                 second[ci].push(orders.next().expect("order 1"));
-                work += series.work(1);
+                work += series.work(1, parts);
             }
         }
-        (Responded { first, second, reference }, work)
+        Responses { first, second, reference, work }
     }
 
     /// A frequency's carrier, where its co-rotating component is one.
