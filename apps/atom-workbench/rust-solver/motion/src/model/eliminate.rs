@@ -205,13 +205,15 @@ impl Model {
     /// beams' amplitudes (their jets), jets to `order`: the one elimination (elim.rs `fold`) at the point -- P the
     /// cluster's states in its frames, every lit carrier a class whose beams are coherent at the point, the carriers'
     /// drives folded at their replicas or explicit where the frames make them static --, its responses on the carriers'
-    /// field bases, normalized (`Responses`). Its derivatives in the position, to `order`, are the exact ones by the
+    /// field bases, normalized (`Responses`) -- with the products of two places' resolvents each reference class's first
+    /// order and the landing read (`Responses::mixed`) where `mixes`: where the plan lays the forms they make
+    /// (assemble.rs `Plan::mixes`). Its derivatives in the position, to `order`, are the exact ones by the
     /// resolvent's identity (elim.rs `Reference::respond`) from the far Hamiltonian's jet `h`: the reference z₀'s and
     /// the excited block's. (Central differences of the same function, as they were, read the forms' rounding -- that of
     /// their terms, not of their small value -- times 1/δ²: on R4_LIN_1's cluster of three ground states the potential's
     /// curvature along the tweezer's axis +0.166 rad/µs/µm² where it is −3.5·10⁻⁴, its weak axis's own 0.033.)
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn eliminate(&self, cluster: usize, h: &[Mat], lights: &Lights, order: usize) -> Responses {
+    pub(crate) fn eliminate(&self, cluster: usize, h: &[Mat], lights: &Lights, order: usize, mixes: bool) -> Responses {
         use super::elim;
         let parts = jet::parts(order);
         let c = &self.clusters[cluster];
@@ -231,7 +233,6 @@ impl Model {
         let slopes: Vec<(Vec<f64>, Mat)> = (1..parts).map(|p| (reference[p].clone(), h[p].block(&excited, &excited))).collect();
         let classes = self.references(cluster, lights);
         let firsts: Vec<usize> = (0..classes.iter().max().map_or(0, |m| m + 1)).map(|a| classes.iter().position(|&x| x == a).expect("a class's place")).collect();
-        let mixes = (self.series.order >= 1 || self.series.normalization >= 1) && firsts.len() > 1;
         let lit: Vec<usize> = (0..self.carriers.len()).filter(|&ci| lights.on(self.carriers[ci].frequency)).collect();
         let nus: Vec<f64> = lit.iter().map(|&ci| self.carriers[ci].detuning).collect();
         let sizes: Vec<f64> = c.frames.iter().map(|f| self.axes.size(f)).collect();

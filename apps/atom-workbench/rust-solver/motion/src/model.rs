@@ -428,7 +428,7 @@ pub struct Model {
     pub(crate) classes: Vec<Vec<photon::Class>>,
     /// The clusters' assemblies under the light sets asked so far, each made once where it is first asked (assemble.rs
     /// `Model::plan`).
-    pub(crate) plans: Mutex<Vec<(usize, Lights, Arc<std::sync::OnceLock<Arc<assemble::Plan>>>)>>,
+    pub(crate) plans: Mutex<Vec<(usize, Lights, elim::Orders, Arc<std::sync::OnceLock<Arc<assemble::Plan>>>)>>,
     /// The spread of what moves the folds' spectra (units.rs `Model::spread`), and the constant forms of two frequencies asked so
     /// far (units.rs `Model::constants`).
     pub(crate) spread: f64,

@@ -313,13 +313,24 @@ pub(crate) fn energies(request: &Request) -> Vec<f64> {
     (0..STATES).map(|s| request.hamiltonian[(s, s)].re).collect()
 }
 
-/// D = Σ_a C_a†C_a on the excited states (EXCITED × EXCITED).
+/// D = Σ_a C_a†C_a on the excited states (EXCITED × EXCITED), an entry within the rounding of its sum -- of the 3 GROUND
+/// products' moduli Σ_a Σ_b |C_a[b, e]| |C_a[b, e']| -- nothing: the dipole sums' orthogonality (D = Γ on each excited
+/// line, diagonal in any basis of it) is exact, its rounding is not, and an entry of rounding is a product every decay
+/// on rows pays (assemble.rs `ReplicaPlan`: PGC3D's eight own rows a replica took 1124 of them).
 pub(crate) fn decay(request: &Request) -> Mat {
     let (ground, excited): (Vec<usize>, Vec<usize>) = ((0..GROUND).collect(), (GROUND..STATES).collect());
-    let mut d = Mat::zeros(EXCITED, EXCITED);
+    let (mut d, mut moduli) = (Mat::zeros(EXCITED, EXCITED), Mat::zeros(EXCITED, EXCITED));
     for c in &request.emission {
         let ce = c.block(&ground, &excited);
         d.add_scaled(C64::ONE, &ce.adjoint_product(&ce));
+        let size = Mat::from_fn(GROUND, EXCITED, |b, e| C64::real(ce[(b, e)].abs()));
+        moduli.add_scaled(C64::ONE, &size.adjoint_product(&size));
+    }
+    let floor = rounding(3 * GROUND);
+    for (z, m) in d.data.iter_mut().zip(&moduli.data) {
+        if z.abs() <= floor * m.re {
+            *z = C64::ZERO;
+        }
     }
     d
 }

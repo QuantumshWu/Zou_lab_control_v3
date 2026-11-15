@@ -426,7 +426,7 @@ impl Model {
         let (lights, plan) = (&layout.lights, &layout.plan);
         let near = self.light_at(lights, &layout.coordinates, x);
         let h = self.far_hamiltonian(&near, lights, 0);
-        let r = self.eliminate(layout.cluster, &h, lights, 0);
+        let r = self.eliminate(layout.cluster, &h, lights, 0, plan.mixes());
         let energies = vec![(0..STATES).map(|s| h[0][(s, s)].re).collect::<Vec<f64>>()];
         let mut values = vec![C64::ZERO; plan.near.len()];
         self.forms(plan, &r, &energies, &mut values, &|_| true);

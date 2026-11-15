@@ -198,7 +198,7 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
     // The elimination at the middle with its gradient: a frequency's coupling on its field (its every folded drive's, those
     // folded at the atom alone, or as it is) and its response on the path.
     let far = model.far_hamiltonian(&amplitudes, &lights, 1);
-    let responses = model.eliminate(cluster, &far, &lights, 1);
+    let responses = model.eliminate(cluster, &far, &lights, 1, model.plan(cluster, &lights).mixes());
     let coupling = |frequency: usize, basis: &[Mat], e: usize, b: usize| -> Jet { (0..basis.len()).fold(NONE, |sum, k| plus(sum, scaled(field(frequency, k, false), leaf(basis[k][(e, b)])))) };
     let folded = |frequency: usize, e: usize, b: usize| coupling(frequency, &model.tones[frequency].coupled[0], e, b);
     let response = |frequency: usize, e: usize, y: usize| -> Jet {
@@ -977,7 +977,7 @@ fn the_normalized_part_along_a_path_is_its_nodes_and_its_quadrature_falls_as_the
 }
 
 /// The held part's force form (`Middle::held_force`) is the form of its gradient's matrices: at the series' order 1
-/// -- on the first cluster whose run holds it, its places of one reference (eliminate.rs `Model::orders_of`): of the 1D
+/// -- on the first cluster whose run holds it (its plan's orders, eliminate.rs `Model::references`): of the 1D
 /// PGC at 3 G, refs/requests/PGC1D_TILT_0, its cluster 0 (its F = 2 sublevels, one cluster of Zeeman-split levels,
 /// take it no longer), else PGC3D's --
 /// the held part −Herm(Y E₀) at a node, its force form on a Hermitian ρ by the forms' terms contracted with E₀ρ and ρY
@@ -1332,5 +1332,41 @@ fn the_readout_inverts_the_generator_s_own_normalization() {
             let (shown, own) = (read[s] / read[first], x[p + 1].norm_sqr() / x[0].norm_sqr());
             assert!((shown - own).abs() <= 1e-12 * own.max(1.0), "ground state {s}: read {shown} against x's {own}");
         }
+    }
+}
+
+/// The plan's counted work by piece (run by name: `SCENE=<name or path> … a_scene_s_plan_work -- --ignored --nocapture`):
+/// per cluster of the scene's closed model, the complex multiply-adds a node's and a point's pieces count -- the dense
+/// terms' node cost, 𝒯 (`excite`), its first order, the decay, the metric, the normalized part, a scattering's classes.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn a_scene_s_plan_work() {
+    use crate::model::photon::Gradients;
+    let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
+    let request = crate::model::testing::scene(&name);
+    let light = crate::field::Light::new(&request);
+    let state = (0..crate::request::GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let (model, ..) = Model::closed_at(&request, &light, vec![], state, request.temperature_uk);
+    let running = model.running();
+    for k in 0..model.clusters().len() {
+        let plan = model.plan(k, &running);
+        let fourth = plan.fourth.as_ref();
+        println!(
+            "cluster {k}: {} | node {:?} excite {:.0} (near {:.0}) first {:.0} decay {:.0} metric {:.0} node normal {:?} quartic {:.0} held force {:.0} | classes (all) {:.0} (none) {:.0} amplitudes {:.0} | costs {:?}",
+            plan.described(),
+            plan.node,
+            plan.excite_work(1, true),
+            plan.excite_work(1, false),
+            plan.excite_first_work(1),
+            plan.decay_work(),
+            plan.metric_work(1),
+            fourth.map(|f| plan.node_normal_work(f)),
+            fourth.map_or(0.0, |f| plan.quartic_work(f, None, false)),
+            fourth.map_or(0.0, |f| plan.held_force_work(f, 3)),
+            plan.classes_work(Gradients::All),
+            plan.classes_work(Gradients::None),
+            plan.amplitudes_work(4),
+            plan.costs(3)
+        );
     }
 }

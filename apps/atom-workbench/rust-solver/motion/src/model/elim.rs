@@ -95,12 +95,12 @@
 //! far levels alone q = 0.548; with the centre c, q = 0.0056, the series' order 0 within 7.9e-5 of the fold, order 1
 //! within 4.0e-7. A place's own level, not its cluster's mean: R4_LIN_4's cluster of F = 1 and F = 2 ground states, 855
 //! rad/µs apart in its frames, had q ≈ 1.6 about their mean -- ELIMINATION v11.)
-//! The first order and the landing's overlap are of two places' resolvents, R₀(s)R₀(t)W_t (`Fold::evaluated`,
-//! `Fold::landing_evaluated`): the landing's the run holds as its own forms (assemble.rs `NearLayout::landing`); the
-//! generator's first order and its jumps' it holds of one resolvent alone, N₁, exact where a cluster's places have one
-//! reference (eliminate.rs `Model::one_reference`) -- elsewhere `Unit::Series` is no candidate and the next order is the
-//! nearest block's keep, as every order beyond the first (eliminate.rs `Model::orders_of`). Where no order reaches the share (q
-//! near one) the block is made explicit by criterion one.
+//! The first order and the landing's overlap are of two places' resolvents, R₀(s)R₀(t)W_t, column s at its own place's
+//! reference (assemble.rs, # The normalized generator: the crossed forms Y⁽ᵃ⁾ and the mixed responses M⁽ᵃ⁾ of each
+//! reference class); every order beyond the first is the nearest block's keep. Where no order reaches the share (q near
+//! one) the block is made explicit by criterion one. The evaluation the readings measure against the definition is the
+//! run's own, one function (assemble.rs `Model::evaluation`: its plan's static normalized generator at the point, at the
+//! run's orders or the next ones, `Model::plan_at`) -- no second implementation of the series here.
 //!
 //! # First order in the frequency offsets
 //! A P amplitude whose frequency is λ_p + Δ -- the Doppler shift of a beam, k·v, an explicit beat -- drives
@@ -1383,49 +1383,6 @@ impl Fold {
             .collect()
     }
 
-    /// The products of two places' resolvents on the order-0 responses `responses` (`responses_about`): per replica and
-    /// place s of its group R₀(s) R₀(t) W on every column t, R₀(s) = (z_s + f − K)⁻¹ (zero at a place of another group)
-    /// -- the series' first order on column s, T¹[:, s] = −Σ_t R₀(s)R₀(t)W_t E[t, s] (the column's own reference: (z_s +
-    /// f − K)T[:, s] = W_s − (T E)[:, s]), and of the left wave operator's row s, W′_s R₀(s) (the landing's Y). Where
-    /// z_s = z_t, R₀(t)²W_t: the order-1 response, the same numbers (the same solves).
-    fn mixed_about(&self, z0: &[f64], responses: &[Vec<Mat>]) -> Vec<Vec<Mat>> {
-        let n = self.size();
-        self.replicas
-            .iter()
-            .zip(responses)
-            .map(|(rep, r)| {
-                (0..n)
-                    .map(|s| {
-                        let mut x = Mat::zeros(r[0].rows, n);
-                        if !self.members[rep.group].contains(&s) {
-                            return x;
-                        }
-                        let sigma = C64::real(z0[s] + rep.frequency);
-                        for &t in &self.members[rep.group] {
-                            let column: Vec<C64> = (0..x.rows).map(|i| r[0][(i, t)]).collect();
-                            let solved = rep.k.resolvent(sigma, &column);
-                            for i in 0..x.rows {
-                                x[(i, t)] = solved[i];
-                            }
-                        }
-                        x
-                    })
-                    .collect()
-            })
-            .collect()
-    }
-
-    /// Σ_f W′_f P_f of the products `mixed` (`mixed_about`) at place s: the series' first-order form on column s,
-    /// N⁽ˢ⁾[r, t] = Σ_f W′_f R₀(s)R₀(t) W_f -- N₁ where the references are one.
-    fn mixed_form(&self, mixed: &[Vec<Mat>], s: usize) -> Mat {
-        let n = self.size();
-        let mut m = Mat::zeros(n, n);
-        for (rep, p) in self.replicas.iter().zip(mixed) {
-            m.add_scaled(C64::ONE, &rep.back.product(&p[s]));
-        }
-        m
-    }
-
     /// ‖H − Z₀‖₂ (`series_ratio`).
     pub(crate) fn series_norm(&self, z0: &[f64]) -> f64 {
         let mut e = self.generator.clone();
@@ -1614,74 +1571,6 @@ impl Fold {
         Some((class, self.members[group].iter().copied().filter(|&place| place < self.ground).collect()))
     }
 
-    /// The evaluation's normalized generator at the orders `orders` (assemble.rs `normal`; ELIMINATION v7, v11) of this
-    /// fold's series about Z₀ = diag(z_y) -- the reference's forms, what the tables hold --: H₀ = Herm(A + N₀) − (i/2)L,
-    /// N₀ = Σ W′R₀(y)W on column y, L = Σ (R₀W)†D(R₀W), at K = 1 H = H₀ − N⁽ˢ⁾(H₀ − Z₀) on each column s (`mixed_form`:
-    /// N₁ where the references are one); its Hermitian part Herm H and its decay S_J⁻¹ (Σ T†D T) S_J⁻¹ of the jumps' wave
-    /// operator T = R₀W (− Σ_t R₀(s)R₀(t)W_t E[t, s] on column s at K = 1, E = H − Z₀) and S_J⁻¹ = Σ_{j≤J} b_j X^j,
-    /// X = Σ (R₀W)†(R₀W): Herm H − (i/2) decay.
-    pub(crate) fn evaluated(&self, levels: &Levels, z0: &[f64], orders: Orders) -> Mat {
-        let n = self.size();
-        let responses = self.responses_about(z0, 0);
-        let mixed = if orders.series >= 1 { self.mixed_about(z0, &responses) } else { vec![] };
-        let forms = |k: usize| {
-            let mut m = Mat::zeros(n, n);
-            for (rep, r) in self.replicas.iter().zip(&responses) {
-                m.add_scaled(C64::ONE, &rep.back.product(&r[k]));
-            }
-            m
-        };
-        let metric = metric_about(&responses, n);
-        let mut loss = Mat::zeros(n, n);
-        for (rep, r) in self.replicas.iter().zip(&responses) {
-            loss.add_scaled(C64::ONE, &r[0].adjoint_product(&levels.decay.block(&rep.q, &rep.q).product(&r[0])));
-        }
-        let mut whole = self.direct.clone();
-        whole.add_scaled(C64::ONE, &forms(0));
-        let mut h = whole.hermitian_part();
-        h.add_scaled(C64::new(0.0, -0.5), &loss);
-        let offset = |h: &Mat| {
-            let mut e = h.clone();
-            for i in 0..n {
-                e[(i, i)] -= C64::real(z0[i]);
-            }
-            e
-        };
-        // Column s of a product of the products at s: Σ_t P⁽ˢ⁾[:, t] E[t, s].
-        let at_columns = |of: &dyn Fn(usize) -> Mat, e: &Mat, rows: usize| {
-            let mut out = Mat::zeros(rows, n);
-            for s in 0..n {
-                let column = of(s).product(e);
-                for r in 0..rows {
-                    out[(r, s)] = column[(r, s)];
-                }
-            }
-            out
-        };
-        if orders.series >= 1 {
-            let next = at_columns(&|s| self.mixed_form(&mixed, s), &offset(&h), n);
-            h.add_scaled(-C64::ONE, &next);
-        }
-        let e = offset(&h);
-        let mut inner = Mat::zeros(n, n);
-        for (x, (rep, r)) in self.replicas.iter().zip(&responses).enumerate() {
-            let mut wave = r[0].clone();
-            if orders.series >= 1 {
-                wave.add_scaled(-C64::ONE, &at_columns(&|s| mixed[x][s].clone(), &e, r[0].rows));
-            }
-            inner.add_scaled(C64::ONE, &wave.adjoint_product(&levels.decay.block(&rep.q, &rep.q).product(&wave)));
-        }
-        let mut bent = Mat::identity(n);
-        let mut power = Mat::identity(n);
-        for j in 1..=orders.normalization {
-            power = power.product(&metric);
-            bent.add_scaled(C64::real(binomial(-0.5, j)), &power);
-        }
-        let mut out = h.hermitian_part();
-        out.add_scaled(C64::new(0.0, -0.5), &bent.product(&inner).product(&bent));
-        out
-    }
-
     /// The definition (ELIMINATION v3 4, v6, v7): of this fold -- the self-consistent one, its excited block whole
     /// (`Model::definition_fold`), the run's static part: what the run's sectors leave out is criterion one's
     /// (`Fold::sector_parts`), read on the run's own fold, not a part of what the evaluation is measured against -- with
@@ -1690,13 +1579,29 @@ impl Fold {
     /// landing map S (1 + Σ_f S_f T_f)⁻¹, S_f the left wave operators (`left_operators`, the landing's overlap of
     /// `transients`): where a bare state lands, in the normalized coordinates -- None where the left operators do not
     /// settle: the landing does not exist there, and the readings book it whole (`Model::readings`, `converges`). Λ is
-    /// the norm's loss on the slow invariant subspace, −d/dt x†(1 + X)x = x†Λx: the jumps' product Σ_f T_f†D T_f.
+    /// the norm's loss on the slow invariant subspace, −d/dt x†(1 + X)x = x†Λx: the excited amplitude's product Σ_f
+    /// 𝒯_f†D𝒯_f, 𝒯_f the replica's whole excited amplitude -- T_f on its Q and each explicit state of its frame its own
+    /// (P's excited states decay as they are: their D, and its cross terms with T_f; an explicit state of a frame no
+    /// replica is at, its D alone). The run's (assemble.rs, # The excited amplitude): the explicit states' amplitude is
+    /// theirs in 𝒯 there too.
     pub(crate) fn definitions(&self, levels: &Levels) -> (Mat, Option<Mat>) {
         let n = self.size();
+        let g = self.ground;
         let (s, s_inverse) = self.normalization();
         let mut loss = Mat::zeros(n, n);
+        // An explicit state's place, and whether a replica holds it.
+        let mut held = vec![false; self.explicit.len()];
         for rep in &self.replicas {
-            loss.add_scaled(C64::ONE, &rep.t.adjoint_product(&levels.decay.block(&rep.q, &rep.q).product(&rep.t)));
+            let own: Vec<usize> = (0..self.explicit.len()).filter(|&i| !rep.q.contains(&self.explicit[i]) && self.places[g + i] == rep.group && equal(self.frames[g + i] - rep.frequency, self.sizes[g + i] + rep.scale)).collect();
+            own.iter().for_each(|&i| held[i] = true);
+            let rows: Vec<usize> = rep.q.iter().copied().chain(own.iter().map(|&i| self.explicit[i])).collect();
+            let amplitude = Mat::from_fn(rows.len(), n, |a, y| if a < rep.q.len() { rep.t[(a, y)] } else if y == g + own[a - rep.q.len()] { C64::ONE } else { C64::ZERO });
+            loss.add_scaled(C64::ONE, &amplitude.adjoint_product(&levels.decay.block(&rows, &rows).product(&amplitude)));
+        }
+        for i in (0..self.explicit.len()).filter(|&i| !held[i]) {
+            for j in (0..self.explicit.len()).filter(|&j| !held[j] && self.places[g + j] == self.places[g + i] && equal(self.frames[g + j] - self.frames[g + i], self.sizes[g + j] + self.sizes[g + i])) {
+                loss[(g + i, g + j)] += levels.decay[(self.explicit[i], self.explicit[j])];
+            }
         }
         let mut generator = s.product(&self.generator).product(&s_inverse).hermitian_part();
         generator.add_scaled(C64::new(0.0, -0.5), &s_inverse.product(&loss).product(&s_inverse));
@@ -1708,36 +1613,7 @@ impl Fold {
         (generator, landing)
     }
 
-    /// The evaluation's landing map at the orders `orders` (assemble.rs `normal`, model.rs `Model::landed`) of this fold's
-    /// series about Z₀ -- the reference's forms, what the tables hold --: S_J Σ_{j≤J} (−Y)^j, Y[s, t] = Σ_f W′_f,s
-    /// R₀(s)R₀(t) W_f,t the left and the right wave operators' overlap to the series' leading order (the left one's row s
-    /// W′_s R₀(s), the right one's column t R₀(t)W_t: `mixed_about`; N₁ where the references are one), S_J =
-    /// Σ_{j≤J} binom(½, j) X^j, X = Σ (R₀W)†(R₀W): the identity at J = 0.
-    pub(crate) fn landing_evaluated(&self, z0: &[f64], orders: Orders) -> Mat {
-        let n = self.size();
-        let responses = self.responses_about(z0, 0);
-        let metric = metric_about(&responses, n);
-        let mut partner = Mat::zeros(n, n);
-        if orders.normalization >= 1 {
-            let mixed = self.mixed_about(z0, &responses);
-            for s in 0..n {
-                let form = self.mixed_form(&mixed, s);
-                for t in 0..n {
-                    partner[(s, t)] = form[(s, t)];
-                }
-            }
-        }
-        let (mut s, mut power, mut sum, mut term) = (Mat::identity(n), Mat::identity(n), Mat::identity(n), Mat::identity(n));
-        for j in 1..=orders.normalization {
-            power = power.product(&metric);
-            s.add_scaled(C64::real(binomial(0.5, j)), &power);
-            term = term.product(&partner).scaled(-C64::ONE);
-            sum.add_scaled(C64::ONE, &term);
-        }
-        s.product(&sum)
-    }
-
-    /// The evaluation's landing error on a state ψ against the definition (`landing_evaluated`, `definitions`): after
+    /// The evaluation's landing error on a state ψ against the definition (assemble.rs `Model::evaluation`, `definitions`): after
     /// the next jump the atom lands in a bare ground state at the state's own ground populations p_g (as `errors` reads
     /// the transient), and a landing off by r_g = ‖(L_e − L_d) e_g‖/‖L_d e_g‖ is off on the landed state -- its norm, the
     /// next wait's threshold law, and its populations -- by a rate's relative error 2r_g + r_g²: Σ_g p_g (2r_g + r_g²)
@@ -1918,7 +1794,7 @@ impl Reference {
     /// The products of two places' resolvents on class c's coupling, R₀(x)R₀(y) W on every ground place y's column, one
     /// a place x of `places` (any of the slow states: a reference class's first, eliminate.rs `Model::references`) -- of
     /// the series' first order at x's reference and of the landing's Y = Σ_f W′_f R₀(x)R₀(y) W_f, the left and the right
-    /// wave operators' overlap at their leading order (the left one's row x is W′_x R₀(x), `Fold::landing_evaluated`) --:
+    /// wave operators' overlap at their leading order (the left one's row x is W′_x R₀(x), assemble.rs `normal`) --:
     /// [x][part], with their jets as `respond`'s. Where z_x = z_y, the order-1 response R₀(y)² W_y, the same numbers
     /// (the same solves).
     pub(crate) fn mixed(&self, class: usize, coupling: &Mat, n: usize, slopes: &[(Vec<f64>, Mat)], places: &[usize]) -> Vec<Vec<Mat>> {
@@ -2207,8 +2083,7 @@ fn rate_error(apart: f64, scale: f64) -> f64 {
 }
 
 /// The slow state's one metric as the run evaluates it (assemble.rs `bent`, `Model::bent_at`): X = Σ_f (R₀W_f)†(R₀W_f)
-/// of the series' order-0 responses about z₀ (`Fold::responses_about`) -- the generator's normalization's
-/// (`Fold::evaluated`), the landing map's (`Fold::landing_evaluated`) and its series' ratio's (`Fold::evaluated_share`).
+/// of the series' order-0 responses about z₀ (`Fold::responses_about`) -- its series' ratio's (`Fold::evaluated_share`).
 fn metric_about(responses: &[Vec<Mat>], n: usize) -> Mat {
     let mut metric = Mat::zeros(n, n);
     for r in responses {
@@ -2587,7 +2462,7 @@ impl super::Model {
         for (l, x) in &errors.links {
             book(&self.link_unit(grounds, l), *x, &mut out);
         }
-        if let Some((fold, levels, far, left)) = self.cluster_fold(sample.cluster, &amplitudes, true) {
+        if let Some((fold, _, far, left)) = self.cluster_fold(sample.cluster, &amplitudes, true) {
             // A part on a block -- or, None, on every block the state reaches --, split among its classes as `errors`
             // splits a block's (`Fold::state_block_parts`).
             let on_blocks = |on: Option<usize>, x: f64, out: &mut Vec<UnitError>| {
@@ -2597,8 +2472,9 @@ impl super::Model {
                     }
                 }
             };
-            // The evaluation against the definition (ELIMINATION v7; `Fold::evaluation_error`, `Fold::landing_error`): one
-            // comparison at the run's orders -- the normalized generator, and the landing map a jump and the light's
+            // The evaluation against the definition (ELIMINATION v7; `Fold::evaluation_error`, `Fold::landing_error`): the
+            // run's own (assemble.rs `Model::evaluation`: its plan's static normalized generator at the sample's point, at
+            // rest), one comparison at the run's orders -- the normalized generator, and the landing map a jump and the light's
             // switching on put the atom through (model.rs `Model::landed`) --, and at each next object the part it takes
             // away: the series' first order (`Unit::Series`) where the run takes order 0, the normalization's next
             // (`Unit::Normalization`); the rest (δK, the orders beyond, the Hermitian part's normalization) on the block
@@ -2614,9 +2490,12 @@ impl super::Model {
                     // Where the definition's landing does not exist (its left wave operators do not settle, `converges`),
                     // every landing is wrong by all of itself: the state's ground populations whole, at every order.
                     let unlanded = (0..g).map(|x| psi[x].norm_sqr()).sum::<f64>() / norm;
+                    let running = self.running();
                     let against = |(defined, landing): &(Mat, Option<Mat>), orders: Orders| {
-                        let landed = landing.as_ref().map_or(unlanded, |landing| Fold::landing_error(&fold.landing_evaluated(z0, orders), landing, g, psi));
-                        Fold::evaluation_error(&fold.evaluated(&levels, z0, orders), defined, z0, psi) + landed
+                        let (evaluated, map) = self.evaluation(&self.plan_at(sample.cluster, &running, orders), sample.at.r);
+                        let map = map.unwrap_or_else(|| Mat::identity(c.states.len()));
+                        let landed = landing.as_ref().map_or(unlanded, |landing| Fold::landing_error(&map, landing, g, psi));
+                        Fold::evaluation_error(&evaluated, defined, z0, psi) + landed
                     };
                     let defined = definition.definitions(&whole);
                     // The run's orders, every cluster's (assemble.rs, # The normalized generator: the series' first

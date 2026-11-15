@@ -1108,29 +1108,28 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
             assert!(skew <= crate::units::rounding(4 * n * n * (j + 1)), "the decay is Hermitian: {skew}");
         }
         assert!(landing_apart.frobenius() <= (q + x_size * q + rate(normalization)).max(1e-9) * exact.frobenius(), "the landing map {}", landing_apart.frobenius() / exact.frobenius());
-        // The errors the run books, measured on random slow states against the definition (`Fold::evaluated` against
-        // `Fold::definitions`, a point's numbers, not bounds): the evaluation's normalized generator at its orders is this
-        // test's route (the same Hermitian part, the same decay), and the error falls from the series' order 0 to 1 and
+        // The errors the run books, measured on random slow states against the definition (the route's whole normalized
+        // generator -- the run's `normal` and the decay of 𝒯 = 𝒯⁽⁰⁾ + 𝒯⁽¹⁾ of the same forms, assemble.rs `Middle::generator`
+        // -- against `Fold::definitions`, a point's numbers, not bounds): the error falls from the series' order 0 to 1 and
         // with the normalization's order.
         let defined = fold.definitions(&lv).0;
-        let at = |orders: Orders| fold.evaluated(&lv, &vec![z0; n], orders);
-        let mut apart = at(orders);
-        let mut route_whole = route.hermitian_part();
-        route_whole.add_scaled(C64::new(0.0, -0.5), &{
+        let at = |orders: Orders| {
             let data = made(orders);
             let (bent, e) = (matrix(&data, crate::model::assemble::BENT), matrix(&data, crate::model::assemble::OFFSET));
+            let mut whole = hermitian.clone();
+            whole.add_scaled(C64::ONE, &matrix(&data, crate::model::assemble::HELD));
             let mut inner = Mat::zeros(n, n);
             for t in &responses {
                 let mut wave = t[0].clone();
-                if order >= 1 {
+                if orders.series >= 1 {
                     wave.add_scaled(-C64::ONE, &t[1].product(&e));
                 }
                 inner.add_scaled(C64::ONE, &wave.adjoint_product(&lv.decay.product(&wave)));
             }
-            bent.product(&inner).product(&bent)
-        });
-        apart.add_scaled(-C64::ONE, &route_whole);
-        assert!(apart.frobenius() <= 1e-9 * route_whole.frobenius(), "{name}: the evaluated generator is the route's, {} apart", apart.frobenius() / route_whole.frobenius());
+            let mut out = whole.hermitian_part();
+            out.add_scaled(C64::new(0.0, -0.5), &bent.product(&inner).product(&bent));
+            out
+        };
         let mut stream = crate::random::Stream::new(3, crate::random::Purpose::Initial, 0, 0);
         for _ in 0..4 {
             let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
@@ -1979,17 +1978,12 @@ fn r4_lin_4() -> (crate::model::Model, Vec<([f64; 3], [f64; 3])>, Vec<usize>) {
 }
 
 /// The run's series' first order about each place's own reference (ELIMINATION v12; assemble.rs, # The normalized
-/// generator): on R4_LIN_4's clusters of more than one reference class -- its F = 1 and F = 2 ground states with the
-/// explicit states, their far levels apart in the frames -- the model with `Unit::Series` kept takes the first order there
-/// (its plans' orders: no cluster is held at order 0), `Unit::Series` is a candidate of the model without it, and at the
-/// prior's atoms the run's first order -- its generator at rest (assemble.rs `Middle::generator`: the held part
-/// −Herm Σ_a Y⁽ᵃ⁾ E₀ P_a, the decay of 𝒯 = 𝒯⁽⁰⁾ + 𝒯⁽¹⁾ with 𝒯⁽¹⁾[:, s] = Σ_t M⁽ᵃ⁽ˢ⁾⁾[:, t] E[t, s]) less the same model's
-/// at order 0 -- is the evaluation's (elim.rs `Fold::evaluated` at K = 1 less K = 0, of the same reference: an
-/// independent implementation of the same series) within a twentieth of itself where the first order is at least 10⁻⁵ of
-/// the generator (measured: 2.3·10⁻², of a first order 4·10⁻⁶ of the generator; the run's bare drives' constant folds,
-/// which take no first order, and its first-order Doppler's recoil, which the evaluation does not take, apart
-/// [hypothesis]; a wrong class's resolvent is all of it) -- below that it is printed, a first order that moves nothing a
-/// run resolves --; and its decay is its photons' rate on the cluster's states.
+/// generator), measured as the readings measure it: on R4_LIN_4's clusters of more than one reference class -- its F = 1
+/// and F = 2 ground states with the explicit states, their far levels apart in the frames -- the model with
+/// `Unit::Series` kept takes the first order there (its plans' orders), `Unit::Series` is a candidate of the model without
+/// it, and at the prior's atoms the run's own evaluation (assemble.rs `Model::evaluation`: the plan's static normalized
+/// generator at rest, the one function the readings call) at order 1 is no farther from the definition (`Fold::
+/// definitions`, `Fold::evaluation_error`) than at order 0; the run's decay is its photons' rate on the cluster's states.
 #[test]
 fn a_cluster_of_more_than_one_reference_takes_the_first_order_of_each_place_s_reference() {
     use crate::model::{Point, Unit};
@@ -1998,47 +1992,37 @@ fn a_cluster_of_more_than_one_reference_takes_the_first_order_of_each_place_s_re
     assert!(!many.is_empty(), "R4_LIN_4 has a cluster of more than one reference");
     assert!(model.kept.contains(&Unit::Series) || model.candidates().contains(&Unit::Series), "Series a unit");
     let kept = model.rekept(&[model.kept.clone(), vec![Unit::Series, Unit::Normalization { order: 1 }]].concat()).expect("the model with the first orders");
-    let zeroth = model.rekept(&[model.kept.clone(), vec![Unit::Normalization { order: 1 }]].concat()).expect("the model at order 0");
     let running = kept.running();
-    let (mut read, mut largest) = (0, 0.0_f64);
+    let mut read = 0;
     for &k in &many {
         let plan = kept.plan(k, &running);
         assert_eq!(plan.fourth.as_ref().map(|f| f.orders.series), Some(1), "cluster {k}'s run takes the first order");
-        let n = kept.clusters()[k].states.len();
+        let c = &kept.clusters()[k];
+        let n = c.states.len();
         for &(r, _) in points.iter().step_by(9) {
             let amplitudes = kept.light.amplitudes(r);
-            let Some((fold, levels, far, _)) = kept.cluster_fold(k, &amplitudes, true) else { continue };
+            let (Some((_, _, far, _)), Some((definition, whole))) = (kept.cluster_fold(k, &amplitudes, true), kept.definition_fold(k, &amplitudes)) else { continue };
             let z0 = kept.reference_of(k, &far);
-            let orders = kept.series.orders();
-            let mut first = fold.evaluated(&levels, &z0, orders);
-            first.add_scaled(-C64::ONE, &fold.evaluated(&levels, &z0, Orders { series: 0, ..orders }));
-            let generator = |m: &crate::model::Model| {
-                let middle = m.assemble(k, r, 0.0, &running);
-                let path = middle.path([0.0; 3], [0.0; 3]);
-                let mut h = Mat::zeros(n, n);
-                middle.generator(&path, 0.0, &mut h);
-                h
-            };
-            let h = generator(&kept);
-            let mut run = h.clone();
-            run.add_scaled(-C64::ONE, &generator(&zeroth));
-            let mut apart = run.clone();
-            apart.add_scaled(-C64::ONE, &first);
-            let (relative, size) = (apart.frobenius() / first.frobenius(), first.frobenius() / h.frobenius());
-            println!("cluster {k} at {r:?}: the first order {size:.3e} of the generator, the run's {relative:.3e} apart of the evaluation's");
-            if size >= 1e-5 {
-                largest = largest.max(relative);
-                assert!(relative <= 5e-2, "cluster {k} at {r:?}: the run's first order {relative:e} apart of the evaluation's ({size:.3e} of the generator)");
-            }
-            // The decay is the photons' rate.
+            let defined = definition.definitions(&whole).0;
             let psi: Vec<C64> = (0..n).map(|i| C64::cis(0.4 * i as f64) * (0.5 + 0.2 * i as f64)).collect();
+            let error = |series: usize| {
+                let orders = Orders { series, ..kept.series.orders() };
+                Fold::evaluation_error(&kept.evaluation(&kept.plan_at(k, &running, orders), r).0, &defined, &z0, &psi)
+            };
+            let (zero, first) = (error(0), error(1));
+            println!("cluster {k} at {r:?}: the run's evaluation against the definition at order 0 {zero:.3e}, at order 1 {first:.3e}");
+            assert!(first <= zero, "cluster {k} at {r:?}: order 1 {first:e} beyond order 0 {zero:e}");
+            // The decay is the photons' rate.
+            let middle = kept.assemble(k, r, 0.0, &running);
+            let path = middle.path([0.0; 3], [0.0; 3]);
+            let mut h = Mat::zeros(n, n);
+            middle.generator(&path, 0.0, &mut h);
             let rate = crate::linalg::inner(&psi, &Mat::from_fn(n, n, |a, b| C64::I * (h[(a, b)] - h[(b, a)].conj())).apply(&psi)).re;
             let photons: f64 = kept.photons(k, &Point { r, kappa: [0.0; 3], t: 0.0 }, &psi).iter().map(|ph| ph.weight()).sum();
             assert!((rate - photons).abs() <= 1e-9 * photons, "cluster {k} at {r:?}: the decay {rate:e} against the photons' {photons:e}");
             read += 1;
         }
     }
-    println!("{read} points on {} clusters of more than one reference: the run's generator within {largest:.2e} of the evaluation's", many.len());
     assert!(read > 0);
 }
 
@@ -2109,103 +2093,3 @@ fn the_series_about_each_place_s_reference_falls_as_its_ratio_s_powers_on_a_join
     println!("{read} atoms read; the largest q {largest:.3e}");
     assert!(read > 0);
 }
-
-impl Fold {
-    /// The evaluation's normalized generator and landing map about one reference z₀ for every place, of one resolvent
-    /// (the formula before ELIMINATION v11): H = H₀ − N₁(H₀ − z₀), the jumps' wave R₀W − R₀²W E, the landing's Y = N₁.
-    fn evaluated_of_one(&self, levels: &Levels, z0: f64, orders: Orders) -> (Mat, Mat) {
-        let n = self.size();
-        let responses = self.responses_about(&vec![z0; n], 1);
-        let forms = |k: usize| {
-            let mut m = Mat::zeros(n, n);
-            for (rep, r) in self.replicas.iter().zip(&responses) {
-                m.add_scaled(C64::ONE, &rep.back.product(&r[k]));
-            }
-            m
-        };
-        let metric = metric_about(&responses, n);
-        let mut loss = Mat::zeros(n, n);
-        for (rep, r) in self.replicas.iter().zip(&responses) {
-            loss.add_scaled(C64::ONE, &r[0].adjoint_product(&levels.decay.block(&rep.q, &rep.q).product(&r[0])));
-        }
-        let mut whole = self.direct.clone();
-        whole.add_scaled(C64::ONE, &forms(0));
-        let mut h = whole.hermitian_part();
-        h.add_scaled(C64::new(0.0, -0.5), &loss);
-        let offset = |h: &Mat| {
-            let mut e = h.clone();
-            for i in 0..n {
-                e[(i, i)] -= C64::real(z0);
-            }
-            e
-        };
-        if orders.series >= 1 {
-            let next = forms(1).product(&offset(&h));
-            h.add_scaled(-C64::ONE, &next);
-        }
-        let e = offset(&h);
-        let mut inner = Mat::zeros(n, n);
-        for (rep, r) in self.replicas.iter().zip(&responses) {
-            let mut wave = r[0].clone();
-            if orders.series >= 1 {
-                wave.add_scaled(-C64::ONE, &r[1].product(&e));
-            }
-            inner.add_scaled(C64::ONE, &wave.adjoint_product(&levels.decay.block(&rep.q, &rep.q).product(&wave)));
-        }
-        let (mut bent, mut power) = (Mat::identity(n), Mat::identity(n));
-        for j in 1..=orders.normalization {
-            power = power.product(&metric);
-            bent.add_scaled(C64::real(binomial(-0.5, j)), &power);
-        }
-        let mut out = h.hermitian_part();
-        out.add_scaled(C64::new(0.0, -0.5), &bent.product(&inner).product(&bent));
-        let partner = forms(1);
-        let (mut s, mut power, mut sum, mut term) = (Mat::identity(n), Mat::identity(n), Mat::identity(n), Mat::identity(n));
-        for j in 1..=orders.normalization {
-            power = power.product(&metric);
-            s.add_scaled(C64::real(binomial(0.5, j)), &power);
-            term = term.product(&partner).scaled(-C64::ONE);
-            sum.add_scaled(C64::ONE, &term);
-        }
-        (out, s.product(&sum))
-    }
-}
-
-/// The first order and the landing about each place's reference (ELIMINATION v11; `Fold::evaluated`,
-/// `Fold::landing_evaluated`, `Reference::mixed`) at K = 1, J = 1: where the references are one -- every place's the
-/// cluster's mean --, the numbers of the one-resolvent formula bit for bit (`evaluated_of_one`: N₁ = Σ W′R₀²W, its
-/// H₀ − N₁(H₀ − z₀), the jumps' wave R₀W − R₀²W E, the landing's Y = N₁), and the run's responses' products R₀(x)R₀(y)W
-/// those of R₀(y)²W (eliminate.rs, the same solves); and on R4_LIN_4's joined cluster, its references apart, the
-/// evaluation's error against the definition (`Fold::evaluation_error`) at order 1 below that at order 0.
-#[test]
-fn the_first_order_about_each_place_s_reference_is_the_one_resolvent_formula_where_they_are_one() {
-    let (model, points, many) = r4_lin_4();
-    let orders = Orders { series: 1, normalization: 1 };
-    let mut read = 0;
-    for &k in &many {
-        for &(r, _) in points.iter().step_by(11) {
-            let amplitudes = model.light.amplitudes(r);
-            let Some((fold, levels, far, _)) = model.cluster_fold(k, &amplitudes, true) else { continue };
-            let n = fold.size();
-            let mean = far.iter().sum::<f64>() / n as f64 + model.series.centre[k];
-            let one = vec![mean; n];
-            let (generator, landing) = fold.evaluated_of_one(&levels, mean, orders);
-            assert_eq!(fold.evaluated(&levels, &one, orders).data, generator.data, "the generator bit for bit at {r:?}");
-            assert_eq!(fold.landing_evaluated(&one, orders).data, landing.data, "the landing bit for bit at {r:?}");
-            // Apart: the order 1 below the order 0 against the definition.
-            let z0 = model.reference_of(k, &far);
-            let (definition, whole) = model.definition_fold(k, &amplitudes).expect("the definition");
-            let defined = definition.definitions(&whole).0;
-            let psi: Vec<C64> = (0..n).map(|i| if i < fold.ground { C64::real(1.0 + 0.1 * i as f64) } else { C64::ZERO }).collect();
-            let error = |series: usize| Fold::evaluation_error(&fold.evaluated(&levels, &z0, Orders { series, normalization: 1 }), &defined, &z0, &psi);
-            let (zero, first) = (error(0), error(1));
-            let q = fold.series_norm(&z0) / fold.series_distance(&z0, None);
-            println!("at {r:?}: the evaluation's error at order 0 {zero:.3e}, order 1 {first:.3e} (q {q:.3e})");
-            assert!(first <= zero, "order 1 {first} beyond order 0 {zero} at {r:?}");
-            read += 1;
-        }
-    }
-    assert!(read > 0);
-}
-
-
