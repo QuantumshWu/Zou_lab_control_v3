@@ -226,10 +226,10 @@ impl Model {
             decay: self.decay.clone(),
         };
         // The reference Z₀ = diag(z_y): each place's level in its frame with the far light alone (`h`'s diagonal, no
-        // near field in it) and the cluster's constant centre c of the near light's scalar shift (`Model::series`);
-        // its jet the far levels' (the frames and c are constants).
+        // near field in it) and its kind's constant centre c of the near light's shift in the cluster, a ground place's
+        // or an explicit place's (elim.rs `Series::centre_of`); its jet the far levels' (the frames and c are constants).
         let frames: Vec<f64> = c.frames.iter().map(|f| self.omega(f)).collect();
-        let reference: Vec<Vec<f64>> = (0..parts).map(|p| (0..n).map(|y| h[p][(c.states[y], c.states[y])].re + if p == 0 { self.series.centre[cluster] - frames[y] } else { 0.0 }).collect()).collect();
+        let reference: Vec<Vec<f64>> = (0..parts).map(|p| (0..n).map(|y| h[p][(c.states[y], c.states[y])].re + if p == 0 { self.series.centre_of(cluster, y >= c.ground) - frames[y] } else { 0.0 }).collect()).collect();
         let slopes: Vec<(Vec<f64>, Mat)> = (1..parts).map(|p| (reference[p].clone(), h[p].block(&excited, &excited))).collect();
         let classes = self.references(cluster, lights);
         let firsts: Vec<usize> = (0..classes.iter().max().map_or(0, |m| m + 1)).map(|a| classes.iter().position(|&x| x == a).expect("a class's place")).collect();
@@ -298,6 +298,16 @@ impl Model {
             }
         }
         classes
+    }
+
+    /// The orders a cluster's evaluation takes under the lights `lights` (elim.rs `Orders`): the model's (`Series`), the
+    /// series' first order only where the cluster's own series converges (elim.rs `Model::first_order_holds`, ELIMINATION
+    /// v12) -- a level of each cluster: elsewhere the first order is no part of the run's evaluation and no unit of the
+    /// cluster's, and what it would take away of the evaluation's error is the next orders', the nearest block's keep
+    /// (elim.rs `Model::readings`); `Unit::Series` is a candidate where some cluster holds it (elim.rs `Model::candidates`).
+    pub(crate) fn orders_of(&self, cluster: usize) -> super::elim::Orders {
+        let orders = self.series.orders();
+        if orders.series >= 1 && !self.first_order_holds(cluster) { super::elim::Orders { series: 0, ..orders } } else { orders }
     }
 
     /// Whether a coupling of two places of a cluster (x ← y at the base beat `beat`) is in the cluster's generator: at a

@@ -2280,10 +2280,10 @@ impl Model {
     /// the plan is made in that place alone -- whoever asks for the same plan meanwhile waits for it, and two plans
     /// asked side by side are made side by side.
     pub(crate) fn plan(&self, cluster: usize, lights: &Lights) -> Arc<Plan> {
-        self.plan_at(cluster, lights, self.series.orders())
+        self.plan_at(cluster, lights, self.orders_of(cluster))
     }
 
-    /// `plan` at the evaluation's orders `orders`: the run's are the model's series' (`plan`), the readings' the next
+    /// `plan` at the evaluation's orders `orders`: the run's are the cluster's own (eliminate.rs `Model::orders_of`, `plan`), the readings' the next
     /// ones too (elim.rs `Model::readings`: the one evaluation, `Model::evaluation`).
     pub(crate) fn plan_at(&self, cluster: usize, lights: &Lights, orders: Orders) -> Arc<Plan> {
         let place = {
