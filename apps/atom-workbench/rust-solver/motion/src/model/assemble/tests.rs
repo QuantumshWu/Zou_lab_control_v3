@@ -1359,12 +1359,11 @@ fn a_scene_s_plan_work() {
         let plan = model.plan(k, &running);
         let fourth = plan.fourth.as_ref();
         println!(
-            "cluster {k}: {} | node {:?} excite {:.0} (near {:.0}) first {:.0} node normal {:?} quartic {:.0} held force {:.0} | classes (all) {:.0} (none) {:.0} amplitudes {:.0} | costs {:?}",
+            "cluster {k}: {} | node {:?} excite {:.0} first {:.0} node normal {:?} quartic {:.0} held force {:.0} | classes (all) {:.0} (none) {:.0} amplitudes {:.0} | costs {:?}",
             plan.described(),
             plan.node,
-            plan.excite_work(1, true),
-            plan.excite_work(1, false),
-            plan.excite_first_work(1),
+            plan.excite_work(1, 0),
+            plan.excite_first_work(1, 0),
             fourth.map(|f| plan.node_normal_work(f)),
             fourth.map_or(0.0, |f| plan.quartic_work(f, None, false)),
             fourth.map_or(0.0, |f| plan.held_force_work(f, 3)),

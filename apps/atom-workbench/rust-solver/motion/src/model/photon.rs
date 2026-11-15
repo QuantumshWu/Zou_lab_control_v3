@@ -333,7 +333,9 @@ impl Model {
         // and is made with the photons' matrices; a middle's scattering asks none -- and nothing where S⁻¹ and the
         // landing are the identity (assemble.rs `Fourth::bends`).
         let fourth = plan.fourth.as_ref().filter(|fourth| fourth.bends()).map_or(0.0, |fourth| self.quartic(plan, fourth, table, r, site, laid, !laid));
-        let near = if laid { 0.0 } else { self.responded(plan, table, order, site) };
+        // A site of its own counts its place's coordinates here (`Model::placed`); a middle's counted them with its near
+        // terms.
+        let near = if laid { 0.0 } else { self.responded(plan, table, order, site) + table.and(site.place).map_or(0.0, |(_, work)| work) };
         let Site { beams, fields, .. } = site;
         self.fields_into(plan, beams, kappa, order, fields);
         let excited = self.excited_at(plan, site, order);
@@ -387,16 +389,26 @@ impl Model {
             let sums = &mut sums[..8 * rows];
             sums.fill(0.0);
             let columns = if with { 4 } else { 1 };
+            // A merged class's feed at its relative beat: its phase factor once a run of its entries (a feed's are
+            // consecutive), one product an entry.
+            let mut turned = (0.0, C64::ONE);
             for &(row, at, phase, c) in &class.entries {
-                let c = if phase == 0.0 { c } else { c * C64::cis(phase * t) };
+                let c = if phase == 0.0 {
+                    c
+                } else {
+                    if turned.0 != phase {
+                        turned = (phase, C64::cis(phase * t));
+                    }
+                    c * turned.1
+                };
                 for column in 0..columns {
                     let z = c * amplitudes[column * plan.amplitude_len + at];
-                    let place = laid(row, column, 4);
+                    let place = row + column * 2 * LANES;
                     sums[place] += z.re;
                     sums[place + LANES] += z.im;
                 }
             }
-            work += (class.entries.len() * columns) as f64;
+            work += (class.entries.len() * columns + class.turning) as f64;
             if sums.chunks_exact(8 * LANES).all(|vector| vector[..if with { 8 * LANES } else { 2 * LANES }].iter().all(|x| *x == 0.0)) {
                 continue;
             }
@@ -487,8 +499,8 @@ impl Plan {
         let near = if self.near.len() == 0 || laid { 0.0 } else { place + super::tabulate::read_work(axes, order, 2 * self.near.responding().len()) };
         let fourth = self.fourth.as_ref().filter(|fourth| fourth.bends()).map_or(0.0, |fourth| if laid { self.quartic_work(fourth, Some(axes), false) } else { self.quartic_made_work(fourth, axes, place) });
         let parts = if order >= 1 { 4 } else { 1 };
-        let first = if self.fourth.as_ref().is_some_and(|fourth| fourth.held()) { self.excite_first_work(parts) } else { 0.0 };
-        near + fourth + self.fields_work(order) + self.excite_work(parts, true) + first
+        let first = if self.fourth.as_ref().is_some_and(|fourth| fourth.held()) { self.excite_first_work(parts, axes) } else { 0.0 };
+        near + fourth + self.fields_work(order) + self.excite_work(parts, axes) + first
     }
 
     /// The counted complex multiply-adds of a state's photons' classes on a site (`Model::classes_on`), priced without
@@ -506,7 +518,7 @@ impl Plan {
                 Gradients::Of(_) => continue,
                 Gradients::None => false,
             };
-            work += (class.entries.len() * if with { 4 } else { 1 }) as f64;
+            work += (class.entries.len() * if with { 4 } else { 1 } + class.turning) as f64;
             if gradients == Gradients::All {
                 work += moments_work(class.rows, with);
             }

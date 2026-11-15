@@ -495,7 +495,8 @@ pub(crate) struct ReplicaPlan {
 /// One photon class of the cluster under the plan's lights (photon.rs `Class`): its landing cluster, its wave number, the
 /// largest wave number of the beams its folded amplitudes absorb from (`Photon::absorbed`; zero without one), its landing
 /// cluster's `states` states, the lanes' rows of its jumps (`rows`: row a `states` + b' as whole vectors), and its entries
-/// -- per row, feed and excited state of the feed's replica its place among the amplitude rows, its relative beat's value
+/// -- per row (its place among the lanes' sums, `laid` of its first column: column c a further c 2 LANES on), feed and
+/// excited state of the feed's replica its place among the amplitude rows, its relative beat's value
 /// in a merged class (rad/µs) and the emission's C_a[b', e] (photon.rs, # A state's photons at a point).
 #[derive(Clone, Debug)]
 pub(crate) struct ClassPlan {
@@ -505,6 +506,8 @@ pub(crate) struct ClassPlan {
     pub(crate) states: usize,
     pub(crate) rows: usize,
     pub(crate) entries: Vec<(usize, usize, f64, C64)>,
+    /// Its entries at a relative beat (a merged class's feeds'): each one product more, its phase factor's.
+    pub(crate) turning: usize,
 }
 
 /// A Hermitian near form's place in the generator: the block, flag and entry (x, y) it is the value of, its tone, the form's
@@ -1519,12 +1522,13 @@ impl<'a> Builder<'a> {
                     for (j, q) in replicas[r].basis.iter().enumerate() {
                         let c: C64 = q.iter().enumerate().map(|(e, z)| model.emission[a][(b, GROUND + e)] * *z).sum();
                         if c != C64::ZERO {
-                            entries.push((a * states + bp, replicas[r].at + j, model.omega(phase), c));
+                            entries.push((laid(a * states + bp, 0, 4), replicas[r].at + j, model.omega(phase), c));
                         }
                     }
                 }
             }
-            classes.push(ClassPlan { landing: class.landing, wave_number: model.class_wave_number(self.cluster, class), absorbed, states, rows, entries });
+            let turning = entries.iter().filter(|e| e.2 != 0.0).count();
+            classes.push(ClassPlan { landing: class.landing, wave_number: model.class_wave_number(self.cluster, class), absorbed, states, rows, entries, turning });
         }
         let amplitude_len = replicas.iter().map(|r| r.size).sum();
         let near = self.near;
@@ -1951,13 +1955,14 @@ impl Plan {
 
     /// 𝒯 of every replica (module documentation, # The excited amplitude) at a point or a node into `out`, laid
     /// [part][amplitude row][place] (`parts` × `amplitude_len` × n; a replica's rows from its `at`): of the near forms'
-    /// responses -- `response(i)` the value and the gradient along the lab axes of the response entry i's T_k, `partner(i)`
-    /// its T2_k's --, the field components `plain` and, where given, `doppler` (each its value and gradient), to `parts` (1:
-    /// the values; 4: with the lab gradients, by the product rule): e_k T_k − e^w_k T2_k of each lit carrier's entry (without
-    /// `doppler`, e_k T_k), and unless `near` alone each bare drive's e_k R and each explicit state's −1. Returns the
-    /// complex multiply-adds.
+    /// responses -- `turned` the responding forms with their gradients along the lab axes (`Site::turn`: entry i's T_k,
+    /// and `responses.len()` on its T2_k), read along `directions` directions --, the field components `plain` and `doppler` (each its value and
+    /// gradient), to `parts` (1: the values; 4: with the lab gradients, by the product rule): e_k T_k − e^w_k T2_k of each
+    /// lit carrier's entry (an explicit state's static couplings' T alone), each bare drive's e_k R and each explicit
+    /// state's −1. Returns the complex multiply-adds (`excite_work`).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn excite(&self, response: &dyn Fn(usize) -> [C64; 4], partner: &dyn Fn(usize) -> [C64; 4], plain: &[[C64; 4]], doppler: Option<&[[C64; 4]]>, parts: usize, near: bool, out: &mut Vec<C64>) -> f64 {
+    pub(crate) fn excite(&self, turned: &[[C64; 4]], plain: &[[C64; 4]], doppler: &[[C64; 4]], parts: usize, directions: usize, out: &mut Vec<C64>) -> f64 {
+        let count = self.near.responses.len();
         let n = self.states;
         let width = self.amplitude_len * n;
         out.clear();
@@ -1968,36 +1973,31 @@ impl Plan {
                 out[p * width + at] += (c[p] * t[0] + c[0] * t[p]) * sign;
             }
         };
-        let mut work = 0;
         for r in &self.replicas {
             for &(i, s, j, y) in &r.near {
                 let at = (r.at + j) * n + y;
-                add(out, &s.map_or(UNIT, |s| plain[s]), &response(i), at, 1.0);
-                if let (Some(doppler), Some(s)) = (doppler, s) {
-                    add(out, &doppler[s], &partner(i), at, -1.0);
+                add(out, &s.map_or(UNIT, |s| plain[s]), &turned[i], at, 1.0);
+                if let Some(s) = s {
+                    add(out, &doppler[s], &turned[count + i], at, -1.0);
                 }
-            }
-            work += r.near.iter().map(|x| if doppler.is_some() && x.1.is_some() { 2 } else { 1 }).sum::<usize>();
-            if near {
-                continue;
             }
             for &(s, j, y, v) in &r.bare {
                 add(out, &plain[s], &[v, C64::ZERO, C64::ZERO, C64::ZERO], (r.at + j) * n + y, 1.0);
             }
-            work += r.bare.len();
             for &(j, y) in &r.explicit {
                 out[(r.at + j) * n + y] -= C64::ONE;
             }
         }
-        (work * parts) as f64
+        self.excite_work(parts, directions)
     }
-    /// The counted complex multiply-adds of `excite` to `parts`, with the Doppler partners and the bare and explicit parts
-    /// (`whole`) or of the near part alone without them.
-    pub(crate) fn excite_work(&self, parts: usize, whole: bool) -> f64 {
-        let near: usize = self.replicas.iter().map(|r| r.near.len()).sum();
-        let partners: usize = self.replicas.iter().map(|r| r.near.iter().filter(|x| x.1.is_some()).count()).sum();
+    /// The counted complex multiply-adds of `excite` to `parts`, its responses read along `directions` directions: per
+    /// near term its read (`read_work`) and its product's 2 parts − 1 products by the product rule, with a carrier's
+    /// Doppler partner the same again, a bare term's product.
+    pub(crate) fn excite_work(&self, parts: usize, directions: usize) -> f64 {
+        let (each, read) = ((2 * parts - 1) as f64, read_work(parts, directions));
+        let near: f64 = self.replicas.iter().flat_map(|r| &r.near).map(|x| if x.1.is_some() { 2.0 } else { 1.0 }).sum();
         let bare: usize = self.replicas.iter().map(|r| r.bare.len()).sum();
-        (parts * if whole { near + partners + bare } else { near }) as f64
+        near * (each + read) + bare as f64 * each
     }
 
     /// The series' first order of 𝒯 (module documentation, # The normalized generator) added into `out` (`excite`'s
@@ -2007,11 +2007,11 @@ impl Plan {
     /// (`e0`, parts × n², its value and lab gradients) -- of the components alone: the first order takes no Doppler
     /// partner. `scratch` holds M; returns the complex multiply-adds.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn excite_first(&self, mixed: &dyn Fn(usize) -> [C64; 4], plain: &[[C64; 4]], e0: &[C64], parts: usize, scratch: &mut Vec<C64>, out: &mut [C64]) -> f64 {
+    pub(crate) fn excite_first(&self, turned: &[[C64; 4]], plain: &[[C64; 4]], e0: &[C64], parts: usize, directions: usize, scratch: &mut Vec<C64>, out: &mut [C64]) -> f64 {
         let (n, classes) = (self.states, self.reference_classes.max(1));
+        let responding = self.near.responding().start;
         let width = self.amplitude_len * n;
         let size = n * n;
-        let mut work = 0;
         for r in &self.replicas {
             if r.near.is_empty() {
                 continue;
@@ -2023,7 +2023,7 @@ impl Plan {
             for &(i, s, j, t) in &r.near {
                 let c = &s.map_or(UNIT, |s| plain[s]);
                 for a in 0..classes {
-                    let m = mixed(self.first_place[i * classes + a]);
+                    let m = turned[self.first_place[i * classes + a] - responding];
                     let at = a * parts * block + j * n + t;
                     scratch[at] += c[0] * m[0];
                     for p in 1..parts {
@@ -2047,14 +2047,16 @@ impl Plan {
                     }
                 }
             }
-            work += r.near.len() * classes * parts + rows * n * n * (2 * parts - 1);
         }
-        work as f64
+        self.excite_first_work(parts, directions)
     }
-    /// The counted complex multiply-adds of `excite_first` to `parts`.
-    pub(crate) fn excite_first_work(&self, parts: usize) -> f64 {
+    /// The counted complex multiply-adds of `excite_first` to `parts`, its mixed responses read along `directions`
+    /// directions: per near term and class a read (`read_work`) and its product's 2 parts − 1 products, and per own row
+    /// the product with E₀ by the product rule.
+    pub(crate) fn excite_first_work(&self, parts: usize, directions: usize) -> f64 {
         let (n, classes) = (self.states, self.reference_classes.max(1));
-        self.replicas.iter().filter(|r| !r.near.is_empty()).map(|r| (r.near.len() * classes * parts + r.own * n * n * (2 * parts - 1)) as f64).sum()
+        let (each, read) = ((2 * parts - 1) as f64, read_work(parts, directions));
+        self.replicas.iter().filter(|r| !r.near.is_empty()).map(|r| (r.near.len() * classes) as f64 * (each + read) + (r.own * n * n * (2 * parts - 1)) as f64).sum()
     }
 
 
@@ -2204,6 +2206,13 @@ impl<T: Spare> DerefMut for Held<T> {
 
 /// Where row `row` of column `column` lies among `count` columns laid for the lanes (module documentation, # The jumps'
 /// matrices), from their start: its real part, its imaginary part `LANES` after it.
+/// The counted complex multiply-adds of a responding form's read at a point (`Site::response`) to `parts`: its value, and
+/// to first order its slope along each of `directions` directions onto the three lab axes, a real times a complex each
+/// (half a complex multiply-add).
+pub(crate) fn read_work(parts: usize, directions: usize) -> f64 {
+    if parts > 1 { 1.5 * directions as f64 } else { 0.0 }
+}
+
 pub(crate) fn laid(row: usize, column: usize, count: usize) -> usize {
     ((row / LANES) * count + column) * 2 * LANES + row % LANES
 }
@@ -2237,6 +2246,9 @@ pub(crate) struct Site {
     /// and their slopes along `directions` (`response_slopes[f * len + i]`), where read to first order (`Model::responded`).
     pub(crate) responses: Vec<C64>,
     pub(crate) response_slopes: Vec<C64>,
+    /// The responding forms with their gradients along the lab axes, of their slopes along `directions` (`Site::turn`):
+    /// what 𝒯 at the point is made of (`Model::excited_at`).
+    pub(crate) turned: Vec<[C64; 4]>,
     /// What a state's photons read (photon.rs `Model::photons_of`): the plan's field components; 𝒯 of every replica at the
     /// point (`Model::excited_at`: `Plan::excite`'s layout, with its gradients where made to first order); the excited
     /// amplitudes of a state (`Plan::amplitudes`) and a class's sums in the making (`class`, laid for the lanes).
@@ -2307,23 +2319,24 @@ impl Site {
             self.response_slopes.extend_from_slice(&near.data[(1 + f) * near.len + range.start..(1 + f) * near.len + range.end]);
         }
     }
-    /// The responding form at `place` (among the near forms) with its gradient along the lab axes, of its slopes along the
-    /// site's directions (none where it has none: its value alone).
-    pub(crate) fn response(&self, plan: &Plan, place: usize) -> [C64; 4] {
-        let i = place - plan.near.responding().start;
-        let len = self.responses.len();
-        // A site without near forms (`Model::middle_of` of none) holds none: nothing of the near light.
-        let Some(&value) = self.responses.get(i) else { return [C64::ZERO; 4] };
-        let mut out = [value, C64::ZERO, C64::ZERO, C64::ZERO];
-        if self.response_slopes.len() >= len * self.directions.len() && len > 0 {
-            for (f, d) in self.directions.iter().enumerate() {
-                let slope = self.response_slopes.get(f * len + i).copied().unwrap_or(C64::ZERO);
-                for a in 0..3 {
-                    out[1 + a] += slope * d[a];
+    /// The responding forms (`Site::responses`) with their gradients along the lab axes, of their slopes along the site's
+    /// directions (none where they have none: their values alone), into `turned`, one pass: a form's read (`read_work`).
+    fn turn(&mut self) {
+        let (len, directions) = (self.responses.len(), self.directions.len());
+        let sloped = len > 0 && self.response_slopes.len() >= len * directions;
+        self.turned.clear();
+        self.turned.extend(self.responses.iter().enumerate().map(|(i, &value)| {
+            let mut out = [value, C64::ZERO, C64::ZERO, C64::ZERO];
+            if sloped {
+                for (f, d) in self.directions.iter().enumerate() {
+                    let slope = self.response_slopes[f * len + i];
+                    for a in 0..3 {
+                        out[1 + a] += slope * d[a];
+                    }
                 }
             }
-        }
-        out
+            out
+        }));
     }
 }
 
@@ -2944,16 +2957,16 @@ impl Model {
         let jet = |of: &[C64]| -> [C64; 4] { std::array::from_fn(|p| of.get(p).copied().unwrap_or(C64::ZERO)) };
         let plain: Vec<[C64; 4]> = (0..plan.scalars.len()).map(|s| jet(site.fields.plain(s))).collect();
         let doppler: Vec<[C64; 4]> = (0..plan.scalars.len()).map(|s| jet(site.fields.doppler(s))).collect();
-        let responding = plan.near.responding().start;
-        let count = plan.near.responses.len();
         let mut excited = std::mem::take(&mut site.excited);
-        let mut work = plan.excite(&|i| site.response(plan, responding + i), &|i| site.response(plan, responding + count + i), &plain, Some(&doppler), parts, false, &mut excited);
+        let directions = site.directions.len();
+        site.turn();
+        let mut work = plan.excite(&site.turned, &plain, &doppler, parts, directions, &mut excited);
         if let Some(fourth) = plan.fourth.as_ref().filter(|fourth| fourth.held()) {
             let size = fourth.n * fourth.n;
             let mut scratch = vec![];
             Model::quartic_read(|q| {
                 let e0 = &q.data[OFFSET * size..(OFFSET + 4) * size];
-                work += plan.excite_first(&|place| site.response(plan, place), &plain, e0, parts, &mut scratch, &mut excited);
+                work += plan.excite_first(&site.turned, &plain, e0, parts, directions, &mut scratch, &mut excited);
             });
         }
         site.excited = excited;

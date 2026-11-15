@@ -2661,6 +2661,25 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
         calls[4],
         pace * count as f64 / 1.024
     );
+    // Each part's count beside its time: ns a counted unit, the price's proportion to the wall part by part.
+    let mean = |f: &dyn Fn(usize) -> f64| (0..count).map(f).sum::<f64>() / count as f64;
+    let scattered = mean(&|i| pieces[i].through.generator.scattering(&paths[i], &starts[i].psi).1);
+    let made = mean(&|i| pieces[i].through.generator.made());
+    let costs: [f64; 3] = std::array::from_fn(|k| mean(&|i| pieces[i].through.generator.work()[k]));
+    let modelled = mean(&|i| steps[i].prices.iter().map(|(_, p)| p.modelled()).sum::<f64>());
+    let rest = work - modelled;
+    eprintln!(
+        "{name:<22} n {n} τ {tau:<6} | counts: middle {made:.0}, scattering {scattered:.0}, generator {:.0}, force {:.0}, tones {:.0}, the step less its middles and scatterings {rest:.0} | ns a count: middle {:.3}, scattering {:.3}, generator {:.3}, force {:.3}, tones {:.3}, the rest {:.3}",
+        costs[0],
+        costs[1],
+        costs[2],
+        1e3 * point / made,
+        1e3 * scattering / scattered,
+        1e3 * generator / costs[0],
+        1e3 * force / costs[1],
+        1e3 * tones / costs[2],
+        1e3 * (whole - point - scattering) / rest
+    );
     propagated
 }
 
