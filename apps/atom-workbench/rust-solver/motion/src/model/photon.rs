@@ -338,8 +338,8 @@ impl Model {
         let near = if laid { 0.0 } else { self.responded(plan, table, order, site) + table.and(site.place).map_or(0.0, |(_, work)| work) };
         let Site { beams, fields, .. } = site;
         self.fields_into(plan, beams, kappa, order, fields);
-        let excited = self.excited_at(plan, site, order);
-        near + fourth + plan.fields_work(order) + excited
+        let turned = self.turned(plan, site, order);
+        near + fourth + plan.fields_work(order) + turned
     }
 
     /// The classes of a state's photons at the time t on a point's site (`sited`: its work `made`), class by class to
@@ -373,8 +373,20 @@ impl Model {
             });
             work += (size * parts) as f64;
         }
-        let excited = plan.amplitudes(&site.excited, &bent, parts, &mut site.member);
-        work += excited;
+        // The excited amplitudes of the state, term by term (`Plan::amplitudes`), the series' first order of the point's E.
+        let jet = |of: &[C64]| -> [C64; 4] { std::array::from_fn(|p| of.get(p).copied().unwrap_or(C64::ZERO)) };
+        let mut member = std::mem::take(&mut site.member);
+        let mut scratch = vec![];
+        let held = plan.fourth.as_ref().filter(|fourth| fourth.held());
+        let (plain, doppler) = (|s: usize| jet(site.fields.plain(s)), |s: usize| jet(site.fields.doppler(s)));
+        work += match held {
+            Some(fourth) => {
+                let size = fourth.n * fourth.n;
+                crate::model::Model::quartic_read(|q| plan.amplitudes(&site.turned, &plain, &doppler, Some(&q.data[super::assemble::OFFSET * size..(super::assemble::OFFSET + 4) * size]), &bent, parts, &mut scratch, &mut member))
+            }
+            None => plan.amplitudes(&site.turned, &plain, &doppler, None, &bent, parts, &mut scratch, &mut member),
+        };
+        site.member = member;
         let Site { member: amplitudes, class: sums, .. } = site;
         let most = plan.classes.iter().map(|class| class.rows).max().unwrap_or(0);
         sized(sums, 8 * most);
@@ -494,13 +506,12 @@ impl Plan {
     /// middle's site (`laid`: its forms read with the middle) the matrices alone with their gradients, which the step's
     /// middle node makes and its scattering counts (`Plan::quartic_work`); on a site of its own, a jump's, its forms read
     /// and the matrices with the landing that follows there (`Plan::quartic_made_work`) --; the field components; the
-    /// excited amplitudes' operator (`Plan::excite_work`).
+    /// responding forms turned to the lab axes (`Model::turned`).
     pub(crate) fn sited_work(&self, axes: usize, place: f64, order: usize, laid: bool) -> f64 {
         let near = if self.near.len() == 0 || laid { 0.0 } else { place + super::tabulate::read_work(axes, order, 2 * self.near.responding().len()) };
         let fourth = self.fourth.as_ref().filter(|fourth| fourth.bends()).map_or(0.0, |fourth| if laid { self.quartic_work(fourth, Some(axes), false) } else { self.quartic_made_work(fourth, axes, place) });
         let parts = if order >= 1 { 4 } else { 1 };
-        let first = if self.fourth.as_ref().is_some_and(|fourth| fourth.held()) { self.excite_first_work(parts, axes) } else { 0.0 };
-        near + fourth + self.fields_work(order) + self.excite_work(parts, axes) + first
+        near + fourth + self.fields_work(order) + self.near.responding().len() as f64 * super::assemble::read_work(parts, axes)
     }
 
     /// The counted complex multiply-adds of a state's photons' classes on a site (`Model::classes_on`), priced without
@@ -510,7 +521,7 @@ impl Plan {
         let parts = if gradients == Gradients::None { 1 } else { 4 };
         let n = self.states;
         let bent = if self.fourth.as_ref().is_some_and(|fourth| fourth.bends()) { (n * n * parts) as f64 } else { 0.0 };
-        let mut work = bent + self.amplitudes_work(parts);
+        let mut work = bent + self.amplitudes_work(parts, self.fourth.as_ref().is_some_and(|fourth| fourth.held()));
         for (place, class) in self.classes.iter().enumerate() {
             let with = match gradients {
                 Gradients::All => true,
