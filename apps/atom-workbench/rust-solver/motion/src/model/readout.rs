@@ -69,7 +69,11 @@ impl Model {
         let g = c.ground;
         let mut site = Held::<Site>::take();
         let count = self.channels_at(plan, table, at, &mut site);
-        let Site { channels, excited, beams, normal, .. } = &mut *site;
+        let mut bent = vec![];
+        if let Some(fourth) = plan.fourth.as_ref().filter(|fourth| fourth.bends()) {
+            self.bent_at(plan, fourth, &*site, &mut vec![], &mut bent);
+        }
+        let Site { channels, excited_rows: excited, .. } = &mut *site;
         let size = EXCITED * g;
         // The co-resonant channels and places (p, b1) and (q, b2), θ_b1 + ν_p = θ_b2 + ν_q, and with them a place's class:
         // the first of the places co-resonant with it (itself among them). The cluster's own under the running lights,
@@ -94,9 +98,8 @@ impl Model {
         // place): its excited amplitude A_k = C_k x.
         let n = psi.len();
         excited.clear();
-        excited.resize(places * size + 3 * n * n, C64::ZERO);
-        let (classes, rest) = excited.split_at_mut(places * size);
-        let (bent, scratch) = rest.split_at_mut(n * n);
+        excited.resize(places * size, C64::ZERO);
+        let classes = &mut excited[..];
         for (p, response) in channels.chunks_exact(size).enumerate() {
             for b in 0..g {
                 let class = &mut classes[first[p * g + b] * size..][..size];
@@ -107,15 +110,15 @@ impl Model {
         }
         let held: Vec<usize> = (0..places).filter(|&k| first[k] == k).collect();
         // The slow state of the normalized coordinates ψ = S x (assemble.rs, # The normalized generator): x = S⁻¹ψ with
-        // the generator's own S⁻¹ = Σ_{j≤J} b_j X^j of the one metric X at the point (`Model::bent_at`; its series'
-        // ratio, X's largest eigenvalue, read by elim.rs `Series`), the identity where it bends nothing; every population
+        // the generator's own S⁻¹ = Σ_{j≤J} b_j X^j of the one metric X at the point (`Model::bent_at`, of the same
+        // responses; its series' ratio, X's largest eigenvalue, read by elim.rs `Series`), the identity where it bends
+        // nothing; every population
         // of it -- the ground places' |x_b|², the excited states' Σ_k |A_k|² over every channel, the explicit states' --
         // over their sum: the slow state's norm to the series' remainder, and the bare drives' excited populations, whose
         // folds are constants the generator's metric does not hold.
         let mut x = [C64::ZERO; STATES];
         x[..n].copy_from_slice(psi);
-        if let Some(fourth) = plan.fourth.as_ref().filter(|fourth| fourth.bends()) {
-            self.bent_at(plan, fourth, beams, normal, scratch, bent);
+        if !bent.is_empty() {
             for (b, z) in x.iter_mut().enumerate().take(n) {
                 *z = (0..n).map(|y| bent[b * n + y] * psi[y]).sum();
             }
@@ -145,17 +148,10 @@ impl Model {
         self.light.amplitudes_into(at.r, 0, |_| true, &mut site.beams);
         // The responses of the drives folded at the atom: their table's at the point, or the exact elimination's.
         let folded = self.folded_carriers(plan).count();
-        let exact = match table {
-            Some(table) if folded > 0 && self.placed(table, site) => {
-                self.near_responses(table, site);
-                None
-            }
-            _ => (folded > 0).then(|| self.near_exact(plan, &site.beams, 0)),
-        };
-        // The slow state's one metric's forms, their values, where the generator's S bends anything: the readout
-        // inverts the generator's own S (`Model::bent_at`).
-        if plan.fourth.as_ref().is_some_and(|fourth| fourth.bends()) {
-            self.normal_read(plan, if exact.is_none() { table } else { None }, exact.as_ref(), site, false);
+        site.place = None;
+        let table = table.filter(|table| folded > 0 && self.placed(table, site));
+        if folded > 0 {
+            self.responded(plan, table, 0, site);
         }
         let Site { beams: amplitudes, responses, weights, channels, .. } = site;
         let (far, size) = (self.bare_components(&plan.lights).count(), EXCITED * c.ground);
@@ -165,8 +161,7 @@ impl Model {
             self.bare_response(c, amplitudes, frequency, side, &mut channels[p * size..(p + 1) * size]);
         }
         if folded > 0 {
-            let start = plan.near.responding().start;
-            let near = |i: usize| exact.as_ref().map_or_else(|| C64::new(responses[2 * i], responses[2 * i + 1]), |values| values.data[start + i]);
+            let near = |i: usize| responses[i];
             let place = |carrier: usize| far + self.folded_carriers(plan).take_while(|&d| d < carrier).count();
             self.responses_each(plan, near, amplitudes, at.kappa, weights, |carrier, e, y, z| channels[place(carrier) * size + e * c.ground + y] += z);
         }

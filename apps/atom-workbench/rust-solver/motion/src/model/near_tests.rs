@@ -349,14 +349,13 @@ fn every_near_form_s_and_the_potential_s_jets_are_the_derivatives_of_their_value
                         j
                     };
                     // Each form is exact to the rounding of the matrix it is an entry of (linalg.rs: a modest multiple of u
-                    // on its data): the forms of one kind -- S, D, X, L of the pair entries, the reference, the shifts, the
-                    // jumps and their partners, the responses and theirs -- one matrix, its rounding γ_{E²} (a solve on
+                    // on its data): the forms of one kind -- S, D and the crossed forms of the pair entries, the reference, the
+                    // shifts, the responses, their partners and the mixed ones -- one matrix, its rounding γ_{E²} (a solve on
                     // Q) times its largest entry, over ℓ^order, ℓ the light's shortest length; and each derivative to that
                     // rounding times the resolvent's condition κ of itself: the floors beside each form's own scale.
-                    let (p, v, j, m) = (near.pairs.len(), near.shifts.len(), near.jumps.len(), near.responses.len());
-                    let kinds = if p == 0 { 0 } else { (near.hermitian().end - near.reference - v) / p };
-                    let mut bounds: Vec<usize> = (0..=kinds).map(|k| k * p).collect();
-                    for size in [near.reference, v, j, j, m, m] {
+                    let (p, v, m) = (near.pairs.len(), near.shifts.len(), near.responses.len());
+                    let mut bounds: Vec<usize> = vec![0];
+                    for size in [p, p, near.crossed.len(), near.reference, v, m, m, near.mixed.len()] {
                         bounds.push(bounds.last().unwrap() + size);
                     }
                     let mut value = [C64::ZERO; jet::WHOLE];
@@ -443,7 +442,7 @@ fn a_trajectory_s_start_lands_as_the_definition_within_what_the_readings_book() 
             let amplitudes = model.light.amplitudes(r);
             let (fold, _, far, _) = model.cluster_fold(cluster, &amplitudes, true).expect("the cluster's fold");
             let z0 = model.reference_of(cluster, &far);
-            let evaluated = fold.landing_evaluated(&z0, model.orders_of(cluster, &model.running()));
+            let evaluated = fold.landing_evaluated(&z0, model.series.orders());
             let (definition, levels) = model.definition_fold(cluster, &amplitudes).expect("the definition's fold");
             let defined = definition.definitions(&levels).1.expect("the definition's landing");
             let column = |m: &Mat| -> Vec<C64> { (0..m.rows).map(|i| m[(i, place)]).collect() };
@@ -571,10 +570,10 @@ fn a_unit_books_no_error_where_its_states_are_empty() {
 }
 
 /// A step's middle counts the elimination at the atom (assemble.rs # Work; step.rs `Middle::made`, `Middle::scattering`, where
-/// a step counts them): R2_RECOIL with its probe's drives folded there counts its middle at the focus with its state's
-/// scattering, at a point of its own (the thread's matrices forgotten), at no less than the factorizations its elimination
-/// makes, one per ground state for the probe's dressing and one for the response of the cluster's ground state --
-/// (n³ − n)/3 complex multiply-adds each on the n excited states.
+/// a step counts them), and its scattering makes it no second time: R2_RECOIL with its probe's drives folded there counts
+/// its middle at the focus with its state's scattering, at a point of its own (the thread's matrices forgotten), at no
+/// less than the exact elimination's own count there (`Model::near_exact`) -- the scattering takes the middle's
+/// responses (assemble.rs `Site::responses`) and counts less than that elimination.
 #[test]
 fn the_assembly_s_price_counts_the_elimination_at_the_atom() {
     use crate::step::Middle;
@@ -585,24 +584,31 @@ fn the_assembly_s_price_counts_the_elimination_at_the_atom() {
     let mut p = [0.0; GROUND];
     p[7] = 1.0;
     let run = crate::model::Run::new(&model, p);
-    let n = STATES - GROUND;
-    let factorizations = (GROUND + 1) as f64 * ((n * n * n - n) / 3) as f64 * crate::decide::COMPLEX;
-    let made = (0..model.clusters().len())
-        .map(|c| {
-            Model::forget_quartic();
-            let middle = run.middle(c, [0.0; 3], 0.0);
-            let first: Vec<C64> = (0..model.clusters()[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
-            middle.made() + middle.scattering(&middle.path([0.0; 3], [0.0; 3]), &first).1
-        })
-        .fold(0.0, f64::max);
-    assert!(made >= factorizations, "a middle and its scattering counted {made} below its factorizations' {factorizations}");
+    let amplitudes = model.light.amplitudes([0.0; 3]);
+    let mut met = 0;
+    for c in 0..model.clusters().len() {
+        let plan = model.plan(c, &model.running());
+        if plan.near.len() == 0 {
+            continue;
+        }
+        let once = model.near_exact(&plan, &amplitudes, 1).work * crate::decide::COMPLEX;
+        Model::forget_quartic();
+        let middle = run.middle(c, [0.0; 3], 0.0);
+        let first: Vec<C64> = (0..model.clusters()[c].states.len()).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
+        let scattering = middle.scattering(&middle.path([0.0; 3], [0.0; 3]), &first).1;
+        assert!(middle.made() >= once, "cluster {c}: the middle counted {} below its elimination's {once}", middle.made());
+        assert!(scattering < once, "cluster {c}: the scattering counted {scattering}, an elimination's {once} or more");
+        met += 1;
+    }
+    assert!(met > 0);
 }
 
 /// The normalized generator's decay is its photons' rate with a kept pair of two frequencies (assemble.rs, # The normalized
 /// generator: Λ_R = −i(G_R − G_L†), the anti-Hermitian read of the generator's own Doppler terms). R6_RAMAN_CO, |1,0⟩ and
 /// |2,0⟩ joined by their kept Raman coupling at the two lights' beat, one light's drives folded at the atom and the other's
-/// bare, the normalization's order kept (`Unit::Normalization`; the series' first order is no candidate on a cluster of
-/// two references, F = 1 and F = 2: eliminate.rs `Model::one_reference`, ELIMINATION v11): the generator's decay
+/// bare, the series' first order and the normalization's kept (`Unit::Series`, `Unit::Normalization`) on the joined
+/// cluster of two references, F = 1 and F = 2 (eliminate.rs `Model::references`: each column's first order of its own
+/// place's reference and the other's, ELIMINATION v12): the generator's decay
 /// ⟨ψ|i(H − H†)|ψ⟩ on a state of both is the photons' Σ‖u_a‖² at rest and moving, whichever leg is at the atom; and the
 /// same with no pair kept, each state's own cluster of one reference, one frequency's terms alone, the series' first
 /// order kept too (`Unit::Series`). Without the orders kept the decay is another (the orders change the rate).
@@ -624,8 +630,9 @@ fn the_normalized_generator_s_decay_is_its_photons_rate_with_a_kept_pair_of_two_
         let drives = at_the_atom(&request, &light, &[lifted]);
         let orders = vec![Unit::Series, Unit::Normalization { order: 1 }];
         let second = Model::new(&request, &light, &[drives.clone(), vec![raman.clone()]].concat()).unwrap();
-        let normalized = Model::new(&request, &light, &[drives.clone(), vec![raman.clone(), Unit::Normalization { order: 1 }]].concat()).unwrap();
-        assert!(!normalized.one_reference(normalized.cluster_of(1), &normalized.running()), "the joined cluster's places have two references");
+        let normalized = Model::new(&request, &light, &[drives.clone(), vec![raman.clone(), Unit::Series, Unit::Normalization { order: 1 }]].concat()).unwrap();
+        assert_eq!(normalized.references(normalized.cluster_of(1), &normalized.running()), vec![0, 1], "the joined cluster's places have two references");
+        assert_eq!(normalized.plan(normalized.cluster_of(1), &normalized.running()).fourth.as_ref().map(|f| f.orders.series), Some(1), "the joined cluster's run takes the first order");
         assert_eq!(normalized.clusters()[normalized.cluster_of(1)].states, vec![1, 5], "the kept pair's cluster");
         let alone = Model::new(&request, &light, &[drives, orders].concat()).unwrap();
         for kappa in [[0.0; 3], [3.0, -2.0, 5.0]] {

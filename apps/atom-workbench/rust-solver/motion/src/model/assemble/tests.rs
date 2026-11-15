@@ -130,14 +130,15 @@ struct Written {
 ///   a frequency's every folded coupling and R̃ = Σ_k (e_k T_k − ẽ_k T2_k) its response at the atom of the elimination at the
 ///   middle, in the levels its dressings make there (`Model::far_hamiltonian`; none where it is no carrier); the explicit states' van Vleck shift by the drives folded at the atom, each its own
 ///   denominator at the energy its cluster's ground states read the state at against the other leg's folded coupling; the explicit drives Σ_k e_k U_k and their adjoints;
-/// - the decay −(i/2) Σ_φ Σ_a J_{a,φ}†J_{a,φ}, a class's jump the sum of its members' -- a component's bare drives'
-///   e_k J_{a,k} (e_k* counter-rotating), a carrier's C_a R̃ with its own bare drives' e_k J_{a,k}, an explicit state's
-///   −C_a --, each at its relative beat;
+/// - the decay −(i/2) Σ_φ Σ_a J_{a,φ}†J_{a,φ}, a class's jump its feeds' emission rows on their replicas' excited
+///   amplitude 𝒯_ρ (photon.rs, # Replicas and classes) -- per channel at a ground place a component's bare drives'
+///   e_k R_k (e_k* counter-rotating) and a carrier's R̃, an explicit state's −1 --, each at its relative beat;
 /// - every entry at its beat's phase at t + s and in its two states' Doppler frames, with their diag(K_s·v).
 /// With `moduli` every factor is its modulus: the same sums with nothing cancelling, the scale of their rounding.
 fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 3], velocity: [f64; 3], s: f64, moduli: bool) -> Written {
     let c = &model.clusters[cluster];
     let (n, g) = (c.states.len(), c.ground);
+    let c_states = |y: usize| c.states[y];
     let lights = model.running();
     let leaf = move |z: C64| if moduli { C64::real(z.abs()) } else { z };
     let real = move |x: f64| leaf(C64::real(x));
@@ -240,32 +241,46 @@ fn written_out(model: &Model, cluster: usize, r: [f64; 3], t: f64, kappa: [f64; 
             }
         }
     }
-    // The decay: per class and axis its jump on the landing cluster's ground places, the sum of its members'.
+    // The decay: per class and axis its jump on the landing cluster's ground places, its feeds' emission rows on their
+    // replicas' 𝒯 at the path's momentum.
     let mut decay = vec![C64::ZERO; n * n];
+    let excited = |replica: &crate::model::photon::Replica, e: usize, y: usize| -> C64 {
+        let mut z = C64::ZERO;
+        for &(channel, place) in replica.channels.iter().filter(|ch| ch.1 == y) {
+            let _ = place;
+            match channel {
+                crate::model::photon::Channel::Near { carrier } => {
+                    let f = model.carriers[carrier].frequency;
+                    for k in 0..model.carriers[carrier].basis.len() {
+                        let (first, second) = (&responses.first[carrier][k][0], &responses.second[carrier][k][0]);
+                        z += field(f, k, false)[0] * leaf(first[(e, y)]) + field(f, k, true)[0] * leaf(-second[(e, y)]);
+                    }
+                }
+                crate::model::photon::Channel::Bare { frequency, side } => {
+                    for (k, response) in model.tones[frequency].bare_response[side].iter().enumerate() {
+                        let c = field(frequency, k, false)[0];
+                        z += (if side == 1 { c.conj() } else { c }) * leaf(response[(e, c_states(y))]);
+                    }
+                }
+            }
+        }
+        if replica.explicit.contains(&y) && GROUND + e == c_states(y) {
+            z -= leaf(C64::ONE);
+        }
+        z
+    };
     for class in &model.classes[cluster] {
         let landing = &model.clusters[class.landing];
         for a in 0..3 {
             let mut jump = Mat::zeros(landing.ground, n);
-            for member in &class.members {
-                let own = leaf(C64::cis(model.omega(&member.phase) * (t + s)));
-                for &(bp, sp) in &member.entries {
-                    let (b, state) = (landing.states[bp], c.states[sp]);
-                    let amplitude = match model.sources[member.source].origin {
-                        Origin::Far { frequency, side, component } => {
-                            let e = field(frequency, component, false)[0];
-                            (if side == 1 { e.conj() } else { e }) * leaf(model.tones[frequency].jumps[side][component][a][(b, state)])
-                        }
-                        Origin::Near { carrier, component } => {
-                            let f = model.carriers[carrier].frequency;
-                            let (e, weighted) = (field(f, component, false)[0], field(f, component, true)[0]);
-                            let (first, second) = (&responses.first[carrier][component][0], &responses.second[carrier][component][0]);
-                            let bare = model.tones[f].jumps[0].get(component).map_or(C64::ZERO, |jumps| jumps[a][(b, state)]);
-                            let at_the_atom: C64 = if sp < g { (0..EXCITED).map(|i| leaf(model.emission[a][(b, GROUND + i)]) * (e * leaf(first[(i, sp)]) + weighted * leaf(-second[(i, sp)]))).sum() } else { C64::ZERO };
-                            at_the_atom + e * leaf(bare)
-                        }
-                        Origin::Explicit { state: e } => leaf(-model.emission[a][(b, e)]),
-                    };
-                    jump[(bp, sp)] += amplitude * own;
+            for (r, bp, phase) in &class.feeds {
+                let replica = &model.replicas[cluster][*r];
+                let own = leaf(C64::cis(model.omega(phase) * (t + s)));
+                let b = landing.states[*bp];
+                for y in 0..n {
+                    for &e in &replica.rows {
+                        jump[(*bp, y)] += leaf(model.emission[a][(b, GROUND + e)]) * excited(replica, e, y) * own;
+                    }
                 }
             }
             for x in 0..n {
@@ -306,7 +321,8 @@ const SINGLE: usize = 26;
 /// over its terms (`Written::terms`) and over its blocks' four flags.
 fn chain(model: &Model, plan: &Plan, terms: usize) -> usize {
     let beams = model.light.frequencies.iter().map(|f| f.beams.len()).max().unwrap_or(0);
-    2 * (beams + 2 * EXCITED) + model.sources.len() + 4 * GROUND + terms + 4 * plan.blocks.len() + SINGLE
+    let channels = model.replicas.iter().flatten().map(|r| r.channels.len() + r.explicit.len()).max().unwrap_or(0);
+    2 * (beams + 2 * EXCITED) + channels * 3 + 4 * GROUND + terms + 4 * plan.blocks.len() + SINGLE
 }
 
 /// A path through a point for the tests, in the light's own units -- K its largest wave number: a position within 1/K of
@@ -464,19 +480,17 @@ fn the_tones_are_the_held_force_s_even_part() {
 }
 
 /// A table's middle (tabulate.rs `Model::near_point`: the table's interpolant of a point's values, each straight to its
-/// place) against the middle of the table's forms at the point (`Model::near_tabulated`, laid by `Site::formed`). Their
-/// Hermitian values are the same reals under the same weights, the one summed onto its constant in the interpolation's own
-/// fused sum and the other added to it afterwards: the force's forms agree to the rounding of their sums (the bound of
-/// the definitions' own test), and each counts what it makes: the table's middle its reads of the laid values (`Plan::near_read`,
-/// the normalized forms' `Plan::normal_read_work`, its place's coordinates), the forms' middle the forms' reads and their laying
-/// (`Plan::formed_work`). Their decays are the interpolant of the jumps' product and the product of the
-/// interpolated jumps: the generators differ by an anti-Hermitian part alone (the Hermitian part of their difference
-/// within the rounding of the entries' sums), and that mismatch is an interpolation error -- of the third order in the
-/// spacing: with every axis halved (`Model::halved`) its sum over a scene's points and clusters falls by more than 2²,
-/// and on each cluster it lies within the sum of the two middles' own errors against the exact elimination, the table's
-/// read (`Model::form_error`). On reference scenes' models with drives folded at the atom, their tables made over the reach.
+/// place, and of its responding forms) against the middle of the table's forms at the point (`Model::near_tabulated`,
+/// laid by `Site::formed`). Their Hermitian values are the same reals under the same weights, the one summed onto its
+/// constant in the interpolation's own fused sum and the other added to it afterwards, and their decays are one product
+/// of the same interpolated responses (module documentation, # The excited amplitude): the generators agree entry by
+/// entry, and the force's forms, to the rounding of their sums (the bound of the definitions' own test) -- the decay is
+/// the photons' rate between the table's nodes as at them, there is no second interpolation of it --; and each counts
+/// what it makes: the table's middle its reads of the laid values (`Plan::near_read`, the normalized forms'
+/// `Plan::normal_read_work`, its place's coordinates), the forms' middle the forms' reads and their laying
+/// (`Plan::formed_work`). On reference scenes' models with drives folded at the atom, their tables made over the reach.
 #[test]
-fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation() {
+fn a_table_s_middle_is_the_middle_of_its_forms() {
     let (mut tables_met, mut axes) = (0, 0);
     for (index, name) in ["R3_DOPPLER", "R4_TW1", "R5_PUMP"].into_iter().enumerate() {
         let (request, model) = (scene(name), model(name, &others, &|_| false));
@@ -487,15 +501,12 @@ fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation
         let reach = model.reach(&trap, &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
         let tables = model.tabulate(&reach, 1 << 12);
         let lights = model.running();
-        let mut all = (0.0, 0.0);
         for cluster in 0..model.clusters.len() {
             let Some(table) = tables.of(cluster, &lights) else { continue };
             tables_met += 1;
             axes += table.axes();
             let (plan, n) = (model.plan(cluster, &lights), model.clusters[cluster].states.len());
-            let finer = Some((0..table.axes()).fold(table.clone(), |t, f| crate::model::tabulate::NearTable { table: model.halved(&t, f), layout: t.layout }));
-            let sections = [(plan.near.hermitian(), 1), (plan.near.jumping(), 0)];
-            let (mut coarse, mut fine, mut read) = (0.0, 0.0, 0.0);
+            let sections = [(plan.near.hermitian(), 1), (plan.near.responding(), 1)];
             for _ in 0..16 {
                 let (r, t, kappa, velocity, times) = drawn(&model, &mut stream);
                 let rho = hermitian(n, &mut stream);
@@ -514,9 +525,8 @@ fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation
                     ours.generator(&path, s, &mut h);
                     theirs.generator(&other, s, &mut g);
                     for i in 0..n * n {
-                        let (j, size) = ((i % n) * n + i / n, sizes.hermitian[i][0].re + sizes.decay[i].re);
-                        let apart = ((h.data[i] - g.data[i]) + (h.data[j] - g.data[j]).conj()).abs();
-                        assert!(apart <= rounding(links) * size, "{name}, cluster {cluster}, s {s}, entry ({}, {}): the Hermitian parts are {apart:e} apart of {size:e}", i / n, i % n);
+                        let (apart, size) = ((h.data[i] - g.data[i]).abs(), sizes.hermitian[i][0].re + sizes.decay[i].re);
+                        assert!(apart <= rounding(links) * size, "{name}, cluster {cluster}, s {s}, entry ({}, {}): the generators are {apart:e} apart of {size:e}", i / n, i % n);
                     }
                     let (pull, pulled) = (ours.force(&path, s, &rho), theirs.force(&other, s, &rho));
                     for a in 0..3 {
@@ -524,105 +534,10 @@ fn a_table_s_middle_is_the_middle_of_its_forms_but_for_the_decay_s_interpolation
                         assert!(apart <= rounding(2 * links + n * n) * size, "{name}, cluster {cluster}, s {s}, axis {a}: the force's forms are {apart:e} apart of {size:e}");
                     }
                 }
-                // The decay's mismatch on a state, as the table's reads take an error of the generator; and the same on the
-                // finer table.
-                let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
-                let sample = crate::model::Sample { cluster, at: crate::model::Point { r, kappa, t }, psi };
-                let far = model.action(&sample, &model.middle_of(&plan, t, &amplitudes, None));
-                let exact = model.action(&sample, &model.middle_of(&plan, t, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1))));
-                // The generator reads the forms' values alone: of the forms to order 0 it is the same, bit for bit.
-                assert_eq!(exact, model.action(&sample, &model.middle_of(&plan, t, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 0)))), "{name}, cluster {cluster}: the generator of the forms' values alone");
-                let (a, b) = (model.action(&sample, &ours), model.action(&sample, &theirs));
-                let error = |first: &[C64], second: &[C64]| delta(&far, first, second);
-                coarse += error(&b, &a);
-                read += error(&exact, &a) + error(&exact, &b);
-                if let Some(finer) = &finer {
-                    let forms = model.near_values(&plan, &amplitudes, &sections, Some(finer));
-                    let (ours, theirs) = (model.middle(&plan, r, t, Some(finer)), model.middle_of(&plan, t, &amplitudes, Some(&forms)));
-                    fine += error(&model.action(&sample, &theirs), &model.action(&sample, &ours));
-                }
-            }
-            eprintln!("{name}, cluster {cluster} ({} axes, {} nodes): the decay's mismatch {:.2e} of the near generator, {:.2e} on the halved table; the two middles' errors {:.2e}", table.axes(), crate::table::Table::nodes(table.table.axes()), coarse / 16.0, fine / 16.0, read / 16.0);
-            assert!(coarse <= read, "{name}, cluster {cluster}: the mismatch {coarse:e} beyond the middles' own errors {read:e}");
-            if finer.is_some() {
-                (all.0, all.1) = (all.0 + coarse, all.1 + fine);
             }
         }
-        assert!(4.0 * all.1 <= all.0, "{name}: the mismatch {:e} falls to {:e} on the halved tables", all.0, all.1);
     }
     assert!(tables_met > 0 && axes > 0, "tables met ({tables_met}) with axes ({axes})");
-}
-
-/// The decay's mismatch on a scene's own model (run by name, alone: `SCENE=<a reference scene's name or a native request's
-/// path> … the_decay_s_mismatch_on_a_scene -- --ignored --nocapture`): the scene's model as the solve closes it (every unit
-/// whose fold does not exist over the reach kept, until none fails) with its near tables, and per cluster with a table, at
-/// 256 atoms of the scene's temperature in the trap's harmonic approximation, each a random state of the cluster: the
-/// generator the steps take (the decay's interpolated sums) against the one of the table's interpolated jumps' own product,
-/// as the table's reads take an error of the generator (`Model::form_error`: δ of the near generator, its error on what is
-/// shown and on T) and as the change of the state's decay rate −2 Im⟨ψ|Ĥ|ψ⟩/⟨ψ|ψ⟩ relative to it, beside the table's whole
-/// read at the same atoms.
-#[test]
-#[ignore = "a measurement, not a check: run by name"]
-fn the_decay_s_mismatch_on_a_scene() {
-    let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
-    let request = if name.ends_with(".json") { Request::from_native(&serde_json::from_str(&std::fs::read_to_string(&name).unwrap()).unwrap()).unwrap() } else { scene(&name) };
-    let light = Light::new(&request);
-    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let (model, _, trap, reach) = Model::closed_at(&request, &light, vec![], state, request.temperature_uk);
-    let tables = model.tabulate(&reach, 1 << 20);
-    let (lights, kt) = (model.running(), crate::units::KT_PER_UK * request.temperature_uk);
-    let mut stream = Stream::new(3, Purpose::Initial, 0, 0);
-    for cluster in 0..model.clusters.len() {
-        let Some(table) = tables.of(cluster, &lights) else { continue };
-        let (plan, n) = (model.plan(cluster, &lights), model.clusters[cluster].states.len());
-        let sections = [(plan.near.hermitian(), 1), (plan.near.jumping(), 0)];
-        // (the mean, the largest) of the mismatch's δ, of its error on what is shown and on T, and of the whole read's.
-        let mut reads = [[0.0_f64; 2]; 8];
-        let atoms = 256;
-        for _ in 0..atoms {
-            let along: [f64; 3] = std::array::from_fn(|i| stream.normal() * (kt * model.hbar_over_mass).sqrt() / trap.frequencies[i]);
-            let r: [f64; 3] = std::array::from_fn(|a| trap.centre[a] + (0..3).map(|i| trap.axes[i][a] * along[i]).sum::<f64>());
-            let kappa: [f64; 3] = std::array::from_fn(|_| stream.normal() * (kt / model.hbar_over_mass).sqrt());
-            let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect();
-            let sample = crate::model::Sample { cluster, at: crate::model::Point { r, kappa, t: 0.0 }, psi };
-            let amplitudes = model.light.amplitudes(r);
-            let action = |middle: &Middle| model.action(&sample, middle);
-            let far = action(&model.middle_of(&plan, 0.0, &amplitudes, None));
-            let ours = action(&model.middle(&plan, r, 0.0, Some(table)));
-            let theirs = action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_values(&plan, &amplitudes, &sections, Some(table)))));
-            let exact = action(&model.middle_of(&plan, 0.0, &amplitudes, Some(&model.near_exact(&plan, &amplitudes, 1))));
-            let (mismatch, whole) = (model.form_error(&sample, &far, &theirs, &ours, tables.thermal), model.form_error(&sample, &far, &exact, &ours, tables.thermal));
-            let rate = |action: &[C64]| -2.0 * crate::linalg::inner(&sample.psi, action).im;
-            let rates = [(rate(&ours) - rate(&theirs)).abs() / rate(&theirs), (rate(&ours) - rate(&exact)).abs() / rate(&exact)];
-            for (read, x) in reads.iter_mut().zip([delta(&far, &theirs, &ours), mismatch.population, mismatch.temperature, delta(&far, &exact, &ours), whole.population, whole.temperature, rates[0], rates[1]]) {
-                *read = [read[0] + x / atoms as f64, read[1].max(x)];
-            }
-        }
-        eprintln!(
-            "{name} cluster {cluster} ({n} states; {} axes, {} nodes of {} reals): the decay's mismatch δ {:.2e} (largest {:.2e}), on what is shown {:.2e} ({:.2e}), on T {:.2e} ({:.2e}) | the table's whole read δ {:.2e} ({:.2e}), shown {:.2e} ({:.2e}), T {:.2e} ({:.2e}) | the decay rate moved by {:.2e} ({:.2e}) of itself by the mismatch, {:.2e} ({:.2e}) from the exact one",
-            table.axes(),
-            crate::table::Table::nodes(table.table.axes()),
-            table.table.width(),
-            reads[0][0],
-            reads[0][1],
-            reads[1][0],
-            reads[1][1],
-            reads[2][0],
-            reads[2][1],
-            reads[3][0],
-            reads[3][1],
-            reads[4][0],
-            reads[4][1],
-            reads[5][0],
-            reads[5][1],
-            reads[6][0],
-            reads[6][1],
-            reads[7][0],
-            reads[7][1]
-        );
-    }
-    let (shown, temperature) = crate::model::tabulate::shares();
-    eprintln!("{name}: the tables' shares {shown:.2e} on what is shown, {temperature:.2e} on T");
 }
 
 /// A state's photons made in parts (photon.rs `Gradients`) are the same photons: every class's amplitudes without any
@@ -655,8 +570,11 @@ fn a_state_s_photons_in_parts_are_its_photons() {
             assert_eq!(model.scattering_of(&plan, table, &at, &psi).0, crate::model::Scattering::of(&whole, norm), "{name}, cluster {cluster}: the scattering");
             let bare = model.photons_of(&plan, table, &at, &psi, Gradients::None).0;
             assert_eq!(bare, run.photon_amplitudes(cluster, &at, &psi));
-            assert_eq!(whole.len(), bare.len(), "{name}, cluster {cluster}: the classes");
-            for (drawn, (photon, alone)) in whole.iter().zip(&bare).enumerate() {
+            // A class of no amplitude is a photon of the whole alone, its gradients' second moment (photon.rs
+            // `Model::classes_on`): the classes a draw reads are those of an amplitude.
+            let emitting: Vec<&crate::model::Photon> = whole.iter().filter(|p| p.amplitudes.iter().flatten().any(|z| *z != C64::ZERO)).collect();
+            assert_eq!(emitting.len(), bare.len(), "{name}, cluster {cluster}: the classes");
+            for (drawn, (photon, alone)) in emitting.into_iter().zip(&bare).enumerate() {
                 assert!(alone.gradients.iter().flatten().all(|g| g.is_empty()), "{name}, cluster {cluster}, class {}: gradients where none are asked", photon.class);
                 assert!((alone.class, &alone.amplitudes) == (photon.class, &photon.amplitudes), "{name}, cluster {cluster}, class {}: the amplitudes alone", photon.class);
                 let one = model.photons_of(&plan, table, &at, &psi, Gradients::Of(photon.class)).0;
@@ -701,25 +619,23 @@ struct Entries {
     terms: usize,
 }
 
-/// A state's photons by the definition's entries (`MemberPlan::entries`; photon.rs, # Sources and classes, # The absorbed
-/// light's momentum), none of the jumps' matrices: per class and entry (a, b', s) of a member the jump there -- a near
-/// form with its constant part, its gradient the form's (`NearValues::first_order`), or a constant -- times the member's
-/// field component, less the Doppler-weighted component times the partner's, times ψ_s at the member's phase; ∇u of a
-/// folded member by the product rule entry by entry. `bound(place)` is the bound of a near form's modulus in the sums of
-/// moduli (its own, or what its interpolant's terms can reach).
+/// A state's photons by the definition's entries (photon.rs, # Replicas and classes, # The absorbed light's momentum), none
+/// of the plan's replicas or classes: per class, feed, axis a and excited state e of the feed's replica, C_a[b', e] times
+/// the replica's excited amplitude there -- per channel at a ground place s a carrier's near forms (its response with its
+/// gradient, `NearValues::first_order`) times its field component less the Doppler-weighted component times its partner,
+/// a bare component's constant response times its component, an explicit state's −1 -- times ψ_s, at the feed's phase;
+/// ∇u by the product rule entry by entry. `bound(place)` is the bound of a near form's modulus in the sums of moduli (its
+/// own, or what its interpolant's terms can reach).
 fn photons_written(model: &Model, plan: &Plan, near: Option<&NearValues>, bound: &dyn Fn(usize) -> f64, amplitudes: &[Amplitude], at: &crate::model::Point, psi: &[C64]) -> Vec<Entries> {
+    use crate::model::photon::Channel;
     let fields = model.fields(plan, amplitudes, at.kappa, 1);
-    let len = plan.near.len();
-    // A jump with its gradient, and their moduli's bounds.
-    let jump = |place: usize| -> ([C64; 4], [f64; 4]) {
-        if place >= len {
-            let v = plan.constants[place - len];
-            return ([v, C64::ZERO, C64::ZERO, C64::ZERO], [v.abs(), 0.0, 0.0, 0.0]);
-        }
+    let (start, count) = (plan.near.responding().start, plan.near.responses.len());
+    let cluster = &model.clusters[plan.cluster];
+    // A near form with its gradient, and their moduli's bounds.
+    let form = |place: usize| -> ([C64; 4], [f64; 4]) {
         let near = near.expect("a near form's values");
-        let mut value = near.first_order(place);
-        value[0] += plan.bare(place);
-        let mut size = [bound(place) + plan.bare(place).abs(), 0.0, 0.0, 0.0];
+        let value = near.first_order(place);
+        let mut size = [bound(place), 0.0, 0.0, 0.0];
         match &near.directions {
             None => (0..3).for_each(|i| size[1 + i] = value[1 + i].abs()),
             Some(directions) => {
@@ -730,11 +646,59 @@ fn photons_written(model: &Model, plan: &Plan, near: Option<&NearValues>, bound:
         }
         (value, size)
     };
+    let scalar = |frequency: usize, k: usize, conjugate: bool| plan.scalars.iter().position(|s| (s.frequency, s.group, s.component, s.conjugate) == (frequency, None, k, conjugate));
     let one = [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO];
-    plan.classes
+    // A replica's excited amplitude at e of place y (its value and gradient, and their moduli's bounds), per unit ψ_y.
+    let excited = |replica: &crate::model::photon::Replica, e: usize, y: usize| -> ([C64; 4], [f64; 4]) {
+        let (mut z, mut size) = ([C64::ZERO; 4], [0.0; 4]);
+        let mut add = |c: &[C64], cs: [f64; 4], t: [C64; 4], ts: [f64; 4]| {
+            z[0] += c[0] * t[0];
+            size[0] += cs[0] * ts[0];
+            for i in 0..3 {
+                z[1 + i] += c[1 + i] * t[0] + c[0] * t[1 + i];
+                size[1 + i] += cs[1 + i] * ts[0] + cs[0] * ts[1 + i];
+            }
+        };
+        let moduli = |c: &[C64]| -> [f64; 4] { std::array::from_fn(|p| c[p].abs()) };
+        for &(channel, _) in replica.channels.iter().filter(|ch| ch.1 == y) {
+            match channel {
+                Channel::Near { carrier } => {
+                    let cc = &model.carriers[carrier];
+                    if !plan.lights.on(cc.frequency) {
+                        continue;
+                    }
+                    for k in 0..cc.basis.len() {
+                        let (Some(s), Some(i)) = (scalar(cc.frequency, k, false), plan.near.responses.iter().position(|r| *r == [carrier, k, e, y])) else { continue };
+                        let (c, cw) = (fields.plain(s), fields.doppler(s));
+                        let ((t, ts), (t2, ts2)) = (form(start + i), form(start + count + i));
+                        add(c, moduli(c), t, ts);
+                        let minus: Vec<C64> = cw.iter().map(|x| -*x).collect();
+                        add(&minus, moduli(cw), t2, ts2);
+                    }
+                }
+                Channel::Bare { frequency, side } => {
+                    if !plan.lights.on(frequency) {
+                        continue;
+                    }
+                    for (k, response) in model.tones[frequency].bare_response[side].iter().enumerate() {
+                        let Some(s) = scalar(frequency, k, side == 1) else { continue };
+                        let v = response[(e, cluster.states[y])];
+                        let c = fields.plain(s);
+                        add(c, moduli(c), [v, C64::ZERO, C64::ZERO, C64::ZERO], [v.abs(), 0.0, 0.0, 0.0]);
+                    }
+                }
+            }
+        }
+        if replica.explicit.contains(&y) && GROUND + e == cluster.states[y] {
+            add(&one, [1.0, 0.0, 0.0, 0.0], [-C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO], [1.0, 0.0, 0.0, 0.0]);
+        }
+        (z, size)
+    };
+    model.classes[plan.cluster]
         .iter()
         .map(|class| {
-            let n = model.clusters[class.landing].states.len();
+            let landing = &model.clusters[class.landing];
+            let n = landing.states.len();
             let mut out = Entries {
                 u: std::array::from_fn(|_| vec![C64::ZERO; n]),
                 du: std::array::from_fn(|_| std::array::from_fn(|_| vec![C64::ZERO; n])),
@@ -742,21 +706,26 @@ fn photons_written(model: &Model, plan: &Plan, near: Option<&NearValues>, bound:
                 slopes: std::array::from_fn(|_| std::array::from_fn(|_| vec![0.0; n])),
                 terms: 0,
             };
-            for m in &class.members {
-                let folded = m.folded;
-                let (c, cw): (&[C64], &[C64]) = m.scalar.map_or((&one, &one), |s| (fields.plain(s), fields.doppler(s)));
-                let phase = C64::cis(m.phase * at.t);
-                for &(a, bp, sp, first, second) in &m.entries {
-                    let x = psi[sp] * phase;
-                    let (j, js) = jump(first);
-                    let (j2, js2) = if m.doppler { jump(second) } else { ([C64::ZERO; 4], [0.0; 4]) };
-                    out.u[a][bp] += (c[0] * j[0] - cw[0] * j2[0]) * x;
-                    out.sizes[a][bp] += (c[0].abs() * js[0] + cw[0].abs() * js2[0]) * x.abs();
-                    out.terms += 1;
-                    if folded {
-                        for i in 0..3 {
-                            out.du[i][a][bp] += (c[1 + i] * j[0] + c[0] * j[1 + i] - cw[1 + i] * j2[0] - cw[0] * j2[1 + i]) * x;
-                            out.slopes[i][a][bp] += (c[1 + i].abs() * js[0] + c[0].abs() * js[1 + i] + cw[1 + i].abs() * js2[0] + cw[0].abs() * js2[1 + i]) * x.abs();
+            for (r, bp, phase) in &class.feeds {
+                let replica = &model.replicas[plan.cluster][*r];
+                let phase = C64::cis(model.omega(phase) * at.t);
+                let b = landing.states[*bp];
+                for (y, &x) in psi.iter().enumerate() {
+                    let x = x * phase;
+                    for &e in &replica.rows {
+                        let (z, size) = excited(replica, e, y);
+                        for a in 0..3 {
+                            let c = model.emission[a][(b, GROUND + e)];
+                            if c == C64::ZERO {
+                                continue;
+                            }
+                            out.u[a][*bp] += c * z[0] * x;
+                            out.sizes[a][*bp] += c.abs() * size[0] * x.abs();
+                            out.terms += 1;
+                            for i in 0..3 {
+                                out.du[i][a][*bp] += c * z[1 + i] * x;
+                                out.slopes[i][a][*bp] += c.abs() * size[1 + i] * x.abs();
+                            }
                         }
                     }
                 }
@@ -766,15 +735,16 @@ fn photons_written(model: &Model, plan: &Plan, near: Option<&NearValues>, bound:
         .collect()
 }
 
-/// A state's photons (photon.rs `Model::photons_of`: the classes' jumps as matrices on the state, the chain rule after
-/// the sums) are the definition's entries summed one by one (`photons_written`), amplitudes and gradients, to the
+/// A state's photons (photon.rs `Model::photons_of`: the replicas' excited amplitudes once, then the classes' emission
+/// rows on them) are the definition's entries summed one by one (`photons_written`), amplitudes and gradients, to the
 /// rounding of each sum -- γ_N of its terms' moduli, N the entries of the class's row, each a chain of a field's sum over
-/// its beams, the jump's own sum (a form's over the excited states, or an interpolant's over its stencil), the product
-/// rule's four terms and each direction's two; and their moments (`Photon::moments`) are those of the written-out
-/// vectors. With the exact elimination at the point, on every model of the tests; and from tables made over the reach,
-/// whose interpolant of the jumps' matrices is that of the jumps themselves: there a near jump's terms are bounded by
-/// its largest modulus over the table's nodes times the stencil's weights' moduli, at most 3/2 an axis (5/4 inside,
-/// table.rs `Axis::weights`), and its slopes are the same numbers in both.
+/// its beams, the response's own sum (a form's over the excited states, or an interpolant's over its stencil), the
+/// product rule's four terms and each direction's two, the excited amplitude's sum over the places; and their moments
+/// (`Photon::moments`) are those of the written-out vectors. With the exact elimination at the point, on every model of
+/// the tests; and from tables made over the reach, whose interpolant of the responses is that of the responses
+/// themselves: there a response's terms are bounded by its largest modulus over the table's nodes times the stencil's
+/// weights' moduli, at most 3/2 an axis (5/4 inside, table.rs `Axis::weights`), and its slopes are the same numbers in
+/// both.
 #[test]
 fn a_state_s_photons_are_their_entries_summed() {
     use crate::model::photon::Gradients;
@@ -805,10 +775,10 @@ fn a_state_s_photons_are_their_entries_summed() {
                 let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
                 let amplitudes = model.light.amplitudes(r);
                 // The table's where it holds the point, else the exact elimination's (tabulate.rs, # Axes).
-                let table = table.filter(|t| model.near_tabulated(t, &amplitudes, &[(plan.near.jumping(), 1)]).is_some());
+                let table = table.filter(|t| model.near_tabulated(t, &amplitudes, &[(plan.near.responding(), 1)]).is_some());
                 let near = match table {
                     _ if len == 0 => None,
-                    Some(table) => model.near_tabulated(table, &amplitudes, &[(plan.near.jumping(), 1)]),
+                    Some(table) => model.near_tabulated(table, &amplitudes, &[(plan.near.responding(), 1)]),
                     None => Some(model.near_exact(&plan, &amplitudes, 1)),
                 };
                 near_met += near.is_some() as usize;
@@ -823,7 +793,7 @@ fn a_state_s_photons_are_their_entries_summed() {
                     let landing = model.clusters[class.landing].states.len();
                     // The chain to a row's sum: its entries, each a field's sum over its beams, a jump's own sum and
                     // the product rule's terms with a direction's two each.
-                    let links = entries.terms.div_ceil(landing.max(1)) + 2 * beams + 2 * EXCITED + 4usize.pow(d as u32) + 4 + 2 * d.max(3) + 8;
+                    let links = entries.terms.div_ceil(landing.max(1)) + 2 * beams + 2 * EXCITED + 4usize.pow(d as u32) + 4 + 2 * d.max(3) + 8 + 2 * n;
                     let photon = photons.iter().find(|p| p.class == place);
                     let zero = vec![C64::ZERO; landing];
                     for a in 0..3 {
@@ -840,10 +810,8 @@ fn a_state_s_photons_are_their_entries_summed() {
                             }
                         }
                     }
-                    let Some(photon) = photon else {
-                        assert!(entries.u.iter().flatten().chain(entries.du.iter().flatten().flatten()).all(|z| *z == C64::ZERO), "{name}, cluster {cluster}, class {place}: left out with entries");
-                        continue;
-                    };
+                    // A class left out is nothing: its entries within their sums' rounding of zero, checked above.
+                    let Some(photon) = photon else { continue };
                     assert_eq!((photon.landing, photon.wave_number, photon.absorbed), (class.landing, class.wave_number, class.absorbed));
                     // The moments of the written-out vectors: W, Σ_a Im⟨u_a|∇u_a⟩, Σ_a Re⟨∇u_a|⊗|∇u_a⟩ with the explicit part.
                     let moments = photon.moments();
@@ -883,7 +851,8 @@ fn a_state_s_photons_are_their_entries_summed() {
 
 /// The scattering's table error on a scene's own model (run by name, alone: `SCENE=<a reference scene's name or a native
 /// request's path> … the_scattering_s_table_error_on_a_scene -- --ignored --nocapture`): the scene's model as the solve
-/// closes it with its near tables (as `the_decay_s_mismatch_on_a_scene`), and per cluster with a table, at 256 atoms of
+/// closes it with its near tables (every unit whose fold does not exist over the reach kept, until none fails), and per
+/// cluster with a table, at 256 atoms of
 /// the scene's temperature in the trap's harmonic approximation, each a random state of the cluster: a step's scattering
 /// (photon.rs `Model::scattering_of`) from the table against the exact elimination's at the point -- the force's
 /// difference over the classes' summed |Σ_a Im⟨u_a|∇u_a⟩|, the diffusion's largest entry's over the summed second
@@ -927,11 +896,11 @@ fn the_scattering_s_table_error_on_a_scene() {
             }
         }
         eprintln!(
-            "{name} cluster {cluster} ({n} states; {} axes, {} nodes of {} reals, {} of them the jumps' matrices): the scattering from the table against the exact elimination's -- the force {:.2e} (largest {:.2e}) of the classes' means, the diffusion {:.2e} ({:.2e}) of the second moments | the table's whole read of the generator δ {:.2e} ({:.2e})",
+            "{name} cluster {cluster} ({n} states; {} axes, {} nodes of {} reals, {} of them the responding forms'): the scattering from the table against the exact elimination's -- the force {:.2e} (largest {:.2e}) of the classes' means, the diffusion {:.2e} ({:.2e}) of the second moments | the table's whole read of the generator δ {:.2e} ({:.2e})",
             table.axes(),
             crate::table::Table::nodes(table.table.axes()),
             table.table.width(),
-            plan.jumps_start.len(),
+            2 * plan.near.responding().len(),
             reads[0][0],
             reads[0][1],
             reads[1][0],
@@ -1113,6 +1082,66 @@ fn the_decay_is_the_photons_rate_with_the_normalized_generator() {
     }
 }
 
+/// The decay is the jumps' product on random fields and polarizations (the class test; module documentation, # The
+/// excited amplitude; photon.rs, # The jumps and the decay): of one 𝒯 the generator's anti-Hermitian part is
+/// −(i/2) S⁻¹ Σ 𝒯†D𝒯 S⁻¹ and the photons' operators are C_a 𝒯 S⁻¹ -- the compression's identity i(G − G†) = Σ L†L, which
+/// holds for any 𝒯 and any Hermitian S. On every model of the tests -- bare and folded drives, explicit states, kept
+/// couplings and coherences (merged classes), clusters of several reference classes --, as they come and with the
+/// series' first order and the normalization kept (`Unit::Series`, `Unit::Normalization`), at random points across the
+/// light's pattern (the fields' amplitudes and polarizations there), random momenta and random states, from the exact
+/// elimination and from a scene's tables between their nodes: ψ†i(H − H†)ψ of the generator at the point (its path's
+/// middle) is Σ_classes Σ_a ‖u_a‖² of its photons there, to the rounding of their sums.
+#[test]
+fn the_decay_is_the_jumps_product_on_random_fields_and_polarizations() {
+    use crate::model::photon::Gradients;
+    let (mut checked, mut largest) = (0, 0.0_f64);
+    let mut check = |name: &str, model: &Model, tables: Option<&crate::model::tabulate::Tables>, stream: &mut Stream| {
+        let lights = model.running();
+        for cluster in 0..model.clusters.len() {
+            let (plan, n) = (model.plan(cluster, &lights), model.clusters[cluster].states.len());
+            let table = tables.and_then(|t| t.of(cluster, &lights));
+            for _ in 0..6 {
+                let (r, t, kappa, velocity, _) = drawn(model, stream);
+                let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
+                let middle = model.middle(&plan, r, t, table);
+                let path = middle.path(kappa, velocity);
+                let mut h = Mat::zeros(n, n);
+                middle.generator(&path, 0.0, &mut h);
+                // The rate's rounding: of the entries' sums, the Hermitian part's whole size among them.
+                let (mut rate, mut size) = (0.0, 0.0);
+                for x in 0..n {
+                    for y in 0..n {
+                        let z = psi[x].conj() * (h.data[x * n + y] - h.data[y * n + x].conj()) * C64::I * psi[y];
+                        rate += z.re;
+                        size += psi[x].abs() * (h.data[x * n + y].abs() + h.data[y * n + x].abs()) * psi[y].abs();
+                    }
+                }
+                let photons: f64 = model.photons_of(&plan, table, &crate::model::Point { r, kappa, t }, &psi, Gradients::None).0.iter().map(|ph| ph.weight()).sum();
+                let apart = (rate - photons).abs();
+                assert!(apart <= rounding(8 * n * n + 4 * EXCITED * EXCITED) * size.max(photons), "{name}, cluster {cluster} at {r:?}, κ {kappa:?}: the decay {rate:e} against the photons' {photons:e}");
+                largest = largest.max(if photons > 0.0 { apart / photons } else { 0.0 });
+                checked += 1;
+            }
+        }
+    };
+    for (index, (name, model)) in models().into_iter().enumerate() {
+        let mut stream = Stream::new(12, Purpose::Initial, index as u64, 0);
+        check(name, &model, None, &mut stream);
+        let bent = model.rekept(&[model.kept.clone(), vec![Unit::Series, Unit::Normalization { order: 1 }]].concat()).unwrap();
+        check(&format!("{name}, normalized"), &bent, None, &mut stream);
+    }
+    for (index, name) in ["R3_DOPPLER", "R4_TW1"].into_iter().enumerate() {
+        let (request, model) = (scene(name), model(name, &others, &|_| false));
+        let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+        let p: [f64; GROUND] = std::array::from_fn(|b| if b == state { 1.0 } else { 0.0 });
+        let reach = model.reach(&model.trap(&p, &model.prepared()).unwrap(), &p, request.temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
+        let tables = model.tabulate(&reach, 1 << 12);
+        check(&format!("{name} tabulated"), &model, Some(&tables), &mut Stream::new(12, Purpose::Initial, 100 + index as u64, 0));
+    }
+    eprintln!("{checked} states: the decay against the photons' rate within {largest:.2e} of it");
+    assert!(checked > 0);
+}
+
 /// The beating groups (assemble.rs, # Exact tones) are the generator's along a path: on every test model's clusters whose
 /// generator has no normalized part (whose forms' products are in no group), Ĥ(s) less every candidate pair's
 /// e^{iνs}G⁺ + e^{−iνs}G⁻ (`Middle::beats`, `Middle::envelopes`) is the same at every time along the path -- what is left
@@ -1204,6 +1233,8 @@ fn groups_along_a_path(name: &str, index: u64, model: &Model) -> (usize, usize) 
                 assert!(envelopes.iter().all(|(p, q)| p.data.iter().chain(&q.data).all(|z| z.re.is_finite() && z.im.is_finite())), "{name}, cluster {cluster}: the envelopes are numbers");
                 continue;
             }
+            // The Hermitian part: the decay's beats are the static group's, made of the node's 𝒯 (module documentation, #
+            // The excited amplitude; spectral.rs, # Which beats are tones), none of a group's.
             let rest = |s: f64| -> Mat {
                 let mut h = Mat::zeros(n, n);
                 middle.generator(&path, s, &mut h);
@@ -1212,7 +1243,7 @@ fn groups_along_a_path(name: &str, index: u64, model: &Model) -> (usize, usize) 
                         h.data[i] -= C64::cis(beat * s) * plus.data[i] + C64::cis(-beat * s) * minus.data[i];
                     }
                 }
-                h
+                Mat::from_fn(n, n, |x, y| (h[(x, y)] + h[(y, x)].conj()) * 0.5)
             };
             let form = |s: f64| -> [f64; 3] {
                 let mut f = middle.force(&path, s, &rho);
@@ -1252,7 +1283,8 @@ fn groups_along_a_path(name: &str, index: u64, model: &Model) -> (usize, usize) 
 /// The readout inverts the generator's own S (readout.rs `Model::readout_of`; `Model::bent_at`): the 1D PGC at 3 G
 /// (PGC1D_TILT_0) with every near light at the atom, the prior's units, and the series' first order and the
 /// normalization's kept, so that S bends the state. At two points the readout's S⁻¹ -- Σ_{j≤J} b_j X^j of the one
-/// metric's forms' values there and the plan's field components -- is the matrix the photons and the landing take
+/// metric, the near part of 𝒯's at the responses there and the plan's field components -- is the matrix the photons and
+/// the landing take
 /// (`Model::quartic`, with its gradients), to rounding; and the ground populations the readout reads of a state ψ are
 /// those of x = S⁻¹ψ, in ratio (the readout divides them by the sum with the folded excited populations).
 #[test]
@@ -1282,10 +1314,9 @@ fn the_readout_inverts_the_generator_s_own_normalization() {
         // The readout's.
         let mut point = Held::<Site>::take();
         model.light.amplitudes_into(r, 0, |_| true, &mut point.beams);
-        let exact = model.near_exact(&plan, &point.beams, 0);
-        model.normal_read(&plan, None, Some(&exact), &mut point, false);
-        let (mut scratch, mut bent) = (vec![C64::ZERO; 2 * size], vec![C64::ZERO; size]);
-        model.bent_at(&plan, fourth, &point.beams, &point.normal, &mut scratch, &mut bent);
+        model.responded(&plan, None, 0, &mut point);
+        let (mut scratch, mut bent) = (vec![], vec![]);
+        model.bent_at(&plan, fourth, &point, &mut scratch, &mut bent);
         let scale = generator.iter().fold(0.0_f64, |m, z| m.max(z.abs()));
         let apart = generator.iter().zip(&bent).fold(0.0_f64, |m, (a, b)| m.max((*a - *b).abs()));
         let identity = generator.iter().enumerate().fold(0.0_f64, |m, (i, z)| m.max((*z - if i % (n + 1) == 0 { C64::ONE } else { C64::ZERO }).abs()));

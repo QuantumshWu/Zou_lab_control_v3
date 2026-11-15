@@ -1916,11 +1916,13 @@ impl Reference {
     }
 
     /// The products of two places' resolvents on class c's coupling, R₀(x)R₀(y) W on every ground place y's column, one
-    /// a ground place x -- of the landing's Y = Σ_f W′_f R₀(x)R₀(y) W_f, the left and the right wave operators' overlap at
-    /// their leading order (the left one's row x is W′_x R₀(x), `Fold::landing_evaluated`) --: [x][part], with their
-    /// jets as `respond`'s. Where z_x = z_y, the order-1 response R₀(y)² W_y, the same numbers (the same solves).
-    pub(crate) fn mixed(&self, class: usize, coupling: &Mat, n: usize, slopes: &[(Vec<f64>, Mat)]) -> Vec<Vec<Mat>> {
-        (0..self.ground).map(|x| self.chain(class, coupling, n, 1, slopes, &|order, y| if order == 0 { y } else { x }).pop().expect("order 1")).collect()
+    /// a place x of `places` (any of the slow states: a reference class's first, eliminate.rs `Model::references`) -- of
+    /// the series' first order at x's reference and of the landing's Y = Σ_f W′_f R₀(x)R₀(y) W_f, the left and the right
+    /// wave operators' overlap at their leading order (the left one's row x is W′_x R₀(x), `Fold::landing_evaluated`) --:
+    /// [x][part], with their jets as `respond`'s. Where z_x = z_y, the order-1 response R₀(y)² W_y, the same numbers
+    /// (the same solves).
+    pub(crate) fn mixed(&self, class: usize, coupling: &Mat, n: usize, slopes: &[(Vec<f64>, Mat)], places: &[usize]) -> Vec<Vec<Mat>> {
+        places.iter().map(|&x| self.chain(class, coupling, n, 1, slopes, &|order, y| if order == 0 { y } else { x }).pop().expect("order 1")).collect()
     }
 
     /// The chain x_j = R₀(z_{at(j, y)}) x_{j−1} on ground place y's column, x_{−1} = W (the coupling, the same everywhere:
@@ -2522,11 +2524,10 @@ impl super::Model {
         out.extend(self.coherence_units());
         // The bare folds onto explicit states, each taken to the atom by its keep (`bare_links`).
         out.extend(self.bare_links().into_iter().map(|(component, excited, ground)| super::Unit::Bare { component, excited, ground }));
-        // The evaluation's next orders where a fold has the normalized generator (`Unit::Series`, `Unit::Normalization`);
-        // the series' first order where some cluster's run holds it exactly (`Model::one_reference`).
+        // The evaluation's next orders where a fold has the normalized generator (`Unit::Series`, `Unit::Normalization`).
         let running = self.running();
         if (0..self.clusters.len()).any(|c| self.plan(c, &running).fourth.is_some()) {
-            if self.series.order == 0 && (0..self.clusters.len()).any(|c| self.plan(c, &running).fourth.is_some() && self.one_reference(c, &running)) {
+            if self.series.order == 0 {
                 out.push(super::Unit::Series);
             }
             out.push(super::Unit::Normalization { order: self.series.normalization + 1 });
@@ -2618,15 +2619,13 @@ impl super::Model {
                         Fold::evaluation_error(&fold.evaluated(&levels, z0, orders), defined, z0, psi) + landed
                     };
                     let defined = definition.definitions(&whole);
-                    // The cluster's own orders (`Model::orders_of`); its series' first order where its run holds it
-                    // exactly (`Model::one_reference`): else what it would take away is the next orders', the nearest
-                    // block's.
-                    let running = self.running();
-                    let (own, holds) = (self.orders_of(sample.cluster, &running), self.one_reference(sample.cluster, &running));
+                    // The run's orders, every cluster's (assemble.rs, # The normalized generator: the series' first
+                    // order of each place's own reference).
+                    let own = self.series.orders();
                     let at = against(&defined, own);
-                    let series = if own.series == 0 && holds { (at - against(&defined, Orders { series: 1, ..own })).max(0.0) } else { 0.0 };
+                    let series = if own.series == 0 { (at - against(&defined, Orders { series: 1, ..own })).max(0.0) } else { 0.0 };
                     let normalization = (at - against(&defined, Orders { normalization: own.normalization + 1, ..own })).max(0.0);
-                    if own.series == 0 && holds {
+                    if own.series == 0 {
                         book(&Unit::Series, series, &mut out);
                     }
                     book(&Unit::Normalization { order: own.normalization + 1 }, normalization, &mut out);

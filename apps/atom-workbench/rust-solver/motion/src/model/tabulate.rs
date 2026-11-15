@@ -1,6 +1,6 @@
 //! The near light's tables (SPEC §2.3): per cluster and light set the elimination's nonlinear part -- the cluster's near forms
-//! (assemble.rs `NearLayout`: the shifts S and their Doppler partners, the jumps, the explicit states' van Vleck shifts, the
-//! responses) -- tabulated over the coordinates it depends on, the linear part (the field's components, the Doppler shifts) exact.
+//! (assemble.rs `NearLayout`: the shifts S and their Doppler partners, the first order's crossed forms, the explicit
+//! states' van Vleck shifts, the responses with their partners and the mixed responses) -- tabulated over the coordinates it depends on, the linear part (the field's components, the Doppler shifts) exact.
 //! The light sets the integrator evaluates: every light on (the generator, the photons, the readout), and every light but the
 //! trap's (V_run's subtraction, potential.rs).
 //!
@@ -22,15 +22,11 @@
 //! # A node's reals
 //! The near forms, their real and imaginary parts in the layout's order: what the photons, the readout, the potential and the
 //! refinement read. And after them the middle's own (assemble.rs, # Dense terms), where the generator's dense terms and the
-//! forms' take them: the Hermitian forms (`Plan::lay`) and the decay's sums of the node's jumps' products (`Plan::decay`). A
-//! middle takes that part in one pass over the stencil's rows, each real straight to its place (`Model::near_point`), and
-//! multiplies no jumps. The Hermitian part is linear in the forms: its interpolant is the interpolated forms' own layout,
-//! number for number. The decay is quadratic in the jumps: its interpolant is not the product of the interpolated jumps --
-//! which the photons take (photon.rs) -- but differs from it by the two interpolations' errors, both third order in the
-//! spacing and both in the table's error (below). And last the photons' own: the near jumps as the matrices a state's
-//! photons sum (assemble.rs, # The jumps' matrices; `Plan::lay_jumps`), linear in the jumps -- their interpolant, and
-//! its slopes along the axes, are the interpolated jumps' own, number for number, each real in its place for the
-//! photons' sums (`Model::near_jumps`).
+//! forms' take them: the Hermitian forms laid (`Plan::lay`). A middle takes that part in one pass over the stencil's rows,
+//! each real straight to its place (`Model::near_point`). The Hermitian part is linear in the forms: its interpolant is the
+//! interpolated forms' own layout, number for number. The decay and the photons are made of the excited amplitude, of the
+//! interpolated responding forms (assemble.rs, # The excited amplitude; `Model::near_responses`): one object, so that the
+//! decay is the photons' rate between the nodes as at them -- no product of anything is interpolated.
 //!
 //! # Axes
 //! A coordinate's range over the atoms' reach is its focus value ± the proven bound of its distance from it there, to the
@@ -95,10 +91,10 @@
 //! # The table's error
 //! A table's values are ṽ(s) = v(s) + e(s), the elimination's and the interpolation's error, C¹ in the coordinates. The
 //! generator they give has the force of its own Hermitian part (the interpolant's own derivative), and its decay is the
-//! interpolant of the jumps' product: the elimination's decay to the same order as every other value, and a Lindblad one with
-//! the interpolated jumps to that order -- at a node exactly. So the table stands for the model whose generator is the
+//! product of the interpolated responses' excited amplitude: the elimination's decay to the same order as every other value,
+//! and a Lindblad one of the photons it gives everywhere. So the table stands for the model whose generator is the
 //! interpolated one, and its error on the outputs is that generator's distance from the elimination's (both reads below take
-//! the generator the steps take, the decay's interpolated sums in it): the rates and the couplings of a state moved by the relative δ =
+//! the generator the steps take, its decay of the interpolated responses): the rates and the couplings of a state moved by the relative δ =
 //! ‖(Ñ − N)ψ‖/‖Nψ‖ (N the near light's part of the generator at the atom, its Doppler partners at the atom's momentum) -- the
 //! populations by at most δ P_g, and T, which the near light sets through its rates, its friction and the depth of its shifts
 //! (all of them N's), by the relative δ --; and the atom's potential moved by ΔV = ⟨ψ|H̃_h − H_h|ψ⟩, a conservative change that
@@ -226,7 +222,7 @@ impl NearTable {
 impl Layout {
     /// A node's reals (module documentation, # A node's reals).
     fn width(&self) -> usize {
-        2 * self.plan.near.len() + self.plan.generator_start.len() + self.plan.form_start.len() + self.plan.jumps_start.len()
+        2 * self.plan.near.len() + self.plan.generator_start.len() + self.plan.form_start.len()
     }
 
     /// Whether a table of this layout on the grid `axes` costs less than the direct evaluation it stands for at `most`
@@ -439,12 +435,8 @@ impl Model {
             pair.copy_from_slice(&[z.re, z.im]);
         }
         point.fill(0.0);
-        let (generator, rest) = point.split_at_mut(plan.generator_start.len());
-        let (forms, jumps) = rest.split_at_mut(plan.form_start.len());
+        let (generator, forms) = point.split_at_mut(plan.generator_start.len());
         plan.lay(|at| values[at], Some(generator), forms);
-        let len = values.len();
-        plan.decay(|at| if at < len { values[at] + plan.bare(at) } else { plan.constants[at - len] }, &mut vec![], generator);
-        plan.lay_jumps(|at| values[at], jumps);
     }
 
     /// A near table's grid with axis f's spacing halved (crate::table `Axis::halved`), its nodes reused: the refinement's one step.
@@ -884,9 +876,9 @@ impl Model {
     }
 
     /// A site's point on a table (module documentation, # At a point), from the site's beams' amplitudes: the axes'
-    /// coordinates there, their gradients -- the directions the forms' and the jumps' slopes are along --, and the
+    /// coordinates there, their gradients -- the directions the forms' and the responses' slopes are along --, and the
     /// point's place on the table's grid with the coordinates' counted work (`Site::place`). Every read of the table
-    /// at the point takes that place (`near_point`, `near_jumps`, `near_responses`; assemble.rs `Model::quartic`): a
+    /// at the point takes that place (`near_point`, `near_responses`; assemble.rs `Model::quartic`): a
     /// site is placed once, after its beams and before its first read, whatever is read of the table there. Whether the
     /// table holds the point (# Axes): where it does not, the site has no place, and its forms are the exact
     /// elimination's.
@@ -899,38 +891,29 @@ impl Model {
         point.place.is_some()
     }
 
-    /// A point's jumps' matrices from a table (assemble.rs, # The jumps' matrices), to an order (0 or 1), into the
-    /// vectors of a site placed there (`placed`), and their counted work: the matrices -- the table's interpolant of
-    /// them onto their constant part -- and to first order their slopes per axis, in one pass over the stencil's rows.
-    /// Counted as the reals it reads (assemble.rs, # Work): the laid matrices, to first order with their slopes; the
-    /// place's coordinates are its site's (photon.rs `sited`).
-    pub(crate) fn near_jumps(&self, table: &NearTable, order: usize, point: &mut Site) -> f64 {
-        let (d, plan) = (table.axes(), &table.layout.plan);
+    /// A point's responding forms from a table (the near forms' responding section: the responses, their partners, the
+    /// mixed responses, assemble.rs `NearLayout::responding`), to an order (0 or 1), into the vectors of a site placed
+    /// there (`placed`): their values and to first order their slopes per axis, in one pass over the stencil's rows; and
+    /// their counted work, the reals it reads (assemble.rs, # Work) -- the place's coordinates are its site's.
+    pub(crate) fn near_responses(&self, table: &NearTable, order: usize, point: &mut Site) -> f64 {
+        let (d, range) = (table.axes(), table.layout.plan.near.responding());
         let slopes = if order >= 1 { d } else { 0 };
         let (place, _) = point.place.expect("a site placed on its table");
-        let (first, width) = (2 * plan.near.len() + plan.generator_start.len() + plan.form_start.len(), plan.jumps_start.len());
-        sized(&mut point.jumps, width);
-        sized(&mut point.jump_slopes, slopes * width);
-        table.table.read(&place, first, Some(&plan.jumps_start), &mut point.jumps, (order >= 1).then_some(&mut point.jump_slopes[..]));
-        read_work(d, order, width)
-    }
-
-    /// A point's responses from a table (the near forms' responding section, to order 0: what the readout reads,
-    /// readout.rs), into the vectors of a site placed there (`placed`): the section's reals, a response's real part
-    /// and its imaginary part in the forms' order.
-    pub(crate) fn near_responses(&self, table: &NearTable, point: &mut Site) {
-        let entries = table.layout.plan.near.responding();
-        let (place, _) = point.place.expect("a site placed on its table");
-        sized(&mut point.responses, 2 * entries.len());
-        table.table.read(&place, 2 * entries.start, None, &mut point.responses, None);
+        let (mut values, mut along) = (vec![0.0; 2 * range.len()], vec![0.0; slopes * 2 * range.len()]);
+        table.table.read(&place, 2 * range.start, None, &mut values, (order >= 1).then_some(&mut along[..]));
+        point.responses.clear();
+        point.responses.extend(values.chunks_exact(2).map(|z| C64::new(z[0], z[1])));
+        point.response_slopes.clear();
+        point.response_slopes.extend(along.chunks_exact(2).map(|z| C64::new(z[0], z[1])));
+        read_work(d, order, 2 * range.len())
     }
 
     /// A middle's near terms' values at a point from a table (module documentation, # At a point; assemble.rs `Site`),
     /// into a site placed there (`placed`), and their counted work: the table's interpolant of the generator's values
-    /// -- the Hermitian forms and the decay's sums of the jumps' products, as the nodes hold them -- and of the forms'
-    /// with their slopes along the axes, each straight to its place onto its constant part, in one pass over the
-    /// stencil's rows. Counted with the coordinates as the forms' interpolation is (the Hermitian ones to first order,
-    /// the jumps to order 0): the count is the definition's, not the layout's (assemble.rs, # Work).
+    /// -- the Hermitian forms laid, as the nodes hold them -- and of the forms' with their slopes along the axes, each
+    /// straight to its place onto its constant part, in one pass over the stencil's rows; and the responding forms with
+    /// their slopes (`near_responses`), of which the node's excited amplitude is made. Counted with the coordinates as the
+    /// forms' interpolation is: the count is the definition's, not the layout's (assemble.rs, # Work).
     pub(crate) fn near_point(&self, table: &NearTable, point: &mut Site) -> f64 {
         let (d, plan) = (table.axes(), &table.layout.plan);
         let (place, work) = point.place.expect("a site placed on its table");
@@ -940,6 +923,7 @@ impl Model {
         sized(&mut point.slopes, d * forms);
         table.table.read(&place, first, Some(&plan.generator_start), &mut point.generator, None);
         table.table.read(&place, first + generator, Some(&plan.form_start), &mut point.forms, Some(&mut point.slopes));
+        self.near_responses(table, 1, point);
         work + plan.near_read(d)
     }
 
@@ -954,6 +938,7 @@ impl Model {
             .map(|table| {
                 let (d, plan) = (table.axes(), &table.layout.plan);
                 let (w, generator) = (table.table.width(), 2 * plan.near.len()..2 * plan.near.len() + plan.generator_start.len());
+                let responding = 2 * plan.near.responding().start..2 * plan.near.responding().end;
                 let mut axes = vec![vec![zero; samples.len()]; d];
                 let mut whole = vec![zero; samples.len()];
                 for (k, sample) in samples.iter().enumerate() {
@@ -974,7 +959,7 @@ impl Model {
                         // The axis' read of the generator's values, the decay's with the Hermitian ones.
                         let (mut dv, mut ds) = (vec![0.0; w], vec![0.0; d * w]);
                         table.table.axis_error(f, &x, &mut dv, &mut ds);
-                        read[k] = self.form_error(sample, &far, &ours, &self.action(sample, &tabulated.moved(&dv[generator.clone()])), tables.thermal);
+                        read[k] = self.form_error(sample, &far, &ours, &self.action(sample, &tabulated.moved(&dv[generator.clone()], &dv[responding.clone()])), tables.thermal);
                     }
                     // The exact elimination's forms to order 0: the generator on a state reads their values alone.
                     let exact = self.middle_of(plan, sample.at.t, &amplitudes, Some(&self.near_exact(plan, &amplitudes, 0)));

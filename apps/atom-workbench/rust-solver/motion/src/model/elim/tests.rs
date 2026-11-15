@@ -1042,8 +1042,8 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         let hermitian = whole.hermitian_part();
         let four = |m: &Mat| -> Vec<C64> { m.data.iter().copied().chain(std::iter::repeat_n(C64::ZERO, 3 * n * n)).collect() };
         let made = |orders: Orders| -> Vec<C64> {
-            let mut data = vec![C64::ZERO; 14 * n * n];
-            crate::model::assemble::normal(&four(&hermitian), &four(&n1), &four(&x), &four(&l), &n1.data, n, &vec![[z0, 0.0, 0.0, 0.0]; n], orders, true, true, true, &mut data, &mut vec![]);
+            let mut data = vec![C64::ZERO; (crate::model::assemble::FIRST + 1) * n * n];
+            crate::model::assemble::normal(&four(&hermitian), &four(&n1), &[], 1, &four(&x), &four(&l), n, &vec![[z0, 0.0, 0.0, 0.0]; n], orders, true, true, &mut data, &mut vec![]);
             data
         };
         let matrix = |data: &[C64], m: usize| Mat { rows: n, cols: n, data: data[m * n * n..(m + 1) * n * n].to_vec() };
@@ -1966,7 +1966,7 @@ fn the_closure_s_and_the_readings_cost_by_part() {
 }
 
 /// R4_LIN_4 closed at its request's state (testing.rs `Model::closed_at`), its prior's atoms, and its clusters whose
-/// places have more than one reference (eliminate.rs `Model::one_reference`) among those with a normalized generator.
+/// places have more than one reference class (eliminate.rs `Model::references`) among those with a normalized generator.
 fn r4_lin_4() -> (crate::model::Model, Vec<([f64; 3], [f64; 3])>, Vec<usize>) {
     let req = crate::model::testing::scene("R4_LIN_4");
     let light = crate::field::Light::new(&req);
@@ -1974,46 +1974,71 @@ fn r4_lin_4() -> (crate::model::Model, Vec<([f64; 3], [f64; 3])>, Vec<usize>) {
     let (model, ..) = crate::model::Model::closed_at(&req, &light, vec![], state, req.temperature_uk);
     let points = crate::solve::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
     let running = model.running();
-    let many: Vec<usize> = (0..model.clusters().len()).filter(|&k| model.plan(k, &running).fourth.is_some() && !model.one_reference(k, &running)).collect();
+    let many: Vec<usize> = (0..model.clusters().len()).filter(|&k| model.plan(k, &running).fourth.is_some() && model.references(k, &running).iter().any(|&a| a > 0)).collect();
     (model, points, many)
 }
 
-/// The transition rule (ELIMINATION v11; eliminate.rs `Model::one_reference`, `Model::orders_of`): the run holds the
-/// series' first order of one resolvent alone, N₁ (the near forms' Doppler partners), so where a cluster's places have
-/// more than one reference -- R4_LIN_4's cluster of F = 1 and F = 2 ground states with its explicit states, its far
-/// levels apart in its frames -- the cluster's run takes no first order, even with `Unit::Series` kept (its plan's
-/// orders), the model builds (the closure ends), and at the cluster's states the readings book what the first order
-/// would take away with the orders beyond it, on the nearest block (`Unit::Block`), and nothing on `Unit::Series`;
-/// `Unit::Series` is a unit where some cluster holds it.
+/// The run's series' first order about each place's own reference (ELIMINATION v12; assemble.rs, # The normalized
+/// generator): on R4_LIN_4's clusters of more than one reference class -- its F = 1 and F = 2 ground states with the
+/// explicit states, their far levels apart in the frames -- the model with `Unit::Series` kept takes the first order there
+/// (its plans' orders: no cluster is held at order 0), `Unit::Series` is a candidate of the model without it, and at the
+/// prior's atoms the run's first order -- its generator at rest (assemble.rs `Middle::generator`: the held part
+/// −Herm Σ_a Y⁽ᵃ⁾ E₀ P_a, the decay of 𝒯 = 𝒯⁽⁰⁾ + 𝒯⁽¹⁾ with 𝒯⁽¹⁾[:, s] = Σ_t M⁽ᵃ⁽ˢ⁾⁾[:, t] E[t, s]) less the same model's
+/// at order 0 -- is the evaluation's (elim.rs `Fold::evaluated` at K = 1 less K = 0, of the same reference: an
+/// independent implementation of the same series) within a twentieth of itself where the first order is at least 10⁻⁵ of
+/// the generator (measured: 2.3·10⁻², of a first order 4·10⁻⁶ of the generator; the run's bare drives' constant folds,
+/// which take no first order, and its first-order Doppler's recoil, which the evaluation does not take, apart
+/// [hypothesis]; a wrong class's resolvent is all of it) -- below that it is printed, a first order that moves nothing a
+/// run resolves --; and its decay is its photons' rate on the cluster's states.
 #[test]
-fn a_cluster_of_more_than_one_reference_keeps_a_block_and_not_the_series() {
-    use crate::model::{Point, Sample, Unit};
+fn a_cluster_of_more_than_one_reference_takes_the_first_order_of_each_place_s_reference() {
+    use crate::model::{Point, Unit};
+    use crate::step::Middle as _;
     let (model, points, many) = r4_lin_4();
     assert!(!many.is_empty(), "R4_LIN_4 has a cluster of more than one reference");
-    let running = model.running();
-    let somewhere = (0..model.clusters().len()).any(|k| model.plan(k, &running).fourth.is_some() && model.one_reference(k, &running));
-    let candidates = model.candidates();
-    assert_eq!(candidates.contains(&Unit::Series) || model.kept.contains(&Unit::Series), somewhere, "Series a unit where some cluster holds it");
-    // With the series' first order kept, these clusters' runs take order 0 still.
-    let kept = model.rekept(&[model.kept.clone(), vec![Unit::Series]].concat()).expect("the model with the first order");
+    assert!(model.kept.contains(&Unit::Series) || model.candidates().contains(&Unit::Series), "Series a unit");
+    let kept = model.rekept(&[model.kept.clone(), vec![Unit::Series, Unit::Normalization { order: 1 }]].concat()).expect("the model with the first orders");
+    let zeroth = model.rekept(&[model.kept.clone(), vec![Unit::Normalization { order: 1 }]].concat()).expect("the model at order 0");
+    let running = kept.running();
+    let (mut read, mut largest) = (0, 0.0_f64);
     for &k in &many {
-        let plan = kept.plan(k, &kept.running());
-        assert_eq!(plan.fourth.as_ref().map(|f| f.orders.series), Some(0), "cluster {k}'s run takes no first order");
-    }
-    let units: Vec<Unit> = candidates.iter().cloned().chain(std::iter::once(Unit::Series)).collect();
-    let (mut read, mut on_blocks) = (0, 0.0);
-    for &k in &many {
-        let n = model.clusters()[k].states.len();
-        for &(r, kappa) in points.iter().step_by(9) {
-            let psi: Vec<C64> = (0..n).map(|i| if i < model.clusters()[k].ground { C64::ONE } else { C64::ZERO }).collect();
-            let (errors, _) = model.readings(&units, &Sample { cluster: k, at: Point { r, kappa, t: 0.0 }, psi }, None);
-            let series = errors.last().expect("the series' error");
-            assert!(series.population == 0.0 && series.temperature == 0.0, "nothing booked on Series at {r:?}: {series:?}");
-            on_blocks += units.iter().zip(&errors).filter(|(u, _)| matches!(u, Unit::Block { .. })).map(|(_, e)| e.population).sum::<f64>();
+        let plan = kept.plan(k, &running);
+        assert_eq!(plan.fourth.as_ref().map(|f| f.orders.series), Some(1), "cluster {k}'s run takes the first order");
+        let n = kept.clusters()[k].states.len();
+        for &(r, _) in points.iter().step_by(9) {
+            let amplitudes = kept.light.amplitudes(r);
+            let Some((fold, levels, far, _)) = kept.cluster_fold(k, &amplitudes, true) else { continue };
+            let z0 = kept.reference_of(k, &far);
+            let orders = kept.series.orders();
+            let mut first = fold.evaluated(&levels, &z0, orders);
+            first.add_scaled(-C64::ONE, &fold.evaluated(&levels, &z0, Orders { series: 0, ..orders }));
+            let generator = |m: &crate::model::Model| {
+                let middle = m.assemble(k, r, 0.0, &running);
+                let path = middle.path([0.0; 3], [0.0; 3]);
+                let mut h = Mat::zeros(n, n);
+                middle.generator(&path, 0.0, &mut h);
+                h
+            };
+            let h = generator(&kept);
+            let mut run = h.clone();
+            run.add_scaled(-C64::ONE, &generator(&zeroth));
+            let mut apart = run.clone();
+            apart.add_scaled(-C64::ONE, &first);
+            let (relative, size) = (apart.frobenius() / first.frobenius(), first.frobenius() / h.frobenius());
+            println!("cluster {k} at {r:?}: the first order {size:.3e} of the generator, the run's {relative:.3e} apart of the evaluation's");
+            if size >= 1e-5 {
+                largest = largest.max(relative);
+                assert!(relative <= 5e-2, "cluster {k} at {r:?}: the run's first order {relative:e} apart of the evaluation's ({size:.3e} of the generator)");
+            }
+            // The decay is the photons' rate.
+            let psi: Vec<C64> = (0..n).map(|i| C64::cis(0.4 * i as f64) * (0.5 + 0.2 * i as f64)).collect();
+            let rate = crate::linalg::inner(&psi, &Mat::from_fn(n, n, |a, b| C64::I * (h[(a, b)] - h[(b, a)].conj())).apply(&psi)).re;
+            let photons: f64 = kept.photons(k, &Point { r, kappa: [0.0; 3], t: 0.0 }, &psi).iter().map(|ph| ph.weight()).sum();
+            assert!((rate - photons).abs() <= 1e-9 * photons, "cluster {k} at {r:?}: the decay {rate:e} against the photons' {photons:e}");
             read += 1;
         }
     }
-    println!("{read} states read on {} clusters of more than one reference: the blocks booked {on_blocks:.3e}, Series nothing", many.len());
+    println!("{read} points on {} clusters of more than one reference: the run's generator within {largest:.2e} of the evaluation's", many.len());
     assert!(read > 0);
 }
 

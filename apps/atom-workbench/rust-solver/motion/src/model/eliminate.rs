@@ -21,10 +21,10 @@
 //! `errors`, Δ = max|Ω| + 2 k_max v); no clamp, no switch (SPEC §1.4).
 //!
 //! # The fold's terms: one contraction
-//! A folded drive leaves the ground states two things, both made of its response (`shift`, `jump`): with an emitted leg
+//! A folded drive leaves the ground states two things, both made of its response (`shift`, and the response itself): with an emitted leg
 //! (coupling V', response R') and an absorbed one (V, R), the ground block −½(V'†R + R'†V) -- the light shifts, the Raman and
-//! Zeeman couplings of the light, the beats of two components --, and the photons' jumps C_a R, whose own product is the decay
-//! −(i/2)Σ J†J (photon.rs). A response is (K − z)⁻¹V with the levels it is taken at: the bare ones (K₀ = H0_ee − (i/2)D,
+//! Zeeman couplings of the light, the beats of two components --, and the excited amplitude R itself, whose photons C_a R
+//! and whose own product −(i/2) R†D R, the decay, are one object (assemble.rs, # The excited amplitude; photon.rs). A response is (K − z)⁻¹V with the levels it is taken at: the bare ones (K₀ = H0_ee − (i/2)D,
 //! z = E_b + ν: a constant, far.rs), or those at the atom (`Model::eliminate`: the far light's H(r), the other carriers'
 //! dressing, the folded channels' self-energy -- the bare folds' results are its inputs, so they are made first). One
 //! definition for both: what differs is the response handed in.
@@ -34,7 +34,7 @@
 //! contraction of the two beams' legs -- each its frequency's every folded coupling, bare ones too, with its response at the
 //! atom (none where the frequency is no carrier): what the bare drives' constants leave of the fold (far.rs) --, at the beat
 //! δ_ω' − δ_ω and wave vector k_l − k_l'; an entry whose residual beat in the frames is not zero only where its unit
-//! (`Unit::Term`) is kept. Per beam the jumps C_a T_l. The explicit states' energies take the van Vleck shift of the drives
+//! (`Unit::Term`) is kept. Per beam the responses T_l, the excited amplitude's (assemble.rs, # The excited amplitude). The explicit states' energies take the van Vleck shift of the drives
 //! folded here, ½ Σ_b (V^f[e,b] V[f,b]*/(E_e − E_b − δ_c) + V[e,b] V^f[f,b]*/(E_f − E_b − δ_c)), each drive's own denominator
 //! against the other's folded coupling V. The explicit drives enter as they are: a_l X_l[e,b] e^{−iδ_c t} and its adjoint.
 //!
@@ -71,11 +71,6 @@ pub(crate) fn half(coupling: &Mat, state: usize, response: &Mat, place: usize) -
 /// the absorbed response against the emitted coupling, and the emitted response against the absorbed coupling, conjugated.
 pub(crate) fn shift(emitted: Leg, absorbed: Leg) -> C64 {
     half(emitted.coupling, emitted.state, absorbed.response, absorbed.place) + half(absorbed.coupling, absorbed.state, emitted.response, emitted.place).conj()
-}
-
-/// A jump's entry (C_a R)[b, place] of a response's column (the one definition).
-pub(crate) fn jump(emission: &Mat, b: usize, response: &Mat, place: usize) -> C64 {
-    (0..EXCITED).map(|e| emission[(b, GROUND + e)] * response[(e, place)]).sum()
 }
 
 /// A carrier: a co-rotating component with a drive not bare (derived from the drives' levels, model.rs `Level`; never listed).
@@ -128,9 +123,11 @@ impl Carrier {
 /// reference, elim.rs `Reference`), jets in the position: per carrier (empty where unlit), basis vector k of its field
 /// and jet part, R_k = −R₀ U_k and R2_k = R₀² U_k on every place of the cluster (EXCITED × n) -- the order-0 response
 /// and the first-order Doppler partner, R₀(y)² U_k on place y's column; a beam's Σ_k γ_lk of them; the sign the
-/// contraction's (`shift`) --; where the landing asks (`mixes`: the normalization's order J ≥ 1), the products
-/// R₀(x)R₀(y) U_k of two places' resolvents on place y's column, [carrier][k][x][part] (elim.rs `Reference::mixed`);
-/// per jet part the reference Z₀ itself, its every place's z_y; and the complex multiply-adds that made them.
+/// contraction's (`shift`) --; where the evaluation takes a first order (the series' or the normalization's) and the
+/// cluster's places have more than one reference class (`Model::references`), the products R₀(z_a)R₀(z_y) U_k of a
+/// class's reference and the place's on place y's column, [carrier][k][class][part] (elim.rs `Reference::mixed`, at
+/// each class's first place); per jet part the reference Z₀ itself, its every place's z_y; and the complex
+/// multiply-adds that made them.
 pub(crate) struct Responses {
     pub(crate) first: Vec<Vec<Vec<Mat>>>,
     pub(crate) second: Vec<Vec<Vec<Mat>>>,
@@ -232,7 +229,9 @@ impl Model {
         let frames: Vec<f64> = c.frames.iter().map(|f| self.omega(f)).collect();
         let reference: Vec<Vec<f64>> = (0..parts).map(|p| (0..n).map(|y| h[p][(c.states[y], c.states[y])].re + if p == 0 { self.series.centre[cluster] - frames[y] } else { 0.0 }).collect()).collect();
         let slopes: Vec<(Vec<f64>, Mat)> = (1..parts).map(|p| (reference[p].clone(), h[p].block(&excited, &excited))).collect();
-        let mixes = self.series.normalization >= 1;
+        let classes = self.references(cluster, lights);
+        let firsts: Vec<usize> = (0..classes.iter().max().map_or(0, |m| m + 1)).map(|a| classes.iter().position(|&x| x == a).expect("a class's place")).collect();
+        let mixes = (self.series.order >= 1 || self.series.normalization >= 1) && firsts.len() > 1;
         let lit: Vec<usize> = (0..self.carriers.len()).filter(|&ci| lights.on(self.carriers[ci].frequency)).collect();
         let nus: Vec<f64> = lit.iter().map(|&ci| self.carriers[ci].detuning).collect();
         let sizes: Vec<f64> = c.frames.iter().map(|f| self.axes.size(f)).collect();
@@ -248,8 +247,8 @@ impl Model {
                 second[ci].push(orders.next().expect("order 1"));
                 work += series.work(1, parts);
                 if mixes {
-                    mixed[ci].push(series.mixed(j, &coupling, n, &slopes));
-                    work += series.work(1, parts) * g as f64;
+                    mixed[ci].push(series.mixed(j, &coupling, n, &slopes, &firsts));
+                    work += series.work(1, parts) * firsts.len() as f64;
                 }
             }
         }
@@ -261,43 +260,43 @@ impl Model {
         self.carriers.iter().position(|c| c.frequency == frequency)
     }
 
-    /// Whether a cluster's places have one reference at every point (elim.rs, # The definition and the route it is
-    /// evaluated on; `eliminate`'s Z₀): z_y = H_far[y, y] − θ_y + c one at every place whatever the far field -- the
-    /// base levels in their frames one, and every far beam pair's form (`level_pairs`) one on every place's diagonal
-    /// --, each within its terms' rounding (elim.rs `equal`). There the series' first order is of one resolvent,
-    /// N₁ = Σ W′R₀²W, which the near forms hold as their Doppler partners (assemble.rs `normal`); else it is of two
-    /// places' resolvents, Σ_t W′R₀(s)R₀(t)W_t E[t, s] on column s (elim.rs `Fold::evaluated`), which the run does not
-    /// hold (`orders_of`).
-    pub(crate) fn one_reference(&self, cluster: usize, lights: &Lights) -> bool {
+    /// The reference classes of a cluster's places under the lights `lights` (elim.rs, # The definition and the route it is
+    /// evaluated on; `eliminate`'s Z₀): per place the class of the places whose reference z_y = H_far[y, y] − θ_y + c is
+    /// its own at every point whatever the far field -- the base levels in their frames one, and every far beam pair's
+    /// form (`level_pairs`) one on their diagonals --, each within its terms' rounding (elim.rs `equal`), the classes in
+    /// the order of their first places. One resolvent a class: the series' first order on column s is of s's class's
+    /// reference and of each other place's, R₀(z_a)R₀(z_t) (`Responses::mixed`), the Doppler partner where they are one.
+    pub(crate) fn references(&self, cluster: usize, lights: &Lights) -> Vec<usize> {
         let c = &self.clusters[cluster];
         let pairs = self.level_pairs(lights);
         let level = |y: usize| {
             let s = c.states[y];
             (self.base[(s, s)].re - self.omega(&c.frames[y]), self.base[(s, s)].abs() + self.axes.size(&c.frames[y]))
         };
-        (1..c.states.len()).all(|y| {
-            let ((a, sa), (b, sb)) = (level(0), level(y));
-            let (s0, sy) = (c.states[0], c.states[y]);
+        let one = |x: usize, y: usize| {
+            let ((a, sa), (b, sb)) = (level(x), level(y));
+            let (sx, sy) = (c.states[x], c.states[y]);
             super::elim::equal(a - b, sa + sb)
                 && pairs.iter().enumerate().all(|(w, of)| {
                     of.iter().enumerate().filter(|x| *x.1).all(|(x, _)| {
                         let form = &self.tones[w].pairs[x];
-                        let (u, v) = (form[(s0, s0)], form[(sy, sy)]);
+                        let (u, v) = (form[(sx, sx)], form[(sy, sy)]);
                         super::elim::equal((u - v).abs(), u.abs() + v.abs())
                     })
                 })
-        })
-    }
-
-    /// The orders a cluster's evaluation takes under the lights `lights` (elim.rs `Orders`): the model's (`Series`), the
-    /// series' first order only where the cluster's places have one reference (`one_reference`; ELIMINATION v11: the
-    /// transition until the jumps and the decay are the fold's own, L = C T). Elsewhere the first order is no part of the
-    /// run's evaluation and no unit of the cluster's: what it would take away of the evaluation's error is the next
-    /// orders', the nearest block's keep, as every order beyond the first (elim.rs `Model::readings`) -- exact still, the
-    /// block explicit; `Unit::Series` is a candidate where some cluster holds it (elim.rs `Model::candidates`).
-    pub(crate) fn orders_of(&self, cluster: usize, lights: &Lights) -> super::elim::Orders {
-        let orders = self.series.orders();
-        if orders.series >= 1 && !self.one_reference(cluster, lights) { super::elim::Orders { series: 0, ..orders } } else { orders }
+        };
+        let mut classes: Vec<usize> = vec![];
+        let mut firsts: Vec<usize> = vec![];
+        for y in 0..c.states.len() {
+            match firsts.iter().position(|&x| one(x, y)) {
+                Some(a) => classes.push(a),
+                None => {
+                    classes.push(firsts.len());
+                    firsts.push(y);
+                }
+            }
+        }
+        classes
     }
 
     /// Whether a coupling of two places of a cluster (x ← y at the base beat `beat`) is in the cluster's generator: at a

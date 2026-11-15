@@ -82,7 +82,7 @@
 //! the request's outside forms hold none: where both folds exist (the model's domain, model.rs `Model::settled`) its mixing is the
 //! product of theirs, a fourth order.
 
-use super::eliminate::{jump, shift, Leg};
+use super::eliminate::{shift, Leg};
 use super::{Beat, Component, Level};
 use crate::field::{Amplitude, Light};
 use crate::linalg::{Lu, Mat, C64};
@@ -268,7 +268,7 @@ impl Bases {
 
 /// The light of a frequency as the folds with the bare levels take it (module documentation): its exact co-rotating
 /// frequency δ_ω, its coupling bases, its static form on its field's basis and per beam pair, the outside form at the focus,
-/// and its bare drives' responses and jumps on the basis -- each drive at its level (`Tone::fold`).
+/// and its bare drives' responses on the basis -- each drive at its level (`Tone::fold`).
 #[derive(Clone, Debug)]
 pub(crate) struct Tone {
     /// δ_ω exactly (its index; no frame coordinate) and its value (rad/µs).
@@ -282,9 +282,6 @@ pub(crate) struct Tone {
     pub(crate) pairs: Vec<Mat>,
     /// O(E(0)): the outside form at the focus, which H0 holds.
     pub(crate) focus: Mat,
-    /// Per component ([co, counter]) and basis vector k its bare drives' jumps (GROUND × GROUND per axis a): the field's jump is
-    /// Σ_k e_k J_{a,k} (the counter-rotating Σ_k e_k* J_{a,k}); empty where none is bare.
-    pub(crate) jumps: [Vec<[Mat; 3]>; 2],
     /// Per component ([co, counter]) and beam its bare drives' response R_l (EXCITED × GROUND, the readout's).
     pub(crate) responses: [Vec<Mat>; 2],
     /// Per component ([co, counter]) and beam its coupling at the focus, X_l and R_l (STATES × STATES).
@@ -301,13 +298,12 @@ pub(crate) struct Tone {
     pub(crate) outside: [[Mat; 3]; 3],
     plain: Vec<Mat>,
     /// The beams' coefficients on the basis γ_lk, the field's basis vectors, [δ_ω, −(δ_ω + 2ν_frame)] (rad/µs), K₀ = H0_ee −
-    /// (i/2)D, the bare energies and the emission operators: what a fold reads again.
+    /// (i/2)D and the bare energies: what a fold reads again.
     pub(crate) coefficients: Vec<Vec<C64>>,
     pub(crate) vectors: Vec<[C64; 3]>,
     pub(crate) nu: [f64; 2],
     k0: Mat,
     energies: Vec<f64>,
-    emission: [Mat; 3],
     /// Per excited state (less GROUND) the energy its folds' excited block is read at (model.rs `Model::read_made`).
     read: Vec<f64>,
 }
@@ -374,7 +370,6 @@ impl Tone {
             forms: vec![],
             pairs: vec![],
             focus,
-            jumps: [vec![], vec![]],
             responses: [vec![], vec![]],
             couplings: [vec![], vec![]],
             basis,
@@ -388,7 +383,6 @@ impl Tone {
             nu,
             k0,
             energies: energies(request),
-            emission: request.emission.clone(),
             read: energies(request)[GROUND..].to_vec(),
         };
         tone.couplings = [0, 1].map(|c| tone.per_beam(c, &tone.basis[c]));
@@ -428,7 +422,7 @@ impl Tone {
         Fold { coupled: &self.coupled[side][k], bare: &self.bare_basis[side][k], response: &self.bare_response[side][k] }
     }
 
-    /// Takes each drive at its level: the bare drives' responses, jumps and excited block, and the static form of every
+    /// Takes each drive at its level: the bare drives' responses and excited block, and the static form of every
     /// folded drive's coupling with them (`second_order`).
     fn fold(&mut self, level: &dyn Fn(usize, usize, usize) -> Level) {
         let r = self.basis[0].len();
@@ -448,10 +442,6 @@ impl Tone {
         self.pairs = per_pair(self, self, &a);
         self.forms = a;
         self.responses = [0, 1].map(|c| self.per_beam(c, &self.bare_response[c]));
-        self.jumps = [0, 1].map(|c| {
-            let of = |response: &Mat| -> [Mat; 3] { std::array::from_fn(|a| Mat::from_fn(GROUND, GROUND, |to, b| jump(&self.emission[a], to, response, b))) };
-            if self.bare[c] { self.bare_response[c].iter().map(of).collect() } else { vec![] }
-        });
     }
 }
 

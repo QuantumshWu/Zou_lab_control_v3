@@ -423,8 +423,8 @@ pub struct Model {
     pub(crate) carriers: Vec<eliminate::Carrier>,
     /// Per cluster the blocks of the excited states its eliminations can mix (assemble.rs `Model::mix`).
     pub(crate) mixing: Vec<Vec<usize>>,
-    /// The photons' sources (photon.rs) and per cluster its classes.
-    pub(crate) sources: Vec<photon::Source>,
+    /// Per cluster its excited replicas and its photons' classes (photon.rs).
+    pub(crate) replicas: Vec<Vec<photon::Replica>>,
     pub(crate) classes: Vec<Vec<photon::Class>>,
     /// The clusters' assemblies under the light sets asked so far, each made once where it is first asked (assemble.rs
     /// `Model::plan`).
@@ -605,7 +605,7 @@ impl Model {
             membership: [0; GROUND],
             carriers: vec![],
             mixing: vec![],
-            sources: vec![],
+            replicas: vec![],
             classes: vec![],
             plans: Mutex::new(vec![]),
             spread: 0.0,
@@ -703,7 +703,7 @@ impl Model {
             }
         }
         model.mixing = (0..model.clusters.len()).map(|c| model.mix(c)).collect();
-        model.sources = model.all_sources();
+        model.replicas = (0..model.clusters.len()).map(|c| model.replicas(c)).collect();
         model.classes = (0..model.clusters.len()).map(|c| model.classes(c)).collect();
         model.series = elim::Series::none(model.clusters.len());
         model.series = model.series_at(&[([0.0; 3], [0.0; 3])]);
@@ -987,11 +987,9 @@ impl Model {
         use photon::Gradients;
         let running = self.running();
         let plans: Vec<Arc<assemble::Plan>> = (0..self.clusters.len()).map(|c| self.plan(c, &running)).collect();
-        let focus = self.light.amplitudes([0.0; 3]);
-        let live = |p: &assemble::Plan| (0..3).filter(|&a| p.beams.iter().any(|&l| focus[l].gradient[a] != C64::ZERO)).count();
         let largest = |count: &dyn Fn(&assemble::Plan, usize, f64) -> f64| plans.iter().zip(axes).map(|(p, &(d, place))| count(p, d, place)).fold(0.0, f64::max) * crate::decide::COMPLEX;
-        let scattering = largest(&|p, d, place| p.sited_work(d, place, 1, true) + p.classes_work(d, Gradients::All, live(p)));
-        let photons = largest(&|p, d, place| p.sited_work(d, place, 1, false) + p.classes_work(d, Gradients::None, live(p)) + (0..p.classes.len()).map(|class| p.classes_work(d, Gradients::Of(class), live(p))).fold(0.0, f64::max));
+        let scattering = largest(&|p, d, place| p.sited_work(d, place, 1, true) + p.classes_work(Gradients::All));
+        let photons = largest(&|p, d, place| p.sited_work(d, place, 1, false) + p.classes_work(Gradients::None) + (0..p.classes.len()).map(|class| p.classes_work(Gradients::Of(class))).fold(0.0, f64::max));
         let assembly = largest(&|p, d, place| p.middle_work(d, place)) + scattering;
         Priced { costs: plans.iter().zip(axes).map(|(p, &(d, _))| p.costs(d)).collect(), assembly, photons }
     }

@@ -1,38 +1,33 @@
 //! Photons (SPEC §1.6): the jump operators by class, the photons a state emits, the absorbed light's two moments per unit
-//! time.
+//! time -- of the one excited amplitude the generator's decay is made of (assemble.rs, # The excited amplitude).
 //!
-//! # Sources and classes
-//! A source is one part of the jump operators, linear in one component of a frequency's field (or constant): a component's
-//! folded drives' photons C_a R from its field's component e_k on its basis (the counter-rotating from e_k*) -- R the whole
-//! response of its folded drives, the bare ones' constant and, of a carrier, that of its drives folded at the atom
-//! (far.rs, eliminate.rs): one amplitude, one source --, or an explicit excited state's C_a. In the base frame its entries b' ← s carry the beat Ω_J -- −ν of the absorbed component,
-//! 0 for an explicit state (the excited states' ν_frame, common to every photon, is a global phase) -- and, beam by beam of its
-//! field, the wave vector q_J (the absorbed beam's k_l; −k_l for a counter-rotating component's a_l*). In the frames (cluster.rs)
-//! an entry is at ω̃ = Ω_J + θ_b' − θ_s, its photon's frequency up to the class's common phase; a folded photon and an explicit one
-//! of the same light land at the same ω̃ exactly. A class is the entries of one frame frequency landing in one cluster (model.rs
-//! `Photon`); two frequencies landing in one cluster are two classes unless their coherence is kept (`Unit::Coherence`), then
-//! one, each member at its relative phase e^{i(ω̃ − ω̃₀)t}. A carrier's jump b' ← s exists where its response from s reaches an
-//! excited state that decays to b' (assemble.rs `Model::reached`).
+//! # Replicas and classes
+//! The slow state's excited amplitude is one object, the fold's wave operator 𝒯 (elim.rs, # The fold; ELIMINATION v12):
+//! per excited replica -- one excited frequency in the cluster's frames -- the amplitude 𝒯_ρ x its slow state drives there.
+//! What makes it (`Replica`): the channels (readout.rs, # The readout) at the ground places they drive into the replica --
+//! a component's bare drives (their constant response, far.rs) or a carrier's drives folded at the atom (their response
+//! there, eliminate.rs) --, and the explicit excited states of its frame, whose amplitude is their own. A channel ν at the
+//! ground place s drives the replica of frame frequency ρ = −ν − θ_s, an explicit state s is at ρ = −θ_s (the excited
+//! states' ν_frame, common to every photon, is a global phase). Of the replica's excited states (its rows) the photons land
+//! where they decay: on the landing ground state b' of frame θ_b' at the frame frequency ω̃ = ρ + θ_b', its photon's
+//! frequency up to the class's common phase. A class is one frame frequency landing in one cluster (model.rs `Photon`): its
+//! feeds, each a landing place and the one replica whose photons land there at that frequency. Two frequencies landing in
+//! one cluster are two classes unless their coherence is kept (`Unit::Coherence`), then one, each feed at its relative
+//! phase e^{i(ω̃ − ω̃₀)t}.
 //!
-//! # The decay (assemble.rs)
-//! −(i/2) Σ_φ Σ_a J_{a,φ}†J_{a,φ}: per class and pair of its members (j, i) the term e_j* e_i L_j†L_i, L the members' entries in
-//! that class, at the beat Ω_i − Ω_j, whose residual in the frames is zero within one frequency: the decay is the jumps' own
-//! product, the generator Lindblad's by construction, and the hazard Σ_φ Σ_a ‖J_{a,φ}ψ‖²/‖ψ‖² (SPEC §1.4, the photons' own
-//! weights) is the propagated norm's rate ⟨ψ|i(H − H†)|ψ⟩/‖ψ‖² identically (step.rs; the identity is the tests').
-//! A table's middle takes the decay's sums interpolated, the photons the interpolated jumps: there the identity holds to the
-//! table's error, which its reads take (tabulate.rs, # A node's reals, # The table's error).
+//! # The jumps and the decay
+//! A class's jump on the axis a is J_a = Σ_feeds C_a[b', :] 𝒯_ρ S⁻¹ -- the emission's rows on the feed's replica, the
+//! normalized coordinates' S⁻¹ (assemble.rs, # The normalized generator) --, and the generator's decay is the same 𝒯's
+//! product, −(i/2) S⁻¹ Σ_ρ 𝒯_ρ† D 𝒯_ρ S⁻¹ (D = Σ_a C_a†C_a, a merged class's cross terms at their beats): the
+//! compression of the no-jump generator onto the slow subspace (1; 𝒯) has i(G − G†) = Σ L†L for any 𝒯 and any Hermitian
+//! S (ELIMINATION v12), so the hazard Σ_φ Σ_a ‖J_{a,φ}ψ‖²/‖ψ‖² is the propagated norm's rate ⟨ψ|i(H − H†)|ψ⟩/‖ψ‖² by
+//! construction -- at a node, at a point, from a table or exactly: the decay is made of the same 𝒯 the photons are.
 //!
 //! # A state's photons at a point
-//! A class's u on the rows a n + b' (the axis a, the landing cluster's n states b') is the sum over its members of the
-//! member's field component times its jumps' matrix on the state (assemble.rs, # The jumps' matrices): the matrix on the
-//! state once (linalg.rs `combine`: the state's amplitudes on the matrix's columns), then the product with the field's
-//! component -- where the member holds a near form with its Doppler partner, the partner's matrix on the same state
-//! times the Doppler-weighted component. ∇u takes the same vectors with the components' gradients, and of a member that
-//! holds a near form its matrices' slopes on the state, each along its direction (a table's axes' coordinates'
-//! gradients, or the lab axes) times the component: the chain rule after the sums, not entry by entry. The matrices at
-//! the point are the exact elimination's jumps there with their exact derivatives, or their table's interpolant with its
-//! own slopes (tabulate.rs `Model::near_jumps`): one sum either way, the definition's entries (`MemberPlan::entries`)
-//! in another order. A class's moments (# The absorbed light's momentum) are ten sums over its rows.
+//! The excited amplitude ε_ρ = 𝒯_ρ S⁻¹ψ of every replica once, with its gradient ∇ε_ρ = ∇𝒯_ρ S⁻¹ψ + 𝒯_ρ ∇S⁻¹ψ
+//! (assemble.rs `Model::excited_at`); a class's u on the rows a n + b' (the axis a, the landing cluster's n states b') is its
+//! feeds' C_a[b', :] ε_ρ, and ∇u the same rows on ∇ε_ρ. A class's moments (# The absorbed light's momentum) are ten sums
+//! over its rows.
 //!
 //! # A class's photon
 //! Its frequency is the frame's less the class's frame frequency, ω_φ = ω_frame − ω̃ + E_s₀ − E_b₀: the frames are counted from
@@ -48,58 +43,48 @@
 //! expansion, summed over the emitted photon's polarizations a: the scattering force Σ_a Im⟨u_a|∇u_a⟩ and the second moment's
 //! rate Σ_a Re⟨∇u_a|⊗|∇u_a⟩ (`Photon::moments`), neither divided by the class's rate W = Σ_a ‖u_a‖² -- both smooth and
 //! finite where the light interferes away (half of the second moment is the evolution without a jump's, and no photon's). A
-//! folded source's ∇u is its field component's gradient on its entries (each beam's ∇a_l = a_l (ik_l + ∇ln|a_l|)) and its
-//! jumps' own. A jump of the class carries its conditional mean b = Σ_a Im⟨u_a|∇u_a⟩/W as far as one absorbed photon's
-//! momentum goes, s b with s = min(1, k_c/|b|) (`Photon::kick`): b is the beams' wave vectors weighted, within their
+//! folded amplitude's ∇u is its field components' gradients on its responses (each beam's ∇a_l = a_l (ik_l + ∇ln|a_l|))
+//! and its responses' own. A jump of the class carries its conditional mean b = Σ_a Im⟨u_a|∇u_a⟩/W as far as one absorbed
+//! photon's momentum goes, s b with s = min(1, k_c/|b|) (`Photon::kick`): b is the beams' wave vectors weighted, within their
 //! convex hull while the weights are positive, and beyond k_c only where they interfere to both signs -- there it is no
 //! photon's momentum. What the jumps do not carry is the step's (`Model::scattering_of`): the force Σ_c (1 − s_c) Σ_a
 //! Im⟨u_a|∇u_a⟩ and the diffusion 2D = Σ_c [Σ_a Re⟨∇u_a|⊗|∇u_a⟩ − s_c² W_c b_c b_cᵀ], positive semidefinite by
 //! Cauchy–Schwarz. A plane wave's jump carries its k and leaves nothing; a standing wave's carries nothing and leaves
 //! k² R₀ sin² kz, the dipole force's fluctuations.
 //!
-//! An explicit state's jumps are constants and its absorption's mean is the Ehrenfest force's (its kept drives'
+//! An explicit state's amplitude is its own and its absorption's mean is the Ehrenfest force's (its kept drives'
 //! stimulated force): what its absorbed light gives the momentum beside that mean is the force's own correlation through
 //! the optical sector, the trajectory's per-state noise (optical.rs; step.rs, # The optical sector's noise), not a
-//! photon's moment here.
+//! photon's moment here -- its amplitude has no gradient (S⁻¹ holds the explicit states as they are).
 
-use super::assemble::{laid, sized, ClassPlan, Held, MemberPlan, Plan, Site};
+use super::assemble::{laid, sized, ClassPlan, Held, Plan, Site};
 use super::far::EXCITED;
 use super::tabulate::NearTable;
-use super::{Beat, Lights, Model, Moments, Photon, Point, Scattering, Unit};
+use super::{Beat, Component, Model, Moments, Photon, Point, Scattering, Unit};
 use crate::step::Emitted;
 use std::sync::Arc;
 
-use crate::linalg::{combine, C64, LANES};
+use crate::linalg::{C64, LANES};
 use crate::request::{GROUND, STATES};
-use crate::table::MOST_AXES;
 use crate::units::{wave_number, RAD_PER_US_PER_MHZ};
 
-/// What a source's jumps are (module documentation): a component's bare drives' on its field's basis vector (`Far`: `side` 0
-/// the co-rotating, 1 the counter-rotating; constant, far.rs `Tone::jumps`), an explicit excited state's −C_a (the excited
-/// amplitude a folded drive makes is −R x_g, so that a class's jump is C_a(R x_g − x_e), the physical photon's sign
-/// throughout), or a carrier's (`Near`): its bare drives' constant and its drives' folded at the atom, C_a(T_k − w T2_k) at
-/// the point (eliminate.rs), together.
+/// A channel of a replica (module documentation, # Replicas and classes; readout.rs, # The readout): a component's bare
+/// drives (`side` 0 the co-rotating, 1 the counter-rotating; their constant response, far.rs `Tone::bare_response`), or a
+/// carrier's drives folded at the atom (eliminate.rs `Responses`).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Origin {
-    Far { frequency: usize, side: usize, component: usize },
-    Explicit { state: usize },
-    Near { carrier: usize, component: usize },
+pub(crate) enum Channel {
+    Bare { frequency: usize, side: usize },
+    Near { carrier: usize },
 }
 
-/// One source of the jump operators (module documentation): what it is and its exact base beat.
+/// An excited replica of a cluster (module documentation, # Replicas and classes): its frame frequency ρ, the channels at
+/// the ground places that drive it, its explicit places, and the excited states (less GROUND) its amplitude can hold.
 #[derive(Clone, Debug)]
-pub(crate) struct Source {
-    pub(crate) origin: Origin,
+pub(crate) struct Replica {
     pub(crate) beat: Beat,
-}
-
-/// A member of a class: a source and its entries in the class (landing place in the landing cluster, source place in the
-/// source cluster), and its relative beat in a merged class (zero otherwise).
-#[derive(Clone, Debug)]
-pub(crate) struct Member {
-    pub(crate) source: usize,
-    pub(crate) entries: Vec<(usize, usize)>,
-    pub(crate) phase: Beat,
+    pub(crate) channels: Vec<(Channel, usize)>,
+    pub(crate) explicit: Vec<usize>,
+    pub(crate) rows: Vec<usize>,
 }
 
 /// Which classes' gradients a state's photons are made with (`Model::photons_of`): every class's (a step's scattering,
@@ -113,104 +98,106 @@ pub(crate) enum Gradients {
     None,
 }
 
-/// A class of a source cluster's photons: its frame frequencies (one, or several kept coherent), its landing cluster, its members.
+/// A class of a source cluster's photons: its frame frequencies (one, or several kept coherent), its landing cluster, its
+/// feeds -- each a replica, the landing place its photons land on at the class's frequency, and its relative beat in a
+/// merged class (zero otherwise).
 #[derive(Clone, Debug)]
 pub(crate) struct Class {
     pub(crate) beats: Vec<Beat>,
     pub(crate) landing: usize,
-    pub(crate) members: Vec<Member>,
+    pub(crate) feeds: Vec<(usize, usize, Beat)>,
 }
 
 impl Model {
-    /// The sources (module documentation): per component with a bare drive that is no carrier and basis vector of its field,
-    /// per explicit excited state, per carrier and basis vector.
-    pub(crate) fn all_sources(&self) -> Vec<Source> {
-        let mut out = vec![];
-        for (frequency, (f, tone)) in self.light.frequencies.iter().zip(&self.tones).enumerate() {
-            for side in 0..2 {
-                if tone.bare[side] && !(side == 0 && self.carrier_of(frequency).is_some()) {
-                    let nu = self.axes.component(&self.light, super::Component { frequency, counter: side == 1 });
-                    out.extend((0..f.rank()).map(|component| Source { origin: Origin::Far { frequency, side, component }, beat: nu.negated() }));
+    /// A channel's component (module documentation): a bare one's own, a carrier's co-rotating one.
+    pub(crate) fn channel_component(&self, channel: Channel) -> Component {
+        match channel {
+            Channel::Bare { frequency, side } => Component { frequency, counter: side == 1 },
+            Channel::Near { carrier } => Component { frequency: self.carriers[carrier].frequency, counter: false },
+        }
+    }
+
+    /// The excited states (less GROUND) a channel's response from the ground state b can reach on a cluster: a bare
+    /// channel's where its constant response is not zero, a carrier's where its response at the atom can be
+    /// (assemble.rs `Model::reached`).
+    pub(crate) fn channel_rows(&self, cluster: usize, channel: Channel, b: usize) -> [bool; EXCITED] {
+        match channel {
+            Channel::Bare { frequency, side } => std::array::from_fn(|e| self.tones[frequency].bare_response[side].iter().any(|r| r[(e, b)] != C64::ZERO)),
+            Channel::Near { carrier } => (0..self.carriers[carrier].basis.len()).fold([false; EXCITED], |mut out, k| {
+                out.iter_mut().zip(self.reached(cluster, carrier, k, b)).for_each(|(o, r)| *o |= r);
+                out
+            }),
+        }
+    }
+
+    /// The replicas of a cluster (module documentation, # Replicas and classes), every light on: per component with bare
+    /// drives and per carrier, each ground place it reaches an excited state from, at ρ = −ν − θ_s; each explicit state at
+    /// ρ = −θ_s; channels and explicit states of one frame frequency one replica. In the order they are first met.
+    pub(crate) fn replicas(&self, cluster: usize) -> Vec<Replica> {
+        let c = &self.clusters[cluster];
+        let mut out: Vec<Replica> = vec![];
+        let add = |out: &mut Vec<Replica>, beat: Beat, rows: [bool; EXCITED], what: Result<(Channel, usize), usize>| {
+            let at = out.iter().position(|r| r.beat == beat).unwrap_or_else(|| {
+                out.push(Replica { beat, channels: vec![], explicit: vec![], rows: vec![] });
+                out.len() - 1
+            });
+            let r = &mut out[at];
+            match what {
+                Ok(channel) => r.channels.push(channel),
+                Err(place) => r.explicit.push(place),
+            }
+            for (e, _) in rows.iter().enumerate().filter(|x| *x.1) {
+                if !r.rows.contains(&e) {
+                    r.rows.push(e);
+                }
+            }
+        };
+        let mut channels: Vec<Channel> = vec![];
+        for (frequency, tone) in self.tones.iter().enumerate() {
+            channels.extend((0..2).filter(|&side| tone.bare[side]).map(|side| Channel::Bare { frequency, side }));
+        }
+        channels.extend((0..self.carriers.len()).map(|carrier| Channel::Near { carrier }));
+        for channel in channels {
+            let nu = self.frequency(self.channel_component(channel)).negated();
+            for (sp, &s) in c.states[..c.ground].iter().enumerate() {
+                let rows = self.channel_rows(cluster, channel, s);
+                if rows.iter().any(|r| *r) {
+                    add(&mut out, nu.plus(-1, &c.frames[sp]), rows, Ok((channel, sp)));
                 }
             }
         }
-        out.extend((GROUND..STATES).filter(|&e| self.explicit(e)).map(|state| Source { origin: Origin::Explicit { state }, beat: self.axes.zero() }));
-        for (carrier, cc) in self.carriers.iter().enumerate() {
-            out.extend((0..cc.basis.len()).map(|component| Source { origin: Origin::Near { carrier, component }, beat: cc.beat.negated() }));
+        for sp in c.ground..c.states.len() {
+            let rows = std::array::from_fn(|e| GROUND + e == c.states[sp]);
+            add(&mut out, self.axes.zero().plus(-1, &c.frames[sp]), rows, Err(sp));
+        }
+        for r in &mut out {
+            r.rows.sort();
         }
         out
     }
 
-    /// The frequency whose field a source takes: None for an explicit state's.
-    pub(crate) fn source_frequency(&self, source: &Source) -> Option<usize> {
-        match source.origin {
-            Origin::Far { frequency, .. } => Some(frequency),
-            Origin::Near { carrier, .. } => Some(self.carriers[carrier].frequency),
-            Origin::Explicit { .. } => None,
-        }
-    }
-
-    /// Whether a source's light is on.
-    pub(crate) fn lit(&self, source: &Source, lights: &Lights) -> bool {
-        self.source_frequency(source).map_or(true, |f| lights.on(f))
-    }
-
-    /// The constant part of a source's jump b ← s on axis a: a bare or explicit source's jump, and of a carrier's its bare
-    /// drives'.
-    pub(crate) fn constant_jump(&self, source: &Source, a: usize, b: usize, s: usize) -> C64 {
-        let bare = |frequency: usize, side: usize, component: usize| self.tones[frequency].jumps[side].get(component).map_or(C64::ZERO, |jumps| jumps[a][(b, s)]);
-        match source.origin {
-            Origin::Far { frequency, side, component } if s < GROUND => bare(frequency, side, component),
-            Origin::Near { carrier, component } if s < GROUND => bare(self.carriers[carrier].frequency, 0, component),
-            Origin::Explicit { state } if s == state => -self.emission[a][(b, state)],
-            _ => C64::ZERO,
-        }
-    }
-
-    /// Whether a source may jump from state s of a cluster to b on some axis: where its constant part is not zero, and a
-    /// carrier's wherever its response at the atom from s reaches an excited state that decays to b.
-    fn may_jump(&self, source: &Source, cluster: usize, b: usize, s: usize) -> bool {
-        let at_the_atom = match source.origin {
-            Origin::Near { carrier, component } => {
-                s < GROUND && {
-                    let reach = self.reached(cluster, carrier, component, s);
-                    (0..EXCITED).any(|e| reach[e] && (0..3).any(|a| self.emission[a][(b, GROUND + e)] != C64::ZERO))
-                }
-            }
-            _ => false,
-        };
-        at_the_atom || (0..3).any(|a| self.constant_jump(source, a, b, s) != C64::ZERO)
-    }
-
-    /// The classes of a cluster's photons (module documentation, # Sources and classes): its sources' entries from its states,
-    /// grouped by frame frequency and landing cluster, the kept coherences merged; in the order of their landing clusters and
-    /// frame frequencies.
+    /// The classes of a cluster's photons (module documentation, # Replicas and classes): of each replica, each ground state
+    /// one of its rows decays to, at ω̃ = ρ + θ_b' landing in b's cluster, grouped by frame frequency and landing cluster,
+    /// the kept coherences merged; in the order of their landing clusters and frame frequencies.
     pub(crate) fn classes(&self, cluster: usize) -> Vec<Class> {
-        let c = &self.clusters[cluster];
         let mut out: Vec<Class> = vec![];
-        for (index, source) in self.sources.iter().enumerate() {
-            for (sp, &s) in c.states.iter().enumerate() {
-                for b in 0..GROUND {
-                    if !self.may_jump(source, cluster, b, s) {
-                        continue;
-                    }
-                    let landing = self.membership[b];
-                    let lc = &self.clusters[landing];
-                    let bp = lc.states.iter().position(|&x| x == b).expect("a ground state is in its cluster");
-                    let beat = source.beat.plus(1, &lc.frames[bp]).plus(-1, &c.frames[sp]);
-                    let class = match out.iter().position(|k| k.landing == landing && k.beats[0] == beat) {
-                        Some(at) => at,
-                        None => {
-                            out.push(Class { beats: vec![beat.clone()], landing, members: vec![] });
-                            out.len() - 1
-                        }
-                    };
-                    let members = &mut out[class].members;
-                    match members.iter_mut().find(|m| m.source == index) {
-                        Some(m) => m.entries.push((bp, sp)),
-                        None => members.push(Member { source: index, entries: vec![(bp, sp)], phase: self.axes.zero() }),
-                    }
+        for (ri, replica) in self.replicas[cluster].iter().enumerate() {
+            for b in 0..GROUND {
+                if !replica.rows.iter().any(|&e| (0..3).any(|a| self.emission[a][(b, GROUND + e)] != C64::ZERO)) {
+                    continue;
                 }
+                let landing = self.membership[b];
+                let lc = &self.clusters[landing];
+                let bp = lc.states.iter().position(|&x| x == b).expect("a ground state is in its cluster");
+                let beat = replica.beat.plus(1, &lc.frames[bp]);
+                let class = match out.iter().position(|k| k.landing == landing && k.beats[0] == beat) {
+                    Some(at) => at,
+                    None => {
+                        out.push(Class { beats: vec![beat.clone()], landing, feeds: vec![] });
+                        out.len() - 1
+                    }
+                };
+                out[class].feeds.push((ri, bp, self.axes.zero()));
             }
         }
         out.sort_by(|x, y| (x.landing, &x.beats[0]).cmp(&(y.landing, &y.beats[0])));
@@ -230,10 +217,7 @@ impl Model {
                     let reference = merged[at].beats[0].clone();
                     let phase = class.beats[0].plus(-1, &reference);
                     merged[at].beats.push(class.beats[0].clone());
-                    merged[at].members.extend(class.members.into_iter().map(|mut m| {
-                        m.phase = phase.clone();
-                        m
-                    }));
+                    merged[at].feeds.extend(class.feeds.into_iter().map(|(r, bp, _)| (r, bp, phase.clone())));
                 }
                 None => merged.push(class),
             }
@@ -256,10 +240,10 @@ impl Model {
 
     /// The photons of a state under a plan's lights (`photons`), made as far as `gradients` says -- every class's amplitudes
     /// with every class's gradients, one class alone with its gradients, or every class's amplitudes without any (a class's
-    /// gradients are then empty) --, and the complex multiply-adds that made them: the near jumps at the point (with their
-    /// gradients where any class takes them; from their table where one is given), the field components, each entry's
-    /// amplitude and its gradient. What a jump shares across its classes is in a thread's spare (assemble.rs `Held`):
-    /// beyond the photons' own vectors the heap is asked for nothing.
+    /// gradients are then empty) --, and the complex multiply-adds that made them: the point's excited amplitudes (with
+    /// their gradients where any class takes them; the responses from their table where one is given), and each class's
+    /// rows on them. What a jump shares across its classes is in a thread's spare (assemble.rs `Held`): beyond the photons'
+    /// own vectors the heap is asked for nothing.
     pub(crate) fn photons_of(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], gradients: Gradients) -> (Vec<Photon>, f64) {
         let mut out = Vec::with_capacity(plan.classes.len());
         let work = self.classes_at(plan, table, at, psi, gradients, &mut |place, class, sums, with| {
@@ -322,7 +306,7 @@ impl Model {
 
     /// What `photons_of` makes, class by class to `each` as it is made (`classes_on`), on the point's own site
     /// (`Model::pointed`) made to the order the gradients ask (`sited`); and the complex multiply-adds, counted as the
-    /// definition's entries (assemble.rs, # Work).
+    /// operations done (assemble.rs, # Work).
     fn classes_at(&self, plan: &Arc<Plan>, table: Option<&NearTable>, at: &Point, psi: &[C64], gradients: Gradients, each: &mut dyn FnMut(usize, &ClassPlan, &[f64], bool)) -> f64 {
         let mut site = Held::<Site>::take();
         let table = self.pointed(plan, table, at.r, &mut site);
@@ -333,94 +317,61 @@ impl Model {
     /// What the photons of a plan's states at a point read of the point's site (assemble.rs `Site`; module
     /// documentation, # A state's photons at a point), whatever the state, made on a site that holds the point
     /// (assemble.rs `Model::pointed`: every beam's amplitude with its gradient, its place on the table) -- a site of
-    /// its own, or a middle's, whose forms are `laid` there already: the normalized generator's matrices (assemble.rs
-    /// `Model::quartic`, the position `r` their key: the step's middle's where the thread still holds them); the
-    /// jumps' matrices to `order` -- 0, or 1 with their slopes: a table's, or the exact elimination's --; and the plan's
-    /// field components to that order at the momentum κ. What lies within an order is the same numbers at every order.
-    /// Returns the site's counted work: the jumps' matrices', the normalized generator's, and each field component's value
-    /// (and gradient) from its beams, plain and Doppler-weighted.
+    /// its own, or a middle's, whose forms and responses are `laid` there already: the normalized generator's matrices
+    /// (assemble.rs `Model::quartic`, the position `r` their key: the step's middle's where the thread still holds them);
+    /// the responses to `order` -- 0, or 1 with their slopes: a table's, or the exact elimination's --; the plan's field
+    /// components to that order at the momentum κ; and of them the excited amplitudes' operator 𝒯 of every replica
+    /// (assemble.rs `Model::excited_at`). What lies within an order is the same numbers at every order. Returns the
+    /// site's counted work.
     #[allow(clippy::too_many_arguments)]
     fn sited(&self, plan: &Arc<Plan>, table: Option<&NearTable>, r: Option<[f64; 3]>, kappa: [f64; 3], order: usize, site: &mut Site, laid: bool) -> f64 {
         // A site of its own is a jump's (or a reading's): its landing follows at the same point (model.rs `Model::landed`),
         // and is made with the photons' matrices; a middle's scattering asks none -- and nothing where S⁻¹ and the
         // landing are the identity (assemble.rs `Fourth::bends`).
         let fourth = plan.fourth.as_ref().filter(|fourth| fourth.bends()).map_or(0.0, |fourth| self.quartic(plan, fourth, table, r, site, laid, !laid));
-        let near = match table {
-            _ if plan.near.len() == 0 => {
-                site.jumped(plan, None);
-                0.0
-            }
-            // A site of its own counts its place's coordinates here; a middle's counted them with its near terms.
-            Some(table) => self.near_jumps(table, order, site) + if laid { 0.0 } else { site.place.map_or(0.0, |(_, work)| work) },
-            None => {
-                let near = self.near_exact(plan, &site.beams, order);
-                site.jumped(plan, Some(&near));
-                near.work
-            }
-        };
+        let near = if laid { 0.0 } else { self.responded(plan, table, order, site) };
         let Site { beams, fields, .. } = site;
         self.fields_into(plan, beams, kappa, order, fields);
-        near + fourth + plan.fields_work(order)
+        let excited = self.excited_at(plan, site, order);
+        near + fourth + plan.fields_work(order) + excited
     }
 
-    /// The classes of a state's photons at the time t on a point's site (`sited`: its work `made`),
-    /// class by class to `each` as each is made -- the class's place and plan, its sums (four columns laid for the lanes on the class's rows a n + b',
-    /// assemble.rs `laid`: u, then per lab axis i ∇_i u, which hold nothing where the class takes no gradients), and
-    /// whether it took gradients --, a class the state gives nothing left out; and the complex multiply-adds with the
-    /// site's, counted as the definition's entries (assemble.rs, # Work). A class made with its gradients asks them of
-    /// the site: it is made to first order. Module documentation, # A state's photons at a point: the sums are the site's,
-    /// a thread's spare's (`Held`), and a step's scattering (`scattering_of`) and a jump's photon (`emission_of`) read
-    /// them where they are made and ask the heap for nothing.
+    /// The classes of a state's photons at the time t on a point's site (`sited`: its work `made`), class by class to
+    /// `each` as each is made -- the class's place and plan, its sums (four columns laid for the lanes on the class's rows
+    /// a n + b', assemble.rs `laid`: u, then per lab axis i ∇_i u, which hold nothing where the class takes no
+    /// gradients), and whether it took gradients --, a class the state gives nothing left out; and the complex
+    /// multiply-adds with the site's (assemble.rs, # Work). A class made with its gradients asks them of the site: it is
+    /// made to first order. Module documentation, # A state's photons at a point: the excited amplitudes ε_ρ = 𝒯_ρ S⁻¹ψ
+    /// of every replica once with their gradients, then each class's rows C_a[b', :] on its feeds'. The sums are the
+    /// site's, a thread's spare's (`Held`), and a step's scattering (`scattering_of`) and a jump's photon (`emission_of`)
+    /// read them where they are made and ask the heap for nothing.
     #[allow(clippy::too_many_arguments)]
     fn classes_on(&self, plan: &Arc<Plan>, t: f64, psi: &[C64], gradients: Gradients, site: &mut Site, made: f64, each: &mut dyn FnMut(usize, &ClassPlan, &[f64], bool)) -> f64 {
-        let order = if gradients == Gradients::None { 0 } else { 1 };
+        let with_any = gradients != Gradients::None;
+        let parts = if with_any { 4 } else { 1 };
+        let n = psi.len();
+        // The normalized state ψ̂ = S⁻¹ψ (assemble.rs, # The normalized generator) and with the gradients its three lab
+        // axes' ∂S⁻¹ψ.
+        let mut bent = [[C64::ZERO; STATES]; 4];
+        bent[0][..n].copy_from_slice(psi);
         let mut work = made;
-        // The normalized generator's states (assemble.rs, # The normalized generator): S⁻¹ψ and M ψ = E S⁻¹ψ, and with
-        // the gradients the three lab axes' ∂S⁻¹ ψ and ∂M ψ.
-        let bent: Option<[[C64; STATES]; 8]> = plan.fourth.as_ref().filter(|fourth| fourth.bends()).map(|fourth| {
-            let (n, size) = (fourth.n, fourth.n * fourth.n);
+        if plan.fourth.as_ref().is_some_and(|fourth| fourth.bends()) {
+            let size = n * n;
             crate::model::Model::quartic_read(|q| {
-                let mut out = [[C64::ZERO; STATES]; 8];
-                let (inverse, partner) = (&q.data[super::assemble::BENT * size..], &q.data[super::assemble::PARTNER * size..]);
-                for part in 0..if order >= 1 { 4 } else { 1 } {
-                    for x in 0..n {
-                        let (mut bend, mut shift) = (C64::ZERO, C64::ZERO);
-                        for (y, z) in psi.iter().enumerate().take(n) {
-                            bend += inverse[part * size + x * n + y] * *z;
-                            shift += partner[part * size + x * n + y] * *z;
-                        }
-                        match part {
-                            0 => (out[0][x], out[1][x]) = (bend, shift),
-                            _ => (out[1 + part][x], out[4 + part][x]) = (bend, shift),
-                        }
+                let inverse = &q.data[super::assemble::BENT * size..];
+                for (part, out) in bent.iter_mut().enumerate().take(parts) {
+                    for (x, z) in out.iter_mut().enumerate().take(n) {
+                        *z = (0..n).map(|y| inverse[part * size + x * n + y] * psi[y]).sum();
                     }
                 }
-                work += (2 * size * if order >= 1 { 4 } else { 1 }) as f64;
-                out
-            })
-        });
-        // The lab axes along which the normalized generator's matrices change: those the plan's beams change along at the
-        // point (a light along one axis: that one) -- the definition's, whatever the numbers there (assemble.rs, # Work;
-        // `Plan::classes_work` prices them so).
-        let (mut axes, mut count) = ([0; 3], 0);
-        for a in 0..3 {
-            if bent.is_some() && plan.beams.iter().any(|&l| site.beams[l].gradient[a] != C64::ZERO) {
-                (axes[count], count) = (a, count + 1);
-            }
+            });
+            work += (size * parts) as f64;
         }
-        let live = &axes[..count];
-        let Site { directions, jumps, jump_slopes, fields, member: vectors, class: sums, .. } = site;
-        // A member's vectors: its matrix on the state, a point's with its partner's and each direction's two slopes.
-        // The most a member makes (below: `base + more` of a near member with the normalized generator and the gradients), s
-        // the directions' slopes, a table's axes or the three lab axes: 2(1 + s) its jumps' and its partner's with their
-        // slopes, 1 + s the partner on E S⁻¹ψ with its slopes, and along each of the three lab axes the jumps
-        // on ∂S⁻¹ψ and the partner on ∂(E S⁻¹)ψ: 3(1 + s) + 6.
-        const MOST: usize = 3 * (1 + if MOST_AXES > 3 { MOST_AXES } else { 3 }) + 6;
-        let (width, most) = (jumps.len(), plan.classes.iter().map(|class| class.rows).max().unwrap_or(0));
-        sized(vectors, MOST * 2 * most);
+        let excited = plan.amplitudes(&site.excited, &bent, parts, &mut site.member);
+        work += excited;
+        let Site { member: amplitudes, class: sums, .. } = site;
+        let most = plan.classes.iter().map(|class| class.rows).max().unwrap_or(0);
         sized(sums, 8 * most);
-        let one = [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO];
-        let (mut x, mut weights) = ([C64::ZERO; STATES], [C64::ZERO; 4 * MOST]);
         for (place, class) in plan.classes.iter().enumerate() {
             let with = match gradients {
                 Gradients::All => true,
@@ -430,138 +381,18 @@ impl Model {
             };
             let rows = class.rows;
             let sums = &mut sums[..8 * rows];
-            // Whether u, and ∇u, hold nothing yet: a class's first member writes them, the others add to them.
-            let (mut first, mut flat) = (true, true);
-            for m in class.members.iter().filter(|m| !m.columns.is_empty()) {
-                let (c, cw): (&[C64], &[C64]) = m.scalar.map_or((&one, &one), |s| (fields.plain(s), fields.doppler(s)));
-                // The state on the member's columns, at the member's relative phase in a merged class.
-                let (count, matrix) = (m.columns.len(), 2 * rows * m.columns.len());
-                if m.phase == 0.0 {
-                    x.iter_mut().zip(&m.columns).for_each(|(x, &sp)| *x = psi[sp]);
-                } else {
-                    let phase = C64::cis(m.phase * t);
-                    x.iter_mut().zip(&m.columns).for_each(|(x, &sp)| *x = psi[sp] * phase);
+            sums.fill(0.0);
+            let columns = if with { 4 } else { 1 };
+            for &(row, at, phase, c) in &class.entries {
+                let c = if phase == 0.0 { c } else { c * C64::cis(phase * t) };
+                for column in 0..columns {
+                    let z = c * amplitudes[column * plan.amplitude_len + at];
+                    let place = laid(row, column, 4);
+                    sums[place] += z.re;
+                    sums[place + LANES] += z.im;
                 }
-                let x = &x[..count];
-                // Its matrices on the state: its jumps', and where they are a point's the partner's and their slopes'.
-                let taken = m.folded && with;
-                let slopes = if taken && m.near { directions.len() } else { 0 };
-                let base = if m.near { 2 * (1 + slopes) } else { 1 };
-                // The normalized generator's vectors after them: a point's partner on E S⁻¹ψ with its slopes, and with the gradients
-                // along each lab axis the jumps on ∂S⁻¹ψ and the partner on c ∂(E S⁻¹)ψ − c_w ∂S⁻¹ψ (the photon's operator
-                // (c J − c_w J2 + c J2 E) S⁻¹, assemble.rs # The normalized generator); a constant member's jumps on ∂S⁻¹ψ.
-                let more = match (&bent, m.near) {
-                    (None, _) => 0,
-                    (Some(_), true) => 1 + slopes + if taken { 2 * live.len() } else { 0 },
-                    (Some(_), false) => if taken { live.len() } else { 0 },
-                };
-                let made = base + more;
-                let gathers = gathered_states(m, taken, bent.is_some(), live.len());
-                let vectors = &mut vectors[..made * 2 * rows];
-                // A state of the cluster on the member's columns, at its phase.
-                let gathered = |of: &[C64; STATES]| -> [C64; STATES] {
-                    let phase = if m.phase == 0.0 { C64::ONE } else { C64::cis(m.phase * t) };
-                    let mut out = [C64::ZERO; STATES];
-                    out.iter_mut().zip(&m.columns).for_each(|(z, &sp)| *z = of[sp] * phase);
-                    out
-                };
-                // The jumps and their partners act on the state, or on the normalized generator's S⁻¹ψ.
-                let bend = bent.as_ref().map(|b| gathered(&b[0]));
-                let on: &[C64] = bend.as_ref().map_or(x, |b| &b[..count]);
-                if m.near {
-                    combine(false, on, count, &jumps[m.at..m.at + matrix], vectors, made, 0);
-                    combine(false, on, count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, 1);
-                    for f in 0..slopes {
-                        let slope = &jump_slopes[f * width + m.at..][..2 * matrix];
-                        combine(false, on, count, &slope[..matrix], vectors, made, 2 + 2 * f);
-                        combine(false, on, count, &slope[matrix..], vectors, made, 3 + 2 * f);
-                    }
-                    if let Some(b) = &bent {
-                        let shift = gathered(&b[1]);
-                        combine(false, &shift[..count], count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, base);
-                        for f in 0..slopes {
-                            combine(false, &shift[..count], count, &jump_slopes[f * width + m.at + matrix..][..matrix], vectors, made, base + 1 + f);
-                        }
-                        for (i, &a) in live.iter().enumerate().filter(|_| taken) {
-                            let (bend, shift) = (gathered(&b[2 + a]), gathered(&b[5 + a]));
-                            let partner: [C64; STATES] = std::array::from_fn(|k| shift[k] * c[0] - bend[k] * cw[0]);
-                            combine(false, &bend[..count], count, &jumps[m.at..m.at + matrix], vectors, made, base + 1 + slopes + 2 * i);
-                            combine(false, &partner[..count], count, &jumps[m.at + matrix..m.at + 2 * matrix], vectors, made, base + 2 + slopes + 2 * i);
-                        }
-                    }
-                } else {
-                    combine(false, on, count, &plan.emitted[m.at..m.at + matrix], vectors, made, 0);
-                    if let (Some(b), true) = (&bent, taken) {
-                        for (i, &a) in live.iter().enumerate() {
-                            let bend = gathered(&b[2 + a]);
-                            combine(false, &bend[..count], count, &plan.emitted[m.at..m.at + matrix], vectors, made, 1 + i);
-                        }
-                    }
-                }
-                // u: the field's component on the jumps' vector, less the Doppler-weighted one on the partner's. ∇u of
-                // a folded member: the components' gradients on the same vectors, and along each direction the
-                // components on the slopes' vectors.
-                let weights = &mut weights[..4 * made];
-                if more > 0 {
-                    weights.iter_mut().for_each(|w| *w = C64::ZERO);
-                }
-                weights[0] = c[0];
-                if m.near {
-                    weights[1] = -cw[0];
-                    weights[2..made].iter_mut().for_each(|w| *w = C64::ZERO);
-                    if bent.is_some() {
-                        weights[base] = c[0];
-                    }
-                }
-                if taken {
-                    for i in 0..3 {
-                        let of = &mut weights[(1 + i) * made..(2 + i) * made];
-                        of[0] = c[1 + i];
-                        if m.near {
-                            of[1] = -cw[1 + i];
-                        }
-                        for (f, direction) in directions.iter().enumerate().take(slopes) {
-                            (of[2 + 2 * f], of[3 + 2 * f]) = (c[0] * direction[i], -cw[0] * direction[i]);
-                        }
-                        // The normalized generator's: the partner on E S⁻¹ψ as the jumps on the state, and this axis' bent states.
-                        match (bent.is_some(), m.near) {
-                            (true, true) => {
-                                of[base] = c[1 + i];
-                                for (f, direction) in directions.iter().enumerate().take(slopes) {
-                                    of[base + 1 + f] = c[0] * direction[i];
-                                }
-                                if let Some(at) = live.iter().position(|&a| a == i) {
-                                    (of[base + 1 + slopes + 2 * at], of[base + 2 + slopes + 2 * at]) = (c[0], C64::ONE);
-                                }
-                            }
-                            (true, false) => {
-                                if let Some(at) = live.iter().position(|&a| a == i) {
-                                    of[1 + at] = c[0];
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                match (taken, first == flat) {
-                    (false, _) => combine(!first, &weights[..made], made, vectors, sums, 4, 0),
-                    (true, true) => combine(!first, weights, made, vectors, sums, 4, 0),
-                    (true, false) => {
-                        combine(!first, &weights[..made], made, vectors, sums, 4, 0);
-                        combine(!flat, &weights[made..], made, vectors, sums, 4, 1);
-                    }
-                }
-                (first, flat) = (false, flat && !taken);
-                work += member_work(m, taken, made, gathers, rows);
             }
-            // A class the state gives nothing: no amplitude, and no gradient either -- at a node of its light a class has
-            // no photon and still its gradients' second moment. Gradients no member made are nothing.
-            if first {
-                continue;
-            }
-            if with && flat {
-                sums.chunks_exact_mut(8 * LANES).for_each(|vector| vector[2 * LANES..].fill(0.0));
-            }
+            work += (class.entries.len() * columns) as f64;
             if sums.chunks_exact(8 * LANES).all(|vector| vector[..if with { 8 * LANES } else { 2 * LANES }].iter().all(|x| *x == 0.0)) {
                 continue;
             }
@@ -634,30 +465,6 @@ impl Model {
 
 }
 
-/// The counted complex multiply-adds of a member's part of its class's sums (`Model::classes_on`), as it makes them: its
-/// `made` vectors, each its laid matrix on a state of its columns over the class's `rows` (the lanes' rows, as they are
-/// summed: `linalg::combine`); the vectors' weights into the class's sums -- the amplitude's, and where the gradients
-/// are `taken` the three lab axes' too --; and its `gathered` states, each a phase or a combination on its columns
-/// (`gathered_states`). (Counted as the definition's entries instead -- an amplitude, a partner and 3(3 + 2 partner)
-/// gradients' terms an entry --, PGC3D's and GMD1C's scattering read 1.8 to 3 times what the classes summed.)
-fn member_work(m: &MemberPlan, taken: bool, made: usize, gathered: usize, rows: usize) -> f64 {
-    let columns = m.columns.len();
-    (made * rows * columns + if taken { 4 } else { 1 } * made * rows + gathered * columns) as f64
-}
-
-/// The states a member gathers on its columns (`Model::classes_on`): the state at its phase where that turns; with the
-/// normalized generator (`bent`) S⁻¹ψ, of a near member E S⁻¹ψ too, and where its gradients are `taken` along each of the
-/// `live` lab axes ∂S⁻¹ψ -- of a near member with ∂(E S⁻¹)ψ and the partner's combination of the two.
-fn gathered_states(m: &MemberPlan, taken: bool, bent: bool, live: usize) -> usize {
-    let along = if taken { live } else { 0 };
-    usize::from(m.phase != 0.0)
-        + match (bent, m.near) {
-            (false, _) => 0,
-            (true, true) => 2 + 3 * along,
-            (true, false) => 1 + along,
-        }
-}
-
 /// The counted complex multiply-adds of a class's moments from its sums over its `rows` (`moments`): the rate, and with
 /// the gradients the mean's three and the second moment's six -- each a sum over the rows of two parts' products.
 fn moments_work(rows: usize, with: bool) -> f64 {
@@ -666,27 +473,26 @@ fn moments_work(rows: usize, with: bool) -> f64 {
 
 impl Plan {
     /// The counted complex multiply-adds of a state's photons' site at a point (`Model::sited`) to `order`, priced without
-    /// making it (solve.rs `Pricing`): the near jumps read from a table on `axes` axes whose coordinates there count
+    /// making it (solve.rs `Pricing`): the responses read from a table on `axes` axes whose coordinates there count
     /// `place`; the normalized generator's matrices where they bend anything (assemble.rs `Fourth::bends`) -- on a
     /// middle's site (`laid`: its forms read with the middle) the matrices alone with their gradients, which the step's
     /// middle node makes and its scattering counts (`Plan::quartic_work`); on a site of its own, a jump's, its forms read
-    /// and the matrices with the landing that follows there (`Plan::quartic_made_work`) --; the field components.
+    /// and the matrices with the landing that follows there (`Plan::quartic_made_work`) --; the field components; the
+    /// excited amplitudes' operator (`Plan::excite_work`).
     pub(crate) fn sited_work(&self, axes: usize, place: f64, order: usize, laid: bool) -> f64 {
-        let near = if self.near.len() == 0 { 0.0 } else { (if laid { 0.0 } else { place }) + super::tabulate::read_work(axes, order, self.jumps_start.len()) };
+        let near = if self.near.len() == 0 || laid { 0.0 } else { place + super::tabulate::read_work(axes, order, 2 * self.near.responding().len()) };
         let fourth = self.fourth.as_ref().filter(|fourth| fourth.bends()).map_or(0.0, |fourth| if laid { self.quartic_work(fourth, Some(axes), false) } else { self.quartic_made_work(fourth, axes, place) });
-        near + fourth + self.fields_work(order)
+        near + fourth + self.fields_work(order) + self.excite_work(if order >= 1 { 4 } else { 1 }, true)
     }
 
-    /// The counted complex multiply-adds of a state's photons' classes on a site whose jumps have `axes` slopes
-    /// (`Model::classes_on`), priced without making them: the fourth order's bent states, and every lit member's part
-    /// (`member_work`) of the classes the gradients ask -- with all of them, a scattering's, each class's moments
-    /// (`Model::scattering_on`) --; `live` the lab axes along which the fourth order's matrices change, those the plan's
-    /// beams change along at the point (`classes_on`).
-    pub(crate) fn classes_work(&self, axes: usize, gradients: Gradients, live: usize) -> f64 {
-        let order = if gradients == Gradients::None { 0 } else { 1 };
-        let fourth = self.fourth.as_ref().filter(|fourth| fourth.bends());
-        let bent = fourth.map_or(0.0, |fourth| (2 * fourth.n * fourth.n * if order >= 1 { 4 } else { 1 }) as f64);
-        let mut work = bent;
+    /// The counted complex multiply-adds of a state's photons' classes on a site (`Model::classes_on`), priced without
+    /// making them: the normalized state and the replicas' amplitudes, and each class the gradients ask its rows -- with
+    /// all of them, a scattering's, each class's moments (`Model::scattering_on`).
+    pub(crate) fn classes_work(&self, gradients: Gradients) -> f64 {
+        let parts = if gradients == Gradients::None { 1 } else { 4 };
+        let n = self.states;
+        let bent = if self.fourth.as_ref().is_some_and(|fourth| fourth.bends()) { (n * n * parts) as f64 } else { 0.0 };
+        let mut work = bent + self.amplitudes_work(parts);
         for (place, class) in self.classes.iter().enumerate() {
             let with = match gradients {
                 Gradients::All => true,
@@ -694,18 +500,7 @@ impl Plan {
                 Gradients::Of(_) => continue,
                 Gradients::None => false,
             };
-            for m in class.members.iter().filter(|m| !m.columns.is_empty()) {
-                let taken = m.folded && with;
-                let slopes = if taken && m.near { axes } else { 0 };
-                let more = match (fourth, m.near) {
-                    (None, _) => 0,
-                    (Some(_), true) => 1 + slopes + if taken { 2 * live } else { 0 },
-                    (Some(_), false) => if taken { live } else { 0 },
-                };
-                let base = if m.near { 2 * (1 + slopes) } else { 1 };
-                work += member_work(m, taken, base + more, gathered_states(m, taken, fourth.is_some(), live), class.rows);
-            }
-            // A scattering's moments of the class (`Model::scattering_on`).
+            work += (class.entries.len() * if with { 4 } else { 1 }) as f64;
             if gradients == Gradients::All {
                 work += moments_work(class.rows, with);
             }
@@ -714,7 +509,7 @@ impl Plan {
     }
 }
 
-/// Σ_rows (a b ± c d) of four parts A, B, C, D of a class's four columns laid for the lanes (`Model::classes_at`: each
+// Σ_rows (a b ± c d) of four parts A, B, C, D of a class's four columns laid for the lanes (`Model::classes_at`: each
 /// column's real parts, then its imaginary parts, a vector of rows at a time), the sign `sign` (±1): one pass over the
 /// rows, a partial sum a lane.
 fn lanes<const A: usize, const B: usize, const C: usize, const D: usize>(sums: &[f64], sign: f64) -> f64 {
