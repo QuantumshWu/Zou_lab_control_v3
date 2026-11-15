@@ -102,11 +102,13 @@
 //! excited states' common rate times one (D = Σ C†C: the line's total decay, the same from every excited state of it)
 //! and H_E holds no coupling across lines -- every scene's --, so that ‖R(z + Δ) v‖² = Σ_k |⟨e_k|v⟩|²/|z + Δ − κ_k|²
 //! exactly, κ_k and e_k K's eigenvalues and eigenvectors, its Schur form's diagonal and columns: one change of v's
-//! basis a replica, n_Q numbers an offset. Of a Schur block S = Λ + N, N strictly upper, (z − S)⁻¹ =
-//! Σ_{k<m} ((z − Λ)⁻¹N)^k (z − Λ)⁻¹ (nilpotent), so ‖(z − S)⁻¹y‖ ≤ (1 + h) ‖(z − Λ)⁻¹y‖ and ‖(z − S)⁻¹‖ ≤ (1 + h)/δ,
-//! 1 + h = Σ_{k<m} (‖N‖/δ)^k, δ the least distance of z from Λ (Henrici's departure from normality; `Schur::resolvent_norm`,
-//! `Schur::distance`): the normal case's exact numbers at N = 0, continuous in N -- a block of K is never judged normal
-//! or not, its rounding's N a part in 10¹⁶ of 1 + h. (The bound ‖R(z + Δ)‖ ‖v‖ at every offset overstated a sideband
+//! basis a replica, n_Q numbers an offset; of a block that is not normal (P's static generator, a sector's left factor)
+//! the back substitution on its Schur form, exactly the same number where it is (`Schur::resolvent_norm`). Of a Schur
+//! block S = Λ + N, N strictly upper, (z − S)⁻¹ = Σ_{k<m} ((z − Λ)⁻¹N)^k (z − Λ)⁻¹ (nilpotent), so ‖(z − S)⁻¹‖ ≤
+//! (1 + h)/δ, 1 + h = Σ_{k<m} (‖N‖/δ)^k, δ the least distance of z from Λ (Henrici's departure from normality;
+//! `SchurBlock::henrici`): the bound the series' distance takes (`Fold::series_distance`), the normal case's exact
+//! number at N = 0, continuous in N -- a block of K is never judged normal or not, its rounding's N a part in 10¹⁶ of
+//! 1 + h. (The bound ‖R(z + Δ)‖ ‖v‖ at every offset overstated a sideband
 //! near an excited level v does not hold: R3_DOPPLER's cooling pair had eleven blocks made explicit at its prior
 //! atoms.) Over the
 //! frequencies a P amplitude spans, each component c at its offset δ_c with its share w_c of the amplitude's population,
@@ -195,14 +197,23 @@ pub(crate) struct Class {
 pub(crate) struct Slow {
     pub explicit: Vec<usize>,
     pub frames: Vec<f64>,
+    /// Per frame the size of the terms its value is the sum of (`Sized`): what its rounding is of (`equal`).
+    pub sizes: Vec<f64>,
     pub groups: Vec<usize>,
 }
 
-impl Slow {
-    /// The P of one cluster: all its states one group.
-    pub(crate) fn single(explicit: Vec<usize>, frames: Vec<f64>) -> Slow {
-        let groups = vec![0; frames.len()];
-        Slow { explicit, frames, groups }
+/// A frequency with the size of the terms it is the sum of (`equal`): the frames of the closure, sums of the kept links'
+/// beats along their tree (cluster.rs `frames`), each a difference of two classes' frequencies -- a frame of 26 rad/µs
+/// made of the cooling and the repumping lights' 4.1·10⁴ is rounded at the 4.1·10⁴'s, not at its own.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Sized {
+    pub value: f64,
+    pub size: f64,
+}
+
+impl super::cluster::Exact for Sized {
+    fn plus(&self, s: i64, other: &Sized) -> Sized {
+        Sized { value: self.value + s as f64 * other.value, size: self.size + s.unsigned_abs() as f64 * other.size }
     }
 }
 
@@ -212,6 +223,8 @@ impl Slow {
 #[derive(Clone, Debug)]
 pub(crate) struct Replicas {
     pub frequencies: Vec<f64>,
+    /// Per replica the size of the terms its frequency is the sum of (a class's and a frame's, `Slow::sizes`; `equal`).
+    pub scales: Vec<f64>,
     pub groups: Vec<usize>,
     /// [class][ground state].
     pub driven: Vec<Vec<usize>>,
@@ -219,34 +232,33 @@ pub(crate) struct Replicas {
     pub held: Vec<usize>,
 }
 
-/// Whether two frequencies are one: equal within the rounding of the sums that make them -- a class's frequency and a
-/// frame, itself a sum of at most a component per state along the frames' paths (cluster.rs `frames`): γ_STATES of their sizes.
-/// Two physically different frequencies differ by a beat of the request's frequency axes, many orders more.
-pub(crate) fn same(a: f64, b: f64) -> bool {
-    equal(a - b, a.abs() + b.abs())
-}
-
-/// Whether a sum of frequencies is nothing (`same`): within γ_STATES of the sizes `scale` of its terms -- a beat of two
-/// replicas is the difference of two frequencies of the light's size (a sector's, # Sectors), however small it is.
+/// Whether a sum of frequencies is nothing: within γ_STATES of the size `scale` of the terms it is the sum of -- a class's
+/// frequency and frames, each itself a sum of at most a component per state along the frames' paths (cluster.rs
+/// `frames`; `Sized`, `Slow::sizes`, `Replicas::scales`, `Beat::size`). Its own size is no measure: two replicas'
+/// frequencies of 26 rad/µs, each the cooling light's and a frame of the repumping light's beat 4.1·10⁴ apart, are
+/// rounded at the 4.1·10⁴'s -- read at their own size, PGC1D_TILT_2's held a sector between two replicas that are one,
+/// at a beat of 1.8·10⁻¹², and a coupling of a state with itself across it. Two physically different frequencies
+/// differ by a beat of the request's frequency axes, many orders more.
 pub(crate) fn equal(sum: f64, scale: f64) -> bool {
     sum.abs() <= rounding(crate::request::STATES) * scale
 }
 
 impl Replicas {
-    /// The replicas of frequencies that are one (`same`) within one group.
+    /// The replicas of frequencies that are one (`equal`, at the sizes of their terms) within one group.
     pub(crate) fn of(classes: &[Class], slow: &Slow, ground: usize) -> Replicas {
-        let (mut frequencies, mut groups): (Vec<f64>, Vec<usize>) = (vec![], vec![]);
-        let mut place = |f: f64, group: usize| match frequencies.iter().zip(&groups).position(|(&x, &g)| g == group && same(x, f)) {
+        let (mut frequencies, mut scales, mut groups): (Vec<f64>, Vec<f64>, Vec<usize>) = (vec![], vec![], vec![]);
+        let mut place = |f: f64, scale: f64, group: usize| match (0..frequencies.len()).find(|&x| groups[x] == group && equal(frequencies[x] - f, scales[x] + scale)) {
             Some(at) => at,
             None => {
                 frequencies.push(f);
+                scales.push(scale);
                 groups.push(group);
                 frequencies.len() - 1
             }
         };
-        let driven = classes.iter().map(|c| (0..ground).map(|g| place(c.nu + slow.frames[g], slow.groups[g])).collect()).collect();
-        let held = (0..slow.explicit.len()).map(|i| place(slow.frames[ground + i], slow.groups[ground + i])).collect();
-        Replicas { frequencies, groups, driven, held }
+        let driven = classes.iter().map(|c| (0..ground).map(|g| place(c.nu + slow.frames[g], c.nu.abs() + slow.sizes[g], slow.groups[g])).collect()).collect();
+        let held = (0..slow.explicit.len()).map(|i| place(slow.frames[ground + i], slow.sizes[ground + i], slow.groups[ground + i])).collect();
+        Replicas { frequencies, scales, groups, driven, held }
     }
 }
 
@@ -267,6 +279,8 @@ pub(crate) struct Feed {
 #[derive(Clone, Debug)]
 pub(crate) struct Folded {
     pub frequency: f64,
+    /// The size of the terms its frequency is the sum of (`Replicas::scales`).
+    pub scale: f64,
     /// Its group (an index into the fold's `members`, # Groups): its feeds' places, where its equation is solved.
     pub group: usize,
     pub q: Vec<usize>,
@@ -448,7 +462,7 @@ impl Sectoring {
         for (i, ri) in folded.iter().enumerate() {
             for (ci, (absorbed, ..)) in ri.classes.iter().enumerate() {
                 for rj in folded.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, r)| r) {
-                    let (omega, scale) = (ri.frequency - rj.frequency, ri.frequency.abs() + rj.frequency.abs());
+                    let (omega, scale) = (ri.frequency - rj.frequency, ri.scale + rj.scale);
                     for (emitted, _, coupling, _) in &rj.classes {
                         let mut rows = vec![];
                         for &x in &members[rj.group] {
@@ -514,9 +528,14 @@ pub(crate) struct Fold {
     pub ground: usize,
     pub explicit: Vec<usize>,
     pub frames: Vec<f64>,
+    /// The sizes of the frames' terms (`Slow::sizes`).
+    pub sizes: Vec<f64>,
     /// A: the direct static entries.
     pub direct: Mat,
     pub generator: Mat,
+    /// The change of the self-consistent iteration's last step (`settle`): the floor the generator settled to; none about
+    /// a reference (one step).
+    pub floor: f64,
     pub replicas: Vec<Folded>,
     /// The sectors of the turning couplings the model does not carry (module documentation, # Sectors): folded into the
     /// generator where the fold is self-consistent; about a reference -- the run's own evaluation, which folds none --
@@ -708,6 +727,9 @@ impl Schur {
         out
     }
     /// (σ − S)⁻¹ y in place (back substitution, block by block).
+    /// An entry of nothing on its right is nothing: the block it is in is not driven -- a sector's block of two groups
+    /// its couplings do not join is solved with the others' (`Sector::solve`), and at the sector fold's first step H is
+    /// H_s, so the empty block of a group with itself at the beat zero would be 0/0.
     fn shifted_solve(&self, sigma: C64, y: &mut [C64]) {
         for b in &self.blocks {
             let m = b.states.len();
@@ -716,24 +738,19 @@ impl Schur {
                 for k in row + 1..m {
                     acc += b.s[row * m + k] * y[b.start + k];
                 }
-                y[b.start + row] = acc / (sigma - b.s[row * m + row]);
+                y[b.start + row] = if acc == C64::ZERO { C64::ZERO } else { acc / (sigma - b.s[row * m + row]) };
             }
         }
     }
-    /// A bound of ‖(z − A)⁻¹ v‖ from above, `y` = Q†v in the form's order (`left_in`): per block (1 + h)‖(z − Λ)⁻¹y‖ on
-    /// it (`SchurBlock::henrici`), in squares -- where A is normal exactly ‖(z − A)⁻¹ v‖ = (Σ_k |⟨e_k|v⟩|²/|z − κ_k|²)^{1/2}
-    /// (module documentation, # First order in the frequency offsets), continuously in its blocks' departures.
+    /// ‖(z − A)⁻¹ v‖ exactly, `y` = Q†v in the form's order (`left_in`): the back substitution on each block (Q unitary,
+    /// `shifted_solve`) -- where A is normal it is (Σ_k |⟨e_k|v⟩|²/|z − κ_k|²)^{1/2} (module documentation, # First
+    /// order in the frequency offsets), continuously in its blocks' departures. (Henrici's bound (1 + h)‖(z − Λ)⁻¹y‖
+    /// it was read by grows as (‖N‖/δ)^{m−1}: on the tilted 1D PGC's P of eight ground states, non-normal, a sector's
+    /// growth at the moving atom's offsets read 10⁷ where the solve's is 13.)
     fn resolvent_norm(&self, z: C64, y: &[C64]) -> f64 {
-        self.blocks
-            .iter()
-            .map(|b| {
-                let m = b.states.len();
-                let (_, factor) = b.henrici(z);
-                let normal: f64 = (0..m).map(|i| y[b.start + i].norm_sqr() / (z - b.s[i * m + i]).norm_sqr()).sum();
-                factor * factor * normal
-            })
-            .sum::<f64>()
-            .sqrt()
+        let mut x = y.to_vec();
+        self.shifted_solve(z, &mut x);
+        crate::linalg::norm_sqr(&x).sqrt()
     }
     /// (σ − A)⁻¹ v.
     fn resolvent(&self, sigma: C64, v: &[C64]) -> Vec<C64> {
@@ -827,7 +844,8 @@ pub(crate) fn bare_error(mixing: f64) -> f64 {
     if converges(2.0 * mixing) { 2.0 * mixing * mixing } else { 1.0 }
 }
 
-/// The fixed point of x ← step(x) from x₀ (a step gives its value and the scale of its terms), and whether it exists.
+/// The fixed point of x ← step(x) from x₀ (a step gives its value and the scale of its terms), whether it exists, and
+/// the change of its last step: the floor it settled to (within it of the fixed point, the contraction below ¼).
 /// The iteration's factor at the start is the derivative of the fold in its argument at the unperturbed spectra,
 /// W'R²W, the excited share m² of the states it folds (for one line exactly |T|²), read as the iteration's first
 /// contraction κ -- the change of the second step over the first's --; Stewart's theorem has the invariant subspace, and
@@ -836,7 +854,7 @@ pub(crate) fn bare_error(mixing: f64) -> f64 {
 /// its exceptional point, starts at exactly κ = ¼) -- and the partition makes the excited block explicit. Where it
 /// exists the iteration goes on to its floor: until a change is within the rounding of a step's operations (`terms`)
 /// times the scale, or no longer falls.
-fn settle(start: &Mat, mut step: impl FnMut(&Mat) -> (Mat, f64), terms: usize) -> (Mat, bool) {
+fn settle(start: &Mat, mut step: impl FnMut(&Mat) -> (Mat, f64), terms: usize) -> (Mat, bool, f64) {
     let (mut x, mut last, mut iterations, mut first) = (start.clone(), f64::INFINITY, 0, None);
     loop {
         iterations += 1;
@@ -844,20 +862,20 @@ fn settle(start: &Mat, mut step: impl FnMut(&Mat) -> (Mat, f64), terms: usize) -
         let change = difference(&next, &x);
         if !change.is_finite() {
             // A change that is no number is no fixed point (`converges`); the last iterate that is one is kept.
-            return (x, false);
+            return (x, false, last);
         }
         x = next;
         if change <= rounding(terms) * scale {
-            return (x, true);
+            return (x, true, change);
         }
         match first {
             None => first = Some(change),
-            Some(f) if iterations == 2 && !converges(2.0 * (change / f).sqrt()) => return (x, false),
+            Some(f) if iterations == 2 && !converges(2.0 * (change / f).sqrt()) => return (x, false, change),
             _ => {}
         }
         if !(change < last) {
             // At its floor.
-            return (x, true);
+            return (x, true, change);
         }
         last = change;
     }
@@ -888,6 +906,7 @@ pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replic
         k
     };
     let frame = |s: usize| slow.frames[s];
+    let size = |s: usize| slow.sizes[s];
     let together = |x: usize, y: usize| slow.groups[x] == slow.groups[y];
     // The groups' places, in the order they first come.
     let mut members: Vec<Vec<usize>> = vec![];
@@ -905,10 +924,10 @@ pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replic
         if value == C64::ZERO {
             return;
         }
-        if together(row, column) && same(frame(column), frame(row)) {
+        if together(row, column) && equal(frame(column) - frame(row), size(column) + size(row)) {
             a[(row, column)] += value;
         } else {
-            turning.push((row, column, frame(column) - frame(row), value, frame(column).abs() + frame(row).abs()));
+            turning.push((row, column, frame(column) - frame(row), value, size(column) + size(row)));
         }
     };
     for r in 0..ground {
@@ -931,7 +950,7 @@ pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replic
             for (i, &x) in slow.explicit.iter().enumerate() {
                 for g in 0..ground {
                     let v = beam.coupling[(x, g)];
-                    if v != C64::ZERO && together(g, ground + i) && same(class.nu + frame(g), frame(ground + i)) {
+                    if v != C64::ZERO && together(g, ground + i) && equal(class.nu + frame(g) - frame(ground + i), class.nu.abs() + size(g) + size(ground + i)) {
                         a[(ground + i, g)] += v;
                         a[(g, ground + i)] += v.conj();
                     }
@@ -945,14 +964,15 @@ pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replic
         .frequencies
         .iter()
         .zip(&replicas.groups)
-        .map(|(&f, &group)| {
-            let q: Vec<usize> = (0..excited).filter(|&e| !slow.explicit.iter().enumerate().any(|(i, &x)| x == e && slow.groups[ground + i] == group && same(frame(ground + i), f))).collect();
+        .zip(&replicas.scales)
+        .map(|((&f, &group), &scale)| {
+            let q: Vec<usize> = (0..excited).filter(|&e| !slow.explicit.iter().enumerate().any(|(i, &x)| x == e && slow.groups[ground + i] == group && equal(frame(ground + i) - f, size(ground + i) + scale))).collect();
             if !forms.iter().any(|x| x.0 == q) {
                 let k = Schur::of(&k_full.block(&q, &q)).expect("the Schur form of the excited block");
                 forms.push((q.clone(), k));
             }
             let (_, k) = forms.iter().find(|x| x.0 == q).expect("its form");
-            Folded { frequency: f, group: group_of(group), q, feeds: vec![], w: Mat::zeros(0, 0), back: Mat::zeros(0, 0), t: Mat::zeros(0, 0), classes: vec![], k: k.clone() }
+            Folded { frequency: f, scale, group: group_of(group), q, feeds: vec![], w: Mat::zeros(0, 0), back: Mat::zeros(0, 0), t: Mat::zeros(0, 0), classes: vec![], k: k.clone() }
         })
         .collect();
     for (c, class) in classes.iter().enumerate() {
@@ -1055,18 +1075,18 @@ pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replic
     // goes up, a block where the static part's does not, a link where the sectors' does not -- `closure`); where the
     // sectors' does not, the generator is the static part's, the sectors made at it.
     let terms = (n + excited) * (n + excited);
-    let (h, still_exists, exists) = match reference {
+    let (h, still_exists, exists, floor) = match reference {
         None => {
-            let (h, settled) = settle(&a, |h| step(h, false), terms);
+            let (h, settled, floor) = settle(&a, |h| step(h, false), terms);
             match folds_sectors && settled {
                 true => match settle(&h, |h| step(h, true), terms) {
-                    (whole, true) => (whole, true, true),
-                    _ => (h, true, false),
+                    (whole, true, floor) => (whole, true, true, floor),
+                    _ => (h, true, false, floor),
                 },
-                false => (h, settled, settled),
+                false => (h, settled, settled, floor),
             }
         }
-        Some(z0) => (step(&Mat::from_fn(n, n, |i, j| if i == j { C64::real(z0[i]) } else { C64::ZERO }), false).0, true, true),
+        Some(z0) => (step(&Mat::from_fn(n, n, |i, j| if i == j { C64::real(z0[i]) } else { C64::ZERO }), false).0, true, true, 0.0),
     };
     // The responses at the generator they made it of, at its final form (about a reference: R₀ W, as made), and the static
     // part H_s they make there.
@@ -1092,7 +1112,7 @@ pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replic
         carried_sectors.iter_mut().for_each(|s| s.solve(&still, &whole));
     }
     let (eigen, groups) = eigen_of(&h, &members);
-    Fold { ground, explicit: slow.explicit.clone(), frames: slow.frames.clone(), direct: a, generator: h, replicas: folded, sectors, carried: carried_sectors, eigen, exists, still_exists, reference: reference.map(|z| z.to_vec()), driven, members, groups, places: place_group, stills }
+    Fold { ground, explicit: slow.explicit.clone(), frames: slow.frames.clone(), sizes: slow.sizes.clone(), direct: a, generator: h, floor, replicas: folded, sectors, carried: carried_sectors, eigen, exists, still_exists, reference: reference.map(|z| z.to_vec()), driven, members, groups, places: place_group, stills }
 }
 
 /// H's eigendecomposition and each eigenstate's group: H is a group's alone (# Groups), so its eigenstates are each one
@@ -1260,7 +1280,7 @@ impl Fold {
                 let (mut coherent, mut apart) = (0.0, 0.0);
                 for rep in self.replicas.iter().filter(|rep| rep.group == to) {
                     let e = crate::linalg::norm_sqr(&rep.t.apply(&t));
-                    match self.replicas.iter().any(|own| own.group == self.groups[p] && equal(own.frequency - s.frequency - rep.frequency, own.frequency.abs() + s.scale + rep.frequency.abs())) {
+                    match self.replicas.iter().any(|own| own.group == self.groups[p] && equal(own.frequency - s.frequency - rep.frequency, own.scale + s.scale + rep.scale)) {
                         true => coherent += e,
                         false => apart += e,
                     }
@@ -1691,7 +1711,7 @@ impl Fold {
         }
         // From the right generator, which the left one is similar to, M = (1 + ST) H (1 + ST)⁻¹: within the excited share
         // X of it.
-        let (_, settled) = settle(
+        let (_, settled, _) = settle(
             &self.generator,
             |m| {
                 let sm = schurs_of(&m.adjoint(), &self.members).expect("the Schur form of P's left generator");
@@ -1803,8 +1823,9 @@ impl Reference {
         let out = replicas
             .frequencies
             .iter()
-            .map(|&f| {
-                let q: Vec<usize> = (0..excited).filter(|&e| !slow.explicit.iter().enumerate().any(|(i, &x)| x == e && same(slow.frames[ground + i], f))).collect();
+            .zip(&replicas.scales)
+            .map(|(&f, &scale)| {
+                let q: Vec<usize> = (0..excited).filter(|&e| !slow.explicit.iter().enumerate().any(|(i, &x)| x == e && equal(slow.frames[ground + i] - f, slow.sizes[ground + i] + scale))).collect();
                 if !forms.iter().any(|x| x.0 == q) {
                     forms.push((q.clone(), Schur::of(&k.block(&q, &q)).expect("the Schur form of the excited block")));
                 }
@@ -2207,9 +2228,10 @@ impl super::Model {
         let states: Vec<usize> = grounds.iter().chain(&explicit).copied().collect();
         let frame = |s: usize| {
             let c = &self.clusters[clusters[cluster_of[s]]];
-            self.omega(&c.frames[c.states.iter().position(|&x| x == states[s]).expect("a cluster's state")])
+            &c.frames[c.states.iter().position(|&x| x == states[s]).expect("a cluster's state")]
         };
-        let frames: Vec<f64> = (0..states.len()).map(frame).collect();
+        let frames: Vec<f64> = (0..states.len()).map(|s| self.omega(frame(s))).collect();
+        let sizes: Vec<f64> = (0..states.len()).map(|s| self.axes.size(frame(s))).collect();
         let far: Vec<f64> = clusters
             .iter()
             .enumerate()
@@ -2218,7 +2240,7 @@ impl super::Model {
                 places.iter().map(|&y| h[(grounds[y], grounds[y])].re - frames[y]).sum::<f64>() / self.clusters[k].ground as f64
             })
             .collect();
-        let slow = Slow { explicit: explicit.iter().map(|&s| s - GROUND).collect(), frames, groups: cluster_of.clone() };
+        let slow = Slow { explicit: explicit.iter().map(|&s| s - GROUND).collect(), frames, sizes, groups: cluster_of.clone() };
         let replicas = Replicas::of(&classes, &slow, g);
         let carries = |l: &Link| {
             let super::Unit::Term { a, b, beat } = self.link_unit(&grounds, l) else { unreachable!("a link's unit is a term") };
@@ -2533,7 +2555,7 @@ impl super::Model {
             let source: Vec<usize> = (0..n).filter(|&p| atom.groups[p] == group).collect();
             let landings: Vec<Landing> = (0..atom.members.len()).map(|x| Landing::of(&atom, &(0..n).filter(|&q| atom.groups[q] == x).collect::<Vec<_>>())).collect();
             let classes = &self.classes[sample.cluster];
-            let mut images: Vec<Images> = classes.iter().map(|class| Images { frequency: -self.omega(&class.beats[0]), landing: atom.places[place_of(self.clusters[class.landing].states[0])], images: vec![std::array::from_fn(|_| vec![C64::ZERO; n]); n], links: vec![] }).collect();
+            let mut images: Vec<Images> = classes.iter().map(|class| Images { frequency: -self.omega(&class.beats[0]), scale: self.axes.size(&class.beats[0]), landing: atom.places[place_of(self.clusters[class.landing].states[0])], images: vec![std::array::from_fn(|_| vec![C64::ZERO; n]); n], links: vec![] }).collect();
             for &p in source.iter().filter(|&&p| coefficients[p] != C64::ZERO) {
                 let r = atom.right(p);
                 let local: Vec<C64> = c.states.iter().map(|&s| r[place_of(s)]).collect();
@@ -2761,6 +2783,10 @@ impl Link {
     pub(crate) fn beat(&self, classes: &[Class]) -> f64 {
         self.classes.1.map_or(0.0, |c| classes[c].nu) - self.classes.0.map_or(0.0, |c| classes[c].nu)
     }
+    /// The size of its beat's terms (`equal`): the two classes' frequencies'.
+    pub(crate) fn size(&self, classes: &[Class]) -> f64 {
+        self.classes.1.map_or(0.0, |c| classes[c].nu.abs()) + self.classes.0.map_or(0.0, |c| classes[c].nu.abs())
+    }
 
     /// Its strength at the point (rad/µs; the frames' order, cluster.rs `frames`): an explicit drive's coupling, the
     /// class's beams summed, |C_c(e, g)|; a coupling of two P states through two classes its second-order entry through
@@ -2809,12 +2835,12 @@ fn slow_of(blocks: &[Vec<usize>], kept: &Kept, classes: &[Class], levels: &Level
     let ground = levels.ground.rows;
     let explicit: Vec<usize> = kept.blocks.iter().flat_map(|&b| blocks[b].iter().copied()).collect();
     let place = |s: usize| if s < ground { Some(s) } else { explicit.iter().position(|&e| e == s - ground).map(|i| ground + i) };
-    let edges: Vec<(usize, usize, f64, f64)> = kept.links.iter().filter_map(|l| Some((place(l.a)?, place(l.b)?, l.beat(classes), l.strength(classes, levels, &explicit)))).collect();
+    let edges: Vec<(usize, usize, Sized, f64)> = kept.links.iter().filter_map(|l| Some((place(l.a)?, place(l.b)?, Sized { value: l.beat(classes), size: l.size(classes) }, l.strength(classes, levels, &explicit)))).collect();
     let n = ground + explicit.len();
-    let frames = super::cluster::frames(n, &edges, &0.0);
+    let sized = super::cluster::frames(n, &edges, &Sized { value: 0.0, size: 0.0 });
     let within = kept.blocks.iter().flat_map(|&b| blocks[b].windows(2).filter_map(|w| Some((place(ground + w[0])?, place(ground + w[1])?))));
     let groups = components(n, edges.iter().map(|e| (e.0, e.1)).chain(within));
-    Slow { explicit, frames, groups }
+    Slow { explicit, frames: sized.iter().map(|f| f.value).collect(), sizes: sized.iter().map(|f| f.size).collect(), groups }
 }
 
 /// The closure at one point (`Closed`): from `start`, at the atom's velocity v (µm/µs) --
@@ -2855,7 +2881,7 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
             .iter()
             .enumerate()
             .flat_map(|(i, &e)| (0..classes.len()).flat_map(move |c| (0..ground).map(move |g| (i, e, c, g))))
-            .filter(|&(i, e, c, g)| slow.groups[g] == slow.groups[ground + i] && same(classes[c].nu + slow.frames[g], slow.frames[ground + i]) && classes[c].beams.iter().any(|beam| beam.coupling[(e, g)] != C64::ZERO))
+            .filter(|&(i, e, c, g)| slow.groups[g] == slow.groups[ground + i] && equal(classes[c].nu + slow.frames[g] - slow.frames[ground + i], classes[c].nu.abs() + slow.sizes[g] + slow.sizes[ground + i]) && classes[c].beams.iter().any(|beam| beam.coupling[(e, g)] != C64::ZERO))
             .map(|(_, e, c, g)| Link { a: ground + e, b: g, classes: (None, Some(c)) })
             .filter(|l| !kept.links.contains(l))
             .collect();
@@ -2930,7 +2956,7 @@ pub(crate) fn closure(levels: &Levels, classes: &[Class], blocks: &[Vec<usize>],
                     let links: Vec<Link> = blocks[b]
                         .iter()
                         .flat_map(|&e| (0..ground).map(move |g| (e, g)))
-                        .filter(|&(e, g)| slow.groups[g] == held && replicas.driven[c][g] < replicas.frequencies.len() && same(replicas.frequencies[replicas.driven[c][g]], rep.frequency) && classes[c].beams.iter().any(|beam| beam.coupling[(e, g)] != C64::ZERO))
+                        .filter(|&(e, g)| slow.groups[g] == held && replicas.driven[c][g] < replicas.frequencies.len() && equal(replicas.frequencies[replicas.driven[c][g]] - rep.frequency, replicas.scales[replicas.driven[c][g]] + rep.scale) && classes[c].beams.iter().any(|beam| beam.coupling[(e, g)] != C64::ZERO))
                         .map(|(e, g)| Link { a: ground + e, b: g, classes: (None, Some(c)) })
                         .filter(|l| !kept.links.contains(l))
                         .collect();
@@ -3244,6 +3270,8 @@ impl Landing {
 #[derive(Clone, Debug)]
 pub(crate) struct Images {
     pub frequency: f64,
+    /// The size of the terms its frequency is the sum of (`equal`).
+    pub scale: f64,
     pub landing: usize,
     pub images: Vec<[Vec<C64>; 3]>,
     pub links: Vec<(Link, f64)>,
@@ -3296,7 +3324,7 @@ pub(crate) fn cross_terms(classes: &[Images], landings: &[Landing], values: &[C6
     for a in 0..classes.len() {
         for b in a + 1..classes.len() {
             let (ca, cb) = (&classes[a], &classes[b]);
-            if ca.landing != cb.landing || same(ca.frequency, cb.frequency) {
+            if ca.landing != cb.landing || equal(ca.frequency - cb.frequency, ca.scale + cb.scale) {
                 continue;
             }
             let lambda = &landings[ca.landing].values;
@@ -3411,15 +3439,15 @@ impl Fold {
         // A class: its images, origin, landing place, and its kind -- the fold's own photons (0), a carried sector's (1),
         // a left-out one's (2).
         let mut out: Vec<(Images, PhotonSource, usize, u8)> = vec![];
-        let add = |frequency: f64, kind: u8, origin: PhotonSource, at: usize, p: usize, axis: usize, value: C64, out: &mut Vec<(Images, PhotonSource, usize, u8)>| -> Option<usize> {
+        let add = |(frequency, scale): (f64, f64), kind: u8, origin: PhotonSource, at: usize, p: usize, axis: usize, value: C64, out: &mut Vec<(Images, PhotonSource, usize, u8)>| -> Option<usize> {
             if value == C64::ZERO {
                 return None;
             }
             let landing = self.places[at];
-            let k = match out.iter().position(|c| c.3 == kind && c.0.landing == landing && same(c.0.frequency, frequency)) {
+            let k = match out.iter().position(|c| c.3 == kind && c.0.landing == landing && equal(c.0.frequency - frequency, c.0.scale + scale)) {
                 Some(k) => k,
                 None => {
-                    out.push((Images { frequency, landing, images: vec![std::array::from_fn(|_| vec![C64::ZERO; n]); n], links: vec![] }, origin, at, kind));
+                    out.push((Images { frequency, scale, landing, images: vec![std::array::from_fn(|_| vec![C64::ZERO; n]); n], links: vec![] }, origin, at, kind));
                     out.len() - 1
                 }
             };
@@ -3428,17 +3456,17 @@ impl Fold {
         };
         let origin_of = |j: usize, rep: &Folded| {
             let origin = (0..self.driven.len()).find_map(|c| (0..ground).find(|&g| self.driven[c][g] == Some(j)).map(|g| PhotonSource::Class(c, g)));
-            origin.or_else(|| (0..self.explicit.len()).find(|&i| same(self.frames[ground + i], rep.frequency)).map(|i| PhotonSource::Explicit(ground + i)))
+            origin.or_else(|| (0..self.explicit.len()).find(|&i| equal(self.frames[ground + i] - rep.frequency, self.sizes[ground + i] + rep.scale)).map(|i| PhotonSource::Explicit(ground + i)))
         };
-        // The photons of an amplitude x on the places of the group `group` (none: every group) at the beat Ω more: its
-        // replicas' excited amplitudes and its explicit places' own; the classes they make.
-        let emit = |p: usize, x: &[C64], group: Option<usize>, omega: f64, kind: u8, out: &mut Vec<(Images, PhotonSource, usize, u8)>| -> Vec<usize> {
+        // The photons of an amplitude x on the places of the group `group` (none: every group) at the beat Ω more (its
+        // terms' size `scale`): its replicas' excited amplitudes and its explicit places' own; the classes they make.
+        let emit = |p: usize, x: &[C64], group: Option<usize>, (omega, scale): (f64, f64), kind: u8, out: &mut Vec<(Images, PhotonSource, usize, u8)>| -> Vec<usize> {
             let mut made = vec![];
             for (j, rep) in self.replicas.iter().enumerate().filter(|(_, rep)| group.is_none_or(|g| rep.group == g)) {
                 let Some(origin) = origin_of(j, rep) else { continue };
                 let y = rep.t.apply(x);
                 for g in 0..ground {
-                    let frequency = rep.frequency + omega - self.frames[g];
+                    let frequency = (rep.frequency + omega - self.frames[g], rep.scale + scale + self.sizes[g]);
                     for axis in 0..3 {
                         let value: C64 = rep.q.iter().zip(&y).map(|(&e, z)| emission[axis][(g, ground + e)] * *z).sum();
                         made.extend(add(frequency, kind, origin, g, p, axis, value, out));
@@ -3447,7 +3475,7 @@ impl Fold {
             }
             for (i, &e) in self.explicit.iter().enumerate().filter(|(i, _)| group.is_none_or(|g| self.places[ground + i] == g)) {
                 for g in 0..ground {
-                    let frequency = self.frames[ground + i] + omega - self.frames[g];
+                    let frequency = (self.frames[ground + i] + omega - self.frames[g], self.sizes[ground + i] + scale + self.sizes[g]);
                     for axis in 0..3 {
                         made.extend(add(frequency, kind, PhotonSource::Explicit(ground + i), g, p, axis, emission[axis][(g, ground + e)] * x[ground + i], out));
                     }
@@ -3457,12 +3485,12 @@ impl Fold {
         };
         for &p in states {
             let r = self.right(p);
-            emit(p, &r, None, 0.0, 0, &mut out);
+            emit(p, &r, None, (0.0, 0.0), 0, &mut out);
             for (kind, list) in [(1, &self.carried), (2, &self.sectors)] {
                 for s in list.iter() {
                     let t = self.sector_apply(s, &r);
                     for (to, places) in self.targets(s, p) {
-                        let mut made = emit(p, &t, Some(to), s.frequency, kind, &mut out);
+                        let mut made = emit(p, &t, Some(to), (s.frequency, s.scale), kind, &mut out);
                         if kind == 2 {
                             made.sort();
                             made.dedup();

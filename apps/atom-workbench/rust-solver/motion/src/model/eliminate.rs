@@ -236,7 +236,8 @@ impl Model {
         let slopes: Vec<(f64, Mat)> = (1..parts).map(|p| (reference[p], h[p].block(&excited, &excited))).collect();
         let lit: Vec<usize> = (0..self.carriers.len()).filter(|&ci| lights.on(self.carriers[ci].frequency)).collect();
         let nus: Vec<f64> = lit.iter().map(|&ci| self.carriers[ci].detuning).collect();
-        let slow = elim::Slow::single(c.states[g..].iter().map(|&s| s - GROUND).collect(), frames);
+        let sizes: Vec<f64> = c.frames.iter().map(|f| self.axes.size(f)).collect();
+        let slow = elim::Slow { explicit: c.states[g..].iter().map(|&s| s - GROUND).collect(), frames, sizes, groups: vec![0; c.states.len()] };
         let series = elim::Reference::new(&levels, &nus, &slow, reference[0]);
         let (mut first, mut second) = (vec![vec![]; self.carriers.len()], vec![vec![]; self.carriers.len()]);
         let mut work = 0.0;

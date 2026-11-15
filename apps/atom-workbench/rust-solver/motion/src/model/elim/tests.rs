@@ -43,8 +43,14 @@ fn sectored(levels: &Levels, classes: &[Class], slow: &Slow, carried: bool) -> F
     fold(levels, classes, slow, &replicas, Some(&|_: &Link| carried))
 }
 
+/// The P of one cluster of exact frames (each its own size): all its states one group.
+fn single(explicit: Vec<usize>, frames: Vec<f64>) -> Slow {
+    let (groups, sizes) = (vec![0; frames.len()], frames.iter().map(|f| f.abs()).collect());
+    Slow { explicit, frames, sizes, groups }
+}
+
 fn at_rest(n: usize) -> Slow {
-    Slow::single(vec![], vec![0.0; n])
+    single(vec![], vec![0.0; n])
 }
 
 /// The two-level atom's saturation (v3 3). The slow eigenvalue of the static Floquet generator [[0, g*], [g, −ν − iΓ/2]]
@@ -148,7 +154,7 @@ fn a_lambda_system_s_raman_coupling_and_dark_state_are_the_analytic_ones() {
         let d2 = (nu1 - nu2) + two_photon;
         let lv = levels(&[0.0, d2], &[0.0], gamma, &[0]);
         let classes = vec![class(nu1, 2, 1, &[(0, 0, C64::real(g1))]), class(nu2, 2, 1, &[(0, 1, C64::real(g2))])];
-        let slow = Slow::single(vec![], vec![0.0, nu1 - nu2]);
+        let slow = single(vec![], vec![0.0, nu1 - nu2]);
         let fold = folded(&lv, &classes, &slow);
         assert!(fold.exists);
         assert_eq!(fold.replicas.len(), 1, "the two drives feed one replica in these frames");
@@ -226,7 +232,7 @@ fn a_sector_s_self_consistent_fold_where_its_ladder_closes_is_the_exact_problem(
     for &(a, d0) in &[(1.0, 8.0), (1.0, 3.0), (2.0, 5.0)] {
         let theta = 26.5;
         let lv = Levels { ground: Mat::from_fn(2, 2, |i, j| match (i, j) { (0, 1) | (1, 0) => C64::real(a), (1, 1) => C64::real(d0), _ => C64::ZERO }), excited: Mat::zeros(0, 0), decay: Mat::zeros(0, 0) };
-        let slow = Slow::single(vec![], vec![0.0, theta]);
+        let slow = single(vec![], vec![0.0, theta]);
         let fold = sectored(&lv, &[], &slow, false);
         assert!(fold.exists, "a = {a}, d₀ = {d0}: the fold exists");
         let exact = eigen(&lv.ground).unwrap();
@@ -269,7 +275,7 @@ fn the_lambda_scheme_s_sector_holds_the_static_shift_the_averaged_model_left_out
         let lv = levels(&[0.0, d0], &[0.0], gamma, &[0]);
         let classes = vec![class(nu1, 2, 1, &[(0, 0, C64::real(g1))]), class(nu2, 2, 1, &[(0, 1, C64::real(g2))])];
         let (rest, sector) = (folded(&lv, &classes, &at_rest(2)), sectored(&lv, &classes, &at_rest(2), false));
-        let exact = folded(&lv, &classes, &Slow::single(vec![], vec![0.0, nu1 - nu2]));
+        let exact = folded(&lv, &classes, &single(vec![], vec![0.0, nu1 - nu2]));
         assert!(sector.exists && exact.exists);
         let of = |f: &Fold| (0..2).find(|&p| f.dominant(p) == 0).unwrap();
         let (pr, ps, pe) = (of(&rest), of(&sector), of(&exact));
@@ -551,7 +557,7 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
     let holds = |c: &Closed, l: &Link, cl: &[Class], lv: &Levels| {
         let slow = slow_of(&blocks, &c.kept, cl, lv);
         let place = |s: usize| if s < ground { Some(s) } else { slow.explicit.iter().position(|&e| e == s - ground).map(|i| ground + i) };
-        c.kept.links.contains(l) || c.kept.links.contains(&l.reversed()) || matches!((place(l.a), place(l.b)), (Some(a), Some(b)) if slow.groups[a] == slow.groups[b] && same(l.beat(cl), slow.frames[a] - slow.frames[b]))
+        c.kept.links.contains(l) || c.kept.links.contains(&l.reversed()) || matches!((place(l.a), place(l.b)), (Some(a), Some(b)) if slow.groups[a] == slow.groups[b] && equal(l.beat(cl) - slow.frames[a] + slow.frames[b], l.size(cl) + slow.sizes[a] + slow.sizes[b]))
     };
     for &(r, v) in &points {
         let read: Vec<(Closed, (f64, f64), Levels, Vec<Class>)> = requests
@@ -577,16 +583,7 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
             }
         }
         for l in closed[1].kept.links.iter().filter(|l| !base.kept.links.contains(l)) {
-            if !holds(closed[2], l, &read[2].3, &read[2].2) {
-                // Its part of criterion one at each closure's end, the largest over the ground-like eigenstates.
-                for (name, c) in names.iter().zip(&closed) {
-                    let f = &c.fold;
-                    let part = (0..f.size()).filter(|&p| f.ground_weight(p) >= 0.5).map(|p| f.sector_parts(p, 2.0 * 8.06 * crate::linalg::norm3(v)).into_iter().filter(|x| x.0 == *l || x.0 == l.reversed()).map(|x| x.1).sum::<f64>()).fold(0.0_f64, f64::max);
-                    let worst = (0..f.size()).filter(|&p| f.ground_weight(p) >= 0.5).map(|p| rate(f.criterion_one(&blocks, p, 2.0 * 8.06 * crate::linalg::norm3(v), 1.0, &|_| 1.0).0.sqrt())).fold(0.0_f64, f64::max);
-                    eprintln!("{name}: the link's part of ρ² {part:.4e} (its rate alone {:.4e}), the worst eigenstate's error {worst:.4e}, the share {:.4e}; {} links kept", rate(part.sqrt()), super::share(), c.kept.links.len());
-                }
-                panic!("a link at 0.1° that 2° does not hold, {l:?}, at {r:?} {v:?}");
-            }
+            assert!(holds(closed[2], l, &read[2].3, &read[2].2), "a link at 0.1° that 2° does not hold, {l:?}, at {r:?} {v:?}");
         }
         let (at0, at01) = (measured[0], measured[1]);
         assert!((at01.0 - at0.0).abs() <= 10.0 * theta * at0.0.max(1e-6), "ρ at 0.1°: {} against {}", at01.0, at0.0);
@@ -597,10 +594,106 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
     assert!(rate(most) <= super::share(), "a folded sector beyond the share");
 }
 
+/// Each link's part of criterion one moves continuously with the tilt (the coordinator's 2026-11-14 statement): the tilt's
+/// couplings are the probe's, linear in sin θ, so along the family of the 0° and the 2° requests' levels and couplings in
+/// the proportions 1 − s and s (θ = 2s° to the order θ²), on one structure -- the 0° closure's kept set, its groups and
+/// frames held --, every link's part at an atom is a smooth function of s. Read at s = 0, ¼, ½, ¾, 1 against s + h for
+/// h = 10⁻³ and 10⁻⁴: the largest change of any link's part falls with h at least fivefold (a jump would not fall), at the
+/// prior's atoms (every eleventh). Where a decision changes with θ it is where a part crosses the share continuously:
+/// the 2° closure's links beyond the 0°'s are each kept at an eigenstate whose error, 2ρ + ρ² (`rate`), is beyond the
+/// share on the 2° fold with the 0° set kept -- printed, with the count.
+#[test]
+fn a_tilt_moves_every_link_s_part_continuously() {
+    let (zero, two) = (request("PGC1D_TILT_0"), request("PGC1D_TILT_2"));
+    let (l0, l2) = (crate::field::Light::new(&zero), crate::field::Light::new(&two));
+    let blocks = excited_blocks(&zero.states);
+    let points = prior_atoms(&zero);
+    let blend = |a: &Mat, b: &Mat, s: f64| {
+        let mut m = a.scaled(C64::real(1.0 - s));
+        m.add_scaled(C64::real(s), b);
+        m
+    };
+    let (mut beyond, mut added) = (0, 0);
+    for &(r, v) in points.iter().step_by(11) {
+        let ((lv0, cl0, _), (lv2, cl2, _)) = (system(&zero, &l0, r), system(&two, &l2, r));
+        assert_eq!(cl0.len(), cl2.len());
+        let at = |s: f64| -> (Levels, Vec<Class>) {
+            let lv = Levels { ground: blend(&lv0.ground, &lv2.ground, s), excited: blend(&lv0.excited, &lv2.excited, s), decay: lv0.decay.clone() };
+            let cl = cl0.iter().zip(&cl2).map(|(a, b)| Class { nu: a.nu, beams: a.beams.iter().zip(&b.beams).map(|(x, y)| Beam { coupling: blend(&x.coupling, &y.coupling, s), wave: x.wave }).collect() }).collect();
+            (lv, cl)
+        };
+        let fastest = cl0.iter().flat_map(|c| c.beams.iter()).map(|b| crate::linalg::norm3(b.wave)).fold(0.0, f64::max);
+        let pattern = 2.0 * fastest * crate::linalg::norm3(v);
+        let base = closure(&lv0, &cl0, &blocks, v, &Kept::default()).kept;
+        // Every link's part, summed over the ground-like eigenstates, on the 0° structure at s.
+        let parts = |s: f64| -> Vec<(Link, f64)> {
+            let (lv, cl) = at(s);
+            let slow = slow_of(&blocks, &base, &cl, &lv);
+            let f = fold(&lv, &cl, &slow, &Replicas::of(&cl, &slow, lv.ground.rows), Some(&|l: &Link| base.links.contains(l)));
+            let mut out: Vec<(Link, f64)> = vec![];
+            for p in (0..f.size()).filter(|&p| f.ground_weight(p) >= 0.5) {
+                for (l, x) in f.sector_parts(p, pattern) {
+                    match out.iter_mut().find(|o| o.0 == l || o.0 == l.reversed()) {
+                        Some(o) => o.1 += x,
+                        None => out.push((l, x)),
+                    }
+                }
+            }
+            out
+        };
+        let moved = |a: &[(Link, f64)], b: &[(Link, f64)]| a.iter().map(|x| (x.1 - b.iter().find(|y| y.0 == x.0 || y.0 == x.0.reversed()).map_or(0.0, |y| y.1)).abs()).fold(0.0_f64, f64::max);
+        for s in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let here = parts(s);
+            let sign = if s < 1.0 { 1.0 } else { -1.0 };
+            let (coarse, fine) = (moved(&here, &parts(s + sign * 1e-3)), moved(&here, &parts(s + sign * 1e-4)));
+            let largest = here.iter().map(|x| x.1).fold(0.0_f64, f64::max);
+            assert!(fine <= coarse / 5.0 + crate::units::rounding(1024) * largest, "at {r:?}, s {s}: a link's part moved {coarse:.3e} over 10⁻³ and {fine:.3e} over 10⁻⁴");
+        }
+        // The 2° closure's links beyond the 0°'s: each eigenstate's error at 2° on the 0° structure.
+        let kept2 = closure(&lv2, &cl2, &blocks, v, &Kept::default()).kept;
+        let more: Vec<&Link> = kept2.links.iter().filter(|l| !base.links.contains(l) && !base.links.contains(&l.reversed())).collect();
+        if !more.is_empty() {
+            let slow = slow_of(&blocks, &base, &cl2, &lv2);
+            let f = fold(&lv2, &cl2, &slow, &Replicas::of(&cl2, &slow, lv2.ground.rows), Some(&|l: &Link| base.links.contains(l)));
+            let worst = (0..f.size()).filter(|&p| f.ground_weight(p) >= 0.5).map(|p| rate(f.criterion_one(&blocks, p, pattern, 1.0, &|_| 1.0).0.sqrt())).fold(0.0_f64, f64::max);
+            println!("at {r:?}: 2° keeps {} links beyond the 0°'s {}; on the 0° structure at 2° the worst eigenstate's error {worst:.4e} (the share {:.4e}){}", more.len(), base.links.len(), super::share(), if f.exists { "" } else { ", where the fold does not exist" });
+            beyond += usize::from(worst > super::share() || !f.exists);
+            added += 1;
+        }
+    }
+    println!("{added} atoms where 2° keeps more than 0°; at {beyond} of them the 0° structure is beyond the share at 2°");
+    assert_eq!(beyond, added, "2° keeps more only where the 0° structure is beyond the share at 2°");
+}
+
 /// The frames are a gauge (module documentation, # Groups): at the prior's atoms of the tilted 1D PGC (a few of them),
-/// on the closure's kept set, a constant added to the frames of every state of each group -- random, of the size of the
-/// Zeeman splittings and beyond -- leaves every decision and every error the same: the sectors' parts by link (criterion
-/// one on what the run leaves out), the blocks' remainders, and the error at a state with its parts.
+/// on two structures -- the closure's first round (no link kept: its groups and frames), where it makes its moves, and
+/// its kept set --, a constant added to the frames of every state of each group -- random, of the size of the Zeeman
+/// splittings and beyond -- leaves every decision the same, object by object (the moves criterion one makes at
+/// each ground-like eigenstate, `closure`'s rule), and every number the same within its rounding: the sectors' parts by
+/// link, the blocks' remainders, and the error at a state with its parts.
+///
+/// The rounding a number is the same within. A gauge is an exact change of variables (H → H − c on a group), but each
+/// gauge's fold is its own computation, settled to its floor ε_H (`settle`: the change of its last iteration,
+/// `Fold::floor`, at least the rounding of its operations γ_terms s, terms = (n_P + n_E)², at the scale s of its terms,
+/// of the size of ‖H‖_F); an
+/// eigenvector r_p of H is then fixed to ε_H/g_p, g_p its eigenvalue's least distance from the others of its group (first
+/// order in the perturbation), and a sector's response at p, read off its Sylvester solve, to ε_H/δ_p, δ_p = min |Ω +
+/// λ_p' − λ_q| the solve's separation over its blocks' eigenvalue pairs -- beside its own arithmetic's γ_terms κ, κ the
+/// eigenvectors' condition: the vector a whose components' squares are p's parts by link (x_l = |a_l|², X_p = ‖a‖² their
+/// whole) is fixed to η_p ‖a‖, η_p = γ_terms κ + ε_H/g_p + ε_H/δ_p, the error of a vector, not of each component: a
+/// part to 2√(x_l X_p) η_p + X_p η_p² (a small part beside a large one moves with the large one's error; PGC1D's first
+/// round, a link of 1.8·10⁻³ beside 0.32 at one eigenstate, ‖H‖_F = 7.5·10⁴ of its hyperfine frames: 1.2·10⁻¹⁰ between
+/// gauges against 2x η of 4·10⁻¹²); and a sector's frequency Ω is a sum of frames and classes' frequencies -- of a
+/// counter-rotating class the optical frequency's 2.4·10⁹ rad/µs --, known to its terms' rounding δΩ = γ_STATES s_Ω
+/// (`equal`'s: what two frequencies are one within), so a part of 1/d², d the least distance of the sector's pole from
+/// p's offsets, moves by 2x δΩ/d (PGC1D's first round: Ω = 26.37 of replica frequencies of 2.4·10⁹, d = 0.57, a part
+/// of 391 apart by 1.3·10⁻⁶ relatively, between gauges whose frames differ by 10⁻³; by 10⁻⁹, where the replicas'
+/// frequencies round alike, 10⁻⁹). Two gauges' parts of a link differ by at most the sum of their floors over the
+/// eigenstates; the remainders and the errors, made of the same eigenvectors, relatively by γ_terms κ + 2ε_H/g of the
+/// least g among the eigenstates read, the errors besides by their sectors' parts' floors (a rate 2ρ + ρ² of an
+/// eigenstate's total t moves by (1 + 1/√t) of t's); and every part by γ_terms of the whole sum's scale, a link of a structural zero
+/// being a rounding's. (Read part by part at 10⁻⁸ relatively, the tilt's link of 3.6·10⁻⁹ at an eigenstate near its
+/// neighbour moved 8.6·10⁻⁴ between gauges.)
 #[test]
 fn every_decision_and_error_is_the_same_in_every_gauge() {
     let req = request("PGC1D_TILT_2");
@@ -613,74 +706,135 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         (seed >> 11) as f64 / (1u64 << 53) as f64
     };
+    let share = super::share();
+    let mut decided = 0;
     for &(r, v) in points.iter().step_by(11) {
         let (lv, cl, _) = system(&req, &light, r);
         let closed = closure(&lv, &cl, &blocks, v, &Kept::default());
         let slow = slow_of(&blocks, &closed.kept, &cl, &lv);
+        let none = Kept::default();
+        let first = slow_of(&blocks, &none, &cl, &lv);
         let fastest = cl.iter().flat_map(|c| c.beams.iter()).map(|b| crate::linalg::norm3(b.wave)).fold(0.0, f64::max);
         let pattern = 2.0 * fastest * crate::linalg::norm3(v);
-        let read = |slow: &Slow| {
-            let fold = fold(&lv, &cl, slow, &Replicas::of(&cl, slow, lv.ground.rows), Some(&|l: &Link| closed.kept.links.contains(l)));
-            let like: Vec<usize> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
-            let mut sectors: Vec<(usize, usize, (Option<usize>, Option<usize>), f64)> = vec![];
-            let mut detail: Vec<String> = vec![];
-            for s in &fold.sectors {
-                for l in &s.links {
-                    detail.push(format!("sector Ω {:.12e} scale {:.3e} blocks {:?}: link {:?} at ({}, {}) value {:.6e}", s.frequency, s.scale, s.blocks, l.0, l.1, l.2, l.3.abs()));
-                }
-            }
+        // Per link (either way round) its part summed over the ground-like eigenstates and its floor; the remainders; the
+        // relative floor of what is made of the eigenvectors; the error at a state and its parts; the moves, sorted.
+        type Read = (Vec<(Link, f64, f64)>, Vec<f64>, f64, (f64, Vec<((usize, Option<usize>), f64)>, f64), Vec<String>);
+        let read = |slow: &Slow, kept: &Kept| -> Read {
+            let fold = fold(&lv, &cl, slow, &Replicas::of(&cl, slow, lv.ground.rows), Some(&|l: &Link| kept.links.contains(l)));
+            let n = fold.size();
+            let gamma = crate::units::rounding((n + lv.excited.rows).pow(2));
+            // The fold's floor: its own iteration's last change, or the rounding of its terms where that is below it.
+            let (floor, own) = ((gamma * fold.generator.frobenius()).max(fold.floor), gamma * fold.eigen.condition);
+            let gap = |p: usize| (0..n).filter(|&q| q != p && fold.groups[q] == fold.groups[p]).map(|q| (fold.eigen.values[q] - fold.eigen.values[p]).abs()).fold(f64::INFINITY, f64::min);
+            let like: Vec<usize> = (0..n).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
+            let least = like.iter().map(|&p| gap(p)).fold(f64::INFINITY, f64::min);
+            let mut sectors: Vec<(Link, f64, f64)> = vec![];
+            let mut moves: Vec<String> = vec![];
+            // The error's floor (`errors`: a rate 2ρ + ρ², of the total t at an eigenstate, moves by (1 + 1/√t) of t's).
+            let mut error_floor = 0.0;
+            // The separation of the Sylvester solves eigenstate p's sector parts are read from: |Ω + λ_p' − λ_q| over
+            // every block from p's group, p' of that group and q of the block's target (a solve's error is its
+            // separation's, of all its eigenvalues' pairs, not p's alone).
+            let (groups, values) = (&fold.groups, &fold.eigen.values);
+            let distance = |p: usize| {
+                fold.sectors
+                    .iter()
+                    .flat_map(|s| s.blocks.iter().filter(move |b| b.1 == groups[p]).flat_map(move |b| (0..n).filter(move |&o| groups[o] == b.1).flat_map(move |o| (0..n).filter(move |&q| groups[q] == b.0).map(move |q| (C64::real(s.frequency) + values[o] - values[q]).abs()))))
+                    .fold(f64::INFINITY, f64::min)
+            };
             for &p in &like {
-                for (l, x) in fold.sector_parts(p, pattern) {
-                    detail.push(format!("eigenstate {p} (λ {:.10e}{:+.10e}i): link {l:?} part {x:.10e}", fold.eigen.values[p].re, fold.eigen.values[p].im));
-                    match sectors.iter_mut().find(|s| (s.0, s.1, s.2) == (l.a, l.b, l.classes)) {
-                        Some(s) => s.3 += x,
-                        None => sectors.push((l.a, l.b, l.classes, x)),
-                    }
-                }
-            }
-            sectors.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
-            let mut rho: Vec<f64> = like.iter().map(|&p| fold.block_parts(&blocks, p, Some(&fold.offsets(p, pattern, 1.0, &|_| 1.0))).0).collect();
-            rho.sort_by(f64::total_cmp);
-            let psi: Vec<C64> = (0..fold.size()).map(|s| if s < ground { C64::real(1.0) } else { C64::ZERO }).collect();
-            let errors = errors(&fold, &blocks, &psi, pattern, &[]);
-            let error = errors.parts.iter().map(|p| p.1).sum::<f64>() + errors.links.iter().map(|p| p.1).sum::<f64>() + errors.outside.iter().sum::<f64>();
-            (sectors, rho, error, errors.parts, detail)
-        };
-        let base = read(&slow);
-        for _ in 0..3 {
-            let mut shifted = slow.clone();
-            let shifts: Vec<f64> = (0..shifted.frames.len()).map(|_| 200.0 * (uniform() - 0.5)).collect();
-            for (f, g) in shifted.frames.iter_mut().zip(&slow.groups) {
-                *f += shifts[*g];
-            }
-            let other = read(&shifted);
-            // Every link's part the same, either way round: a link of a structural zero (its part a rounding's) is
-            // there or not as the rounding falls.
-            let largest = base.0.iter().chain(&other.0).fold(0.0_f64, |m, s| m.max(s.3));
-            for (a, b) in [(&base.0, &other.0), (&other.0, &base.0)] {
-                for x in a.iter() {
-                    let y = b.iter().find(|y| (y.0, y.1, y.2) == (x.0, x.1, x.2)).map_or(0.0, |y| y.3);
-                    if !((x.3 - y).abs() <= 1e-8 * x.3 + 1e-10 * largest) {
-                        let key = format!("a: {}, b: {}, classes: {:?}", x.0, x.1, x.2);
-                        for (name, d) in [("base", &base.4), ("shifted", &other.4)] {
-                            for line in d.iter().filter(|l| l.contains(&key)) {
-                                eprintln!("{name}: {line}");
+                let parts = fold.sector_parts(p, pattern);
+                let (whole, eta) = (parts.iter().map(|x| x.1).sum::<f64>(), own + floor / gap(p) + floor / distance(p));
+                let mut at_p = 0.0;
+                for (l, x) in parts {
+                    // The sector's frequency to its terms' rounding (`equal`'s), at the least distance of its pole from p's
+                    // offsets: the part, of 1/d², moves by 2x δΩ/d.
+                    let sector = fold.sectors.iter().find(|s| s.links.iter().any(|m| m.0 == l)).expect("a part's sector");
+                    let lambda = fold.eigen.values[p];
+                    let mut pole = f64::INFINITY;
+                    for (to, _) in fold.targets(sector, p) {
+                        let k = &fold.stills[to];
+                        for q in 0..k.n {
+                            for o in [0.0, pattern, -pattern] {
+                                pole = pole.min((lambda + C64::real(sector.frequency + o) - k.s[q * k.n + q]).abs());
                             }
                         }
-                        panic!("the part of the link {:?}: {} against {} (largest {largest:.3e})", (x.0, x.1, x.2), x.3, y);
+                    }
+                    let beat = 2.0 * x * crate::units::rounding(crate::request::STATES) * sector.scale / pole;
+                    let rounding = 2.0 * (x * whole).sqrt() * eta + whole * eta * eta + beat;
+                    at_p += rounding;
+                    match sectors.iter_mut().find(|s| s.0 == l || s.0 == l.reversed()) {
+                        Some(s) => (s.1, s.2) = (s.1 + x, s.2 + rounding),
+                        None => sectors.push((l, x, rounding)),
+                    }
+                }
+                // The moves at this eigenstate (`closure`): its parts largest first until what is left is within the share.
+                let (total, mut parts) = fold.criterion_one(&blocks, p, pattern, 1.0, &|_| 1.0);
+                if rate(total.sqrt()) < 1.0 && total > 0.0 {
+                    error_floor += (1.0 + 1.0 / total.sqrt()) * at_p;
+                }
+                if rate(total.sqrt()) > share {
+                    parts.sort_by(|x, y| y.1.total_cmp(&x.1));
+                    let mut rest = total;
+                    for (o, x) in parts {
+                        if !(rate(rest.max(0.0).sqrt()) > share) {
+                            break;
+                        }
+                        rest -= x;
+                        moves.push(match o {
+                            Object::Block { block, class, .. } => format!("block {block} {class:?}"),
+                            Object::Link(l) => format!("{:?}", if (l.a, l.b) <= (l.b, l.a) { l } else { l.reversed() }),
+                        });
                     }
                 }
             }
-            for (a, b) in base.1.iter().zip(&other.1) {
-                assert!((a - b).abs() <= 1e-8 * a.max(1e-6), "a remainder {a} against {b}");
-            }
-            assert!((base.2 - other.2).abs() <= 1e-8 * base.2.max(1e-6), "the error {} against {}", base.2, other.2);
-            for (object, x) in &base.3 {
-                let y = other.3.iter().find(|o| o.0 == *object).map_or(0.0, |o| o.1);
-                assert!((x - y).abs() <= 1e-8 * x.max(1e-6), "the part of {object:?}: {x} against {y}");
+            moves.sort();
+            moves.dedup();
+            // And every part's rounding at the scale of the whole sum: a link of a structural zero, its part a rounding's.
+            let whole: f64 = sectors.iter().map(|x| x.1).sum();
+            sectors.iter_mut().for_each(|x| x.2 += gamma * whole);
+            let mut rho: Vec<f64> = like.iter().map(|&p| fold.block_parts(&blocks, p, Some(&fold.offsets(p, pattern, 1.0, &|_| 1.0))).0).collect();
+            rho.sort_by(f64::total_cmp);
+            let psi: Vec<C64> = (0..n).map(|s| if s < ground { C64::real(1.0) } else { C64::ZERO }).collect();
+            let errors = errors(&fold, &blocks, &psi, pattern, &[]);
+            let error = errors.parts.iter().map(|p| p.1).sum::<f64>() + errors.links.iter().map(|p| p.1).sum::<f64>() + errors.outside.iter().sum::<f64>();
+            (sectors, rho, own + 2.0 * floor / least, (error, errors.parts, error_floor), moves)
+        };
+        for (slow, kept) in [(&first, &none), (&slow, &closed.kept)] {
+            let base = read(slow, kept);
+            for _ in 0..3 {
+                let mut shifted = slow.clone();
+                let shifts: Vec<f64> = (0..shifted.frames.len()).map(|_| 200.0 * (uniform() - 0.5)).collect();
+                // A frame moved by c is a sum of one term more: its terms' size grows by |c| (`Sized`).
+                for ((f, size), g) in shifted.frames.iter_mut().zip(shifted.sizes.iter_mut()).zip(&slow.groups) {
+                    (*f, *size) = (*f + shifts[*g], *size + shifts[*g].abs());
+                }
+                let other = read(&shifted, kept);
+                assert_eq!(base.4, other.4, "the moves at {r:?}");
+                decided += base.4.len();
+                // Every link's part the same within the two folds' floors, either way round.
+                for (a, b) in [(&base.0, &other.0), (&other.0, &base.0)] {
+                    for x in a.iter() {
+                        let (y, floor) = b.iter().find(|y| y.0 == x.0 || y.0 == x.0.reversed()).map_or((0.0, 0.0), |y| (y.1, y.2));
+                        assert!((x.1 - y).abs() <= x.2 + floor, "the part of the link {:?}: {} against {y} (floors {:.2e}, {floor:.2e})", x.0, x.1, x.2);
+                    }
+                }
+                let relative = base.2 + other.2;
+                for (a, b) in base.1.iter().zip(&other.1) {
+                    assert!((a - b).abs() <= relative * a.abs(), "a remainder {a} against {b}");
+                }
+                // The error and its parts: of the eigenvectors, relatively, and of the sectors' parts, their floors.
+                let floors = base.3 .2 + other.3 .2;
+                assert!((base.3 .0 - other.3 .0).abs() <= relative * base.3 .0 + floors, "the error {} against {} (floors {floors:.2e})", base.3 .0, other.3 .0);
+                for (object, x) in &base.3 .1 {
+                    let y = other.3 .1.iter().find(|o| o.0 == *object).map_or(0.0, |o| o.1);
+                    assert!((x - y).abs() <= relative * x + floors, "the part of {object:?}: {x} against {y}");
+                }
             }
         }
     }
+    println!("{decided} moves, the same in every gauge");
+    assert!(decided > 0, "the first rounds make moves");
 }
 
 /// A block of two classes (the coordinator's test): one ground state driven into one excited state by two classes of
@@ -708,7 +862,7 @@ fn a_block_is_kept_for_the_class_of_its_larger_part_and_turns_in_that_class_s_fr
         // Kept for that class: the drive's link, the frames from it.
         let kept = Kept { blocks: vec![0], links: vec![Link { a: ground, b: 0, classes: (None, Some(larger)) }], ..Kept::default() };
         let slow = slow_of(&blocks, &kept, &classes, &lv);
-        assert!(same(classes[larger].nu + slow.frames[0], slow.frames[ground]), "the explicit state turns in its class's frame");
+        assert!(equal(classes[larger].nu + slow.frames[0] - slow.frames[ground], classes[larger].nu.abs() + slow.sizes[0] + slow.sizes[ground]), "the explicit state turns in its class's frame");
         let fold = folded(&lv, &classes, &slow);
         assert!(fold.direct[(1, 0)].abs() > 0.0, "the kept class's drive is the static generator's");
         let other = fold.replicas.iter().find(|rep| rep.feeds.iter().any(|f| f.class == Some(smaller))).expect("the other class's replica");
@@ -1002,11 +1156,11 @@ fn a_group_s_replica_is_solved_on_its_own_places_whatever_another_group_holds_on
     let (gamma, nu, g) = (38.1, -120.0, 30.0);
     let lv = levels(&[0.0, 5.0], &[0.0], gamma, &[0]);
     let classes = vec![class(nu, 2, 1, &[(0, 1, C64::real(g))])];
-    let slow = Slow { explicit: vec![0], frames: vec![0.0, 0.0, nu], groups: vec![0, 1, 0] };
+    let slow = Slow { explicit: vec![0], frames: vec![0.0, 0.0, nu], sizes: vec![0.0, 0.0, nu.abs()], groups: vec![0, 1, 0] };
     let whole = folded(&lv, &classes, &slow);
     assert!(whole.generator.data.iter().all(|z| z.re.is_finite() && z.im.is_finite()), "a finite fold");
-    let first = folded(&levels(&[0.0], &[0.0], gamma, &[0]), &[class(nu, 1, 1, &[])], &Slow::single(vec![0], vec![0.0, nu]));
-    let second = folded(&levels(&[5.0], &[0.0], gamma, &[0]), &[class(nu, 1, 1, &[(0, 0, C64::real(g))])], &Slow::single(vec![], vec![0.0]));
+    let first = folded(&levels(&[0.0], &[0.0], gamma, &[0]), &[class(nu, 1, 1, &[])], &single(vec![0], vec![0.0, nu]));
+    let second = folded(&levels(&[5.0], &[0.0], gamma, &[0]), &[class(nu, 1, 1, &[(0, 0, C64::real(g))])], &single(vec![], vec![0.0]));
     let mut apart: Vec<C64> = first.eigen.values.iter().chain(&second.eigen.values).copied().collect();
     let mut together = whole.eigen.values.clone();
     for v in [&mut apart, &mut together] {
@@ -1150,7 +1304,7 @@ impl Fold {
     /// (`settle`, on n × n matrices alone); None where it does not settle.
     fn series_generator(&self, forms: &[Mat], z0: C64) -> Option<Mat> {
         let n = self.size();
-        let (h, exists) = settle(
+        let (h, exists, _) = settle(
             &self.direct,
             |h| {
                 let mut e = h.clone();
@@ -1442,7 +1596,7 @@ fn a_raman_resonant_photon_coherence_is_kept_and_a_far_one_dropped_as_the_master
         let dx = detuning + shift(a) - shift(b);
         // The fold, and its cross terms at the start.
         let classes = vec![class(delta, 2, 1, &[(0, 0, C64::real(a))]), class(delta - e2 + dx, 2, 1, &[(0, 1, C64::real(b))])];
-        let slow = Slow { explicit: vec![], frames: vec![0.0, beta], groups: vec![0, 0] };
+        let slow = Slow { explicit: vec![], frames: vec![0.0, beta], sizes: vec![0.0, beta], groups: vec![0, 0] };
         let f = fold(&levels, &classes, &slow, &Replicas::of(&classes, &slow, 2), None);
         assert!(f.exists, "{name}: the fold exists");
         let pairs = start_cross_terms(&f, &emission).0;
@@ -1574,7 +1728,7 @@ fn the_coherences_old_and_combined_frequencies_at_the_prior_s_atoms() {
                     .iter()
                     .map(|class| {
                         let m = model.clusters[class.landing].states.len();
-                        Images { frequency: -model.omega(&class.beats[0]), landing: landed.iter().position(|&l| l == class.landing).unwrap(), images: vec![std::array::from_fn(|_| vec![C64::ZERO; m]); n], links: vec![] }
+                        Images { frequency: -model.omega(&class.beats[0]), scale: model.axes.size(&class.beats[0]), landing: landed.iter().position(|&l| l == class.landing).unwrap(), images: vec![std::array::from_fn(|_| vec![C64::ZERO; m]); n], links: vec![] }
                     })
                     .collect();
                 for &p in &like {
@@ -1758,3 +1912,4 @@ fn the_closure_s_and_the_readings_cost_by_part() {
         println!("{name}: {reads} readings, {:.3} ms each: the atom's run fold {:.3} ({:.1} sectors), errors {:.3}, the definition's fold {:.3}, its definitions {:.3}", 1e3 * whole / k, 1e3 * run / k, folded as f64 / k, 1e3 * errs / k, 1e3 * definition / k, 1e3 * defined / k);
     }
 }
+

@@ -118,6 +118,10 @@ impl Beat {
     pub fn value(&self, axes: &[f64]) -> f64 {
         self.n.iter().zip(axes).map(|(&n, &a)| n as f64 * a).sum::<f64>() / self.d as f64
     }
+    /// The size of the terms its value is the sum of, Σ_k |n_k a_k| / |d|: what the value's rounding is of.
+    pub fn size(&self, axes: &[f64]) -> f64 {
+        self.n.iter().zip(axes).map(|(&n, &a)| (n as f64 * a).abs()).sum::<f64>() / (self.d as f64).abs()
+    }
 }
 
 impl cluster::Exact for Beat {

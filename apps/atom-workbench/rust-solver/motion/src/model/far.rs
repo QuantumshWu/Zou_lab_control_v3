@@ -123,6 +123,11 @@ impl Axes {
     pub(crate) fn omega(&self, beat: &Beat) -> f64 {
         RAD_PER_US_PER_MHZ * beat.value(&self.0)
     }
+    /// The size of the terms a beat's value is the sum of (rad/µs; `Beat::size`): what its rounding is of (elim.rs
+    /// `equal`).
+    pub(crate) fn size(&self, beat: &Beat) -> f64 {
+        RAD_PER_US_PER_MHZ * beat.size(&self.0)
+    }
     /// A component's frequency ν exactly: the co-rotating δ_ω (the frequency's index), the counter-rotating −(δ_ω + 2ν_frame).
     pub(crate) fn component(&self, light: &Light, c: Component) -> Beat {
         let mut n: Vec<i64> = light.frequencies[c.frequency].index.iter().map(|&x| x as i64).collect();
