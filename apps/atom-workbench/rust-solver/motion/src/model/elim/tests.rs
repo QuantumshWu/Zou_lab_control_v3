@@ -840,7 +840,9 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
 /// different frequencies. The block's part of the error at the ground state goes to the classes by their responses'
 /// shares (`class_shares`); with the two couplings swapped the larger share swaps with them. Kept for the class of the
 /// larger part, the block is explicit at that class's replica: its drive static in the frames (residual zero, A's), the
-/// other class's coupling folded at its own replica, where the explicit state is Q.
+/// other class's coupling a turning coupling of P at its residual beat -- the explicit state is P at every frequency,
+/// its copy at the other class's a Sambe sector (ELIMINATION v12) --: no replica feeds it, no Q holds the explicit state,
+/// and the sector of that beat holds the other class's link.
 #[test]
 fn a_block_is_kept_for_the_class_of_its_larger_part_and_turns_in_that_class_s_frame() {
     let (gamma, ground) = (38.1, 1);
@@ -864,8 +866,11 @@ fn a_block_is_kept_for_the_class_of_its_larger_part_and_turns_in_that_class_s_fr
         assert!(equal(classes[larger].nu + slow.frames[0] - slow.frames[ground], classes[larger].nu.abs() + slow.sizes[0] + slow.sizes[ground]), "the explicit state turns in its class's frame");
         let fold = folded(&lv, &classes, &slow);
         assert!(fold.direct[(1, 0)].abs() > 0.0, "the kept class's drive is the static generator's");
-        let other = fold.replicas.iter().find(|rep| rep.feeds.iter().any(|f| f.class == Some(smaller))).expect("the other class's replica");
-        assert!(other.q.contains(&0), "the explicit state is Q at the other class's replica");
+        assert!(fold.replicas.iter().all(|rep| rep.feeds.iter().all(|f| f.class != Some(smaller)) && !rep.q.contains(&0)), "no replica folds the explicit state, at any frequency");
+        let sectors = sectored(&lv, &classes, &slow, false);
+        let beat = classes[smaller].nu + slow.frames[0] - slow.frames[ground];
+        let link = Link { a: ground, b: 0, classes: (None, Some(smaller)) };
+        assert!(sectors.sectors.iter().any(|s| equal(s.frequency - beat, s.scale + classes[smaller].nu.abs() + slow.sizes[0] + slow.sizes[ground]) && s.links.iter().any(|l| l.0 == link)), "the other class's drive is the sector of its residual beat {beat}");
     }
 }
 
@@ -922,7 +927,7 @@ fn the_fold_s_series_about_a_reference_is_the_fold_within_its_remainder_and_fall
     let centred = far + C64::real(0.5 * (low + high));
     println!("the near light's scalar shift over the grid: {low:.3} to {high:.3} rad/us");
     for (name, z0) in [("far levels", far), ("far levels and the range's centre", centred), ("levels with the point's scalar shift", shifted)] {
-        let q = fold.series_ratio(z0);
+        let q = fold.series_bound(z0);
         println!("PGC3D F=2 at {peak:?}, z0 at the {name}: the series' ratio q = {q:.4}");
         assert!(q < 1.0, "the series converges here: q = {q}");
         let mut last = f64::INFINITY;
@@ -998,7 +1003,7 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         // The reference: the point's scalar shift's centre (here the point's own); the orders it asks.
         let far = (0..n).map(|i| fold.direct[(i, i)].re).sum::<f64>() / n as f64;
         let z0 = fold.eigen.values.iter().map(|z| z.re).sum::<f64>() / n as f64;
-        let q = fold.series_ratio(C64::real(z0));
+        let q = fold.series_bound(C64::real(z0));
         let x_size = fold.evaluated_share(&vec![z0; n]).0;
         assert!(q < 1.0 && x_size < 1.0, "{name}: the series converge here");
         // The proven bounds (this test's; the run books what it measures).
@@ -1328,13 +1333,23 @@ impl Fold {
     /// remainder after order K is within q^{K+1}/(1 − q) of the fold, relatively, where q < 1 (the Neumann series'
     /// radius) -- the order an evaluation takes is the least whose remainder is within the share (criterion one's ρ
     /// books it).
-    fn series_ratio(&self, z0: C64) -> f64 {
-        self.series_ratio_about(&vec![z0.re; self.size()])
+    fn series_bound(&self, z0: C64) -> f64 {
+        self.series_bound_about(&vec![z0.re; self.size()])
     }
-    /// The series' ratio about Z₀ = diag(z_y), q = ‖H − Z₀‖₂/d, d the least distance of z_y + f over the places of
-    /// each replica's group (ELIMINATION v11).
-    fn series_ratio_about(&self, z0: &[f64]) -> f64 {
+    /// The series' bound about Z₀ = diag(z_y), q = ‖H − Z₀‖₂/d, d the least distance of z_y + f over the places of
+    /// each replica's group (ELIMINATION v11): its remainder after order K within q^{K+1}/(1 − q) where E = H − Z₀ is
+    /// normal enough for ‖E‖ to bound its spectrum -- the tests' proven bound; the engine takes the step's own radius
+    /// (`Fold::series_ratio`, ELIMINATION v12).
+    fn series_bound_about(&self, z0: &[f64]) -> f64 {
         self.series_norm(z0) / self.series_distance(z0, None)
+    }
+    /// ‖H − Z₀‖₂ (`series_bound_about`).
+    fn series_norm(&self, z0: &[f64]) -> f64 {
+        let mut e = self.generator.clone();
+        for i in 0..self.size() {
+            e[(i, i)] -= C64::real(z0[i]);
+        }
+        crate::linalg::hermitian_eigen(&e.adjoint_product(&e)).values.iter().fold(0.0_f64, |m, &x| m.max(x)).sqrt()
     }
     /// The series' generator about Z₀ = diag(z_y) to order K (ELIMINATION v11): column s of the Sylvester equation,
     /// (z_s + f − K)T[:, s] = W_s − (T E)[:, s], E = H − Z₀, gives T = Σ_k T⁽ᵏ⁾, T⁽⁰⁾[:, s] = R₀(s)W_s,
@@ -1429,15 +1444,15 @@ fn a_series_radius_is_read_on_the_blocks_its_terms_hold() {
             if every < norm && fold.series_distance(&z0, None) > norm {
                 unheld += 1;
             }
-            let q = fold.series_ratio_about(&z0);
+            let q = fold.series_bound_about(&z0);
             if worst.as_ref().is_none_or(|w| q > w.0) {
                 worst = Some((q, fold, z0));
             }
         }
     }
-    println!("S2Q, the probe's F′ = 3 block kept for F = 2 m = −2, −1, 0: {} clusters; {unheld} cluster folds with a block in no term nearer than ‖H − z₀‖; series q = {:.3e}, x = {:.3e}", model.clusters().len(), model.series.ratio, model.series.excited);
+    println!("S2Q, the probe's F′ = 3 block kept for F = 2 m = −2, −1, 0: {} clusters; {unheld} cluster folds with a block in no term nearer than ‖H − z₀‖; series q = {:?}, x = {:.3e}", model.clusters().len(), model.series.ratios, model.series.excited);
     assert!(unheld > 0, "the scene holds a block the series does not hold within ‖H − z₀‖ of z₀ + f");
-    assert!(model.series.exists(), "the series converge on the blocks they hold: q = {}, x = {}", model.series.ratio, model.series.excited);
+    assert!(model.series.exists() && (0..model.clusters().len()).all(|k| model.series.holds(k)), "the series converge on the blocks they hold: q = {:?}, x = {}", model.series.ratios, model.series.excited);
     assert_eq!(model.series_block(), None, "the closure makes no block explicit");
     // The series' orders at its largest ratio converge as that ratio bounds them.
     let (q, fold, z0) = worst.expect("a cluster with a fold");
@@ -1571,7 +1586,7 @@ fn the_resolvent_s_bounds_are_continuous_in_the_folded_block_s_departure_from_no
         let f = folded(&levels, &classes, &at_rest(1));
         assert!(f.exists);
         let rho: f64 = f.offsets(0, 10.0, 1.0, &|_| 1.0).iter().map(|x| x * x).sum::<f64>().sqrt();
-        (rho, f.series_ratio(C64::real(f.eigen.values[0].re)))
+        (rho, f.series_bound(C64::real(f.eigen.values[0].re)))
     };
     let (rho0, q0) = read(0.0);
     println!("ε 0: ρ {rho0:.6e}, q {q0:.6e}");
@@ -1651,7 +1666,7 @@ fn a_raman_resonant_photon_coherence_is_kept_and_a_far_one_dropped_as_the_master
         let slow = Slow { explicit: vec![], frames: vec![0.0, beta], sizes: vec![0.0, beta], groups: vec![0, 0] };
         let f = fold(&levels, &classes, &slow, &Replicas::of(&classes, &slow, 2), None);
         assert!(f.exists, "{name}: the fold exists");
-        let pairs = start_cross_terms(&f, &emission).0;
+        let pairs = start_cross_terms(&f, &emission);
         let raman = |pair: &[(Option<usize>, usize, usize); 2]| pair.contains(&(Some(0), 0, 0)) && pair.contains(&(Some(1), 1, 0));
         let kept = pairs.iter().any(raman);
         // The old number at the equal superposition: the two classes' interference rate over Ω.
@@ -1666,7 +1681,7 @@ fn a_raman_resonant_photon_coherence_is_kept_and_a_far_one_dropped_as_the_master
         let omega = images[ia].frequency - images[ib].frequency;
         let old = gamma_old / omega.abs();
         let landings = vec![Landing::of(&f, &[0, 1])];
-        let read = cross_terms(&images, &landings, &f.eigen.values, &[C64::ONE, C64::ONE], norm, 0.0).into_iter().find(|t| (t.0, t.1) == (ia.min(ib), ia.max(ib))).map_or(0.0, |t| t.2);
+        let read = cross_terms(&images, &landings, &f.eigen.values, &[C64::ONE, C64::ONE], norm).into_iter().find(|t| (t.0, t.1) == (ia.min(ib), ia.max(ib))).map_or(0.0, |t| t.2);
         // The exact three-level master equation in the lasers' frame, and the two ground states' with both classes in
         // one jump (the elimination's) and with each class apart (the split's).
         let h3 = Mat::from_fn(3, 3, |i, j| match (i, j) {
@@ -1780,7 +1795,7 @@ fn the_coherences_old_and_combined_frequencies_at_the_prior_s_atoms() {
                     .iter()
                     .map(|class| {
                         let m = model.clusters[class.landing].states.len();
-                        Images { frequency: -model.omega(&class.beats[0]), scale: model.axes.size(&class.beats[0]), landing: landed.iter().position(|&l| l == class.landing).unwrap(), images: vec![std::array::from_fn(|_| vec![C64::ZERO; m]); n], blocks: vec![] }
+                        Images { frequency: -model.omega(&class.beats[0]), scale: model.axes.size(&class.beats[0]), landing: landed.iter().position(|&l| l == class.landing).unwrap(), images: vec![std::array::from_fn(|_| vec![C64::ZERO; m]); n] }
                     })
                     .collect();
                 for &p in &like {
@@ -1802,8 +1817,8 @@ fn the_coherences_old_and_combined_frequencies_at_the_prior_s_atoms() {
                     let norm = norm_sqr(&psi);
                     // The same parts over Ω: every eigenvalue at zero.
                     let flat: Vec<Landing> = landings.iter().map(|l| Landing { values: vec![C64::ZERO; l.values.len()], left: l.left.clone() }).collect();
-                    let at_omega = cross_terms(&images, &flat, &vec![C64::ZERO; n], &coefficients, norm, 0.0);
-                    for (a, b, x) in cross_terms(&images, &landings, &source.eigen.values, &coefficients, norm, 0.0) {
+                    let at_omega = cross_terms(&images, &flat, &vec![C64::ZERO; n], &coefficients, norm);
+                    for (a, b, x) in cross_terms(&images, &landings, &source.eigen.values, &coefficients, norm) {
                         let unit = coherence(classes, a, b);
                         if kept.contains(&unit) {
                             continue;
@@ -2162,7 +2177,7 @@ fn the_first_order_about_each_place_s_reference_is_the_one_resolvent_formula_whe
             let amplitudes = model.light.amplitudes(r);
             let Some((fold, levels, far, _)) = model.cluster_fold(k, &amplitudes, true) else { continue };
             let n = fold.size();
-            let mean = far.iter().sum::<f64>() / n as f64 + model.series.centre[k];
+            let mean = far.iter().sum::<f64>() / n as f64 + model.series.centre_of(k, false);
             let one = vec![mean; n];
             let (generator, landing) = fold.evaluated_of_one(&levels, mean, orders);
             assert_eq!(fold.evaluated(&levels, &one, orders).data, generator.data, "the generator bit for bit at {r:?}");
@@ -2183,4 +2198,194 @@ fn the_first_order_about_each_place_s_reference_is_the_one_resolvent_formula_whe
     assert!(read > 0);
 }
 
+
+
+/// The explicit states are P at every frequency (ELIMINATION v12; `fold_about`): an explicit state's copy at another
+/// frequency is P's Sambe sector, never a Q state. On random schemes -- two to four ground states, two excited blocks
+/// of two or three states each (couplings inside a block: the explicit–explicit entries), 300 rad/µs apart, two or
+/// three classes of random frequencies and couplings, each closed at a random velocity from nothing kept (`closure`:
+/// its own blocks, links and frames) --
+/// - no replica's Q holds an explicit state of its group, at any frequency;
+/// - no ground-like eigenstate's block part, and so no closure move, names a block explicit in its group;
+/// - every turning entry of an explicit state -- of two explicit states, or a drive into one -- is one sector's link;
+/// - criterion three reads the run's classes alone (`Fold::photons`, `cross_terms`): the fold with every sector left
+///   out has no class the static fold has not, frequency by frequency -- a left-out sector emits no photon in the run,
+///   no channel to join --; every pair the prior keeps (`start_cross_terms`, `Unit::Coherence`) is of the closure's
+///   classes, its own photons' and its carried sectors'.
+#[test]
+fn an_explicit_state_is_p_at_every_frequency_and_its_copies_sectors() {
+    let mut stream = crate::random::Stream::new(11, crate::random::Purpose::Initial, 0, 0);
+    let mut u = || stream.uniform();
+    let (mut explicit_seen, mut turning_seen) = (0, 0);
+    for _ in 0..40 {
+        let ng = 2 + (3.0 * u()) as usize;
+        let (b0, b1) = (2 + (2.0 * u()) as usize, 2 + (2.0 * u()) as usize);
+        let ne = b0 + b1;
+        let grounds: Vec<f64> = (0..ng).map(|_| 60.0 * (u() - 0.5)).collect();
+        let excited: Vec<f64> = (0..ne).map(|e| if e < b0 { 0.0 } else { 300.0 } + 17.6 * e as f64).collect();
+        let lands: Vec<usize> = (0..ne).map(|e| e % ng).collect();
+        let mut lv = levels(&grounds, &excited, 38.1, &lands);
+        for (lo, hi) in [(0, b0), (b0, ne)] {
+            for x in lo..hi {
+                for y in x + 1..hi {
+                    let v = C64::new(3.0 * (u() - 0.5), 3.0 * (u() - 0.5));
+                    lv.excited[(x, y)] = v;
+                    lv.excited[(y, x)] = v.conj();
+                }
+            }
+        }
+        let blocks = vec![(0..b0).collect::<Vec<_>>(), (b0..ne).collect::<Vec<_>>()];
+        let count = 2 + (2.0 * u()) as usize;
+        let mut classes: Vec<Class> = vec![];
+        for _ in 0..count {
+            let mut entries: Vec<(usize, usize, C64)> = vec![];
+            for e in 0..ne {
+                for g in 0..ng {
+                    if u() < 0.6 {
+                        entries.push((e, g, C64::new(60.0 * u(), 20.0 * (u() - 0.5))));
+                    }
+                }
+            }
+            let nu = 80.0 * (u() - 0.5) - 17.6 * (b0 as f64) * u();
+            classes.push(class(nu, ng, ne, &entries));
+        }
+        let velocity = [u() - 0.5, u() - 0.5, u() - 0.5];
+        let closed = closure(&lv, &classes, &blocks, velocity, &Kept::default());
+        let fold = &closed.fold;
+        let place_of = |e: usize| fold.explicit.iter().position(|&x| x == e).map(|i| ng + i);
+        explicit_seen += usize::from(!fold.explicit.is_empty());
+        for rep in &fold.replicas {
+            for &e in &rep.q {
+                assert!(place_of(e).is_none_or(|p| fold.members[rep.group].iter().all(|&m| m != p)), "Q at {} holds explicit state {e} of its group", rep.frequency);
+            }
+        }
+        for p in (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5) {
+            let group = fold.groups[p];
+            for (b, ..) in fold.block_parts(&blocks, p, None).1 {
+                assert!(blocks[b].iter().all(|&e| place_of(e).is_none_or(|x| fold.members[group].iter().all(|&m| m != x))), "a part on block {b}, explicit in eigenstate {p}'s group");
+            }
+        }
+        // Every turning entry of an explicit state is one sector's link (folded or carried), none a replica's feed.
+        let slow = slow_of(&blocks, &closed.kept, &classes, &lv);
+        // Criterion three's classes: the run's alone.
+        let emission: [Mat; 3] = std::array::from_fn(|a| Mat::from_fn(ng, ng + ne, |g, x| if a == 0 && x >= ng && lands[x - ng] == g { C64::real(38.1_f64.sqrt()) } else { C64::ZERO }));
+        let keys = |f: &Fold| f.photons(&emission, &(0..f.size()).collect::<Vec<_>>()).0.iter().map(|c| (c.landing, c.frequency, c.scale)).collect::<Vec<_>>();
+        let (still, left_out) = (keys(&folded(&lv, &classes, &slow)), keys(&sectored(&lv, &classes, &slow, false)));
+        assert!(left_out.iter().all(|k| still.iter().any(|x| x.0 == k.0 && equal(x.1 - k.1, x.2 + k.2))), "a left-out sector makes no photon class: {left_out:?} against {still:?}");
+        let like: Vec<usize> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
+        let (images, _) = fold.photons(&emission, &like);
+        assert!(start_cross_terms(fold, &emission).len() <= images.len() * images.len(), "the kept pairs are of the run's classes");
+        let n = fold.size();
+        let label = |s: usize| if s < ng { s } else { ng + fold.explicit[s - ng] };
+        for x in ng..n {
+            for y in 0..n {
+                if slow.groups[x] != slow.groups[y] || x == y {
+                    continue;
+                }
+                let entries: Vec<(f64, f64, (Option<usize>, Option<usize>))> = if y >= ng {
+                    if lv.excited[(fold.explicit[x - ng], fold.explicit[y - ng])] != C64::ZERO { vec![(slow.frames[y] - slow.frames[x], slow.sizes[x] + slow.sizes[y], (None, None))] } else { vec![] }
+                } else {
+                    classes.iter().enumerate().filter(|(_, c)| c.beams[0].coupling[(fold.explicit[x - ng], y)] != C64::ZERO).map(|(k, c)| (c.nu + slow.frames[y] - slow.frames[x], c.nu.abs() + slow.sizes[x] + slow.sizes[y], (None, Some(k)))).collect()
+                };
+                for (beat, scale, cls) in entries.into_iter().filter(|e| !equal(e.0, e.1)) {
+                    let link = Link { a: label(x), b: label(y), classes: cls };
+                    let holding = fold.sectors.iter().chain(&fold.carried).filter(|s| equal(s.frequency - beat, s.scale + scale) && s.links.iter().any(|l| l.0 == link)).count();
+                    assert_eq!(holding, 1, "the turning entry {link:?} at {beat} is one sector's link");
+                    turning_seen += 1;
+                }
+            }
+        }
+    }
+    println!("{explicit_seen} of 40 closures with explicit states, {turning_seen} turning entries of explicit states, each one sector's link");
+    assert!(explicit_seen > 0 && turning_seen > 0, "the schemes reach explicit states and their turning entries");
+}
+
+/// A cluster's series order is a level of its own (ELIMINATION v12; `Series::holds`, `Model::first_order_holds`): on
+/// PGC1D_TILT_2's model of the finish head's refusal -- its first model and its first attempt's keep (the normalization's
+/// first order, the F′ = 3 block for both PGC lights from F = 2: a cluster of F = 2 and seven explicit states, its
+/// drives up to 83 rad/µs) --
+/// - the model exists, the series' ratio (`Fold::series_ratio`: the step's spectral radius) below one at every prior atom
+///   on that cluster (about 0.08, where with the explicit states' copies in Q it was 2.3–2.4 and their bound ‖E‖/d 6.5),
+///   and the series' own terms fall within its powers;
+/// - per cluster, its first order a level it can take exactly where its own series converges (and its places have one
+///   reference, the transition, `Model::one_reference`);
+/// - the evaluation at order 0 is within the share of the definition on every eigenstate, ground-like and explicit-like,
+///   and order 1 nearer still.
+#[test]
+fn a_cluster_s_series_order_is_its_own_level_and_tilt2_s_explicit_cluster_converges() {
+    use super::super::{Component, Model, Unit};
+    let req = request("PGC1D_TILT_2");
+    let light = crate::field::Light::new(&req);
+    let initial = crate::solve::components(&req);
+    let mut kept = vec![];
+    let _ = crate::solve::closed(&req, &light, &mut kept, &initial, req.temperature_uk).expect("the first model");
+    kept.push(Unit::Normalization { order: 1 });
+    for f in [0, 1] {
+        kept.push(Unit::Block { block: 5, component: Component { frequency: f, counter: false }, grounds: 248 });
+    }
+    let mut model = Model::new(&req, &light, &kept).expect("the model");
+    let points = crate::solve::atoms(&model, &req, &light, &initial, req.temperature_uk).expect("atoms");
+    model.referenced(&points);
+    assert!(model.series.exists(), "the model exists: {:?}", model.series.stop);
+    let running = model.running();
+    for c in 0..model.clusters.len() {
+        assert_eq!(model.series.holds(c), model.series.ratios[c] < 1.0);
+        assert_eq!(model.first_order_holds(c, &running), model.series.holds(c) && model.one_reference(c, &running), "cluster {c}");
+    }
+    let k = (0..model.clusters.len()).max_by_key(|&k| model.clusters[k].states.len()).unwrap();
+    assert!(model.clusters[k].states.len() == 12 && model.series.holds(k), "the explicit cluster's series converges: {:?}", model.series.ratios);
+    let share = super::share();
+    let (mut radius, mut worst) = (0.0_f64, [[0.0_f64; 2]; 2]);
+    for &(r, _) in &points {
+        let amplitudes = light.amplitudes(r);
+        let (fold, levels, far, left) = model.cluster_fold(k, &amplitudes, true).unwrap();
+        let z0 = model.reference_of(k, &far);
+        let rho = fold.series_ratio(&z0, Some(&left));
+        radius = radius.max(rho);
+        // The series' terms, T⁽ᵏ⁺¹⁾[:, s] = −R₀(s)(T⁽ᵏ⁾E)[:, s], twenty steps on: within (2ρ)²⁰ of the first.
+        let mut e = fold.generator.clone();
+        for y in 0..fold.size() {
+            e[(y, y)] -= C64::real(z0[y]);
+        }
+        for (rep, r0) in fold.replicas.iter().zip(fold.responses_about(&z0, 0)) {
+            let (mut t, first) = (r0[0].clone(), r0[0].frobenius());
+            for _ in 0..20 {
+                let te = t.product(&e);
+                let mut next = Mat::zeros(t.rows, t.cols);
+                for &s in &fold.members[rep.group] {
+                    let column: Vec<C64> = (0..t.rows).map(|x| -te[(x, s)]).collect();
+                    let solved = rep.k.resolvent(C64::real(z0[s] + rep.frequency), &column);
+                    for x in 0..t.rows {
+                        next[(x, s)] = solved[x];
+                    }
+                }
+                t = next;
+            }
+            assert!(t.frobenius() <= first * (2.0 * rho).powi(20), "the terms fall as the ratio's powers");
+        }
+        let (definition, whole) = model.definition_fold(k, &amplitudes).unwrap();
+        let defined = definition.definitions(&whole).0;
+        let orders = model.orders_of(k, &running);
+        for (order, evaluated) in [0, 1].map(|series| (series, fold.evaluated(&levels, &z0, Orders { series, ..orders }))) {
+            for p in 0..definition.size() {
+                let x = Fold::evaluation_error(&evaluated, &defined, &z0, &definition.right(p));
+                let kind = usize::from(definition.ground_weight(p) < 0.5);
+                worst[order][kind] = worst[order][kind].max(x);
+            }
+        }
+    }
+    println!("the explicit cluster: series' ratio {radius:.4e} at most; the evaluation's error at order 0 ground-like {:.3e}, explicit-like {:.3e}; at order 1 {:.3e}, {:.3e} (share {share:.4})", worst[0][0], worst[0][1], worst[1][0], worst[1][1]);
+    // What a reading costs there, criterion three on the run's classes alone (the measure the module documentation quotes).
+    let units = model.candidates();
+    let n = model.clusters[k].states.len();
+    let (r, v) = points[0];
+    let sample = super::super::Sample { cluster: k, at: super::super::Point { r, kappa: v.map(|x| x / model.hbar_over_mass), t: 0.0 }, psi: (0..n).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect() };
+    let started = std::time::Instant::now();
+    let _ = model.readings(&units, &sample, None);
+    let classes = model.classes[k].len();
+    println!("a reading in {:.3} s: {classes} photon classes of the cluster, {} pairs at most", started.elapsed().as_secs_f64(), classes * (classes - 1) / 2);
+    assert!(radius < 1.0);
+    assert!(worst[0][0] <= share && worst[0][1] <= share, "order 0 within the share: {worst:?}");
+    assert!(worst[1][0] <= worst[0][0] && worst[1][1] <= worst[0][1], "order 1 nearer: {worst:?}");
+}
 

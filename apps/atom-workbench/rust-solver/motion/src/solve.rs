@@ -811,11 +811,14 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
 /// The model of the units `kept` and of every unit whose fold does not exist where the reach's atoms are, added to
 /// `kept` (module documentation, # The model's prior; `failing`): the units that fail kept, and the model they make
 /// read again, until none fails -- a drive up its levels as far as the first whose fold exists (model.rs `Level`). And
-/// the fold's series constants at the same atoms (model/elim.rs `Series`): where a series does not converge there
-/// (q ≥ 1 or x ≥ 1), the excited block that stops it is made explicit (criterion one; elim.rs `Model::series_block`)
-/// and the model read again; where no block is left to make explicit, the evaluation does not exist and nothing is
-/// above it: the request is refused (elim.rs `converges`, one failure for every expansion). The orders the evaluation
-/// takes are the keep rule's (`Unit::Series`, `Unit::Normalization`), their errors measured at the run's states.
+/// the fold's series constants at the same atoms (model/elim.rs `Series`): where a cluster's fold does not exist there
+/// or the normalization's series does not converge (x ≥ 1), the excited block that stops it is made explicit
+/// (criterion one; elim.rs `Model::series_block`) and the model read again; where that block's move is kept already or
+/// none, nothing is above: the request is refused, the refusal naming the atom, the cluster, the expansion and the
+/// object (elim.rs `Model::stop_message`; `converges`, one failure for every expansion). A cluster whose series does
+/// not converge takes order 0 (elim.rs `Series::holds`): that stops nothing. The orders the evaluation takes are the
+/// keep rule's (`Unit::Series`, `Unit::Normalization`) where the clusters can take them, their errors measured at the
+/// run's states.
 pub(crate) fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, initial: &[(usize, f64)], temperature: f64) -> Result<Model, String> {
     loop {
         let mut model = Model::new(request, light, kept)?;
@@ -828,10 +831,7 @@ pub(crate) fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, ini
             }
             match model.series_block().filter(|unit| !kept.contains(unit)) {
                 Some(unit) => kept.push(unit),
-                None => {
-                    let s = &model.series;
-                    return Err(format!("模型无法闭合：在先验的原子处，消去激发态所用的级数不收敛（预解式级数比 q = {:.3e}，激发占比 x = {:.3e}，都须小于 1），而已没有能再显式处理的激发能级块", s.ratio, s.excited));
-                }
+                None => return Err(model.stop_message()),
             }
             continue;
         }

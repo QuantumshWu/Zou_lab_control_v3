@@ -283,9 +283,9 @@ pub enum Unit {
     /// it, elim.rs `Model::readings`): kept, the block's states are explicit and every drive of that component into them
     /// from those ground states is kept as it is (`Model::block_drives`, `Unit::Drive`); its frame is the frames' (Karp's,
     /// cluster.rs) on the explicit set. The block is explicit at the replica of that component in the group that holds
-    /// its part (ELIMINATION §2–§3, v2 5; elim.rs # Groups): a drive of another component, or from another group -- the
-    /// other ground hyperfine level, 6.8 GHz away --, turns at its own frequency, where the block is a Q state folded like
-    /// any other.
+    /// its part (ELIMINATION §2–§3, v2 5; elim.rs # Groups): a drive from another group -- the other ground hyperfine
+    /// level, 6.8 GHz away -- is folded at its own frequency, where the block is Q to that group; a drive into it from its
+    /// own group at a residual beat is a turning coupling of P, a sector (elim.rs # P, Q and the frames; v12).
     Block { block: usize, component: Component, grounds: u32 },
     /// The fold's series about its reference at its first order (assemble.rs, # The normalized generator: H₀ − N₁E₀):
     /// folded, the evaluation takes order 0; kept, order 1. Its error is what order 1 takes away of the evaluation's error

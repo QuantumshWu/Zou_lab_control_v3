@@ -227,10 +227,10 @@ impl Model {
             decay: self.decay.clone(),
         };
         // The reference Z₀ = diag(z_y): each place's level in its frame with the far light alone (`h`'s diagonal, no
-        // near field in it) and the cluster's constant centre c of the near light's scalar shift (`Model::series`);
-        // its jet the far levels' (the frames and c are constants).
+        // near field in it) and its kind's constant centre c of the near light's shift in the cluster, a ground place's
+        // or an explicit place's (elim.rs `Series::centre_of`); its jet the far levels' (the frames and c are constants).
         let frames: Vec<f64> = c.frames.iter().map(|f| self.omega(f)).collect();
-        let reference: Vec<Vec<f64>> = (0..parts).map(|p| (0..n).map(|y| h[p][(c.states[y], c.states[y])].re + if p == 0 { self.series.centre[cluster] - frames[y] } else { 0.0 }).collect()).collect();
+        let reference: Vec<Vec<f64>> = (0..parts).map(|p| (0..n).map(|y| h[p][(c.states[y], c.states[y])].re + if p == 0 { self.series.centre_of(cluster, y >= c.ground) - frames[y] } else { 0.0 }).collect()).collect();
         let slopes: Vec<(Vec<f64>, Mat)> = (1..parts).map(|p| (reference[p].clone(), h[p].block(&excited, &excited))).collect();
         let mixes = self.series.normalization >= 1;
         let lit: Vec<usize> = (0..self.carriers.len()).filter(|&ci| lights.on(self.carriers[ci].frequency)).collect();
@@ -290,14 +290,15 @@ impl Model {
     }
 
     /// The orders a cluster's evaluation takes under the lights `lights` (elim.rs `Orders`): the model's (`Series`), the
-    /// series' first order only where the cluster's places have one reference (`one_reference`; ELIMINATION v11: the
-    /// transition until the jumps and the decay are the fold's own, L = C T). Elsewhere the first order is no part of the
+    /// series' first order only where the cluster can take it (elim.rs `Model::first_order_holds`: its own series
+    /// converges there, ELIMINATION v12, and its places have one reference, `one_reference`, v11's transition until the
+    /// jumps and the decay are the fold's own, L = C T). Elsewhere the first order is no part of the
     /// run's evaluation and no unit of the cluster's: what it would take away of the evaluation's error is the next
     /// orders', the nearest block's keep, as every order beyond the first (elim.rs `Model::readings`) -- exact still, the
     /// block explicit; `Unit::Series` is a candidate where some cluster holds it (elim.rs `Model::candidates`).
     pub(crate) fn orders_of(&self, cluster: usize, lights: &Lights) -> super::elim::Orders {
         let orders = self.series.orders();
-        if orders.series >= 1 && !self.one_reference(cluster, lights) { super::elim::Orders { series: 0, ..orders } } else { orders }
+        if orders.series >= 1 && !self.first_order_holds(cluster, lights) { super::elim::Orders { series: 0, ..orders } } else { orders }
     }
 
     /// Whether a coupling of two places of a cluster (x ← y at the base beat `beat`) is in the cluster's generator: at a
