@@ -166,8 +166,12 @@ impl Model {
                 }
             }
         }
+        // An explicit state's rows: its own, and those its static couplings' response reaches (assemble.rs
+        // `Model::held_support`, every light on).
+        let running = self.running();
         for sp in c.ground..c.states.len() {
-            let rows = std::array::from_fn(|e| GROUND + e == c.states[sp]);
+            let reach = self.held_support(cluster, sp, &running).1;
+            let rows = std::array::from_fn(|e| GROUND + e == c.states[sp] || reach[e]);
             add(&mut out, self.axes.zero().plus(-1, &c.frames[sp]), rows, Err(sp));
         }
         for r in &mut out {

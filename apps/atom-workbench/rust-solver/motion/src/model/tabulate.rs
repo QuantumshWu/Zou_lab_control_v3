@@ -597,8 +597,9 @@ impl Model {
         let read = |x: f64| if x.is_nan() { f64::INFINITY } else { x };
         let error = |at: usize| (complex(other, at) - complex(exact, at)).norm_sqr();
         let (mut responses, mut potential) = (0.0_f64, 0.0_f64);
-        for (c, cc) in self.carriers.iter().enumerate() {
-            let w = shift[cc.frequency];
+        // Per carrier, and the explicit states' static couplings' (the slot after them: no Doppler partner).
+        for c in 0..=self.carriers.len() {
+            let w = self.carriers.get(c).map_or(0.0, |cc| shift[cc.frequency]);
             let sum = |of: &dyn Fn(usize) -> f64| (0..count).filter(|&i| plan.near.responses[i][0] == c).map(of).sum::<f64>().sqrt();
             let size = sum(&|i| complex(exact, start + i).norm_sqr());
             if !(size == 0.0) {

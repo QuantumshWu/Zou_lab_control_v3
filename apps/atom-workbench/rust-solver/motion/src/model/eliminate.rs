@@ -34,13 +34,23 @@
 //! contraction of the two beams' legs -- each its frequency's every folded coupling, bare ones too, with its response at the
 //! atom (none where the frequency is no carrier): what the bare drives' constants leave of the fold (far.rs) --, at the beat
 //! δ_ω' − δ_ω and wave vector k_l − k_l'; an entry whose residual beat in the frames is not zero only where its unit
-//! (`Unit::Term`) is kept. Per beam the responses T_l, the excited amplitude's (assemble.rs, # The excited amplitude). The explicit states' energies take the van Vleck shift of the drives
-//! folded here, ½ Σ_b (V^f[e,b] V[f,b]*/(E_e − E_b − δ_c) + V[e,b] V^f[f,b]*/(E_f − E_b − δ_c)), each drive's own denominator
-//! against the other's folded coupling V. The explicit drives enter as they are: a_l X_l[e,b] e^{−iδ_c t} and its adjoint.
+//! (`Unit::Term`) is kept. Per beam the responses T_l, the excited amplitude's (assemble.rs, # The excited amplitude). The
+//! explicit drives enter as they are: a_l X_l[e,b] e^{−iδ_c t} and its adjoint.
+//!
+//! # The explicit states' static couplings
+//! P holds the explicit states at every frequency (ELIMINATION v12), and the fold's W holds every coupling of P to Q:
+//! beside the classes' columns from the ground states, the explicit states' own, W[:, x] = K[Q, x] -- the levels' excited
+//! block (the far light's static forms and the base) and the decay's −(i/2)D on x's column, at the replica of x's frame
+//! (elim.rs `Reference::respond_held`; the definition's feeds of no class, `fold_about`). Its response R₀(x)K[Q, x] is one
+//! more leg of the excited amplitude, of no field component and no Doppler partner, and its contraction with every other
+//! leg one more pair form on P (`Responses::held`; assemble.rs, # Near forms): the explicit states' shifts and couplings
+//! through Q, their decay through it, their part of the metric. Its coupling varies with the far light, so a form of it
+//! is the product of the coupling's jet and the response's.
 //!
 //! # Derivatives
-//! The elimination's derivatives in the position are central differences of the same function along its inputs' own Taylor
-//! path (`Model::eliminate`): exact but for the difference's O(δ²) and its rounding -- the force's definition at the point.
+//! The elimination's derivatives in the position are the exact ones by the resolvent's identity (elim.rs
+//! `Reference::chain`) from the far Hamiltonian's jet: the reference's, the excited block's and the explicit states'
+//! couplings'.
 
 use super::assemble::Plan;
 use super::{Beat, Component, Level, Lights, Model, Unit};
@@ -126,12 +136,17 @@ impl Carrier {
 /// contraction's (`shift`) --; where the evaluation takes a first order (the series' or the normalization's) and the
 /// cluster's places have more than one reference class (`Model::references`), the products R₀(z_a)R₀(z_y) U_k of a
 /// class's reference and the place's on place y's column, [carrier][k][class][part] (elim.rs `Reference::mixed`, at
-/// each class's first place); per jet part the reference Z₀ itself, its every place's z_y; and the complex
+/// each class's first place); after the carriers, in the slot `carriers.len()` with the one basis vector 0, the same of
+/// the explicit states' static couplings to Q, W[:, x] = K[Q, x] on each explicit place x (`Reference::respond_held`:
+/// the wave operator's columns of P's explicit states, ELIMINATION v12), and their coupling back W′[x, Q] = K[x, Q] as its
+/// adjoint's column x (`held` [part], STATES × STATES as a coupling, `Leg`; empty without explicit states): no field
+/// component, no Doppler partner; per jet part the reference Z₀ itself, its every place's z_y; and the complex
 /// multiply-adds that made them.
 pub(crate) struct Responses {
     pub(crate) first: Vec<Vec<Vec<Mat>>>,
     pub(crate) second: Vec<Vec<Vec<Mat>>>,
     pub(crate) mixed: Vec<Vec<Vec<Vec<Mat>>>>,
+    pub(crate) held: Vec<Mat>,
     pub(crate) reference: Vec<Vec<f64>>,
     pub(crate) work: f64,
 }
@@ -238,7 +253,8 @@ impl Model {
         let sizes: Vec<f64> = c.frames.iter().map(|f| self.axes.size(f)).collect();
         let slow = elim::Slow { explicit: c.states[g..].iter().map(|&s| s - GROUND).collect(), frames, sizes, groups: vec![0; c.states.len()] };
         let series = elim::Reference::new(&levels, &nus, &slow, &reference[0]);
-        let (mut first, mut second, mut mixed) = (vec![vec![]; self.carriers.len()], vec![vec![]; self.carriers.len()], vec![vec![]; self.carriers.len()]);
+        let slots = self.carriers.len() + 1;
+        let (mut first, mut second, mut mixed) = (vec![vec![]; slots], vec![vec![]; slots], vec![vec![]; slots]);
         let mut work = 0.0;
         for (j, &ci) in lit.iter().enumerate() {
             for u in &self.carriers[ci].basis {
@@ -246,14 +262,38 @@ impl Model {
                 let mut orders = series.respond(j, &coupling, n, 1, &slopes).into_iter();
                 first[ci].push(orders.next().expect("order 0").into_iter().map(|m| m.scaled(-C64::ONE)).collect());
                 second[ci].push(orders.next().expect("order 1"));
-                work += series.work(1, parts);
+                work += series.work(1, parts, false);
                 if mixes {
                     mixed[ci].push(series.mixed(j, &coupling, n, &slopes, &firsts));
-                    work += series.work(1, parts) * firsts.len() as f64;
+                    work += series.work(1, parts, false) * firsts.len() as f64;
                 }
             }
         }
-        Responses { first, second, mixed, reference, work }
+        // The explicit states' static couplings to Q (module documentation, # The response): W[:, x] = K[Q, x] of the
+        // levels' excited block with its decay, −(i/2)D, the coupling back W′[x, Q] = K[x, Q] -- held as its adjoint's
+        // column (`Responses::held`, the contraction's left factor, `half`) --, their jets the far light's.
+        let mut held = vec![];
+        if n > g {
+            let coupling: Vec<Mat> = (0..parts)
+                .map(|p| Mat::from_fn(EXCITED, n, |e, x| if x < g { C64::ZERO } else { h[p][(GROUND + e, c.states[x])] - if p == 0 { self.decay[(e, c.states[x] - GROUND)] * C64::new(0.0, 0.5) } else { C64::ZERO } }))
+                .collect();
+            held = (0..parts)
+                .map(|p| Mat::from_fn(STATES, STATES, |e, s| match c.states[g..].iter().position(|&x| x == s) {
+                    Some(_) if e >= GROUND => (h[p][(s, e)] - if p == 0 { self.decay[(s - GROUND, e - GROUND)] * C64::new(0.0, 0.5) } else { C64::ZERO }).conj(),
+                    _ => C64::ZERO,
+                }))
+                .collect();
+            let k = self.carriers.len();
+            let mut orders = series.respond_held(&coupling, n, 1, &slopes).into_iter();
+            first[k].push(orders.next().expect("order 0").into_iter().map(|m| m.scaled(-C64::ONE)).collect());
+            second[k].push(orders.next().expect("order 1"));
+            work += series.work(1, parts, true);
+            if mixes {
+                mixed[k].push(series.mixed_held(&coupling, n, &slopes, &firsts));
+                work += series.work(1, parts, true) * firsts.len() as f64;
+            }
+        }
+        Responses { first, second, mixed, held, reference, work }
     }
 
     /// A frequency's carrier, where its co-rotating component is one.
@@ -345,9 +385,9 @@ impl Model {
             .collect()
     }
 
-    /// The terms of the carriers' folded responses, one a response of the plan's near forms, each to
-    /// `add` as it is made -- its carrier, its excited state (less GROUND), its ground place and its value
-    /// e_k T_k − e^w_k T2_k --, from the forms' responding section `near` (its entry i: the T's, then the T2's). `fields` is
+    /// The terms of the carriers' folded responses and of the explicit states' static couplings' (the slot after the
+    /// carriers, `Responses`), one a response of the plan's near forms, each to `add` as it is made -- its slot, its
+    /// excited state (less GROUND), its place and its value e_k T_k − e^w_k T2_k (the explicit states' T alone) --, from the forms' responding section `near` (its entry i: the T's, then the T2's). `fields` is
     /// its caller's vector, kept from one point to the next and written whole here before it is read: per carrier and
     /// basis vector its field's component, plain and Doppler-weighted, as many a carrier as the widest basis holds.
     pub(crate) fn responses_each(&self, plan: &Plan, near: impl Fn(usize) -> C64, amplitudes: &[Amplitude], kappa: [f64; 3], fields: &mut Vec<(C64, C64)>, mut add: impl FnMut(usize, usize, usize, C64)) {
@@ -363,6 +403,9 @@ impl Model {
                 })
             }));
         }
+        // The explicit states' static couplings (the slot after the carriers, basis vector 0): no component -- one --, no
+        // Doppler partner.
+        fields.extend((0..widest.max(1)).map(|_| (C64::ONE, C64::ZERO)));
         for (i, &[c, k, e, y]) in plan.near.responses.iter().enumerate() {
             let (plain, weighted) = fields[c * widest + k];
             add(c, e, y, plain * near(i) - weighted * near(count + i));

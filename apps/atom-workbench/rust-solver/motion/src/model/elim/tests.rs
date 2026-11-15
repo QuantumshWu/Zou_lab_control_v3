@@ -2286,3 +2286,49 @@ fn a_cluster_s_series_order_is_its_own_level_and_tilt2_s_explicit_cluster_conver
     assert!(worst[1][0] <= worst[0][0] && worst[1][1] <= worst[0][1], "order 1 nearer: {worst:?}");
 }
 
+
+/// The explicit states' static couplings to Q, K[Q, x] (a measurement, jumps2 step 1): on PGC1D_TILT_0, PGC3D_1ms,
+/// PGC1D_TILT_2, R4_LIN_4 and the final set's GMD1C_1ms (where its request is at hand), each closed as the solve closes it at its reference state, at
+/// the prior's atoms, per explicit state x of each cluster the largest |K[q, x]| over Q (the far levels' excited block
+/// with the decay, eliminate.rs `Responses::held`), and its self-energy at order 0, Σ_x = K[x, Q] (E_x − K_Q)⁻¹ K[Q, x]
+/// in the excited frame: Re Σ_x the shift it adds to x, −2 Im Σ_x the rate, over x's own Γ_x = D_xx.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn the_explicit_states_static_couplings_on_the_brief_s_scenes() {
+    use crate::request::{GROUND, STATES};
+    let gmd = std::path::Path::new(r"C:\Users\eadri\AppData\Local\Temp\claude\c0815e347c54866c\8308d66c-699b-4483-ab9b-7305d93a9f7e\scratchpad\final\req\GMD1C_1ms.json");
+    let mut scenes: Vec<(String, crate::request::Request)> = ["PGC1D_TILT_0", "PGC3D_1ms", "PGC1D_TILT_2"].iter().map(|n| (n.to_string(), request(n))).collect();
+    scenes.push(("R4_LIN_4".into(), crate::model::testing::scene("R4_LIN_4")));
+    if gmd.exists() {
+        scenes.push(("GMD1C_1ms".into(), crate::model::testing::scene(gmd.to_str().unwrap())));
+    }
+    for (name, req) in scenes {
+        let light = crate::field::Light::new(&req);
+        let chief = (0..GROUND).max_by(|&a, &b| req.initial_density[(a, a)].re.total_cmp(&req.initial_density[(b, b)].re)).unwrap();
+        let (model, ..) = super::super::Model::closed_at(&req, &light, vec![], chief, req.temperature_uk);
+        let points = crate::solve::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
+        let running = model.running();
+        let explicit: usize = model.clusters().iter().map(|c| c.states.len() - c.ground).sum();
+        let (mut k, mut shift, mut rate) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for &(r, _) in &points {
+            let h = &model.far_hamiltonian(&light.amplitudes(r), &running, 0)[0];
+            for c in model.clusters() {
+                let held: Vec<usize> = c.states[c.ground..].to_vec();
+                let q: Vec<usize> = (GROUND..STATES).filter(|s| !held.contains(s)).collect();
+                for &x in &held {
+                    let column: Vec<C64> = q.iter().map(|&e| h[(e, x)] - model.decay[(e - GROUND, x - GROUND)] * C64::new(0.0, 0.5)).collect();
+                    let row: Vec<C64> = q.iter().map(|&e| h[(x, e)] - model.decay[(x - GROUND, e - GROUND)] * C64::new(0.0, 0.5)).collect();
+                    k = column.iter().map(|z| z.abs()).fold(k, f64::max);
+                    let a = Mat::from_fn(q.len(), q.len(), |i, j| (if i == j { h[(x, x)] } else { C64::ZERO }) - h[(q[i], q[j])] + model.decay[(q[i] - GROUND, q[j] - GROUND)] * C64::new(0.0, 0.5));
+                    let Some(lu) = crate::linalg::Lu::new(&a) else { continue };
+                    let mut t = column.clone();
+                    lu.solve(&mut t);
+                    let sigma: C64 = row.iter().zip(&t).map(|(a, b)| *a * *b).sum();
+                    shift = shift.max(sigma.re.abs());
+                    rate = rate.max((-2.0 * sigma.im).abs() / model.decay[(x - GROUND, x - GROUND)].re);
+                }
+            }
+        }
+        println!("{name}: {explicit} explicit states in {} clusters; at {} atoms the largest |K[q, x]| {k:.4e} rad/µs, |Re Σ_x| {shift:.4e} rad/µs, |2 Im Σ_x|/Γ_x {rate:.4e}", model.clusters().len(), points.len());
+    }
+}

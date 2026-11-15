@@ -9,8 +9,10 @@
 //! - the base (H0 less the outside forms at the focus: every light off) and the frames' −θ_s, constant;
 //! - each pair of lit frequencies' constant form at their beat, e^ω'_k'* e^ω_k C_k'k (far.rs `constant`; a frequency's own is
 //!   its static form): the folds with the bare levels;
-//! - the same pairs' part at the atom, e^ω'_k'* e^ω_k S_k'k on the ground states (eliminate.rs), the explicit states' van Vleck
-//!   shift by the drives folded there, and the explicit drives, e_k U_k[e, b] and their adjoints;
+//! - the same pairs' part at the atom, e^ω'_k'* e^ω_k S_k'k on the ground states (eliminate.rs), the same contraction of
+//!   the explicit states' static couplings to Q (eliminate.rs `Responses::held`) with a carrier's legs, e_k on an explicit
+//!   and a ground place, and with each other on two explicit places, and the explicit drives, e_k U_k[e, b] and their
+//!   adjoints;
 //! - the decay −(i/2) Σ_ρ 𝒯_ρ† D 𝒯_ρ of the excited amplitude (# The excited amplitude), made at each node of the node's
 //!   own 𝒯: no term of its own.
 //! One rule takes an entry a ← b of the first two kinds into the generator, whatever light makes it (eliminate.rs
@@ -25,8 +27,10 @@
 //! T_k and T2_k (eliminate.rs), by a few complex numbers that are linear in them (`NearLayout`): the shifts' S_k'k =
 //! −½(U^f_k'†T_k + T_k'†U^f_k) and their Doppler partners D_k'k = ½ U^f_k'†T2_k on the cluster's ground places, U^f a
 //! frequency's every folded coupling (far.rs `Tone::coupled`) and T its response at the atom, none where it is no carrier; the
-//! first order's crossed forms of the other reference classes (`NearLayout::crossed`); the explicit states' van Vleck
-//! shifts; the reference Z₀; and the responding forms -- the responses themselves, their partners and the mixed responses
+//! first order's crossed forms of the other reference classes (`NearLayout::crossed`); the same of the explicit states'
+//! static couplings to Q, W[:, x] = K[Q, x] (eliminate.rs `Responses::held`: a pair side of the frequency `tones.len()`,
+//! no component, no Doppler partner, its coupling the far light's at the point -- a pair's form its coupling's and its
+//! response's product, part by part); the reference Z₀; and the responding forms -- the responses themselves, their partners and the mixed responses
 //! (`NearLayout::mixed`) --, of which the excited amplitude is made (# The excited amplitude). Each exists where it can
 //! differ from zero: the responses of a ground state reach the excited states its coupling reaches through the excited
 //! states' own couplings (`Model::reached`, the responses' one support). At a point
@@ -167,7 +171,7 @@
 //! know them. (A table's point once counted the values the exact forms make beside its read, and a site's classes the
 //! definition's terms an entry: PGC3D's and GMD1C's middle and scattering read 2.4 and 1.5 times what they made.)
 
-use super::eliminate::{half, shift, Leg, Responses};
+use super::eliminate::{half, Responses};
 use super::far::EXCITED;
 use super::photon::Channel;
 use super::tabulate::NearTable;
@@ -187,6 +191,10 @@ pub(crate) const RIGHT: usize = 1;
 pub(crate) const LEFT: usize = 2;
 /// Both factors Doppler-weighted: the decay's product of two partners (module documentation, # The excited amplitude).
 pub(crate) const BOTH: usize = 3;
+
+/// The jet of a leg of no field component (an explicit state's own: its coupling the levels', eliminate.rs
+/// `Responses::held`): one, its gradient none.
+const UNIT: [C64; 4] = [C64::ONE, C64::ZERO, C64::ZERO, C64::ZERO];
 
 /// A leg of a replica's excited amplitude (module documentation, # The excited amplitude; photon.rs `Replica`): a lit
 /// carrier's response at the atom on its basis vector k (the near forms' responses), or a constant vector of the plan's
@@ -243,8 +251,6 @@ pub(crate) enum Operand {
     Pair(usize),
     /// D of a pair entry.
     Doppler(usize),
-    /// An explicit pair's van Vleck shift.
-    Shift(usize),
     /// A pair entry's first-order form of another place's reference (`NearLayout::crossed`).
     Crossed(usize),
     /// The series' reference z_y of a place (eliminate.rs `Responses::reference`).
@@ -254,7 +260,7 @@ pub(crate) enum Operand {
 }
 
 /// One cluster's near forms under a light set (module documentation, # Near forms), in the order of a point's values and of a
-/// table's node: the Hermitian forms -- S, D, the crossed forms, the reference, the shifts -- and the responding ones -- the
+/// table's node: the Hermitian forms -- S, D, the crossed forms, the reference, the decay forms -- and the responding ones -- the
 /// responses, their Doppler partners, the mixed responses.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NearLayout {
@@ -264,8 +270,6 @@ pub(crate) struct NearLayout {
     /// not y's own (module documentation, # The normalized generator): Y⁽ᵃ⁾[x, y] = U^f_k'† R₀(z_a)R₀(z_y) U_k, its partner
     /// 2D where a is y's class.
     pub(crate) crossed: Vec<[usize; 2]>,
-    /// (carrier, k', k, places x, y of two explicit states).
-    pub(crate) shifts: Vec<[usize; 5]>,
     /// (carrier, k, excited state e, place y): T_k[e, y], and after them T2_k[e, y].
     pub(crate) responses: Vec<[usize; 4]>,
     /// (response, reference class a): R₀(z_a)R₀(z_y) U_k[e, y] of a response's entry at the reference of class a, where that
@@ -287,20 +291,19 @@ impl NearLayout {
     }
     /// Where an operand lies among a point's values.
     fn at(&self, o: Operand) -> usize {
-        let (p, c, r, d) = (self.pairs.len(), self.crossed.len(), self.reference, self.decays.len());
+        let (p, c, r) = (self.pairs.len(), self.crossed.len(), self.reference);
         match o {
             Operand::Pair(i) => i,
             Operand::Doppler(i) => p + i,
             Operand::Crossed(i) => 2 * p + i,
             Operand::Reference(i) => 2 * p + c + i,
             Operand::Decay(i) => 2 * p + c + r + i,
-            Operand::Shift(i) => 2 * p + c + r + d + i,
         }
     }
-    /// The forms laid in the generator (S, D, the crossed forms, the reference, the decay forms, the shifts); the responses
+    /// The forms laid in the generator (S, D, the crossed forms, the reference, the decay forms); the responses
     /// with their partners and the mixed ones.
     pub(crate) fn hermitian(&self) -> Range<usize> {
-        0..2 * self.pairs.len() + self.crossed.len() + self.reference + self.decays.len() + self.shifts.len()
+        0..2 * self.pairs.len() + self.crossed.len() + self.reference + self.decays.len()
     }
     pub(crate) fn responding(&self) -> Range<usize> {
         self.hermitian().end..self.hermitian().end + 2 * self.responses.len() + self.mixed.len()
@@ -484,7 +487,7 @@ pub(crate) struct ReplicaPlan {
     basis: Vec<[C64; EXCITED]>,
     places: Vec<usize>,
     pub(crate) at: usize,
-    near: Vec<(usize, usize, usize, usize)>,
+    near: Vec<(usize, Option<usize>, usize, usize)>,
     bare: Vec<(usize, usize, usize, C64)>,
     explicit: Vec<(usize, usize)>,
 }
@@ -945,12 +948,25 @@ impl<'a> Builder<'a> {
     }
 
     /// Whether U^f_k'†T_k of a pair of (frequency, basis vector) can differ from zero on x ← y: the left coupling's excited
-    /// states from x among those the right response reaches from y (none where the right frequency is no carrier).
+    /// states from x among those the right response reaches from y (none where the right frequency is no carrier). The
+    /// frequency `tones.len()` (basis vector 0) is the explicit states' static couplings (eliminate.rs `Responses::held`,
+    /// `Model::held_support`), beside which a carrier's coupling is its drives' folded at the atom (`Carrier::basis`: the
+    /// fold's W, ELIMINATION v12).
     fn touches(&self, left: (usize, usize), right: (usize, usize), x: usize, y: usize) -> bool {
-        let Some(carrier) = self.model.carrier_of(right.0) else { return false };
-        let reach = self.model.reached(self.cluster, carrier, right.1, self.states()[y]);
-        let u = &self.model.tones[left.0].coupled[0][left.1];
-        (0..EXCITED).any(|e| reach[e] && u[(GROUND + e, self.states()[x])] != C64::ZERO)
+        let (model, held) = (self.model, self.model.tones.len());
+        let reach = if right.0 == held {
+            model.held_support(self.cluster, y, self.lights).1
+        } else {
+            let Some(carrier) = model.carrier_of(right.0) else { return false };
+            model.reached(self.cluster, carrier, right.1, self.states()[y])
+        };
+        let coupled: [bool; EXCITED] = if left.0 == held {
+            model.held_support(self.cluster, x, self.lights).0
+        } else {
+            let u = if right.0 == held { &model.carriers[model.carrier_of(left.0).expect("a carrier beside the explicit states' couplings")].basis[left.1] } else { &model.tones[left.0].coupled[0][left.1] };
+            std::array::from_fn(|e| u[(GROUND + e, self.states()[x])] != C64::ZERO)
+        };
+        (0..EXCITED).any(|e| reach[e] && coupled[e])
     }
     /// The pair entry of S and D on x ← y, found or made with its adjoint's (the same forms' y ← x of the pair exchanged); None
     /// where neither can differ from zero.
@@ -1020,8 +1036,8 @@ impl<'a> Builder<'a> {
 
     /// The terms at the atom (module documentation, # Terms): per pair of lit frequencies the ground places' shifts and
     /// couplings at the beat δ_ω' − δ_ω where either's response reaches -- each entry by the one rule (eliminate.rs
-    /// `Model::term_included`) --, and per lit carrier the explicit states' van Vleck shifts and the explicit drives with
-    /// their adjoints.
+    /// `Model::term_included`) --, per lit carrier the explicit drives with their adjoints, and the pairs of an explicit
+    /// state's static couplings' leg.
     fn near(&mut self) {
         let model = self.model;
         let (states, n, g) = (self.states(), self.states().len(), self.ground());
@@ -1054,8 +1070,55 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // The reference, where a carrier is lit (module documentation, # The normalized generator).
-        if model.carriers.iter().any(|cc| self.lights.on(cc.frequency)) {
+        // The explicit states' static couplings to Q (eliminate.rs `Responses::held`; ELIMINATION v12): the same
+        // contraction −½(W′_l T_r + T_l†W_r) of every pair with an explicit place's leg -- an explicit place x and a
+        // ground place y of a lit carrier's basis vector, x ← y at the carrier's beat negated (the absorbed leg its
+        // Doppler partner's) and y ← x at its beat (the emitted one's), and two explicit places, static --, each entry
+        // by the one rule.
+        let held = model.tones.len();
+        let holds = (g..n).any(|x| model.held_support(self.cluster, x, self.lights).1.iter().any(|r| *r));
+        if holds {
+            for cc in model.carriers.iter().filter(|cc| self.lights.on(cc.frequency)) {
+                let w = cc.frequency;
+                for k in 0..cc.basis.len() {
+                    let (Some(plain), Some(conjugated)) = (self.scalar(w, None, k, false), self.scalar(w, None, k, true)) else { continue };
+                    for x in g..n {
+                        for y in 0..g {
+                            let absorbed = cc.beat.negated();
+                            if model.term_included(self.cluster, x, y, &absorbed) {
+                                if let Some(at) = self.pair((held, 0), (w, k), x, y) {
+                                    let block = self.block(None, Some(plain), &absorbed);
+                                    self.hermitian(block, PLAIN, x, y, C64::ZERO, Some((Operand::Pair(at), false)));
+                                    self.hermitian(block, RIGHT, x, y, C64::ZERO, Some((Operand::Doppler(at), false)));
+                                }
+                            }
+                            if model.term_included(self.cluster, y, x, &cc.beat) {
+                                if let Some(at) = self.pair((w, k), (held, 0), y, x) {
+                                    let exchanged = self.pair((held, 0), (w, k), x, y).expect("a pair's entry comes with its adjoint's");
+                                    let block = self.block(Some(conjugated), None, &cc.beat);
+                                    self.hermitian(block, PLAIN, y, x, C64::ZERO, Some((Operand::Pair(at), false)));
+                                    self.hermitian(block, LEFT, y, x, C64::ZERO, Some((Operand::Doppler(exchanged), true)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let zero = model.axes.zero();
+            for x in g..n {
+                for y in g..n {
+                    if model.term_included(self.cluster, x, y, &zero) {
+                        if let Some(at) = self.pair((held, 0), (held, 0), x, y) {
+                            let still = self.block(None, None, &zero);
+                            self.hermitian(still, PLAIN, x, y, C64::ZERO, Some((Operand::Pair(at), false)));
+                        }
+                    }
+                }
+            }
+        }
+        // The reference, where a carrier is lit or an explicit state couples to Q (module documentation, # The normalized
+        // generator).
+        if holds || model.carriers.iter().any(|cc| self.lights.on(cc.frequency)) {
             self.near.reference = n;
         }
         for cc in model.carriers.iter() {
@@ -1103,6 +1166,12 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // The explicit states' static couplings' responses (eliminate.rs `Responses::held`), in the slot after the carriers.
+        let held = model.carriers.len();
+        for x in g..states.len() {
+            let reach = model.held_support(self.cluster, x, self.lights).1;
+            self.near.responses.extend((0..EXCITED).filter(|&e| reach[e]).map(|e| [held, 0, e, x]));
+        }
         let index: HashMap<[usize; 4], usize> = self.near.responses.iter().enumerate().map(|(i, r)| (*r, i)).collect();
         let mut at = 0;
         let mut out = vec![];
@@ -1128,7 +1197,7 @@ impl<'a> Builder<'a> {
                             let Some(scalar) = self.scalar(cc.frequency, None, k, false) else { continue };
                             for &e in &replica.rows {
                                 if let Some(&i) = index.get(&[carrier, k, e, y]) {
-                                    near.push((i, scalar, row(&mut own, e), y));
+                                    near.push((i, Some(scalar), row(&mut own, e), y));
                                 }
                             }
                         }
@@ -1149,6 +1218,11 @@ impl<'a> Builder<'a> {
             }
             for &y in &replica.explicit {
                 explicit.push((row(&mut own, states[y] - GROUND), y));
+                for &e in &replica.rows {
+                    if let Some(&i) = index.get(&[held, 0, e, y]) {
+                        near.push((i, None, row(&mut own, e), y));
+                    }
+                }
             }
             let o = own.len();
             let mut basis: Vec<[C64; EXCITED]> = own.iter().map(|&e| std::array::from_fn(|x| if x == e { C64::ONE } else { C64::ZERO })).collect();
@@ -1250,6 +1324,11 @@ impl<'a> Builder<'a> {
             for &x in &replica.explicit {
                 constants.push(std::array::from_fn(|e| if GROUND + e == states[x] { -C64::ONE } else { C64::ZERO }));
                 of.push((DecayLeg::Constant(constants.len() - 1), None, x, model.axes.zero()));
+                // Its static couplings' response (eliminate.rs `Responses::held`): no component, no Doppler partner.
+                let leg = DecayLeg::Near { carrier: model.carriers.len(), k: 0 };
+                if (0..EXCITED).any(|e| index.contains_key(&[model.carriers.len(), 0, e, x])) {
+                    of.push((leg, None, x, model.axes.zero()));
+                }
             }
             legs.push(of);
         }
@@ -1284,7 +1363,10 @@ impl<'a> Builder<'a> {
                         }
                     };
                     let block = self.block(left, rs, &lb.plus(-1, &rb));
+                    // Near: a response at the atom (its forms, its first order); Doppler: of a carrier's beams.
                     let (ln, rn) = (matches!(l, DecayLeg::Near { .. }), matches!(r, DecayLeg::Near { .. }));
+                    let doppler = |leg: DecayLeg| matches!(leg, DecayLeg::Near { carrier, .. } if carrier < model.carriers.len());
+                    let (ld, rd) = (doppler(l), doppler(r));
                     let of = |lo: usize, ro: usize| DecayForm { left: (l, lo), right: (r, ro), x, y, kernel };
                     if let (DecayLeg::Constant(i), DecayLeg::Constant(j)) = (l, r) {
                         let v: C64 = kernels[kernel].iter().map(|&(e, f, k)| constants[i][e].conj() * k * constants[j][f]).sum();
@@ -1293,16 +1375,16 @@ impl<'a> Builder<'a> {
                     }
                     let plain = self.decay_form(of(0, 0));
                     self.decay(block, PLAIN, x, y, C64::ZERO, Some((Operand::Decay(plain), false, -half)));
-                    if rn {
+                    if rd {
                         let right = self.decay_form(of(0, 1));
                         self.decay(block, RIGHT, x, y, C64::ZERO, Some((Operand::Decay(right), false, half)));
                     }
-                    if ln {
+                    if ld {
                         // The exchanged pair's RIGHT form, conjugated.
                         let exchanged = self.decay_form(DecayForm { left: (r, 0), right: (l, 1), x: y, y: x, kernel });
                         self.decay(block, LEFT, x, y, C64::ZERO, Some((Operand::Decay(exchanged), true, half)));
                     }
-                    if ln && rn {
+                    if ld && rd {
                         let both = self.decay_form(of(1, 1));
                         self.decay(block, BOTH, x, y, C64::ZERO, Some((Operand::Decay(both), false, -half)));
                     }
@@ -1317,9 +1399,11 @@ impl<'a> Builder<'a> {
                             let Some(ra) = first(r, y, a) else { continue };
                             let f = self.decay_form(of(0, ra));
                             sums.push(DecaySum { kind: Sum::First, block: block.0, flag: PLAIN, x, y, tone: 0, form: f, slot: a, factor: C64::ONE });
-                            if ln {
+                            if ld {
                                 let f = self.decay_form(of(1, ra));
                                 sums.push(DecaySum { kind: Sum::First, block: block.0, flag: flip(LEFT, block.1), x, y, tone: 0, form: f, slot: a, factor: -C64::ONE });
+                            }
+                            if ln {
                                 for b in 0..count {
                                     let Some(lb) = first(l, x, b) else { continue };
                                     let f = self.decay_form(of(lb, ra));
@@ -1376,16 +1460,23 @@ impl<'a> Builder<'a> {
     /// evaluation takes the series' first order or the normalization's (the landing's overlap) and the cluster's places
     /// have more than one reference class: per pair entry and per response entry, each class that is not its right
     /// place's.
+    /// An explicit state's leg on the right has no Doppler partner, so its forms are crossed at every class, its own
+    /// too (Y = W′R₀(z_y)²K there, which a carrier's right leg reads from its partner's term).
     fn crossed(&mut self, references: &[usize], count: usize) {
         let o = self.orders;
-        if count <= 1 || (o.series == 0 && o.normalization == 0) {
+        if o.series == 0 && o.normalization == 0 {
             return;
         }
+        let held = self.model.tones.len();
         for (i, p) in self.near.pairs.iter().enumerate() {
-            if self.model.carrier_of(p[2]).is_none() {
-                continue;
+            if p[2] == held {
+                self.near.crossed.extend((0..count.max(1)).map(|a| [i, a]));
+            } else if count > 1 && self.model.carrier_of(p[2]).is_some() {
+                self.near.crossed.extend((0..count).filter(|&a| a != references[p[5]]).map(|a| [i, a]));
             }
-            self.near.crossed.extend((0..count).filter(|&a| a != references[p[5]]).map(|a| [i, a]));
+        }
+        if count <= 1 {
+            return;
         }
         if o.series >= 1 {
             for (i, r) in self.near.responses.iter().enumerate() {
@@ -1722,7 +1813,7 @@ impl Plan {
     /// and the landing's, where the cluster's places have more than one reference class): what the elimination makes
     /// for it (eliminate.rs `Model::eliminate`).
     pub(crate) fn mixes(&self) -> bool {
-        !self.near.crossed.is_empty() || !self.near.mixed.is_empty()
+        !self.near.mixed.is_empty() || self.near.crossed.iter().any(|&[i, a]| !self.references.is_empty() && self.references[self.near.pairs[i][5]] != a)
     }
 
     /// The plan of a cluster under a light set at the evaluation's orders `orders` (elim.rs `Orders`: the run's, the
@@ -1881,12 +1972,12 @@ impl Plan {
         for r in &self.replicas {
             for &(i, s, j, y) in &r.near {
                 let at = (r.at + j) * n + y;
-                add(out, &plain[s], &response(i), at, 1.0);
-                if let Some(doppler) = doppler {
+                add(out, &s.map_or(UNIT, |s| plain[s]), &response(i), at, 1.0);
+                if let (Some(doppler), Some(s)) = (doppler, s) {
                     add(out, &doppler[s], &partner(i), at, -1.0);
                 }
             }
-            work += r.near.len() * if doppler.is_some() { 2 } else { 1 };
+            work += r.near.iter().map(|x| if doppler.is_some() && x.1.is_some() { 2 } else { 1 }).sum::<usize>();
             if near {
                 continue;
             }
@@ -1904,8 +1995,9 @@ impl Plan {
     /// (`whole`) or of the near part alone without them.
     pub(crate) fn excite_work(&self, parts: usize, whole: bool) -> f64 {
         let near: usize = self.replicas.iter().map(|r| r.near.len()).sum();
+        let partners: usize = self.replicas.iter().map(|r| r.near.iter().filter(|x| x.1.is_some()).count()).sum();
         let bare: usize = self.replicas.iter().map(|r| r.bare.len()).sum();
-        (parts * if whole { 2 * near + bare } else { near }) as f64
+        (parts * if whole { near + partners + bare } else { near }) as f64
     }
 
     /// The series' first order of 𝒯 (module documentation, # The normalized generator) added into `out` (`excite`'s
@@ -1929,7 +2021,7 @@ impl Plan {
             scratch.clear();
             scratch.resize(classes * parts * block, C64::ZERO);
             for &(i, s, j, t) in &r.near {
-                let c = &plain[s];
+                let c = &s.map_or(UNIT, |s| plain[s]);
                 for a in 0..classes {
                     let m = mixed(self.first_place[i * classes + a]);
                     let at = a * parts * block + j * n + t;
@@ -2300,16 +2392,44 @@ impl Model {
     }
 
     /// The excited states the response of a carrier's basis coupling k from ground state b can reach on a cluster: those in a
-    /// block (`Model::mixing`) with a state its drives folded at the atom couple b to.
+    /// block (`Model::mixing`) with a state its drives folded at the atom couple b to, less the cluster's explicit states
+    /// (P at every frequency, ELIMINATION v12: no response holds them).
     pub(crate) fn reached(&self, cluster: usize, carrier: usize, k: usize, b: usize) -> [bool; EXCITED] {
-        let (u, blocks) = (&self.carriers[carrier].basis[k], &self.mixing[cluster]);
+        let u = &self.carriers[carrier].basis[k];
+        self.blocks_of(cluster, std::array::from_fn(|e| u[(GROUND + e, b)] != C64::ZERO))
+    }
+
+    /// The explicit states' static couplings to Q on a cluster under a light set (eliminate.rs `Responses::held`): of its
+    /// explicit place x the excited states (less GROUND) that K[Q, x] can couple it to -- the base's, the decay's and each
+    /// far beam pair's form the lights hold (eliminate.rs `Model::level_pairs`) -- and those its response R₀(x)K[Q, x]
+    /// reaches (`blocks_of`).
+    pub(crate) fn held_support(&self, cluster: usize, x: usize, lights: &Lights) -> ([bool; EXCITED], [bool; EXCITED]) {
+        let c = &self.clusters[cluster];
+        let s = c.states[x];
+        let pairs = self.level_pairs(lights);
+        let explicit = |e: usize| c.states[c.ground..].contains(&(GROUND + e));
+        let coupled: [bool; EXCITED] = std::array::from_fn(|e| {
+            !explicit(e)
+                && (self.base[(GROUND + e, s)] != C64::ZERO
+                    || self.decay[(e, s - GROUND)] != C64::ZERO
+                    || pairs.iter().enumerate().any(|(w, of)| of.iter().enumerate().any(|(p, &held)| held && self.tones[w].pairs[p][(GROUND + e, s)] != C64::ZERO)))
+        });
+        (coupled, self.blocks_of(cluster, coupled))
+    }
+
+    /// The excited states in a block (`Model::mixing`) with one of `from`, less the cluster's explicit states: what a
+    /// response of couplings into `from` can reach -- the factorization of K − z on Q and its solves leave every other
+    /// entry exactly zero.
+    fn blocks_of(&self, cluster: usize, from: [bool; EXCITED]) -> [bool; EXCITED] {
+        let (c, blocks) = (&self.clusters[cluster], &self.mixing[cluster]);
         let mut out = [false; EXCITED];
-        for from in 0..EXCITED {
-            if u[(GROUND + from, b)] != C64::ZERO {
-                for e in 0..EXCITED {
-                    out[e] |= blocks[e] == blocks[from];
-                }
+        for f in (0..EXCITED).filter(|&f| from[f]) {
+            for e in 0..EXCITED {
+                out[e] |= blocks[e] == blocks[f];
             }
+        }
+        for &x in &c.states[c.ground..] {
+            out[x - GROUND] = false;
         }
         out
     }
@@ -2358,32 +2478,61 @@ impl Model {
         // The pairs and the crossed forms made, a part's.
         let pairs = near.pairs.iter().filter(|pair| places(pair[4]) && places(pair[5])).count();
         let crossed = near.crossed.iter().filter(|&&[i, _]| places(near.pairs[i][4]) && places(near.pairs[i][5])).count();
-        // A frequency's carrier; one that is none has no response at the atom.
-        let carriers: Vec<Option<usize>> = (0..self.tones.len()).map(|w| self.carrier_of(w)).collect();
-        let none = Mat::zeros(EXCITED, cluster.ground);
+        // A pair side's response slot -- a frequency's carrier (one that is none has no response at the atom), the explicit
+        // states' after the carriers for the frequency `tones.len()` (`Builder::touches`) -- and its coupling's part p
+        // (none where it is zero): the explicit states' at the point (`Responses::held`, the far light's jet), beside them a
+        // carrier's drives folded at the atom, else its frequency's every folded coupling, constants.
+        let held = self.tones.len();
+        let slot = |w: usize| if w == held { Some(self.carriers.len()) } else { self.carrier_of(w) };
+        let coupling = |w: usize, k: usize, other: usize, p: usize| -> Option<&Mat> {
+            if w == held {
+                responses.held.get(p)
+            } else if p > 0 {
+                None
+            } else if other == held {
+                Some(&self.carriers[self.carrier_of(w).expect("a carrier beside the explicit states' couplings")].basis[k])
+            } else {
+                Some(&self.tones[w].coupled[0][k])
+            }
+        };
+        // The product rule's pairs of parts (coupling, response) of a part.
+        let rule = |part: usize| -> Vec<(usize, usize)> {
+            match part {
+                0 => vec![(0, 0)],
+                p if p < 4 => vec![(p, 0), (0, p)],
+                p => {
+                    let (a, b) = jet::PAIRS[p - 4];
+                    vec![(p, 0), (1 + a, 1 + b), (1 + b, 1 + a), (0, p)]
+                }
+            }
+        };
+        // −½ c† r of a coupling's part and a response's, summed over a part's product rule.
+        let contract = |part: usize, w: usize, k: usize, other: usize, x: usize, response: Option<&[Mat]>, y: usize| -> C64 {
+            rule(part).into_iter().filter_map(|(a, b)| Some(half(coupling(w, k, other, a)?, states[x], response?.get(b)?, y))).sum()
+        };
         for part in 0..energies.len() {
             let out = &mut out[part * len..(part + 1) * len];
-            let (first, second) = (|c: usize, k: usize| &responses.first[c][k][part], |c: usize, k: usize| &responses.second[c][k][part]);
-            // The fold's one contraction (eliminate.rs `shift`) of the legs -- each its frequency's every folded coupling and
-            // its response at the point --; a Doppler partner is the absorbed half with −T2 for T.
+            // The fold's one contraction (eliminate.rs `shift`) of the legs -- each its coupling and its response at the
+            // point --; a Doppler partner is the absorbed half with −T2 for T.
             for (i, &[wl, kl, wr, kr, x, y]) in near.pairs.iter().enumerate().filter(|(_, pair)| places(pair[4]) && places(pair[5])) {
-                let (ul, ur) = (&self.tones[wl].coupled[0][kl], &self.tones[wr].coupled[0][kr]);
-                let emitted = Leg { coupling: ul, state: states[x], response: carriers[wl].map_or(&none, |c| first(c, kl)), place: x };
-                let absorbed = Leg { coupling: ur, state: states[y], response: carriers[wr].map_or(&none, |c| first(c, kr)), place: y };
-                out[near.at(Operand::Pair(i))] = shift(emitted, absorbed);
-                out[near.at(Operand::Doppler(i))] = -half(ul, states[x], carriers[wr].map_or(&none, |c| second(c, kr)), y);
+                let first = |w: usize, k: usize| slot(w).map(|c| responses.first[c][k].as_slice());
+                let second = |w: usize, k: usize| slot(w).map(|c| responses.second[c][k].as_slice());
+                out[near.at(Operand::Pair(i))] = contract(part, wl, kl, wr, x, first(wr, kr), y) + contract(part, wr, kr, wl, y, first(wl, kl), x).conj();
+                out[near.at(Operand::Doppler(i))] = -contract(part, wl, kl, wr, x, second(wr, kr), y);
             }
-            // The crossed forms (`NearLayout::crossed`): U^f_k'† R₀(z_a)R₀(z_y) U_k on x ← y.
+            // The crossed forms (`NearLayout::crossed`): U^f_k'† R₀(z_a)R₀(z_y) U_k on x ← y -- at y's own class R₀(z_y)²U_k.
             for (c, &[i, a]) in near.crossed.iter().enumerate().filter(|(_, &[i, _])| places(near.pairs[i][4]) && places(near.pairs[i][5])) {
                 let [wl, kl, wr, kr, x, y] = near.pairs[i];
-                let Some(cr) = carriers[wr] else { continue };
-                out[near.at(Operand::Crossed(c))] = half(&self.tones[wl].coupled[0][kl], states[x], &responses.mixed[cr][kr][a][part], y) * -2.0;
+                let Some(cr) = slot(wr) else { continue };
+                let own = plan.references.is_empty() || plan.references[y] == a;
+                let mixed = if own { &responses.second[cr][kr] } else { &responses.mixed[cr][kr][a] };
+                out[near.at(Operand::Crossed(c))] = contract(part, wl, kl, wr, x, Some(mixed), y) * -2.0;
             }
             let responding = near.responding().start;
             let count = near.responses.len();
             for (i, &[c, k, e, y]) in near.responses.iter().enumerate().filter(|(_, response)| places(response[3])) {
-                out[responding + i] = first(c, k)[(e, y)];
-                out[responding + count + i] = second(c, k)[(e, y)];
+                out[responding + i] = responses.first[c][k][part][(e, y)];
+                out[responding + count + i] = responses.second[c][k][part][(e, y)];
             }
             for (m, &[i, a]) in near.mixed.iter().enumerate() {
                 let [c, k, e, y] = near.responses[i];
@@ -2443,35 +2592,7 @@ impl Model {
                 out[part * len + near.at(Operand::Decay(i))] = z;
             }
         }
-        // The explicit states' van Vleck shift by the drives folded at the atom: each half its own drive's denominator there
-        // against the other leg's folded coupling (far.rs `second_order`, where the bare drives' halves are),
-        // ½ Σ_b (U^a_k[e,b] U^f_k'[f,b]*/(z_e − E_b − δ) + U^f_k[e,b] U^a_k'[f,b]*/(z_f − E_b − δ)), each explicit state at
-        // the energy z the cluster's ground states read it at (model.rs `Model::read`, with the levels at the atom): the
-        // two-photon distance of the Raman pair through it (far.rs, # A fold onto an explicit state).
-        for (i, &[c, kl, kr, x, y]) in near.shifts.iter().enumerate() {
-            let cc = &self.carriers[c];
-            let folded = &self.tones[cc.frequency].coupled[0];
-            let (e, f) = (states[x], states[y]);
-            let mut shift = vec![C64::ZERO; energies.len()];
-            let read = |place: usize| -> Vec<f64> { energies.iter().enumerate().map(|(part, h)| self.read(cluster, place, h, part == 0)).collect() };
-            let read = [read(x), read(y)];
-            for b in 0..GROUND {
-                for (z, v) in [(&read[0], cc.basis[kr][(e, b)] * folded[kl][(f, b)].conj()), (&read[1], folded[kr][(e, b)] * cc.basis[kl][(f, b)].conj())] {
-                    if v == C64::ZERO {
-                        continue;
-                    }
-                    let mut gap: Vec<f64> = z.iter().zip(energies).map(|(z, h)| z - h[b]).collect();
-                    gap[0] -= cc.detuning;
-                    for (z, r) in shift.iter_mut().zip(jet::reciprocal(&gap)) {
-                        *z += v * (0.5 * r);
-                    }
-                }
-            }
-            for (part, z) in shift.into_iter().enumerate() {
-                out[part * len + near.at(Operand::Shift(i))] = z;
-            }
-        }
-        (energies.len() * ((3 * pairs + crossed) * EXCITED + 2 * GROUND * near.shifts.len()) + decayed) as f64
+        (energies.len() * (3 * pairs + crossed) * EXCITED + decayed) as f64
     }
 
     /// A plan's near forms at a point from the exact elimination there, jets to `order` (eliminate.rs).

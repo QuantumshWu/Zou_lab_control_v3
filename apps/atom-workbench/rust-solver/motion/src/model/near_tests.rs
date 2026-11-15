@@ -350,12 +350,12 @@ fn every_near_form_s_and_the_potential_s_jets_are_the_derivatives_of_their_value
                     };
                     // Each form is exact to the rounding of the matrix it is an entry of (linalg.rs: a modest multiple of u
                     // on its data): the forms of one kind -- S, D and the crossed forms of the pair entries, the reference, the
-                    // decay forms, the shifts, the responses, their partners and the mixed ones -- one matrix, its rounding γ_{E²} (a solve on
+                    // decay forms, the responses, their partners and the mixed ones -- one matrix, its rounding γ_{E²} (a solve on
                     // Q) times its largest entry, over ℓ^order, ℓ the light's shortest length; and each derivative to that
                     // rounding times the resolvent's condition κ of itself: the floors beside each form's own scale.
-                    let (p, v, m) = (near.pairs.len(), near.shifts.len(), near.responses.len());
+                    let (p, m) = (near.pairs.len(), near.responses.len());
                     let mut bounds: Vec<usize> = vec![0];
-                    for size in [p, p, near.crossed.len(), near.reference, near.decays.len(), v, m, m, near.mixed.len()] {
+                    for size in [p, p, near.crossed.len(), near.reference, near.decays.len(), m, m, near.mixed.len()] {
                         bounds.push(bounds.last().unwrap() + size);
                     }
                     let mut value = [C64::ZERO; jet::WHOLE];

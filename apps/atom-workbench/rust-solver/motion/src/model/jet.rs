@@ -63,24 +63,6 @@ pub(crate) fn multiply(a: &[C64], b: &[C64], out: &mut [C64]) {
     }
 }
 
-/// The jet of 1/d for a real jet d.
-pub(crate) fn reciprocal(d: &[f64]) -> Vec<f64> {
-    let n = d.len();
-    let g = 1.0 / d[0];
-    let mut out = vec![g];
-    if n >= 4 {
-        for i in 0..3 {
-            out.push(-d[1 + i] * g * g);
-        }
-    }
-    if n >= 10 {
-        for (k, &(i, j)) in PAIRS.iter().enumerate() {
-            out.push(2.0 * d[1 + i] * d[1 + j] * g * g * g - d[4 + k] * g * g);
-        }
-    }
-    out
-}
-
 /// Σ_parts of a scalar jet times a constant matrix, added to a matrix jet: out_p += c_p m.
 pub(crate) fn add_scaled(out: &mut [Mat], c: &[C64], m: &Mat) {
     for (o, z) in out.iter_mut().zip(c) {

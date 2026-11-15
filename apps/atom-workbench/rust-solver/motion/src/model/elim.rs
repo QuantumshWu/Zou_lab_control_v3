@@ -1809,6 +1809,7 @@ impl Fold {
 pub(crate) struct Reference {
     replicas: Vec<(f64, Vec<usize>, Schur)>,
     driven: Vec<Vec<usize>>,
+    held: Vec<usize>,
     ground: usize,
     excited: usize,
     z0: Vec<f64>,
@@ -1829,9 +1830,10 @@ impl Reference {
         let out = replicas
             .frequencies
             .iter()
-            .zip(&replicas.scales)
-            .map(|(&f, &scale)| {
-                let q: Vec<usize> = (0..excited).filter(|&e| !slow.explicit.iter().enumerate().any(|(i, &x)| x == e && equal(slow.frames[ground + i] - f, slow.sizes[ground + i] + scale))).collect();
+            .zip(&replicas.groups)
+            .map(|(&f, &group)| {
+                // Q_f: the excited states less the group's explicit ones, at every frequency (`fold_about`, ELIMINATION v12).
+                let q: Vec<usize> = (0..excited).filter(|&e| !slow.explicit.iter().enumerate().any(|(i, &x)| x == e && slow.groups[ground + i] == group)).collect();
                 if !forms.iter().any(|x| x.0 == q) {
                     forms.push((q.clone(), Schur::of(&k.block(&q, &q)).expect("the Schur form of the excited block")));
                 }
@@ -1839,7 +1841,7 @@ impl Reference {
                 (f, q, schur)
             })
             .collect();
-        Reference { replicas: out, driven: replicas.driven, ground, excited, z0: z0.to_vec() }
+        Reference { replicas: out, driven: replicas.driven, held: replicas.held, ground, excited, z0: z0.to_vec() }
     }
 
     /// The responses of class c's coupling (E × the ground states) to the orders 0..=`orders`, R₀(y)^{j+1} W on every
@@ -1849,7 +1851,15 @@ impl Reference {
     /// the position, per order its parts (jet.rs: the value, the gradient's three, the Hessian's six of `jet::PAIRS`),
     /// exact by the resolvent's identity -- not differences (`chain`). Returns [order][part].
     pub(crate) fn respond(&self, class: usize, coupling: &Mat, n: usize, orders: usize, slopes: &[(Vec<f64>, Mat)]) -> Vec<Vec<Mat>> {
-        self.chain(class, coupling, n, orders, slopes, &|_, y| y)
+        self.chain(&self.class_columns(class), std::slice::from_ref(coupling), n, orders, slopes, &|_, y| y)
+    }
+
+    /// The same of the explicit states' own static couplings to Q, W[:, x] = K[Q, x] on each explicit place x (`coupling`:
+    /// its jet, E × n, [part]; the levels' excited block, the far light's, so its derivatives are the far light's), at the
+    /// replica of x's frame (`Replicas::held`): R₀(x)^{j+1} K[Q, x] -- the wave operator's columns of P's explicit states,
+    /// one fold with the classes' (`fold_about`'s feeds of no class), at x's own reference.
+    pub(crate) fn respond_held(&self, coupling: &[Mat], n: usize, orders: usize, slopes: &[(Vec<f64>, Mat)]) -> Vec<Vec<Mat>> {
+        self.chain(&self.held_columns(), coupling, n, orders, slopes, &|_, y| y)
     }
 
     /// The products of two places' resolvents on class c's coupling, R₀(x)R₀(y) W on every ground place y's column, one
@@ -1859,66 +1869,84 @@ impl Reference {
     /// [x][part], with their jets as `respond`'s. Where z_x = z_y, the order-1 response R₀(y)² W_y, the same numbers
     /// (the same solves).
     pub(crate) fn mixed(&self, class: usize, coupling: &Mat, n: usize, slopes: &[(Vec<f64>, Mat)], places: &[usize]) -> Vec<Vec<Mat>> {
-        places.iter().map(|&x| self.chain(class, coupling, n, 1, slopes, &|order, y| if order == 0 { y } else { x }).pop().expect("order 1")).collect()
+        let columns = self.class_columns(class);
+        places.iter().map(|&x| self.chain(&columns, std::slice::from_ref(coupling), n, 1, slopes, &|order, y| if order == 0 { y } else { x }).pop().expect("order 1")).collect()
     }
 
-    /// The chain x_j = R₀(z_{at(j, y)}) x_{j−1} on ground place y's column, x_{−1} = W (the coupling, the same everywhere:
-    /// the near field is the forms' coefficient), to the order `orders`, each order's resolvent at the place `at` names.
-    /// With A = z + f − K_f on each replica's Q, A x_j = x_{j−1} differentiated gives
+    /// `mixed` of the explicit states' static couplings (`respond_held`).
+    pub(crate) fn mixed_held(&self, coupling: &[Mat], n: usize, slopes: &[(Vec<f64>, Mat)], places: &[usize]) -> Vec<Vec<Mat>> {
+        let columns = self.held_columns();
+        places.iter().map(|&x| self.chain(&columns, coupling, n, 1, slopes, &|order, y| if order == 0 { y } else { x }).pop().expect("order 1")).collect()
+    }
+
+    /// The columns class c drives: each ground place with the replica its amplitude goes to.
+    fn class_columns(&self, class: usize) -> Vec<(usize, usize)> {
+        (0..self.ground).map(|g| (g, self.driven[class][g])).collect()
+    }
+
+    /// The explicit places' columns, each at its frame's replica.
+    fn held_columns(&self) -> Vec<(usize, usize)> {
+        self.held.iter().enumerate().map(|(i, &r)| (self.ground + i, r)).collect()
+    }
+
+    /// The chain x_j = R₀(z_{at(j, y)}) x_{j−1} on each column y of `columns` (a place and the replica it drives),
+    /// x_{−1} = W (the coupling's column y and its jet, `coupling` [part], the parts it lacks zero: a class's coupling is
+    /// a constant, the near field the forms' coefficient), to the order `orders`, each order's resolvent at the place
+    /// `at` names. With A = z + f − K_f on each replica's Q, A x_j = x_{j−1} differentiated gives
     ///   ∂_i x_j = R₀ (∂_i x_{j−1} − ∂_i A x_j),
     ///   ∂_i∂_k x_j = R₀ (∂_i∂_k x_{j−1} − ∂_i A ∂_k x_j − ∂_k A ∂_i x_j − ∂_i∂_k A x_j),
     /// ∂A = ∂z − ∂K (f is a frame's), `slopes` the derivatives (∂Z₀, ∂K) of the reference (a number a place) and of the
     /// excited block K (its decay constant) from the far light's Hamiltonian, part by part after the value (none: the
     /// values alone). Each part a resolvent per order and driven column, at the rounding of the solves themselves.
-    fn chain(&self, class: usize, coupling: &Mat, n: usize, orders: usize, slopes: &[(Vec<f64>, Mat)], at: &dyn Fn(usize, usize) -> usize) -> Vec<Vec<Mat>> {
+    fn chain(&self, columns: &[(usize, usize)], coupling: &[Mat], n: usize, orders: usize, slopes: &[(Vec<f64>, Mat)], at: &dyn Fn(usize, usize) -> usize) -> Vec<Vec<Mat>> {
         let parts = 1 + slopes.len();
         let mut out = vec![vec![Mat::zeros(self.excited, n); parts]; orders + 1];
-        for (r, (f, q, schur)) in self.replicas.iter().enumerate() {
+        for &(g, r) in columns {
+            let (f, q, schur) = &self.replicas[r];
             // ∂A on Q at place z's reference applied to a vector: ∂z x − ∂K x, of part p.
             let slope = |p: usize, z: usize, x: &[C64]| -> Vec<C64> {
                 let (dz, k) = &slopes[p - 1];
                 q.iter().enumerate().map(|(a, &e)| x[a] * dz[z] - q.iter().enumerate().map(|(b, &e2)| k[(e, e2)] * x[b]).sum::<C64>()).collect()
             };
-            for g in (0..self.ground).filter(|&g| self.driven[class][g] == r) {
-                let column: Vec<C64> = q.iter().map(|&e| coupling[(e, g)]).collect();
-                if column.iter().all(|z| *z == C64::ZERO) {
-                    continue;
+            // The previous order's jet, x_{−1} = W: the coupling's column and its derivatives.
+            let mut before: Vec<Vec<C64>> = (0..parts).map(|p| coupling.get(p).map_or(vec![C64::ZERO; q.len()], |w| q.iter().map(|&e| w[(e, g)]).collect())).collect();
+            if before.iter().all(|part| part.iter().all(|z| *z == C64::ZERO)) {
+                continue;
+            }
+            for (j, order) in out.iter_mut().enumerate() {
+                let z = at(j, g);
+                let sigma = C64::real(self.z0[z] + f);
+                let mut x: Vec<Vec<C64>> = vec![schur.resolvent(sigma, &before[0])];
+                for p in 1..parts.min(4) {
+                    let a = slope(p, z, &x[0]);
+                    x.push(schur.resolvent(sigma, &before[p].iter().zip(&a).map(|(b, a)| *b - *a).collect::<Vec<C64>>()));
                 }
-                // The previous order's jet, x_{−1} = W: its value the coupling, its derivatives none.
-                let mut before: Vec<Vec<C64>> = (0..parts).map(|p| if p == 0 { column.clone() } else { vec![C64::ZERO; q.len()] }).collect();
-                for (j, order) in out.iter_mut().enumerate() {
-                    let z = at(j, g);
-                    let sigma = C64::real(self.z0[z] + f);
-                    let mut x: Vec<Vec<C64>> = vec![schur.resolvent(sigma, &before[0])];
-                    for p in 1..parts.min(4) {
-                        let a = slope(p, z, &x[0]);
-                        x.push(schur.resolvent(sigma, &before[p].iter().zip(&a).map(|(b, a)| *b - *a).collect::<Vec<C64>>()));
-                    }
-                    for (m, &(i, k)) in super::jet::PAIRS.iter().enumerate().take(parts.saturating_sub(4)) {
-                        let p = 4 + m;
-                        let (ai, ak, aik) = (slope(1 + i, z, &x[1 + k]), slope(1 + k, z, &x[1 + i]), slope(p, z, &x[0]));
-                        let rhs: Vec<C64> = (0..q.len()).map(|a| before[p][a] - ai[a] - ak[a] - aik[a]).collect();
-                        x.push(schur.resolvent(sigma, &rhs));
-                    }
-                    for (p, part) in order.iter_mut().enumerate() {
-                        for (a, &e) in q.iter().enumerate() {
-                            part[(e, g)] = x[p][a];
-                        }
-                    }
-                    before = x;
+                for (m, &(i, k)) in super::jet::PAIRS.iter().enumerate().take(parts.saturating_sub(4)) {
+                    let p = 4 + m;
+                    let (ai, ak, aik) = (slope(1 + i, z, &x[1 + k]), slope(1 + k, z, &x[1 + i]), slope(p, z, &x[0]));
+                    let rhs: Vec<C64> = (0..q.len()).map(|a| before[p][a] - ai[a] - ak[a] - aik[a]).collect();
+                    x.push(schur.resolvent(sigma, &rhs));
                 }
+                for (p, part) in order.iter_mut().enumerate() {
+                    for (a, &e) in q.iter().enumerate() {
+                        part[(e, g)] = x[p][a];
+                    }
+                }
+                before = x;
             }
         }
         out
     }
 
-    /// The complex multiply-adds of one coupling's responses to `orders` with their jets of `parts` (`respond`): per
-    /// driven column, order and part a resolvent's two changes of basis and its back substitution on Q, and per
-    /// derivative its products by ∂A -- one a gradient's part, three a Hessian's.
-    pub(crate) fn work(&self, orders: usize, parts: usize) -> f64 {
+    /// The complex multiply-adds of one coupling's responses to `orders` with their jets of `parts` (`respond`; of the
+    /// explicit states' couplings, `held`: `respond_held`): per driven column, order and part a resolvent's two changes
+    /// of basis and its back substitution on Q, and per derivative its products by ∂A -- one a gradient's part, three a
+    /// Hessian's.
+    pub(crate) fn work(&self, orders: usize, parts: usize, held: bool) -> f64 {
         let q = self.replicas.iter().map(|r| r.1.len()).max().unwrap_or(0) as f64;
         let products = parts.min(4).saturating_sub(1) + 3 * parts.saturating_sub(4);
-        (self.ground * (orders + 1)) as f64 * (2.5 * parts as f64 + products as f64) * q * q
+        let columns = if held { self.held.len() } else { self.ground };
+        (columns * (orders + 1)) as f64 * (2.5 * parts as f64 + products as f64) * q * q
     }
 }
 
