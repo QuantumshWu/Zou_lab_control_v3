@@ -255,8 +255,9 @@ fn a_sector_s_self_consistent_fold_where_its_ladder_closes_is_the_exact_problem(
 ///   ‖T′r‖²/(1 + ‖T′r‖²) the exact eigenvector's;
 /// - the second order −a²/δ (T′ ≈ R′V) errs on the exact shift by (a/δ)² relatively (1.35 % at 1.36 % at 1000 times);
 /// - the fold without it -- what the averaged model was -- leaves out the shift, 9.6 % of g₁'s light shift at
-///   a/δ = 0.117, where 2(a/δ)² = 2.7 % was booked; the readings' measure of it (`Fold::evaluation_error`, the
-///   definition with its sector against the one without, z₀ at g₁'s bare level) is the shift over λ₁ − z₀, beyond 2(a/δ)²;
+///   a/δ = 0.117, where 2(a/δ)² = 2.7 % was booked; the readings' measure of it (criterion one on the run's fold, which
+///   folds no sector, at g₁'s eigenstate: `errors`, `Fold::sector_parts`) is the shift over U₁ within the second
+///   order's (a/δ)², beyond 2(a/δ)²;
 /// - and the closure keeps the link at all three points (at the first the averaged rule's 2(a/δ)² left it out).
 #[test]
 fn the_lambda_scheme_s_sector_holds_the_static_shift_the_averaged_model_left_out() {
@@ -302,14 +303,18 @@ fn the_lambda_scheme_s_sector_holds_the_static_shift_the_averaged_model_left_out
         let true_population = v[1].norm_sqr() / (v[0].norm_sqr() + v[1].norm_sqr());
         println!("    the micromotion's population: the sector {population:.6}, exact {true_population:.6}, (a/δ)² {:.6}", mixing * mixing);
         assert!((population - true_population).abs() <= (0.05 + offset_part) * true_population, "the sector's population {population} against {true_population}");
-        // The readings' measure of what the run without the sector leaves out (z₀ at g₁'s bare level).
-        let psi = sector.right(ps);
-        let reading = Fold::evaluation_error(&rest.definitions(&lv).0, &sector.definitions(&lv).0, C64::ZERO, &psi);
-        let r = (1.0 + reading).sqrt() - 1.0;
-        let expected = shift.abs() / ls.abs();
-        println!("    the reading {reading:.4e} (r {r:.4e}) against the shift over λ₁ − z₀ {expected:.4e}; 2(a/δ)² {:.4e}", 2.0 * mixing * mixing);
+        // The readings' measure of what the run, which folds no sector, leaves out: criterion one on the run's fold about
+        // z₀ at g₁'s bare level, its sector made at it (`errors`, `Fold::sector_parts`), at g₁'s eigenstate -- the
+        // light's interference through the sector, a response's relative error (g₂/g₁)(a/δ), the sector's own
+        // second-order shift over g₁'s light shift: the shift's relative error to the second order's (a/δ)²; in squares
+        // with the population's part, the amplitude's error √(1 + 2‖T′r‖²) − 1 of the populations' 2⟨X′⟩.
+        let run = fold_about(&lv, &classes, &at_rest(2), &Replicas::of(&classes, &at_rest(2), 2), Some(&[0.0, 0.0]), Some(&|_: &Link| false));
+        let reading: f64 = errors(&run, &[vec![0]], &run.right(of(&run)), 0.0, &[]).links.iter().map(|l| l.1).sum();
+        let r = amplitude(reading);
+        let expected = (shift.abs() / lr.abs()).hypot(amplitude(2.0 * held));
+        println!("    the reading {reading:.4e} (ρ {r:.4e}) against the shift over U₁ with the population's part {expected:.4e}; 2(a/δ)² {:.4e}", 2.0 * mixing * mixing);
         assert!(reading > 2.0 * mixing * mixing, "the reading {reading} within the averaged rule's 2(a/δ)²");
-        assert!((r - expected).abs() <= 0.1 * expected, "the reading's ratio {r} against the shift's {expected}");
+        assert!((r - expected).abs() <= (1.1 * mixing * mixing + offset_part) * expected, "the reading's ρ {r} against the shift's {expected}");
         // The closure keeps the coupling (criterion one on its sector).
         let closed = closure(&lv, &classes, &[vec![0]], [0.0; 3], &Kept::default());
         assert!(closed.kept.links.iter().any(|l| l.a < 2 && l.b < 2 && l.a != l.b), "the closure keeps the Raman coupling: {:?}", closed.kept);
@@ -371,7 +376,7 @@ fn a_sector_s_fold_is_the_truncated_sambe_problem_s_within_its_second_harmonic()
         let (p, r) = ((0..2).find(|&p| sector.dominant(p) == g).unwrap(), (0..2).find(|&p| rest.dominant(p) == g).unwrap());
         let (exact, converged) = (near(&fine, 8, g), near(&coarse, 6, g));
         let (ls, lr) = (sector.eigen.values[p], rest.eigen.values[r]);
-        let s = sector.sectors.iter().filter(|s| s.from == sector.groups[p]).map(|s| {
+        let s = sector.sectors.iter().filter(|s| s.blocks.iter().any(|b| b.1 == sector.groups[p])).map(|s| {
             let t = sector.sector_apply(s, &sector.right(p));
             crate::linalg::norm_sqr(&t)
         }).sum::<f64>();
@@ -379,6 +384,78 @@ fn a_sector_s_fold_is_the_truncated_sambe_problem_s_within_its_second_harmonic()
         println!("g{}: exact {:.8e} (M 6 against 8: {:.1e}); the sector's fold {:.3e} apart, the static fold {:.3e}; (a/δ)² {mixing2:.3e}", g + 1, exact.re, (exact - converged).abs(), (ls - exact).abs(), (lr - exact).abs());
         assert!((exact - converged).abs() <= 1e-3 * (lr - exact).abs(), "the Sambe truncation converged");
         assert!((ls - exact).abs() <= mixing2 * (lr - exact).abs(), "g{}: the sector's fold {ls:?} against {exact:?}, beyond (a/δ)² of the shift", g + 1);
+    }
+}
+
+/// One object, one number (the finish brief's item 1). Criterion one's ρ is an amplitude's relative error: of the excited
+/// response e = T r_p, wrong by δe with ‖δe‖ = ρ‖e‖, every rate it makes, Γ‖e‖², moves by |2 Re⟨e|δe⟩ + ‖δe‖²| ≤
+/// (2ρ + ρ²)Γ‖e‖² -- attained where δe lies along e, as it does on one line --, and a shift ⟨W r_p|e⟩ by at most ρ; the
+/// populations are the rates' ratios and T is set by the rates and the shifts' gradients, so the output's error is the
+/// rate's 2ρ + ρ² (`rate`). The closure judged ρ against the share and the readings booked 2ρ: an object between the
+/// two was let go by the prior and asked for by the readings. Now both take `rate` of one function's ρ
+/// (`Fold::criterion_one`):
+/// - a two-level atom (Δ = −3Γ, s ≈ 0.06) moving through its light along k: ρ = Δ_v²/(|z ± Δ_v − κ||z − κ|) at the offset
+///   Δ_v = 2kv (z = λ + ν, κ = −iΓ/2; # First order in the frequency offsets), the larger sign, analytic; at its
+///   eigenstate the readings book 2ρ + ρ² (`errors`, beside the transient; to 1e-12), and the closure makes the block explicit
+///   exactly where that is beyond the share -- also where share/2 < ρ < share (√(1 + share) − 1 < ρ), where before it
+///   did not;
+/// - the Λ scheme of a sector at a far two-photon distance, its link not kept: at the closure's eigenstate the readings'
+///   number of the link is the closure's own part of it, to the rounding.
+#[test]
+fn the_closure_judges_each_object_by_the_number_the_readings_book() {
+    let (gamma, k): (f64, f64) = (38.1, 8.0);
+    let nu = -3.0 * gamma;
+    let g = (0.06 * (nu * nu + 0.25 * gamma * gamma) / 2.0).sqrt();
+    let lv = levels(&[0.0], &[0.0], gamma, &[0]);
+    let classes = vec![Class { nu, beams: vec![Beam { coupling: Mat::from_fn(1, 1, |_, _| C64::real(g)), wave: [k, 0.0, 0.0] }] }];
+    let share = super::share();
+    let (mut between, mut beyond, mut within) = (0, 0, 0);
+    for step in 1..=40 {
+        let v = 0.06 * step as f64;
+        let pattern = 2.0 * k * v;
+        let fold = folded(&lv, &classes, &at_rest(1));
+        let lambda = fold.eigen.values[0];
+        let distance = |d: f64| (lambda + C64::new(nu + d, 0.5 * gamma)).abs();
+        let rho = [pattern, -pattern].iter().map(|&d| d * d / (distance(d) * distance(0.0))).fold(0.0_f64, f64::max);
+        // The readings' block part less the transient's (its part at rest, the offsets' none).
+        let on = |pattern: f64| errors(&fold, &[vec![0]], &[C64::ONE], pattern, &[]).parts.iter().map(|x| x.1).sum::<f64>();
+        let read = on(pattern) - on(0.0);
+        assert!((read - rate(rho)).abs() <= 1e-12 * rate(rho), "v {v}: the readings' {read} against 2ρ + ρ² {}", rate(rho));
+        let (total, _) = fold.criterion_one(&[vec![0]], 0, pattern, 1.0, &|_| 1.0);
+        assert!((total.sqrt() - rho).abs() <= 1e-12 * rho, "v {v}: the closure's ρ {} against {rho}", total.sqrt());
+        let kept = !closure(&lv, &classes, &[vec![0]], [v, 0.0, 0.0], &Kept::default()).kept.blocks.is_empty();
+        assert_eq!(kept, rate(rho) > share, "v {v}: ρ {rho}, 2ρ + ρ² {}, the share {share}", rate(rho));
+        if amplitude(share) < rho && rho < share {
+            between += 1;
+        }
+        (beyond, within) = (beyond + usize::from(kept), within + usize::from(!kept));
+    }
+    println!("two levels: {within} velocities within, {beyond} beyond, of them {between} between share/2 and the share");
+    assert!(between > 0 && within > 0, "the scan crosses the share, through the window the factor two left");
+    // The Λ scheme, its sector 300 rad/µs off the two-photon resonance: the link folded and not kept.
+    let (delta, g1, g2) = (-3072.0, 60.0, 50.0);
+    let (nu1, nu2) = (delta, delta - 26.5);
+    let lv = levels(&[0.0, (nu1 - nu2) + 300.0], &[0.0], gamma, &[0]);
+    let classes = vec![class(nu1, 2, 1, &[(0, 0, C64::real(g1))]), class(nu2, 2, 1, &[(0, 1, C64::real(g2))])];
+    let closed = closure(&lv, &classes, &[vec![0]], [0.0; 3], &Kept::default());
+    assert!(closed.kept.links.is_empty() && !closed.fold.sectors.is_empty(), "the sector folded, its link not kept: {:?}", closed.kept);
+    let fold = &closed.fold;
+    for p in (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5) {
+        let (total, parts) = fold.criterion_one(&[vec![0]], p, 0.0, 1.0, &|_| 1.0);
+        let mut prior: Vec<(Link, f64)> = vec![];
+        for (l, x) in split(total, parts).filter_map(|(o, x)| if let Object::Link(l) = o { Some((l, x)) } else { None }) {
+            match prior.iter_mut().find(|q| q.0 == l || q.0 == l.reversed()) {
+                Some(q) => q.1 += x,
+                None => prior.push((l, x)),
+            }
+        }
+        let read = errors(fold, &[vec![0]], &fold.right(p), 0.0, &[]);
+        for (l, x) in &prior {
+            let y = read.links.iter().find(|r| r.0 == *l || r.0 == l.reversed()).map_or(0.0, |r| r.1);
+            println!("Λ, eigenstate {p}: the link {l:?}: the closure's {x:.6e}, the readings' {y:.6e}");
+            assert!((x - y).abs() <= 1e-12 * x.max(1e-300), "the link {l:?}: the closure's {x} against the readings' {y}");
+        }
+        assert!(!prior.is_empty(), "the sector's link has its part at eigenstate {p}");
     }
 }
 
@@ -453,9 +530,9 @@ fn measures(closed: &Closed, classes: &[Class], velocity: [f64; 3]) -> (f64, f64
 /// θ = 0, 0.1°, 2° (the user's failure #4 is 2°; refs/requests/PGC1D_TILT_*, made by the app's own request builder),
 /// each closure at the 88 atoms the prior reads (`prior_atoms`, the θ = 0 request's). The tilt adds couplings ∝ sin θ:
 /// - the partition (criterion one's blocks) is the same at every atom and θ;
-/// - at 0.1° the untilted links stay and ρ moves by O(θ): no coupling counts as "existing" or not; what 0.1° adds is
-///   what 2° keeps -- a tilt coupling's sector near a two-photon resonance, whose first-order part (the light's
-///   interference through it, # Sectors) grows as θ;
+/// - at 0.1° the untilted links stay and ρ moves by O(θ): no coupling counts as "existing" or not; what 0.1° adds 2°
+///   holds -- keeps, or holds static in its frames -- a tilt coupling's sector near a two-photon resonance, whose
+///   first-order part (the light's interference through it, # Sectors) grows as θ;
 /// - at 2° the untilted links stay, and what is added are the tilt's couplings that are near resonance on the actual
 ///   spectrum at that atom (the Raman-dressed F = 2 levels: |δ| ≈ 0.4–1.2 rad/µs at a ≈ 0.08–0.3 -- physics the rule
 ///   keeps, measured 2026-11-14); what is left folded is within the share (criterion one on the sectors).
@@ -467,22 +544,32 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
     assert_eq!(points.len(), 88);
     let theta = 0.1_f64.to_radians();
     let (mut added, mut most) = (0, 0.0_f64);
+    let blocks = excited_blocks(&requests[0].states);
+    let ground = crate::request::GROUND;
+    // Whether a closure holds a link: kept, or static in its frames -- its two states one group, its lab beat their
+    // frames' difference (`slow_of`).
+    let holds = |c: &Closed, l: &Link, cl: &[Class], lv: &Levels| {
+        let slow = slow_of(&blocks, &c.kept, cl, lv);
+        let place = |s: usize| if s < ground { Some(s) } else { slow.explicit.iter().position(|&e| e == s - ground).map(|i| ground + i) };
+        c.kept.links.contains(l) || c.kept.links.contains(&l.reversed()) || matches!((place(l.a), place(l.b)), (Some(a), Some(b)) if slow.groups[a] == slow.groups[b] && same(l.beat(cl), slow.frames[a] - slow.frames[b]))
+    };
     for &(r, v) in &points {
-        let (closed, measured): (Vec<Closed>, Vec<(f64, f64)>) = requests
+        let read: Vec<(Closed, (f64, f64), Levels, Vec<Class>)> = requests
             .iter()
             .map(|req| {
                 let light = crate::field::Light::new(req);
                 let (lv, cl, _) = system(req, &light, r);
-                let blocks = excited_blocks(&req.states);
                 let closed = closure(&lv, &cl, &blocks, v, &Kept::default());
                 let measured = measures(&closed, &cl, v);
-                (closed, measured)
+                (closed, measured, lv, cl)
             })
-            .unzip();
-        for ((name, c), m) in names.iter().zip(&closed).zip(&measured) {
+            .collect();
+        let closed: Vec<&Closed> = read.iter().map(|x| &x.0).collect();
+        let measured: Vec<(f64, f64)> = read.iter().map(|x| x.1).collect();
+        for ((name, c), m) in names.iter().zip(closed.iter()).zip(&measured) {
             println!("{name} r {r:?} v {v:?}: blocks {:?}, links {}, rho {:.4e}, folded sectors {:.4e}", c.kept.blocks, c.kept.links.len(), m.0, m.1);
         }
-        let base = &closed[0];
+        let base = closed[0];
         for c in &closed[1..] {
             assert_eq!(c.kept.blocks, base.kept.blocks, "the partition at {r:?} {v:?}");
             for l in &base.kept.links {
@@ -490,7 +577,16 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
             }
         }
         for l in closed[1].kept.links.iter().filter(|l| !base.kept.links.contains(l)) {
-            assert!(closed[2].kept.links.contains(l) || closed[2].kept.links.contains(&l.reversed()), "a link at 0.1° that 2° does not keep, {l:?}, at {r:?} {v:?}");
+            if !holds(closed[2], l, &read[2].3, &read[2].2) {
+                // Its part of criterion one at each closure's end, the largest over the ground-like eigenstates.
+                for (name, c) in names.iter().zip(&closed) {
+                    let f = &c.fold;
+                    let part = (0..f.size()).filter(|&p| f.ground_weight(p) >= 0.5).map(|p| f.sector_parts(p, 2.0 * 8.06 * crate::linalg::norm3(v)).into_iter().filter(|x| x.0 == *l || x.0 == l.reversed()).map(|x| x.1).sum::<f64>()).fold(0.0_f64, f64::max);
+                    let worst = (0..f.size()).filter(|&p| f.ground_weight(p) >= 0.5).map(|p| rate(f.criterion_one(&blocks, p, 2.0 * 8.06 * crate::linalg::norm3(v), 1.0, &|_| 1.0).0.sqrt())).fold(0.0_f64, f64::max);
+                    eprintln!("{name}: the link's part of ρ² {part:.4e} (its rate alone {:.4e}), the worst eigenstate's error {worst:.4e}, the share {:.4e}; {} links kept", rate(part.sqrt()), super::share(), c.kept.links.len());
+                }
+                panic!("a link at 0.1° that 2° does not hold, {l:?}, at {r:?} {v:?}");
+            }
         }
         let (at0, at01) = (measured[0], measured[1]);
         assert!((at01.0 - at0.0).abs() <= 10.0 * theta * at0.0.max(1e-6), "ρ at 0.1°: {} against {}", at01.0, at0.0);
@@ -498,7 +594,7 @@ fn a_tilt_leaves_the_partition_and_moves_the_links_only_where_its_couplings_are_
         most = most.max(measured[2].1);
     }
     println!("2°: {added} links added over the 88 atoms; the largest folded sectors' part {most:.3e}");
-    assert!(most <= super::share(), "a folded sector beyond the share");
+    assert!(rate(most) <= super::share(), "a folded sector beyond the share");
 }
 
 /// The frames are a gauge (module documentation, # Groups): at the prior's atoms of the tilted 1D PGC (a few of them),
@@ -527,8 +623,15 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
             let fold = fold(&lv, &cl, slow, &Replicas::of(&cl, slow, lv.ground.rows), Some(&|l: &Link| closed.kept.links.contains(l)));
             let like: Vec<usize> = (0..fold.size()).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
             let mut sectors: Vec<(usize, usize, (Option<usize>, Option<usize>), f64)> = vec![];
+            let mut detail: Vec<String> = vec![];
+            for s in &fold.sectors {
+                for l in &s.links {
+                    detail.push(format!("sector Ω {:.12e} scale {:.3e} blocks {:?}: link {:?} at ({}, {}) value {:.6e}", s.frequency, s.scale, s.blocks, l.0, l.1, l.2, l.3.abs()));
+                }
+            }
             for &p in &like {
                 for (l, x) in fold.sector_parts(p, pattern) {
+                    detail.push(format!("eigenstate {p} (λ {:.10e}{:+.10e}i): link {l:?} part {x:.10e}", fold.eigen.values[p].re, fold.eigen.values[p].im));
                     match sectors.iter_mut().find(|s| (s.0, s.1, s.2) == (l.a, l.b, l.classes)) {
                         Some(s) => s.3 += x,
                         None => sectors.push((l.a, l.b, l.classes, x)),
@@ -540,8 +643,8 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
             rho.sort_by(f64::total_cmp);
             let psi: Vec<C64> = (0..fold.size()).map(|s| if s < ground { C64::real(1.0) } else { C64::ZERO }).collect();
             let errors = errors(&fold, &blocks, &psi, pattern, &[]);
-            let error = errors.parts.iter().map(|p| p.1).sum::<f64>() + errors.outside.iter().sum::<f64>();
-            (sectors, rho, error, errors.parts)
+            let error = errors.parts.iter().map(|p| p.1).sum::<f64>() + errors.links.iter().map(|p| p.1).sum::<f64>() + errors.outside.iter().sum::<f64>();
+            (sectors, rho, error, errors.parts, detail)
         };
         let base = read(&slow);
         for _ in 0..3 {
@@ -557,7 +660,15 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
             for (a, b) in [(&base.0, &other.0), (&other.0, &base.0)] {
                 for x in a.iter() {
                     let y = b.iter().find(|y| (y.0, y.1, y.2) == (x.0, x.1, x.2)).map_or(0.0, |y| y.3);
-                    assert!((x.3 - y).abs() <= 1e-8 * x.3 + 1e-10 * largest, "the part of the link {:?}: {} against {}", (x.0, x.1, x.2), x.3, y);
+                    if !((x.3 - y).abs() <= 1e-8 * x.3 + 1e-10 * largest) {
+                        let key = format!("a: {}, b: {}, classes: {:?}", x.0, x.1, x.2);
+                        for (name, d) in [("base", &base.4), ("shifted", &other.4)] {
+                            for line in d.iter().filter(|l| l.contains(&key)) {
+                                eprintln!("{name}: {line}");
+                            }
+                        }
+                        panic!("the part of the link {:?}: {} against {} (largest {largest:.3e})", (x.0, x.1, x.2), x.3, y);
+                    }
                 }
             }
             for (a, b) in base.1.iter().zip(&other.1) {
@@ -988,8 +1099,8 @@ fn an_explicit_excited_state_leaks_its_population_into_the_outside_level() {
 /// The eliminated excited states' level error acts through the fold (`outside_errors`; the coordinator's 2026-11-13
 /// example): R2_RECOIL with the 776 nm beam, the atom in |2,2⟩ at the trap's centre and the probe folded at the atom.
 /// The beam moves |3′,3′⟩ by V²/Δ (318 MHz at Δ = 500 MHz, 5.3 GHz at 30) with an error m of that, and the probe's
-/// response feels it across its distance to the line: booked beyond the share at 500 MHz, more at 30 MHz -- where
-/// |3′,3′⟩'s population, the line moved away, is smaller still. Far from the level (100 GHz) and without the beam
+/// response feels it across its distance to the line: booked beyond the share at 500 MHz, no less at 30 MHz -- where
+/// |3′,3′⟩'s population, the line moved away, is smaller still (each at most all of the rate, `rate`). Far from the level (100 GHz) and without the beam
 /// (R2_RECOIL itself), every transition's error is a thousandth of the share at most.
 #[test]
 fn a_shifted_excited_level_s_error_is_booked_through_the_fold() {
@@ -1013,7 +1124,7 @@ fn a_shifted_excited_level_s_error_is_booked_through_the_fold() {
     }
     assert!(booked[0].1 <= 1e-3 * share && booked[1].1 <= 1e-3 * share, "without the beam, or far from the level: {booked:?}");
     assert!(booked[2].0 > share, "Δ = 500 MHz: {:?}", booked[2]);
-    assert!(booked[3].0 > booked[2].0, "Δ = 30 MHz books more: {booked:?}");
+    assert!(booked[3].0 >= booked[2].0, "Δ = 30 MHz books no less: {booked:?}");
 }
 
 /// The series about a reference evaluated as the definition takes it (module documentation of elim.rs, # The definition
@@ -1334,7 +1445,7 @@ fn a_raman_resonant_photon_coherence_is_kept_and_a_far_one_dropped_as_the_master
         let slow = Slow { explicit: vec![], frames: vec![0.0, beta], groups: vec![0, 0] };
         let f = fold(&levels, &classes, &slow, &Replicas::of(&classes, &slow, 2), None);
         assert!(f.exists, "{name}: the fold exists");
-        let pairs = start_cross_terms(&f, &emission);
+        let pairs = start_cross_terms(&f, &emission).0;
         let raman = |pair: &[(Option<usize>, usize, usize); 2]| pair.contains(&(Some(0), 0, 0)) && pair.contains(&(Some(1), 1, 0));
         let kept = pairs.iter().any(raman);
         // The old number at the equal superposition: the two classes' interference rate over Ω.
@@ -1389,7 +1500,7 @@ fn a_raman_resonant_photon_coherence_is_kept_and_a_far_one_dropped_as_the_master
 /// Criterion three's frequency at the prior's atoms (unify part 2; a measurement): on R6_RAMAN_CO, R6_RAMAN_COUNTER,
 /// GMD1C (its request at the path in the environment variable GMD1C), the zero-field probe (S2), PGC1D_TILT_0 and
 /// PGC1D_TILT_2, the closed model's coherence units not kept, read at every prior atom on the states of every source
-/// cluster's spectrum (`Model::cluster_spectrum`, as the readings read them): each ground-like eigenstate r_p, and each
+/// cluster's spectrum (its fold about its reference, `Model::clusters_fold`): each ground-like eigenstate r_p, and each
 /// pair's superposition r_p + r_p′. The old number, the two classes' interference rate γ = |Σ_a ⟨u_a|u′_a⟩|/‖ψ‖² over
 /// their frequencies' difference Ω, against `cross_terms` -- the dropped term's parts on the landing's and the source's
 /// eigenstates, each over its combined frequency ω_c -- and the same parts over Ω (the frequency's change apart from
@@ -1442,7 +1553,7 @@ fn the_coherences_old_and_combined_frequencies_at_the_prior_s_atoms() {
                 if classes.len() < 2 {
                     continue;
                 }
-                let source = model.cluster_spectrum(s, &amplitudes);
+                let source = model.clusters_fold(&[s], &amplitudes, true, false, true, false).expect("a cluster's fold").0;
                 let plan = model.plan(s, &running);
                 let n = source.size();
                 let like: Vec<usize> = (0..n).filter(|&p| source.ground_weight(p) >= 0.5).collect();
@@ -1455,7 +1566,7 @@ fn the_coherences_old_and_combined_frequencies_at_the_prior_s_atoms() {
                 let landings: Vec<Landing> = landed
                     .iter()
                     .map(|&l| {
-                        let fold = if l == s { source.clone() } else { model.cluster_spectrum(l, &amplitudes) };
+                        let fold = if l == s { source.clone() } else { model.clusters_fold(&[l], &amplitudes, true, false, true, false).expect("a cluster's fold").0 };
                         Landing::of(&fold, &(0..fold.size()).collect::<Vec<_>>())
                     })
                     .collect();
@@ -1463,7 +1574,7 @@ fn the_coherences_old_and_combined_frequencies_at_the_prior_s_atoms() {
                     .iter()
                     .map(|class| {
                         let m = model.clusters[class.landing].states.len();
-                        Images { frequency: -model.omega(&class.beats[0]), landing: landed.iter().position(|&l| l == class.landing).unwrap(), images: vec![std::array::from_fn(|_| vec![C64::ZERO; m]); n] }
+                        Images { frequency: -model.omega(&class.beats[0]), landing: landed.iter().position(|&l| l == class.landing).unwrap(), images: vec![std::array::from_fn(|_| vec![C64::ZERO; m]); n], links: vec![] }
                     })
                     .collect();
                 for &p in &like {
@@ -1550,5 +1661,100 @@ fn the_kept_units_by_kind_on_the_brief_s_scenes() {
             kept.len(), terms.len(), count(&|u| matches!(u, Unit::Bare { .. })), count(&|u| matches!(u, Unit::Drive { .. })), count(&|u| matches!(u, Unit::Block { .. })), count(&|u| matches!(u, Unit::Coherence { .. })), count(&|u| matches!(u, Unit::Series)), count(&|u| matches!(u, Unit::Normalization { .. })),
             model.clusters().iter().map(|c| c.states.len()).collect::<Vec<_>>()
         );
+    }
+}
+
+/// Where the model's building and its readings spend their time (a measurement, the finish brief's item 4): on
+/// PGC1D_TILT_0, PGC1D_TILT_2 and PGC3D_1ms, at the prior's atoms --
+/// - the closure's first round (nothing kept: every ground state its own group): its groups, its sectors and their
+///   links, how many of them are at the beat zero of one class (the same class absorbed and emitted, the two states'
+///   frames equal), the fold's wall time without sectors and with them, and the whole closure's;
+/// - the model closed as the solve closes it, its wall time;
+/// - at a state of each cluster at each atom (its ground states in equal parts): a reading's wall time, and its parts --
+///   the run's fold of the whole atom (`Model::atom_fold`) and its sectors, `errors` on it, the definition's fold and
+///   its `definitions`.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn the_closure_s_and_the_readings_cost_by_part() {
+    use super::super::{Point, Sample};
+    use std::time::Instant;
+    let seconds = |t: Instant| t.elapsed().as_secs_f64();
+    for name in ["PGC1D_TILT_0", "PGC1D_TILT_2", "PGC3D_1ms"] {
+        let req = request(name);
+        let light = crate::field::Light::new(&req);
+        let blocks = excited_blocks(&req.states);
+        let points = prior_atoms(&req);
+        let (mut groups, mut sectors, mut links, mut zero_same, mut zero_links) = (0usize, 0usize, 0usize, 0usize, 0usize);
+        let (mut t_static, mut t_sectors, mut t_closure) = (0.0, 0.0, 0.0);
+        for &(r, v) in &points {
+            let (lv, cl, _) = system(&req, &light, r);
+            let ground = lv.ground.rows;
+            let slow = slow_of(&blocks, &Kept::default(), &cl, &lv);
+            let replicas = Replicas::of(&cl, &slow, ground);
+            let mut distinct = slow.groups.clone();
+            distinct.sort();
+            distinct.dedup();
+            groups += distinct.len();
+            let t = Instant::now();
+            let _ = fold(&lv, &cl, &slow, &replicas, None);
+            t_static += seconds(t);
+            let t = Instant::now();
+            let f = fold(&lv, &cl, &slow, &replicas, Some(&|_: &Link| false));
+            t_sectors += seconds(t);
+            sectors += f.sectors.len();
+            for s in &f.sectors {
+                links += s.links.len();
+                if equal(s.frequency, s.scale) {
+                    let same_class = s.links.iter().filter(|l| l.0.classes.0 == l.0.classes.1).count();
+                    if same_class == s.links.len() {
+                        zero_same += 1;
+                    }
+                    zero_links += same_class;
+                }
+            }
+            let t = Instant::now();
+            let _ = closure(&lv, &cl, &blocks, v, &Kept::default());
+            t_closure += seconds(t);
+        }
+        let k = points.len() as f64;
+        println!("{name}: {} atoms; the first round a closure: {:.1} groups, {:.1} sectors of {:.1} links, of them at the beat zero of one class {:.1} sectors ({:.1} links); fold {:.2} ms without sectors, {:.2} ms with; the whole closure {:.2} ms", points.len(), groups as f64 / k, sectors as f64 / k, links as f64 / k, zero_same as f64 / k, zero_links as f64 / k, 1e3 * t_static / k, 1e3 * t_sectors / k, 1e3 * t_closure / k);
+        let chief = (0..crate::request::GROUND).max_by(|&a, &b| req.initial_density[(a, a)].re.total_cmp(&req.initial_density[(b, b)].re)).unwrap();
+        let t = Instant::now();
+        let (model, kept, _, _) = super::super::Model::closed_at(&req, &light, vec![], chief, req.temperature_uk);
+        println!("{name}: closed in {:.2} s (wall, the pool's), {} units kept; clusters {:?}", seconds(t), kept.len(), model.clusters().iter().map(|c| c.states.len()).collect::<Vec<_>>());
+        let units = model.candidates();
+        let hm = model.hbar_over_mass();
+        let (mut reads, mut whole, mut run, mut errs, mut definition, mut defined, mut folded) = (0usize, 0.0, 0.0, 0.0, 0.0, 0.0, 0usize);
+        for &(r, v) in &points {
+            let amplitudes = light.amplitudes(r);
+            for (cluster, c) in model.clusters().iter().enumerate().filter(|(_, c)| c.ground > 0) {
+                let n = c.states.len();
+                let psi: Vec<C64> = (0..n).map(|s| if s < c.ground { C64::real((c.ground as f64).sqrt().recip()) } else { C64::ZERO }).collect();
+                let sample = Sample { cluster, at: Point { r, kappa: v.map(|x| x / hm), t: 0.0 }, psi: psi.clone() };
+                let t = Instant::now();
+                let _ = model.readings(&units, &sample, None);
+                whole += seconds(t);
+                reads += 1;
+                let t = Instant::now();
+                let (atom, states) = model.atom_fold(&amplitudes);
+                run += seconds(t);
+                folded += atom.sectors.len();
+                let mut on = vec![C64::ZERO; atom.size()];
+                for (i, &x) in c.states.iter().enumerate() {
+                    on[states.iter().position(|&y| y == x).unwrap()] = psi[i];
+                }
+                let t = Instant::now();
+                let _ = errors(&atom, &blocks, &on, 0.0, &[]);
+                errs += seconds(t);
+                let t = Instant::now();
+                let Some((d, lv)) = model.definition_fold(cluster, &amplitudes) else { continue };
+                definition += seconds(t);
+                let t = Instant::now();
+                let _ = d.definitions(&lv);
+                defined += seconds(t);
+            }
+        }
+        let k = reads as f64;
+        println!("{name}: {reads} readings, {:.3} ms each: the atom's run fold {:.3} ({:.1} sectors), errors {:.3}, the definition's fold {:.3}, its definitions {:.3}", 1e3 * whole / k, 1e3 * run / k, folded as f64 / k, 1e3 * errs / k, 1e3 * definition / k, 1e3 * defined / k);
     }
 }

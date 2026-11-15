@@ -858,7 +858,8 @@ pub(crate) fn atoms(model: &Model, request: &Request, light: &Light, initial: &[
 
 /// What the model's prior keeps beyond what the model keeps already, at the atoms of the reach of the temperature
 /// `temperature` (µK; module documentation, # The model's prior): each atom's closure (model/elim.rs `Model::prior`:
-/// criterion one's remainder, criterion two's components, the frames), at its place and its velocity (`atoms`).
+/// criterion one on the excited blocks and on the sectors of P's turning couplings, criterion three's cross terms, the
+/// frames), at its place and its velocity (`atoms`).
 fn failing(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<(Vec<Unit>, bool), String> {
     let points = atoms(model, request, light, initial, temperature)?;
     let kept = &model.kept;
