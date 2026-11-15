@@ -2389,7 +2389,7 @@ impl Model {
     }
 
     /// `plan` at the evaluation's orders `orders`: the run's are the cluster's own (eliminate.rs `Model::orders_of`, `plan`), the readings' the next
-    /// ones too (elim.rs `Model::readings`: the one evaluation, `Model::evaluation`).
+    /// ones too (elim.rs `Model::readings`: the one evaluation, `Model::evaluations`).
     pub(crate) fn plan_at(&self, cluster: usize, lights: &Lights, orders: Orders) -> Arc<Plan> {
         let place = {
             let mut plans = self.plans.lock().expect("the plans' lock");
@@ -3075,24 +3075,53 @@ impl Model {
         self.middle(&self.plan(cluster, lights), r, t, None)
     }
 
-    /// The run's own evaluation at a point, the one criterion one reads (elim.rs `Model::readings`): of a plan -- the
-    /// run's, or one at the readings' next orders (`Model::plan_at`) -- the static normalized generator at rest at `r`
-    /// (`Middle::generated`'s time mean: every tone but the static one at its mean, nothing; the exact elimination
-    /// there, no table), and where the plan bends the landing map S (1 + Y_L)⁻¹ (`Quartic`), else none: the identity.
-    pub(crate) fn evaluation(&self, plan: &Arc<Plan>, r: [f64; 3]) -> (Mat, Option<Mat>) {
-        let n = plan.states;
-        let middle = self.middle(plan, r, 0.0, None);
-        let path = crate::step::Middle::path(&middle, [0.0; 3], [0.0; 3]);
-        let mut h = Mat::zeros(n, n);
-        middle.generated(&path, 0.0, true, &mut h);
-        let landing = plan.fourth.as_ref().filter(|fourth| fourth.bends()).map(|fourth| {
-            let mut site = Held::<Site>::take();
-            let table = self.pointed(plan, None, r, &mut site);
-            self.quartic(plan, fourth, table, Some(r), &mut site, false, true);
-            let size = n * n;
-            Model::quartic_read(|q| Mat::from_fn(n, n, |x, y| q.data[LANDING * size + x * n + y]))
-        });
-        (h, landing)
+    /// The run's own evaluation at a point, the one criterion one reads (elim.rs `Model::readings`): of plans of one
+    /// cluster under one light set -- the run's, and those at the readings' next orders (`Model::plan_at`) -- each the
+    /// static normalized generator at rest at `r` (`Middle::generated`'s time mean: every tone but the static one at its
+    /// mean, nothing) and where the plan bends the landing map S (1 + Y_L)⁻¹ (`Quartic`), else none: the identity. The
+    /// exact elimination at the point (criterion one measures the evaluation's truncation against the definition, both
+    /// at the point: never a table's values, whose interpolation is the tables' own reading), once for every plan -- one
+    /// set of responses, each plan's forms laid of it (`Model::forms`) -- and its values alone: the readings ask for no
+    /// derivative (the run's force does).
+    pub(crate) fn evaluations(&self, plans: &[Arc<Plan>], r: [f64; 3]) -> Vec<(Mat, Option<Mat>)> {
+        let Some(first) = plans.first() else { return vec![] };
+        let mut amplitudes = vec![];
+        self.light.amplitudes_into(r, 0, |_| true, &mut amplitudes);
+        let near = plans.iter().any(|plan| plan.near.len() > 0);
+        let h = self.far_hamiltonian(&amplitudes, &first.lights, 0);
+        let responses = near.then(|| self.eliminate(first.cluster, &h, &first.lights, 0, plans.iter().any(|plan| plan.mixes())));
+        let energies: Vec<Vec<f64>> = h.iter().map(|m| (0..STATES).map(|s| m[(s, s)].re).collect()).collect();
+        plans
+            .iter()
+            .map(|plan| {
+                let n = plan.states;
+                let near = responses.as_ref().filter(|_| plan.near.len() > 0).map(|responses| {
+                    let len = plan.near.len();
+                    let mut data = vec![C64::ZERO; len];
+                    let work = self.forms(plan, responses, &energies, &mut data, &|_| true);
+                    NearValues { len, order: 0, data, directions: None, work }
+                });
+                let middle = self.middle_of(plan, 0.0, &amplitudes, near.as_ref());
+                let path = crate::step::Middle::path(&middle, [0.0; 3], [0.0; 3]);
+                let mut generator = Mat::zeros(n, n);
+                middle.generated(&path, 0.0, true, &mut generator);
+                let landing = plan.fourth.as_ref().filter(|fourth| fourth.bends()).map(|fourth| {
+                    let mut site = Held::<Site>::take();
+                    site.beams.clear();
+                    site.beams.extend_from_slice(&amplitudes);
+                    QUARTIC.with(|kept| {
+                        let mut q = kept.borrow_mut();
+                        q.landing = true;
+                        self.quartic_made(plan, fourth, None, near.as_ref(), &mut site, false, &mut q);
+                        // Made of no keyed point: no site's read finds these matrices its own.
+                        q.key = None;
+                        let size = n * n;
+                        Mat::from_fn(n, n, |x, y| q.data[LANDING * size + x * n + y])
+                    })
+                });
+                (generator, landing)
+            })
+            .collect()
     }
 }
 
@@ -3643,7 +3672,7 @@ fn hermitian(m: &mut [C64], n: usize) {
 
 impl Middle<'_> {
     /// The generator at a node (`generator`), or where `mean` its time mean: every tone but the static one at its mean,
-    /// nothing -- the run's static normalized generator, what the readings measure (`Model::evaluation`).
+    /// nothing -- the run's static normalized generator, what the readings measure (`Model::evaluations`).
     fn generated(&self, path: &Path, s: f64, mean: bool, h: &mut Mat) {
         let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
         let mut scratch = point.scratch.borrow_mut();

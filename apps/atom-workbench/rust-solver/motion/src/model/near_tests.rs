@@ -409,7 +409,7 @@ fn every_near_form_s_and_the_potential_s_jets_are_the_derivatives_of_their_value
 /// R2_RECOIL's probe and R4_LIN_1's lin⊥lin cooling and repump folded at the atom (a cluster of one ground state, and of
 /// three), with the evaluation's orders as they come (K = 0, J = 0) and with the normalization's and the series' kept, a
 /// trajectory started where its threshold lets it land holds the run's landing of its bare state to the bit; that is the
-/// evaluation's map the readings measure (assemble.rs `Model::evaluation`, within 10⁻⁹); the trajectory's state against the
+/// evaluation's map the readings measure (assemble.rs `Model::evaluations`, within 10⁻⁹); the trajectory's state against the
 /// definition's S(1 + Σ S_f T_f)⁻¹ e_b (`Fold::definitions`, the self-consistent fold's) errs by what the readings
 /// measure (2r + r²), the readings book at least that on the candidates, and the normalization's first order lands
 /// nearer the definition than the identity of J = 0.
@@ -440,7 +440,7 @@ fn a_trajectory_s_start_lands_as_the_definition_within_what_the_readings_book() 
             assert_eq!(trajectory.psi.to_vec(), landed, "{name} {orders:?}: the trajectory holds the run's landing");
             // The evaluation's map the readings measure, and the definition's.
             let amplitudes = model.light.amplitudes(r);
-            let evaluated = model.evaluation(&model.plan(cluster, &model.running()), r).1.unwrap_or_else(|| Mat::identity(c.states.len()));
+            let evaluated = model.evaluations(&[model.plan(cluster, &model.running())], r).swap_remove(0).1.unwrap_or_else(|| Mat::identity(c.states.len()));
             let (definition, levels) = model.definition_fold(cluster, &amplitudes).expect("the definition's fold");
             let defined = definition.definitions(&levels).1.expect("the definition's landing");
             let column = |m: &Mat| -> Vec<C64> { (0..m.rows).map(|i| m[(i, place)]).collect() };

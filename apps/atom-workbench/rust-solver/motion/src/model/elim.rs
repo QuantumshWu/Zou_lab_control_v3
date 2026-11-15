@@ -109,7 +109,7 @@
 //! reference class), taken by each cluster whose own series converges (`Model::first_order_holds`); every order beyond
 //! the first is the nearest block's keep. Where no order reaches the share (q near
 //! one) the block is made explicit by criterion one. The evaluation the readings measure against the definition is the
-//! run's own, one function (assemble.rs `Model::evaluation`: its plan's static normalized generator at the point, at the
+//! run's own, one function (assemble.rs `Model::evaluations`: its plan's static normalized generator at the point, at the
 //! run's orders or the next ones, `Model::plan_at`) -- no second implementation of the series here.
 //!
 //! # First order in the frequency offsets
@@ -1674,7 +1674,7 @@ impl Fold {
         (generator, landing)
     }
 
-    /// The evaluation's landing error on a state ψ against the definition (assemble.rs `Model::evaluation`, `definitions`): after
+    /// The evaluation's landing error on a state ψ against the definition (assemble.rs `Model::evaluations`, `definitions`): after
     /// the next jump the atom lands in a bare ground state at the state's own ground populations p_g (as `errors` reads
     /// the transient), and a landing off by r_g = ‖(L_e − L_d) e_g‖/‖L_d e_g‖ is off on the landed state -- its norm, the
     /// next wait's threshold law, and its populations -- by a rate's relative error 2r_g + r_g²: Σ_g p_g (2r_g + r_g²)
@@ -2646,7 +2646,7 @@ impl super::Model {
                 }
             };
             // The evaluation against the definition (ELIMINATION v7; `Fold::evaluation_error`, `Fold::landing_error`): the
-            // run's own (assemble.rs `Model::evaluation`: its plan's static normalized generator at the sample's point, at
+            // run's own (assemble.rs `Model::evaluations`: its plan's static normalized generator at the sample's point, at
             // rest), one comparison at the run's orders -- the normalized generator, and the landing map a jump and the light's
             // switching on put the atom through (model.rs `Model::landed`) --, and at each next object the part it takes
             // away: the series' first order (`Unit::Series`) where the run takes order 0, the normalization's next
@@ -2664,20 +2664,26 @@ impl super::Model {
                     // every landing is wrong by all of itself: the state's ground populations whole, at every order.
                     let unlanded = (0..g).map(|x| psi[x].norm_sqr()).sum::<f64>() / norm;
                     let running = self.running();
-                    let against = |(defined, landing): &(Mat, Option<Mat>), orders: Orders| {
-                        let (evaluated, map) = self.evaluation(&self.plan_at(sample.cluster, &running, orders), sample.at.r);
-                        let map = map.unwrap_or_else(|| Mat::identity(c.states.len()));
-                        let landed = landing.as_ref().map_or(unlanded, |landing| Fold::landing_error(&map, landing, g, psi));
-                        Fold::evaluation_error(&evaluated, defined, z0, psi) + landed
-                    };
-                    let defined = definition.definitions(&whole);
+                    let (defined, landing) = definition.definitions(&whole);
                     // The cluster's own orders (`Model::orders_of`); its series' first order where the cluster can take
                     // it (`Model::first_order_holds`): else what it would take away is the next orders', the nearest
-                    // block's.
+                    // block's. Each evaluated of the one elimination at the point (`Model::evaluations`).
                     let (own, holds) = (self.orders_of(sample.cluster), self.first_order_holds(sample.cluster));
-                    let at = against(&defined, own);
-                    let series = if own.series == 0 && holds { (at - against(&defined, Orders { series: 1, ..own })).max(0.0) } else { 0.0 };
-                    let normalization = (at - against(&defined, Orders { normalization: own.normalization + 1, ..own })).max(0.0);
+                    let next = own.series == 0 && holds;
+                    let orders: Vec<Orders> = std::iter::once(own).chain(next.then_some(Orders { series: 1, ..own })).chain(std::iter::once(Orders { normalization: own.normalization + 1, ..own })).collect();
+                    let plans: Vec<_> = orders.iter().map(|&o| self.plan_at(sample.cluster, &running, o)).collect();
+                    let against: Vec<f64> = self
+                        .evaluations(&plans, sample.at.r)
+                        .into_iter()
+                        .map(|(evaluated, map)| {
+                            let map = map.unwrap_or_else(|| Mat::identity(c.states.len()));
+                            let landed = landing.as_ref().map_or(unlanded, |landing| Fold::landing_error(&map, landing, g, psi));
+                            Fold::evaluation_error(&evaluated, &defined, z0, psi) + landed
+                        })
+                        .collect();
+                    let at = against[0];
+                    let series = if next { (at - against[1]).max(0.0) } else { 0.0 };
+                    let normalization = (at - against[against.len() - 1]).max(0.0);
                     if own.series == 0 && holds {
                         book(&Unit::Series, series, &mut out);
                     }

@@ -1996,7 +1996,7 @@ fn r4_lin_4() -> (crate::model::Model, Vec<([f64; 3], [f64; 3])>, Vec<usize>) {
 /// generator), measured as the readings measure it: on R4_LIN_4's clusters of more than one reference class -- its F = 1
 /// and F = 2 ground states with the explicit states, their far levels apart in the frames -- the model with
 /// `Unit::Series` kept takes the first order there (its plans' orders), `Unit::Series` is a candidate of the model without
-/// it, and at the prior's atoms the run's own evaluation (assemble.rs `Model::evaluation`: the plan's static normalized
+/// it, and at the prior's atoms the run's own evaluation (assemble.rs `Model::evaluations`: the plan's static normalized
 /// generator at rest, the one function the readings call) at order 1 is no farther from the definition (`Fold::
 /// definitions`, `Fold::evaluation_error`) than at order 0; the run's decay is its photons' rate on the cluster's states.
 #[test]
@@ -2022,7 +2022,7 @@ fn a_cluster_of_more_than_one_reference_takes_the_first_order_of_each_place_s_re
             let psi: Vec<C64> = (0..n).map(|i| C64::cis(0.4 * i as f64) * (0.5 + 0.2 * i as f64)).collect();
             let error = |series: usize| {
                 let orders = Orders { series, ..kept.series.orders() };
-                Fold::evaluation_error(&kept.evaluation(&kept.plan_at(k, &running, orders), r).0, &defined, &z0, &psi)
+                Fold::evaluation_error(&kept.evaluations(&[kept.plan_at(k, &running, orders)], r)[0].0, &defined, &z0, &psi)
             };
             let (zero, first) = (error(0), error(1));
             println!("cluster {k} at {r:?}: the run's evaluation against the definition at order 0 {zero:.3e}, at order 1 {first:.3e}");
@@ -2263,7 +2263,7 @@ fn a_cluster_s_series_order_is_its_own_level_and_tilt2_s_explicit_cluster_conver
         let (definition, whole) = model.definition_fold(k, &amplitudes).unwrap();
         let defined = definition.definitions(&whole).0;
         let orders = model.orders_of(k);
-        for (order, evaluated) in [0, 1].map(|series| (series, model.evaluation(&model.plan_at(k, &running, Orders { series, ..orders }), r).0)) {
+        for (order, evaluated) in [0, 1].map(|series| (series, model.evaluations(&[model.plan_at(k, &running, Orders { series, ..orders })], r).swap_remove(0).0)) {
             for p in 0..definition.size() {
                 let x = Fold::evaluation_error(&evaluated, &defined, &z0, &definition.right(p));
                 let kind = usize::from(definition.ground_weight(p) < 0.5);
