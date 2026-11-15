@@ -442,8 +442,8 @@ fn a_trajectory_s_start_lands_as_the_definition_within_what_the_readings_book() 
             // The evaluation's map the readings measure, and the definition's.
             let amplitudes = model.light.amplitudes(r);
             let (fold, _, far, _) = model.cluster_fold(cluster, &amplitudes, true).expect("the cluster's fold");
-            let z0 = C64::real(far + model.series.centre[cluster]);
-            let evaluated = fold.landing_evaluated(z0, model.series.orders());
+            let z0 = model.reference_of(cluster, &far);
+            let evaluated = fold.landing_evaluated(&z0, model.series.orders());
             let (definition, levels) = model.definition_fold(cluster, &amplitudes).expect("the definition's fold");
             let defined = definition.definitions(&levels).1.expect("the definition's landing");
             let column = |m: &Mat| -> Vec<C64> { (0..m.rows).map(|i| m[(i, place)]).collect() };

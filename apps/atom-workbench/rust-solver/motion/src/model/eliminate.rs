@@ -127,12 +127,15 @@ impl Carrier {
 /// The elimination's responses on a cluster at a point (`Model::eliminate`: the one elimination's series about the
 /// reference, elim.rs `Reference`), jets in the position: per carrier (empty where unlit), basis vector k of its field
 /// and jet part, R_k = −R₀ U_k and R2_k = R₀² U_k on every place of the cluster (EXCITED × n) -- the order-0 response
-/// and the order-1 one, which is the first-order Doppler partner too; a beam's Σ_k γ_lk of them; the sign the
-/// contraction's (`shift`) --; per jet part the reference z₀ itself; and the complex multiply-adds that made them.
+/// and the first-order Doppler partner, R₀(y)² U_k on place y's column; a beam's Σ_k γ_lk of them; the sign the
+/// contraction's (`shift`) --; where the landing asks (`mixes`: the normalization's order J ≥ 1), the products
+/// R₀(x)R₀(y) U_k of two places' resolvents on place y's column, [carrier][k][x][part] (elim.rs `Reference::mixed`);
+/// per jet part the reference Z₀ itself, its every place's z_y; and the complex multiply-adds that made them.
 pub(crate) struct Responses {
     pub(crate) first: Vec<Vec<Vec<Mat>>>,
     pub(crate) second: Vec<Vec<Vec<Mat>>>,
-    pub(crate) reference: Vec<f64>,
+    pub(crate) mixed: Vec<Vec<Vec<Vec<Mat>>>>,
+    pub(crate) reference: Vec<Vec<f64>>,
     pub(crate) work: f64,
 }
 
@@ -223,38 +226,77 @@ impl Model {
             excited: h[0].block(&excited, &excited),
             decay: self.decay.clone(),
         };
-        // The reference z₀: the mean of the cluster's ground levels in its frames with the far light alone (`h`'s
-        // diagonal, no near field in it) and the cluster's constant centre c of the near light's scalar shift
-        // (`Model::series`); its jet the far levels' (the frames and c are constants).
+        // The reference Z₀ = diag(z_y): each place's level in its frame with the far light alone (`h`'s diagonal, no
+        // near field in it) and the cluster's constant centre c of the near light's scalar shift (`Model::series`);
+        // its jet the far levels' (the frames and c are constants).
         let frames: Vec<f64> = c.frames.iter().map(|f| self.omega(f)).collect();
-        let reference: Vec<f64> = (0..parts)
-            .map(|p| {
-                let mean = (0..g).map(|y| h[p][(grounds[y], grounds[y])].re - if p == 0 { frames[y] } else { 0.0 }).sum::<f64>() / g as f64;
-                if p == 0 { mean + self.series.centre[cluster] } else { mean }
-            })
-            .collect();
-        let slopes: Vec<(f64, Mat)> = (1..parts).map(|p| (reference[p], h[p].block(&excited, &excited))).collect();
+        let reference: Vec<Vec<f64>> = (0..parts).map(|p| (0..n).map(|y| h[p][(c.states[y], c.states[y])].re + if p == 0 { self.series.centre[cluster] - frames[y] } else { 0.0 }).collect()).collect();
+        let slopes: Vec<(Vec<f64>, Mat)> = (1..parts).map(|p| (reference[p].clone(), h[p].block(&excited, &excited))).collect();
+        let mixes = self.series.normalization >= 1;
         let lit: Vec<usize> = (0..self.carriers.len()).filter(|&ci| lights.on(self.carriers[ci].frequency)).collect();
         let nus: Vec<f64> = lit.iter().map(|&ci| self.carriers[ci].detuning).collect();
         let sizes: Vec<f64> = c.frames.iter().map(|f| self.axes.size(f)).collect();
         let slow = elim::Slow { explicit: c.states[g..].iter().map(|&s| s - GROUND).collect(), frames, sizes, groups: vec![0; c.states.len()] };
-        let series = elim::Reference::new(&levels, &nus, &slow, reference[0]);
-        let (mut first, mut second) = (vec![vec![]; self.carriers.len()], vec![vec![]; self.carriers.len()]);
+        let series = elim::Reference::new(&levels, &nus, &slow, &reference[0]);
+        let (mut first, mut second, mut mixed) = (vec![vec![]; self.carriers.len()], vec![vec![]; self.carriers.len()], vec![vec![]; self.carriers.len()]);
         let mut work = 0.0;
         for (j, &ci) in lit.iter().enumerate() {
             for u in &self.carriers[ci].basis {
-                let mut orders = series.respond(j, &u.block(&excited, &grounds), n, 1, &slopes).into_iter();
+                let coupling = u.block(&excited, &grounds);
+                let mut orders = series.respond(j, &coupling, n, 1, &slopes).into_iter();
                 first[ci].push(orders.next().expect("order 0").into_iter().map(|m| m.scaled(-C64::ONE)).collect());
                 second[ci].push(orders.next().expect("order 1"));
                 work += series.work(1, parts);
+                if mixes {
+                    mixed[ci].push(series.mixed(j, &coupling, n, &slopes));
+                    work += series.work(1, parts) * g as f64;
+                }
             }
         }
-        Responses { first, second, reference, work }
+        Responses { first, second, mixed, reference, work }
     }
 
     /// A frequency's carrier, where its co-rotating component is one.
     pub(crate) fn carrier_of(&self, frequency: usize) -> Option<usize> {
         self.carriers.iter().position(|c| c.frequency == frequency)
+    }
+
+    /// Whether a cluster's places have one reference at every point (elim.rs, # The definition and the route it is
+    /// evaluated on; `eliminate`'s Z₀): z_y = H_far[y, y] − θ_y + c one at every place whatever the far field -- the
+    /// base levels in their frames one, and every far beam pair's form (`level_pairs`) one on every place's diagonal
+    /// --, each within its terms' rounding (elim.rs `equal`). There the series' first order is of one resolvent,
+    /// N₁ = Σ W′R₀²W, which the near forms hold as their Doppler partners (assemble.rs `normal`); else it is of two
+    /// places' resolvents, Σ_t W′R₀(s)R₀(t)W_t E[t, s] on column s (elim.rs `Fold::evaluated`), which the run does not
+    /// hold (`series_open`).
+    pub(crate) fn one_reference(&self, cluster: usize, lights: &Lights) -> bool {
+        let c = &self.clusters[cluster];
+        let pairs = self.level_pairs(lights);
+        let level = |y: usize| {
+            let s = c.states[y];
+            (self.base[(s, s)].re - self.omega(&c.frames[y]), self.base[(s, s)].abs() + self.axes.size(&c.frames[y]))
+        };
+        (1..c.states.len()).all(|y| {
+            let ((a, sa), (b, sb)) = (level(0), level(y));
+            let (s0, sy) = (c.states[0], c.states[y]);
+            super::elim::equal(a - b, sa + sb)
+                && pairs.iter().enumerate().all(|(w, of)| {
+                    of.iter().enumerate().filter(|x| *x.1).all(|(x, _)| {
+                        let form = &self.tones[w].pairs[x];
+                        let (u, v) = (form[(s0, s0)], form[(sy, sy)]);
+                        super::elim::equal((u - v).abs(), u.abs() + v.abs())
+                    })
+                })
+        })
+    }
+
+    /// Whether the run holds the series' first order exactly on every cluster it evaluates with a normalized generator
+    /// (`one_reference`; ELIMINATION v11: until the jumps and the decay are the fold's own, L = C T): `Unit::Series` a
+    /// candidate there (elim.rs `Model::candidates`). Where it does not, the first order is no unit of its own: what
+    /// it would take away of the evaluation's error is the next orders', the nearest block's keep, as every order
+    /// beyond the first (elim.rs `Model::readings`) -- exact still, the block explicit.
+    pub(crate) fn series_open(&self) -> bool {
+        let running = self.running();
+        (0..self.clusters.len()).all(|k| self.plan(k, &running).fourth.is_none() || self.one_reference(k, &running))
     }
 
     /// Whether a coupling of two places of a cluster (x ← y at the base beat `beat`) is in the cluster's generator: at a

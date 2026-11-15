@@ -1000,7 +1000,7 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         let far = (0..n).map(|i| fold.direct[(i, i)].re).sum::<f64>() / n as f64;
         let z0 = fold.eigen.values.iter().map(|z| z.re).sum::<f64>() / n as f64;
         let q = fold.series_ratio(C64::real(z0));
-        let x_size = fold.evaluated_share(C64::real(z0)).0;
+        let x_size = fold.evaluated_share(&vec![z0; n]).0;
         assert!(q < 1.0 && x_size < 1.0, "{name}: the series converge here");
         // The proven bounds (this test's; the run books what it measures).
         let remainder = |k: usize| {
@@ -1023,7 +1023,7 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         };
         // The forms (every class, every replica, as the engine's per carrier and basis), from the reference's responses.
         let nus: Vec<f64> = cl.iter().map(|c| c.nu).collect();
-        let reference = Reference::new(&lv, &nus, &at_rest(n), z0);
+        let reference = Reference::new(&lv, &nus, &at_rest(n), &vec![z0; n]);
         let (mut n0, mut n1, mut x, mut l) = (Mat::zeros(n, n), Mat::zeros(n, n), Mat::zeros(n, n), Mat::zeros(n, n));
         let mut responses = vec![];
         for (c, class) in cl.iter().enumerate() {
@@ -1044,7 +1044,7 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         let four = |m: &Mat| -> Vec<C64> { m.data.iter().copied().chain(std::iter::repeat_n(C64::ZERO, 3 * n * n)).collect() };
         let made = |orders: Orders| -> Vec<C64> {
             let mut data = vec![C64::ZERO; 14 * n * n];
-            crate::model::assemble::normal(&four(&hermitian), &four(&n1), &four(&x), &four(&l), n, [z0, 0.0, 0.0, 0.0], orders, true, true, true, &mut data, &mut vec![]);
+            crate::model::assemble::normal(&four(&hermitian), &four(&n1), &four(&x), &four(&l), &n1.data, n, &vec![[z0, 0.0, 0.0, 0.0]; n], orders, true, true, true, &mut data, &mut vec![]);
             data
         };
         let matrix = |data: &[C64], m: usize| Mat { rows: n, cols: n, data: data[m * n * n..(m + 1) * n * n].to_vec() };
@@ -1114,7 +1114,7 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         // test's route (the same Hermitian part, the same decay), and the error falls from the series' order 0 to 1 and
         // with the normalization's order.
         let defined = fold.definitions(&lv).0;
-        let at = |orders: Orders| fold.evaluated(&lv, C64::real(z0), orders);
+        let at = |orders: Orders| fold.evaluated(&lv, &vec![z0; n], orders);
         let mut apart = at(orders);
         let mut route_whole = route.hermitian_part();
         route_whole.add_scaled(C64::new(0.0, -0.5), &{
@@ -1135,7 +1135,7 @@ fn the_schrieffer_wolff_series_is_the_fold_s_normalized_generator_within_its_rem
         let mut stream = crate::random::Stream::new(3, crate::random::Purpose::Initial, 0, 0);
         for _ in 0..4 {
             let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
-            let error = |series: usize, normalization: usize| Fold::evaluation_error(&at(Orders { series, normalization }), &defined, C64::real(z0), &psi);
+            let error = |series: usize, normalization: usize| Fold::evaluation_error(&at(Orders { series, normalization }), &defined, &vec![z0; n], &psi);
             let (first, second) = (error(0, normalization), error(1, normalization));
             let by_j: Vec<f64> = (0..3).map(|j| error(1, j)).collect();
             println!("    measured against the definition: the series' order 0 {first:.3e}, order 1 {second:.3e} (q {q:.1e}); at order 1 the normalization's J 0..2 {by_j:?} (x {x_size:.1e})");
@@ -1293,7 +1293,7 @@ impl Fold {
     fn series(&self, z0: C64, orders: usize) -> Vec<Mat> {
         let n = self.size();
         let mut out = vec![Mat::zeros(n, n); orders + 1];
-        for (rep, responses) in self.replicas.iter().zip(self.responses_about(z0, orders)) {
+        for (rep, responses) in self.replicas.iter().zip(self.responses_about(&vec![z0.re; n], orders)) {
             for (form, x) in out.iter_mut().zip(&responses) {
                 form.add_scaled(C64::ONE, &rep.back.product(x));
             }
@@ -1330,7 +1330,54 @@ impl Fold {
     /// radius) -- the order an evaluation takes is the least whose remainder is within the share (criterion one's ρ
     /// books it).
     fn series_ratio(&self, z0: C64) -> f64 {
+        self.series_ratio_about(&vec![z0.re; self.size()])
+    }
+    /// The series' ratio about Z₀ = diag(z_y), q = ‖H − Z₀‖₂/d, d the least distance of z_y + f over the places of
+    /// each replica's group (ELIMINATION v11).
+    fn series_ratio_about(&self, z0: &[f64]) -> f64 {
         self.series_norm(z0) / self.series_distance(z0, None)
+    }
+    /// The series' generator about Z₀ = diag(z_y) to order K (ELIMINATION v11): column s of the Sylvester equation,
+    /// (z_s + f − K)T[:, s] = W_s − (T E)[:, s], E = H − Z₀, gives T = Σ_k T⁽ᵏ⁾, T⁽⁰⁾[:, s] = R₀(s)W_s,
+    /// T⁽ᵏ⁾[:, s] = −R₀(s)(T⁽ᵏ⁻¹⁾E)[:, s] -- with one reference T_f = Σ_k (−1)^k R₀^{k+1} W_f E^k (`series`) --, and
+    /// H = A + Σ_f W′_f T_f its fixed point in H (`settle`); None where it does not settle.
+    fn series_generator_about(&self, z0: &[f64], orders: usize) -> Option<Mat> {
+        let n = self.size();
+        let solve = |rep: &Folded, x: &Mat| -> Mat {
+            let mut out = Mat::zeros(x.rows, n);
+            for &s in &self.members[rep.group] {
+                let column: Vec<C64> = (0..x.rows).map(|i| x[(i, s)]).collect();
+                let solved = rep.k.resolvent(C64::real(z0[s] + rep.frequency), &column);
+                for i in 0..x.rows {
+                    out[(i, s)] = solved[i];
+                }
+            }
+            out
+        };
+        let (h, exists, _) = settle(
+            &self.direct,
+            |h| {
+                let mut e = h.clone();
+                for i in 0..n {
+                    e[(i, i)] -= C64::real(z0[i]);
+                }
+                let (mut next, mut scale) = (self.direct.clone(), self.direct.frobenius());
+                for rep in &self.replicas {
+                    let mut term = solve(rep, &rep.w);
+                    let mut t = term.clone();
+                    for _ in 0..orders {
+                        term = solve(rep, &term.product(&e)).scaled(-C64::ONE);
+                        t.add_scaled(C64::ONE, &term);
+                    }
+                    let form = rep.back.product(&t);
+                    scale += form.frobenius();
+                    next.add_scaled(C64::ONE, &form);
+                }
+                (next, scale)
+            },
+            n * n * (orders + 1),
+        );
+        exists.then_some(h)
     }
 }
 
@@ -1364,19 +1411,26 @@ fn a_series_radius_is_read_on_the_blocks_its_terms_hold() {
     let points = crate::solve::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
     model.referenced(&points);
     // The scene holds the class: a cluster whose Q has a block in no term of its series nearer z₀ + f than ‖H − z₀‖.
-    let mut worst: Option<(f64, Fold, C64)> = None;
+    let mut worst: Option<(f64, Fold, Vec<f64>)> = None;
     let mut unheld = 0;
     for k in 0..model.clusters().len() {
         for &(r, _) in &points {
             let amplitudes = light.amplitudes(r);
             let Some((fold, _, far, _)) = model.cluster_fold(k, &amplitudes, false) else { continue };
-            let z0 = C64::real(far + model.series.centre[k]);
-            let every = fold.replicas.iter().flat_map(|rep| (0..rep.k.n).map(move |i| (z0 + C64::real(rep.frequency) - rep.k.s[i * rep.k.n + i]).abs())).fold(f64::INFINITY, f64::min);
-            let norm = fold.series_norm(z0);
-            if every < norm && fold.series_distance(z0, None) > norm {
+            let z0 = model.reference_of(k, &far);
+            let mut every = f64::INFINITY;
+            for rep in &fold.replicas {
+                for &y in &fold.members[rep.group] {
+                    for i in 0..rep.k.n {
+                        every = every.min((C64::real(z0[y] + rep.frequency) - rep.k.s[i * rep.k.n + i]).abs());
+                    }
+                }
+            }
+            let norm = fold.series_norm(&z0);
+            if every < norm && fold.series_distance(&z0, None) > norm {
                 unheld += 1;
             }
-            let q = fold.series_ratio(z0);
+            let q = fold.series_ratio_about(&z0);
             if worst.as_ref().is_none_or(|w| q > w.0) {
                 worst = Some((q, fold, z0));
             }
@@ -1391,8 +1445,7 @@ fn a_series_radius_is_read_on_the_blocks_its_terms_hold() {
     let n = fold.size();
     let own = fold.generator.clone();
     for order in 0..=3 {
-        let forms = fold.series(z0, order);
-        let h = fold.series_generator(&forms, z0).expect("the series' generator settles");
+        let h = fold.series_generator_about(&z0, order).expect("the series' generator settles");
         let mut apart = h.clone();
         apart.add_scaled(-C64::ONE, &fold.generator);
         let relative = apart.frobenius() / own.frobenius();
@@ -1911,5 +1964,216 @@ fn the_closure_s_and_the_readings_cost_by_part() {
         let k = reads as f64;
         println!("{name}: {reads} readings, {:.3} ms each: the atom's run fold {:.3} ({:.1} sectors), errors {:.3}, the definition's fold {:.3}, its definitions {:.3}", 1e3 * whole / k, 1e3 * run / k, folded as f64 / k, 1e3 * errs / k, 1e3 * definition / k, 1e3 * defined / k);
     }
+}
+
+/// R4_LIN_4 closed at its request's state (testing.rs `Model::closed_at`), its prior's atoms, and its clusters whose
+/// places have more than one reference (eliminate.rs `Model::one_reference`) among those with a normalized generator.
+fn r4_lin_4() -> (crate::model::Model, Vec<([f64; 3], [f64; 3])>, Vec<usize>) {
+    let req = crate::model::testing::scene("R4_LIN_4");
+    let light = crate::field::Light::new(&req);
+    let state = (0..crate::request::GROUND).max_by(|&x, &y| req.initial_density[(x, x)].re.total_cmp(&req.initial_density[(y, y)].re)).unwrap();
+    let (model, ..) = crate::model::Model::closed_at(&req, &light, vec![], state, req.temperature_uk);
+    let points = crate::solve::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
+    let running = model.running();
+    let many: Vec<usize> = (0..model.clusters().len()).filter(|&k| model.plan(k, &running).fourth.is_some() && !model.one_reference(k, &running)).collect();
+    (model, points, many)
+}
+
+/// The transition rule (ELIMINATION v11; eliminate.rs `Model::one_reference`, `Model::series_open`): the run holds the
+/// series' first order of one resolvent alone, N₁ (the near forms' Doppler partners), so where a cluster's places have
+/// more than one reference -- R4_LIN_4's cluster of F = 1 and F = 2 ground states with its explicit states, its far
+/// levels apart in its frames -- `Unit::Series` is no candidate, the model builds without it (the closure ends), and
+/// at the run's states the readings book what the first order would take away with the orders beyond it, on the
+/// nearest block (`Unit::Block`), and nothing on `Unit::Series`.
+#[test]
+fn a_cluster_of_more_than_one_reference_keeps_a_block_and_not_the_series() {
+    use crate::model::{Point, Sample, Unit};
+    let (model, points, many) = r4_lin_4();
+    assert!(!many.is_empty(), "R4_LIN_4 has a cluster of more than one reference");
+    assert!(!model.series_open(), "the series' first order is closed");
+    let candidates = model.candidates();
+    assert!(!candidates.contains(&Unit::Series), "no candidate Series");
+    assert!(!model.kept.contains(&Unit::Series), "no Series kept");
+    let units: Vec<Unit> = candidates.iter().cloned().chain(std::iter::once(Unit::Series)).collect();
+    let (mut read, mut on_blocks) = (0, 0.0);
+    for &k in &many {
+        let n = model.clusters()[k].states.len();
+        for &(r, kappa) in points.iter().step_by(9) {
+            let psi: Vec<C64> = (0..n).map(|i| if i < model.clusters()[k].ground { C64::ONE } else { C64::ZERO }).collect();
+            let (errors, _) = model.readings(&units, &Sample { cluster: k, at: Point { r, kappa, t: 0.0 }, psi }, None);
+            let series = errors.last().expect("the series' error");
+            assert!(series.population == 0.0 && series.temperature == 0.0, "nothing booked on Series at {r:?}: {series:?}");
+            on_blocks += units.iter().zip(&errors).filter(|(u, _)| matches!(u, Unit::Block { .. })).map(|(_, e)| e.population).sum::<f64>();
+            read += 1;
+        }
+    }
+    println!("{read} states read on {} clusters of more than one reference: the blocks booked {on_blocks:.3e}, Series nothing", many.len());
+    assert!(read > 0);
+}
+
+/// The series about each place's own reference (ELIMINATION v11; module documentation, # The definition and the route
+/// it is evaluated on): on R4_LIN_4's cluster of F = 1 and F = 2 ground states, where one reference for the cluster had
+/// q ≈ 1.6, at the prior's atoms the ratio q = ‖H − Z₀‖₂/d about Z₀ = diag(z_y) (`Fold::series_norm`,
+/// `Fold::series_distance`) is below one, and the wave operator's series about it, T⁽⁰⁾[:, s] = R₀(s)W_s,
+/// T⁽ᵏ⁾[:, s] = −R₀(s) Σ_t T⁽ᵏ⁻¹⁾[:, t] E[t, s] (E = H − Z₀ of the fold's own H: (z_s + f − K)T[:, s] = W_s −
+/// (T E)[:, s]), is within q^{K+1}/(1 − q) ‖T⁽⁰⁾‖ of the fold's own T after each order K = 0..3 -- its remainders
+/// falling as q's powers.
+#[test]
+fn the_series_about_each_place_s_reference_falls_as_its_ratio_s_powers_on_a_joined_cluster() {
+    let (model, points, many) = r4_lin_4();
+    let mut read = 0;
+    let mut largest = 0.0_f64;
+    for &k in &many {
+        for &(r, _) in points.iter().step_by(5) {
+            let amplitudes = model.light.amplitudes(r);
+            let Some((fold, _, far, _)) = model.cluster_fold(k, &amplitudes, false) else { continue };
+            assert!(fold.exists, "the cluster's fold exists at {r:?}");
+            let z0 = model.reference_of(k, &far);
+            let n = fold.size();
+            let q = fold.series_norm(&z0) / fold.series_distance(&z0, None);
+            largest = largest.max(q);
+            assert!(q < 1.0, "q {q} at {r:?}");
+            let mut e = fold.generator.clone();
+            for i in 0..n {
+                e[(i, i)] -= C64::real(z0[i]);
+            }
+            let (mut first, mut remainders) = (0.0_f64, vec![0.0_f64; 4]);
+            for rep in &fold.replicas {
+                // R₀(s) on every column of x, column s at its own reference.
+                let solve = |x: &Mat| -> Mat {
+                    let mut out = Mat::zeros(x.rows, n);
+                    for &s in &fold.members[rep.group] {
+                        let column: Vec<C64> = (0..x.rows).map(|i| x[(i, s)]).collect();
+                        let solved = rep.k.resolvent(C64::real(z0[s] + rep.frequency), &column);
+                        for i in 0..x.rows {
+                            out[(i, s)] = solved[i];
+                        }
+                    }
+                    out
+                };
+                let mut term = solve(&rep.w);
+                first += term.frobenius().powi(2);
+                let mut sum = term.clone();
+                for (order, remainder) in remainders.iter_mut().enumerate() {
+                    if order > 0 {
+                        term = solve(&term.product(&e)).scaled(-C64::ONE);
+                        sum.add_scaled(C64::ONE, &term);
+                    }
+                    let mut apart = rep.t.clone();
+                    apart.add_scaled(-C64::ONE, &sum);
+                    *remainder += apart.frobenius().powi(2);
+                }
+            }
+            let first = first.sqrt();
+            for (order, remainder) in remainders.iter().enumerate() {
+                let bound = q.powi(order as i32 + 1) / (1.0 - q) * first + crate::units::rounding(n * n * (order + 2)) * first;
+                assert!(remainder.sqrt() <= bound, "at {r:?}, K {order}: the remainder {:.3e} beyond {bound:.3e} (q {q:.3e})", remainder.sqrt());
+            }
+            if read % 8 == 0 {
+                println!("at {r:?}: q {q:.3e}; the remainders after K = 0..3, relative to T⁽⁰⁾: {:?}", remainders.iter().map(|x| format!("{:.2e}", x.sqrt() / first)).collect::<Vec<_>>());
+            }
+            read += 1;
+        }
+    }
+    println!("{read} atoms read; the largest q {largest:.3e}");
+    assert!(read > 0);
+}
+
+impl Fold {
+    /// The evaluation's normalized generator and landing map about one reference z₀ for every place, of one resolvent
+    /// (the formula before ELIMINATION v11): H = H₀ − N₁(H₀ − z₀), the jumps' wave R₀W − R₀²W E, the landing's Y = N₁.
+    fn evaluated_of_one(&self, levels: &Levels, z0: f64, orders: Orders) -> (Mat, Mat) {
+        let n = self.size();
+        let responses = self.responses_about(&vec![z0; n], 1);
+        let forms = |k: usize| {
+            let mut m = Mat::zeros(n, n);
+            for (rep, r) in self.replicas.iter().zip(&responses) {
+                m.add_scaled(C64::ONE, &rep.back.product(&r[k]));
+            }
+            m
+        };
+        let metric = metric_about(&responses, n);
+        let mut loss = Mat::zeros(n, n);
+        for (rep, r) in self.replicas.iter().zip(&responses) {
+            loss.add_scaled(C64::ONE, &r[0].adjoint_product(&levels.decay.block(&rep.q, &rep.q).product(&r[0])));
+        }
+        let mut whole = self.direct.clone();
+        whole.add_scaled(C64::ONE, &forms(0));
+        let mut h = whole.hermitian_part();
+        h.add_scaled(C64::new(0.0, -0.5), &loss);
+        let offset = |h: &Mat| {
+            let mut e = h.clone();
+            for i in 0..n {
+                e[(i, i)] -= C64::real(z0);
+            }
+            e
+        };
+        if orders.series >= 1 {
+            let next = forms(1).product(&offset(&h));
+            h.add_scaled(-C64::ONE, &next);
+        }
+        let e = offset(&h);
+        let mut inner = Mat::zeros(n, n);
+        for (rep, r) in self.replicas.iter().zip(&responses) {
+            let mut wave = r[0].clone();
+            if orders.series >= 1 {
+                wave.add_scaled(-C64::ONE, &r[1].product(&e));
+            }
+            inner.add_scaled(C64::ONE, &wave.adjoint_product(&levels.decay.block(&rep.q, &rep.q).product(&wave)));
+        }
+        let (mut bent, mut power) = (Mat::identity(n), Mat::identity(n));
+        for j in 1..=orders.normalization {
+            power = power.product(&metric);
+            bent.add_scaled(C64::real(binomial(-0.5, j)), &power);
+        }
+        let mut out = h.hermitian_part();
+        out.add_scaled(C64::new(0.0, -0.5), &bent.product(&inner).product(&bent));
+        let partner = forms(1);
+        let (mut s, mut power, mut sum, mut term) = (Mat::identity(n), Mat::identity(n), Mat::identity(n), Mat::identity(n));
+        for j in 1..=orders.normalization {
+            power = power.product(&metric);
+            s.add_scaled(C64::real(binomial(0.5, j)), &power);
+            term = term.product(&partner).scaled(-C64::ONE);
+            sum.add_scaled(C64::ONE, &term);
+        }
+        (out, s.product(&sum))
+    }
+}
+
+/// The first order and the landing about each place's reference (ELIMINATION v11; `Fold::evaluated`,
+/// `Fold::landing_evaluated`, `Reference::mixed`) at K = 1, J = 1: where the references are one -- every place's the
+/// cluster's mean --, the numbers of the one-resolvent formula bit for bit (`evaluated_of_one`: N₁ = Σ W′R₀²W, its
+/// H₀ − N₁(H₀ − z₀), the jumps' wave R₀W − R₀²W E, the landing's Y = N₁), and the run's responses' products R₀(x)R₀(y)W
+/// those of R₀(y)²W (eliminate.rs, the same solves); and on R4_LIN_4's joined cluster, its references apart, the
+/// evaluation's error against the definition (`Fold::evaluation_error`) at order 1 below that at order 0.
+#[test]
+fn the_first_order_about_each_place_s_reference_is_the_one_resolvent_formula_where_they_are_one() {
+    let (model, points, many) = r4_lin_4();
+    let orders = Orders { series: 1, normalization: 1 };
+    let mut read = 0;
+    for &k in &many {
+        for &(r, _) in points.iter().step_by(11) {
+            let amplitudes = model.light.amplitudes(r);
+            let Some((fold, levels, far, _)) = model.cluster_fold(k, &amplitudes, true) else { continue };
+            let n = fold.size();
+            let mean = far.iter().sum::<f64>() / n as f64 + model.series.centre[k];
+            let one = vec![mean; n];
+            let (generator, landing) = fold.evaluated_of_one(&levels, mean, orders);
+            assert_eq!(fold.evaluated(&levels, &one, orders).data, generator.data, "the generator bit for bit at {r:?}");
+            assert_eq!(fold.landing_evaluated(&one, orders).data, landing.data, "the landing bit for bit at {r:?}");
+            // Apart: the order 1 below the order 0 against the definition.
+            let z0 = model.reference_of(k, &far);
+            let (definition, whole) = model.definition_fold(k, &amplitudes).expect("the definition");
+            let defined = definition.definitions(&whole).0;
+            let psi: Vec<C64> = (0..n).map(|i| if i < fold.ground { C64::real(1.0 + 0.1 * i as f64) } else { C64::ZERO }).collect();
+            let error = |series: usize| Fold::evaluation_error(&fold.evaluated(&levels, &z0, Orders { series, normalization: 1 }), &defined, &z0, &psi);
+            let (zero, first) = (error(0), error(1));
+            let q = fold.series_norm(&z0) / fold.series_distance(&z0, None);
+            println!("at {r:?}: the evaluation's error at order 0 {zero:.3e}, order 1 {first:.3e} (q {q:.3e})");
+            assert!(first <= zero, "order 1 {first} beyond order 0 {zero} at {r:?}");
+            read += 1;
+        }
+    }
+    assert!(read > 0);
 }
 
