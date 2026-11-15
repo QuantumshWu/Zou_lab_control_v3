@@ -673,9 +673,9 @@ fn a_tilt_moves_every_link_s_part_continuously() {
 /// link, the blocks' remainders, and the error at a state with its parts.
 ///
 /// The rounding a number is the same within. A gauge is an exact change of variables (H → H − c on a group), but each
-/// gauge's fold is its own computation, settled to its floor ε_H (`settle`: the change of its last iteration,
-/// `Fold::floor`, at least the rounding of its operations γ_terms s, terms = (n_P + n_E)², at the scale s of its terms,
-/// of the size of ‖H‖_F); an
+/// gauge's fold is its own computation, settled to its floor ε_H = γ_terms s (`settle`: the change of an iteration
+/// within the rounding of its operations, terms = (n_P + n_E)², at the scale s of its terms, of the size of ‖H‖_F;
+/// PGC1D's first round stops so at its tenth step, contracting by 0.058 a step); an
 /// eigenvector r_p of H is then fixed to ε_H/g_p, g_p its eigenvalue's least distance from the others of its group (first
 /// order in the perturbation), and a sector's response at p, read off its Sylvester solve, to ε_H/δ_p, δ_p = min |Ω +
 /// λ_p' − λ_q| the solve's separation over its blocks' eigenvalue pairs -- beside its own arithmetic's γ_terms κ, κ the
@@ -723,8 +723,7 @@ fn every_decision_and_error_is_the_same_in_every_gauge() {
             let fold = fold(&lv, &cl, slow, &Replicas::of(&cl, slow, lv.ground.rows), Some(&|l: &Link| kept.links.contains(l)));
             let n = fold.size();
             let gamma = crate::units::rounding((n + lv.excited.rows).pow(2));
-            // The fold's floor: its own iteration's last change, or the rounding of its terms where that is below it.
-            let (floor, own) = ((gamma * fold.generator.frobenius()).max(fold.floor), gamma * fold.eigen.condition);
+            let (floor, own) = (gamma * fold.generator.frobenius(), gamma * fold.eigen.condition);
             let gap = |p: usize| (0..n).filter(|&q| q != p && fold.groups[q] == fold.groups[p]).map(|q| (fold.eigen.values[q] - fold.eigen.values[p]).abs()).fold(f64::INFINITY, f64::min);
             let like: Vec<usize> = (0..n).filter(|&p| fold.ground_weight(p) >= 0.5).collect();
             let least = like.iter().map(|&p| gap(p)).fold(f64::INFINITY, f64::min);
@@ -1304,7 +1303,7 @@ impl Fold {
     /// (`settle`, on n × n matrices alone); None where it does not settle.
     fn series_generator(&self, forms: &[Mat], z0: C64) -> Option<Mat> {
         let n = self.size();
-        let (h, exists, _) = settle(
+        let (h, exists) = settle(
             &self.direct,
             |h| {
                 let mut e = h.clone();
@@ -1354,7 +1353,7 @@ impl Fold {
             }
             out
         };
-        let (h, exists, _) = settle(
+        let (h, exists) = settle(
             &self.direct,
             |h| {
                 let mut e = h.clone();

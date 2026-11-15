@@ -542,9 +542,6 @@ pub(crate) struct Fold {
     /// A: the direct static entries.
     pub direct: Mat,
     pub generator: Mat,
-    /// The change of the self-consistent iteration's last step (`settle`): the floor the generator settled to; none about
-    /// a reference (one step).
-    pub floor: f64,
     pub replicas: Vec<Folded>,
     /// The sectors of the turning couplings the model does not carry (module documentation, # Sectors): folded into the
     /// generator where the fold is self-consistent; about a reference -- the run's own evaluation, which folds none --
@@ -853,8 +850,7 @@ pub(crate) fn bare_error(mixing: f64) -> f64 {
     if converges(2.0 * mixing) { 2.0 * mixing * mixing } else { 1.0 }
 }
 
-/// The fixed point of x ← step(x) from x₀ (a step gives its value and the scale of its terms), whether it exists, and
-/// the change of its last step: the floor it settled to (within it of the fixed point, the contraction below ¼).
+/// The fixed point of x ← step(x) from x₀ (a step gives its value and the scale of its terms), and whether it exists.
 /// The iteration's factor at the start is the derivative of the fold in its argument at the unperturbed spectra,
 /// W'R²W, the excited share m² of the states it folds (for one line exactly |T|²), read as the iteration's first
 /// contraction κ -- the change of the second step over the first's --; Stewart's theorem has the invariant subspace, and
@@ -863,7 +859,7 @@ pub(crate) fn bare_error(mixing: f64) -> f64 {
 /// its exceptional point, starts at exactly κ = ¼) -- and the partition makes the excited block explicit. Where it
 /// exists the iteration goes on to its floor: until a change is within the rounding of a step's operations (`terms`)
 /// times the scale, or no longer falls.
-fn settle(start: &Mat, mut step: impl FnMut(&Mat) -> (Mat, f64), terms: usize) -> (Mat, bool, f64) {
+fn settle(start: &Mat, mut step: impl FnMut(&Mat) -> (Mat, f64), terms: usize) -> (Mat, bool) {
     let (mut x, mut last, mut iterations, mut first) = (start.clone(), f64::INFINITY, 0, None);
     loop {
         iterations += 1;
@@ -871,20 +867,20 @@ fn settle(start: &Mat, mut step: impl FnMut(&Mat) -> (Mat, f64), terms: usize) -
         let change = difference(&next, &x);
         if !change.is_finite() {
             // A change that is no number is no fixed point (`converges`); the last iterate that is one is kept.
-            return (x, false, last);
+            return (x, false);
         }
         x = next;
         if change <= rounding(terms) * scale {
-            return (x, true, change);
+            return (x, true);
         }
         match first {
             None => first = Some(change),
-            Some(f) if iterations == 2 && !converges(2.0 * (change / f).sqrt()) => return (x, false, change),
+            Some(f) if iterations == 2 && !converges(2.0 * (change / f).sqrt()) => return (x, false),
             _ => {}
         }
         if !(change < last) {
             // At its floor.
-            return (x, true, change);
+            return (x, true);
         }
         last = change;
     }
@@ -1084,18 +1080,18 @@ pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replic
     // goes up, a block where the static part's does not, a link where the sectors' does not -- `closure`); where the
     // sectors' does not, the generator is the static part's, the sectors made at it.
     let terms = (n + excited) * (n + excited);
-    let (h, still_exists, exists, floor) = match reference {
+    let (h, still_exists, exists) = match reference {
         None => {
-            let (h, settled, floor) = settle(&a, |h| step(h, false), terms);
+            let (h, settled) = settle(&a, |h| step(h, false), terms);
             match folds_sectors && settled {
                 true => match settle(&h, |h| step(h, true), terms) {
-                    (whole, true, floor) => (whole, true, true, floor),
-                    _ => (h, true, false, floor),
+                    (whole, true) => (whole, true, true),
+                    _ => (h, true, false),
                 },
-                false => (h, settled, settled, floor),
+                false => (h, settled, settled),
             }
         }
-        Some(z0) => (step(&Mat::from_fn(n, n, |i, j| if i == j { C64::real(z0[i]) } else { C64::ZERO }), false).0, true, true, 0.0),
+        Some(z0) => (step(&Mat::from_fn(n, n, |i, j| if i == j { C64::real(z0[i]) } else { C64::ZERO }), false).0, true, true),
     };
     // The responses at the generator they made it of, at its final form (about a reference: R₀ W, as made), and the static
     // part H_s they make there.
@@ -1121,7 +1117,7 @@ pub(crate) fn fold_about(levels: &Levels, classes: &[Class], slow: &Slow, replic
         carried_sectors.iter_mut().for_each(|s| s.solve(&still, &whole));
     }
     let (eigen, groups) = eigen_of(&h, &members);
-    Fold { ground, explicit: slow.explicit.clone(), frames: slow.frames.clone(), sizes: slow.sizes.clone(), direct: a, generator: h, floor, replicas: folded, sectors, carried: carried_sectors, eigen, exists, still_exists, reference: reference.map(|z| z.to_vec()), driven, members, groups, places: place_group, stills }
+    Fold { ground, explicit: slow.explicit.clone(), frames: slow.frames.clone(), sizes: slow.sizes.clone(), direct: a, generator: h, replicas: folded, sectors, carried: carried_sectors, eigen, exists, still_exists, reference: reference.map(|z| z.to_vec()), driven, members, groups, places: place_group, stills }
 }
 
 /// H's eigendecomposition and each eigenstate's group: H is a group's alone (# Groups), so its eigenstates are each one
@@ -1783,7 +1779,7 @@ impl Fold {
         }
         // From the right generator, which the left one is similar to, M = (1 + ST) H (1 + ST)⁻¹: within the excited share
         // X of it.
-        let (_, settled, _) = settle(
+        let (_, settled) = settle(
             &self.generator,
             |m| {
                 let sm = schurs_of(&m.adjoint(), &self.members).expect("the Schur form of P's left generator");
