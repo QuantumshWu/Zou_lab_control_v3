@@ -482,7 +482,9 @@ impl Plan {
     pub(crate) fn sited_work(&self, axes: usize, place: f64, order: usize, laid: bool) -> f64 {
         let near = if self.near.len() == 0 || laid { 0.0 } else { place + super::tabulate::read_work(axes, order, 2 * self.near.responding().len()) };
         let fourth = self.fourth.as_ref().filter(|fourth| fourth.bends()).map_or(0.0, |fourth| if laid { self.quartic_work(fourth, Some(axes), false) } else { self.quartic_made_work(fourth, axes, place) });
-        near + fourth + self.fields_work(order) + self.excite_work(if order >= 1 { 4 } else { 1 }, true)
+        let parts = if order >= 1 { 4 } else { 1 };
+        let first = if self.fourth.as_ref().is_some_and(|fourth| fourth.held()) { self.excite_first_work(parts) } else { 0.0 };
+        near + fourth + self.fields_work(order) + self.excite_work(parts, true) + first
     }
 
     /// The counted complex multiply-adds of a state's photons' classes on a site (`Model::classes_on`), priced without

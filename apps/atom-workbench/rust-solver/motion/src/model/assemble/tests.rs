@@ -1116,9 +1116,24 @@ fn the_decay_is_the_jumps_product_on_random_fields_and_polarizations() {
                         size += psi[x].abs() * (h.data[x * n + y].abs() + h.data[y * n + x].abs()) * psi[y].abs();
                     }
                 }
-                let photons: f64 = model.photons_of(&plan, table, &crate::model::Point { r, kappa, t }, &psi, Gradients::None).0.iter().map(|ph| ph.weight()).sum();
+                let at = crate::model::Point { r, kappa, t };
+                let photons_at = |table| -> f64 { model.photons_of(&plan, table, &at, &psi, Gradients::None).0.iter().map(|ph| ph.weight()).sum() };
+                let photons = photons_at(table);
                 let apart = (rate - photons).abs();
-                assert!(apart <= rounding(8 * n * n + 4 * EXCITED * EXCITED) * size.max(photons), "{name}, cluster {cluster} at {r:?}, κ {kappa:?}: the decay {rate:e} against the photons' {photons:e}");
+                // From a table the decay is its interpolated pair forms and the photons its interpolated responses' jumps:
+                // apart by the table's measured error, each against the exact elimination at the point (tabulate.rs, # The
+                // table's error: its whole read).
+                let tabulated = match table {
+                    None => 0.0,
+                    Some(_) => {
+                        let exact = model.middle(&plan, r, t, None);
+                        let mut g = Mat::zeros(n, n);
+                        exact.generator(&exact.path(kappa, velocity), 0.0, &mut g);
+                        let rate_exact: f64 = (0..n).flat_map(|x| (0..n).map(move |y| (x, y))).map(|(x, y)| (psi[x].conj() * (g.data[x * n + y] - g.data[y * n + x].conj()) * C64::I * psi[y]).re).sum();
+                        (rate - rate_exact).abs() + (photons - photons_at(None)).abs()
+                    }
+                };
+                assert!(apart <= rounding(8 * n * n + 4 * EXCITED * EXCITED) * size.max(photons) + tabulated, "{name}, cluster {cluster} at {r:?}, κ {kappa:?}: the decay {rate:e} against the photons' {photons:e} (the table's error {tabulated:e})");
                 largest = largest.max(if photons > 0.0 { apart / photons } else { 0.0 });
                 checked += 1;
             }
@@ -1280,7 +1295,7 @@ fn groups_along_a_path(name: &str, index: u64, model: &Model) -> (usize, usize) 
     (groups, clusters)
 }
 
-/// The readout inverts the generator's own S (readout.rs `Model::readout_of`; `Model::bent_at`): the 1D PGC at 3 G
+/// The readout inverts the generator's own S (readout.rs `Model::readout_of`; `Model::quartic`): the 1D PGC at 3 G
 /// (PGC1D_TILT_0) with every near light at the atom, the prior's units, and the series' first order and the
 /// normalization's kept, so that S bends the state. At two points the readout's S⁻¹ -- Σ_{j≤J} b_j X^j of the one
 /// metric, the near part of 𝒯's at the responses there and the plan's field components -- is the matrix the photons and
@@ -1311,17 +1326,9 @@ fn the_readout_inverts_the_generator_s_own_normalization() {
         let table = model.pointed(&plan, None, r, &mut site);
         model.quartic(&plan, fourth, table, Some(r), &mut site, false, false);
         let generator: Vec<C64> = Model::quartic_read(|q| q.data[BENT * size..(BENT + 1) * size].to_vec());
-        // The readout's.
-        let mut point = Held::<Site>::take();
-        model.light.amplitudes_into(r, 0, |_| true, &mut point.beams);
-        model.responded(&plan, None, 0, &mut point);
-        let (mut scratch, mut bent) = (vec![], vec![]);
-        model.bent_at(&plan, fourth, &point, &mut scratch, &mut bent);
-        let scale = generator.iter().fold(0.0_f64, |m, z| m.max(z.abs()));
-        let apart = generator.iter().zip(&bent).fold(0.0_f64, |m, (a, b)| m.max((*a - *b).abs()));
         let identity = generator.iter().enumerate().fold(0.0_f64, |m, (i, z)| m.max((*z - if i % (n + 1) == 0 { C64::ONE } else { C64::ZERO }).abs()));
-        println!("r {r:?}: the readout's S⁻¹ against the generator's {apart:.2e} (S⁻¹ − 1 of size {identity:.2e})");
-        assert!(identity > 0.0 && apart <= rounding(4 * size) * scale, "the readout's S⁻¹ {apart:e} from the generator's");
+        println!("r {r:?}: S⁻¹ − 1 of size {identity:.2e}");
+        assert!(identity > 0.0, "S bends the state");
         // The populations of ψ are x's, x = S⁻¹ψ.
         let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.uniform() - 0.5, stream.uniform() - 0.5)).collect();
         let x: Vec<C64> = (0..n).map(|i| (0..n).map(|j| generator[i * n + j] * psi[j]).sum()).collect();
@@ -1352,14 +1359,12 @@ fn a_scene_s_plan_work() {
         let plan = model.plan(k, &running);
         let fourth = plan.fourth.as_ref();
         println!(
-            "cluster {k}: {} | node {:?} excite {:.0} (near {:.0}) first {:.0} decay {:.0} metric {:.0} node normal {:?} quartic {:.0} held force {:.0} | classes (all) {:.0} (none) {:.0} amplitudes {:.0} | costs {:?}",
+            "cluster {k}: {} | node {:?} excite {:.0} (near {:.0}) first {:.0} node normal {:?} quartic {:.0} held force {:.0} | classes (all) {:.0} (none) {:.0} amplitudes {:.0} | costs {:?}",
             plan.described(),
             plan.node,
             plan.excite_work(1, true),
             plan.excite_work(1, false),
             plan.excite_first_work(1),
-            plan.decay_work(),
-            plan.metric_work(1),
             fourth.map(|f| plan.node_normal_work(f)),
             fourth.map_or(0.0, |f| plan.quartic_work(f, None, false)),
             fourth.map_or(0.0, |f| plan.held_force_work(f, 3)),

@@ -226,7 +226,7 @@ impl Model {
             let fields = self.fields(plan, amplitudes, [0.0; 3], order);
             for link in &plan.links {
                 let (x, y) = link.place;
-                if x != y || x >= c.ground || p[c.states[x]] == 0.0 || !plan.statics[link.block] {
+                if !link.hermitian || x != y || x >= c.ground || p[c.states[x]] == 0.0 || !plan.statics[link.block] {
                     continue;
                 }
                 let (left, right) = plan.factors(link.block);

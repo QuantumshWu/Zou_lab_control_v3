@@ -10,14 +10,14 @@
 //!
 //! The state the dynamics carries is the normalized ψ = S x (assemble.rs, # The normalized generator; ELIMINATION v7),
 //! and the readout inverts the generator's own S: x = S⁻¹ψ, S⁻¹ = Σ_{j≤J} b_j X^j of the slow state's one metric X --
-//! the near light's static pair forms at the point, the same matrix a node's is (assemble.rs `Model::bent_at`), whose
+//! the metric's decay sums at the point, the generator's own matrix there (assemble.rs `Quartic`, `Sum::Metric`), whose
 //! largest eigenvalue is the series' ratio (elim.rs `Fold::evaluated_share`, `Series`) -- to the model's normalization
 //! order J; an explicit state's amplitude its own. (It read before a metric of its own, Y = Σ_k C_k†C_k of every
 //! channel with its Doppler partner: a second definition of the metric, which does not invert the generator's S.) The
 //! populations are x's |x_b|², the excited states' Σ_k |A_k[i]|² over every channel and the explicit states', over their
 //! sum: what is read is the slow state itself in the coordinates the dynamics holds.
 
-use super::assemble::{Held, Plan, Site};
+use super::assemble::{Held, Plan, Site, BENT};
 use super::far::EXCITED;
 use super::tabulate::NearTable;
 use super::{Beat, Cluster, Component, Level, Lights, Model, Point, Sample, Unit, GROUND, STATES};
@@ -69,10 +69,17 @@ impl Model {
         let g = c.ground;
         let mut site = Held::<Site>::take();
         let count = self.channels_at(plan, table, at, &mut site);
-        let mut bent = vec![];
-        if let Some(fourth) = plan.fourth.as_ref().filter(|fourth| fourth.bends()) {
-            self.bent_at(plan, fourth, &*site, &mut vec![], &mut bent);
-        }
+        // The generator's own S⁻¹ at the point (assemble.rs `Quartic`: the photons' and the landing's).
+        let bent: Vec<C64> = match plan.fourth.as_ref().filter(|fourth| fourth.bends()) {
+            Some(fourth) => {
+                let mut point = Held::<Site>::take();
+                let table = self.pointed(plan, table, at.r, &mut point);
+                self.quartic(plan, fourth, table, Some(at.r), &mut point, false, false);
+                let size = fourth.n * fourth.n;
+                Model::quartic_read(|q| q.data[BENT * size..(BENT + 1) * size].to_vec())
+            }
+            None => vec![],
+        };
         let Site { channels, excited_rows: excited, .. } = &mut *site;
         let size = EXCITED * g;
         // The co-resonant channels and places (p, b1) and (q, b2), θ_b1 + ν_p = θ_b2 + ν_q, and with them a place's class:
@@ -110,7 +117,7 @@ impl Model {
         }
         let held: Vec<usize> = (0..places).filter(|&k| first[k] == k).collect();
         // The slow state of the normalized coordinates ψ = S x (assemble.rs, # The normalized generator): x = S⁻¹ψ with
-        // the generator's own S⁻¹ = Σ_{j≤J} b_j X^j of the one metric X at the point (`Model::bent_at`, of the same
+        // the generator's own S⁻¹ = Σ_{j≤J} b_j X^j of the one metric X at the point (assemble.rs `Quartic`, of the same
         // responses; its series' ratio, X's largest eigenvalue, read by elim.rs `Series`), the identity where it bends
         // nothing; every population
         // of it -- the ground places' |x_b|², the excited states' Σ_k |A_k|² over every channel, the explicit states' --
