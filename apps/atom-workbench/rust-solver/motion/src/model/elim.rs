@@ -3407,7 +3407,9 @@ pub(crate) fn pair_links(fold: &Fold, a: &Images, b: &Images) -> Vec<(Link, f64)
 /// |Σ_x ⟨u^a_x|u^b_x⟩| is the trace alone; and every pair of source eigenstates, a state's coherence between two of them
 /// a cross term at their eigenvalues' difference -- two ground states the frames do not join, their Raman resonance
 /// at ω_c → 0 however far apart their classes' frequencies (Ω = κ_a − κ_b). A sector's photons are a class of their
-/// own, at their frequency (`Fold::photons`), read by the same ω_c. Returns (a, b, error) of the pairs read -- of those
+/// own, at their frequency (`Fold::photons`), read by the same ω_c, against the classes the run emits: a pair of two
+/// left-out sectors' classes is no split of the run's -- the run has neither photon, and what leaving them out costs
+/// is their sectors' rates and populations, criterion one's. Returns (a, b, error) of the pairs read -- of those
 /// beyond `floor` where it is a decision's (the prior's, at the share: a pair whose bound is within it is none of its
 /// moves): by |Σ_x ⟨l_q|u^a⟩⟨l_q′|u^b⟩*| ≤ Σ_x A^a_x A^b_x, A_x = Σ_q |⟨l_q|u_x⟩|, and |ω_c| ≥ |κ_a − κ_b| − Λ, Λ the
 /// largest |λ_q − λ_q′* − (λ_p − λ_p′*)|, a pair's error is within Σ_{p,p′} w Σ_x A^a A^b / (|κ_a − κ_b| − Λ) where
@@ -3438,7 +3440,9 @@ pub(crate) fn cross_terms(classes: &[Images], landings: &[Landing], values: &[C6
     for (i, &a) in active.iter().enumerate() {
         for &b in &active[i + 1..] {
             let (ca, cb) = (&classes[a], &classes[b]);
-            if ca.landing != cb.landing || equal(ca.frequency - cb.frequency, ca.scale + cb.scale) {
+            // Two classes the run emits neither of: no split of the run's (the run has neither photon; what leaving
+            // them out costs is their sectors' rates and populations, criterion one's, `Fold::sector_parts`).
+            if ca.landing != cb.landing || equal(ca.frequency - cb.frequency, ca.scale + cb.scale) || (!ca.blocks.is_empty() && !cb.blocks.is_empty()) {
                 continue;
             }
             let lambda = &landings[ca.landing].values;
