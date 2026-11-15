@@ -1666,7 +1666,7 @@ fn a_raman_resonant_photon_coherence_is_kept_and_a_far_one_dropped_as_the_master
         let omega = images[ia].frequency - images[ib].frequency;
         let old = gamma_old / omega.abs();
         let landings = vec![Landing::of(&f, &[0, 1])];
-        let read = cross_terms(&images, &landings, &f.eigen.values, &[C64::ONE, C64::ONE], norm).into_iter().find(|t| (t.0, t.1) == (ia.min(ib), ia.max(ib))).map_or(0.0, |t| t.2);
+        let read = cross_terms(&images, &landings, &f.eigen.values, &[C64::ONE, C64::ONE], norm, 0.0).into_iter().find(|t| (t.0, t.1) == (ia.min(ib), ia.max(ib))).map_or(0.0, |t| t.2);
         // The exact three-level master equation in the lasers' frame, and the two ground states' with both classes in
         // one jump (the elimination's) and with each class apart (the split's).
         let h3 = Mat::from_fn(3, 3, |i, j| match (i, j) {
@@ -1780,7 +1780,7 @@ fn the_coherences_old_and_combined_frequencies_at_the_prior_s_atoms() {
                     .iter()
                     .map(|class| {
                         let m = model.clusters[class.landing].states.len();
-                        Images { frequency: -model.omega(&class.beats[0]), scale: model.axes.size(&class.beats[0]), landing: landed.iter().position(|&l| l == class.landing).unwrap(), images: vec![std::array::from_fn(|_| vec![C64::ZERO; m]); n], links: vec![] }
+                        Images { frequency: -model.omega(&class.beats[0]), scale: model.axes.size(&class.beats[0]), landing: landed.iter().position(|&l| l == class.landing).unwrap(), images: vec![std::array::from_fn(|_| vec![C64::ZERO; m]); n], blocks: vec![] }
                     })
                     .collect();
                 for &p in &like {
@@ -1802,8 +1802,8 @@ fn the_coherences_old_and_combined_frequencies_at_the_prior_s_atoms() {
                     let norm = norm_sqr(&psi);
                     // The same parts over Ω: every eigenvalue at zero.
                     let flat: Vec<Landing> = landings.iter().map(|l| Landing { values: vec![C64::ZERO; l.values.len()], left: l.left.clone() }).collect();
-                    let at_omega = cross_terms(&images, &flat, &vec![C64::ZERO; n], &coefficients, norm);
-                    for (a, b, x) in cross_terms(&images, &landings, &source.eigen.values, &coefficients, norm) {
+                    let at_omega = cross_terms(&images, &flat, &vec![C64::ZERO; n], &coefficients, norm, 0.0);
+                    for (a, b, x) in cross_terms(&images, &landings, &source.eigen.values, &coefficients, norm, 0.0) {
                         let unit = coherence(classes, a, b);
                         if kept.contains(&unit) {
                             continue;
@@ -2182,4 +2182,5 @@ fn the_first_order_about_each_place_s_reference_is_the_one_resolvent_formula_whe
     }
     assert!(read > 0);
 }
+
 

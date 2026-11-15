@@ -2652,7 +2652,7 @@ impl super::Model {
             let source: Vec<usize> = (0..n).filter(|&p| atom.groups[p] == group).collect();
             let landings: Vec<Landing> = (0..atom.members.len()).map(|x| Landing::of(&atom, &(0..n).filter(|&q| atom.groups[q] == x).collect::<Vec<_>>())).collect();
             let classes = &self.classes[sample.cluster];
-            let mut images: Vec<Images> = classes.iter().map(|class| Images { frequency: -self.omega(&class.beats[0]), scale: self.axes.size(&class.beats[0]), landing: atom.places[place_of(self.clusters[class.landing].states[0])], images: vec![std::array::from_fn(|_| vec![C64::ZERO; n]); n], links: vec![] }).collect();
+            let mut images: Vec<Images> = classes.iter().map(|class| Images { frequency: -self.omega(&class.beats[0]), scale: self.axes.size(&class.beats[0]), landing: atom.places[place_of(self.clusters[class.landing].states[0])], images: vec![std::array::from_fn(|_| vec![C64::ZERO; n]); n], blocks: vec![] }).collect();
             for &p in source.iter().filter(|&&p| coefficients[p] != C64::ZERO) {
                 let r = atom.right(p);
                 let local: Vec<C64> = c.states.iter().map(|&s| r[place_of(s)]).collect();
@@ -2667,9 +2667,9 @@ impl super::Model {
                 }
             }
             let emission: [Mat; 3] = std::array::from_fn(|a| Mat::from_fn(atom.ground, STATES, |x, y| self.emission[a][(grounds[x], y)]));
-            images.extend(atom.photons(&emission, &source).0.into_iter().filter(|class| !class.links.is_empty()));
-            for (a, b, x) in cross_terms(&images, &landings, &atom.eigen.values, &coefficients, norm) {
-                let on = pair_links(&images[a], &images[b]);
+            images.extend(atom.photons(&emission, &source).0.into_iter().filter(|class| !class.blocks.is_empty()));
+            for (a, b, x) in cross_terms(&images, &landings, &atom.eigen.values, &coefficients, norm, 0.0) {
+                let on = pair_links(&atom, &images[a], &images[b]);
                 if on.is_empty() {
                     let (first, second) = (&classes[a].beats[0], &classes[b].beats[0]);
                     let (lo, hi) = if first < second { (first.clone(), second.clone()) } else { (second.clone(), first.clone()) };
@@ -3362,8 +3362,9 @@ impl Landing {
 /// frequency its entries turn at, e^{+iω̃t}, so that the photon's lab frequency is κ less the landing state's frame,
 /// up to the class's common phase --, the landing it lands in (an index into the landings), and per source eigenstate
 /// p its photon u_a = J_a r_p (a = x, y, z) on the landing's places. Of photons the run leaves out -- those of the
-/// sectors it does not carry (`Fold::photons`) --, the links whose keep takes them into the run, with their shares of
-/// the class (`links`); none of the photons the run has.
+/// sectors it does not carry (`Fold::photons`) --, the sectors' blocks it holds photons of (the sector, among the fold's
+/// `sectors`, the source eigenstate and the target group), in the order they were made, whose links' keep takes them
+/// into the run (`Fold::class_links`, read only for a pair beyond the share); none of the photons the run has.
 #[derive(Clone, Debug)]
 pub(crate) struct Images {
     pub frequency: f64,
@@ -3371,18 +3372,18 @@ pub(crate) struct Images {
     pub scale: f64,
     pub landing: usize,
     pub images: Vec<[Vec<C64>; 3]>,
-    pub links: Vec<(Link, f64)>,
+    pub blocks: Vec<(usize, usize, usize)>,
 }
 
 /// The objects a pair of classes' cross term is on where the run leaves one of them out (`Images::links`): the links of
 /// each class that has them, half to each where both do, by their shares within the class; none where the run has both
 /// (the pair's coherence is then the object, `Unit::Coherence`).
-pub(crate) fn pair_links(a: &Images, b: &Images) -> Vec<(Link, f64)> {
-    let parts: Vec<&Images> = [a, b].into_iter().filter(|c| !c.links.is_empty()).collect();
+pub(crate) fn pair_links(fold: &Fold, a: &Images, b: &Images) -> Vec<(Link, f64)> {
+    let parts: Vec<Vec<(Link, f64)>> = [a, b].into_iter().filter(|c| !c.blocks.is_empty()).map(|c| fold.class_links(c)).collect();
     let mut out: Vec<(Link, f64)> = vec![];
-    for class in &parts {
-        let total: f64 = class.links.iter().map(|l| l.1).sum();
-        for &(link, w) in class.links.iter().filter(|_| total > 0.0) {
+    for links in &parts {
+        let total: f64 = links.iter().map(|l| l.1).sum();
+        for &(link, w) in links.iter().filter(|_| total > 0.0) {
             let x = w / total / parts.len() as f64;
             match out.iter_mut().find(|o| o.0 == link || o.0 == link.reversed()) {
                 Some(o) => o.1 += x,
@@ -3406,8 +3407,13 @@ pub(crate) fn pair_links(a: &Images, b: &Images) -> Vec<(Link, f64)> {
 /// |Σ_x ⟨u^a_x|u^b_x⟩| is the trace alone; and every pair of source eigenstates, a state's coherence between two of them
 /// a cross term at their eigenvalues' difference -- two ground states the frames do not join, their Raman resonance
 /// at ω_c → 0 however far apart their classes' frequencies (Ω = κ_a − κ_b). A sector's photons are a class of their
-/// own, at their frequency (`Fold::photons`), read by the same ω_c. Returns (a, b, error) of the pairs read.
-pub(crate) fn cross_terms(classes: &[Images], landings: &[Landing], values: &[C64], coefficients: &[C64], norm: f64) -> Vec<(usize, usize, f64)> {
+/// own, at their frequency (`Fold::photons`), read by the same ω_c. Returns (a, b, error) of the pairs read -- of those
+/// beyond `floor` where it is a decision's (the prior's, at the share: a pair whose bound is within it is none of its
+/// moves): by |Σ_x ⟨l_q|u^a⟩⟨l_q′|u^b⟩*| ≤ Σ_x A^a_x A^b_x, A_x = Σ_q |⟨l_q|u_x⟩|, and |ω_c| ≥ |κ_a − κ_b| − Λ, Λ the
+/// largest |λ_q − λ_q′* − (λ_p − λ_p′*)|, a pair's error is within Σ_{p,p′} w Σ_x A^a A^b / (|κ_a − κ_b| − Λ) where
+/// |κ_a − κ_b| > Λ (left-out sectors' photon classes, 1.8·10³ an atom of PGC1D_TILT_2, and pairs of them by the
+/// million: the prior's cross terms 3.5 s an atom against its closure's 0.1).
+pub(crate) fn cross_terms(classes: &[Images], landings: &[Landing], values: &[C64], coefficients: &[C64], norm: f64, floor: f64) -> Vec<(usize, usize, f64)> {
     let held: Vec<usize> = (0..coefficients.len()).filter(|&p| coefficients[p] != C64::ZERO).collect();
     // Per class, per axis, its coefficients on the landing's eigenstates, [p][axis][q] for the held p.
     let on: Vec<Vec<[Vec<C64>; 3]>> = classes
@@ -3417,15 +3423,33 @@ pub(crate) fn cross_terms(classes: &[Images], landings: &[Landing], values: &[C6
             held.iter().map(|&p| std::array::from_fn(|x| landing.left.apply(&class.images[p][x]))).collect()
         })
         .collect();
+    // The classes of any photon from the held eigenstates: a pair with one of none is of no size.
+    let active: Vec<usize> = (0..classes.len()).filter(|&a| on[a].iter().any(|axes| axes.iter().any(|v| v.iter().any(|z| *z != C64::ZERO)))).collect();
+    // Per class and held eigenstate, per axis, Σ_q |⟨l_q|u_x⟩|; per landing, Λ over the held pairs.
+    let sums: Vec<Vec<[f64; 3]>> = on.iter().map(|of| of.iter().map(|axes| std::array::from_fn(|x| axes[x].iter().map(|z| z.abs()).sum())).collect()).collect();
+    let spread: Vec<f64> = landings
+        .iter()
+        .map(|landing| {
+            let lambda = &landing.values;
+            held.iter().flat_map(|&p| held.iter().map(move |&p2| values[p] - values[p2].conj())).flat_map(|source| lambda.iter().flat_map(move |&l| lambda.iter().map(move |&l2| (l - l2.conj() - source).abs()))).fold(0.0, f64::max)
+        })
+        .collect();
     let mut out = vec![];
-    for a in 0..classes.len() {
-        for b in a + 1..classes.len() {
+    for (i, &a) in active.iter().enumerate() {
+        for &b in &active[i + 1..] {
             let (ca, cb) = (&classes[a], &classes[b]);
             if ca.landing != cb.landing || equal(ca.frequency - cb.frequency, ca.scale + cb.scale) {
                 continue;
             }
             let lambda = &landings[ca.landing].values;
             let omega = ca.frequency - cb.frequency;
+            let apart = omega.abs() - spread[ca.landing];
+            if floor > 0.0 && apart > 0.0 {
+                let bound: f64 = (0..held.len()).flat_map(|i| (0..held.len()).map(move |k| (i, k))).map(|(i, k)| (coefficients[held[i]] * coefficients[held[k]].conj()).abs() / norm * (0..3).map(|x| sums[a][i][x] * sums[b][k][x]).sum::<f64>()).sum::<f64>() / apart;
+                if !(bound > floor) {
+                    continue;
+                }
+            }
             let mut error = 0.0;
             for (i, &p) in held.iter().enumerate() {
                 for (k, &p2) in held.iter().enumerate() {
@@ -3479,11 +3503,11 @@ pub(crate) fn start_cross_terms(fold: &Fold, emission: &[Mat; 3]) -> (Vec<[(Opti
         let mut coefficients = vec![C64::ZERO; n];
         state.iter().for_each(|&p| coefficients[p] = C64::ONE);
         let psi: Vec<C64> = (0..n).map(|k| state.iter().map(|&p| fold.eigen.vectors[(k, p)]).sum()).collect();
-        for (a, b, x) in cross_terms(&images, &landings, &fold.eigen.values, &coefficients, crate::linalg::norm_sqr(&psi)) {
+        for (a, b, x) in cross_terms(&images, &landings, &fold.eigen.values, &coefficients, crate::linalg::norm_sqr(&psi), share()) {
             if !(x > share()) {
                 continue;
             }
-            let mut on = pair_links(&images[a], &images[b]);
+            let mut on = pair_links(fold, &images[a], &images[b]);
             if on.is_empty() {
                 let pair = [class(origins[a]), class(origins[b])];
                 if !out.contains(&pair) {
@@ -3536,18 +3560,24 @@ impl Fold {
         // A class: its images, origin, landing place, and its kind -- the fold's own photons (0), a carried sector's (1),
         // a left-out one's (2).
         let mut out: Vec<(Images, PhotonSource, usize, u8)> = vec![];
+        // The class a frequency of a kind lands in, by its exact bits once found: the first class one with it (`equal`),
+        // which no class made later precedes.
+        let found: std::cell::RefCell<std::collections::HashMap<(u8, usize, u64), usize>> = Default::default();
         let add = |(frequency, scale): (f64, f64), kind: u8, origin: PhotonSource, at: usize, p: usize, axis: usize, value: C64, out: &mut Vec<(Images, PhotonSource, usize, u8)>| -> Option<usize> {
             if value == C64::ZERO {
                 return None;
             }
             let landing = self.places[at];
-            let k = match out.iter().position(|c| c.3 == kind && c.0.landing == landing && equal(c.0.frequency - frequency, c.0.scale + scale)) {
+            let key = (kind, landing, frequency.to_bits());
+            let known = found.borrow().get(&key).copied();
+            let k = match known.or_else(|| out.iter().position(|c| c.3 == kind && c.0.landing == landing && equal(c.0.frequency - frequency, c.0.scale + scale))) {
                 Some(k) => k,
                 None => {
-                    out.push((Images { frequency, scale, landing, images: vec![std::array::from_fn(|_| vec![C64::ZERO; n]); n], links: vec![] }, origin, at, kind));
+                    out.push((Images { frequency, scale, landing, images: vec![std::array::from_fn(|_| vec![C64::ZERO; n]); n], blocks: vec![] }, origin, at, kind));
                     out.len() - 1
                 }
             };
+            found.borrow_mut().insert(key, k);
             out[k].0.images[p][axis][at] += value;
             Some(k)
         };
@@ -3584,23 +3614,17 @@ impl Fold {
             let r = self.right(p);
             emit(p, &r, None, (0.0, 0.0), 0, &mut out);
             for (kind, list) in [(1, &self.carried), (2, &self.sectors)] {
-                for s in list.iter() {
+                for (index, s) in list.iter().enumerate() {
                     let t = self.sector_apply(s, &r);
                     for (to, places) in self.targets(s, p) {
                         let mut made = emit(p, &t, Some(to), (s.frequency, s.scale), kind, &mut out);
-                        if kind == 2 {
+                        // A block's links weigh where its coupling reaches r_p (`link_weights`, made when read).
+                        let from = &self.members[self.groups[p]];
+                        if kind == 2 && s.links_in(places, from).any(|&(_, _, y, value)| value * r[y] != C64::ZERO) {
                             made.sort();
                             made.dedup();
-                            let weights = self.link_weights(s, p, to, places);
-                            let total: f64 = weights.iter().map(|w| w.1).sum();
-                            for &k in made.iter().filter(|_| total > 0.0) {
-                                for &(link, w) in &weights {
-                                    let links = &mut out[k].0.links;
-                                    match links.iter_mut().find(|l| l.0 == link) {
-                                        Some(l) => l.1 += w / total,
-                                        None => links.push((link, w / total)),
-                                    }
-                                }
+                            for &k in &made {
+                                out[k].0.blocks.push((index, p, to));
                             }
                         }
                     }
@@ -3608,6 +3632,23 @@ impl Fold {
             }
         }
         out.into_iter().map(|(images, origin, at, _)| (images, (origin, at))).unzip()
+    }
+
+    /// A left-out sector's photon class's links with their shares of the class (`Images::blocks`; `pair_links`): per
+    /// block it holds photons of, each link's weight in T′r_p over the block's (`link_weights`), summed link by link.
+    pub(crate) fn class_links(&self, class: &Images) -> Vec<(Link, f64)> {
+        let mut links: Vec<(Link, f64)> = vec![];
+        for &(index, p, to) in &class.blocks {
+            let weights = self.link_weights(&self.sectors[index], p, to, &self.members[to]);
+            let total: f64 = weights.iter().map(|w| w.1).sum();
+            for &(link, w) in weights.iter().filter(|_| total > 0.0) {
+                match links.iter_mut().find(|l| l.0 == link) {
+                    Some(l) => l.1 += w / total,
+                    None => links.push((link, w / total)),
+                }
+            }
+        }
+        links
     }
 }
 
