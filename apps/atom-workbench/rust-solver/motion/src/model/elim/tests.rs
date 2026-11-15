@@ -1978,21 +1978,28 @@ fn r4_lin_4() -> (crate::model::Model, Vec<([f64; 3], [f64; 3])>, Vec<usize>) {
     (model, points, many)
 }
 
-/// The transition rule (ELIMINATION v11; eliminate.rs `Model::one_reference`, `Model::series_open`): the run holds the
+/// The transition rule (ELIMINATION v11; eliminate.rs `Model::one_reference`, `Model::orders_of`): the run holds the
 /// series' first order of one resolvent alone, N₁ (the near forms' Doppler partners), so where a cluster's places have
 /// more than one reference -- R4_LIN_4's cluster of F = 1 and F = 2 ground states with its explicit states, its far
-/// levels apart in its frames -- `Unit::Series` is no candidate, the model builds without it (the closure ends), and
-/// at the run's states the readings book what the first order would take away with the orders beyond it, on the
-/// nearest block (`Unit::Block`), and nothing on `Unit::Series`.
+/// levels apart in its frames -- the cluster's run takes no first order, even with `Unit::Series` kept (its plan's
+/// orders), the model builds (the closure ends), and at the cluster's states the readings book what the first order
+/// would take away with the orders beyond it, on the nearest block (`Unit::Block`), and nothing on `Unit::Series`;
+/// `Unit::Series` is a unit where some cluster holds it.
 #[test]
 fn a_cluster_of_more_than_one_reference_keeps_a_block_and_not_the_series() {
     use crate::model::{Point, Sample, Unit};
     let (model, points, many) = r4_lin_4();
     assert!(!many.is_empty(), "R4_LIN_4 has a cluster of more than one reference");
-    assert!(!model.series_open(), "the series' first order is closed");
+    let running = model.running();
+    let somewhere = (0..model.clusters().len()).any(|k| model.plan(k, &running).fourth.is_some() && model.one_reference(k, &running));
     let candidates = model.candidates();
-    assert!(!candidates.contains(&Unit::Series), "no candidate Series");
-    assert!(!model.kept.contains(&Unit::Series), "no Series kept");
+    assert_eq!(candidates.contains(&Unit::Series) || model.kept.contains(&Unit::Series), somewhere, "Series a unit where some cluster holds it");
+    // With the series' first order kept, these clusters' runs take order 0 still.
+    let kept = model.rekept(&[model.kept.clone(), vec![Unit::Series]].concat()).expect("the model with the first order");
+    for &k in &many {
+        let plan = kept.plan(k, &kept.running());
+        assert_eq!(plan.fourth.as_ref().map(|f| f.orders.series), Some(0), "cluster {k}'s run takes no first order");
+    }
     let units: Vec<Unit> = candidates.iter().cloned().chain(std::iter::once(Unit::Series)).collect();
     let (mut read, mut on_blocks) = (0, 0.0);
     for &k in &many {

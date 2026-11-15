@@ -99,7 +99,7 @@
 //! `Fold::landing_evaluated`): the landing's the run holds as its own forms (assemble.rs `NearLayout::landing`); the
 //! generator's first order and its jumps' it holds of one resolvent alone, N₁, exact where a cluster's places have one
 //! reference (eliminate.rs `Model::one_reference`) -- elsewhere `Unit::Series` is no candidate and the next order is the
-//! nearest block's keep, as every order beyond the first (`Model::series_open`). Where no order reaches the share (q
+//! nearest block's keep, as every order beyond the first (eliminate.rs `Model::orders_of`). Where no order reaches the share (q
 //! near one) the block is made explicit by criterion one.
 //!
 //! # First order in the frequency offsets
@@ -2523,10 +2523,10 @@ impl super::Model {
         // The bare folds onto explicit states, each taken to the atom by its keep (`bare_links`).
         out.extend(self.bare_links().into_iter().map(|(component, excited, ground)| super::Unit::Bare { component, excited, ground }));
         // The evaluation's next orders where a fold has the normalized generator (`Unit::Series`, `Unit::Normalization`);
-        // the series' first order where the run holds it exactly (`series_open`).
+        // the series' first order where some cluster's run holds it exactly (`Model::one_reference`).
         let running = self.running();
         if (0..self.clusters.len()).any(|c| self.plan(c, &running).fourth.is_some()) {
-            if self.series.order == 0 && self.series_open() {
+            if self.series.order == 0 && (0..self.clusters.len()).any(|c| self.plan(c, &running).fourth.is_some() && self.one_reference(c, &running)) {
                 out.push(super::Unit::Series);
             }
             out.push(super::Unit::Normalization { order: self.series.normalization + 1 });
@@ -2618,13 +2618,15 @@ impl super::Model {
                         Fold::evaluation_error(&fold.evaluated(&levels, z0, orders), defined, z0, psi) + landed
                     };
                     let defined = definition.definitions(&whole);
-                    let own = self.series.orders();
+                    // The cluster's own orders (`Model::orders_of`); its series' first order where its run holds it
+                    // exactly (`Model::one_reference`): else what it would take away is the next orders', the nearest
+                    // block's.
+                    let running = self.running();
+                    let (own, holds) = (self.orders_of(sample.cluster, &running), self.one_reference(sample.cluster, &running));
                     let at = against(&defined, own);
-                    // The series' first order where the run holds it exactly (`Model::one_reference`): else what it would
-                    // take away is the next orders', the nearest block's.
-                    let series = if own.series == 0 && self.series_open() { (at - against(&defined, Orders { series: 1, ..own })).max(0.0) } else { 0.0 };
+                    let series = if own.series == 0 && holds { (at - against(&defined, Orders { series: 1, ..own })).max(0.0) } else { 0.0 };
                     let normalization = (at - against(&defined, Orders { normalization: own.normalization + 1, ..own })).max(0.0);
-                    if own.series == 0 {
+                    if own.series == 0 && holds {
                         book(&Unit::Series, series, &mut out);
                     }
                     book(&Unit::Normalization { order: own.normalization + 1 }, normalization, &mut out);

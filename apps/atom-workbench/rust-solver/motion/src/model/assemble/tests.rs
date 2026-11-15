@@ -1008,26 +1008,36 @@ fn the_normalized_part_along_a_path_is_its_nodes_and_its_quadrature_falls_as_the
 }
 
 /// The held part's force form (`Middle::held_force`) is the form of its gradient's matrices: at the series' order 1
-/// (the 1D PGC at 3 G, refs/requests/PGC1D_TILT_0: q ≈ 0.1) the held part −Herm(Y E₀) at a node, its force form on a
-/// Hermitian ρ by the forms' terms contracted with E₀ρ and ρY (no gradient matrix made) against Σ_xy ∇held[x, y] ρ[y, x]
-/// of the node's whole matrices (`Middle::gradient`, the node's gradients made): at the three nodes of a step along a
-/// path, on random states, to the rounding of the sums.
+/// -- on the first cluster whose run holds it, its places of one reference (eliminate.rs `Model::orders_of`): of the 1D
+/// PGC at 3 G, refs/requests/PGC1D_TILT_0, its cluster 0 (its F = 2 sublevels, one cluster of Zeeman-split levels,
+/// take it no longer), else PGC3D's --
+/// the held part −Herm(Y E₀) at a node, its force form on a Hermitian ρ by the forms' terms contracted with E₀ρ and ρY
+/// (no gradient matrix made) against Σ_xy ∇held[x, y] ρ[y, x] of the node's whole matrices (`Middle::gradient`, the
+/// node's gradients made): at the three nodes of a step along a path, on random states, to the rounding of the sums.
 #[test]
 fn the_held_part_s_force_form_is_its_gradient_s() {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC1D_TILT_0.json");
-    let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    let request = Request::from_native(&line).unwrap();
-    let light = Light::new(&request);
-    let bare = Model::new(&request, &light, &[]).unwrap();
-    let kept: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).flat_map(|frequency| bare.bare_units(Component { frequency, counter: false })).collect();
     let (r, v) = ([0.05, -0.1, 0.0], [0.09, 0.05, 0.07]);
     let points = [(r, v), ([0.0; 3], [0.0; 3])];
-    // The prior's units at the points (its resonant Δm = 2 links: the F = 2 sublevels one cluster).
-    let prior = Model::new(&request, &light, &kept).unwrap().prior(&points);
-    // The series at its first order kept (`Unit::Series`): the held part is anything.
-    let mut model = Model::new(&request, &light, &[kept, prior, vec![Unit::Series]].concat()).unwrap();
-    model.referenced(&points);
-    let cluster = model.cluster_of(GROUND - 1);
+    let (model, cluster) = ["PGC1D_TILT_0.json", "PGC3D_1ms.json"]
+        .iter()
+        .find_map(|file| {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join(file);
+            let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            let request = Request::from_native(&line).unwrap();
+            let light = Light::new(&request);
+            let bare = Model::new(&request, &light, &[]).unwrap();
+            let kept: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).flat_map(|frequency| bare.bare_units(Component { frequency, counter: false })).collect();
+            // The prior's units at the points, and the series at its first order kept (`Unit::Series`): the held part
+            // is anything where a cluster's run takes it.
+            let prior = Model::new(&request, &light, &kept).unwrap().prior(&points);
+            let mut model = Model::new(&request, &light, &[kept, prior, vec![Unit::Series]].concat()).unwrap();
+            model.referenced(&points);
+            let running = model.running();
+            let cluster = (0..model.clusters().len()).find(|&c| model.plan(c, &running).fourth.as_ref().is_some_and(|f| f.held()));
+            println!("{file}: a cluster whose run takes the series' first order: {cluster:?}");
+            cluster.map(|c| (model, c))
+        })
+        .expect("a cluster whose run holds the series' first order");
     let plan = model.plan(cluster, &model.running());
     let fourth = plan.fourth.as_ref().expect("the cluster's fold has its normalized generator");
     assert!(fourth.held(), "the series at order 1: {:?}", fourth.orders);

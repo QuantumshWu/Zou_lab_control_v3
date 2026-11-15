@@ -443,7 +443,7 @@ fn a_trajectory_s_start_lands_as_the_definition_within_what_the_readings_book() 
             let amplitudes = model.light.amplitudes(r);
             let (fold, _, far, _) = model.cluster_fold(cluster, &amplitudes, true).expect("the cluster's fold");
             let z0 = model.reference_of(cluster, &far);
-            let evaluated = fold.landing_evaluated(&z0, model.series.orders());
+            let evaluated = fold.landing_evaluated(&z0, model.orders_of(cluster, &model.running()));
             let (definition, levels) = model.definition_fold(cluster, &amplitudes).expect("the definition's fold");
             let defined = definition.definitions(&levels).1.expect("the definition's landing");
             let column = |m: &Mat| -> Vec<C64> { (0..m.rows).map(|i| m[(i, place)]).collect() };
@@ -601,10 +601,11 @@ fn the_assembly_s_price_counts_the_elimination_at_the_atom() {
 /// The normalized generator's decay is its photons' rate with a kept pair of two frequencies (assemble.rs, # The normalized
 /// generator: Λ_R = −i(G_R − G_L†), the anti-Hermitian read of the generator's own Doppler terms). R6_RAMAN_CO, |1,0⟩ and
 /// |2,0⟩ joined by their kept Raman coupling at the two lights' beat, one light's drives folded at the atom and the other's
-/// bare, the series' first order and the normalization's kept (`Unit::Series`, `Unit::Normalization`): the generator's
-/// decay ⟨ψ|i(H − H†)|ψ⟩ on a state of both is the photons' Σ‖u_a‖² at rest and moving, whichever leg is at the atom; and
-/// the same with no pair kept, each state's own cluster, one frequency's terms alone. Without the orders kept the decay
-/// is another (the orders change the rate).
+/// bare, the normalization's order kept (`Unit::Normalization`; the series' first order is no candidate on a cluster of
+/// two references, F = 1 and F = 2: eliminate.rs `Model::one_reference`, ELIMINATION v11): the generator's decay
+/// ⟨ψ|i(H − H†)|ψ⟩ on a state of both is the photons' Σ‖u_a‖² at rest and moving, whichever leg is at the atom; and the
+/// same with no pair kept, each state's own cluster of one reference, one frequency's terms alone, the series' first
+/// order kept too (`Unit::Series`). Without the orders kept the decay is another (the orders change the rate).
 #[test]
 fn the_normalized_generator_s_decay_is_its_photons_rate_with_a_kept_pair_of_two_frequencies() {
     let request = scene("R6_RAMAN_CO");
@@ -623,7 +624,8 @@ fn the_normalized_generator_s_decay_is_its_photons_rate_with_a_kept_pair_of_two_
         let drives = at_the_atom(&request, &light, &[lifted]);
         let orders = vec![Unit::Series, Unit::Normalization { order: 1 }];
         let second = Model::new(&request, &light, &[drives.clone(), vec![raman.clone()]].concat()).unwrap();
-        let normalized = Model::new(&request, &light, &[drives.clone(), vec![raman.clone()], orders.clone()].concat()).unwrap();
+        let normalized = Model::new(&request, &light, &[drives.clone(), vec![raman.clone(), Unit::Normalization { order: 1 }]].concat()).unwrap();
+        assert!(!normalized.one_reference(normalized.cluster_of(1), &normalized.running()), "the joined cluster's places have two references");
         assert_eq!(normalized.clusters()[normalized.cluster_of(1)].states, vec![1, 5], "the kept pair's cluster");
         let alone = Model::new(&request, &light, &[drives, orders].concat()).unwrap();
         for kappa in [[0.0; 3], [3.0, -2.0, 5.0]] {

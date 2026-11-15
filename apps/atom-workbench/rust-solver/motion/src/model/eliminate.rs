@@ -267,7 +267,7 @@ impl Model {
     /// --, each within its terms' rounding (elim.rs `equal`). There the series' first order is of one resolvent,
     /// N₁ = Σ W′R₀²W, which the near forms hold as their Doppler partners (assemble.rs `normal`); else it is of two
     /// places' resolvents, Σ_t W′R₀(s)R₀(t)W_t E[t, s] on column s (elim.rs `Fold::evaluated`), which the run does not
-    /// hold (`series_open`).
+    /// hold (`orders_of`).
     pub(crate) fn one_reference(&self, cluster: usize, lights: &Lights) -> bool {
         let c = &self.clusters[cluster];
         let pairs = self.level_pairs(lights);
@@ -289,14 +289,15 @@ impl Model {
         })
     }
 
-    /// Whether the run holds the series' first order exactly on every cluster it evaluates with a normalized generator
-    /// (`one_reference`; ELIMINATION v11: until the jumps and the decay are the fold's own, L = C T): `Unit::Series` a
-    /// candidate there (elim.rs `Model::candidates`). Where it does not, the first order is no unit of its own: what
-    /// it would take away of the evaluation's error is the next orders', the nearest block's keep, as every order
-    /// beyond the first (elim.rs `Model::readings`) -- exact still, the block explicit.
-    pub(crate) fn series_open(&self) -> bool {
-        let running = self.running();
-        (0..self.clusters.len()).all(|k| self.plan(k, &running).fourth.is_none() || self.one_reference(k, &running))
+    /// The orders a cluster's evaluation takes under the lights `lights` (elim.rs `Orders`): the model's (`Series`), the
+    /// series' first order only where the cluster's places have one reference (`one_reference`; ELIMINATION v11: the
+    /// transition until the jumps and the decay are the fold's own, L = C T). Elsewhere the first order is no part of the
+    /// run's evaluation and no unit of the cluster's: what it would take away of the evaluation's error is the next
+    /// orders', the nearest block's keep, as every order beyond the first (elim.rs `Model::readings`) -- exact still, the
+    /// block explicit; `Unit::Series` is a candidate where some cluster holds it (elim.rs `Model::candidates`).
+    pub(crate) fn orders_of(&self, cluster: usize, lights: &Lights) -> super::elim::Orders {
+        let orders = self.series.orders();
+        if orders.series >= 1 && !self.one_reference(cluster, lights) { super::elim::Orders { series: 0, ..orders } } else { orders }
     }
 
     /// Whether a coupling of two places of a cluster (x ← y at the base beat `beat`) is in the cluster's generator: at a

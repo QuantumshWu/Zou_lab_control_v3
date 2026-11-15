@@ -536,7 +536,7 @@ impl Fourth {
             groups.last_mut().expect("a block's group").2 = entries.len();
         }
         let lit: Vec<usize> = model.carriers.iter().filter(|cc| plan.lights.on(cc.frequency)).map(|cc| cc.frequency).collect();
-        Some(Fourth { n, groups, entries, uniform: (plan.near.fourth == 1).then(|| Fourth::uniform(model, plan.cluster, &lit)).flatten(), orders: model.series.orders() })
+        Some(Fourth { n, groups, entries, uniform: (plan.near.fourth == 1).then(|| Fourth::uniform(model, plan.cluster, &lit)).flatten(), orders: model.orders_of(plan.cluster, &plan.lights) })
     }
 
     /// Whether the held part is anything (`normal`): the series' first order -- at order 0 the generator's Hermitian part
@@ -965,7 +965,6 @@ impl<'a> Builder<'a> {
             self.near.fourth = if Fourth::uniform(model, self.cluster, &lit).is_some() { 1 } else { 2 };
             self.near.landing = usize::from(model.series.normalization >= 1);
             self.near.reference = n;
-            assert!(model.series.order == 0 || model.one_reference(self.cluster, &self.lights), "the series' first order on a cluster of more than one reference: the run holds it of one resolvent alone (eliminate.rs `Model::one_reference`)");
         }
         for cc in model.carriers.iter() {
             if !self.lights.on(cc.frequency) {
