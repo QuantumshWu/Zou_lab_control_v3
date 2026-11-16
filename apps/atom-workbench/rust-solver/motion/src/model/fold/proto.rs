@@ -1807,8 +1807,8 @@ fn inverse_root(x: &[C64], n: usize, y: &mut [C64], p: &mut [C64], q: &mut [C64]
 
 impl Fold {
     /// The prototype's layout for this fold (module documentation). Refused where a block holds what the prototype does
-    /// not: explicit states, a static source, an exact copy, centred excited rows beside solved ones (the choice's to make
-    /// solved), or a copy emitting into P.
+    /// not: an exact copy before an excited row, centred excited rows beside solved ones (the choice's to make solved), a
+    /// copy landing on a P frame (a static source), explicit states in a block whose rows are all centred, or copies there.
     pub(crate) fn prototype_workspace(&self) -> Result<Workspace, String> {
         let n = self.size();
         let ng = self.ground.len();
@@ -1930,10 +1930,8 @@ impl Fold {
         let (mut near, mut far) = (vec![], vec![]);
         for (o, b) in self.blocks.iter().enumerate() {
             let m = b.rows.len();
-            if m == 0 {
-                if !b.explicit.is_empty() {
-                    return Err(format!("块 {o}：显式态的块没有 Q 行"));
-                }
+            // A block of nothing: no rows, no explicit state.
+            if m == 0 && b.explicit.is_empty() {
                 continue;
             }
             let s = b.solved;
@@ -1965,13 +1963,16 @@ impl Fold {
                 (0..pairs.len()).filter(|&t| contract(pairs[t], keep, size, size).frobenius() > 0.0).collect()
             };
             let row_of = |x: usize| b.rows.iter().position(|r| *r == Row::Excited(x));
-            if s == 0 && !b.explicit.is_empty() {
+            // A block whose rows are all centred is far (rows, none solved); any other is near -- its solved rows, or none
+            // at all beside its explicit states (BRIEF_WIRE2 item 2: ε its explicit rows alone).
+            let centred = m > 0 && s == 0;
+            if centred && !b.explicit.is_empty() {
                 return Err(format!("块 {o}：原型不含全居中块里的显式态"));
             }
             // The block's explicit states' P places; a state's row among the solved rows and the explicit ones (the terms').
             let xs: Vec<usize> = b.explicit.clone();
             let ext_of = |x: usize| row_of(x).filter(|&a| a < s).or_else(|| xs.iter().position(|&p| self.explicit[p - ng] == x).map(|j| m + j));
-            if s > 0 {
+            if !centred {
                 if b.rows[s..].iter().any(|r| matches!(r, Row::Excited(_))) {
                     return Err(format!("块 {o}：解的块里有居中的激发行（先把它们改为解）"));
                 }

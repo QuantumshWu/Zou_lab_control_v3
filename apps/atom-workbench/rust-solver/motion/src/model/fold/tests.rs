@@ -2076,15 +2076,16 @@ fn toned_lambda() -> Request {
 /// tr(Ḡ′ G_m(h)) of each tone at the outer node at h (a random density Ḡ′: a tone's complex amplitude). Each evaluation
 /// on a fresh cache (its decompositions made at the point, where the reuse leaves nothing), its discrete choices (sweeps,
 /// held rows, copies' rows) those of the centre -- a point where a difference meets another choice is skipped. Within the
-/// difference's error and what the kept R₀ and z₀ leave (`Force::held`). On PGC3D_1ms (refs), R4_LIN_4 and a Λ with a
-/// tone (`toned_lambda`) by their prototype choices (`proto_choice`), every set the prototype holds, three points each; the
-/// decay is its jumps' products at all three positions (`proto_decay`).
+/// difference's error and what the kept R₀ and z₀ leave (`Force::held`). On PGC3D_1ms (refs), R4_LIN_4, a Λ with a tone
+/// (`toned_lambda`) and unify's Λ (`lambda_request`: its excited level in P, a block of no Q rows) by their prototype
+/// choices (`proto_choice`), every set the prototype holds, three points each; the decay is its jumps' products at all
+/// three positions (`proto_decay`).
 #[test]
 fn the_prototype_s_force_is_the_difference_of_its_generator() {
     use super::proto::{Bar, Cache};
     let pgc = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json").to_string_lossy().into_owned();
     let (mut checked, mut toned) = (0, 0);
-    for (name, req) in [(pgc.clone(), crate::model::testing::scene(&pgc)), ("R4_LIN_4".to_string(), crate::model::testing::scene("R4_LIN_4")), ("a Λ with a tone".to_string(), toned_lambda())] {
+    for (name, req) in [(pgc.clone(), crate::model::testing::scene(&pgc)), ("R4_LIN_4".to_string(), crate::model::testing::scene("R4_LIN_4")), ("a Λ with a tone".to_string(), toned_lambda()), ("a Λ with its excited level in P".to_string(), lambda_request(3.0, 1.5, 0.0))] {
         let choice = proto_choice(&req, &name);
         let mut seed = 23u64;
         let mut u = || {
@@ -2214,15 +2215,15 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
 /// their rate is the state's hazard ⟨ψ|i(G − G†)|ψ⟩/‖ψ‖² to the rounding (the jumps' amplitudes u = Lψ are the decay's);
 /// and their moments, of the step's tangent, are those of the amplitudes' difference -- ∇u by the central difference of
 /// u = L(r)ψ, each on a fresh cache (`prototype_jumps`; h = 10⁻⁴ µm), its responses' own change and S⁻¹'s with the
-/// beams', its discrete choices those of the centre (else skipped) -- within the difference's error and what the kept R₀ leaves (10⁻⁴ of the force's and the diffusion's scale). On PGC3D_1ms (refs) and
-/// R4_LIN_4 by their prototype choices, three points a set.
+/// beams', its discrete choices those of the centre (else skipped) -- within the difference's error and what the kept R₀
+/// leaves (10⁻⁴ of the force's and the diffusion's scale). On PGC3D_1ms (refs), R4_LIN_4 and unify's Λ (`lambda_request`:
+/// a block of no Q rows, its photons its explicit row's) by their prototype choices, three points a set.
 #[test]
 fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
     use super::proto::Cache;
-    let pgc = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json");
+    let pgc = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json").to_string_lossy().into_owned();
     let mut checked = 0;
-    for name in [pgc.to_string_lossy().into_owned(), "R4_LIN_4".to_string()] {
-        let req = crate::model::testing::scene(&name);
+    for (name, req) in [(pgc.clone(), crate::model::testing::scene(&pgc)), ("R4_LIN_4".to_string(), crate::model::testing::scene("R4_LIN_4")), ("a Λ with its excited level in P".to_string(), lambda_request(3.0, 1.5, 0.0))] {
         let choice = proto_choice(&req, &name);
         let sets = Fold::sets(&req, &choice).unwrap();
         let mut seed = 31u64;
@@ -2430,11 +2431,12 @@ fn the_levels_cross_series() {
 /// ±100 rad/µs (run.rs # The tones), and the atom at rest at kz = π/4, where B's intensity is half its focus's. The two
 /// ground states are one set (their Raman coupling resonant), both lasers reach one block, its jumps are one operator, and
 /// a jump lands on both states at their frames' phases (run.rs # The jumps' phase): 400 trajectories from |1⟩ (the atom
-/// 10⁶ times Rb's mass, at rest), steps of 0.25 µs through the integrator and its jumps, read at 60 µs. Returns the run's
+/// 10⁶ times Rb's mass, at rest), steps of 0.25 µs through the integrator and its jumps, read at `time` µs. Returns the run's
 /// mean |1⟩ share, its standard error, the exact master equation's (RK4 in the lasers' frame, the beams' amplitudes at the
-/// atom), and the dark state's |b|²/(|a|² + |b|²) there.
-fn lambda_against_master(a: f64, b: f64, form: f64) -> (f64, f64, f64, f64) {
-    use crate::step::{Dynamics, Midway, Trajectory};
+/// atom) with its own error (against the steps halved), and the dark state's |b|²/(|a|² + |b|²) there.
+/// The Λ's request (`lambda_against_master`): A of `a` rad/µs, B of `b` (two counter-propagating beams where `form` is not
+/// zero, with the form between |1⟩ and |2⟩).
+fn lambda_request(a: f64, b: f64, form: f64) -> Request {
     let (e2, gamma) = (100.0, 38.0);
     let (to1, to2) = (0.75 * gamma, 0.25 * gamma);
     // The excited state at 1000 rad/µs in its frame, the lasers on resonance there (the idle excited states at zero, no
@@ -2448,14 +2450,23 @@ fn lambda_against_master(a: f64, b: f64, form: f64) -> (f64, f64, f64, f64) {
     req.emission = std::array::from_fn(|_| Mat::zeros(STATES, STATES));
     req.emission[0][(0, GROUND + 17)] = C64::real(to1.sqrt());
     req.emission[1][(4, GROUND + 17)] = C64::real(to2.sqrt());
-    let k = req.beams[1].wave_number;
-    let at = if form != 0.0 { [0.0, 0.0, std::f64::consts::FRAC_PI_4 / k] } else { [0.0; 3] };
     if form != 0.0 {
         let f = req.outside_forms.iter().position(|f| f.frequency_index == vec![0, 1]).unwrap();
         req.outside_forms[f].matrices[1][(0, 4)] = C64::real(form);
         req.outside_forms[f].matrices[1][(4, 0)] = C64::real(form);
     }
     req.validate().unwrap();
+    req
+}
+
+fn lambda_against_master(a: f64, b: f64, form: f64, time: f64) -> (f64, f64, f64, f64, f64) {
+    use crate::step::{Dynamics, Midway, Trajectory};
+    let (e2, gamma): (f64, f64) = (100.0, 38.0);
+    let (to1, to2) = (0.75 * gamma, 0.25 * gamma);
+    let req = lambda_request(a, b, form);
+    let rays = req.beams.len();
+    let k = req.beams[1].wave_number;
+    let at = if form != 0.0 { [0.0, 0.0, std::f64::consts::FRAC_PI_4 / k] } else { [0.0; 3] };
     let mut p = [0.0; GROUND];
     p[0] = 1.0;
     let run = run::Onefold::new(&req, p).expect("the run");
@@ -2463,8 +2474,8 @@ fn lambda_against_master(a: f64, b: f64, form: f64) -> (f64, f64, f64, f64) {
     // The couplings at the atom: each beam's amplitude there, and the form's entry less its value at the focus.
     let light = Light::new(&req);
     let amplitude = |l: usize, r: [f64; 3]| light.beams[l].amplitude_to(r, 1).value;
-    let (ae, be) = (amplitude(0, at) * a, (1..rays.len()).map(|l| amplitude(l, at)).sum::<C64>() * b);
-    let intensity = |r: [f64; 3]| 1e6 * (1..rays.len()).map(|l| amplitude(l, r)).sum::<C64>().norm_sqr();
+    let (ae, be) = (amplitude(0, at) * a, (1..rays).map(|l| amplitude(l, at)).sum::<C64>() * b);
+    let intensity = |r: [f64; 3]| 1e6 * (1..rays).map(|l| amplitude(l, r)).sum::<C64>().norm_sqr();
     let c = form * (intensity(at) - intensity([0.0; 3]));
     // The exact three-level master equation in the lasers' frame, from |1⟩⟨1|, at 60 µs (RK4): |2⟩'s frame 100 rad/µs
     // above |1⟩'s, so c turns as e^{∓i100t}.
@@ -2494,26 +2505,28 @@ fn lambda_against_master(a: f64, b: f64, form: f64) -> (f64, f64, f64, f64) {
         }
         out
     };
-    let (time, dt): (f64, f64) = (60.0, 2e-4);
-    let mut rho = Mat::zeros(3, 3);
-    rho[(0, 0)] = C64::ONE;
-    for k in 0..(time / dt).round() as usize {
-        let t = k as f64 * dt;
-        let k1 = lindblad(t, &rho);
-        let mut x = rho.clone();
-        x.add_scaled(C64::real(0.5 * dt), &k1);
-        let k2 = lindblad(t + 0.5 * dt, &x);
-        let mut x = rho.clone();
-        x.add_scaled(C64::real(0.5 * dt), &k2);
-        let k3 = lindblad(t + 0.5 * dt, &x);
-        let mut x = rho.clone();
-        x.add_scaled(C64::real(dt), &k3);
-        let k4 = lindblad(t + dt, &x);
-        for (k, w) in [(&k1, 1.0), (&k2, 2.0), (&k3, 2.0), (&k4, 1.0)] {
-            rho.add_scaled(C64::real(dt * w / 6.0), k);
+    let share = |dt: f64| {
+        let mut rho = Mat::zeros(3, 3);
+        rho[(0, 0)] = C64::ONE;
+        for k in 0..(time / dt).round() as usize {
+            let t = k as f64 * dt;
+            let k1 = lindblad(t, &rho);
+            let mut x = rho.clone();
+            x.add_scaled(C64::real(0.5 * dt), &k1);
+            let k2 = lindblad(t + 0.5 * dt, &x);
+            let mut x = rho.clone();
+            x.add_scaled(C64::real(0.5 * dt), &k2);
+            let k3 = lindblad(t + 0.5 * dt, &x);
+            let mut x = rho.clone();
+            x.add_scaled(C64::real(dt), &k3);
+            let k4 = lindblad(t + dt, &x);
+            for (k, w) in [(&k1, 1.0), (&k2, 2.0), (&k3, 2.0), (&k4, 1.0)] {
+                rho.add_scaled(C64::real(dt * w / 6.0), k);
+            }
         }
-    }
-    let exact = rho[(0, 0)].re / (rho[(0, 0)].re + rho[(1, 1)].re);
+        rho[(0, 0)].re / (rho[(0, 0)].re + rho[(1, 1)].re)
+    };
+    let (exact, finer) = (share(2e-4), share(1e-4));
     struct Anywhere;
     impl crate::step::Domain for Anywhere {
         fn runaway(&self, _: f64) -> bool {
@@ -2534,20 +2547,26 @@ fn lambda_against_master(a: f64, b: f64, form: f64) -> (f64, f64, f64, f64) {
     }
     let mean = shares.iter().sum::<f64>() / count as f64;
     let error = (shares.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (count * (count - 1)) as f64).sqrt();
-    (mean, error, exact, be.norm_sqr() / (ae.norm_sqr() + be.norm_sqr()))
+    (mean, error, finer, (exact - finer).abs(), be.norm_sqr() / (ae.norm_sqr() + be.norm_sqr()))
 }
 
-/// The run's Λ (`lambda_against_master`) without the coupling, the lasers at half unify's (1.5 and 0.75 rad/µs, so that
-/// the rule folds the excited state): the jumps' coherence makes the dark state b|1⟩ − a|2⟩ (coherent population
-/// trapping), |1⟩'s share 0.2, where the rate equations, each laser's photons apart, give 0.43 -- their mean |1⟩ share
-/// within three standard errors and the elimination's (a/(Γ/2))² of the exact one.
+/// The run's Λ (`lambda_against_master`) without the coupling, the lasers at unify's (3 and 1.5 rad/µs): the rule keeps
+/// the excited level in P, its block one of no Q rows (proto.rs, BRIEF_WIRE2 item 2: its ε the explicit row alone, its
+/// jumps that row's). The jumps' coherence makes the dark state b|1⟩ − a|2⟩ (coherent population trapping), |1⟩'s share
+/// 0.2, where the rate equations, each laser's photons apart, give 0.43: at 60 µs the run and the master equation are
+/// both there to 10⁻¹⁰, and on the way, at 10 µs, their mean |1⟩ shares agree within three standard errors (nothing is
+/// folded).
 #[test]
 fn the_run_s_lambda_is_the_master_equation_s_dark_state() {
-    let (a, gamma) = (1.5, 38.0);
-    let (mean, error, exact, _) = lambda_against_master(a, 0.75, 0.0);
-    let elimination = (a / (0.5 * gamma)).powi(2);
-    println!("|1⟩'s share at 60 µs: the run {mean:.4} ± {error:.4} over 400 trajectories, the exact master equation {exact:.4} (the rate equations' 0.43; the elimination's (a/(Γ/2))² {elimination:.4})");
-    assert!((mean - exact).abs() <= 3.0 * error + elimination, "the run's |1⟩ share {mean} ± {error} against the master equation's {exact}");
+    for time in [10.0, 60.0] {
+        let (mean, error, exact, own, dark) = lambda_against_master(3.0, 1.5, 0.0, time);
+        println!("|1⟩'s share at {time} µs: the run {mean:.6} ± {error:.1e} over 400 trajectories, the exact master equation {exact:.6} ± {own:.1e} (the dark state's {dark:.4}; the rate equations' 0.43)");
+        if time < 60.0 {
+            assert!((mean - exact).abs() <= 3.0 * error + own, "the run's |1⟩ share {mean} ± {error} against the master equation's {exact} ± {own}");
+        } else {
+            assert!((mean - dark).abs() <= 1e-10 && (exact - dark).abs() <= 1e-10, "at {time} µs the run's {mean} and the master equation's {exact} against the dark state's {dark}");
+        }
+    }
 }
 
 /// The run's Λ with a tone (BRIEF_WIRE2 item 1; `lambda_against_master`): A as there, B a standing wave of two beams of
@@ -2560,9 +2579,9 @@ fn the_run_s_lambda_is_the_master_equation_s_dark_state() {
 fn the_run_s_lambda_with_a_tone_is_the_master_equation_s() {
     let (a, gamma) = (1.5, 38.0);
     // B's intensity at the atom half its focus's, 2·10⁶ less: c = −2·10⁶ form.
-    let (mean, error, exact, dark) = lambda_against_master(a, 0.4, -5e-6);
+    let (mean, error, exact, own, dark) = lambda_against_master(a, 0.4, -5e-6, 60.0);
     let elimination = (a / (0.5 * gamma)).powi(2);
-    println!("with the tone: |1⟩'s share at 60 µs: the run {mean:.4} ± {error:.4} over 400 trajectories, the exact master equation {exact:.4} (the dark state's {dark:.4}; the elimination's (a/(Γ/2))² {elimination:.4})");
-    assert!((exact - dark).abs() > 3.0 * error + elimination, "the tone moves the share beyond what the run is held to: {exact} against the dark state's {dark}");
-    assert!((mean - exact).abs() <= 3.0 * error + elimination, "the run's |1⟩ share {mean} ± {error} against the master equation's {exact}");
+    println!("with the tone: |1⟩'s share at 60 µs: the run {mean:.4} ± {error:.4} over 400 trajectories, the exact master equation {exact:.4} ± {own:.1e} (the dark state's {dark:.4}; the elimination's (a/(Γ/2))² {elimination:.4})");
+    assert!((exact - dark).abs() > 3.0 * error + elimination + own, "the tone moves the share beyond what the run is held to: {exact} against the dark state's {dark}");
+    assert!((mean - exact).abs() <= 3.0 * error + elimination + own, "the run's |1⟩ share {mean} ± {error} against the master equation's {exact}");
 }
