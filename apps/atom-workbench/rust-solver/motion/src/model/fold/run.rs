@@ -87,7 +87,8 @@ impl Onefold {
             let fold = Fold::new(request, &choice, set[0])?;
             if let Some(f) = fold.at([0.0; 3], [0.0; 3], &mut super::Path::default()) {
                 if !f.tones.is_empty() {
-                    return Err(format!("态集合 {set:?} 在焦点处有音调：原型不含音调（DESIGN 第 2 步）"));
+                    let tones: Vec<String> = f.tones.iter().map(|t| format!("{:.2} rad/µs（最大元 {:.2e}）", t.value, t.generator.max_abs())).collect();
+                    return Err(format!("态集合 {set:?} 在焦点处有音调 {tones:?}：原型不含音调"));
                 }
             }
             let mut states: Vec<usize> = fold.ground.clone();

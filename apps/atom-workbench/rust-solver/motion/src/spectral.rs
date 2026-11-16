@@ -2478,6 +2478,87 @@ pub(crate) mod tests {
         assert!(nodes > 20.0 * tone, "through the nodes {nodes:e}, as a tone {tone:e}");
     }
 
+    /// A tone whose envelope changes along the path (the light's profile at the path's points; DESIGN §1.6, BRIEF_WIRE
+    /// 2a): random Lindblad clusters -- n of 2 to 4 states, a static group of random light shifts and couplings with a
+    /// slope along the path and the decay of random jumps, −(i/2)J†J --, and one Hermitian tone pair beating fast
+    /// (|ν|h of 4 to 12), its envelope C + uA with a slope |A| of |C|/τ to 4|C|/τ. Over a step from three random states,
+    /// against the dense flow of the whole generator: the envelope taken at each of the three nodes leaves the static
+    /// group its own parabola, and the state errs within what the tones' treatments leave (`beating_remainders`, their
+    /// leading terms) and the static group's own step (the same picture without the tone, against its own flow); the
+    /// envelope held at its middle value -- as before -- leaves the slope's beat to the static group's nodes, and errs
+    /// by far more.
+    #[test]
+    fn a_random_lindblad_s_changing_tone_is_its_flow_at_its_nodes_values() {
+        let mut stream = crate::random::Stream::new(29, crate::random::Purpose::Initial, 0, 0);
+        let mut s = || stream.uniform();
+        let (mut worst, mut worst_held, mut cases) = (0.0_f64, f64::INFINITY, 0);
+        for _ in 0..20 {
+            let n = 2 + (3.0 * s()) as usize;
+            let size = 1.0 + 4.0 * s();
+            let half = 0.1 + 0.2 * s();
+            let random = |s: &mut dyn FnMut() -> f64, scale: f64| Mat::from_fn(n, n, |_, _| C64::cis(std::f64::consts::TAU * s()) * (scale * s()));
+            let hermitian = |m: &Mat| Mat::from_fn(n, n, |i, j| (m[(i, j)] + m[(j, i)].conj()) * 0.5);
+            let jumps = random(&mut s, size.sqrt());
+            let mut still = hermitian(&random(&mut s, size));
+            still.add_scaled(C64::new(0.0, -0.5), &jumps.adjoint_product(&jumps));
+            let group = [still, hermitian(&random(&mut s, size))];
+            let beat = (4.0 + 8.0 * s()) / half;
+            let c = random(&mut s, 0.3 * size);
+            let a = random(&mut s, 0.3 * size).scaled(C64::real((1.0 + 3.0 * s()) / (2.0 * half)));
+            let plus = |u: f64| Mat::from_fn(n, n, |i, j| c[(i, j)] + a[(i, j)] * u);
+            let generator = |u: f64| {
+                let mut g = Mat::from_fn(n, n, |i, j| group[0][(i, j)] + group[1][(i, j)] * u);
+                g.add_scaled(C64::cis(beat * u), &plus(u));
+                g.add_scaled(C64::cis(-beat * u), &plus(u).adjoint());
+                g
+            };
+            let picture_of = |at_nodes: bool| {
+                let mut picture = Picture::default();
+                picture.fit(n);
+                picture.base = generator(0.0);
+                picture.ends = [-half, half].map(generator);
+                picture.separate(
+                    half,
+                    |beats, keys| {
+                        beats.push(beat);
+                        keys.push(vec![1]);
+                    },
+                    |_, u, p, m| {
+                        let at = if at_nodes { u } else { 0.0 };
+                        (*p, *m) = (plus(at), plus(at).adjoint());
+                    },
+                );
+                assert_eq!(picture.beats.len(), 1, "the candidate a tone");
+                picture.prepare(half, false, |_| 2, 0.0, 0.0);
+                picture
+            };
+            let (mut nodes, mut held) = (picture_of(true), picture_of(false));
+            let alone = |u: f64| Mat::from_fn(n, n, |i, j| group[0][(i, j)] + group[1][(i, j)] * u);
+            let mut static_group = Picture::default();
+            static_group.fit(n);
+            static_group.base = alone(0.0);
+            static_group.ends = [-half, half].map(alone);
+            static_group.prepare(half, false, |_| 2, 0.0, 0.0);
+            let within = beating_remainders(&nodes, 1);
+            let times = [-0.3 * half, 0.5 * half, half];
+            let (mut e_nodes, mut e_held, mut e_static) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for _ in 0..3 {
+                let start: Vec<C64> = (0..n).map(|_| C64::new(s() - 0.5, s() - 0.5)).collect();
+                e_nodes = e_nodes.max(beating_errors(&mut nodes, &generator, &start, &times, 20_000));
+                e_held = e_held.max(beating_errors(&mut held, &generator, &start, &times, 20_000));
+                e_static = e_static.max(beating_errors(&mut static_group, &alone, &start, &times, 20_000));
+            }
+            let allowed = within + e_static;
+            eprintln!("n {n}, νh {:.1}, |A|τ/|C| {:.1}: at the nodes' values {e_nodes:.2e} (the treatments leave {within:.2e}, the static group's own step {e_static:.2e}), held at the middle {e_held:.2e}", beat * half, 2.0 * half * a.max_abs() / c.max_abs());
+            assert!(e_nodes <= allowed, "n {n}, νh {:.1}: at the nodes' values the state errs by {e_nodes:e}, its treatments and the static group's step leave {allowed:e}", beat * half);
+            worst = worst.max(e_nodes / allowed);
+            worst_held = worst_held.min(e_held / e_nodes);
+            cases += 1;
+        }
+        eprintln!("{cases} random Lindblad steps: at the nodes' values the error at most {worst:.2e} of what the treatments and the static group's step leave; held at the middle at least {worst_held:.1e} times it");
+        assert!(worst_held > 10.0, "the envelope held at its middle errs by {worst_held} times the nodes' values' at the least");
+    }
+
     /// The tones' gauge (module documentation, # Tones): a frame that turns a group of states at θ moves their
     /// diagonal in the static group by θ and the beat of every tone between that group and the others by θ, and
     /// leaves each combined frequency as it is. Two groups of two states, each strongly coupled within itself (with

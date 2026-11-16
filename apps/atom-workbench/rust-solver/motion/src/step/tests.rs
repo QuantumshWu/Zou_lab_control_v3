@@ -2873,6 +2873,48 @@ fn a_scene_s_step_cost() {
     });
 }
 
+/// A scene's step on the fold at the atom (model/fold/run.rs; run by name, alone: `SCENE=<a reference scene's name or a
+/// native request's path> TAU=<µs> … a_scene_s_onefold_step_cost -- --ignored --nocapture --test-threads 1`): per state
+/// set, 16 atoms drawn as `scene_clusters` draws them (the prepared trap at the request's temperature, a random state of
+/// the set, no jump), each first taken one step so that it stands on its own decompositions (its first step makes them),
+/// then its next step timed as `cost` times the old model's -- the step, model and integrator together.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn a_scene_s_onefold_step_cost() {
+    use crate::model::GROUND;
+    let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
+    let tau: f64 = std::env::var("TAU").expect("TAU: the step (µs)").parse().expect("TAU: a number");
+    let request = scene(&name);
+    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let mut p = [0.0; GROUND];
+    p[state] = 1.0;
+    let started = std::time::Instant::now();
+    let run = crate::model::fold::run::Onefold::new(&request, p).expect("the run on the fold at the atom");
+    eprintln!("{name}: the run made in {:.2?}", started.elapsed());
+    let model = crate::model::Model::new(&request, &crate::field::Light::new(&request), &[]).unwrap();
+    let trap = model.trap(&p, &model.prepared()).expect("the prepared trap");
+    let kt = crate::units::KT_PER_UK * request.temperature_uk;
+    for set in 0..GROUND {
+        let first = (0..GROUND).find(|&g| run.cluster_of(g) == set);
+        let Some(first) = first else { break };
+        let n = run.cluster(set).states.len();
+        let starts: Vec<Trajectory> = (0..16)
+            .map(|i| {
+                let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, set as u32);
+                let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
+                let mut t = Trajectory::new(&run, first, r, kappa, 17, i);
+                let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect();
+                let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+                t.psi = psi.iter().map(|z| *z / norm).collect();
+                t.threshold = f64::MIN_POSITIVE;
+                let warmed = step_of(&run, &t, tau, &mut step::Scratch::default()).expect("the first step").end;
+                Trajectory { psi: t.psi, threshold: f64::MIN_POSITIVE, ..warmed }
+            })
+            .collect();
+        cost(&format!("set {set} ({n}) of {}", std::path::Path::new(&name).file_stem().unwrap().to_string_lossy()), &run, &starts, tau);
+    }
+}
+
 /// What `decay_along` reads of a scene's decay, kind by kind.
 const DECAYS: [&str; 5] = ["tables at the nodes", "exact at the nodes", "tables inside", "exact inside", "parabola inside"];
 

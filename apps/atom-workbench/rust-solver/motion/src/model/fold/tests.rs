@@ -2308,3 +2308,88 @@ fn the_levels_cross_series() {
         }
     }
 }
+
+/// The run on the fold at the atom (run.rs) against the exact master equation (BRIEF_WIRE 2a; unify part 2's Λ): |1⟩ at 0
+/// and |2⟩ at 100 rad/µs, one excited state decaying at Γ = 38 rad/µs, three quarters to |1⟩ and a quarter to |2⟩ (on two
+/// axes), laser A on |1⟩ (1.5 rad/µs) and B on |2⟩ (0.75 rad/µs), both on resonance -- half unify's, so that the rule
+/// folds the excited state (at unify's 3 and 1.5 rad/µs it keeps it in P, a block with no Q rows, which the prototype does
+/// not hold) --: the jumps' coherence makes the dark state b|1⟩ − a|2⟩ (coherent population trapping), |1⟩'s share 0.2,
+/// where the rate equations, each laser's photons apart, give 0.43. The two ground states are one set (their Raman
+/// coupling resonant), both lasers reach one block, and its jumps are one operator: 400 trajectories from |1⟩ (the atom
+/// 10⁶ times Rb's mass, at rest at the focus), steps of 0.25 µs through the integrator and its jumps, read at 60 µs --
+/// their mean |1⟩ share within three standard errors and the elimination's (a/(Γ/2))² of the exact one.
+#[test]
+fn the_run_s_lambda_is_the_master_equation_s_dark_state() {
+    use crate::step::{Dynamics, Midway, Trajectory};
+    let (e2, gamma, a, b) = (100.0, 38.0, 1.5, 0.75);
+    let (to1, to2) = (0.75 * gamma, 0.25 * gamma);
+    // The excited state at 1000 rad/µs in its frame, the lasers on resonance there (the idle excited states at zero, no
+    // laser's energy on them).
+    let ee = 1000.0;
+    let mut req = system(&[(0, 0.0), (4, e2)], &[(17, ee, gamma, 0)], &[Ray { axis: 0, nu: ee, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(a))] }, Ray { axis: 1, nu: ee - e2, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 4, C64::real(b))] }], 2, true);
+    req.emission = std::array::from_fn(|_| Mat::zeros(STATES, STATES));
+    req.emission[0][(0, GROUND + 17)] = C64::real(to1.sqrt());
+    req.emission[1][(4, GROUND + 17)] = C64::real(to2.sqrt());
+    req.validate().unwrap();
+    let mut p = [0.0; GROUND];
+    p[0] = 1.0;
+    let run = run::Onefold::new(&req, p).expect("the run");
+    assert_eq!(run.cluster_of(0), run.cluster_of(4), "|1⟩ and |2⟩ one set");
+    // The exact three-level master equation in the lasers' frame, from |1⟩⟨1|, at 30 µs (RK4).
+    let h3 = Mat::from_fn(3, 3, |i, j| if (i, j) == (2, 0) || (i, j) == (0, 2) { C64::real(a) } else if (i, j) == (2, 1) || (i, j) == (1, 2) { C64::real(b) } else { C64::ZERO });
+    let c3 = [Mat::from_fn(3, 3, |i, j| if (i, j) == (0, 2) { C64::real(to1.sqrt()) } else { C64::ZERO }), Mat::from_fn(3, 3, |i, j| if (i, j) == (1, 2) { C64::real(to2.sqrt()) } else { C64::ZERO })];
+    let lindblad = |rho: &Mat| -> Mat {
+        let mut out = h3.product(rho);
+        out.add_scaled(-C64::ONE, &rho.product(&h3));
+        let mut out = out.scaled(C64::new(0.0, -1.0));
+        for j in &c3 {
+            out.add_scaled(C64::ONE, &j.product(rho).product(&j.adjoint()));
+            let jj = j.adjoint_product(j);
+            out.add_scaled(C64::real(-0.5), &jj.product(rho));
+            out.add_scaled(C64::real(-0.5), &rho.product(&jj));
+        }
+        out
+    };
+    let (time, dt): (f64, f64) = (60.0, 2e-4);
+    let mut rho = Mat::zeros(3, 3);
+    rho[(0, 0)] = C64::ONE;
+    for _ in 0..(time / dt).round() as usize {
+        let k1 = lindblad(&rho);
+        let mut x = rho.clone();
+        x.add_scaled(C64::real(0.5 * dt), &k1);
+        let k2 = lindblad(&x);
+        let mut x = rho.clone();
+        x.add_scaled(C64::real(0.5 * dt), &k2);
+        let k3 = lindblad(&x);
+        let mut x = rho.clone();
+        x.add_scaled(C64::real(dt), &k3);
+        let k4 = lindblad(&x);
+        for (k, w) in [(&k1, 1.0), (&k2, 2.0), (&k3, 2.0), (&k4, 1.0)] {
+            rho.add_scaled(C64::real(dt * w / 6.0), k);
+        }
+    }
+    let exact = rho[(0, 0)].re / (rho[(0, 0)].re + rho[(1, 1)].re);
+    struct Anywhere;
+    impl crate::step::Domain for Anywhere {
+        fn runaway(&self, _: f64) -> bool {
+            false
+        }
+    }
+    let (tau, count) = (0.25, 400);
+    let steps = (time / tau).round() as usize;
+    let mut shares = vec![];
+    let mut scratch = crate::step::Scratch::default();
+    for i in 0..count {
+        let mut t = Trajectory::new(&run, 0, [0.0; 3], [0.0; 3], 11, i);
+        for _ in 0..steps {
+            t = Midway::new(&run, &t, tau).unwrap().attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere).unwrap().end;
+        }
+        let rows = run.readout(t.cluster, &t.point(), &t.psi);
+        shares.push(rows[0] / (rows[0] + rows[4]));
+    }
+    let mean = shares.iter().sum::<f64>() / count as f64;
+    let error = (shares.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (count * (count - 1)) as f64).sqrt();
+    let elimination = (a / (0.5 * gamma)).powi(2);
+    println!("|1⟩'s share at 60 µs: the run {mean:.4} ± {error:.4} over {count} trajectories, the exact master equation {exact:.4} (the rate equations' 0.43; the elimination's (a/(Γ/2))² {elimination:.4})");
+    assert!((mean - exact).abs() <= 3.0 * error + elimination, "the run's |1⟩ share {mean} ± {error} against the master equation's {exact}");
+}

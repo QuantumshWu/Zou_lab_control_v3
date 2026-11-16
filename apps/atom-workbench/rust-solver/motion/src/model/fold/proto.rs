@@ -2748,7 +2748,7 @@ impl Fold {
         ws.noded = false;
         lap(PLACE, &mut clock, &mut tick);
         let share = crate::model::elim::share();
-        if cache.at_near.len() != ws.near.len() {
+        if cache.at_near.len() != ws.near.len() || cache.at_far.len() != ws.far.len() {
             cache.near = (0..ws.near.len()).map(|_| vec![]).collect();
             cache.at_near = vec![None; ws.near.len()];
             cache.far = (0..ws.far.len()).map(|_| vec![]).collect();
