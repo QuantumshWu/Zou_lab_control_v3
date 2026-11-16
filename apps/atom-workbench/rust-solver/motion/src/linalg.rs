@@ -310,6 +310,36 @@ pub fn mul_add(subtract: bool, z: &mut [C64], f: C64, y: &[C64]) {
     }
 }
 
+/// out_j = 1/((c_j − w) − κ) for every j, each as the scalar form makes it -- the two differences, |z|² = re² + im², one
+/// division, the conjugate scaled -- but four numbers' squared moduli to a vector and one vector division for the four.
+pub fn reciprocals(c: &[C64], w: f64, kappa: C64, out: &mut [C64]) {
+    let n = c.len();
+    assert!(out.len() >= n);
+    // SAFETY: n numbers of each (above); C64 is two f64 (`repr(C)`); the build has AVX2 (above).
+    unsafe {
+        use std::arch::x86_64::{_mm256_div_pd, _mm256_hadd_pd, _mm256_unpackhi_pd, _mm256_unpacklo_pd};
+        let (cp, op) = (c.as_ptr() as *const f64, out.as_mut_ptr() as *mut f64);
+        let (wv, kv) = (_mm256_setr_pd(w, 0.0, w, 0.0), _mm256_setr_pd(kappa.re, kappa.im, kappa.re, kappa.im));
+        let (sign, one) = (_mm256_setr_pd(1.0, -1.0, 1.0, -1.0), _mm256_set1_pd(1.0));
+        let mut j = 0;
+        while j + 4 <= n {
+            let a = _mm256_sub_pd(_mm256_sub_pd(_mm256_loadu_pd(cp.add(2 * j)), wv), kv);
+            let b = _mm256_sub_pd(_mm256_sub_pd(_mm256_loadu_pd(cp.add(2 * j + 4)), wv), kv);
+            // [|z0|², |z2|², |z1|², |z3|²], their reciprocals, laid back by pairs.
+            let r = _mm256_div_pd(one, _mm256_hadd_pd(_mm256_mul_pd(a, a), _mm256_mul_pd(b, b)));
+            _mm256_storeu_pd(op.add(2 * j), _mm256_mul_pd(_mm256_mul_pd(a, sign), _mm256_unpacklo_pd(r, r)));
+            _mm256_storeu_pd(op.add(2 * j + 4), _mm256_mul_pd(_mm256_mul_pd(b, sign), _mm256_unpackhi_pd(r, r)));
+            j += 4;
+        }
+        while j < n {
+            let z = C64 { re: c[j].re - w, im: c[j].im - 0.0 } - kappa;
+            let d = 1.0 / z.norm_sqr();
+            out[j] = C64 { re: z.re * d, im: -z.im * d };
+            j += 1;
+        }
+    }
+}
+
 /// out (r × c) = a (r × k) b (k × c), all row by row: each entry from zero by k fused steps, b's rows in order,
 /// o.re ← x.re y.re + (−x.im y.im + o.re) and o.im ← x.re y.im + (x.im y.re + o.im) (x = a's entry, y = b's) -- two
 /// fused multiply-adds a real. Up to eight numbers of a row of out are held in registers through the k steps.
