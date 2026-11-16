@@ -80,6 +80,14 @@
 //! a second-order shift of nothing in the exact Floquet problem (onefold report, step 1); the hazard is to take the jumps'
 //! cross terms the same way (step 2).
 //!
+//! # The passes as the next one reads (DESIGN §1.5, M1)
+//! Two passes, a third only as the share asks (the cheapest within the share, the evaluation order's rule): after the
+//! second the next one's change is read by the same block perturbation, bounded -- a column's response moves by at most
+//! Σ_i |δH_ij| ‖Z_i‖ over its distance from the block's diagonal, δH the Bloch generator less the H solved at --, and the
+//! third is solved only beyond the share. Two at the least: the existence (the passes' ratio) is read from two changes; one
+//! pass reads nothing where the self-consistency does not exist (the Λ at its two-photon resonance, ⑥: one pass's next
+//! reads zero there, its ratio after three is above one).
+//!
 //! # Two passes and the read of the next (DESIGN §1.5, M1)
 //! Pass 0 at H = diag(Ĥ_PP), then at H = diag of the Bloch generator it gives (the diagonal fold), pass 1 at the Bloch
 //! generator H⁽¹⁾ = Ĥ_PP + Σ_o Ĥ_Po T_o⁽⁰⁾; the read: H⁽²⁾ from T⁽¹⁾, δT solving the same equation with source −T⁽¹⁾ δH, and the
@@ -188,7 +196,9 @@ pub(crate) enum Row {
 /// The run's choice of nodes (DESIGN §1.1, §3, §11): the ground states' frames and sets and the excited states' parts (the
 /// rule's, `Choice::of`), the explicit excited levels (a level at the offset component `part` reaches from ground state
 /// `ground`), and the copies' statuses keyed by an absorbed component and one of the block's own sources (the block), the
-/// emitting component and the copy's ground level F -- a later entry overriding an earlier one; unlisted: centred.
+/// emitting component and the copy's ground level F -- a later entry overriding an earlier one; unlisted: centred. And the
+/// excited parts a block leaves out (`left`: keyed the same, by an absorbed component and a source, the part's index), each
+/// by its omission reading within the share (the cheapest evaluation, M18).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Choice {
     pub(crate) frames: Vec<Beat>,
@@ -196,6 +206,7 @@ pub(crate) struct Choice {
     pub(crate) parts: Vec<Vec<usize>>,
     pub(crate) explicit: Vec<(usize, Part, usize)>,
     pub(crate) copies: Vec<((Part, usize, Part, u8), Status)>,
+    pub(crate) left: Vec<((Part, usize), usize)>,
 }
 
 /// A copy's population at mixing m, the dressed two-state admixture ½(1 − 1/√(1 + 4m²)) (½ where m is infinite: a
@@ -308,7 +319,7 @@ impl Choice {
             }
         }
         let parts = connected(EXCITED, &joins);
-        Ok(Choice { frames, sets, parts, explicit: vec![], copies: vec![] })
+        Ok(Choice { frames, sets, parts, explicit: vec![], copies: vec![], left: vec![] })
     }
 }
 
@@ -356,6 +367,8 @@ pub(crate) struct Fold {
     /// Per frequency and (p, q) of its outside form O_pq in the spherical components (STATES × STATES) the entries that are
     /// not zero.
     entries: Vec<Vec<(usize, usize, Vec<(usize, usize, C64)>)>>,
+    /// The same of the excited states no block solves and no place holds (the readings' bare excited block alone).
+    others: Vec<Vec<(usize, usize, Vec<(usize, usize, C64)>)>>,
     /// Per excited state its part (`Choice::parts`).
     part_of: Vec<usize>,
     /// The levels: per ground state its F, per excited state its level, the excited levels (manifold, F′).
@@ -500,8 +513,11 @@ impl Fold {
                     (0..EXCITED).filter(|&x| m[(x, ground[p])] != C64::ZERO).for_each(|x| reached[x] = true);
                 }
             }
-            for part in &choice.parts {
-                if part.iter().any(|&x| reached[x] || theirs.contains(&x)) {
+            for (pi, part) in choice.parts.iter().enumerate() {
+                let left = !part.iter().any(|x| theirs.contains(x)) && sources.iter().any(|&(p, c)| choice.left.contains(&((components[c].part, ground[p]), pi)));
+                if left {
+                    part.iter().for_each(|&x| reached[x] = false);
+                } else if part.iter().any(|&x| reached[x] || theirs.contains(&x)) {
                     part.iter().for_each(|&x| reached[x] = true);
                 }
             }
@@ -539,6 +555,31 @@ impl Fold {
             rows.extend(centred);
             blocks.push(Block { offset, value, explicit: mine, rows, solved, sources, kept, omitted });
         }
+        // The outside forms' entries that are not zero, of the states the fold uses (every ground state; the excited states a
+        // block solves or a place holds) and of the others.
+        let mut used = [true; STATES];
+        for x in 0..EXCITED {
+            used[GROUND + x] = explicit.contains(&x) || blocks.iter().any(|b| b.rows.contains(&Row::Excited(x)));
+        }
+        let (mut entries, mut others) = (vec![], vec![]);
+        for o in &outside {
+            let (mut mine, mut theirs) = (vec![], vec![]);
+            for p in 0..3 {
+                for q in 0..3 {
+                    let m = &o[p][q];
+                    let all: Vec<(usize, usize, C64)> = (0..STATES).flat_map(|i| (0..STATES).map(move |j| (i, j))).filter(|&(i, j)| m[(i, j)] != C64::ZERO).map(|(i, j)| (i, j, m[(i, j)])).collect();
+                    let (a, b): (Vec<_>, Vec<_>) = all.into_iter().partition(|&(i, j, _)| used[i] && used[j]);
+                    if !a.is_empty() {
+                        mine.push((p, q, a));
+                    }
+                    if !b.is_empty() {
+                        theirs.push((p, q, b));
+                    }
+                }
+            }
+            entries.push(mine);
+            others.push(theirs);
+        }
         Ok(Fold {
             hbar_over_mass: crate::units::hbar_over_mass(request.mass_kg),
             light,
@@ -551,22 +592,8 @@ impl Fold {
             base_ground: base.block(&all, &all),
             base_excited,
             emission: std::array::from_fn(|q| request.emission[q].block(&all, &excited)),
-            entries: outside
-                .iter()
-                .map(|o| {
-                    let mut out = vec![];
-                    for p in 0..3 {
-                        for q in 0..3 {
-                            let m = &o[p][q];
-                            let e: Vec<(usize, usize, C64)> = (0..STATES).flat_map(|i| (0..STATES).map(move |j| (i, j))).filter(|&(i, j)| m[(i, j)] != C64::ZERO).map(|(i, j)| (i, j, m[(i, j)])).collect();
-                            if !e.is_empty() {
-                                out.push((p, q, e));
-                            }
-                        }
-                    }
-                    out
-                })
-                .collect(),
+            entries,
+            others,
             part_of: (0..EXCITED).map(|x| choice.parts.iter().position(|p| p.contains(&x)).unwrap_or(0)).collect(),
             ground_level,
             excited_level,
@@ -580,13 +607,12 @@ impl Fold {
     }
 
     /// The light's fields at a point and their gradients (module documentation, # The Hamiltonian at a point).
-    fn site(&self, r: [f64; 3], kappa: [f64; 3], work: &mut f64) -> Site {
-        let a: Vec<Amplitude> = self.light.beams.iter().map(|b| b.amplitude_to(r, 1)).collect();
-        let mut ground = self.base_ground.clone();
-        let mut excited = self.base_excited.clone();
+    /// The outside forms of the entries `list` at the beams' amplitudes `a`, added to H_GG and 𝒦.
+    #[allow(clippy::type_complexity)]
+    fn forms(&self, list: &[Vec<(usize, usize, Vec<(usize, usize, C64)>)>], a: &[Amplitude], ground: &mut Mat, excited: &mut Mat, work: &mut f64) {
         for (w, f) in self.light.frequencies.iter().enumerate() {
-            let field = f.field(&a);
-            for (p, q, entries) in &self.entries[w] {
+            let field = f.field(a);
+            for (p, q, entries) in &list[w] {
                 let x = field.value[*p].conj() * field.value[*q];
                 for &(i, j, v) in entries {
                     match (i < GROUND, j < GROUND) {
@@ -598,6 +624,13 @@ impl Fold {
                 *work += entries.len() as f64;
             }
         }
+    }
+
+    fn site(&self, r: [f64; 3], kappa: [f64; 3], work: &mut f64) -> Site {
+        let a: Vec<Amplitude> = self.light.beams.iter().map(|b| b.amplitude_to(r, 1)).collect();
+        let mut ground = self.base_ground.clone();
+        let mut excited = self.base_excited.clone();
+        self.forms(&self.entries, &a, &mut ground, &mut excited, work);
         let drives = self
             .components
             .iter()
@@ -780,24 +813,33 @@ impl Fold {
                 eliminated.push(self.eliminate(o, e, path, &renew, &mut moved, &mut work)?);
             }
             phase("eliminate", work, &mut phases);
+            // The passes: at diag(Ĥ_PP), at the diagonal of its Bloch generator, at the Bloch generator; each next one only
+            // where the last one's next reads beyond the share.
             let mut stages: Vec<Stage> = vec![];
-            let h_minus = diag(&hpp);
-            let s0 = self.solve(&site, &laid, &eliminated, &h_minus, true, &mut work)?;
-            let h0 = diag(&self.bloch(&hpp, &laid, &s0, &mut work));
-            stages.push(s0);
-            let s1 = self.solve(&site, &laid, &eliminated, &h0, true, &mut work)?;
-            let h1 = self.bloch(&hpp, &laid, &s1, &mut work);
-            stages.push(s1);
-            let s2 = self.solve(&site, &laid, &eliminated, &h1, false, &mut work)?;
-            let h2 = self.bloch(&hpp, &laid, &s2, &mut work);
-            let beyond: Vec<usize> = eliminated.iter().zip(s2.reuse()).filter(|(_, r)| *r > share).map(|(e, _)| e.basis).collect();
-            stages.push(s2);
+            let mut hs: Vec<Mat> = vec![diag(&hpp)];
+            let bloch = loop {
+                let h = hs.last().unwrap().clone();
+                let s = self.solve(&site, &laid, &eliminated, &h, stages.len() < 2, &mut work)?;
+                let b = self.bloch(&hpp, &laid, &s, &mut work);
+                let next = s.next(&eliminated, &h, &b, &mut work);
+                stages.push(s);
+                if (next <= share && stages.len() == 2) || stages.len() == 3 {
+                    break b;
+                }
+                hs.push(if stages.len() == 1 { diag(&b) } else { b });
+            };
+            let last = stages.last_mut().unwrap();
+            last.read_reuse(&eliminated, &laid, &mut work);
+            let beyond: Vec<usize> = eliminated.iter().zip(last.reuse()).filter(|(_, r)| *r > share).map(|(e, _)| e.basis).collect();
             phase("passes", work, &mut phases);
             if beyond.is_empty() || !renew.is_empty() {
-                break (eliminated, stages, h0, h1, h2);
+                let h1 = hs.pop().unwrap();
+                let h0 = hs.pop().unwrap_or_else(|| h1.clone());
+                break (eliminated, stages, h0, h1, bloch);
             }
             renew = beyond;
         };
+        // The passes' ratio (the self-consistency's existence, ≥ 1 none): of the last two changes.
         let ratio = difference(&h2, &h1) / difference(&h1, &h0);
         let last = stages.last().unwrap();
         // The compression.
@@ -834,7 +876,8 @@ impl Fold {
         };
         let reuse = last.reuse();
         phase("normal, tones, jumps", work, &mut phases);
-        Some(Folded { n, a, metric, normal, generator, amplitudes, tones, jumps: vec![], excitation, ratio, readings: vec![], work, reading_work: 0.0, reuse, phases, site, laid, eliminated, stages, hpp, h: [h0, h1, h2], m_eigen: (x.values, x.vectors) })
+        let passes = stages.len();
+        Some(Folded { n, a, metric, normal, generator, amplitudes, tones, jumps: vec![], excitation, ratio, readings: vec![], work, reading_work: 0.0, reuse, phases, passes, site, laid, eliminated, stages, hpp, h: [h0, h1, h2], m_eigen: (x.values, x.vectors) })
     }
 
     /// The jumps at a fold (module documentation, # The compression): per block C_q ε_o S⁻¹ -- where a jump is drawn, not
@@ -885,13 +928,12 @@ impl Fold {
     fn solve(&self, site: &Site, laid: &[Laid], eliminated: &[Eliminated], h: &Mat, diagonal: bool, work: &mut f64) -> Option<Stage> {
         let n = self.size();
         let triangle = if diagonal { Triangle { t: h.clone(), u: Mat::identity(n) } } else { Triangle::of(h, work)? };
-        let (mut splits, mut sources, mut responses, mut errors, mut sizes) = (vec![], vec![], vec![], vec![], vec![]);
+        let (mut splits, mut sources, mut responses, mut sizes) = (vec![], vec![], vec![], vec![]);
         for (l, e) in laid.iter().zip(eliminated) {
             // The ranks in H's Schur basis (H diagonal: as they are).
             let turned: Option<Vec<Vec<Mat>>> = (!diagonal).then(|| e.ranks.iter().map(|(_, per)| per.iter().map(|w| mul(w, &triangle.u, work)).collect()).collect());
             let (mut per, mut src) = (vec![], vec![]);
             let mut total = Mat::zeros(e.solved, n);
-            let mut err = vec![vec![0.0; n]; e.factored.parts.len()];
             for (split, &w) in l.shifts.iter().enumerate() {
                 let b = match l.beams[split] {
                     None => match &e.to_static {
@@ -920,9 +962,6 @@ impl Fold {
                     }
                 };
                 let z = e.sylvester(&triangle.t, w, &b, work);
-                if !diagonal {
-                    e.reuse(&triangle.t, w, &z, &mut err, work);
-                }
                 plus(&mut total, &z);
                 per.push(z);
                 src.push(b);
@@ -932,10 +971,9 @@ impl Fold {
             responses.push(e.rows(l, &t, work));
             splits.push(per);
             sources.push(src);
-            errors.push((0..n).map(|j| err.iter().map(|x| x[j] * x[j]).sum::<f64>().sqrt()).collect());
             sizes.push((0..n).map(|j| (0..total.rows).map(|k| total[(k, j)].norm_sqr()).sum::<f64>()).collect());
         }
-        Some(Stage { triangle, splits, sources, responses, errors, sizes })
+        Some(Stage { triangle, splits, sources, responses, errors: vec![], sizes })
     }
 
     /// The Bloch generator of a pass's responses: Ĥ_PP + Σ_o Ĥ_Po T_o.
@@ -1305,7 +1343,10 @@ impl Eliminated {
             let norms: Vec<f64> = parts.iter().map(|(idx, at, _)| (*at..at + idx.len()).map(|k| z[(k, j)].norm_sqr()).sum::<f64>().sqrt()).collect();
             for (p, (idx, at, _)) in parts.iter().enumerate() {
                 let gap = (*at..at + idx.len()).map(|k| (c - self.diag[k]).abs()).fold(f64::INFINITY, f64::min);
-                err[p][j] += (0..parts.len()).map(|q| self.off[p][q] * norms[q]).sum::<f64>() / gap;
+                err[p][j] += match (0..parts.len()).map(|q| self.off[p][q] * norms[q]).sum::<f64>() {
+                    0.0 => 0.0,
+                    x => x / gap,
+                };
             }
             *work += (2 * z.rows + parts.len() * parts.len()) as f64;
         }
@@ -1556,6 +1597,54 @@ struct Stage {
 }
 
 impl Stage {
+    /// The next pass's reading (rate units; module documentation, # The passes as the next one reads): the largest over the
+    /// columns of Σ_i |δH_ij| ‖Z_i‖ over the column's distance from each block's diagonal, relative to its whole response,
+    /// δH = `bloch` − `h` in H's Schur basis.
+    fn next(&self, eliminated: &[Eliminated], h: &Mat, bloch: &Mat, work: &mut f64) -> f64 {
+        let n = h.rows;
+        // A response that is not finite (an energy on the diagonal itself) reads beyond any share.
+        if self.sizes.iter().flatten().any(|x| !x.is_finite()) {
+            return f64::INFINITY;
+        }
+        let mut dh = bloch.clone();
+        dh.add_scaled(-C64::ONE, h);
+        let u = &self.triangle.u;
+        let dh = mul(&mul_adj(u, &dh, work), u, work);
+        let whole: Vec<f64> = (0..n).map(|j| self.sizes.iter().map(|x| x[j]).sum::<f64>()).collect();
+        let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
+        let mut err = vec![0.0; n];
+        for (e, size) in eliminated.iter().zip(&self.sizes) {
+            for j in 0..n {
+                let gap = e.diag.iter().map(|d| (self.triangle.t[(j, j)] - *d).abs()).fold(f64::INFINITY, f64::min);
+                // At the diagonal itself (a gap of zero) a change reads infinite, no change nothing.
+                let x = match (0..n).map(|i| dh[(i, j)].abs() * size[i].sqrt()).sum::<f64>() {
+                    0.0 => 0.0,
+                    x => x / gap,
+                };
+                err[j] += x * x;
+            }
+            *work += (n * (n + e.solved)) as f64;
+        }
+        (0..n).filter(|&j| whole[j] > floor).map(|j| rate((err[j] / whole[j]).sqrt())).fold(0.0, f64::max)
+    }
+
+    /// The reuse's errors of its splits (`Eliminated::reuse`), per block and column.
+    fn read_reuse(&mut self, eliminated: &[Eliminated], laid: &[Laid], work: &mut f64) {
+        let n = self.triangle.t.rows;
+        self.errors = eliminated
+            .iter()
+            .zip(laid)
+            .zip(&self.splits)
+            .map(|((e, l), per)| {
+                let mut err = vec![vec![0.0; n]; e.factored.parts.len()];
+                for (z, &w) in per.iter().zip(&l.shifts) {
+                    e.reuse(&self.triangle.t, w, z, &mut err, work);
+                }
+                (0..n).map(|j| err.iter().map(|x| x[j] * x[j]).sum::<f64>().sqrt()).collect()
+            })
+            .collect();
+    }
+
     /// Per block the reuse's reading (rate units): the largest over the columns of its error relative to the column's whole
     /// response (every block's; a column at the responses' rounding reads nothing).
     fn reuse(&self) -> Vec<f64> {
@@ -1632,6 +1721,8 @@ pub(crate) struct Folded {
     /// Per block the reading of its decomposition's reuse (rate units), and the work by phase.
     pub(crate) reuse: Vec<f64>,
     pub(crate) phases: Vec<(&'static str, f64)>,
+    /// The passes solved (two or three, as the next one's reading asks).
+    pub(crate) passes: usize,
     site: Site,
     laid: Vec<Laid>,
     eliminated: Vec<Eliminated>,
@@ -1786,6 +1877,23 @@ impl Fold {
                 split(o, &col, j, 0, 1.0, &mut out, work);
             }
         }
+        // An excited node left out of its block: its response's share of the column's whole excited response (the
+        // omission's reading; a part is left out where its nodes' sum is within the share).
+        for (o, b) in self.blocks.iter().enumerate() {
+            for j in (0..n).filter(|&j| whole[j] > 0.0) {
+                let mut parts: Vec<(Node, f64)> = vec![];
+                for i in (0..b.rows.len()).filter(|&i| matches!(b.rows[i], Row::Excited(_))) {
+                    let nd = node(b, i);
+                    match parts.iter_mut().find(|p| p.0 == nd) {
+                        Some(p) => p.1 += tu[o][(i, j)].norm_sqr(),
+                        None => parts.push((nd, tu[o][(i, j)].norm_sqr())),
+                    }
+                }
+                for (nd, x) in parts {
+                    put(o, nd, 7, x / whole[j], &mut out);
+                }
+            }
+        }
         // The light pattern's offsets ±pattern on each column's own response, the larger.
         if pattern > 0.0 {
             for o in 0..self.blocks.len() {
@@ -1827,7 +1935,12 @@ impl Fold {
         }
         // The bare excited block's eigendecomposition, for the reabsorption's resolvent (no lattice node holds it).
         let mut bare = crate::linalg::Eigen::default();
-        let bare = bare.decompose(&f.site.excited).then_some(bare);
+        let full = {
+            let (mut g, mut e) = (Mat::zeros(GROUND, GROUND), f.site.excited.clone());
+            self.forms(&self.others, &f.site.a, &mut g, &mut e, work);
+            e
+        };
+        let bare = bare.decompose(&full).then_some(bare);
         if let Some(b) = &bare {
             *work += b.work;
         }
@@ -2113,11 +2226,28 @@ impl Fold {
                 let g = mul(&e.to(&bar_ts, w), &tri.u, w);
                 let mut kz = Mat::zeros(e.solved, e.solved);
                 let mut hz = Mat::zeros(n, n);
+                // A pass at a diagonal H passes back its diagonal alone (`k` ≤ 1); K̄ is taken part by part (its couplings
+                // across parts are left out, as the decomposition leaves them).
+                let whole_h = k >= 2;
                 let ranks_u: Vec<Vec<Mat>> = e.ranks.iter().map(|(_, per)| per.iter().map(|rk| mul(rk, &tri.u, w)).collect()).collect();
                 for (sp, (z, &shift)) in stage.splits[o].iter().zip(&l.shifts).enumerate() {
                     let lz = e.adjoint(&tri.t, shift, &g, w);
-                    plus(&mut kz, &mul_by_adj(&lz, z, w));
-                    plus(&mut hz, &mul_adj(z, &lz, w));
+                    for (idx, at, _) in &e.factored.parts {
+                        for a in *at..at + idx.len() {
+                            for b in *at..at + idx.len() {
+                                kz[(a, b)] += (0..n).map(|j| lz[(a, j)] * z[(b, j)].conj()).sum::<C64>();
+                            }
+                        }
+                        *w += (idx.len() * idx.len() * n) as f64;
+                    }
+                    if whole_h {
+                        plus(&mut hz, &mul_adj(z, &lz, w));
+                    } else {
+                        for i in 0..n {
+                            hz[(i, i)] += (0..z.rows).map(|a| z[(a, i)].conj() * lz[(a, i)]).sum::<C64>();
+                        }
+                        *w += (z.rows * n) as f64;
+                    }
                     match l.beams[sp] {
                         None => {
                             if e.to_static.is_some() {

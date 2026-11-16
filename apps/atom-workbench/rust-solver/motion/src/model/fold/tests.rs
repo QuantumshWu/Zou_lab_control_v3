@@ -325,9 +325,9 @@ fn eigenvalue_bound(f: &Folded, kinds: &dyn Fn(&Reading) -> f64) -> f64 {
     rate(excited.sqrt()) * fold_part(f) + copies
 }
 
-/// The fold's part of the generator: ‖H⁽¹⁾ − Ĥ_PP‖_F.
+/// The fold's part of the generator: its last Bloch generator less Ĥ_PP, ‖H − Ĥ_PP‖_F.
 fn fold_part(f: &Folded) -> f64 {
-    let mut d = f.h[1].clone();
+    let mut d = f.h[2].clone();
     d.add_scaled(-C64::ONE, &f.hpp);
     d.frobenius()
 }
@@ -665,12 +665,13 @@ fn sixty_random_systems_are_their_dense_sambe_within_the_read_truncation() {
 
 /// ⑥ The closed Λ (g11 = 60, g22 = 50, Ω = 400; copies decomposed, lab frames) swept in its two-photon detuning from 40 to 0
 /// rad/µs: the readings' total moves without a cliff (a step of 0.5 rad/µs changes it by less than (d/(d − ½))⁶, the
-/// steepest power its parts make -- the next pass's δT, three resolvent factors of the copy at d, squared --, for d ≥ 2),
+/// steepest power its parts make -- the next pass's δT, three resolvent factors of the copy at d, squared --, for d ≥ 2, at
+/// the same number of passes; where a pass is added, the switch is within the share),
 /// and passes the share before the fold stops existing (x ≥ 1, or the passes' ratio ≥ 1).
 #[test]
 fn a_lambda_swept_into_resonance_reads_beyond_the_share_before_its_fold_fails() {
     let share = super::super::elim::share();
-    let (mut beyond, mut gone, mut last): (Option<f64>, Option<f64>, Option<(f64, f64)>) = (None, None, None);
+    let (mut beyond, mut gone, mut last): (Option<f64>, Option<f64>, Option<(f64, f64, usize)>) = (None, None, None);
     for step in 0..=80 {
         let d0 = 40.0 - 0.5 * step as f64;
         let req = lambda_system(60.0, 0.0, 0.0, 50.0, d0, 400.0);
@@ -686,13 +687,18 @@ fn a_lambda_swept_into_resonance_reads_beyond_the_share_before_its_fold_fails() 
         if total > share {
             beyond.get_or_insert(d0);
         }
-        if let Some((d, t)) = last {
-            if d >= 2.0 {
+        if let Some((d, t, passes)) = last {
+            if d >= 2.0 && passes == f.passes {
                 let limit = (d / (d - 0.5)).powi(6);
                 assert!(total <= limit * t && t <= limit * total, "d₀ {d0}: the reading {total:.3e} after {t:.3e} (limit ×{limit:.2})");
             }
+            if passes != f.passes {
+                // A pass more (the next one's reading beyond the share): the switch moves the result within the share.
+                println!("d₀ {d0}: {passes} to {} passes, the reading {t:.3e} to {total:.3e}", f.passes);
+                assert!(t.min(total) <= share, "d₀ {d0}: a switch of the passes beyond the share");
+            }
         }
-        last = Some((d0, total));
+        last = Some((d0, total, f.passes));
     }
     println!("beyond the share at d₀ = {beyond:?} rad/µs; the fold gone at {gone:?}");
     let (beyond, gone) = (beyond.expect("the reading passes the share"), gone.unwrap_or(-1.0));
@@ -1077,7 +1083,25 @@ fn a_fold_s_work_at_a_scene() {
                     changed = true;
                 }
             }
-            println!("set {set:?} round {round}: copies not left out {statuses:?}");
+            // The excited parts: a block leaves out a part whose nodes' omission readings sum within the share.
+            for (o, b) in fold.blocks.iter().enumerate() {
+                for (pi, part) in choice.parts.iter().enumerate() {
+                    let levels: Vec<usize> = part.iter().map(|&x| fold.excited_level[x]).collect();
+                    let here = b.rows.iter().any(|r| matches!(r, Row::Excited(x) if part.contains(x)));
+                    if !here || b.explicit.iter().any(|&p| part.contains(&fold.explicit[p - fold.ground.len()])) {
+                        continue;
+                    }
+                    let total: f64 = f.readings.iter().filter(|r| r.block == o && matches!(r.node, Node::Excited(l) if levels.contains(&l))).map(|r| r.omission).sum();
+                    if rate(total.sqrt()) <= share {
+                        for &(s, a) in &b.sources {
+                            choice.left.push(((fold.components[a].part, fold.ground[s]), pi));
+                        }
+                        statuses.push(format!("block {o}: part {pi} left out ({total:.1e})"));
+                        changed = true;
+                    }
+                }
+            }
+            println!("set {set:?} round {round}: {statuses:?}");
             if !changed {
                 break;
             }
@@ -1092,6 +1116,10 @@ fn a_fold_s_work_at_a_scene() {
         let mut path = Path::default();
         let (mut works, mut forces, mut remade, mut worst) = (vec![], vec![], vec![], 0.0_f64);
         let mut phases: Vec<(&'static str, f64)> = vec![];
+        let mut passes = [0usize; 4];
+        // A moving atom: 0.1 m/s along (1, 2, 3)/√14, every beam its own Doppler shift.
+        let speed = 0.1 / fold.hbar_over_mass;
+        let kappa = [speed / 14f64.sqrt(), 2.0 * speed / 14f64.sqrt(), 3.0 * speed / 14f64.sqrt()];
         let started = std::time::Instant::now();
         let steps = 100;
         let mut last = None;
@@ -1099,7 +1127,8 @@ fn a_fold_s_work_at_a_scene() {
             let s = -1.5 + 0.03 * step as f64;
             let r = [s * unit; 3];
             let made = path.made;
-            let f = fold.at(r, [0.0; 3], &mut path).unwrap();
+            let f = fold.at(r, kappa, &mut path).unwrap();
+            passes[f.passes] += 1;
             let rho = Mat::from_fn(f.n, f.n, |i, j| if i == j { C64::real(1.0 / f.n as f64) } else { C64::ZERO });
             let (_, force) = fold.force(&f, &rho, &[]);
             works.push(f.work);
@@ -1144,6 +1173,6 @@ fn a_fold_s_work_at_a_scene() {
             f.reading_work,
             1e3 * elapsed
         );
-        println!("   a step by phase: {}", phases.iter().map(|(n, x)| format!("{n} {x:.0}")).collect::<Vec<_>>().join(", "));
+        println!("   a step by phase: {}; passes one/two/three at {}/{}/{} steps", phases.iter().map(|(n, x)| format!("{n} {x:.0}")).collect::<Vec<_>>().join(", "), passes[1], passes[2], passes[3]);
     }
 }
