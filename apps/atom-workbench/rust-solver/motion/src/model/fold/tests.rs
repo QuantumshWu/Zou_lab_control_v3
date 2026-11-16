@@ -1676,7 +1676,7 @@ fn proto_choice(req: &Request, name: &str) -> Choice {
             choice.excited.extend(add);
             // Every excited level of a block with rows in the lattice: left out at the focus, it is solved in a block that
             // solves any row and centred in one that does not; whether the step takes it is read at the point (proto.rs
-            // # Leaving nodes out).
+            // # The levels kept and left out).
             for b in fold.blocks.iter().filter(|b| !b.rows.is_empty()) {
                 let status = if b.solved > 0 { Status::Decomposed } else { Status::Centred };
                 for &(p, c) in &b.sources {
@@ -1684,6 +1684,11 @@ fn proto_choice(req: &Request, name: &str) -> Choice {
                         x.1 = status;
                     }
                 }
+            }
+            // A block with no rows at the focus is read at every point too (proto.rs # The levels kept and left out): its
+            // levels solved where the point keeps them.
+            for x in choice.excited.iter_mut().filter(|x| x.1 == Status::Omitted && set.contains(&x.0 .1)) {
+                x.1 = Status::Decomposed;
             }
             let fold = Fold::new(req, &choice, set[0]).unwrap();
             if fold.blocks.is_empty() {
