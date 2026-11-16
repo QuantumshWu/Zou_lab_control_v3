@@ -536,14 +536,11 @@ pub(crate) struct Workspace {
 /// its excited rows) and its lanes, each phase taking the leading part it needs: a step asks the heap for nothing. Shapes
 /// in s (the kept rows), n (the columns), L (the lanes), nd (the exact copies), nc (the centred copies' rows), T (the terms).
 struct Scratch {
-    /// s × n: a node's source (Ṽ + Ỹ₀), a compression's K̂Z; the force's per position Ṽ̄ (B̄), Ê̄†, ZĀ; the tangent's a
-    /// lane's ∂Z.
+    /// s × n: a node's source (Ṽ + Ỹ₀), a compression's K̂Z; the force's per position Ṽ̄; the tangent's a lane's ∂Z.
     src: Vec<C64>,
     y: Vec<C64>,
     zb: Vec<C64>,
     vb: Vec<C64>,
-    ebt: Vec<C64>,
-    xb: Vec<C64>,
     /// The tangent's: ∂Ṽ (s × 3n), the axes' ∂c on the terms and its conjugate (3 × T each) and its products on the terms'
     /// forms (3 × max(s, n) n);
     /// the sweeps' right-hand sides (s × 3Ln), ∂Z Δ (s × 3Ln), Z ∂Δ (s × Ln), a part's ∂K̃ rows (3s × s).
@@ -592,8 +589,6 @@ impl Scratch {
             y: z(s * n),
             zb: z(s * n),
             vb: z(s * n),
-            ebt: z(s * n),
-            xb: z(s * n),
             dv: z(3 * s * n),
             dct: z(3 * terms),
             dcc: z(3 * terms),
@@ -629,11 +624,9 @@ impl Scratch {
                 kddb: z(nd * nd),
                 eh: z(nd * n),
                 od: z(nd * n),
-                zdh: z(n * nd),
-                exb: z(n * nd),
                 bdb: z(nd * n),
             },
-            copies_back: CopiesBack { adj: z(n * n), zea: z(s * n), zead: z(s * n), zda: z(nd * n), zdad: z(nd * n) },
+            copies_back: CopiesBack { zea: z(s * n), zda: z(nd * n) },
             rows: RowTemps { part: vec![0.0; s.max(1) * n], lane: vec![0.0; ln], each: vec![0.0; n], total: vec![0.0; n], acc: vec![0.0; n] },
             bound: BoundTemps {
                 q_of: Vec::with_capacity(levels),
@@ -690,18 +683,13 @@ struct CopyTemps {
     kddb: Vec<C64>,
     eh: Vec<C64>,
     od: Vec<C64>,
-    zdh: Vec<C64>,
-    exb: Vec<C64>,
     bdb: Vec<C64>,
 }
 
-/// `copies_compress_back`'s temporaries: Ā† (n × n), Z_EĀ, Z_EĀ† (s × n), Z_DĀ, Z_DĀ† (nd × n).
+/// `copies_compress_back`'s temporaries: Z_EĀ (s × n), Z_DĀ (nd × n).
 struct CopiesBack {
-    adj: Vec<C64>,
     zea: Vec<C64>,
-    zead: Vec<C64>,
     zda: Vec<C64>,
-    zdad: Vec<C64>,
 }
 
 /// The omission bound's temporaries (`bound_levels`), for Q levels, L lanes, n columns, every excited row, T terms.
@@ -743,8 +731,7 @@ struct BoundTemps {
 /// [u | ∂u] (3 GROUND × 4), a class's rows of it and their Gram matrix (4 × 4); the
 /// omission's columns' denominators and a trial's (n), a block's bounds on trial (`Bounds`, the largest levels × n), the
 /// levels' and far blocks' order; the near blocks' rows stacked (BRIEF_PROTO5 item 2: every block's rows of a product's two
-/// factors, 2 × the rows in all × n each; the force's products on them, the rows in all × n and × 2n; its [Ā; Ā†] and
-/// [Ā | Ā†]).
+/// factors, 2 × the rows in all × n each; the force's product on them, 2 × the rows in all × n).
 struct Temp {
     dhbase: Vec<C64>,
     dmetric: Vec<C64>,
@@ -776,9 +763,6 @@ struct Temp {
     sl: Vec<C64>,
     sr: Vec<C64>,
     fo1: Vec<C64>,
-    fo2: Vec<C64>,
-    right: Vec<C64>,
-    wide: Vec<C64>,
 }
 
 impl Temp {
@@ -817,10 +801,7 @@ impl Temp {
             units: Vec::with_capacity(all.max(far)),
             sl: z(2 * rows * n),
             sr: z(2 * rows * n),
-            fo1: z(rows * n),
-            fo2: z(2 * rows * n),
-            right: z(2 * nn),
-            wide: z(2 * nn),
+            fo1: z(2 * rows * n),
         }
     }
 }
@@ -1519,19 +1500,10 @@ fn explicit_parts(xs: &[usize], exact: &[(usize, usize)], basis: &NearBasis, e: 
     }
 }
 
-/// The adjoint of `compress` (with the emission) for a cotangent Ā (n × n) of A = ÊZ + Z†(K̂Z + B): Z̄ = Ê†Ā + (K̂Z + B)Ā†
-/// + K̂†ZĀ, B̄ = ZĀ, Ê̄† = ZĀ†. Its two products are the force's, stacked over the blocks' rows (`Fold::prototype_force`):
-/// Z̄'s first two terms (in `zbar`) and [ZĀ | ZĀ†] (`xe`, s × 2n); here the rest of a block: x = ZĀ (the force stacks it with
-/// Z over the positions for K̃̄ = Σ_j Z_jĀ_jZ_j†, one product), B̄ = x into `srcbar`, Ê̄† into `ebt` (s × n), Z̄ += K̂†x
-/// (K̂† triangular).
-#[allow(clippy::too_many_arguments)]
-fn compress_back_rest(kappa: &[C64], t: &Mat, ends: &[usize], xe: &[C64], zbar: &mut [C64], srcbar: &mut [C64], ebt: &mut [C64], x: &mut [C64], s: usize, n: usize, work: &mut f64) {
-    let n2 = 2 * n;
-    for i in 0..s {
-        x[i * n..(i + 1) * n].copy_from_slice(&xe[i * n2..i * n2 + n]);
-        ebt[i * n..(i + 1) * n].copy_from_slice(&xe[i * n2 + n..(i + 1) * n2]);
-    }
-    srcbar.copy_from_slice(x);
+/// The adjoint of `compress` (with the emission) for a Hermitian cotangent Ā (n × n) of A = ÊZ + Z†(K̂Z + B): Z̄ = (Ê† + K̂Z +
+/// B)Ā + K̂†ZĀ, B̄ = Ê̄† = ZĀ. Its product is the force's, stacked over the blocks' rows (`Fold::prototype_force`): Z̄'s first
+/// term (in `zbar`) and x = ZĀ; here the rest of a block, Z̄ += K̂†x (K̂† triangular).
+fn compress_back_rest(kappa: &[C64], t: &Mat, ends: &[usize], x: &[C64], zbar: &mut [C64], s: usize, n: usize, work: &mut f64) {
     // Z̄ += K̂† (Z Ā): K̂† = conj(κ) on the diagonal and the strict lower part T†.
     for i in 0..s {
         for j in 0..n {
@@ -1637,18 +1609,15 @@ fn copies_compress(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C64], z
     *work += (2 * s * nd * n + nd * nd * n + (s + 2 * nd) * n * n) as f64;
 }
 
-/// The adjoint of `copies_compress` for the cotangent Ā of A (and X̄ of the metric, `xbar`, where given): Z̄_E, Z̄_D, and
-/// K̂_ED's, K̂_DE's, K̂_DD's cotangents (Z_E Ā Z_D†, Z_D Ā Z_E†, Z_D Ā Z_D†).
+/// The adjoint of `copies_compress` for the Hermitian cotangent Ā of A (and X̄ of the metric, `xbar`, where given): Z̄_E,
+/// Z̄_D, and K̂_ED's, K̂_DE's, K̂_DD's cotangents (Z_E Ā Z_D†, Z_D Ā Z_E†, Z_D Ā Z_D†).
 #[allow(clippy::too_many_arguments)]
 fn copies_compress_back(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C64], ze: &[C64], zd: &[C64], abar: &[C64], xbar: Option<&[C64]>, zebar: &mut [C64], zdbar: &mut [C64], kedbar: &mut [C64], kdebar: &mut [C64], kddbar: &mut [C64], ct: &mut CopiesBack, n: usize, work: &mut f64) {
-    let adj = &mut ct.adj[..n * n];
-    adjoint_into(abar, n, n, adj);
-    // Z Ā and Z Ā† of both.
-    let (zea, zead, zda, zdad) = (&mut ct.zea[..s * n], &mut ct.zead[..s * n], &mut ct.zda[..nd * n], &mut ct.zdad[..nd * n]);
+    // Z Ā of both (Ā† = Ā).
+    let (zea, zda) = (&mut ct.zea[..s * n], &mut ct.zda[..nd * n]);
     fused_product_into(ze, abar, (s, n, n), zea);
-    fused_product_into(ze, adj, (s, n, n), zead);
     fused_product_into(zd, abar, (nd, n, n), zda);
-    fused_product_into(zd, adj, (nd, n, n), zdad);
+    let (zead, zdad) = (&*zea, &*zda);
     for i in 0..s {
         for d in 0..nd {
             // Z̄_E += K̂_ED (Z_D Ā†) + K̂_DE† (Z_D Ā).
@@ -1674,7 +1643,7 @@ fn copies_compress_back(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C6
             }
         }
     }
-    *work += (4 * (s + nd) * n * n + 6 * s * nd * n + 3 * nd * nd * n) as f64;
+    *work += (2 * (s + nd) * n * n + 6 * s * nd * n + 3 * nd * nd * n) as f64;
 }
 
 /// S's Lyapunov map solved, S Y + Y S = C (C Hermitian, S = (1 + X)^{1/2} = (1 + X)S⁻¹), into `y`, with `e` = S/σ − 1 made
@@ -3661,6 +3630,16 @@ impl Fold {
     /// responses' own tangent. The kept R₀ and z₀ are held as the step holds them; their relative change per µm along each
     /// axis (`Force::held`, ‖R₀‖·|∂(Ĥ − z₀)|, ~10⁻⁷ on the scenes) is what that leaves of the force, relatively. After
     /// `prototype`, `prototype_nodes` and `prototype_tangent` on the same cache.
+    ///
+    /// # The cotangents are Hermitian (BRIEF_PROTO5 item 5)
+    /// The integrator gives at each of its three nodes a real combination of the states' densities (step.rs `whole`: the
+    /// quadrature's and the nodes' Lagrange weights are real, the sums laid by their upper triangle and its conjugate; the
+    /// middle's held density taken out at real weights) and contracts it with the generator's Hermitian part, Re tr(∂G_h ρ)
+    /// (`Middle::force`, DESIGN §1.3) -- for Hermitian ρ that is Re tr(ρ∂G) = Re tr(Ḡ†∂G) with Ḡ = ρ. So every Ḡ_j is
+    /// Hermitian by construction, and so is Ā_j = S⁻¹Ḡ_jS⁻¹: the compressions' adjoint is [Ê† + K̂Z + B; Z]Ā, one product of
+    /// half the size ([Ê† | K̂Z + B][Ā; Ā†] and Z[Ā | Ā†] before), Ê̄† = B̄ = ZĀ; N̄'s Hermitian part (all `inverse_root_back`
+    /// reads) Σ_j P_j + P_j†, P_j = (S⁻¹Ḡ_j)†A_h,j, three products a position (six before); the copies' Ā + Ā† = 2Ā. (The
+    /// tones' cotangents are complex combinations, not Hermitian; they are the tones' generators', not the static G's here.)
     pub(crate) fn prototype_force(&self, cache: &Cache, ws: &mut Workspace, bars: [&Mat; 3]) -> Force {
         let n = ws.n;
         let nn = n * n;
@@ -3670,23 +3649,25 @@ impl Fold {
         let (mid, nodes, pp, step) = (&*mid, &*nodes, &*pp, &*step);
         let positions = if *noded { 3 } else { 1 };
         let normal = &step.normal.data;
-        let Temp { abar, nbar, adj, xbar, abc, w: wz, ge, diagonal, e, p, sl, sr, fo1, fo2, right, wide, .. } = tm;
-        // Ā_j = S⁻¹Ḡ_jS⁻¹; N̄ = Σ_j Ḡ_j S⁻¹ A_j† + A_j† S⁻¹ Ḡ_j; X̄ (`inverse_root_back`).
+        let Temp { abar, nbar, adj, xbar, abc, w: wz, ge, diagonal, e, p, sl, fo1, .. } = tm;
+        // Ā_j = S⁻¹Ḡ_jS⁻¹ (Hermitian); N̄ = Σ_j Ḡ_j S⁻¹ A_j† + A_j† S⁻¹ Ḡ_j, of which `inverse_root_back` reads the Hermitian
+        // part Σ_j P_j + P_j†, P_j = Ḡ_jS⁻¹A_h,j = (S⁻¹Ḡ_j)†A_h,j (A_h = (A + A†)/2): given as Σ_j 2P_j; X̄.
         let (nbar, adj, xbar, abc, wz) = (&mut nbar[..nn], &mut adj[..nn], &mut xbar[..nn], &mut abc[..nn], &mut wz[..nn]);
         nbar.fill(C64::ZERO);
         for j in 0..positions {
             let g = &bars[j].data;
+            debug_assert!((0..nn).all(|i| (g[i] - g[(i % n) * n + i / n].conj()).abs() <= 1e-12 * (1.0 + g[i].abs())), "a cotangent not Hermitian");
             let aj = if j == 0 { &step.a.data } else { &nodes[j - 1].a.data };
             multiply(normal, g, &mut eigen.data, n);
             multiply(&eigen.data, normal, &mut abar[j], n);
-            adjoint_into(aj, n, n, adj);
-            multiply(g, normal, &mut eigen.data, n);
-            multiply(&eigen.data, adj, &mut temp.data, n);
-            nbar.iter_mut().zip(&temp.data).for_each(|(o, x)| *o += *x);
-            multiply(adj, normal, &mut eigen.data, n);
-            multiply(&eigen.data, g, &mut temp.data, n);
-            nbar.iter_mut().zip(&temp.data).for_each(|(o, x)| *o += *x);
-            work += (6 * n * n * n) as f64;
+            for r in 0..n {
+                for c in 0..n {
+                    adj[r * n + c] = (aj[r * n + c] + aj[c * n + r].conj()) * 0.5;
+                }
+            }
+            crate::linalg::adjoint_product(&eigen.data, adj, (n, n, n), &mut temp.data);
+            nbar.iter_mut().zip(&temp.data).for_each(|(o, x)| *o += *x * 2.0);
+            work += (3 * n * n * n) as f64;
         }
         inverse_root_back(&step.metric.data, normal, nbar, n, xbar, &mut e[..nn], &mut temp.data, &mut p[..nn], &mut work);
         let mut ft = [0u64; 5];
@@ -3746,12 +3727,11 @@ impl Fold {
                 work += (v * v * nn) as f64;
             }
             lap(1, &mut clock, &mut ft);
-            // The near blocks. The compressions' adjoints, A = ÊZ + Z†(K̂Z + B): Z̄ = [Ê† | K̂Z + B] [Ā; Ā†] and
-            // [ZĀ | ZĀ†] = Z [Ā | Ā†], each one product stacked over every block's rows at the position (BRIEF_PROTO5 item 2).
+            // The near blocks. The compressions' adjoints, A = ÊZ + Z†(K̂Z + B), Ā Hermitian: [Z̄ less K̂†ZĀ; ZĀ] =
+            // [Ê† + K̂Z + B; Z] Ā, one product stacked over every block's rows at the position (BRIEF_PROTO5 items 2, 5).
             let total: usize = near.iter().filter(|nb| !nb.idle()).map(|nb| nb.s).sum();
-            let n2 = 2 * n;
             {
-                let (left, zs) = (&mut sl[..total * n2], &mut sr[..total * n]);
+                let left = &mut sl[..2 * total * n];
                 let mut off = 0;
                 for (x, (nb, sc)) in near.iter().zip(scratch.iter_mut()).enumerate() {
                     if nb.idle() {
@@ -3764,29 +3744,15 @@ impl Fold {
                     let y = &mut sc.y[..s * n];
                     schur_on(&nb.kappa, &basis.f.t, &basis.f.ends, z, y, s, n, &mut 0.0);
                     let explicit = !nb.xs.is_empty();
-                    for i in 0..s {
-                        let row = &mut left[(off + i) * n2..(off + i + 1) * n2];
-                        row[..n].copy_from_slice(&emit[i * n..(i + 1) * n]);
-                        for p in 0..n {
-                            row[n + p] = y[i * n + p] + v[i * n + p] + if explicit { stat[i * n + p] } else { C64::ZERO };
-                        }
+                    let row = &mut left[off * n..(off + s) * n];
+                    for (k, r) in row.iter_mut().enumerate() {
+                        *r = emit[k] + y[k] + v[k] + if explicit { stat[k] } else { C64::ZERO };
                     }
-                    zs[off * n..(off + s) * n].copy_from_slice(&z[..s * n]);
+                    left[(total + off) * n..(total + off + s) * n].copy_from_slice(&z[..s * n]);
                     off += s;
                 }
-                let (right, wide) = (&mut right[..n2 * n], &mut wide[..n * n2]);
-                for p in 0..n {
-                    for q in 0..n {
-                        let (a, h) = (ab[p * n + q], ab[q * n + p].conj());
-                        right[p * n + q] = a;
-                        right[(n + p) * n + q] = h;
-                        wide[p * n2 + q] = a;
-                        wide[p * n2 + n + q] = h;
-                    }
-                }
-                fused_product_into(left, right, (total, n2, n), &mut fo1[..total * n]);
-                fused_product_into(zs, wide, (total, n, n2), &mut fo2[..total * n2]);
-                work += (4 * total * n * n) as f64;
+                fused_product_into(left, ab, (2 * total, n, n), &mut fo1[..2 * total * n]);
+                work += (2 * total * n * n) as f64;
             }
             let mut off = 0;
             for (x, (nb, sc)) in near.iter().zip(scratch.iter_mut()).enumerate() {
@@ -3800,10 +3766,14 @@ impl Fold {
                 // The position's explicit parts of the exact copies.
                 let (exd, b0d): (&[C64], &[C64]) = if j == 0 { (&nb.exd, &nb.b0d) } else { (&nb.pnode[j - 1].exd, &nb.pnode[j - 1].b0d) };
                 let explicit = !nb.xs.is_empty();
-                let Scratch { vb, ebt, xb, kx, kz, tcbar, copies: ct, copies_back: cbk, .. } = &mut *sc;
-                let (vb, ebt, xb) = (&mut vb[..sn], &mut ebt[..sn], &mut xb[..sn]);
-                let zb = &mut fo1[off * n..(off + s) * n];
-                compress_back_rest(&nb.kappa, &basis.f.t, &basis.f.ends, &fo2[off * n2..(off + s) * n2], zb, vb, ebt, xb, s, n, &mut work);
+                let Scratch { vb, kx, kz, tcbar, copies: ct, copies_back: cbk, .. } = &mut *sc;
+                let vb = &mut vb[..sn];
+                let (zb, xb) = fo1[..2 * total * n].split_at_mut(total * n);
+                let (zb, xb) = (&mut zb[off * n..(off + s) * n], &xb[off * n..(off + s) * n]);
+                // Z̄ += K̂†ZĀ; B̄ = Ê̄† = ZĀ.
+                compress_back_rest(&nb.kappa, &basis.f.t, &basis.f.ends, xb, zb, s, n, &mut work);
+                vb.copy_from_slice(xb);
+                let ebt = xb;
                 off += s;
                 // ZĀ and Z for K̃̄ over the positions (one product after them).
                 {
@@ -3823,10 +3793,10 @@ impl Fold {
                     }
                     work += (nb.terms.len() * (2 * s * n + nn)) as f64;
                 }
-                // Ṽ is in both the source and the emission (Ê = Ṽ† on the ground rows): its cotangent B̄ + Ê̄†.
-                vb.iter_mut().zip(ebt.iter()).for_each(|(a, b)| *a += *b);
+                // Ṽ is in both the source and the emission (Ê = Ṽ† on the ground rows): its cotangent B̄ + Ê̄† = 2ZĀ.
+                vb.iter_mut().for_each(|a| *a *= 2.0);
                 // The exact copies' rows.
-                let CopyTemps { zdb, kedb, kdeb, kddb, eh, od, zdh, exb, bdb, .. } = ct;
+                let CopyTemps { zdb, kedb, kdeb, kddb, eh, od, bdb, .. } = ct;
                 let (zdb, kedb, kdeb, kddb) = (&mut zdb[..nd * n], &mut kedb[..s * nd], &mut kdeb[..nd * s], &mut kddb[..nd * nd]);
                 if nd > 0 {
                     zdb.fill(C64::ZERO);
@@ -3835,24 +3805,21 @@ impl Fold {
                     kddb.fill(C64::ZERO);
                     let (zd, ked, kde): (&[C64], &[C64], &[C64]) = if j == 0 { (&nb.zdtot, &nb.ked, &nb.kde) } else { (&nb.zdnode[j - 1], &nb.kednode[j - 1], &nb.kdenode[j - 1]) };
                     copies_compress_back(s, nd, ked, kde, &nb.kdd, z, zd, ab, None, zb, zdb, kedb, kdeb, kddb, cbk, n, &mut work);
-                    // Ê_D Z_D + Z_D†B_D: Z̄_D += Ê_D†Ā + B_D Ā†, and Re⟨ĀZ_D†, ∂Ê_D⟩ + Re⟨Z_DĀ, ∂B_D⟩ on each coupling vector.
+                    // Ê_D Z_D + Z_D†B_D: Z̄_D += (Ê_D† + B_D)Ā (Ā Hermitian), and Re⟨ĀZ_D†, ∂Ê_D⟩ + Re⟨Z_DĀ, ∂B_D⟩ on each
+                    // coupling vector, ĀZ_D† = (Z_DĀ)†.
                     if explicit {
-                        adjoint_into(ab, n, n, wz);
-                        let (eh, o, zdh, exb, bdb) = (&mut eh[..nd * n], &mut od[..nd * n], &mut zdh[..n * nd], &mut exb[..n * nd], &mut bdb[..nd * n]);
+                        let (eh, o, bdb) = (&mut eh[..nd * n], &mut od[..nd * n], &mut bdb[..nd * n]);
                         adjoint_into(exd, n, nd, eh);
+                        eh.iter_mut().zip(b0d.iter()).for_each(|(u, b)| *u += *b);
                         fused_product_into(eh, ab, (nd, n, n), o);
                         zdb.iter_mut().zip(o.iter()).for_each(|(u, y)| *u += *y);
-                        fused_product_into(b0d, wz, (nd, n, n), o);
-                        zdb.iter_mut().zip(o.iter()).for_each(|(u, y)| *u += *y);
-                        adjoint_into(zd, nd, n, zdh);
-                        fused_product_into(ab, zdh, (n, n, nd), exb);
                         fused_product_into(zd, ab, (nd, n, n), bdb);
                         for (xx, &(g, k)) in nb.exact.iter().enumerate() {
                             let yv = &basis.xcouple[xx];
                             let (mut ge, mut gb) = (C64::ZERO, C64::ZERO);
                             for p in 0..n {
                                 for d2 in 0..nd {
-                                    ge += exb[p * nd + d2].conj() * yv[p * nd + d2];
+                                    ge += bdb[d2 * n + p] * yv[p * nd + d2];
                                     gb += bdb[d2 * n + p].conj() * yv[p * nd + d2].conj();
                                 }
                             }
@@ -3861,14 +3828,14 @@ impl Fold {
                                 fp[a] += (ge * d[a] + gb * d[a].conj()).re;
                             }
                         }
-                        work += (4 * nd * n * n) as f64;
+                        work += (2 * nd * n * n) as f64;
                     }
                 }
-                // The centred copies' rows: T̄_C = z₀ T_C (Ā + Ā†), onto Z and e.
+                // The centred copies' rows: T̄_C = z₀ T_C (Ā + Ā†) = 2z₀ T_C Ā, onto Z and e.
                 let tcb = &mut tcbar[..nb.nc * n];
                 if nb.copied_in {
                     let tc: &[C64] = if j == 0 { &nb.tc } else { &nb.tcnode[j - 1] };
-                    (0..nn).for_each(|i| wz[i] = (ab[i] + ab[(i % n) * n + i / n].conj()) * basis.z0);
+                    (0..nn).for_each(|i| wz[i] = ab[i] * (2.0 * basis.z0));
                     tcb.fill(C64::ZERO);
                     for k in 0..nb.nc {
                         for p in 0..n {
