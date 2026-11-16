@@ -1674,6 +1674,17 @@ fn proto_choice(req: &Request, name: &str) -> Choice {
                 }
             }
             choice.excited.extend(add);
+            // Every excited level of a block with rows in the lattice: left out at the focus, it is solved in a block that
+            // solves any row and centred in one that does not; whether the step takes it is read at the point (proto.rs
+            // # Leaving nodes out).
+            for b in fold.blocks.iter().filter(|b| !b.rows.is_empty()) {
+                let status = if b.solved > 0 { Status::Decomposed } else { Status::Centred };
+                for &(p, c) in &b.sources {
+                    for x in choice.excited.iter_mut().filter(|x| x.1 == Status::Omitted && x.0 .0 == fold.components[c].part && x.0 .1 == fold.ground[p]) {
+                        x.1 = status;
+                    }
+                }
+            }
             let fold = Fold::new(req, &choice, set[0]).unwrap();
             if fold.blocks.is_empty() {
                 continue;
@@ -1712,6 +1723,7 @@ fn unrate(r: f64) -> f64 {
 /// its scale), the copies' largest absolute difference (a population's amplitude), the prototype's own decay against its
 /// own jumps, its sweeps and the decompositions it made.
 struct Against {
+    floor: f64,
     diff: f64,
     allowed: f64,
     parts: [f64; 4],
@@ -1729,7 +1741,7 @@ fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut supe
     let at_next = last.next(&f.eliminated, &f.h[1], &f.h[2], &mut w);
     let step = fold.prototype(r, kappa, cache, ws).expect("the prototype at the point");
     let (generator, normal) = (step.generator.clone(), step.normal.clone());
-    let allowed = unrate(step.series) + unrate(step.reuse) + unrate(step.far) + unrate(at_next) + 1e-10;
+    let allowed = unrate(step.series) + unrate(step.reuse) + unrate(step.far) + unrate(step.omitted) + unrate(at_next) + 1e-10;
     let (sweeps, made, series, reuse, far) = (step.sweeps, step.made, step.series, step.reuse, step.far);
     let responses = ws.responses(fold, cache);
     let n = f.n;
@@ -1772,7 +1784,12 @@ fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut supe
     let mut gap = Mat::from_fn(n, n, |i, j| C64::I * (generator[(i, j)] - generator[(j, i)].conj()));
     let scale = generator.frobenius().max(products.frobenius());
     gap.add_scaled(-C64::ONE, &products);
-    Against { diff: rho, allowed, parts: [unrate(series), unrate(reuse), unrate(far), unrate(at_next)], g, copies, decay: gap.max_abs() / scale, sweeps, made }
+    // The decay's floor, derived (`the_step_is_the_fold_at_a_point_to_rounding`): one Schur form of two lines is exact to
+    // ε‖K‖ only, a resonant response moved by that over Γ/2.
+    let k_max = f.laid.iter().flat_map(|l| (0..l.inner.rows).map(move |i| l.inner[(i, i)].abs())).fold(0.0_f64, f64::max);
+    let gamma = (0..EXCITED).map(|x| -2.0 * fold.base_excited[(x, x)].im).filter(|&g| g > 0.0).fold(f64::INFINITY, f64::min);
+    let floor = (f64::EPSILON * k_max / (0.5 * gamma)).max(1e-12);
+    Against { floor, diff: rho, allowed, parts: [unrate(series), unrate(reuse), unrate(far), unrate(at_next)], g, copies, decay: gap.max_abs() / scale, sweeps, made }
 }
 
 /// The prototype against the fold at a point (proto.rs; BRIEF_PROTO.md gate 2), on a scene (`PROTO_SCENE`, a request's
@@ -1818,7 +1835,7 @@ fn the_prototype_is_the_fold_within_its_readings() {
                     *a = a.max(b);
                 }
                 assert!(x.diff <= x.allowed, "{what}: the responses' difference {:.3e} beyond what the readings allow {:.3e}", x.diff, x.allowed);
-                assert!(x.decay <= 1e-12, "{what}: the decay against the jumps {:.1e}", x.decay);
+                assert!(x.decay <= x.floor, "{what}: the decay against the jumps {:.1e} (its floor {:.1e})", x.decay, x.floor);
                 *worst = worst.max(x.diff / x.allowed);
                 worst_g = worst_g.max(x.g);
                 worst_copy = worst_copy.max(x.copies);
@@ -1916,12 +1933,16 @@ fn a_prototype_s_step_at_a_scene() {
                 let (mut sweeps, mut made, mut rounds) = (vec![], vec![], vec![]);
                 let (mut sweep_ticks, mut sweep_work, mut sweep_count) = (vec![0u64; 64], vec![0.0; 64], vec![0usize; 64]);
                 let mut most = [0.0_f64; 6];
+                let (mut left, mut most_omitted) = ([0usize; 2], 0.0_f64);
                 for path in &paths {
                     let mut cache = Cache::default();
                     for r in path {
                         let clock = std::time::Instant::now();
                         let s = fold.prototype(*r, kappa, &mut cache, &mut ws).expect("the prototype's step");
                         wall.push(clock.elapsed().as_secs_f64());
+                        left[0] += s.left[0];
+                        left[1] += s.left[1];
+                        most_omitted = most_omitted.max(s.omitted);
                         let s = (s.ticks, s.work, s.sweeps, s.made, s.rounds, s.sweep_ticks.clone(), s.sweep_work.clone(), [s.series, s.reuse, s.far, s.centring, s.ratio, s.copies]);
                         // The rest of the step's model: the outer nodes, the force (the three positions' cotangents), the
                         // photons of the state.
@@ -1987,6 +2008,7 @@ fn a_prototype_s_step_at_a_scene() {
                     most[4],
                     most[5]
                 );
+                out += &format!("; the nodes left out: {:.2} near parts and {:.2} far blocks a step, their largest reading {most_omitted:.1e}", left[0] as f64 / steps as f64, left[1] as f64 / steps as f64);
                 out += "
 ";
                 out += &format!("      by phase (µs / multiply-adds, the steps of one round; all steps' µs in brackets): {}
