@@ -9,6 +9,30 @@ use std::collections::{HashMap, VecDeque};
 
 const GAMMA: f64 = 38.1;
 
+/// The rule's choice of a request (`Choice::of`) at the model's share.
+fn rule(request: &Request) -> Choice {
+    Choice::of(request, super::super::elim::share()).unwrap()
+}
+
+/// Every node folded, every copy centred, at the frames `frames`, the rule's sets and parts.
+fn folded(request: &Request, frames: Vec<Beat>) -> Choice {
+    Choice { frames, ..rule(request) }
+}
+
+/// The fold at a point on a fresh path (its decompositions made there), its jumps and its readings.
+fn fold_at(fold: &Fold, r: [f64; 3], kappa: [f64; 3]) -> Option<Folded> {
+    let mut f = fold.at(r, kappa, &mut Path::default())?;
+    fold.jumps(&mut f);
+    fold.read(&mut f, 0.0);
+    Some(f)
+}
+
+/// `sylvester` with T_K's own diagonal.
+fn syl(tk: &Mat, ends: &[usize], th: &Mat, w: f64, b: &Mat, work: &mut f64) -> Mat {
+    let diag: Vec<C64> = (0..tk.rows).map(|i| tk[(i, i)]).collect();
+    sylvester(tk, &diag, ends, th, w, b, work)
+}
+
 /// A beam of a synthetic system: its frequency axis, ν (rad/µs, its detuning from the excited frame), its direction, its
 /// couplings (excited state less GROUND, ground state, value).
 struct Ray {
@@ -85,7 +109,7 @@ fn lab(request: &Request) -> Vec<Beat> {
 fn parts(request: &Request) -> Vec<Part> {
     let light = Light::new(request);
     let axes = Axes::new(request).unwrap();
-    components(request, &light, &axes).iter().map(|c| c.part).collect()
+    components(request, &light, &axes).unwrap().iter().map(|c| c.part).collect()
 }
 
 /// Every copy at one status (`Choice::copies`): from every ground state and component, by every component, of both F.
@@ -333,9 +357,9 @@ fn a_two_level_atom_s_shift_and_rate_are_the_analytic_ones_and_doppler_takes_min
         for s in [0.1, 1.0, 3.0, 10.0] {
             let g = 0.5 * GAMMA * (s / 2.0_f64).sqrt();
             let req = system(&[(0, 0.0)], &[(17, 0.0, GAMMA, 0)], &[Ray { axis: 0, nu: delta, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(g))] }], 1, heavy);
-            let fold = Fold::new(&req, &Choice::folded(lab(&req)), 0).unwrap();
+            let fold = Fold::new(&req, &folded(&req, lab(&req)), 0).unwrap();
             if heavy {
-                let f = fold.at([0.0; 3], [0.0; 3], 0.0).unwrap();
+                let f = fold_at(&fold, [0.0; 3], [0.0; 3]).unwrap();
                 let (lambda, exact) = (f.generator[(0, 0)], exact(delta, g));
                 let bound = rate(read(&f, &|r| r.next).sqrt()) * exact.abs() + 1e-12 * exact.abs();
                 println!("s {s:5.1}: fold {lambda:.9?} exact {exact:.9?} apart {:.2e} bound {bound:.2e} (x {:.4}, ratio {:.4})", (lambda - exact).abs(), f.excitation, f.ratio);
@@ -348,7 +372,7 @@ fn a_two_level_atom_s_shift_and_rate_are_the_analytic_ones_and_doppler_takes_min
             for sign in [1.0, -1.0] {
                 let kappa = sign * 0.5 * GAMMA / (hm * k);
                 let w = hm * (k * kappa + 0.5 * k * k);
-                let f = fold.at([0.0; 3], [0.0, 0.0, kappa], 0.0).unwrap();
+                let f = fold_at(&fold, [0.0; 3], [0.0, 0.0, kappa]).unwrap();
                 let ours = -2.0 * f.generator[(0, 0)].im;
                 let (minus, other) = (-2.0 * exact(delta - w, g).im, -2.0 * exact(delta + w, g).im);
                 let bound = rate(read(&f, &|r| r.next).sqrt()) * minus + 1e-12 * minus;
@@ -392,15 +416,15 @@ fn the_lambda_rows_are_the_exact_floquet_ones_with_the_copies_folded() {
     for (g11, g12, g21, g22, d0, om) in rows {
         let req = lambda_system(g11, g12, g21, g22, d0, om);
         let ps = parts(&req);
-        let base = Fold::new(&req, &Choice::folded(lab(&req)), 0).unwrap();
+        let base = Fold::new(&req, &folded(&req, lab(&req)), 0).unwrap();
         let l = lattice(&base, [0.0; 3], 24, &|_| true);
         let g1 = p_like(&l.m, &[0], 1)[0].0;
         let u2 = g22 * g22 / -3072.0;
         let delta = d0 + u2 - g11 * g11 / -3072.0;
         println!("== row ({g11}, {g12}, {g21}, {g22}, d0 {d0}, Ω {om}): exact {g1:.6?}, rate {:.6e}, 2U₂/δ {:+.4}", -2.0 * g1.im, 2.0 * u2 / delta);
-        for (name, frames, status) in [("lab, decomposed", lab(&req), Status::Decomposed), ("mixing, decomposed", mixing_frames(&req).unwrap(), Status::Decomposed), ("lab, copies left out", lab(&req), Status::Omitted)] {
-            let fold = Fold::new(&req, &Choice { frames, explicit: vec![], copies: all_copies(&ps, status) }, 0).unwrap();
-            let f = fold.at([0.0; 3], [0.0; 3], 0.0).unwrap();
+        for (name, frames, status) in [("lab, decomposed", lab(&req), Status::Decomposed), ("mixing, decomposed", rule(&req).frames, Status::Decomposed), ("lab, copies left out", lab(&req), Status::Omitted)] {
+            let fold = Fold::new(&req, &Choice { frames, explicit: vec![], copies: all_copies(&ps, status), ..rule(&req) }, 0).unwrap();
+            let f = fold_at(&fold, [0.0; 3], [0.0; 3]).unwrap();
             let v = g1_like(&f);
             let (shift, rr) = ((v.re - g1.re) / g1.re, (v.im - g1.im) / g1.im);
             let bound = rate(read(&f, &|r| r.next + r.truncation).sqrt()) * fold_part(&f) / v.abs();
@@ -462,10 +486,10 @@ fn random_system(state: &mut u64, trial: usize) -> (Request, Choice) {
         .collect();
     let req = system(&ground, &excited, &rays, 2, true);
     let ps = parts(&req);
-    let mut choice = Choice { frames: lab(&req), explicit: vec![], copies: all_copies(&ps, Status::Decomposed) };
+    let mut choice = Choice { frames: lab(&req), explicit: vec![], copies: all_copies(&ps, Status::Decomposed), ..rule(&req) };
     if trial % 3 == 0 {
         if let Some((a, y)) = (0..rays.len()).flat_map(|a| (0..g).map(move |y| (a, y))).find(|&(a, y)| rays[a].couplings.iter().any(|c| c.0 == exciteds[0] && c.1 == grounds[y])) {
-            let fold = Fold::new(&req, &Choice::folded(lab(&req)), 0).unwrap();
+            let fold = Fold::new(&req, &folded(&req, lab(&req)), 0).unwrap();
             choice.explicit.push((fold.excited_level[exciteds[0]], Part { frequency: a, counter: false }, grounds[y]));
         }
     }
@@ -482,7 +506,7 @@ fn r4(heavy: bool) -> (Request, Choice, Part, Part) {
     let light = Light::new(&req);
     let frequency_of = |id: &str| light.frequencies.iter().position(|f| f.beams.iter().any(|&l| req.beams[l].id == id)).unwrap();
     let (cool, repump) = (Part { frequency: frequency_of("cool-plus"), counter: false }, Part { frequency: frequency_of("repump-plus"), counter: false });
-    let fold = Fold::new(&req, &Choice::folded(lab(&req)), 0).unwrap();
+    let fold = Fold::new(&req, &folded(&req, lab(&req)), 0).unwrap();
     let level = fold.levels.iter().position(|l| *l == (Manifold::D2, 2)).unwrap();
     let ps = parts(&req);
     let near = |p: &Part| *p == cool || *p == repump;
@@ -496,7 +520,7 @@ fn r4(heavy: bool) -> (Request, Choice, Part, Part) {
             }
         }
     }
-    let choice = Choice { frames: lab(&req), explicit: vec![(level, repump, 0)], copies };
+    let choice = Choice { frames: lab(&req), explicit: vec![(level, repump, 0)], copies, ..rule(&req) };
     (req, choice, cool, repump)
 }
 
@@ -525,13 +549,13 @@ fn the_decay_is_the_jumps_products_to_rounding_with_explicit_rows() {
     for trial in 0..20 {
         let (req, choice) = random_system(&mut state, trial);
         for set in Fold::sets(&req, &choice).unwrap() {
-            let f = Fold::new(&req, &choice, set[0]).unwrap().at([0.0; 3], [0.0; 3], 0.0).unwrap();
+            let f = fold_at(&Fold::new(&req, &choice, set[0]).unwrap(), [0.0; 3], [0.0; 3]).unwrap();
             worst = worst.max(check(&f, &format!("trial {trial}, set {set:?}")));
         }
     }
     let (req, choice, ..) = r4(false);
     for set in Fold::sets(&req, &choice).unwrap() {
-        let f = Fold::new(&req, &choice, set[0]).unwrap().at([0.1, -0.2, 0.3], [0.0; 3], 0.0).unwrap();
+        let f = fold_at(&Fold::new(&req, &choice, set[0]).unwrap(), [0.1, -0.2, 0.3], [0.0; 3]).unwrap();
         worst = worst.max(check(&f, &format!("R4_LIN_4, set {set:?}")));
     }
     println!("the decay against the jumps' products: worst {worst:.2e} of the scale");
@@ -548,7 +572,7 @@ fn r4_lin_4_at_a_point_is_its_32_state_floquet() {
     for state in [0, 4] {
     let fold = Fold::new(&req, &choice, state).unwrap();
     let at = [0.1, -0.2, 0.3];
-    let f = fold.at(at, [0.0; 3], 0.0).unwrap();
+    let f = fold_at(&fold, at, [0.0; 3]).unwrap();
     let near = |c: usize| fold.components[c].part == cool || fold.components[c].part == repump;
     let l = lattice(&fold, at, 3, &near);
     let ex = exact(&fold, &l);
@@ -568,6 +592,25 @@ fn r4_lin_4_at_a_point_is_its_32_state_floquet() {
     }
 }
 
+/// ④'s reference against itself one hop deeper (not a test: the convergence of the 32-state Floquet problem it is compared
+/// with): per set the P-like eigenvalues at depth three and four, their largest change, and the fold's gaps to each.
+#[test]
+#[ignore]
+fn r4_lin_4_s_lattice_one_hop_deeper() {
+    let (req, choice, cool, repump) = r4(true);
+    for state in [0, 4] {
+        let fold = Fold::new(&req, &choice, state).unwrap();
+        let point = [0.1, -0.2, 0.3];
+        let f = fold_at(&fold, point, [0.0; 3]).unwrap();
+        let near = |c: usize| fold.components[c].part == cool || fold.components[c].part == repump;
+        let ours = p_floquet(&f, 2);
+        let largest = |v: Vec<f64>| v.iter().fold(0.0_f64, |a, &b| a.max(b));
+        let (l3, l4) = (lattice(&fold, point, 3, &near), lattice(&fold, point, 4, &near));
+        let (e3, e4) = (exact(&fold, &l3), exact(&fold, &l4));
+        println!("the set of {:?}: {} and {} nodes; depth 3 to 4 moves the P-like eigenvalues by {:.3e} rad/µs; the fold's largest gap {:.3e} to depth 3, {:.3e} to depth 4", fold.ground, l3.nodes.len(), l4.nodes.len(), largest(apart(&e4, &e3)), largest(apart(&ours, &e3)), largest(apart(&ours, &e4)));
+    }
+}
+
 /// ⑤ Sixty random small systems (`random_system`): the fold's P-Floquet eigenvalues against the dense lattice's (its depth
 /// grown from 4 by 2 until they stay within 10⁻¹⁰), each within the read next pass and truncation of the fold's part; the
 /// gap over that bound printed -- below one, and how far.
@@ -582,7 +625,7 @@ fn sixty_random_systems_are_their_dense_sambe_within_the_read_truncation() {
         if fold.blocks.is_empty() {
             continue;
         }
-        let Some(f) = fold.at([0.0; 3], [0.0; 3], 0.0) else { continue };
+        let Some(f) = fold_at(&fold, [0.0; 3], [0.0; 3]) else { continue };
         if !(f.excitation < 1.0 && f.ratio < 1.0) {
             absent += 1;
             continue;
@@ -632,8 +675,9 @@ fn a_lambda_swept_into_resonance_reads_beyond_the_share_before_its_fold_fails() 
         let d0 = 40.0 - 0.5 * step as f64;
         let req = lambda_system(60.0, 0.0, 0.0, 50.0, d0, 400.0);
         let ps = parts(&req);
-        let fold = Fold::new(&req, &Choice { frames: lab(&req), explicit: vec![], copies: all_copies(&ps, Status::Decomposed) }, 0).unwrap();
-        let f = fold.at([0.0; 3], [0.0; 3], 0.0);
+        // Both ground states in P whatever the rule makes of them (the reading, not the rule, is tested).
+        let fold = Fold::new(&req, &Choice { frames: lab(&req), explicit: vec![], copies: all_copies(&ps, Status::Decomposed), sets: vec![vec![0, 4]], ..rule(&req) }, 0).unwrap();
+        let f = fold_at(&fold, [0.0; 3], [0.0; 3]);
         let Some(f) = f.filter(|f| f.excitation < 1.0 && f.ratio < 1.0) else {
             gone.get_or_insert(d0);
             continue;
@@ -667,7 +711,7 @@ fn the_adjoint_force_is_the_difference_of_the_contracted_generator() {
     choice.copies.push(((cool, 4, repump, 1), Status::Kept));
     let fold = Fold::new(&req, &choice, 4).unwrap();
     let at = [0.3, -0.2, 0.5];
-    let f0 = fold.at(at, [0.0; 3], 0.0).unwrap();
+    let f0 = fold_at(&fold, at, [0.0; 3]).unwrap();
     let n = f0.n;
     let mut seed = 11u64;
     let mut u = || {
@@ -679,7 +723,7 @@ fn the_adjoint_force_is_the_difference_of_the_contracted_generator() {
     let rho = Mat::from_fn(n, n, |i, j| psi[i] * psi[j].conj() / norm);
     let cot: Vec<Mat> = f0.tones.iter().map(|_| Mat::from_fn(n, n, |_, _| C64::new(u(), u()) * 0.1)).collect();
     let value = |r: [f64; 3]| -> f64 {
-        let f = fold.at(r, [0.0; 3], 0.0).unwrap();
+        let f = fold_at(&fold, r, [0.0; 3]).unwrap();
         assert_eq!(f.tones.len(), cot.len());
         let tr = |b: &Mat, g: &Mat| (0..b.data.len()).map(|i| (b.data[i].conj() * g.data[i]).re).sum::<f64>();
         tr(&rho, &f.generator) + f.tones.iter().zip(&cot).map(|(t, b)| tr(b, &t.generator)).sum::<f64>()
@@ -720,9 +764,9 @@ fn a_frame_shift_leaves_the_generator_and_the_jumps_as_they_are() {
     let mut copies = all_copies(&ps, Status::Decomposed);
     copies.retain(|x| x.0 != kept);
     copies.push((kept, Status::Kept));
-    let base = Fold::new(&req, &Choice { frames: lab(&req), explicit: vec![], copies: copies.clone() }, 0).unwrap();
+    let base = Fold::new(&req, &Choice { frames: lab(&req), explicit: vec![], copies: copies.clone(), ..rule(&req) }, 0).unwrap();
     let at = [0.2, 0.1, -0.3];
-    let f = base.at(at, [0.0; 3], 0.0).unwrap();
+    let f = fold_at(&base, at, [0.0; 3]).unwrap();
     assert!(!f.tones.is_empty(), "the kept copy's tones");
     let scale = f.generator.frobenius();
     let mut seed = 5u64;
@@ -735,8 +779,8 @@ fn a_frame_shift_leaves_the_generator_and_the_jumps_as_they_are() {
         };
         let set = |s: usize| if s == 0 || s == 4 { 0 } else if s == 6 { 1 } else { 2 };
         let frames: Vec<Beat> = (0..GROUND).map(|s| shift(set(s))).collect();
-        let fold = Fold::new(&req, &Choice { frames: frames.clone(), explicit: vec![], copies: copies.clone() }, 0).unwrap();
-        let g = fold.at(at, [0.0; 3], 0.0).unwrap();
+        let fold = Fold::new(&req, &Choice { frames: frames.clone(), explicit: vec![], copies: copies.clone(), ..rule(&req) }, 0).unwrap();
+        let g = fold_at(&fold, at, [0.0; 3]).unwrap();
         for p in 0..f.n {
             for q in 0..f.n {
                 let expected = f.generator[(p, q)] - if p == q { C64::real(fold.frame_values[p]) } else { C64::ZERO };
@@ -784,7 +828,7 @@ fn the_sylvester_back_substitution_is_the_eigenvalue_one_and_continuous_through_
         let b = Mat::from_fn(m, n, |_, _| C64::new(u(), u()));
         let shift = 0.3;
         let (th, tk) = (Triangle::of(&h, &mut w).unwrap(), Triangle::of(&k, &mut w).unwrap());
-        let z = sylvester(&tk.t, &[m; 4], &th.t, shift, &tk.u.adjoint().product(&b).product(&th.u), &mut w);
+        let z = syl(&tk.t, &[m; 4], &th.t, shift, &tk.u.adjoint().product(&b).product(&th.u), &mut w);
         let t = tk.u.product(&z).product(&th.u.adjoint());
         let e = crate::linalg::eigen(&h).unwrap();
         for p in 0..n {
@@ -802,7 +846,7 @@ fn the_sylvester_back_substitution_is_the_eigenvalue_one_and_continuous_through_
     let solve = |s: f64, w: &mut f64| {
         let h = Mat::from_fn(2, 2, |i, j| C64::real(if i == j || i == 0 { 1.0 } else { s }));
         let (th, tk) = (Triangle::of(&h, w).unwrap(), Triangle::of(&k, w).unwrap());
-        let z = sylvester(&tk.t, &[2, 2], &th.t, 0.0, &tk.u.adjoint().product(&b).product(&th.u), w);
+        let z = syl(&tk.t, &[2, 2], &th.t, 0.0, &tk.u.adjoint().product(&b).product(&th.u), w);
         (tk.u.product(&z).product(&th.u.adjoint()), crate::linalg::eigen(&h).map_or(f64::INFINITY, |e| e.condition))
     };
     let mut last: Option<(f64, Mat)> = None;
@@ -829,7 +873,7 @@ fn the_sylvester_back_substitution_is_the_eigenvalue_one_and_continuous_through_
     for trial in 0..20 {
         let (req, choice) = random_system(&mut state, trial);
         let fold = Fold::new(&req, &choice, 0).unwrap();
-        let f = fold.at([0.0; 3], [0.0; 3], 0.0).unwrap();
+        let f = fold_at(&fold, [0.0; 3], [0.0; 3]).unwrap();
         if !(f.excitation < 0.5 && f.ratio < 0.5) {
             continue;
         }
@@ -839,7 +883,7 @@ fn the_sylvester_back_substitution_is_the_eigenvalue_one_and_continuous_through_
         let mut h = f.h[1].clone();
         let mut w = 0.0;
         let fixed = loop {
-            let stage = fold.solve(&f.laid, &f.eliminated, &h, false, &mut w).unwrap();
+            let stage = fold.solve(&f.site, &f.laid, &f.eliminated, &h, false, &mut w).unwrap();
             let next = fold.bloch(&f.hpp, &f.laid, &stage, &mut w);
             let mut d = next.clone();
             d.add_scaled(-C64::ONE, &h);
@@ -899,9 +943,13 @@ fn the_sylvester_back_substitution_is_the_eigenvalue_one_and_continuous_through_
 
 /// ⑩ The tweezer's shift of the excited state, summed to all orders (DESIGN §1.4): a two-level atom (Γ = 38.1) under a weak
 /// cooling beam (Δ_c = −228 rad/µs) and a far red tweezer (ν_t = −10⁵ rad/µs) whose ground light shift U is −0.9 |Δ_c|: the
-/// excited state's shift −U makes ΣR ≈ −0.9 on the cooling's replica. The fold (its copies centred) gives the dressed
-/// two-level's rate, the root of [[U, g_c], [g_c, −Δ_c − U − iΓ/2]] (U the tweezer's exact two-level root), to the dressing's
-/// own O(U/ν_t); the first order in Σ (what a tone would follow) misses it by far.
+/// excited state's shift −U makes ΣR ≈ −0.9 on the cooling's replica. The reference is the system's own Floquet lattice (its
+/// depth grown from 4 by 2 until it stays within 10⁻¹⁰): the fold's eigenvalue within its read bound (next pass,
+/// truncation, evaluation order). The dressed two-level formula, the root of [[U, g_c], [g_c, −Δ_c − U − iΓ/2]] (U the
+/// tweezer's two-level root), is not exact: it takes the tweezer's dressing of the ground and the excited state as the two
+/// shifts U and −U and leaves out the dressed states' mixing, |g_t/ν_t|² ≈ 2·10⁻³ of each, which the cooling's coupling
+/// and the rate carry at that order -- printed beside, not asserted. The first order in Σ (what a tone would follow)
+/// misses the rate by far.
 #[test]
 fn the_tweezer_s_excited_shift_is_summed_to_all_orders() {
     let (dc, nt, gc) = (-228.0, -1e5, 3.0);
@@ -913,9 +961,21 @@ fn the_tweezer_s_excited_shift_is_summed_to_all_orders() {
         2,
         true,
     );
-    let fold = Fold::new(&req, &Choice::folded(lab(&req)), 0).unwrap();
-    let f = fold.at([0.0; 3], [0.0; 3], 0.0).unwrap();
+    let fold = Fold::new(&req, &folded(&req, lab(&req)), 0).unwrap();
+    let f = fold_at(&fold, [0.0; 3], [0.0; 3]).unwrap();
     let ours = f.generator[(0, 0)];
+    let mut depth = 4;
+    let mut ex = exact(&fold, &lattice(&fold, [0.0; 3], depth, &|_| true));
+    loop {
+        let next = exact(&fold, &lattice(&fold, [0.0; 3], depth + 2, &|_| true));
+        let change = apart(&next, &ex).iter().fold(0.0_f64, |a, &b| a.max(b));
+        ex = next;
+        depth += 2;
+        if change <= 1e-10 * (1.0 + ex.iter().map(|x| x.0.abs()).fold(0.0, f64::max)) || depth >= 12 {
+            break;
+        }
+    }
+    let exact = ex.iter().map(|x| x.0).min_by(|a, b| (*a - ours).abs().total_cmp(&(*b - ours).abs())).unwrap();
     let u = root(C64::ZERO, C64::new(-nt, -0.5 * GAMMA), gt);
     let analytic = root(u, C64::new(-dc, -0.5 * GAMMA) - u, gc);
     let sigma_r = -u.re / dc;
@@ -924,11 +984,16 @@ fn the_tweezer_s_excited_shift_is_summed_to_all_orders() {
         let t = r * gc * (C64::ONE + (-u) * r);
         GAMMA * t.norm_sqr()
     };
-    let (rate_ours, rate_analytic) = (-2.0 * (ours.im - u.im), -2.0 * (analytic.im - u.im));
-    println!("U {u:.4?}, ΣR {sigma_r:+.3}: the fold's rate {rate_ours:.6e}, the dressed two-level's {rate_analytic:.6e}, first order in Σ {first:.6e}");
+    let rate = |l: C64| -2.0 * (l.im - u.im);
+    let (r_ours, r_exact, r_analytic) = (rate(ours), rate(exact), rate(analytic));
+    let bound = eigenvalue_bound(&f, &|r| r.next + r.truncation + r.order);
+    let mixing = (gt / nt).powi(2);
+    println!("U {u:.4?}, ΣR {sigma_r:+.3}, |g_t/ν_t|² {mixing:.2e} (lattice depth {depth})");
+    println!("the rate: the fold's {r_ours:.6e}, the lattice's {r_exact:.6e} ({:+.2e} relative), the dressed two-level's {r_analytic:.6e} ({:+.2e}), first order in Σ {first:.6e}", r_ours / r_exact - 1.0, r_analytic / r_exact - 1.0);
+    println!("the eigenvalue: the fold {:.3e} from the lattice's, the read bound {bound:.3e}; the formula {:.3e} from it", (ours - exact).abs(), (analytic - exact).abs());
     assert!((sigma_r + 0.9).abs() < 0.05, "ΣR ≈ −0.9");
-    assert!((rate_ours - rate_analytic).abs() <= 1e-2 * rate_analytic, "summed to all orders");
-    assert!((first - rate_analytic).abs() > 0.5 * rate_analytic, "the first order misses it");
+    assert!((ours - exact).abs() <= bound + 1e-9 * exact.abs(), "summed to all orders, within the read bound");
+    assert!((first - r_exact).abs() > 0.5 * r_exact, "the first order misses it");
 }
 
 /// The rise and the fall (DESIGN §11.1) on a random system's excited node: rising a normalized state's x = S⁻¹y and falling
@@ -939,7 +1004,7 @@ fn a_node_rises_and_falls_back_exactly_and_reads_what_it_drops() {
     let mut state = 41u64;
     let (req, choice) = random_system(&mut state, 1);
     let fold = Fold::new(&req, &choice, 0).unwrap();
-    let f = fold.at([0.0; 3], [0.0; 3], 0.0).unwrap();
+    let f = fold_at(&fold, [0.0; 3], [0.0; 3]).unwrap();
     let (o, rows) = (0..fold.blocks.len())
         .find_map(|o| {
             let level = fold.blocks[o].rows.iter().find_map(|r| if let Row::Excited(x) = r { Some(fold.excited_level[*x]) } else { None })?;
@@ -961,11 +1026,12 @@ fn a_node_rises_and_falls_back_exactly_and_reads_what_it_drops() {
 }
 
 
-/// The work of a fold at a scene's focus (not a test of the fold: the step's count for the gate, DESIGN §8; FOLD_SCENE a
-/// reference scene's name or a native request's path). The mixing tree's frames; every copy decomposed (exact: a centring
-/// can be singular, a copy at the centre itself), then each at the cheapest evaluation its readings allow within the share
-/// (left out, centred, decomposed: M18), to its fixed point.
-/// Prints each part's complex multiply-adds.
+/// The work of a fold along a path in a scene (not a test of the fold: the step's count for the gate, DESIGN §8; FOLD_SCENE a
+/// reference scene's name or a native request's path). The rule's sets, frames and parts (`Choice::of`); every copy
+/// decomposed (exact: a centring can be singular, a copy at the centre itself), then each at the cheapest evaluation its
+/// readings allow within the share (left out, centred, decomposed: M18), to its fixed point, at the focus; then per set one
+/// path of 100 steps of 30 nm through the focus on one `Path`: per step the complex multiply-adds of the fold and of the
+/// force, the decompositions made, the largest reuse reading; the readings' once.
 #[test]
 #[ignore]
 fn a_fold_s_work_at_a_scene() {
@@ -973,44 +1039,111 @@ fn a_fold_s_work_at_a_scene() {
     let req = crate::model::testing::scene(&name);
     let share = super::super::elim::share();
     let ps = parts(&req);
-    let frames = mixing_frames(&req).unwrap();
-    let mut choice = Choice { frames, explicit: vec![], copies: all_copies(&ps, Status::Decomposed) };
+    let mut choice = Choice { copies: all_copies(&ps, Status::Decomposed), ..rule(&req) };
+    println!("{name}: the rule's ground sets {:?}; excited parts {:?}", choice.sets, choice.parts);
+    let d = super::super::far::decay(&req);
+    for part in &choice.parts {
+        let mean = part.iter().map(|&x| d[(x, x)].re).sum::<f64>() / part.len() as f64;
+        let dev = part.iter().flat_map(|&x| part.iter().map(move |&y| (x, y))).map(|(x, y)| (d[(x, y)] - if x == y { C64::real(mean) } else { C64::ZERO }).abs()).fold(0.0, f64::max);
+        println!("   excited part {part:?}: Γ {mean:.4}, the decay's largest departure from Γ·1 {dev:.2e}");
+    }
     let at = [0.0; 3];
     for set in Fold::sets(&req, &choice).unwrap() {
-    for round in 0..3 {
-        let fold = Fold::new(&req, &choice, set[0]).unwrap();
-        if fold.blocks.is_empty() {
-            break;
-        }
-        let started = std::time::Instant::now();
-        let f = fold.at(at, [0.0; 3], 0.0).unwrap();
-        let elapsed = started.elapsed().as_secs_f64();
-        let rho = Mat::from_fn(f.n, f.n, |i, j| if i == j { C64::real(1.0 / f.n as f64) } else { C64::ZERO });
-        let (_, force) = fold.force(&f, &rho, &[]);
-        let rows: Vec<usize> = fold.blocks.iter().map(|b| b.rows.len()).collect();
-        let solved: Vec<usize> = fold.blocks.iter().map(|b| b.solved).collect();
-        println!("{name} set {:?} round {round}: n {}, {} blocks (rows {rows:?}, solved {solved:?}), x {:.4}, ratio {:.4}; the fold {:.0}, its readings {:.0}, the force {force:.0} complex multiply-adds; {:.1} ms", fold.ground, f.n, fold.blocks.len(), f.excitation, f.ratio, f.work, f.reading_work, 1e3 * elapsed);
-        let mut changed = false;
-        for r in &f.readings {
-            let Node::Copy { level, component } = r.node else { continue };
-            let b = &fold.blocks[r.block];
-            let Some(&(s, a)) = b.sources.first() else { continue };
-            let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
-            let status = choice.copies.iter().rev().find(|x| x.0 == key).map_or(Status::Centred, |x| x.1);
-            // The cheapest evaluation whose reading is within the share (M18): left out, centred, decomposed.
-            let next = if rate(r.omission.sqrt()) <= share { Status::Omitted } else if rate(r.centring.sqrt()) <= share { Status::Centred } else { Status::Decomposed };
-            if next != status {
-                for &(s, a) in &b.sources {
-                    let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
-                    choice.copies.retain(|x| x.0 != key);
-                    choice.copies.push((key, next));
+        for round in 0..4 {
+            let fold = Fold::new(&req, &choice, set[0]).unwrap();
+            if fold.blocks.is_empty() {
+                break;
+            }
+            let f = fold_at(&fold, at, [0.0; 3]).unwrap();
+            let mut changed = false;
+            let mut statuses: Vec<String> = vec![];
+            for r in &f.readings {
+                let Node::Copy { level, component } = r.node else { continue };
+                let b = &fold.blocks[r.block];
+                let Some(&(s, a)) = b.sources.first() else { continue };
+                let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
+                let status = choice.copies.iter().rev().find(|x| x.0 == key).map_or(Status::Centred, |x| x.1);
+                // The cheapest evaluation whose reading is within the share (M18): left out, centred, decomposed.
+                let next = if rate(r.omission.sqrt()) <= share { Status::Omitted } else if rate(r.centring.sqrt()) <= share { Status::Centred } else { Status::Decomposed };
+                if next != Status::Omitted {
+                    statuses.push(format!("block {} F={level} by {:?}: {next:?}", r.block, fold.components[component].part));
                 }
-                changed = true;
+                if next != status {
+                    for &(s, a) in &b.sources {
+                        let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
+                        choice.copies.retain(|x| x.0 != key);
+                        choice.copies.push((key, next));
+                    }
+                    changed = true;
+                }
+            }
+            println!("set {set:?} round {round}: copies not left out {statuses:?}");
+            if !changed {
+                break;
             }
         }
-        if !changed {
-            break;
-        }
     }
+    let unit = 1.0 / 3.0_f64.sqrt();
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold = Fold::new(&req, &choice, set[0]).unwrap();
+        if fold.blocks.is_empty() {
+            continue;
+        }
+        let mut path = Path::default();
+        let (mut works, mut forces, mut remade, mut worst) = (vec![], vec![], vec![], 0.0_f64);
+        let mut phases: Vec<(&'static str, f64)> = vec![];
+        let started = std::time::Instant::now();
+        let steps = 100;
+        let mut last = None;
+        for step in 0..steps {
+            let s = -1.5 + 0.03 * step as f64;
+            let r = [s * unit; 3];
+            let made = path.made;
+            let f = fold.at(r, [0.0; 3], &mut path).unwrap();
+            let rho = Mat::from_fn(f.n, f.n, |i, j| if i == j { C64::real(1.0 / f.n as f64) } else { C64::ZERO });
+            let (_, force) = fold.force(&f, &rho, &[]);
+            works.push(f.work);
+            forces.push(force);
+            if step > 0 {
+                for &(name, x) in &f.phases {
+                    match phases.iter_mut().find(|p| p.0 == name) {
+                        Some(p) => p.1 += x / (steps - 1) as f64,
+                        None => phases.push((name, x / (steps - 1) as f64)),
+                    }
+                }
+            }
+            worst = f.reuse.iter().fold(worst, |a, &b| a.max(b));
+            if path.made > made {
+                remade.push(step);
+            }
+            last = Some(f);
+        }
+        let elapsed = started.elapsed().as_secs_f64() / steps as f64;
+        let mut f = last.unwrap();
+        fold.read(&mut f, 0.0);
+        let rest = |v: &[f64]| v[1..].iter().sum::<f64>() / (v.len() - 1) as f64;
+        let rows: Vec<String> = fold
+            .blocks
+            .iter()
+            .zip(&f.laid)
+            .map(|(b, l)| format!("{}/{}/{}", b.rows.len(), b.solved, l.shifts.len() - 1))
+            .collect();
+        println!(
+            "{name} set {:?}: n {}, {} blocks (rows/solved/beams {rows:?}), {} bases, x {:.4}, ratio {:.4}; made {} (at steps {remade:?}), the largest reuse reading {worst:.2e} (share {share:.4}); the fold's work: first {:.0}, then {:.0} a step (largest {:.0}); the force's {:.0} a step; the readings' {:.0} once; {:.2} ms a step with the force",
+            fold.ground,
+            f.n,
+            fold.blocks.len(),
+            path.bases.len(),
+            f.excitation,
+            f.ratio,
+            path.made,
+            works[0],
+            rest(&works),
+            works.iter().fold(0.0_f64, |a, &b| a.max(b)),
+            rest(&forces),
+            f.reading_work,
+            1e3 * elapsed
+        );
+        println!("   a step by phase: {}", phases.iter().map(|(n, x)| format!("{n} {x:.0}")).collect::<Vec<_>>().join(", "));
     }
 }
