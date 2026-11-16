@@ -44,6 +44,7 @@ pub mod tabulate;
 pub(crate) mod optical;
 pub(crate) mod jet;
 pub(crate) mod own;
+pub(crate) mod fold;
 #[cfg(test)]
 pub(crate) mod testing;
 #[cfg(test)]
