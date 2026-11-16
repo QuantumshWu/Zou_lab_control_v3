@@ -1723,10 +1723,9 @@ fn unrate(r: f64) -> f64 {
 /// its scale), the copies' largest absolute difference (a population's amplitude), the prototype's own decay against its
 /// own jumps, its sweeps and the decompositions it made.
 struct Against {
-    floor: f64,
     diff: f64,
     allowed: f64,
-    parts: [f64; 4],
+    parts: [f64; 5],
     g: f64,
     copies: f64,
     decay: f64,
@@ -1742,7 +1741,7 @@ fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut supe
     let step = fold.prototype(r, kappa, cache, ws).expect("the prototype at the point");
     let (generator, normal) = (step.generator.clone(), step.normal.clone());
     let allowed = unrate(step.series) + unrate(step.reuse) + unrate(step.far) + unrate(step.omitted) + unrate(at_next) + 1e-10;
-    let (sweeps, made, series, reuse, far) = (step.sweeps, step.made, step.series, step.reuse, step.far);
+    let (sweeps, made, series, reuse, far, omitted) = (step.sweeps, step.made, step.series, step.reuse, step.far, step.omitted);
     let responses = ws.responses(fold, cache);
     let n = f.n;
     let (mut diff, mut whole, mut copies) = (vec![0.0; n], vec![0.0; n], 0.0_f64);
@@ -1784,12 +1783,7 @@ fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut supe
     let mut gap = Mat::from_fn(n, n, |i, j| C64::I * (generator[(i, j)] - generator[(j, i)].conj()));
     let scale = generator.frobenius().max(products.frobenius());
     gap.add_scaled(-C64::ONE, &products);
-    // The decay's floor, derived (`the_step_is_the_fold_at_a_point_to_rounding`): one Schur form of two lines is exact to
-    // ε‖K‖ only, a resonant response moved by that over Γ/2.
-    let k_max = f.laid.iter().flat_map(|l| (0..l.inner.rows).map(move |i| l.inner[(i, i)].abs())).fold(0.0_f64, f64::max);
-    let gamma = (0..EXCITED).map(|x| -2.0 * fold.base_excited[(x, x)].im).filter(|&g| g > 0.0).fold(f64::INFINITY, f64::min);
-    let floor = (f64::EPSILON * k_max / (0.5 * gamma)).max(1e-12);
-    Against { floor, diff: rho, allowed, parts: [unrate(series), unrate(reuse), unrate(far), unrate(at_next)], g, copies, decay: gap.max_abs() / scale, sweeps, made }
+    Against { diff: rho, allowed, parts: [unrate(series), unrate(reuse), unrate(far), unrate(at_next), unrate(omitted)], g, copies, decay: gap.max_abs() / scale, sweeps, made }
 }
 
 /// The prototype against the fold at a point (proto.rs; BRIEF_PROTO.md gate 2), on a scene (`PROTO_SCENE`, a request's
@@ -1828,14 +1822,14 @@ fn the_prototype_is_the_fold_within_its_readings() {
             let split = "";
             let (mut worst, mut worst_g, mut worst_copy, mut worst_decay) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
             let mut sweeps = [0usize; 64];
-            let (mut diffs, mut parts) = (0.0_f64, [0.0_f64; 4]);
+            let (mut diffs, mut parts) = (0.0_f64, [0.0_f64; 5]);
             let mut check = |x: Against, what: &str, worst: &mut f64| {
                 diffs = diffs.max(x.diff);
                 for (a, b) in parts.iter_mut().zip(x.parts) {
                     *a = a.max(b);
                 }
-                assert!(x.diff <= x.allowed, "{what}: the responses' difference {:.3e} beyond what the readings allow {:.3e}", x.diff, x.allowed);
-                assert!(x.decay <= x.floor, "{what}: the decay against the jumps {:.1e} (its floor {:.1e})", x.decay, x.floor);
+                assert!(x.diff <= x.allowed, "{what}: the responses' difference {:.3e} beyond what the readings allow {:.3e} (series, reuse, far, Fold::at's next, left out: {:?})", x.diff, x.allowed, x.parts);
+                assert!(x.decay <= 1e-12, "{what}: the decay against the jumps {:.1e}", x.decay);
                 *worst = worst.max(x.diff / x.allowed);
                 worst_g = worst_g.max(x.g);
                 worst_copy = worst_copy.max(x.copies);
@@ -1858,7 +1852,7 @@ fn the_prototype_is_the_fold_within_its_readings() {
             }
             let total: usize = sweeps.iter().sum();
             let shares: Vec<String> = sweeps.iter().enumerate().filter(|x| *x.1 > 0).map(|(k, c)| format!("{k}: {:.1}%", 100.0 * *c as f64 / total as f64)).collect();
-            println!("   {split}20 points {worst:.2e} of the allowance; the path (100 steps, {made} decompositions made) {along:.2e}; G {worst_g:.1e}, copies {worst_copy:.1e}, decay {worst_decay:.1e}; sweeps {shares:?}; the largest ρ: difference {diffs:.2e}, the series' rest {:.2e}, reuse {:.2e}, the far forms held {:.2e}, Fold::at's next {:.2e}", parts[0], parts[1], parts[2], parts[3]);
+            println!("   {split}20 points {worst:.2e} of the allowance; the path (100 steps, {made} decompositions made) {along:.2e}; G {worst_g:.1e}, copies {worst_copy:.1e}, decay {worst_decay:.1e}; sweeps {shares:?}; the largest ρ: difference {diffs:.2e}, the series' rest {:.2e}, reuse {:.2e}, the far forms held {:.2e}, Fold::at's next {:.2e}, the nodes left out {:.2e}", parts[0], parts[1], parts[2], parts[3], parts[4]);
             checked += 1;
         }
     }

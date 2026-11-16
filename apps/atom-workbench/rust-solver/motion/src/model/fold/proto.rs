@@ -161,6 +161,13 @@ struct Near {
     active: Vec<bool>,
     /// Per row whether the point leaves it out (`omit`).
     out: Vec<bool>,
+    /// R̃ Z of the last sweep (s × Ln, on the kept rows' hull).
+    rz: Vec<C64>,
+    /// The kept rows' hull [lo, hi) after `omit` (every row outside it left out, so zero) and R̃ on it ((hi − lo)²): the
+    /// products' rows and columns.
+    lo: usize,
+    hi: usize,
+    rtk: Vec<C64>,
     q: Vec<f64>,
     reading: f64,
     // Each sweep's, for the force (`Fold::prototype_force`): per split its diagonal's inverse and its response, and the
@@ -272,6 +279,11 @@ struct NearBasis {
     /// Per term V†N_tV on the parts' entries (s × s, zero across parts: the tangent's ∂K̃); the emission on the block's rows
     /// C_qV (GROUND × s, the jumps and the photons).
     within: Vec<C64>,
+    /// R̃ = V†(K − K₀)V across the parts at the reference (s × s) and per term its part across them (T × s²): the levels'
+    /// series (module documentation # The levels' series), exact in the light.
+    cross0: Vec<C64>,
+    crossterms: Vec<C64>,
+    pairnorm: Vec<f64>,
     emit: [Vec<C64>; 3],
     /// The exact copies: per coupling vector (component g, k) V†U_k on (E rows, D rows of g) (ne × nd); what the
     /// decomposition's dressing adds to K̂_ED and K̂_DE at the reference beyond the bare drives (held); K̂_DD at the
@@ -491,46 +503,56 @@ fn freeze(near: &mut [Near], cache: &Cache, h: &[C64], c: &[C64], whole: &[f64],
         most = most.max((a2 / whole[j]).sqrt());
     }
     order.clear();
+    let mut across: Vec<f64> = vec![];
     for (x, nb) in near.iter_mut().enumerate() {
         let basis = &cache.near[x][cache.at_near[x].unwrap()];
         let s = nb.s;
+        let ln = nb.lanes * n;
         // The exact copies couple every part of their block through the P layer: the reading bounds a part's own next
         // order, not the copies' through it, so such a block goes on whole.
         if nb.nd > 0 {
             continue;
         }
-        for (pi, (idx, at, _)) in basis.f.parts.iter().enumerate() {
-            let mut q = 0.0;
+        for (pi, (idx, at, _)) in basis.f.parts.iter().enumerate().filter(|(_, x)| !nb.out[x.1]) {
+            // Its next order: the Δ residual's (q, against `most`) and R̃Z¹'s on its rows, (c − w − κ)⁻¹ R̃Z¹ by its gaps.
+            let (mut q, mut r) = (0.0, vec![0.0; n]);
             for (sp, &wl) in nb.shifts.iter().enumerate() {
                 let mut sum = 0.0;
+                let mut rs = vec![0.0; n];
                 for i in *at..at + idx.len() {
                     let gap = (0..n).map(|j| (c[j] - C64::real(wl) - nb.kappa[i]).norm_sqr()).fold(f64::INFINITY, f64::min);
-                    let ln = nb.shifts.len() * n;
                     let row: f64 = nb.z[i * ln + sp * n..i * ln + sp * n + n].iter().map(|z| z.norm_sqr()).sum();
                     sum += row / gap;
+                    for j in 0..n {
+                        rs[j] += nb.rz[i * ln + sp * n + j].norm_sqr() / gap;
+                    }
                 }
                 q += sum.sqrt();
+                r.iter_mut().zip(&rs).for_each(|(a, b)| *a += b.sqrt());
             }
             nb.q[pi] = q;
             order.push((q, x, pi));
+            across.push((0..n).filter(|&j| whole[j] > floor).map(|j| r[j] / whole[j].sqrt()).fold(0.0, f64::max));
         }
-        *work += (nb.shifts.len() * s * n) as f64 / 2.0;
+        *work += (nb.shifts.len() * s * n) as f64;
     }
-    order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let mut keyed: Vec<((f64, usize, usize), f64)> = order.iter().copied().zip(across).collect();
+    keyed.sort_unstable_by(|a, b| a.0 .0.total_cmp(&b.0 .0));
     let limit = budget;
-    let mut sum = 0.0;
-    for &(q, x, pi) in order.iter() {
-        if (sum + q * q).sqrt() * most > limit {
+    let (mut sum, mut rsum) = (0.0, 0.0);
+    for &((q, x, pi), r) in keyed.iter() {
+        if (sum + q * q).sqrt() * most + rsum + r > limit {
             break;
         }
         sum += q * q;
+        rsum += r;
         let nb = &mut near[x];
         let (idx, at, _) = &cache.near[x][cache.at_near[x].unwrap()].f.parts[pi];
         for i in *at..at + idx.len() {
             nb.active[i] = false;
         }
     }
-    sum.sqrt() * most
+    sum.sqrt() * most + rsum
 }
 
 /// The excited nodes the point leaves out (module documentation, # Leaving nodes out): after the first sweep a near block's
@@ -541,29 +563,59 @@ fn freeze(near: &mut [Near], cache: &Cache, h: &[C64], c: &[C64], whole: &[f64],
 /// block's forms out of H. Returns the ρ they leave together; `tally` counts the parts and far blocks left out. A block
 /// with exact copies goes on whole (its parts coupled through the P layer, as `freeze`).
 #[allow(clippy::too_many_arguments)]
-fn omit(near: &mut [Near], far: &mut [Far], cache: &Cache, hbase: &mut [C64], whole: &mut [f64], change: &mut [f64], tally: &mut [usize; 2], share: f64, thermal: f64, n: usize, work: &mut f64) -> f64 {
+fn omit(near: &mut [Near], far: &mut [Far], cache: &Cache, hbase: &mut [C64], c: &[C64], whole: &mut [f64], change: &mut [f64], tally: &mut [usize; 2], share: f64, thermal: f64, n: usize, work: &mut f64) -> f64 {
     let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
     let pot = |dv: f64| ((1.0 + dv / (2.0 * thermal)).sqrt() - 1.0).powi(2);
     let mut units: Vec<(f64, usize, usize, usize)> = vec![];
-    for (x, nb) in near.iter().enumerate() {
+    for (x, nb) in near.iter_mut().enumerate() {
         if nb.nd > 0 {
             continue;
         }
+        // A part's response to first order across the levels is its own Z¹ and (c − w − κ)⁻¹(R̃Z¹) on its rows: bounded
+        // part by part, Σ_Q ‖R̃_PQ‖ ‖Z¹_Q,l,j‖ over the part's least gap, ‖R̃_PQ‖ ≤ its reference's plus Σ_t |δc_t| its terms'.
+        let (s, ln) = (nb.s, nb.lanes * n);
         let basis = &cache.near[x][cache.at_near[x].unwrap()];
-        let s = nb.s;
+        let np = basis.f.parts.len();
+        let mut rn = basis.pairnorm[..np * np].to_vec();
+        for (t, d) in nb.delta.iter().enumerate() {
+            let size = d.abs();
+            for (r, y) in rn.iter_mut().zip(&basis.pairnorm[(t + 1) * np * np..(t + 2) * np * np]) {
+                *r += size * y;
+            }
+        }
+        // Per part, lane and column ‖Z¹_Q,l,j‖.
+        let mut zn = vec![0.0_f64; np * ln];
+        for (q, (idx, at, _)) in basis.f.parts.iter().enumerate() {
+            for i in *at..at + idx.len() {
+                for (u, z) in zn[q * ln..(q + 1) * ln].iter_mut().zip(&nb.z[i * ln..(i + 1) * ln]) {
+                    *u += z.norm_sqr();
+                }
+            }
+        }
+        zn.iter_mut().for_each(|u| *u = u.sqrt());
+        *work += (np * np * nb.delta.len() + s * ln / 4) as f64;
         for (pi, (idx, at, _)) in basis.f.parts.iter().enumerate() {
+            let mut across = vec![0.0; n];
+            for (sp, &wl) in nb.shifts.iter().enumerate() {
+                let gap = (*at..at + idx.len()).flat_map(|i| (0..n).map(move |j| (i, j))).map(|(i, j)| (c[j] - C64::real(wl) - nb.kappa[i]).abs()).fold(f64::INFINITY, f64::min);
+                for j in 0..n {
+                    across[j] += (0..np).filter(|&q| q != pi).map(|q| rn[pi * np + q] * zn[q * ln + sp * n + j]).sum::<f64>() / gap;
+                }
+            }
             let mut w = 0.0_f64;
             for j in (0..n).filter(|&j| whole[j] > floor) {
-                let (mut size, mut dv) = (0.0, C64::ZERO);
+                let (mut size, mut dv, mut e2) = (0.0, C64::ZERO, 0.0);
                 for i in *at..at + idx.len() {
                     size += nb.ztot[i * n + j].norm_sqr();
                     dv += nb.emit[j * s + i] * nb.ztot[i * n + j];
+                    e2 += nb.emit[j * s + i].norm_sqr();
                 }
-                w = w.max((size / whole[j]).max(pot(2.0 * dv.re.abs())));
+                let size = (size.sqrt() + across[j]).powi(2);
+                w = w.max((size / whole[j]).max(pot(2.0 * (dv.re.abs() + e2.sqrt() * across[j]))));
             }
             units.push((w, 0, x, pi));
         }
-        *work += (s * n) as f64;
+        *work += (nb.shifts.len() * s * n) as f64;
     }
     for (x, fb) in far.iter().enumerate() {
         let w = (0..n).filter(|&j| whole[j] > floor).map(|j| (fb.mf[j * n + j].re / whole[j]).max(pot(2.0 * fb.hf[j * n + j].re.abs()))).fold(0.0, f64::max);
@@ -614,6 +666,30 @@ fn omit(near: &mut [Near], far: &mut [Far], cache: &Cache, hbase: &mut [C64], wh
     }
     whole.iter_mut().for_each(|w| *w = w.max(0.0));
     change.iter_mut().for_each(|w| *w = w.max(0.0));
+    // Each block's kept rows' hull, R̃ on it (its reference and the terms' δc_t: exact in the light) and R̃Z¹ there (the
+    // next sweep's; `freeze` reads it).
+    for (x, nb) in near.iter_mut().enumerate() {
+        let basis = &cache.near[x][cache.at_near[x].unwrap()];
+        let (s, ln) = (nb.s, nb.lanes * n);
+        nb.lo = (0..s).find(|&i| !nb.out[i]).unwrap_or(0);
+        nb.hi = (0..s).rev().find(|&i| !nb.out[i]).map_or(0, |i| i + 1).max(nb.lo);
+        let (lo, h) = (nb.lo, nb.hi - nb.lo);
+        nb.rtk.resize(h * h, C64::ZERO);
+        for i in 0..h {
+            nb.rtk[i * h..(i + 1) * h].copy_from_slice(&basis.cross0[(lo + i) * s + lo..(lo + i) * s + lo + h]);
+        }
+        for (t, &d) in nb.delta.iter().enumerate() {
+            if d == C64::ZERO {
+                continue;
+            }
+            let m = &basis.crossterms[t * s * s..(t + 1) * s * s];
+            for i in 0..h {
+                crate::linalg::mul_add(false, &mut nb.rtk[i * h..(i + 1) * h], d, &m[(lo + i) * s + lo..(lo + i) * s + lo + h]);
+            }
+        }
+        fused_product_into(&nb.rtk, &nb.z[lo * ln..(lo + h) * ln], (h, h, ln), &mut nb.rz[lo * ln..(lo + h) * ln]);
+        *work += (nb.delta.len() * h * h + h * h * ln) as f64;
+    }
     sum.sqrt()
 }
 
@@ -680,10 +756,15 @@ fn copies_back(copies: &[(usize, usize, usize)], groups: &[(usize, Vec<usize>)],
 /// the middle it is the Bloch generator's, in H) + Z†(K̂Z + B), B the source (s × n: Ṽ and the static lane's), K̂ the kept
 /// Schur form with the step's diagonal κ (module documentation, 7); `y` = K̂Z on return (s × n).
 #[allow(clippy::too_many_arguments)]
-fn compress(kappa: &[C64], t: &Mat, ends: &[usize], z: &[C64], emit: Option<&[C64]>, src: &[C64], y: &mut [C64], a: &mut [C64], s: usize, n: usize, work: &mut f64) {
+fn compress(kappa: &[C64], t: &Mat, ends: &[usize], (rtk, lo, hi): (&[C64], usize, usize), z: &[C64], emit: Option<&[C64]>, src: &[C64], y: &mut [C64], a: &mut [C64], s: usize, n: usize, work: &mut f64) {
+    // K̂Z = (T + δκ − o)Z + R̃Z, R̃ on the kept rows' hull.
+    y[..s * n].fill(C64::ZERO);
+    let h = hi - lo;
+    fused_product_into(rtk, &z[lo * n..hi * n], (h, h, n), &mut y[lo * n..hi * n]);
+    *work += (h * h * n) as f64;
     for i in 0..s {
         for j in 0..n {
-            y[i * n + j] = kappa[i] * z[i * n + j];
+            y[i * n + j] += kappa[i] * z[i * n + j];
         }
         for l in i + 1..ends[i] {
             crate::linalg::mul_add(false, &mut y[i * n..i * n + n], t[(i, l)], &z[l * n..l * n + n]);
@@ -761,7 +842,7 @@ fn explicit_parts(xs: &[usize], exact: &[(usize, usize)], basis: &NearBasis, e: 
 /// + K̂†ZĀ, B̄ += ZĀ, Ê̄ += ĀZ† (n × s), K̃̄ += ZĀZ† on the parts' entries (`parts`, the decomposition's), `y` = K̂Z (as
 /// `compress` left it), `x` a buffer (s × n): products (`fused_product`) but for K̂†, triangular.
 #[allow(clippy::too_many_arguments)]
-fn compress_back(kappa: &[C64], t: &Mat, ends: &[usize], parts: &[(Vec<usize>, usize, Mat)], z: &[C64], emit: &[C64], src: &[C64], y: &[C64], abar: &[C64], zbar: &mut [C64], srcbar: &mut [C64], emitbar: &mut [C64], kbar: &mut [C64], x: &mut [C64], s: usize, n: usize, work: &mut f64) {
+fn compress_back(kappa: &[C64], t: &Mat, ends: &[usize], (rtk, lo, hi): (&[C64], usize, usize), z: &[C64], emit: &[C64], src: &[C64], y: &[C64], abar: &[C64], zbar: &mut [C64], srcbar: &mut [C64], emitbar: &mut [C64], kbar: &mut [C64], x: &mut [C64], s: usize, n: usize, work: &mut f64) {
     let mut adj = Buf::zeros(n * n);
     adjoint_into(abar, n, n, &mut adj);
     // Z̄ += Ê†Ā + (Y + B)Ā†; B̄ += ZĀ (= x); Ê̄ += ĀZ†.
@@ -790,20 +871,22 @@ fn compress_back(kappa: &[C64], t: &Mat, ends: &[usize], parts: &[(Vec<usize>, u
             crate::linalg::mul_add(false, &mut zbar[l * n..l * n + n], t[(i, l)].conj(), &x[i * n..i * n + n]);
         }
     }
-    // K̃̄ += (Z Ā) Z† on the parts.
-    for (idx, at, _) in parts {
-        let p = idx.len();
-        let mut zh = Buf::zeros(n * p);
-        adjoint_into(&z[at * n..(at + p) * n], p, n, &mut zh);
-        let mut kp = Buf::zeros(p * p);
-        fused_product_into(&x[at * n..(at + p) * n], &zh, (p, n, p), &mut kp);
-        for i in 0..p {
-            for (k, q) in kbar[(at + i) * s + at..(at + i) * s + at + p].iter_mut().zip(&kp[i * p..(i + 1) * p]) {
-                *k += *q;
-            }
-        }
-        *work += (p * p * n) as f64;
+    // Z̄ += R̃†(Z Ā) (the levels' series); K̃̄ += (Z Ā) Z† whole (on the parts ∂K̃'s, across them ∂R̃'s).
+    // On the kept rows' hull (outside it Z and ZĀ are zero).
+    let h = hi - lo;
+    let mut rh = Buf::zeros(h * h);
+    adjoint_into(rtk, h, h, &mut rh);
+    let mut o = Buf::zeros(h * n);
+    fused_product_into(&rh, &x[lo * n..hi * n], (h, h, n), &mut o);
+    zbar[lo * n..hi * n].iter_mut().zip(o.iter()).for_each(|(a, b)| *a += *b);
+    let mut zh = Buf::zeros(n * h);
+    adjoint_into(&z[lo * n..hi * n], h, n, &mut zh);
+    let mut kp = Buf::zeros(h * h);
+    fused_product_into(&x[lo * n..hi * n], &zh, (h, n, h), &mut kp);
+    for i in 0..h {
+        kbar[(lo + i) * s + lo..(lo + i) * s + hi].iter_mut().zip(&kp[i * h..(i + 1) * h]).for_each(|(a, b)| *a += *b);
     }
+    *work += (2 * h * h * n) as f64;
     *work += (4 * s * n * n) as f64;
 }
 
@@ -1325,6 +1408,10 @@ impl Fold {
                     norms: vec![0.0; s + 1],
                     active: vec![true; s],
                     out: vec![false; s],
+                    rz: z(lanes * s * n),
+                    lo: 0,
+                    hi: s,
+                    rtk: z(s * s),
                     q: vec![0.0; s + 1],
                     reading: 0.0,
                     invs: vec![],
@@ -1486,7 +1573,15 @@ impl Fold {
         let e = self.effective(nb.o, &laid, work)?;
         // The excited rows decomposed; the exact copies after them in their own coordinates (P layer).
         let (er, dr): (Vec<usize>, Vec<usize>) = ((0..s).collect(), (s..s + nd).collect());
-        let f = Factored::of(&e.k.block(&er, &er), work)?;
+        // The parts within the excited levels (DESIGN §1.1, module documentation # The levels' series): K₀ the levels' own
+        // blocks decomposed, R = K − K₀ across them (V†RV, `cross0`, the series').
+        let level: Vec<usize> = b.rows[..s].iter().map(|r| if let Row::Excited(x) = *r { self.excited_level[x] } else { unreachable!() }).collect();
+        let kse = e.k.block(&er, &er);
+        let kw = Mat::from_fn(s, s, |i, j| if level[i] == level[j] { kse[(i, j)] } else { C64::ZERO });
+        let f = Factored::of(&kw, work)?;
+        let mut kx = kse.clone();
+        kx.add_scaled(-C64::ONE, &kw);
+        let cross0 = rotate(&f, &kx, work).data;
         let mut part = vec![0; s];
         for (pi, (idx, at, _)) in f.parts.iter().enumerate() {
             for a in 0..idx.len() {
@@ -1583,6 +1678,18 @@ impl Fold {
         }
         let at: Vec<C64> = nb.terms.iter().map(|&t| ws.mid.coef[t]).collect();
         let within: Vec<C64> = terms.iter().flat_map(|x| Mat::from_fn(s, s, |i, j| if part[i] == part[j] { x.1[(i, j)] } else { C64::ZERO }).data).collect();
+        let crossterms: Vec<C64> = terms.iter().flat_map(|x| Mat::from_fn(s, s, |i, j| if part[i] != part[j] { x.1[(i, j)] } else { C64::ZERO }).data).collect();
+        // R̃'s norm on each pair of parts (P, Q): of the reference, then of each term (the omission's bound, `omit`).
+        let np = f.parts.len();
+        let mut pairnorm = vec![0.0_f64; (terms.len() + 1) * np * np];
+        for (t, m) in std::iter::once(&cross0[..]).chain(crossterms.chunks(s * s)).enumerate() {
+            for i in 0..s {
+                for j in 0..s {
+                    pairnorm[(t * np + part[i]) * np + part[j]] += m[i * s + j].norm_sqr();
+                }
+            }
+        }
+        pairnorm.iter_mut().for_each(|x| *x = x.sqrt());
         let xcol = |jx: usize| nb.xs[jx];
         let sterms: Vec<C64> = terms.iter().flat_map(|x| Mat::from_fn(s, n, |i, p| nb.xs.iter().position(|&q| q == p).map_or(C64::ZERO, |jx| x.4[(i, jx)])).data).collect();
         let eterms: Vec<C64> = terms.iter().flat_map(|x| Mat::from_fn(n, s, |p, i| nb.xs.iter().position(|&q| q == p).map_or(C64::ZERO, |jx| x.5[(jx, i)])).data).collect();
@@ -1612,7 +1719,7 @@ impl Fold {
         for (t, (_, tw, td, ..)) in terms.iter().enumerate() {
             for i in 0..s {
                 diag[t * s + i] = tw[(i, i)];
-                for j in (0..s).filter(|&j| j != i) {
+                for j in (0..s).filter(|&j| j != i && part[j] == part[i]) {
                     norms[(t * s + i) * parts + part[j]] += tw[(i, j)].norm_sqr();
                 }
                 dressed[t * s + i] = (0..s).map(|j| td[(i, j)].norm_sqr()).sum::<f64>().sqrt();
@@ -1753,6 +1860,9 @@ impl Fold {
             z0: laid.z0,
             r0: r0.frobenius(),
             within,
+            cross0,
+            crossterms,
+            pairnorm,
             emit,
             couple,
             ked0,
@@ -2040,6 +2150,7 @@ impl Fold {
                 nb.ztot.fill(C64::ZERO);
                 nb.active.fill(true);
                 nb.out.fill(false);
+                (nb.lo, nb.hi) = (0, nb.s);
                 nb.invs.clear();
                 nb.zs.clear();
                 nb.ztots.clear();
@@ -2093,13 +2204,20 @@ impl Fold {
                     let rhs = &mut nb.rhs;
                     rhs.copy_from_slice(&nb.vt);
                     if sweep > 0 {
-                        fused_product_into(&nb.z, delta, (s * splits, n, n), &mut nb.prod);
+                        // −Z^{k−1}Δ and the levels' R̃Z^{k−1} (the first sweep after `freeze`, which made it).
+                        let (lo, hi) = (nb.lo, nb.hi);
+                        let h = hi - lo;
+                        fused_product_into(&nb.z[lo * ln..hi * ln], delta, (h * splits, n, n), &mut nb.prod[lo * ln..hi * ln]);
+                        if sweep > 1 {
+                            fused_product_into(&nb.rtk, &nb.z[lo * ln..hi * ln], (h, h, ln), &mut nb.rz[lo * ln..hi * ln]);
+                            work[SERIES] += (h * h * ln) as f64;
+                        }
                         for i in (0..s).filter(|&i| nb.active[i]) {
-                            for (r, p) in rhs[i * ln..(i + 1) * ln].iter_mut().zip(&nb.prod[i * ln..(i + 1) * ln]) {
-                                *r -= *p;
+                            for ((r, p), q) in rhs[i * ln..(i + 1) * ln].iter_mut().zip(&nb.prod[i * ln..(i + 1) * ln]).zip(&nb.rz[i * ln..(i + 1) * ln]) {
+                                *r += *q - *p;
                             }
                         }
-                        work[SERIES] += (block * n) as f64;
+                        work[SERIES] += (h * ln * n) as f64;
                     }
                     // The diagonal: (c_j − w_l − κ_i)⁻¹, each column at its own energy.
                     for i in (0..s).filter(|&i| nb.active[i]) {
@@ -2203,7 +2321,7 @@ impl Fold {
                 }
                 // After the first sweep the nodes the point leaves out (`omit`), before the Bloch generator they would enter.
                 if sweep == 0 {
-                    omitted = omit(near, far, cache, hbase, whole, change, &mut tally, share, self.thermal, n, &mut work[SERIES]);
+                    omitted = omit(near, far, cache, hbase, c, whole, change, &mut tally, share, self.thermal, n, &mut work[SERIES]);
                 }
                 h.copy_from_slice(hbase);
                 for nb in near.iter() {
@@ -2363,7 +2481,7 @@ impl Fold {
             if !nb.xs.is_empty() {
                 src.iter_mut().zip(&nb.stat).for_each(|(a, b)| *a += *b);
             }
-            compress(&nb.kappa, &basis.f.t, &basis.f.ends, &nb.ztot, None, &src, &mut nb.y, &mut a.data, s, n, &mut work[COMPRESSION]);
+            compress(&nb.kappa, &basis.f.t, &basis.f.ends, (&nb.rtk, nb.lo, nb.hi), &nb.ztot, None, &src, &mut nb.y, &mut a.data, s, n, &mut work[COMPRESSION]);
             let mut zh = Buf::zeros(n * s);
             adjoint_into(&nb.ztot, s, n, &mut zh);
             let mut o = Buf::zeros(n * n);
@@ -2424,6 +2542,7 @@ impl Fold {
 /// (axis by axis).
 struct Tangent {
     dk: Buf,
+    dkx: Buf,
     demit: Buf,
     dhx: Buf,
     dexd: [Buf; 3],
@@ -2578,7 +2697,7 @@ impl Fold {
                     src.iter_mut().zip(&nb.pnode[j].stat).for_each(|(u, y)| *u += *y);
                     a.iter_mut().zip(&nb.pnode[j].hx).for_each(|(u, y)| *u += *y);
                 }
-                compress(&nb.kappa, &basis.f.t, &basis.f.ends, &nb.znode[j], Some(&nb.pnode[j].emit), &src, &mut nb.rhs, a, s, n, &mut work);
+                compress(&nb.kappa, &basis.f.t, &basis.f.ends, (&nb.rtk, nb.lo, nb.hi), &nb.znode[j], Some(&nb.pnode[j].emit), &src, &mut nb.rhs, a, s, n, &mut work);
                 if nb.nd > 0 {
                     let nd = nb.nd;
                     let zd = &mut nb.zdnode[j];
@@ -2734,16 +2853,18 @@ impl Fold {
                     src.iter_mut().zip(stat).for_each(|(u, y)| *u += *y);
                 }
                 let mut y = Buf::zeros(s * n);
+                let (lo, hi) = (nb.lo, nb.hi);
+                fused_product_into(&nb.rtk, &z[lo * n..hi * n], (hi - lo, hi - lo, n), &mut y[lo * n..hi * n]);
                 for i in 0..s {
                     for c in 0..n {
-                        y[i * n + c] = nb.kappa[i] * z[i * n + c];
+                        y[i * n + c] += nb.kappa[i] * z[i * n + c];
                     }
                     for l in i + 1..basis.f.ends[i] {
                         crate::linalg::mul_add(false, &mut y[i * n..i * n + n], basis.f.t[(i, l)], &z[l * n..l * n + n]);
                     }
                 }
                 let (mut zb, mut vb, mut eb, mut kb, mut xb) = (Buf::zeros(s * n), Buf::zeros(s * n), Buf::zeros(n * s), Buf::zeros(s * s), Buf::zeros(s * n));
-                compress_back(&nb.kappa, &basis.f.t, &basis.f.ends, &basis.f.parts, z, emit, &src, &y, ab, &mut zb, &mut vb, &mut eb, &mut kb, &mut xb, s, n, &mut work);
+                compress_back(&nb.kappa, &basis.f.t, &basis.f.ends, (&nb.rtk, nb.lo, nb.hi), z, emit, &src, &y, ab, &mut zb, &mut vb, &mut eb, &mut kb, &mut xb, s, n, &mut work);
                 // The explicit parts' terms: Re⟨B̄, S_t⟩ + Re⟨Ê̄, E_t⟩ + Re⟨Ā, H_t⟩ times ∂c_t.
                 if explicit {
                     for (ti, &tt) in nb.terms.iter().enumerate() {
@@ -2819,7 +2940,7 @@ impl Fold {
                     }
                 }
                 for a in 0..3 {
-                    fp[a] += inner(&kb, &t.dk[a * s * s..(a + 1) * s * s], s, s, s, 0).re;
+                    fp[a] += inner(&kb, &t.dk[a * s * s..(a + 1) * s * s], s, s, s, 0).re + inner(&kb, &t.dkx[a * s * s..(a + 1) * s * s], s, s, s, 0).re;
                     if nd > 0 {
                         fp[a] += re(&kddb, &t.dkdd[a]);
                     }
@@ -3026,8 +3147,26 @@ impl Fold {
                         dct[a * terms + ti] = dc[tt][a];
                     }
                 }
-                let mut dk = Buf::zeros(s * s3);
-                fused_product_into(&dct, &basis.within, (3, terms, s * s), &mut dk);
+                // ∂K̃ on the kept parts' entries and ∂R̃ = Σ_t ∂c_t across the parts on the kept rows' hull (the rest is left out).
+                let (mut dk, mut dkx) = (Buf::zeros(s * s3), Buf::zeros(s * s3));
+                let (lo, hi) = (nb.lo, nb.hi);
+                for t in 0..terms {
+                    let (w, x) = (&basis.within[t * s * s..(t + 1) * s * s], &basis.crossterms[t * s * s..(t + 1) * s * s]);
+                    for a in 0..3 {
+                        let d = dct[a * terms + t];
+                        if d == C64::ZERO {
+                            continue;
+                        }
+                        for (idx, at, _) in basis.f.parts.iter().filter(|x| !nb.out[x.1]) {
+                            for i in *at..at + idx.len() {
+                                crate::linalg::mul_add(false, &mut dk[a * s * s + i * s + at..a * s * s + i * s + at + idx.len()], d, &w[i * s + at..i * s + at + idx.len()]);
+                            }
+                        }
+                        for i in lo..hi {
+                            crate::linalg::mul_add(false, &mut dkx[a * s * s + i * s + lo..a * s * s + i * s + hi], d, &x[i * s + lo..i * s + hi]);
+                        }
+                    }
+                }
                 let mut dv = Buf::zeros(s * n3);
                 for (ia, &(cc, k)) in nb.vectors.iter().enumerate() {
                     let y = &basis.vectors[ia];
@@ -3037,7 +3176,7 @@ impl Fold {
                         }
                     }
                 }
-                work[0] += (3 * (terms * s * s + nb.vectors.len() * s * n)) as f64;
+                work[0] += (3 * (terms * (hi - lo).pow(2) + nb.vectors.len() * s * n)) as f64;
                 let nd = nb.nd;
                 let (mut dked, mut dkde, mut dkdd): ([Buf; 3], [Buf; 3], [Buf; 3]) = (std::array::from_fn(|_| Buf::zeros(s * nd)), std::array::from_fn(|_| Buf::zeros(nd * s)), std::array::from_fn(|_| Buf::zeros(nd * nd)));
                 for a in 0..3 {
@@ -3112,6 +3251,7 @@ impl Fold {
                 }
                 Tangent {
                     dk,
+                    dkx,
                     demit,
                     dhx,
                     dexd,
@@ -3199,27 +3339,42 @@ impl Fold {
                 lap(1, &mut clock, &mut tick);
                 // −(∂Z^{k−1}Δ + Z^{k−1}∂Δ): the first on every axis and split at once, the second axis by axis.
                 if k > 0 {
-                    let prev = &nb.zs[at - s * ln..at];
-                    let mut p1 = Buf::zeros(s * m);
-                    fused_product_into(&tg.dz, delta, (3 * s * splits, n, n), &mut p1);
-                    for (r, y) in rhs.iter_mut().zip(p1.iter()) {
-                        *r -= *y;
+                    // −(∂Z^{k−1}Δ + Z^{k−1}∂Δ) and the levels' ∂R̃ Z^{k−1} + R̃ ∂Z^{k−1}, on the kept rows' hull (outside it every
+                    // row is left out: zero).
+                    let (lo, hi) = (nb.lo, nb.hi);
+                    let h = hi - lo;
+                    let prev = &nb.zs[at - s * ln + lo * ln..at - s * ln + hi * ln];
+                    let mut p1 = Buf::zeros(h * m);
+                    fused_product_into(&tg.dz[lo * m..hi * m], delta, (3 * h * splits, n, n), &mut p1);
+                    let rows = &mut rhs[lo * m..hi * m];
+                    rows.iter_mut().zip(p1.iter()).for_each(|(r, y)| *r -= *y);
+                    let mut mx = Buf::zeros(3 * h * h);
+                    for i in 0..h {
+                        for a in 0..3 {
+                            let from = a * s * s + (lo + i) * s + lo;
+                            mx[(i * 3 + a) * h..(i * 3 + a) * h + h].copy_from_slice(&tg.dkx[from..from + h]);
+                        }
                     }
-                    let mut p2 = Buf::zeros(s * ln);
+                    fused_product_into(&mx, prev, (3 * h, h, ln), &mut p1);
+                    rows.iter_mut().zip(p1.iter()).for_each(|(r, y)| *r += *y);
+                    fused_product_into(&nb.rtk, &tg.dz[lo * m..hi * m], (h, h, m), &mut p1);
+                    rows.iter_mut().zip(p1.iter()).for_each(|(r, y)| *r += *y);
+                    work[2] += (2 * h * h * m) as f64;
+                    let mut p2 = Buf::zeros(h * ln);
                     for a in 0..3 {
                         for r in 0..n {
                             for c2 in 0..n {
                                 dd[r * n + c2] = if r == c2 { C64::ZERO } else { dh[r * n3 + a * n + c2] };
                             }
                         }
-                        fused_product_into(prev, &dd, (s * splits, n, n), &mut p2);
-                        for i in 0..s {
-                            for (r, y) in rhs[i * m + a * ln..i * m + a * ln + ln].iter_mut().zip(&p2[i * ln..(i + 1) * ln]) {
+                        fused_product_into(prev, &dd, (h * splits, n, n), &mut p2);
+                        for i in 0..h {
+                            for (r, y) in rows[i * m + a * ln..i * m + a * ln + ln].iter_mut().zip(&p2[i * ln..(i + 1) * ln]) {
                                 *r -= *y;
                             }
                         }
                     }
-                    work[2] += (2 * s * m * n) as f64;
+                    work[2] += (2 * h * m * n) as f64;
                 }
                 lap(2, &mut clock, &mut tick);
                 let nd = nb.nd;
