@@ -1323,9 +1323,14 @@ fn a_fold_s_work_at_a_scene() {
 /// cheapest evaluation its readings allow within the share (left out, centred, decomposed), and the excited parts whose
 /// omission reads within it left out, to the fixed point.
 fn tiers(req: &Request, name: &str) -> Choice {
+    tiers_with(req, name, vec![])
+}
+
+/// `tiers` with the explicit levels `explicit` (`Choice::explicit`) kept in P.
+fn tiers_with(req: &Request, name: &str, explicit: Vec<(usize, Part, usize)>) -> Choice {
     let share = super::super::elim::share();
     let ps = parts(req);
-    let mut choice = Choice { copies: all_copies(&ps, Status::Decomposed), ..rule(req) };
+    let mut choice = Choice { copies: all_copies(&ps, Status::Decomposed), explicit, ..rule(req) };
     println!("{name}: the rule's ground sets {:?}", choice.sets);
     let at = [0.0; 3];
     for set in Fold::sets(req, &choice).unwrap() {
@@ -1645,25 +1650,55 @@ fn a_step_s_work_at_a_scene() {
     }
 }
 
-/// The prototype's choice (proto.rs): a scene's tiers (`tiers`), and in every block that solves any row its centred
-/// excited rows solved too (a mode of the kept decomposition, not a pass); the blocks whose rows are all centred keep them so.
+/// The prototype's choice (proto.rs): a scene's tiers (`tiers_with`), and in every block that solves any row its centred
+/// excited rows solved too (a mode of the kept decomposition, not a pass); the blocks whose rows are all centred keep them
+/// so. And the rule's explicit nodes (DESIGN §3.2), to the fixed point: an excited node whose reading at the focus is
+/// beyond the share stays in P (its level at its block's offset); where the fold does not exist there (the excitation or
+/// the passes' ratio at or above one) the excited node that reads the most does, whatever its reading.
 fn proto_choice(req: &Request, name: &str) -> Choice {
-    let mut choice = tiers(req, name);
-    for set in Fold::sets(req, &choice).unwrap() {
-        let fold = Fold::new(req, &choice, set[0]).unwrap();
-        let mut add = vec![];
-        for b in fold.blocks.iter().filter(|b| b.solved > 0) {
-            for r in &b.rows[b.solved..] {
-                if let Row::Excited(x) = *r {
-                    for &(p, c) in &b.sources {
-                        add.push(((fold.components[c].part, fold.ground[p], fold.excited_level[x]), Status::Decomposed));
+    let share = super::super::elim::share();
+    let mut explicit: Vec<(usize, Part, usize)> = vec![];
+    loop {
+        let mut choice = tiers_with(req, name, explicit.clone());
+        let mut kept = vec![];
+        for set in Fold::sets(req, &choice).unwrap() {
+            let fold = Fold::new(req, &choice, set[0]).unwrap();
+            let mut add = vec![];
+            for b in fold.blocks.iter().filter(|b| b.solved > 0) {
+                for r in &b.rows[b.solved..] {
+                    if let Row::Excited(x) = *r {
+                        for &(p, c) in &b.sources {
+                            add.push(((fold.components[c].part, fold.ground[p], fold.excited_level[x]), Status::Decomposed));
+                        }
                     }
                 }
             }
+            choice.excited.extend(add);
+            let fold = Fold::new(req, &choice, set[0]).unwrap();
+            if fold.blocks.is_empty() {
+                continue;
+            }
+            let Some(f) = fold_at(&fold, [0.0; 3], [0.0; 3]) else { continue };
+            let exists = f.excitation < 1.0 && f.ratio < 1.0;
+            let mut nodes: Vec<(usize, usize, f64)> = f.readings.iter().filter_map(|r| if let Node::Excited(level) = r.node { Some((r.block, level, r.total())) } else { None }).collect();
+            nodes.sort_by(|a, b| b.2.total_cmp(&a.2));
+            let beyond: Vec<(usize, usize, f64)> = nodes.iter().copied().filter(|x| x.2 > share).collect();
+            let chosen = if !beyond.is_empty() { beyond } else if !exists { nodes.into_iter().take(1).collect() } else { vec![] };
+            for (o, level, reading) in chosen {
+                let b = &fold.blocks[o];
+                let Some(&(p, c)) = b.sources.first() else { continue };
+                let key = (level, fold.components[c].part, fold.ground[p]);
+                if !explicit.contains(&key) && !kept.contains(&key) {
+                    println!("{name} set {set:?}: block {o} excited level {level} kept in P (reading {reading:.2e}, excitation {:.2}, the passes' ratio {:.2})", f.excitation, f.ratio);
+                    kept.push(key);
+                }
+            }
         }
-        choice.excited.extend(add);
+        if kept.is_empty() {
+            return choice;
+        }
+        explicit.extend(kept);
     }
-    choice
 }
 
 /// The rate's inverse: the relative amplitude error ρ of a reading r = 2ρ + ρ².
@@ -1714,6 +1749,10 @@ fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut supe
                 }
             }
         }
+    }
+    // An explicit column's excited amplitude holds its own unit row (ε = E + T): the rate's unit of its column.
+    for w in whole[fold.ground.len()..].iter_mut() {
+        *w += 1.0;
     }
     let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
     let rho = (0..n).filter(|&j| whole[j] > floor).map(|j| (diff[j] / whole[j]).sqrt()).fold(0.0, f64::max);
