@@ -168,8 +168,6 @@ struct Near {
     all: usize,
     levels: Vec<Vec<usize>>,
     wanted: Option<Vec<usize>>,
-    /// Whether the basis it stands on was made at this step (`omit` reads whether kept levels may leave).
-    fresh: bool,
     /// The step's R₀ change factor ε_R (the reuse's and the omission bound's).
     epsr: f64,
     nc: usize,
@@ -1287,67 +1285,16 @@ fn omit(near: &mut [Near], far: &mut [Far], scratch: &mut [Scratch], tm: &mut Te
             per[x].0[q] = false;
             rho = read_omitted(per, den, thermal, n);
         }
-        for (x, (nb, (om, ..))) in near.iter_mut().zip(per.iter()).enumerate() {
-            let kept: Vec<usize> = (0..om.len()).filter(|&q| !om[q]).collect();
-            if kept != cache.near[x][cache.at_near[x].unwrap()].kept {
-                nb.wanted = Some(kept);
+        // The blocks the joins decompose again: their kept levels that may leave leave with them (`leave`).
+        for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
+            let basis = &cache.near[x][cache.at_near[x].unwrap()];
+            let kept: Vec<usize> = (0..per[x].0.len()).filter(|&q| !per[x].0[q]).collect();
+            if kept != basis.kept {
+                leave(nb, sc, basis, per, x, tm, at, h, limit, thermal, n, work);
+                nb.wanted = Some((0..per[x].0.len()).filter(|&q| !per[x].0[q]).collect());
             }
         }
         return (rho, true);
-    }
-    // Where a decomposition was made at this step its kept levels may leave, the smallest first, while the bounds (each with
-    // the whole kept response, its own in it, and the column less its bound) read within: a new one without them. A trial
-    // stands in the block's bounds in place (`Temp::trial` swapped in) and is swapped back where it reads beyond.
-    let mut left = false;
-    for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
-        let basis = &cache.near[x][cache.at_near[x].unwrap()];
-        if !nb.fresh || nb.nd > 0 {
-            continue;
-        }
-        let nl = nb.levels.len();
-        let mut joined = false;
-        let (om, sz, bk, sh) = &mut tm.trial;
-        tm.units.clear();
-        for &q in &basis.kept {
-            om.clear();
-            om.extend_from_slice(&per[x].0);
-            om[q] = true;
-            if bound_levels(nb, basis, om, at, h, sz, bk, sh, &mut sc.bound, n, work).is_ok() {
-                tm.units.push(((0..n).map(|j| (sz[q * n + j] + bk[q * n + j]).powi(2) / den[j].max(f64::MIN_POSITIVE)).fold(0.0, f64::max), q));
-            }
-        }
-        tm.units.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        for u in 0..tm.units.len() {
-            let q = tm.units[u].1;
-            let (om, sz, bk, sh) = &mut tm.trial;
-            om.clear();
-            om.extend_from_slice(&per[x].0);
-            om[q] = true;
-            if bound_levels(nb, basis, om, at, h, sz, bk, sh, &mut sc.bound, n, work).is_err() {
-                continue;
-            }
-            let d = &mut tm.d[..n];
-            for j in 0..n {
-                d[j] = (den[j] - sz[q * n + j].powi(2)).max(0.0);
-            }
-            std::mem::swap(&mut per[x], &mut tm.trial);
-            if read_omitted(per, d, thermal, n) <= limit {
-                den.copy_from_slice(d);
-                joined = true;
-            } else {
-                std::mem::swap(&mut per[x], &mut tm.trial);
-            }
-        }
-        if joined {
-            left = true;
-            let kept: Vec<usize> = (0..nl).filter(|&q| !per[x].0[q]).collect();
-            if kept != basis.kept {
-                nb.wanted = Some(kept);
-            }
-        }
-    }
-    if left && near.iter().any(|nb| nb.wanted.is_some()) {
-        return (read_omitted(per, den, thermal, n), true);
     }
     tally[0] += per.iter().map(|p| p.0.iter().filter(|&&o| o).count()).sum::<usize>();
     // The far blocks of the smallest reading go too while the whole reads within: each its exact M_F,jj and H_F,jj.
@@ -1373,6 +1320,61 @@ fn omit(near: &mut [Near], far: &mut [Far], scratch: &mut [Scratch], tm: &mut Te
     }
     whole.iter_mut().for_each(|w| *w = w.max(0.0));
     (rho, false)
+}
+
+/// A block's kept levels that may leave, read where its decomposition is made again for the fold's accuracy -- a level
+/// joins (`omit`), or its reuse reads beyond the share (`Fold::prototype`, 6) -- and nowhere else: a decomposition is made
+/// for the accuracy alone, and what may leave leaves with the next one so made (DESIGN §1.1, 2026-11-16). On the block's
+/// standing basis at the point, the smallest first, a level leaves while the omitted levels' bounds -- each with the whole
+/// kept response, its own in it, and the column less its bound (`Temp::den`, the joined levels' bounds counted as their
+/// responses) -- read within: a trial stands in the block's bounds in place (`Temp::trial` swapped in) and is swapped back
+/// where it reads beyond. The levels joining at the point (kept in `per` and not in the basis) are bounded as left out in
+/// every trial -- their bound feeds the others' as their response will -- and not read (they are kept). A block with exact
+/// copies keeps every level. Leaves the result in `per[x]`'s flags.
+#[allow(clippy::too_many_arguments)]
+fn leave(nb: &Near, sc: &mut Scratch, basis: &NearBasis, per: &mut [Bounds], x: usize, tm: &mut Temp, at: &Placed, h: &[C64], limit: f64, thermal: f64, n: usize, work: &mut f64) {
+    if nb.nd > 0 {
+        return;
+    }
+    let nl = nb.levels.len();
+    let joining: Vec<usize> = (0..nl).filter(|&q| !per[x].0[q] && !basis.kept.contains(&q)).collect();
+    let Temp { den, d, trial, units, .. } = tm;
+    let den = &mut den[..n];
+    let trial_of = |q: usize, flags: &[bool], trial: &mut Bounds, sc: &mut Scratch, work: &mut f64| -> bool {
+        let (om, sz, bk, sh) = trial;
+        om.clear();
+        om.extend_from_slice(flags);
+        om[q] = true;
+        joining.iter().for_each(|&p| om[p] = true);
+        let ok = bound_levels(nb, basis, om, at, h, sz, bk, sh, &mut sc.bound, n, work).is_ok();
+        joining.iter().for_each(|&p| om[p] = false);
+        ok
+    };
+    units.clear();
+    for &q in &basis.kept {
+        if trial_of(q, &per[x].0, trial, sc, work) {
+            let (_, sz, bk, _) = &*trial;
+            units.push(((0..n).map(|j| (sz[q * n + j] + bk[q * n + j]).powi(2) / den[j].max(f64::MIN_POSITIVE)).fold(0.0, f64::max), q));
+        }
+    }
+    units.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    for u in 0..units.len() {
+        let q = units[u].1;
+        let flags = per[x].0.clone();
+        if !trial_of(q, &flags, trial, sc, work) {
+            continue;
+        }
+        let d = &mut d[..n];
+        for j in 0..n {
+            d[j] = (den[j] - trial.1[q * n + j].powi(2)).max(0.0);
+        }
+        std::mem::swap(&mut per[x], trial);
+        if read_omitted(per, d, thermal, n) <= limit {
+            den.copy_from_slice(d);
+        } else {
+            std::mem::swap(&mut per[x], trial);
+        }
+    }
 }
 
 /// A near block's copies' rows T_C = Σ_a e_a* (R₀U_a†V Z + R₀U_a(X, C)†) into `nb.tc` (module documentation, 7).
@@ -2003,7 +2005,6 @@ impl Fold {
                     all: ne,
                     levels,
                     wanted: None,
-                    fresh: false,
                     epsr: 0.0,
                     nc,
                     value: b.value,
@@ -2753,9 +2754,6 @@ impl Fold {
             cache.at_far = vec![None; ws.far.len()];
         }
         ws.renew.clear();
-        for nb in ws.near.iter_mut() {
-            nb.fresh = false;
-        }
         let made_before = cache.made;
         let grown_before = cache.grown;
         let mut round = 0;
@@ -2837,9 +2835,6 @@ impl Fold {
                         }
                     };
                     if chosen.is_none() {
-                        if !kind {
-                            ws.near[x].fresh = true;
-                        }
                         cache.made += 1;
                         if same == Some(false) {
                             cache.grown += 1;
@@ -3297,6 +3292,18 @@ impl Fold {
             }
             if renew.len() == before || refreshes == 2 || cache.made > made {
                 break (sweep, series, ratio, round + 1, omitted, tally);
+            }
+            // The near blocks decomposed again for their reuse: their kept levels that may leave leave with it (`leave`, on
+            // the bounds `omit` read at this round's first sweep).
+            for &(kind, x) in &renew[before..] {
+                if !kind {
+                    let basis = &cache.near[x][cache.at_near[x].unwrap()];
+                    leave(&near[x], &mut scratch[x], basis, per, x, tm, mid, h, unrate(share), self.thermal, n, &mut work[READING]);
+                    let kept: Vec<usize> = (0..per[x].0.len()).filter(|&q| !per[x].0[q]).collect();
+                    if kept != basis.kept {
+                        near[x].wanted = Some(kept);
+                    }
+                }
             }
             round += 1;
             refreshes += 1;
