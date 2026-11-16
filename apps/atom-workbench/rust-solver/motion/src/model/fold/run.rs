@@ -67,7 +67,7 @@
 //! potentials as model.rs makes them (the folds with every drive bare: a reference is exact for any potential); the
 //! displayed rows are the set's own populations. The photons' and the landing's own forms (DESIGN step 3) and the
 //! explicit sets' optical sector are not yet here.
-use super::proto::{At, Bar, Cache, Workspace};
+use super::proto::{At, Bar, Cache, Moments, Workspace};
 use super::{Choice, Fold};
 use crate::field::Light;
 use crate::linalg::{Mat, C64};
@@ -195,13 +195,27 @@ impl Onefold {
             photons: 0.0,
         };
         // A jump's photons at the focus, the dearest set's, as a jump at a point makes them (`Dynamics::emit`): its
-        // forward, tangent, the place and the photons there (`Dynamics::photon_work`).
+        // forward, tangent, the place and the photons there -- every class's rate and the dearest class's moments, the
+        // class a jump draws (`Fold::prototype_photons`) -- (`Dynamics::photon_work`).
         run.photons = (0..run.sets.len())
             .filter(|&k| !run.sets[k].fold.blocks.is_empty())
             .map(|k| {
                 let n = run.sets[k].fold.size();
                 let psi: Vec<C64> = (0..n).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
-                run.evaluate(k, [0.0; 3], [0.0; 3], &Held::default(), |fold, cache, ws, forward| forward + fold.prototype_tangent(cache, ws) + fold.prototype_place([0.0; 3], [0.0; 3], [0.0; 3], 0.0, ws) + fold.prototype_photons(cache, ws, &psi, &run.grounds, At::Place, 0.0).work).unwrap_or(0.0)
+                run.evaluate(k, [0.0; 3], [0.0; 3], &Held::default(), |fold, cache, ws, forward| {
+                    let made = forward + fold.prototype_tangent(cache, ws) + fold.prototype_place([0.0; 3], [0.0; 3], [0.0; 3], 0.0, ws);
+                    let (mut dearest, mut class, mut classes) = (0.0_f64, 0, 1);
+                    while class < classes {
+                        let mut drawn = |rates: &[f64]| {
+                            classes = rates.len();
+                            (class < classes).then_some(class)
+                        };
+                        dearest = dearest.max(fold.prototype_photons(cache, ws, &psi, &run.grounds, At::Place, 0.0, Moments::Drawn(&mut drawn)).work);
+                        class += 1;
+                    }
+                    made + dearest
+                })
+                .unwrap_or(0.0)
             })
             .fold(0.0, f64::max)
             * crate::decide::COMPLEX;
@@ -419,11 +433,12 @@ impl Middle<'_> {
 
     /// A jump's photon of the state ψ at the time s from the middle along the path (`step::Dynamics::emit`; DESIGN §13.2):
     /// the forward and the tangent the step made at the path (made here where it made none), the place there -- the light
-    /// turned to r + vs, the responses and their tangent turned lane by lane, S the middle's (proto.rs
-    /// `Fold::prototype_place`): no fold at the place --, the classes' rates there and the class `draw` picks; its jump's
-    /// amplitudes L(s)ψ on the landing set's states -- the photons' own u = C ε S⁻¹ψ of its group (`Workspace::jumped`) --,
-    /// each at its frame's phase at the time t_m + s (module documentation, # The jumps' phase), and the photon's
-    /// frequency. None where the set has no light (no blocks), the fold does not exist there, or `draw` picks none.
+    /// turned to r + vs, the responses turned lane by lane, S the middle's (proto.rs `Fold::prototype_place`): no fold at
+    /// the place --, every class's rate there, the class `draw` picks and its kick alone (its group's tangent turned there,
+    /// on its landing set's rows: `Fold::prototype_photons`); its jump's amplitudes L(s)ψ on the landing set's states --
+    /// the photons' own u = C ε S⁻¹ψ of its group (`Workspace::jumped`) --, each at its frame's phase at the time t_m + s
+    /// (module documentation, # The jumps' phase), and the photon's frequency. None where the set has no light (no
+    /// blocks), the fold does not exist there, or `draw` picks none.
     pub(crate) fn emitted(&self, path: &Path, s: f64, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
         let (run, set) = (self.run, &self.run.sets[self.set]);
         let fold = &set.fold;
@@ -438,9 +453,8 @@ impl Middle<'_> {
         let ws = ws.as_mut().expect("a workspace");
         fold.prototype_place(self.r, path.kappa, path.velocity, s, ws);
         let t = self.t + s;
-        let photons = fold.prototype_photons(eval, ws, psi, &run.grounds, At::Place, t);
-        let rates: Vec<f64> = photons.classes.iter().map(|c| c.rate).collect();
-        let class = &photons.classes[draw(&rates)?];
+        let photons = fold.prototype_photons(eval, ws, psi, &run.grounds, At::Place, t, Moments::Drawn(draw));
+        let class = &photons.classes[photons.drawn?];
         // The class's jump: its group's blocks' at their offsets' phases e^{−iot} (# The jumps' coherence), as its photons
         // summed them, on the landing set's states, each at its frame's phase e^{iθ_s t} (# The jumps' phase).
         let to = &run.sets[class.landing];
@@ -648,7 +662,7 @@ impl crate::step::Middle for Middle<'_> {
             return (Scattering { force: [f64::NAN; 3], diffusion: [[f64::NAN; 3]; 3], size: 0.0, links: 0 }, 0.0);
         }
         let Inner { eval, ws, .. } = &mut *inner;
-        let photons = fold.prototype_photons(eval, ws.as_mut().unwrap(), psi, &self.run.grounds, At::Middle, self.t);
+        let photons = fold.prototype_photons(eval, ws.as_mut().unwrap(), psi, &self.run.grounds, At::Middle, self.t, Moments::Every);
         // The terms of a diagonal entry: per class its second moment and its kick's W b², at most the entry and twice
         // the kicks' part; the products behind it: S⁻¹ψ, the responses, the emission, a class's Gram over its rows.
         let kicks: [f64; 3] = std::array::from_fn(|a| photons.classes.iter().map(|c| c.rate * c.kick[a] * c.kick[a]).sum());

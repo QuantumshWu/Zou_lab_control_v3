@@ -1924,7 +1924,7 @@ fn a_prototype_s_step_at_a_scene() {
                         tangent.push((ws.tangent_ticks, ws.tangent_work, t_tangent, ws.force_ticks));
                         let t_force = clock.elapsed().as_secs_f64();
                         let clock = std::time::Instant::now();
-                        let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets, super::proto::At::Middle, 0.0);
+                        let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets, super::proto::At::Middle, 0.0, super::proto::Moments::Every);
                         let t_photons = clock.elapsed().as_secs_f64();
                         rest.push([t_nodes, t_force, t_photons, node_work, tangent_work + force.work, photons.work]);
                         ticks.push(s.0);
@@ -2262,11 +2262,25 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                 let mut cache = Cache::default();
                 let g = fold.prototype(r0, kappa, &mut cache, &mut ws).unwrap().generator.clone();
                 fold.prototype_tangent(&cache, &mut ws);
-                let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets, super::proto::At::Middle, 0.0);
+                let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets, super::proto::At::Middle, 0.0, super::proto::Moments::Every);
                 let hazard: f64 = (0..n).map(|i| (0..n).map(|j| psi[i].conj() * C64::I * (g[(i, j)] - g[(j, i)].conj()) * psi[j]).sum::<C64>().re).sum::<f64>() / norm;
                 assert!((photons.rate - hazard).abs() <= 1e-12 * hazard.abs().max(1e-300), "{name} set {set:?} point {point}: the photons' rate {} against the hazard {hazard}", photons.rate);
                 // A class's jump's amplitudes as the photons leave them (`Workspace::jumped`), on its set's rows.
                 let jumped: Vec<(usize, Vec<C64>)> = photons.classes.iter().map(|c| (c.landing, (0..3).flat_map(|q| sets[c.landing].iter().map(move |&b| (q, b))).map(|(q, b)| ws.jumped(c.slot, b, q)).collect())).collect();
+                // A jump's order -- every class's rate, then the drawn class's moments alone (BRIEF_STEP3 item 6) -- is the
+                // same formula: each class drawn, its rates, kick and amplitudes those of every class's moments.
+                for (c, whole) in photons.classes.iter().enumerate() {
+                    let drawn = fold.prototype_photons(&cache, &mut ws, &psi, &sets, super::proto::At::Middle, 0.0, super::proto::Moments::Drawn(&mut |_| Some(c)));
+                    let one = &drawn.classes[c];
+                    let rates: Vec<f64> = drawn.classes.iter().map(|x| x.rate).collect();
+                    assert!(rates == photons.classes.iter().map(|x| x.rate).collect::<Vec<f64>>() && drawn.drawn == Some(c), "{name} set {set:?} point {point}: the rates before the draw");
+                    let size = whole.kick.iter().map(|x| x.abs()).fold(0.0, f64::max);
+                    let apart = (0..3).map(|a| (one.kick[a] - whole.kick[a]).abs()).fold(0.0, f64::max);
+                    assert!(apart <= 1e-14 * size, "{name} set {set:?} point {point}: class {c}'s kick drawn {:?} against every class's {:?}", one.kick, whole.kick);
+                    let amplitudes: Vec<C64> = (0..3).flat_map(|q| sets[one.landing].iter().map(move |&b| (q, b))).map(|(q, b)| ws.jumped(one.slot, b, q)).collect();
+                    assert!(amplitudes == jumped[c].1, "{name} set {set:?} point {point}: class {c}'s amplitudes drawn");
+                    assert!(drawn.work < photons.work || photons.classes.len() == 1, "{name} set {set:?} point {point}: a drawn class's work {} against every class's {}", drawn.work, photons.work);
+                }
                 // The whole gradient by the difference (h = 1e-4 µm, central).
                 let h = 1e-4;
                 let (u0, centre) = amplitudes(r0, &mut ws);
