@@ -816,8 +816,10 @@ impl Fold {
         };
         // Each block's evaluation order on the path's bases, the passes, and the bases' reading at the energies solved at:
         // beyond the share those bases are made again at the point and the passes solved again.
-        let mut renew: Vec<usize> = vec![];
+        let mut renew: Vec<(Vec<Row>, Option<usize>)> = vec![];
+        let mut round = 0;
         let (eliminated, stages, h0, h1, h2) = loop {
+            let made = path.made;
             let mut eliminated = vec![];
             let mut moved: Vec<Option<(Vec<C64>, Vec<Vec<f64>>)>> = vec![None; path.bases.len()];
             for (o, l) in laid.iter().enumerate() {
@@ -842,14 +844,22 @@ impl Fold {
             };
             let last = stages.last_mut().unwrap();
             last.read_reuse(&eliminated, &laid, &mut work);
-            let beyond: Vec<usize> = eliminated.iter().zip(last.reuse()).filter(|(_, r)| *r > share).map(|(e, _)| e.basis).collect();
+            let mut beyond: Vec<(Vec<Row>, Option<usize>)> = vec![];
+            for (e, r) in eliminated.iter().zip(last.reuse()) {
+                let x = &path.bases[e.basis];
+                if r > share && !beyond.contains(&(x.rows.clone(), x.own)) {
+                    beyond.push((x.rows.clone(), x.own));
+                }
+            }
             phase("passes", work, &mut phases);
-            if beyond.is_empty() || !renew.is_empty() {
+            // Beyond the share: the nearest kept decomposition, then a new one; a new one beyond it too is read as it is.
+            if beyond.is_empty() || round == 2 || path.made > made {
                 let h1 = hs.pop().unwrap();
                 let h0 = hs.pop().unwrap_or_else(|| h1.clone());
                 break (eliminated, stages, h0, h1, bloch);
             }
-            renew = beyond;
+            renew.extend(beyond);
+            round += 1;
         };
         // The passes' ratio (the self-consistency's existence, ≥ 1 none): of the last two changes.
         let ratio = difference(&h2, &h1) / difference(&h1, &h0);
@@ -1269,18 +1279,29 @@ impl Factored {
     }
 }
 
-/// The decompositions a path keeps (module documentation, # One decomposition along the path), one path per fold: per
-/// basis the matrix it decomposed (a block's K_eff + o on its solved rows, its couplings across parts left out) and its
-/// Schur form, made again (`version`) where its reading passes the share; per block its sources' ranks in its basis (per
-/// component of its sources, per basis vector U_k, V† of the unit source on its source columns) and the basis's version
-/// they were made at. `made`: the decompositions made.
+/// The decompositions kept (module documentation, # One decomposition along the path), one cache per fold and shared by
+/// every atom of it: a block's K_eff + o depends on the place only through the light that reaches it, not on the atom, so
+/// a decomposition made by one atom serves any other where its reading is within the share. Per basis the matrix it
+/// decomposed (a block's K_eff + o on its solved rows, the exact copies' and the lines' couplings left out), its Schur form
+/// and per block its sources' ranks in it (per component of its sources, per basis vector U_k, V† of the unit source on
+/// its source columns). `current`: per key (solved rows, the block where its copies dress it) the basis the atom stands
+/// on -- an atom's own; beyond the share it looks for the nearest kept one (‖K − K_basis‖_F) and makes one only where that
+/// one is beyond the share too. `made`, `looked`: the decompositions made and the kept ones taken up again.
 #[derive(Default)]
 pub(crate) struct Path {
     bases: Vec<Basis>,
-    ranks: Vec<Option<(usize, usize, Rc<Vec<(usize, Vec<Mat>)>>)>>,
+    pub(crate) current: Vec<((Vec<Row>, Option<usize>), usize)>,
     pub(crate) made: usize,
+    pub(crate) looked: usize,
     /// The largest condition of a made decomposition's eigenvectors (1: a normal one).
     pub(crate) condition: f64,
+}
+
+impl Path {
+    /// The decompositions kept.
+    pub(crate) fn bases_len(&self) -> usize {
+        self.bases.len()
+    }
 }
 
 struct Basis {
@@ -1288,7 +1309,7 @@ struct Basis {
     own: Option<usize>,
     k: Mat,
     factored: Rc<Factored>,
-    version: usize,
+    ranks: Vec<Option<Rc<Vec<(usize, Vec<Mat>)>>>>,
 }
 
 /// A block's matrices at the point before its decomposition: K_eff + o on its solved rows (its centred copies eliminated at
@@ -1502,7 +1523,7 @@ impl Fold {
     /// is missing or to be made again (`renew`); the diagonal moved by the change's first order; the remainder.
     #[allow(clippy::type_complexity)]
     #[allow(clippy::type_complexity)]
-    fn eliminate(&self, o: usize, e: Effective, path: &mut Path, renew: &[usize], moved: &mut Vec<Option<(Vec<C64>, Vec<Vec<f64>>)>>, work: &mut f64) -> Option<Eliminated> {
+    fn eliminate(&self, o: usize, e: Effective, path: &mut Path, renew: &[(Vec<Row>, Option<usize>)], moved: &mut Vec<Option<(Vec<C64>, Vec<Vec<f64>>)>>, work: &mut f64) -> Option<Eliminated> {
         let b = &self.blocks[o];
         let rows = b.rows[..b.solved].to_vec();
         let dressed = b.rows.len() > b.solved || rows.iter().any(|r| matches!(r, Row::Copy { .. }));
@@ -1528,10 +1549,37 @@ impl Fold {
                 }
             }
         }
-        let found = path.bases.iter().position(|x| x.rows == rows && x.own == own);
-        let at = match found {
-            Some(at) if !renew.contains(&at) => at,
-            _ => {
+        // The basis: the atom's own; beyond the share (`renew`, the keys whose reading passed it) first the nearest kept one
+        // of the key, then a new one.
+        let key = (rows.clone(), own);
+        let current = path.current.iter().position(|x| x.0 == key);
+        let tries = renew.iter().filter(|x| **x == key).count();
+        let nearest = |path: &Path, but: Option<usize>, work: &mut f64| -> Option<usize> {
+            let mut best: Option<(usize, f64)> = None;
+            for (i, x) in path.bases.iter().enumerate().filter(|(i, x)| x.rows == rows && x.own == own && Some(*i) != but) {
+                let mut d = kept.clone();
+                d.add_scaled(-C64::ONE, &x.k);
+                let size = d.frobenius();
+                *work += (d.rows * d.cols) as f64;
+                if best.is_none_or(|b| size < b.1) {
+                    best = Some((i, size));
+                }
+            }
+            best.map(|b| b.0)
+        };
+        let standing = current.map(|c| path.current[c].1);
+        let chosen = match (standing, tries) {
+            (Some(at), 0) => Some(at),
+            (None, 0) => nearest(path, None, work),
+            (_, 1) => nearest(path, standing, work),
+            _ => None,
+        };
+        if chosen.is_some() && chosen != standing {
+            path.looked += 1;
+        }
+        let at = match chosen {
+            Some(at) => at,
+            None => {
                 let factored = Rc::new(Factored::of(&k, work)?);
                 path.made += 1;
                 for (idx, _, _) in &factored.parts {
@@ -1539,23 +1587,19 @@ impl Fold {
                         path.condition = path.condition.max(x.condition);
                     }
                 }
-                let basis = Basis { rows, own, k, factored, version: 0 };
-                match found {
-                    Some(at) => {
-                        let version = path.bases[at].version + 1;
-                        path.bases[at] = Basis { version, ..basis };
-                        moved[at] = None;
-                        at
-                    }
-                    None => {
-                        path.bases.push(basis);
-                        moved.push(None);
-                        path.bases.len() - 1
-                    }
-                }
+                path.bases.push(Basis { rows, own, k, factored, ranks: vec![None; self.blocks.len()] });
+                moved.push(None);
+                path.bases.len() - 1
             }
         };
-        let (factored, version) = (path.bases[at].factored.clone(), path.bases[at].version);
+        match current {
+            Some(c) => path.current[c].1 = at,
+            None => path.current.push((key, at)),
+        }
+        while moved.len() < path.bases.len() {
+            moved.push(None);
+        }
+        let factored = path.bases[at].factored.clone();
         // The change since the basis was made in the basis, δK̃ = V†δV (the couplings the decomposition leaves out between
         // the lines with it): its diagonal the first order, each row's rest its reading's norm, with what the form dropped.
         if moved[at].is_none() {
@@ -1577,12 +1621,8 @@ impl Fold {
         }
         let (d, off) = moved[at].clone().unwrap();
         let diag: Vec<C64> = (0..b.solved).map(|i| factored.t[(i, i)] + d[i] - C64::real(b.value)).collect();
-        // The sources' ranks in the basis, made with it.
-        if path.ranks.len() != self.blocks.len() {
-            path.ranks = vec![None; self.blocks.len()];
-        }
-        let fresh = matches!(&path.ranks[o], Some((x, v, _)) if *x == at && *v == version);
-        if !fresh {
+        // The sources' ranks in the basis, made with it, kept with it.
+        if path.bases[at].ranks[o].is_none() {
             let n = self.size();
             let mut ranks = vec![];
             for (ci, comp) in self.components.iter().enumerate() {
@@ -1607,9 +1647,9 @@ impl Fold {
                     .collect();
                 ranks.push((ci, per));
             }
-            path.ranks[o] = Some((at, version, Rc::new(ranks)));
+            path.bases[at].ranks[o] = Some(Rc::new(ranks));
         }
-        let ranks = path.ranks[o].as_ref().unwrap().2.clone();
+        let ranks = path.bases[at].ranks[o].clone().unwrap();
         let to_static = e.source.as_ref().map(|x| factored.to(x, work));
         // The exact copies' couplings in the basis at the point.
         let nd = b.solved - ne;

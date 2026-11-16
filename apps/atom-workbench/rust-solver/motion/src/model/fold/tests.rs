@@ -1274,5 +1274,43 @@ fn a_fold_s_work_at_a_scene() {
         println!("   wall clock a step (single thread, after the first): the fold {:.1} µs, the force {:.1} µs", 1e6 * clocks[0], 1e6 * clocks[1]);
         println!("   {} path: {} decompositions made in {steps} steps (at {remade:?}), the reuse's largest reading {worst:.2e}, the decompositions' eigenvectors' largest condition {:.3}", if thermal { "a thermal atom's" } else { "the focus's" }, path.made, path.condition);
         }
+        // The cache shared by the atoms (Path): the focus's path twice (the second on what the first kept), and 88 thermal
+        // atoms (0.1 µm about the focus on each axis, random amplitudes, phases and periods), each 100 steps, atom after atom.
+        let mut path = Path::default();
+        for pass in 0..2 {
+            let before = path.made;
+            for step in 0..100 {
+                let s = -1.5 + 0.03 * step as f64;
+                fold.at([s * unit; 3], kappa_of(&fold), &mut path).unwrap();
+            }
+            println!("   shared, the focus's path, pass {pass}: {} decompositions made, {} kept in all, {} taken up again", path.made - before, path.bases_len(), path.looked);
+        }
+        let mut path = Path::default();
+        let mut seed = 1u64;
+        let mut u = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let started = std::time::Instant::now();
+        let mut after10 = 0;
+        for atom in 0..88 {
+            let shape: Vec<(f64, f64, f64)> = (0..3).map(|a| (0.2 * u(), 2.0 * std::f64::consts::PI * u(), [15.0, 17.0, 60.0][a] * (0.8 + 0.4 * u()))).collect();
+            path.current.clear();
+            for step in 0..100 {
+                let r: [f64; 3] = std::array::from_fn(|a| shape[a].0 * (2.0 * std::f64::consts::PI * step as f64 / shape[a].2 + shape[a].1).sin());
+                fold.at(r, kappa_of(&fold), &mut path).unwrap();
+            }
+            if atom == 9 {
+                after10 = path.made;
+            }
+        }
+        let each = started.elapsed().as_secs_f64() / 8800.0;
+        println!("   shared, 88 thermal atoms × 100 steps: {} decompositions made in all ({} by the first 10 atoms), {} taken up again; {:.1} µs a step (the fold alone)", path.made, after10, path.looked, 1e6 * each);
     }
+}
+
+/// A moving atom's wave vector (0.1 m/s along (1, 2, 3)/√14).
+fn kappa_of(fold: &Fold) -> [f64; 3] {
+    let speed = 0.1 / fold.hbar_over_mass;
+    [speed / 14f64.sqrt(), 2.0 * speed / 14f64.sqrt(), 3.0 * speed / 14f64.sqrt()]
 }
