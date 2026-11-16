@@ -631,9 +631,22 @@ fn sixty_random_systems_are_their_dense_sambe_within_the_read_truncation() {
             continue;
         }
         let mut depth = 4;
-        let mut ex = exact(&fold, &lattice(&fold, [0.0; 3], depth, &|_| true));
+        // The reference itself: a lattice whose eigenvectors are singular (an exactly degenerate, defective spectrum) is
+        // no reference -- counted beside the systems without a fold.
+        let l0 = lattice(&fold, [0.0; 3], depth, &|_| true);
+        if crate::linalg::eigen(&l0.m).is_none() {
+            println!("   trial {trial}: the dense lattice ({} nodes) does not decompose: no reference", l0.nodes.len());
+            absent += 1;
+            continue;
+        }
+        let mut ex = exact(&fold, &l0);
         loop {
-            let next = exact(&fold, &lattice(&fold, [0.0; 3], depth + 2, &|_| true));
+            let l = lattice(&fold, [0.0; 3], depth + 2, &|_| true);
+            if crate::linalg::eigen(&l.m).is_none() {
+                println!("   trial {trial}: the lattice at depth {} ({} nodes) does not decompose; depth {depth} taken", depth + 2, l.nodes.len());
+                break;
+            }
+            let next = exact(&fold, &l);
             let change = apart(&next, &ex).iter().fold(0.0_f64, |a, &b| a.max(b));
             ex = next;
             depth += 2;
@@ -659,7 +672,7 @@ fn sixty_random_systems_are_their_dense_sambe_within_the_read_truncation() {
         }
     }
     ratios.sort_by(f64::total_cmp);
-    println!("{compared} systems against the dense lattice, {absent} without a fold; gap over bound: median {:.3e}, largest {:.3e}", ratios[ratios.len() / 2], ratios[ratios.len() - 1]);
+    println!("{compared} systems against the dense lattice, {absent} without a fold or a reference; gap over bound: median {:.3e}, largest {:.3e}", ratios[ratios.len() / 2], ratios[ratios.len() - 1]);
     assert!(compared >= 40, "{compared} compared");
 }
 
@@ -1083,24 +1096,6 @@ fn a_fold_s_work_at_a_scene() {
                     changed = true;
                 }
             }
-            // The excited parts: a block leaves out a part whose nodes' omission readings sum within the share.
-            for (o, b) in fold.blocks.iter().enumerate() {
-                for (pi, part) in choice.parts.iter().enumerate() {
-                    let levels: Vec<usize> = part.iter().map(|&x| fold.excited_level[x]).collect();
-                    let here = b.rows.iter().any(|r| matches!(r, Row::Excited(x) if part.contains(x)));
-                    if !here || b.explicit.iter().any(|&p| part.contains(&fold.explicit[p - fold.ground.len()])) {
-                        continue;
-                    }
-                    let total: f64 = f.readings.iter().filter(|r| r.block == o && matches!(r.node, Node::Excited(l) if levels.contains(&l))).map(|r| r.omission).sum();
-                    if rate(total.sqrt()) <= share {
-                        for &(s, a) in &b.sources {
-                            choice.left.push(((fold.components[a].part, fold.ground[s]), pi));
-                        }
-                        statuses.push(format!("block {o}: part {pi} left out ({total:.1e})"));
-                        changed = true;
-                    }
-                }
-            }
             println!("set {set:?} round {round}: {statuses:?}");
             if !changed {
                 break;
@@ -1113,6 +1108,7 @@ fn a_fold_s_work_at_a_scene() {
         if fold.blocks.is_empty() {
             continue;
         }
+        for thermal in [false, true] {
         let mut path = Path::default();
         let (mut works, mut forces, mut remade, mut worst) = (vec![], vec![], vec![], 0.0_f64);
         let mut phases: Vec<(&'static str, f64)> = vec![];
@@ -1125,8 +1121,11 @@ fn a_fold_s_work_at_a_scene() {
         let mut clocks = [0.0_f64; 2];
         let mut last = None;
         for step in 0..steps {
+            // Through the focus (±1.5 µm along (1, 1, 1)/√3, 30 nm a step), or a thermal atom about it: 0.1 µm (30 µK's
+            // spread) on each axis at periods of 15, 17 and 60 steps.
             let s = -1.5 + 0.03 * step as f64;
-            let r = [s * unit; 3];
+            let phase = |period: f64| (2.0 * std::f64::consts::PI * step as f64 / period).sin();
+            let r = if thermal { [0.1 * phase(15.0), 0.1 * phase(17.0), 0.1 * phase(60.0)] } else { [s * unit; 3] };
             let made = path.made;
             let clock = std::time::Instant::now();
             let f = fold.at(r, kappa, &mut path).unwrap();
@@ -1184,5 +1183,7 @@ fn a_fold_s_work_at_a_scene() {
         );
         println!("   a step by phase: {}; passes one/two/three at {}/{}/{} steps", phases.iter().map(|(n, x)| format!("{n} {x:.0}")).collect::<Vec<_>>().join(", "), passes[1], passes[2], passes[3]);
         println!("   wall clock a step (single thread, after the first): the fold {:.1} µs, the force {:.1} µs", 1e6 * clocks[0], 1e6 * clocks[1]);
+        println!("   {} path: {} decompositions made in {steps} steps (at {remade:?}), the reuse's largest reading {worst:.2e}, the decompositions' eigenvectors' largest condition {:.3}", if thermal { "a thermal atom's" } else { "the focus's" }, path.made, path.condition);
+        }
     }
 }

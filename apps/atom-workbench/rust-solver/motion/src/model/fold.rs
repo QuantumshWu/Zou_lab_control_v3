@@ -54,11 +54,11 @@
 //! What a block decomposes, K_eff + o, changes along a path only with the light that reaches it: the outside forms' fields
 //! (the far light's intensity, slowly) and the copies' couplings (`Path`). Its Schur form V T V† made at one point serves the
 //! next ones with its diagonal moved to first order, T_kk + (V†δK V)_kk -- exact in z, in o, in every beam's Doppler shift,
-//! which only move the diagonal --, and what that leaves, the part of V†δK V off the diagonal, is read by the evaluation
-//! order's function, the block perturbation R(z) δK T, bounded part by part: the error on part P of a column is at most
-//! Σ_Q ‖δK_PQ‖ ‖Z_Q‖ over the distance of the column's energy from P's diagonal (within a part ‖δK_PP‖² less its
-//! diagonal's, V unitary; across parts the couplings the decomposition leaves out, and what changed of them), relative to
-//! the column's whole response (the readings' unit). Beyond the share the decomposition is made again at the point and the
+//! which only move the diagonal --, and what that leaves, the part of δK̃ = V†δK V off the diagonal, is read by the
+//! evaluation order's function, the block perturbation R(z) δK T, bounded row by row: the first-order error of row i of a
+//! column is (Σ_{k≠i} δK̃_ik Z_k)/(c − κ_i), at most Σ_L ‖δK̃_i,L∖i‖ ‖Z_L∖i‖ / |c − κ_i| over the lines L -- each row's
+//! own distance against the other rows' response line by line (the couplings the decomposition leaves out between the
+//! lines meet the other line's response, not this one's) --, relative to the column's whole response (the readings' unit). Beyond the share the decomposition is made again at the point and the
 //! passes solved again. Blocks of the same rows no copy dresses decompose the same 𝒦 and share one. A Schur
 //! form's entries off the diagonal within its rounding are zero (a normal part's form is its diagonal: 𝒦 on one line is
 //! Hermitian less iΓ/2, a centred copy's dressing Hermitian), what they held read with the rest.
@@ -308,17 +308,22 @@ impl Choice {
                 frames[s] = frames[s].plus(1, &shift);
             }
         }
-        let mut joins = vec![];
+        // The excited parts: the lines (D1, D2). Within a line every coupling stays in the decomposition, which is made once
+        // and kept along the path; between the lines there is only the decay's cross terms (7 THz off, a mixing near 10⁻⁶),
+        // read with the change (module documentation, # One decomposition along the path).
+        let labels = request.levels()?;
+        let mut lines: Vec<Manifold> = vec![];
+        let mut parts: Vec<Vec<usize>> = vec![];
         for x in 0..EXCITED {
-            for y in (0..EXCITED).filter(|&y| y != x) {
-                let a = d[(x, y)].abs() * 0.5 + forms(GROUND + x, GROUND + y) + request.hamiltonian[(GROUND + x, GROUND + y)].abs();
-                let delta = (e[GROUND + x] - e[GROUND + y]).abs();
-                if a > 0.0 && rate(admixture(a / delta).sqrt()) > share {
-                    joins.push((x, y));
+            let line = labels[GROUND + x].manifold;
+            match lines.iter().position(|l| *l == line) {
+                Some(at) => parts[at].push(x),
+                None => {
+                    lines.push(line);
+                    parts.push(vec![x]);
                 }
             }
         }
-        let parts = connected(EXCITED, &joins);
         Ok(Choice { frames, sets, parts, explicit: vec![], copies: vec![], left: vec![] })
     }
 }
@@ -1203,27 +1208,6 @@ impl Factored {
         Some(Factored { t, ends, parts, dropped })
     }
 
-    /// The first order of a change δ of the decomposed matrix (its rows'): the diagonal of V†δV, entry by entry of δ within
-    /// a part.
-    fn first_order(&self, delta: &Mat, work: &mut f64) -> Vec<C64> {
-        let mut d = vec![C64::ZERO; delta.rows];
-        for (idx, at, u) in &self.parts {
-            for (a, &i) in idx.iter().enumerate() {
-                for (c, &j) in idx.iter().enumerate() {
-                    let x = delta[(i, j)];
-                    if x == C64::ZERO {
-                        continue;
-                    }
-                    for b in 0..idx.len() {
-                        d[at + b] += u[(a, b)].conj() * x * u[(c, b)];
-                    }
-                    *work += idx.len() as f64;
-                }
-            }
-        }
-        d
-    }
-
     /// V† m (m's rows the block's), part by part.
     fn to(&self, m: &Mat, work: &mut f64) -> Mat {
         let mut out = Mat::zeros(m.rows, m.cols);
@@ -1271,7 +1255,7 @@ impl Factored {
             for l in k + 1..self.ends[k] {
                 acc += self.t[(k, l)] * z[l];
             }
-            z[k] = acc / (c - diag[k]);
+            z[k] = if acc == C64::ZERO { C64::ZERO } else { acc / (c - diag[k]) };
             *work += (self.ends[k] - k) as f64;
         }
         z
@@ -1288,6 +1272,8 @@ pub(crate) struct Path {
     bases: Vec<Basis>,
     ranks: Vec<Option<(usize, usize, Rc<Vec<(usize, Vec<Mat>)>>)>>,
     pub(crate) made: usize,
+    /// The largest condition of a made decomposition's eigenvectors (1: a normal one).
+    pub(crate) condition: f64,
 }
 
 struct Basis {
@@ -1307,8 +1293,9 @@ struct Effective {
 }
 
 /// A block's evaluation order at a point (module documentation, # Blocks): its solved rows, R₀, its basis (`Path`) with
-/// the diagonal at the point (first order, less o), per pair of its parts (P, Q) the norm its reading takes of what the
-/// diagonal leaves (`off`: δK_PQ, within a part off V's diagonal), its static split's source and its ranks in the basis.
+/// the diagonal at the point (first order, less o), per row of the basis and part the norm of what the diagonal leaves of
+/// the row on the part (`off`: ‖δK̃_i,P∖i‖, its own part's with what the Schur form dropped), its static split's source and
+/// its ranks in the basis.
 struct Eliminated {
     solved: usize,
     resolvent: Mat,
@@ -1334,21 +1321,23 @@ impl Eliminated {
         sylvester(&self.factored.t, &self.diag, &self.factored.ends, th, w, b, work)
     }
 
-    /// The reuse's error of a split's solution Z (Schur coordinates) at H's Schur diagonal `th` less w, per column, added to
-    /// `err` (per part and column, module documentation, # One decomposition along the path).
+    /// The reuse's error of a split's solution Z (Schur coordinates) at H's Schur diagonal `th` less w, per row and column,
+    /// added to `err` (module documentation, # One decomposition along the path): Σ_L ‖δK̃_i,L∖i‖ ‖Z_L∖i‖ / |c − κ_i|.
     fn reuse(&self, th: &Mat, w: f64, z: &Mat, err: &mut [Vec<f64>], work: &mut f64) {
         let parts = &self.factored.parts;
         for j in 0..z.cols {
             let c = th[(j, j)] - C64::real(w);
-            let norms: Vec<f64> = parts.iter().map(|(idx, at, _)| (*at..at + idx.len()).map(|k| z[(k, j)].norm_sqr()).sum::<f64>().sqrt()).collect();
+            let norms: Vec<f64> = parts.iter().map(|(idx, at, _)| (*at..at + idx.len()).map(|k| z[(k, j)].norm_sqr()).sum()).collect();
             for (p, (idx, at, _)) in parts.iter().enumerate() {
-                let gap = (*at..at + idx.len()).map(|k| (c - self.diag[k]).abs()).fold(f64::INFINITY, f64::min);
-                err[p][j] += match (0..parts.len()).map(|q| self.off[p][q] * norms[q]).sum::<f64>() {
-                    0.0 => 0.0,
-                    x => x / gap,
-                };
+                for i in *at..at + idx.len() {
+                    let x: f64 = (0..parts.len()).map(|q| self.off[i][q] * if q == p { (norms[q] - z[(i, j)].norm_sqr()).max(0.0) } else { norms[q] }.sqrt()).sum();
+                    err[i][j] += match x {
+                        0.0 => 0.0,
+                        x => x / (c - self.diag[i]).abs(),
+                    };
+                }
             }
-            *work += (2 * z.rows + parts.len() * parts.len()) as f64;
+            *work += (z.rows * (2 + parts.len())) as f64;
         }
     }
     fn adjoint(&self, th: &Mat, w: f64, b: &Mat, work: &mut f64) -> Mat {
@@ -1400,6 +1389,7 @@ impl Fold {
     /// The block's evaluation order at the point from its matrices and the path's basis: the basis found, or made where it
     /// is missing or to be made again (`renew`); the diagonal moved by the change's first order; the remainder.
     #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity)]
     fn eliminate(&self, o: usize, e: Effective, path: &mut Path, renew: &[usize], moved: &mut Vec<Option<(Vec<C64>, Vec<Vec<f64>>)>>, work: &mut f64) -> Option<Eliminated> {
         let b = &self.blocks[o];
         let rows = b.rows[..b.solved].to_vec();
@@ -1422,6 +1412,11 @@ impl Fold {
             _ => {
                 let factored = Rc::new(Factored::of(&k, work)?);
                 path.made += 1;
+                for (idx, _, _) in &factored.parts {
+                    if let Some(x) = crate::linalg::eigen(&k.block(idx, idx)) {
+                        path.condition = path.condition.max(x.condition);
+                    }
+                }
                 let basis = Basis { rows, own, k, factored, version: 0 };
                 match found {
                     Some(at) => {
@@ -1439,28 +1434,22 @@ impl Fold {
             }
         };
         let (factored, version) = (path.bases[at].factored.clone(), path.bases[at].version);
-        // The change since the basis was made: its first order on the diagonal; per pair of parts the norm of the rest
-        // (within a part ‖δ_PP‖² less its diagonal's, V unitary; across parts all of δ_PQ), and what the form dropped.
+        // The change since the basis was made in the basis, δK̃ = V†δV (the couplings the decomposition leaves out between
+        // the lines with it): its diagonal the first order, each row's rest its reading's norm, with what the form dropped.
         if moved[at].is_none() {
             let mut delta = e.k.clone();
             delta.add_scaled(-C64::ONE, &path.bases[at].k);
-            let d = factored.first_order(&delta, work);
-            let np = factored.parts.len();
-            let mut of_row = vec![0; b.solved];
-            for (p, (idx, _, _)) in factored.parts.iter().enumerate() {
-                idx.iter().for_each(|&i| of_row[i] = p);
-            }
-            let mut off = vec![vec![0.0; np]; np];
-            for i in 0..b.solved {
-                for j in 0..b.solved {
-                    off[of_row[i]][of_row[j]] += delta[(i, j)].norm_sqr();
+            let tilde = factored.to(&factored.to(&delta, work).adjoint(), work).adjoint();
+            let d: Vec<C64> = (0..b.solved).map(|i| tilde[(i, i)]).collect();
+            let mut off = vec![vec![0.0; factored.parts.len()]; b.solved];
+            for (p, (idx, at, _)) in factored.parts.iter().enumerate() {
+                for i in *at..at + idx.len() {
+                    for (q, (jdx, bt, _)) in factored.parts.iter().enumerate() {
+                        let sum: f64 = (*bt..bt + jdx.len()).filter(|&k| k != i).map(|k| tilde[(i, k)].norm_sqr()).sum();
+                        off[i][q] = sum.sqrt() + if q == p { factored.dropped[p] } else { 0.0 };
+                    }
                 }
             }
-            for (p, (idx, at, _)) in factored.parts.iter().enumerate() {
-                let first: f64 = (*at..at + idx.len()).map(|k| d[k].norm_sqr()).sum();
-                off[p][p] = (off[p][p] - first).max(0.0);
-            }
-            let off: Vec<Vec<f64>> = (0..np).map(|p| (0..np).map(|q| off[p][q].sqrt() + if p == q { factored.dropped[p] } else { 0.0 }).collect()).collect();
             *work += (delta.rows * delta.cols) as f64;
             moved[at] = Some((d, off));
         }
@@ -1546,7 +1535,8 @@ fn sylvester(tk: &Mat, diag: &[C64], ends: &[usize], th: &Mat, w: f64, b: &Mat, 
             for l in k + 1..ends[k] {
                 acc += tk[(k, l)] * z[(l, j)];
             }
-            z[(k, j)] = acc / (c - diag[k]);
+            // A row with nothing to answer answers nothing (a decoupled state, even where its energy is the column's).
+            z[(k, j)] = if acc == C64::ZERO { C64::ZERO } else { acc / (c - diag[k]) };
         }
     }
     *work += (m * n * n.saturating_sub(1) / 2 + n * (0..m).map(|k| ends[k] - k).sum::<usize>()) as f64;
@@ -1577,7 +1567,7 @@ fn sylvester_adjoint(tk: &Mat, diag: &[C64], ends: &[usize], th: &Mat, w: f64, b
             for l in (0..k).filter(|&l| ends[l] > k) {
                 acc += tk[(l, k)].conj() * z[(l, j)];
             }
-            z[(k, j)] = acc / (c - diag[k].conj());
+            z[(k, j)] = if acc == C64::ZERO { C64::ZERO } else { acc / (c - diag[k].conj()) };
         }
     }
     *work += (m * n * n.saturating_sub(1) / 2 + n * (0..m).map(|k| ends[k] - k).sum::<usize>()) as f64;
@@ -1636,7 +1626,7 @@ impl Stage {
             .zip(laid)
             .zip(&self.splits)
             .map(|((e, l), per)| {
-                let mut err = vec![vec![0.0; n]; e.factored.parts.len()];
+                let mut err = vec![vec![0.0; n]; e.solved];
                 for (z, &w) in per.iter().zip(&l.shifts) {
                     e.reuse(&self.triangle.t, w, z, &mut err, work);
                 }
