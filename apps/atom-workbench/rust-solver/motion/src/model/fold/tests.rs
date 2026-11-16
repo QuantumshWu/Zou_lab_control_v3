@@ -1927,7 +1927,7 @@ fn a_prototype_s_step_at_a_scene() {
                 let (mut sweeps, mut made, mut rounds) = (vec![], vec![], vec![]);
                 let (mut sweep_ticks, mut sweep_work, mut sweep_count) = (vec![0u64; 64], vec![0.0; 64], vec![0usize; 64]);
                 let mut most = [0.0_f64; 6];
-                let (mut left, mut most_omitted) = ([0usize; 2], 0.0_f64);
+                let (mut left, mut most_omitted, mut grown) = ([0usize; 2], 0.0_f64, 0usize);
                 for path in &paths {
                     let mut cache = Cache::default();
                     for r in path {
@@ -1936,6 +1936,7 @@ fn a_prototype_s_step_at_a_scene() {
                         wall.push(clock.elapsed().as_secs_f64());
                         left[0] += s.left[0];
                         left[1] += s.left[1];
+                        grown += s.grown;
                         most_omitted = most_omitted.max(s.omitted);
                         let s = (s.ticks, s.work, s.sweeps, s.made, s.rounds, s.sweep_ticks.clone(), s.sweep_work.clone(), [s.series, s.reuse, s.far, s.centring, s.ratio, s.copies]);
                         // The rest of the step's model: the outer nodes, the force (the three positions' cotangents), the
@@ -1986,7 +1987,7 @@ fn a_prototype_s_step_at_a_scene() {
                 sweeps.iter().for_each(|&k| hist[k.min(63)] += 1);
                 let shares: Vec<String> = hist.iter().enumerate().filter(|x| *x.1 > 0).map(|(k, c)| format!("{k}: {:.1}%", 100.0 * *c as f64 / steps as f64)).collect();
                 out += &format!(
-                    "   {split}(pace {pace:.3} ns a yardstick multiply-add): {:.2} µs a step ({:.2} µs on the {} steps of one round that made nothing; {} steps made a decomposition or took up a kept one, {} made in all), {:.0} multiply-adds a step ({:.0} on those), {:.2} ns each; sweeps {shares:?}; the largest readings: series {:.1e}, reuse {:.1e}, the far forms held {:.1e}, their centring {:.1e}, the sweeps' ratio {:.2}, the copies' rows left out {:.1e}",
+                    "   {split}(pace {pace:.3} ns a yardstick multiply-add): {:.2} µs a step ({:.2} µs on the {} steps of one round that made nothing; {} steps made a decomposition or took up a kept one, {} made in all, {grown} of them for a change of the kept levels), {:.0} multiply-adds a step ({:.0} on those), {:.2} ns each; sweeps {shares:?}; the largest readings: series {:.1e}, reuse {:.1e}, the far forms held {:.1e}, their centring {:.1e}, the sweeps' ratio {:.2}, the copies' rows left out {:.1e}",
                     us(&every),
                     us(&calm),
                     calm.len(),

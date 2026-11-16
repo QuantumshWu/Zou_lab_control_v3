@@ -12,8 +12,9 @@
 //! K_ref + Σ_t (c_t − c_t,ref) N_t with c_t = ε_k*ε_k' -- exactly, but for R₀'s own change (read).
 //!
 //! # What is kept (`Cache`, per block, by the far coordinates)
-//! A block with solved rows (`Near`): the Schur form V T V† of K_ref + o part by part (unitary, fold.rs `Factored`; the
-//! normal parts diagonal); per term the diagonal of V†N_tV and per row and part the norm of the rest; per beam its source in
+//! A block with solved rows (`Near`): the Schur form V T V† of K_ref + o on its kept levels' rows (# The levels kept and
+//! left out; unitary, fold.rs `Factored`: what couples them is one part; the normal parts diagonal); every level's data for
+//! the omitted ones' bound; per term the diagonal of V†N_tV and per row and part the norm of the rest; per beam its source in
 //! the basis Ỹ_l = V†X_l; per source vector Y_a = V†U_a; per centred copy vector R₀U_a†V (the copies' rows' response);
 //! ‖R₀‖. A block whose rows are all centred (`Far`): its response T = R₀B is its field coefficients times kept vectors, so
 //! its compression is the pair forms U_a†R₀U_b and U_a†R₀†R₀U_b in e_a*e_b.
@@ -21,7 +22,8 @@
 //! # A step
 //! 1. The light at the point: the beams' amplitudes, the fields' ε, the pairs' coefficients, the components' coefficients
 //!    e and beam factors f_l, every beam's Doppler shift w_l, Ĥ_PP.
-//! 2. The diagonal moved to first order, κ_i = T_ii − o + Σ_t Re δc_t (V†N_tV)_ii; the rest of the change is read.
+//! 2. The diagonal moved to first order, κ_i = T_ii − o + Σ_t Re δc_t (V†N_tV)_ii; the rest of the change is read (on the
+//!    kept rows; the omitted levels' by their bound).
 //! 3. Ṽ_l = f_l Ỹ_l, beam by beam; Ṽ = Σ_a e_a Y_a.
 //! 4. The far blocks' pair forms into H, A and M.
 //! 5. The series: Z_l solves Z_l H − (T + w_l − o) Z_l = Ṽ_l with H = Ĥ_PP + Σ Ṽ†Z the Bloch generator. A sweep is
@@ -50,6 +52,21 @@
 //! tangent's three axes, three sources of the same operators, with them, (i, a, l, j) at i·3Ln + a·Ln + l·n + j
 //! (`Tangent`): a sweep is one product on all of them and one triangular solve of rows Ln (3Ln) long -- the same formula,
 //! its loops over all splits and axes at once.
+//!
+//! # The levels kept and left out (DESIGN §1.1, §1.8; BRIEF_PROTO4 items 1, 2)
+//! A near block's excited levels are kept or left out; the kept ones are one Schur form (whatever couples them is in the
+//! decomposition, no series across them), the omitted ones are neither decomposed nor solved. Their coupling R to the kept
+//! rows enters their reading alone (`bound_levels`), a bound read after the first sweep without solving them: per level q,
+//! lane l and column j, with g = 1/dist(c_j − w_l, W(K_qq − o)) -- W the numerical range, its Gershgorin rectangle at the
+//! reference widened by Σ_t |δc_t| ‖N_t,qq‖ and R₀'s change: ‖(z − K)⁻¹‖ ≤ 1/dist(z, W(K)) for any K, normal or not --,
+//! ‖z_q‖ ≤ g (‖W_q‖ + ‖R_qK‖ ‖Z_K‖ + Σ_p∈Q ‖R_qp‖ x_p + Σ_i |Δ_ij| x_i) (the last two by their largest, a contraction), and
+//! what its absence leaves of the kept rows, ‖(c − w − K_KK)⁻¹‖ ‖R_Kq‖ ‖z_q‖ with ‖(z − D − N)⁻¹‖ ≤ 1/(δ − ν) (δ the Schur
+//! diagonal's distance, ν the strict upper part's norm with what the decomposition and the reuse leave). The reading is
+//! `Fold::at`'s omission reading of a node -- the response's share of the column and the potential it carries -- on these
+//! bounds, against the kept rows' response (at most the whole column's: the reading only grows). Beyond the share levels
+//! join, the largest first, and the block is decomposed again at the point; where a decomposition is made its kept levels
+//! leave while the bounds read within. At an atom's first step nothing is kept (a block with exact copies keeps every
+//! level: they couple all of them through the P layer).
 //!
 //! # The nodes (DESIGN §4.2)
 //! The integrator's outer nodes s = ±τ/2 (`Fold::prototype_nodes`): the decomposition, H, S and every split's response per
@@ -129,7 +146,16 @@ struct Near {
     /// The same at the step's outer nodes, with their pairs' coefficients less the decomposition's.
     pnode: [Parts; 2],
     o: usize,
+    /// The kept rows of the basis it stands on (`fit`), of all its excited rows `all`; per excited level its rows (of
+    /// `all`); the kept levels the next decomposition is to hold (`omit`'s, where they change).
     s: usize,
+    all: usize,
+    levels: Vec<Vec<usize>>,
+    wanted: Option<Vec<usize>>,
+    /// Whether the basis it stands on was made at this step (`omit` reads whether kept levels may leave).
+    fresh: bool,
+    /// The step's R₀ change factor ε_R (the reuse's and the omission bound's).
+    epsr: f64,
     nc: usize,
     value: f64,
     centre: Vec<usize>,
@@ -159,15 +185,6 @@ struct Near {
     err: Vec<f64>,
     norms: Vec<f64>,
     active: Vec<bool>,
-    /// Per row whether the point leaves it out (`omit`).
-    out: Vec<bool>,
-    /// R̃ Z of the last sweep (s × Ln, on the kept rows' hull).
-    rz: Vec<C64>,
-    /// The kept rows' hull [lo, hi) after `omit` (every row outside it left out, so zero) and R̃ on it ((hi − lo)²): the
-    /// products' rows and columns.
-    lo: usize,
-    hi: usize,
-    rtk: Vec<C64>,
     q: Vec<f64>,
     reading: f64,
     // Each sweep's, for the force (`Fold::prototype_force`): per split its diagonal's inverse and its response, and the
@@ -201,6 +218,40 @@ struct Near {
     zdnode: [Vec<C64>; 2],
     kednode: [Vec<C64>; 2],
     kdenode: [Vec<C64>; 2],
+}
+
+impl Near {
+    /// The step's buffers for a basis of `s` kept rows (of `all`: within the capacity the workspace gave them).
+    fn fit(&mut self, s: usize, n: usize) {
+        let (ln, nd) = (self.lanes * n, self.nd);
+        self.s = s;
+        self.kappa.resize(s, C64::ZERO);
+        self.off.resize(s * s.max(1), 0.0);
+        self.rho.resize(s, 0.0);
+        self.rhox.resize(s, 0.0);
+        for v in [&mut self.vt, &mut self.z, &mut self.rhs, &mut self.prod] {
+            v.resize(s * ln, C64::ZERO);
+        }
+        let [z0, z1] = &mut self.znode;
+        let [v0, v1] = &mut self.vnode;
+        for v in [&mut self.vtot, &mut self.ztot, &mut self.zold, &mut self.y, &mut self.stat, z0, z1, v0, v1] {
+            v.resize(s * n, C64::ZERO);
+        }
+        self.emit.resize(n * s, C64::ZERO);
+        for p in self.pnode.iter_mut() {
+            p.emit.resize(n * s, C64::ZERO);
+            p.stat.resize(s * n, C64::ZERO);
+        }
+        let [e0, e1] = &mut self.kednode;
+        let [d0, d1] = &mut self.kdenode;
+        for v in [&mut self.ked, &mut self.kde, e0, e1, d0, d1] {
+            v.resize(s * nd, C64::ZERO);
+        }
+        self.err.resize(s * n, 0.0);
+        self.norms.resize(s + 1, 0.0);
+        self.q.resize(s + 1, 0.0);
+        self.active.resize(s, true);
+    }
 }
 
 /// A near block's explicit parts at an outer node (`explicit_parts`): its pairs' coefficients less the decomposition's,
@@ -262,7 +313,26 @@ struct Far {
 struct NearBasis {
     at: Vec<C64>,
     weights: Vec<f64>,
+    /// The kept levels (of `Near::levels`) and their rows (of the block's excited rows, ascending): the rows of `f`.
+    kept: Vec<usize>,
+    rows: Vec<usize>,
     f: Factored,
+    /// ‖the Schur form's strict upper part‖_F with what it dropped (the kept part's departure from normality, `omit`'s
+    /// resolvent bound).
+    nu: f64,
+    /// Every level's data for the omission bound (`omit`), L levels, at the reference: per level the Gershgorin intervals of
+    /// K_qq − o's Hermitian part and of its decay i(K_qq − K_qq†) (a_lo, a_hi, b_lo, b_hi); per term ‖N_t,qq‖_F (T × L);
+    /// ‖K_qp‖_F of the reference and per term ‖N_t,qp‖_F ((T + 1) × L × L); per term the dressing's rows' norm on the
+    /// level (T × L, R₀'s change); per level the beams' sources' and the source vectors' column norms (L × splits × n,
+    /// L × v × n); the static source's and the explicit rows' emission's column norms ((T + 1) × L × n each).
+    gersh: Vec<[f64; 4]>,
+    lterm: Vec<f64>,
+    lpair: Vec<f64>,
+    ldress: Vec<f64>,
+    lbeam: Vec<f64>,
+    lvec: Vec<f64>,
+    lstat: Vec<f64>,
+    lemit: Vec<f64>,
     part: Vec<usize>,
     diag: Vec<C64>,
     norms: Vec<f64>,
@@ -279,11 +349,6 @@ struct NearBasis {
     /// Per term V†N_tV on the parts' entries (s × s, zero across parts: the tangent's ∂K̃); the emission on the block's rows
     /// C_qV (GROUND × s, the jumps and the photons).
     within: Vec<C64>,
-    /// R̃ = V†(K − K₀)V across the parts at the reference (s × s) and per term its part across them (T × s²): the levels'
-    /// series (module documentation # The levels' series), exact in the light.
-    cross0: Vec<C64>,
-    crossterms: Vec<C64>,
-    pairnorm: Vec<f64>,
     emit: [Vec<C64>; 3],
     /// The exact copies: per coupling vector (component g, k) V†U_k on (E rows, D rows of g) (ne × nd); what the
     /// decomposition's dressing adds to K̂_ED and K̂_DE at the reference beyond the bare drives (held); K̂_DD at the
@@ -338,6 +403,8 @@ pub(crate) struct Cache {
     at_far: Vec<Option<usize>>,
     pub(crate) made: usize,
     pub(crate) looked: usize,
+    /// Of `made`, those made because the kept levels changed (`omit`'s).
+    pub(crate) grown: usize,
 }
 
 /// A step's result: A, the metric less one, S⁻¹, G (n × n); the sweeps; the readings (rate units): the series' rest,
@@ -360,6 +427,8 @@ pub(crate) struct Step {
     pub(crate) left: [usize; 2],
     pub(crate) ratio: f64,
     pub(crate) made: usize,
+    /// Of `made`, those for a change of the kept levels.
+    pub(crate) grown: usize,
     pub(crate) rounds: usize,
     pub(crate) work: [f64; 10],
     pub(crate) ticks: [u64; 10],
@@ -492,8 +561,8 @@ fn unrate(r: f64) -> f64 {
 /// q_P = Σ_l (Σ_{i∈P} max_j |c⁰_j − w_l − κ_i|⁻² ‖Z¹_l,i‖²)^½ and a_j = ‖(H¹ − c⁰)_:,j‖. The parts of the smallest next order
 /// stay at the first sweep's while what they leave together, (Σ q_P²)^½ max_j a_j/‖Z_j‖, reads within the share (all
 /// blocks' parts on one share); the others go on.
-/// Returns what the held parts leave (ρ). The excited rows far from the column energies (a centred tier before) are these.
-/// The budget is the share's ρ less what the nodes left out at the point leave (`omit`): one share for both.
+/// Returns what the held parts leave (ρ). The budget is the share's ρ less what the levels left out leave (`omit`): one
+/// share for both.
 #[allow(clippy::too_many_arguments)]
 fn freeze(near: &mut [Near], cache: &Cache, h: &[C64], c: &[C64], whole: &[f64], order: &mut Vec<(f64, usize, usize)>, budget: f64, n: usize, work: &mut f64) -> f64 {
     let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
@@ -503,7 +572,6 @@ fn freeze(near: &mut [Near], cache: &Cache, h: &[C64], c: &[C64], whole: &[f64],
         most = most.max((a2 / whole[j]).sqrt());
     }
     order.clear();
-    let mut across: Vec<f64> = vec![];
     for (x, nb) in near.iter_mut().enumerate() {
         let basis = &cache.near[x][cache.at_near[x].unwrap()];
         let s = nb.s;
@@ -513,184 +581,349 @@ fn freeze(near: &mut [Near], cache: &Cache, h: &[C64], c: &[C64], whole: &[f64],
         if nb.nd > 0 {
             continue;
         }
-        for (pi, (idx, at, _)) in basis.f.parts.iter().enumerate().filter(|(_, x)| !nb.out[x.1]) {
-            // Its next order: the Δ residual's (q, against `most`) and R̃Z¹'s on its rows, (c − w − κ)⁻¹ R̃Z¹ by its gaps.
-            let (mut q, mut r) = (0.0, vec![0.0; n]);
+        for (pi, (idx, at, _)) in basis.f.parts.iter().enumerate() {
+            let mut q = 0.0;
             for (sp, &wl) in nb.shifts.iter().enumerate() {
                 let mut sum = 0.0;
-                let mut rs = vec![0.0; n];
                 for i in *at..at + idx.len() {
                     let gap = (0..n).map(|j| (c[j] - C64::real(wl) - nb.kappa[i]).norm_sqr()).fold(f64::INFINITY, f64::min);
                     let row: f64 = nb.z[i * ln + sp * n..i * ln + sp * n + n].iter().map(|z| z.norm_sqr()).sum();
                     sum += row / gap;
-                    for j in 0..n {
-                        rs[j] += nb.rz[i * ln + sp * n + j].norm_sqr() / gap;
-                    }
                 }
                 q += sum.sqrt();
-                r.iter_mut().zip(&rs).for_each(|(a, b)| *a += b.sqrt());
             }
             nb.q[pi] = q;
             order.push((q, x, pi));
-            across.push((0..n).filter(|&j| whole[j] > floor).map(|j| r[j] / whole[j].sqrt()).fold(0.0, f64::max));
         }
         *work += (nb.shifts.len() * s * n) as f64;
     }
-    let mut keyed: Vec<((f64, usize, usize), f64)> = order.iter().copied().zip(across).collect();
-    keyed.sort_unstable_by(|a, b| a.0 .0.total_cmp(&b.0 .0));
-    let limit = budget;
-    let (mut sum, mut rsum) = (0.0, 0.0);
-    for &((q, x, pi), r) in keyed.iter() {
-        if (sum + q * q).sqrt() * most + rsum + r > limit {
+    order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let mut sum = 0.0;
+    for &(q, x, pi) in order.iter() {
+        if (sum + q * q).sqrt() * most > budget {
             break;
         }
         sum += q * q;
-        rsum += r;
         let nb = &mut near[x];
         let (idx, at, _) = &cache.near[x][cache.at_near[x].unwrap()].f.parts[pi];
         for i in *at..at + idx.len() {
             nb.active[i] = false;
         }
     }
-    sum.sqrt() * most + rsum
+    sum.sqrt() * most
 }
 
-/// The excited nodes the point leaves out (module documentation, # Leaving nodes out): after the first sweep a near block's
-/// Schur part P reads ω_P = max_j max(‖Z_P,j‖²/W_j, pot(2|Re(Ê_P Z_P)_jj|)) and a far block ω_F = max_j max(M_F,jj/W_j,
-/// pot(2|Re H_F,jj|)) -- W_j the column's whole excited response, pot(ΔV) = (√(1 + ΔV/2k_BT) − 1)² the potential's
-/// (`Fold::readings`' omission reading of a node, the same function); the smallest go while their sum reads within the
-/// share, and are not solved again: a part's rows set to zero (out of every later sweep, the tangent, the force), a far
-/// block's forms out of H. Returns the ρ they leave together; `tally` counts the parts and far blocks left out. A block
-/// with exact copies goes on whole (its parts coupled through the P layer, as `freeze`).
+/// The distance of z from the rectangle [a_lo − r, a_hi + r] × [−b_hi/2 − r, −b_lo/2 + r] (a level's numerical range
+/// widened by r, `bound_levels`), zero inside.
+fn outside(z: C64, g: &[f64; 4], r: f64) -> f64 {
+    let x = (g[0] - r - z.re).max(z.re - g[1] - r).max(0.0);
+    let y = (-0.5 * g[3] - r - z.im).max(z.im + 0.5 * g[2] - r).max(0.0);
+    x.hypot(y)
+}
+
+/// One block's omitted levels bounded (module documentation, # The levels left out): per level q of `omitted` and column j
+/// the bound N_q,j on its response (`sizes`, L × n), δ_q,j on what its absence leaves of the kept rows' (`backs`), and its
+/// potential's numerator (`shifts`), at the column energies c and the series' part Δ (its columns' 1-norms `dcol`). Where a
+/// bound does not exist (a column energy on a level's widened numerical range, or the omitted levels' own coupling and Δ's
+/// not contracting) the level that holds it the most, its largest γ (or β's that do not exist).
 #[allow(clippy::too_many_arguments)]
-fn omit(near: &mut [Near], far: &mut [Far], cache: &Cache, hbase: &mut [C64], c: &[C64], whole: &mut [f64], change: &mut [f64], tally: &mut [usize; 2], share: f64, thermal: f64, n: usize, work: &mut f64) -> f64 {
-    let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
+fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, c: &[C64], dcol: &[f64], sizes: &mut [f64], backs: &mut [f64], shifts: &mut [f64], n: usize, work: &mut f64) -> Result<(), usize> {
+    let nl = nb.levels.len();
+    let terms = nb.terms.len();
+    let (s, ln) = (nb.s, nb.lanes * n);
+    sizes[..nl * n].fill(0.0);
+    backs[..nl * n].fill(0.0);
+    shifts[..nl * n].fill(0.0);
+    let q_of: Vec<usize> = (0..nl).filter(|&q| omitted[q]).collect();
+    if q_of.is_empty() {
+        return Ok(());
+    }
+    // The level pairs' coupling and each level's numerical range's widening at the point: the reference's and the terms'
+    // |δc_t| (exact in the light), R₀'s change ε_R Σ_t |c_t| on the dressing's rows.
+    let mut pair = basis.lpair[..nl * nl].to_vec();
+    let (mut radius, mut held) = (vec![0.0_f64; nl], vec![0.0_f64; nl]);
+    for (t, &p) in nb.terms.iter().enumerate() {
+        let d = nb.delta[t].abs();
+        for q in 0..nl {
+            radius[q] += d * basis.lterm[t * nl + q];
+            held[q] += nb.epsr * at.coef[p].abs() * basis.ldress[t * nl + q];
+        }
+        if d > 0.0 {
+            for (a, y) in pair.iter_mut().zip(&basis.lpair[(t + 1) * nl * nl..(t + 2) * nl * nl]) {
+                *a += d * y;
+            }
+        }
+    }
+    for q in 0..nl {
+        radius[q] += held[q];
+        for p in 0..nl {
+            pair[q * nl + p] += held[q];
+        }
+    }
+    *work += (terms * nl * (nl + 2)) as f64;
+    // The kept rows' response per lane and column, and the kept part's resolvent bound per lane and column: the Schur form's
+    // diagonal's least distance δ less its departure from normality ν (the strict upper part, what it dropped, the reuse's
+    // off-diagonal change and R₀'s): ‖(z − D − N)⁻¹‖ ≤ Σ_k ‖N‖^k/δ^{k+1} = 1/(δ − ν).
+    let mut zk = vec![0.0_f64; ln];
+    for i in 0..s {
+        for (u, z) in zk.iter_mut().zip(&nb.z[i * ln..(i + 1) * ln]) {
+            *u += z.norm_sqr();
+        }
+    }
+    zk.iter_mut().for_each(|u| *u = u.sqrt());
+    let parts = basis.f.parts.len().max(1);
+    let nu = basis.nu + (0..s).map(|i| nb.off[i * parts..(i + 1) * parts].iter().sum::<f64>() + nb.rho[i]).fold(0.0, f64::max);
+    let mut gk = vec![0.0_f64; ln];
+    if s > 0 {
+        for (sp, &wl) in nb.shifts.iter().enumerate() {
+            for j in 0..n {
+                let d = (0..s).map(|i| (c[j] - C64::real(wl) - nb.kappa[i]).abs()).fold(f64::INFINITY, f64::min);
+                gk[sp * n + j] = if d > nu { 1.0 / (d - nu) } else { f64::INFINITY };
+            }
+        }
+    }
+    let ek: Vec<f64> = (0..n).map(|j| nb.emit[j * s..(j + 1) * s].iter().map(|x| x.norm_sqr()).sum::<f64>().sqrt()).collect();
+    *work += (s * ln + ln * s / 4 + n * s) as f64;
+    // Per omitted level q, lane l and column j: x ≤ g (src + ‖R_qK‖‖Z_K‖ + Σ_p∈Q ‖R_qp‖ x_p + Σ_i |Δ_ij| x_i), g = 1/dist(z,
+    // W(K_qq)) the numerical range's bound (any matrix, normal or not); the omitted levels' own coupling and Δ's by their
+    // largest, x ≤ β + γ X with X = max β/(1 − γ).
+    let mut beta = vec![0.0_f64; q_of.len() * ln];
+    let mut gam = vec![0.0_f64; q_of.len() * ln];
+    for (k, &q) in q_of.iter().enumerate() {
+        let rqk = (0..nl).filter(|&p| !omitted[p]).map(|p| pair[q * nl + p].powi(2)).sum::<f64>().sqrt();
+        let rqq: f64 = q_of.iter().filter(|&&p| p != q).map(|&p| pair[q * nl + p]).sum();
+        for sp in 0..nb.lanes {
+            let beam = sp < nb.splits.len();
+            let (wl, fl) = if beam { (nb.shifts[sp], at.f[nb.splits[sp].0][nb.splits[sp].1].abs()) } else { (0.0, 0.0) };
+            for j in 0..n {
+                let src = if beam {
+                    fl * basis.lbeam[(q * nb.splits.len() + sp) * n + j]
+                } else {
+                    let mut v = basis.lstat[q * n + j];
+                    for t in 0..terms {
+                        v += nb.delta[t].abs() * basis.lstat[((t + 1) * nl + q) * n + j];
+                    }
+                    v + held[q]
+                };
+                // The denominator (c_j − w_l) − (K_qq − o): z against the numerical range of K_qq − o.
+                let z = c[j] - C64::real(wl);
+                let d = outside(z, &basis.gersh[q], radius[q]);
+                let g = if d > 0.0 { 1.0 / d } else { f64::INFINITY };
+                beta[k * ln + sp * n + j] = g * (src + rqk * zk[sp * n + j]);
+                gam[k * ln + sp * n + j] = g * (rqq + dcol[j]);
+            }
+        }
+        *work += (nb.lanes * n * 3) as f64;
+    }
+    for sp in 0..nb.lanes {
+        let (mut gmax, mut bmax) = (0.0_f64, 0.0_f64);
+        for k in 0..q_of.len() {
+            for j in 0..n {
+                gmax = gmax.max(gam[k * ln + sp * n + j]);
+                bmax = bmax.max(beta[k * ln + sp * n + j]);
+            }
+        }
+        if bmax == 0.0 {
+            continue;
+        }
+        if !(gmax < 1.0 && bmax.is_finite()) {
+            let worst = |k: usize| (0..n).map(|j| if beta[k * ln + sp * n + j].is_finite() { gam[k * ln + sp * n + j] } else { f64::INFINITY }).fold(0.0, f64::max);
+            let k = (0..q_of.len()).max_by(|&a, &b| worst(a).total_cmp(&worst(b))).unwrap();
+            return Err(q_of[k]);
+        }
+        let top = bmax / (1.0 - gmax);
+        for (k, &q) in q_of.iter().enumerate() {
+            let rkq = (0..nl).filter(|&p| !omitted[p]).map(|p| pair[p * nl + q].powi(2)).sum::<f64>().sqrt();
+            for j in 0..n {
+                let x = beta[k * ln + sp * n + j] + gam[k * ln + sp * n + j] * top;
+                sizes[q * n + j] += x;
+                if rkq > 0.0 {
+                    backs[q * n + j] += gk[sp * n + j] * rkq * x;
+                }
+            }
+        }
+    }
+    // The potential's numerator: |Re(Ê_Q Z_Q)_jj| and its kept rows' change, ‖Ê_q,j‖ N_q,j + ‖Ê_K,j‖ δ_q,j; Ê on a ground
+    // column Ṽ† (‖Ṽ_q,j‖ ≤ Σ_a |e_a| ‖Y_a,q,j‖), on an explicit one its emission row (reference and terms).
+    for &q in &q_of {
+        for j in 0..n {
+            let eq = if nb.xs.contains(&j) {
+                let mut v = basis.lemit[q * n + j];
+                for t in 0..terms {
+                    v += nb.delta[t].abs() * basis.lemit[((t + 1) * nl + q) * n + j];
+                }
+                v + held[q]
+            } else {
+                nb.vectors.iter().enumerate().map(|(a, &(cc, k))| at.e[cc][k].abs() * basis.lvec[(q * nb.vectors.len() + a) * n + j]).sum()
+            };
+            shifts[q * n + j] = eq * sizes[q * n + j] + if backs[q * n + j] > 0.0 { ek[j] * backs[q * n + j] } else { 0.0 };
+        }
+        *work += (n * nb.vectors.len()) as f64;
+    }
+    Ok(())
+}
+
+/// A block's levels' bounds at a point (`bound_levels`): per level whether it is left out, N, δ and the potential's
+/// numerator (L × n each).
+type Bounds = (Vec<bool>, Vec<f64>, Vec<f64>, Vec<f64>);
+
+/// The omitted levels' reading with the columns' denominators `den` (module documentation, # The levels left out): per
+/// column (√(Σ N²) + Σ δ)²/W_j and pot(2 Σ shifts) over every block's omitted levels, the largest (ρ).
+fn read_omitted(per: &[Bounds], den: &[f64], thermal: f64, n: usize) -> f64 {
     let pot = |dv: f64| ((1.0 + dv / (2.0 * thermal)).sqrt() - 1.0).powi(2);
-    let mut units: Vec<(f64, usize, usize, usize)> = vec![];
-    for (x, nb) in near.iter_mut().enumerate() {
-        if nb.nd > 0 {
+    let total: f64 = den.iter().sum::<f64>() + per.iter().map(|p| (0..p.0.len()).filter(|&q| p.0[q]).map(|q| p.1[q * n..(q + 1) * n].iter().map(|x| x * x).sum::<f64>()).sum::<f64>()).sum::<f64>();
+    let floor = (crate::units::rounding(n) * total.sqrt()).powi(2);
+    let mut most = 0.0_f64;
+    for j in 0..n {
+        let (mut sq, mut back, mut dv) = (0.0, 0.0, 0.0);
+        for (om, sz, bk, sh) in per {
+            for q in (0..om.len()).filter(|&q| om[q]) {
+                sq += sz[q * n + j].powi(2);
+                back += bk[q * n + j];
+                dv += sh[q * n + j];
+            }
+        }
+        let size = (sq.sqrt() + back).powi(2);
+        if size + den[j] <= floor {
             continue;
         }
-        // A part's response to first order across the levels is its own Z¹ and (c − w − κ)⁻¹(R̃Z¹) on its rows: bounded
-        // part by part, Σ_Q ‖R̃_PQ‖ ‖Z¹_Q,l,j‖ over the part's least gap, ‖R̃_PQ‖ ≤ its reference's plus Σ_t |δc_t| its terms'.
-        let (s, ln) = (nb.s, nb.lanes * n);
-        let basis = &cache.near[x][cache.at_near[x].unwrap()];
-        let np = basis.f.parts.len();
-        let mut rn = basis.pairnorm[..np * np].to_vec();
-        for (t, d) in nb.delta.iter().enumerate() {
-            let size = d.abs();
-            for (r, y) in rn.iter_mut().zip(&basis.pairnorm[(t + 1) * np * np..(t + 2) * np * np]) {
-                *r += size * y;
-            }
-        }
-        // Per part, lane and column ‖Z¹_Q,l,j‖.
-        let mut zn = vec![0.0_f64; np * ln];
-        for (q, (idx, at, _)) in basis.f.parts.iter().enumerate() {
-            for i in *at..at + idx.len() {
-                for (u, z) in zn[q * ln..(q + 1) * ln].iter_mut().zip(&nb.z[i * ln..(i + 1) * ln]) {
-                    *u += z.norm_sqr();
-                }
-            }
-        }
-        zn.iter_mut().for_each(|u| *u = u.sqrt());
-        *work += (np * np * nb.delta.len() + s * ln / 4) as f64;
-        for (pi, (idx, at, _)) in basis.f.parts.iter().enumerate() {
-            let mut across = vec![0.0; n];
-            for (sp, &wl) in nb.shifts.iter().enumerate() {
-                let gap = (*at..at + idx.len()).flat_map(|i| (0..n).map(move |j| (i, j))).map(|(i, j)| (c[j] - C64::real(wl) - nb.kappa[i]).abs()).fold(f64::INFINITY, f64::min);
-                for j in 0..n {
-                    across[j] += (0..np).filter(|&q| q != pi).map(|q| rn[pi * np + q] * zn[q * ln + sp * n + j]).sum::<f64>() / gap;
-                }
-            }
-            let mut w = 0.0_f64;
-            for j in (0..n).filter(|&j| whole[j] > floor) {
-                let (mut size, mut dv, mut e2) = (0.0, C64::ZERO, 0.0);
-                for i in *at..at + idx.len() {
-                    size += nb.ztot[i * n + j].norm_sqr();
-                    dv += nb.emit[j * s + i] * nb.ztot[i * n + j];
-                    e2 += nb.emit[j * s + i].norm_sqr();
-                }
-                let size = (size.sqrt() + across[j]).powi(2);
-                w = w.max((size / whole[j]).max(pot(2.0 * (dv.re.abs() + e2.sqrt() * across[j]))));
-            }
-            units.push((w, 0, x, pi));
-        }
-        *work += (nb.shifts.len() * s * n) as f64;
+        let w = if size > 0.0 { size / den[j] } else { 0.0 };
+        most = most.max(w.max(pot(2.0 * dv)));
     }
-    for (x, fb) in far.iter().enumerate() {
-        let w = (0..n).filter(|&j| whole[j] > floor).map(|j| (fb.mf[j * n + j].re / whole[j]).max(pot(2.0 * fb.hf[j * n + j].re.abs()))).fold(0.0, f64::max);
-        units.push((w, 1, x, 0));
-    }
-    units.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    most.sqrt()
+}
+
+/// The levels and far blocks the point leaves out (module documentation, # The levels left out), read after the first sweep
+/// without solving the omitted levels: their bounds (`bound_levels`) read together (`read_omitted`) against each column's
+/// whole excited response W_j -- the kept rows' and the far blocks', at most the whole column's, so the reading only
+/// grows. Within the share: the far blocks of the smallest reading go too while the whole stays within (their M_F,jj and
+/// H_F,jj exact), out of H. Beyond it: levels join, the largest first (its bound's share of its column, the joined ones'
+/// bounds counted in the columns as their responses), until the bounds read within; their blocks' `wanted` say the kept
+/// levels the next decomposition holds. Returns the ρ left out and whether levels joined.
+#[allow(clippy::too_many_arguments)]
+fn omit(near: &mut [Near], far: &mut [Far], cache: &Cache, at: &Placed, hbase: &mut [C64], h: &mut [C64], whole: &mut [f64], tally: &mut [usize; 2], share: f64, thermal: f64, n: usize, work: &mut f64) -> (f64, bool) {
+    let pot = |dv: f64| ((1.0 + dv / (2.0 * thermal)).sqrt() - 1.0).powi(2);
+    let c: Vec<C64> = (0..n).map(|j| h[j * n + j]).collect();
+    let dcol: Vec<f64> = (0..n).map(|j| (0..n).filter(|&i| i != j).map(|i| h[i * n + j].abs()).sum()).collect();
     let limit = unrate(share);
-    let mut sum = 0.0_f64;
-    for &(w, kind, x, pi) in &units {
-        if (sum + w).sqrt() > limit {
-            break;
-        }
-        sum += w;
-        tally[kind] += 1;
-        if kind == 1 {
-            let fb = &mut far[x];
-            fb.omitted = true;
-            for (h, f) in hbase.iter_mut().zip(&fb.hf) {
-                *h -= *f;
-            }
-            for j in 0..n {
-                whole[j] -= fb.mf[j * n + j].re;
-            }
-            continue;
-        }
-        let nb = &mut near[x];
-        let (idx, at, _) = &cache.near[x][cache.at_near[x].unwrap()].f.parts[pi];
-        let (s, ln) = (nb.s, nb.lanes * n);
-        let last = nb.zs.len() - s * ln;
-        let lastt = nb.ztots.len() - s * n;
-        for i in *at..at + idx.len() {
-            nb.out[i] = true;
-            nb.active[i] = false;
-            for j in 0..n {
-                let z = nb.ztot[i * n + j];
-                whole[j] -= z.norm_sqr();
-                change[j] -= z.norm_sqr();
-                for p in 0..n {
-                    nb.bloch[p * n + j] -= nb.emit[p * s + i] * z;
-                }
-            }
-            nb.z[i * ln..(i + 1) * ln].fill(C64::ZERO);
-            nb.zs[last + i * ln..last + (i + 1) * ln].fill(C64::ZERO);
-            nb.ztot[i * n..(i + 1) * n].fill(C64::ZERO);
-            nb.ztots[lastt + i * n..lastt + (i + 1) * n].fill(C64::ZERO);
-        }
-        *work += (idx.len() * n * n) as f64;
-    }
-    whole.iter_mut().for_each(|w| *w = w.max(0.0));
-    change.iter_mut().for_each(|w| *w = w.max(0.0));
-    // Each block's kept rows' hull, R̃ on it (its reference and the terms' δc_t: exact in the light) and R̃Z¹ there (the
-    // next sweep's; `freeze` reads it).
+    let mut per: Vec<Bounds> = vec![];
+    let mut grow = false;
     for (x, nb) in near.iter_mut().enumerate() {
         let basis = &cache.near[x][cache.at_near[x].unwrap()];
-        let (s, ln) = (nb.s, nb.lanes * n);
-        nb.lo = (0..s).find(|&i| !nb.out[i]).unwrap_or(0);
-        nb.hi = (0..s).rev().find(|&i| !nb.out[i]).map_or(0, |i| i + 1).max(nb.lo);
-        let (lo, h) = (nb.lo, nb.hi - nb.lo);
-        nb.rtk.resize(h * h, C64::ZERO);
-        for i in 0..h {
-            nb.rtk[i * h..(i + 1) * h].copy_from_slice(&basis.cross0[(lo + i) * s + lo..(lo + i) * s + lo + h]);
+        let nl = nb.levels.len();
+        let omitted: Vec<bool> = (0..nl).map(|q| !basis.kept.contains(&q)).collect();
+        let (mut sz, mut bk, mut sh) = (vec![0.0; nl * n], vec![0.0; nl * n], vec![0.0; nl * n]);
+        if let Err(q) = bound_levels(nb, basis, &omitted, at, &c, &dcol, &mut sz, &mut bk, &mut sh, n, work) {
+            // No bound: the level that holds it the most joins.
+            let mut kept = basis.kept.clone();
+            kept.push(q);
+            kept.sort_unstable();
+            nb.wanted = Some(kept);
+            grow = true;
         }
-        for (t, &d) in nb.delta.iter().enumerate() {
-            if d == C64::ZERO {
+        per.push((omitted, sz, bk, sh));
+    }
+    if grow {
+        return (f64::INFINITY, true);
+    }
+    let mut rho = read_omitted(&per, whole, thermal, n);
+    *work += (n * per.iter().map(|p| p.0.len()).sum::<usize>()) as f64;
+    if rho > limit {
+        let mut den = whole.to_vec();
+        while rho > limit {
+            let mut best: Option<(f64, usize, usize)> = None;
+            for (x, (om, sz, ..)) in per.iter().enumerate() {
+                for q in (0..om.len()).filter(|&q| om[q]) {
+                    let key = (0..n).map(|j| sz[q * n + j].powi(2) / (den[j] + sz[q * n + j].powi(2)).max(f64::MIN_POSITIVE)).fold(0.0, f64::max);
+                    if best.is_none_or(|b| key > b.0) {
+                        best = Some((key, x, q));
+                    }
+                }
+            }
+            let Some((_, x, q)) = best else { break };
+            for j in 0..n {
+                den[j] += per[x].1[q * n + j].powi(2);
+            }
+            per[x].0[q] = false;
+            rho = read_omitted(&per, &den, thermal, n);
+        }
+        for (x, (nb, (om, ..))) in near.iter_mut().zip(&per).enumerate() {
+            let kept: Vec<usize> = (0..om.len()).filter(|&q| !om[q]).collect();
+            if kept != cache.near[x][cache.at_near[x].unwrap()].kept {
+                nb.wanted = Some(kept);
+            }
+        }
+        return (rho, true);
+    }
+    // Where a decomposition was made at this step its kept levels may leave, the smallest first, while the bounds (each with
+    // the whole kept response, its own in it, and the column less its bound) read within: a new one without them.
+    let mut den = whole.to_vec();
+    let mut left = false;
+    for (x, nb) in near.iter_mut().enumerate() {
+        let basis = &cache.near[x][cache.at_near[x].unwrap()];
+        if !nb.fresh || nb.nd > 0 {
+            continue;
+        }
+        let nl = nb.levels.len();
+        let mut units: Vec<(f64, usize)> = vec![];
+        for &q in &basis.kept {
+            let mut om = per[x].0.clone();
+            om[q] = true;
+            let (mut sz, mut bk, mut sh) = (vec![0.0; nl * n], vec![0.0; nl * n], vec![0.0; nl * n]);
+            if bound_levels(nb, basis, &om, at, &c, &dcol, &mut sz, &mut bk, &mut sh, n, work).is_ok() {
+                units.push(((0..n).map(|j| (sz[q * n + j] + bk[q * n + j]).powi(2) / den[j].max(f64::MIN_POSITIVE)).fold(0.0, f64::max), q));
+            }
+        }
+        units.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, q) in units {
+            let mut om = per[x].0.clone();
+            om[q] = true;
+            let (mut sz, mut bk, mut sh) = (vec![0.0; nl * n], vec![0.0; nl * n], vec![0.0; nl * n]);
+            if bound_levels(nb, basis, &om, at, &c, &dcol, &mut sz, &mut bk, &mut sh, n, work).is_err() {
                 continue;
             }
-            let m = &basis.crossterms[t * s * s..(t + 1) * s * s];
-            for i in 0..h {
-                crate::linalg::mul_add(false, &mut nb.rtk[i * h..(i + 1) * h], d, &m[(lo + i) * s + lo..(lo + i) * s + lo + h]);
+            let d: Vec<f64> = (0..n).map(|j| (den[j] - sz[q * n + j].powi(2)).max(0.0)).collect();
+            let mut trial = per.clone();
+            trial[x] = (om, sz, bk, sh);
+            if read_omitted(&trial, &d, thermal, n) <= limit {
+                per = trial;
+                den = d;
+                left = true;
             }
         }
-        fused_product_into(&nb.rtk, &nb.z[lo * ln..(lo + h) * ln], (h, h, ln), &mut nb.rz[lo * ln..(lo + h) * ln]);
-        *work += (nb.delta.len() * h * h + h * h * ln) as f64;
+        if left {
+            let kept: Vec<usize> = (0..nl).filter(|&q| !per[x].0[q]).collect();
+            if kept != basis.kept {
+                nb.wanted = Some(kept);
+            }
+        }
     }
-    sum.sqrt()
+    if left && near.iter().any(|nb| nb.wanted.is_some()) {
+        return (read_omitted(&per, &den, thermal, n), true);
+    }
+    tally[0] += per.iter().map(|p| p.0.iter().filter(|&&o| o).count()).sum::<usize>();
+    // The far blocks of the smallest reading go too while the whole reads within: each its exact M_F,jj and H_F,jj.
+    let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
+    let mut units: Vec<(f64, usize)> = far.iter().enumerate().map(|(x, fb)| ((0..n).filter(|&j| whole[j] > floor).map(|j| (fb.mf[j * n + j].re / whole[j]).max(pot(2.0 * fb.hf[j * n + j].re.abs()))).fold(0.0, f64::max), x)).collect();
+    units.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    for (w, x) in units {
+        if (rho * rho + w).sqrt() > limit {
+            break;
+        }
+        rho = (rho * rho + w).sqrt();
+        tally[1] += 1;
+        let fb = &mut far[x];
+        fb.omitted = true;
+        for ((a, b), f) in hbase.iter_mut().zip(h.iter_mut()).zip(&fb.hf) {
+            *a -= *f;
+            *b -= *f;
+        }
+        for j in 0..n {
+            whole[j] -= fb.mf[j * n + j].re;
+        }
+    }
+    whole.iter_mut().for_each(|w| *w = w.max(0.0));
+    (rho, false)
 }
 
 /// A near block's copies' rows T_C = Σ_a e_a* (R₀U_a†V Z + R₀U_a(X, C)†) into `nb.tc` (module documentation, 7).
@@ -756,12 +989,9 @@ fn copies_back(copies: &[(usize, usize, usize)], groups: &[(usize, Vec<usize>)],
 /// the middle it is the Bloch generator's, in H) + Z†(K̂Z + B), B the source (s × n: Ṽ and the static lane's), K̂ the kept
 /// Schur form with the step's diagonal κ (module documentation, 7); `y` = K̂Z on return (s × n).
 #[allow(clippy::too_many_arguments)]
-fn compress(kappa: &[C64], t: &Mat, ends: &[usize], (rtk, lo, hi): (&[C64], usize, usize), z: &[C64], emit: Option<&[C64]>, src: &[C64], y: &mut [C64], a: &mut [C64], s: usize, n: usize, work: &mut f64) {
-    // K̂Z = (T + δκ − o)Z + R̃Z, R̃ on the kept rows' hull.
+fn compress(kappa: &[C64], t: &Mat, ends: &[usize], z: &[C64], emit: Option<&[C64]>, src: &[C64], y: &mut [C64], a: &mut [C64], s: usize, n: usize, work: &mut f64) {
+    // K̂Z = (T + δκ − o)Z.
     y[..s * n].fill(C64::ZERO);
-    let h = hi - lo;
-    fused_product_into(rtk, &z[lo * n..hi * n], (h, h, n), &mut y[lo * n..hi * n]);
-    *work += (h * h * n) as f64;
     for i in 0..s {
         for j in 0..n {
             y[i * n + j] += kappa[i] * z[i * n + j];
@@ -842,7 +1072,7 @@ fn explicit_parts(xs: &[usize], exact: &[(usize, usize)], basis: &NearBasis, e: 
 /// + K̂†ZĀ, B̄ += ZĀ, Ê̄ += ĀZ† (n × s), K̃̄ += ZĀZ† on the parts' entries (`parts`, the decomposition's), `y` = K̂Z (as
 /// `compress` left it), `x` a buffer (s × n): products (`fused_product`) but for K̂†, triangular.
 #[allow(clippy::too_many_arguments)]
-fn compress_back(kappa: &[C64], t: &Mat, ends: &[usize], (rtk, lo, hi): (&[C64], usize, usize), z: &[C64], emit: &[C64], src: &[C64], y: &[C64], abar: &[C64], zbar: &mut [C64], srcbar: &mut [C64], emitbar: &mut [C64], kbar: &mut [C64], x: &mut [C64], s: usize, n: usize, work: &mut f64) {
+fn compress_back(kappa: &[C64], t: &Mat, ends: &[usize], z: &[C64], emit: &[C64], src: &[C64], y: &[C64], abar: &[C64], zbar: &mut [C64], srcbar: &mut [C64], emitbar: &mut [C64], kbar: &mut [C64], x: &mut [C64], s: usize, n: usize, work: &mut f64) {
     let mut adj = Buf::zeros(n * n);
     adjoint_into(abar, n, n, &mut adj);
     // Z̄ += Ê†Ā + (Y + B)Ā†; B̄ += ZĀ (= x); Ê̄ += ĀZ†.
@@ -871,23 +1101,9 @@ fn compress_back(kappa: &[C64], t: &Mat, ends: &[usize], (rtk, lo, hi): (&[C64],
             crate::linalg::mul_add(false, &mut zbar[l * n..l * n + n], t[(i, l)].conj(), &x[i * n..i * n + n]);
         }
     }
-    // Z̄ += R̃†(Z Ā) (the levels' series); K̃̄ += (Z Ā) Z† whole (on the parts ∂K̃'s, across them ∂R̃'s).
-    // On the kept rows' hull (outside it Z and ZĀ are zero).
-    let h = hi - lo;
-    let mut rh = Buf::zeros(h * h);
-    adjoint_into(rtk, h, h, &mut rh);
-    let mut o = Buf::zeros(h * n);
-    fused_product_into(&rh, &x[lo * n..hi * n], (h, h, n), &mut o);
-    zbar[lo * n..hi * n].iter_mut().zip(o.iter()).for_each(|(a, b)| *a += *b);
-    let mut zh = Buf::zeros(n * h);
-    adjoint_into(&z[lo * n..hi * n], h, n, &mut zh);
-    let mut kp = Buf::zeros(h * h);
-    fused_product_into(&x[lo * n..hi * n], &zh, (h, n, h), &mut kp);
-    for i in 0..h {
-        kbar[(lo + i) * s + lo..(lo + i) * s + hi].iter_mut().zip(&kp[i * h..(i + 1) * h]).for_each(|(a, b)| *a += *b);
-    }
-    *work += (2 * h * h * n) as f64;
-    *work += (4 * s * n * n) as f64;
+    // K̃̄ += (Z Ā) Z† (∂K̃ is on the parts' entries).
+    fused_product_into(x, &zh, (s, n, s), kbar);
+    *work += (s * s * n + 4 * s * n * n) as f64;
 }
 
 /// The exact copies' K̂_ED = K̂_ED,0 + Σ_x e_x Y_x, K̂_DE = K̂_DE,0 + Σ_x e_x* Y_x† (Y_x the coupling vectors) at the light e.
@@ -1356,6 +1572,18 @@ impl Fold {
                     }
                 }
                 let s = ne;
+                // The block's excited levels, each with its rows.
+                let mut levels: Vec<(usize, Vec<usize>)> = vec![];
+                for (a, r) in b.rows[..ne].iter().enumerate() {
+                    if let Row::Excited(x) = *r {
+                        let lv = self.excited_level[x];
+                        match levels.iter_mut().find(|y| y.0 == lv) {
+                            Some(y) => y.1.push(a),
+                            None => levels.push((lv, vec![a])),
+                        }
+                    }
+                }
+                let levels: Vec<Vec<usize>> = levels.into_iter().map(|x| x.1).collect();
                 let z = |x: usize| vec![C64::ZERO; x];
                 let lanes = splits.len() + usize::from(!xs.is_empty());
                 let sp = lanes;
@@ -1384,6 +1612,11 @@ impl Fold {
                     kdenode: [z(nd * s), z(nd * s)],
                     o,
                     s,
+                    all: ne,
+                    levels,
+                    wanted: None,
+                    fresh: false,
+                    epsr: 0.0,
                     nc,
                     value: b.value,
                     centre,
@@ -1407,11 +1640,6 @@ impl Fold {
                     err: vec![0.0; s * n],
                     norms: vec![0.0; s + 1],
                     active: vec![true; s],
-                    out: vec![false; s],
-                    rz: z(lanes * s * n),
-                    lo: 0,
-                    hi: s,
-                    rtk: z(s * s),
                     q: vec![0.0; s + 1],
                     reading: 0.0,
                     invs: vec![],
@@ -1503,6 +1731,7 @@ impl Fold {
                 left: [0; 2],
                 ratio: 0.0,
                 made: 0,
+                grown: 0,
                 rounds: 0,
                 work: [0.0; 10],
                 ticks: [0; 10],
@@ -1564,24 +1793,27 @@ impl Fold {
         }
     }
 
-    /// A near block's decomposition at the point (module documentation, # What is kept), from the fold's own matrices
-    /// there (`Fold::site`, `lay`, `effective`).
-    fn near_basis(&self, nb: &Near, ws: &Workspace, site: &Site, work: &mut f64) -> Option<NearBasis> {
-        let (n, s, nc, nd) = (ws.n, nb.s, nb.nc, nb.nd);
+    /// A near block's decomposition at the point (module documentation, # What is kept): the kept levels' rows merged into
+    /// one Schur form (`Factored::of` on K_KK: whatever couples them is in it), and every level's data for the omitted
+    /// ones' bound (`bound_levels`), from the fold's own matrices there (`Fold::lay`, `Fold::effective`).
+    #[allow(clippy::too_many_arguments)]
+    fn near_basis(&self, nb: &Near, ws: &Workspace, laid: &Laid, e: &Effective, kept: &[usize], work: &mut f64) -> Option<NearBasis> {
+        let (n, ne, nc, nd) = (ws.n, nb.all, nb.nc, nb.nd);
         let b = &self.blocks[nb.o];
-        let laid = self.lay(nb.o, site, work);
-        let e = self.effective(nb.o, &laid, work)?;
-        // The excited rows decomposed; the exact copies after them in their own coordinates (P layer).
-        let (er, dr): (Vec<usize>, Vec<usize>) = ((0..s).collect(), (s..s + nd).collect());
-        // The parts within the excited levels (DESIGN §1.1, module documentation # The levels' series): K₀ the levels' own
-        // blocks decomposed, R = K − K₀ across them (V†RV, `cross0`, the series').
-        let level: Vec<usize> = b.rows[..s].iter().map(|r| if let Row::Excited(x) = *r { self.excited_level[x] } else { unreachable!() }).collect();
-        let kse = e.k.block(&er, &er);
-        let kw = Mat::from_fn(s, s, |i, j| if level[i] == level[j] { kse[(i, j)] } else { C64::ZERO });
-        let f = Factored::of(&kw, work)?;
-        let mut kx = kse.clone();
-        kx.add_scaled(-C64::ONE, &kw);
-        let cross0 = rotate(&f, &kx, work).data;
+        let nl = nb.levels.len();
+        let mut kr: Vec<usize> = kept.iter().flat_map(|&q| nb.levels[q].iter().copied()).collect();
+        kr.sort_unstable();
+        let s = kr.len();
+        let mut level = vec![0; ne];
+        for (q, rows) in nb.levels.iter().enumerate() {
+            for &i in rows {
+                level[i] = q;
+            }
+        }
+        // The excited rows; the exact copies after them in their own coordinates (P layer).
+        let (er, dr): (Vec<usize>, Vec<usize>) = ((0..ne).collect(), (ne..ne + nd).collect());
+        let kall = e.k.block(&er, &er);
+        let f = Factored::of(&kall.block(&kr, &kr), work)?;
         let mut part = vec![0; s];
         for (pi, (idx, at, _)) in f.parts.iter().enumerate() {
             for a in 0..idx.len() {
@@ -1589,16 +1821,18 @@ impl Fold {
             }
         }
         let parts = f.parts.len().max(1);
-        let rows: Vec<usize> = b.rows[..s].iter().map(|r| if let Row::Excited(x) = *r { x } else { unreachable!() }).collect();
-        let copy_state = |a: usize| if let Row::Copy { state, .. } = b.rows[s + nd + a] { state } else { unreachable!() };
+        let nu = ((0..s).flat_map(|i| (i + 1..s).map(move |j| (i, j))).map(|(i, j)| f.t[(i, j)].norm_sqr()).sum::<f64>().sqrt()) + f.dropped.iter().sum::<f64>();
+        let rows: Vec<usize> = b.rows[..ne].iter().map(|r| if let Row::Excited(x) = *r { x } else { unreachable!() }).collect();
+        let copy_state = |a: usize| if let Row::Copy { state, .. } = b.rows[ne + nd + a] { state } else { unreachable!() };
         let r0 = &e.resolvent;
-        // Per copy component: U_k on (S, C_g) and R₀ on (C_g, C_g); the block's explicit states and U_k on (X, C_g).
-        let u_sc = |g: usize, k: usize, cg: &[usize]| Mat::from_fn(s, cg.len(), |a, c| self.components[g].basis[k][(rows[a], copy_state(cg[c]))]);
+        // Per copy component: U_k on (excited rows, C_g) and R₀ on (C_g, C_g); the block's explicit states and U_k on (X, C_g).
+        let u_ec = |g: usize, k: usize, cg: &[usize]| Mat::from_fn(ne, cg.len(), |a, c| self.components[g].basis[k][(rows[a], copy_state(cg[c]))]);
         let ng = self.ground.len();
         let nx = nb.xs.len();
+        let xall: Vec<usize> = (0..nx).collect();
         let xstates: Vec<usize> = nb.xs.iter().map(|&p| self.explicit[p - ng]).collect();
         let u_xc = |g: usize, k: usize, cg: &[usize]| Mat::from_fn(nx, cg.len(), |a, c| self.components[g].basis[k][(xstates[a], copy_state(cg[c]))]);
-        // Each excited state's solved row, and per ground state the centred copies of it (row, group).
+        // Each excited state's row, and per ground state the centred copies of it (row, group).
         let mut row_of = [usize::MAX; EXCITED];
         for (a, &x) in rows.iter().enumerate() {
             row_of[x] = a;
@@ -1609,12 +1843,18 @@ impl Fold {
                 copies_of_state[copy_state(x)].push((x, gi));
             }
         }
+        // A matrix's norm on a level's rows and another's columns (Frobenius).
+        let lnorm = |m: &Mat, rq: &[usize], cq: &[usize]| rq.iter().flat_map(|&i| cq.iter().map(move |&j| (i, j))).map(|(i, j)| m[(i, j)].norm_sqr()).sum::<f64>().sqrt();
+        let xcol = |jx: usize| nb.xs[jx];
+        let terms_n = nb.terms.len();
+        let (mut lterm, mut lpair, mut ldress) = (vec![0.0; terms_n * nl], vec![0.0; (terms_n + 1) * nl * nl], vec![0.0; terms_n * nl]);
+        let (mut lstat, mut lemit) = (vec![0.0; (terms_n + 1) * nl * n], vec![0.0; (terms_n + 1) * nl * n]);
         let mut terms = vec![];
-        for &t in &nb.terms {
+        for (ti, &t) in nb.terms.iter().enumerate() {
             let (w, k, kk) = ws.pairs[t];
             let u = &self.light.frequencies[w].basis;
-            let mut form = Mat::zeros(s, s);
-            let (mut form_sx, mut form_xs) = (Mat::zeros(s, nx), Mat::zeros(nx, s));
+            let mut form = Mat::zeros(ne, ne);
+            let (mut form_sx, mut form_xs) = (Mat::zeros(ne, nx), Mat::zeros(nx, ne));
             let mut cc = Mat::zeros(nc, nc);
             for (p, q, entries) in &self.entries[w] {
                 let cu = u[k][*p].conj() * u[kk][*q];
@@ -1642,8 +1882,8 @@ impl Fold {
                 }
             }
             // The dressing: co-rotating e_k e_kk* = ε_k ε_kk* (the pair (w, kk, k)), counter-rotating ε_k* ε_kk (the pair (w, k, kk)).
-            let mut dressing = Mat::zeros(s, s);
-            let (mut dress_sx, mut dress_xs, mut dress_xx) = (Mat::zeros(s, nx), Mat::zeros(nx, s), Mat::zeros(nx, nx));
+            let mut dressing = Mat::zeros(ne, ne);
+            let (mut dress_sx, mut dress_xs, mut dress_xx) = (Mat::zeros(ne, nx), Mat::zeros(nx, ne), Mat::zeros(nx, nx));
             for (g, cg) in &nb.groups {
                 let comp = &self.components[*g];
                 if comp.part.frequency != w {
@@ -1651,7 +1891,7 @@ impl Fold {
                 }
                 let rg = r0.block(cg, cg);
                 let (k1, k2) = if comp.part.counter { (k, kk) } else { (kk, k) };
-                let (us1, us2) = (u_sc(*g, k1, cg), u_sc(*g, k2, cg));
+                let (us1, us2) = (u_ec(*g, k1, cg), u_ec(*g, k2, cg));
                 let x = us1.product(&rg).product(&us2.adjoint());
                 plus(&mut dressing, &x);
                 if nx > 0 {
@@ -1663,34 +1903,56 @@ impl Fold {
             }
             let mut whole = form.clone();
             plus(&mut whole, &dressing);
-            let tw = rotate(&f, &whole, work);
+            let tw = rotate(&f, &whole.block(&kr, &kr), work);
             // The dressing's rows' norms alone are read (the reuse's R₀ change): ‖(V†DV)_i‖ = ‖(V†D)_i‖, V unitary.
-            let td = f.to(&dressing, work);
+            let td = f.to(&dressing.block(&kr, &kr), work);
             // The explicit columns' source V†(𝒦_SX + dressing), the explicit rows' emission (𝒦_XS + dressing)V, their own
             // dressing (the forms among them are Ĥ_PP's); the source's dressing's rows (its R₀'s change read).
             let (mut sx, mut xsm) = (form_sx, form_xs);
             plus(&mut sx, &dress_sx);
             plus(&mut xsm, &dress_xs);
-            let st = f.to(&sx, work);
-            let et = f.to(&xsm.adjoint(), work).adjoint();
-            let tdx = f.to(&dress_sx, work);
-            terms.push((whole.frobenius(), tw, td, cc.frobenius(), st, et, dress_xx, tdx));
-        }
-        let at: Vec<C64> = nb.terms.iter().map(|&t| ws.mid.coef[t]).collect();
-        let within: Vec<C64> = terms.iter().flat_map(|x| Mat::from_fn(s, s, |i, j| if part[i] == part[j] { x.1[(i, j)] } else { C64::ZERO }).data).collect();
-        let crossterms: Vec<C64> = terms.iter().flat_map(|x| Mat::from_fn(s, s, |i, j| if part[i] != part[j] { x.1[(i, j)] } else { C64::ZERO }).data).collect();
-        // R̃'s norm on each pair of parts (P, Q): of the reference, then of each term (the omission's bound, `omit`).
-        let np = f.parts.len();
-        let mut pairnorm = vec![0.0_f64; (terms.len() + 1) * np * np];
-        for (t, m) in std::iter::once(&cross0[..]).chain(crossterms.chunks(s * s)).enumerate() {
-            for i in 0..s {
-                for j in 0..s {
-                    pairnorm[(t * np + part[i]) * np + part[j]] += m[i * s + j].norm_sqr();
+            let st = f.to(&sx.block(&kr, &xall), work);
+            let et = f.to(&xsm.block(&xall, &kr).adjoint(), work).adjoint();
+            let tdx = f.to(&dress_sx.block(&kr, &xall), work);
+            // Every level's: its own block's, its pairs', its dressing's rows' (with the static source's), its static source's
+            // and explicit emission's columns.
+            for (q, rq) in nb.levels.iter().enumerate() {
+                lterm[ti * nl + q] = lnorm(&whole, rq, rq);
+                for (p, rp) in nb.levels.iter().enumerate().filter(|&(p, _)| p != q) {
+                    lpair[((ti + 1) * nl + q) * nl + p] = lnorm(&whole, rq, rp);
+                }
+                ldress[ti * nl + q] = (lnorm(&dressing, rq, &er).powi(2) + lnorm(&dress_sx, rq, &xall).powi(2)).sqrt();
+                for jx in 0..nx {
+                    lstat[((ti + 1) * nl + q) * n + xcol(jx)] = lnorm(&sx, rq, &[jx]);
+                    lemit[((ti + 1) * nl + q) * n + xcol(jx)] = lnorm(&xsm.adjoint(), rq, &[jx]);
                 }
             }
+            terms.push((whole.frobenius(), tw, td, cc.frobenius(), st, et, dress_xx, tdx));
         }
-        pairnorm.iter_mut().for_each(|x| *x = x.sqrt());
-        let xcol = |jx: usize| nb.xs[jx];
+        // The reference's: the level pairs' coupling and each level's Gershgorin intervals of K_qq − o's Hermitian part and
+        // of its decay.
+        let mut gersh = vec![[0.0; 4]; nl];
+        for (q, rq) in nb.levels.iter().enumerate() {
+            for (p, rp) in nb.levels.iter().enumerate().filter(|&(p, _)| p != q) {
+                lpair[q * nl + p] = lnorm(&kall, rq, rp);
+            }
+            let (mut a, mut d) = ([f64::INFINITY, f64::NEG_INFINITY], [f64::INFINITY, f64::NEG_INFINITY]);
+            for &i in rq {
+                let (mut ra, mut rd) = (0.0, 0.0);
+                for &j in rq.iter().filter(|&&j| j != i) {
+                    let (x, y) = (kall[(i, j)], kall[(j, i)].conj());
+                    ra += ((x + y) * 0.5).abs();
+                    rd += ((x - y) * C64::I).abs();
+                }
+                let (ai, di) = (kall[(i, i)].re - b.value, -2.0 * kall[(i, i)].im);
+                a = [a[0].min(ai - ra), a[1].max(ai + ra)];
+                d = [d[0].min(di - rd), d[1].max(di + rd)];
+            }
+            gersh[q] = [a[0], a[1], d[0], d[1]];
+        }
+        *work += (ne * ne * (terms_n + 1)) as f64;
+        let at: Vec<C64> = nb.terms.iter().map(|&t| ws.mid.coef[t]).collect();
+        let within: Vec<C64> = terms.iter().flat_map(|x| Mat::from_fn(s, s, |i, j| if part[i] == part[j] { x.1[(i, j)] } else { C64::ZERO }).data).collect();
         let sterms: Vec<C64> = terms.iter().flat_map(|x| Mat::from_fn(s, n, |i, p| nb.xs.iter().position(|&q| q == p).map_or(C64::ZERO, |jx| x.4[(i, jx)])).data).collect();
         let eterms: Vec<C64> = terms.iter().flat_map(|x| Mat::from_fn(n, s, |p, i| nb.xs.iter().position(|&q| q == p).map_or(C64::ZERO, |jx| x.5[(jx, i)])).data).collect();
         let hterms: Vec<C64> = terms
@@ -1707,7 +1969,7 @@ impl Fold {
             .collect();
         let dressedx: Vec<f64> = terms.iter().flat_map(|x| (0..s).map(|i| (0..nx).map(|c| x.7[(i, c)].norm_sqr()).sum::<f64>().sqrt()).collect::<Vec<f64>>()).collect();
         let es: Vec<usize> = (0..GROUND).collect();
-        let excited: Vec<usize> = rows.clone();
+        let excited: Vec<usize> = kr.iter().map(|&a| rows[a]).collect();
         let emit: [Vec<C64>; 3] = std::array::from_fn(|q| {
             let c = Mat::from_fn(GROUND, s, |g, a| self.emission[q][(es[g], excited[a])]);
             f.to(&c.adjoint(), work).adjoint().data
@@ -1727,13 +1989,37 @@ impl Fold {
         }
         norms.iter_mut().for_each(|x| *x = x.sqrt());
         let copied = terms.iter().map(|x| x.3).collect();
-        // The sources: per split Ỹ_l = V† Σ_k γ_jk U_k (source columns), per vector Y_a = V†U_a.
-        let mut source = |c: usize, mat: &dyn Fn(usize, usize) -> C64| -> Vec<C64> {
+        // The sources on every excited row: per split Σ_k γ_jk U_k (source columns), per vector U_a; the kept rows' in the
+        // basis, Ỹ_l = V†X_l and Y_a = V†U_a; every level's column norms.
+        let source = |c: usize, mat: &dyn Fn(usize, usize) -> C64| -> Mat {
             let places: Vec<usize> = b.sources.iter().filter(|x| x.1 == c).map(|x| x.0).collect();
-            let m = Mat::from_fn(s, n, |a, p| if places.contains(&p) { mat(rows[a], self.ground[p]) } else { C64::ZERO });
-            f.to(&m, work).data
+            Mat::from_fn(ne, n, |a, p| if places.contains(&p) { mat(rows[a], self.ground[p]) } else { C64::ZERO })
         };
-        let per: Vec<Vec<C64>> = nb.splits.iter().map(|&(c, j)| source(c, &|x, t| self.components[c].couplings[j][(x, t)])).collect();
+        let all: Vec<usize> = (0..n).collect();
+        let col_norms = |m: &Mat, out: &mut [f64], at: usize| {
+            for (q, rq) in nb.levels.iter().enumerate() {
+                for j in 0..n {
+                    out[at + q * n + j] = lnorm(m, rq, &[j]);
+                }
+            }
+        };
+        let nsp = nb.splits.len();
+        let nv = nb.vectors.len();
+        let (mut lbeam, mut lvec) = (vec![0.0; nl * nsp * n], vec![0.0; nl * nv * n]);
+        let per: Vec<Vec<C64>> = nb
+            .splits
+            .iter()
+            .enumerate()
+            .map(|(sp, &(c, j))| {
+                let m = source(c, &|x, t| self.components[c].couplings[j][(x, t)]);
+                for (q, rq) in nb.levels.iter().enumerate() {
+                    for p in 0..n {
+                        lbeam[(q * nsp + sp) * n + p] = lnorm(&m, rq, &[p]);
+                    }
+                }
+                f.to(&m.block(&kr, &all), work).data
+            })
+            .collect();
         let ln = per.len() * n;
         let mut beams = vec![C64::ZERO; s * ln];
         for (sp, y) in per.iter().enumerate() {
@@ -1741,20 +2027,33 @@ impl Fold {
                 beams[i * ln + sp * n..i * ln + sp * n + n].copy_from_slice(&y[i * n..i * n + n]);
             }
         }
-        let vectors = nb.vectors.iter().map(|&(c, k)| source(c, &|x, t| self.components[c].basis[k][(x, t)])).collect();
+        let vectors = nb
+            .vectors
+            .iter()
+            .enumerate()
+            .map(|(a, &(c, k))| {
+                let m = source(c, &|x, t| self.components[c].basis[k][(x, t)]);
+                for (q, rq) in nb.levels.iter().enumerate() {
+                    for p in 0..n {
+                        lvec[(q * nv + a) * n + p] = lnorm(&m, rq, &[p]);
+                    }
+                }
+                f.to(&m.block(&kr, &all), work).data
+            })
+            .collect();
         // The copies' rows: per copy vector R₀(C_g, C_g) U_k(S, C_g)† V.
         let vfull = f.from(&Mat::identity(s), work);
-        let copies: Vec<Vec<C64>> = nb.copies.iter().map(|&(g, k, gi)| r0.block(&nb.groups[gi].1, &nb.groups[gi].1).product(&u_sc(g, k, &nb.groups[gi].1).adjoint()).product(&vfull).data).collect();
+        let copies: Vec<Vec<C64>> = nb.copies.iter().map(|&(g, k, gi)| r0.block(&nb.groups[gi].1, &nb.groups[gi].1).product(&u_ec(g, k, &nb.groups[gi].1).block(&kr, &(0..nb.groups[gi].1.len()).collect::<Vec<_>>()).adjoint()).product(&vfull).data).collect();
         let copied_rows = copies.iter().map(|y: &Vec<C64>| y.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()).collect();
-        // The exact copies: their coupling vectors V†U_k(E, D of g), K̂_ED and K̂_DE at the reference less their bare drives
-        // (the dressing through the centred rows, held), K̂_DD, its forms per term.
+        // The exact copies (their block keeps every level): their coupling vectors V†U_k(E, D of g), K̂_ED and K̂_DE at the
+        // reference less their bare drives (the dressing through the centred rows, held), K̂_DD, its forms per term.
         let couple: Vec<Vec<C64>> = nb
             .exact
             .iter()
-            .map(|&(g, k)| f.to(&Mat::from_fn(s, nd, |a, d| if nb.dstates[d].1 == g { self.components[g].basis[k][(rows[a], nb.dstates[d].0)] } else { C64::ZERO }), work).data)
+            .map(|&(g, k)| f.to(&Mat::from_fn(s, nd, |a, d| if nb.dstates[d].1 == g { self.components[g].basis[k][(rows[kr[a]], nb.dstates[d].0)] } else { C64::ZERO }), work).data)
             .collect();
-        let mut ked0 = f.to(&e.k.block(&er, &dr), work).data;
-        let mut kde0 = f.to(&e.k.block(&dr, &er).adjoint(), work).adjoint().data;
+        let mut ked0 = f.to(&e.k.block(&kr, &dr), work).data;
+        let mut kde0 = f.to(&e.k.block(&dr, &kr).adjoint(), work).adjoint().data;
         for (x, &(g, k)) in nb.exact.iter().enumerate() {
             let ek = ws.mid.e[g][k];
             for i in 0..s {
@@ -1764,7 +2063,7 @@ impl Fold {
                 }
             }
         }
-        let kdd0 = Mat::from_fn(nd, nd, |a, c| e.k[(s + a, s + c)] - if a == c { C64::real(b.value) } else { C64::ZERO }).data;
+        let kdd0 = Mat::from_fn(nd, nd, |a, c| e.k[(ne + a, ne + c)] - if a == c { C64::real(b.value) } else { C64::ZERO }).data;
         let ddterms: Vec<Vec<C64>> = nb
             .terms
             .iter()
@@ -1787,13 +2086,14 @@ impl Fold {
                 m
             })
             .collect();
-        // The explicit states' references at the point: the static source on the solved rows (`effective`'s, its dressing in
+        // The explicit states' references at the point: the static source on the excited rows (`effective`'s, its dressing in
         // it), the emission (𝒦_XS + Ĥ_XC R₀ Ĥ_CS)V and the dressing Ĥ_XC R₀ B_C,X among themselves; the exact copies' static
         // source and emission less their bare drives (held, as K̂_ED's dressing); the centred copies' static rows.
-        let all: Vec<usize> = (0..n).collect();
-        let cr: Vec<usize> = (s + nd..b.rows.len()).collect();
-        let source = e.source.clone().unwrap_or_else(|| Mat::zeros(s + nd, n));
-        let stat = f.to(&source.block(&er, &all), work).data;
+        let cr: Vec<usize> = (ne + nd..b.rows.len()).collect();
+        let source = e.source.clone().unwrap_or_else(|| Mat::zeros(ne + nd, n));
+        let src_e = source.block(&er, &all);
+        col_norms(&src_e, &mut lstat, 0);
+        let stat = f.to(&src_e.block(&kr, &all), work).data;
         let mut ex = laid.emit.block(&nb.xs, &er);
         let mut exd = laid.emit.block(&nb.xs, &dr);
         let mut hx = Mat::zeros(nx, nx);
@@ -1803,7 +2103,12 @@ impl Fold {
             plus(&mut exd, &xr.product(&laid.inner.block(&cr, &dr)));
             hx = xr.product(&laid.absorb[0].block(&cr, &nb.xs));
         }
-        let ext = f.to(&ex.adjoint(), work).adjoint();
+        for (q, rq) in nb.levels.iter().enumerate() {
+            for jx in 0..nx {
+                lemit[q * n + xcol(jx)] = lnorm(&ex.adjoint(), rq, &[jx]);
+            }
+        }
+        let ext = f.to(&ex.block(&xall, &kr).adjoint(), work).adjoint();
         let (mut xemit0, mut hx0) = (vec![C64::ZERO; n * s], vec![C64::ZERO; n * n]);
         for a in 0..nx {
             for i in 0..s {
@@ -1844,10 +2149,22 @@ impl Fold {
             })
             .collect();
         let xemitc: [Vec<C64>; 3] = std::array::from_fn(|q| Mat::from_fn(GROUND, n, |g, p| nb.xs.iter().position(|&x| x == p).map_or(C64::ZERO, |jx| self.emission[q][(g, xstates[jx])])).data);
+        let _ = level;
         Some(NearBasis {
             at,
             weights,
+            kept: kept.to_vec(),
+            rows: kr,
             f,
+            nu,
+            gersh,
+            lterm,
+            lpair,
+            ldress,
+            lbeam,
+            lvec,
+            lstat,
+            lemit,
             part,
             diag,
             norms,
@@ -1860,9 +2177,6 @@ impl Fold {
             z0: laid.z0,
             r0: r0.frobenius(),
             within,
-            cross0,
-            crossterms,
-            pairnorm,
             emit,
             couple,
             ked0,
@@ -1960,28 +2274,52 @@ impl Fold {
             cache.at_far = vec![None; ws.far.len()];
         }
         ws.renew.clear();
+        for nb in ws.near.iter_mut() {
+            nb.fresh = false;
+        }
         let made_before = cache.made;
+        let grown_before = cache.grown;
         let mut round = 0;
+        let mut refreshes = 0;
         let mut site: Option<Site> = None;
+        // Per near block its matrices at the point, once for every decomposition made here (`Fold::lay`, `Fold::effective`).
+        let mut here: Vec<Option<(Laid, Effective)>> = (0..ws.near.len()).map(|_| None).collect();
         let (sweeps, series, ratio, rounds, omitted, tally) = loop {
             let made = cache.made;
-            // The bases (module documentation, 6): the atom's own; beyond the share the nearest kept, then a new one.
+            // The bases (module documentation, 6): the atom's own; beyond the share the nearest kept, then a new one. A near
+            // block's kept levels: those `omit` wants, else its standing basis's; at an atom's first step none (a block with
+            // exact copies keeps every level: the copies couple them all through the P layer).
             for kind in [false, true] {
                 let count = if kind { ws.far.len() } else { ws.near.len() };
                 for x in 0..count {
                     let tries = ws.renew.iter().filter(|y| **y == (kind, x)).count();
                     let standing = if kind { cache.at_far[x] } else { cache.at_near[x] };
-                    if let (Some(_), 0) = (standing, tries) {
+                    let want: Vec<usize> = if kind {
+                        vec![]
+                    } else {
+                        let nb = &mut ws.near[x];
+                        match (nb.wanted.take(), standing) {
+                            (Some(w), _) => w,
+                            (None, Some(at)) => cache.near[x][at].kept.clone(),
+                            (None, None) => (0..if nb.nd > 0 { nb.levels.len() } else { 0 }).collect(),
+                        }
+                    };
+                    let same = standing.map(|at| kind || cache.near[x][at].kept == want);
+                    if let (Some(at), 0, Some(true)) = (standing, tries, same) {
+                        if !kind {
+                            let s = cache.near[x][at].rows.len();
+                            ws.near[x].fit(s, n);
+                        }
                         continue;
                     }
-                    let (terms, kept): (&[usize], Vec<(&[C64], &[f64])>) = if kind {
-                        (&ws.far[x].terms, cache.far[x].iter().map(|b| (&b.at[..], &b.weights[..])).collect())
+                    let (terms, kept): (&[usize], Vec<(usize, &[C64], &[f64])>) = if kind {
+                        (&ws.far[x].terms, cache.far[x].iter().enumerate().map(|(i, b)| (i, &b.at[..], &b.weights[..])).collect())
                     } else {
-                        (&ws.near[x].terms, cache.near[x].iter().map(|b| (&b.at[..], &b.weights[..])).collect())
+                        (&ws.near[x].terms, cache.near[x].iter().enumerate().filter(|(_, b)| b.kept == want).map(|(i, b)| (i, &b.at[..], &b.weights[..])).collect())
                     };
                     let nearest = |but: Option<usize>, work: &mut f64| -> Option<usize> {
                         let mut best: Option<(usize, f64)> = None;
-                        for (i, (at, weights)) in kept.iter().enumerate().filter(|(i, _)| Some(*i) != but) {
+                        for &(i, at, weights) in kept.iter().filter(|(i, ..)| Some(*i) != but) {
                             let d: f64 = terms.iter().enumerate().map(|(t, &p)| (ws.mid.coef[p] - at[t]).abs() * weights[t]).sum();
                             *work += terms.len() as f64;
                             if best.is_none_or(|b| d < b.1) {
@@ -1990,10 +2328,9 @@ impl Fold {
                         }
                         best.map(|b| b.0)
                     };
-                    let chosen = match (standing, tries) {
-                        (Some(at), 0) => Some(at),
-                        (None, 0) => nearest(None, &mut work[REFRESH]),
-                        (_, 1) => nearest(standing, &mut work[REFRESH]),
+                    let chosen = match tries {
+                        0 => nearest(None, &mut work[REFRESH]),
+                        1 => nearest(standing, &mut work[REFRESH]),
                         _ => None,
                     };
                     if chosen.is_some() && chosen != standing {
@@ -2011,19 +2348,33 @@ impl Fold {
                                 cache.far[x].push(basis);
                                 cache.far[x].len() - 1
                             } else {
-                                let basis = self.near_basis(&ws.near[x], ws, site, &mut work[REFRESH])?;
+                                if here[x].is_none() {
+                                    let laid = self.lay(ws.near[x].o, site, &mut work[REFRESH]);
+                                    let e = self.effective(ws.near[x].o, &laid, &mut work[REFRESH])?;
+                                    here[x] = Some((laid, e));
+                                }
+                                let (laid, e) = here[x].as_ref().unwrap();
+                                let basis = self.near_basis(&ws.near[x], ws, laid, e, &want, &mut work[REFRESH])?;
                                 cache.near[x].push(basis);
                                 cache.near[x].len() - 1
                             }
                         }
                     };
                     if chosen.is_none() {
+                        if !kind {
+                            ws.near[x].fresh = true;
+                        }
                         cache.made += 1;
+                        if same == Some(false) {
+                            cache.grown += 1;
+                        }
                     }
                     if kind {
                         cache.at_far[x] = Some(at);
                     } else {
                         cache.at_near[x] = Some(at);
+                        let s = cache.near[x][at].rows.len();
+                        ws.near[x].fit(s, n);
                     }
                 }
             }
@@ -2078,9 +2429,11 @@ impl Fold {
                     work[DIAGONAL] += (2 * nb.exact.len() * s * nb.nd + nb.terms.len() * nb.nd * nb.nd) as f64;
                 }
                 // R₀'s own change: δR₀ ≤ ‖R₀‖²‖δM‖/(1 − ‖R₀‖‖δM‖) through the dressing, ρ_i = ε_R Σ_t |c_t| ‖(V†N_t,dress V)_i‖.
+                nb.epsr = 0.0;
                 if nb.nc > 0 {
                     let x = basis.r0 * dm;
                     let eps_r = if x < 1.0 { x / (1.0 - x) } else { f64::INFINITY };
+                    nb.epsr = eps_r;
                     for (t, &p) in nb.terms.iter().enumerate() {
                         let size = coef[p].abs();
                         for i in 0..s {
@@ -2149,8 +2502,6 @@ impl Fold {
             for nb in near.iter_mut() {
                 nb.ztot.fill(C64::ZERO);
                 nb.active.fill(true);
-                nb.out.fill(false);
-                (nb.lo, nb.hi) = (0, nb.s);
                 nb.invs.clear();
                 nb.zs.clear();
                 nb.ztots.clear();
@@ -2170,7 +2521,7 @@ impl Fold {
             for fb in far.iter_mut() {
                 fb.omitted = false;
             }
-            let (series, ratio, omitted) = loop {
+            let outcome = loop {
                 let (t0, w0) = (ticks(), work[SERIES]);
                 // The columns' energies (H's diagonal, each column at its own) and the series' part of H (off it).
                 for j in 0..n {
@@ -2204,20 +2555,14 @@ impl Fold {
                     let rhs = &mut nb.rhs;
                     rhs.copy_from_slice(&nb.vt);
                     if sweep > 0 {
-                        // −Z^{k−1}Δ and the levels' R̃Z^{k−1} (the first sweep after `freeze`, which made it).
-                        let (lo, hi) = (nb.lo, nb.hi);
-                        let h = hi - lo;
-                        fused_product_into(&nb.z[lo * ln..hi * ln], delta, (h * splits, n, n), &mut nb.prod[lo * ln..hi * ln]);
-                        if sweep > 1 {
-                            fused_product_into(&nb.rtk, &nb.z[lo * ln..hi * ln], (h, h, ln), &mut nb.rz[lo * ln..hi * ln]);
-                            work[SERIES] += (h * h * ln) as f64;
-                        }
+                        // −Z^{k−1}Δ.
+                        fused_product_into(&nb.z, delta, (s * splits, n, n), &mut nb.prod);
                         for i in (0..s).filter(|&i| nb.active[i]) {
-                            for ((r, p), q) in rhs[i * ln..(i + 1) * ln].iter_mut().zip(&nb.prod[i * ln..(i + 1) * ln]).zip(&nb.rz[i * ln..(i + 1) * ln]) {
-                                *r += *q - *p;
+                            for (r, p) in rhs[i * ln..(i + 1) * ln].iter_mut().zip(&nb.prod[i * ln..(i + 1) * ln]) {
+                                *r -= *p;
                             }
                         }
-                        work[SERIES] += (h * ln * n) as f64;
+                        work[SERIES] += (s * ln * n) as f64;
                     }
                     // The diagonal: (c_j − w_l − κ_i)⁻¹, each column at its own energy.
                     for i in (0..s).filter(|&i| nb.active[i]) {
@@ -2319,15 +2664,20 @@ impl Fold {
                 for w in whole[self.ground.len()..].iter_mut() {
                     *w += 1.0;
                 }
-                // After the first sweep the nodes the point leaves out (`omit`), before the Bloch generator they would enter.
-                if sweep == 0 {
-                    omitted = omit(near, far, cache, hbase, c, whole, change, &mut tally, share, self.thermal, n, &mut work[SERIES]);
-                }
                 h.copy_from_slice(hbase);
                 for nb in near.iter() {
                     for (a, b) in h.iter_mut().zip(&nb.bloch) {
                         *a += *b;
                     }
+                }
+                // After the first sweep the levels and far blocks the point leaves out (`omit`, read on bounds): beyond the
+                // share levels join, a new round on new decompositions.
+                if sweep == 0 {
+                    let (rho, grow) = omit(near, far, cache, mid, hbase, h, whole, &mut tally, share, self.thermal, n, &mut work[SERIES]);
+                    if grow {
+                        break None;
+                    }
+                    omitted = rho;
                 }
                 sweep += 1;
                 if sweep == 1 {
@@ -2348,10 +2698,17 @@ impl Fold {
                 // Two sweeps at the least; then within the share, or no longer converging (a ratio at or above one after
                 // the second change: the self-consistency or the series does not exist here).
                 if sweep >= 2 && (rest <= share || (sweep >= 3 && most >= 1.0)) {
-                    break (rate(unrate(rest) + frozen), most, omitted);
+                    break Some((rate(unrate(rest) + frozen), most, omitted));
                 }
             };
             lap(SERIES, &mut clock, &mut tick);
+            let Some((series, ratio, omitted)) = outcome else {
+                round += 1;
+                if round > 3 + ws.near.iter().map(|x| x.levels.len()).sum::<usize>() {
+                    return None;
+                }
+                continue;
+            };
             // The readings of what is held (module documentation, 6), at the columns' energies H_jj. The reuse's first-order
             // error of the response the step uses, Z = Σ_l Z_l: Σ_l R_l δK̃ Z_l = R̄ δK̃ Z + Σ_l (R_l − R̄) δK̃ Z_l, R̄ at the
             // beams' mean Doppler shift w̄ -- row by row, row i of δK̃Z at most Σ_P off_iP ‖Z_P∖i‖ (+ ρ_i‖Z‖), the beams'
@@ -2424,11 +2781,12 @@ impl Fold {
                     renew.push((true, x));
                 }
             }
-            if renew.is_empty() || round == 2 || cache.made > made {
+            if renew.is_empty() || refreshes == 2 || cache.made > made {
                 break (sweep, series, ratio, round + 1, omitted, tally);
             }
             ws.renew.extend(renew);
             round += 1;
+            refreshes += 1;
         };
         // The copies' rows and the compression (module documentation, 7).
         let Workspace { near, far, h, step, eigen, vectors, temp, mid, .. } = &mut *ws;
@@ -2481,7 +2839,7 @@ impl Fold {
             if !nb.xs.is_empty() {
                 src.iter_mut().zip(&nb.stat).for_each(|(a, b)| *a += *b);
             }
-            compress(&nb.kappa, &basis.f.t, &basis.f.ends, (&nb.rtk, nb.lo, nb.hi), &nb.ztot, None, &src, &mut nb.y, &mut a.data, s, n, &mut work[COMPRESSION]);
+            compress(&nb.kappa, &basis.f.t, &basis.f.ends, &nb.ztot, None, &src, &mut nb.y, &mut a.data, s, n, &mut work[COMPRESSION]);
             let mut zh = Buf::zeros(n * s);
             adjoint_into(&nb.ztot, s, n, &mut zh);
             let mut o = Buf::zeros(n * n);
@@ -2526,6 +2884,7 @@ impl Fold {
         step.omitted = rate(omitted);
         step.left = tally;
         step.made = cache.made - made_before;
+        step.grown = cache.grown - grown_before;
         step.rounds = rounds;
         step.work = work;
         step.ticks = tick;
@@ -2542,7 +2901,6 @@ impl Fold {
 /// (axis by axis).
 struct Tangent {
     dk: Buf,
-    dkx: Buf,
     demit: Buf,
     dhx: Buf,
     dexd: [Buf; 3],
@@ -2697,7 +3055,7 @@ impl Fold {
                     src.iter_mut().zip(&nb.pnode[j].stat).for_each(|(u, y)| *u += *y);
                     a.iter_mut().zip(&nb.pnode[j].hx).for_each(|(u, y)| *u += *y);
                 }
-                compress(&nb.kappa, &basis.f.t, &basis.f.ends, (&nb.rtk, nb.lo, nb.hi), &nb.znode[j], Some(&nb.pnode[j].emit), &src, &mut nb.rhs, a, s, n, &mut work);
+                compress(&nb.kappa, &basis.f.t, &basis.f.ends, &nb.znode[j], Some(&nb.pnode[j].emit), &src, &mut nb.rhs, a, s, n, &mut work);
                 if nb.nd > 0 {
                     let nd = nb.nd;
                     let zd = &mut nb.zdnode[j];
@@ -2853,8 +3211,6 @@ impl Fold {
                     src.iter_mut().zip(stat).for_each(|(u, y)| *u += *y);
                 }
                 let mut y = Buf::zeros(s * n);
-                let (lo, hi) = (nb.lo, nb.hi);
-                fused_product_into(&nb.rtk, &z[lo * n..hi * n], (hi - lo, hi - lo, n), &mut y[lo * n..hi * n]);
                 for i in 0..s {
                     for c in 0..n {
                         y[i * n + c] += nb.kappa[i] * z[i * n + c];
@@ -2864,7 +3220,7 @@ impl Fold {
                     }
                 }
                 let (mut zb, mut vb, mut eb, mut kb, mut xb) = (Buf::zeros(s * n), Buf::zeros(s * n), Buf::zeros(n * s), Buf::zeros(s * s), Buf::zeros(s * n));
-                compress_back(&nb.kappa, &basis.f.t, &basis.f.ends, (&nb.rtk, nb.lo, nb.hi), z, emit, &src, &y, ab, &mut zb, &mut vb, &mut eb, &mut kb, &mut xb, s, n, &mut work);
+                compress_back(&nb.kappa, &basis.f.t, &basis.f.ends, z, emit, &src, &y, ab, &mut zb, &mut vb, &mut eb, &mut kb, &mut xb, s, n, &mut work);
                 // The explicit parts' terms: Re⟨B̄, S_t⟩ + Re⟨Ê̄, E_t⟩ + Re⟨Ā, H_t⟩ times ∂c_t.
                 if explicit {
                     for (ti, &tt) in nb.terms.iter().enumerate() {
@@ -2940,7 +3296,7 @@ impl Fold {
                     }
                 }
                 for a in 0..3 {
-                    fp[a] += inner(&kb, &t.dk[a * s * s..(a + 1) * s * s], s, s, s, 0).re + inner(&kb, &t.dkx[a * s * s..(a + 1) * s * s], s, s, s, 0).re;
+                    fp[a] += inner(&kb, &t.dk[a * s * s..(a + 1) * s * s], s, s, s, 0).re;
                     if nd > 0 {
                         fp[a] += re(&kddb, &t.dkdd[a]);
                     }
@@ -3147,23 +3503,19 @@ impl Fold {
                         dct[a * terms + ti] = dc[tt][a];
                     }
                 }
-                // ∂K̃ on the kept parts' entries and ∂R̃ = Σ_t ∂c_t across the parts on the kept rows' hull (the rest is left out).
-                let (mut dk, mut dkx) = (Buf::zeros(s * s3), Buf::zeros(s * s3));
-                let (lo, hi) = (nb.lo, nb.hi);
+                // ∂K̃ on the kept parts' entries.
+                let mut dk = Buf::zeros(s * s3);
                 for t in 0..terms {
-                    let (w, x) = (&basis.within[t * s * s..(t + 1) * s * s], &basis.crossterms[t * s * s..(t + 1) * s * s]);
+                    let w = &basis.within[t * s * s..(t + 1) * s * s];
                     for a in 0..3 {
                         let d = dct[a * terms + t];
                         if d == C64::ZERO {
                             continue;
                         }
-                        for (idx, at, _) in basis.f.parts.iter().filter(|x| !nb.out[x.1]) {
+                        for (idx, at, _) in basis.f.parts.iter() {
                             for i in *at..at + idx.len() {
                                 crate::linalg::mul_add(false, &mut dk[a * s * s + i * s + at..a * s * s + i * s + at + idx.len()], d, &w[i * s + at..i * s + at + idx.len()]);
                             }
-                        }
-                        for i in lo..hi {
-                            crate::linalg::mul_add(false, &mut dkx[a * s * s + i * s + lo..a * s * s + i * s + hi], d, &x[i * s + lo..i * s + hi]);
                         }
                     }
                 }
@@ -3176,7 +3528,7 @@ impl Fold {
                         }
                     }
                 }
-                work[0] += (3 * (terms * (hi - lo).pow(2) + nb.vectors.len() * s * n)) as f64;
+                work[0] += (3 * (terms * s * s + nb.vectors.len() * s * n)) as f64;
                 let nd = nb.nd;
                 let (mut dked, mut dkde, mut dkdd): ([Buf; 3], [Buf; 3], [Buf; 3]) = (std::array::from_fn(|_| Buf::zeros(s * nd)), std::array::from_fn(|_| Buf::zeros(nd * s)), std::array::from_fn(|_| Buf::zeros(nd * nd)));
                 for a in 0..3 {
@@ -3251,7 +3603,6 @@ impl Fold {
                 }
                 Tangent {
                     dk,
-                    dkx,
                     demit,
                     dhx,
                     dexd,
@@ -3320,7 +3671,7 @@ impl Fold {
                 }
                 work[1] += (s * m) as f64;
                 // ∂K̃ Z on the parts: per part its rows (i, a) of ∂K̃ (3p × p) on Z_P (p × Ln), the result rhs's rows there.
-                for (idx, pat, _) in basis.f.parts.iter().filter(|x| !nb.out[x.1]) {
+                for (idx, pat, _) in basis.f.parts.iter() {
                     let p = idx.len();
                     let mut mp = Buf::zeros(3 * p * p);
                     for ii in 0..p {
@@ -3339,27 +3690,13 @@ impl Fold {
                 lap(1, &mut clock, &mut tick);
                 // −(∂Z^{k−1}Δ + Z^{k−1}∂Δ): the first on every axis and split at once, the second axis by axis.
                 if k > 0 {
-                    // −(∂Z^{k−1}Δ + Z^{k−1}∂Δ) and the levels' ∂R̃ Z^{k−1} + R̃ ∂Z^{k−1}, on the kept rows' hull (outside it every
-                    // row is left out: zero).
-                    let (lo, hi) = (nb.lo, nb.hi);
-                    let h = hi - lo;
-                    let prev = &nb.zs[at - s * ln + lo * ln..at - s * ln + hi * ln];
+                    let h = s;
+                    let prev = &nb.zs[at - s * ln..at];
                     let mut p1 = Buf::zeros(h * m);
-                    fused_product_into(&tg.dz[lo * m..hi * m], delta, (3 * h * splits, n, n), &mut p1);
-                    let rows = &mut rhs[lo * m..hi * m];
+                    fused_product_into(&tg.dz, delta, (3 * h * splits, n, n), &mut p1);
+                    let rows = &mut rhs[..];
                     rows.iter_mut().zip(p1.iter()).for_each(|(r, y)| *r -= *y);
-                    let mut mx = Buf::zeros(3 * h * h);
-                    for i in 0..h {
-                        for a in 0..3 {
-                            let from = a * s * s + (lo + i) * s + lo;
-                            mx[(i * 3 + a) * h..(i * 3 + a) * h + h].copy_from_slice(&tg.dkx[from..from + h]);
-                        }
-                    }
-                    fused_product_into(&mx, prev, (3 * h, h, ln), &mut p1);
-                    rows.iter_mut().zip(p1.iter()).for_each(|(r, y)| *r += *y);
-                    fused_product_into(&nb.rtk, &tg.dz[lo * m..hi * m], (h, h, m), &mut p1);
-                    rows.iter_mut().zip(p1.iter()).for_each(|(r, y)| *r += *y);
-                    work[2] += (2 * h * h * m) as f64;
+                    work[2] += (h * m * n) as f64;
                     let mut p2 = Buf::zeros(h * ln);
                     for a in 0..3 {
                         for r in 0..n {
@@ -3374,7 +3711,7 @@ impl Fold {
                             }
                         }
                     }
-                    work[2] += (2 * h * m * n) as f64;
+                    work[2] += (h * m * n) as f64;
                 }
                 lap(2, &mut clock, &mut tick);
                 let nd = nb.nd;
@@ -3397,7 +3734,7 @@ impl Fold {
                 // The triangular solves, every axis and split of a row at once: (c_j − w_l − T)⁻¹ the forward's.
                 {
                     let dz = &mut tg.dz;
-                    for i in (0..s).rev().filter(|&i| (k == 0 && !nb.out[i]) || nb.active[i]) {
+                    for i in (0..s).rev().filter(|&i| k == 0 || nb.active[i]) {
                         let (head, tail) = dz.split_at_mut((i + 1) * m);
                         let r = &mut rhs[i * m..(i + 1) * m];
                         for l2 in i + 1..ends[i] {
@@ -3775,8 +4112,21 @@ impl Workspace {
             let ts = basis.f.from(&z, &mut w);
             let mut rows = Near { tc: vec![C64::ZERO; nb.nc * n], ..nb.clone() };
             copy_rows(&mut rows, basis, &self.mid.e, n, &mut w);
-            let (s, nd) = (nb.s, nb.nd);
-            out[nb.o] = Some(Mat::from_fn(s + nd + nb.nc, n, |i, j| if i < s { ts[(i, j)] } else if i < s + nd { nb.zdtot[(i - s) * n + j] } else { rows.tc[(i - s - nd) * n + j] }));
+            let (ne, nd) = (nb.all, nb.nd);
+            // The kept rows' response on their rows of the block, the omitted levels' zero.
+            let mut place = vec![usize::MAX; ne];
+            for (a, &i) in basis.rows.iter().enumerate() {
+                place[i] = a;
+            }
+            out[nb.o] = Some(Mat::from_fn(ne + nd + nb.nc, n, |i, j| {
+                if i < ne {
+                    if place[i] == usize::MAX { C64::ZERO } else { ts[(place[i], j)] }
+                } else if i < ne + nd {
+                    nb.zdtot[(i - ne) * n + j]
+                } else {
+                    rows.tc[(i - ne - nd) * n + j]
+                }
+            }));
         }
         for (x, fb) in self.far.iter().enumerate() {
             if fb.omitted {
