@@ -1819,7 +1819,7 @@ fn the_prototype_is_the_fold_within_its_readings() {
 #[test]
 #[ignore = "a measurement: run by name with PROTO_SCENE"]
 fn a_prototype_s_step_at_a_scene() {
-    use super::proto::{Cache, PHASES};
+    use super::proto::{Cache, PHASES, TANGENT};
     let name = std::env::var("PROTO_SCENE").expect("PROTO_SCENE");
     let atoms: usize = std::env::var("PROTO_ATOMS").map_or(10, |x| x.parse().unwrap());
     let req = crate::model::testing::scene(&name);
@@ -1873,6 +1873,7 @@ fn a_prototype_s_step_at_a_scene() {
                 std::hint::black_box(sink);
                 // Per step: wall, ticks by phase, work by phase, sweeps, made; per sweep index its ticks and work.
                 let (mut wall, mut ticks, mut work, mut rest) = (vec![], vec![], vec![], vec![]);
+                let mut tangent: Vec<([u64; 6], [f64; 6], f64, [u64; 5])> = vec![];
                 let (mut sweeps, mut made, mut rounds) = (vec![], vec![], vec![]);
                 let (mut sweep_ticks, mut sweep_work, mut sweep_count) = (vec![0u64; 64], vec![0.0; 64], vec![0usize; 64]);
                 let mut most = [0.0_f64; 6];
@@ -1890,7 +1891,9 @@ fn a_prototype_s_step_at_a_scene() {
                         let t_nodes = clock.elapsed().as_secs_f64();
                         let clock = std::time::Instant::now();
                         let tangent_work = fold.prototype_tangent(&cache, &mut ws);
+                        let t_tangent = clock.elapsed().as_secs_f64();
                         let force = fold.prototype_force(&cache, &mut ws, [&rho, &rho, &rho]);
+                        tangent.push((ws.tangent_ticks, ws.tangent_work, t_tangent, ws.force_ticks));
                         let t_force = clock.elapsed().as_secs_f64();
                         let clock = std::time::Instant::now();
                         let photons = fold.prototype_photons(&cache, &ws, &psi, &sets);
@@ -1964,6 +1967,14 @@ fn a_prototype_s_step_at_a_scene() {
                     us(&calm) + nodes_us + force_us + photons_us,
                     us(&every) + 1e6 * (part(&every, 0) + part(&every, 1) + part(&every, 2)),
                     1e-3 * phase_us(&every, 1) * steps as f64 / paths.len() as f64
+                );
+                let tangent_us = 1e6 * mean(&calm, &|i| tangent[i].2);
+                out += &format!(
+                    "      the tangent {tangent_us:.2} µs, the force's contraction {:.2} µs (top, light, compressions, responses, held: {}); the tangent by phase (µs / multiply-adds): {}
+",
+                    force_us - tangent_us,
+                    (0..5).map(|k| format!("{:.2}", 1e-3 * ns_tick * mean(&calm, &|i| tangent[i].3[k] as f64))).collect::<Vec<_>>().join(", "),
+                    (0..6).map(|k| format!("{} {:.2}/{:.0}", TANGENT[k], 1e-3 * ns_tick * mean(&calm, &|i| tangent[i].0[k] as f64), mean(&calm, &|i| tangent[i].1[k]))).collect::<Vec<_>>().join(", ")
                 );
                 let whole = us(&calm) + nodes_us + force_us + photons_us;
                 each_pass.push(whole);
