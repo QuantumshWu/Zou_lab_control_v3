@@ -2917,8 +2917,218 @@ fn a_scene_s_onefold_step_cost() {
                 start
             })
             .collect();
-        cost(&format!("set {set} ({n}) of {}", std::path::Path::new(&name).file_stem().unwrap().to_string_lossy()), &run, &starts, tau);
+        let label = format!("set {set} ({n}) of {}", std::path::Path::new(&name).file_stem().unwrap().to_string_lossy());
+        cost(&label, &run, &starts, tau);
+        parts(&label, &run, &starts, tau);
     }
+}
+
+/// A step's and a jump's parts on a case's atoms (`a_scene_s_onefold_step_cost`; wire3 item 1), µs an atom, timed in turn
+/// (`microseconds`). The step through a middle made before, held, and its model's parts each on a path of its own --
+/// the forward at the path's momentum, the outer nodes, the tangent with one form, the three nodes' contraction with the
+/// end's (`Middle::nodes`), the scattered light --; its integrator's parts on a path whose model is made -- the picture
+/// (`pictured`: the generator's copies, the tones' separation, the decomposition and its following), the launch (its two
+/// hops and three rates), the states at the quadrature's nodes and stops, the kick's and the survival's sums. A jump:
+/// the step with its threshold crossed halfway down its fall; its photon and its landing at the path's point (`jump`:
+/// `Dynamics::emit` and `Dynamics::landed`, each alone too); its root in the first panel, from the panel's nodes
+/// (`root`); its launch at the middle with the states and sums of the rest of the step. Said with the nodes, the route,
+/// the tones and the counted hops' work.
+fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
+    let (count, h, hm) = (starts.len(), 0.5 * tau, model.hbar_over_mass());
+    let n = starts[0].psi.len();
+    let midway = |from: &Trajectory| step::Midway::new(model, &Trajectory { threshold: 0.0, ..from.clone() }, tau).unwrap();
+    // Three middles an atom: the integrator's (its path's model made once), the model's parts' (a path of its own each
+    // time), the whole step's (each step a path of its own): a middle holds the model of its last path alone.
+    let (cached, fresh, stepping): (Vec<step::Midway<D>>, Vec<step::Midway<D>>, Vec<step::Midway<D>>) = (starts.iter().map(midway).collect(), starts.iter().map(midway).collect(), starts.iter().map(midway).collect());
+    let kappas: Vec<[f64; 3]> = cached.iter().zip(starts).map(|(m, s)| super::predicted(&s.forms, m.reached.1, m.reference, tau, s.time + h)).collect();
+    let rhos: Vec<Vec<C64>> = starts
+        .iter()
+        .map(|s| {
+            let mut rho = vec![C64::ZERO; n * n];
+            super::density(&s.psi, &mut rho);
+            rho
+        })
+        .collect();
+    // The integrator's parts on paths whose model is made (one each, its picture prepared once beforehand).
+    let alongs: Vec<_> = cached.iter().zip(&kappas).map(|(m, k)| super::Along::new(&m.generator, *k, k.map(|k| hm * k))).collect();
+    let launched: Vec<[C64; STATES]> = alongs.iter().zip(starts).map(|(a, s)| a.turned(&s.psi, -h, true)).collect();
+    let mut scratches: Vec<step::Scratch> = alongs
+        .iter()
+        .zip(&launched)
+        .map(|(along, x)| {
+            let mut scratch = fitted(n);
+            super::pictured(along, &mut scratch, tau, Some((&x[..n], -h))).unwrap();
+            scratch
+        })
+        .collect();
+    // Each atom's stops: its quadrature's nodes over the step with their weights, then the middle and the end.
+    let stops: Vec<Vec<(f64, f64)>> = scratches.iter().map(|s| super::quadrature(-h, h, s.picture.bandwidth, super::FORMS, super::Within::Share).chain([(0.0, 0.0), (h, 0.0)]).collect()).collect();
+    let nodes = stops.iter().map(|s| (s.len() - 2) as f64).sum::<f64>() / count as f64;
+    let mut x = [C64::ZERO; STATES];
+    // A jump's crossings: each atom with its threshold halfway down its step's fall, the point a tenth of the step past
+    // the middle on its path.
+    let crossed: Vec<Trajectory> = stepping
+        .iter()
+        .zip(starts)
+        .map(|(m, s)| {
+            let taken = m.attempt(&Trajectory { threshold: 0.0, ..s.clone() }, &step::Brownian::STILL, &[], &mut fitted(n), &Everywhere).unwrap();
+            Trajectory { threshold: (crate::linalg::norm_sqr(&s.psi) * crate::linalg::norm_sqr(&taken.end.psi)).sqrt(), ..s.clone() }
+        })
+        .collect();
+    let landings: Vec<usize> = stepping.iter().zip(&crossed).map(|(m, c)| m.attempt(c, &step::Brownian::STILL, &[], &mut fitted(n), &Everywhere).unwrap().made.iter().filter(|m| m.kick.is_some()).map(|m| m.state.cluster).next().unwrap_or(usize::MAX)).collect();
+    let others = landings.iter().zip(starts).filter(|(l, s)| **l != usize::MAX && **l != s.cluster).count();
+    let jumped: Vec<Trajectory> = cached.iter().zip(&kappas).zip(starts).map(|((m, k), s)| Trajectory { r: std::array::from_fn(|a| m.reached.0[a] + hm * k[a] * 0.1 * tau), kappa: *k, time: s.time + 0.6 * tau, ..s.clone() }).collect();
+    let mut draw = |rates: &[f64]| (rates.iter().sum::<f64>() > 0.0).then(|| rates.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0);
+    let emitted: Vec<Option<step::Emitted>> = jumped.iter().map(|t| model.emit(t.cluster, &t.point(), &t.psi, &t.held, &mut draw)).collect();
+    // The first panel's root: its sums laid from its nodes, the target halfway down its fall.
+    struct Root {
+        b: f64,
+        log: f64,
+        fell: f64,
+        saved: Vec<f64>,
+        weights: Vec<f64>,
+    }
+    let roots: Vec<Root> = scratches
+        .iter_mut()
+        .zip(&launched)
+        .map(|(scratch, x0)| {
+            let super::Carved { picture, decay, part, sums, weights, .. } = scratch.carve();
+            picture.launch(-h, &x0[..n]);
+            sums.fill(0.0);
+            weights.fill(0.0);
+            let (b, panel) = super::panels(-h, h, picture.bandwidth, super::FORMS, super::Within::Share).next().unwrap();
+            let mut y = [C64::ZERO; STATES];
+            for (u, w) in panel {
+                picture.advance(u, &mut y[..n]);
+                super::Sums { still: false, h, tones: &picture.beats }.gather(u, w, &y[..n], Some(&mut *weights), sums);
+            }
+            let fell = super::hazard(decay, sums, n);
+            let _ = part;
+            Root { b, log: crate::linalg::norm_sqr(&x0[..n]).ln(), fell, saved: vec![0.0; sums.len()], weights: vec![0.0; weights.len()] }
+        })
+        .collect();
+    let (scratches, stepped) = (std::cell::RefCell::new(scratches), std::cell::RefCell::new(fitted(n)));
+    let roots = std::cell::RefCell::new(roots);
+    let [step, forward, outer, tangent, contraction, scattering, picture, launch, states, sums, with_jump, jump, emit, landed, root, relaunch] = microseconds(
+        count,
+        [
+            &mut || stepping.iter().zip(starts).map(|(m, s)| m.attempt(&Trajectory { threshold: 0.0, ..s.clone() }, &step::Brownian::STILL, &[], &mut stepped.borrow_mut(), &Everywhere).unwrap().end.kappa[0]).sum::<f64>(),
+            &mut || {
+                let mut g = Mat::zeros(n, n);
+                fresh.iter().zip(&kappas).for_each(|(m, k)| m.generator.generator(&m.generator.path(*k, k.map(|k| hm * k)), 0.0, &mut g));
+                g.data[0].re
+            },
+            &mut || {
+                let mut g = Mat::zeros(n, n);
+                for (m, k) in fresh.iter().zip(&kappas) {
+                    let path = m.generator.path(*k, k.map(|k| hm * k));
+                    for s in [0.0, -h, h] {
+                        m.generator.generator(&path, s, &mut g);
+                    }
+                }
+                g.data[0].re
+            },
+            &mut || {
+                let mut g = Mat::zeros(n, n);
+                let mut sum = 0.0;
+                for ((m, k), rho) in fresh.iter().zip(&kappas).zip(&rhos) {
+                    let path = m.generator.path(*k, k.map(|k| hm * k));
+                    for s in [0.0, -h, h] {
+                        m.generator.generator(&path, s, &mut g);
+                    }
+                    sum += m.generator.force(&path, 0.0, rho)[0];
+                }
+                sum
+            },
+            &mut || alongs.iter().zip(&rhos).map(|(a, rho)| a.middle.nodes(&a.path, h, [rho, rho, rho], None, Some((rho, &a.path))).0[0][0]).sum::<f64>(),
+            &mut || alongs.iter().zip(starts).map(|(a, s)| a.middle.scattering(&a.path, &s.psi).0.force[0]).sum::<f64>(),
+            &mut || alongs.iter().zip(&launched).zip(scratches.borrow_mut().iter_mut()).map(|((a, x), s)| super::pictured(a, s, tau, Some((&x[..n], -h))).unwrap()).sum::<f64>(),
+            &mut || {
+                for (x0, s) in launched.iter().zip(scratches.borrow_mut().iter_mut()) {
+                    s.picture.launch(-h, &x0[..n]);
+                }
+                0.0
+            },
+            &mut || {
+                let mut sum = 0.0;
+                for (stops, s) in stops.iter().zip(scratches.borrow_mut().iter_mut()) {
+                    for &(u, _) in stops {
+                        s.picture.between(u, &mut x[..n]);
+                        sum += x[0].re;
+                    }
+                }
+                sum
+            },
+            &mut || {
+                let mut sum = 0.0;
+                for (stops, s) in stops.iter().zip(scratches.borrow_mut().iter_mut()) {
+                    let super::Carved { picture, sums, weights, .. } = s.carve();
+                    let y: [C64; STATES] = std::array::from_fn(|i| if i < n { C64::new(1.0 + i as f64, 0.5) } else { C64::ZERO });
+                    for &(u, w) in &stops[..stops.len() - 2] {
+                        super::Sums { still: false, h, tones: &picture.beats }.gather(u, w, &y[..n], Some(&mut *weights), sums);
+                    }
+                    sum += sums[0];
+                }
+                sum
+            },
+            &mut || stepping.iter().zip(&crossed).map(|(m, c)| m.attempt(c, &step::Brownian::STILL, &[], &mut stepped.borrow_mut(), &Everywhere).unwrap().end.kappa[0]).sum::<f64>(),
+            &mut || {
+                jumped
+                    .iter()
+                    .map(|t| {
+                        let mut t = t.clone();
+                        super::jump(model, &mut t).unwrap();
+                        t.kappa[0]
+                    })
+                    .sum::<f64>()
+            },
+            &mut || jumped.iter().map(|t| model.emit(t.cluster, &t.point(), &t.psi, &t.held, &mut draw).map_or(0.0, |e| e.wave_number)).sum::<f64>(),
+            &mut || jumped.iter().zip(&emitted).filter_map(|(t, e)| e.as_ref().map(|e| (t, e))).map(|(t, e)| model.landed(e.landing, &t.point(), &e.amplitudes[0], &t.held)[0].re).sum::<f64>(),
+            &mut || {
+                let mut sum = 0.0;
+                for (s, r) in scratches.borrow_mut().iter_mut().zip(roots.borrow_mut().iter_mut()) {
+                    let super::Carved { picture, decay, part, sums, weights, .. } = s.carve();
+                    let _ = (sums, weights);
+                    r.saved.fill(0.0);
+                    r.weights.fill(0.0);
+                    let target = r.log - 0.5 * r.fell;
+                    let floor = crate::units::rounding(n + 10) * tau.abs() + 2.0 * crate::units::UNIT_ROUNDOFF * target.abs();
+                    let (u, ..) = super::root(picture, (false, h, picture.bandwidth), (decay, part), (&mut r.saved, &mut r.weights), (-h, r.b), r.log, Some((r.b, r.fell)), f64::NAN, target, floor);
+                    sum += u.unwrap_or(0.0);
+                }
+                sum
+            },
+            &mut || {
+                let mut sum = 0.0;
+                for (x0, s) in launched.iter().zip(scratches.borrow_mut().iter_mut()) {
+                    let super::Carved { picture, sums, weights, .. } = s.carve();
+                    picture.launch(0.0, &x0[..n]);
+                    let mut y = [C64::ZERO; STATES];
+                    for (u, w) in super::quadrature(0.0, h, picture.bandwidth, super::FORMS, super::Within::Share) {
+                        picture.advance(u, &mut y[..n]);
+                        super::Sums { still: false, h, tones: &picture.beats }.gather(u, w, &y[..n], Some(&mut *weights), sums);
+                    }
+                    sum += sums[0];
+                }
+                sum
+            },
+        ],
+    );
+    let model_part = forward + (outer - forward) + (tangent - outer) + contraction + scattering;
+    let integrator = picture + launch + states + sums;
+    let s0 = &scratches.borrow()[0].picture;
+    let (decomposed, tones) = (scratches.borrow().iter().filter(|s| s.picture.decomposed()).count(), s0.beats.len());
+    eprintln!(
+        "{name:<22} n {n} τ {tau:<6} | parts: step {step:8.2} = model {model_part:8.2} (forward {forward:7.2}, outer nodes {:7.2}, tangent and a form {:7.2}, the nodes' contraction {contraction:7.2}, scattering {scattering:7.2}) + integrator {integrator:7.2} (picture {picture:6.2}, launch {launch:6.2}, states {states:6.2} at {:.1}, sums {sums:6.2} at {nodes:.1} nodes; decomposed {decomposed}/{count}, tones {tones}) + rest {:7.2}",
+        outer - forward,
+        tangent - outer,
+        nodes + 2.0,
+        step - model_part - integrator
+    );
+    eprintln!(
+        "{name:<22} n {n} τ {tau:<6} | a jump: with it {with_jump:8.2} (+{:8.2}; {others}/{count} land in another set) | jump {jump:8.2} (emit {emit:8.2}, landed {landed:8.2}) | root in the first panel {root:7.2} | relaunch at the middle with the rest's states and sums {relaunch:7.2}",
+        with_jump - step
+    );
 }
 
 /// What `decay_along` reads of a scene's decay, kind by kind.
