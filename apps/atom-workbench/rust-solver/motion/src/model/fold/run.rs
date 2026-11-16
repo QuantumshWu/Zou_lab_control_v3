@@ -49,8 +49,9 @@
 //! # The jumps' coherence (BRIEF_WIRE3 item 3)
 //! A set's blocks whose explicit states P holds a tone between are one coherence group (fold.rs `Fold::groups`, # Tones):
 //! their jumps are one operator per landing set, L_q(t) = C_q Σ_o e^{−iot}ε_o S⁻¹ over the group (DESIGN §1.3), so the
-//! photons' classes are per group (proto.rs `Fold::prototype_photons` at the time) and a jump's amplitudes its group's
-//! blocks' at their phases (`Middle::emitted`); and the decay between the offsets is its cross products, added to the
+//! photons' classes are per group (proto.rs `Fold::prototype_photons` at the time) and a jump's amplitudes its class's
+//! photons' own, its group's blocks summed at their phases (`Middle::emitted`, proto.rs `Workspace::jumped`); and the
+//! decay between the offsets is its cross products, added to the
 //! generator at their beats at every position (`step::Middle::generator`): i(G − G†) = Σ_q L_q(t)†L_q(t) at every time,
 //! static and beating, by construction. Every block of the scenes is a group of its own.
 //!
@@ -76,19 +77,19 @@ use crate::step::{Emitted, Forms, Held, Internal, Middle as _};
 use std::cell::{RefCell, RefMut};
 use std::sync::{Arc, Mutex};
 
-/// One state set of the run: its fold, its cluster, the near and far blocks in the jumps' order as the fold's blocks, the
-/// counted work of a step's middle at the focus (`step::Middle::work`), and the workspaces its evaluations take in turn.
+/// One state set of the run: its fold, its cluster, the counted work of a step's middle at the focus
+/// (`step::Middle::work`), and the workspaces its evaluations take in turn.
 struct Set {
     fold: Fold,
     cluster: Cluster,
-    blocks: Vec<usize>,
     work: [f64; 3],
     pool: Mutex<Vec<Workspace>>,
     /// The tones' values ν_m (rad/µs; proto.rs `Workspace::tones`' order); the integrator's candidates (`Candidate`).
     tones: Vec<f64>,
     candidates: Vec<Candidate>,
-    /// The pairs of the jumps' blocks (their order, `blocks`) of one coherence group (fold.rs `Fold::groups`), each with
-    /// its beat o − o′ (rad/µs): the decay between their offsets (# The jumps' coherence).
+    /// The pairs of the jumps' blocks (their order: the near blocks', then the far ones', as the fold's blocks) of one
+    /// coherence group (fold.rs `Fold::groups`), each with its beat o − o′ (rad/µs): the decay between their offsets (# The
+    /// jumps' coherence).
     coherent: Vec<(usize, usize, f64)>,
 }
 
@@ -177,7 +178,7 @@ impl Onefold {
                 .filter(|&(i, j)| i != j && fold.groups[blocks[i]] == fold.groups[blocks[j]])
                 .map(|(i, j)| (i, j, fold.blocks[blocks[i]].value - fold.blocks[blocks[j]].value))
                 .collect();
-            sets.push(Set { fold, cluster, blocks, work, pool: Mutex::new(pool), tones, candidates, coherent });
+            sets.push(Set { fold, cluster, work, pool: Mutex::new(pool), tones, candidates, coherent });
         }
         let energies: Vec<f64> = (0..GROUND).map(|s| request.hamiltonian[(s, s)].re).collect();
         let mut run = Onefold {
@@ -420,9 +421,9 @@ impl Middle<'_> {
     /// the forward and the tangent the step made at the path (made here where it made none), the place there -- the light
     /// turned to r + vs, the responses and their tangent turned lane by lane, S the middle's (proto.rs
     /// `Fold::prototype_place`): no fold at the place --, the classes' rates there and the class `draw` picks; its jump's
-    /// amplitudes L(s)ψ on the landing set's states, each at its frame's phase at the time t_m + s (module documentation,
-    /// # The jumps' phase), and the photon's frequency. None where the set has no light (no blocks), the fold does not
-    /// exist there, or `draw` picks none.
+    /// amplitudes L(s)ψ on the landing set's states -- the photons' own u = C ε S⁻¹ψ of its group (`Workspace::jumped`) --,
+    /// each at its frame's phase at the time t_m + s (module documentation, # The jumps' phase), and the photon's
+    /// frequency. None where the set has no light (no blocks), the fold does not exist there, or `draw` picks none.
     pub(crate) fn emitted(&self, path: &Path, s: f64, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
         let (run, set) = (self.run, &self.run.sets[self.set]);
         let fold = &set.fold;
@@ -438,37 +439,24 @@ impl Middle<'_> {
         fold.prototype_place(self.r, path.kappa, path.velocity, s, ws);
         let t = self.t + s;
         let photons = fold.prototype_photons(eval, ws, psi, &run.grounds, At::Place, t);
-        let jumps = fold.prototype_jumps(eval, ws, At::Place);
-        let rates: Vec<f64> = photons.classes.iter().map(|c| c.2).collect();
-        let (first_block, landing, _, kick) = photons.classes[draw(&rates)?];
-        // The class's jump: its group's blocks' at their offsets' phases e^{−iot} (# The jumps' coherence), on the landing
-        // set's states, each at its frame's phase e^{iθ_s t} (# The jumps' phase); per block its share of the rate.
-        let to = &run.sets[landing];
-        let group = fold.groups[set.blocks[first_block]];
-        let x = Mat { rows: psi.len(), cols: 1, data: psi.to_vec() };
+        let rates: Vec<f64> = photons.classes.iter().map(|c| c.rate).collect();
+        let class = &photons.classes[draw(&rates)?];
+        // The class's jump: its group's blocks' at their offsets' phases e^{−iot} (# The jumps' coherence), as its photons
+        // summed them, on the landing set's states, each at its frame's phase e^{iθ_s t} (# The jumps' phase).
+        let to = &run.sets[class.landing];
         let mut amplitudes = [Internal::zeros(to.cluster.states.len()); 3];
-        let mut shares = vec![];
-        for (b, _) in set.blocks.iter().enumerate().filter(|(_, &o)| fold.groups[o] == group) {
-            let phase = C64::cis(-fold.blocks[set.blocks[b]].value * t);
-            let mut share = 0.0;
-            for (a, amplitude) in amplitudes.iter_mut().enumerate() {
-                let u = jumps[b][a].product(&x);
-                for ((z, &s), &theta) in amplitude.iter_mut().zip(&to.cluster.states).zip(&to.fold.frame_values) {
-                    if s < GROUND {
-                        *z += u.data[s] * phase * C64::cis(theta * t);
-                        share += u.data[s].norm_sqr();
-                    }
+        for (a, amplitude) in amplitudes.iter_mut().enumerate() {
+            for ((z, &s), &theta) in amplitude.iter_mut().zip(&to.cluster.states).zip(&to.fold.frame_values) {
+                if s < GROUND {
+                    *z = ws.jumped(class.slot, s, a) * C64::cis(theta * t);
                 }
             }
-            shares.push((share, fold.blocks[set.blocks[b]].value));
         }
         // The photon's frequency: the excited amplitude's (the frame's, its offset's and the set's slow ground energy) less
-        // the landing state's energy; of a group, its blocks' offsets at their shares of the rate.
-        let total: f64 = shares.iter().map(|x| x.0).sum();
-        let offset = if total > 0.0 { shares.iter().map(|(w, o)| w * o).sum::<f64>() / total } else { fold.blocks[set.blocks[first_block]].value };
+        // the landing state's energy; of a group, its blocks' offsets at their shares of the rate (`Class::offset`).
         let first = fold.ground[0];
-        let omega = run.frame + offset + run.energies[first] - fold.frame_values[0] - run.energies[run.grounds[landing][0]];
-        Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick })
+        let omega = run.frame + class.offset + run.energies[first] - fold.frame_values[0] - run.energies[run.grounds[class.landing][0]];
+        Some(Emitted { landing: class.landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick: class.kick })
     }
 
     /// Where a jump's bare state f lands in this middle's set: its slow part S⁻¹f, S the middle's (DESIGN §1.3, §13.2, the
@@ -663,7 +651,7 @@ impl crate::step::Middle for Middle<'_> {
         let photons = fold.prototype_photons(eval, ws.as_mut().unwrap(), psi, &self.run.grounds, At::Middle, self.t);
         // The terms of a diagonal entry: per class its second moment and its kick's W b², at most the entry and twice
         // the kicks' part; the products behind it: S⁻¹ψ, the responses, the emission, a class's Gram over its rows.
-        let kicks: [f64; 3] = std::array::from_fn(|a| photons.classes.iter().map(|c| c.2 * c.3[a] * c.3[a]).sum());
+        let kicks: [f64; 3] = std::array::from_fn(|a| photons.classes.iter().map(|c| c.rate * c.kick[a] * c.kick[a]).sum());
         let size = (0..3).map(|a| photons.diffusion[a][a].abs() + 2.0 * kicks[a]).fold(0.0, f64::max);
         let links = fold.size() + STATES + 3 * GROUND;
         (Scattering { force: photons.force, diffusion: photons.diffusion, size, links }, photons.work * crate::decide::COMPLEX)

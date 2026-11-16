@@ -100,7 +100,9 @@
 //! # The jumps (DESIGN §1.3, §2.6)
 //! L_q = C_q ε S⁻¹ of the same responses at every position (`Fold::prototype_jumps`): ε = VZ of a near block (Z(s) at a
 //! node), R₀Σ_a e_a U_a of a far one; i(G − G†) = Σ L†L to the rounding, S the middle's at the nodes too. The photons a
-//! state emits per step (`Fold::prototype_photons`): u = C_q V Z S⁻¹ψ and its whole gradient, the step's tangent along each
+//! state emits per step (`Fold::prototype_photons`): u = C_q V Z S⁻¹ψ -- a jump's amplitudes at its place are these, its
+//! class's (`Workspace::jumped`; DESIGN §13.2: ε(u*) = Σ_l a_l(u*)T_l x(u*), no operator made) -- and its whole
+//! gradient, the step's tangent along each
 //! axis by the same sweeps (the beams' fields, and the responses' own change through Ĥ_PP, K̃, Ṽ and H) and S⁻¹'s: the
 //! responses' own change is the excited states' differential light shift along r (the tweezer's), a tenth of the
 //! diffusion on R4 F=2 and nearly all of it on PGC3D F=1, where the one repump beam's field alone gives none.
@@ -2233,9 +2235,17 @@ impl Fold {
         })
     }
 
-    /// The light at a place (module documentation, 1), the beams' gradients with it (the force's).
+    /// The light at a place (module documentation, 1) and Ĥ_PP there (`light_at`, `generator_at`).
     #[allow(clippy::too_many_arguments)]
     fn proto_place(&self, r: [f64; 3], kappa: [f64; 3], at: &mut Placed, pairs: &[Pair], pp: &[Vec<(usize, C64)>], base: &[C64], lin: &Lin, rotating: &[Rotating], proj: &[Vec<C64>], work: &mut f64) {
+        self.light_at(r, kappa, at, proj, work);
+        self.generator_at(at, pairs, pp, base, lin, rotating, work);
+    }
+
+    /// The light at a place (module documentation, 1) with its gradients: the beams' amplitudes, each frequency's
+    /// components ε_k, per component its beams' factors f_l and Doppler shifts w_l and its coefficients e_k; ∂ε_k, ∂e_k,
+    /// ∂f_l. All a jump's photons take at its place (`prototype_place`).
+    fn light_at(&self, r: [f64; 3], kappa: [f64; 3], at: &mut Placed, proj: &[Vec<C64>], work: &mut f64) {
         for (a, b) in at.amplitudes.iter_mut().zip(&self.light.beams) {
             *a = b.amplitude_to(r, 1);
         }
@@ -2250,10 +2260,6 @@ impl Fold {
             }
             *work += (f.beams.len() * rank) as f64;
         }
-        for (x, &(w, k, kk)) in at.coef.iter_mut().zip(pairs) {
-            *x = at.eps[w][k].conj() * at.eps[w][kk];
-        }
-        *work += pairs.len() as f64;
         for (c, comp) in self.components.iter().enumerate() {
             for (j, &l) in comp.beams.iter().enumerate() {
                 at.f[c][j] = comp.factor(at.amplitudes[l].value);
@@ -2266,6 +2272,34 @@ impl Fold {
                 at.e[c][k] = if comp.part.counter { eps[k].conj() } else { eps[k] };
             }
         }
+        // The gradients: ∂_a ε_k = Σ_l ∂_a a_l u_k†E_l, ∂e_k (its conjugate counter-rotating), ∂f_l (the factor is linear in
+        // the amplitude).
+        for ((d, f), pr) in at.deps.iter_mut().zip(&self.light.frequencies).zip(proj) {
+            let rank = f.rank();
+            for (k, dk) in d.iter_mut().enumerate() {
+                *dk = std::array::from_fn(|a| f.beams.iter().enumerate().map(|(j, &l)| at.amplitudes[l].gradient[a] * pr[j * rank + k]).sum());
+            }
+            *work += (3 * f.beams.len() * rank) as f64;
+        }
+        for (c, comp) in self.components.iter().enumerate() {
+            let d = &at.deps[comp.part.frequency];
+            for k in 0..comp.basis.len() {
+                at.de[c][k] = if comp.part.counter { d[k].map(|z| z.conj()) } else { d[k] };
+            }
+            for (j, &l) in comp.beams.iter().enumerate() {
+                at.df[c][j] = std::array::from_fn(|a| comp.factor(at.amplitudes[l].gradient[a]));
+            }
+        }
+    }
+
+    /// Ĥ_PP at a place whose light is laid (`light_at`): the pairs' coefficients c_t = ε_k*ε_k', Ĥ_PP and its tones' A_m
+    /// (# The tones; n × n each), and the pairs' ∂c_t = ∂ε_k* ε_k' + ε_k* ∂ε_k' the tangent and the force take.
+    #[allow(clippy::too_many_arguments)]
+    fn generator_at(&self, at: &mut Placed, pairs: &[Pair], pp: &[Vec<(usize, C64)>], base: &[C64], lin: &Lin, rotating: &[Rotating], work: &mut f64) {
+        for (x, &(w, k, kk)) in at.coef.iter_mut().zip(pairs) {
+            *x = at.eps[w][k].conj() * at.eps[w][kk];
+        }
+        *work += pairs.len() as f64;
         at.hpp.copy_from_slice(base);
         for (entries, &x) in pp.iter().zip(&at.coef) {
             for &(i, v) in entries {
@@ -2295,24 +2329,6 @@ impl Fold {
                     a[i] += x * v;
                 }
                 *work += entries.len() as f64;
-            }
-        }
-        // The gradients: ∂_a ε_k = Σ_l ∂_a a_l u_k†E_l, ∂e_k (its conjugate counter-rotating), ∂_a c_t = ∂ε_k* ε_k' + ε_k* ∂ε_k',
-        // ∂f_l (the factor is linear in the amplitude).
-        for ((d, f), pr) in at.deps.iter_mut().zip(&self.light.frequencies).zip(proj) {
-            let rank = f.rank();
-            for (k, dk) in d.iter_mut().enumerate() {
-                *dk = std::array::from_fn(|a| f.beams.iter().enumerate().map(|(j, &l)| at.amplitudes[l].gradient[a] * pr[j * rank + k]).sum());
-            }
-            *work += (3 * f.beams.len() * rank) as f64;
-        }
-        for (c, comp) in self.components.iter().enumerate() {
-            let d = &at.deps[comp.part.frequency];
-            for k in 0..comp.basis.len() {
-                at.de[c][k] = if comp.part.counter { d[k].map(|z| z.conj()) } else { d[k] };
-            }
-            for (j, &l) in comp.beams.iter().enumerate() {
-                at.df[c][j] = std::array::from_fn(|a| comp.factor(at.amplitudes[l].gradient[a]));
             }
         }
         for (x, &(w, k, kk)) in at.dc.iter_mut().zip(pairs) {
@@ -3601,16 +3617,27 @@ pub(crate) struct Force {
     pub(crate) work: f64,
 }
 
-/// The absorbed light's moments at a step's middle (`Fold::prototype_photons`; photon.rs # The absorbed light's momentum):
-/// the rate W, the force the jumps do not carry and the diffusion 2D, per unit norm of the state; the work.
+/// The absorbed light's moments at a step's middle or a jump's place (`Fold::prototype_photons`; photon.rs # The absorbed
+/// light's momentum): the rate W, the force the jumps do not carry and the diffusion 2D, per unit norm of the state; the
+/// work; per class its own (`Class`).
 pub(crate) struct Photons {
     pub(crate) rate: f64,
     pub(crate) force: [f64; 3],
     pub(crate) diffusion: [[f64; 3]; 3],
     pub(crate) work: f64,
-    /// Per class (a block's photons landing in one set) in the jumps' order (`Fold::prototype_jumps`: the near blocks', then
-    /// the far ones'): its block, its landing set (an index of `sets`), its rate W_c and the kick its jump carries.
-    pub(crate) classes: Vec<(usize, usize, f64, [f64; 3])>,
+    pub(crate) classes: Vec<Class>,
+}
+
+/// A class of photons (a coherence group's, landing in one set; `Fold::prototype_photons`): its group's slot -- where its
+/// jump's amplitudes u = Σ_o e^{−iot} C ε_o S⁻¹ψ stand after the call (`Workspace::jumped`) --, its landing set (an index
+/// of `sets`), its rate W_c, the kick its jump carries, and the offset of its light, its group's blocks' at their shares
+/// of its rate (the first block's where it has none).
+pub(crate) struct Class {
+    pub(crate) slot: usize,
+    pub(crate) landing: usize,
+    pub(crate) rate: f64,
+    pub(crate) kick: [f64; 3],
+    pub(crate) offset: f64,
 }
 
 impl Fold {
@@ -3749,7 +3776,8 @@ impl Fold {
     }
 
     /// A jump's place inside the step (DESIGN §13.2; module documentation, # The jumps): at the time s from the middle along
-    /// the path of velocity v, the light there (the beams' fields turned to r + vs) and every near block's response
+    /// the path of velocity v, the light there with its gradients (`light_at`: what the photons take, no Ĥ_PP) and every
+    /// near block's response
     /// Z(s) = Σ_l ρ_l Z_l with its tangent ∂Z(s) = Σ_l ρ_l ∂Z_l, ρ_l = f_l(s)/f_l -- the responses per beam and their
     /// tangent held over the step, the field turned, as the outer nodes' (`prototype_nodes`): no fold at the place. A plane
     /// wave's relative gradient is its wave vector, so its lane's tangent turns with its factor exactly; the responses'
@@ -3759,9 +3787,9 @@ impl Fold {
         let n = ws.n;
         let mut work = 0.0;
         assert!(ws.tangent, "the step's tangent");
-        let Workspace { mid, near, pairs, pp, base, lin, rotating, proj, place, .. } = &mut *ws;
+        let Workspace { mid, near, proj, place, .. } = &mut *ws;
         let at: [f64; 3] = std::array::from_fn(|a| r[a] + velocity[a] * s);
-        self.proto_place(at, kappa, place, pairs, pp, base, lin, rotating, proj, &mut work);
+        self.light_at(at, kappa, place, proj, &mut work);
         for nb in near.iter_mut().filter(|nb| !nb.idle()) {
             let (rows, ln) = (nb.s, nb.lanes * n);
             let m = 3 * ln;
@@ -4755,7 +4783,7 @@ impl Fold {
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let mut out = Photons { rate: 0.0, force: [0.0; 3], diffusion: [[0.0; 3]; 3], work: 0.0, classes: vec![] };
         let gram = &mut gram[..16];
-        let mut class = |u4: &[C64], rows: &[usize], absorbed: f64, at: (usize, usize), out: &mut Photons| {
+        let mut class = |u4: &[C64], rows: &[usize], absorbed: f64, (slot, landing, offset): (usize, usize, f64), out: &mut Photons| {
             let m = 3 * rows.len();
             let r = &mut rows4[..4 * m];
             for (k, &b) in rows.iter().enumerate() {
@@ -4768,7 +4796,7 @@ impl Fold {
             let bound = absorbed * w;
             let kick = if square > bound * bound { mean.map(|x| absorbed * x / square.sqrt()) } else if w > 0.0 { mean.map(|x| x / w) } else { [0.0; 3] };
             out.rate += w;
-            out.classes.push((at.0, at.1, w, kick));
+            out.classes.push(Class { slot, landing, rate: w, kick, offset });
             for a in 0..3 {
                 out.force[a] += mean[a] - w * kick[a];
                 for c in 0..3 {
@@ -4778,19 +4806,26 @@ impl Fold {
         };
         let u4 = &mut u4[..4 * g3];
         // Per coherence group (fold.rs `Fold::groups`) its blocks' [u | ∂u] summed at their offsets' phases e^{−iot} at the
-        // time t, the largest absorbed wave number, and the jumps' index of its first block: its classes' (a group of one
-        // block, its block's).
+        // time t -- its classes' jumps' amplitudes too, column 0 (`Workspace::jumped`) --, the largest absorbed wave number,
+        // its first block's offset, and per landing set its blocks' rates Σ|u|² and their offsets at those weights: its
+        // classes' (a group of one block, its block's).
         let groups = &mut photons4[..(near.len() + far.len()) * 4 * g3];
         groups.fill(C64::ZERO);
-        let mut slots: Vec<(usize, usize, f64)> = Vec::with_capacity(near.len() + far.len());
-        let mut gather = |o: usize, at: usize, absorbed: f64, u4: &[C64]| {
-            let group = self.groups[o];
+        let mut slots: Vec<(usize, f64, f64)> = Vec::with_capacity(near.len() + far.len());
+        let mut offsets: Vec<[f64; 2]> = Vec::with_capacity((near.len() + far.len()) * sets.len());
+        let mut gather = |o: usize, absorbed: f64, u4: &[C64]| {
+            let (group, value) = (self.groups[o], self.blocks[o].value);
             let slot = slots.iter().position(|s| s.0 == group).unwrap_or_else(|| {
-                slots.push((group, at, 0.0));
+                slots.push((group, value, 0.0));
+                offsets.extend(sets.iter().map(|_| [0.0; 2]));
                 slots.len() - 1
             });
             slots[slot].2 = slots[slot].2.max(absorbed);
-            let phase = C64::cis(-self.blocks[o].value * t);
+            for (sum, set) in offsets[slot * sets.len()..].iter_mut().zip(sets) {
+                let w: f64 = set.iter().flat_map(|&b| (0..3).map(move |q| 4 * (3 * b + q))).map(|i| u4[i].norm_sqr()).sum();
+                *sum = [sum[0] + w, sum[1] + w * value];
+            }
+            let phase = C64::cis(-value * t);
             for (sum, u) in groups[slot * 4 * g3..(slot + 1) * 4 * g3].iter_mut().zip(u4) {
                 *sum += phase * *u;
             }
@@ -4823,10 +4858,9 @@ impl Fold {
                 crate::linalg::fused_product_onto(&basis.xemitc, z4, (g3, n, 4), u4);
                 work += (12 * GROUND * n) as f64;
             }
-            gather(nb.o, x, absorbed, u4);
-            work += (4 * g3) as f64;
+            gather(nb.o, absorbed, u4);
+            work += (5 * g3) as f64;
         }
-        let nears = near.len();
         for (x, fb) in far.iter_mut().enumerate().filter(|(_, fb)| !fb.omitted) {
             let basis = &cache.far[x][cache.at_far[x].unwrap()];
             let mut absorbed = 0.0_f64;
@@ -4851,34 +4885,36 @@ impl Fold {
                 }
                 work += (12 * GROUND * n) as f64;
             }
-            gather(fb.o, nears + x, absorbed, u4);
-            work += (4 * g3) as f64;
+            gather(fb.o, absorbed, u4);
+            work += (5 * g3) as f64;
         }
-        for (slot, &(_, at, absorbed)) in slots.iter().enumerate() {
+        for (slot, &(_, first, absorbed)) in slots.iter().enumerate() {
             for (k, set) in sets.iter().enumerate() {
-                class(&groups[slot * 4 * g3..(slot + 1) * 4 * g3], set, absorbed, (at, k), &mut out);
+                let [w, wo] = offsets[slot * sets.len() + k];
+                class(&groups[slot * 4 * g3..(slot + 1) * 4 * g3], set, absorbed, (slot, k, if w > 0.0 { wo / w } else { first }), &mut out);
             }
             work += (3 * GROUND * 13) as f64;
         }
         out.rate /= norm;
         out.force = out.force.map(|x| x / norm);
         out.diffusion = out.diffusion.map(|r| r.map(|x| x / norm));
-        out.classes.iter_mut().for_each(|c| c.2 /= norm);
+        out.classes.iter_mut().for_each(|c| c.rate /= norm);
         out.work = work;
         out
     }
 
-    /// The jumps at a position of the step (`At`: its middle, an outer node, a jump's place): per block C_q ε S⁻¹
-    /// (GROUND × n, q the emission's axis), ε the block's excited amplitude there -- a near block's VZ (Z = Σ_l ρ_l Z_l at a node), a far block's
-    /// R₀Σ_a e_a U_a --, S the middle's: i(G − G†) = Σ L†L to the rounding at every position (module documentation, # The
-    /// jumps).
+    /// The jumps as operators at a position of the step (`At`: its middle or an outer node; the generator's decay between a
+    /// coherence group's offsets takes their products): per block C_q ε S⁻¹ (GROUND × n, q the emission's axis), ε the
+    /// block's excited amplitude there -- a near block's VZ (Z = Σ_l ρ_l Z_l at a node), a far block's R₀Σ_a e_a U_a --, S
+    /// the middle's: i(G − G†) = Σ L†L to the rounding at every position (module documentation, # The jumps). A jump's own
+    /// amplitudes on its state are its photons' (`Fold::prototype_photons`, `Workspace::jumped`).
     pub(crate) fn prototype_jumps(&self, cache: &Cache, ws: &Workspace, position: At) -> Vec<[Mat; 3]> {
         let n = ws.n;
         let normal = &ws.step.normal;
         let e = match position {
             At::Middle => &ws.mid.e,
             At::Node(j) => &ws.nodes[j].at.e,
-            At::Place => &ws.place.e,
+            At::Place => unreachable!("a jump's amplitudes at its place are its photons'"),
         };
         let mut out = vec![];
         for (x, nb) in ws.near.iter().enumerate() {
@@ -4886,7 +4922,7 @@ impl Fold {
             let z = match position {
                 At::Middle => &nb.ztot,
                 At::Node(j) => &nb.znode[j],
-                At::Place => &nb.zplace,
+                At::Place => unreachable!("a jump's amplitudes at its place are its photons'"),
             };
             let zm = Mat { rows: nb.s, cols: n, data: z.clone() };
             out.push(std::array::from_fn(|q| {
@@ -4915,6 +4951,12 @@ impl Fold {
 }
 
 impl Workspace {
+    /// A class's jump's amplitude on the ground state b along the emission's axis q, as the last `Fold::prototype_photons`
+    /// left it (`Class::slot`): u_q,b = Σ_o e^{−iot}(C_q ε_o S⁻¹ψ)_b over its group's blocks, the photons' own.
+    pub(crate) fn jumped(&self, slot: usize, b: usize, q: usize) -> C64 {
+        self.photons4[slot * 12 * GROUND + 4 * (3 * b + q)]
+    }
+
     /// Per block of the jumps (`Fold::prototype_jumps`' order: the near blocks, then the far ones) the photon's absorbed
     /// wave number k_c its class's kick is bounded by: its sources' beams' largest.
     pub(crate) fn absorbed(&self, fold: &Fold) -> Vec<f64> {

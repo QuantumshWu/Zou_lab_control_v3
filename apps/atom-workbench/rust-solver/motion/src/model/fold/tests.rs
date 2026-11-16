@@ -2213,7 +2213,8 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
 
 /// The prototype's photons (proto.rs `Fold::prototype_photons`, BRIEF_PROTO2 item 2) of a random state at the step's middle:
 /// their rate is the state's hazard ⟨ψ|i(G − G†)|ψ⟩/‖ψ‖² to the rounding (the jumps' amplitudes u = Lψ are the decay's);
-/// and their moments, of the step's tangent, are those of the amplitudes' difference -- ∇u by the central difference of
+/// a class's jump's amplitudes as they leave them (`Workspace::jumped`, a jump's at its place) are the operators' on the
+/// state (`prototype_jumps`) to the rounding; and their moments, of the step's tangent, are those of the amplitudes' difference -- ∇u by the central difference of
 /// u = L(r)ψ, each on a fresh cache (`prototype_jumps`; h = 10⁻⁴ µm), its responses' own change and S⁻¹'s with the
 /// beams', its discrete choices those of the centre (else skipped) -- within the difference's error and what the kept R₀
 /// leaves (10⁻⁴ of the force's and the diffusion's scale). On PGC3D_1ms (refs), R4_LIN_4 and unify's Λ (`lambda_request`:
@@ -2264,9 +2265,18 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                 let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets, super::proto::At::Middle, 0.0);
                 let hazard: f64 = (0..n).map(|i| (0..n).map(|j| psi[i].conj() * C64::I * (g[(i, j)] - g[(j, i)].conj()) * psi[j]).sum::<C64>().re).sum::<f64>() / norm;
                 assert!((photons.rate - hazard).abs() <= 1e-12 * hazard.abs().max(1e-300), "{name} set {set:?} point {point}: the photons' rate {} against the hazard {hazard}", photons.rate);
+                // A class's jump's amplitudes as the photons leave them (`Workspace::jumped`), on its set's rows.
+                let jumped: Vec<(usize, Vec<C64>)> = photons.classes.iter().map(|c| (c.landing, (0..3).flat_map(|q| sets[c.landing].iter().map(move |&b| (q, b))).map(|(q, b)| ws.jumped(c.slot, b, q)).collect())).collect();
                 // The whole gradient by the difference (h = 1e-4 µm, central).
                 let h = 1e-4;
                 let (u0, centre) = amplitudes(r0, &mut ws);
+                // ... are the operators' on the state (every block a coherence group of its own here): each class's those of
+                // one block landing in its set, to the rounding.
+                let scale = u0.iter().flatten().map(|z| z.abs()).fold(0.0, f64::max);
+                for (landing, a) in &jumped {
+                    let apart = u0.iter().skip(*landing).step_by(sets.len()).map(|x| x.iter().zip(a).map(|(p, q)| (*p - *q).abs()).fold(0.0, f64::max)).fold(f64::INFINITY, f64::min);
+                    assert!(apart <= 1e-13 * scale, "{name} set {set:?} point {point}: a class's jump's amplitudes {apart:e} from the operators' (scale {scale:e})");
+                }
                 let mut other = false;
                 let du: Vec<[Vec<C64>; 3]> = {
                     let mut per: Vec<[Vec<C64>; 3]> = u0.iter().map(|x| std::array::from_fn(|_| vec![C64::ZERO; x.len()])).collect();
