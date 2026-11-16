@@ -1203,6 +1203,25 @@ fn a_fold_s_work_at_a_scene() {
                     changed = true;
                 }
             }
+            // The excited parts: a block leaves out a part whose nodes' omission readings (the rates' and the potential's,
+            // the larger) sum within the share.
+            for (o, b) in fold.blocks.iter().enumerate() {
+                for (pi, part) in choice.parts.iter().enumerate() {
+                    let levels: Vec<usize> = part.iter().map(|&x| fold.excited_level[x]).collect();
+                    let here = b.rows.iter().any(|r| matches!(r, Row::Excited(x) if part.contains(x)));
+                    if !here || b.explicit.iter().any(|&p| part.contains(&fold.explicit[p - fold.ground.len()])) {
+                        continue;
+                    }
+                    let total: f64 = f.readings.iter().filter(|r| r.block == o && matches!(r.node, Node::Excited(l) if levels.contains(&l))).map(|r| r.omission).sum();
+                    if rate(total.sqrt()) <= share {
+                        for &(s, a) in &b.sources {
+                            choice.left.push(((fold.components[a].part, fold.ground[s]), pi));
+                        }
+                        statuses.push(format!("block {o}: part {pi} left out ({total:.1e})"));
+                        changed = true;
+                    }
+                }
+            }
             println!("set {set:?} round {round}: {statuses:?}");
             if !changed {
                 break;
