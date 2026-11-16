@@ -1889,12 +1889,13 @@ fn a_prototype_s_step_at_a_scene() {
                         let node_work = fold.prototype_nodes(*r, kappa, velocity, [-0.5 * tau, 0.5 * tau], &cache, &mut ws);
                         let t_nodes = clock.elapsed().as_secs_f64();
                         let clock = std::time::Instant::now();
+                        let tangent_work = fold.prototype_tangent(&cache, &mut ws);
                         let force = fold.prototype_force(&cache, &mut ws, [&rho, &rho, &rho]);
                         let t_force = clock.elapsed().as_secs_f64();
                         let clock = std::time::Instant::now();
                         let photons = fold.prototype_photons(&cache, &ws, &psi, &sets);
                         let t_photons = clock.elapsed().as_secs_f64();
-                        rest.push([t_nodes, t_force, t_photons, node_work, force.work, photons.work]);
+                        rest.push([t_nodes, t_force, t_photons, node_work, tangent_work + force.work, photons.work]);
                         ticks.push(s.0);
                         work.push(s.1);
                         sweeps.push(s.2);
@@ -1956,7 +1957,7 @@ fn a_prototype_s_step_at_a_scene() {
                 let part = |idx: &[usize], k: usize| mean(idx, &|i| rest[i][k]);
                 let (nodes_us, force_us, photons_us) = (1e6 * part(&calm, 0), 1e6 * part(&calm, 1), 1e6 * part(&calm, 2));
                 out += &format!(
-                    "      the rest of the step (µs / multiply-adds, the steps of one round): nodes {nodes_us:.2}/{:.0}, force {force_us:.2}/{:.0}, photons {photons_us:.2}/{:.0}; the step's model (forward + nodes + force + photons) {:.2} µs ({:.2} µs with every step's refresh); the decompositions' cost an atom (its first step's and its refreshes'): {:.2} ms",
+                    "      the rest of the step (µs / multiply-adds, the steps of one round): nodes {nodes_us:.2}/{:.0}, tangent and force {force_us:.2}/{:.0}, photons {photons_us:.2}/{:.0}; the step's model (forward + nodes + force + photons) {:.2} µs ({:.2} µs with every step's refresh); the decompositions' cost an atom (its first step's and its refreshes'): {:.2} ms",
                     part(&calm, 3),
                     part(&calm, 4),
                     part(&calm, 5),
@@ -2064,6 +2065,7 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
                         proto_decay(&g, &fold.prototype_jumps(&cache, &ws, j))
                     })
                     .collect();
+                fold.prototype_tangent(&cache, &mut ws);
                 let force = fold.prototype_force(&cache, &mut ws, [&bars[0], &bars[1], &bars[2]]);
                 let scale = force.force.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
                 println!("{name} set {set:?} point {point}: the force {:?} (held {:?}, {:.0} multiply-adds); decay against the jumps {:?}", force.force, force.held, force.work, decay.iter().map(|d| format!("{d:.1e}")).collect::<Vec<_>>());
@@ -2092,8 +2094,10 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
                     let (r1, r0) = (q[2] + (q[2] - q[1]) / 3.0, q[1] + (q[1] - q[0]) / 3.0);
                     let limit = r1 + (r1 - r0) / 15.0;
                     println!("   ∂{a}: adjoint {:.10e}, difference {:.10e} ± {:.1e} (extrapolated {limit:.10e}, ± {:.1e}), held {:.1e}", force.force[a], estimate.0, estimate.1, (limit - r1).abs(), force.held[a]);
-                    assert!(crate::model::testing::agrees(force.force[a], (estimate.0, estimate.1 + force.held[a] / 4.0), scale), "{name} set {set:?} point {point} axis {a}: the adjoint against the difference");
-                    assert!((force.force[a] - limit).abs() <= 4.0 * (limit - r1).abs() + force.held[a] + 1e-8 * scale, "{name} set {set:?} point {point} axis {a}: the adjoint against the extrapolated difference");
+                    // What the kept R₀ and z₀ leave: their relative change along the axis (`Force::held`) of the force's scale.
+                    let held = force.held[a] * scale;
+                    assert!(crate::model::testing::agrees(force.force[a], (estimate.0, estimate.1 + held / 4.0), scale), "{name} set {set:?} point {point} axis {a}: the force against the difference");
+                    assert!((force.force[a] - limit).abs() <= 4.0 * (limit - r1).abs() + held + 1e-8 * scale, "{name} set {set:?} point {point} axis {a}: the force against the extrapolated difference");
                 }
                 checked += usize::from(!skipped);
             }
@@ -2151,6 +2155,7 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                 };
                 let mut cache = Cache::default();
                 let g = fold.prototype(r0, kappa, &mut cache, &mut ws).unwrap().generator.clone();
+                fold.prototype_tangent(&cache, &mut ws);
                 let photons = fold.prototype_photons(&cache, &ws, &psi, &sets);
                 let hazard: f64 = (0..n).map(|i| (0..n).map(|j| psi[i].conj() * C64::I * (g[(i, j)] - g[(j, i)].conj()) * psi[j]).sum::<C64>().re).sum::<f64>() / norm;
                 assert!((photons.rate - hazard).abs() <= 1e-12 * hazard.abs().max(1e-300), "{name} set {set:?} point {point}: the photons' rate {} against the hazard {hazard}", photons.rate);
