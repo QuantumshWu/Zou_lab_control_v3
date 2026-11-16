@@ -2936,6 +2936,7 @@ impl State {
             work: 0.,
             pending: [[0.; 3]; 3],
             booked: [0.; 3],
+            held: crate::step::Held::default(),
         }
     }
 }

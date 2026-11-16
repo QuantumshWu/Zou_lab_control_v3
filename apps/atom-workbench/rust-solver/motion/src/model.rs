@@ -1016,14 +1016,14 @@ impl crate::step::Dynamics for Run<'_> {
     fn cluster_of(&self, ground: usize) -> usize {
         self.model.membership[ground]
     }
-    fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Middle<'_> {
+    fn middle(&self, cluster: usize, r: [f64; 3], t: f64, _held: &crate::step::Held, _decide: bool) -> Middle<'_> {
         Run::middle(self, cluster, r, t)
     }
-    fn emit(&self, cluster: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<crate::step::Emitted> {
+    fn emit(&self, cluster: usize, at: &Point, psi: &[C64], _held: &crate::step::Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<crate::step::Emitted> {
         let (plan, table) = &self.plans[cluster];
         self.model.emission_of(plan, *table, at, psi, draw)
     }
-    fn landed(&self, cluster: usize, at: &Point, f: &[C64]) -> crate::step::Internal {
+    fn landed(&self, cluster: usize, at: &Point, f: &[C64], _held: &crate::step::Held) -> crate::step::Internal {
         Run::landed(self, cluster, at, f)
     }
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {

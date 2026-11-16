@@ -1326,77 +1326,10 @@ fn tiers(req: &Request, name: &str) -> Choice {
     tiers_with(req, name, vec![])
 }
 
-/// `tiers` with the explicit levels `explicit` (`Choice::explicit`) kept in P.
+/// `tiers` with the explicit levels `explicit` (`Choice::explicit`) kept in P (`Choice::tiered`).
 fn tiers_with(req: &Request, name: &str, explicit: Vec<(usize, Part, usize)>) -> Choice {
-    let share = super::super::elim::share();
-    let ps = parts(req);
-    let mut choice = Choice { copies: all_copies(&ps, Status::Decomposed), explicit, ..rule(req) };
+    let choice = Choice::tiered(req, explicit).unwrap();
     println!("{name}: the rule's ground sets {:?}", choice.sets);
-    let at = [0.0; 3];
-    for set in Fold::sets(req, &choice).unwrap() {
-        for round in 0..4 {
-            let fold = Fold::new(req, &choice, set[0]).unwrap();
-            if fold.blocks.is_empty() {
-                break;
-            }
-            let f = fold_at(&fold, at, [0.0; 3]).unwrap();
-            let mut changed = false;
-            let mut statuses: Vec<String> = vec![];
-            for r in &f.readings {
-                let Node::Copy { level, component } = r.node else { continue };
-                let b = &fold.blocks[r.block];
-                let Some(&(s, a)) = b.sources.first() else { continue };
-                let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
-                let status = choice.copies.iter().rev().find(|x| x.0 == key).map_or(Status::Centred, |x| x.1);
-                // The cheapest evaluation whose reading is within the share (M18): left out, centred, decomposed.
-                let next = if rate(r.omission.sqrt()) <= share { Status::Omitted } else if rate(r.centring.sqrt()) <= share { Status::Centred } else { Status::Decomposed };
-                if next != Status::Omitted {
-                    statuses.push(format!("block {} F={level} by {:?}: {next:?}", r.block, fold.components[component].part));
-                }
-                if next != status {
-                    for &(s, a) in &b.sources {
-                        let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
-                        choice.copies.retain(|x| x.0 != key);
-                        choice.copies.push((key, next));
-                    }
-                    changed = true;
-                }
-            }
-            // The excited nodes, the same rule: a block leaves out the nodes whose omission readings (the rates' and the
-            // potential's, the larger) sum within the share, the smallest first; of the others it centres those whose
-            // centring reads within it; the rest it solves.
-            for (o, b) in fold.blocks.iter().enumerate() {
-                let mut nodes: Vec<(usize, f64, f64)> = f.readings.iter().filter(|r| r.block == o).filter_map(|r| if let Node::Excited(level) = r.node { Some((level, r.omission, r.centring)) } else { None }).collect();
-                nodes.sort_by(|a, b| a.1.total_cmp(&b.1));
-                let mut sum = 0.0;
-                for (level, omission, centring) in nodes {
-                    let next = if rate((sum + omission).sqrt()) <= share {
-                        sum += omission;
-                        Status::Omitted
-                    } else if rate(centring.sqrt()) <= share {
-                        Status::Centred
-                    } else {
-                        Status::Decomposed
-                    };
-                    let Some(&(s0, a0)) = b.sources.first() else { continue };
-                    let now = choice.excited.iter().rev().find(|x| x.0 == (fold.components[a0].part, fold.ground[s0], level)).map_or(Status::Decomposed, |x| x.1);
-                    if next != now {
-                        for &(s, a) in &b.sources {
-                            let key = (fold.components[a].part, fold.ground[s], level);
-                            choice.excited.retain(|x| x.0 != key);
-                            choice.excited.push((key, next));
-                        }
-                        statuses.push(format!("block {o}: excited level {level} {next:?} (omission {omission:.1e}, centring {centring:.1e})"));
-                        changed = true;
-                    }
-                }
-            }
-            println!("set {set:?} round {round}: {statuses:?}");
-            if !changed {
-                break;
-            }
-        }
-    }
     choice
 }
 
@@ -1667,71 +1600,11 @@ fn a_step_s_work_at_a_scene() {
     }
 }
 
-/// The prototype's choice (proto.rs): a scene's tiers (`tiers_with`), and in every block that solves any row its centred
-/// excited rows solved too (a mode of the kept decomposition, not a pass); the blocks whose rows are all centred keep them
-/// so. And the rule's explicit nodes (DESIGN §3.2), to the fixed point: an excited node whose reading at the focus is
-/// beyond the share stays in P (its level at its block's offset); where the fold does not exist there (the excitation or
-/// the passes' ratio at or above one) the excited node that reads the most does, whatever its reading.
+/// The prototype's choice (proto.rs): the run's (`Choice::running`).
 fn proto_choice(req: &Request, name: &str) -> Choice {
-    let share = super::super::elim::share();
-    let mut explicit: Vec<(usize, Part, usize)> = vec![];
-    loop {
-        let mut choice = tiers_with(req, name, explicit.clone());
-        let mut kept = vec![];
-        for set in Fold::sets(req, &choice).unwrap() {
-            let fold = Fold::new(req, &choice, set[0]).unwrap();
-            let mut add = vec![];
-            for b in fold.blocks.iter().filter(|b| b.solved > 0) {
-                for r in &b.rows[b.solved..] {
-                    if let Row::Excited(x) = *r {
-                        for &(p, c) in &b.sources {
-                            add.push(((fold.components[c].part, fold.ground[p], fold.excited_level[x]), Status::Decomposed));
-                        }
-                    }
-                }
-            }
-            choice.excited.extend(add);
-            // Every excited level of a block with rows in the lattice: left out at the focus, it is solved in a block that
-            // solves any row and centred in one that does not; whether the step takes it is read at the point (proto.rs
-            // # The levels kept and left out).
-            for b in fold.blocks.iter().filter(|b| !b.rows.is_empty()) {
-                let status = if b.solved > 0 { Status::Decomposed } else { Status::Centred };
-                for &(p, c) in &b.sources {
-                    for x in choice.excited.iter_mut().filter(|x| x.1 == Status::Omitted && x.0 .0 == fold.components[c].part && x.0 .1 == fold.ground[p]) {
-                        x.1 = status;
-                    }
-                }
-            }
-            // A block with no rows at the focus is read at every point too (proto.rs # The levels kept and left out): its
-            // levels solved where the point keeps them.
-            for x in choice.excited.iter_mut().filter(|x| x.1 == Status::Omitted && set.contains(&x.0 .1)) {
-                x.1 = Status::Decomposed;
-            }
-            let fold = Fold::new(req, &choice, set[0]).unwrap();
-            if fold.blocks.is_empty() {
-                continue;
-            }
-            let Some(f) = fold_at(&fold, [0.0; 3], [0.0; 3]) else { continue };
-            let exists = f.excitation < 1.0 && f.ratio < 1.0;
-            let mut nodes: Vec<(usize, usize, f64)> = f.readings.iter().filter_map(|r| if let Node::Excited(level) = r.node { Some((r.block, level, r.total())) } else { None }).collect();
-            nodes.sort_by(|a, b| b.2.total_cmp(&a.2));
-            let beyond: Vec<(usize, usize, f64)> = nodes.iter().copied().filter(|x| x.2 > share).collect();
-            let chosen = if !beyond.is_empty() { beyond } else if !exists { nodes.into_iter().take(1).collect() } else { vec![] };
-            for (o, level, reading) in chosen {
-                let b = &fold.blocks[o];
-                let Some(&(p, c)) = b.sources.first() else { continue };
-                let key = (level, fold.components[c].part, fold.ground[p]);
-                if !explicit.contains(&key) && !kept.contains(&key) {
-                    println!("{name} set {set:?}: block {o} excited level {level} kept in P (reading {reading:.2e}, excitation {:.2}, the passes' ratio {:.2})", f.excitation, f.ratio);
-                    kept.push(key);
-                }
-            }
-        }
-        if kept.is_empty() {
-            return choice;
-        }
-        explicit.extend(kept);
-    }
+    let choice = Choice::running(req).unwrap();
+    println!("{name}: the rule's ground sets {:?}", choice.sets);
+    choice
 }
 
 /// The rate's inverse: the relative amplitude error ρ of a reading r = 2ρ + ρ².

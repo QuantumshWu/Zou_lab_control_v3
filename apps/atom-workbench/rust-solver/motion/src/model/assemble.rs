@@ -3315,7 +3315,7 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     /// The pair's first group's envelope and its partner's (`envelope`), constant along the path.
-    fn envelopes(&self, path: &Path, m: usize, plus: &mut Mat, minus: &mut Mat) {
+    fn envelopes(&self, path: &Path, m: usize, _: f64, plus: &mut Mat, minus: &mut Mat) {
         let plan = &*self.plan;
         let group = &plan.groups[plan.firsts[m]];
         self.envelope(path, group, plus);

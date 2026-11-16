@@ -435,11 +435,12 @@ struct FarBasis {
 }
 
 /// An atom's kept decompositions, per block (near and far apart): the kept ones and the one it stands on; the
-/// decompositions made and the kept ones taken up again.
-#[derive(Default)]
+/// decompositions made and the kept ones taken up again. A value: its decompositions shared, so that a copy is cheap and a
+/// copy's own decompositions are its own (a trajectory's representation, model/run.rs).
+#[derive(Default, Clone)]
 pub(crate) struct Cache {
-    near: Vec<Vec<NearBasis>>,
-    far: Vec<Vec<FarBasis>>,
+    near: Vec<Vec<std::sync::Arc<NearBasis>>>,
+    far: Vec<Vec<std::sync::Arc<FarBasis>>>,
     at_near: Vec<Option<usize>>,
     at_far: Vec<Option<usize>>,
     pub(crate) made: usize,
@@ -2819,7 +2820,7 @@ impl Fold {
                             let site = site.as_ref().unwrap();
                             if kind {
                                 let basis = self.far_basis(&ws.far[x], ws, site, &mut work[REFRESH])?;
-                                cache.far[x].push(basis);
+                                cache.far[x].push(std::sync::Arc::new(basis));
                                 cache.far[x].len() - 1
                             } else {
                                 if ws.here[x].is_none() {
@@ -2829,7 +2830,7 @@ impl Fold {
                                 }
                                 let (laid, e) = ws.here[x].as_ref().unwrap();
                                 let basis = self.near_basis(&ws.near[x], ws, laid, e, &want, &mut work[REFRESH])?;
-                                cache.near[x].push(basis);
+                                cache.near[x].push(std::sync::Arc::new(basis));
                                 cache.near[x].len() - 1
                             }
                         }
@@ -3504,6 +3505,9 @@ pub(crate) struct Photons {
     pub(crate) force: [f64; 3],
     pub(crate) diffusion: [[f64; 3]; 3],
     pub(crate) work: f64,
+    /// Per class (a block's photons landing in one set) in the jumps' order (`Fold::prototype_jumps`: the near blocks', then
+    /// the far ones'): its block, its landing set (an index of `sets`), its rate W_c and the kick its jump carries.
+    pub(crate) classes: Vec<(usize, usize, f64, [f64; 3])>,
 }
 
 impl Fold {
@@ -4524,9 +4528,9 @@ impl Fold {
         // The classes' moments: per class its rows (b ∈ set, every axis q) of [u | ∂u] gathered, their Gram matrix
         // R†R (4 × 4) one product -- the rate Σ|u|², the mean Σ Im(u*∂u), the second moment Σ Re(∂u*∂u).
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
-        let mut out = Photons { rate: 0.0, force: [0.0; 3], diffusion: [[0.0; 3]; 3], work: 0.0 };
+        let mut out = Photons { rate: 0.0, force: [0.0; 3], diffusion: [[0.0; 3]; 3], work: 0.0, classes: vec![] };
         let gram = &mut gram[..16];
-        let mut class = |u4: &[C64], rows: &[usize], absorbed: f64, out: &mut Photons| {
+        let mut class = |u4: &[C64], rows: &[usize], absorbed: f64, at: (usize, usize), out: &mut Photons| {
             let m = 3 * rows.len();
             let r = &mut rows4[..4 * m];
             for (k, &b) in rows.iter().enumerate() {
@@ -4539,6 +4543,7 @@ impl Fold {
             let bound = absorbed * w;
             let kick = if square > bound * bound { mean.map(|x| absorbed * x / square.sqrt()) } else if w > 0.0 { mean.map(|x| x / w) } else { [0.0; 3] };
             out.rate += w;
+            out.classes.push((at.0, at.1, w, kick));
             for a in 0..3 {
                 out.force[a] += mean[a] - w * kick[a];
                 for c in 0..3 {
@@ -4574,11 +4579,12 @@ impl Fold {
                 crate::linalg::fused_product_onto(&basis.xemitc, z4, (g3, n, 4), u4);
                 work += (12 * GROUND * n) as f64;
             }
-            for set in sets {
-                class(u4, set, absorbed, &mut out);
+            for (k, set) in sets.iter().enumerate() {
+                class(u4, set, absorbed, (x, k), &mut out);
             }
             work += (3 * GROUND * 13) as f64;
         }
+        let nears = near.len();
         for (x, fb) in far.iter_mut().enumerate().filter(|(_, fb)| !fb.omitted) {
             let basis = &cache.far[x][cache.at_far[x].unwrap()];
             let mut absorbed = 0.0_f64;
@@ -4603,14 +4609,15 @@ impl Fold {
                 }
                 work += (12 * GROUND * n) as f64;
             }
-            for set in sets {
-                class(u4, set, absorbed, &mut out);
+            for (k, set) in sets.iter().enumerate() {
+                class(u4, set, absorbed, (nears + x, k), &mut out);
             }
             work += (3 * GROUND * 13) as f64;
         }
         out.rate /= norm;
         out.force = out.force.map(|x| x / norm);
         out.diffusion = out.diffusion.map(|r| r.map(|x| x / norm));
+        out.classes.iter_mut().for_each(|c| c.2 /= norm);
         out.work = work;
         out
     }
@@ -4715,6 +4722,11 @@ impl Workspace {
     }
 
     /// An outer node's G(s) (`Fold::prototype_nodes`).
+    /// S⁻¹ at the last step's middle.
+    pub(crate) fn normal(&self) -> &Mat {
+        &self.step.normal
+    }
+
     pub(crate) fn node_generator(&self, j: usize) -> &Mat {
         &self.nodes[j].generator
     }

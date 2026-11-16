@@ -740,11 +740,14 @@ impl Picture {
     /// less than its change through the nodes would --, its members asked of `envelopes` (the candidate's place, G⁺ at
     /// e^{iνu}, G⁻ at e^{−iνu}), and its Hermitian part e^{iνu}P + e^{−iνu}P†, P = (G⁺ + G⁻†)/2, taken out of the
     /// generator at each node: what is left is the static group (`beats`: the tones). None where no candidate is so fast.
+    /// Each member's envelope is asked at each of the three nodes (`envelopes`' time u = −h, 0, h) and taken out there at its
+    /// own value: an envelope that changes along the path (the light's profile at the path's points) goes through the
+    /// nodes as the static group does.
     /// The decay's beats stay with the static group: a hop's exponent is the first Magnus term, and a beating decay's
     /// part alone is no decay -- its sign turns with its beat --, so that over a hop it would grow the interaction
     /// picture's state by e^{|Γ_ν| w} where the static decay's factors hold the state (an overflow of m, not of x); a
     /// Hermitian tone's hops are unitary.
-    pub fn separate(&mut self, half: f64, candidates: impl FnOnce(&mut Vec<f64>, &mut Vec<Vec<i64>>), mut envelopes: impl FnMut(usize, &mut Mat, &mut Mat)) {
+    pub fn separate(&mut self, half: f64, candidates: impl FnOnce(&mut Vec<f64>, &mut Vec<Vec<i64>>), mut envelopes: impl FnMut(usize, f64, &mut Mat, &mut Mat)) {
         let n = self.n;
         self.beating.clear();
         self.keys.clear();
@@ -764,29 +767,21 @@ impl Picture {
                 m.data.resize(n * n, C64::ZERO);
             }
             let [plus, minus] = &mut tone.members;
-            envelopes(candidate, &mut plus[1], &mut minus[1]);
-            // Its Hermitian part: P = (G⁺ + G⁻†)/2 at e^{iνu}, P† at e^{−iνu}.
-            let [given, middle, _] = &mut *plus;
-            given.data.copy_from_slice(&middle.data);
-            for a in 0..n {
-                for b in 0..n {
-                    middle.data[a * n + b] = (given.data[a * n + b] + minus[1].data[b * n + a].conj()) * 0.5;
-                }
-            }
-            for a in 0..n {
-                for b in 0..n {
-                    minus[1].data[a * n + b] = plus[1].data[b * n + a].conj();
-                }
-            }
-            for member in [&mut *plus, &mut *minus] {
-                let [first, middle, last] = member;
-                first.data.copy_from_slice(&middle.data);
-                last.data.copy_from_slice(&middle.data);
-            }
             let [start, end] = &mut self.ends;
-            for (node, u) in [start, &mut self.base, end].into_iter().zip([-half, 0.0, half]) {
+            for (j, (node, u)) in [start, &mut self.base, end].into_iter().zip([-half, 0.0, half]).enumerate() {
+                envelopes(candidate, u, &mut plus[j], &mut minus[j]);
+                let (g, m) = (&mut plus[j].data, &mut minus[j].data);
+                // Its Hermitian part at the node: P = (G⁺ + G⁻†)/2 at e^{iνu}, P† at e^{−iνu}, pair by pair in place.
+                for a in 0..n {
+                    for b in a..n {
+                        let (ab, ba) = (a * n + b, b * n + a);
+                        let (pab, pba) = ((g[ab] + m[ba].conj()) * 0.5, (g[ba] + m[ab].conj()) * 0.5);
+                        (g[ab], g[ba]) = (pab, pba);
+                        (m[ab], m[ba]) = (pba.conj(), pab.conj());
+                    }
+                }
                 let (p, q) = (C64::cis(beat * u), C64::cis(-beat * u));
-                for ((z, g), h) in node.data.iter_mut().zip(&plus[1].data).zip(&minus[1].data) {
+                for ((z, g), h) in node.data.iter_mut().zip(g.iter()).zip(m.iter()) {
                     *z -= p * *g + q * *h;
                 }
             }
@@ -2370,7 +2365,7 @@ pub(crate) mod tests {
                 beats.extend(tones.iter().map(|t| t.beat));
                 keys.extend((0..tones.len()).map(|m| (0..tones.len()).map(|j| i64::from(j == m)).collect()));
             },
-            |m, plus, minus| (*plus, *minus) = (tones[m].plus.clone(), tones[m].minus.clone()),
+            |m, _, plus, minus| (*plus, *minus) = (tones[m].plus.clone(), tones[m].minus.clone()),
         );
         assert_eq!(picture.beats.len(), tones.len(), "every candidate a tone");
         picture.prepare(half, false, |_| 2, 0.0, 0.0);

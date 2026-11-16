@@ -444,20 +444,23 @@ pub trait Dynamics {
     fn cluster_of(&self, ground: usize) -> usize;
 
     /// The cluster's generator at the position r and the time t with every light on, for every momentum and along every
-    /// straight path through the point (`Middle`): made once a step, at its middle.
-    fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Self::Middle<'_>;
+    /// straight path through the point (`Middle`): made once a step, at its middle, on the trajectory's representation
+    /// `held` (`Held`). Where `decide` the middle's first evaluation is a decision time of the run (DESIGN §11.3): what it
+    /// decides of the representation -- the nodes kept, the decompositions made again -- is the trajectory's from then on
+    /// (`Middle::held`); any other evaluation decides nothing that outlives it.
+    fn middle(&self, cluster: usize, r: [f64; 3], t: f64, held: &Held, decide: bool) -> Self::Middle<'_>;
 
     /// A jump's photon of the cluster's state ψ (unnormalized) at a point (SPEC §1.6; model/photon.rs
     /// `Model::emission_of`): the model makes the rate W = Σ_a‖u_a‖² of every class the state emits there, in the
     /// classes' order; `draw` picks one of them by its place among those rates, or none; and the model makes the photon
     /// of the class drawn (`Emitted`) -- the one class whose amplitudes and kick a jump reads. None where `draw` picks
     /// none.
-    fn emit(&self, cluster: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted>;
+    fn emit(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted>;
     /// Where a jump's bare state `f` lands in a cluster at a point: the state the trajectory goes on in, with the norm
     /// it goes on with (a fold's bare state is its slow state and a part that is gone within the excited state's
     /// lifetime; the slow state's norm is the bare state's survival extrapolated back to the jump, below ‖f‖ or above
     /// it; model.rs `Model::landed`). The state itself where the model folds nothing of that.
-    fn landed(&self, _cluster: usize, _at: &Point, f: &[C64]) -> Internal {
+    fn landed(&self, _cluster: usize, _at: &Point, f: &[C64], _held: &Held) -> Internal {
         f.iter().copied().collect()
     }
 
@@ -512,9 +515,10 @@ pub trait Middle {
     /// path Ĥ is still along.
     fn beats(&self, _path: &Self::Path, _beats: &mut Vec<f64>, _keys: &mut Vec<Vec<i64>>) {}
 
-    /// The m-th candidate's members' envelopes (`beats`) into `plus` (G_m⁺, at e^{iν_m s}) and `minus` (G_m⁻, at
-    /// e^{−iν_m s}; n × n each, rad/µs): its part of `generator`'s at the time s is e^{iν_m s} G_m⁺ + e^{−iν_m s} G_m⁻.
-    fn envelopes(&self, _path: &Self::Path, _m: usize, _plus: &mut Mat, _minus: &mut Mat) {}
+    /// The m-th candidate's members' envelopes (`beats`) at the time s from the middle along the path (the step's nodes:
+    /// spectral.rs `Picture::separate`) into `plus` (G_m⁺, at e^{iν_m s}) and `minus` (G_m⁻, at e^{−iν_m s}; n × n each,
+    /// rad/µs): its part of `generator`'s at the time s is e^{iν_m s} G_m⁺(s) + e^{−iν_m s} G_m⁻(s).
+    fn envelopes(&self, _path: &Self::Path, _m: usize, _s: f64, _plus: &mut Mat, _minus: &mut Mat) {}
 
     /// The m-th candidate's part of `force`'s forms at its beat, per lab axis: Σ_k w_k Re tr(Ĝ_m(s_k) ρ_k) of the
     /// tone's Hermitian part's gradient Ĝ_m(s) = e^{iν_m s} Ĝ_m⁺ + e^{−iν_m s} Ĝ_m⁻, given σ = Σ_k w_k e^{iν_m s_k} ρ_k =
@@ -570,6 +574,43 @@ pub trait Middle {
     /// cluster has no explicit excited state.
     fn optical(&self, _path: &Self::Path) -> Option<Optical> {
         None
+    }
+
+    /// The step's three nodes' forms at once (`Midway::stretch`): Re tr(Ĝ(s_j) ρ_j) per lab axis at s = −h, 0, h (`force` at
+    /// each), the middle's with the fixed point's tones on a held state at their weights where one is held (`centre`); what
+    /// the step takes is their sum, node by node. One call, so that a model whose forms are one derivative of its step
+    /// contracts them at once (and gives their sum as the first node's).
+    fn nodes(&self, path: &Self::Path, h: f64, rho: [&[C64]; 3], held: Option<(&[C64], &dyn Fn(f64) -> f64)>) -> [[f64; 3]; 3] {
+        std::array::from_fn(|j| match held {
+            Some((held, weight)) if j == 1 => self.centre(path, held, weight, rho[j]),
+            _ => self.force(path, [-h, 0.0, h][j], rho[j]),
+        })
+    }
+
+    /// The representation a deciding middle left (`Dynamics::middle`): None where it decided nothing of it.
+    fn held(&self) -> Option<Held> {
+        None
+    }
+}
+
+/// A trajectory's representation of the model's folds (DESIGN §11.3; model/fold/run.rs: per state set its kept
+/// decompositions and the one it stands on): what the model decided at the run's decision times, carried with the
+/// trajectory as a value -- a snapshot's is its own, so a trajectory taken up again from one goes on the same --, opaque
+/// to the integrator, which hands it to the model (`Dynamics::middle`, `emit`, `landed`) and takes back what a deciding
+/// middle made (`Middle::held`). None where the model keeps nothing of its own per trajectory (model.rs `Run`). No part
+/// of the atom's state: trajectories are equal by their state whatever their representations.
+#[derive(Clone, Default)]
+pub struct Held(pub Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>);
+
+impl PartialEq for Held {
+    fn eq(&self, _: &Held) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "Held(..)" } else { "Held(none)" })
     }
 }
 
@@ -728,6 +769,8 @@ pub struct Trajectory {
     /// The optical sector's booking over the trajectory (# The optical sector's noise; the ledger's): Σ ε_Q tr C of its
     /// steps' covariances C, Σ tr C, and the scattered light's Σ tr(2D)|τ| (1/µm²).
     pub booked: [f64; 3],
+    /// The model's representation of its folds for this trajectory (`Held`).
+    pub held: Held,
 }
 
 impl Trajectory {
@@ -742,7 +785,7 @@ impl Trajectory {
         let mut psi = Internal::zeros(states.len());
         psi[at] = C64::ONE;
         let threshold = Stream::jump(seed, index, 0).open_uniform();
-        let landed = model.landed(cluster, &Point { r, kappa, t: 0.0 }, &psi);
+        let landed = model.landed(cluster, &Point { r, kappa, t: 0.0 }, &psi, &Held::default());
         let on = norm_sqr(&landed) > threshold;
         if on {
             psi = landed;
@@ -763,6 +806,7 @@ impl Trajectory {
             work: 0.0,
             pending: [[0.0; 3]; 3],
             booked: [0.0; 3],
+            held: Held::default(),
         };
         if !on {
             // A bare state with no photon to emit goes on as it is.
@@ -1330,7 +1374,7 @@ impl Scratch {
     fn fit(&mut self, n: usize, slots: usize) {
         self.picture.fit(n);
         self.slots = slots;
-        self.rest.resize((2 + slots.saturating_sub(SUMS)) * n * n, C64::ZERO);
+        self.rest.resize((4 + slots.saturating_sub(SUMS)) * n * n, C64::ZERO);
         self.sums.resize(4 * slots * 2 * n * row(n), 0.0);
         self.weights.resize(slots.max(SUMS), 0.0);
         self.kept.resize(slots.max(SUMS), 0.0);
@@ -1339,7 +1383,7 @@ impl Scratch {
     fn carve(&mut self) -> Carved<'_> {
         let n = self.picture.states();
         let (held, rest) = self.rest.split_at_mut(n * n);
-        let (sum, tones) = rest.split_at_mut(n * n);
+        let (sum, tones) = rest.split_at_mut(3 * n * n);
         let size = self.slots * 2 * n * row(n);
         let (sums, rest) = self.sums.split_at_mut(size);
         let (saved, rest) = rest.split_at_mut(size);
@@ -1432,7 +1476,7 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
                 along.middle.beats(&along.path, beats, keys);
             }
         },
-        |m, plus, minus| along.middle.envelopes(&along.path, m, plus, minus),
+        |m, s, plus, minus| along.middle.envelopes(&along.path, m, s, plus, minus),
     );
     if !picture.beats.iter().flat_map(|tone| tone.members.iter().flatten()).all(numbers) {
         return Err(Refused::Overflow);
@@ -1801,7 +1845,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     pub fn new(model: &'a D, from: &Trajectory, tau: f64) -> Result<Midway<'a, D>, Refused> {
         let half = 0.5 * tau;
         let (flow, reached) = middle(model, from.r, from.kappa, half)?;
-        let generator = model.middle(from.cluster, reached.0, from.time + half);
+        let generator = model.middle(from.cluster, reached.0, from.time + half, &from.held, true);
         Ok(Midway { model, tau, hbar_over_mass: model.hbar_over_mass(), flow, reached, reference: flow.gradient_at(reached.0), generator })
     }
 
@@ -1821,12 +1865,16 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         scratch.fit(n, SUMS);
         let kappa_m = predicted(scratch, &self.generator, &from.psi, kappa_h, reference, tau);
         let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, impulse: [0.0; 3], scattered: None, optical: None, work: 0.0, prices: Vec::new(), made: Vec::new() };
+        // What the middle decided at its first evaluation (the prediction's) is the trajectory's representation from here on.
+        if let Some(held) = self.generator.held() {
+            march.state.held = held;
+        }
         // The three nodes' weights' sums over the step, its stretches' together.
         scratch.weights.fill(0.0);
         // Cluster by cluster: the start's generator, then that of every cluster a jump lands in, at the same middle.
         let mut landed: Option<D::Middle<'a>> = None;
         while !self.stretch(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time, reads, &mut march, scratch, domain)? {
-            landed = Some(self.model.middle(march.state.cluster, r_h, from.time + h));
+            landed = Some(self.model.middle(march.state.cluster, r_h, from.time + h, &march.state.held, false));
         }
         let March { state: mut end, read, impulse, scattered, optical, work, prices, mut made, .. } = march;
         // The scattered light at the middle, on the state there: its force over the step; and its diffusion with the
@@ -2082,6 +2130,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         // The stretch's part of the kick; in the middle's stretch about the middle state, with the scattered light and the
         // optical sector's rate there.
         let part = if still {
+            let sum = &mut sum[..n * n];
             whole(sums, 0, n, sum);
             along.middle.force(&along.path, 0.0, sum).map(|f| -f)
         } else {
@@ -2123,16 +2172,12 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             // one pass of the model's forms (`Middle::centre`); the nodes' forms hold the exact tones' at the nodes, and
             // each tone's sums at its beat take them out (`Middle::tone_force`).
             let shear = |omega: f64| tau * sinc(0.5 * omega * tau);
-            for (j, at) in [-h, 0.0, h].into_iter().enumerate() {
+            for (j, (at, sum)) in [-h, 0.0, h].into_iter().zip(sum.chunks_exact_mut(size)).enumerate() {
                 whole(sums, j, n, sum);
                 if middle.is_some() {
                     for (q, rho) in sum.iter_mut().zip(held.iter()) {
                         *q -= *rho * weights[j];
                     }
-                }
-                let form = if j == 1 && middle.is_some() { along.middle.centre(&along.path, held, &shear, sum) } else { along.middle.force(&along.path, at, sum) };
-                for a in 0..3 {
-                    out[a] -= form[a];
                 }
                 for (pair, tone) in tones.chunks_exact_mut(2 * size).zip(&picture.beats) {
                     let (sin, cos) = (tone.beat * at).sin_cos();
@@ -2141,6 +2186,13 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         *re -= *q * cos;
                         *im -= *q * sin;
                     }
+                }
+            }
+            let (s0, rest) = sum.split_at(size);
+            let (s1, s2) = rest.split_at(size);
+            for form in along.middle.nodes(&along.path, h, [s0, s1, &s2[..size]], middle.is_some().then_some((&held[..], &shear as &dyn Fn(f64) -> f64))) {
+                for a in 0..3 {
+                    out[a] -= form[a];
                 }
             }
             for (pair, tone) in tones.chunks_exact(2 * size).zip(&picture.beats) {
@@ -2501,7 +2553,7 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
             }
             Some(pick)
         };
-        let Some(photon) = model.emit(trajectory.cluster, &at, &trajectory.psi, &mut draw) else {
+        let Some(photon) = model.emit(trajectory.cluster, &at, &trajectory.psi, &trajectory.held, &mut draw) else {
             // A norm at its threshold with no photon to emit is refused; a bare state with none goes on as it is.
             if first {
                 return Err(Refused::Emission);
@@ -2539,7 +2591,7 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
         // The landing: the state the trajectory goes on in, its norm against the threshold; at the threshold already,
         // one more photon from the bare state and the next threshold.
         let at = trajectory.point();
-        let landed = model.landed(trajectory.cluster, &at, &trajectory.psi);
+        let landed = model.landed(trajectory.cluster, &at, &trajectory.psi, &trajectory.held);
         if norm_sqr(&landed) > trajectory.threshold {
             trajectory.psi = landed;
             break;

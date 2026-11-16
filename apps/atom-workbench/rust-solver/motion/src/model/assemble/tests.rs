@@ -583,7 +583,7 @@ fn a_state_s_photons_in_parts_are_its_photons() {
                     assert!(rates.len() == bare.len() && rates.iter().zip(&bare).all(|(rate, photon)| *rate == photon.weight()), "{name}, cluster {cluster}: the classes' rates to a jump's draw");
                     Some(drawn)
                 };
-                let emitted = crate::step::Dynamics::emit(run, cluster, &at, &psi, &mut draw).expect("the class drawn");
+                let emitted = crate::step::Dynamics::emit(run, cluster, &at, &psi, &crate::step::Held::default(), &mut draw).expect("the class drawn");
                 assert!((emitted.landing, emitted.wave_number, emitted.kick) == (photon.landing, photon.wave_number, photon.kick()) && (0..3).all(|a| emitted.amplitudes[a][..] == alone.amplitudes[a][..]), "{name}, cluster {cluster}, class {}: a jump's photon", photon.class);
                 classes += 1;
                 folded += photon.gradients.iter().flatten().flatten().filter(|z| **z != C64::ZERO).count().min(1);
@@ -1235,7 +1235,7 @@ fn groups_along_a_path(name: &str, index: u64, model: &Model) -> (usize, usize) 
             let envelopes: Vec<(Mat, Mat)> = (0..beats.len())
                 .map(|m| {
                     let (mut plus, mut minus) = (Mat::zeros(n, n), Mat::zeros(n, n));
-                    middle.envelopes(&path, m, &mut plus, &mut minus);
+                    middle.envelopes(&path, m, 0.0, &mut plus, &mut minus);
                     (plus, minus)
                 })
                 .collect();

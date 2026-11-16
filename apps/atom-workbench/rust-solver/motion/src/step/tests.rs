@@ -146,7 +146,7 @@ impl Middle for Parts {
         // Each pair its own label: no two of their products share a class but where they are one pair's.
         keys.extend((0..pairs.len()).map(|m| (0..pairs.len()).map(|j| i64::from(j == m)).collect()));
     }
-    fn envelopes(&self, _: &[f64; 3], m: usize, plus: &mut Mat, minus: &mut Mat) {
+    fn envelopes(&self, _: &[f64; 3], m: usize, _: f64, plus: &mut Mat, minus: &mut Mat) {
         let (omega, wave) = self.pairs()[m];
         for (out, key) in [(plus, (omega, wave)), (minus, (-omega, wave.map(|x| -x)))] {
             out.data.fill(C64::ZERO);
@@ -327,7 +327,7 @@ impl Dynamics for Atom {
     fn cluster_of(&self, _: usize) -> usize {
         0
     }
-    fn middle(&self, _: usize, r: [f64; 3], _: f64) -> Parts {
+    fn middle(&self, _: usize, r: [f64; 3], _: f64, _: &step::Held, _: bool) -> Parts {
         let (n, v) = (self.n(), self.trap.expansion(r));
         let mut m = Mat::zeros(n, n);
         let mut g = zeros(n);
@@ -383,7 +383,7 @@ impl Dynamics for Atom {
         parts.insert(0, Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g });
         Parts { waves: self.cluster.waves.clone(), parts, folded: (!self.folded.is_empty()).then(|| self.folded_at(r)), optical: self.optical }
     }
-    fn emit(&self, _: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+    fn emit(&self, _: usize, at: &Point, psi: &[C64], _: &step::Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         let n = self.n();
         // The one class: the folded light's amplitude on the ground state with its kick, or the excited state's decay
         // into the ground state, the same on every axis.
@@ -1715,7 +1715,7 @@ impl Dynamics for Wells {
     fn cluster_of(&self, _: usize) -> usize {
         0
     }
-    fn middle(&self, _: usize, r: [f64; 3], _: f64) -> Parts {
+    fn middle(&self, _: usize, r: [f64; 3], _: f64, _: &step::Held, _: bool) -> Parts {
         let (mut m, mut g) = (Mat::zeros(2, 2), zeros(2));
         for s in 0..2 {
             let gradient: [f64; 3] = std::array::from_fn(|a| (self.reference[a] + self.own[s][a]) * r[a]);
@@ -1726,7 +1726,7 @@ impl Dynamics for Wells {
         }
         Parts { waves: self.cluster.waves.clone(), parts: vec![Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g }], folded: None, optical: false }
     }
-    fn emit(&self, _: usize, _: &Point, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+    fn emit(&self, _: usize, _: &Point, _: &[C64], _: &step::Held, _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         unreachable!("the wells scatter nothing")
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
@@ -2256,7 +2256,7 @@ impl Dynamics for Synthetic {
     fn cluster_of(&self, _: usize) -> usize {
         0
     }
-    fn middle(&self, _: usize, r: [f64; 3], _: f64) -> Parts {
+    fn middle(&self, _: usize, r: [f64; 3], _: f64, _: &step::Held, _: bool) -> Parts {
         let (n, v, k) = (self.cluster.states.len(), self.trap.expansion(r), &self.cluster.waves);
         // An entry a ← b of wave vector q: its own q + K_a − K_b, and its phase at the point.
         let wave = |a: usize, b: usize, q: [f64; 3]| -> ([f64; 3], C64) {
@@ -2298,7 +2298,7 @@ impl Dynamics for Synthetic {
         }
         Parts { waves: k.clone(), parts, folded: None, optical: false }
     }
-    fn emit(&self, _: usize, _: &Point, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+    fn emit(&self, _: usize, _: &Point, _: &[C64], _: &step::Held, _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         unreachable!("the cost harness takes no jump")
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
@@ -2385,8 +2385,8 @@ impl<M: Middle> Middle for Probe<'_, M> {
     fn beats(&self, path: &M::Path, beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
         self.middle.beats(path, beats, keys)
     }
-    fn envelopes(&self, path: &M::Path, m: usize, plus: &mut Mat, minus: &mut Mat) {
-        self.middle.envelopes(path, m, plus, minus)
+    fn envelopes(&self, path: &M::Path, m: usize, s: f64, plus: &mut Mat, minus: &mut Mat) {
+        self.middle.envelopes(path, m, s, plus, minus)
     }
     fn tone_force(&self, path: &M::Path, m: usize, re: &[C64], im: &[C64]) -> [f64; 3] {
         self.middle.tone_force(path, m, re, im)
@@ -2416,14 +2416,14 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
     fn cluster_of(&self, ground: usize) -> usize {
         self.model.cluster_of(ground)
     }
-    fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Self::Middle<'_> {
+    fn middle(&self, cluster: usize, r: [f64; 3], t: f64, held: &step::Held, decide: bool) -> Self::Middle<'_> {
         let mut calls = self.calls.get();
         calls[1] += 1;
         self.calls.set(calls);
-        Probe { middle: self.model.middle(cluster, r, t), calls: &self.calls }
+        Probe { middle: self.model.middle(cluster, r, t, held, decide), calls: &self.calls }
     }
-    fn emit(&self, cluster: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
-        self.model.emit(cluster, at, psi, draw)
+    fn emit(&self, cluster: usize, at: &Point, psi: &[C64], held: &step::Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+        self.model.emit(cluster, at, psi, held, draw)
     }
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
         self.model.energy(cluster, at, psi)
@@ -2599,7 +2599,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
         [
             &mut || starts.iter().map(|s| step_of(model, s, tau, &mut kept.borrow_mut()).unwrap().end.kappa[0]).sum::<f64>(),
             &mut || pieces.iter().map(|p| model.reference(p.at.0).value).sum::<f64>(),
-            &mut || pieces.iter().zip(starts).map(|(p, s)| model.middle(s.cluster, p.at.0, p.at.1).states() as f64).sum::<f64>(),
+            &mut || pieces.iter().zip(starts).map(|(p, s)| model.middle(s.cluster, p.at.0, p.at.1, &step::Held::default(), false).states() as f64).sum::<f64>(),
             &mut || {
                 pieces.iter().zip(&paths).for_each(|(p, path)| p.through.generator.generator(path, 0.2 * tau, &mut h));
                 h.data[0].re
@@ -3126,11 +3126,11 @@ fn a_jump_s_kick_is_one_photon_s_at_most() {
         let at = Point { r, kappa: [0.0; 3], t: 0.0 };
         let (norm, photon) = (psi[0].norm_sqr(), &model.made(r, &psi)[0]);
         let (weight, b) = (photon.weight() / norm, k * epsilon / (phase.cos().powi(2) + (epsilon * phase.sin()).powi(2)));
-        let kick = model.emit(0, &at, &psi, &mut |_| Some(0)).expect("the one class").kick;
+        let kick = model.emit(0, &at, &psi, &step::Held::default(), &mut |_| Some(0)).expect("the one class").kick;
         let expected = b.min(k);
         assert!((kick[2] - expected).abs() <= 1e-9 * k && kick[0] == 0.0 && kick[1] == 0.0, "kz = {phase}: the jump carries {kick:?} of b = {b}");
         carried_whole += (b <= k) as usize;
-        let middle = model.middle(0, at.r, at.t);
+        let middle = model.middle(0, at.r, at.t, &step::Held::default(), false);
         let (scattered, _) = middle.scattering(&middle.path(at.kappa, [0.0; 3]), &psi);
         let (mean, second) = (scattered.force[2] + weight * kick[2], scattered.diffusion[2][2] + weight * kick[2] * kick[2]);
         let closed = (k * c * c * epsilon, k * k * c * c * (phase.sin().powi(2) + (epsilon * phase.cos()).powi(2)));
@@ -3648,7 +3648,7 @@ impl Dynamics for Lindblad {
     fn cluster_of(&self, _: usize) -> usize {
         0
     }
-    fn middle(&self, _: usize, r: [f64; 3], _: f64) -> Parts {
+    fn middle(&self, _: usize, r: [f64; 3], _: f64, _: &step::Held, _: bool) -> Parts {
         let n = self.cluster.states.len();
         let mut parts = vec![Part { omega: 0.0, wave: [0.0; 3], generator: self.still.clone(), force: zeros(n) }];
         for (q, x) in &self.beats {
@@ -3672,7 +3672,7 @@ impl Dynamics for Lindblad {
         }
         Parts { waves: self.cluster.waves.clone(), parts, folded: None, optical: false }
     }
-    fn emit(&self, _: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+    fn emit(&self, _: usize, at: &Point, psi: &[C64], _: &step::Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         let third = (1.0_f64 / 3.0).sqrt();
         let u: step::Internal = self.jump_at(at.r).apply(psi).into_iter().map(|z| z * third).collect();
         draw(&[3.0 * crate::linalg::norm_sqr(&u)])?;
@@ -3866,12 +3866,12 @@ fn the_hazard_is_the_generator_s_decay_and_a_sum_of_squares() {
             let reach = s.uniform();
             let r = s.direction().map(|x| x * reach);
             let psi = random_state(&mut s, n);
-            let middle = model.middle(0, r, 0.0);
+            let middle = model.middle(0, r, 0.0, &step::Held::default(), false);
             let mut h = Mat::zeros(n, n);
             middle.generator(&[0.0; 3], 0.0, &mut h);
             let (hazard, form, scale) = rates(&h, &psi);
             let mut jumps = 0.0;
-            let _ = model.emit(0, &Point { r, kappa: [0.0; 3], t: 0.0 }, &psi, &mut |w| {
+            let _ = model.emit(0, &Point { r, kappa: [0.0; 3], t: 0.0 }, &psi, &step::Held::default(), &mut |w| {
                 jumps = w.iter().sum();
                 None
             });
@@ -3893,7 +3893,7 @@ fn the_hazard_is_the_generator_s_decay_and_a_sum_of_squares() {
                 middle.generator(&path, 0.0, &mut h);
                 let (hazard, form, scale) = rates(&h, &start.psi);
                 let mut jumps = 0.0;
-                let _ = dynamics.emit(cluster, &at, &start.psi, &mut |w| {
+                let _ = dynamics.emit(cluster, &at, &start.psi, &step::Held::default(), &mut |w| {
                     jumps = w.iter().sum();
                     None
                 });
@@ -4117,7 +4117,7 @@ impl Dynamics for Grouped {
     fn cluster_of(&self, _: usize) -> usize {
         0
     }
-    fn middle(&self, _: usize, _: [f64; 3], _: f64) -> Parts {
+    fn middle(&self, _: usize, _: [f64; 3], _: f64, _: &step::Held, _: bool) -> Parts {
         let n = 4;
         let matrix = |entries: &[(usize, usize, C64)]| Mat::from_fn(n, n, |a, b| entries.iter().filter(|e| (e.0, e.1) == (a, b)).map(|e| e.2).sum());
         let hermitian = |entries: &[(usize, usize, C64)]| {
@@ -4138,7 +4138,7 @@ impl Dynamics for Grouped {
         }
         Parts { waves: vec![[0.0; 3]; n], parts, folded: None, optical: false }
     }
-    fn emit(&self, _: usize, _: &Point, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+    fn emit(&self, _: usize, _: &Point, _: &[C64], _: &step::Held, _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         None
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
@@ -4213,10 +4213,10 @@ impl Dynamics for Emitting {
     fn cluster_of(&self, ground: usize) -> usize {
         self.0.cluster_of(ground)
     }
-    fn middle(&self, c: usize, r: [f64; 3], t: f64) -> Parts {
-        self.0.middle(c, r, t)
+    fn middle(&self, c: usize, r: [f64; 3], t: f64, held: &step::Held, decide: bool) -> Parts {
+        self.0.middle(c, r, t, held, decide)
     }
-    fn emit(&self, _: usize, _: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+    fn emit(&self, _: usize, _: &Point, psi: &[C64], _: &step::Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         draw(&[psi[1].norm_sqr() + psi[2].norm_sqr()])?;
         let mut amplitudes: [step::Internal; 3] = std::array::from_fn(|_| step::Internal::zeros(psi.len()));
         (amplitudes[0][0], amplitudes[1][0]) = (psi[1], psi[2]);
@@ -4263,7 +4263,7 @@ fn a_step_s_price_is_its_count_item_by_item() {
     let jumps = taken.made.iter().filter(|m| m.kick.is_some()).count();
     assert_eq!((jumps, taken.prices.len()), (1, 1), "one jump inside the step, one stretch");
     let (_, price) = taken.prices[0];
-    let costs = model.middle(0, [0.0; 3], 0.0).work();
+    let costs = model.middle(0, [0.0; 3], 0.0, &step::Held::default(), false).work();
     assert_eq!(taken.work, price.work(costs), "the step's count is its stretch's price");
     let unit = |which: usize| (price.stepped(std::array::from_fn(|i| if i == which { 1.0 } else { 0.0 })) - price.stepped([0.0; 3])) / COMPLEX;
     eprintln!("calls {calls:?}; the price's calls of the generator, the force and the tones {:?}; {} tones", [unit(0), unit(1), unit(2)], price.tones);
