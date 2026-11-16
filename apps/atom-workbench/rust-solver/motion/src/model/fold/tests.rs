@@ -2106,7 +2106,7 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
 /// their rate is the state's hazard ⟨ψ|i(G − G†)|ψ⟩/‖ψ‖² to the rounding (the jumps' amplitudes u = Lψ are the decay's);
 /// and their moments, of the step's tangent, are those of the amplitudes' difference -- ∇u by the central difference of
 /// u = L(r)ψ, each on a fresh cache (`prototype_jumps`; h = 10⁻⁴ µm), its responses' own change and S⁻¹'s with the
-/// beams' -- within the difference's error and what the kept R₀ leaves (10⁻⁴ of the force's and the diffusion's scale). On PGC3D_1ms (refs) and
+/// beams', its discrete choices those of the centre (else skipped) -- within the difference's error and what the kept R₀ leaves (10⁻⁴ of the force's and the diffusion's scale). On PGC3D_1ms (refs) and
 /// R4_LIN_4 by their prototype choices, three points a set.
 #[test]
 fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
@@ -2138,7 +2138,7 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                 let psi: Vec<C64> = (0..n).map(|_| C64::new(u() - 0.5, u() - 0.5)).collect();
                 let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
                 // Per class (block, landing set) and emission axis, u on the set's rows.
-                let amplitudes = |r: [f64; 3], ws: &mut super::proto::Workspace| -> Vec<Vec<C64>> {
+                let amplitudes = |r: [f64; 3], ws: &mut super::proto::Workspace| -> (Vec<Vec<C64>>, (usize, Vec<(Vec<bool>, bool)>)) {
                     let mut cache = Cache::default();
                     fold.prototype(r, kappa, &mut cache, ws).expect("the prototype");
                     let mut out = vec![];
@@ -2147,7 +2147,7 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                             out.push((0..3).flat_map(|q| set.iter().map(move |&b| (q, b))).map(|(q, b)| (0..n).map(|j| js[q][(b, j)] * psi[j]).sum()).collect());
                         }
                     }
-                    out
+                    (out, ws.choices())
                 };
                 let mut cache = Cache::default();
                 let g = fold.prototype(r0, kappa, &mut cache, &mut ws).unwrap().generator.clone();
@@ -2156,14 +2156,16 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                 assert!((photons.rate - hazard).abs() <= 1e-12 * hazard.abs().max(1e-300), "{name} set {set:?} point {point}: the photons' rate {} against the hazard {hazard}", photons.rate);
                 // The whole gradient by the difference (h = 1e-4 µm, central).
                 let h = 1e-4;
-                let u0 = amplitudes(r0, &mut ws);
+                let (u0, centre) = amplitudes(r0, &mut ws);
+                let mut other = false;
                 let du: Vec<[Vec<C64>; 3]> = {
                     let mut per: Vec<[Vec<C64>; 3]> = u0.iter().map(|x| std::array::from_fn(|_| vec![C64::ZERO; x.len()])).collect();
                     for a in 0..3 {
                         let (mut p, mut m) = (r0, r0);
                         p[a] += h;
                         m[a] -= h;
-                        let (up, um) = (amplitudes(p, &mut ws), amplitudes(m, &mut ws));
+                        let ((up, cp), (um, cm)) = (amplitudes(p, &mut ws), amplitudes(m, &mut ws));
+                        other |= cp != centre || cm != centre;
                         for c in 0..u0.len() {
                             for i in 0..u0[c].len() {
                                 per[c][a][i] = (up[c][i] - um[c][i]) / (2.0 * h);
@@ -2172,11 +2174,15 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                     }
                     per
                 };
-                // The moments by photon.rs's rule, k_c the largest wave number of the beams (an upper bound: what the
-                // classes' own k_c leave is the same for both).
-                let kc = fold.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
+                if other {
+                    println!("{name} set {set:?} point {point}: another choice within the difference's step: skipped");
+                    continue;
+                }
+                // The moments by photon.rs's rule, k_c the class's block's (`Workspace::absorbed`).
+                let kcs = ws.absorbed(&fold);
                 let (mut force, mut diffusion) = ([0.0; 3], [[0.0; 3]; 3]);
                 for (c, x) in u0.iter().enumerate() {
+                    let kc = kcs[c / sets.len()];
                     let w: f64 = x.iter().map(|z| z.norm_sqr()).sum();
                     let mean: [f64; 3] = std::array::from_fn(|a| x.iter().zip(&du[c][a]).map(|(z, d)| (z.conj() * *d).im).sum());
                     let square = crate::linalg::dot3(mean, mean);
