@@ -48,14 +48,15 @@
 //! unit amplitude held over the step, the field turned -- Z_l(s) = (f_l(s)/f_l) Z_l, Ṽ(s) = Σ_a e_a(s) Y_a, Ĥ_PP(s) and
 //! the far forms at s exactly --, A(s) by the same compression, G(s) = S⁻¹A(s)S⁻¹.
 //!
-//! # The force (DESIGN §1.3)
-//! −∇ Σ_j Re tr(Ḡ_j†G_j) over the step's positions moved together, by the adjoint of the step as it was evaluated
-//! (`Fold::prototype_force`): G = S⁻¹AS⁻¹; S⁻¹'s Fréchet adjoint, S X̄ + X̄ S = −S⁻¹N̄S⁻¹ by the fixed point the fold's
-//! existence makes a contraction; the compressions; every sweep, the last first, its triangular solves adjoint on the
-//! same kept Schur form; to the light's coefficients (the splits' factors, the components', the pairs') contracted with
-//! the beams' analytic gradients. K's change is taken whole on the decomposition's parts (V†N_tV, not its diagonal alone:
-//! the reuse's first order moves the diagonal, the gradient is all of K's). R₀ and z₀ are held as the step holds them;
-//! their own change along the axis bounds what that leaves (`Force::held`, ~10⁻⁶ of the force on the scenes).
+//! # The force and the step's one derivative (DESIGN §1.3)
+//! The step's tangent along the three lab axes (`Fold::prototype_tangent`), by the same sweeps as the step: every split's
+//! response's change -- its field's and its own through Ĥ_PP, K̃ on the decomposition's parts (all of K's change, not the
+//! diagonal the reuse moves), Ṽ and the Bloch generators, the exact copies' with it -- and S⁻¹'s (S dS + dS S = ∂X,
+//! `lyapunov`, a contraction for any metric). The photons take it whole (∇u); the force −∇ Σ_j Re tr(Ḡ_j†G_j) over the
+//! step's positions moved together contracts it with the top's cotangents alone (`Fold::prototype_force`: Ā = S⁻¹ḠS⁻¹,
+//! X̄ by one `lyapunov`, the compressions' Z̄, Ṽ̄, K̄): one derivative of the step for both, exact (against the difference
+//! of the evaluated step to 10⁻⁷). R₀ and z₀ are held as the step holds them; their relative change per µm is read
+//! (`Force::held`).
 //!
 //! # The jumps (DESIGN §1.3, §2.6)
 //! L_q = C_q ε S⁻¹ of the same responses at every position (`Fold::prototype_jumps`): ε = VZ of a near block (Z(s) at a
