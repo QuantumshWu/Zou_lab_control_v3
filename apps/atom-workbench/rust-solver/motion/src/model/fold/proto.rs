@@ -1220,6 +1220,17 @@ impl Fold {
         let r0 = &e.resolvent;
         // Per copy component: U_k on (S, C_g) and R₀ on (C_g, C_g).
         let u_sc = |g: usize, k: usize, cg: &[usize]| Mat::from_fn(s, cg.len(), |a, c| self.components[g].basis[k][(rows[a], copy_state(cg[c]))]);
+        // Each excited state's solved row, and per ground state the centred copies of it (row, group).
+        let mut row_of = [usize::MAX; EXCITED];
+        for (a, &x) in rows.iter().enumerate() {
+            row_of[x] = a;
+        }
+        let mut copies_of_state: Vec<Vec<(usize, usize)>> = vec![vec![]; GROUND];
+        for (gi, (_, cg)) in nb.groups.iter().enumerate() {
+            for &x in cg {
+                copies_of_state[copy_state(x)].push((x, gi));
+            }
+        }
         let mut terms = vec![];
         for &t in &nb.terms {
             let (w, k, kk) = ws.pairs[t];
@@ -1230,17 +1241,16 @@ impl Fold {
                 let cu = u[k][*p].conj() * u[kk][*q];
                 for &(i, j, v) in entries {
                     if i >= GROUND && j >= GROUND {
-                        if let (Some(a), Some(c)) = (rows.iter().position(|&x| x == i - GROUND), rows.iter().position(|&x| x == j - GROUND)) {
+                        let (a, c) = (row_of[i - GROUND], row_of[j - GROUND]);
+                        if a != usize::MAX && c != usize::MAX {
                             form[(a, c)] += cu * v;
                         }
                     } else if i < GROUND && j < GROUND {
                         // The copies' own rows (one component's copies among themselves).
-                        for (_, cg) in &nb.groups {
-                            for &x in cg {
-                                for &y in cg {
-                                    if copy_state(x) == i && copy_state(y) == j {
-                                        cc[(x, y)] += cu * v;
-                                    }
+                        for &(x, gx) in &copies_of_state[i] {
+                            for &(y, gy) in &copies_of_state[j] {
+                                if gx == gy {
+                                    cc[(x, y)] += cu * v;
                                 }
                             }
                         }
@@ -1262,7 +1272,8 @@ impl Fold {
             let mut whole = form.clone();
             plus(&mut whole, &dressing);
             let tw = rotate(&f, &whole, work);
-            let td = rotate(&f, &dressing, work);
+            // The dressing's rows' norms alone are read (the reuse's R₀ change): ‖(V†DV)_i‖ = ‖(V†D)_i‖, V unitary.
+            let td = f.to(&dressing, work);
             terms.push((whole.frobenius(), tw, td, cc.frobenius()));
         }
         let at: Vec<C64> = nb.terms.iter().map(|&t| ws.mid.coef[t]).collect();
