@@ -4380,6 +4380,48 @@ impl Workspace {
         self.near.iter().map(|x| of(&x.splits)).chain(self.far.iter().map(|x| of(&x.splits))).collect()
     }
 
+    /// Per near block with kept rows at the last step: the share of ∂K̃'s entries in the kept basis that every term leaves at
+    /// the rounding (Σ_t |(V†N_tV)_ij| ≤ ε Σ_t ‖V†N_tV‖_F) and the blocks its pattern falls into -- a structure a product
+    /// could skip (BRIEF_PROTO4 item 6).
+    pub(crate) fn dk_zeros(&self, cache: &Cache) -> Vec<(usize, usize, f64)> {
+        let mut out = vec![];
+        for (x, nb) in self.near.iter().enumerate() {
+            if nb.s == 0 {
+                continue;
+            }
+            let basis = &cache.near[x][cache.at_near[x].unwrap()];
+            let s = nb.s;
+            let mut sum = vec![0.0_f64; s * s];
+            let mut size = 0.0;
+            for t in 0..nb.terms.len() {
+                let w = &basis.within[t * s * s..(t + 1) * s * s];
+                size += w.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+                sum.iter_mut().zip(w).for_each(|(a, z)| *a += z.abs());
+            }
+            let floor = crate::units::rounding(s) * size;
+            // The pattern's connected rows (its blocks under a permutation).
+            let mut root: Vec<usize> = (0..s).collect();
+            fn find(r: &mut [usize], mut x: usize) -> usize {
+                while r[x] != x {
+                    r[x] = r[r[x]];
+                    x = r[x];
+                }
+                x
+            }
+            for i in 0..s {
+                for j in 0..s {
+                    if sum[i * s + j] > floor {
+                        let (a, b) = (find(&mut root, i), find(&mut root, j));
+                        root[a.max(b)] = a.min(b);
+                    }
+                }
+            }
+            let blocks = (0..s).filter(|&i| find(&mut root, i) == i).count();
+            out.push((s, blocks, sum.iter().filter(|&&a| a <= floor).count() as f64 / (s * s) as f64));
+        }
+        out
+    }
+
     /// Per near block at the last step: its kept rows, lanes and terms.
     pub(crate) fn kept_rows(&self) -> Vec<(usize, usize, usize)> {
         self.near.iter().map(|x| (x.s, x.lanes, x.terms.len())).collect()

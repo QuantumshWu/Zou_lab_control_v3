@@ -1532,6 +1532,23 @@ fn thermal_paths(atoms: usize) -> Vec<Vec<[f64; 3]>> {
         .collect()
 }
 
+/// `thermal_paths` at a run's step τ (µs): the same orbits (amplitudes ≤ 0.2 µm, periods 15–60 steps of 0.65 µs, i.e. trap
+/// frequencies 26–100 kHz and speeds up to 0.13 m/s, a 30 µK atom's in the tweezer), each step advancing them by τ, so the
+/// speed is the scene's whatever its τ.
+fn thermal_paths_at(atoms: usize, tau: f64) -> Vec<Vec<[f64; 3]>> {
+    let mut seed = 1u64;
+    let mut u = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    (0..atoms)
+        .map(|_| {
+            let shape: Vec<(f64, f64, f64)> = (0..3).map(|a| (0.2 * u(), 2.0 * std::f64::consts::PI * u(), [15.0, 17.0, 60.0][a] * (0.8 + 0.4 * u()))).collect();
+            (0..100).map(|step| std::array::from_fn(|a| shape[a].0 * (2.0 * std::f64::consts::PI * step as f64 * tau / 0.65 / shape[a].2 + shape[a].1).sin())).collect()
+        })
+        .collect()
+}
+
 /// The step over the paths at 0.1 m/s, one cache per atom; `fresh` a new cache every step.
 fn run_step(fold: &Fold, paths: &[Vec<[f64; 3]>], fresh: bool) -> Run {
     use super::step::Cache;
@@ -1879,7 +1896,8 @@ fn a_prototype_s_step_at_a_scene() {
     let atoms: usize = std::env::var("PROTO_ATOMS").map_or(10, |x| x.parse().unwrap());
     let req = crate::model::testing::scene(&name);
     let choice = proto_choice(&req, &name);
-    let paths = thermal_paths(atoms);
+    let tau: f64 = std::env::var("PROTO_TAU").map_or(0.65, |x| x.parse().unwrap());
+    let paths = thermal_paths_at(atoms, tau);
     for set in Fold::sets(&req, &choice).unwrap() {
         let fold = Fold::new(&req, &choice, set[0]).unwrap();
         if fold.blocks.is_empty() {
@@ -1896,7 +1914,6 @@ fn a_prototype_s_step_at_a_scene() {
         println!("{name} set {set:?}: n {}, near blocks (block, rows, copies, beams, terms) {near:?}, far blocks (block, rows, terms) {far:?}; {atoms} atoms × 100 steps", fold.size());
         let kappa = kappa_of(&fold);
         let velocity = kappa.map(|k| k * fold.hbar_over_mass);
-        let tau: f64 = std::env::var("PROTO_TAU").map_or(0.65, |x| x.parse().unwrap());
         let sets = Fold::sets(&req, &choice).unwrap();
         let n = fold.size();
         let psi: Vec<C64> = (0..n).map(|k| C64::cis(0.7 * k as f64) * (1.0 + 0.1 * k as f64)).collect();
@@ -2066,6 +2083,13 @@ fn a_prototype_s_step_at_a_scene() {
                 }
             }
             each_pass.sort_by(f64::total_cmp);
+            {
+                let mut cache = Cache::default();
+                for r in &paths[0] {
+                    fold.prototype(*r, kappa, &mut cache, &mut ws).expect("the prototype's step");
+                }
+                println!("      ∂K̃'s entries at the rounding in the kept basis (rows, its pattern's blocks, the zeros' share), the first atom's last step: {:?}", ws.dk_zeros(&cache));
+            }
             println!("{}", best.unwrap().1);
             println!("      the passes' µs a step (steps of one round), sorted: {:?}", each_pass.iter().map(|x| format!("{x:.2}")).collect::<Vec<_>>());
         }
