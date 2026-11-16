@@ -1874,7 +1874,7 @@ fn the_prototype_is_the_fold_within_its_readings() {
             }
             let total: usize = sweeps.iter().sum();
             let shares: Vec<String> = sweeps.iter().enumerate().filter(|x| *x.1 > 0).map(|(k, c)| format!("{k}: {:.1}%", 100.0 * *c as f64 / total as f64)).collect();
-            println!("   {split}20 points {worst:.2e} of the allowance; the path (100 steps, {made} decompositions made) {along:.2e}; G {worst_g:.1e}, copies {worst_copy:.1e}, decay {worst_decay:.1e}; sweeps {shares:?}; the largest ρ: difference {diffs:.2e}, the series' rest {:.2e}, reuse {:.2e}, the far forms held {:.2e}, Fold::at's next {:.2e}, the nodes left out {:.2e}", parts[0], parts[1], parts[2], parts[3], parts[4]);
+            println!("   {split}20 points {worst:.6e} of the allowance; the path (100 steps, {made} decompositions made) {along:.6e}; G {worst_g:.6e}, copies {worst_copy:.1e}, decay {worst_decay:.1e}; sweeps {shares:?}; the largest ρ: difference {diffs:.6e}, the series' rest {:.2e}, reuse {:.2e}, the far forms held {:.2e}, Fold::at's next {:.2e}, the nodes left out {:.2e}", parts[0], parts[1], parts[2], parts[3], parts[4]);
             checked += 1;
         }
     }
@@ -1988,7 +1988,7 @@ fn a_prototype_s_step_at_a_scene() {
                         tangent.push((ws.tangent_ticks, ws.tangent_work, t_tangent, ws.force_ticks));
                         let t_force = clock.elapsed().as_secs_f64();
                         let clock = std::time::Instant::now();
-                        let photons = fold.prototype_photons(&cache, &ws, &psi, &sets);
+                        let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets);
                         let t_photons = clock.elapsed().as_secs_f64();
                         rest.push([t_nodes, t_force, t_photons, node_work, tangent_work + force.work, photons.work]);
                         ticks.push(s.0);
@@ -2274,7 +2274,7 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                 let mut cache = Cache::default();
                 let g = fold.prototype(r0, kappa, &mut cache, &mut ws).unwrap().generator.clone();
                 fold.prototype_tangent(&cache, &mut ws);
-                let photons = fold.prototype_photons(&cache, &ws, &psi, &sets);
+                let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets);
                 let hazard: f64 = (0..n).map(|i| (0..n).map(|j| psi[i].conj() * C64::I * (g[(i, j)] - g[(j, i)].conj()) * psi[j]).sum::<C64>().re).sum::<f64>() / norm;
                 assert!((photons.rate - hazard).abs() <= 1e-12 * hazard.abs().max(1e-300), "{name} set {set:?} point {point}: the photons' rate {} against the hazard {hazard}", photons.rate);
                 // The whole gradient by the difference (h = 1e-4 µm, central).

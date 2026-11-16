@@ -313,18 +313,52 @@ pub fn mul_add(subtract: bool, z: &mut [C64], f: C64, y: &[C64]) {
 /// out (r × c) = a (r × k) b (k × c), all row by row: each entry from zero by k fused steps, b's rows in order,
 /// o.re ← x.re y.re + (−x.im y.im + o.re) and o.im ← x.re y.im + (x.im y.re + o.im) (x = a's entry, y = b's) -- two
 /// fused multiply-adds a real. Up to eight numbers of a row of out are held in registers through the k steps.
-pub fn fused_product(a: &[C64], b: &[C64], (r, k, c): (usize, usize, usize), out: &mut [C64]) {
+pub fn fused_product(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &mut [C64]) {
+    product::<false, false>(a, b, dims, out);
+}
+
+/// out (r × c) += a (r × k) b (k × c): `fused_product` with each entry's chain from out's own value.
+pub fn fused_product_onto(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &mut [C64]) {
+    product::<false, true>(a, b, dims, out);
+}
+
+/// out (r × c) = a† b, a (k × r): `fused_product` on a's columns, each entry conjugated (no adjoint made).
+pub fn adjoint_product(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &mut [C64]) {
+    product::<true, false>(a, b, dims, out);
+}
+
+/// out (r × c) += a† b, a (k × r).
+pub fn adjoint_product_onto(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &mut [C64]) {
+    product::<true, true>(a, b, dims, out);
+}
+
+/// The products' one kernel: out (r × c) = op(a) b, op(a) = a (r × k) or with `ADJOINT` a† of a (k × r); with `ONTO` each
+/// entry's chain starts at out's value instead of zero.
+#[inline(always)]
+fn product<const ADJOINT: bool, const ONTO: bool>(a: &[C64], b: &[C64], (r, k, c): (usize, usize, usize), out: &mut [C64]) {
     assert!(a.len() >= r * k && b.len() >= k * c && out.len() >= r * c);
     // SAFETY: the lengths above; C64 is two f64 (`repr(C)`); the build has AVX2 and FMA (above).
     unsafe {
-        let (bp, op) = (b.as_ptr() as *const f64, out.as_mut_ptr() as *mut f64);
-        for (i, row) in a[..r * k].chunks_exact(k.max(1)).enumerate().take(r) {
+        let (ap, bp, op) = (a.as_ptr(), b.as_ptr() as *const f64, out.as_mut_ptr() as *mut f64);
+        for i in 0..r {
             let mut j = 0;
             while j < c {
                 let w = (c - j).min(8);
                 let pairs = w / 2;
+                let to = op.add(2 * (i * c + j));
                 let (mut held, mut tail) = ([_mm256_setzero_pd(); 4], _mm_setzero_pd());
-                for (l, x) in row.iter().enumerate() {
+                if ONTO {
+                    for (v, sum) in held.iter_mut().enumerate() {
+                        if v < pairs {
+                            *sum = _mm256_loadu_pd(to.add(4 * v));
+                        }
+                    }
+                    if w % 2 == 1 {
+                        tail = _mm_loadu_pd(to.add(4 * pairs));
+                    }
+                }
+                for l in 0..k {
+                    let x = if ADJOINT { (*ap.add(l * r + i)).conj() } else { *ap.add(i * k + l) };
                     let at = bp.add(2 * (l * c + j));
                     let (re, im) = (_mm256_set1_pd(x.re), _mm256_setr_pd(-x.im, x.im, -x.im, x.im));
                     for (v, sum) in held.iter_mut().enumerate() {
@@ -338,7 +372,6 @@ pub fn fused_product(a: &[C64], b: &[C64], (r, k, c): (usize, usize, usize), out
                         tail = _mm_fmadd_pd(_mm256_castpd256_pd128(re), y, _mm_fmadd_pd(_mm256_castpd256_pd128(im), _mm_permute_pd::<0b01>(y), tail));
                     }
                 }
-                let to = op.add(2 * (i * c + j));
                 for (v, sum) in held.iter().enumerate() {
                     if v < pairs {
                         _mm256_storeu_pd(to.add(4 * v), *sum);
@@ -349,9 +382,6 @@ pub fn fused_product(a: &[C64], b: &[C64], (r, k, c): (usize, usize, usize), out
                 }
                 j += w;
             }
-        }
-        if k == 0 {
-            out[..r * c].fill(C64::ZERO);
         }
     }
 }

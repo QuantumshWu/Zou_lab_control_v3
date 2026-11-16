@@ -53,6 +53,13 @@
 //! (`Tangent`): a sweep is one product on all of them and one triangular solve of rows Ln (3Ln) long -- the same formula,
 //! its loops over all splits and axes at once.
 //!
+//! # The step's temporaries (BRIEF_PROTO5 item 1)
+//! Every phase's temporaries are reserved once with the workspace: per near block for its largest basis (`Scratch`, each
+//! phase taking the leading part it needs) and for the whole (`Temp`); the block's tangent is kept with the block
+//! (`Tangent`), the light's gradients with the light (`Placed`), and the products onto their sums (linalg.rs
+//! `fused_product_onto`, `adjoint_product_onto`) need no copy of a product nor an adjoint made. A step asks the heap for
+//! nothing.
+//!
 //! # The levels kept and left out (DESIGN §1.1, §1.8; BRIEF_PROTO4 items 1, 2)
 //! A near block's excited levels are kept or left out; the kept ones are one Schur form (whatever couples them is in the
 //! decomposition, no series across them), the omitted ones are neither decomposed nor solved. Their coupling R to the kept
@@ -134,7 +141,6 @@ fn ticks() -> u64 {
 /// A block with solved rows: its layout (rows s, centred copies nc, its offset; the P places of its sources, as fold.rs
 /// `lay` takes its centre; its beam splits (component, beam); its source vectors (component, k); per copy component its
 /// centred rows, and its copy vectors (component, k, group); its terms) and the step's buffers.
-#[derive(Clone)]
 struct Near {
     /// The lanes: the beam splits, then the static one where the block holds explicit states (their columns' source, no
     /// Doppler shift: DESIGN §1.3); the explicit states' P places.
@@ -222,6 +228,8 @@ struct Near {
     zdnode: [Vec<C64>; 2],
     kednode: [Vec<C64>; 2],
     kdenode: [Vec<C64>; 2],
+    /// The step's tangent (`Fold::prototype_tangent`).
+    tg: Tangent,
 }
 
 impl Near {
@@ -260,6 +268,7 @@ impl Near {
         self.norms.resize(s + 1, 0.0);
         self.q.resize(s + 1, 0.0);
         self.active.resize(s, true);
+        self.tg.fit(s, n, self.lanes, nd, self.nc);
     }
 }
 
@@ -277,7 +286,8 @@ struct Parts {
 
 /// The light at a place (module documentation, 1): the beams' amplitudes with their gradients, each frequency's components
 /// ε_k on its basis, the pairs' coefficients, per component its beams' factors f_l and Doppler shifts w_l and its
-/// coefficients e_k, Ĥ_PP.
+/// coefficients e_k, Ĥ_PP; and the gradients along the lab axes the tangent and the force take there: ∂ε_k, ∂e_k, the pairs'
+/// ∂c_t, the beams' factors' ∂f_l.
 #[derive(Clone)]
 struct Placed {
     amplitudes: Vec<Amplitude>,
@@ -287,6 +297,10 @@ struct Placed {
     w: Vec<Vec<f64>>,
     e: Vec<Vec<C64>>,
     hpp: Vec<C64>,
+    deps: Vec<Vec<[C64; 3]>>,
+    de: Vec<Vec<[C64; 3]>>,
+    dc: Vec<[C64; 3]>,
+    df: Vec<Vec<[C64; 3]>>,
 }
 
 /// A step's outer node (`Fold::prototype_nodes`): its light, A(s) and G(s) = S⁻¹A(s)S⁻¹ (S the middle's), per far block
@@ -316,6 +330,12 @@ struct Far {
     centring: f64,
     /// Whether the point leaves the block out (`omit`).
     omitted: bool,
+    /// Temporaries (BRIEF_PROTO5 item 1): the pairs' products at a node and their gradients (v², 3v²), the latter on the
+    /// stacked forms (3 × n²), the force's ⟨Ā, F_ab + z₀G_ab⟩ (v²).
+    pnode: Vec<C64>,
+    dp: Vec<C64>,
+    o3: Vec<C64>,
+    ks: Vec<C64>,
 }
 
 /// A near block's decomposition (module documentation, # What is kept).
@@ -476,8 +496,11 @@ pub(crate) struct Workspace {
     nodes: Vec<Node>,
     node_times: [f64; 2],
     noded: bool,
-    /// The step's tangent (`Fold::prototype_tangent`), its ticks and work by phase (`TANGENT`).
-    tangents: Option<Tangents>,
+    /// Whether the step's tangent was made (`Fold::prototype_tangent`: per near block its own, `Near::tg`; per lab axis the
+    /// metric's ∂X and S's ∂S), its ticks and work by phase (`TANGENT`).
+    tangent: bool,
+    dx: [Vec<C64>; 3],
+    ds: [Vec<C64>; 3],
     pub(crate) tangent_ticks: [u64; 6],
     pub(crate) tangent_work: [f64; 6],
     /// The force's ticks by phase: its top (Ā, X̄), the light's terms (Ĥ_PP, the far forms), the compressions' adjoints,
@@ -497,117 +520,278 @@ pub(crate) struct Workspace {
     order: Vec<(f64, usize, usize)>,
     /// The omission bounds per near block (`omit`'s, kept from step to step).
     per: Vec<Bounds>,
+    /// Per near block its matrices at the point where a decomposition is made there (`Fold::lay`, `Fold::effective`).
+    here: Vec<Option<(Laid, Effective)>>,
+    /// The step's temporaries: per near block (`Scratch`) and those of the whole (`Temp`).
+    scratch: Vec<Scratch>,
+    tm: Temp,
     step: Step,
 }
 
-thread_local! {
-    static SPARE: std::cell::RefCell<Vec<Vec<C64>>> = const { std::cell::RefCell::new(Vec::new()) };
+/// A near block's temporaries of a step (BRIEF_PROTO5 item 1): every phase's -- the forward's, the omission bound's, the
+/// nodes', the tangent's, the force's, the photons' -- reserved once with the workspace for the block's largest basis (all
+/// its excited rows) and its lanes, each phase taking the leading part it needs: a step asks the heap for nothing. Shapes
+/// in s (the kept rows), n (the columns), L (the lanes), nd (the exact copies), nc (the centred copies' rows), T (the terms).
+struct Scratch {
+    /// s × n: the source (Ṽ + Ỹ₀) and K̂Z + B of a compression; the force's per position K̂Z, Z̄, Ṽ̄ (B̄), Ê̄†, ZĀ; n × s Ê̄.
+    src: Vec<C64>,
+    w: Vec<C64>,
+    y: Vec<C64>,
+    zb: Vec<C64>,
+    vb: Vec<C64>,
+    ebt: Vec<C64>,
+    xb: Vec<C64>,
+    eb: Vec<C64>,
+    /// The tangent's: ∂Ṽ (s × 3n), the axes' ∂c on the terms (3 × T) and its products on the terms' forms (3 × max(s, n) n);
+    /// the sweeps' right-hand sides (s × 3Ln), ∂Z Δ (s × 3Ln), Z ∂Δ (s × Ln), a part's ∂K̃ rows (3s × s).
+    dv: Vec<C64>,
+    dct: Vec<C64>,
+    to: Vec<C64>,
+    rhs: Vec<C64>,
+    p1: Vec<C64>,
+    p2: Vec<C64>,
+    mp: Vec<C64>,
+    /// The force's Z_jĀ_j and Z_j side by side over the positions (s × 3n), the latter's adjoint (3n × s), K̃̄ (s × s); the
+    /// centred copies' rows' cotangent (nc × n) and the tangent's of them (nc × n, two).
+    kx: Vec<C64>,
+    kz: Vec<C64>,
+    kzh: Vec<C64>,
+    kb: Vec<C64>,
+    tcbar: Vec<C64>,
+    tc1: Vec<C64>,
+    tc2: Vec<C64>,
+    /// The photons' y = Zζ (s) and ∂y (3 × s).
+    py: Vec<C64>,
+    pdy: Vec<C64>,
+    back: BackTemps,
+    copies: CopyTemps,
+    copies_back: CopiesBack,
+    bound: BoundTemps,
 }
 
-/// A vector of the thread's spares (assemble.rs `Held`'s rule for the prototype's temporaries: a step's force and photons
-/// take the vectors the step before left, and ask the heap for nothing).
-struct Buf(Vec<C64>);
-
-impl Buf {
-    /// `len` zeros.
-    fn zeros(len: usize) -> Buf {
-        let mut v = SPARE.try_with(|x| x.borrow_mut().pop()).ok().flatten().unwrap_or_default();
-        v.clear();
-        v.resize(len, C64::ZERO);
-        Buf(v)
-    }
-    /// A copy of `x`.
-    fn copy(x: &[C64]) -> Buf {
-        let mut b = Buf::zeros(0);
-        b.0.extend_from_slice(x);
-        b
-    }
-}
-
-impl std::ops::Deref for Buf {
-    type Target = Vec<C64>;
-    fn deref(&self) -> &Vec<C64> {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for Buf {
-    fn deref_mut(&mut self) -> &mut Vec<C64> {
-        &mut self.0
-    }
-}
-
-impl<'a> IntoIterator for &'a Buf {
-    type Item = &'a C64;
-    type IntoIter = std::slice::Iter<'a, C64>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
-    }
-}
-
-impl AsRef<[C64]> for Buf {
-    fn as_ref(&self) -> &[C64] {
-        &self.0
-    }
-}
-
-impl Drop for Buf {
-    fn drop(&mut self) {
-        let v = std::mem::take(&mut self.0);
-        let _ = SPARE.try_with(|x| x.borrow_mut().push(v));
-    }
-}
-
-thread_local! {
-    static SPARE_F: std::cell::RefCell<Vec<Vec<f64>>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// A real vector of the thread's spares (`Buf`'s rule for the omission bound's temporaries).
-struct FBuf(Vec<f64>);
-
-impl FBuf {
-    /// `len` zeros.
-    fn zeros(len: usize) -> FBuf {
-        let mut v = SPARE_F.try_with(|x| x.borrow_mut().pop()).ok().flatten().unwrap_or_default();
-        v.clear();
-        v.resize(len, 0.0);
-        FBuf(v)
-    }
-    /// A copy of `x`.
-    fn copy(x: &[f64]) -> FBuf {
-        let mut b = FBuf::zeros(0);
-        b.0.extend_from_slice(x);
-        b
-    }
-}
-
-impl std::ops::Deref for FBuf {
-    type Target = Vec<f64>;
-    fn deref(&self) -> &Vec<f64> {
-        &self.0
+impl Scratch {
+    fn new(s: usize, n: usize, lanes: usize, nd: usize, nc: usize, levels: usize, terms: usize) -> Scratch {
+        let z = |x: usize| vec![C64::ZERO; x];
+        let ln = lanes * n;
+        Scratch {
+            src: z(s * n),
+            w: z(s * n),
+            y: z(s * n),
+            zb: z(s * n),
+            vb: z(s * n),
+            ebt: z(s * n),
+            xb: z(s * n),
+            eb: z(n * s),
+            dv: z(3 * s * n),
+            dct: z(3 * terms),
+            to: z(3 * s.max(n) * n),
+            rhs: z(3 * s * ln),
+            p1: z(3 * s * ln),
+            p2: z(s * ln),
+            mp: z(3 * s * s),
+            kx: z(3 * s * n),
+            kz: z(3 * s * n),
+            kzh: z(3 * n * s),
+            kb: z(s * s),
+            tcbar: z(nc * n),
+            tc1: z(nc * n),
+            tc2: z(nc * n),
+            py: z(s),
+            pdy: z(3 * s),
+            back: BackTemps { left: z(2 * s * n), right: z(2 * n * n), wide: z(2 * n * n), o: z(2 * s * n) },
+            copies: CopyTemps {
+                rd: z(nd * n),
+                ze: z(s * n),
+                inv: z(s * n),
+                zdn: z(nd * n),
+                p: z(s),
+                lu: z(nd * nd),
+                piv: vec![0; nd],
+                rhs: z(nd),
+                ye: z(s * n),
+                yd: z(nd * n),
+                dze: z(s * n),
+                zdb: z(nd * n),
+                kedb: z(s * nd),
+                kdeb: z(nd * s),
+                kddb: z(nd * nd),
+                eh: z(nd * n),
+                od: z(nd * n),
+                zdh: z(n * nd),
+                exb: z(n * nd),
+                bdb: z(nd * n),
+            },
+            copies_back: CopiesBack { adj: z(n * n), zea: z(s * n), zead: z(s * n), zda: z(nd * n), zdad: z(nd * n) },
+            bound: BoundTemps {
+                q_of: Vec::with_capacity(levels),
+                c: z(n),
+                dabs: vec![0.0; terms],
+                cabs: vec![0.0; terms],
+                pair: vec![0.0; levels * levels],
+                radius: vec![0.0; levels],
+                held: vec![0.0; levels],
+                zk: vec![0.0; ln],
+                gk: vec![0.0; ln],
+                ek: vec![0.0; n],
+                dcol: vec![0.0; n],
+                zt: vec![0.0; n],
+                beta: vec![0.0; levels * ln],
+                gam: vec![0.0; levels * ln],
+                gl: vec![0.0; levels * ln],
+                src: vec![0.0; levels * ln],
+                x: vec![0.0; levels * ln],
+                rqk: vec![0.0; levels],
+                rkq: vec![0.0; levels],
+                whole: vec![0.0; levels * n],
+                vall: z(s * n),
+                rz: z(s * n),
+                v: z(s * n),
+            },
+        }
     }
 }
 
-impl std::ops::DerefMut for FBuf {
-    fn deref_mut(&mut self) -> &mut Vec<f64> {
-        &mut self.0
+/// `compress_back`'s temporaries: [Ê† | K̂Z + B] (s × 2n), [Ā; Ā†] (2n × n), [Ā | Ā†] (n × 2n), Z on the latter (s × 2n).
+struct BackTemps {
+    left: Vec<C64>,
+    right: Vec<C64>,
+    wide: Vec<C64>,
+    o: Vec<C64>,
+}
+
+/// The exact copies' temporaries: the series' and the tangent's Woodbury solves (the copies' source nd × n, a lane's
+/// excited response and diagonal inverse s × n, its copies' response nd × n; P_j's column s, C_j's factors nd × nd and
+/// pivots, the right-hand side nd; the tangent's lane response s × n), the compression's K̂_ED Z_D (s × n) and
+/// K̂_DE Z_E + K̂_DD Z_D (nd × n), the force's cotangents (Z̄_D, K̄_ED, K̄_DE, K̄_DD) and its explicit parts' products.
+struct CopyTemps {
+    rd: Vec<C64>,
+    ze: Vec<C64>,
+    inv: Vec<C64>,
+    zdn: Vec<C64>,
+    p: Vec<C64>,
+    lu: Vec<C64>,
+    piv: Vec<usize>,
+    rhs: Vec<C64>,
+    ye: Vec<C64>,
+    yd: Vec<C64>,
+    dze: Vec<C64>,
+    zdb: Vec<C64>,
+    kedb: Vec<C64>,
+    kdeb: Vec<C64>,
+    kddb: Vec<C64>,
+    eh: Vec<C64>,
+    od: Vec<C64>,
+    zdh: Vec<C64>,
+    exb: Vec<C64>,
+    bdb: Vec<C64>,
+}
+
+/// `copies_compress_back`'s temporaries: Ā† (n × n), Z_EĀ, Z_EĀ† (s × n), Z_DĀ, Z_DĀ† (nd × n).
+struct CopiesBack {
+    adj: Vec<C64>,
+    zea: Vec<C64>,
+    zead: Vec<C64>,
+    zda: Vec<C64>,
+    zdad: Vec<C64>,
+}
+
+/// The omission bound's temporaries (`bound_levels`), for Q levels, L lanes, n columns, every excited row, T terms.
+struct BoundTemps {
+    q_of: Vec<usize>,
+    c: Vec<C64>,
+    dabs: Vec<f64>,
+    cabs: Vec<f64>,
+    pair: Vec<f64>,
+    radius: Vec<f64>,
+    held: Vec<f64>,
+    zk: Vec<f64>,
+    gk: Vec<f64>,
+    ek: Vec<f64>,
+    dcol: Vec<f64>,
+    zt: Vec<f64>,
+    beta: Vec<f64>,
+    gam: Vec<f64>,
+    gl: Vec<f64>,
+    src: Vec<f64>,
+    x: Vec<f64>,
+    rqk: Vec<f64>,
+    rkq: Vec<f64>,
+    whole: Vec<f64>,
+    vall: Vec<C64>,
+    rz: Vec<C64>,
+    v: Vec<C64>,
+}
+
+/// The step's temporaries of the whole (BRIEF_PROTO5 item 1), n the columns: the tangent's ∂Ĥ_base, the far metric's
+/// tangent, ∂H, ∂X (n × 3n), ∂Δ (n × n), ∂c (3 × n), a product's (3 × n × n), two n × n; the force's Ā_j (three), N̄, Ā†,
+/// X̄, Ā*, a work n × n, per component and vector ḡ_e, the diagonal's gradient (n × 3); the photons' ζ, ∂ζ, u, ∂u; the
+/// omission's columns' denominators and a trial's (n), a block's bounds on trial (`Bounds`, the largest levels × n), the
+/// levels' and far blocks' order.
+struct Temp {
+    dhbase: Vec<C64>,
+    dmetric: Vec<C64>,
+    dh: Vec<C64>,
+    dx: Vec<C64>,
+    dd: Vec<C64>,
+    dhd: Vec<C64>,
+    o3: Vec<C64>,
+    e: Vec<C64>,
+    p: Vec<C64>,
+    abar: [Vec<C64>; 3],
+    nbar: Vec<C64>,
+    adj: Vec<C64>,
+    xbar: Vec<C64>,
+    abc: Vec<C64>,
+    w: Vec<C64>,
+    ge: Vec<Vec<C64>>,
+    diagonal: Vec<[f64; 3]>,
+    zeta: Vec<C64>,
+    dzeta: Vec<C64>,
+    u: Vec<C64>,
+    du: Vec<[C64; 3]>,
+    den: Vec<f64>,
+    d: Vec<f64>,
+    trial: Bounds,
+    units: Vec<(f64, usize)>,
+}
+
+impl Temp {
+    /// For n columns, the components' vectors `vectors` (per component its basis' size), the largest levels of a block, the
+    /// blocks' levels in all and the far blocks.
+    fn new(n: usize, vectors: &[usize], levels: usize, all: usize, far: usize) -> Temp {
+        let z = |x: usize| vec![C64::ZERO; x];
+        let nn = n * n;
+        Temp {
+            dhbase: z(3 * nn),
+            dmetric: z(3 * nn),
+            dh: z(3 * nn),
+            dx: z(3 * nn),
+            dd: z(nn),
+            dhd: z(3 * n),
+            o3: z(3 * nn),
+            e: z(nn),
+            p: z(nn),
+            abar: std::array::from_fn(|_| z(nn)),
+            nbar: z(nn),
+            adj: z(nn),
+            xbar: z(nn),
+            abc: z(nn),
+            w: z(nn),
+            ge: vectors.iter().map(|&v| z(v)).collect(),
+            diagonal: vec![[0.0; 3]; n],
+            zeta: z(n),
+            dzeta: z(3 * n),
+            u: z(3 * GROUND),
+            du: vec![[C64::ZERO; 3]; 3 * GROUND],
+            den: vec![0.0; n],
+            d: vec![0.0; n],
+            trial: (Vec::with_capacity(levels), vec![0.0; levels * n], vec![0.0; levels * n], vec![0.0; levels * n]),
+            units: Vec::with_capacity(all.max(far)),
+        }
     }
 }
 
-impl Clone for FBuf {
-    fn clone(&self) -> FBuf {
-        FBuf::copy(&self.0)
-    }
-}
-
-impl Drop for FBuf {
-    fn drop(&mut self) {
-        let v = std::mem::take(&mut self.0);
-        let _ = SPARE_F.try_with(|x| x.borrow_mut().push(v));
-    }
-}
-
-/// 1/z by one real division (z away from zero and overflow: the series' denominators).
+// 1/z by one real division (z away from zero and overflow: the series' denominators).
 #[inline]
 fn reciprocal(z: C64) -> C64 {
     let d = 1.0 / z.norm_sqr();
@@ -697,9 +881,10 @@ fn outside(z: C64, g: &[f64; 4], r: f64) -> f64 {
 /// source and the reference's coupling to the kept response, Σ_a e_a U_a,q + R_qK,ref V Z (exact vectors: a standing wave's
 /// node cancels in them), the lanes' spread a remainder (D_l − D̄ = (w_l − w̄) D_l D̄) --, the smaller kept. Where a bound
 /// does not exist (a column energy on a level's widened numerical range, or the omitted levels' own coupling and Δ's not
-/// contracting) the level that holds it the most, its largest γ (or β's that do not exist).
+/// contracting) the level that holds it the most, its largest γ (or β's that do not exist). Its temporaries the block's
+/// (`BoundTemps`).
 #[allow(clippy::too_many_arguments)]
-fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: &[C64], tight: bool, sizes: &mut [f64], backs: &mut [f64], shifts: &mut [f64], n: usize, work: &mut f64) -> Result<(), usize> {
+fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: &[C64], tight: bool, sizes: &mut [f64], backs: &mut [f64], shifts: &mut [f64], tp: &mut BoundTemps, n: usize, work: &mut f64) -> Result<(), usize> {
     let nl = nb.levels.len();
     let terms = nb.terms.len();
     let (s, lanes) = (nb.s, nb.lanes);
@@ -707,31 +892,32 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
     sizes[..nl * n].fill(0.0);
     backs[..nl * n].fill(0.0);
     shifts[..nl * n].fill(0.0);
-    // The omitted levels (a block has at most the excited levels: no allocation).
-    let mut q_buf = [0usize; 32];
-    let mut count = 0;
-    for q in (0..nl).filter(|&q| omitted[q]) {
-        q_buf[count] = q;
-        count += 1;
-    }
-    let q_of = &q_buf[..count];
-    if q_of.is_empty() {
+    // The omitted levels.
+    tp.q_of.clear();
+    tp.q_of.extend((0..nl).filter(|&q| omitted[q]));
+    if tp.q_of.is_empty() {
         return Ok(());
     }
-    let mut c = Buf::zeros(n);
+    let BoundTemps { q_of, c, dabs, cabs, pair, radius, held, zk, gk, ek, dcol, zt, beta, gam, gl, src, x, rqk, rkq, whole, vall, rz, v } = tp;
+    let q_of = &q_of[..];
+    let nq = q_of.len();
+    let c = &mut c[..n];
     for j in 0..n {
         c[j] = h[j * n + j];
     }
     // The level pairs' coupling and each level's numerical range's widening at the point: the reference's and the terms'
     // |δc_t| (exact in the light), R₀'s change ε_R Σ_t |c_t| on the dressing's rows.
     // |δc_t| and |c_t| once (a complex modulus by its square's root: hypot's care is not needed at these sizes).
-    let (mut dabs, mut cabs) = (FBuf::zeros(terms), FBuf::zeros(terms));
+    let (dabs, cabs) = (&mut dabs[..terms], &mut cabs[..terms]);
     for (t, &p) in nb.terms.iter().enumerate() {
         dabs[t] = nb.delta[t].norm_sqr().sqrt();
         cabs[t] = at.coef[p].norm_sqr().sqrt();
     }
-    let mut pair = FBuf::copy(&basis.lpair[..nl * nl]);
-    let (mut radius, mut held) = (FBuf::zeros(nl), FBuf::zeros(nl));
+    let pair = &mut pair[..nl * nl];
+    pair.copy_from_slice(&basis.lpair[..nl * nl]);
+    let (radius, held) = (&mut radius[..nl], &mut held[..nl]);
+    radius.fill(0.0);
+    held.fill(0.0);
     for t in 0..terms {
         let d = dabs[t];
         for q in 0..nl {
@@ -754,7 +940,8 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
     // The kept rows' response per lane and column, and the kept part's resolvent bound per lane and column: the Schur form's
     // diagonal's least distance δ less its departure from normality ν (the strict upper part, what it dropped, the reuse's
     // off-diagonal change and R₀'s): ‖(z − D − N)⁻¹‖ ≤ Σ_k ‖N‖^k/δ^{k+1} = 1/(δ − ν).
-    let mut zk = FBuf::zeros(ln);
+    let zk = &mut zk[..ln];
+    zk.fill(0.0);
     for i in 0..s {
         for (u, z) in zk.iter_mut().zip(&nb.z[i * ln..(i + 1) * ln]) {
             *u += z.norm_sqr();
@@ -770,17 +957,17 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
         let d = (0..s).map(|i| (z - nb.kappa[i]).norm_sqr()).fold(f64::INFINITY, f64::min).sqrt();
         if d > nu { 1.0 / (d - nu) } else { f64::INFINITY }
     };
-    let mut gk = FBuf::zeros(ln);
+    let gk = &mut gk[..ln];
     for (sp, &wl) in nb.shifts.iter().enumerate() {
         for j in 0..n {
             gk[sp * n + j] = kept_resolvent(c[j] - C64::real(wl));
         }
     }
-    let mut ek = FBuf::zeros(n);
+    let ek = &mut ek[..n];
     for j in 0..n {
         ek[j] = nb.emit[j * s..(j + 1) * s].iter().map(|x| x.norm_sqr()).sum::<f64>().sqrt();
     }
-    let mut dcol = FBuf::zeros(n);
+    let dcol = &mut dcol[..n];
     for j in 0..n {
         dcol[j] = (0..n).filter(|&i| i != j).map(|i| h[i * n + j].norm_sqr().sqrt()).sum();
     }
@@ -788,9 +975,8 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
     // Per omitted level q, lane l and column j: x ≤ g (src + ‖R_qK‖‖Z_K‖ + Σ_p∈Q ‖R_qp‖ x_p + Σ_i |Δ_ij| x_i), g = 1/dist(z,
     // W(K_qq − o)) the numerical range's bound (any matrix, normal or not); the omitted levels' own coupling and Δ's by
     // their largest, x ≤ β + γ X with X = max β/(1 − γ).
-    let nq = q_of.len();
-    let (mut beta, mut gam, mut gl, mut src) = (FBuf::zeros(nq * ln), FBuf::zeros(nq * ln), FBuf::zeros(nq * ln), FBuf::zeros(nq * ln));
-    let mut rqk = FBuf::zeros(nq);
+    let (beta, gam, gl, src, x) = (&mut beta[..nq * ln], &mut gam[..nq * ln], &mut gl[..nq * ln], &mut src[..nq * ln], &mut x[..nq * ln]);
+    let rqk = &mut rqk[..nq];
     for (k, &q) in q_of.iter().enumerate() {
         rqk[k] = (0..nl).filter(|&p| !omitted[p]).map(|p| pair[q * nl + p].powi(2)).sum::<f64>().sqrt();
         let rqq: f64 = q_of.iter().filter(|&&p| p != q).map(|&p| pair[q * nl + p]).sum();
@@ -818,7 +1004,7 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
         }
         *work += (lanes * n * 3) as f64;
     }
-    let mut x = FBuf::zeros(nq * ln);
+    x.fill(0.0);
     for sp in 0..lanes {
         let (mut gmax, mut bmax) = (0.0_f64, 0.0_f64);
         for k in 0..nq {
@@ -842,7 +1028,7 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
             }
         }
     }
-    let mut rkq = FBuf::zeros(nq);
+    let rkq = &mut rkq[..nq];
     for (k, &q) in q_of.iter().enumerate() {
         rkq[k] = (0..nl).filter(|&p| !omitted[p]).map(|p| pair[p * nl + q].powi(2)).sum::<f64>().sqrt();
         for sp in 0..lanes {
@@ -861,24 +1047,26 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
         let mean = nb.shifts.iter().sum::<f64>() / lanes.max(1) as f64;
         // Σ_a e_a U_a (+ the static source) on every excited row, and K_qK,ref V Z on the omitted levels' rows stacked: once.
         let all = nb.all;
-        let mut vall = Buf::zeros(all * n);
+        let vall = &mut vall[..all * n];
+        vall.fill(C64::ZERO);
         for (a, &(cc, kk)) in nb.vectors.iter().enumerate() {
-            crate::linalg::mul_add(false, &mut vall, at.e[cc][kk], &basis.uall[a * all * n..(a + 1) * all * n]);
+            crate::linalg::mul_add(false, vall, at.e[cc][kk], &basis.uall[a * all * n..(a + 1) * all * n]);
         }
         if !nb.xs.is_empty() {
             vall.iter_mut().zip(&basis.sall).for_each(|(a, b)| *a += *b);
         }
         let stacked = basis.rall.len() / s.max(1);
-        let mut rz = Buf::zeros(stacked * n);
+        let rz = &mut rz[..stacked * n];
         if s > 0 && stacked > 0 {
-            fused_product_into(&basis.rall, &nb.ztot, (stacked, s, n), &mut rz);
+            fused_product_into(&basis.rall, &nb.ztot, (stacked, s, n), rz);
         }
         *work += ((nb.vectors.len() * all + stacked * s) * n) as f64;
-        let mut zt = FBuf::zeros(n);
+        let zt = &mut zt[..n];
         for j in 0..n {
             zt[j] = (0..s).map(|i| nb.ztot[i * n + j].norm_sqr()).sum::<f64>().sqrt();
         }
-        let whole = FBuf::copy(&sizes[..nl * n]);
+        let whole = &mut whole[..nl * n];
+        whole.copy_from_slice(&sizes[..nl * n]);
         for (k, &q) in q_of.iter().enumerate() {
             // A kept level read as if omitted has no reference coupling stored: its lane bound stands.
             if basis.rat[q] == usize::MAX {
@@ -886,7 +1074,7 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
             }
             let (rows, r0) = (&nb.levels[q], basis.rat[q]);
             let m = rows.len();
-            let mut v = Buf::zeros(m * n);
+            let v = &mut v[..m * n];
             for (a, &i) in rows.iter().enumerate() {
                 v[a * n..(a + 1) * n].copy_from_slice(&vall[i * n..(i + 1) * n]);
                 if s > 0 {
@@ -920,10 +1108,12 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
                         // What its absence leaves of the kept rows, likewise: the kept resolvent at the mean on the whole, the
                         // lanes' spread on each lane's bound.
                         let gkb = kept_resolvent(c[j] - C64::real(mean));
-                        let lane: f64 = (0..lanes).map(|sp| {
-                            let wl = if sp < nb.splits.len() { nb.shifts[sp] } else { 0.0 };
-                            (wl - mean).abs() * gk[sp * n + j] * x[k * ln + sp * n + j]
-                        }).sum();
+                        let lane: f64 = (0..lanes)
+                            .map(|sp| {
+                                let wl = if sp < nb.splits.len() { nb.shifts[sp] } else { 0.0 };
+                                (wl - mean).abs() * gk[sp * n + j] * x[k * ln + sp * n + j]
+                            })
+                            .sum();
                         backs[q * n + j] = backs[q * n + j].min(gkb * rkq[k] * (new + lane));
                     }
                 }
@@ -981,7 +1171,7 @@ fn read_omitted(per: &[Bounds], den: &[f64], thermal: f64, n: usize) -> f64 {
     most.sqrt()
 }
 
-/// The levels and far blocks the point leaves out (module documentation, # The levels left out), read after the first sweep
+//// The levels and far blocks the point leaves out (module documentation, # The levels left out), read after the first sweep
 /// without solving the omitted levels: their bounds (`bound_levels`) read together (`read_omitted`) against each column's
 /// whole excited response W_j -- the kept rows' and the far blocks', at most the whole column's, so the reading only
 /// grows. Within the share: the far blocks of the smallest reading go too while the whole stays within (their M_F,jj and
@@ -989,22 +1179,19 @@ fn read_omitted(per: &[Bounds], den: &[f64], thermal: f64, n: usize) -> f64 {
 /// bounds counted in the columns as their responses), until the bounds read within; their blocks' `wanted` say the kept
 /// levels the next decomposition holds. Returns the ρ left out and whether levels joined.
 #[allow(clippy::too_many_arguments)]
-fn omit(near: &mut [Near], far: &mut [Far], cache: &Cache, at: &Placed, hbase: &mut [C64], h: &mut [C64], whole: &mut [f64], per: &mut Vec<Bounds>, tally: &mut [usize; 2], share: f64, thermal: f64, n: usize, work: &mut f64) -> (f64, bool) {
+fn omit(near: &mut [Near], far: &mut [Far], scratch: &mut [Scratch], tm: &mut Temp, cache: &Cache, at: &Placed, hbase: &mut [C64], h: &mut [C64], whole: &mut [f64], per: &mut [Bounds], tally: &mut [usize; 2], share: f64, thermal: f64, n: usize, work: &mut f64) -> (f64, bool) {
     let pot = |dv: f64| ((1.0 + dv / (2.0 * thermal)).sqrt() - 1.0).powi(2);
     let limit = unrate(share);
-    // The bounds' vectors kept in the workspace from step to step (no allocation).
-    per.resize_with(near.len(), || (vec![], vec![], vec![], vec![]));
+    // The bounds' vectors kept in the workspace from step to step (`Workspace::per`, one per near block).
     let mut grow = false;
-    for (x, nb) in near.iter_mut().enumerate() {
+    for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
         let basis = &cache.near[x][cache.at_near[x].unwrap()];
         let nl = nb.levels.len();
         let (omitted, sz, bk, sh) = &mut per[x];
-        omitted.clear();
-        omitted.extend((0..nl).map(|q| !basis.kept.contains(&q)));
-        for v in [&mut *sz, &mut *bk, &mut *sh] {
-            v.resize(nl * n, 0.0);
+        for (q, o) in omitted[..nl].iter_mut().enumerate() {
+            *o = !basis.kept.contains(&q);
         }
-        if let Err(q) = bound_levels(nb, basis, omitted, at, h, true, sz, bk, sh, n, work) {
+        if let Err(q) = bound_levels(nb, basis, omitted, at, h, true, sz, bk, sh, &mut sc.bound, n, work) {
             // No bound: the level that holds it the most joins.
             let mut kept = basis.kept.clone();
             kept.push(q);
@@ -1018,8 +1205,9 @@ fn omit(near: &mut [Near], far: &mut [Far], cache: &Cache, at: &Placed, hbase: &
     }
     let mut rho = read_omitted(per, whole, thermal, n);
     *work += (n * per.iter().map(|p| p.0.len()).sum::<usize>()) as f64;
+    let den = &mut tm.den[..n];
+    den.copy_from_slice(&whole[..n]);
     if rho > limit {
-        let mut den = FBuf::copy(whole);
         while rho > limit {
             let mut best: Option<(f64, usize, usize)> = None;
             for (x, (om, sz, ..)) in per.iter().enumerate() {
@@ -1035,7 +1223,7 @@ fn omit(near: &mut [Near], far: &mut [Far], cache: &Cache, at: &Placed, hbase: &
                 den[j] += per[x].1[q * n + j].powi(2);
             }
             per[x].0[q] = false;
-            rho = read_omitted(per, &den, thermal, n);
+            rho = read_omitted(per, den, thermal, n);
         }
         for (x, (nb, (om, ..))) in near.iter_mut().zip(per.iter()).enumerate() {
             let kept: Vec<usize> = (0..om.len()).filter(|&q| !om[q]).collect();
@@ -1046,45 +1234,50 @@ fn omit(near: &mut [Near], far: &mut [Far], cache: &Cache, at: &Placed, hbase: &
         return (rho, true);
     }
     // Where a decomposition was made at this step its kept levels may leave, the smallest first, while the bounds (each with
-    // the whole kept response, its own in it, and the column less its bound) read within: a new one without them.
-    let mut den = FBuf::copy(whole);
+    // the whole kept response, its own in it, and the column less its bound) read within: a new one without them. A trial
+    // stands in the block's bounds in place (`Temp::trial` swapped in) and is swapped back where it reads beyond.
     let mut left = false;
-    for (x, nb) in near.iter_mut().enumerate() {
+    for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
         let basis = &cache.near[x][cache.at_near[x].unwrap()];
         if !nb.fresh || nb.nd > 0 {
             continue;
         }
         let nl = nb.levels.len();
-        let mut units: Vec<(f64, usize)> = vec![];
+        let mut joined = false;
+        let (om, sz, bk, sh) = &mut tm.trial;
+        tm.units.clear();
         for &q in &basis.kept {
-            let mut om = per[x].0.clone();
+            om.clear();
+            om.extend_from_slice(&per[x].0);
             om[q] = true;
-            let (mut sz, mut bk, mut sh) = (FBuf::zeros(nl * n), FBuf::zeros(nl * n), FBuf::zeros(nl * n));
-            if bound_levels(nb, basis, &om, at, h, false, &mut sz, &mut bk, &mut sh, n, work).is_ok() {
-                units.push(((0..n).map(|j| (sz[q * n + j] + bk[q * n + j]).powi(2) / den[j].max(f64::MIN_POSITIVE)).fold(0.0, f64::max), q));
+            if bound_levels(nb, basis, om, at, h, false, sz, bk, sh, &mut sc.bound, n, work).is_ok() {
+                tm.units.push(((0..n).map(|j| (sz[q * n + j] + bk[q * n + j]).powi(2) / den[j].max(f64::MIN_POSITIVE)).fold(0.0, f64::max), q));
             }
         }
-        units.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        for (_, q) in units {
-            let mut om = per[x].0.clone();
+        tm.units.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        for u in 0..tm.units.len() {
+            let q = tm.units[u].1;
+            let (om, sz, bk, sh) = &mut tm.trial;
+            om.clear();
+            om.extend_from_slice(&per[x].0);
             om[q] = true;
-            let (mut sz, mut bk, mut sh) = (FBuf::zeros(nl * n), FBuf::zeros(nl * n), FBuf::zeros(nl * n));
-            if bound_levels(nb, basis, &om, at, h, false, &mut sz, &mut bk, &mut sh, n, work).is_err() {
+            if bound_levels(nb, basis, om, at, h, false, sz, bk, sh, &mut sc.bound, n, work).is_err() {
                 continue;
             }
-            let mut d = FBuf::zeros(n);
+            let d = &mut tm.d[..n];
             for j in 0..n {
                 d[j] = (den[j] - sz[q * n + j].powi(2)).max(0.0);
             }
-            let mut trial = per.clone();
-            trial[x] = (om, sz.to_vec(), bk.to_vec(), sh.to_vec());
-            if read_omitted(&trial, &d, thermal, n) <= limit {
-                *per = trial;
-                den = d;
-                left = true;
+            std::mem::swap(&mut per[x], &mut tm.trial);
+            if read_omitted(per, d, thermal, n) <= limit {
+                den.copy_from_slice(d);
+                joined = true;
+            } else {
+                std::mem::swap(&mut per[x], &mut tm.trial);
             }
         }
-        if left {
+        if joined {
+            left = true;
             let kept: Vec<usize> = (0..nl).filter(|&q| !per[x].0[q]).collect();
             if kept != basis.kept {
                 nb.wanted = Some(kept);
@@ -1092,14 +1285,15 @@ fn omit(near: &mut [Near], far: &mut [Far], cache: &Cache, at: &Placed, hbase: &
         }
     }
     if left && near.iter().any(|nb| nb.wanted.is_some()) {
-        return (read_omitted(per, &den, thermal, n), true);
+        return (read_omitted(per, den, thermal, n), true);
     }
     tally[0] += per.iter().map(|p| p.0.iter().filter(|&&o| o).count()).sum::<usize>();
     // The far blocks of the smallest reading go too while the whole reads within: each its exact M_F,jj and H_F,jj.
     let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
-    let mut units: Vec<(f64, usize)> = far.iter().enumerate().map(|(x, fb)| ((0..n).filter(|&j| whole[j] > floor).map(|j| (fb.mf[j * n + j].re / whole[j]).max(pot(2.0 * fb.hf[j * n + j].re.abs()))).fold(0.0, f64::max), x)).collect();
-    units.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    for (w, x) in units {
+    tm.units.clear();
+    tm.units.extend(far.iter().enumerate().map(|(x, fb)| ((0..n).filter(|&j| whole[j] > floor).map(|j| (fb.mf[j * n + j].re / whole[j]).max(pot(2.0 * fb.hf[j * n + j].re.abs()))).fold(0.0, f64::max), x)));
+    tm.units.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    for &(w, x) in &tm.units {
         if (rho * rho + w).sqrt() > limit {
             break;
         }
@@ -1122,16 +1316,17 @@ fn omit(near: &mut [Near], far: &mut [Far], cache: &Cache, at: &Placed, hbase: &
 /// A near block's copies' rows T_C = Σ_a e_a* (R₀U_a†V Z + R₀U_a(X, C)†) into `nb.tc` (module documentation, 7).
 fn copy_rows(nb: &mut Near, basis: &NearBasis, e: &[Vec<C64>], n: usize, work: &mut f64) {
     let Near { copies, groups, ztot, tc, s, .. } = nb;
-    copies_of(copies, groups, basis, e, ztot, true, tc, *s, n, work);
+    copies_of(copies, groups, basis, &|g, k| e[g][k], ztot, true, tc, *s, n, work);
 }
 
 /// The copies' rows T_C = Σ_a e_a* (R₀U_a†V) Z of a response Z (s × n) into `out` (nc × n), with the explicit columns'
-/// static rows Σ_a e_a* R₀U_a(X, C)† where `stat` (T_C's whole; without, its part linear in Z).
+/// static rows Σ_a e_a* R₀U_a(X, C)† where `stat` (T_C's whole; without, its part linear in Z); e_a of the copy vector
+/// (component g, k) by `e`.
 #[allow(clippy::too_many_arguments)]
-fn copies_of(copies: &[(usize, usize, usize)], groups: &[(usize, Vec<usize>)], basis: &NearBasis, e: &[Vec<C64>], z: &[C64], stat: bool, out: &mut [C64], s: usize, n: usize, work: &mut f64) {
+fn copies_of(copies: &[(usize, usize, usize)], groups: &[(usize, Vec<usize>)], basis: &NearBasis, e: &dyn Fn(usize, usize) -> C64, z: &[C64], stat: bool, out: &mut [C64], s: usize, n: usize, work: &mut f64) {
     out.fill(C64::ZERO);
     for (cv, &(g, k, gi)) in copies.iter().enumerate() {
-        let ek = e[g][k].conj();
+        let ek = e(g, k).conj();
         let yc = &basis.copies[cv];
         let rows = &groups[gi].1;
         for (a2, &row) in rows.iter().enumerate() {
@@ -1152,9 +1347,9 @@ fn copies_of(copies: &[(usize, usize, usize)], groups: &[(usize, Vec<usize>)], b
 }
 
 /// The adjoint of `copies_of`: given T̄_C (nc × n), Z̄ += Σ_a e_a (R₀U_a†V)† T̄_C and ḡ_e += (Σ T̄_C* ∘ (R₀U_a†V)Z)* per copy
-/// vector (Re ḡ de).
+/// vector (Re ḡ de; `ge` per component and vector).
 #[allow(clippy::too_many_arguments)]
-fn copies_back(copies: &[(usize, usize, usize)], groups: &[(usize, Vec<usize>)], basis: &NearBasis, e: &[Vec<C64>], z: &[C64], tbar: &[C64], zbar: &mut [C64], ge: &mut [Buf], s: usize, n: usize, work: &mut f64) {
+fn copies_back(copies: &[(usize, usize, usize)], groups: &[(usize, Vec<usize>)], basis: &NearBasis, e: &[Vec<C64>], z: &[C64], tbar: &[C64], zbar: &mut [C64], ge: &mut [Vec<C64>], s: usize, n: usize, work: &mut f64) {
     for (cv, &(g, k, gi)) in copies.iter().enumerate() {
         let ek = e[g][k];
         let yc = &basis.copies[cv];
@@ -1178,46 +1373,42 @@ fn copies_back(copies: &[(usize, usize, usize)], groups: &[(usize, Vec<usize>)],
     }
 }
 
-/// The near block's compression of a response Z (s × n) into `a` (n × n): Ê Z (where the emission Ê, n × s, is given: at
-/// the middle it is the Bloch generator's, in H) + Z†(K̂Z + B), B the source (s × n: Ṽ and the static lane's), K̂ the kept
-/// Schur form with the step's diagonal κ (module documentation, 7); `y` = K̂Z on return (s × n).
+/// K̂Z = (T + δκ − o)Z into `y` (s × n): the kept Schur form with the step's diagonal κ on a response.
 #[allow(clippy::too_many_arguments)]
-fn compress(kappa: &[C64], t: &Mat, ends: &[usize], z: &[C64], emit: Option<&[C64]>, src: &[C64], y: &mut [C64], a: &mut [C64], s: usize, n: usize, work: &mut f64) {
-    // K̂Z = (T + δκ − o)Z.
-    y[..s * n].fill(C64::ZERO);
+fn schur_on(kappa: &[C64], t: &Mat, ends: &[usize], z: &[C64], y: &mut [C64], s: usize, n: usize, work: &mut f64) {
     for i in 0..s {
-        for j in 0..n {
-            y[i * n + j] += kappa[i] * z[i * n + j];
+        let row = &mut y[i * n..i * n + n];
+        for (o, x) in row.iter_mut().zip(&z[i * n..i * n + n]) {
+            *o = kappa[i] * *x;
         }
         for l in i + 1..ends[i] {
-            crate::linalg::mul_add(false, &mut y[i * n..i * n + n], t[(i, l)], &z[l * n..l * n + n]);
+            crate::linalg::mul_add(false, row, t[(i, l)], &z[l * n..l * n + n]);
         }
         *work += ((ends[i] - i) * n) as f64;
     }
-    let mut o = Buf::zeros(n * n);
+}
+
+/// The near block's compression of a response Z (s × n) into `a` (n × n): Ê Z (where the emission Ê, n × s, is given: at
+/// the middle it is the Bloch generator's, in H) + Z†(K̂Z + B), B the source (s × n: Ṽ and the static lane's), K̂ the kept
+/// Schur form with the step's diagonal κ (module documentation, 7); `y` = K̂Z and `w` = K̂Z + B on return (s × n).
+#[allow(clippy::too_many_arguments)]
+fn compress(kappa: &[C64], t: &Mat, ends: &[usize], z: &[C64], emit: Option<&[C64]>, src: &[C64], y: &mut [C64], w: &mut [C64], a: &mut [C64], s: usize, n: usize, work: &mut f64) {
+    schur_on(kappa, t, ends, z, y, s, n, work);
     if let Some(emit) = emit {
-        fused_product_into(emit, z, (n, s, n), &mut o);
-        a.iter_mut().zip(o.iter()).for_each(|(x, y)| *x += *y);
+        crate::linalg::fused_product_onto(emit, z, (n, s, n), a);
         *work += (s * n * n) as f64;
     }
-    let mut zh = Buf::zeros(n * s);
-    adjoint_into(z, s, n, &mut zh);
-    let mut w = Buf::copy(&y[..s * n]);
-    w.iter_mut().zip(src).for_each(|(x, y)| *x += *y);
-    fused_product_into(&zh, &w, (n, s, n), &mut o);
-    a.iter_mut().zip(o.iter()).for_each(|(x, y)| *x += *y);
+    for ((w, y), b) in w[..s * n].iter_mut().zip(&y[..s * n]).zip(src) {
+        *w = *y + *b;
+    }
+    crate::linalg::adjoint_product_onto(z, w, (n, s, n), a);
     *work += (s * n * n) as f64;
 }
 
 /// The exact copies' explicit parts of a compression: Ê_D Z_D + Z_D†B_D into `a` (Ê_D n × nd, B_D nd × n).
 fn explicit_copies(exd: &[C64], b0d: &[C64], zd: &[C64], a: &mut [C64], nd: usize, n: usize, work: &mut f64) {
-    let mut o = Buf::zeros(n * n);
-    fused_product_into(exd, zd, (n, nd, n), &mut o);
-    a.iter_mut().zip(o.iter()).for_each(|(m, x)| *m += *x);
-    let mut zdh = Buf::zeros(n * nd);
-    adjoint_into(zd, nd, n, &mut zdh);
-    fused_product_into(&zdh, b0d, (n, nd, n), &mut o);
-    a.iter_mut().zip(o.iter()).for_each(|(m, x)| *m += *x);
+    crate::linalg::fused_product_onto(exd, zd, (n, nd, n), a);
+    crate::linalg::adjoint_product_onto(zd, b0d, (n, nd, n), a);
     *work += (2 * n * nd * n) as f64;
 }
 
@@ -1225,19 +1416,20 @@ fn explicit_copies(exd: &[C64], b0d: &[C64], zd: &[C64], a: &mut [C64], nd: usiz
 /// less the decomposition's: the emission Ê (Ṽ† on the ground rows, E_X,ref + Σ_t δc_t E_t on the explicit ones), and where
 /// the block holds explicit states the static lane's source Ỹ₀ = Ỹ₀,ref + Σ_t δc_t S_t (`stat`), their dressing
 /// hx = hx_ref + Σ_t δc_t H_t, the exact copies' static source (B_D,ref + Σ_x e_x* U_x(X, D)†) and emission into P
-/// (Ê_D,ref + Σ_x e_x U_x(X, D)), the bare drives exact, the dressing through the centred copies of the pairs.
+/// (Ê_D,ref + Σ_x e_x U_x(X, D)), the bare drives exact, the dressing through the centred copies of the pairs; `o` a
+/// temporary (s × n).
 #[allow(clippy::too_many_arguments)]
-fn explicit_parts(xs: &[usize], exact: &[(usize, usize)], basis: &NearBasis, e: &[Vec<C64>], delta: &[C64], vtot: &[C64], stat: &mut [C64], emit: &mut [C64], hx: &mut [C64], b0d: &mut [C64], exd: &mut [C64], s: usize, nd: usize, n: usize, work: &mut f64) {
+fn explicit_parts(xs: &[usize], exact: &[(usize, usize)], basis: &NearBasis, e: &[Vec<C64>], delta: &[C64], vtot: &[C64], stat: &mut [C64], emit: &mut [C64], hx: &mut [C64], b0d: &mut [C64], exd: &mut [C64], o: &mut [C64], s: usize, nd: usize, n: usize, work: &mut f64) {
     adjoint_into(vtot, s, n, emit);
     *work += (s * n) as f64 / 4.0;
     if xs.is_empty() {
         return;
     }
     let t = delta.len();
-    let mut o = Buf::zeros(s * n);
+    let o = &mut o[..s * n];
     fused_product_into(delta, &basis.sterms, (1, t, s * n), stat);
     stat.iter_mut().zip(&basis.stat).for_each(|(a, b)| *a += *b);
-    fused_product_into(delta, &basis.eterms, (1, t, n * s), &mut o);
+    fused_product_into(delta, &basis.eterms, (1, t, n * s), o);
     emit.iter_mut().zip(o.iter().zip(&basis.xemit0)).for_each(|(a, (b, c))| *a += *b + *c);
     fused_product_into(delta, &basis.hterms, (1, t, n * n), hx);
     hx.iter_mut().zip(&basis.hx0).for_each(|(a, b)| *a += *b);
@@ -1264,11 +1456,11 @@ fn explicit_parts(xs: &[usize], exact: &[(usize, usize)], basis: &NearBasis, e: 
 /// The adjoint of `compress` (with the emission) for a cotangent Ā (n × n) of A = ÊZ + Z†(K̂Z + B): Z̄ += Ê†Ā + (K̂Z + B)Ā†
 /// + K̂†ZĀ, B̄ += ZĀ (`x` = ZĀ on return: the force stacks it with Z over the positions for K̃̄ = Σ_j Z_jĀ_jZ_j†, one product),
 /// Ê̄† = ZĀ† into `ebt` (s × n); `y` = K̂Z (as `compress` left it). Two products: [Ê† | K̂Z + B] (s × 2n) on [Ā; Ā†] and
-/// Z on [Ā | Ā†] (n × 2n); K̂† triangular.
+/// Z on [Ā | Ā†] (n × 2n); K̂† triangular. Its temporaries `cb` (`BackTemps`).
 #[allow(clippy::too_many_arguments)]
-fn compress_back(kappa: &[C64], t: &Mat, ends: &[usize], z: &[C64], emit: &[C64], src: &[C64], y: &[C64], abar: &[C64], zbar: &mut [C64], srcbar: &mut [C64], ebt: &mut [C64], x: &mut [C64], s: usize, n: usize, work: &mut f64) {
+fn compress_back(kappa: &[C64], t: &Mat, ends: &[usize], z: &[C64], emit: &[C64], src: &[C64], y: &[C64], abar: &[C64], zbar: &mut [C64], srcbar: &mut [C64], ebt: &mut [C64], x: &mut [C64], cb: &mut BackTemps, s: usize, n: usize, work: &mut f64) {
     let n2 = 2 * n;
-    let (mut left, mut right, mut wide) = (Buf::zeros(s * n2), Buf::zeros(n2 * n), Buf::zeros(n * n2));
+    let (left, right, wide, o) = (&mut cb.left[..s * n2], &mut cb.right[..n2 * n], &mut cb.wide[..n * n2], &mut cb.o[..s * n2]);
     for i in 0..s {
         for p in 0..n {
             left[i * n2 + p] = emit[p * s + i].conj();
@@ -1284,10 +1476,8 @@ fn compress_back(kappa: &[C64], t: &Mat, ends: &[usize], z: &[C64], emit: &[C64]
             wide[p * n2 + n + q] = h;
         }
     }
-    let mut o = Buf::zeros(s * n2);
-    fused_product_into(&left, &right, (s, n2, n), &mut o[..s * n]);
-    zbar.iter_mut().zip(o.iter()).for_each(|(a, b)| *a += *b);
-    fused_product_into(z, &wide, (s, n, n2), &mut o);
+    crate::linalg::fused_product_onto(left, right, (s, n2, n), zbar);
+    fused_product_into(z, wide, (s, n, n2), o);
     for i in 0..s {
         for q in 0..n {
             x[i * n + q] = o[i * n2 + q];
@@ -1324,38 +1514,55 @@ fn copy_couplings(nb: &Near, basis: &NearBasis, e: &[Vec<C64>], ked: &mut [C64],
     }
 }
 
-/// The exact copies' part of a block's solve for one split (module documentation, # The exact copies): with the excited
-/// rows' z_E⁰ = A_j⁻¹ r_E already in `ze` (every column j, A_j = c_j − w − K̂_EE triangular in the kept basis, its inverse
-/// diagonal `inv`), per column P_j = A_j⁻¹K̂_ED, C_j = (c_j − w) − K̂_DD − K̂_DE P_j, z_D = C_j⁻¹(r_D + K̂_DE z_E⁰),
-/// z_E = z_E⁰ + P_j z_D -- the whole block's solve, by Woodbury. With `stored` (P_j, C_j⁻¹ of the forward) they are
-/// taken as they are (a tangent's solve on the same matrices); otherwise made and kept there. False where a C_j is
-/// singular.
+/// The exact copies' Woodbury factors for one split (module documentation, # The exact copies): per column j
+/// P_j = A_j⁻¹K̂_ED (A_j = c_j − w − K̂_EE triangular in the kept basis, its inverse diagonal `inv`, s × n) into `pj`
+/// (n × nd × s) and C_j⁻¹ (C_j = (c_j − w) − K̂_DD − K̂_DE P_j) into `cinv` (n × nd × nd). False where a C_j is singular.
 #[allow(clippy::too_many_arguments)]
-fn copies_solve(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C64], basis: &NearBasis, c: &[C64], w: f64, inv: &[C64], rd: &[C64], ze: &mut [C64], zd: &mut [C64], pj: &mut [C64], cinv: &mut [C64], stored: bool, n: usize, work: &mut f64) -> bool {
+fn copies_factor(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C64], basis: &NearBasis, c: &[C64], w: f64, inv: &[C64], pj: &mut [C64], cinv: &mut [C64], p: &mut [C64], lu: &mut [C64], piv: &mut [usize], n: usize, work: &mut f64) -> bool {
     let (t, ends) = (&basis.f.t, &basis.f.ends);
-    let mut p = vec![C64::ZERO; s];
+    let (p, lu, piv) = (&mut p[..s], &mut lu[..nd * nd], &mut piv[..nd]);
     for j in 0..n {
         let (pj, cinv) = (&mut pj[j * nd * s..(j + 1) * nd * s], &mut cinv[j * nd * nd..(j + 1) * nd * nd]);
-        if !stored {
-            for d in 0..nd {
-                for i in (0..s).rev() {
-                    let mut acc = ked[i * nd + d];
-                    for l in i + 1..ends[i] {
-                        acc += t[(i, l)] * p[l];
-                    }
-                    p[i] = acc * inv[i * n + j];
+        for d in 0..nd {
+            for i in (0..s).rev() {
+                let mut acc = ked[i * nd + d];
+                for l in i + 1..ends[i] {
+                    acc += t[(i, l)] * p[l];
                 }
-                pj[d * s..(d + 1) * s].copy_from_slice(&p);
+                p[i] = acc * inv[i * n + j];
             }
-            let cm = Mat::from_fn(nd, nd, |a, b| {
-                let own = if a == b { c[j] - C64::real(w) } else { C64::ZERO } - kdd[a * nd + b];
-                own - (0..s).map(|i| kde[a * s + i] * pj[b * s + i]).sum::<C64>()
-            });
-            let Some(ci) = inverse(&cm, work) else { return false };
-            cinv.copy_from_slice(&ci.data);
-            *work += (nd * (s * s / 2 + s) + nd * nd * s) as f64;
+            pj[d * s..(d + 1) * s].copy_from_slice(p);
         }
-        let rhs: Vec<C64> = (0..nd).map(|a| rd[a * n + j] + (0..s).map(|i| kde[a * s + i] * ze[i * n + j]).sum::<C64>()).collect();
+        for a in 0..nd {
+            for b in 0..nd {
+                let own = if a == b { c[j] - C64::real(w) } else { C64::ZERO } - kdd[a * nd + b];
+                lu[a * nd + b] = own - (0..s).map(|i| kde[a * s + i] * pj[b * s + i]).sum::<C64>();
+            }
+        }
+        if !crate::linalg::factor(lu, piv, nd) {
+            return false;
+        }
+        cinv.fill(C64::ZERO);
+        for a in 0..nd {
+            cinv[a * nd + a] = C64::ONE;
+        }
+        crate::linalg::solve(lu, piv, nd, cinv, nd);
+        *work += (nd * (s * s / 2 + s) + nd * nd * s) as f64 + (nd * nd * nd) as f64 * 4.0 / 3.0;
+    }
+    true
+}
+
+/// The exact copies' part of a block's solve for one split on its factors (`copies_factor`): with the excited rows'
+/// z_E⁰ = A_j⁻¹ r_E already in `ze` (every column j), z_D = C_j⁻¹(r_D + K̂_DE z_E⁰), z_E = z_E⁰ + P_j z_D -- the whole
+/// block's solve, by Woodbury.
+#[allow(clippy::too_many_arguments)]
+fn copies_apply(s: usize, nd: usize, kde: &[C64], pj: &[C64], cinv: &[C64], rd: &[C64], ze: &mut [C64], zd: &mut [C64], rhs: &mut [C64], n: usize, work: &mut f64) {
+    let rhs = &mut rhs[..nd];
+    for j in 0..n {
+        let (pj, cinv) = (&pj[j * nd * s..(j + 1) * nd * s], &cinv[j * nd * nd..(j + 1) * nd * nd]);
+        for a in 0..nd {
+            rhs[a] = rd[a * n + j] + (0..s).map(|i| kde[a * s + i] * ze[i * n + j]).sum::<C64>();
+        }
         for a in 0..nd {
             let x: C64 = (0..nd).map(|b| cinv[a * nd + b] * rhs[b]).sum();
             zd[a * n + j] = x;
@@ -1365,45 +1572,20 @@ fn copies_solve(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C64], basi
         }
         *work += (2 * nd * s + nd * nd) as f64;
     }
-    true
 }
 
 /// The exact copies' part of a compression: Z_E†K̂_ED Z_D + Z_D†K̂_DE Z_E + Z_D†K̂_DD Z_D into `a`, Z_D†Z_D into `metric`.
 #[allow(clippy::too_many_arguments)]
-fn copies_compress(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C64], ze: &[C64], zd: &[C64], a: &mut [C64], metric: Option<&mut [C64]>, n: usize, work: &mut f64) {
+fn copies_compress(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C64], ze: &[C64], zd: &[C64], a: &mut [C64], metric: Option<&mut [C64]>, ct: &mut CopyTemps, n: usize, work: &mut f64) {
     // y_E = K̂_ED Z_D (s × n), y_D = K̂_DE Z_E + K̂_DD Z_D (nd × n).
-    let mut ye = vec![C64::ZERO; s * n];
-    let mut yd = vec![C64::ZERO; nd * n];
-    for i in 0..s {
-        for d in 0..nd {
-            crate::linalg::mul_add(false, &mut ye[i * n..i * n + n], ked[i * nd + d], &zd[d * n..d * n + n]);
-        }
-    }
-    for d in 0..nd {
-        for i in 0..s {
-            crate::linalg::mul_add(false, &mut yd[d * n..d * n + n], kde[d * s + i], &ze[i * n..i * n + n]);
-        }
-        for e in 0..nd {
-            crate::linalg::mul_add(false, &mut yd[d * n..d * n + n], kdd[d * nd + e], &zd[e * n..e * n + n]);
-        }
-    }
-    for i in 0..s {
-        for p in 0..n {
-            let zp = ze[i * n + p].conj();
-            if zp != C64::ZERO {
-                crate::linalg::mul_add(false, &mut a[p * n..p * n + n], zp, &ye[i * n..i * n + n]);
-            }
-        }
-    }
-    let mut metric = metric;
-    for d in 0..nd {
-        for p in 0..n {
-            let zp = zd[d * n + p].conj();
-            crate::linalg::mul_add(false, &mut a[p * n..p * n + n], zp, &yd[d * n..d * n + n]);
-            if let Some(m) = metric.as_deref_mut() {
-                crate::linalg::mul_add(false, &mut m[p * n..p * n + n], zp, &zd[d * n..d * n + n]);
-            }
-        }
+    let (ye, yd) = (&mut ct.ye[..s * n], &mut ct.yd[..nd * n]);
+    fused_product_into(ked, zd, (s, nd, n), ye);
+    fused_product_into(kde, ze, (nd, s, n), yd);
+    crate::linalg::fused_product_onto(kdd, zd, (nd, nd, n), yd);
+    crate::linalg::adjoint_product_onto(ze, ye, (n, s, n), a);
+    crate::linalg::adjoint_product_onto(zd, yd, (n, nd, n), a);
+    if let Some(m) = metric {
+        crate::linalg::adjoint_product_onto(zd, zd, (n, nd, n), m);
     }
     *work += (2 * s * nd * n + nd * nd * n + (s + 2 * nd) * n * n) as f64;
 }
@@ -1411,22 +1593,15 @@ fn copies_compress(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C64], z
 /// The adjoint of `copies_compress` for the cotangent Ā of A (and X̄ of the metric, `xbar`, where given): Z̄_E, Z̄_D, and
 /// K̂_ED's, K̂_DE's, K̂_DD's cotangents (Z_E Ā Z_D†, Z_D Ā Z_E†, Z_D Ā Z_D†).
 #[allow(clippy::too_many_arguments)]
-fn copies_compress_back(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C64], ze: &[C64], zd: &[C64], abar: &[C64], xbar: Option<&[C64]>, zebar: &mut [C64], zdbar: &mut [C64], kedbar: &mut [C64], kdebar: &mut [C64], kddbar: &mut [C64], n: usize, work: &mut f64) {
-    let adj: Vec<C64> = (0..n * n).map(|i| abar[(i % n) * n + i / n].conj()).collect();
-    let prod = |z: &[C64], m: &[C64], rows: usize| -> Vec<C64> {
-        let mut out = vec![C64::ZERO; rows * n];
-        for i in 0..rows {
-            for p in 0..n {
-                let x = z[i * n + p];
-                if x != C64::ZERO {
-                    crate::linalg::mul_add(false, &mut out[i * n..i * n + n], x, &m[p * n..p * n + n]);
-                }
-            }
-        }
-        out
-    };
+fn copies_compress_back(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C64], ze: &[C64], zd: &[C64], abar: &[C64], xbar: Option<&[C64]>, zebar: &mut [C64], zdbar: &mut [C64], kedbar: &mut [C64], kdebar: &mut [C64], kddbar: &mut [C64], ct: &mut CopiesBack, n: usize, work: &mut f64) {
+    let adj = &mut ct.adj[..n * n];
+    adjoint_into(abar, n, n, adj);
     // Z Ā and Z Ā† of both.
-    let (zea, zead, zda, zdad) = (prod(ze, abar, s), prod(ze, &adj, s), prod(zd, abar, nd), prod(zd, &adj, nd));
+    let (zea, zead, zda, zdad) = (&mut ct.zea[..s * n], &mut ct.zead[..s * n], &mut ct.zda[..nd * n], &mut ct.zdad[..nd * n]);
+    fused_product_into(ze, abar, (s, n, n), zea);
+    fused_product_into(ze, adj, (s, n, n), zead);
+    fused_product_into(zd, abar, (nd, n, n), zda);
+    fused_product_into(zd, adj, (nd, n, n), zdad);
     for i in 0..s {
         for d in 0..nd {
             // Z̄_E += K̂_ED (Z_D Ā†) + K̂_DE† (Z_D Ā).
@@ -1497,14 +1672,12 @@ fn lyapunov(x: &[C64], normal: &[C64], c: &[C64], n: usize, y: &mut [C64], e: &m
     }
 }
 
-/// The columns `at..at + width` of the `rows` rows of stride `stride` in `x`, as a rows × width matrix (a split's or an
-/// axis's own of the rows laid side by side).
-fn gather(x: &[C64], rows: usize, stride: usize, at: usize, width: usize) -> Buf {
-    let mut out = Buf::zeros(rows * width);
+/// The columns `at..at + width` of the `rows` rows of stride `stride` in `x`, as a rows × width matrix into `out` (a split's
+/// or an axis's own of the rows laid side by side).
+fn gather(x: &[C64], out: &mut [C64], rows: usize, stride: usize, at: usize, width: usize) {
     for i in 0..rows {
         out[i * width..(i + 1) * width].copy_from_slice(&x[i * stride + at..i * stride + at + width]);
     }
-    out
 }
 
 /// `gather`'s inverse: the rows × width matrix `x` into the columns `at..at + width` of `out`'s rows of stride `stride`.
@@ -1856,6 +2029,7 @@ impl Fold {
                     vectors,
                     groups,
                     copies,
+                    tg: Tangent::default(),
                 });
             } else {
                 if b.rows.iter().any(|r| matches!(r, Row::Copy { .. })) {
@@ -1863,15 +2037,41 @@ impl Fold {
                 }
                 let terms = terms_of(&|i, j| if i >= GROUND && j >= GROUND { Some((row_of(i - GROUND)?, row_of(j - GROUND)?)) } else { None }, m);
                 let v = vectors.len();
-                far.push(Far { o, m, centre, splits, terms, delta: vec![], products: vec![C64::ZERO; v * v], hf: vec![C64::ZERO; n * n], mf: vec![C64::ZERO; n * n], reading: 0.0, centring: 0.0, omitted: false, vectors });
+                far.push(Far {
+                    o,
+                    m,
+                    centre,
+                    splits,
+                    terms,
+                    delta: vec![],
+                    products: vec![C64::ZERO; v * v],
+                    hf: vec![C64::ZERO; n * n],
+                    mf: vec![C64::ZERO; n * n],
+                    reading: 0.0,
+                    centring: 0.0,
+                    omitted: false,
+                    vectors,
+                    pnode: vec![C64::ZERO; v * v],
+                    dp: vec![C64::ZERO; 3 * v * v],
+                    o3: vec![C64::ZERO; 3 * n * n],
+                    ks: vec![C64::ZERO; v * v],
+                });
             }
         }
         for x in near.iter_mut() {
             x.delta = vec![C64::ZERO; x.terms.len()];
+            // The tangent's buffers at the largest basis (every excited row): a later basis fits within them.
+            let (s, lanes, nd, nc) = (x.s, x.lanes, x.nd, x.nc);
+            x.tg.fit(s, n, lanes, nd, nc);
         }
         for x in far.iter_mut() {
             x.delta = vec![C64::ZERO; x.terms.len()];
         }
+        // The step's temporaries (BRIEF_PROTO5 item 1): per near block at its largest basis, and the whole's.
+        let levels = near.iter().map(|x| x.levels.len()).max().unwrap_or(0);
+        let scratch: Vec<Scratch> = near.iter().map(|x| Scratch::new(x.all, n, x.lanes, x.nd, x.nc, x.levels.len(), x.terms.len())).collect();
+        let per: Vec<Bounds> = near.iter().map(|x| (vec![false; x.levels.len()], vec![0.0; levels * n], vec![0.0; levels * n], vec![0.0; levels * n])).collect();
+        let tm = Temp::new(n, &self.components.iter().map(|c| c.basis.len()).collect::<Vec<_>>(), levels, near.iter().map(|x| x.levels.len()).sum(), far.len());
         let z = |r: usize, c: usize| Mat::zeros(r, c);
         let near_parts: usize = near.iter().map(|x| x.s).sum();
         let placed = Placed {
@@ -1882,10 +2082,15 @@ impl Fold {
             w: self.components.iter().map(|c| vec![0.0; c.beams.len()]).collect(),
             e: self.components.iter().map(|c| vec![C64::ZERO; c.basis.len()]).collect(),
             hpp: vec![C64::ZERO; n * n],
+            deps: self.light.frequencies.iter().map(|f| vec![[C64::ZERO; 3]; f.rank()]).collect(),
+            de: self.components.iter().map(|c| vec![[C64::ZERO; 3]; c.basis.len()]).collect(),
+            dc: vec![[C64::ZERO; 3]; pairs.len()],
+            df: self.components.iter().map(|c| vec![[C64::ZERO; 3]; c.beams.len()]).collect(),
         };
         let proj = self.light.frequencies.iter().map(|f| f.fields.iter().flat_map(|e| f.basis.iter().map(move |u| (0..3).map(|q| u[q].conj() * e[q]).sum())).collect()).collect();
         let node = || Node { at: placed.clone(), a: z(n, n), generator: z(n, n), hf: far.iter().map(|_| vec![C64::ZERO; n * n]).collect(), mf: far.iter().map(|_| vec![C64::ZERO; n * n]).collect() };
         let nodes = vec![node(), node()];
+        let near_len = near.len();
         Ok(Workspace {
             n,
             pp,
@@ -1900,7 +2105,9 @@ impl Fold {
             nodes,
             node_times: [0.0; 2],
             noded: false,
-            tangents: None,
+            tangent: false,
+            dx: std::array::from_fn(|_| vec![C64::ZERO; n * n]),
+            ds: std::array::from_fn(|_| vec![C64::ZERO; n * n]),
             tangent_ticks: [0; 6],
             tangent_work: [0.0; 6],
             force_ticks: [0; 5],
@@ -1916,7 +2123,10 @@ impl Fold {
             vectors: z(n, n),
             temp: z(n, n),
             renew: vec![],
-            per: vec![],
+            per,
+            here: (0..near_len).map(|_| None).collect(),
+            scratch,
+            tm,
             order: Vec::with_capacity(near_parts),
             step: Step {
                 a: z(n, n),
@@ -1993,6 +2203,28 @@ impl Fold {
             }
             *work += (2 * direct.len()) as f64;
         }
+        // The gradients: ∂_a ε_k = Σ_l ∂_a a_l u_k†E_l, ∂e_k (its conjugate counter-rotating), ∂_a c_t = ∂ε_k* ε_k' + ε_k* ∂ε_k',
+        // ∂f_l (the factor is linear in the amplitude).
+        for ((d, f), pr) in at.deps.iter_mut().zip(&self.light.frequencies).zip(proj) {
+            let rank = f.rank();
+            for (k, dk) in d.iter_mut().enumerate() {
+                *dk = std::array::from_fn(|a| f.beams.iter().enumerate().map(|(j, &l)| at.amplitudes[l].gradient[a] * pr[j * rank + k]).sum());
+            }
+            *work += (3 * f.beams.len() * rank) as f64;
+        }
+        for (c, comp) in self.components.iter().enumerate() {
+            let d = &at.deps[comp.part.frequency];
+            for k in 0..comp.basis.len() {
+                at.de[c][k] = if comp.part.counter { d[k].map(|z| z.conj()) } else { d[k] };
+            }
+            for (j, &l) in comp.beams.iter().enumerate() {
+                at.df[c][j] = std::array::from_fn(|a| comp.factor(at.amplitudes[l].gradient[a]));
+            }
+        }
+        for (x, &(w, k, kk)) in at.dc.iter_mut().zip(pairs) {
+            *x = std::array::from_fn(|a| at.deps[w][k][a].conj() * at.eps[w][kk] + at.eps[w][k].conj() * at.deps[w][kk][a]);
+        }
+        *work += (6 * pairs.len()) as f64;
     }
 
     /// A near block's decomposition at the point (module documentation, # What is kept): the kept levels' rows merged into
@@ -2500,7 +2732,7 @@ impl Fold {
         let mut refreshes = 0;
         let mut site: Option<Site> = None;
         // Per near block its matrices at the point, once for every decomposition made here (`Fold::lay`, `Fold::effective`).
-        let mut here: Vec<Option<(Laid, Effective)>> = (0..ws.near.len()).map(|_| None).collect();
+        ws.here.iter_mut().for_each(|x| *x = None);
         let (sweeps, series, ratio, rounds, omitted, tally) = loop {
             let made = cache.made;
             // The bases (module documentation, 6): the atom's own; beyond the share the nearest kept, then a new one. A near
@@ -2511,17 +2743,8 @@ impl Fold {
                 for x in 0..count {
                     let tries = ws.renew.iter().filter(|y| **y == (kind, x)).count();
                     let standing = if kind { cache.at_far[x] } else { cache.at_near[x] };
-                    let want: Vec<usize> = if kind {
-                        vec![]
-                    } else {
-                        let nb = &mut ws.near[x];
-                        match (nb.wanted.take(), standing) {
-                            (Some(w), _) => w,
-                            (None, Some(at)) => cache.near[x][at].kept.clone(),
-                            (None, None) => (0..if nb.nd > 0 { nb.levels.len() } else { 0 }).collect(),
-                        }
-                    };
-                    let same = standing.map(|at| kind || cache.near[x][at].kept == want);
+                    let wanted = if kind { None } else { ws.near[x].wanted.take() };
+                    let same = standing.map(|at| kind || wanted.as_ref().is_none_or(|w| cache.near[x][at].kept == *w));
                     if let (Some(at), 0, Some(true)) = (standing, tries, same) {
                         if !kind {
                             let s = cache.near[x][at].rows.len();
@@ -2529,6 +2752,12 @@ impl Fold {
                         }
                         continue;
                     }
+                    let want: Vec<usize> = match (kind, wanted, standing) {
+                        (true, ..) => vec![],
+                        (false, Some(w), _) => w,
+                        (false, None, Some(at)) => cache.near[x][at].kept.clone(),
+                        (false, None, None) => (0..if ws.near[x].nd > 0 { ws.near[x].levels.len() } else { 0 }).collect(),
+                    };
                     let (terms, kept): (&[usize], Vec<(usize, &[C64], &[f64])>) = if kind {
                         (&ws.far[x].terms, cache.far[x].iter().enumerate().map(|(i, b)| (i, &b.at[..], &b.weights[..])).collect())
                     } else {
@@ -2565,12 +2794,12 @@ impl Fold {
                                 cache.far[x].push(basis);
                                 cache.far[x].len() - 1
                             } else {
-                                if here[x].is_none() {
+                                if ws.here[x].is_none() {
                                     let laid = self.lay(ws.near[x].o, site, &mut work[REFRESH]);
                                     let e = self.effective(ws.near[x].o, &laid, &mut work[REFRESH])?;
-                                    here[x] = Some((laid, e));
+                                    ws.here[x] = Some((laid, e));
                                 }
-                                let (laid, e) = here[x].as_ref().unwrap();
+                                let (laid, e) = ws.here[x].as_ref().unwrap();
                                 let basis = self.near_basis(&ws.near[x], ws, laid, e, &want, &mut work[REFRESH])?;
                                 cache.near[x].push(basis);
                                 cache.near[x].len() - 1
@@ -2597,7 +2826,7 @@ impl Fold {
             }
             lap(REFRESH, &mut clock, &mut tick);
             // The near blocks: the diagonal to first order and what it leaves; their sources (module documentation, 2, 3).
-            let Workspace { near, far, mid, hbase, h, delta, c, change, previous, whole, step, order, cs, deltas, per, .. } = &mut *ws;
+            let Workspace { near, far, mid, hbase, h, delta, c, change, previous, whole, step, order, cs, deltas, per, scratch, tm, renew, .. } = &mut *ws;
             let Placed { coef, f, w, e, hpp, .. } = &*mid;
             for (x, nb) in near.iter_mut().enumerate() {
                 let basis = &cache.near[x][cache.at_near[x].unwrap()];
@@ -2662,7 +2891,7 @@ impl Fold {
                 }
             }
             lap(DIAGONAL, &mut clock, &mut tick);
-            for (x, nb) in near.iter_mut().enumerate() {
+            for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
                 if nb.idle() {
                     continue;
                 }
@@ -2688,7 +2917,7 @@ impl Fold {
                 }
                 work[SOURCES] += ((nb.splits.len() + nb.vectors.len()) * s * n) as f64;
                 let Near { xs, exact, nd, vtot, stat, emit, hx, b0d, exd, delta, .. } = &mut *nb;
-                explicit_parts(xs, exact, basis, e, delta, vtot, stat, emit, hx, b0d, exd, s, *nd, n, &mut work[SOURCES]);
+                explicit_parts(xs, exact, basis, e, delta, vtot, stat, emit, hx, b0d, exd, &mut sc.src, s, *nd, n, &mut work[SOURCES]);
                 if !nb.xs.is_empty() {
                     scatter(&nb.stat, &mut nb.vt, s, ln, (nb.lanes - 1) * n, n);
                 }
@@ -2756,7 +2985,7 @@ impl Fold {
                 deltas.extend_from_slice(delta);
                 change.fill(0.0);
                 whole.fill(0.0);
-                for (x, nb) in near.iter_mut().enumerate() {
+                for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
                     if nb.idle() {
                         continue;
                     }
@@ -2810,12 +3039,19 @@ impl Fold {
                             *z = *x * *v;
                         }
                     }
-                    // The exact copies by Woodbury (`copies_solve`), their own source the series' part alone, split by split.
+                    // The exact copies by Woodbury (`copies_factor`, `copies_apply`), their own source the series' part alone,
+                    // split by split.
                     if nd > 0 {
+                        let CopyTemps { rd, ze, inv, zdn, p, lu, piv, rhs: rhd, .. } = &mut sc.copies;
                         for sp in 0..splits {
                             let wl = nb.shifts[sp];
                             // The static lane's own source on the copies' rows (the explicit columns').
-                            let mut rd = if sp == nb.splits.len() { nb.b0d.clone() } else { vec![C64::ZERO; nd * n] };
+                            let rd = &mut rd[..nd * n];
+                            if sp == nb.splits.len() {
+                                rd.copy_from_slice(&nb.b0d);
+                            } else {
+                                rd.fill(C64::ZERO);
+                            }
                             let zdl = &mut nb.zd[sp * nd * n..(sp + 1) * nd * n];
                             if sweep > 0 {
                                 for a in 0..nd {
@@ -2828,16 +3064,16 @@ impl Fold {
                                 }
                             }
                             let (pj, cinv) = (&mut nb.pjs[pat + sp * n * nd * s..pat + (sp + 1) * n * nd * s], &mut nb.cinvs[cat + sp * n * nd * nd..cat + (sp + 1) * n * nd * nd]);
-                            let mut zle = gather(&nb.z, s, ln, sp * n, n);
-                            let inv = gather(&nb.invs[at..at + block], s, ln, sp * n, n);
-                            let mut zdn = vec![C64::ZERO; nd * n];
-                            let ok = copies_solve(s, nd, &nb.ked, &nb.kde, &nb.kdd, basis, c, wl, &inv, &rd, &mut zle, &mut zdn, pj, cinv, false, n, &mut work[SERIES]);
-                            if !ok {
+                            let (zle, inv, zdn) = (&mut ze[..s * n], &mut inv[..s * n], &mut zdn[..nd * n]);
+                            gather(&nb.z, zle, s, ln, sp * n, n);
+                            gather(&nb.invs[at..at + block], inv, s, ln, sp * n, n);
+                            if !copies_factor(s, nd, &nb.ked, &nb.kde, &nb.kdd, basis, c, wl, inv, pj, cinv, p, lu, piv, n, &mut work[SERIES]) {
                                 return None;
                             }
-                            scatter(&zle, &mut nb.z, s, ln, sp * n, n);
-                            zdl.copy_from_slice(&zdn);
-                            for (a, b) in nb.zdtot.iter_mut().zip(&zdn) {
+                            copies_apply(s, nd, &nb.kde, pj, cinv, rd, zle, zdn, rhd, n, &mut work[SERIES]);
+                            scatter(zle, &mut nb.z, s, ln, sp * n, n);
+                            zdl.copy_from_slice(zdn);
+                            for (a, b) in nb.zdtot.iter_mut().zip(zdn.iter()) {
                                 *a += *b;
                             }
                         }
@@ -2871,9 +3107,7 @@ impl Fold {
                     if !nb.xs.is_empty() {
                         nb.bloch.iter_mut().zip(&nb.hx).for_each(|(b, x)| *b += *x);
                         if nd > 0 {
-                            let mut o = Buf::zeros(n * n);
-                            fused_product_into(&nb.exd, &nb.zdtot, (n, nd, n), &mut o);
-                            nb.bloch.iter_mut().zip(o.iter()).for_each(|(b, x)| *b += *x);
+                            crate::linalg::fused_product_onto(&nb.exd, &nb.zdtot, (n, nd, n), &mut nb.bloch);
                         }
                     }
                     work[SERIES] += (n * s * n + splits * s * n) as f64;
@@ -2897,7 +3131,7 @@ impl Fold {
                 // After the first sweep the levels and far blocks the point leaves out (`omit`, read on bounds): beyond the
                 // share levels join, a new round on new decompositions.
                 if sweep == 0 {
-                    let (rho, grow) = omit(near, far, cache, mid, hbase, h, whole, per, &mut tally, share, self.thermal, n, &mut work[SERIES]);
+                    let (rho, grow) = omit(near, far, scratch, tm, cache, mid, hbase, h, whole, per, &mut tally, share, self.thermal, n, &mut work[SERIES]);
                     if grow {
                         break None;
                     }
@@ -2998,7 +3232,7 @@ impl Fold {
                 work[READING] += fb.terms.len() as f64 / 4.0;
             }
             lap(READING, &mut clock, &mut tick);
-            let mut renew = vec![];
+            let before = renew.len();
             for (x, nb) in near.iter().enumerate() {
                 if nb.reading > share {
                     renew.push((false, x));
@@ -3009,15 +3243,14 @@ impl Fold {
                     renew.push((true, x));
                 }
             }
-            if renew.is_empty() || refreshes == 2 || cache.made > made {
+            if renew.len() == before || refreshes == 2 || cache.made > made {
                 break (sweep, series, ratio, round + 1, omitted, tally);
             }
-            ws.renew.extend(renew);
             round += 1;
             refreshes += 1;
         };
         // The copies' rows and the compression (module documentation, 7).
-        let Workspace { near, far, h, step, eigen, vectors, temp, mid, .. } = &mut *ws;
+        let Workspace { near, far, h, step, eigen, vectors, temp, mid, scratch, .. } = &mut *ws;
         let e = &mid.e;
         let (a, metric) = (&mut step.a, &mut step.metric);
         a.data.copy_from_slice(h);
@@ -3062,32 +3295,26 @@ impl Fold {
             work[COPIES] += (nb.nc * n * n) as f64;
         }
         lap(COPIES, &mut clock, &mut tick);
-        for (x, nb) in near.iter_mut().enumerate() {
+        for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
             if nb.idle() {
                 continue;
             }
             let basis = &cache.near[x][cache.at_near[x].unwrap()];
             let s = nb.s;
             // Z†(Ṽ + Ỹ₀) + Z†(T + δκ − o)Z (the emission's part Ê Z is the Bloch generator's, in H), the metric Z†Z.
-            let mut src = Buf::copy(&nb.vtot);
+            let src = &mut sc.src[..s * n];
+            src.copy_from_slice(&nb.vtot);
             if !nb.xs.is_empty() {
                 src.iter_mut().zip(&nb.stat).for_each(|(a, b)| *a += *b);
             }
-            compress(&nb.kappa, &basis.f.t, &basis.f.ends, &nb.ztot, None, &src, &mut nb.y, &mut a.data, s, n, &mut work[COMPRESSION]);
-            let mut zh = Buf::zeros(n * s);
-            adjoint_into(&nb.ztot, s, n, &mut zh);
-            let mut o = Buf::zeros(n * n);
-            fused_product_into(&zh, &nb.ztot, (n, s, n), &mut o);
-            metric.data.iter_mut().zip(o.iter()).for_each(|(m, x)| *m += *x);
+            compress(&nb.kappa, &basis.f.t, &basis.f.ends, &nb.ztot, None, src, &mut nb.y, &mut sc.w, &mut a.data, s, n, &mut work[COMPRESSION]);
+            crate::linalg::adjoint_product_onto(&nb.ztot, &nb.ztot, (n, s, n), &mut metric.data);
             work[COMPRESSION] += (s * n * n) as f64;
             if nb.nd > 0 {
-                copies_compress(s, nb.nd, &nb.ked, &nb.kde, &nb.kdd, &nb.ztot, &nb.zdtot, &mut a.data, Some(&mut metric.data), n, &mut work[COMPRESSION]);
+                copies_compress(s, nb.nd, &nb.ked, &nb.kde, &nb.kdd, &nb.ztot, &nb.zdtot, &mut a.data, Some(&mut metric.data), &mut sc.copies, n, &mut work[COMPRESSION]);
                 if !nb.xs.is_empty() {
                     // Ê_D Z_D is the Bloch generator's (in H): Z_D†B_D alone.
-                    let mut zdh = Buf::zeros(n * nb.nd);
-                    adjoint_into(&nb.zdtot, nb.nd, n, &mut zdh);
-                    fused_product_into(&zdh, &nb.b0d, (n, nb.nd, n), &mut o);
-                    a.data.iter_mut().zip(o.iter()).for_each(|(m, x)| *m += *x);
+                    crate::linalg::adjoint_product_onto(&nb.zdtot, &nb.b0d, (n, nb.nd, n), &mut a.data);
                 }
             }
         }
@@ -3127,28 +3354,52 @@ impl Fold {
 }
 
 /// One near block's tangent along the lab axes (`Fold::prototype_tangent`), the three axes side by side in every row
-/// (module documentation, # The beams side by side): ∂K̃ on the parts' entries ((a, i, l) at a·s² + i·s + l), ∂Ṽ
-/// ((i, a, p) at i·3n + a·n + p), the emission's ((p, a, i) at (3p + a)·s + i), the explicit states' dressing's ((p, a, q)
-/// at p·3n + a·n + q), the exact copies' explicit source's and emission's (axis by axis), the sources' tangent (∂f_l Ỹ_l,
-/// the static lane's Σ_t ∂c_t S_t) and the lanes' responses' tangent at the last sweep ((i, a, l, j) at i·3Ln + a·Ln + l·n + j)
-/// and summed over the splits ((i, a, j) at i·3n + a·n + j); the exact copies' ∂K̂ and theirs, the centred copies' rows'
-/// (axis by axis).
+/// (module documentation, # The beams side by side): ∂K̃ on the parts' entries ((a, i, l) at a·s² + i·s + l), the
+/// emission's ((p, a, i) at (3p + a)·s + i), the explicit states' dressing's ((p, a, q) at p·3n + a·n + q), the exact
+/// copies' explicit source's and emission's (axis by axis), the sources' tangent (∂f_l Ỹ_l, the static lane's Σ_t ∂c_t S_t)
+/// and the lanes' responses' tangent at the last sweep ((i, a, l, j) at i·3Ln + a·Ln + l·n + j) and summed over the splits
+/// ((i, a, j) at i·3n + a·n + j); the exact copies' ∂K̂ and theirs, the centred copies' rows' (axis by axis). Kept with the
+/// block, sized with its basis (`Near::fit`).
+#[derive(Default)]
 struct Tangent {
-    dk: Buf,
-    demit: Buf,
-    dhx: Buf,
-    dexd: [Buf; 3],
-    db0d: [Buf; 3],
-    src: Buf,
-    dz: Buf,
-    dztot: Buf,
+    dk: Vec<C64>,
+    demit: Vec<C64>,
+    dhx: Vec<C64>,
+    dexd: [Vec<C64>; 3],
+    db0d: [Vec<C64>; 3],
+    src: Vec<C64>,
+    dz: Vec<C64>,
+    dztot: Vec<C64>,
     // The exact copies': ∂K̂_ED, ∂K̂_DE, ∂K̂_DD, per split their response's tangent and summed.
-    dked: [Buf; 3],
-    dkde: [Buf; 3],
-    dkdd: [Buf; 3],
-    ddz: Vec<[Buf; 3]>,
-    ddztot: [Buf; 3],
-    dtc: [Buf; 3],
+    dked: [Vec<C64>; 3],
+    dkde: [Vec<C64>; 3],
+    dkdd: [Vec<C64>; 3],
+    ddz: Vec<[Vec<C64>; 3]>,
+    ddztot: [Vec<C64>; 3],
+    dtc: [Vec<C64>; 3],
+}
+
+impl Tangent {
+    /// Its buffers for s kept rows, n columns, `lanes` lanes, nd exact copies, nc centred copies' rows.
+    fn fit(&mut self, s: usize, n: usize, lanes: usize, nd: usize, nc: usize) {
+        let m = 3 * lanes * n;
+        self.dk.resize(3 * s * s, C64::ZERO);
+        self.demit.resize(3 * n * s, C64::ZERO);
+        self.dhx.resize(3 * n * n, C64::ZERO);
+        self.src.resize(s * m, C64::ZERO);
+        self.dz.resize(s * m, C64::ZERO);
+        self.dztot.resize(3 * s * n, C64::ZERO);
+        for a in 0..3 {
+            self.dexd[a].resize(n * nd, C64::ZERO);
+            self.db0d[a].resize(nd * n, C64::ZERO);
+            self.dked[a].resize(s * nd, C64::ZERO);
+            self.dkde[a].resize(nd * s, C64::ZERO);
+            self.dkdd[a].resize(nd * nd, C64::ZERO);
+            self.ddztot[a].resize(nd * n, C64::ZERO);
+            self.dtc[a].resize(nc * n, C64::ZERO);
+        }
+        self.ddz.resize_with(if nd > 0 { lanes } else { 0 }, || std::array::from_fn(|_| vec![C64::ZERO; nd * n]));
+    }
 }
 
 /// The tangent's phases (`Fold::prototype_tangent`; the measurement's split of its time): the light's gradients and the
@@ -3166,16 +3417,6 @@ fn inner(x: &[C64], y: &[C64], rows: usize, width: usize, stride: usize, at: usi
         }
     }
     sum
-}
-
-/// The step's tangent (`Fold::prototype_tangent`): per near block its own (`Tangent`), per lab axis the metric's ∂X and
-/// S's ∂S, the components' coefficients' gradients ∂e and the pairs' ∂c at the middle.
-pub(crate) struct Tangents {
-    blocks: Vec<Tangent>,
-    dx: Vec<Buf>,
-    ds: Vec<Buf>,
-    de: Vec<Vec<[C64; 3]>>,
-    dc: Vec<[C64; 3]>,
 }
 
 /// The force at a step (`Fold::prototype_force`): per lab axis −∂/∂r_a of Σ_j Re tr(Ḡ_j†G_j) over the step's positions
@@ -3197,25 +3438,6 @@ pub(crate) struct Photons {
 }
 
 impl Fold {
-    /// Per frequency and basis vector its component's gradient at a place, ∂_a ε_k = Σ_l ∂_a a_l u_k†E_l.
-    fn component_gradients(&self, at: &Placed, proj: &[Vec<C64>]) -> Vec<Vec<[C64; 3]>> {
-        self.light
-            .frequencies
-            .iter()
-            .enumerate()
-            .map(|(w, f)| {
-                let rank = f.rank();
-                (0..rank).map(|k| std::array::from_fn(|a| f.beams.iter().enumerate().map(|(j, &l)| at.amplitudes[l].gradient[a] * proj[w][j * rank + k]).sum())).collect()
-            })
-            .collect()
-    }
-
-    /// Per pair its coefficient's gradient at a place, ∂_a c_t = ∂_a ε_k* ε_k' + ε_k* ∂_a ε_k'.
-    fn pair_gradients(&self, at: &Placed, proj: &[Vec<C64>], pairs: &[Pair]) -> Vec<[C64; 3]> {
-        let deps = self.component_gradients(at, proj);
-        pairs.iter().map(|&(w, k, kk)| std::array::from_fn(|a| deps[w][k][a].conj() * at.eps[w][kk] + at.eps[w][k].conj() * deps[w][kk][a])).collect()
-    }
-
     /// The step's outer nodes (module documentation, # The nodes; DESIGN §4.2): at the offsets `times` (µs) from the middle
     /// along the path of velocity v (µm/µs), the light there; every split's response the middle's times its factor's ratio
     /// there to the middle's (held per unit amplitude: the field turned; the decomposition, H, S and the responses per beam
@@ -3226,7 +3448,7 @@ impl Fold {
         let mut work = 0.0;
         ws.node_times = times;
         ws.noded = true;
-        let Workspace { mid, nodes, near, far, pairs, pp, base, lin, proj, step, temp, .. } = &mut *ws;
+        let Workspace { mid, nodes, near, far, pairs, pp, base, lin, proj, step, temp, scratch, .. } = &mut *ws;
         let (mid, pairs, pp, base, lin, proj, step) = (&*mid, &*pairs, &*pp, &*base, &*lin, &*proj, &*step);
         for (j, node) in nodes.iter_mut().enumerate() {
             let rj: [f64; 3] = std::array::from_fn(|a| r[a] + velocity[a] * times[j]);
@@ -3234,25 +3456,25 @@ impl Fold {
             let at = &node.at;
             let a = &mut node.a.data;
             a.copy_from_slice(&at.hpp);
-            for (x, fb) in far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
+            for (x, fb) in far.iter_mut().enumerate().filter(|(_, fb)| !fb.omitted) {
                 let basis = &cache.far[x][cache.at_far[x].unwrap()];
                 let v = fb.vectors.len();
                 let (hf, mf) = (&mut node.hf[x], &mut node.mf[x]);
-                let mut p = Buf::zeros(v * v);
+                let p = &mut fb.pnode[..v * v];
                 for ia in 0..v {
                     for ib in 0..v {
                         let ((ca, ka), (cb, kb)) = (fb.vectors[ia], fb.vectors[ib]);
                         p[ia * v + ib] = at.e[ca][ka].conj() * at.e[cb][kb];
                     }
                 }
-                fused_product_into(&p, &basis.f, (1, v * v, n * n), hf);
-                fused_product_into(&p, &basis.g, (1, v * v, n * n), mf);
+                fused_product_into(p, &basis.f, (1, v * v, n * n), hf);
+                fused_product_into(p, &basis.g, (1, v * v, n * n), mf);
                 for i in 0..n * n {
                     a[i] += hf[i] + mf[i] * basis.z0;
                 }
                 work += (2 * v * v * n * n + n * n) as f64;
             }
-            for (x, nb) in near.iter_mut().enumerate() {
+            for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
                 if nb.idle() {
                     continue;
                 }
@@ -3285,14 +3507,15 @@ impl Fold {
                     for (t, &p) in terms.iter().enumerate() {
                         pn.delta[t] = at.coef[p] - basis.at[t];
                     }
-                    explicit_parts(xs, exact, basis, &at.e, &pn.delta, &vnode[j], &mut pn.stat, &mut pn.emit, &mut pn.hx, &mut pn.b0d, &mut pn.exd, s, *nd, n, &mut work);
+                    explicit_parts(xs, exact, basis, &at.e, &pn.delta, &vnode[j], &mut pn.stat, &mut pn.emit, &mut pn.hx, &mut pn.b0d, &mut pn.exd, &mut sc.w, s, *nd, n, &mut work);
                 }
-                let mut src = Buf::copy(&nb.vnode[j]);
+                let src = &mut sc.src[..s * n];
+                src.copy_from_slice(&nb.vnode[j]);
                 if !nb.xs.is_empty() {
                     src.iter_mut().zip(&nb.pnode[j].stat).for_each(|(u, y)| *u += *y);
                     a.iter_mut().zip(&nb.pnode[j].hx).for_each(|(u, y)| *u += *y);
                 }
-                compress(&nb.kappa, &basis.f.t, &basis.f.ends, &nb.znode[j], Some(&nb.pnode[j].emit), &src, &mut nb.rhs, a, s, n, &mut work);
+                compress(&nb.kappa, &basis.f.t, &basis.f.ends, &nb.znode[j], Some(&nb.pnode[j].emit), src, &mut sc.y, &mut sc.w, a, s, n, &mut work);
                 if nb.nd > 0 {
                     let nd = nb.nd;
                     let zd = &mut nb.zdnode[j];
@@ -3303,13 +3526,13 @@ impl Fold {
                     let (mut ked, mut kde) = (std::mem::take(&mut nb.kednode[j]), std::mem::take(&mut nb.kdenode[j]));
                     copy_couplings(nb, basis, &at.e, &mut ked, &mut kde);
                     (nb.kednode[j], nb.kdenode[j]) = (ked, kde);
-                    copies_compress(s, nd, &nb.kednode[j], &nb.kdenode[j], &nb.kdd, &nb.znode[j], &nb.zdnode[j], a, None, n, &mut work);
+                    copies_compress(s, nd, &nb.kednode[j], &nb.kdenode[j], &nb.kdd, &nb.znode[j], &nb.zdnode[j], a, None, &mut sc.copies, n, &mut work);
                     if !nb.xs.is_empty() {
                         explicit_copies(&nb.pnode[j].exd, &nb.pnode[j].b0d, &nb.zdnode[j], a, nd, n, &mut work);
                     }
                 }
                 if nb.copied_in {
-                    copies_of(&nb.copies, &nb.groups, basis, &at.e, &nb.znode[j], true, &mut nb.tcnode[j], s, n, &mut work);
+                    copies_of(&nb.copies, &nb.groups, basis, &|g, k| at.e[g][k], &nb.znode[j], true, &mut nb.tcnode[j], s, n, &mut work);
                     let tc = &nb.tcnode[j];
                     for k in 0..nb.nc {
                         for i in 0..n {
@@ -3342,32 +3565,30 @@ impl Fold {
         let n = ws.n;
         let nn = n * n;
         let mut work = 0.0;
-        let Workspace { near, far, mid, nodes, noded, pairs, pp, lin, proj, step, eigen, vectors, temp, tangents, .. } = &mut *ws;
-        let (mid, nodes, pairs, pp, proj, step) = (&*mid, &*nodes, &*pairs, &*pp, &*proj, &*step);
-        let tg = tangents.as_ref().expect("the step's tangent");
+        assert!(ws.tangent, "the step's tangent");
+        let Workspace { near, far, mid, nodes, noded, pp, lin, step, eigen, temp, scratch, tm, dx: dxs, .. } = &mut *ws;
+        let (mid, nodes, pp, step) = (&*mid, &*nodes, &*pp, &*step);
         let positions = if *noded { 3 } else { 1 };
         let normal = &step.normal.data;
+        let Temp { abar, nbar, adj, xbar, abc, w: wz, ge, diagonal, e, p, .. } = tm;
         // Ā_j = S⁻¹Ḡ_jS⁻¹; N̄ = Σ_j Ḡ_j S⁻¹ A_j† + A_j† S⁻¹ Ḡ_j; X̄ (`inverse_root_back`).
-        let mut abar: Vec<Buf> = vec![];
-        let mut nbar = Buf::zeros(nn);
-        let mut adj = Buf::zeros(nn);
+        let (nbar, adj, xbar, abc, wz) = (&mut nbar[..nn], &mut adj[..nn], &mut xbar[..nn], &mut abc[..nn], &mut wz[..nn]);
+        nbar.fill(C64::ZERO);
         for j in 0..positions {
             let g = &bars[j].data;
             let aj = if j == 0 { &step.a.data } else { &nodes[j - 1].a.data };
             multiply(normal, g, &mut eigen.data, n);
-            multiply(&eigen.data, normal, &mut temp.data, n);
-            abar.push(Buf::copy(&temp.data));
-            adjoint_into(aj, n, n, &mut adj);
+            multiply(&eigen.data, normal, &mut abar[j], n);
+            adjoint_into(aj, n, n, adj);
             multiply(g, normal, &mut eigen.data, n);
-            multiply(&eigen.data, &adj, &mut temp.data, n);
+            multiply(&eigen.data, adj, &mut temp.data, n);
             nbar.iter_mut().zip(&temp.data).for_each(|(o, x)| *o += *x);
-            multiply(&adj, normal, &mut eigen.data, n);
+            multiply(adj, normal, &mut eigen.data, n);
             multiply(&eigen.data, g, &mut temp.data, n);
             nbar.iter_mut().zip(&temp.data).for_each(|(o, x)| *o += *x);
             work += (6 * n * n * n) as f64;
         }
-        let mut xbar = Buf::zeros(nn);
-        inverse_root_back(&step.metric.data, normal, &nbar, n, &mut xbar, &mut eigen.data, &mut temp.data, &mut vectors.data, &mut work);
+        inverse_root_back(&step.metric.data, normal, nbar, n, xbar, &mut e[..nn], &mut temp.data, &mut p[..nn], &mut work);
         let mut ft = [0u64; 5];
         let mut clock = ticks();
         let lap = |k: usize, clock: &mut u64, ft: &mut [u64; 5]| {
@@ -3379,27 +3600,13 @@ impl Fold {
         // f'_a: the metric's part first.
         let re = |a: &[C64], b: &[C64]| a.iter().zip(b).map(|(x, y)| (x.conj() * *y).re).sum::<f64>();
         let im = |a: &[C64], b: &[C64]| a.iter().zip(b).map(|(x, y)| (x.conj() * *y).im).sum::<f64>();
-        let mut fp: [f64; 3] = std::array::from_fn(|a| re(&xbar, &tg.dx[a]));
+        let mut fp: [f64; 3] = std::array::from_fn(|a| re(xbar, &dxs[a]));
         work += (3 * nn) as f64;
-        // Per near block Z_jĀ_j and Z_j side by side over the positions (s × positions·n each): K̃̄ = Σ_j Z_jĀ_jZ_j† one product.
-        let mut stack: Vec<(Buf, Buf)> = near.iter().map(|nb| (Buf::zeros(nb.s * positions * n), Buf::zeros(nb.s * positions * n))).collect();
         for j in 0..positions {
             let at = if j == 0 { mid } else { &nodes[j - 1].at };
-            let ab = &abar[j];
-            // The pairs' gradients and the components' at the position.
-            let dc = if j == 0 { None } else { Some(self.pair_gradients(at, proj, pairs)) };
-            let dc = dc.as_deref().unwrap_or(&tg.dc);
-            let deps = if j == 0 { None } else { Some(self.component_gradients(at, proj)) };
-            let de_at = |c: usize, k: usize| -> [C64; 3] {
-                match &deps {
-                    None => tg.de[c][k],
-                    Some(d) => {
-                        let comp = &self.components[c];
-                        let x = d[comp.part.frequency][k];
-                        if comp.part.counter { x.map(|z| z.conj()) } else { x }
-                    }
-                }
-            };
+            let ab = &abar[j][..nn];
+            // The pairs' gradients and the components' at the position (`Placed`).
+            let (dc, de) = (&at.dc, &at.de);
             // Ĥ_PP's: Re⟨Ā, Σ_t ∂c_t pp_t⟩.
             for (t, entries) in pp.iter().enumerate() {
                 let k: C64 = entries.iter().map(|&(i, v)| ab[i].conj() * v).sum();
@@ -3412,26 +3619,25 @@ impl Fold {
             for (g, kk, direct, conj) in lin.iter() {
                 let kd: C64 = direct.iter().map(|&(i, v)| ab[i].conj() * v).sum();
                 let kc: C64 = conj.iter().map(|&(i, v)| ab[i].conj() * v).sum();
-                let d = de_at(*g, *kk);
+                let d = de[*g][*kk];
                 for a in 0..3 {
                     fp[a] += (kd * d[a] + kc * d[a].conj()).re;
                 }
                 work += (2 * direct.len()) as f64;
             }
             // The far forms: Re⟨Ā, Σ ∂p_ab F_ab⟩ + z₀ Re⟨Ā, Σ ∂p_ab G_ab⟩ (the metric's in X̄ already).
-            let mut abc = Buf::zeros(nn);
             abc.iter_mut().zip(ab.iter()).for_each(|(a, z)| *a = z.conj());
-            for (x, fb) in far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
+            for (x, fb) in far.iter_mut().enumerate().filter(|(_, fb)| !fb.omitted) {
                 let basis = &cache.far[x][cache.at_far[x].unwrap()];
                 let v = fb.vectors.len();
                 // ⟨Ā, F_ab + z₀G_ab⟩ for every pair (a, b): one product of the stacked forms on Ā*.
-                let mut ks = Buf::zeros(v * v);
-                fused_product_into(&basis.fg, &abc, (v * v, nn, 1), &mut ks);
+                let ks = &mut fb.ks[..v * v];
+                fused_product_into(&basis.fg, abc, (v * v, nn, 1), ks);
                 for ia in 0..v {
                     for ib in 0..v {
                         let ((ca, ka), (cb, kb)) = (fb.vectors[ia], fb.vectors[ib]);
                         let k = ks[ia * v + ib];
-                        let (da, db) = (de_at(ca, ka), de_at(cb, kb));
+                        let (da, db) = (de[ca][ka], de[cb][kb]);
                         for a in 0..3 {
                             fp[a] += (k * (da[a].conj() * at.e[cb][kb] + at.e[ca][ka].conj() * db[a])).re;
                         }
@@ -3441,35 +3647,29 @@ impl Fold {
             }
             lap(1, &mut clock, &mut ft);
             // The near blocks.
-            for (x, nb) in near.iter_mut().enumerate() {
+            for (x, (nb, sc)) in near.iter().zip(scratch.iter_mut()).enumerate() {
                 if nb.idle() {
                     continue;
                 }
                 let basis = &cache.near[x][cache.at_near[x].unwrap()];
-                let t = &tg.blocks[x];
                 let (s, nd, splits) = (nb.s, nb.nd, nb.lanes);
+                let sn = s * n;
                 let (z, v): (&[C64], &[C64]) = if j == 0 { (&nb.ztot, &nb.vtot) } else { (&nb.znode[j - 1], &nb.vnode[j - 1]) };
                 // The position's emission, static source, explicit dressing, the exact copies' explicit parts.
                 let (emit, stat, exd, b0d): (&[C64], &[C64], &[C64], &[C64]) = if j == 0 { (&nb.emit, &nb.stat, &nb.exd, &nb.b0d) } else { (&nb.pnode[j - 1].emit, &nb.pnode[j - 1].stat, &nb.pnode[j - 1].exd, &nb.pnode[j - 1].b0d) };
                 let explicit = !nb.xs.is_empty();
-                let mut src = Buf::copy(v);
+                let Scratch { src, y, zb, vb, ebt, xb, eb, kx, kz, tcbar, back, copies: ct, copies_back: cbk, .. } = &mut *sc;
+                let (src, y, zb, vb, ebt, xb) = (&mut src[..sn], &mut y[..sn], &mut zb[..sn], &mut vb[..sn], &mut ebt[..sn], &mut xb[..sn]);
+                src.copy_from_slice(v);
                 if explicit {
                     src.iter_mut().zip(stat).for_each(|(u, y)| *u += *y);
                 }
-                let mut y = Buf::zeros(s * n);
-                for i in 0..s {
-                    for c in 0..n {
-                        y[i * n + c] += nb.kappa[i] * z[i * n + c];
-                    }
-                    for l in i + 1..basis.f.ends[i] {
-                        crate::linalg::mul_add(false, &mut y[i * n..i * n + n], basis.f.t[(i, l)], &z[l * n..l * n + n]);
-                    }
-                }
-                let (mut zb, mut vb, mut ebt, mut xb) = (Buf::zeros(s * n), Buf::zeros(s * n), Buf::zeros(s * n), Buf::zeros(s * n));
-                compress_back(&nb.kappa, &basis.f.t, &basis.f.ends, z, emit, &src, &y, ab, &mut zb, &mut vb, &mut ebt, &mut xb, s, n, &mut work);
+                schur_on(&nb.kappa, &basis.f.t, &basis.f.ends, z, y, s, n, &mut 0.0);
+                zb.fill(C64::ZERO);
+                vb.fill(C64::ZERO);
+                compress_back(&nb.kappa, &basis.f.t, &basis.f.ends, z, emit, src, y, ab, zb, vb, ebt, xb, back, s, n, &mut work);
                 // ZĀ and Z for K̃̄ over the positions (one product after them).
                 {
-                    let (kx, kz) = &mut stack[x];
                     let pn = positions * n;
                     for i in 0..s {
                         kx[i * pn + j * n..i * pn + j * n + n].copy_from_slice(&xb[i * n..i * n + n]);
@@ -3478,10 +3678,10 @@ impl Fold {
                 }
                 // The explicit parts' terms: Re⟨B̄, S_t⟩ + Re⟨Ê̄, E_t⟩ + Re⟨Ā, H_t⟩ times ∂c_t.
                 if explicit {
-                    let mut eb = Buf::zeros(n * s);
-                    adjoint_into(&ebt, s, n, &mut eb);
+                    let eb = &mut eb[..n * s];
+                    adjoint_into(ebt, s, n, eb);
                     for (ti, &tt) in nb.terms.iter().enumerate() {
-                        let g = inner(&vb, &basis.sterms[ti * s * n..(ti + 1) * s * n], s, n, n, 0) + inner(&eb, &basis.eterms[ti * n * s..(ti + 1) * n * s], n, s, s, 0) + inner(ab, &basis.hterms[ti * nn..(ti + 1) * nn], n, n, n, 0);
+                        let g = inner(vb, &basis.sterms[ti * s * n..(ti + 1) * s * n], s, n, n, 0) + inner(eb, &basis.eterms[ti * n * s..(ti + 1) * n * s], n, s, s, 0) + inner(ab, &basis.hterms[ti * nn..(ti + 1) * nn], n, n, n, 0);
                         for a in 0..3 {
                             fp[a] += (g * dc[tt][a]).re;
                         }
@@ -3491,26 +3691,27 @@ impl Fold {
                 // Ṽ is in both the source and the emission (Ê = Ṽ† on the ground rows): its cotangent B̄ + Ê̄†.
                 vb.iter_mut().zip(ebt.iter()).for_each(|(a, b)| *a += *b);
                 // The exact copies' rows.
-                let (mut zdb, mut kedb, mut kdeb, mut kddb) = (Buf::zeros(nd * n), Buf::zeros(s * nd), Buf::zeros(nd * s), Buf::zeros(nd * nd));
+                let CopyTemps { zdb, kedb, kdeb, kddb, eh, od, zdh, exb, bdb, .. } = ct;
+                let (zdb, kedb, kdeb, kddb) = (&mut zdb[..nd * n], &mut kedb[..s * nd], &mut kdeb[..nd * s], &mut kddb[..nd * nd]);
                 if nd > 0 {
+                    zdb.fill(C64::ZERO);
+                    kedb.fill(C64::ZERO);
+                    kdeb.fill(C64::ZERO);
+                    kddb.fill(C64::ZERO);
                     let (zd, ked, kde): (&[C64], &[C64], &[C64]) = if j == 0 { (&nb.zdtot, &nb.ked, &nb.kde) } else { (&nb.zdnode[j - 1], &nb.kednode[j - 1], &nb.kdenode[j - 1]) };
-                    copies_compress_back(s, nd, ked, kde, &nb.kdd, z, zd, ab, None, &mut zb, &mut zdb, &mut kedb, &mut kdeb, &mut kddb, n, &mut work);
+                    copies_compress_back(s, nd, ked, kde, &nb.kdd, z, zd, ab, None, zb, zdb, kedb, kdeb, kddb, cbk, n, &mut work);
                     // Ê_D Z_D + Z_D†B_D: Z̄_D += Ê_D†Ā + B_D Ā†, and Re⟨ĀZ_D†, ∂Ê_D⟩ + Re⟨Z_DĀ, ∂B_D⟩ on each coupling vector.
                     if explicit {
-                        let mut adj = Buf::zeros(nn);
-                        adjoint_into(ab, n, n, &mut adj);
-                        let mut eh = Buf::zeros(nd * n);
-                        adjoint_into(exd, n, nd, &mut eh);
-                        let mut o = Buf::zeros(nd * n);
-                        fused_product_into(&eh, ab, (nd, n, n), &mut o);
+                        adjoint_into(ab, n, n, wz);
+                        let (eh, o, zdh, exb, bdb) = (&mut eh[..nd * n], &mut od[..nd * n], &mut zdh[..n * nd], &mut exb[..n * nd], &mut bdb[..nd * n]);
+                        adjoint_into(exd, n, nd, eh);
+                        fused_product_into(eh, ab, (nd, n, n), o);
                         zdb.iter_mut().zip(o.iter()).for_each(|(u, y)| *u += *y);
-                        fused_product_into(b0d, &adj, (nd, n, n), &mut o);
+                        fused_product_into(b0d, wz, (nd, n, n), o);
                         zdb.iter_mut().zip(o.iter()).for_each(|(u, y)| *u += *y);
-                        let mut zdh = Buf::zeros(n * nd);
-                        adjoint_into(zd, nd, n, &mut zdh);
-                        let (mut exb, mut bdb) = (Buf::zeros(n * nd), Buf::zeros(nd * n));
-                        fused_product_into(ab, &zdh, (n, n, nd), &mut exb);
-                        fused_product_into(zd, ab, (nd, n, n), &mut bdb);
+                        adjoint_into(zd, nd, n, zdh);
+                        fused_product_into(ab, zdh, (n, n, nd), exb);
+                        fused_product_into(zd, ab, (nd, n, n), bdb);
                         for (xx, &(g, k)) in nb.exact.iter().enumerate() {
                             let yv = &basis.xcouple[xx];
                             let (mut ge, mut gb) = (C64::ZERO, C64::ZERO);
@@ -3520,7 +3721,7 @@ impl Fold {
                                     gb += bdb[d2 * n + p].conj() * yv[p * nd + d2].conj();
                                 }
                             }
-                            let d = de_at(g, k);
+                            let d = de[g][k];
                             for a in 0..3 {
                                 fp[a] += (ge * d[a] + gb * d[a].conj()).re;
                             }
@@ -3529,31 +3730,30 @@ impl Fold {
                     }
                 }
                 // The centred copies' rows: T̄_C = z₀ T_C (Ā + Ā†), onto Z and e.
-                let mut tcb = Buf::zeros(nb.nc * n);
+                let tcb = &mut tcbar[..nb.nc * n];
                 if nb.copied_in {
                     let tc: &[C64] = if j == 0 { &nb.tc } else { &nb.tcnode[j - 1] };
-                    let mut w = Buf::zeros(nn);
-                    (0..nn).for_each(|i| w[i] = (ab[i] + ab[(i % n) * n + i / n].conj()) * basis.z0);
+                    (0..nn).for_each(|i| wz[i] = (ab[i] + ab[(i % n) * n + i / n].conj()) * basis.z0);
+                    tcb.fill(C64::ZERO);
                     for k in 0..nb.nc {
                         for p in 0..n {
-                            crate::linalg::mul_add(false, &mut tcb[k * n..k * n + n], tc[k * n + p], &w[p * n..p * n + n]);
+                            crate::linalg::mul_add(false, &mut tcb[k * n..k * n + n], tc[k * n + p], &wz[p * n..p * n + n]);
                         }
                     }
                 }
                 // ∂Ṽ = Σ ∂e_a Y_a; ∂K̃ (the middle's, held at the nodes) on the parts; the exact copies' ∂K̂.
                 for (ia, &(cc, k)) in nb.vectors.iter().enumerate() {
                     let g: C64 = vb.iter().zip(&basis.vectors[ia]).map(|(a, b)| a.conj() * *b).sum();
-                    let d = de_at(cc, k);
+                    let d = de[cc][k];
                     for a in 0..3 {
                         fp[a] += (g * d[a]).re;
                     }
                 }
+                let t = &nb.tg;
                 if nd > 0 {
                     for a in 0..3 {
-                        fp[a] += re(&kddb, &t.dkdd[a]);
+                        fp[a] += re(kddb, &t.dkdd[a]);
                     }
-                }
-                if nd > 0 {
                     for (xx, &(g, k)) in nb.exact.iter().enumerate() {
                         let yv = &basis.couple[xx];
                         let mut gk = C64::ZERO;
@@ -3562,7 +3762,7 @@ impl Fold {
                                 gk += kedb[i * nd + d2].conj() * yv[i * nd + d2] + kdeb[d2 * s + i] * yv[i * nd + d2];
                             }
                         }
-                        let d = de_at(g, k);
+                        let d = de[g][k];
                         for a in 0..3 {
                             fp[a] += (gk * d[a]).re;
                         }
@@ -3572,20 +3772,22 @@ impl Fold {
                 // ∂Z (and ∂Z_D, ∂T_C): the middle's tangent; at a node Σ_l (∂ρ_l Z_l + ρ_l ∂Z_l).
                 if j == 0 {
                     for a in 0..3 {
-                        fp[a] += inner(&zb, &t.dztot, s, n, 3 * n, a * n).re + re(&zdb, &t.ddztot[a]);
+                        fp[a] += inner(zb, &t.dztot, s, n, 3 * n, a * n).re + re(zdb, &t.ddztot[a]);
                         if nb.copied_in {
-                            fp[a] += re(&tcb, &t.dtc[a]);
+                            fp[a] += re(tcb, &t.dtc[a]);
                         }
                     }
                     work += (3 * (s + nd) * n) as f64;
                 } else {
                     // The centred copies' rows at a node: T_C(s) of Z(s) and e(s): onto Z(s) and e(s) by `copies_back`.
                     if nb.copied_in {
-                        let mut ge: Vec<Buf> = self.components.iter().map(|c| Buf::zeros(c.basis.len())).collect();
-                        copies_back(&nb.copies, &nb.groups, basis, &at.e, z, &tcb, &mut zb, &mut ge, s, n, &mut work);
+                        for g in ge.iter_mut() {
+                            g.fill(C64::ZERO);
+                        }
+                        copies_back(&nb.copies, &nb.groups, basis, &at.e, z, tcb, zb, ge, s, n, &mut work);
                         for (c, g) in ge.iter().enumerate() {
                             for (k, gk) in g.iter().enumerate() {
-                                let d = de_at(c, k);
+                                let d = de[c][k];
                                 for a in 0..3 {
                                     fp[a] += (*gk * d[a]).re;
                                 }
@@ -3597,28 +3799,26 @@ impl Fold {
                     if explicit {
                         let sp = splits - 1;
                         for a in 0..3 {
-                            fp[a] += inner(&zb, &t.dz, s, n, m, a * ln + sp * n).re;
+                            fp[a] += inner(zb, &t.dz, s, n, m, a * ln + sp * n).re;
                             if nd > 0 {
-                                fp[a] += re(&zdb, &t.ddz[sp][a]);
+                                fp[a] += re(zdb, &t.ddz[sp][a]);
                             }
                         }
                     }
                     for (sp, &(cc, jj)) in nb.splits.iter().enumerate() {
-                        let l = self.components[cc].beams[jj];
                         let rho = nb.ratio[j - 1][sp];
                         let fm = mid.f[cc][jj];
-                        let mut g: C64 = inner(&zb, &nb.z, s, n, ln, sp * n);
+                        let mut g: C64 = inner(zb, &nb.z, s, n, ln, sp * n);
                         if nd > 0 {
                             g += zdb.iter().zip(&nb.zd[sp * nd * n..(sp + 1) * nd * n]).map(|(a, b)| a.conj() * *b).sum::<C64>();
                         }
                         for a in 0..3 {
-                            let dfs = self.components[cc].factor(at.amplitudes[l].gradient[a]);
-                            let dfm = self.components[cc].factor(mid.amplitudes[l].gradient[a]);
+                            let (dfs, dfm) = (at.df[cc][jj][a], mid.df[cc][jj][a]);
                             let drho = (dfs - rho * dfm) / fm;
-                            let dzl = inner(&zb, &t.dz, s, n, m, a * ln + sp * n);
+                            let dzl = inner(zb, &t.dz, s, n, m, a * ln + sp * n);
                             fp[a] += (g * drho).re + rho.re * dzl.re - rho.im * dzl.im;
                             if nd > 0 {
-                                fp[a] += rho.re * re(&zdb, &t.ddz[sp][a]) - rho.im * im(&zdb, &t.ddz[sp][a]);
+                                fp[a] += rho.re * re(zdb, &t.ddz[sp][a]) - rho.im * im(zdb, &t.ddz[sp][a]);
                             }
                         }
                     }
@@ -3628,30 +3828,28 @@ impl Fold {
             }
         }
         // K̃̄ = [Z_jĀ_j]_j [Z_j]_j† (s × positions·n × s) on ∂K̃ (the middle's, held at the nodes).
-        for (x, nb) in near.iter().enumerate() {
+        for (nb, sc) in near.iter().zip(scratch.iter_mut()) {
             if nb.idle() {
                 continue;
             }
             let (s, pn) = (nb.s, positions * n);
-            let (kx, kz) = &stack[x];
-            let mut kzh = Buf::zeros(pn * s);
-            adjoint_into(kz, s, pn, &mut kzh);
-            let mut kb = Buf::zeros(s * s);
-            fused_product_into(kx, &kzh, (s, pn, s), &mut kb);
-            let t = &tg.blocks[x];
+            let (kzh, kb) = (&mut sc.kzh[..pn * s], &mut sc.kb[..s * s]);
+            adjoint_into(&sc.kz[..s * pn], s, pn, kzh);
+            fused_product_into(&sc.kx[..s * pn], kzh, (s, pn, s), kb);
             for a in 0..3 {
-                fp[a] += inner(&kb, &t.dk[a * s * s..(a + 1) * s * s], s, s, s, 0).re;
+                fp[a] += inner(kb, &nb.tg.dk[a * s * s..(a + 1) * s * s], s, s, s, 0).re;
             }
             work += (s * s * pn + 3 * s * s) as f64;
         }
         lap(2, &mut clock, &mut ft);
         // What the kept R₀ and z₀ leave: their relative change per µm along each axis. A block's centre z₀'s gradient: the
         // mean of its sources' Ĥ_PP diagonal's, of the pairs' coefficients' gradients.
-        let mut diagonal = vec![[0.0_f64; 3]; n];
+        let diagonal = &mut diagonal[..n];
+        diagonal.fill([0.0; 3]);
         for (t, e) in pp.iter().enumerate() {
             for &(i, v) in e.iter().filter(|x| x.0 % (n + 1) == 0) {
                 for a in 0..3 {
-                    diagonal[i / n][a] += (tg.dc[t][a] * v).re;
+                    diagonal[i / n][a] += (mid.dc[t][a] * v).re;
                 }
             }
         }
@@ -3664,7 +3862,7 @@ impl Fold {
             let basis = &cache.near[x][cache.at_near[x].unwrap()];
             let z0g = centre_gradient(&nb.centre);
             for a in 0..3 {
-                let change = z0g[a].abs() + nb.terms.iter().enumerate().map(|(ti, &tt)| tg.dc[tt][a].abs() * basis.copied[ti]).sum::<f64>();
+                let change = z0g[a].abs() + nb.terms.iter().enumerate().map(|(ti, &tt)| mid.dc[tt][a].abs() * basis.copied[ti]).sum::<f64>();
                 held[a] = held[a].max(basis.r0 * change);
             }
         }
@@ -3672,7 +3870,7 @@ impl Fold {
             let basis = &cache.far[x][cache.at_far[x].unwrap()];
             let z0g = centre_gradient(&fb.centre);
             for a in 0..3 {
-                let change = z0g[a].abs() + fb.terms.iter().enumerate().map(|(ti, &tt)| tg.dc[tt][a].abs() * basis.copied[ti]).sum::<f64>();
+                let change = z0g[a].abs() + fb.terms.iter().enumerate().map(|(ti, &tt)| mid.dc[tt][a].abs() * basis.copied[ti]).sum::<f64>();
                 held[a] = held[a].max(basis.r0 * change);
             }
         }
@@ -3700,15 +3898,17 @@ impl Fold {
             tick[k] += now - *clock;
             *clock = now;
         };
-        let (mid, step, pairs, pp, proj) = (&ws.mid, &ws.step, &ws.pairs, &ws.pp, &ws.proj);
+        let Workspace { mid, step, pp, lin, near, far, scratch, tm, deltas, dx: dxs, ds: dss, .. } = &mut *ws;
+        let (mid, step, pp, lin, deltas) = (&*mid, &*step, &*pp, &*lin, &*deltas);
         let normal = &step.normal.data;
         let sweeps = step.sweeps;
-        // The light's tangents: per component and vector ∂e, per pair ∂c.
-        let deps = self.component_gradients(mid, proj);
-        let de: Vec<Vec<[C64; 3]>> = self.components.iter().map(|c| deps[c.part.frequency].iter().map(|d| if c.part.counter { d.map(|z| z.conj()) } else { *d }).collect()).collect();
-        let dc = self.pair_gradients(mid, proj, pairs);
+        // The light's tangents at the middle (`Placed`): per component and vector ∂e, per pair ∂c.
+        let (de, dc) = (&mid.de, &mid.dc);
         // Ĥ_PP's and the far forms' (and the far metric's) tangents, the axes side by side: (p, a, q) at p·3n + a·n + q.
-        let (mut dhbase, mut dmetric) = (Buf::zeros(n * n3), Buf::zeros(n * n3));
+        let Temp { dhbase, dmetric, dh, dd, dhd, o3, dx, e, p, .. } = tm;
+        let (dhbase, dmetric) = (&mut dhbase[..n * n3], &mut dmetric[..n * n3]);
+        dhbase.fill(C64::ZERO);
+        dmetric.fill(C64::ZERO);
         for (t, entries) in pp.iter().enumerate() {
             for &(i, v) in entries {
                 let (p, q) = (i / n, i % n);
@@ -3718,7 +3918,7 @@ impl Fold {
             }
             work[0] += (3 * entries.len()) as f64;
         }
-        for (g, k, direct, conj) in &ws.lin {
+        for (g, k, direct, conj) in lin {
             for a in 0..3 {
                 let d = de[*g][*k][a];
                 for &(i, v) in direct {
@@ -3730,11 +3930,11 @@ impl Fold {
             }
             work[0] += (6 * direct.len()) as f64;
         }
-        for (x, fb) in ws.far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
+        for (x, fb) in far.iter_mut().enumerate().filter(|(_, fb)| !fb.omitted) {
             let basis = &cache.far[x][cache.at_far[x].unwrap()];
             let v = fb.vectors.len();
             // The pairs' gradients (3 × v²) on the stacked forms (v² × n²), one product each.
-            let mut dp = Buf::zeros(3 * v * v);
+            let dp = &mut fb.dp[..3 * v * v];
             for ia in 0..v {
                 for ib in 0..v {
                     let ((ca, ka), (cb, kb)) = (fb.vectors[ia], fb.vectors[ib]);
@@ -3743,9 +3943,9 @@ impl Fold {
                     }
                 }
             }
-            let mut o = Buf::zeros(3 * nn);
-            for (forms, out) in [(&basis.f, &mut dhbase), (&basis.g, &mut dmetric)] {
-                fused_product_into(&dp, forms, (3, v * v, nn), &mut o);
+            let o = &mut fb.o3[..3 * nn];
+            for (forms, out) in [(&basis.f, &mut *dhbase), (&basis.g, &mut *dmetric)] {
+                fused_product_into(dp, forms, (3, v * v, nn), o);
                 for a in 0..3 {
                     for p in 0..n {
                         for (u, y) in out[p * n3 + a * n..p * n3 + a * n + n].iter_mut().zip(&o[a * nn + p * n..a * nn + p * n + n]) {
@@ -3757,150 +3957,131 @@ impl Fold {
             work[0] += (6 * v * v * nn) as f64;
         }
         // Per near block: ∂K̃ on the parts, ∂Ṽ, the exact copies' ∂K̂ (the axes side by side).
-        let mut tangents: Vec<Tangent> = ws
-            .near
-            .iter()
-            .enumerate()
-            .map(|(x, nb)| {
-                if nb.idle() {
-                    let e = || Buf::zeros(0);
-                    let e3 = || std::array::from_fn(|_| Buf::zeros(0));
-                    return Tangent { dk: e(), demit: e(), dhx: e(), dexd: e3(), db0d: e3(), src: e(), dz: e(), dztot: e(), dked: e3(), dkde: e3(), dkdd: e3(), ddz: vec![], ddztot: e3(), dtc: e3() };
-                }
-                let basis = &cache.near[x][cache.at_near[x].unwrap()];
-                let s = nb.s;
-                let s3 = 3 * s;
-                // ∂K̃ = Σ_t ∂c_t V†N_tV on the parts' entries alone: the axes' (3 × T) on the terms' (T × s²), one product.
-                let terms = nb.terms.len();
-                let mut dct = Buf::zeros(3 * terms);
-                for (ti, &tt) in nb.terms.iter().enumerate() {
-                    for a in 0..3 {
-                        dct[a * terms + ti] = dc[tt][a];
-                    }
-                }
-                // ∂K̃ on the kept parts' entries.
-                let mut dk = Buf::zeros(s * s3);
-                for t in 0..terms {
-                    let w = &basis.within[t * s * s..(t + 1) * s * s];
-                    for a in 0..3 {
-                        let d = dct[a * terms + t];
-                        if d == C64::ZERO {
-                            continue;
-                        }
-                        for (idx, at, _) in basis.f.parts.iter() {
-                            for i in *at..at + idx.len() {
-                                crate::linalg::mul_add(false, &mut dk[a * s * s + i * s + at..a * s * s + i * s + at + idx.len()], d, &w[i * s + at..i * s + at + idx.len()]);
-                            }
-                        }
-                    }
-                }
-                let mut dv = Buf::zeros(s * n3);
-                for (ia, &(cc, k)) in nb.vectors.iter().enumerate() {
-                    let y = &basis.vectors[ia];
-                    for i in 0..s {
-                        for a in 0..3 {
-                            crate::linalg::mul_add(false, &mut dv[i * n3 + a * n..i * n3 + a * n + n], de[cc][k][a], &y[i * n..i * n + n]);
-                        }
-                    }
-                }
-                work[0] += (3 * (terms * s * s + nb.vectors.len() * s * n)) as f64;
-                let nd = nb.nd;
-                let (mut dked, mut dkde, mut dkdd): ([Buf; 3], [Buf; 3], [Buf; 3]) = (std::array::from_fn(|_| Buf::zeros(s * nd)), std::array::from_fn(|_| Buf::zeros(nd * s)), std::array::from_fn(|_| Buf::zeros(nd * nd)));
+        for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
+            if nb.idle() {
+                continue;
+            }
+            let basis = &cache.near[x][cache.at_near[x].unwrap()];
+            let s = nb.s;
+            let nd = nb.nd;
+            let tg = &mut nb.tg;
+            // ∂K̃ = Σ_t ∂c_t V†N_tV on the parts' entries alone: the axes' (3 × T) on the terms' (T × s²).
+            let terms = nb.terms.len();
+            let dct = &mut sc.dct[..3 * terms];
+            for (ti, &tt) in nb.terms.iter().enumerate() {
                 for a in 0..3 {
-                    for (xx, &(g, k)) in nb.exact.iter().enumerate() {
-                        let d = de[g][k][a];
-                        for i in 0..s {
-                            for e2 in 0..nd {
-                                let y = basis.couple[xx][i * nd + e2];
-                                dked[a][i * nd + e2] += d * y;
-                                dkde[a][e2 * s + i] += (d * y).conj();
-                            }
-                        }
+                    dct[a * terms + ti] = dc[tt][a];
+                }
+            }
+            // ∂K̃ on the kept parts' entries.
+            tg.dk.fill(C64::ZERO);
+            for t in 0..terms {
+                let w = &basis.within[t * s * s..(t + 1) * s * s];
+                for a in 0..3 {
+                    let d = dct[a * terms + t];
+                    if d == C64::ZERO {
+                        continue;
                     }
-                    for (ti, &tt) in nb.terms.iter().enumerate() {
-                        if nd > 0 {
-                            crate::linalg::mul_add(false, &mut dkdd[a], dc[tt][a], &basis.ddterms[ti]);
+                    for (idx, at, _) in basis.f.parts.iter() {
+                        for i in *at..at + idx.len() {
+                            crate::linalg::mul_add(false, &mut tg.dk[a * s * s + i * s + at..a * s * s + i * s + at + idx.len()], d, &w[i * s + at..i * s + at + idx.len()]);
                         }
                     }
                 }
-                // The emission's tangent (rows (p, a), 3n × s): ∂Ṽ† on the ground rows, Σ_t ∂c_t E_t on the explicit ones; the
-                // static lane's source Σ_t ∂c_t S_t, the explicit states' dressing Σ_t ∂c_t H_t (n × 3n), the exact copies'
-                // static source and emission, axis by axis.
-                let lanes = nb.lanes;
-                let mut demit = Buf::zeros(3 * n * s);
+            }
+            let dv = &mut sc.dv[..s * n3];
+            dv.fill(C64::ZERO);
+            for (ia, &(cc, k)) in nb.vectors.iter().enumerate() {
+                let y = &basis.vectors[ia];
                 for i in 0..s {
                     for a in 0..3 {
-                        for p in 0..n {
-                            demit[(p * 3 + a) * s + i] = dv[i * n3 + a * n + p].conj();
+                        crate::linalg::mul_add(false, &mut dv[i * n3 + a * n..i * n3 + a * n + n], de[cc][k][a], &y[i * n..i * n + n]);
+                    }
+                }
+            }
+            work[0] += (3 * (terms * s * s + nb.vectors.len() * s * n)) as f64;
+            for a in 0..3 {
+                tg.dked[a].fill(C64::ZERO);
+                tg.dkde[a].fill(C64::ZERO);
+                tg.dkdd[a].fill(C64::ZERO);
+                for (xx, &(g, k)) in nb.exact.iter().enumerate() {
+                    let d = de[g][k][a];
+                    for i in 0..s {
+                        for e2 in 0..nd {
+                            let y = basis.couple[xx][i * nd + e2];
+                            tg.dked[a][i * nd + e2] += d * y;
+                            tg.dkde[a][e2 * s + i] += (d * y).conj();
                         }
                     }
                 }
-                let mut src = Buf::zeros(s * 3 * lanes * n);
-                let mut dhx = Buf::zeros(n * n3);
-                let (mut dexd, mut db0d): ([Buf; 3], [Buf; 3]) = (std::array::from_fn(|_| Buf::zeros(n * nd)), std::array::from_fn(|_| Buf::zeros(nd * n)));
-                if !nb.xs.is_empty() {
-                    let (ln, m) = (lanes * n, 3 * lanes * n);
-                    let mut o = Buf::zeros(3 * s * n);
-                    fused_product_into(&dct, &basis.sterms, (3, terms, s * n), &mut o);
-                    for a in 0..3 {
+                if nd > 0 {
+                    for (ti, &tt) in nb.terms.iter().enumerate() {
+                        crate::linalg::mul_add(false, &mut tg.dkdd[a], dc[tt][a], &basis.ddterms[ti]);
+                    }
+                }
+            }
+            // The emission's tangent (rows (p, a), 3n × s): ∂Ṽ† on the ground rows, Σ_t ∂c_t E_t on the explicit ones; the
+            // static lane's source Σ_t ∂c_t S_t, the explicit states' dressing Σ_t ∂c_t H_t (n × 3n), the exact copies'
+            // static source and emission, axis by axis.
+            let lanes = nb.lanes;
+            for i in 0..s {
+                for a in 0..3 {
+                    for p in 0..n {
+                        tg.demit[(p * 3 + a) * s + i] = dv[i * n3 + a * n + p].conj();
+                    }
+                }
+            }
+            if !nb.xs.is_empty() {
+                let (ln, m) = (lanes * n, 3 * lanes * n);
+                let o = &mut sc.to[..3 * s * n];
+                fused_product_into(dct, &basis.sterms, (3, terms, s * n), o);
+                for a in 0..3 {
+                    for i in 0..s {
+                        tg.src[i * m + a * ln + (lanes - 1) * n..i * m + a * ln + lanes * n].copy_from_slice(&o[a * s * n + i * n..a * s * n + i * n + n]);
+                    }
+                }
+                fused_product_into(dct, &basis.eterms, (3, terms, n * s), o);
+                for a in 0..3 {
+                    for p in 0..n {
                         for i in 0..s {
-                            src[i * m + a * ln + (lanes - 1) * n..i * m + a * ln + lanes * n].copy_from_slice(&o[a * s * n + i * n..a * s * n + i * n + n]);
+                            tg.demit[(p * 3 + a) * s + i] += o[a * n * s + p * s + i];
                         }
                     }
-                    fused_product_into(&dct, &basis.eterms, (3, terms, n * s), &mut o);
+                }
+                let o = &mut sc.to[..3 * nn];
+                fused_product_into(dct, &basis.hterms, (3, terms, nn), o);
+                for a in 0..3 {
+                    for p in 0..n {
+                        tg.dhx[p * n3 + a * n..p * n3 + a * n + n].copy_from_slice(&o[a * nn + p * n..a * nn + p * n + n]);
+                    }
+                }
+                for a in 0..3 {
+                    tg.dexd[a].fill(C64::ZERO);
+                    tg.db0d[a].fill(C64::ZERO);
+                }
+                for (xx, &(g, k)) in nb.exact.iter().enumerate() {
                     for a in 0..3 {
+                        let d = de[g][k][a];
                         for p in 0..n {
-                            for i in 0..s {
-                                demit[(p * 3 + a) * s + i] += o[a * n * s + p * s + i];
+                            for e2 in 0..nd {
+                                let y = basis.xcouple[xx][p * nd + e2];
+                                tg.dexd[a][p * nd + e2] += d * y;
+                                tg.db0d[a][e2 * n + p] += (d * y).conj();
                             }
                         }
                     }
-                    let mut o = Buf::zeros(3 * n * n);
-                    fused_product_into(&dct, &basis.hterms, (3, terms, n * n), &mut o);
-                    for a in 0..3 {
-                        for p in 0..n {
-                            dhx[p * n3 + a * n..p * n3 + a * n + n].copy_from_slice(&o[a * n * n + p * n..a * n * n + p * n + n]);
-                        }
-                    }
-                    for (xx, &(g, k)) in nb.exact.iter().enumerate() {
-                        for a in 0..3 {
-                            let d = de[g][k][a];
-                            for p in 0..n {
-                                for e2 in 0..nd {
-                                    let y = basis.xcouple[xx][p * nd + e2];
-                                    dexd[a][p * nd + e2] += d * y;
-                                    db0d[a][e2 * n + p] += (d * y).conj();
-                                }
-                            }
-                        }
-                    }
-                    work[0] += (3 * terms * (2 * s * n + n * n)) as f64;
                 }
-                Tangent {
-                    dk,
-                    demit,
-                    dhx,
-                    dexd,
-                    db0d,
-                    src,
-                    dz: Buf::zeros(s * 3 * lanes * n),
-                    dztot: Buf::zeros(s * n3),
-                    dked,
-                    dkde,
-                    dkdd,
-                    ddz: (0..if nd > 0 { lanes } else { 0 }).map(|_| std::array::from_fn(|_| Buf::zeros(nd * n))).collect(),
-                    ddztot: std::array::from_fn(|_| Buf::zeros(nd * n)),
-                    dtc: std::array::from_fn(|_| Buf::zeros(nb.nc * n)),
-                }
-            })
-            .collect();
+                work[0] += (3 * terms * (2 * s * n + nn)) as f64;
+            }
+        }
         lap(0, &mut clock, &mut tick);
         // The sweeps: ∂H (n × 3n) the Bloch generator's tangent the sweep was solved at, its diagonal ∂c and the rest ∂Δ.
-        let mut dh = Buf::copy(&dhbase);
-        let mut dd = Buf::zeros(nn);
+        let dh = &mut dh[..n * n3];
+        let dd = &mut dd[..nn];
+        dh.copy_from_slice(dhbase);
         for k in 0..sweeps {
-            let delta = &ws.deltas[k * nn..(k + 1) * nn];
-            for (x, (nb, tg)) in ws.near.iter().zip(tangents.iter_mut()).enumerate() {
+            let delta = &deltas[k * nn..(k + 1) * nn];
+            for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
                 if nb.idle() {
                     continue;
                 }
@@ -3911,39 +4092,35 @@ impl Fold {
                 let m = 3 * ln;
                 let (t, ends) = (&basis.f.t, &basis.f.ends);
                 let at = k * s * ln;
-                let (zk, inv) = (&nb.zs[at..at + s * ln], &nb.invs[at..at + s * ln]);
+                let nd = nb.nd;
+                let Near { tg, zs, invs, zds, pjs, cinvs, kde, active, splits: beams, .. } = &mut *nb;
+                let (zk, inv) = (&zs[at..at + s * ln], &invs[at..at + s * ln]);
                 // The sources: ∂f_l Ỹ_l − Z_l ∂c, every axis and split of a row side by side.
                 if k == 0 {
-                    let df: Vec<[C64; 3]> = nb
-                        .splits
-                        .iter()
-                        .map(|&(cc, jj)| {
-                            let comp = &self.components[cc];
-                            let l = comp.beams[jj];
-                            std::array::from_fn(|a| comp.factor(mid.amplitudes[l].gradient[a]))
-                        })
-                        .collect();
                     for i in 0..s {
                         for a in 0..3 {
-                            for (sp, dfl) in df.iter().enumerate() {
+                            for (sp, &(cc, jj)) in beams.iter().enumerate() {
+                                let dfl = mid.df[cc][jj][a];
                                 let (o, src) = (i * m + a * ln + sp * n, i * bn + sp * n);
                                 for (u, y) in tg.src[o..o + n].iter_mut().zip(&basis.beams[src..src + n]) {
-                                    *u = dfl[a] * *y;
+                                    *u = dfl * *y;
                                 }
                             }
                         }
                     }
                     work[1] += (s * m) as f64;
                 }
-                let mut rhs = Buf::copy(&tg.src);
-                let mut dhd: [Buf; 3] = std::array::from_fn(|_| Buf::zeros(n));
-                for (a, d) in dhd.iter_mut().enumerate() {
+                let rhs = &mut sc.rhs[..s * m];
+                rhs.copy_from_slice(&tg.src[..s * m]);
+                let dhd = &mut dhd[..3 * n];
+                for a in 0..3 {
                     for j in 0..n {
-                        d[j] = dh[j * n3 + a * n + j];
+                        dhd[a * n + j] = dh[j * n3 + a * n + j];
                     }
                 }
                 for i in 0..s {
-                    for (a, d) in dhd.iter().enumerate() {
+                    for a in 0..3 {
+                        let d = &dhd[a * n..a * n + n];
                         for sp in 0..splits {
                             let (o, src) = (i * m + a * ln + sp * n, i * ln + sp * n);
                             for ((u, z), c) in rhs[o..o + n].iter_mut().zip(&zk[src..src + n]).zip(d) {
@@ -3956,40 +4133,35 @@ impl Fold {
                 // ∂K̃ Z on the parts: per part its rows (i, a) of ∂K̃ (3p × p) on Z_P (p × Ln), the result rhs's rows there.
                 for (idx, pat, _) in basis.f.parts.iter() {
                     let p = idx.len();
-                    let mut mp = Buf::zeros(3 * p * p);
+                    let mp = &mut sc.mp[..3 * p * p];
                     for ii in 0..p {
                         for a in 0..3 {
                             let from = a * s * s + (pat + ii) * s + pat;
                             mp[(ii * 3 + a) * p..(ii * 3 + a) * p + p].copy_from_slice(&tg.dk[from..from + p]);
                         }
                     }
-                    let mut o = Buf::zeros(3 * p * ln);
-                    fused_product_into(&mp, &zk[pat * ln..(pat + p) * ln], (3 * p, p, ln), &mut o);
-                    for (r, y) in rhs[pat * m..(pat + p) * m].iter_mut().zip(o.iter()) {
-                        *r += *y;
-                    }
+                    crate::linalg::fused_product_onto(mp, &zk[pat * ln..(pat + p) * ln], (3 * p, p, ln), &mut rhs[pat * m..(pat + p) * m]);
                     work[1] += (3 * p * p * ln) as f64;
                 }
                 lap(1, &mut clock, &mut tick);
                 // −(∂Z^{k−1}Δ + Z^{k−1}∂Δ): the first on every axis and split at once, the second axis by axis.
                 if k > 0 {
                     let h = s;
-                    let prev = &nb.zs[at - s * ln..at];
-                    let mut p1 = Buf::zeros(h * m);
-                    fused_product_into(&tg.dz, delta, (3 * h * splits, n, n), &mut p1);
-                    let rows = &mut rhs[..];
-                    rows.iter_mut().zip(p1.iter()).for_each(|(r, y)| *r -= *y);
+                    let prev = &zs[at - s * ln..at];
+                    let p1 = &mut sc.p1[..h * m];
+                    fused_product_into(&tg.dz, delta, (3 * h * splits, n, n), p1);
+                    rhs.iter_mut().zip(p1.iter()).for_each(|(r, y)| *r -= *y);
                     work[2] += (h * m * n) as f64;
-                    let mut p2 = Buf::zeros(h * ln);
+                    let p2 = &mut sc.p2[..h * ln];
                     for a in 0..3 {
                         for r in 0..n {
                             for c2 in 0..n {
                                 dd[r * n + c2] = if r == c2 { C64::ZERO } else { dh[r * n3 + a * n + c2] };
                             }
                         }
-                        fused_product_into(prev, &dd, (h * splits, n, n), &mut p2);
+                        fused_product_into(prev, dd, (h * splits, n, n), p2);
                         for i in 0..h {
-                            for (r, y) in rows[i * m + a * ln..i * m + a * ln + ln].iter_mut().zip(&p2[i * ln..(i + 1) * ln]) {
+                            for (r, y) in rhs[i * m + a * ln..i * m + a * ln + ln].iter_mut().zip(&p2[i * ln..(i + 1) * ln]) {
                                 *r -= *y;
                             }
                         }
@@ -3997,11 +4169,10 @@ impl Fold {
                     work[2] += (h * m * n) as f64;
                 }
                 lap(2, &mut clock, &mut tick);
-                let nd = nb.nd;
                 if nd > 0 {
                     for sp in 0..splits {
                         let dat = (k * splits + sp) * nd * n;
-                        let zdk = &nb.zds[dat..dat + nd * n];
+                        let zdk = &zds[dat..dat + nd * n];
                         for i in 0..s {
                             for a in 0..3 {
                                 for e2 in 0..nd {
@@ -4017,7 +4188,7 @@ impl Fold {
                 // The triangular solves, every axis and split of a row at once: (c_j − w_l − T)⁻¹ the forward's.
                 {
                     let dz = &mut tg.dz;
-                    for i in (0..s).rev().filter(|&i| k == 0 || nb.active[i]) {
+                    for i in (0..s).rev().filter(|&i| k == 0 || active[i]) {
                         let (head, tail) = dz.split_at_mut((i + 1) * m);
                         let r = &mut rhs[i * m..(i + 1) * m];
                         for l2 in i + 1..ends[i] {
@@ -4035,15 +4206,22 @@ impl Fold {
                 if nd > 0 {
                     // The copies' rows: −(∂Z_D^{k−1}Δ + Z_D^{k−1}∂Δ) + ∂K̂_DE Z_E + ∂K̂_DD Z_D − Z_D∘∂c, by Woodbury on the
                     // forward's P_j and C_j⁻¹, split by split and axis by axis.
+                    let CopyTemps { ze: zke, inv: invl, rd, zdn: out, rhs: rhd, dze, .. } = &mut sc.copies;
                     for sp in 0..splits {
                         let dat = (k * splits + sp) * nd * n;
-                        let zdk = &nb.zds[dat..dat + nd * n];
-                        let zke = gather(zk, s, ln, sp * n, n);
-                        let invl = gather(inv, s, ln, sp * n, n);
+                        let zdk = &zds[dat..dat + nd * n];
+                        let (zke, invl) = (&mut zke[..s * n], &mut invl[..s * n]);
+                        gather(zk, zke, s, ln, sp * n, n);
+                        gather(inv, invl, s, ln, sp * n, n);
                         let (pat, cat) = ((k * splits + sp) * n * nd * s, (k * splits + sp) * n * nd * nd);
                         for a in 0..3 {
                             // The static lane's own source on the copies' rows, its tangent.
-                            let mut rd = if sp == nb.splits.len() { Buf::copy(&tg.db0d[a]) } else { Buf::zeros(nd * n) };
+                            let rd = &mut rd[..nd * n];
+                            if sp == beams.len() {
+                                rd.copy_from_slice(&tg.db0d[a]);
+                            } else {
+                                rd.fill(C64::ZERO);
+                            }
                             for e2 in 0..nd {
                                 for j in 0..n {
                                     rd[e2 * n + j] -= zdk[e2 * n + j] * dh[j * n3 + a * n + j];
@@ -4058,7 +4236,7 @@ impl Fold {
                                     crate::linalg::mul_add(false, &mut rd[e2 * n..e2 * n + n], tg.dkdd[a][e2 * nd + f2], &zdk[f2 * n..f2 * n + n]);
                                 }
                                 if k > 0 {
-                                    let prev = &nb.zds[dat - splits * nd * n..dat - splits * nd * n + nd * n];
+                                    let prev = &zds[dat - splits * nd * n..dat - splits * nd * n + nd * n];
                                     for mm in 0..n {
                                         let (dzm, zm) = (tg.ddz[sp][a][e2 * n + mm], prev[e2 * n + mm]);
                                         if dzm != C64::ZERO {
@@ -4072,13 +4250,11 @@ impl Fold {
                                     }
                                 }
                             }
-                            let mut pj = Buf::copy(&nb.pjs[pat..pat + n * nd * s]);
-                            let mut cinv = Buf::copy(&nb.cinvs[cat..cat + n * nd * nd]);
-                            let mut out = Buf::zeros(nd * n);
-                            let mut dze = gather(&tg.dz, s, m, a * ln + sp * n, n);
-                            copies_solve(s, nd, &nb.ked, &nb.kde, &nb.kdd, basis, &[], 0.0, &invl, &rd, &mut dze, &mut out, &mut pj, &mut cinv, true, n, &mut work[3]);
-                            scatter(&dze, &mut tg.dz, s, m, a * ln + sp * n, n);
-                            tg.ddz[sp][a].copy_from_slice(&out);
+                            let (out, dze) = (&mut out[..nd * n], &mut dze[..s * n]);
+                            gather(&tg.dz, dze, s, m, a * ln + sp * n, n);
+                            copies_apply(s, nd, kde, &pjs[pat..pat + n * nd * s], &cinvs[cat..cat + n * nd * nd], rd, dze, out, rhd, n, &mut work[3]);
+                            scatter(dze, &mut tg.dz, s, m, a * ln + sp * n, n);
+                            tg.ddz[sp][a].copy_from_slice(out);
                             work[3] += (nd * n * (s + nd + 2 * n)) as f64;
                         }
                     }
@@ -4104,30 +4280,26 @@ impl Fold {
                 work[4] += (s * m) as f64 / 4.0;
                 lap(4, &mut clock, &mut tick);
             }
-            // ∂H^{k+1} = ∂Ĥ_base + Σ (∂Ṽ†Z + Ṽ†∂Z): Ṽ† on ∂Z (n × s on s × 3n), and ∂Ṽ†'s rows (p, a) on Z (3n × s on s × n).
             // ∂H^{k+1} = ∂Ĥ_base + Σ (∂Ê Z + Ê ∂Z (+ ∂Ê_D Z_D + Ê_D ∂Z_D + ∂hx)): Ê on ∂Z (n × s on s × 3n), and ∂Ê's rows
             // (p, a) on Z (3n × s on s × n).
-            dh.copy_from_slice(&dhbase);
-            for (nb, tg) in ws.near.iter().zip(&tangents) {
+            dh.copy_from_slice(dhbase);
+            for nb in near.iter() {
                 if nb.idle() {
                     continue;
                 }
-                let (s, nd) = (nb.s, nb.nd);
+                let (s, nd, tg) = (nb.s, nb.nd, &nb.tg);
                 let ztot = &nb.ztots[k * s * n..(k + 1) * s * n];
-                let mut o = Buf::zeros(n * n3);
-                fused_product_into(&nb.emit, &tg.dztot, (n, s, n3), &mut o);
-                dh.iter_mut().zip(o.iter()).for_each(|(h, y)| *h += *y);
-                fused_product_into(&tg.demit, ztot, (n3, s, n), &mut o);
-                dh.iter_mut().zip(o.iter()).for_each(|(h, y)| *h += *y);
+                crate::linalg::fused_product_onto(&nb.emit, &tg.dztot, (n, s, n3), dh);
+                crate::linalg::fused_product_onto(&tg.demit, ztot, (n3, s, n), dh);
                 work[4] += (2 * s * n * n3) as f64;
                 if !nb.xs.is_empty() {
                     dh.iter_mut().zip(tg.dhx.iter()).for_each(|(h, y)| *h += *y);
                     if nd > 0 {
                         let zdk = &nb.zdtots[k * nd * n..(k + 1) * nd * n];
-                        let mut q = Buf::zeros(n * n);
+                        let (o, q) = (&mut o3[..nn], &mut e[..nn]);
                         for a in 0..3 {
-                            fused_product_into(&tg.dexd[a], zdk, (n, nd, n), &mut o);
-                            fused_product_into(&nb.exd, &tg.ddztot[a], (n, nd, n), &mut q);
+                            fused_product_into(&tg.dexd[a], zdk, (n, nd, n), o);
+                            fused_product_into(&nb.exd, &tg.ddztot[a], (n, nd, n), q);
                             for p in 0..n {
                                 for j in 0..n {
                                     dh[p * n3 + a * n + j] += o[p * n + j] + q[p * n + j];
@@ -4142,28 +4314,26 @@ impl Fold {
         }
         // ∂X = Σ ∂Z†Z + Z†∂Z (+ the copies' rows', the far metric's), the axes side by side as ∂H; S⁻¹'s tangent
         // dN = −N dS N, S dS + dS S = ∂X, axis by axis.
-        let mut dx = Buf::copy(&dmetric);
-        for (x, (nb, tg)) in ws.near.iter().zip(tangents.iter_mut()).enumerate() {
+        let dx = &mut dx[..n * n3];
+        dx.copy_from_slice(dmetric);
+        for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
             if nb.idle() {
                 continue;
             }
             let s = nb.s;
-            let mut zh = Buf::zeros(n * s);
-            adjoint_into(&nb.ztot, s, n, &mut zh);
-            let mut o = Buf::zeros(n * n3);
-            fused_product_into(&zh, &tg.dztot, (n, s, n3), &mut o);
-            dx.iter_mut().zip(o.iter()).for_each(|(h, y)| *h += *y);
-            let mut dzh = Buf::zeros(n3 * s);
-            for i in 0..s {
-                for a in 0..3 {
-                    for p in 0..n {
-                        dzh[(p * 3 + a) * s + i] = tg.dztot[i * n3 + a * n + p].conj();
+            crate::linalg::adjoint_product_onto(&nb.ztot, &nb.tg.dztot, (n, s, n3), dx);
+            // ∂Z†Z: the axes' ∂Z† (rows (a, p)) on Z, laid back as (p, a).
+            let o = &mut o3[..n3 * n];
+            crate::linalg::adjoint_product(&nb.tg.dztot, &nb.ztot, (n3, s, n), o);
+            for a in 0..3 {
+                for p in 0..n {
+                    for (u, y) in dx[p * n3 + a * n..p * n3 + a * n + n].iter_mut().zip(&o[(a * n + p) * n..(a * n + p + 1) * n]) {
+                        *u += *y;
                     }
                 }
             }
-            fused_product_into(&dzh, &nb.ztot, (n3, s, n), &mut o);
-            dx.iter_mut().zip(o.iter()).for_each(|(h, y)| *h += *y);
             work[5] += (2 * s * n * n3) as f64;
+            let tg = &mut nb.tg;
             for a in 0..3 {
                 for d in 0..nb.nd {
                     for p in 0..n {
@@ -4174,12 +4344,12 @@ impl Fold {
                 }
                 if nb.copied_in {
                     let basis = &cache.near[x][cache.at_near[x].unwrap()];
-                    let (mut dtc, mut extra) = (Buf::zeros(nb.nc * n), Buf::zeros(nb.nc * n));
-                    copies_of(&nb.copies, &nb.groups, basis, &mid.e, &gather(&tg.dztot, s, n3, a * n, n), false, &mut dtc, s, n, &mut work[5]);
-                    let de_a: Vec<Vec<C64>> = de.iter().map(|c| c.iter().map(|d| d[a]).collect()).collect();
-                    copies_of(&nb.copies, &nb.groups, basis, &de_a, &nb.ztot, true, &mut extra, s, n, &mut work[5]);
+                    let (dza, dtc, extra) = (&mut sc.zb[..s * n], &mut sc.tc1[..nb.nc * n], &mut sc.tc2[..nb.nc * n]);
+                    gather(&tg.dztot, dza, s, n3, a * n, n);
+                    copies_of(&nb.copies, &nb.groups, basis, &|g, k| mid.e[g][k], dza, false, dtc, s, n, &mut work[5]);
+                    copies_of(&nb.copies, &nb.groups, basis, &|g, k| de[g][k][a], &nb.ztot, true, extra, s, n, &mut work[5]);
                     dtc.iter_mut().zip(extra.iter()).for_each(|(o, z)| *o += *z);
-                    tg.dtc[a].copy_from_slice(&dtc);
+                    tg.dtc[a].copy_from_slice(dtc);
                     for c in 0..nb.nc {
                         for p in 0..n {
                             crate::linalg::mul_add(false, &mut dx[p * n3 + a * n..p * n3 + a * n + n], dtc[c * n + p].conj(), &nb.tc[c * n..c * n + n]);
@@ -4189,17 +4359,13 @@ impl Fold {
                 }
             }
         }
-        let (mut e_buf, mut p_buf) = (Buf::zeros(nn), Buf::zeros(nn));
-        let (mut dxs, mut dss): (Vec<Buf>, Vec<Buf>) = (vec![], vec![]);
+        let (e, p) = (&mut e[..nn], &mut p[..nn]);
         for a in 0..3 {
-            let dxa = gather(&dx, n, n3, a * n, n);
-            let mut ds = Buf::zeros(nn);
-            lyapunov(&step.metric.data, normal, &dxa, n, &mut ds, &mut e_buf, &mut p_buf, &mut work[5]);
-            dxs.push(dxa);
-            dss.push(ds);
+            gather(dx, &mut dxs[a], n, n3, a * n, n);
+            lyapunov(&step.metric.data, normal, &dxs[a], n, &mut dss[a], e, p, &mut work[5]);
         }
         lap(5, &mut clock, &mut tick);
-        ws.tangents = Some(Tangents { blocks: tangents, dx: dxs, ds: dss, de, dc });
+        ws.tangent = true;
         ws.tangent_ticks = tick;
         ws.tangent_work = work;
         work.iter().sum()
@@ -4211,21 +4377,27 @@ impl Fold {
     /// step's tangent (`Fold::prototype_tangent`: ∂Z, ∂e, and S⁻¹'s ∂(S⁻¹ψ) = −S⁻¹ ∂S S⁻¹ψ). The jumps carry each class's
     /// mean up to one absorbed photon (`Photon::kick`'s rule, k_c the class's largest beam wave number): the rest is the
     /// force; 2D = Σ_c M2_c − W_c b_c b_cᵀ of the kicks. After `prototype_tangent`.
-    pub(crate) fn prototype_photons(&self, cache: &Cache, ws: &Workspace, psi: &[C64], sets: &[Vec<usize>]) -> Photons {
+    pub(crate) fn prototype_photons(&self, cache: &Cache, ws: &mut Workspace, psi: &[C64], sets: &[Vec<usize>]) -> Photons {
         let n = ws.n;
         let mut work = 0.0;
-        let mid = &ws.mid;
-        let normal = &ws.step.normal.data;
-        let tg = ws.tangents.as_ref().expect("the step's tangent");
-        let (tangents, de) = (&tg.blocks, &tg.de);
+        assert!(ws.tangent, "the step's tangent");
+        let Workspace { mid, step, near, far, scratch, tm, ds, .. } = &mut *ws;
+        let normal = &step.normal.data;
+        let de = &mid.de;
+        let Temp { zeta, dzeta, u, du, e: q, .. } = tm;
         // ζ = S⁻¹ψ, ∂ζ = −S⁻¹ ∂S ζ.
-        let zeta: Vec<C64> = (0..n).map(|i| (0..n).map(|j| normal[i * n + j] * psi[j]).sum()).collect();
-        let dzeta: Vec<Vec<C64>> = (0..3)
-            .map(|a| {
-                let q: Vec<C64> = (0..n).map(|i| (0..n).map(|j| tg.ds[a][i * n + j] * zeta[j]).sum()).collect();
-                (0..n).map(|i| -(0..n).map(|j| normal[i * n + j] * q[j]).sum::<C64>()).collect()
-            })
-            .collect();
+        let (zeta, dzeta, q) = (&mut zeta[..n], &mut dzeta[..3 * n], &mut q[..n]);
+        for i in 0..n {
+            zeta[i] = (0..n).map(|j| normal[i * n + j] * psi[j]).sum();
+        }
+        for a in 0..3 {
+            for i in 0..n {
+                q[i] = (0..n).map(|j| ds[a][i * n + j] * zeta[j]).sum();
+            }
+            for i in 0..n {
+                dzeta[a * n + i] = -(0..n).map(|j| normal[i * n + j] * q[j]).sum::<C64>();
+            }
+        }
         work += (7 * n * n) as f64;
         // The classes' moments.
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
@@ -4255,43 +4427,51 @@ impl Fold {
                 }
             }
         };
-        let (mut u, mut du) = (Buf::zeros(3 * GROUND), vec![[C64::ZERO; 3]; 3 * GROUND]);
-        for (x, (nb, tg)) in ws.near.iter().zip(tangents.iter()).enumerate() {
+        let (u, du) = (&mut u[..3 * GROUND], &mut du[..3 * GROUND]);
+        for (x, (nb, sc)) in near.iter().zip(scratch.iter_mut()).enumerate() {
             if nb.idle() {
                 continue;
             }
             let basis = &cache.near[x][cache.at_near[x].unwrap()];
             let s = nb.s;
+            let tg = &nb.tg;
             let mut absorbed = 0.0_f64;
             for &(cc, jj) in &nb.splits {
                 absorbed = absorbed.max(self.light.beams[self.components[cc].beams[jj]].wave_number);
             }
-            let y: Vec<C64> = (0..s).map(|i| (0..n).map(|j| nb.ztot[i * n + j] * zeta[j]).sum()).collect();
-            let dy: Vec<Vec<C64>> = (0..3).map(|a| (0..s).map(|i| (0..n).map(|j| tg.dztot[i * 3 * n + a * n + j] * zeta[j] + nb.ztot[i * n + j] * dzeta[a][j]).sum()).collect()).collect();
+            let (y, dy) = (&mut sc.py[..s], &mut sc.pdy[..3 * s]);
+            for i in 0..s {
+                y[i] = (0..n).map(|j| nb.ztot[i * n + j] * zeta[j]).sum();
+            }
+            for a in 0..3 {
+                for i in 0..s {
+                    dy[a * s + i] = (0..n).map(|j| tg.dztot[i * 3 * n + a * n + j] * zeta[j] + nb.ztot[i * n + j] * dzeta[a * n + j]).sum();
+                }
+            }
             for q in 0..3 {
                 let e = &basis.emit[q];
                 let ex = &basis.xemitc[q];
                 for b in 0..GROUND {
                     let row = &e[b * s..b * s + s];
-                    u[q * GROUND + b] = row.iter().zip(&y).map(|(p, z)| *p * *z).sum();
-                    du[q * GROUND + b] = std::array::from_fn(|a| row.iter().zip(&dy[a]).map(|(p, z)| *p * *z).sum());
+                    u[q * GROUND + b] = row.iter().zip(y.iter()).map(|(p, z)| *p * *z).sum();
+                    du[q * GROUND + b] = std::array::from_fn(|a| row.iter().zip(&dy[a * s..a * s + s]).map(|(p, z)| *p * *z).sum());
                     // The explicit states' own rows of ε (units): C_q on them, of ζ and ∂ζ.
                     for &p in &nb.xs {
                         let c = ex[b * n + p];
                         u[q * GROUND + b] += c * zeta[p];
                         for a in 0..3 {
-                            du[q * GROUND + b][a] += c * dzeta[a][p];
+                            du[q * GROUND + b][a] += c * dzeta[a * n + p];
                         }
                     }
                 }
             }
             work += (7 * s * n + 12 * GROUND * s) as f64;
             for set in sets {
-                class(&u, &du, set, absorbed, &mut out);
+                class(u, du, set, absorbed, &mut out);
             }
             work += (3 * GROUND * 13) as f64;
         }
-        for (x, fb) in ws.far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
+        for (x, fb) in far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
             let basis = &cache.far[x][cache.at_far[x].unwrap()];
             u.fill(C64::ZERO);
             du.fill([C64::ZERO; 3]);
@@ -4307,17 +4487,17 @@ impl Fold {
                     let m = &basis.emitted[ia][q];
                     for b in 0..GROUND {
                         let row = &m[b * n..b * n + n];
-                        let v: C64 = row.iter().zip(&zeta).map(|(p, z)| *p * *z).sum();
+                        let v: C64 = row.iter().zip(zeta.iter()).map(|(p, z)| *p * *z).sum();
                         u[q * GROUND + b] += e * v;
                         for a in 0..3 {
-                            du[q * GROUND + b][a] += de[cc][k][a] * v + e * row.iter().zip(&dzeta[a]).map(|(p, z)| *p * *z).sum::<C64>();
+                            du[q * GROUND + b][a] += de[cc][k][a] * v + e * row.iter().zip(&dzeta[a * n..a * n + n]).map(|(p, z)| *p * *z).sum::<C64>();
                         }
                     }
                 }
                 work += (12 * GROUND * n) as f64;
             }
             for set in sets {
-                class(&u, &du, set, absorbed, &mut out);
+                class(u, du, set, absorbed, &mut out);
             }
             work += (3 * GROUND * 13) as f64;
         }
@@ -4449,8 +4629,8 @@ impl Workspace {
             let basis = &cache.near[x][cache.at_near[x].unwrap()];
             let z = Mat { rows: nb.s, cols: n, data: nb.ztot.clone() };
             let ts = basis.f.from(&z, &mut w);
-            let mut rows = Near { tc: vec![C64::ZERO; nb.nc * n], ..nb.clone() };
-            copy_rows(&mut rows, basis, &self.mid.e, n, &mut w);
+            let mut tc = vec![C64::ZERO; nb.nc * n];
+            copies_of(&nb.copies, &nb.groups, basis, &|g, k| self.mid.e[g][k], &nb.ztot, true, &mut tc, nb.s, n, &mut w);
             let (ne, nd) = (nb.all, nb.nd);
             // The kept rows' response on their rows of the block, the omitted levels' zero.
             let mut place = vec![usize::MAX; ne];
@@ -4463,7 +4643,7 @@ impl Workspace {
                 } else if i < ne + nd {
                     nb.zdtot[(i - ne) * n + j]
                 } else {
-                    rows.tc[(i - ne - nd) * n + j]
+                    tc[(i - ne - nd) * n + j]
                 }
             }));
         }
