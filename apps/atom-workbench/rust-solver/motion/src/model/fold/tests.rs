@@ -1644,3 +1644,309 @@ fn a_step_s_work_at_a_scene() {
         }
     }
 }
+
+/// The prototype's choice (proto.rs): a scene's tiers (`tiers`), and in every block that solves any row its centred
+/// excited rows solved too (a mode of the kept decomposition, not a pass); the blocks whose rows are all centred keep them so.
+fn proto_choice(req: &Request, name: &str) -> Choice {
+    let mut choice = tiers(req, name);
+    for set in Fold::sets(req, &choice).unwrap() {
+        let fold = Fold::new(req, &choice, set[0]).unwrap();
+        let mut add = vec![];
+        for b in fold.blocks.iter().filter(|b| b.solved > 0) {
+            for r in &b.rows[b.solved..] {
+                if let Row::Excited(x) = *r {
+                    for &(p, c) in &b.sources {
+                        add.push(((fold.components[c].part, fold.ground[p], fold.excited_level[x]), Status::Decomposed));
+                    }
+                }
+            }
+        }
+        choice.excited.extend(add);
+    }
+    choice
+}
+
+/// The rate's inverse: the relative amplitude error ρ of a reading r = 2ρ + ρ².
+fn unrate(r: f64) -> f64 {
+    (1.0 + r).sqrt() - 1.0
+}
+
+/// One point of the prototype against `Fold::at` there (its decompositions made at the point): the largest column's
+/// difference of the excited responses (relative to the column's whole, as ρ), what the readings allow it -- the
+/// prototype's series, reuse and held far forms and `Fold::at`'s own next pass, each as ρ, summed --, G's difference (of
+/// its scale), the copies' largest absolute difference (a population's amplitude), the prototype's own decay against its
+/// own jumps, its sweeps and the decompositions it made.
+struct Against {
+    diff: f64,
+    allowed: f64,
+    parts: [f64; 4],
+    g: f64,
+    copies: f64,
+    decay: f64,
+    sweeps: usize,
+    made: usize,
+}
+
+fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut super::proto::Cache, r: [f64; 3], kappa: [f64; 3], split: super::proto::Split) -> Against {
+    let f = fold.at(r, kappa, &mut Path::default()).expect("the fold at the point");
+    let mut w = 0.0;
+    let last = f.stages.last().unwrap();
+    let at_next = last.next(&f.eliminated, &f.h[1], &f.h[2], &mut w);
+    let step = fold.prototype(r, kappa, cache, ws, split).expect("the prototype at the point");
+    let (generator, normal) = (step.generator.clone(), step.normal.clone());
+    let allowed = unrate(step.series) + unrate(step.reuse) + unrate(step.far) + unrate(at_next) + 1e-10;
+    let (sweeps, made, series, reuse, far) = (step.sweeps, step.made, step.series, step.reuse, step.far);
+    let responses = ws.responses(fold, cache);
+    let n = f.n;
+    let (mut diff, mut whole, mut copies) = (vec![0.0; n], vec![0.0; n], 0.0_f64);
+    for (o, b) in fold.blocks.iter().enumerate() {
+        let Some(mine) = &responses[o] else { continue };
+        let theirs = &last.responses[o];
+        for i in 0..b.rows.len() {
+            for j in 0..n {
+                let d = (mine[(i, j)] - theirs[(i, j)]).norm_sqr();
+                match b.rows[i] {
+                    Row::Excited(_) => {
+                        diff[j] += d;
+                        whole[j] += theirs[(i, j)].norm_sqr();
+                    }
+                    Row::Copy { .. } => copies = copies.max(d.sqrt()),
+                }
+            }
+        }
+    }
+    let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
+    let rho = (0..n).filter(|&j| whole[j] > floor).map(|j| (diff[j] / whole[j]).sqrt()).fold(0.0, f64::max);
+    let g = generator.data.iter().zip(&f.generator.data).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max) / f.generator.frobenius();
+    // The prototype's decay against its own jumps (DESIGN §2.6): i(G − G†) = Σ_q (C_q ε S⁻¹)†(C_q ε S⁻¹).
+    let es: Vec<usize> = (0..GROUND).collect();
+    let mut products = Mat::zeros(n, n);
+    for (o, b) in fold.blocks.iter().enumerate() {
+        let Some(t) = &responses[o] else { continue };
+        let e = fold.amplitude(b, t);
+        let rows = b.excited(fold);
+        for q in 0..3 {
+            let j = fold.emission[q].block(&es, &rows).product(&e).product(&normal);
+            products.add_scaled(C64::ONE, &j.adjoint_product(&j));
+        }
+    }
+    let mut gap = Mat::from_fn(n, n, |i, j| C64::I * (generator[(i, j)] - generator[(j, i)].conj()));
+    let scale = generator.frobenius().max(products.frobenius());
+    gap.add_scaled(-C64::ONE, &products);
+    Against { diff: rho, allowed, parts: [unrate(series), unrate(reuse), unrate(far), unrate(at_next)], g, copies, decay: gap.max_abs() / scale, sweeps, made }
+}
+
+/// The prototype against the fold at a point (proto.rs; BRIEF_PROTO.md gate 2), on a scene (`PROTO_SCENE`, a request's
+/// path) with its choice (`proto_choice`), each split: twenty random points about the focus (±0.3 µm, 0.1 m/s in a random
+/// direction), each on a fresh cache, and a thermal atom's 100 steps on one cache. At every point the excited responses'
+/// difference within what the readings allow (`proto_against`), the decay the jumps' products; the sweeps' shares said.
+#[test]
+#[ignore = "a check on a scene's request: run by name with PROTO_SCENE"]
+fn the_prototype_is_the_fold_within_its_readings() {
+    use super::proto::{Cache, Split};
+    let name = std::env::var("PROTO_SCENE").expect("PROTO_SCENE");
+    let req = crate::model::testing::scene(&name);
+    let choice = proto_choice(&req, &name);
+    let mut seed = 7u64;
+    let mut u = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut checked = 0;
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold = Fold::new(&req, &choice, set[0]).unwrap();
+        if fold.blocks.is_empty() {
+            continue;
+        }
+        let mut ws = match fold.prototype_workspace() {
+            Ok(w) => w,
+            Err(e) => {
+                println!("{name} set {set:?}: not the prototype's ({e})");
+                continue;
+            }
+        };
+        let (near, far) = ws.layout();
+        println!("{name} set {set:?}: n {}, near blocks (block, rows, copies, beams, terms) {near:?}, far blocks (block, rows, terms) {far:?}", fold.size());
+        let speed = 0.1 / fold.hbar_over_mass;
+        for split in [Split::Column, Split::Centre] {
+            let (mut worst, mut worst_g, mut worst_copy, mut worst_decay) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+            let mut sweeps = [0usize; 64];
+            let (mut diffs, mut parts) = (0.0_f64, [0.0_f64; 4]);
+            let mut check = |x: Against, what: &str, worst: &mut f64| {
+                diffs = diffs.max(x.diff);
+                for (a, b) in parts.iter_mut().zip(x.parts) {
+                    *a = a.max(b);
+                }
+                assert!(x.diff <= x.allowed, "{what}: the responses' difference {:.3e} beyond what the readings allow {:.3e}", x.diff, x.allowed);
+                assert!(x.decay <= 1e-12, "{what}: the decay against the jumps {:.1e}", x.decay);
+                *worst = worst.max(x.diff / x.allowed);
+                worst_g = worst_g.max(x.g);
+                worst_copy = worst_copy.max(x.copies);
+                worst_decay = worst_decay.max(x.decay);
+                sweeps[x.sweeps.min(63)] += 1;
+                x.made
+            };
+            for p in 0..20 {
+                let r: [f64; 3] = std::array::from_fn(|_| 0.6 * u() - 0.3);
+                let (ct, phi) = (2.0 * u() - 1.0, 2.0 * std::f64::consts::PI * u());
+                let st = (1.0 - ct * ct).sqrt();
+                let kappa = [speed * st * phi.cos(), speed * st * phi.sin(), speed * ct];
+                check(proto_against(&fold, &mut ws, &mut Cache::default(), r, kappa, split), &format!("{split:?} point {p}"), &mut worst);
+            }
+            let mut along = 0.0_f64;
+            let (mut made, mut cache) = (0, Cache::default());
+            let kappa = kappa_of(&fold);
+            for (k, r) in thermal_paths(1)[0].iter().enumerate() {
+                made += check(proto_against(&fold, &mut ws, &mut cache, *r, kappa, split), &format!("{split:?} path step {k}"), &mut along);
+            }
+            let total: usize = sweeps.iter().sum();
+            let shares: Vec<String> = sweeps.iter().enumerate().filter(|x| *x.1 > 0).map(|(k, c)| format!("{k}: {:.1}%", 100.0 * *c as f64 / total as f64)).collect();
+            println!("   {split:?}: 20 points {worst:.2e} of the allowance; the path (100 steps, {made} decompositions made) {along:.2e}; G {worst_g:.1e}, copies {worst_copy:.1e}, decay {worst_decay:.1e}; sweeps {shares:?}; the largest ρ: difference {diffs:.2e}, the series' rest {:.2e}, reuse {:.2e}, the far forms held {:.2e}, Fold::at's next {:.2e}", parts[0], parts[1], parts[2], parts[3]);
+            checked += 1;
+        }
+    }
+    assert!(checked > 0);
+}
+
+/// What the force's adjoint would cost, phase by phase, as a multiple of the forward's (proto.rs `PHASES`; the force is not
+/// made, BRIEF_PROTO.md): the light's gradients (each beam's amplitude and every coefficient on three axes), the sources'
+/// and the diagonal's cotangents (one contraction each), the far forms' (one), the sweeps' adjoints (each sweep's two
+/// products transposed: the source's and Δ's cotangents), the copies' and the compression's (both sides of Z†XZ), the
+/// normalization's (the eigenbasis there and back, ≈ 12n³ against 13n³); the refresh and the readings none.
+const ADJOINT: [f64; 10] = [3.0, 0.0, 1.0, 1.0, 1.0, 2.0, 0.0, 2.0, 2.0, 1.0];
+
+/// The prototype's step along thermal paths (not a test: BRIEF_PROTO.md gate 1; `PROTO_SCENE` a request's path,
+/// `PROTO_ATOMS` the atoms, 10 by default; run it single-threaded): per set and split, one cache per atom, 100 steps an
+/// atom (`thermal_paths`, 0.1 m/s), timed twice (the first pass warms the machine), the second reported. Per step the wall
+/// clock and its phases (the time stamps' ticks, scaled by the wall clock), the work, the sweeps, the decompositions made,
+/// the readings; and the force's estimate by `ADJOINT`.
+#[test]
+#[ignore = "a measurement: run by name with PROTO_SCENE"]
+fn a_prototype_s_step_at_a_scene() {
+    use super::proto::{Cache, Split, PHASES};
+    let name = std::env::var("PROTO_SCENE").expect("PROTO_SCENE");
+    let atoms: usize = std::env::var("PROTO_ATOMS").map_or(10, |x| x.parse().unwrap());
+    let req = crate::model::testing::scene(&name);
+    let choice = proto_choice(&req, &name);
+    let paths = thermal_paths(atoms);
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold = Fold::new(&req, &choice, set[0]).unwrap();
+        if fold.blocks.is_empty() {
+            continue;
+        }
+        let mut ws = match fold.prototype_workspace() {
+            Ok(w) => w,
+            Err(e) => {
+                println!("{name} set {set:?}: not the prototype's ({e})");
+                continue;
+            }
+        };
+        let (near, far) = ws.layout();
+        println!("{name} set {set:?}: n {}, near blocks (block, rows, copies, beams, terms) {near:?}, far blocks (block, rows, terms) {far:?}; {atoms} atoms × 100 steps", fold.size());
+        let kappa = kappa_of(&fold);
+        // The machine's pace while the passes run (the old harness's yardstick, step/tests.rs: 1024 complex multiply-adds),
+        // timed in turn with them; each split's best pass (the least mean wall clock of its steps of one round) reported.
+        let yardstick = || {
+            let matrix: [C64; 64] = std::array::from_fn(|k| C64::cis(0.37 * k as f64) * 0.125);
+            let mut x: [C64; 8] = std::array::from_fn(|k| C64::cis(1.3 * k as f64));
+            for _ in 0..16 {
+                let m = std::hint::black_box(&matrix);
+                x = std::array::from_fn(|i| m[8 * i..8 * i + 8].iter().zip(&x).map(|(a, b)| *a * *b).sum());
+            }
+            x[0].re
+        };
+        let passes: usize = std::env::var("PROTO_PASSES").map_or(6, |x| x.parse().unwrap());
+        for split in [Split::Column, Split::Centre] {
+            let mut best: Option<(f64, String)> = None;
+            let mut each_pass = vec![];
+            for pass in 0..passes {
+                let clock = std::time::Instant::now();
+                let mut sink = 0.0;
+                for _ in 0..1000 {
+                    sink += yardstick();
+                }
+                let pace = clock.elapsed().as_secs_f64() / 1000.0 * 1e9 / 1024.0;
+                std::hint::black_box(sink);
+                // Per step: wall, ticks by phase, work by phase, sweeps, made; per sweep index its ticks and work.
+                let (mut wall, mut ticks, mut work) = (vec![], vec![], vec![]);
+                let (mut sweeps, mut made, mut rounds) = (vec![], vec![], vec![]);
+                let (mut sweep_ticks, mut sweep_work, mut sweep_count) = (vec![0u64; 64], vec![0.0; 64], vec![0usize; 64]);
+                let mut most = [0.0_f64; 6];
+                for path in &paths {
+                    let mut cache = Cache::default();
+                    for r in path {
+                        let clock = std::time::Instant::now();
+                        let s = fold.prototype(*r, kappa, &mut cache, &mut ws, split).expect("the prototype's step");
+                        wall.push(clock.elapsed().as_secs_f64());
+                        ticks.push(s.ticks);
+                        work.push(s.work);
+                        sweeps.push(s.sweeps);
+                        made.push(s.made);
+                        rounds.push(s.rounds);
+                        for (k, (t, w)) in s.sweep_ticks.iter().zip(&s.sweep_work).enumerate() {
+                            sweep_ticks[k.min(63)] += t;
+                            sweep_work[k.min(63)] += w;
+                            sweep_count[k.min(63)] += 1;
+                        }
+                        for (m, x) in most.iter_mut().zip([s.series, s.reuse, s.far, s.centring, s.ratio, s.copies]) {
+                            *m = m.max(x);
+                        }
+                    }
+                }
+                if pass == 0 {
+                    continue;
+                }
+                let mut out = String::new();
+                let steps = wall.len();
+                let all_ticks: u64 = ticks.iter().map(|t| t.iter().sum::<u64>()).sum();
+                let ns_tick = 1e9 * wall.iter().sum::<f64>() / all_ticks as f64;
+                let calm: Vec<usize> = (0..steps).filter(|&i| made[i] == 0 && rounds[i] == 1).collect();
+                let every: Vec<usize> = (0..steps).collect();
+                let mean = |idx: &[usize], f: &dyn Fn(usize) -> f64| idx.iter().map(|&i| f(i)).sum::<f64>() / idx.len().max(1) as f64;
+                let us = |idx: &[usize]| 1e6 * mean(idx, &|i| wall[i]);
+                let phase_us = |idx: &[usize], k: usize| 1e-3 * ns_tick * mean(idx, &|i| ticks[i][k] as f64);
+                let phase_work = |idx: &[usize], k: usize| mean(idx, &|i| work[i][k]);
+                let total_work = |idx: &[usize]| mean(idx, &|i| work[i].iter().sum::<f64>());
+                let mut hist = vec![0usize; 64];
+                sweeps.iter().for_each(|&k| hist[k.min(63)] += 1);
+                let shares: Vec<String> = hist.iter().enumerate().filter(|x| *x.1 > 0).map(|(k, c)| format!("{k}: {:.1}%", 100.0 * *c as f64 / steps as f64)).collect();
+                out += &format!(
+                    "   {split:?} (pace {pace:.3} ns a yardstick multiply-add): {:.2} µs a step ({:.2} µs on the {} steps of one round that made nothing; {} steps made a decomposition or took up a kept one, {} made in all), {:.0} multiply-adds a step ({:.0} on those), {:.2} ns each; sweeps {shares:?}; the largest readings: series {:.1e}, reuse {:.1e}, the far forms held {:.1e}, their centring {:.1e}, the sweeps' ratio {:.2}, the copies' rows left out {:.1e}",
+                    us(&every),
+                    us(&calm),
+                    calm.len(),
+                    steps - calm.len(),
+                    made.iter().sum::<usize>(),
+                    total_work(&every),
+                    total_work(&calm),
+                    1e3 * us(&calm) / total_work(&calm),
+                    most[0],
+                    most[1],
+                    most[2],
+                    most[3],
+                    most[4],
+                    most[5]
+                );
+                out += "
+";
+                out += &format!("      by phase (µs / multiply-adds, the steps of one round; all steps' µs in brackets): {}
+", (0..10).map(|k| format!("{} {:.3}/{:.0} [{:.3}]", PHASES[k], phase_us(&calm, k), phase_work(&calm, k), phase_us(&every, k))).collect::<Vec<_>>().join(", "));
+                out += &format!(
+                    "      by sweep (µs / multiply-adds a sweep; the share of steps reaching it): {}
+",
+                    (0..64).filter(|&k| sweep_count[k] > 0).map(|k| format!("{}: {:.3}/{:.0} ({:.0}%)", k + 1, 1e-3 * ns_tick * sweep_ticks[k] as f64 / sweep_count[k] as f64, sweep_work[k] / sweep_count[k] as f64, 100.0 * sweep_count[k] as f64 / steps as f64)).collect::<Vec<_>>().join(", ")
+                );
+                let force_us: f64 = (0..10).map(|k| ADJOINT[k] * phase_us(&calm, k)).sum();
+                let force_work: f64 = (0..10).map(|k| ADJOINT[k] * phase_work(&calm, k)).sum();
+                out += &format!("      the force's estimate (ADJOINT × the phases): {force_us:.2} µs, {force_work:.0} multiply-adds; the forward and the force {:.2} µs a step (the steps of one round), {:.2} µs with every step's refresh; the decompositions' cost an atom (its first step's and its refreshes'): {:.2} ms", us(&calm) + force_us, us(&every) + force_us, 1e-3 * phase_us(&every, 1) * steps as f64 / paths.len() as f64);
+                each_pass.push(us(&calm));
+                if best.as_ref().is_none_or(|b| us(&calm) < b.0) {
+                    best = Some((us(&calm), out));
+                }
+            }
+            each_pass.sort_by(f64::total_cmp);
+            println!("{}", best.unwrap().1);
+            println!("      the passes' µs a step (steps of one round), sorted: {:?}", each_pass.iter().map(|x| format!("{x:.2}")).collect::<Vec<_>>());
+        }
+    }
+}

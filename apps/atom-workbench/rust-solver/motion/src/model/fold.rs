@@ -113,6 +113,7 @@ use std::rc::Rc;
 use crate::request::{Manifold, Request, GROUND, STATES};
 
 mod step;
+mod proto;
 #[cfg(test)]
 mod tests;
 
