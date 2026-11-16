@@ -1498,9 +1498,9 @@ fn explicit_parts(xs: &[usize], exact: &[(usize, usize)], basis: &NearBasis, e: 
     }
 }
 
-/// The adjoint of `compress` (with the emission) for a Hermitian cotangent Ā (n × n) of A = ÊZ + Z†(K̂Z + B): Z̄ = (Ê† + K̂Z +
-/// B)Ā + K̂†ZĀ, B̄ = Ê̄† = ZĀ. Its product is the force's, stacked over the blocks' rows (`Fold::prototype_force`): Z̄'s first
-/// term (in `zbar`) and x = ZĀ; here the rest of a block, Z̄ += K̂†x (K̂† triangular).
+/// The adjoint of a near block's compression (with the emission) for a Hermitian cotangent Ā (n × n) of A = ÊZ + Z†(K̂Z +
+/// B): Z̄ = (Ê† + K̂Z + B)Ā + K̂†ZĀ, B̄ = Ê̄† = ZĀ. Its product is the force's, stacked over the blocks' rows
+/// (`Fold::prototype_force`): Z̄'s first term (in `zbar`) and x = ZĀ; here the rest of a block, Z̄ += K̂†x (K̂† triangular).
 fn compress_back_rest(kappa: &[C64], t: &Mat, ends: &[usize], x: &[C64], zbar: &mut [C64], s: usize, n: usize, work: &mut f64) {
     // Z̄ += K̂† (Z Ā): K̂† = conj(κ) on the diagonal and the strict lower part T†.
     for i in 0..s {
@@ -3633,7 +3633,7 @@ impl Fold {
     /// G and of the outer nodes' (where `prototype_nodes` made them; ignored otherwise), every position moved together --
     /// the step's derivative, the same tangent the photons take (`Fold::prototype_tangent`), contracted with the cotangents
     /// of its top: G = S⁻¹AS⁻¹ (Ā = S⁻¹ḠS⁻¹, and S⁻¹'s to X̄ by `lyapunov`: Re⟨X̄, ∂X⟩), and per position the compression's
-    /// (`compress_back`: Re⟨Z̄, ∂Z⟩ + Re⟨Ṽ̄, ∂Ṽ⟩ + Re⟨K̄, ∂K̃⟩, the exact copies' and the centred copies' rows with them),
+    /// (`compress_back_rest`: Re⟨Z̄, ∂Z⟩ + Re⟨Ṽ̄, ∂Ṽ⟩ + Re⟨K̄, ∂K̃⟩, the exact copies' and the centred copies' rows with them),
     /// Ĥ_PP's and the far forms'. A node's Z(s) = Σ_l ρ_l Z_l moves with its factors' ratios ρ_l = f_l(s)/f_l and the
     /// responses' own tangent. The kept R₀ and z₀ are held as the step holds them; their relative change per µm along each
     /// axis (`Force::held`, ‖R₀‖·|∂(Ĥ − z₀)|, ~10⁻⁷ on the scenes) is what that leaves of the force, relatively. After
