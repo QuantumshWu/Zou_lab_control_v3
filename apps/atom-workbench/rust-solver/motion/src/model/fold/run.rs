@@ -16,9 +16,11 @@
 //! §11.3): there the middle's first evaluation joins or lets go the levels and makes the decompositions again as its
 //! readings ask, and what it decides is the trajectory's from then on (`Middle::held`). Every other evaluation -- the
 //! step's path at its own momentum, a set a jump lands in, the photon and the landing at a jump -- starts from the
-//! trajectory's representation and decides nothing that outlives it. Here a decision is made at every step's middle and
+//! trajectory's representation and decides nothing that outlives it. Here a decision is made at every step's middle,
 //! where a trajectory starts (`Dynamics::started`: the landing of its bare state, the held forms there -- its first
-//! decomposition made once); the grid of the coarsest level's step ends is step 3's.
+//! decomposition made once), and where a jump lands it in another set (step.rs `Places`: the landing set's middle, on
+//! which the step goes on -- its first decomposition there made once and kept); the grid of the coarsest level's step
+//! ends is step 3's. The representation is per set a shared value (`Caches`): a decision replaces its own set's.
 //!
 //! # The held forms
 //! A step's path momentum is predicted from the start state's held forms (step.rs # The path's momentum): the end state's
@@ -36,6 +38,21 @@
 //! at the nodes with the static ones at their exact phases (`Middle::nodes`, `Middle::force`), on the integrator's sums
 //! at their beats (`Middle::tone_force`), on the held state at the beats' weights (`Middle::nodes`, `Middle::tones`).
 //!
+//! # The jumps on the step's middle (DESIGN §13.2)
+//! A jump inside a step is made on the middles the step made: the photon at the jump's time s from the middle on the
+//! emitting set's (`Middle::emitted`: the light turned to the jump's place, the responses per beam and their tangent the
+//! middle's turned with it, S the middle's -- proto.rs `Fold::prototype_place`, no fold at the place), the landing
+//! S⁻¹f on the landing set's (`Middle::landing`, S the middle's). At a point (a trajectory's start) a middle is made
+//! there and the jump made on it at s = 0: one way for both.
+//!
+//! # The jumps' coherence (BRIEF_WIRE3 item 3)
+//! A set's blocks whose explicit states P holds a tone between are one coherence group (fold.rs `Fold::groups`, # Tones):
+//! their jumps are one operator per landing set, L_q(t) = C_q Σ_o e^{−iot}ε_o S⁻¹ over the group (DESIGN §1.3), so the
+//! photons' classes are per group (proto.rs `Fold::prototype_photons` at the time) and a jump's amplitudes its group's
+//! blocks' at their phases (`Middle::emitted`); and the decay between the offsets is its cross products, added to the
+//! generator at their beats at every position (`step::Middle::generator`): i(G − G†) = Σ_q L_q(t)†L_q(t) at every time,
+//! static and beating, by construction. Every block of the scenes is a group of its own.
+//!
 //! # The jumps' phase
 //! A jump lands on the lab frame's ground states, C_q Σ e^{−iot} ε_o S⁻¹x: in the landing set's coordinates, each of its
 //! ground states s at its own frame θ_s, the landed amplitude of s is e^{i(θ_s − o)t} (C_q ε_o S⁻¹x)_s -- one block a
@@ -48,14 +65,14 @@
 //! potentials as model.rs makes them (the folds with every drive bare: a reference is exact for any potential); the
 //! displayed rows are the set's own populations. The photons' and the landing's own forms (DESIGN step 3) and the
 //! explicit sets' optical sector are not yet here.
-use super::proto::{Bar, Cache, Workspace};
+use super::proto::{At, Bar, Cache, Workspace};
 use super::{Choice, Fold};
 use crate::field::Light;
 use crate::linalg::{Mat, C64};
 use crate::model::{Cluster, Lights, Model, Point, Quadratic, Scattering};
 use crate::request::{Request, GROUND, STATES};
-use crate::step::{Emitted, Forms, Held, Internal};
-use std::cell::{Cell, RefCell, RefMut};
+use crate::step::{Emitted, Forms, Held, Internal, Middle as _};
+use std::cell::{RefCell, RefMut};
 use std::sync::{Arc, Mutex};
 
 /// One state set of the run: its fold, its cluster, the near and far blocks in the jumps' order as the fold's blocks, the
@@ -69,6 +86,9 @@ struct Set {
     /// The tones' values ν_m (rad/µs; proto.rs `Workspace::tones`' order); the integrator's candidates (`Candidate`).
     tones: Vec<f64>,
     candidates: Vec<Candidate>,
+    /// The pairs of the jumps' blocks (their order, `blocks`) of one coherence group (fold.rs `Fold::groups`), each with
+    /// its beat o − o′ (rad/µs): the decay between their offsets (# The jumps' coherence).
+    coherent: Vec<(usize, usize, f64)>,
 }
 
 /// A candidate tone of the integrator (step.rs `Middle::beats`): a pair of the set's tones at ν and −ν (either may be
@@ -82,9 +102,10 @@ struct Candidate {
     work: [f64; 2],
 }
 
-/// An atom's representation (`step::Held`): per set its kept decompositions.
+/// An atom's representation (`step::Held`): per set its kept decompositions, each shared -- a decision replaces one set's,
+/// a middle reads its own set's without copying the others'.
 #[derive(Clone)]
-struct Caches(Vec<Cache>);
+struct Caches(Vec<Arc<Cache>>);
 
 /// The run's model on the fold at the atom (module documentation).
 pub(crate) struct Onefold {
@@ -108,8 +129,12 @@ impl Onefold {
     /// The run of a request (module documentation), the splitting's reference state's ground populations `reference`.
     /// Refused where the fold at the focus has a tone, or a set is not the prototype's (proto.rs `prototype_workspace`).
     pub(crate) fn new(request: &Request, reference: [f64; GROUND]) -> Result<Onefold, String> {
-        let choice = Choice::running(request)?;
-        let grounds = Fold::sets(request, &choice)?;
+        Onefold::of(request, &Choice::running(request)?, reference)
+    }
+
+    /// The run of a request on a choice of nodes (`new`: the rule's at the focus, `Choice::running`).
+    pub(crate) fn of(request: &Request, choice: &Choice, reference: [f64; GROUND]) -> Result<Onefold, String> {
+        let grounds = Fold::sets(request, choice)?;
         let light = Light::new(request);
         let potentials = Model::new(request, &light, &[])?;
         let axes = super::Axes::new(request)?;
@@ -117,7 +142,7 @@ impl Onefold {
         let mut sets = vec![];
         for (k, set) in grounds.iter().enumerate() {
             set.iter().for_each(|&g| membership[g] = k);
-            let fold = Fold::new(request, &choice, set[0])?;
+            let fold = Fold::new(request, choice, set[0])?;
             let mut states: Vec<usize> = fold.ground.clone();
             states.extend(fold.explicit.iter().map(|&x| GROUND + x));
             let cluster = Cluster { ground: fold.ground.len(), frames: fold.frames.clone(), waves: vec![[0.0; 3]; states.len()], waves_exact: vec![potentials.no_wave(); states.len()], states };
@@ -146,7 +171,12 @@ impl Onefold {
                 });
                 (vec![ws], blocks, [(forward + nodes) / 3.0, (tangent + force) / 3.0, tangent + force], beats.iter().map(|b| b.1).collect(), candidates)
             };
-            sets.push(Set { fold, cluster, blocks, work, pool: Mutex::new(pool), tones, candidates });
+            let coherent = (0..blocks.len())
+                .flat_map(|i| (0..blocks.len()).map(move |j| (i, j)))
+                .filter(|&(i, j)| i != j && fold.groups[blocks[i]] == fold.groups[blocks[j]])
+                .map(|(i, j)| (i, j, fold.blocks[blocks[i]].value - fold.blocks[blocks[j]].value))
+                .collect();
+            sets.push(Set { fold, cluster, blocks, work, pool: Mutex::new(pool), tones, candidates, coherent });
         }
         let energies: Vec<f64> = (0..GROUND).map(|s| request.hamiltonian[(s, s)].re).collect();
         let mut run = Onefold {
@@ -162,13 +192,14 @@ impl Onefold {
             sets,
             photons: 0.0,
         };
-        // A jump's photons at the focus, the dearest set's: its forward, tangent and photons (`Dynamics::photon_work`).
+        // A jump's photons at the focus, the dearest set's, as a jump at a point makes them (`Dynamics::emit`): its
+        // forward, tangent, the place and the photons there (`Dynamics::photon_work`).
         run.photons = (0..run.sets.len())
             .filter(|&k| !run.sets[k].fold.blocks.is_empty())
             .map(|k| {
                 let n = run.sets[k].fold.size();
                 let psi: Vec<C64> = (0..n).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
-                run.evaluate(k, [0.0; 3], [0.0; 3], &Held::default(), |fold, cache, ws, forward| forward + fold.prototype_tangent(cache, ws) + fold.prototype_photons(cache, ws, &psi, &run.grounds).work).unwrap_or(0.0)
+                run.evaluate(k, [0.0; 3], [0.0; 3], &Held::default(), |fold, cache, ws, forward| forward + fold.prototype_tangent(cache, ws) + fold.prototype_place([0.0; 3], [0.0; 3], [0.0; 3], 0.0, ws) + fold.prototype_photons(cache, ws, &psi, &run.grounds, At::Place, 0.0).work).unwrap_or(0.0)
             })
             .fold(0.0, f64::max)
             * crate::decide::COMPLEX;
@@ -176,7 +207,7 @@ impl Onefold {
     }
 
     /// A set's kept decompositions in a representation (none yet: a new atom's).
-    fn cache(&self, held: &Held, set: usize) -> Cache {
+    fn cache(&self, held: &Held, set: usize) -> Arc<Cache> {
         held.0.as_ref().and_then(|h| h.downcast_ref::<Caches>()).and_then(|c| c.0.get(set).cloned()).unwrap_or_default()
     }
 
@@ -195,7 +226,7 @@ impl Onefold {
     /// exist there.
     fn evaluate<R>(&self, set: usize, r: [f64; 3], kappa: [f64; 3], held: &Held, then: impl FnOnce(&Fold, &Cache, &mut Workspace, f64) -> R) -> Option<R> {
         let fold = &self.sets[set].fold;
-        let mut cache = self.cache(held, set);
+        let mut cache = (*self.cache(held, set)).clone();
         let mut ws = self.take(set);
         let forward = fold.prototype(r, kappa, &mut cache, &mut ws).map(|step| step.work.iter().sum::<f64>());
         let out = forward.map(|w| then(fold, &cache, &mut ws, w));
@@ -213,7 +244,7 @@ impl Onefold {
         if fold.blocks.is_empty() {
             return Some((psi.to_vec(), Forms { time: at.t, ..Forms::default() }, Cache::default()));
         }
-        let mut cache = self.cache(held, set);
+        let mut cache = (*self.cache(held, set)).clone();
         let mut ws = self.take(set);
         let out = fold.prototype(at.r, at.kappa, &mut cache, &mut ws).is_some().then(|| {
             let state = if land { ws.normal().product(&Mat { rows: n, cols: 1, data: psi.to_vec() }).data } else { psi.to_vec() };
@@ -286,9 +317,10 @@ fn position(s: f64) -> usize {
     }
 }
 
-/// A set's generator at a point (`step::Middle`; module documentation): the forward made at a path's momentum where the
-/// path is first asked for (its first a decision where the middle decides), the outer nodes where a step asks for them,
-/// the tangent where a form or the photons are asked; the middle's time t (the tones' phases).
+/// A set's generator at a point (`step::Middle`; module documentation): the forward made at a path's momentum and
+/// velocity where they are first asked for (its first a decision where the middle decides; a path is its numbers, so a
+/// path asked for again is the one made), the outer nodes where a step asks for them, the tangent where a form or the
+/// photons are asked; the middle's time t (the tones' phases).
 pub(crate) struct Middle<'a> {
     run: &'a Onefold,
     set: usize,
@@ -296,19 +328,18 @@ pub(crate) struct Middle<'a> {
     t: f64,
     decide: bool,
     caches: Option<Arc<Caches>>,
-    paths: Cell<u64>,
     inner: RefCell<Inner>,
 }
 
 /// What a middle holds of its evaluations: the set's decompositions as the trajectory gave them with what its decision
-/// made (`committed`), and those its last forward stood on (`eval`); the workspace; the path the workspace holds, the
-/// outer nodes' offset it holds them at, whether it holds the tangent; whether the decision was made; and the generator
-/// and S⁻¹ at the middle.
+/// made (`committed`), and those its last forward stood on (`eval`); the workspace; the path the workspace holds (its
+/// momentum and velocity), the outer nodes' offset it holds them at, whether it holds the tangent; whether the decision
+/// was made; and the generator and S⁻¹ at the middle.
 struct Inner {
-    committed: Cache,
+    committed: Arc<Cache>,
     eval: Cache,
     ws: Option<Workspace>,
-    current: u64,
+    current: Option<([f64; 3], [f64; 3])>,
     nodes: Option<f64>,
     tangent: bool,
     decided: bool,
@@ -316,9 +347,8 @@ struct Inner {
     generator: Mat,
 }
 
-/// A path through a middle: its momentum and velocity, and its place among the middle's paths.
+/// A path through a middle: its momentum and velocity.
 pub(crate) struct Path {
-    id: u64,
     kappa: [f64; 3],
     velocity: [f64; 3],
 }
@@ -335,18 +365,18 @@ impl Middle<'_> {
     /// The forward at the path's momentum, where the workspace does not hold it (module documentation, # The representation).
     fn forward(&self, path: &Path) -> RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
-        if inner.current != path.id {
+        if inner.current != Some((path.kappa, path.velocity)) {
             let fold = &self.run.sets[self.set].fold;
             let decide = self.decide && !inner.decided;
             let Inner { committed, eval, ws, generator, .. } = &mut *inner;
-            *eval = committed.clone();
+            *eval = (**committed).clone();
             let made = fold.prototype(self.r, path.kappa, eval, ws.as_mut().expect("a workspace")).map(|step| generator.data.copy_from_slice(&step.generator.data));
             if decide {
-                *committed = eval.clone();
+                *committed = Arc::new(eval.clone());
             }
             inner.decided |= decide;
             inner.exists = made.is_some();
-            (inner.current, inner.nodes, inner.tangent) = (path.id, None, false);
+            (inner.current, inner.nodes, inner.tangent) = (Some((path.kappa, path.velocity)), None, false);
         }
         inner
     }
@@ -383,6 +413,75 @@ impl Middle<'_> {
         fold.prototype_force(eval, ws.as_mut().unwrap(), bars, channels).forms
     }
 
+    /// A jump's photon of the state ψ at the time s from the middle along the path (`step::Dynamics::emit`; DESIGN §13.2):
+    /// the forward and the tangent the step made at the path (made here where it made none), the place there -- the light
+    /// turned to r + vs, the responses and their tangent turned lane by lane, S the middle's (proto.rs
+    /// `Fold::prototype_place`): no fold at the place --, the classes' rates there and the class `draw` picks; its jump's
+    /// amplitudes L(s)ψ on the landing set's states, each at its frame's phase at the time t_m + s (module documentation,
+    /// # The jumps' phase), and the photon's frequency. None where the set has no light (no blocks), the fold does not
+    /// exist there, or `draw` picks none.
+    pub(crate) fn emitted(&self, path: &Path, s: f64, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+        let (run, set) = (self.run, &self.run.sets[self.set]);
+        let fold = &set.fold;
+        if fold.blocks.is_empty() {
+            return None;
+        }
+        let mut inner = self.made(path, None, true);
+        if !inner.exists {
+            return None;
+        }
+        let Inner { eval, ws, .. } = &mut *inner;
+        let ws = ws.as_mut().expect("a workspace");
+        fold.prototype_place(self.r, path.kappa, path.velocity, s, ws);
+        let t = self.t + s;
+        let photons = fold.prototype_photons(eval, ws, psi, &run.grounds, At::Place, t);
+        let jumps = fold.prototype_jumps(eval, ws, At::Place);
+        let rates: Vec<f64> = photons.classes.iter().map(|c| c.2).collect();
+        let (first_block, landing, _, kick) = photons.classes[draw(&rates)?];
+        // The class's jump: its group's blocks' at their offsets' phases e^{−iot} (# The jumps' coherence), on the landing
+        // set's states, each at its frame's phase e^{iθ_s t} (# The jumps' phase); per block its share of the rate.
+        let to = &run.sets[landing];
+        let group = fold.groups[set.blocks[first_block]];
+        let x = Mat { rows: psi.len(), cols: 1, data: psi.to_vec() };
+        let mut amplitudes = [Internal::zeros(to.cluster.states.len()); 3];
+        let mut shares = vec![];
+        for (b, _) in set.blocks.iter().enumerate().filter(|(_, &o)| fold.groups[o] == group) {
+            let phase = C64::cis(-fold.blocks[set.blocks[b]].value * t);
+            let mut share = 0.0;
+            for (a, amplitude) in amplitudes.iter_mut().enumerate() {
+                let u = jumps[b][a].product(&x);
+                for ((z, &s), &theta) in amplitude.iter_mut().zip(&to.cluster.states).zip(&to.fold.frame_values) {
+                    if s < GROUND {
+                        *z += u.data[s] * phase * C64::cis(theta * t);
+                        share += u.data[s].norm_sqr();
+                    }
+                }
+            }
+            shares.push((share, fold.blocks[set.blocks[b]].value));
+        }
+        // The photon's frequency: the excited amplitude's (the frame's, its offset's and the set's slow ground energy) less
+        // the landing state's energy; of a group, its blocks' offsets at their shares of the rate.
+        let total: f64 = shares.iter().map(|x| x.0).sum();
+        let offset = if total > 0.0 { shares.iter().map(|(w, o)| w * o).sum::<f64>() / total } else { fold.blocks[set.blocks[first_block]].value };
+        let first = fold.ground[0];
+        let omega = run.frame + offset + run.energies[first] - fold.frame_values[0] - run.energies[run.grounds[landing][0]];
+        Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick })
+    }
+
+    /// Where a jump's bare state f lands in this middle's set: its slow part S⁻¹f, S the middle's (DESIGN §1.3, §13.2, the
+    /// landing; the forward the step made at the path). The state itself where the set has no light.
+    fn landing(&self, path: &Path, f: &[C64]) -> Internal {
+        if self.run.sets[self.set].fold.blocks.is_empty() {
+            return f.iter().copied().collect();
+        }
+        let inner = self.made(path, None, false);
+        if !inner.exists {
+            return f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect();
+        }
+        let n = f.len();
+        inner.ws.as_ref().expect("a workspace").normal().product(&Mat { rows: n, cols: 1, data: f.to_vec() }).data.into_iter().collect()
+    }
+
     /// e^{iν_m (t_m + s)} ρ: tone m's X at the time s from the middle (module documentation, # The tones).
     fn phased(&self, m: usize, s: f64, rho: &[C64]) -> Vec<C64> {
         let phase = C64::cis(self.run.sets[self.set].tones[m] * (self.t + s));
@@ -407,9 +506,7 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     fn path(&self, kappa: [f64; 3], velocity: [f64; 3]) -> Path {
-        let id = self.paths.get() + 1;
-        self.paths.set(id);
-        Path { id, kappa, velocity }
+        Path { kappa, velocity }
     }
 
     fn gauge(&self, _: &Path, rates: &mut [f64]) {
@@ -428,10 +525,29 @@ impl crate::step::Middle for Middle<'_> {
         let source = if s == 0.0 { &inner.generator } else { ws.node_generator(usize::from(s > 0.0)) };
         h.data.copy_from_slice(&source.data);
         let position = position(s);
-        for (m, &nu) in self.run.sets[self.set].tones.iter().enumerate() {
+        let set = &self.run.sets[self.set];
+        for (m, &nu) in set.tones.iter().enumerate() {
             let phase = C64::cis(nu * (self.t + s));
             for (z, g) in h.data.iter_mut().zip(&ws.tone(m, position).data) {
                 *z += phase * *g;
+            }
+        }
+        // The decay between a coherence group's offsets: −(i/2) e^{i(o − o′)t} Σ_q L_o,q†L_o′,q of its jumps there (# The
+        // jumps' coherence).
+        if !set.coherent.is_empty() {
+            let at = match position {
+                0 => At::Middle,
+                j => At::Node(j - 1),
+            };
+            let jumps = set.fold.prototype_jumps(&inner.eval, ws, at);
+            for &(i, j, beat) in &set.coherent {
+                let factor = C64::new(0.0, -0.5) * C64::cis(beat * (self.t + s));
+                for q in 0..3 {
+                    let cross = jumps[i][q].adjoint().product(&jumps[j][q]);
+                    for (z, c) in h.data.iter_mut().zip(&cross.data) {
+                        *z += factor * *c;
+                    }
+                }
             }
         }
     }
@@ -541,7 +657,7 @@ impl crate::step::Middle for Middle<'_> {
             return (Scattering { force: [f64::NAN; 3], diffusion: [[f64::NAN; 3]; 3], size: 0.0, links: 0 }, 0.0);
         }
         let Inner { eval, ws, .. } = &mut *inner;
-        let photons = fold.prototype_photons(eval, ws.as_mut().unwrap(), psi, &self.run.grounds);
+        let photons = fold.prototype_photons(eval, ws.as_mut().unwrap(), psi, &self.run.grounds, At::Middle, self.t);
         // The terms of a diagonal entry: per class its second moment and its kick's W b², at most the entry and twice
         // the kicks' part; the products behind it: S⁻¹ψ, the responses, the emission, a class's Gram over its rows.
         let kicks: [f64; 3] = std::array::from_fn(|a| photons.classes.iter().map(|c| c.2 * c.3[a] * c.3[a]).sum());
@@ -572,7 +688,7 @@ impl crate::step::Middle for Middle<'_> {
         if !inner.decided {
             return None;
         }
-        let mut caches = self.caches.as_ref().map_or_else(|| Caches(vec![Cache::default(); self.run.sets.len()]), |c| (**c).clone());
+        let mut caches = self.caches.as_ref().map_or_else(|| Caches(vec![Arc::default(); self.run.sets.len()]), |c| (**c).clone());
         caches.0[self.set] = inner.committed.clone();
         Some(Held(Some(Arc::new(caches))))
     }
@@ -612,31 +728,21 @@ impl crate::step::Dynamics for Onefold {
             t,
             decide,
             caches,
-            paths: Cell::new(0),
-            inner: RefCell::new(Inner { eval: committed.clone(), committed, ws, current: 0, nodes: None, tangent: false, decided: false, exists: true, generator: Mat::zeros(n, n) }),
+            inner: RefCell::new(Inner { eval: Cache::default(), committed, ws, current: None, nodes: None, tangent: false, decided: false, exists: true, generator: Mat::zeros(n, n) }),
         }
     }
 
-    fn emit(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
-        let set = &self.sets[cluster];
-        let (classes, jumps) = self.evaluate(cluster, at.r, at.kappa, held, |fold, cache, ws, _| {
-            fold.prototype_tangent(cache, ws);
-            let photons = fold.prototype_photons(cache, ws, psi, &self.grounds);
-            (photons.classes, fold.prototype_jumps(cache, ws, None))
-        })?;
-        let rates: Vec<f64> = classes.iter().map(|c| c.2).collect();
-        let (block, landing, _, kick) = classes[draw(&rates)?];
-        // The landing set's states each at its frame's phase e^{iθ_s t} (module documentation, # The jumps' phase).
-        let to = &self.sets[landing];
-        let amplitudes: [Internal; 3] = std::array::from_fn(|a| {
-            let u = jumps[block][a].product(&Mat { rows: psi.len(), cols: 1, data: psi.to_vec() });
-            to.cluster.states.iter().zip(&to.fold.frame_values).map(|(&s, &theta)| if s < GROUND { u.data[s] * C64::cis(theta * at.t) } else { C64::ZERO }).collect()
-        });
-        // The photon's frequency: the block's excited amplitude's (the frame's, its offset's and the set's slow ground
-        // energy) less the landing state's energy.
-        let (fold, first) = (&set.fold, set.fold.ground[0]);
-        let omega = self.frame + fold.blocks[set.blocks[block]].value + self.energies[first] - fold.frame_values[0] - self.energies[self.grounds[landing][0]];
-        Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick })
+    /// A jump's photon (`Middle::emitted`): on the step's middle at the jump's time from it, or at a point (a trajectory's
+    /// start) on a middle made there, at its own time.
+    fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path, f64)>, psi: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+        match on {
+            Some((middle, path, s)) => middle.emitted(path, s, psi, draw),
+            None => {
+                let middle = self.middle(cluster, at.r, at.t, held, false);
+                let path = middle.path(at.kappa, [0.0; 3]);
+                middle.emitted(&path, 0.0, psi, draw)
+            }
+        }
     }
 
     /// The held forms at a point, deciding nothing (# The held forms).
@@ -649,22 +755,25 @@ impl crate::step::Dynamics for Onefold {
     fn started(&self, cluster: usize, at: &Point, f: &[C64]) -> (Internal, Forms, Held) {
         match self.held_forms(cluster, at, f, &Held::default(), true) {
             Some((landed, forms, cache)) => {
-                let mut caches = Caches(vec![Cache::default(); self.sets.len()]);
-                caches.0[cluster] = cache;
+                let mut caches = Caches(vec![Arc::default(); self.sets.len()]);
+                caches.0[cluster] = Arc::new(cache);
                 (landed.into_iter().collect(), forms, Held(Some(Arc::new(caches))))
             }
             None => (f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect(), Forms { time: at.t, held: [f64::NAN; 3], tones: vec![] }, Held::default()),
         }
     }
 
-    fn landed(&self, cluster: usize, at: &Point, f: &[C64], held: &Held) -> Internal {
-        if self.sets[cluster].fold.blocks.is_empty() {
-            return f.iter().copied().collect();
+    /// Where a jump's bare state lands (`Middle::landing`): on the landing set's middle in the step, or at a point on a
+    /// middle made there.
+    fn landed<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path)>, f: &[C64], held: &Held) -> Internal {
+        match on {
+            Some((middle, path)) => middle.landing(path, f),
+            None => {
+                let middle = self.middle(cluster, at.r, at.t, held, false);
+                let path = middle.path(at.kappa, [0.0; 3]);
+                middle.landing(&path, f)
+            }
         }
-        // The slow part of the bare state: S⁻¹f (DESIGN §1.3, the landing).
-        let n = f.len();
-        self.evaluate(cluster, at.r, at.kappa, held, |_, _, ws, _| ws.normal().product(&Mat { rows: n, cols: 1, data: f.to_vec() }).data.into_iter().collect())
-            .unwrap_or_else(|| f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect())
     }
 
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {

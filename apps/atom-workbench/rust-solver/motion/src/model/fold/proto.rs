@@ -115,9 +115,8 @@
 //! G's metric (DESIGN §1.3: the metric's beating part left out, M8): the generator at the time t is
 //! G + Σ_m e^{iν_m t} G_m. Its gradient is the same step's derivative, contracted with the static G's in one pass
 //! (`Fold::prototype_force`): S⁻¹'s through N̄ and the metric's tangent, A_m's through the pairs' ∂c at the position.
-//! The tones' decay i(G_m − G_{−m}†) has no jump of its own: the jumps are per block (fold.rs # Tones, blocks no kept copy
-//! relates are not coherent), so a set whose tones beat with a decay -- explicit levels at two offsets -- is not the
-//! run's (none of the scenes has one; `Fold::at` is the same).
+//! A tone is Hermitian: an explicit pair's entry is 𝒦's less its decay (`Fold::hermitian_excited`), the decay between two
+//! offsets being their group's jumps' cross products (fold.rs # Tones; model/fold/run.rs, # The jumps' coherence).
 //!
 //! The copies a block solves exactly (the P layer's Woodbury) are the solved rows after its excited ones; a block with no
 //! Q rows is a near block of none, its explicit states' own ε rows alone (BRIEF_WIRE2 item 2).
@@ -229,6 +228,9 @@ struct Near {
     // response Z(s), Ṽ(s), the copies' rows.
     ratio: [Vec<C64>; 2],
     znode: [Vec<C64>; 2],
+    // At a jump's place (`Fold::prototype_place`): the response Z(s) and its tangent, the middle's turned lane by lane.
+    zplace: Vec<C64>,
+    dzplace: Vec<C64>,
     vnode: [Vec<C64>; 2],
     tcnode: [Vec<C64>; 2],
     copied_in: bool,
@@ -274,9 +276,10 @@ impl Near {
         }
         let [z0, z1] = &mut self.znode;
         let [v0, v1] = &mut self.vnode;
-        for v in [&mut self.vtot, &mut self.ztot, &mut self.zold, &mut self.stat, z0, z1, v0, v1] {
+        for v in [&mut self.vtot, &mut self.ztot, &mut self.zold, &mut self.stat, z0, z1, v0, v1, &mut self.zplace] {
             v.resize(s * n, C64::ZERO);
         }
+        self.dzplace.resize(3 * s * n, C64::ZERO);
         self.emit.resize(n * s, C64::ZERO);
         for p in self.pnode.iter_mut() {
             p.emit.resize(n * s, C64::ZERO);
@@ -528,6 +531,10 @@ pub(crate) struct Workspace {
     nodes: Vec<Node>,
     node_times: [f64; 2],
     noded: bool,
+    /// The light at a jump's place (`Fold::prototype_place`).
+    place: Placed,
+    /// The photons' [u | ∂u] per coherence group (`Fold::prototype_photons`; fold.rs `Fold::groups`).
+    photons4: Vec<C64>,
     /// Whether the step's tangent was made (`Fold::prototype_tangent`: per near block its own, `Near::tg`; per lab axis the
     /// metric's ∂X and S's ∂S), its ticks and work by phase (`TANGENT`).
     tangent: bool,
@@ -1902,7 +1909,7 @@ impl Fold {
         };
         for x in (0..n * n).filter(|&x| turning(x / n, x % n)) {
             let (p, q) = (x / n, x % n);
-            let h = if p < ng { self.base_ground[(self.ground[p], self.ground[q])] } else { self.base_excited[(self.explicit[p - ng], self.explicit[q - ng])] };
+            let h = if p < ng { self.base_ground[(self.ground[p], self.ground[q])] } else { self.hermitian_excited(&self.base_excited, p, q) };
             if h != C64::ZERO {
                 let m = tone_of(x, &mut rotating);
                 rotating[m].base.push((x, h));
@@ -2084,6 +2091,8 @@ impl Fold {
                     ztots: vec![],
                     ratio: [z(lanes), z(lanes)],
                     znode: [z(s * n), z(s * n)],
+                    zplace: z(s * n),
+                    dzplace: z(3 * s * n),
                     vnode: [z(s * n), z(s * n)],
                     tcnode: [z(nc * n), z(nc * n)],
                     copied_in: false,
@@ -2156,6 +2165,8 @@ impl Fold {
         let node = || Node { at: placed.clone(), a: z(n, n), generator: z(n, n), tones: rotating.iter().map(|_| z(n, n)).collect(), hf: far.iter().map(|_| vec![C64::ZERO; n * n]).collect(), mf: far.iter().map(|_| vec![C64::ZERO; n * n]).collect() };
         let nodes = vec![node(), node()];
         let near_len = near.len();
+        let place = placed.clone();
+        let photons4 = vec![C64::ZERO; (near.len() + far.len()) * 12 * GROUND];
         Ok(Workspace {
             n,
             pp,
@@ -2170,6 +2181,8 @@ impl Fold {
             nodes,
             node_times: [0.0; 2],
             noded: false,
+            place,
+            photons4,
             tangent: false,
             dx: std::array::from_fn(|_| vec![C64::ZERO; n * n]),
             ds: std::array::from_fn(|_| vec![C64::ZERO; n * n]),
@@ -3560,6 +3573,15 @@ fn inner(x: &[C64], y: &[C64], rows: usize, width: usize, stride: usize, at: usi
     sum
 }
 
+/// Where along a step its photons and its jumps are read (`Fold::prototype_photons`, `Fold::prototype_jumps`): its
+/// middle, an outer node (`Fold::prototype_nodes`), or a jump's place (`Fold::prototype_place`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum At {
+    Middle,
+    Node(usize),
+    Place,
+}
+
 /// One cotangent of the step's derivative (`Fold::prototype_force`): the channel its form is summed into, its position (0
 /// the middle, 1 and 2 the outer nodes at −h and h), what it contracts -- the static G (none) or tone m's G_m (module
 /// documentation, # The tones) -- and its matrix (n × n, row by row): Ḡ of Re tr(Ḡ†G) (Hermitian), X of tr(G_m X).
@@ -3722,6 +3744,44 @@ impl Fold {
                 multiply(&temp.data, &step.normal.data, &mut g.data, n);
             }
             work += (2 * n * n * n * (1 + node.tones.len())) as f64;
+        }
+        work
+    }
+
+    /// A jump's place inside the step (DESIGN §13.2; module documentation, # The jumps): at the time s from the middle along
+    /// the path of velocity v, the light there (the beams' fields turned to r + vs) and every near block's response
+    /// Z(s) = Σ_l ρ_l Z_l with its tangent ∂Z(s) = Σ_l ρ_l ∂Z_l, ρ_l = f_l(s)/f_l -- the responses per beam and their
+    /// tangent held over the step, the field turned, as the outer nodes' (`prototype_nodes`): no fold at the place. A plane
+    /// wave's relative gradient is its wave vector, so its lane's tangent turns with its factor exactly; the responses'
+    /// own change (through Ĥ_PP, K̃, Ṽ) is the middle's. After `prototype` and `prototype_tangent` on the same cache.
+    /// Returns the work.
+    pub(crate) fn prototype_place(&self, r: [f64; 3], kappa: [f64; 3], velocity: [f64; 3], s: f64, ws: &mut Workspace) -> f64 {
+        let n = ws.n;
+        let mut work = 0.0;
+        assert!(ws.tangent, "the step's tangent");
+        let Workspace { mid, near, pairs, pp, base, lin, rotating, proj, place, .. } = &mut *ws;
+        let at: [f64; 3] = std::array::from_fn(|a| r[a] + velocity[a] * s);
+        self.proto_place(at, kappa, place, pairs, pp, base, lin, rotating, proj, &mut work);
+        for nb in near.iter_mut().filter(|nb| !nb.idle()) {
+            let (rows, ln) = (nb.s, nb.lanes * n);
+            let m = 3 * ln;
+            nb.zplace.fill(C64::ZERO);
+            nb.dzplace.fill(C64::ZERO);
+            for sp in 0..nb.lanes {
+                // The beams' lanes turn with their factors; the static lane is held (its ratio one).
+                let ratio = match nb.splits.get(sp) {
+                    Some(&(cc, jj)) => place.f[cc][jj] / mid.f[cc][jj],
+                    None => C64::ONE,
+                };
+                for i in 0..rows {
+                    crate::linalg::mul_add(false, &mut nb.zplace[i * n..i * n + n], ratio, &nb.z[i * ln + sp * n..i * ln + sp * n + n]);
+                    for a in 0..3 {
+                        let from = i * m + a * ln + sp * n;
+                        crate::linalg::mul_add(false, &mut nb.dzplace[(3 * i + a) * n..(3 * i + a + 1) * n], ratio, &nb.tg.dz[from..from + n]);
+                    }
+                }
+            }
+            work += (4 * nb.lanes * rows * n) as f64;
         }
         work
     }
@@ -4651,20 +4711,29 @@ impl Fold {
         work.iter().sum()
     }
 
-    /// The absorbed light's moments of the state ψ at the step's middle (photon.rs # The absorbed light's momentum, its
-    /// moments' formula): per block (its photons one frequency) and landing set (`sets`, the ground states' partition) a
+    /// The absorbed light's moments of the state ψ at a position of the step -- its middle, or a jump's place
+    /// (`prototype_place`: the light there, the responses and their tangent turned, S the middle's) -- (photon.rs # The
+    /// absorbed light's momentum, its moments' formula): per coherence group (fold.rs `Fold::groups`: a block alone, its
+    /// photons one frequency; or blocks whose jumps are one operator, each block's at its offset's phase e^{−iot} at the
+    /// time `t`) and landing set (`sets`, the ground states' partition) a
     /// class, u_q = C_q ε S⁻¹ψ -- ε = VZ of a near block, R₀Σ_a e_a U_a of a far one -- with its whole gradient ∇u of the
     /// step's tangent (`Fold::prototype_tangent`: ∂Z, ∂e, and S⁻¹'s ∂(S⁻¹ψ) = −S⁻¹ ∂S S⁻¹ψ). The jumps carry each class's
     /// mean up to one absorbed photon (`Photon::kick`'s rule, k_c the class's largest beam wave number): the rest is the
     /// force; 2D = Σ_c M2_c − W_c b_c b_cᵀ of the kicks. After `prototype_tangent`.
-    pub(crate) fn prototype_photons(&self, cache: &Cache, ws: &mut Workspace, psi: &[C64], sets: &[Vec<usize>]) -> Photons {
+    pub(crate) fn prototype_photons(&self, cache: &Cache, ws: &mut Workspace, psi: &[C64], sets: &[Vec<usize>], position: At, t: f64) -> Photons {
         let n = ws.n;
         let g3 = 3 * GROUND;
         let mut work = 0.0;
         assert!(ws.tangent, "the step's tangent");
-        let Workspace { mid, step, near, far, scratch, tm, ds, .. } = &mut *ws;
+        let Workspace { mid, place, step, near, far, scratch, tm, ds, photons4, .. } = &mut *ws;
         let normal = &step.normal.data;
-        let de = &mid.de;
+        // The light and the responses there: the middle's, or a jump's place's (`prototype_place`).
+        let (light, placed) = match position {
+            At::Middle => (&*mid, false),
+            At::Place => (&*place, true),
+            At::Node(_) => unreachable!("the photons at the middle or at a jump's place"),
+        };
+        let de = &light.de;
         let Temp { zeta, dzeta, zeta4, u4, rows4, gram, e: q, .. } = tm;
         // ζ = S⁻¹ψ, ∂ζ = −S⁻¹ ∂S ζ, laid as the products' right factor [ζ | ∂ζ_x | ∂ζ_y | ∂ζ_z] (n × 4).
         let (zeta, dzeta, z4, q) = (&mut zeta[..n], &mut dzeta[..3 * n], &mut zeta4[..4 * n], &mut q[..n]);
@@ -4708,6 +4777,24 @@ impl Fold {
             }
         };
         let u4 = &mut u4[..4 * g3];
+        // Per coherence group (fold.rs `Fold::groups`) its blocks' [u | ∂u] summed at their offsets' phases e^{−iot} at the
+        // time t, the largest absorbed wave number, and the jumps' index of its first block: its classes' (a group of one
+        // block, its block's).
+        let groups = &mut photons4[..(near.len() + far.len()) * 4 * g3];
+        groups.fill(C64::ZERO);
+        let mut slots: Vec<(usize, usize, f64)> = Vec::with_capacity(near.len() + far.len());
+        let mut gather = |o: usize, at: usize, absorbed: f64, u4: &[C64]| {
+            let group = self.groups[o];
+            let slot = slots.iter().position(|s| s.0 == group).unwrap_or_else(|| {
+                slots.push((group, at, 0.0));
+                slots.len() - 1
+            });
+            slots[slot].2 = slots[slot].2.max(absorbed);
+            let phase = C64::cis(-self.blocks[o].value * t);
+            for (sum, u) in groups[slot * 4 * g3..(slot + 1) * 4 * g3].iter_mut().zip(u4) {
+                *sum += phase * *u;
+            }
+        };
         for (x, (nb, sc)) in near.iter().zip(scratch.iter_mut()).enumerate() {
             if nb.idle() {
                 continue;
@@ -4720,8 +4807,9 @@ impl Fold {
             }
             // [Zζ | Z∂ζ_a + ∂Z_a ζ] (s × 4): Z on [ζ | ∂ζ], ∂Z (its rows (i, a) at 3i + a) on ζ.
             let (y, dy) = (&mut sc.py[..4 * s], &mut sc.pdy[..3 * s]);
-            fused_product_into(&nb.ztot, z4, (s, n, 4), y);
-            fused_product_into(&nb.tg.dztot, zeta, (3 * s, n, 1), dy);
+            let (z, dz) = if placed { (&nb.zplace, &nb.dzplace) } else { (&nb.ztot, &nb.tg.dztot) };
+            fused_product_into(z, z4, (s, n, 4), y);
+            fused_product_into(dz, zeta, (3 * s, n, 1), dy);
             for i in 0..s {
                 for a in 0..3 {
                     y[4 * i + 1 + a] += dy[3 * i + a];
@@ -4735,10 +4823,8 @@ impl Fold {
                 crate::linalg::fused_product_onto(&basis.xemitc, z4, (g3, n, 4), u4);
                 work += (12 * GROUND * n) as f64;
             }
-            for (k, set) in sets.iter().enumerate() {
-                class(u4, set, absorbed, (x, k), &mut out);
-            }
-            work += (3 * GROUND * 13) as f64;
+            gather(nb.o, x, absorbed, u4);
+            work += (4 * g3) as f64;
         }
         let nears = near.len();
         for (x, fb) in far.iter_mut().enumerate().filter(|(_, fb)| !fb.omitted) {
@@ -4755,7 +4841,7 @@ impl Fold {
             fused_product_into(&basis.emitted, z4, (v * g3, n, 4), pv);
             u4.fill(C64::ZERO);
             for (ia, &(cc, k)) in fb.vectors.iter().enumerate() {
-                let (e, d) = (mid.e[cc][k], de[cc][k]);
+                let (e, d) = (light.e[cc][k], de[cc][k]);
                 for r in 0..g3 {
                     let (o, x) = (&mut u4[4 * r..4 * r + 4], &pv[4 * (ia * g3 + r)..4 * (ia * g3 + r) + 4]);
                     o[0] += e * x[0];
@@ -4765,8 +4851,12 @@ impl Fold {
                 }
                 work += (12 * GROUND * n) as f64;
             }
+            gather(fb.o, nears + x, absorbed, u4);
+            work += (4 * g3) as f64;
+        }
+        for (slot, &(_, at, absorbed)) in slots.iter().enumerate() {
             for (k, set) in sets.iter().enumerate() {
-                class(u4, set, absorbed, (nears + x, k), &mut out);
+                class(&groups[slot * 4 * g3..(slot + 1) * 4 * g3], set, absorbed, (at, k), &mut out);
             }
             work += (3 * GROUND * 13) as f64;
         }
@@ -4778,23 +4868,25 @@ impl Fold {
         out
     }
 
-    /// The jumps at the step's middle (`node` None) or at an outer node: per block C_q ε S⁻¹ (GROUND × n, q the emission's
-    /// axis), ε the block's excited amplitude there -- a near block's VZ (Z = Σ_l ρ_l Z_l at a node), a far block's
+    /// The jumps at a position of the step (`At`: its middle, an outer node, a jump's place): per block C_q ε S⁻¹
+    /// (GROUND × n, q the emission's axis), ε the block's excited amplitude there -- a near block's VZ (Z = Σ_l ρ_l Z_l at a node), a far block's
     /// R₀Σ_a e_a U_a --, S the middle's: i(G − G†) = Σ L†L to the rounding at every position (module documentation, # The
     /// jumps).
-    pub(crate) fn prototype_jumps(&self, cache: &Cache, ws: &Workspace, node: Option<usize>) -> Vec<[Mat; 3]> {
+    pub(crate) fn prototype_jumps(&self, cache: &Cache, ws: &Workspace, position: At) -> Vec<[Mat; 3]> {
         let n = ws.n;
         let normal = &ws.step.normal;
-        let e = match node {
-            None => &ws.mid.e,
-            Some(j) => &ws.nodes[j].at.e,
+        let e = match position {
+            At::Middle => &ws.mid.e,
+            At::Node(j) => &ws.nodes[j].at.e,
+            At::Place => &ws.place.e,
         };
         let mut out = vec![];
         for (x, nb) in ws.near.iter().enumerate() {
             let basis = &cache.near[x][cache.at_near[x].unwrap()];
-            let z = match node {
-                None => &nb.ztot,
-                Some(j) => &nb.znode[j],
+            let z = match position {
+                At::Middle => &nb.ztot,
+                At::Node(j) => &nb.znode[j],
+                At::Place => &nb.zplace,
             };
             let zm = Mat { rows: nb.s, cols: n, data: z.clone() };
             out.push(std::array::from_fn(|q| {

@@ -76,15 +76,21 @@
 //!
 //! # Tones
 //! What stays in P and is not static: an entry between P states of different frames (H_GG, or 𝒦 between explicit states of two
-//! offsets) at θ_t − θ_s whose coupling cannot be folded (`Fold::turning`: its peak strength over the states' energy
-//! difference read as the sets are, `unfoldable`; one that can is a copy left out, its population within the share); a
+//! offsets, its Hermitian part) at θ_t − θ_s whose coupling cannot be folded (`Fold::turning`: its peak strength over the
+//! states' energy difference read as the sets are, `unfoldable`; one that can is a copy left out, its population within
+//! the share); a
 //! kept copy's emission Γ_t†V_g†ε_o at θ_t − ω and its partner; and the beat of the two blocks a kept copy relates,
 //! ε_o'†(𝒦 − ν̄)ε_o at o' − o (o' = θ_t + ν_g; ν̄ the columns' offsets from their own frames, gauge invariant, `Fold::cross`):
 //! the copy's excited node is reached both from block o and from its state's sideband through its own block, one Floquet node, so their interference (the rate's, with
 //! the decay -(i/2)ε_o'†Dε_o) is physics. Two blocks no kept copy relates are different Floquet nodes: their cross terms
 //! are not taken -- with the beating metric dropped (M8) they would turn at |o − o'| with a size |o − o'|·|ε_o'†ε_o|/2 and
-//! a second-order shift of nothing in the exact Floquet problem (onefold report, step 1); the hazard is to take the jumps'
-//! cross terms the same way (step 2).
+//! a second-order shift of nothing in the exact Floquet problem (onefold report, step 1); the jumps' cross terms the same
+//! way: each block's jumps its own. Blocks whose explicit states P holds a tone between (`Fold::groups`) are one group: the
+//! decay of P between their explicit states is no tone's but their jumps', which are one operator per landing set,
+//! L_q(t) = C_q Σ_o e^{−iot}ε_o S⁻¹ over the group (DESIGN §1.3; model/fold/run.rs): the decay between the offsets is its
+//! cross products L_o†L_o′ at e^{i(o − o′)t} -- whole, the explicit rows' with the solved ones' --, so that the decay is the
+//! jumps' product at every time by construction, positive semidefinite (BRIEF_WIRE3 item 3). (A kept copy's related
+//! blocks keep their cross term whole and their jumps apart: not the run's, whose choice keeps no copy in P.)
 //!
 //! # The passes as the next one reads (DESIGN §1.5, M1)
 //! Two passes, a third only as the share asks (the cheapest within the share, the evaluation order's rule): after the
@@ -505,6 +511,9 @@ pub(crate) struct Fold {
     /// kind and different frames whose coupling cannot be folded.
     pub(crate) turning: Vec<bool>,
     pub(crate) blocks: Vec<Block>,
+    /// Per block its coherence group (module documentation, # Tones), named by its least block: blocks whose explicit
+    /// states P holds a tone between are one group, their jumps one operator.
+    pub(crate) groups: Vec<usize>,
     /// H0 less the outside forms at the focus: its ground block, and its excited block with −(i/2)D.
     base_ground: Mat,
     base_excited: Mat,
@@ -751,6 +760,16 @@ impl Fold {
             rows.extend(centred);
             blocks.push(Block { offset, value, explicit: mine, rows, solved, sources, kept, omitted });
         }
+        // The coherence groups (module documentation, # Tones): blocks joined by a tone between their explicit states.
+        let mut groups: Vec<usize> = (0..blocks.len()).collect();
+        let block_of = |p: usize| blocks.iter().position(|b| b.explicit.contains(&p));
+        for x in (0..n * n).filter(|&x| turning[x] && x / n >= ng && x % n >= ng) {
+            if let (Some(i), Some(j)) = (block_of(x / n), block_of(x % n)) {
+                let (gi, gj) = (groups[i], groups[j]);
+                let (low, high) = (gi.min(gj), gi.max(gj));
+                groups.iter_mut().filter(|g| **g == high).for_each(|g| *g = low);
+            }
+        }
         // The outside forms' entries that are not zero, of the states the fold uses (every ground state; the excited states a
         // block solves or a place holds) and of the others.
         let mut used = [true; STATES];
@@ -787,6 +806,7 @@ impl Fold {
             explicit,
             turning,
             blocks,
+            groups,
             base_ground: base.block(&all, &all),
             base_excited,
             emission: std::array::from_fn(|q| request.emission[q].block(&all, &excited)),
@@ -1224,6 +1244,16 @@ impl Fold {
         pairs
     }
 
+    /// 𝒦's entry between the explicit places p and q (of different offsets) less its decay −(i/2)D: the decay between the
+    /// offsets is their group's jumps' cross products, L_o†L_o′ at e^{i(o − o′)t} (module documentation, # Tones), D =
+    /// Σ_q C_q†C_q the emission's.
+    pub(crate) fn hermitian_excited(&self, excited: &Mat, p: usize, q: usize) -> C64 {
+        let ng = self.ground.len();
+        let (x, y) = (self.explicit[p - ng], self.explicit[q - ng]);
+        let decay: C64 = self.emission.iter().map(|c| (0..GROUND).map(|g| c[(g, x)].conj() * c[(g, y)]).sum::<C64>()).sum();
+        excited[(x, y)] + C64::new(0.0, 0.5) * decay
+    }
+
     /// The cross term of two blocks a kept copy relates (module documentation, # Tones), ε_i†(𝒦 − ν̄)ε_j with the frame part of
     /// the Galerkin term taken from each column's own offset: entry (p, q) holds ε_i†𝒦ε_j less ½[(o_i − θ_p) + (o_j − θ_q)] of
     /// the shared states' overlap ε_i†ε_j -- the offsets of the columns' excited amplitudes from their own frames, what the
@@ -1251,7 +1281,7 @@ impl Fold {
         // P's entries of places of one kind and different frames whose coupling cannot be folded (`Fold::turning`).
         for x in (0..n * n).filter(|&x| self.turning[x]) {
             let (p, q) = (x / n, x % n);
-            let z = if p < ng { site.ground[(self.ground[p], self.ground[q])] } else { site.excited[(self.explicit[p - ng], self.explicit[q - ng])] };
+            let z = if p < ng { site.ground[(self.ground[p], self.ground[q])] } else { self.hermitian_excited(&site.excited, p, q) };
             if z != C64::ZERO {
                 let mut m = Mat::zeros(n, n);
                 m[(p, q)] = z;

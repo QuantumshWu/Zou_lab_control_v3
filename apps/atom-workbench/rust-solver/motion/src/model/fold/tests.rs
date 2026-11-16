@@ -1924,7 +1924,7 @@ fn a_prototype_s_step_at_a_scene() {
                         tangent.push((ws.tangent_ticks, ws.tangent_work, t_tangent, ws.force_ticks));
                         let t_force = clock.elapsed().as_secs_f64();
                         let clock = std::time::Instant::now();
-                        let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets);
+                        let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets, super::proto::At::Middle, 0.0);
                         let t_photons = clock.elapsed().as_secs_f64();
                         rest.push([t_nodes, t_force, t_photons, node_work, tangent_work + force.work, photons.work]);
                         ticks.push(s.0);
@@ -2152,7 +2152,7 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
                             None => g0.clone(),
                             Some(j) => ws.node_generator(j).clone(),
                         };
-                        proto_decay(&g, &fold.prototype_jumps(&cache, &ws, j))
+                        proto_decay(&g, &fold.prototype_jumps(&cache, &ws, j.map_or(super::proto::At::Middle, super::proto::At::Node)))
                     })
                     .collect();
                 fold.prototype_tangent(&cache, &mut ws);
@@ -2251,7 +2251,7 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                     let mut cache = Cache::default();
                     fold.prototype(r, kappa, &mut cache, ws).expect("the prototype");
                     let mut out = vec![];
-                    for js in fold.prototype_jumps(&cache, ws, None) {
+                    for js in fold.prototype_jumps(&cache, ws, super::proto::At::Middle) {
                         for set in &sets {
                             out.push((0..3).flat_map(|q| set.iter().map(move |&b| (q, b))).map(|(q, b)| (0..n).map(|j| js[q][(b, j)] * psi[j]).sum()).collect());
                         }
@@ -2261,7 +2261,7 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                 let mut cache = Cache::default();
                 let g = fold.prototype(r0, kappa, &mut cache, &mut ws).unwrap().generator.clone();
                 fold.prototype_tangent(&cache, &mut ws);
-                let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets);
+                let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets, super::proto::At::Middle, 0.0);
                 let hazard: f64 = (0..n).map(|i| (0..n).map(|j| psi[i].conj() * C64::I * (g[(i, j)] - g[(j, i)].conj()) * psi[j]).sum::<C64>().re).sum::<f64>() / norm;
                 assert!((photons.rate - hazard).abs() <= 1e-12 * hazard.abs().max(1e-300), "{name} set {set:?} point {point}: the photons' rate {} against the hazard {hazard}", photons.rate);
                 // The whole gradient by the difference (h = 1e-4 µm, central).
@@ -2584,4 +2584,90 @@ fn the_run_s_lambda_with_a_tone_is_the_master_equation_s() {
     println!("with the tone: |1⟩'s share at 60 µs: the run {mean:.4} ± {error:.4} over 400 trajectories, the exact master equation {exact:.4} ± {own:.1e} (the dark state's {dark:.4}; the elimination's (a/(Γ/2))² {elimination:.4})");
     assert!((exact - dark).abs() > 3.0 * error + elimination + own, "the tone moves the share beyond what the run is held to: {exact} against the dark state's {dark}");
     assert!((mean - exact).abs() <= 3.0 * error + elimination + own, "the run's |1⟩ share {mean} ± {error} against the master equation's {exact}");
+}
+
+/// The jumps' coherence (run.rs # The jumps' coherence; BRIEF_WIRE3 item 3): |1⟩ at 0 (|2⟩ at 100 rad/µs, lit by
+/// nothing), an excited state e at 1000 rad/µs in its frame (Γ = 38 rad/µs: 1 to |1⟩, the rest to |2⟩), A on |1⟩ → e
+/// (10 rad/µs) on its resonance, and a second excited level e′ (D1's F′ = 1, e being D2's) 10 rad/µs above e decaying
+/// to |1⟩ at 25 rad/µs on e's axis, driven from |1⟩ by a laser C (10 rad/µs) on its resonance. Both excited levels in P,
+/// each at its offset (a tiered choice), the offsets 10 rad/µs apart; D_ee′ = 5 rad/µs, so P holds a tone between them
+/// (its mixing |D_ee′|/2 over their 10 rad/µs, 0.25, beyond the share):
+/// their blocks are one coherence group. At the step's three positions and at times across the beat, for random states
+/// of the set: the photons' rate at the jump's place (`Middle::emitted`'s classes, the light turned there) is the hazard
+/// ψ†i(G − G†)ψ/ψ†ψ of the generator at that node (`Middle::generator`) to the rounding: the decay is the jumps' product at
+/// every time, its beat between the offsets with it. (With the jumps per block and the tone's decay in G they differed by
+/// the cross decay, a fraction of the hazard.)
+#[test]
+fn a_set_with_explicit_states_at_two_offsets_decays_by_its_jumps() {
+    use crate::step::{Dynamics, Middle};
+    let (gamma, ee, e2) = (38.0, 1000.0, 100.0);
+    let rays = [
+        Ray { axis: 0, nu: ee, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(10.0))] },
+        Ray { axis: 1, nu: ee + 10.0, direction: [1.0, 0.0, 0.0], couplings: vec![(0, 0, C64::real(10.0))] },
+    ];
+    let mut req = system(&[(0, 0.0), (4, e2)], &[(17, ee, gamma, 0), (0, ee + 10.0, gamma, 0)], &rays, 2, true);
+    req.emission = std::array::from_fn(|_| Mat::zeros(STATES, STATES));
+    req.emission[0][(0, GROUND + 17)] = C64::real(1.0);
+    req.emission[1][(4, GROUND + 17)] = C64::real((gamma - 1.0).sqrt());
+    req.emission[0][(0, GROUND)] = C64::real(25.0_f64.sqrt());
+    req.validate().unwrap();
+    let mut p = [0.0; GROUND];
+    p[0] = 1.0;
+    // Both levels in P at their own offsets (the rule at the focus would want each at both: through D_ee′ each is the
+    // other's block's Q row, beyond the share where the tone is -- a fold keeps a level at one offset).
+    let level = |x: usize| Fold::new(&req, &Choice::tiered(&req, vec![]).unwrap(), 0).unwrap().excited_level[x];
+    let part = |frequency: usize| crate::model::Component { frequency, counter: false };
+    let choice = Choice::tiered(&req, vec![(level(17), part(0), 0), (level(0), part(1), 0)]).expect("the choice");
+    let run = super::run::Onefold::of(&req, &choice, p).expect("the run");
+    let fold = Fold::new(&req, &choice, 0).unwrap();
+    let joined: Vec<usize> = (0..fold.blocks.len()).filter(|&b| fold.groups[b] != b).collect();
+    assert!(!joined.is_empty(), "the explicit levels' blocks one coherence group: {:?}", fold.groups);
+    let set = run.cluster_of(0);
+    let cluster = run.cluster(set);
+    let n = cluster.states.len();
+    println!("the set's states {:?}, their frames {:?}", cluster.states, cluster.frames);
+    assert!(cluster.states.contains(&GROUND) && cluster.states.contains(&(GROUND + 17)), "both excited levels in P: {:?}", cluster.states);
+    let (h, mut worst, mut beat) = (0.1, 0.0_f64, 0.0_f64);
+    let mut stream = crate::random::Stream::new(41, crate::random::Purpose::Initial, 0, 0);
+    // The hazard of one state at the middle across the beat: its beating part, the cross decay.
+    let probe: Vec<C64> = (0..n).map(|i| C64::new(1.0 + i as f64, 0.3 * i as f64)).collect();
+    let hazards: Vec<f64> = [0.0, 0.07, 0.19, 0.31]
+        .iter()
+        .map(|&t| {
+            let middle = run.middle(set, [0.3, 0.0, 0.0], t, &crate::step::Held::default(), false);
+            let mut rate = 0.0;
+            let _ = middle.emitted(&middle.path([0.0; 3], [2.0, 0.0, 0.0]), 0.0, &probe, &mut |rates: &[f64]| {
+                rate = rates.iter().sum();
+                None
+            });
+            rate
+        })
+        .collect();
+    let swing = (hazards.iter().copied().fold(f64::NEG_INFINITY, f64::max) - hazards.iter().copied().fold(f64::INFINITY, f64::min)) / hazards[0];
+    println!("one state's hazard across the beat {hazards:.4?}: its swing {swing:.3} of it, the cross decay");
+    assert!(swing > 1e-3, "the cross decay beats: {swing}");
+    for t in [0.0, 0.07, 0.19, 0.31] {
+        let middle = run.middle(set, [0.3, 0.0, 0.0], t, &crate::step::Held::default(), false);
+        let path = middle.path([0.0; 3], [2.0, 0.0, 0.0]);
+        for s in [-h, 0.0, h] {
+            let mut g = Mat::zeros(n, n);
+            middle.generator(&path, s, &mut g);
+            for _ in 0..4 {
+                let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect();
+                let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
+                let gpsi: Vec<C64> = (0..n).map(|i| (0..n).map(|j| g[(i, j)] * psi[j]).sum()).collect();
+                let gdag: Vec<C64> = (0..n).map(|i| (0..n).map(|j| g[(j, i)].conj() * psi[j]).sum()).collect();
+                let hazard = (0..n).map(|i| (psi[i].conj() * C64::I * (gpsi[i] - gdag[i])).re).sum::<f64>() / norm;
+                let mut rate = f64::NAN;
+                let _ = middle.emitted(&path, s, &psi, &mut |rates: &[f64]| {
+                    rate = rates.iter().sum();
+                    None
+                });
+                worst = worst.max((rate - hazard).abs() / hazard.abs());
+                beat = beat.max(hazard);
+            }
+        }
+    }
+    println!("the photons' rate against the generator's hazard: within {worst:.2e} of it (hazards up to {beat:.3e})");
+    assert!(worst < 1e-12, "the photons' rate against the hazard: {worst:e}");
 }

@@ -222,7 +222,9 @@
 //!   the step as the kick δκ cos ωu and the displacement −(ħ/m) δκ sin(ωu)/ω at the middle do, per principal axis (the
 //!   identity of `spreading` and of `Segment`);
 //! - a jump that lands in another cluster goes on in that cluster's generator at the same middle (`Dynamics::middle`),
-//!   on the same path: its picture is made there, its part of the kick is its own forms'.
+//!   on the same path -- the middle the jump's landing was made on (`Places`), whose evaluation there is a decision
+//!   time: the representation it makes is the trajectory's --: its picture is made there, its part of the kick is its
+//!   own forms'.
 //! What a jump inside a step leaves, each once a jump (the jumps' number is the physics', so each is an error of the
 //! run of its own order in τ; h = τ/2, a the acceleration, f the force beside the reference's):
 //! - the photons' Doppler weights are the path's, κ_m for κ_m + a u*: first order and odd in u*, so of zero mean over
@@ -466,13 +468,16 @@ pub trait Dynamics {
     /// `Model::emission_of`): the model makes the rate W = Σ_a‖u_a‖² of every class the state emits there, in the
     /// classes' order; `draw` picks one of them by its place among those rates, or none; and the model makes the photon
     /// of the class drawn (`Emitted`) -- the one class whose amplitudes and kick a jump reads. None where `draw` picks
-    /// none.
-    fn emit(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted>;
+    /// none. Inside a step the point is on the step's path: `on` is the cluster's middle there with the path and the
+    /// point's time s from the middle (`Places`), what the step made of the model for the jump to read (DESIGN §13.2);
+    /// at a trajectory's start there is none.
+    fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, psi: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted>;
     /// Where a jump's bare state `f` lands in a cluster at a point: the state the trajectory goes on in, with the norm
     /// it goes on with (a fold's bare state is its slow state and a part that is gone within the excited state's
     /// lifetime; the slow state's norm is the bare state's survival extrapolated back to the jump, below ‖f‖ or above
-    /// it; model.rs `Model::landed`). The state itself where the model folds nothing of that.
-    fn landed(&self, _cluster: usize, _at: &Point, f: &[C64], _held: &Held) -> Internal {
+    /// it; model.rs `Model::landed`). The state itself where the model folds nothing of that. Inside a step `on` is the
+    /// landing cluster's middle with the path (`emit`).
+    fn landed<'m>(&'m self, _cluster: usize, _at: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path)>, f: &[C64], _held: &Held) -> Internal {
         f.iter().copied().collect()
     }
 
@@ -506,7 +511,7 @@ pub trait Dynamics {
     where
         Self: Sized,
     {
-        let landed = self.landed(cluster, at, f, &Held::default());
+        let landed = self.landed(cluster, at, None, f, &Held::default());
         let forms = self.forms(cluster, at, &landed, &Held::default());
         (landed, forms, Held::default())
     }
@@ -860,7 +865,7 @@ impl Trajectory {
         };
         if !on {
             // A bare state with no photon to emit goes on as it is.
-            let _ = jump(model, &mut trajectory);
+            let _ = jump(model, &mut trajectory, None);
             let t = &trajectory;
             let forms = model.forms(t.cluster, &t.point(), &t.psi, &t.held);
             trajectory.forms = forms;
@@ -1954,8 +1959,12 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         scratch.weights.fill(0.0);
         // Cluster by cluster: the start's generator, then that of every cluster a jump lands in, at the same middle.
         let mut landed: Option<D::Middle<'a>> = None;
-        while !self.stretch(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time, reads, &mut march, scratch, domain)? {
-            landed = Some(self.model.middle(march.state.cluster, r_h, from.time + h, &march.state.held, false));
+        loop {
+            let (done, next) = self.stretch(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time, reads, &mut march, scratch, domain)?;
+            if done {
+                break;
+            }
+            landed = Some(next.unwrap_or_else(|| self.model.middle(march.state.cluster, r_h, from.time + h, &march.state.held, true)));
         }
         let March { state: mut end, read, impulse, scattered, optical, work, prices, mut made, .. } = march;
         // The scattered light at the middle, on the state there: its force over the step; and its diffusion with the
@@ -2046,7 +2055,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// Ĥ is still along every path Ĝ is one matrix, and the stretch's part its one form with ∫ρ(u)du. The middle's
     /// stretch reads the scattered light there and the optical sector's rate, on the middle state.
     #[allow(clippy::too_many_arguments)]
-    fn stretch(&self, generator: &D::Middle<'a>, kappa_m: [f64; 3], start: f64, reads: &[f64], march: &mut March, scratch: &mut Scratch, domain: &dyn Domain) -> Result<bool, Refused> {
+    fn stretch(&self, generator: &D::Middle<'a>, kappa_m: [f64; 3], start: f64, reads: &[f64], march: &mut March, scratch: &mut Scratch, domain: &dyn Domain) -> Result<(bool, Option<D::Middle<'a>>), Refused> {
         let (tau, hm) = (self.tau, self.hbar_over_mass);
         let h = 0.5 * tau;
         let velocity = kappa_m.map(|k| hm * k);
@@ -2076,6 +2085,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let scale = (0.5 * (log - norm_sqr(x).ln())).exp();
             along.turned(x, u, false)[..n].iter().map(|z| *z * scale).collect()
         };
+        // The middle of the cluster the last jump landed the trajectory in, where it is another (`Places`).
+        let mut next: Option<D::Middle<'a>> = None;
         let done = loop {
             // A piece: from the state the march stands at, the sums and the weights as they are, the survival from ‖ψ‖².
             let from = march.u;
@@ -2198,11 +2209,13 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 march.u = h;
                 break true;
             };
-            // The jump, on the path's own point, from the state at the threshold.
+            // The jump, on the path's own point, from the state at the threshold, on the middles the step made there.
             let state = &mut march.state;
             state.psi = at(&x[..n], crossed, target);
             (state.r, state.kappa, state.time) = (std::array::from_fn(|a| self.reached.0[a] + velocity[a] * crossed), kappa_m, start + (crossed + h));
-            jump(self.model, state)?;
+            let mut places = Places { model: self.model, point: (self.reached.0, start + h), path: (kappa_m, velocity), s: crossed, own: (cluster, generator, &along.path), other: None };
+            jump(self.model, state, Some(&mut places))?;
+            next = places.other.filter(|other| other.0 == state.cluster).map(|other| other.1);
             let kick = std::array::from_fn(|a| state.kappa[a] - kappa_m[a]);
             march.made.push(Made { kick: Some(kick), state: state.clone() });
             march.u = crossed;
@@ -2352,7 +2365,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         };
         march.work += price.work(costs);
         march.prices.push((cluster, price));
-        Ok(done)
+        Ok((done, next.filter(|_| !done)))
     }
 }
 
@@ -2618,6 +2631,37 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
     l
 }
 
+/// The middles a jump inside a step is made on (`jump`; module documentation, # Jumps): the step's middle point and
+/// time, the path's momentum and velocity and the jump's time s from the middle; the emitting cluster's middle with its
+/// path, and the middle of a cluster a jump lands in where that is another, made there -- the one the step goes on in
+/// after the jump (`Midway::stretch`). A landing in another cluster is a decision time of the run (`Dynamics::middle`
+/// deciding; DESIGN §11.3): what the landing's evaluation makes of that cluster's representation -- its first
+/// decomposition there -- is the trajectory's from then on, as a step's middle's is.
+pub struct Places<'p, 'm, D: Dynamics + 'm> {
+    model: &'m D,
+    point: ([f64; 3], f64),
+    path: ([f64; 3], [f64; 3]),
+    s: f64,
+    own: (usize, &'p D::Middle<'m>, &'p <D::Middle<'m> as Middle>::Path),
+    other: Option<(usize, D::Middle<'m>, <D::Middle<'m> as Middle>::Path)>,
+}
+
+impl<'m, D: Dynamics + 'm> Places<'_, 'm, D> {
+    /// A cluster's middle with its path: the emitting cluster's, or another's, made where it is first asked for.
+    fn of(&mut self, cluster: usize, held: &Held) -> (&D::Middle<'m>, &<D::Middle<'m> as Middle>::Path) {
+        if cluster == self.own.0 {
+            return (self.own.1, self.own.2);
+        }
+        if self.other.as_ref().is_none_or(|other| other.0 != cluster) {
+            let middle = self.model.middle(cluster, self.point.0, self.point.1, held, true);
+            let path = middle.path(self.path.0, self.path.1);
+            self.other = Some((cluster, middle, path));
+        }
+        let (_, middle, path) = self.other.as_ref().expect("made");
+        (middle, path)
+    }
+}
+
 /// The jump of a trajectory at its state (SPEC §1.6): from `Stream::jump(seed, index, jumps + 1)` the next threshold, the
 /// class ∝ Σ_a‖u_a‖² among the rates the model makes of the state's classes, whose photon alone the model then makes
 /// (`Dynamics::emit`), the polarization across the direction by ‖Σ_a ε_a u_a‖², and the direction from the dipole pattern
@@ -2625,8 +2669,9 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
 /// cluster and κ += −k_φ n + s b, the emitted photon's recoil and the class's conditional mean of the absorbed momentum
 /// as far as one photon's goes (`Emitted::kick`; module documentation, # The absorbed light's momentum) -- at most
 /// k_φ + k_c, whatever the light does at the point. The point is the trajectory's as it is given: a step makes its
-/// jumps on its path's points (module documentation, # Jumps), and the loss after a jump is its caller's to test, on
-/// the trajectory's own place (adapt.rs). A norm that reached its threshold with no photon to emit -- every class's
+/// jumps on its path's points (module documentation, # Jumps), on the middles it made there (`Places`; at a
+/// trajectory's start, none: the model at the point), and the loss after a jump is its caller's to test, on the
+/// trajectory's own place (adapt.rs). A norm that reached its threshold with no photon to emit -- every class's
 /// weight zero, or not a number -- is refused (`Refused::Emission`) with the trajectory as it was: the model's decay
 /// and its photons contradict each other, and no jump is made of that.
 ///
@@ -2639,7 +2684,7 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
 /// next threshold is drawn anew, and it lands again. So the waiting time after a jump is P(T > t) = min(1, n e^{−γt})
 /// for the landing's norm n and the state's rate γ (model.rs `Model::landed`: the fourth order's statistics for either
 /// sign of 1 − n), and a state that lands as it is draws nothing more.
-pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), Refused> {
+pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut places: Option<&mut Places<'_, 'm, D>>) -> Result<(), Refused> {
     let j = trajectory.jumps + 1;
     let mut stream = Stream::jump(trajectory.seed, trajectory.index, j);
     let threshold = stream.open_uniform();
@@ -2664,7 +2709,13 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
             }
             Some(pick)
         };
-        let Some(photon) = model.emit(trajectory.cluster, &at, &trajectory.psi, &trajectory.held, &mut draw) else {
+        let held = trajectory.held.clone();
+        let on = places.as_deref_mut().map(|p| {
+            let s = p.s;
+            let (middle, path) = p.of(trajectory.cluster, &held);
+            (middle, path, s)
+        });
+        let Some(photon) = model.emit(trajectory.cluster, &at, on, &trajectory.psi, &trajectory.held, &mut draw) else {
             // A norm at its threshold with no photon to emit is refused; a bare state with none goes on as it is.
             if first {
                 return Err(Refused::Emission);
@@ -2702,7 +2753,8 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
         // The landing: the state the trajectory goes on in, its norm against the threshold; at the threshold already,
         // one more photon from the bare state and the next threshold.
         let at = trajectory.point();
-        let landed = model.landed(trajectory.cluster, &at, &trajectory.psi, &trajectory.held);
+        let on = places.as_deref_mut().map(|p| p.of(trajectory.cluster, &held));
+        let landed = model.landed(trajectory.cluster, &at, on, &trajectory.psi, &trajectory.held);
         if norm_sqr(&landed) > trajectory.threshold {
             trajectory.psi = landed;
             break;

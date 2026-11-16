@@ -583,7 +583,7 @@ fn a_state_s_photons_in_parts_are_its_photons() {
                     assert!(rates.len() == bare.len() && rates.iter().zip(&bare).all(|(rate, photon)| *rate == photon.weight()), "{name}, cluster {cluster}: the classes' rates to a jump's draw");
                     Some(drawn)
                 };
-                let emitted = crate::step::Dynamics::emit(run, cluster, &at, &psi, &crate::step::Held::default(), &mut draw).expect("the class drawn");
+                let emitted = crate::step::Dynamics::emit(run, cluster, &at, None, &psi, &crate::step::Held::default(), &mut draw).expect("the class drawn");
                 assert!((emitted.landing, emitted.wave_number, emitted.kick) == (photon.landing, photon.wave_number, photon.kick()) && (0..3).all(|a| emitted.amplitudes[a][..] == alone.amplitudes[a][..]), "{name}, cluster {cluster}, class {}: a jump's photon", photon.class);
                 classes += 1;
                 folded += photon.gradients.iter().flatten().flatten().filter(|z| **z != C64::ZERO).count().min(1);
