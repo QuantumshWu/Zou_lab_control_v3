@@ -20,16 +20,27 @@
 //! the grid of the coarsest level's step ends is step 3's.
 //!
 //! # The tones
-//! What stays in P and beats (an entry of two P states of different frames, a kept copy's emission) is no part of the
-//! prototype: a request whose fold at the focus has a tone is refused here (`Onefold::new`), and the integrator gets no
-//! candidate tones.
+//! What stays in P and beats -- an entry of two P states of different frames (proto.rs # The tones) -- is the
+//! generator's turning part: at the time t the generator is G + Σ_m e^{iν_m t} G_m, each tone's envelope G_m at the
+//! step's three nodes its own (the light at the path's points there, the middle's S). The integrator's candidates
+//! (`Middle::beats`) are the tones' pairs, ν and −ν, each keyed by its beat's exact coordinates; their envelopes carry the
+//! middle's phase e^{±iν t_m}. Their forms are the same contraction as the static G's (proto.rs `Fold::prototype_force`):
+//! at the nodes with the static ones at their exact phases (`Middle::nodes`, `Middle::force`), on the integrator's sums
+//! at their beats (`Middle::tone_force`), on the held state at the beats' weights (`Middle::nodes`, `Middle::tones`).
+//!
+//! # The jumps' phase
+//! A jump lands on the lab frame's ground states, C_q Σ e^{−iot} ε_o S⁻¹x: in the landing set's coordinates, each of its
+//! ground states s at its own frame θ_s, the landed amplitude of s is e^{i(θ_s − o)t} (C_q ε_o S⁻¹x)_s -- one block a
+//! class (fold.rs # Tones), so e^{−iot} is the state's global phase and e^{iθ_s t} what a set of several frames holds
+//! between its states (`Dynamics::emit`). The rates, the force and the diffusion are sums over the states of |u_s|² and
+//! of their gradients' products, each its own phase's: none of them turns.
 //!
 //! # The rest of the model
 //! The reference potential of the splitting (A), the loss energy and its test are the request's prepared and running
 //! potentials as model.rs makes them (the folds with every drive bare: a reference is exact for any potential); the
 //! displayed rows are the set's own populations. The photons' and the landing's own forms (DESIGN step 3) and the
 //! explicit sets' optical sector are not yet here.
-use super::proto::{Cache, Workspace};
+use super::proto::{Bar, Cache, Workspace};
 use super::{Choice, Fold};
 use crate::field::Light;
 use crate::linalg::{Mat, C64};
@@ -47,6 +58,20 @@ struct Set {
     blocks: Vec<usize>,
     work: [f64; 3],
     pool: Mutex<Vec<Workspace>>,
+    /// The tones' values ν_m (rad/µs; proto.rs `Workspace::tones`' order); the integrator's candidates (`Candidate`).
+    tones: Vec<f64>,
+    candidates: Vec<Candidate>,
+}
+
+/// A candidate tone of the integrator (step.rs `Middle::beats`): a pair of the set's tones at ν and −ν (either may be
+/// none), the beat's exact key (its coordinates on the set's common denominator), and the counted complex multiply-adds
+/// of its envelopes (the three nodes', the middle's phase) and of its forms (`Middle::tone_work`).
+struct Candidate {
+    beat: f64,
+    plus: Option<usize>,
+    minus: Option<usize>,
+    key: Vec<i64>,
+    work: [f64; 2],
 }
 
 /// An atom's representation (`step::Held`): per set its kept decompositions.
@@ -85,32 +110,35 @@ impl Onefold {
         for (k, set) in grounds.iter().enumerate() {
             set.iter().for_each(|&g| membership[g] = k);
             let fold = Fold::new(request, &choice, set[0])?;
-            if let Some(f) = fold.at([0.0; 3], [0.0; 3], &mut super::Path::default()) {
-                if !f.tones.is_empty() {
-                    let tones: Vec<String> = f.tones.iter().map(|t| format!("{:.2} rad/µs（最大元 {:.2e}）", t.value, t.generator.max_abs())).collect();
-                    return Err(format!("态集合 {set:?} 在焦点处有音调 {tones:?}：原型不含音调"));
-                }
-            }
             let mut states: Vec<usize> = fold.ground.clone();
             states.extend(fold.explicit.iter().map(|&x| GROUND + x));
             let cluster = Cluster { ground: fold.ground.len(), frames: fold.frames.clone(), waves: vec![[0.0; 3]; states.len()], waves_exact: vec![potentials.no_wave(); states.len()], states };
-            let (pool, blocks, work) = if fold.blocks.is_empty() {
-                (vec![], vec![], [0.0; 3])
+            let (pool, blocks, work, tones, candidates) = if fold.blocks.is_empty() {
+                (vec![], vec![], [0.0; 3], vec![], vec![])
             } else {
                 let mut ws = fold.prototype_workspace()?;
                 let (near, far) = ws.layout();
                 let blocks = near.iter().map(|x| x.0).chain(far.iter().map(|x| x.0)).collect();
-                // The counts of a middle at the focus at rest: its forward and nodes, its tangent and force.
+                let n = fold.size();
+                let beats: Vec<(crate::model::Beat, f64)> = ws.tones().map(|(b, v)| (b.clone(), v)).collect();
+                // The counts of a middle at the focus at rest: its forward and nodes, its tangent and force with every
+                // tone's at the three nodes; a tone's forms on the integrator's sums.
                 let mut cache = Cache::default();
                 let forward: f64 = fold.prototype([0.0; 3], [0.0; 3], &mut cache, &mut ws).ok_or("焦点处的折叠不存在")?.work.iter().sum();
                 let nodes = fold.prototype_nodes([0.0; 3], [0.0; 3], [0.0; 3], [-0.5, 0.5], &cache, &mut ws);
                 let tangent = fold.prototype_tangent(&cache, &mut ws);
-                let n = fold.size();
-                let zero = Mat::zeros(n, n);
-                let force = fold.prototype_force(&cache, &mut ws, [&zero, &zero, &zero]).work;
-                (vec![ws], blocks, [(forward + nodes) / 3.0, (tangent + force) / 3.0, tangent + force])
+                let zero = vec![C64::ZERO; n * n];
+                let bar = |position: usize, tone: Option<usize>| Bar { channel: 0, position, tone, matrix: &zero };
+                let mut bars: Vec<Bar> = (0..3).map(|j| bar(j, None)).collect();
+                bars.extend((0..beats.len()).flat_map(|m| (0..3).map(move |j| (m, j))).map(|(m, j)| bar(j, Some(m))));
+                let force = fold.prototype_force(&cache, &mut ws, &bars, 1).work;
+                let candidates = candidates(&beats, |plus, minus| {
+                    let one: Vec<Bar> = [plus, minus].iter().filter(|&&x| x).map(|_| bar(0, Some(0))).collect();
+                    [(3 * one.len() * n * n) as f64, fold.prototype_force(&cache, &mut ws, &one, 1).work]
+                });
+                (vec![ws], blocks, [(forward + nodes) / 3.0, (tangent + force) / 3.0, tangent + force], beats.iter().map(|b| b.1).collect(), candidates)
             };
-            sets.push(Set { fold, cluster, blocks, work, pool: Mutex::new(pool) });
+            sets.push(Set { fold, cluster, blocks, work, pool: Mutex::new(pool), tones, candidates });
         }
         let energies: Vec<f64> = (0..GROUND).map(|s| request.hamiltonian[(s, s)].re).collect();
         let mut run = Onefold {
@@ -187,13 +215,50 @@ impl Onefold {
     }
 }
 
+/// A set's candidate tones (`Candidate`; module documentation, # The tones) from its tones' exact beats and values: each
+/// pair ν, −ν once, its beat the one of positive orientation (`Beat::sign`), its key that beat's coordinates on the
+/// tones' common denominator; `work` the counts of a candidate of so many members.
+fn candidates(beats: &[(crate::model::Beat, f64)], mut work: impl FnMut(bool, bool) -> [f64; 2]) -> Vec<Candidate> {
+    let common = beats.iter().fold(1_i64, |l, (b, _)| {
+        let (mut a, mut c) = (l, b.d);
+        while c != 0 {
+            (a, c) = (c, a % c);
+        }
+        l / a * b.d
+    });
+    let mut out = vec![];
+    for (m, (b, value)) in beats.iter().enumerate() {
+        let partner = beats.iter().position(|x| x.0 == b.negated());
+        if b.sign() < 0 && partner.is_some() {
+            continue;
+        }
+        let (plus, minus, beat) = if b.sign() > 0 { (Some(m), partner, *value) } else { (None, Some(m), -*value) };
+        let key = (if b.sign() > 0 { b.clone() } else { b.negated() }).n.iter().map(|x| x * (common / b.d)).collect();
+        out.push(Candidate { beat, plus, minus, key, work: work(plus.is_some(), minus.is_some()) });
+    }
+    out
+}
+
+/// The position of the time s from a step's middle among the prototype's (proto.rs `Workspace::tone`): 0 the middle, 1
+/// the outer node at −h, 2 the one at h.
+fn position(s: f64) -> usize {
+    if s == 0.0 {
+        0
+    } else if s < 0.0 {
+        1
+    } else {
+        2
+    }
+}
+
 /// A set's generator at a point (`step::Middle`; module documentation): the forward made at a path's momentum where the
 /// path is first asked for (its first a decision where the middle decides), the outer nodes where a step asks for them,
-/// the tangent where a form or the photons are asked.
+/// the tangent where a form or the photons are asked; the middle's time t (the tones' phases).
 pub(crate) struct Middle<'a> {
     run: &'a Onefold,
     set: usize,
     r: [f64; 3],
+    t: f64,
     decide: bool,
     caches: Option<Arc<Caches>>,
     paths: Cell<u64>,
@@ -271,19 +336,28 @@ impl Middle<'_> {
         inner
     }
 
-    /// Σ_j Re tr(Ĝ(s_j) ρ_j) per lab axis over the middle (`bars[0]`) and the outer nodes at ±h (`bars[1]`, `bars[2]`,
-    /// where `h`), at once (proto.rs `Fold::prototype_force`, the force's negative).
-    fn forms(&self, path: &Path, h: Option<f64>, bars: [&[C64]; 3]) -> [f64; 3] {
+    /// The forms of one contraction of the step's derivative (proto.rs `Fold::prototype_force`): per channel the sum of its
+    /// bars, the outer nodes at ±h made where `h`.
+    fn forms(&self, path: &Path, h: Option<f64>, bars: &[Bar], channels: usize) -> Vec<[C64; 3]> {
         let fold = &self.run.sets[self.set].fold;
-        let n = fold.size();
         let mut inner = self.made(path, h, true);
         if !inner.exists {
-            return [f64::NAN; 3];
+            return vec![[C64::new(f64::NAN, f64::NAN); 3]; channels];
         }
-        let mats: Vec<Mat> = bars.iter().map(|b| Mat { rows: n, cols: n, data: b.to_vec() }).collect();
         let Inner { eval, ws, .. } = &mut *inner;
-        fold.prototype_force(eval, ws.as_mut().unwrap(), [&mats[0], &mats[1], &mats[2]]).force.map(|f| -f)
+        fold.prototype_force(eval, ws.as_mut().unwrap(), bars, channels).forms
     }
+
+    /// e^{iν_m (t_m + s)} ρ: tone m's X at the time s from the middle (module documentation, # The tones).
+    fn phased(&self, m: usize, s: f64, rho: &[C64]) -> Vec<C64> {
+        let phase = C64::cis(self.run.sets[self.set].tones[m] * (self.t + s));
+        rho.iter().map(|z| *z * phase).collect()
+    }
+}
+
+/// The real parts of a form.
+fn real(form: [C64; 3]) -> [f64; 3] {
+    form.map(|z| z.re)
 }
 
 impl crate::step::Middle for Middle<'_> {
@@ -307,38 +381,111 @@ impl crate::step::Middle for Middle<'_> {
         rates.fill(0.0);
     }
 
+    /// The static G at the time s from the middle and every tone at its phase there, G + Σ_m e^{iν_m(t_m + s)} G_m(s)
+    /// (module documentation, # The tones).
     fn generator(&self, path: &Path, s: f64, h: &mut Mat) {
         let inner = self.made(path, (s != 0.0).then_some(s.abs()), false);
         if !inner.exists {
             h.data.fill(C64::new(f64::NAN, f64::NAN));
             return;
         }
-        let source = if s == 0.0 { &inner.generator } else { inner.ws.as_ref().unwrap().node_generator(usize::from(s > 0.0)) };
+        let ws = inner.ws.as_ref().unwrap();
+        let source = if s == 0.0 { &inner.generator } else { ws.node_generator(usize::from(s > 0.0)) };
         h.data.copy_from_slice(&source.data);
-    }
-
-    fn force(&self, path: &Path, s: f64, rho: &[C64]) -> [f64; 3] {
-        let zero = vec![C64::ZERO; rho.len()];
-        if s == 0.0 {
-            self.forms(path, None, [rho, &zero, &zero])
-        } else if s < 0.0 {
-            self.forms(path, Some(-s), [&zero, rho, &zero])
-        } else {
-            self.forms(path, Some(s), [&zero, &zero, rho])
+        let position = position(s);
+        for (m, &nu) in self.run.sets[self.set].tones.iter().enumerate() {
+            let phase = C64::cis(nu * (self.t + s));
+            for (z, g) in h.data.iter_mut().zip(&ws.tone(m, position).data) {
+                *z += phase * *g;
+            }
         }
     }
 
-    fn tones(&self, path: &Path, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
-        each(0.0, self.force(path, 0.0, rho));
+    /// The static G's form at the time s and every tone's there at its exact phase, one contraction.
+    fn force(&self, path: &Path, s: f64, rho: &[C64]) -> [f64; 3] {
+        let j = position(s);
+        let phased: Vec<Vec<C64>> = (0..self.run.sets[self.set].tones.len()).map(|m| self.phased(m, s, rho)).collect();
+        let mut bars = vec![Bar { channel: 0, position: j, tone: None, matrix: rho }];
+        bars.extend(phased.iter().enumerate().map(|(m, x)| Bar { channel: 0, position: j, tone: Some(m), matrix: x }));
+        real(self.forms(path, (s != 0.0).then_some(s.abs()), &bars, 1)[0])
     }
 
+    /// The static G's at zero, each tone's at its beat ν_m: the middle's G_m at its phase e^{iν_m t_m} (module
+    /// documentation, # The tones), each its own channel of one contraction.
+    fn tones(&self, path: &Path, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
+        let tones = &self.run.sets[self.set].tones;
+        let phased: Vec<Vec<C64>> = (0..tones.len()).map(|m| self.phased(m, 0.0, rho)).collect();
+        let mut bars = vec![Bar { channel: 0, position: 0, tone: None, matrix: rho }];
+        bars.extend(phased.iter().enumerate().map(|(m, x)| Bar { channel: 1 + m, position: 0, tone: Some(m), matrix: x }));
+        let forms = self.forms(path, None, &bars, 1 + tones.len());
+        each(0.0, real(forms[0]));
+        for (m, &nu) in tones.iter().enumerate() {
+            each(nu, real(forms[1 + m]));
+        }
+    }
+
+    /// The three nodes' static forms and every tone's there at its exact phase, the held state's at the beats' weights
+    /// with the middle's, in one contraction (module documentation, # The tones).
     fn nodes(&self, path: &Path, h: f64, rho: [&[C64]; 3], held: Option<(&[C64], &dyn Fn(f64) -> f64)>) -> [[f64; 3]; 3] {
-        // The fixed point's one tone (at zero) on the held state at its weight goes with the middle's form.
-        let middle: Vec<C64> = match held {
-            Some((held, weight)) => rho[1].iter().zip(held).map(|(r, x)| *r + *x * weight(0.0)).collect(),
-            None => rho[1].to_vec(),
+        let tones = &self.run.sets[self.set].tones;
+        let at = |nu: f64| -> Vec<C64> {
+            match held {
+                Some((held, weight)) => rho[1].iter().zip(held).map(|(r, x)| *r + *x * weight(nu)).collect(),
+                None => rho[1].to_vec(),
+            }
         };
-        [self.forms(path, Some(h), [&middle, rho[0], rho[2]]), [0.0; 3], [0.0; 3]]
+        let middle = at(0.0);
+        let phased: Vec<[Vec<C64>; 3]> = tones.iter().enumerate().map(|(m, &nu)| [self.phased(m, 0.0, &at(nu)), self.phased(m, -h, rho[0]), self.phased(m, h, rho[2])]).collect();
+        let mut bars: Vec<Bar> = [&middle[..], rho[0], rho[2]].into_iter().enumerate().map(|(j, x)| Bar { channel: 0, position: j, tone: None, matrix: x }).collect();
+        for (m, xs) in phased.iter().enumerate() {
+            bars.extend(xs.iter().enumerate().map(|(j, x)| Bar { channel: 0, position: j, tone: Some(m), matrix: x }));
+        }
+        [real(self.forms(path, Some(h), &bars, 1)[0]), [0.0; 3], [0.0; 3]]
+    }
+
+    /// The candidates' beats and keys (module documentation, # The tones).
+    fn beats(&self, _: &Path, beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
+        for c in &self.run.sets[self.set].candidates {
+            beats.push(c.beat);
+            keys.push(c.key.clone());
+        }
+    }
+
+    /// Candidate m's members at the time s from the middle: e^{iνt_m} G_+(s) and e^{−iνt_m} G_−(s) (none: zero).
+    fn envelopes(&self, path: &Path, m: usize, s: f64, plus: &mut Mat, minus: &mut Mat) {
+        let inner = self.made(path, (s != 0.0).then_some(s.abs()), false);
+        let c = &self.run.sets[self.set].candidates[m];
+        for (member, out, sign) in [(c.plus, plus, 1.0), (c.minus, minus, -1.0)] {
+            match member.filter(|_| inner.exists) {
+                Some(k) => {
+                    let phase = C64::cis(sign * c.beat * self.t);
+                    for (z, g) in out.data.iter_mut().zip(&inner.ws.as_ref().unwrap().tone(k, position(s)).data) {
+                        *z = phase * *g;
+                    }
+                }
+                None => out.data.fill(if inner.exists { C64::ZERO } else { C64::new(f64::NAN, f64::NAN) }),
+            }
+        }
+    }
+
+    /// Candidate m's forms on the integrator's sums σ = re + i im at its beat: its + member's middle G_+ on e^{iνt_m}σ, its
+    /// − member's on e^{−iνt_m}σ† (step.rs `Middle::tone_force`).
+    fn tone_force(&self, path: &Path, m: usize, re: &[C64], im: &[C64]) -> [f64; 3] {
+        let c = &self.run.sets[self.set].candidates[m];
+        let n = self.states();
+        let members: Vec<(usize, Vec<C64>)> = [(c.plus, 1.0), (c.minus, -1.0)]
+            .iter()
+            .filter_map(|&(k, sign)| {
+                let phase = C64::cis(sign * c.beat * self.t);
+                k.map(|k| (k, (0..n * n).map(|i| (re[i] + C64::new(0.0, sign) * im[i]) * phase).collect()))
+            })
+            .collect();
+        let bars: Vec<Bar> = members.iter().map(|(k, x)| Bar { channel: 0, position: 0, tone: Some(*k), matrix: x }).collect();
+        real(self.forms(path, None, &bars, 1)[0])
+    }
+
+    fn tone_work(&self, m: usize) -> [f64; 2] {
+        self.run.sets[self.set].candidates[m].work
     }
 
     fn scattering(&self, path: &Path, psi: &[C64]) -> (Scattering, f64) {
@@ -407,7 +554,7 @@ impl crate::step::Dynamics for Onefold {
         self.membership[ground]
     }
 
-    fn middle(&self, cluster: usize, r: [f64; 3], _: f64, held: &Held, decide: bool) -> Middle<'_> {
+    fn middle(&self, cluster: usize, r: [f64; 3], t: f64, held: &Held, decide: bool) -> Middle<'_> {
         let committed = self.cache(held, cluster);
         let n = self.sets[cluster].fold.size();
         let ws = (!self.sets[cluster].fold.blocks.is_empty()).then(|| self.take(cluster));
@@ -416,6 +563,7 @@ impl crate::step::Dynamics for Onefold {
             run: self,
             set: cluster,
             r,
+            t,
             decide,
             caches,
             paths: Cell::new(0),
@@ -432,10 +580,11 @@ impl crate::step::Dynamics for Onefold {
         })?;
         let rates: Vec<f64> = classes.iter().map(|c| c.2).collect();
         let (block, landing, _, kick) = classes[draw(&rates)?];
-        let states = &self.sets[landing].cluster.states;
+        // The landing set's states each at its frame's phase e^{iθ_s t} (module documentation, # The jumps' phase).
+        let to = &self.sets[landing];
         let amplitudes: [Internal; 3] = std::array::from_fn(|a| {
             let u = jumps[block][a].product(&Mat { rows: psi.len(), cols: 1, data: psi.to_vec() });
-            states.iter().map(|&s| if s < GROUND { u.data[s] } else { C64::ZERO }).collect()
+            to.cluster.states.iter().zip(&to.fold.frame_values).map(|(&s, &theta)| if s < GROUND { u.data[s] * C64::cis(theta * at.t) } else { C64::ZERO }).collect()
         });
         // The photon's frequency: the block's excited amplitude's (the frame's, its offset's and the set's slow ground
         // energy) less the landing state's energy.

@@ -76,10 +76,11 @@
 //!
 //! # Tones
 //! What stays in P and is not static: an entry between P states of different frames (H_GG, or 𝒦 between explicit states of two
-//! offsets) at θ_t − θ_s; a kept copy's emission Γ_t†V_g†ε_o at θ_t − ω and its partner; and the beat of the two blocks a kept
-//! copy relates, ε_o'†(𝒦 − ν̄)ε_o at o' − o (o' = θ_t + ν_g; ν̄ the columns' offsets from their own frames, gauge invariant,
-//! `Fold::cross`): the copy's excited node is reached both from
-//! block o and from its state's sideband through its own block, one Floquet node, so their interference (the rate's, with
+//! offsets) at θ_t − θ_s whose coupling cannot be folded (`Fold::turning`: its peak strength over the states' energy
+//! difference read as the sets are, `unfoldable`; one that can is a copy left out, its population within the share); a
+//! kept copy's emission Γ_t†V_g†ε_o at θ_t − ω and its partner; and the beat of the two blocks a kept copy relates,
+//! ε_o'†(𝒦 − ν̄)ε_o at o' − o (o' = θ_t + ν_g; ν̄ the columns' offsets from their own frames, gauge invariant, `Fold::cross`):
+//! the copy's excited node is reached both from block o and from its state's sideband through its own block, one Floquet node, so their interference (the rate's, with
 //! the decay -(i/2)ε_o'†Dε_o) is physics. Two blocks no kept copy relates are different Floquet nodes: their cross terms
 //! are not taken -- with the beating metric dropped (M8) they would turn at |o − o'| with a size |o − o'|·|ε_o'†ε_o|/2 and
 //! a second-order shift of nothing in the exact Floquet problem (onefold report, step 1); the hazard is to take the jumps'
@@ -216,6 +217,13 @@ pub(crate) struct Choice {
     pub(crate) excited: Vec<((Part, usize, usize), Status)>,
 }
 
+/// Whether a coupling of mixing m = |a|/|Δ| (its strength over its mismatch, both frame-free) cannot be folded (DESIGN
+/// §1.1): its copy's population w(m) beyond the share in rate. The one reading of a coupling: the sets' (`Choice::of`)
+/// and the tones' (`Fold::turning`).
+fn unfoldable(m: f64, share: f64) -> bool {
+    rate(admixture(m).sqrt()) > share
+}
+
 /// A copy's population at mixing m, the dressed two-state admixture ½(1 − 1/√(1 + 4m²)) (½ where m is infinite: a
 /// coupling at no mismatch).
 fn admixture(m: f64) -> f64 {
@@ -297,7 +305,7 @@ impl Choice {
                 }
             }
         }
-        let kept: Vec<(usize, usize, Beat, f64)> = edges.into_iter().filter(|x| rate(admixture(x.3).sqrt()) > share).collect();
+        let kept: Vec<(usize, usize, Beat, f64)> = edges.into_iter().filter(|x| unfoldable(x.3, share)).collect();
         let sets = connected(GROUND, &kept.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>());
         let mut frames = super::cluster::frames(GROUND, &kept, &axes.zero());
         let mut candidates = vec![axes.zero()];
@@ -493,6 +501,9 @@ pub(crate) struct Fold {
     frame_values: Vec<f64>,
     /// Per explicit place j (P place ng + j) its excited state.
     pub(crate) explicit: Vec<usize>,
+    /// Per entry (p, q) of P (n × n, row by row) whether it is a tone (module documentation, # Tones): two places of one
+    /// kind and different frames whose coupling cannot be folded.
+    pub(crate) turning: Vec<bool>,
     pub(crate) blocks: Vec<Block>,
     /// H0 less the outside forms at the focus: its ground block, and its excited block with −(i/2)D.
     base_ground: Mat,
@@ -613,6 +624,25 @@ impl Fold {
         let d = decay(request);
         let mut base_excited = base.block(&excited, &excited);
         base_excited.add_scaled(C64::new(0.0, -0.5), &d);
+        // The tones (module documentation, # Tones): an entry of two places of one kind and different frames whose coupling
+        // cannot be folded -- its peak strength (H0's, the decay's, and each frequency's outside forms at its intensity
+        // scale, as `Choice::of` reads a coupling) over the states' energy difference, frame-free --; one that can is a copy
+        // left out (its reading within the share).
+        let n = ground.len() + explicit.len();
+        let state = |p: usize| if p < ng { ground[p] } else { GROUND + explicit[p - ng] };
+        let turning: Vec<bool> = (0..n * n)
+            .map(|x| {
+                let (p, q) = (x / n, x % n);
+                if p == q || (p < ng) != (q < ng) || frames[p] == frames[q] {
+                    return false;
+                }
+                let (s, t) = (state(p), state(q));
+                let decayed = if p < ng { 0.0 } else { 0.5 * d[(s - GROUND, t - GROUND)].abs() };
+                let peak = request.hamiltonian[(s, t)].abs() + decayed + light.frequencies.iter().map(|f| f.norm * request.outside_forms[f.form].matrices.iter().map(|m| m[(s, t)].abs()).sum::<f64>()).sum::<f64>();
+                let delta = request.hamiltonian[(s, s)].re - request.hamiltonian[(t, t)].re;
+                unfoldable(peak / delta.abs(), crate::model::elim::share())
+            })
+            .collect();
         // The excited states the outside forms couple (any frequency, any field components).
         let mut coupled = vec![false; EXCITED * EXCITED];
         for o in &outside {
@@ -755,6 +785,7 @@ impl Fold {
             frames,
             frame_values,
             explicit,
+            turning,
             blocks,
             base_ground: base.block(&all, &all),
             base_excited,
@@ -1217,21 +1248,14 @@ impl Fold {
             None => out.push(Tone { beat, value, a: m, generator: Mat::default() }),
         };
         let ng = self.ground.len();
-        for p in 0..ng {
-            for q in (0..ng).filter(|&q| self.frames[q] != self.frames[p] && site.ground[(self.ground[p], self.ground[q])] != C64::ZERO) {
+        // P's entries of places of one kind and different frames whose coupling cannot be folded (`Fold::turning`).
+        for x in (0..n * n).filter(|&x| self.turning[x]) {
+            let (p, q) = (x / n, x % n);
+            let z = if p < ng { site.ground[(self.ground[p], self.ground[q])] } else { site.excited[(self.explicit[p - ng], self.explicit[q - ng])] };
+            if z != C64::ZERO {
                 let mut m = Mat::zeros(n, n);
-                m[(p, q)] = site.ground[(self.ground[p], self.ground[q])];
+                m[(p, q)] = z;
                 add(self.frames[p].plus(-1, &self.frames[q]), self.frame_values[p] - self.frame_values[q], m, &mut out);
-            }
-        }
-        for p in ng..n {
-            for q in (ng..n).filter(|&q| self.frames[q] != self.frames[p]) {
-                let z = site.excited[(self.explicit[p - ng], self.explicit[q - ng])];
-                if z != C64::ZERO {
-                    let mut m = Mat::zeros(n, n);
-                    m[(p, q)] = z;
-                    add(self.frames[p].plus(-1, &self.frames[q]), self.frame_values[p] - self.frame_values[q], m, &mut out);
-                }
             }
         }
         for (b, e) in self.blocks.iter().zip(amplitudes) {

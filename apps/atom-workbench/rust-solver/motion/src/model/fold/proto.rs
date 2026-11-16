@@ -105,10 +105,22 @@
 //! responses' own change is the excited states' differential light shift along r (the tweezer's), a tenth of the
 //! diffusion on R4 F=2 and nearly all of it on PGC3D F=1, where the one repump beam's field alone gives none.
 //!
-//! The copies a block solves exactly (the P layer's Woodbury), the explicit states and the static sources are not here
-//! (`Fold::prototype_workspace` refuses them): none of the prototype's two scenes has them. Their copies are the tweezer's,
-//! whose dressing (the excited states' tweezer shift, ~10Γ) no series about the excited response holds: it is the kept
-//! decomposition's.
+//! # The tones (DESIGN §1.3, §1.6; BRIEF_WIRE2 item 1)
+//! The generator's part that turns: Ĥ_PP's entries between P states of different frames -- ground states' H_GG(r), an
+//! explicit offset's 𝒦(r) with another's (its decay's cross terms with it) -- whose coupling cannot be folded
+//! (`Fold::turning`: a coupling within the share is a copy left out), each at its exact beat θ_p − θ_q, as `Fold::at`'s
+//! (fold.rs # Tones; a kept copy's emission and the blocks it relates are not the run's: its choice keeps no
+//! copy in P). Of the same form as Ĥ_PP's static part (`Rotating`: what the forms leave, and per pair its forms' entries),
+//! so at every position A_m(r) = its entries at the light there, and G_m = S⁻¹A_mS⁻¹ with the middle's S, the static
+//! G's metric (DESIGN §1.3: the metric's beating part left out, M8): the generator at the time t is
+//! G + Σ_m e^{iν_m t} G_m. Its gradient is the same step's derivative, contracted with the static G's in one pass
+//! (`Fold::prototype_force`): S⁻¹'s through N̄ and the metric's tangent, A_m's through the pairs' ∂c at the position.
+//! The tones' decay i(G_m − G_{−m}†) has no jump of its own: the jumps are per block (fold.rs # Tones, blocks no kept copy
+//! relates are not coherent), so a set whose tones beat with a decay -- explicit levels at two offsets -- is not the
+//! run's (none of the scenes has one; `Fold::at` is the same).
+//!
+//! The copies a block solves exactly (the P layer's Woodbury) are the solved rows after its excited ones; a block with no
+//! Q rows is a near block of none, its explicit states' own ε rows alone (BRIEF_WIRE2 item 2).
 use super::*;
 use crate::field::Amplitude;
 
@@ -117,6 +129,16 @@ type Pair = (usize, usize, usize);
 
 /// Entries of Ĥ_PP linear in a component's coefficient (`Workspace::lin`): (component, vector, at e_k, at e_k*).
 type Lin = Vec<(usize, usize, Vec<(usize, C64)>, Vec<(usize, C64)>)>;
+
+/// A tone of Ĥ_PP (module documentation, # The tones): its entries at one exact beat θ_p − θ_q (its value, rad/µs), laid
+/// as the static part's (`Workspace::base`, `pp`): what the forms leave of them (flat index, value) and per pair the
+/// forms' entries.
+struct Rotating {
+    beat: Beat,
+    value: f64,
+    base: Vec<(usize, C64)>,
+    pp: Vec<(usize, Vec<(usize, C64)>)>,
+}
 
 /// The step's phases, as BRIEF_PROTO.md splits its time.
 pub(crate) const PHASES: [&str; 10] = ["place", "refresh", "Ṽ", "diagonal", "far", "series", "reading", "copies", "compression", "normal"];
@@ -285,8 +307,8 @@ struct Parts {
 
 /// The light at a place (module documentation, 1): the beams' amplitudes with their gradients, each frequency's components
 /// ε_k on its basis, the pairs' coefficients, per component its beams' factors f_l and Doppler shifts w_l and its
-/// coefficients e_k, Ĥ_PP; and the gradients along the lab axes the tangent and the force take there: ∂ε_k, ∂e_k, the pairs'
-/// ∂c_t, the beams' factors' ∂f_l.
+/// coefficients e_k, Ĥ_PP and its tones' A_m (# The tones; n × n each); and the gradients along the lab axes the tangent
+/// and the force take there: ∂ε_k, ∂e_k, the pairs' ∂c_t, the beams' factors' ∂f_l.
 #[derive(Clone)]
 struct Placed {
     amplitudes: Vec<Amplitude>,
@@ -296,18 +318,20 @@ struct Placed {
     w: Vec<Vec<f64>>,
     e: Vec<Vec<C64>>,
     hpp: Vec<C64>,
+    tones: Vec<Vec<C64>>,
     deps: Vec<Vec<[C64; 3]>>,
     de: Vec<Vec<[C64; 3]>>,
     dc: Vec<[C64; 3]>,
     df: Vec<Vec<[C64; 3]>>,
 }
 
-/// A step's outer node (`Fold::prototype_nodes`): its light, A(s) and G(s) = S⁻¹A(s)S⁻¹ (S the middle's), per far block
-/// its forms there.
+/// A step's outer node (`Fold::prototype_nodes`): its light, A(s) and G(s) = S⁻¹A(s)S⁻¹ (S the middle's), the tones'
+/// G_m(s) likewise, per far block its forms there.
 struct Node {
     at: Placed,
     a: Mat,
     generator: Mat,
+    tones: Vec<Mat>,
     hf: Vec<Vec<C64>>,
     mf: Vec<Vec<C64>>,
 }
@@ -458,6 +482,8 @@ pub(crate) struct Step {
     pub(crate) metric: Mat,
     pub(crate) normal: Mat,
     pub(crate) generator: Mat,
+    /// The tones' G_m = S⁻¹A_mS⁻¹ (module documentation, # The tones; `Workspace::tones`' order).
+    pub(crate) tones: Vec<Mat>,
     pub(crate) sweeps: usize,
     pub(crate) series: f64,
     pub(crate) reuse: f64,
@@ -488,6 +514,8 @@ pub(crate) struct Workspace {
     base: Vec<C64>,
     /// The drives between ground and explicit places, per (component, vector): its entries at e_k and at e_k*.
     lin: Lin,
+    /// Ĥ_PP's tones (module documentation, # The tones), by their beats' values.
+    rotating: Vec<Rotating>,
     near: Vec<Near>,
     far: Vec<Far>,
     /// The middle's light, and per frequency, beam and basis vector u_k†E_l (the components' gradients).
@@ -743,10 +771,9 @@ struct Temp {
     o3: Vec<C64>,
     e: Vec<C64>,
     p: Vec<C64>,
-    abar: [Vec<C64>; 3],
+    abar: Vec<Vec<C64>>,
     nbar: Vec<C64>,
     adj: Vec<C64>,
-    xbar: Vec<C64>,
     abc: Vec<C64>,
     w: Vec<C64>,
     ge: Vec<Vec<C64>>,
@@ -782,10 +809,9 @@ impl Temp {
             o3: z(3 * nn),
             e: z(nn),
             p: z(nn),
-            abar: std::array::from_fn(|_| z(nn)),
+            abar: (0..3).map(|_| z(nn)).collect(),
             nbar: z(nn),
             adj: z(nn),
-            xbar: z(nn),
             abc: z(nn),
             w: z(nn),
             ge: vectors.iter().map(|&v| z(v)).collect(),
@@ -1718,23 +1744,6 @@ fn fused_product_into(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &m
     crate::linalg::fused_product(a, b, dims, out);
 }
 
-/// The adjoint of S⁻¹ = (1 + X)^{−1/2} (`inverse_root`): given N̄ on N = S⁻¹, X̄ on X into `out`. With S² = 1 + X,
-/// dN = −N dS N and S dS + dS S = dX, so S̄ = −N N̄_h N (N̄_h its Hermitian part: N and dN are Hermitian) and X̄ solves
-/// S X̄ + X̄ S = S̄ (the map is self-adjoint; `lyapunov`).
-#[allow(clippy::too_many_arguments)]
-fn inverse_root_back(x: &[C64], normal: &[C64], nbar: &[C64], n: usize, out: &mut [C64], p: &mut [C64], q: &mut [C64], r: &mut [C64], work: &mut f64) -> bool {
-    for i in 0..n {
-        for j in 0..n {
-            r[i * n + j] = (nbar[i * n + j] + nbar[j * n + i].conj()) * 0.5;
-        }
-    }
-    multiply(normal, r, p, n);
-    multiply(p, normal, q, n);
-    q.iter_mut().for_each(|z| *z = -*z);
-    *work += (2 * n * n * n) as f64;
-    lyapunov(x, normal, q, n, out, r, p, work)
-}
-
 /// out = a b (n × n, row by row; linalg.rs `fused_product`).
 fn multiply(a: &[C64], b: &[C64], out: &mut [C64], n: usize) {
     crate::linalg::fused_product(a, b, (n, n, n), out);
@@ -1879,6 +1888,45 @@ impl Fold {
                 }
             }
         }
+        // The tones (module documentation, # The tones): Ĥ_PP's entries between places of one kind and different frames whose
+        // coupling cannot be folded (`Fold::turning`), by their beat, laid as its static part -- what the forms leave of
+        // them, and per pair the forms'.
+        let turning = |p: usize, q: usize| self.turning[p * n + q];
+        let mut rotating: Vec<Rotating> = vec![];
+        let tone_of = |x: usize, rotating: &mut Vec<Rotating>| -> usize {
+            let beat = self.frames[x / n].plus(-1, &self.frames[x % n]);
+            rotating.iter().position(|r| r.beat == beat).unwrap_or_else(|| {
+                rotating.push(Rotating { value: self.frame_values[x / n] - self.frame_values[x % n], beat, base: vec![], pp: vec![] });
+                rotating.len() - 1
+            })
+        };
+        for x in (0..n * n).filter(|&x| turning(x / n, x % n)) {
+            let (p, q) = (x / n, x % n);
+            let h = if p < ng { self.base_ground[(self.ground[p], self.ground[q])] } else { self.base_excited[(self.explicit[p - ng], self.explicit[q - ng])] };
+            if h != C64::ZERO {
+                let m = tone_of(x, &mut rotating);
+                rotating[m].base.push((x, h));
+            }
+        }
+        for (t, &pair) in pairs.iter().enumerate() {
+            let m = contract(
+                pair,
+                &|i, j| {
+                    let (p, q) = (place(i)?, place(j)?);
+                    turning(p, q).then_some((p, q))
+                },
+                n,
+                n,
+            );
+            for x in (0..n * n).filter(|&x| m.data[x] != C64::ZERO) {
+                let r = tone_of(x, &mut rotating);
+                match rotating[r].pp.iter_mut().find(|y| y.0 == t) {
+                    Some(y) => y.1.push((x, m.data[x])),
+                    None => rotating[r].pp.push((t, vec![(x, m.data[x])])),
+                }
+            }
+        }
+        rotating.sort_by(|a, b| a.value.total_cmp(&b.value));
         let (mut near, mut far) = (vec![], vec![]);
         for (o, b) in self.blocks.iter().enumerate() {
             let m = b.rows.len();
@@ -2097,13 +2145,14 @@ impl Fold {
             w: self.components.iter().map(|c| vec![0.0; c.beams.len()]).collect(),
             e: self.components.iter().map(|c| vec![C64::ZERO; c.basis.len()]).collect(),
             hpp: vec![C64::ZERO; n * n],
+            tones: rotating.iter().map(|_| vec![C64::ZERO; n * n]).collect(),
             deps: self.light.frequencies.iter().map(|f| vec![[C64::ZERO; 3]; f.rank()]).collect(),
             de: self.components.iter().map(|c| vec![[C64::ZERO; 3]; c.basis.len()]).collect(),
             dc: vec![[C64::ZERO; 3]; pairs.len()],
             df: self.components.iter().map(|c| vec![[C64::ZERO; 3]; c.beams.len()]).collect(),
         };
         let proj = self.light.frequencies.iter().map(|f| f.fields.iter().flat_map(|e| f.basis.iter().map(move |u| (0..3).map(|q| u[q].conj() * e[q]).sum())).collect()).collect();
-        let node = || Node { at: placed.clone(), a: z(n, n), generator: z(n, n), hf: far.iter().map(|_| vec![C64::ZERO; n * n]).collect(), mf: far.iter().map(|_| vec![C64::ZERO; n * n]).collect() };
+        let node = || Node { at: placed.clone(), a: z(n, n), generator: z(n, n), tones: rotating.iter().map(|_| z(n, n)).collect(), hf: far.iter().map(|_| vec![C64::ZERO; n * n]).collect(), mf: far.iter().map(|_| vec![C64::ZERO; n * n]).collect() };
         let nodes = vec![node(), node()];
         let near_len = near.len();
         Ok(Workspace {
@@ -2148,6 +2197,7 @@ impl Fold {
                 metric: z(n, n),
                 normal: z(n, n),
                 generator: z(n, n),
+                tones: rotating.iter().map(|_| z(n, n)).collect(),
                 sweeps: 0,
                 series: 0.0,
                 reuse: 0.0,
@@ -2165,12 +2215,13 @@ impl Fold {
                 sweep_work: vec![],
                 sweep_ticks: vec![],
             },
+            rotating,
         })
     }
 
     /// The light at a place (module documentation, 1), the beams' gradients with it (the force's).
     #[allow(clippy::too_many_arguments)]
-    fn proto_place(&self, r: [f64; 3], kappa: [f64; 3], at: &mut Placed, pairs: &[Pair], pp: &[Vec<(usize, C64)>], base: &[C64], lin: &Lin, proj: &[Vec<C64>], work: &mut f64) {
+    fn proto_place(&self, r: [f64; 3], kappa: [f64; 3], at: &mut Placed, pairs: &[Pair], pp: &[Vec<(usize, C64)>], base: &[C64], lin: &Lin, rotating: &[Rotating], proj: &[Vec<C64>], work: &mut f64) {
         for (a, b) in at.amplitudes.iter_mut().zip(&self.light.beams) {
             *a = b.amplitude_to(r, 1);
         }
@@ -2217,6 +2268,20 @@ impl Fold {
                 at.hpp[i] += e.conj() * v;
             }
             *work += (2 * direct.len()) as f64;
+        }
+        // The tones' A_m, as Ĥ_PP's static part (module documentation, # The tones).
+        for (a, tone) in at.tones.iter_mut().zip(rotating) {
+            a.fill(C64::ZERO);
+            for &(i, v) in &tone.base {
+                a[i] += v;
+            }
+            for (t, entries) in &tone.pp {
+                let x = at.coef[*t];
+                for &(i, v) in entries {
+                    a[i] += x * v;
+                }
+                *work += entries.len() as f64;
+            }
         }
         // The gradients: ∂_a ε_k = Σ_l ∂_a a_l u_k†E_l, ∂e_k (its conjugate counter-rotating), ∂_a c_t = ∂ε_k* ε_k' + ε_k* ∂ε_k',
         // ∂f_l (the factor is linear in the amplitude).
@@ -2742,8 +2807,8 @@ impl Fold {
             *clock = now;
         };
         {
-            let Workspace { mid, pairs, pp, base, lin, proj, .. } = &mut *ws;
-            self.proto_place(r, kappa, mid, pairs, pp, base, lin, proj, &mut work[PLACE]);
+            let Workspace { mid, pairs, pp, base, lin, rotating, proj, .. } = &mut *ws;
+            self.proto_place(r, kappa, mid, pairs, pp, base, lin, rotating, proj, &mut work[PLACE]);
         }
         ws.noded = false;
         lap(PLACE, &mut clock, &mut tick);
@@ -3403,7 +3468,12 @@ impl Fold {
         }
         multiply(&step.normal.data, &step.a.data, &mut temp.data, n);
         multiply(&temp.data, &step.normal.data, &mut step.generator.data, n);
-        work[NORMAL] += (2 * n * n * n) as f64;
+        // The tones' G_m = S⁻¹A_mS⁻¹ (module documentation, # The tones).
+        for (g, a) in step.tones.iter_mut().zip(&mid.tones) {
+            multiply(&step.normal.data, a, &mut temp.data, n);
+            multiply(&temp.data, &step.normal.data, &mut g.data, n);
+        }
+        work[NORMAL] += (2 * n * n * n * (1 + step.tones.len())) as f64;
         lap(NORMAL, &mut clock, &mut tick);
         step.sweeps = sweeps;
         step.series = series;
@@ -3489,11 +3559,21 @@ fn inner(x: &[C64], y: &[C64], rows: usize, width: usize, stride: usize, at: usi
     sum
 }
 
-/// The force at a step (`Fold::prototype_force`): per lab axis −∂/∂r_a of Σ_j Re tr(Ḡ_j†G_j) over the step's positions
-/// (the middle and the outer nodes where made), all moved together; per axis the bound on what the kept R₀ and z₀ leave of
-/// it (their own change along the axis: module documentation, # The force); the work (complex multiply-adds).
+/// One cotangent of the step's derivative (`Fold::prototype_force`): the channel its form is summed into, its position (0
+/// the middle, 1 and 2 the outer nodes at −h and h), what it contracts -- the static G (none) or tone m's G_m (module
+/// documentation, # The tones) -- and its matrix (n × n, row by row): Ḡ of Re tr(Ḡ†G) (Hermitian), X of tr(G_m X).
+pub(crate) struct Bar<'a> {
+    pub(crate) channel: usize,
+    pub(crate) position: usize,
+    pub(crate) tone: Option<usize>,
+    pub(crate) matrix: &'a [C64],
+}
+
+/// The step's derivative's forms (`Fold::prototype_force`): per channel and lab axis ∂/∂r_a of its bars' sum, every
+/// position moved together (real where the channel holds static bars alone); per axis the bound on what the kept R₀ and
+/// z₀ leave of it (their own change along the axis: module documentation, # The force); the work (complex multiply-adds).
 pub(crate) struct Force {
-    pub(crate) force: [f64; 3],
+    pub(crate) forms: Vec<[C64; 3]>,
     pub(crate) held: [f64; 3],
     pub(crate) work: f64,
 }
@@ -3521,11 +3601,11 @@ impl Fold {
         let mut work = 0.0;
         ws.node_times = times;
         ws.noded = true;
-        let Workspace { mid, nodes, near, far, pairs, pp, base, lin, proj, step, temp, scratch, tm, .. } = &mut *ws;
-        let (mid, pairs, pp, base, lin, proj, step) = (&*mid, &*pairs, &*pp, &*base, &*lin, &*proj, &*step);
+        let Workspace { mid, nodes, near, far, pairs, pp, base, lin, rotating, proj, step, temp, scratch, tm, .. } = &mut *ws;
+        let (mid, pairs, pp, base, lin, rotating, proj, step) = (&*mid, &*pairs, &*pp, &*base, &*lin, &*rotating, &*proj, &*step);
         for (j, node) in nodes.iter_mut().enumerate() {
             let rj: [f64; 3] = std::array::from_fn(|a| r[a] + velocity[a] * times[j]);
-            self.proto_place(rj, kappa, &mut node.at, pairs, pp, base, lin, proj, &mut work);
+            self.proto_place(rj, kappa, &mut node.at, pairs, pp, base, lin, rotating, proj, &mut work);
             let at = &node.at;
             let a = &mut node.a.data;
             a.copy_from_slice(&at.hpp);
@@ -3635,60 +3715,118 @@ impl Fold {
             crate::linalg::adjoint_product_onto(sl, sr, (n, 2 * total, n), a);
             multiply(&step.normal.data, &node.a.data, &mut temp.data, n);
             multiply(&temp.data, &step.normal.data, &mut node.generator.data, n);
-            work += (2 * n * n * n) as f64;
+            // The tones' G_m(s) = S⁻¹A_m(s)S⁻¹ (module documentation, # The tones).
+            for (g, a) in node.tones.iter_mut().zip(&node.at.tones) {
+                multiply(&step.normal.data, a, &mut temp.data, n);
+                multiply(&temp.data, &step.normal.data, &mut g.data, n);
+            }
+            work += (2 * n * n * n * (1 + node.tones.len())) as f64;
         }
         work
     }
 
-    /// The force (module documentation, # The force): −∂/∂r_a of Σ_j Re tr(Ḡ_j†G_j), `bars` the cotangents of the middle's
-    /// G and of the outer nodes' (where `prototype_nodes` made them; ignored otherwise), every position moved together --
-    /// the step's derivative, the same tangent the photons take (`Fold::prototype_tangent`), contracted with the cotangents
-    /// of its top: G = S⁻¹AS⁻¹ (Ā = S⁻¹ḠS⁻¹, and S⁻¹'s to X̄ by `lyapunov`: Re⟨X̄, ∂X⟩), and per position the compression's
-    /// (`compress_back_rest`: Re⟨Z̄, ∂Z⟩ + Re⟨Ṽ̄, ∂Ṽ⟩ + Re⟨K̄, ∂K̃⟩, the exact copies' and the centred copies' rows with them),
-    /// Ĥ_PP's and the far forms'. A node's Z(s) = Σ_l ρ_l Z_l moves with its factors' ratios ρ_l = f_l(s)/f_l and the
-    /// responses' own tangent. The kept R₀ and z₀ are held as the step holds them; their relative change per µm along each
-    /// axis (`Force::held`, ‖R₀‖·|∂(Ĥ − z₀)|, ~10⁻⁷ on the scenes) is what that leaves of the force, relatively. After
+    /// The forms of the step's derivative (module documentation, # The force), per channel and lab axis ∂/∂r_a of the sum of
+    /// its bars (`Bar`): of a static bar Re tr(Ḡ†G) at its position, Ḡ its matrix (Hermitian, below); of a tone's
+    /// tr(G_m X) at its position, X its matrix (complex: the tone's complex amplitude, module documentation, # The tones).
+    /// Every position moved together -- the step's derivative, the same tangent the photons take
+    /// (`Fold::prototype_tangent`), contracted with the cotangents of its top: G = S⁻¹AS⁻¹ and G_m = S⁻¹A_mS⁻¹ (Ā = S⁻¹ḠS⁻¹;
+    /// S⁻¹'s by the tangent's ∂S, ∂S⁻¹ = −S⁻¹∂S S⁻¹), and per static bar the compression's (`compress_back_rest`:
+    /// Re⟨Z̄, ∂Z⟩ + Re⟨Ṽ̄, ∂Ṽ⟩ + Re⟨K̄, ∂K̃⟩, the exact copies' and the centred copies' rows with them), Ĥ_PP's and the far
+    /// forms'; per tone's bar its A_m's. A node's Z(s) = Σ_l ρ_l Z_l moves with its factors' ratios ρ_l = f_l(s)/f_l and
+    /// the responses' own tangent. The kept R₀ and z₀ are held as the step holds them; their relative change per µm along
+    /// each axis (`Force::held`, ‖R₀‖·|∂(Ĥ − z₀)|, ~10⁻⁷ on the scenes) is what that leaves of the forms, relatively. The
+    /// bars in the order of their channels, at the positions the step made (`prototype_nodes` for the outer nodes). After
     /// `prototype`, `prototype_nodes` and `prototype_tangent` on the same cache.
     ///
     /// # The cotangents are Hermitian (BRIEF_PROTO5 item 5)
     /// The integrator gives at each of its three nodes a real combination of the states' densities (step.rs `whole`: the
     /// quadrature's and the nodes' Lagrange weights are real, the sums laid by their upper triangle and its conjugate; the
     /// middle's held density taken out at real weights) and contracts it with the generator's Hermitian part, Re tr(∂G_h ρ)
-    /// (`Middle::force`, DESIGN §1.3) -- for Hermitian ρ that is Re tr(ρ∂G) = Re tr(Ḡ†∂G) with Ḡ = ρ. So every Ḡ_j is
-    /// Hermitian by construction, and so is Ā_j = S⁻¹Ḡ_jS⁻¹: the compressions' adjoint is [Ê† + K̂Z + B; Z]Ā, one product of
-    /// half the size ([Ê† | K̂Z + B][Ā; Ā†] and Z[Ā | Ā†] before), Ê̄† = B̄ = ZĀ; N̄'s Hermitian part (all `inverse_root_back`
-    /// reads) Σ_j P_j + P_j†, P_j = (S⁻¹Ḡ_j)†A_h,j, three products a position (six before); the copies' Ā + Ā† = 2Ā. (The
-    /// tones' cotangents are complex combinations, not Hermitian; they are the tones' generators', not the static G's here.)
-    pub(crate) fn prototype_force(&self, cache: &Cache, ws: &mut Workspace, bars: [&Mat; 3]) -> Force {
+    /// (`Middle::force`, DESIGN §1.3) -- for Hermitian ρ that is Re tr(ρ∂G) = Re tr(Ḡ†∂G) with Ḡ = ρ. So every static Ḡ is
+    /// Hermitian by construction, and so is Ā = S⁻¹ḠS⁻¹: the compressions' adjoint is [Ê† + K̂Z + B; Z]Ā, one product of
+    /// half the size ([Ê† | K̂Z + B][Ā; Ā†] and Z[Ā | Ā†] before), Ê̄† = B̄ = ZĀ; S⁻¹'s part Re tr(∂S M), M = −S⁻¹N̄_hS⁻¹,
+    /// N̄_h = Σ P + P†, P = (S⁻¹Ḡ)†A_h (A_h = (A + A†)/2), three products a bar and two a channel; the copies' Ā + Ā† = 2Ā.
+    /// A tone's cotangent is a complex combination (step.rs: Σ_k w_k e^{iν s_k}ρ_k), its form complex:
+    /// tr(∂G_m X) = tr(∂A_m S⁻¹XS⁻¹) − tr(∂S S⁻¹(A_mS⁻¹X + XS⁻¹A_m)S⁻¹), seven products a bar.
+    pub(crate) fn prototype_force(&self, cache: &Cache, ws: &mut Workspace, bars: &[Bar], channels: usize) -> Force {
         let n = ws.n;
         let nn = n * n;
         let mut work = 0.0;
         assert!(ws.tangent, "the step's tangent");
-        let Workspace { near, far, mid, nodes, noded, pp, lin, step, eigen, temp, scratch, tm, dx: dxs, .. } = &mut *ws;
-        let (mid, nodes, pp, step) = (&*mid, &*nodes, &*pp, &*step);
-        let positions = if *noded { 3 } else { 1 };
+        let positions = if ws.noded { 3 } else { 1 };
+        assert!(bars.iter().all(|b| b.position < positions && b.channel < channels), "a bar at a position the step did not make");
+        debug_assert!(bars.windows(2).all(|w| w[0].channel <= w[1].channel), "the bars in the order of their channels");
+        let Workspace { near, far, mid, nodes, pp, lin, rotating, step, eigen, temp, scratch, tm, ds, .. } = &mut *ws;
+        let (mid, nodes, pp, rotating, step, ds) = (&*mid, &*nodes, &*pp, &*rotating, &*step, &*ds);
         let normal = &step.normal.data;
-        let Temp { abar, nbar, adj, xbar, abc, w: wz, ge, diagonal, e, p, sl, fo1, .. } = tm;
-        // Ā_j = S⁻¹Ḡ_jS⁻¹ (Hermitian); N̄ = Σ_j Ḡ_j S⁻¹ A_j† + A_j† S⁻¹ Ḡ_j, of which `inverse_root_back` reads the Hermitian
-        // part Σ_j P_j + P_j†, P_j = Ḡ_jS⁻¹A_h,j = (S⁻¹Ḡ_j)†A_h,j (A_h = (A + A†)/2): given as Σ_j 2P_j; X̄.
-        let (nbar, adj, xbar, abc, wz) = (&mut nbar[..nn], &mut adj[..nn], &mut xbar[..nn], &mut abc[..nn], &mut wz[..nn]);
-        nbar.fill(C64::ZERO);
-        for j in 0..positions {
-            let g = &bars[j].data;
-            debug_assert!((0..nn).all(|i| (g[i] - g[(i % n) * n + i / n].conj()).abs() <= 1e-12 * (1.0 + g[i].abs())), "a cotangent not Hermitian");
-            let aj = if j == 0 { &step.a.data } else { &nodes[j - 1].a.data };
-            multiply(normal, g, &mut eigen.data, n);
-            multiply(&eigen.data, normal, &mut abar[j], n);
-            for r in 0..n {
-                for c in 0..n {
-                    adj[r * n + c] = (aj[r * n + c] + aj[c * n + r].conj()) * 0.5;
+        let Temp { abar, nbar, adj, abc, w: wz, ge, diagonal, e, p, sl, fo1, .. } = tm;
+        let (nbar, adj, abc, wz) = (&mut nbar[..nn], &mut adj[..nn], &mut abc[..nn], &mut wz[..nn]);
+        let mut forms = vec![[C64::ZERO; 3]; channels];
+        // tr(∂S_a M) of a matrix M (n × n): S⁻¹'s part of every form, by the step's ∂S.
+        let along = |m: &[C64], a: usize| -> C64 { (0..n).map(|r| (0..n).map(|c| ds[a][r * n + c] * m[c * n + r]).sum::<C64>()).sum() };
+        // The tones' bars (module documentation, # The tones).
+        for b in bars {
+            let Some(m) = b.tone else { continue };
+            let at = if b.position == 0 { mid } else { &nodes[b.position - 1].at };
+            let (a, x) = (&at.tones[m], b.matrix);
+            let (u, w) = (&mut e[..nn], &mut p[..nn]);
+            multiply(normal, x, u, n);
+            multiply(u, normal, w, n);
+            for (t, entries) in &rotating[m].pp {
+                let k: C64 = entries.iter().map(|&(i, v)| v * w[(i % n) * n + i / n]).sum();
+                for d in 0..3 {
+                    forms[b.channel][d] += k * at.dc[*t][d];
                 }
+                work += entries.len() as f64;
             }
-            crate::linalg::adjoint_product(&eigen.data, adj, (n, n, n), &mut temp.data);
-            nbar.iter_mut().zip(&temp.data).for_each(|(o, x)| *o += *x * 2.0);
-            work += (3 * n * n * n) as f64;
+            multiply(a, u, &mut temp.data, n);
+            multiply(x, normal, &mut eigen.data, n);
+            crate::linalg::fused_product_onto(&eigen.data, a, (n, n, n), &mut temp.data);
+            multiply(normal, &temp.data, abc, n);
+            multiply(abc, normal, adj, n);
+            for d in 0..3 {
+                forms[b.channel][d] -= along(adj, d);
+            }
+            work += (7 * n * n * n + 3 * nn) as f64;
         }
-        inverse_root_back(&step.metric.data, normal, nbar, n, xbar, &mut e[..nn], &mut temp.data, &mut p[..nn], &mut work);
+        // The static bars, channel by channel: Ā = S⁻¹ḠS⁻¹; S⁻¹'s part Re tr(∂S M), M = −S⁻¹N̄_hS⁻¹.
+        let statics: Vec<usize> = (0..bars.len()).filter(|&i| bars[i].tone.is_none()).collect();
+        if abar.len() < statics.len() {
+            abar.resize(statics.len(), vec![C64::ZERO; nn]);
+        }
+        for c in 0..channels {
+            nbar.fill(C64::ZERO);
+            let mut asked = false;
+            for (slot, &i) in statics.iter().enumerate().filter(|(_, &i)| bars[i].channel == c) {
+                let (j, g) = (bars[i].position, bars[i].matrix);
+                debug_assert!((0..nn).all(|i| (g[i] - g[(i % n) * n + i / n].conj()).abs() <= 1e-12 * (1.0 + g[i].abs())), "a cotangent not Hermitian");
+                let aj = if j == 0 { &step.a.data } else { &nodes[j - 1].a.data };
+                multiply(normal, g, &mut eigen.data, n);
+                multiply(&eigen.data, normal, &mut abar[slot], n);
+                for r in 0..n {
+                    for c in 0..n {
+                        adj[r * n + c] = (aj[r * n + c] + aj[c * n + r].conj()) * 0.5;
+                    }
+                }
+                crate::linalg::adjoint_product(&eigen.data, adj, (n, n, n), &mut temp.data);
+                nbar.iter_mut().zip(&temp.data).for_each(|(o, x)| *o += *x);
+                work += (3 * n * n * n) as f64;
+                asked = true;
+            }
+            if asked {
+                for r in 0..n {
+                    for c in 0..n {
+                        adj[r * n + c] = -(nbar[r * n + c] + nbar[c * n + r].conj());
+                    }
+                }
+                multiply(normal, adj, &mut temp.data, n);
+                multiply(&temp.data, normal, abc, n);
+                for d in 0..3 {
+                    forms[c][d] += C64::real(along(abc, d).re);
+                }
+                work += (2 * n * n * n + 3 * nn) as f64;
+            }
+        }
         let mut ft = [0u64; 5];
         let mut clock = ticks();
         let lap = |k: usize, clock: &mut u64, ft: &mut [u64; 5]| {
@@ -3697,14 +3835,18 @@ impl Fold {
             *clock = now;
         };
         lap(0, &mut clock, &mut ft);
-        // f'_a: the metric's part first.
         let re = |a: &[C64], b: &[C64]| a.iter().zip(b).map(|(x, y)| (x.conj() * *y).re).sum::<f64>();
         let im = |a: &[C64], b: &[C64]| a.iter().zip(b).map(|(x, y)| (x.conj() * *y).im).sum::<f64>();
-        let mut fp: [f64; 3] = std::array::from_fn(|a| re(xbar, &dxs[a]));
-        work += (3 * nn) as f64;
-        for j in 0..positions {
+        // A channel's static bars' slots: its first and its count (the K̃̄ product's, one a channel).
+        let first = |c: usize| statics.iter().filter(|&&i| bars[i].channel < c).count();
+        let count = |c: usize| statics.iter().filter(|&&i| bars[i].channel == c).count();
+        for (slot, &i) in statics.iter().enumerate() {
+            let (channel, j) = (bars[i].channel, bars[i].position);
+            let mut fp = [0.0_f64; 3];
+            // Its place in its channel's K̃̄ product: the channel's slots s × (count·n) after the earlier channels'.
+            let (into, pn) = (slot - first(channel), count(channel) * n);
             let at = if j == 0 { mid } else { &nodes[j - 1].at };
-            let ab = &abar[j][..nn];
+            let ab = &abar[slot][..nn];
             // The pairs' gradients and the components' at the position (`Placed`).
             let (dc, de) = (&at.dc, &at.de);
             // Ĥ_PP's: Re⟨Ā, Σ_t ∂c_t pp_t⟩.
@@ -3794,12 +3936,16 @@ impl Fold {
                 vb.copy_from_slice(xb);
                 let ebt = xb;
                 off += s;
-                // ZĀ and Z for K̃̄ over the positions (one product after them).
+                // ZĀ and Z for its channel's K̃̄ (one product after the bars).
                 {
-                    let pn = positions * n;
+                    let at = first(channel) * s * n;
+                    if kx.len() < (first(channel) + count(channel)) * s * n {
+                        kx.resize(statics.len() * s * n, C64::ZERO);
+                        kz.resize(statics.len() * s * n, C64::ZERO);
+                    }
                     for i in 0..s {
-                        kx[i * pn + j * n..i * pn + j * n + n].copy_from_slice(&xb[i * n..i * n + n]);
-                        kz[i * pn + j * n..i * pn + j * n + n].copy_from_slice(&z[i * n..i * n + n]);
+                        kx[at + i * pn + into * n..at + i * pn + into * n + n].copy_from_slice(&xb[i * n..i * n + n]);
+                        kz[at + i * pn + into * n..at + i * pn + into * n + n].copy_from_slice(&z[i * n..i * n + n]);
                     }
                 }
                 // The explicit parts' terms: Re⟨B̄, S_t⟩ + Re⟨Ê̄, E_t⟩ + Re⟨Ā, H_t⟩ times ∂c_t.
@@ -3947,20 +4093,29 @@ impl Fold {
                 }
                 lap(3, &mut clock, &mut ft);
             }
+            for a in 0..3 {
+                forms[channel][a] += C64::real(fp[a]);
+            }
         }
-        // K̃̄ = [Z_jĀ_j]_j [Z_j]_j† (s × positions·n × s) on ∂K̃ (the middle's, held at the nodes).
+        // Per channel K̃̄ = [Z_bĀ_b]_b [Z_b]_b† (s × count·n × s over its static bars) on ∂K̃ (the middle's, held at the nodes).
         for (nb, sc) in near.iter().zip(scratch.iter_mut()) {
             if nb.idle() {
                 continue;
             }
-            let (s, pn) = (nb.s, positions * n);
-            let (kzh, kb) = (&mut sc.kzh[..pn * s], &mut sc.kb[..s * s]);
-            adjoint_into(&sc.kz[..s * pn], s, pn, kzh);
-            fused_product_into(&sc.kx[..s * pn], kzh, (s, pn, s), kb);
-            for a in 0..3 {
-                fp[a] += inner(kb, &nb.tg.dk[a * s * s..(a + 1) * s * s], s, s, s, 0).re;
+            let s = nb.s;
+            for (c, form) in forms.iter_mut().enumerate().filter(|(c, _)| count(*c) > 0) {
+                let (at, pn) = (first(c) * s * n, count(c) * n);
+                if sc.kzh.len() < pn * s {
+                    sc.kzh.resize(pn * s, C64::ZERO);
+                }
+                let (kzh, kb) = (&mut sc.kzh[..pn * s], &mut sc.kb[..s * s]);
+                adjoint_into(&sc.kz[at..at + s * pn], s, pn, kzh);
+                fused_product_into(&sc.kx[at..at + s * pn], kzh, (s, pn, s), kb);
+                for a in 0..3 {
+                    form[a] += C64::real(inner(kb, &nb.tg.dk[a * s * s..(a + 1) * s * s], s, s, s, 0).re);
+                }
+                work += (s * s * pn + 3 * s * s) as f64;
             }
-            work += (s * s * pn + 3 * s * s) as f64;
         }
         lap(2, &mut clock, &mut ft);
         // What the kept R₀ and z₀ leave: their relative change per µm along each axis. A block's centre z₀'s gradient: the
@@ -3997,7 +4152,7 @@ impl Fold {
         }
         lap(4, &mut clock, &mut ft);
         ws.force_ticks = ft;
-        Force { force: fp.map(|x| -x), held, work }
+        Force { forms, held, work }
     }
 
     /// The step's tangent along the three lab axes (module documentation, # The force): every split's response's change by the
@@ -4721,14 +4876,33 @@ impl Workspace {
         self.near.iter().map(|x| (x.s, x.lanes, x.terms.len())).collect()
     }
 
-    /// An outer node's G(s) (`Fold::prototype_nodes`).
     /// S⁻¹ at the last step's middle.
     pub(crate) fn normal(&self) -> &Mat {
         &self.step.normal
     }
 
+    /// An outer node's G(s) (`Fold::prototype_nodes`).
     pub(crate) fn node_generator(&self, j: usize) -> &Mat {
         &self.nodes[j].generator
+    }
+
+    /// The tones (module documentation, # The tones): per tone its exact beat and its value (rad/µs), by their values.
+    pub(crate) fn tones(&self) -> impl Iterator<Item = (&Beat, f64)> {
+        self.rotating.iter().map(|r| (&r.beat, r.value))
+    }
+
+    /// Tone m's G_m at a position of the last step: 0 its middle, 1 and 2 its outer nodes (`Fold::prototype_nodes`).
+    pub(crate) fn tone(&self, m: usize, position: usize) -> &Mat {
+        if position == 0 {
+            &self.step.tones[m]
+        } else {
+            &self.nodes[position - 1].tones[m]
+        }
+    }
+
+    /// Tone m's A_m at the last step's middle (n × n, row by row).
+    pub(crate) fn tone_matrix(&self, m: usize) -> &[C64] {
+        &self.mid.tones[m]
     }
 
     /// The step's discrete choices (what the force's difference holds fixed): its sweeps, and per near block its rows

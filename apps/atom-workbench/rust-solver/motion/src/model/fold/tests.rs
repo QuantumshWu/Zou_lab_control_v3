@@ -1616,7 +1616,11 @@ fn unrate(r: f64) -> f64 {
 /// difference of the excited responses (relative to the column's whole, as ρ), what the readings allow it -- the
 /// prototype's series, reuse and held far forms and `Fold::at`'s own next pass, each as ρ, summed --, G's difference (of
 /// its scale), the copies' largest absolute difference (a population's amplitude), the prototype's own decay against its
-/// own jumps, its sweeps and the decompositions it made.
+/// own jumps, its sweeps and the decompositions it made. Of the tones (proto.rs # The tones): their A_m's largest
+/// difference from `Fold::at`'s (of the static A's scale), their G_m's (of their own scale), their decay
+/// i(G_m − G_{−m}†) (of G's scale: no jump of their own); and the metric's beating part `Fold::at` leaves out (DESIGN M8),
+/// X_cross = Σ_{o ≠ o′} ε_o′†ε_o on the excited rows two blocks share -- its largest entry, and that times the mixing
+/// c_pq = √w(|G_m,pq|/|ν_m + G_pp − G_qq|) of the tone at the same entry.
 struct Against {
     diff: f64,
     allowed: f64,
@@ -1626,6 +1630,11 @@ struct Against {
     decay: f64,
     sweeps: usize,
     made: usize,
+    tones: usize,
+    tone_a: f64,
+    tone_g: f64,
+    tone_decay: f64,
+    beating: [f64; 2],
 }
 
 fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut super::proto::Cache, r: [f64; 3], kappa: [f64; 3]) -> Against {
@@ -1634,7 +1643,7 @@ fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut supe
     let last = f.stages.last().unwrap();
     let at_next = last.next(&f.eliminated, &f.h[1], &f.h[2], &mut w);
     let step = fold.prototype(r, kappa, cache, ws).expect("the prototype at the point");
-    let (generator, normal) = (step.generator.clone(), step.normal.clone());
+    let (generator, normal, a) = (step.generator.clone(), step.normal.clone(), step.a.clone());
     let allowed = unrate(step.series) + unrate(step.reuse) + unrate(step.far) + unrate(step.omitted) + unrate(at_next) + 1e-10;
     let (sweeps, made, series, reuse, far, omitted) = (step.sweeps, step.made, step.series, step.reuse, step.far, step.omitted);
     let responses = ws.responses(fold, cache);
@@ -1678,7 +1687,53 @@ fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut supe
     let mut gap = Mat::from_fn(n, n, |i, j| C64::I * (generator[(i, j)] - generator[(j, i)].conj()));
     let scale = generator.frobenius().max(products.frobenius());
     gap.add_scaled(-C64::ONE, &products);
-    Against { diff: rho, allowed, parts: [unrate(series), unrate(reuse), unrate(far), unrate(at_next), unrate(omitted)], g, copies, decay: gap.max_abs() / scale, sweeps, made }
+    // The tones against `Fold::at`'s (none there at a beat: zero), and their decay, pair by pair.
+    let beats: Vec<(Beat, f64)> = ws.tones().map(|(b, v)| (b.clone(), v)).collect();
+    let (mut tone_a, mut tone_g, mut tone_decay) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for (m, (beat, _)) in beats.iter().enumerate() {
+        let theirs = f.tones.iter().find(|t| t.beat == *beat);
+        let mine = Mat { rows: n, cols: n, data: ws.tone_matrix(m).to_vec() };
+        let (ta, tg) = theirs.map_or((Mat::zeros(n, n), Mat::zeros(n, n)), |t| (t.a.clone(), t.generator.clone()));
+        let g_m = ws.tone(m, 0);
+        tone_a = tone_a.max((0..n * n).map(|i| (mine.data[i] - ta.data[i]).abs()).fold(0.0, f64::max) / a.frobenius());
+        let size = g_m.max_abs().max(tg.max_abs());
+        if size > 0.0 {
+            tone_g = tone_g.max((0..n * n).map(|i| (g_m.data[i] - tg.data[i]).abs()).fold(0.0, f64::max) / size);
+        }
+        if let Some(k) = beats.iter().position(|x| x.0 == beat.negated()) {
+            let partner = ws.tone(k, 0);
+            tone_decay = tone_decay.max((0..n).flat_map(|i| (0..n).map(move |j| (i, j))).map(|(i, j)| (C64::I * (g_m[(i, j)] - partner[(j, i)].conj())).abs()).fold(0.0, f64::max) / scale);
+        }
+    }
+    // The metric's beating part (DESIGN M8) on `Fold::at`'s amplitudes, and with the tones' mixing at its entries.
+    let mut cross = Mat::zeros(n, n);
+    for (o, bo) in fold.blocks.iter().enumerate() {
+        let ro = bo.excited(fold);
+        for (q, bq) in fold.blocks.iter().enumerate().filter(|&(q, _)| q != o) {
+            let rq = bq.excited(fold);
+            for (x, &e) in ro.iter().enumerate() {
+                if let Some(y) = rq.iter().position(|&d| d == e) {
+                    for p in 0..n {
+                        for c in 0..n {
+                            cross[(p, c)] += f.amplitudes[q][(y, p)].conj() * f.amplitudes[o][(x, c)];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mixing = |p: usize, c: usize| -> f64 {
+        f.tones
+            .iter()
+            .map(|t| {
+                let delta = (t.value + f.generator[(p, p)].re - f.generator[(c, c)].re).abs();
+                admixture(t.generator[(p, c)].abs() / delta).sqrt()
+            })
+            .fold(0.0, f64::max)
+    };
+    let largest = cross.max_abs();
+    let mixed = (0..n).flat_map(|p| (0..n).map(move |c| (p, c))).filter(|(p, c)| p != c).map(|(p, c)| cross[(p, c)].abs() * mixing(p, c)).fold(0.0, f64::max);
+    Against { diff: rho, allowed, parts: [unrate(series), unrate(reuse), unrate(far), unrate(at_next), unrate(omitted)], g, copies, decay: gap.max_abs() / scale, sweeps, made, tones: beats.len(), tone_a, tone_g, tone_decay, beating: [largest, mixed] }
 }
 
 /// The prototype against the fold at a point (proto.rs; BRIEF_PROTO.md gate 2), on a scene (`PROTO_SCENE`, a request's
@@ -1716,6 +1771,7 @@ fn the_prototype_is_the_fold_within_its_readings() {
         {
             let split = "";
             let (mut worst, mut worst_g, mut worst_copy, mut worst_decay) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+            let (mut tones, mut tone_a, mut tone_g, mut tone_decay, mut beating) = (0, 0.0_f64, 0.0_f64, 0.0_f64, [0.0_f64; 2]);
             let mut sweeps = [0usize; 64];
             let (mut diffs, mut parts) = (0.0_f64, [0.0_f64; 5]);
             let mut check = |x: Against, what: &str, worst: &mut f64| {
@@ -1725,6 +1781,11 @@ fn the_prototype_is_the_fold_within_its_readings() {
                 }
                 assert!(x.diff <= x.allowed, "{what}: the responses' difference {:.3e} beyond what the readings allow {:.3e} (series, reuse, far, Fold::at's next, left out: {:?})", x.diff, x.allowed, x.parts);
                 assert!(x.decay <= 1e-12, "{what}: the decay against the jumps {:.1e}", x.decay);
+                assert!(x.tone_a <= 1e-12 && x.tone_decay <= 1e-12, "{what}: the tones' A against Fold::at's {:.1e}, their decay {:.1e}", x.tone_a, x.tone_decay);
+                assert!(x.tone_g <= x.allowed, "{what}: the tones' G against Fold::at's {:.3e} beyond what the readings allow {:.3e}", x.tone_g, x.allowed);
+                tones = x.tones;
+                (tone_a, tone_g, tone_decay) = (tone_a.max(x.tone_a), tone_g.max(x.tone_g), tone_decay.max(x.tone_decay));
+                beating = [beating[0].max(x.beating[0]), beating[1].max(x.beating[1])];
                 *worst = worst.max(x.diff / x.allowed);
                 worst_g = worst_g.max(x.g);
                 worst_copy = worst_copy.max(x.copies);
@@ -1748,6 +1809,7 @@ fn the_prototype_is_the_fold_within_its_readings() {
             let total: usize = sweeps.iter().sum();
             let shares: Vec<String> = sweeps.iter().enumerate().filter(|x| *x.1 > 0).map(|(k, c)| format!("{k}: {:.1}%", 100.0 * *c as f64 / total as f64)).collect();
             println!("   {split}20 points {worst:.6e} of the allowance; the path (100 steps, {made} decompositions made) {along:.6e}; G {worst_g:.6e}, copies {worst_copy:.1e}, decay {worst_decay:.1e}; sweeps {shares:?}; the largest ρ: difference {diffs:.6e}, the series' rest {:.2e}, reuse {:.2e}, the far forms held {:.2e}, Fold::at's next {:.2e}, the nodes left out {:.2e}", parts[0], parts[1], parts[2], parts[3], parts[4]);
+            println!("   {split}{tones} tones: A against Fold::at's {tone_a:.1e} (of A's scale), G_m {tone_g:.3e} (of their own), their decay {tone_decay:.1e}; the metric's beating part (M8): its largest entry {:.3e}, times the tones' mixing {:.3e}", beating[0], beating[1]);
             checked += 1;
         }
     }
@@ -1857,7 +1919,8 @@ fn a_prototype_s_step_at_a_scene() {
                         let clock = std::time::Instant::now();
                         let tangent_work = fold.prototype_tangent(&cache, &mut ws);
                         let t_tangent = clock.elapsed().as_secs_f64();
-                        let force = fold.prototype_force(&cache, &mut ws, [&rho, &rho, &rho]);
+                        let bars: Vec<super::proto::Bar> = (0..3).map(|position| super::proto::Bar { channel: 0, position, tone: None, matrix: &rho.data }).collect();
+                        let force = fold.prototype_force(&cache, &mut ws, &bars, 1);
                         tangent.push((ws.tangent_ticks, ws.tangent_work, t_tangent, ws.force_ticks));
                         let t_force = clock.elapsed().as_secs_f64();
                         let clock = std::time::Instant::now();
@@ -1985,21 +2048,43 @@ fn proto_decay(generator: &Mat, jumps: &[[Mat; 3]]) -> f64 {
     gap.max_abs() / scale
 }
 
-/// The prototype's force (proto.rs `Fold::prototype_force`, BRIEF_PROTO2 item 1) against the high-precision difference of
-/// its contracted generator, f(δ) = Σ_j Re tr(Ḡ_j†G_j) over the step's middle and outer nodes (τ = 0.65 µs, the path at
-/// 0.1 m/s), every position moved by δ, random Hermitian cotangents Ḡ_j: each evaluation on a fresh cache (its
-/// decompositions made at the point, where the reuse leaves nothing), its discrete choices (sweeps, held rows, copies'
-/// rows) those of the centre -- a point where a difference meets another choice is skipped. Within the difference's error
-/// and what the kept R₀ and z₀ leave (`Force::held`). On PGC3D_1ms (refs) and R4_LIN_4 by their prototype choices
-/// (`proto_choice`), every set the prototype holds, three points each; the decay is its jumps' products at all three
-/// positions (`proto_decay`).
+/// A Λ whose two ground states turn against each other (BRIEF_WIRE2 item 1's tone): |0⟩ at 0 and |4⟩ at 100 rad/µs, one
+/// excited state (17) at 1000 rad/µs decaying at Γ to |0⟩, laser A (the trap's axis, a plane wave) on |0⟩ at 0.5 rad/µs and
+/// laser B on |4⟩ at 0.4 rad/µs a standing wave along z, both on resonance: the Raman coupling is resonant, so |0⟩ and |4⟩
+/// are one set, in frames 100 rad/µs apart (ν_A − ν_B), and B's outside form between them, 0.8 rad/µs times its intensity
+/// over a beam's, an entry of H_GG at their frames' beat -- a tone at ±100 rad/µs whose envelope is B's standing wave.
+fn toned_lambda() -> Request {
+    let (e4, ee) = (100.0, 1000.0);
+    let rays = [
+        Ray { axis: 0, nu: ee, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(0.5))] },
+        Ray { axis: 1, nu: ee - e4, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 4, C64::real(0.4))] },
+        Ray { axis: 1, nu: ee - e4, direction: [0.0, 0.0, -1.0], couplings: vec![(17, 4, C64::real(0.4))] },
+    ];
+    let mut req = system(&[(0, 0.0), (4, e4)], &[(17, ee, GAMMA, 0)], &rays, 2, false);
+    // |E_π|² of one beam is 10⁶ (`system`): the form's entry 0.8·10⁻⁶ gives 0.8 rad/µs a beam's intensity.
+    let b = req.outside_forms.iter().position(|f| f.frequency_index == vec![0, 1]).unwrap();
+    req.outside_forms[b].matrices[1][(0, 4)] = C64::real(0.8e-6);
+    req.outside_forms[b].matrices[1][(4, 0)] = C64::real(0.8e-6);
+    req.validate().unwrap();
+    req
+}
+
+/// The prototype's force (proto.rs `Fold::prototype_force`, BRIEF_PROTO2 item 1; BRIEF_WIRE2 item 1) against the
+/// high-precision difference of its contracted generator, every position moved by δ: on channel 0
+/// f(δ) = Σ_j Re tr(Ḡ_j†G_j) + Σ_m,j Re tr(X_m,j G_m(j)) over the step's middle and outer nodes (τ = 0.65 µs, the path at
+/// 0.1 m/s), random Hermitian cotangents Ḡ_j and random complex X_m,j of every tone; on channel 1 + m the complex
+/// tr(Ḡ′ G_m(h)) of each tone at the outer node at h (a random density Ḡ′: a tone's complex amplitude). Each evaluation
+/// on a fresh cache (its decompositions made at the point, where the reuse leaves nothing), its discrete choices (sweeps,
+/// held rows, copies' rows) those of the centre -- a point where a difference meets another choice is skipped. Within the
+/// difference's error and what the kept R₀ and z₀ leave (`Force::held`). On PGC3D_1ms (refs), R4_LIN_4 and a Λ with a
+/// tone (`toned_lambda`) by their prototype choices (`proto_choice`), every set the prototype holds, three points each; the
+/// decay is its jumps' products at all three positions (`proto_decay`).
 #[test]
 fn the_prototype_s_force_is_the_difference_of_its_generator() {
-    use super::proto::Cache;
-    let pgc = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json");
-    let mut checked = 0;
-    for name in [pgc.to_string_lossy().into_owned(), "R4_LIN_4".to_string()] {
-        let req = crate::model::testing::scene(&name);
+    use super::proto::{Bar, Cache};
+    let pgc = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json").to_string_lossy().into_owned();
+    let (mut checked, mut toned) = (0, 0);
+    for (name, req) in [(pgc.clone(), crate::model::testing::scene(&pgc)), ("R4_LIN_4".to_string(), crate::model::testing::scene("R4_LIN_4")), ("a Λ with a tone".to_string(), toned_lambda())] {
         let choice = proto_choice(&req, &name);
         let mut seed = 23u64;
         let mut u = || {
@@ -2019,6 +2104,7 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
                 }
             };
             let n = fold.size();
+            let tones = ws.tones().count();
             let speed = 0.1 / fold.hbar_over_mass;
             let times = [-0.325, 0.325];
             for point in 0..3 {
@@ -2027,20 +2113,32 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
                 let st = (1.0 - ct * ct).sqrt();
                 let kappa = [speed * st * phi.cos(), speed * st * phi.sin(), speed * ct];
                 let velocity = kappa.map(|k| k * fold.hbar_over_mass);
-                let bars: Vec<Mat> = (0..3)
-                    .map(|_| {
-                        let psi: Vec<C64> = (0..n).map(|_| C64::new(u() - 0.5, u() - 0.5)).collect();
-                        let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
-                        Mat::from_fn(n, n, |i, j| psi[i] * psi[j].conj() / norm)
-                    })
-                    .collect();
-                let value = |d: [f64; 3], ws: &mut super::proto::Workspace| -> (f64, (usize, Vec<(Vec<bool>, bool)>)) {
+                let mut density = || {
+                    let psi: Vec<C64> = (0..n).map(|_| C64::new(u() - 0.5, u() - 0.5)).collect();
+                    let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
+                    Mat::from_fn(n, n, |i, j| psi[i] * psi[j].conj() / norm)
+                };
+                let bars: Vec<Mat> = (0..3).map(|_| density()).collect();
+                let ends: Vec<Mat> = (0..tones).map(|_| density()).collect();
+                let xs: Vec<Mat> = (0..3 * tones).map(|_| Mat::from_fn(n, n, |_, _| C64::new(u() - 0.5, u() - 0.5))).collect();
+                // tr(X G) = Σ_ij X_ij G_ji.
+                let tr = |x: &Mat, g: &Mat| (0..n).flat_map(|i| (0..n).map(move |j| (i, j))).map(|(i, j)| x[(i, j)] * g[(j, i)]).sum::<C64>();
+                // Channel 0 and the tones' channels at the point moved by d.
+                let value = |d: [f64; 3], ws: &mut super::proto::Workspace| -> (Vec<C64>, (usize, Vec<(Vec<bool>, bool)>)) {
                     let r: [f64; 3] = std::array::from_fn(|a| r0[a] + d[a]);
                     let mut cache = Cache::default();
                     let g0 = fold.prototype(r, kappa, &mut cache, ws).expect("the prototype").generator.clone();
                     fold.prototype_nodes(r, kappa, velocity, times, &cache, ws);
-                    let tr = |b: &Mat, g: &Mat| (0..b.data.len()).map(|i| (b.data[i].conj() * g.data[i]).re).sum::<f64>();
-                    (tr(&bars[0], &g0) + tr(&bars[1], ws.node_generator(0)) + tr(&bars[2], ws.node_generator(1)), ws.choices())
+                    let real = |b: &Mat, g: &Mat| (0..b.data.len()).map(|i| (b.data[i].conj() * g.data[i]).re).sum::<f64>();
+                    let mut f0 = real(&bars[0], &g0) + real(&bars[1], ws.node_generator(0)) + real(&bars[2], ws.node_generator(1));
+                    for m in 0..tones {
+                        for j in 0..3 {
+                            f0 += tr(&xs[3 * m + j], ws.tone(m, j)).re;
+                        }
+                    }
+                    let mut out = vec![C64::real(f0)];
+                    out.extend((0..tones).map(|m| tr(&ends[m], ws.tone(m, 2))));
+                    (out, ws.choices())
                 };
                 let (_, centre) = value([0.0; 3], &mut ws);
                 let mut cache = Cache::default();
@@ -2057,13 +2155,17 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
                     })
                     .collect();
                 fold.prototype_tangent(&cache, &mut ws);
-                let force = fold.prototype_force(&cache, &mut ws, [&bars[0], &bars[1], &bars[2]]);
-                let scale = force.force.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
-                println!("{name} set {set:?} point {point}: the force {:?} (held {:?}, {:.0} multiply-adds); decay against the jumps {:?}", force.force, force.held, force.work, decay.iter().map(|d| format!("{d:.1e}")).collect::<Vec<_>>());
+                let mut contraction: Vec<Bar> = (0..3).map(|j| Bar { channel: 0, position: j, tone: None, matrix: &bars[j].data }).collect();
+                contraction.extend((0..3 * tones).map(|k| Bar { channel: 0, position: k % 3, tone: Some(k / 3), matrix: &xs[k].data }));
+                contraction.extend((0..tones).map(|m| Bar { channel: 1 + m, position: 2, tone: Some(m), matrix: &ends[m].data }));
+                let force = fold.prototype_force(&cache, &mut ws, &contraction, 1 + tones);
+                let scale = force.forms[0].iter().fold(0.0_f64, |m, x| m.max(x.re.abs()));
+                println!("{name} set {set:?} point {point}: the forms {:?} (held {:?}, {:.0} multiply-adds, {tones} tones); decay against the jumps {:?}", force.forms[0].map(|z| z.re), force.held, force.work, decay.iter().map(|d| format!("{d:.1e}")).collect::<Vec<_>>());
                 assert!(decay.iter().all(|&d| d <= 1e-12), "the decay against the jumps {decay:?}");
                 let mut skipped = false;
-                for a in 0..3 {
-                    let mut quotients = vec![];
+                'axes: for a in 0..3 {
+                    // Per channel the real part, then the tones' imaginary parts.
+                    let mut quotients: Vec<Vec<f64>> = vec![vec![]; 1 + 2 * tones];
                     for h in crate::model::testing::steps() {
                         let (mut p, mut m) = ([0.0; 3], [0.0; 3]);
                         p[a] = h;
@@ -2071,30 +2173,41 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
                         let ((fp, cp), (fm, cm)) = (value(p, &mut ws), value(m, &mut ws));
                         if cp != centre || cm != centre {
                             skipped = true;
+                            break 'axes;
                         }
-                        quotients.push(-(fp - fm) / (2.0 * h));
+                        for c in 0..1 + tones {
+                            let q = (fp[c] - fm[c]) / (2.0 * h);
+                            quotients[c].push(q.re);
+                            if c > 0 {
+                                quotients[tones + c].push(q.im);
+                            }
+                        }
                     }
-                    if skipped {
-                        println!("   another choice within the differences' steps: skipped");
-                        break;
+                    for (c, quotients) in quotients.iter().enumerate() {
+                        let form = if c <= tones { force.forms[c][a].re } else { force.forms[c - tones][a].im };
+                        let estimate = crate::model::testing::converged(quotients, 1);
+                        // The finest three quotients extrapolated twice (their error h², then h⁴): the limit to the rounding
+                        // the coarse steps' estimate (`converged`) leaves where the light turns fast along the axis.
+                        let q = &quotients[quotients.len() - 3..];
+                        let (r1, r0) = (q[2] + (q[2] - q[1]) / 3.0, q[1] + (q[1] - q[0]) / 3.0);
+                        let limit = r1 + (r1 - r0) / 15.0;
+                        let size = if c == 0 { scale } else { force.forms[if c <= tones { c } else { c - tones }].iter().fold(0.0_f64, |m, z| m.max(z.abs())) };
+                        println!("   ∂{a} channel {c}: the forms {form:.10e}, difference {:.10e} ± {:.1e} (extrapolated {limit:.10e}, ± {:.1e}), held {:.1e}", estimate.0, estimate.1, (limit - r1).abs(), force.held[a]);
+                        // What the kept R₀ and z₀ leave: their relative change along the axis (`Force::held`) of the scale.
+                        let held = force.held[a] * size;
+                        assert!(crate::model::testing::agrees(form, (estimate.0, estimate.1 + held / 4.0), size), "{name} set {set:?} point {point} axis {a} channel {c}: the forms against the difference");
+                        assert!((form - limit).abs() <= 4.0 * (limit - r1).abs() + held + 1e-8 * size, "{name} set {set:?} point {point} axis {a} channel {c}: the forms against the extrapolated difference");
                     }
-                    let estimate = crate::model::testing::converged(&quotients, 1);
-                    // The finest three quotients extrapolated twice (their error h², then h⁴): the limit to the rounding the
-                    // coarse steps' estimate (`converged`) leaves where the light turns fast along the axis.
-                    let q = &quotients[quotients.len() - 3..];
-                    let (r1, r0) = (q[2] + (q[2] - q[1]) / 3.0, q[1] + (q[1] - q[0]) / 3.0);
-                    let limit = r1 + (r1 - r0) / 15.0;
-                    println!("   ∂{a}: adjoint {:.10e}, difference {:.10e} ± {:.1e} (extrapolated {limit:.10e}, ± {:.1e}), held {:.1e}", force.force[a], estimate.0, estimate.1, (limit - r1).abs(), force.held[a]);
-                    // What the kept R₀ and z₀ leave: their relative change along the axis (`Force::held`) of the force's scale.
-                    let held = force.held[a] * scale;
-                    assert!(crate::model::testing::agrees(force.force[a], (estimate.0, estimate.1 + held / 4.0), scale), "{name} set {set:?} point {point} axis {a}: the force against the difference");
-                    assert!((force.force[a] - limit).abs() <= 4.0 * (limit - r1).abs() + held + 1e-8 * scale, "{name} set {set:?} point {point} axis {a}: the force against the extrapolated difference");
+                }
+                if skipped {
+                    println!("   another choice within the differences' steps: skipped");
                 }
                 checked += usize::from(!skipped);
+                toned += usize::from(!skipped && tones > 0);
             }
         }
     }
-    assert!(checked >= 4, "{checked} points checked");
+    assert!(checked >= 4 && toned >= 1, "{checked} points checked, {toned} with tones");
 }
 
 /// The prototype's photons (proto.rs `Fold::prototype_photons`, BRIEF_PROTO2 item 2) of a random state at the step's middle:
@@ -2309,38 +2422,69 @@ fn the_levels_cross_series() {
     }
 }
 
-/// The run on the fold at the atom (run.rs) against the exact master equation (BRIEF_WIRE 2a; unify part 2's Λ): |1⟩ at 0
-/// and |2⟩ at 100 rad/µs, one excited state decaying at Γ = 38 rad/µs, three quarters to |1⟩ and a quarter to |2⟩ (on two
-/// axes), laser A on |1⟩ (1.5 rad/µs) and B on |2⟩ (0.75 rad/µs), both on resonance -- half unify's, so that the rule
-/// folds the excited state (at unify's 3 and 1.5 rad/µs it keeps it in P, a block with no Q rows, which the prototype does
-/// not hold) --: the jumps' coherence makes the dark state b|1⟩ − a|2⟩ (coherent population trapping), |1⟩'s share 0.2,
-/// where the rate equations, each laser's photons apart, give 0.43. The two ground states are one set (their Raman
-/// coupling resonant), both lasers reach one block, and its jumps are one operator: 400 trajectories from |1⟩ (the atom
-/// 10⁶ times Rb's mass, at rest at the focus), steps of 0.25 µs through the integrator and its jumps, read at 60 µs --
-/// their mean |1⟩ share within three standard errors and the elimination's (a/(Γ/2))² of the exact one.
-#[test]
-fn the_run_s_lambda_is_the_master_equation_s_dark_state() {
+/// The run on the fold at the atom (run.rs) against the exact master equation of a Λ (unify part 2's): |1⟩ at 0 and |2⟩ at
+/// 100 rad/µs, one excited state decaying at Γ = 38 rad/µs, three quarters to |1⟩ and a quarter to |2⟩ (on two axes),
+/// laser A on |1⟩ (`a` rad/µs) and B on |2⟩ (`b`), both on resonance. Where `form` is not zero B is a standing wave along z
+/// (two beams of `b` each) with an outside form `form` between |1⟩ and |2⟩ (per unit |E_π|², a beam's 10⁶): H_GG's entry
+/// c(r) = form (|E_B(r)|² − |E_B(0)|²) (H0 holds the forms at the focus), in their frames 100 rad/µs apart a tone at
+/// ±100 rad/µs (run.rs # The tones), and the atom at rest at kz = π/4, where B's intensity is half its focus's. The two
+/// ground states are one set (their Raman coupling resonant), both lasers reach one block, its jumps are one operator, and
+/// a jump lands on both states at their frames' phases (run.rs # The jumps' phase): 400 trajectories from |1⟩ (the atom
+/// 10⁶ times Rb's mass, at rest), steps of 0.25 µs through the integrator and its jumps, read at 60 µs. Returns the run's
+/// mean |1⟩ share, its standard error, the exact master equation's (RK4 in the lasers' frame, the beams' amplitudes at the
+/// atom), and the dark state's |b|²/(|a|² + |b|²) there.
+fn lambda_against_master(a: f64, b: f64, form: f64) -> (f64, f64, f64, f64) {
     use crate::step::{Dynamics, Midway, Trajectory};
-    let (e2, gamma, a, b) = (100.0, 38.0, 1.5, 0.75);
+    let (e2, gamma) = (100.0, 38.0);
     let (to1, to2) = (0.75 * gamma, 0.25 * gamma);
     // The excited state at 1000 rad/µs in its frame, the lasers on resonance there (the idle excited states at zero, no
     // laser's energy on them).
     let ee = 1000.0;
-    let mut req = system(&[(0, 0.0), (4, e2)], &[(17, ee, gamma, 0)], &[Ray { axis: 0, nu: ee, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(a))] }, Ray { axis: 1, nu: ee - e2, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 4, C64::real(b))] }], 2, true);
+    let mut rays = vec![Ray { axis: 0, nu: ee, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(a))] }, Ray { axis: 1, nu: ee - e2, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 4, C64::real(b))] }];
+    if form != 0.0 {
+        rays.push(Ray { axis: 1, nu: ee - e2, direction: [0.0, 0.0, -1.0], couplings: vec![(17, 4, C64::real(b))] });
+    }
+    let mut req = system(&[(0, 0.0), (4, e2)], &[(17, ee, gamma, 0)], &rays, 2, true);
     req.emission = std::array::from_fn(|_| Mat::zeros(STATES, STATES));
     req.emission[0][(0, GROUND + 17)] = C64::real(to1.sqrt());
     req.emission[1][(4, GROUND + 17)] = C64::real(to2.sqrt());
+    let k = req.beams[1].wave_number;
+    let at = if form != 0.0 { [0.0, 0.0, std::f64::consts::FRAC_PI_4 / k] } else { [0.0; 3] };
+    if form != 0.0 {
+        let f = req.outside_forms.iter().position(|f| f.frequency_index == vec![0, 1]).unwrap();
+        req.outside_forms[f].matrices[1][(0, 4)] = C64::real(form);
+        req.outside_forms[f].matrices[1][(4, 0)] = C64::real(form);
+    }
     req.validate().unwrap();
     let mut p = [0.0; GROUND];
     p[0] = 1.0;
     let run = run::Onefold::new(&req, p).expect("the run");
     assert_eq!(run.cluster_of(0), run.cluster_of(4), "|1⟩ and |2⟩ one set");
-    // The exact three-level master equation in the lasers' frame, from |1⟩⟨1|, at 30 µs (RK4).
-    let h3 = Mat::from_fn(3, 3, |i, j| if (i, j) == (2, 0) || (i, j) == (0, 2) { C64::real(a) } else if (i, j) == (2, 1) || (i, j) == (1, 2) { C64::real(b) } else { C64::ZERO });
+    // The couplings at the atom: each beam's amplitude there, and the form's entry less its value at the focus.
+    let light = Light::new(&req);
+    let amplitude = |l: usize, r: [f64; 3]| light.beams[l].amplitude_to(r, 1).value;
+    let (ae, be) = (amplitude(0, at) * a, (1..rays.len()).map(|l| amplitude(l, at)).sum::<C64>() * b);
+    let intensity = |r: [f64; 3]| 1e6 * (1..rays.len()).map(|l| amplitude(l, r)).sum::<C64>().norm_sqr();
+    let c = form * (intensity(at) - intensity([0.0; 3]));
+    // The exact three-level master equation in the lasers' frame, from |1⟩⟨1|, at 60 µs (RK4): |2⟩'s frame 100 rad/µs
+    // above |1⟩'s, so c turns as e^{∓i100t}.
+    let h3 = |t: f64| {
+        let turn = C64::cis(-e2 * t) * c;
+        Mat::from_fn(3, 3, |i, j| match (i, j) {
+            (2, 0) => ae,
+            (0, 2) => ae.conj(),
+            (2, 1) => be,
+            (1, 2) => be.conj(),
+            (0, 1) => turn,
+            (1, 0) => turn.conj(),
+            _ => C64::ZERO,
+        })
+    };
     let c3 = [Mat::from_fn(3, 3, |i, j| if (i, j) == (0, 2) { C64::real(to1.sqrt()) } else { C64::ZERO }), Mat::from_fn(3, 3, |i, j| if (i, j) == (1, 2) { C64::real(to2.sqrt()) } else { C64::ZERO })];
-    let lindblad = |rho: &Mat| -> Mat {
-        let mut out = h3.product(rho);
-        out.add_scaled(-C64::ONE, &rho.product(&h3));
+    let lindblad = |t: f64, rho: &Mat| -> Mat {
+        let h = h3(t);
+        let mut out = h.product(rho);
+        out.add_scaled(-C64::ONE, &rho.product(&h));
         let mut out = out.scaled(C64::new(0.0, -1.0));
         for j in &c3 {
             out.add_scaled(C64::ONE, &j.product(rho).product(&j.adjoint()));
@@ -2353,17 +2497,18 @@ fn the_run_s_lambda_is_the_master_equation_s_dark_state() {
     let (time, dt): (f64, f64) = (60.0, 2e-4);
     let mut rho = Mat::zeros(3, 3);
     rho[(0, 0)] = C64::ONE;
-    for _ in 0..(time / dt).round() as usize {
-        let k1 = lindblad(&rho);
+    for k in 0..(time / dt).round() as usize {
+        let t = k as f64 * dt;
+        let k1 = lindblad(t, &rho);
         let mut x = rho.clone();
         x.add_scaled(C64::real(0.5 * dt), &k1);
-        let k2 = lindblad(&x);
+        let k2 = lindblad(t + 0.5 * dt, &x);
         let mut x = rho.clone();
         x.add_scaled(C64::real(0.5 * dt), &k2);
-        let k3 = lindblad(&x);
+        let k3 = lindblad(t + 0.5 * dt, &x);
         let mut x = rho.clone();
         x.add_scaled(C64::real(dt), &k3);
-        let k4 = lindblad(&x);
+        let k4 = lindblad(t + dt, &x);
         for (k, w) in [(&k1, 1.0), (&k2, 2.0), (&k3, 2.0), (&k4, 1.0)] {
             rho.add_scaled(C64::real(dt * w / 6.0), k);
         }
@@ -2380,7 +2525,7 @@ fn the_run_s_lambda_is_the_master_equation_s_dark_state() {
     let mut shares = vec![];
     let mut scratch = crate::step::Scratch::default();
     for i in 0..count {
-        let mut t = Trajectory::new(&run, 0, [0.0; 3], [0.0; 3], 11, i);
+        let mut t = Trajectory::new(&run, 0, at, [0.0; 3], 11, i);
         for _ in 0..steps {
             t = Midway::new(&run, &t, tau).unwrap().attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere).unwrap().end;
         }
@@ -2389,7 +2534,35 @@ fn the_run_s_lambda_is_the_master_equation_s_dark_state() {
     }
     let mean = shares.iter().sum::<f64>() / count as f64;
     let error = (shares.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (count * (count - 1)) as f64).sqrt();
+    (mean, error, exact, be.norm_sqr() / (ae.norm_sqr() + be.norm_sqr()))
+}
+
+/// The run's Λ (`lambda_against_master`) without the coupling, the lasers at half unify's (1.5 and 0.75 rad/µs, so that
+/// the rule folds the excited state): the jumps' coherence makes the dark state b|1⟩ − a|2⟩ (coherent population
+/// trapping), |1⟩'s share 0.2, where the rate equations, each laser's photons apart, give 0.43 -- their mean |1⟩ share
+/// within three standard errors and the elimination's (a/(Γ/2))² of the exact one.
+#[test]
+fn the_run_s_lambda_is_the_master_equation_s_dark_state() {
+    let (a, gamma) = (1.5, 38.0);
+    let (mean, error, exact, _) = lambda_against_master(a, 0.75, 0.0);
     let elimination = (a / (0.5 * gamma)).powi(2);
-    println!("|1⟩'s share at 60 µs: the run {mean:.4} ± {error:.4} over {count} trajectories, the exact master equation {exact:.4} (the rate equations' 0.43; the elimination's (a/(Γ/2))² {elimination:.4})");
+    println!("|1⟩'s share at 60 µs: the run {mean:.4} ± {error:.4} over 400 trajectories, the exact master equation {exact:.4} (the rate equations' 0.43; the elimination's (a/(Γ/2))² {elimination:.4})");
+    assert!((mean - exact).abs() <= 3.0 * error + elimination, "the run's |1⟩ share {mean} ± {error} against the master equation's {exact}");
+}
+
+/// The run's Λ with a tone (BRIEF_WIRE2 item 1; `lambda_against_master`): A as there, B a standing wave of two beams of
+/// 0.4 rad/µs (its fold the rule's at the focus, where B is 0.8 rad/µs), and a form
+/// whose coupling between |1⟩ and |2⟩ at the atom is c = 10 rad/µs -- in their frames a tone at ±100 rad/µs (νh = 12.5 at
+/// the steps of 0.25 µs: a tone of the integrator), its light shift c²/100 = 1 rad/µs on the two-photon resonance, beyond
+/// the dark state's width (a² + b²)/Γ ≈ 0.07 rad/µs: the dark state is lifted -- |1⟩'s share moves from its 0.12 -- and the
+/// run follows the exact master equation within three standard errors and the elimination's (a/(Γ/2))².
+#[test]
+fn the_run_s_lambda_with_a_tone_is_the_master_equation_s() {
+    let (a, gamma) = (1.5, 38.0);
+    // B's intensity at the atom half its focus's, 2·10⁶ less: c = −2·10⁶ form.
+    let (mean, error, exact, dark) = lambda_against_master(a, 0.4, -5e-6);
+    let elimination = (a / (0.5 * gamma)).powi(2);
+    println!("with the tone: |1⟩'s share at 60 µs: the run {mean:.4} ± {error:.4} over 400 trajectories, the exact master equation {exact:.4} (the dark state's {dark:.4}; the elimination's (a/(Γ/2))² {elimination:.4})");
+    assert!((exact - dark).abs() > 3.0 * error + elimination, "the tone moves the share beyond what the run is held to: {exact} against the dark state's {dark}");
     assert!((mean - exact).abs() <= 3.0 * error + elimination, "the run's |1⟩ share {mean} ± {error} against the master equation's {exact}");
 }
