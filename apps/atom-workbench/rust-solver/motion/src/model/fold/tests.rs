@@ -1952,3 +1952,128 @@ fn a_prototype_s_step_at_a_scene() {
         }
     }
 }
+
+/// The decay of a prototype step's generator against its own jumps at a position (DESIGN §2.6): the largest entry of
+/// i(G − G†) − Σ L†L over the scale of G and Σ L†L.
+fn proto_decay(generator: &Mat, jumps: &[[Mat; 3]]) -> f64 {
+    let n = generator.rows;
+    let mut products = Mat::zeros(n, n);
+    for js in jumps {
+        for j in js {
+            products.add_scaled(C64::ONE, &j.adjoint_product(j));
+        }
+    }
+    let mut gap = Mat::from_fn(n, n, |i, j| C64::I * (generator[(i, j)] - generator[(j, i)].conj()));
+    let scale = generator.frobenius().max(products.frobenius());
+    gap.add_scaled(-C64::ONE, &products);
+    gap.max_abs() / scale
+}
+
+/// The prototype's force (proto.rs `Fold::prototype_force`, BRIEF_PROTO2 item 1) against the high-precision difference of
+/// its contracted generator, f(δ) = Σ_j Re tr(Ḡ_j†G_j) over the step's middle and outer nodes (τ = 0.65 µs, the path at
+/// 0.1 m/s), every position moved by δ, random Hermitian cotangents Ḡ_j: each evaluation on a fresh cache (its
+/// decompositions made at the point, where the reuse leaves nothing), its discrete choices (sweeps, held rows, copies'
+/// rows) those of the centre -- a point where a difference meets another choice is skipped. Within the difference's error
+/// and what the kept R₀ and z₀ leave (`Force::held`). On PGC3D_1ms (refs) and R4_LIN_4 by their prototype choices
+/// (`proto_choice`), every set the prototype holds, three points each; the decay is its jumps' products at all three
+/// positions (`proto_decay`).
+#[test]
+fn the_prototype_s_force_is_the_difference_of_its_generator() {
+    use super::proto::Cache;
+    let pgc = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json");
+    let mut checked = 0;
+    for name in [pgc.to_string_lossy().into_owned(), "R4_LIN_4".to_string()] {
+        let req = crate::model::testing::scene(&name);
+        let choice = proto_choice(&req, &name);
+        let mut seed = 23u64;
+        let mut u = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for set in Fold::sets(&req, &choice).unwrap() {
+            let fold = Fold::new(&req, &choice, set[0]).unwrap();
+            if fold.blocks.is_empty() {
+                continue;
+            }
+            let mut ws = match fold.prototype_workspace() {
+                Ok(w) => w,
+                Err(e) => {
+                    println!("{name} set {set:?}: not the prototype's ({e})");
+                    continue;
+                }
+            };
+            let n = fold.size();
+            let speed = 0.1 / fold.hbar_over_mass;
+            let times = [-0.325, 0.325];
+            for point in 0..3 {
+                let r0: [f64; 3] = std::array::from_fn(|_| 0.6 * u() - 0.3);
+                let (ct, phi) = (2.0 * u() - 1.0, 2.0 * std::f64::consts::PI * u());
+                let st = (1.0 - ct * ct).sqrt();
+                let kappa = [speed * st * phi.cos(), speed * st * phi.sin(), speed * ct];
+                let velocity = kappa.map(|k| k * fold.hbar_over_mass);
+                let bars: Vec<Mat> = (0..3)
+                    .map(|_| {
+                        let psi: Vec<C64> = (0..n).map(|_| C64::new(u() - 0.5, u() - 0.5)).collect();
+                        let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
+                        Mat::from_fn(n, n, |i, j| psi[i] * psi[j].conj() / norm)
+                    })
+                    .collect();
+                let value = |d: [f64; 3], ws: &mut super::proto::Workspace| -> (f64, (usize, Vec<(Vec<bool>, bool)>)) {
+                    let r: [f64; 3] = std::array::from_fn(|a| r0[a] + d[a]);
+                    let mut cache = Cache::default();
+                    let g0 = fold.prototype(r, kappa, &mut cache, ws).expect("the prototype").generator.clone();
+                    fold.prototype_nodes(r, kappa, velocity, times, &cache, ws);
+                    let tr = |b: &Mat, g: &Mat| (0..b.data.len()).map(|i| (b.data[i].conj() * g.data[i]).re).sum::<f64>();
+                    (tr(&bars[0], &g0) + tr(&bars[1], ws.node_generator(0)) + tr(&bars[2], ws.node_generator(1)), ws.choices())
+                };
+                let (_, centre) = value([0.0; 3], &mut ws);
+                let mut cache = Cache::default();
+                let g0 = fold.prototype(r0, kappa, &mut cache, &mut ws).unwrap().generator.clone();
+                fold.prototype_nodes(r0, kappa, velocity, times, &cache, &mut ws);
+                let decay: Vec<f64> = [None, Some(0), Some(1)]
+                    .iter()
+                    .map(|&j| {
+                        let g = match j {
+                            None => g0.clone(),
+                            Some(j) => ws.node_generator(j).clone(),
+                        };
+                        proto_decay(&g, &fold.prototype_jumps(&cache, &ws, j))
+                    })
+                    .collect();
+                let force = fold.prototype_force(&cache, &mut ws, [&bars[0], &bars[1], &bars[2]]);
+                let scale = force.force.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+                println!("{name} set {set:?} point {point}: the force {:?} (held {:?}, {:.0} multiply-adds); decay against the jumps {:?}", force.force, force.held, force.work, decay.iter().map(|d| format!("{d:.1e}")).collect::<Vec<_>>());
+                assert!(decay.iter().all(|&d| d <= 1e-12), "the decay against the jumps {decay:?}");
+                let mut skipped = false;
+                for a in 0..3 {
+                    let mut quotients = vec![];
+                    for h in crate::model::testing::steps() {
+                        let (mut p, mut m) = ([0.0; 3], [0.0; 3]);
+                        p[a] = h;
+                        m[a] = -h;
+                        let ((fp, cp), (fm, cm)) = (value(p, &mut ws), value(m, &mut ws));
+                        if cp != centre || cm != centre {
+                            skipped = true;
+                        }
+                        quotients.push(-(fp - fm) / (2.0 * h));
+                    }
+                    if skipped {
+                        println!("   another choice within the differences' steps: skipped");
+                        break;
+                    }
+                    let estimate = crate::model::testing::converged(&quotients, 1);
+                    // The finest three quotients extrapolated twice (their error h², then h⁴): the limit to the rounding the
+                    // coarse steps' estimate (`converged`) leaves where the light turns fast along the axis.
+                    let q = &quotients[quotients.len() - 3..];
+                    let (r1, r0) = (q[2] + (q[2] - q[1]) / 3.0, q[1] + (q[1] - q[0]) / 3.0);
+                    let limit = r1 + (r1 - r0) / 15.0;
+                    println!("   ∂{a}: adjoint {:.10e}, difference {:.10e} ± {:.1e} (extrapolated {limit:.10e}, ± {:.1e}), held {:.1e}", force.force[a], estimate.0, estimate.1, (limit - r1).abs(), force.held[a]);
+                    assert!(crate::model::testing::agrees(force.force[a], (estimate.0, estimate.1 + force.held[a] / 4.0), scale), "{name} set {set:?} point {point} axis {a}: the adjoint against the difference");
+                    assert!((force.force[a] - limit).abs() <= 4.0 * (limit - r1).abs() + force.held[a] + 1e-8 * scale, "{name} set {set:?} point {point} axis {a}: the adjoint against the extrapolated difference");
+                }
+                checked += usize::from(!skipped);
+            }
+        }
+    }
+    assert!(checked >= 4, "{checked} points checked");
+}
