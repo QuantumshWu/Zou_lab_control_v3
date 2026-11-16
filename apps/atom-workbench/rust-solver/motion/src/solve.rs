@@ -518,11 +518,19 @@
 //! shown at a time is every atom's fate there -- a held atom's rows, a lost one's loss --, so the model errs on it by the
 //! mean over the atoms of the error of each one's fate (`Measured::means`): the held atoms' at their states there, by
 //! the held share 1 − L, and the lost atoms' along their paths, by L. A lost atom's fate was decided along its path
-//! from t = 0 to its loss: a rate's relative error x along it moves its loss's time by x of it to the first order, and
-//! its fate's error is the path's mean of x, read at the two states the run holds of it -- at t = 0 and where it was
-//! found lost -- by the trapezoid (`Booking::path`). T is the held atoms' alone. A run's price is read where its atoms
-//! were too (`one_each`): a trajectory weighs by the time it holds its atom, and one lost before the first time read by
-//! its state at t = 0. (Read on the held atoms alone, S2Q's first model -- nothing kept, its resonant probe's drives
+//! from t = 0 to where it passes the potential's far value -- past it the atom runs out of the trap's region whatever
+//! the rates there, and is found lost where it leaves it (adapt.rs, # The reads) --: a rate's relative error x along
+//! that path moves its loss's time by x of it to the first order, and its fate's error is the path's mean of x, read
+//! where the run reads every atom and at the path's end: at t = 0, at the analysis times it was held at, and at its
+//! last state the run keeps below the far value (`approached`: its last checkpoint not leaving, within one window of
+//! the passage) -- by the trapezoid on them (`Booking::path`). The state it was found lost in is read nowhere: its
+//! fate is sealed there. (Read there, as half of the path, the 1D PGC tilted 3° over 10 ms -- three of four atoms lost
+//! by 4 ms, each found at the trap's rim, 2 µm off its axis, where its strong near light (3 to 5 Γ, 38 I_sat a beam)
+//! leaves the fold wrong by 0.32–0.48 against 0.004–0.032 at every held state -- kept the F′ = 3 block for it: its
+//! steps 2.2 to 5 times dearer, and its run past every deadline.) An atom held near the rim is read there where an
+//! analysis time finds it, as every held atom. T is the held atoms' alone. A run's price is read where its atoms were
+//! too (`one_each`): a trajectory weighs by the time it holds its atom -- a lost one's to its path's end --, and one
+//! lost before the first time read by its state at t = 0. (Read on the held atoms alone, S2Q's first model -- nothing kept, its resonant probe's drives
 //! folded by the bare levels -- lost every atom within 10 µs, read no state at any output and booked its error as
 //! none, and the solve stood on every atom lost by 50 µs, where half of them are held to 0.53 ms; priced at the held
 //! states alone, every keep of it cost nothing, and it kept a coherence of photons 736 THz apart, which no step
@@ -1695,32 +1703,68 @@ impl Booking {
         Booking { error: [e.population, e.temperature] }
     }
 
-    /// The error of a lost atom's fate (module documentation, # The model): a unit's error along its path, of which the
-    /// run holds two states -- at t = 0 (`start`) and at its loss (`end`) --, their mean: the path's mean by the
-    /// trapezoid on those two: an atom lost errs by its fate.
-    fn path(start: &Booking, end: &Booking) -> Booking {
-        Booking { error: std::array::from_fn(|i| 0.5 * (start.error[i] + end.error[i])) }
+    /// The error of a lost atom's fate (module documentation, # Where the atoms went): a unit's mean error along the
+    /// path its fate was decided along, by the trapezoid on the states the run holds of it there (`nodes`: their times,
+    /// increasing from t = 0, and their errors) -- one state, its own: an atom lost errs by its fate.
+    fn path(nodes: &[(f64, Booking)]) -> Booking {
+        let span = nodes.last().map_or(0., |n| n.0) - nodes.first().map_or(0., |n| n.0);
+        if !(span > 0.) {
+            return nodes.first().map_or(Booking::NONE, |n| n.1);
+        }
+        let sum = nodes.windows(2).fold([0.; 2], |s, w| std::array::from_fn(|i| s[i] + 0.5 * (w[1].0 - w[0].0) * (w[0].1.error[i] + w[1].1.error[i])));
+        Booking { error: sum.map(|x| x / span) }
     }
 }
 
+/// The end of the path a lost atom's fate was decided along (module documentation, # Where the atoms went): of its
+/// checkpoints `trail` (at t = 0 and every window on, `run`) the last whose state is not leaving -- its prepared energy
+/// below the potential's far value (`leaving`, model/reach.rs `Model::situated`) --, the first where every one is.
+/// Its last state that the dynamics still decide the fate of: past the far value the atom runs out of the trap's
+/// region whatever the rates there, and is found lost where it leaves it.
+fn approached(trail: &[Checkpoint], leaving: &dyn Fn(&Trajectory) -> bool) -> usize {
+    trail.iter().rposition(|c| !leaving(&c.trajectory)).unwrap_or(0)
+}
+
+/// The states a lost atom's path is read at (`sampled`, `Booking::path`), in their times' order, each with its place
+/// among the held states `samples` (per analysis time, the first t = 0's) where it is one of them: its state at t = 0,
+/// its held states at the analysis times before the time `first` it is first lost at and before its path's end, and
+/// the path's end `end` (`approached`) where it is later than all of them. None where the run holds no state of it at
+/// t = 0.
+fn held_path<'a>(samples: &'a [Vec<State>], first: usize, end: &'a State) -> Option<Vec<(&'a State, Option<(usize, usize)>)>> {
+    let start = samples.first()?.iter().find(|x| x.index == end.index)?;
+    let mut along = vec![(start, None)];
+    for (k, at) in samples.iter().enumerate().take(first).skip(1) {
+        if let Some(i) = at.iter().position(|x| x.index == end.index && x.sample.at.t < end.sample.at.t) {
+            along.push((&at[i], Some((k, i))));
+        }
+    }
+    if end.sample.at.t > along[along.len() - 1].0.sample.at.t {
+        along.push((end, None));
+    }
+    Some(along)
+}
+
 /// The states the model is read at and the errors there of the units read of `units` (SPEC §5.2; module documentation,
-/// # The model: where the atoms went), at the analysis times the groups `parts` are read at (`Part::at`). At every
-/// analysis time after t = 0, of every group:
+/// # Where the atoms went), at the analysis times the groups `parts` are read at (`Part::at`). At every analysis time
+/// after t = 0, of every group:
 /// - every member that holds its atom there: the error of its rows, read at its state there;
-/// - and every member lost by then: the error of its fate, read along its path at the two states the run holds of
-///   it, at t = 0 and where it was found lost (adapt.rs, # The reads: its last state) -- their mean (`Booking::path`).
-/// At t = 0 no model has acted (`model_error`): its states are read as a lost atom's path's start alone. A held atom's
-/// state is read for its time alone, a lost atom's path once for every time after its loss: the reads are the table's
-/// rows by number (`Sampled::row`). A row `known` already holds -- the same trajectory at the same time, or its path, at
-/// the same step: the scout's inside the pilot -- keeps the errors read there, where it read every unit read here: a
-/// unit's error is a function of the state.
+/// - and every member lost by then: the error of its fate, its units' errors along the path its fate was decided
+///   along, read at the states the run holds of that path -- at t = 0, at the analysis times it was held at before the
+///   path's end, and at the path's end, its last state below the potential's far value (`approached`) -- by the
+///   trapezoid (`Booking::path`); never where it was found lost, beyond the trap's region past the far value.
+/// At t = 0 no model has acted (`model_error`): its states are read as a lost atom's path's start alone. A state is read
+/// once -- a held atom's for its time, and as a node of its path where it is lost later --, and a lost atom's path is
+/// made of its states' rows, no read of its own, for every time after its loss: the reads are the table's rows by
+/// number (`Sampled::row`). A state's row `known` already holds -- the same trajectory at the same time and step: the
+/// scout's inside the pilot -- keeps the errors read there, where it read every unit read here: a unit's error is a
+/// function of the state.
 ///
 /// Every unit is read (ELIMINATION.md §6: the errors are measured where the atoms went, no bound over the whole space).
 ///
 /// The errors are one table (`Measured::errors`): the rows one after another, a row the units' read errors on the
-/// populations and on T as each books them there (`Booking`), each row written on the pool where it is read. One block
-/// of memory, not one a state: the states are thousands, and as many blocks took the calling thread 0.2 to 0.6 s to
-/// free.
+/// populations and on T as each books them there (`Booking`), each state's row written on the pool where it is read,
+/// the paths' rows after them. One block of memory, not one a state: the states are thousands, and as many blocks
+/// took the calling thread 0.2 to 0.6 s to free.
 struct Sampled {
     /// Each row's trajectory, its time's bits (`PATH` for a lost atom's path) and its step.
     of: Vec<(u64, u64, f64)>,
@@ -1750,52 +1794,80 @@ impl Sampled {
 /// The time a lost atom's path's row stands at (`Sampled::of`): none of the run's.
 const PATH: u64 = u64::MAX;
 fn sampled(model: &Model, units: &[Unit], tables: &crate::model::tabulate::Tables, parts: &[&Part], known: Option<Sampled>) -> Sampled {
-    // A row's states: a held atom's at a time, or a lost atom's at t = 0 and at its loss.
-    let mut rows: Vec<(u64, u64, f64, &State, Option<&State>)> = vec![];
-    let (mut at, mut from, mut row, mut lost) = (vec![], vec![], vec![], vec![]);
-    for (g, p) in parts.iter().enumerate() {
-        // The group's lost atoms, each a row: the first time it is lost at, its row.
-        let mut paths: Vec<(usize, usize)> = vec![];
-        for (first, last) in &p.lost {
-            if let Some(start) = p.samples.first().and_then(|s| s.iter().find(|x| x.index == last.index)) {
-                paths.push((*first, rows.len()));
-                rows.push((last.index, PATH, last.tau, start, Some(last)));
-            }
-        }
+    // The states read -- a held atom's at a time, a lost atom's at t = 0 and at its path's end --, and per lost atom its
+    // path: its trajectory, its step and its nodes (their times and rows); per group its held states' rows by time and
+    // its lost atoms' first times lost and paths.
+    let mut rows: Vec<(u64, u64, f64, &State)> = vec![];
+    let mut paths: Vec<(u64, f64, Vec<(f64, usize)>)> = vec![];
+    let mut layout: Vec<(Vec<Vec<usize>>, Vec<(usize, usize)>)> = vec![];
+    for p in parts {
+        let mut held: Vec<Vec<usize>> = vec![vec![]; p.samples.len()];
         for (k, s) in p.samples.iter().enumerate().skip(1) {
             for state in s {
-                (at.push(k), from.push(g), row.push(rows.len()), lost.push(false));
-                rows.push((state.index, state.sample.at.t.to_bits(), state.tau, state, None));
+                held[k].push(rows.len());
+                rows.push((state.index, state.sample.at.t.to_bits(), state.tau, state));
             }
-            for &(_, r) in paths.iter().filter(|(first, _)| *first <= k) {
-                (at.push(k), from.push(g), row.push(r), lost.push(true));
+        }
+        let mut lost_here = vec![];
+        for (first, end) in &p.lost {
+            let Some(along) = held_path(&p.samples, *first, end) else { continue };
+            let mut nodes = vec![];
+            for (state, place) in along {
+                let r = match place {
+                    Some((k, i)) => held[k][i],
+                    None => {
+                        rows.push((state.index, state.sample.at.t.to_bits(), state.tau, state));
+                        rows.len() - 1
+                    }
+                };
+                nodes.push((state.sample.at.t, r));
+            }
+            lost_here.push((*first, paths.len()));
+            paths.push((end.index, end.tau, nodes));
+        }
+        layout.push((held, lost_here));
+    }
+    let states = rows.len();
+    let (mut at, mut from, mut row, mut lost) = (vec![], vec![], vec![], vec![]);
+    for (g, (held, lost_here)) in layout.iter().enumerate() {
+        for (k, h) in held.iter().enumerate().skip(1) {
+            for &r in h {
+                (at.push(k), from.push(g), row.push(r), lost.push(false));
+            }
+            for &(_, j) in lost_here.iter().filter(|(first, _)| *first <= k) {
+                (at.push(k), from.push(g), row.push(states + j), lost.push(true));
             }
         }
     }
-    // The place in a row of `known` of each unit read here: the same unit's.
+    // The place in a row of `known` of each unit read here: the same unit's; of a state's row alone (a path's is made of
+    // its states' rows).
     let places: Option<Vec<usize>> = known.as_ref().map(|k| (0..units.len().min(k.units)).collect());
     let key = |index: u64, at: u64, tau: f64| (index, at, tau.to_bits());
-    let read: HashMap<(u64, u64, u64), usize> = known.iter().filter(|_| places.is_some()).flat_map(|k| k.of.iter().enumerate().map(|(j, &(index, at, tau))| (key(index, at, tau), j))).collect();
+    let read: HashMap<(u64, u64, u64), usize> = known.iter().filter(|_| places.is_some()).flat_map(|k| k.of.iter().enumerate().filter(|(_, x)| x.1 != PATH).map(|(j, &(index, at, tau))| (key(index, at, tau), j))).collect();
     let outside = model.outside_count();
     let width = units.len() + outside;
-    let mut errors = vec![Booking::NONE; rows.len() * width];
+    let mut errors = vec![Booking::NONE; (states + paths.len()) * width];
     let errors_at = |state: &State| {
         let (units, beyond) = model.readings(units, &state.sample, Some(tables));
         units.iter().chain(&beyond).map(Booking::of).collect::<Vec<_>>()
     };
-    // A row (the table is empty where nothing is read).
-    errors.par_chunks_mut(width.max(1)).zip(&rows).for_each(|(out, &(index, time, tau, state, last))| match (&known, &places, read.get(&key(index, time, tau))) {
+    // A state's row (the table is empty where nothing is read), then each path's of its nodes' rows.
+    let (read_rows, path_rows) = errors.split_at_mut(states * width);
+    read_rows.par_chunks_mut(width.max(1)).zip(&rows).for_each(|(out, &(index, time, tau, state))| match (&known, &places, read.get(&key(index, time, tau))) {
         (Some(known), Some(places), Some(&j)) => {
             let row = &known.errors[j * known.width()..][..known.width()];
             out.iter_mut().zip(places).for_each(|(out, &q)| *out = row[q]);
             out[places.len()..].copy_from_slice(&row[known.width() - outside..]);
         }
-        _ => match last {
-            None => out.copy_from_slice(&errors_at(state)),
-            Some(last) => out.iter_mut().zip(errors_at(state)).zip(errors_at(last)).for_each(|((out, a), b)| *out = Booking::path(&a, &b)),
-        },
+        _ => out.copy_from_slice(&errors_at(state)),
     });
-    Sampled { of: rows.iter().map(|&(index, time, tau, _, _)| (index, time, tau)).collect(), units: units.len(), outside, errors, at, from, row, lost }
+    for ((_, _, nodes), out) in paths.iter().zip(path_rows.chunks_mut(width.max(1))) {
+        for (u, out) in out.iter_mut().enumerate() {
+            *out = Booking::path(&nodes.iter().map(|&(t, r)| (t, read_rows[r * width + u])).collect::<Vec<_>>());
+        }
+    }
+    let of = rows.iter().map(|&(index, time, tau, _)| (index, time, tau)).chain(paths.iter().map(|&(index, tau, _)| (index, PATH, tau))).collect();
+    Sampled { of, units: units.len(), outside, errors, at, from, row, lost }
 }
 
 /// Whose reads a keep is judged on (`keep`): the scout's few, the pilot's, the product's statistics beside the pilot's
@@ -2961,7 +3033,7 @@ struct Checkpoint {
 /// where held; what became of it by every time the decisions read (`Plan::reads`); where its states are kept (`keep`:
 /// the pilot's run level, for the model's errors and prices; module documentation, # The model: where the atoms went),
 /// its checkpoints (`trail`, module documentation, # The analysis times) and, where it was lost, the first of those
-/// times it is lost at and its last state, where it was found lost; its counts.
+/// times it is lost at and the end of the path its fate was decided along (`approached`); its counts.
 struct Record {
     outputs: Vec<Fate>,
     listed: Vec<Option<(V3, V3)>>,
@@ -3214,15 +3286,16 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         }
         reached = sizes;
     }
-    // From the time it does not reach: failed, or lost -- a lost atom's last state kept where states are, its fate's
-    // to read (`sampled`).
+    // From the time it does not reach: failed, or lost -- a lost atom's last state held below the potential's far
+    // value kept where states are, the end of the path its fate was decided along (`approached`), its fate's to read
+    // (`sampled`).
     let mut lost = None;
     let mut windows = windows.into_inner();
     for ((w, &reached), &size) in windows.iter_mut().zip(&reached).zip(&sizes) {
         w.fates[reached.min(size)..].fill(if refused { Fate::Refused } else if failed { Fate::Failed } else { Fate::Lost });
     }
     if reached[1] < sizes[1] && keep && !failed {
-        lost = Some((reached[1], State::of(&t, tau)));
+        lost = Some((reached[1], State::of(&trail[approached(&trail, &|c| domain.placed(c.r, c.kappa)[1])].trajectory, tau)));
     }
     let [outputs, reads] = windows.map(Windows::close);
     let stopped = |why: bool| if why { Stopped::at(t.time) } else { Stopped::default() };
@@ -3272,8 +3345,8 @@ fn replay<D: Dynamics>(model: &D, domain: &Domain, tau: f64, end: f64, trail: &[
 /// What a group of trajectories leaves: its sums at the outputs and at the times the decisions read (estimate.rs
 /// `Group`), its held atoms' (r, κ) at the listed outputs; where its states are kept (the pilot's run level: every
 /// member's), its trajectories' checkpoints in its members' order (`Record::trail`) and, at the analysis times
-/// (`parts_at`), its states there; its lost atoms' last states with the first of the times read each is lost at; its
-/// counts.
+/// (`parts_at`), its states there; its lost atoms' paths' ends (`approached`) with the first of the times read each is
+/// lost at; its counts.
 #[derive(Clone)]
 struct Part {
     sums: Group,
@@ -4175,7 +4248,7 @@ fn one_each<'a>(parts: &[&'a Part]) -> Vec<Pick<'a>> {
         for (member, first) in members.iter().enumerate() {
             let held: Vec<&State> = part.samples.iter().skip(1).filter_map(|at| at.iter().find(|state| state.index == first.index)).collect();
             let lost = part.lost.iter().find(|(_, state)| state.index == first.index).map(|(_, state)| state);
-            // Its states to pick from, and its last: where it was lost, its last state is where it was found lost.
+            // Its states to pick from, and its last: where it was lost, its path's end (`approached`).
             let states = if held.is_empty() { lost.map(|_| vec![first]).unwrap_or_default() } else { held };
             let Some(last) = lost.or(states.last().copied()) else { continue };
             let through = ((member * groups + group) as f64 + 0.5) / (members.len() * groups) as f64;
@@ -6037,6 +6110,68 @@ mod tests {
                 assert_eq!(Booking::of(&e), Booking { error: [1.; 2] }, "{e:?}");
             }
         }
+    }
+
+    /// A lost atom's fate is read along the path it was decided along (module documentation, # Where the atoms went;
+    /// `approached`, `held_path`, `Booking::path`): analysis times 0, 10, 20, 30 and 40 µs, checkpoints every 6 µs.
+    /// - An atom that escapes: held at 0 and 10 µs, past the far value from 24 µs on (`leaving`), found lost at 27 µs
+    ///   (first lost at 30): its path ends at its last checkpoint below the far value, 18 µs, and is read at 0, 10 and
+    ///   18 µs -- not at 20 µs, a state the run holds of it after its path's end, nor where it was found lost. Its
+    ///   error is the trapezoid's mean on those three, whatever the errors past the far value (one there, a fold's
+    ///   whole, as at the trap's rim of the 1D PGC tilted 3°).
+    /// - An atom that goes near the rim and back, held there at 10 µs with a large error, and is lost later (first at
+    ///   40, past the far value from 36 µs): its rim is a node of its path, weighed as the trapezoid weighs it.
+    /// - An atom held near the rim at 20 µs and never lost: that state is a held row like every other, its error in the
+    ///   held atoms' mean there (`Measured::means`).
+    /// - An atom past the far value at every checkpoint (none below it) is read at t = 0 alone.
+    #[test]
+    fn a_lost_atom_s_fate_is_read_on_its_path_below_the_far_value_and_the_rim_where_held() {
+        let state = |index: u64, t: f64| State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, tau: 0.5, index, jumps: 0, threshold: 0.5, forms: crate::step::Forms::default() };
+        let trail = |index: u64, until: f64| -> Vec<Checkpoint> {
+            (0..).map(|j| 6. * j as f64).take_while(|&t| t < until).map(|t| Checkpoint { trajectory: state(index, t).trajectory(), path: adapt::Path::new(SEED, index, 2., 2), carry: Scratch::default().carry() }).collect()
+        };
+        // The escaping atom (0), the one that goes to the rim and back (1), the one held at the rim (2).
+        let leaving = |from: f64| move |t: &Trajectory| t.time >= from;
+        let (first, second) = (trail(0, 27.), trail(1, 38.));
+        let ends = [&first[approached(&first, &leaving(24.))], &second[approached(&second, &leaving(36.))]];
+        assert_eq!((ends[0].trajectory.time, ends[1].trajectory.time), (18., 30.), "the paths' ends: the last checkpoints below the far value");
+        assert_eq!(approached(&trail(3, 27.), &leaving(0.)), 0, "past the far value throughout: its path is its start");
+        let ends = [State::of(&ends[0].trajectory, 0.5), State::of(&ends[1].trajectory, 0.5)];
+        let times = [0., 10., 20., 30., 40.];
+        let held = |index: u64, last: usize| (0..=last).map(move |k| (k, state(index, times[k])));
+        let mut samples: Vec<Vec<State>> = vec![vec![]; times.len()];
+        for (k, s) in held(0, 2).chain(held(1, 3)).chain(held(2, 4)) {
+            samples[k].push(s);
+        }
+        let path0 = held_path(&samples, 3, &ends[0]).unwrap();
+        assert_eq!(path0.iter().map(|(s, place)| (s.sample.at.t, *place)).collect::<Vec<_>>(), vec![(0., None), (10., Some((1, 0))), (18., None)]);
+        let path1 = held_path(&samples, 4, &ends[1]).unwrap();
+        assert_eq!(path1.iter().map(|(s, _)| s.sample.at.t).collect::<Vec<_>>(), vec![0., 10., 20., 30.], "the rim at 10 µs a node; its end at its last checkpoint below the far value, 30 µs");
+        // The errors: a few parts in a hundred where the fold holds, 0.4 at the rim, one past the far value.
+        let error = |index: u64, t: f64| -> Booking {
+            let x = match (index, t) {
+                (1, 10.) | (2, 20.) => 0.4,
+                (0, t) if t >= 24. => 1.,
+                (_, t) => 0.01 + 0.001 * t,
+            };
+            Booking { error: [x, x] }
+        };
+        let mean = |path: &[(&State, Option<(usize, usize)>)]| Booking::path(&path.iter().map(|(s, _)| (s.sample.at.t, error(s.index, s.sample.at.t))).collect::<Vec<_>>());
+        let trapezoid = |nodes: &[(f64, f64)]| nodes.windows(2).map(|w| 0.5 * (w[1].0 - w[0].0) * (w[0].1 + w[1].1)).sum::<f64>() / (nodes[nodes.len() - 1].0 - nodes[0].0);
+        let expected = [trapezoid(&[(0., 0.01), (10., 0.02), (18., 0.028)]), trapezoid(&[(0., 0.01), (10., 0.4), (20., 0.03), (30., 0.04)])];
+        for (path, expected) in [mean(&path0), mean(&path1)].into_iter().zip(expected) {
+            assert!(path.error.iter().all(|x| (x - expected).abs() <= 1e-15), "{path:?} against {expected}");
+        }
+        assert!(mean(&path0).error[0] < 0.03, "nothing of the error past the far value");
+        assert_eq!(Booking::path(&[(0., Booking { error: [0.2, 0.3] })]), Booking { error: [0.2, 0.3] }, "a path of its start alone");
+        // The held atom at the rim: a held row at 20 µs, beside the second atom's there (the first is lost by then, its
+        // path its row).
+        let errors = [error(1, 20.), error(2, 20.), mean(&path0)];
+        let measured = Measured { errors: &errors, output: &[2, 2, 2], group: &[0, 0, 0], row: &[0, 1, 2], lost: &[false, false, true], units: 1, outside: 0 };
+        let estimates: Vec<Estimate> = (0..3).map(|k| Estimate { loss: if k == 2 { 1. / 3. } else { 0. }, ..estimate([10.; 3], 0., 3.) }).collect();
+        let at = measured.means(3, None, &estimates)[2][0][0];
+        let expected = (2. / 3.) * 0.5 * (error(1, 20.).error[0] + 0.4) + (1. / 3.) * mean(&path0).error[0];
+        assert!((at - expected).abs() <= 1e-15, "the held rim's error in the held atoms' mean: {at} against {expected}");
     }
 
     /// The trajectories a level's looks need without some units (`Level::need_without_all`) and with every unit kept
