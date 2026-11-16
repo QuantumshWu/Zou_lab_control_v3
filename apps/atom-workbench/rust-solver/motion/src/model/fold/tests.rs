@@ -1687,12 +1687,12 @@ struct Against {
     made: usize,
 }
 
-fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut super::proto::Cache, r: [f64; 3], kappa: [f64; 3], split: super::proto::Split) -> Against {
+fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut super::proto::Cache, r: [f64; 3], kappa: [f64; 3]) -> Against {
     let f = fold.at(r, kappa, &mut Path::default()).expect("the fold at the point");
     let mut w = 0.0;
     let last = f.stages.last().unwrap();
     let at_next = last.next(&f.eliminated, &f.h[1], &f.h[2], &mut w);
-    let step = fold.prototype(r, kappa, cache, ws, split).expect("the prototype at the point");
+    let step = fold.prototype(r, kappa, cache, ws).expect("the prototype at the point");
     let (generator, normal) = (step.generator.clone(), step.normal.clone());
     let allowed = unrate(step.series) + unrate(step.reuse) + unrate(step.far) + unrate(at_next) + 1e-10;
     let (sweeps, made, series, reuse, far) = (step.sweeps, step.made, step.series, step.reuse, step.far);
@@ -1743,7 +1743,7 @@ fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut supe
 #[test]
 #[ignore = "a check on a scene's request: run by name with PROTO_SCENE"]
 fn the_prototype_is_the_fold_within_its_readings() {
-    use super::proto::{Cache, Split};
+    use super::proto::Cache;
     let name = std::env::var("PROTO_SCENE").expect("PROTO_SCENE");
     let req = crate::model::testing::scene(&name);
     let choice = proto_choice(&req, &name);
@@ -1768,7 +1768,8 @@ fn the_prototype_is_the_fold_within_its_readings() {
         let (near, far) = ws.layout();
         println!("{name} set {set:?}: n {}, near blocks (block, rows, copies, beams, terms) {near:?}, far blocks (block, rows, terms) {far:?}", fold.size());
         let speed = 0.1 / fold.hbar_over_mass;
-        for split in [Split::Column, Split::Centre] {
+        {
+            let split = "";
             let (mut worst, mut worst_g, mut worst_copy, mut worst_decay) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
             let mut sweeps = [0usize; 64];
             let (mut diffs, mut parts) = (0.0_f64, [0.0_f64; 4]);
@@ -1791,17 +1792,17 @@ fn the_prototype_is_the_fold_within_its_readings() {
                 let (ct, phi) = (2.0 * u() - 1.0, 2.0 * std::f64::consts::PI * u());
                 let st = (1.0 - ct * ct).sqrt();
                 let kappa = [speed * st * phi.cos(), speed * st * phi.sin(), speed * ct];
-                check(proto_against(&fold, &mut ws, &mut Cache::default(), r, kappa, split), &format!("{split:?} point {p}"), &mut worst);
+                check(proto_against(&fold, &mut ws, &mut Cache::default(), r, kappa), &format!("{split}point {p}"), &mut worst);
             }
             let mut along = 0.0_f64;
             let (mut made, mut cache) = (0, Cache::default());
             let kappa = kappa_of(&fold);
             for (k, r) in thermal_paths(1)[0].iter().enumerate() {
-                made += check(proto_against(&fold, &mut ws, &mut cache, *r, kappa, split), &format!("{split:?} path step {k}"), &mut along);
+                made += check(proto_against(&fold, &mut ws, &mut cache, *r, kappa), &format!("{split}path step {k}"), &mut along);
             }
             let total: usize = sweeps.iter().sum();
             let shares: Vec<String> = sweeps.iter().enumerate().filter(|x| *x.1 > 0).map(|(k, c)| format!("{k}: {:.1}%", 100.0 * *c as f64 / total as f64)).collect();
-            println!("   {split:?}: 20 points {worst:.2e} of the allowance; the path (100 steps, {made} decompositions made) {along:.2e}; G {worst_g:.1e}, copies {worst_copy:.1e}, decay {worst_decay:.1e}; sweeps {shares:?}; the largest ρ: difference {diffs:.2e}, the series' rest {:.2e}, reuse {:.2e}, the far forms held {:.2e}, Fold::at's next {:.2e}", parts[0], parts[1], parts[2], parts[3]);
+            println!("   {split}20 points {worst:.2e} of the allowance; the path (100 steps, {made} decompositions made) {along:.2e}; G {worst_g:.1e}, copies {worst_copy:.1e}, decay {worst_decay:.1e}; sweeps {shares:?}; the largest ρ: difference {diffs:.2e}, the series' rest {:.2e}, reuse {:.2e}, the far forms held {:.2e}, Fold::at's next {:.2e}", parts[0], parts[1], parts[2], parts[3]);
             checked += 1;
         }
     }
@@ -1823,7 +1824,7 @@ const ADJOINT: [f64; 10] = [3.0, 0.0, 1.0, 1.0, 1.0, 2.0, 0.0, 2.0, 2.0, 1.0];
 #[test]
 #[ignore = "a measurement: run by name with PROTO_SCENE"]
 fn a_prototype_s_step_at_a_scene() {
-    use super::proto::{Cache, Split, PHASES};
+    use super::proto::{Cache, PHASES};
     let name = std::env::var("PROTO_SCENE").expect("PROTO_SCENE");
     let atoms: usize = std::env::var("PROTO_ATOMS").map_or(10, |x| x.parse().unwrap());
     let req = crate::model::testing::scene(&name);
@@ -1856,7 +1857,8 @@ fn a_prototype_s_step_at_a_scene() {
             x[0].re
         };
         let passes: usize = std::env::var("PROTO_PASSES").map_or(6, |x| x.parse().unwrap());
-        for split in [Split::Column, Split::Centre] {
+        {
+            let split = "";
             let mut best: Option<(f64, String)> = None;
             let mut each_pass = vec![];
             for pass in 0..passes {
@@ -1876,7 +1878,7 @@ fn a_prototype_s_step_at_a_scene() {
                     let mut cache = Cache::default();
                     for r in path {
                         let clock = std::time::Instant::now();
-                        let s = fold.prototype(*r, kappa, &mut cache, &mut ws, split).expect("the prototype's step");
+                        let s = fold.prototype(*r, kappa, &mut cache, &mut ws).expect("the prototype's step");
                         wall.push(clock.elapsed().as_secs_f64());
                         ticks.push(s.ticks);
                         work.push(s.work);
@@ -1911,7 +1913,7 @@ fn a_prototype_s_step_at_a_scene() {
                 sweeps.iter().for_each(|&k| hist[k.min(63)] += 1);
                 let shares: Vec<String> = hist.iter().enumerate().filter(|x| *x.1 > 0).map(|(k, c)| format!("{k}: {:.1}%", 100.0 * *c as f64 / steps as f64)).collect();
                 out += &format!(
-                    "   {split:?} (pace {pace:.3} ns a yardstick multiply-add): {:.2} µs a step ({:.2} µs on the {} steps of one round that made nothing; {} steps made a decomposition or took up a kept one, {} made in all), {:.0} multiply-adds a step ({:.0} on those), {:.2} ns each; sweeps {shares:?}; the largest readings: series {:.1e}, reuse {:.1e}, the far forms held {:.1e}, their centring {:.1e}, the sweeps' ratio {:.2}, the copies' rows left out {:.1e}",
+                    "   {split}(pace {pace:.3} ns a yardstick multiply-add): {:.2} µs a step ({:.2} µs on the {} steps of one round that made nothing; {} steps made a decomposition or took up a kept one, {} made in all), {:.0} multiply-adds a step ({:.0} on those), {:.2} ns each; sweeps {shares:?}; the largest readings: series {:.1e}, reuse {:.1e}, the far forms held {:.1e}, their centring {:.1e}, the sweeps' ratio {:.2}, the copies' rows left out {:.1e}",
                     us(&every),
                     us(&calm),
                     calm.len(),

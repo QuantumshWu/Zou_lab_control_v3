@@ -25,7 +25,9 @@
 //! 3. Ṽ_l = f_l Ỹ_l, beam by beam; Ṽ = Σ_a e_a Y_a.
 //! 4. The far blocks' pair forms into H, A and M.
 //! 5. The series: Z_l solves Z_l H − (T + w_l − o) Z_l = Ṽ_l with H = Ĥ_PP + Σ Ṽ†Z the Bloch generator. A sweep is
-//!    Z_l ← (c − w_l − T)⁻¹(Ṽ_l − Z_l Δ), c the columns' energies on the diagonal (exact; `Split`), Δ = H − diag(c) the
+//!    Z_l ← (c − w_l − T)⁻¹(Ṽ_l − Z_l Δ), c the columns' energies on the diagonal (each column at its own, exact; a common centre for all columns, the
+//!    brief's z₀, was measured and dropped: on an S2Q set its series took 6–11 sweeps against two, on R4 F=2 its reading
+//!    fell short), Δ = H − diag(c) the
 //!    series' part, H made again from the sweep's Z: each sweep adds the next order of Δ and of the self-consistency at
 //!    once. Its change, column by column over every row of every block (each mode with its own column: no norm of the
 //!    whole), reads it: the next change is the last times their ratio, what the rest add the last times r/(1 − r). Two
@@ -50,14 +52,6 @@ use crate::field::Amplitude;
 
 /// A pair of one frequency's field coefficients (frequency w, k, k'): its coefficient ε_k*ε_k'.
 type Pair = (usize, usize, usize);
-
-/// Where the series puts a column's energy: on the diagonal each column at its own (H's diagonal; Δ the part of H off it),
-/// or every column at their mean (Δ = H less it; BRIEF_PROTO.md's D₀ at z₀).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Split {
-    Column,
-    Centre,
-}
 
 /// The step's phases, as BRIEF_PROTO.md splits its time.
 pub(crate) const PHASES: [&str; 10] = ["place", "refresh", "Ṽ", "diagonal", "far", "series", "reading", "copies", "compression", "normal"];
@@ -115,6 +109,9 @@ struct Near {
     y: Vec<C64>,
     err: Vec<f64>,
     norms: Vec<f64>,
+    active: Vec<bool>,
+    held: Vec<C64>,
+    q: Vec<f64>,
     reading: f64,
 }
 
@@ -230,12 +227,77 @@ pub(crate) struct Workspace {
     vectors: Mat,
     temp: Mat,
     renew: Vec<(bool, usize)>,
+    order: Vec<(f64, usize, usize)>,
     step: Step,
 }
 
 /// V†MV of a block's solved rows (Schur parts).
 fn rotate(f: &Factored, m: &Mat, work: &mut f64) -> Mat {
     f.to(&f.to(m, work).adjoint(), work).adjoint()
+}
+
+/// The rate's inverse: the relative amplitude error ρ of a reading r = 2ρ + ρ².
+fn unrate(r: f64) -> f64 {
+    (1.0 + r).sqrt() - 1.0
+}
+
+/// The series' order, mode by mode (module documentation, 5): after the first sweep the next one moves a Schur part P of a
+/// block by at most q_P a_j in column j -- the next change is the diagonal times the first sweep's residual against the
+/// Bloch generator H¹ it gives, −Z¹(H¹ − c⁰), so row by row against column by column (Cauchy–Schwarz) and beam by beam,
+/// q_P = Σ_l (Σ_{i∈P} max_j |c⁰_j − w_l − κ_i|⁻² ‖Z¹_l,i‖²)^½ and a_j = ‖(H¹ − c⁰)_:,j‖. The parts of the smallest next order
+/// stay at the first sweep's while what they leave together, (Σ q_P²)^½ max_j a_j/‖Z_j‖, reads within the share (all
+/// blocks' parts on one share); the others go on. A part held keeps its rows' part of the Bloch generator (`held`).
+/// Returns what the held parts leave (ρ). The excited rows far from the column energies (a centred tier before) are these.
+#[allow(clippy::too_many_arguments)]
+fn freeze(near: &mut [Near], cache: &Cache, h: &[C64], c: &[C64], whole: &[f64], order: &mut Vec<(f64, usize, usize)>, share: f64, n: usize, work: &mut f64) -> f64 {
+    let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
+    let mut most = 0.0_f64;
+    for j in (0..n).filter(|&j| whole[j] > floor) {
+        let a2: f64 = (0..n).map(|i| (h[i * n + j] - if i == j { c[j] } else { C64::ZERO }).norm_sqr()).sum();
+        most = most.max((a2 / whole[j]).sqrt());
+    }
+    order.clear();
+    for (x, nb) in near.iter_mut().enumerate() {
+        let basis = &cache.near[x][cache.at_near[x].unwrap()];
+        let s = nb.s;
+        for (pi, (idx, at, _)) in basis.f.parts.iter().enumerate() {
+            let mut q = 0.0;
+            for (sp, &wl) in nb.shifts.iter().enumerate() {
+                let mut sum = 0.0;
+                for i in *at..at + idx.len() {
+                    let gap = (0..n).map(|j| (c[j] - C64::real(wl) - nb.kappa[i]).norm_sqr()).fold(f64::INFINITY, f64::min);
+                    let row: f64 = nb.z[sp * s * n + i * n..sp * s * n + i * n + n].iter().map(|z| z.norm_sqr()).sum();
+                    sum += row / gap;
+                }
+                q += sum.sqrt();
+            }
+            nb.q[pi] = q;
+            order.push((q, x, pi));
+        }
+        *work += (nb.shifts.len() * s * n) as f64 / 2.0;
+    }
+    order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let limit = unrate(share);
+    let mut sum = 0.0;
+    for &(q, x, pi) in order.iter() {
+        if (sum + q * q).sqrt() * most > limit {
+            break;
+        }
+        sum += q * q;
+        let nb = &mut near[x];
+        let (idx, at, _) = &cache.near[x][cache.at_near[x].unwrap()].f.parts[pi];
+        for i in *at..at + idx.len() {
+            nb.active[i] = false;
+            for p in 0..n {
+                let v = nb.vtot[i * n + p].conj();
+                if v != C64::ZERO {
+                    crate::linalg::mul_add(false, &mut nb.held[p * n..p * n + n], v, &nb.ztot[i * n..i * n + n]);
+                }
+            }
+        }
+        *work += (idx.len() * n * n) as f64;
+    }
+    sum.sqrt() * most
 }
 
 /// A near block's copies' rows T_C = Σ_a e_a* (R₀U_a†V) Z into `nb.tc` (module documentation, 7).
@@ -264,12 +326,15 @@ fn multiply(a: &[C64], b: &[C64], out: &mut [C64], n: usize) {
     crate::linalg::fused_product(a, b, (n, n, n), out);
 }
 
-/// S⁻¹ = (1 + X)^{−1/2} of the metric less one X (Hermitian, n × n) into `y`, by the Newton–Schulz iteration
-/// Y ← Y(3 − (1 + X)Y²)/2 from its series' second order Y = 1 − X/2 + 3X²/8: a polynomial in X (Hermitian, commuting with
-/// it) that converges quadratically where ‖X‖ < 1 -- to the rounding. A step's error e goes to −(3/2)e² − e³/2 (Y = M^{−1/2}
-/// (1 + e)), so a step that moves Y by m leaves (3/2)m²: it stops where that is within γ_{4n} of Y's size (the next
-/// move's reading, not one more step to see it). False where a step does not shrink the last one's move (no
-/// convergence: the caller takes the eigenvectors). Products alone (3n³ a step).
+/// S⁻¹ = (1 + X)^{−1/2} of the metric less one X (Hermitian, X ≥ 0, n × n) into `y`, by the Newton–Schulz iteration
+/// Y ← Y(3 − (1 + X)Y²)/2 from its series' second order Y₀ = 1 − X/2 + 3X²/8, to the rounding -- the one algorithm for it.
+/// Every iterate is a polynomial in X, so the iteration is scalar on each eigenvalue x ≥ 0 of X: with u = y√(1 + x) it is
+/// u ← u(3 − u²)/2, which goes to 1 from every u₀ in (0, √3) (on (0, 1] it rises to 1; (1, √3) it maps into (0, 1)), and
+/// u₀(x) = (1 − x/2 + 3x²/8)√(1 + x) lies in [1, 1.24] for 0 ≤ x ≤ 1 (u₀ reaches √3 only at x ≈ 1.5). The fold exists only
+/// where its excitation, X's largest eigenvalue, is below one (DESIGN §3.1), so there it always converges, quadratically:
+/// a step's error e goes to −(3/2)e² − e³/2 (Y = M^{−1/2}(1 + e)), and a step that moves Y by m leaves (3/2)m² -- it stops
+/// where that is within γ_{4n} of Y's size (the next move's reading). False where a step does not shrink the last one's
+/// move: X beyond that range, the fold not existing there (the caller returns none). Products alone (3n³ a step).
 fn inverse_root(x: &[C64], n: usize, y: &mut [C64], p: &mut [C64], q: &mut [C64], r: &mut [C64], work: &mut f64) -> bool {
     multiply(x, x, p, n);
     for i in 0..n {
@@ -444,6 +509,9 @@ impl Fold {
                     y: z(s * n),
                     err: vec![0.0; s * n],
                     norms: vec![0.0; s + 1],
+                    active: vec![true; s],
+                    held: z(n * n),
+                    q: vec![0.0; s + 1],
                     reading: 0.0,
                     splits,
                     vectors,
@@ -466,6 +534,7 @@ impl Fold {
             x.delta = vec![C64::ZERO; x.terms.len()];
         }
         let z = |r: usize, c: usize| Mat::zeros(r, c);
+        let near_parts: usize = near.iter().map(|x| x.s).sum();
         Ok(Workspace {
             n,
             pp,
@@ -491,6 +560,7 @@ impl Fold {
             vectors: z(n, n),
             temp: z(n, n),
             renew: vec![],
+            order: Vec::with_capacity(near_parts),
             step: Step {
                 a: z(n, n),
                 metric: z(n, n),
@@ -700,7 +770,7 @@ impl Fold {
 
     /// The prototype's step at a point (r, κ) on an atom's kept decompositions (module documentation): A, M, S⁻¹, G in the
     /// workspace's `Step`. None where a decomposition or a centring is singular.
-    pub(crate) fn prototype<'w>(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &'w mut Workspace, split: Split) -> Option<&'w Step> {
+    pub(crate) fn prototype<'w>(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &'w mut Workspace) -> Option<&'w Step> {
         let n = ws.n;
         let mut work = [0.0_f64; 10];
         let mut tick = [0u64; 10];
@@ -791,7 +861,7 @@ impl Fold {
             }
             lap(REFRESH, &mut clock, &mut tick);
             // The near blocks: the diagonal to first order and what it leaves; their sources (module documentation, 2, 3).
-            let Workspace { near, far, coef, f, w, e, hpp, hbase, h, delta, c, change, previous, whole, step, .. } = &mut *ws;
+            let Workspace { near, far, coef, f, w, e, hpp, hbase, h, delta, c, change, previous, whole, step, order, .. } = &mut *ws;
             for (x, nb) in near.iter_mut().enumerate() {
                 let basis = &cache.near[x][cache.at_near[x].unwrap()];
                 let s = nb.s;
@@ -890,30 +960,21 @@ impl Fold {
             h.copy_from_slice(hbase);
             for nb in near.iter_mut() {
                 nb.ztot.fill(C64::ZERO);
+                nb.active.fill(true);
+                nb.held.fill(C64::ZERO);
             }
             previous.fill(0.0);
             let mut sweep = 0;
+            let mut frozen = 0.0_f64;
             let (series, ratio) = loop {
                 let (t0, w0) = (ticks(), work[SERIES]);
-                // The columns' energies and the series' part of H.
-                match split {
-                    Split::Column => {
-                        for j in 0..n {
-                            c[j] = h[j * n + j];
-                        }
-                        delta.copy_from_slice(h);
-                        for j in 0..n {
-                            delta[j * n + j] = C64::ZERO;
-                        }
-                    }
-                    Split::Centre => {
-                        let mean = (0..n).map(|j| h[j * n + j]).sum::<C64>() * (1.0 / n as f64);
-                        c.fill(mean);
-                        delta.copy_from_slice(h);
-                        for j in 0..n {
-                            delta[j * n + j] -= mean;
-                        }
-                    }
+                // The columns' energies (H's diagonal, each column at its own) and the series' part of H (off it).
+                for j in 0..n {
+                    c[j] = h[j * n + j];
+                }
+                delta.copy_from_slice(h);
+                for j in 0..n {
+                    delta[j * n + j] = C64::ZERO;
                 }
                 change.fill(0.0);
                 whole.fill(0.0);
@@ -921,15 +982,18 @@ impl Fold {
                     let basis = &cache.near[x][cache.at_near[x].unwrap()];
                     let s = nb.s;
                     let (t, ends) = (&basis.f.t, &basis.f.ends);
-                    std::mem::swap(&mut nb.ztot, &mut nb.zold);
-                    nb.ztot.fill(C64::ZERO);
+                    // Only the rows still going on move: the held ones keep their response.
+                    nb.zold.copy_from_slice(&nb.ztot);
+                    for i in (0..s).filter(|&i| nb.active[i]) {
+                        nb.ztot[i * n..i * n + n].fill(C64::ZERO);
+                    }
                     for sp in 0..nb.splits.len() {
                         let wl = nb.shifts[sp];
                         let zl = &mut nb.z[sp * s * n..(sp + 1) * s * n];
                         let rhs = &mut nb.rhs;
                         rhs.copy_from_slice(&nb.vt[sp * s * n..(sp + 1) * s * n]);
                         if sweep > 0 {
-                            for i in 0..s {
+                            for i in (0..s).filter(|&i| nb.active[i]) {
                                 for k in 0..n {
                                     let zik = zl[i * n + k];
                                     if zik == C64::ZERO {
@@ -938,27 +1002,16 @@ impl Fold {
                                     crate::linalg::mul_add(true, &mut rhs[i * n..i * n + n], zik, &delta[k * n..k * n + n]);
                                 }
                             }
-                            work[SERIES] += (s * n * n) as f64;
+                            work[SERIES] += (nb.active.iter().filter(|&&x| x).count() * n * n) as f64;
                         }
-                        // The diagonal: (c_j − w_l − κ_i)⁻¹, each column at its own energy, or at their centre.
-                        match split {
-                            Split::Column => {
-                                for i in 0..s {
-                                    for j in 0..n {
-                                        nb.inv[i * n + j] = (c[j] - C64::real(wl) - nb.kappa[i]).recip();
-                                    }
-                                }
-                                work[SERIES] += (s * n) as f64;
-                            }
-                            Split::Centre => {
-                                for i in 0..s {
-                                    let x = (c[0] - C64::real(wl) - nb.kappa[i]).recip();
-                                    nb.inv[i * n..i * n + n].fill(x);
-                                }
-                                work[SERIES] += s as f64;
+                        // The diagonal: (c_j − w_l − κ_i)⁻¹, each column at its own energy.
+                        for i in (0..s).filter(|&i| nb.active[i]) {
+                            for j in 0..n {
+                                nb.inv[i * n + j] = (c[j] - C64::real(wl) - nb.kappa[i]).recip();
                             }
                         }
-                        for i in (0..s).rev() {
+                        work[SERIES] += (s * n) as f64;
+                        for i in (0..s).rev().filter(|&i| nb.active[i]) {
                             for l in i + 1..ends[i] {
                                 crate::linalg::mul_add(false, &mut rhs[i * n..i * n + n], t[(i, l)], &zl[l * n..l * n + n]);
                             }
@@ -967,20 +1020,24 @@ impl Fold {
                                 zl[i * n + j] = rhs[i * n + j] * nb.inv[i * n + j];
                             }
                         }
-                        for (a, b) in nb.ztot.iter_mut().zip(zl.iter()) {
-                            *a += *b;
+                        for i in (0..s).filter(|&i| nb.active[i]) {
+                            for (a, b) in nb.ztot[i * n..i * n + n].iter_mut().zip(&zl[i * n..i * n + n]) {
+                                *a += *b;
+                            }
                         }
                     }
                     // The change and the whole response, column by column; the Bloch generator's part Ṽ†Z.
                     for i in 0..s {
                         for j in 0..n {
-                            let (zn, zo) = (nb.ztot[i * n + j], nb.zold[i * n + j]);
-                            change[j] += (zn - zo).norm_sqr();
+                            let zn = nb.ztot[i * n + j];
+                            if nb.active[i] {
+                                change[j] += (zn - nb.zold[i * n + j]).norm_sqr();
+                            }
                             whole[j] += zn.norm_sqr();
                         }
                     }
-                    nb.bloch.fill(C64::ZERO);
-                    for i in 0..s {
+                    nb.bloch.copy_from_slice(&nb.held);
+                    for i in (0..s).filter(|&i| nb.active[i]) {
                         for p in 0..n {
                             let v = nb.vtot[i * n + p].conj();
                             if v == C64::ZERO {
@@ -1003,6 +1060,9 @@ impl Fold {
                     }
                 }
                 sweep += 1;
+                if sweep == 1 {
+                    frozen = freeze(near, cache, h, c, whole, order, share, n, &mut work[SERIES]);
+                }
                 // The rest: the last change times r/(1 − r), r the ratio of the last two changes (none after the first).
                 let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
                 let (mut rest, mut most) = (0.0_f64, 0.0_f64);
@@ -1018,7 +1078,7 @@ impl Fold {
                 // Two sweeps at the least; then within the share, or no longer converging (a ratio at or above one after
                 // the second change: the self-consistency or the series does not exist here).
                 if sweep >= 2 && (rest <= share || (sweep >= 3 && most >= 1.0)) {
-                    break (rest, most);
+                    break (rate(unrate(rest) + frozen), most);
                 }
             };
             lap(SERIES, &mut clock, &mut tick);
@@ -1179,16 +1239,9 @@ impl Fold {
             work[COMPRESSION] += (n * n) as f64;
         }
         lap(COMPRESSION, &mut clock, &mut tick);
-        // S⁻¹ = (1 + X)^{−1/2} (`inverse_root`; the Jacobi eigenvectors where it does not converge), G = S⁻¹AS⁻¹.
+        // S⁻¹ = (1 + X)^{−1/2} (`inverse_root`: it converges wherever the fold exists), G = S⁻¹AS⁻¹.
         if !inverse_root(&metric.data, n, &mut step.normal.data, &mut eigen.data, &mut vectors.data, &mut temp.data, &mut work[NORMAL]) {
-            eigen.data.copy_from_slice(&metric.data);
-            crate::linalg::hermitian_in_place(&mut eigen.data, &mut vectors.data, n);
-            for i in 0..n {
-                for j in 0..n {
-                    step.normal.data[i * n + j] = (0..n).map(|k| vectors.data[i * n + k] * vectors.data[j * n + k].conj() * (1.0 / (1.0 + eigen.data[k * n + k].re).sqrt())).sum();
-                }
-            }
-            work[NORMAL] += (11 * n * n * n) as f64;
+            return None;
         }
         multiply(&step.normal.data, &step.a.data, &mut temp.data, n);
         multiply(&temp.data, &step.normal.data, &mut step.generator.data, n);
