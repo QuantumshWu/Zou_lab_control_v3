@@ -2442,9 +2442,13 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
 }
 
 /// µs per item of each of the `passes` over `items` items, on this thread: every pass timed in batches of as many
-/// repetitions as take the clock a millisecond, the batches taken in turn over 24 rounds, the least mean of each -- the
-/// machine's other work only adds, and taken in turn it weighs on every pass alike.
-fn microseconds<const N: usize>(items: usize, mut passes: [&mut dyn FnMut() -> f64; N]) -> [f64; N] {
+/// repetitions as take the clock a millisecond, 24 rounds, the least mean of each -- the machine's other work only adds.
+/// The batches taken in turn (`Order::Turn`): the machine's pace weighs on every pass alike, and each batch starts on what
+/// the others left in the caches; or each pass's rounds back to back (`Order::Apart`): each batch on what its own last
+/// left. A whole that is timed in turn against its parts timed so too is not their sum: a whole touches more than any of
+/// its parts and refills more after the others (wire4 item 2: a step on S2Q's one-state sets 20.6 µs back to back, 30 in
+/// turn with its parts; after 17 ms streaming 64 MB 24.9).
+fn microseconds<const N: usize>(items: usize, order: Order, passes: &mut [&mut dyn FnMut() -> f64; N]) -> [f64; N] {
     let mut batch = |pass: usize, repetitions: usize| {
         let clock = std::time::Instant::now();
         for _ in 0..repetitions {
@@ -2460,12 +2464,19 @@ fn microseconds<const N: usize>(items: usize, mut passes: [&mut dyn FnMut() -> f
         repetitions
     });
     let mut least = [f64::INFINITY; N];
-    for _ in 0..24 {
-        for pass in 0..N {
-            least[pass] = least[pass].min(batch(pass, repetitions[pass]) / repetitions[pass] as f64);
-        }
+    let mut time = |pass: usize| least[pass] = least[pass].min(batch(pass, repetitions[pass]) / repetitions[pass] as f64);
+    match order {
+        Order::Turn => (0..24).for_each(|_| (0..N).for_each(&mut time)),
+        Order::Apart => (0..N).for_each(|pass| (0..24).for_each(|_| time(pass))),
     }
     least.map(|t| 1e6 * t / items as f64)
+}
+
+/// How `microseconds` takes its passes' batches.
+#[derive(Clone, Copy)]
+enum Order {
+    Turn,
+    Apart,
 }
 
 /// The densities' sums are made lane by lane with fused multiply-adds (`step::accumulate`). They are the plain sums
@@ -2599,7 +2610,8 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
         .collect();
     let [whole, reference, point, generator, force, tones, middle, propagated, root, scattering, readout, gradient, optical, pace] = microseconds(
         count,
-        [
+        Order::Turn,
+        &mut [
             &mut || starts.iter().map(|s| step_of(model, s, tau, &mut kept.borrow_mut()).unwrap().end.kappa[0]).sum::<f64>(),
             &mut || pieces.iter().map(|p| model.reference(p.at.0).value).sum::<f64>(),
             &mut || pieces.iter().zip(starts).map(|(p, s)| model.middle(s.cluster, p.at.0, p.at.1, &step::Held::default(), false).states() as f64).sum::<f64>(),
@@ -2924,10 +2936,12 @@ fn a_scene_s_onefold_step_cost() {
     }
 }
 
-/// A step's and a jump's parts on a case's atoms (`a_scene_s_onefold_step_cost`; wire3 item 1), µs an atom, timed in turn
-/// (`microseconds`). The step through a middle made before, held, and its model's parts each on a path of its own --
-/// the forward at the path's momentum, the outer nodes, the tangent with one form, the three nodes' contraction with the
-/// end's (`Middle::nodes`), the scattered light --; its integrator's parts on a path whose model is made -- the picture
+/// A step's and a jump's parts on a case's atoms (`a_scene_s_onefold_step_cost`; wire3 item 1), µs an atom, each pass
+/// timed back to back (`microseconds`, `Order::Apart`: a whole in turn with its parts refills more than they do, and is
+/// said beside). The step, and its model's parts each on a path of its own -- the step's middle (the reference's fixed
+/// point and the model's middle made there, `Midway::new`), the forward at the path's momentum, the outer nodes, the
+/// tangent with one form, the three nodes' contraction with the end's (`Middle::nodes`), the scattered light --; its
+/// integrator's parts on a path whose model is made -- the picture
 /// (`pictured`: the generator's copies, the tones' separation, the decomposition and its following), the launch (its two
 /// hops and three rates), the states at the quadrature's nodes and stops, the kick's and the survival's sums. A jump:
 /// the step with its threshold crossed halfway down its fall; its photon and its landing at the path's point (`jump`:
@@ -3012,9 +3026,7 @@ fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
         .collect();
     let (scratches, stepped) = (std::cell::RefCell::new(scratches), std::cell::RefCell::new(fitted(n)));
     let roots = std::cell::RefCell::new(roots);
-    let [step, decided, midway_alone, forward, outer, tangent, contraction, scattering, picture, launch, states, sums, with_jump, jump, emit, landed, root, relaunch] = microseconds(
-        count,
-        [
+    let mut passes: [&mut dyn FnMut() -> f64; 18] = [
             &mut || starts.iter().map(|s| midway(s).attempt(&Trajectory { threshold: 0.0, ..s.clone() }, &step::Brownian::STILL, &[], &mut stepped.borrow_mut(), &Everywhere).unwrap().end.kappa[0]).sum::<f64>(),
             &mut || {
                 let mut g = Mat::zeros(n, n);
@@ -3133,14 +3145,17 @@ fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
                 }
                 sum
             },
-        ],
-    );
-    let model_part = forward + (outer - forward) + (tangent - outer) + contraction + scattering;
+    ];
+    // Each pass back to back, so that the step and its parts start alike on their own data; and the step once more in
+    // turn with its parts (`Order`).
+    let [step, decided, midway_alone, forward, outer, tangent, contraction, scattering, picture, launch, states, sums, with_jump, jump, emit, landed, root, relaunch] = microseconds(count, Order::Apart, &mut passes);
+    let in_turn = microseconds(count, Order::Turn, &mut passes)[0];
+    let model_part = midway_alone + forward + (outer - forward) + (tangent - outer) + contraction + scattering;
     let integrator = picture + launch + states + sums;
     let s0 = &scratches.borrow()[0].picture;
     let (decomposed, tones) = (scratches.borrow().iter().filter(|s| s.picture.decomposed()).count(), s0.beats.len());
     eprintln!(
-        "{name:<22} n {n} τ {tau:<6} | parts: step {step:8.2} = model {model_part:8.2} (forward {forward:7.2} [deciding with its representation {decided:7.2}; the step's middle alone {midway_alone:6.2}], outer nodes {:7.2}, tangent and a form {:7.2}, the nodes' contraction {contraction:7.2}, scattering {scattering:7.2}) + integrator {integrator:7.2} (picture {picture:6.2}, launch {launch:6.2}, states {states:6.2} at {:.1}, sums {sums:6.2} at {nodes:.1} nodes; decomposed {decomposed}/{count}, tones {tones}) + rest {:7.2}",
+        "{name:<22} n {n} τ {tau:<6} | parts, each back to back: step {step:8.2} (in turn with its parts {in_turn:8.2}) = model {model_part:8.2} (the step's middle {midway_alone:6.2}, forward {forward:7.2} [deciding with its representation {decided:7.2}], outer nodes {:7.2}, tangent and a form {:7.2}, the nodes' contraction {contraction:7.2}, scattering {scattering:7.2}) + integrator {integrator:7.2} (picture {picture:6.2}, launch {launch:6.2}, states {states:6.2} at {:.1}, sums {sums:6.2} at {nodes:.1} nodes; decomposed {decomposed}/{count}, tones {tones}) + rest {:7.2}",
         outer - forward,
         tangent - outer,
         nodes + 2.0,
