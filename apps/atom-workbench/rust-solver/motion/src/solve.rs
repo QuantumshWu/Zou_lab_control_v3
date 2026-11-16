@@ -3141,7 +3141,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         // An unresolved one is booked whole (`apart`). Leaving or bound, at the instant.
         let [beyond, leaving] = domain.placed(t.r, t.kappa);
         let outside = !t.unresolved && beyond;
-        let held = Fate::Held(Held { rows: model.readout(t.cluster, &t.point(), &t.psi), kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), outside, unresolved: t.unresolved, leaving });
+        let held = Fate::Held(Held { rows: model.readout(t.cluster, &t.point(), &t.psi, &t.held), kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), outside, unresolved: t.unresolved, leaving });
         let mut windows = windows.borrow_mut();
         if let Some(k) = places[0] {
             windows[0].record(k, held.clone());

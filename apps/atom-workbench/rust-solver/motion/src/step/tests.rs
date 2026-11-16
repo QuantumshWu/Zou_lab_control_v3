@@ -405,7 +405,7 @@ impl Dynamics for Atom {
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
         at.r.iter().map(|x| x * x).sum::<f64>().sqrt() > self.region && self.energy(cluster, at, psi) > 0.0
     }
-    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
+    fn readout(&self, _: usize, _: &Point, psi: &[C64], _: &step::Held) -> [f64; STATES] {
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let mut rows = [0.0; STATES];
         for (s, &state) in self.cluster.states.iter().enumerate() {
@@ -1735,7 +1735,7 @@ impl Dynamics for Wells {
     fn lost(&self, _: usize, _: &Point, _: &[C64]) -> bool {
         false
     }
-    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
+    fn readout(&self, _: usize, _: &Point, psi: &[C64], _: &step::Held) -> [f64; STATES] {
         let mut rows = [0.0; STATES];
         for (row, z) in rows.iter_mut().zip(psi) {
             *row = z.norm_sqr();
@@ -2309,7 +2309,7 @@ impl Dynamics for Synthetic {
     fn lost(&self, _: usize, _: &Point, _: &[C64]) -> bool {
         false
     }
-    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
+    fn readout(&self, _: usize, _: &Point, psi: &[C64], _: &step::Held) -> [f64; STATES] {
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let mut rows = [0.0; STATES];
         for (s, z) in psi.iter().enumerate() {
@@ -2433,8 +2433,8 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
         self.model.lost(cluster, at, psi)
     }
-    fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
-        self.model.readout(cluster, at, psi)
+    fn readout(&self, cluster: usize, at: &Point, psi: &[C64], held: &step::Held) -> [f64; STATES] {
+        self.model.readout(cluster, at, psi, held)
     }
     fn photon_work(&self) -> f64 {
         self.model.photon_work()
@@ -2629,7 +2629,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || propagation(false),
             &mut || propagation(true),
             &mut || pieces.iter().zip(&paths).zip(starts).map(|((p, path), s)| p.through.generator.scattering(path, &s.psi).0.force[0]).sum::<f64>(),
-            &mut || pieces.iter().zip(starts).map(|(p, s)| model.readout(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi)[0]).sum::<f64>(),
+            &mut || pieces.iter().zip(starts).map(|(p, s)| model.readout(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi, &s.held)[0]).sum::<f64>(),
             &mut || {
                 pieces.iter().zip(&paths).for_each(|(p, path)| p.through.generator.gradient(path, 0.2 * tau, &mut g, None));
                 g[0][0].re
@@ -3978,7 +3978,7 @@ impl Dynamics for Lindblad {
     fn lost(&self, _: usize, _: &Point, _: &[C64]) -> bool {
         false
     }
-    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
+    fn readout(&self, _: usize, _: &Point, psi: &[C64], _: &step::Held) -> [f64; STATES] {
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let mut rows = [0.0; STATES];
         for (s, z) in psi.iter().enumerate() {
@@ -4441,7 +4441,7 @@ impl Dynamics for Grouped {
     fn lost(&self, _: usize, _: &Point, _: &[C64]) -> bool {
         false
     }
-    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
+    fn readout(&self, _: usize, _: &Point, psi: &[C64], _: &step::Held) -> [f64; STATES] {
         let mut rows = [0.0; STATES];
         for (s, z) in psi.iter().enumerate() {
             rows[s] = z.norm_sqr();
@@ -4522,8 +4522,8 @@ impl Dynamics for Emitting {
     fn lost(&self, c: usize, at: &Point, psi: &[C64]) -> bool {
         self.0.lost(c, at, psi)
     }
-    fn readout(&self, c: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
-        self.0.readout(c, at, psi)
+    fn readout(&self, c: usize, at: &Point, psi: &[C64], held: &step::Held) -> [f64; STATES] {
+        self.0.readout(c, at, psi, held)
     }
     fn photon_work(&self) -> f64 {
         7.0

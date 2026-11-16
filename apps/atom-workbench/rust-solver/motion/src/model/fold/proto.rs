@@ -5218,6 +5218,71 @@ impl Workspace {
         out
     }
 
+    /// The populations the state ψ holds at the last step's middle (DESIGN §1.3, the readout), onto `out` by the model's
+    /// states (a ground state's index, an excited one's GROUND + its own): x = S⁻¹ψ; each P place's |x_p|² (a ground
+    /// state, an explicit state's own amplitude); each block's rows' |(εx)_row|² -- a near block's kept rows VZx, its exact
+    /// copies' Z_D x, its centred copies' T_C x where the metric holds them; a far block's R₀Bx --, an excited row's onto its
+    /// state, a copy row's onto its ground state. The blocks apart (different offsets beat: their cross terms average out
+    /// over the beat), as the metric M = 1 + Σ ε†ε holds them: the sum is x†Mx = ψ†ψ to the rounding. Returns the sum.
+    pub(crate) fn populations(&self, fold: &Fold, cache: &Cache, psi: &[C64], out: &mut [f64]) -> f64 {
+        let n = self.n;
+        let mut w = 0.0;
+        let x = self.step.normal.product(&Mat { rows: n, cols: 1, data: psi.to_vec() });
+        let state = |p: usize| if p < fold.ground.len() { fold.ground[p] } else { GROUND + fold.explicit[p - fold.ground.len()] };
+        let mut sum = 0.0;
+        let mut onto = |state: usize, z: C64| {
+            out[state] += z.norm_sqr();
+            sum += z.norm_sqr();
+        };
+        for (p, z) in x.data.iter().enumerate() {
+            onto(state(p), *z);
+        }
+        let row_state = |o: usize, r: usize| match fold.blocks[o].rows[r] {
+            Row::Excited(e) => GROUND + e,
+            Row::Copy { state, .. } => state,
+        };
+        let apply = |rows: usize, m: &[C64]| -> Vec<C64> { (0..rows).map(|i| m[i * n..(i + 1) * n].iter().zip(&x.data).map(|(a, b)| *a * *b).sum()).collect() };
+        for (k, nb) in self.near.iter().enumerate() {
+            if nb.idle() {
+                continue;
+            }
+            let basis = &cache.near[k][cache.at_near[k].unwrap()];
+            // The kept rows in the block's row order (V on Zx), the exact copies' after the excited rows, the centred
+            // copies' after those.
+            let zx = Mat { rows: nb.s, cols: 1, data: apply(nb.s, &nb.ztot) };
+            let vzx = basis.f.from(&zx, &mut w);
+            for (a, &r) in basis.rows.iter().enumerate() {
+                onto(row_state(nb.o, r), vzx[(a, 0)]);
+            }
+            for (d, z) in apply(nb.nd, &nb.zdtot).into_iter().enumerate() {
+                onto(row_state(nb.o, nb.all + d), z);
+            }
+            if nb.copied_in {
+                for (c, z) in apply(nb.nc, &nb.tc).into_iter().enumerate() {
+                    onto(row_state(nb.o, nb.all + nb.nd + c), z);
+                }
+            }
+        }
+        for (k, fb) in self.far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
+            let basis = &cache.far[k][cache.at_far[k].unwrap()];
+            let b = &fold.blocks[fb.o];
+            // B x on the block's rows (its sources' components at the middle's light), then R₀.
+            let mut bx = Mat::zeros(fb.m, 1);
+            for &(c, kk) in &fb.vectors {
+                for &(p, _) in b.sources.iter().filter(|s| s.1 == c) {
+                    for a in 0..fb.m {
+                        let Row::Excited(e) = b.rows[a] else { unreachable!("a far block's rows are excited") };
+                        bx[(a, 0)] += self.mid.e[c][kk] * fold.components[c].basis[kk][(e, fold.ground[p])] * x.data[p];
+                    }
+                }
+            }
+            for (a, z) in basis.resolvent.product(&bx).data.into_iter().enumerate() {
+                onto(row_state(fb.o, a), z);
+            }
+        }
+        sum
+    }
+
     /// The blocks the prototype holds: (near: (block, rows s, copies nc, beam splits, terms), far: (block, rows, terms)).
     #[allow(clippy::type_complexity)]
     pub(crate) fn layout(&self) -> (Vec<(usize, usize, usize, usize, usize)>, Vec<(usize, usize, usize)>) {

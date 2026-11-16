@@ -2566,7 +2566,7 @@ fn lambda_against_master(a: f64, b: f64, form: f64, time: f64) -> (f64, f64, f64
         for _ in 0..steps {
             t = Midway::new(&run, &t, tau).unwrap().attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere).unwrap().end;
         }
-        let rows = run.readout(t.cluster, &t.point(), &t.psi);
+        let rows = run.readout(t.cluster, &t.point(), &t.psi, &t.held);
         shares.push(rows[0] / (rows[0] + rows[4]));
     }
     let mean = shares.iter().sum::<f64>() / count as f64;
@@ -2694,4 +2694,102 @@ fn a_set_with_explicit_states_at_two_offsets_decays_by_its_jumps() {
     }
     println!("the photons' rate against the generator's hazard: within {worst:.2e} of it (hazards up to {beat:.3e})");
     assert!(worst < 1e-12, "the photons' rate against the hazard: {worst:e}");
+}
+
+/// The readout (DESIGN §1.3; proto.rs `Workspace::populations`, run.rs `Dynamics::readout`): at random points and states of
+/// every set of PGC3D_1ms and R4_LIN_4 (the rule's choice at the focus; R4's F = 1 set holds explicit excited states), the
+/// fold's populations sum to ψ†ψ to the rounding (the metric's terms, x = S⁻¹ψ), an explicit state's is its own |x_X|²
+/// with what other offsets' blocks hold of it as their Q rows (at most the Q rows' whole), and the run's rows sum to one.
+#[test]
+fn the_readout_is_the_fold_s_populations_and_they_sum_to_the_norm() {
+    use crate::step::Dynamics;
+    use super::proto::Cache;
+    let pgc = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json").to_string_lossy().into_owned();
+    let mut seed = 7u64;
+    let mut u = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut explicit_checked = 0;
+    for name in [pgc, "R4_LIN_4".to_string()] {
+        let req = crate::model::testing::scene(&name);
+        let choice = Choice::running(&req).unwrap();
+        let mut p = [0.0; GROUND];
+        p[0] = 1.0;
+        let run = super::run::Onefold::of(&req, &choice, p).unwrap();
+        for set in Fold::sets(&req, &choice).unwrap() {
+            let fold = Fold::new(&req, &choice, set[0]).unwrap();
+            if fold.blocks.is_empty() {
+                continue;
+            }
+            let mut ws = fold.prototype_workspace().unwrap();
+            let n = fold.size();
+            for point in 0..3 {
+                let r: [f64; 3] = std::array::from_fn(|_| 0.6 * u() - 0.3);
+                let kappa: [f64; 3] = std::array::from_fn(|_| (0.2 * u() - 0.1) / fold.hbar_over_mass);
+                let psi: Vec<C64> = (0..n).map(|_| C64::new(u() - 0.5, u() - 0.5)).collect();
+                let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
+                let mut cache = Cache::default();
+                fold.prototype(r, kappa, &mut cache, &mut ws).unwrap();
+                let mut out = [0.0; STATES];
+                let sum = ws.populations(&fold, &cache, &psi, &mut out);
+                assert!((sum - norm).abs() <= 1e-12 * norm && (out.iter().sum::<f64>() - sum).abs() <= 1e-13 * norm, "{name} set {set:?} point {point}: the populations' sum {sum} against ψ†ψ {norm}");
+                let x = ws.normal().product(&Mat { rows: n, cols: 1, data: psi.clone() });
+                let rows: f64 = sum - x.data.iter().map(|z| z.norm_sqr()).sum::<f64>();
+                for (j, &e) in fold.explicit.iter().enumerate() {
+                    let own = x.data[fold.ground.len() + j].norm_sqr();
+                    let more = out[GROUND + e] - own;
+                    assert!(more >= -1e-13 * norm && more <= rows + 1e-13 * norm, "{name} set {set:?} point {point}: explicit state {e}'s population {} against |x|² {own} (the Q rows' {rows})", out[GROUND + e]);
+                    explicit_checked += 1;
+                }
+                let at = crate::model::Point { r, kappa, t: 0.0 };
+                let rows = run.readout(run.cluster_of(set[0]), &at, &psi, &crate::step::Held::default());
+                assert!((rows.iter().sum::<f64>() - 1.0).abs() <= 1e-13, "{name} set {set:?} point {point}: the rows' sum {}", rows.iter().sum::<f64>());
+            }
+        }
+    }
+    assert!(explicit_checked > 0, "an explicit state checked");
+}
+
+/// The readout of a two-level atom at rest in a running wave (BRIEF_STEP3 item 2): the excited state folded, the readout's
+/// excited population of the ground state is the slow mode's of the 2 × 2 generator the explicit choice holds there,
+/// |T|²/(1 + |T|²) with (1, T) its eigenvector of the eigenvalue nearest the ground state's, within the share the fold's
+/// readings hold it to -- the fold's conditional state, as the run carries it between jumps; beside it (said, not held)
+/// the optical Bloch equations' steady state ρ_ee, an ensemble's, with the transient after each jump that the fold's
+/// landing leaves out.
+#[test]
+fn a_two_level_atom_s_readout_is_its_slow_mode_s_population() {
+    use crate::step::{Dynamics, Middle};
+    let (gamma, ee) = (38.0, 1000.0);
+    for (a, delta) in [(2.0, -60.0), (6.0, -60.0), (12.0, -60.0), (6.0, -20.0)] {
+        let rays = [Ray { axis: 0, nu: ee + delta, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(a))] }];
+        let req = system(&[(0, 0.0)], &[(17, ee, gamma, 0)], &rays, 1, true);
+        let mut p = [0.0; GROUND];
+        p[0] = 1.0;
+        let level = Fold::new(&req, &Choice::tiered(&req, vec![]).unwrap(), 0).unwrap().excited_level[17];
+        let kept = Choice::tiered(&req, vec![(level, crate::model::Component { frequency: 0, counter: false }, 0)]).unwrap();
+        let (explicit, folded) = (super::run::Onefold::of(&req, &kept, p).unwrap(), super::run::Onefold::of(&req, &Choice::tiered(&req, vec![]).unwrap(), p).unwrap());
+        let at = crate::model::Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
+        let set = explicit.cluster_of(0);
+        let states = &explicit.cluster(set).states;
+        let i = states.iter().position(|&x| x == GROUND + 17).expect("the excited state explicit");
+        let middle = explicit.middle(set, at.r, at.t, &crate::step::Held::default(), false);
+        let mut whole = Mat::zeros(states.len(), states.len());
+        middle.generator(&middle.path([0.0; 3], [0.0; 3]), 0.0, &mut whole);
+        // The level's other states are not driven: the 2 × 2 of the ground state and the driven one.
+        let g = Mat::from_fn(2, 2, |r, c| whole[([0, i][r], [0, i][c])]);
+        // The slow mode: the eigenvalue of [[g00, g01], [g10, g11]] nearest g00, its eigenvector (1, (λ − g00)/g01).
+        let (tr, det) = (g[(0, 0)] + g[(1, 1)], g[(0, 0)] * g[(1, 1)] - g[(0, 1)] * g[(1, 0)]);
+        let root = (tr * tr * 0.25 - det).sqrt();
+        let lambda = [tr * 0.5 + root, tr * 0.5 - root].into_iter().min_by(|x, y| (*x - g[(0, 0)]).abs().total_cmp(&(*y - g[(0, 0)]).abs())).unwrap();
+        let t = (lambda - g[(0, 0)]) / g[(0, 1)];
+        let slow = t.norm_sqr() / (1.0 + t.norm_sqr());
+        // The optical Bloch equations' steady state of the same generator: Ω/2 = |g10|, Δ, Γ.
+        let (half, detuning, decay) = (g[(1, 0)].abs(), g[(1, 1)].re - g[(0, 0)].re, -2.0 * g[(1, 1)].im);
+        let bloch = half * half / (detuning * detuning + 0.25 * decay * decay + 2.0 * half * half);
+        let rows = folded.readout(folded.cluster_of(0), &at, &[C64::ONE], &crate::step::Held::default());
+        println!("a {a}, Δ {delta}: Ω/2 {half:.3}, Δ {detuning:.2}, Γ {decay:.2} rad/µs: the readout's excited population {:.6e}, the slow mode's {slow:.6e} ({:+.2e} of it), the Bloch equations' ρ_ee {bloch:.6e} ({:+.2e})", rows[GROUND + 17], rows[GROUND + 17] / slow - 1.0, rows[GROUND + 17] / bloch - 1.0);
+        assert!((rows.iter().sum::<f64>() - 1.0).abs() <= 1e-13, "the rows' sum");
+        assert!((rows[GROUND + 17] - slow).abs() <= crate::model::elim::share() * slow, "the readout {} against the slow mode's {slow}", rows[GROUND + 17]);
+    }
 }

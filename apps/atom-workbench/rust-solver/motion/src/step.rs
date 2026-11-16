@@ -496,8 +496,9 @@ pub trait Dynamics {
     /// The loss test at a point (`Model::lost`): outside the region and E_s above its far value.
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool;
 
-    /// The displayed rows of the cluster's state at a point (`Model::readout`).
-    fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES];
+    /// The displayed rows of the cluster's state at a point (`Model::readout`), on the trajectory's representation `held`
+    /// (deciding nothing).
+    fn readout(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held) -> [f64; STATES];
 
     /// A cluster's state's held forms at a point (module documentation, # The path's momentum: `Forms`, at the point's
     /// time): the model at the point (`middle`, deciding nothing), the state on its path at the point's momentum, at the

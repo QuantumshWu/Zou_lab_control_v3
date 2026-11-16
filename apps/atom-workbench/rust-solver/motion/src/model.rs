@@ -1032,7 +1032,7 @@ impl crate::step::Dynamics for Run<'_> {
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
         self.model.lost_with(cluster, at, psi, self.tables)
     }
-    fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
+    fn readout(&self, cluster: usize, at: &Point, psi: &[C64], _: &crate::step::Held) -> [f64; STATES] {
         Run::readout(self, cluster, at, psi)
     }
 }

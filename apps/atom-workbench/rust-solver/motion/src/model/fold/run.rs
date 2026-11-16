@@ -65,8 +65,8 @@
 //! # The rest of the model
 //! The reference potential of the splitting (A), the loss energy and its test are the request's prepared and running
 //! potentials as model.rs makes them (the folds with every drive bare: a reference is exact for any potential); the
-//! displayed rows are the set's own populations. The photons' and the landing's own forms (DESIGN step 3) and the
-//! explicit sets' optical sector are not yet here.
+//! displayed rows are the fold's time-averaged populations at the point (`Dynamics::readout`). The photons' and the
+//! landing's own forms (DESIGN step 3) and the explicit sets' optical sector are not yet here.
 use super::proto::{At, Bar, Cache, Moments, Workspace};
 use super::{Choice, Fold};
 use crate::field::Light;
@@ -790,13 +790,21 @@ impl crate::step::Dynamics for Onefold {
         self.potentials.light.outside(at.r) && self.energy(cluster, at, psi) > self.potentials.asymptote(&self.populations(cluster, psi), &self.running)
     }
 
-    fn readout(&self, cluster: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
-        let total = crate::linalg::norm_sqr(psi);
+    /// The fold's time-averaged populations of the state at the point (DESIGN §1.3; proto.rs `Workspace::populations`):
+    /// one forward there on the trajectory's representation, deciding nothing; a set with no light its states' own. Over
+    /// their sum, ψ†ψ by construction.
+    fn readout(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held) -> [f64; STATES] {
         let mut out = [0.0; STATES];
-        for (z, &s) in psi.iter().zip(&self.sets[cluster].cluster.states) {
-            out[s] = z.norm_sqr() / total;
-        }
-        out
+        let set = &self.sets[cluster];
+        let total = if set.fold.blocks.is_empty() {
+            for (z, &s) in psi.iter().zip(&set.cluster.states) {
+                out[s] = z.norm_sqr();
+            }
+            crate::linalg::norm_sqr(psi)
+        } else {
+            self.evaluate(cluster, at.r, at.kappa, held, |fold, cache, ws, _| ws.populations(fold, cache, psi, &mut out)).unwrap_or(f64::NAN)
+        };
+        out.map(|x| x / total)
     }
 
     fn photon_work(&self) -> f64 {
