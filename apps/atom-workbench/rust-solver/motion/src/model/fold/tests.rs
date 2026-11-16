@@ -611,6 +611,60 @@ fn r4_lin_4_s_lattice_one_hop_deeper() {
     }
 }
 
+/// The exact copies after the excited block (fold.rs, # The exact copies): on random systems with their copies exact, each
+/// block's column solve (c − K)z = r and its adjoint against a dense LU of the whole block as the decomposition holds it
+/// (the couplings between the lines left out), at energies about the block's: equal to the rounding times the block's
+/// condition.
+#[test]
+fn the_exact_copies_after_the_excited_block_are_the_whole_block_s_solve() {
+    let mut state = 77u64;
+    let (mut checked, mut worst) = (0, 0.0_f64);
+    for trial in 0..20 {
+        let (req, choice) = random_system(&mut state, trial);
+        for set in Fold::sets(&req, &choice).unwrap() {
+            let fold = Fold::new(&req, &choice, set[0]).unwrap();
+            let Some(f) = fold_at(&fold, [0.0; 3], [0.0; 3]) else { continue };
+            for (o, e) in f.eliminated.iter().enumerate() {
+                if e.exact == 0 {
+                    continue;
+                }
+                let b = &fold.blocks[o];
+                let m = e.solved;
+                // K in the basis, the whole block's: V†K V with the lines' couplings left out (as decomposed and read).
+                let mut w = 0.0;
+                let l = &f.laid[o];
+                let eff = fold.effective(o, l, &mut w).unwrap();
+                let mut k = eff.k.clone();
+                for i in 0..m {
+                    k[(i, i)] -= C64::real(b.value);
+                    for j in 0..m {
+                        if let (Row::Excited(x), Row::Excited(y)) = (b.rows[i], b.rows[j]) {
+                            if fold.part_of[x] != fold.part_of[y] {
+                                k[(i, j)] = C64::ZERO;
+                            }
+                        }
+                    }
+                }
+                let kt = e.to(&e.to(&k, &mut w).adjoint(), &mut w).adjoint();
+                for (s, c) in [(0, C64::new(3.0, 0.5)), (1, C64::new(-40.0, -2.0)), (2, C64::new(0.7, 9.0))] {
+                    let r: Vec<C64> = (0..m).map(|i| C64::new(1.0 + i as f64 + s as f64, 0.5 - 0.1 * i as f64)).collect();
+                    for adjoint in [false, true] {
+                        let ours = e.column(c, &r, adjoint, &mut w);
+                        let a = Mat::from_fn(m, m, |i, j| if i == j { c } else { C64::ZERO } - if adjoint { kt[(j, i)].conj() } else { kt[(i, j)] });
+                        let mut x = r.clone();
+                        crate::linalg::Lu::new(&a).unwrap().solve(&mut x);
+                        let gap = ours.iter().zip(&x).map(|(p, q)| (*p - *q).abs()).fold(0.0, f64::max) / x.iter().map(|q| q.abs()).fold(0.0, f64::max);
+                        worst = worst.max(gap);
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    println!("{checked} exact-copy solves against the whole block's LU: worst {worst:.2e} relative");
+    assert!(checked >= 20 && worst <= 1e-10, "{checked} solves, worst {worst:.2e}");
+}
+
 /// ⑤ Sixty random small systems (`random_system`): the fold's P-Floquet eigenvalues against the dense lattice's (its depth
 /// grown from 4 by 2 until they stay within 10⁻¹⁰), each within the read next pass and truncation of the fold's part; the
 /// gap over that bound printed -- below one, and how far.
@@ -1107,6 +1161,41 @@ fn a_fold_s_work_at_a_scene() {
         let fold = Fold::new(&req, &choice, set[0]).unwrap();
         if fold.blocks.is_empty() {
             continue;
+        }
+        // FOLD_DETAIL: per block at the focus, its copies' emitting light and the couplings between the lines its
+        // decomposition leaves out -- the bare frame matrix's and the centred dressing's.
+        if std::env::var("FOLD_DETAIL").is_ok() {
+            let mut w = 0.0;
+            let site = fold.site([0.0; 3], [0.0; 3], &mut w);
+            for (o, b) in fold.blocks.iter().enumerate() {
+                let l = fold.lay(o, &site, &mut w);
+                let Some(e) = fold.effective(o, &l, &mut w) else { continue };
+                let mut by: Vec<String> = vec![];
+                for r in &b.rows {
+                    if let Row::Copy { state, component } = *r {
+                        let comp = &fold.components[component];
+                        let names: Vec<&str> = comp.beams.iter().map(|&x| req.beams[x].name.as_str()).collect();
+                        let tag = format!("{:?} {names:?} {}", comp.part, if b.rows[..b.solved].contains(r) { "decomposed" } else { "centred" });
+                        if !by.contains(&tag) {
+                            by.push(tag);
+                        }
+                        let _ = state;
+                    }
+                }
+                let (mut bare, mut dressing) = (0.0_f64, 0.0_f64);
+                for i in 0..b.solved {
+                    for j in 0..b.solved {
+                        if let (Row::Excited(x), Row::Excited(y)) = (b.rows[i], b.rows[j]) {
+                            if fold.part_of[x] != fold.part_of[y] {
+                                bare += l.inner[(i, j)].norm_sqr();
+                                dressing += (e.k[(i, j)] - l.inner[(i, j)]).norm_sqr();
+                            }
+                        }
+                    }
+                }
+                let sources: Vec<String> = b.sources.iter().map(|&(p, c)| format!("{}<-{:?}", fold.ground[p], fold.components[c].part)).take(2).collect();
+                println!("   block {o} ({:.1} rad/µs; sources {sources:?}…): rows {}/{}, copies {by:?}; between the lines: the frame matrix's {:.3e}, the dressing's {:.3e}", b.value, b.rows.len(), b.solved, bare.sqrt(), dressing.sqrt());
+            }
         }
         for thermal in [false, true] {
         let mut path = Path::default();

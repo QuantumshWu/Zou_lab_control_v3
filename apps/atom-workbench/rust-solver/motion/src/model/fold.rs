@@ -63,6 +63,13 @@
 //! form's entries off the diagonal within its rounding are zero (a normal part's form is its diagonal: 𝒦 on one line is
 //! Hermitian less iΓ/2, a centred copy's dressing Hermitian), what they held read with the rest.
 //!
+//! # The exact copies after the excited block (DESIGN §3.4 of the replan)
+//! A copy taken exactly (`Status::Decomposed`) is not in the decomposition kept along the path: its couplings to the
+//! excited rows are the near light's and change every step. The block is the same, its elimination order the other one --
+//! the excited rows first, in the kept basis (their resolvent triangular there), then the copies by their n_D × n_D Schur
+//! complement (c − K_DD) − Ỹ′(c − T_E)⁻¹Ỹ at every energy c (Woodbury), Ỹ = V_E†K_ED V_D and Ỹ′ = V_D†K_DE V_E taken at the
+//! point. The same block solve as one decomposition of the whole, exactly.
+//!
 //! # The compression
 //! With Φ = [1; T_o] on the lifted space, A = Φ†ĤΦ = Ĥ_PP + Σ_o (Ĥ_Po T_o + T_o†Ĥ_oP + T_o†Ĥ_oo T_o) and M = 1 + Σ_o T_o†T_o
 //! (the copies' time-averaged population with it); S = M^{1/2}, G = S⁻¹AS⁻¹. Its anti-Hermitian part is
@@ -1305,6 +1312,11 @@ struct Eliminated {
     off: Vec<Vec<f64>>,
     to_static: Option<Mat>,
     ranks: Rc<Vec<(usize, Vec<Mat>)>>,
+    /// The exact copies: their count (the solved rows' last), and in the basis their couplings with the excited rows,
+    /// Ỹ = V_E†K_ED V_D and Ỹ′ = V_D†K_DE V_E (module documentation, # The exact copies).
+    exact: usize,
+    coupling: Mat,
+    back_coupling: Mat,
 }
 
 impl Eliminated {
@@ -1315,10 +1327,93 @@ impl Eliminated {
         self.factored.from(z, work)
     }
     fn back(&self, c: C64, r: &[C64], work: &mut f64) -> Vec<C64> {
-        self.factored.back(&self.diag, c, r, work)
+        if self.exact == 0 {
+            return self.factored.back(&self.diag, c, r, work);
+        }
+        self.column(c, r, false, work)
     }
     fn sylvester(&self, th: &Mat, w: f64, b: &Mat, work: &mut f64) -> Mat {
-        sylvester(&self.factored.t, &self.diag, &self.factored.ends, th, w, b, work)
+        if self.exact == 0 {
+            return sylvester(&self.factored.t, &self.diag, &self.factored.ends, th, w, b, work);
+        }
+        let (m, n) = (b.rows, b.cols);
+        let mut z = Mat::zeros(m, n);
+        for j in 0..n {
+            let mut rhs: Vec<C64> = (0..m).map(|k| b[(k, j)]).collect();
+            for i in 0..j {
+                let t = th[(i, j)];
+                if t != C64::ZERO {
+                    (0..m).for_each(|k| rhs[k] -= z[(k, i)] * t);
+                }
+            }
+            let col = self.column(th[(j, j)] - C64::real(w), &rhs, false, work);
+            (0..m).for_each(|k| z[(k, j)] = col[k]);
+        }
+        *work += (m * n * n.saturating_sub(1) / 2) as f64;
+        z
+    }
+
+    /// The triangle's solve on the rows `lo..hi` of the basis: (c − T)z = r, or (c − T†)z = r (`adjoint`, c already the
+    /// adjoint's), each part's own; a row with nothing to answer answers nothing.
+    fn triangle_on(&self, c: C64, r: &[C64], lo: usize, hi: usize, adjoint: bool, work: &mut f64) -> Vec<C64> {
+        let (t, ends) = (&self.factored.t, &self.factored.ends);
+        let mut z = vec![C64::ZERO; hi - lo];
+        if adjoint {
+            for k in lo..hi {
+                let mut acc = r[k - lo];
+                for l in (lo..k).filter(|&l| ends[l] > k) {
+                    acc += t[(l, k)].conj() * z[l - lo];
+                }
+                z[k - lo] = if acc == C64::ZERO { C64::ZERO } else { acc / (c - self.diag[k].conj()) };
+            }
+        } else {
+            for k in (lo..hi).rev() {
+                let mut acc = r[k - lo];
+                for l in k + 1..ends[k].min(hi) {
+                    acc += t[(k, l)] * z[l - lo];
+                }
+                z[k - lo] = if acc == C64::ZERO { C64::ZERO } else { acc / (c - self.diag[k]) };
+            }
+        }
+        *work += (lo..hi).map(|k| ends[k] - k).sum::<usize>() as f64;
+        z
+    }
+
+    /// One column of the block's solve with exact copies (module documentation, # The exact copies): (c − K)z = r, or
+    /// (c − K†)z = r, the excited rows first, then the copies' Schur complement.
+    fn column(&self, c: C64, r: &[C64], adjoint: bool, work: &mut f64) -> Vec<C64> {
+        let (ne, nd) = (self.solved - self.exact, self.exact);
+        // (B, C): the couplings into the excited rows and out of them, as the system takes them.
+        let (b, cc) = if adjoint { (self.back_coupling.adjoint(), self.coupling.adjoint()) } else { (self.coupling.clone(), self.back_coupling.clone()) };
+        let y = self.triangle_on(c, &r[..ne], 0, ne, adjoint, work);
+        let p: Vec<Vec<C64>> = (0..nd).map(|a| self.triangle_on(c, &(0..ne).map(|k| b[(k, a)]).collect::<Vec<_>>(), 0, ne, adjoint, work)).collect();
+        let t = &self.factored.t;
+        let schur = Mat::from_fn(nd, nd, |a, d| {
+            let (i, j) = (ne + a, ne + d);
+            let own = if a == d {
+                c - if adjoint { self.diag[i].conj() } else { self.diag[i] }
+            } else if adjoint {
+                -t[(j, i)].conj()
+            } else {
+                -t[(i, j)]
+            };
+            own - (0..ne).map(|k| cc[(a, k)] * p[d][k]).sum::<C64>()
+        });
+        *work += (nd * nd * ne) as f64;
+        let rhs = Mat::from_fn(nd, 1, |a, _| r[ne + a] + (0..ne).map(|k| cc[(a, k)] * y[k]).sum::<C64>());
+        let x = match inverse(&schur, work) {
+            Some(inv) => mul(&inv, &rhs, work),
+            None => Mat::from_fn(nd, 1, |_, _| C64::new(f64::NAN, f64::NAN)),
+        };
+        let mut out = y;
+        for (a, pa) in p.iter().enumerate() {
+            for k in 0..ne {
+                out[k] += pa[k] * x[(a, 0)];
+            }
+        }
+        out.extend((0..nd).map(|a| x[(a, 0)]));
+        *work += (2 * nd * ne) as f64;
+        out
     }
 
     /// The reuse's error of a split's solution Z (Schur coordinates) at H's Schur diagonal `th` less w, per row and column,
@@ -1341,7 +1436,24 @@ impl Eliminated {
         }
     }
     fn adjoint(&self, th: &Mat, w: f64, b: &Mat, work: &mut f64) -> Mat {
-        sylvester_adjoint(&self.factored.t, &self.diag, &self.factored.ends, th, w, b, work)
+        if self.exact == 0 {
+            return sylvester_adjoint(&self.factored.t, &self.diag, &self.factored.ends, th, w, b, work);
+        }
+        let (m, n) = (b.rows, b.cols);
+        let mut z = Mat::zeros(m, n);
+        for j in (0..n).rev() {
+            let mut rhs: Vec<C64> = (0..m).map(|k| b[(k, j)]).collect();
+            for i in j + 1..n {
+                let t = th[(j, i)].conj();
+                if t != C64::ZERO {
+                    (0..m).for_each(|k| rhs[k] -= z[(k, i)] * t);
+                }
+            }
+            let col = self.column(th[(j, j)].conj() - C64::real(w), &rhs, true, work);
+            (0..m).for_each(|k| z[(k, j)] = col[k]);
+        }
+        *work += (m * n * n.saturating_sub(1) / 2) as f64;
+        z
     }
 
     /// The block's response on all its Q rows from that on its solved rows: the centred ones T_C = R₀(Ĥ_CS T_S + B_C).
@@ -1395,8 +1507,18 @@ impl Fold {
         let rows = b.rows[..b.solved].to_vec();
         let dressed = b.rows.len() > b.solved || rows.iter().any(|r| matches!(r, Row::Copy { .. }));
         let own = dressed.then_some(o);
-        // Its couplings across parts left out of what is decomposed (read with the change).
-        let mut k = e.k.clone();
+        // The exact copies' couplings with the excited rows are not decomposed (module documentation, # The exact copies);
+        // the couplings between the lines are left out of what is decomposed (read with the change).
+        let ne = rows.iter().take_while(|r| matches!(r, Row::Excited(_))).count();
+        let mut kept = e.k.clone();
+        for i in 0..b.solved {
+            for j in 0..b.solved {
+                if (i < ne) != (j < ne) {
+                    kept[(i, j)] = C64::ZERO;
+                }
+            }
+        }
+        let mut k = kept.clone();
         for i in 0..b.solved {
             for j in 0..b.solved {
                 if let (Row::Excited(x), Row::Excited(y)) = (rows[i], rows[j]) {
@@ -1437,7 +1559,7 @@ impl Fold {
         // The change since the basis was made in the basis, δK̃ = V†δV (the couplings the decomposition leaves out between
         // the lines with it): its diagonal the first order, each row's rest its reading's norm, with what the form dropped.
         if moved[at].is_none() {
-            let mut delta = e.k.clone();
+            let mut delta = kept.clone();
             delta.add_scaled(-C64::ONE, &path.bases[at].k);
             let tilde = factored.to(&factored.to(&delta, work).adjoint(), work).adjoint();
             let d: Vec<C64> = (0..b.solved).map(|i| tilde[(i, i)]).collect();
@@ -1489,7 +1611,24 @@ impl Fold {
         }
         let ranks = path.ranks[o].as_ref().unwrap().2.clone();
         let to_static = e.source.as_ref().map(|x| factored.to(x, work));
-        Some(Eliminated { solved: b.solved, resolvent: e.resolvent, basis: at, factored: path.bases[at].factored.clone(), diag, off, to_static, ranks })
+        // The exact copies' couplings in the basis at the point.
+        let nd = b.solved - ne;
+        let (coupling, back_coupling) = if nd > 0 {
+            let mut ed = Mat::zeros(b.solved, b.solved);
+            for i in 0..b.solved {
+                for j in 0..b.solved {
+                    if (i < ne) != (j < ne) {
+                        ed[(i, j)] = e.k[(i, j)];
+                    }
+                }
+            }
+            let tilde = factored.to(&factored.to(&ed, work).adjoint(), work).adjoint();
+            let (es, ds): (Vec<usize>, Vec<usize>) = ((0..ne).collect(), (ne..b.solved).collect());
+            (tilde.block(&es, &ds), tilde.block(&ds, &es))
+        } else {
+            (Mat::zeros(0, 0), Mat::zeros(0, 0))
+        };
+        Some(Eliminated { solved: b.solved, resolvent: e.resolvent, basis: at, factored: path.bases[at].factored.clone(), diag, off, to_static, ranks, exact: nd, coupling, back_coupling })
     }
 }
 
@@ -2230,6 +2369,16 @@ impl Fold {
                         }
                         *w += (idx.len() * idx.len() * n) as f64;
                     }
+                    // The exact copies' couplings with the excited rows (solved, not decomposed).
+                    let ne = e.solved - e.exact;
+                    for a in 0..e.solved {
+                        for b in 0..e.solved {
+                            if (a < ne) != (b < ne) {
+                                kz[(a, b)] += (0..n).map(|j| lz[(a, j)] * z[(b, j)].conj()).sum::<C64>();
+                            }
+                        }
+                    }
+                    *w += (2 * ne * e.exact * n) as f64;
                     if whole_h {
                         plus(&mut hz, &mul_adj(z, &lz, w));
                     } else {
