@@ -16,8 +16,16 @@
 //! §11.3): there the middle's first evaluation joins or lets go the levels and makes the decompositions again as its
 //! readings ask, and what it decides is the trajectory's from then on (`Middle::held`). Every other evaluation -- the
 //! step's path at its own momentum, a set a jump lands in, the photon and the landing at a jump -- starts from the
-//! trajectory's representation and decides nothing that outlives it. Here a decision is made at every step's middle;
-//! the grid of the coarsest level's step ends is step 3's.
+//! trajectory's representation and decides nothing that outlives it. Here a decision is made at every step's middle and
+//! where a trajectory starts (`Dynamics::started`: the landing of its bare state, the held forms there -- its first
+//! decomposition made once); the grid of the coarsest level's step ends is step 3's.
+//!
+//! # The held forms
+//! A step's path momentum is predicted from the start state's held forms (step.rs # The path's momentum): the end state's
+//! at the last step's end node, in the same contraction as the step's kick (`Middle::nodes`: one more density at +h, its
+//! static G's form on a channel of its own and each tone's complex amplitude on one each, referenced to the middle's
+//! time); at a point -- a trajectory's start, a jump at a step's end into another set -- one evaluation there, its
+//! tangent and the contraction at the point (`Onefold::held_forms`).
 //!
 //! # The tones
 //! What stays in P and beats -- an entry of two P states of different frames (proto.rs # The tones) -- is the
@@ -46,7 +54,7 @@ use crate::field::Light;
 use crate::linalg::{Mat, C64};
 use crate::model::{Cluster, Lights, Model, Point, Quadratic, Scattering};
 use crate::request::{Request, GROUND, STATES};
-use crate::step::{Emitted, Held, Internal};
+use crate::step::{Emitted, Forms, Held, Internal};
 use std::cell::{Cell, RefCell, RefMut};
 use std::sync::{Arc, Mutex};
 
@@ -193,6 +201,33 @@ impl Onefold {
         let out = forward.map(|w| then(fold, &cache, &mut ws, w));
         self.give(set, ws);
         out
+    }
+
+    /// The held forms of a set's state at a point (module documentation, # The held forms): the set's forward on the
+    /// trajectory's decompositions, its tangent, and in one contraction at the point the static G's form and each tone's
+    /// complex amplitude at the point's time; where `land`, of the bare state's landing ψ = S⁻¹ψ. With the state they are
+    /// of and the decompositions the forward stood on. None where the fold does not exist there.
+    fn held_forms(&self, set: usize, at: &Point, psi: &[C64], held: &Held, land: bool) -> Option<(Vec<C64>, Forms, Cache)> {
+        let fold = &self.sets[set].fold;
+        let (n, tones) = (fold.size(), &self.sets[set].tones);
+        if fold.blocks.is_empty() {
+            return Some((psi.to_vec(), Forms { time: at.t, ..Forms::default() }, Cache::default()));
+        }
+        let mut cache = self.cache(held, set);
+        let mut ws = self.take(set);
+        let out = fold.prototype(at.r, at.kappa, &mut cache, &mut ws).is_some().then(|| {
+            let state = if land { ws.normal().product(&Mat { rows: n, cols: 1, data: psi.to_vec() }).data } else { psi.to_vec() };
+            fold.prototype_tangent(&cache, &mut ws);
+            let mut rho = vec![C64::ZERO; n * n];
+            crate::step::density(&state, &mut rho);
+            let phased: Vec<Vec<C64>> = tones.iter().map(|&nu| rho.iter().map(|z| *z * C64::cis(nu * at.t)).collect()).collect();
+            let mut bars = vec![Bar { channel: 0, position: 0, tone: None, matrix: &rho }];
+            bars.extend(phased.iter().enumerate().map(|(m, x)| Bar { channel: 1 + m, position: 0, tone: Some(m), matrix: x }));
+            let f = fold.prototype_force(&cache, &mut ws, &bars, 1 + tones.len()).forms;
+            (state, Forms { time: at.t, held: real(f[0]), tones: tones.iter().zip(&f[1..]).map(|(&nu, a)| (nu, *a)).collect() })
+        });
+        self.give(set, ws);
+        out.map(|(state, forms)| (state, forms, cache))
     }
 
     /// p(ψ), the ground populations of a set's state (model.rs `Model::ground_populations`, on the set's states).
@@ -425,8 +460,12 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     /// The three nodes' static forms and every tone's there at its exact phase, the held state's at the beats' weights
-    /// with the middle's, in one contraction (module documentation, # The tones).
-    fn nodes(&self, path: &Path, h: f64, rho: [&[C64]; 3], held: Option<(&[C64], &dyn Fn(f64) -> f64)>) -> [[f64; 3]; 3] {
+    /// with the middle's (module documentation, # The tones); and where `end` is given, the end state's held forms at the
+    /// end node, the static G's on a channel of its own and each tone's complex amplitude, referenced to the middle's time,
+    /// on one each (# The held forms) -- in one contraction.
+    fn nodes(&self, path: &Path, h: f64, rho: [&[C64]; 3], held: Option<(&[C64], &dyn Fn(f64) -> f64)>, end: Option<(&[C64], &Path)>) -> ([[f64; 3]; 3], Option<Forms>) {
+        // The tones are the light's beats in time (the path's turns are its envelopes'): the end node's own, no path at rest.
+        let end = end.map(|(rho, _)| rho);
         let tones = &self.run.sets[self.set].tones;
         let at = |nu: f64| -> Vec<C64> {
             match held {
@@ -440,7 +479,14 @@ impl crate::step::Middle for Middle<'_> {
         for (m, xs) in phased.iter().enumerate() {
             bars.extend(xs.iter().enumerate().map(|(j, x)| Bar { channel: 0, position: j, tone: Some(m), matrix: x }));
         }
-        [real(self.forms(path, Some(h), &bars, 1)[0]), [0.0; 3], [0.0; 3]]
+        let ended: Vec<Vec<C64>> = end.map_or(vec![], |rho| (0..tones.len()).map(|m| self.phased(m, 0.0, rho)).collect());
+        if let Some(rho) = end {
+            bars.push(Bar { channel: 1, position: 2, tone: None, matrix: rho });
+            bars.extend(ended.iter().enumerate().map(|(m, x)| Bar { channel: 2 + m, position: 2, tone: Some(m), matrix: x }));
+        }
+        let f = self.forms(path, Some(h), &bars, if end.is_some() { 2 + tones.len() } else { 1 });
+        let held = end.map(|_| Forms { time: 0.0, held: real(f[1]), tones: tones.iter().zip(&f[2..]).map(|(&nu, a)| (nu, *a)).collect() });
+        ([real(f[0]), [0.0; 3], [0.0; 3]], held)
     }
 
     /// The candidates' beats and keys (module documentation, # The tones).
@@ -591,6 +637,24 @@ impl crate::step::Dynamics for Onefold {
         let (fold, first) = (&set.fold, set.fold.ground[0]);
         let omega = self.frame + fold.blocks[set.blocks[block]].value + self.energies[first] - fold.frame_values[0] - self.energies[self.grounds[landing][0]];
         Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick })
+    }
+
+    /// The held forms at a point, deciding nothing (# The held forms).
+    fn forms(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held) -> Forms {
+        self.held_forms(cluster, at, psi, held, false).map_or_else(|| Forms { time: at.t, held: [f64::NAN; 3], tones: vec![] }, |x| x.1)
+    }
+
+    /// The bare state's landing and its held forms in one evaluation, the trajectory's first decision: its
+    /// decompositions made there are its representation (# The representation and the decision times).
+    fn started(&self, cluster: usize, at: &Point, f: &[C64]) -> (Internal, Forms, Held) {
+        match self.held_forms(cluster, at, f, &Held::default(), true) {
+            Some((landed, forms, cache)) => {
+                let mut caches = Caches(vec![Cache::default(); self.sets.len()]);
+                caches.0[cluster] = cache;
+                (landed.into_iter().collect(), forms, Held(Some(Arc::new(caches))))
+            }
+            None => (f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect(), Forms { time: at.t, held: [f64::NAN; 3], tones: vec![] }, Held::default()),
+        }
     }
 
     fn landed(&self, cluster: usize, at: &Point, f: &[C64], held: &Held) -> Internal {

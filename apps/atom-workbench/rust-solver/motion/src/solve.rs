@@ -2909,15 +2909,17 @@ struct State {
     /// The trajectory's jumps up to the state, and the threshold of its next one.
     jumps: u32,
     threshold: f64,
+    /// Its held forms (step.rs `Forms`: the next step's path momentum).
+    forms: crate::step::Forms,
 }
 impl State {
     /// A trajectory's state as it stands, at the step τ.
     fn of(t: &Trajectory, tau: f64) -> State {
-        State { sample: Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() }, tau, index: t.index, jumps: t.jumps, threshold: t.threshold }
+        State { sample: Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() }, tau, index: t.index, jumps: t.jumps, threshold: t.threshold, forms: t.forms.clone() }
     }
 
     /// The trajectory at the state, as far as a step from it reads it (`step::priced`): its place, momentum, internal
-    /// state and time, its next jump's threshold and its streams.
+    /// state and time, its next jump's threshold, its held forms and its streams.
     fn trajectory(&self) -> Trajectory {
         let Sample { cluster, at, psi } = &self.sample;
         Trajectory {
@@ -2937,6 +2939,7 @@ impl State {
             pending: [[0.; 3]; 3],
             booked: [0.; 3],
             held: crate::step::Held::default(),
+            forms: self.forms.clone(),
         }
     }
 }
@@ -6086,6 +6089,7 @@ mod tests {
                     // Three jumps a unit of time.
                     jumps: 3 * k as u32,
                     threshold: 0.5,
+                    forms: crate::step::Forms::default(),
                 };
                 let samples = (0..=outputs).map(|k| (0..members).filter(|&m| k <= held(g, m)).map(|m| state(m, k)).collect()).collect();
                 Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), listed: vec![], samples, trails: vec![], lost: vec![], counts: Counts::default() }
@@ -7010,7 +7014,7 @@ mod tests {
         let (groups, members, outputs) = (11_usize, GROUP as usize, 4_usize);
         let parts: Vec<Part> = (0..groups)
             .map(|g| {
-                let state = |m: usize, t: f64, jumps: u32| State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, tau: 0.5, index: MOST_TRAJECTORIES + (g * members + m) as u64, jumps, threshold: 0.5 };
+                let state = |m: usize, t: f64, jumps: u32| State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, tau: 0.5, index: MOST_TRAJECTORIES + (g * members + m) as u64, jumps, threshold: 0.5, forms: crate::step::Forms::default() };
                 let loss = |m: usize| 0.1 + 0.8 * ((g * members + m) % 9) as f64 / 8.;
                 let mut samples = vec![vec![]; outputs + 1];
                 samples[0] = (0..members).map(|m| state(m, 0., 0)).collect();

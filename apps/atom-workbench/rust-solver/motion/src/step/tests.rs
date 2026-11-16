@@ -1872,6 +1872,7 @@ fn a_step_with_light_and_its_reverse_miss_beyond_the_scheme_s_order() {
     let lambda = 0.5 * (d - (d * d + 4.0 * c.norm_sqr()).sqrt());
     let mut dressed = bare.clone();
     dressed.psi = [C64::ONE, c / (lambda - d)].into_iter().collect();
+    dressed.forms = model.forms(dressed.cluster, &dressed.point(), &dressed.psi, &dressed.held);
     for (name, start) in [("dressed", dressed), ("bare", bare)] {
         let mut misses = Vec::new();
         for tau in [0.2, 0.1, 0.05] {
@@ -2079,6 +2080,7 @@ fn a_following_state_s_kick_has_the_curvature_of_the_level_it_follows() {
                 let (c, d) = (model.coupling(0, t.r) + model.coupling(1, t.r), -detuning);
                 let lambda = 0.5 * (d - d.signum() * (d * d + 4.0 * c.norm_sqr()).sqrt());
                 t.psi = [C64::ONE, c / (lambda - d)].into_iter().collect();
+                t.forms = model.forms(t.cluster, &t.point(), &t.psi, &t.held);
                 let mut z = vec![t.r[2]];
                 for _ in 0..steps {
                     t = step_of(&model, &t, tau, &mut step::Scratch::default()).unwrap().end;
@@ -2558,7 +2560,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             let free = Trajectory { threshold: 0.0, ..from.clone() };
             let through = step::Midway::new(model, &free, tau).unwrap();
             let (r_h, kappa_h) = through.reached;
-            let kappa = super::predicted(&mut fitted(from.psi.len()), &through.generator, &from.psi, kappa_h, through.reference, tau);
+            let kappa = super::predicted(&from.forms, kappa_h, through.reference, tau, from.time + 0.5 * tau);
             let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
             let mut crossed = from.clone();
             crossed.threshold = (norm(&from.psi) * norm(&taken.end.psi)).sqrt();
@@ -2695,6 +2697,7 @@ fn atoms<D: Dynamics>(model: &D, count: u64) -> Vec<Trajectory> {
             let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(s.normal(), s.normal())).collect();
             let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
             t.psi = psi.iter().map(|z| *z / norm).collect();
+            t.forms = model.forms(t.cluster, &t.point(), &t.psi, &t.held);
             t.threshold = f64::MIN_POSITIVE;
             t
         })
@@ -2827,6 +2830,7 @@ fn scene_clusters(name: &str, each: &mut dyn FnMut(&crate::model::Model, &crate:
                 let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(stream.normal(), stream.normal())).collect();
                 let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
                 t.psi = psi.iter().map(|z| *z / norm).collect();
+                t.forms = run.forms(t.cluster, &t.point(), &t.psi, &t.held);
                 t.threshold = f64::MIN_POSITIVE;
                 t
             })
@@ -2908,7 +2912,9 @@ fn a_scene_s_onefold_step_cost() {
                 t.psi = psi.iter().map(|z| *z / norm).collect();
                 t.threshold = f64::MIN_POSITIVE;
                 let warmed = step_of(&run, &t, tau, &mut step::Scratch::default()).expect("the first step").end;
-                Trajectory { psi: t.psi, threshold: f64::MIN_POSITIVE, ..warmed }
+                let mut start = Trajectory { psi: t.psi, threshold: f64::MIN_POSITIVE, ..warmed };
+                start.forms = run.forms(start.cluster, &start.point(), &start.psi, &start.held);
+                start
             })
             .collect();
         cost(&format!("set {set} ({n}) of {}", std::path::Path::new(&name).file_stem().unwrap().to_string_lossy()), &run, &starts, tau);
@@ -2942,7 +2948,7 @@ fn decay_along(name: &str, tau: f64, each: &mut dyn FnMut(usize, usize, usize, &
         for start in starts {
             let through = step::Midway::new(run, start, tau).unwrap();
             let (r_h, kappa_h) = through.reached;
-            let kappa = super::predicted(&mut fitted(n), &through.generator, &start.psi, kappa_h, through.reference, tau);
+            let kappa = super::predicted(&start.forms, kappa_h, through.reference, tau, start.time + h);
             let velocity = kappa.map(|k| run.hbar_over_mass() * k);
             let exact_middle = exact.middle(cluster, r_h, start.time + h);
             let (path, exact_path) = (through.generator.path(kappa, velocity), exact_middle.path(kappa, velocity));
@@ -3324,7 +3330,7 @@ fn a_scene_s_step_error_by_the_split() {
             .iter()
             .zip(&middles)
             .map(|(s, through)| {
-                let kappa = super::predicted(&mut fitted(n), &through.generator, &s.psi, through.reached.1, through.reference, tau);
+                let kappa = super::predicted(&s.forms, through.reached.1, through.reference, tau, s.time + 0.5 * tau);
                 let along = super::Along::new(&through.generator, kappa, kappa.map(|k| hm * k));
                 let start = along.turned(&s.psi, -0.5 * tau, true)[..n].to_vec();
                 // The generator less its scalar part, which is a factor of its own: Simpson's rule of it on the path.
@@ -3787,7 +3793,7 @@ fn negative_decay<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> (f64,
     let (n, h) = (start.psi.len(), 0.5 * tau);
     let through = step::Midway::new(model, start, tau).unwrap();
     let (_, kappa_h) = through.reached;
-    let kappa = super::predicted(&mut fitted(n), &through.generator, &start.psi, kappa_h, through.reference, tau);
+    let kappa = super::predicted(&start.forms, kappa_h, through.reference, tau, start.time + h);
     let path = through.generator.path(kappa, kappa.map(|k| model.hbar_over_mass() * k));
     let mut m = Mat::zeros(n, n);
     let nodes = [-h, 0.0, h].map(|u| {
@@ -4310,7 +4316,7 @@ fn a_step_s_price_is_its_count_item_by_item() {
     let unit = |which: usize| (price.stepped(std::array::from_fn(|i| if i == which { 1.0 } else { 0.0 })) - price.stepped([0.0; 3])) / COMPLEX;
     eprintln!("calls {calls:?}; the price's calls of the generator, the force and the tones {:?}; {} tones", [unit(0), unit(1), unit(2)], price.tones);
     assert_eq!([unit(0), unit(1), unit(2)], [calls[2] as f64, calls[3] as f64, calls[4] as f64], "the price's calls of the model are the step's");
-    assert!(price.tones == 2 && price.toned[0] > (6 * 2 * 4 * 4) as f64 && price.centred && price.sheared, "{price:?}");
+    assert!(price.tones == 2 && price.toned[0] > (6 * 2 * 4 * 4) as f64 && price.centred && price.ended, "{price:?}");
     assert_eq!(taken.end.work - from.work, model.photon_work() * jumps as f64, "a jump's photons");
     assert_eq!(step::priced(&model, &from, tau, &Everywhere).unwrap(), taken.prices, "a step taken from the state");
 }
