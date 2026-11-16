@@ -665,6 +665,59 @@ fn the_exact_copies_after_the_excited_block_are_the_whole_block_s_solve() {
     assert!(checked >= 20 && worst <= 1e-10, "{checked} solves, worst {worst:.2e}");
 }
 
+/// The tweezer's trap from the fold (replan, guard 5): R4_LIN_4's request with its trap light alone (the other beams'
+/// couplings and outside forms zero, as the prepared trap takes it), the fold's potential of the reference state,
+/// V(r) = Re G_ss about the old prepared trap's centre: its curvature along each lab axis (ω = √(V″ ħ/m)) and its depth
+/// against 10 µm off, against the old engine's prepared trap (`Model::closed_at`, itself judged against the references'
+/// trap frequencies by trap_tests) within 1 %; and in the whole scene the tweezer's blocks are not left out: their
+/// omission reads beyond the share in the potential's unit though their rates' is nothing.
+#[test]
+fn the_tweezer_s_trap_is_the_prepared_one_and_its_blocks_stay() {
+    use crate::model::Model;
+    let full = crate::model::testing::scene("R4_LIN_4");
+    let mut req = full.clone();
+    let trap_index = req.beams[req.trap_beam].frequency_index.clone();
+    for beam in req.beams.iter_mut().filter(|b| b.frequency_index != trap_index) {
+        beam.coupling = Mat::zeros(STATES, STATES);
+        beam.counter_coupling = Mat::zeros(STATES, STATES);
+    }
+    for form in req.outside_forms.iter_mut().filter(|f| f.frequency_index != trap_index) {
+        form.matrices = std::array::from_fn(|_| Mat::zeros(STATES, STATES));
+    }
+    let chief = (0..GROUND).max_by(|&a, &b| full.initial_density[(a, a)].re.total_cmp(&full.initial_density[(b, b)].re)).unwrap();
+    let (model, _, trap, _) = Model::closed_at(&full, &Light::new(&full), vec![], chief, full.temperature_uk);
+    let mut p = [0.0; GROUND];
+    p[chief] = 1.0;
+    let far = [trap.centre[0], trap.centre[1], trap.centre[2] + 10.0];
+    let depth_old = model.potential(far, &p, &model.prepared()) - model.potential(trap.centre, &p, &model.prepared());
+    let fold = Fold::new(&req, &rule(&req), chief).unwrap();
+    let place = fold.ground.iter().position(|&s| s == chief).unwrap();
+    let v = |r: [f64; 3]| fold_at(&fold, r, [0.0; 3]).unwrap().generator[(place, place)].re;
+    let c = trap.centre;
+    let h = 0.01;
+    let mut worst = 0.0_f64;
+    for a in 0..3 {
+        let (mut plus, mut minus) = (c, c);
+        plus[a] += h;
+        minus[a] -= h;
+        let curvature = (v(plus) - 2.0 * v(c) + v(minus)) / (h * h);
+        let omega = (curvature * fold.hbar_over_mass).max(0.0).sqrt();
+        println!("axis {a}: the fold's ω {omega:.6} rad/µs, the prepared trap's {:.6} ({:+.2e} relative)", trap.lab[a], omega / trap.lab[a] - 1.0);
+        worst = worst.max((omega / trap.lab[a] - 1.0).abs());
+    }
+    let depth = v(far) - v(c);
+    println!("depth: the fold's {depth:.6} rad/µs, the prepared trap's {depth_old:.6} ({:+.2e} relative)", depth / depth_old - 1.0);
+    // The tweezer's blocks in the whole scene: their omission reading in the potential's unit.
+    let fold = Fold::new(&full, &rule(&full), chief).unwrap();
+    let f = fold_at(&fold, c, [0.0; 3]).unwrap();
+    let share = super::super::elim::share();
+    let tweezer: Vec<usize> = (0..fold.blocks.len()).filter(|&o| fold.blocks[o].sources.iter().any(|&(_, k)| fold.components[k].beams.contains(&full.trap_beam))).collect();
+    let read: f64 = f.readings.iter().filter(|r| tweezer.contains(&r.block) && matches!(r.node, Node::Excited(_))).map(|r| r.omission).sum();
+    println!("the tweezer's blocks {tweezer:?}: their omission read {:.3e} in rate units (the share {share:.4})", rate(read.sqrt()));
+    assert!(worst <= 1e-2 && (depth / depth_old - 1.0).abs() <= 1e-2, "the fold's trap against the prepared one");
+    assert!(rate(read.sqrt()) > share, "the tweezer's blocks stay");
+}
+
 /// ⑤ Sixty random small systems (`random_system`): the fold's P-Floquet eigenvalues against the dense lattice's (its depth
 /// grown from 4 by 2 until they stay within 10⁻¹⁰), each within the read next pass and truncation of the fold's part; the
 /// gap over that bound printed -- below one, and how far.

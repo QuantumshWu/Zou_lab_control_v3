@@ -362,6 +362,8 @@ impl Block {
 pub(crate) struct Fold {
     light: Light,
     hbar_over_mass: f64,
+    /// k_BT of the request's temperature (rad/µs): the potential's unit in the omission's reading.
+    thermal: f64,
     pub(crate) components: Vec<Component>,
     /// P's ground states (place p < ng holds ground state ground[p]).
     pub(crate) ground: Vec<usize>,
@@ -594,6 +596,7 @@ impl Fold {
         }
         Ok(Fold {
             hbar_over_mass: crate::units::hbar_over_mass(request.mass_kg),
+            thermal: crate::units::KT_PER_UK * request.temperature_uk,
             light,
             components,
             ground: ground.to_vec(),
@@ -2046,20 +2049,29 @@ impl Fold {
                 split(o, &col, j, 0, 1.0, &mut out, work);
             }
         }
-        // An excited node left out of its block: its response's share of the column's whole excited response (the
-        // omission's reading; a part is left out where its nodes' sum is within the share).
+        // An excited node left out of its block, read in both of the readings' units, the larger: its response's share of the
+        // column's whole excited response (the rates'), and the potential it carries, ΔV_j = 2|Re(U†Ĥ_P,node T_node U)_jj|
+        // -- the column's light shift through the node --, against T's share of k_BT (a conservative change moves a kinetic
+        // energy by at most itself: tabulate.rs # Refinement): ρ with rate(ρ) = ΔV/(2k_BT), so that rate(ρ) within the
+        // populations' share is ΔV/k_BT within T's, twice it (elim::share). A far node's rate is nothing, its shift the trap.
         for (o, b) in self.blocks.iter().enumerate() {
+            let ue = mul_adj(&tri.u, &f.laid[o].emit, work);
             for j in (0..n).filter(|&j| whole[j] > 0.0) {
-                let mut parts: Vec<(Node, f64)> = vec![];
+                let mut parts: Vec<(Node, f64, C64)> = vec![];
                 for i in (0..b.rows.len()).filter(|&i| matches!(b.rows[i], Row::Excited(_))) {
                     let nd = node(b, i);
+                    let shift = ue[(j, i)] * tu[o][(i, j)];
                     match parts.iter_mut().find(|p| p.0 == nd) {
-                        Some(p) => p.1 += tu[o][(i, j)].norm_sqr(),
-                        None => parts.push((nd, tu[o][(i, j)].norm_sqr())),
+                        Some(p) => {
+                            p.1 += tu[o][(i, j)].norm_sqr();
+                            p.2 += shift;
+                        }
+                        None => parts.push((nd, tu[o][(i, j)].norm_sqr(), shift)),
                     }
                 }
-                for (nd, x) in parts {
-                    put(o, nd, 7, x / whole[j], &mut out);
+                for (nd, x, shift) in parts {
+                    let potential = ((1.0 + (2.0 * shift.re).abs() / (2.0 * self.thermal)).sqrt() - 1.0).powi(2);
+                    put(o, nd, 7, (x / whole[j]).max(potential), &mut out);
                 }
             }
         }
