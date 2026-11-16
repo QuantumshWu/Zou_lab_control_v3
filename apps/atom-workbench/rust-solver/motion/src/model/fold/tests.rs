@@ -1164,70 +1164,7 @@ fn a_fold_s_work_at_a_scene() {
     let name = std::env::var("FOLD_SCENE").expect("FOLD_SCENE");
     let req = crate::model::testing::scene(&name);
     let share = super::super::elim::share();
-    let ps = parts(&req);
-    let mut choice = Choice { copies: all_copies(&ps, Status::Decomposed), ..rule(&req) };
-    println!("{name}: the rule's ground sets {:?}; excited parts {:?}", choice.sets, choice.parts);
-    let d = super::super::far::decay(&req);
-    for part in &choice.parts {
-        let mean = part.iter().map(|&x| d[(x, x)].re).sum::<f64>() / part.len() as f64;
-        let dev = part.iter().flat_map(|&x| part.iter().map(move |&y| (x, y))).map(|(x, y)| (d[(x, y)] - if x == y { C64::real(mean) } else { C64::ZERO }).abs()).fold(0.0, f64::max);
-        println!("   excited part {part:?}: Γ {mean:.4}, the decay's largest departure from Γ·1 {dev:.2e}");
-    }
-    let at = [0.0; 3];
-    for set in Fold::sets(&req, &choice).unwrap() {
-        for round in 0..4 {
-            let fold = Fold::new(&req, &choice, set[0]).unwrap();
-            if fold.blocks.is_empty() {
-                break;
-            }
-            let f = fold_at(&fold, at, [0.0; 3]).unwrap();
-            let mut changed = false;
-            let mut statuses: Vec<String> = vec![];
-            for r in &f.readings {
-                let Node::Copy { level, component } = r.node else { continue };
-                let b = &fold.blocks[r.block];
-                let Some(&(s, a)) = b.sources.first() else { continue };
-                let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
-                let status = choice.copies.iter().rev().find(|x| x.0 == key).map_or(Status::Centred, |x| x.1);
-                // The cheapest evaluation whose reading is within the share (M18): left out, centred, decomposed.
-                let next = if rate(r.omission.sqrt()) <= share { Status::Omitted } else if rate(r.centring.sqrt()) <= share { Status::Centred } else { Status::Decomposed };
-                if next != Status::Omitted {
-                    statuses.push(format!("block {} F={level} by {:?}: {next:?}", r.block, fold.components[component].part));
-                }
-                if next != status {
-                    for &(s, a) in &b.sources {
-                        let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
-                        choice.copies.retain(|x| x.0 != key);
-                        choice.copies.push((key, next));
-                    }
-                    changed = true;
-                }
-            }
-            // The excited parts: a block leaves out a part whose nodes' omission readings (the rates' and the potential's,
-            // the larger) sum within the share.
-            for (o, b) in fold.blocks.iter().enumerate() {
-                for (pi, part) in choice.parts.iter().enumerate() {
-                    let levels: Vec<usize> = part.iter().map(|&x| fold.excited_level[x]).collect();
-                    let here = b.rows.iter().any(|r| matches!(r, Row::Excited(x) if part.contains(x)));
-                    if !here || b.explicit.iter().any(|&p| part.contains(&fold.explicit[p - fold.ground.len()])) {
-                        continue;
-                    }
-                    let total: f64 = f.readings.iter().filter(|r| r.block == o && matches!(r.node, Node::Excited(l) if levels.contains(&l))).map(|r| r.omission).sum();
-                    if rate(total.sqrt()) <= share {
-                        for &(s, a) in &b.sources {
-                            choice.left.push(((fold.components[a].part, fold.ground[s]), pi));
-                        }
-                        statuses.push(format!("block {o}: part {pi} left out ({total:.1e})"));
-                        changed = true;
-                    }
-                }
-            }
-            println!("set {set:?} round {round}: {statuses:?}");
-            if !changed {
-                break;
-            }
-        }
-    }
+    let choice = tiers(&req, &name);
     let unit = 1.0 / 3.0_f64.sqrt();
     for set in Fold::sets(&req, &choice).unwrap() {
         let fold = Fold::new(&req, &choice, set[0]).unwrap();
@@ -1381,8 +1318,307 @@ fn a_fold_s_work_at_a_scene() {
     }
 }
 
+/// A scene's evaluation tiers at its focus (the measurements' choice, M18): the rule's sets, frames and parts
+/// (`Choice::of`); every copy decomposed (exact: a centring can be singular, a copy at the centre itself), then each at the
+/// cheapest evaluation its readings allow within the share (left out, centred, decomposed), and the excited parts whose
+/// omission reads within it left out, to the fixed point.
+fn tiers(req: &Request, name: &str) -> Choice {
+    let share = super::super::elim::share();
+    let ps = parts(req);
+    let mut choice = Choice { copies: all_copies(&ps, Status::Decomposed), ..rule(req) };
+    println!("{name}: the rule's ground sets {:?}; excited parts {:?}", choice.sets, choice.parts);
+    let d = super::super::far::decay(req);
+    for part in &choice.parts {
+        let mean = part.iter().map(|&x| d[(x, x)].re).sum::<f64>() / part.len() as f64;
+        let dev = part.iter().flat_map(|&x| part.iter().map(move |&y| (x, y))).map(|(x, y)| (d[(x, y)] - if x == y { C64::real(mean) } else { C64::ZERO }).abs()).fold(0.0, f64::max);
+        println!("   excited part {part:?}: Γ {mean:.4}, the decay's largest departure from Γ·1 {dev:.2e}");
+    }
+    let at = [0.0; 3];
+    for set in Fold::sets(req, &choice).unwrap() {
+        for round in 0..4 {
+            let fold = Fold::new(req, &choice, set[0]).unwrap();
+            if fold.blocks.is_empty() {
+                break;
+            }
+            let f = fold_at(&fold, at, [0.0; 3]).unwrap();
+            let mut changed = false;
+            let mut statuses: Vec<String> = vec![];
+            for r in &f.readings {
+                let Node::Copy { level, component } = r.node else { continue };
+                let b = &fold.blocks[r.block];
+                let Some(&(s, a)) = b.sources.first() else { continue };
+                let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
+                let status = choice.copies.iter().rev().find(|x| x.0 == key).map_or(Status::Centred, |x| x.1);
+                // The cheapest evaluation whose reading is within the share (M18): left out, centred, decomposed.
+                let next = if rate(r.omission.sqrt()) <= share { Status::Omitted } else if rate(r.centring.sqrt()) <= share { Status::Centred } else { Status::Decomposed };
+                if next != Status::Omitted {
+                    statuses.push(format!("block {} F={level} by {:?}: {next:?}", r.block, fold.components[component].part));
+                }
+                if next != status {
+                    for &(s, a) in &b.sources {
+                        let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
+                        choice.copies.retain(|x| x.0 != key);
+                        choice.copies.push((key, next));
+                    }
+                    changed = true;
+                }
+            }
+            // The excited parts: a block leaves out a part whose nodes' omission readings (the rates' and the potential's,
+            // the larger) sum within the share.
+            for (o, b) in fold.blocks.iter().enumerate() {
+                for (pi, part) in choice.parts.iter().enumerate() {
+                    let levels: Vec<usize> = part.iter().map(|&x| fold.excited_level[x]).collect();
+                    let here = b.rows.iter().any(|r| matches!(r, Row::Excited(x) if part.contains(x)));
+                    if !here || b.explicit.iter().any(|&p| part.contains(&fold.explicit[p - fold.ground.len()])) {
+                        continue;
+                    }
+                    let total: f64 = f.readings.iter().filter(|r| r.block == o && matches!(r.node, Node::Excited(l) if levels.contains(&l))).map(|r| r.omission).sum();
+                    if rate(total.sqrt()) <= share {
+                        for &(s, a) in &b.sources {
+                            choice.left.push(((fold.components[a].part, fold.ground[s]), pi));
+                        }
+                        statuses.push(format!("block {o}: part {pi} left out ({total:.1e})"));
+                        changed = true;
+                    }
+                }
+            }
+            println!("set {set:?} round {round}: {statuses:?}");
+            if !changed {
+                break;
+            }
+        }
+    }
+    choice
+}
+
 /// A moving atom's wave vector (0.1 m/s along (1, 2, 3)/√14).
 fn kappa_of(fold: &Fold) -> [f64; 3] {
     let speed = 0.1 / fold.hbar_over_mass;
     [speed / 14f64.sqrt(), 2.0 * speed / 14f64.sqrt(), 3.0 * speed / 14f64.sqrt()]
+}
+
+/// The step against the fold at a point (B2, stage 1; step.rs): on a fresh cache -- its decompositions made at the point,
+/// as `Fold::at` makes its own -- the step's A, metric, S⁻¹ and G are the fold's to the rounding, its passes the same; and
+/// its decay is its own jumps' products, C_q ε_o S⁻¹ of its own responses, to the rounding (DESIGN §2.6). On the 20 random
+/// systems of ③ (every copy exact, an explicit level in every third), on R4_LIN_4 with its D2 F′ = 2 explicit and its near
+/// copies exact, the others centred (a static source of the explicit state's, and of H_GG at a copy's frame), and on
+/// R4_LIN_4 by the rule (every copy centred); at rest and moving.
+#[test]
+fn the_step_is_the_fold_at_a_point_to_rounding() {
+    use super::step::{Cache, Workspace};
+    let decay = |fold: &Fold, ws: &Workspace, g: &Mat, normal: &Mat| -> f64 {
+        let n = fold.size();
+        let es: Vec<usize> = (0..GROUND).collect();
+        let mut products = Mat::zeros(n, n);
+        for (o, b) in fold.blocks.iter().enumerate() {
+            let e = fold.amplitude(b, ws.response(o));
+            let rows = b.excited(fold);
+            for q in 0..3 {
+                let j = fold.emission[q].block(&es, &rows).product(&e).product(normal);
+                products.add_scaled(C64::ONE, &j.adjoint_product(&j));
+            }
+        }
+        let mut gap = Mat::from_fn(n, n, |i, j| C64::I * (g[(i, j)] - g[(j, i)].conj()));
+        let scale = g.frobenius().max(products.frobenius()).max(f64::MIN_POSITIVE);
+        gap.add_scaled(-C64::ONE, &products);
+        gap.max_abs() / scale
+    };
+    let (mut worst, mut worst_decay, mut compared) = (0.0_f64, 0.0_f64, 0);
+    let mut check = |fold: &Fold, r: [f64; 3], kappa: [f64; 3], what: &str| {
+        if fold.blocks.is_empty() {
+            return;
+        }
+        let Some(f) = fold.at(r, kappa, &mut Path::default()) else { return };
+        let mut ws = fold.workspace();
+        let s = fold.step(r, kappa, &mut Cache::default(), &mut ws).expect("the step where the fold is").clone_parts();
+        let scale = f.generator.frobenius().max(f.a.frobenius()).max(f64::MIN_POSITIVE);
+        let gap = |a: &Mat, b: &Mat| a.data.iter().zip(&b.data).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max);
+        let x = [gap(&s.0, &f.a) / scale, gap(&s.1, &f.metric) / f.metric.frobenius().max(f64::MIN_POSITIVE), gap(&s.2, &f.normal), gap(&s.3, &f.generator) / scale];
+        let d = decay(fold, &ws, &s.3, &s.2);
+        println!("{what}: n {}, passes {} / {}; A {:.1e}, metric {:.1e}, S⁻¹ {:.1e}, G {:.1e} (of their scales); the decay against its jumps {d:.1e}", f.n, s.4, f.passes, x[0], x[1], x[2], x[3]);
+        assert_eq!(s.4, f.passes, "{what}: the passes");
+        assert!(x.iter().all(|&g| g <= 1e-12), "{what}: the step against the fold");
+        assert!(d <= 1e-12, "{what}: the decay against the step's jumps");
+        worst = x.iter().fold(worst, |a, &b| a.max(b));
+        worst_decay = worst_decay.max(d);
+        compared += 1;
+    };
+    let mut state = 3u64;
+    for trial in 0..20 {
+        let (req, choice) = random_system(&mut state, trial);
+        for set in Fold::sets(&req, &choice).unwrap() {
+            let fold = Fold::new(&req, &choice, set[0]).unwrap();
+            check(&fold, [0.0; 3], [0.0; 3], &format!("trial {trial}, set {set:?}"));
+            check(&fold, [0.3, -0.1, 0.2], [2.0, -1.0, 3.0], &format!("trial {trial}, set {set:?}, moving"));
+        }
+    }
+    let (req, choice, ..) = r4(false);
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold = Fold::new(&req, &choice, set[0]).unwrap();
+        check(&fold, [0.1, -0.2, 0.3], [0.0; 3], &format!("R4_LIN_4 explicit, set {set:?}"));
+        check(&fold, [0.1, -0.2, 0.3], kappa_of(&fold), &format!("R4_LIN_4 explicit, set {set:?}, moving"));
+    }
+    let req = crate::model::testing::scene("R4_LIN_4");
+    let choice = rule(&req);
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold = Fold::new(&req, &choice, set[0]).unwrap();
+        check(&fold, [0.0; 3], kappa_of(&fold), &format!("R4_LIN_4 by the rule, set {set:?}"));
+        check(&fold, [0.4, 0.3, -0.5], kappa_of(&fold), &format!("R4_LIN_4 by the rule, set {set:?}, off the focus"));
+    }
+    println!("{compared} points: the step against the fold, worst {worst:.2e}; the decay against the step's jumps, worst {worst_decay:.2e}");
+    assert!(compared >= 40);
+}
+
+/// A run of the step over atoms' paths (`a_step_s_work_at_a_scene`): per step after each atom's first the mean work, its
+/// phases and the wall clock; the decompositions made and taken up; the passes, and the passes' work on two and on three;
+/// the largest reuse reading.
+struct Run {
+    work: f64,
+    wall: f64,
+    phases: Vec<(&'static str, f64)>,
+    made: usize,
+    looked: usize,
+    passes: [usize; 4],
+    third: f64,
+    second: f64,
+    reading: f64,
+}
+
+/// Atoms 0.2 µm about the focus, 100 steps each (random amplitudes, phases and periods about 15, 17 and 60 steps).
+fn thermal_paths(atoms: usize) -> Vec<Vec<[f64; 3]>> {
+    let mut seed = 1u64;
+    let mut u = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    (0..atoms)
+        .map(|_| {
+            let shape: Vec<(f64, f64, f64)> = (0..3).map(|a| (0.2 * u(), 2.0 * std::f64::consts::PI * u(), [15.0, 17.0, 60.0][a] * (0.8 + 0.4 * u()))).collect();
+            (0..100).map(|step| std::array::from_fn(|a| shape[a].0 * (2.0 * std::f64::consts::PI * step as f64 / shape[a].2 + shape[a].1).sin())).collect()
+        })
+        .collect()
+}
+
+/// The step over the paths at 0.1 m/s: one cache shared by the atoms (`current` cleared per atom); `fresh` a new cache
+/// every step, `own` a cache per atom.
+fn run_step(fold: &Fold, paths: &[Vec<[f64; 3]>], fresh: bool, own: bool) -> Run {
+    use super::step::Cache;
+    let kappa = kappa_of(fold);
+    let mut ws = fold.workspace();
+    let mut cache = Cache::default();
+    let (mut work, mut wall, mut count, mut made, mut looked, mut passes, mut reading) = (0.0, 0.0, 0usize, 0, 0, [0usize; 4], 0.0_f64);
+    let mut phases: Vec<(&'static str, f64)> = vec![];
+    let (mut third, mut second) = ((0.0, 0usize), (0.0, 0usize));
+    for path in paths {
+        if own {
+            made += cache.made;
+            looked += cache.looked;
+            cache = Cache::default();
+        }
+        cache.current.clear();
+        for (k, r) in path.iter().enumerate() {
+            if fresh {
+                made += cache.made;
+                cache = Cache::default();
+            }
+            let clock = std::time::Instant::now();
+            let s = fold.step(*r, kappa, &mut cache, &mut ws).expect("the step");
+            let t = clock.elapsed().as_secs_f64();
+            passes[s.passes] += 1;
+            reading = s.reuse.iter().fold(reading, |a, &b| a.max(b));
+            let p3 = s.phases[3].1;
+            if s.passes == 3 {
+                third = (third.0 + p3, third.1 + 1);
+            } else {
+                second = (second.0 + p3, second.1 + 1);
+            }
+            if k > 0 {
+                work += s.work;
+                wall += t;
+                count += 1;
+                for &(n, x) in &s.phases {
+                    match phases.iter_mut().find(|p| p.0 == n) {
+                        Some(p) => p.1 += x,
+                        None => phases.push((n, x)),
+                    }
+                }
+            }
+        }
+    }
+    made += cache.made;
+    looked += cache.looked;
+    let c = count as f64;
+    phases.iter_mut().for_each(|p| p.1 /= c);
+    Run { work: work / c, wall: wall / c, phases, made, looked, passes, third: third.0 / third.1.max(1) as f64, second: second.0 / second.1.max(1) as f64, reading }
+}
+
+fn show_run(what: &str, x: &Run) {
+    println!(
+        "   {what}: {:.0} a step ({}), {:.1} µs a step, {:.2} ns a multiply-add; made {}, taken up {}; passes two/three {}/{} (the passes' work {:.0} on two, {:.0} on three); the largest reuse reading {:.2e}",
+        x.work,
+        x.phases.iter().map(|(n, v)| format!("{n} {v:.0}")).collect::<Vec<_>>().join(", "),
+        1e6 * x.wall,
+        1e9 * x.wall / x.work,
+        x.made,
+        x.looked,
+        x.passes[2],
+        x.passes[3],
+        x.second,
+        x.third,
+        x.reading
+    );
+}
+
+/// The step's work along thermal paths in a scene and its devices with and without (not a test: B2's stage-1 measurement;
+/// STEP_SCENE a reference scene's name or a native request's path; STEP_ATOMS the atoms, 20 by default; run it
+/// single-threaded). The scene's tiers (`tiers`); per set, atoms 0.2 µm about the focus at 0.1 m/s, 100 steps each, one
+/// after another on one shared `Cache` (`run_step`). Then on the same paths each device taken away alone: no reuse (a fresh
+/// cache every step), no sharing (a cache per atom), the lines joined (one excited part), every copy exact; and `Fold::at`
+/// on its own shared `Path` (the object's B1 evaluation: its wall clock per counted multiply-add against the step's, the
+/// fixed workspace's).
+#[test]
+#[ignore]
+fn a_step_s_work_at_a_scene() {
+    let name = std::env::var("STEP_SCENE").expect("STEP_SCENE");
+    let atoms: usize = std::env::var("STEP_ATOMS").map_or(20, |x| x.parse().unwrap());
+    let req = crate::model::testing::scene(&name);
+    let share = super::super::elim::share();
+    let choice = tiers(&req, &name);
+    let ps = parts(&req);
+    let paths = thermal_paths(atoms);
+    let exact = Choice { copies: all_copies(&ps, Status::Decomposed), ..choice.clone() };
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold = Fold::new(&req, &choice, set[0]).unwrap();
+        if fold.blocks.is_empty() {
+            continue;
+        }
+        let rows: Vec<String> = fold.blocks.iter().map(|b| format!("{}/{}", b.rows.len(), b.solved)).collect();
+        println!("{name} set {set:?}: n {}, {} blocks (rows/solved {rows:?}), {atoms} atoms × 100 steps, share {share:.4}", fold.size(), fold.blocks.len());
+        show_run("B2 (the step)", &run_step(&fold, &paths, false, false));
+        show_run("no reuse (a fresh cache every step)", &run_step(&fold, &paths, true, false));
+        show_run("no sharing (a cache per atom)", &run_step(&fold, &paths, false, true));
+        let mut joined = Fold::new(&req, &choice, set[0]).unwrap();
+        joined.part_of = vec![0; EXCITED];
+        show_run("the lines joined (one excited part)", &run_step(&joined, &paths, false, false));
+        let all = Fold::new(&req, &exact, set[0]).unwrap();
+        show_run("every copy exact", &run_step(&all, &paths, false, false));
+        let kappa = kappa_of(&fold);
+        let mut path = Path::default();
+        let (mut work, mut wall, mut count) = (0.0, 0.0, 0usize);
+        for p in &paths {
+            path.current.clear();
+            for (k, r) in p.iter().enumerate() {
+                let clock = std::time::Instant::now();
+                let f = fold.at(*r, kappa, &mut path).unwrap();
+                let t = clock.elapsed().as_secs_f64();
+                if k > 0 {
+                    work += f.work;
+                    wall += t;
+                    count += 1;
+                }
+            }
+        }
+        let c = count as f64;
+        println!("   Fold::at (B1, allocating): {:.0} a step, {:.1} µs a step, {:.2} ns a multiply-add; made {}", work / c, 1e6 * wall / c, 1e9 * wall / work, path.made);
+    }
 }

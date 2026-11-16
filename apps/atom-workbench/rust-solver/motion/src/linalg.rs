@@ -683,6 +683,21 @@ pub fn hermitian_eigen(h: &Mat) -> Hermitian {
     Hermitian { values: order.iter().map(|&i| a[(i, i)].re).collect(), vectors: Mat::from_fn(n, n, |i, k| u[(i, order[k])]) }
 }
 
+/// `hermitian_eigen` in place, asking the heap for nothing: `a` (n × n, row by row) becomes its Hermitian part's diagonal
+/// form (the eigenvalues on its diagonal, unordered), `u` its eigenvectors' columns.
+pub(crate) fn hermitian_in_place(a: &mut [C64], u: &mut [C64], n: usize) {
+    for i in 0..n {
+        for j in i..n {
+            let x = (a[i * n + j] + a[j * n + i].conj()) * 0.5;
+            a[i * n + j] = x;
+            a[j * n + i] = x.conj();
+        }
+    }
+    u.fill(C64::ZERO);
+    (0..n).for_each(|i| u[i * n + i] = C64::ONE);
+    jacobi(a, u, n);
+}
+
 /// A = R diag(λ) R⁻¹ of a general square matrix: the eigenvalues (in the complex Schur form's order), R with columns
 /// of unit 2-norm, R⁻¹, and the condition κ(R) = ‖R‖₁‖R⁻¹‖₁, which bounds what is computed through the
 /// decomposition: e^{tA}v through it errs by about κ(R)·u·(1 + |t|·(max Re λ − min Re λ)) relative to ‖v‖,
