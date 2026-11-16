@@ -1441,9 +1441,14 @@ fn the_step_is_the_fold_at_a_point_to_rounding() {
         let d = decay(fold, &ws, &s.3, &s.2);
         println!("{what}: n {}, passes {} / {}; A {:.1e}, metric {:.1e}, S⁻¹ {:.1e}, G {:.1e} (of their scales); the decay against its jumps {d:.1e}", f.n, s.4, f.passes, x[0], x[1], x[2], x[3]);
         assert_eq!(s.4, f.passes, "{what}: the passes");
-        // To 1e-10 of their scales: one Schur form holds both lines, 4.4e7 rad/µs apart, so its eigenvalues are ε‖K‖ ~ 3e-8
-        // rad/µs exact, and the two evaluations' different roundings of K move T by that over Γ.
-        assert!(x.iter().all(|&g| g <= 1e-10), "{what}: the step against the fold");
+        // The floor, derived: one Schur form holds both lines (4.4e7 rad/µs apart in R4_LIN_4), so its eigenvalues are only
+        // ε‖K‖ exact (‖K‖ ~ 1.3e8 rad/µs: ~3e-8 rad/µs); the two evaluations round K differently, which moves a resonant
+        // response by that over its distance Γ/2 -- relative ε‖K‖/(Γ/2); and 1e-12 below it (the passes' and the exact
+        // copies' own conditioning, the per-line era's worst 2.7e-13).
+        let k_max = f.laid.iter().flat_map(|l| (0..l.inner.rows).map(move |i| l.inner[(i, i)].abs())).fold(0.0_f64, f64::max);
+        let gamma = (0..EXCITED).map(|x| -2.0 * fold.base_excited[(x, x)].im).filter(|&g| g > 0.0).fold(f64::INFINITY, f64::min);
+        let floor = (f64::EPSILON * k_max / (0.5 * gamma)).max(1e-12);
+        assert!(x.iter().all(|&g| g <= floor), "{what}: the step against the fold beyond the floor {floor:.1e}");
         assert!(d <= 1e-12, "{what}: the decay against the step's jumps");
         worst = x.iter().fold(worst, |a, &b| a.max(b));
         worst_decay = worst_decay.max(d);

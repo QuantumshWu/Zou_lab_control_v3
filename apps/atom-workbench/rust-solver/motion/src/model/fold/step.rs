@@ -71,7 +71,7 @@ struct Term {
     at: C64,
     diag: Vec<C64>,
     norms: Vec<f64>,
-    frozen: f64,
+    ck: Vec<f64>,
 }
 
 /// A kept decomposition (module documentation, 2): its key; K kept at its reference (x coordinates, the exact copies'
@@ -88,15 +88,12 @@ struct Basis {
     part: Vec<usize>,
     places: Vec<(usize, usize, usize)>,
     terms: Vec<Term>,
-    r0: Mat,
-    z0: f64,
-    r0_norms: Vec<f64>,
-    excited: Vec<bool>,
+    fc: Factored,
+    cplaces: Vec<(usize, usize, usize)>,
+    cdrop: Vec<f64>,
     cc: Vec<C64>,
-    component: Vec<usize>,
-    components: usize,
-    x: Mat,
-    y: Mat,
+    ph: Mat,
+    qy: Mat,
     dressing: Vec<C64>,
     hdd: Mat,
     vd: Mat,
@@ -160,8 +157,13 @@ struct Lay {
     coefficients: Vec<C64>,
     off: Vec<f64>,
     rho: Vec<f64>,
-    factor: Vec<f64>,
-    dr0: Vec<f64>,
+    mu: Vec<C64>,
+    ek: Vec<f64>,
+    g: f64,
+    z0: f64,
+    p: Mat,
+    ub: Mat,
+    wb: Mat,
     shifts: Vec<f64>,
     live: Vec<bool>,
     b: Vec<Mat>,
@@ -180,7 +182,6 @@ struct Lay {
     coupling: Mat,
     back: Mat,
     b0: Mat,
-    r0b: Mat,
     u: Mat,
     tc: Mat,
     t: Mat,
@@ -190,10 +191,10 @@ struct Lay {
     sizes: Vec<f64>,
     err: Vec<f64>,
     norms: Vec<f64>,
-    dx: Vec<f64>,
-    xr: Vec<f64>,
     yb: Vec<f64>,
     dyb: Vec<f64>,
+    qy: Mat,
+    scols: Vec<usize>,
     column: Column,
     reading: f64,
 }
@@ -241,6 +242,7 @@ pub(crate) struct Workspace {
     vectors: Mat,
     temp: Mat,
     whole: Vec<f64>,
+    whole_x: Vec<f64>,
     renew: Vec<(Vec<Row>, Option<usize>)>,
     step: Step,
 }
@@ -581,8 +583,13 @@ impl Fold {
                 coefficients: vec![],
                 off: vec![0.0; s * s.max(1)],
                 rho: vec![0.0; s],
-                factor: vec![0.0; nc.max(1)],
-                dr0: vec![0.0; nc.max(1)],
+                mu: vec![C64::ZERO; nc],
+                ek: vec![0.0; nc],
+                g: 0.0,
+                z0: 0.0,
+                p: z(s, nc),
+                ub: z(nc, n),
+                wb: z(nc, n),
                 bu: z(s, n),
                 ztot: z(s, n),
                 zx: z(s, n),
@@ -596,7 +603,6 @@ impl Fold {
                 coupling: z(ne, nd),
                 back: z(nd, ne),
                 b0: z(m, n),
-                r0b: z(nc, n),
                 u: z(nc, n),
                 tc: z(nc, n),
                 t: z(m, n),
@@ -606,10 +612,10 @@ impl Fold {
                 sizes: vec![0.0; n],
                 err: vec![0.0; s * n],
                 norms: vec![0.0; s.max(1)],
-                dx: vec![0.0; nc.max(1)],
-                xr: vec![0.0; nc.max(1)],
                 yb: vec![0.0; s.max(1) * nc.max(1)],
                 dyb: vec![0.0; s.max(1) * nc.max(1)],
+                qy: z(nc, s),
+                scols: (0..s).collect(),
                 column: Column { r: vec![C64::ZERO; s], p: z(nd, ne), pv: vec![C64::ZERO; ne], schur: vec![C64::ZERO; nd * nd], pivots: vec![0; nd], y: vec![C64::ZERO; ne], x: vec![C64::ZERO; nd], out: vec![C64::ZERO; s] },
                 reading: 0.0,
             });
@@ -660,6 +666,7 @@ impl Fold {
             vectors: z(n, n),
             temp: z(n, n),
             whole: vec![0.0; n],
+            whole_x: vec![0.0; n],
             renew: Vec::with_capacity(self.blocks.len() * 3),
             step: Step { a: z(n, n), metric: z(n, n), normal: z(n, n), generator: z(n, n), passes: 0, ratio: 0.0, reuse: vec![0.0; self.blocks.len()], first: vec![0.0; self.blocks.len()], work: 0.0, phases: [("place", 0.0), ("select", 0.0), ("prepare", 0.0), ("passes", 0.0), ("reading", 0.0), ("compression", 0.0)] },
         }
@@ -872,10 +879,12 @@ impl Fold {
         // The outside forms' terms: on the solved excited rows, and on the frozen centred excited rows (δM's norm).
         let row_of: Vec<Option<usize>> = (0..EXCITED).map(|x| b.rows.iter().position(|r| *r == Row::Excited(x))).collect();
         let mut terms = vec![];
+        let mut centred_forms = vec![];
         for (w, list) in self.entries.iter().enumerate() {
             for (p, q, entries) in list {
                 let mut mm = Mat::zeros(s, s);
-                let (mut any, mut frozen) = (false, 0.0);
+                let mut mc = Mat::zeros(nc, nc);
+                let (mut any, mut centred) = (false, false);
                 for &(i, j, v) in entries {
                     if i >= GROUND && j >= GROUND {
                         if let (Some(a), Some(c)) = (row_of[i - GROUND], row_of[j - GROUND]) {
@@ -883,52 +892,24 @@ impl Fold {
                                 mm[(a, c)] = v;
                                 any = true;
                             } else if a >= s && c >= s {
-                                frozen += v.norm_sqr();
+                                mc[(a - s, c - s)] = v;
+                                centred = true;
                             }
                         }
                     }
                 }
-                if !any && frozen == 0.0 {
+                if !any && !centred {
                     continue;
                 }
                 let t = rotate(&mm, work);
                 let field = &ws.fields[w];
-                terms.push(Term { w, p: *p, q: *q, at: field[*p].conj() * field[*q], diag: (0..s).map(|i| t[(i, i)]).collect(), norms: norms_of(&t), frozen: frozen.sqrt() });
+                terms.push(Term { w, p: *p, q: *q, at: field[*p].conj() * field[*q], diag: (0..s).map(|i| t[(i, i)]).collect(), norms: norms_of(&t), ck: vec![] });
+                centred_forms.push(mc);
             }
         }
         // The frozen centred rows: their H_GG slots' values, their connected components (R₀'s blocks).
         let cc: Vec<C64> = l.frozen.iter().map(|&k| inner[(l.inner[k].row, l.inner[k].col)]).collect();
-        let mut component: Vec<usize> = (0..nc).collect();
-        fn find(c: &mut [usize], mut x: usize) -> usize {
-            while c[x] != x {
-                c[x] = c[c[x]];
-                x = c[x];
-            }
-            x
-        }
-        for x in l.inner.iter().filter(|x| x.row >= s && x.col >= s && x.row != x.col) {
-            let (a, c) = (find(&mut component, x.row - s), find(&mut component, x.col - s));
-            component[a.max(c)] = a.min(c);
-        }
-        let mut roots: Vec<usize> = vec![];
-        for a in 0..nc {
-            let r = find(&mut component, a);
-            component[a] = match roots.iter().position(|&x| x == r) {
-                Some(k) => k,
-                None => {
-                    roots.push(r);
-                    roots.len() - 1
-                }
-            };
-        }
-        // The dressing at the reference: X = V†Ĥ_SC R₀, Y = Ĥ_CS V, diag(XY).
         let (ss, cs): (Vec<usize>, Vec<usize>) = ((0..s).collect(), (s..m).collect());
-        let (x, y) = if s > 0 && nc > 0 {
-            (mul(&factored.to(&inner.block(&ss, &cs), work), &r0, work), factored.to(&inner.block(&cs, &ss).adjoint(), work).adjoint())
-        } else {
-            (Mat::zeros(s, nc), Mat::zeros(nc, s))
-        };
-        let dressing: Vec<C64> = (0..s).map(|i| (0..nc).map(|c| x[(i, c)] * y[(c, i)]).sum()).collect();
         let ds: Vec<usize> = (ne..s).collect();
         let hdd = inner.block(&ds, &ds);
         let mut vd = Mat::zeros(nd, nd);
@@ -939,15 +920,54 @@ impl Fold {
                 }
             }
         }
-        let mut r0_norms = vec![0.0; roots.len()];
-        let mut excited = vec![false; roots.len()];
-        for a in 0..nc {
-            for c in (0..nc).filter(|&c| component[c] == component[a]) {
-                r0_norms[component[a]] += r0[(a, c)].norm_sqr();
+        // The centred block kept the same way as the solved one: Ĥ_CC = U T U† (Schur, part by part) at the reference,
+        // R₀(z₀) = U (z₀ − T)⁻¹ U† at any z₀ -- z₀ moves T's diagonal alone, exactly; each term's rows in that basis,
+        // ‖(U†M_tU)_k‖ (the reading of its change).
+        let fc = Factored::of(&inner.block(&cs, &cs), work)?;
+        let mut cplaces = vec![(0, 0, 0); nc];
+        for (pi, (idx, at, _)) in fc.parts.iter().enumerate() {
+            for (a, &i) in idx.iter().enumerate() {
+                cplaces[i] = (pi, *at, a);
             }
-            excited[component[a]] |= matches!(b.rows[s + a], Row::Excited(_));
         }
-        r0_norms.iter_mut().for_each(|x| *x = x.sqrt());
+        for (t, mc) in terms.iter_mut().zip(&centred_forms) {
+            t.ck = if nc > 0 && mc.data.iter().any(|z| *z != C64::ZERO) {
+                let e = fc.to(&fc.to(mc, work).adjoint(), work).adjoint();
+                (0..nc).map(|k| (0..nc).map(|c| e[(k, c)].norm_sqr()).sum::<f64>().sqrt()).collect()
+            } else {
+                vec![0.0; nc]
+            };
+        }
+        // Per row of the Schur basis what the form dropped there (U†Ĥ_CC U less the kept triangle).
+        let cdrop: Vec<f64> = if nc > 0 {
+            let full = fc.to(&fc.to(&inner.block(&cs, &cs), work).adjoint(), work).adjoint();
+            (0..nc).map(|k| (0..nc).map(|c| (full[(k, c)] - fc.t[(k, c)]).norm_sqr()).sum::<f64>().sqrt()).collect()
+        } else {
+            vec![]
+        };
+        // The dressing at the reference in the centred block's Schur basis: P̂ = X₀U(z₀ − T)⁻¹ (X₀ = V†Ĥ_SC), Q = U†Y
+        // (Y = Ĥ_CS V), its diagonal Σ_k P̂_ik Q_ki.
+        let (mut ph, mut qy) = (Mat::zeros(s, nc), Mat::zeros(nc, s));
+        if s > 0 && nc > 0 {
+            let x0 = factored.to(&inner.block(&ss, &cs), work);
+            let y = factored.to(&inner.block(&cs, &ss).adjoint(), work).adjoint();
+            let xu = fc.to(&x0.adjoint(), work).adjoint();
+            let mu: Vec<C64> = (0..nc).map(|k| C64::real(z0) - fc.t[(k, k)]).collect();
+            for i in 0..s {
+                for k in 0..nc {
+                    let mut acc = xu[(i, k)];
+                    for j in 0..k {
+                        if fc.ends[j] > k {
+                            acc += ph[(i, j)] * fc.t[(j, k)];
+                        }
+                    }
+                    ph[(i, k)] = acc / mu[k];
+                }
+            }
+            qy = fc.to(&y, work);
+        }
+        let dressing: Vec<C64> = (0..s).map(|i| (0..nc).map(|k| ph[(i, k)] * qy[(k, i)]).sum()).collect();
+        let _ = &r0;
         Some(Basis {
             rows,
             own: (b.rows.len() > s || nd > 0).then_some(o),
@@ -956,15 +976,12 @@ impl Fold {
             part,
             places,
             terms,
-            r0,
-            z0,
-            r0_norms,
-            excited,
+            fc,
+            cplaces,
+            cdrop,
             cc,
-            component,
-            components: roots.len(),
-            x,
-            y,
+            ph,
+            qy,
             dressing,
             hdd,
             vd,
@@ -997,14 +1014,12 @@ impl Fold {
                 l.off[i * parts + g] = if g == basis.part[i] { fa.dropped[g] } else { 0.0 };
             }
         }
-        let mut frozen_change = 0.0;
         for (t, c) in basis.terms.iter().zip(&l.coefficients) {
             let d = *c - t.at;
             if d == C64::ZERO {
                 continue;
             }
             let delta = d.abs();
-            frozen_change += delta * t.frozen;
             for i in 0..s {
                 l.kappa[i] += d * t.diag[i];
                 for g in 0..parts {
@@ -1016,8 +1031,10 @@ impl Fold {
         // The centred rows at the point: X₀ = V†Ĥ_SC, Y = Ĥ_CS V (slots), X = X₀R₀; the dressing's diagonal exactly, its
         // rest by Cauchy–Schwarz component by component; R₀'s own change since the reference.
         l.rho.iter_mut().for_each(|x| *x = 0.0);
-        l.factor.iter_mut().for_each(|x| *x = 0.0);
-        l.dr0.iter_mut().for_each(|x| *x = 0.0);
+        l.z0 = z0;
+        for k in 0..nc {
+            l.mu[k] = C64::real(z0) - basis.fc.t[(k, k)];
+        }
         if nc > 0 && s > 0 {
             l.x0.data.fill(C64::ZERO);
             l.y.data.fill(C64::ZERO);
@@ -1038,79 +1055,117 @@ impl Fold {
                     *work += u.cols as f64;
                 }
             }
-            product(&mut l.x, &l.x0, &basis.r0, false, work);
-            // The excited rows' (the exact copies' own rows move by their change whole, below).
+            // X = X₀R₀ = X₀U (z₀ − T)⁻¹ U†, row by row: P = X₀U, P̂ = P(z₀ − T)⁻¹ (kept: the reading's), X = P̂U†.
+            let fc = &basis.fc;
+            for i in 0..s {
+                for (idx, at, u) in &fc.parts {
+                    for bb in 0..idx.len() {
+                        l.p[(i, at + bb)] = idx.iter().enumerate().map(|(a, &c)| l.x0[(i, c)] * u[(a, bb)]).sum();
+                    }
+                }
+                for k in 0..nc {
+                    let mut acc = l.p[(i, k)];
+                    for j in 0..k {
+                        if fc.ends[j] > k {
+                            acc += l.p[(i, j)] * fc.t[(j, k)];
+                        }
+                    }
+                    l.p[(i, k)] = acc / l.mu[k];
+                }
+                for (idx, at, u) in &fc.parts {
+                    for (a, &c) in idx.iter().enumerate() {
+                        l.x[(i, c)] = (0..idx.len()).map(|bb| l.p[(i, at + bb)] * u[(a, bb)].conj()).sum();
+                    }
+                }
+            }
+            *work += (s * (2 * fc.parts.iter().map(|x| x.0.len() * x.0.len()).sum::<usize>() + nc * nc / 2)) as f64;
+            // Q = U†Y; the dressing's diagonal Σ_k P̂_ik Q_ki exactly (the excited rows'; the exact copies' own rows move by
+            // their change whole, below), its rest by Cauchy–Schwarz over the centred block's Schur parts c:
+            // ‖δP̂_ic‖ ‖Q_c[:, P]‖ + ‖P̂_ref,ic‖ ‖δQ_c[:, P]‖.
+            to_cols(&basis.fc, &l.y, &l.scols, &mut l.qy, work);
             for i in 0..ne {
-                let d: C64 = (0..nc).map(|c| l.x[(i, c)] * l.y[(c, i)]).sum();
+                let d: C64 = (0..nc).map(|k| l.p[(i, k)] * l.qy[(k, i)]).sum();
                 l.kappa[i] += d - basis.dressing[i];
             }
             *work += (ne * nc) as f64;
-            // Per centred component b and part P: ‖Y_b[:, P]‖ and ‖δY_b[:, P]‖; per row ‖δX_ib‖ and ‖X_ref,ib‖.
-            let comps = basis.components;
+            let cparts = &basis.fc.parts;
             l.yb.iter_mut().for_each(|x| *x = 0.0);
             l.dyb.iter_mut().for_each(|x| *x = 0.0);
-            for c in 0..nc {
-                for j in 0..s {
-                    let k = basis.component[c] * parts + basis.part[j];
-                    l.yb[k] += l.y[(c, j)].norm_sqr();
-                    l.dyb[k] += (l.y[(c, j)] - basis.y[(c, j)]).norm_sqr();
+            for (ci, (idx, at, _)) in cparts.iter().enumerate() {
+                for k in *at..at + idx.len() {
+                    for j in 0..s {
+                        let slot = ci * parts + basis.part[j];
+                        l.yb[slot] += l.qy[(k, j)].norm_sqr();
+                        l.dyb[slot] += (l.qy[(k, j)] - basis.qy[(k, j)]).norm_sqr();
+                    }
                 }
             }
             l.yb.iter_mut().chain(l.dyb.iter_mut()).for_each(|x| *x = x.sqrt());
             for i in 0..s {
-                l.dx.iter_mut().for_each(|x| *x = 0.0);
-                l.xr.iter_mut().for_each(|x| *x = 0.0);
-                for c in 0..nc {
-                    l.dx[basis.component[c]] += (l.x[(i, c)] - basis.x[(i, c)]).norm_sqr();
-                    l.xr[basis.component[c]] += basis.x[(i, c)].norm_sqr();
-                }
-                for b in 0..comps {
-                    let (dxi, xri) = (l.dx[b].sqrt(), l.xr[b].sqrt());
+                for (ci, (idx, at, _)) in cparts.iter().enumerate() {
+                    let (mut dxi, mut xri) = (0.0, 0.0);
+                    for k in *at..at + idx.len() {
+                        dxi += (l.p[(i, k)] - basis.ph[(i, k)]).norm_sqr();
+                        xri += basis.ph[(i, k)].norm_sqr();
+                    }
+                    let (dxi, xri) = (dxi.sqrt(), xri.sqrt());
                     for g in 0..parts {
-                        l.off[i * parts + g] += dxi * l.yb[b * parts + g] + xri * l.dyb[b * parts + g];
+                        l.off[i * parts + g] += dxi * l.yb[ci * parts + g] + xri * l.dyb[ci * parts + g];
                     }
                 }
             }
-            *work += (s * nc * 2 + s * comps * parts) as f64;
+            *work += (s * nc * 3 + s * cparts.len() * parts) as f64;
         }
+        l.g = 0.0;
         if nc > 0 {
-            // δM_b, the change of z₀ − Ĥ_CC on each centred component: the frozen H_GG slots exactly, the excited rows' z₀
-            // shift exactly and their forms by the terms. Then per component δR₀_b ≤ ‖R₀_b‖²‖δM_b‖/(1 − ‖R₀_b‖‖δM_b‖) and
-            // the factor ‖R₀_b‖‖δM_b‖/(1 − ‖R₀_b‖‖δM_b‖) of its own rows' change, δT_C,b = R₀_b δM_b T_C,b to first order.
-            let dz = z0 - basis.z0;
-            let comps = basis.components;
-            let dm = &mut l.factor;
-            for (k, &si) in l.frozen.iter().enumerate() {
-                let x = &l.inner[si];
-                let shift = if x.row == x.col { C64::real(dz) } else { C64::ZERO };
-                dm[basis.component[x.row - s]] += (shift - (x.value - basis.cc[k])).norm_sqr();
-            }
-            for a in 0..nc {
-                if matches!(self.blocks[o].rows[s + a], Row::Excited(_)) {
-                    dm[basis.component[a]] += dz * dz;
-                }
-            }
-            for b in 0..comps {
-                let d = dm[b].sqrt() + if basis.excited[b] { frozen_change } else { 0.0 };
-                let q = basis.r0_norms[b] * d;
-                let (factor, dr0) = if d == 0.0 { (0.0, 0.0) } else if q < 1.0 { (q / (1.0 - q), basis.r0_norms[b] * q / (1.0 - q)) } else { (f64::INFINITY, f64::INFINITY) };
-                dm[b] = factor;
-                l.dr0[b] = dr0;
-            }
-            if s > 0 && l.dr0[..comps].iter().any(|&x| x > 0.0) {
-                // Through the dressing: ρ_i = Σ_b ‖(V†Ĥ_SC)_i,b‖ δR₀_b ‖Y_b‖.
-                l.dx.iter_mut().for_each(|x| *x = 0.0);
-                for c in 0..nc {
-                    l.dx[basis.component[c]] += (0..s).map(|j| l.y[(c, j)].norm_sqr()).sum::<f64>();
-                }
-                for i in 0..s {
-                    l.xr.iter_mut().for_each(|x| *x = 0.0);
-                    for c in 0..nc {
-                        l.xr[basis.component[c]] += l.x0[(i, c)].norm_sqr();
+            // The centred block's own change since the reference (z₀'s is exact above), in its Schur basis: row k of
+            // E = U†(Ĥ_CC − Ĥ_CC,ref)U at most e_k = Σ_t |δc_t| ‖(U†M_tU)_k‖ + Σ_slots |δ| |U_ak|. To first order it moves the
+            // centred rows by U R E R U†v (R = (z₀ − T)⁻¹, its diagonal's distances μ as the solved rows' reading takes them):
+            // per Schur part P (E is block diagonal by them) ‖δT_C,P,j‖ ≤ (Σ_k∈P (e_k/|μ_k|)²)^½ ‖U†T_C,P,j‖; and the dressing on
+            // the solved rows by ρ_i = Σ_P (Σ_k∈P |P̂_ik| e_k) (Σ_m∈P (q_m/|μ_m|)²)^½, q_m mode m's coupling to them.
+            // What the Schur form dropped (within its rounding) is the remainder's at the reference already, row by row.
+            l.ek.copy_from_slice(&basis.cdrop);
+            for (t, c) in basis.terms.iter().zip(&l.coefficients) {
+                let d = (*c - t.at).abs();
+                if d > 0.0 {
+                    for k in 0..nc {
+                        l.ek[k] += d * t.ck[k];
                     }
-                    l.rho[i] = (0..comps).map(|b| if l.dr0[b] == 0.0 { 0.0 } else { l.xr[b].sqrt() * l.dr0[b] * l.dx[b].sqrt() }).sum();
                 }
-                *work += (2 * s * nc) as f64;
+            }
+            for (k2, &si) in l.frozen.iter().enumerate() {
+                let x = &l.inner[si];
+                let d = (x.value - basis.cc[k2]).abs();
+                if d > 0.0 {
+                    let (pi, at, a) = basis.cplaces[x.row - s];
+                    let u = &basis.fc.parts[pi].2;
+                    for bb in 0..u.cols {
+                        l.ek[at + bb] += d * u[(a, bb)].abs();
+                    }
+                }
+            }
+            *work += (nc * (basis.terms.len() + l.frozen.len())) as f64;
+            l.g = l.ek.iter().fold(0.0_f64, |a, &b| a.max(b));
+            if s > 0 && l.g > 0.0 {
+                // E is block diagonal by the Schur parts: per part P, ρ_i += (Σ_k∈P |P̂_ik| e_k) (Σ_m∈P (q_m/|μ_m|)²)^½,
+                // q_m ≤ Σ_c∈P |U_cm| ‖Y_c‖ (mode m's coupling to the solved rows).
+                let fc = &basis.fc;
+                for (idx, at, u) in &fc.parts {
+                    let mut qp = 0.0;
+                    for bb in 0..idx.len() {
+                        let q: f64 = idx.iter().enumerate().map(|(a, &c)| u[(a, bb)].abs() * (0..s).map(|j| l.y[(c, j)].norm_sqr()).sum::<f64>().sqrt()).sum();
+                        qp += (q / l.mu[at + bb].abs()).powi(2);
+                    }
+                    let qp = qp.sqrt();
+                    if qp == 0.0 {
+                        continue;
+                    }
+                    for i in 0..s {
+                        let a: f64 = (0..idx.len()).map(|bb| l.p[(i, at + bb)].abs() * l.ek[at + bb]).sum();
+                        l.rho[i] += a * qp;
+                    }
+                }
+                *work += (2 * s * nc + nc * s) as f64;
             }
         }
         // The exact copies: their own rows' change V_D†δK_DD V_D, their couplings with the excited rows at the point,
@@ -1145,7 +1200,7 @@ impl Fold {
                 for j in 0..nd {
                     let mut v: C64 = (0..nd).map(|a| l.left[(i, a)] * basis.vd[(a, j)]).sum();
                     if nc > 0 {
-                        v += (0..nc).map(|c| l.x[(ne + i, c)] * l.y[(c, ne + j)] - basis.x[(ne + i, c)] * basis.y[(c, ne + j)]).sum::<C64>();
+                        v += (0..nc).map(|k| l.p[(ne + i, k)] * l.qy[(k, ne + j)] - basis.ph[(ne + i, k)] * basis.qy[(k, ne + j)]).sum::<C64>();
                     }
                     l.dkdd[(i, j)] = v;
                 }
@@ -1249,7 +1304,12 @@ impl Fold {
                 *a += *b;
             }
         }
-        product(&mut l.r0b, &basis.r0, &l.u, false, work);
+        // (z₀ − T)⁻¹U†B_C: the centred rows' source at z₀ in their Schur basis.
+        if nc > 0 {
+            let all: Vec<usize> = (0..n).collect();
+            to_cols(&basis.fc, &l.u, &all, &mut l.ub, work);
+            back_cols(&basis.fc, &l.mu, &mut l.ub, work);
+        }
         // The static emission's rows from the solved rows in the basis, Ê = E_S V.
         l.est.data.fill(C64::ZERO);
         for x in l.emit.iter().filter(|x| x.col < s) {
@@ -1269,6 +1329,7 @@ impl Fold {
         let n = self.size();
         let Workspace { blocks, h, tri, u, rhs, bloch, beams, hpp, .. } = ws;
         let th: &Mat = if diagonal { h } else { tri };
+        let all: Vec<usize> = (0..n).collect();
         for l in blocks.iter_mut() {
             let basis = &cache.bases[l.basis];
             let fa = &basis.factored;
@@ -1321,13 +1382,15 @@ impl Fold {
             } else {
                 product_adj(&mut l.zx, &l.ztot, u, work);
             }
-            // T_C = R₀(Y Z + B_C) = R₀ Y Z + R₀B_C.
+            // T_C = R₀(Y Z + B_C) = U[(z₀ − T)⁻¹U†Y Z + (z₀ − T)⁻¹U†B_C].
             if l.nc > 0 {
                 product(&mut l.u, &l.y, &l.zx, false, work);
-                product(&mut l.tc, &basis.r0, &l.u, false, work);
-                for (a, b) in l.tc.data.iter_mut().zip(&l.r0b.data) {
+                to_cols(&basis.fc, &l.u, &all, &mut l.wb, work);
+                back_cols(&basis.fc, &l.mu, &mut l.wb, work);
+                for (a, b) in l.wb.data.iter_mut().zip(&l.ub.data) {
                     *a += *b;
                 }
+                from_rows(&basis.fc, &l.wb, &mut l.tc, work);
             }
             for j in 0..n {
                 l.sizes[j] = (0..s).map(|k| l.ztot[(k, j)].norm_sqr()).sum();
@@ -1406,10 +1469,14 @@ impl Fold {
     /// copies' absolute (a population's).
     fn reuse_reading(&self, cache: &Cache, ws: &mut Workspace, diagonal: bool, work: &mut f64) {
         let n = self.size();
-        let Workspace { blocks, h, tri, whole, .. } = ws;
+        let Workspace { blocks, h, tri, whole, whole_x, .. } = ws;
         let th: &Mat = if diagonal { h } else { tri };
         for j in 0..n {
-            whole[j] = blocks.iter().map(|l| l.sizes[j]).sum();
+            // A column's whole excited response: the solved rows' and the centred excited rows' (x columns).
+            let centred: f64 = blocks.iter().map(|l| (0..l.nce).map(|a| l.tc[(a, j)].norm_sqr()).sum::<f64>()).sum();
+            whole[j] = blocks.iter().map(|l| l.sizes[j]).sum::<f64>() + centred;
+            // The same in the x columns (the centred rows' own change pairs with these).
+            whole_x[j] = blocks.iter().map(|l| (0..l.s).map(|k| l.zx[(k, j)].norm_sqr()).sum::<f64>()).sum::<f64>() + centred;
         }
         let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
         for l in blocks.iter_mut() {
@@ -1439,23 +1506,30 @@ impl Fold {
                     *work += (s * (2 + parts)) as f64;
                 }
             }
-            let comps = basis.components;
+            // The centred rows' own change, column by column in the x columns: g ‖U†T_C,j‖, an excited one's relative to the
+            // column's whole response, copies' absolute.
+            let mut frozen = 0.0_f64;
+            if l.g > 0.0 {
+                let fc = &basis.fc;
+                for j in (0..n).filter(|&j| whole_x[j] > floor) {
+                    // Part by part: δt̃_k ≤ e_k ‖t̃_P,j‖ / |μ_k| (E block diagonal by the parts).
+                    let mut size = 0.0;
+                    for (idx, at, _) in &fc.parts {
+                        let tp: f64 = (*at..at + idx.len()).map(|k| l.wb[(k, j)].norm_sqr()).sum();
+                        if tp > 0.0 {
+                            size += tp * (*at..at + idx.len()).map(|k| (l.ek[k] / l.mu[k].abs()).powi(2)).sum::<f64>();
+                        }
+                    }
+                    frozen = frozen.max(size * (if l.nce > 0 { 1.0 / whole_x[j] } else { 0.0 } + if l.nc > l.nce { 1.0 } else { 0.0 }));
+                }
+                *work += (l.nc * n) as f64;
+            }
             let mut worst = 0.0_f64;
             for j in (0..n).filter(|&j| whole[j] > floor) {
                 let e2: f64 = (0..s).map(|i| l.err[i * n + j].powi(2)).sum();
                 // The centred rows' own change per component: an excited one's relative to the column's whole response, a
                 // copies' absolute.
-                l.norms.iter_mut().for_each(|x| *x = 0.0);
-                let mut f2 = 0.0;
-                if l.factor[..comps.min(l.factor.len())].iter().any(|&x| x > 0.0) {
-                    for b in 0..comps {
-                        let size: f64 = (0..l.nc).filter(|&a| basis.component[a] == b).map(|a| l.tc[(a, j)].norm_sqr()).sum();
-                        if size > 0.0 {
-                            f2 += (l.factor[b] * l.factor[b] * size) * if basis.excited[b] { 1.0 / whole[j] } else { 1.0 };
-                        }
-                    }
-                    *work += l.nc as f64;
-                }
+                let f2 = frozen;
                 worst = worst.max(rate((e2 / whole[j] + f2).sqrt()));
             }
             l.reading = worst;
@@ -1587,7 +1661,7 @@ impl Fold {
                     }
                     for j in 0..n {
                         let tkj = l.t.data[k * n + j];
-                        a.data[i * n + j] += ti * if k < s { l.ys.data[k * n + j] } else { tkj * basis.z0 };
+                        a.data[i * n + j] += ti * if k < s { l.ys.data[k * n + j] } else { tkj * l.z0 };
                         metric.data[i * n + j] += ti * tkj;
                     }
                 }
@@ -1695,8 +1769,9 @@ mod tests {
                     let mut delta = kept.clone();
                     delta.add_scaled(-C64::ONE, &basis.k);
                     let tilde = f.to(&f.to(&delta, &mut work).adjoint(), &mut work).adjoint();
-                    // The rounding's scale: K's own (the change is a difference of two K's).
-                    let scale = kept.frobenius().max(basis.k.frobenius());
+                    // The rounding's floor, derived: the change is a difference of two K's, each rotated twice by V (products of
+                    // s terms): γ_{s²}‖K‖.
+                    let scale = kept.frobenius().max(basis.k.frobenius()) * crate::units::rounding(l.s * l.s) / 1e-14;
                     let value = fold.blocks[o].value;
                     for i in 0..l.s {
                         let moved = l.kappa[i] - (f.t[(i, i)] - C64::real(value));
@@ -1712,11 +1787,26 @@ mod tests {
                         }
                         checked += 1;
                     }
-                    println!("{name}, set {set:?}, block {o}: {} rows ({} centred), ‖K‖ {scale:.3e}, ‖δK‖ {:.3e}, R₀'s change bound {:.3e}", l.s, l.nc, delta.frobenius(), l.dr0.iter().fold(0.0_f64, |a, &b| a.max(b)));
+                    println!("{name}, set {set:?}, block {o}: {} rows ({} centred), ‖K‖ {scale:.3e}, ‖δK‖ {:.3e}, the centred block's change factor {:.3e}", l.s, l.nc, delta.frobenius(), l.g);
                 }
             }
         }
         println!("{checked} rows: the moved diagonal against the first order, worst {worst_diag:.2e} of its allowance; the rest against the reading's norm, worst {worst_rest:.2e}");
         assert!(checked > 0);
     }
+}
+
+/// x ← (μ − T)⁻¹ x column by column (T a part-by-part Schur form, μ the distances z₀ − T_kk): its back substitution.
+fn back_cols(f: &Factored, mu: &[C64], x: &mut Mat, work: &mut f64) {
+    let m = x.rows;
+    for j in 0..x.cols {
+        for k in (0..m).rev() {
+            let mut acc = x[(k, j)];
+            for l in k + 1..f.ends[k] {
+                acc += f.t[(k, l)] * x[(l, j)];
+            }
+            x[(k, j)] = acc / mu[k];
+        }
+    }
+    *work += (x.cols * (0..m).map(|k| f.ends[k] - k).sum::<usize>()) as f64;
 }
