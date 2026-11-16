@@ -2294,3 +2294,98 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
     }
     assert!(checked >= 6);
 }
+
+/// The cross-level series (coordinator's note on the parts, 2026-11-16; not a test, a measurement: `PROTO_SCENE`): per set
+/// and near block of the prototype's choice, the block's K on its solved excited rows split by excited level, K₀ (within
+/// each level) and R = K − K₀ (across levels), at the focus (the tweezer's centre) and twenty random points (±0.3 µm,
+/// 0.1 m/s): per column j and lane (beam w_l, or the static one) D₀ = (c_j + o − w − K₀)⁻¹ at `Fold::at`'s column energy
+/// c_j = H_jj; the operator's size ‖D₀R‖_F, and on the exact response column T_j the first and second orders the series
+/// would add, ‖D₀RT_j‖/‖T_j‖ and ‖(D₀R)²T_j‖/‖T_j‖, the largest over columns and lanes; and the level pair carrying the
+/// most of R (‖D₀_P R_PQ‖_F).
+#[test]
+#[ignore = "a measurement: run by name with PROTO_SCENE"]
+fn the_levels_cross_series() {
+    let name = std::env::var("PROTO_SCENE").expect("PROTO_SCENE");
+    let req = crate::model::testing::scene(&name);
+    let choice = proto_choice(&req, &name);
+    let mut seed = 11u64;
+    let mut u = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold = Fold::new(&req, &choice, set[0]).unwrap();
+        if fold.blocks.is_empty() {
+            continue;
+        }
+        let n = fold.size();
+        let speed = 0.1 / fold.hbar_over_mass;
+        let mut points: Vec<([f64; 3], [f64; 3])> = vec![([0.0; 3], [0.0; 3])];
+        for _ in 0..20 {
+            let r: [f64; 3] = std::array::from_fn(|_| 0.6 * u() - 0.3);
+            let (ct, phi) = (2.0 * u() - 1.0, 2.0 * std::f64::consts::PI * u());
+            let st = (1.0 - ct * ct).sqrt();
+            points.push((r, [speed * st * phi.cos(), speed * st * phi.sin(), speed * ct]));
+        }
+        for (o, b) in fold.blocks.iter().enumerate().filter(|(_, b)| b.solved > 0) {
+            let ne = b.rows[..b.solved].iter().filter(|r| matches!(r, Row::Excited(_))).count();
+            if ne == 0 {
+                continue;
+            }
+            let lv: Vec<usize> = b.rows[..ne].iter().map(|r| if let Row::Excited(x) = *r { fold.excited_level[x] } else { unreachable!() }).collect();
+            let mut levels = lv.clone();
+            levels.sort();
+            levels.dedup();
+            let (mut op, mut first, mut second) = (0.0_f64, 0.0_f64, 0.0_f64);
+            let mut pairs: Vec<((usize, usize), f64)> = vec![];
+            for (k, &(r, kappa)) in points.iter().enumerate() {
+                let Some(f) = fold.at(r, kappa, &mut Path::default()) else { continue };
+                let mut w = 0.0;
+                let site = fold.site(r, kappa, &mut w);
+                let laid = fold.lay(o, &site, &mut w);
+                let Some(e) = fold.effective(o, &laid, &mut w) else { continue };
+                let er: Vec<usize> = (0..ne).collect();
+                let kk = e.k.block(&er, &er);
+                let k0 = Mat::from_fn(ne, ne, |i, j| if lv[i] == lv[j] { kk[(i, j)] } else { C64::ZERO });
+                let mut rr = kk.clone();
+                rr.add_scaled(-C64::ONE, &k0);
+                let t = &f.stages.last().unwrap().responses[o];
+                let mut lanes: Vec<f64> = laid.shifts.clone();
+                if b.explicit.is_empty() {
+                    lanes.remove(0);
+                }
+                for j in 0..n {
+                    let col = Mat::from_fn(ne, 1, |i, _| t[(i, j)]);
+                    let size = col.frobenius();
+                    if size == 0.0 {
+                        continue;
+                    }
+                    for &wl in &lanes {
+                        let z = f.h[2][(j, j)] + C64::real(b.value - wl);
+                        let Some(d0) = inverse(&Mat::from_fn(ne, ne, |a, c| if a == c { z } else { C64::ZERO } - k0[(a, c)]), &mut w) else { continue };
+                        let dr = d0.product(&rr);
+                        op = op.max(dr.frobenius());
+                        let one = dr.product(&col);
+                        first = first.max(one.frobenius() / size);
+                        second = second.max(dr.product(&one).frobenius() / size);
+                        for &p in &levels {
+                            for &q in levels.iter().filter(|&&q| q != p) {
+                                let x: f64 = (0..ne).filter(|&i| lv[i] == p).flat_map(|i| (0..ne).filter(|&c| lv[c] == q).map(move |c| (i, c))).map(|(i, c)| dr[(i, c)].norm_sqr()).sum::<f64>().sqrt();
+                                match pairs.iter_mut().find(|y| y.0 == (p, q)) {
+                                    Some(y) => y.1 = y.1.max(x),
+                                    None => pairs.push(((p, q), x)),
+                                }
+                            }
+                        }
+                    }
+                }
+                if k == 0 {
+                    println!("{name} set {set:?} block {o} ({ne} excited rows, levels {levels:?}) at the focus: ‖D₀R‖ {op:.2e}, first order {first:.2e}, second {second:.2e}");
+                }
+            }
+            pairs.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let top: Vec<String> = pairs.iter().take(4).map(|((p, q), x)| format!("{:?}←{:?} {x:.1e}", fold.levels[*p], fold.levels[*q])).collect();
+            println!("{name} set {set:?} block {o}: over the focus and 20 points, ‖D₀R‖ {op:.2e}, first order {first:.2e}, second {second:.2e}; the pairs (‖D₀_P R_PQ‖) {top:?}");
+        }
+    }
+}
