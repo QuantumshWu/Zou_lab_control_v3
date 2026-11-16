@@ -1809,18 +1809,13 @@ fn the_prototype_is_the_fold_within_its_readings() {
     assert!(checked > 0);
 }
 
-/// What the force's adjoint would cost, phase by phase, as a multiple of the forward's (proto.rs `PHASES`; the force is not
-/// made, BRIEF_PROTO.md): the light's gradients (each beam's amplitude and every coefficient on three axes), the sources'
-/// and the diagonal's cotangents (one contraction each), the far forms' (one), the sweeps' adjoints (each sweep's two
-/// products transposed: the source's and Δ's cotangents), the copies' and the compression's (both sides of Z†XZ), the
-/// normalization's (the eigenbasis there and back, ≈ 12n³ against 13n³); the refresh and the readings none.
-const ADJOINT: [f64; 10] = [3.0, 0.0, 1.0, 1.0, 1.0, 2.0, 0.0, 2.0, 2.0, 1.0];
 
 /// The prototype's step along thermal paths (not a test: BRIEF_PROTO.md gate 1; `PROTO_SCENE` a request's path,
 /// `PROTO_ATOMS` the atoms, 10 by default; run it single-threaded): per set and split, one cache per atom, 100 steps an
 /// atom (`thermal_paths`, 0.1 m/s), timed twice (the first pass warms the machine), the second reported. Per step the wall
 /// clock and its phases (the time stamps' ticks, scaled by the wall clock), the work, the sweeps, the decompositions made,
-/// the readings; and the force's estimate by `ADJOINT`.
+/// the readings; and the rest of the step's model: the outer nodes at ±τ/2 (`PROTO_TAU`, 0.65 µs by default), the force
+/// of the three positions (one density for all) and the photons of one state.
 #[test]
 #[ignore = "a measurement: run by name with PROTO_SCENE"]
 fn a_prototype_s_step_at_a_scene() {
@@ -1845,6 +1840,13 @@ fn a_prototype_s_step_at_a_scene() {
         let (near, far) = ws.layout();
         println!("{name} set {set:?}: n {}, near blocks (block, rows, copies, beams, terms) {near:?}, far blocks (block, rows, terms) {far:?}; {atoms} atoms × 100 steps", fold.size());
         let kappa = kappa_of(&fold);
+        let velocity = kappa.map(|k| k * fold.hbar_over_mass);
+        let tau: f64 = std::env::var("PROTO_TAU").map_or(0.65, |x| x.parse().unwrap());
+        let sets = Fold::sets(&req, &choice).unwrap();
+        let n = fold.size();
+        let psi: Vec<C64> = (0..n).map(|k| C64::cis(0.7 * k as f64) * (1.0 + 0.1 * k as f64)).collect();
+        let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
+        let rho = Mat::from_fn(n, n, |i, j| psi[i] * psi[j].conj() / norm);
         // The machine's pace while the passes run (the old harness's yardstick, step/tests.rs: 1024 complex multiply-adds),
         // timed in turn with them; each split's best pass (the least mean wall clock of its steps of one round) reported.
         let yardstick = || {
@@ -1870,7 +1872,7 @@ fn a_prototype_s_step_at_a_scene() {
                 let pace = clock.elapsed().as_secs_f64() / 1000.0 * 1e9 / 1024.0;
                 std::hint::black_box(sink);
                 // Per step: wall, ticks by phase, work by phase, sweeps, made; per sweep index its ticks and work.
-                let (mut wall, mut ticks, mut work) = (vec![], vec![], vec![]);
+                let (mut wall, mut ticks, mut work, mut rest) = (vec![], vec![], vec![], vec![]);
                 let (mut sweeps, mut made, mut rounds) = (vec![], vec![], vec![]);
                 let (mut sweep_ticks, mut sweep_work, mut sweep_count) = (vec![0u64; 64], vec![0.0; 64], vec![0usize; 64]);
                 let mut most = [0.0_f64; 6];
@@ -1880,17 +1882,30 @@ fn a_prototype_s_step_at_a_scene() {
                         let clock = std::time::Instant::now();
                         let s = fold.prototype(*r, kappa, &mut cache, &mut ws).expect("the prototype's step");
                         wall.push(clock.elapsed().as_secs_f64());
-                        ticks.push(s.ticks);
-                        work.push(s.work);
-                        sweeps.push(s.sweeps);
-                        made.push(s.made);
-                        rounds.push(s.rounds);
-                        for (k, (t, w)) in s.sweep_ticks.iter().zip(&s.sweep_work).enumerate() {
+                        let s = (s.ticks, s.work, s.sweeps, s.made, s.rounds, s.sweep_ticks.clone(), s.sweep_work.clone(), [s.series, s.reuse, s.far, s.centring, s.ratio, s.copies]);
+                        // The rest of the step's model: the outer nodes, the force (the three positions' cotangents), the
+                        // photons of the state.
+                        let clock = std::time::Instant::now();
+                        let node_work = fold.prototype_nodes(*r, kappa, velocity, [-0.5 * tau, 0.5 * tau], &cache, &mut ws);
+                        let t_nodes = clock.elapsed().as_secs_f64();
+                        let clock = std::time::Instant::now();
+                        let force = fold.prototype_force(&cache, &mut ws, [&rho, &rho, &rho]);
+                        let t_force = clock.elapsed().as_secs_f64();
+                        let clock = std::time::Instant::now();
+                        let photons = fold.prototype_photons(&cache, &ws, &psi, &sets);
+                        let t_photons = clock.elapsed().as_secs_f64();
+                        rest.push([t_nodes, t_force, t_photons, node_work, force.work, photons.work]);
+                        ticks.push(s.0);
+                        work.push(s.1);
+                        sweeps.push(s.2);
+                        made.push(s.3);
+                        rounds.push(s.4);
+                        for (k, (t, w)) in s.5.iter().zip(&s.6).enumerate() {
                             sweep_ticks[k.min(63)] += t;
                             sweep_work[k.min(63)] += w;
                             sweep_count[k.min(63)] += 1;
                         }
-                        for (m, x) in most.iter_mut().zip([s.series, s.reuse, s.far, s.centring, s.ratio, s.copies]) {
+                        for (m, x) in most.iter_mut().zip(s.7) {
                             *m = m.max(x);
                         }
                     }
@@ -1938,12 +1953,21 @@ fn a_prototype_s_step_at_a_scene() {
 ",
                     (0..64).filter(|&k| sweep_count[k] > 0).map(|k| format!("{}: {:.3}/{:.0} ({:.0}%)", k + 1, 1e-3 * ns_tick * sweep_ticks[k] as f64 / sweep_count[k] as f64, sweep_work[k] / sweep_count[k] as f64, 100.0 * sweep_count[k] as f64 / steps as f64)).collect::<Vec<_>>().join(", ")
                 );
-                let force_us: f64 = (0..10).map(|k| ADJOINT[k] * phase_us(&calm, k)).sum();
-                let force_work: f64 = (0..10).map(|k| ADJOINT[k] * phase_work(&calm, k)).sum();
-                out += &format!("      the force's estimate (ADJOINT × the phases): {force_us:.2} µs, {force_work:.0} multiply-adds; the forward and the force {:.2} µs a step (the steps of one round), {:.2} µs with every step's refresh; the decompositions' cost an atom (its first step's and its refreshes'): {:.2} ms", us(&calm) + force_us, us(&every) + force_us, 1e-3 * phase_us(&every, 1) * steps as f64 / paths.len() as f64);
-                each_pass.push(us(&calm));
-                if best.as_ref().is_none_or(|b| us(&calm) < b.0) {
-                    best = Some((us(&calm), out));
+                let part = |idx: &[usize], k: usize| mean(idx, &|i| rest[i][k]);
+                let (nodes_us, force_us, photons_us) = (1e6 * part(&calm, 0), 1e6 * part(&calm, 1), 1e6 * part(&calm, 2));
+                out += &format!(
+                    "      the rest of the step (µs / multiply-adds, the steps of one round): nodes {nodes_us:.2}/{:.0}, force {force_us:.2}/{:.0}, photons {photons_us:.2}/{:.0}; the step's model (forward + nodes + force + photons) {:.2} µs ({:.2} µs with every step's refresh); the decompositions' cost an atom (its first step's and its refreshes'): {:.2} ms",
+                    part(&calm, 3),
+                    part(&calm, 4),
+                    part(&calm, 5),
+                    us(&calm) + nodes_us + force_us + photons_us,
+                    us(&every) + 1e6 * (part(&every, 0) + part(&every, 1) + part(&every, 2)),
+                    1e-3 * phase_us(&every, 1) * steps as f64 / paths.len() as f64
+                );
+                let whole = us(&calm) + nodes_us + force_us + photons_us;
+                each_pass.push(whole);
+                if best.as_ref().is_none_or(|b| whole < b.0) {
+                    best = Some((whole, out));
                 }
             }
             each_pass.sort_by(f64::total_cmp);
@@ -2076,4 +2100,114 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
         }
     }
     assert!(checked >= 4, "{checked} points checked");
+}
+
+/// The prototype's photons (proto.rs `Fold::prototype_photons`, BRIEF_PROTO2 item 2) of a random state at the step's middle:
+/// their rate is the state's hazard ⟨ψ|i(G − G†)|ψ⟩/‖ψ‖² to the rounding (the jumps' amplitudes u = Lψ are the decay's);
+/// and their moments, of the step's tangent, are those of the amplitudes' difference -- ∇u by the central difference of
+/// u = L(r)ψ, each on a fresh cache (`prototype_jumps`; h = 10⁻⁴ µm), its responses' own change and S⁻¹'s with the
+/// beams' -- within the difference's error and what the kept R₀ leaves (10⁻⁴ of the force's and the diffusion's scale). On PGC3D_1ms (refs) and
+/// R4_LIN_4 by their prototype choices, three points a set.
+#[test]
+fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
+    use super::proto::Cache;
+    let pgc = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json");
+    let mut checked = 0;
+    for name in [pgc.to_string_lossy().into_owned(), "R4_LIN_4".to_string()] {
+        let req = crate::model::testing::scene(&name);
+        let choice = proto_choice(&req, &name);
+        let sets = Fold::sets(&req, &choice).unwrap();
+        let mut seed = 31u64;
+        let mut u = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for set in &sets {
+            let fold = Fold::new(&req, &choice, set[0]).unwrap();
+            if fold.blocks.is_empty() {
+                continue;
+            }
+            let Ok(mut ws) = fold.prototype_workspace() else { continue };
+            let n = fold.size();
+            let speed = 0.1 / fold.hbar_over_mass;
+            for point in 0..3 {
+                let r0: [f64; 3] = std::array::from_fn(|_| 0.6 * u() - 0.3);
+                let (ct, phi) = (2.0 * u() - 1.0, 2.0 * std::f64::consts::PI * u());
+                let st = (1.0 - ct * ct).sqrt();
+                let kappa = [speed * st * phi.cos(), speed * st * phi.sin(), speed * ct];
+                let psi: Vec<C64> = (0..n).map(|_| C64::new(u() - 0.5, u() - 0.5)).collect();
+                let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
+                // Per class (block, landing set) and emission axis, u on the set's rows.
+                let amplitudes = |r: [f64; 3], ws: &mut super::proto::Workspace| -> Vec<Vec<C64>> {
+                    let mut cache = Cache::default();
+                    fold.prototype(r, kappa, &mut cache, ws).expect("the prototype");
+                    let mut out = vec![];
+                    for js in fold.prototype_jumps(&cache, ws, None) {
+                        for set in &sets {
+                            out.push((0..3).flat_map(|q| set.iter().map(move |&b| (q, b))).map(|(q, b)| (0..n).map(|j| js[q][(b, j)] * psi[j]).sum()).collect());
+                        }
+                    }
+                    out
+                };
+                let mut cache = Cache::default();
+                let g = fold.prototype(r0, kappa, &mut cache, &mut ws).unwrap().generator.clone();
+                let photons = fold.prototype_photons(&cache, &ws, &psi, &sets);
+                let hazard: f64 = (0..n).map(|i| (0..n).map(|j| psi[i].conj() * C64::I * (g[(i, j)] - g[(j, i)].conj()) * psi[j]).sum::<C64>().re).sum::<f64>() / norm;
+                assert!((photons.rate - hazard).abs() <= 1e-12 * hazard.abs().max(1e-300), "{name} set {set:?} point {point}: the photons' rate {} against the hazard {hazard}", photons.rate);
+                // The whole gradient by the difference (h = 1e-4 µm, central).
+                let h = 1e-4;
+                let u0 = amplitudes(r0, &mut ws);
+                let du: Vec<[Vec<C64>; 3]> = {
+                    let mut per: Vec<[Vec<C64>; 3]> = u0.iter().map(|x| std::array::from_fn(|_| vec![C64::ZERO; x.len()])).collect();
+                    for a in 0..3 {
+                        let (mut p, mut m) = (r0, r0);
+                        p[a] += h;
+                        m[a] -= h;
+                        let (up, um) = (amplitudes(p, &mut ws), amplitudes(m, &mut ws));
+                        for c in 0..u0.len() {
+                            for i in 0..u0[c].len() {
+                                per[c][a][i] = (up[c][i] - um[c][i]) / (2.0 * h);
+                            }
+                        }
+                    }
+                    per
+                };
+                // The moments by photon.rs's rule, k_c the largest wave number of the beams (an upper bound: what the
+                // classes' own k_c leave is the same for both).
+                let kc = fold.light.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
+                let (mut force, mut diffusion) = ([0.0; 3], [[0.0; 3]; 3]);
+                for (c, x) in u0.iter().enumerate() {
+                    let w: f64 = x.iter().map(|z| z.norm_sqr()).sum();
+                    let mean: [f64; 3] = std::array::from_fn(|a| x.iter().zip(&du[c][a]).map(|(z, d)| (z.conj() * *d).im).sum());
+                    let square = crate::linalg::dot3(mean, mean);
+                    let kick = if square > (kc * w).powi(2) { mean.map(|m| kc * m / square.sqrt()) } else if w > 0.0 { mean.map(|m| m / w) } else { [0.0; 3] };
+                    for a in 0..3 {
+                        force[a] += (mean[a] - w * kick[a]) / norm;
+                        for b in 0..3 {
+                            let second: f64 = du[c][a].iter().zip(&du[c][b]).map(|(p, q)| (p.conj() * *q).re).sum();
+                            diffusion[a][b] += (second - w * kick[a] * kick[b]) / norm;
+                        }
+                    }
+                }
+                let trace = |d: &[[f64; 3]; 3]| d[0][0] + d[1][1] + d[2][2];
+                let fsize = force.iter().map(|x| x * x).sum::<f64>().sqrt().max(photons.force.iter().map(|x| x * x).sum::<f64>().sqrt());
+                let fgap = (0..3).map(|a| (photons.force[a] - force[a]).powi(2)).sum::<f64>().sqrt();
+                let dgap = (0..3).flat_map(|a| (0..3).map(move |b| (a, b))).map(|(a, b)| (photons.diffusion[a][b] - diffusion[a][b]).abs()).fold(0.0, f64::max);
+                println!(
+                    "{name} set {set:?} point {point}: rate {:.4e} (hazard {hazard:.4e}); the force the jumps leave {:?} against the whole gradient's {:?} ({:.1e} of its size); 2D's trace {:.4e} against {:.4e}, its largest entry apart {:.1e} of the trace; {:.0} multiply-adds",
+                    photons.rate,
+                    photons.force.map(|x| format!("{x:.3e}")),
+                    force.map(|x| format!("{x:.3e}")),
+                    fgap / fsize.max(1e-300),
+                    trace(&photons.diffusion),
+                    trace(&diffusion),
+                    dgap / trace(&diffusion).abs(),
+                    photons.work
+                );
+                assert!(fgap <= 1e-4 * fsize.max(trace(&diffusion).abs().sqrt() * photons.rate.sqrt()) && dgap <= 1e-4 * trace(&diffusion).abs(), "{name} set {set:?} point {point}: the moments against the difference's");
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked >= 6);
 }

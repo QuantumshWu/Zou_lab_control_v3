@@ -60,7 +60,10 @@
 //! # The jumps (DESIGN §1.3, §2.6)
 //! L_q = C_q ε S⁻¹ of the same responses at every position (`Fold::prototype_jumps`): ε = VZ of a near block (Z(s) at a
 //! node), R₀Σ_a e_a U_a of a far one; i(G − G†) = Σ L†L to the rounding, S the middle's at the nodes too. The photons a
-//! state emits per step (`Fold::prototype_photons`): u = Σ_l C_q V Z_l S⁻¹ψ per split, ∇u = Σ_l ∇ln f_l u_l.
+//! state emits per step (`Fold::prototype_photons`): u = C_q V Z S⁻¹ψ and its whole gradient, the step's tangent along each
+//! axis by the same sweeps (the beams' fields, and the responses' own change through Ĥ_PP, K̃, Ṽ and H) and S⁻¹'s: the
+//! responses' own change is the excited states' differential light shift along r (the tweezer's), a tenth of the
+//! diffusion on R4 F=2 and nearly all of it on PGC3D F=1, where the one repump beam's field alone gives none.
 //!
 //! The copies a block solves exactly (the P layer's Woodbury), the explicit states and the static sources are not here
 //! (`Fold::prototype_workspace` refuses them): none of the prototype's two scenes has them. Their copies are the tweezer's,
@@ -2014,20 +2017,232 @@ impl Fold {
 
     /// The absorbed light's moments of the state ψ at the step's middle (photon.rs # The absorbed light's momentum, its
     /// moments' formula): per block (its photons one frequency) and landing set (`sets`, the ground states' partition) a
-    /// class, u_q = C_q ε S⁻¹ψ, ε the block's excited amplitude -- per split ε_l = VZ_l, so u = Σ_l u_l and
-    /// ∇u = Σ_l ∇ln f_l u_l (each beam's field turned on its response); a far block's Σ_a e_a C_qR₀U_a S⁻¹ψ and its
-    /// components' gradients. The responses' own change along r (through H, K and S⁻¹) is not taken. The jumps carry each
-    /// class's mean up to one absorbed photon (`Photon::kick`'s rule, k_c the class's largest beam wave number): the rest is
-    /// the force; 2D = Σ_c M2_c − W_c k_c k_cᵀ of the kicks.
+    /// class, u_q = C_q ε S⁻¹ψ -- ε = VZ of a near block, R₀Σ_a e_a U_a of a far one -- with its whole gradient ∇u, the
+    /// step's tangent along each lab axis: every split's response's change by the same sweeps as the step (its field's,
+    /// and its own through Ĥ_PP, K̃ on the decomposition's parts, Ṽ and the Bloch generators), and S⁻¹'s (S dS + dS S = dX
+    /// by the fixed point of `inverse_root_back`). The jumps carry each class's mean up to one absorbed photon
+    /// (`Photon::kick`'s rule, k_c the class's largest beam wave number): the rest is the force; 2D = Σ_c M2_c − W_c b_c b_cᵀ
+    /// of the kicks. After `prototype` on the same cache.
     pub(crate) fn prototype_photons(&self, cache: &Cache, ws: &Workspace, psi: &[C64], sets: &[Vec<usize>]) -> Photons {
         let n = ws.n;
+        let nn = n * n;
         let mut work = 0.0;
-        let normal = &ws.step.normal.data;
+        let (mid, step, pairs, pp, proj) = (&ws.mid, &ws.step, &ws.pairs, &ws.pp, &ws.proj);
+        let normal = &step.normal.data;
+        let sweeps = step.sweeps;
+        // The light's tangents: per component and vector ∂e, per pair ∂c, per split ∂f.
+        let deps = self.component_gradients(mid, proj);
+        let de: Vec<Vec<[C64; 3]>> = self.components.iter().map(|c| deps[c.part.frequency].iter().map(|d| if c.part.counter { d.map(|z| z.conj()) } else { *d }).collect()).collect();
+        let dc = self.pair_gradients(mid, proj, pairs);
+        // Ĥ_PP's and the far forms' (and the far metric's) tangents.
+        let mut dhbase: Vec<Vec<C64>> = (0..3).map(|_| vec![C64::ZERO; nn]).collect();
+        let mut dmetric: Vec<Vec<C64>> = (0..3).map(|_| vec![C64::ZERO; nn]).collect();
+        for (t, entries) in pp.iter().enumerate() {
+            for a in 0..3 {
+                for &(i, v) in entries {
+                    dhbase[a][i] += dc[t][a] * v;
+                }
+            }
+            work += (3 * entries.len()) as f64;
+        }
+        for (x, fb) in ws.far.iter().enumerate() {
+            let basis = &cache.far[x][cache.at_far[x].unwrap()];
+            let v = fb.vectors.len();
+            for ia in 0..v {
+                for ib in 0..v {
+                    let ((ca, ka), (cb, kb)) = (fb.vectors[ia], fb.vectors[ib]);
+                    for a in 0..3 {
+                        let dp = de[ca][ka][a].conj() * mid.e[cb][kb] + mid.e[ca][ka].conj() * de[cb][kb][a];
+                        crate::linalg::mul_add(false, &mut dhbase[a], dp, &basis.f[ia * v + ib]);
+                        crate::linalg::mul_add(false, &mut dmetric[a], dp, &basis.g[ia * v + ib]);
+                    }
+                }
+            }
+            work += (6 * v * v * nn) as f64;
+        }
+        // Per near block and axis: ∂K̃ on the parts, ∂Ṽ; per split and axis the response's tangent (the sweeps').
+        struct Tangent {
+            dk: [Vec<C64>; 3],
+            dv: [Vec<C64>; 3],
+            dz: Vec<[Vec<C64>; 3]>,
+            dztot: [Vec<C64>; 3],
+        }
+        let mut tangents: Vec<Tangent> = ws
+            .near
+            .iter()
+            .enumerate()
+            .map(|(x, nb)| {
+                let basis = &cache.near[x][cache.at_near[x].unwrap()];
+                let s = nb.s;
+                let dk = std::array::from_fn(|a| {
+                    let mut m = vec![C64::ZERO; s * s];
+                    for (ti, &tt) in nb.terms.iter().enumerate() {
+                        crate::linalg::mul_add(false, &mut m, dc[tt][a], &basis.within[ti]);
+                    }
+                    m
+                });
+                let dv = std::array::from_fn(|a| {
+                    let mut m = vec![C64::ZERO; s * n];
+                    for (ia, &(cc, k)) in nb.vectors.iter().enumerate() {
+                        crate::linalg::mul_add(false, &mut m, de[cc][k][a], &basis.vectors[ia]);
+                    }
+                    m
+                });
+                work += (3 * (nb.terms.len() * s * s + nb.vectors.len() * s * n)) as f64;
+                Tangent { dk, dv, dz: (0..nb.splits.len()).map(|_| std::array::from_fn(|_| vec![C64::ZERO; s * n])).collect(), dztot: std::array::from_fn(|_| vec![C64::ZERO; s * n]) }
+            })
+            .collect();
+        let mut dh = dhbase.clone();
+        let mut rhs = vec![];
+        for k in 0..sweeps {
+            let delta = &ws.deltas[k * nn..(k + 1) * nn];
+            for (x, (nb, tg)) in ws.near.iter().zip(tangents.iter_mut()).enumerate() {
+                let basis = &cache.near[x][cache.at_near[x].unwrap()];
+                let s = nb.s;
+                let splits = nb.splits.len();
+                let (t, ends) = (&basis.f.t, &basis.f.ends);
+                rhs.resize(s * n, C64::ZERO);
+                for (sp, &(cc, jj)) in nb.splits.iter().enumerate() {
+                    let at = (k * splits + sp) * s * n;
+                    let (zk, inv) = (&ws.near[x].zs[at..at + s * n], &nb.invs[at..at + s * n]);
+                    let l = self.components[cc].beams[jj];
+                    let y = &basis.beams[sp];
+                    for a in 0..3 {
+                        let df = self.components[cc].factor(mid.amplitudes[l].gradient[a]);
+                        let dz = &mut tg.dz[sp][a];
+                        for i in (0..s).filter(|&i| k == 0 || nb.active[i]) {
+                            for j in 0..n {
+                                rhs[i * n + j] = df * y[i * n + j] - zk[i * n + j] * dh[a][j * n + j];
+                            }
+                            // ∂K̃ Z on the parts.
+                            for m in (0..s).filter(|&m| basis.part[m] == basis.part[i]) {
+                                let km = tg.dk[a][i * s + m];
+                                if km != C64::ZERO {
+                                    crate::linalg::mul_add(false, &mut rhs[i * n..i * n + n], km, &zk[m * n..m * n + n]);
+                                }
+                            }
+                            if k > 0 {
+                                // −(∂Z^{k−1} Δ + Z^{k−1} ∂Δ).
+                                let prev = &ws.near[x].zs[at - splits * s * n..at - splits * s * n + s * n];
+                                for m in 0..n {
+                                    let (dzm, zm) = (dz[i * n + m], prev[i * n + m]);
+                                    if dzm != C64::ZERO {
+                                        crate::linalg::mul_add(true, &mut rhs[i * n..i * n + n], dzm, &delta[m * n..m * n + n]);
+                                    }
+                                    if zm != C64::ZERO {
+                                        for j in (0..n).filter(|&j| j != m) {
+                                            rhs[i * n + j] -= zm * dh[a][m * n + j];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        for i in (0..s).rev().filter(|&i| k == 0 || nb.active[i]) {
+                            for l2 in i + 1..ends[i] {
+                                crate::linalg::mul_add(false, &mut rhs[i * n..i * n + n], t[(i, l2)], &dz[l2 * n..l2 * n + n]);
+                            }
+                            for j in 0..n {
+                                dz[i * n + j] = rhs[i * n + j] * inv[i * n + j];
+                            }
+                        }
+                    }
+                    work += (3 * s * n * (2 + 2 * n + s / 2)) as f64;
+                }
+                for a in 0..3 {
+                    tg.dztot[a].fill(C64::ZERO);
+                    for sp in 0..splits {
+                        tg.dztot[a].iter_mut().zip(&tg.dz[sp][a]).for_each(|(o, z)| *o += *z);
+                    }
+                }
+            }
+            // ∂H^{k+1} = ∂Ĥ_base + Σ (∂Ṽ†Z + Ṽ†∂Z).
+            for a in 0..3 {
+                dh[a].copy_from_slice(&dhbase[a]);
+                for (x, (nb, tg)) in ws.near.iter().zip(&tangents).enumerate() {
+                    let s = nb.s;
+                    let ztot = &ws.near[x].ztots[k * s * n..(k + 1) * s * n];
+                    for i in 0..s {
+                        for p in 0..n {
+                            let (dvp, vp) = (tg.dv[a][i * n + p].conj(), nb.vtot[i * n + p].conj());
+                            if dvp != C64::ZERO {
+                                crate::linalg::mul_add(false, &mut dh[a][p * n..p * n + n], dvp, &ztot[i * n..i * n + n]);
+                            }
+                            if vp != C64::ZERO {
+                                crate::linalg::mul_add(false, &mut dh[a][p * n..p * n + n], vp, &tg.dztot[a][i * n..i * n + n]);
+                            }
+                        }
+                    }
+                    work += (2 * s * n * n) as f64;
+                }
+            }
+        }
+        // ∂X = Σ ∂Z†Z + Z†∂Z (+ the copies' rows', the far metric's); S⁻¹'s tangent dN = −N dS N, S dS + dS S = ∂X.
         let zeta: Vec<C64> = (0..n).map(|i| (0..n).map(|j| normal[i * n + j] * psi[j]).sum()).collect();
-        work += (n * n) as f64;
+        let mut dzeta: Vec<Vec<C64>> = vec![];
+        let (mut e_buf, mut p_buf, mut q_buf) = (vec![C64::ZERO; nn], vec![C64::ZERO; nn], vec![C64::ZERO; nn]);
+        multiply(&step.metric.data, normal, &mut e_buf, n);
+        for i in 0..nn {
+            e_buf[i] += normal[i] - if i % (n + 1) == 0 { C64::ONE } else { C64::ZERO };
+        }
+        work += (n * n * n) as f64;
+        for a in 0..3 {
+            let mut dx = dmetric[a].clone();
+            for (x, (nb, tg)) in ws.near.iter().zip(&tangents).enumerate() {
+                let s = nb.s;
+                for i in 0..s {
+                    for p in 0..n {
+                        let (dzp, zp) = (tg.dztot[a][i * n + p].conj(), nb.ztot[i * n + p].conj());
+                        crate::linalg::mul_add(false, &mut dx[p * n..p * n + n], dzp, &nb.ztot[i * n..i * n + n]);
+                        crate::linalg::mul_add(false, &mut dx[p * n..p * n + n], zp, &tg.dztot[a][i * n..i * n + n]);
+                    }
+                }
+                work += (2 * s * n * n) as f64;
+                if nb.copied_in {
+                    let basis = &cache.near[x][cache.at_near[x].unwrap()];
+                    let (mut dtc, mut extra) = (vec![C64::ZERO; nb.nc * n], vec![C64::ZERO; nb.nc * n]);
+                    copies_of(&nb.copies, &nb.groups, basis, &mid.e, &tg.dztot[a], &mut dtc, s, n, &mut work);
+                    let de_a: Vec<Vec<C64>> = de.iter().map(|c| c.iter().map(|d| d[a]).collect()).collect();
+                    copies_of(&nb.copies, &nb.groups, basis, &de_a, &nb.ztot, &mut extra, s, n, &mut work);
+                    dtc.iter_mut().zip(&extra).for_each(|(o, z)| *o += *z);
+                    for c in 0..nb.nc {
+                        for p in 0..n {
+                            crate::linalg::mul_add(false, &mut dx[p * n..p * n + n], dtc[c * n + p].conj(), &nb.tc[c * n..c * n + n]);
+                            crate::linalg::mul_add(false, &mut dx[p * n..p * n + n], nb.tc[c * n + p].conj(), &dtc[c * n..c * n + n]);
+                        }
+                    }
+                }
+            }
+            // dS by the fixed point dS ← (∂X − E dS − dS E)/2 (Hermitian iterates), to the rounding.
+            let mut ds: Vec<C64> = dx.iter().map(|z| *z * 0.5).collect();
+            let floor = crate::units::rounding(4 * n);
+            let mut last = f64::INFINITY;
+            loop {
+                multiply(&e_buf, &ds, &mut p_buf, n);
+                let (mut moved, mut size) = (0.0_f64, 0.0_f64);
+                for i in 0..n {
+                    for j in 0..n {
+                        let next = (dx[i * n + j] - p_buf[i * n + j] - p_buf[j * n + i].conj()) * 0.5;
+                        moved += (next - ds[i * n + j]).norm_sqr();
+                        size += next.norm_sqr();
+                        ds[i * n + j] = next;
+                    }
+                }
+                work += (n * n * n) as f64;
+                if moved.sqrt() <= floor * size.sqrt() || size == 0.0 || moved.sqrt() >= last {
+                    break;
+                }
+                last = moved.sqrt();
+            }
+            // dζ = −N dS ζ.
+            for i in 0..n {
+                q_buf[i] = (0..n).map(|j| ds[i * n + j] * zeta[j]).sum();
+            }
+            dzeta.push((0..n).map(|i| -(0..n).map(|j| normal[i * n + j] * q_buf[j]).sum::<C64>()).collect());
+            work += (2 * n * n) as f64;
+        }
+        // The classes' moments.
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let mut out = Photons { rate: 0.0, force: [0.0; 3], diffusion: [[0.0; 3]; 3], work: 0.0 };
-        // A class's moments from its u and ∇u on its rows.
         let class = |u: &[C64], du: &[[C64; 3]], rows: &[usize], absorbed: f64, out: &mut Photons| {
             let (mut w, mut mean, mut second) = (0.0, [0.0; 3], [[0.0; 3]; 3]);
             for &b in rows {
@@ -2053,43 +2268,30 @@ impl Fold {
                 }
             }
         };
-        let mut u = vec![C64::ZERO; 3 * GROUND];
-        let mut du = vec![[C64::ZERO; 3]; 3 * GROUND];
-        for (x, nb) in ws.near.iter().enumerate() {
+        let (mut u, mut du) = (vec![C64::ZERO; 3 * GROUND], vec![[C64::ZERO; 3]; 3 * GROUND]);
+        for (x, (nb, tg)) in ws.near.iter().zip(&tangents).enumerate() {
             let basis = &cache.near[x][cache.at_near[x].unwrap()];
             let s = nb.s;
-            u.fill(C64::ZERO);
-            du.fill([C64::ZERO; 3]);
             let mut absorbed = 0.0_f64;
-            let mut zl = vec![C64::ZERO; s];
-            for (sp, &(cc, jj)) in nb.splits.iter().enumerate() {
-                let comp = &self.components[cc];
-                let l = comp.beams[jj];
-                absorbed = absorbed.max(self.light.beams[l].wave_number);
-                let f = ws.mid.f[cc][jj];
-                let g: [C64; 3] = std::array::from_fn(|a| comp.factor(ws.mid.amplitudes[l].gradient[a]) / f);
-                let z = &nb.z[sp * s * n..(sp + 1) * s * n];
-                for i in 0..s {
-                    zl[i] = (0..n).map(|j| z[i * n + j] * zeta[j]).sum();
-                }
-                for q in 0..3 {
-                    let e = &basis.emit[q];
-                    for b in 0..GROUND {
-                        let v: C64 = (0..s).map(|i| e[b * s + i] * zl[i]).sum();
-                        u[q * GROUND + b] += v;
-                        for a in 0..3 {
-                            du[q * GROUND + b][a] += g[a] * v;
-                        }
-                    }
-                }
-                work += (s * n + 3 * GROUND * (s + 3)) as f64;
+            for &(cc, jj) in &nb.splits {
+                absorbed = absorbed.max(self.light.beams[self.components[cc].beams[jj]].wave_number);
             }
+            let y: Vec<C64> = (0..s).map(|i| (0..n).map(|j| nb.ztot[i * n + j] * zeta[j]).sum()).collect();
+            let dy: Vec<Vec<C64>> = (0..3).map(|a| (0..s).map(|i| (0..n).map(|j| tg.dztot[a][i * n + j] * zeta[j] + nb.ztot[i * n + j] * dzeta[a][j]).sum()).collect()).collect();
+            for q in 0..3 {
+                let e = &basis.emit[q];
+                for b in 0..GROUND {
+                    let row = &e[b * s..b * s + s];
+                    u[q * GROUND + b] = row.iter().zip(&y).map(|(p, z)| *p * *z).sum();
+                    du[q * GROUND + b] = std::array::from_fn(|a| row.iter().zip(&dy[a]).map(|(p, z)| *p * *z).sum());
+                }
+            }
+            work += (7 * s * n + 12 * GROUND * s) as f64;
             for set in sets {
                 class(&u, &du, set, absorbed, &mut out);
             }
             work += (3 * GROUND * 13) as f64;
         }
-        let deps = self.component_gradients(&ws.mid, &ws.proj);
         for (x, fb) in ws.far.iter().enumerate() {
             let basis = &cache.far[x][cache.at_far[x].unwrap()];
             u.fill(C64::ZERO);
@@ -2101,21 +2303,19 @@ impl Fold {
                 }
             }
             for (ia, &(cc, k)) in fb.vectors.iter().enumerate() {
-                let comp = &self.components[cc];
-                let d = deps[comp.part.frequency][k];
-                let de: [C64; 3] = if comp.part.counter { d.map(|z| z.conj()) } else { d };
-                let e = ws.mid.e[cc][k];
+                let e = mid.e[cc][k];
                 for q in 0..3 {
                     let m = &basis.emitted[ia][q];
                     for b in 0..GROUND {
-                        let v: C64 = (0..n).map(|j| m[b * n + j] * zeta[j]).sum();
+                        let row = &m[b * n..b * n + n];
+                        let v: C64 = row.iter().zip(&zeta).map(|(p, z)| *p * *z).sum();
                         u[q * GROUND + b] += e * v;
                         for a in 0..3 {
-                            du[q * GROUND + b][a] += de[a] * v;
+                            du[q * GROUND + b][a] += de[cc][k][a] * v + e * row.iter().zip(&dzeta[a]).map(|(p, z)| *p * *z).sum::<C64>();
                         }
                     }
                 }
-                work += (3 * GROUND * (n + 4)) as f64;
+                work += (12 * GROUND * n) as f64;
             }
             for set in sets {
                 class(&u, &du, set, absorbed, &mut out);
