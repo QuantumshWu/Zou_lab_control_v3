@@ -24,10 +24,11 @@
 //!
 //! # The held forms
 //! A step's path momentum is predicted from the start state's held forms (step.rs # The path's momentum): the end state's
-//! at the last step's end node, in the same contraction as the step's kick (`Middle::nodes`: one more density at +h, its
-//! static G's form on a channel of its own and each tone's complex amplitude on one each, referenced to the middle's
-//! time); at a point -- a trajectory's start, a jump at a step's end into another set -- one evaluation there, its
-//! tangent and the contraction at the point (`Onefold::held_forms`).
+//! at the last step's middle, in the same contraction as the step's kick (`Middle::nodes`: one more density at the
+//! middle, its static G's form on a channel of its own and each tone's complex amplitude on one each, referenced to the
+//! middle's time; the integrator takes the reference's gradient from them); at a point -- a trajectory's start, a jump at
+//! a step's end into another set -- one evaluation there, its tangent and the contraction at the point, less the
+//! reference's gradient there (`Onefold::held_forms`).
 //!
 //! # The tones
 //! What stays in P and beats -- an entry of two P states of different frames (proto.rs # The tones) -- is the
@@ -236,13 +237,15 @@ impl Onefold {
 
     /// The held forms of a set's state at a point (module documentation, # The held forms): the set's forward on the
     /// trajectory's decompositions, its tangent, and in one contraction at the point the static G's form and each tone's
-    /// complex amplitude at the point's time; where `land`, of the bare state's landing ψ = S⁻¹ψ. With the state they are
-    /// of and the decompositions the forward stood on. None where the fold does not exist there.
+    /// complex amplitude at the point's time, less the reference's gradient there (step.rs `Forms`); where `land`, of the
+    /// bare state's landing ψ = S⁻¹ψ. With the state they are of and the decompositions the forward stood on. None where
+    /// the fold does not exist there.
     fn held_forms(&self, set: usize, at: &Point, psi: &[C64], held: &Held, land: bool) -> Option<(Vec<C64>, Forms, Cache)> {
         let fold = &self.sets[set].fold;
         let (n, tones) = (fold.size(), &self.sets[set].tones);
+        let gradient = self.potentials.expansion(at.r, &self.reference, &self.prepared).gradient;
         if fold.blocks.is_empty() {
-            return Some((psi.to_vec(), Forms { time: at.t, ..Forms::default() }, Cache::default()));
+            return Some((psi.to_vec(), Forms { time: at.t, ..Forms::default() }.less(gradient), Cache::default()));
         }
         let mut cache = (*self.cache(held, set)).clone();
         let mut ws = self.take(set);
@@ -255,7 +258,7 @@ impl Onefold {
             let mut bars = vec![Bar { channel: 0, position: 0, tone: None, matrix: &rho }];
             bars.extend(phased.iter().enumerate().map(|(m, x)| Bar { channel: 1 + m, position: 0, tone: Some(m), matrix: x }));
             let f = fold.prototype_force(&cache, &mut ws, &bars, 1 + tones.len()).forms;
-            (state, Forms { time: at.t, held: real(f[0]), tones: tones.iter().zip(&f[1..]).map(|(&nu, a)| (nu, *a)).collect() })
+            (state, Forms { time: at.t, held: real(f[0]), tones: tones.iter().zip(&f[1..]).map(|(&nu, a)| (nu, *a)).collect() }.less(gradient))
         });
         self.give(set, ws);
         out.map(|(state, forms)| (state, forms, cache))
@@ -577,10 +580,10 @@ impl crate::step::Middle for Middle<'_> {
 
     /// The three nodes' static forms and every tone's there at its exact phase, the held state's at the beats' weights
     /// with the middle's (module documentation, # The tones); and where `end` is given, the end state's held forms at the
-    /// end node, the static G's on a channel of its own and each tone's complex amplitude, referenced to the middle's time,
+    /// middle, the static G's on a channel of its own and each tone's complex amplitude, referenced to the middle's time,
     /// on one each (# The held forms) -- in one contraction.
     fn nodes(&self, path: &Path, h: f64, rho: [&[C64]; 3], held: Option<(&[C64], &dyn Fn(f64) -> f64)>, end: Option<(&[C64], &Path)>) -> ([[f64; 3]; 3], Option<Forms>) {
-        // The tones are the light's beats in time (the path's turns are its envelopes'): the end node's own, no path at rest.
+        // The tones are the light's beats in time (the path's turns are its envelopes'): the middle's own, no path at rest.
         let end = end.map(|(rho, _)| rho);
         let tones = &self.run.sets[self.set].tones;
         let at = |nu: f64| -> Vec<C64> {
@@ -597,8 +600,8 @@ impl crate::step::Middle for Middle<'_> {
         }
         let ended: Vec<Vec<C64>> = end.map_or(vec![], |rho| (0..tones.len()).map(|m| self.phased(m, 0.0, rho)).collect());
         if let Some(rho) = end {
-            bars.push(Bar { channel: 1, position: 2, tone: None, matrix: rho });
-            bars.extend(ended.iter().enumerate().map(|(m, x)| Bar { channel: 2 + m, position: 2, tone: Some(m), matrix: x }));
+            bars.push(Bar { channel: 1, position: 0, tone: None, matrix: rho });
+            bars.extend(ended.iter().enumerate().map(|(m, x)| Bar { channel: 2 + m, position: 0, tone: Some(m), matrix: x }));
         }
         let f = self.forms(path, Some(h), &bars, if end.is_some() { 2 + tones.len() } else { 1 });
         let held = end.map(|_| Forms { time: 0.0, held: real(f[1]), tones: tones.iter().zip(&f[2..]).map(|(&nu, a)| (nu, *a)).collect() });

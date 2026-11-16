@@ -137,24 +137,33 @@
 //! evaluated for it (r11.status.md, its recommendation E): the generator and the path are both taken at κ_m, one middle
 //! and one evaluation of the model a step. κ_m = κ_h + K/2, K the kick of the start state held where the model last
 //! evaluated it -- its held forms (`Forms`), the trajectory's: the static form over τ and each tone's at its phase over
-//! the step, τ sinc(ντ/2) e^{iν(t_m − t₁)} --, and the reference's τ∇V_ref(r_h) (`predicted`, a function of what the
-//! trajectory carries). The forms are those of the end state ψ₁ on the last step's path at its end node s = +h, at
-//! r_h + v_m h and t₁ -- the next step's start to O(τ²) --, contracted with the step's own kick (`Middle::nodes`: one more
-//! density, its static form and each tone's complex amplitude); at the trajectory's start the model's at its own point
+//! the step, τ sinc(ντ/2) e^{iν(t_m − t₁)} (`predicted`, a function of what the trajectory carries). A form is what the
+//! kick integrates, the model's force less the reference's gradient, P = Re tr(Ĝρ) − ∇V_ref (# The reference: the
+//! reference's own flow is exact, the kick takes the rest), read at a middle point, where the model's generator and the
+//! reference's expansion are at one point by construction -- whatever a model holds of its potential along a path (a
+//! model may hold a trap the reference takes exactly as it is at the middle over the whole step: the kick integrates it
+//! to the same τ∇V_ref(r_h) either way). The forms are those of the end state ψ₁ at the last step's middle r_h, its
+//! density contracted with the step's own kick (`Middle::nodes`: one more density, its static form and each tone's
+//! complex amplitude), less the step's τ∇V_ref(r_h); at the trajectory's start the model's at its own point
 //! (`Dynamics::started`, the same contraction there; the trajectory's first decision); after a jump at a step's end into
 //! another cluster, that cluster's at the jump's point (`Dynamics::forms`).
-//! - The forms against the force the next step needs, its own average over its path: the position r_h + v_m h is the
-//!   next start's to O(τ²), the state is the trajectory's own at t₁, and the generator is taken at κ_m of the last step,
-//!   O(τ) from the state's momentum: F_E = F(z₁) − (τ/2)κ̇·∂_κF + O(τ²) against F(z₁) + (τ′/2)Ḟ + O(τ²). κ_m errs by
-//!   O(τ²), the kick's sensitivity to it, (τ/2)|∂Δκ/∂κ_m|, is O(τ), so the kick and the state err by O(τ³), the
-//!   scheme's own local order (r11.status.md §2(a); the pilot's companion at twice the step reads it with the rest of
+//! - The forms against the force the next step needs, its own average over its path about r_h′ = r_h + v_m τ + O(τ²):
+//!   the state is the trajectory's own at t₁, the position O(τ) from r_h′, and the generator is taken at κ_m of the last
+//!   step, O(τ) from the state's momentum: P_E = P(z₁) − τv·∇P − (τ/2)κ̇·∂_κP + O(τ²) against P(z₁) + (τ′/2)Ṗ + O(τ²).
+//!   κ_m errs by O(τ²), the kick's sensitivity to it, (τ/2)|∂Δκ/∂κ_m|, is O(τ), so the kick and the state err by O(τ³),
+//!   the scheme's own local order (r11.status.md §2(a); the pilot's companion at twice the step reads it with the rest of
 //!   the step's error: each level carries its own forms). A tone is carried by its amplitude, so the next step weighs
 //!   it by its own beat over its own width: the force at one time alone would put κ_m off by (τ/2)|F_tone| at ντ ≳ 1.
-//! - The reverse step takes the forms the forward step left: its path's momentum is κ_h + Δκ − (τ/2)F_E(z₁) against
-//!   the step's κ_h + (τ/2)F_E(z₀). They differ by the forms' trapezoid against the kick, O(τ³), and by (τ²/2)κ̇∂_κF, the
-//!   force's dependence on the velocity: a step and its reverse miss the start beyond the scheme's order (tests), and by
-//!   nothing where the kick does not depend on the path (one internal state: a conservative trap's step is its own
-//!   inverse to round-off).
+//!   What is read at one point against a reference at another holds the reference's own force between them, K·δr: a
+//!   model's force at the end node against the next middle's reference put κ_m off by (τ/2)K·v_mτ, (ωτ)²/2 of κ in a
+//!   trap of ω, which no step resolves (wire.status.md, wire4 item 1).
+//! - The reverse step takes the forms the forward step left, at its own middle (a step and its reverse share r_h): its
+//!   path's momentum is κ_h + Δκ − (τ/2)P_E(z₁) against the step's κ_h + (τ/2)P_E(z₀). They differ by the forms'
+//!   trapezoid against the kick and by the start's forms' position, O(τ²), and by (τ²/2)κ̇∂_κP, the force's dependence
+//!   on the velocity; the kick takes v_m by its path's odd moments: a step and its reverse miss the start beyond the
+//!   scheme's order (tests: from a dressed state 2.6e-6, 3.0e-7, 2.1e-8 at τ = 0.2, 0.1, 0.05 µs), and by nothing where
+//!   the kick does not depend on the path (one internal state: a conservative trap's step is its own inverse to
+//!   round-off).
 //! - Where the step does not resolve the internal state (a jump's bare state relaxing in 1/Γ ≪ τ) the force changes by
 //!   O(1) over the step and the path's velocity errs in first order over that step; the companion reads that too. A
 //!   jump inside a step: the step's κ_m was predicted from the state before it, as it was from the start state; the next
@@ -492,7 +501,8 @@ pub trait Dynamics {
 
     /// A cluster's state's held forms at a point (module documentation, # The path's momentum: `Forms`, at the point's
     /// time): the model at the point (`middle`, deciding nothing), the state on its path at the point's momentum, at the
-    /// middle (`forms_at`). Where a jump at a step's end lands in another cluster, and after a trajectory's first jump.
+    /// middle (`forms_at`), less the reference's gradient there. Where a jump at a step's end lands in another cluster,
+    /// and after a trajectory's first jump.
     fn forms(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held) -> Forms
     where
         Self: Sized,
@@ -501,7 +511,7 @@ pub trait Dynamics {
         let path = middle.path(at.kappa, [0.0; 3]);
         let mut rho = vec![C64::ZERO; psi.len() * psi.len()];
         density(psi, &mut rho);
-        Forms { time: at.t, ..forms_at(&middle, &path, &path, 0.0, &rho) }
+        Forms { time: at.t, ..forms_at(&middle, &path, &rho) }.less(self.reference(at.r).gradient)
     }
 
     /// Where a trajectory starts (`Trajectory::new`): the landing of the bare state f at the point (`landed`), its held
@@ -621,11 +631,12 @@ pub trait Middle {
 
     /// The step's three nodes' forms at once (`Midway::stretch`): Re tr(Ĝ(s_j) ρ_j) per lab axis at s = −h, 0, h (`force` at
     /// each), the middle's with the fixed point's tones on a held state at their weights where one is held (`centre`); what
-    /// the step takes is their sum, node by node. And where `end` is given -- the end state's density at the end node, and
-    /// the path at rest through the middle (its fixed point's tones) -- its held forms there (`Forms`, its time the
-    /// middle's, 0; module documentation, # The path's momentum). One call, so that a model whose forms are one
-    /// derivative of its step contracts them at once (and gives their sum as the first node's, the end's in the same
-    /// contraction); here the end's by the middle's forms (`forms_at`).
+    /// the step takes is their sum, node by node. And where `end` is given -- the end state's density, and the path at
+    /// rest through the middle (its fixed point's tones) -- its forms at the middle (`Forms`, its time the middle's, 0;
+    /// the model's, the integrator takes the reference's gradient from them; module documentation, # The path's
+    /// momentum). One call, so that a model whose forms are one derivative of its step contracts them at once (and gives
+    /// their sum as the first node's, the end's in the same contraction); here the end's by the middle's forms
+    /// (`forms_at`).
     fn nodes(&self, path: &Self::Path, h: f64, rho: [&[C64]; 3], held: Option<(&[C64], &dyn Fn(f64) -> f64)>, end: Option<(&[C64], &Self::Path)>) -> ([[f64; 3]; 3], Option<Forms>)
     where
         Self: Sized,
@@ -634,7 +645,7 @@ pub trait Middle {
             Some((held, weight)) if j == 1 => self.centre(path, held, weight, rho[j]),
             _ => self.force(path, [-h, 0.0, h][j], rho[j]),
         });
-        (forms, end.map(|(rho, fixed)| forms_at(self, path, fixed, h, rho)))
+        (forms, end.map(|(rho, fixed)| forms_at(self, fixed, rho)))
     }
 
     /// The representation a deciding middle left (`Dynamics::middle`): None where it decided nothing of it.
@@ -1345,10 +1356,11 @@ fn whole(sums: &[f64], j: usize, n: usize, sum: &mut [C64]) {
     }
 }
 
-/// A state's held forms (module documentation, # The path's momentum): where the model last evaluated it, at the time
-/// `time` (µs), its conservative force's static form Re tr(Ĝρ) per lab axis (rad/µs/µm) and per tone its beat ν (rad/µs)
-/// and complex amplitude a per lab axis, the tone's form at the time t being Re[a e^{iν(t − time)}]. What a trajectory
-/// carries to predict its next step's path momentum (`predicted`).
+/// A state's held forms (module documentation, # The path's momentum): where the model last evaluated it, at a middle
+/// point and the time `time` (µs), the kick's integrand there -- the static form of the conservative force less the
+/// reference's gradient, Re tr(Ĝρ) − ∇V_ref per lab axis (rad/µs/µm) -- and per tone its beat ν (rad/µs) and complex
+/// amplitude a per lab axis, the tone's form at the time t being Re[a e^{iν(t − time)}]. What a trajectory carries to
+/// predict its next step's path momentum (`predicted`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Forms {
     pub time: f64,
@@ -1356,14 +1368,23 @@ pub struct Forms {
     pub tones: Vec<(f64, [C64; 3])>,
 }
 
-/// A state's held forms on a middle at the time s from it along the path (`Forms`, its time the middle's: 0), by the
-/// middle's forms, for a model that gives them no other way (`Middle::nodes`, `Dynamics::forms`): the fixed point's tones
-/// -- the candidates of the path at rest through the middle, `fixed`: the light's beats in time alone, not the pattern's
-/// turns along a path -- each by its complex amplitude c = F(ρ) − iF(iρ) of its forms on σ = ρ and σ = iρ
-/// (`Middle::tone_force`: its form at s is Re[c e^{iνs}]), the static form the whole one at s along the path
-/// (`Middle::force`) less the tones' there.
-pub fn forms_at<M: Middle>(middle: &M, path: &M::Path, fixed: &M::Path, s: f64, rho: &[C64]) -> Forms {
-    let mut held = middle.force(path, s, rho);
+impl Forms {
+    /// The model's forms less the reference's gradient at the point they were read at: the kick's integrand.
+    pub fn less(mut self, gradient: [f64; 3]) -> Forms {
+        for (f, g) in self.held.iter_mut().zip(gradient) {
+            *f -= g;
+        }
+        self
+    }
+}
+
+/// A state's forms at a middle on the path at rest through it, `fixed` (`Forms`, its time the middle's: 0; the model's,
+/// the reference's gradient not taken), by the middle's forms, for a model that gives them no other way
+/// (`Middle::nodes`, `Dynamics::forms`): the fixed point's tones -- its candidates, the light's beats in time alone, not
+/// the pattern's turns along a path -- each by its complex amplitude c = F(ρ) − iF(iρ) of its forms on σ = ρ and σ = iρ
+/// (`Middle::tone_force`), the static form the whole one at the middle (`Middle::force`) less the tones' there.
+pub fn forms_at<M: Middle>(middle: &M, fixed: &M::Path, rho: &[C64]) -> Forms {
+    let mut held = middle.force(fixed, 0.0, rho);
     let (mut beats, mut keys) = (vec![], vec![]);
     middle.beats(fixed, &mut beats, &mut keys);
     let none = vec![C64::ZERO; rho.len()];
@@ -1373,9 +1394,8 @@ pub fn forms_at<M: Middle>(middle: &M, path: &M::Path, fixed: &M::Path, s: f64, 
         .map(|(m, &nu)| {
             let (re, im) = (middle.tone_force(fixed, m, rho, &none), middle.tone_force(fixed, m, &none, rho));
             let c: [C64; 3] = std::array::from_fn(|a| C64::new(re[a], -im[a]));
-            let turn = C64::cis(nu * s);
             for a in 0..3 {
-                held[a] -= (c[a] * turn).re;
+                held[a] -= c[a].re;
             }
             (nu, c)
         })
@@ -1871,9 +1891,9 @@ pub trait Domain {
 }
 
 /// The path's momentum of the step of τ about its middle time t_m (module documentation, # The path's momentum),
-/// predicted from the start state's held forms: κ_h and half the kick they give over the step -- the static form over τ,
-/// each tone's over the step at its phase there, τ sinc(ντ/2) Re[a e^{iν(t_m − t₁)}] -- with the reference's τ∇V_ref(r_h).
-pub fn predicted(forms: &Forms, kappa_h: [f64; 3], reference: [f64; 3], tau: f64, t_m: f64) -> [f64; 3] {
+/// predicted from the start state's held forms: κ_h and half the kick they give over the step -- the static form (the
+/// reference's gradient taken) over τ, each tone's over the step at its phase there, τ sinc(ντ/2) Re[a e^{iν(t_m − t₁)}].
+pub fn predicted(forms: &Forms, kappa_h: [f64; 3], tau: f64, t_m: f64) -> [f64; 3] {
     let mut held = forms.held.map(|f| tau * f);
     for (nu, a) in &forms.tones {
         let (w, turn) = (tau * sinc(0.5 * nu * tau), C64::cis(nu * (t_m - forms.time)));
@@ -1881,7 +1901,7 @@ pub fn predicted(forms: &Forms, kappa_h: [f64; 3], reference: [f64; 3], tau: f64
             held[c] += w * (a[c] * turn).re;
         }
     }
-    std::array::from_fn(|c| kappa_h[c] + 0.5 * (tau * reference[c] - held[c]))
+    std::array::from_fn(|c| kappa_h[c] - 0.5 * held[c])
 }
 
 /// A step's middle (module documentation, # The reference, # The kick): the reference's flow of a step of τ and the
@@ -1953,7 +1973,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let h = 0.5 * tau;
         let (flow, (r_h, kappa_h), reference) = (self.flow, self.reached, self.reference);
         scratch.fit(n, SUMS);
-        let kappa_m = predicted(&from.forms, kappa_h, reference, tau, from.time + h);
+        let kappa_m = predicted(&from.forms, kappa_h, tau, from.time + h);
         let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, impulse: [0.0; 3], scattered: None, optical: None, work: 0.0, prices: Vec::new(), made: Vec::new() };
         // The three nodes' weights' sums over the step, its stretches' together.
         scratch.weights.fill(0.0);
@@ -2227,12 +2247,12 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             }
         };
         // The end state's held forms (module documentation, # The path's momentum): where the stretch reaches the step's end
-        // in its own cluster, its density at the end node, with the kick's forms; where a jump at the end left it in
-        // another, that cluster's at the jump's point.
+        // in its own cluster, its density at the middle (the frame's there is the lab's), with the kick's forms, less the
+        // step's reference gradient; where a jump at the end left it in another, that cluster's at the jump's point.
         let ended = done && march.state.cluster == cluster;
         let end: Option<Vec<C64>> = ended.then(|| {
             let mut rho = vec![C64::ZERO; n * n];
-            density(&along.turned(&march.state.psi, h, true)[..n], &mut rho);
+            density(&march.state.psi, &mut rho);
             rho
         });
         if done && !ended {
@@ -2248,7 +2268,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             whole(sums, 0, n, sum);
             if let Some(rho) = &end {
                 let fixed = along.middle.path(kappa_m, [0.0; 3]);
-                march.state.forms = Forms { time: t_m, ..forms_at(along.middle, &along.path, &fixed, h, rho) };
+                march.state.forms = Forms { time: t_m, ..forms_at(along.middle, &fixed, rho) }.less(self.reference);
             }
             along.middle.force(&along.path, 0.0, sum).map(|f| -f)
         } else {
@@ -2316,7 +2336,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 }
             }
             if let Some(forms) = forms_end {
-                march.state.forms = Forms { time: t_m, ..forms };
+                march.state.forms = Forms { time: t_m, ..forms }.less(self.reference);
             }
             for (pair, tone) in tones.chunks_exact(2 * size).zip(&picture.beats) {
                 let (re, im) = pair.split_at(size);
