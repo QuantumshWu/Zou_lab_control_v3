@@ -339,6 +339,71 @@ pub(crate) struct Workspace {
     step: Step,
 }
 
+thread_local! {
+    static SPARE: std::cell::RefCell<Vec<Vec<C64>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A vector of the thread's spares (assemble.rs `Held`'s rule for the prototype's temporaries: a step's force and photons
+/// take the vectors the step before left, and ask the heap for nothing).
+struct Buf(Vec<C64>);
+
+impl Buf {
+    /// `len` zeros.
+    fn zeros(len: usize) -> Buf {
+        let mut v = SPARE.try_with(|x| x.borrow_mut().pop()).ok().flatten().unwrap_or_default();
+        v.clear();
+        v.resize(len, C64::ZERO);
+        Buf(v)
+    }
+    /// A copy of `x`.
+    fn copy(x: &[C64]) -> Buf {
+        let mut b = Buf::zeros(0);
+        b.0.extend_from_slice(x);
+        b
+    }
+}
+
+impl std::ops::Deref for Buf {
+    type Target = Vec<C64>;
+    fn deref(&self) -> &Vec<C64> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Buf {
+    fn deref_mut(&mut self) -> &mut Vec<C64> {
+        &mut self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a Buf {
+    type Item = &'a C64;
+    type IntoIter = std::slice::Iter<'a, C64>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl AsRef<[C64]> for Buf {
+    fn as_ref(&self) -> &[C64] {
+        &self.0
+    }
+}
+
+impl Drop for Buf {
+    fn drop(&mut self) {
+        let v = std::mem::take(&mut self.0);
+        let _ = SPARE.try_with(|x| x.borrow_mut().push(v));
+    }
+}
+
+/// 1/z by one real division (z away from zero and overflow: the series' denominators).
+#[inline]
+fn reciprocal(z: C64) -> C64 {
+    let d = 1.0 / z.norm_sqr();
+    C64::new(z.re * d, -z.im * d)
+}
+
 /// V†MV of a block's solved rows (Schur parts).
 fn rotate(f: &Factored, m: &Mat, work: &mut f64) -> Mat {
     f.to(&f.to(m, work).adjoint(), work).adjoint()
@@ -444,7 +509,7 @@ fn copies_of(copies: &[(usize, usize, usize)], groups: &[(usize, Vec<usize>)], b
 /// The adjoint of `copies_of`: given T̄_C (nc × n), Z̄ += Σ_a e_a (R₀U_a†V)† T̄_C and ḡ_e += (Σ T̄_C* ∘ (R₀U_a†V)Z)* per copy
 /// vector (Re ḡ de).
 #[allow(clippy::too_many_arguments)]
-fn copies_back(copies: &[(usize, usize, usize)], groups: &[(usize, Vec<usize>)], basis: &NearBasis, e: &[Vec<C64>], z: &[C64], tbar: &[C64], zbar: &mut [C64], ge: &mut [Vec<C64>], s: usize, n: usize, work: &mut f64) {
+fn copies_back(copies: &[(usize, usize, usize)], groups: &[(usize, Vec<usize>)], basis: &NearBasis, e: &[Vec<C64>], z: &[C64], tbar: &[C64], zbar: &mut [C64], ge: &mut [Buf], s: usize, n: usize, work: &mut f64) {
     for (cv, &(g, k, gi)) in copies.iter().enumerate() {
         let ek = e[g][k];
         let yc = &basis.copies[cv];
@@ -706,7 +771,7 @@ fn copies_compress_back(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C6
 
 /// The light's cotangents of the exact copies' couplings: K̂_ED's and K̂_DE's onto the coupling vectors' coefficients
 /// (ḡ_e, Re ḡ de), K̂_DD's onto the pairs' (k_t).
-fn copies_light(nb: &Near, basis: &NearBasis, kedbar: &[C64], kdebar: &[C64], kddbar: &[C64], ge: &mut [Vec<C64>], kt: Option<&mut [C64]>) {
+fn copies_light(nb: &Near, basis: &NearBasis, kedbar: &[C64], kdebar: &[C64], kddbar: &[C64], ge: &mut [Buf], kt: Option<&mut [C64]>) {
     let (s, nd) = (nb.s, nb.nd);
     for (x, &(g, k)) in nb.exact.iter().enumerate() {
         let y = &basis.couple[x];
@@ -1168,11 +1233,11 @@ impl Fold {
     /// The light's cotangents at a place onto its beams' amplitudes, contracted with their gradients, per lab axis: given
     /// per component and beam ḡ_f (Re ḡ df of the factor f_l), per component and basis vector ḡ_e (of e_k) and per pair
     /// k_t (of c_t), Σ Re(ḡ ∂_a x) over them all (`Fold::prototype_force`).
-    fn contracted(&self, at: &Placed, proj: &[Vec<C64>], pairs: &[Pair], gf: &[Vec<C64>], ge: &[Vec<C64>], kt: &[C64]) -> [f64; 3] {
+    fn contracted<V: AsRef<[C64]>>(&self, at: &Placed, proj: &[Vec<C64>], pairs: &[Pair], gf: &[V], ge: &[V], kt: &[C64]) -> [f64; 3] {
         // Onto ε_k: e_k = ε_k or ε_k*; c_t = ε_k*ε_k'.
         let mut geps: Vec<[C64; 3]> = vec![[C64::ZERO; 3]; self.light.frequencies.len()];
         for (c, comp) in self.components.iter().enumerate() {
-            for (k, g) in ge[c].iter().enumerate() {
+            for (k, g) in ge[c].as_ref().iter().enumerate() {
                 geps[comp.part.frequency][k] += if comp.part.counter { g.conj() } else { *g };
             }
         }
@@ -1193,7 +1258,8 @@ impl Fold {
         }
         for (c, comp) in self.components.iter().enumerate() {
             for (j, &l) in comp.beams.iter().enumerate() {
-                ga[l] += if comp.part.counter { gf[c][j].conj() } else { gf[c][j] };
+                let g = gf[c].as_ref()[j];
+                ga[l] += if comp.part.counter { g.conj() } else { g };
             }
         }
         std::array::from_fn(|a| ga.iter().zip(&at.amplitudes).map(|(g, x)| (*g * x.gradient[a]).re).sum())
@@ -1676,7 +1742,7 @@ impl Fold {
                         // The diagonal: (c_j − w_l − κ_i)⁻¹, each column at its own energy.
                         for i in (0..s).filter(|&i| nb.active[i]) {
                             for j in 0..n {
-                                nb.invs[at + sp * s * n + i * n + j] = (c[j] - C64::real(wl) - nb.kappa[i]).recip();
+                                nb.invs[at + sp * s * n + i * n + j] = reciprocal(c[j] - C64::real(wl) - nb.kappa[i]);
                             }
                         }
                         work[SERIES] += (s * n) as f64;
@@ -2128,15 +2194,15 @@ impl Fold {
         let sweeps = step.sweeps;
         let normal = &step.normal.data;
         // Ā_j = S⁻¹Ḡ_jS⁻¹; N̄ = Σ_j Ḡ_j S⁻¹ A_j† + A_j† S⁻¹ Ḡ_j.
-        let mut abar: Vec<Vec<C64>> = vec![];
-        let mut nbar = vec![C64::ZERO; nn];
-        let mut adj = vec![C64::ZERO; nn];
+        let mut abar: Vec<Buf> = vec![];
+        let mut nbar = Buf::zeros(nn);
+        let mut adj = Buf::zeros(nn);
         for j in 0..positions {
             let g = &bars[j].data;
             let aj = if j == 0 { &step.a.data } else { &nodes[j - 1].a.data };
             multiply(normal, g, &mut eigen.data, n);
             multiply(&eigen.data, normal, &mut temp.data, n);
-            abar.push(temp.data.clone());
+            abar.push(Buf::copy(&temp.data));
             for p in 0..n {
                 for q in 0..n {
                     adj[p * n + q] = aj[q * n + p].conj();
@@ -2150,14 +2216,14 @@ impl Fold {
             nbar.iter_mut().zip(&temp.data).for_each(|(o, x)| *o += *x);
             work += (6 * n * n * n) as f64;
         }
-        let mut xbar = vec![C64::ZERO; nn];
+        let mut xbar = Buf::zeros(nn);
         inverse_root_back(&step.metric.data, normal, &nbar, n, &mut xbar, &mut eigen.data, &mut temp.data, &mut vectors.data, &mut work);
         // The light's cotangents per position: the splits' factors, the components' coefficients, the pairs' coefficients.
-        let mut gf: Vec<Vec<Vec<C64>>> = (0..positions).map(|_| self.components.iter().map(|c| vec![C64::ZERO; c.beams.len()]).collect()).collect();
-        let mut ge: Vec<Vec<Vec<C64>>> = (0..positions).map(|_| self.components.iter().map(|c| vec![C64::ZERO; c.basis.len()]).collect()).collect();
-        let mut kt: Vec<Vec<C64>> = (0..positions).map(|_| vec![C64::ZERO; pairs.len()]).collect();
+        let mut gf: Vec<Vec<Buf>> = (0..positions).map(|_| self.components.iter().map(|c| Buf::zeros(c.beams.len())).collect()).collect();
+        let mut ge: Vec<Vec<Buf>> = (0..positions).map(|_| self.components.iter().map(|c| Buf::zeros(c.basis.len())).collect()).collect();
+        let mut kt: Vec<Buf> = (0..positions).map(|_| Buf::zeros(pairs.len())).collect();
         // A far block's forms Σ p_ab F_ab, Σ p_ab G_ab (p_ab = e_a*e_b) for their cotangents H̄, M̄.
-        let far_back = |x: usize, fb: &Far, e: &[Vec<C64>], hbar: &[C64], mbar: &[C64], ge: &mut [Vec<C64>], work: &mut f64| {
+        let far_back = |x: usize, fb: &Far, e: &[Vec<C64>], hbar: &[C64], mbar: &[C64], ge: &mut [Buf], work: &mut f64| {
             let basis = &cache.far[x][cache.at_far[x].unwrap()];
             let v = fb.vectors.len();
             for ia in 0..v {
@@ -2183,7 +2249,8 @@ impl Fold {
             pp_back(&abar[j], &mut kt[j], &mut work);
             for (x, fb) in far.iter().enumerate() {
                 let z0 = cache.far[x][cache.at_far[x].unwrap()].z0;
-                let mbar: Vec<C64> = abar[j].iter().map(|z| *z * z0).collect();
+                let mut mbar = Buf::zeros(nn);
+                mbar.iter_mut().zip(abar[j].iter()).for_each(|(m, z)| *m = *z * z0);
                 far_back(x, fb, &nodes[j - 1].at.e, &abar[j], &mbar, &mut ge[j], &mut work);
             }
         }
@@ -2196,7 +2263,7 @@ impl Fold {
             for b in [&mut nb.ztbar, &mut nb.vbar, &mut nb.kbar, &mut nb.zbar, &mut nb.bucket, &mut nb.fbar, &mut nb.zdbar, &mut nb.zdtbar, &mut nb.kedbar, &mut nb.kdebar, &mut nb.kddbar] {
                 b.fill(C64::ZERO);
             }
-            let mut x_buf = vec![C64::ZERO; s * n];
+            let mut x_buf = Buf::zeros(s * n);
             compress_back(&nb.kappa, t, ends, &basis.part, &nb.ztot, &nb.vtot, &nb.y, &abar[0], &mut nb.ztbar, &mut nb.vbar, &mut nb.kbar, &mut x_buf, s, n, &mut work);
             // The metric: Z̄ += 2 Z X̄.
             for i in 0..s {
@@ -2214,7 +2281,7 @@ impl Fold {
             if nb.copied_in {
                 // T̄_C = T_C (z₀(Ā + Ā†) + 2X̄).
                 let w: Vec<C64> = (0..nn).map(|i| (abar[0][i] + abar[0][(i % n) * n + i / n].conj()) * basis.z0 + xbar[i] * 2.0).collect();
-                let mut tbar = vec![C64::ZERO; nb.nc * n];
+                let mut tbar = Buf::zeros(nb.nc * n);
                 for k in 0..nb.nc {
                     for p in 0..n {
                         crate::linalg::mul_add(false, &mut tbar[k * n..k * n + n], nb.tc[k * n + p], &w[p * n..p * n + n]);
@@ -2223,7 +2290,7 @@ impl Fold {
                 copies_back(&nb.copies, &nb.groups, basis, &mid.e, &nb.ztot, &tbar, &mut nb.ztbar, &mut ge[0], s, n, &mut work);
             }
             for j in 1..positions {
-                let (mut zb, mut vb, mut y) = (vec![C64::ZERO; s * n], vec![C64::ZERO; s * n], vec![C64::ZERO; s * n]);
+                let (mut zb, mut vb, mut y) = (Buf::zeros(s * n), Buf::zeros(s * n), Buf::zeros(s * n));
                 let (zn, vn) = (&nb.znode[j - 1], &nb.vnode[j - 1]);
                 // K̂Z(s) (`compress` left the last node's alone).
                 for i in 0..s {
@@ -2238,7 +2305,7 @@ impl Fold {
                 if nb.copied_in {
                     let w: Vec<C64> = (0..nn).map(|i| (abar[j][i] + abar[j][(i % n) * n + i / n].conj()) * basis.z0).collect();
                     let tc = &nb.tcnode[j - 1];
-                    let mut tbar = vec![C64::ZERO; nb.nc * n];
+                    let mut tbar = Buf::zeros(nb.nc * n);
                     for k in 0..nb.nc {
                         for p in 0..n {
                             crate::linalg::mul_add(false, &mut tbar[k * n..k * n + n], tc[k * n + p], &w[p * n..p * n + n]);
@@ -2250,9 +2317,9 @@ impl Fold {
                     ge[j][cc][k] += vb.iter().zip(&basis.vectors[ia]).map(|(a, b)| a.conj() * *b).sum::<C64>();
                 }
                 let nd = nb.nd;
-                let mut zdb = vec![C64::ZERO; nd * n];
+                let mut zdb = Buf::zeros(nd * n);
                 if nd > 0 {
-                    let (mut kedb, mut kdeb) = (vec![C64::ZERO; s * nd], vec![C64::ZERO; nd * s]);
+                    let (mut kedb, mut kdeb) = (Buf::zeros(s * nd), Buf::zeros(nd * s));
                     copies_compress_back(s, nd, &nb.kednode[j - 1], &nb.kdenode[j - 1], &nb.kdd, zn, &nb.zdnode[j - 1], &abar[j], None, &mut zb, &mut zdb, &mut kedb, &mut kdeb, &mut nb.kddbar, n, &mut work);
                     copies_light(nb, basis, &kedb, &kdeb, &[], &mut ge[j], None);
                 }
@@ -2276,10 +2343,10 @@ impl Fold {
         }
         // The series, the last sweep first: h̄ the cotangent of the Bloch generator the sweep was solved at.
         let mut hb = abar[0].clone();
-        let mut hbase_bar = vec![C64::ZERO; nn];
-        let mut cbar = vec![C64::ZERO; n];
-        let mut dbar = vec![C64::ZERO; nn];
-        let mut acc = vec![C64::ZERO; n];
+        let mut hbase_bar = Buf::zeros(nn);
+        let mut cbar = Buf::zeros(n);
+        let mut dbar = Buf::zeros(nn);
+        let mut acc = Buf::zeros(n);
         for k in (0..sweeps).rev() {
             // h^{k+1} = hbase + Σ Ṽ†Z^k (the last sweep's Bloch part taken with the compression's).
             hbase_bar.iter_mut().zip(&hb).for_each(|(a, b)| *a += *b);
@@ -2313,11 +2380,13 @@ impl Fold {
                     let bucket = &mut nb.bucket[sp * s * n..(sp + 1) * s * n];
                     // The excited rows' cotangent of this sweep's Z_l (the held rows' to the first sweep), and the exact
                     // copies' Λ_D with it (`copies_back_solve`: K̂_DE†Λ_D onto the excited rows' cotangent).
-                    let mut zeb: Vec<C64> = (0..s * n).map(|x| nb.ztbar[x] + zbl[x] + if k == 0 { bucket[x] } else { C64::ZERO }).collect();
-                    let mut lamd = vec![C64::ZERO; nd * n];
+                    let mut zeb = Buf::zeros(s * n);
+                    (0..s * n).for_each(|x| zeb[x] = nb.ztbar[x] + zbl[x] + if k == 0 { bucket[x] } else { C64::ZERO });
+                    let mut lamd = Buf::zeros(nd * n);
                     if nd > 0 {
                         let dat = (k * splits + sp) * nd * n;
-                        let zdb: Vec<C64> = (0..nd * n).map(|x| nb.zdtbar[x] + nb.zdbar[sp * nd * n + x]).collect();
+                        let mut zdb = Buf::zeros(nd * n);
+                        (0..nd * n).for_each(|x| zdb[x] = nb.zdtbar[x] + nb.zdbar[sp * nd * n + x]);
                         let (pat, cat) = ((k * splits + sp) * n * nd * s, (k * splits + sp) * n * nd * nd);
                         copies_back_solve(s, nd, &nb.kde, &mut zeb, &zdb, &nb.pjs[pat..pat + n * nd * s], &nb.cinvs[cat..cat + n * nd * nd], &mut lamd, n, &mut work);
                         let (zdk, zek) = (&nb.zds[dat..dat + nd * n], zk);
@@ -2418,7 +2487,8 @@ impl Fold {
         pp_back(&hbase_bar, &mut kt[0], &mut work);
         for (x, fb) in far.iter().enumerate() {
             let z0 = cache.far[x][cache.at_far[x].unwrap()].z0;
-            let mbar: Vec<C64> = (0..nn).map(|i| abar[0][i] * z0 + xbar[i]).collect();
+            let mut mbar = Buf::zeros(nn);
+            (0..nn).for_each(|i| mbar[i] = abar[0][i] * z0 + xbar[i]);
             far_back(x, fb, &mid.e, &hbase_bar, &mbar, &mut ge[0], &mut work);
         }
         let mut held = [0.0_f64; 3];
@@ -2493,8 +2563,8 @@ impl Fold {
         let de: Vec<Vec<[C64; 3]>> = self.components.iter().map(|c| deps[c.part.frequency].iter().map(|d| if c.part.counter { d.map(|z| z.conj()) } else { *d }).collect()).collect();
         let dc = self.pair_gradients(mid, proj, pairs);
         // Ĥ_PP's and the far forms' (and the far metric's) tangents.
-        let mut dhbase: Vec<Vec<C64>> = (0..3).map(|_| vec![C64::ZERO; nn]).collect();
-        let mut dmetric: Vec<Vec<C64>> = (0..3).map(|_| vec![C64::ZERO; nn]).collect();
+        let mut dhbase: Vec<Buf> = (0..3).map(|_| Buf::zeros(nn)).collect();
+        let mut dmetric: Vec<Buf> = (0..3).map(|_| Buf::zeros(nn)).collect();
         for (t, entries) in pp.iter().enumerate() {
             for a in 0..3 {
                 for &(i, v) in entries {
@@ -2520,16 +2590,16 @@ impl Fold {
         }
         // Per near block and axis: ∂K̃ on the parts, ∂Ṽ; per split and axis the response's tangent (the sweeps').
         struct Tangent {
-            dk: [Vec<C64>; 3],
-            dv: [Vec<C64>; 3],
-            dz: Vec<[Vec<C64>; 3]>,
-            dztot: [Vec<C64>; 3],
+            dk: [Buf; 3],
+            dv: [Buf; 3],
+            dz: Vec<[Buf; 3]>,
+            dztot: [Buf; 3],
             // The exact copies': ∂K̂_ED, ∂K̂_DE, ∂K̂_DD, per split their response's tangent and summed.
-            dked: [Vec<C64>; 3],
-            dkde: [Vec<C64>; 3],
-            dkdd: [Vec<C64>; 3],
-            ddz: Vec<[Vec<C64>; 3]>,
-            ddztot: [Vec<C64>; 3],
+            dked: [Buf; 3],
+            dkde: [Buf; 3],
+            dkdd: [Buf; 3],
+            ddz: Vec<[Buf; 3]>,
+            ddztot: [Buf; 3],
         }
         let mut tangents: Vec<Tangent> = ws
             .near
@@ -2539,14 +2609,14 @@ impl Fold {
                 let basis = &cache.near[x][cache.at_near[x].unwrap()];
                 let s = nb.s;
                 let dk = std::array::from_fn(|a| {
-                    let mut m = vec![C64::ZERO; s * s];
+                    let mut m = Buf::zeros(s * s);
                     for (ti, &tt) in nb.terms.iter().enumerate() {
                         crate::linalg::mul_add(false, &mut m, dc[tt][a], &basis.within[ti]);
                     }
                     m
                 });
                 let dv = std::array::from_fn(|a| {
-                    let mut m = vec![C64::ZERO; s * n];
+                    let mut m = Buf::zeros(s * n);
                     for (ia, &(cc, k)) in nb.vectors.iter().enumerate() {
                         crate::linalg::mul_add(false, &mut m, de[cc][k][a], &basis.vectors[ia]);
                     }
@@ -2554,7 +2624,7 @@ impl Fold {
                 });
                 work += (3 * (nb.terms.len() * s * s + nb.vectors.len() * s * n)) as f64;
                 let nd = nb.nd;
-                let (mut dked, mut dkde, mut dkdd): ([Vec<C64>; 3], [Vec<C64>; 3], [Vec<C64>; 3]) = (std::array::from_fn(|_| vec![C64::ZERO; s * nd]), std::array::from_fn(|_| vec![C64::ZERO; nd * s]), std::array::from_fn(|_| vec![C64::ZERO; nd * nd]));
+                let (mut dked, mut dkde, mut dkdd): ([Buf; 3], [Buf; 3], [Buf; 3]) = (std::array::from_fn(|_| Buf::zeros(s * nd)), std::array::from_fn(|_| Buf::zeros(nd * s)), std::array::from_fn(|_| Buf::zeros(nd * nd)));
                 for a in 0..3 {
                     for (xx, &(g, k)) in nb.exact.iter().enumerate() {
                         let d = de[g][k][a];
@@ -2575,17 +2645,17 @@ impl Fold {
                 Tangent {
                     dk,
                     dv,
-                    dz: (0..nb.splits.len()).map(|_| std::array::from_fn(|_| vec![C64::ZERO; s * n])).collect(),
-                    dztot: std::array::from_fn(|_| vec![C64::ZERO; s * n]),
+                    dz: (0..nb.splits.len()).map(|_| std::array::from_fn(|_| Buf::zeros(s * n))).collect(),
+                    dztot: std::array::from_fn(|_| Buf::zeros(s * n)),
                     dked,
                     dkde,
                     dkdd,
-                    ddz: (0..nb.splits.len()).map(|_| std::array::from_fn(|_| vec![C64::ZERO; nd * n])).collect(),
-                    ddztot: std::array::from_fn(|_| vec![C64::ZERO; nd * n]),
+                    ddz: (0..nb.splits.len()).map(|_| std::array::from_fn(|_| Buf::zeros(nd * n))).collect(),
+                    ddztot: std::array::from_fn(|_| Buf::zeros(nd * n)),
                 }
             })
             .collect();
-        let mut dh = dhbase.clone();
+        let mut dh: Vec<Buf> = dhbase.iter().map(|x| Buf::copy(x)).collect();
         let mut rhs = vec![];
         for k in 0..sweeps {
             let delta = &ws.deltas[k * nn..(k + 1) * nn];
@@ -2656,7 +2726,7 @@ impl Fold {
                             // on the forward's P_j and C_j⁻¹.
                             let zdk = &ws.near[x].zds[dat..dat + nd * n];
                             let ddz = &mut tg.ddz[sp][a];
-                            let mut rd = vec![C64::ZERO; nd * n];
+                            let mut rd = Buf::zeros(nd * n);
                             for e2 in 0..nd {
                                 for j in 0..n {
                                     rd[e2 * n + j] = -zdk[e2 * n + j] * dh[a][j * n + j];
@@ -2686,9 +2756,9 @@ impl Fold {
                                 }
                             }
                             let (pat, cat) = ((k * splits + sp) * n * nd * s, (k * splits + sp) * n * nd * nd);
-                            let mut pj = nb.pjs[pat..pat + n * nd * s].to_vec();
-                            let mut cinv = nb.cinvs[cat..cat + n * nd * nd].to_vec();
-                            let mut out = vec![C64::ZERO; nd * n];
+                            let mut pj = Buf::copy(&nb.pjs[pat..pat + n * nd * s]);
+                            let mut cinv = Buf::copy(&nb.cinvs[cat..cat + n * nd * nd]);
+                            let mut out = Buf::zeros(nd * n);
                             copies_solve(s, nd, &nb.ked, &nb.kde, &nb.kdd, basis, &[], 0.0, inv, &rd, dz, &mut out, &mut pj, &mut cinv, true, n, &mut work);
                             ddz.copy_from_slice(&out);
                             work += (nd * n * (s + nd + 2 * n)) as f64;
@@ -2729,9 +2799,9 @@ impl Fold {
         // ∂X = Σ ∂Z†Z + Z†∂Z (+ the copies' rows', the far metric's); S⁻¹'s tangent dN = −N dS N, S dS + dS S = ∂X.
         let zeta: Vec<C64> = (0..n).map(|i| (0..n).map(|j| normal[i * n + j] * psi[j]).sum()).collect();
         let mut dzeta: Vec<Vec<C64>> = vec![];
-        let (mut e_buf, mut p_buf, mut q_buf) = (vec![C64::ZERO; nn], vec![C64::ZERO; nn], vec![C64::ZERO; nn]);
+        let (mut e_buf, mut p_buf, mut q_buf) = (Buf::zeros(nn), Buf::zeros(nn), Buf::zeros(nn));
         for a in 0..3 {
-            let mut dx = dmetric[a].clone();
+            let mut dx = Buf::copy(&dmetric[a]);
             for (x, (nb, tg)) in ws.near.iter().zip(&tangents).enumerate() {
                 let s = nb.s;
                 for i in 0..s {
@@ -2751,7 +2821,7 @@ impl Fold {
                 }
                 if nb.copied_in {
                     let basis = &cache.near[x][cache.at_near[x].unwrap()];
-                    let (mut dtc, mut extra) = (vec![C64::ZERO; nb.nc * n], vec![C64::ZERO; nb.nc * n]);
+                    let (mut dtc, mut extra) = (Buf::zeros(nb.nc * n), Buf::zeros(nb.nc * n));
                     copies_of(&nb.copies, &nb.groups, basis, &mid.e, &tg.dztot[a], &mut dtc, s, n, &mut work);
                     let de_a: Vec<Vec<C64>> = de.iter().map(|c| c.iter().map(|d| d[a]).collect()).collect();
                     copies_of(&nb.copies, &nb.groups, basis, &de_a, &nb.ztot, &mut extra, s, n, &mut work);
@@ -2765,7 +2835,7 @@ impl Fold {
                 }
             }
             // S dS + dS S = ∂X (`lyapunov`).
-            let mut ds = vec![C64::ZERO; nn];
+            let mut ds = Buf::zeros(nn);
             lyapunov(&step.metric.data, normal, &dx, n, &mut ds, &mut e_buf, &mut p_buf, &mut work);
             // dζ = −N dS ζ.
             for i in 0..n {
@@ -2802,7 +2872,7 @@ impl Fold {
                 }
             }
         };
-        let (mut u, mut du) = (vec![C64::ZERO; 3 * GROUND], vec![[C64::ZERO; 3]; 3 * GROUND]);
+        let (mut u, mut du) = (Buf::zeros(3 * GROUND), vec![[C64::ZERO; 3]; 3 * GROUND]);
         for (x, (nb, tg)) in ws.near.iter().zip(&tangents).enumerate() {
             let basis = &cache.near[x][cache.at_near[x].unwrap()];
             let s = nb.s;
