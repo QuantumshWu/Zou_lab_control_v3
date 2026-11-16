@@ -1933,17 +1933,32 @@ fn a_prototype_s_step_at_a_scene() {
                 let (mut sweep_ticks, mut sweep_work, mut sweep_count) = (vec![0u64; 64], vec![0.0; 64], vec![0usize; 64]);
                 let mut most = [0.0_f64; 6];
                 let (mut left, mut most_omitted, mut grown) = ([0usize; 2], 0.0_f64, 0usize);
+                // The decompositions at an atom's first step and after it (count, kept-level changes, ticks), and per step
+                // the work the path's δK̃ would add entering the series (BRIEF_PROTO4 item 3 (a)): T s² to form it, per
+                // sweep s²Ln in the series and 3s²Ln in the tangent, s²n in the compression, the two nodes' and the force's.
+                let (mut first, mut later, mut later_grown, mut first_ticks, mut later_ticks) = (0usize, 0usize, 0usize, 0u64, 0u64);
+                let mut series_a = vec![];
                 for path in &paths {
                     let mut cache = Cache::default();
-                    for r in path {
+                    for (k, r) in path.iter().enumerate() {
                         let clock = std::time::Instant::now();
                         let s = fold.prototype(*r, kappa, &mut cache, &mut ws).expect("the prototype's step");
                         wall.push(clock.elapsed().as_secs_f64());
+                        if k == 0 {
+                            first += s.made;
+                            first_ticks += s.ticks[1];
+                        } else {
+                            later += s.made;
+                            later_grown += s.grown;
+                            later_ticks += s.ticks[1];
+                        }
+                        let sw = s.sweeps;
                         left[0] += s.left[0];
                         left[1] += s.left[1];
                         grown += s.grown;
                         most_omitted = most_omitted.max(s.omitted);
                         let s = (s.ticks, s.work, s.sweeps, s.made, s.rounds, s.sweep_ticks.clone(), s.sweep_work.clone(), [s.series, s.reuse, s.far, s.centring, s.ratio, s.copies]);
+                        series_a.push(ws.kept_rows().iter().map(|&(sk, l, t)| (t * sk * sk + sw * 4 * sk * sk * l * n + 12 * sk * sk * n) as f64).sum::<f64>());
                         // The rest of the step's model: the outer nodes, the force (the three positions' cotangents), the
                         // photons of the state.
                         let clock = std::time::Instant::now();
@@ -2008,7 +2023,14 @@ fn a_prototype_s_step_at_a_scene() {
                     most[4],
                     most[5]
                 );
-                out += &format!("; the nodes left out: {:.2} near parts and {:.2} far blocks a step, their largest reading {most_omitted:.1e}", left[0] as f64 / steps as f64, left[1] as f64 / steps as f64);
+                out += &format!("; the nodes left out: {:.2} near levels and {:.2} far blocks a step, their largest reading {most_omitted:.1e}", left[0] as f64 / steps as f64, left[1] as f64 / steps as f64);
+                out += &format!(
+                    "; decompositions at the atoms' first steps {first} ({:.1} µs each), after them {later} ({later_grown} for the kept levels; {:.1} µs each, {:.2} µs a step); the path's δK̃ in the series would add {:.0} multiply-adds a step",
+                    1e-3 * ns_tick * first_ticks as f64 / first.max(1) as f64,
+                    1e-3 * ns_tick * later_ticks as f64 / later.max(1) as f64,
+                    1e-3 * ns_tick * later_ticks as f64 / steps as f64,
+                    series_a.iter().sum::<f64>() / steps as f64
+                );
                 out += "
 ";
                 out += &format!("      by phase (µs / multiply-adds, the steps of one round; all steps' µs in brackets): {}
