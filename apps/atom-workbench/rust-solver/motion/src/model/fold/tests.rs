@@ -1122,15 +1122,24 @@ fn a_fold_s_work_at_a_scene() {
         let kappa = [speed / 14f64.sqrt(), 2.0 * speed / 14f64.sqrt(), 3.0 * speed / 14f64.sqrt()];
         let started = std::time::Instant::now();
         let steps = 100;
+        let mut clocks = [0.0_f64; 2];
         let mut last = None;
         for step in 0..steps {
             let s = -1.5 + 0.03 * step as f64;
             let r = [s * unit; 3];
             let made = path.made;
+            let clock = std::time::Instant::now();
             let f = fold.at(r, kappa, &mut path).unwrap();
+            let folded = clock.elapsed().as_secs_f64();
             passes[f.passes] += 1;
             let rho = Mat::from_fn(f.n, f.n, |i, j| if i == j { C64::real(1.0 / f.n as f64) } else { C64::ZERO });
+            let clock = std::time::Instant::now();
             let (_, force) = fold.force(&f, &rho, &[]);
+            let forced = clock.elapsed().as_secs_f64();
+            if step > 0 {
+                clocks[0] += folded / (steps - 1) as f64;
+                clocks[1] += forced / (steps - 1) as f64;
+            }
             works.push(f.work);
             forces.push(force);
             if step > 0 {
@@ -1174,5 +1183,6 @@ fn a_fold_s_work_at_a_scene() {
             1e3 * elapsed
         );
         println!("   a step by phase: {}; passes one/two/three at {}/{}/{} steps", phases.iter().map(|(n, x)| format!("{n} {x:.0}")).collect::<Vec<_>>().join(", "), passes[1], passes[2], passes[3]);
+        println!("   wall clock a step (single thread, after the first): the fold {:.1} µs, the force {:.1} µs", 1e6 * clocks[0], 1e6 * clocks[1]);
     }
 }
