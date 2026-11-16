@@ -1,41 +1,41 @@
 //! The fold's step (B2; replan §3, onefold.status.md's plan of 2026-11-16): the same object as `Fold::at` -- the same
-//! blocks, rows, splits, passes, readings' rule and compression --, evaluated in a decomposition kept along the path and
-//! shared by the fold's atoms, in buffers laid out once per structure (`Workspace`): a step asks the heap for nothing
-//! (making or taking up a decomposition is the cache's, not the step's). `Fold::at` stays the definition and the tests'
-//! truth; at a fresh cache the two agree to the rounding.
+//! blocks, rows, tiers, splits, passes, readings' rule and compression --, evaluated in a decomposition kept along the path,
+//! in buffers laid out once per structure (`Workspace`): a step asks the heap for nothing (making or taking up a
+//! decomposition is the cache's, not the step's). `Fold::at` stays the definition and the tests' truth; at a fresh cache
+//! the two agree to the rounding. One cache per atom (`Cache`): its decompositions serve the atom's path.
 //!
 //! # What a step does
-//! 1. The light at the point: every beam's amplitude a_l, every frequency's field F, 𝒦 and H_GG (the request's levels with
-//!    the outside forms of F there), every component's coefficients on its field's basis e_k = Σ_l a_l γ_lk and every beam's
-//!    Doppler shift. Every entry the blocks and P take in x coordinates is a slot (`Slot`): 𝒦's, H_GG's, or a drive
-//!    Σ_k e_k U_k[x, t] (its conjugate), less a constant; the slots are laid out once and filled every step.
-//! 2. Each block's decomposition (`Cache`, keyed like `Path`: its solved rows, and the block where its copies dress it):
-//!    the Schur form V T V† of K = Ĥ_SS + Ĥ_SC R₀ Ĥ_CS + o on its solved rows (the exact copies' couplings and the couplings
-//!    between the lines left out), R₀ = (z₀ − Ĥ_CC)⁻¹ at its reference. Its diagonal is moved by the first order of the
-//!    change, κ_i = T_ii + Σ_t δc_t (V†M_tV)_ii, term by term (`Term`): the outside forms c = F_p*F_q on the excited rows,
-//!    and the centred copies' dressing c = e_k e_k′* with M = U_k R₀ U_k′† -- R₀ the reference's. The exact copies' own
-//!    rows move by their change itself, V_D†δK_DD V_D (few rows), their couplings with the excited rows are taken at the
-//!    point (Woodbury, fold.rs # The exact copies).
+//! 1. The light at the point: every beam's amplitude a_l, every frequency's field F, H_GG and 𝒦 (the request's levels with
+//!    the outside forms of F there, on the entries a step reads), every component's coefficients on its field's basis
+//!    e_k = Σ_l a_l γ_lk and every beam's Doppler shift. Every entry the blocks and P take in x coordinates is a slot
+//!    (`Slot`): 𝒦's, H_GG's, or a drive Σ_k e_k U_k[x, t] (its conjugate), less a constant; laid out once, filled each step.
+//! 2. Each block's decomposition (`Cache`, keyed by its solved rows and the block where centred rows dress it): the Schur
+//!    form V T V† of K = Ĥ_SS + Ĥ_SC R₀ Ĥ_CS + o on the solved rows S (the exact copies' couplings left out), the centred
+//!    rows C (excited levels and copies alike) frozen at its reference: R₀ = (z₀ − Ĥ_CC)⁻¹ and Ĥ_CC = z₀ − R₀⁻¹ there.
+//!    Its diagonal is moved by the first order of the change: the outside forms' term by term, κ_i += Σ_t δc_t (V†M_tV)_ii
+//!    (c = F_p*F_q), and the dressing's exactly, diag(X Y) − its reference's, X = V†Ĥ_SC R₀ and Y = Ĥ_CS V at the point.
+//!    The exact copies' own rows move by their change itself, V_D†δK_DD V_D; their couplings with the excited rows are
+//!    taken at the point (Woodbury, fold.rs # The exact copies).
 //! 3. The passes as `Fold::at` makes them (two on diagonal generators, a third on the Bloch generator where the next one
-//!    reads beyond the share): every beam's source a_l Σ_k γ_lk Y_k (Y_k = V†U_k, kept with the decomposition) and the
-//!    static one V†(B_S + Ĥ_SC R₀ B_C) solved in the basis -- on a diagonal generator each column a division by
-//!    h_j − w_l − κ_i --, the centred rows T_C = R₀(Ĥ_CS V Z + B_C) = X_C†Z + R₀B_C (X_C = V†Ĥ_SC R₀), and the Bloch generator
-//!    Ĥ_PP + W†Z + Ê Z + Ĥ_PC T_C (W = Σ_l of the beams' sources, the beams' emission's adjoint; Ê the static emission's
-//!    rows in the basis).
-//! 4. The reuse's reading, row by row and line by line (fold.rs # One decomposition along the path), its norms from the
-//!    terms: a row's error in a column is at most Σ_L off_iL ‖Z_L∖i‖ / |c − κ_i|, off_iL = ‖(V†(K_ref − K_kept)V)[i, L∖i]‖
-//!    + Σ_t |δc_t| ‖M̃_t[i, L∖i]‖ -- what the decomposition left out at its reference (on its own line what the Schur form
-//!    dropped, on the other line the couplings between the lines), exactly, and the change since; and R₀'s own change
-//!    since the reference, δR₀ ≤ ‖R₀‖²‖δM‖/(1 − ‖R₀‖‖δM‖) with
-//!    δM the change of z₀ − Ĥ_CC, through the dressing on the solved rows and on the centred rows themselves (their
-//!    population's error). Beyond the share a block takes the nearest kept decomposition, then a new one, as `Fold::at`.
-//! 5. The compression, the object's whole (DESIGN §1.3): A = Φ†ĤΦ with Φ = [1; T] and Ĥ at the point, every term of it --
-//!    the couplings between the lines the decomposition left out, the decay D exactly, the dressing through the centred
-//!    rows --, in the coordinates where Ĥ is sparse: T_S = VZ once, then A = Bloch + (W†Z)† + T†(ĤT + B) and M = 1 + T†T.
-//!    Its anti-Hermitian part is −(i/2)Σ_o ε_o†Dε_o for any T, so the decay is the jumps' products by construction.
-//!    S = M^{1/2}, G = S⁻¹AS⁻¹.
+//!    reads beyond the share): every beam's source a_l Σ_k γ_lk Y_k + X B_C,l (Y_k = V†U_k, kept with the decomposition;
+//!    B_C,l its source on the centred rows) and the static one V†B_S + X B_C solved in the basis -- on a diagonal generator
+//!    each column a division by h_j − w_l − κ_i --, the centred rows T_C = R₀(Ĥ_CS V Z + B_C) (every split's source), and
+//!    the Bloch generator Ĥ_PP + W†Z + Ê Z + Ĥ_PC T_C (W the beams' own sources on S, Ê the static emission in the basis).
+//! 4. The reuse's reading, row by row against the decomposition's connected parts P (fold.rs # One decomposition along the
+//!    path): a row's error in a column is at most Σ_P off_iP ‖Z_P∖i‖ / |c − κ_i|, off_iP = Σ_t |δc_t| ‖M̃_t[i, P∖i]‖ + Σ_b
+//!    (‖δX_ib‖ ‖Y_b[:, P]‖ + ‖X_ref,ib‖ ‖δY_b[:, P]‖) (+ what the Schur form dropped) -- the forms term by term, the dressing
+//!    by Cauchy–Schwarz component by component (b the centred rows' connected components, R₀ block diagonal by them); and
+//!    the frozen rows' own change component by component, δR₀_b ≤ ‖R₀_b‖²‖δM_b‖/(1 − ‖R₀_b‖‖δM_b‖), δM the change of
+//!    z₀ − Ĥ_CC, through the dressing (ρ_i = Σ_b ‖(V†Ĥ_SC)_ib‖ δR₀_b ‖Y_b‖) and on the centred rows themselves
+//!    (δT_C,b = R₀_b δM_b T_C,b to first order: ‖R₀_b‖‖δM_b‖‖T_C,b‖/(1 − ‖R₀_b‖‖δM_b‖)). Beyond the share a block takes the nearest kept decomposition, then a new one, as `Fold::at`.
+//! 5. The compression, of exactly this object (DESIGN §1.3): A = Φ†Ĥ′Φ, Ĥ′ the point's but on C × C the frozen z₀ − R₀⁻¹ --
+//!    with T_C = R₀(Ĥ_CS T_S + B_C) that block's terms are z₀T_C†T_C − T_C†(Ĥ_CS T_S + B_C) --, so A = Bloch + (W†Z)† +
+//!    T_S†(Ĥ_SS T_S + Ĥ_SC T_C + B_S) + z₀ T_C†T_C and M = 1 + T_S†T_S + T_C†T_C, T_S = VZ once. Every coupling of the
+//!    point is in it and the decay D exactly (Ĥ′'s anti-Hermitian part is −(i/2)D), so the decay is the jumps' products for
+//!    any T. S = M^{1/2}, G = S⁻¹AS⁻¹.
 //!
-//! Not here yet (the plan's later steps): the force's adjoint, the three nodes and the photons, the tones.
+//! Not here yet (the plan's later steps): the force's adjoint, the three nodes and the photons, the tones, the readings at
+//! the analysis times.
 use super::*;
 use crate::field::Amplitude;
 
@@ -49,7 +49,8 @@ enum Entry {
     Back(usize, usize, usize),
 }
 
-/// An entry of a sparse matrix at the point: its row and column, what it is, the constant it is less, its value.
+/// An entry of a sparse matrix at the point: its row and column, what it is, the constant it is less, its value; `live`
+/// filled every step (a frozen entry -- 𝒦 between two centred rows -- only where a decomposition is made).
 #[derive(Clone, Copy, Debug)]
 struct Slot {
     row: usize,
@@ -57,67 +58,64 @@ struct Slot {
     what: Entry,
     less: f64,
     value: C64,
+    live: bool,
 }
 
-/// A term of K's change on the excited rows (module documentation, 2): its coefficient -- an outside form's F_p*F_q
-/// (frequency, p, q), or a copy component's e_k e_k′* (component, k, k′) --, its value at the reference, and of
-/// M̃ = V†MV the diagonal and per row and group the norm of the row's rest on the group (its own group less itself).
-enum Coefficient {
-    Form(usize, usize, usize),
-    Dressing(usize, usize, usize),
-}
-
+/// An outside form's term of K's change (module documentation, 2): its frequency and components (c = F_p*F_q), its value at
+/// the reference; of M̃ = V†MV on the solved rows the diagonal and per row and part the norm of the row's rest there; and
+/// ‖M‖_F on the frozen centred excited rows (δM's).
 struct Term {
-    what: Coefficient,
+    w: usize,
+    p: usize,
+    q: usize,
     at: C64,
     diag: Vec<C64>,
     norms: Vec<f64>,
-}
-
-/// A block's sources in a basis: per source component its Y_k = V†U_k on its source places (solved rows × n); per copy
-/// component its Ỹ_k = V†U_k on the copies' columns (solved rows × (exact + centred copies)), X_k = Ỹ_k[:, centred] R₀ and
-/// per row Ỹ_k's norm on the centred columns.
-struct Ranks {
-    sources: Vec<(usize, Vec<Mat>)>,
-    copies: Vec<(usize, Vec<Mat>, Vec<Mat>, Vec<Vec<f64>>)>,
+    frozen: f64,
 }
 
 /// A kept decomposition (module documentation, 2): its key; K kept at its reference (x coordinates, the exact copies'
-/// couplings out; the nearest one's distance); its Schur form; per basis row its group (its line, or the exact copies')
-/// and its Schur part; the terms; per row and group the norm of what the decomposition leaves out on the other lines at
-/// its reference (V†(K_ref − K_kept)V's); its reference's R₀, z₀, Ĥ_CC, ‖R₀‖_F, the exact copies' K and their Schur vectors V_D
-/// (exact × exact); per block its ranks.
+/// couplings out; the nearest one's distance); its Schur form; per basis row its connected part, and per solved row its
+/// part, the part's first basis row and its place there; the forms' terms; the
+/// frozen centred rows: R₀, z₀, the frozen slots' ground values (the C × C H_GG slots, in their order), per centred row its
+/// connected component (R₀ is block diagonal by them) and per component ‖R₀_b‖_F and whether it holds excited rows; the dressing at the reference X_ref, Y_ref and diag(X_ref Y_ref); the exact
+/// copies' Ĥ_DD there and their Schur vectors V_D (exact × exact); per block its sources' Y_k on its solved rows.
 struct Basis {
     rows: Vec<Row>,
     own: Option<usize>,
     k: Mat,
     factored: Factored,
-    group: Vec<usize>,
     part: Vec<usize>,
+    places: Vec<(usize, usize, usize)>,
     terms: Vec<Term>,
-    cross: Vec<f64>,
     r0: Mat,
     z0: f64,
-    cc: Mat,
-    r0_norm: f64,
-    kdd: Mat,
+    r0_norms: Vec<f64>,
+    excited: Vec<bool>,
+    cc: Vec<C64>,
+    component: Vec<usize>,
+    components: usize,
+    x: Mat,
+    y: Mat,
+    dressing: Vec<C64>,
+    hdd: Mat,
     vd: Mat,
-    ranks: Vec<Option<Ranks>>,
+    ranks: Vec<Option<Vec<(usize, Vec<Mat>)>>>,
 }
 
-/// The decompositions kept, shared by a fold's atoms (fold.rs `Path`, the same rule): `current` per key the basis the
-/// atom stands on (an atom's own: clear it for another atom), `made` and `looked` the decompositions made and the kept
-/// ones taken up again.
+/// An atom's kept decompositions (fold.rs `Path`, the same rule): `current` per key the basis the atom stands on, `made`
+/// and `looked` the decompositions made and the kept ones taken up again.
 #[derive(Default)]
 pub(crate) struct Cache {
     bases: Vec<Basis>,
-    pub(crate) current: Vec<((Vec<Row>, Option<usize>), usize)>,
+    current: Vec<((Vec<Row>, Option<usize>), usize)>,
     pub(crate) made: usize,
     pub(crate) looked: usize,
 }
 
-/// A step's result (module documentation, 5), P's n × n matrices: A, the metric less one, S⁻¹, G; the passes solved and their ratio (≥ 1: the
-/// self-consistency does not exist); per block its reuse reading (rate units); the complex multiply-adds by phase.
+/// A step's result (module documentation, 5), P's n × n matrices: A, the metric less one, S⁻¹, G; the passes solved and
+/// their ratio (≥ 1: the self-consistency does not exist); per block its reuse reading (rate units); the complex
+/// multiply-adds by phase.
 pub(crate) struct Step {
     pub(crate) a: Mat,
     pub(crate) metric: Mat,
@@ -126,65 +124,76 @@ pub(crate) struct Step {
     pub(crate) passes: usize,
     pub(crate) ratio: f64,
     pub(crate) reuse: Vec<f64>,
+    /// Per block its reading on the first round (before any renewal: what took it beyond the share, if anything).
+    pub(crate) first: Vec<f64>,
     pub(crate) work: f64,
     pub(crate) phases: [(&'static str, f64); 6],
 }
 
-/// A block's layout and buffers (module documentation): its sizes (Q rows m, solved s, of them excited ne and exact
-/// copies nd, centred nc); its slots -- Ĥ on its Q rows, the static sources (row, P place), the static emission (P place,
-/// row), its part of Ĥ_PP; its centre's terms (a ground source: (state, its frame), an explicit state: (state, o)); its
-/// splits (None the static one, else (component, beam)) with per source component its places; the P places a beam
-/// sources (W's columns), the static sources' places, the P rows the static emission from its solved rows reaches; per
-/// solved row its group and the groups' count. Then the step's buffers.
+/// A block's layout and buffers (module documentation): its sizes (Q rows m, solved s, of them excited ne and exact copies
+/// nd, centred nc, of them excited nce); its slots -- Ĥ on its Q rows (the frozen C × C H_GG ones listed apart), the static
+/// sources (row, P place), the static emission (P place, row); its centre's terms (a ground source: (state, its frame), an
+/// explicit state: (state, o)); its splits (None the static one, else (component, beam)) with per source component its
+/// places and per basis vector U_k on the centred excited rows (centred × n); the P places a beam sources, the static
+/// sources' places, the P rows the static emission from its solved rows reaches. Then the step's buffers.
 struct Lay {
     m: usize,
     s: usize,
     ne: usize,
     nd: usize,
     nc: usize,
+    nce: usize,
     inner: Vec<Slot>,
+    frozen: Vec<usize>,
     absorb: Vec<Slot>,
     emit: Vec<Slot>,
     centre: Vec<(bool, usize, f64)>,
     splits: Vec<Option<(usize, usize)>>,
     places: Vec<(usize, Vec<usize>)>,
+    uc: Vec<Vec<Mat>>,
     sourced: Vec<usize>,
     statics: Vec<usize>,
     emitting: Vec<usize>,
-    group: Vec<usize>,
-    groups: usize,
     // The step's.
     basis: usize,
     kappa: Vec<C64>,
     coefficients: Vec<C64>,
     off: Vec<f64>,
     rho: Vec<f64>,
-    dr0: f64,
-    ycf: f64,
-    b0c: f64,
+    factor: Vec<f64>,
+    dr0: Vec<f64>,
     shifts: Vec<f64>,
     live: Vec<bool>,
     b: Vec<Mat>,
+    bc: Vec<Mat>,
     z: Vec<Mat>,
     bu: Mat,
     ztot: Mat,
     zx: Mat,
     w: Mat,
     est: Mat,
-    xc: Mat,
-    yc: Mat,
-    ydc: Mat,
+    x0: Mat,
+    x: Mat,
+    y: Mat,
+    gd: Mat,
+    hde: Mat,
     coupling: Mat,
     back: Mat,
     b0: Mat,
     r0b: Mat,
+    u: Mat,
     tc: Mat,
     t: Mat,
-    y: Mat,
+    ys: Mat,
     dkdd: Mat,
+    left: Mat,
     sizes: Vec<f64>,
     err: Vec<f64>,
     norms: Vec<f64>,
+    dx: Vec<f64>,
+    xr: Vec<f64>,
+    yb: Vec<f64>,
+    dyb: Vec<f64>,
     column: Column,
     reading: f64,
 }
@@ -203,8 +212,8 @@ struct Column {
     out: Vec<C64>,
 }
 
-/// The step's buffers, laid out once per fold (`Fold::workspace`): the light at the point, P's slots, every block's
-/// layout, the P matrices of the passes and the compression, and the step's result.
+/// The step's buffers, laid out once per fold (`Fold::workspace`): the light at the point, the outside forms' entries a
+/// step reads, P's slots, every block's layout, the P matrices of the passes and the compression, and the step's result.
 pub(crate) struct Workspace {
     amplitudes: Vec<Amplitude>,
     fields: Vec<[C64; 3]>,
@@ -213,6 +222,8 @@ pub(crate) struct Workspace {
     e: Vec<Vec<C64>>,
     f: Vec<Vec<C64>>,
     doppler: Vec<Vec<f64>>,
+    #[allow(clippy::type_complexity)]
+    entries: Vec<Vec<(usize, usize, Vec<(usize, usize, C64)>)>>,
     pp: Vec<Slot>,
     blocks: Vec<Lay>,
     hpp: Mat,
@@ -239,21 +250,21 @@ fn drive(e: &[Vec<C64>], components: &[Component], g: usize, x: usize, t: usize)
     components[g].basis.iter().zip(&e[g]).map(|(u, ek)| *ek * u[(x, t)]).sum()
 }
 
+fn value(what: Entry, excited: &Mat, ground: &Mat, e: &[Vec<C64>], components: &[Component]) -> C64 {
+    match what {
+        Entry::Excited(x, y) => excited[(x, y)],
+        Entry::Ground(a, b) => ground[(a, b)],
+        Entry::Drive(g, x, t) => drive(e, components, g, x, t),
+        Entry::Back(g, x, t) => drive(e, components, g, x, t).conj(),
+    }
+}
+
 fn fill(slots: &mut [Slot], excited: &Mat, ground: &Mat, e: &[Vec<C64>], components: &[Component], work: &mut f64) {
-    for s in slots.iter_mut() {
-        let v = match s.what {
-            Entry::Excited(x, y) => excited[(x, y)],
-            Entry::Ground(a, b) => ground[(a, b)],
-            Entry::Drive(g, x, t) => {
-                *work += e[g].len() as f64;
-                drive(e, components, g, x, t)
-            }
-            Entry::Back(g, x, t) => {
-                *work += e[g].len() as f64;
-                drive(e, components, g, x, t).conj()
-            }
-        };
-        s.value = v - C64::real(s.less);
+    for s in slots.iter_mut().filter(|s| s.live) {
+        if let Entry::Drive(g, ..) | Entry::Back(g, ..) = s.what {
+            *work += e[g].len() as f64;
+        }
+        s.value = value(s.what, excited, ground, e, components) - C64::real(s.less);
     }
 }
 
@@ -289,6 +300,7 @@ fn from_rows(f: &Factored, z: &Mat, out: &mut Mat, work: &mut f64) {
         *work += (idx.len() * idx.len() * n) as f64;
     }
 }
+
 
 /// out = a b (or out += a b).
 fn product(out: &mut Mat, a: &Mat, b: &Mat, add: bool, work: &mut f64) {
@@ -354,7 +366,8 @@ fn sylvester_into(tk: &Mat, diag: &[C64], ends: &[usize], th: &Mat, w: f64, b: &
 }
 
 /// One column of the block's solve with exact copies (fold.rs `Eliminated::column`): (c − K)z = r, the excited rows first
-/// in the basis, then the copies' Schur complement, into `col.out`.
+/// in the basis, then the copies' Schur complement, into `col.out`. False where that complement is singular.
+#[allow(clippy::too_many_arguments)]
 fn column(f: &Factored, kappa: &[C64], ne: usize, nd: usize, coupling: &Mat, back: &Mat, c: C64, r: &[C64], col: &mut Column, work: &mut f64) -> bool {
     let (t, ends) = (&f.t, &f.ends);
     let tri = |src: &dyn Fn(usize) -> C64, z: &mut [C64], work: &mut f64| {
@@ -417,8 +430,7 @@ impl Fold {
             let c = &self.components[g];
             c.basis.iter().any(|u| u[(x, t)] != C64::ZERO) || c.couplings.iter().any(|u| u[(x, t)] != C64::ZERO)
         };
-        let slot = |row: usize, col: usize, what: Entry, less: f64| Slot { row, col, what, less, value: C64::ZERO };
-        let lines = self.part_of.iter().copied().max().map_or(0, |x| x + 1);
+        let slot = |row: usize, col: usize, what: Entry, less: f64| Slot { row, col, what, less, value: C64::ZERO, live: true };
         let mut pp: Vec<Slot> = vec![];
         for p in 0..ng {
             for q in (0..ng).filter(|&q| self.frames[q] == self.frames[p]) {
@@ -432,6 +444,7 @@ impl Fold {
             let m = b.rows.len();
             let s = b.solved;
             let ne = b.rows[..s].iter().filter(|r| matches!(r, Row::Excited(_))).count();
+            let nce = b.rows[s..].iter().filter(|r| matches!(r, Row::Excited(_))).count();
             let (nd, nc) = (s - ne, m - s);
             let mut inner = vec![];
             for (i, ri) in b.rows.iter().enumerate() {
@@ -445,6 +458,14 @@ impl Fold {
                         }
                         _ => {}
                     }
+                }
+            }
+            // The frozen centred block: its 𝒦 entries are not filled by a step, its H_GG ones are (δM's), listed apart.
+            let mut frozen = vec![];
+            for (k, x) in inner.iter_mut().enumerate().filter(|(_, x)| x.row >= s && x.col >= s) {
+                match x.what {
+                    Entry::Excited(..) => x.live = false,
+                    _ => frozen.push(k),
                 }
             }
             let mut absorb = vec![];
@@ -502,12 +523,24 @@ impl Fold {
             centre.extend(b.explicit.iter().map(|&p| (true, self.explicit[p - ng], b.value)));
             let mut splits = vec![None];
             let mut places = vec![];
+            let mut uc = vec![];
             for (c, comp) in self.components.iter().enumerate() {
                 let here: Vec<usize> = b.sources.iter().filter(|x| x.1 == c).map(|x| x.0).collect();
                 if here.is_empty() {
                     continue;
                 }
                 splits.extend((0..comp.beams.len()).map(|j| Some((c, j))));
+                uc.push(
+                    comp.basis
+                        .iter()
+                        .map(|u| {
+                            Mat::from_fn(nc, n, |a, p| match b.rows[s + a] {
+                                Row::Excited(y) if here.contains(&p) => u[(y, self.ground[p])],
+                                _ => C64::ZERO,
+                            })
+                        })
+                        .collect(),
+                );
                 places.push((c, here));
             }
             let mut sourced: Vec<usize> = places.iter().flat_map(|x| x.1.iter().copied()).collect();
@@ -519,8 +552,6 @@ impl Fold {
             let mut emitting: Vec<usize> = emit.iter().filter(|x: &&Slot| x.col < s).map(|x| x.row).collect();
             emitting.sort();
             emitting.dedup();
-            let group: Vec<usize> = b.rows[..s].iter().map(|r| if let Row::Excited(y) = r { self.part_of[*y] } else { lines }).collect();
-            let groups = lines + 1;
             let z = |r: usize, c: usize| Mat::zeros(r, c);
             blocks.push(Lay {
                 m,
@@ -528,52 +559,80 @@ impl Fold {
                 ne,
                 nd,
                 nc,
+                nce,
                 inner,
+                frozen,
                 absorb,
                 emit,
                 centre,
                 live: vec![false; splits.len()],
                 shifts: vec![0.0; splits.len()],
                 b: (0..splits.len()).map(|_| z(s, n)).collect(),
+                bc: (0..splits.len()).map(|_| z(nc, n)).collect(),
                 z: (0..splits.len()).map(|_| z(s, n)).collect(),
                 splits,
                 places,
+                uc,
                 sourced,
                 statics,
                 emitting,
-                group,
-                groups,
                 basis: 0,
                 kappa: vec![C64::ZERO; s],
                 coefficients: vec![],
-                off: vec![0.0; s * groups],
+                off: vec![0.0; s * s.max(1)],
                 rho: vec![0.0; s],
-                dr0: 0.0,
-                ycf: 0.0,
-                b0c: 0.0,
+                factor: vec![0.0; nc.max(1)],
+                dr0: vec![0.0; nc.max(1)],
                 bu: z(s, n),
                 ztot: z(s, n),
                 zx: z(s, n),
                 w: z(s, n),
                 est: z(n, s),
-                xc: z(s, nc),
-                yc: z(s, nd + nc),
-                ydc: z(nd, nc),
+                x0: z(s, nc),
+                x: z(s, nc),
+                y: z(nc, s),
+                gd: z(s, nd),
+                hde: z(nd, ne),
                 coupling: z(ne, nd),
                 back: z(nd, ne),
                 b0: z(m, n),
                 r0b: z(nc, n),
+                u: z(nc, n),
                 tc: z(nc, n),
                 t: z(m, n),
-                y: z(m, n),
+                ys: z(s, n),
                 dkdd: z(nd, nd),
+                left: z(nd, nd),
                 sizes: vec![0.0; n],
                 err: vec![0.0; s * n],
-                norms: vec![0.0; groups],
+                norms: vec![0.0; s.max(1)],
+                dx: vec![0.0; nc.max(1)],
+                xr: vec![0.0; nc.max(1)],
+                yb: vec![0.0; s.max(1) * nc.max(1)],
+                dyb: vec![0.0; s.max(1) * nc.max(1)],
                 column: Column { r: vec![C64::ZERO; s], p: z(nd, ne), pv: vec![C64::ZERO; ne], schur: vec![C64::ZERO; nd * nd], pivots: vec![0; nd], y: vec![C64::ZERO; ne], x: vec![C64::ZERO; nd], out: vec![C64::ZERO; s] },
                 reading: 0.0,
             });
         }
+        // The outside forms' entries a step reads: those of every ground state and of the excited states a filled slot takes.
+        let mut used = [true; STATES];
+        for x in 0..EXCITED {
+            let mut any = self.explicit.contains(&x);
+            for l in &blocks {
+                any |= l.inner.iter().chain(&l.absorb).chain(&l.emit).any(|s| s.live && matches!(s.what, Entry::Excited(a, b) if a == x || b == x));
+            }
+            used[GROUND + x] = any;
+        }
+        let entries = self
+            .entries
+            .iter()
+            .map(|list| {
+                list.iter()
+                    .map(|(p, q, e)| (*p, *q, e.iter().copied().filter(|&(i, j, _)| used[i] && used[j]).collect::<Vec<_>>()))
+                    .filter(|x| !x.2.is_empty())
+                    .collect()
+            })
+            .collect();
         let z = |r: usize, c: usize| Mat::zeros(r, c);
         Workspace {
             amplitudes: vec![Amplitude { value: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3] }; self.light.beams.len()],
@@ -583,6 +642,7 @@ impl Fold {
             e: self.components.iter().map(|c| vec![C64::ZERO; c.basis.len()]).collect(),
             f: self.components.iter().map(|c| vec![C64::ZERO; c.beams.len()]).collect(),
             doppler: self.components.iter().map(|c| vec![0.0; c.beams.len()]).collect(),
+            entries,
             pp,
             blocks,
             hpp: z(n, n),
@@ -601,11 +661,11 @@ impl Fold {
             temp: z(n, n),
             whole: vec![0.0; n],
             renew: Vec::with_capacity(self.blocks.len() * 3),
-            step: Step { a: z(n, n), metric: z(n, n), normal: z(n, n), generator: z(n, n), passes: 0, ratio: 0.0, reuse: vec![0.0; self.blocks.len()], work: 0.0, phases: [("place", 0.0), ("select", 0.0), ("prepare", 0.0), ("passes", 0.0), ("reading", 0.0), ("compression", 0.0)] },
+            step: Step { a: z(n, n), metric: z(n, n), normal: z(n, n), generator: z(n, n), passes: 0, ratio: 0.0, reuse: vec![0.0; self.blocks.len()], first: vec![0.0; self.blocks.len()], work: 0.0, phases: [("place", 0.0), ("select", 0.0), ("prepare", 0.0), ("passes", 0.0), ("reading", 0.0), ("compression", 0.0)] },
         }
     }
 
-    /// The light at the point (module documentation, 1), every slot filled.
+    /// The light at the point (module documentation, 1), every live slot filled.
     fn place(&self, r: [f64; 3], kappa: [f64; 3], ws: &mut Workspace, work: &mut f64) {
         for (a, b) in ws.amplitudes.iter_mut().zip(&self.light.beams) {
             *a = b.amplitude_to(r, 0);
@@ -615,7 +675,7 @@ impl Fold {
         }
         ws.excited.data.copy_from_slice(&self.base_excited.data);
         ws.ground.data.copy_from_slice(&self.base_ground.data);
-        self.forms(&self.entries, &ws.amplitudes, &mut ws.ground, &mut ws.excited, work);
+        self.forms(&ws.entries, &ws.amplitudes, &mut ws.ground, &mut ws.excited, work);
         for (c, comp) in self.components.iter().enumerate() {
             for (j, &l) in comp.beams.iter().enumerate() {
                 ws.f[c][j] = comp.factor(ws.amplitudes[l].value);
@@ -646,22 +706,32 @@ impl Fold {
         sum / l.centre.len().max(1) as f64
     }
 
+    /// A block's Ĥ on its Q rows at the point, every entry (the frozen ones too, with 𝒦 at the point whole): where a
+    /// decomposition is made or the nearest kept one looked for.
+    fn whole_at(&self, o: usize, ws: &Workspace, work: &mut f64) -> Mat {
+        let l = &ws.blocks[o];
+        let (mut excited, mut ground) = (self.base_excited.clone(), self.base_ground.clone());
+        self.forms(&self.entries, &ws.amplitudes, &mut ground, &mut excited, work);
+        let mut inner = Mat::zeros(l.m, l.m);
+        for x in &l.inner {
+            inner[(x.row, x.col)] = value(x.what, &excited, &ground, &ws.e, &self.components) - C64::real(x.less);
+        }
+        inner
+    }
+
     /// A block's K at the point (x coordinates, its solved rows, the exact copies' couplings out: the kept one), its R₀,
-    /// z₀ and Ĥ_CC -- where a decomposition is made or the nearest kept one looked for. None where R₀ is singular.
+    /// z₀ and Ĥ on its Q rows. None where R₀ is singular.
     fn effective_at(&self, o: usize, ws: &Workspace, work: &mut f64) -> Option<(Mat, Mat, f64, Mat)> {
         let l = &ws.blocks[o];
         let (m, s) = (l.m, l.s);
-        let mut inner = Mat::zeros(m, m);
-        for x in &l.inner {
-            inner[(x.row, x.col)] = x.value;
-        }
+        let inner = self.whole_at(o, ws, work);
         let z0 = self.centre(l, ws);
         let cs: Vec<usize> = (s..m).collect();
         let ss: Vec<usize> = (0..s).collect();
         let cc = inner.block(&cs, &cs);
         let r0 = inverse(&Mat::from_fn(l.nc, l.nc, |i, j| if i == j { C64::real(z0) } else { C64::ZERO } - cc[(i, j)]), work)?;
         let mut k = inner.block(&ss, &ss);
-        if l.nc > 0 {
+        if l.nc > 0 && s > 0 {
             let rc = mul(&inner.block(&ss, &cs), &r0, work);
             plus(&mut k, &mul(&rc, &inner.block(&cs, &ss), work));
         }
@@ -674,7 +744,7 @@ impl Fold {
                 }
             }
         }
-        Some((k, r0, z0, cc))
+        Some((k, r0, z0, inner))
     }
 
     /// The basis a block stands on at the point (fold.rs `Fold::eliminate`, the same rule): the atom's own; beyond the share
@@ -718,11 +788,11 @@ impl Fold {
         let at = match chosen {
             Some(at) => at,
             None => {
-                let (kept, r0, z0, cc) = match here {
+                let made = match here {
                     Some(x) => x,
                     None => self.effective_at(o, ws, work)?,
                 };
-                cache.bases.push(self.make(o, ws, kept, r0, z0, cc, work)?);
+                cache.bases.push(self.make(o, ws, made, work)?);
                 cache.made += 1;
                 cache.bases.len() - 1
             }
@@ -732,19 +802,18 @@ impl Fold {
             None => cache.current.push(((rows.to_vec(), own), at)),
         }
         if cache.bases[at].ranks[o].is_none() {
-            let ranks = self.ranks(o, &cache.bases[at].factored, &cache.bases[at].r0, work);
+            let ranks = self.ranks(o, &cache.bases[at].factored, work);
             cache.bases[at].ranks[o] = Some(ranks);
         }
         ws.blocks[o].basis = at;
         Some(())
     }
 
-    /// A block's sources in a basis (`Ranks`).
-    fn ranks(&self, o: usize, f: &Factored, r0: &Mat, work: &mut f64) -> Ranks {
+    /// A block's sources in a basis: per source component its Y_k = V†U_k on its solved rows and source places.
+    fn ranks(&self, o: usize, f: &Factored, work: &mut f64) -> Vec<(usize, Vec<Mat>)> {
         let b = &self.blocks[o];
         let n = self.size();
         let s = b.solved;
-        let ne = b.rows[..s].iter().filter(|r| matches!(r, Row::Excited(_))).count();
         let mut sources = vec![];
         for (ci, comp) in self.components.iter().enumerate() {
             let places: Vec<usize> = b.sources.iter().filter(|x| x.1 == ci).map(|x| x.0).collect();
@@ -768,114 +837,100 @@ impl Fold {
                 .collect();
             sources.push((ci, per));
         }
-        let mut copies = vec![];
-        let mut gs: Vec<usize> = b.rows[ne..].iter().filter_map(|r| if let Row::Copy { component, .. } = r { Some(*component) } else { None }).collect();
-        gs.sort();
-        gs.dedup();
-        let nd = s - ne;
-        for g in gs {
-            let (mut ys, mut xs, mut rn) = (vec![], vec![], vec![]);
-            for u in &self.components[g].basis {
-                let mut c = Mat::zeros(s, b.rows.len() - ne);
-                for (col, r) in b.rows[ne..].iter().enumerate() {
-                    if let Row::Copy { state, component } = *r {
-                        if component == g {
-                            for i in 0..ne {
-                                if let Row::Excited(y) = b.rows[i] {
-                                    c[(i, col)] = u[(y, state)];
-                                }
-                            }
-                        }
-                    }
-                }
-                let y = f.to(&c, work);
-                let centred = y.block(&(0..s).collect::<Vec<_>>(), &(nd..y.cols).collect::<Vec<_>>());
-                xs.push(mul(&centred, r0, work));
-                rn.push((0..s).map(|i| (nd..y.cols).map(|j| y[(i, j)].norm_sqr()).sum::<f64>().sqrt()).collect());
-                ys.push(y);
-            }
-            copies.push((g, ys, xs, rn));
-        }
-        Ranks { sources, copies }
+        sources
     }
 
-    /// A decomposition made at the point (module documentation, 2): K's Schur form with the lines' couplings out, its
-    /// terms, what it leaves out between the lines there, the copies' reference.
-    #[allow(clippy::too_many_arguments)]
-    fn make(&self, o: usize, ws: &Workspace, kept: Mat, r0: Mat, z0: f64, cc: Mat, work: &mut f64) -> Option<Basis> {
+    /// A decomposition made at the point (module documentation, 2): K's Schur form, its parts, the forms' terms, the frozen
+    /// centred rows and the dressing at the reference.
+    fn make(&self, o: usize, ws: &Workspace, made: (Mat, Mat, f64, Mat), work: &mut f64) -> Option<Basis> {
+        let (kept, r0, z0, inner) = made;
         let b = &self.blocks[o];
         let l = &ws.blocks[o];
-        let (s, ne, nd, groups) = (l.s, l.ne, l.nd, l.groups);
+        let (m, s, ne, nd, nc) = (l.m, l.s, l.ne, l.nd, l.nc);
         let rows = b.rows[..s].to_vec();
-        let mut k = kept.clone();
-        for i in 0..s {
-            for j in 0..s {
-                if let (Row::Excited(x), Row::Excited(y)) = (rows[i], rows[j]) {
-                    if self.part_of[x] != self.part_of[y] {
-                        k[(i, j)] = C64::ZERO;
-                    }
-                }
-            }
-        }
-        let factored = Factored::of(&k, work)?;
-        let (mut group, mut part) = (vec![0; s], vec![0; s]);
+        let factored = Factored::of(&kept, work)?;
+        let mut part = vec![0; s];
+        let mut places = vec![(0, 0, 0); s];
         for (pi, (idx, at, _)) in factored.parts.iter().enumerate() {
-            for a in 0..idx.len() {
-                group[at + a] = l.group[idx[0]];
+            for (a, &i) in idx.iter().enumerate() {
                 part[at + a] = pi;
+                places[i] = (pi, *at, a);
             }
         }
+        let parts = factored.parts.len().max(1);
         let rotate = |m: &Mat, work: &mut f64| factored.to(&factored.to(m, work).adjoint(), work).adjoint();
-        let norms_of = |t: &Mat, cross_only: bool| -> Vec<f64> {
-            let mut out = vec![0.0; s * groups];
+        let norms_of = |t: &Mat| -> Vec<f64> {
+            let mut out = vec![0.0; s * parts];
             for i in 0..s {
                 for j in (0..s).filter(|&j| j != i) {
-                    if !cross_only || group[j] != group[i] {
-                        out[i * groups + group[j]] += t[(i, j)].norm_sqr();
-                    }
+                    out[i * parts + part[j]] += t[(i, j)].norm_sqr();
                 }
             }
             out.iter_mut().for_each(|x| *x = x.sqrt());
             out
         };
-        let row_of: Vec<Option<usize>> = (0..EXCITED).map(|x| rows[..ne].iter().position(|r| *r == Row::Excited(x))).collect();
+        // The outside forms' terms: on the solved excited rows, and on the frozen centred excited rows (δM's norm).
+        let row_of: Vec<Option<usize>> = (0..EXCITED).map(|x| b.rows.iter().position(|r| *r == Row::Excited(x))).collect();
         let mut terms = vec![];
         for (w, list) in self.entries.iter().enumerate() {
             for (p, q, entries) in list {
-                let mut m = Mat::zeros(s, s);
-                let mut any = false;
+                let mut mm = Mat::zeros(s, s);
+                let (mut any, mut frozen) = (false, 0.0);
                 for &(i, j, v) in entries {
                     if i >= GROUND && j >= GROUND {
                         if let (Some(a), Some(c)) = (row_of[i - GROUND], row_of[j - GROUND]) {
-                            m[(a, c)] = v;
-                            any = true;
+                            if a < s && c < s {
+                                mm[(a, c)] = v;
+                                any = true;
+                            } else if a >= s && c >= s {
+                                frozen += v.norm_sqr();
+                            }
                         }
                     }
                 }
-                if !any {
+                if !any && frozen == 0.0 {
                     continue;
                 }
-                let t = rotate(&m, work);
+                let t = rotate(&mm, work);
                 let field = &ws.fields[w];
-                terms.push(Term { what: Coefficient::Form(w, *p, *q), at: field[*p].conj() * field[*q], diag: (0..s).map(|i| t[(i, i)]).collect(), norms: norms_of(&t, false) });
+                terms.push(Term { w, p: *p, q: *q, at: field[*p].conj() * field[*q], diag: (0..s).map(|i| t[(i, i)]).collect(), norms: norms_of(&t), frozen: frozen.sqrt() });
             }
         }
-        let ranks = self.ranks(o, &factored, &r0, work);
-        for (g, ys, xs, _) in &ranks.copies {
-            let centred: Vec<Mat> = ys.iter().map(|y| y.block(&(0..s).collect::<Vec<_>>(), &(nd..y.cols).collect::<Vec<_>>())).collect();
-            for (a, x) in xs.iter().enumerate() {
-                for (c, y) in centred.iter().enumerate() {
-                    let mut t = Mat::zeros(s, s);
-                    product_adj(&mut t, x, y, work);
-                    terms.push(Term { what: Coefficient::Dressing(*g, a, c), at: ws.e[*g][a] * ws.e[*g][c].conj(), diag: (0..s).map(|i| t[(i, i)]).collect(), norms: norms_of(&t, false) });
+        // The frozen centred rows: their H_GG slots' values, their connected components (R₀'s blocks).
+        let cc: Vec<C64> = l.frozen.iter().map(|&k| inner[(l.inner[k].row, l.inner[k].col)]).collect();
+        let mut component: Vec<usize> = (0..nc).collect();
+        fn find(c: &mut [usize], mut x: usize) -> usize {
+            while c[x] != x {
+                c[x] = c[c[x]];
+                x = c[x];
+            }
+            x
+        }
+        for x in l.inner.iter().filter(|x| x.row >= s && x.col >= s && x.row != x.col) {
+            let (a, c) = (find(&mut component, x.row - s), find(&mut component, x.col - s));
+            component[a.max(c)] = a.min(c);
+        }
+        let mut roots: Vec<usize> = vec![];
+        for a in 0..nc {
+            let r = find(&mut component, a);
+            component[a] = match roots.iter().position(|&x| x == r) {
+                Some(k) => k,
+                None => {
+                    roots.push(r);
+                    roots.len() - 1
                 }
-            }
+            };
         }
-        let mut left = kept.clone();
-        left.add_scaled(-C64::ONE, &k);
-        let cross = norms_of(&rotate(&left, work), true);
+        // The dressing at the reference: X = V†Ĥ_SC R₀, Y = Ĥ_CS V, diag(XY).
+        let (ss, cs): (Vec<usize>, Vec<usize>) = ((0..s).collect(), (s..m).collect());
+        let (x, y) = if s > 0 && nc > 0 {
+            (mul(&factored.to(&inner.block(&ss, &cs), work), &r0, work), factored.to(&inner.block(&cs, &ss).adjoint(), work).adjoint())
+        } else {
+            (Mat::zeros(s, nc), Mat::zeros(nc, s))
+        };
+        let dressing: Vec<C64> = (0..s).map(|i| (0..nc).map(|c| x[(i, c)] * y[(c, i)]).sum()).collect();
         let ds: Vec<usize> = (ne..s).collect();
-        let kdd = kept.block(&ds, &ds);
+        let hdd = inner.block(&ds, &ds);
         let mut vd = Mat::zeros(nd, nd);
         for (idx, at, u) in factored.parts.iter().filter(|p| p.0[0] >= ne) {
             for (a, &i) in idx.iter().enumerate() {
@@ -884,14 +939,41 @@ impl Fold {
                 }
             }
         }
-        let r0_norm = r0.frobenius();
-        let mut ranks_all: Vec<Option<Ranks>> = (0..self.blocks.len()).map(|_| None).collect();
-        ranks_all[o] = Some(ranks);
-        Some(Basis { rows, own: (b.rows.len() > s || nd > 0).then_some(o), k: kept, factored, group, part, terms, cross, r0, z0, cc, r0_norm, kdd, vd, ranks: ranks_all })
+        let mut r0_norms = vec![0.0; roots.len()];
+        let mut excited = vec![false; roots.len()];
+        for a in 0..nc {
+            for c in (0..nc).filter(|&c| component[c] == component[a]) {
+                r0_norms[component[a]] += r0[(a, c)].norm_sqr();
+            }
+            excited[component[a]] |= matches!(b.rows[s + a], Row::Excited(_));
+        }
+        r0_norms.iter_mut().for_each(|x| *x = x.sqrt());
+        Some(Basis {
+            rows,
+            own: (b.rows.len() > s || nd > 0).then_some(o),
+            k: kept,
+            factored,
+            part,
+            places,
+            terms,
+            r0,
+            z0,
+            r0_norms,
+            excited,
+            cc,
+            component,
+            components: roots.len(),
+            x,
+            y,
+            dressing,
+            hdd,
+            vd,
+            ranks: (0..self.blocks.len()).map(|_| None).collect(),
+        })
     }
 
     /// A block's quantities on its basis at the point (module documentation, 2–4): the moved diagonal, the reading's norms,
-    /// the copies' couplings, the sources in the basis, the static emission's rows.
+    /// the centred rows' couplings, the exact copies' couplings, the sources in the basis, the static emission's rows.
     fn prepare(&self, o: usize, cache: &Cache, ws: &mut Workspace, work: &mut f64) {
         let n = self.size();
         let value = self.blocks[o].value;
@@ -899,161 +981,203 @@ impl Fold {
             let l = &ws.blocks[o];
             if l.nc > 0 { self.centre(l, ws) } else { 0.0 }
         };
-        let Workspace { blocks, fields, e, f, doppler, .. } = ws;
+        let Workspace { blocks, fields, f, doppler, .. } = ws;
         let l = &mut blocks[o];
         let basis = &cache.bases[l.basis];
         let fa = &basis.factored;
         let ranks = basis.ranks[o].as_ref().unwrap();
-        let (s, ne, nd, nc, groups) = (l.s, l.ne, l.nd, l.nc, l.groups);
-        // The terms' coefficients, the diagonal moved to first order, the reading's norms.
+        let (s, ne, nd, nc) = (l.s, l.ne, l.nd, l.nc);
+        let parts = fa.parts.len().max(1);
+        // The forms' terms: the diagonal to first order, the reading's norms of the change.
         l.coefficients.clear();
-        l.coefficients.extend(basis.terms.iter().map(|t| match t.what {
-            Coefficient::Form(w, p, q) => fields[w][p].conj() * fields[w][q],
-            Coefficient::Dressing(g, k, c) => e[g][k] * e[g][c].conj(),
-        }));
-        // A term whose coefficient has not changed adds nothing.
+        l.coefficients.extend(basis.terms.iter().map(|t| fields[t.w][t.p].conj() * fields[t.w][t.q]));
         for i in 0..s {
             l.kappa[i] = fa.t[(i, i)] - C64::real(value);
-            let own = basis.group[i];
-            for g in 0..groups {
-                l.off[i * groups + g] = if g == own { fa.dropped[basis.part[i]] } else { basis.cross[i * groups + g] };
+            for g in 0..parts {
+                l.off[i * parts + g] = if g == basis.part[i] { fa.dropped[g] } else { 0.0 };
             }
         }
+        let mut frozen_change = 0.0;
         for (t, c) in basis.terms.iter().zip(&l.coefficients) {
             let d = *c - t.at;
             if d == C64::ZERO {
                 continue;
             }
             let delta = d.abs();
+            frozen_change += delta * t.frozen;
             for i in 0..s {
                 l.kappa[i] += d * t.diag[i];
-                for g in 0..groups {
-                    l.off[i * groups + g] += t.norms[i * groups + g] * delta;
+                for g in 0..parts {
+                    l.off[i * parts + g] += t.norms[i * parts + g] * delta;
                 }
             }
-            *work += (s * (1 + groups)) as f64;
+            *work += (s * (1 + parts)) as f64;
         }
-        // The copies at the point: X_C = V†Ĥ_SC R₀ and Ỹ = V†Ĥ_S,copies, R₀'s change since the reference.
-        l.xc.data.fill(C64::ZERO);
-        l.yc.data.fill(C64::ZERO);
-        for (g, ys, xs, _) in &ranks.copies {
-            for (k, (y, x)) in ys.iter().zip(xs).enumerate() {
-                let ek = e[*g][k];
-                for (a, b) in l.xc.data.iter_mut().zip(&x.data) {
-                    *a += ek * *b;
-                }
-                if nd > 0 {
-                    for (a, b) in l.yc.data.iter_mut().zip(&y.data) {
-                        *a += ek * *b;
+        // The centred rows at the point: X₀ = V†Ĥ_SC, Y = Ĥ_CS V (slots), X = X₀R₀; the dressing's diagonal exactly, its
+        // rest by Cauchy–Schwarz component by component; R₀'s own change since the reference.
+        l.rho.iter_mut().for_each(|x| *x = 0.0);
+        l.factor.iter_mut().for_each(|x| *x = 0.0);
+        l.dr0.iter_mut().for_each(|x| *x = 0.0);
+        if nc > 0 && s > 0 {
+            l.x0.data.fill(C64::ZERO);
+            l.y.data.fill(C64::ZERO);
+            for x in &l.inner {
+                if x.row < s && x.col >= s {
+                    let (pi, at, a) = basis.places[x.row];
+                    let u = &fa.parts[pi].2;
+                    for bb in 0..u.cols {
+                        l.x0[(at + bb, x.col - s)] += u[(a, bb)].conj() * x.value;
                     }
-                }
-                *work += (x.data.len() + if nd > 0 { y.data.len() } else { 0 }) as f64;
-            }
-        }
-        if nd > 0 {
-            // The exact copies' rows to the centred ones (Ĥ_DC, H_GG), V_D†Ĥ_DC; their K's change on their own rows.
-            l.ydc.data.fill(C64::ZERO);
-            l.dkdd.data.fill(C64::ZERO);
-            for x in l.inner.iter().filter(|x| x.row >= ne && x.row < s) {
-                if x.col >= s {
-                    for a in 0..nd {
-                        l.ydc[(a, x.col - s)] += basis.vd[(x.row - ne, a)].conj() * x.value;
+                    *work += u.cols as f64;
+                } else if x.row >= s && x.col < s {
+                    let (pi, at, a) = basis.places[x.col];
+                    let u = &fa.parts[pi].2;
+                    for bb in 0..u.cols {
+                        l.y[(x.row - s, at + bb)] += x.value * u[(a, bb)];
                     }
-                } else if x.col >= ne {
-                    l.dkdd[(x.row - ne, x.col - ne)] += x.value;
+                    *work += u.cols as f64;
                 }
             }
-            *work += (nd * nd * nc) as f64;
-            // X_C on the exact copies' rows: V_D†Ĥ_DC R₀.
-            for a in 0..nd {
+            product(&mut l.x, &l.x0, &basis.r0, false, work);
+            // The excited rows' (the exact copies' own rows move by their change whole, below).
+            for i in 0..ne {
+                let d: C64 = (0..nc).map(|c| l.x[(i, c)] * l.y[(c, i)]).sum();
+                l.kappa[i] += d - basis.dressing[i];
+            }
+            *work += (ne * nc) as f64;
+            // Per centred component b and part P: ‖Y_b[:, P]‖ and ‖δY_b[:, P]‖; per row ‖δX_ib‖ and ‖X_ref,ib‖.
+            let comps = basis.components;
+            l.yb.iter_mut().for_each(|x| *x = 0.0);
+            l.dyb.iter_mut().for_each(|x| *x = 0.0);
+            for c in 0..nc {
+                for j in 0..s {
+                    let k = basis.component[c] * parts + basis.part[j];
+                    l.yb[k] += l.y[(c, j)].norm_sqr();
+                    l.dyb[k] += (l.y[(c, j)] - basis.y[(c, j)]).norm_sqr();
+                }
+            }
+            l.yb.iter_mut().chain(l.dyb.iter_mut()).for_each(|x| *x = x.sqrt());
+            for i in 0..s {
+                l.dx.iter_mut().for_each(|x| *x = 0.0);
+                l.xr.iter_mut().for_each(|x| *x = 0.0);
                 for c in 0..nc {
-                    l.xc[(ne + a, c)] = (0..nc).map(|k| l.ydc[(a, k)] * basis.r0[(k, c)]).sum();
+                    l.dx[basis.component[c]] += (l.x[(i, c)] - basis.x[(i, c)]).norm_sqr();
+                    l.xr[basis.component[c]] += basis.x[(i, c)].norm_sqr();
+                }
+                for b in 0..comps {
+                    let (dxi, xri) = (l.dx[b].sqrt(), l.xr[b].sqrt());
+                    for g in 0..parts {
+                        l.off[i * parts + g] += dxi * l.yb[b * parts + g] + xri * l.dyb[b * parts + g];
+                    }
                 }
             }
-            *work += (nd * nc * nc) as f64;
-            // K_DD at the point (R₀ the reference's) less the kept one, in the basis: its diagonal and rows.
-            let mut hdc = Mat::zeros(nd, nc);
-            for x in l.inner.iter().filter(|x| x.row >= ne && x.row < s && x.col >= s) {
-                hdc[(x.row - ne, x.col - s)] = x.value;
+            *work += (s * nc * 2 + s * comps * parts) as f64;
+        }
+        if nc > 0 {
+            // δM_b, the change of z₀ − Ĥ_CC on each centred component: the frozen H_GG slots exactly, the excited rows' z₀
+            // shift exactly and their forms by the terms. Then per component δR₀_b ≤ ‖R₀_b‖²‖δM_b‖/(1 − ‖R₀_b‖‖δM_b‖) and
+            // the factor ‖R₀_b‖‖δM_b‖/(1 − ‖R₀_b‖‖δM_b‖) of its own rows' change, δT_C,b = R₀_b δM_b T_C,b to first order.
+            let dz = z0 - basis.z0;
+            let comps = basis.components;
+            let dm = &mut l.factor;
+            for (k, &si) in l.frozen.iter().enumerate() {
+                let x = &l.inner[si];
+                let shift = if x.row == x.col { C64::real(dz) } else { C64::ZERO };
+                dm[basis.component[x.row - s]] += (shift - (x.value - basis.cc[k])).norm_sqr();
             }
-            let mut hr = Mat::zeros(nd, nc);
-            product(&mut hr, &hdc, &basis.r0, false, work);
-            let mut dk = Mat::zeros(nd, nd);
-            product_adj(&mut dk, &hr, &hdc, work);
+            for a in 0..nc {
+                if matches!(self.blocks[o].rows[s + a], Row::Excited(_)) {
+                    dm[basis.component[a]] += dz * dz;
+                }
+            }
+            for b in 0..comps {
+                let d = dm[b].sqrt() + if basis.excited[b] { frozen_change } else { 0.0 };
+                let q = basis.r0_norms[b] * d;
+                let (factor, dr0) = if d == 0.0 { (0.0, 0.0) } else if q < 1.0 { (q / (1.0 - q), basis.r0_norms[b] * q / (1.0 - q)) } else { (f64::INFINITY, f64::INFINITY) };
+                dm[b] = factor;
+                l.dr0[b] = dr0;
+            }
+            if s > 0 && l.dr0[..comps].iter().any(|&x| x > 0.0) {
+                // Through the dressing: ρ_i = Σ_b ‖(V†Ĥ_SC)_i,b‖ δR₀_b ‖Y_b‖.
+                l.dx.iter_mut().for_each(|x| *x = 0.0);
+                for c in 0..nc {
+                    l.dx[basis.component[c]] += (0..s).map(|j| l.y[(c, j)].norm_sqr()).sum::<f64>();
+                }
+                for i in 0..s {
+                    l.xr.iter_mut().for_each(|x| *x = 0.0);
+                    for c in 0..nc {
+                        l.xr[basis.component[c]] += l.x0[(i, c)].norm_sqr();
+                    }
+                    l.rho[i] = (0..comps).map(|b| if l.dr0[b] == 0.0 { 0.0 } else { l.xr[b].sqrt() * l.dr0[b] * l.dx[b].sqrt() }).sum();
+                }
+                *work += (2 * s * nc) as f64;
+            }
+        }
+        // The exact copies: their own rows' change V_D†δK_DD V_D, their couplings with the excited rows at the point,
+        // Ỹ = V_E†K_ED V_D and Ỹ′ = V_D†K_DE V_E with K's dressing X Y.
+        if nd > 0 {
+            l.gd.data.fill(C64::ZERO);
+            l.hde.data.fill(C64::ZERO);
+            l.dkdd.data.fill(C64::ZERO);
+            for x in &l.inner {
+                if x.row < ne && x.col >= ne && x.col < s {
+                    let (pi, at, a) = basis.places[x.row];
+                    let u = &fa.parts[pi].2;
+                    for bb in 0..u.cols {
+                        l.gd[(at + bb, x.col - ne)] += u[(a, bb)].conj() * x.value;
+                    }
+                } else if x.row >= ne && x.row < s && x.col < ne {
+                    let (pi, at, a) = basis.places[x.col];
+                    let u = &fa.parts[pi].2;
+                    for bb in 0..u.cols {
+                        l.hde[(x.row - ne, at + bb)] += x.value * u[(a, bb)];
+                    }
+                } else if x.row >= ne && x.row < s && x.col >= ne && x.col < s {
+                    l.dkdd[(x.row - ne, x.col - ne)] += x.value - basis.hdd[(x.row - ne, x.col - ne)];
+                }
+            }
             for i in 0..nd {
                 for j in 0..nd {
-                    dk[(i, j)] += l.dkdd[(i, j)] + if i == j { C64::real(value) } else { C64::ZERO } - basis.kdd[(i, j)];
-                }
-            }
-            let mut left = Mat::zeros(nd, nd);
-            for i in 0..nd {
-                for j in 0..nd {
-                    left[(i, j)] = (0..nd).map(|a| basis.vd[(a, i)].conj() * dk[(a, j)]).sum();
+                    l.left[(i, j)] = (0..nd).map(|a| basis.vd[(a, i)].conj() * l.dkdd[(a, j)]).sum();
                 }
             }
             for i in 0..nd {
                 for j in 0..nd {
-                    l.dkdd[(i, j)] = (0..nd).map(|a| left[(i, a)] * basis.vd[(a, j)]).sum();
+                    let mut v: C64 = (0..nd).map(|a| l.left[(i, a)] * basis.vd[(a, j)]).sum();
+                    if nc > 0 {
+                        v += (0..nc).map(|c| l.x[(ne + i, c)] * l.y[(c, ne + j)] - basis.x[(ne + i, c)] * basis.y[(c, ne + j)]).sum::<C64>();
+                    }
+                    l.dkdd[(i, j)] = v;
                 }
             }
-            *work += (2 * nd * nd * nd) as f64;
             for i in 0..nd {
                 let r = ne + i;
                 l.kappa[r] += l.dkdd[(i, i)];
                 let rest: f64 = (0..nd).filter(|&j| j != i).map(|j| l.dkdd[(i, j)].norm_sqr()).sum();
-                l.off[r * groups + basis.group[r]] = rest.sqrt() + fa.dropped[basis.part[r]];
+                for g in 0..parts {
+                    l.off[r * parts + g] = if g == basis.part[r] { rest.sqrt() + fa.dropped[g] } else { 0.0 };
+                }
             }
-            // The couplings of the excited rows and the exact copies in the basis (fold.rs # The exact copies):
-            // Ỹ = Ỹ_C[E, D] V_D + X_C[E] (V_D†Ĥ_DC)†, Ỹ′ = (Ỹ_C[E, D] V_D)† + X_C[D] Ỹ_C[E, C]†.
             for i in 0..ne {
                 for a in 0..nd {
-                    let bare: C64 = (0..nd).map(|c| l.yc[(i, c)] * basis.vd[(c, a)]).sum();
-                    let dressed: C64 = (0..nc).map(|c| l.xc[(i, c)] * l.ydc[(a, c)].conj()).sum();
+                    let bare: C64 = (0..nd).map(|c| l.gd[(i, c)] * basis.vd[(c, a)]).sum();
+                    let back: C64 = (0..nd).map(|c| basis.vd[(c, a)].conj() * l.hde[(c, i)]).sum();
+                    let (dressed, back_dressed) = if nc > 0 {
+                        ((0..nc).map(|c| l.x[(i, c)] * l.y[(c, ne + a)]).sum::<C64>(), (0..nc).map(|c| l.x[(ne + a, c)] * l.y[(c, i)]).sum::<C64>())
+                    } else {
+                        (C64::ZERO, C64::ZERO)
+                    };
                     l.coupling[(i, a)] = bare + dressed;
-                    let back_dressed: C64 = (0..nc).map(|c| l.xc[(ne + a, c)] * l.yc[(i, nd + c)].conj()).sum();
-                    l.back[(a, i)] = bare.conj() + back_dressed;
+                    l.back[(a, i)] = back + back_dressed;
                 }
             }
-            *work += (ne * nd * (nd + 2 * nc)) as f64;
+            *work += (3 * nd * nd * nd + ne * nd * (2 * nd + 2 * nc)) as f64;
         }
-        // R₀'s change since the reference (module documentation, 4).
-        l.dr0 = 0.0;
-        l.ycf = 0.0;
-        l.rho.iter_mut().for_each(|x| *x = 0.0);
-        if nc > 0 {
-            // δM, the change of z₀ − Ĥ_CC (its entries are the C × C slots'; the diagonal's are among them).
-            let mut dm = 0.0;
-            for x in l.inner.iter().filter(|x| x.row >= s && x.col >= s) {
-                let shift = if x.row == x.col { C64::real(z0 - basis.z0) } else { C64::ZERO };
-                dm += (shift - (x.value - basis.cc[(x.row - s, x.col - s)])).norm_sqr();
-            }
-            let dm = dm.sqrt();
-            let q = basis.r0_norm * dm;
-            l.dr0 = if q < 1.0 { basis.r0_norm * basis.r0_norm * dm / (1.0 - q) } else { f64::INFINITY };
-            for i in 0..s {
-                let mut a = 0.0;
-                for (g, _, _, rn) in &ranks.copies {
-                    for (k, r) in rn.iter().enumerate() {
-                        a += e[*g][k].abs() * r[i];
-                    }
-                }
-                if i >= ne {
-                    a += (0..nc).map(|c| l.ydc[(i - ne, c)].norm_sqr()).sum::<f64>().sqrt();
-                }
-                l.rho[i] = a;
-                l.ycf += a * a;
-            }
-            l.ycf = l.ycf.sqrt();
-            for i in 0..s {
-                l.rho[i] *= if l.dr0 == 0.0 { 0.0 } else { l.dr0 * l.ycf };
-            }
-        }
-        // The static source in x coordinates, its effective one in the basis V†B_S + X_C B_C, R₀B_C.
+        // The static source in x coordinates; on S in the basis V†B_S + X B_C; the beams' on the centred rows; R₀ B_C.
         l.b0.data.fill(C64::ZERO);
         for x in &l.absorb {
             l.b0[(x.row, x.col)] = x.value;
         }
-        l.b0c = (s..l.m).map(|i| (0..n).map(|j| l.b0[(i, j)].norm_sqr()).sum::<f64>()).sum::<f64>().sqrt();
         {
             let b = &mut l.b[0];
             b.data.fill(C64::ZERO);
@@ -1061,30 +1185,28 @@ impl Fold {
                 to_cols(fa, &l.b0, &l.statics, b, work);
                 for &j in &l.statics {
                     for i in 0..s {
-                        b[(i, j)] += (0..nc).map(|c| l.xc[(i, c)] * l.b0[(s + c, j)]).sum::<C64>();
+                        b[(i, j)] += (0..nc).map(|c| l.x[(i, c)] * l.b0[(s + c, j)]).sum::<C64>();
                     }
                 }
                 *work += (s * nc * l.statics.len()) as f64;
             }
             l.live[0] = b.data.iter().any(|z| *z != C64::ZERO);
-            l.r0b.data.fill(C64::ZERO);
-            for &j in &l.statics {
-                for a in 0..nc {
-                    l.r0b[(a, j)] = (0..nc).map(|c| basis.r0[(a, c)] * l.b0[(s + c, j)]).sum();
+            for a in 0..nc {
+                for j in 0..n {
+                    l.bc[0][(a, j)] = l.b0[(s + a, j)];
                 }
             }
-            *work += (nc * nc * l.statics.len()) as f64;
         }
-        // The beams' sources a_l Σ_k γ_lk Y_k, W their sum.
         l.w.data.fill(C64::ZERO);
         for sp in 1..l.splits.len() {
             let (c, j) = l.splits[sp].unwrap();
             let comp = &self.components[c];
             l.shifts[sp] = doppler[c][j];
-            let per = &ranks.sources.iter().find(|x| x.0 == c).unwrap().1;
+            let per = &ranks.iter().find(|x| x.0 == c).unwrap().1;
+            let pi = l.places.iter().position(|x| x.0 == c).unwrap();
+            let cols = &l.places[pi].1;
             let b = &mut l.b[sp];
             b.data.fill(C64::ZERO);
-            let cols = &l.places.iter().find(|x| x.0 == c).unwrap().1;
             for (k, y) in per.iter().enumerate() {
                 let x = f[c][j] * comp.gamma[j][k];
                 for i in 0..s {
@@ -1099,18 +1221,44 @@ impl Fold {
                     l.w[(i, p)] += b[(i, p)];
                 }
             }
-            l.live[sp] = true;
+            // On the centred excited rows: B_C,l = a_l Σ_k γ_lk U_k there, and its dressing X B_C,l onto S.
+            let bc = &mut l.bc[sp];
+            bc.data.fill(C64::ZERO);
+            if l.nce > 0 {
+                for (k, u) in l.uc[pi].iter().enumerate() {
+                    let x = f[c][j] * comp.gamma[j][k];
+                    for a in 0..nc {
+                        for &p in cols {
+                            bc[(a, p)] += x * u[(a, p)];
+                        }
+                    }
+                }
+                for i in 0..s {
+                    for &p in cols {
+                        b[(i, p)] += (0..nc).map(|a| l.x[(i, a)] * bc[(a, p)]).sum::<C64>();
+                    }
+                }
+                *work += (per.len() * nc * cols.len() + s * nc * cols.len()) as f64;
+            }
+            l.live[sp] = s > 0;
         }
+        // R₀ times every split's source on the centred rows.
+        l.u.data.fill(C64::ZERO);
+        for bc in &l.bc {
+            for (a, b) in l.u.data.iter_mut().zip(&bc.data) {
+                *a += *b;
+            }
+        }
+        product(&mut l.r0b, &basis.r0, &l.u, false, work);
         // The static emission's rows from the solved rows in the basis, Ê = E_S V.
         l.est.data.fill(C64::ZERO);
         for x in l.emit.iter().filter(|x| x.col < s) {
-            let i = x.col;
-            let (pi, a) = fa.parts.iter().enumerate().find_map(|(pi, (idx, _, _))| idx.iter().position(|&r| r == i).map(|a| (pi, a))).unwrap();
-            let (idx, at, u) = &fa.parts[pi];
-            for bb in 0..idx.len() {
+            let (pi, at, a) = basis.places[x.col];
+            let u = &fa.parts[pi].2;
+            for bb in 0..u.cols {
                 l.est[(x.row, at + bb)] += x.value * u[(a, bb)];
             }
-            *work += idx.len() as f64;
+            *work += u.cols as f64;
         }
     }
 
@@ -1173,13 +1321,14 @@ impl Fold {
             } else {
                 product_adj(&mut l.zx, &l.ztot, u, work);
             }
-            // T_C = X_C†Z + R₀B_C.
-            for a in 0..l.nc {
-                for j in 0..n {
-                    l.tc[(a, j)] = l.r0b[(a, j)] + (0..s).map(|i| l.xc[(i, a)].conj() * l.zx[(i, j)]).sum::<C64>();
+            // T_C = R₀(Y Z + B_C) = R₀ Y Z + R₀B_C.
+            if l.nc > 0 {
+                product(&mut l.u, &l.y, &l.zx, false, work);
+                product(&mut l.tc, &basis.r0, &l.u, false, work);
+                for (a, b) in l.tc.data.iter_mut().zip(&l.r0b.data) {
+                    *a += *b;
                 }
             }
-            *work += (l.nc * s * n) as f64;
             for j in 0..n {
                 l.sizes[j] = (0..s).map(|k| l.ztot[(k, j)].norm_sqr()).sum();
             }
@@ -1202,6 +1351,18 @@ impl Fold {
                 for j in 0..n {
                     bloch[(x.row, j)] += x.value * l.tc[(x.col - s, j)];
                 }
+            }
+            // The centred excited rows' emission into the places their beams source: Σ_l B_C,l† T_C.
+            if l.nce > 0 {
+                for (sp, bc) in l.bc.iter().enumerate().skip(1) {
+                    let (c, _) = l.splits[sp].unwrap();
+                    for &p in &l.places.iter().find(|x| x.0 == c).unwrap().1 {
+                        for j in 0..n {
+                            bloch[(p, j)] += (0..l.nc).map(|a| bc[(a, p)].conj() * l.tc[(a, j)]).sum::<C64>();
+                        }
+                    }
+                }
+                *work += (l.bc.len() * l.sourced.len() * l.nc * n) as f64;
             }
             *work += ((l.sourced.len() + l.emitting.len()) * s * n + l.emit.len() * n) as f64;
         }
@@ -1240,8 +1401,10 @@ impl Fold {
         worst
     }
 
-    /// Per block the reuse's reading on the last pass (module documentation, 4), into `l.reading`.
-    fn reuse_reading(&self, ws: &mut Workspace, diagonal: bool, work: &mut f64) {
+    /// Per block the reuse's reading on the last pass (module documentation, 4), into `l.reading`: the solved rows' error
+    /// relative to the column's whole response; the frozen centred rows' own, the excited ones' relative to it too, the
+    /// copies' absolute (a population's).
+    fn reuse_reading(&self, cache: &Cache, ws: &mut Workspace, diagonal: bool, work: &mut f64) {
         let n = self.size();
         let Workspace { blocks, h, tri, whole, .. } = ws;
         let th: &Mat = if diagonal { h } else { tri };
@@ -1250,7 +1413,9 @@ impl Fold {
         }
         let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
         for l in blocks.iter_mut() {
-            let (s, groups) = (l.s, l.groups);
+            let basis = &cache.bases[l.basis];
+            let s = l.s;
+            let parts = basis.factored.parts.len().max(1);
             l.err.iter_mut().for_each(|x| *x = 0.0);
             for sp in (0..l.splits.len()).filter(|&sp| l.live[sp] && s > 0) {
                 let w = l.shifts[sp];
@@ -1259,32 +1424,45 @@ impl Fold {
                     let c = th[(j, j)] - C64::real(w);
                     l.norms.iter_mut().for_each(|x| *x = 0.0);
                     for k in 0..s {
-                        l.norms[l.group[k]] += z[(k, j)].norm_sqr();
+                        l.norms[basis.part[k]] += z[(k, j)].norm_sqr();
                     }
-                    let total: f64 = l.norms.iter().sum();
+                    let total: f64 = l.norms[..parts].iter().sum();
                     for i in 0..s {
-                        let own = l.group[i];
+                        let own = basis.part[i];
                         let mut x = l.rho[i] * total.sqrt();
-                        for g in 0..groups {
+                        for g in 0..parts {
                             let size = if g == own { (l.norms[g] - z[(i, j)].norm_sqr()).max(0.0) } else { l.norms[g] };
-                            x += l.off[i * groups + g] * size.sqrt();
+                            x += l.off[i * parts + g] * size.sqrt();
                         }
                         l.err[i * n + j] += if x == 0.0 { 0.0 } else { x / (c - l.kappa[i]).abs() };
                     }
-                    *work += (s * (2 + groups)) as f64;
+                    *work += (s * (2 + parts)) as f64;
                 }
             }
+            let comps = basis.components;
             let mut worst = 0.0_f64;
             for j in (0..n).filter(|&j| whole[j] > floor) {
                 let e2: f64 = (0..s).map(|i| l.err[i * n + j].powi(2)).sum();
-                let copies = if l.dr0 == 0.0 { 0.0 } else { l.dr0 * (l.ycf * l.sizes[j].sqrt() + l.b0c) };
-                worst = worst.max(rate((e2 / whole[j] + copies * copies).sqrt()));
+                // The centred rows' own change per component: an excited one's relative to the column's whole response, a
+                // copies' absolute.
+                l.norms.iter_mut().for_each(|x| *x = 0.0);
+                let mut f2 = 0.0;
+                if l.factor[..comps.min(l.factor.len())].iter().any(|&x| x > 0.0) {
+                    for b in 0..comps {
+                        let size: f64 = (0..l.nc).filter(|&a| basis.component[a] == b).map(|a| l.tc[(a, j)].norm_sqr()).sum();
+                        if size > 0.0 {
+                            f2 += (l.factor[b] * l.factor[b] * size) * if basis.excited[b] { 1.0 / whole[j] } else { 1.0 };
+                        }
+                    }
+                    *work += l.nc as f64;
+                }
+                worst = worst.max(rate((e2 / whole[j] + f2).sqrt()));
             }
             l.reading = worst;
         }
     }
 
-    /// The step at a point (r, κ) on the fold's shared decompositions (module documentation): A, M, S⁻¹, G in `ws`. None
+    /// The step at a point (r, κ) on the atom's kept decompositions (module documentation): A, M, S⁻¹, G in `ws`. None
     /// where a Schur form does not converge, a centring is singular or an exact copies' Schur complement is.
     pub(crate) fn step<'w>(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &'w mut Workspace) -> Option<&'w Step> {
         let n = self.size();
@@ -1345,8 +1523,13 @@ impl Fold {
                 3
             };
             mark(3, work, &mut phases);
-            self.reuse_reading(ws, passes == 2, &mut work);
+            self.reuse_reading(cache, ws, passes == 2, &mut work);
             mark(4, work, &mut phases);
+            if round == 0 {
+                for (o, l) in ws.blocks.iter().enumerate() {
+                    ws.step.first[o] = l.reading;
+                }
+            }
             let mut beyond = 0;
             for o in 0..self.blocks.len() {
                 if ws.blocks[o].reading > share {
@@ -1366,7 +1549,8 @@ impl Fold {
         // The passes' ratio (the self-consistency's existence, ≥ 1 none): of the last two changes.
         let difference = |a: &Mat, b: &Mat| a.data.iter().zip(&b.data).map(|(x, y)| (*x - *y).norm_sqr()).sum::<f64>().sqrt();
         let ratio = difference(&ws.bloch, &ws.hs[passes - 1]) / difference(&ws.hs[passes - 1], &ws.hs[passes - 2]);
-        // The compression: T_S = VZ, A = Bloch + (W†Z)† + T†(ĤT + B), M = T†T.
+        // The compression (module documentation, 5): T_S = VZ, A = Bloch + (W†Z)† + T_S†(Ĥ_SS T_S + Ĥ_SC T_C + B_S) +
+        // z₀T_C†T_C, M = T_S†T_S + T_C†T_C.
         let Workspace { blocks, bloch, beams, step, .. } = ws;
         let (a, metric) = (&mut step.a, &mut step.metric);
         for i in 0..n {
@@ -1377,19 +1561,24 @@ impl Fold {
         metric.data.fill(C64::ZERO);
         for l in blocks.iter_mut() {
             let basis = &cache.bases[l.basis];
+            let s = l.s;
             from_rows(&basis.factored, &l.zx, &mut l.t, &mut work);
             for c in 0..l.nc {
                 for j in 0..n {
-                    l.t[(l.s + c, j)] = l.tc[(c, j)];
+                    l.t[(s + c, j)] = l.tc[(c, j)];
                 }
             }
-            l.y.data.copy_from_slice(&l.b0.data);
-            for x in &l.inner {
+            for i in 0..s {
                 for j in 0..n {
-                    l.y.data[x.row * n + j] += x.value * l.t.data[x.col * n + j];
+                    l.ys[(i, j)] = l.b0[(i, j)];
                 }
             }
-            work += (l.inner.len() * n) as f64;
+            for x in l.inner.iter().filter(|x| x.row < s) {
+                for j in 0..n {
+                    l.ys.data[x.row * n + j] += x.value * l.t.data[x.col * n + j];
+                }
+                work += n as f64;
+            }
             for k in 0..l.m {
                 for i in 0..n {
                     let ti = l.t[(k, i)].conj();
@@ -1397,8 +1586,9 @@ impl Fold {
                         continue;
                     }
                     for j in 0..n {
-                        a.data[i * n + j] += ti * l.y.data[k * n + j];
-                        metric.data[i * n + j] += ti * l.t.data[k * n + j];
+                        let tkj = l.t.data[k * n + j];
+                        a.data[i * n + j] += ti * if k < s { l.ys.data[k * n + j] } else { tkj * basis.z0 };
+                        metric.data[i * n + j] += ti * tkj;
                     }
                 }
             }
@@ -1451,10 +1641,11 @@ mod tests {
     use super::*;
 
     /// The reuse (module documentation, 2 and 4): a decomposition made at one point of R4_LIN_4 serves a point 40 nm off
-    /// with its diagonal moved term by term; against the exact first order there, diag(V†(K − K_basis)V) with K at the
-    /// point itself (R₀ there too), each row's moved diagonal is the exact one to the rounding but for R₀'s own change, and
-    /// each row's rest on each group, ‖(V†(K − K_basis)V)[i, L∖i]‖, is within the reading's norm of it, off_iL + ρ_i. By
-    /// the rule (every copy centred) and with every copy exact.
+    /// with its diagonal moved; against the exact first order there, diag(V†(K − K_basis)V) with K at the point itself (R₀
+    /// there too), each row's moved diagonal is the exact one to the rounding but for R₀'s own change (ρ_i), and each row's
+    /// rest on each connected part P, ‖(V†(K − K_basis)V)[i, P∖i]‖, is within the reading's norm of it, off_iP + ρ_i. By the
+    /// rule (every copy centred), with every copy exact, and with every excited node centred where it is not solved
+    /// (the tweezer's blocks whole).
     #[test]
     fn the_reused_diagonal_is_the_change_s_first_order_and_the_reading_bounds_the_rest() {
         let req = crate::model::testing::scene("R4_LIN_4");
@@ -1473,8 +1664,12 @@ mod tests {
                 }
             }
         }
+        // The tweezer's components' blocks: every excited level centred.
+        let tweezer: Vec<Part> = parts.iter().copied().filter(|p| light.frequencies[p.frequency].beams.contains(&req.trap_beam)).collect();
+        let levels = Fold::new(&req, &rule, 0).unwrap().levels.len();
+        let centred: Vec<((Part, usize, usize), Status)> = tweezer.iter().flat_map(|&a| (0..GROUND).flat_map(move |s| (0..levels).map(move |l| ((a, s, l), Status::Centred)))).collect();
         let (mut worst_diag, mut worst_rest, mut checked) = (0.0_f64, 0.0_f64, 0);
-        for (name, choice) in [("by the rule", rule.clone()), ("every copy exact", Choice { copies: exact, ..rule.clone() })] {
+        for (name, choice) in [("by the rule", rule.clone()), ("every copy exact", Choice { copies: exact, ..rule.clone() }), ("the tweezer's blocks centred", Choice { excited: centred, ..rule.clone() })] {
             for set in Fold::sets(&req, &choice).unwrap() {
                 let fold = Fold::new(&req, &choice, set[0]).unwrap();
                 let (r0, r1) = ([0.1, -0.2, 0.3], [0.1 + 0.04 / 3f64.sqrt(), -0.2 + 0.04 / 3f64.sqrt(), 0.3 + 0.04 / 3f64.sqrt()]);
@@ -1495,6 +1690,7 @@ mod tests {
                     }
                     let basis = &cache.bases[l.basis];
                     let f = &basis.factored;
+                    let parts = f.parts.len();
                     let (kept, ..) = fold.effective_at(o, &ws, &mut work).unwrap();
                     let mut delta = kept.clone();
                     delta.add_scaled(-C64::ONE, &basis.k);
@@ -1508,15 +1704,15 @@ mod tests {
                         let allowed = l.rho[i] + 1e-14 * scale;
                         worst_diag = worst_diag.max(gap / allowed.max(f64::MIN_POSITIVE));
                         assert!(gap <= allowed, "{name}, set {set:?}, block {o}, row {i}: the moved diagonal {gap:.3e} from the first order (allowed {allowed:.3e})");
-                        for g in 0..l.groups {
-                            let rest: f64 = (0..l.s).filter(|&j| j != i && basis.group[j] == g).map(|j| tilde[(i, j)].norm_sqr()).sum::<f64>().sqrt();
-                            let bound = l.off[i * l.groups + g] + l.rho[i] + 1e-14 * scale;
+                        for g in 0..parts {
+                            let rest: f64 = (0..l.s).filter(|&j| j != i && basis.part[j] == g).map(|j| tilde[(i, j)].norm_sqr()).sum::<f64>().sqrt();
+                            let bound = l.off[i * parts + g] + l.rho[i] + 1e-14 * scale;
                             worst_rest = worst_rest.max(rest / bound);
-                            assert!(rest <= bound, "{name}, set {set:?}, block {o}, row {i}, group {g}: the rest {rest:.3e} beyond the reading's norm {bound:.3e}");
+                            assert!(rest <= bound, "{name}, set {set:?}, block {o}, row {i}, part {g}: the rest {rest:.3e} beyond the reading's norm {bound:.3e}");
                         }
                         checked += 1;
                     }
-                    println!("{name}, set {set:?}, block {o}: {} rows, ‖K‖ {scale:.3e}, ‖δK‖ {:.3e}, R₀'s change bound {:.3e}, terms {}", l.s, delta.frobenius(), l.dr0, basis.terms.len());
+                    println!("{name}, set {set:?}, block {o}: {} rows ({} centred), ‖K‖ {scale:.3e}, ‖δK‖ {:.3e}, R₀'s change bound {:.3e}", l.s, l.nc, delta.frobenius(), l.dr0.iter().fold(0.0_f64, |a, &b| a.max(b)));
                 }
             }
         }

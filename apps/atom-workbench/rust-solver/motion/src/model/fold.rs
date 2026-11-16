@@ -22,9 +22,7 @@
 //! not one tree over all states (a tree over all would make the 6.8 GHz couplings of F = 1 and F = 2 static: a set whose
 //! diagonal spans GHz, the root of the per-state references and their r² mixed forms). Inside a set the mixing's maximum
 //! spanning tree is static (cluster.rs `frames`); its other couplings carry their loops' beats, the integrator's. Each set's
-//! whole frame is the exact frequency -- zero or a beat of two components -- that centres its diagonal. The excited states
-//! obey the same rule: their couplings that cannot be folded join them into parts (`Choice::parts`), the others are left
-//! out of the solve, their error the rule's.
+//! whole frame is the exact frequency -- zero or a beat of two components -- that centres its diagonal.
 //!
 //! P holds one set's ground states, each in its frame θ_s (ψ_s = e^{−iθ_s t} x_s), and the explicit excited states, each at
 //! its node's offset. A node is a level (a ground F or an excited F′) at an offset (exact, `Beat`): component c from ground
@@ -36,10 +34,12 @@
 //! Each offset o is a block (`Block`): its explicit states (P, the E rows), its other excited states and its copies (the Q
 //! rows). Its matrix in its frame, Ĥ_o: 𝒦 on the excited rows less o; H_GG on each copy offset's rows less ω; V_g between an
 //! excited row and a copy of g. Its sources: V_c from each ground state s with θ_s + ν_c = o (beam by beam), 𝒦 and V_g† from its
-//! E rows, H_GG from a ground state at a copy's offset. A copy is folded in the block's decomposition, folded at the block's
-//! centre z₀ first (`Status::Centred`: R₀ = (z₀ − Ĥ_CC)⁻¹, K_eff = Ĥ_SS + Ĥ_SC R₀ Ĥ_CS), left out of the block (`Omitted`), or
-//! kept in P (`Kept`, a tone); one evaluation path whatever the choice, and each choice's error read by the same function
-//! (`Reading`, DESIGN §1.2, M18).
+//! E rows, H_GG from a ground state at a copy's offset. Every Q node -- an excited level or a copy of a ground level -- has
+//! the same tiers: solved self-consistently in the block's decomposition (`Status::Decomposed`), taken at the block's
+//! centre z₀ (`Centred`: one pass less, its rows C eliminated first, R₀ = (z₀ − Ĥ_CC)⁻¹, K_eff = Ĥ_SS + Ĥ_SC R₀ Ĥ_CS, every
+//! split's source on S dressed by Ĥ_SC R₀ B_C), left out of the block (`Omitted`), or kept in P (`Kept`: a copy's tone, an
+//! excited level's explicit place); one evaluation path whatever the choice, and each choice's error read by the same
+//! function (`Reading`, DESIGN §1.2, M18). An excited node's centring moves its response by exactly (z₀ − z)R_N(z₀)T_N.
 //!
 //! # One linear solve per pass
 //! For the static P generator H (x coordinates), each block's response T_o (Q rows × n) solves, per source split (a beam with
@@ -56,12 +56,10 @@
 //! next ones with its diagonal moved to first order, T_kk + (V†δK V)_kk -- exact in z, in o, in every beam's Doppler shift,
 //! which only move the diagonal --, and what that leaves, the part of δK̃ = V†δK V off the diagonal, is read by the
 //! evaluation order's function, the block perturbation R(z) δK T, bounded row by row: the first-order error of row i of a
-//! column is (Σ_{k≠i} δK̃_ik Z_k)/(c − κ_i), at most Σ_L ‖δK̃_i,L∖i‖ ‖Z_L∖i‖ / |c − κ_i| over the lines L -- each row's
-//! own distance against the other rows' response line by line (the couplings the decomposition leaves out between the
-//! lines meet the other line's response, not this one's) --, relative to the column's whole response (the readings' unit). Beyond the share the decomposition is made again at the point and the
-//! passes solved again. Blocks of the same rows no copy dresses decompose the same 𝒦 and share one. A Schur
-//! form's entries off the diagonal within its rounding are zero (a normal part's form is its diagonal: 𝒦 on one line is
-//! Hermitian less iΓ/2, a centred copy's dressing Hermitian), what they held read with the rest.
+//! column is (Σ_{k≠i} δK̃_ik Z_k)/(c − κ_i), at most Σ_P ‖δK̃_i,P∖i‖ ‖Z_P∖i‖ / |c − κ_i| over the decomposition's connected
+//! parts P, relative to the column's whole response (the readings' unit). Beyond the share the decomposition is made again
+//! at the point and the passes solved again. Blocks of the same rows nothing centred dresses decompose the same 𝒦 and share
+//! one. A Schur form's entries off the diagonal within its rounding are zero, what they held read with the rest.
 //!
 //! # The exact copies after the excited block (DESIGN §3.4 of the replan)
 //! A copy taken exactly (`Status::Decomposed`) is not in the decomposition kept along the path: its couplings to the
@@ -201,20 +199,19 @@ pub(crate) enum Row {
     Copy { state: usize, component: usize },
 }
 
-/// The run's choice of nodes (DESIGN §1.1, §3, §11): the ground states' frames and sets and the excited states' parts (the
-/// rule's, `Choice::of`), the explicit excited levels (a level at the offset component `part` reaches from ground state
-/// `ground`), and the copies' statuses keyed by an absorbed component and one of the block's own sources (the block), the
-/// emitting component and the copy's ground level F -- a later entry overriding an earlier one; unlisted: centred. And the
-/// excited parts a block leaves out (`left`: keyed the same, by an absorbed component and a source, the part's index), each
-/// by its omission reading within the share (the cheapest evaluation, M18).
+/// The run's choice of nodes (DESIGN §1.1, §3, §11): the ground states' frames and sets (the rule's, `Choice::of`), the
+/// explicit excited levels (a level at the offset component `part` reaches from ground state `ground`: an excited node kept
+/// in P), and every other Q node's tier (the same tiers for every node, module documentation # Blocks), keyed by an
+/// absorbed component and one of the block's own sources (the block): a copy's by the emitting component and its ground
+/// level F (unlisted: centred), an excited node's by its level (`excited`; unlisted: solved) -- a later entry overriding an
+/// earlier one.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Choice {
     pub(crate) frames: Vec<Beat>,
     pub(crate) sets: Vec<Vec<usize>>,
-    pub(crate) parts: Vec<Vec<usize>>,
     pub(crate) explicit: Vec<(usize, Part, usize)>,
     pub(crate) copies: Vec<((Part, usize, Part, u8), Status)>,
-    pub(crate) left: Vec<((Part, usize), usize)>,
+    pub(crate) excited: Vec<((Part, usize, usize), Status)>,
 }
 
 /// A copy's population at mixing m, the dressed two-state admixture ½(1 − 1/√(1 + 4m²)) (½ where m is infinite: a
@@ -262,9 +259,7 @@ impl Choice {
     /// -- through an excited state, absorbing f and emitting g, a = Σ_x |V_g[x,t]| |V_f[x,s]| / |E_s + ν_f − 𝒦_xx|, at the
     /// mismatch Δ = E_t − E_s − (ν_f − ν_g); and the outside forms', Σ_ω Σ_i |O_ω,i[t,s]| N_ω at Δ = E_t − E_s -- of an
     /// admixture beyond the share join their ends into a set, and the mixing's maximum spanning tree of those is static,
-    /// each set then moved by the exact frequency (zero or a beat ν_f − ν_g) nearest its diagonal's mean; the excited states'
-    /// couplings -- 𝒦's at the focus (the decay's cross terms) and the outside forms' at peak, at their mismatch -- join
-    /// them into parts the same way.
+    /// each set then moved by the exact frequency (zero or a beat ν_f − ν_g) nearest its diagonal's mean.
     pub(crate) fn of(request: &Request, share: f64) -> Result<Choice, String> {
         let light = Light::new(request);
         let axes = Axes::new(request)?;
@@ -316,29 +311,13 @@ impl Choice {
                 frames[s] = frames[s].plus(1, &shift);
             }
         }
-        // The excited parts: the lines (D1, D2). Within a line every coupling stays in the decomposition, which is made once
-        // and kept along the path; between the lines there is only the decay's cross terms (7 THz off, a mixing near 10⁻⁶),
-        // read with the change (module documentation, # One decomposition along the path).
-        let labels = request.levels()?;
-        let mut lines: Vec<Manifold> = vec![];
-        let mut parts: Vec<Vec<usize>> = vec![];
-        for x in 0..EXCITED {
-            let line = labels[GROUND + x].manifold;
-            match lines.iter().position(|l| *l == line) {
-                Some(at) => parts[at].push(x),
-                None => {
-                    lines.push(line);
-                    parts.push(vec![x]);
-                }
-            }
-        }
-        Ok(Choice { frames, sets, parts, explicit: vec![], copies: vec![], left: vec![] })
+        Ok(Choice { frames, sets, explicit: vec![], copies: vec![], excited: vec![] })
     }
 }
 
 /// A block (module documentation, # Blocks): its offset, its explicit states' P places, its Q rows (the solved ones first:
-/// excited states, then decomposed copies; then the centred ones), its ground sources (place, component), its kept copies
-/// (state, component, exact residual θ_t − ω) and its omitted ones.
+/// excited states, then decomposed copies; then the centred ones, excited states and copies), its ground sources (place,
+/// component), its kept copies (state, component, exact residual θ_t − ω) and its omitted ones.
 pub(crate) struct Block {
     pub(crate) offset: Beat,
     pub(crate) value: f64,
@@ -384,8 +363,6 @@ pub(crate) struct Fold {
     entries: Vec<Vec<(usize, usize, Vec<(usize, usize, C64)>)>>,
     /// The same of the excited states no block solves and no place holds (the readings' bare excited block alone).
     others: Vec<Vec<(usize, usize, Vec<(usize, usize, C64)>)>>,
-    /// Per excited state its part (`Choice::parts`).
-    part_of: Vec<usize>,
     /// The levels: per ground state its F, per excited state its level, the excited levels (manifold, F′).
     pub(crate) ground_level: [u8; GROUND],
     pub(crate) excited_level: Vec<usize>,
@@ -495,6 +472,22 @@ impl Fold {
         let d = decay(request);
         let mut base_excited = base.block(&excited, &excited);
         base_excited.add_scaled(C64::new(0.0, -0.5), &d);
+        // The excited states the outside forms couple (any frequency, any field components).
+        let mut coupled = vec![false; EXCITED * EXCITED];
+        for o in &outside {
+            for row in o {
+                for m in row {
+                    for x in 0..EXCITED {
+                        for y in 0..EXCITED {
+                            if m[(GROUND + x, GROUND + y)] != C64::ZERO {
+                                coupled[x * EXCITED + y] = true;
+                                coupled[y * EXCITED + x] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // The blocks: every offset a ground state's component reaches, and every explicit state's.
         let mut offsets: Vec<Beat> = vec![];
         let mut sources: Vec<Vec<(usize, usize)>> = vec![];
@@ -521,23 +514,39 @@ impl Fold {
             let value = axes.omega(&offset);
             let mine: Vec<usize> = (0..explicit.len()).filter(|&j| frames[ng + j] == offset).map(|j| ng + j).collect();
             let theirs: Vec<usize> = mine.iter().map(|&p| explicit[p - ng]).collect();
-            // The excited Q rows: the parts reached from a source or an explicit state of the block (`Choice::parts`).
+            // The excited Q rows: the excited states a source or an explicit state of the block reaches, closed under 𝒦's
+            // couplings (the request's and the outside forms'), each at its level's tier (solved unless chosen otherwise).
             let mut reached = vec![false; EXCITED];
             for &(p, c) in &sources {
                 for m in &components[c].couplings {
                     (0..EXCITED).filter(|&x| m[(x, ground[p])] != C64::ZERO).for_each(|x| reached[x] = true);
                 }
             }
-            for (pi, part) in choice.parts.iter().enumerate() {
-                let left = !part.iter().any(|x| theirs.contains(x)) && sources.iter().any(|&(p, c)| choice.left.contains(&((components[c].part, ground[p]), pi)));
-                if left {
-                    part.iter().for_each(|&x| reached[x] = false);
-                } else if part.iter().any(|&x| reached[x] || theirs.contains(&x)) {
-                    part.iter().for_each(|&x| reached[x] = true);
+            theirs.iter().for_each(|&x| reached[x] = true);
+            loop {
+                let before = reached.iter().filter(|&&r| r).count();
+                for x in 0..EXCITED {
+                    for y in 0..EXCITED {
+                        if reached[x] && !reached[y] && (base_excited[(x, y)] != C64::ZERO || base_excited[(y, x)] != C64::ZERO || coupled[x * EXCITED + y]) {
+                            reached[y] = true;
+                        }
+                    }
+                }
+                if reached.iter().filter(|&&r| r).count() == before {
+                    break;
                 }
             }
-            let q: Vec<usize> = choice.parts.iter().flatten().copied().filter(|&x| reached[x] && !theirs.contains(&x)).collect();
-            let rows_excited: Vec<usize> = theirs.iter().chain(&q).copied().collect();
+            let tier = |x: usize| {
+                choice
+                    .excited
+                    .iter()
+                    .rev()
+                    .find(|((absorbed, s, level), _)| *level == excited_level[x] && find(*absorbed).is_ok_and(|a| sources.iter().any(|&(p, c)| ground[p] == *s && c == a)))
+                    .map_or(Status::Decomposed, |x| x.1)
+            };
+            let q: Vec<usize> = (0..EXCITED).filter(|&x| reached[x] && !theirs.contains(&x) && tier(x) == Status::Decomposed).collect();
+            let centred_excited: Vec<usize> = (0..EXCITED).filter(|&x| reached[x] && !theirs.contains(&x) && tier(x) == Status::Centred).collect();
+            let rows_excited: Vec<usize> = theirs.iter().chain(&q).chain(&centred_excited).copied().collect();
             // The copies: per emitting component, the ground states it reaches from the block's excited rows off their frames.
             let mut decomposed = vec![];
             let mut centred = vec![];
@@ -567,6 +576,7 @@ impl Fold {
             let mut rows: Vec<Row> = q.iter().map(|&x| Row::Excited(x)).collect();
             rows.extend(decomposed);
             let solved = rows.len();
+            rows.extend(centred_excited.iter().map(|&x| Row::Excited(x)));
             rows.extend(centred);
             blocks.push(Block { offset, value, explicit: mine, rows, solved, sources, kept, omitted });
         }
@@ -610,7 +620,6 @@ impl Fold {
             emission: std::array::from_fn(|q| request.emission[q].block(&all, &excited)),
             entries,
             others,
-            part_of: (0..EXCITED).map(|x| choice.parts.iter().position(|p| p.contains(&x)).unwrap_or(0)).collect(),
             ground_level,
             excited_level,
             levels,
@@ -984,6 +993,9 @@ impl Fold {
                             out.add_scaled(f * comp.gamma[j][k], w);
                         }
                         *work += (comp.basis.len() * e.solved * n) as f64;
+                        if let Some(d) = &e.to_dressed[split] {
+                            plus(&mut out, &if diagonal { d.clone() } else { mul(d, &triangle.u, work) });
+                        }
                         out
                     }
                 };
@@ -1316,12 +1328,14 @@ struct Basis {
     ranks: Vec<Option<Rc<Vec<(usize, Vec<Mat>)>>>>,
 }
 
-/// A block's matrices at the point before its decomposition: K_eff + o on its solved rows (its centred copies eliminated at
-/// z₀, R₀ = (z₀ − Ĥ_CC)⁻¹), R₀, and its static split's effective source (None where it has none).
+/// A block's matrices at the point before its decomposition: K_eff + o on its solved rows (its centred rows eliminated at
+/// z₀, R₀ = (z₀ − Ĥ_CC)⁻¹), R₀, its static split's effective source (None where it has none), and per beam split the
+/// dressing of its source through the centred rows, Ĥ_SC R₀ B_C (None where its source has no centred rows).
 struct Effective {
     k: Mat,
     resolvent: Mat,
     source: Option<Mat>,
+    dressed: Vec<Option<Mat>>,
 }
 
 /// A block's evaluation order at a point (module documentation, # Blocks): its solved rows, R₀, its basis (`Path`) with
@@ -1336,6 +1350,7 @@ struct Eliminated {
     diag: Vec<C64>,
     off: Vec<Vec<f64>>,
     to_static: Option<Mat>,
+    to_dressed: Vec<Option<Mat>>,
     ranks: Rc<Vec<(usize, Vec<Mat>)>>,
     /// The exact copies: their count (the solved rows' last), and in the basis their couplings with the excited rows,
     /// Ỹ = V_E†K_ED V_D and Ỹ′ = V_D†K_DE V_E (module documentation, # The exact copies).
@@ -1481,7 +1496,8 @@ impl Eliminated {
         z
     }
 
-    /// The block's response on all its Q rows from that on its solved rows: the centred ones T_C = R₀(Ĥ_CS T_S + B_C).
+    /// The block's response on all its Q rows from that on its solved rows: the centred ones T_C = R₀(Ĥ_CS T_S + B_C), B_C
+    /// every split's source on them.
     fn rows(&self, l: &Laid, t: &Mat, work: &mut f64) -> Mat {
         let m = l.inner.rows;
         let n = t.cols;
@@ -1491,7 +1507,9 @@ impl Eliminated {
         }
         let all: Vec<usize> = (0..n).collect();
         let mut tc = mul_sparse(&l.inner.block(&c, &s), t, work);
-        plus(&mut tc, &l.absorb[0].block(&c, &all));
+        for a in &l.absorb {
+            plus(&mut tc, &a.block(&c, &all));
+        }
         let tc = mul(&self.resolvent, &tc, work);
         Mat::from_fn(m, n, |i, j| if i < self.solved { t[(i, j)] } else { tc[(i - self.solved, j)] })
     }
@@ -1520,7 +1538,12 @@ impl Fold {
             k[(i, i)] += C64::real(b.value);
         }
         let source = source.data.iter().any(|z| *z != C64::ZERO).then_some(source);
-        Some(Effective { k, resolvent, source })
+        let mut dressed = vec![None];
+        for a in &l.absorb[1..] {
+            let ac = a.block(&c, &all);
+            dressed.push((!c.is_empty() && ac.data.iter().any(|z| *z != C64::ZERO)).then(|| mul(&mul(&l.inner.block(&s, &c), &resolvent, work), &ac, work)));
+        }
+        Some(Effective { k, resolvent, source, dressed })
     }
 
     /// The block's evaluation order at the point from its matrices and the path's basis: the basis found, or made where it
@@ -1532,8 +1555,7 @@ impl Fold {
         let rows = b.rows[..b.solved].to_vec();
         let dressed = b.rows.len() > b.solved || rows.iter().any(|r| matches!(r, Row::Copy { .. }));
         let own = dressed.then_some(o);
-        // The exact copies' couplings with the excited rows are not decomposed (module documentation, # The exact copies);
-        // the couplings between the lines are left out of what is decomposed (read with the change).
+        // The exact copies' couplings with the excited rows are not decomposed (module documentation, # The exact copies).
         let ne = rows.iter().take_while(|r| matches!(r, Row::Excited(_))).count();
         let mut kept = e.k.clone();
         for i in 0..b.solved {
@@ -1543,16 +1565,7 @@ impl Fold {
                 }
             }
         }
-        let mut k = kept.clone();
-        for i in 0..b.solved {
-            for j in 0..b.solved {
-                if let (Row::Excited(x), Row::Excited(y)) = (rows[i], rows[j]) {
-                    if self.part_of[x] != self.part_of[y] {
-                        k[(i, j)] = C64::ZERO;
-                    }
-                }
-            }
-        }
+        let k = kept.clone();
         // The basis: the atom's own; beyond the share (`renew`, the keys whose reading passed it) first the nearest kept one
         // of the key, then a new one.
         let key = (rows.clone(), own);
@@ -1587,7 +1600,8 @@ impl Fold {
                 let factored = Rc::new(Factored::of(&k, work)?);
                 path.made += 1;
                 for (idx, _, _) in &factored.parts {
-                    if let Some(x) = crate::linalg::eigen(&k.block(idx, idx)) {
+                    let mut x = crate::linalg::Eigen::default();
+                    if x.decompose(&k.block(idx, idx)) {
                         path.condition = path.condition.max(x.condition);
                     }
                 }
@@ -1604,8 +1618,8 @@ impl Fold {
             moved.push(None);
         }
         let factored = path.bases[at].factored.clone();
-        // The change since the basis was made in the basis, δK̃ = V†δV (the couplings the decomposition leaves out between
-        // the lines with it): its diagonal the first order, each row's rest its reading's norm, with what the form dropped.
+        // The change since the basis was made in the basis, δK̃ = V†δV: its diagonal the first order, each row's rest its
+        // reading's norm, with what the form dropped.
         if moved[at].is_none() {
             let mut delta = kept.clone();
             delta.add_scaled(-C64::ONE, &path.bases[at].k);
@@ -1655,6 +1669,7 @@ impl Fold {
         }
         let ranks = path.bases[at].ranks[o].clone().unwrap();
         let to_static = e.source.as_ref().map(|x| factored.to(x, work));
+        let to_dressed: Vec<Option<Mat>> = e.dressed.iter().map(|d| d.as_ref().map(|x| factored.to(x, work))).collect();
         // The exact copies' couplings in the basis at the point.
         let nd = b.solved - ne;
         let (coupling, back_coupling) = if nd > 0 {
@@ -1672,7 +1687,7 @@ impl Fold {
         } else {
             (Mat::zeros(0, 0), Mat::zeros(0, 0))
         };
-        Some(Eliminated { solved: b.solved, resolvent: e.resolvent, basis: at, factored: path.bases[at].factored.clone(), diag, off, to_static, ranks, exact: nd, coupling, back_coupling })
+        Some(Eliminated { solved: b.solved, resolvent: e.resolvent, basis: at, factored: path.bases[at].factored.clone(), diag, off, to_static, to_dressed, ranks, exact: nd, coupling, back_coupling })
     }
 }
 
@@ -2076,6 +2091,34 @@ impl Fold {
                 }
             }
         }
+        // Every node's centring on its own response (module documentation, # Blocks): taken at z₀ instead of each column's
+        // own energy t_jj, its response moves by exactly (z₀ − t_jj) R_N(z₀) T_N,j, R_N(z₀) = (z₀ − Ĥ_NN)⁻¹ on its rows -- an
+        // excited node's relative to the column's whole excited response, a copy's absolute (`per`); the order's reading
+        // where it is centred. (A copy's effect through the solved rows is read below, the larger kept.)
+        for (o, b) in self.blocks.iter().enumerate() {
+            let l = &f.laid[o];
+            let mut nodes: Vec<Node> = (0..b.rows.len()).map(|i| node(b, i)).collect();
+            nodes.dedup();
+            let mut seen: Vec<Node> = vec![];
+            for nd in nodes {
+                if seen.contains(&nd) {
+                    continue;
+                }
+                seen.push(nd);
+                let rows: Vec<usize> = (0..b.rows.len()).filter(|&i| node(b, i) == nd).collect();
+                let centred = rows.iter().any(|&i| i >= b.solved);
+                let Some(r0) = inverse(&Mat::from_fn(rows.len(), rows.len(), |a, c| if a == c { C64::real(l.z0) } else { C64::ZERO } - l.inner[(rows[a], rows[c])]), work) else { continue };
+                for j in (0..n).filter(|&j| whole[j] > 0.0) {
+                    let col = Mat::from_fn(rows.len(), 1, |a, _| tu[o][(rows[a], j)]);
+                    let moved = mul(&r0, &col, work);
+                    let size = (C64::real(l.z0) - tri.t[(j, j)]).norm_sqr() * moved.data.iter().map(|x| x.norm_sqr()).sum::<f64>() / per(nd, j);
+                    put(o, nd, 6, size, &mut out);
+                    if centred {
+                        put(o, nd, 3, size, &mut out);
+                    }
+                }
+            }
+        }
         // The light pattern's offsets ±pattern on each column's own response, the larger.
         if pattern > 0.0 {
             for o in 0..self.blocks.len() {
@@ -2370,6 +2413,8 @@ impl Fold {
         let mut bar_k: Vec<Mat> = f.eliminated.iter().map(|e| Mat::zeros(e.solved, e.solved)).collect();
         let mut bar_r0: Vec<Mat> = f.eliminated.iter().map(|e| Mat::zeros(e.resolvent.rows, e.resolvent.cols)).collect();
         let mut bar_source: Vec<Vec<Mat>> = f.eliminated.iter().zip(&f.laid).map(|(e, l)| l.shifts.iter().map(|_| Mat::zeros(e.solved, n)).collect()).collect();
+        // A beam's dressed source (Ĥ_SC R₀ B_C), apart from its rows' own (those reach the beam through its ranks).
+        let mut bar_dressed: Vec<Vec<Mat>> = bar_source.clone();
         let mut kappa: Vec<Vec<C64>> = self.components.iter().map(|c| vec![C64::ZERO; c.beams.len()]).collect();
         for k in (0..f.stages.len()).rev() {
             let stage = &f.stages[k];
@@ -2387,7 +2432,9 @@ impl Fold {
                     let ts = stage.responses[o].block(&sr, &all);
                     let inner_cs = l.inner.block(&cr, &sr);
                     let mut arg = mul(&inner_cs, &ts, w);
-                    plus(&mut arg, &l.absorb[0].block(&cr, &all));
+                    for a in &l.absorb {
+                        plus(&mut arg, &a.block(&cr, &all));
+                    }
                     let r0b = mul_adj(&e.resolvent, &btc, w);
                     plus(&mut bar_ts, &mul_adj(&inner_cs, &r0b, w));
                     plus(&mut bar_r0[o], &mul_by_adj(&btc, &arg, w));
@@ -2396,8 +2443,10 @@ impl Fold {
                         for (b2, &si) in sr.iter().enumerate() {
                             bar_inner[o][(ci, si)] += ics[(a, b2)];
                         }
-                        for j in 0..n {
-                            bar_absorb[o][0][(ci, j)] += r0b[(a, j)];
+                        for ba in bar_absorb[o].iter_mut() {
+                            for j in 0..n {
+                                ba[(ci, j)] += r0b[(a, j)];
+                            }
                         }
                     }
                 }
@@ -2447,6 +2496,9 @@ impl Fold {
                             }
                         }
                         Some((c, j)) => {
+                            if e.to_dressed[sp].is_some() {
+                                plus(&mut bar_dressed[o][sp], &mul_by_adj(&e.from(&lz, w), &tri.u, w));
+                            }
                             let ci = e.ranks.iter().position(|x| x.0 == c).unwrap();
                             for (k, ru) in ranks_u[ci].iter().enumerate() {
                                 let inner: C64 = (0..lz.data.len()).map(|i| lz.data[i].conj() * ru.data[i]).sum();
@@ -2479,20 +2531,10 @@ impl Fold {
                 bar_t.push(mul_adj(&l.emit, &bar_h, w));
             }
         }
-        // Each block's evaluation order: sources_eff = absorb_S (+ Ĥ_SC R₀ absorb_C on the static split), K_eff = Ĥ_SS +
-        // Ĥ_SC R₀ Ĥ_CS, R₀ = (z₀ − Ĥ_CC)⁻¹ -- its couplings across parts left out, as the decomposition leaves them.
+        // Each block's evaluation order: sources_eff = absorb_S + Ĥ_SC R₀ absorb_C (every split), K_eff = Ĥ_SS + Ĥ_SC R₀ Ĥ_CS,
+        // R₀ = (z₀ − Ĥ_CC)⁻¹.
         let mut bar_z0: Vec<f64> = vec![0.0; self.blocks.len()];
         for (o, (l, e)) in f.laid.iter().zip(&f.eliminated).enumerate() {
-            let rows = &self.blocks[o].rows;
-            for i in 0..e.solved {
-                for j in 0..e.solved {
-                    if let (Row::Excited(x), Row::Excited(y)) = (rows[i], rows[j]) {
-                        if self.part_of[x] != self.part_of[y] {
-                            bar_k[o][(i, j)] = C64::ZERO;
-                        }
-                    }
-                }
-            }
             let m = l.inner.rows;
             let (sr, cr): (Vec<usize>, Vec<usize>) = ((0..e.solved).collect(), (e.solved..m).collect());
             let all: Vec<usize> = (0..n).collect();
@@ -2511,21 +2553,29 @@ impl Fold {
             if !cr.is_empty() {
                 let sc = l.inner.block(&sr, &cr);
                 let cs = l.inner.block(&cr, &sr);
-                let ac = l.absorb[0].block(&cr, &all);
                 let r0 = &e.resolvent;
-                let bs0 = &bar_source[o][0];
-                // source0 ∋ Ĥ_SC R₀ B_C; K ∋ Ĥ_SC R₀ Ĥ_CS.
-                let mut bar_sc = mul_by_adj(bs0, &mul(r0, &ac, w), w);
-                plus(&mut bar_sc, &mul_by_adj(&bar_k[o], &mul(r0, &cs, w), w));
-                let mut br0 = mul(&mul_adj(&sc, bs0, w), &ac.adjoint(), w);
-                plus(&mut br0, &mul(&mul_adj(&sc, &bar_k[o], w), &cs.adjoint(), w));
-                plus(&mut bar_r0[o], &br0);
-                let bac = mul_adj(&mul(&sc, r0, w), bs0, w);
-                let bcs = mul_adj(&mul(&sc, r0, w), &bar_k[o], w);
-                for (a, &ci) in cr.iter().enumerate() {
-                    for j in 0..n {
-                        bar_absorb[o][0][(ci, j)] += bac[(a, j)];
+                // source_sp ∋ Ĥ_SC R₀ B_C,sp (the static split's and every beam's dressing); K ∋ Ĥ_SC R₀ Ĥ_CS.
+                let mut bar_sc = mul_by_adj(&bar_k[o], &mul(r0, &cs, w), w);
+                let mut br0 = mul(&mul_adj(&sc, &bar_k[o], w), &cs.adjoint(), w);
+                let scr = mul(&sc, r0, w);
+                for sp in 0..l.absorb.len() {
+                    let bs = if sp == 0 { &bar_source[o][0] } else { &bar_dressed[o][sp] };
+                    if bs.data.iter().all(|z| *z == C64::ZERO) {
+                        continue;
                     }
+                    let ac = l.absorb[sp].block(&cr, &all);
+                    plus(&mut bar_sc, &mul_by_adj(bs, &mul(r0, &ac, w), w));
+                    plus(&mut br0, &mul(&mul_adj(&sc, bs, w), &ac.adjoint(), w));
+                    let bac = mul_adj(&scr, bs, w);
+                    for (a, &ci) in cr.iter().enumerate() {
+                        for j in 0..n {
+                            bar_absorb[o][sp][(ci, j)] += bac[(a, j)];
+                        }
+                    }
+                }
+                plus(&mut bar_r0[o], &br0);
+                let bcs = mul_adj(&scr, &bar_k[o], w);
+                for (a, &ci) in cr.iter().enumerate() {
                     for (b2, &si) in sr.iter().enumerate() {
                         bar_inner[o][(ci, si)] += bcs[(a, b2)];
                         bar_inner[o][(si, ci)] += bar_sc[(b2, a)];
