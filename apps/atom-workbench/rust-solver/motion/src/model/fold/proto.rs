@@ -331,11 +331,12 @@ struct Far {
     /// Whether the point leaves the block out (`omit`).
     omitted: bool,
     /// Temporaries (BRIEF_PROTO5 item 1): the pairs' products at a node and their gradients (v², 3v²), the latter on the
-    /// stacked forms (3 × n²), the force's ⟨Ā, F_ab + z₀G_ab⟩ (v²).
+    /// stacked forms (3 × n²), the force's ⟨Ā, F_ab + z₀G_ab⟩ (v²), the photons' emission on [ζ | ∂ζ] (v·3 GROUND × 4).
     pnode: Vec<C64>,
     dp: Vec<C64>,
     o3: Vec<C64>,
     ks: Vec<C64>,
+    pv: Vec<C64>,
 }
 
 /// A near block's decomposition (module documentation, # What is kept).
@@ -383,9 +384,9 @@ struct NearBasis {
     z0: f64,
     r0: f64,
     /// Per term V†N_tV on the parts' entries (s × s, zero across parts: the tangent's ∂K̃); the emission on the block's rows
-    /// C_qV (GROUND × s, the jumps and the photons).
+    /// C_qV, the axes stacked by rows (b, q) at 3b + q (3 GROUND × s: the jumps and the photons, one product).
     within: Vec<C64>,
-    emit: [Vec<C64>; 3],
+    emit: Vec<C64>,
     /// The exact copies: per coupling vector (component g, k) V†U_k on (E rows, D rows of g) (ne × nd); what the
     /// decomposition's dressing adds to K̂_ED and K̂_DE at the reference beyond the bare drives (held); K̂_DD at the
     /// reference (less o) and per term its form on the D rows (nd × nd).
@@ -400,7 +401,7 @@ struct NearBasis {
     /// through the centred copies among themselves (n × n); per row and term the norm of the source's dressing (its R₀'s
     /// change read). The exact copies': their static source and emission less the bare drives (held; nd × n, n × nd), per
     /// coupling vector (g, k) U_k on (X, D of g) (n × nd). Per copy vector R₀(C_g)U_k(X, C_g)† (|C_g| × n, the centred
-    /// copies' static rows). The emission's columns C_q on the explicit states (GROUND × n).
+    /// copies' static rows). The emission's columns C_q on the explicit states, stacked as `emit` (3 GROUND × n).
     stat: Vec<C64>,
     sterms: Vec<C64>,
     xemit0: Vec<C64>,
@@ -412,7 +413,7 @@ struct NearBasis {
     xd0: Vec<C64>,
     xcouple: Vec<Vec<C64>>,
     copies_x: Vec<Vec<C64>>,
-    xemitc: [Vec<C64>; 3],
+    xemitc: Vec<C64>,
 }
 
 /// A far block's pair forms (module documentation, # What is kept): per pair of source vectors (a, b) U_a†R₀U_b and
@@ -428,8 +429,9 @@ struct FarBasis {
     resolvent: Mat,
     z0: f64,
     r0: f64,
-    /// Per source vector and emission axis C_qR₀U_a (GROUND × n): the jumps and the photons.
-    emitted: Vec<[Vec<C64>; 3]>,
+    /// Per source vector and emission axis C_qR₀U_a, stacked by rows (a, b, q) at (a·GROUND + b)·3 + q (v·3 GROUND × n): the
+    /// jumps and the photons, one product.
+    emitted: Vec<C64>,
 }
 
 /// An atom's kept decompositions, per block (near and far apart): the kept ones and the one it stands on; the
@@ -562,7 +564,7 @@ struct Scratch {
     tcbar: Vec<C64>,
     tc1: Vec<C64>,
     tc2: Vec<C64>,
-    /// The photons' y = Zζ (s) and ∂y (3 × s).
+    /// The photons' [Zζ | Z∂ζ + ∂Zζ] (s × 4) and ∂Z ζ (3s).
     py: Vec<C64>,
     pdy: Vec<C64>,
     copies: CopyTemps,
@@ -607,7 +609,7 @@ impl Scratch {
             tcbar: z(nc * n),
             tc1: z(nc * n),
             tc2: z(nc * n),
-            py: z(s),
+            py: z(4 * s),
             pdy: z(3 * s),
             copies: CopyTemps {
                 rd: z(nd * n),
@@ -737,7 +739,8 @@ struct BoundTemps {
 
 /// The step's temporaries of the whole (BRIEF_PROTO5 item 1), n the columns: the tangent's ∂Ĥ_base, the far metric's
 /// tangent, ∂H, ∂X (n × 3n), ∂Δ (n × n), ∂c (3 × n), a product's (3 × n × n), two n × n; the force's Ā_j (three), N̄, Ā†,
-/// X̄, Ā*, a work n × n, per component and vector ḡ_e, the diagonal's gradient (n × 3); the photons' ζ, ∂ζ, u, ∂u; the
+/// X̄, Ā*, a work n × n, per component and vector ḡ_e, the diagonal's gradient (n × 3); the photons' ζ, ∂ζ, [ζ | ∂ζ] (n × 4),
+/// [u | ∂u] (3 GROUND × 4), a class's rows of it and their Gram matrix (4 × 4); the
 /// omission's columns' denominators and a trial's (n), a block's bounds on trial (`Bounds`, the largest levels × n), the
 /// levels' and far blocks' order; the near blocks' rows stacked (BRIEF_PROTO5 item 2: every block's rows of a product's two
 /// factors, 2 × the rows in all × n each; the force's products on them, the rows in all × n and × 2n; its [Ā; Ā†] and
@@ -762,8 +765,10 @@ struct Temp {
     diagonal: Vec<[f64; 3]>,
     zeta: Vec<C64>,
     dzeta: Vec<C64>,
-    u: Vec<C64>,
-    du: Vec<[C64; 3]>,
+    zeta4: Vec<C64>,
+    u4: Vec<C64>,
+    rows4: Vec<C64>,
+    gram: Vec<C64>,
     den: Vec<f64>,
     d: Vec<f64>,
     trial: Bounds,
@@ -802,8 +807,10 @@ impl Temp {
             diagonal: vec![[0.0; 3]; n],
             zeta: z(n),
             dzeta: z(3 * n),
-            u: z(3 * GROUND),
-            du: vec![[C64::ZERO; 3]; 3 * GROUND],
+            zeta4: z(4 * n),
+            u4: z(12 * GROUND),
+            rows4: z(12 * GROUND),
+            gram: z(16),
             den: vec![0.0; n],
             d: vec![0.0; n],
             trial: (Vec::with_capacity(levels), vec![0.0; levels * n], vec![0.0; levels * n], vec![0.0; levels * n]),
@@ -2093,6 +2100,7 @@ impl Fold {
                     dp: vec![C64::ZERO; 3 * v * v],
                     o3: vec![C64::ZERO; 3 * n * n],
                     ks: vec![C64::ZERO; v * v],
+                    pv: vec![C64::ZERO; v * 12 * GROUND],
                 });
             }
         }
@@ -2442,10 +2450,11 @@ impl Fold {
         let dressedx: Vec<f64> = terms.iter().flat_map(|x| (0..s).map(|i| (0..nx).map(|c| x.7[(i, c)].norm_sqr()).sum::<f64>().sqrt()).collect::<Vec<f64>>()).collect();
         let es: Vec<usize> = (0..GROUND).collect();
         let excited: Vec<usize> = kr.iter().map(|&a| rows[a]).collect();
-        let emit: [Vec<C64>; 3] = std::array::from_fn(|q| {
+        let per: [Mat; 3] = std::array::from_fn(|q| {
             let c = Mat::from_fn(GROUND, s, |g, a| self.emission[q][(es[g], excited[a])]);
-            f.to(&c.adjoint(), work).adjoint().data
+            f.to(&c.adjoint(), work).adjoint()
         });
+        let emit: Vec<C64> = (0..3 * GROUND).flat_map(|r| (0..s).map(|a| per[r % 3][(r / 3, a)]).collect::<Vec<_>>()).collect();
         let weights = terms.iter().map(|x| x.0).collect();
         let mut diag = vec![C64::ZERO; terms.len() * s];
         let mut norms = vec![0.0; terms.len() * s * parts];
@@ -2630,7 +2639,7 @@ impl Fold {
                 Mat::from_fn(cg.len(), n, |a, p| nb.xs.iter().position(|&q| q == p).map_or(C64::ZERO, |jx| m[(a, jx)])).data
             })
             .collect();
-        let xemitc: [Vec<C64>; 3] = std::array::from_fn(|q| Mat::from_fn(GROUND, n, |g, p| nb.xs.iter().position(|&x| x == p).map_or(C64::ZERO, |jx| self.emission[q][(g, xstates[jx])])).data);
+        let xemitc: Vec<C64> = Mat::from_fn(3 * GROUND, n, |r, p| nb.xs.iter().position(|&x| x == p).map_or(C64::ZERO, |jx| self.emission[r % 3][(r / 3, xstates[jx])])).data;
         let _ = level;
         Some(NearBasis {
             at,
@@ -2702,7 +2711,13 @@ impl Fold {
             .collect();
         let ru: Vec<Mat> = u.iter().map(|x| r0.product(x)).collect();
         let es: Vec<usize> = (0..GROUND).collect();
-        let emitted: Vec<[Vec<C64>; 3]> = ru.iter().map(|x| std::array::from_fn(|q| self.emission[q].block(&es, &rows).product(x).data)).collect();
+        let emitted: Vec<C64> = ru
+            .iter()
+            .flat_map(|x| {
+                let per: [Mat; 3] = std::array::from_fn(|q| self.emission[q].block(&es, &rows).product(x));
+                (0..3 * GROUND).flat_map(|r| (0..n).map(|p| per[r % 3][(r / 3, p)]).collect::<Vec<_>>()).collect::<Vec<_>>()
+            })
+            .collect();
         let (mut f, mut g) = (vec![], vec![]);
         for a in 0..u.len() {
             for bb in 0..u.len() {
@@ -4502,43 +4517,42 @@ impl Fold {
     /// force; 2D = Σ_c M2_c − W_c b_c b_cᵀ of the kicks. After `prototype_tangent`.
     pub(crate) fn prototype_photons(&self, cache: &Cache, ws: &mut Workspace, psi: &[C64], sets: &[Vec<usize>]) -> Photons {
         let n = ws.n;
+        let g3 = 3 * GROUND;
         let mut work = 0.0;
         assert!(ws.tangent, "the step's tangent");
         let Workspace { mid, step, near, far, scratch, tm, ds, .. } = &mut *ws;
         let normal = &step.normal.data;
         let de = &mid.de;
-        let Temp { zeta, dzeta, u, du, e: q, .. } = tm;
-        // ζ = S⁻¹ψ, ∂ζ = −S⁻¹ ∂S ζ.
-        let (zeta, dzeta, q) = (&mut zeta[..n], &mut dzeta[..3 * n], &mut q[..n]);
-        for i in 0..n {
-            zeta[i] = (0..n).map(|j| normal[i * n + j] * psi[j]).sum();
-        }
+        let Temp { zeta, dzeta, zeta4, u4, rows4, gram, e: q, .. } = tm;
+        // ζ = S⁻¹ψ, ∂ζ = −S⁻¹ ∂S ζ, laid as the products' right factor [ζ | ∂ζ_x | ∂ζ_y | ∂ζ_z] (n × 4).
+        let (zeta, dzeta, z4, q) = (&mut zeta[..n], &mut dzeta[..3 * n], &mut zeta4[..4 * n], &mut q[..n]);
+        fused_product_into(normal, psi, (n, n, 1), zeta);
         for a in 0..3 {
-            for i in 0..n {
-                q[i] = (0..n).map(|j| ds[a][i * n + j] * zeta[j]).sum();
-            }
-            for i in 0..n {
-                dzeta[a * n + i] = -(0..n).map(|j| normal[i * n + j] * q[j]).sum::<C64>();
+            fused_product_into(&ds[a], zeta, (n, n, 1), q);
+            fused_product_into(normal, q, (n, n, 1), &mut dzeta[a * n..(a + 1) * n]);
+        }
+        dzeta.iter_mut().for_each(|z| *z = -*z);
+        for j in 0..n {
+            z4[4 * j] = zeta[j];
+            for a in 0..3 {
+                z4[4 * j + 1 + a] = dzeta[a * n + j];
             }
         }
         work += (7 * n * n) as f64;
-        // The classes' moments.
+        // The classes' moments: per class its rows (b ∈ set, every axis q) of [u | ∂u] gathered, their Gram matrix
+        // R†R (4 × 4) one product -- the rate Σ|u|², the mean Σ Im(u*∂u), the second moment Σ Re(∂u*∂u).
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let mut out = Photons { rate: 0.0, force: [0.0; 3], diffusion: [[0.0; 3]; 3], work: 0.0 };
-        let class = |u: &[C64], du: &[[C64; 3]], rows: &[usize], absorbed: f64, out: &mut Photons| {
-            let (mut w, mut mean, mut second) = (0.0, [0.0; 3], [[0.0; 3]; 3]);
-            for &b in rows {
-                for q in 0..3 {
-                    let (x, d) = (u[q * GROUND + b], &du[q * GROUND + b]);
-                    w += x.norm_sqr();
-                    for a in 0..3 {
-                        mean[a] += (x.conj() * d[a]).im;
-                        for c in 0..3 {
-                            second[a][c] += (d[a].conj() * d[c]).re;
-                        }
-                    }
-                }
+        let gram = &mut gram[..16];
+        let mut class = |u4: &[C64], rows: &[usize], absorbed: f64, out: &mut Photons| {
+            let m = 3 * rows.len();
+            let r = &mut rows4[..4 * m];
+            for (k, &b) in rows.iter().enumerate() {
+                r[12 * k..12 * k + 12].copy_from_slice(&u4[12 * b..12 * b + 12]);
             }
+            crate::linalg::adjoint_product(r, r, (4, m, 4), gram);
+            let w = gram[0].re;
+            let mean: [f64; 3] = std::array::from_fn(|a| gram[1 + a].im);
             let square = crate::linalg::dot3(mean, mean);
             let bound = absorbed * w;
             let kick = if square > bound * bound { mean.map(|x| absorbed * x / square.sqrt()) } else if w > 0.0 { mean.map(|x| x / w) } else { [0.0; 3] };
@@ -4546,81 +4560,69 @@ impl Fold {
             for a in 0..3 {
                 out.force[a] += mean[a] - w * kick[a];
                 for c in 0..3 {
-                    out.diffusion[a][c] += second[a][c] - w * kick[a] * kick[c];
+                    out.diffusion[a][c] += gram[(1 + a) * 4 + 1 + c].re - w * kick[a] * kick[c];
                 }
             }
         };
-        let (u, du) = (&mut u[..3 * GROUND], &mut du[..3 * GROUND]);
+        let u4 = &mut u4[..4 * g3];
         for (x, (nb, sc)) in near.iter().zip(scratch.iter_mut()).enumerate() {
             if nb.idle() {
                 continue;
             }
             let basis = &cache.near[x][cache.at_near[x].unwrap()];
             let s = nb.s;
-            let tg = &nb.tg;
             let mut absorbed = 0.0_f64;
             for &(cc, jj) in &nb.splits {
                 absorbed = absorbed.max(self.light.beams[self.components[cc].beams[jj]].wave_number);
             }
-            let (y, dy) = (&mut sc.py[..s], &mut sc.pdy[..3 * s]);
+            // [Zζ | Z∂ζ_a + ∂Z_a ζ] (s × 4): Z on [ζ | ∂ζ], ∂Z (its rows (i, a) at 3i + a) on ζ.
+            let (y, dy) = (&mut sc.py[..4 * s], &mut sc.pdy[..3 * s]);
+            fused_product_into(&nb.ztot, z4, (s, n, 4), y);
+            fused_product_into(&nb.tg.dztot, zeta, (3 * s, n, 1), dy);
             for i in 0..s {
-                y[i] = (0..n).map(|j| nb.ztot[i * n + j] * zeta[j]).sum();
-            }
-            for a in 0..3 {
-                for i in 0..s {
-                    dy[a * s + i] = (0..n).map(|j| tg.dztot[i * 3 * n + a * n + j] * zeta[j] + nb.ztot[i * n + j] * dzeta[a * n + j]).sum();
+                for a in 0..3 {
+                    y[4 * i + 1 + a] += dy[3 * i + a];
                 }
             }
-            for q in 0..3 {
-                let e = &basis.emit[q];
-                let ex = &basis.xemitc[q];
-                for b in 0..GROUND {
-                    let row = &e[b * s..b * s + s];
-                    u[q * GROUND + b] = row.iter().zip(y.iter()).map(|(p, z)| *p * *z).sum();
-                    du[q * GROUND + b] = std::array::from_fn(|a| row.iter().zip(&dy[a * s..a * s + s]).map(|(p, z)| *p * *z).sum());
-                    // The explicit states' own rows of ε (units): C_q on them, of ζ and ∂ζ.
-                    for &p in &nb.xs {
-                        let c = ex[b * n + p];
-                        u[q * GROUND + b] += c * zeta[p];
-                        for a in 0..3 {
-                            du[q * GROUND + b][a] += c * dzeta[a * n + p];
-                        }
-                    }
-                }
-            }
+            // [u | ∂u] = C ε S⁻¹[ψ | ∂]: the emission on the kept rows times the above, the explicit states' own rows (units)
+            // on [ζ | ∂ζ]; its rows (b, q), one product each.
+            fused_product_into(&basis.emit, y, (g3, s, 4), u4);
             work += (7 * s * n + 12 * GROUND * s) as f64;
+            if !nb.xs.is_empty() {
+                crate::linalg::fused_product_onto(&basis.xemitc, z4, (g3, n, 4), u4);
+                work += (12 * GROUND * n) as f64;
+            }
             for set in sets {
-                class(u, du, set, absorbed, &mut out);
+                class(u4, set, absorbed, &mut out);
             }
             work += (3 * GROUND * 13) as f64;
         }
-        for (x, fb) in far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
+        for (x, fb) in far.iter_mut().enumerate().filter(|(_, fb)| !fb.omitted) {
             let basis = &cache.far[x][cache.at_far[x].unwrap()];
-            u.fill(C64::ZERO);
-            du.fill([C64::ZERO; 3]);
             let mut absorbed = 0.0_f64;
             for &(cc, _) in &fb.splits {
                 for &l in &self.components[cc].beams {
                     absorbed = absorbed.max(self.light.beams[l].wave_number);
                 }
             }
+            // Every vector's C_qR₀U_a on [ζ | ∂ζ], one product; u = Σ_a e_a (·ζ), ∂u = Σ_a ∂e_a (·ζ) + e_a (·∂ζ).
+            let v = fb.vectors.len();
+            let pv = &mut fb.pv[..4 * v * g3];
+            fused_product_into(&basis.emitted, z4, (v * g3, n, 4), pv);
+            u4.fill(C64::ZERO);
             for (ia, &(cc, k)) in fb.vectors.iter().enumerate() {
-                let e = mid.e[cc][k];
-                for q in 0..3 {
-                    let m = &basis.emitted[ia][q];
-                    for b in 0..GROUND {
-                        let row = &m[b * n..b * n + n];
-                        let v: C64 = row.iter().zip(zeta.iter()).map(|(p, z)| *p * *z).sum();
-                        u[q * GROUND + b] += e * v;
-                        for a in 0..3 {
-                            du[q * GROUND + b][a] += de[cc][k][a] * v + e * row.iter().zip(&dzeta[a * n..a * n + n]).map(|(p, z)| *p * *z).sum::<C64>();
-                        }
+                let (e, d) = (mid.e[cc][k], de[cc][k]);
+                for r in 0..g3 {
+                    let (o, x) = (&mut u4[4 * r..4 * r + 4], &pv[4 * (ia * g3 + r)..4 * (ia * g3 + r) + 4]);
+                    o[0] += e * x[0];
+                    for a in 0..3 {
+                        o[1 + a] += d[a] * x[0] + e * x[1 + a];
                     }
                 }
                 work += (12 * GROUND * n) as f64;
             }
             for set in sets {
-                class(u, du, set, absorbed, &mut out);
+                class(u4, set, absorbed, &mut out);
             }
             work += (3 * GROUND * 13) as f64;
         }
@@ -4651,9 +4653,9 @@ impl Fold {
             };
             let zm = Mat { rows: nb.s, cols: n, data: z.clone() };
             out.push(std::array::from_fn(|q| {
-                let mut m = Mat { rows: GROUND, cols: nb.s, data: basis.emit[q].clone() }.product(&zm);
+                let mut m = Mat::from_fn(GROUND, nb.s, |b, i| basis.emit[(3 * b + q) * nb.s + i]).product(&zm);
                 // The explicit states' own rows of ε: C_q on them.
-                m.add_scaled(C64::ONE, &Mat { rows: GROUND, cols: n, data: basis.xemitc[q].clone() });
+                m.add_scaled(C64::ONE, &Mat::from_fn(GROUND, n, |b, p| basis.xemitc[(3 * b + q) * n + p]));
                 m.product(normal)
             }));
         }
@@ -4666,7 +4668,7 @@ impl Fold {
             out.push(std::array::from_fn(|q| {
                 let mut m = Mat::zeros(GROUND, n);
                 for (ia, &(cc, k)) in fb.vectors.iter().enumerate() {
-                    m.add_scaled(e[cc][k], &Mat { rows: GROUND, cols: n, data: basis.emitted[ia][q].clone() });
+                    m.add_scaled(e[cc][k], &Mat::from_fn(GROUND, n, |b, p| basis.emitted[((ia * GROUND + b) * 3 + q) * n + p]));
                 }
                 m.product(normal)
             }));
