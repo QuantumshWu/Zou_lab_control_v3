@@ -6580,7 +6580,7 @@ mod tests {
         let held = |run: &Run, (state, kappa): (usize, V3), i: usize| Trajectory { threshold: f64::MIN_POSITIVE, ..Trajectory::new(run, state, trap.centre, kappa, SEED, i as u64) };
         // A step's own count, its scratch primed as a run's (`step::priced`).
         let counted = |run: &Run, from: &Trajectory| {
-            let (through, mut scratch, everywhere) = (crate::step::Midway::new(run, from, tau).unwrap(), crate::step::Scratch::default(), Widest(f64::INFINITY));
+            let (through, mut scratch, everywhere) = (crate::step::Midway::new(run, from, tau, Some(tau.abs())).unwrap(), crate::step::Scratch::default(), Widest(f64::INFINITY));
             through.attempt(from, &crate::step::Brownian::STILL, &[], &mut scratch, &everywhere).unwrap();
             through.attempt(from, &crate::step::Brownian::STILL, &[], &mut scratch, &everywhere).unwrap().work
         };

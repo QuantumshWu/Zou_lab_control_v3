@@ -681,6 +681,18 @@ pub trait Middle {
     fn decide(&self, _path: &Self::Path, _psi: &[C64], _interval: f64, owed: f64, _price: &dyn Fn(&Offer) -> f64) -> Decided {
         Decided { owed, held: None, switched: None, work: 0.0 }
     }
+
+    /// Whether the generator exists along the path (its fold at the point: DESIGN §11.3). Here everywhere.
+    fn exists(&self, _path: &Self::Path) -> bool {
+        true
+    }
+
+    /// The rise a step whose middle does not exist asks of this middle at the step's start, made deciding there, for the
+    /// trajectory's state ψ (# The decision times): no decision -- the side that does not exist is beyond every share,
+    /// so its rise, whatever its price (`decide`'s); nothing where no node is left. Here nothing.
+    fn risen(&self, _path: &Self::Path, _psi: &[C64], owed: f64) -> Decided {
+        Decided { owed, held: None, switched: None, work: 0.0 }
+    }
 }
 
 /// A cluster priced at a decision time (`Middle::decide`): its states and ground states, its levels' bandwidth (rad/µs,
@@ -2048,6 +2060,10 @@ pub fn predicted(forms: &Forms, kappa_h: [f64; 3], tau: f64, t_m: f64) -> [f64; 
 pub struct Midway<'a, D: Dynamics + 'a> {
     model: &'a D,
     tau: f64,
+    /// The interval to the next decision where the step ends at a decision time, none where it does not (# The decision
+    /// times); the trajectory as the rises its middle asked for left it at its start, and their number.
+    decision: Option<f64>,
+    risen: Option<(Trajectory, u32)>,
     hbar_over_mass: f64,
     flow: Flow,
     reached: ([f64; 3], [f64; 3]),
@@ -2087,12 +2103,50 @@ struct March {
 
 impl<'a, D: Dynamics> Midway<'a, D> {
     /// The middle of the step of τ (negative: the reverse step) from a trajectory's position, momentum, cluster and
-    /// time: the reference's fixed point (`middle`; refused where it is not one) and the model's generator there.
-    pub fn new(model: &'a D, from: &Trajectory, tau: f64) -> Result<Midway<'a, D>, Refused> {
+    /// time: the reference's fixed point (`middle`; refused where it is not one) and the model's generator there, deciding
+    /// where the step ends at a decision time (`decision`: the interval to the next one; # The decision times), frozen
+    /// where it does not. Where the generator does not exist along the step's path -- its fold at the middle --, the
+    /// trajectory's state is risen at the step's start by the rule of its start until it does: taken onto the cluster of
+    /// the node that holds the most of it (`Middle::risen`, the switch's formula: no decision), or where its own fold does
+    /// not exist there either, its amplitudes landed as a trajectory's first are (`land`); refused as a jump with no
+    /// photon is where no node is left (`Refused::Emission`).
+    pub fn new(model: &'a D, from: &Trajectory, tau: f64, decision: Option<f64>) -> Result<Midway<'a, D>, Refused> {
         let half = 0.5 * tau;
         let (flow, reached) = middle(model, from.r, from.kappa, half)?;
-        let generator = model.middle(from.cluster, reached.0, from.time + half, &from.held, true);
-        Ok(Midway { model, tau, hbar_over_mass: model.hbar_over_mass(), flow, reached, reference: flow.gradient_at(reached.0), generator })
+        let hm = model.hbar_over_mass();
+        let reference = flow.gradient_at(reached.0);
+        let mut risen: Option<(Trajectory, u32)> = None;
+        loop {
+            let start = risen.as_ref().map_or(from, |x| &x.0);
+            let generator = model.middle(start.cluster, reached.0, start.time + half, &start.held, decision.is_some());
+            let kappa_m = predicted(&start.forms, reached.1, tau, start.time + half);
+            if generator.exists(&generator.path(kappa_m, kappa_m.map(|k| hm * k))) {
+                return Ok(Midway { model, tau, decision, risen, hbar_over_mass: hm, flow, reached, reference, generator });
+            }
+            let mut state = start.clone();
+            let at = model.middle(state.cluster, state.r, state.time, &state.held, true);
+            let rose = at.risen(&at.path(state.kappa, [0.0; 3]), &state.psi, state.owed);
+            state.work += rose.work;
+            if let (Some(held), Some(switched)) = (rose.held, rose.switched) {
+                (state.held, state.cluster, state.psi) = (held, switched.cluster, switched.psi);
+                state.forms = Forms { time: state.time, ..switched.forms }.less(model.reference(state.r).gradient);
+                state.dropped += switched.dropped;
+                state.owed += switched.dropped;
+            } else {
+                // Its fold does not exist at the start either: no dressing to carry -- the rule of a trajectory's start
+                // on its amplitudes (`land`), on another cluster or none.
+                let Some((cluster, _, landed)) = land(model, state.cluster, &state.point(), None, &state.psi, &state.held).filter(|x| x.0 != state.cluster) else { return Err(Refused::Emission) };
+                (state.cluster, state.psi) = (cluster, landed);
+                state.forms = model.forms(cluster, &state.point(), &state.psi, &state.held);
+            }
+            let rises = risen.map_or(0, |x| x.1) + 1;
+            risen = Some((state, rises));
+        }
+    }
+
+    /// The rises the step's middle asked for at its start (`new`).
+    pub fn rises(&self) -> u32 {
+        self.risen.as_ref().map_or(0, |x| x.1)
     }
 
     /// The step through this middle of a state at its start -- the middle's own position, momentum, cluster and time,
@@ -2106,6 +2160,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// trajectory's. A jump the model gives no photon is refused (`jump`); so is a stretch whose first state scatters
     /// beyond every state of the atom (`Domain::runaway`; module documentation, # The domain).
     pub fn attempt(&self, from: &Trajectory, brownian: &Brownian, reads: &[f64], scratch: &mut Scratch, domain: &dyn Domain) -> Result<Step, Refused> {
+        let from = self.risen.as_ref().map_or(from, |x| &x.0);
         let (tau, hm, n) = (self.tau, self.hbar_over_mass, from.psi.len());
         let h = 0.5 * tau;
         let (flow, (r_h, kappa_h), reference) = (self.flow, self.reached, self.reference);
@@ -2121,13 +2176,13 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             if done {
                 break;
             }
-            landed = Some(next.unwrap_or_else(|| self.model.middle(march.state.cluster, r_h, from.time + h, &march.state.held, true)));
+            landed = Some(next.unwrap_or_else(|| self.model.middle(march.state.cluster, r_h, from.time + h, &march.state.held, self.decision.is_some())));
             on = march.state.cluster;
         }
-        // The decision on the end state's own cluster's middle (a jump at the step's end into another leaves it to the next
-        // step's).
-        if on == march.state.cluster {
-            self.decided(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time + h, &mut march)?;
+        // The decision on the end state's own cluster's middle where the step ends at a decision time (a jump at the
+        // step's end into another leaves it to the next one).
+        if let Some(interval) = self.decision.filter(|_| on == march.state.cluster) {
+            self.decided(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time + h, interval, &mut march)?;
         }
         let March { state: mut end, read, impulse, scattered, optical, work, prices, mut made, .. } = march;
         // The scattered light at the middle, on the state there: its force over the step; and its diffusion with the
@@ -2197,7 +2252,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// emitted already (# Jumps) -- is the photon at once, from the state before it (which holds that fast part) at the
     /// step's end, as a landing at its threshold is (`jump`): its kick the step's as any jump's, its landing the state the
     /// step ends in.
-    fn decided(&self, middle: &D::Middle<'a>, kappa_m: [f64; 3], t_m: f64, march: &mut March) -> Result<(), Refused> {
+    fn decided(&self, middle: &D::Middle<'a>, kappa_m: [f64; 3], t_m: f64, interval: f64, march: &mut March) -> Result<(), Refused> {
         let stretches: Vec<Price> = march.prices.iter().filter(|(c, _)| *c == march.state.cluster).map(|x| x.1).collect();
         let price = |offer: &Offer| -> f64 {
             let integrator: f64 = stretches
@@ -2210,7 +2265,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             integrator + offer.made
         };
         let path = middle.path(kappa_m, kappa_m.map(|k| self.hbar_over_mass * k));
-        let decided = middle.decide(&path, &march.state.psi, self.tau.abs(), march.state.owed, &price);
+        let decided = middle.decide(&path, &march.state.psi, interval, march.state.owed, &price);
         march.state.owed = decided.owed;
         march.work += decided.work;
         if let Some(held) = decided.held {
@@ -2227,7 +2282,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         }
         let (h, velocity) = (0.5 * self.tau, kappa_m.map(|k| self.hbar_over_mass * k));
         (state.r, state.kappa, state.time) = (std::array::from_fn(|a| self.reached.0[a] + velocity[a] * h), kappa_m, t_m + h);
-        let mut places = Places { model: self.model, point: (self.reached.0, t_m), path: (kappa_m, velocity), s: h, own: (state.cluster, middle, &path), other: None };
+        let mut places = Places { model: self.model, decide: true, point: (self.reached.0, t_m), path: (kappa_m, velocity), s: h, own: (state.cluster, middle, &path), other: None };
         jump(self.model, state, Some(&mut places))?;
         state.forms = self.model.forms(state.cluster, &state.point(), &state.psi, &state.held);
         let kick = std::array::from_fn(|a| state.kappa[a] - kappa_m[a]);
@@ -2424,7 +2479,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let state = &mut march.state;
             state.psi = at(&x[..n], crossed, target);
             (state.r, state.kappa, state.time) = (std::array::from_fn(|a| self.reached.0[a] + velocity[a] * crossed), kappa_m, start + (crossed + h));
-            let mut places = Places { model: self.model, point: (self.reached.0, start + h), path: (kappa_m, velocity), s: crossed, own: (cluster, generator, &along.path), other: None };
+            let mut places = Places { model: self.model, decide: self.decision.is_some(), point: (self.reached.0, start + h), path: (kappa_m, velocity), s: crossed, own: (cluster, generator, &along.path), other: None };
             jump(self.model, state, Some(&mut places))?;
             next = places.other.filter(|other| other.0 == state.cluster).map(|other| other.1);
             let kick = std::array::from_fn(|a| state.kappa[a] - kappa_m[a]);
@@ -2792,7 +2847,7 @@ impl Price {
 /// jumps are the state's own -- its threshold, its streams --, the Brownian path none (no work is of it), no time
 /// read. Refused as the run's step would be (`Midway::attempt`).
 pub fn priced<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, domain: &dyn Domain) -> Result<Vec<(usize, Price)>, Refused> {
-    let (through, mut scratch) = (Midway::new(model, from, tau)?, Scratch::default());
+    let (through, mut scratch) = (Midway::new(model, from, tau, None)?, Scratch::default());
     through.attempt(from, &Brownian::STILL, &[], &mut scratch, domain)?;
     Ok(through.attempt(from, &Brownian::STILL, &[], &mut scratch, domain)?.prices)
 }
@@ -2862,6 +2917,7 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
 /// decomposition there -- is the trajectory's from then on, as a step's middle's is.
 pub struct Places<'p, 'm, D: Dynamics + 'm> {
     model: &'m D,
+    decide: bool,
     point: ([f64; 3], f64),
     path: ([f64; 3], [f64; 3]),
     s: f64,
@@ -2876,7 +2932,7 @@ impl<'m, D: Dynamics + 'm> Places<'_, 'm, D> {
             return (self.own.1, self.own.2);
         }
         if self.other.as_ref().is_none_or(|other| other.0 != cluster) {
-            let middle = self.model.middle(cluster, self.point.0, self.point.1, held, true);
+            let middle = self.model.middle(cluster, self.point.0, self.point.1, held, self.decide);
             let path = middle.path(self.path.0, self.path.1);
             self.other = Some((cluster, middle, path));
         }

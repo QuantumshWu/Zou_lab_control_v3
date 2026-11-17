@@ -20,6 +20,14 @@
 //! periods), where a step chosen from the last step's error drifts. The steps are then the run's length over τ: one
 //! propagation a step, whatever the jumps.
 //!
+//! # The decision times
+//! The model's representation changes at the run's decision times alone (DESIGN §11.3; model/fold/run.rs # The
+//! representation and the decision times): the ends of the Brownian path's cells (# The Brownian path), the coarsest
+//! level's grid, the caller's. A step decides where its end reaches or passes a cell's end -- the cell its end lies in
+//! is past the one its start lies in: integers, no comparison of times --, the cell's width its interval to the next;
+//! every other step is frozen (`step::Midway::new`). So every level of a trajectory, and the halves a refused step is
+//! taken at, decide at the same times on their own states there: two levels differ by the step's error alone.
+//!
 //! # The reads
 //! A trajectory is read at the caller's times (the outputs) where they fall, inside a step, from what the step knows
 //! between its ends (step.rs, # The path between a step's ends): the internal state its propagation has there, the
@@ -234,8 +242,10 @@ pub fn advance<D: Dynamics>(
             // path has it: the bin's end it ends at, or its own cut. The times read inside the step go with it.
             let (brownian, beyond) = path.reach(trajectory.time + length);
             let end = if length == rest { to } else { beyond.at };
+            // A decision time where the step's end reaches or passes a cell's end (# The decision times).
+            let decision = (beyond.bin >> path.depth > path.cursor.bin >> path.depth).then_some(path.cell);
             let reads = &at[next..next + at[next..].partition_point(|&time| time <= end)];
-            match Midway::new(model, trajectory, length).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch, domain)) {
+            match Midway::new(model, trajectory, length, decision).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch, domain)) {
                 Ok(step) => break (step, end, beyond),
                 Err(refusal @ (Refused::Emission | Refused::Runaway | Refused::Optical(_))) => return Err(refusal),
                 Err(refusal) => {

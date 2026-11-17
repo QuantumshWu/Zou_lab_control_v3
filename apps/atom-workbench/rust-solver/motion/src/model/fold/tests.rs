@@ -799,7 +799,7 @@ fn the_left_response_is_the_right_one_of_the_adjoint() {
                 let Ok(mut ws) = fold.prototype_workspace() else { continue };
                 let mut cache = super::proto::Cache::default();
                 let Some(step) = fold.prototype([0.0; 3], [0.0; 3], &mut cache, &mut ws) else { continue };
-                let (x, most) = (step.metric.clone(), step.readings().most());
+                let (x, most) = (step.metric.clone(), step.readings().combined());
                 if !fold.prototype_left(&cache, &mut ws) {
                     continue;
                 }
@@ -2415,7 +2415,7 @@ fn an_explicit_set_s_step_makes_its_optical_sector() {
         let mut stayed = 0;
         for _ in 0..8 {
             let (before, start, jumps) = (t.booked, t.cluster, t.jumps);
-            let middle = crate::step::Midway::new(&run, &t, 0.126).expect("the reference's fixed point");
+            let middle = crate::step::Midway::new(&run, &t, 0.126, Some(0.126)).expect("the reference's fixed point");
             t = middle.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere).expect("a step, its optical sector made").end;
             assert!(t.booked[..2].iter().all(|x| x.is_finite()) && t.pending.iter().flatten().all(|x| x.is_finite()), "the optical sector's covariance a number");
             let cluster = crate::step::Dynamics::cluster(&run, start);
@@ -2792,7 +2792,7 @@ fn lambda_against_master(a: f64, b: f64, form: f64, time: f64) -> (f64, f64, f64
         let mut t = Trajectory::new(&run, 0, at, [0.0; 3], 11, i);
         for _ in 0..steps {
             let before = t.cluster;
-            t = Midway::new(&run, &t, tau).unwrap().attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere).unwrap().end;
+            t = Midway::new(&run, &t, tau, Some(tau.abs())).unwrap().attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere).unwrap().end;
             let c = run.cluster(t.cluster);
             explicit += usize::from(c.states.len() > c.ground);
             switches += usize::from(t.cluster != before && run.cluster(before).ground == c.ground);
@@ -3348,9 +3348,9 @@ fn random_systems_land_within_their_ring() {
             let read = readings.ring + readings.series;
             compared += 1;
             lines.push(format!("   trial {trial} (ground {g}, excited {e}, couplings ×{scale:.2}Γ): the ring {:.2e}, the series {:.2e}; the worst landing's waiting time {worst_tau:.2e}, next landing's total variation {worst_tv:.2e}; actual over read {:.2}", readings.ring, readings.series, worst_tau.max(worst_tv) / read));
-            if readings.most() <= share {
+            if readings.combined() <= share {
                 within += 1;
-                assert!(worst_tau <= share && worst_tv <= share, "trial {trial}: within its readings ({:.2e}) the landings err by {worst_tau:.2e} (waiting) and {worst_tv:.2e} (next landing)", readings.most());
+                assert!(worst_tau <= share && worst_tv <= share, "trial {trial}: within its readings ({:.2e}) the landings err by {worst_tau:.2e} (waiting) and {worst_tv:.2e} (next landing)", readings.combined());
             }
         }
     }
@@ -3496,7 +3496,7 @@ fn a_resonant_two_level_atom_rises_before_its_fold_ceases_to_exist() {
         for i in 0..count {
             let mut t = Trajectory::new(&run, 0, [0.0; 3], [0.0; 3], 5, i);
             for _ in 0..steps {
-                t = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("every step's middle exists").end;
+                t = Midway::new(&run, &t, tau, Some(tau.abs())).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("every step's middle exists").end;
                 let c = run.cluster(t.cluster);
                 explicit += usize::from(c.states.len() > c.ground);
             }
@@ -3509,6 +3509,79 @@ fn a_resonant_two_level_atom_rises_before_its_fold_ceases_to_exist() {
         assert!((rate - master).abs() <= 4.0 * error + share * master, "s {s}: the photons' rate {rate} ± {error} against {master}");
         assert!(if s < 0.25 { explicit == 0 } else { explicit > 0 }, "s {s}: the fold stays where its ring is within the share, the node rises where not");
     }
+}
+
+/// The decision times are the coarsest level's grid (DESIGN §11.3; adapt.rs # The decision times; BRIEF_STEP4A 4c): a
+/// heavy two-level atom crossing a resonant standing wave (s = 0.3 a beam: 1.2 at the antinodes, where the fold with
+/// nothing explicit does not exist) at 0.10-0.24 µm/µs, no jump drawn (its survival the internal state's record), at the
+/// steps 0.2, 0.1, 0.05 and 0.0125 µs, every level deciding at the ends of the cells of 0.4 µs alone, holding between:
+/// every switch of a level is at a decision time, or a rise its held middle asked for where its fold does not exist
+/// (plan4 §2.4: counted, R-b), and no step is refused. Said (plan4 R-a): whether the levels switch at the same decision
+/// times, and the survival's error against the finest with its observed order -- a decision takes the end state at its
+/// step's middle, τ/2 before the decision time, a first-order offset between the levels (measured: BRIEF_STEP4A 4c).
+#[test]
+fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_decision_times_alone() {
+    use crate::step::{Dynamics, Midway, Trajectory};
+    struct Anywhere;
+    impl crate::step::Domain for Anywhere {
+        fn runaway(&self, _: f64) -> bool {
+            false
+        }
+    }
+    let (ee, s, cell, end) = (1000.0, 0.3, 0.4, 4.0);
+    let g = C64::real(0.5 * GAMMA * (s / 2.0_f64).sqrt());
+    let rays = [1.0, -1.0].map(|d| Ray { axis: 0, nu: ee, direction: [0.0, 0.0, d], couplings: vec![(17, 0, g)] });
+    let mut req = system(&[(0, 0.0)], &[(17, ee, GAMMA, 0)], &rays, 1, true);
+    idle_decay(&mut req, GAMMA);
+    req.validate().unwrap();
+    let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+    let hm = run.hbar_over_mass();
+    let taus = [0.2, 0.1, 0.05, 0.0125];
+    // A trajectory at the step τ: the survival ln‖ψ‖² at the end, its switches' times and whether each was a decision
+    // time, and the rises its frozen middles asked for.
+    let path = |i: u64, tau: f64| -> (f64, Vec<(f64, bool)>, u32, usize) {
+        let mut t = Trajectory::new(&run, 0, [0.0, 0.0, 0.05 * i as f64], [0.0, 0.0, (0.1 + 0.02 * i as f64) / hm], 7, i);
+        t.threshold = 0.0;
+        let (per, steps) = ((cell / tau).round() as usize, (end / tau).round() as usize);
+        let (mut scratch, mut switches, mut rises, mut explicit) = (crate::step::Scratch::default(), vec![], 0, 0);
+        for k in 1..=steps {
+            let decision = (k % per == 0).then_some(cell);
+            let before = t.cluster;
+            let middle = Midway::new(&run, &t, tau, decision).expect("a step");
+            rises += middle.rises();
+            t = middle.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere).expect("no step refused").end;
+            t.time = k as f64 * tau;
+            if t.cluster != before {
+                switches.push((t.time, decision.is_some() || middle.rises() > 0));
+            }
+            let c = run.cluster(t.cluster);
+            explicit += usize::from(c.states.len() > c.ground);
+        }
+        (crate::linalg::norm_sqr(&t.psi).ln(), switches, rises, explicit)
+    };
+    let (mut errors, mut same, mut apart, mut forced) = (vec![0.0; taus.len() - 1], 0, 0, 0u32);
+    for i in 0..8 {
+        let levels: Vec<_> = taus.iter().map(|&tau| path(i, tau)).collect();
+        for (tau, level) in taus.iter().zip(&levels) {
+            assert!(level.1.iter().all(|x| x.1), "trajectory {i} at τ {tau}: a switch off the decision times without a rise asked for: {:?}", level.1);
+            forced += level.2;
+        }
+        println!("trajectory {i}: switches at τ 0.2 {:?}, at 0.1 {:?}; explicit step ends {:?}; survival {:?}", levels[0].1.iter().map(|x| x.0).collect::<Vec<_>>(), levels[1].1.iter().map(|x| x.0).collect::<Vec<_>>(), levels.iter().map(|x| x.3).collect::<Vec<_>>(), levels.iter().map(|x| x.0).collect::<Vec<_>>());
+        for pair in levels[..3].windows(2) {
+            let times = |l: &(f64, Vec<(f64, bool)>, u32, usize)| -> Vec<i64> { l.1.iter().map(|x| (x.0 / cell * 1e6).round() as i64).collect() };
+            if times(&pair[0]) == times(&pair[1]) {
+                same += 1;
+            } else {
+                apart += 1;
+            }
+        }
+        for (e, level) in errors.iter_mut().zip(&levels) {
+            *e += (level.0 - levels[taus.len() - 1].0).abs() / 8.0;
+        }
+    }
+    let orders: Vec<f64> = errors.windows(2).map(|e| (e[0] / e[1]).log2()).collect();
+    println!("the survival's error {errors:.2?}, orders {orders:.2?}; levels' switch times alike {same}, apart {apart}; rises a held middle asked for {forced}");
+    assert!(forced > 0, "a fold that does not exist between two decisions rises");
 }
 
 /// A jump's landing that does not exist rises and lands (BRIEF_COPIES item 1; step.rs `land`): a laser half a Γ below an
@@ -3559,7 +3632,7 @@ fn a_landing_that_does_not_exist_rises_and_lands() {
     for i in 0..12 {
         let mut t = Trajectory::new(&run, 5, at.r, at.kappa, 7, i);
         for _ in 0..steps {
-            t = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("no step refused").end;
+            t = Midway::new(&run, &t, tau, Some(tau.abs())).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("no step refused").end;
             assert!(t.psi.iter().all(|z| z.is_finite()), "every state a number");
         }
         moved += usize::from(run.cluster(t.cluster).states.contains(&0));
@@ -3719,7 +3792,7 @@ fn r4_lin_4_s_thermal_paths_meet_no_point_where_their_fold_does_not_exist() {
         let mut t = Trajectory::new(&run, first, [0.2 * phase.sin(), 0.1 * phase.cos(), 0.0], kappa, 3, i);
         for _ in 0..60 {
             let before = t.cluster;
-            t = Midway::new(&run, &t, 0.126).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("every step's middle exists").end;
+            t = Midway::new(&run, &t, 0.126, Some(0.126)).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("every step's middle exists").end;
             let c = run.cluster(t.cluster);
             steps += 1;
             explicit += usize::from(c.states.len() > c.ground);
@@ -3755,7 +3828,7 @@ fn a_run_s_trajectories_are_the_same_to_the_bit_on_one_thread_and_on_many() {
         let mut t = Trajectory::new(run, i as usize % GROUND, [0.2 * phase.sin(), 0.1 * phase.cos(), 0.0], kappa, 3, i);
         let (mut bits, mut visited) = (vec![], vec![t.cluster]);
         for _ in 0..60 {
-            t = Midway::new(run, &t, 0.126).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("a step").end;
+            t = Midway::new(run, &t, 0.126, Some(0.126)).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("a step").end;
             bits.extend(run.cluster(t.cluster).states.iter().map(|&s| s as u64));
             visited.push(t.cluster);
         }
@@ -3883,7 +3956,7 @@ fn a_request_whose_idle_excited_states_lie_at_a_laser_s_energy_is_run() {
     assert!(q.value.is_finite() && q.gradient.iter().chain(q.hessian.iter().flatten()).all(|x| x.is_finite()) && energy.is_finite(), "finite");
     let mut t = Trajectory::new(&run, 0, r, [0.0; 3], 17, 0);
     for _ in 0..20 {
-        t = Midway::new(&run, &t, 0.05).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut crate::step::Scratch::default(), &Anywhere)).expect("a step").end;
+        t = Midway::new(&run, &t, 0.05, Some(0.05)).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut crate::step::Scratch::default(), &Anywhere)).expect("a step").end;
     }
     println!("after 20 steps: κ {:?}, ‖ψ‖² {:.6}", t.kappa, crate::linalg::norm_sqr(&t.psi));
     assert!(t.kappa.iter().all(|x| x.is_finite()) && t.psi.iter().all(|z| z.re.is_finite() && z.im.is_finite()), "the atom steps");
@@ -3983,7 +4056,7 @@ fn held_mean_force(run: &run::Onefold, r: [f64; 3], count: u64, steps: usize, ta
         .map(|i| {
             let mut t = Trajectory::new(run, 0, r, [0.0; 3], 11, i);
             for _ in 0..steps {
-                t = Midway::new(run, &t, tau).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("every step's middle exists").end;
+                t = Midway::new(run, &t, tau, Some(tau.abs())).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("every step's middle exists").end;
             }
             t.kappa.map(|k| k / time)
         })

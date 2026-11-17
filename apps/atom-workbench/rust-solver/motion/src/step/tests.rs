@@ -437,7 +437,7 @@ fn relative(a: &[f64], b: &[f64]) -> f64 {
 /// reaches; and the states read, each on the step's path.
 fn step_read<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, brownian: &step::Brownian, reads: &[f64], scratch: &mut step::Scratch) -> Result<(step::Step, Vec<Trajectory>), step::Refused> {
     let free = Trajectory { threshold: 0.0, ..from.clone() };
-    let mut step = step::Midway::new(model, &free, tau)?.attempt(&free, brownian, reads, scratch, &Everywhere)?;
+    let mut step = step::Midway::new(model, &free, tau, Some(tau.abs()))?.attempt(&free, brownian, reads, scratch, &Everywhere)?;
     step.end.threshold = from.threshold;
     let read = step
         .made
@@ -890,7 +890,7 @@ fn a_step_s_norm_reaches_a_threshold_where_the_path_s_does_whatever_the_detuning
             let model = Atom::new(hm, flat, beams.to_vec(), detuning, GAMMA);
             let mut start = held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]);
             start.threshold = theta;
-            let taken = step::Midway::new(&model, &start, tau).unwrap().attempt(&start, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
+            let taken = step::Midway::new(&model, &start, tau, Some(tau.abs())).unwrap().attempt(&start, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
             let length = taken.made.iter().find(|made| made.kick.is_some()).unwrap_or_else(|| panic!("Δτ {turns}, v {v}: no jump within the step")).state.time;
             let error = (length - at) * rate;
             // Without the decay: the norm after the step.
@@ -1132,7 +1132,7 @@ fn engine_diffusion(model: &Atom, v: f64, tau: f64, burn: usize, span: usize, co
             for s in 0..burn + span {
                 (t.r, t.kappa) = ([0.0, 0.0, z0 + v * t.time], [0.0, 0.0, v / hm]);
                 let brownian = step::Brownian::over(tau, &[stream.normals(), stream.normals()]);
-                let step = step::Midway::new(model, &t, tau).unwrap().attempt(&t, &brownian, &[], &mut scratch, &Everywhere).unwrap();
+                let step = step::Midway::new(model, &t, tau, Some(tau.abs())).unwrap().attempt(&t, &brownian, &[], &mut scratch, &Everywhere).unwrap();
                 if s >= burn {
                     sum += step.end.kappa[2] - v / hm;
                 }
@@ -1278,7 +1278,7 @@ fn the_jumps_are_at_the_roots_of_the_norm() {
 fn stepped<D: Dynamics>(model: &D, start: &Trajectory, tau: f64, end: f64) -> (Trajectory, Vec<f64>, usize) {
     let (mut t, mut scratch, mut times, mut most) = (start.clone(), step::Scratch::default(), Vec::new(), 0);
     for k in 1..=(end / tau).round() as usize {
-        let taken = step::Midway::new(model, &t, tau).unwrap().attempt(&t, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+        let taken = step::Midway::new(model, &t, tau, Some(tau.abs())).unwrap().attempt(&t, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
         times.extend(taken.made.iter().map(|made| made.state.time));
         most = most.max(taken.made.len());
         t = taken.end;
@@ -1310,7 +1310,7 @@ fn a_jump_is_made_inside_its_step_where_the_step_s_own_propagation_reaches_the_t
     let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
     let (mut twin, mut scratch, mut jumps, mut most, mut crossed, mut kept) = (start.clone(), step::Scratch::default(), 0, 0, 0, 0);
     for k in 1..=(end / tau) as usize {
-        let taken = step::Midway::new(&model, &twin, tau).unwrap().attempt(&twin, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+        let taken = step::Midway::new(&model, &twin, tau, Some(tau.abs())).unwrap().attempt(&twin, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
         let free = step_of(&model, &twin, tau, &mut step::Scratch::default()).unwrap();
         let below = (norm(&free.end.psi) / twin.threshold).ln();
         if below.abs() > 1e-9 {
@@ -2553,6 +2553,15 @@ fn fitted(n: usize) -> super::Scratch {
 /// of a state at the middle (`Dynamics::readout`: an output's, not a step's). Returns the time of the step through its
 /// middle.
 fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> f64 {
+    // The atoms whose middle rises (its fold does not exist there: `Midway::new`) are another cluster's: said, not timed.
+    let held: Vec<Trajectory> = starts.iter().filter(|s| step::Midway::new(model, s, tau, None).is_ok_and(|m| m.rises() == 0)).cloned().collect();
+    if held.len() < starts.len() {
+        eprintln!("{name}: {} of {} atoms' middles rise (their fold does not exist there)", starts.len() - held.len(), starts.len());
+    }
+    if held.is_empty() {
+        return 0.0;
+    }
+    let starts = &held[..];
     let (count, half, hm) = (starts.len(), 0.5 * tau, model.hbar_over_mass());
     let kept = std::cell::RefCell::new(fitted(starts[0].psi.len()));
     let counted = Counted { model, calls: std::cell::Cell::new([0; 5]) };
@@ -2571,7 +2580,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
         .zip(&steps)
         .map(|(from, taken)| {
             let free = Trajectory { threshold: 0.0, ..from.clone() };
-            let through = step::Midway::new(model, &free, tau).unwrap();
+            let through = step::Midway::new(model, &free, tau, Some(tau.abs())).unwrap();
             let (r_h, kappa_h) = through.reached;
             let kappa = super::predicted(&from.forms, kappa_h, tau, from.time + 0.5 * tau);
             let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
@@ -2590,7 +2599,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             .zip(starts)
             .map(|(p, s)| {
                 let from = if crossing { p.crossed.clone() } else { Trajectory { threshold: 0.0, ..s.clone() } };
-                step::Midway::new(model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut kept.borrow_mut(), &Everywhere).unwrap().end.kappa[0]
+                step::Midway::new(model, &from, tau, Some(tau.abs())).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut kept.borrow_mut(), &Everywhere).unwrap().end.kappa[0]
             })
             .sum::<f64>()
     };
@@ -2931,7 +2940,15 @@ fn a_scene_s_onefold_step_cost() {
                 t.psi = psi.iter().map(|z| *z / norm).collect();
                 t.threshold = f64::MIN_POSITIVE;
                 let warmed = step_of(&run, &t, tau, &mut step::Scratch::default()).expect("the first step").end;
-                let mut start = Trajectory { psi: t.psi, threshold: f64::MIN_POSITIVE, ..warmed };
+                // A random state on the cluster the step ends on (another where it rose).
+                let psi: step::Internal = if warmed.cluster == t.cluster {
+                    t.psi
+                } else {
+                    let psi: Vec<C64> = warmed.psi.iter().map(|_| C64::new(stream.normal(), stream.normal())).collect();
+                    let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+                    psi.iter().map(|z| *z / norm).collect()
+                };
+                let mut start = Trajectory { psi, threshold: f64::MIN_POSITIVE, ..warmed };
                 start.forms = run.forms(start.cluster, &start.point(), &start.psi, &start.held);
                 start
             })
@@ -2961,9 +2978,19 @@ fn a_scene_s_onefold_step_cost() {
 /// (`root`); its launch at the middle with the states and sums of the rest of the step. Said with the nodes, the route,
 /// the tones and the counted hops' work.
 fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
+    // A step between two decisions (adapt.rs # The decision times): the run's common one; a decision's own is apart. The
+    // atoms whose middle rises (its fold does not exist there: `Midway::new`) are another cluster's: said, not timed.
+    let midway = |from: &Trajectory| step::Midway::new(model, &Trajectory { threshold: 0.0, ..from.clone() }, tau, None).unwrap();
+    let held: Vec<Trajectory> = starts.iter().filter(|s| midway(s).rises() == 0).cloned().collect();
+    if held.len() < starts.len() {
+        eprintln!("{name}: {} of {} atoms' middles rise (their fold does not exist there)", starts.len() - held.len(), starts.len());
+    }
+    if held.is_empty() {
+        return;
+    }
+    let starts = &held[..];
     let (count, h, hm) = (starts.len(), 0.5 * tau, model.hbar_over_mass());
     let n = starts[0].psi.len();
-    let midway = |from: &Trajectory| step::Midway::new(model, &Trajectory { threshold: 0.0, ..from.clone() }, tau).unwrap();
     // Three middles an atom: the integrator's (its path's model made once), the model's parts' (a middle of their own
     // each time), the whole step's (each step a middle of its own): a middle holds the model of its path.
     let (cached, fresh, stepping): (Vec<step::Midway<D>>, Vec<step::Midway<D>>, Vec<step::Midway<D>>) = (starts.iter().map(midway).collect(), starts.iter().map(midway).collect(), starts.iter().map(midway).collect());
@@ -3122,7 +3149,7 @@ fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
                     .map(|((t, a), (m, k))| {
                         let mut t = t.clone();
                         a.middle.forget_left();
-                        let mut places = super::Places { model, point: (m.reached.0, t.time - s), path: (*k, k.map(|k| hm * k)), s, own: (t.cluster, a.middle, &a.path), other: None };
+                        let mut places = super::Places { model, decide: true, point: (m.reached.0, t.time - s), path: (*k, k.map(|k| hm * k)), s, own: (t.cluster, a.middle, &a.path), other: None };
                         super::jump(model, &mut t, Some(&mut places)).unwrap();
                         t.kappa[0]
                     })
@@ -3215,7 +3242,7 @@ fn decay_along(name: &str, tau: f64, each: &mut dyn FnMut(usize, usize, usize, &
         let mut rise = [0.0_f64; 3];
         let points: Vec<f64> = (0..=20).map(|k| -h + tau * k as f64 / 20.0).collect();
         for start in starts {
-            let through = step::Midway::new(run, start, tau).unwrap();
+            let through = step::Midway::new(run, start, tau, Some(tau.abs())).unwrap();
             let (r_h, kappa_h) = through.reached;
             let kappa = super::predicted(&start.forms, kappa_h, tau, start.time + h);
             let velocity = kappa.map(|k| run.hbar_over_mass() * k);
@@ -3594,7 +3621,7 @@ fn a_scene_s_step_error_by_the_split() {
         let label = format!("{ground}+{}", n - ground);
         let falls = |e: &[f64; 3]| format!("{:.3e} {:.3e} {:.3e} (falls {:.1}, {:.1})", e[0], e[1], e[2], e[0] / e[1], e[1] / e[2]);
         // Each atom's path of the step of τ, its frame's start state and the path's own flow to the span's end.
-        let middles: Vec<_> = starts.iter().map(|s| step::Midway::new(run, s, tau).unwrap()).collect();
+        let middles: Vec<_> = starts.iter().map(|s| step::Midway::new(run, s, tau, Some(tau.abs())).unwrap()).collect();
         let cases: Vec<_> = starts
             .iter()
             .zip(&middles)
@@ -3727,7 +3754,7 @@ fn walk<D: Dynamics>(model: &D, start: Trajectory, count: usize, (shortest, long
         let mut tau = between(&mut lengths, shortest, longest);
         let step = loop {
             let brownian = step::Brownian::over(tau, &[noise.normals(), noise.normals()]);
-            match step::Midway::new(model, &t, tau).and_then(|middle| middle.attempt(&t, &brownian, &[], &mut scratch, &Everywhere)) {
+            match step::Midway::new(model, &t, tau, Some(tau.abs())).and_then(|middle| middle.attempt(&t, &brownian, &[], &mut scratch, &Everywhere)) {
                 Ok(step) => break step,
                 Err(e) => {
                     tau *= 0.5;
@@ -3867,7 +3894,7 @@ fn a_held_atom_s_mean_force_is_the_master_equation_s_with_the_trap_s_pull() {
             while t.time < burn + span - 1e-9 {
                 (t.r, t.kappa) = (r, [0.0; 3]);
                 let brownian = step::Brownian::over(tau, &[noise.normals(), noise.normals()]);
-                let step = step::Midway::new(&model, &t, tau).unwrap().attempt(&t, &brownian, &[], &mut scratch, &Everywhere).unwrap();
+                let step = step::Midway::new(&model, &t, tau, Some(tau.abs())).unwrap().attempt(&t, &brownian, &[], &mut scratch, &Everywhere).unwrap();
                 if t.time >= burn - 1e-9 {
                     let m = step.momentum();
                     for a in 0..3 {
@@ -4060,7 +4087,7 @@ fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad
 /// most the survival can rise by over the step -- and its decay's size, ∫λ_max.
 fn negative_decay<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> (f64, f64) {
     let (n, h) = (start.psi.len(), 0.5 * tau);
-    let through = step::Midway::new(model, start, tau).unwrap();
+    let through = step::Midway::new(model, start, tau, Some(tau.abs())).unwrap();
     let (_, kappa_h) = through.reached;
     let kappa = super::predicted(&start.forms, kappa_h, tau, start.time + h);
     let along = super::Along::new(&through.generator, kappa, kappa.map(|k| model.hbar_over_mass() * k));
@@ -4096,7 +4123,7 @@ fn negative_decay<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> (f64,
 /// survival does not take.
 fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> f64 {
     let n = start.psi.len();
-    let through = step::Midway::new(model, start, tau).unwrap();
+    let through = step::Midway::new(model, start, tau, Some(tau.abs())).unwrap();
     let along = super::Along::new(&through.generator, start.kappa, start.kappa.map(|k| model.hbar_over_mass() * k));
     let mut scratch = fitted(n);
     super::pictured(&along, &mut scratch, tau, None).unwrap();
@@ -4577,7 +4604,7 @@ fn a_frame_on_a_group_of_states_leaves_the_engine_s_step_as_it_is() {
         from.psi = start.iter().enumerate().map(|(s, z)| if s >= 2 { *z * C64::cis(theta * h) } else { *z }).collect();
         from.threshold = 0.0;
         let mut scratch = step::Scratch::default();
-        let taken = step::Midway::new(&model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+        let taken = step::Midway::new(&model, &from, tau, Some(tau.abs())).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
         let psi: Vec<C64> = taken.end.psi.iter().enumerate().map(|(s, z)| if s >= 2 { *z * C64::cis(theta * h) } else { *z }).collect();
         let kick: [f64; 3] = std::array::from_fn(|a| taken.end.kappa[a] - from.kappa[a]);
         (psi, kick, scratch.picture.beats.len())
@@ -4652,10 +4679,10 @@ fn a_step_s_price_is_its_count_item_by_item() {
     let mut from = Trajectory::new(&model, 0, [0.0; 3], [3.0, -1.0, 2.0], 7, 0);
     from.psi = [C64::real(0.5), C64::new(0.1, 0.4), C64::new(-0.3, 0.2), C64::new(0.0, -0.6)].into_iter().collect();
     from.threshold = 0.0;
-    let free = step::Midway::new(&model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
+    let free = step::Midway::new(&model, &from, tau, Some(tau.abs())).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
     from.threshold = (norm(&from.psi) * norm(&free.end.psi)).sqrt();
     let counted = Counted { model: &model, calls: std::cell::Cell::new([0; 5]) };
-    let (through, mut scratch) = (step::Midway::new(&counted, &from, tau).unwrap(), step::Scratch::default());
+    let (through, mut scratch) = (step::Midway::new(&counted, &from, tau, Some(tau.abs())).unwrap(), step::Scratch::default());
     through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
     counted.calls.set([0; 5]);
     let taken = through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();

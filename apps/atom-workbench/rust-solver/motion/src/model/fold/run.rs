@@ -57,11 +57,15 @@
 //! §11.3): there the middle's first evaluation joins or lets go the levels and makes the decompositions again as its
 //! readings ask, and what it decides is the trajectory's from then on (`Middle::held`). Every other evaluation -- the
 //! step's path at its own momentum, a set a jump lands in, the photon and the landing at a jump -- starts from the
-//! trajectory's representation and decides nothing that outlives it. Here a decision is made at every step's middle,
-//! where a trajectory starts (`Dynamics::started`: the landing of its bare state, the held forms there -- its first
-//! decomposition made once), and where a jump lands it in another set (step.rs `Places`: the landing set's middle, on
-//! which the step goes on -- its first decomposition there made once and kept); the grid of the coarsest level's step
-//! ends is step 3's. The representation is per set a shared value (`Caches`): a decision replaces its own set's.
+//! trajectory's representation and holds it (proto.rs # The decisions: no level joins or leaves, no decomposition is
+//! made again; its readings read). A decision is made where a trajectory starts (`Dynamics::started`: the landing of
+//! its bare state, the held forms there -- its first decomposition made once) and at the decision times, the ends of
+//! the coarsest level's cells (adapt.rs # The decision times: the middle of the step that reaches one, and the middles
+//! a jump of that step lands on). What a holding forward lacks -- a set's first decomposition (a jump into a set the
+//! trajectory has none of), or a fold that does not exist on what it holds -- it makes as a decision does, and that is
+//! the trajectory's (`Middle::forward`): no choice. A fold that does not exist even so rises at the step's start
+//! (step.rs `Midway::new`, `Middle::risen`). The representation is per set a shared value (`Caches`): a decision
+//! replaces its own set's.
 //!
 //! # The held forms
 //! A step's path momentum is predicted from the start state's held forms (step.rs # The path's momentum): the end state's
@@ -458,7 +462,7 @@ impl Onefold {
         let fold = &self.clusters.sets.get(set).fold;
         let mut cache = (*self.cache(held, set)).clone();
         let mut ws = self.clusters.take(set);
-        let exists = fold.prototype(r, kappa, &mut cache, &mut ws).is_some();
+        let exists = fold.prototype_within(r, kappa, &mut cache, &mut ws, f64::INFINITY, true).is_some();
         let spent = ws.spent();
         let out = exists.then(|| then(fold, &cache, &mut ws, spent));
         self.clusters.give(set, ws);
@@ -505,7 +509,7 @@ impl Onefold {
     /// on the forward that found it within, and the representation it starts with. None where no node is left to rise.
     fn first(&self, k: usize, at: &Point, f: &[C64]) -> Option<(usize, Vec<C64>, Forms, Caches)> {
         let share = crate::model::elim::share();
-        let holds = |fold: &Fold, cache: &Cache, ws: &mut Workspace| ws.readings().most() <= share && fold.prototype_left(cache, ws);
+        let holds = |fold: &Fold, cache: &Cache, ws: &mut Workspace| ws.readings().combined() <= share && fold.prototype_left(cache, ws);
         let (cluster, (state, forms), mut caches) = self.clusters.rise(k, at, f, holds, |cluster, bare, cache, ws| {
             let light = !self.clusters.sets.get(cluster).fold.blocks.is_empty();
             self.held_forms(cluster, at, bare, light.then_some((cache, ws)), true)
@@ -827,7 +831,7 @@ pub(crate) struct Middle<'a> {
 /// momentum and velocity), the outer nodes' offset it holds them at, whether it holds the tangent; whether the decision
 /// was made; the generator at the middle; the forwards' counted work, made or not (real multiply-adds,
 /// `step::Middle::made`), the last one's -- the trajectory's count of the cluster (`Caches::counts`) --, its reading (rate
-/// units: the largest of its readings, `Readings::most`) and the budget a forward is made within
+/// units: its readings combined, `Readings::combined`) and the budget a forward is made within
 /// (`Fold::prototype_within`; a switch's, # The nodes risen and fallen).
 struct Inner {
     committed: Arc<Cache>,
@@ -869,17 +873,29 @@ impl Middle<'_> {
             let fold = &self.run.clusters.sets.get(self.set).fold;
             let decide = self.decide && !inner.decided;
             let Inner { committed, eval, ws, generator, budget, .. } = &mut *inner;
-            *eval = (**committed).clone();
             let ws = ws.as_mut().expect("a workspace");
-            let made = fold.prototype_within(self.r, path.kappa, eval, ws, *budget).map(|step| {
-                generator.data.copy_from_slice(&step.generator.data);
-                step.readings().most()
-            });
-            let spent = ws.spent() * crate::decide::COMPLEX;
-            if decide {
+            // A forward that decides nothing is frozen (# The representation and the decision times); what it made it
+            // lacked (its first decomposition of a block), and where it does not exist on what the atom holds it is made
+            // as a decision's: what it lacked or remade is the trajectory's as a decision's is.
+            let mut forward = |hold: bool| {
+                *eval = (**committed).clone();
+                let made = fold.prototype_within(self.r, path.kappa, eval, ws, *budget, hold).map(|step| {
+                    generator.data.copy_from_slice(&step.generator.data);
+                    step.readings().combined()
+                });
+                (made, ws.spent() * crate::decide::COMPLEX, eval.made > committed.made)
+            };
+            let (mut made, mut spent, mut kept) = forward(!decide);
+            if made.is_none() && !decide {
+                let first = spent;
+                (made, spent, _) = forward(false);
+                (spent, kept) = (spent + first, true);
+            }
+            let kept = kept || decide;
+            if kept {
                 *committed = Arc::new(eval.clone());
             }
-            inner.decided |= decide;
+            inner.decided |= kept;
             inner.exists = made.is_some();
             (inner.made, inner.counted) = (inner.made + spent, spent);
             if let Some(reading) = made {
@@ -1367,6 +1383,20 @@ impl crate::step::Middle for Middle<'_> {
             return None;
         }
         Some(Held(Some(Arc::new(self.leaves()))))
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        self.run.clusters.sets.get(self.set).fold.blocks.is_empty() || self.made(path, None, false).exists
+    }
+
+    /// The rise a step whose middle does not exist asks for at its start (step.rs `Midway::new`; # The representation and
+    /// the decision times): this middle's side read as the step's middle's, beyond every share -- the decision's rise,
+    /// whatever its price, and nothing of its interval's balance (`decide`).
+    fn risen(&self, path: &Path, psi: &[C64], owed: f64) -> Decided {
+        if self.made(path, None, false).exists {
+            self.inner.borrow_mut().reading = f64::INFINITY;
+        }
+        self.decide(path, psi, 0.0, owed, &|_| 0.0)
     }
 
     /// The decision at a step's end (module documentation, # The nodes risen and fallen): the balance paid by this

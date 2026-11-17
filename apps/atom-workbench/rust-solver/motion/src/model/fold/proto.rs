@@ -39,7 +39,7 @@
 //! 6. The readings of what is held: the reuse's (fold.rs # One decomposition along the path, row by row, on the response
 //!    the step uses, Z = Σ_l Z_l, at the beams' mean Doppler shift, with the beams' spread as a remainder; R₀'s own change
 //!    with it) and the far blocks' (‖R₀‖ times the distance of the energies and the forms from the reference). Beyond the
-//!    share the nearest kept decomposition, then a new one (fold.rs `Path`'s rule).
+//!    share the nearest kept decomposition, then a new one (fold.rs `Path`'s rule) -- at a decision (# The decisions).
 //! 7. The copies' rows T_C = R₀Ĥ_CS VZ: their own part of the compression (z₀T_C†T_C, T_C†T_C; their dressing is the kept
 //!    decomposition's) only where it reads beyond the share (‖T_C‖, a copy row's absolute unit). The compression
 //!    A = H + Σ(Ṽ†Z)† + Z†(T + δκ − o)Z (+ z₀T_C†T_C) + z₀ M_far, M = Σ Z†Z (+ T_C†T_C) + M_far (less one);
@@ -81,6 +81,14 @@
 //! work but its bound. Beyond the share levels join, the largest first, and the block is decomposed again at the point;
 //! where a decomposition is made its kept levels leave while the same bounds read within. At an atom's first step nothing is kept (a block with exact copies keeps every
 //! level: they couple all of them through the P layer).
+//!
+//! # The decisions (DESIGN §11.3; BRIEF_STEP4A 4c)
+//! The representation -- the decompositions kept, a block's levels kept or left out -- changes at the run's decision
+//! times alone (run.rs # The representation and the decision times): a forward there makes it again as its readings ask
+//! (`prototype`); between two a forward holds (`prototype_within`): it stands on what the atom holds and reads it, a
+//! reading beyond the share read and not acted on until the next decision. What it lacks -- a block with no
+//! decomposition, an omitted level of no bound -- it makes as any forward does: that is no choice. The series' sweeps
+//! are the point's at every forward (an evaluation, not the representation).
 //!
 //! # The landing (DESIGN §9 M15; landing.status 2–4)
 //! A jump's landing and a node's fall take a state onto the fold's slow span along its fast one (`Workspace::taken`): the
@@ -601,10 +609,12 @@ pub(crate) struct Readings {
 }
 
 impl Readings {
-    /// The largest: the fold's error at the point (run.rs # The nodes risen and fallen, ρ).
-    pub(crate) fn most(&self) -> f64 {
-        // A reading that is no number is beyond every share (the one exit: `f64::max` would pass it as none).
-        [self.series, self.reuse, self.far, self.omitted, self.ring].into_iter().fold(0.0, |a, b| if b.is_nan() { f64::INFINITY } else { a.max(b) })
+    /// The fold's error at the point (run.rs # The nodes risen and fallen, ρ): the readings' relative errors combined as
+    /// one component's are, ρ² = Σ_k ρ_k² (DESIGN §1.5), in rate units -- the one combination of the point's rule and of
+    /// the run's books. A reading that is no number is beyond every share (the one exit).
+    pub(crate) fn combined(&self) -> f64 {
+        let squares: f64 = [self.series, self.reuse, self.far, self.omitted, self.ring].into_iter().map(|x| if x.is_nan() { f64::INFINITY } else { unrate(x).powi(2) }).sum();
+        rate(squares.sqrt())
     }
 }
 
@@ -1452,9 +1462,10 @@ fn read_omitted(per: &[Bounds], den: &[f64], thermal: f64, n: usize) -> f64 {
 /// grows. Within the share: the far blocks of the smallest reading go too while the whole stays within (their M_F,jj and
 /// H_F,jj exact), out of H. Beyond it: levels join, the largest first (its bound's share of its column, the joined ones'
 /// bounds counted in the columns as their responses), until the bounds read within; their blocks' `wanted` say the kept
-/// levels the next decomposition holds. Returns the ρ left out and whether levels joined.
+/// levels the next decomposition holds -- not where `hold` (between two decisions: the reading is read); a level of
+/// no bound joins whatever (no reading of it exists). Returns the ρ left out and whether levels joined.
 #[allow(clippy::too_many_arguments)]
-fn omit(near: &mut [Near], far: &mut [Far], scratch: &mut [Scratch], tm: &mut Temp, cache: &Cache, at: &Placed, hbase: &mut [C64], h: &mut [C64], whole: &mut [f64], per: &mut [Bounds], tally: &mut [usize; 2], share: f64, thermal: f64, n: usize, work: &mut f64) -> (f64, bool) {
+fn omit(near: &mut [Near], far: &mut [Far], scratch: &mut [Scratch], tm: &mut Temp, cache: &Cache, at: &Placed, hbase: &mut [C64], h: &mut [C64], whole: &mut [f64], per: &mut [Bounds], tally: &mut [usize; 2], share: f64, thermal: f64, n: usize, hold: bool, work: &mut f64) -> (f64, bool) {
     let pot = |dv: f64| ((1.0 + dv / (2.0 * thermal)).sqrt() - 1.0).powi(2);
     let limit = unrate(share);
     // The bounds' vectors kept in the workspace from step to step (`Workspace::per`, one per near block).
@@ -1485,7 +1496,7 @@ fn omit(near: &mut [Near], far: &mut [Far], scratch: &mut [Scratch], tm: &mut Te
     *work += (n * per.iter().map(|p| p.0.len()).sum::<usize>()) as f64;
     let den = &mut tm.den[..n];
     den.copy_from_slice(&whole[..n]);
-    if rho > limit {
+    if rho > limit && !hold {
         while rho > limit {
             let mut best: Option<(f64, usize, usize)> = None;
             for (x, (om, sz, ..)) in per.iter().enumerate() {
@@ -3357,19 +3368,21 @@ impl Fold {
         Some(out)
     }
 
-    /// The prototype's step at a point (r, κ) on an atom's kept decompositions (module documentation): A, M, S⁻¹, G in the
-    /// workspace's `Step`. None where the fold does not exist there (`prototype_within`).
+    /// The prototype's step at a point (r, κ) on an atom's kept decompositions (module documentation), a decision's: A, M,
+    /// S⁻¹, G in the workspace's `Step`. None where the fold does not exist there (`prototype_within`).
     pub(crate) fn prototype<'w>(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &'w mut Workspace) -> Option<&'w Step> {
-        self.prototype_within(r, kappa, cache, ws, f64::INFINITY)
+        self.prototype_within(r, kappa, cache, ws, f64::INFINITY, false)
     }
 
     /// The prototype's step within a budget of counted complex multiply-adds (`prototype`). None -- the one exit -- where
     /// the fold does not exist there: a decomposition, a centring, the exact copies' complement or the metric singular, or
     /// the series' ratio at or above one; and where its count passes `budget` before the series is within the share. Its
-    /// count, made or not, is the workspace's (`Workspace::spent`): an attempt is measured as a step is.
-    pub(crate) fn prototype_within<'w>(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &'w mut Workspace, budget: f64) -> Option<&'w Step> {
+    /// count, made or not, is the workspace's (`Workspace::spent`): an attempt is measured as a step is. Where `hold`
+    /// (between two decisions, # The decisions) it changes nothing it holds -- no level joins or leaves, no decomposition
+    /// is made again -- and reads what it holds; what it lacks it makes as any forward does.
+    pub(crate) fn prototype_within<'w>(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &'w mut Workspace, budget: f64, hold: bool) -> Option<&'w Step> {
         let mut work = [0.0_f64; 10];
-        let made = self.forward_within(r, kappa, cache, ws, budget, &mut work);
+        let made = self.forward_within(r, kappa, cache, ws, budget, hold, &mut work);
         ws.spent = work.iter().sum();
         made.map(|()| &ws.step)
     }
@@ -3504,8 +3517,11 @@ impl Fold {
     }
 
     /// `prototype_within`'s forward, its count by phase into `work`: the step into the workspace's `Step`.
-    fn forward_within(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &mut Workspace, budget: f64, work: &mut [f64; 10]) -> Option<()> {
+    #[allow(clippy::too_many_arguments)]
+    fn forward_within(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &mut Workspace, budget: f64, hold: bool, work: &mut [f64; 10]) -> Option<()> {
         let n = ws.n;
+        // What a forward asks of the next round is its own (a pooled workspace holds nothing of another's: `Near::wanted`).
+        ws.near.iter_mut().for_each(|nb| nb.wanted = None);
         let mut tick = [0u64; 10];
         ws.step.sweep_work.clear();
         ws.step.sweep_ticks.clear();
@@ -3529,6 +3545,8 @@ impl Fold {
             cache.far = (0..ws.far.len()).map(|_| vec![]).collect();
             cache.at_far = vec![None; ws.far.len()];
         }
+        // A forward that lacks a block's decomposition makes it (its first) as a decision does.
+        let hold = hold && cache.at_near.iter().chain(&cache.at_far).all(Option::is_some);
         ws.renew.clear();
         let made_before = cache.made;
         let grown_before = cache.grown;
@@ -3782,7 +3800,7 @@ impl Fold {
                 // After the first sweep the levels and far blocks the point leaves out (`omit`, read on bounds): beyond the
                 // share levels join, a new round on new decompositions.
                 if sweep == 0 {
-                    let (rho, grow) = omit(near, far, scratch, tm, cache, mid, hbase, h, whole, per, &mut tally, share, self.thermal, n, &mut work[SERIES]);
+                    let (rho, grow) = omit(near, far, scratch, tm, cache, mid, hbase, h, whole, per, &mut tally, share, self.thermal, n, hold, &mut work[SERIES]);
                     if grow {
                         break None;
                     }
@@ -3918,14 +3936,15 @@ impl Fold {
             let ring = (0..self.ground.len()).filter(|&j| whole[j] > floor).map(|j| landing_ring(near, far, cache, h, j, n, rings)).fold(0.0, f64::max);
             work[READING] += near.iter().map(|nb| nb.s * nb.shifts.len()).sum::<usize>() as f64 * self.ground.len() as f64 / 4.0;
             lap(READING, &mut clock, &mut tick);
+            // Frozen, a reading beyond the share is read, not acted on (# The decisions).
             let before = renew.len();
             for (x, nb) in near.iter().enumerate() {
-                if nb.reading > share {
+                if nb.reading > share && !hold {
                     renew.push((false, x));
                 }
             }
             for (x, fb) in far.iter().enumerate() {
-                if fb.reading > share {
+                if fb.reading > share && !hold {
                     renew.push((true, x));
                 }
             }
