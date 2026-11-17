@@ -87,8 +87,13 @@
 //! times alone (run.rs # The representation and the decision times): a forward there makes it again as its readings ask
 //! (`prototype`); between two a forward holds (`prototype_within`): it stands on what the atom holds and reads it, a
 //! reading beyond the share read and not acted on until the next decision. What it lacks -- a block with no
-//! decomposition, an omitted level of no bound -- it makes as any forward does: that is no choice. The series' sweeps
-//! are the point's at every forward (an evaluation, not the representation).
+//! decomposition, an omitted level of no bound -- it makes as any forward does: that is no choice. The evaluation's
+//! choices -- the series' sweeps, the parts the first sweep leaves at its order, the far blocks the point leaves out, the
+//! centred copies' rows in the compression -- are the decision's too and held between (`Evaluation`), their readings
+//! read: each made at every point turned the generator by up to its reading where the point crossed the threshold, at
+//! points that differ between two levels of a trajectory -- a first-order offset between the levels (plan4 R-c; measured:
+//! a resonant standing wave's survival at four levels, its observed order 0.9 with the sweeps the point's, 2.3–2.5 with
+//! the decision's, BRIEF_STEP4B (a)).
 //!
 //! # The landing (DESIGN §9 M15; landing.status 2–4)
 //! A jump's landing and a node's fall take a state onto the fold's slow span along its fast one (`Workspace::taken`): the
@@ -562,6 +567,22 @@ pub(crate) struct Cache {
     pub(crate) looked: usize,
     /// Of `made`, those made because the kept levels changed (`omit`'s).
     pub(crate) grown: usize,
+    /// The evaluation's choices its last decision made (# The decisions).
+    evaluation: Evaluation,
+}
+
+/// The evaluation's choices a decision makes by its readings (# The decisions): the series' sweeps, per near block the
+/// rows the first sweep leaves at its order (`freeze`), per far block whether the point leaves it out (`omit`), per near
+/// block whether its centred copies' rows are in the compression -- held between two decisions with the representation,
+/// so that the fold is one smooth function of the point there (each choice made per point turned the generator by a
+/// reading's step where the point crossed its threshold: a first-order offset between two levels' points, measured,
+/// BRIEF_STEP4B (a)). Empty where no decision made it (a holding forward then decides it: it lacks it).
+#[derive(Default, Clone)]
+struct Evaluation {
+    sweeps: usize,
+    active: Vec<Vec<bool>>,
+    far: Vec<bool>,
+    copied: Vec<bool>,
 }
 
 /// A step's result: A, the metric less one, S⁻¹, G (n × n); the sweeps; the readings (rate units): the series' rest,
@@ -1048,9 +1069,9 @@ fn unrate(r: f64) -> f64 {
 /// stay at the first sweep's while what they leave together, (Σ q_P²)^½ max_j a_j/‖Z_j‖, reads within the share (all
 /// blocks' parts on one share); the others go on.
 /// Returns what the held parts leave (ρ). The budget is the share's ρ less what the levels left out leave (`omit`): one
-/// share for both.
+/// share for both. Between two decisions the parts the decision left at the first sweep's order (`held`) stay so, read.
 #[allow(clippy::too_many_arguments)]
-fn freeze(near: &mut [Near], cache: &Cache, h: &[C64], c: &[C64], whole: &[f64], order: &mut Vec<(f64, usize, usize)>, budget: f64, n: usize, work: &mut f64) -> f64 {
+fn freeze(near: &mut [Near], cache: &Cache, h: &[C64], c: &[C64], whole: &[f64], order: &mut Vec<(f64, usize, usize)>, budget: f64, held: Option<&[Vec<bool>]>, n: usize, work: &mut f64) -> f64 {
     // The first sweep's reciprocals are its column energies' c⁰ (`Near::invs` from 0).
     let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
     let mut most = 0.0_f64;
@@ -1088,8 +1109,16 @@ fn freeze(near: &mut [Near], cache: &Cache, h: &[C64], c: &[C64], whole: &[f64],
     order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     let mut sum = 0.0;
     for &(q, x, pi) in order.iter() {
-        if (sum + q * q).sqrt() * most > budget {
-            break;
+        let first = cache.near[x][cache.at_near[x].unwrap()].f.parts[pi].1;
+        let frozen = match held {
+            Some(rows) => !rows[x][first],
+            None => (sum + q * q).sqrt() * most <= budget,
+        };
+        if !frozen {
+            if held.is_none() {
+                break;
+            }
+            continue;
         }
         sum += q * q;
         let nb = &mut near[x];
@@ -1462,10 +1491,11 @@ fn read_omitted(per: &[Bounds], den: &[f64], thermal: f64, n: usize) -> f64 {
 /// grows. Within the share: the far blocks of the smallest reading go too while the whole stays within (their M_F,jj and
 /// H_F,jj exact), out of H. Beyond it: levels join, the largest first (its bound's share of its column, the joined ones'
 /// bounds counted in the columns as their responses), until the bounds read within; their blocks' `wanted` say the kept
-/// levels the next decomposition holds -- not where `hold` (between two decisions: the reading is read); a level of
-/// no bound joins whatever (no reading of it exists). Returns the ρ left out and whether levels joined.
+/// levels the next decomposition holds -- not where `hold` (between two decisions: the reading is read, and the far
+/// blocks left out are the decision's); a level of no bound joins whatever (no reading of it exists). Returns the ρ left
+/// out and whether levels joined.
 #[allow(clippy::too_many_arguments)]
-fn omit(near: &mut [Near], far: &mut [Far], scratch: &mut [Scratch], tm: &mut Temp, cache: &Cache, at: &Placed, hbase: &mut [C64], h: &mut [C64], whole: &mut [f64], per: &mut [Bounds], tally: &mut [usize; 2], share: f64, thermal: f64, n: usize, hold: bool, work: &mut f64) -> (f64, bool) {
+fn omit(near: &mut [Near], far: &mut [Far], scratch: &mut [Scratch], tm: &mut Temp, cache: &Cache, at: &Placed, hbase: &mut [C64], h: &mut [C64], whole: &mut [f64], per: &mut [Bounds], tally: &mut [usize; 2], share: f64, thermal: f64, n: usize, hold: Option<&[bool]>, work: &mut f64) -> (f64, bool) {
     let pot = |dv: f64| ((1.0 + dv / (2.0 * thermal)).sqrt() - 1.0).powi(2);
     let limit = unrate(share);
     // The bounds' vectors kept in the workspace from step to step (`Workspace::per`, one per near block).
@@ -1496,7 +1526,7 @@ fn omit(near: &mut [Near], far: &mut [Far], scratch: &mut [Scratch], tm: &mut Te
     *work += (n * per.iter().map(|p| p.0.len()).sum::<usize>()) as f64;
     let den = &mut tm.den[..n];
     den.copy_from_slice(&whole[..n]);
-    if rho > limit && !hold {
+    if rho > limit && hold.is_none() {
         while rho > limit {
             let mut best: Option<(f64, usize, usize)> = None;
             for (x, (om, sz, ..)) in per.iter().enumerate() {
@@ -1532,8 +1562,10 @@ fn omit(near: &mut [Near], far: &mut [Far], scratch: &mut [Scratch], tm: &mut Te
     tm.units.extend(far.iter().enumerate().map(|(x, fb)| ((0..n).filter(|&j| whole[j] > floor).map(|j| (fb.mf[j * n + j].re / whole[j]).max(pot(2.0 * fb.hf[j * n + j].re.abs()))).fold(0.0, f64::max), x)));
     tm.units.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     for &(w, x) in &tm.units {
-        if (rho * rho + w).sqrt() > limit {
-            break;
+        match hold {
+            Some(left) if !left[x] => continue,
+            None if (rho * rho + w).sqrt() > limit => break,
+            _ => {}
         }
         rho = (rho * rho + w).sqrt();
         tally[1] += 1;
@@ -3545,8 +3577,9 @@ impl Fold {
             cache.far = (0..ws.far.len()).map(|_| vec![]).collect();
             cache.at_far = vec![None; ws.far.len()];
         }
-        // A forward that lacks a block's decomposition makes it (its first) as a decision does.
-        let hold = hold && cache.at_near.iter().chain(&cache.at_far).all(Option::is_some);
+        // A forward that lacks a block's decomposition, or the evaluation's choices, makes them (its first) as a decision
+        // does.
+        let hold = hold && cache.at_near.iter().chain(&cache.at_far).all(Option::is_some) && cache.evaluation.sweeps > 0;
         ws.renew.clear();
         let made_before = cache.made;
         let grown_before = cache.grown;
@@ -3800,7 +3833,7 @@ impl Fold {
                 // After the first sweep the levels and far blocks the point leaves out (`omit`, read on bounds): beyond the
                 // share levels join, a new round on new decompositions.
                 if sweep == 0 {
-                    let (rho, grow) = omit(near, far, scratch, tm, cache, mid, hbase, h, whole, per, &mut tally, share, self.thermal, n, hold, &mut work[SERIES]);
+                    let (rho, grow) = omit(near, far, scratch, tm, cache, mid, hbase, h, whole, per, &mut tally, share, self.thermal, n, hold.then_some(&cache.evaluation.far[..]), &mut work[SERIES]);
                     if grow {
                         break None;
                     }
@@ -3808,7 +3841,7 @@ impl Fold {
                 }
                 sweep += 1;
                 if sweep == 1 {
-                    frozen = freeze(near, cache, h, c, whole, order, unrate(share) - omitted, n, &mut work[SERIES]);
+                    frozen = freeze(near, cache, h, c, whole, order, unrate(share) - omitted, hold.then_some(&cache.evaluation.active[..]), n, &mut work[SERIES]);
                 }
                 // A response that is not a number is none: a row and a column at one complex energy (a pole of the
                 // series: their mixing has no bound) or an overflow -- the fold does not exist here (the one exit). Read
@@ -3820,12 +3853,18 @@ impl Fold {
                 previous.copy_from_slice(change);
                 step.sweep_ticks.push(ticks() - t0);
                 step.sweep_work.push(work[SERIES] - w0);
-                // Two sweeps at the least; then within the share. No longer converging -- a ratio at or above one after the
+                // Two sweeps at the least; then within the share -- between two decisions, the decision's sweeps (# The
+                // decisions). No longer converging -- a ratio at or above one after the
                 // second change: the self-consistency or the series does not exist here -- is the fold's one exit where it
                 // does not exist (None, as a singular decomposition, centring, copies' complement or metric); so is a
                 // forward dearer than its budget (the cheapest evaluation within the share is another's: run.rs # The
                 // nodes risen and fallen).
-                if sweep >= 2 && rest <= share {
+                if sweep >= 2 && if hold { sweep >= cache.evaluation.sweeps } else { rest <= share } {
+                    // Held, a series whose ratio reads at or above one at the decision's sweeps does not exist on what
+                    // the atom holds.
+                    if hold && most >= 1.0 {
+                        return None;
+                    }
                     break Some((rate(unrate(rest) + frozen), most, omitted));
                 }
                 if (sweep >= 3 && most >= 1.0) || work.iter().sum::<f64>() > budget {
@@ -3991,7 +4030,7 @@ impl Fold {
             let read = rate(size * most);
             copies_read = copies_read.max(read);
             work[COPIES] += (nb.copies.len() + nb.s * n / 4) as f64;
-            if read <= share {
+            if !(if hold { cache.evaluation.copied[x] } else { read > share }) {
                 continue;
             }
             nb.copied_in = true;
@@ -4068,6 +4107,9 @@ impl Fold {
         work[NORMAL] += (2 * n * n * n * (1 + step.tones.len())) as f64;
         lap(NORMAL, &mut clock, &mut tick);
         step.sweeps = sweeps;
+        if !hold {
+            cache.evaluation = Evaluation { sweeps, active: near.iter().map(|nb| nb.active.clone()).collect(), far: far.iter().map(|fb| fb.omitted).collect(), copied: near.iter().map(|nb| nb.copied_in).collect() };
+        }
         step.series = series;
         step.ratio = ratio;
         step.reuse = near.iter().map(|x| x.reading).fold(0.0, f64::max);

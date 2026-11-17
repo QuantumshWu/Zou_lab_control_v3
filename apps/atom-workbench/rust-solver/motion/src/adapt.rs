@@ -24,9 +24,14 @@
 //! The model's representation changes at the run's decision times alone (DESIGN §11.3; model/fold/run.rs # The
 //! representation and the decision times): the ends of the Brownian path's cells (# The Brownian path), the coarsest
 //! level's grid, the caller's. A step decides where its end reaches or passes a cell's end -- the cell its end lies in
-//! is past the one its start lies in: integers, no comparison of times --, the cell's width its interval to the next;
-//! every other step is frozen (`step::Midway::new`). So every level of a trajectory, and the halves a refused step is
-//! taken at, decide at the same times on their own states there: two levels differ by the step's error alone.
+//! is past the one its start lies in: integers, no comparison of times --, the cell's width its interval to the next,
+//! at its end: on the end state at its own point, a forward made there (`step::Midway::decided`); every step's middle
+//! holds the representation (`step::Midway::new`). So every level of a trajectory, and the halves a refused step is
+//! taken at, decide at the same times on their own states at their own points there, and switch there: two levels
+//! differ by the step's error alone. (Decided at the step's middle, on the end state, a level's switch took the state
+//! at the end by the fold τ/2 before it -- an error ∇T·vτ/2 of the first order between levels, measured: BRIEF_STEP4A
+//! 4c; the outer node at the end holds the middle's decomposition and H, its response first-order off too, and holds no
+//! readings: BRIEF_STEP4B (a).)
 //!
 //! # The reads
 //! A trajectory is read at the caller's times (the outputs) where they fall, inside a step, from what the step knows

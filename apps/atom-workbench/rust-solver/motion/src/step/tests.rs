@@ -3149,7 +3149,7 @@ fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
                     .map(|((t, a), (m, k))| {
                         let mut t = t.clone();
                         a.middle.forget_left();
-                        let mut places = super::Places { model, decide: true, point: (m.reached.0, t.time - s), path: (*k, k.map(|k| hm * k)), s, own: (t.cluster, a.middle, &a.path), other: None };
+                        let mut places = super::Places { model, point: (m.reached.0, t.time - s), path: (*k, k.map(|k| hm * k)), s, own: (t.cluster, a.middle, &a.path), other: None };
                         super::jump(model, &mut t, Some(&mut places)).unwrap();
                         t.kappa[0]
                     })
@@ -4665,7 +4665,8 @@ impl Dynamics for Emitting {
 
 /// A step's price is its count, item by item as the step did it (step.rs `Price`, `priced`): a step of 0.2 µs on the two
 /// groups with two exact tones (`Emitting`), from a state whose threshold its own propagation reaches halfway down its
-/// fall of the norm -- one jump inside the step, the picture launched again from there, on one cluster: one stretch. The
+/// fall of the norm -- one jump inside the step, the picture launched again from there, on one cluster: one stretch -- a
+/// step between two decisions (a decision's forward at the step's end is the decision's count, `Midway::decided`). The
 /// step's count is its stretch's price; the price's calls of the model are the calls the step made, counted by a probe
 /// (`Counted`) -- the generator at the three nodes, the kick's three forms and the fixed point's tones twice, at the
 /// middle's form and in the start state's shear --, read off the price's count at unit counts of each; it holds the two
@@ -4679,10 +4680,10 @@ fn a_step_s_price_is_its_count_item_by_item() {
     let mut from = Trajectory::new(&model, 0, [0.0; 3], [3.0, -1.0, 2.0], 7, 0);
     from.psi = [C64::real(0.5), C64::new(0.1, 0.4), C64::new(-0.3, 0.2), C64::new(0.0, -0.6)].into_iter().collect();
     from.threshold = 0.0;
-    let free = step::Midway::new(&model, &from, tau, Some(tau.abs())).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
+    let free = step::Midway::new(&model, &from, tau, None).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
     from.threshold = (norm(&from.psi) * norm(&free.end.psi)).sqrt();
     let counted = Counted { model: &model, calls: std::cell::Cell::new([0; 5]) };
-    let (through, mut scratch) = (step::Midway::new(&counted, &from, tau, Some(tau.abs())).unwrap(), step::Scratch::default());
+    let (through, mut scratch) = (step::Midway::new(&counted, &from, tau, None).unwrap(), step::Scratch::default());
     through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
     counted.calls.set([0; 5]);
     let taken = through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();

@@ -3511,14 +3511,16 @@ fn a_resonant_two_level_atom_rises_before_its_fold_ceases_to_exist() {
     }
 }
 
-/// The decision times are the coarsest level's grid (DESIGN §11.3; adapt.rs # The decision times; BRIEF_STEP4A 4c): a
-/// heavy two-level atom crossing a resonant standing wave (s = 0.3 a beam: 1.2 at the antinodes, where the fold with
-/// nothing explicit does not exist) at 0.10-0.24 µm/µs, no jump drawn (its survival the internal state's record), at the
-/// steps 0.2, 0.1, 0.05 and 0.0125 µs, every level deciding at the ends of the cells of 0.4 µs alone, holding between:
-/// every switch of a level is at a decision time, or a rise its held middle asked for where its fold does not exist
-/// (plan4 §2.4: counted, R-b), and no step is refused. Said (plan4 R-a): whether the levels switch at the same decision
-/// times, and the survival's error against the finest with its observed order -- a decision takes the end state at its
-/// step's middle, τ/2 before the decision time, a first-order offset between the levels (measured: BRIEF_STEP4A 4c).
+/// The decision times are the coarsest level's grid (DESIGN §11.3; adapt.rs # The decision times; BRIEF_STEP4A 4c,
+/// BRIEF_STEP4B (a)): a heavy two-level atom crossing a resonant standing wave (s = 0.3 a beam: 1.2 at the antinodes,
+/// where the fold with nothing explicit does not exist), no jump drawn (its survival the internal state's record), at the
+/// steps 0.2, 0.1, 0.05 and 0.025 µs, every level deciding at the ends of the cells of 0.4 µs alone, on its end state at
+/// its own point, the representation and the evaluation's choices held between. At 0.03–0.072 µm/µs: every level
+/// switches at the same decision times, no rise is forced between them, and the survival's differences between
+/// successive levels fall at the scheme's second order (their observed orders 2.3, 2.5; decided at the step's middle
+/// they were 2.9 and −1.8 with 7 of 16 levels' switch times alike, and with the series' sweeps the point's, 0.9 and 2.3).
+/// At 0.10–0.24 µm/µs a cell crosses into where the fold does not exist: every switch is at a decision time or a rise a
+/// held middle asked for there (plan4 §2.4, R-b: counted and said), and no step is refused.
 #[test]
 fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_decision_times_alone() {
     use crate::step::{Dynamics, Midway, Trajectory};
@@ -3536,14 +3538,14 @@ fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_de
     req.validate().unwrap();
     let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
     let hm = run.hbar_over_mass();
-    let taus = [0.2, 0.1, 0.05, 0.0125];
-    // A trajectory at the step τ: the survival ln‖ψ‖² at the end, its switches' times and whether each was a decision
-    // time, and the rises its frozen middles asked for.
-    let path = |i: u64, tau: f64| -> (f64, Vec<(f64, bool)>, u32, usize) {
-        let mut t = Trajectory::new(&run, 0, [0.0, 0.0, 0.05 * i as f64], [0.0, 0.0, (0.1 + 0.02 * i as f64) / hm], 7, i);
+    let taus = [0.2, 0.1, 0.05, 0.025];
+    // A trajectory at the speed `speed` (its scale) and the step τ: the survival ln‖ψ‖² at the end, its switches' times
+    // and whether each was a decision time, and the rises its held middles asked for.
+    let path = |i: u64, speed: f64, tau: f64| -> (f64, Vec<(f64, bool)>, u32) {
+        let mut t = Trajectory::new(&run, 0, [0.0, 0.0, 0.05 * i as f64], [0.0, 0.0, speed * (0.1 + 0.02 * i as f64) / hm], 7, i);
         t.threshold = 0.0;
         let (per, steps) = ((cell / tau).round() as usize, (end / tau).round() as usize);
-        let (mut scratch, mut switches, mut rises, mut explicit) = (crate::step::Scratch::default(), vec![], 0, 0);
+        let (mut scratch, mut switches, mut rises) = (crate::step::Scratch::default(), vec![], 0);
         for k in 1..=steps {
             let decision = (k % per == 0).then_some(cell);
             let before = t.cluster;
@@ -3554,34 +3556,38 @@ fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_de
             if t.cluster != before {
                 switches.push((t.time, decision.is_some() || middle.rises() > 0));
             }
-            let c = run.cluster(t.cluster);
-            explicit += usize::from(c.states.len() > c.ground);
         }
-        (crate::linalg::norm_sqr(&t.psi).ln(), switches, rises, explicit)
+        (crate::linalg::norm_sqr(&t.psi).ln(), switches, rises)
     };
-    let (mut errors, mut same, mut apart, mut forced) = (vec![0.0; taus.len() - 1], 0, 0, 0u32);
-    for i in 0..8 {
-        let levels: Vec<_> = taus.iter().map(|&tau| path(i, tau)).collect();
-        for (tau, level) in taus.iter().zip(&levels) {
-            assert!(level.1.iter().all(|x| x.1), "trajectory {i} at τ {tau}: a switch off the decision times without a rise asked for: {:?}", level.1);
-            forced += level.2;
-        }
-        println!("trajectory {i}: switches at τ 0.2 {:?}, at 0.1 {:?}; explicit step ends {:?}; survival {:?}", levels[0].1.iter().map(|x| x.0).collect::<Vec<_>>(), levels[1].1.iter().map(|x| x.0).collect::<Vec<_>>(), levels.iter().map(|x| x.3).collect::<Vec<_>>(), levels.iter().map(|x| x.0).collect::<Vec<_>>());
-        for pair in levels[..3].windows(2) {
-            let times = |l: &(f64, Vec<(f64, bool)>, u32, usize)| -> Vec<i64> { l.1.iter().map(|x| (x.0 / cell * 1e6).round() as i64).collect() };
-            if times(&pair[0]) == times(&pair[1]) {
-                same += 1;
-            } else {
-                apart += 1;
+    for speed in [0.3, 1.0] {
+        let (mut differences, mut same, mut apart, mut forced) = (vec![0.0; taus.len() - 1], 0, 0, 0u32);
+        for i in 0..8 {
+            let levels: Vec<_> = taus.iter().map(|&tau| path(i, speed, tau)).collect();
+            for (tau, level) in taus.iter().zip(&levels) {
+                assert!(level.1.iter().all(|x| x.1), "speed {speed}, trajectory {i} at τ {tau}: a switch off the decision times without a rise asked for: {:?}", level.1);
+                forced += level.2;
+            }
+            let times = |l: &(f64, Vec<(f64, bool)>, u32)| -> Vec<i64> { l.1.iter().map(|x| (x.0 / cell * 1e6).round() as i64).collect() };
+            for pair in levels.windows(2) {
+                if times(&pair[0]) == times(&pair[1]) {
+                    same += 1;
+                } else {
+                    apart += 1;
+                }
+            }
+            for (d, pair) in differences.iter_mut().zip(levels.windows(2)) {
+                *d += (pair[0].0 - pair[1].0).abs() / 8.0;
             }
         }
-        for (e, level) in errors.iter_mut().zip(&levels) {
-            *e += (level.0 - levels[taus.len() - 1].0).abs() / 8.0;
+        let orders: Vec<f64> = differences.windows(2).map(|e| (e[0] / e[1]).log2()).collect();
+        println!("speed {speed}: the survival's differences between successive levels {:?}, orders {orders:.2?}; levels' switch times alike {same}, apart {apart}; rises a held middle asked for {forced}", differences.iter().map(|d| format!("{d:.2e}")).collect::<Vec<_>>());
+        if speed < 1.0 {
+            assert_eq!((apart, forced), (0, 0), "every level switches at the same decision times, none forced between");
+            assert!(orders.iter().all(|&p| (1.5..3.0).contains(&p)), "the levels differ at the scheme's second order: {orders:?}");
+        } else {
+            assert!(forced > 0, "a fold that does not exist between two decisions rises");
         }
     }
-    let orders: Vec<f64> = errors.windows(2).map(|e| (e[0] / e[1]).log2()).collect();
-    println!("the survival's error {errors:.2?}, orders {orders:.2?}; levels' switch times alike {same}, apart {apart}; rises a held middle asked for {forced}");
-    assert!(forced > 0, "a fold that does not exist between two decisions rises");
 }
 
 /// A jump's landing that does not exist rises and lands (BRIEF_COPIES item 1; step.rs `land`): a laser half a Γ below an

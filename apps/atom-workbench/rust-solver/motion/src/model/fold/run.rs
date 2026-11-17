@@ -12,7 +12,8 @@
 //! waves turned, and the integrator takes its change through the three nodes.
 //!
 //! # The nodes risen and fallen (DESIGN §11; BRIEF_STEP3C item 1)
-//! Which excited nodes are explicit is decided at the run's decision times (a middle made deciding: `Middle::decide`),
+//! Which excited nodes are explicit is decided at the run's decision times (a middle made deciding at the decision's
+//! point: `Middle::decide`),
 //! by the evaluation order's rule (M18) on P and Q: the cheapest representation within the share. The fold is within the
 //! share wherever it exists (its series sweeps until its rest reads within it), so the choice is the count: a step's
 //! price on each side (the integrator's, `step::Offer`), a switch priced as a restart -- the other side's forward at the
@@ -24,12 +25,13 @@
 //! trajectory last measured on it (`Caches::counts`; where it measured none, its cluster's at the focus, made or not):
 //! the step's own forward on its cluster at every decision, and an attempt's. A decision takes the cheaper offer where
 //! it is cheaper than staying by these counts, its forward made within the budget that keeps it so
-//! (`Fold::prototype_within`); the attempt is a count like any other and is kept: where it gives the side within the
-//! share, what it counted; where it gives none within its budget (over the budget, the fold not existing there, or
-//! reading beyond the share), the budget or what it spent, whichever is more -- the least that side may cost by what
-//! was measured, at which its offer is no cheaper than staying was. So a side found dearer is tried again only where
-//! staying has grown dearer than it was then, and an attempt wastes at most the budget, within a step's own price: no
-//! constant, no hysteresis. The fold's side is within the share where its readings ρ are -- the series', the reuse's,
+//! (`Fold::prototype_within`); the attempt is a count like any other and is kept: what it spent -- over its budget, the
+//! budget at least, at which its offer is no cheaper than staying was, so a side found dearer is tried again only where
+//! staying has grown dearer than it was then. Where the side reads beyond the share or does not exist at the point, that
+//! is no price: its count is what it cost, and the next decision reads it again at its own point (kept at the budget,
+//! a side found wanting there was tried again only where the price of staying wandered up by a step's rounding of the
+//! integrator's count, at points that differ between two levels: their switch times apart, BRIEF_STEP4B (a)). An
+//! attempt wastes at most the budget, within a step's own price: no constant, no hysteresis. The fold's side is within the share where its readings ρ are -- the series', the reuse's,
 //! the far blocks', what the nodes left out leave, and the ring's (proto.rs # The ring: the transient a jump's landing
 //! leaves) --; where ρ reads beyond the share the fold is not within it at the point, and the decision is its rise,
 //! whatever its price (no budget). A fall is taken only where what it leaves is within the share (DESIGN §11.4): with
@@ -60,8 +62,9 @@
 //! trajectory's representation and holds it (proto.rs # The decisions: no level joins or leaves, no decomposition is
 //! made again; its readings read). A decision is made where a trajectory starts (`Dynamics::started`: the landing of
 //! its bare state, the held forms there -- its first decomposition made once) and at the decision times, the ends of
-//! the coarsest level's cells (adapt.rs # The decision times: the middle of the step that reaches one, and the middles
-//! a jump of that step lands on). What a holding forward lacks -- a set's first decomposition (a jump into a set the
+//! the coarsest level's cells (adapt.rs # The decision times: at the end of the step that reaches one, on its end state
+//! at its own point, a middle made there deciding -- step.rs `Midway::decided`; its readings and its switch the fold's
+//! there, not τ/2 before). What a holding forward lacks -- a set's first decomposition (a jump into a set the
 //! trajectory has none of), or a fold that does not exist on what it holds -- it makes as a decision does, and that is
 //! the trajectory's (`Middle::forward`): no choice. A fold that does not exist even so rises at the step's start
 //! (step.rs `Midway::new`, `Middle::risen`). The representation is per set a shared value (`Caches`): a decision
@@ -72,7 +75,7 @@
 //! at the last step's middle, in the same contraction as the step's kick (`Middle::nodes`: one more density at the
 //! middle, its static G's form on a channel of its own and each tone's complex amplitude on one each, referenced to the
 //! middle's time; the integrator takes the reference's gradient from them); at a point -- a trajectory's start, a jump at
-//! a step's end into another set -- one evaluation there, its tangent and the contraction at the point, less the
+//! a step's end into another set, a switch at a decision -- one evaluation there, its tangent and the contraction at the point, less the
 //! reference's gradient there (`Onefold::held_forms`).
 //!
 //! # The tones
@@ -1399,11 +1402,12 @@ impl crate::step::Middle for Middle<'_> {
         self.decide(path, psi, 0.0, owed, &|_| 0.0)
     }
 
-    /// The decision at a step's end (module documentation, # The nodes risen and fallen): the balance paid by this
+    /// The decision at a step's end, on a middle made deciding at the end's point (module documentation, # The nodes
+    /// risen and fallen; step.rs `Midway::decided`): the balance paid by this
     /// interval, (share − ρ)γΔt; the offers (`Middle::offers`) priced by the trajectory's counts of them (`priced`) with
     /// their restarts -- the other side's forward at the point and its held forms -- against staying (this middle's
     /// forwards as made, `made`); the cheapest that is cheaper made here within the budget that keeps it so, its count kept
-    /// (where it gives no side within the share, at least that budget), and the state taken onto it
+    /// (what it spent), and the state taken onto it
     /// (`Middle::take_onto`); where this side's readings ρ are beyond the share, its rise whatever its price; a fall taken
     /// only where the other side reads within the share and the balance, the fall's ring E and its fold's ργΔt are within
     /// the share's γΔt. Nothing where this middle does not decide, holds no light, or its fold does not exist here.
@@ -1441,15 +1445,8 @@ impl crate::step::Middle for Middle<'_> {
             let theirs = other.made(path, None, false);
             (theirs.exists, theirs.exists && theirs.reading <= share)
         };
-        {
-            // The attempt's count (# The nodes risen and fallen): where it gives no side within the share, at least the
-            // budget it was made within.
-            let mut theirs = other.inner.borrow_mut();
-            theirs.budget = f64::INFINITY;
-            if let Some(b) = budget.filter(|_| !within) {
-                theirs.counted = theirs.counted.max(b);
-            }
-        }
+        // The attempt's count is what it spent (# The nodes risen and fallen): over its budget, the budget at least.
+        other.inner.borrow_mut().budget = f64::INFINITY;
         out.work += other.inner.borrow().made;
         // The decompositions it made are the trajectory's, whatever it takes (a decision's evaluation, DESIGN §11.3).
         out.held = Some(Held(Some(Arc::new(other.kept()))));
