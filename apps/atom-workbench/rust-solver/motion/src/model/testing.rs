@@ -78,11 +78,11 @@ impl Model {
         self.driven.iter().filter(|d| d.0 == component).map(|&(component, excited, ground)| Unit::Bare { component, excited, ground }).collect()
     }
 
-    /// A scene's model as the solve closes it (solve.rs `closed`: the prior at the atoms of the reach of `temperature_uk`,
+    /// A scene's model as the old solve closed it (`closed`: the prior at the atoms of the reach of `temperature_uk`,
     /// the ground state `state` the initial state) from the units `kept`: the model, the units it keeps, its prepared trap
     /// and its reach for that state.
     pub(crate) fn closed_at(request: &Request, light: &Light, mut kept: Vec<Unit>, state: usize, temperature_uk: f64) -> (Model, Vec<Unit>, Trap, Reach) {
-        let model = crate::solve::closed(request, light, &mut kept, &[(state, 1.0)], temperature_uk).expect("the closed model");
+        let model = closed(request, light, &mut kept, &[(state, 1.0)], temperature_uk).expect("the closed model");
         let reference: [f64; GROUND] = std::array::from_fn(|s| if s == state { 1.0 } else { 0.0 });
         let trap = model.trap(&reference, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &reference, temperature_uk, crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64));
@@ -94,5 +94,76 @@ impl Model {
     /// `Model::near_exact`) -- as the run's middles take them.
     pub(crate) fn near_values(&self, plan: &Plan, amplitudes: &[Amplitude], sections: &[(std::ops::Range<usize>, usize)], table: Option<&NearTable>) -> NearValues {
         table.and_then(|table| self.near_tabulated(table, amplitudes, sections)).unwrap_or_else(|| self.near_exact(plan, amplitudes, sections.iter().map(|s| s.1).max().unwrap_or(0)))
+    }
+}
+
+/// The old model of the units `kept` and of every unit whose fold does not exist where the reach's atoms are, added to
+/// `kept` (the old solve's model prior, which the solve on the fold at the atom no longer takes: the old model's tests
+/// alone close their models so): the units that fail kept, and the model they make read again, until none fails; and
+/// the fold's series constants at the same atoms (elim.rs `Series`), the excited block that stops them made explicit, or
+/// the request refused (elim.rs `Model::stop_message`).
+pub(crate) fn closed(request: &Request, light: &Light, kept: &mut Vec<Unit>, initial: &[(usize, f64)], temperature: f64) -> Result<Model, String> {
+    loop {
+        let mut model = Model::new(request, light, kept)?;
+        let points = atoms(&model, request, light, initial, temperature)?;
+        let more: Vec<Unit> = model.prior(&points).into_iter().filter(|u| !kept.contains(u)).collect();
+        if more.is_empty() {
+            model.referenced(&points);
+            if model.series.exists() {
+                return Ok(model);
+            }
+            match model.series_block().filter(|unit| !kept.contains(unit)) {
+                Some(unit) => kept.push(unit),
+                None => return Err(model.stop_message()),
+            }
+            continue;
+        }
+        kept.extend(more);
+    }
+}
+
+/// The atoms an old model's prior reads its gates at (`closed`): the draws of the thermal ensemble at `temperature` (µK)
+/// in the initial components' wells of the old model's prepared potential (`Prepared`), the pilot's numbers and the
+/// run's seed, each its place and its velocity v = (ħ/m)κ.
+pub(crate) fn atoms(model: &Model, request: &Request, light: &Light, initial: &[(usize, f64)], temperature: f64) -> Result<Vec<([f64; 3], [f64; 3])>, String> {
+    use rayon::prelude::*;
+    let hm = crate::units::hbar_over_mass(request.mass_kg);
+    let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(model, light, std::array::from_fn(|b| if b == s { 1.0 } else { 0.0 }))).collect::<Result<_, _>>()?;
+    let ensemble = crate::ensemble::Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn crate::ensemble::Well)).collect::<Vec<_>>(), temperature, hm)?;
+    let first = crate::units::MOST_TRAJECTORIES;
+    Ok((first..first + crate::solve::pilot_size())
+        .into_par_iter()
+        .map(|index| {
+            let start = ensemble.draw(crate::solve::SEED, index);
+            (start.r, start.kappa.map(|k| hm * k))
+        })
+        .collect())
+}
+
+/// One initial component's preparation well of an old model (ensemble.rs `Well`): its prepared potential, trap and
+/// envelope.
+struct Prepared<'a> {
+    model: &'a Model,
+    light: &'a Light,
+    populations: [f64; GROUND],
+    lights: super::Lights,
+    trap: Trap,
+    envelope: super::Envelope,
+}
+impl<'a> Prepared<'a> {
+    fn new(model: &'a Model, light: &'a Light, populations: [f64; GROUND]) -> Result<Prepared<'a>, String> {
+        Ok(Prepared { trap: model.trap(&populations, &model.prepared())?, envelope: model.envelope(&populations), lights: model.prepared(), model, light, populations })
+    }
+}
+impl crate::ensemble::Well for Prepared<'_> {
+    fn potential(&self, r: [f64; 3]) -> (f64, [f64; 3]) {
+        let q = self.model.expansion(r, &self.populations, &self.lights);
+        (q.value, q.gradient)
+    }
+    fn trap(&self) -> ([f64; 3], [[f64; 3]; 3], [f64; 3]) {
+        (self.trap.centre, self.trap.axes, self.trap.frequencies)
+    }
+    fn envelope(&self) -> (Vec<crate::field::Geometry>, f64) {
+        (self.envelope.beams.iter().map(|&l| self.light.beams[l]).collect(), self.envelope.peak())
     }
 }

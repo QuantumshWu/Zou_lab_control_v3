@@ -1026,11 +1026,15 @@ impl Trajectory {
             forms,
         };
         if !on {
-            // A bare state with no photon to emit goes on as it is.
-            let _ = jump(model, &mut trajectory, None);
-            let t = &trajectory;
-            let forms = model.forms(t.cluster, &t.point(), &t.psi, &t.held);
-            trajectory.forms = forms;
+            // Its fast part's photon at once; where the model has none to give, or its landing does not exist, the start
+            // is nowhere as a start that lands nowhere is: no held forms (solve.rs `run` says it, # Exits).
+            trajectory.forms = match jump(model, &mut trajectory, None) {
+                Ok(()) => {
+                    let t = &trajectory;
+                    model.forms(t.cluster, &t.point(), &t.psi, &t.held)
+                }
+                Err(_) => Forms { time: 0.0, held: [f64::NAN; 3], tones: vec![] },
+            };
         }
         trajectory
     }

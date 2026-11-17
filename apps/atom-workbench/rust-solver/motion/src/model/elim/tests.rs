@@ -515,7 +515,7 @@ fn request(name: &str) -> crate::request::Request {
 fn prior_atoms(req: &crate::request::Request) -> Vec<([f64; 3], [f64; 3])> {
     let light = crate::field::Light::new(req);
     let model = super::super::Model::new(req, &light, &[]).expect("the model");
-    crate::solve::atoms(&model, req, &light, &crate::solve::components(req), req.temperature_uk).expect("the prior's atoms")
+    crate::model::testing::atoms(&model, req, &light, &crate::solve::components(req), req.temperature_uk).expect("the prior's atoms")
 }
 
 /// A closure's measures at its end (`closure`, its last round): the worst remainder ρ over its fold's ground-like
@@ -1421,7 +1421,7 @@ fn a_series_radius_is_read_on_the_blocks_its_terms_hold() {
     }
     kept.push(Unit::Normalization { order: 1 });
     let mut model = Model::new(&req, &light, &kept).expect("the model");
-    let points = crate::solve::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
+    let points = crate::model::testing::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
     model.referenced(&points);
     // The scene holds the class: a cluster whose Q has a block in no term of its series nearer z₀ + f than ‖H − z₀‖.
     let mut worst: Option<(f64, Fold, Vec<f64>)> = None;
@@ -1751,7 +1751,7 @@ fn the_coherences_old_and_combined_frequencies_at_the_prior_s_atoms() {
         let light = crate::field::Light::new(&req);
         let chief = (0..GROUND).max_by(|&a, &b| req.initial_density[(a, a)].re.total_cmp(&req.initial_density[(b, b)].re)).unwrap();
         let (model, kept, _, _) = Model::closed_at(&req, &light, vec![], chief, req.temperature_uk);
-        let points = crate::solve::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
+        let points = crate::model::testing::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
         let hm = crate::units::hbar_over_mass(req.mass_kg);
         let running = model.running();
         let coherence = |classes: &[crate::model::photon::Class], a: usize, b: usize| {
@@ -1986,7 +1986,7 @@ fn r4_lin_4() -> (crate::model::Model, Vec<([f64; 3], [f64; 3])>, Vec<usize>) {
     let light = crate::field::Light::new(&req);
     let state = (0..crate::request::GROUND).max_by(|&x, &y| req.initial_density[(x, x)].re.total_cmp(&req.initial_density[(y, y)].re)).unwrap();
     let (model, ..) = crate::model::Model::closed_at(&req, &light, vec![], state, req.temperature_uk);
-    let points = crate::solve::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
+    let points = crate::model::testing::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
     let running = model.running();
     let many: Vec<usize> = (0..model.clusters().len()).filter(|&k| model.plan(k, &running).fourth.is_some() && model.references(k, &running).iter().any(|&a| a > 0)).collect();
     (model, points, many)
@@ -2215,13 +2215,13 @@ fn a_cluster_s_series_order_is_its_own_level_and_tilt2_s_explicit_cluster_conver
     let light = crate::field::Light::new(&req);
     let initial = crate::solve::components(&req);
     let mut kept = vec![];
-    let _ = crate::solve::closed(&req, &light, &mut kept, &initial, req.temperature_uk).expect("the first model");
+    let _ = crate::model::testing::closed(&req, &light, &mut kept, &initial, req.temperature_uk).expect("the first model");
     kept.push(Unit::Normalization { order: 1 });
     for f in [0, 1] {
         kept.push(Unit::Block { block: 5, component: Component { frequency: f, counter: false }, grounds: 248 });
     }
     let mut model = Model::new(&req, &light, &kept).expect("the model");
-    let points = crate::solve::atoms(&model, &req, &light, &initial, req.temperature_uk).expect("atoms");
+    let points = crate::model::testing::atoms(&model, &req, &light, &initial, req.temperature_uk).expect("atoms");
     model.referenced(&points);
     assert!(model.series.exists(), "the model exists: {:?}", model.series.stop);
     let running = model.running();
@@ -2306,7 +2306,7 @@ fn the_explicit_states_static_couplings_on_the_brief_s_scenes() {
         let light = crate::field::Light::new(&req);
         let chief = (0..GROUND).max_by(|&a, &b| req.initial_density[(a, a)].re.total_cmp(&req.initial_density[(b, b)].re)).unwrap();
         let (model, ..) = super::super::Model::closed_at(&req, &light, vec![], chief, req.temperature_uk);
-        let points = crate::solve::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
+        let points = crate::model::testing::atoms(&model, &req, &light, &crate::solve::components(&req), req.temperature_uk).expect("the atoms");
         let running = model.running();
         let explicit: usize = model.clusters().iter().map(|c| c.states.len() - c.ground).sum();
         let (mut k, mut shift, mut rate) = (0.0_f64, 0.0_f64, 0.0_f64);

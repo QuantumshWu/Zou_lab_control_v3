@@ -601,6 +601,15 @@ impl Cache {
         self.evaluation = other.evaluation.clone();
     }
 
+    /// The books' profile its last decision left (unify2 §2.7; `Evaluation::kinds`: per kind its accounts' ρ² at the worst
+    /// column, held over the cell to the next decision -- what each step books, `step::Trajectory::model`), in rate units:
+    /// per kind rate(ρ_k) and their whole rate(√Σρ_k²). None where it holds no decision's evaluation.
+    pub(crate) fn profile(&self) -> Option<[f64; KINDS + 1]> {
+        let decided = !(self.near.is_empty() && self.far.is_empty()) && self.evaluation.fits(self, self.far.len());
+        let kinds = self.evaluation.kinds;
+        decided.then(|| std::array::from_fn(|k| rate(if k < KINDS { kinds[k] } else { kinds.iter().sum::<f64>() }.sqrt())))
+    }
+
     /// The decomposition near block x stands on.
     fn near_at(&self, x: usize) -> &NearBasis {
         self.near[x].as_deref().expect("a near block's decomposition")

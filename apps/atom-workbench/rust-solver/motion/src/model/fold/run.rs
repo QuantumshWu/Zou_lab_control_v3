@@ -146,7 +146,7 @@
 //! through the compression) -- the force contracts it in the reverse mode, each where it is the cheap one. Their slope
 //! along the path is the parabola through the step's outer nodes the propagation takes, a tone's phase exact. A set of
 //! ground states alone has none: its fold's photons hold that part.
-use super::proto::{At, Bar, Cache, Moments, Workspace};
+use super::proto::{At, Bar, Cache, Moments, Workspace, KINDS};
 use super::{Choice, Fold};
 use crate::field::Light;
 use crate::linalg::{Mat, C64};
@@ -310,6 +310,7 @@ pub(crate) struct Onefold {
     /// The splitting's reference potential and the loss energy's light subset (module documentation, # The rest of the
     /// model): every light but the trap's, its clusters made where first asked for (every light's are the run's own).
     light: Light,
+    states: Vec<Reference>,
     reference: Reference,
     /// V_ref at the focus (rad/µs): the bottom an atom's mechanical energy is counted from (`Onefold::mechanical`).
     bottom: f64,
@@ -414,7 +415,8 @@ impl Onefold {
         let axes = super::Axes::new(request)?;
         let energies: Vec<f64> = (0..GROUND).map(|s| request.hamiltonian[(s, s)].re).collect();
         let hbar_over_mass = crate::units::hbar_over_mass(request.mass_kg);
-        let reference = Reference::new(&lit(request, &light, |w| w == light.trap), &light, &reference)?;
+        let states = Reference::states(request, &light)?;
+        let reference = Reference::of(&states, &reference);
         // The potential channel's floor, k_B T_sc (unify2 §2.1; estimate.rs `semiclassical`): the larger of 30 recoils at
         // the beams' mean k² and the reference's zero point ħω̄/2 at the focus (rad/µs).
         let k2 = light.beams.iter().map(|b| b.wave_number * b.wave_number).sum::<f64>() / light.beams.len().max(1) as f64;
@@ -428,6 +430,7 @@ impl Onefold {
             energies,
             bottom: at.value,
             reference,
+            states,
             untrapped: OnceLock::new(),
             light,
             photons: 0.0,
@@ -478,10 +481,19 @@ impl Onefold {
     /// exist there.
     fn evaluate<R>(&self, set: usize, r: [f64; 3], kappa: [f64; 3], held: &Held, then: impl FnOnce(&Fold, &Cache, &mut Workspace, f64) -> R) -> Option<R> {
         let fold = &self.clusters.sets.get(set).fold;
-        let mut cache = (*self.cache(held, set)).clone();
+        let held = self.cache(held, set);
+        let mut cache = (*held).clone();
         let mut ws = self.clusters.take(set);
-        let exists = fold.prototype_within(r, kappa, self.mechanical(r, kappa), &mut cache, &mut ws, false).is_some();
-        let spent = ws.spent();
+        // Held first; where it does not exist on what the atom holds, made as a decision's, as a middle's forward is
+        // (`Middle::forward`) -- on the copy: it decides nothing.
+        let energy = self.mechanical(r, kappa);
+        let mut exists = fold.prototype_within(r, kappa, energy, &mut cache, &mut ws, false).is_some();
+        let mut spent = ws.spent();
+        if !exists {
+            cache = (*held).clone();
+            exists = fold.prototype_within(r, kappa, energy, &mut cache, &mut ws, true).is_some();
+            spent += ws.spent();
+        }
         let out = exists.then(|| then(fold, &cache, &mut ws, spent));
         self.clusters.give(set, ws);
         out
@@ -534,6 +546,57 @@ impl Onefold {
         })?;
         caches.choose(k, cluster);
         Some((cluster, state, forms, caches))
+    }
+
+    /// The prepared potential of the ground populations p (module documentation, # The rest of the model; `Reference::of`):
+    /// the trap light's alone, as the splitting's reference is of the reference state's.
+    pub(crate) fn prepared(&self, p: &[f64; GROUND]) -> Reference {
+        Reference::of(&self.states, p)
+    }
+
+    /// The run's light.
+    pub(crate) fn light(&self) -> &Light {
+        &self.light
+    }
+
+    /// A cluster's counts at a node (`step::Middle::work`): what a step's stretch on it adds with its own
+    /// (`step::Price::work`).
+    pub(crate) fn costs(&self, cluster: usize) -> [f64; 3] {
+        self.clusters.sets.get(cluster).work
+    }
+
+    /// The books' profile of a cluster's state on the trajectory's representation (`step::Held`; unify2 §2.7): per kind
+    /// the reading its cluster's last decision left and their whole, rate units (proto.rs `Cache::profile`) -- what each
+    /// step books over its cell (`Middle::books`, `step::Trajectory::model`) --, no forward made; a set that holds no
+    /// light books none. None where the representation holds no decision on the cluster.
+    pub(crate) fn profile(&self, cluster: usize, held: &Held) -> Option<[f64; KINDS + 1]> {
+        if self.clusters.sets.get(cluster).fold.blocks.is_empty() {
+            return Some([0.0; KINDS + 1]);
+        }
+        self.cache(held, cluster).profile()
+    }
+
+    /// The reported trap's potential (SPEC §1.3; module documentation, # The rest of the model) of the ground populations
+    /// p: the held forms of the run's base folds at the focus (`Fold::prototype_held`, every light on, nothing explicit),
+    /// the trap's frequency's on all its beam pairs and every other frequency's on each beam's own pair alone -- its
+    /// phases averaged: a pair of two beams of one frequency is their interference pattern, which an atom moving across it
+    /// at any speed sees averaged out over the trap. A near light holds no form (its response is no form of the field)
+    /// and is not in it. None where a far block does not exist at the focus.
+    pub(crate) fn reported(&self, p: &[f64; GROUND]) -> Result<Reference, String> {
+        let mut out = Reference { pairs: vec![] };
+        for k in (0..self.clusters.grounds.len()).filter(|&k| self.clusters.grounds[k].iter().any(|&s| p[s] != 0.0)) {
+            let fold = &self.clusters.sets.get(k).fold;
+            if fold.blocks.is_empty() {
+                continue;
+            }
+            let weight: Vec<f64> = (0..fold.size()).map(|x| fold.ground.get(x).map_or(0.0, |&s| p[s])).collect();
+            let mut ws = self.clusters.take(k);
+            let forms = fold.prototype_held(&mut ws, &weight);
+            self.clusters.give(k, ws);
+            let trap = self.light.trap;
+            out.add(Reference::laid(&self.light, &forms.ok_or("报告阱：远块在焦点处不存在")?, &|w, first, second| w == trap || first == second).pairs.into_iter());
+        }
+        Ok(out)
     }
 }
 
@@ -762,51 +825,91 @@ pub(super) fn lit(request: &Request, light: &Light, on: impl Fn(usize) -> bool) 
 /// The splitting's reference potential (module documentation, # The rest of the model): V_ref(r) = Re Σ B_l'l a_l'*(r)a_l(r)
 /// over the beam pairs of the lit frequencies -- the held forms' terms e_a* e_b W with each coefficient on its beams,
 /// e = ε_k = Σ_l γ_lk a_l (field.rs `Frequency::coefficients`), its conjugate counter-rotating --, each pair's product with
-/// its gradient and Hessian (far.rs `pair`), as the old model's far potential takes them.
-struct Reference {
+/// its gradient and Hessian (far.rs `pair`), as the old model's far potential takes them. The held forms are linear in
+/// the ground populations they are weighed by (`Fold::prototype_held`), and so is V_ref: a population's is its ground
+/// states' alone weighed by it (`Reference::states`, `Reference::of`) -- the prepared potential of every initial
+/// component and of every ground state (solve.rs: the wells, the kick's curvature) the same object as the run's.
+pub(crate) struct Reference {
     pairs: Vec<(usize, usize, C64)>,
 }
 
 impl Reference {
-    /// The held forms of the folds of `prepared` (the request with the trap's frequency alone lit) at the focus, on the
-    /// reference state's ground populations p: each ground set's with nothing explicit (`Choice::base`), its ground
-    /// places weighted by their populations (`Fold::prototype_held`), each term laid on its beam pairs. Refused where a
-    /// far block does not exist at the focus.
-    fn new(prepared: &Request, light: &Light, p: &[f64; GROUND]) -> Result<Reference, String> {
-        let choice = Choice::base(prepared, vec![])?;
-        let mut pairs: Vec<(usize, usize, C64)> = vec![];
-        for set in Fold::sets(prepared, &choice)?.iter().filter(|set| set.iter().any(|&s| p[s] != 0.0)) {
-            let fold = Fold::new(prepared, &choice, set[0])?;
-            let weight: Vec<f64> = (0..fold.size()).map(|x| fold.ground.get(x).map_or(0.0, |&s| p[s])).collect();
+    /// Every ground state's reference alone, in the ground states' order: the held forms of the folds of the request
+    /// with the trap's frequency alone lit (`lit`) at the focus, each ground set's with nothing explicit
+    /// (`Choice::base`), at each of its ground places alone (`Fold::prototype_held`), each term laid on its beam pairs.
+    /// Refused where a far block does not exist at the focus.
+    pub(crate) fn states(request: &Request, light: &Light) -> Result<Vec<Reference>, String> {
+        let prepared = lit(request, light, |w| w == light.trap);
+        let choice = Choice::base(&prepared, vec![])?;
+        let mut out: Vec<Reference> = (0..GROUND).map(|_| Reference { pairs: vec![] }).collect();
+        for set in Fold::sets(&prepared, &choice)? {
+            let fold = Fold::new(&prepared, &choice, set[0])?;
             let mut ws = fold.prototype_workspace()?;
-            for ([a, b], w) in fold.prototype_held(&mut ws, &weight).ok_or("参考势：阱光的远块在焦点处不存在")? {
-                // e_a* e_b of one rotation: co-rotating Σ γ_ja* γ_j'b a_j* a_j', counter-rotating its conjugates' (the
-                // pair of a_j' and a_j). Two coefficients of opposite rotations meet at one offset only at twice the
-                // optical frequency: no static form holds them.
-                assert_eq!(a.2, b.2, "a static form of coefficients of one rotation");
-                let (fa, fb) = (&light.frequencies[a.0], &light.frequencies[b.0]);
-                for (j, &l) in fa.beams.iter().enumerate() {
-                    for (jj, &ll) in fb.beams.iter().enumerate() {
-                        let (ga, gb) = (fa.coefficients[j][a.1], fb.coefficients[jj][b.1]);
-                        let (first, second, value) = if a.2 { (ll, l, ga * gb.conj() * w) } else { (l, ll, ga.conj() * gb * w) };
-                        match pairs.iter_mut().find(|x| x.0 == first && x.1 == second) {
-                            Some(x) => x.2 += value,
-                            None => pairs.push((first, second, value)),
-                        }
+            for (x, &s) in fold.ground.iter().enumerate() {
+                let weight: Vec<f64> = (0..fold.size()).map(|y| if y == x { 1.0 } else { 0.0 }).collect();
+                out[s] = Reference::laid(light, &fold.prototype_held(&mut ws, &weight).ok_or("参考势：阱光的远块在焦点处不存在")?, &|_, _, _| true);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The reference of the ground populations p, Σ_s p_s V_s of the ground states' own (`states`).
+    pub(crate) fn of(states: &[Reference], p: &[f64; GROUND]) -> Reference {
+        let mut out = Reference { pairs: vec![] };
+        for (s, state) in states.iter().enumerate().filter(|(s, _)| p[*s] != 0.0) {
+            out.add(state.pairs.iter().map(|&(first, second, value)| (first, second, value * p[s])));
+        }
+        out
+    }
+
+    /// Terms added to their beam pairs.
+    fn add(&mut self, terms: impl Iterator<Item = (usize, usize, C64)>) {
+        for (first, second, value) in terms {
+            match self.pairs.iter_mut().find(|x| x.0 == first && x.1 == second) {
+                Some(x) => x.2 += value,
+                None => self.pairs.push((first, second, value)),
+            }
+        }
+    }
+
+    /// Held forms (`Fold::prototype_held`) laid on their beam pairs: each form of one frequency's coefficients, its
+    /// beam pairs (l', l) those `keep` keeps of that frequency's.
+    fn laid(light: &Light, forms: &[([(usize, usize, bool); 2], C64)], keep: &dyn Fn(usize, usize, usize) -> bool) -> Reference {
+        let mut out = Reference { pairs: vec![] };
+        for &([a, b], w) in forms {
+            // e_a* e_b of one rotation: co-rotating Σ γ_ja* γ_j'b a_j* a_j', counter-rotating its conjugates' (the
+            // pair of a_j' and a_j). Two coefficients of opposite rotations meet at one offset only at twice the
+            // optical frequency: no static form holds them.
+            assert_eq!(a.2, b.2, "a static form of coefficients of one rotation");
+            let (fa, fb) = (&light.frequencies[a.0], &light.frequencies[b.0]);
+            for (j, &l) in fa.beams.iter().enumerate() {
+                for (jj, &ll) in fb.beams.iter().enumerate() {
+                    let (ga, gb) = (fa.coefficients[j][a.1], fb.coefficients[jj][b.1]);
+                    let (first, second, value) = if a.2 { (ll, l, ga * gb.conj() * w) } else { (l, ll, ga.conj() * gb * w) };
+                    if a.0 == b.0 && keep(a.0, first, second) {
+                        out.add(std::iter::once((first, second, value)));
                     }
                 }
             }
         }
-        Ok(Reference { pairs })
+        out
     }
 
     /// V_ref's second-order expansion at r: each beam's amplitude to the second order (field.rs `Beam::amplitude_to`),
     /// each pair's product a_l'* a_l (far.rs `pair`), times its weight, the real part.
-    fn at(&self, light: &Light, r: [f64; 3]) -> Quadratic {
+    pub(crate) fn at(&self, light: &Light, r: [f64; 3]) -> Quadratic {
+        self.rounded(light, r).0
+    }
+
+    /// V_ref's second-order expansion at r (`at`) with the rounding of its value, `rounding(terms)` times the sum of its
+    /// terms' moduli (potential.rs `descend`).
+    pub(crate) fn rounded(&self, light: &Light, r: [f64; 3]) -> (Quadratic, f64) {
         let mut out = Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] };
+        let mut scale = 0.0;
         for &(first, second, weight) in &self.pairs {
             let c = crate::model::far::pair(&light.beams[first].amplitude_to(r, 2), &light.beams[second].amplitude_to(r, 2));
             out.value += (c.value * weight).re;
+            scale += (c.value * weight).abs();
             for x in 0..3 {
                 out.gradient[x] += (c.gradient[x] * weight).re;
                 for y in 0..3 {
@@ -814,7 +917,13 @@ impl Reference {
                 }
             }
         }
-        out
+        (out, crate::units::rounding(self.pairs.len().max(1)) * scale)
+    }
+
+    /// B = Σ_l'l |B_l'l|: −V_ref(r) ≤ B max_l |a_l(r)|² (ensemble.rs `Well::envelope`), each pair's |a_l'* a_l| at most
+    /// the larger of its beams' intensities.
+    pub(crate) fn peak(&self) -> f64 {
+        self.pairs.iter().map(|x| x.2.abs()).sum()
     }
 }
 
