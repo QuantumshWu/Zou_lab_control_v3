@@ -116,10 +116,14 @@
 //!   near-resonant trap light has no far block and holds none: its force stays in the model's, less the reference's, as
 //!   any part of the force does (a reference is exact for any potential: step.rs # The reference);
 //! - the loss energy, (ħ/m)κ²/2 + V_run(r; p), V_run(r; p) = Σ_b p_b [G_L(r) − G_{L∖trap}(r)]_bb of the folds of every
-//!   light and of every light but the trap's, each ground set's with nothing explicit at the point (its diagonal in the
-//!   lab: G's less its frame), p the state's ground populations (an explicit excited state's by its decay's branching).
-//!   Its far value is zero: the trap's frequency holds no plane wave (ensemble.rs `PLANE_WAVE` refuses one). None
-//!   where a fold does not exist at the point: no loss is read there (`Subset::diagonal`).
+//!   light and of every light but the trap's (the run's clusters, and those of its request with the trap's light off:
+//!   `Clusters`), each ground set's on the cluster the bare state √p first holds at the point at rest -- with nothing
+//!   explicit where its fold exists there, else risen until it does, the rule of a trajectory's start
+//!   (`Clusters::rise`, `Clusters::diagonal`) -- its diagonal in the lab (G's less its frame), p the state's ground
+//!   populations (an explicit excited state's by its decay's branching). On a risen cluster the risen node's light shift
+//!   is in its coupling to the ground places, not on their diagonal: of both light sets alike where both rise it, so
+//!   that their difference keeps the trap's. Its far value is zero: the trap's frequency holds no plane wave
+//!   (ensemble.rs `PLANE_WAVE` refuses one).
 //! The displayed rows are the fold's time-averaged populations at the point (`Dynamics::readout`): the populations of
 //! the slow modes between two jumps (proto.rs `Workspace::populations`) -- not the optical Bloch equations' ensemble
 //! ρ_ee, which holds each jump's transient over 1/Γ that the fold's landing leaves out (within the share, read by the
@@ -133,7 +137,7 @@
 //! through the compression) -- the force contracts it in the reverse mode, each where it is the cheap one. Their slope
 //! along the path is the parabola through the step's outer nodes the propagation takes, a tone's phase exact. A set of
 //! ground states alone has none: its fold's photons hold that part.
-use super::proto::{At, Bar, Cache, Moments, Workspace};
+use super::proto::{At, Bar, Cache, Moments, Step, Workspace};
 use super::{Choice, Fold};
 use crate::field::Light;
 use crate::linalg::{Mat, C64};
@@ -270,25 +274,30 @@ impl Arena {
     }
 }
 
-/// The run's model on the fold at the atom (module documentation).
-pub(crate) struct Onefold {
+/// The clusters of one request (# The state sets): the request, every cluster asked for (`Arena`; the first per ground set
+/// its base, the base choice's explicit nodes of that set -- none: `Onefold::new`'s), the base choice, and the ground sets
+/// (the photons' landing partition) with each ground state's. The run's, and the loss energy's light subset's (# The rest
+/// of the model): one object, one rule.
+pub(super) struct Clusters {
     request: Request,
-    /// The clusters; the first per ground set its base, the choice's explicit nodes of that set (none: `new`'s).
     sets: Arena,
     base: Choice,
-    /// The ground sets (the photons' landing partition).
     grounds: Vec<Vec<usize>>,
     membership: [usize; GROUND],
+}
+
+/// The run's model on the fold at the atom (module documentation).
+pub(crate) struct Onefold {
+    pub(super) clusters: Clusters,
     hbar_over_mass: f64,
     /// The bare ground energies, and the excited states' frame frequency (rad/µs): the photons' frequencies.
     energies: Vec<f64>,
     frame: f64,
-    /// The splitting's reference potential and the loss energy's light subsets (module documentation, # The rest of the
-    /// model): every light, every light but the trap's (the latter made where first asked for).
+    /// The splitting's reference potential and the loss energy's light subset (module documentation, # The rest of the
+    /// model): every light but the trap's, its clusters made where first asked for (every light's are the run's own).
     light: Light,
     reference: Reference,
-    running: Subset,
-    untrapped: OnceLock<Result<Subset, String>>,
+    untrapped: OnceLock<Result<Clusters, String>>,
     photons: f64,
 }
 
@@ -376,45 +385,29 @@ impl Onefold {
         Onefold::of(request, &Choice::base(request, vec![])?, reference)
     }
 
-    /// The run of a request on a base choice of nodes (`new`: nothing explicit): per ground set its cluster with the
-    /// choice's explicit nodes of that set first (cluster k the k-th set's), any other made where a decision asks for it
-    /// (`Onefold::cluster_with`). Refused where a set is not the prototype's (proto.rs `prototype_workspace`).
+    /// The run of a request on a base choice of nodes (`new`: nothing explicit): its clusters (`Clusters::new`). Refused
+    /// where a set is not the prototype's (proto.rs `prototype_workspace`).
     pub(crate) fn of(request: &Request, choice: &Choice, reference: [f64; GROUND]) -> Result<Onefold, String> {
-        let grounds = Fold::sets(request, choice)?;
         let light = Light::new(request);
         let axes = super::Axes::new(request)?;
-        let mut membership = [0; GROUND];
-        for (k, set) in grounds.iter().enumerate() {
-            set.iter().for_each(|&g| membership[g] = k);
-        }
         let energies: Vec<f64> = (0..GROUND).map(|s| request.hamiltonian[(s, s)].re).collect();
         let mut run = Onefold {
-            request: request.clone(),
-            sets: Arena { chunks: std::array::from_fn(|_| OnceLock::new()), keys: Mutex::new(vec![]) },
-            base: choice.clone(),
+            clusters: Clusters::new(request, choice)?,
             hbar_over_mass: crate::units::hbar_over_mass(request.mass_kg),
             frame: axes.omega(&axes.frame()),
             energies,
             reference: Reference::new(&lit(request, &light, |w| w == light.trap), &light, &reference)?,
-            running: Subset::new(request.clone())?,
             untrapped: OnceLock::new(),
             light,
-            grounds,
-            membership,
             photons: 0.0,
         };
-        for k in 0..run.grounds.len() {
-            let mut nodes: Vec<Key> = choice.explicit.iter().copied().filter(|x| run.grounds[k].contains(&x.2)).collect();
-            nodes.sort();
-            run.sets.index((k, nodes.clone()), || Set::new(request, choice, k, &run.grounds[k], nodes))?;
-        }
         // A jump's photons at the focus, the dearest base cluster's, as a jump at a point makes them (`Dynamics::emit`):
         // its forward, tangent, the place and the photons there -- every class's rate and the dearest class's moments,
         // the class a jump draws (`Fold::prototype_photons`) -- (`Dynamics::photon_work`).
-        run.photons = (0..run.grounds.len())
-            .filter(|&k| !run.sets.get(k).fold.blocks.is_empty())
+        run.photons = (0..run.clusters.grounds.len())
+            .filter(|&k| !run.clusters.sets.get(k).fold.blocks.is_empty())
             .map(|k| {
-                let n = run.sets.get(k).fold.size();
+                let n = run.clusters.sets.get(k).fold.size();
                 let psi: Vec<C64> = (0..n).map(|x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
                 run.evaluate(k, [0.0; 3], [0.0; 3], &Held::default(), |fold, cache, ws, forward| {
                     let made = forward + fold.prototype_tangent(cache, ws) + fold.prototype_place([0.0; 3], [0.0; 3], [0.0; 3], 0.0, ws);
@@ -424,7 +417,7 @@ impl Onefold {
                             classes = rates.len();
                             (class < classes).then_some(class)
                         };
-                        dearest = dearest.max(fold.prototype_photons(cache, ws, &psi, &run.grounds, At::Place, 0.0, Moments::Drawn(&mut drawn)).work);
+                        dearest = dearest.max(fold.prototype_photons(cache, ws, &psi, &run.clusters.grounds, At::Place, 0.0, Moments::Drawn(&mut drawn)).work);
                         class += 1;
                     }
                     made + dearest
@@ -434,6 +427,92 @@ impl Onefold {
             .fold(0.0, f64::max)
             * crate::decide::COMPLEX;
         Ok(run)
+    }
+
+    /// A cluster's kept decompositions in a representation (none yet: a new atom's).
+    fn cache(&self, held: &Held, set: usize) -> Arc<Cache> {
+        caches(held).and_then(|c| c.sets.get(set).cloned()).unwrap_or_default()
+    }
+
+    /// One evaluation at a point that decides nothing (module documentation, # The representation): the set's forward on
+    /// a copy of the trajectory's decompositions, then `then` on it with the forward's work. None where the fold does not
+    /// exist there.
+    fn evaluate<R>(&self, set: usize, r: [f64; 3], kappa: [f64; 3], held: &Held, then: impl FnOnce(&Fold, &Cache, &mut Workspace, f64) -> R) -> Option<R> {
+        let fold = &self.clusters.sets.get(set).fold;
+        let mut cache = (*self.cache(held, set)).clone();
+        let mut ws = self.clusters.take(set);
+        let exists = fold.prototype(r, kappa, &mut cache, &mut ws).is_some();
+        let spent = ws.spent();
+        let out = exists.then(|| then(fold, &cache, &mut ws, spent));
+        self.clusters.give(set, ws);
+        out
+    }
+
+    /// The held forms of a set's state at a point (module documentation, # The held forms), on the set's forward made
+    /// there (`cache`, `ws`; none where the set holds no light): its tangent, and in one contraction at the point the
+    /// static G's form and each tone's complex amplitude at the point's time, less the reference's gradient there (step.rs
+    /// `Forms`); where `land`, of the bare state's landing (`Workspace::taken`, nothing following: S⁻¹ψ). With the state
+    /// they are of.
+    fn held_forms(&self, set: usize, at: &Point, psi: &[C64], made: Option<(&Cache, &mut Workspace)>, land: bool) -> (Vec<C64>, Forms) {
+        let gradient = self.reference.at(&self.light, at.r).gradient;
+        let Some((cache, ws)) = made else { return (psi.to_vec(), Forms { time: at.t, ..Forms::default() }.less(gradient)) };
+        let fold = &self.clusters.sets.get(set).fold;
+        let state = if land { ws.taken(fold, cache, psi, &[], false) } else { psi.to_vec() };
+        let forms = forms_on(fold, cache, ws, &self.clusters.sets.get(set).tones, at.t, &state);
+        (state, Forms { time: at.t, ..forms }.less(gradient))
+    }
+
+    /// p(ψ), the ground populations of a set's state (model.rs `Model::ground_populations`, on the set's states): an
+    /// explicit excited state's by its decay's branching.
+    fn populations(&self, set: usize, psi: &[C64]) -> [f64; GROUND] {
+        let total = crate::linalg::norm_sqr(psi);
+        let mut p = [0.0; GROUND];
+        for (z, &s) in psi.iter().zip(&self.clusters.sets.get(set).cluster.states) {
+            let weight = z.norm_sqr() / total;
+            if s < GROUND {
+                p[s] += weight;
+            } else if weight != 0.0 {
+                let rate: f64 = (0..GROUND).map(|b| self.clusters.request.emission.iter().map(|c| c[(b, s)].norm_sqr()).sum::<f64>()).sum();
+                for (b, landing) in p.iter_mut().enumerate() {
+                    *landing += weight * self.clusters.request.emission.iter().map(|c| c[(b, s)].norm_sqr()).sum::<f64>() / rate;
+                }
+            }
+        }
+        p
+    }
+
+    /// Where a trajectory's bare state f at a point first lands (`Dynamics::started`; # The nodes risen and fallen): ground
+    /// set k's cluster with nothing explicit where its fold exists there within the share (its landing's reading within
+    /// it, proto.rs # The landing's reading), else risen until one is (`Clusters::rise`) -- the landing and its held forms
+    /// on the forward that found it within, and the representation it starts with. None where no node is left to rise.
+    fn first(&self, k: usize, at: &Point, f: &[C64]) -> Option<(usize, Vec<C64>, Forms, Caches)> {
+        let share = crate::model::elim::share();
+        let (cluster, (state, forms), mut caches) = self.clusters.rise(k, at, f, |step| step.landing <= share, |cluster, bare, cache, ws| {
+            let light = !self.clusters.sets.get(cluster).fold.blocks.is_empty();
+            self.held_forms(cluster, at, bare, light.then_some((cache, ws)), true)
+        })?;
+        caches.choose(k, cluster);
+        Some((cluster, state, forms, caches))
+    }
+}
+
+impl Clusters {
+    /// A request's clusters on a base choice of nodes (# The state sets): per ground set its cluster with the choice's
+    /// explicit nodes of that set first (cluster k the k-th set's), any other made where it is first asked for
+    /// (`cluster_with`).
+    fn new(request: &Request, choice: &Choice) -> Result<Clusters, String> {
+        let grounds = Fold::sets(request, choice)?;
+        let mut membership = [0; GROUND];
+        for (k, set) in grounds.iter().enumerate() {
+            set.iter().for_each(|&g| membership[g] = k);
+        }
+        let out = Clusters { request: request.clone(), sets: Arena { chunks: std::array::from_fn(|_| OnceLock::new()), keys: Mutex::new(vec![]) }, base: choice.clone(), grounds, membership };
+        for k in 0..out.grounds.len() {
+            let mut nodes: Vec<Key> = choice.explicit.iter().copied().filter(|x| out.grounds[k].contains(&x.2)).collect();
+            nodes.sort();
+            out.sets.index((k, nodes.clone()), || Set::new(request, choice, k, &out.grounds[k], nodes))?;
+        }
+        Ok(out)
     }
 
     /// The cluster of ground set k with the explicit nodes `nodes` (# The state sets): made where it is not yet, on the
@@ -479,11 +558,6 @@ impl Onefold {
         order.into_iter().find_map(|(f, _)| self.way(set, &f.cluster, || set.nodes.iter().copied().filter(|k| *k != f.key).collect()))
     }
 
-    /// A cluster's kept decompositions in a representation (none yet: a new atom's).
-    fn cache(&self, held: &Held, set: usize) -> Arc<Cache> {
-        caches(held).and_then(|c| c.sets.get(set).cloned()).unwrap_or_default()
-    }
-
     /// A workspace of a cluster, taken from its pool (made where none is free).
     fn take(&self, set: usize) -> Workspace {
         let taken = self.sets.get(set).pool.lock().unwrap_or_else(|e| e.into_inner()).pop();
@@ -494,61 +568,13 @@ impl Onefold {
         self.sets.get(set).pool.lock().unwrap_or_else(|e| e.into_inner()).push(ws);
     }
 
-    /// One evaluation at a point that decides nothing (module documentation, # The representation): the set's forward on
-    /// a copy of the trajectory's decompositions, then `then` on it with the forward's work. None where the fold does not
-    /// exist there.
-    fn evaluate<R>(&self, set: usize, r: [f64; 3], kappa: [f64; 3], held: &Held, then: impl FnOnce(&Fold, &Cache, &mut Workspace, f64) -> R) -> Option<R> {
-        let fold = &self.sets.get(set).fold;
-        let mut cache = (*self.cache(held, set)).clone();
-        let mut ws = self.take(set);
-        let exists = fold.prototype(r, kappa, &mut cache, &mut ws).is_some();
-        let spent = ws.spent();
-        let out = exists.then(|| then(fold, &cache, &mut ws, spent));
-        self.give(set, ws);
-        out
-    }
-
-    /// The held forms of a set's state at a point (module documentation, # The held forms), on the set's forward made
-    /// there (`cache`, `ws`; none where the set holds no light): its tangent, and in one contraction at the point the
-    /// static G's form and each tone's complex amplitude at the point's time, less the reference's gradient there (step.rs
-    /// `Forms`); where `land`, of the bare state's landing (`Workspace::taken`, nothing following: S⁻¹ψ). With the state
-    /// they are of.
-    fn held_forms(&self, set: usize, at: &Point, psi: &[C64], made: Option<(&Cache, &mut Workspace)>, land: bool) -> (Vec<C64>, Forms) {
-        let gradient = self.reference.at(&self.light, at.r).gradient;
-        let Some((cache, ws)) = made else { return (psi.to_vec(), Forms { time: at.t, ..Forms::default() }.less(gradient)) };
-        let fold = &self.sets.get(set).fold;
-        let state = if land { ws.taken(fold, cache, psi, &[], false) } else { psi.to_vec() };
-        let forms = forms_on(fold, cache, ws, &self.sets.get(set).tones, at.t, &state);
-        (state, Forms { time: at.t, ..forms }.less(gradient))
-    }
-
-    /// p(ψ), the ground populations of a set's state (model.rs `Model::ground_populations`, on the set's states): an
-    /// explicit excited state's by its decay's branching.
-    fn populations(&self, set: usize, psi: &[C64]) -> [f64; GROUND] {
-        let total = crate::linalg::norm_sqr(psi);
-        let mut p = [0.0; GROUND];
-        for (z, &s) in psi.iter().zip(&self.sets.get(set).cluster.states) {
-            let weight = z.norm_sqr() / total;
-            if s < GROUND {
-                p[s] += weight;
-            } else if weight != 0.0 {
-                let rate: f64 = (0..GROUND).map(|b| self.request.emission.iter().map(|c| c[(b, s)].norm_sqr()).sum::<f64>()).sum();
-                for (b, landing) in p.iter_mut().enumerate() {
-                    *landing += weight * self.request.emission.iter().map(|c| c[(b, s)].norm_sqr()).sum::<f64>() / rate;
-                }
-            }
-        }
-        p
-    }
-
-    /// Where a trajectory's bare state f at a point first lands (`Dynamics::started`; # The nodes risen and fallen):
-    /// ground set k's cluster with nothing explicit where its fold exists there within the share (its landing's reading
-    /// within it, proto.rs # The landing's reading); else that cluster's rise for the bare state in that forward (its last
-    /// sweep's responses, where it failed: `Onefold::risen`), until it does -- the landing and its held forms on the
-    /// forward that found it within, and the representation it starts with: the decompositions made there, and every
-    /// forward's count (made or not: no budget). None where no node is left to rise.
-    fn first(&self, k: usize, at: &Point, f: &[C64]) -> Option<(usize, Vec<C64>, Forms, Caches)> {
-        let share = crate::model::elim::share();
+    /// Where a bare state f of ground set k at a point is first evaluated (# The nodes risen and fallen): k's cluster with
+    /// nothing explicit where its forward there `holds`; else -- its fold not existing there, or not holding -- that
+    /// cluster's rise for f in that forward (its last sweep's responses, where it failed: `risen`), until one holds:
+    /// `then` on that forward (the cluster, f on its states, the forward's decompositions and workspace), with the
+    /// representation the attempts made -- every forward's decompositions and count (made or not: no budget). None where
+    /// no node is left to rise.
+    fn rise<R>(&self, k: usize, at: &Point, f: &[C64], holds: impl Fn(&Step) -> bool, then: impl FnOnce(usize, &[C64], &Cache, &mut Workspace) -> R) -> Option<(usize, R, Caches)> {
         let mut caches = Caches::default();
         let mut cluster = k;
         loop {
@@ -556,27 +582,40 @@ impl Onefold {
             let mut bare = vec![C64::ZERO; set.cluster.states.len()];
             let ground = f.len().min(set.cluster.ground);
             bare[..ground].copy_from_slice(&f[..ground]);
-            if set.fold.blocks.is_empty() {
-                let (state, forms) = self.held_forms(cluster, at, &bare, None, true);
-                caches.choose(k, cluster);
-                return Some((cluster, state, forms, caches));
-            }
             let mut cache = Cache::default();
             let mut ws = self.take(cluster);
-            let within = set.fold.prototype(at.r, at.kappa, &mut cache, &mut ws).is_some_and(|step| step.landing <= share);
+            let held = set.fold.prototype(at.r, at.kappa, &mut cache, &mut ws).is_some_and(&holds);
             let count = ws.spent() * crate::decide::COMPLEX;
-            if within {
-                let (state, forms) = self.held_forms(cluster, at, &bare, Some((&cache, &mut ws)), true);
+            if held {
+                let out = then(cluster, &bare, &cache, &mut ws);
                 self.give(cluster, ws);
                 caches.keep(cluster, Arc::new(cache), count);
-                caches.choose(k, cluster);
-                return Some((cluster, state, forms, caches));
+                return Some((cluster, out, caches));
             }
             let amplitudes = ws.amplitudes(&set.fold, &cache, &bare);
             self.give(cluster, ws);
             caches.keep(cluster, Arc::new(cache), count);
             cluster = self.risen(set, &amplitudes)?;
         }
+    }
+
+    /// Σ_b p_b [G(r)]_bb in the lab (the diagonal less its frame) of the ground sets p populates (# The rest of the model):
+    /// each set's on the cluster its bare state √p first holds at r at rest -- its fold with nothing explicit where it
+    /// exists there, else risen until it does (`rise`: the rule of a trajectory's start, existence its test). None where
+    /// no node is left to rise.
+    fn diagonal(&self, r: [f64; 3], p: &[f64; GROUND]) -> Option<f64> {
+        let at = Point { r, kappa: [0.0; 3], t: 0.0 };
+        let mut out = 0.0;
+        for k in (0..self.grounds.len()).filter(|&k| self.grounds[k].iter().any(|&s| p[s] != 0.0)) {
+            let f: Vec<C64> = self.sets.get(k).fold.ground.iter().map(|&s| C64::real(p[s].sqrt())).collect();
+            let (_, part, _) = self.rise(k, &at, &f, |_| true, |cluster, _, _, ws| {
+                let fold = &self.sets.get(cluster).fold;
+                let (n, g) = (fold.size(), ws.generator());
+                fold.ground.iter().enumerate().map(|(x, &s)| p[s] * (g.data[x * n + x].re + fold.frame_values[x])).sum::<f64>()
+            })?;
+            out += part;
+        }
+        Some(out)
     }
 }
 
@@ -716,33 +755,6 @@ impl Reference {
     }
 }
 
-/// A light subset's folds (module documentation, # The rest of the model): per ground set of the request with that light
-/// its fold with nothing explicit (`Choice::base`).
-struct Subset {
-    folds: Vec<Fold>,
-}
-
-impl Subset {
-    fn new(request: Request) -> Result<Subset, String> {
-        let choice = Choice::base(&request, vec![])?;
-        let folds = Fold::sets(&request, &choice)?.iter().map(|set| Fold::new(&request, &choice, set[0])).collect::<Result<_, _>>()?;
-        Ok(Subset { folds })
-    }
-
-    /// Σ_b p_b [G(r)]_bb in the lab (the diagonal less its frame) of the ground sets p populates, each by a forward at r
-    /// at rest on decompositions made there. None where a fold does not exist there.
-    fn diagonal(&self, r: [f64; 3], p: &[f64; GROUND]) -> Option<f64> {
-        let mut out = 0.0;
-        for fold in self.folds.iter().filter(|fold| fold.ground.iter().any(|&s| p[s] != 0.0)) {
-            let mut ws = fold.prototype_workspace().ok()?;
-            let step = fold.prototype(r, [0.0; 3], &mut Cache::default(), &mut ws)?;
-            let n = fold.size();
-            out += fold.ground.iter().enumerate().map(|(x, &s)| p[s] * (step.generator.data[x * n + x].re + fold.frame_values[x])).sum::<f64>();
-        }
-        Some(out)
-    }
-}
-
 /// The position of the time s from a step's middle among the prototype's (proto.rs `Workspace::tone`): 0 the middle, 1
 /// the outer node at −h, 2 the one at h.
 fn position(s: f64) -> usize {
@@ -804,7 +816,7 @@ pub(crate) struct Path {
 impl Drop for Middle<'_> {
     fn drop(&mut self) {
         if let Some(ws) = self.inner.get_mut().ws.take() {
-            self.run.give(self.set, ws);
+            self.run.clusters.give(self.set, ws);
         }
     }
 }
@@ -814,7 +826,7 @@ impl Middle<'_> {
     fn forward(&self, path: &Path) -> RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
         if inner.current != Some((path.kappa, path.velocity)) {
-            let fold = &self.run.sets.get(self.set).fold;
+            let fold = &self.run.clusters.sets.get(self.set).fold;
             let decide = self.decide && !inner.decided;
             let Inner { committed, eval, ws, generator, budget, .. } = &mut *inner;
             *eval = (**committed).clone();
@@ -841,7 +853,7 @@ impl Middle<'_> {
     /// The forward, the outer nodes at ±h where asked, and the tangent where asked.
     fn made(&self, path: &Path, h: Option<f64>, tangent: bool) -> RefMut<'_, Inner> {
         let mut inner = self.forward(path);
-        let fold = &self.run.sets.get(self.set).fold;
+        let fold = &self.run.clusters.sets.get(self.set).fold;
         if !inner.exists {
             return inner;
         }
@@ -861,7 +873,7 @@ impl Middle<'_> {
     /// The forms of one contraction of the step's derivative (proto.rs `Fold::prototype_force`): per channel the sum of its
     /// bars, the outer nodes at ±h made where `h`.
     fn forms(&self, path: &Path, h: Option<f64>, bars: &[Bar], channels: usize) -> Vec<[C64; 3]> {
-        let fold = &self.run.sets.get(self.set).fold;
+        let fold = &self.run.clusters.sets.get(self.set).fold;
         let mut inner = self.made(path, h, true);
         if !inner.exists {
             return vec![[C64::new(f64::NAN, f64::NAN); 3]; channels];
@@ -879,7 +891,7 @@ impl Middle<'_> {
     /// (module documentation, # The jumps' phase), and the photon's frequency. None where the set has no light (no
     /// blocks), the fold does not exist there, or `draw` picks none.
     pub(crate) fn emitted(&self, path: &Path, s: f64, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
-        let (run, set) = (self.run, &self.run.sets.get(self.set));
+        let (run, set) = (self.run, &self.run.clusters.sets.get(self.set));
         let fold = &set.fold;
         if fold.blocks.is_empty() {
             return None;
@@ -892,12 +904,12 @@ impl Middle<'_> {
         let ws = ws.as_mut().expect("a workspace");
         fold.prototype_place(self.r, path.kappa, path.velocity, s, ws);
         let t = self.t + s;
-        let photons = fold.prototype_photons(eval, ws, psi, &run.grounds, At::Place, t, Moments::Drawn(draw));
+        let photons = fold.prototype_photons(eval, ws, psi, &run.clusters.grounds, At::Place, t, Moments::Drawn(draw));
         let class = &photons.classes[photons.drawn?];
         // The class's jump: its group's blocks' at their offsets' phases e^{−iot} (# The jumps' coherence), as its photons
         // summed them, on the landing cluster's states, each at its frame's phase e^{iθ_s t} (# The jumps' phase).
         let landing = self.landing_cluster(class.landing);
-        let to = run.sets.get(landing);
+        let to = run.clusters.sets.get(landing);
         let mut amplitudes = [Internal::zeros(to.cluster.states.len()); 3];
         for (a, amplitude) in amplitudes.iter_mut().enumerate() {
             for ((z, &s), &theta) in amplitude.iter_mut().zip(&to.cluster.states).zip(&to.fold.frame_values) {
@@ -909,14 +921,14 @@ impl Middle<'_> {
         // The photon's frequency: the excited amplitude's (the frame's, its offset's and the set's slow ground energy) less
         // the landing state's energy; of a group, its blocks' offsets at their shares of the rate (`Class::offset`).
         let first = fold.ground[0];
-        let omega = run.frame + class.offset + run.energies[first] - fold.frame_values[0] - run.energies[run.grounds[class.landing][0]];
+        let omega = run.frame + class.offset + run.energies[first] - fold.frame_values[0] - run.energies[run.clusters.grounds[class.landing][0]];
         Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick: class.kick })
     }
 
     /// The cluster a jump into ground set k lands in (# The nodes risen and fallen): this middle's where k is its own set,
     /// else the one the trajectory last took there, else k's with nothing explicit.
     fn landing_cluster(&self, k: usize) -> usize {
-        if k == self.run.sets.get(self.set).ground_set {
+        if k == self.run.clusters.sets.get(self.set).ground_set {
             return self.set;
         }
         self.caches.as_ref().and_then(|c| c.chosen.get(k).copied().flatten()).unwrap_or(k)
@@ -926,14 +938,14 @@ impl Middle<'_> {
     /// landing; the forward the step made at the path) -- the switch's formula with nothing following (`Workspace::taken`:
     /// a fall at x_X = 0). The state itself where the set has no light.
     pub(super) fn landing(&self, path: &Path, f: &[C64]) -> Internal {
-        if self.run.sets.get(self.set).fold.blocks.is_empty() {
+        if self.run.clusters.sets.get(self.set).fold.blocks.is_empty() {
             return f.iter().copied().collect();
         }
         let inner = self.made(path, None, false);
         if !inner.exists {
             return f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect();
         }
-        inner.ws.as_ref().expect("a workspace").taken(&self.run.sets.get(self.set).fold, &inner.eval, f, &[], false).into_iter().collect()
+        inner.ws.as_ref().expect("a workspace").taken(&self.run.clusters.sets.get(self.set).fold, &inner.eval, f, &[], false).into_iter().collect()
     }
 
     /// The trajectory's representation with this cluster's decompositions as this middle's decision made them, and the
@@ -949,25 +961,25 @@ impl Middle<'_> {
     /// cluster the one taken in its ground set.
     fn leaves(&self) -> Caches {
         let mut caches = self.kept();
-        caches.choose(self.run.sets.get(self.set).ground_set, self.set);
+        caches.choose(self.run.clusters.sets.get(self.set).ground_set, self.set);
         caches
     }
 
     /// A cluster's price by the trajectory's count of it (# The nodes risen and fallen): the count of a forward it last
     /// measured there, else the cluster's at the focus.
     fn priced(&self, cluster: usize) -> Offer {
-        let set = self.run.sets.get(cluster);
+        let set = self.run.clusters.sets.get(cluster);
         set.offer(self.caches.as_ref().and_then(|c| c.counts.get(cluster).copied().flatten()).unwrap_or(set.made))
     }
 
     /// The offers of a decision (# The nodes risen and fallen) for the state's P amplitudes x at this middle: the rise of
-    /// the Q node that holds the most of the state (`Onefold::risen`), the fall of the explicit node that holds the least
-    /// (`Onefold::fallen`); each its cluster.
+    /// the Q node that holds the most of the state (`Clusters::risen`), the fall of the explicit node that holds the least
+    /// (`Clusters::fallen`); each its cluster.
     fn offers(&self, x: &[C64]) -> Vec<usize> {
-        let (run, set) = (self.run, self.run.sets.get(self.set));
+        let (run, set) = (self.run, self.run.clusters.sets.get(self.set));
         let inner = self.inner.borrow();
         let amplitudes = inner.ws.as_ref().expect("a workspace").amplitudes(&set.fold, &inner.eval, x);
-        run.risen(set, &amplitudes).into_iter().chain(run.fallen(set, x)).collect()
+        run.clusters.risen(set, &amplitudes).into_iter().chain(run.clusters.fallen(set, x)).collect()
     }
 
     /// The state ψ of this middle taken onto the cluster `to` at its middle, `other` (# The nodes risen and fallen; one
@@ -975,8 +987,8 @@ impl Middle<'_> {
     /// node's row's (εx) --; each of its Q rows that is this cluster's P place given that place's amplitude; every other
     /// Q row following. With what it drops, δp over ‖ψ‖².
     pub(super) fn take_onto(&self, psi: &[C64], to: usize, other: &Middle) -> (Vec<C64>, f64) {
-        let (run, mine) = (self.run, self.run.sets.get(self.set));
-        let (theirs_set, from) = (run.sets.get(to), &mine.fold);
+        let (run, mine) = (self.run, self.run.clusters.sets.get(self.set));
+        let (theirs_set, from) = (run.clusters.sets.get(to), &mine.fold);
         let target = &theirs_set.fold;
         let (inner, theirs) = (self.inner.borrow(), other.inner.borrow());
         let ws = inner.ws.as_ref().expect("a workspace");
@@ -1008,7 +1020,7 @@ impl Middle<'_> {
 
     /// e^{iν_m (t_m + s)} ρ: tone m's X at the time s from the middle (module documentation, # The tones).
     fn phased(&self, m: usize, s: f64, rho: &[C64]) -> Vec<C64> {
-        let phase = C64::cis(self.run.sets.get(self.set).tones[m] * (self.t + s));
+        let phase = C64::cis(self.run.clusters.sets.get(self.set).tones[m] * (self.t + s));
         rho.iter().map(|z| *z * phase).collect()
     }
 }
@@ -1022,7 +1034,7 @@ impl crate::step::Middle for Middle<'_> {
     type Path = Path;
 
     fn states(&self) -> usize {
-        self.run.sets.get(self.set).fold.size()
+        self.run.clusters.sets.get(self.set).fold.size()
     }
 
     fn still(&self) -> bool {
@@ -1049,7 +1061,7 @@ impl crate::step::Middle for Middle<'_> {
         let source = if s == 0.0 { &inner.generator } else { ws.node_generator(usize::from(s > 0.0)) };
         h.data.copy_from_slice(&source.data);
         let position = position(s);
-        let set = &self.run.sets.get(self.set);
+        let set = &self.run.clusters.sets.get(self.set);
         for (m, &nu) in set.tones.iter().enumerate() {
             let phase = C64::cis(nu * (self.t + s));
             for (z, g) in h.data.iter_mut().zip(&ws.tone(m, position).data) {
@@ -1079,7 +1091,7 @@ impl crate::step::Middle for Middle<'_> {
     /// The static G's form at the time s and every tone's there at its exact phase, one contraction.
     fn force(&self, path: &Path, s: f64, rho: &[C64]) -> [f64; 3] {
         let j = position(s);
-        let phased: Vec<Vec<C64>> = (0..self.run.sets.get(self.set).tones.len()).map(|m| self.phased(m, s, rho)).collect();
+        let phased: Vec<Vec<C64>> = (0..self.run.clusters.sets.get(self.set).tones.len()).map(|m| self.phased(m, s, rho)).collect();
         let mut bars = vec![Bar { channel: 0, position: j, tone: None, matrix: rho }];
         bars.extend(phased.iter().enumerate().map(|(m, x)| Bar { channel: 0, position: j, tone: Some(m), matrix: x }));
         real(self.forms(path, (s != 0.0).then_some(s.abs()), &bars, 1)[0])
@@ -1088,7 +1100,7 @@ impl crate::step::Middle for Middle<'_> {
     /// The static G's at zero, each tone's at its beat ν_m: the middle's G_m at its phase e^{iν_m t_m} (module
     /// documentation, # The tones), each its own channel of one contraction.
     fn tones(&self, path: &Path, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
-        let tones = &self.run.sets.get(self.set).tones;
+        let tones = &self.run.clusters.sets.get(self.set).tones;
         let phased: Vec<Vec<C64>> = (0..tones.len()).map(|m| self.phased(m, 0.0, rho)).collect();
         let mut bars = vec![Bar { channel: 0, position: 0, tone: None, matrix: rho }];
         bars.extend(phased.iter().enumerate().map(|(m, x)| Bar { channel: 1 + m, position: 0, tone: Some(m), matrix: x }));
@@ -1106,7 +1118,7 @@ impl crate::step::Middle for Middle<'_> {
     fn nodes(&self, path: &Path, h: f64, rho: [&[C64]; 3], held: Option<(&[C64], &dyn Fn(f64) -> f64)>, end: Option<(&[C64], &Path)>) -> ([[f64; 3]; 3], Option<Forms>) {
         // The tones are the light's beats in time (the path's turns are its envelopes'): the middle's own, no path at rest.
         let end = end.map(|(rho, _)| rho);
-        let tones = &self.run.sets.get(self.set).tones;
+        let tones = &self.run.clusters.sets.get(self.set).tones;
         let at = |nu: f64| -> Vec<C64> {
             match held {
                 Some((held, weight)) => rho[1].iter().zip(held).map(|(r, x)| *r + *x * weight(nu)).collect(),
@@ -1131,7 +1143,7 @@ impl crate::step::Middle for Middle<'_> {
 
     /// The candidates' beats and keys (module documentation, # The tones).
     fn beats(&self, _: &Path, beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
-        for c in &self.run.sets.get(self.set).candidates {
+        for c in &self.run.clusters.sets.get(self.set).candidates {
             beats.push(c.beat);
             keys.push(c.key.clone());
         }
@@ -1141,7 +1153,7 @@ impl crate::step::Middle for Middle<'_> {
     /// decays at ν there, −(i/2) Σ_q L_o,q†L_o′,q (# The jumps' coherence), and e^{−iνt_m} times the same at −ν (none: zero).
     fn envelopes(&self, path: &Path, m: usize, s: f64, plus: &mut Mat, minus: &mut Mat) {
         let inner = self.made(path, (s != 0.0).then_some(s.abs()), false);
-        let set = self.run.sets.get(self.set);
+        let set = self.run.clusters.sets.get(self.set);
         let c = &set.candidates[m];
         if !inner.exists {
             plus.data.fill(C64::new(f64::NAN, f64::NAN));
@@ -1182,7 +1194,7 @@ impl crate::step::Middle for Middle<'_> {
     /// formula; a cross decay has no Hermitian part, and no form. One contraction (the outer nodes made at the sums'
     /// offset where asked).
     fn tone_force(&self, path: &Path, m: usize, sums: &[(f64, &[C64], &[C64])]) -> [f64; 3] {
-        let c = &self.run.sets.get(self.set).candidates[m];
+        let c = &self.run.clusters.sets.get(self.set).candidates[m];
         let n = self.states();
         let members: Vec<(usize, usize, Vec<C64>)> = sums
             .iter()
@@ -1202,17 +1214,17 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     fn tone_work(&self, m: usize) -> [f64; 2] {
-        self.run.sets.get(self.set).candidates[m].work
+        self.run.clusters.sets.get(self.set).candidates[m].work
     }
 
     fn scattering(&self, path: &Path, psi: &[C64]) -> (Scattering, f64) {
-        let fold = &self.run.sets.get(self.set).fold;
+        let fold = &self.run.clusters.sets.get(self.set).fold;
         let mut inner = self.made(path, None, true);
         if !inner.exists {
             return (Scattering { force: [f64::NAN; 3], diffusion: [[f64::NAN; 3]; 3], size: 0.0, links: 0 }, 0.0);
         }
         let Inner { eval, ws, .. } = &mut *inner;
-        let photons = fold.prototype_photons(eval, ws.as_mut().unwrap(), psi, &self.run.grounds, At::Middle, self.t, Moments::Every);
+        let photons = fold.prototype_photons(eval, ws.as_mut().unwrap(), psi, &self.run.clusters.grounds, At::Middle, self.t, Moments::Every);
         // The terms of a diagonal entry: per class its second moment and its kick's W b², at most the entry and twice
         // the kicks' part; the products behind it: S⁻¹ψ, the responses, the emission, a class's Gram over its rows.
         let kicks: [f64; 3] = std::array::from_fn(|a| photons.classes.iter().map(|c| c.rate * c.kick[a] * c.kick[a]).sum());
@@ -1222,7 +1234,7 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     fn work(&self) -> [f64; 3] {
-        self.run.sets.get(self.set).work
+        self.run.clusters.sets.get(self.set).work
     }
 
     /// Its forwards' counted work (`Inner::made`): a step's model is priced where it is made, its forward at the point
@@ -1236,7 +1248,7 @@ impl crate::step::Middle for Middle<'_> {
     /// largest (k_l − k_m)·v over its light's beams. None where the set holds no explicit state (a fold's photons hold that
     /// part: step.rs # The optical sector's noise).
     fn optical(&self, path: &Path) -> Option<Optical> {
-        let set = &self.run.sets.get(self.set);
+        let set = &self.run.clusters.sets.get(self.set);
         let decay = set.optical?;
         let (most, least) = set.waves.iter().map(|k| (0..3).map(|a| k[a] * path.velocity[a]).sum::<f64>()).fold((f64::NEG_INFINITY, f64::INFINITY), |(most, least), x| (most.max(x), least.min(x)));
         Some(Optical { ground: set.cluster.ground, decay, beat: if most >= least { most - least } else { 0.0 } })
@@ -1251,7 +1263,7 @@ impl crate::step::Middle for Middle<'_> {
     /// frame: `gauge`).
     fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) -> f64 {
         assert!(s == 0.0 || slope.is_none(), "the gradient's slope at the middle (the step's optical sector's)");
-        let set = &self.run.sets.get(self.set);
+        let set = &self.run.clusters.sets.get(self.set);
         let n = self.states();
         let ends = if s != 0.0 { Some(s.abs()) } else { slope.as_ref().map(|_| self.inner.borrow().half.expect("the step's outer nodes: its picture's ends")) };
         let mut inner = self.made(path, ends, true);
@@ -1301,7 +1313,7 @@ impl crate::step::Middle for Middle<'_> {
     /// Nothing where this middle does not decide, holds no light, or its fold does not exist here.
     fn decide(&self, path: &Path, psi: &[C64], interval: f64, owed: f64, price: &dyn Fn(&Offer) -> f64) -> Decided {
         let mut out = Decided { owed, held: None, switched: None, work: 0.0 };
-        let (run, set) = (self.run, self.run.sets.get(self.set));
+        let (run, set) = (self.run, self.run.clusters.sets.get(self.set));
         if !self.decide || set.fold.blocks.is_empty() || !self.made(path, None, false).exists {
             return out;
         }
@@ -1320,7 +1332,7 @@ impl crate::step::Middle for Middle<'_> {
         // budget); else the cheapest offer cheaper than staying, its forward within the budget that keeps it so (its count
         // in its price and in its restart; real multiply-adds).
         let (to, budget) = if landing > share {
-            let Some(&to) = offers.iter().find(|&&c| run.sets.get(c).nodes.len() > set.nodes.len()) else { return out };
+            let Some(&to) = offers.iter().find(|&&c| run.clusters.sets.get(c).nodes.len() > set.nodes.len()) else { return out };
             (to, None)
         } else {
             let best = offers.into_iter().map(|c| (c, self.priced(c))).map(|(c, o)| (c, o, price(&o) + restart(&o))).filter(|x| x.2 < here).min_by(|a, b| a.2.total_cmp(&b.2));
@@ -1349,7 +1361,7 @@ impl crate::step::Middle for Middle<'_> {
             return out;
         }
         let (taken, dropped) = self.take_onto(psi, to, &other);
-        if set.nodes.len() > run.sets.get(to).nodes.len() {
+        if set.nodes.len() > run.clusters.sets.get(to).nodes.len() {
             let theirs = other.inner.borrow();
             let (rho, gamma) = (theirs.reading, rate(&theirs.generator, &taken));
             if theirs.landing > share || out.owed + dropped + rho * gamma * interval > share * gamma * interval {
@@ -1358,7 +1370,7 @@ impl crate::step::Middle for Middle<'_> {
         }
         out.owed = (out.owed + dropped).max(0.0);
         // Its held forms at the middle: the static G's and each tone's at the middle's phase, one contraction.
-        let tones = &run.sets.get(to).tones;
+        let tones = &run.clusters.sets.get(to).tones;
         let n = taken.len();
         let mut rho = vec![C64::ZERO; n * n];
         crate::step::density(&taken, &mut rho);
@@ -1366,7 +1378,7 @@ impl crate::step::Middle for Middle<'_> {
         let mut bars = vec![Bar { channel: 0, position: 0, tone: None, matrix: &rho }];
         bars.extend(phased.iter().enumerate().map(|(m, x)| Bar { channel: 1 + m, position: 0, tone: Some(m), matrix: x }));
         let f = other.forms(path, None, &bars, 1 + tones.len());
-        out.work += crate::decide::COMPLEX * run.sets.get(to).work[2];
+        out.work += crate::decide::COMPLEX * run.clusters.sets.get(to).work[2];
         let forms = Forms { time: 0.0, held: real(f[0]), tones: tones.iter().zip(&f[1..]).map(|(&nu, a)| (nu, *a)).collect() };
         out.held = Some(Held(Some(Arc::new(other.leaves()))));
         out.switched = Some(Switched { cluster: to, psi: taken.into_iter().collect(), dropped, forms });
@@ -1390,17 +1402,17 @@ impl crate::step::Dynamics for Onefold {
     }
 
     fn cluster(&self, cluster: usize) -> &Cluster {
-        &self.sets.get(cluster).cluster
+        &self.clusters.sets.get(cluster).cluster
     }
 
     fn cluster_of(&self, ground: usize) -> usize {
-        self.membership[ground]
+        self.clusters.membership[ground]
     }
 
     fn middle(&self, cluster: usize, r: [f64; 3], t: f64, held: &Held, decide: bool) -> Middle<'_> {
         let committed = self.cache(held, cluster);
-        let n = self.sets.get(cluster).fold.size();
-        let ws = (!self.sets.get(cluster).fold.blocks.is_empty()).then(|| self.take(cluster));
+        let n = self.clusters.sets.get(cluster).fold.size();
+        let ws = (!self.clusters.sets.get(cluster).fold.blocks.is_empty()).then(|| self.clusters.take(cluster));
         let caches = held.0.as_ref().and_then(|h| h.clone().downcast::<Caches>().ok());
         Middle {
             run: self,
@@ -1444,17 +1456,17 @@ impl crate::step::Dynamics for Onefold {
 
     /// The held forms at a point, deciding nothing (# The held forms): on one evaluation there.
     fn forms(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held) -> Forms {
-        if self.sets.get(cluster).fold.blocks.is_empty() {
+        if self.clusters.sets.get(cluster).fold.blocks.is_empty() {
             return self.held_forms(cluster, at, psi, None, false).1;
         }
         self.evaluate(cluster, at.r, at.kappa, held, |_, cache, ws, _| self.held_forms(cluster, at, psi, Some((cache, ws)), false).1).unwrap_or_else(|| Forms { time: at.t, held: [f64::NAN; 3], tones: vec![] })
     }
 
     /// The bare state's landing and its held forms in one evaluation, the trajectory's first decision: its cluster
-    /// (`Onefold::first`), and its decompositions made there its representation (# The representation and the decision
+    /// (`Onefold::first`, `Clusters::rise`), and its decompositions made there its representation (# The representation and the decision
     /// times).
     fn started(&self, cluster: usize, at: &Point, f: &[C64]) -> (usize, Internal, Forms, Held) {
-        match self.first(self.sets.get(cluster).ground_set, at, f) {
+        match self.first(self.clusters.sets.get(cluster).ground_set, at, f) {
             Some((cluster, landed, forms, caches)) => (cluster, landed.into_iter().collect(), forms, Held(Some(Arc::new(caches)))),
             None => (cluster, f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect(), Forms { time: at.t, held: [f64::NAN; 3], tones: vec![] }, Held::default()),
         }
@@ -1473,12 +1485,17 @@ impl crate::step::Dynamics for Onefold {
         }
     }
 
-    /// (ħ/m)κ²/2 + V_run(r; p(ψ)) (module documentation, # The rest of the model): NaN where a fold does not exist there.
+    /// (ħ/m)κ²/2 + V_run(r; p(ψ)) (module documentation, # The rest of the model): each light set's on the clusters its
+    /// folds hold at the point, risen where they do not exist (`Clusters::diagonal`); NaN only where no node is left to
+    /// rise, or the request with the trap's light off makes no clusters.
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
         let kinetic = 0.5 * self.hbar_over_mass * at.kappa.iter().map(|k| k * k).sum::<f64>();
         let p = self.populations(cluster, psi);
-        let untrapped = self.untrapped.get_or_init(|| Subset::new(lit(&self.request, &self.light, |w| w != self.light.trap))).as_ref().ok();
-        let potential = self.running.diagonal(at.r, &p).zip(untrapped.and_then(|u| u.diagonal(at.r, &p))).map_or(f64::NAN, |(on, off)| on - off);
+        let untrapped = self.untrapped.get_or_init(|| {
+            let request = lit(&self.clusters.request, &self.light, |w| w != self.light.trap);
+            Clusters::new(&request, &Choice::base(&request, vec![])?)
+        });
+        let potential = self.clusters.diagonal(at.r, &p).zip(untrapped.as_ref().ok().and_then(|u| u.diagonal(at.r, &p))).map_or(f64::NAN, |(on, off)| on - off);
         kinetic + potential
     }
 
@@ -1495,7 +1512,7 @@ impl crate::step::Dynamics for Onefold {
     /// sum, ψ†ψ by construction.
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held) -> [f64; STATES] {
         let mut out = [0.0; STATES];
-        let set = &self.sets.get(cluster);
+        let set = &self.clusters.sets.get(cluster);
         let total = if set.fold.blocks.is_empty() {
             for (z, &s) in psi.iter().zip(&set.cluster.states) {
                 out[s] = z.norm_sqr();

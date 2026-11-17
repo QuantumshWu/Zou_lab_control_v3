@@ -5557,6 +5557,11 @@ impl Workspace {
         self.near.iter().map(|x| (x.s, x.lanes, x.terms.len())).collect()
     }
 
+    /// G at the last step's middle.
+    pub(crate) fn generator(&self) -> &Mat {
+        &self.step.generator
+    }
+
     /// The last forward's count, made or not (complex multiply-adds; `Fold::prototype_within`).
     pub(crate) fn spent(&self) -> f64 {
         self.spent

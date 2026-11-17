@@ -3062,7 +3062,7 @@ fn idle_decay(req: &mut Request, gamma: f64) {
 fn two_level_clusters(run: &run::Onefold, req: &Request) -> (usize, usize) {
     let fold = Fold::new(req, &Choice::base(req, vec![]).unwrap(), 0).unwrap();
     let key = Choice::candidates(&fold)[0].0;
-    (0, run.cluster_with(0, vec![key]).expect("the explicit cluster"))
+    (0, run.clusters.cluster_with(0, vec![key]).expect("the explicit cluster"))
 }
 
 /// A jump's landing is a fall with no explicit amplitude (BRIEF_STEP3C item 1; DESIGN §11.1, run.rs # The nodes risen and
@@ -3270,6 +3270,32 @@ fn the_reference_and_the_loss_energy_are_the_trap_light_s_on_the_fold() {
             assert!(d.0 <= share * s.0.max(1e-300) + 1e-12 * depth && d.1 <= share * s.1 + 1e-12 * depth && d.2 <= share * s.2 + 1e-12 * depth, "{name}: the reference against the prepared potential");
             assert!((energy - at).abs() <= share * depth, "{name}: the loss energy against Fold::at's");
         }
+    }
+}
+
+/// The loss energy where a light set's fold does not exist (BRIEF_STEP3E item 3; run.rs # The rest of the model): a
+/// resonant two-level atom at rest at the focus, s = 0.5 and 0.6 -- its fold with nothing explicit exists at the first
+/// and not at the second (its series' ratio beyond one, BRIEF_STEP3C) --: the light set's cluster rises there as a
+/// trajectory's start rises it (`Clusters::rise`), and the energy is a number, not none. On resonance the light shifts
+/// nothing: at both it is zero within the share of the light's scale (Ω/2)²/(Γ/2).
+#[test]
+fn the_loss_energy_rises_where_a_light_set_s_fold_does_not_exist() {
+    use crate::model::Point;
+    use crate::step::Dynamics;
+    for s in [0.5, 0.6] {
+        let req = two_level(0.0, s);
+        let mut p = [0.0; GROUND];
+        p[0] = 1.0;
+        let run = super::run::Onefold::new(&req, p).expect("the run");
+        let fold = Fold::new(&req, &Choice::base(&req, vec![]).unwrap(), 0).unwrap();
+        let exists = fold.prototype([0.0; 3], [0.0; 3], &mut super::proto::Cache::default(), &mut fold.prototype_workspace().unwrap()).is_some();
+        let set = run.cluster_of(0);
+        let psi: Vec<C64> = run.cluster(set).states.iter().map(|&x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
+        let energy = run.energy(set, &Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 }, &psi);
+        let scale = 0.5 * GAMMA * s / 2.0;
+        println!("s {s}: the fold with nothing explicit {} at the focus; the loss energy at rest {energy:.3e} (the light's scale {scale:.2})", if exists { "exists" } else { "does not exist" });
+        assert_eq!(exists, s < 0.55, "the fold at s = {s}");
+        assert!(energy.abs() <= crate::model::elim::share() * scale, "s {s}: the loss energy {energy}");
     }
 }
 
