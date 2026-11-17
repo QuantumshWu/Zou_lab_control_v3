@@ -4539,7 +4539,8 @@ impl Dynamics for Grouped {
 /// A frame on a group of states leaves the engine's step as it is (spectral.rs, # Tones; step.rs, # The kick): the
 /// model of two groups (`Grouped`) over a step of 0.2 µs -- the tones' beats turn 6 rad over it, beyond the nodes'
 /// π, their combined frequencies are of one radian or less --, from one state with no jump (its threshold none), in the
-/// frame of every θ of four from −61 to 87 rad/µs (θτ up to 17, no tone's beat below √5/h in any): the same two tones
+/// frame of every θ of four from −61 to 87 rad/µs (θτ up to 17, each candidate a tone in every frame by what its routes
+/// leave, spectral.rs # Which beats are tones): the same two tones
 /// are taken (`spectral::Picture::separate`), the state at the step's end, taken back to the first frame, is the first
 /// frame's to rounding, and the kick -- the tones' parts integrated at their beats on the quadrature's densities -- is
 /// within the quadrature's share of its size (the forms' bandwidth is the frame's, max|λ_a* − λ_b| with the tones'

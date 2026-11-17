@@ -43,7 +43,7 @@
 //!   shift, are two hops of the interaction picture a step, the first Magnus term with its integral over the entry's
 //!   turn exact, and a quintic between the nodes (spectral.rs). The propagation's work is the same whatever Ĥ₀'s
 //!   frequencies or the tones' beats times the step are. Which of the model's beats are tones is the propagation's
-//!   choice (spectral.rs, # Which beats are tones: |ν| h > √5), the rest of the generator its static group. The
+//!   choice (spectral.rs, # Which beats are tones: by what each route leaves), the rest of the generator its static group. The
 //!   gradient's slow change is taken through the same three nodes (`propagate`), and so are the static group's decay
 //!   (the survival's) and its gradient (the kick's); a tone is its candidate whole, its Hermitian part and its decay's
 //!   beat (spectral.rs `Picture::separate`), and its forms -- its gradient's (the kick's) and its decay's (the
@@ -2399,11 +2399,14 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 sector = Some((ground, made));
             }
         }
-        // The stretch's count, item by item as it was done (`Price`), the step's own and its price at once.
+        // The stretch's count, item by item as it was done (`Price`), the step's own and its price at once: the tones'
+        // envelopes at the three nodes, the candidates weighed and left in the static group at the middle alone, and the
+        // weighing (`spectral::Picture::separate`).
         let [envelopes, forces] = picture.beats.iter().fold([0.0; 2], |sum, tone| {
             let work = generator.tone_work(tone.candidate);
             [sum[0] + work[0], sum[1] + work[1]]
         });
+        let envelopes = envelopes + picture.weighed.iter().map(|&m| generator.tone_work(m)[0] / 3.0).sum::<f64>() + picture.weighing;
         let count = picture.beats.len();
         let price = Price {
             states: n,
