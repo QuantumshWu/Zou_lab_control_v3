@@ -7,6 +7,8 @@ use crate::request::tests::sample;
 use crate::request::{Beam, OutsideForm};
 use std::collections::{HashMap, VecDeque};
 
+mod look;
+
 const GAMMA: f64 = 38.1;
 
 /// The rule's choice of a request (`Choice::of`) at the model's share.
