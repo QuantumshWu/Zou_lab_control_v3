@@ -167,6 +167,7 @@
 use super::*;
 use crate::field::Amplitude;
 
+pub(crate) mod look;
 pub(crate) mod price;
 
 /// A pair of one frequency's field coefficients (frequency w, k, k'): its coefficient ε_k*ε_k'.
@@ -3690,8 +3691,8 @@ impl Fold {
                 let s = nb.s;
                 let fa = &basis.f;
                 let parts = fa.parts.len().max(1);
+                look::moved(basis, nb.value, &nb.terms, coef, &mut nb.kappa, &mut nb.delta, &mut work[DIAGONAL]);
                 for i in 0..s {
-                    nb.kappa[i] = fa.t[(i, i)] - C64::real(nb.value);
                     for g in 0..parts {
                         nb.off[i * parts + g] = if g == basis.part[i] { fa.dropped[g] } else { 0.0 };
                     }
@@ -3699,22 +3700,16 @@ impl Fold {
                     nb.rhox[i] = 0.0;
                 }
                 let mut dm = 0.0;
-                for (t, &p) in nb.terms.iter().enumerate() {
-                    let d = coef[p] - basis.at[t];
-                    nb.delta[t] = d;
+                for (t, &d) in nb.delta.iter().enumerate() {
                     if d == C64::ZERO {
                         continue;
                     }
                     let size = d.abs();
                     dm += size * basis.copied[t];
-                    let (dg, nm) = (&basis.diag[t * s..(t + 1) * s], &basis.norms[t * s * parts..(t + 1) * s * parts]);
-                    for i in 0..s {
-                        nb.kappa[i].re += (d * dg[i]).re;
-                    }
-                    for (o, x) in nb.off[..s * parts].iter_mut().zip(nm) {
+                    for (o, x) in nb.off[..s * parts].iter_mut().zip(&basis.norms[t * s * parts..(t + 1) * s * parts]) {
                         *o += size * x;
                     }
-                    work[DIAGONAL] += (s + s * parts) as f64;
+                    work[DIAGONAL] += (s * parts) as f64;
                 }
                 // The exact copies' couplings and K̂_DD at the point (exact in the light, the dressing's held).
                 if nb.nd > 0 {
@@ -3751,30 +3746,8 @@ impl Fold {
                 }
                 let basis = &cache.near[x][cache.at_near[x].unwrap()];
                 let s = nb.s;
-                let (ln, bn) = (nb.lanes * n, nb.splits.len() * n);
-                for (sp, &(cc, j)) in nb.splits.iter().enumerate() {
-                    nb.shifts[sp] = w[cc][j];
-                    let fl = f[cc][j];
-                    for i in 0..s {
-                        let (at, from) = (i * ln + sp * n, i * bn + sp * n);
-                        for (v, y) in nb.vt[at..at + n].iter_mut().zip(&basis.beams[from..from + n]) {
-                            *v = fl * *y;
-                        }
-                    }
-                }
-                nb.vtot.fill(C64::ZERO);
-                for (a, &(cc, k)) in nb.vectors.iter().enumerate() {
-                    let ek = e[cc][k];
-                    for (v, y) in nb.vtot.iter_mut().zip(&basis.vectors[a]) {
-                        *v += ek * *y;
-                    }
-                }
-                work[SOURCES] += ((nb.splits.len() + nb.vectors.len()) * s * n) as f64;
-                let Near { xs, exact, nd, vtot, stat, emit, hx, b0d, exd, delta, .. } = &mut *nb;
-                explicit_parts(xs, exact, basis, e, delta, vtot, stat, emit, hx, b0d, exd, s, *nd, n, &mut work[SOURCES]);
-                if !nb.xs.is_empty() {
-                    scatter(&nb.stat, &mut nb.vt, s, ln, (nb.lanes - 1) * n, n);
-                }
+                let Near { splits, vectors, xs, exact, lanes, nd, delta, shifts, vt, vtot, stat, emit, hx, b0d, exd, .. } = &mut *nb;
+                look::sourced(splits, vectors, xs, exact, *lanes, *nd, basis, f, w, e, delta, shifts, vt, vtot, stat, emit, hx, b0d, exd, s, n, &mut work[SOURCES]);
             }
             lap(SOURCES, &mut clock, &mut tick);
             // The far blocks' pair forms (module documentation, 4): H_far = Σ e_a*e_b U_a†R₀U_b, M_far likewise.
