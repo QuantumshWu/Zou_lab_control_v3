@@ -8,6 +8,7 @@ use crate::request::{Beam, OutsideForm};
 use std::collections::{HashMap, VecDeque};
 
 mod look;
+mod raman;
 
 const GAMMA: f64 = 38.1;
 

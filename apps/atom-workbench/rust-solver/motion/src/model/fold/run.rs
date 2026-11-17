@@ -91,8 +91,9 @@
 //! there and the jump made on it at s = 0: one way for both.
 //!
 //! # The jumps' coherence (BRIEF_WIRE3 item 3)
-//! A set's blocks whose explicit states P holds a tone between are one coherence group (fold.rs `Fold::groups`, # Tones):
-//! their jumps are one operator per landing set, L_q(t) = C_q Σ_o e^{−iot}ε_o S⁻¹ over the group (DESIGN §1.3), so the
+//! A set's blocks whose landings' interference cannot be left out -- a static one never can: tilt0's two beams' blocks,
+//! landing on m − 1 and m + 1 with one photon frequency -- or whose explicit states P holds a tone between are one
+//! coherence group (fold.rs `Fold::groups`, # Tones): their jumps are one operator per landing set, L_q(t) = C_q Σ_o e^{−iot}ε_o S⁻¹ over the group (DESIGN §1.3), so the
 //! photons' classes are per group (proto.rs `Fold::prototype_photons` at the time) and a jump's amplitudes its class's
 //! photons' own, its group's blocks summed at their phases (`Middle::emitted`, proto.rs `Workspace::jumped`); and the
 //! decay between the offsets is its cross products, added to the
@@ -101,7 +102,7 @@
 //! key the offsets' exact coordinates o − o′, with the tone of P between the two blocks' explicit states where there is
 //! one, at the beat's same key --, so that the integrator takes the decay's beat as it takes a tone (spectral.rs, # Which
 //! beats are tones) and the survival's hazard at its exact phase (step.rs, # Jumps): not through the step's three nodes,
-//! which alias it beyond νh = π. Every block of the scenes is a group of its own.
+//! which alias it beyond νh = π.
 //!
 //! # The jumps' phase
 //! A jump lands on the lab frame's ground states, C_q Σ e^{−iot} ε_o S⁻¹x: in the landing set's coordinates, each of its
