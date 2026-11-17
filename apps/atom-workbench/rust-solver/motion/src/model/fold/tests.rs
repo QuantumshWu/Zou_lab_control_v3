@@ -3361,6 +3361,38 @@ fn random_systems_land_within_their_ring() {
     assert!(within >= 10, "{within} within");
 }
 
+/// A risen node's cluster is a fold the prototype holds wherever the base choice makes it (BRIEF_LANDIMPL item 3; fold.rs
+/// `Choice::base`, `Block::far`): on sixty random systems, every candidate node of every set risen alone on the base
+/// choice of its set (`Choice::base_of`), no block is left far -- its rows all centred -- that holds an explicit state or a
+/// copy row, what a far form does not hold (GMD1C's (1, f2, 0) was refused so, every such block's rows centred around
+/// the risen node's). Said beside: the prototype's other refusals by their reason.
+#[test]
+fn a_risen_node_s_cluster_holds_no_far_block_a_far_form_does_not_hold() {
+    let mut state = 20261117u64;
+    let (mut made, mut refused) = (0, std::collections::BTreeMap::<String, usize>::new());
+    for trial in 0..60 {
+        let (req, _) = random_system(&mut state, trial);
+        let Ok(base) = Choice::base(&req, vec![]) else { continue };
+        for set in Fold::sets(&req, &base).unwrap() {
+            let Ok(fold) = Fold::new(&req, &base, set[0]) else { continue };
+            for (key, _, _) in Choice::candidates(&fold) {
+                let Ok(choice) = Choice::base_of(&req, vec![key], &|x| x == &set[..]) else { continue };
+                let Ok(risen) = Fold::new(&req, &choice, set[0]) else { continue };
+                for b in &risen.blocks {
+                    let centred = b.solved == 0 && !b.rows.is_empty();
+                    assert!(!centred || b.far(), "trial {trial}, node {key:?}: an all-centred block with an explicit state or a copy");
+                }
+                match risen.prototype_workspace() {
+                    Ok(_) => made += 1,
+                    Err(why) => *refused.entry(why.split('：').nth(1).unwrap_or(&why).to_string()).or_default() += 1,
+                }
+            }
+        }
+    }
+    println!("{made} risen clusters held by the prototype; refused: {refused:?}");
+    assert!(refused.keys().all(|why| !why.contains("全居中")), "no all-centred refusal");
+}
+
 /// A two-level atom's ring reads what its landing leaves (proto.rs # The ring; landing.status 6): the ring's reading at the
 /// focus, resonant at s = 0.1–0.4, 6.8·10⁻³, 3.0·10⁻², 7.9·10⁻², 0.174, and at Δ = −4Γ, s = 10, 30, 60, 4.6·10⁻³,
 /// 2.45·10⁻², 5.5·10⁻² -- the leading order of the waiting time's error on the exact slow span -- each within a tenth.

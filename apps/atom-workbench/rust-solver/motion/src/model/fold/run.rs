@@ -524,14 +524,15 @@ impl Clusters {
     }
 
     /// The cluster of ground set k with the explicit nodes `nodes` (# The state sets): made where it is not yet, on the
-    /// base choice with those nodes of that set kept in P (`Choice::base`); refused where a fold of it cannot be made (a
-    /// level explicit at two offsets, a block the prototype does not hold), and kept refused.
+    /// base choice of that set with those nodes kept in P (`Choice::base_of`: its own set's tiers, no other's); refused
+    /// where a fold of it cannot be made (a level explicit at two offsets, a block the prototype does not hold), and kept
+    /// refused.
     pub(super) fn cluster_with(&self, k: usize, mut nodes: Vec<Key>) -> Result<usize, String> {
         nodes.sort();
         self.sets.index((k, nodes.clone()), || {
             let mut explicit: Vec<Key> = self.base.explicit.iter().copied().filter(|x| !self.grounds[k].contains(&x.2)).collect();
             explicit.extend(nodes.iter().copied());
-            let choice = Choice::base(&self.request, explicit)?;
+            let choice = Choice::base_of(&self.request, explicit, &|set| set == &self.grounds[k][..])?;
             Set::new(&self.request, &choice, k, &self.grounds[k], nodes)
         })
     }

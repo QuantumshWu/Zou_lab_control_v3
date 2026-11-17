@@ -337,6 +337,12 @@ impl Choice {
     /// first), of the others those whose centring reads within it centred, the rest solved -- to the fixed point (at most
     /// four rounds a set).
     pub(crate) fn tiered(request: &Request, explicit: Vec<(usize, Part, usize)>) -> Result<Choice, String> {
+        Choice::tiered_of(request, explicit, &|_| true)
+    }
+
+    /// `tiered` on the sets `of` picks alone (the others' statuses left unread: no key of theirs is another set's, so a set's
+    /// fold is the same).
+    fn tiered_of(request: &Request, explicit: Vec<(usize, Part, usize)>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
         let share = crate::model::elim::share();
         let parts: Vec<Part> = components(request, &Light::new(request), &Axes::new(request)?)?.iter().map(|c| c.part).collect();
         let mut copies = vec![];
@@ -350,7 +356,7 @@ impl Choice {
             }
         }
         let mut choice = Choice { copies, explicit, ..Choice::of(request, share)? };
-        for set in Fold::sets(request, &choice)? {
+        for set in Fold::sets(request, &choice)?.into_iter().filter(|set| of(set)) {
             for _ in 0..4 {
                 let fold = Fold::new(request, &choice, set[0])?;
                 if fold.blocks.is_empty() {
@@ -408,17 +414,24 @@ impl Choice {
     }
 
     /// The run's choice of nodes with the explicit levels `explicit` kept in P (DESIGN §3.2, §11; the prototype's, proto.rs):
-    /// the rule's tiers at the focus (`tiered`), and in every block that solves any row its centred excited rows solved too
-    /// (a mode of the kept decomposition, not a pass); the blocks whose rows are all centred keep them so; every excited
-    /// level of a block with rows, and of a block with none at the focus, read at every point (proto.rs # The levels kept
-    /// and left out). Which excited nodes are explicit is the run's at every point, not the focus's (run.rs # The nodes
-    /// risen and fallen).
+    /// the rule's tiers at the focus (`tiered`), and in every block that is not far its centred excited rows solved too (a
+    /// mode of the kept decomposition, not a pass); a block is far -- its rows all centred, kept so -- where it solves no
+    /// row and holds nothing but its excited rows (`Block::far`: an explicit state or a copy is no far form's, proto.rs);
+    /// every excited level of a block with rows, and of a block with none at the focus, read at every point (proto.rs # The
+    /// levels kept and left out). Which excited nodes are explicit is the run's at every point, not the focus's (run.rs #
+    /// The nodes risen and fallen).
     pub(crate) fn base(request: &Request, explicit: Vec<(usize, Part, usize)>) -> Result<Choice, String> {
-        let mut choice = Choice::tiered(request, explicit)?;
-        for set in Fold::sets(request, &choice)? {
+        Choice::base_of(request, explicit, &|_| true)
+    }
+
+    /// `base` on the sets `of` picks alone (`tiered_of`): a cluster's choice reads its own ground set's tiers, not every
+    /// set's (model/fold/run.rs `Clusters::cluster_with`).
+    pub(crate) fn base_of(request: &Request, explicit: Vec<(usize, Part, usize)>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
+        let mut choice = Choice::tiered_of(request, explicit, of)?;
+        for set in Fold::sets(request, &choice)?.into_iter().filter(|set| of(set)) {
             let fold = Fold::new(request, &choice, set[0])?;
             let mut add = vec![];
-            for b in fold.blocks.iter().filter(|b| b.solved > 0) {
+            for b in fold.blocks.iter().filter(|b| !b.far()) {
                 for r in &b.rows[b.solved..] {
                     if let Row::Excited(x) = *r {
                         for &(p, c) in &b.sources {
@@ -429,7 +442,7 @@ impl Choice {
             }
             choice.excited.extend(add);
             for b in fold.blocks.iter().filter(|b| !b.rows.is_empty()) {
-                let status = if b.solved > 0 { Status::Decomposed } else { Status::Centred };
+                let status = if b.far() { Status::Centred } else { Status::Decomposed };
                 for &(p, c) in &b.sources {
                     for x in choice.excited.iter_mut().filter(|x| x.1 == Status::Omitted && x.0 .0 == fold.components[c].part && x.0 .1 == fold.ground[p]) {
                         x.1 = status;
@@ -478,6 +491,12 @@ pub(crate) struct Block {
 }
 
 impl Block {
+    /// Whether the block is far (proto.rs, a block whose rows are all centred: its response R₀B, pair forms of the field):
+    /// it solves no row, and holds no explicit state and no copy row -- what a far form does not hold.
+    fn far(&self) -> bool {
+        self.solved == 0 && self.explicit.is_empty() && self.rows.iter().all(|r| matches!(r, Row::Excited(_)))
+    }
+
     /// The excited rows of its amplitude ε_o: its explicit states, then its excited Q rows (excited state indices).
     fn excited(&self, fold: &Fold) -> Vec<usize> {
         let mut out: Vec<usize> = self.explicit.iter().map(|&p| fold.explicit[p - fold.ground.len()]).collect();
