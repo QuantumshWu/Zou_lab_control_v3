@@ -43,13 +43,14 @@
 //!   shift, are two hops of the interaction picture a step, the first Magnus term with its integral over the entry's
 //!   turn exact, and a quintic between the nodes (spectral.rs). The propagation's work is the same whatever Ĥ₀'s
 //!   frequencies or the tones' beats times the step are. Which of the model's beats are tones is the propagation's
-//!   choice (spectral.rs, # Which beats are tones: |ν| h > √5), the rest of the generator its static group. The
+//!   choice (spectral.rs, # Which beats are tones: by what each route leaves), the rest of the generator its static group. The
 //!   gradient's slow change is taken through the same three nodes (`propagate`), and so are the static group's decay
-//!   (the survival's) and its gradient (the kick's); a tone is Hermitian (the decay's beats are the static group's,
-//!   spectral.rs `Picture::separate`), and its gradient's forms are taken at its beat, as its part of the state is: on
-//!   the quadrature's densities summed at e^{iνu} -- two Hermitian sums a tone, of the weights cos νu and sin νu
-//!   (`Sums`) -- so that what the step integrates of a tone resolves its combined frequencies, not its beat (the forms'
-//!   bandwidth with the tones', spectral.rs).
+//!   (the survival's) and its gradient (the kick's); a tone is its candidate whole, its Hermitian part and its decay's
+//!   beat (spectral.rs `Picture::separate`), and its forms -- its gradient's (the kick's) and its decay's (the
+//!   survival's) -- are taken at its beat, as its part of the state is: on the quadrature's densities summed at
+//!   e^{iνu} -- six Hermitian sums a tone, of the three nodes' Lagrange weights times cos νu and sin νu (`Sums`) -- so
+//!   that what the step integrates of a tone resolves its combined frequencies, not its beat (the forms' bandwidth with
+//!   the tones', spectral.rs).
 //! The step's time integral -- the kick -- is read on that state at the nodes of a
 //! Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: within the
 //! kick's share `QUADRATURE` of each component's size times the step, the old engine's rule -- no credit taken for a
@@ -178,12 +179,17 @@
 //! random long steps, 10²⁰⁰ compounded over a two-level atom's steps at 10 Γ (motion3d_status/rewrite/norm.status.md,
 //! int.status.md) --, which made an atom wait too long for its next jump and a root taken as monotone miss the first
 //! crossing. So the step takes the survival from the law, not from the propagation's norm: ln N(u) = ln N(u₀) − ∫h, h on
-//! the propagation's direction, Γ(u) the parabola of the generator's decay through the step's three nodes -- the
-//! generator the propagation takes, its one matrix where Ĥ is still --, and the trajectory's state is √N times the
-//! direction.
+//! the propagation's direction, Γ(u) the decay of the generator the propagation takes -- the static group's through the
+//! step's three nodes, its parabola Σ_j ℓ_j(u)Γ_j, and each tone's at its exact phase, its envelope's parabola times
+//! e^{±iνu}; its one matrix where Ĥ is still --, and the trajectory's state is √N times the direction.
 //! - The integral is the kick's quadrature's: each node's density is in the three nodes' Lagrange sums S_j already
-//!   (`accumulate`), and ∫h over what they hold is Σ_j tr(Γ_j S_j) (`hazard`) -- no work a node; a trace of the laid
-//!   decay at each panel's end (`panels`).
+//!   (`accumulate`) and in each tone's at its phase, C_j and S′_j of the weights ℓ_j(u) cos νu and ℓ_j(u) sin νu
+//!   (`Sums`), and ∫h over what they hold is Σ_j tr(Γ_j S_j) + Σ_tones Σ_j [tr(Γ_j^c C_j) + tr(Γ_j^s S′_j)] (`hazard`),
+//!   Γ_j^c and Γ_j^s the tone's decay at the phases 0 and π/2 at the node j -- the decays of G⁺ + G⁻ and of i(G⁺ − G⁻):
+//!   e^{iθ}G⁺ + e^{−iθ}G⁻ is cos θ times the first and sin θ times the second -- no work a node; a trace of the laid
+//!   decay at each panel's end (`panels`). At the quadrature's nodes this is x̂†Γ(u_k)x̂ of the generator's own decay
+//!   where the envelopes are constant along the path, Σ L(u_k)†L(u_k), whatever the tones' beats: the decay's beats are
+//!   neither aliased nor averaged by the three nodes (DESIGN §12.4).
 //! - N does not rise where the decay is positive semidefinite at the quadrature's nodes: the weights are positive and
 //!   each node's h a form of it. The model's decay is the jumps' product exactly, from its near tables to their error;
 //!   along the measured scenes' steps -- PGC3D, GMD1C, S3, S3c, R4_LIN_2, S1, R3_DOPPLER, TET and a two-level atom at
@@ -1345,6 +1351,9 @@ impl<'a, M: Middle> Along<'a, M> {
 /// The most sums `accumulate` takes at once: a beating path's three nodes'.
 const SUMS: usize = 3;
 
+/// An exact tone's sums (`Sums`): its density at each of the step's three nodes' Lagrange weights, times cos νu and sin νu.
+const TONE: usize = 2 * SUMS;
+
 /// The fewest nodes of the kick's quadrature (`propagate`): the smallest rule's -- the forms on a state the generator
 /// propagates are entire in the time at their bandwidth, and nothing more is asked of the rule where it vanishes.
 const FORMS: usize = 2;
@@ -1469,7 +1478,7 @@ pub fn density(x: &[C64], rho: &mut [C64]) {
 /// its following, the state's path), one array carved (`Scratch::carve`) into the middle state's density and a
 /// Hermitian sum the model takes, and four laid as `accumulate` holds its sums: the nodes' weighted sums of the states'
 /// densities, the sums as they stood where the panel being propagated began (`Midway::stretch`), a span's own inside a
-/// panel (`fallen`), and the generator's decay at the step's nodes (`laid_decay`); and the states a panel keeps -- its
+/// panel (`fallen`), and the generator's decay laid on the sums (`pictured`); and the states a panel keeps -- its
 /// stops and its readings -- until its root is known (`Midway::stretch`). Every use writes what it reads but one: the
 /// picture's counts of the decomposition's route (spectral.rs `Picture::counts`), which the next step's route is weighed
 /// against -- a step takes the strides where they cost less than the decomposition as it was last counted. That is what
@@ -1525,7 +1534,7 @@ impl Scratch {
     fn fit(&mut self, n: usize, slots: usize) {
         self.picture.fit(n);
         self.slots = slots;
-        self.rest.resize((4 + slots.saturating_sub(SUMS)) * n * n, C64::ZERO);
+        self.rest.resize((4 + 2 * (slots.saturating_sub(SUMS) / TONE)) * n * n, C64::ZERO);
         self.sums.resize(4 * slots * 2 * n * row(n), 0.0);
         self.weights.resize(slots.max(SUMS), 0.0);
         self.kept.resize(slots.max(SUMS), 0.0);
@@ -1539,8 +1548,8 @@ impl Scratch {
         let (sums, rest) = self.sums.split_at_mut(size);
         let (saved, rest) = rest.split_at_mut(size);
         let (part, rest) = rest.split_at_mut(size);
-        // The decay on the nodes' sums alone: the tones are Hermitian (`pictured`).
-        let decay = &mut rest[..self.slots.min(SUMS) * 2 * n * row(n)];
+        // The decay on every sum: the nodes' and the tones' (`pictured`).
+        let decay = &mut rest[..size];
         let width = self.slots.max(SUMS);
         let (weights, kept) = (&mut self.weights[..width], &mut self.kept[..width]);
         Carved { picture: &mut self.picture, noise: &mut self.noise, held, sum, tones, sums, saved, part, decay, met: &mut self.met, weights, kept }
@@ -1566,20 +1575,21 @@ mod count {
     /// the middle state's density, laid with the middle node's sum, and the three nodes' forms -- where the stretch
     /// holds the step's middle (`centred`), the middle's with the fixed point's tones on the middle state
     /// (`Middle::centre`: a form and a `tones`). Of the exact tones (`tones` of them, their forms' counted work
-    /// `forces`): per node and tone a density again and its two sums; their two matrices with the nodes' sums at their
-    /// phases, and their forms.
+    /// `forces`): per node and tone a density again and its six sums (`super::Sums`); their two matrices, each its three
+    /// nodes' sums added, with the nodes' sums at their phases, and their forms.
     pub fn impulse(n: usize, model: [f64; 3], nodes: usize, still: bool, centred: bool, tones: usize, forces: f64) -> f64 {
         let (sums, forms) = if still { (1, model[1]) } else { (3, (2 * n * n) as f64 + 3.0 * model[1] + if centred { model[2] } else { 0.0 }) };
-        COMPLEX * ((nodes * ((1 + sums) * n * (n + 1) / 2 + 3 * tones * n * (n + 1) / 2)) as f64 + forms + (8 * tones * n * n) as f64 + forces)
+        COMPLEX * ((nodes * ((1 + sums) * n * (n + 1) / 2 + (1 + super::TONE) * tones * n * (n + 1) / 2)) as f64 + forms + (16 * tones * n * n) as f64 + forces)
     }
     /// The end state's held forms (# The path's momentum): its density and one more node's forms with its tones'.
     pub fn end(n: usize, model: [f64; 3], tones: f64) -> f64 {
         COMPLEX * ((n * n) as f64 + model[1] + tones)
     }
-    /// The survival's hazard (# Jumps): the generator's decay laid at the step's nodes -- one, or three on a beating
-    /// path -- once, and `traces` of it on the sums, each over the same upper triangles.
-    pub fn hazard(n: usize, traces: usize, still: bool) -> f64 {
-        let sums = if still { 1 } else { 3 };
+    /// The survival's hazard (# Jumps): the generator's decay laid on the sums -- at the step's nodes, one or three on a
+    /// beating path, and each of the `tones` exact tones' six (`super::Sums`) -- once, and `traces` of it on the sums,
+    /// each over the same upper triangles.
+    pub fn hazard(n: usize, traces: usize, still: bool, tones: usize) -> f64 {
+        let sums = if still { 1 } else { super::SUMS + super::TONE * tones };
         COMPLEX * ((1 + traces) * sums * n * (n + 1) / 2) as f64
     }
 }
@@ -1603,10 +1613,11 @@ fn root_states() -> f64 {
 /// the time u it is launched from (none: no root priced); the strides' share at what that state forgets, h₀
 /// (`Picture::prepare`) --: the model's generator at the step's middle and, unless it
 /// is still along every path, at the step's two ends -- its static group, and its exact tones' envelopes at the three
-/// nodes (`Middle::beats`). The static group's decay is laid into `decay` first, node by node in the order
-/// of the kick's sums (`laid_decay`; −h, 0, h, or the middle alone where Ĥ is still): the survival's hazard (# Jumps);
-/// `part` is a sum's scratch. Returns the largest sum of the decay's entries' moduli over the nodes; a generator at a
-/// node that is no number refuses the step (`Refused::Overflow`: nothing of it can be propagated).
+/// nodes (`Middle::beats`). The decay is laid into `decay` first in the order of the kick's sums (`Sums`): the static
+/// group's node by node (−h, 0, h, or the middle alone where Ĥ is still), then each tone's at each node at the phases
+/// 0 and π/2 -- the survival's hazard (# Jumps); `part` is a sum's scratch. Returns the largest sum over the nodes of
+/// the moduli the decay's entries can reach (the static group's and each tone's two at once); a generator at a node
+/// that is no number refuses the step (`Refused::Overflow`: nothing of it can be propagated).
 fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start: Option<(&[C64], f64)>) -> Result<f64, Refused> {
     let (h, still, n) = (0.5 * tau, along.middle.still(), along.n);
     let picture = &mut scratch.picture;
@@ -1637,8 +1648,24 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
     let Carved { picture, decay, part, .. } = scratch.carve();
     decay.fill(0.0);
     let generators = if still { [Some(&picture.base), None, None] } else { [Some(&picture.ends[0]), Some(&picture.base), Some(&picture.ends[1])] };
-    // The decay is the static group's (a tone is Hermitian: `spectral::Picture::separate`), laid on the nodes' sums.
-    let scale = generators.into_iter().flatten().enumerate().map(|(j, g)| laid(|a, b| C64::I * (g.data[a * n + b] - g.data[b * n + a].conj()), n, j, decay)).fold(0.0, f64::max);
+    // The decay i(X − X†) of an n × n matrix X given entry by entry (row by row).
+    fn of(x: impl Fn(usize) -> C64, n: usize) -> impl Fn(usize, usize) -> C64 {
+        move |a, b| C64::I * (x(a * n + b) - x(b * n + a).conj())
+    }
+    // The static group's laid on the nodes' sums, and each tone's at each node on its two sums there: its decay at the
+    // phases 0 and π/2, of G⁺ + G⁻ and of i(G⁺ − G⁻) (`Sums`). Per node the sum of the moduli its decay can reach.
+    let mut sizes = [0.0; SUMS];
+    for ((j, g), size) in generators.into_iter().flatten().enumerate().zip(&mut sizes) {
+        *size = laid(of(|k| g.data[k], n), n, j, decay);
+    }
+    for (m, tone) in picture.beats.iter().enumerate() {
+        for (j, size) in sizes.iter_mut().enumerate() {
+            let [plus, minus] = [&tone.members[0][j].data, &tone.members[1][j].data];
+            let at = SUMS + TONE * m + 2 * j;
+            *size += laid(of(|k| plus[k] + minus[k], n), n, at, decay) + laid(of(|k| C64::I * (plus[k] - minus[k]), n), n, at + 1, decay);
+        }
+    }
+    let scale = sizes.into_iter().fold(0.0, f64::max);
     let sums = Sums { still, h, tones: &picture.beats };
     let rate = start.map_or(0.0, |(x, u)| {
         part.fill(0.0);
@@ -1667,10 +1694,11 @@ fn laid(gamma: impl Fn(usize, usize) -> C64, n: usize, j: usize, decay: &mut [f6
     size
 }
 
-/// ∫h du over the nodes a laid sum holds (# Jumps): Σ_j tr(Γ_j S_j), Γ_j the generator's decay at the step's node j
-/// (`laid_decay`) and S_j = Σ_k w_k ℓ_j(u_k) x̂_k x̂_k† the sum `accumulate` made -- Σ_k w_k x̂_k†Γ(u_k)x̂_k, Γ(u) = Σ_j ℓ_j(u)Γ_j
-/// the parabola through the step's three nodes the propagation takes (its one matrix where Ĥ is still). On n states,
-/// row by row from the vector of the row's own column on (the laid decay is zero below the diagonal), lane by lane.
+/// ∫h du over the nodes a laid sum holds (# Jumps): Σ_j tr(Γ_j S_j) over the laid decays and the sums `accumulate` made
+/// (`pictured`, `Sums`) -- of the static group Γ_j its decay at the step's node j and S_j = Σ_k w_k ℓ_j(u_k) x̂_k x̂_k†, of
+/// a tone its decay at the phases 0 and π/2 at the node j on its sums of ℓ_j(u_k) cos νu_k and ℓ_j(u_k) sin νu_k --:
+/// Σ_k w_k x̂_k†Γ(u_k)x̂_k, Γ(u) the decay of the generator the propagation takes (its one matrix where Ĥ is still). On n
+/// states, row by row from the vector of the row's own column on (the laid decay is zero below the diagonal), lane by lane.
 fn hazard(decay: &[f64], sums: &[f64], n: usize) -> f64 {
     let width = row(n);
     let mut lanes = [0.0; LANES];
@@ -1712,9 +1740,10 @@ fn taken(part: &[f64], spanned: &[f64], sums: &mut [f64], weights: &mut [f64]) {
 }
 
 /// What the kick's and the survival's sums hold (`accumulate`): one where Ĥ is still along the path, the three nodes'
-/// on a beating one (each node's weight times the nodes' Lagrange polynomials), and two of each exact tone of the step
-/// (`spectral::Picture::separate`) -- its weight times cos νu and sin νu, the density's sum at e^{iνu} = the first
-/// + i the second --, in that order.
+/// on a beating one (each node's weight times the nodes' Lagrange polynomials), and six of each exact tone of the step
+/// (`spectral::Picture::separate`) -- per node j its weight times ℓ_j(u) cos νu and ℓ_j(u) sin νu, the density's sum at
+/// e^{iνu} with the node's weight = the first + i the second (their sum over j the tone's whole, Σ_j ℓ_j = 1) --, in that
+/// order: the tone's forms at its exact phase, its envelope through the nodes as the propagation takes it.
 #[derive(Clone, Copy)]
 struct Sums<'a> {
     still: bool,
@@ -1725,7 +1754,7 @@ struct Sums<'a> {
 impl Sums<'_> {
     /// The sums' count.
     fn count(&self) -> usize {
-        if self.still { 1 } else { SUMS + 2 * self.tones.len() }
+        if self.still { 1 } else { SUMS + TONE * self.tones.len() }
     }
 
     /// A node's state at the time u with its weight into the sums, the weights' sums into `weights` where asked.
@@ -1746,11 +1775,12 @@ impl Sums<'_> {
         let size = 2 * x.len() * row(x.len());
         for (m, tone) in self.tones.iter().enumerate() {
             let (sin, cos) = (tone.beat * u).sin_cos();
-            let pair = [weight * cos, weight * sin];
-            accumulate(x, &pair, &mut sums[(SUMS + 2 * m) * size..]);
+            let parts: [f64; TONE] = std::array::from_fn(|k| lagrange[k / 2] * if k % 2 == 0 { cos } else { sin });
+            accumulate(x, &parts, &mut sums[(SUMS + TONE * m) * size..]);
             if let Some(weights) = weights.as_deref_mut() {
-                weights[SUMS + 2 * m] += pair[0];
-                weights[SUMS + 2 * m + 1] += pair[1];
+                for (sum, part) in weights[SUMS + TONE * m..].iter_mut().zip(parts) {
+                    *sum += part;
+                }
             }
         }
     }
@@ -2372,25 +2402,33 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         }
                     }
                 }
-                // A tone's weights over the step outside this stretch: ∫e^{iνu}du over [−h, its start] and past its end.
-                for (m, tone) in picture.beats.iter().enumerate() {
-                    let integral = |a: f64, b: f64| ((tone.beat * b).sin() - (tone.beat * a).sin(), (tone.beat * a).cos() - (tone.beat * b).cos());
-                    for (from, to) in [(-h, begun)].into_iter().chain((!done).then_some((march.u, h))) {
-                        let (re, im) = integral(from, to);
-                        weights[SUMS + 2 * m] += re / tone.beat;
-                        weights[SUMS + 2 * m + 1] += im / tone.beat;
-                    }
-                }
                 density(&middle[..n], held);
             }
-            // A tone's two sums less the middle state's at their weights: its σ = Σ_k w_k e^{iνu_k}(ρ_k − ρ_m).
-            for (m, pair) in tones.chunks_exact_mut(2 * size).enumerate() {
+            // A tone's sums at its beat, its three nodes' together (`Sums`), less the middle state's at their weights: its
+            // σ = Σ_k w_k e^{iνu_k}(ρ_k − ρ_m) -- the weights' sums with what of the step lies outside this stretch,
+            // ∫e^{iνu}du over [−h, its start] and past its end.
+            let spare = &mut sum[..size];
+            for ((m, pair), tone) in tones.chunks_exact_mut(2 * size).enumerate().zip(&picture.beats) {
+                let integral = |a: f64, b: f64| [(tone.beat * b).sin() - (tone.beat * a).sin(), (tone.beat * a).cos() - (tone.beat * b).cos()];
+                let outside = [(-h, begun)].into_iter().chain((!done).then_some((march.u, h))).fold([0.0; 2], |sum, (a, b)| {
+                    let part = integral(a, b);
+                    [sum[0] + part[0] / tone.beat, sum[1] + part[1] / tone.beat]
+                });
                 for (part, part_sum) in pair.chunks_exact_mut(size).enumerate() {
-                    let j = SUMS + 2 * m + part;
-                    whole(sums, j, n, part_sum);
+                    let slots = (0..SUMS).map(|j| SUMS + TONE * m + 2 * j + part);
+                    let mut weight = outside[part];
+                    for (i, slot) in slots.enumerate() {
+                        weight += weights[slot];
+                        if i == 0 {
+                            whole(sums, slot, n, part_sum);
+                        } else {
+                            whole(sums, slot, n, spare);
+                            part_sum.iter_mut().zip(spare.iter()).for_each(|(q, z)| *q += *z);
+                        }
+                    }
                     if middle.is_some() {
                         for (q, rho) in part_sum.iter_mut().zip(held.iter()) {
-                            *q -= *rho * weights[j];
+                            *q -= *rho * weight;
                         }
                     }
                 }
@@ -2449,11 +2487,14 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 sector = Some((ground, made));
             }
         }
-        // The stretch's count, item by item as it was done (`Price`), the step's own and its price at once.
+        // The stretch's count, item by item as it was done (`Price`), the step's own and its price at once: the tones'
+        // envelopes at the three nodes, the candidates weighed and left in the static group at the middle alone, and the
+        // weighing (`spectral::Picture::separate`).
         let [envelopes, forces] = picture.beats.iter().fold([0.0; 2], |sum, tone| {
             let work = generator.tone_work(tone.candidate);
             [sum[0] + work[0], sum[1] + work[1]]
         });
+        let envelopes = envelopes + picture.weighed.iter().map(|&m| generator.tone_work(m)[0] / 3.0).sum::<f64>() + picture.weighing;
         let count = picture.beats.len();
         let price = Price {
             states: n,
@@ -2630,7 +2671,7 @@ impl Price {
         let (n, still) = (self.states, self.still);
         let optical = self.sector.map_or(0.0, |(_, make)| optical_work(n, costs[1], still, make));
         let end = if self.ended { count::end(n, costs, self.toned[1]) } else { 0.0 };
-        count::propagation(costs, still, self.made + self.stops, self.toned[0]) + count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]) + count::hazard(n, self.traces, still) + optical + end
+        count::propagation(costs, still, self.made + self.stops, self.toned[0]) + count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]) + count::hazard(n, self.traces, still, self.tones) + optical + end
     }
 
     /// The model's own there: the middle's making and the light scattered at the middle.

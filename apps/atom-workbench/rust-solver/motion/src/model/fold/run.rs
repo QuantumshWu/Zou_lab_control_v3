@@ -60,8 +60,10 @@
 //! What stays in P and beats -- an entry of two P states of different frames (proto.rs # The tones) -- is the
 //! generator's turning part: at the time t the generator is G + Σ_m e^{iν_m t} G_m, each tone's envelope G_m at the
 //! step's three nodes its own (the light at the path's points there, the middle's S). The integrator's candidates
-//! (`Middle::beats`) are the tones' pairs, ν and −ν, each keyed by its beat's exact coordinates; their envelopes carry the
-//! middle's phase e^{±iν t_m}. Their forms are the same contraction as the static G's (proto.rs `Fold::prototype_force`):
+//! (`Middle::beats`) are the generator's whole parts at each exact beat and its opposite -- the tones' pairs, ν and −ν,
+//! and the coherence groups' cross decays at those beats (# The jumps' coherence; `Candidate`) --, each keyed by its
+//! beat's exact coordinates; their envelopes carry the middle's phase e^{±iν t_m}. Their forms are the same contraction
+//! as the static G's (proto.rs `Fold::prototype_force`):
 //! at the nodes with the static ones at their exact phases (`Middle::nodes`, `Middle::force`), on the integrator's sums
 //! at their beats (`Middle::tone_force`), on the held state at the beats' weights (`Middle::nodes`, `Middle::tones`).
 //!
@@ -79,7 +81,11 @@
 //! photons' own, its group's blocks summed at their phases (`Middle::emitted`, proto.rs `Workspace::jumped`); and the
 //! decay between the offsets is its cross products, added to the
 //! generator at their beats at every position (`step::Middle::generator`): i(G − G†) = Σ_q L_q(t)†L_q(t) at every time,
-//! static and beating, by construction. Every block of the scenes is a group of its own.
+//! static and beating, by construction. Each cross decay is part of the integrator's candidate of its exact beat -- its
+//! key the offsets' exact coordinates o − o′, with the tone of P between the two blocks' explicit states where there is
+//! one, at the beat's same key --, so that the integrator takes the decay's beat as it takes a tone (spectral.rs, # Which
+//! beats are tones) and the survival's hazard at its exact phase (step.rs, # Jumps): not through the step's three nodes,
+//! which alias it beyond νh = π. Every block of the scenes is a group of its own.
 //!
 //! # The jumps' phase
 //! A jump lands on the lab frame's ground states, C_q Σ e^{−iot} ε_o S⁻¹x: in the landing set's coordinates, each of its
@@ -132,8 +138,8 @@ struct Set {
     tones: Vec<f64>,
     candidates: Vec<Candidate>,
     /// The pairs of the jumps' blocks (their order: the near blocks', then the far ones', as the fold's blocks) of one
-    /// coherence group (fold.rs `Fold::groups`), each with its beat o − o′ (rad/µs): the decay between their offsets (# The
-    /// jumps' coherence).
+    /// coherence group (fold.rs `Fold::groups`), each with its beat o − o′ (rad/µs: its candidate's, `Candidate::cross`):
+    /// the decay between their offsets (# The jumps' coherence).
     coherent: Vec<(usize, usize, f64)>,
     /// Its optical sector (# The optical sector): γ_Q, the least of its explicit excited states' decay over two (none
     /// where it holds none), and its light's beams' momenta (the fold's components' beams: the pattern's beats).
@@ -141,13 +147,16 @@ struct Set {
     waves: Vec<[f64; 3]>,
 }
 
-/// A candidate tone of the integrator (step.rs `Middle::beats`): a pair of the set's tones at ν and −ν (either may be
-/// none), the beat's exact key (its coordinates on the set's common denominator), and the counted complex multiply-adds
-/// of its envelopes (the three nodes', the middle's phase) and of its forms (`Middle::tone_work`).
+/// A candidate tone of the integrator (step.rs `Middle::beats`): the generator's whole part at one exact beat and its
+/// opposite (# The tones, # The jumps' coherence) -- a pair of the set's tones at ν and −ν (either may be none) and the
+/// coherence groups' cross decays at them (the indices of `Set::coherent`, at ν and at −ν) --, the beat's exact key (its
+/// coordinates on the set's common denominator), and the counted complex multiply-adds of its envelopes (the three
+/// nodes', the middle's phase) and of its forms (`Middle::tone_work`).
 struct Candidate {
     beat: f64,
     plus: Option<usize>,
     minus: Option<usize>,
+    cross: [Vec<usize>; 2],
     key: Vec<i64>,
     work: [f64; 2],
 }
@@ -233,14 +242,17 @@ impl Set {
             .collect();
         let bandwidth = levels.iter().flat_map(|a| levels.iter().map(move |b| (a.conj() - *b).abs())).fold(0.0, f64::max);
         let cluster = Cluster { ground: fold.ground.len(), frames: fold.frames.clone(), waves: vec![[0.0; 3]; states.len()], waves_exact: vec![no_wave.clone(); states.len()], states };
-        let (pool, blocks, work, made, tones, candidates) = if fold.blocks.is_empty() {
-            (vec![], vec![], [0.0; 3], Some(0.0), vec![], vec![])
+        let (pool, work, made, tones, candidates, coherent) = if fold.blocks.is_empty() {
+            (vec![], [0.0; 3], Some(0.0), vec![], vec![], vec![])
         } else {
             let mut ws = fold.prototype_workspace()?;
             let (near, far) = ws.layout();
-            let blocks = near.iter().map(|x| x.0).chain(far.iter().map(|x| x.0)).collect();
+            let blocks: Vec<usize> = near.iter().map(|x| x.0).chain(far.iter().map(|x| x.0)).collect();
             let n = fold.size();
             let beats: Vec<(crate::model::Beat, f64)> = ws.tones().map(|(b, v)| (b.clone(), v)).collect();
+            // The pairs of one coherence group's blocks, each with its exact beat o − o′ and its value.
+            let pairs: Vec<(usize, usize)> = (0..blocks.len()).flat_map(|i| (0..blocks.len()).map(move |j| (i, j))).filter(|&(i, j)| i != j && fold.groups[blocks[i]] == fold.groups[blocks[j]]).collect();
+            let crossing: Vec<(crate::model::Beat, f64)> = pairs.iter().map(|&(i, j)| (fold.blocks[blocks[i]].offset.plus(-1, &fold.blocks[blocks[j]].offset), fold.blocks[blocks[i]].value - fold.blocks[blocks[j]].value)).collect();
             // The counts of a middle at the focus at rest: its forward (none where its fold does not exist there) and
             // nodes, its tangent and force with every tone's at the three nodes; a tone's forms on the integrator's sums.
             let mut cache = Cache::default();
@@ -253,23 +265,28 @@ impl Set {
                 let mut bars: Vec<Bar> = (0..3).map(|j| bar(j, None)).collect();
                 bars.extend((0..beats.len()).flat_map(|m| (0..3).map(move |j| (m, j))).map(|(m, j)| bar(j, Some(m))));
                 let force = fold.prototype_force(&cache, &mut ws, &bars, 1).work;
-                let candidates = candidates(&beats, |plus, minus| {
+                // A candidate's envelopes: its tones' at the three nodes, and per cross decay its three products L†L there
+                // (GROUND × n each, `Middle::envelopes`); its forms: its tones' (a cross decay has no Hermitian part).
+                let candidates = candidates(&beats, &crossing, |plus, minus, cross| {
                     let one: Vec<Bar> = [plus, minus].iter().filter(|&&x| x).map(|_| bar(0, Some(0))).collect();
-                    [(3 * one.len() * n * n) as f64, fold.prototype_force(&cache, &mut ws, &one, 1).work]
+                    let forms = if one.is_empty() { 0.0 } else { fold.prototype_force(&cache, &mut ws, &one, 1).work };
+                    [(3 * one.len() * n * n + 9 * cross * (GROUND + 1) * n * n) as f64, forms]
                 });
                 ([nodes / 3.0, (tangent + force) / 3.0, tangent + force], forward * crate::decide::COMPLEX, candidates)
             });
             let (work, made, candidates) = match counted {
                 Some((work, made, candidates)) => (work, Some(made), candidates),
-                None => ([0.0; 3], None, candidates(&beats, |_, _| [0.0; 2])),
+                None => ([0.0; 3], None, candidates(&beats, &crossing, |_, _, _| [0.0; 2])),
             };
-            (vec![ws], blocks, work, made, beats.iter().map(|b| b.1).collect(), candidates)
+            // Each pair turned at its candidate's beat, as the candidate's members are (`Middle::generator`).
+            let mut coherent: Vec<(usize, usize, f64)> = pairs.iter().map(|&(i, j)| (i, j, 0.0)).collect();
+            for c in &candidates {
+                for (side, sign) in c.cross.iter().zip([1.0, -1.0]) {
+                    side.iter().for_each(|&k| coherent[k].2 = sign * c.beat);
+                }
+            }
+            (vec![ws], work, made, beats.iter().map(|b| b.1).collect(), candidates, coherent)
         };
-        let coherent = (0..blocks.len())
-            .flat_map(|i| (0..blocks.len()).map(move |j| (i, j)))
-            .filter(|&(i, j)| i != j && fold.groups[blocks[i]] == fold.groups[blocks[j]])
-            .map(|(i, j)| (i, j, fold.blocks[blocks[i]].value - fold.blocks[blocks[j]].value))
-            .collect();
         let optical = fold.explicit.iter().map(|&x| 0.5 * decay[(x, x)].re).reduce(f64::min);
         let waves = fold.components.iter().flat_map(|c| c.kicks.iter().copied()).collect();
         Ok(Set { ground_set: k, nodes, fold, cluster, work, made, bandwidth, pool: Mutex::new(pool), tones, candidates, coherent, optical, waves })
@@ -489,26 +506,40 @@ fn caches(held: &Held) -> Option<&Caches> {
     held.0.as_ref().and_then(|h| h.downcast_ref::<Caches>())
 }
 
-/// A set's candidate tones (`Candidate`; module documentation, # The tones) from its tones' exact beats and values: each
-/// pair ν, −ν once, its beat the one of positive orientation (`Beat::sign`), its key that beat's coordinates on the
-/// tones' common denominator; `work` the counts of a candidate of so many members.
-fn candidates(beats: &[(crate::model::Beat, f64)], mut work: impl FnMut(bool, bool) -> [f64; 2]) -> Vec<Candidate> {
-    let common = beats.iter().fold(1_i64, |l, (b, _)| {
+/// A set's candidate tones (`Candidate`; module documentation, # The tones, # The jumps' coherence) from the exact beats
+/// and values of its tones and of its coherence groups' cross decays (`crossing`): each exact beat with its opposite
+/// once -- its tones there and its cross decays there --, in the order of their first beat of positive orientation
+/// (`Beat::sign`; of a beat whose opposite is none, its own); its beat the one of positive orientation, of its tone's
+/// value where it has one; its key that beat's coordinates on the common denominator of them all; `work` the counts of a
+/// candidate of so many tones and cross decays.
+fn candidates(beats: &[(crate::model::Beat, f64)], crossing: &[(crate::model::Beat, f64)], mut work: impl FnMut(bool, bool, usize) -> [f64; 2]) -> Vec<Candidate> {
+    let all = || beats.iter().chain(crossing);
+    let common = all().fold(1_i64, |l, (b, _)| {
         let (mut a, mut c) = (l, b.d);
         while c != 0 {
             (a, c) = (c, a % c);
         }
         l / a * b.d
     });
-    let mut out = vec![];
-    for (m, (b, value)) in beats.iter().enumerate() {
-        let partner = beats.iter().position(|x| x.0 == b.negated());
-        if b.sign() < 0 && partner.is_some() {
+    let mut out: Vec<Candidate> = vec![];
+    let mut made: Vec<crate::model::Beat> = vec![];
+    for (b, value) in all() {
+        let oriented = if b.sign() > 0 { b.clone() } else { b.negated() };
+        if (b.sign() < 0 && all().any(|x| x.0 == oriented)) || made.contains(&oriented) {
             continue;
         }
-        let (plus, minus, beat) = if b.sign() > 0 { (Some(m), partner, *value) } else { (None, Some(m), -*value) };
-        let key = (if b.sign() > 0 { b.clone() } else { b.negated() }).n.iter().map(|x| x * (common / b.d)).collect();
-        out.push(Candidate { beat, plus, minus, key, work: work(plus.is_some(), minus.is_some()) });
+        let opposite = oriented.negated();
+        let (plus, minus) = (beats.iter().position(|x| x.0 == oriented), beats.iter().position(|x| x.0 == opposite));
+        let cross = [&oriented, &opposite].map(|beat| (0..crossing.len()).filter(|&k| crossing[k].0 == *beat).collect::<Vec<usize>>());
+        let beat = match (plus, minus) {
+            (Some(m), _) => beats[m].1,
+            (None, Some(m)) => -beats[m].1,
+            (None, None) => *value * b.sign() as f64,
+        };
+        let key = oriented.n.iter().map(|x| x * (common / oriented.d)).collect();
+        let work = work(plus.is_some(), minus.is_some(), cross[0].len() + cross[1].len());
+        out.push(Candidate { beat, plus, minus, cross, key, work });
+        made.push(oriented);
     }
     out
 }
@@ -924,25 +955,47 @@ impl crate::step::Middle for Middle<'_> {
         }
     }
 
-    /// Candidate m's members at the time s from the middle: e^{iνt_m} G_+(s) and e^{−iνt_m} G_−(s) (none: zero).
+    /// Candidate m's members at the time s from the middle (`Candidate`): e^{iνt_m} times its tone G_+(s) and its cross
+    /// decays at ν there, −(i/2) Σ_q L_o,q†L_o′,q (# The jumps' coherence), and e^{−iνt_m} times the same at −ν (none: zero).
     fn envelopes(&self, path: &Path, m: usize, s: f64, plus: &mut Mat, minus: &mut Mat) {
         let inner = self.made(path, (s != 0.0).then_some(s.abs()), false);
-        let c = &self.run.sets.get(self.set).candidates[m];
-        for (member, out, sign) in [(c.plus, plus, 1.0), (c.minus, minus, -1.0)] {
-            match member.filter(|_| inner.exists) {
-                Some(k) => {
-                    let phase = C64::cis(sign * c.beat * self.t);
-                    for (z, g) in out.data.iter_mut().zip(&inner.ws.as_ref().unwrap().tone(k, position(s)).data) {
-                        *z = phase * *g;
+        let set = self.run.sets.get(self.set);
+        let c = &set.candidates[m];
+        if !inner.exists {
+            plus.data.fill(C64::new(f64::NAN, f64::NAN));
+            minus.data.fill(C64::new(f64::NAN, f64::NAN));
+            return;
+        }
+        let ws = inner.ws.as_ref().unwrap();
+        let at = match position(s) {
+            0 => At::Middle,
+            j => At::Node(j - 1),
+        };
+        let jumps = (!c.cross.iter().all(Vec::is_empty)).then(|| set.fold.prototype_jumps(&inner.eval, ws, at));
+        for ((member, cross), out, sign) in [((c.plus, &c.cross[0]), plus, 1.0), ((c.minus, &c.cross[1]), minus, -1.0)] {
+            let phase = C64::cis(sign * c.beat * self.t);
+            out.data.fill(C64::ZERO);
+            if let Some(k) = member {
+                for (z, g) in out.data.iter_mut().zip(&ws.tone(k, position(s)).data) {
+                    *z = phase * *g;
+                }
+            }
+            for &pair in cross {
+                let (i, j, _) = set.coherent[pair];
+                let jumps = jumps.as_ref().expect("the jumps of a cross decay's blocks");
+                let factor = C64::new(0.0, -0.5) * phase;
+                for q in 0..3 {
+                    let product = jumps[i][q].adjoint().product(&jumps[j][q]);
+                    for (z, x) in out.data.iter_mut().zip(&product.data) {
+                        *z += factor * *x;
                     }
                 }
-                None => out.data.fill(if inner.exists { C64::ZERO } else { C64::new(f64::NAN, f64::NAN) }),
             }
         }
     }
 
-    /// Candidate m's forms on the integrator's sums σ = re + i im at its beat: its + member's middle G_+ on e^{iνt_m}σ, its
-    /// − member's on e^{−iνt_m}σ† (step.rs `Middle::tone_force`).
+    /// Candidate m's forms on the integrator's sums σ = re + i im at its beat: its + tone's middle G_+ on e^{iνt_m}σ, its
+    /// − tone's on e^{−iνt_m}σ† (step.rs `Middle::tone_force`); a cross decay has no Hermitian part, and no form.
     fn tone_force(&self, path: &Path, m: usize, re: &[C64], im: &[C64]) -> [f64; 3] {
         let c = &self.run.sets.get(self.set).candidates[m];
         let n = self.states();
@@ -953,6 +1006,9 @@ impl crate::step::Middle for Middle<'_> {
                 k.map(|k| (k, (0..n * n).map(|i| (re[i] + C64::new(0.0, sign) * im[i]) * phase).collect()))
             })
             .collect();
+        if members.is_empty() {
+            return [0.0; 3];
+        }
         let bars: Vec<Bar> = members.iter().map(|(k, x)| Bar { channel: 0, position: 0, tone: Some(*k), matrix: x }).collect();
         real(self.forms(path, None, &bars, 1)[0])
     }

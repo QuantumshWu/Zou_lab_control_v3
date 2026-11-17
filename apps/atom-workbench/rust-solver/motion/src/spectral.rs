@@ -32,7 +32,9 @@
 //! group does not couple to the others -- moves their diagonal in the static group by θ, their eigenvalues with it, and
 //! the beat of every tone between the group and the others by θ the other way: each Ω stays as it is, and so does the
 //! state the propagation gives, taken back to the first frame, to rounding (tests,
-//! `a_frame_on_a_group_of_states_leaves_the_propagated_state_as_it_is`: 10⁻¹⁵ at θτ up to 17). A beat the frame could
+//! `a_frame_on_a_group_of_states_leaves_the_propagated_state_as_it_is`: 10⁻¹⁵ at θτ up to 17), where a candidate takes
+//! the same route in either frame -- what the static group leaves of it moves with the frame, its beat and its turns
+//! do (# Which beats are tones), as the static group's own change through the nodes does. A beat the frame could
 //! not take away -- a loop's, whose edges' beats sum to it whatever the frame -- costs the step nothing where the
 //! loop's own detunings, the Ω of its entries, are slow: the step need not resolve the beat (tests,
 //! `a_loop_s_weak_edge_beats_fast_and_is_taken_at_its_combined_frequency`: a loop closed at B = 26.4 rad/µs over a step
@@ -40,25 +42,47 @@
 //! through the three nodes errs by 6.9·10⁻², the alias).
 //!
 //! # Which beats are tones
-//! What goes into the static group and what is a tone is the model's to say (step.rs `Middle::beats`), by what each
-//! leaves. A beat e^{iνu}C taken into the static group is the change e^{iνu}C − C through the nodes, of the slope
-//! s_A ≈ |νC|h² over a half step, and its hops leave x s_A²/15 (# The split); taken as a tone it is the envelope C whole,
-//! s_C = |C|h, and they leave x s_C²/3. The first is the less where νh < √5 -- a slow beat of a strong coupling, a 3D
-//! lattice's residual q·v at the steps the scenes take --, the second beyond it -- a loop's weak closing edge at its
-//! fast beat --; where the two are equal they swap, so nothing jumps there (as with the split, # The split). The
-//! static group's change is also read through the nodes, which alias a beat beyond νh = π: a tone has no such edge.
+//! Which of the model's candidates (step.rs `Middle::beats`) are tones is the propagation's choice, by what each route
+//! leaves on the candidate's entries at the step's end (`toned`), before the decomposition: the two routes' Ĥ₀ differ by
+//! the candidate's middle value, so the choice is the candidate's whole, not an entry's. A beat e^{iνu}C taken into the
+//! static group puts C into Ĥ₀ and its change (e^{iνu} − 1)C through the three nodes, whose parabola has over a half step
+//! the slope s_C|sin y| and the curvature s_C(1 − cos y) exactly (y = νh, s_C = |C| |h|): the split takes it by those at
+//! the entry's turn x = |ω| |h| (# The split), and the parabola misses the beat in the first order of C -- of a hop by
+//! s_C|β(ωh, y)|, β(x, y) = ∫₋₁¹ e^{ixt}[e^{iyt} − p_y(t)]dt of the hop's own moments, β(0, y) = −y⁴/90 + … (Simpson's
+//! remainder: `aliased`); of a following by its polynomial against the beat's own following at ω + ν. Taken as a tone it
+//! is the envelope C whole at its combined frequency, x′ = |ω + ν| |h|, the split's route on it. The turns are of the
+//! generator's diagonal at the middle in its frames -- the zeroth order in the static coupling, no decomposition: a
+//! strongly dressed pair's route is estimated, which costs accuracy alone, the check reading either route. A candidate
+//! is a tone where the static group leaves more, and wherever |ν| |h| ≥ π: three nodes do not resolve a phase of more
+//! than π between two of them, and beyond it the static group's miss is the alias that the step and its companion at
+//! twice the step read alike (at νh = 2πk the same) -- a bound of the nodes, no number of the rule. Where the two leave
+//! the same they swap, so nothing jumps there; their crossing is no number either: for a weak coupling of an entry that
+//! does not turn it lies near y³ = 30 s_C (y = 0.67 at s_C = 0.01, 1.5 at 0.1), and from s_C ≈ 0.4 on the static group
+//! leaves less up to π (DESIGN §12.5). A slow beat of a strong coupling -- a 3D lattice's residual q·v at the steps the
+//! scenes take -- stays in the static group, a loop's weak closing edge at its fast beat is a tone. (Until 2026-11-16 the
+//! rule was νh = √5: the slope taken as |νC|h², no curvature, no alias and one turn for both routes; with the exact slope
+//! and curvature the static group's hops leave less at one turn whatever y -- sin²y/15 + (1 − cos y)²/42 ≤ 0.104 < 1/3
+//! --, the routes crossing by the alias and by their turns' difference alone.)
 //!
-//! A tone is its Hermitian part, P = (G⁺ + G⁻†)/2 and P†; the decay's beats stay in the static group (`Picture::separate`).
-//! The hop's exponent is the first Magnus term −i∫D̃ (# The state at any time of the step), and it keeps the flow's
-//! dissipative structure only where its anti-Hermitian part is a decay: of D = H − (i/2)Γ it is −(1/2)∫Γ̃, negative
-//! semidefinite where Γ̃ is at the times it is integrated over. A beating decay's part alone,
-//! −(i/2)(e^{iνu}Γ_ν + e^{−iνu}Γ_ν†), is no decay: Γ_ν is not positive -- the interference term of two plane waves'
-//! scattering --, its sign turns with its beat, and its integral over a hop is of either sign, so that as a tone it
-//! raises m's norm by up to e^{|Γ_ν| w} over a hop of the width w, where only its sum with the static decay is positive
-//! (measured: a random Lindblad's step, the survival test's case 68, overflowed). With the static group it is that sum,
-//! as the nodes give it; the static group's parabola of it is the step's decay (step.rs, # Jumps), whose negative part
-//! between the nodes is what the survival may rise by (step/tests.rs `negative_decay`), and its alias beyond νh = π the
-//! decay rate's error, the check's to read, as before the tones. A Hermitian tone's hops are unitary.
+//! A tone is its candidate whole: both members as the model gives them, the Hermitian part and the decay's beat alike
+//! (`Picture::separate`). The static group then holds the decay's mean over the beats, Γ_s (of Γ(u) = Σ_{o,o′}
+//! e^{i(o − o′)u} L_o†L_o′ it is Σ_o L_o†L_o, positive), and no decay of a tone twice. The members take the routes the
+//! Hermitian ones do: `take`, `following` and `exponent` are of an entry's complex numbers whatever G⁻ is to G⁺ -- a fast
+//! entry's following solves for a non-Hermitian envelope as for a Hermitian one, no exponential in it; a slow entry's
+//! hop is the first Magnus term −i∫D̃ (# The state at any time of the step), Λ exact. A beating decay's part alone,
+//! −(i/2)(e^{iνu}Γ_ν + e^{−iνu}Γ_ν†), is no decay -- Γ_ν is not positive (the interference of two plane waves'
+//! scattering), its sign turns with its beat --, so a hop's first Magnus term of it is not bounded by the static
+//! decay's, and the propagation's norm may rise by it as it rises by the decomposition's change of basis: the
+//! propagation is no flow that only lowers the norm (step.rs, # Jumps), and in no basis is it one while Λ keeps its
+//! exact decays (DESIGN §12.4). It grows where the first Magnus term is itself wrong -- a strong beating decay at a
+//! slow combined frequency, |Γ_ν| w ≳ 1 --, which the check reads. The survival is the law's, not the propagation's
+//! norm: its hazard is the decay of the generator the propagation takes, each tone at its exact phase on the
+//! quadrature's states (step.rs `Sums`), Σ L(u)†L(u) at each node where the envelopes are constant along the path --
+//! positive semidefinite by construction -- and to the parabola's third order where they change, as the static group's.
+//! (Through the three nodes with the static group, as the decay's beats were taken before 2026-11-16, the beat beyond
+//! νh = π was its alias: the interference kept or dropped whole, and read the same by the step and by its companion
+//! at twice the step where νh = 2πk -- a silent error of the scattering rate up to the interference term's size; and
+//! three offsets' parabola went negative between the nodes, 7 % of the decay, raising the survival.)
 //!
 //! # The state at any time of the step
 //! With Ĥ₀ = c + RΛR⁻¹ (its scalar part c apart, `linalg::Eigen`) and x = R d, i ḋ = (Λ + Dᵉ(u)) d, Dᵉ = R⁻¹DR, each
@@ -420,6 +444,10 @@ pub struct Picture {
     pub beats: Vec<Beat>,
     beating: Vec<f64>,
     keys: Vec<Vec<i64>>,
+    /// The candidates `separate` weighed and left in the static group (their members read at the middle), and the
+    /// complex multiply-adds of its weighing.
+    pub weighed: Vec<usize>,
+    pub weighing: f64,
     /// After `prepare` on a beating path, the static group's slope at the middle through the step's ends,
     /// (G₀(h) − G₀(−h))/2h, as the caller's matrices are laid out: the first order of the parabola it is taken for (the
     /// optical sector's along the path, step.rs).
@@ -508,6 +536,8 @@ impl Default for Picture {
             beats: Vec::new(),
             beating: Vec::new(),
             keys: Vec::new(),
+            weighed: Vec::new(),
+            weighing: 0.0,
             slope: none(),
             matrix: none(),
             basis: linalg::Eigen::default(),
@@ -563,17 +593,23 @@ impl Default for Picture {
 /// product's following X⁽²⁾ (# The second order by tones) leaves besides the third order c X⁽²⁾ on the entries the
 /// first order's couplings carry it to, `coupled` the couplings' size over a half step, S_C + S_A + S_B: at most 2 S r
 /// over the step (the left-out term's turn there, min(x′, 1)/x′, at most one) -- the following's leading term with it.
-fn followed(x: f64, [slope, curvature, constant]: [f64; 3], r: f64, coupled: f64) -> Option<bool> {
+/// With the route, what it leaves at the step's end: the least of the two where r < 1, the hops' where they are taken
+/// at r ≥ 1, the following's leading term where neither is (the least any route could leave there); none where the term
+/// does not turn (its hops' second term is x times the sizes').
+fn followed(x: f64, [slope, curvature, constant]: [f64; 3], r: f64, coupled: f64) -> (Option<bool>, f64) {
     if !(x > 0.0) {
-        return Some(false);
+        return (Some(false), 0.0);
     }
     let (first, second, zeroth) = (slope * slope, curvature * curvature, constant * constant);
     let leading = 2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * x.min(1.0) + 2.0 * coupled * r * x.powi(3);
-    let (light, hops) = (4.0 / 15.0 * second * (x * x), x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0));
+    let (light, hops, cube) = (4.0 / 15.0 * second * (x * x), x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0), x.powi(3));
     if r < 1.0 {
-        Some(leading / (1.0 - r) + light <= hops)
+        let following = leading / (1.0 - r) + light;
+        if following <= hops { (Some(true), following / cube) } else { (Some(false), hops / cube) }
+    } else if leading + light > hops {
+        (Some(false), hops / cube)
     } else {
-        (leading + light > hops).then_some(false)
+        (None, (leading + light) / cube)
     }
 }
 
@@ -587,6 +623,101 @@ fn series(x: f64, size: f64) -> usize {
         next *= x / terms as f64;
     }
     terms
+}
+
+/// The moments I_p(z) = ∫₀¹ s^p e^{zs} ds, p = 0, 1, 2, by their series Σ_j z^j/(j!(j + p + 1)) to `terms` terms (`series`),
+/// as the series' even and odd terms in j apart: I_p(z) is their sum, I_p(−z) their difference -- an entry's hop and its
+/// partner's at once (module documentation). `reciprocals` holds the whole numbers' 1/k as far as a series went, and
+/// is lengthened as this one asks.
+fn moments(z: C64, terms: usize, reciprocals: &mut Vec<f64>) -> [[C64; 3]; 2] {
+    while reciprocals.len() < terms + 3 {
+        reciprocals.push(1.0 / reciprocals.len() as f64);
+    }
+    let (mut power, mut parts) = (C64::ONE, [[C64::ZERO; 3]; 2]);
+    for j in 0..terms {
+        // 1/(j + p + 1) for the moment p.
+        let inverse = &reciprocals[j + 1..j + 4];
+        for (moment, inverse) in parts[j % 2].iter_mut().zip(inverse) {
+            *moment += power * *inverse;
+        }
+        power = power * z * inverse[0];
+    }
+    parts
+}
+
+/// What the three nodes' parabola of a beat leaves of a hop's integral over the step (module documentation, # Which
+/// beats are tones): β(x, y) = ∫₋₁¹ e^{ixt}[e^{iyt} − p_y(t)] dt, p_y(t) = 1 + it sin y + t²(cos y − 1) the parabola
+/// through e^{iyt} at t = −1, 0, 1, of an entry turning by x = ωh (complex: its decay rates' difference with it) and a beat
+/// by y = νh between two nodes; first order in the beat's coupling C, |C| |h| |β| at the step's end. Of the hop's own
+/// moments over the two half steps: M_p(a) = ∫₋₁¹ t^p e^{iat} dt = I_p(ia) + (−1)^p I_p(−ia), twice the series' even part
+/// for p even and its odd part for p odd (`moments`), and β = M₀(x + y) − M₀(x) − i sin y M₁(x) − (cos y − 1) M₂(x);
+/// β(0, y) = 2 sin y/y − 2 + (2/3)(1 − cos y) = −y⁴/90 + …, Simpson's rule's remainder. With the series' terms summed.
+fn aliased(x: C64, y: f64, reciprocals: &mut Vec<f64>) -> (f64, usize) {
+    let mut summed = 0;
+    let mut at = |a: C64| {
+        let z = C64::I * a;
+        let terms = series(z.abs(), 1.0);
+        summed += terms;
+        moments(z, terms, reciprocals)
+    };
+    let ([even, odd], [turned, _]) = (at(x), at(x + C64::real(y)));
+    (((turned[0] - even[0] - odd[1] * C64::new(0.0, y.sin()) - even[2] * (y.cos() - 1.0)) * 2.0).abs(), summed)
+}
+
+/// Whether a candidate e^{iνu}G⁺ + e^{−iνu}G⁻ is a tone of the step of 2h (module documentation, # Which beats are
+/// tones), its members' envelopes at the middle `members` and the generator's diagonal at the middle `diagonal`: by what
+/// each route leaves on its entries at the step's end, summed over its members' entries that are not zero -- each entry
+/// (s, t) at its turn of the diagonal, ω = Ĥ_ss − Ĥ_tt (the zeroth order in the static coupling, no decomposition), and
+/// its envelope's size over a half step s_C = |C| |h|; the beat at ±ν by its member, y = νh:
+/// - as a tone, at its combined frequency ω + ν, x′ = |ω + ν| |h|: the split's route on its envelope C (`followed`, the
+///   following's size r = |C|/|ω + ν|);
+/// - in the static group, C in Ĥ₀ and the change (e^{iνu} − 1)C through the three nodes, at the turn x = |ω| |h|: the
+///   split's route on the parabola's slope s_C|sin y| and curvature s_C(1 − cos y), and the beat the parabola misses --
+///   of a hop or the strides s_C |β(ωh, y)| (`aliased`); of a following the parabola's following against the beat's own
+///   at its combined frequency at the step's ends, |−C/ω + Y(±h) + e^{±iy}C/(ω + ν)|, Y the polynomial of the change
+///   (`following`): first order in C, both.
+/// A tone where the static group leaves more, and wherever |ν| |h| ≥ π: the three nodes do not resolve a phase of more than
+/// π between two of them, and there the static group's miss of the beat is what the step and its companion at twice the
+/// step read alike (at νh = 2πk the nodes of both hold the beat's same values) -- the bound is the nodes', no number of
+/// the rule. Where the two leave the same (the routes' crossing, and a candidate of no envelope at the middle) the static
+/// group: the routes swap where they leave the same, so nothing jumps there. Returns the weighing's complex multiply-adds
+/// with it.
+fn toned(diagonal: &[C64], beat: f64, half: f64, members: [&Mat; 2], reciprocals: &mut Vec<f64>) -> (bool, f64) {
+    let h = half.abs();
+    if !(beat.abs() * h < std::f64::consts::PI) {
+        return (true, 0.0);
+    }
+    let n = diagonal.len();
+    let (mut nodes, mut tone, mut work) = (0.0, 0.0, 0.0);
+    for (member, nu) in members.into_iter().zip([beat, -beat]) {
+        let y = nu * half;
+        let (sin, cos) = y.sin_cos();
+        for (k, &c) in member.data.iter().enumerate().filter(|(_, c)| **c != C64::ZERO) {
+            let (s, t) = (k / n, k % n);
+            let (omega, size) = (diagonal[s] - diagonal[t], c.abs() * h);
+            let combined = omega + C64::real(nu);
+            // As a tone: its envelope at its combined frequency.
+            let r = if combined != C64::ZERO { c.abs() / combined.abs() } else { 0.0 };
+            tone += followed(combined.abs() * h, [0.0, 0.0, size], r, 0.0).1;
+            // In the static group: the parabola's slope and curvature at the entry's turn, and the beat it misses.
+            let (a, b) = (c * C64::new(0.0, sin / half), c * ((cos - 1.0) / (half * half)));
+            let y_poly = if omega != C64::ZERO { following(omega.recip(), C64::ZERO, a, b) } else { [C64::ZERO; 3] };
+            let at = |u: f64| y_poly[0] + y_poly[1] * u + y_poly[2] * (u * u);
+            let r = [-half, half].into_iter().map(|u| at(u).abs()).fold(0.0, f64::max);
+            let (route, left) = followed(omega.abs() * h, [size * sin.abs(), size * (1.0 - cos), 0.0], r, 0.0);
+            let missed = if route == Some(true) {
+                [-half, half].into_iter().map(|u| (at(u) - c / omega + C64::cis(nu * u) * c / combined).abs()).fold(0.0, f64::max)
+            } else {
+                let (beta, terms) = aliased(omega * half, y, reciprocals);
+                work += (4 * terms) as f64;
+                size * beta
+            };
+            nodes += left + missed;
+            // The entry's turns, sizes, following and remainders.
+            work += 24.0;
+        }
+    }
+    (!(nodes <= tone), work)
 }
 
 /// The quintic through three nodes at s = −1, 0, 1 (the Hermite interpolant of values and rates): the weights of the
@@ -679,7 +810,7 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, lambda: &[C64], si
                 let turn = omega.abs();
                 let (k, t) = (row * n + column, column * n + row);
                 let r = if turn > 0.0 { size(&classes[c], k, omega).max(size(&classes[partner], t, -omega)) } else { 0.0 };
-                let split = followed(turn * h.abs(), sizes, r, coupled);
+                let (split, _) = followed(turn * h.abs(), sizes, r, coupled);
                 routed &= split.is_some();
                 let fast = split.unwrap_or(false);
                 if !fast {
@@ -735,57 +866,62 @@ impl Picture {
     }
 
     /// The step's exact tones out of the generator (module documentation, # Which beats are tones), the generator at the
-    /// nodes given (`base`, `ends`): `candidates` gives the beats ν (rad/µs) of the caller's candidate tone pairs, each
-    /// of members constant along the path; a candidate is a tone of the step of 2h where |ν| |h| > √5 -- its hops leave
-    /// less than its change through the nodes would --, its members asked of `envelopes` (the candidate's place, G⁺ at
-    /// e^{iνu}, G⁻ at e^{−iνu}), and its Hermitian part e^{iνu}P + e^{−iνu}P†, P = (G⁺ + G⁻†)/2, taken out of the
-    /// generator at each node: what is left is the static group (`beats`: the tones). None where no candidate is so fast.
-    /// Each member's envelope is asked at each of the three nodes (`envelopes`' time u = −h, 0, h) and taken out there at its
-    /// own value: an envelope that changes along the path (the light's profile at the path's points) goes through the
-    /// nodes as the static group does.
-    /// The decay's beats stay with the static group: a hop's exponent is the first Magnus term, and a beating decay's
-    /// part alone is no decay -- its sign turns with its beat --, so that over a hop it would grow the interaction
-    /// picture's state by e^{|Γ_ν| w} where the static decay's factors hold the state (an overflow of m, not of x); a
-    /// Hermitian tone's hops are unitary.
+    /// nodes given (`base`, `ends`): `candidates` gives the beats ν (rad/µs) of the caller's candidate tone pairs, their
+    /// members asked of `envelopes` (the candidate's place and a time u from the middle; G⁺ at e^{iνu}, G⁻ at e^{−iνu}) --
+    /// first at the middle, where the routes are weighed (`toned`): a candidate is a tone of the step of 2h where its
+    /// change through the three nodes would leave more than its own treatments, and wherever |ν| |h| ≥ π --, then at the
+    /// outer nodes, and the candidate whole, e^{iνu}G⁺ + e^{−iνu}G⁻ -- its Hermitian part and its decay's beat alike --,
+    /// taken out of the generator at each node: what is left is the static group (`beats`: the tones; `weighed`: the
+    /// candidates weighed and left in the static group). None where there is no candidate, and the generator as it is.
+    /// Each member's envelope is taken out at each of the three nodes (u = −h, 0, h) at its own value: an envelope that
+    /// changes along the path (the light's profile at the path's points) goes through the nodes as the static group does.
+    /// The routes are weighed on the generator's diagonal at the middle as given, before any candidate is taken out: a
+    /// candidate's route does not depend on the others' order.
     pub fn separate(&mut self, half: f64, candidates: impl FnOnce(&mut Vec<f64>, &mut Vec<Vec<i64>>), mut envelopes: impl FnMut(usize, f64, &mut Mat, &mut Mat)) {
         let n = self.n;
         self.beating.clear();
         self.keys.clear();
+        self.weighed.clear();
+        self.weighing = 0.0;
         candidates(&mut self.beating, &mut self.keys);
-        let edge = 5.0_f64.sqrt() / half.abs();
-        let count = self.beating.iter().filter(|beat| beat.abs() > edge).count();
-        self.beats.truncate(count);
-        while self.beats.len() < count {
-            self.beats.push(Beat { beat: 0.0, key: vec![], candidate: 0, members: std::array::from_fn(|_| std::array::from_fn(|_| Mat::zeros(n, n))) });
+        let mut diagonal = [C64::ZERO; crate::model::STATES];
+        for (i, d) in diagonal[..n].iter_mut().enumerate() {
+            *d = self.base[(i, i)];
         }
-        let chosen = self.beating.iter().copied().enumerate().filter(|(_, beat)| beat.abs() > edge);
-        for (tone, (candidate, beat)) in self.beats.iter_mut().zip(chosen) {
-            (tone.beat, tone.candidate) = (beat, candidate);
-            tone.key.clone_from(&self.keys[candidate]);
+        let mut count = 0;
+        let Picture { beats, base, ends, beating, keys, reciprocals, weighed, weighing, .. } = self;
+        for (candidate, &beat) in beating.iter().enumerate() {
+            if beats.len() == count {
+                beats.push(Beat { beat: 0.0, key: vec![], candidate: 0, members: std::array::from_fn(|_| std::array::from_fn(|_| Mat::zeros(n, n))) });
+            }
+            let tone = &mut beats[count];
             for m in tone.members.iter_mut().flatten() {
                 (m.rows, m.cols) = (n, n);
                 m.data.resize(n * n, C64::ZERO);
             }
             let [plus, minus] = &mut tone.members;
-            let [start, end] = &mut self.ends;
-            for (j, (node, u)) in [start, &mut self.base, end].into_iter().zip([-half, 0.0, half]).enumerate() {
+            envelopes(candidate, 0.0, &mut plus[1], &mut minus[1]);
+            let (taken, work) = toned(&diagonal[..n], beat, half, [&plus[1], &minus[1]], reciprocals);
+            *weighing += work;
+            if !taken {
+                weighed.push(candidate);
+                continue;
+            }
+            (tone.beat, tone.candidate) = (beat, candidate);
+            tone.key.clone_from(&keys[candidate]);
+            for (j, u) in [(0, -half), (2, half)] {
                 envelopes(candidate, u, &mut plus[j], &mut minus[j]);
-                let (g, m) = (&mut plus[j].data, &mut minus[j].data);
-                // Its Hermitian part at the node: P = (G⁺ + G⁻†)/2 at e^{iνu}, P† at e^{−iνu}, pair by pair in place.
-                for a in 0..n {
-                    for b in a..n {
-                        let (ab, ba) = (a * n + b, b * n + a);
-                        let (pab, pba) = ((g[ab] + m[ba].conj()) * 0.5, (g[ba] + m[ab].conj()) * 0.5);
-                        (g[ab], g[ba]) = (pab, pba);
-                        (m[ab], m[ba]) = (pba.conj(), pab.conj());
-                    }
-                }
+            }
+            let [start, end] = &mut *ends;
+            for (j, (node, u)) in [start, &mut *base, end].into_iter().zip([-half, 0.0, half]).enumerate() {
                 let (p, q) = (C64::cis(beat * u), C64::cis(-beat * u));
-                for ((z, g), h) in node.data.iter_mut().zip(g.iter()).zip(m.iter()) {
+                for ((z, g), h) in node.data.iter_mut().zip(&plus[j].data).zip(&minus[j].data) {
                     *z -= p * *g + q * *h;
                 }
             }
+            count += 1;
         }
+        beats.truncate(count);
     }
 
     /// The decomposition's route as this picture last counted it, per count of states (`counted`): what it carries from
@@ -1382,18 +1518,7 @@ impl Picture {
                         let between = self.lambda[a] - self.lambda[b];
                         let z = C64::I * (if c == 0 { between } else { C64::new(between.re + beat, between.im) }) * w;
                         let terms = series(z.abs(), bound);
-                        while self.reciprocals.len() < terms + 3 {
-                            self.reciprocals.push(1.0 / self.reciprocals.len() as f64);
-                        }
-                        let (mut power, mut parts) = (C64::ONE, [[C64::ZERO; 3]; 2]);
-                        for j in 0..terms {
-                            // 1/(j + p + 1) for the moment p.
-                            let inverse = &self.reciprocals[j + 1..j + 4];
-                            for (moment, inverse) in parts[j % 2].iter_mut().zip(inverse) {
-                                *moment += power * *inverse;
-                            }
-                            power = power * z * inverse[0];
-                        }
+                        let parts = moments(z, terms, &mut self.reciprocals);
                         for p in 0..3 {
                             one.moments[p * size + k] = parts[0][p] + parts[1][p];
                             other.as_deref_mut().unwrap_or(&mut *one).moments[p * size + b * n + a] = parts[0][p] - parts[1][p];
@@ -2114,7 +2239,7 @@ pub(crate) mod tests {
         // A second pair's slope that takes the first to a route, and the second pair (3 rad between two nodes) to one.
         let beside = |fast: bool| (0..=40).map(|k| 10_f64.powf(-3.0 + k as f64 / 8.0)).find(|other| {
             let sizes = [own[0].hypot(*other), own[1], 0.0];
-            followed(x, sizes, across(x, C64::cis(0.7) * own[0], C64::cis(-0.4) * own[1]), 0.0) == Some(fast) && followed(3.0, sizes, across(3.0, C64::real(*other), C64::ZERO), 0.0).is_some()
+            followed(x, sizes, across(x, C64::cis(0.7) * own[0], C64::cis(-0.4) * own[1]), 0.0).0 == Some(fast) && followed(3.0, sizes, across(3.0, C64::real(*other), C64::ZERO), 0.0).0.is_some()
         });
         let mut found = [None; 3];
         for (treatment, wanted) in [Some(false), Some(true), None].into_iter().enumerate() {
@@ -2352,7 +2477,8 @@ pub(crate) mod tests {
     }
 
     /// A picture of the whole generator at its three nodes and its candidate tones over a step of 2h (`separate`: those
-    /// of |ν| h > √5 its tones), prepared on the decomposition's route (a fresh picture has counted no other).
+    /// its routes take as tones; every candidate here), prepared on the decomposition's route (a fresh picture has counted
+    /// no other).
     fn with_tones(group: &[Mat; 2], tones: &[Tone], half: f64) -> Picture {
         let n = group[0].rows;
         let mut picture = Picture::default();
@@ -2368,6 +2494,23 @@ pub(crate) mod tests {
             |m, _, plus, minus| (*plus, *minus) = (tones[m].plus.clone(), tones[m].minus.clone()),
         );
         assert_eq!(picture.beats.len(), tones.len(), "every candidate a tone");
+        picture.prepare(half, false, |_| 2, 0.0, 0.0);
+        picture
+    }
+
+    /// The same picture with every candidate a tone whatever its routes leave (`separate`'s taking out, the route not
+    /// weighed): a route's own error, for the rule's to be read against.
+    fn as_tones(group: &[Mat; 2], tones: &[Tone], half: f64) -> Picture {
+        let n = group[0].rows;
+        let mut picture = Picture::default();
+        picture.fit(n);
+        picture.base = toned(group, &[], 0.0);
+        picture.ends = [-half, half].map(|u| toned(group, &[], u));
+        for (m, t) in tones.iter().enumerate() {
+            let members = [-half, 0.0, half].map(|_| t.plus.clone());
+            let partners = [-half, 0.0, half].map(|_| t.minus.clone());
+            picture.beats.push(Beat { beat: t.beat, key: (0..tones.len()).map(|j| i64::from(j == m)).collect(), candidate: m, members: [members, partners] });
+        }
         picture.prepare(half, false, |_| 2, 0.0, 0.0);
         picture
     }
@@ -2557,6 +2700,193 @@ pub(crate) mod tests {
         }
         eprintln!("{cases} random Lindblad steps: at the nodes' values the error at most {worst:.2e} of what the treatments and the static group's step leave; held at the middle at least {worst_held:.1e} times it");
         assert!(worst_held > 10.0, "the envelope held at its middle errs by {worst_held} times the nodes' values' at the least");
+    }
+
+    /// A decay's beats as exact tones (module documentation, # Which beats are tones; DESIGN §12.4): random Lindblad
+    /// clusters -- n of 2 to 4 states, a static Hermitian part with a slope along the path, and the jumps
+    /// L(u) = Σ_k e^{−io_k u} L_k at two to four offsets o_k, so that the decay −(i/2)L(u)†L(u) beats at every o_k − o_k′
+    /// (each difference a candidate, −(i/2)L_k′†L_k at e^{i(o_k′ − o_k)u} and −(i/2)L_k†L_k′ at its opposite: no Hermitian
+    /// part) -- over a step whose beats are near the multiples of 2π between two nodes, o_k h = k(2π + δ_k) with |δ_k| up to
+    /// 0.3 (and exactly 2πk on every fourth case), the decay over a half step up to one. From three random states, against
+    /// the dense flow of the whole generator:
+    /// - through the three nodes with the static group, as before 2026-11-16, the beats are their alias: the state errs
+    ///   by the interference's size over the step (3·10⁻² to 0.15 here); at νh = 2πk the nodes read e^{iνu} as one, the
+    ///   interference whole, and a step of 2τ through its own nodes reads it so too, so that two steps through the nodes
+    ///   and their companion at twice the step differ by less than the two err -- the check's blind spot (asserted where
+    ///   νh = 2πk exactly);
+    /// - taken as tones, whole, the state errs by the step's own error: twenty times less than through the nodes or
+    ///   better, as the tones of the other tests (asserted); beside it are printed the static group's own step (the same
+    ///   picture without the decay's beats, against its own flow) and Hermitian tones of the same members (G⁺ and G⁺†, the
+    ///   same routes, against their own flow), which the decay's tones err about as much as -- and the treatments' leading
+    ///   terms (`beating_remainders`), which the errors of either kind of tone exceed tenfold here: those terms do not hold
+    ///   the following's next order (a product's c X⁽²⁾, # The split) nor the hops' cross terms of the tones with the
+    ///   static group's slope.
+    #[test]
+    fn a_decay_s_beats_are_tones_and_their_flow_where_the_nodes_alias_them() {
+        let mut stream = crate::random::Stream::new(31, crate::random::Purpose::Initial, 0, 0);
+        let mut s = || stream.uniform();
+        let (mut worst, mut nearest, mut blind, mut cases) = (0.0_f64, f64::INFINITY, f64::INFINITY, 0);
+        for case in 0..16 {
+            let n = 2 + (3.0 * s()) as usize;
+            let offsets = 2 + (3.0 * s()) as usize;
+            let half = 0.1 + 0.2 * s();
+            let decay = (0.2 + 0.8 * s()) / half;
+            let random = |s: &mut dyn FnMut() -> f64, scale: f64| Mat::from_fn(n, n, |_, _| C64::cis(std::f64::consts::TAU * s()) * (scale * s()));
+            let hermitian = |m: &Mat| Mat::from_fn(n, n, |i, j| (m[(i, j)] + m[(j, i)].conj()) * 0.5);
+            let exact = case % 4 == 0;
+            let o: Vec<f64> = (0..offsets).map(|k| k as f64 * (std::f64::consts::TAU + if exact { 0.0 } else { 0.6 * (s() - 0.5) }) / half).collect();
+            let jumps: Vec<Mat> = (0..offsets).map(|_| random(&mut s, (decay / (n * offsets) as f64).sqrt())).collect();
+            let mut still = hermitian(&random(&mut s, 3.0));
+            for l in &jumps {
+                still.add_scaled(C64::new(0.0, -0.5), &l.adjoint_product(l));
+            }
+            let group = [still, hermitian(&random(&mut s, 3.0))];
+            let mut tones = vec![];
+            for k in 0..offsets {
+                for j in k + 1..offsets {
+                    let (plus, minus) = (jumps[j].adjoint_product(&jumps[k]).scaled(C64::new(0.0, -0.5)), jumps[k].adjoint_product(&jumps[j]).scaled(C64::new(0.0, -0.5)));
+                    tones.push(Tone { beat: o[j] - o[k], plus, minus });
+                }
+            }
+            let generator = |u: f64| toned(&group, &tones, u);
+            let alone = |u: f64| toned(&group, &[], u);
+            let mut picture = with_tones(&group, &tones, half);
+            let mut before = without_tones(&group, &tones, half);
+            let mut static_group = without_tones(&group, &[], half);
+            let hermitian_tones: Vec<Tone> = tones.iter().map(|t| Tone { beat: t.beat, plus: t.plus.clone(), minus: t.plus.adjoint() }).collect();
+            let unitary = |u: f64| toned(&group, &hermitian_tones, u);
+            let mut hermitian_picture = with_tones(&group, &hermitian_tones, half);
+            let within = beating_remainders(&picture, tones.len());
+            let times = [-0.4 * half, 0.3 * half, half];
+            // Through the nodes: two steps of 2h|... and the companion of 4h over the same span, from the span's start.
+            let noded = |middle: f64, h: f64| {
+                let shifted = |u: f64| generator(middle + u);
+                let mut picture = Picture::default();
+                picture.fit(n);
+                picture.base = shifted(0.0);
+                picture.ends = [-h, h].map(shifted);
+                picture.prepare(h, false, |_| 2, 0.0, 0.0);
+                picture
+            };
+            let through = |picture: &mut Picture, x: &[C64]| {
+                let mut y = vec![C64::ZERO; n];
+                picture.launch(-picture.half, x);
+                picture.advance(picture.half, &mut y);
+                y
+            };
+            let (mut first, mut second, mut companion) = (noded(-half, half), noded(half, half), noded(0.0, 2.0 * half));
+            let (mut e_tone, mut e_nodes, mut e_static, mut e_hermitian, mut e_pair, mut apart) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+            for _ in 0..3 {
+                let start: Vec<C64> = (0..n).map(|_| C64::new(s() - 0.5, s() - 0.5)).collect();
+                e_tone = e_tone.max(beating_errors(&mut picture, &generator, &start, &times, 20_000));
+                e_hermitian = e_hermitian.max(beating_errors(&mut hermitian_picture, &unitary, &start, &times, 20_000));
+                e_nodes = e_nodes.max(beating_errors(&mut before, &generator, &start, &times, 20_000));
+                e_static = e_static.max(beating_errors(&mut static_group, &alone, &start, &times, 20_000));
+                let halves = through(&mut second, &through(&mut first, &start));
+                let whole = through(&mut companion, &start);
+                let flow = flowing(&generator, 2.0 * half, 2.0 * half, &start, 40_000);
+                e_pair = e_pair.max(halves.iter().zip(&flow).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max));
+                apart = apart.max(halves.iter().zip(&whole).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max));
+            }
+            let beats: Vec<f64> = tones.iter().map(|t| t.beat * half / std::f64::consts::TAU).collect();
+            eprintln!("n {n}, {offsets} offsets, νh/2π {beats:.3?}, Γh {:.2}: as tones {e_tone:.2e} (the static group's own step {e_static:.2e}, Hermitian tones of its members {e_hermitian:.2e}, the treatments' leading terms {within:.2e}); through the nodes {e_nodes:.2e}, two steps {e_pair:.2e} off the flow and {apart:.2e} off their companion", decay * half);
+            assert!(e_nodes > 20.0 * e_tone, "n {n}, {offsets} offsets: as tones the state errs by {e_tone:e}, through the nodes by {e_nodes:e}");
+            if exact {
+                assert!(e_pair > apart, "at νh = 2πk two steps through the nodes err by {e_pair:e}, and differ from their companion by {apart:e}");
+                blind = blind.min(e_pair / apart);
+            }
+            (worst, nearest) = (worst.max(e_tone / e_hermitian), nearest.min(e_nodes / e_tone));
+            cases += 1;
+        }
+        eprintln!("{cases} random decays: as tones at least {nearest:.0} times better than through the nodes, and at most {worst:.2} times the Hermitian tones of their members; at νh = 2πk two steps through the nodes erred at least {blind:.1} times their difference from the companion");
+    }
+
+    /// A candidate's route by what each leaves (module documentation, # Which beats are tones; DESIGN §12.5): small
+    /// clusters -- two or three states, a static group of random light shifts and weak couplings with their decays, the
+    /// pair (0, 1) at a turn between two nodes x = |ω|h of zero or one -- and one candidate on the pair, a Hermitian
+    /// coupling C e^{iνu} with its partner, or a decay's beat, −(i/2)L₁†L₀ e^{iνu} and its opposite (two plane waves'
+    /// jumps, their own decays in the static group), of the sizes s_C = |C|h of 0.01, 0.1 and 0.3 (the largest entry's),
+    /// across the routes' crossing: y = νh from 0.3 to 3, and 3.5. Each step is taken both ways -- the candidate a tone
+    /// (`as_tones`) and through the three nodes with the static group (`without_tones`) -- from three states against the
+    /// dense flow, at the step's end and inside it. From y = π on the rule's route is the tone; both routes are taken
+    /// across the scan; and the rule's routes err less in all than the rule they replaced did (νh = √5: the nodes below
+    /// it, a tone above), summed over the cases. The table is printed, with each rule's count of cases where it took the
+    /// route that erred more by over a half (the split's own measure, `a_pair_hopped_and_followed_against_its_flow`).
+    /// Measured: the rule takes the worse route on 8 of the 96, by up to 83 times, each next to the routes' crossing in
+    /// the scan; √5 on 42, by up to 5.5·10⁴ times; in all the rule's routes err a quarter of √5's. The static group's remainders (the alias β of a hop) are read
+    /// within a factor two of what it errs by; a tone's following leaves 30 to 100 times less than its leading term
+    /// 2s³ min(x, 1)/x³ says at a turn x′ of one to two, which moves the crossing the rule reads (DESIGN §12.5).
+    #[test]
+    fn a_candidate_s_route_is_the_one_that_leaves_less() {
+        let mut stream = crate::random::Stream::new(37, crate::random::Purpose::Initial, 0, 0);
+        let mut s = || stream.uniform();
+        let (mut statics, mut cases) = (0, 0);
+        let (mut sums, mut worse, mut most) = ([0.0_f64; 2], [0; 2], [0.0_f64; 2]);
+        for decaying in [false, true] {
+            for size in [0.01, 0.1, 0.3] {
+                for x in [0.0, 1.0] {
+                    for y in [0.3, 0.7, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5] {
+                        let (n, half) = (2 + (2.0 * s()) as usize, 0.2 + 0.2 * s());
+                        let random = |s: &mut dyn FnMut() -> f64, scale: f64| Mat::from_fn(n, n, |_, _| C64::cis(std::f64::consts::TAU * s()) * (scale * s()));
+                        let hermitian = |m: &Mat| Mat::from_fn(n, n, |i, j| (m[(i, j)] + m[(j, i)].conj()) * 0.5);
+                        let sign = if s() < 0.5 { 1.0 } else { -1.0 };
+                        let mut still = Mat::from_fn(n, n, |i, j| match (i, j) {
+                            (0, 0) => C64::ZERO,
+                            (1, 1) => C64::new(-sign * x / half, -0.1 * s()),
+                            (i, j) if i == j => C64::new(3.0 * (s() - 0.5), -0.3 * s()),
+                            _ => C64::ZERO,
+                        });
+                        still.add_scaled(C64::real(0.3), &hermitian(&random(&mut s, 1.0)));
+                        let entry = C64::cis(std::f64::consts::TAU * s()) * (size / half);
+                        let (plus, minus) = if decaying {
+                            let (l0, l1) = (random(&mut s, 1.0), random(&mut s, 1.0));
+                            let cross = l1.adjoint_product(&l0).scaled(C64::new(0.0, -0.5));
+                            let scale = size / half / cross.max_abs();
+                            still.add_scaled(C64::new(0.0, -0.5 * scale), &l0.adjoint_product(&l0));
+                            still.add_scaled(C64::new(0.0, -0.5 * scale), &l1.adjoint_product(&l1));
+                            (cross.scaled(C64::real(scale)), l0.adjoint_product(&l1).scaled(C64::new(0.0, -0.5 * scale)))
+                        } else {
+                            (Mat::from_fn(n, n, |i, j| if (i, j) == (0, 1) { entry } else { C64::ZERO }), Mat::from_fn(n, n, |i, j| if (i, j) == (1, 0) { entry.conj() } else { C64::ZERO }))
+                        };
+                        let group = [still, Mat::zeros(n, n)];
+                        let tones = [Tone { beat: sign * y / half, plus, minus }];
+                        let generator = |u: f64| toned(&group, &tones, u);
+                        let mut rule = Picture::default();
+                        rule.fit(n);
+                        rule.base = generator(0.0);
+                        rule.ends = [-half, half].map(generator);
+                        let candidate = |beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>| {
+                            beats.push(tones[0].beat);
+                            keys.push(vec![1]);
+                        };
+                        rule.separate(half, candidate, |_, _, plus, minus| (*plus, *minus) = (tones[0].plus.clone(), tones[0].minus.clone()));
+                        let taken = rule.beats.len() == 1;
+                        let (mut tone, mut nodes) = (as_tones(&group, &tones, half), without_tones(&group, &tones, half));
+                        let times = [-0.3 * half, 0.4 * half, half];
+                        let (mut e_tone, mut e_nodes) = (0.0_f64, 0.0_f64);
+                        for _ in 0..3 {
+                            let start: Vec<C64> = (0..n).map(|_| C64::new(s() - 0.5, s() - 0.5)).collect();
+                            e_tone = e_tone.max(beating_errors(&mut tone, &generator, &start, &times, 8_000));
+                            e_nodes = e_nodes.max(beating_errors(&mut nodes, &generator, &start, &times, 8_000));
+                        }
+                        let chosen = if taken { e_tone } else { e_nodes };
+                        let before = if y > 5.0_f64.sqrt() { e_tone } else { e_nodes };
+                        eprintln!("{} s_C {size:4} x {x} y {y:3}: {:>6} | as a tone {e_tone:.2e}, through the nodes {e_nodes:.2e}", if decaying { "decay" } else { "pair " }, if taken { "tone" } else { "nodes" });
+                        assert!(taken || y < std::f64::consts::PI, "y {y}: through the nodes beyond π");
+                        for (k, found) in [chosen, before].into_iter().enumerate() {
+                            sums[k] += found;
+                            worse[k] += usize::from(found > 1.5 * e_tone.min(e_nodes) + 1e-13);
+                            most[k] = most[k].max(found / e_tone.min(e_nodes).max(1e-13));
+                        }
+                        statics += usize::from(!taken);
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("{cases} candidates, {statics} through the nodes: the rule's routes err {:.3e} in all, the worse route on {} (by up to {:.1} times); νh = √5's {:.3e}, the worse route on {} (by up to {:.1e} times)", sums[0], worse[0], most[0], sums[1], worse[1], most[1]);
+        assert!(statics > 0 && statics < cases, "both routes taken");
+        assert!(sums[0] < sums[1], "the rule's routes err {} in all, √5's {}", sums[0], sums[1]);
     }
 
     /// The tones' gauge (module documentation, # Tones): a frame that turns a group of states at θ moves their

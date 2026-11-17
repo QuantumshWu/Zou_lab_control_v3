@@ -215,8 +215,9 @@
 //!   cheapest -- a rung below adds at least N w(τ) to staying, the steps doubled -- and the third level, a quarter of
 //!   the pilot's steps, P w(τ)/4, always less than that: the ladder as it was, to the bit, wherever a step's price is
 //!   the same at every step (`a_flat_price_leaves_the_ladder_as_it_was`). Since the propagation integrates the tones
-//!   exactly (spectral.rs, # Which beats are tones), a step's price grows with the step: a beat is a tone where
-//!   |ν|h > √5, more of them the longer the step, and their products' classes, 1 + 2T + 2P, with them. GMD1C's pictures
+//!   exactly (spectral.rs, # Which beats are tones), a step's price grows with the step: a beat is a tone where its
+//!   change through the nodes would leave more than its treatments and wherever |ν|h ≥ π, more of them the longer the
+//!   step, and their products' classes, 1 + 2T + 2P, with them. GMD1C's pictures
 //!   cost 1.6·10⁴ at τ = 0.95 µs, 3.7·10⁵ at 2τ and 2.2·10⁶ at 4τ, 140 times τ's: its third level, a quarter of the
 //!   pilot's steps, took 23 s of a 29.6 s run (9.2 s before the tones) -- the steps' count is no measure of the work.
 //! - The scout's eleven pairs leave a rung clearly beyond so, and certify nothing: a rung they leave standing is the
