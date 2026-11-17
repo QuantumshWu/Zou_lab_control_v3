@@ -2704,7 +2704,7 @@ fn lambda_request(a: f64, b: f64, form: f64) -> Request {
     req
 }
 
-fn lambda_against_master(a: f64, b: f64, form: f64, time: f64) -> (f64, f64, f64, f64, f64) {
+fn lambda_against_master(a: f64, b: f64, form: f64, time: f64) -> (f64, f64, f64, f64, f64, usize) {
     use crate::step::{Dynamics, Midway, Trajectory};
     let (e2, gamma): (f64, f64) = (100.0, 38.0);
     let (to1, to2) = (0.75 * gamma, 0.25 * gamma);
@@ -2801,27 +2801,28 @@ fn lambda_against_master(a: f64, b: f64, form: f64, time: f64) -> (f64, f64, f64
         let rows = run.readout(t.cluster, &t.point(), &t.psi, &t.held);
         shares.push(rows[0] / (rows[0] + rows[4]));
     }
-    println!("the run's steps' ends: {explicit} of {} explicit, {switches} switches, the switches' δp {dropped:.3e} over the trajectories", count as usize * steps);
+    println!("the run's steps' ends: {explicit} of {} explicit, {switches} switches, the switches' booked rings {dropped:.3e} over the trajectories", count as usize * steps);
     let mean = shares.iter().sum::<f64>() / count as f64;
     let error = (shares.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (count * (count - 1)) as f64).sqrt();
-    (mean, error, finer, (exact - finer).abs(), be.norm_sqr() / (ae.norm_sqr() + be.norm_sqr()))
+    (mean, error, finer, (exact - finer).abs(), be.norm_sqr() / (ae.norm_sqr() + be.norm_sqr()), explicit)
 }
 
-/// The run's Λ (`lambda_against_master`) without the coupling, the lasers at unify's (3 and 1.5 rad/µs): the rule keeps
-/// the excited level in P, its block one of no Q rows (proto.rs, BRIEF_WIRE2 item 2: its ε the explicit row alone, its
-/// jumps that row's). The jumps' coherence makes the dark state b|1⟩ − a|2⟩ (coherent population trapping), |1⟩'s share
-/// 0.2, where the rate equations, each laser's photons apart, give 0.43: at 60 µs the run and the master equation are
-/// both there to 10⁻¹⁰, and on the way, at 10 µs, their mean |1⟩ shares agree within three standard errors (nothing is
-/// folded).
+/// The run's Λ (`lambda_against_master`) without the coupling, the lasers at unify's (3 and 1.5 rad/µs): its fold with
+/// nothing explicit holds it at every step (BRIEF_LANDIMPL: its ring 1.6·10⁻³, no node rises). The jumps' coherence makes
+/// the dark state b|1⟩ − a|2⟩ (coherent population trapping), |1⟩'s share 0.2, where the rate equations, each laser's
+/// photons apart, give 0.43: at 60 µs the master equation is there to 10⁻¹⁰ and every trajectory of the run in the fold's
+/// dark mode, within the share (its series' rest: 0.1996), and on the way, at 10 µs, their mean |1⟩ shares agree within
+/// three standard errors.
 #[test]
 fn the_run_s_lambda_is_the_master_equation_s_dark_state() {
     for time in [10.0, 60.0] {
-        let (mean, error, exact, own, dark) = lambda_against_master(3.0, 1.5, 0.0, time);
+        let (mean, error, exact, own, dark, explicit) = lambda_against_master(3.0, 1.5, 0.0, time);
+        assert_eq!(explicit, 0, "the Λ's fold rings within the share: no node rises");
         println!("|1⟩'s share at {time} µs: the run {mean:.6} ± {error:.1e} over 400 trajectories, the exact master equation {exact:.6} ± {own:.1e} (the dark state's {dark:.4}; the rate equations' 0.43)");
         if time < 60.0 {
             assert!((mean - exact).abs() <= 3.0 * error + own, "the run's |1⟩ share {mean} ± {error} against the master equation's {exact} ± {own}");
         } else {
-            assert!((mean - dark).abs() <= 1e-10 && (exact - dark).abs() <= 1e-10, "at {time} µs the run's {mean} and the master equation's {exact} against the dark state's {dark}");
+            assert!((mean - dark).abs() <= crate::model::elim::share() && error <= 1e-10 && (exact - dark).abs() <= 1e-10, "at {time} µs the run's {mean} ± {error} and the master equation's {exact} against the dark state's {dark}");
         }
     }
 }
@@ -2836,7 +2837,7 @@ fn the_run_s_lambda_is_the_master_equation_s_dark_state() {
 fn the_run_s_lambda_with_a_tone_is_the_master_equation_s() {
     let (a, gamma) = (1.5, 38.0);
     // B's intensity at the atom half its focus's, 2·10⁶ less: c = −2·10⁶ form.
-    let (mean, error, exact, own, dark) = lambda_against_master(a, 0.4, -5e-6, 60.0);
+    let (mean, error, exact, own, dark, _) = lambda_against_master(a, 0.4, -5e-6, 60.0);
     let elimination = (a / (0.5 * gamma)).powi(2);
     println!("with the tone: |1⟩'s share at 60 µs: the run {mean:.4} ± {error:.4} over 400 trajectories, the exact master equation {exact:.4} ± {own:.1e} (the dark state's {dark:.4}; the elimination's (a/(Γ/2))² {elimination:.4})");
     assert!((exact - dark).abs() > 3.0 * error + elimination + own, "the tone moves the share beyond what the run is held to: {exact} against the dark state's {dark}");
@@ -3122,9 +3123,8 @@ fn two_level_clusters(run: &run::Onefold, req: &Request) -> (usize, usize) {
 /// A jump's landing is a fall with no explicit amplitude (BRIEF_STEP3C item 1; DESIGN §11.1, run.rs # The nodes risen and
 /// fallen: one formula, `Workspace::taken`; proto.rs # The landing): a two-level atom with the light on, the state (f, 0) of
 /// its explicit cluster -- nothing in Q there, S = 1 -- taken onto its folded cluster at the same middle is S N⁻¹f, the
-/// landing of the bare state f there, to the rounding; what the fall drops is the landing's norm's complement,
-/// 1 − ‖S N⁻¹f‖² (f a unit vector). A state that follows T -- the folded state ψ risen, (x, T_X x) -- falls back to ψ
-/// and drops nothing, to the rounding.
+/// landing of the bare state f there, to the rounding, and what it books is its ring (proto.rs `Workspace::ring`). A state
+/// that follows T -- the folded state ψ risen, (x, T_X x) -- falls back to ψ and books nothing, to the rounding.
 #[test]
 fn a_two_level_atom_s_landing_is_its_fall_with_no_excited_amplitude() {
     use crate::step::{Dynamics, Middle as _};
@@ -3143,13 +3143,237 @@ fn a_two_level_atom_s_landing_is_its_fall_with_no_excited_amplitude() {
         let bare: Vec<C64> = (0..n).map(|i| if i == 0 { f } else { C64::ZERO }).collect();
         let (fallen, dropped, _) = high.take_onto(&bare, folded, &low).expect("the fall");
         let apart = (landed[0] - fallen[0]).abs();
-        println!("Δ {delta:+.1} s {s}: the landing {:?} and the fall at x_X = 0 {:?} apart {apart:.1e}; dropped {dropped:.6}, 1 − ‖S⁻¹f‖² {:.6}", landed[0], fallen[0], 1.0 - landed[0].norm_sqr());
+        println!("Δ {delta:+.1} s {s}: the landing {:?} and the fall at x_X = 0 {:?} apart {apart:.1e}; its norm's change {:.6}, its ring {dropped:.3e}", landed[0], fallen[0], 1.0 - landed[0].norm_sqr());
         assert!(apart <= 1e-14, "the fall at no explicit amplitude is the landing");
-        assert!((dropped - (1.0 - landed[0].norm_sqr())).abs() <= 1e-14, "it drops the landing's norm's complement");
+        assert!(dropped > 0.0, "it books its ring");
         let (risen, up, _) = low.take_onto(&[f], explicit, &high).expect("the rise");
         let (back, down, _) = high.take_onto(&risen, folded, &low).expect("the fall back");
         println!("   the folded state risen ({:.4?}) and fallen back: {:.1e} from it, dropped {up:.1e} and {down:.1e}", risen, (back[0] - f).abs());
         assert!((back[0] - f).abs() <= 1e-14 && up.abs() <= 1e-14 && down.abs() <= 1e-14, "a state that follows T falls back to itself");
+    }
+}
+
+/// A decaying matrix M's flow by its eigenvectors (every eigenvalue below the real axis): of a vector v its coefficients
+/// c = V⁻¹v, e^{−iMt}v = Σ_k c_k v_k e^{−iλ_k t}, and ∫₀^∞ e^{−iMt}vv†e^{iM†t}dt = Σ_kl c_k c̄_l v_k v_l† (−i)/(λ_k − λ̄_l).
+struct Flow {
+    e: crate::linalg::Eigen,
+}
+
+impl Flow {
+    fn new(m: &Mat) -> Option<Flow> {
+        crate::linalg::eigen(m).map(|e| Flow { e })
+    }
+
+    fn at(&self, v: &[C64], t: f64) -> Vec<C64> {
+        let c = self.e.inverse.apply(v);
+        let size = v.len();
+        (0..size).map(|i| (0..size).map(|k| self.e.vectors[(i, k)] * c[k] * (C64::new(0.0, -t) * self.e.values[k]).exp()).sum()).collect()
+    }
+
+    fn integral(&self, v: &[C64]) -> Mat {
+        let c = self.e.inverse.apply(v);
+        let size = v.len();
+        let mut w = Mat::zeros(size, size);
+        for k in 0..size {
+            for l in 0..size {
+                w[(k, l)] = c[k] * c[l].conj() * C64::new(0.0, -1.0) / (self.e.values[k] - self.e.values[l].conj());
+            }
+        }
+        let vw = self.e.vectors.product(&w);
+        vw.product(&self.e.vectors.adjoint())
+    }
+}
+
+/// Random systems land within their ring (proto.rs # The ring; landing.status 6, 9): one laser frequency on 2–3 ground and
+/// 2–3 excited states (detunings within ±2Γ, couplings 0.05–0.6 Γ at random phases, each excited state decaying at Γ to a
+/// ground state of its own choosing), the fold at the focus at rest. Per landing state the exact statistics -- the dense
+/// lattice's flow from the bare state (`lattice`, `Flow`): the mean waiting time ∫‖ψ‖²dt and the next landing's
+/// distribution, each offset's jumps apart -- against the fold's: its spectral landing ψ₀ = S N⁻¹f on the jump clock
+/// (c = ‖ψ₀‖² below one: the bare state's photon at once with 1 − c; above: the dead time to ‖e^{−iGt}ψ₀‖² = 1), its own
+/// flow e^{−iGt}, its jumps L_q (`Fold::prototype_jumps`). Where its readings are within the share (ρ, the run's test: the
+/// ring's and the series' among them), so is every landing's waiting time's error and the total variation of its next
+/// landing; what they err by over the ring's and the series' readings together is said (a leading-order estimate, not a
+/// bound: no ratio is asserted).
+#[test]
+fn random_systems_land_within_their_ring() {
+    use super::proto::{At, Cache};
+    let share = crate::model::elim::share();
+    let mut state = 20261116u64;
+    let mut u = || {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let (grounds, exciteds, ee) = ([0usize, 4, 6], [17usize, 13, 9], 1000.0);
+    let (mut within, mut compared, mut lines) = (0, 0, vec![]);
+    for trial in 0..40 {
+        let (g, e) = (2 + (u() * 2.0) as usize, 2 + (u() * 2.0) as usize);
+        let scale = 0.05 + 0.55 * u();
+        let ground: Vec<(usize, f64)> = (0..g).map(|i| (grounds[i], 0.3 * GAMMA * (2.0 * u() - 1.0))).collect();
+        let excited: Vec<(usize, f64, f64, usize)> = (0..e).map(|i| (exciteds[i], ee + 2.0 * GAMMA * (2.0 * u() - 1.0), GAMMA, grounds[(u() * g as f64) as usize])).collect();
+        let mut couplings = vec![];
+        for x in 0..e {
+            for y in 0..g {
+                couplings.push((exciteds[x], grounds[y], C64::cis(6.283 * u()) * (scale * GAMMA * (0.5 + u()))));
+            }
+        }
+        let req = system(&ground, &excited, &[Ray { axis: 0, nu: ee, direction: [0.0, 0.0, 1.0], couplings }], 1, true);
+        let choice = Choice::base(&req, vec![]).unwrap();
+        for set in Fold::sets(&req, &choice).unwrap() {
+            let fold = Fold::new(&req, &choice, set[0]).unwrap();
+            if fold.blocks.is_empty() || !fold.explicit.is_empty() {
+                continue;
+            }
+            let Ok(mut ws) = fold.prototype_workspace() else { continue };
+            let mut cache = Cache::default();
+            let Some(step) = fold.prototype([0.0; 3], [0.0; 3], &mut cache, &mut ws) else { continue };
+            let (readings, generator) = (step.readings(), step.generator.clone());
+            let n = fold.size();
+            let jumps = fold.prototype_jumps(&cache, &ws, At::Middle);
+            let (near, far) = ws.layout();
+            let blocks: Vec<usize> = near.iter().map(|x| x.0).chain(far.iter().map(|x| x.0)).collect();
+            // The fold's jumps by offset: a group of one offset's blocks coherent, the offsets apart.
+            let mut offsets: Vec<f64> = blocks.iter().map(|&o| fold.blocks[o].value).collect();
+            offsets.sort_by(f64::total_cmp);
+            offsets.dedup();
+            let landed = |psi: &[C64], out: &mut [f64; GROUND], weight: f64| {
+                for &offset in &offsets {
+                    for q in 0..3 {
+                        let mut u = [C64::ZERO; GROUND];
+                        for (k, &o) in blocks.iter().enumerate().filter(|(_, o)| fold.blocks[**o].value == offset) {
+                            let _ = o;
+                            for (b, z) in u.iter_mut().enumerate() {
+                                *z += (0..n).map(|p| jumps[k][q][(b, p)] * psi[p]).sum::<C64>();
+                            }
+                        }
+                        for b in 0..GROUND {
+                            out[b] += weight * u[b].norm_sqr();
+                        }
+                    }
+                }
+            };
+            let Some(fold_flow) = Flow::new(&generator) else { continue };
+            // The exact lattice, its nodes connected to the set's ground states (the lattice seeds every ground state of the
+            // model; the others' nodes are no part of the flow): its flow, its excited nodes by offset.
+            let whole = lattice(&fold, [0.0; 3], 4, &|_| true);
+            let mut kept: Vec<usize> = whole.nodes.iter().enumerate().filter(|(_, (s, key))| fold.ground.contains(s) && key.iter().all(|&x| x == 0)).map(|x| x.0).collect();
+            let mut at = 0;
+            while at < kept.len() {
+                let i = kept[at];
+                for j in 0..whole.m.rows {
+                    if (whole.m[(j, i)] != C64::ZERO || whole.m[(i, j)] != C64::ZERO) && !kept.contains(&j) {
+                        kept.push(j);
+                    }
+                }
+                at += 1;
+            }
+            let l = Lattice { nodes: kept.iter().map(|&i| whole.nodes[i].clone()).collect(), m: Mat::from_fn(kept.len(), kept.len(), |a, b| whole.m[(kept[a], kept[b])]) };
+            let Some(exact_flow) = Flow::new(&l.m) else { continue };
+            let size = l.m.rows;
+            let mut keys: Vec<Vec<i64>> = l.nodes.iter().filter(|(s, _)| *s >= GROUND).map(|x| x.1.clone()).collect();
+            keys.sort();
+            keys.dedup();
+            let (mut worst_tau, mut worst_tv) = (0.0_f64, 0.0_f64);
+            for k in 0..fold.ground.len() {
+                // Exact.
+                let at = l.nodes.iter().position(|(s, key)| *s == fold.ground[k] && key.iter().all(|&x| x == 0)).expect("the ground state's node");
+                let f: Vec<C64> = (0..size).map(|i| if i == at { C64::ONE } else { C64::ZERO }).collect();
+                let rho = exact_flow.integral(&f);
+                let tau_exact: f64 = (0..size).map(|i| rho[(i, i)].re).sum();
+                let mut next_exact = [0.0; GROUND];
+                for key in &keys {
+                    let nodes: Vec<usize> = (0..size).filter(|&i| l.nodes[i].0 >= GROUND && l.nodes[i].1 == *key).collect();
+                    for q in 0..3 {
+                        for (b, out) in next_exact.iter_mut().enumerate() {
+                            let w: Vec<C64> = nodes.iter().map(|&i| req.emission[q][(b, l.nodes[i].0)]).collect();
+                            let mut x = C64::ZERO;
+                            for (a, &i) in nodes.iter().enumerate() {
+                                for (c, &j) in nodes.iter().enumerate() {
+                                    x += w[a].conj() * rho[(i, j)] * w[c];
+                                }
+                            }
+                            *out += x.re;
+                        }
+                    }
+                }
+                // The fold on its jump clock.
+                let bare: Vec<C64> = (0..n).map(|p| if p == k { C64::ONE } else { C64::ZERO }).collect();
+                let Some((psi0, _)) = ws.taken(&fold, &cache, &bare, &[], false) else { continue };
+                let c = crate::linalg::norm_sqr(&psi0);
+                let (mut tau, mut next) = (0.0, [0.0; GROUND]);
+                let start = if c <= 1.0 {
+                    let mut prompt = [0.0; GROUND];
+                    landed(&bare, &mut prompt, 1.0);
+                    let total: f64 = prompt.iter().sum();
+                    for (o, x) in next.iter_mut().zip(prompt) {
+                        *o += (1.0 - c) * x / total;
+                    }
+                    psi0
+                } else {
+                    let norm = |t: f64| crate::linalg::norm_sqr(&fold_flow.at(&psi0, t)) - 1.0;
+                    let mut hi = 1.0 / GAMMA;
+                    while norm(hi) > 0.0 {
+                        hi *= 2.0;
+                    }
+                    let mut lo = 0.0;
+                    for _ in 0..80 {
+                        let mid = 0.5 * (lo + hi);
+                        if norm(mid) > 0.0 {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    tau += lo;
+                    fold_flow.at(&psi0, lo)
+                };
+                let rho = fold_flow.integral(&start);
+                tau += (0..n).map(|p| rho[(p, p)].re).sum::<f64>();
+                for &offset in &offsets {
+                    for q in 0..3 {
+                        let lq = Mat::from_fn(GROUND, n, |b, p| blocks.iter().enumerate().filter(|(_, o)| fold.blocks[**o].value == offset).map(|(x, _)| jumps[x][q][(b, p)]).sum());
+                        let m = lq.product(&rho).product(&lq.adjoint());
+                        for (b, o) in next.iter_mut().enumerate() {
+                            *o += m[(b, b)].re;
+                        }
+                    }
+                }
+                let total_exact: f64 = next_exact.iter().sum();
+                let total: f64 = next.iter().sum();
+                worst_tau = worst_tau.max((tau / tau_exact - 1.0).abs());
+                worst_tv = worst_tv.max(0.5 * (0..GROUND).map(|b| (next[b] / total - next_exact[b] / total_exact).abs()).sum::<f64>());
+            }
+            let read = readings.ring + readings.series;
+            compared += 1;
+            lines.push(format!("   trial {trial} (ground {g}, excited {e}, couplings ×{scale:.2}Γ): the ring {:.2e}, the series {:.2e}; the worst landing's waiting time {worst_tau:.2e}, next landing's total variation {worst_tv:.2e}; actual over read {:.2}", readings.ring, readings.series, worst_tau.max(worst_tv) / read));
+            if readings.most() <= share {
+                within += 1;
+                assert!(worst_tau <= share && worst_tv <= share, "trial {trial}: within its readings ({:.2e}) the landings err by {worst_tau:.2e} (waiting) and {worst_tv:.2e} (next landing)", readings.most());
+            }
+        }
+    }
+    for l in &lines {
+        println!("{l}");
+    }
+    println!("{compared} folds compared, {within} within their readings");
+    assert!(within >= 10, "{within} within");
+}
+
+/// A two-level atom's ring reads what its landing leaves (proto.rs # The ring; landing.status 6): the ring's reading at the
+/// focus, resonant at s = 0.1–0.4, 6.8·10⁻³, 3.0·10⁻², 7.9·10⁻², 0.174, and at Δ = −4Γ, s = 10, 30, 60, 4.6·10⁻³,
+/// 2.45·10⁻², 5.5·10⁻² -- the leading order of the waiting time's error on the exact slow span -- each within a tenth.
+#[test]
+fn a_two_level_atom_s_ring_reads_its_landing() {
+    for (delta, s, expected) in [(0.0, 0.1, 6.8e-3), (0.0, 0.2, 3.0e-2), (0.0, 0.3, 7.9e-2), (0.0, 0.4, 0.174), (-4.0 * GAMMA, 10.0, 4.6e-3), (-4.0 * GAMMA, 30.0, 2.45e-2), (-4.0 * GAMMA, 60.0, 5.5e-2)] {
+        let req = two_level(delta, s);
+        let fold = Fold::new(&req, &Choice::base(&req, vec![]).unwrap(), 0).unwrap();
+        let mut ws = fold.prototype_workspace().unwrap();
+        let mut cache = super::proto::Cache::default();
+        let readings = fold.prototype([0.0; 3], [0.0; 3], &mut cache, &mut ws).expect("the fold at the focus").readings();
+        println!("Δ {delta:+.1} s {s}: the ring {:.3e} against {expected:.2e} (the series' {:.1e})", readings.ring, readings.series);
+        assert!((readings.ring - expected).abs() <= 0.1 * expected, "the ring reads the landing's error");
     }
 }
 
@@ -3174,11 +3398,12 @@ fn a_landing_is_the_slow_mode_s_survival_extrapolated_to_the_jump() {
     }
 }
 
-/// A resonant two-level atom at rest swept over saturations s = 0.1–0.6 (BRIEF_STEP3C item 1; DESIGN §11, M18): its fold's
-/// series' ratio goes to one about s = 0.55 (proto.rs: none at and beyond it), its count without bound, so the node rises
-/// before: at every s every step's middle exists (no step refused), and the run's photons per µs are the master
-/// equation's Γρ_ee = (Γ/2)s/(1 + s) within four of their standard errors and the share -- continuous in s, whichever side
-/// a step stands on (said: the steps' ends on the explicit cluster).
+/// A resonant two-level atom at rest swept over saturations s = 0.1–0.6 (BRIEF_STEP3C item 1, BRIEF_LANDIMPL; DESIGN §11,
+/// M18, M15): its fold's series' ratio goes to one about s = 0.55 (proto.rs: none at and beyond it), and its ring reads
+/// beyond the share from s ≈ 0.24 (proto.rs # The ring; 3.0·10⁻² at s = 0.2, 7.9·10⁻² at 0.3): at s = 0.1 and 0.2 the
+/// fold stays (no step's end explicit), from s = 0.3 the node rises; at every s every step's middle exists (no step
+/// refused), and the run's photons per µs are the master equation's Γρ_ee = (Γ/2)s/(1 + s) within four of their standard
+/// errors and the share -- continuous in s, whichever side a step stands on.
 #[test]
 fn a_resonant_two_level_atom_rises_before_its_fold_ceases_to_exist() {
     use crate::step::{Dynamics, Midway, Trajectory};
@@ -3190,7 +3415,7 @@ fn a_resonant_two_level_atom_rises_before_its_fold_ceases_to_exist() {
     }
     let share = crate::model::elim::share();
     let (tau, steps, count) = (0.1, 100, 12);
-    for s in [0.1, 0.3, 0.5, 0.55, 0.6] {
+    for s in [0.1, 0.2, 0.3, 0.5, 0.55, 0.6] {
         let req = two_level(0.0, s);
         let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
         let mut scratch = crate::step::Scratch::default();
@@ -3202,22 +3427,24 @@ fn a_resonant_two_level_atom_rises_before_its_fold_ceases_to_exist() {
                 let c = run.cluster(t.cluster);
                 explicit += usize::from(c.states.len() > c.ground);
             }
-            jumps += u64::from(t.jumps);
+            jumps += t.scattered[0] as u64;
             dropped += t.dropped;
         }
         let time = (count as usize * steps) as f64 * tau;
         let (rate, error, master) = (jumps as f64 / time, (jumps as f64).sqrt() / time, 0.5 * GAMMA * s / (1.0 + s));
-        println!("s {s:.2}: {rate:.4} ± {error:.4} photons/µs against the master equation's {master:.4}; {explicit} of {} steps' ends explicit; δp booked {dropped:.2e}", count as usize * steps);
+        println!("s {s:.2}: {rate:.4} ± {error:.4} photons/µs against the master equation's {master:.4}; {explicit} of {} steps' ends explicit; rings booked {dropped:.2e}", count as usize * steps);
         assert!((rate - master).abs() <= 4.0 * error + share * master, "s {s}: the photons' rate {rate} ± {error} against {master}");
+        assert!(if s < 0.25 { explicit == 0 } else { explicit > 0 }, "s {s}: the fold stays where its ring is within the share, the node rises where not");
     }
 }
 
-/// The fall's criterion with its balance (BRIEF_STEP3C item 1; DESIGN §11.4, run.rs # The nodes risen and fallen): a
-/// two-level atom's decisions (at Δ = −4Γ, s = 2: its fold within the share, its landing's reading too) forced to flip -- the explicit side priced dearer from the explicit cluster, cheaper from the
-/// folded one (the integrator's price is the decision's argument) --, the explicit state each time (1, 0) (a fast part,
-/// δp the landing's deficit). Where an interval's share pays for a flip, (share − ρ)γΔt ≥ δp, the node falls at every
-/// other decision; where it does not, the booked δp stops the falls; and over all of it what the falls booked stays
-/// within the share of the time, Σδp ≤ Σ share·γΔt + the largest δp.
+/// The fall's criterion with its balance (BRIEF_STEP3C item 1, BRIEF_LANDIMPL item 2; DESIGN §11.4, run.rs # The nodes risen
+/// and fallen): a two-level atom's decisions (at Δ = −4Γ, s = 2: its fold within the share, its ring too) forced to flip --
+/// the explicit side priced dearer from the explicit cluster, cheaper from the folded one (the integrator's price is the
+/// decision's argument) --, the explicit state each time (1, 0): a fast part, its norm's change δp = 1 − ‖ψ′‖² the
+/// landing's (+0.014), what the fall books its ring E (proto.rs `Workspace::ring`, ≈ 2.5·10⁻⁴). Where an interval's share
+/// pays for a flip, (share − ρ)γΔt ≥ E, the node falls at every other decision; where it does not, the booked E stops the
+/// falls; and over all of it what the falls booked stays within the share of the time, ΣE ≤ Σ share·γΔt + the largest E.
 #[test]
 fn a_flipping_node_s_booked_drops_stop_its_falls_where_the_share_does_not_pay_them() {
     use crate::step::{Dynamics, Middle as _, Offer};
@@ -3228,18 +3455,21 @@ fn a_flipping_node_s_booked_drops_stop_its_falls_where_the_share_does_not_pay_th
     let (r, t) = ([0.0; 3], 0.0);
     let fewer = |o: &Offer| 1e9 * o.states as f64;
     let more = |o: &Offer| 1e9 / o.states as f64;
-    // The pay of one interval of Δt on the folded side: its slow mode's decay rate γ and its reading ρ.
+    // The folded side's slow mode's decay rate γ; one fall of (1, 0) where the share pays for anything, its ring.
     let low = run.middle(folded, r, t, &crate::step::Held::default(), false);
     let path = low.path([0.0; 3], [0.0; 3]);
     let mut g = Mat::zeros(1, 1);
     low.generator(&path, 0.0, &mut g);
     let gamma = -2.0 * g[(0, 0)].im;
-    let (landed, _) = (low.landing(&path, &[C64::ONE]), ());
-    let deficit = 1.0 - landed[0].norm_sqr();
-    let (mut owed, mut booked, mut paid, mut largest) = (0.0, 0.0, 0.0, 0.0_f64);
     let n = run.cluster(explicit).states.len();
     let bare: Vec<C64> = (0..n).map(|i| if i == 0 { C64::ONE } else { C64::ZERO }).collect();
-    for (phase, interval) in [(0, 20.0 * deficit / (share * gamma)), (1, 0.5 * deficit / (share * gamma))] {
+    let probe = run.middle(explicit, r, t, &crate::step::Held::default(), true);
+    let fell = probe.decide(&probe.path([0.0; 3], [0.0; 3]), &bare, 1e3 / gamma, 0.0, &fewer).switched.expect("a fall the share pays for");
+    let (ring, norm) = (fell.dropped, 1.0 - crate::linalg::norm_sqr(&fell.psi));
+    println!("the fall of (1, 0): its norm's change δp {norm:+.4e}, its ring {ring:.3e}");
+    assert!(ring > 0.0 && ring < norm.abs(), "a fall books its ring, not its norm");
+    let (mut owed, mut booked, mut paid, mut largest) = (0.0, 0.0, 0.0, 0.0_f64);
+    for (phase, interval) in [(0, 20.0 * ring / (share * gamma)), (1, 0.5 * ring / (share * gamma))] {
         let mut falls = 0;
         for _ in 0..20 {
             let high = run.middle(explicit, r, t, &crate::step::Held::default(), true);
@@ -3259,10 +3489,78 @@ fn a_flipping_node_s_booked_drops_stop_its_falls_where_the_share_does_not_pay_th
             paid += share * gamma * 2.0 * interval;
             assert_eq!(rose.switched.map(|x| x.cluster), Some(explicit), "the rise back");
         }
-        println!("Δt {interval:.3} µs (the share's pay {:.3e} an interval, δp {deficit:.3e}): {falls} falls of 20; booked {booked:.3e}, the share's {paid:.3e}", share * gamma * interval);
+        println!("Δt {interval:.3e} µs (the share's pay {:.3e} an interval, the ring {ring:.3e}): {falls} falls of 20; booked {booked:.3e}, the share's {paid:.3e}", share * gamma * interval);
         assert!(if phase == 0 { falls == 20 } else { falls == 0 }, "falls where the share pays for them, none where not");
     }
-    assert!(booked <= paid + largest, "the booked drops within the share of the time");
+    assert!(booked <= paid + largest, "the booked rings within the share of the time");
+}
+
+/// A fall right after a landing on the explicit side books its ring, not its norm (BRIEF_LANDIMPL item 2; landing.status 4,
+/// 8): a resonant two-level atom at s = 0.2, its explicit state from (1, 0) after t_d = 0, 1/Γ, 4/Γ of no jump, taken onto
+/// its fold: the norm's change δp = 1 − ‖ψ′‖² is large and negative (−0.48, −0.33, −0.10: the fast part's antibunching, a
+/// dead time on the clock), while the clock's mean waiting time from there errs by +2.9 %, +3.0 %, +1.7 % against the
+/// exact (the explicit generator's) on the exact slow span -- what the fall's ring reads (2.9·10⁻², 3.0·10⁻², 1.6·10⁻²),
+/// within its 15 % and the share (its leading order; T's error within the share, the ring quadratic in it) --; the fold's
+/// own slow part, c = ‖ψ′‖², is the exact one's within the series' share (2·share·|c − 1|, as the landing's).
+#[test]
+fn a_fall_right_after_a_landing_books_its_ring_not_its_norm() {
+    use crate::step::{Dynamics, Middle as _};
+    let req = two_level(0.0, 0.2);
+    let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+    let (folded, explicit) = two_level_clusters(&run, &req);
+    let (low, high) = (run.middle(folded, [0.0; 3], 0.0, &crate::step::Held::default(), false), run.middle(explicit, [0.0; 3], 0.0, &crate::step::Held::default(), false));
+    let (path, path2) = (low.path([0.0; 3], [0.0; 3]), high.path([0.0; 3], [0.0; 3]));
+    let n = run.cluster(explicit).states.len();
+    let (mut g, mut gx) = (Mat::zeros(1, 1), Mat::zeros(n, n));
+    low.generator(&path, 0.0, &mut g);
+    high.generator(&path2, 0.0, &mut gx);
+    let gamma = -2.0 * g[(0, 0)].im;
+    // The explicit side's two coupled states (the ground state and the excited one the light drives) and its generator
+    // there; by its eigenvectors e^{−iGt}ψ and the exact mean waiting time ∫‖e^{−iGt}ψ‖²dt.
+    let coupled: Vec<usize> = (0..n).filter(|&k| k == 0 || gx[(k, 0)] != C64::ZERO || gx[(0, k)] != C64::ZERO).collect();
+    assert_eq!(coupled.len(), 2, "a two-level atom");
+    let two = Mat::from_fn(2, 2, |i, j| gx[(coupled[i], coupled[j])]);
+    let e = crate::linalg::eigen(&two).expect("its eigenvectors");
+    let det = e.vectors[(0, 0)] * e.vectors[(1, 1)] - e.vectors[(0, 1)] * e.vectors[(1, 0)];
+    let on = |psi: [C64; 2]| [(e.vectors[(1, 1)] * psi[0] - e.vectors[(0, 1)] * psi[1]) / det, (e.vectors[(0, 0)] * psi[1] - e.vectors[(1, 0)] * psi[0]) / det];
+    let evolved = |psi: [C64; 2], t: f64| -> [C64; 2] {
+        let c = on(psi);
+        std::array::from_fn(|i| (0..2).map(|k| e.vectors[(i, k)] * c[k] * (C64::new(0.0, -t) * e.values[k]).exp()).sum())
+    };
+    let waiting = |psi: [C64; 2]| -> f64 {
+        let c = on(psi);
+        let mut sum = C64::ZERO;
+        for k in 0..2 {
+            for l in 0..2 {
+                let overlap: C64 = (0..2).map(|i| e.vectors[(i, k)].conj() * e.vectors[(i, l)]).sum();
+                sum += c[k].conj() * c[l] * overlap * C64::new(0.0, 1.0) / (e.values[k].conj() - e.values[l]);
+            }
+        }
+        sum.re
+    };
+    // The slow mode: the eigenvector of the larger P weight.
+    let weight = |k: usize| e.vectors[(0, k)].norm_sqr() / (e.vectors[(0, k)].norm_sqr() + e.vectors[(1, k)].norm_sqr());
+    let slow = if weight(0) > weight(1) { 0 } else { 1 };
+    let clock = |c: f64, gamma: f64| if c > 1.0 { (1.0 + c.ln()) / gamma } else { c / gamma };
+    let share = crate::model::elim::share();
+    for (td, expected) in [(0.0, 2.9e-2), (1.0 / GAMMA, 3.0e-2), (4.0 / GAMMA, 1.6e-2)] {
+        let psi = evolved([C64::ONE, C64::ZERO], td);
+        let scale = 1.0 / (psi[0].norm_sqr() + psi[1].norm_sqr()).sqrt();
+        let psi = psi.map(|z| z * scale);
+        let exact = waiting(psi);
+        // Its slow part along the fast span on the exact slow span: the slow eigenvector's coefficient.
+        let alpha = on(psi)[slow];
+        let c_exact = alpha.norm_sqr() * (e.vectors[(0, slow)].norm_sqr() + e.vectors[(1, slow)].norm_sqr());
+        let error = clock(c_exact, -2.0 * e.values[slow].im) / exact - 1.0;
+        let mut state = vec![C64::ZERO; n];
+        (state[coupled[0]], state[coupled[1]]) = (psi[0], psi[1]);
+        let (fallen, ring, _) = high.take_onto(&state, folded, &low).expect("the fall");
+        let c = fallen[0].norm_sqr();
+        println!("t_d {:.2}/Γ: δp {:+.4} (on the exact span {:+.4}), the clock's mean waiting on the exact span {:+.2} % from the exact, on the fold's {:+.2} %; the fall's ring {ring:.3e} (derived {expected:.1e})", td * GAMMA, 1.0 - c, 1.0 - c_exact, 100.0 * error, 100.0 * (clock(c, gamma) / exact - 1.0));
+        assert!((error - ring).abs() <= (0.15 + share) * ring, "the fall's ring reads the clock's error (its leading order, on T within the share)");
+        assert!((ring - expected).abs() <= 0.15 * expected, "the ring as derived");
+        assert!((c - c_exact).abs() <= 2.0 * share * (c_exact - 1.0).abs(), "the fold's slow part the exact span's within the series' share");
+    }
 }
 
 /// R4_LIN_4's F = 1 set along thermal paths (BRIEF_STEP3C item 1): its fold does not exist at the focus (its series'

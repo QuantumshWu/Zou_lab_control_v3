@@ -702,9 +702,10 @@ pub struct Decided {
     pub work: f64,
 }
 
-/// A state taken onto another cluster at a decision time (DESIGN §11.1): the cluster, the state on it at the middle,
-/// what the switch dropped (δp, a population: what of the state the cluster's span does not hold), and its held forms at
-/// the middle (the model's, `Forms`, its time the middle's).
+/// A state taken onto another cluster at a decision time (DESIGN §11.1): the cluster, the state on it at the middle (its
+/// norm the slow part's: the jump clock's), what the switch leaves booked -- the ring of its fast part, its transient's
+/// error (rate units: model/fold/proto.rs # The ring; zero for a state that follows the fold, a rise) --, and its held
+/// forms at the middle (the model's, `Forms`, its time the middle's).
 pub struct Switched {
     pub cluster: usize,
     pub psi: Internal,
@@ -888,9 +889,10 @@ pub struct Trajectory {
     /// The optical sector's booking over the trajectory (# The optical sector's noise; the ledger's): Σ ε_Q tr C of its
     /// steps' covariances C, Σ tr C, and the scattered light's Σ tr(2D)|τ| (1/µm²).
     pub booked: [f64; 3],
-    /// What its switches of representation dropped (DESIGN §11.1, §11.4: Σ δp, populations), and the balance of it the
-    /// share has not yet paid -- owed: each decision interval pays (share − ρ)γΔt off it, never below zero, and a node
-    /// falls only where the balance, its δp and its fold's ργΔt are within the share's γΔt (`Middle::decide`).
+    /// What its switches of representation left booked (DESIGN §11.1, §11.4: Σ E, each switch's ring, `Switched`), and
+    /// the balance of it the share has not yet paid -- owed: each decision interval pays (share − ρ)γΔt off it, never
+    /// below zero, and a node falls only where the balance, its E and its fold's ργΔt are within the share's γΔt
+    /// (`Middle::decide`).
     pub dropped: f64,
     pub owed: f64,
     /// The model's representation of its folds for this trajectory (`Held`).

@@ -29,19 +29,23 @@
 //! reading beyond the share), the budget or what it spent, whichever is more -- the least that side may cost by what
 //! was measured, at which its offer is no cheaper than staying was. So a side found dearer is tried again only where
 //! staying has grown dearer than it was then, and an attempt wastes at most the budget, within a step's own price: no
-//! constant, no hysteresis. A fall is taken only where what it drops is within the share
-//! (DESIGN §11.4): with the trajectory's owed balance b (`Trajectory::owed`: what earlier switches dropped and the
-//! share has not paid since, each interval paying (share − ρ)γΔt off it), b + δp + ρ′γΔt ≤ share·γΔt, ρ′ the folded
-//! side's reading, γ the state's decay rate, Δt the interval -- so a trajectory that flips books δp at each fall and its
-//! balance stops the next one: the flips stop by what they book, no hysteresis.
+//! constant, no hysteresis. The fold's side is within the share where its readings ρ are -- the series', the reuse's,
+//! the far blocks', what the nodes left out leave, and the ring's (proto.rs # The ring: the transient a jump's landing
+//! leaves) --; where ρ reads beyond the share the fold is not within it at the point, and the decision is its rise,
+//! whatever its price (no budget). A fall is taken only where what it leaves is within the share (DESIGN §11.4): with
+//! the trajectory's owed balance b (`Trajectory::owed`: what earlier switches booked and the share has not paid since,
+//! each interval paying (share − ρ)γΔt off it), b + E + ρ′γΔt ≤ share·γΔt, E the ring of the fall's fast part (proto.rs
+//! `Workspace::ring`: its transient's error, zero for a state that follows T), ρ′ the folded side's readings (within the
+//! share), γ the state's decay rate, Δt the interval -- so a trajectory that flips books E at each fall and its balance
+//! stops the next one: the flips stop by what they book, no hysteresis.
 //!
 //! A switch is one formula (`Workspace::taken`; proto.rs # The landing): the state lifted on the side it leaves, taken
 //! onto the other's slow span along its fast one, ψ′ = S′a′, a′ = N′⁻¹Φ_L′†Ψ at the middle, not normalized. Risen, the
 //! node's rows become P amplitudes x_X = T_X x, every Q row following T: exact (N′x, so S′x: the metric held T_X†T_X as
 //! the explicit amplitude's square). Fallen, its rows are given their explicit amplitudes, a′ = x + N′⁻¹T_L,X†(x_X −
-//! T_X x), and the norm's change δp = ‖ψ‖² − ‖ψ′‖² over ‖ψ‖² -- the fast part's net emission, of either sign -- is
-//! booked (`Trajectory::dropped`); a norm at the trajectory's threshold or below is that photon at once (step.rs
-//! `Midway::decided`). A jump's landing is the same formula with nothing following (a bare state, S N⁻¹f): a fall at
+//! T_X x), and what the fast part leaves -- its ring E (proto.rs `Workspace::ring`) -- is booked (`Trajectory::dropped`);
+//! its norm's change, ‖ψ‖² − ‖ψ′‖², is the fast part's net emission, of either sign, the clock's: a norm at the
+//! trajectory's threshold or below is that photon at once (step.rs `Midway::decided`). A jump's landing is the same formula with nothing following (a bare state, S N⁻¹f): a fall at
 //! x_X = 0. A jump lands in its emitting cluster where it lands in that ground set, else in the
 //! cluster the trajectory last held for the landing set (`Caches::chosen`), else in that set's with nothing explicit.
 //! A trajectory starts on its set's cluster with nothing explicit where its fold exists there, else with the candidate
@@ -129,7 +133,7 @@
 //! The displayed rows are the fold's time-averaged populations at the point (`Dynamics::readout`): the populations of
 //! the slow modes between two jumps (proto.rs `Workspace::populations`) -- not the optical Bloch equations' ensemble
 //! ρ_ee, which holds each jump's transient over 1/Γ that the fold's landing leaves out (within the share, read by the
-//! landing's reading).
+//! ring's reading).
 //!
 //! # The optical sector (step.rs # The optical sector's noise; DESIGN §1.3, R23)
 //! A set that holds explicit excited states has an optical sector (`Middle::optical`): its ground states, γ_Q the least
@@ -485,12 +489,12 @@ impl Onefold {
     }
 
     /// Where a trajectory's bare state f at a point first lands (`Dynamics::started`; # The nodes risen and fallen): ground
-    /// set k's cluster with nothing explicit where its fold exists there within the share (its landing's reading within
-    /// it, proto.rs # The landing's reading), else risen until one is (`Clusters::rise`) -- the landing and its held forms
+    /// set k's cluster with nothing explicit where its fold exists there within the share (its readings within it, the
+    /// ring's with them, and its landing made: `Fold::prototype_left`), else risen until one is (`Clusters::rise`) -- the landing and its held forms
     /// on the forward that found it within, and the representation it starts with. None where no node is left to rise.
     fn first(&self, k: usize, at: &Point, f: &[C64]) -> Option<(usize, Vec<C64>, Forms, Caches)> {
         let share = crate::model::elim::share();
-        let holds = |fold: &Fold, cache: &Cache, ws: &mut Workspace| ws.readings().landing <= share && fold.prototype_left(cache, ws);
+        let holds = |fold: &Fold, cache: &Cache, ws: &mut Workspace| ws.readings().most() <= share && fold.prototype_left(cache, ws);
         let (cluster, (state, forms), mut caches) = self.clusters.rise(k, at, f, holds, |cluster, bare, cache, ws| {
             let light = !self.clusters.sets.get(cluster).fold.blocks.is_empty();
             self.held_forms(cluster, at, bare, light.then_some((cache, ws)), true)
@@ -790,7 +794,7 @@ pub(crate) struct Middle<'a> {
 /// momentum and velocity), the outer nodes' offset it holds them at, whether it holds the tangent; whether the decision
 /// was made; the generator at the middle; the forwards' counted work, made or not (real multiply-adds,
 /// `step::Middle::made`), the last one's -- the trajectory's count of the cluster (`Caches::counts`) --, its reading (rate
-/// units: the largest of its readings, each within the share) and the budget a forward is made within
+/// units: the largest of its readings, `Readings::most`) and the budget a forward is made within
 /// (`Fold::prototype_within`; a switch's, # The nodes risen and fallen).
 struct Inner {
     committed: Arc<Cache>,
@@ -807,7 +811,6 @@ struct Inner {
     made: f64,
     counted: f64,
     reading: f64,
-    landing: f64,
     budget: f64,
 }
 
@@ -837,7 +840,7 @@ impl Middle<'_> {
             let ws = ws.as_mut().expect("a workspace");
             let made = fold.prototype_within(self.r, path.kappa, eval, ws, *budget).map(|step| {
                 generator.data.copy_from_slice(&step.generator.data);
-                (step.readings().most(), step.landing)
+                step.readings().most()
             });
             let spent = ws.spent() * crate::decide::COMPLEX;
             if decide {
@@ -846,8 +849,8 @@ impl Middle<'_> {
             inner.decided |= decide;
             inner.exists = made.is_some();
             (inner.made, inner.counted) = (inner.made + spent, spent);
-            if let Some((reading, landing)) = made {
-                (inner.reading, inner.landing) = (reading, landing);
+            if let Some(reading) = made {
+                inner.reading = reading;
             }
             (inner.current, inner.nodes, inner.tangent) = (Some((path.kappa, path.velocity)), None, false);
         }
@@ -998,8 +1001,9 @@ impl Middle<'_> {
     /// The state ψ of this middle taken onto the cluster `to` at its middle, `other` (# The nodes risen and fallen; one
     /// formula, `Workspace::taken`): each of `to`'s P places the state's amplitude there -- a P place's own, or a risen
     /// node's row's (εx) --; each of its Q rows that is this cluster's P place given that place's amplitude; every other
-    /// Q row following. With what it drops, δp over ‖ψ‖², and the left response's count where it was made here (real
-    /// multiply-adds). None where `other`'s left response does not exist (`Workspace::taken`).
+    /// Q row following. With the ring of what it leaves (`Workspace::ring`: zero for a state that follows T, a rise), and
+    /// the left response's count where it was made here (real multiply-adds). None where `other`'s left response does not
+    /// exist (`Workspace::taken`).
     pub(super) fn take_onto(&self, psi: &[C64], to: usize, other: &Middle) -> Option<(Vec<C64>, f64, f64)> {
         let (run, mine) = (self.run, self.run.clusters.sets.get(self.set));
         let (theirs_set, from) = (run.clusters.sets.get(to), &mine.fold);
@@ -1030,10 +1034,9 @@ impl Middle<'_> {
         let ws = ws.as_mut().expect("a workspace");
         let taken = ws.taken(target, eval, &xp, &fallen, true);
         let work = ws.left_work() * crate::decide::COMPLEX;
-        let (taken, _) = taken?;
-        let norm = crate::linalg::norm_sqr(psi);
-        let dropped = (norm - crate::linalg::norm_sqr(&taken)) / norm;
-        Some((taken, dropped, work))
+        let (taken, slow) = taken?;
+        let ring = ws.ring(target, eval, &xp, &fallen, true, &slow, &taken);
+        Some((taken, ring, work))
     }
 
     /// e^{iν_m (t_m + s)} ρ: tone m's X at the time s from the middle (module documentation, # The tones).
@@ -1335,8 +1338,9 @@ impl crate::step::Middle for Middle<'_> {
     /// their restarts -- the other side's forward at the point and its held forms -- against staying (this middle's
     /// forwards as made, `made`); the cheapest that is cheaper made here within the budget that keeps it so, its count kept
     /// (where it gives no side within the share, at least that budget), and the state taken onto it
-    /// (`Middle::take_onto`); a fall taken only where the balance, its δp and its fold's ργΔt are within the share's γΔt.
-    /// Nothing where this middle does not decide, holds no light, or its fold does not exist here.
+    /// (`Middle::take_onto`); where this side's readings ρ are beyond the share, its rise whatever its price; a fall taken
+    /// only where the other side reads within the share and the balance, the fall's ring E and its fold's ργΔt are within
+    /// the share's γΔt. Nothing where this middle does not decide, holds no light, or its fold does not exist here.
     fn decide(&self, path: &Path, psi: &[C64], interval: f64, owed: f64, price: &dyn Fn(&Offer) -> f64) -> Decided {
         let mut out = Decided { owed, held: None, switched: None, work: 0.0 };
         let (run, set) = (self.run, self.run.clusters.sets.get(self.set));
@@ -1346,18 +1350,18 @@ impl crate::step::Middle for Middle<'_> {
         let share = crate::model::elim::share();
         // A state's decay rate on a generator, i⟨ψ|G − G†|ψ⟩/‖ψ‖².
         let rate = |g: &Mat, psi: &[C64]| -2.0 * psi.iter().zip(g.apply(psi)).map(|(a, b)| a.conj() * b).sum::<C64>().im / crate::linalg::norm_sqr(psi);
-        let (x, gamma, reading, landing, made) = {
+        let (x, gamma, reading, made) = {
             let inner = self.inner.borrow();
-            (inner.ws.as_ref().expect("a workspace").normal().apply(psi), rate(&inner.generator, psi), inner.reading, inner.landing, inner.made)
+            (inner.ws.as_ref().expect("a workspace").normal().apply(psi), rate(&inner.generator, psi), inner.reading, inner.made)
         };
         out.owed = (owed - (share - reading.min(share)) * gamma * interval).max(0.0);
         let here = price(&set.offer(made));
         let restart = |o: &Offer| o.made + crate::decide::COMPLEX * o.costs[2];
         let offers = self.offers(&x);
-        // Where the landing reads beyond the share the fold is not within it here: its rise, whatever its price (no
+        // Where the readings are beyond the share the fold is not within it here: its rise, whatever its price (no
         // budget); else the cheapest offer cheaper than staying, its forward within the budget that keeps it so (its count
         // in its price and in its restart; real multiply-adds).
-        let (to, budget) = if landing > share {
+        let (to, budget) = if reading > share {
             let Some(&to) = offers.iter().find(|&&c| run.clusters.sets.get(c).nodes.len() > set.nodes.len()) else { return out };
             (to, None)
         } else {
@@ -1386,12 +1390,12 @@ impl crate::step::Middle for Middle<'_> {
         if !exists {
             return out;
         }
-        let Some((taken, dropped, left)) = self.take_onto(psi, to, &other) else { return out };
+        let Some((taken, ring, left)) = self.take_onto(psi, to, &other) else { return out };
         out.work += left;
         if set.nodes.len() > run.clusters.sets.get(to).nodes.len() {
             let theirs = other.inner.borrow();
             let (rho, gamma) = (theirs.reading, rate(&theirs.generator, &taken));
-            if theirs.landing > share || out.owed + dropped + rho * gamma * interval > share * gamma * interval {
+            if !within || out.owed + ring + rho * gamma * interval > share * gamma * interval {
                 return out;
             }
         }
@@ -1407,7 +1411,7 @@ impl crate::step::Middle for Middle<'_> {
         out.work += crate::decide::COMPLEX * run.clusters.sets.get(to).work[2];
         let forms = Forms { time: 0.0, held: real(f[0]), tones: tones.iter().zip(&f[1..]).map(|(&nu, a)| (nu, *a)).collect() };
         out.held = Some(Held(Some(Arc::new(other.leaves()))));
-        out.switched = Some(Switched { cluster: to, psi: taken.into_iter().collect(), dropped, forms });
+        out.switched = Some(Switched { cluster: to, psi: taken.into_iter().collect(), dropped: ring, forms });
         out
     }
 }
@@ -1461,7 +1465,6 @@ impl crate::step::Dynamics for Onefold {
                 made: 0.0,
                 counted: 0.0,
                 reading: 0.0,
-                landing: 0.0,
                 budget: f64::INFINITY,
             }),
         }
