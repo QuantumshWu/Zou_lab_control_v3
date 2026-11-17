@@ -1681,8 +1681,7 @@ fn root_states() -> f64 {
 /// The picture of the generator along a step's path (`spectral::Picture`), prepared -- each route priced at its
 /// quadrature's nodes, the middle and the end (`nodes`), and at the states a jump's root reads (`root_states`) times the
 /// chance of a jump in what is left of the step, 1 − e^{−h₀|h − u|} at the hazard h₀ of `start`, the frame's state at
-/// the time u it is launched from (none: no root priced); the strides' share at what that state forgets, h₀
-/// (`Picture::prepare`) --: the model's generator at the step's middle and, unless it
+/// the time u it is launched from (none: no root priced) --: the model's generator at the step's middle and, unless it
 /// is still along every path, at the step's two ends -- its static group, and its exact tones' envelopes at the three
 /// nodes (`Middle::beats`). The decay is laid into `decay` first in the order of the kick's sums (`Sums`): the static
 /// group's node by node (−h, 0, h, or the middle alone where Ĥ is still), then each tone's at each node at the phases
@@ -1744,7 +1743,7 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
         hazard(decay, part, x.len()).max(0.0)
     });
     let roots = -(-rate * (h - start.map_or(h, |(_, u)| u)).abs()).exp_m1() * root_states();
-    picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots, rate);
+    picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots);
     Ok(scale)
 }
 

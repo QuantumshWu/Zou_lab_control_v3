@@ -794,9 +794,9 @@ fn a_step_integrates_its_internal_frequencies_whatever_the_detuning() {
 /// - Where the step's nodes resolve the pair for what changes (Δτ = 1 in four and in eight steps; with the decay in
 ///   two as well) the state is hopped, and both fall as the fourth order, sixteen a halving: a hop's second Magnus term
 ///   is of the fifth order in the step, and so is the three nodes' representation of the change (Simpson's rule's) --
-///   down to the strides' truncation where the step takes them: their exponentials are within the kick's share of what
-///   the state forgets (spectral.rs `Picture::tolerance`), over the span at most QUADRATURE Γ span with the decay Γ
-///   (none without one: round-off).
+///   and so is the strides' CF4 where the step takes them, their exponentials summed to round-off (spectral.rs,
+///   # The strides; until 2026-11-17 truncated at the share of what the state forgets, which this test let pass down to
+///   QUADRATURE Γ span).
 /// - Where they do not (Δτ = 1 in one step, Δτ = 10 and more in any) the state follows the change, by the following
 ///   X = D/ω and its rate's corrections, to the second order. Its error is within the square of the following at the
 ///   step's end, (k·v h V/ω)² with V the light's largest coupling and ω the dressed pair's frequency -- held to that
@@ -849,8 +849,7 @@ fn a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the
             let following = |steps: usize| K * v * 0.5 * span / steps as f64 * coupling / omega;
             // The fourth order between two levels that both hop the pair -- the slowest pair's last two levels at
             // the least --, and the following's square at a level that follows it.
-            let truncated = crate::units::QUADRATURE * gamma * span;
-            let hopped = (0..3).all(|i| !(hops[i] && hops[i + 1]) || (0..2).all(|q| falls[i][q] > 12.0 || errors[i + 1][q] <= truncated)) && (turns != 1.0 || (hops[2] && hops[3]));
+            let hopped = (0..3).all(|i| !(hops[i] && hops[i + 1]) || (0..2).all(|q| falls[i][q] > 12.0)) && (turns != 1.0 || (hops[2] && hops[3]));
             let followed = (0..4).all(|i| hops[i] || errors[i][0] < following(1 << i).powi(2));
             if !(hopped && followed) {
                 failures.push(format!("Γ {gamma}, Δτ {turns}: {errors:?}"));
@@ -3687,7 +3686,7 @@ fn a_scene_s_step_error_by_the_split() {
                         along.middle.generator(&along.path, middle - 0.5 * t, &mut picture.ends[0]);
                         along.middle.generator(&along.path, middle + 0.5 * t, &mut picture.ends[1]);
                     }
-                    picture.prepare(0.5 * t, still, |bandwidth| super::nodes(t, bandwidth) + 2, 0.0, 0.0);
+                    picture.prepare(0.5 * t, still, |bandwidth| super::nodes(t, bandwidth) + 2, 0.0);
                     if i == 0 {
                         for [turn, slope, curvature] in crate::spectral::tests::pairs(&picture) {
                             let bin = [0.5, 1.0, 2.0, 4.0].iter().filter(|edge| turn >= **edge).count();

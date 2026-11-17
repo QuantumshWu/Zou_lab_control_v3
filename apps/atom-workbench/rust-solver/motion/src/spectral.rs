@@ -278,16 +278,27 @@
 //! The state can also be taken without the decomposition (`Picture::through` false): from stop to stop of the caller's
 //! (`Picture::advance`) by CF4 (Blanes & Moan 2006) of the same Ĥ₀ + D(u) -- the static group's parabola and each
 //! tone's members at their phases at the two Gauss nodes --, two exponentials on the vector by Taylor's series
-//! (`linalg::taylor_series`, the old engine's way: its terms through the first whose bound is within the share, not to
-//! round-off). It is exact where nothing moves but for the series' truncation; with D it is of fourth order in the
-//! stride's width, which is the caller's nodes' spacing -- a few radians of Ĥ₀'s bound at most --, so its error is a
-//! share of D's own effect, not an error of Ĥ₀'s frequencies (`Picture::stridden`: the Magnus expansion's first terms a
-//! fourth-order method leaves out, by the matrices' norms, a tone's derivatives with its beat's powers). Each
-//! exponential's series is truncated where its remainder is within the kick's share (`units::QUADRATURE`, the share
-//! the step's quadrature lays its nodes at, step.rs) of what the state forgets over its width: the state keeps an error
-//! for 1/γ, γ the decay it is launched with -- a jump renews it --, so the exponentials' errors over that time add up to
-//! the share whatever the step, as the old engine's truncation per waiting time did (NUMERICAL_SHARE x target x
-//! dt/waiting); a state that forgets nothing is taken to round-off (`Picture::tolerance`). A step takes the strides
+//! (`linalg::taylor_series`), each summed to the round-off of the state it acts on, as every exponential and series of
+//! the decomposition's route is (Λ's phases exact, the hops' moments and their Chebyshev exponentials to round-off). It
+//! is exact where nothing moves; with D it is of fourth order in the stride's width, which is the caller's nodes'
+//! spacing -- a few radians of Ĥ₀'s bound at most --, so its error is a share of D's own effect, not an error of Ĥ₀'s
+//! frequencies (`Picture::stridden`: the Magnus expansion's first terms a fourth-order method leaves out, by the
+//! matrices' norms, a tone's derivatives with its beat's powers). The two routes then take the same flow of Ĥ₀ to the
+//! same round-off and differ by their remainders of D alone, each of the fourth order in the step and read by the
+//! step's companion at twice it: where a step changes its route with its length, its result changes by those, as the
+//! split's routes do (# The split). (Until 2026-11-17 each series was truncated at the kick's share `QUADRATURE` of
+//! what the state forgets over its width, QUADRATURE·h₀·w/2 with h₀ the hazard the step is launched with -- the old
+//! engine's truncation per waiting time, on the premise that the state forgets an error at its decay and that the two
+//! levels of the doubling accumulate the same truncation. Neither holds. An error δ added to the state x goes on under
+//! the same flow, so relative to x it fades at the difference of the two's decay rates, not at x's own: along x's own
+//! mode, or where the modes decay alike -- a two-level atom driven above Ω = Γ/2, both dressed states at Γ/4 --, never,
+//! and the survival integrates the direction's error at the decay's whole size, not at h₀. So the truncation was an
+//! error per unit time that does not fall with the step, read by nothing, while the decomposition's route takes Ĥ₀
+//! exactly: a resonant two-level atom crossing a standing wave over 4 µs without a jump (model/fold/tests.rs,
+//! `an_explicit_two_level_atom_s_survival_falls_to_its_flow_at_every_step`) was within 10⁻⁷ of its flow at τ = 0.2 to
+//! 0.025 µs, all on the decomposition, and 4·10⁻³ and 7·10⁻³ off ln N = −76.6 at 0.0125 and 0.00625, where the strides
+//! became the cheaper route on 265 of 320 steps and on every step; on the strides alone 10⁻⁴ to 9·10⁻³ at every
+//! step; summed to round-off 10⁻⁸ to 10⁻¹⁰.) A step takes the strides
 //! - where they cost less than the decomposition's route as it was last counted on this picture for as many states
 //!   (its preparation and its states at its stops: `Picture::counted`), each with the states a jump's root is expected
 //!   to read -- a stride each, against a state at a time through the decomposition (step.rs `pictured`) --, and the
@@ -486,9 +497,6 @@ pub struct Picture {
     /// Whether D is anything at all, and the step's half h.
     moving: bool,
     half: f64,
-    /// The rate at which the state forgets its own errors (rad/µs): the decay it is launched with, at which a jump
-    /// renews it (`prepare`; the strides' share, `tolerance`).
-    forgets: f64,
     /// Whether any entry of any class is followed, and 1 + X factored (LU with partial pivoting, n² and its pivots) at
     /// the time `factored`: a launched state's way into g -- the following leaves the step's start's, a launch elsewhere
     /// makes its own.
@@ -558,7 +566,6 @@ impl Default for Picture {
             lanes: Vec::new(),
             moving: false,
             half: 0.0,
-            forgets: 0.0,
             followed: false,
             factors: Vec::new(),
             pivots: Vec::new(),
@@ -1010,12 +1017,11 @@ impl Picture {
     /// eigenbasis and their following (`follow`). `stops` gives the stops a step takes at a bandwidth of its forms (its
     /// quadrature's nodes, its middle and its end), `roots` the states a jump's root is expected to read besides
     /// (step.rs `pictured`): what each route is priced at -- a stride per state, or a state at a time through the
-    /// decomposition; `forgets` the decay of the state the step is launched with (rad/µs; the strides' share,
-    /// `tolerance`). `work` begins anew with what this counted.
-    pub fn prepare(&mut self, half: f64, still: bool, stops: impl Fn(f64) -> usize, roots: f64, forgets: f64) {
+    /// decomposition. `work` begins anew with what this counted.
+    pub fn prepare(&mut self, half: f64, still: bool, stops: impl Fn(f64) -> usize, roots: f64) {
         assert!(!still || self.beats.is_empty(), "exact tones on a still path");
         let n = self.n;
-        (self.work, self.width, self.moving, self.forgets) = (0.0, f64::NAN, false, forgets.max(0.0));
+        (self.work, self.width, self.moving) = (0.0, f64::NAN, false);
         (self.half, self.followed, self.spread, self.factored, self.routed) = (half, false, 0.0, f64::NAN, true);
         self.classify();
         if !still {
@@ -1603,15 +1609,15 @@ impl Picture {
 
     /// One stride of the frame's state without the decomposition, from the time u over the width w, either sign: CF4
     /// of Ĥ₀ + D(u) (module documentation, # The strides) -- the static group's parabola, and each tone's members at
-    /// their phases --, each of its two exponentials on the vector by Taylor's series within its tolerance
-    /// (`tolerance`) -- the two planned at once, at the larger of their bounds, and their scalar parts' factor taken once.
+    /// their phases --, each of its two exponentials on the vector by Taylor's series to the round-off of the state --
+    /// the two planned at once, at the larger of their bounds, and their scalar parts' factor taken once.
     fn stride(&mut self, state: &mut [C64], u: f64, w: f64) {
         let n = self.n;
         let size = n * n;
         // Ĥ at the stride's two Gauss nodes c = ½ ∓ √3/6, the weights ¼ ± √3/6: the two exponents' matrices.
         let r = 3.0_f64.sqrt() / 6.0;
         let (u1, u2) = (u + (0.5 - r) * w, u + (0.5 + r) * w);
-        let (t, tolerance) = (C64::new(0.0, -w), self.tolerance(w));
+        let t = C64::new(0.0, -w);
         let (matrices, _) = self.product.split_at_mut(2 * size);
         let mut bounds = [(C64::ZERO, [0.0; 2]); 2];
         for (([w1, w2], matrix), bound) in [[0.25 + r, 0.25 - r], [0.25 - r, 0.25 + r]].into_iter().zip(matrices.chunks_exact_mut(size)).zip(&mut bounds) {
@@ -1639,7 +1645,7 @@ impl Picture {
         // An exponent of no finite bound makes no state: the stride's state is no number, and the step that took it is
         // refused at its end (step.rs `Refused::Overflow`; its generators are numbers, `pictured`, so only an
         // overflow gets here).
-        let Some(plan) = linalg::Taylor::plan(bounds[0].1[0].max(bounds[1].1[0]), bounds[0].1[1].max(bounds[1].1[1]), tolerance, n) else {
+        let Some(plan) = linalg::Taylor::plan(bounds[0].1[0].max(bounds[1].1[0]), bounds[0].1[1].max(bounds[1].1[1]), UNIT_ROUNDOFF, n) else {
             state.fill(C64::new(f64::NAN, f64::NAN));
             return;
         };
@@ -1651,15 +1657,6 @@ impl Picture {
             *x *= phase;
         }
         self.work += 2.0 * ((4 * size) as f64 + plan.work(n)) + (12 * size * self.beats.len()) as f64;
-    }
-
-    /// The tolerance of one of a stride's two exponentials over the width w, relative to the state's norm (module
-    /// documentation, # The strides): the kick's share `QUADRATURE` of what the state forgets over it, the decay it is
-    /// launched with over w/2 -- over the time the state keeps an error, 1/decay, the exponentials add up to the share
-    /// whatever the step, as the old engine's truncation per waiting time did --; the unit round-off where the state
-    /// forgets nothing (no decay: a unitary flow keeps every error).
-    fn tolerance(&self, w: f64) -> f64 {
-        (QUADRATURE * self.forgets * 0.5 * w.abs()).max(UNIT_ROUNDOFF)
     }
 
     /// Launches the picture from the frame's state x at the time `from` of the step (from the middle; the step's
@@ -1840,14 +1837,14 @@ impl Picture {
     }
 
     /// The strides' price at `stops` stops: a stride per stop over the stops' mean spacing w, each exponential's series
-    /// (`linalg::Taylor`) at the bound of its exponent, half of Ĥ₀'s bounds and D's farthest over w, within its tolerance
-    /// (`tolerance`); and per exponential its matrix (three numbers an entry) and its bound's pass.
+    /// (`linalg::Taylor`) at the bound of its exponent, half of Ĥ₀'s bounds and D's farthest over w, to the round-off
+    /// (`stride`); and per exponential its matrix (three numbers an entry) and its bound's pass.
     fn strided(&self, stops: usize) -> f64 {
         let (n, h) = (self.n, self.half.abs());
         let w = 2.0 * h / stops as f64;
         let bound = 0.5 * (self.bounds[0] + self.bounds[1]) * w + self.moved(h - w, w);
         // A bound that is no number prices no route.
-        linalg::Taylor::plan(bound, 0.5 * self.bounds[1] * w, self.tolerance(w), n).map_or(f64::INFINITY, |plan| stops as f64 * 2.0 * ((4 * n * n) as f64 + plan.work(n)))
+        linalg::Taylor::plan(bound, 0.5 * self.bounds[1] * w, UNIT_ROUNDOFF, n).map_or(f64::INFINITY, |plan| stops as f64 * 2.0 * ((4 * n * n) as f64 + plan.work(n)))
     }
 }
 
@@ -1913,7 +1910,7 @@ pub(crate) mod tests {
         picture.fit(n);
         picture.base = base.clone();
         picture.ends = [-half, half].map(|u| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u)));
-        picture.prepare(half, !moving, |_| 2, 0.0, 0.0);
+        picture.prepare(half, !moving, |_| 2, 0.0);
         picture
     }
 
@@ -1938,13 +1935,13 @@ pub(crate) mod tests {
     /// Hermitian of PGC3D's size about a large common light shift (its traceless part's bound 0.33 rad/µs, the trap's
     /// shift 50 rad/µs) with the Doppler frames' rates on its diagonal (±2.5 rad/µs) and the decay of a folded light
     /// (0.01 rad/µs), and slopes of a light pattern crossed at its speed (A, B of 0.3 and 0.6 rad/µs per µs, µs²); a
-    /// random state, the strides' stops at a quadrature's spacing over steps of 0.5 and 1 µs, launched with the decay of
-    /// a folded light's ground state (`DECAY`). At every stop the state is the parabola's flow within the kick's share
-    /// `QUADRATURE` of its norm (the Magnus expansion's part, `stridden`) and of what it forgets over the time (the
-    /// exponentials' truncation, `Picture::tolerance`); the error is printed beside the share.
+    /// random state, the strides' stops at a quadrature's spacing over steps of 0.5 and 1 µs. Their exponentials summed
+    /// to round-off, at every stop the state is the parabola's flow within the Magnus expansion's part over the step,
+    /// relative to its norm (`stridden`, which the route's choice reads against the kick's share): the strides leave
+    /// nothing else (until 2026-11-17 their exponentials were truncated at the share of what the state forgets, and the
+    /// error was 2.9·10⁻⁴ and 4.1·10⁻⁵ against that share's 4.6·10⁻³ and 5.2·10⁻³).
     #[test]
-    fn a_folded_cluster_s_strides_are_its_flow_within_the_share() {
-        const DECAY: f64 = 0.3;
+    fn a_folded_cluster_s_strides_are_its_flow_within_their_magnus_remainder() {
         let n = 5;
         let mut s = crate::random::Stream::new(41, crate::random::Purpose::Initial, 0, 0);
         let mut hermitian = |size: f64| {
@@ -1966,15 +1963,15 @@ pub(crate) mod tests {
             picture.base = base.clone();
             picture.ends = [-half, half].map(|u| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u)));
             let stops = |bandwidth: f64| ((bandwidth * 2.0 * half).ceil() as usize).max(2) + 2;
-            picture.prepare(half, false, stops, 0.0, DECAY);
+            picture.prepare(half, false, stops, 0.0);
             assert!(!picture.through, "half {half}: the strides taken");
             let count = stops(picture.bandwidth);
             picture.launch(-half, &start);
             let at: Vec<f64> = (1..=count).map(|k| -half + 2.0 * half * k as f64 / count as f64).collect();
             let error = errors(&mut picture, &base, &a, &b, half, &start, &at, 20_000) / norm;
-            let share = QUADRATURE * (1.0 + DECAY * 2.0 * half);
-            eprintln!("half {half}: {count} stops, the state's largest error {error:.2e} of its norm (the share {share:.2e})");
-            assert!(error <= share, "half {half}: {error:e}");
+            let magnus = picture.stridden(count);
+            eprintln!("half {half}: {count} stops, the state's largest error {error:.2e} of its norm (the Magnus part's {magnus:.2e}, the share {QUADRATURE:.2e})");
+            assert!(error <= magnus, "half {half}: {error:e} against {magnus:e}");
         }
     }
 
@@ -2004,13 +2001,11 @@ pub(crate) mod tests {
                     picture.advance(if k == stops { half } else { -half + k as f64 * w }, &mut x);
                 }
                 let error = x.iter().zip(&exact).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max);
-                // What the slopes move between two stops at the step's end: (h‖A‖ + h²‖B‖) w, its square the second order;
-                // and the strides' exponentials' share of the kick's, relative to the state's norm (`Picture::exponential`).
+                // What the slopes move between two stops at the step's end: (h‖A‖ + h²‖B‖) w, its square the second order
+                // (the strides' exponentials are summed to round-off).
                 let moved = (half * 2.0 + half * half * 30.0) * 2.0_f64.sqrt() * w;
-                // Launched with no decay (`pictured`), the exponentials are taken to round-off (`Picture::tolerance`).
-                let (norm, share) = (start.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt(), 0.0);
                 eprintln!("{off} off the exceptional point, moving {moving}: the state's error {error:e} (the slopes move {moved:e} between stops)");
-                assert!(error < if moving { moved * moved } else { 1e-12 } + share * norm, "{off} off the exceptional point, moving {moving}: {error:e}");
+                assert!(error < if moving { moved * moved } else { 1e-12 }, "{off} off the exceptional point, moving {moving}: {error:e}");
             }
         }
     }
@@ -2389,7 +2384,9 @@ pub(crate) mod tests {
     /// inputs of this module's tests -- slow pairs hopped, fast pairs followed, both, nothing moving, the strides of a
     /// folded cluster and of a defective generator, each route asserted --, every output of the picture
     /// (`static_outputs`) is the one the propagation gave before the tones (3640446e, read there by this test), to the
-    /// bit.
+    /// bit; but the folded cluster's strides', whose exponentials are summed to round-off since 2026-11-17 (module
+    /// documentation, # The strides: launched with the decay 0.3 /µs they were truncated at the share before; read at
+    /// that change by this test, every other output as it was).
     #[test]
     fn the_static_group_alone_is_propagated_as_before_to_the_bit() {
         let entry = |seed: f64, i: usize, j: usize| C64::new((seed * (1.0 + i as f64) + 0.7 * j as f64).sin(), (seed * (2.0 + j as f64) - 0.3 * i as f64).cos());
@@ -2419,7 +2416,7 @@ pub(crate) mod tests {
             assert_eq!(route, wanted, "{name}: the route (decomposed, moving, followed, a pair hopped beside)");
             found.push((name, static_outputs(&mut picture)));
         }
-        // The strides: a folded cluster (`a_folded_cluster_s_strides_are_its_flow_within_the_share`) and a defective
+        // The strides: a folded cluster (`a_folded_cluster_s_strides_are_its_flow_within_their_magnus_remainder`) and a defective
         // generator (`a_defective_generator_s_strides_are_the_exponential_s`).
         let n = 5;
         let mut s = crate::random::Stream::new(41, crate::random::Purpose::Initial, 0, 0);
@@ -2437,7 +2434,7 @@ pub(crate) mod tests {
         picture.counted[n] = Some([f64::MAX, 0.0]);
         picture.base = base.clone();
         picture.ends = [-half, half].map(|u| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u)));
-        picture.prepare(half, false, |bandwidth: f64| ((bandwidth * 2.0 * half).ceil() as usize).max(2) + 2, 0.0, 0.3);
+        picture.prepare(half, false, |bandwidth: f64| ((bandwidth * 2.0 * half).ceil() as usize).max(2) + 2, 0.0);
         assert!(!picture.through, "a folded cluster's strides");
         found.push(("strides of a folded cluster", static_outputs(&mut picture)));
         let gamma = 38.117;
@@ -2447,13 +2444,14 @@ pub(crate) mod tests {
         let mut picture = pictured(&base, &slope(2.0), &slope(30.0), 0.03, true);
         assert!(!picture.through, "a defective generator's strides");
         found.push(("strides of a defective generator", static_outputs(&mut picture)));
-        // Read at 3640446e by this test.
+        // Read at 3640446e by this test; the folded cluster's strides at their exponentials' round-off (0x07d3_5ae0_fefe_35e7
+        // at 3640446e, truncated at the share).
         let before = [
             ("slow pairs", (0x5929_f2fe_4b8c_a975, 49)),
             ("fast pairs", (0xeb67_a5e6_163a_febe, 63)),
             ("still", (0x2063_56cf_0f1f_b516, 63)),
             ("fast and slow pairs", (0xbff6_10b9_9e9f_9cdd, 77)),
-            ("strides of a folded cluster", (0x07d3_5ae0_fefe_35e7, 77)),
+            ("strides of a folded cluster", (0x69d5_ed1b_238e_2331, 77)),
             ("strides of a defective generator", (0x3784_b559_9bc9_62a2, 33)),
         ];
         for ((name, (hash, count)), (_, (was, _))) in found.iter().zip(before) {
@@ -2494,7 +2492,7 @@ pub(crate) mod tests {
             |m, _, plus, minus| (*plus, *minus) = (tones[m].plus.clone(), tones[m].minus.clone()),
         );
         assert_eq!(picture.beats.len(), tones.len(), "every candidate a tone");
-        picture.prepare(half, false, |_| 2, 0.0, 0.0);
+        picture.prepare(half, false, |_| 2, 0.0);
         picture
     }
 
@@ -2511,7 +2509,7 @@ pub(crate) mod tests {
             let partners = [-half, 0.0, half].map(|_| t.minus.clone());
             picture.beats.push(Beat { beat: t.beat, key: (0..tones.len()).map(|j| i64::from(j == m)).collect(), candidate: m, members: [members, partners] });
         }
-        picture.prepare(half, false, |_| 2, 0.0, 0.0);
+        picture.prepare(half, false, |_| 2, 0.0);
         picture
     }
 
@@ -2523,7 +2521,7 @@ pub(crate) mod tests {
         picture.fit(n);
         picture.base = toned(group, tones, 0.0);
         picture.ends = [-half, half].map(|u| toned(group, tones, u));
-        picture.prepare(half, false, |_| 2, 0.0, 0.0);
+        picture.prepare(half, false, |_| 2, 0.0);
         picture
     }
 
@@ -2672,7 +2670,7 @@ pub(crate) mod tests {
                     },
                 );
                 assert_eq!(picture.beats.len(), 1, "the candidate a tone");
-                picture.prepare(half, false, |_| 2, 0.0, 0.0);
+                picture.prepare(half, false, |_| 2, 0.0);
                 picture
             };
             let (mut nodes, mut held) = (picture_of(true), picture_of(false));
@@ -2681,7 +2679,7 @@ pub(crate) mod tests {
             static_group.fit(n);
             static_group.base = alone(0.0);
             static_group.ends = [-half, half].map(alone);
-            static_group.prepare(half, false, |_| 2, 0.0, 0.0);
+            static_group.prepare(half, false, |_| 2, 0.0);
             let within = beating_remainders(&nodes, 1);
             let times = [-0.3 * half, 0.5 * half, half];
             let (mut e_nodes, mut e_held, mut e_static) = (0.0_f64, 0.0_f64, 0.0_f64);
@@ -2765,7 +2763,7 @@ pub(crate) mod tests {
                 picture.fit(n);
                 picture.base = shifted(0.0);
                 picture.ends = [-h, h].map(shifted);
-                picture.prepare(h, false, |_| 2, 0.0, 0.0);
+                picture.prepare(h, false, |_| 2, 0.0);
                 picture
             };
             let through = |picture: &mut Picture, x: &[C64]| {
