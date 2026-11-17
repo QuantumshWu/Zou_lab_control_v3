@@ -2754,7 +2754,9 @@ fn the_run_s_lambda_with_a_tone_is_the_master_equation_s() {
 /// of the set: the photons' rate at the jump's place (`Middle::emitted`'s classes, the light turned there) is the hazard
 /// ψ†i(G − G†)ψ/ψ†ψ of the generator at that node (`Middle::generator`) to the rounding: the decay is the jumps' product at
 /// every time, its beat between the offsets with it. (With the jumps per block and the tone's decay in G they differed by
-/// the cross decay, a fraction of the hazard.)
+/// the cross decay, a fraction of the hazard.) And the beating decay is the integrator's candidates' (`Middle::beats`,
+/// `Middle::envelopes`): the generator less every candidate at its phase decays alike at every time across the beat, at
+/// each of the step's three positions, to the rounding.
 #[test]
 fn a_set_with_explicit_states_at_two_offsets_decays_by_its_jumps() {
     use crate::step::{Dynamics, Middle};
@@ -2828,6 +2830,37 @@ fn a_set_with_explicit_states_at_two_offsets_decays_by_its_jumps() {
     }
     println!("the photons' rate against the generator's hazard: within {worst:.2e} of it (hazards up to {beat:.3e})");
     assert!(worst < 1e-12, "the photons' rate against the hazard: {worst:e}");
+    // The decay's beat is the integrator's candidate's (run.rs # The jumps' coherence; spectral.rs # Which beats are tones):
+    // the generator less every candidate at its phase -- the static group the integrator keeps where all are tones --
+    // decays alike at every time across the beat, to the rounding, where the generator's own decay swings.
+    let (mut kept, mut swung, mut size) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for s in [-h, 0.0, h] {
+        let decays: Vec<[Mat; 2]> = [0.0, 0.07, 0.19]
+            .iter()
+            .map(|&t| {
+                let middle = run.middle(set, [0.3, 0.0, 0.0], t, &crate::step::Held::default(), false);
+                let path = middle.path([0.0; 3], [2.0, 0.0, 0.0]);
+                let (mut g, mut plus, mut minus) = (Mat::zeros(n, n), Mat::zeros(n, n), Mat::zeros(n, n));
+                middle.generator(&path, s, &mut g);
+                let whole = g.clone();
+                let (mut beats, mut keys) = (vec![], vec![]);
+                middle.beats(&path, &mut beats, &mut keys);
+                for (m, &nu) in beats.iter().enumerate() {
+                    middle.envelopes(&path, m, s, &mut plus, &mut minus);
+                    g.add_scaled(-C64::cis(nu * s), &plus);
+                    g.add_scaled(-C64::cis(-nu * s), &minus);
+                }
+                [whole, g].map(|g| Mat::from_fn(n, n, |a, b| C64::I * (g[(a, b)] - g[(b, a)].conj())))
+            })
+            .collect();
+        for d in &decays[1..] {
+            kept = kept.max(d[1].data.iter().zip(&decays[0][1].data).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max));
+            swung = swung.max(d[0].data.iter().zip(&decays[0][0].data).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max));
+        }
+        size = size.max(decays[0][0].data.iter().map(|z| z.abs()).fold(0.0, f64::max));
+    }
+    println!("less its candidates the generator's decay moves across the beat by {kept:.2e}, its own by {swung:.3e} (its entries up to {size:.3e})");
+    assert!(kept <= crate::units::rounding(4 * n + 10) * size && swung > 1e3 * kept, "the decay less the candidates moves by {kept:e}, the generator's by {swung:e}");
 }
 
 /// The readout (DESIGN §1.3; proto.rs `Workspace::populations`, run.rs `Dynamics::readout`): at random points and states of

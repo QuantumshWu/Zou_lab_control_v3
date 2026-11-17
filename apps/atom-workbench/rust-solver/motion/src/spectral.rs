@@ -48,17 +48,25 @@
 //! fast beat --; where the two are equal they swap, so nothing jumps there (as with the split, # The split). The
 //! static group's change is also read through the nodes, which alias a beat beyond νh = π: a tone has no such edge.
 //!
-//! A tone is its Hermitian part, P = (G⁺ + G⁻†)/2 and P†; the decay's beats stay in the static group (`Picture::separate`).
-//! The hop's exponent is the first Magnus term −i∫D̃ (# The state at any time of the step), and it keeps the flow's
-//! dissipative structure only where its anti-Hermitian part is a decay: of D = H − (i/2)Γ it is −(1/2)∫Γ̃, negative
-//! semidefinite where Γ̃ is at the times it is integrated over. A beating decay's part alone,
-//! −(i/2)(e^{iνu}Γ_ν + e^{−iνu}Γ_ν†), is no decay: Γ_ν is not positive -- the interference term of two plane waves'
-//! scattering --, its sign turns with its beat, and its integral over a hop is of either sign, so that as a tone it
-//! raises m's norm by up to e^{|Γ_ν| w} over a hop of the width w, where only its sum with the static decay is positive
-//! (measured: a random Lindblad's step, the survival test's case 68, overflowed). With the static group it is that sum,
-//! as the nodes give it; the static group's parabola of it is the step's decay (step.rs, # Jumps), whose negative part
-//! between the nodes is what the survival may rise by (step/tests.rs `negative_decay`), and its alias beyond νh = π the
-//! decay rate's error, the check's to read, as before the tones. A Hermitian tone's hops are unitary.
+//! A tone is its candidate whole: both members as the model gives them, the Hermitian part and the decay's beat alike
+//! (`Picture::separate`). The static group then holds the decay's mean over the beats, Γ_s (of Γ(u) = Σ_{o,o′}
+//! e^{i(o − o′)u} L_o†L_o′ it is Σ_o L_o†L_o, positive), and no decay of a tone twice. The members take the routes the
+//! Hermitian ones do: `take`, `following` and `exponent` are of an entry's complex numbers whatever G⁻ is to G⁺ -- a fast
+//! entry's following solves for a non-Hermitian envelope as for a Hermitian one, no exponential in it; a slow entry's
+//! hop is the first Magnus term −i∫D̃ (# The state at any time of the step), Λ exact. A beating decay's part alone,
+//! −(i/2)(e^{iνu}Γ_ν + e^{−iνu}Γ_ν†), is no decay -- Γ_ν is not positive (the interference of two plane waves'
+//! scattering), its sign turns with its beat --, so a hop's first Magnus term of it is not bounded by the static
+//! decay's, and the propagation's norm may rise by it as it rises by the decomposition's change of basis: the
+//! propagation is no flow that only lowers the norm (step.rs, # Jumps), and in no basis is it one while Λ keeps its
+//! exact decays (DESIGN §12.4). It grows where the first Magnus term is itself wrong -- a strong beating decay at a
+//! slow combined frequency, |Γ_ν| w ≳ 1 --, which the check reads. The survival is the law's, not the propagation's
+//! norm: its hazard is the decay of the generator the propagation takes, each tone at its exact phase on the
+//! quadrature's states (step.rs `Sums`), Σ L(u)†L(u) at each node where the envelopes are constant along the path --
+//! positive semidefinite by construction -- and to the parabola's third order where they change, as the static group's.
+//! (Through the three nodes with the static group, as the decay's beats were taken before 2026-11-16, the beat beyond
+//! νh = π was its alias: the interference kept or dropped whole, and read the same by the step and by its companion
+//! at twice the step where νh = 2πk -- a silent error of the scattering rate up to the interference term's size; and
+//! three offsets' parabola went negative between the nodes, 7 % of the decay, raising the survival.)
 //!
 //! # The state at any time of the step
 //! With Ĥ₀ = c + RΛR⁻¹ (its scalar part c apart, `linalg::Eigen`) and x = R d, i ḋ = (Λ + Dᵉ(u)) d, Dᵉ = R⁻¹DR, each
@@ -738,15 +746,11 @@ impl Picture {
     /// nodes given (`base`, `ends`): `candidates` gives the beats ν (rad/µs) of the caller's candidate tone pairs, each
     /// of members constant along the path; a candidate is a tone of the step of 2h where |ν| |h| > √5 -- its hops leave
     /// less than its change through the nodes would --, its members asked of `envelopes` (the candidate's place, G⁺ at
-    /// e^{iνu}, G⁻ at e^{−iνu}), and its Hermitian part e^{iνu}P + e^{−iνu}P†, P = (G⁺ + G⁻†)/2, taken out of the
-    /// generator at each node: what is left is the static group (`beats`: the tones). None where no candidate is so fast.
-    /// Each member's envelope is asked at each of the three nodes (`envelopes`' time u = −h, 0, h) and taken out there at its
-    /// own value: an envelope that changes along the path (the light's profile at the path's points) goes through the
-    /// nodes as the static group does.
-    /// The decay's beats stay with the static group: a hop's exponent is the first Magnus term, and a beating decay's
-    /// part alone is no decay -- its sign turns with its beat --, so that over a hop it would grow the interaction
-    /// picture's state by e^{|Γ_ν| w} where the static decay's factors hold the state (an overflow of m, not of x); a
-    /// Hermitian tone's hops are unitary.
+    /// e^{iνu}, G⁻ at e^{−iνu}), and the candidate whole, e^{iνu}G⁺ + e^{−iνu}G⁻ -- its Hermitian part and its decay's
+    /// beat alike --, taken out of the generator at each node: what is left is the static group (`beats`: the tones).
+    /// None where no candidate is so fast, and the generator as it is. Each member's envelope is asked at each of the
+    /// three nodes (`envelopes`' time u = −h, 0, h) and taken out there at its own value: an envelope that changes along
+    /// the path (the light's profile at the path's points) goes through the nodes as the static group does.
     pub fn separate(&mut self, half: f64, candidates: impl FnOnce(&mut Vec<f64>, &mut Vec<Vec<i64>>), mut envelopes: impl FnMut(usize, f64, &mut Mat, &mut Mat)) {
         let n = self.n;
         self.beating.clear();
@@ -770,18 +774,8 @@ impl Picture {
             let [start, end] = &mut self.ends;
             for (j, (node, u)) in [start, &mut self.base, end].into_iter().zip([-half, 0.0, half]).enumerate() {
                 envelopes(candidate, u, &mut plus[j], &mut minus[j]);
-                let (g, m) = (&mut plus[j].data, &mut minus[j].data);
-                // Its Hermitian part at the node: P = (G⁺ + G⁻†)/2 at e^{iνu}, P† at e^{−iνu}, pair by pair in place.
-                for a in 0..n {
-                    for b in a..n {
-                        let (ab, ba) = (a * n + b, b * n + a);
-                        let (pab, pba) = ((g[ab] + m[ba].conj()) * 0.5, (g[ba] + m[ab].conj()) * 0.5);
-                        (g[ab], g[ba]) = (pab, pba);
-                        (m[ab], m[ba]) = (pba.conj(), pab.conj());
-                    }
-                }
                 let (p, q) = (C64::cis(beat * u), C64::cis(-beat * u));
-                for ((z, g), h) in node.data.iter_mut().zip(g.iter()).zip(m.iter()) {
+                for ((z, g), h) in node.data.iter_mut().zip(&plus[j].data).zip(&minus[j].data) {
                     *z -= p * *g + q * *h;
                 }
             }
@@ -2557,6 +2551,105 @@ pub(crate) mod tests {
         }
         eprintln!("{cases} random Lindblad steps: at the nodes' values the error at most {worst:.2e} of what the treatments and the static group's step leave; held at the middle at least {worst_held:.1e} times it");
         assert!(worst_held > 10.0, "the envelope held at its middle errs by {worst_held} times the nodes' values' at the least");
+    }
+
+    /// A decay's beats as exact tones (module documentation, # Which beats are tones; DESIGN §12.4): random Lindblad
+    /// clusters -- n of 2 to 4 states, a static Hermitian part with a slope along the path, and the jumps
+    /// L(u) = Σ_k e^{−io_k u} L_k at two to four offsets o_k, so that the decay −(i/2)L(u)†L(u) beats at every o_k − o_k′
+    /// (each difference a candidate, −(i/2)L_k′†L_k at e^{i(o_k′ − o_k)u} and −(i/2)L_k†L_k′ at its opposite: no Hermitian
+    /// part) -- over a step whose beats are near the multiples of 2π between two nodes, o_k h = k(2π + δ_k) with |δ_k| up to
+    /// 0.3 (and exactly 2πk on every fourth case), the decay over a half step up to one. From three random states, against
+    /// the dense flow of the whole generator:
+    /// - through the three nodes with the static group, as before 2026-11-16, the beats are their alias: the state errs
+    ///   by the interference's size over the step (3·10⁻² to 0.15 here); at νh = 2πk the nodes read e^{iνu} as one, the
+    ///   interference whole, and a step of 2τ through its own nodes reads it so too, so that two steps through the nodes
+    ///   and their companion at twice the step differ by less than the two err -- the check's blind spot (asserted where
+    ///   νh = 2πk exactly);
+    /// - taken as tones, whole, the state errs by the step's own error: twenty times less than through the nodes or
+    ///   better, as the tones of the other tests (asserted); beside it are printed the static group's own step (the same
+    ///   picture without the decay's beats, against its own flow) and Hermitian tones of the same members (G⁺ and G⁺†, the
+    ///   same routes, against their own flow), which the decay's tones err about as much as -- and the treatments' leading
+    ///   terms (`beating_remainders`), which the errors of either kind of tone exceed tenfold here: those terms do not hold
+    ///   the following's next order (a product's c X⁽²⁾, # The split) nor the hops' cross terms of the tones with the
+    ///   static group's slope.
+    #[test]
+    fn a_decay_s_beats_are_tones_and_their_flow_where_the_nodes_alias_them() {
+        let mut stream = crate::random::Stream::new(31, crate::random::Purpose::Initial, 0, 0);
+        let mut s = || stream.uniform();
+        let (mut worst, mut nearest, mut blind, mut cases) = (0.0_f64, f64::INFINITY, f64::INFINITY, 0);
+        for case in 0..16 {
+            let n = 2 + (3.0 * s()) as usize;
+            let offsets = 2 + (3.0 * s()) as usize;
+            let half = 0.1 + 0.2 * s();
+            let decay = (0.2 + 0.8 * s()) / half;
+            let random = |s: &mut dyn FnMut() -> f64, scale: f64| Mat::from_fn(n, n, |_, _| C64::cis(std::f64::consts::TAU * s()) * (scale * s()));
+            let hermitian = |m: &Mat| Mat::from_fn(n, n, |i, j| (m[(i, j)] + m[(j, i)].conj()) * 0.5);
+            let exact = case % 4 == 0;
+            let o: Vec<f64> = (0..offsets).map(|k| k as f64 * (std::f64::consts::TAU + if exact { 0.0 } else { 0.6 * (s() - 0.5) }) / half).collect();
+            let jumps: Vec<Mat> = (0..offsets).map(|_| random(&mut s, (decay / (n * offsets) as f64).sqrt())).collect();
+            let mut still = hermitian(&random(&mut s, 3.0));
+            for l in &jumps {
+                still.add_scaled(C64::new(0.0, -0.5), &l.adjoint_product(l));
+            }
+            let group = [still, hermitian(&random(&mut s, 3.0))];
+            let mut tones = vec![];
+            for k in 0..offsets {
+                for j in k + 1..offsets {
+                    let (plus, minus) = (jumps[j].adjoint_product(&jumps[k]).scaled(C64::new(0.0, -0.5)), jumps[k].adjoint_product(&jumps[j]).scaled(C64::new(0.0, -0.5)));
+                    tones.push(Tone { beat: o[j] - o[k], plus, minus });
+                }
+            }
+            let generator = |u: f64| toned(&group, &tones, u);
+            let alone = |u: f64| toned(&group, &[], u);
+            let mut picture = with_tones(&group, &tones, half);
+            let mut before = without_tones(&group, &tones, half);
+            let mut static_group = without_tones(&group, &[], half);
+            let hermitian_tones: Vec<Tone> = tones.iter().map(|t| Tone { beat: t.beat, plus: t.plus.clone(), minus: t.plus.adjoint() }).collect();
+            let unitary = |u: f64| toned(&group, &hermitian_tones, u);
+            let mut hermitian_picture = with_tones(&group, &hermitian_tones, half);
+            let within = beating_remainders(&picture, tones.len());
+            let times = [-0.4 * half, 0.3 * half, half];
+            // Through the nodes: two steps of 2h|... and the companion of 4h over the same span, from the span's start.
+            let noded = |middle: f64, h: f64| {
+                let shifted = |u: f64| generator(middle + u);
+                let mut picture = Picture::default();
+                picture.fit(n);
+                picture.base = shifted(0.0);
+                picture.ends = [-h, h].map(shifted);
+                picture.prepare(h, false, |_| 2, 0.0, 0.0);
+                picture
+            };
+            let through = |picture: &mut Picture, x: &[C64]| {
+                let mut y = vec![C64::ZERO; n];
+                picture.launch(-picture.half, x);
+                picture.advance(picture.half, &mut y);
+                y
+            };
+            let (mut first, mut second, mut companion) = (noded(-half, half), noded(half, half), noded(0.0, 2.0 * half));
+            let (mut e_tone, mut e_nodes, mut e_static, mut e_hermitian, mut e_pair, mut apart) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+            for _ in 0..3 {
+                let start: Vec<C64> = (0..n).map(|_| C64::new(s() - 0.5, s() - 0.5)).collect();
+                e_tone = e_tone.max(beating_errors(&mut picture, &generator, &start, &times, 20_000));
+                e_hermitian = e_hermitian.max(beating_errors(&mut hermitian_picture, &unitary, &start, &times, 20_000));
+                e_nodes = e_nodes.max(beating_errors(&mut before, &generator, &start, &times, 20_000));
+                e_static = e_static.max(beating_errors(&mut static_group, &alone, &start, &times, 20_000));
+                let halves = through(&mut second, &through(&mut first, &start));
+                let whole = through(&mut companion, &start);
+                let flow = flowing(&generator, 2.0 * half, 2.0 * half, &start, 40_000);
+                e_pair = e_pair.max(halves.iter().zip(&flow).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max));
+                apart = apart.max(halves.iter().zip(&whole).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max));
+            }
+            let beats: Vec<f64> = tones.iter().map(|t| t.beat * half / std::f64::consts::TAU).collect();
+            eprintln!("n {n}, {offsets} offsets, νh/2π {beats:.3?}, Γh {:.2}: as tones {e_tone:.2e} (the static group's own step {e_static:.2e}, Hermitian tones of its members {e_hermitian:.2e}, the treatments' leading terms {within:.2e}); through the nodes {e_nodes:.2e}, two steps {e_pair:.2e} off the flow and {apart:.2e} off their companion", decay * half);
+            assert!(e_nodes > 20.0 * e_tone, "n {n}, {offsets} offsets: as tones the state errs by {e_tone:e}, through the nodes by {e_nodes:e}");
+            if exact {
+                assert!(e_pair > apart, "at νh = 2πk two steps through the nodes err by {e_pair:e}, and differ from their companion by {apart:e}");
+                blind = blind.min(e_pair / apart);
+            }
+            (worst, nearest) = (worst.max(e_tone / e_hermitian), nearest.min(e_nodes / e_tone));
+            cases += 1;
+        }
+        eprintln!("{cases} random decays: as tones at least {nearest:.0} times better than through the nodes, and at most {worst:.2} times the Hermitian tones of their members; at νh = 2πk two steps through the nodes erred at least {blind:.1} times their difference from the companion");
     }
 
     /// The tones' gauge (module documentation, # Tones): a frame that turns a group of states at θ moves their

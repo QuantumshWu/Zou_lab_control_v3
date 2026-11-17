@@ -4031,27 +4031,37 @@ fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad
     }
 }
 
-/// The step's own decay along its path (step.rs, # Jumps): from a state at its start, the generator at the step's
-/// three nodes on its path (the momentum predicted as the step predicts it), and the parabola Γ(u) = Σ_j ℓ_j(u)Γ_j of
-/// their decays i(Ĥ − Ĥ†) the survival takes; returned: the parabola's negative part over the step,
-/// ∫max(0, −λ_min(Γ(u)))du on 400 panels' trapezoid -- the most the survival can rise by over the step -- and its decay's
-/// size, ∫λ_max.
+/// The step's own decay along its path (step.rs, # Jumps): from a state at its start, the generator the propagation takes
+/// on the step's path (the momentum predicted as the step predicts it; `pictured`) -- the static group's parabola through
+/// the three nodes and each tone at its exact phase, its envelope's parabola -- and its decay Γ(u) = i(Ĥ − Ĥ†), which the
+/// survival takes; returned: Γ's negative part over the step, ∫max(0, −λ_min(Γ(u)))du on 400 panels' trapezoid -- the
+/// most the survival can rise by over the step -- and its decay's size, ∫λ_max.
 fn negative_decay<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> (f64, f64) {
     let (n, h) = (start.psi.len(), 0.5 * tau);
     let through = step::Midway::new(model, start, tau).unwrap();
     let (_, kappa_h) = through.reached;
     let kappa = super::predicted(&start.forms, kappa_h, tau, start.time + h);
-    let path = through.generator.path(kappa, kappa.map(|k| model.hbar_over_mass() * k));
-    let mut m = Mat::zeros(n, n);
-    let nodes = [-h, 0.0, h].map(|u| {
-        through.generator.generator(&path, u, &mut m);
-        Mat::from_fn(n, n, |a, b| C64::I * (m[(a, b)] - m[(b, a)].conj()))
-    });
+    let along = super::Along::new(&through.generator, kappa, kappa.map(|k| model.hbar_over_mass() * k));
+    let mut scratch = fitted(n);
+    super::pictured(&along, &mut scratch, tau, None).unwrap();
+    let picture = &scratch.picture;
+    // Ĥ(u): the static group, its middle and (on a beating path) its slope and curvature, and each tone's members, their
+    // envelopes' C, A and B (`spectral::Picture::prepare`), at e^{±iνu}.
+    let still = along.middle.still();
+    let generator = |u: f64| {
+        let parabola = |m: &[Mat; 3]| Mat::from_fn(n, n, |a, b| m[0][(a, b)] + m[1][(a, b)] * u + m[2][(a, b)] * (u * u));
+        let mut g = if still { picture.base.clone() } else { parabola(&[picture.base.clone(), picture.ends[0].clone(), picture.ends[1].clone()]) };
+        for tone in &picture.beats {
+            g.add_scaled(C64::cis(tone.beat * u), &parabola(&tone.members[0]));
+            g.add_scaled(C64::cis(-tone.beat * u), &parabola(&tone.members[1]));
+        }
+        g
+    };
     let (mut negative, mut size) = (0.0, 0.0);
     for k in 0..=400 {
         let s = -1.0 + k as f64 / 200.0;
-        let l = [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)];
-        let values = crate::linalg::hermitian_eigen(&Mat::from_fn(n, n, |a, b| (0..3).map(|j| nodes[j][(a, b)] * l[j]).sum())).values;
+        let m = generator(s * h);
+        let values = crate::linalg::hermitian_eigen(&Mat::from_fn(n, n, |a, b| C64::I * (m[(a, b)] - m[(b, a)].conj()))).values;
         let weight = tau.abs() / 400.0 * if k == 0 || k == 400 { 0.5 } else { 1.0 };
         negative += weight * (-values.iter().copied().fold(f64::INFINITY, f64::min)).max(0.0);
         size += weight * values.iter().copied().fold(0.0, f64::max);
@@ -4131,7 +4141,7 @@ fn a_generator_without_a_decay_keeps_the_survival() {
 }
 
 /// The hazard is the generator's decay and a sum of squares (step.rs, # Jumps): the survival's rate on a state's
-/// direction, as the step takes it from the decay laid at a node and a density's sum (`laid_decay`, `accumulate`,
+/// direction, as the step takes it from the decay laid at a node and a density's sum (`laid`, `accumulate`,
 /// `hazard`), is −2 Im⟨x̂|Ĥ|x̂⟩ to its rounding, and the jumps' rates on the state, Σ‖J x̂‖² (the photons' class rates,
 /// `Dynamics::emit`), to theirs -- never negative. On 300 random clusters (`Lindblad`) at 5 points and states each; and on
 /// R4_LIN_2's model as the solve closes it (`scene_clusters`), exactly (`Run::new`) and from its near tables, its
@@ -4200,6 +4210,78 @@ fn the_hazard_is_the_generator_s_decay_and_a_sum_of_squares() {
         }
     });
     eprintln!("random clusters: the hazard within {:.3} of its rounding of the jumps' rates; R4_LIN_2 from its tables: within {:.2e} of them", worst[0], worst[1]);
+}
+
+/// The survival's hazard takes a decay's beats at their exact phase (step.rs, # Jumps; DESIGN §12.4): random clusters
+/// (`Lindblad`) of two to four states whose jumps are three or four plane waves -- a decay of three or more offsets along
+/// the path, beating at each pair's (q_l′ − q_l)·v --, on a path and a step where every beat turns π or more between two
+/// nodes (each a tone of the step, spectral.rs # Which beats are tones), the decay over a half step a tenth to one. At
+/// random times of the step and random states the hazard the step takes from its laid decay and a density's sums
+/// (`pictured`, `Sums::gather`, `hazard`) is −2 Im⟨x̂|Ĥ(u)|x̂⟩ of the model's generator at that time to the rounding: the
+/// jumps' Σ‖L(u)x̂‖², never negative. The parabola of the generator's decay through the step's three nodes -- the hazard
+/// before 2026-11-16 -- is printed: its least eigenvalue over the step, of the decay's largest.
+#[test]
+fn the_hazard_is_the_decay_at_every_time_of_a_step_whose_decay_beats() {
+    let (mut worst, mut parabola, mut tones) = (0.0_f64, 0.0_f64, 0);
+    for case in 0..60 {
+        let mut s = crate::random::Stream::new(61, crate::random::Purpose::Initial, case, 0);
+        let n = 2 + (3.0 * s.uniform()) as usize;
+        let waves = 3 + (2.0 * s.uniform()) as usize;
+        let size = 0.3 * 100.0_f64.powf(s.uniform());
+        let mut model = Lindblad::new(&mut s, n, 0, waves, size);
+        // A heading on which every pair's wave vector turns: its least turn at least a fifth of its largest.
+        let pairs: Vec<[f64; 3]> = model.jumps.iter().flat_map(|(q, _)| model.jumps.iter().map(move |(p, _)| std::array::from_fn(|i| p[i] - q[i]))).filter(|w: &[f64; 3]| *w != [0.0; 3]).collect();
+        let heading = loop {
+            let e = s.direction();
+            let turns: Vec<f64> = pairs.iter().map(|w| dot3(*w, e).abs()).collect();
+            if turns.iter().copied().fold(f64::INFINITY, f64::min) >= 0.2 * turns.iter().copied().fold(0.0, f64::max) {
+                break e;
+            }
+        };
+        let tau = 0.5;
+        let h = 0.5 * tau;
+        let least = pairs.iter().map(|w| dot3(*w, heading).abs()).fold(f64::INFINITY, f64::min);
+        let speed = (1.0 + s.uniform()) * std::f64::consts::PI / (least * h);
+        let velocity = heading.map(|x| x * speed);
+        let gamma = (0.1 + 0.9 * s.uniform()) / h;
+        let held = (gamma / (size * (n * waves) as f64)).sqrt();
+        model.jumps.iter_mut().for_each(|(_, m)| *m = m.scaled(C64::real(held)));
+        let r = s.direction().map(|x| x * s.uniform());
+        let parts = model.middle(0, r, 0.0, &step::Held::default(), false);
+        let along = super::Along::new(&parts, velocity.map(|v| v / RB), velocity);
+        let mut scratch = fitted(n);
+        let scale = super::pictured(&along, &mut scratch, tau, None).unwrap();
+        let candidates = parts.pairs().len();
+        let super::Carved { picture, decay, part, .. } = scratch.carve();
+        assert_eq!(picture.beats.len(), candidates, "case {case}: every beat a tone");
+        tones += candidates;
+        let mut g = Mat::zeros(n, n);
+        let decayed = |g: &Mat| Mat::from_fn(n, n, |a, b| C64::I * (g[(a, b)] - g[(b, a)].conj()));
+        let nodes = [-h, 0.0, h].map(|u| {
+            parts.generator(&velocity, u, &mut g);
+            decayed(&g)
+        });
+        for _ in 0..8 {
+            let u = h * (2.0 * s.uniform() - 1.0);
+            let psi = random_state(&mut s, n);
+            part.fill(0.0);
+            super::Sums { still: false, h, tones: &picture.beats }.gather(u, 1.0, &psi, None, part);
+            let hazard = super::hazard(decay, part, n);
+            parts.generator(&velocity, u, &mut g);
+            let form: C64 = (0..n).map(|a| psi[a].conj() * (0..n).map(|b| g[(a, b)] * psi[b]).sum::<C64>()).sum();
+            let exact = -2.0 * form.im / crate::linalg::norm_sqr(&psi);
+            let rounding = crate::units::rounding(4 * n + 10 + super::TONE * candidates) * (scale + 2.0 * g.data.iter().map(|z| z.abs()).sum::<f64>());
+            assert!(hazard >= -rounding && (hazard - exact).abs() <= rounding, "case {case}, u {u:.3}: the hazard {hazard:e} against the decay's {exact:e} (rounding {rounding:e})");
+            worst = worst.max((hazard - exact).abs() / rounding);
+            // The three nodes' parabola at the same time.
+            let t = u / h;
+            let l = [0.5 * t * (t - 1.0), 1.0 - t * t, 0.5 * t * (t + 1.0)];
+            let values = crate::linalg::hermitian_eigen(&Mat::from_fn(n, n, |a, b| (0..3).map(|j| nodes[j][(a, b)] * l[j]).sum())).values;
+            let largest = values.iter().copied().fold(0.0, f64::max);
+            parabola = parabola.min(values.iter().copied().fold(f64::INFINITY, f64::min) / largest);
+        }
+    }
+    eprintln!("{tones} beating decays as tones: the hazard within {worst:.3} of its rounding of the decay at its time; through the three nodes the decay's least eigenvalue down to {parabola:.3} of its largest");
 }
 
 /// R4_LIN_2's steps no longer raise the survival (step.rs, # Jumps): its model as the solve closes it (`scene_clusters`:
