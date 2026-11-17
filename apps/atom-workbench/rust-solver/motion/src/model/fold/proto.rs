@@ -1834,8 +1834,8 @@ fn multiply(a: &[C64], b: &[C64], out: &mut [C64], n: usize) {
 /// eigenvalue may pass one where its excitation does not: there (‖X‖_F > 1, a bound of it) the start is the scalar
 /// (1 + ‖X‖_F)^{−1/2}, every u₀ in (0, 1]. From either start it converges, quadratically near one: a step's error e goes
 /// to −(3/2)e² − e³/2 (Y = M^{−1/2}(1 + e)), and a step that moves Y by m leaves (3/2)m² -- it stops where that is within
-/// γ_{4n} of Y's size (the next move's reading). False where a step does not shrink the last one's move (no fold there:
-/// the caller returns none). Products alone (3n³ a step).
+/// γ_{4n} of Y's size (the next move's reading). False where a step does not shrink the last one's move, or its move is
+/// not a number (no fold there: the caller returns none). Products alone (3n³ a step).
 fn inverse_root(x: &[C64], n: usize, y: &mut [C64], p: &mut [C64], q: &mut [C64], r: &mut [C64], work: &mut f64) -> bool {
     let size = x.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
     if size <= 1.0 {
@@ -1874,7 +1874,8 @@ fn inverse_root(x: &[C64], n: usize, y: &mut [C64], p: &mut [C64], q: &mut [C64]
         if 1.5 * moved * moved <= floor * size {
             return true;
         }
-        if moved >= last {
+        // No longer converging -- or not a number, which never converges: the one exit.
+        if !(moved < last) {
             return false;
         }
         last = moved;
@@ -3380,6 +3381,12 @@ impl Fold {
                 sweep += 1;
                 if sweep == 1 {
                     frozen = freeze(near, cache, h, c, whole, order, unrate(share) - omitted, n, &mut work[SERIES]);
+                }
+                // A response that is not a number is none: a row and a column at one complex energy (a pole of the
+                // series: their mixing has no bound) or an overflow -- the fold does not exist here (the one exit). Read
+                // as the rest is, a column of no number would pass as one that converged.
+                if !whole.iter().chain(change.iter()).all(|x| x.is_finite()) {
+                    return None;
                 }
                 // The rest: the last change times r/(1 − r), r the ratio of the last two changes (none after the first; a
                 // column that did not change has converged, r = 0).

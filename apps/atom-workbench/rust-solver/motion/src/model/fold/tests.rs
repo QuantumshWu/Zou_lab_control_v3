@@ -2655,13 +2655,11 @@ fn lambda_against_master(a: f64, b: f64, form: f64, time: f64) -> (f64, f64, f64
     let (e2, gamma): (f64, f64) = (100.0, 38.0);
     let (to1, to2) = (0.75 * gamma, 0.25 * gamma);
     let mut req = lambda_request(a, b, form);
-    // Every excited state decays, as in every request the app makes: the idle ones (no laser on them) at Γ to the ground
-    // state 1 -- never populated, they leave the Λ's dynamics as they are, and an explicit set's optical sector relaxes
-    // in every direction (step.rs # The optical sector's noise: a direction that does not relax makes no K, and the step
-    // is refused).
-    for e in (0..EXCITED).filter(|&e| e != 17) {
-        req.emission[2][(1, GROUND + e)] = C64::real(gamma.sqrt());
-    }
+    // Every excited state decays, as in every request the app makes: the idle ones (no laser on them) at Γ each by a
+    // channel of its own (`idle_decay`) -- never populated, they leave the Λ's dynamics as they are, and an explicit set's
+    // optical sector relaxes in every direction (step.rs # The optical sector's noise: a direction that does not relax
+    // makes no K, and the step is refused).
+    idle_decay(&mut req, gamma);
     let rays = req.beams.len();
     let k = req.beams[1].wave_number;
     let at = if form != 0.0 { [0.0, 0.0, std::f64::consts::FRAC_PI_4 / k] } else { [0.0; 3] };
@@ -3021,18 +3019,42 @@ fn two_level(delta: f64, s: f64) -> Request {
 }
 
 /// The idle excited states of a synthetic request made to decay at Γ, as every request the app makes has them (an
-/// explicit level's optical sector relaxes in every direction, step.rs # The optical sector's noise): each by a channel --
-/// a ground state and a polarization -- no other state uses while one is free, so that no idle state shares a channel
-/// with a live one (BRIEF_STEP3C item 1: through one shared channel the idle states made one mode decaying at their sum
-/// and the rest none, and a fold's landing read that mode).
+/// explicit level's optical sector relaxes in every direction, step.rs # The optical sector's noise), each by a channel of
+/// its own: its emission's column over the channels -- a ground state and a polarization -- orthogonal to every other
+/// excited state's, so that the decay Σ_q C_q†C_q holds Γ on each idle state and nothing between any two (BRIEF_STEP3E
+/// item 2: through one shared channel the idle states made one mode decaying at their sum and the rest none -- modes no
+/// relaxation reaches, the master equation's steady state not one). Gram–Schmidt over the channels against the live
+/// states' columns: a channel no other state uses first (the latest ground state's, the last polarization), then of the
+/// others the one the columns leave the most of.
 fn idle_decay(req: &mut Request, gamma: f64) {
-    let used = |req: &Request, b: usize, q: usize| (0..EXCITED).any(|e| req.emission[q][(b, GROUND + e)] != C64::ZERO);
-    let idle: Vec<usize> = (0..EXCITED).filter(|&e| (0..3).all(|q| (0..GROUND).all(|b| req.emission[q][(b, GROUND + e)] == C64::ZERO))).collect();
-    let mut free: Vec<(usize, usize)> = (0..GROUND).rev().flat_map(|b| (0..3).map(move |q| (b, q))).filter(|&(b, q)| !used(req, b, q)).collect();
-    let last = *free.last().expect("a free channel");
+    let channels: Vec<(usize, usize)> = (0..GROUND).rev().flat_map(|b| (0..3).map(move |q| (b, q))).collect();
+    let column = |req: &Request, e: usize| -> Vec<C64> { channels.iter().map(|&(b, q)| req.emission[q][(b, GROUND + e)]).collect() };
+    let (live, idle): (Vec<usize>, Vec<usize>) = (0..EXCITED).partition(|&e| column(req, e).iter().any(|z| *z != C64::ZERO));
+    // A vector less its parts along an orthonormal basis, and its norm.
+    let less = |mut v: Vec<C64>, basis: &[Vec<C64>]| -> (Vec<C64>, f64) {
+        for u in basis {
+            let p: C64 = u.iter().zip(&v).map(|(a, b)| a.conj() * *b).sum();
+            v.iter_mut().zip(u).for_each(|(x, y)| *x -= p * *y);
+        }
+        let norm = v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+        (v, norm)
+    };
+    let mut basis: Vec<Vec<C64>> = vec![];
+    for e in live {
+        let (v, norm) = less(column(req, e), &basis);
+        if norm > 0.0 {
+            basis.push(v.iter().map(|z| *z / norm).collect());
+        }
+    }
     for e in idle {
-        let (b, q) = free.pop().unwrap_or(last);
-        req.emission[q][(b, GROUND + e)] = C64::real(gamma.sqrt());
+        let unit = |k: usize| -> Vec<C64> { (0..channels.len()).map(|j| if j == k { C64::ONE } else { C64::ZERO }).collect() };
+        let (v, norm) = (0..channels.len()).map(|k| less(unit(k), &basis)).max_by(|a, b| a.1.total_cmp(&b.1)).expect("a channel");
+        assert!(norm > 0.0, "a channel left for every excited state");
+        let v: Vec<C64> = v.iter().map(|z| *z / norm).collect();
+        for (&(b, q), z) in channels.iter().zip(&v) {
+            req.emission[q][(b, GROUND + e)] = *z * gamma.sqrt();
+        }
+        basis.push(v);
     }
 }
 
