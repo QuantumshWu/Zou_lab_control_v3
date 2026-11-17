@@ -2898,8 +2898,10 @@ fn a_scene_s_step_cost() {
 /// A scene's step on the fold at the atom (model/fold/run.rs; run by name, alone: `SCENE=<a reference scene's name or a
 /// native request's path> TAU=<µs> … a_scene_s_onefold_step_cost -- --ignored --nocapture --test-threads 1`): per state
 /// set, 16 atoms drawn as `scene_clusters` draws them (the prepared trap at the request's temperature, a random state of
-/// the set, no jump), each first taken one step so that it stands on its own decompositions (its first step makes them),
-/// then its next step timed as `cost` times the old model's -- the step, model and integrator together.
+/// the cluster its start took -- `Dynamics::started`: the set's with nothing explicit, or its nodes risen --, no jump),
+/// each first taken one step so that it stands on its own decompositions (its first step makes them), then its next
+/// step timed as `cost` times the old model's -- the step, model and integrator together --, per cluster the atoms
+/// started in.
 #[test]
 #[ignore = "a measurement, not a check: run by name"]
 fn a_scene_s_onefold_step_cost() {
@@ -2919,13 +2921,12 @@ fn a_scene_s_onefold_step_cost() {
     for set in 0..GROUND {
         let first = (0..GROUND).find(|&g| run.cluster_of(g) == set);
         let Some(first) = first else { break };
-        let n = run.cluster(set).states.len();
         let starts: Vec<Trajectory> = (0..16)
             .map(|i| {
                 let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, set as u32);
                 let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
                 let mut t = Trajectory::new(&run, first, r, kappa, 17, i);
-                let psi: Vec<C64> = (0..n).map(|_| C64::new(stream.normal(), stream.normal())).collect();
+                let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(stream.normal(), stream.normal())).collect();
                 let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
                 t.psi = psi.iter().map(|z| *z / norm).collect();
                 t.threshold = f64::MIN_POSITIVE;
@@ -2935,9 +2936,15 @@ fn a_scene_s_onefold_step_cost() {
                 start
             })
             .collect();
-        let label = format!("set {set} ({n}) of {}", std::path::Path::new(&name).file_stem().unwrap().to_string_lossy());
-        cost(&label, &run, &starts, tau);
-        parts(&label, &run, &starts, tau);
+        let mut clusters: Vec<usize> = starts.iter().map(|t| t.cluster).collect();
+        clusters.sort();
+        clusters.dedup();
+        for cluster in clusters {
+            let these: Vec<Trajectory> = starts.iter().filter(|t| t.cluster == cluster).cloned().collect();
+            let label = format!("set {set} ({}, {} atoms) of {}", these[0].psi.len(), these.len(), std::path::Path::new(&name).file_stem().unwrap().to_string_lossy());
+            cost(&label, &run, &these, tau);
+            parts(&label, &run, &these, tau);
+        }
     }
 }
 
