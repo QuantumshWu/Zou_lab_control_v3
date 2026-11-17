@@ -2596,7 +2596,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let paths: Vec<_> = pieces.iter().map(|p| p.through.generator.path(p.kappa, p.kappa.map(|k| hm * k))).collect();
     let n = starts[0].psi.len();
     let mut h = Mat::zeros(n, n);
-    let mut g: [Vec<C64>; 3] = Default::default();
+    let (mut g, mut slope): ([Vec<C64>; 3], [Vec<C64>; 3]) = Default::default();
     // The optical sector as a step's middle makes it (`step::optical`, then one `within`), on each piece's path with its
     // picture made beforehand.
     let alongs: Vec<_> = pieces.iter().map(|p| super::Along::new(&p.through.generator, p.kappa, p.kappa.map(|k| hm * k))).collect();
@@ -2631,7 +2631,8 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || pieces.iter().zip(&paths).zip(starts).map(|((p, path), s)| p.through.generator.scattering(path, &s.psi).0.force[0]).sum::<f64>(),
             &mut || pieces.iter().zip(starts).map(|(p, s)| model.readout(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi, &s.held)[0]).sum::<f64>(),
             &mut || {
-                pieces.iter().zip(&paths).for_each(|(p, path)| p.through.generator.gradient(path, 0.2 * tau, &mut g, None));
+                // As a step asks them (`step::optical`): at the middle, with their slope along the path where it is not still.
+                pieces.iter().zip(&paths).for_each(|(p, path)| p.through.generator.gradient(path, 0.0, &mut g, (!p.through.generator.still()).then_some(&mut slope)));
                 g[0][0].re
             },
             &mut || {

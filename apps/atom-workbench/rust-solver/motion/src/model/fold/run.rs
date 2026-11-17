@@ -66,14 +66,23 @@
 //! The reference potential of the splitting (A), the loss energy and its test are the request's prepared and running
 //! potentials as model.rs makes them (the folds with every drive bare: a reference is exact for any potential); the
 //! displayed rows are the fold's time-averaged populations at the point (`Dynamics::readout`). The photons' and the
-//! landing's own forms (DESIGN step 3) and the explicit sets' optical sector are not yet here.
+//! landing's own forms (DESIGN step 3) are not yet here.
+//!
+//! # The optical sector (step.rs # The optical sector's noise; DESIGN §1.3, R23)
+//! A set that holds explicit excited states has an optical sector (`Middle::optical`): its ground states, γ_Q the least
+//! of its explicit states' decay over two, and the light pattern's fastest beat along the path over its light's beams.
+//! Its K is of the gradient's matrices Ĝ_a (`Middle::gradient`), not of their contraction with one density: the same
+//! derivative of the step as the force's, in its forward mode (proto.rs `Fold::prototype_gradient`: the step's tangent
+//! through the compression) -- the force contracts it in the reverse mode, each where it is the cheap one. Their slope
+//! along the path is the parabola through the step's outer nodes the propagation takes, a tone's phase exact. A set of
+//! ground states alone has none: its fold's photons hold that part.
 use super::proto::{At, Bar, Cache, Moments, Workspace};
 use super::{Choice, Fold};
 use crate::field::Light;
 use crate::linalg::{Mat, C64};
 use crate::model::{Cluster, Lights, Model, Point, Quadratic, Scattering};
 use crate::request::{Request, GROUND, STATES};
-use crate::step::{Emitted, Forms, Held, Internal, Middle as _};
+use crate::step::{Emitted, Forms, Held, Internal, Middle as _, Optical};
 use std::cell::{RefCell, RefMut};
 use std::sync::{Arc, Mutex};
 
@@ -91,6 +100,10 @@ struct Set {
     /// coherence group (fold.rs `Fold::groups`), each with its beat o − o′ (rad/µs): the decay between their offsets (# The
     /// jumps' coherence).
     coherent: Vec<(usize, usize, f64)>,
+    /// Its optical sector (# The optical sector): γ_Q, the least of its explicit excited states' decay over two (none
+    /// where it holds none), and its light's beams' momenta (the fold's components' beams: the pattern's beats).
+    optical: Option<f64>,
+    waves: Vec<[f64; 3]>,
 }
 
 /// A candidate tone of the integrator (step.rs `Middle::beats`): a pair of the set's tones at ν and −ν (either may be
@@ -140,6 +153,7 @@ impl Onefold {
         let light = Light::new(request);
         let potentials = Model::new(request, &light, &[])?;
         let axes = super::Axes::new(request)?;
+        let decay = super::decay(request);
         let mut membership = [0; GROUND];
         let mut sets = vec![];
         for (k, set) in grounds.iter().enumerate() {
@@ -178,7 +192,9 @@ impl Onefold {
                 .filter(|&(i, j)| i != j && fold.groups[blocks[i]] == fold.groups[blocks[j]])
                 .map(|(i, j)| (i, j, fold.blocks[blocks[i]].value - fold.blocks[blocks[j]].value))
                 .collect();
-            sets.push(Set { fold, cluster, work, pool: Mutex::new(pool), tones, candidates, coherent });
+            let optical = fold.explicit.iter().map(|&x| 0.5 * decay[(x, x)].re).reduce(f64::min);
+            let waves = fold.components.iter().flat_map(|c| c.kicks.iter().copied()).collect();
+            sets.push(Set { fold, cluster, work, pool: Mutex::new(pool), tones, candidates, coherent, optical, waves });
         }
         let energies: Vec<f64> = (0..GROUND).map(|s| request.hamiltonian[(s, s)].re).collect();
         let mut run = Onefold {
@@ -359,6 +375,8 @@ struct Inner {
     ws: Option<Workspace>,
     current: Option<([f64; 3], [f64; 3])>,
     nodes: Option<f64>,
+    /// The offset the outer nodes were last made at, on any path: the step's half (its picture's ends).
+    half: Option<f64>,
     tangent: bool,
     decided: bool,
     exists: bool,
@@ -409,7 +427,7 @@ impl Middle<'_> {
         if let Some(h) = h.filter(|&h| inner.nodes != Some(h)) {
             let Inner { eval, ws, .. } = &mut *inner;
             fold.prototype_nodes(self.r, path.kappa, path.velocity, [-h, h], eval, ws.as_mut().unwrap());
-            (inner.nodes, inner.tangent) = (Some(h), false);
+            (inner.nodes, inner.half, inner.tangent) = (Some(h), Some(h), false);
         }
         if tangent && !inner.tangent {
             let Inner { eval, ws, .. } = &mut *inner;
@@ -679,12 +697,56 @@ impl crate::step::Middle for Middle<'_> {
         0.0
     }
 
-    fn gradient(&self, _: &Path, _: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) {
-        // No explicit set's optical sector here (module documentation, # The rest of the model): `optical` is None.
+    /// The set's optical sector on the path (module documentation, # The optical sector): its ground states, γ_Q -- the
+    /// least of its explicit excited states' decay over two --, and the light pattern's fastest beat along the path, the
+    /// largest (k_l − k_m)·v over its light's beams. None where the set holds no explicit state (a fold's photons hold that
+    /// part: step.rs # The optical sector's noise).
+    fn optical(&self, path: &Path) -> Option<Optical> {
+        let set = &self.run.sets[self.set];
+        let decay = set.optical?;
+        let (most, least) = set.waves.iter().map(|k| (0..3).map(|a| k[a] * path.velocity[a]).sum::<f64>()).fold((f64::NEG_INFINITY, f64::INFINITY), |(most, least), x| (most.max(x), least.min(x)));
+        Some(Optical { ground: set.cluster.ground, decay, beat: if most >= least { most - least } else { 0.0 } })
+    }
+
+    /// Ĝ_a(s) as matrices (module documentation, # The optical sector): the static G's and every tone's at its phase there,
+    /// e^{iν_m(t_m + s)} (`Middle::force`'s, its contraction), of the step's derivative in its forward mode (proto.rs
+    /// `Fold::prototype_gradient`; at a time s off the middle the nodes made there, as `generator`'s); and where asked
+    /// their slope along the path at the middle (the step's, `step::optical`), through the step's outer nodes -- the
+    /// parabola the propagation takes (spectral.rs `Picture::slope`): the static G's and each tone's envelope by their
+    /// chord (Ĝ(h) − Ĝ(−h))/2h, each tone's phase by its derivative iν_m. In the set's frames, the lab's (no Doppler
+    /// frame: `gauge`).
+    fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) {
+        assert!(s == 0.0 || slope.is_none(), "the gradient's slope at the middle (the step's optical sector's)");
+        let set = &self.run.sets[self.set];
         let n = self.states();
-        g.iter_mut().for_each(|m| m.resize(n * n, C64::ZERO));
+        let ends = if s != 0.0 { Some(s.abs()) } else { slope.as_ref().map(|_| self.inner.borrow().half.expect("the step's outer nodes: its picture's ends")) };
+        let mut inner = self.made(path, ends, true);
+        if !inner.exists {
+            for m in g.iter_mut().chain(slope.into_iter().flat_map(|x| x.iter_mut())) {
+                m.clear();
+                m.resize(n * n, C64::new(f64::NAN, f64::NAN));
+            }
+            return;
+        }
+        let Inner { eval, ws, .. } = &mut *inner;
+        let ws = ws.as_mut().expect("a workspace");
+        let phases = |u: f64, turned: bool| -> Vec<C64> { set.tones.iter().map(|&nu| C64::cis(nu * (self.t + u)) * if turned { C64::new(0.0, nu) } else { C64::ONE }).collect() };
+        set.fold.prototype_gradient(eval, ws, position(s), true, &phases(s, false), g);
         if let Some(slope) = slope {
-            slope.iter_mut().for_each(|m| m.resize(n * n, C64::ZERO));
+            let h = ends.expect("the outer nodes");
+            let mut minus: [Vec<C64>; 3] = Default::default();
+            set.fold.prototype_gradient(eval, ws, 1, true, &phases(0.0, false), &mut minus);
+            set.fold.prototype_gradient(eval, ws, 2, true, &phases(0.0, false), slope);
+            for (plus, minus) in slope.iter_mut().zip(&minus) {
+                plus.iter_mut().zip(minus).for_each(|(p, m)| *p = (*p - *m) / (2.0 * h));
+            }
+            if !set.tones.is_empty() {
+                let mut turned: [Vec<C64>; 3] = Default::default();
+                set.fold.prototype_gradient(eval, ws, 0, false, &phases(0.0, true), &mut turned);
+                for (o, t) in slope.iter_mut().zip(&turned) {
+                    o.iter_mut().zip(t).for_each(|(o, t)| *o += *t);
+                }
+            }
         }
     }
 
@@ -733,7 +795,7 @@ impl crate::step::Dynamics for Onefold {
             t,
             decide,
             caches,
-            inner: RefCell::new(Inner { eval: Cache::default(), committed, ws, current: None, nodes: None, tangent: false, decided: false, exists: true, generator: Mat::zeros(n, n) }),
+            inner: RefCell::new(Inner { eval: Cache::default(), committed, ws, current: None, nodes: None, half: None, tangent: false, decided: false, exists: true, generator: Mat::zeros(n, n) }),
         }
     }
 

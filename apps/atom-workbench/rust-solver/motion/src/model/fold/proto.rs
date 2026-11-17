@@ -569,6 +569,45 @@ pub(crate) struct Workspace {
     scratch: Vec<Scratch>,
     tm: Temp,
     step: Step,
+    /// The gradient's matrices' temporaries (`Fold::prototype_gradient`).
+    gradient: Gradient,
+}
+
+/// The temporaries of the gradient's matrices (`Fold::prototype_gradient`): ∂A on the three axes, the far pairs' gradients,
+/// and a near block's -- its W = K̂Z + B, ∂Z, ∂Ṽ, the stacked products' sides, the exact copies' and the centred copies'
+/// with the top's products. Each is laid where it is asked (a set with explicit states asks the matrices once a step: the
+/// heap only at its first).
+#[derive(Default)]
+struct Gradient {
+    da: Vec<C64>,
+    dp: Vec<C64>,
+    w: Vec<C64>,
+    dz: Vec<C64>,
+    dv: Vec<C64>,
+    left: Vec<C64>,
+    right: Vec<C64>,
+    dzd: Vec<C64>,
+    ye: Vec<C64>,
+    yd: Vec<C64>,
+    dye: Vec<C64>,
+    dyd: Vec<C64>,
+    dked: Vec<C64>,
+    dkde: Vec<C64>,
+    dexd: Vec<C64>,
+    db0d: Vec<C64>,
+    dtc: Vec<C64>,
+    extra: Vec<C64>,
+    y: Vec<C64>,
+    x: Vec<C64>,
+    m1: Vec<C64>,
+    m2: Vec<C64>,
+}
+
+/// `v` laid as `len` zeros (its memory kept: the heap only where it grows).
+fn zeroed(v: &mut Vec<C64>, len: usize) -> &mut [C64] {
+    v.clear();
+    v.resize(len, C64::ZERO);
+    v
 }
 
 /// A near block's temporaries of a step (BRIEF_PROTO5 item 1): every phase's -- the forward's, the omission bound's, the
@@ -2241,6 +2280,7 @@ impl Fold {
                 sweep_ticks: vec![],
             },
             rotating,
+            gradient: Gradient::default(),
         })
     }
 
@@ -4251,6 +4291,266 @@ impl Fold {
         Force { forms, held, work }
     }
 
+    /// The gradient of the generator's Hermitian part at a position of the step as matrices, Ĝ_a (n × n each, Hermitian;
+    /// DESIGN §1.3, R23): what `prototype_force` contracts, Re tr(Ĝ_a ρ) its form of a static bar ρ there (and of a tone's
+    /// bar c_mρ, the real part of tr(∂G_m c_mρ), where `tones` gives c_m) -- for the optical sector, whose K is of the
+    /// matrices themselves, not of their contraction with one density (step.rs # The optical sector's noise). The same
+    /// derivative of the step as the force's, every position moved together, in its forward mode: the step's tangent
+    /// (`prototype_tangent`, the photons' ∇u) taken through the compression, A = Ĥ_PP + Σ_far Σ_ab p_ab(F_ab + z₀G_ab) +
+    /// Σ_near (Ê†)†Z + Z†W (W = K̂Z + B; with the explicit dressing hx, the exact copies' Z†K̂_ED Z_D + Z_D†(K̂_DE Z +
+    /// K̂_DD Z_D) and Ê_D Z_D + Z_D†B_D, the centred copies' z₀T_C†T_C):
+    ///
+    /// ```text
+    ///   ∂A = ∂Ĥ_PP + Σ ∂p_ab(F_ab + z₀G_ab) + Σ ∂(Ê†)†Z + (Ê†)†∂Z + ∂Z†W + Z†(K̂∂Z + ∂K̃Z + ∂B) + …,
+    ///   Ĝ = Herm(S⁻¹∂A S⁻¹ − S⁻¹∂S G − G ∂S S⁻¹),
+    /// ```
+    /// ∂Z = Σ_l (∂ρ_l Z_l + ρ_l ∂Z_l) at an outer node (ρ_l = f_l(s)/f_l: the lanes turned as the node's Z(s) is; one at the
+    /// middle), the light's gradients the position's, ∂K̃, ∂K̂_DD and ∂S the middle's (held there, as the force holds
+    /// them). The force's contraction with a density is the reverse mode of this derivative, these matrices its forward
+    /// mode: each where it is the cheap one -- the matrices through the adjoint would ask n² cotangents a position, n²/3
+    /// times this (R4 F=1: 192 contractions a step against 9 directions; step3b.status.md). `whole`: the static G's;
+    /// `tones`: per tone its coefficient c_m of G_m's (none where empty). After `prototype`, `prototype_nodes` (for an
+    /// outer node) and `prototype_tangent` on the same cache. Returns the work (complex multiply-adds).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prototype_gradient(&self, cache: &Cache, ws: &mut Workspace, position: usize, whole: bool, tones: &[C64], out: &mut [Vec<C64>; 3]) -> f64 {
+        let n = ws.n;
+        let (nn, j) = (n * n, position);
+        assert!(ws.tangent, "the step's tangent");
+        assert!(j == 0 || ws.noded, "an outer node the step made");
+        let mut work = 0.0;
+        let Workspace { near, far, mid, nodes, pp, lin, rotating, step, ds, gradient, .. } = &mut *ws;
+        let at: &Placed = if j == 0 { mid } else { &nodes[j - 1].at };
+        let Gradient { da, dp, w, dz, dv, left, right, dzd, ye, yd, dye, dyd, dked, dkde, dexd, db0d, dtc, extra, y, x, m1, m2 } = gradient;
+        let da = zeroed(da, 3 * nn);
+        if whole {
+            // Ĥ_PP's and the drives' between ground and explicit places.
+            for (t, entries) in pp.iter().enumerate() {
+                for &(i, v) in entries {
+                    for a in 0..3 {
+                        da[a * nn + i] += at.dc[t][a] * v;
+                    }
+                }
+                work += (3 * entries.len()) as f64;
+            }
+            for (g, k, direct, conj) in lin.iter() {
+                for a in 0..3 {
+                    let d = at.de[*g][*k][a];
+                    for &(i, v) in direct {
+                        da[a * nn + i] += d * v;
+                    }
+                    for &(i, v) in conj {
+                        da[a * nn + i] += d.conj() * v;
+                    }
+                }
+                work += (3 * (direct.len() + conj.len())) as f64;
+            }
+            // The far blocks' forms: Σ ∂p_ab (F_ab + z₀G_ab), the axes' pairs (3 × v²) on the stacked forms (v² × n²).
+            for (xf, fb) in far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
+                let basis = &cache.far[xf][cache.at_far[xf].unwrap()];
+                let v = fb.vectors.len();
+                let dp = zeroed(dp, 3 * v * v);
+                for ia in 0..v {
+                    for ib in 0..v {
+                        let ((ca, ka), (cb, kb)) = (fb.vectors[ia], fb.vectors[ib]);
+                        for a in 0..3 {
+                            dp[a * v * v + ia * v + ib] = at.de[ca][ka][a].conj() * at.e[cb][kb] + at.e[ca][ka].conj() * at.de[cb][kb][a];
+                        }
+                    }
+                }
+                crate::linalg::fused_product_onto(dp, &basis.fg, (3, v * v, nn), da);
+                work += (3 * v * v * nn) as f64;
+            }
+            // The near blocks, axis by axis: one product of the stacked sides [∂(Ê†); Ê†; ∂Z; Z]† [Z; ∂Z; W; ∂W] (Ê† the
+            // emission by its adjoint, s × n, as the compression lays it).
+            for (xn, nb) in near.iter().enumerate() {
+                if nb.idle() {
+                    continue;
+                }
+                let basis = &cache.near[xn][cache.at_near[xn].unwrap()];
+                let (s, nd, lanes, explicit) = (nb.s, nb.nd, nb.lanes, !nb.xs.is_empty());
+                let (sn, ln, m) = (s * n, lanes * n, 3 * lanes * n);
+                let tg = &nb.tg;
+                let (z, v): (&[C64], &[C64]) = if j == 0 { (&nb.ztot, &nb.vtot) } else { (&nb.znode[j - 1], &nb.vnode[j - 1]) };
+                let (emit, stat): (&[C64], &[C64]) = if j == 0 { (&nb.emit, &nb.stat) } else { (&nb.pnode[j - 1].emit, &nb.pnode[j - 1].stat) };
+                let w = zeroed(w, sn);
+                schur_on(&nb.kappa, &basis.f.t, &basis.f.ends, z, w, s, n, &mut work);
+                for (k, o) in w.iter_mut().enumerate() {
+                    *o += v[k] + if explicit { stat[k] } else { C64::ZERO };
+                }
+                // A lane's factor's ratio to the middle's and its gradient at the position (the middle's own lanes: one).
+                let ratio = |sp: usize, a: usize| -> (C64, C64) {
+                    match nb.splits.get(sp).filter(|_| j > 0) {
+                        Some(&(cc, jj)) => {
+                            let (fm, rho) = (mid.f[cc][jj], at.f[cc][jj] / mid.f[cc][jj]);
+                            (rho, (at.df[cc][jj][a] - rho * mid.df[cc][jj][a]) / fm)
+                        }
+                        None => (C64::ONE, C64::ZERO),
+                    }
+                };
+                let dz = zeroed(dz, 3 * sn);
+                for a in 0..3 {
+                    for sp in 0..lanes {
+                        let (rho, drho) = ratio(sp, a);
+                        for i in 0..s {
+                            let o = &mut dz[a * sn + i * n..a * sn + i * n + n];
+                            crate::linalg::mul_add(false, o, rho, &tg.dz[i * m + a * ln + sp * n..i * m + a * ln + sp * n + n]);
+                            if drho != C64::ZERO {
+                                crate::linalg::mul_add(false, o, drho, &nb.z[i * ln + sp * n..i * ln + sp * n + n]);
+                            }
+                        }
+                    }
+                }
+                work += (6 * lanes * sn) as f64;
+                for a in 0..3 {
+                    let dza = &dz[a * sn..(a + 1) * sn];
+                    let da = &mut da[a * nn..(a + 1) * nn];
+                    // ∂Ṽ = Σ ∂e_a Y_a.
+                    let dv = zeroed(dv, sn);
+                    for (ia, &(cc, k)) in nb.vectors.iter().enumerate() {
+                        crate::linalg::mul_add(false, dv, at.de[cc][k][a], &basis.vectors[ia]);
+                    }
+                    let (l, r) = (zeroed(left, 4 * sn), zeroed(right, 4 * sn));
+                    // ∂W = K̂∂Z + ∂K̃Z + ∂Ṽ (+ Σ_t ∂c_t S_t); ∂(Ê†) = ∂Ṽ (+ Σ_t ∂c_t* E_t); the explicit dressing's Σ_t ∂c_t H_t.
+                    {
+                        let dw = &mut r[3 * sn..4 * sn];
+                        schur_on(&nb.kappa, &basis.f.t, &basis.f.ends, dza, dw, s, n, &mut work);
+                        crate::linalg::fused_product_onto(&tg.dk[a * s * s..(a + 1) * s * s], z, (s, s, n), dw);
+                        dw.iter_mut().zip(dv.iter()).for_each(|(o, x)| *o += *x);
+                    }
+                    l[..sn].copy_from_slice(dv);
+                    if explicit {
+                        for (ti, &tt) in nb.terms.iter().enumerate() {
+                            let d = at.dc[tt][a];
+                            if d == C64::ZERO {
+                                continue;
+                            }
+                            crate::linalg::mul_add(false, &mut r[3 * sn..4 * sn], d, &basis.sterms[ti * sn..(ti + 1) * sn]);
+                            crate::linalg::mul_add(false, &mut l[..sn], d.conj(), &basis.eterms[ti * sn..(ti + 1) * sn]);
+                            crate::linalg::mul_add(false, da, d, &basis.hterms[ti * nn..(ti + 1) * nn]);
+                        }
+                        work += (nb.terms.len() * (2 * sn + nn)) as f64;
+                    }
+                    l[sn..2 * sn].copy_from_slice(&emit[..sn]);
+                    l[2 * sn..3 * sn].copy_from_slice(dza);
+                    l[3 * sn..].copy_from_slice(z);
+                    r[..sn].copy_from_slice(z);
+                    r[sn..2 * sn].copy_from_slice(dza);
+                    r[2 * sn..3 * sn].copy_from_slice(w);
+                    crate::linalg::adjoint_product_onto(l, r, (n, 4 * s, n), da);
+                    work += (s * s * n + nb.vectors.len() * sn + 4 * s * nn) as f64;
+                    // The exact copies' rows: ∂(Z†y_E + Z_D†y_D), y_E = K̂_ED Z_D, y_D = K̂_DE Z + K̂_DD Z_D, and of the explicit
+                    // states Ê_D Z_D + Z_D†B_D; K̂_ED and Ê_D of the position's light, K̂_DD the middle's.
+                    if nd > 0 {
+                        let (ked, kde): (&[C64], &[C64]) = if j == 0 { (&nb.ked, &nb.kde) } else { (&nb.kednode[j - 1], &nb.kdenode[j - 1]) };
+                        let zd: &[C64] = if j == 0 { &nb.zdtot } else { &nb.zdnode[j - 1] };
+                        let dzd = zeroed(dzd, nd * n);
+                        for sp in 0..lanes {
+                            let (rho, drho) = ratio(sp, a);
+                            crate::linalg::mul_add(false, dzd, rho, &tg.ddz[sp][a]);
+                            if drho != C64::ZERO {
+                                crate::linalg::mul_add(false, dzd, drho, &nb.zd[sp * nd * n..(sp + 1) * nd * n]);
+                            }
+                        }
+                        let (dked, dkde) = (zeroed(dked, s * nd), zeroed(dkde, nd * s));
+                        for (xx, &(g, k)) in nb.exact.iter().enumerate() {
+                            let d = at.de[g][k][a];
+                            for i in 0..s {
+                                for e2 in 0..nd {
+                                    let c = d * basis.couple[xx][i * nd + e2];
+                                    dked[i * nd + e2] += c;
+                                    dkde[e2 * s + i] += c.conj();
+                                }
+                            }
+                        }
+                        let (ye, yd, dye, dyd) = (zeroed(ye, sn), zeroed(yd, nd * n), zeroed(dye, sn), zeroed(dyd, nd * n));
+                        fused_product_into(ked, zd, (s, nd, n), ye);
+                        fused_product_into(kde, z, (nd, s, n), yd);
+                        crate::linalg::fused_product_onto(&nb.kdd, zd, (nd, nd, n), yd);
+                        fused_product_into(dked, zd, (s, nd, n), dye);
+                        crate::linalg::fused_product_onto(ked, dzd, (s, nd, n), dye);
+                        fused_product_into(dkde, z, (nd, s, n), dyd);
+                        crate::linalg::fused_product_onto(kde, dza, (nd, s, n), dyd);
+                        crate::linalg::fused_product_onto(&tg.dkdd[a], zd, (nd, nd, n), dyd);
+                        crate::linalg::fused_product_onto(&nb.kdd, dzd, (nd, nd, n), dyd);
+                        crate::linalg::adjoint_product_onto(dza, ye, (n, s, n), da);
+                        crate::linalg::adjoint_product_onto(z, dye, (n, s, n), da);
+                        crate::linalg::adjoint_product_onto(dzd, yd, (n, nd, n), da);
+                        crate::linalg::adjoint_product_onto(zd, dyd, (n, nd, n), da);
+                        work += (nb.exact.len() * s * nd + 4 * s * nd * n + 3 * nd * nd * n + 2 * (s + nd) * nn + lanes * nd * n) as f64;
+                        if explicit {
+                            let (exd, b0d): (&[C64], &[C64]) = if j == 0 { (&nb.exd, &nb.b0d) } else { (&nb.pnode[j - 1].exd, &nb.pnode[j - 1].b0d) };
+                            let (dexd, db0d) = (zeroed(dexd, n * nd), zeroed(db0d, nd * n));
+                            for (xx, &(g, k)) in nb.exact.iter().enumerate() {
+                                let d = at.de[g][k][a];
+                                for p in 0..n {
+                                    for e2 in 0..nd {
+                                        let c = d * basis.xcouple[xx][p * nd + e2];
+                                        dexd[p * nd + e2] += c;
+                                        db0d[e2 * n + p] += c.conj();
+                                    }
+                                }
+                            }
+                            crate::linalg::fused_product_onto(dexd, zd, (n, nd, n), da);
+                            crate::linalg::fused_product_onto(exd, dzd, (n, nd, n), da);
+                            crate::linalg::adjoint_product_onto(dzd, b0d, (n, nd, n), da);
+                            crate::linalg::adjoint_product_onto(zd, db0d, (n, nd, n), da);
+                            work += (nb.exact.len() * n * nd + 4 * nd * nn) as f64;
+                        }
+                    }
+                    // The centred copies' rows: z₀(∂T_C†T_C + T_C†∂T_C), ∂T_C of ∂Z and of the position's ∂e.
+                    if nb.copied_in {
+                        let tc: &[C64] = if j == 0 { &nb.tc } else { &nb.tcnode[j - 1] };
+                        let (dtc, extra) = (zeroed(dtc, nb.nc * n), zeroed(extra, nb.nc * n));
+                        copies_of(&nb.copies, &nb.groups, basis, &|g, k| at.e[g][k], dza, false, dtc, s, n, &mut work);
+                        copies_of(&nb.copies, &nb.groups, basis, &|g, k| at.de[g][k][a], z, true, extra, s, n, &mut work);
+                        dtc.iter_mut().zip(extra.iter()).for_each(|(o, x)| *o += *x);
+                        let m1 = zeroed(m1, nn);
+                        crate::linalg::adjoint_product_onto(dtc, tc, (n, nb.nc, n), m1);
+                        crate::linalg::adjoint_product_onto(tc, dtc, (n, nb.nc, n), m1);
+                        crate::linalg::mul_add(false, da, C64::real(basis.z0), m1);
+                        work += (2 * nb.nc * nn + nn) as f64;
+                    }
+                }
+            }
+        }
+        // The tones' A_m: Σ_m c_m Σ_t ∂c_t (its pairs' entries).
+        for (rot, &c) in rotating.iter().zip(tones).filter(|(_, c)| **c != C64::ZERO) {
+            for (t, entries) in &rot.pp {
+                for a in 0..3 {
+                    let d = c * at.dc[*t][a];
+                    for &(i, v) in entries {
+                        da[a * nn + i] += d * v;
+                    }
+                }
+                work += (3 * entries.len()) as f64;
+            }
+        }
+        // The generator the position holds -- G, and the tones' G_m at their coefficients -- and the top: S⁻¹∂AS⁻¹ less
+        // S⁻¹∂S G and G ∂S S⁻¹ (∂S⁻¹ = −S⁻¹∂S S⁻¹), its Hermitian part.
+        let y = zeroed(y, nn);
+        if whole {
+            y.copy_from_slice(if j == 0 { &step.generator.data } else { &nodes[j - 1].generator.data });
+        }
+        for (m, &c) in tones.iter().enumerate().filter(|(_, c)| **c != C64::ZERO) {
+            crate::linalg::mul_add(false, y, c, if j == 0 { &step.tones[m].data } else { &nodes[j - 1].tones[m].data });
+        }
+        let normal = &step.normal.data;
+        for (a, o) in out.iter_mut().enumerate() {
+            let (x, m1, m2) = (zeroed(x, nn), zeroed(m1, nn), zeroed(m2, nn));
+            multiply(normal, &da[a * nn..(a + 1) * nn], m1, n);
+            multiply(m1, normal, x, n);
+            multiply(normal, &ds[a], m1, n);
+            multiply(m1, y, m2, n);
+            x.iter_mut().zip(m2.iter()).for_each(|(u, v)| *u -= *v);
+            multiply(y, &ds[a], m1, n);
+            multiply(m1, normal, m2, n);
+            x.iter_mut().zip(m2.iter()).for_each(|(u, v)| *u -= *v);
+            o.clear();
+            o.extend((0..nn).map(|i| (x[i] + x[(i % n) * n + i / n].conj()) * 0.5));
+        }
+        work + (18 * n * nn) as f64
+    }
+
     /// The step's tangent along the three lab axes (module documentation, # The force): every split's response's change by the
     /// same sweeps as the step -- its field's (the split's factor) and its own through Ĥ_PP, K̃ on the decomposition's parts,
     /// Ṽ and the Bloch generators, the exact copies' with it --, the metric's ∂X and S's ∂S (S dS + dS S = ∂X, `lyapunov`):
@@ -5159,6 +5459,11 @@ impl Workspace {
     /// Tone m's A_m at the last step's middle (n × n, row by row).
     pub(crate) fn tone_matrix(&self, m: usize) -> &[C64] {
         &self.mid.tones[m]
+    }
+
+    /// The exact copies' rows over the near blocks at the last step (the tests' coverage).
+    pub(crate) fn exact_rows(&self) -> usize {
+        self.near.iter().map(|x| x.nd).sum()
     }
 
     /// The step's discrete choices (what the force's difference holds fixed): its sweeps, and per near block its rows

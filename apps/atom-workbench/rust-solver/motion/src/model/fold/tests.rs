@@ -2211,6 +2211,133 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
     assert!(checked >= 4 && toned >= 1, "{checked} points checked, {toned} with tones");
 }
 
+/// The gradient's matrices (proto.rs `Fold::prototype_gradient`, the step's derivative in its forward mode; BRIEF_STEP3
+/// item 3) are the force's (`Fold::prototype_force`, its reverse mode): at the step's middle and at its two outer nodes,
+/// Re tr(Ĝ_a ρ) of a random density is its static bar's form, and of a tone's bar cρ its tone's matrices at c, to the
+/// rounding of the two orders of summation (of the matrices' size, or of the generator's times the light's wave number
+/// where the light's gradient vanishes there: a uniform light's). Every set of PGC3D_1ms (refs), a Λ with a tone, unify's
+/// Λ with its excited level in P, R4_LIN_4 (its F = 1 set explicit), R6_RAMAN_CO, R6_RAMAN_COUNTER, R5_PUMP and
+/// R1_TWEEZER, by their prototype choices, two moving points a set. (No set of these -- nor of GMD1C, tilt2 or S2Q -- takes
+/// an exact copy or a centred copy's rows in at its points: those terms mirror the tangent's and the force's own.)
+#[test]
+fn the_gradient_s_matrices_are_the_force_s_forms() {
+    use super::proto::{Bar, Cache};
+    let pgc = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json").to_string_lossy().into_owned();
+    let (mut checked, mut toned, mut exact, mut copied, mut explicit, mut worst) = (0, 0, 0, 0, 0, 0.0_f64);
+    let scenes = ["R4_LIN_4", "R6_RAMAN_CO", "R6_RAMAN_COUNTER", "R5_PUMP", "R1_TWEEZER"].map(|x| (x.to_string(), crate::model::testing::scene(x)));
+    for (name, req) in [(pgc.clone(), crate::model::testing::scene(&pgc)), ("a Λ with a tone".to_string(), toned_lambda()), ("a Λ with its excited level in P".to_string(), lambda_request(3.0, 1.5, 0.0))].into_iter().chain(scenes) {
+        let choice = proto_choice(&req, &name);
+        let mut seed = 29u64;
+        let mut u = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for set in Fold::sets(&req, &choice).unwrap() {
+            let fold = Fold::new(&req, &choice, set[0]).unwrap();
+            if fold.blocks.is_empty() {
+                continue;
+            }
+            let mut ws = match fold.prototype_workspace() {
+                Ok(w) => w,
+                Err(e) => {
+                    println!("{name} set {set:?}: not the prototype's ({e})");
+                    continue;
+                }
+            };
+            let n = fold.size();
+            let tones = ws.tones().count();
+            let speed = 0.1 / fold.hbar_over_mass;
+            let k = fold.components.iter().flat_map(|c| c.kicks.iter()).map(|q| (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt()).fold(0.0, f64::max);
+            for _ in 0..2 {
+                let r0: [f64; 3] = std::array::from_fn(|_| 0.6 * u() - 0.3);
+                let (ct, phi) = (2.0 * u() - 1.0, 2.0 * std::f64::consts::PI * u());
+                let st = (1.0 - ct * ct).sqrt();
+                let kappa = [speed * st * phi.cos(), speed * st * phi.sin(), speed * ct];
+                let velocity = kappa.map(|k| k * fold.hbar_over_mass);
+                let mut cache = Cache::default();
+                let middle = fold.prototype(r0, kappa, &mut cache, &mut ws).expect("the prototype").generator.clone();
+                fold.prototype_nodes(r0, kappa, velocity, [-0.325, 0.325], &cache, &mut ws);
+                fold.prototype_tangent(&cache, &mut ws);
+                exact += usize::from(ws.exact_rows() > 0);
+                copied += usize::from(ws.choices().1.iter().any(|x| x.1));
+                explicit += usize::from(n > fold.ground.len());
+                for j in 0..3 {
+                    let psi: Vec<C64> = (0..n).map(|_| C64::new(u() - 0.5, u() - 0.5)).collect();
+                    let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
+                    let rho: Vec<C64> = (0..n * n).map(|i| psi[i / n] * psi[i % n].conj() / norm).collect();
+                    // Re tr(Ĝ ρ) = Σ_pq Re(Ĝ_pq ρ_qp).
+                    let contracted = |g: &[Vec<C64>; 3]| -> [f64; 3] { std::array::from_fn(|a| (0..n * n).map(|i| (g[a][i] * rho[(i % n) * n + i / n]).re).sum()) };
+                    let frobenius = |m: &[C64]| m.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+                    let held = if j == 0 { frobenius(&middle.data) } else { frobenius(&ws.node_generator(j - 1).data) };
+                    let toned = (0..tones).map(|m| frobenius(&ws.tone(m, j).data)).fold(0.0, f64::max);
+                    let size = |g: &[Vec<C64>; 3]| -> f64 { g.iter().map(|m| frobenius(m)).fold(0.0, f64::max).max(k * held.max(toned)) };
+                    let mut matrices: [Vec<C64>; 3] = Default::default();
+                    fold.prototype_gradient(&cache, &mut ws, j, true, &[], &mut matrices);
+                    let forms = fold.prototype_force(&cache, &mut ws, &[Bar { channel: 0, position: j, tone: None, matrix: &rho }], 1).forms[0];
+                    let (ours, scale) = (contracted(&matrices), size(&matrices));
+                    let mut miss: f64 = (0..3).map(|a| (ours[a] - forms[a].re).abs()).fold(0.0, f64::max) / scale.max(f64::MIN_POSITIVE);
+                    for m in 0..tones {
+                        let c = C64::cis(2.0 * std::f64::consts::PI * u());
+                        let x: Vec<C64> = rho.iter().map(|z| *z * c).collect();
+                        let mut coefficients = vec![C64::ZERO; tones];
+                        coefficients[m] = c;
+                        let mut toned_matrices: [Vec<C64>; 3] = Default::default();
+                        fold.prototype_gradient(&cache, &mut ws, j, false, &coefficients, &mut toned_matrices);
+                        let forms = fold.prototype_force(&cache, &mut ws, &[Bar { channel: 0, position: j, tone: Some(m), matrix: &x }], 1).forms[0];
+                        let (ours, scale) = (contracted(&toned_matrices), size(&toned_matrices));
+                        miss = miss.max((0..3).map(|a| (ours[a] - forms[a].re).abs()).fold(0.0, f64::max) / scale.max(f64::MIN_POSITIVE));
+                    }
+                    println!("{name} set {set:?} position {j}: Re tr(Ĝρ) {:+.6e} {:+.6e} {:+.6e}, the forms {:+.6e} {:+.6e} {:+.6e}: {miss:.1e} of ‖Ĝ‖ {scale:.2e} ({tones} tones)", ours[0], ours[1], ours[2], forms[0].re, forms[1].re, forms[2].re);
+                    assert!(miss <= 1e-12, "{name} set {set:?} position {j}: the matrices against the forms, {miss:.2e} of their size");
+                    worst = worst.max(miss);
+                }
+                checked += 1;
+                toned += usize::from(tones > 0);
+            }
+        }
+    }
+    println!("{checked} points, {toned} with tones, {explicit} with explicit states, {exact} with exact copies, {copied} with centred copies' rows in: the largest miss {worst:.1e}");
+    assert!(checked >= 8 && toned >= 1 && explicit >= 2, "{checked} points checked, {toned} with tones, {explicit} explicit");
+}
+
+/// Steps of R4_LIN_4's run on each of its sets, moving (BRIEF_STEP3 item 3): its F = 1 set holds explicit states, and its
+/// steps make the optical sector's K of the gradient's matrices with their slope along the path -- not refused
+/// (`Refused::Optical`), the covariance booked and a number; its F = 2 set holds none and books none.
+#[test]
+fn an_explicit_set_s_step_makes_its_optical_sector() {
+    struct Anywhere;
+    impl crate::step::Domain for Anywhere {
+        fn runaway(&self, _: f64) -> bool {
+            false
+        }
+    }
+    let req = crate::model::testing::scene("R4_LIN_4");
+    let run = super::run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).expect("the run");
+    let speed = 0.05 / crate::units::hbar_over_mass(req.mass_kg);
+    let mut scratch = crate::step::Scratch::default();
+    let mut explicit = 0;
+    for set in 0..2 {
+        let cluster = crate::step::Dynamics::cluster(&run, set).clone();
+        let holds = cluster.states.len() > cluster.ground;
+        let mut t = crate::step::Trajectory::new(&run, cluster.states[0], [0.05, -0.03, 0.02], [speed, 0.4 * speed, -0.7 * speed], 7, set as u64);
+        // The steps that stay in the set: each books its covariance where the set holds explicit states, none where not.
+        let mut stayed = 0;
+        for _ in 0..8 {
+            let (before, start) = (t.booked, t.cluster);
+            let middle = crate::step::Midway::new(&run, &t, 0.126).expect("the reference's fixed point");
+            t = middle.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere).expect("a step, its optical sector made").end;
+            assert!(t.booked[..2].iter().all(|x| x.is_finite()) && t.pending.iter().flatten().all(|x| x.is_finite()), "the optical sector's covariance a number");
+            if start == set && t.cluster == set && t.jumps == 0 {
+                assert_eq!(t.booked[1] != before[1], holds, "the optical sector where the set holds explicit states");
+                stayed += 1;
+            }
+        }
+        println!("set {set} ({} states, {} ground): {stayed} steps in it before its first jump; booked over 8 steps ε_Q tr C {:.3e}, tr C {:.3e}", cluster.states.len(), cluster.ground, t.booked[0], t.booked[1]);
+        explicit += usize::from(holds && stayed > 0);
+    }
+    assert!(explicit >= 1, "R4_LIN_4's F = 1 set explicit, its trajectory there");
+}
+
 /// The prototype's photons (proto.rs `Fold::prototype_photons`, BRIEF_PROTO2 item 2) of a random state at the step's middle:
 /// their rate is the state's hazard ⟨ψ|i(G − G†)|ψ⟩/‖ψ‖² to the rounding (the jumps' amplitudes u = Lψ are the decay's);
 /// a class's jump's amplitudes as they leave them (`Workspace::jumped`, a jump's at its place) are the operators' on the
@@ -2487,7 +2614,14 @@ fn lambda_against_master(a: f64, b: f64, form: f64, time: f64) -> (f64, f64, f64
     use crate::step::{Dynamics, Midway, Trajectory};
     let (e2, gamma): (f64, f64) = (100.0, 38.0);
     let (to1, to2) = (0.75 * gamma, 0.25 * gamma);
-    let req = lambda_request(a, b, form);
+    let mut req = lambda_request(a, b, form);
+    // Every excited state decays, as in every request the app makes: the idle ones (no laser on them) at Γ to the ground
+    // state 1 -- never populated, they leave the Λ's dynamics as they are, and an explicit set's optical sector relaxes
+    // in every direction (step.rs # The optical sector's noise: a direction that does not relax makes no K, and the step
+    // is refused).
+    for e in (0..EXCITED).filter(|&e| e != 17) {
+        req.emission[2][(1, GROUND + e)] = C64::real(gamma.sqrt());
+    }
     let rays = req.beams.len();
     let k = req.beams[1].wave_number;
     let at = if form != 0.0 { [0.0, 0.0, std::f64::consts::FRAC_PI_4 / k] } else { [0.0; 3] };
