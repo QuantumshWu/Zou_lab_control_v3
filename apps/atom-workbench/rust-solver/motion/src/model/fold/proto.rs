@@ -220,7 +220,9 @@ struct Near {
     all: usize,
     levels: Vec<Vec<usize>>,
     wanted: Option<Vec<usize>>,
-    /// The step's R₀ change factor ε_R (the reuse's and the omission bound's).
+    /// The step's centred copies (module documentation, 6; `centring`): the forms' change of their matrix z₀ − Ĥ_CC held at
+    /// the reference, Σ_t |δc_t| ‖N_t,CC‖, and the factor ε_R,j's largest over the columns (the omission bound's).
+    held: f64,
     epsr: f64,
     nc: usize,
     value: f64,
@@ -234,8 +236,9 @@ struct Near {
     delta: Vec<C64>,
     kappa: Vec<C64>,
     off: Vec<f64>,
+    /// Per row the centred copies' dressing's size Σ_t |c_t| ‖(V†N_t,dress V)_i‖, and its explicit source's (an absolute
+    /// source error on the explicit columns): times the factor ε_R,j, the error of R₀ held (`centring`).
     rho: Vec<f64>,
-    /// Per row the explicit source's dressing's R₀ change (an absolute source error on the explicit columns).
     rhox: Vec<f64>,
     shifts: Vec<f64>,
     vt: Vec<C64>,
@@ -426,7 +429,6 @@ struct Far {
     hf: Vec<C64>,
     mf: Vec<C64>,
     reading: f64,
-    centring: f64,
     /// Its rows' largest decay (rad/µs; the ring's, `landing_ring`).
     decay: f64,
     /// Whether the point leaves the block out (`omit`).
@@ -555,8 +557,9 @@ pub(crate) struct Cache {
 }
 
 /// A step's result: A, the metric less one, S⁻¹, G (n × n); the sweeps; the readings (rate units): the series' rest,
-/// the largest of the near blocks' reuse, of the far blocks' held forms against `Fold::at` and of their centring against
-/// the exact energies; the last changes' largest ratio; the work (complex multiply-adds) and the ticks by phase
+/// the largest of the near blocks' reuse (their centred copies' held resolvent against the exact one at every column's
+/// energy with it, `centring`) and of the far blocks' held response against the exact one there; the last changes'
+/// largest ratio; the work (complex multiply-adds) and the ticks by phase
 /// (`PHASES`), and per sweep.
 pub(crate) struct Step {
     pub(crate) a: Mat,
@@ -569,7 +572,6 @@ pub(crate) struct Step {
     pub(crate) series: f64,
     pub(crate) reuse: f64,
     pub(crate) far: f64,
-    pub(crate) centring: f64,
     pub(crate) copies: f64,
     /// What the nodes left out at the point leave (rate units), and their count (near parts, far blocks).
     pub(crate) omitted: f64,
@@ -601,7 +603,8 @@ pub(crate) struct Readings {
 impl Readings {
     /// The largest: the fold's error at the point (run.rs # The nodes risen and fallen, ρ).
     pub(crate) fn most(&self) -> f64 {
-        [self.series, self.reuse, self.far, self.omitted, self.ring].into_iter().fold(0.0, f64::max)
+        // A reading that is no number is beyond every share (the one exit: `f64::max` would pass it as none).
+        [self.series, self.reuse, self.far, self.omitted, self.ring].into_iter().fold(0.0, |a, b| if b.is_nan() { f64::INFINITY } else { a.max(b) })
     }
 }
 
@@ -784,6 +787,7 @@ struct RowTemps {
     each: Vec<f64>,
     total: Vec<f64>,
     acc: Vec<f64>,
+    eps: Vec<f64>,
 }
 
 impl Scratch {
@@ -833,7 +837,7 @@ impl Scratch {
                 bdb: z(nd * n),
             },
             copies_back: CopiesBack { zea: z(s * n), zda: z(nd * n) },
-            rows: RowTemps { part: vec![0.0; s.max(1) * n], lane: vec![0.0; ln], each: vec![0.0; n], total: vec![0.0; n], acc: vec![0.0; n] },
+            rows: RowTemps { part: vec![0.0; s.max(1) * n], lane: vec![0.0; ln], each: vec![0.0; n], total: vec![0.0; n], acc: vec![0.0; n], eps: vec![0.0; n] },
             bound: BoundTemps {
                 q_of: Vec::with_capacity(levels),
                 c: z(n),
@@ -1170,7 +1174,7 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
     }
     zk.iter_mut().for_each(|u| *u = u.sqrt());
     let parts = basis.f.parts.len().max(1);
-    let nu = basis.nu + (0..s).map(|i| nb.off[i * parts..(i + 1) * parts].iter().sum::<f64>() + nb.rho[i]).fold(0.0, f64::max);
+    let nu = basis.nu + (0..s).map(|i| nb.off[i * parts..(i + 1) * parts].iter().sum::<f64>() + nb.epsr * nb.rho[i]).fold(0.0, f64::max);
     // Per lane and column min_i |c_j − w_l − κ_i|², the rows outer (BRIEF_PROTO5 item 3), then 1/(δ − ν).
     let resolvent = |d2: f64| -> f64 {
         if s == 0 {
@@ -1458,6 +1462,9 @@ fn omit(near: &mut [Near], far: &mut [Far], scratch: &mut [Scratch], tm: &mut Te
     for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
         let basis = &cache.near[x][cache.at_near[x].unwrap()];
         let nl = nb.levels.len();
+        // The centred copies' factor at this sweep's energies, its largest (the levels' bound's and its departure from
+        // normality's, `bound_levels`).
+        nb.epsr = if nb.nc > 0 { (0..n).map(|j| centring(basis.r0, basis.z0, nb.held, h[j * n + j], &nb.shifts)).fold(0.0, f64::max) } else { 0.0 };
         let (omitted, sz, bk, sh) = &mut per[x];
         for (q, o) in omitted[..nl].iter_mut().enumerate() {
             *o = !basis.kept.contains(&q);
@@ -2547,6 +2554,7 @@ impl Fold {
                     all: ne,
                     levels,
                     wanted: None,
+                    held: 0.0,
                     epsr: 0.0,
                     nc,
                     value: b.value,
@@ -2606,7 +2614,6 @@ impl Fold {
                     hf: vec![C64::ZERO; n * n],
                     mf: vec![C64::ZERO; n * n],
                     reading: 0.0,
-                    centring: 0.0,
                     decay: b.rows.iter().filter_map(|r| if let Row::Excited(e) = *r { Some(-2.0 * self.base_excited[(e, e)].im) } else { None }).fold(0.0, f64::max),
                     omitted: false,
                     vectors,
@@ -2703,7 +2710,6 @@ impl Fold {
                 series: 0.0,
                 reuse: 0.0,
                 far: 0.0,
-                centring: 0.0,
                 copies: 0.0,
                 omitted: 0.0,
                 ring: 0.0,
@@ -3625,7 +3631,6 @@ impl Fold {
                 let s = nb.s;
                 let fa = &basis.f;
                 let parts = fa.parts.len().max(1);
-                let z0: f64 = nb.centre.iter().map(|&p| hpp[p * n + p].re).sum::<f64>() / nb.centre.len().max(1) as f64;
                 for i in 0..s {
                     nb.kappa[i] = fa.t[(i, i)] - C64::real(nb.value);
                     for g in 0..parts {
@@ -3634,7 +3639,7 @@ impl Fold {
                     nb.rho[i] = 0.0;
                     nb.rhox[i] = 0.0;
                 }
-                let mut dm = (z0 - basis.z0).abs();
+                let mut dm = 0.0;
                 for (t, &p) in nb.terms.iter().enumerate() {
                     let d = coef[p] - basis.at[t];
                     nb.delta[t] = d;
@@ -3666,17 +3671,15 @@ impl Fold {
                     }
                     work[DIAGONAL] += (2 * nb.exact.len() * s * nb.nd + nb.terms.len() * nb.nd * nb.nd) as f64;
                 }
-                // R₀'s own change: δR₀ ≤ ‖R₀‖²‖δM‖/(1 − ‖R₀‖‖δM‖) through the dressing, ρ_i = ε_R Σ_t |c_t| ‖(V†N_t,dress V)_i‖.
-                nb.epsr = 0.0;
+                // The centred copies' dressing on the rows, ρ_i = Σ_t |c_t| ‖(V†N_t,dress V)_i‖, and the forms' change of their held
+                // matrix: the factor ε_R,j is the columns' (`centring`).
+                (nb.held, nb.epsr) = (dm, 0.0);
                 if nb.nc > 0 {
-                    let x = basis.r0 * dm;
-                    let eps_r = if x < 1.0 { x / (1.0 - x) } else { f64::INFINITY };
-                    nb.epsr = eps_r;
                     for (t, &p) in nb.terms.iter().enumerate() {
                         let size = coef[p].abs();
                         for i in 0..s {
-                            nb.rho[i] += eps_r * size * basis.dressed[t * s + i];
-                            nb.rhox[i] += eps_r * size * basis.dressedx[t * s + i];
+                            nb.rho[i] += size * basis.dressed[t * s + i];
+                            nb.rhox[i] += size * basis.dressedx[t * s + i];
                         }
                     }
                     work[DIAGONAL] += (nb.terms.len() * s) as f64 / 4.0;
@@ -3833,7 +3836,7 @@ impl Fold {
                 let ln = beams * n;
                 let mean = nb.shifts.iter().sum::<f64>() / beams.max(1) as f64;
                 let spread = nb.shifts.iter().map(|w| (w - mean).abs()).fold(0.0, f64::max);
-                let RowTemps { part: pn, lane, each, total, acc } = &mut sc.rows;
+                let RowTemps { part: pn, lane, each, total, acc, eps } = &mut sc.rows;
                 let (pn, lane, each, total, acc) = (&mut pn[..parts * n], &mut lane[..ln], &mut each[..n], &mut total[..n], &mut acc[..n]);
                 pn.fill(0.0);
                 lane.fill(0.0);
@@ -3859,15 +3862,21 @@ impl Fold {
                     }
                 }
                 acc.fill(0.0);
+                // The centred copies' factor at every column's energy (`centring`).
+                let eps = &mut eps[..n];
+                for (j, x) in eps.iter_mut().enumerate() {
+                    *x = if nb.nc > 0 { centring(basis.r0, basis.z0, nb.held, h[j * n + j], &nb.shifts) } else { 0.0 };
+                }
+                let most = eps.iter().copied().fold(0.0, f64::max);
                 for i in 0..s {
                     let own = basis.part[i];
-                    let mut all = nb.rho[i];
+                    let mut all = most * nb.rho[i];
                     for g in 0..parts {
                         all += nb.off[i * parts + g];
                     }
                     let kappa = nb.kappa[i];
                     for j in 0..n {
-                        let mut e = nb.rho[i] * total[j].sqrt() + if nb.xcol[j] { nb.rhox[i] } else { 0.0 };
+                        let mut e = if eps[j] > 0.0 { eps[j] * (nb.rho[i] * total[j].sqrt() + if nb.xcol[j] { nb.rhox[i] } else { 0.0 }) } else { 0.0 };
                         for g in 0..parts {
                             let off = nb.off[i * parts + g];
                             if off > 0.0 {
@@ -3886,20 +3895,16 @@ impl Fold {
             }
             for (x, fb) in far.iter_mut().enumerate() {
                 if fb.omitted {
-                    (fb.reading, fb.centring) = (0.0, 0.0);
+                    fb.reading = 0.0;
                     continue;
                 }
+                // Its response R₀B held at the reference (its centre z₀ and forms) against the exact one at every column's
+                // energy and lane: one factor (`centring`), the centring and the drift.
                 let basis = &cache.far[x][cache.at_far[x].unwrap()];
-                let z0: f64 = fb.centre.iter().map(|&p| hpp[p * n + p].re).sum::<f64>() / fb.centre.len().max(1) as f64;
-                let held = (z0 - basis.z0).abs() + fb.delta.iter().zip(&basis.copied).map(|(d, c)| d.abs() * c).sum::<f64>();
-                let energies = (0..n).map(|j| (h[j * n + j] - C64::real(z0)).abs()).fold(0.0, f64::max) + fb.splits.iter().map(|&(cc, j)| w[cc][j].abs()).fold(0.0, f64::max);
-                let read = |d: f64| {
-                    let x = basis.r0 * d;
-                    if x < 1.0 { rate(x / (1.0 - x)) } else { f64::INFINITY }
-                };
-                fb.reading = read(held);
-                fb.centring = read(energies);
-                work[READING] += fb.terms.len() as f64 / 4.0;
+                let held = fb.delta.iter().zip(&basis.copied).map(|(d, c)| d.abs() * c).sum::<f64>();
+                let shifts: Vec<f64> = fb.splits.iter().map(|&(cc, j)| w[cc][j]).chain([0.0]).collect();
+                fb.reading = (0..n).map(|j| rate(centring(basis.r0, basis.z0, held, h[j * n + j], &shifts))).fold(0.0, f64::max);
+                work[READING] += (fb.terms.len() + n) as f64 / 4.0;
             }
             // The ring's reading (module documentation, # The ring): per ground column -- a jump lands on a ground state --
             // the transient a bare state's landing leaves, to first order on the right response.
@@ -4042,7 +4047,6 @@ impl Fold {
         step.ratio = ratio;
         step.reuse = near.iter().map(|x| x.reading).fold(0.0, f64::max);
         step.far = far.iter().map(|x| x.reading).fold(0.0, f64::max);
-        step.centring = far.iter().map(|x| x.centring).fold(0.0, f64::max);
         step.copies = copies_read;
         step.omitted = rate(omitted);
         step.ring = ring;
@@ -4054,6 +4058,18 @@ impl Fold {
         step.ticks = tick;
         Some(())
     }
+}
+
+/// The factor ε_R of a resolvent held at the reference, R₀ = (z₀ − Ĥ_ref)⁻¹ (a block's centred copies', a far block's rows'),
+/// against the exact one at a column's energy c and every lane, R(c − w) (DESIGN §1.2, M10, M18; BRIEF_COPIES item 2):
+/// R(z) − R₀ = R(z)(z₀ − z + Ĥ − Ĥ_ref)R₀, so ‖R(z) − R₀‖ ≤ ‖R₀‖ x/(1 − x), x = ‖R₀‖ d, d = |c − w̄ − z₀| + max_l |w_l − w̄|
+/// + ‖Ĥ − Ĥ_ref‖ (`held`, the forms' change): the centring itself -- each column at its own energy, not at the block's
+/// centre -- and the reference's drift in one factor, column by column. ∞ where x reaches one.
+fn centring(r0: f64, z0: f64, held: f64, c: C64, shifts: &[f64]) -> f64 {
+    let mean = shifts.iter().sum::<f64>() / shifts.len().max(1) as f64;
+    let spread = shifts.iter().map(|w| (w - mean).abs()).fold(0.0, f64::max);
+    let x = r0 * ((c - C64::real(mean + z0)).norm_sqr().sqrt() + spread + held);
+    if x < 1.0 { x / (1.0 - x) } else { f64::INFINITY }
 }
 
 /// One near block's tangent along the lab axes (`Fold::prototype_tangent`), the three axes side by side in every row
