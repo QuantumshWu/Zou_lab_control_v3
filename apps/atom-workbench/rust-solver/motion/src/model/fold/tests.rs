@@ -3200,3 +3200,86 @@ fn r4_lin_4_s_thermal_paths_meet_no_point_where_their_fold_does_not_exist() {
 
 
 
+
+/// The splitting's reference and the loss energy on the fold (model/fold/run.rs, # The rest of the model; BRIEF_STEP3C
+/// item 3): on R4_LIN_4, R1_TWEEZER and R1_RETRO, at the prepared trap's centre, a thermal offset and 10 µm along each
+/// axis, the reference -- the trap light's held forms at the focus -- against the old model's prepared potential of the
+/// reference state (the bare fold's far forms, `Model::expansion`): value, gradient and Hessian within the share of their
+/// size; and the loss energy's potential at rest, V_run(r; p) of the folds with every light and with every light but the
+/// trap's, against the same difference of `Fold::at`'s generators (the prototype's truth) within the share of the
+/// reference's depth. The old model's running potential is said beside: its bare folds hold none of what the trap light
+/// does to the other lights' shifts (model/potential.rs, # An averaged light), the fold at the atom holds it.
+#[test]
+fn the_reference_and_the_loss_energy_are_the_trap_light_s_on_the_fold() {
+    use crate::model::{Model, Point};
+    use crate::step::Dynamics;
+    let share = super::super::elim::share();
+    for name in ["R4_LIN_4", "R1_TWEEZER", "R1_RETRO"] {
+        let request = crate::model::testing::scene(name);
+        let light = Light::new(&request);
+        let chief = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
+        let mut p = [0.0; GROUND];
+        p[chief] = 1.0;
+        let old = Model::new(&request, &light, &[]).unwrap();
+        let trap = old.trap(&p, &old.prepared()).unwrap();
+        let run = super::run::Onefold::new(&request, p).expect("the run");
+        let depth = -old.potential(trap.centre, &p, &old.prepared());
+        let c = trap.centre;
+        let points = [c, [c[0] + 0.3, c[1] - 0.2, c[2] + 0.5], [c[0] + 10.0, c[1], c[2]], [c[0], c[1] + 10.0, c[2]], [c[0], c[1], c[2] + 10.0]];
+        let size = |q: &crate::model::Quadratic| (q.value.abs(), q.gradient.iter().map(|x| x * x).sum::<f64>().sqrt(), q.hessian.iter().flatten().map(|x| x * x).sum::<f64>().sqrt());
+        let set = run.cluster_of(chief);
+        let psi: Vec<C64> = run.cluster(set).states.iter().map(|&s| if s == chief { C64::ONE } else { C64::ZERO }).collect();
+        for r in points {
+            let (new, was) = (run.reference(r), old.expansion(r, &p, &old.prepared()));
+            let apart = crate::model::Quadratic { value: new.value - was.value, gradient: std::array::from_fn(|a| new.gradient[a] - was.gradient[a]), hessian: std::array::from_fn(|a| std::array::from_fn(|b| new.hessian[a][b] - was.hessian[a][b])) };
+            let (d, s) = (size(&apart), size(&was));
+            let energy = run.energy(set, &Point { r, kappa: [0.0; 3], t: 0.0 }, &psi);
+            let running = old.potential(r, &p, &old.running());
+            // V_run of `Fold::at` on the folds with every light and with every light but the trap's (each ground set's
+            // with nothing explicit; the chief state's diagonal in the lab).
+            let diagonal = |request: &Request| -> f64 {
+                let choice = Choice::base(request, vec![]).unwrap();
+                let fold = Fold::new(request, &choice, chief).unwrap();
+                let x = fold.ground.iter().position(|&g| g == chief).unwrap();
+                fold_at(&fold, r, [0.0; 3]).expect("the fold at the point").generator[(x, x)].re + fold.frame_values[x]
+            };
+            let at = diagonal(&request) - diagonal(&super::run::lit(&request, &light, |w| w != light.trap));
+            println!("{name} at {r:.2?}: the reference {:.6e} (old {:.6e}), apart: value {:.2e}, gradient {:.2e}, Hessian {:.2e} of {:.2e}, {:.2e}, {:.2e}; V_run {energy:.6e} (Fold::at's {at:.6e}; the old model's {running:.6e}; depth {depth:.4e})", new.value, was.value, d.0, d.1, d.2, s.0, s.1, s.2);
+            assert!(d.0 <= share * s.0.max(1e-300) + 1e-12 * depth && d.1 <= share * s.1 + 1e-12 * depth && d.2 <= share * s.2 + 1e-12 * depth, "{name}: the reference against the prepared potential");
+            assert!((energy - at).abs() <= share * depth, "{name}: the loss energy against Fold::at's");
+        }
+    }
+}
+
+/// A request whose idle excited states lie at a laser's energy (BRIEF_STEP3C item 3): a two-level atom four linewidths
+/// below its line, the 31 other excited states idle at zero -- where the laser's energy is -- and undecaying. The run is made (no model of
+/// every bare drive, whose denominators vanish there, is built), its reference and loss energy are finite, and atoms
+/// step.
+#[test]
+fn a_request_whose_idle_excited_states_lie_at_a_laser_s_energy_is_run() {
+    use crate::model::Point;
+    use crate::step::{Dynamics, Midway, Trajectory};
+    struct Anywhere;
+    impl crate::step::Domain for Anywhere {
+        fn runaway(&self, _: f64) -> bool {
+            false
+        }
+    }
+    let req = system(&[(0, 0.0)], &[(17, 4.0 * GAMMA, GAMMA, 0)], &[Ray { axis: 0, nu: 0.0, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(0.5 * GAMMA))] }], 1, true);
+    let mut p = [0.0; GROUND];
+    p[0] = 1.0;
+    let run = super::run::Onefold::new(&req, p).expect("the run of idle states at the laser's energy");
+    let r = [0.3, -0.2, 0.1];
+    let q = run.reference(r);
+    let set = run.cluster_of(0);
+    let psi: Vec<C64> = run.cluster(set).states.iter().map(|&s| if s == 0 { C64::ONE } else { C64::ZERO }).collect();
+    let energy = run.energy(set, &Point { r, kappa: [0.0; 3], t: 0.0 }, &psi);
+    println!("the reference {q:?}; the loss energy at rest {energy:.6e}");
+    assert!(q.value.is_finite() && q.gradient.iter().chain(q.hessian.iter().flatten()).all(|x| x.is_finite()) && energy.is_finite(), "finite");
+    let mut t = Trajectory::new(&run, 0, r, [0.0; 3], 17, 0);
+    for _ in 0..20 {
+        t = Midway::new(&run, &t, 0.05).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut crate::step::Scratch::default(), &Anywhere)).expect("a step").end;
+    }
+    println!("after 20 steps: κ {:?}, ‖ψ‖² {:.6}", t.kappa, crate::linalg::norm_sqr(&t.psi));
+    assert!(t.kappa.iter().all(|x| x.is_finite()) && t.psi.iter().all(|z| z.re.is_finite() && z.im.is_finite()), "the atom steps");
+}

@@ -2886,6 +2886,42 @@ impl Fold {
         Some(FarBasis { at: fb.terms.iter().map(|&t| ws.mid.coef[t]).collect(), weights: copied.clone(), f, g, fg, copied, z0: laid.z0, r0: r0.frobenius(), resolvent: r0, emitted })
     }
 
+    /// The forms Ĥ_PP's pairs and the far blocks hold at the focus, on P's diagonal at the weights `weight` (one per
+    /// place; model/fold/run.rs, # The rest of the model): per term its two factors -- (frequency, basis vector,
+    /// counter-rotating) of the coefficients e_a = ε_k (ε_k* counter-rotating) --, and its weight W = Σ_p weight_p
+    /// (F_ab)_pp, the form being Re Σ e_a* e_b W wherever the coefficients are taken: the pairs' outside forms N_t (# The far
+    /// coordinates) and each far block's U_a†R₀U_b, R₀ held at the focus (# What is kept). Bilinear in the field: its
+    /// derivatives are the coefficients'. A near block holds none (its response is no form of the field). None where a far
+    /// block's resolvent is singular at the focus (the fold's one exit: it does not exist there).
+    pub(crate) fn prototype_held(&self, ws: &mut Workspace, weight: &[f64]) -> Option<Vec<([(usize, usize, bool); 2], C64)>> {
+        let n = ws.n;
+        let mut work = 0.0;
+        {
+            let Workspace { mid, pairs, pp, base, lin, rotating, proj, .. } = ws;
+            self.proto_place([0.0; 3], [0.0; 3], mid, pairs, pp, base, lin, rotating, proj, &mut work);
+        }
+        let site = self.site([0.0; 3], [0.0; 3], &mut work);
+        let diagonal = |m: &[C64]| -> C64 { (0..n).map(|p| m[p * n + p] * weight[p]).sum() };
+        let mut out: Vec<([(usize, usize, bool); 2], C64)> = ws
+            .pairs
+            .iter()
+            .zip(&ws.pp)
+            .map(|(&(w, k, kk), entries)| ([(w, k, false), (w, kk, false)], entries.iter().filter(|(i, _)| i / n == i % n).map(|&(i, v)| v * weight[i / n]).sum()))
+            .collect();
+        for fb in &ws.far {
+            let basis = self.far_basis(fb, ws, &site, &mut work)?;
+            let factor = |(c, k): (usize, usize)| (self.components[c].part.frequency, k, self.components[c].part.counter);
+            let v = fb.vectors.len();
+            for a in 0..v {
+                for b in 0..v {
+                    out.push(([factor(fb.vectors[a]), factor(fb.vectors[b])], diagonal(&basis.f[(a * v + b) * n * n..(a * v + b + 1) * n * n])));
+                }
+            }
+        }
+        out.retain(|x| x.1 != C64::ZERO);
+        Some(out)
+    }
+
     /// The prototype's step at a point (r, κ) on an atom's kept decompositions (module documentation): A, M, S⁻¹, G in the
     /// workspace's `Step`. None where the fold does not exist there (`prototype_within`).
     pub(crate) fn prototype<'w>(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &'w mut Workspace) -> Option<&'w Step> {

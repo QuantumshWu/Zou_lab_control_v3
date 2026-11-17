@@ -461,9 +461,10 @@ pub trait Dynamics {
     /// ħ/m (µm²/µs): the velocity of κ is (ħ/m)κ, its kinetic energy (ħ/m)κ²/2 (rad/µs).
     fn hbar_over_mass(&self) -> f64;
 
-    /// The reference potential's second-order expansion at r (SPEC §2.1): the fixed reference state's trap potential,
-    /// `Model::expansion(r, p_ref, &model.prepared())`. The splitting is exact for any reference; this one moves the trap's
-    /// harmonic part, and its gradient and curvature at the step's middle, exactly.
+    /// The reference potential's second-order expansion at r (SPEC §2.1): the fixed reference state's trap potential --
+    /// `Model::expansion(r, p_ref, &model.prepared())`, or the trap light's held forms on the fold (model/fold/run.rs,
+    /// # The rest of the model). The splitting is exact for any reference; this one moves the trap's harmonic part, and its
+    /// gradient and curvature at the step's middle, exactly.
     fn reference(&self, r: [f64; 3]) -> Quadratic;
 
     /// A cluster: its states and its Doppler frame K_s (`Model::clusters()[c]`).

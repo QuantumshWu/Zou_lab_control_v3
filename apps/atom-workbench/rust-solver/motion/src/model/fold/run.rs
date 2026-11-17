@@ -94,11 +94,27 @@
 //! between its states (`Dynamics::emit`). The rates, the force and the diffusion are sums over the states of |u_s|² and
 //! of their gradients' products, each its own phase's: none of them turns.
 //!
-//! # The rest of the model
-//! The reference potential of the splitting (A), the loss energy and its test are the request's prepared and running
-//! potentials as model.rs makes them (the folds with every drive bare: a reference is exact for any potential); the
-//! displayed rows are the fold's time-averaged populations at the point (`Dynamics::readout`). The photons' and the
-//! landing's own forms (DESIGN step 3) are not yet here.
+//! # The rest of the model (BRIEF_STEP3C item 3)
+//! The splitting's reference potential (A) and the loss energy are the fold's, of the same request with a subset of its
+//! light lit (`lit`: every other frequency's beams' fields and couplings zero) -- the same object and the same rule
+//! (`Choice::base`), the light its input:
+//! - the reference, V_ref(r) = Re Σ e_a*(r)e_b(r) W_ab, is what the folds of the trap's frequency alone hold of the field
+//!   at the focus on the reference state's ground populations: Ĥ_PP's outside forms and the far blocks' U_a†R₀U_b, R₀
+//!   held there (proto.rs `Fold::prototype_held`; `Reference`). Bilinear in the field's coefficients e = ε_k (ε_k*
+//!   counter-rotating), ε_k = Σ_l γ_lk a_l(r), so a form of the beam pairs a_l'*a_l as the old model's far potential:
+//!   its gradient and Hessian are the beams' amplitudes' jets, exactly (equal to the old prepared potential to 10⁻¹³
+//!   where the trap light is far: tests). A
+//!   near-resonant trap light has no far block and holds none: its force stays in the model's, less the reference's, as
+//!   any part of the force does (a reference is exact for any potential: step.rs # The reference);
+//! - the loss energy, (ħ/m)κ²/2 + V_run(r; p), V_run(r; p) = Σ_b p_b [G_L(r) − G_{L∖trap}(r)]_bb of the folds of every
+//!   light and of every light but the trap's, each ground set's with nothing explicit at the point (its diagonal in the
+//!   lab: G's less its frame), p the state's ground populations (an explicit excited state's by its decay's branching).
+//!   Its far value is zero: the trap's frequency holds no plane wave (ensemble.rs `PLANE_WAVE` refuses one). None
+//!   where a fold does not exist at the point: no loss is read there (`Subset::diagonal`).
+//! The displayed rows are the fold's time-averaged populations at the point (`Dynamics::readout`): the populations of
+//! the slow modes between two jumps (proto.rs `Workspace::populations`) -- not the optical Bloch equations' ensemble
+//! ρ_ee, which holds each jump's transient over 1/Γ that the fold's landing leaves out (within the share, read by the
+//! landing's reading).
 //!
 //! # The optical sector (step.rs # The optical sector's noise; DESIGN §1.3, R23)
 //! A set that holds explicit excited states has an optical sector (`Middle::optical`): its ground states, γ_Q the least
@@ -112,7 +128,7 @@ use super::proto::{At, Bar, Cache, Moments, Workspace};
 use super::{Choice, Fold};
 use crate::field::Light;
 use crate::linalg::{Mat, C64};
-use crate::model::{Cluster, Lights, Model, Point, Quadratic, Scattering};
+use crate::model::{Cluster, Point, Quadratic, Scattering};
 use crate::request::{Request, GROUND, STATES};
 use crate::step::{Decided, Dynamics as _, Emitted, Forms, Held, Internal, Middle as _, Offer, Optical, Switched};
 use std::cell::{RefCell, RefMut};
@@ -215,12 +231,12 @@ pub(crate) struct Onefold {
     /// The bare ground energies, and the excited states' frame frequency (rad/µs): the photons' frequencies.
     energies: Vec<f64>,
     frame: f64,
-    /// The potentials of the splitting's reference and of the loss (module documentation, # The rest of the model).
-    potentials: Model,
-    reference: [f64; GROUND],
-    prepared: Lights,
-    running: Lights,
-    no_wave: crate::model::Beat,
+    /// The splitting's reference potential and the loss energy's light subsets (module documentation, # The rest of the
+    /// model): every light, every light but the trap's (the latter made where first asked for).
+    light: Light,
+    reference: Reference,
+    running: Subset,
+    untrapped: OnceLock<Result<Subset, String>>,
     photons: f64,
 }
 
@@ -228,7 +244,7 @@ impl Set {
     /// The cluster of ground set `k` (`ground`) with the explicit nodes `nodes` on a choice of nodes that keeps them
     /// (module documentation, # The state sets): its fold and cluster, its counts at the focus at rest, its tones'
     /// candidates, coherence groups and optical sector.
-    fn new(request: &Request, choice: &Choice, k: usize, ground: &[usize], nodes: Vec<Key>, no_wave: &crate::model::Beat) -> Result<Set, String> {
+    fn new(request: &Request, choice: &Choice, k: usize, ground: &[usize], nodes: Vec<Key>) -> Result<Set, String> {
         let decay = super::decay(request);
         let fold = Fold::new(request, choice, ground[0])?;
         let mut states: Vec<usize> = fold.ground.clone();
@@ -241,7 +257,7 @@ impl Set {
             .map(|(&s, theta)| C64::new(request.hamiltonian[(s, s)].re - theta, if s < GROUND { 0.0 } else { -0.5 * decay[(s - GROUND, s - GROUND)].re }))
             .collect();
         let bandwidth = levels.iter().flat_map(|a| levels.iter().map(move |b| (a.conj() - *b).abs())).fold(0.0, f64::max);
-        let cluster = Cluster { ground: fold.ground.len(), frames: fold.frames.clone(), waves: vec![[0.0; 3]; states.len()], waves_exact: vec![no_wave.clone(); states.len()], states };
+        let cluster = Cluster { ground: fold.ground.len(), frames: fold.frames.clone(), waves: vec![[0.0; 3]; states.len()], waves_exact: vec![crate::model::Beat::whole(vec![]); states.len()], states };
         let (pool, work, made, tones, candidates, coherent) = if fold.blocks.is_empty() {
             (vec![], [0.0; 3], Some(0.0), vec![], vec![], vec![])
         } else {
@@ -312,7 +328,6 @@ impl Onefold {
     pub(crate) fn of(request: &Request, choice: &Choice, reference: [f64; GROUND]) -> Result<Onefold, String> {
         let grounds = Fold::sets(request, choice)?;
         let light = Light::new(request);
-        let potentials = Model::new(request, &light, &[])?;
         let axes = super::Axes::new(request)?;
         let mut membership = [0; GROUND];
         for (k, set) in grounds.iter().enumerate() {
@@ -326,11 +341,10 @@ impl Onefold {
             hbar_over_mass: crate::units::hbar_over_mass(request.mass_kg),
             frame: axes.omega(&axes.frame()),
             energies,
-            reference,
-            prepared: potentials.prepared(),
-            running: potentials.running(),
-            no_wave: potentials.no_wave(),
-            potentials,
+            reference: Reference::new(&lit(request, &light, |w| w == light.trap), &light, &reference)?,
+            running: Subset::new(request.clone())?,
+            untrapped: OnceLock::new(),
+            light,
             grounds,
             membership,
             photons: 0.0,
@@ -338,7 +352,7 @@ impl Onefold {
         for k in 0..run.grounds.len() {
             let mut nodes: Vec<Key> = choice.explicit.iter().copied().filter(|x| run.grounds[k].contains(&x.2)).collect();
             nodes.sort();
-            run.sets.index((k, nodes.clone()), || Set::new(request, choice, k, &run.grounds[k], nodes, &run.no_wave))?;
+            run.sets.index((k, nodes.clone()), || Set::new(request, choice, k, &run.grounds[k], nodes))?;
         }
         // A jump's photons at the focus, the dearest base cluster's, as a jump at a point makes them (`Dynamics::emit`):
         // its forward, tangent, the place and the photons there -- every class's rate and the dearest class's moments,
@@ -377,7 +391,7 @@ impl Onefold {
             let mut explicit: Vec<Key> = self.base.explicit.iter().copied().filter(|x| !self.grounds[k].contains(&x.2)).collect();
             explicit.extend(nodes.iter().copied());
             let choice = Choice::base(&self.request, explicit)?;
-            Set::new(&self.request, &choice, k, &self.grounds[k], nodes, &self.no_wave)
+            Set::new(&self.request, &choice, k, &self.grounds[k], nodes)
         })
     }
 
@@ -417,7 +431,7 @@ impl Onefold {
     fn held_forms(&self, set: usize, at: &Point, psi: &[C64], held: &Held, land: bool) -> Option<(Vec<C64>, Forms, Cache)> {
         let fold = &self.sets.get(set).fold;
         let tones = &self.sets.get(set).tones;
-        let gradient = self.potentials.expansion(at.r, &self.reference, &self.prepared).gradient;
+        let gradient = self.reference.at(&self.light, at.r).gradient;
         if fold.blocks.is_empty() {
             return Some((psi.to_vec(), Forms { time: at.t, ..Forms::default() }.less(gradient), Cache::default()));
         }
@@ -432,19 +446,19 @@ impl Onefold {
         out.map(|(state, forms)| (state, forms, cache))
     }
 
-    /// p(ψ), the ground populations of a set's state (model.rs `Model::ground_populations`, on the set's states).
+    /// p(ψ), the ground populations of a set's state (model.rs `Model::ground_populations`, on the set's states): an
+    /// explicit excited state's by its decay's branching.
     fn populations(&self, set: usize, psi: &[C64]) -> [f64; GROUND] {
         let total = crate::linalg::norm_sqr(psi);
         let mut p = [0.0; GROUND];
-        let model = &self.potentials;
         for (z, &s) in psi.iter().zip(&self.sets.get(set).cluster.states) {
             let weight = z.norm_sqr() / total;
             if s < GROUND {
                 p[s] += weight;
             } else if weight != 0.0 {
-                let rate = model.decay[(s - GROUND, s - GROUND)].re;
+                let rate: f64 = (0..GROUND).map(|b| self.request.emission.iter().map(|c| c[(b, s)].norm_sqr()).sum::<f64>()).sum();
                 for (b, landing) in p.iter_mut().enumerate() {
-                    *landing += weight * model.emission.iter().map(|c| c[(b, s)].norm_sqr()).sum::<f64>() / rate;
+                    *landing += weight * self.request.emission.iter().map(|c| c[(b, s)].norm_sqr()).sum::<f64>() / rate;
                 }
             }
         }
@@ -542,6 +556,112 @@ fn candidates(beats: &[(crate::model::Beat, f64)], crossing: &[(crate::model::Be
         made.push(oriented);
     }
     out
+}
+
+/// The request with only the frequencies `on` lit (module documentation, # The rest of the model): every other
+/// frequency's beams' fields and couplings zero, and its outside shift at the focus taken out of H0, which holds it
+/// (request.rs: H = H0 + Σ_ω Σ_i (x_ω,i(r) − x_ω,i(0)) O_ω,i).
+pub(super) fn lit(request: &Request, light: &Light, on: impl Fn(usize) -> bool) -> Request {
+    let mut out = request.clone();
+    for (_, f) in light.frequencies.iter().enumerate().filter(|(w, _)| !on(*w)) {
+        let focus: [C64; 3] = std::array::from_fn(|q| f.beams.iter().map(|&l| request.beams[l].field[q]).sum());
+        for (x, o) in crate::request::coordinates(&focus).iter().zip(&request.outside_forms[f.form].matrices) {
+            out.hamiltonian.add_scaled(C64::real(-x), o);
+        }
+        for &l in &f.beams {
+            let beam = &mut out.beams[l];
+            beam.field = [C64::ZERO; 3];
+            beam.coupling = Mat::zeros(STATES, STATES);
+            beam.counter_coupling = Mat::zeros(STATES, STATES);
+        }
+    }
+    out
+}
+
+/// The splitting's reference potential (module documentation, # The rest of the model): V_ref(r) = Re Σ B_l'l a_l'*(r)a_l(r)
+/// over the beam pairs of the lit frequencies -- the held forms' terms e_a* e_b W with each coefficient on its beams,
+/// e = ε_k = Σ_l γ_lk a_l (field.rs `Frequency::coefficients`), its conjugate counter-rotating --, each pair's product with
+/// its gradient and Hessian (far.rs `pair`), as the old model's far potential takes them.
+struct Reference {
+    pairs: Vec<(usize, usize, C64)>,
+}
+
+impl Reference {
+    /// The held forms of the folds of `prepared` (the request with the trap's frequency alone lit) at the focus, on the
+    /// reference state's ground populations p: each ground set's with nothing explicit (`Choice::base`), its ground
+    /// places weighted by their populations (`Fold::prototype_held`), each term laid on its beam pairs. Refused where a
+    /// far block does not exist at the focus.
+    fn new(prepared: &Request, light: &Light, p: &[f64; GROUND]) -> Result<Reference, String> {
+        let choice = Choice::base(prepared, vec![])?;
+        let mut pairs: Vec<(usize, usize, C64)> = vec![];
+        for set in Fold::sets(prepared, &choice)?.iter().filter(|set| set.iter().any(|&s| p[s] != 0.0)) {
+            let fold = Fold::new(prepared, &choice, set[0])?;
+            let weight: Vec<f64> = (0..fold.size()).map(|x| fold.ground.get(x).map_or(0.0, |&s| p[s])).collect();
+            let mut ws = fold.prototype_workspace()?;
+            for ([a, b], w) in fold.prototype_held(&mut ws, &weight).ok_or("参考势：阱光的远块在焦点处不存在")? {
+                // e_a* e_b of one rotation: co-rotating Σ γ_ja* γ_j'b a_j* a_j', counter-rotating its conjugates' (the
+                // pair of a_j' and a_j). Two coefficients of opposite rotations meet at one offset only at twice the
+                // optical frequency: no static form holds them.
+                assert_eq!(a.2, b.2, "a static form of coefficients of one rotation");
+                let (fa, fb) = (&light.frequencies[a.0], &light.frequencies[b.0]);
+                for (j, &l) in fa.beams.iter().enumerate() {
+                    for (jj, &ll) in fb.beams.iter().enumerate() {
+                        let (ga, gb) = (fa.coefficients[j][a.1], fb.coefficients[jj][b.1]);
+                        let (first, second, value) = if a.2 { (ll, l, ga * gb.conj() * w) } else { (l, ll, ga.conj() * gb * w) };
+                        match pairs.iter_mut().find(|x| x.0 == first && x.1 == second) {
+                            Some(x) => x.2 += value,
+                            None => pairs.push((first, second, value)),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Reference { pairs })
+    }
+
+    /// V_ref's second-order expansion at r: each beam's amplitude to the second order (field.rs `Beam::amplitude_to`),
+    /// each pair's product a_l'* a_l (far.rs `pair`), times its weight, the real part.
+    fn at(&self, light: &Light, r: [f64; 3]) -> Quadratic {
+        let mut out = Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] };
+        for &(first, second, weight) in &self.pairs {
+            let c = crate::model::far::pair(&light.beams[first].amplitude_to(r, 2), &light.beams[second].amplitude_to(r, 2));
+            out.value += (c.value * weight).re;
+            for x in 0..3 {
+                out.gradient[x] += (c.gradient[x] * weight).re;
+                for y in 0..3 {
+                    out.hessian[x][y] += (c.hessian[x][y] * weight).re;
+                }
+            }
+        }
+        out
+    }
+}
+
+/// A light subset's folds (module documentation, # The rest of the model): per ground set of the request with that light
+/// its fold with nothing explicit (`Choice::base`).
+struct Subset {
+    folds: Vec<Fold>,
+}
+
+impl Subset {
+    fn new(request: Request) -> Result<Subset, String> {
+        let choice = Choice::base(&request, vec![])?;
+        let folds = Fold::sets(&request, &choice)?.iter().map(|set| Fold::new(&request, &choice, set[0])).collect::<Result<_, _>>()?;
+        Ok(Subset { folds })
+    }
+
+    /// Σ_b p_b [G(r)]_bb in the lab (the diagonal less its frame) of the ground sets p populates, each by a forward at r
+    /// at rest on decompositions made there. None where a fold does not exist there.
+    fn diagonal(&self, r: [f64; 3], p: &[f64; GROUND]) -> Option<f64> {
+        let mut out = 0.0;
+        for fold in self.folds.iter().filter(|fold| fold.ground.iter().any(|&s| p[s] != 0.0)) {
+            let mut ws = fold.prototype_workspace().ok()?;
+            let step = fold.prototype(r, [0.0; 3], &mut Cache::default(), &mut ws)?;
+            let n = fold.size();
+            out += fold.ground.iter().enumerate().map(|(x, &s)| p[s] * (step.generator.data[x * n + x].re + fold.frame_values[x])).sum::<f64>();
+        }
+        Some(out)
+    }
 }
 
 /// The position of the time s from a step's middle among the prototype's (proto.rs `Workspace::tone`): 0 the middle, 1
@@ -1183,8 +1303,9 @@ impl crate::step::Dynamics for Onefold {
         self.hbar_over_mass
     }
 
+    /// V_ref's second-order expansion at r (module documentation, # The rest of the model; `Reference`).
     fn reference(&self, r: [f64; 3]) -> Quadratic {
-        self.potentials.expansion(r, &self.reference, &self.prepared)
+        self.reference.at(&self.light, r)
     }
 
     fn cluster(&self, cluster: usize) -> &Cluster {
@@ -1272,13 +1393,19 @@ impl crate::step::Dynamics for Onefold {
         }
     }
 
+    /// (ħ/m)κ²/2 + V_run(r; p(ψ)) (module documentation, # The rest of the model): NaN where a fold does not exist there.
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
         let kinetic = 0.5 * self.hbar_over_mass * at.kappa.iter().map(|k| k * k).sum::<f64>();
-        kinetic + self.potentials.expand(at.r, &self.populations(cluster, psi), &self.running, 0, None).quadratic.value
+        let p = self.populations(cluster, psi);
+        let untrapped = self.untrapped.get_or_init(|| Subset::new(lit(&self.request, &self.light, |w| w != self.light.trap))).as_ref().ok();
+        let potential = self.running.diagonal(at.r, &p).zip(untrapped.and_then(|u| u.diagonal(at.r, &p))).map_or(f64::NAN, |(on, off)| on - off);
+        kinetic + potential
     }
 
+    /// Outside the trap's region with the loss energy above its far value, zero (module documentation, # The rest of the
+    /// model).
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
-        self.potentials.light.outside(at.r) && self.energy(cluster, at, psi) > self.potentials.asymptote(&self.populations(cluster, psi), &self.running)
+        self.light.outside(at.r) && self.energy(cluster, at, psi) > 0.0
     }
 
     /// The fold's time-averaged populations of the state at the point (DESIGN §1.3; proto.rs `Workspace::populations`):
