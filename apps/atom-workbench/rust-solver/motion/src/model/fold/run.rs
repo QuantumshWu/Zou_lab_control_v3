@@ -123,12 +123,14 @@
 //!   any part of the force does (a reference is exact for any potential: step.rs # The reference);
 //! - the loss energy, (ħ/m)κ²/2 + V_run(r; p), V_run(r; p) = Σ_b p_b [G_L(r) − G_{L∖trap}(r)]_bb of the folds of every
 //!   light and of every light but the trap's (the run's clusters, and those of its request with the trap's light off:
-//!   `Clusters`), each ground set's on the cluster the bare state √p first holds at the point at rest -- with nothing
-//!   explicit where its fold exists there, else risen until it does, the rule of a trajectory's start
-//!   (`Clusters::rise`, `Clusters::diagonal`) -- its diagonal in the lab (G's less its frame), p the state's ground
-//!   populations (an explicit excited state's by its decay's branching). On a risen cluster the risen node's light shift
-//!   is in its coupling to the ground places, not on their diagonal: of both light sets alike where both rise it, so
-//!   that their difference keeps the trap's. Its far value is zero: the trap's frequency holds no plane wave
+//!   `Clusters`), each ground set's on the cluster the bare state √p holds at the point at rest -- with nothing explicit
+//!   where its fold exists there, else risen until it does, the rule of a trajectory's start (`Clusters::risen`,
+//!   existence its test) -- its diagonal in the lab (G's less its frame), p the state's ground populations (an explicit
+//!   excited state's by its decay's branching). On a risen cluster the risen node's light shift is in its coupling to
+//!   the ground places, not on their diagonal; so both light sets stand on one set of explicit nodes, a node risen for
+//!   either risen in both (`Clusters::difference`): its shift is left out of both alike and their difference keeps the
+//!   trap's (BRIEF_LANDIMPL item 4: risen in one alone, the difference jumped by that node's whole light shift where the
+//!   other's fold ceased to exist). Its far value is zero: the trap's frequency holds no plane wave
 //!   (ensemble.rs `PLANE_WAVE` refuses one).
 //! The displayed rows are the fold's time-averaged populations at the point (`Dynamics::readout`): the populations of
 //! the slow modes between two jumps (proto.rs `Workspace::populations`) -- not the optical Bloch equations' ensemble
@@ -608,23 +610,41 @@ impl Clusters {
         }
     }
 
-    /// Σ_b p_b [G(r)]_bb in the lab (the diagonal less its frame) of the ground sets p populates (# The rest of the model):
-    /// each set's on the cluster its bare state √p first holds at r at rest -- its fold with nothing explicit where it
-    /// exists there, else risen until it does (`rise`: the rule of a trajectory's start, existence its test). None where
-    /// no node is left to rise.
-    fn diagonal(&self, r: [f64; 3], p: &[f64; GROUND]) -> Option<f64> {
-        let at = Point { r, kappa: [0.0; 3], t: 0.0 };
-        let mut out = 0.0;
-        for k in (0..self.grounds.len()).filter(|&k| self.grounds[k].iter().any(|&s| p[s] != 0.0)) {
-            let f: Vec<C64> = self.sets.get(k).fold.ground.iter().map(|&s| C64::real(p[s].sqrt())).collect();
-            let (_, part, _) = self.rise(k, &at, &f, |_, _, _| true, |cluster, _, _, ws| {
-                let fold = &self.sets.get(cluster).fold;
-                let (n, g) = (fold.size(), ws.generator());
-                fold.ground.iter().enumerate().map(|(x, &s)| p[s] * (g.data[x * n + x].re + fold.frame_values[x])).sum::<f64>()
-            })?;
-            out += part;
+    /// Σ_b p_b [G(r) − G′(r)]_bb in the lab (the diagonals less their frames) of these clusters' light and `other`'s, over
+    /// the ground sets p populates (# The rest of the model), both on one set of explicit nodes: none where both folds
+    /// exist at r at rest; where either does not, the rise of its node that holds the most of the bare state √p in its
+    /// forward there (`risen`: the rule of a trajectory's start, existence its test), risen in both -- in each light set
+    /// where its base cluster offers it (a node of a light the other set has not is risen in this alone) --, until both
+    /// exist. None where no node is left to rise.
+    fn difference(&self, other: &Clusters, r: [f64; 3], p: &[f64; GROUND]) -> Option<f64> {
+        let mut nodes: Vec<Key> = vec![];
+        'rise: loop {
+            let mut out = 0.0;
+            for (sign, side) in [(1.0, self), (-1.0, other)] {
+                for k in (0..side.grounds.len()).filter(|&k| side.grounds[k].iter().any(|&s| p[s] != 0.0)) {
+                    let mine: Vec<Key> = nodes.iter().copied().filter(|key| side.sets.get(k).rises.iter().any(|r| r.key == *key)).collect();
+                    let cluster = side.cluster_with(k, mine).ok()?;
+                    let set = side.sets.get(cluster);
+                    let mut cache = Cache::default();
+                    let mut ws = side.take(cluster);
+                    let exists = set.fold.prototype(r, [0.0; 3], &mut cache, &mut ws).is_some();
+                    let fold = &set.fold;
+                    let (n, g) = (fold.size(), ws.generator());
+                    let part: f64 = fold.ground.iter().enumerate().map(|(x, &s)| p[s] * (g.data[x * n + x].re + fold.frame_values[x])).sum();
+                    let bare: Vec<C64> = (0..n).map(|x| fold.ground.get(x).map_or(C64::ZERO, |&s| C64::real(p[s].sqrt()))).collect();
+                    let amplitudes = (!exists).then(|| ws.amplitudes(fold, &cache, &bare));
+                    side.give(cluster, ws);
+                    if let Some(amplitudes) = amplitudes {
+                        let risen = side.risen(set, &amplitudes)?;
+                        let more: Vec<Key> = side.sets.get(risen).nodes.iter().copied().filter(|key| !nodes.contains(key)).collect();
+                        nodes.extend(more);
+                        continue 'rise;
+                    }
+                    out += sign * part;
+                }
+            }
+            return Some(out);
         }
-        Some(out)
     }
 }
 
@@ -1515,9 +1535,9 @@ impl crate::step::Dynamics for Onefold {
         }
     }
 
-    /// (ħ/m)κ²/2 + V_run(r; p(ψ)) (module documentation, # The rest of the model): each light set's on the clusters its
-    /// folds hold at the point, risen where they do not exist (`Clusters::diagonal`); NaN only where no node is left to
-    /// rise, or the request with the trap's light off makes no clusters.
+    /// (ħ/m)κ²/2 + V_run(r; p(ψ)) (module documentation, # The rest of the model): the two light sets' on one set of
+    /// explicit nodes, risen where either fold does not exist at the point (`Clusters::difference`); NaN only where no node
+    /// is left to rise, or the request with the trap's light off makes no clusters.
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
         let kinetic = 0.5 * self.hbar_over_mass * at.kappa.iter().map(|k| k * k).sum::<f64>();
         let p = self.populations(cluster, psi);
@@ -1525,7 +1545,7 @@ impl crate::step::Dynamics for Onefold {
             let request = lit(&self.clusters.request, &self.light, |w| w != self.light.trap);
             Clusters::new(&request, &Choice::base(&request, vec![])?)
         });
-        let potential = self.clusters.diagonal(at.r, &p).zip(untrapped.as_ref().ok().and_then(|u| u.diagonal(at.r, &p))).map_or(f64::NAN, |(on, off)| on - off);
+        let potential = untrapped.as_ref().ok().and_then(|u| self.clusters.difference(u, at.r, &p)).unwrap_or(f64::NAN);
         kinetic + potential
     }
 

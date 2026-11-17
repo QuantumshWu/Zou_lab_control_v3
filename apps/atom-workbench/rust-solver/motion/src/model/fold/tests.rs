@@ -3361,6 +3361,45 @@ fn random_systems_land_within_their_ring() {
     assert!(within >= 10, "{within} within");
 }
 
+/// The loss energy where one light set's fold ceases to exist (BRIEF_LANDIMPL item 4; run.rs # The rest of the model,
+/// `Clusters::difference`): a two-level atom in a far trap light (Δ_t = −60Γ, Ω_t = 6Γ) and a cooling light 0.1Γ below
+/// its line, at rest at the focus, the cooling's saturation s = 0.8 and 0.9 -- with every light the fold exists at both
+/// (the trap moves the line), with the cooling alone it ceases between them. There its node rises in both light sets:
+/// V_run at s = 0.9 is the trap's own shift, the run's of the trap light alone, within the share of it; risen in the
+/// cooling's set alone (before), V_run dropped by that set's whole cooling shift there (−6.2 rad/µs against V_run's
+/// −4.3); now by the trap's change of the cooling's shift through the risen node alone (said).
+#[test]
+fn the_loss_energy_stands_on_one_set_of_risen_nodes_for_both_light_sets() {
+    use crate::model::Point;
+    use crate::step::Dynamics;
+    let ee = 1000.0;
+    let rays = |s: f64, cooling: bool| -> Vec<Ray> {
+        let trap = Ray { axis: 0, nu: ee - 60.0 * GAMMA, direction: [1.0, 0.0, 0.0], couplings: vec![(17, 0, C64::real(3.0 * GAMMA))] };
+        let cool = Ray { axis: 1, nu: ee - 0.1 * GAMMA, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(0.5 * GAMMA * (s / 2.0_f64).sqrt()))] };
+        if cooling { vec![trap, cool] } else { vec![trap] }
+    };
+    let energy = |s: f64, cooling: bool| -> (f64, bool) {
+        let mut req = system(&[(0, 0.0)], &[(17, ee, GAMMA, 0)], &rays(s, cooling), if cooling { 2 } else { 1 }, true);
+        idle_decay(&mut req, GAMMA);
+        req.validate().unwrap();
+        let mut p = [0.0; GROUND];
+        p[0] = 1.0;
+        let run = super::run::Onefold::new(&req, p).expect("the run");
+        let light = Light::new(&req);
+        let off = super::run::lit(&req, &light, |w| w != light.trap);
+        let fold = Fold::new(&off, &Choice::base(&off, vec![]).unwrap(), 0).unwrap();
+        let exists = fold.blocks.is_empty() || fold.prototype([0.0; 3], [0.0; 3], &mut super::proto::Cache::default(), &mut fold.prototype_workspace().unwrap()).is_some();
+        let set = run.cluster_of(0);
+        let psi: Vec<C64> = run.cluster(set).states.iter().map(|&x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
+        (run.energy(set, &Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 }, &psi), exists)
+    };
+    let (trap, _) = energy(0.0, false);
+    let ((below, held), (above, gone)) = (energy(0.8, true), energy(0.9, true));
+    println!("V_run at s = 0.8 {below:.4} rad/µs (the cooling's fold {}), at s = 0.9 {above:.4} ({}); the trap light's alone {trap:.4}: the step across {:.4}", if held { "exists" } else { "does not" }, if gone { "exists" } else { "does not" }, above - below);
+    assert!(held && !gone, "the cooling's fold ceases between s = 0.8 and 0.9");
+    assert!((above - trap).abs() <= crate::model::elim::share() * trap.abs(), "risen in both, V_run is the trap's own shift");
+}
+
 /// A risen node's cluster is a fold the prototype holds wherever the base choice makes it (BRIEF_LANDIMPL item 3; fold.rs
 /// `Choice::base`, `Block::far`): on sixty random systems, every candidate node of every set risen alone on the base
 /// choice of its set (`Choice::base_of`), no block is left far -- its rows all centred -- that holds an explicit state or a
