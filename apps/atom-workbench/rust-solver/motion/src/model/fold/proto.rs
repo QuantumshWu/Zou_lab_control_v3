@@ -468,8 +468,14 @@ struct Far {
     pv: Vec<C64>,
 }
 
+/// The keys of the near decompositions made (`NearBasis::key`): one each, never again in a process.
+static KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// A near block's decomposition (module documentation, # What is kept).
 struct NearBasis {
+    /// Its key (`KEYS`): what an evaluation's parts are of (`Evaluation::keys`) -- by the decomposition, not by its parts'
+    /// places, which another decomposition of the block lays otherwise.
+    key: u64,
     at: Vec<C64>,
     /// The kept levels (of `Near::levels`) and their rows (of the block's excited rows, ascending): the rows of `f`.
     kept: Vec<usize>,
@@ -580,6 +586,18 @@ pub(crate) struct Cache {
 }
 
 impl Cache {
+    /// Near block x's decomposition dropped (a test's: a held forward that lacks it).
+    #[cfg(test)]
+    pub(crate) fn forget(&mut self, x: usize) {
+        self.near[x] = None;
+    }
+
+    /// Another's evaluation on these decompositions (a test's: an evaluation not of the decompositions it is held on).
+    #[cfg(test)]
+    pub(crate) fn graft(&mut self, other: &Cache) {
+        self.evaluation = other.evaluation.clone();
+    }
+
     /// The decomposition near block x stands on.
     fn near_at(&self, x: usize) -> &NearBasis {
         self.near[x].as_deref().expect("a near block's decomposition")
@@ -599,6 +617,7 @@ impl Cache {
 #[derive(Default, Clone)]
 struct Evaluation {
     parts: Vec<Vec<usize>>,
+    keys: Vec<u64>,
     far: Vec<bool>,
     reading: f64,
     kinds: [f64; KINDS],
@@ -610,15 +629,22 @@ impl Evaluation {
         self.parts.iter().flatten().copied().max().unwrap_or(1).max(1)
     }
 
-    /// Fitted to the decompositions a decision stands on: a near block's parts that are not its basis' at the largest
-    /// sweeps held (two at the least), the far blocks all in where it holds none.
+    /// Whether it is of the decompositions a forward stands on: per near block its parts' those of the block's basis (by
+    /// its key, `NearBasis::key`), per far block one.
+    fn fits(&self, cache: &Cache, far: usize) -> bool {
+        self.parts.len() == cache.near.len() && self.far.len() == far && cache.near.iter().zip(&self.keys).all(|(b, k)| b.as_ref().is_some_and(|b| b.key == *k))
+    }
+
+    /// Fitted to the decompositions a decision stands on: a near block's parts that are not its basis' (another key) made
+    /// again at the largest sweeps held (two at the least), the far blocks all in where it holds none.
     fn fit(&mut self, cache: &Cache, near: &[Near], far: &[Far]) {
         let most = self.parts.iter().flatten().copied().max().unwrap_or(2).max(2);
         self.parts.resize(near.len(), vec![]);
+        self.keys.resize(near.len(), u64::MAX);
         for (x, nb) in near.iter().enumerate() {
-            let np = series_parts(nb, cache.near_at(x));
-            if self.parts[x].len() != np {
-                self.parts[x] = vec![most; np];
+            let basis = cache.near_at(x);
+            if self.keys[x] != basis.key {
+                (self.parts[x], self.keys[x]) = (vec![most; series_parts(nb, basis)], basis.key);
             }
         }
         if self.far.len() != far.len() {
@@ -3250,6 +3276,7 @@ impl Fold {
         let xemitc: Vec<C64> = Mat::from_fn(3 * GROUND, n, |r, p| nb.xs.iter().position(|&x| x == p).map_or(C64::ZERO, |jx| self.emission[r % 3][(r / 3, xstates[jx])])).data;
         let _ = level;
         Some(NearBasis {
+            key: KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             at,
             kept: kept.to_vec(),
             rows: kr,
@@ -3561,8 +3588,10 @@ impl Fold {
             cache.far = vec![None; ws.far.len()];
             cache.evaluation = Evaluation::default();
         }
-        // What a forward lacks -- a block's decomposition, the evaluation -- it makes as a decision does: that is no choice.
-        let lacks = cache.near.iter().any(Option::is_none) || cache.far.iter().any(Option::is_none) || cache.evaluation.parts.len() != ws.near.len();
+        // What a forward lacks -- a block's decomposition, an evaluation of the decompositions it stands on (by their keys:
+        // one chosen on another decomposition indexes parts this one lays otherwise) -- it makes as a decision does, there:
+        // that is no choice.
+        let lacks = cache.near.iter().any(Option::is_none) || cache.far.iter().any(Option::is_none) || !cache.evaluation.fits(cache, ws.far.len());
         let decide = decide || lacks;
         let (made_before, grown_before) = (cache.made, cache.grown);
         ws.here.iter_mut().for_each(|x| *x = None);
@@ -4199,13 +4228,13 @@ impl Fold {
         }
         if again {
             // The blocks made again let go the kept levels that keep every column within (on the trial bounds of each left
-            // out with those already out: `bound_levels`), the least first; their parts' sweeps are the next round's.
+            // out with those already out: `bound_levels`), the least first; their parts' sweeps are the next round's (another
+            // decomposition's: `Evaluation::fit`).
             let pot = |dv: f64| unrate(dv / (2.0 * energy)).powi(2);
             for x in 0..near.len() {
                 if !(decision.near[x] || decision.kept[x].is_some()) {
                     continue;
                 }
-                evaluation.parts[x].clear();
                 if near[x].nd > 0 {
                     continue;
                 }

@@ -907,6 +907,41 @@ fn a_lambda_swept_into_resonance_reads_beyond_the_share_before_its_fold_fails() 
     assert!(beyond > gone, "the reading passes the share before the fold stops existing");
 }
 
+/// A held forward whose evaluation is not of the decompositions it stands on decides there (unify2 §2.7, §4.3; psolve.status
+/// §6 (b): an evaluation's parts indexed another decomposition's, out of bounds on tilt0): R4_LIN_4's sets, decided at two
+/// points; on the second's decompositions with the first's evaluation (another decomposition's keys, its parts' places
+/// another's), and on the first's with a block's decomposition dropped, a held forward at the second point is the
+/// decision there to the bit, and no index leaves its decomposition's parts.
+#[test]
+fn a_held_forward_whose_evaluation_is_not_of_its_decompositions_decides_there() {
+    use super::proto::Cache;
+    let (req, choice, _, _) = r4(false);
+    let mut checked = 0;
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold = Fold::new(&req, &choice, set[0]).unwrap();
+        if fold.blocks.is_empty() {
+            continue;
+        }
+        let Ok(mut ws) = fold.prototype_workspace() else { continue };
+        let ((a, b), kappa) = (([0.0; 3], [0.4, -0.3, 0.2]), kappa_of(&fold));
+        let (mut at_a, mut at_b) = (Cache::default(), Cache::default());
+        let (Some(sa), Some(sb)) = (fold.prototype(a, kappa, fold.thermal, &mut at_a, &mut ws).map(|s| s.sweeps), fold.prototype(b, kappa, fold.thermal, &mut at_b, &mut ws).map(|s| s.sweeps)) else { continue };
+        let mut grafted = at_b.clone();
+        grafted.graft(&at_a);
+        let mut forgotten = at_a.clone();
+        forgotten.forget(0);
+        for (what, cache) in [("b's decompositions, a's evaluation", grafted), ("a's with block 0's dropped", forgotten)] {
+            let (mut held, mut decided) = (cache.clone(), cache);
+            let h = fold.prototype_within(b, kappa, fold.thermal, &mut held, &mut ws, false).map(|s| s.generator.clone());
+            let d = fold.prototype_within(b, kappa, fold.thermal, &mut decided, &mut ws, true).map(|s| s.generator.clone());
+            println!("set {set:?}, {what} (the decisions' sweeps {sa}, {sb}): held and decided {}", if h.as_ref().map(|m| &m.data) == d.as_ref().map(|m| &m.data) { "the same" } else { "apart" });
+            assert_eq!(h.map(|m| m.data), d.map(|m| m.data), "{what}: a held forward on what it does not hold decides there");
+            checked += 1;
+        }
+    }
+    assert!(checked > 0);
+}
+
 /// ⑦ The adjoint's force (DESIGN §1.3) against the high-precision difference of the contracted generator: at a point of
 /// R4_LIN_4 with explicit, decomposed, centred and kept nodes (one kept copy: F = 1 by the repump in the cooling's block from
 /// ground state 4), f(r) = Re tr(ρ G(r)) + Σ_k Re tr(B_k†G_k(r)) for a random state's ρ and random tone cotangents B_k;
